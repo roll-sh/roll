@@ -235,6 +235,14 @@ pub trait Provider: Send + Sync {
         Vec::new()
     }
 
+    /// What using an endpoint adds to its processes (docs/code/agents.md, "Endpoints"), or why
+    /// this provider can't use one of its kind. The default sets the variables each API's own
+    /// SDKs read ([`crate::endpoints::generic_use`]), which suits most CLIs; an adapter overrides
+    /// it when its CLI is configured some other way (Codex's model providers).
+    fn endpoint_use(&self, endpoint: &agent_proto::EndpointSpec, key: Option<&str>) -> Result<crate::endpoints::EndpointUse, String> {
+        Ok(crate::endpoints::generic_use(endpoint, key))
+    }
+
     /// Use `cfg` (the daemon's config with the machine's settings over it) from the next process
     /// on. A session already running keeps what it started with.
     fn configure(&self, cfg: ProviderConfig) {

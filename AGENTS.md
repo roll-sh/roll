@@ -273,8 +273,14 @@ The product should feel alive: dots react to the cursor and the marks "think". E
     are tested by replaying recorded transcripts through a fake binary. No test calls a real model
     or needs a provider login.
   - The daemon runs the user's own installed provider CLIs with their own logins. Never read, copy,
-    relay or pool a provider credential (no subscription proxying); API keys and base URLs come
-    only from the daemon config or a sandbox's sealed env.
+    relay in the clear or pool a provider credential (no subscription proxying). Endpoints (a base
+    URL and a key: CLIProxyAPI, a gateway) can be set from roll per machine (docs/code/agents.md,
+    "Endpoints"): the browser seals the key to that daemon's `seal_key` (`lib/agents-seal.ts`), the
+    relay only checks the box's shape and forwards it (never stores, logs or returns a key), and only
+    the daemon opens it, keeps it in `agent.db` (0600) and gives it to the processes of the providers
+    that use the endpoint (never terminals, records or `hello`). Owner endpoint profiles on the relay
+    never hold a key, and nothing is shared across owners. Keys may also come from `config.toml`, a
+    sandbox's sealed env, or a 1Password reference the daemon reads on the machine.
   - Machine tokens (`rlm_…`) only open the relay link; code access is a per-command, one-repo,
     short-lived grant (`rlg_…`). Both are looked up on every use, never cached.
   - Checkpoints use a private `GIT_INDEX_FILE` under `refs/roll/checkpoints/`: never touch the

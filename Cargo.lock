@@ -47,15 +47,18 @@ dependencies = [
 name = "agent-host"
 version = "0.1.0"
 dependencies = [
+ "aes-gcm",
  "agent-proto",
  "anyhow",
  "async-trait",
  "axum",
  "base64 0.22.1",
  "code-control",
+ "curve25519-dalek",
  "diffy",
  "futures-util",
  "hex",
+ "hkdf",
  "image",
  "libc",
  "parking_lot",
@@ -75,6 +78,7 @@ dependencies = [
  "toml",
  "tower",
  "tracing",
+ "zeroize",
 ]
 
 [[package]]
@@ -8757,6 +8761,7 @@ version = "1.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e13084392c5e4bc371903e2935a5eaeed24905a7511356b883835e18a78f6879"
 dependencies = [
+ "serde",
  "zeroize_derive",
 ]
 

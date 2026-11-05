@@ -295,6 +295,13 @@ impl Provider for Codex {
         self.cfg.set(cfg);
     }
 
+    /// Codex takes a model provider of roll's (`-c model_providers.roll_<id>…`, the way
+    /// CLIProxyAPI's instructions configure Codex) with the key in a variable (`env_key`), never
+    /// in an argument.
+    fn endpoint_use(&self, endpoint: &agent_proto::EndpointSpec, key: Option<&str>) -> Result<crate::endpoints::EndpointUse, String> {
+        crate::endpoints::codex_use(endpoint, key)
+    }
+
     /// T3 gives a bare custom Codex slug the first listed model's options.
     fn custom_model_options(&self, _slug: &str, listed: &[ModelInfo]) -> Vec<ModelOption> {
         listed.first().map(|m| m.options.clone()).unwrap_or_default()

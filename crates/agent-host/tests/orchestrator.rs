@@ -1378,3 +1378,153 @@ async fn provider_status_fills_in_as_probes_answer() {
     assert!(p.checking && p.installed && p.name == "Fake codex", "{p:?}");
     codex.release_probes();
 }
+
+/// A CLIProxyAPI stand-in: `/v1/models` lists two models for the right bearer key, 401 otherwise,
+/// and remembers every `Authorization` it was sent.
+async fn mock_cliproxy(key: &'static str) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+    use axum::http::{HeaderMap, StatusCode};
+    use axum::response::IntoResponse;
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let log = seen.clone();
+    let app = axum::Router::new().route(
+        "/v1/models",
+        axum::routing::get(move |headers: HeaderMap| {
+            let log = log.clone();
+            async move {
+                let auth = headers.get("authorization").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+                log.lock().unwrap().push(auth.clone());
+                if auth == format!("Bearer {key}") {
+                    axum::Json(serde_json::json!({ "object": "list", "data": [{ "id": "gemini-2.5-pro", "owned_by": "google" }, { "id": "gpt-5.5" }] })).into_response()
+                } else {
+                    StatusCode::UNAUTHORIZED.into_response()
+                }
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    (format!("http://{addr}"), seen)
+}
+
+fn endpoint_set(spec: &EndpointSpec, key: KeyChange) -> Command {
+    Command::EndpointSet { endpoint: spec.clone(), key }
+}
+
+fn invalid(reply: Reply) -> String {
+    match reply {
+        Reply::Error(ReplyError { code: ErrorCode::Invalid, message }) => message,
+        other => panic!("expected invalid, got {other:?}"),
+    }
+}
+
+/// Endpoints (docs/code/agents.md, "Endpoints"): a key sealed to this daemon opens only here and
+/// only for its endpoint, reaches only the providers that use it (never `hello`), lists the
+/// endpoint's models under its name, survives a restart in a private `agent.db`, and goes away
+/// with the endpoint.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn endpoint_keys_are_sealed_to_the_daemon_and_reach_only_their_providers() {
+    const KEY: &str = "sk-roll-test-0123456789";
+    let (url, seen) = mock_cliproxy(KEY).await;
+    let home = tempfile::tempdir().unwrap();
+    let (codex, claude) = (FakeProvider::new("codex"), FakeProvider::new("claude"));
+    let host = open(home.path(), vec![codex.clone(), claude.clone()]).await;
+    let seal_key = host.info().await.seal_key.expect("hello carries the seal key");
+    let spec = EndpointSpec {
+        id: "cliproxy".into(),
+        name: "CLIProxyAPI".into(),
+        kind: EndpointKind::Cliproxy,
+        base_url: url.clone(),
+        providers: vec![ProviderId::claude()],
+        url_env: None,
+        key_env: None,
+        key_ref: None,
+    };
+    let sealed = |endpoint: &str, key: &str| KeyChange::Set { sealed: agent_host::endpoints::seal(&seal_key, endpoint, key).unwrap() };
+
+    // A box for another endpoint, or sealed to another daemon, doesn't open; nothing is kept.
+    assert!(invalid(run(&host, endpoint_set(&spec, sealed("other", KEY))).await).contains("sealed to this machine"));
+    let stranger = agent_host::endpoints::SealKey::generate().public();
+    let foreign = KeyChange::Set { sealed: agent_host::endpoints::seal(&stranger, "cliproxy", KEY).unwrap() };
+    assert!(invalid(run(&host, endpoint_set(&spec, foreign)).await).contains("sealed to this machine"));
+    // A provider that isn't here is refused (one that can't speak the endpoint's API too: the
+    // adapters' own tests).
+    let elsewhere = EndpointSpec { providers: vec![ProviderId("acp:nope".into())], ..spec.clone() };
+    assert!(invalid(run(&host, endpoint_set(&elsewhere, KeyChange::Keep)).await).contains("no provider"));
+    assert!(host.info().await.settings.unwrap().endpoints.is_empty());
+
+    let mut events = host.subscribe();
+    assert_eq!(run(&host, endpoint_set(&spec, sealed("cliproxy", KEY))).await, Reply::Ok);
+    let env = claude.configured().unwrap().env;
+    assert!(env.contains(&("ANTHROPIC_BASE_URL".into(), url.clone())), "{env:?}");
+    assert!(env.contains(&("ANTHROPIC_AUTH_TOKEN".into(), KEY.into())));
+    assert!(!format!("{:?}", codex.configured().unwrap()).contains(KEY), "only the providers that use it");
+
+    // The models come from the endpoint, with the key, and are offered under its name.
+    let info = loop {
+        let info = host.info().await;
+        let listed = info.settings.as_ref().unwrap().endpoints.first().is_some_and(|e| e.checked_at.is_some());
+        if listed {
+            break info;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    assert_eq!(seen.lock().unwrap().last().map(String::as_str), Some(format!("Bearer {KEY}").as_str()));
+    let ep = &info.settings.as_ref().unwrap().endpoints[0];
+    assert_eq!((ep.key, ep.models.len(), ep.error.as_deref()), (KeyState::Sealed, 2, None));
+    let claude_info = info.providers.iter().find(|p| p.id == ProviderId::claude()).unwrap();
+    assert_eq!((claude_info.auth, claude_info.detail.as_deref()), (AuthStatus::Ready, Some("via CLIProxyAPI")));
+    let gemini = claude_info.models.iter().find(|m| m.id == "gemini-2.5-pro").expect("the endpoint's model");
+    assert_eq!(gemini.via.as_deref(), Some("CLIProxyAPI"));
+    assert!(!info.providers.iter().find(|p| p.id == ProviderId::codex()).unwrap().models.iter().any(|m| m.via.is_some()));
+
+    // `hello` never carries the key, nor does anything the daemon sends.
+    assert!(!serde_json::to_string(&info).unwrap().contains(KEY));
+    while let Ok(out) = events.try_recv() {
+        let text = match out {
+            Outbound::Info(i) => serde_json::to_string(&i).unwrap(),
+            Outbound::Entity(e) => serde_json::to_string(&e).unwrap(),
+            Outbound::Delta(d) => serde_json::to_string(&d).unwrap(),
+        };
+        assert!(!text.contains(KEY), "sent the key: {text}");
+    }
+
+    // A check answers now; a wrong key says so without echoing either key.
+    let Reply::EndpointChecked(check) = run(&host, Command::EndpointCheck { endpoint: "cliproxy".into() }).await else { panic!("no check") };
+    assert!(check.ok && check.models == 2 && check.error.is_none(), "{check:?}");
+    assert_eq!(run(&host, endpoint_set(&spec, sealed("cliproxy", "sk-wrong"))).await, Reply::Ok);
+    let Reply::EndpointChecked(check) = run(&host, Command::EndpointCheck { endpoint: "cliproxy".into() }).await else { panic!("no check") };
+    assert!(!check.ok && check.error.as_deref().is_some_and(|e| e.contains("401") && !e.contains("sk-")), "{check:?}");
+    assert_eq!(run(&host, endpoint_set(&spec, sealed("cliproxy", KEY))).await, Reply::Ok);
+
+    // Kept across a restart, in a file only its user reads.
+    drop(host);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(home.path().join("agent.db")).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+    let (codex, claude) = (FakeProvider::new("codex"), FakeProvider::new("claude"));
+    let host = open(home.path(), vec![codex.clone(), claude.clone()]).await;
+    assert_eq!(host.info().await.seal_key.as_deref(), Some(seal_key.as_str()), "the key pair is made once");
+    assert!(claude.configured().unwrap().env.contains(&("ANTHROPIC_AUTH_TOKEN".into(), KEY.into())));
+
+    // Changing it without a key keeps the key; Codex taken on gets it too.
+    let both = EndpointSpec { providers: vec![ProviderId::claude(), ProviderId::codex()], ..spec.clone() };
+    assert_eq!(run(&host, endpoint_set(&both, KeyChange::Keep)).await, Reply::Ok);
+    assert!(codex.configured().unwrap().env.contains(&("OPENAI_API_KEY".into(), KEY.into())));
+    // A second endpoint takes Codex over: a provider uses one endpoint.
+    let gw = EndpointSpec { id: "gw".into(), name: "Gateway".into(), kind: EndpointKind::Openai, base_url: "http://127.0.0.1:9/v1".into(), providers: vec![ProviderId::codex()], ..spec.clone() };
+    assert_eq!(run(&host, endpoint_set(&gw, KeyChange::Keep)).await, Reply::Ok);
+    let endpoints = host.info().await.settings.unwrap().endpoints;
+    assert_eq!(endpoints.iter().find(|e| e.spec.id == "cliproxy").unwrap().spec.providers, vec![ProviderId::claude()]);
+    assert!(!format!("{:?}", codex.configured().unwrap()).contains(KEY));
+    // Cleared, then removed: the provider goes back to its own login.
+    assert_eq!(run(&host, endpoint_set(&spec, KeyChange::Clear)).await, Reply::Ok);
+    assert!(!claude.configured().unwrap().env.iter().any(|(k, _)| k == "ANTHROPIC_AUTH_TOKEN"));
+    assert_eq!(host.info().await.settings.unwrap().endpoints.iter().find(|e| e.spec.id == "cliproxy").unwrap().key, KeyState::None);
+    assert_eq!(run(&host, Command::EndpointRemove { endpoint: "cliproxy".into() }).await, Reply::Ok);
+    assert!(!claude.configured().unwrap().env.iter().any(|(k, _)| k.starts_with("ANTHROPIC")));
+    assert!(matches!(run(&host, Command::EndpointRemove { endpoint: "cliproxy".into() }).await, Reply::Error(ReplyError { code: ErrorCode::NotFound, .. })));
+}

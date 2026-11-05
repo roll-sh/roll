@@ -16,6 +16,7 @@
 //!   as started before it runs and its reply is stored after, so the same sender and id get that
 //!   reply again (also after a restart), and a command a crash cut short never runs twice.
 
+mod endpoints;
 mod handoff;
 mod instructions;
 mod probes;
@@ -79,6 +80,10 @@ pub struct Host {
     settings_changed: Arc<tokio::sync::Notify>,
     /// Finds projects' logos (`projects.rs`, `logo.rs`).
     logos: Arc<crate::logo::Logos>,
+    /// The key pair endpoint keys are sealed to (`crate::endpoints`).
+    seal: crate::endpoints::SealKey,
+    /// The endpoints set from roll, with their keys (`endpoints.rs`).
+    endpoints: std::sync::Mutex<Vec<crate::endpoints::Live>>,
 }
 
 /// Why a command failed; becomes `Reply::Error`.
@@ -245,6 +250,8 @@ impl Host {
         store.prune_receipts(now().saturating_sub(RECEIPT_DAYS * 86_400_000))?;
         let providers: BTreeMap<_, _> = providers.into_iter().map(|p| (p.id(), p)).collect();
         let settings = Host::stored_settings(&store);
+        let seal = crate::endpoints::SealKey::load_or_create(&store)?;
+        let endpoints = Host::stored_endpoints(&store);
         let probes = probes::Probes::load(&store);
         let (out, _) = broadcast::channel(8192);
         let (mcp, listener) = crate::mcp::Server::bind().await?;
@@ -278,11 +285,14 @@ impl Host {
             configuring: AsyncMutex::new(()),
             settings_changed: Arc::new(tokio::sync::Notify::new()),
             logos: Arc::default(),
+            seal,
+            endpoints: std::sync::Mutex::new(endpoints),
         });
         host.configure_providers();
         // Hello goes out with what's known; each provider's status follows as its probe answers.
         host.probe_providers();
         host.publish_info().await;
+        host.spawn_endpoints_start();
         host.recover()?;
         host.mcp.start(Arc::downgrade(&host), listener);
         tasks::spawn_worker(Arc::downgrade(&host), task_work);
@@ -608,9 +618,9 @@ impl Host {
                 Ok(Reply::Ok)
             }
             Command::MachineConfigure { settings } => self.machine_configure(*settings).await,
-            Command::EndpointSet { .. } | Command::EndpointRemove { .. } | Command::EndpointCheck { .. } => {
-                Err(Fail::Invalid("this roll agent doesn't take endpoints yet: update it".into()))
-            }
+            Command::EndpointSet { endpoint, key } => self.endpoint_set(endpoint, key).await,
+            Command::EndpointRemove { endpoint } => self.endpoint_remove(&endpoint).await,
+            Command::EndpointCheck { endpoint } => self.endpoint_check(&endpoint).await,
             Command::DiffGet { thread, run } => self.diff_get(&thread, run.as_ref()).await,
             Command::FsList { project, path } => self.fs_list(project.as_ref(), &path).await,
             Command::FsRead { project, path } => self.fs_read(&project, &path).await,

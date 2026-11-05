@@ -302,11 +302,12 @@ without input are skipped), with the window from T3's model manifest (`claude/mo
 unless it is 0).
 
 **Auth is the user's own.** The daemon runs the provider CLIs installed on the machine with the
-logins already there, exactly as T3 Code and Conductor do; roll never reads, copies or relays a
-provider credential. API keys and `ANTHROPIC_BASE_URL`/`OPENAI_BASE_URL` can be set per provider
-in the daemon config (only there: machine settings refuse them, "Machine settings"). A provider's
-status (installed, version, logged in) is reported in `hello` and refreshed on `provider.refresh`;
-logging in happens in a terminal on the canvas.
+logins already there, exactly as T3 Code and Conductor do; roll never reads, copies, pools or
+relays a provider credential in the clear. A provider can instead use an endpoint (a base URL and
+a key: CLIProxyAPI, a gateway), set in the daemon config or from roll, where the key is sealed to
+the daemon in the browser so roll only ever carries ciphertext ("Endpoints"). A provider's status
+(installed, version, logged in, or "via <endpoint>") is reported in `hello` and refreshed on
+`provider.refresh`; logging in happens in a terminal on the canvas.
 
 **Probes never hold up the daemon** (T3's provider registry, which starts from its status cache,
 `apps/server/src/provider/providerStatusCache.ts`, and refreshes each provider on its own). A probe
@@ -770,12 +771,13 @@ next to `providers`, which they change; a lagged link sends `hello` again, so no
 - **Over `config.toml`, never rewriting it.** `config.toml` stays the machine's own file. Every
   setting overrides it: the binary instead of its binary, arguments after its arguments, variables
   over its variables of the same name; unset falls back to it.
-- **Never a credential.** `MachineSettings::check` (agent-proto, mirrored in `lib/machine-settings.ts`)
-  refuses any variable whose name holds `KEY`, `TOKEN`, `SECRET`, `PASS`, `CREDENTIAL`, `AUTH`,
-  `COOKIE`, `SESSION`, `PRIVATE`, `URL`, `ENDPOINT`, `PROXY` or `HOST` (`is_credential_env`): keys,
-  tokens and anything that points a provider somewhere else. The dashboard refuses them before
-  sending, the relay before forwarding (400) and the daemon again. The panel says to set them in
-  `config.toml` on the machine (its path is shown) or in a sandbox's sealed env, and shows
+- **Never a credential in the clear.** `MachineSettings::check` (agent-proto, mirrored in
+  `lib/machine-settings.ts`) refuses any variable whose name holds `KEY`, `TOKEN`, `SECRET`, `PASS`,
+  `CREDENTIAL`, `AUTH`, `COOKIE`, `SESSION`, `PRIVATE`, `URL`, `ENDPOINT`, `PROXY` or `HOST`
+  (`is_credential_env`): keys, tokens and anything that points a provider somewhere else, because
+  settings travel and are reported in the clear. The dashboard refuses them before sending, the
+  relay before forwarding (400) and the daemon again. Base URLs and keys go in an endpoint instead
+  ("Endpoints", sealed to the daemon) or in `config.toml` on the machine; the panel shows
   `config.toml`'s variables by name only: their values never leave the machine.
 - **A provider turned off** (`enabled: false`) leaves `MachineInfo.providers` (never probed), so
   nothing offers it; new threads, switching to it and delegating to it are refused (`provider`), and
@@ -790,6 +792,68 @@ next to `providers`, which they change; a lagged link sends `hello` again, so no
   per provider; paths absolute or `~/…`; a branch prefix git takes; auto-pull at least daily;
   subagents at most 8 deep, 1 to 32 tasks per thread; a git name and email both or neither.
 - Changing them is the owner's (`Code::manages`); agent tokens can't (agents/policy.rs).
+
+## Endpoints
+
+A provider can talk to an endpoint instead of (or besides) its own login: CLIProxyAPI
+(github.com/router-for-me/CLIProxyAPI), any Anthropic- or OpenAI-compatible gateway, or a key in
+the provider's own variables (Gemini's `GEMINI_API_KEY`). The owner sets them from roll, for any
+machine (laptops, servers and sandboxes), at any time. Wire: `agent-proto/src/endpoint.rs`; daemon:
+`agent-host/src/endpoints.rs` and `orchestrator/endpoints.rs`; browser: `lib/agents-seal.ts`.
+
+**The rule** (it replaced "API keys and base URLs come only from `config.toml` or a sandbox's
+sealed env"): the owner may set endpoints and keys from roll, and a key is sealed end to end to the
+daemon that uses it, so roll's relay only ever holds ciphertext, in memory, while forwarding it;
+it never stores, logs or returns a key. Nothing is pooled or shared across owners: an endpoint is
+the owner's own, set on the owner's own machines, and a sandbox is one owner's machine.
+
+- **An endpoint** (`EndpointSpec`): an id (the client's, `[a-z0-9_-]`), a name, a kind, a base URL
+  (`http(s)://`, no credentials in it), the providers that use it, and for `custom` the variables
+  its URL and key go in. A provider uses at most one endpoint on a machine: setting one takes its
+  providers from the machine's others. At most 32 per machine.
+- **Kinds and what a provider's process gets** (`Provider::endpoint_use`, so every adapter, including
+  new ones, gets the generic default and overrides it only when its CLI is configured otherwise):
+  - `anthropic`: `ANTHROPIC_BASE_URL`, and the key as `ANTHROPIC_AUTH_TOKEN` (a bearer token, what
+    gateways and CLIProxyAPI take; `ANTHROPIC_API_KEY` would make Claude Code ask before using it).
+  - `openai`: the base URL includes `/v1`; `OPENAI_BASE_URL` and `OPENAI_API_KEY`.
+  - `cliproxy`: one server with the Anthropic, OpenAI and Gemini routes at its root. Claude Code gets
+    the Anthropic variables; Codex gets a model provider of roll's (below); other agents get all
+    three families (`OPENAI_BASE_URL` = `<base>/v1`, `GOOGLE_GEMINI_BASE_URL`, `GEMINI_API_KEY`).
+  - `custom`: the base URL in `url_env` and the key in `key_env`, whichever are named.
+  - Codex: `-c model_provider="roll_<id>"` and `-c model_providers.roll_<id>.{name,base_url,
+    wire_api="responses",requires_openai_auth=false,env_key="ROLL_ENDPOINT_KEY"}` before
+    `app-server`, the key in `ROLL_ENDPOINT_KEY` (never in an argument: arguments show in `ps`).
+  - A provider that can't speak the kind is refused (`invalid`): Claude Code with `openai`, Codex
+    with `anthropic`.
+  An endpoint's variables are laid over the provider's config (`config.toml`, then the machine's
+  settings) for its next process, and reach nothing else: not terminals, records, `hello` or
+  shares. A running session keeps what it started with.
+- **Sealing** (`roll-seal-v1`): the daemon makes an X25519 key pair once (`agent.db`'s `settings`,
+  `seal_key`) and says the public half in `hello` (`MachineInfo.seal_key`). The browser seals the
+  key with WebCrypto: a fresh X25519 pair, HKDF-SHA256 over the shared secret (salt `epk ‖
+  seal_key`, info `roll-seal-v1`) to an AES-256-GCM key, a random nonce, and `roll-endpoint:<id>`
+  as associated data, so a box opens only on that daemon and only for that endpoint (`SealedSecret`).
+  `endpoint.set {endpoint, key}` carries it (`key`: `keep`, `clear`, or `set {sealed}`). The relay
+  checks the box's shape (`SealedSecret::check`) and the spec, and forwards the command; commands are
+  never stored on the relay. The daemon opens the box (an all-zero shared secret is refused), keeps
+  the key in `agent.db`, which it keeps at mode 0600, and replies; its receipt holds only the reply.
+  Debug output of a sealed box or a key never shows it.
+- **1Password** (T3's secret providers): instead of a sealed key, an endpoint may name a reference
+  (`key_ref`, `op://vault/item/field`). The daemon reads it with the `op` CLI on the machine
+  (30 s, its value only in memory) at start, when the endpoint is set and on each check. A reference
+  isn't a secret, so it travels in the clear.
+- **Reported, never the key**: `MachineConfig.endpoints` (`EndpointInfo`) has the spec, where the
+  key comes from (`none`, `sealed`, `reference`), the models it listed and the last check's error.
+  The UI shows "Key set (never shown)" with Replace and Remove; it never shows any part of a key.
+- **Models**: after `endpoint.set`, at start for endpoints never listed, and on `endpoint.check`
+  (which answers `endpoint_checked {ok, models, ms, error}`), the daemon asks the endpoint for its
+  models: `<base>/v1/models` (anthropic, cliproxy) or `<base>/models` (openai), with the key as a
+  bearer token (and `x-api-key`), 10 s, at most 2 MiB, no redirects, 500 models. Each provider that
+  uses the endpoint offers them after its own, with `ModelInfo.via` = the endpoint's name (the picker
+  shows it), and its status says "via <name>". A private or tailnet address is fine: the daemon calls
+  it; roll's relay never calls an endpoint. Errors name the failure, never a key.
+- **Who**: the owner (`Code::manages`); agent tokens can't set, remove or check endpoints
+  (`agents/policy.rs`).
 
 ## Owner settings
 
@@ -808,7 +872,7 @@ dashboard or desktop app already decides, or features roll doesn't have.
 | T3 setting | roll | Where |
 |---|---|---|
 | Providers: enabled, display name, binary path, home path (`CODEX_HOME`, `CLAUDE_CONFIG_DIR`), launch args, environment | on/off, binary, extra arguments, environment (home paths are variables); names are the daemon's | machine |
-| Provider secrets (API keys, `secretProviders`, sensitive env) | never through roll: `config.toml` or a sandbox's sealed env | machine-local only |
+| Provider secrets (API keys, `secretProviders`, sensitive env) | endpoints: keys sealed to the daemon from roll, or a 1Password reference read on the machine ("Endpoints"); `config.toml` stays the machine's own | machine (sealed) |
 | Custom models (`customModels`), hidden models, model order | custom models; hiding and ordering: not applicable (the picker sorts favourites first) | machine |
 | Favourite models (`favorites`) and roll's recent models | `favorite_models`, `recent_models` (localStorage is the cache; `agents-models.ts`) | owner |
 | Default model (`defaultModelSelection`), permissions (`defaultRuntimeMode`), workspace (`defaultThreadEnvMode`), plan mode | new-thread defaults: project, then machine, then owner (`newThreadDefaults`) | project, machine, owner |
@@ -961,8 +1025,9 @@ on the server meanwhile.
 **Logging providers in.** The owner logs the providers in from a terminal on the canvas
 (`terminal.open` with `command: "claude /login"` or `"codex login --device-auth"`): both are
 browserless flows that print a URL and take a code, and the login stays in the sandbox's home
-volume. Provider API keys through the sandbox's env are the alternative. roll never reads, copies or
-pools these credentials. A subscription login on a machine roll hosts is still the owner's own login
+volume. An endpoint set on the sandbox ("Endpoints"), sealed to its daemon like any machine's, or
+provider API keys through the sandbox's env at creation, are the alternatives. roll never reads,
+copies or pools these credentials. A subscription login on a machine roll hosts is still the owner's own login
 on a machine they rent, but it isn't their own computer: whether Anthropic's (and OpenAI's)
 consumer terms allow a subscription to be used from a hosted sandbox is an open policy question to
 settle with them before this is marketed; API keys have no such question.

@@ -75,6 +75,7 @@ pub fn kind_name(kind: EntityKind) -> &'static str {
 impl Store {
     pub fn open(path: &Path) -> anyhow::Result<Store> {
         let mut db = Connection::open(path).with_context(|| format!("opening {}", path.display()))?;
+        private(path);
         db.pragma_update(None, "journal_mode", "WAL")?;
         db.pragma_update(None, "synchronous", "NORMAL")?;
         db.pragma_update(None, "foreign_keys", "ON")?;
@@ -255,6 +256,20 @@ impl Store {
         )?;
         Ok(())
     }
+}
+
+/// `agent.db` holds endpoint keys (`endpoints.rs`): only its user reads it. SQLite gives its
+/// `-wal` and `-shm` files the database's mode.
+fn private(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(e) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
+            tracing::warn!("couldn't make {} private: {e}", path.display());
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = path;
 }
 
 fn migrate(db: &mut Connection) -> anyhow::Result<()> {

@@ -7,18 +7,23 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+aes-gcm.workspace = true
 agent-proto.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
 axum.workspace = true
 base64.workspace = true
+curve25519-dalek.workspace = true
 diffy.workspace = true
 futures-util.workspace = true
 hex.workspace = true
+hkdf.workspace = true
 # Project logos (`logo.rs`): rasters shrunk to a small PNG.
 image = { workspace = true, features = ["ico"] }
 libc.workspace = true
 rand.workspace = true
+# Endpoints' model lists (`endpoints.rs`).
+reqwest = { workspace = true, features = ["rustls"] }
 rusqlite.workspace = true
 rustls-native-certs.workspace = true
 serde.workspace = true
@@ -30,6 +35,7 @@ tokio-rustls.workspace = true
 tokio-tungstenite = { workspace = true, features = ["rustls-tls-native-roots"] }
 toml.workspace = true
 tracing.workspace = true
+zeroize = { workspace = true, features = ["serde"] }
 
 [dev-dependencies]
 code-control.workspace = true

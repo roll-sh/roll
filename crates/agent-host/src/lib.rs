@@ -9,6 +9,7 @@ use async_trait::async_trait;
 use tokio::sync::broadcast;
 
 pub mod config;
+pub mod endpoints;
 pub mod fs;
 pub mod mcp;
 pub mod git;

@@ -115,6 +115,17 @@ impl Provider for Claude {
         models::options_for(slug)
     }
 
+    /// Claude Code speaks the Anthropic API: `ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN`
+    /// (CLIProxyAPI's own instructions for Claude Code).
+    fn endpoint_use(&self, endpoint: &agent_proto::EndpointSpec, key: Option<&str>) -> Result<crate::endpoints::EndpointUse, String> {
+        use agent_proto::EndpointKind as K;
+        match endpoint.kind {
+            K::Openai => Err("Claude Code speaks the Anthropic API: use an Anthropic-compatible endpoint or CLIProxyAPI".into()),
+            K::Anthropic | K::Cliproxy => Ok(crate::endpoints::anthropic_use(&endpoint.base_url, key)),
+            K::Custom => Ok(crate::endpoints::generic_use(endpoint, key)),
+        }
+    }
+
     async fn info(&self) -> ProviderInfo {
         let (models, update_required) = models::models(None);
         let mut info = ProviderInfo {
@@ -806,6 +817,17 @@ fn tail_text(tail: &Mutex<Vec<u8>>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn claude_uses_anthropic_endpoints_and_refuses_openai_ones() {
+        use agent_proto::{EndpointKind, EndpointSpec};
+        let claude = Claude::new(ProviderConfig::default());
+        let spec = |kind| EndpointSpec { id: "e".into(), name: "E".into(), kind, base_url: "http://h:8317".into(), providers: vec![], url_env: None, key_env: None, key_ref: None };
+        let used = claude.endpoint_use(&spec(EndpointKind::Cliproxy), Some("k")).unwrap();
+        assert_eq!(used.env, vec![("ANTHROPIC_BASE_URL".to_string(), "http://h:8317".to_string()), ("ANTHROPIC_AUTH_TOKEN".to_string(), "k".to_string())]);
+        assert!(used.args.is_empty());
+        assert!(claude.endpoint_use(&spec(EndpointKind::Openai), Some("k")).unwrap_err().contains("Anthropic API"));
+    }
 
     #[test]
     fn modes_map_like_t3() {

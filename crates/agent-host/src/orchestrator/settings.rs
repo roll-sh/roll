@@ -38,9 +38,11 @@ impl Host {
         self.settings.lock().unwrap().clone()
     }
 
-    /// A provider's config: `config.toml`'s entry with the machine's settings over it.
+    /// A provider's config: `config.toml`'s entry with the machine's settings over it, and the
+    /// endpoint it uses over both (`endpoints.rs`).
     pub(crate) fn provider_config(&self, id: &ProviderId) -> ProviderConfig {
-        merged(self.config.provider(id), &self.settings.lock().unwrap().provider(id))
+        let cfg = merged(self.config.provider(id), &self.settings.lock().unwrap().provider(id));
+        self.with_endpoint(id, cfg)
     }
 
     /// A provider new work may use: on this machine and not turned off in its settings.
@@ -147,6 +149,21 @@ impl Host {
                     info.models.push(ModelInfo { custom: true, options, ..ModelInfo::new(m.id.clone(), name) });
                 }
             }
+            // An endpoint's models, under its name; and the provider's status says it uses it
+            // (its own login no longer matters).
+            if let Some(ep) = self.endpoint_of(id) {
+                for m in &ep.models {
+                    if !info.models.iter().any(|known| known.id == m.id) {
+                        let options = provider.custom_model_options(&m.id, &info.models);
+                        let name = m.name.clone().unwrap_or_else(|| m.id.clone());
+                        info.models.push(ModelInfo { via: Some(ep.spec.name.clone()), options, ..ModelInfo::new(m.id.clone(), name) });
+                    }
+                }
+                if info.installed {
+                    info.auth = AuthStatus::Ready;
+                    info.detail = Some(format!("via {}", ep.spec.name));
+                }
+            }
             offered.push(info);
         }
         let (git_name, git_email) = crate::git::global_identity().await;
@@ -172,9 +189,9 @@ impl Host {
                 base,
                 providers,
                 config_path: self.config.home.join("config.toml").display().to_string(),
-                endpoints: Vec::new(),
+                endpoints: self.endpoint_infos(),
             })),
-            seal_key: None,
+            seal_key: Some(self.seal_key()),
         }
     }
 }

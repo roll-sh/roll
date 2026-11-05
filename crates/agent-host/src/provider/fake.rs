@@ -33,6 +33,30 @@ pub enum Script {
     Demo,
 }
 
+/// What a [`Script::Demo`] (or Echo) turn answers on its own when sent exactly this: the endpoint
+/// variables its process gets (docs/code/agents.md, "Endpoints"), base URLs as they are and keys
+/// only as a SHA-256, for the end-to-end test that a sealed key reaches the provider.
+pub const ENV_PROBE: &str = "roll:endpoint-env";
+
+/// [`ENV_PROBE`]'s answer for a process environment.
+pub fn env_report(env: &[(String, String)]) -> String {
+    use sha2::Digest;
+    let mut lines: Vec<String> = env
+        .iter()
+        .filter_map(|(k, v)| {
+            if k.ends_with("_BASE_URL") {
+                Some(format!("{k}={v}"))
+            } else if k.ends_with("_KEY") || k.ends_with("_TOKEN") {
+                Some(format!("{k}=sha256:{}", hex::encode(sha2::Sha256::digest(v.as_bytes()))))
+            } else {
+                None
+            }
+        })
+        .collect();
+    lines.sort();
+    if lines.is_empty() { "no endpoint variables".into() } else { lines.join("\n") }
+}
+
 /// The file a [`Script::Demo`] turn writes.
 pub const DEMO_FILE: &str = "ROLL_DEMO.md";
 /// The context a [`Script::Demo`] conversation reports after its first turn; it grows per turn.
@@ -320,6 +344,17 @@ impl FakeSession {
 }
 
 impl FakeSession {
+    /// A whole turn that answers `answer`.
+    fn say(&self, answer: &str) {
+        let id = self.next_item();
+        self.emit(self.message(&id, "", NodeStatus::Running));
+        self.emit(ProviderEvent::TextDelta { item: id.clone(), text: answer.into() });
+        self.emit(self.message(&id, answer, NodeStatus::Completed));
+        let turn = format!("{}:turn-{}", self.inner.native, self.inner.turns.fetch_add(1, Ordering::SeqCst) + 1);
+        self.emit(ProviderEvent::TurnRef { id: turn });
+        self.emit(ProviderEvent::TurnEnded(TurnEnd::Completed));
+    }
+
     fn message(&self, id: &str, text: &str, status: NodeStatus) -> ProviderEvent {
         ProviderEvent::Item(Item { id: id.into(), parent: None, status, body: NodeBody::Message { text: text.into() } })
     }
@@ -433,6 +468,7 @@ impl Session for FakeSession {
         // What the user said, not the context roll handed over in front of it.
         let said = input.text.rsplit_once("</roll-context>\n\n").map_or(input.text.as_str(), |(_, said)| said);
         match self.inner.script {
+            Script::Echo | Script::Demo if said.trim() == ENV_PROBE => self.say(&env_report(&self.config.env)),
             Script::Echo => self.echo(said),
             Script::Demo => {
                 tokio::spawn(self.clone().demo_start(said.to_string()));

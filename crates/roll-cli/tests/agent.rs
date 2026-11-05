@@ -691,3 +691,126 @@ async fn a_slack_button_answers_the_fake_providers_approval() {
     let status = tokio::task::spawn_blocking(move || wait_for(&mut daemon, Duration::from_secs(10))).await.unwrap().expect("stopped");
     assert!(status.success(), "{status:?}");
 }
+
+/// Every file under `dir` that holds `needle`.
+fn files_holding(dir: &std::path::Path, needle: &str) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&d) else { continue };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if std::fs::read(&path).is_ok_and(|b| b.windows(needle.len()).any(|w| w == needle.as_bytes())) {
+                found.push(path);
+            }
+        }
+    }
+    found
+}
+
+/// Endpoints end to end (docs/code/agents.md, "Endpoints"): a key sealed to the daemon of
+/// `roll agent up` (as the browser seals it) crosses the relay as ciphertext only, so nothing the
+/// relay keeps or the daemon prints holds it; the daemon lists the endpoint's models (a mock
+/// CLIProxyAPI on loopback) and the fake provider's process gets the key.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_endpoint_key_sealed_to_the_daemon_reaches_the_fake_provider_and_nothing_else() {
+    const KEY: &str = "sk-e2e-endpoint-7f3a9c41";
+    let app = axum::Router::new().route(
+        "/v1/models",
+        axum::routing::get(|headers: axum::http::HeaderMap| async move {
+            let ok = headers.get("authorization").and_then(|v| v.to_str().ok()) == Some(&format!("Bearer {KEY}"));
+            if ok {
+                axum::Json(json!({ "object": "list", "data": [{ "id": "gemini-2.5-pro" }, { "id": "gpt-5.5" }] })).into_response()
+            } else {
+                axum::http::StatusCode::UNAUTHORIZED.into_response()
+            }
+        }),
+    );
+    use axum::response::IntoResponse;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mock = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let env = env().await;
+    let e = &env;
+    e.login("box").await;
+    let saved: Value = serde_json::from_str(&std::fs::read_to_string(&e.login).unwrap()).unwrap();
+    let machine = saved["machine"].as_str().unwrap().to_string();
+    let path = format!("/v1/code/agents/acme/machines/{machine}/commands");
+    let mut c = e.cmd(&["agent", "up"]);
+    c.env("ROLL_AGENT_FAKE", "1");
+    let mut daemon = c.spawn().unwrap();
+    let log = lines(&mut daemon);
+    let info = |f: fn(&Value) -> bool, what: &'static str| async move {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            let m = e.machines().await.pop().unwrap_or_default();
+            if m["online"].as_bool() == Some(true) && f(&m["info"]) {
+                return m["info"].clone();
+            }
+            assert!(Instant::now() < deadline, "never {what}: {m}");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    };
+    let seal_key = info(|i| i["seal_key"].is_string(), "said its seal key").await["seal_key"].as_str().unwrap().to_string();
+
+    // The relay refuses what isn't a sealed box before it reaches the machine.
+    let raw = json!({ "id": "e0", "command": { "type": "endpoint.set", "endpoint": { "id": "cliproxy", "name": "CLIProxyAPI", "kind": "cliproxy", "base_url": mock },
+        "key": { "type": "set", "sealed": { "v": 1, "epk": "x", "nonce": "y", "ct": KEY } } } });
+    let (s, r) = e.req("POST", &path, Some(raw)).await;
+    assert_eq!(s.as_u16(), 400, "{r}");
+
+    let sealed = agent_host::endpoints::seal(&seal_key, "cliproxy", KEY).unwrap();
+    let set = json!({ "id": "e1", "command": { "type": "endpoint.set",
+        "endpoint": { "id": "cliproxy", "name": "CLIProxyAPI", "kind": "cliproxy", "base_url": mock, "providers": ["fake"] },
+        "key": { "type": "set", "sealed": sealed } } });
+    let (s, r) = e.req("POST", &path, Some(set)).await;
+    assert_eq!((s.as_u16(), r["type"].as_str()), (200, Some("ok")), "{r}");
+    let listed = info(|i| i["settings"]["endpoints"][0]["models"].as_array().is_some_and(|m| m.len() == 2), "listed the endpoint's models").await;
+    assert_eq!(listed["settings"]["endpoints"][0]["key"], "sealed");
+    let fake = listed["providers"].as_array().unwrap().iter().find(|p| p["id"] == "fake").unwrap().clone();
+    assert_eq!(fake["detail"], "via CLIProxyAPI", "{fake}");
+    assert!(fake["models"].as_array().unwrap().iter().any(|m| m["id"] == "gemini-2.5-pro" && m["via"] == "CLIProxyAPI"), "{fake}");
+
+    // The provider's process gets the key: the fake answers with its SHA-256.
+    let project = e.dir.path().join("proj");
+    std::fs::create_dir_all(&project).unwrap();
+    let (_, r) = e.req("POST", &path, Some(json!({ "id": "p1", "command": { "type": "project.add", "path": project, "name": "proj" } }))).await;
+    let project_id = r["id"].as_str().unwrap_or_else(|| panic!("{r}")).to_string();
+    let probe = agent_host::provider::fake::ENV_PROBE;
+    let create = json!({ "id": "t1", "command": { "type": "thread.create", "project": project_id, "provider": "fake", "runtime_mode": "ask", "prompt": probe } });
+    let (s, r) = e.req("POST", &path, Some(create)).await;
+    assert_eq!(s.as_u16(), 200, "{r}");
+    let want = agent_host::provider::fake::env_report(&[("ANTHROPIC_AUTH_TOKEN".into(), KEY.into())]);
+    let thread = r["id"].as_str().unwrap_or_else(|| panic!("{r}")).to_string();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let answer = loop {
+        let (_, state) = e.req("GET", &format!("/v1/code/agents/acme/state?threads={thread}"), None).await;
+        let text = state["entities"].as_array().unwrap().iter().filter_map(|m| m["entity"]["body"]["text"].as_str()).find(|t| t.contains("ANTHROPIC_AUTH_TOKEN")).map(str::to_string);
+        if let Some(t) = text {
+            break t;
+        }
+        assert!(Instant::now() < deadline, "the fake never answered the probe: {:?}", state["entities"].as_array().unwrap().iter().filter(|m| m["entity"]["kind"] != "project").map(|m| m["entity"].clone()).collect::<Vec<_>>());
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    assert!(answer.lines().any(|l| l == want), "{answer}");
+    assert!(answer.contains(&format!("ANTHROPIC_BASE_URL={mock}")), "{answer}");
+
+    // Nothing roll's side keeps holds the key: the relay's database and objects, its state, and
+    // what the daemon printed.
+    let (_, state) = e.req("GET", "/v1/code/agents/acme/state", None).await;
+    assert!(!state.to_string().contains(KEY));
+    assert_eq!(files_holding(&e.dir.path().join("home"), KEY), Vec::<PathBuf>::new());
+    assert_eq!(files_holding(&e.dir.path().join("objects"), KEY), Vec::<PathBuf>::new());
+    // SAFETY: signalling the child this test started.
+    unsafe { libc::kill(daemon.id() as i32, libc::SIGINT) };
+    let status = tokio::task::spawn_blocking(move || wait_for(&mut daemon, Duration::from_secs(10))).await.unwrap().expect("stopped");
+    assert!(status.success(), "{status:?}");
+    let printed: Vec<String> = log.try_iter().collect();
+    assert!(!printed.iter().any(|l| l.contains(KEY)), "{printed:?}");
+    // The daemon keeps it, in its own private database.
+    let db = e.data.join("agent.db");
+    assert_eq!(std::fs::metadata(&db).unwrap().permissions().mode() & 0o777, 0o600);
+}
