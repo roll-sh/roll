@@ -109,7 +109,7 @@
         },
         "type": "object"
       },
-      "description": "Stream a roll thread's progress to the Linear agent session as activities, ask its questions and approvals there, and pass the replies on (they answer, steer or stop it). Done when the thread is",
+      "description": "Stream a roll thread's progress to the Linear agent session as activities, ask its questions and approvals there, and pass the replies on (they answer, steer or stop it). Done when the thread is idle after its run (its last message is the response).",
       "integration": "linear",
       "kind": "linear.agent_session",
       "output": [

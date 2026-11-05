@@ -340,7 +340,7 @@ impl StepKind for AgentSession {
         StepInfo {
             kind: "linear.agent_session".into(),
             title: "Show the agent in Linear".into(),
-            description: "Stream a roll thread's progress to the Linear agent session as activities, ask its questions and approvals there, and pass the replies on (they answer, steer or stop it). Done when the thread is".into(),
+            description: "Stream a roll thread's progress to the Linear agent session as activities, ask its questions and approvals there, and pass the replies on (they answer, steer or stop it). Done when the thread is idle after its run (its last message is the response).".into(),
             config: json!({
                 "type": "object",
                 "additionalProperties": false,
