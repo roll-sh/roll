@@ -18,6 +18,7 @@
 
 mod cleanup;
 mod endpoints;
+mod gateway;
 mod handoff;
 mod idle;
 mod instructions;
@@ -86,6 +87,10 @@ pub struct Host {
     seal: crate::endpoints::SealKey,
     /// The endpoints set from roll, with their keys (`endpoints.rs`).
     endpoints: std::sync::Mutex<Vec<crate::endpoints::Live>>,
+    /// roll's model gateway, when this machine hosts it (`gateway.rs`).
+    gateway: gateway::Hosting,
+    /// Whether the gateways this machine's endpoints use answer (their fallback).
+    gateway_health: crate::gateway::Health,
     /// Each thread's idle compaction timer (`idle.rs`).
     idle_timers: std::sync::Mutex<HashMap<ThreadId, tokio::task::AbortHandle>>,
 }
@@ -297,6 +302,8 @@ impl Host {
             logos: Arc::default(),
             seal,
             endpoints: std::sync::Mutex::new(endpoints),
+            gateway: gateway::Hosting::default(),
+            gateway_health: crate::gateway::Health::default(),
             idle_timers: std::sync::Mutex::new(HashMap::new()),
         });
         host.configure_providers();
@@ -304,6 +311,7 @@ impl Host {
         host.probe_providers();
         host.publish_info().await;
         host.spawn_endpoints_start();
+        host.spawn_gateway_start();
         host.recover()?;
         host.mcp.start(Arc::downgrade(&host), listener);
         tasks::spawn_worker(Arc::downgrade(&host), task_work);
@@ -633,17 +641,16 @@ impl Host {
             Command::EndpointSet { endpoint, key } => self.endpoint_set(endpoint, key).await,
             Command::EndpointRemove { endpoint } => self.endpoint_remove(&endpoint).await,
             Command::EndpointCheck { endpoint } => self.endpoint_check(&endpoint).await,
-            // TODO(gateway lane): agent-host/src/gateway.rs takes these over.
-            Command::GatewayConfigure { .. }
-            | Command::GatewayKey { .. }
-            | Command::GatewayClientIssue { .. }
-            | Command::GatewayClientRevoke { .. }
-            | Command::GatewayTest { .. }
-            | Command::GatewayRemove {}
-            | Command::GatewayStatus {}
-            | Command::GatewayUsage { .. }
-            | Command::GatewayLog { .. }
-            | Command::GatewayLogBody { .. } => Err(Fail::Invalid("this daemon has no model gateway yet".into())),
+            Command::GatewayConfigure { settings } => self.gateway_configure(*settings).await,
+            Command::GatewayKey { upstream, key } => self.gateway_key(&upstream, key).await,
+            Command::GatewayClientIssue { name, machine, seal_key } => self.gateway_client_issue(&name, machine, &seal_key).await,
+            Command::GatewayClientRevoke { client } => self.gateway_client_revoke(&client).await,
+            Command::GatewayTest { upstream } => self.gateway_test(upstream.as_deref()).await,
+            Command::GatewayRemove {} => self.gateway_remove().await,
+            Command::GatewayStatus {} => self.gateway_status().await,
+            Command::GatewayUsage { from, to, by, bucket } => self.gateway_usage(from, to, by, bucket).await,
+            Command::GatewayLog { after, before, limit, errors } => self.gateway_log(after, before, limit, errors).await,
+            Command::GatewayLogBody { seq } => self.gateway_log_body(seq).await,
             Command::DiffGet { thread, run } => self.diff_get(&thread, run.as_ref()).await,
             Command::FsList { project, path } => self.fs_list(project.as_ref(), &path).await,
             Command::FsRead { project, path } => self.fs_read(&project, &path).await,

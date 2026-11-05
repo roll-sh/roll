@@ -53,6 +53,45 @@ pub enum Script {
 /// only as a SHA-256, for the end-to-end test that a sealed key reaches the provider.
 pub const ENV_PROBE: &str = "roll:endpoint-env";
 
+/// What a [`Script::Demo`] (or Echo) turn answers on its own when sent exactly this: it sends one
+/// Anthropic Messages request the way Claude Code does through an endpoint (`POST
+/// $ANTHROPIC_BASE_URL/v1/messages` with `$ANTHROPIC_AUTH_TOKEN` as a bearer token and the headers
+/// in `ANTHROPIC_CUSTOM_HEADERS`) and says what came back ([`gateway_probe`]), for the end-to-end
+/// test of roll's model gateway.
+pub const GATEWAY_PROBE: &str = "roll:gateway-probe";
+
+/// [`GATEWAY_PROBE`]'s request from a process environment: `gateway: <status> <text>`, the
+/// response's first text block (or, on an error, its body, cut to 300 bytes).
+pub async fn gateway_probe(env: &[(String, String)]) -> String {
+    let var = |k: &str| env.iter().rev().find(|(n, _)| n == k).map(|(_, v)| v.clone());
+    let Some(base) = var("ANTHROPIC_BASE_URL") else { return "gateway: no ANTHROPIC_BASE_URL".into() };
+    let http = match reqwest::Client::builder().timeout(Duration::from_secs(30)).build() {
+        Ok(h) => h,
+        Err(e) => return format!("gateway: {e}"),
+    };
+    let body = json!({ "model": "claude-haiku-4-5", "max_tokens": 16, "messages": [{ "role": "user", "content": "Say ok." }] });
+    let mut req = http.post(format!("{base}/v1/messages")).header("anthropic-version", "2023-06-01").json(&body);
+    if let Some(token) = var("ANTHROPIC_AUTH_TOKEN") {
+        req = req.bearer_auth(token);
+    }
+    for line in var("ANTHROPIC_CUSTOM_HEADERS").unwrap_or_default().lines() {
+        if let Some((k, v)) = line.split_once(':') {
+            req = req.header(k.trim(), v.trim());
+        }
+    }
+    let resp = match req.send().await {
+        Ok(r) => r,
+        Err(e) => return format!("gateway: unreachable: {e}"),
+    };
+    let status = resp.status().as_u16();
+    let bytes = resp.bytes().await.unwrap_or_default();
+    let text = serde_json::from_slice::<Value>(&bytes)
+        .ok()
+        .and_then(|v| v["content"].as_array()?.iter().find_map(|b| b["text"].as_str().map(str::to_string)))
+        .unwrap_or_else(|| String::from_utf8_lossy(&bytes[..bytes.len().min(300)]).into_owned());
+    format!("gateway: {status} {text}")
+}
+
 /// [`ENV_PROBE`]'s answer for a process environment.
 pub fn env_report(env: &[(String, String)]) -> String {
     use sha2::Digest;
@@ -742,6 +781,10 @@ impl Session for FakeSession {
         let said = input.text.rsplit_once("</roll-context>\n\n").map_or(input.text.as_str(), |(_, said)| said);
         match self.inner.script {
             Script::Echo | Script::Demo if said.trim() == ENV_PROBE => self.say(&env_report(&self.config.env)),
+            Script::Echo | Script::Demo if said.trim() == GATEWAY_PROBE => {
+                let me = self.clone();
+                tokio::spawn(async move { me.say(&gateway_probe(&me.config.env).await) });
+            }
             Script::Echo => self.echo(said),
             Script::Demo => {
                 tokio::spawn(self.clone().demo_start(said.to_string()));

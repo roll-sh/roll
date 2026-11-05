@@ -466,6 +466,8 @@ impl Host {
         if !tokio::fs::metadata(cwd).await.map(|m| m.is_dir()).unwrap_or(false) {
             return Err(Fail::Invalid(format!("the thread's directory {} is gone", rt.thread.cwd)));
         }
+        // A gateway with a fallback is asked whether it answers before its variables are used.
+        self.check_gateway(&rt.thread.provider).await;
         let t = &rt.thread;
         let p = t.provider.as_str();
         let resume = rt.private.native.get(p).cloned();
@@ -481,7 +483,12 @@ impl Host {
             resume,
             resume_at,
             fork: None,
-            env: self.provider_config(&t.provider).env,
+            env: {
+                let mut env = self.provider_config(&t.provider).env;
+                let attribution = self.gateway_attribution(&t.provider, &env, &t.id, &t.project);
+                env.extend(attribution);
+                env
+            },
             mcp: vec![self.mcp.session_server(&t.id)],
             instructions: Some(super::instructions::for_thread(t)),
         };

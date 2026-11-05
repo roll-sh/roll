@@ -61,6 +61,7 @@ dependencies = [
  "hkdf",
  "image",
  "libc",
+ "model-gateway",
  "parking_lot",
  "pg-storage",
  "rand 0.8.8",

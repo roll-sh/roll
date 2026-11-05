@@ -21,6 +21,8 @@ hkdf.workspace = true
 # Project logos (`logo.rs`): rasters shrunk to a small PNG.
 image = { workspace = true, features = ["ico"] }
 libc.workspace = true
+# roll's model gateway, hosted by the daemon (`gateway.rs`).
+model-gateway.workspace = true
 rand.workspace = true
 # Endpoints' model lists (`endpoints.rs`); the fake orchestrator (`provider/fake.rs`) calls the
 # MCP server the way an agent does; OpenCode 2's HTTP API (`provider/opencode`).

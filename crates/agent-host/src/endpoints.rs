@@ -92,6 +92,13 @@ impl SealKey {
     /// Opens a key sealed to this daemon for `endpoint`, or says why it doesn't open (never with
     /// any of its bytes).
     pub fn open(&self, endpoint: &str, sealed: &SealedSecret) -> Result<Secret, String> {
+        self.open_with(&SealedSecret::context(endpoint), sealed)
+    }
+
+    /// [`SealKey::open`] for a box sealed with any associated data: `context` names what the key
+    /// is for (an endpoint's `roll-endpoint:<id>`, a gateway upstream's
+    /// [`agent_proto::gateway::upstream_key_context`]), so a box made for one never opens as another.
+    pub fn open_with(&self, context: &str, sealed: &SealedSecret) -> Result<Secret, String> {
         sealed.check()?;
         let bad = || "the key wasn't sealed to this machine (reload the page and set it again)".to_string();
         let epk: [u8; 32] = B64.decode(&sealed.epk).ok().and_then(|b| b.try_into().ok()).ok_or_else(bad)?;
@@ -103,8 +110,7 @@ impl SealKey {
             return Err(bad());
         }
         let cipher = box_cipher(&shared, &epk, &self.public);
-        let aad = SealedSecret::context(endpoint);
-        let plain = Zeroizing::new(cipher.decrypt(&nonce.into(), Payload { msg: &ct, aad: aad.as_bytes() }).map_err(|_| bad())?);
+        let plain = Zeroizing::new(cipher.decrypt(&nonce.into(), Payload { msg: &ct, aad: context.as_bytes() }).map_err(|_| bad())?);
         let key = String::from_utf8(plain.to_vec()).map_err(|_| "the key isn't text".to_string())?;
         check_key(&key)?;
         Ok(Secret::new(key))
@@ -125,14 +131,18 @@ fn box_cipher(shared: &[u8; 32], epk: &[u8; 32], public: &[u8; 32]) -> aes_gcm::
 /// Seals `key` to the daemon whose public key is `public` (base64url), for `endpoint`: what the
 /// dashboard does in the browser (`agents-seal.ts`), for tests and tools.
 pub fn seal(public: &str, endpoint: &str, key: &str) -> anyhow::Result<SealedSecret> {
+    seal_with(public, &SealedSecret::context(endpoint), key)
+}
+
+/// [`seal`] with any associated data (see [`SealKey::open_with`]).
+pub fn seal_with(public: &str, context: &str, key: &str) -> anyhow::Result<SealedSecret> {
     let public: [u8; 32] = B64.decode(public)?.try_into().map_err(|_| anyhow::anyhow!("a seal key is 32 bytes"))?;
     let esk = Zeroizing::new(rand::random::<[u8; 32]>());
     let epk = MontgomeryPoint::mul_base_clamped(*esk).to_bytes();
     let shared = Zeroizing::new(MontgomeryPoint(public).mul_clamped(*esk).to_bytes());
     let nonce: [u8; 12] = rand::random();
-    let aad = SealedSecret::context(endpoint);
     let ct = box_cipher(&shared, &epk, &public)
-        .encrypt(&nonce.into(), Payload { msg: key.as_bytes(), aad: aad.as_bytes() })
+        .encrypt(&nonce.into(), Payload { msg: key.as_bytes(), aad: context.as_bytes() })
         .map_err(|_| anyhow::anyhow!("sealing failed"))?;
     Ok(SealedSecret { v: SEAL_VERSION, epk: B64.encode(epk), nonce: B64.encode(nonce), ct: B64.encode(ct) })
 }
@@ -310,6 +320,11 @@ pub fn codex_use(spec: &EndpointSpec, key: Option<&str>) -> Result<EndpointUse, 
         format!("model_providers.{id}.wire_api=\"responses\""),
         format!("model_providers.{id}.requires_openai_auth=false"),
     ];
+    if spec.kind == EndpointKind::Gateway {
+        // Each session's process names its thread and project (`gateway::attribution_env`).
+        use crate::gateway::{PROJECT_ENV, PROJECT_HEADER, THREAD_ENV, THREAD_HEADER};
+        set.push(format!("model_providers.{id}.env_http_headers={{{}={},{}={}}}", toml(THREAD_HEADER), toml(THREAD_ENV), toml(PROJECT_HEADER), toml(PROJECT_ENV)));
+    }
     let mut env = Vec::new();
     if let Some(k) = key {
         set.push(format!("model_providers.{id}.env_key={}", toml(CODEX_KEY_ENV)));

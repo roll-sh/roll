@@ -159,9 +159,12 @@ impl Host {
                         info.models.push(ModelInfo { via: Some(ep.spec.name.clone()), options, ..ModelInfo::new(m.id.clone(), name) });
                     }
                 }
-                if info.installed {
+                let down = ep.spec.kind == EndpointKind::Gateway && ep.spec.fallback && self.gateway_health.known_down(&ep.spec.base_url);
+                if info.installed && !down {
                     info.auth = AuthStatus::Ready;
-                    info.detail = Some(format!("via {}", ep.spec.name));
+                }
+                if info.installed {
+                    info.detail = Some(crate::gateway::status_detail(&ep.spec.name, down));
                 }
             }
             offered.push(info);
@@ -190,7 +193,7 @@ impl Host {
                 providers,
                 config_path: self.config.home.join("config.toml").display().to_string(),
                 endpoints: self.endpoint_infos(),
-                gateway: None,
+                gateway: self.gateway_info(),
             })),
             seal_key: Some(self.seal_key()),
         }
