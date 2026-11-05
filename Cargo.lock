@@ -4145,6 +4145,7 @@ dependencies = [
  "jsonwebtoken",
  "rand 0.8.8",
  "reqwest",
+ "rsa",
  "rusqlite",
  "serde",
  "serde_json",
