@@ -43,6 +43,7 @@ import {
   type Notice,
 } from "./automations-api";
 import { createLinearApi } from "./linear-api";
+import { createGatewayApi } from "./agents-gateway";
 import { ROLL_API } from "./roll-api";
 
 /** Milliseconds since the Unix epoch. */
@@ -666,8 +667,12 @@ export interface MachineInfo {
 
 // ── endpoints (docs/code/agents.md, "Endpoints"; agent-proto `endpoint.rs`) ──
 
-/** What an endpoint speaks: which variables a provider gets and how its models are listed. */
-export type EndpointKind = "anthropic" | "openai" | "cliproxy" | "custom";
+/**
+ * What an endpoint speaks: which variables a provider gets and how its models are listed.
+ * `gateway` is roll's model gateway on another of the owner's machines, set by the relay when a
+ * machine joins it (id `roll-gateway`; docs/code/gateway.md): the generic editor never edits it.
+ */
+export type EndpointKind = "anthropic" | "openai" | "cliproxy" | "custom" | "gateway";
 
 /** An endpoint as the owner sets it: everything but the key. */
 export interface EndpointSpec {
@@ -684,6 +689,8 @@ export interface EndpointSpec {
   key_env?: string;
   /** The key is read on the machine from 1Password (`op://vault/item/field`). */
   key_ref?: string;
+  /** When it doesn't answer as a provider's process starts, the provider starts on its own login or keys instead of failing. */
+  fallback?: boolean;
 }
 
 /** A key sealed to one daemon (`roll-seal-v1`; `agents-seal.ts`). The relay only ever sees this. */
@@ -730,6 +737,288 @@ export interface EndpointProfile extends EndpointSpec {
   updated_at: Millis;
 }
 
+// ── the model gateway (docs/code/gateway.md; agent-proto `gateway.rs`) ──
+
+/** The limits `GatewaySettings::check` holds settings to, and the queries' caps (agent-proto `gateway_limits`). */
+export const GATEWAY_LIMITS = {
+  id: 64,
+  name: 64,
+  url: 2048,
+  upstreams: 32,
+  routes: 256,
+  targets: 16,
+  models: 256,
+  model: 256,
+  listen: 8,
+  clients: 256,
+  headers: 16,
+  header: 1024,
+  logPage: 200,
+  usageRows: 5000,
+  /** The members' endpoint id on every machine that uses the gateway. */
+  endpointId: "roll-gateway",
+} as const;
+
+/** An API a request or an upstream speaks. */
+export type WireFormat = "messages" | "chat" | "responses";
+
+/** Who an upstream is: its URL, how it's authenticated, what it speaks. API keys and cloud credentials only. */
+export type UpstreamKind = "anthropic" | "openai" | "azure_openai" | "bedrock" | "vertex" | "openrouter" | "anthropic_compatible" | "openai_compatible";
+export const UPSTREAM_KINDS: readonly UpstreamKind[] = ["anthropic", "openai", "azure_openai", "bedrock", "vertex", "openrouter", "anthropic_compatible", "openai_compatible"];
+
+/** An upstream as the owner sets it: everything but its key. */
+export interface UpstreamSpec {
+  /** `[a-z0-9_-]`, at most 64; its sealed key is bound to it. */
+  id: string;
+  name: string;
+  kind: UpstreamKind;
+  base_url?: string;
+  /** Bedrock and Vertex. */
+  region?: string;
+  /** Vertex's project id. */
+  project?: string;
+  /** Exact, or a prefix ending in `*`; empty: what it lists. */
+  models?: string[];
+  /** `openai_compatible`: it speaks Responses too. */
+  responses?: boolean;
+  /** Sent with every request to it; never a key. */
+  headers?: [string, string][];
+  /** Its base URL may be a private, loopback or tailnet address. */
+  allow_private?: boolean;
+  /** The key is read on the gateway's machine from 1Password. */
+  key_ref?: string;
+  disabled?: boolean;
+}
+
+export interface RouteTarget {
+  upstream: string;
+  /** The model name to ask it for (unset: the client's). */
+  model?: string;
+}
+
+/** Where requests for a model go, the first healthy target serving. An alias renames the model. */
+export interface RouteSpec {
+  /** Exact, or a prefix ending in `*`. */
+  model: string;
+  targets: RouteTarget[];
+}
+
+/** A model's price over the built-in list, in micro-dollars per million tokens. */
+export interface ModelPrice {
+  model: string;
+  input: number;
+  output: number;
+  cache_read: number;
+  cache_write: number;
+}
+
+/** The gateway as the owner sets it on its machine (`gateway.configure` replaces it whole). No secrets. */
+export interface GatewaySettings {
+  enabled: boolean;
+  port: number;
+  /** IP literals besides loopback; never an unspecified address. */
+  listen?: string[];
+  /** In priority order. */
+  upstreams?: UpstreamSpec[];
+  routes?: RouteSpec[];
+  prices?: ModelPrice[];
+  /** Keep bodies in the request log (64 KiB each, a day). */
+  log_bodies?: boolean;
+  /** Unset: on. */
+  affinity?: boolean;
+  /** Days of usage kept; unset: 400. */
+  retention_days?: number;
+}
+
+export const GATEWAY_PORT = 8790;
+export const GATEWAY_RETENTION = 400;
+
+/** Where an upstream's key comes from (never any part of it). */
+export interface UpstreamKey {
+  upstream: string;
+  key: KeyState;
+}
+
+/** A client key (`rgk_…`): one per machine that uses the gateway. The gateway keeps only its hash. */
+export interface GatewayClient {
+  /** `gwc_…`. */
+  id: string;
+  name: string;
+  machine?: MachineId;
+  created_at: Millis;
+}
+
+export type GatewayRun =
+  | { state: "stopped" }
+  | { state: "running"; addresses: string[]; since: Millis }
+  /** It couldn't start; the daemon retries. Addresses it did bind are still served. */
+  | { state: "failed"; error: string; addresses?: string[] };
+
+/** The gateway as its daemon reports it (`MachineConfig.gateway`). */
+export interface GatewayInfo {
+  settings: GatewaySettings;
+  keys: UpstreamKey[];
+  clients: GatewayClient[];
+  run: GatewayRun;
+}
+
+export type CircuitState = "closed" | "open" | "half_open";
+
+/** An upstream's health (`gateway.status`). */
+export interface UpstreamHealth {
+  upstream: string;
+  circuit: CircuitState;
+  failures: number;
+  open_until?: Millis;
+  /** A 429's `retry-after`: nothing goes to it before this. */
+  cooling_until?: Millis;
+  last_ok_at?: Millis;
+  last_error?: string;
+  last_error_at?: Millis;
+  requests_hour: number;
+  /** Median time to the first byte over the last hour. */
+  p50_ms?: number;
+}
+
+export interface ClientSeen {
+  client: string;
+  at: Millis;
+}
+
+export interface GatewayStatus {
+  run: GatewayRun;
+  upstreams: UpstreamHealth[];
+  clients_seen: ClientSeen[];
+  /** What `GET /v1/models` offers. */
+  models: string[];
+}
+
+/** What `gateway.test` found for one upstream (it never generates). */
+export interface UpstreamCheck {
+  upstream: string;
+  ok: boolean;
+  ms: number;
+  models: number;
+  error?: string;
+}
+
+export type UsageBy = "model" | "machine" | "project" | "thread" | "upstream";
+export type UsageBucket = "hour" | "day";
+
+export interface UsageRow {
+  /** The bucket's start (UTC). */
+  at: Millis;
+  /** The group's key; empty when the request didn't say. */
+  key: string;
+  requests: number;
+  errors: number;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+  /** Micro-dollars from list prices: an estimate, not a bill. */
+  cost_micros: number;
+}
+
+export interface UsageReport {
+  by: UsageBy;
+  bucket: UsageBucket;
+  from: Millis;
+  to: Millis;
+  rows: UsageRow[];
+  /** More rows matched than the cap; the newest were kept. */
+  truncated?: boolean;
+}
+
+/** One upstream tried for a request. */
+export interface Attempt {
+  upstream: string;
+  model: string;
+  /** 0: no answer. */
+  status: number;
+  ms: number;
+  error?: string;
+}
+
+/** A request in the log; more than one attempt is a failover. */
+export interface LogEntry {
+  seq: number;
+  at: Millis;
+  client?: string;
+  machine?: MachineId;
+  project?: string;
+  thread?: string;
+  format: WireFormat;
+  model: string;
+  stream: boolean;
+  status: number;
+  ms: number;
+  first_byte_ms?: number;
+  attempts: Attempt[];
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+  cost_micros: number;
+  error?: string;
+  /** Its bodies were kept (`gateway.log.body`). */
+  has_body?: boolean;
+}
+
+export interface LogBody {
+  seq: number;
+  request: string;
+  response: string;
+  truncated?: boolean;
+}
+
+/** `gateway.client.issue`'s answer: the key sealed to the machine that asked (only ciphertext passes). */
+export interface IssuedClient {
+  client: GatewayClient;
+  sealed: SealedSecret;
+}
+
+/** A way members reach the gateway, labelled ("Tailscale", "Docker sandboxes"). */
+export interface GatewayUrl {
+  label: string;
+  url: string;
+}
+
+export interface GatewayMember {
+  machine: MachineId;
+  url: string;
+  /** Empty: every provider that can. */
+  providers?: ProviderId[];
+  /** Its client (`gwc_…`) on the host. */
+  client?: string;
+  joined_at: Millis;
+  /** Why joining last failed. */
+  error?: string;
+}
+
+/** The owner's gateway, kept on the relay (`/v1/code/agents/{owner}/gateway`): no keys. */
+export interface GatewayPlan {
+  host: MachineId;
+  /** The first is the default. */
+  urls?: GatewayUrl[];
+  members?: GatewayMember[];
+  /** New sandboxes join as they first say hello. */
+  new_sandboxes?: boolean;
+  /** Members' providers start on their own login or keys while the gateway doesn't answer. */
+  fallback?: boolean;
+  /** When the owner acknowledged the notice. */
+  acknowledged_at: Millis;
+  updated_at: Millis;
+}
+
+/** `POST …/gateway/members`. */
+export interface GatewayJoin {
+  machine: MachineId;
+  /** Unset: the plan's first URL. */
+  url?: string;
+  providers?: ProviderId[];
+}
+
 // ── machine settings (docs/code/agents.md, "Machine settings") ──
 
 /** A machine's settings as its daemon reports them: what the owner set, and what applies otherwise. */
@@ -744,6 +1033,8 @@ export interface MachineConfig {
   config_path: string;
   /** The endpoints set from roll, with whether each has a key (never the key). */
   endpoints?: EndpointInfo[];
+  /** roll's model gateway on this machine; unset: never set up here. */
+  gateway?: GatewayInfo;
 }
 
 export interface SettingsBase {
@@ -993,6 +1284,21 @@ export type Command =
   | { type: "endpoint.remove"; endpoint: string }
   /** Ask the endpoint for its models now (answers `endpoint_checked`). */
   | { type: "endpoint.check"; endpoint: string }
+  /** Set up, change, start or stop the gateway on this machine (replaced whole, applied live). */
+  | { type: "gateway.configure"; settings: GatewaySettings }
+  /** An upstream's key: sealed to this daemon (`sealUpstreamKey`), or cleared. */
+  | { type: "gateway.key"; upstream: string; key?: KeyChange }
+  /** Mint a client key sealed to `seal_key` (answers `gateway_client`); the relay sends it on joining. */
+  | { type: "gateway.client.issue"; name: string; machine?: MachineId; seal_key: string }
+  | { type: "gateway.client.revoke"; client: string }
+  /** Ask upstreams for their model lists (answers `gateway_tested`); never generates. */
+  | { type: "gateway.test"; upstream?: string }
+  | { type: "gateway.remove" }
+  | { type: "gateway.status" }
+  | { type: "gateway.usage"; from: Millis; to: Millis; by?: UsageBy; bucket?: UsageBucket }
+  /** Newest first: after `after` (the live tail) or before `before` (paging back). */
+  | { type: "gateway.log"; after?: number; before?: number; limit: number; errors?: boolean }
+  | { type: "gateway.log.body"; seq: number }
   | { type: "diff.get"; thread: ThreadId; run?: RunId }
   | { type: "fs.list"; project?: ProjectId; path: string }
   | { type: "fs.read"; project: ProjectId; path: string }
@@ -1004,7 +1310,7 @@ export type Command =
 export type CommandType = Command["type"];
 
 /** Queries only answer; they never change state. */
-export const QUERIES: readonly CommandType[] = ["diff.get", "fs.list", "fs.read", "git.status", "terminal.scrollback"];
+export const QUERIES: readonly CommandType[] = ["diff.get", "fs.list", "fs.read", "git.status", "terminal.scrollback", "gateway.status", "gateway.usage", "gateway.log", "gateway.log.body"];
 
 export interface CommandRequest {
   /** The idempotency key: retrying with the same id never runs the command twice. */
@@ -1069,6 +1375,12 @@ export type Reply =
   | ({ type: "cleaned" } & CleanupReport)
   | { type: "scrollback"; data: string }
   | ({ type: "endpoint_checked" } & EndpointCheck)
+  | ({ type: "gateway_client" } & IssuedClient)
+  | { type: "gateway_tested"; checks: UpstreamCheck[] }
+  | ({ type: "gateway_status" } & GatewayStatus)
+  | ({ type: "gateway_usage" } & UsageReport)
+  | { type: "gateway_log"; entries: LogEntry[] }
+  | ({ type: "gateway_log_body" } & LogBody)
   | { type: "error"; code: ErrorCode; message: string };
 
 // ── deltas and the stream ──
@@ -1658,7 +1970,7 @@ const machineSettingsD = obj<MachineSettings>({
   git_email: optional(str),
   idle_compaction: optional(idleCompactionD),
 });
-const endpointKindD = literal("anthropic", "openai", "cliproxy", "custom");
+const endpointKindD = literal("anthropic", "openai", "cliproxy", "custom", "gateway");
 const endpointSpecFields = {
   id: str,
   name: str,
@@ -1668,6 +1980,7 @@ const endpointSpecFields = {
   url_env: optional(str),
   key_env: optional(str),
   key_ref: optional(str),
+  fallback: optional(bool),
 };
 const endpointSpecD = obj<EndpointSpec>(endpointSpecFields);
 const sealedSecretD = obj<SealedSecret>({ v: int, epk: str, nonce: str, ct: str });
@@ -1685,6 +1998,126 @@ const endpointInfoD = obj<EndpointInfo>({
 });
 const endpointCheckD = obj<EndpointCheck>({ ok: bool, models: withDefault(int, () => 0), ms: withDefault(int, () => 0), error: optional(str) });
 export const endpointProfileD = obj<EndpointProfile>({ ...endpointSpecFields, sandbox_default: optional(bool), updated_at: withDefault(int, () => 0) });
+
+// The gateway's (agent-proto `gateway.rs`). What Rust skips when empty stays `undefined`, so
+// `gateway.configure` serializes back exactly.
+const pairD: Decoder<[string, string]> = (v, p, ctx) => {
+  if (!Array.isArray(v) || v.length !== 2) throw new DecodeError(p, "expected a [name, value] pair");
+  return [str(v[0], `${p}[0]`, ctx), str(v[1], `${p}[1]`, ctx)];
+};
+const upstreamKindD = literal(...UPSTREAM_KINDS);
+const upstreamSpecD = obj<UpstreamSpec>({
+  id: str,
+  name: str,
+  kind: upstreamKindD,
+  base_url: optional(str),
+  region: optional(str),
+  project: optional(str),
+  models: optional(array(str)),
+  responses: optional(bool),
+  headers: optional(array(pairD)),
+  allow_private: optional(bool),
+  key_ref: optional(str),
+  disabled: optional(bool),
+});
+const routeSpecD = obj<RouteSpec>({ model: str, targets: array(obj<RouteTarget>({ upstream: str, model: optional(str) })) });
+const modelPriceD = obj<ModelPrice>({ model: str, input: int, output: int, cache_read: withDefault(int, () => 0), cache_write: withDefault(int, () => 0) });
+export const gatewaySettingsD = obj<GatewaySettings>({
+  enabled: withDefault(bool, () => false),
+  port: withDefault(int, () => GATEWAY_PORT),
+  listen: optional(array(str)),
+  upstreams: optional(array(upstreamSpecD)),
+  routes: optional(array(routeSpecD)),
+  prices: optional(array(modelPriceD)),
+  log_bodies: optional(bool),
+  affinity: optional(bool),
+  retention_days: optional(int),
+});
+const gatewayRunD: Decoder<GatewayRun> = withDefault(
+  tagged("state", {
+    stopped: obj<object>({}),
+    running: obj<{ addresses: string[]; since: Millis }>({ addresses: vec(str), since: int }),
+    failed: obj<{ error: string; addresses?: string[] }>({ error: str, addresses: optional(array(str)) }),
+  } satisfies Record<GatewayRun["state"], Decoder<object>>),
+  () => ({ state: "stopped" as const }),
+);
+const keyStateD = literal("none", "sealed", "reference");
+const gatewayClientD = obj<GatewayClient>({ id: str, name: str, machine: optional(str), created_at: int });
+const gatewayInfoD = obj<GatewayInfo>({
+  settings: gatewaySettingsD,
+  keys: vec(obj<UpstreamKey>({ upstream: str, key: keyStateD })),
+  clients: vec(gatewayClientD),
+  run: gatewayRunD,
+});
+const upstreamHealthD = obj<UpstreamHealth>({
+  upstream: str,
+  circuit: literal("closed", "open", "half_open"),
+  failures: withDefault(int, () => 0),
+  open_until: optional(int),
+  cooling_until: optional(int),
+  last_ok_at: optional(int),
+  last_error: optional(str),
+  last_error_at: optional(int),
+  requests_hour: withDefault(int, () => 0),
+  p50_ms: optional(int),
+});
+const gatewayStatusD = obj<GatewayStatus>({
+  run: gatewayRunD,
+  upstreams: array(upstreamHealthD),
+  clients_seen: vec(obj<ClientSeen>({ client: str, at: int })),
+  models: vec(str),
+});
+const upstreamCheckD = obj<UpstreamCheck>({ upstream: str, ok: bool, ms: withDefault(int, () => 0), models: withDefault(int, () => 0), error: optional(str) });
+const usageByD = literal("model", "machine", "project", "thread", "upstream");
+const usageBucketD = literal("hour", "day");
+const zero = withDefault(int, () => 0);
+const usageRowD = obj<UsageRow>({
+  at: int,
+  key: str,
+  requests: int,
+  errors: zero,
+  input_tokens: int,
+  output_tokens: int,
+  cache_read_tokens: zero,
+  cache_write_tokens: zero,
+  cost_micros: int,
+});
+const usageReportD = obj<UsageReport>({ by: usageByD, bucket: usageBucketD, from: int, to: int, rows: array(usageRowD), truncated: optional(bool) });
+const attemptD = obj<Attempt>({ upstream: str, model: str, status: int, ms: int, error: optional(str) });
+export const logEntryD = obj<LogEntry>({
+  seq: int,
+  at: int,
+  client: optional(str),
+  machine: optional(str),
+  project: optional(str),
+  thread: optional(str),
+  format: literal("messages", "chat", "responses"),
+  model: str,
+  stream: bool,
+  status: int,
+  ms: int,
+  first_byte_ms: optional(int),
+  attempts: vec(attemptD),
+  input_tokens: zero,
+  output_tokens: zero,
+  cache_read_tokens: zero,
+  cache_write_tokens: zero,
+  cost_micros: zero,
+  error: optional(str),
+  has_body: optional(bool),
+});
+const logBodyD = obj<LogBody>({ seq: int, request: str, response: str, truncated: optional(bool) });
+const gatewayMemberD = obj<GatewayMember>({ machine: str, url: str, providers: optional(array(str)), client: optional(str), joined_at: int, error: optional(str) });
+export const gatewayPlanD = obj<GatewayPlan>({
+  host: str,
+  urls: optional(array(obj<GatewayUrl>({ label: str, url: str }))),
+  members: optional(array(gatewayMemberD)),
+  new_sandboxes: optional(bool),
+  fallback: optional(bool),
+  acknowledged_at: withDefault(int, () => 0),
+  updated_at: withDefault(int, () => 0),
+});
+export const gatewayJoinD = obj<GatewayJoin>({ machine: str, url: optional(str), providers: optional(array(str)) });
 const machineConfigD = obj<MachineConfig>({
   set: machineSettingsD,
   base: obj<SettingsBase>({
@@ -1700,6 +2133,7 @@ const machineConfigD = obj<MachineConfig>({
   providers: array(obj<ProviderBase>({ id: str, name: str, binary: opt(str), args: withDefault(int, () => 0), env: vec(str) })),
   config_path: str,
   endpoints: optional(array(endpointInfoD)),
+  gateway: optional(gatewayInfoD),
 });
 const machineInfoD = obj<MachineInfo>({
   hostname: str,
@@ -1808,6 +2242,16 @@ export const commandD: Decoder<Command> = tagged("type", {
   "endpoint.set": cmd<"endpoint.set">(obj({ endpoint: endpointSpecD, key: optional(keyChangeD) })),
   "endpoint.remove": cmd<"endpoint.remove">(obj({ endpoint: str })),
   "endpoint.check": cmd<"endpoint.check">(obj({ endpoint: str })),
+  "gateway.configure": cmd<"gateway.configure">(obj({ settings: gatewaySettingsD })),
+  "gateway.key": cmd<"gateway.key">(obj({ upstream: str, key: optional(keyChangeD) })),
+  "gateway.client.issue": cmd<"gateway.client.issue">(obj({ name: str, machine: optional(str), seal_key: str })),
+  "gateway.client.revoke": cmd<"gateway.client.revoke">(obj({ client: str })),
+  "gateway.test": cmd<"gateway.test">(obj({ upstream: optional(str) })),
+  "gateway.remove": cmd<"gateway.remove">(obj({})),
+  "gateway.status": cmd<"gateway.status">(obj({})),
+  "gateway.usage": cmd<"gateway.usage">(obj({ from: int, to: int, by: optional(usageByD), bucket: optional(usageBucketD) })),
+  "gateway.log": cmd<"gateway.log">(obj({ after: optional(int), before: optional(int), limit: withDefault(int, () => 0), errors: optional(bool) })),
+  "gateway.log.body": cmd<"gateway.log.body">(obj({ seq: int })),
   "diff.get": cmd<"diff.get">(obj({ thread: str, run: optional(str) })),
   "fs.list": cmd<"fs.list">(obj({ project: optional(str), path: str })),
   "fs.read": cmd<"fs.read">(obj({ project: str, path: str })),
@@ -1840,6 +2284,12 @@ export const replyD: Decoder<Reply> = tagged("type", {
   scrollback: obj<{ data: string }>({ data: str }),
   written: obj<{ path: string }>({ path: str }),
   endpoint_checked: endpointCheckD,
+  gateway_client: obj<IssuedClient>({ client: gatewayClientD, sealed: sealedSecretD }),
+  gateway_tested: obj<{ checks: UpstreamCheck[] }>({ checks: array(upstreamCheckD) }),
+  gateway_status: gatewayStatusD,
+  gateway_usage: usageReportD,
+  gateway_log: obj<{ entries: LogEntry[] }>({ entries: array(logEntryD) }),
+  gateway_log_body: logBodyD,
   pulled: pullResultD,
   cleaned: obj<CleanupReport>({ removed: array(str), kept: array(obj<{ thread: string; reason: KeptReason }>({ thread: str, reason: keptReasonD })) }),
   error: obj<{ code: ErrorCode; message: string }>({
@@ -2084,6 +2534,8 @@ export function createAgentsApi(
     integrations: createIntegrationsApi(call),
     /** `/v1/code/agents/{owner}/linear…` (`linear-api.ts`). */
     linear: createLinearApi(call),
+    /** The owner's model gateway plan and its members (docs/code/gateway.md; `agents-gateway.ts`). */
+    gateway: createGatewayApi(call),
     /** The fetch this client uses (the event stream follows it too). */
     fetch: doFetch,
     state: async (owner: string, threads: readonly string[] = []) =>

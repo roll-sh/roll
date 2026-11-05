@@ -4,6 +4,7 @@ import { ChevronRight, Cloud, KeyRound, Laptop, X } from "lucide-react";
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import type { EndpointProfile, Machine } from "@/lib/agents-api";
+import { NewSandboxGatewayNotice } from "./gateway/machine";
 import { KIND_LABEL } from "@/lib/agents-endpoints";
 import { formatHourly, type SandboxSize } from "@/lib/sandboxes-api";
 import { CopyButton, input, primary, useCopy } from "../ui";
@@ -246,6 +247,7 @@ function RentSandbox({ onCreated, dialog }: { onCreated?: (m: Machine) => void; 
             {profile && <p className="text-[11.5px] text-subtle">Set once the sandbox connects{profile.key_ref ? ", its key read from 1Password there" : ", the key sealed to it in your browser"}.</p>}
           </div>
         )}
+        <NewSandboxGatewayNotice />
         <div className="flex items-center gap-2">
           <button type="submit" className={primary} disabled={busy || full || !chosen}>
             {busy ? <span className="shimmer">Renting…</span> : `Rent for ${formatHourly(chosen?.hourly_cents ?? 0)}`}

@@ -5,6 +5,7 @@
  * `#agents/settings/owner`, ⌘,): what follows the user to every device, T3 Code's client settings
  * that roll has a use for (`SettingsPanels.tsx` there: General, Chat, Threads, Keybindings), the
  * way to each machine's own settings, the owner's endpoint profiles (`endpoint-settings.tsx`), the
+ * owner's model gateway (`gateway/section.tsx`), the
  * owner's Slack, Discord and GitHub (`integrations.tsx`),
  * and its Linear workspace (`linear-settings.tsx`). Saved by roll per owner
  * (`AgentsServices.settings`), so other devices change too; each change saves at once, as in T3.
@@ -19,6 +20,7 @@ import { DEFAULT_OWNER_SETTINGS, RESTORABLE, type NotifyMode, type OwnerSettings
 import { INTEGRATION_SETTINGS, IntegrationsSection } from "./integrations";
 import { LINEAR_SETTINGS, LinearSettingsSection } from "./linear-settings";
 import { ENDPOINT_SETTINGS, EndpointProfilesSection } from "./endpoint-settings";
+import { GATEWAY_SETTINGS, GatewaySection } from "./gateway/section";
 import { DefaultsRows } from "./machine-settings";
 import { SaveState, SettingRow, SettingsPage, SettingsSection, useSearching, type Setting } from "./settings-ui";
 import { MachineIcon } from "./identity";
@@ -105,6 +107,7 @@ export function OwnerSettingsPanel({ onClose }: { onClose: () => void }) {
       S.workspace,
       ...machines.map((m) => ({ id: `machine.${m.id}`, title: m.name, section: "Machines", terms: ["machine settings", "providers", m.info?.os ?? "", m.sandbox ? "sandbox" : "computer"] })),
       ...(services ? [ENDPOINT_SETTINGS.owner] : []),
+      ...(services?.gateway ? Object.values(GATEWAY_SETTINGS) : []),
       ...(services ? Object.values(INTEGRATION_SETTINGS) : []),
       ...(services ? LINEAR_SETTINGS : []),
       S.keyboard,
@@ -205,6 +208,7 @@ export function OwnerSettingsPanel({ onClose }: { onClose: () => void }) {
           <EndpointProfilesSection />
         </SettingsSection>
       )}
+      {services?.gateway && <GatewaySection />}
       {services && <IntegrationsSection owner={owner} api={services.integrations} />}
       <LinearSettingsSection />
       <SettingsSection title="Keyboard" ids={[S.keyboard.id]}>

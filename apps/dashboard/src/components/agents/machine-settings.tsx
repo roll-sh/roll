@@ -30,6 +30,7 @@ import {
 import { customModelError, envNameError, parseAutoCompact, settingsError, withFields, withProvider } from "@/lib/machine-settings";
 import { setAgentsView } from "@/lib/agents-surface";
 import { ENDPOINT_SETTINGS, MachineEndpoints, ProviderEndpointRow, providerEndpointSetting, type EndpointEdit } from "./endpoint-settings";
+import { GATEWAY_MACHINE_SETTING, GatewayMachineCard, ProviderGatewayNote } from "./gateway/machine";
 import { endpointOf } from "@/lib/agents-endpoints";
 import { ModelPicker } from "./model-picker";
 import { ProviderLogo } from "./provider-logo";
@@ -150,6 +151,7 @@ function items(config: MachineConfig | null, sandbox: boolean): Setting[] {
     S.idle,
     ...providers.flatMap(providerRows),
     ENDPOINT_SETTINGS.machine,
+    GATEWAY_MACHINE_SETTING,
     S.model,
     S.permissions,
     S.mode,
@@ -275,6 +277,7 @@ export function MachineSettingsPanel({ machine, onClose }: { machine: Machine; o
       <SettingsSection title="Endpoints" ids={[ENDPOINT_SETTINGS.machine.id]}>
         <MachineEndpoints machine={machine} editing={endpointEdit} onEdit={setEndpointEdit} />
       </SettingsSection>
+      <GatewayMachineCard machine={machine} />
       <NewThreads ctx={ctx} />
       <SettingsSection title="Worktrees" ids={[S.worktreeDir.id, S.branchPrefix.id]}>
         <SettingRow
@@ -557,6 +560,11 @@ function ProviderCard({ ctx, base, info }: { ctx: Ctx; base: ProviderBase; info:
         </button>
       </div>
       {p.enabled && info && <UsageLimitBars info={info} className="pb-3 pl-[50px] pr-[86px]" />}
+      {p.enabled && via?.kind === "gateway" && (
+        <div className="pb-3 pl-[50px] pr-3.5">
+          <ProviderGatewayNote machine={ctx.machine} provider={base.id} />
+        </div>
+      )}
       {expanded && (
         <div className="mx-3.5 mb-3 divide-y divide-line overflow-hidden rounded-lg border border-line-2 bg-panel-2">
           <ProviderEndpointRow machine={ctx.machine} provider={base} onNew={() => ctx.editEndpoint({ provider: base.id })} />

@@ -28,6 +28,7 @@ import {
 import { ApiError, codeApi, type Repo } from "./code-api";
 import { checkEndpoint, ENDPOINT_LIMITS } from "./agents-endpoints";
 import type { AutomationsApi } from "./automations-api";
+import type { GatewayApi } from "./agents-gateway";
 import type { IntegrationsApi } from "./integrations-api";
 import type { LinearApi } from "./linear-api";
 import { sandboxesApi, type SandboxesApi } from "./sandboxes-api";
@@ -76,6 +77,8 @@ export interface AgentsServices {
   linear: LinearApi;
   /** The owner's endpoint profiles, kept by roll without a key (docs/code/agents.md, "Endpoints"). */
   endpoints: EndpointProfiles;
+  /** The owner's model gateway plan (docs/code/gateway.md); unset: the Gateway section says it isn't here. */
+  gateway?: GatewayApi;
 }
 
 /** An owner's endpoint profiles: oldest first; `save` replaces by id, and its `sandbox_default` takes it off the others. */
@@ -204,6 +207,7 @@ export function httpServices(
     integrations: api.integrations,
     linear: api.linear,
     endpoints: { list: api.endpoints, save: api.saveEndpoint, remove: api.removeEndpoint },
+    gateway: api.gateway,
   };
 }
 
