@@ -3,10 +3,14 @@
 import { ChevronRight, Cloud, KeyRound, Laptop, X } from "lucide-react";
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
-import type { Machine } from "@/lib/agents-api";
+import type { EndpointProfile, Machine } from "@/lib/agents-api";
+import { KIND_LABEL } from "@/lib/agents-endpoints";
 import { formatHourly, type SandboxSize } from "@/lib/sandboxes-api";
 import { CopyButton, input, primary, useCopy } from "../ui";
+import { useAutomationsStore } from "./automations/shared";
 import { apiFlag, useInstallLine } from "./connect";
+import { applyWhenReady, type PendingApply } from "./endpoint-settings";
+import { Select } from "./ui";
 import { useAgents } from "./use-agents";
 
 /** Provider keys a sandbox can be given at create (passed to the sandbox only, never shown again). */
@@ -28,13 +32,15 @@ export function sandboxEnv(keys: Record<string, string>): Record<string, string>
 /**
  * The two ways to get a machine on the canvas, side by side: connect your own computer, or rent a
  * sandbox roll hosts. `onCreated` gets a new sandbox's machine (it's on the canvas at once,
- * pulsing while it boots).
+ * pulsing while it boots); with an endpoint profile picked, once the profile is set on it.
+ * `dialog`: closing it is the user's (an endpoint still waiting for the sandbox is given up, with a
+ * notice); elsewhere the wait goes on after the paths go away (the canvas replaces them).
  */
-export function AddMachinePaths({ onCreated }: { onCreated?: (m: Machine) => void }) {
+export function AddMachinePaths({ onCreated, dialog = false }: { onCreated?: (m: Machine) => void; dialog?: boolean }) {
   return (
     <div className="grid gap-3 text-left sm:grid-cols-2">
       <ConnectComputer />
-      <RentSandbox onCreated={onCreated} />
+      <RentSandbox onCreated={onCreated} dialog={dialog} />
     </div>
   );
 }
@@ -82,8 +88,9 @@ function ConnectComputer() {
   );
 }
 
-function RentSandbox({ onCreated }: { onCreated?: (m: Machine) => void }) {
+function RentSandbox({ onCreated, dialog }: { onCreated?: (m: Machine) => void; dialog: boolean }) {
   const { owner, services, sandboxes, client } = useAgents();
+  const notices = useAutomationsStore();
   const list = sandboxes?.list ?? null;
   const [size, setSize] = useState<string | null>(null);
   const [name, setName] = useState("");
@@ -91,11 +98,54 @@ function RentSandbox({ onCreated }: { onCreated?: (m: Machine) => void }) {
   const [keys, setKeys] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const profiles = useProfiles();
+  const [picked, setPicked] = useState<string | null>(null);
+  const [endpointKey, setEndpointKey] = useState("");
+  const [pending, setPending] = useState<{ machine: Machine; profile: EndpointProfile; state: PendingApply } | null>(null);
+  const cancel = useRef<(() => boolean) | null>(null);
+  const mounted = useRef(true);
+  const pendingRef = useRef(pending);
+  pendingRef.current = pending;
   const chosen = list?.sizes.find((s) => s.name === size) ?? list?.sizes[0];
   const used = list?.sandboxes.length ?? 0;
   const full = list ? used >= list.max : false;
+  // None, or the profile marked the default for new sandboxes, until one is picked.
+  const profileId = picked ?? profiles?.find((p) => p.sandbox_default)?.id ?? NONE;
+  const profile = profiles?.find((p) => p.id === profileId) ?? null;
+
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      // Closing the dialog gives up an endpoint still waiting for its sandbox; say so, quietly.
+      const p = pendingRef.current;
+      if (dialog && p && cancel.current?.()) {
+        notices?.local({ level: "info", title: `${p.profile.name} wasn't set on ${p.machine.name}`, body: "Apply it from the machine's settings once it's up.", link: `#agents/settings/m:${p.machine.id}` });
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  /** Set the profile on the new sandbox once it says hello (`applyWhenReady`), the key sealed then. */
+  const applyLater = (m: Machine, p: EndpointProfile, key: string | undefined) => {
+    setPending({ machine: m, profile: p, state: { state: "waiting" } });
+    cancel.current = applyWhenReady(client, m.id, p, key, (state) => {
+      if (mounted.current) {
+        setPending({ machine: m, profile: p, state });
+        if (state.state === "done") onCreated?.(state.machine);
+      } else if (state.state !== "waiting" && state.state !== "applying") {
+        // The paths went away (the canvas took their place): the outcome is a notice.
+        notices?.local(
+          state.state === "done"
+            ? { level: "success", title: `${p.name} is set on ${m.name}` }
+            : { level: "warning", title: `${p.name} wasn't set on ${m.name}`, body: state.state === "failed" ? state.error : "It didn't connect in time: apply it from the machine's settings.", link: `#agents/settings/m:${m.id}` },
+        );
+      }
+    });
+  };
 
   const lead = "An always-on machine roll hosts for you, with Claude Code and Codex installed. Log the providers in from the canvas, or give it API keys.";
+  if (pending) return <Applying pending={pending} onDone={() => onCreated?.(pending.machine)} />;
   if (!services || (!list && !sandboxes?.error))
     return (
       <Path icon={<Cloud className="size-4 text-muted" />} title="Rent a sandbox" lead={lead}>
@@ -125,10 +175,14 @@ function RentSandbox({ onCreated }: { onCreated?: (m: Machine) => void }) {
           try {
             const r = await services.sandboxes.create(owner, { name: name.trim() || undefined, size: chosen.name, env: sandboxEnv(keys) });
             setKeys({});
+            // The key waits in the wait's closure only, until the sandbox's seal key comes.
+            const key = profile && !profile.key_ref ? endpointKey.trim() || undefined : undefined;
+            setEndpointKey("");
             // On the canvas at once; the stream keeps it up to date from here.
             client.enqueue({ type: "machine", cursor: 0, machine: r.machine });
             sandboxes?.reload();
-            onCreated?.(r.machine);
+            if (profile) applyLater(r.machine, profile, key);
+            else onCreated?.(r.machine);
           } catch (err) {
             setError(err instanceof Error ? err.message : String(err));
           } finally {
@@ -164,6 +218,34 @@ function RentSandbox({ onCreated }: { onCreated?: (m: Machine) => void }) {
             <KeyRound className="size-3.5" /> Add provider API keys (optional)
           </button>
         )}
+        {profiles && profiles.length > 0 && (
+          <div className="space-y-1.5" role="group" aria-label="Endpoint">
+            <div className="flex items-center gap-2">
+              <span className="shrink-0 text-[12px] text-muted">Endpoint</span>
+              <Select
+                label="Endpoint"
+                className="min-w-0 flex-1"
+                value={profileId}
+                onChange={setPicked}
+                options={[{ value: NONE, label: "None" }, ...profiles.map((p) => ({ value: p.id, label: p.name, hint: p.sandbox_default ? "default" : KIND_LABEL[p.kind] }))]}
+              />
+            </div>
+            {profile && !profile.key_ref && (
+              <input
+                type="password"
+                autoComplete="off"
+                spellCheck={false}
+                value={endpointKey}
+                onChange={(e) => setEndpointKey(e.target.value)}
+                placeholder={`Key for ${profile.name} (optional)`}
+                aria-label="Endpoint key"
+                data-1p-ignore
+                className={`${input} w-full font-mono text-[12px]`}
+              />
+            )}
+            {profile && <p className="text-[11.5px] text-subtle">Set once the sandbox connects{profile.key_ref ? ", its key read from 1Password there" : ", the key sealed to it in your browser"}.</p>}
+          </div>
+        )}
         <div className="flex items-center gap-2">
           <button type="submit" className={primary} disabled={busy || full || !chosen}>
             {busy ? <span className="shimmer">Renting…</span> : `Rent for ${formatHourly(chosen?.hourly_cents ?? 0)}`}
@@ -175,6 +257,56 @@ function RentSandbox({ onCreated }: { onCreated?: (m: Machine) => void }) {
         {full && <p className="text-[12px] text-muted">You have as many sandboxes as you can. Delete one to rent another.</p>}
         {error && <p className="text-[12px] text-danger">{error}</p>}
       </form>
+    </Path>
+  );
+}
+
+const NONE = "__none";
+
+/** The owner's endpoint profiles, for the new-sandbox form (`null` while loading or when they can't be read). */
+function useProfiles(): EndpointProfile[] | null {
+  const { owner, services } = useAgents();
+  const [profiles, setProfiles] = useState<EndpointProfile[] | null>(null);
+  useEffect(() => {
+    let live = true;
+    services?.endpoints
+      .list(owner)
+      .then((ps) => live && setProfiles(ps))
+      .catch(() => live && setProfiles(null));
+    return () => {
+      live = false;
+    };
+  }, [services, owner]);
+  return profiles;
+}
+
+/** A new sandbox waiting to take its endpoint: "Setting up CLIProxyAPI…", then how it went. */
+function Applying({ pending: { machine, profile, state }, onDone }: { pending: { machine: Machine; profile: EndpointProfile; state: PendingApply }; onDone: () => void }) {
+  const stuck = state.state === "failed" || state.state === "timeout";
+  return (
+    <Path icon={<Cloud className="size-4 text-muted" />} title="Rent a sandbox" lead={`${machine.name} is on the canvas, starting up.`}>
+      <div className="space-y-2 rounded-lg border border-line bg-panel-2 px-3 py-2.5 text-[12.5px]" role="status" aria-label="Setting up the endpoint">
+        {stuck ? (
+          <p className="text-danger">{state.state === "failed" ? state.error : `${machine.name} didn't connect within 3 minutes.`}</p>
+        ) : (
+          <p className="flex items-center gap-2">
+            <span className="size-1.5 shrink-0 animate-pulse rounded-full bg-accent motion-reduce:animate-none" aria-hidden />
+            <span className="shimmer">Setting up {profile.name}…</span>
+          </p>
+        )}
+        <p className="text-[11.5px] text-subtle">
+          {stuck
+            ? `Apply ${profile.name} from ${machine.name}'s settings once it's up.`
+            : state.state === "waiting"
+              ? `Waiting for ${machine.name} to connect (up to 3 minutes), then the endpoint is set on it.`
+              : `Sealing the key to ${machine.name} and setting ${profile.name}.`}
+        </p>
+      </div>
+      {stuck && (
+        <button type="button" onClick={onDone} className={`${primary} self-start`}>
+          Go to {machine.name}
+        </button>
+      )}
     </Path>
   );
 }
@@ -225,7 +357,7 @@ export function AddMachineDialog({ onClose, onCreated }: { onClose: () => void; 
             <X className="size-4" strokeWidth={1.75} />
           </button>
         </div>
-        <AddMachinePaths onCreated={onCreated} />
+        <AddMachinePaths onCreated={onCreated} dialog />
       </div>
     </div>
   );

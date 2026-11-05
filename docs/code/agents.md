@@ -933,6 +933,22 @@ the owner's own, set on the owner's own machines, and a sandbox is one owner's m
 - **Who**: the owner (`Code::manages`); agent tokens can't set, remove or check endpoints, or change
   profiles (`agents/policy.rs`, `agents/endpoints.rs`); they can read profiles.
 
+**In the dashboard** (`components/agents/endpoint-settings.tsx`): machine settings have an
+Endpoints section (`MachineEndpoints`: each endpoint's kind, URL, providers, key state, models and
+last check, with Check, Edit, Replace or Remove the key, and Remove after asking) and an Endpoint
+row in each provider's card (`ProviderEndpointRow`: its own login, a compatible endpoint, or New
+endpoint…; switching sends `endpoint.set` with `key: keep`). The editor (`EndpointEditor`) checks
+the spec with `checkEndpoint` before sending and shows the daemon's `invalid`; a provider that can't
+speak the kind is disabled with the reason; the key field is a password field, swapped for an
+`op://` reference by "From 1Password", and emptied once sent. An old daemon (no seal key) or an
+offline computer is read-only; an asleep sandbox stays editable (a command wakes it). Owner settings
+list the profiles (`EndpointProfilesSection`: the editor without a key, "Default for new
+sandboxes", and Apply to machines…, which takes the key once and seals it to each picked machine).
+The new-sandbox dialog (`add-machine.tsx`) offers the profiles, the default picked, waits up to
+three minutes for the sandbox's seal key ("Setting up CLIProxyAPI…", `applyWhenReady`), then
+applies it; closed first, a quiet notice says it wasn't applied. The model picker tags endpoint
+models "via <name>".
+
 ## Owner settings
 
 What follows the user to every device (T3's client settings that roll has a use for) is one

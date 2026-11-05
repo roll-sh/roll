@@ -178,6 +178,12 @@ export class AutomationsStore {
     this.notices.add(fn);
     return () => void this.notices.delete(fn);
   }
+
+  /** A notice the dashboard raises itself (not a `notify` step's), shown with theirs. */
+  local(n: Pick<Notice, "title" | "level"> & Partial<Pick<Notice, "body" | "link">>) {
+    const notice: Notice = { id: `local-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, link: null, automation: null, run: null, at: Date.now(), ...n };
+    for (const fn of this.notices) fn(notice);
+  }
 }
 
 const stores = new WeakMap<AgentsClient, AutomationsStore>();

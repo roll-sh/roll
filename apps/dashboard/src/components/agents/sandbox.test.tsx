@@ -1,11 +1,12 @@
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
-import type { Machine } from "@/lib/agents-api";
+import type { EndpointProfile, Machine } from "@/lib/agents-api";
 import type { Sandbox } from "@/lib/sandboxes-api";
+import { AddMachineDialog } from "./add-machine";
 import { MachineNode } from "./nodes";
 import type { SandboxesState } from "./sandbox";
-import { machine, mirrored, project, provider, T0 } from "@/test/agents";
+import { machine, machineConfig, mirrored, project, provider, SEAL_KEY, T0 } from "@/test/agents";
 import { agentsHarness, fakeServices, renderAgents, SIZE } from "@/test/agents-render";
 
 const sb = (over: Partial<Sandbox> = {}): Sandbox => ({
@@ -175,5 +176,79 @@ describe("MachineNode", () => {
     expect(within(checking).getByText("Checking…")).toBeInTheDocument();
     expect(within(checking).getByText("Grok Build").className).toContain("shimmer");
     expect(within(list).getByLabelText("Logged in")).toBeInTheDocument();
+  });
+});
+
+describe("the new-sandbox dialog's endpoint", () => {
+  const KEY = "sk-sandbox-never-shown-71";
+  const PROFILE: EndpointProfile = { id: "cliproxy", name: "CLIProxyAPI", kind: "cliproxy", base_url: "http://proxy.local:8317", providers: ["claude", "codex", "acp:gemini"], sandbox_default: true, updated_at: T0 };
+  const booting = machine({ id: "mch_new", name: "scratch", online: false, info: null, sandbox: { backend: "docker", size: "standard", status: "creating", hourly_cents: 3 } });
+  const up = machine({
+    ...booting,
+    online: true,
+    sandbox: { backend: "docker", size: "standard", status: "running", hourly_cents: 3 },
+    info: { ...machine().info!, hostname: "scratch", seal_key: SEAL_KEY, providers: [provider(), provider({ id: "codex", name: "Codex" })], settings: machineConfig() },
+  });
+
+  function rent(seed: EndpointProfile[] = [PROFILE]) {
+    const create = vi.fn(async () => ({ sandbox: sb({ machine: "mch_new", name: "scratch", status: "creating" }), machine: booting }));
+    const services = fakeServices({ sandboxes: { create }, endpoints: { seed } });
+    const h = agentsHarness({ machines: [machine()], ctx: { services, sandboxes: { ...state(sb()), list: { sandboxes: [], sizes: [SIZE], max: 5, backend: "docker" } } } });
+    const onCreated = vi.fn();
+    const view = renderAgents(<AddMachineDialog onClose={vi.fn()} onCreated={onCreated} />, h);
+    return { h, onCreated, create, view };
+  }
+  const sets = (h: ReturnType<typeof agentsHarness>) => h.command.mock.calls.filter((c) => c[2].type === "endpoint.set");
+
+  it("picks the sandbox default, then applies it with the sealed key once the machine's seal key arrives", async () => {
+    const { h, onCreated, create } = rent();
+    const rentBox = screen.getByRole("region", { name: "Rent a sandbox" });
+    expect(await within(rentBox).findByRole("combobox", { name: "Endpoint" })).toHaveTextContent("CLIProxyAPI");
+    const key = within(rentBox).getByLabelText("Endpoint key");
+    expect(key).toHaveAttribute("type", "password");
+    expect(key).toHaveAttribute("autocomplete", "off");
+    await userEvent.type(key, KEY);
+    await userEvent.click(within(rentBox).getByRole("button", { name: /^Rent for/ }));
+    await waitFor(() => expect(create).toHaveBeenCalled());
+    // The sandbox env never carries the endpoint's key.
+    expect(JSON.stringify(create.mock.calls)).not.toContain(KEY);
+
+    // Waiting for its daemon: progress, nothing sent, the dialog stays.
+    expect(await screen.findByText("Setting up CLIProxyAPI…")).toHaveClass("shimmer");
+    expect(sets(h)).toEqual([]);
+    expect(onCreated).not.toHaveBeenCalled();
+    expect(document.body.innerHTML).not.toContain(KEY);
+
+    // Its hello brings the seal key: applied with the key sealed to it, then the dialog is done.
+    h.client.enqueue({ type: "machine", cursor: 5, machine: up });
+    await waitFor(() => expect(sets(h)).toHaveLength(1));
+    const [[to, , command]] = sets(h);
+    expect(to).toBe("mch_new");
+    expect(command).toEqual({
+      type: "endpoint.set",
+      endpoint: { id: "cliproxy", name: "CLIProxyAPI", kind: "cliproxy", base_url: "http://proxy.local:8317", providers: ["claude", "codex"] },
+      key: { type: "set", sealed: expect.objectContaining({ v: 1 }) },
+    });
+    expect(JSON.stringify(h.command.mock.calls)).not.toContain(KEY);
+    await waitFor(() => expect(onCreated).toHaveBeenCalledWith(up));
+  });
+
+  it("applies nothing when None is picked or the dialog is closed first", async () => {
+    const first = rent();
+    const rentBox = screen.getByRole("region", { name: "Rent a sandbox" });
+    await userEvent.click(await within(rentBox).findByRole("combobox", { name: "Endpoint" }));
+    await userEvent.click(await screen.findByRole("option", { name: "None" }));
+    expect(within(rentBox).queryByLabelText("Endpoint key")).toBeNull();
+    await userEvent.click(within(rentBox).getByRole("button", { name: /^Rent for/ }));
+    await waitFor(() => expect(first.onCreated).toHaveBeenCalledWith(booting));
+    first.view.unmount();
+
+    const second = rent();
+    await userEvent.click(within(screen.getByRole("region", { name: "Rent a sandbox" })).getByRole("button", { name: /^Rent for/ }));
+    expect(await screen.findByText("Setting up CLIProxyAPI…")).toBeInTheDocument();
+    second.view.unmount();
+    second.h.client.enqueue({ type: "machine", cursor: 5, machine: up });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(sets(second.h)).toEqual([]);
   });
 });
