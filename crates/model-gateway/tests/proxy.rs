@@ -482,3 +482,119 @@ async fn usage_and_cost_are_recorded_per_request() {
     assert_eq!(usage.rows.iter().map(|r| r.requests).sum::<u64>(), 2);
     assert_eq!(usage.rows.iter().map(|r| r.input_tokens).sum::<u64>(), 1012);
 }
+
+fn chat_stream(model: &str) -> Vec<String> {
+    let chunk = |delta: serde_json::Value, finish: serde_json::Value| {
+        format!("data: {}\n\n", json!({ "id": "c1", "object": "chat.completion.chunk", "created": 1, "model": model, "choices": [{ "index": 0, "delta": delta, "finish_reason": finish }] }))
+    };
+    vec![
+        chunk(json!({ "role": "assistant", "content": "" }), json!(null)),
+        chunk(json!({ "content": "Hel" }), json!(null)),
+        chunk(json!({ "content": "lo" }), json!(null)),
+        chunk(json!({}), json!("stop")),
+        format!("data: {}\n\n", json!({ "id": "c1", "object": "chat.completion.chunk", "created": 1, "model": model, "choices": [], "usage": { "prompt_tokens": 7, "completion_tokens": 2, "total_tokens": 9 } })),
+        "data: [DONE]\n\n".into(),
+    ]
+}
+
+/// The client's stream, as (event name, data) pairs.
+fn events(text: &str) -> Vec<(Option<String>, serde_json::Value)> {
+    text.split("\n\n")
+        .filter(|e| !e.trim().is_empty())
+        .filter_map(|e| {
+            let name = e.lines().find_map(|l| l.strip_prefix("event: ")).map(str::to_string);
+            let data = e.lines().find_map(|l| l.strip_prefix("data: "))?;
+            Some((name, serde_json::from_str(data).unwrap_or(json!(data))))
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn translated_paths_reach_upstreams_of_another_api() {
+    let mock = Mock::start(|s| {
+        let stream = s.json()["stream"] == true;
+        match (s.uri.as_str(), stream) {
+            ("/v1/chat/completions", true) => sse(&chat_stream("gpt-x")),
+            ("/v1/chat/completions", false) => json(200, json!({
+                "id": "c1", "object": "chat.completion", "created": 1, "model": "gpt-x",
+                "choices": [{ "index": 0, "message": { "role": "assistant", "content": "hi" }, "finish_reason": "stop" }],
+                "usage": { "prompt_tokens": 7, "completion_tokens": 2, "total_tokens": 9 }
+            })),
+            ("/v1/messages", true) => sse(&messages_stream("claude-x")),
+            ("/v1/messages", false) => json(200, messages_answer("claude-x", 12, 5)),
+            _ => status(404),
+        }
+    })
+    .await;
+    let mut oai = upstream("oai", UpstreamKind::OpenaiCompatible, &mock.url("/v1"));
+    oai.models = vec!["gpt-*".into()];
+    let mut ant = upstream("ant", UpstreamKind::AnthropicCompatible, &mock.url(""));
+    ant.models = vec!["claude-*".into()];
+    let g = Gw::start(vec![oai, ant], vec![], &[]).await;
+
+    // A Messages client on a Chat upstream, streamed.
+    let text = g.post("/v1/messages", &messages("gpt-x", true)).await.text().await.unwrap();
+    let ev = events(&text);
+    assert_eq!(ev.first().unwrap().0.as_deref(), Some("message_start"), "{text}");
+    assert_eq!(ev.last().unwrap().0.as_deref(), Some("message_stop"), "{text}");
+    let said: String = ev.iter().filter_map(|(_, d)| d.pointer("/delta/text").and_then(|t| t.as_str())).collect();
+    assert_eq!(said, "Hello");
+    let up = &mock.seen()[0];
+    assert_eq!(up.uri, "/v1/chat/completions");
+    assert_eq!(up.json()["stream_options"]["include_usage"], true);
+    assert_eq!(up.json()["messages"][0]["content"], "hi");
+
+    // … and whole.
+    let r: serde_json::Value = g.post("/v1/messages", &messages("gpt-x", false)).await.json().await.unwrap();
+    assert_eq!((r["type"].as_str(), r["model"].as_str(), r["content"][0]["text"].as_str()), (Some("message"), Some("gpt-x"), Some("hi")));
+
+    // A Responses client on a Messages upstream.
+    let text = g.post("/v1/responses", &json!({ "model": "claude-x", "stream": true, "input": "hi" })).await.text().await.unwrap();
+    let names: Vec<String> = events(&text).into_iter().filter_map(|(n, _)| n).collect();
+    assert_eq!(names.first().map(String::as_str), Some("response.created"), "{text}");
+    assert!(names.iter().any(|n| n == "response.output_text.delta"), "{names:?}");
+    assert_eq!(names.last().map(String::as_str), Some("response.completed"), "{names:?}");
+    assert_eq!(mock.seen()[2].uri, "/v1/messages");
+
+    // A Chat client on a Messages upstream, whole and streamed.
+    let r: serde_json::Value = g.post("/v1/chat/completions", &json!({ "model": "claude-x", "messages": [{ "role": "user", "content": "hi" }] })).await.json().await.unwrap();
+    assert_eq!(r["choices"][0]["message"]["content"], "hello");
+    assert_eq!(r["usage"]["prompt_tokens"], 12);
+    let text = g
+        .post("/v1/chat/completions", &json!({ "model": "claude-x", "stream": true, "stream_options": { "include_usage": true }, "messages": [{ "role": "user", "content": "hi" }] }))
+        .await
+        .text()
+        .await
+        .unwrap();
+    assert!(text.trim_end().ends_with("data: [DONE]"), "{text}");
+    let said: String = events(&text).iter().filter_map(|(_, d)| d.pointer("/choices/0/delta/content").and_then(|t| t.as_str())).collect();
+    assert_eq!(said, "Hello");
+
+    let log = g.logged(5).await;
+    let first = log.iter().find(|e| e.model == "gpt-x" && e.stream).unwrap();
+    assert_eq!((first.input_tokens, first.output_tokens), (7, 2));
+    assert!(log.iter().all(|e| e.status == 200), "{log:?}");
+}
+
+#[tokio::test]
+async fn reasoning_another_provider_signed_never_passes_through() {
+    let mock = Mock::start(|_| json(200, messages_answer("claude-x", 1, 1))).await;
+    let g = Gw::start(vec![upstream("a", UpstreamKind::Anthropic, &mock.url(""))], vec![], &[("a", "k")]).await;
+    let body = json!({
+        "model": "claude-x", "max_tokens": 64,
+        "messages": [
+            { "role": "user", "content": "hi" },
+            { "role": "assistant", "content": [
+                { "type": "thinking", "thinking": "from openai", "signature": "roll-oai:rs_1:gAAAA" },
+                { "type": "thinking", "thinking": "from anthropic", "signature": "EqQBCkYIBxgC" },
+                { "type": "text", "text": "hello" }
+            ] },
+            { "role": "user", "content": "again" }
+        ]
+    });
+    assert_eq!(g.post("/v1/messages", &body).await.status(), 200);
+    let sent = mock.seen()[0].json();
+    let blocks = sent["messages"][1]["content"].as_array().unwrap();
+    assert_eq!(blocks.len(), 2);
+    assert_eq!(blocks[0]["signature"], "EqQBCkYIBxgC");
+}

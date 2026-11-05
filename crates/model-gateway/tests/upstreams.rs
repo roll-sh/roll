@@ -260,3 +260,37 @@ async fn test_asks_each_upstream_for_its_models_and_never_generates() {
     assert!(mock.seen().iter().all(|s| s.method == "GET"));
     assert_eq!(g.gw.test(Some("oai")).await.len(), 1);
 }
+
+#[tokio::test]
+async fn translated_claude_requests_keep_cache_breakpoints_on_bedrock_and_vertex() {
+    let (sa, _) = service_account();
+    let mock = Mock::start(|s| match s.uri.as_str() {
+        "/token" => json(200, json!({ "access_token": "ya29.t", "expires_in": 3600 })),
+        u if u.ends_with("/invoke") || u.ends_with(":rawPredict") => json(200, messages_answer("claude-x", 1, 1)),
+        _ => status(404),
+    })
+    .await;
+    let mut vertex = upstream("vertex", UpstreamKind::Vertex, &mock.url(""));
+    vertex.region = Some("global".into());
+    vertex.project = Some("p".into());
+    vertex.models = vec!["claude-vertex".into()];
+    let br = bedrock(&mock.url(""));
+    let g = Gw::start(vec![br, vertex], vec![], &[("bedrock", "ABSKkey"), ("vertex", &sa)]).await;
+    g.gw.set_vertex_token_uri_for_tests(Some(mock.url("/token")));
+    let chat = |model: &str| json!({ "model": model, "messages": [{ "role": "system", "content": "be brief" }, { "role": "user", "content": "hi" }] });
+    for model in ["anthropic.claude-x", "claude-vertex"] {
+        let r = g.post("/v1/chat/completions", &chat(model)).await;
+        assert_eq!(r.status(), 200, "{model}");
+        assert_eq!(r.json::<Value>().await.unwrap()["choices"][0]["message"]["content"], "hello");
+    }
+    let seen: Vec<Value> = mock.seen().iter().filter(|s| s.uri != "/token").map(Seen::json).collect();
+    assert_eq!(seen.len(), 2);
+    for (body, version) in seen.iter().zip(["bedrock-2023-05-31", "vertex-2023-10-16"]) {
+        assert_eq!(body["anthropic_version"], version);
+        assert!(body.get("model").is_none(), "{body}");
+        let text = body.to_string();
+        assert!(text.contains(r#""cache_control":{"type":"ephemeral"}"#), "no cache breakpoint: {text}");
+        assert!(!text.contains("\"ttl\""), "{text}");
+    }
+    assert!(mock.seen().iter().any(|s| s.uri == "/v1/projects/p/locations/global/publishers/anthropic/models/claude-vertex:rawPredict"));
+}

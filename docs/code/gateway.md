@@ -182,9 +182,14 @@ For a request asking for model `m`:
      `metadata.user_id`.
    - At most 10,000 sessions are remembered, each for an hour.
 4. **Failover.**
-   - A connection error, a timeout, a 5xx or Anthropic's 529 moves to the next candidate, but only
-     before the first byte reaches the client.
-   - A 429 moves only to an upstream of another provider (another kind or another host).
+   - A connection error, a timeout, a 5xx, Anthropic's 529, a 401 or 403 (the owner's key is
+     wrong) or an error event before a stream's first event moves to the next candidate, but only
+     before the first byte reaches the client. A 404 moves on too, without counting against the
+     circuit.
+   - A 429 moves only to an upstream of another provider, and while it cools down every upstream
+     of its provider is skipped. The named kinds are one provider each, whatever their host or
+     key (two Anthropic keys, two Azure resources, two Bedrock regions); a compatible upstream is
+     the provider at its host; two upstreams at one host are one provider.
    - Every upstream tried is in the log entry's `attempts`.
 
 **Which API goes upstream:**

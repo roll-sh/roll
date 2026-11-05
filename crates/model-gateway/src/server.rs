@@ -31,14 +31,16 @@
 //! answers. A connection error, a timeout, 5xx, 529, 401/403 (the owner's key is wrong) or an
 //! error event before the stream's first event moves on to the next (failover, counted
 //! against the upstream's circuit); a 404 moves on without counting; a 429 cools the upstream
-//! down and bars every other upstream of its provider for this request; any other answer goes
+//! down, and while it cools every upstream of its provider is skipped ([`route::same_provider`]:
+//! never another key of it); any other answer goes
 //! to the client. Once a stream's first event is good the gateway is committed to that
 //! upstream: a failure after it ends the client's stream with an error event, never a
 //! switch.
 //!
 //! **Pass-through.** When the upstream speaks the client's API the body goes up with only
-//! `model` changed and the answer comes back byte for byte (a stream event by event, as the
-//! upstream framed it), its usage read on the way. Otherwise [`crate::wire`] translates the
+//! `model` changed (and reasoning another provider signed dropped: `drop_foreign_reasoning`),
+//! and the answer comes back byte for byte (a stream event by event, as the upstream framed
+//! it), its usage read on the way. Otherwise [`crate::wire`] translates the
 //! request, the answer and the stream.
 //!
 //! **Listeners** ([`Listeners`]): loopback (IPv4, and IPv6 where the machine has it) plus
@@ -639,6 +641,29 @@ fn message_of(body: &[u8]) -> String {
     }
 }
 
+/// Drops reasoning another provider signed from a pass-through body: a thinking block whose
+/// `signature` [`crate::wire`] gave an Anthropic client for an OpenAI reasoning item
+/// (`roll-oai:`), or a reasoning item whose `encrypted_content` it gave a Responses client for
+/// an Anthropic thinking block (`roll-ant:`, `roll-ant-r:`). Either is only valid to the
+/// provider that made it, and a conversation may come back here after a failover.
+fn drop_foreign_reasoning(format: WireFormat, body: &mut Value) {
+    match format {
+        WireFormat::Messages => {
+            for m in body.get_mut("messages").and_then(Value::as_array_mut).into_iter().flatten() {
+                if let Some(blocks) = m.get_mut("content").and_then(Value::as_array_mut) {
+                    blocks.retain(|b| !(b["type"] == "thinking" && b["signature"].as_str().is_some_and(|s| s.starts_with("roll-oai:"))));
+                }
+            }
+        }
+        WireFormat::Responses => {
+            if let Some(items) = body.get_mut("input").and_then(Value::as_array_mut) {
+                items.retain(|i| !(i["type"] == "reasoning" && i["encrypted_content"].as_str().is_some_and(|s| s.starts_with("roll-ant:") || s.starts_with("roll-ant-r:"))));
+            }
+        }
+        WireFormat::Chat => {}
+    }
+}
+
 /// One upstream tried.
 async fn attempt(req: &mut Req, up: &Arc<Upstream>, t: &Target, permit: &mut Option<OwnedSemaphorePermit>) -> Step {
     let gw = req.gw.clone();
@@ -652,6 +677,7 @@ async fn attempt(req: &mut Req, up: &Arc<Upstream>, t: &Target, permit: &mut Opt
     let body = if pass {
         let mut b = req.body.clone();
         b["model"] = Value::from(t.model.as_str());
+        drop_foreign_reasoning(req.format, &mut b);
         b
     } else {
         match wire::translate_request(req.format, upfmt, req.body.clone(), &t.model) {
@@ -742,7 +768,7 @@ async fn attempt(req: &mut Req, up: &Arc<Upstream>, t: &Target, permit: &mut Opt
         let out = if pass {
             body
         } else {
-            match parsed.map(|v| wire::translate_response(upfmt, req.format, v, &req.model)) {
+            match parsed.map(|v| wire::translate_response_with(upfmt, req.format, v, &req.model, &req.body)) {
                 Some(Ok(v)) => serde_json::to_vec(&v).unwrap_or_default(),
                 Some(Err(e)) => return Step::Done(req.fail(502, &format!("{}'s answer couldn't be translated: {e}", up.spec.name))),
                 None => return Step::Done(req.fail(502, &format!("{}'s answer isn't JSON", up.spec.name))),
@@ -754,7 +780,7 @@ async fn attempt(req: &mut Req, up: &Arc<Upstream>, t: &Target, permit: &mut Opt
     }
     // A stream: read until its first event, which decides whether this upstream serves.
     let mut reader = Reader::new(resp, framing, idle);
-    let mut mode = if pass { Mode::Pass(UsageTap::new(upfmt)) } else { Mode::Translate(Box::new(StreamTranslator::new(upfmt, req.format, &req.model))) };
+    let mut mode = if pass { Mode::Pass(UsageTap::new(upfmt)) } else { Mode::Translate(Box::new(StreamTranslator::new(upfmt, req.format, &req.model).with_request(&req.body))) };
     let mut first: Vec<Bytes> = Vec::new();
     loop {
         let ev = match reader.next().await {
