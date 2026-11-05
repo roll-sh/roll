@@ -142,7 +142,9 @@ export class DemoGateway {
     for (const [i, { machine: m, providers }] of members.entries()) {
       const c: GatewayClient = { id: `gwc_demo${(i + 1).toString(16).padStart(11, "0")}`, name: this.h.machines().get(m)?.name ?? m, machine: m, created_at: t - 26 * HOUR + i * 60_000 };
       this.clients.push(c);
-      this.plan.members!.push({ machine: m, url: m === host ? loopbackUrl(GATEWAY_PORT) : this.plan.urls![0].url, ...(providers ? { providers } : {}), client: c.id, joined_at: c.created_at });
+      // A local Docker sandbox reaches the host's bridge; the others its tailnet name.
+      const url = m === host ? loopbackUrl(GATEWAY_PORT) : this.plan.urls![this.h.machines().get(m)?.sandbox?.backend === "docker" ? 1 : 0].url;
+      this.plan.members!.push({ machine: m, url, ...(providers ? { providers } : {}), client: c.id, joined_at: c.created_at });
     }
     for (const u of this.settings.upstreams ?? []) this.health.set(u.id, { upstream: u.id, circuit: "closed", failures: 0, requests_hour: 0, last_ok_at: t - 20_000 });
     // The GPU box is off: five refused connections in a row opened its circuit.
@@ -216,12 +218,14 @@ export class DemoGateway {
   /** One request through the gateway at `at`. */
   private request(at: number, live: boolean): LogEntry {
     const r = this.random;
-    const work = this.h.work();
+    // Requests come from the members: their threads, and now and then a session outside any.
+    const members = new Set(this.clients.map((c) => c.machine));
+    const work = [...this.h.work().filter((x) => members.has(x.machine)), ...[...members].filter((m): m is string => !!m).map((machine) => ({ machine, project: "", thread: "" }))];
     const w = work[Math.floor(r() * work.length)] ?? { machine: this.host ?? "", project: "", thread: "" };
     const shapes = this.shapes();
     let shape = shapes[Math.floor(r() * shapes.length)];
     // Now and then someone asks for the GPU box's model while it's off: nothing else serves it.
-    if (live && r() < 0.08) shape = { model: "qwen3-coder", format: "chat", attempts: [], size: [0, 0, 0] };
+    if (r() < (live ? 0.08 : 0.02)) shape = { model: "qwen3-coder", format: "chat", attempts: [], size: [0, 0, 0] };
     const attempts: Attempt[] = shape.attempts.map((a) => ({ ...a, ms: a.status === 200 ? Math.round(400 + r() * 900) : Math.round(60 + r() * 200) }));
     const last = attempts[attempts.length - 1];
     const ok = last?.status === 200;
@@ -284,6 +288,7 @@ export class DemoGateway {
       const hour = new Date(at).getUTCHours();
       const busy = hour >= 7 && hour <= 19 ? 1 : 0.25;
       at += Math.round((90_000 + this.random() * 240_000) / busy);
+      if (at >= t - 60_000) break;
       const e = this.request(at, false);
       if (t - at < 2 * HOUR) this.log.push(e);
     }

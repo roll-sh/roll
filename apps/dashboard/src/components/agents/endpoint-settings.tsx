@@ -16,6 +16,7 @@ import { reachable, type EndpointCheck, type EndpointInfo, type EndpointKind, ty
 import type { AgentsClient } from "@/lib/agents-client";
 import { checkEndpoint, endpointId, endpointOf, incompatible, KIND_LABEL, KIND_URL, keyChange, keyLabel } from "@/lib/agents-endpoints";
 import { useEscapeLayer } from "./escape-layers";
+import { GatewayEndpointItem } from "./gateway/machine";
 import { MachineIcon } from "./identity";
 import { field, Note, SettingRow, type Setting } from "./settings-ui";
 import { ago } from "./shared";
@@ -497,7 +498,10 @@ export function MachineEndpoints({ machine, editing, onEdit }: { machine: Machin
       {editing && !editing.id && !locked && editor()}
       {list.length === 0 && !(editing && !editing.id) && <p className="px-3.5 py-3 text-[12.5px] text-subtle">No endpoints: every provider uses its own login here.</p>}
       {list.map((e) =>
-        editing?.id === e.id && !locked ? (
+        // roll's gateway sets this one when the machine joins: read-only here, managed in Gateway settings.
+        e.kind === "gateway" ? (
+          <GatewayEndpointItem key={e.id} machine={machine} endpoint={e} providerName={name} />
+        ) : editing?.id === e.id && !locked ? (
           editor(e)
         ) : (
           <EndpointItem key={e.id} machine={machine} endpoint={e} profile={profiles.has(e.id)} locked={!!locked} providerName={name} onEdit={(key) => onEdit({ id: e.id, key })} />
@@ -643,6 +647,8 @@ export function ProviderEndpointRow({ machine, provider, onNew }: { machine: Mac
   const locked = endpointsLocked(machine);
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
+  // The gateway's endpoint is the relay's: a provider is moved onto or off it in Gateway settings.
+  const managed = current?.kind === "gateway";
   const choose = async (v: string) => {
     if (v === "new") return onNew();
     const next = v === "own" ? null : list.find((e) => `e:${e.id}` === v);
@@ -669,13 +675,15 @@ export function ProviderEndpointRow({ machine, provider, onNew }: { machine: Mac
         <Select
           label={`${provider.name} endpoint`}
           className="w-44"
-          disabled={!!locked || busy}
-          title={locked ?? `${provider.name} endpoint`}
+          disabled={!!locked || busy || managed}
+          title={locked ?? (managed ? "Managed in Gateway settings" : `${provider.name} endpoint`)}
           value={current ? `e:${current.id}` : "own"}
           onChange={(v) => void choose(v)}
           options={[
             { value: "own", label: "Own login" },
-            ...list.filter((e) => !incompatible(provider.id, e.kind)).map((e) => ({ value: `e:${e.id}`, label: e.name, hint: e.name === KIND_SHORT[e.kind] ? undefined : KIND_SHORT[e.kind] })),
+            ...list
+              .filter((e) => !incompatible(provider.id, e.kind) && (e.kind !== "gateway" || e === current))
+              .map((e) => ({ value: `e:${e.id}`, label: e.name, hint: e.name === KIND_SHORT[e.kind] ? undefined : KIND_SHORT[e.kind] })),
             { value: "new", label: "New endpoint…", icon: <Plus className="size-3.5 text-subtle" /> },
           ]}
         />

@@ -183,6 +183,32 @@
   }
 }
 
+/*
+ * Charts (the gateway's usage; components/agents/gateway/usage.tsx): four categorical series and a
+ * neutral for the folded rest. Validated with the dataviz skill's validate_palette.js against the
+ * card surface in each mode (adjacent pairs: CVD and normal-vision separation pass; the light
+ * aqua and magenta sit under 3:1, so every chart has its table). Stepped in lightness, unlike the
+ * identity tokens, so neighbours stay apart for colour-blind readers. No blue (the accent), no
+ * orange or yellow, no red (danger).
+ */
+:root {
+  --viz-1: #199e70;
+  --viz-2: #9085e9;
+  --viz-3: #008300;
+  --viz-4: #d55181;
+  --viz-other: #6b7079;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --viz-1: #1baf7a;
+    --viz-2: #6250d6;
+    --viz-3: #008300;
+    --viz-4: #e87ba4;
+    --viz-other: #a3a6ad;
+  }
+}
+
 /* Popovers, menus and dialogs: the panel a little see-through over a blur (T3's dropdown-glass). */
 @utility glass {
   background: color-mix(in srgb, var(--popover) 88%, transparent);
