@@ -29,7 +29,8 @@ describe("identity colours", () => {
 
   it("a machine's: picked, else its id's (a rename keeps it)", () => {
     const m = machine();
-    expect(machineColor({ ...m, name: "renamed" })).toBe(machineColor(m));
+    const renamed: typeof m = { ...m, name: "renamed" };
+    expect(machineColor(renamed)).toBe(machineColor(m));
     expect(machineColor(machine({ appearance: { color: "teal" } }))).toBe("teal");
   });
 });

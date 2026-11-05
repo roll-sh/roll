@@ -30,18 +30,18 @@ export const SCRIPT_ICONS: { id: ScriptIcon; label: string; icon: ReactNode }[] 
 
 /** The project's rows (T3's project scope of the same settings). */
 const P = {
-  name: { id: "project.name", title: "Name", section: "Project", description: "How the project is called on the canvas." },
+  name: { id: "project.name", title: "Name", section: "Name and icon", description: "How the project is called on the canvas." },
   color: {
     id: "project.color",
     title: "Colour",
-    section: "Project",
+    section: "Name and icon",
     description: "Its cards, edges and rows carry it everywhere. Auto is made from its repo or name, so it's the same on every device and machine.",
     terms: ["color", "colour", "tint", "identity"],
   },
   icon: {
     id: "project.icon",
     title: "Icon",
-    section: "Project",
+    section: "Name and icon",
     description: "Its own logo when roll finds one in the repo (a favicon, an app icon or a logo), else its monogram.",
     terms: ["logo", "favicon", "monogram", "emoji", "picture", "identity"],
   },
@@ -248,7 +248,7 @@ export function ProjectSettingsForm({ project, machine, onDone }: { project: Pro
         if (changed && scriptsOk && online) void save();
       }}
     >
-      <SettingsSection title="Project" ids={[P.name.id, P.color.id, P.icon.id]}>
+      <SettingsSection title="Name and icon" ids={[P.name.id, P.color.id, P.icon.id]}>
         <SettingRow
           s={P.name}
           control={<input id={`project-name-${project.id}`} aria-label="Name" value={name} onChange={(e) => setName(e.target.value)} className={`${field} w-56`} spellCheck={false} />}
