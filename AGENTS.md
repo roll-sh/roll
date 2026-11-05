@@ -300,6 +300,14 @@ The product should feel alive: dots react to the cursor and the marks "think". E
       Code's chat (popups scale from their trigger, disclosures animate their height, sheets
       slide in, 150–300 ms, reduced motion honoured); its components name the T3 files they
       follow.
+  - The gateway (docs/code/gateway.md): `crates/model-gateway` is roll's model gateway (Messages,
+    Chat and Responses in; the owner's API-key upstreams out; translation, failover, client keys,
+    usage). One machine's daemon runs it in-process (`agent-host/src/gateway.rs`), managed only by
+    `gateway.*` commands (no management HTTP API); members join through the relay
+    (`code-control/src/agents/gateway.rs`) with a client key sealed straight to them. Never: a
+    consumer-subscription login as an upstream, a client presented as another, or another key of
+    the same provider after a 429. Every place a machine uses it shows `GatewayNotice` (its
+    requests go out from the gateway's computer).
   - Chat ops (docs/code/chatops.md): `crates/code-chat` is the Slack and Discord wire (no roll
     types); `crates/code-control/src/chatops/` holds installs, the action queue, bindings, and the
     `slack`/`discord`/`github` triggers and steps. A platform's request is verified (signature and
