@@ -43,13 +43,30 @@ export interface Schema {
   maximum?: number;
   /**
    * The widget beyond the type (the catalog's convention, agreed with code-control):
-   * `template`, `template-long`, `roll-thread`, `roll-target`, `roll-project`, `roll-model`
-   * (writes the sibling `provider` and `effort` too), `roll-secret`, `json`.
+   * `template`, `template-long`, `roll-thread`, `roll-machine`, `roll-target`, `roll-project`,
+   * `roll-model` (writes the sibling `provider` and `effort` too), `roll-secret`, `json`, `lookup`
+   * (a picker: see `lookup`).
    */
   format?: string;
   /** Labels for `enum` values, in order. */
   enumTitles?: string[];
   additionalProperties?: Schema | boolean;
+  /** `format: "lookup"`: where the picker's rows come from (code-control `lookup::Pick`). */
+  lookup?: SchemaLookup;
+}
+
+/**
+ * A lookup field's rows: the server's `source/kind` (`linear/states`), its parent from the sibling
+ * field `parent` (used when it holds one value), and the field's own `extras` shown first.
+ */
+export interface SchemaLookup {
+  source?: string;
+  kind?: string;
+  parent?: string;
+  extras?: { id: string; label: string }[];
+  extras_group?: string;
+  /** New ones can be made from the search. */
+  create?: boolean;
 }
 
 const tpl = (title: string, description?: string, long = false): Schema => ({ type: "string", title, description, format: long ? "template-long" : "template" });

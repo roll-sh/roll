@@ -9,11 +9,13 @@
  * groups"); T3's sidebar lists every project but only the ones with threads take room.
  */
 
-import { ChevronRight, FolderPlus, Pin, Plus, Settings2 } from "lucide-react";
+import { ChevronRight, FolderPlus, MoreHorizontal, Pin, Plus } from "lucide-react";
 import { createContext, useContext, useState, type ReactNode } from "react";
 import { reachable, type Machine, type Project } from "@/lib/agents-api";
 import { setAgentsView } from "@/lib/agents-surface";
 import { ProjectIcon } from "./identity";
+import { Menu } from "./menu";
+import { useProjectActions } from "./project-actions";
 import { shortPath } from "./shared";
 import { Popover, PopoverPopup, PopoverTrigger } from "./ui";
 import { useAgents } from "./use-agents";
@@ -27,8 +29,9 @@ export interface CanvasProjects {
   keep?: (project: string, on: boolean) => void;
 }
 
-const NONE: CanvasProjects = { unused: new Map(), kept: () => false };
-const Ctx = createContext<CanvasProjects>(NONE);
+/** No canvas here (the palette, the sidebar): nothing folded, nothing to pin. */
+export const NO_CANVAS: CanvasProjects = { unused: new Map(), kept: () => false };
+const Ctx = createContext<CanvasProjects>(NO_CANVAS);
 
 export function CanvasProjectsProvider({ value, children }: { value: CanvasProjects; children: ReactNode }) {
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
@@ -99,6 +102,7 @@ function ProjectRow({ project, machine, onDone }: { project: Project; machine: M
   const online = reachable(machine);
   const settings = () => (onDone(), setAgentsView({ kind: "settings", target: `p:${project.id}` }));
   const start = startNew && online ? () => (onDone(), startNew(project.id)) : null;
+  const actions = useProjectActions(project);
   const where = project.repo ? `${project.repo.owner}/${project.repo.repo}` : shortPath(project.path, machine.info?.home);
   return (
     <li className="group/r flex items-center rounded-md transition-colors duration-100 hover:bg-fg/[0.06] has-focus-visible:bg-fg/[0.06]">
@@ -125,9 +129,13 @@ function ProjectRow({ project, machine, onDone }: { project: Project; machine: M
             <Pin />
           </RowTool>
         )}
-        <RowTool label="Project settings" onClick={settings}>
-          <Settings2 />
-        </RowTool>
+        <Menu
+          label={`More for ${project.name}`}
+          className="[&>button]:size-6"
+          trigger={<MoreHorizontal className="size-3.5" />}
+          // A pick closes the list too.
+          items={actions.map((a) => ({ ...a, onSelect: () => (onDone(), a.onSelect()) }))}
+        />
       </span>
     </li>
   );

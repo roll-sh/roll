@@ -61,6 +61,8 @@ import { useAgents } from "./use-agents";
 import { useInboxActions } from "./threads-sidebar";
 import { inbox, shelfOf, type Shelf } from "@/lib/agents-inbox";
 import { openShelf } from "@/lib/agents-shelf";
+import { NO_CANVAS } from "./machine-projects";
+import { projectActions } from "./project-actions";
 
 const SHELF_NAME: Record<Exclude<Shelf, "active">, string> = { settled: "Settled", snoozed: "Snoozed", archived: "Archived" };
 
@@ -292,7 +294,7 @@ function PaletteDialog({ session, intent, host }: { session: number; intent: Pal
       },
       addProject,
       { kind: "action", value: "action:add-machine", title: "Add machine", searchTerms: ["connect", "computer", "sandbox", "rent"], icon: <Server className={ICON} />, run: host.addMachine },
-      !!auto.store && { kind: "action", value: "action:automations", title: "Automations", searchTerms: ["workflow", "trigger", "schedule", "cron", "webhook", "zap", "rules"], icon: <Zap className={ICON} />, run: () => setAgentsView({ kind: "automations" }) },
+      !!auto.store && { kind: "action", value: "action:automations", title: "Automations", searchTerms: ["workflow", "trigger", "schedule", "cron", "webhook", "zap", "rules"], icon: <Zap className={ICON} />, shortcut: "A", run: () => setAgentsView({ kind: "automations" }) },
       !!auto.store && { kind: "action", value: "action:new-automation", title: "New automation", searchTerms: ["workflow", "trigger", "schedule", "template"], icon: <Plus className={ICON} />, run: () => setAgentsView({ kind: "automations", open: "new" }) },
       auto.automations.size > 0 && {
         kind: "submenu",
@@ -380,14 +382,35 @@ function PaletteDialog({ session, intent, host }: { session: number; intent: Pal
       root,
       // Archived ones too: searching is how an old conversation is found.
       threads: [...data.threads.values()].map((r) => threadRow(r.value, r.machine, query)),
+      // "Project: roll": the canvas on it, then what can be done with it (its card's actions).
       projects: projects.map((p) => ({
-        kind: "action" as const,
+        kind: "submenu" as const,
         value: `project:${p.id}`,
-        title: p.name,
-        searchTerms: [p.path, p.repo ? `${p.repo.owner}/${p.repo.repo}` : "", machineCount > 1 ? machineName(p.machine) : ""].filter(Boolean),
+        title: `Project: ${p.name}`,
+        searchTerms: [p.name, p.path, p.repo ? `${p.repo.owner}/${p.repo.repo}` : "", machineCount > 1 ? machineName(p.machine) : ""].filter(Boolean),
         description: [machineCount > 1 ? machineName(p.machine) : null, p.path].filter(Boolean).join(" · "),
         icon: <ProjectIcon project={p} className="size-4" />,
-        run: () => focus(`p:${p.id}`),
+        view: {
+          label: p.name,
+          placeholder: `Do what with ${p.name}?`,
+          groups: [
+            {
+              value: "project",
+              label: p.name,
+              items: [
+                { kind: "action" as const, value: `project:${p.id}:show`, title: "Show on the canvas", icon: <Focus className={ICON} />, run: () => focus(`p:${p.id}`) },
+                ...projectActions({ ...ctx, canvas: NO_CANVAS }, p).map((a) => ({
+                  kind: "action" as const,
+                  value: `project:${p.id}:${a.label}`,
+                  title: a.label,
+                  disabled: a.disabled,
+                  icon: <span className="grid size-4 place-items-center text-subtle [&>svg]:size-4 [&>svg]:stroke-[1.75]">{a.icon}</span>,
+                  run: a.onSelect,
+                })),
+              ],
+            },
+          ],
+        },
       })),
       machines: machines.map((m) => ({
         kind: "action" as const,
@@ -402,7 +425,7 @@ function PaletteDialog({ session, intent, host }: { session: number; intent: Pal
     };
     // Rebuilt when the records change; `query` only tags thread picks.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [data, projects, machines, openRecord, host, targets, query, auto.automations, auto.store, inboxActions]);
+  }, [data, projects, machines, openRecord, host, targets, query, auto.automations, auto.store, inboxActions, ctx]);
 
   const shown: PaletteGroup[] = useMemo(() => {
     if (view?.panel) return [];

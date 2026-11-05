@@ -992,11 +992,22 @@ async fn chatops_routes_follow_the_auth_matrix() {
     assert_eq!(call(a, "POST", &format!("{base}/teams/install"), None, acme).await, NOT_FOUND);
     assert_eq!(call(a, "PATCH", &format!("{base}/slack/chi_x"), Some(&body), acme).await, NOT_FOUND);
     assert_eq!(call(a, "DELETE", &format!("{base}/slack/chi_x"), None, acme).await, NOT_FOUND);
+    // The pickers' lookups: not set up is a quiet 200 to list, a 422 to make one.
+    let lookup = "/v1/code/agents/acme/lookup";
+    for kind in ["slack/workspaces", "slack/channels", "slack/users", "slack/usergroups", "slack/targets", "discord/guilds", "discord/channels", "discord/roles", "discord/members"] {
+        assert_eq!(call(a, "GET", &format!("{lookup}/{kind}"), None, acme).await, OK, "{kind}");
+        assert_eq!(call(a, "GET", &format!("{lookup}/{kind}"), None, Some(ADMIN)).await, OK, "{kind}");
+    }
+    assert_eq!(call(a, "POST", &format!("{lookup}/slack/channels"), Some(&json!({ "name": "x" })), acme).await, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(call(a, "GET", &format!("{lookup}/slack/emoji"), None, acme).await, NOT_FOUND);
     let routes = [
         ("GET", base.to_string()),
         ("POST", format!("{base}/slack/install")),
         ("PATCH", format!("{base}/slack/chi_x")),
         ("DELETE", format!("{base}/slack/chi_x")),
+        ("GET", format!("{lookup}/slack/channels")),
+        ("POST", format!("{lookup}/slack/channels")),
+        ("GET", format!("{lookup}/discord/members")),
     ];
     for (who, token, want) in [("agent", agent, FORBIDDEN), ("review app", app_in, FORBIDDEN), ("another owner", other, FORBIDDEN), ("anonymous", None, StatusCode::UNAUTHORIZED)] {
         for (m, p) in &routes {
@@ -1033,6 +1044,9 @@ async fn linear_routes_follow_the_auth_matrix() {
         ("PUT", format!("{base}/settings"), NOT_FOUND),
         ("PUT", format!("{base}/webhook/secret"), StatusCode::BAD_REQUEST),
         ("GET", format!("{base}/teams"), NOT_FOUND),
+        // The pickers' lookups: not connected is a quiet 200 to list, a 422 to make one.
+        ("GET", "/v1/code/agents/acme/lookup/linear/teams".to_string(), OK),
+        ("POST", "/v1/code/agents/acme/lookup/linear/labels".to_string(), StatusCode::UNPROCESSABLE_ENTITY),
     ];
     let body = json!({ "name": "s" });
     for (who, token) in [("admin", Some(ADMIN)), ("owner", Some(w.acme.as_str()))] {
@@ -1063,6 +1077,42 @@ async fn linear_routes_follow_the_auth_matrix() {
     for token in [None, Some(ADMIN), Some(w.acme.as_str()), Some(w.agent.as_str()), Some("hunter2")] {
         for (m, p, want) in &open {
             assert_eq!(call(a, m, p, Some(&json!({})), token).await, *want, "{token:?}: {m} {p}");
+        }
+    }
+}
+
+/// The pickers' GitHub lookups are Code::manages like the rest of the owner's integrations (an
+/// installation spans tenants: only who manages the owner may look through its repos). With no
+/// GitHub App on this server: a quiet 200 to list, a 422 to make a label; unknown kinds 404.
+#[tokio::test]
+async fn github_lookups_follow_the_auth_matrix() {
+    let w = world().await;
+    let a = &w.a;
+    let base = "/v1/code/agents/acme/lookup/github";
+    let routes = [
+        ("GET", format!("{base}/repos"), OK),
+        ("GET", format!("{base}/branches?parent=app"), OK),
+        ("GET", format!("{base}/reviewers"), OK),
+        ("POST", format!("{base}/labels"), StatusCode::UNPROCESSABLE_ENTITY),
+        ("GET", format!("{base}/stars"), NOT_FOUND),
+    ];
+    let body = json!({ "name": "s", "parent": "app" });
+    for (who, token) in [("admin", Some(ADMIN)), ("owner", Some(w.acme.as_str()))] {
+        for (m, p, want) in &routes {
+            assert_eq!(call(a, m, p, Some(&body), token).await, *want, "{who}: {m} {p}");
+        }
+    }
+    let denied = StatusCode::UNAUTHORIZED;
+    for (who, token, want) in [
+        ("agent", Some(w.agent.as_str()), FORBIDDEN),
+        ("review app", Some(w.app_in.as_str()), FORBIDDEN),
+        ("another owner", Some(w.other.as_str()), FORBIDDEN),
+        ("anonymous", None, denied),
+        ("revoked", Some(w.revoked.as_str()), denied),
+        ("garbage", Some("hunter2"), denied),
+    ] {
+        for (m, p, _) in &routes {
+            assert_eq!(call(a, m, p, Some(&body), token).await, want, "{who}: {m} {p}");
         }
     }
 }

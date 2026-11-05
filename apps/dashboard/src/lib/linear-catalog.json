@@ -77,6 +77,9 @@
             "type": "boolean"
           },
           "machine": {
+            "description": "Where a new thread starts (default: the project's)",
+            "format": "roll-machine",
+            "title": "Machine",
             "type": "string"
           },
           "plan": {
@@ -186,7 +189,11 @@
           },
           "issue": {
             "description": "Issue id or identifier (ENG-12); default: the event's issue",
-            "format": "template",
+            "format": "lookup",
+            "lookup": {
+              "kind": "issues",
+              "source": "linear"
+            },
             "title": "Issue",
             "type": "string"
           },
@@ -216,14 +223,40 @@
         "additionalProperties": false,
         "properties": {
           "assignee": {
-            "description": "A name, email or id",
-            "format": "template",
+            "description": "roll, or a person",
+            "format": "lookup",
+            "lookup": {
+              "extras": [
+                {
+                  "id": "roll",
+                  "label": "roll"
+                },
+                {
+                  "id": "none",
+                  "label": "No one"
+                }
+              ],
+              "kind": "users",
+              "source": "linear"
+            },
             "title": "Assignee",
             "type": "string"
           },
           "delegate": {
             "description": "roll: the agent takes it",
-            "format": "template",
+            "format": "lookup",
+            "lookup": {
+              "extras": [
+                {
+                  "id": "roll",
+                  "label": "roll"
+                },
+                {
+                  "id": "none",
+                  "label": "No one"
+                }
+              ]
+            },
             "title": "Delegate",
             "type": "string"
           },
@@ -234,38 +267,115 @@
             "type": "string"
           },
           "labels": {
+            "description": "Put these labels on it",
+            "format": "lookup",
             "items": {
               "type": "string"
             },
+            "lookup": {
+              "create": true,
+              "kind": "labels",
+              "parent": "team",
+              "source": "linear"
+            },
+            "title": "Labels",
             "type": "array"
           },
           "parent": {
-            "description": "Parent issue id or identifier",
-            "format": "template",
-            "title": "Parent",
+            "description": "A sub-issue of this issue",
+            "format": "lookup",
+            "lookup": {
+              "kind": "issues",
+              "source": "linear"
+            },
+            "title": "Issue",
             "type": "string"
           },
           "priority": {
-            "type": [
-              "integer",
-              "string"
-            ]
+            "description": "How urgent it is",
+            "format": "lookup",
+            "lookup": {
+              "extras": [
+                {
+                  "id": "0",
+                  "label": "No priority"
+                },
+                {
+                  "id": "1",
+                  "label": "Urgent"
+                },
+                {
+                  "id": "2",
+                  "label": "High"
+                },
+                {
+                  "id": "3",
+                  "label": "Medium"
+                },
+                {
+                  "id": "4",
+                  "label": "Low"
+                }
+              ]
+            },
+            "title": "Priority",
+            "type": "string"
           },
           "project": {
-            "description": "A project id",
-            "format": "template",
+            "description": "Add it to this project",
+            "format": "lookup",
+            "lookup": {
+              "kind": "projects",
+              "source": "linear"
+            },
             "title": "Project",
             "type": "string"
           },
           "state": {
-            "description": "A state's name, type or id",
-            "format": "template",
+            "description": "Default: the team's first backlog or triage state",
+            "format": "lookup",
+            "lookup": {
+              "extras": [
+                {
+                  "id": "triage",
+                  "label": "Triage"
+                },
+                {
+                  "id": "backlog",
+                  "label": "Backlog"
+                },
+                {
+                  "id": "unstarted",
+                  "label": "Unstarted"
+                },
+                {
+                  "id": "started",
+                  "label": "Started"
+                },
+                {
+                  "id": "completed",
+                  "label": "Completed"
+                },
+                {
+                  "id": "canceled",
+                  "label": "Canceled"
+                }
+              ],
+              "extras_group": "Any team",
+              "kind": "states",
+              "parent": "team",
+              "source": "linear"
+            },
             "title": "State",
             "type": "string"
           },
           "team": {
-            "description": "Team key (ENG), name or id",
-            "format": "template",
+            "description": "The team the issue goes in",
+            "format": "lookup",
+            "lookup": {
+              "kind": "teams",
+              "source": "linear"
+            },
             "title": "Team",
             "type": "string"
           },
@@ -297,20 +407,54 @@
         "additionalProperties": false,
         "properties": {
           "add_labels": {
+            "description": "Put these labels on it",
+            "format": "lookup",
             "items": {
               "type": "string"
             },
+            "lookup": {
+              "create": true,
+              "kind": "labels",
+              "source": "linear"
+            },
+            "title": "Add labels",
             "type": "array"
           },
           "assignee": {
-            "description": "roll, none, or a name, email or id",
-            "format": "template",
+            "description": "roll, no one, or a person",
+            "format": "lookup",
+            "lookup": {
+              "extras": [
+                {
+                  "id": "roll",
+                  "label": "roll"
+                },
+                {
+                  "id": "none",
+                  "label": "No one"
+                }
+              ],
+              "kind": "users",
+              "source": "linear"
+            },
             "title": "Assignee",
             "type": "string"
           },
           "delegate": {
-            "description": "roll (the agent works on it), or none",
-            "format": "template",
+            "description": "roll (the agent works on it), or no one",
+            "format": "lookup",
+            "lookup": {
+              "extras": [
+                {
+                  "id": "roll",
+                  "label": "roll"
+                },
+                {
+                  "id": "none",
+                  "label": "No one"
+                }
+              ]
+            },
             "title": "Delegate",
             "type": "string"
           },
@@ -322,33 +466,105 @@
           },
           "issue": {
             "description": "Issue id or identifier; default: the event's issue",
-            "format": "template",
+            "format": "lookup",
+            "lookup": {
+              "kind": "issues",
+              "source": "linear"
+            },
             "title": "Issue",
             "type": "string"
           },
           "labels": {
-            "description": "Replace the labels (names)",
+            "description": "Replace the labels",
+            "format": "lookup",
             "items": {
               "type": "string"
             },
+            "lookup": {
+              "create": true,
+              "kind": "labels",
+              "source": "linear"
+            },
+            "title": "Labels",
             "type": "array"
           },
           "priority": {
-            "description": "0–4 or none, urgent, high, medium, low",
-            "type": [
-              "integer",
-              "string"
-            ]
+            "description": "How urgent it is",
+            "format": "lookup",
+            "lookup": {
+              "extras": [
+                {
+                  "id": "0",
+                  "label": "No priority"
+                },
+                {
+                  "id": "1",
+                  "label": "Urgent"
+                },
+                {
+                  "id": "2",
+                  "label": "High"
+                },
+                {
+                  "id": "3",
+                  "label": "Medium"
+                },
+                {
+                  "id": "4",
+                  "label": "Low"
+                }
+              ]
+            },
+            "title": "Priority",
+            "type": "string"
           },
           "remove_labels": {
+            "description": "Take these labels off it",
+            "format": "lookup",
             "items": {
               "type": "string"
             },
+            "lookup": {
+              "kind": "labels",
+              "source": "linear"
+            },
+            "title": "Remove labels",
             "type": "array"
           },
           "state": {
-            "description": "A state's name (In Progress), type (started) or id",
-            "format": "template",
+            "description": "A kind of state moves it to the first state of that kind in the issue's team",
+            "format": "lookup",
+            "lookup": {
+              "extras": [
+                {
+                  "id": "triage",
+                  "label": "Triage"
+                },
+                {
+                  "id": "backlog",
+                  "label": "Backlog"
+                },
+                {
+                  "id": "unstarted",
+                  "label": "Unstarted"
+                },
+                {
+                  "id": "started",
+                  "label": "Started"
+                },
+                {
+                  "id": "completed",
+                  "label": "Completed"
+                },
+                {
+                  "id": "canceled",
+                  "label": "Canceled"
+                }
+              ],
+              "extras_group": "Any team",
+              "kind": "states",
+              "source": "linear"
+            },
             "title": "State",
             "type": "string"
           },
@@ -380,10 +596,26 @@
         "additionalProperties": false,
         "properties": {
           "assignees": {
-            "description": "roll, none, or a name, email or id",
+            "description": "Assigned to one of these (roll: roll is assigned or delegated)",
+            "format": "lookup",
             "items": {
               "type": "string"
             },
+            "lookup": {
+              "extras": [
+                {
+                  "id": "roll",
+                  "label": "roll"
+                },
+                {
+                  "id": "none",
+                  "label": "No one"
+                }
+              ],
+              "kind": "users",
+              "source": "linear"
+            },
+            "title": "Assignees",
             "type": "array"
           },
           "include_attached": {
@@ -396,16 +628,30 @@
           },
           "label_added": {
             "description": "An update added one of these labels",
+            "format": "lookup",
             "items": {
               "type": "string"
             },
+            "lookup": {
+              "kind": "labels",
+              "parent": "teams",
+              "source": "linear"
+            },
+            "title": "Label added",
             "type": "array"
           },
           "labels": {
             "description": "The issue has one of these labels",
+            "format": "lookup",
             "items": {
               "type": "string"
             },
+            "lookup": {
+              "kind": "labels",
+              "parent": "teams",
+              "source": "linear"
+            },
+            "title": "Labels",
             "type": "array"
           },
           "matches": {
@@ -417,41 +663,144 @@
             "type": "boolean"
           },
           "priorities": {
-            "description": "0–4 or none, urgent, high, medium, low",
-            "items": {
-              "type": [
-                "integer",
-                "string"
-              ]
-            },
-            "type": "array"
-          },
-          "projects": {
-            "description": "Project names or ids",
+            "description": "The issue has one of these priorities",
+            "format": "lookup",
             "items": {
               "type": "string"
             },
+            "lookup": {
+              "extras": [
+                {
+                  "id": "0",
+                  "label": "No priority"
+                },
+                {
+                  "id": "1",
+                  "label": "Urgent"
+                },
+                {
+                  "id": "2",
+                  "label": "High"
+                },
+                {
+                  "id": "3",
+                  "label": "Medium"
+                },
+                {
+                  "id": "4",
+                  "label": "Low"
+                }
+              ]
+            },
+            "title": "Priorities",
+            "type": "array"
+          },
+          "projects": {
+            "description": "Only issues in these projects",
+            "format": "lookup",
+            "items": {
+              "type": "string"
+            },
+            "lookup": {
+              "kind": "projects",
+              "source": "linear"
+            },
+            "title": "Projects",
             "type": "array"
           },
           "state_changed_to": {
             "description": "An update moved it into one of these states",
+            "format": "lookup",
             "items": {
               "type": "string"
             },
+            "lookup": {
+              "extras": [
+                {
+                  "id": "triage",
+                  "label": "Triage"
+                },
+                {
+                  "id": "backlog",
+                  "label": "Backlog"
+                },
+                {
+                  "id": "unstarted",
+                  "label": "Unstarted"
+                },
+                {
+                  "id": "started",
+                  "label": "Started"
+                },
+                {
+                  "id": "completed",
+                  "label": "Completed"
+                },
+                {
+                  "id": "canceled",
+                  "label": "Canceled"
+                }
+              ],
+              "extras_group": "Any team",
+              "kind": "states",
+              "parent": "teams",
+              "source": "linear"
+            },
+            "title": "State changed to",
             "type": "array"
           },
           "states": {
-            "description": "The issue's state (name or type: triage, backlog, unstarted, started, completed, canceled)",
+            "description": "The issue is in one of these states (a kind of state matches it in any team)",
+            "format": "lookup",
             "items": {
               "type": "string"
             },
+            "lookup": {
+              "extras": [
+                {
+                  "id": "triage",
+                  "label": "Triage"
+                },
+                {
+                  "id": "backlog",
+                  "label": "Backlog"
+                },
+                {
+                  "id": "unstarted",
+                  "label": "Unstarted"
+                },
+                {
+                  "id": "started",
+                  "label": "Started"
+                },
+                {
+                  "id": "completed",
+                  "label": "Completed"
+                },
+                {
+                  "id": "canceled",
+                  "label": "Canceled"
+                }
+              ],
+              "extras_group": "Any team",
+              "kind": "states",
+              "parent": "teams",
+              "source": "linear"
+            },
+            "title": "States",
             "type": "array"
           },
           "teams": {
-            "description": "Team keys (ENG), names or ids",
+            "description": "Only issues of these teams",
+            "format": "lookup",
             "items": {
               "type": "string"
             },
+            "lookup": {
+              "kind": "teams",
+              "source": "linear"
+            },
+            "title": "Teams",
             "type": "array"
           }
         },

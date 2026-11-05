@@ -13,7 +13,7 @@
 
 import { AlarmClock, AlarmClockOff, Archive, ArchiveRestore, Check, ChevronDown, Eraser, ChevronRight, MoreHorizontal, PanelLeft, PanelLeftClose, Plus, Trash2, Undo2, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
-import type { Command, Machine, MachineId, Thread } from "@/lib/agents-api";
+import type { Command, Machine, MachineId, Project, Thread } from "@/lib/agents-api";
 import {
   cantPark,
   inbox,
@@ -34,7 +34,8 @@ import {
 } from "@/lib/agents-inbox";
 import { runsOf, type AgentsData } from "@/lib/agents-store";
 import { agentsSurface, setAgentsView } from "@/lib/agents-surface";
-import type { MenuItem as MenuEntry } from "./menu";
+import { Menu as ActionsMenu, type MenuItem as MenuEntry } from "./menu";
+import { useProjectActions } from "./project-actions";
 import { Menu, MenuItem, MenuPopup, MenuRadioGroup, MenuRadioItem, MenuSeparator, MenuShortcut, MenuSub, MenuSubPopup, MenuSubTrigger, MenuTrigger, Segmented } from "./ui";
 import { useAgents, usePrefs } from "./use-agents";
 import { MachineIcon, ProjectIcon } from "./identity";
@@ -366,7 +367,24 @@ export function ShelfStrip({ thread, now = Date.now() }: { thread: Thread; now?:
  * The sidebar, and what works while it's hidden too: the shortcuts, and telling the daemon a
  * conversation was seen (`thread.visit`: when it opens, and when one of its runs ends while open).
  */
-export function ThreadsSidebar({ data, open, setOpen, phone, openThread }: { data: AgentsData; open: boolean; setOpen: (open: boolean) => void; phone: boolean; openThread: string | null }) {
+export function ThreadsSidebar({
+  data,
+  open,
+  setOpen,
+  phone,
+  openThread,
+  only = null,
+  onShowAll,
+}: {
+  data: AgentsData;
+  open: boolean;
+  setOpen: (open: boolean) => void;
+  phone: boolean;
+  openThread: string | null;
+  /** "Focus on this project only": just its group. */
+  only?: string | null;
+  onShowAll?: () => void;
+}) {
   const { client, startNew, readOnly } = useAgents();
   const actions = useInboxActions();
   const [now, setNow] = useState(() => Date.now());
@@ -375,7 +393,9 @@ export function ThreadsSidebar({ data, open, setOpen, phone, openThread }: { dat
     const t = setInterval(() => setNow(Date.now()), 30_000);
     return () => clearInterval(t);
   }, []);
-  const groups = useMemo(() => inbox(data, now), [data, now]);
+  const everyGroup = useMemo(() => inbox(data, now), [data, now]);
+  const groups = useMemo(() => (only ? everyGroup.filter((g) => g.project.id === only) : everyGroup), [everyGroup, only]);
+  const onlyProject = only ? data.projects.get(only)?.value : undefined;
 
   // Seen: the open conversation, again when a run of it ends while it's open.
   const shown = openThread ? data.threads.get(openThread) : undefined;
@@ -468,6 +488,18 @@ export function ThreadsSidebar({ data, open, setOpen, phone, openThread }: { dat
             </span>
           </div>
           <div className="min-h-0 flex-1 overflow-y-auto px-1.5 pb-4" role="tree" aria-label="Projects">
+            {onlyProject && (
+              <p className="mt-1 flex h-7 items-center gap-1.5 rounded-md border border-line-2 bg-panel-2 pr-0.5 pl-2 text-[12px] inset-shadow-highlight" role="status">
+                <span className="min-w-0 flex-1 truncate text-muted">
+                  Only <span className="text-fg">{onlyProject.name}</span>
+                </span>
+                {onShowAll && (
+                  <button type="button" onClick={onShowAll} title="Show every project (Esc)" aria-label={`Show every project, not only ${onlyProject.name}`} className="grid size-6 shrink-0 place-items-center rounded text-subtle hover:bg-fg/[0.06] hover:text-fg">
+                    <X className="size-3" />
+                  </button>
+                )}
+              </p>
+            )}
             {groups.length === 0 && <p className="px-2 py-6 text-center text-[12.5px] text-subtle">No projects yet.</p>}
             {groups.map((g) => (
               <ProjectGroup
@@ -542,6 +574,7 @@ function ProjectGroup({
             <Plus className="size-3.5" strokeWidth={1.5} />
           </button>
         )}
+        <ProjectMenu project={group.project} />
       </div>
       {!collapsed && (
         <div role="group" className="mt-0.5 space-y-px">
@@ -574,6 +607,12 @@ function ProjectGroup({
       )}
     </section>
   );
+}
+
+/** A project's actions (the same as on its card), on its group's header. */
+function ProjectMenu({ project }: { project: Project }) {
+  const items = useProjectActions(project);
+  return <ActionsMenu label={`${project.name} actions`} align="start" className="opacity-0 transition-opacity group-hover/p:opacity-100 has-focus-visible:opacity-100 has-data-popup-open:opacity-100 [@media(hover:none)]:opacity-100 [&>button]:size-6" trigger={<MoreHorizontal className="size-3.5" strokeWidth={1.5} />} items={items} />;
 }
 
 function ShelfHeader({ label, count, open, onToggle }: { label: string; count: number; open: boolean; onToggle: () => void }) {

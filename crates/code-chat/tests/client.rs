@@ -598,3 +598,150 @@ async fn discord_errors_rate_limits_and_size_cap() {
     assert!(matches!(e, Error::Http(_)));
     assert_secret_free(&e);
 }
+
+// ── lists (the dashboard's pickers) ──
+
+#[tokio::test]
+async fn slack_lists_page_with_cursors_and_bounded_limits() {
+    let (base, mock) = serve(|s: &Seen| match s.path.as_str() {
+        "/api/conversations.list" => ok(json!({
+            "ok": true,
+            "channels": [
+                {"id": "C1", "name": "general", "is_private": false, "is_member": true, "num_members": 12, "topic": {"value": "x"}},
+                {"id": "G2", "name": "ops", "is_private": true, "is_member": true}
+            ],
+            "response_metadata": {"next_cursor": if s.query.contains_key("cursor") { "" } else { "dGVhbTpDMDYx" }}
+        })),
+        "/api/users.list" => ok(json!({
+            "ok": true,
+            "members": [{"id": "U1", "name": "ada", "real_name": "Ada Lovelace", "deleted": false, "is_bot": false,
+                "profile": {"display_name": "ada", "image_48": "https://avatars.slack-edge.com/ada_48.png"}}],
+            "response_metadata": {"next_cursor": ""}
+        })),
+        "/api/usergroups.list" => ok(json!({
+            "ok": true,
+            "usergroups": [{"id": "S1", "name": "On call", "handle": "oncall", "user_count": 3, "prefs": {}}]
+        })),
+        _ => (404, vec![], "".into()),
+    })
+    .await;
+    let client = slack::Client::new(&format!("{base}/api"));
+    let first = client.list_channels(SLACK_TOKEN, None, 5_000).await.unwrap();
+    assert_eq!(first.next.as_deref(), Some("dGVhbTpDMDYx"));
+    assert_eq!(
+        first.items[0],
+        slack::Channel {
+            id: "C1".into(),
+            name: "general".into(),
+            is_private: false,
+            is_member: true,
+            num_members: Some(12)
+        }
+    );
+    assert!(first.items[1].is_private && first.items[1].num_members.is_none());
+    let last = client
+        .list_channels(SLACK_TOKEN, first.next.as_deref(), 0)
+        .await
+        .unwrap();
+    assert_eq!(last.next, None, "an empty next_cursor is the end");
+    let users = client.list_users(SLACK_TOKEN, None, 50).await.unwrap();
+    assert_eq!(users.items[0].real_name.as_deref(), Some("Ada Lovelace"));
+    assert_eq!(
+        users.items[0].profile.image_48.as_deref(),
+        Some("https://avatars.slack-edge.com/ada_48.png")
+    );
+    let groups = client.list_usergroups(SLACK_TOKEN).await.unwrap();
+    assert_eq!(
+        (groups[0].handle.as_str(), groups[0].user_count),
+        ("oncall", Some(3))
+    );
+
+    let seen = seen(&mock);
+    for s in &seen {
+        assert_eq!(s.method, "GET");
+        assert_eq!(s.auth.as_deref(), Some(&*format!("Bearer {SLACK_TOKEN}")));
+    }
+    assert_eq!(seen[0].query["types"], "public_channel,private_channel");
+    assert_eq!(seen[0].query["exclude_archived"], "true");
+    assert_eq!(seen[0].query["limit"], "200", "a limit is at most 200");
+    assert!(!seen[0].query.contains_key("cursor"));
+    assert_eq!(
+        (seen[1].query["cursor"].as_str(), seen[1].query["limit"].as_str()),
+        ("dGVhbTpDMDYx", "1")
+    );
+    assert_eq!(seen[2].query["limit"], "50");
+    assert_eq!(seen[3].query["include_disabled"], "false");
+
+    // A list over the size cap is refused, not read.
+    let (base, _) = serve(|_: &Seen| (200, vec![], huge())).await;
+    let e = slack::Client::new(&format!("{base}/api"))
+        .list_users(SLACK_TOKEN, None, 200)
+        .await
+        .unwrap_err();
+    assert!(matches!(&e, Error::Decode(m) if m.contains("too large")), "{e:?}");
+}
+
+#[tokio::test]
+async fn discord_lists_a_guilds_channels_roles_and_members() {
+    let (base, mock) = serve(|s: &Seen| match s.path.as_str() {
+        "/api/v10/guilds/500/channels" => ok(json!([
+            {"id": "10", "type": 4, "name": "Work", "position": 0},
+            {"id": "11", "type": 0, "name": "general", "parent_id": "10", "position": 1, "topic": null}
+        ])),
+        "/api/v10/guilds/500/roles" => ok(json!([
+            {"id": "500", "name": "@everyone", "color": 0, "position": 0, "managed": false},
+            {"id": "21", "name": "Maintainers", "color": 5_017_087, "position": 2, "managed": false}
+        ])),
+        "/api/v10/guilds/500/members" | "/api/v10/guilds/500/members/search" => ok(json!([
+            {"user": {"id": "7", "username": "ada", "global_name": "Ada", "avatar": "abc", "bot": false}, "nick": "ada (ops)", "roles": []}
+        ])),
+        "/api/v10/guilds/500/members/7" => ok(json!({"user": {"id": "7", "username": "ada"}})),
+        _ => (
+            404,
+            vec![],
+            json!({"message": "Unknown Member", "code": 10007}).to_string(),
+        ),
+    })
+    .await;
+    let client = discord::Client::new(&format!("{base}/api/v10"), DISCORD_TOKEN);
+    let channels = client.guild_channels("500").await.unwrap();
+    assert_eq!(
+        (channels[1].kind, channels[1].parent_id.as_deref()),
+        (0, Some("10"))
+    );
+    let roles = client.guild_roles("500").await.unwrap();
+    assert_eq!(
+        (roles[1].name.as_str(), roles[1].color),
+        ("Maintainers", 5_017_087)
+    );
+    let found = client.search_guild_members("500", "ad a", 0).await.unwrap();
+    assert_eq!(found[0].nick.as_deref(), Some("ada (ops)"));
+    assert_eq!(found[0].user.avatar.as_deref(), Some("abc"));
+    client
+        .list_guild_members("500", Some("6"), 50_000)
+        .await
+        .unwrap();
+    client.list_guild_members("500", None, 10).await.unwrap();
+    assert!(client.guild_member("500", "7").await.unwrap().is_some());
+    assert_eq!(
+        client.guild_member("500", "8").await.unwrap(),
+        None,
+        "not a member"
+    );
+
+    let seen = seen(&mock);
+    for s in &seen {
+        assert_eq!(
+            (s.method.as_str(), s.auth.as_deref()),
+            ("GET", Some(&*format!("Bot {DISCORD_TOKEN}")))
+        );
+    }
+    assert_eq!(seen[2].query["query"], "ad a");
+    assert_eq!(seen[2].query["limit"], "1");
+    assert_eq!(
+        (seen[3].query["limit"].as_str(), seen[3].query["after"].as_str()),
+        ("1000", "6"),
+        "a page is at most 1000"
+    );
+    assert!(!seen[4].query.contains_key("after"));
+}

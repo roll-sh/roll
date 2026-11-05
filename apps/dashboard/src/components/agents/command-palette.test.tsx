@@ -196,4 +196,24 @@ describe("the canvas's prompt bar", () => {
     await waitFor(() => expect(creates(h)).toHaveLength(2));
     expect(creates(h)[1]).not.toHaveProperty("orchestrator");
   });
+
+  it("“Project: roll” has the project's actions, its card's own", async () => {
+    setup();
+    await userEvent.keyboard("{Meta>}k{/Meta}");
+    await userEvent.type(screen.getByRole("combobox"), "project: roll");
+    expect(selected()).toHaveTextContent("Project: roll");
+    await userEvent.keyboard("{Enter}");
+    const names = within(palette())
+      .getAllByRole("option")
+      .map((o) => o.textContent);
+    expect(names).toEqual([
+      expect.stringContaining("Show on the canvas"),
+      expect.stringContaining("New agent here"),
+      expect.stringContaining("Focus on this project only"),
+      expect.stringContaining("Settings"),
+    ]);
+    await userEvent.type(within(palette()).getByRole("combobox"), "settings");
+    await userEvent.keyboard("{Enter}");
+    expect(agentsSurface.get().view).toEqual({ kind: "settings", target: `p:${project().id}` });
+  });
 });

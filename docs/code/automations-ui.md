@@ -11,35 +11,51 @@ Code: `apps/dashboard/src/components/agents/automations/` (views), `lib/automati
 
 ## Where it lives
 
-- **Entry points.** The ⚡ button in the agents header (it toggles back to the canvas), "Automations",
-  "New automation" and "Run automation…" in ⌘K, the automation chip on a thread's canvas card, a
-  notice's "View the run", and links:
-  `#agents/automations`, `…/runs`, `…/templates`, `…/new[/<template>]`, `…/<id>`,
-  `…/<id>/runs[/<run>]`, `…/<id>/settings`.
-- **List in the working area, detail in the side panel.** The list replaces the canvas inside the
-  same inset panel (Linear's inverted L), and the open automation is the floating sheet beside it,
-  the way a conversation sits beside the canvas.
-  - It keeps one model for the whole surface: whatever you open slides in on the right, and Escape
-    closes it (first the panel, then the list).
-  - The list stays visible while you edit, so you can switch between automations without going
-    back, and its live status keeps moving.
-  - The builder is a vertical flow about 600px wide, which is the sheet's width. Zapier's editor
-    is a narrow column for the same reason; a full-width canvas (n8n) suits branching graphs, and
-    automations here are linear.
-  - The canvas stays mounted underneath, so coming back finds it where it was.
-- On a phone the panel covers the list, as conversations do.
+- **Entry points.** The ⚡ button in the agents header and A on the canvas (both toggle the sheet),
+  "Automations", "New automation" and "Run automation…" in ⌘K, the automation chip on a thread's
+  canvas card, a notice's "View the run", and links:
+  `#agents/automations`, `…/runs`, `…/templates`, `…/new[/<template>]`, `…/<id>` (its overview),
+  `…/<id>/edit`, `…/<id>/settings`, `…/<id>/runs[/<run>[/<thread>]]`.
+- **A sheet beside the canvas, not a page.** Automations open in the right sheet the conversation
+  uses (`SidePanel`: the same width, resize handle and slide in; it slides back out when it closes),
+  so the canvas stays live and interactive next to them and a run's threads can be pointed at on
+  it. A short list never floats in an empty page. One right sheet: a card clicked on the canvas
+  replaces the sheet with its conversation.
+- **The sheet.** A stack (`sheet.tsx`, `lib/automations-nav.ts`):
+  - **List** (Automations / Runs / Templates tabs) → **overview** of one automation (what starts it,
+    the next run, the steps in words, where it works, recent runs; the switch, Run, Edit, ⋯) →
+    its **builder** (Build and Settings tabs) or **all its runs** → one **run** (live steps; its
+    threads' cards highlighted on the canvas) → a **conversation** that run started.
+  - Every page has the same header: Back, labelled with where it goes, then the page's tile, title,
+    subtitle and tools, then Maximize (the builder only) and Close.
+  - Back and Escape go up a level: to where you came from (the trail), else the level's parent (a
+    deep link). From the list Escape closes the sheet; ⚡ and A close it from anywhere.
+  - A page deeper slides in from the right, one you go back to from the left; a tab on the same
+    level doesn't move. A new automation, once created, is replaced by its overview.
+  - The builder can fill the working area (T3's "Maximize panel"; per device). Its vertical flow is
+    about 600px wide, the sheet's width, like Zapier's narrow editor; maximizing gives the
+    conditions and long templates room.
+- **Phone.** The sheet is full height over the canvas (which pauses under it), as conversations
+  are, with the same stack and motion. There's no Close: Back leads out at every level, and Back on
+  the list returns to the canvas. Headers keep their tools as icons, the list's search gets its own
+  line, rows drop the place and integration marks and keep ⋯ instead of hover actions, and a
+  conversation opened from a run fills the sheet with Back to the run.
 
 ## The list
 
 | Part | What and why |
 | --- | --- |
-| Bar | A segmented control: Automations (count), Runs (an accent count while some run), Templates. Then a quiet filter field and the white "New automation". |
-| Row | Two lines at 52px (T3's `ScheduledTaskRow` and Linear's list rows). Line 1 is the name at 13.5/510. Line 2 is the trigger in words plus "next in 3 h" (`Weekdays at 09:00 · Budapest · next in 10 h`). |
-| Left | The trigger's icon on a tile. On narrow lists a 6px last-run dot sits on its corner; when the column has room the dot moves into the last-run column instead. |
-| Columns | The last run (dot, state, `4m`), then seven days of runs as 4px tracks filled from the bottom (failed days red, Linear-quiet), then the count. Container queries drop columns as the side panel narrows the list. |
-| End | T3's switch (on is the accent), then ⋯ (Run now, Duplicate, Delete with a confirm), which shows on hover, on focus and always on touch. |
+| Header | The sheet's header: the ⚡ tile, "Automations", the white "New", Close. |
+| Bar | A segmented control: Automations (count), Runs (an accent count while some run), Templates. Then Search (every word, across the name, the trigger in words and the steps' kinds) and Filter. On a phone Search gets its own line. |
+| Filter | Linear's quick filters, one value each, with counts and only values that occur: Status (On, Paused, Last run failed, Running now), Trigger (By hand, Schedule, roll code, Slack…), Project (the projects its steps work in). Active ones are chips over the list with × and Clear. Search and filters stay while you go into an automation and back; they reset when the sheet closes. Logic: `lib/automations-list.ts`. |
+| Row | Two lines at 52px (T3's `ScheduledTaskRow` and Linear's list rows). Line 1 is the name at 13.5/510, where it works (project and machine icons) and the marks of the integrations its steps use besides its trigger (Slack, Linear, GitHub); the marks drop below about 450px. Line 2 is the trigger in words plus the next run (`Weekdays at 09:00 · Budapest · next in 10 h`). |
+| Left | The trigger's icon on a tile (an integration's own mark for its triggers), with a dot that breathes on its corner while a run goes on. |
+| Last run | Its state's dot, the state in words when there's room, and how long ago in mono (`4m`); "Running" shimmering while one goes on. |
+| History | Its last 12 runs as 3px bars, oldest first (GitHub Actions' run history): done grey, failed red, going on the accent breathing, cancelled and skipped faint; empty slots stay as faint tracks so rows line up. Each bar's title says what and when. Dropped on narrow lists. |
+| Actions | On hover and keyboard focus, Run now, Pause/Turn on, Duplicate, Edit and ⋯ (Delete with a confirm) take the last run's and history's place, in the row, with no floating bar and no room reserved for them. On touch and on lists narrower than about 450px (a phone), ⋯ beside the switch has them all, so the name keeps its room and a tap on the row always opens it. |
+| End | T3's switch (on is the accent). |
 | Paused | The row dims to 64% and line 2 reads "Paused" (T3). |
-| Selected | A 2px accent bar on the left and the selected fill. |
+| Keys | Tab to a row, Enter opens it, ↑/↓ move between rows. |
 
 Live state comes from `automation_run` events, not from `last_run`, which is only as fresh as the
 last list (auto-core's note): `lastRunOf` takes the newest run the store has.
@@ -113,7 +129,9 @@ last list (auto-core's note): `lastRunOf` takes the newest run the store has.
     | `format` | Picker |
     | --- | --- |
     | `template` / `template-long` | One-line or multi-line template field |
-    | `roll-thread` | Mono template field; empty means the run's latest thread |
+    | `roll-thread` | The owner's threads by title, grouped by project (the shared picker); a typed id or a variable too; empty means the run's latest thread |
+    | `roll-machine` | The owner's machines and sandboxes; empty means the step's default |
+    | `lookup` | The shared picker (`ui/picker.tsx`) over `lookup: {source, kind, parent?, extras?, extras_group?, create?}`: the integration's things from `GET …/lookup/{source}/{kind}` (one, or chips for an array), `parent` read from that sibling field when it holds one value (a create-issue step's states are its team's), `extras` first (`roll`, `No one`, the kinds of state), "Create label …" with `create`. Every lookup field also takes a typed value, and step fields a variable ("Use a variable"); the stored value stays the id, shown by name |
     | `roll-target` | A machine (T3 select with online, asleep or offline), a new sandbox (size, keep it), any online, or the project's machine |
     | `roll-project` | By project or by repository (cloned if missing) |
     | `roll-model` | The composer's model picker, from the target machine's providers (all machines' when the target isn't one machine); it writes `provider` and `effort` too, and those fields are hidden |
@@ -178,8 +196,11 @@ last list (auto-core's note): `lastRunOf` takes the newest run the store has.
   - **Running, waiting and failed steps open themselves.**
     - The log shows lines at `+0.7s` offsets, errors in red, at most 384px high.
     - Then the output as `steps.<id>` JSON, and "Trying again in 30s" while retrying.
-  - **Threads a step started** are chips under it (title · machine). A click opens the
-    conversation in the side panel and reveals its card on the canvas.
+  - **Threads a step started** are chips under it (title · machine), and their cards are
+    highlighted on the canvas (the open card's accent edge) and the first is revealed while the run
+    shows. A chip, or one of those cards on the canvas, opens the conversation as the sheet's next
+    page (Back and Escape return to the run). Any other card replaces the sheet with its
+    conversation, as always: one right sheet.
 - **Live.** `automation_run` events carry whole runs, and the store keeps the newer cursor, so a
   run's detail moves while you watch.
 

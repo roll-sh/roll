@@ -338,7 +338,9 @@ export function ViewsBar({
         {focused && (
           <span className="fade-in flex h-7 max-w-44 items-center gap-1.5 rounded-md border border-line-2 bg-panel-2 pr-0.5 pl-2 text-[12px] text-fg inset-shadow-highlight" role="status">
             <FocusIcon className="size-3.5 shrink-0 text-muted" strokeWidth={1.75} aria-hidden />
-            <span className="truncate">{focused.name}</span>
+            <span className="truncate">
+              <span className="text-muted">Only</span> {focused.name}
+            </span>
             <button onClick={focused.clear} title="Show every project (Esc)" aria-label={`Stop focusing ${focused.name}`} className="grid size-6 shrink-0 place-items-center rounded text-subtle hover:bg-fg/[0.06] hover:text-fg">
               <X className="size-3" />
             </button>

@@ -347,7 +347,7 @@ impl StepKind for AgentSession {
                 "properties": {
                     "session": { "type": "string", "title": "Session", "description": "Agent session id; default: the event's", "format": "template" },
                     "thread": { "type": "string", "title": "Thread", "description": "Default: an earlier step's, else the issue's", "format": "roll-thread" },
-                    "machine": { "type": "string" },
+                    "machine": { "type": "string", "title": "Machine", "description": "Where a new thread starts (default: the project's)", "format": "roll-machine" },
                     "actions": { "type": "boolean", "description": "Tool calls as actions (default on)" },
                     "thoughts": { "type": "boolean", "description": "Reasoning and interim messages as thoughts (default on)" },
                     "plan": { "type": "boolean", "description": "The agent's todos as the session's plan (default on)" },

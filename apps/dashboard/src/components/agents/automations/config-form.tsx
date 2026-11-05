@@ -12,9 +12,11 @@ import { useMemo, type ReactNode } from "react";
 import type { ModelOptions, ProviderInfo } from "@/lib/agents-api";
 import type { ProjectRef, Target } from "@/lib/automations-api";
 import type { Problems, Schema, Variable } from "@/lib/automations-ui";
+import { LookupPicker } from "../lookup-picker";
 import { ModelPicker } from "../model-picker";
 import { field as fieldClass } from "../settings-ui";
 import { cn, Segmented, Switch } from "../ui";
+import { Picker, type PickerOption } from "../ui/picker";
 import { useAgents } from "../use-agents";
 import { SizedSelect } from "./shared";
 import { TemplateInput } from "./template-input";
@@ -125,7 +127,19 @@ function FieldFor({
     case "roll-thread":
       return (
         <Label title={title} description={s.description}>
-          <TemplateInput label={title} value={show(value)} onChange={(v) => onChange(v || null)} placeholder="The thread this run started last" mono {...tplProps} />
+          <ThreadField label={title} value={typeof value === "string" ? value : null} onChange={onChange} variables={ctx.variables} error={error} />
+        </Label>
+      );
+    case "roll-machine":
+      return (
+        <Label title={title} description={s.description}>
+          <MachineField label={title} value={typeof value === "string" ? value : null} onChange={onChange} variables={ctx.variables} error={error} />
+        </Label>
+      );
+    case "lookup":
+      return (
+        <Label title={title} description={s.description}>
+          <LookupField title={title} schema={s} required={required} value={value} onChange={onChange} whole={whole} variables={ctx.variables} error={error} />
         </Label>
       );
     case "json":
@@ -333,6 +347,58 @@ export function Chips<V extends string>({ options, picked, onChange, label }: { 
 
 // ── roll's pickers ──
 
+/** A value a parent field holds, when it's one thing (not a list of several, not a variable). */
+function single(v: unknown): string | null {
+  const one = Array.isArray(v) ? (v.length === 1 ? v[0] : null) : v;
+  return typeof one === "string" && one && !one.includes("{{") ? one : null;
+}
+
+/** Linear's kinds of workflow state: a row of one shows the state's icon. */
+const STATE_KINDS = new Set(["triage", "backlog", "unstarted", "started", "completed", "canceled"]);
+
+/**
+ * A `format: "lookup"` field: the integration's things in the shared picker (one, or a list for an
+ * array), its own `extras` first, a typed value or a variable when nothing fits.
+ */
+function LookupField({ title, schema: s, required, value, onChange, whole, variables, error }: { title: string; schema: Schema; required: boolean; value: unknown; onChange: (v: unknown) => void; whole: Obj; variables: readonly Variable[]; error?: string }) {
+  const l = s.lookup ?? {};
+  const extras = useMemo(() => (l.extras ?? []).map((e): PickerOption => ({ id: e.id, label: e.label, icon: STATE_KINDS.has(e.id) ? e.id : undefined })), [l.extras]);
+  const parent = l.parent ? single(whole[l.parent]) : null;
+  const common = { label: title, extras, extrasGroup: l.extras_group, custom: true, variables, error, placeholder: required ? undefined : "Not set" };
+  const from = l.source && l.kind ? { source: l.source, kind: l.kind } : null;
+  if (s.type === "array") {
+    const props = { ...common, multiple: true as const, value: Array.isArray(value) ? value.map(String) : [], onChange: (v: string[]) => onChange(v.length ? v : null) };
+    return from ? <LookupPicker {...props} from={from} parent={parent} create={l.create} /> : <Picker {...props} />;
+  }
+  const props = { ...common, value: value == null || value === "" ? null : String(value), onChange: (v: string | null) => onChange(v), clearable: !required };
+  return from ? <LookupPicker {...props} from={from} parent={parent} create={l.create} /> : <Picker {...props} />;
+}
+
+/** A roll thread: the owner's threads by title, grouped by project. Empty: the run's last. */
+function ThreadField({ label, value, onChange, variables, error }: { label: string; value: string | null; onChange: (v: string | null) => void; variables: readonly Variable[]; error?: string }) {
+  const { client } = useAgents();
+  const { threads, projects, machines } = client.data;
+  const options = useMemo(
+    () =>
+      [...threads.values()]
+        .sort((a, b) => b.value.updated_at - a.value.updated_at)
+        .slice(0, 200)
+        .map((r): PickerOption => ({ id: r.value.id, label: r.value.title || "Untitled", group: projects.get(r.value.project)?.value.name ?? "Threads", hint: machines.get(r.machine)?.value.name })),
+    [threads, projects, machines],
+  );
+  return <Picker label={label} value={value} onChange={onChange} options={options} custom variables={variables} clearable placeholder="The thread this run started last" error={error} mono />;
+}
+
+/** A machine (or sandbox) of the owner's. Empty: the step's default. */
+function MachineField({ label, value, onChange, variables, error }: { label: string; value: string | null; onChange: (v: string | null) => void; variables: readonly Variable[]; error?: string }) {
+  const { client } = useAgents();
+  const options = useMemo(
+    () => [...client.data.machines.values()].map((r) => r.value).map((m): PickerOption => ({ id: m.id, label: m.name, hint: m.online ? "online" : m.sandbox ? "asleep" : "offline", group: m.sandbox ? "Sandboxes" : "Machines" })),
+    [client.data.machines],
+  );
+  return <Picker label={label} value={value} onChange={onChange} options={options} custom variables={variables} clearable placeholder="Default" error={error} mono />;
+}
+
 /** Every provider of the owner's machines (one machine's when given), the first of each id. */
 function useProviders(machine?: string | null): ProviderInfo[] {
   const { client } = useAgents();
@@ -467,7 +533,7 @@ function ProjectField({ value, onChange, error }: { value: ProjectRef | null; on
       )}
       {value?.type === "repo" && (
         <div className="flex flex-wrap gap-1.5">
-          <input aria-label="Repository" value={value.repo} onChange={(e) => onChange({ ...value, repo: e.target.value })} placeholder="owner/repo" className={cn(fieldClass, "w-56 font-mono text-[12px]")} />
+          <LookupPicker label="Repository" from={{ source: "code", kind: "repos" }} value={value.repo || null} onChange={(repo) => onChange({ ...value, repo: repo ?? "" })} placeholder="Pick a repo" custom className="w-56" />
           <input aria-label="Folder" value={value.path ?? ""} onChange={(e) => onChange({ ...value, path: e.target.value || null })} placeholder="Folder (optional)" className={cn(fieldClass, "w-44 font-mono text-[12px]")} />
         </div>
       )}

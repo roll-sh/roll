@@ -47,6 +47,7 @@ import {
 } from "@/lib/automations-ui";
 import { field as fieldClass } from "../settings-ui";
 import { cn, Menu, MenuGroup, MenuGroupLabel, MenuItem, MenuPopup, MenuSeparator, MenuTrigger, Segmented, Select } from "../ui";
+import { LookupPicker } from "../lookup-picker";
 import { useAgents } from "../use-agents";
 import { AddButton, Chips, ConfigForm } from "./config-form";
 import { stepIcon, Tile, triggerIcon, SizedSelect } from "./shared";
@@ -504,7 +505,7 @@ function TriggerBody({
           </div>
           <div>
             <p className="mb-1.5 text-[12.5px] font-[510] text-soft">Repositories</p>
-            <input aria-label="Repositories" value={t.repos.join(", ")} onChange={(e) => onChange({ ...t, repos: e.target.value.split(",").map((x) => x.trim()).filter(Boolean) })} placeholder="All your repos" className={cn(fieldClass, "w-full font-mono text-[12px]")} />
+            <LookupPicker label="Repositories" multiple from={{ source: "code", kind: "repos" }} value={t.repos} onChange={(repos) => onChange({ ...t, repos })} placeholder="All your repos" custom />
           </div>
         </div>
       );
@@ -819,7 +820,7 @@ function StepCard({
   );
 }
 
-function useStepSummary(s: Step, schema: Schema): string {
+export function useStepSummary(s: Step, schema: Schema): string {
   const { client } = useAgents();
   const c = (s.config ?? {}) as Record<string, unknown>;
   const parts: string[] = [];

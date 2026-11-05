@@ -1,41 +1,62 @@
 "use client";
 
 /**
- * The Automations view: in place of the canvas, inside the same inset panel (docs/code/
- * automations-ui.md). Three lists under one bar: the automations (two-line rows: trigger, name,
- * when it runs, its last run, seven days of runs, the switch), every run, and the templates; the
- * empty state is the templates gallery. Opening one puts it in the side panel.
+ * The automations list, the root of the automations sheet (docs/code/automations-ui.md). Three
+ * lists under one bar: the automations (two-line rows: trigger, name, when it runs, its last run,
+ * seven days of runs, the switch), every run, and the templates; the empty state is the templates
+ * gallery. Opening one goes a level into the sheet (sheet.tsx).
  */
 
 import { DotField } from "@roll/brand";
-import { ArrowRight, ChevronRight, Copy, MoreHorizontal, Play, Plus, Search, Trash2, X } from "lucide-react";
+import { ArrowRight, ChevronRight, Plus, Search, X, Zap } from "lucide-react";
 import { useMemo, useState, type ReactNode } from "react";
 import type { Automation, AutomationRun, RunState } from "@/lib/automations-api";
 import { TEMPLATES, type AutomationTemplate, type TemplateContext } from "@/lib/automation-templates";
 import { setAgentsView, type AutomationsView as View } from "@/lib/agents-surface";
-import { duration, lastRunOf, runLabel, specOf, took, triggerSummary, weekOf } from "@/lib/automations-ui";
+import { duration, took } from "@/lib/automations-ui";
 import { automationPlaces } from "@/lib/agents-identity";
 import { MachineIcon, ProjectIcon } from "../identity";
-import { Menu } from "../menu";
 import { integrationOf } from "../brand-icons";
 import { ago } from "../shared";
-import { cn, Segmented, Switch } from "../ui";
+import { cn, Segmented } from "../ui";
 import { useAgents } from "../use-agents";
-import { inTime, PrimaryButton, QuietButton, RunDot, RunStatus, shortAgo, stepIcon, Tile, triggerIcon, useAutomations, WeekStrip } from "./shared";
+import type { ListFilter as Filter } from "@/lib/automations-list";
+import { AutomationList, FilterButton } from "./list";
+import { SheetHeader } from "./sheet";
+import { PrimaryButton, QuietButton, RunStatus, stepIcon, Tile, triggerIcon, useAutomations } from "./shared";
 
 export function AutomationsView({ view, phone }: { view: View; phone: boolean }) {
   const a = useAutomations();
   const list = view.list ?? "automations";
   const go = (patch: Partial<View>) => setAgentsView({ kind: "automations", ...patch });
   const automations = useMemo(() => [...a.automations.values()].sort((x, y) => Number(y.enabled) - Number(x.enabled) || x.name.localeCompare(y.name)), [a.automations]);
-  const [query, setQuery] = useState("");
-  const shown = query.trim() ? automations.filter((x) => `${x.name} ${x.description ?? ""} ${triggerSummary(x.trigger, a.catalog)}`.toLowerCase().includes(query.trim().toLowerCase())) : automations;
+  // Kept while the page is open, so coming back from an automation finds the list as it was.
+  const [query, setQuery] = useState(() => kept.query);
+  const [filter, setFilterState] = useState<Filter>(() => kept.filter);
+  const setSearch = (q: string) => setQuery((kept.query = q));
+  const setFilter = (f: Filter) => setFilterState((kept.filter = f));
   const empty = a.loaded && !a.error && automations.length === 0;
 
-  if (!a.store) return <Center title="Automations aren't on this server yet" body="Update roll to set up triggers that run your agents." />;
+  if (!a.store)
+    return (
+      <>
+        <SheetHeader title="Automations" />
+        <Center title="Automations aren't on this server yet" body="Update roll to set up triggers that run your agents." />
+      </>
+    );
   return (
-    <div className="flex h-full min-h-0 flex-col @container" aria-label="Automations">
-      <div className="flex h-11 shrink-0 items-center gap-2 px-3 max-sm:px-2">
+    <>
+      <SheetHeader
+        icon={<Tile icon={Zap} />}
+        title="Automations"
+        tools={
+          <PrimaryButton onClick={() => go({ open: "new", list: view.list })} title="New automation">
+            <Plus strokeWidth={2} />
+            <span className="max-sm:sr-only">New</span>
+          </PrimaryButton>
+        }
+      />
+      <div className="flex min-h-11 shrink-0 flex-wrap items-center gap-2 px-3 py-2" aria-label="Automations">
         <Segmented
           label="Show"
           value={list}
@@ -46,25 +67,20 @@ export function AutomationsView({ view, phone }: { view: View; phone: boolean })
             { value: "templates", label: "Templates" },
           ]}
         />
-        <span className="ml-auto flex items-center gap-1.5">
-          {list === "automations" && automations.length > 0 && !phone && (
-            <label className="flex h-7 w-52 items-center gap-2 rounded-md border border-line bg-fg/[0.03] px-2 text-[12.5px] inset-shadow-highlight transition-colors focus-within:border-line-3 max-lg:w-40">
-              <Search className="size-3.5 shrink-0 text-subtle" aria-hidden />
-              <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Filter" aria-label="Filter automations" className="min-w-0 flex-1 bg-transparent outline-none placeholder:text-subtle" />
-              {query && (
-                <button type="button" onClick={() => setQuery("")} aria-label="Clear the filter" className="text-subtle hover:text-fg">
-                  <X className="size-3" />
-                </button>
-              )}
-            </label>
-          )}
-          <PrimaryButton onClick={() => go({ open: "new", list: view.list })} title="New automation">
-            <Plus strokeWidth={2} />
-            <span className="max-sm:sr-only">New automation</span>
-          </PrimaryButton>
-        </span>
+        {list === "automations" && automations.length > 0 && (
+          <label className="ml-auto flex h-7 min-w-0 flex-1 basis-32 max-sm:order-last max-sm:ml-0 max-sm:basis-full items-center gap-2 rounded-md border border-line bg-fg/[0.03] px-2 text-[12.5px] inset-shadow-highlight transition-colors focus-within:border-line-3 sm:max-w-56">
+            <Search className="size-3.5 shrink-0 text-subtle" aria-hidden />
+            <input value={query} onChange={(e) => setSearch(e.target.value)} placeholder="Search" aria-label="Search automations" className="min-w-0 flex-1 bg-transparent outline-none placeholder:text-subtle" />
+            {query && (
+              <button type="button" onClick={() => setSearch("")} aria-label="Clear the search" className="text-subtle hover:text-fg">
+                <X className="size-3" />
+              </button>
+            )}
+          </label>
+        )}
+        {list === "automations" && automations.length > 1 && <FilterButton automations={automations} filter={filter} setFilter={setFilter} />}
       </div>
-      <div className="min-h-0 flex-1 overflow-y-auto" data-scroll>
+      <div className="min-h-0 flex-1 overflow-y-auto @container" data-scroll>
         {!a.loaded ? (
           <Loading />
         ) : a.error && !automations.length ? (
@@ -81,16 +97,7 @@ export function AutomationsView({ view, phone }: { view: View; phone: boolean })
           <EmptyState />
         ) : (
           <Section>
-            {shown.length ? (
-              <List automations={shown} runs={a.runs} selected={view.open} />
-            ) : (
-              <p className="py-16 text-center text-[13px] text-subtle">
-                Nothing matches “{query}”.{" "}
-                <button onClick={() => setQuery("")} className="text-accent hover:underline">
-                  Clear the filter
-                </button>
-              </p>
-            )}
+            <AutomationList automations={automations} query={query} setQuery={setSearch} filter={filter} setFilter={setFilter} list={view.list} />
             <p className="mt-4 px-1 text-[12px] text-subtle">
               Automations run your agents when something happens.{" "}
               <button onClick={() => go({ list: "templates" })} className="text-accent hover:underline">
@@ -100,7 +107,7 @@ export function AutomationsView({ view, phone }: { view: View; phone: boolean })
           </Section>
         )}
       </div>
-    </div>
+    </>
   );
 }
 
@@ -110,8 +117,17 @@ function Count({ n, accent }: { n: number; accent?: boolean }) {
   return <span className={cn("ml-1 grid h-4 min-w-4 place-items-center rounded-full px-1 font-mono text-[10px] tabular-nums", accent ? "bg-accent/20 text-accent" : "bg-fg/[0.08] text-muted")}>{n}</span>;
 }
 
+/** The list's search and filters, kept while the page is open (going into an automation and back). */
+const kept: { query: string; filter: Filter } = { query: "", filter: {} };
+
+/** A fresh list the next time the sheet opens. */
+export function forgetListState() {
+  kept.query = "";
+  kept.filter = {};
+}
+
 function Section({ children }: { children: ReactNode }) {
-  return <div className="mx-auto w-full max-w-[1040px] px-5 pt-3 pb-10 max-sm:px-2">{children}</div>;
+  return <div className="w-full px-3 pt-1 pb-8 max-sm:px-2">{children}</div>;
 }
 
 function Loading() {
@@ -141,24 +157,11 @@ function Center({ title, body, action }: { title: string; body: string; action?:
   );
 }
 
-// ── the list ──
-
-function List({ automations, runs, selected }: { automations: Automation[]; runs: ReadonlyMap<string, AutomationRun>; selected?: string }) {
-  const [now] = useState(() => Date.now());
-  return (
-    <ul className="overflow-hidden rounded-xl border border-line-2 bg-panel shadow-card inset-shadow-highlight" aria-label="Your automations">
-      {automations.map((x) => (
-        <Row key={x.id} automation={x} runs={runs} selected={x.id === selected} now={now} />
-      ))}
-    </ul>
-  );
-}
-
-/** The projects and machines an automation works in, as the canvas shows them (a quiet stack after its name). */
-function Places({ automation }: { automation: Automation }) {
+/** The projects and machines an automation works in, as the canvas shows them. */
+export function usePlaces(automation: Automation) {
   const { client } = useAgents();
   const data = client.data;
-  const { projects, machines } = useMemo(
+  return useMemo(
     () =>
       automationPlaces(
         automation,
@@ -167,6 +170,11 @@ function Places({ automation }: { automation: Automation }) {
       ),
     [automation, data.projects, data.machines],
   );
+}
+
+/** Where it works, as a quiet stack of project and machine icons after its name. */
+export function Places({ automation }: { automation: Automation }) {
+  const { projects, machines } = usePlaces(automation);
   if (!projects.length && !machines.length) return null;
   const names = [...projects.map((p) => p.name), ...machines.map((m) => m.name)];
   const shown = 3;
@@ -180,119 +188,6 @@ function Places({ automation }: { automation: Automation }) {
       ))}
       {names.length > shown && <span className="font-mono text-[10.5px] text-subtle tabular-nums">+{names.length - shown}</span>}
     </span>
-  );
-}
-
-function Row({ automation: x, runs, selected, now }: { automation: Automation; runs: ReadonlyMap<string, AutomationRun>; selected: boolean; now: number }) {
-  const { store, catalog } = useAutomations();
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const last = lastRunOf(x, runs.values());
-  const week = useMemo(() => weekOf(runs.values(), x.id, now), [runs, x.id, now]);
-  const source = x.trigger.type === "integration" ? x.trigger.source : x.trigger.type;
-  const open = () => setAgentsView({ kind: "automations", open: x.id });
-  const act = async (fn: () => Promise<unknown>) => {
-    setError(null);
-    try {
-      await fn();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    }
-  };
-  const toggle = (on: boolean) =>
-    act(async () => {
-      if (!store) return;
-      setBusy(true);
-      try {
-        store.put(on ? await store.api.enable(store.owner, x.id) : await store.api.disable(store.owner, x.id));
-      } finally {
-        setBusy(false);
-      }
-    });
-  const runNow = () =>
-    act(async () => {
-      if (!store) return;
-      const r = await store.api.run(store.owner, x.id, {});
-      store.putRun(r);
-      setAgentsView({ kind: "automations", open: x.id, tab: "runs", run: r.id });
-    });
-  const duplicate = () =>
-    act(async () => {
-      if (!store) return;
-      const saved = await store.api.create(store.owner, { ...specOf(x), name: `${x.name} (copy)`, enabled: false });
-      store.put(saved.automation);
-      setAgentsView({ kind: "automations", open: saved.automation.id });
-    });
-  const remove = () =>
-    act(async () => {
-      if (!store) return;
-      await store.api.remove(store.owner, x.id);
-      store.forget(x.id);
-    });
-  const when = !x.enabled ? "Paused" : [triggerSummary(x.trigger, catalog), x.next_at && x.next_at > now ? `next ${inTime(x.next_at, now)}` : null].filter(Boolean).join(" · ");
-  return (
-    <li className="border-line [&+&]:border-t">
-      <div
-        role="button"
-        tabIndex={0}
-        onClick={open}
-        onKeyDown={(e) => {
-          if ((e.key === "Enter" || e.key === " ") && e.target === e.currentTarget) {
-            e.preventDefault();
-            open();
-          }
-        }}
-        aria-label={x.name}
-        aria-current={selected || undefined}
-        className={cn(
-          "group/row relative flex min-h-[52px] cursor-pointer items-center gap-3 px-3.5 py-2 outline-none transition-colors duration-150 hover:bg-fg/[0.03] focus-visible:bg-fg/[0.04]",
-          selected && "bg-fg/[0.06] hover:bg-fg/[0.06]",
-        )}
-      >
-        <span className={cn("relative transition-opacity", !x.enabled && "opacity-60")}>
-          <Tile icon={triggerIcon(source)} />
-          {last && <RunDot status={last.status} className="absolute -top-0.5 -right-0.5 ring-2 ring-panel @2xl:hidden" />}
-        </span>
-        <span className={cn("min-w-0 flex-1 transition-opacity", !x.enabled && "opacity-64")}>
-          <span className="flex min-w-0 items-center gap-2">
-            <span className="truncate text-[13.5px] font-[510] tracking-[-0.01em]">{x.name}</span>
-            <Places automation={x} />
-          </span>
-          <span className="mt-px block truncate text-[12px] text-subtle">
-            {when}
-            {error && <span className="ml-2 text-danger">{error}</span>}
-          </span>
-        </span>
-        <span className="hidden w-36 shrink-0 items-center gap-1.5 text-[12px] text-muted @2xl:flex">
-          {last ? (
-            <>
-              <RunDot status={last.status} />
-              <span className={cn("truncate", last.status === "failed" && "text-danger")}>{runLabel[last.status]}</span>
-              <span className="ml-auto font-mono text-[11px] text-subtle tabular-nums">{shortAgo(last.at, now)}</span>
-            </>
-          ) : (
-            <span className="text-faint">Never run</span>
-          )}
-        </span>
-        <span className="hidden shrink-0 @lg:inline-flex">
-          <WeekStrip {...week} />
-        </span>
-        <span className="flex shrink-0 items-center gap-1" onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}>
-          <Switch size="sm" checked={x.enabled} disabled={busy} onCheckedChange={(on) => void toggle(on)} aria-label={`${x.enabled ? "Pause" : "Turn on"} ${x.name}`} />
-          <span className="opacity-0 transition-opacity group-hover/row:opacity-100 focus-within:opacity-100 [@media(hover:none)]:opacity-100">
-            <Menu
-              label={`More for ${x.name}`}
-              trigger={<MoreHorizontal className="size-4" />}
-              items={[
-                { label: "Run now", icon: <Play />, onSelect: () => void runNow() },
-                { label: "Duplicate", icon: <Copy />, onSelect: () => void duplicate() },
-                { label: "Delete", icon: <Trash2 />, danger: true, confirm: `Delete ${x.name}?`, onSelect: () => void remove() },
-              ]}
-            />
-          </span>
-        </span>
-      </div>
-    </li>
   );
 }
 
@@ -451,20 +346,20 @@ function TemplateCard({ template: t, selected, needsSetup }: { template: Automat
 function EmptyState() {
   return (
     <div className="relative isolate">
-      <DotField className="pointer-events-none absolute inset-x-0 top-0 -z-10 h-72 text-fg [mask-image:linear-gradient(to_bottom,black,transparent)]" />
+      <DotField className="pointer-events-none absolute inset-x-0 top-0 -z-10 h-44 text-fg [mask-image:linear-gradient(to_bottom,black,transparent)]" />
       <Section>
-        <div className="mx-auto max-w-xl pt-12 pb-10 text-center max-sm:pt-6">
-          <h2 className="text-[28px] leading-tight font-[590] tracking-[-0.05em]">Let your agents run on their own</h2>
-          <p className="mx-auto mt-2 max-w-md text-[13.5px] leading-relaxed text-muted">
+        <div className="px-1 pt-6 pb-6">
+          <h2 className="text-[20px] leading-tight font-[590] tracking-[-0.04em]">Let your agents run on their own</h2>
+          <p className="mt-1.5 max-w-md text-[13px] leading-relaxed text-muted">
             When something happens (a schedule, a webhook, main breaking, an agent finishing), start agents on any machine or a fresh sandbox, wait for them, and ship what they made.
           </p>
-          <div className="mt-5 flex justify-center gap-2">
+          <div className="mt-4 flex gap-2">
             <PrimaryButton onClick={() => setAgentsView({ kind: "automations", open: "new" })}>
               <Plus strokeWidth={2} /> Start from scratch
             </PrimaryButton>
           </div>
         </div>
-        <h3 className="mb-2.5 px-0.5 text-[12px] font-medium text-soft">Start from a template</h3>
+        <h3 className="mb-2.5 px-1 text-[12px] font-medium text-soft">Or start from a template</h3>
         <Gallery />
       </Section>
     </div>

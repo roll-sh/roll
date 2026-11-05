@@ -1,9 +1,12 @@
-import { act, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { agentsSurface, resetAgentsSurface } from "@/lib/agents-surface";
 import { NO_INTEGRATIONS, type ChatInstall, type Integrations, type IntegrationsApi } from "@/lib/integrations-api";
+import { memoryLookup } from "@/lib/lookup-api";
+import { DEMO_LOOKUPS } from "@/lib/lookup-demo";
 import { agentsHarness, fakeServices, renderAgents } from "@/test/agents-render";
+import { macClick } from "@/test/mac-click";
 import { IntegrationsSection, openIntegrations, resetIntegrationsLink } from "./integrations";
 import { SettingsPanel } from "./settings-panel";
 
@@ -84,23 +87,26 @@ describe("the Slack card", () => {
     expect(within(slack()).getByRole("button", { name: "Add another" })).toBeInTheDocument();
     expect(within(acme).getByText("T04ACME")).toBeInTheDocument();
     expect(within(acme).getByText("U02ADA")).toBeInTheDocument();
-    expect(within(within(acme).getByRole("list", { name: "Members" })).getByText("U03GRACE")).toBeInTheDocument();
+    expect(within(acme).getByText("U03GRACE")).toBeInTheDocument();
 
-    // Add two members at once.
-    await userEvent.type(within(acme).getByRole("textbox", { name: "Add a member" }), "U04LIN, U05MAX{Enter}");
-    await waitFor(() => expect(api.update).toHaveBeenLastCalledWith("acme", "slack", "chi_1", { members: ["U03GRACE", "U04LIN", "U05MAX"] }));
-    expect(await within(acme).findByText("U05MAX")).toBeInTheDocument();
-    expect(within(acme).getByRole("textbox", { name: "Add a member" })).toHaveValue("");
+    // Outside the agents surface there's nothing to look people up in: an id is typed.
+    macClick(within(acme).getByRole("button", { name: "Add to Members" }));
+    const search = await screen.findByRole("combobox", { name: "Search members" });
+    fireEvent.change(search, { target: { value: "U04LIN" } });
+    macClick(await screen.findByRole("option", { name: /Use U04LIN/ }));
+    await waitFor(() => expect(api.update).toHaveBeenLastCalledWith("acme", "slack", "chi_1", { members: ["U03GRACE", "U04LIN"] }));
+    expect(await within(acme).findByText("U04LIN")).toBeInTheDocument();
 
     // A bad id is refused before it's sent.
-    await userEvent.type(within(acme).getByRole("textbox", { name: "Add a member" }), "<@U1>{Enter}");
+    fireEvent.change(screen.getByRole("combobox", { name: "Search members" }), { target: { value: "<@U1>" } });
+    macClick(await screen.findByRole("option", { name: /Use <@U1>/ }));
     expect(within(acme).getByRole("alert")).toHaveTextContent("isn't a Slack user id");
     expect(api.update).toHaveBeenCalledTimes(1);
-    await userEvent.clear(within(acme).getByRole("textbox", { name: "Add a member" }));
+    fireEvent.keyDown(screen.getByRole("combobox", { name: "Search members" }), { key: "Escape" });
 
     // Remove one.
-    await userEvent.click(within(acme).getByRole("button", { name: "Remove U03GRACE" }));
-    await waitFor(() => expect(api.update).toHaveBeenLastCalledWith("acme", "slack", "chi_1", { members: ["U04LIN", "U05MAX"] }));
+    macClick(within(acme).getByRole("button", { name: "Remove U03GRACE" }));
+    await waitFor(() => expect(api.update).toHaveBeenLastCalledWith("acme", "slack", "chi_1", { members: ["U04LIN"] }));
     await waitFor(() => expect(within(acme).queryByText("U03GRACE")).toBeNull());
   });
 
@@ -209,5 +215,38 @@ describe("in the owner's settings", () => {
     expect(screen.getByRole("heading", { name: "Slack" })).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "GitHub" })).toBeNull();
     expect(screen.queryByRole("region", { name: "Keyboard" })).toBeNull();
+  });
+});
+
+describe("members are picked from the workspace", () => {
+  it("shows them by name and adds people from the workspace's list (Safari's click)", async () => {
+    const api = fakeApi({ slack: { configured: true, installs: [ACME] }, sealing: true });
+    const lookup = memoryLookup(DEMO_LOOKUPS);
+    renderAgents(<IntegrationsSection owner="acme" api={api} navigate={vi.fn()} />, agentsHarness({ ctx: { services: fakeServices({ lookup }) } }));
+    const acme = await within(slack()).findByRole("listitem", { name: "Acme" });
+    // A stored id shows its person.
+    expect(await within(acme).findByText("Grace Hopper")).toBeInTheDocument();
+    macClick(within(acme).getByRole("button", { name: "Add to Members" }));
+    const people = await screen.findByRole("listbox", { name: "Members" });
+    macClick(await within(people).findByRole("option", { name: /Alan Turing/ }));
+    await waitFor(() => expect(api.update).toHaveBeenLastCalledWith("acme", "slack", "chi_1", { members: ["U03GRACE", "U04ALAN"] }));
+    expect(lookup.calls.some((c) => c.startsWith("/v1/code/agents/acme/lookup/slack/users") && c.includes("parent=T04ACME"))).toBe(true);
+    // Picking several keeps the list open; a press outside closes it.
+    expect(screen.getByRole("listbox", { name: "Members" })).toBeInTheDocument();
+    macClick(document.body);
+    await waitFor(() => expect(screen.queryByRole("listbox", { name: "Members" })).toBeNull());
+    expect(await within(acme).findByText("Alan Turing")).toBeInTheDocument();
+  });
+
+  it("a Discord server's members come from its own list", async () => {
+    const server: ChatInstall = { ...ACME, id: "chi_2", team_id: "1100000000000000001", team_name: "Acme Discord", installer: "", members: [] };
+    const api = fakeApi({ discord: { configured: true, installs: [server] } });
+    const lookup = memoryLookup(DEMO_LOOKUPS);
+    renderAgents(<IntegrationsSection owner="acme" api={api} navigate={vi.fn()} />, agentsHarness({ ctx: { services: fakeServices({ lookup }) } }));
+    const item = await within(row("integrations.discord")).findByRole("listitem", { name: "Acme Discord" });
+    macClick(within(item).getByRole("button", { name: "Members" }));
+    macClick(await within(await screen.findByRole("listbox", { name: "Members" })).findByRole("option", { name: /Grace/ }));
+    await waitFor(() => expect(api.update).toHaveBeenLastCalledWith("acme", "discord", "chi_2", { members: ["1100000000000000043"] }));
+    expect(lookup.calls.at(-1)).toContain("/lookup/discord/members?parent=1100000000000000001");
   });
 });

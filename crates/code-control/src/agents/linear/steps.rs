@@ -6,7 +6,8 @@
 use super::SOURCE;
 use super::client::{LinearError, already_made, uuid_for};
 use super::store;
-use super::trigger::priority_of;
+use super::trigger::{PRIORITIES, STATE_TYPES, priority_of};
+use crate::agents::lookup::Pick;
 use crate::Code;
 use crate::agents::automations::{OwnerRef, StepContext, StepKind, StepOutcome};
 use agent_proto::automation::StepInfo;
@@ -57,6 +58,33 @@ fn text_field(title: &str, desc: &str) -> Value {
 /// A multi-line template field (markdown).
 fn long_field(title: &str, desc: &str) -> Value {
     json!({ "type": "string", "title": title, "description": desc, "format": "template-long" })
+}
+
+/// An issue, searched by title or identifier.
+fn issue_field(desc: &str) -> Value {
+    Pick::from(SOURCE, "issues").one("Issue", desc)
+}
+
+/// A team's state (its own when `team` names the sibling field), or a kind of state.
+fn state_field(team: Option<&'static str>, desc: &str) -> Value {
+    Pick { parent: team, extras: STATE_TYPES, extras_group: Some("Any team"), ..Pick::from(SOURCE, "states") }.one("State", desc)
+}
+
+fn assignee_field(desc: &str) -> Value {
+    Pick { extras: &[("roll", "roll"), ("none", "No one")], ..Pick::from(SOURCE, "users") }.one("Assignee", desc)
+}
+
+fn delegate_field(desc: &str) -> Value {
+    Pick { extras: &[("roll", "roll"), ("none", "No one")], ..Pick::default() }.one("Delegate", desc)
+}
+
+/// Labels (a team's and the workspace's when `team` names the sibling field); new ones can be made.
+fn label_field(team: Option<&'static str>, create: bool) -> Pick<'static> {
+    Pick { parent: team, create, ..Pick::from(SOURCE, "labels") }
+}
+
+fn priority_field() -> Value {
+    Pick { extras: PRIORITIES, ..Pick::default() }.one("Priority", "How urgent it is")
 }
 
 fn schema(props: Value, required: &[&str]) -> Value {
@@ -193,7 +221,7 @@ impl StepKind for Comment {
             "Post a markdown comment on the issue (the event's, unless `issue` says) as roll",
             schema(
                 json!({
-                    "issue": text_field("Issue", "Issue id or identifier (ENG-12); default: the event's issue"),
+                    "issue": issue_field("Issue id or identifier (ENG-12); default: the event's issue"),
                     "body": long_field("Body", "Markdown (a template)"),
                     "parent": text_field("Parent", "Reply under this comment id"),
                 }),
@@ -280,14 +308,14 @@ impl StepKind for UpdateIssue {
             "Change the issue's state, assignee, delegate, labels, priority, title or description",
             schema(
                 json!({
-                    "issue": text_field("Issue", "Issue id or identifier; default: the event's issue"),
-                    "state": text_field("State", "A state's name (In Progress), type (started) or id"),
-                    "assignee": text_field("Assignee", "roll, none, or a name, email or id"),
-                    "delegate": text_field("Delegate", "roll (the agent works on it), or none"),
-                    "labels": { "type": "array", "items": { "type": "string" }, "description": "Replace the labels (names)" },
-                    "add_labels": { "type": "array", "items": { "type": "string" } },
-                    "remove_labels": { "type": "array", "items": { "type": "string" } },
-                    "priority": { "type": ["integer", "string"], "description": "0–4 or none, urgent, high, medium, low" },
+                    "issue": issue_field("Issue id or identifier; default: the event's issue"),
+                    "state": state_field(None, "A kind of state moves it to the first state of that kind in the issue's team"),
+                    "assignee": assignee_field("roll, no one, or a person"),
+                    "delegate": delegate_field("roll (the agent works on it), or no one"),
+                    "labels": label_field(None, true).many("Labels", "Replace the labels"),
+                    "add_labels": label_field(None, true).many("Add labels", "Put these labels on it"),
+                    "remove_labels": label_field(None, false).many("Remove labels", "Take these labels off it"),
+                    "priority": priority_field(),
                     "title": text_field("Title", "A new title"),
                     "description": long_field("Description", "A new description (markdown)"),
                 }),
@@ -531,16 +559,16 @@ impl StepKind for CreateIssue {
             "Open an issue in a team, optionally delegated to roll",
             schema(
                 json!({
-                    "team": text_field("Team", "Team key (ENG), name or id"),
+                    "team": Pick::from(SOURCE, "teams").one("Team", "The team the issue goes in"),
                     "title": text_field("Title", "Title (a template)"),
                     "description": long_field("Description", "Markdown"),
-                    "state": text_field("State", "A state's name, type or id"),
-                    "assignee": text_field("Assignee", "A name, email or id"),
-                    "delegate": text_field("Delegate", "roll: the agent takes it"),
-                    "labels": { "type": "array", "items": { "type": "string" } },
-                    "priority": { "type": ["integer", "string"] },
-                    "project": text_field("Project", "A project id"),
-                    "parent": text_field("Parent", "Parent issue id or identifier"),
+                    "state": state_field(Some("team"), "Default: the team's first backlog or triage state"),
+                    "assignee": assignee_field("roll, or a person"),
+                    "delegate": delegate_field("roll: the agent takes it"),
+                    "labels": label_field(Some("team"), true).many("Labels", "Put these labels on it"),
+                    "priority": priority_field(),
+                    "project": Pick::from(SOURCE, "projects").one("Project", "Add it to this project"),
+                    "parent": issue_field("A sub-issue of this issue"),
                 }),
                 &["team", "title"],
             ),

@@ -680,5 +680,29 @@ export function saveCurrentView(owner: string, id: string) {
   write(CURRENT_KEY(owner), id === ALL ? null : id);
 }
 
+const ONLY_KEY = (owner: string) => `roll:agents:only:${owner}`;
+
+/** The project each view is focused on ("Focus on this project only"), on this device. */
+export function loadFocused(owner: string): Record<string, string> {
+  try {
+    const v = JSON.parse(read(ONLY_KEY(owner)) ?? "{}") as unknown;
+    if (!isObject(v)) return {};
+    const out: Record<string, string> = {};
+    for (const [view, project] of Object.entries(v).slice(0, MAX_VIEWS + 1)) if (typeof project === "string" && project.length <= 64) out[view] = project;
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+/** Focus a view on a project, or (`null`) on every project again; returns the new map. */
+export function setFocused(owner: string, all: Record<string, string>, view: string, project: string | null): Record<string, string> {
+  const next = { ...all };
+  if (project) next[view] = project;
+  else delete next[view];
+  write(ONLY_KEY(owner), Object.keys(next).length ? JSON.stringify(next) : null);
+  return next;
+}
+
 /** Where a view's frame (pan and zoom) is remembered on this device: All keeps the canvas's own. */
 export const viewStorageKey = (owner: string, id: string) => (id === ALL ? owner : `${owner}#${id}`);

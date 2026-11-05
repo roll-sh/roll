@@ -44,6 +44,7 @@ import {
 } from "./automations-api";
 import { createLinearApi } from "./linear-api";
 import { createGatewayApi } from "./agents-gateway";
+import { createLookupApi } from "./lookup-api";
 import { ROLL_API } from "./roll-api";
 
 /** Milliseconds since the Unix epoch. */
@@ -2631,6 +2632,8 @@ export function createAgentsApi(
     linear: createLinearApi(call),
     /** The owner's model gateway plan and its members (docs/code/gateway.md; `agents-gateway.ts`). */
     gateway: createGatewayApi(call),
+    /** `/v1/code/agents/{owner}/lookup…` (`lookup-api.ts`): integration rows for pickers. */
+    lookup: createLookupApi(call),
     /** The fetch this client uses (the event stream follows it too). */
     fetch: doFetch,
     state: async (owner: string, threads: readonly string[] = []) =>

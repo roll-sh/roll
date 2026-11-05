@@ -383,6 +383,8 @@ pub fn changes_of(d: &Value, from: &Value) -> Value {
             d["labels"].as_array().and_then(|ls| ls.iter().find(|l| l["id"].as_str() == Some(id))).and_then(|l| l["name"].as_str()).unwrap_or(id).to_string()
         };
         out["labels_added"] = now.iter().filter(|i| !was.contains(i)).map(|i| Value::String(name(i))).collect();
+        // Their ids too: a trigger picked from Linear's labels names them by id.
+        out["labels_added_ids"] = now.iter().filter(|i| !was.contains(i)).map(|i| Value::String(i.to_string())).collect();
         out["labels_removed"] = was.iter().filter(|i| !now.contains(i)).map(|i| Value::String(i.to_string())).collect();
     }
     if f.contains_key("assigneeId") {
@@ -484,6 +486,7 @@ mod tests {
         assert_eq!(c["state"]["to_type"], "started");
         assert_eq!(c["state"]["from"], "s1");
         assert_eq!(c["labels_added"], json!(["roll"]));
+        assert_eq!(c["labels_added_ids"], json!(["l2"]));
         assert_eq!(c["labels_removed"], json!(["l3"]));
         assert_eq!(c["assignee"], json!({ "from": null, "to": "u2" }));
         assert_eq!(c["priority"], json!({ "from": 4, "to": 2 }));

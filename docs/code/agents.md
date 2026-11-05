@@ -1543,11 +1543,25 @@ The surface has three views:
   the arrows still pan.
 
   **Focusing a project** (`focusOn` in `lib/agents-views.ts`). With several projects the canvas is
-  busy, and most of the time one project is what's being worked on. F on a card (or "Focus" in a
-  project card's menu, or ⌘K "Focus a project…") fills the canvas with that card's project: the
-  project, its machine above it and everything under it, framed again. A chip in the views bar
-  names it; its × or Escape (before Escape closes anything else) shows every project again. It's
-  per device and on top of the view, so it never changes what a view picks.
+  busy, and most of the time one project is what's being worked on. F on a card (or "Focus on this
+  project only" in any of its menus, or ⌘K "Focus a project…") fills the canvas with that card's
+  project: the project, its machine above it and everything under it, framed again. The sidebar
+  lists only its group and the header counts only its work. An "Only roll" chip in the views bar
+  (and one atop the sidebar) names it; its × or Escape (before Escape closes anything else) shows
+  every project again. It's remembered per view on this device (`loadFocused`), on top of the
+  view, so it never changes what a view picks.
+
+  **A project's actions** (`projectActions` in `project-actions.tsx`) are one list wherever the
+  project shows: its card's ⋯, its row under a machine's folded projects, its group's header in
+  the sidebar, and ⌘K "Project: roll" (which starts with "Show on the canvas"). In order: New agent
+  here, New sandbox for this project, Focus on this project only, Pin to the canvas (on the canvas),
+  Pull (a notice says what it did), Open in roll code, Settings, Settled and archived (N), and on
+  the card Remove from roll. **New sandbox for this project** (a project with a roll code repo)
+  is a dialog: a size and a name, then its steps as they happen (rent, start, clone
+  `owner/repo`, each with its time), waiting up to 3 minutes for the sandbox's hello before
+  cloning with `project.add` and `clone`; then "Start an agent" there or "Open settings". A
+  failure stops on its step and says why; closing the dialog stops waiting, and the sandbox stays.
+  T3's "Add to another machine" (`AddProjectToMachineDialog.tsx`) is the clone half.
 
   **Display** (Linear's display options; `DisplayMenu` in `views.tsx`, `applyDisplay` in
   `lib/agents-views.ts`). Each view has its own, kept with it in the canvas document, in a
@@ -1604,6 +1618,13 @@ The surface has three views:
   place), so they never overlap; the header drags them among their siblings, the corner resizes
   them (arrows on the focused corner too). They always show on their view whatever its filter,
   at most 12 per view, sizes remembered per view.
+- **Automations.** ⚡ in the header, A on the canvas, or ⌘K "Automations" slides the automations
+  sheet in beside the canvas, in the conversation's frame (one right sheet: opening a conversation
+  from the canvas replaces it). It is a stack, kept in the URL (`#agents/automations/<id>/runs/<run>/<thread>`,
+  lib/automations-nav.ts): the list, an automation's overview, its builder (which can maximize over
+  the canvas) or runs, one run (its threads' cards highlighted on the canvas), and a conversation
+  that run started, with Back to the run. Back and Escape go up one level, from the list Escape,
+  ⚡ and A close it. docs/code/automations-ui.md has the details.
 - **A conversation.** Clicking a thread opens it in a panel docked beside the canvas (resizable, remembered; on a phone it covers the canvas), its card selected on the canvas. A machine's or project's settings open in the same panel (`#agents/settings/<key>`, from its card), and so do the owner's (`#agents/settings/owner`, the header's gear or ⌘,; "Machine settings", "Owner settings"). Finished subagents (a done provider subagent, a delegated thread that's done) leave the canvas; their results stay in the parent's transcript. The conversation is T3's chat
   view (`session.tsx`, `transcript.tsx`, `work-log.tsx`, `composer.tsx`; the grouping is
   `lib/agents-worklog.ts`): a header that is a breadcrumb (the project, the title, T3's status

@@ -1270,3 +1270,40 @@ async fn endpoint_profiles_keep_no_key_and_sealed_keys_pass_through() {
     d.send(&DaemonFrame::Reply { id: "k2".into(), result: Reply::Ok }).await;
     assert_eq!(pending.await.unwrap(), (StatusCode::OK, json!({ "type": "ok" })));
 }
+
+/// The pickers' roll code rows (`GET …/lookup/code/{repos,agents}`): the owner's repos (newest
+/// first, found by name or `owner/name`) and its agents (the `agent:<name>` tokens an automation
+/// acts as, never another owner's), always current, for who manages the owner.
+#[tokio::test]
+async fn pickers_list_the_owners_repos_and_agents() {
+    let w = world().await;
+    for (owner, name) in [("acme", "api"), ("acme", "web"), ("other", "secret")] {
+        let (s, v) = w.a.req("POST", "/v1/code/repos", Some(json!({ "owner": owner, "name": name, "description": format!("the {name}") })), Some(ADMIN)).await;
+        assert_eq!(s, StatusCode::CREATED, "{v}");
+    }
+    let (s, v) = w.req("GET", "/v1/code/agents/acme/lookup/code/repos", None, &w.owner).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let names: Vec<&str> = v["items"].as_array().unwrap().iter().map(|i| i["id"].as_str().unwrap()).collect();
+    assert_eq!(names.len(), 2, "only acme's: {v}");
+    assert!(names.contains(&"api") && names.contains(&"web"));
+    let (_, v) = w.req("GET", "/v1/code/agents/acme/lookup/code/repos?q=we", None, &w.owner).await;
+    assert_eq!(v["items"], json!([{ "id": "web", "label": "web", "key": "acme/web", "hint": "the web", "icon": "repo" }]));
+    let (_, v) = w.req("GET", "/v1/code/agents/acme/lookup/code/repos?ids=acme/api", None, &w.owner).await;
+    assert_eq!(v["items"][0]["id"], "api");
+    let (_, v) = w.req("GET", "/v1/code/agents/acme/lookup/code/repos?limit=1", None, &w.owner).await;
+    assert_eq!((v["items"].as_array().unwrap().len(), v["next"].as_str()), (1, Some("1")));
+    // A repo made now shows at once (roll's rows aren't cached).
+    let (s, _) = w.a.req("POST", "/v1/code/repos", Some(json!({ "owner": "acme", "name": "cli" })), Some(ADMIN)).await;
+    assert_eq!(s, StatusCode::CREATED);
+    let (_, v) = w.req("GET", "/v1/code/agents/acme/lookup/code/repos?q=cli", None, &w.owner).await;
+    assert_eq!(v["items"][0]["id"], "cli");
+
+    let (_, v) = w.req("GET", "/v1/code/agents/acme/lookup/code/agents", None, &w.owner).await;
+    assert_eq!(v["items"], json!([{ "id": "bot", "label": "bot", "key": "agent:bot", "icon": "agent" }]));
+    let (s, _) = w.req("GET", "/v1/code/agents/acme/lookup/code/repos", None, &w.agent).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "agents don't manage the owner");
+    let (s, _) = w.req("GET", "/v1/code/agents/acme/lookup/code/repos", None, &w.other).await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    let (s, _) = w.req("GET", "/v1/code/agents/acme/lookup/code/branches", None, &w.owner).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+}

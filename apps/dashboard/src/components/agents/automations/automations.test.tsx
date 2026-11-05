@@ -1,7 +1,8 @@
 import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { Automation, AutomationRun, AutomationsApi, AutomationSpec, StepRun } from "@/lib/automations-api";
+import type { AutomationsApi } from "@/lib/automations-api";
+import { automation, automationRun, fakeApi, T } from "@/test/automations";
 import { agentsSurface, resetAgentsSurface } from "@/lib/agents-surface";
 import { machine, mirrored, project, provider, thread } from "@/test/agents";
 import { agentsHarness, fakeServices, renderAgents } from "@/test/agents-render";
@@ -14,76 +15,6 @@ afterEach(() => {
   resetAgentsSurface();
   forgetDrafts();
 });
-
-const T = Date.now();
-
-function automation(over: Partial<Automation> = {}): Automation {
-  return {
-    id: "aut_1",
-    name: "Morning triage",
-    enabled: true,
-    trigger: { type: "schedule", cron: "0 9 * * 1-5", timezone: "UTC" },
-    filters: [],
-    steps: [{ id: "tell", kind: "notify", config: { title: "Hi", level: "info", link: null }, when: [], retry: null, timeout_s: null }],
-    concurrency: "parallel",
-    rate_limit: null,
-    run_as: null,
-    revision: 1,
-    cursor: 1,
-    created_at: T,
-    updated_at: T,
-    created_by: "ada",
-    secrets: [],
-    webhook: null,
-    next_at: null,
-    last_run: null,
-    ...over,
-  };
-}
-
-const stepRun = (id: string, kind: string, status: StepRun["status"], over: Partial<StepRun> = {}): StepRun => ({ id, kind, status, attempt: 1, started_at: T - 5000, finished_at: status === "succeeded" ? T - 1000 : null, next_at: null, output: null, error: null, log: [], ...over });
-
-function automationRun(over: Partial<AutomationRun> = {}): AutomationRun {
-  return {
-    id: "arn_1",
-    automation: "aut_1",
-    name: "Morning triage",
-    status: "running",
-    event: { id: "aev_1", source: "schedule", kind: "tick", summary: "Weekdays at 09:00", at: T - 6000 },
-    steps: [stepRun("start", "agent.start", "succeeded"), stepRun("wait", "agent.wait", "waiting", { log: [{ at: T - 4000, level: "info", text: "Waiting for thr_1" }] })],
-    threads: [{ machine: "mch_1", thread: "thr_1", step: "start" }],
-    cursor: 5,
-    created_at: T - 6000,
-    started_at: T - 6000,
-    finished_at: null,
-    reason: null,
-    ...over,
-  };
-}
-
-function fakeApi(list: Automation[] = [], runs: AutomationRun[] = []): AutomationsApi {
-  const saved = (a: Automation) => ({ automation: a, webhook_secret: null });
-  return {
-    list: vi.fn(async () => list),
-    get: vi.fn(async (_o: string, id: string) => list.find((a) => a.id === id)!),
-    create: vi.fn(async (_o: string, spec: AutomationSpec) => saved(automation({ ...spec, id: "aut_new", cursor: 10 }))),
-    update: vi.fn(async (_o: string, id: string, spec: AutomationSpec) => saved(automation({ ...spec, id, revision: 2, cursor: 11 }))),
-    remove: vi.fn(async () => {}),
-    enable: vi.fn(async (_o: string, id: string) => automation({ ...list.find((a) => a.id === id), enabled: true, cursor: 20 })),
-    disable: vi.fn(async (_o: string, id: string) => automation({ ...list.find((a) => a.id === id), enabled: false, cursor: 20 })),
-    run: vi.fn(async () => automationRun({ id: "arn_now", status: "queued" })),
-    runsOf: vi.fn(async () => runs),
-    runs: vi.fn(async () => runs),
-    runDetail: vi.fn(async (_o: string, id: string) => ({ run: runs.find((r) => r.id === id)!, event: { id: "aev_1", source: "schedule", kind: "tick", key: "schedule:1", at: T, data: { at: T }, automation: "aut_1" } })),
-    cancel: vi.fn(async (_o: string, id: string) => ({ ...runs.find((r) => r.id === id)!, status: "cancelled" as const, cursor: 30 })),
-    retry: vi.fn(),
-    setSecret: vi.fn(async () => {}),
-    removeSecret: vi.fn(async () => {}),
-    rotateWebhookSecret: vi.fn(),
-    catalog: vi.fn(async () => ({ triggers: [], steps: [] })),
-    test: vi.fn(async () => ({ matched: true, trigger: true, filters: [], steps: [{ id: "notify", runs: true, config: { title: "Hi there" }, error: null }] })),
-  } as AutomationsApi;
-}
 
 function harness(api: AutomationsApi) {
   return agentsHarness({
@@ -100,7 +31,7 @@ describe("Automations list", () => {
     const row = await screen.findByRole("button", { name: "Morning triage" });
     expect(within(row).getByText("Weekdays at 09:00 UTC")).toBeInTheDocument();
     expect(within(row).getByText("Failed")).toBeInTheDocument();
-    expect(within(row).getByLabelText("1 runs in 7 days, 1 failed")).toBeInTheDocument();
+    expect(within(row).getByRole("img", { name: "Last 1 run, 1 failed" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Fix a broken main" })).toHaveTextContent("When a work item changes in acme/roll");
 
     await userEvent.click(within(row).getByRole("switch", { name: "Pause Morning triage" }));
@@ -108,7 +39,56 @@ describe("Automations list", () => {
     await waitFor(() => expect(within(screen.getByRole("button", { name: "Morning triage" })).getByText("Paused")).toBeInTheDocument());
 
     await userEvent.click(row);
-    expect(agentsSurface.get().view).toEqual({ kind: "automations", open: "aut_1" });
+    expect(agentsSurface.get().view).toEqual({ kind: "automations", list: undefined, open: "aut_1" });
+  });
+
+  it("searches and filters (status, trigger), shows them as chips, and acts on a row from its hover actions", async () => {
+    const hook = automation({ id: "aut_3", name: "Deploy hook", enabled: false, trigger: { type: "webhook" } as never, steps: [{ id: "post", kind: "slack.post", config: {}, when: [], retry: null, timeout_s: null }] });
+    const api = fakeApi([automation(), automation({ id: "aut_2", name: "Fix a broken main", trigger: { type: "code", events: ["work"], repos: ["acme/roll"] } }), hook], [automationRun({ status: "running" })]);
+    renderAgents(<AutomationsView view={{ kind: "automations" }} phone={false} />, harness(api));
+    // The filter popover makes the page inert while it shows: read the rows behind it.
+    const rows = () => within(screen.getByRole("list", { name: "Your automations", hidden: true })).getAllByRole("button", { name: /^(Morning triage|Fix a broken main|Deploy hook)$/, hidden: true }).map((r) => r.getAttribute("aria-label"));
+    await screen.findByRole("button", { name: "Morning triage" });
+    // A run going on breathes on its row; Slack is marked as what the hook's steps use.
+    expect(within(screen.getByRole("button", { name: "Deploy hook" })).getByRole("img", { name: "Uses Slack" })).toBeInTheDocument();
+
+    await userEvent.type(screen.getByRole("textbox", { name: "Search automations" }), "slack");
+    expect(rows()).toEqual(["Deploy hook"]);
+    await userEvent.click(screen.getByRole("button", { name: "Clear the search" }));
+
+    await userEvent.click(screen.getByRole("button", { name: "Filter" }));
+    const popup = await screen.findByRole("dialog", { name: "Filter automations" });
+    await userEvent.click(within(within(popup).getByRole("group", { name: "Status" })).getByRole("button", { name: /Running now/ }));
+    expect(rows()).toEqual(["Morning triage"]);
+    await userEvent.click(within(within(popup).getByRole("group", { name: "Status" })).getByRole("button", { name: /^On/ }));
+    await userEvent.click(within(within(popup).getByRole("group", { name: "Trigger" })).getByRole("button", { name: /roll code/ }));
+    await userEvent.keyboard("{Escape}");
+    expect(rows()).toEqual(["Fix a broken main"]);
+    const chips = screen.getByLabelText("Filters");
+    expect(chips).toHaveTextContent("Status On");
+    expect(chips).toHaveTextContent("Trigger roll code");
+    await userEvent.click(within(chips).getByRole("button", { name: "Remove the filter roll code" }));
+    expect(rows()).toEqual(["Fix a broken main", "Morning triage"]);
+    await userEvent.click(within(chips).getByRole("button", { name: "Clear" }));
+    expect(rows()).toHaveLength(3);
+
+    // ↓ moves from row to row.
+    screen.getByRole("button", { name: "Fix a broken main" }).focus();
+    await userEvent.keyboard("{ArrowDown}");
+    expect(screen.getByRole("button", { name: "Morning triage" })).toHaveFocus();
+    await userEvent.keyboard("{ArrowUp}");
+    expect(screen.getByRole("button", { name: "Fix a broken main" })).toHaveFocus();
+
+    const actions = screen.getByRole("group", { name: "Actions for Fix a broken main" });
+    await userEvent.click(within(actions).getByRole("button", { name: "Run now" }));
+    expect(api.run).toHaveBeenCalledWith("acme", "aut_2", { input: null });
+    await waitFor(() => expect(agentsSurface.get().view).toEqual({ kind: "automations", list: undefined, open: "aut_2", tab: "runs", run: "arn_now" }));
+    await userEvent.click(within(actions).getByRole("button", { name: "Duplicate" }));
+    expect(api.create).toHaveBeenCalledWith("acme", expect.objectContaining({ name: "Fix a broken main (copy)", enabled: false }));
+    await userEvent.click(within(actions).getByRole("button", { name: "Edit" }));
+    expect(agentsSurface.get().view).toEqual({ kind: "automations", list: undefined, open: "aut_2", tab: "edit" });
+    await userEvent.click(within(actions).getByRole("button", { name: "Pause" }));
+    expect(api.disable).toHaveBeenCalledWith("acme", "aut_2");
   });
 
   it("with none yet, is a gallery of templates that open in the builder", async () => {
@@ -125,7 +105,7 @@ describe("Automations list", () => {
 describe("Automation builder", () => {
   it("builds one from nothing: a step from the catalog, its form, a variable from {{, a test, then Create", async () => {
     const api = fakeApi();
-    renderAgents(<AutomationPanel view={{ kind: "automations", open: "new" }} onClose={() => {}} />, harness(api));
+    renderAgents(<AutomationPanel view={{ kind: "automations", open: "new" }} />, harness(api));
     await userEvent.type(screen.getByRole("textbox", { name: "Name" }), "Say hi");
 
     await userEvent.click(screen.getByRole("button", { name: "Add a step" }));
@@ -157,7 +137,7 @@ describe("Automation builder", () => {
   });
 
   it("renames a step in place: its card and its open section stay while its id is typed", async () => {
-    renderAgents(<AutomationPanel view={{ kind: "automations", open: "new" }} onClose={() => {}} />, harness(fakeApi()));
+    renderAgents(<AutomationPanel view={{ kind: "automations", open: "new" }} />, harness(fakeApi()));
     await userEvent.click(screen.getByRole("button", { name: "Add a step" }));
     await userEvent.click(await screen.findByRole("menuitem", { name: /Notify me/ }));
     const card = screen.getByRole("region", { name: "Step 1: Notify me" });
@@ -172,7 +152,7 @@ describe("Automation builder", () => {
 
   it("says what's wrong inline and doesn't save until it's fixed", async () => {
     const api = fakeApi();
-    renderAgents(<AutomationPanel view={{ kind: "automations", open: "new" }} onClose={() => {}} />, harness(api));
+    renderAgents(<AutomationPanel view={{ kind: "automations", open: "new" }} />, harness(api));
     await userEvent.click(screen.getByRole("button", { name: "Create" }));
     expect(screen.getByRole("contentinfo")).toHaveTextContent("2 things to fix");
     expect(screen.getByText("Add a step: what should happen.")).toBeInTheDocument();
@@ -180,7 +160,7 @@ describe("Automation builder", () => {
   });
 
   it("opens a template ready to go, pointing at the owner's own machine and project", async () => {
-    renderAgents(<AutomationPanel view={{ kind: "automations", open: "new", template: "run-on-machine" }} onClose={() => {}} />, harness(fakeApi()));
+    renderAgents(<AutomationPanel view={{ kind: "automations", open: "new", template: "run-on-machine" }} />, harness(fakeApi()));
     expect(screen.getByRole("textbox", { name: "Name" })).toHaveValue("Run on ada-mbp");
     expect(screen.getByRole("region", { name: "Step 1: Start an agent" })).toHaveTextContent("on ada-mbp");
     expect(screen.getAllByRole("region", { name: /^Step / })).toHaveLength(3);
@@ -192,7 +172,7 @@ describe("Automation runs", () => {
     const r = automationRun();
     const api = fakeApi([automation()], [r]);
     const h = harness(api);
-    renderAgents(<RunDetail run="arn_1" onBack={() => {}} />, h);
+    renderAgents(<RunDetail run="arn_1" />, h);
     const steps = await screen.findByRole("list", { name: "Steps" });
     expect(within(steps).getByText("Waiting")).toBeInTheDocument();
     expect(within(steps).getByText("Waiting for thr_1")).toBeInTheDocument();
@@ -214,7 +194,7 @@ describe("Automation runs", () => {
 
   it("cancels a run that's going", async () => {
     const api = fakeApi([automation()], [automationRun()]);
-    renderAgents(<RunDetail run="arn_1" onBack={() => {}} />, harness(api));
+    renderAgents(<RunDetail run="arn_1" />, harness(api));
     await userEvent.click(await screen.findByRole("button", { name: /Cancel/ }));
     expect(api.cancel).toHaveBeenCalledWith("acme", "arn_1");
     expect(await screen.findByText("Cancelled")).toBeInTheDocument();

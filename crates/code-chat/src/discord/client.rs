@@ -17,6 +17,63 @@ pub struct Posted {
     pub id: String,
 }
 
+/// The most members Discord answers in one page.
+pub const MAX_MEMBERS_PAGE: usize = 1000;
+
+/// A guild channel. `kind` is Discord's `type` (0 text, 2 voice, 4 category, 5 announcement,
+/// 15 forum…).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+pub struct Channel {
+    pub id: String,
+    #[serde(rename = "type", default)]
+    pub kind: u64,
+    #[serde(default)]
+    pub name: Option<String>,
+    /// The category it's in.
+    #[serde(default)]
+    pub parent_id: Option<String>,
+    #[serde(default)]
+    pub position: Option<i64>,
+}
+
+/// A guild role. `color` is an RGB integer (0: none).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+pub struct Role {
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub color: u64,
+    #[serde(default)]
+    pub position: i64,
+    /// A bot's or an integration's own role.
+    #[serde(default)]
+    pub managed: bool,
+}
+
+/// A guild member.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+pub struct Member {
+    pub user: MemberUser,
+    /// The member's nickname in this guild.
+    #[serde(default)]
+    pub nick: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+pub struct MemberUser {
+    pub id: String,
+    #[serde(default)]
+    pub username: String,
+    #[serde(default)]
+    pub global_name: Option<String>,
+    /// The avatar's hash (`cdn.discordapp.com/avatars/{id}/{hash}.png`).
+    #[serde(default)]
+    pub avatar: Option<String>,
+    #[serde(default)]
+    pub bot: bool,
+}
+
 #[derive(Clone)]
 pub struct Client {
     api_base: String,
@@ -153,6 +210,71 @@ impl Client {
         self.call::<Value>(Method::PUT, &path, Some(&commands))
             .await?;
         Ok(())
+    }
+
+    /// `GET /guilds/{guild}/channels`: every channel of the guild the bot can see, categories
+    /// included (Discord doesn't page them).
+    pub async fn guild_channels(&self, guild: &str) -> Result<Vec<Channel>, Error> {
+        let path = format!("/guilds/{}/channels", percent_encode(guild));
+        self.call(Method::GET, &path, None).await
+    }
+
+    /// `GET /guilds/{guild}/roles`.
+    pub async fn guild_roles(&self, guild: &str) -> Result<Vec<Role>, Error> {
+        let path = format!("/guilds/{}/roles", percent_encode(guild));
+        self.call(Method::GET, &path, None).await
+    }
+
+    /// `GET /guilds/{guild}/members/search`: members whose username or nickname starts with
+    /// `query`, at most `limit` (clamped to 1..=[`MAX_MEMBERS_PAGE`]). Needs the application's
+    /// Server Members Intent.
+    pub async fn search_guild_members(
+        &self,
+        guild: &str,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<Member>, Error> {
+        let path = format!(
+            "/guilds/{}/members/search?query={}&limit={}",
+            percent_encode(guild),
+            percent_encode(query),
+            limit.clamp(1, MAX_MEMBERS_PAGE)
+        );
+        self.call(Method::GET, &path, None).await
+    }
+
+    /// `GET /guilds/{guild}/members`: a page of members by user id, after `after`, at most
+    /// `limit` (clamped to 1..=[`MAX_MEMBERS_PAGE`]). Needs the Server Members Intent.
+    pub async fn list_guild_members(
+        &self,
+        guild: &str,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<Member>, Error> {
+        let mut path = format!(
+            "/guilds/{}/members?limit={}",
+            percent_encode(guild),
+            limit.clamp(1, MAX_MEMBERS_PAGE)
+        );
+        if let Some(a) = after.filter(|a| !a.is_empty()) {
+            path.push_str(&format!("&after={}", percent_encode(a)));
+        }
+        self.call(Method::GET, &path, None).await
+    }
+
+    /// `GET /guilds/{guild}/members/{user}`: `None` when they aren't a member.
+    pub async fn guild_member(&self, guild: &str, user: &str) -> Result<Option<Member>, Error> {
+        let path = format!(
+            "/guilds/{}/members/{}",
+            percent_encode(guild),
+            percent_encode(user)
+        );
+        match self.call(Method::GET, &path, None).await {
+            Ok(m) => Ok(Some(m)),
+            // Unknown Member, Unknown User.
+            Err(Error::Api(e)) if e.starts_with("10007:") || e.starts_with("10013:") => Ok(None),
+            Err(e) => Err(e),
+        }
     }
 
     async fn call<T: DeserializeOwned>(

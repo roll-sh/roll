@@ -199,7 +199,14 @@ state, or draw a project's logo inline (only in an `<img>`).
   `ui/cn.ts`'s `glass` is the one definition for Base UI popups.
 - **Dialogs and the palette:** a `--scrim` (black 60%, 2–3px blur), then a sheet that is
   `rounded-2xl border-line-2 bg-sheet shadow-sheet`, with a 17px/590 title and a 12.5px muted
-  lead.
+  lead. `ui/dialog.tsx` (T3's Base UI dialog) is the one to use for new ones: centred a third
+  of the way down, it grows from the press or the focused control that opened it (scale 0.98 and
+  a fade, 200 ms; none with reduced motion), traps focus and gives it back, and closes on Escape,
+  a press outside or its ×. Work that takes a while inside one is a `Steps` list
+  (`project-actions.tsx`): a 16px ring per step (done: `ok` tick; now: an accent dot, the label
+  shimmering, its time in mono at the right; next: subtle; failed: `danger`).
+- **"Only roll" chips:** focusing a project puts a raised chip in the views bar ("Only" muted,
+  the name, an ×) and the same chip atop the sidebar's list.
 - **Empty and loading states:** loading shows the Horizon mark (40px, thinking) over a
   shimmering line. With no machines, the globe (`RollMark`) shows big over the `DotField` with
   both ways in. An empty view is one calm sentence with a text link back.
@@ -238,6 +245,8 @@ Text levels: `--fg` `#f7f8f8`, `--soft` `#d0d6e0` (secondary body), `--muted` `#
 | popup opening | `.sheet-in`: translateY 10px, scale 0.985 → 1, fade, 260ms, `--ease-drawer` |
 | chrome settling | `.chrome-in`: translateY −4px, fade, 300ms on the drawer curve, 50ms after the sheet |
 | side panel and sidebar | `.panel-in` / `.sidebar-in`: translateX ±28px, fade, 240ms on the drawer curve |
+| automations sheet closing | `.panel-out`: back out 28px to the right with a fade, 180ms ease-in, then it unmounts |
+| a page in the automations sheet | `.stack-push` (deeper, from 24px right) / `.stack-pop` (back, from 24px left), fade, 220ms on the drawer curve; a tab on the same level doesn't move |
 | popovers and menus | scale 0.98 → 1 plus fade, 150ms, `--ease-out-soft` `(0.23,1,0.32,1)`, from the trigger |
 | palette and dialogs | scale 0.98 plus fade, 200ms on the drawer curve, with the scrim fading in over 200ms |
 | hover and colour | 150ms; buttons press to scale 0.97 |
@@ -268,12 +277,40 @@ switched off under `prefers-reduced-motion`, and the engine draws a static, stat
   focus buttons on click, so `relatedTarget` is null while a popup's own buttons are used. Never
   decide from `relatedTarget` alone.
 
+## Pickers
+
+Nobody types an id, a key or a handle that roll can look up (the user's ask, wave 9). Every field
+that names a thing — a Linear team, state or person, a Slack channel, a GitHub label, a roll
+thread or machine — is the shared picker, `Picker` in `components/agents/ui/picker.tsx`
+(`LookupPicker` in `lookup-picker.tsx` for an integration's things):
+
+- **The trigger is the field.** A hairline box like every field showing the picked thing by name
+  with its picture, colour or kind icon; a list is chips (each with its ×) and an "Add" at the end.
+  A value nobody listed yet is looked up by id; one that resolves to nothing shows as itself, in
+  mono. A variable shows as its `{{ path }}` in the accent.
+- **The list is T3's combobox** on a solid popover (the popover fill, hairline and pop shadow, not glass: rows of names must read over a busy form): search at the top (the platform filters it),
+  recents first (per device), then the field's own rows (`roll`, `No one`), then the platform's,
+  grouped (a state's team). ↑↓ and Enter, Esc closes; picking several keeps it open, with a
+  "N picked · Done" footer.
+- **Fallbacks are rows, not modes:** "Use “…”" for a typed value, "Create label “…”" where the
+  platform lets roll make one, "Use a variable" in automation steps, "Load more" for the next page.
+- **Problems are a quiet footer** (a warning icon, the reason, "Connect" or "Reconnect" linking to
+  the owner's settings). The field still takes a typed value.
+- The selected row is a quiet fill and a check (a box for lists); no accent bars or rings.
+- roll code's pages use the same picker (review requests, required checks, work-item labels),
+  with their rows from the code API.
+
 ## Automations
 
-The Automations view follows this system and adds a few pieces of its own: the list in the working
-area with the open automation in the side panel, the builder's flow of cards, template fields,
-the run timeline, notice toasts and the canvas chip. They're in docs/code/automations-ui.md, with
-the Linear, Zapier, n8n, GitHub Actions, Vercel, Raycast and T3 references each one comes from.
+Automations live in one right sheet beside the canvas, the conversation's frame (`SidePanel`: the
+same width, resize handle and slide), so the canvas stays live and interactive next to them. Inside
+it is a stack (list → overview → builder or runs → run → conversation): each page has the same
+56px header (Back with where it goes, the page's tile, title and subtitle, its tools, then Maximize
+on the builder and Close), and pages push and pop sideways. A conversation opened from a run is a
+page of the sheet, never a second sheet. The builder can fill the working area (T3's "Maximize
+panel"). The rest (the builder's flow of cards, template fields, the run timeline, notice toasts,
+the canvas chip) is in docs/code/automations-ui.md, with the Linear, Zapier, n8n, GitHub Actions,
+Vercel, Raycast and T3 references each one comes from.
 
 ## References
 

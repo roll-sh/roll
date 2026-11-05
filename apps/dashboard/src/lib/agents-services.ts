@@ -31,6 +31,7 @@ import type { AutomationsApi } from "./automations-api";
 import type { GatewayApi } from "./agents-gateway";
 import type { IntegrationsApi } from "./integrations-api";
 import type { LinearApi } from "./linear-api";
+import type { LookupApi } from "./lookup-api";
 import { sandboxesApi, type SandboxesApi } from "./sandboxes-api";
 
 /** A repo to clone onto a machine (only what the picker shows). */
@@ -79,6 +80,8 @@ export interface AgentsServices {
   endpoints: EndpointProfiles;
   /** The owner's model gateway plan (docs/code/gateway.md); unset: the Gateway section says it isn't here. */
   gateway?: GatewayApi;
+  /** The rows pickers show for an integration's things (`lookup-api.ts`): the server looks them up with the owner's token. */
+  lookup: LookupApi;
 }
 
 /** An owner's endpoint profiles: oldest first; `save` replaces by id, and its `sandbox_default` takes it off the others. */
@@ -206,6 +209,7 @@ export function httpServices(
     automations: api.automations,
     integrations: api.integrations,
     linear: api.linear,
+    lookup: api.lookup,
     endpoints: { list: api.endpoints, save: api.saveEndpoint, remove: api.removeEndpoint },
     gateway: api.gateway,
   };

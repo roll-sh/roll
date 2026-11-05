@@ -1,4 +1,5 @@
 /** Render agents canvas components with a real `AgentsClient` over a fake transport. */
+import { memoryLookup } from "@/lib/lookup-api";
 import { render } from "@testing-library/react";
 import type { ReactElement } from "react";
 import { vi, type Mock } from "vitest";
@@ -97,6 +98,7 @@ export function fakeServices(
       ...integrations,
     },
     linear: memoryLinear(DISCONNECTED),
+    lookup: memoryLookup({}),
     endpoints: { list: vi.fn(profiles.list), save: vi.fn(profiles.save), remove: vi.fn(profiles.remove), ...endpointCalls },
     ...rest,
   };

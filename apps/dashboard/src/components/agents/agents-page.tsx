@@ -1,6 +1,6 @@
 "use client";
 
-import { DotField, HorizonMark, RollMark } from "@roll/brand";
+import { DotField, HorizonMark, RollMark, useReducedMotion } from "@roll/brand";
 import { Archive, ArrowLeft, ChevronDown, ChevronUp, MoreHorizontal, PanelRightClose, Pin, PinOff, Plus, Search, Server, Settings, Share2, X, Zap } from "lucide-react";
 import Link from "next/link";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
@@ -12,16 +12,16 @@ import type { Direction, Size } from "@/lib/agents-layout";
 import { closePalette, noteThreadOpen, openPalette, togglePalette } from "@/lib/agents-palette";
 import { lastInputWasKeyboard } from "@/lib/input-modality";
 import type { AgentsServices } from "@/lib/agents-services";
-import { isNewAgentKey, setAgentsView, useAgentsSurface, viewFromHash, type AgentsView } from "@/lib/agents-surface";
-import { ALL, applyDisplay, applyView, directionOf, focusOn, isPinned, keepProject, pinKey, pinnedConversations, pinOf, projectOf, viewStorageKey, withDirection, type Pin as PinRec } from "@/lib/agents-views";
+import { isNewAgentKey, setAgentsView, useAgentsSurface, viewFromHash, type AgentsView, type AutomationsView } from "@/lib/agents-surface";
+import { isBuilder } from "@/lib/automations-nav";
+import { ALL, applyDisplay, applyView, directionOf, focusOn, isPinned, keepProject, loadFocused, pinKey, setFocused as setFocusedIn, pinnedConversations, pinOf, projectOf, viewStorageKey, withDirection, type Pin as PinRec } from "@/lib/agents-views";
 import { desktop, onDesktopDeepLink, useDesktop } from "@/lib/desktop";
 import { LINK_PARAMS, type IntegrationsLink } from "@/lib/integrations-api";
 import { useModelPrefsSync, useOwnerSettings } from "@/lib/owner-settings";
 import { useMarkState, useMarkStateValue } from "../mark-state";
 import { AddMachineDialog, AddMachinePaths } from "./add-machine";
 import { AgentsCanvas, type CanvasHandle } from "./agents-canvas";
-import { AutomationPanel } from "./automations/automation-panel";
-import { AutomationsView } from "./automations/automations-view";
+import { AutomationsSheet } from "./automations/sheet";
 import { Notices } from "./automations/notices";
 import { CommandPalette, type PaletteHost } from "./command-palette";
 import { openIntegrations } from "./integrations";
@@ -30,6 +30,7 @@ import { Launcher } from "./new-agent";
 import { PinnedConversation, PinnedDiff, PinnedTerminal } from "./pinned";
 import { MachineNode, ProjectNode, RequestNode, SubagentNode, ThreadNode } from "./nodes";
 import { CanvasProjectsProvider, type CanvasProjects } from "./machine-projects";
+import { ProjectDialogs } from "./project-actions";
 import { PromptBar } from "./prompt-bar";
 import { PendingRequest } from "./pending-request";
 import { SettingsPanel } from "./settings-panel";
@@ -177,8 +178,27 @@ export function AgentsSurface({
     if (gone) setAgentsView({ kind: "canvas" });
   }, [gone]);
   const shown: AgentsView = gone ? { kind: "canvas" } : view;
-  // The card beside the open panel, selected on the canvas.
-  const selected = shown.kind === "thread" ? `t:${shown.thread}` : shown.kind === "settings" && shown.target !== "owner" ? shown.target : undefined;
+  // The card beside the open panel, selected on the canvas (a conversation opened from a run, in the automations sheet, too).
+  const selected =
+    shown.kind === "thread" ? `t:${shown.thread}` : shown.kind === "automations" && shown.thread ? `t:${shown.thread}` : shown.kind === "settings" && shown.target !== "owner" ? shown.target : undefined;
+  // The automations sheet: what it highlights on the canvas (a run's threads), Back for Escape,
+  // the builder maximized, and the sheet kept a beat after it closes so it can slide out.
+  const [highlighted, setHighlighted] = useState<readonly string[]>([]);
+  const runInSheet = useRef<{ view: AutomationsView; keys: readonly string[] } | null>(null);
+  const sheetBack = useRef<(() => void) | null>(null);
+  const [maximized, setMaximized] = useMaximized();
+  const sheet = useLeaving(shown.kind === "automations" ? shown : null, useReducedMotion() ? 0 : SHEET_OUT_MS);
+  const sheetView = sheet.leaving && shown.kind !== "canvas" ? null : sheet.value;
+  const wide = !phone && maximized && !!sheetView && !sheet.leaving && isBuilder(sheetView);
+  const firstHighlight = highlighted[0];
+  useEffect(() => {
+    runInSheet.current = shown.kind === "automations" && shown.run && highlighted.length ? { view: shown, keys: highlighted } : null;
+  }, [shown, highlighted]);
+  useEffect(() => {
+    if (!firstHighlight || selected) return;
+    const t = setTimeout(() => canvas.current?.reveal(firstHighlight), 280);
+    return () => clearTimeout(t);
+  }, [firstHighlight, selected]);
   useEffect(() => {
     if (!selected) return;
     // Once the panel has made the canvas narrower.
@@ -201,10 +221,14 @@ export function AgentsSurface({
   }, [client, data.threads, shown]);
   useEffect(() => () => client.unfollow("surface"), [client]);
 
+  // A run in the automations sheet and the cards it highlights: one of those cards opens its
+  // conversation in the sheet, over the run (Back returns to it), not in place of the sheet.
   const openThread = useCallback((thread: string) => {
     // How often and how lately, for the command palette's ranking.
     noteThreadOpen(thread);
-    setAgentsView({ kind: "thread", thread });
+    const inSheet = runInSheet.current;
+    if (inSheet?.keys.includes(`t:${thread}`)) setAgentsView({ ...inSheet.view, thread });
+    else setAgentsView({ kind: "thread", thread });
   }, []);
   const close = useCallback(() => setAgentsView({ kind: "canvas" }), []);
 
@@ -263,16 +287,22 @@ export function AgentsSurface({
     [chrome, startNew],
   );
 
-  // One project filling the canvas (per device, until Escape or the chip's ×).
-  const [focused, setFocused] = useState<string | null>(null);
-  const focusProject = useCallback((project: string | null) => {
-    setFocused(project);
-    if (project) setAgentsView({ kind: "canvas" });
-  }, []);
-  const focusedGone = focused !== null && !data.projects.has(focused);
+  // "Focus on this project only": the canvas, the sidebar and the counts scoped to one project,
+  // remembered per view on this device, until Escape or the chip's ×.
+  const viewId = views.current.id;
+  const [focusedBy, setFocusedBy] = useState<Record<string, string>>(() => loadFocused(client.owner));
+  const focused = focusedBy[viewId] ?? null;
+  const focusProject = useCallback(
+    (project: string | null) => {
+      setFocusedBy((all) => setFocusedIn(client.owner, all, viewId, project));
+      if (project) setAgentsView({ kind: "canvas" });
+    },
+    [client.owner, viewId],
+  );
+  const focusedGone = focused !== null && data.projects.size > 0 && !data.projects.has(focused);
   useEffect(() => {
-    if (focusedGone) setFocused(null);
-  }, [focusedGone]);
+    if (focusedGone) focusProject(null);
+  }, [focusedGone, focusProject]);
   const prefs = useOwnerSettings(services?.settings, client.owner, data.settings?.revision ?? 0);
   // The model picker's favourites and recent models follow the owner (a share's replay has no services).
   useModelPrefsSync(prefs, services ? prefs.save : null);
@@ -338,8 +368,8 @@ export function AgentsSurface({
       }
       const typing = el && (el.isContentEditable || /^(INPUT|SELECT)$/.test(el.tagName) || (el.tagName === "TEXTAREA" && (el as HTMLTextAreaElement).value !== ""));
       if (typing) return;
-      // An open automation closes to the list first; the list goes back to the canvas.
-      if (shown.kind === "automations" && shown.open) setAgentsView({ kind: "automations", list: shown.list });
+      // The automations sheet goes up one level; from its list, it closes.
+      if (shown.kind === "automations") (sheetBack.current ?? close)();
       else if (shown.kind !== "canvas") close();
       else onClose?.();
     };
@@ -372,8 +402,24 @@ export function AgentsSurface({
     [focus],
   );
 
-  const { busy: working, requests } = rolling(data);
+  const all = rolling(data);
+  // Focused on one project: its counts only.
+  const inFocus = (thread: string) => !focused || data.threads.get(thread)?.value.project === focused;
+  const working = focused ? all.busy.filter((t) => t.project === focused) : all.busy;
+  const requests = focused ? all.requests.filter((r) => inFocus(r.thread)) : all.requests;
   const toggleAutomations = useCallback(() => setAgentsView(shown.kind === "automations" ? { kind: "canvas" } : { kind: "automations" }), [shown.kind]);
+  // A (no modifiers, not typing, nothing open over the canvas): the automations sheet, like the ⚡ button.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.defaultPrevented || e.metaKey || e.ctrlKey || e.altKey || e.shiftKey || e.repeat || e.key.toLowerCase() !== "a") return;
+      const el = e.target as HTMLElement | null;
+      if (el && (el.isContentEditable || /^(INPUT|SELECT|TEXTAREA)$/.test(el.tagName) || el.closest(".xterm, [role=dialog]:not([data-surface]), [role=menu], [role=listbox]"))) return;
+      e.preventDefault();
+      toggleAutomations();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [toggleAutomations]);
   // Waiting on you isn't running: those show as the waiting count.
   const running = working.filter((t) => t.status !== "waiting").length;
   const archived = [...data.threads.values()].filter((r) => r.value.archived_at !== null).length;
@@ -463,7 +509,7 @@ export function AgentsSurface({
               </button>
               {/* On a phone these are under More; the bar keeps its room for what is live. */}
               <span className="flex max-sm:hidden">
-                <IconButton label={shown.kind === "automations" ? "Back to the canvas" : "Automations"} active={shown.kind === "automations"} onClick={toggleAutomations}>
+                <IconButton label={shown.kind === "automations" ? "Close automations (A)" : "Automations (A)"} active={shown.kind === "automations"} onClick={toggleAutomations}>
                   <Zap className="size-4" strokeWidth={1.75} />
                 </IconButton>
                 <IconButton label="Add a machine" onClick={() => setAdding(true)}>
@@ -477,7 +523,7 @@ export function AgentsSurface({
                 label="More"
                 trigger={<MoreHorizontal className="size-4" strokeWidth={1.75} />}
                 items={[
-                  phone && { label: shown.kind === "automations" ? "Back to the canvas" : "Automations", icon: <Zap />, onSelect: toggleAutomations },
+                  phone && { label: shown.kind === "automations" ? "Close automations" : "Automations", icon: <Zap />, onSelect: toggleAutomations },
                   phone && { label: "Add a machine", icon: <Server />, onSelect: () => setAdding(true) },
                   phone && { label: "Agents settings", icon: <Settings />, onSelect: () => setAgentsView({ kind: "settings", target: "owner" }) },
                   archived > 0 && { label: `${showArchived ? "Hide" : "Show"} archived (${archived})`, icon: <Archive />, onSelect: () => setShowArchived((s) => !s) },
@@ -488,19 +534,18 @@ export function AgentsSurface({
             </span>
           </header>
           <div className="relative flex min-h-0 flex-1">
-            <ThreadsSidebar data={data} open={sidebar} setOpen={setSidebar} phone={phone} openThread={shown.kind === "thread" ? shown.thread : null} />
+            <ThreadsSidebar data={data} open={sidebar} setOpen={setSidebar} phone={phone} openThread={shown.kind === "thread" ? shown.thread : null} only={focused} onShowAll={() => focusProject(null)} />
             {/* The working area: an inset panel one step up from the chrome (Linear's inverted L). */}
             <div
               data-waiting={(phone && shown.kind === "canvas" && requests.length > 0) || undefined}
-              className={`relative min-h-0 min-w-0 flex-1 overflow-hidden bg-canvas ${phone ? "" : "mx-2 mb-2 rounded-xl border border-line"}`}
+              className={`relative min-h-0 min-w-0 flex-1 overflow-hidden bg-canvas ${phone ? "" : "mx-2 mb-2 rounded-xl border border-line"} ${wide ? "hidden" : ""}`}
             >
-              {data.machines.size === 0 && snap.conn !== "connecting" && shown.kind !== "automations" ? (
+              {data.machines.size === 0 && snap.conn !== "connecting" ? (
                 <Empty demo={demo} onCreated={onSandbox} />
               ) : (
                 <>
-                  {shown.kind === "automations" && <AutomationsView view={shown} phone={phone} />}
-                  {/* Kept mounted under the automations, so the canvas comes back where it was. */}
-                  <div className={shown.kind === "automations" ? "hidden" : "contents"}>
+                  {/* Live beside the automations sheet; hidden (still mounted) under a maximized builder. */}
+                  <div className="contents">
                     <CanvasView
                       canvasRef={canvas}
                       data={data}
@@ -511,8 +556,9 @@ export function AgentsSurface({
                       focused={focused}
                       onFocus={focusProject}
                       pendingFocus={pendingFocus}
-                      visible={shown.kind !== "new" && shown.kind !== "automations"}
+                      visible={shown.kind !== "new" && !wide && !(phone && shown.kind === "automations")}
                       selected={selected}
+                      highlighted={shown.kind === "automations" ? highlighted : undefined}
                       phone={phone}
                       onLaunch={onLaunch}
                       keepClear={dock}
@@ -526,7 +572,7 @@ export function AgentsSurface({
                 </p>
               )}
               {/* Beside an open conversation too (the canvas narrows; the draft stays); on a phone, under what's waiting. */}
-              {data.machines.size > 0 && shown.kind !== "automations" && <PromptBar ref={dock} above={phone && shown.kind === "canvas" && requests.length > 0 && <PhoneWaiting client={client} />} />}
+              {data.machines.size > 0 && <PromptBar ref={dock} above={phone && shown.kind === "canvas" && requests.length > 0 && <PhoneWaiting client={client} />} />}
             </div>
             {shown.kind === "thread" && threadOpen && (
               <SidePanel phone={phone} label="Conversation">
@@ -547,14 +593,15 @@ export function AgentsSurface({
                 <SettingsPanel key={shown.target} target={shown.target} onClose={close} />
               </SidePanel>
             )}
-            {shown.kind === "automations" && shown.open && (
-              <SidePanel phone={phone} label="Automation">
-                <AutomationPanel key={`${shown.open}:${shown.template ?? ""}`} view={{ ...shown, open: shown.open }} onClose={() => setAgentsView({ kind: "automations", list: shown.list })} />
+            {sheetView && (
+              <SidePanel phone={phone} label="Automations" wide={wide} leaving={sheet.leaving}>
+                <AutomationsSheet view={sheetView} phone={phone} maximized={maximized} setMaximized={setMaximized} backRef={sheetBack} onHighlight={setHighlighted} />
               </SidePanel>
             )}
           </div>
         </div>
         <Notices />
+        <ProjectDialogs />
         {adding && <AddMachineDialog onClose={() => setAdding(false)} onCreated={onSandbox} />}
         {shown.kind === "new" && <Launcher key={`${shown.project ?? ""}|${shown.machine ?? ""}|${shown.at?.x ?? ""},${shown.at?.y ?? ""}`} project={shown.project} machine={shown.machine} at={shown.at} onClose={close} />}
         <CommandPalette host={host} />
@@ -564,12 +611,50 @@ export function AgentsSurface({
 }
 
 const PANEL_WIDTH = "roll:agents:panel-width";
+const MAXIMIZED = "roll:agents:automations-maximized";
+/** The automations sheet sliding out (`.panel-out`). */
+const SHEET_OUT_MS = 180;
+
+/** The automations builder filling the working area (T3's maximized right panel), per device. */
+function useMaximized(): [boolean, (on: boolean) => void] {
+  const [on, setOn] = useState(false);
+  useEffect(() => {
+    try {
+      setOn(localStorage.getItem(MAXIMIZED) === "1");
+    } catch {
+      // Not remembered.
+    }
+  }, []);
+  const set = useCallback((next: boolean) => {
+    setOn(next);
+    try {
+      localStorage.setItem(MAXIMIZED, next ? "1" : "0");
+    } catch {
+      // Not remembered.
+    }
+  }, []);
+  return [on, set];
+}
+
+/** `value`, kept for `ms` after it becomes `null` (`leaving` meanwhile), so it can animate out. */
+function useLeaving<T>(value: T | null, ms: number): { value: T | null; leaving: boolean } {
+  const [kept, setKept] = useState<T | null>(value);
+  if (value !== null && value !== kept) setKept(value);
+  const leaving = value === null && kept !== null;
+  useEffect(() => {
+    if (!leaving) return;
+    const t = setTimeout(() => setKept(null), ms);
+    return () => clearTimeout(t);
+  }, [leaving, ms]);
+  return { value: value ?? kept, leaving };
+}
 
 /**
- * What's open beside the canvas (a conversation, settings): docked on the right, sliding in, as
- * wide as it was last dragged to; on a phone it covers the canvas.
+ * What's open beside the canvas (a conversation, settings, the automations sheet): docked on the
+ * right, sliding in, as wide as it was last dragged to; on a phone it covers the canvas. `wide`
+ * fills the working area (the maximized builder); `leaving` slides it out before it unmounts.
  */
-function SidePanel({ phone, label, children }: { phone: boolean; label: string; children: ReactNode }) {
+function SidePanel({ phone, label, wide = false, leaving = false, children }: { phone: boolean; label: string; wide?: boolean; leaving?: boolean; children: ReactNode }) {
   const [width, setWidth] = useState(() => {
     const saved = typeof window === "undefined" ? NaN : Number(localStorage.getItem(PANEL_WIDTH));
     return Number.isFinite(saved) && saved > 0 ? saved : 640;
@@ -599,10 +684,11 @@ function SidePanel({ phone, label, children }: { phone: boolean; label: string; 
     <aside
       aria-label={label}
       data-panel
-      className={`panel-in flex min-h-0 flex-col ${phone ? "absolute inset-0 z-20 bg-sheet" : "relative shrink-0 pr-2 pb-2"}`}
-      style={phone ? undefined : { width: `min(${width}px, calc(100% - 320px))` }}
+      className={`${leaving ? "panel-out pointer-events-none" : "panel-in"} flex min-h-0 flex-col ${phone ? "absolute inset-0 z-20 bg-sheet" : wide ? "relative min-w-0 flex-1 pr-2 pb-2 pl-2" : "relative shrink-0 pr-2 pb-2"}`}
+      style={phone || wide ? undefined : { width: `min(${width}px, calc(100% - 320px))` }}
+      data-leaving={leaving || undefined}
     >
-      {!phone && (
+      {!phone && !wide && (
         <div
           role="separator"
           aria-orientation="vertical"
@@ -659,6 +745,7 @@ function CanvasView({
   pendingFocus,
   visible,
   selected,
+  highlighted,
   phone,
   onLaunch,
   keepClear,
@@ -675,6 +762,8 @@ function CanvasView({
   pendingFocus: React.RefObject<string | null>;
   visible: boolean;
   selected?: string;
+  /** More cards to mark as open beside the canvas (a run's threads in the automations sheet). */
+  highlighted?: readonly string[];
   phone: boolean;
   onLaunch?: (source: string, at: { x: number; y: number }) => void;
   keepClear?: React.RefObject<HTMLElement | null>;
@@ -871,6 +960,7 @@ function CanvasView({
             defaultSize={sizeOf}
             active={visible}
             selected={selected}
+            highlighted={highlighted}
             onLaunch={onLaunch}
             keepClear={keepClear}
             overlay={empty && <EmptyView name={view.id === ALL ? null : view.name} waitingOnly={filter.status?.length === 1 && filter.status[0] === "waiting"} onAll={() => (view.id === ALL ? views.setFilter({}) : views.select(ALL))} />}

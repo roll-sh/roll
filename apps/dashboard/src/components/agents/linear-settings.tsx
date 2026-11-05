@@ -10,7 +10,8 @@
 import { Check, Copy, ExternalLink, Trash2, X } from "lucide-react";
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { linearReturn, type LinearConnection, type LinearReturn, type LinearSettings, type LinearStatus, type LinearTeam, type LinearWebhookStatus } from "@/lib/linear-api";
-import { field, Note, SaveState, SettingRow, SettingsSection, TextField, type Setting } from "./settings-ui";
+import { LookupPicker } from "./lookup-picker";
+import { field, Note, SaveState, SettingRow, SettingsSection, type Setting } from "./settings-ui";
 import { ago } from "./shared";
 import { cn } from "./ui";
 import { useAgents } from "./use-agents";
@@ -325,6 +326,9 @@ function Url({ url }: { url: string }) {
   );
 }
 
+/** The owner's roll code repos (a team's issues are in one). */
+const REPOS = { source: "code", kind: "repos" } as const;
+
 function Repos({ settings, teams, disabled, onSave }: { settings: LinearSettings; teams: () => Promise<LinearTeam[]>; disabled: boolean; onSave: (s: LinearSettings) => Promise<boolean> }) {
   const [known, setKnown] = useState<LinearTeam[] | null>(null);
   const [adding, setAdding] = useState("");
@@ -369,12 +373,12 @@ function Repos({ settings, teams, disabled, onSave }: { settings: LinearSettings
               {key}
             </span>
             <span className="min-w-0 flex-1 truncate text-[12px] text-subtle">{name(key) ?? ""}</span>
-            <TextField label={`${key} repo`} value={settings.repos[key] ?? ""} placeholder={settings.default_repo ?? "repo"} mono disabled={disabled} className="w-44" onSave={(r) => setRepo(key, r)} />
+            <LookupPicker label={`${key} repo`} from={REPOS} value={settings.repos[key] ?? null} placeholder={settings.default_repo ?? "Pick a repo"} custom clearable disabled={disabled} className="w-48" onChange={(r) => void setRepo(key, r ?? "")} />
           </li>
         ))}
         <li className="flex items-center gap-2 pt-1">
           <span className="min-w-0 flex-1 text-[12px] text-muted">Default repo</span>
-          <TextField label="Default repo" value={settings.default_repo ?? ""} placeholder="none" mono disabled={disabled} className="w-44" onSave={setDefault} />
+          <LookupPicker label="Default repo" from={REPOS} value={settings.default_repo ?? null} placeholder="None" custom clearable disabled={disabled} className="w-48" onChange={(r) => void setDefault(r ?? "")} />
         </li>
       </ul>
       {known === null ? (

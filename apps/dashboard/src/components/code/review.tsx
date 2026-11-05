@@ -2,6 +2,7 @@
 
 import { CircleCheck, CircleDashed, CircleX, Eye, MessageSquare, Pencil, Trash2, UserPlus } from "lucide-react";
 import { forwardRef, useCallback, useEffect, useState } from "react";
+import { Picker, type PickerOption } from "../agents/ui/picker";
 import {
   codeApi,
   type Change,
@@ -206,27 +207,22 @@ const requestName = (r: ReviewRequest["reviewer"]) =>
 
 /** Ask someone (or roll, or an app, or an agent) for a review. Writers only. */
 export function RequestReview({ change, busy, run }: { change: Change; busy: string | null; run: (key: string, fn: () => Promise<unknown>) => Promise<unknown> }) {
-  const [who, setWho] = useState("");
+  const [who, setWho] = useState<string | null>(null);
   const [required, setRequired] = useState(false);
-  const valid = /^(@[\w.-]+|agent:[\w.-]+|app:[\w.-]+|roll)$/.test(who.trim());
+  const reviewers = useReviewers(change.repo.split("/")[0]);
+  const valid = /^(@[\w.-]+|agent:[\w.-]+|app:[\w.-]+|roll)$/.test(who?.trim() ?? "");
   return (
     <form
       className="space-y-2"
       onSubmit={async (e) => {
         e.preventDefault();
         if (!valid) return;
-        const ok = await run("request-review", () => codeApi.requestReview(change.id, who.trim(), required));
-        if (ok !== undefined) setWho("");
+        const ok = await run("request-review", () => codeApi.requestReview(change.id, who!.trim(), required));
+        if (ok !== undefined) setWho(null);
       }}
     >
       <div className="flex gap-2">
-        <input
-          value={who}
-          onChange={(e) => setWho(e.target.value)}
-          placeholder="@name, agent:x, app:x or roll"
-          spellCheck={false}
-          className={`${input} min-w-0 flex-1 font-mono text-[12px]`}
-        />
+        <Picker label="Reviewer" value={who} onChange={setWho} options={reviewers} custom clearable placeholder="roll, an agent, an app or @name" searchPlaceholder="Search or type @name…" className="min-w-0 flex-1" />
         <button type="submit" disabled={!valid || busy !== null} className={btn} title="Request a review">
           <UserPlus className="size-3.5" />
         </button>
@@ -632,3 +628,26 @@ export const ReviewComposer = forwardRef<
     </div>
   );
 });
+
+/**
+ * Who a review can be asked of without typing: roll, the owner's agents (its `agent:` tokens) and
+ * its review apps. Only what the caller may list shows (a writer who doesn't manage the owner sees
+ * roll and types the rest).
+ */
+function useReviewers(owner: string): PickerOption[] {
+  const [rows, setRows] = useState<PickerOption[]>([{ id: "roll", label: "roll", hint: "roll's own review", icon: "agent" }]);
+  useEffect(() => {
+    let live = true;
+    const roll: PickerOption = { id: "roll", label: "roll", hint: "roll's own review", icon: "agent" };
+    Promise.allSettled([codeApi.tokens(owner), codeApi.reviewApps(owner)]).then(([tokens, apps]) => {
+      if (!live) return;
+      const agents = tokens.status === "fulfilled" ? tokens.value.filter((t) => t.name.startsWith("agent:")).map((t): PickerOption => ({ id: t.name, label: t.name.slice("agent:".length), hint: "agent", icon: "agent", group: "Agents" })) : [];
+      const reviewApps = apps.status === "fulfilled" ? apps.value.map((a): PickerOption => ({ id: `app:${a.name}`, label: a.name, hint: "review app", icon: "workflow", group: "Review apps" })) : [];
+      setRows([roll, ...agents, ...reviewApps]);
+    });
+    return () => {
+      live = false;
+    };
+  }, [owner]);
+  return rows;
+}
