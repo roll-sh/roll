@@ -37,6 +37,14 @@ function memoryGateway(seed: GatewayPlan | null = null) {
 }
 
 describe("setting up the gateway", () => {
+  it("picks an always-on computer, not the laptop listed first", () => {
+    const h = agentsHarness({ machines: [LAPTOP, HOST], ctx: { services: fakeServices({ gateway: memoryGateway().api }) } });
+    renderAgents(<GatewaySetup machines={[LAPTOP, HOST]} onClose={vi.fn()} onDone={vi.fn()} />, h);
+    const dlg = screen.getByRole("dialog", { name: "Set up the model gateway" });
+    expect(within(dlg).getByRole("radio", { name: "ai-server" })).toBeChecked();
+    expect(within(dlg).getByRole("radio", { name: "ada-mbp" })).not.toBeChecked();
+  });
+
   it("walks the five steps under a macOS click, seals the key before sending it, and acknowledges the notice", async () => {
     const gw = memoryGateway();
     const h = agentsHarness({

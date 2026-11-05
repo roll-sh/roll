@@ -219,7 +219,10 @@ function GatewayRows({ g, onSetup }: { g: ReturnType<typeof useGatewayPlan>; onS
             <button type="button" disabled={!live || [...checks.values()].includes("busy")} onClick={() => void checkOne()} className={smallBtn} title="Ask each upstream for its models now (never generates)">
               <RefreshCw className={cn("size-3.5", [...checks.values()].includes("busy") && "animate-spin motion-reduce:animate-none")} /> Check upstreams
             </button>
-            <Switch checked={!!settings?.enabled} disabled={!live} onCheckedChange={(on) => void run(() => apply((s) => ({ ...s, enabled: on })))} aria-label="The gateway serves" />
+            <label className="flex items-center gap-2 text-[12px] text-muted">
+              {settings?.enabled ? "Serving" : "Off"}
+              <Switch checked={!!settings?.enabled} disabled={!live} onCheckedChange={(on) => void run(() => apply((s) => ({ ...s, enabled: on })))} aria-label="The gateway serves" />
+            </label>
           </>
         }
       >

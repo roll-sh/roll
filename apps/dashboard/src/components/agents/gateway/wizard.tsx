@@ -22,6 +22,7 @@ import { createPortal } from "react-dom";
 import { GATEWAY_PORT, reachable, type GatewayPlan, type GatewaySettings, type GatewayUrl, type KeyChange, type Machine, type UpstreamCheck, type UpstreamSpec } from "@/lib/agents-api";
 import { checkSettings, checkUrl, gatewayOn, isIPv4, isIPv6, listenError, reachProblem, upstreamKeyChange, upstreamUrl, URL_LABELS, urlChoices, urlFor } from "@/lib/agents-gateway";
 import { useEscapeLayer } from "../escape-layers";
+import { machineKind } from "@/lib/agents-identity";
 import { MachineIcon } from "../identity";
 import { field, Note } from "../settings-ui";
 import { cn, Select, Switch } from "../ui";
@@ -63,7 +64,15 @@ export function GatewaySetup({
   const { client, services, owner } = useAgents();
   const [step, setStep] = useState(0);
   const computers = machines.filter((m) => !m.sandbox);
-  const [hostId, setHostId] = useState<string | null>(() => computers.find((m) => m.id === initialHost && !hostProblem(m))?.id ?? computers.find((m) => !hostProblem(m))?.id ?? null);
+  // An always-on computer first (a server, a desktop), then any that can host it: a laptop sleeps.
+  const [hostId, setHostId] = useState<string | null>(() => {
+    const able = computers.filter((m) => !hostProblem(m));
+    const rank = (m: Machine) => {
+      const i = ["server", "cloud", "desktop"].indexOf(machineKind(m));
+      return i < 0 ? 3 : i;
+    };
+    return able.find((m) => m.id === initialHost)?.id ?? [...able].sort((a, b) => rank(a) - rank(b))[0]?.id ?? null;
+  });
   const host = machines.find((m) => m.id === hostId);
   const [ack, setAck] = useState(false);
   const [upstreams, setUpstreams] = useState<UpstreamSpec[]>([]);
@@ -445,7 +454,7 @@ export function Addresses({ addresses, onChange, hostName, port = GATEWAY_PORT }
       )}
       <div className="flex flex-wrap items-center gap-2">
         <Select label="Network" className="w-40" value={label} onChange={setLabel} options={LABELS} />
-        <input aria-label="Address" value={address} onChange={(e) => setAddress(e.target.value)} onKeyDown={(e) => e.key === "Enter" && (e.preventDefault(), add())} placeholder="ai-server.tailnet.ts.net or an IP" spellCheck={false} className={cn(field, "min-w-48 flex-1 font-mono text-[12px]")} />
+        <input aria-label="Address" value={address} onChange={(e) => setAddress(e.target.value)} onKeyDown={(e) => e.key === "Enter" && (e.preventDefault(), add())} placeholder={`${hostName.toLowerCase().replace(/[^a-z0-9-]+/g, "-")}.tailnet.ts.net or an IP`} spellCheck={false} className={cn(field, "min-w-48 flex-1 font-mono text-[12px]")} />
         {!literal && address.trim() && (
           <input aria-label="Its IP address" value={ip} onChange={(e) => setIp(e.target.value)} placeholder="its IP on that network" spellCheck={false} className={cn(field, "w-40 font-mono text-[12px]")} />
         )}
