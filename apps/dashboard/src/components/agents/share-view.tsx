@@ -258,8 +258,8 @@ function ShareHeader({ share, stats }: { share: Share; stats: ReturnType<typeof 
           {share.trimmed ? " · long outputs shortened" : ""}
         </p>
       </div>
-      <Link href="/dashboard/agents" className="hidden shrink-0 items-center gap-1.5 text-[12px] text-subtle hover:text-fg sm:flex">
-        <HorizonMark size={13} interactive={false} label="" /> keep the code rolling
+      <Link href="/dashboard/agents" aria-label="Open roll agents" className="flex shrink-0 items-center gap-1.5 text-[12px] text-subtle hover:text-fg">
+        <HorizonMark size={13} interactive={false} label="" /> <span className="max-sm:hidden">keep the code rolling</span>
       </Link>
     </header>
   );

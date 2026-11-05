@@ -80,6 +80,13 @@ describe("ShareView", () => {
     expect(screen.getByText("0123456789")).toBeInTheDocument();
   });
 
+  it("links a viewer into roll's agents on any screen (on a phone, the mark alone)", () => {
+    view();
+    const link = screen.getByRole("link", { name: "Open roll agents" });
+    expect(link).toHaveAttribute("href", "/dashboard/agents");
+    expect(link.className).not.toMatch(/(^|\s)hidden(\s|$)/);
+  });
+
   it("formats the clock", () => {
     expect([clock(0), clock(61_400), clock(-5)]).toEqual(["0:00", "1:01", "0:00"]);
   });
