@@ -185,6 +185,9 @@ pub struct Wanted<'a> {
     /// The session just opened: fx takes its permission mode only once written (T3 forces
     /// that first write).
     pub opening: bool,
+    /// The agent's own mode for the runtime mode, where its flavor names one (Antigravity's
+    /// `default`/`auto_edit`/`yolo`); set when the agent offers it.
+    pub permission_mode: Option<&'a str>,
 }
 
 /// The settings that bring the agent to what roll wants, in T3's order: model, effort, then
@@ -262,6 +265,7 @@ pub fn settings(
     let target = match (want.interaction, plan) {
         (InteractionMode::Plan, Some(plan)) => Some(plan),
         _ if fx => Some(if full { fx_auto.unwrap_or("auto") } else { "ask" }),
+        _ if want.permission_mode.is_some_and(|m| mode_ids.contains(&m)) => want.permission_mode,
         _ if current.is_some_and(is_plan_mode) => before_plan
             .filter(|m| mode_ids.contains(m) && !is_plan_mode(m))
             .or_else(|| mode_ids.iter().copied().find(|id| !is_plan_mode(id))),
@@ -323,7 +327,21 @@ mod tests {
 
     fn want(runtime: RuntimeMode, interaction: InteractionMode) -> Wanted<'static> {
         static NONE: std::sync::LazyLock<agent_proto::ModelOptions> = std::sync::LazyLock::new(Default::default);
-        Wanted { model: None, effort: None, options: &NONE, runtime, interaction, opening: false }
+        Wanted { model: None, effort: None, options: &NONE, runtime, interaction, opening: false, permission_mode: None }
+    }
+
+    /// Antigravity's modes follow the runtime mode (T3's `antigravityPermissionMode`).
+    #[test]
+    fn a_flavors_permission_mode() {
+        let agy = wire::config_options(&json!([
+            { "id": "mode", "category": "mode", "type": "select", "currentValue": "default",
+              "options": [{ "value": "default" }, { "value": "auto_edit" }, { "value": "yolo" }] },
+        ]));
+        let s = settings(&agy, None, None, false, None, &Wanted { permission_mode: Some("yolo"), ..want(RuntimeMode::FullAccess, InteractionMode::Default) });
+        assert_eq!(s, [Setting::Option { id: "mode".into(), value: OptionValue::Id("yolo".into()), optional: false }]);
+        assert!(settings(&agy, None, None, false, None, &Wanted { permission_mode: Some("default"), ..want(RuntimeMode::Ask, InteractionMode::Default) }).is_empty());
+        // A mode it doesn't offer isn't written.
+        assert!(settings(&agy, None, None, false, None, &Wanted { permission_mode: Some("plan"), ..want(RuntimeMode::Ask, InteractionMode::Default) }).is_empty());
     }
 
     #[test]

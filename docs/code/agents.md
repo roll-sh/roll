@@ -248,6 +248,64 @@ completed, native thread ref). The orchestrator owns ids and turns those events 
   `auto_edit`, everything in `full_access`) and asks otherwise. The agent may call roll's
   `fs/*` and `terminal/*`, confined to the thread's directory; writes and terminals need the
   mode or an approval of the same kind in that turn.
+  - **Google Antigravity** (`acp:antigravity`, `acp/antigravity.rs`, ported from T3's
+    `provider/acp/Antigravity*.ts`, `AntigravityAcpSupport.ts`, `antigravityAuthSupport.ts`,
+    `AntigravityInstallation.ts`, `Drivers/AntigravityDriver.ts` and `AntigravityAdapterV2.ts`).
+    Google's ACP server `agy_acp_server.par` is found on `PATH` with its `localharness_external`
+    beside the real binary. It starts with `--uid=` on Linux, `ANTIGRAVITY_HARNESS_PATH` and
+    `PYTHONUNBUFFERED=1`. Missing, the detail says to get it from the ACP registry
+    (`antigravity-acp`). Its status never starts it, because it unpacks about 1 GB per launch:
+    installed means the binary and the harness are there. It is known as Antigravity by its name
+    (`antigravity`, or a binary named `agy_acp_server…`) before `initialize`, and by
+    `agentInfo.name == "antigravity-acp"` after.
+    - It's offered reads but no writes or terminals: advertising writes turns its diff edits into
+      whole-file writes. roll names itself; T3 claims to be Zed, which the agent's allowlist
+      rewards with Claude and GPT models, so roll's threads see the Gemini models only.
+    - `authenticate` goes out eagerly, before `session/new`, with `oauth-personal` (or the first
+      method offered). Sending it reads nothing: the agent uses its own stored login.
+    - Not signed in, the agent prints `Open the following link to authenticate the ACP server: …`
+      on stdout (not JSON). roll ends the start as a sign-in failure, never repeats the link, and
+      the provider reports `auth: missing` until a session starts. ACP's -32000 does the same, for
+      every ACP agent. To sign in, run it once in a terminal on the machine and send it
+      `authenticate` (`(printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1}}'
+      '{"jsonrpc":"2.0","id":2,"method":"authenticate","params":{"methodId":"oauth-personal"}}'; sleep 600) | agy_acp_server.par --uid=`
+      with `ANTIGRAVITY_HARNESS_PATH` set), then open the link it prints. Google's redirect goes to
+      `127.0.0.1` on that machine, so the browser must run there.
+    - A resume is `session/resume`, never a `session/load` that replays every tool call. 1.4.2 to
+      1.4.5 get `_meta.antigravity.disabledTools: ["run_workflow"]`, because otherwise it writes a
+      skill into the workspace. 1.4.5 gets a thread's instructions as
+      `_meta.antigravity.systemPrompt.append`; older ones get them in front of the first prompt.
+    - The runtime mode is its `mode` option: `yolo`, `auto_edit` or `default`. It has no plan mode
+      (its own `/plan` is a message), and it reports subagents.
+    - `interaction_*` permission requests are its questions. Each is a single choice of its own
+      options, checked before roll's policy, so full access still asks. The answer is the option's
+      label, kept unique.
+    - The `agy.security.warning` on "allow always" is the approval's reason.
+    - Tools are bounded as T3 bounds them: 8,000 characters kept from the end, inline images and
+      `formatted_output` dropped. Its names are read: `CommandLine`, `command_line` and
+      `commandLine`; `combinedOutput`; `exitCode` and `exit_code`. A command without a kind is
+      `execute`. Its titles are tool names (`Running client_view_file`), which become the tool's
+      name, with the path shown.
+    - `Running start_subagent` and `Run invoke_subagent?` (unless `_meta.is_mcp_tool_call`) are a
+      subagent batch, with the role and prompt from its permission prompt's `rawInput.Subagents`.
+      It runs until the turn ends, because no child session is reported.
+    - A `client_view_file` read that roll served is completed even when the agent later fails it
+      with an unrelated error.
+    - `stopReason: "refusal"` fails the turn as the quota.
+    - Usage is Gemini's: input plus cached reads, output plus thoughts.
+    - Models come from its grouped `model` option, and thinking from the `thought_level` option.
+
+    Not ported, by the credential rule or for cost:
+    - T3's own profile and credential store (`GEMINI_HOME`, `AGY_ACP_FORCE_FILE_STORAGE`, its
+      `acp_token.json`).
+    - The OAuth redirect relay (`antigravityCallback.ts`) and the API-key and Vertex sign-in
+      methods it stores.
+    - The quota reader (`antigravityUsageLimits.ts`), so there are no usage limits.
+    - The SQLite read of the agent's conversation database. Turns its log ends on an API error
+      stay completed.
+    - Edit hunks rebuilt from the file before an edit.
+    - Attachments other than images (audio, PDFs, video).
+    - Reading subagents' work.
 - **OpenCode** (`opencode.rs`, a port of T3's v2 OpenCode driver): OpenCode 2's own server,
   `opencode serve`, over HTTP and server-sent events (`GET /api/event`). One server per provider
   serves every session (each request names its directory); roll starts it with a password it keeps

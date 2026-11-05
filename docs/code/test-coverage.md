@@ -1473,8 +1473,8 @@ transcripts. The test binary is the fake `claude` too: it checks every line the 
 
 ### ACP agents (`agent-host/tests/acp.rs`, transcripts in `agent-host/tests/fixtures/acp/`)
 
-T3 Code's ACP replay fixtures (MIT) for registry agents, Kiro, fx and Grok, and transcripts
-written in the tests.
+T3 Code's ACP replay fixtures (MIT) for registry agents, Kiro, fx and Grok, Antigravity transcripts
+built from T3's Antigravity tests (`antigravity_*.ndjson`), and transcripts written in the tests.
 
 | Feature | Tests |
 | --- | --- |
@@ -1493,6 +1493,11 @@ written in the tests.
 | `info()`: `initialize` only (no session, no login), version, auth methods, images; not installed; an agent that never answers is unavailable; known agents and their launch commands | `agent-host/tests/acp.rs::info_probes_without_side_effects`, `agent-host/tests/acp.rs::info_marks_an_agent_that_never_answers_unavailable`, `agent-host/tests/acp.rs::known_agents_cover_t3s`, `agent-host/src/provider/acp.rs::known_agents_are_valid_config_entries`, `agent-host/src/provider/acp.rs::versions_and_binaries` |
 | `roll agent up` offers the configured `[[acp]]` agents plus every known agent installed on `PATH` (configured entries win) | `agent-host/src/provider/acp.rs::configured_agents_win_over_discovered_ones` |
 | Robustness: crash → `Exited` with stderr; bounded lines; kill on close and on drop, reaped | `agent-host/tests/acp.rs::resume_unsupported_and_crashes`, `agent-host/src/provider/acp/rpc.rs::lines_are_bounded`, `agent-host/tests/acp.rs::close_kills_an_agent_that_ignores_stdin`, `agent-host/tests/acp.rs::dropping_a_session_kills_the_agent` |
+| Antigravity: reads-only client capabilities and roll's own name; eager `authenticate` (`oauth-personal`, else the first method); `_meta` with `run_workflow` off on 1.4.2–1.4.5 and instructions as the 1.4.5 system prompt; the grouped model option, thinking, `yolo`/`auto_edit`/`default` for the runtime mode; Gemini usage | `agent-host/tests/acp.rs::antigravity_new_session`, `agent-host/src/provider/acp/antigravity.rs::versions_meta_and_modes`, `agent-host/src/provider/acp/policy.rs::a_flavors_permission_mode`, `agent-host/src/provider/acp/antigravity.rs::gemini_usage_adds_cached_reads_and_thoughts`, `agent-host/src/provider/acp/session.rs::initialize_offers_v2_and_v1_and_what_roll_implements` |
+| Antigravity: resume with `session/resume`, never a replaying load; instructions in the prompt before 1.4.5; `refusal` fails the turn as the quota | `agent-host/tests/acp.rs::antigravity_resume_refusal` |
+| Antigravity: `interaction_*` permission requests → single-choice questions (before the policy; ids or unique labels; free answers refused); subagent batches by title with the launch from the permission prompt, running until the turn ends; `CommandLine`/`combinedOutput`/`exitCode` commands, an inferred `execute`, tool names from titles; the "allow always" warning as the reason; payloads bounded (8,000 characters, no images, no `formatted_output`) | `agent-host/tests/acp.rs::antigravity_turn`, `agent-host/src/provider/acp/antigravity.rs::questions_are_single_choices_of_its_own_options`, `agent-host/src/provider/acp/antigravity.rs::subagents_by_title_with_their_launch`, `agent-host/src/provider/acp/antigravity.rs::allow_always_carries_its_warning`, `agent-host/src/provider/acp/antigravity.rs::payloads_are_bounded` |
+| Antigravity: `client_view_file` reads roll served are completed (served before or after the announcement), refused ones fail | `agent-host/tests/acp.rs::antigravity_read_repair`, `agent-host/src/provider/acp/antigravity.rs::served_reads_are_completed` |
+| Antigravity: the sign-in link on stdout ends the start as a sign-in failure without repeating the link, and the status says `missing` after; the launch sets the harness beside the real binary and `PYTHONUNBUFFERED`; the status never starts it (installed = binary + harness, no plan mode, subagents) | `agent-host/tests/acp.rs::antigravity_sign_in_required`, `agent-host/tests/acp.rs::antigravity_info_never_starts_it`, `agent-host/src/provider/acp/antigravity.rs::spawn_env_finds_the_harness_beside_the_real_binary` |
 
 ### OpenCode (`agent-host/tests/opencode.rs`, transcripts in `agent-host/tests/fixtures/opencode/`)
 
