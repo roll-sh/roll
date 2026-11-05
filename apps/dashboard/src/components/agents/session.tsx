@@ -234,6 +234,14 @@ export function Conversation({ thread, machine, start, end }: { thread: Thread; 
               onHide={() => setSide(null)}
             />
           )}
+          {readOnly && subagent && (
+            // A share's replay has no composer: the subagent's bar still leads back.
+            <div className="shrink-0 px-3 pt-1 pb-3 sm:px-6">
+              <div className="mx-auto w-full max-w-[46rem]">
+                <SubagentBar node={subagent.node} now={now} onParent={() => setSub(null)} />
+              </div>
+            </div>
+          )}
           {readOnly && error && <p className="px-6 pb-3 text-[12px] text-danger">{error}</p>}
         </div>
         {side?.kind === "diff" && !readOnly && (

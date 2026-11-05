@@ -83,6 +83,7 @@ function useModifierHeld(): boolean {
 }
 
 const NO_QUESTIONS: Question[] = [];
+const EMPTY_DRAFT = { text: "", attachments: [] as Attachment[] };
 
 /** One of the composer's slash commands (T3's `/plan`, `/default`, and the providers' `/compact`). */
 export interface SlashCommand {
@@ -167,7 +168,7 @@ export function Composer({
   const held = useModifierHeld();
   // A queued message being edited here (T3's "Edit in the composer"), and the draft it pushed aside.
   const [editing, setEditing] = useState<QueuedMessage | null>(null);
-  const stash = useRef("");
+  const stash = useRef<{ text: string; attachments: Attachment[] }>(EMPTY_DRAFT);
   const [slashAt, setSlashAt] = useState(0);
   const [slashClosed, setSlashClosed] = useState(false);
 
@@ -336,7 +337,7 @@ export function Composer({
   // The queue (T3's queued runs).
   const promote = (q: QueuedMessage) => command({ type: "message.promote", thread: thread!.id, message: q.id });
   const startEditing = (q: QueuedMessage) => {
-    if (!editing) stash.current = text;
+    if (!editing) stash.current = { text, attachments };
     setEditing(q);
     setText(q.text);
     setAttachments(q.attachments);
@@ -344,9 +345,9 @@ export function Composer({
   };
   const leaveEditing = () => {
     setEditing(null);
-    setText(stash.current);
-    setAttachments([]);
-    stash.current = "";
+    setText(stash.current.text);
+    setAttachments(stash.current.attachments);
+    stash.current = EMPTY_DRAFT;
   };
   const queueActions = {
     sendNow: (q: QueuedMessage) => void act(() => promote(q)),
@@ -361,7 +362,7 @@ export function Composer({
   useEffect(() => {
     if (editing && thread && !thread.queued.some((q) => q.id === editing.id)) {
       setEditing(null);
-      stash.current = "";
+      stash.current = EMPTY_DRAFT;
     }
   }, [editing, thread]);
 
