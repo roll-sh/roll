@@ -1,10 +1,10 @@
-import { screen } from "@testing-library/react";
-import { render } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { ApiError } from "@/lib/code-api";
+import { ApiError, type Owner } from "@/lib/code-api";
 import { api, resetApi } from "@/test/api";
 import { info } from "@/test/fixtures";
+import { macClick } from "@/test/mac-click";
 
 vi.mock("@/lib/code-api", async (orig) => ({ ...(await orig()), ...(await import("@/test/api")).apiModule }));
 const agents = vi.hoisted(() => ({ approveLogin: vi.fn(), denyLogin: vi.fn(), addMachine: vi.fn(), pendingLogin: vi.fn() }));
@@ -28,12 +28,26 @@ describe("ConnectAgents", () => {
     expect(screen.getByText("WXYZ-2345")).toBeInTheDocument();
     expect(await screen.findByText("Approve ada-mbp (macOS)?")).toBeInTheDocument();
     expect(agents.pendingLogin).toHaveBeenCalledWith("acme", "WXYZ-2345");
-    await screen.findByRole("option", { name: "acme" });
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "Owner" })).toHaveTextContent("acme"));
     await userEvent.type(screen.getByRole("textbox", { name: "Machine name" }), "ada-mbp");
     await userEvent.click(screen.getByRole("button", { name: "Connect machine" }));
     expect(agents.approveLogin).toHaveBeenCalledWith("acme", "WXYZ-2345", "ada-mbp");
     expect(await screen.findByText("Connected")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Open your agents" })).toHaveAttribute("href", "#agents");
+  });
+
+  it("picks the owner from a list (not a native select), with a click that never focuses", async () => {
+    api.info.mockResolvedValue(info({ required: false }));
+    api.owners.mockResolvedValue([{ name: "acme" }, { name: "globex" }] as Owner[]);
+    agents.approveLogin.mockResolvedValue(undefined);
+    render(<ConnectAgents code="WXYZ-2345" />);
+    const trigger = await screen.findByRole("combobox", { name: "Owner" });
+    await waitFor(() => expect(trigger).toHaveTextContent("acme"));
+    macClick(trigger);
+    macClick(await screen.findByRole("option", { name: "globex" }));
+    await waitFor(() => expect(trigger).toHaveTextContent("globex"));
+    await userEvent.click(screen.getByRole("button", { name: "Connect machine" }));
+    expect(agents.approveLogin).toHaveBeenCalledWith("globex", "WXYZ-2345", undefined);
   });
 
   it("says at once when no login is waiting with the code", async () => {
@@ -47,7 +61,7 @@ describe("ConnectAgents", () => {
     agents.pendingLogin.mockRejectedValue(new ApiError("unavailable", 503, null));
     agents.approveLogin.mockResolvedValue(undefined);
     render(<ConnectAgents code="WXYZ-2345" />);
-    await screen.findByRole("option", { name: "acme" });
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "Owner" })).toHaveTextContent("acme"));
     expect(screen.getByText("A machine wants to connect")).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "Connect machine" }));
     expect(agents.approveLogin).toHaveBeenCalledWith("acme", "WXYZ-2345", undefined);
@@ -57,7 +71,7 @@ describe("ConnectAgents", () => {
     agents.pendingLogin.mockReturnValue(new Promise(() => {}));
     agents.denyLogin.mockRejectedValue(new ApiError("no pending login", 404, null));
     render(<ConnectAgents code="BCDF-GHJK" />);
-    await screen.findByRole("option", { name: "acme" });
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "Owner" })).toHaveTextContent("acme"));
     await userEvent.click(screen.getByRole("button", { name: "Deny" }));
     expect(agents.denyLogin).toHaveBeenCalledWith("acme", "BCDF-GHJK");
     expect(await screen.findByText("This code isn't waiting any more")).toBeInTheDocument();

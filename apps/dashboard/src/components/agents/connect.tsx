@@ -7,6 +7,7 @@ import { agentsApi, type MintedMachine, type PendingLogin } from "@/lib/agents-a
 import { ApiError, codeApi, type Owner } from "@/lib/code-api";
 import { ROLL_API } from "@/lib/roll-api";
 import { btn, CopyButton, ErrorNote, input, Panel, primary, useCopy } from "../ui";
+import { Select } from "./ui/select";
 
 /** What the CLI talks to when it isn't told (`roll --api`, `ROLL_API_URL`). */
 const CLI_DEFAULT_API = "http://127.0.0.1:7070";
@@ -168,11 +169,7 @@ function Approve({ code }: { code: string }) {
         <div className="grid gap-3 sm:grid-cols-2">
           <label className="block space-y-1">
             <span className="text-[12px] text-subtle">Owner</span>
-            <select value={owner} onChange={(e) => setOwner(e.target.value)} className={`${input} w-full`} disabled={!owners?.length} aria-label="Owner">
-              {(owners ?? []).map((o) => (
-                <option key={o}>{o}</option>
-              ))}
-            </select>
+            <Select label="Owner" value={owner || null} onChange={setOwner} disabled={!owners?.length} options={(owners ?? []).map((o) => ({ value: o, label: o }))} className="h-9" />
           </label>
           <label className="block space-y-1">
             <span className="text-[12px] text-subtle">Name (optional)</span>
@@ -291,11 +288,7 @@ function AddMachine() {
             }}
           >
             {owners && owners.length > 1 && (
-              <select value={owner} onChange={(e) => setOwner(e.target.value)} aria-label="Owner" className={input}>
-                {owners.map((o) => (
-                  <option key={o}>{o}</option>
-                ))}
-              </select>
+              <Select label="Owner" value={owner || null} onChange={setOwner} options={owners.map((o) => ({ value: o, label: o }))} className="h-9 w-auto" />
             )}
             <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Machine name, e.g. build-box" aria-label="Machine name" className={`${input} min-w-0 flex-1`} />
             <button type="submit" className={primary} disabled={busy || !owner || !name.trim()}>
