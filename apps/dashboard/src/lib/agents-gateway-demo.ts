@@ -215,17 +215,17 @@ export class DemoGateway {
     ];
   }
 
-  /** One request through the gateway at `at`. */
-  private request(at: number, live: boolean): LogEntry {
+  /** One request through the gateway at `at` (of `pick`'s shape, else a random one). */
+  private request(at: number, live: boolean, pick?: Shape): LogEntry {
     const r = this.random;
     // Requests come from the members: their threads, and now and then a session outside any.
     const members = new Set(this.clients.map((c) => c.machine));
     const work = [...this.h.work().filter((x) => members.has(x.machine)), ...[...members].filter((m): m is string => !!m).map((machine) => ({ machine, project: "", thread: "" }))];
     const w = work[Math.floor(r() * work.length)] ?? { machine: this.host ?? "", project: "", thread: "" };
     const shapes = this.shapes();
-    let shape = shapes[Math.floor(r() * shapes.length)];
+    let shape = pick ?? shapes[Math.floor(r() * shapes.length)];
     // Now and then someone asks for the GPU box's model while it's off: nothing else serves it.
-    if (r() < (live ? 0.08 : 0.02)) shape = { model: "qwen3-coder", format: "chat", attempts: [], size: [0, 0, 0] };
+    if (!pick && r() < (live ? 0.08 : 0.02)) shape = { model: "qwen3-coder", format: "chat", attempts: [], size: [0, 0, 0] };
     const attempts: Attempt[] = shape.attempts.map((a) => ({ ...a, ms: a.status === 200 ? Math.round(400 + r() * 900) : Math.round(60 + r() * 200) }));
     const last = attempts[attempts.length - 1];
     const ok = last?.status === 200;
@@ -291,6 +291,11 @@ export class DemoGateway {
       if (at >= t - 60_000) break;
       const e = this.request(at, false);
       if (t - at < 2 * HOUR) this.log.push(e);
+    }
+    // The log always has a failover to show (at night the last two hours hold few requests).
+    if (!this.log.some((e) => e.attempts.length > 1 && e.status === 200)) {
+      const failover = this.shapes().find((x) => x.attempts.length > 1);
+      if (failover) this.log.push(this.request(t - 25 * 60_000, false, failover));
     }
     for (const hh of this.health.values()) if (hh.upstream !== "gpu-box") hh.requests_hour = Math.round(40 + this.random() * 120);
     this.log.sort((a, b) => b.seq - a.seq);
