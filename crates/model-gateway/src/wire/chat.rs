@@ -531,6 +531,9 @@ impl Decoder {
         if text.is_empty() {
             return Ok(());
         }
+        if self.next + self.tail.len() >= MAX_BLOCKS {
+            return Err(WireError::TooLarge("an upstream stream opened too many blocks".into()));
+        }
         match self.live {
             Some(Live::Tool(..)) => {
                 self.hold(text.len())?;
@@ -611,7 +614,7 @@ impl Decoder {
         let at = match self.tools.iter().position(|(k, _)| *k == key) {
             Some(at) => at,
             None => {
-                if self.tools.len() >= 1024 {
+                if self.tools.len() >= MAX_BLOCKS {
                     return Err(WireError::TooLarge("an upstream stream made too many tool calls".into()));
                 }
                 self.tools.push((key, ToolAcc { id: String::new(), name: String::new(), args: String::new(), block: None }));

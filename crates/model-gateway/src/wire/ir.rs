@@ -24,6 +24,9 @@ use std::collections::{HashMap, HashSet};
 /// their block): a stream over it fails rather than growing without end.
 pub(crate) const MAX_BUFFER: usize = 64 << 20;
 
+/// The most blocks (or items) one stream may open: more is a broken or hostile upstream.
+pub(crate) const MAX_BLOCKS: usize = 4096;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Role {
     User,

@@ -548,7 +548,7 @@ pub(crate) struct Decoder {
 impl Decoder {
     fn open_block(&mut self, kind: Kind, out: &mut Vec<Ev>) -> Result<usize, WireError> {
         self.close_open(out);
-        if self.next >= 4096 {
+        if self.next >= MAX_BLOCKS {
             return Err(WireError::TooLarge("an upstream stream opened too many items".into()));
         }
         let i = self.next;
@@ -603,6 +603,9 @@ impl Decoder {
         }
         match ty.as_str() {
             "response.output_item.added" => {
+                if self.items.len() >= MAX_BLOCKS {
+                    return Err(WireError::TooLarge("an upstream stream opened too many items".into()));
+                }
                 let item = v.get("item").cloned().unwrap_or_default();
                 let it = match str_at(&item, "type") {
                     Some("message") => Item::Message,

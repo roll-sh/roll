@@ -564,7 +564,7 @@ impl Decoder {
             }
             "content_block_start" => {
                 let i = v.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
-                if i > 4096 {
+                if i >= MAX_BLOCKS {
                     return Err(invalid("upstream event: block index out of range"));
                 }
                 let b = v.get("content_block").cloned().unwrap_or_default();

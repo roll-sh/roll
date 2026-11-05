@@ -1193,3 +1193,34 @@ fn error_bodies_in_each_clients_shape() {
     );
     assert_eq!(wire::error_body(Responses, 529, "overloaded_error", "busy")["error"]["code"], "server_is_overloaded");
 }
+
+#[test]
+fn a_stream_that_never_stops_opening_blocks_is_refused() {
+    let mut t = StreamTranslator::new(Chat, Messages, "m");
+    let mut refused = None;
+    for i in 0..10_000 {
+        let delta = if i % 2 == 0 { json!({ "reasoning_content": "a" }) } else { json!({ "content": "b" }) };
+        if let Err(e) = t.push(&Event::data(chunk(delta, None).to_string())) {
+            refused = Some((i, e));
+            break;
+        }
+    }
+    let (at, err) = refused.expect("refused");
+    assert!(matches!(err, WireError::TooLarge(_)), "{err:?}");
+    assert!(at < 5000, "refused at block {at}");
+}
+
+#[test]
+fn a_responses_message_without_part_events_still_streams_its_text() {
+    let raw = sse(&[
+        (None, json!({ "type": "response.created", "response": { "id": "resp_q" } })),
+        (None, json!({ "type": "response.output_item.added", "output_index": 0, "item": { "id": "msg_q", "type": "message", "role": "assistant", "content": [] } })),
+        (None, json!({ "type": "response.output_item.done", "output_index": 0, "item": { "id": "msg_q", "type": "message", "role": "assistant",
+            "content": [{ "type": "output_text", "text": "whole" }] } })),
+        (None, json!({ "type": "response.completed", "response": { "id": "resp_q", "status": "completed", "usage": { "input_tokens": 1, "output_tokens": 1 } } })),
+    ]);
+    let (out, _) = translate_stream(Responses, Messages, "m", None, &raw);
+    let text: Vec<&str> = out.iter().filter_map(|(_, d)| d["delta"]["text"].as_str()).collect();
+    assert_eq!(text, ["whole"]);
+    assert_eq!(out.last().unwrap().0.as_deref(), Some("message_stop"));
+}
