@@ -5,23 +5,47 @@
         "additionalProperties": false,
         "properties": {
           "channel": {
-            "description": "A channel id.",
+            "description": "Where to tell",
+            "format": "lookup",
+            "lookup": {
+              "kind": "channels",
+              "parent": "guild",
+              "source": "discord"
+            },
+            "title": "Channel",
             "type": "string"
           },
           "guild": {
-            "description": "The server (guild id); unset: the event's, or the owner's only one.",
+            "description": "Unset: the event's, or the owner's only one",
+            "format": "lookup",
+            "lookup": {
+              "kind": "guilds",
+              "source": "discord"
+            },
+            "title": "Server",
             "type": "string"
           },
           "machine": {
-            "description": "Unset: the agent event's.",
+            "description": "Unset: the agent event's",
+            "format": "roll-machine",
+            "title": "Machine",
             "type": "string"
           },
           "thread": {
-            "description": "Unset: the agent event's.",
+            "description": "Unset: the agent event's",
+            "format": "roll-thread",
+            "title": "Thread",
             "type": "string"
           },
           "user": {
-            "description": "Or a user id to DM.",
+            "description": "Or DM them",
+            "format": "lookup",
+            "lookup": {
+              "kind": "members",
+              "parent": "guild",
+              "source": "discord"
+            },
+            "title": "Person",
             "type": "string"
           }
         },
@@ -43,11 +67,24 @@
         "additionalProperties": false,
         "properties": {
           "channel": {
-            "description": "Channel id; unset: the event's.",
+            "description": "Unset: the event's",
+            "format": "lookup",
+            "lookup": {
+              "kind": "channels",
+              "parent": "guild",
+              "source": "discord"
+            },
+            "title": "Channel",
             "type": "string"
           },
           "guild": {
-            "description": "The server (guild id); unset: the event's, or the owner's only one.",
+            "description": "Unset: the event's, or the owner's only one",
+            "format": "lookup",
+            "lookup": {
+              "kind": "guilds",
+              "source": "discord"
+            },
+            "title": "Server",
             "type": "string"
           },
           "text": {
@@ -55,7 +92,14 @@
             "type": "string"
           },
           "user": {
-            "description": "A user id to DM instead.",
+            "description": "DM them instead",
+            "format": "lookup",
+            "lookup": {
+              "kind": "members",
+              "parent": "guild",
+              "source": "discord"
+            },
+            "title": "Person",
             "type": "string"
           }
         },
@@ -78,15 +122,30 @@
         "additionalProperties": false,
         "properties": {
           "channel": {
-            "description": "Unset: the event's.",
+            "description": "Unset: the event's",
+            "format": "lookup",
+            "lookup": {
+              "kind": "channels",
+              "parent": "guild",
+              "source": "discord"
+            },
+            "title": "Channel",
             "type": "string"
           },
           "guild": {
-            "description": "The server (guild id); unset: the event's, or the owner's only one.",
+            "description": "Unset: the event's, or the owner's only one",
+            "format": "lookup",
+            "lookup": {
+              "kind": "guilds",
+              "source": "discord"
+            },
+            "title": "Server",
             "type": "string"
           },
           "machine": {
-            "description": "The agent's machine.",
+            "description": "The agent's machine (steps.<start>.machine)",
+            "format": "roll-machine",
+            "title": "Machine",
             "type": "string"
           },
           "message": {
@@ -94,7 +153,9 @@
             "type": "string"
           },
           "thread": {
-            "description": "The agent thread.",
+            "description": "The agent thread (steps.<start>.thread)",
+            "format": "roll-thread",
+            "title": "Thread",
             "type": "string"
           }
         },
@@ -293,7 +354,13 @@
             "type": "array"
           },
           "team": {
-            "description": "The workspace (team id); unset: the event's, or the owner's only one.",
+            "description": "Unset: the event's, or the owner's only one",
+            "format": "lookup",
+            "lookup": {
+              "kind": "workspaces",
+              "source": "slack"
+            },
+            "title": "Workspace",
             "type": "string"
           },
           "text": {
@@ -301,7 +368,14 @@
             "type": "string"
           },
           "user": {
-            "description": "Slack user id (U…).",
+            "description": "Who gets the message",
+            "format": "lookup",
+            "lookup": {
+              "kind": "users",
+              "parent": "team",
+              "source": "slack"
+            },
+            "title": "Person",
             "type": "string"
           }
         },
@@ -325,11 +399,19 @@
         "additionalProperties": false,
         "properties": {
           "machine": {
-            "description": "Unset: the agent event's.",
+            "description": "Unset: the agent event's",
+            "format": "roll-machine",
+            "title": "Machine",
             "type": "string"
           },
           "team": {
-            "description": "The workspace (team id); unset: the event's, or the owner's only one.",
+            "description": "Unset: the event's, or the owner's only one",
+            "format": "lookup",
+            "lookup": {
+              "kind": "workspaces",
+              "source": "slack"
+            },
+            "title": "Workspace",
             "type": "string"
           },
           "text": {
@@ -337,11 +419,20 @@
             "type": "string"
           },
           "thread": {
-            "description": "Unset: the agent event's.",
+            "description": "Unset: the agent event's",
+            "format": "roll-thread",
+            "title": "Thread",
             "type": "string"
           },
           "to": {
-            "description": "A channel id, or a user id (U…) for a DM.",
+            "description": "A channel, or a person (a DM)",
+            "format": "lookup",
+            "lookup": {
+              "kind": "targets",
+              "parent": "team",
+              "source": "slack"
+            },
+            "title": "To",
             "type": "string"
           }
         },
@@ -370,11 +461,24 @@
             "type": "array"
           },
           "channel": {
-            "description": "Channel id.",
+            "description": "Where to post",
+            "format": "lookup",
+            "lookup": {
+              "kind": "channels",
+              "parent": "team",
+              "source": "slack"
+            },
+            "title": "Channel",
             "type": "string"
           },
           "team": {
-            "description": "The workspace (team id); unset: the event's, or the owner's only one.",
+            "description": "Unset: the event's, or the owner's only one",
+            "format": "lookup",
+            "lookup": {
+              "kind": "workspaces",
+              "source": "slack"
+            },
+            "title": "Workspace",
             "type": "string"
           },
           "text": {
@@ -411,11 +515,24 @@
             "type": "array"
           },
           "channel": {
-            "description": "Unset: the event's.",
+            "description": "Unset: the event's",
+            "format": "lookup",
+            "lookup": {
+              "kind": "channels",
+              "parent": "team",
+              "source": "slack"
+            },
+            "title": "Channel",
             "type": "string"
           },
           "team": {
-            "description": "The workspace (team id); unset: the event's, or the owner's only one.",
+            "description": "Unset: the event's, or the owner's only one",
+            "format": "lookup",
+            "lookup": {
+              "kind": "workspaces",
+              "source": "slack"
+            },
+            "title": "Workspace",
             "type": "string"
           },
           "text": {
@@ -447,19 +564,36 @@
         "additionalProperties": false,
         "properties": {
           "channel": {
-            "description": "Unset: the event's.",
+            "description": "Unset: the event's",
+            "format": "lookup",
+            "lookup": {
+              "kind": "channels",
+              "parent": "team",
+              "source": "slack"
+            },
+            "title": "Channel",
             "type": "string"
           },
           "machine": {
-            "description": "The agent's machine (steps.<start>.machine).",
+            "description": "The agent's machine (steps.<start>.machine)",
+            "format": "roll-machine",
+            "title": "Machine",
             "type": "string"
           },
           "team": {
-            "description": "The workspace (team id); unset: the event's, or the owner's only one.",
+            "description": "Unset: the event's, or the owner's only one",
+            "format": "lookup",
+            "lookup": {
+              "kind": "workspaces",
+              "source": "slack"
+            },
+            "title": "Workspace",
             "type": "string"
           },
           "thread": {
-            "description": "The agent thread (steps.<start>.thread).",
+            "description": "The agent thread (steps.<start>.thread)",
+            "format": "roll-thread",
+            "title": "Thread",
             "type": "string"
           },
           "thread_ts": {
@@ -500,11 +634,24 @@
             "type": "array"
           },
           "channel": {
-            "description": "Channel id.",
+            "description": "Where the message is",
+            "format": "lookup",
+            "lookup": {
+              "kind": "channels",
+              "parent": "team",
+              "source": "slack"
+            },
+            "title": "Channel",
             "type": "string"
           },
           "team": {
-            "description": "The workspace (team id); unset: the event's, or the owner's only one.",
+            "description": "Unset: the event's, or the owner's only one",
+            "format": "lookup",
+            "lookup": {
+              "kind": "workspaces",
+              "source": "slack"
+            },
+            "title": "Workspace",
             "type": "string"
           },
           "text": {
@@ -538,14 +685,27 @@
       "config": {
         "properties": {
           "channels": {
-            "description": "Channel ids; unset: any.",
+            "description": "Only /roll in these; unset: any",
+            "format": "lookup",
             "items": {
               "type": "string"
             },
+            "lookup": {
+              "kind": "channels",
+              "parent": "guild",
+              "source": "discord"
+            },
+            "title": "Channels",
             "type": "array"
           },
           "guild": {
-            "description": "The server (guild id); unset: the owner's only one.",
+            "description": "Unset: the owner's only one",
+            "format": "lookup",
+            "lookup": {
+              "kind": "guilds",
+              "source": "discord"
+            },
+            "title": "Server",
             "type": "string"
           }
         },
@@ -758,10 +918,17 @@
       "config": {
         "properties": {
           "channels": {
-            "description": "Channel ids to listen in; unset: any channel the bot is in. Needed for message.",
+            "description": "Listen in these; unset: any channel the bot is in. Needed for message.",
+            "format": "lookup",
             "items": {
               "type": "string"
             },
+            "lookup": {
+              "kind": "channels",
+              "parent": "team",
+              "source": "slack"
+            },
+            "title": "Channels",
             "type": "array"
           },
           "reactions": {
@@ -769,10 +936,17 @@
             "items": {
               "type": "string"
             },
+            "title": "Reactions",
             "type": "array"
           },
           "team": {
-            "description": "The workspace (team id); unset: the owner's only one.",
+            "description": "Unset: the owner's only one",
+            "format": "lookup",
+            "lookup": {
+              "kind": "workspaces",
+              "source": "slack"
+            },
+            "title": "Workspace",
             "type": "string"
           }
         },

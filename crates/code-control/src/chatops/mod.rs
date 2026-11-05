@@ -394,6 +394,8 @@ pub(crate) fn save_install(code: &Code, n: &NewInstall) -> Result<Install> {
         }
     })?;
     let id = out.map_err(|()| crate::Error::Conflict(format!("this {} is connected to another roll owner", if n.platform == Platform::Slack { "Slack workspace" } else { "Discord server" })))?;
+    // The pickers list the new workspace (or the old one through its new token) at once.
+    code.lookups_changed(&n.owner_id, n.platform.as_str());
     install_by_id(code, &id)?.ok_or_else(|| crate::Error::NotFound("install".into()))
 }
 
@@ -407,6 +409,7 @@ pub(crate) fn update_members(code: &Code, install_id: &str, members: &[String], 
 
 /// Forget an install and what hangs off it (its bindings, cards, pending actions).
 pub(crate) fn delete_install(code: &Code, install_id: &str) -> Result<()> {
+    let gone = install_by_id(code, install_id)?;
     code.db.write(|c| {
         c.execute("DELETE FROM chat_requests WHERE binding_id IN (SELECT id FROM chat_threads WHERE install_id = ?)", [install_id])?;
         c.execute("DELETE FROM chat_threads WHERE install_id = ?", [install_id])?;
@@ -414,6 +417,9 @@ pub(crate) fn delete_install(code: &Code, install_id: &str) -> Result<()> {
         c.execute("DELETE FROM chat_installs WHERE id = ?", [install_id])?;
         Ok(())
     })?;
+    if let Some(i) = gone {
+        code.lookups_changed(&i.owner_id, i.platform.as_str());
+    }
     Ok(())
 }
 

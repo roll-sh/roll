@@ -16,8 +16,10 @@
 //!   failing come back as a 200 with `problem`, so a picker can say "Reconnect Linear" and still
 //!   take a typed value. Unknown sources or kinds are 404s, a missing `parent` a 400.
 
+mod discord;
 mod linear;
 mod rollcode;
+mod slack;
 
 use crate::agents::api::manageable;
 use crate::api::{Body, Q};
@@ -250,6 +252,46 @@ pub struct Cache {
     pages: Mutex<HashMap<Key, (Instant, Page)>>,
     /// (owner, source) → until when its API isn't called.
     cooling: Mutex<HashMap<(String, String), Instant>>,
+    /// (owner, source, name) → a whole list read lately ([`Known`]).
+    lists: Mutex<HashMap<ListKey, (Instant, Rows)>>,
+}
+
+type ListKey = (String, String, String);
+type Rows = Arc<Vec<Known>>;
+
+/// A row of a whole list a platform can't search or page the way a picker does (Slack's channels
+/// and people, a Discord server's channels and roles): read once per [`TTL`], then searched and
+/// paged here. `listed: false` rows (a deactivated person, a bot) only resolve a stored value.
+#[derive(Clone, Debug)]
+pub struct Known {
+    pub item: Item,
+    pub listed: bool,
+}
+
+impl Known {
+    pub fn listed(item: Item) -> Known {
+        Known { item, listed: true }
+    }
+}
+
+/// A page of `rows` for `q`: `ids` resolve by id or key (any row, case-insensitive, a leading
+/// `#`/`@` ignored), else the listed rows whose label, key or hint holds the search, paged by an
+/// offset cursor.
+pub fn page_of(rows: &[Known], q: &Query) -> Page {
+    if !q.ids.is_empty() {
+        let bare = |v: &str| v.trim_start_matches(['#', '@']).to_lowercase();
+        let wanted: Vec<String> = q.ids.iter().map(|v| bare(v)).collect();
+        let hit = |i: &Item| q.ids.contains(&i.id) || i.key.as_deref().is_some_and(|k| wanted.contains(&bare(k)));
+        return Page { items: rows.iter().filter(|r| hit(&r.item)).map(|r| r.item.clone()).take(MAX_IDS).collect(), ..Page::default() };
+    }
+    let needle = q.q.to_lowercase();
+    let needle = needle.trim_start_matches(['#', '@']);
+    let has = |s: &Option<String>| s.as_deref().is_some_and(|s| s.to_lowercase().contains(needle));
+    let hits: Vec<&Item> = rows.iter().filter(|r| r.listed).map(|r| &r.item).filter(|i| needle.is_empty() || i.label.to_lowercase().contains(needle) || has(&i.key) || has(&i.hint)).collect();
+    let from = q.cursor.as_deref().and_then(|c| c.parse::<usize>().ok()).unwrap_or(0);
+    let items: Vec<Item> = hits.iter().skip(from).take(q.limit).map(|i| (*i).clone()).collect();
+    let next = (from + q.limit < hits.len()).then(|| (from + q.limit).to_string());
+    Page { items, next, problem: None }
 }
 
 impl Cache {
@@ -292,10 +334,27 @@ impl Cache {
         self.cooling.lock().insert((owner.to_string(), source.to_string()), Instant::now() + Duration::from_secs(secs.clamp(1, 3600)));
     }
 
+    /// A whole list of the owner's `source` read within [`TTL`].
+    pub(crate) fn list(&self, owner: &str, source: &str, name: &str) -> Option<Rows> {
+        let k = (owner.to_string(), source.to_string(), name.to_string());
+        self.lists.lock().get(&k).filter(|(at, _)| at.elapsed() < TTL).map(|(_, l)| l.clone())
+    }
+
+    pub(crate) fn keep_list(&self, owner: &str, source: &str, name: &str, rows: Rows) {
+        let mut lists = self.lists.lock();
+        if lists.len() >= MAX_ENTRIES {
+            lists.retain(|_, (at, _)| at.elapsed() < TTL);
+        }
+        if lists.len() < MAX_ENTRIES {
+            lists.insert((owner.to_string(), source.to_string(), name.to_string()), (Instant::now(), rows));
+        }
+    }
+
     /// Forget the owner's pages of `source` and any rate limit it was cooling off (after a write
     /// through roll: a new label, a connection made or removed).
     pub fn invalidate(&self, owner: &str, source: &str) {
         self.pages.lock().retain(|k, _| !(k.owner == owner && k.source == source));
+        self.lists.lock().retain(|(o, s, _), _| !(o == owner && s == source));
         self.cooling.lock().remove(&(owner.to_string(), source.to_string()));
     }
 }
@@ -310,7 +369,7 @@ impl Code {
 // ── the routes ──
 
 /// The sources and kinds there are, for 404s that say what is.
-const SOURCES: &[(&str, &[&str])] = &[("linear", linear::KINDS), ("code", rollcode::KINDS)];
+const SOURCES: &[(&str, &[&str])] = &[("linear", linear::KINDS), ("code", rollcode::KINDS), ("slack", slack::KINDS), ("discord", discord::KINDS)];
 
 fn known(source: &str, kind: &str) -> Result<()> {
     let Some((_, kinds)) = SOURCES.iter().find(|(s, _)| *s == source) else {
@@ -326,6 +385,8 @@ async fn fetch(code: &Code, owner_id: &str, source: &str, kind: &str, q: &Query)
     match source {
         "linear" => linear::list(code, owner_id, kind, q).await,
         "code" => rollcode::list(code, owner_id, kind, q).await,
+        "slack" => slack::list(code, owner_id, kind, q).await,
+        "discord" => discord::list(code, owner_id, kind, q).await,
         _ => Err(Failure::Refused(Error::NotFound(format!("lookup source {source:?}")))),
     }
 }
@@ -380,6 +441,7 @@ async fn create(State(code): S, caller: Caller, Path((owner, source, kind)): Pat
     let new = New { name: name.to_string(), parent: b["parent"].as_str().map(str::to_string).filter(|p| !p.is_empty()), color: b["color"].as_str().filter(|c| is_color(c)).map(str::to_string) };
     let made = match source.as_str() {
         "linear" => linear::create(&code, &o.id, &kind, &new).await,
+        "slack" | "discord" => Err(Failure::Refused(Error::Unprocessable(format!("roll can't make {source} {kind}")))),
         _ => Err(Failure::Refused(Error::NotFound(format!("lookup source {source:?}")))),
     };
     match made {

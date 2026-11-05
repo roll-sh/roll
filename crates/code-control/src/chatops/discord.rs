@@ -13,6 +13,7 @@ use super::follow::{self, Failure, Follow, Surface};
 use super::{Handled, Install, Platform};
 use crate::Code;
 use crate::agents::automations::{NewEvent, OwnerRef, Registry, StepContext, StepKind, StepOutcome, TriggerSource};
+use crate::agents::lookup::Pick;
 use agent_proto::automation::{AutomationEvent, EventInfo, Retry, StepInfo, TriggerInfo};
 use code_chat::card::{RequestCard, StatusCard};
 use code_chat::discord::{self as wire, Client, Interaction};
@@ -60,8 +61,8 @@ impl TriggerSource for DiscordTrigger {
             config: json!({
                 "type": "object",
                 "properties": {
-                    "guild": { "type": "string", "description": "The server (guild id); unset: the owner's only one." },
-                    "channels": { "type": "array", "items": { "type": "string" }, "description": "Channel ids; unset: any." }
+                    "guild": Pick::from(SOURCE, "guilds").one("Server", "Unset: the owner's only one"),
+                    "channels": Pick { parent: Some("guild"), ..Pick::from(SOURCE, "channels") }.many("Channels", "Only /roll in these; unset: any")
                 }
             }),
             needs_setup: false,
@@ -355,26 +356,30 @@ impl DiscordStep {
 impl StepKind for DiscordStep {
     fn info(&self) -> StepInfo {
         let s = |d: &str| json!({ "type": "string", "description": d });
-        let guild = s("The server (guild id); unset: the event's, or the owner's only one.");
+        let fmt = |title: &str, d: &str, format: &str| json!({ "type": "string", "title": title, "description": d, "format": format });
+        let in_guild = |kind| Pick { parent: Some("guild"), ..Pick::from(SOURCE, kind) };
+        let guild = Pick::from(SOURCE, "guilds").one("Server", "Unset: the event's, or the owner's only one");
+        let channel = |d: &str| in_guild("channels").one("Channel", d);
+        let user = |d: &str| in_guild("members").one("Person", d);
         let (title, description, props, required, output): (&str, &str, Value, Value, &[&str]) = match self.kind {
             Kind::Post => (
                 "Post to Discord",
                 "Post a message to a channel, or DM a user.",
-                json!({ "guild": guild, "channel": s("Channel id; unset: the event's."), "user": s("A user id to DM instead."), "text": s("The message (a template).") }),
+                json!({ "guild": guild, "channel": channel("Unset: the event's"), "user": user("DM them instead"), "text": s("The message (a template).") }),
                 json!(["text"]),
                 &["channel", "id"],
             ),
             Kind::Status => (
                 "Live status in Discord",
                 "Follow an agent thread in Discord: a status message that updates, buttons and selects for its requests, and a Reply button to steer it.",
-                json!({ "guild": guild, "machine": s("The agent's machine."), "thread": s("The agent thread."), "channel": s("Unset: the event's."), "message": s("Reply to this message.") }),
+                json!({ "guild": guild, "machine": fmt("Machine", "The agent's machine (steps.<start>.machine)", "roll-machine"), "thread": fmt("Thread", "The agent thread (steps.<start>.thread)", "roll-thread"), "channel": channel("Unset: the event's"), "message": s("Reply to this message.") }),
                 json!(["machine", "thread"]),
                 &["channel", "ts", "status", "title", "change.url"],
             ),
             Kind::Notify => (
                 "Notify in Discord",
                 "Tell a channel or person about an agent, with buttons to answer what it waits on.",
-                json!({ "guild": guild, "channel": s("A channel id."), "user": s("Or a user id to DM."), "machine": s("Unset: the agent event's."), "thread": s("Unset: the agent event's.") }),
+                json!({ "guild": guild, "channel": channel("Where to tell"), "user": user("Or DM them"), "machine": fmt("Machine", "Unset: the agent event's", "roll-machine"), "thread": fmt("Thread", "Unset: the agent event's", "roll-thread") }),
                 json!([]),
                 &["channel", "ts", "status"],
             ),

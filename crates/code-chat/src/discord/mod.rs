@@ -18,7 +18,9 @@ mod render;
 mod verify;
 
 pub use crate::{Error, VerifyError};
-pub use client::{Client, Posted};
+pub use client::{
+    Channel, Client, MAX_MEMBERS_PAGE, Member, MemberUser, Posted, Role,
+};
 pub use interaction::{Interaction, parse_interaction};
 pub use render::{
     ANSWER_PREFIX, MAX_CUSTOM_ID, QUESTION_PREFIX, answer_custom_id, question_custom_id,

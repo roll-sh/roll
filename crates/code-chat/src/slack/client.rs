@@ -87,6 +87,84 @@ pub struct Posted {
     pub ts: String,
 }
 
+/// The most rows roll asks a list method for at once (Slack's own recommended ceiling).
+pub const MAX_LIST_PAGE: usize = 200;
+
+/// A page of a list method, and Slack's cursor for the next one.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Listed<T> {
+    pub items: Vec<T>,
+    pub next: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct Meta {
+    #[serde(default)]
+    next_cursor: String,
+}
+
+impl Meta {
+    fn next(m: Option<Meta>) -> Option<String> {
+        m.map(|m| m.next_cursor).filter(|c| !c.is_empty())
+    }
+}
+
+/// A channel from `conversations.list`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+pub struct Channel {
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub is_private: bool,
+    /// Whether the bot is in it (it can only post where it is).
+    #[serde(default)]
+    pub is_member: bool,
+    #[serde(default)]
+    pub num_members: Option<u64>,
+}
+
+/// A person (or bot) from `users.list`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+pub struct User {
+    pub id: String,
+    /// The handle (`ada`).
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub real_name: Option<String>,
+    #[serde(default)]
+    pub deleted: bool,
+    #[serde(default)]
+    pub is_bot: bool,
+    #[serde(default)]
+    pub profile: Profile,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+pub struct Profile {
+    #[serde(default)]
+    pub real_name: Option<String>,
+    #[serde(default)]
+    pub display_name: Option<String>,
+    /// A 48px avatar's URL.
+    #[serde(default)]
+    pub image_48: Option<String>,
+}
+
+/// A user group from `usergroups.list`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+pub struct UserGroup {
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    /// What people type after `@`.
+    #[serde(default)]
+    pub handle: String,
+    #[serde(default)]
+    pub user_count: Option<u64>,
+}
+
 #[derive(Clone)]
 pub struct Client {
     api_base: String,
@@ -341,6 +419,83 @@ impl Client {
             )
             .await?;
         Ok(pick(replies))
+    }
+
+    /// `conversations.list`: one page of the public channels and the private ones the bot is in,
+    /// archived ones left out. `limit` is clamped to 1..=[`MAX_LIST_PAGE`]; Slack may answer
+    /// fewer rows and still have a next page.
+    pub async fn list_channels(
+        &self,
+        token: &str,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<Listed<Channel>, Error> {
+        #[derive(Deserialize)]
+        struct Answer {
+            #[serde(default)]
+            channels: Vec<Channel>,
+            #[serde(default)]
+            response_metadata: Option<Meta>,
+        }
+        let limit = limit.clamp(1, MAX_LIST_PAGE).to_string();
+        let mut query = vec![
+            ("types", "public_channel,private_channel"),
+            ("exclude_archived", "true"),
+            ("limit", limit.as_str()),
+        ];
+        if let Some(c) = cursor.filter(|c| !c.is_empty()) {
+            query.push(("cursor", c));
+        }
+        let a: Answer = self.get(token, "conversations.list", &query).await?;
+        Ok(Listed {
+            items: a.channels,
+            next: Meta::next(a.response_metadata),
+        })
+    }
+
+    /// `users.list`: one page of the workspace's people (deleted ones and bots included: the
+    /// caller decides). `limit` as [`Client::list_channels`].
+    pub async fn list_users(
+        &self,
+        token: &str,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<Listed<User>, Error> {
+        #[derive(Deserialize)]
+        struct Answer {
+            #[serde(default)]
+            members: Vec<User>,
+            #[serde(default)]
+            response_metadata: Option<Meta>,
+        }
+        let limit = limit.clamp(1, MAX_LIST_PAGE).to_string();
+        let mut query = vec![("limit", limit.as_str())];
+        if let Some(c) = cursor.filter(|c| !c.is_empty()) {
+            query.push(("cursor", c));
+        }
+        let a: Answer = self.get(token, "users.list", &query).await?;
+        Ok(Listed {
+            items: a.members,
+            next: Meta::next(a.response_metadata),
+        })
+    }
+
+    /// `usergroups.list`: the workspace's enabled user groups (Slack doesn't page them; the
+    /// answer is read bounded like any other).
+    pub async fn list_usergroups(&self, token: &str) -> Result<Vec<UserGroup>, Error> {
+        #[derive(Deserialize)]
+        struct Answer {
+            #[serde(default)]
+            usergroups: Vec<UserGroup>,
+        }
+        let a: Answer = self
+            .get(
+                token,
+                "usergroups.list",
+                &[("include_count", "true"), ("include_disabled", "false")],
+            )
+            .await?;
+        Ok(a.usergroups)
     }
 
     /// A GET method with its arguments in the query string.

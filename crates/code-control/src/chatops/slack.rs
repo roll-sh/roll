@@ -12,6 +12,7 @@ use super::follow::{self, Failure, Follow, Surface};
 use super::{Handled, Install, Platform};
 use crate::Code;
 use crate::agents::automations::{NewEvent, OwnerRef, Registry, StepContext, StepKind, StepOutcome, TriggerSource};
+use crate::agents::lookup::Pick;
 use agent_proto::automation::{AutomationEvent, EventInfo, LogLevel, Retry, StepInfo, TriggerInfo};
 use code_chat::card::{RequestCard, StatusCard};
 use code_chat::slack::{self as wire, Client, Envelope, Event, Interaction, Message};
@@ -69,9 +70,9 @@ impl TriggerSource for SlackTrigger {
             config: json!({
                 "type": "object",
                 "properties": {
-                    "team": { "type": "string", "description": "The workspace (team id); unset: the owner's only one." },
-                    "channels": { "type": "array", "items": { "type": "string" }, "description": "Channel ids to listen in; unset: any channel the bot is in. Needed for message." },
-                    "reactions": { "type": "array", "items": { "type": "string" }, "description": "Reaction names (no colons); unset: robot_face." }
+                    "team": Pick::from(SOURCE, "workspaces").one("Workspace", "Unset: the owner's only one"),
+                    "channels": Pick { parent: Some("team"), ..Pick::from(SOURCE, "channels") }.many("Channels", "Listen in these; unset: any channel the bot is in. Needed for message."),
+                    "reactions": { "type": "array", "items": { "type": "string" }, "title": "Reactions", "description": "Reaction names (no colons); unset: robot_face." }
                 }
             }),
             needs_setup: false,
@@ -457,23 +458,30 @@ impl SlackStep {
 
     fn schema(&self) -> Value {
         let str_ = |d: &str| json!({ "type": "string", "description": d });
-        let team = str_("The workspace (team id); unset: the event's, or the owner's only one.");
+        let fmt = |title: &str, d: &str, format: &str| json!({ "type": "string", "title": title, "description": d, "format": format });
+        let in_team = |kind| Pick { parent: Some("team"), ..Pick::from(SOURCE, kind) };
+        let team = Pick::from(SOURCE, "workspaces").one("Workspace", "Unset: the event's, or the owner's only one");
+        let channel = |d: &str| in_team("channels").one("Channel", d);
+        let (machine, thread) = (fmt("Machine", "The agent's machine (steps.<start>.machine)", "roll-machine"), fmt("Thread", "The agent thread (steps.<start>.thread)", "roll-thread"));
         let text = str_("The message (a template; Slack mrkdwn).");
         let blocks = json!({ "type": "array", "description": "Block Kit blocks (strings in them are templates); text is the fallback." });
         let (props, required) = match self.kind {
-            Kind::Post => (json!({ "team": team, "channel": str_("Channel id."), "text": text, "blocks": blocks, "thread_ts": str_("Post in this thread.") }), json!(["channel", "text"])),
-            Kind::Update => (json!({ "team": team, "channel": str_("Channel id."), "ts": str_("The message to edit (an earlier step's ts)."), "text": text, "blocks": blocks }), json!(["channel", "ts", "text"])),
-            Kind::Reply => (json!({ "team": team, "channel": str_("Unset: the event's."), "thread_ts": str_("Unset: the event's thread."), "text": text, "blocks": blocks }), json!(["text"])),
-            Kind::Dm => (json!({ "team": team, "user": str_("Slack user id (U…)."), "text": text, "blocks": blocks }), json!(["user", "text"])),
+            Kind::Post => (json!({ "team": team, "channel": channel("Where to post"), "text": text, "blocks": blocks, "thread_ts": str_("Post in this thread.") }), json!(["channel", "text"])),
+            Kind::Update => (json!({ "team": team, "channel": channel("Where the message is"), "ts": str_("The message to edit (an earlier step's ts)."), "text": text, "blocks": blocks }), json!(["channel", "ts", "text"])),
+            Kind::Reply => (json!({ "team": team, "channel": channel("Unset: the event's"), "thread_ts": str_("Unset: the event's thread."), "text": text, "blocks": blocks }), json!(["text"])),
+            Kind::Dm => (json!({ "team": team, "user": in_team("users").one("Person", "Who gets the message"), "text": text, "blocks": blocks }), json!(["user", "text"])),
             Kind::Status => (
                 json!({
-                    "team": team, "machine": str_("The agent's machine (steps.<start>.machine)."), "thread": str_("The agent thread (steps.<start>.thread)."),
-                    "channel": str_("Unset: the event's."), "thread_ts": str_("Unset: the event's thread; none: the status starts one."), "ts": str_("Edit this status message instead of posting one.")
+                    "team": team, "machine": machine, "thread": thread,
+                    "channel": channel("Unset: the event's"), "thread_ts": str_("Unset: the event's thread; none: the status starts one."), "ts": str_("Edit this status message instead of posting one.")
                 }),
                 json!(["machine", "thread"]),
             ),
             Kind::Notify => (
-                json!({ "team": team, "to": str_("A channel id, or a user id (U…) for a DM."), "machine": str_("Unset: the agent event's."), "thread": str_("Unset: the agent event's."), "text": str_("A line above the card (a template).") }),
+                json!({
+                    "team": team, "to": in_team("targets").one("To", "A channel, or a person (a DM)"),
+                    "machine": fmt("Machine", "Unset: the agent event's", "roll-machine"), "thread": fmt("Thread", "Unset: the agent event's", "roll-thread"), "text": str_("A line above the card (a template).")
+                }),
                 json!(["to"]),
             ),
         };

@@ -939,11 +939,22 @@ async fn chatops_routes_follow_the_auth_matrix() {
     assert_eq!(call(a, "POST", &format!("{base}/teams/install"), None, acme).await, NOT_FOUND);
     assert_eq!(call(a, "PATCH", &format!("{base}/slack/chi_x"), Some(&body), acme).await, NOT_FOUND);
     assert_eq!(call(a, "DELETE", &format!("{base}/slack/chi_x"), None, acme).await, NOT_FOUND);
+    // The pickers' lookups: not set up is a quiet 200 to list, a 422 to make one.
+    let lookup = "/v1/code/agents/acme/lookup";
+    for kind in ["slack/workspaces", "slack/channels", "slack/users", "slack/usergroups", "slack/targets", "discord/guilds", "discord/channels", "discord/roles", "discord/members"] {
+        assert_eq!(call(a, "GET", &format!("{lookup}/{kind}"), None, acme).await, OK, "{kind}");
+        assert_eq!(call(a, "GET", &format!("{lookup}/{kind}"), None, Some(ADMIN)).await, OK, "{kind}");
+    }
+    assert_eq!(call(a, "POST", &format!("{lookup}/slack/channels"), Some(&json!({ "name": "x" })), acme).await, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(call(a, "GET", &format!("{lookup}/slack/emoji"), None, acme).await, NOT_FOUND);
     let routes = [
         ("GET", base.to_string()),
         ("POST", format!("{base}/slack/install")),
         ("PATCH", format!("{base}/slack/chi_x")),
         ("DELETE", format!("{base}/slack/chi_x")),
+        ("GET", format!("{lookup}/slack/channels")),
+        ("POST", format!("{lookup}/slack/channels")),
+        ("GET", format!("{lookup}/discord/members")),
     ];
     for (who, token, want) in [("agent", agent, FORBIDDEN), ("review app", app_in, FORBIDDEN), ("another owner", other, FORBIDDEN), ("anonymous", None, StatusCode::UNAUTHORIZED)] {
         for (m, p) in &routes {

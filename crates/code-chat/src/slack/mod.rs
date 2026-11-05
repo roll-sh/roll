@@ -15,7 +15,10 @@ mod events;
 mod verify;
 
 pub use crate::{Error, VerifyError};
-pub use client::{Client, Fetched, Message, OAuthAccess, Posted};
+pub use client::{
+    Channel, Client, Fetched, Listed, MAX_LIST_PAGE, Message, OAuthAccess, Posted, Profile, User,
+    UserGroup,
+};
 pub use events::{
     ActionHit, BlockActions, Envelope, Event, Interaction, MessageEvent, Reaction, Selected,
     SlashCommand, ViewSubmission, escape, parse_command, parse_envelope, parse_interaction,
@@ -27,7 +30,9 @@ pub const DEFAULT_API_BASE: &str = "https://slack.com/api";
 pub const DEFAULT_AUTHORIZE_URL: &str = "https://slack.com/oauth/v2/authorize";
 
 /// The bot scopes roll asks for: hear mentions and thread replies, post and update its
-/// messages, take `/roll`, react, DM people and resolve their names.
+/// messages, take `/roll`, react, DM people and resolve their names, and list channels, people
+/// and user groups for the dashboard's pickers. A workspace installed before a scope was added
+/// keeps its old grant until it's installed again (its lookups say "Reconnect Slack").
 pub const BOT_SCOPES: &[&str] = &[
     "app_mentions:read",
     "channels:history",
@@ -40,6 +45,9 @@ pub const BOT_SCOPES: &[&str] = &[
     "reactions:write",
     "im:write",
     "users:read",
+    "channels:read",
+    "groups:read",
+    "usergroups:read",
 ];
 
 /// A Slack app. `api_base` and `authorize_url` point at a test server.

@@ -37,6 +37,8 @@ struct Mock {
     ts: AtomicU64,
     /// The team the OAuth exchange answers.
     team: Mutex<String>,
+    /// How the list methods answer instead: `429` (rate limited), or a Slack error code.
+    fail: Mutex<Option<&'static str>>,
 }
 
 impl Mock {
@@ -45,13 +47,28 @@ impl Mock {
     }
 }
 
-async fn mock_api(State(m): State<Arc<Mock>>, uri: Uri, headers: axum::http::HeaderMap, body: String) -> axum::Json<Value> {
+async fn mock_api(State(m): State<Arc<Mock>>, uri: Uri, headers: axum::http::HeaderMap, body: String) -> axum::response::Response {
+    use axum::response::IntoResponse;
     let path = uri.path().to_string();
     let auth = headers.get("authorization").and_then(|v| v.to_str().ok()).unwrap_or_default().to_string();
+    // A GET's arguments are its query: recorded as its body.
+    let body = if body.is_empty() { uri.query().unwrap_or_default().to_string() } else { body };
     m.calls.lock().push((path.clone(), auth, body.clone()));
     let b: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
+    let query: std::collections::HashMap<String, String> = url::form_urlencoded::parse(body.as_bytes()).into_owned().collect();
     let ts = || format!("1700000000.{:06}", m.ts.fetch_add(1, Ordering::SeqCst) + 1);
-    axum::Json(match path.trim_start_matches("/slack").trim_start_matches('/') {
+    let p = path.trim_start_matches("/slack").trim_start_matches('/');
+    let listing = p.ends_with(".list") || p.contains("/guilds/") && !p.ends_with("/commands");
+    match *m.fail.lock() {
+        Some("429") if listing => return (StatusCode::TOO_MANY_REQUESTS, [("retry-after", "30")], "{}").into_response(),
+        Some(code) if listing && p.starts_with("discord/") => return (StatusCode::FORBIDDEN, axum::Json(json!({ "message": "Missing Access", "code": code.parse::<u64>().unwrap_or(0) }))).into_response(),
+        Some(code) if listing => return axum::Json(json!({ "ok": false, "error": code })).into_response(),
+        _ => {}
+    }
+    if let Some(v) = lists(p, &query) {
+        return axum::Json(v).into_response();
+    }
+    axum::Json(match p {
         "oauth.v2.access" => json!({
             "ok": true, "access_token": BOT_TOKEN, "token_type": "bot", "scope": "chat:write,commands", "bot_user_id": "UBOT", "app_id": "A1",
             "team": { "id": m.team.lock().clone(), "name": "Acme" }, "authed_user": { "id": "UADA" }
@@ -69,6 +86,53 @@ async fn mock_api(State(m): State<Arc<Mock>>, uri: Uri, headers: axum::http::Hea
             }
         }
         _ => json!({ "ok": true }),
+    })
+    .into_response()
+}
+
+/// The list methods' answers: a workspace's channels in two pages, its people (a bot and a
+/// deactivated one among them), its user groups; a Discord server's channels, roles and members.
+fn lists(p: &str, query: &std::collections::HashMap<String, String>) -> Option<Value> {
+    Some(match p {
+        "conversations.list" if query.get("cursor").map(String::as_str) == Some("page-2") => json!({
+            "ok": true, "channels": [{ "id": "G3", "name": "ops", "is_private": true, "is_member": true, "num_members": 4 }],
+            "response_metadata": { "next_cursor": "" }
+        }),
+        "conversations.list" => json!({
+            "ok": true,
+            "channels": [
+                { "id": "C2", "name": "random", "is_private": false, "is_member": false, "num_members": 30 },
+                { "id": "C1", "name": "general", "is_private": false, "is_member": true, "num_members": 12 }
+            ],
+            "response_metadata": { "next_cursor": "page-2" }
+        }),
+        "users.list" => json!({
+            "ok": true,
+            "members": [
+                { "id": "U1", "name": "ada", "real_name": "Ada Lovelace", "profile": { "image_48": "https://avatars.slack-edge.com/ada_48.png" } },
+                { "id": "U2", "name": "grace", "profile": { "real_name": "Grace Hopper", "image_48": "http://insecure/grace.png" } },
+                { "id": "B1", "name": "deploybot", "is_bot": true, "profile": {} },
+                { "id": "U9", "name": "eve", "deleted": true, "profile": {} }
+            ],
+            "response_metadata": { "next_cursor": "" }
+        }),
+        "usergroups.list" => json!({ "ok": true, "usergroups": [{ "id": "S1", "name": "On call", "handle": "oncall", "user_count": 3 }] }),
+        "discord/guilds/G1/channels" => json!([
+            { "id": "10", "type": 4, "name": "Work", "position": 1 },
+            { "id": "11", "type": 0, "name": "deploys", "parent_id": "10", "position": 0 },
+            { "id": "12", "type": 2, "name": "voice", "parent_id": "10", "position": 1 },
+            { "id": "13", "type": 0, "name": "welcome", "position": 0 }
+        ]),
+        "discord/guilds/G1/roles" => json!([
+            { "id": "G1", "name": "@everyone", "color": 0, "position": 0 },
+            { "id": "21", "name": "Maintainers", "color": 5_017_087, "position": 2 }
+        ]),
+        "discord/guilds/G1/members" | "discord/guilds/G1/members/search" => json!([
+            { "user": { "id": "42", "username": "ada", "global_name": "Ada", "avatar": "abc" }, "nick": null },
+            { "user": { "id": "43", "username": "rollbot", "bot": true } }
+        ]),
+        "discord/guilds/G1/members/42" => json!({ "user": { "id": "42", "username": "ada", "global_name": "Ada" } }),
+        _ => return None,
     })
 }
 
@@ -602,4 +666,168 @@ async fn the_dashboard_has_chat_ops_catalog() {
     }
     let have: Value = serde_json::from_str(&std::fs::read_to_string(&path).expect("the fixture (ROLL_FIXTURES=write)")).unwrap();
     assert_eq!(have, want, "apps/dashboard/src/lib/chatops-catalog.json is stale: ROLL_FIXTURES=write cargo test -p code-control --test chatops");
+}
+
+// ── pickers: the owner's Slack and Discord things, looked up with the install's token ──
+
+impl World {
+    async fn lookup(&self, path: &str) -> Value {
+        let (s, v) = self.a.req("GET", &format!("/v1/code/agents/acme/lookup/{path}"), None, Some(&self.owner)).await;
+        assert_eq!(s, StatusCode::OK, "{path}: {v}");
+        v
+    }
+
+    /// Calls to a mock path (`conversations.list`, `discord/guilds/G1/members`), as their query.
+    fn queries(&self, path: &str) -> Vec<std::collections::HashMap<String, String>> {
+        self.mock.calls.lock().iter().filter(|c| c.0.ends_with(path)).map(|c| url::form_urlencoded::parse(c.2.as_bytes()).into_owned().collect()).collect()
+    }
+
+    /// Connect the Discord server G1 to acme through the bot install.
+    async fn install_discord(&self) -> String {
+        let (_, v) = self.a.req("POST", "/v1/code/agents/acme/integrations/discord/install", None, Some(&self.owner)).await;
+        let state = url::Url::parse(v["url"].as_str().unwrap()).unwrap().query_pairs().find(|(k, _)| k == "state").unwrap().1.to_string();
+        let resp = self.a.send(Request::get(format!("/v1/code/chat/discord/oauth?code=g&state={state}")).body(Body::empty()).unwrap()).await;
+        assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+        let v = self.a.ok_as("GET", "/v1/code/agents/acme/integrations", &self.owner).await;
+        v["discord"]["installs"][0]["id"].as_str().unwrap().to_string()
+    }
+}
+
+fn labels(v: &Value) -> Vec<&str> {
+    v["items"].as_array().unwrap().iter().map(|i| i["label"].as_str().unwrap()).collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pickers_look_up_slack_through_the_workspaces_token() {
+    let w = world().await;
+    let v = w.lookup("slack/channels").await;
+    assert_eq!((v["items"].clone(), v["problem"]["code"].clone()), (json!([]), json!("not_connected")), "{v}");
+    let (s, _) = w.a.req("GET", "/v1/code/agents/acme/lookup/slack/channels", None, Some(&w.agent)).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "lookups are for who manages the owner");
+    let install = w.install("T1").await;
+
+    // Channels: Slack's pages read whole (its cursor passed on), the bot's own first, by name.
+    let v = w.lookup("slack/channels").await;
+    assert_eq!(labels(&v), ["general", "ops", "random"]);
+    assert_eq!(v["items"][0], json!({ "id": "C1", "label": "general", "key": "general", "hint": "12 members", "icon": "channel" }));
+    assert_eq!((v["items"][1]["icon"].as_str(), v["items"][2]["hint"].as_str()), (Some("private"), Some("not a member")));
+    assert!(!v.to_string().contains(BOT_TOKEN), "the token never leaves the server");
+    let sent = w.queries("conversations.list");
+    assert_eq!(sent.len(), 2);
+    assert_eq!((sent[0]["types"].as_str(), sent[0]["exclude_archived"].as_str(), sent[0]["limit"].as_str()), ("public_channel,private_channel", "true", "200"));
+    assert_eq!((sent[0].get("cursor"), sent[1]["cursor"].as_str()), (None, "page-2"));
+    assert!(w.mock.calls.lock().iter().filter(|c| c.0.ends_with(".list")).all(|c| c.1 == format!("Bearer {BOT_TOKEN}")));
+    // Searches, pages and stored values come from the list read once.
+    assert_eq!(labels(&w.lookup("slack/channels?q=%23gen").await), ["general"]);
+    let first = w.lookup("slack/channels?limit=2").await;
+    assert_eq!((labels(&first), first["next"].as_str()), (vec!["general", "ops"], Some("2")));
+    assert_eq!(labels(&w.lookup("slack/channels?limit=2&cursor=2").await), ["random"]);
+    assert_eq!(labels(&w.lookup("slack/channels?ids=%23general,G3").await), ["general", "ops"]);
+    assert_eq!(w.queries("conversations.list").len(), 2, "searched here, not at Slack");
+
+    // People: names, handles, only https pictures; bots and deactivated people only resolve.
+    let v = w.lookup("slack/users").await;
+    assert_eq!(labels(&v), ["Ada Lovelace", "Grace Hopper"]);
+    assert_eq!(v["items"][0], json!({ "id": "U1", "label": "Ada Lovelace", "key": "ada", "hint": "@ada", "avatar": "https://avatars.slack-edge.com/ada_48.png", "icon": "user" }));
+    assert!(v["items"][1].get("avatar").is_none(), "{v}");
+    assert_eq!(labels(&w.lookup("slack/users?ids=B1,U9").await), ["deploybot", "eve"]);
+    let v = w.lookup("slack/usergroups").await;
+    assert_eq!(v["items"][0], json!({ "id": "S1", "label": "On call", "key": "oncall", "hint": "@oncall", "icon": "group" }));
+    // A notice goes to a channel or a person: one list, grouped.
+    let v = w.lookup("slack/targets?q=a").await;
+    let groups: Vec<(&str, &str)> = v["items"].as_array().unwrap().iter().map(|i| (i["label"].as_str().unwrap(), i["group"].as_str().unwrap())).collect();
+    assert_eq!(groups, [("general", "Channels"), ("random", "Channels"), ("Ada Lovelace", "People"), ("Grace Hopper", "People")]);
+    let v = w.lookup("slack/workspaces").await;
+    assert_eq!(v["items"], json!([{ "id": "T1", "label": "Acme", "key": install, "hint": "T1", "icon": "team" }]));
+    assert_eq!(labels(&w.lookup("slack/users?parent=T1").await).len(), 2);
+    let (s, _) = w.a.req("GET", "/v1/code/agents/acme/lookup/slack/users?parent=T404", None, Some(&w.owner)).await;
+    assert_eq!(s, StatusCode::NOT_FOUND, "only the owner's own workspaces");
+    let (s, _) = w.a.req("GET", "/v1/code/agents/acme/lookup/slack/emoji", None, Some(&w.owner)).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    let (s, _) = w.a.req("POST", "/v1/code/agents/acme/lookup/slack/channels", Some(json!({ "name": "new" })), Some(&w.owner)).await;
+    assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY, "roll doesn't make Slack channels");
+
+    // A second workspace: without a parent, each one's rows under its name.
+    let users_read = w.queries("users.list").len();
+    w.install("T2").await;
+    let v = w.lookup("slack/users").await;
+    assert_eq!(v["items"].as_array().unwrap().len(), 4);
+    assert!(v["items"].as_array().unwrap().iter().all(|i| i["group"] == "Acme"), "{v}");
+    assert_eq!(w.queries("users.list").len(), users_read + 2, "a new install drops what was cached");
+
+    // A grant without the new scopes: reconnect. A rate limit: said, and Slack left alone.
+    *w.mock.fail.lock() = Some("missing_scope");
+    let v = w.lookup("slack/channels?parent=T2&q=x").await;
+    assert_eq!(v["problem"]["code"], "reconnect", "{v}");
+    *w.mock.fail.lock() = Some("429");
+    let v = w.lookup("slack/usergroups?parent=T2").await;
+    assert_eq!(v["problem"], json!({ "code": "rate_limited", "retry_after": 30 }));
+    let calls = w.mock.calls.lock().len();
+    let v = w.lookup("slack/channels?parent=T2&q=y").await;
+    assert_eq!(v["problem"]["code"], "rate_limited");
+    assert_eq!(w.mock.calls.lock().len(), calls, "nothing goes to Slack while it said to wait");
+
+    // Disconnecting forgets it all.
+    *w.mock.fail.lock() = None;
+    for i in w.a.ok_as("GET", "/v1/code/agents/acme/integrations", &w.owner).await["slack"]["installs"].as_array().unwrap() {
+        let (s, _) = w.a.req("DELETE", &format!("/v1/code/agents/acme/integrations/slack/{}", i["id"].as_str().unwrap()), None, Some(&w.owner)).await;
+        assert_eq!(s, StatusCode::NO_CONTENT);
+    }
+    assert_eq!(w.lookup("slack/channels").await["problem"]["code"], "not_connected");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pickers_look_up_discord_in_the_owners_servers() {
+    let w = world().await;
+    assert_eq!(w.lookup("discord/channels").await["problem"]["code"], "not_connected");
+    let install = w.install_discord().await;
+    let v = w.lookup("discord/guilds").await;
+    assert_eq!(v["items"], json!([{ "id": "G1", "label": "Acme Discord", "key": install, "hint": "G1", "icon": "team" }]));
+
+    // Channels a message can go to, under their category; read once.
+    let v = w.lookup("discord/channels").await;
+    let rows: Vec<(&str, Option<&str>)> = v["items"].as_array().unwrap().iter().map(|i| (i["label"].as_str().unwrap(), i["group"].as_str())).collect();
+    assert_eq!(rows, [("welcome", None), ("deploys", Some("Work"))]);
+    assert_eq!(v["items"][0]["icon"], "channel");
+    assert_eq!(labels(&w.lookup("discord/channels?q=dep").await), ["deploys"]);
+    assert_eq!(w.queries("discord/guilds/G1/channels").len(), 1);
+    assert!(w.mock.calls.lock().iter().filter(|c| c.0.contains("/guilds/G1/")).all(|c| c.1.starts_with("Bot ")));
+    // Roles with their colour; @everyone isn't one.
+    let v = w.lookup("discord/roles?parent=G1").await;
+    assert_eq!(v["items"], json!([{ "id": "21", "label": "Maintainers", "key": "Maintainers", "color": "#4c8dff", "icon": "role" }]));
+
+    // Members: listed by user id, searched at Discord, stored ids one by one; bots left out.
+    let v = w.lookup("discord/members?limit=2").await;
+    assert_eq!(v["items"], json!([{ "id": "42", "label": "Ada", "key": "ada", "hint": "@ada", "avatar": "https://cdn.discordapp.com/avatars/42/abc.png?size=64", "icon": "user" }]));
+    assert_eq!(v["next"], "43", "a full page goes on after its last member");
+    let _ = w.lookup("discord/members?limit=2&cursor=43").await;
+    let listed = w.queries("discord/guilds/G1/members");
+    assert_eq!((listed[0]["limit"].as_str(), listed[0].get("after"), listed[1]["after"].as_str()), ("2", None, "43"));
+    assert_eq!(labels(&w.lookup("discord/members?q=%40ad").await), ["Ada"]);
+    let search = w.queries("members/search");
+    assert_eq!((search[0]["query"].as_str(), search[0]["limit"].as_str()), ("ad", "50"));
+    assert_eq!(labels(&w.lookup("discord/members?ids=42,not-an-id").await), ["Ada"]);
+    assert_eq!(w.queries("discord/guilds/G1/members/42").len(), 1);
+
+    // Only servers the owner installed roll in: never one a caller names.
+    let (s, _) = w.a.req("GET", "/v1/code/agents/acme/lookup/discord/members?parent=999", None, Some(&w.owner)).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    assert!(!w.mock.calls.lock().iter().any(|c| c.0.contains("/guilds/999")));
+
+    // Without the Server Members Intent, said; a rate limit holds Discord off.
+    *w.mock.fail.lock() = Some("50001");
+    let v = w.lookup("discord/members?q=gr").await;
+    assert_eq!(v["problem"]["code"], "unavailable", "{v}");
+    assert!(v["problem"]["message"].as_str().unwrap().contains("Members Intent"));
+    *w.mock.fail.lock() = Some("429");
+    assert_eq!(w.lookup("discord/members?q=li").await["problem"]["code"], "rate_limited");
+    let calls = w.mock.calls.lock().len();
+    assert_eq!(w.lookup("discord/members?q=lin").await["problem"]["code"], "rate_limited");
+    assert_eq!(w.mock.calls.lock().len(), calls);
+
+    // Removing the server drops its cached rows and its cooling off.
+    *w.mock.fail.lock() = None;
+    let (s, _) = w.a.req("DELETE", &format!("/v1/code/agents/acme/integrations/discord/{install}"), None, Some(&w.owner)).await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+    assert_eq!(w.lookup("discord/channels").await["problem"]["code"], "not_connected");
 }
