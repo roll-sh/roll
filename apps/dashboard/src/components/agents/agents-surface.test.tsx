@@ -9,7 +9,8 @@ import { MarkStateProvider } from "../mark-state";
 import { AgentsControl } from "./agents-control";
 import { AgentsPage } from "./agents-page";
 import { CanvasEngine } from "./canvas-engine";
-import { defaultProject, Launcher } from "./new-agent";
+import { Launcher } from "./new-agent";
+import { defaultProject } from "./new-thread";
 
 let conn: { client: AgentsHarness["client"] | null; services: ReturnType<typeof fakeServices> | null; error: string | null } = { client: null, services: null, error: null };
 vi.mock("./use-connection", () => ({ useAgentsConnection: () => conn, useDemoParam: () => false }));
@@ -206,7 +207,14 @@ describe("a new agent", () => {
   });
 
   it("creates the thread where it was pointed and opens its conversation", async () => {
-    const h = agentsHarness({ entities: [mirrored("project", project(), 1)], reply: () => ({ type: "created", id: "thr_new" }) });
+    // The daemon's reply comes first, then the thread's record (it opens once that's in).
+    const h: AgentsHarness = agentsHarness({
+      entities: [mirrored("project", project(), 1)],
+      reply: () => {
+        setTimeout(() => h.client.enqueue({ type: "entity", ...mirrored("thread", thread({ id: "thr_new" }), 2) }), 0);
+        return { type: "created", id: "thr_new" };
+      },
+    });
     renderAgents(<Launcher onClose={vi.fn()} />, h);
     expect(screen.getByRole("combobox", { name: "Machine" })).toHaveTextContent("ada-mbp");
     expect(screen.getByRole("combobox", { name: "Project" })).toHaveTextContent("roll");

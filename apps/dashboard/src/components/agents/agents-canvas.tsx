@@ -92,8 +92,13 @@ export const AgentsCanvas = forwardRef<
      * canvas, with where (client coordinates). A plain click on the handle stays a click.
      */
     onLaunch?: (source: string, at: Point) => void;
+    /**
+     * Something over the canvas's bottom (the prompt bar): fitting, focusing and revealing keep
+     * cards above its top edge, wherever it is at that moment.
+     */
+    keepClear?: React.RefObject<HTMLElement | null>;
   }
->(function AgentsCanvas({ graph, storageKey, order: shownOrder, onOrder, fitKey, direction = "horizontal", onDirection, density, onOpen, render, defaultSize, onEscape, overlay, active = true, selected, onLaunch }, ref) {
+>(function AgentsCanvas({ graph, storageKey, order: shownOrder, onOrder, fitKey, direction = "horizontal", onDirection, density, onOpen, render, defaultSize, onEscape, overlay, active = true, selected, onLaunch, keepClear }, ref) {
   const reduced = useReducedMotion();
   const container = useRef<HTMLDivElement>(null);
   const canvas = useRef<HTMLCanvasElement>(null);
@@ -185,18 +190,29 @@ export const AgentsCanvas = forwardRef<
   // `all`: everything, however small (the Fit button, `1`). Otherwise readable cards beat seeing
   // everything: never below READABLE (a phone, 0.55), framed from the top; a phone starts on the
   // first machine, wherever the direction puts it.
+  // How much of the canvas's bottom `keepClear` covers now (at most half of it).
+  const coveredBelow = useCallback(() => {
+    const el = keepClear?.current;
+    const c = container.current;
+    if (!el || !c) return 0;
+    const box = c.getBoundingClientRect();
+    const top = el.getBoundingClientRect().top;
+    return Math.max(0, Math.min(box.bottom - top, box.height / 2));
+  }, [keepClear]);
+
   const fit = useCallback(
     (animate = true, all = false) => {
       const e = engine.current;
       if (!e) return;
       const r = bounds(positions, sizeOf);
-      const { w, h } = e.viewport;
-      if (!r || !w || !h) return;
+      const { w } = e.viewport;
+      const h = e.viewport.h - coveredBelow();
+      if (!r || !w || h <= 0) return;
       const first = arranged.roots.find((k) => positions.has(k));
       const anchor = first ? bounds(positions, sizeOf, [first]) ?? undefined : undefined;
       e.setView(w < 640 ? fitView(r, w, h, 24, 1, all ? 0 : 0.55, anchor) : fitView(r, w, h, 64, 1, all ? 0 : READABLE), animate);
     },
-    [positions, sizeOf, arranged],
+    [positions, sizeOf, arranged, coveredBelow],
   );
 
   // Fit once, when the first layout with measured cards is in; then keep everything in view as
@@ -291,13 +307,14 @@ export const AgentsCanvas = forwardRef<
       if (!e || !p) return;
       following.current = false;
       const s = sizeOf(key);
-      const { w, h } = e.viewport;
+      const { w } = e.viewport;
+      const h = e.viewport.h - coveredBelow();
       const nk = k ?? Math.max(e.view.k, 0.85);
       // Keep tall cards' tops in view, below the canvas toolbar.
       const cy = s.h * nk > h - 96 ? p.y + (h / 2 - 64) / nk : p.y + s.h / 2;
       e.setView({ k: nk, x: w / 2 - (p.x + s.w / 2) * nk, y: h / 2 - cy * nk }, true);
     },
-    [positions, sizeOf],
+    [positions, sizeOf, coveredBelow],
   );
 
   const reveal = useCallback(
@@ -307,11 +324,12 @@ export const AgentsCanvas = forwardRef<
       if (!e || !p) return;
       const s = sizeOf(key);
       const { x, y, k } = e.view;
-      const { w, h } = e.viewport;
+      const { w } = e.viewport;
+      const h = e.viewport.h - coveredBelow();
       const inView = p.x * k + x >= 0 && p.y * k + y >= 0 && (p.x + s.w) * k + x <= w && (p.y + s.h) * k + y <= h;
       if (!inView) focus(key, e.view.k);
     },
-    [positions, sizeOf, focus],
+    [positions, sizeOf, focus, coveredBelow],
   );
 
   useImperativeHandle(ref, () => ({ focus, reveal, fit: () => fit(true) }), [focus, reveal, fit]);

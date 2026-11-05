@@ -26,7 +26,7 @@ import { ImplementButton, PlanBanner, usePlanActions } from "./plan";
 import { QueuedMessages } from "./queue";
 import { pickByDigit, pill, QuestionsPanel, quiet, useQuestionFlow } from "./request-card";
 import { Switch } from "./ui";
-import { newThreadDefaults } from "@/lib/owner-settings";
+import { newThreadSettings } from "./new-thread";
 import { useAgents, usePrefs } from "./use-agents";
 
 /** What a new thread starts with (the `thread.create` fields the composer picks). */
@@ -48,11 +48,6 @@ export type ComposerMode = { kind: "new"; project: Project; machine: Machine } |
 export const MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024;
 
 const draftKey = (k: string) => `roll:agents:draft:${k}`;
-
-/** The default provider: the first logged-in one, else the first installed. */
-export function defaultProvider(providers: readonly ProviderInfo[]): ProviderInfo | undefined {
-  return providers.find((p) => p.installed && p.auth === "ready") ?? providers.find((p) => p.installed);
-}
 
 export function readAsAttachment(file: File): Promise<Attachment> {
   return new Promise((resolve, reject) => {
@@ -148,23 +143,15 @@ export function Composer({
 
   const [text, setText] = useState("");
   const [attachments, setAttachments] = useState<Attachment[]>([]);
-  // A new thread starts from its project's defaults, then its machine's, then the owner's (settings), else the usual choices.
-  const defaults =
-    mode.kind === "new"
-      ? newThreadDefaults(
-          [mode.project.settings?.defaults, mode.machine?.info?.settings?.set.defaults, prefs.defaults],
-          providers.map((p) => p.id),
-        )
-      : undefined;
-  const preset = defaults?.provider && providers.some((p) => p.id === defaults.provider) ? defaults : undefined;
-  const [provider, setProvider] = useState<string>(() => thread?.provider ?? preset?.provider ?? defaultProvider(providers)?.id ?? "");
-  const [model, setModel] = useState<string | null>(thread?.model ?? preset?.model ?? null);
-  const [effort, setEffort] = useState<string | null>(thread?.effort ?? preset?.effort ?? null);
-  const [options, setOptions] = useState<ModelOptions>(thread?.options ?? preset?.options ?? {});
-  const [runtime, setRuntime] = useState<RuntimeMode>(thread?.runtime_mode ?? defaults?.runtime_mode ?? DEFAULT_RUNTIME_MODE);
-  const [plan, setPlan] = useState<InteractionMode>(thread?.interaction_mode ?? defaults?.interaction_mode ?? "default");
-  // A roll code project publishes threads as changes, which needs a worktree: on by default there.
-  const [worktree, setWorktree] = useState(mode.kind === "new" && (defaults?.worktree ?? !!mode.project.repo));
+  // A new thread starts from the same defaults as every other way to start one (`new-thread.ts`).
+  const start = mode.kind === "new" ? newThreadSettings(mode.project, mode.machine, prefs.defaults) : undefined;
+  const [provider, setProvider] = useState<string>(() => thread?.provider ?? start?.provider ?? "");
+  const [model, setModel] = useState<string | null>(thread?.model ?? start?.model ?? null);
+  const [effort, setEffort] = useState<string | null>(thread?.effort ?? start?.effort ?? null);
+  const [options, setOptions] = useState<ModelOptions>(thread?.options ?? start?.options ?? {});
+  const [runtime, setRuntime] = useState<RuntimeMode>(thread?.runtime_mode ?? start?.runtime_mode ?? DEFAULT_RUNTIME_MODE);
+  const [plan, setPlan] = useState<InteractionMode>(thread?.interaction_mode ?? start?.interaction_mode ?? "default");
+  const [worktree, setWorktree] = useState(start?.worktree ?? false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [dragging, setDragging] = useState(false);

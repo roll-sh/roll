@@ -122,6 +122,7 @@ export function Select<V extends string>({
   icon,
   popupClassName,
   title,
+  side,
 }: {
   label: string;
   value: V | null;
@@ -136,6 +137,8 @@ export function Select<V extends string>({
   popupClassName?: string;
   /** The trigger's tooltip (default: `label`). */
   title?: string;
+  /** Where the list opens (below by default). */
+  side?: SelectPrimitive.Positioner.Props["side"];
 }) {
   const items = options.map((o) => ({ value: o.value, label: o.label }));
   return (
@@ -144,7 +147,7 @@ export function Select<V extends string>({
         {icon}
         <SelectValue placeholder={placeholder ?? label} />
       </SelectTrigger>
-      <SelectPopup className={popupClassName}>
+      <SelectPopup className={popupClassName} side={side}>
         {options.map((o) => (
           <SelectItem key={o.value} value={o.value} disabled={o.disabled} hint={o.hint} icon={o.icon}>
             {o.label}

@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { machine, project, provider } from "@/test/agents";
 import { filterGroups, goalsFirst, nestedItems, reduceStack, type PaletteAction, type PaletteGroup, type PaletteItem } from "./command-palette.logic";
-import { goalChoice, goalCommand } from "./orchestrate";
+import { newThreadSettings } from "./new-thread";
+import { goalCommand } from "./orchestrate";
 
 const act = (title: string, searchTerms: string[] = []): PaletteAction => ({ kind: "action", value: `action:${title}`, title, searchTerms, icon: null, run: () => {} });
 const thr = (title: string): PaletteAction => ({ ...act(title), value: `thread:${title}`, threadSearch: { title, activityAt: null } });
@@ -101,7 +102,7 @@ describe("a goal from outside a conversation", () => {
 
   it("says why it can't start", () => {
     expect(goalCommand("orchestrate", " ", target)).toEqual({ error: "Say what should get done." });
-    expect(goalCommand("orchestrate", "x", { ...target, machine: { ...m, online: false } })).toEqual({ error: "ada-mbp is offline." });
+    expect(goalCommand("orchestrate", "x", { ...target, machine: { ...m, online: false } })).toEqual({ error: "ada-mbp is offline. Start it with roll agent up, or pick another project." });
     expect(goalCommand("agent", "x", { ...target, machine: { ...m, info: { ...m.info!, providers: [] } } })).toEqual({ error: "No agent is installed on ada-mbp." });
   });
 
@@ -116,6 +117,19 @@ describe("a goal from outside a conversation", () => {
     const cmd = goalCommand("agent", "go", { project: p, machine: mm });
     expect(cmd).toMatchObject({ provider: "claude", options: { fastMode: true } });
     expect("options" in cmd && cmd.options).toEqual({ fastMode: true });
-    expect(goalChoice(p, mm)).toEqual({ provider: "claude", model: "claude-opus-5-5", effort: null, options: { fastMode: true } });
+    expect(newThreadSettings(p, mm)).toMatchObject({ provider: "claude", model: "claude-opus-5-5", effort: null, options: { fastMode: true } });
+  });
+
+  it("takes the launcher's defaults: the project's, then the machine's, then the owner's", () => {
+    const withMachine = { ...m, info: { ...m.info!, settings: { set: { defaults: { provider: "claude", model: "claude-sonnet-5", runtime_mode: "ask" as const } } } } } as typeof m;
+    // The machine's defaults, where the project has none (the bar used to skip this layer).
+    expect(goalCommand("agent", "go", { ...target, machine: withMachine })).toMatchObject({ provider: "claude", model: "claude-sonnet-5", runtime_mode: "ask" });
+    // The owner's, where neither has any.
+    expect(goalCommand("agent", "go", target, undefined, { provider: "claude", effort: "high", worktree: true })).toMatchObject({ provider: "claude", effort: "high", worktree: true });
+    // The project's beat both.
+    const p = { ...target.project, settings: { ...target.project.settings, defaults: { provider: "codex" } } };
+    expect(goalCommand("agent", "go", { project: p, machine: withMachine }, undefined, { provider: "claude" })).toMatchObject({ provider: "codex", runtime_mode: "ask" });
+    // An orchestrator still plans in the checkout, whatever the defaults say.
+    expect(goalCommand("orchestrate", "go", target, undefined, { interaction_mode: "plan", worktree: true })).toMatchObject({ interaction_mode: "default", worktree: false });
   });
 });

@@ -1327,8 +1327,22 @@ The surface has three views:
   say otherwise, and the conversation opens beside the canvas. They lead the list when the query
   names nothing (no row has every word typed at a word start: a sentence, a typo), else they come
   last. The same goal can be typed in the prompt bar at the bottom of the canvas ("What should
-  the agents get done?", Orchestrate or One agent; its project chip opens the palette to pick
-  another).
+  the agents get done?", Orchestrate or One agent).
+- **The prompt bar** (`prompt-bar.tsx`) and the launcher (`new-agent.tsx`) share one set of rules
+  (`new-thread.ts`): the default project is the last one a thread was started in, else the one
+  with the newest thread, preferring machines that can take one; the model and modes are the
+  project's, then the machine's, then the owner's new-thread defaults. Once something is drafted
+  the bar pins its project: thread updates never move it, only its project chip (a picker of
+  every project, "Add a project…" last) does, and an offline machine says so instead of the draft
+  moving elsewhere. The draft (text, Orchestrate or One agent, project, model) is kept per owner
+  in this browser, so it survives the conversation that opens on Enter, a reload and the phone's
+  panels; after a start the text goes and the kind and model stay (T3's sticky model). A start's
+  command id is kept with the draft: sending again after a timeout replays instead of starting a
+  second one, while a refusal (shown whole, above the toolbar) gets a new id. Starting… can be
+  cancelled (Esc). The bar stays while a conversation is open beside the canvas: centred over a
+  wide canvas, across a narrow one above the zoom controls, and on a phone under "Waiting for you".
+  Fitting, focusing and revealing cards keep them above it. Keyboard: Enter starts, Shift+Enter is
+  a new line, arrows switch Orchestrate and One agent, Esc leaves.
 
 - **Getting started.** An owner with no machines sees the globe (`RollMark`) and the two ways in
   side by side, the same as "Add machine" on the canvas: connect your computer (install,

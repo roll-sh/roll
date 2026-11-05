@@ -163,6 +163,8 @@ export function AgentsSurface({
   const [showArchived, setShowArchived] = useState(false);
   const [sidebar, setSidebar] = useSidebarOpen(phone);
   const canvas = useRef<CanvasHandle>(null);
+  // The prompt bar's dock: the canvas keeps cards clear of it.
+  const dock = useRef<HTMLDivElement>(null);
   const views = useCanvasViews(services.canvas, client.owner, data.canvas?.revision ?? 0);
   const root = useRef<HTMLDivElement>(null);
   const pendingFocus = useRef<string | null>(initialFocus ?? null);
@@ -510,17 +512,18 @@ export function AgentsSurface({
                       selected={selected}
                       phone={phone}
                       onLaunch={onLaunch}
+                      keepClear={dock}
                     />
                   </div>
                 </>
               )}
-              {phone && shown.kind === "canvas" && requests.length > 0 && <PhoneWaiting client={client} />}
               {launchError && (
                 <p role="alert" className="rise absolute bottom-4 left-4 z-10 rounded-lg border border-danger/40 bg-panel px-3 py-2 text-[12px] text-danger">
                   {launchError}
                 </p>
               )}
-              {!phone && data.machines.size > 0 && shown.kind === "canvas" && <PromptBar />}
+              {/* Beside an open conversation too (the canvas narrows; the draft stays); on a phone, under what's waiting. */}
+              {data.machines.size > 0 && shown.kind !== "automations" && <PromptBar ref={dock} above={phone && shown.kind === "canvas" && requests.length > 0 && <PhoneWaiting client={client} />} />}
             </div>
             {shown.kind === "thread" && threadOpen && (
               <SidePanel phone={phone} label="Conversation">
@@ -655,6 +658,7 @@ function CanvasView({
   selected,
   phone,
   onLaunch,
+  keepClear,
 }: {
   canvasRef: React.RefObject<CanvasHandle | null>;
   data: AgentsClient["data"];
@@ -670,6 +674,7 @@ function CanvasView({
   selected?: string;
   phone: boolean;
   onLaunch?: (source: string, at: { x: number; y: number }) => void;
+  keepClear?: React.RefObject<HTMLElement | null>;
 }) {
   const { client, owner } = useAgents();
   const view = views.current;
@@ -839,6 +844,7 @@ function CanvasView({
           active={visible}
           selected={selected}
           onLaunch={onLaunch}
+          keepClear={keepClear}
           overlay={empty && <EmptyView name={view.id === ALL ? null : view.name} waitingOnly={filter.status?.length === 1 && filter.status[0] === "waiting"} onAll={() => (view.id === ALL ? views.setFilter({}) : views.select(ALL))} />}
         />
       </div>
@@ -922,7 +928,7 @@ function PhoneWaiting({ client }: { client: AgentsClient }) {
   const q = requests[0];
   const t = data.threads.get(q.thread);
   return (
-    <div className="rise absolute inset-x-2 bottom-[max(0.5rem,env(safe-area-inset-bottom))] z-20 max-h-[55%] overflow-y-auto rounded-2xl border border-outline bg-raised px-3.5 py-3 shadow-pop" aria-label="Waiting for you">
+    <div className="rise max-h-[55dvh] overflow-y-auto rounded-2xl border border-outline bg-raised px-3.5 py-3 shadow-pop" aria-label="Waiting for you">
       <PendingRequest
         request={q}
         data={data}

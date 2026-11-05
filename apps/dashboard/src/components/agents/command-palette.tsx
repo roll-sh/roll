@@ -51,7 +51,8 @@ import {
   type PaletteItem,
   type PaletteView,
 } from "./command-palette.logic";
-import { targetLabel, useGoalTargets, useLaunchGoal, type GoalKind, type GoalTarget } from "./orchestrate";
+import { targetLabel, type Target as GoalTarget } from "./new-thread";
+import { useGoalTargets, useLaunchGoal, type GoalKind } from "./orchestrate";
 import { useAutomations } from "./automations/shared";
 import { NewProject } from "./project-new";
 import { StatusDot } from "./shared";

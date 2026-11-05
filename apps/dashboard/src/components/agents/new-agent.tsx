@@ -8,25 +8,10 @@ import { Composer } from "./composer";
 import { NewProject } from "./project-new";
 import { MachineIcon, ProjectIcon } from "./identity";
 import { Select } from "./ui";
+import { defaultProject, lastProject, rememberProject, usableIn, useStartThread } from "./new-thread";
 import { useAgents } from "./use-agents";
 
-export const LAST_PROJECT = "roll:agents:last-project";
 const ADD = "+";
-
-/** Where a new agent starts by default: the project asked for, else the last one used, else the one with the newest thread. */
-export function defaultProject<P extends Project>(projects: readonly P[], threads: readonly { project: string; updated_at: number }[], wanted?: string, last?: string | null): P | undefined {
-  const by = (id: string | null | undefined) => (id ? projects.find((p) => p.id === id) : undefined);
-  const newest = [...threads].sort((a, b) => b.updated_at - a.updated_at)[0];
-  return by(wanted) ?? by(last) ?? by(newest?.project) ?? projects[0];
-}
-
-function lastProject(): string | null {
-  try {
-    return localStorage.getItem(LAST_PROJECT);
-  } catch {
-    return null;
-  }
-}
 
 /**
  * The launcher: a small composer over the canvas (T3's new thread, as a popup). Pick the machine
@@ -37,7 +22,8 @@ function lastProject(): string | null {
  * With no machine yet, the ways to connect one.
  */
 export function Launcher({ project: wanted, machine: wantedMachine, at, onClose }: { project?: string; machine?: string; at?: { x: number; y: number }; onClose: () => void }) {
-  const { client, openThread, focus } = useAgents();
+  const { client, focus } = useAgents();
+  const start = useStartThread();
   const data = client.data;
   const machines = useMemo(() => [...data.machines.values()].map((r) => r.value).sort((a, b) => Number(b.online) - Number(a.online) || a.name.localeCompare(b.name)), [data.machines]);
   // With the machine each one is on (the record's, not the project's own).
@@ -49,7 +35,7 @@ export function Launcher({ project: wanted, machine: wantedMachine, at, onClose 
     // On a machine asked for, only its projects count.
     const pool = wantedMachine ? projects.filter((p) => p.machine === wantedMachine) : projects;
     const ts = wantedMachine ? threads.filter((t) => pool.some((p) => p.id === t.project)) : threads;
-    return defaultProject(pool, ts, wanted, lastProject())?.id ?? null;
+    return defaultProject(pool, ts, wanted, lastProject(), usableIn(new Map(machines.map((m) => [m.id, m]))))?.id ?? null;
   });
   const project = projects.find((p) => p.id === picked);
   const machine = machines.find((m) => m.id === (machineId ?? project?.machine)) ?? machines.find((m) => m.online) ?? machines[0];
@@ -59,11 +45,7 @@ export function Launcher({ project: wanted, machine: wantedMachine, at, onClose 
 
   const choose = (p: Project) => {
     setPicked(p.id);
-    try {
-      localStorage.setItem(LAST_PROJECT, p.id);
-    } catch {
-      // Not remembered.
-    }
+    rememberProject(p.id);
   };
 
   // Dropped on the canvas: open there, kept inside the surface.
@@ -159,11 +141,7 @@ export function Launcher({ project: wanted, machine: wantedMachine, at, onClose 
           <Composer
             key={inProject.id}
             mode={{ kind: "new", project: inProject, machine }}
-            onSubmit={async (c) => {
-              const r = await client.run<{ type: "created"; id: string }>(machine.id, { type: "thread.create", project: inProject.id, ...c }, "created");
-              choose(inProject);
-              openThread(r.id);
-            }}
+            onSubmit={(c) => start(machine, { type: "thread.create", project: inProject.id, ...c })}
           />
         ) : (
           <Offline machine={machine} onAdd={() => setAdding(true)} />
