@@ -39,7 +39,7 @@ describe("ThreadNode, T3's thread row as a card", () => {
     const t = thread({
       run_count: 1,
       change: { repo: "acme/roll", number: 41, status: "ready", url: "/acme/roll/changes/41", detail: null },
-      worktree: { path: "/Users/ada/.roll/worktrees/thr_1", branch: "roll/fix-queue", base: "main" },
+      worktree: { path: "/Users/ada/.roll/worktrees/thr_1", branch: "roll/fix-queue", base: "main", removed_at: null },
     });
     const h = agentsHarness({
       entities: [mirrored("project", project({ name: "roll web" }), 1), mirrored("thread", t, 2), mirrored("terminal", terminal({ thread: "thr_1" }), 3)],

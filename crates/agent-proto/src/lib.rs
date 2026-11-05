@@ -229,6 +229,9 @@ pub struct ProjectSettings {
     /// When the daemon settles the project's threads by itself.
     #[serde(default)]
     pub auto_settle: AutoSettle,
+    /// What the daemon cleans up after settled and archived threads.
+    #[serde(default, skip_serializing_if = "Cleanup::is_default")]
+    pub cleanup: Cleanup,
     /// Its colour (unset: one made from its repo or name, the same on every device).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color: Option<IdentityColor>,
@@ -250,6 +253,10 @@ pub struct AutoSettle {
     /// Settle a thread when its change lands. A closed change always settles it.
     #[serde(default = "yes")]
     pub on_land: bool,
+    /// Inactivity never settles a thread whose published change is still open (T3's
+    /// `sidebarAutoSettleKeepPullRequests`); its landing or closing still does.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub keep_changes: bool,
 }
 
 fn yes() -> bool {
@@ -266,7 +273,48 @@ impl AutoSettle {
 
 impl Default for AutoSettle {
     fn default() -> Self {
-        AutoSettle { after_days: AutoSettle::default_days(), on_land: true }
+        AutoSettle { after_days: AutoSettle::default_days(), on_land: true, keep_changes: false }
+    }
+}
+
+/// Cleaning up after settled and archived threads (T3's `worktreeCleanup` and storage cleanup
+/// rules, per project; off by default as there). A worktree with local changes is never removed,
+/// its branch and checkpoints always stay, and the thread's next run, rollback or terminal puts
+/// it back (docs/code/agents.md, "Settling").
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Cleanup {
+    /// Remove the worktree of a thread settled or archived this many days ago; `null` never.
+    /// 0 to 3650 (0: the next sweep).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_after_days: Option<u16>,
+    /// What keeps a worktree, however long its thread has been settled.
+    #[serde(default, skip_serializing_if = "CleanupKeep::is_default")]
+    pub keep: CleanupKeep,
+}
+
+impl Cleanup {
+    pub const MAX_DAYS: u16 = 3650;
+
+    pub fn is_default(&self) -> bool {
+        *self == Cleanup::default()
+    }
+}
+
+/// Which local files keep a worktree (T3's `worktreeKeepWhen`). Either way a worktree with
+/// uncommitted changes stays: roll has no setting that loses them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CleanupKeep {
+    /// Changes to tracked files and untracked files git doesn't ignore.
+    #[default]
+    UncommittedChanges,
+    /// Those, and ignored files too (`.env`, build output, `node_modules`).
+    AnyLocalFiles,
+}
+
+impl CleanupKeep {
+    pub fn is_default(&self) -> bool {
+        *self == CleanupKeep::default()
     }
 }
 
@@ -604,6 +652,10 @@ pub struct Worktree {
     pub branch: String,
     /// The commit the worktree was created from.
     pub base: String,
+    /// When cleanup removed its folder (the branch and checkpoints stay). The thread's next
+    /// run, rollback or terminal puts it back from the branch and clears this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub removed_at: Option<Millis>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -1729,6 +1781,10 @@ pub enum Command {
     /// and the relay sends this itself when the repo's default branch moves.
     #[serde(rename = "project.pull")]
     ProjectPull { project: ProjectId },
+    /// Remove now the worktrees of the project's settled and archived threads that cleanup may
+    /// remove (whatever their age), with the same checks; answers `Reply::Cleaned`.
+    #[serde(rename = "project.cleanup")]
+    ProjectCleanup { project: ProjectId },
 
     /// Start a thread. `worktree` puts it in its own git worktree on a new branch.
     #[serde(rename = "thread.create")]
@@ -1795,7 +1851,8 @@ pub enum Command {
     ThreadArchive { thread: ThreadId },
     #[serde(rename = "thread.unarchive")]
     ThreadUnarchive { thread: ThreadId },
-    /// Delete a thread, its records and its worktree (the branch stays).
+    /// Delete a thread and its records. Its worktree goes too unless it has uncommitted
+    /// changes; the branch always stays.
     #[serde(rename = "thread.delete")]
     ThreadDelete { thread: ThreadId },
     /// Put a thread on the settled shelf (T3's `thread.settle`). Refused while it runs, waits on
@@ -2000,6 +2057,8 @@ pub enum Reply {
     Pulled(PullResult),
     /// `fs.write` wrote `path` (relative to the workspace).
     Written { path: String },
+    /// What `project.cleanup` did.
+    Cleaned(CleanupReport),
     Scrollback {
         /// Base64.
         data: String,
@@ -2007,6 +2066,39 @@ pub enum Reply {
     /// What `endpoint.check` found.
     EndpointChecked(EndpointCheck),
     Error(ReplyError),
+}
+
+/// What a cleanup did: the threads whose worktrees it removed, and those it kept and why.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CleanupReport {
+    pub removed: Vec<ThreadId>,
+    pub kept: Vec<CleanupKept>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CleanupKept {
+    pub thread: ThreadId,
+    pub reason: KeptReason,
+}
+
+/// Why cleanup left a worktree where it is (T3's keep checks).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KeptReason {
+    /// It has local changes (`CleanupKeep` says which count).
+    LocalChanges,
+    /// Its thread runs, waits on its user or has queued messages.
+    Busy,
+    /// A terminal is running in it.
+    Terminal,
+    /// It isn't on the thread's branch any more (someone checked out something else).
+    OtherBranch,
+    /// Another thread works in it too.
+    Shared,
+    /// It isn't a worktree roll made (outside the worktrees folder, a symlink, the checkout).
+    NotManaged,
+    /// git refused or failed (submodules, a lock); nothing was removed.
+    Failed,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

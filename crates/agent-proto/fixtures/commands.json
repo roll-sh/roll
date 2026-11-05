@@ -59,6 +59,10 @@
     "project": "prj_1234567890abcdef"
   },
   {
+    "type": "project.cleanup",
+    "project": "prj_1234567890abcdef"
+  },
+  {
     "type": "thread.create",
     "project": "prj_1234567890abcdef",
     "provider": "codex",

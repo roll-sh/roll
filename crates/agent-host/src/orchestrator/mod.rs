@@ -16,6 +16,7 @@
 //!   as started before it runs and its reply is stored after, so the same sender and id get that
 //!   reply again (also after a restart), and a command a crash cut short never runs twice.
 
+mod cleanup;
 mod endpoints;
 mod handoff;
 mod instructions;
@@ -168,6 +169,10 @@ pub(crate) struct Private {
     /// The commit of the newest live checkpoint: the base of the next run's diff.
     #[serde(default)]
     head: Option<String>,
+    /// It was published to a roll code repo and that change hasn't landed or closed yet
+    /// (`thread.change_ended`): `AutoSettle::keep_changes` keeps it from settling for inactivity.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    change_open: bool,
     /// Each checkpoint's base commit (the checkpoint it is diffed against).
     #[serde(default)]
     from: BTreeMap<String, String>,
@@ -216,6 +221,8 @@ pub(crate) struct Rt {
     generation: u64,
     /// The thread was deleted; whoever still holds this runtime must stop.
     gone: bool,
+    /// When its last run ended: a live session idle for [`cleanup::IDLE_SESSION`] closes.
+    idle_since: Option<Millis>,
 }
 
 /// A running provider session and what it was started with.
@@ -492,9 +499,9 @@ impl Host {
         }
         let thread = self.stored_thread(id)?;
         let private: Private = self.store.thread_state(id)?.unwrap_or_default();
-        let git = crate::git::root(Path::new(&thread.cwd)).await.is_some();
+        let git = crate::git::root(&self.git_dir(&thread)).await.is_some();
         let active = self.parked_run(&thread)?;
-        let rt = Rt { thread, private, git, live: None, active, generation: 0, gone: false };
+        let rt = Rt { thread, private, git, live: None, active, generation: 0, gone: false, idle_since: None };
         let mut threads = self.threads.lock().unwrap();
         Ok(threads.entry(id.clone()).or_insert_with(|| Arc::new(AsyncMutex::new(rt))).clone())
     }
@@ -537,6 +544,7 @@ impl Host {
             Command::ProjectRemove { project } => self.project_remove(&project).await,
             Command::ProjectUpdate { project, name, settings } => self.project_update(&project, name, settings, grant).await,
             Command::ProjectPull { project } => self.project_pull(&project, grant).await,
+            Command::ProjectCleanup { project } => self.project_cleanup(&project).await,
             Command::ThreadCreate {
                 project,
                 provider,

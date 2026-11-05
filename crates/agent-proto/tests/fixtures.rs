@@ -61,7 +61,8 @@ fn project() -> Project {
                 ProjectScript { id: "setup".into(), name: "Install".into(), command: "pnpm install".into(), icon: ScriptIcon::Configure, on_worktree: true },
                 ProjectScript { id: "test".into(), name: "Test".into(), command: "cargo test".into(), icon: ScriptIcon::Test, on_worktree: false },
             ],
-            auto_settle: AutoSettle { after_days: None, on_land: false },
+            auto_settle: AutoSettle { after_days: None, on_land: false, keep_changes: true },
+            cleanup: Cleanup { worktree_after_days: Some(7), keep: CleanupKeep::AnyLocalFiles },
             color: Some(IdentityColor::Teal),
             icon: ProjectIcon::File { path: "public/logo.svg".into() },
         },
@@ -88,6 +89,7 @@ fn thread() -> Thread {
             path: "/home/ada/.local/share/roll/agent/worktrees/prj_1234567890abcdef/thr_a1b2c3d4e5f60718".into(),
             branch: "roll/fix-the-flaky-queue-test".into(),
             base: "f35f34cf".into(),
+            removed_at: Some(T),
         }),
         status: ThreadStatus::Waiting,
         lineage: Some(Lineage {
@@ -388,6 +390,7 @@ fn commands() -> Vec<Command> {
             settings: Some(ProjectSettings { icon: ProjectIcon::Monogram { text: Some("RO".into()) }, ..ProjectSettings::default() }),
         },
         Command::ProjectPull { project: prj() },
+        Command::ProjectCleanup { project: prj() },
         Command::ThreadCreate {
             project: prj(),
             provider: ProviderId::codex(),
@@ -478,6 +481,7 @@ fn covered_command(c: &Command) {
         | Command::ProjectRemove { .. }
         | Command::ProjectUpdate { .. }
         | Command::ProjectPull { .. }
+        | Command::ProjectCleanup { .. }
         | Command::ThreadCreate { .. }
         | Command::ThreadConfigure { .. }
         | Command::ThreadFork { .. }
@@ -545,6 +549,21 @@ fn replies() -> Vec<Reply> {
         }),
         Reply::Pulled(PullResult { at: T, outcome: PullOutcome::Failed { message: "fetching origin failed: could not resolve host".into() } }),
         Reply::Written { path: "docs/plans/fix-the-queue.md".into() },
+        Reply::Cleaned(CleanupReport {
+            removed: vec![thr()],
+            kept: [
+                KeptReason::LocalChanges,
+                KeptReason::Busy,
+                KeptReason::Terminal,
+                KeptReason::OtherBranch,
+                KeptReason::Shared,
+                KeptReason::NotManaged,
+                KeptReason::Failed,
+            ]
+            .into_iter()
+            .map(|reason| CleanupKept { thread: ThreadId::from_suffix("0000000000000001"), reason })
+            .collect(),
+        }),
         Reply::Scrollback { data: "JCBscwo=".into() },
         Reply::EndpointChecked(EndpointCheck { ok: true, models: 42, ms: 180, error: None }),
         Reply::EndpointChecked(EndpointCheck { ok: false, models: 0, ms: 10_000, error: Some("the endpoint answered 401 Unauthorized".into()) }),
@@ -563,6 +582,7 @@ fn covered_reply(r: &Reply) {
         | Reply::Published(_)
         | Reply::Pulled(_)
         | Reply::Written { .. }
+        | Reply::Cleaned(_)
         | Reply::Scrollback { .. }
         | Reply::EndpointChecked(_)
         | Reply::Error(_) => {}
@@ -987,8 +1007,8 @@ fn every_variant_of_every_tagged_enum_is_sampled() {
     let tags = |v: serde_json::Value, key: &str| -> std::collections::BTreeSet<String> {
         v.as_array().unwrap().iter().map(|x| x[key].as_str().unwrap().to_string()).collect()
     };
-    assert_eq!(tags(serde_json::to_value(commands()).unwrap(), "type").len(), 41, "commands");
-    assert_eq!(tags(serde_json::to_value(replies()).unwrap(), "type").len(), 12, "replies");
+    assert_eq!(tags(serde_json::to_value(commands()).unwrap(), "type").len(), 42, "commands");
+    assert_eq!(tags(serde_json::to_value(replies()).unwrap(), "type").len(), 13, "replies");
     assert_eq!(tags(serde_json::to_value(entities()).unwrap(), "kind").len(), 8, "entities");
     let bodies: std::collections::BTreeSet<String> = entities()
         .iter()
@@ -1017,11 +1037,16 @@ fn records_from_before_settling_parse() {
     assert_eq!(*serde_json::from_value::<Thread>(thread).unwrap().inbox, Inbox::default());
     // Projects from before keep T3's defaults: three days, and on landing.
     let settings: ProjectSettings = serde_json::from_value(json!({ "auto_pull": true })).unwrap();
-    assert_eq!(settings.auto_settle, AutoSettle { after_days: Some(3), on_land: true });
+    assert_eq!(settings.auto_settle, AutoSettle { after_days: Some(3), on_land: true, keep_changes: false });
     let never: AutoSettle = serde_json::from_value(json!({ "after_days": null })).unwrap();
-    assert_eq!(never, AutoSettle { after_days: None, on_land: true });
+    assert_eq!(never, AutoSettle { after_days: None, on_land: true, keep_changes: false });
     assert_eq!(serde_json::to_value(never).unwrap(), json!({ "after_days": null, "on_land": true }), "never stays never");
     assert_eq!(serde_json::to_value(ProjectSettings::default()).unwrap()["auto_settle"], json!({ "after_days": 3, "on_land": true }));
+    // Cleanup is off until a project turns it on, as in T3, and leaves no trace while off.
+    assert_eq!(settings.cleanup, Cleanup { worktree_after_days: None, keep: CleanupKeep::UncommittedChanges });
+    assert!(serde_json::to_value(ProjectSettings::default()).unwrap().get("cleanup").is_none());
+    let worktree: Worktree = serde_json::from_value(json!({ "path": "/w", "branch": "roll/x", "base": "abc" })).unwrap();
+    assert_eq!(worktree.removed_at, None);
 }
 
 #[test]

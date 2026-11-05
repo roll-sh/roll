@@ -45,7 +45,12 @@
       ],
       "auto_settle": {
         "after_days": null,
-        "on_land": false
+        "on_land": false,
+        "keep_changes": true
+      },
+      "cleanup": {
+        "worktree_after_days": 7,
+        "keep": "any_local_files"
       },
       "color": "teal",
       "icon": {
@@ -88,7 +93,8 @@
     "worktree": {
       "path": "/home/ada/.local/share/roll/agent/worktrees/prj_1234567890abcdef/thr_a1b2c3d4e5f60718",
       "branch": "roll/fix-the-flaky-queue-test",
-      "base": "f35f34cf"
+      "base": "f35f34cf",
+      "removed_at": 1762000000000
     },
     "status": "waiting",
     "lineage": {
@@ -159,7 +165,8 @@
     "worktree": {
       "path": "/home/ada/.local/share/roll/agent/worktrees/prj_1234567890abcdef/thr_a1b2c3d4e5f60718",
       "branch": "roll/fix-the-flaky-queue-test",
-      "base": "f35f34cf"
+      "base": "f35f34cf",
+      "removed_at": 1762000000000
     },
     "status": "idle",
     "orchestrator": true,
@@ -207,7 +214,8 @@
     "worktree": {
       "path": "/home/ada/.local/share/roll/agent/worktrees/prj_1234567890abcdef/thr_a1b2c3d4e5f60718",
       "branch": "roll/fix-the-flaky-queue-test",
-      "base": "f35f34cf"
+      "base": "f35f34cf",
+      "removed_at": 1762000000000
     },
     "status": "idle",
     "orchestrator": true,

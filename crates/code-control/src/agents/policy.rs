@@ -71,6 +71,7 @@ pub(crate) fn agent_may(command: &Command, current: Option<(RuntimeMode, Interac
         Command::ProjectRemove { .. } => owner_only("remove projects"),
         Command::ProjectUpdate { .. } => owner_only("change a project's settings"),
         Command::ProjectPull { .. } => owner_only("pull a project's checkout"),
+        Command::ProjectCleanup { .. } => owner_only("clean up a project's worktrees"),
         Command::ThreadDelete { .. } => owner_only("delete threads"),
         Command::ThreadChangeEnded { .. } => owner_only("say a thread's change ended"),
         Command::RequestRespond { .. } => owner_only("answer a thread's approvals and questions"),

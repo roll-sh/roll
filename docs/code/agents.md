@@ -647,6 +647,7 @@ it or replaces its settings whole, and replies once the record is stored. Code:
   agent, as T3's `ProjectSetupScriptRunner` does for `async` scripts (roll doesn't make the agent
   wait). A script that can't start never fails the thread.
 - **Auto-settle** (`auto_settle`): when the project's threads settle by themselves ("Settling").
+- **Cleanup** (`cleanup`): when the worktrees of its settled and archived threads go ("Settling").
 - Shares leave a project's settings and last pull out (a command can hold anything).
 
 ## Identity
@@ -711,7 +712,9 @@ Code: `agent-host/src/orchestrator/settle.rs`; the threads sidebar is
   it are unread) and `manual` (auto-settle off for the thread, T3's `autoSettleDisabledAt`).
 - **By hand.** `thread.settle` is refused (`conflict`) while the thread runs, waits on its user or
   has queued messages, and for an archived thread (T3's checks and reasons). It closes the idle
-  provider session, as T3 detaches it; settling a settled thread keeps its time. `thread.unsettle`
+  provider session, as T3 detaches it, and the thread's terminals that have finished (T3's
+  `closeIdle`; a running one, a dev server, stays); settling a settled thread keeps its time.
+  Archiving closes all of the thread's terminals, as T3 does. `thread.unsettle`
   sets `active`. `thread.auto_settle {enabled}` turns auto-settle off or on for one thread.
 - **What brings a thread back.** Every new run (a message, a queued message draining, a delegated
   task) clears `settle`, `active` included, as T3 clears the override on every dispatch. A message
@@ -736,7 +739,37 @@ Code: `agent-host/src/orchestrator/settle.rs`; the threads sidebar is
   stops following it then) sends `thread.change_ended {landed}` once, and the daemon settles the
   thread by the same rules (`by: landed` when `on_land`, `closed` always), T3's settle on a merged
   or closed PR. It's best effort: a machine that is offline then misses it, and inactivity settles
-  the thread later. T3's `keepPullRequests` isn't kept: the daemon doesn't know a thread's change.
+  the thread later. `auto_settle.keep_changes` (T3's `sidebarAutoSettleKeepPullRequests`, off by
+  default): inactivity never settles a thread whose change is open. The daemon knows that from its
+  own publish (a successful `thread.publish` to a roll code repo, kept in the thread's private
+  state) until `thread.change_ended`; a plain git project's push opens nothing roll can follow, so
+  it doesn't count.
+- **Cleanup** (T3's `storageCleanup.ts` worktree rules, `ProjectSettings.cleanup`, off by default
+  as in T3; code: `agent-host/src/orchestrator/cleanup.rs`). With `worktree_after_days` set (0 to
+  3650), the minute sweep removes the worktree of a thread settled or archived that long ago (and
+  at least a minute since its record last changed, T3's 60 s). Every check runs again on the live
+  record just before, and any of them keeps the worktree (`KeptReason`): the thread is busy, waits
+  on its user or has queued messages; a running terminal is in it; another thread works in it (a
+  fork without a worktree of its own); it isn't one roll made (outside the worktrees folder, a
+  symlink, the checkout itself, not the top of its own work tree); it's on another branch than the
+  thread's; or it has local files (`keep`: `uncommitted_changes`, T3's default, is changes to
+  tracked files and untracked files git doesn't ignore; `any_local_files` counts ignored files,
+  `.env` and build output, too). T3's `tracked-changes` option isn't offered: it would remove
+  untracked files. Removal is `git worktree remove` without `--force`, so git refuses a dirty tree
+  as well. The branch (with every commit, pushed or not) and the checkpoints always stay, and
+  `Worktree.removed_at` says it's gone. Diffs and `git.status` keep answering from the project's
+  repository (worktrees share its objects and refs). The thread's next run, rollback, terminal,
+  publish or a fork working in its folder puts it back first, in the same place, on its branch
+  (T3's turn start and checkpoint restore do the same); if the branch was deleted, a new one from
+  the worktree's base gets the newest checkpoint's files. `project.cleanup` does it now for every
+  settled or archived thread of the project, whatever their age, and answers `Reply::Cleaned`
+  (what went, what stayed and why), T3's "Run now". T3's other rules (inactive, merged, unchanged
+  worktrees, browser artifacts, rotated logs) aren't ported: an inactive thread settles first, and
+  the daemon keeps no such files.
+- **Idle sessions.** A provider session nobody has used for 30 minutes is closed (T3's
+  `idle_timeout`); the next message resumes the native conversation in a new one.
+- **Delete** removes the worktree only when it has no uncommitted changes; otherwise the folder
+  stays (T3 never removes one without asking), and the branch always does.
 - **Seen.** The dashboard sends `thread.visit` when a conversation opens and when a run of the open
   one ends; it isn't activity and leaves `updated_at` alone. Agent tokens may settle, snooze and
   visit (they're thread work, like archive); `thread.change_ended` is the owner's.
@@ -884,19 +917,21 @@ dashboard or desktop app already decides, or features roll doesn't have.
 | Favourite models (`favorites`) and roll's recent models | `favorite_models`, `recent_models` (localStorage is the cache; `agents-models.ts`) | owner |
 | Default model (`defaultModelSelection`), permissions (`defaultRuntimeMode`), workspace (`defaultThreadEnvMode`), plan mode | new-thread defaults: project, then machine, then owner (`newThreadDefaults`) | project, machine, owner |
 | Worktrees: `worktreesDirectory`, `branchNamePrefix` | worktree folder, branch prefix | machine |
-| `branchNamingMode`, `newWorktreesStartFromOrigin`, `worktreeSubmodules`, `worktreeCleanup` | not applicable (branches are `<prefix>/<title>`, from the checkout's HEAD; worktrees go with their thread) | — |
+| `branchNamingMode`, `newWorktreesStartFromOrigin`, `worktreeSubmodules` | not applicable (branches are `<prefix>/<title>`, from the checkout's HEAD) | — |
+| `worktreeCleanup`, `storageCleanup.worktreeSettledAfterDays`, `worktreeKeepWhen` | `ProjectSettings.cleanup` (`worktree_after_days`, `keep`: uncommitted changes or any local files), "Clean up now" (`project.cleanup`) ("Settling") | project |
+| `storageCleanup.worktreeAfterDays`, `worktreeOnMerge`, `worktreeUnchanged`, `worktreeOnDelete`, browser artifacts, rotated logs | not applicable (an inactive or merged thread settles and then its settled rule applies; delete removes a clean worktree; no browser artifacts or rotated logs) | — |
 | Git identity for commits | `git_name`, `git_email` for publishing | machine |
 | `defaultAutoPull`, `automaticGitFetchInterval` | auto-pull per project; how often it fetches (`pull_every`) | project, machine |
 | Add project starts in (`addProjectBaseDirectory`) | the clone folder (`clone_dir`); folders start at the machine's home | machine |
 | Delegation (T3's orchestrator limits) | subagent depth, tasks per thread | machine |
 | `notificationMode`, `inAppNotificationsEnabled` | notifications: off, notifications, sound, both (the browser; the desktop app notifies itself) | owner |
 | `confirmThreadDelete` | confirm before deleting a thread | owner |
-| `confirmThreadArchive`, `confirmThreadUnpin`, `confirmQuit` | not applicable (archive is undoable; no pins; the desktop app quits from its tray) | — |
+| `confirmThreadArchive`, `confirmThreadUnpin`, `confirmQuit` | not applicable (archive is undoable from its toast; no pins; the desktop app quits from its tray) | — |
 | `sendShortcut` | send with Enter or ⌘/Ctrl+Enter | owner |
 | `followUpBehavior` | while a run is going: queue or steer | owner |
 | Keybindings | the shortcuts, listed (not rebindable) | owner (read-only) |
 | Theme, contrast, glass, fonts, chat width, word wrap, timestamps, effort display, math | not applicable: the dashboard's theme and type | — |
-| Auto-settle after days and on merge (`sidebarAutoSettleAfterDays`, `sidebarAutoSettleOnMerge`) | `ProjectSettings.auto_settle` ("Settling") | project |
+| Auto-settle after days, on merge, keep PRs (`sidebarAutoSettleAfterDays`, `sidebarAutoSettleOnMerge`, `sidebarAutoSettleKeepPullRequests`) | `ProjectSettings.auto_settle` (`after_days`, `on_land`, `keep_changes`) ("Settling") | project |
 | Snooze presets, sidebar grouping and order, working shelf | T3's snooze presets as they are; the threads sidebar groups by project, newest first | — |
 | Text generation model, thread title instructions, response streaming | not applicable (titles come from the first message; streaming is always on) | — |
 | Diffs & PRs (layout, whitespace, colours, open in app), source control writing style, review guides | not applicable yet (roll code's review is its own) | — |

@@ -347,6 +347,7 @@ impl Host {
         }
         let mut batch = vec![Entity::Run(run.clone())];
         rt.active = Some(Active::new(run, rt.thread.usage));
+        rt.idle_since = None;
 
         if rt.git && rt.private.head.is_none() {
             match self.capture(rt, 0, None).await {
@@ -453,6 +454,8 @@ impl Host {
             }
         }
         self.close_session(rt).await;
+        // Cleaned up after it settled: back from its branch first (T3's turn start does this).
+        self.ensure_worktree(rt).await?;
         let cwd = Path::new(&rt.thread.cwd);
         if !tokio::fs::metadata(cwd).await.map(|m| m.is_dir()).unwrap_or(false) {
             return Err(Fail::Invalid(format!("the thread's directory {} is gone", rt.thread.cwd)));
@@ -1017,6 +1020,7 @@ impl Host {
         batch.push(Entity::Thread(thread.clone()));
         self.put(batch)?;
         self.save_private(rt)?;
+        rt.idle_since = Some(at);
         if let Some(next) = next {
             let input = TurnInput { text: next.text, attachments: next.attachments };
             // A failure is on the new run's record; nobody is waiting for this reply.

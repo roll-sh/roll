@@ -47,7 +47,13 @@ impl Host {
     ) -> Res<Reply> {
         let (project, cwd, worktree) = match (&thread, &project) {
             (Some(thread), _) => {
-                let t = self.stored_thread(thread)?;
+                let mut t = self.stored_thread(thread)?;
+                if t.worktree.as_ref().is_some_and(|w| w.removed_at.is_some()) {
+                    // A terminal in a cleaned-up thread puts its worktree back first.
+                    let mut rt = self.lock(thread).await?;
+                    self.ensure_worktree(&mut rt).await?;
+                    t = rt.thread.clone();
+                }
                 (Some(t.project), t.cwd, t.worktree.map(|w| w.path))
             }
             (None, Some(project)) => (Some(project.clone()), self.project(project)?.path, None),

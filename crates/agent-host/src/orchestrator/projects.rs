@@ -262,6 +262,9 @@ fn checked(mut s: ProjectSettings) -> Res<ProjectSettings> {
     if s.auto_settle.after_days.is_some_and(|d| !(1..=AutoSettle::MAX_DAYS).contains(&d)) {
         return Err(Fail::Invalid(format!("auto-settle waits 1 to {} days", AutoSettle::MAX_DAYS)));
     }
+    if s.cleanup.worktree_after_days.is_some_and(|d| d > Cleanup::MAX_DAYS) {
+        return Err(Fail::Invalid(format!("worktree cleanup waits 0 to {} days", Cleanup::MAX_DAYS)));
+    }
     s.icon = s.icon.check().map_err(Fail::Invalid)?;
     Ok(s)
 }

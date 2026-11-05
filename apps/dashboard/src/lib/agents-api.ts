@@ -130,6 +130,8 @@ export interface ProjectSettings {
   scripts: ProjectScript[];
   /** When the daemon settles the project's threads by itself. */
   auto_settle: AutoSettle;
+  /** What the daemon cleans up after settled and archived threads (unset: nothing). */
+  cleanup?: Cleanup;
   /** Its colour (unset: made from its repo or name, the same on every device). */
   color?: IdentityColor;
   /** Its logo, monogram or emoji (unset: `auto`). */
@@ -142,9 +144,34 @@ export interface AutoSettle {
   after_days: number | null;
   /** Settle a thread when its change lands (a closed change always settles it). */
   on_land: boolean;
+  /** Inactivity never settles a thread whose published change is still open (T3's `sidebarAutoSettleKeepPullRequests`). */
+  keep_changes?: boolean;
 }
 
 export const DEFAULT_AUTO_SETTLE: AutoSettle = { after_days: 3, on_land: true };
+
+/**
+ * T3's worktree cleanup, per project (off by default, as there): the worktree of a thread settled
+ * or archived `worktree_after_days` ago goes, unless it has local changes. Its branch and
+ * checkpoints stay, and its next message, rollback or terminal puts it back.
+ */
+export interface Cleanup {
+  /** 0–3650 days; unset never. */
+  worktree_after_days?: number | null;
+  /** Which local files keep a worktree (default `uncommitted_changes`). */
+  keep?: CleanupKeep;
+}
+
+export type CleanupKeep = "uncommitted_changes" | "any_local_files";
+export const CLEANUP_MAX_DAYS = 3650;
+
+/** Why cleanup left a worktree where it was. */
+export type KeptReason = "local_changes" | "busy" | "terminal" | "other_branch" | "shared" | "not_managed" | "failed";
+
+export interface CleanupReport {
+  removed: ThreadId[];
+  kept: { thread: ThreadId; reason: KeptReason }[];
+}
 
 /** Unset fields fall back to the composer's last choice. */
 export interface ThreadDefaults {
@@ -194,6 +221,8 @@ export interface Worktree {
   path: string;
   branch: string;
   base: string;
+  /** When cleanup removed its folder; the next message, rollback or terminal puts it back. */
+  removed_at: Millis | null;
 }
 
 export interface Lineage {
@@ -834,6 +863,7 @@ export type Command =
       settings?: { auto_pull: boolean; defaults?: ThreadDefaults; scripts?: ProjectScript[]; auto_settle?: AutoSettle; color?: IdentityColor; icon?: ProjectIcon };
     }
   | { type: "project.pull"; project: ProjectId }
+  | { type: "project.cleanup"; project: ProjectId }
   | {
       type: "thread.create";
       project: ProjectId;
@@ -979,6 +1009,7 @@ export type Reply =
   | ({ type: "published" } & Published)
   | ({ type: "pulled" } & PullResult)
   | { type: "written"; path: string }
+  | ({ type: "cleaned" } & CleanupReport)
   | { type: "scrollback"; data: string }
   | ({ type: "endpoint_checked" } & EndpointCheck)
   | { type: "error"; code: ErrorCode; message: string };
@@ -1229,6 +1260,12 @@ const projectScriptD = obj<ProjectScript>({
 const autoSettleD = obj<AutoSettle>({
   after_days: withDefault(nullable(int), () => DEFAULT_AUTO_SETTLE.after_days),
   on_land: withDefault(bool, () => true),
+  keep_changes: optional(bool),
+});
+const keptReasonD = literal("local_changes", "busy", "terminal", "other_branch", "shared", "not_managed", "failed");
+const cleanupD = obj<Cleanup>({
+  worktree_after_days: optional(nullable(int)),
+  keep: optional(literal("uncommitted_changes", "any_local_files")),
 });
 // Identity is decoded leniently: a colour or icon kind from a newer daemon shows the default
 // rather than dropping the record. A logo is only ever a `data:image/…` URL.
@@ -1262,6 +1299,7 @@ const settingsFields = {
   defaults: optional(threadDefaultsD),
   scripts: optional(array(projectScriptD)),
   auto_settle: optional(autoSettleD),
+  cleanup: optional(cleanupD),
   color: identityColorD,
   icon: projectIconD,
 };
@@ -1270,6 +1308,7 @@ const projectSettingsD = obj<ProjectSettings>({
   defaults: withDefault(threadDefaultsD, () => ({})),
   scripts: vec(projectScriptD),
   auto_settle: withDefault(autoSettleD, () => ({ ...DEFAULT_AUTO_SETTLE })),
+  cleanup: optional(cleanupD),
   color: identityColorD,
   icon: projectIconD,
 });
@@ -1319,7 +1358,7 @@ const threadD = obj<Thread>({
   runtime_mode: runtimeModeD,
   interaction_mode: interactionModeD,
   cwd: str,
-  worktree: opt(obj<Worktree>({ path: str, branch: str, base: str })),
+  worktree: opt(obj<Worktree>({ path: str, branch: str, base: str, removed_at: opt(int) })),
   status: literal("idle", "starting", "running", "waiting", "error"),
   lineage: opt(obj<Lineage>({ parent: str, relation: literal("fork", "subagent"), root: str, from_run: opt(str) })),
   orchestrator: withDefault(bool, () => false),
@@ -1629,6 +1668,7 @@ export const commandD: Decoder<Command> = tagged("type", {
   "project.remove": cmd<"project.remove">(obj({ project: str })),
   "project.update": cmd<"project.update">(obj({ project: str, name: optional(str), settings: optional(obj(settingsFields)) })),
   "project.pull": cmd<"project.pull">(obj({ project: str })),
+  "project.cleanup": cmd<"project.cleanup">(obj({ project: str })),
   "thread.create": cmd<"thread.create">(
     obj({
       project: str,
@@ -1723,6 +1763,7 @@ export const replyD: Decoder<Reply> = tagged("type", {
   written: obj<{ path: string }>({ path: str }),
   endpoint_checked: endpointCheckD,
   pulled: pullResultD,
+  cleaned: obj<CleanupReport>({ removed: array(str), kept: array(obj<{ thread: string; reason: KeptReason }>({ thread: str, reason: keptReasonD })) }),
   error: obj<{ code: ErrorCode; message: string }>({
     code: literal("not_found", "invalid", "conflict", "provider", "machine_offline", "timeout", "internal"),
     message: str,

@@ -1009,7 +1009,7 @@ async fn threads_settle_by_themselves_after_days_without_activity_or_when_their_
     let rules = |after_days, on_land| Command::ProjectUpdate {
         project: w.project.clone(),
         name: None,
-        settings: Some(ProjectSettings { auto_settle: AutoSettle { after_days, on_land }, ..ProjectSettings::default() }),
+        settings: Some(ProjectSettings { auto_settle: AutoSettle { after_days, on_land, keep_changes: false }, ..ProjectSettings::default() }),
     };
     assert!(is_err(&w.run(rules(Some(91), true)).await, ErrorCode::Invalid));
     assert!(is_err(&w.run(rules(Some(0), true)).await, ErrorCode::Invalid));
@@ -1092,4 +1092,226 @@ async fn model_options_reach_the_session_and_follow_the_model() {
     assert_eq!((second.config.model.as_deref(), &second.config.options), (Some("fake-1"), &fast(false)));
     assert!(first.calls().contains(&Call::Close));
     turn(&w, &second, &thread, &[]).await;
+}
+
+// ── cleanup (docs/code/agents.md, "Settling": T3's storageCleanup, idle sessions, terminals) ──
+
+fn cleanup_rules(w: &World, worktree_after_days: Option<u16>, keep: CleanupKeep) -> Command {
+    Command::ProjectUpdate {
+        project: w.project.clone(),
+        name: None,
+        settings: Some(ProjectSettings { cleanup: Cleanup { worktree_after_days, keep }, ..ProjectSettings::default() }),
+    }
+}
+
+/// A thread in its own worktree whose first run is over; its folder.
+async fn idle_worktree(w: &World, title: &str) -> (ThreadId, std::path::PathBuf) {
+    let thread = w.thread("codex", Some(title), true).await;
+    let t = w.wait_thread(&thread, |t| t.status == ThreadStatus::Idle && t.run_count == 1).await;
+    (thread, t.worktree.unwrap().path.into())
+}
+
+async fn settle(w: &World, thread: &ThreadId) {
+    assert_eq!(w.run(Command::ThreadSettle { thread: thread.clone() }).await, Reply::Ok);
+}
+
+fn terminal(thread: &ThreadId, command: &str) -> Command {
+    Command::TerminalOpen { project: None, thread: Some(thread.clone()), command: Some(command.into()), script: None, cols: 80, rows: 24 }
+}
+
+fn cleaned(s: &Records, thread: &ThreadId) -> bool {
+    s.thread(thread).unwrap().worktree.as_ref().unwrap().removed_at.is_some()
+}
+
+#[tokio::test]
+async fn settled_worktrees_are_cleaned_up_without_losing_anything_and_come_back() {
+    let w = World::new(vec![FakeProvider::new("codex")]).await;
+    assert_eq!(w.run(cleanup_rules(&w, Some(2), CleanupKeep::UncommittedChanges)).await, Reply::Ok);
+    let (clean, clean_dir) = idle_worktree(&w, "Clean").await;
+    // A commit on its branch that was never pushed anywhere.
+    std::fs::write(clean_dir.join("done.txt"), "done\n").unwrap();
+    sh(&clean_dir, &["add", "."]);
+    sh(&clean_dir, &["-c", "user.name=T", "-c", "user.email=t@x", "commit", "-qm", "done"]);
+    let (dirty, dirty_dir) = idle_worktree(&w, "Dirty").await;
+    std::fs::write(dirty_dir.join("notes.txt"), "mine\n").unwrap();
+    let (moved, moved_dir) = idle_worktree(&w, "Moved").await;
+    sh(&moved_dir, &["checkout", "-q", "-b", "elsewhere"]);
+    let (shell, shell_dir) = idle_worktree(&w, "Shell").await;
+    let Reply::Created { id: term } = w.run(terminal(&shell, "sleep 600")).await else { panic!() };
+    let (_active, active_dir) = idle_worktree(&w, "Active").await;
+    for t in [&clean, &dirty, &moved, &shell] {
+        settle(&w, t).await;
+    }
+
+    let at = now_ms();
+    w.host.settle_round(at + 2 * DAY - 120_000).await;
+    assert!(clean_dir.exists(), "two days aren't up");
+    w.host.settle_round(at + 2 * DAY + 120_000).await;
+    let s = w.state().await;
+    assert!(!clean_dir.exists());
+    assert!(cleaned(&s, &clean));
+    assert!(matches!(s.thread(&clean).unwrap().inbox.settle, Some(Settle::Settled { .. })), "still settled");
+    // Its branch keeps the commit, and the checkpoints stay for a rollback.
+    assert!(sh(&w.repo, &["log", "--format=%s", "roll/clean"]).contains("done"));
+    assert!(!sh(&w.repo, &["for-each-ref", &format!("refs/roll/checkpoints/{clean}/")]).is_empty());
+    // Everything else stays: local changes, another branch checked out, a running terminal, not settled.
+    for (thread, dir) in [(&dirty, &dirty_dir), (&moved, &moved_dir), (&shell, &shell_dir)] {
+        assert!(dir.exists() && !cleaned(&s, thread), "{dir:?}");
+    }
+    assert!(active_dir.exists());
+    assert_eq!(std::fs::read_to_string(dirty_dir.join("notes.txt")).unwrap(), "mine\n");
+    assert_eq!(w.run(Command::TerminalClose { terminal: TerminalId(term) }).await, Reply::Ok);
+
+    // The conversation reads as before, after a restart too: diffs come from the repository.
+    let w = restart(w, vec![FakeProvider::new("codex")]).await;
+    let first = w.state().await.runs(&clean)[0].id.clone();
+    assert!(matches!(w.run(Command::DiffGet { thread: clean.clone(), run: Some(first) }).await, Reply::Diff(_)));
+    assert!(matches!(w.run(Command::DiffGet { thread: clean.clone(), run: None }).await, Reply::Diff(_)));
+    let Reply::GitStatus(status) = w.run(Command::GitStatus { thread: clean.clone() }).await else { panic!() };
+    assert_eq!((status.branch.as_deref(), status.files.len()), (Some("roll/clean"), 0));
+
+    // The next message puts it back from its branch, in the same place.
+    w.send(&clean, "one more", SendMode::Queue).await;
+    let t = w.wait_thread(&clean, |t| t.status == ThreadStatus::Idle && t.run_count == 2).await;
+    assert_eq!(t.worktree.unwrap().removed_at, None);
+    assert_eq!(std::fs::read_to_string(clean_dir.join("done.txt")).unwrap(), "done\n");
+    assert_eq!(sh(&clean_dir, &["symbolic-ref", "--short", "HEAD"]).trim(), "roll/clean");
+}
+
+#[tokio::test]
+async fn cleaning_up_now_says_what_it_kept_and_a_terminal_or_rollback_brings_a_worktree_back() {
+    let w = World::new(vec![FakeProvider::new("codex")]).await;
+    std::fs::write(w.repo.join(".gitignore"), ".env\n").unwrap();
+    sh(&w.repo, &["add", "."]);
+    sh(&w.repo, &["commit", "-qm", "ignore"]);
+    assert_eq!(w.run(cleanup_rules(&w, None, CleanupKeep::AnyLocalFiles)).await, Reply::Ok);
+    let (env, env_dir) = idle_worktree(&w, "Env").await;
+    std::fs::write(env_dir.join(".env"), "SECRET=1\n").unwrap();
+    settle(&w, &env).await;
+    let (archived, archived_dir) = idle_worktree(&w, "Archived").await;
+    assert_eq!(w.run(Command::ThreadArchive { thread: archived.clone() }).await, Reply::Ok);
+    let (_open, open_dir) = idle_worktree(&w, "Open").await;
+    // A fork without a worktree of its own works in its parent's folder.
+    let (parent, parent_dir) = idle_worktree(&w, "Parent").await;
+    let Reply::Created { .. } = w.run(Command::ThreadFork { thread: parent.clone(), at: None, worktree: false }).await else { panic!() };
+    settle(&w, &parent).await;
+
+    let Reply::Cleaned(report) = w.run(Command::ProjectCleanup { project: w.project.clone() }).await else { panic!() };
+    assert_eq!(report.removed, vec![archived.clone()], "{report:?}");
+    let mut kept: Vec<(ThreadId, KeptReason)> = report.kept.into_iter().map(|k| (k.thread, k.reason)).collect();
+    kept.sort_by(|a, b| a.0.0.cmp(&b.0.0));
+    let mut want = vec![(env.clone(), KeptReason::LocalChanges), (parent.clone(), KeptReason::Shared)];
+    want.sort_by(|a, b| a.0.0.cmp(&b.0.0));
+    assert_eq!(kept, want);
+    assert!(!archived_dir.exists() && open_dir.exists() && parent_dir.exists());
+    assert_eq!(std::fs::read_to_string(env_dir.join(".env")).unwrap(), "SECRET=1\n", "ignored files kept it");
+
+    // Counting only uncommitted changes, an ignored file doesn't keep it.
+    assert_eq!(w.run(cleanup_rules(&w, None, CleanupKeep::UncommittedChanges)).await, Reply::Ok);
+    let Reply::Cleaned(report) = w.run(Command::ProjectCleanup { project: w.project.clone() }).await else { panic!() };
+    assert_eq!(report.removed, vec![env.clone()]);
+    assert!(!env_dir.exists());
+
+    // A terminal in the thread puts its worktree back; so does a rollback.
+    let Reply::Created { id: term } = w.run(terminal(&archived, "true")).await else { panic!() };
+    assert!(archived_dir.join("README.md").exists());
+    assert!(!cleaned(&w.state().await, &archived));
+    let _ = w.run(Command::TerminalClose { terminal: TerminalId(term) }).await;
+    let checkpoint = w.state().await.checkpoints(&env).into_iter().find(|c| c.ordinal == 1).unwrap();
+    assert_eq!(w.run(Command::CheckpointRollback { thread: env.clone(), checkpoint: checkpoint.id }).await, Reply::Ok);
+    assert!(env_dir.join("README.md").exists());
+    assert!(!cleaned(&w.state().await, &env));
+}
+
+#[tokio::test]
+async fn idle_provider_sessions_close_after_half_an_hour() {
+    let fake = FakeProvider::new("codex");
+    let w = World::new(vec![fake.clone()]).await;
+    let thread = w.thread("codex", Some("one"), false).await;
+    w.wait_thread(&thread, |t| t.status == ThreadStatus::Idle && t.run_count == 1).await;
+    let session = fake.session(0).await;
+    w.host.settle_round(now_ms() + 29 * 60_000).await;
+    assert!(!session.calls().contains(&Call::Close));
+    w.host.settle_round(now_ms() + 31 * 60_000).await;
+    assert!(session.calls().contains(&Call::Close), "idle for half an hour");
+    w.send(&thread, "two", SendMode::Queue).await;
+    w.wait_thread(&thread, |t| t.status == ThreadStatus::Idle && t.run_count == 2).await;
+    assert_eq!(fake.sessions().len(), 2, "the next message resumes it");
+}
+
+#[tokio::test]
+async fn deleting_a_thread_keeps_a_worktree_with_uncommitted_changes() {
+    let w = World::new(vec![FakeProvider::new("codex")]).await;
+    let (thread, dir) = idle_worktree(&w, "Keep my notes").await;
+    std::fs::write(dir.join("notes.txt"), "mine\n").unwrap();
+    assert_eq!(w.run(Command::ThreadDelete { thread: thread.clone() }).await, Reply::Ok);
+    assert!(w.state().await.thread(&thread).is_none());
+    assert_eq!(std::fs::read_to_string(dir.join("notes.txt")).unwrap(), "mine\n");
+    assert!(sh(&w.repo, &["branch", "--list", "roll/keep-my-notes"]).contains("roll/keep-my-notes"));
+}
+
+#[tokio::test]
+async fn settling_closes_finished_terminals_and_archiving_closes_them_all() {
+    let w = World::new(vec![FakeProvider::new("codex")]).await;
+    let thread = w.thread("codex", Some("one"), false).await;
+    w.wait_thread(&thread, |t| t.status == ThreadStatus::Idle && t.run_count == 1).await;
+    let Reply::Created { id: done } = w.run(terminal(&thread, "true")).await else { panic!() };
+    let Reply::Created { id: server } = w.run(terminal(&thread, "sleep 600")).await else { panic!() };
+    let term = |s: &Records, id: &str| s.live.get(&(EntityKind::Terminal, id.to_string())).cloned();
+    w.wait("the finished terminal", |s| matches!(term(s, &done), Some(Entity::Terminal(t)) if t.status == TerminalStatus::Exited).then_some(())).await;
+    settle(&w, &thread).await;
+    let s = w.state().await;
+    assert!(term(&s, &done).is_none(), "a finished terminal goes");
+    assert!(term(&s, &server).is_some(), "a running one, a dev server, stays");
+    assert_eq!(w.run(Command::ThreadUnsettle { thread: thread.clone() }).await, Reply::Ok);
+    assert_eq!(w.run(Command::ThreadArchive { thread: thread.clone() }).await, Reply::Ok);
+    assert!(term(&w.state().await, &server).is_none(), "T3 closes an archived thread's terminals");
+}
+
+#[tokio::test]
+async fn keep_changes_holds_a_published_thread_until_its_change_ends() {
+    use agent_host::Daemon;
+    let w = World::new(vec![FakeProvider::new("codex")]).await;
+    let src = tempfile::tempdir().unwrap();
+    git_repo(src.path());
+    sh(src.path(), &["clone", "-q", "--bare", ".", "app.git"]);
+    let url = src.path().join("app.git").to_string_lossy().into_owned();
+    let repo = RepoRef { owner: "acme".into(), repo: "app".into() };
+    let grant = |write| Some(CodeGrant { repo: repo.clone(), url: url.clone(), token: "rlg_t".into(), write, expires_at: u64::MAX });
+    let dest = tempfile::tempdir().unwrap();
+    let add = Command::ProjectAdd { path: dest.path().join("app").to_string_lossy().into(), name: None, clone: Some(repo.clone()) };
+    let Reply::Created { id: project } = w.host.run_granted("add".into(), "owner".into(), add, grant(false)).await else { panic!() };
+    let project = ProjectId(project);
+    let settings = ProjectSettings { auto_settle: AutoSettle { after_days: Some(1), on_land: true, keep_changes: true }, ..ProjectSettings::default() };
+    assert_eq!(w.run(Command::ProjectUpdate { project: project.clone(), name: None, settings: Some(settings) }).await, Reply::Ok);
+    let create = |title: &str| Command::ThreadCreate {
+        project: project.clone(),
+        provider: ProviderId::codex(),
+        model: None,
+        effort: None,
+        options: Default::default(),
+        runtime_mode: RuntimeMode::FullAccess,
+        interaction_mode: InteractionMode::Default,
+        worktree: true,
+        title: None,
+        prompt: Some(title.into()),
+        attachments: Vec::new(),
+        orchestrator: false,
+    };
+    let Reply::Created { id: published } = w.run(create("Published")).await else { panic!() };
+    let Reply::Created { id: quiet } = w.run(create("Quiet")).await else { panic!() };
+    let (published, quiet) = (ThreadId(published), ThreadId(quiet));
+    for t in [&published, &quiet] {
+        w.wait_thread(t, |t| t.status == ThreadStatus::Idle && t.run_count == 1).await;
+    }
+    let publish = Command::ThreadPublish { thread: published.clone(), message: "Ship".into(), land: false };
+    let reply = w.host.run_granted("pub".into(), "owner".into(), publish, grant(true)).await;
+    assert!(matches!(reply, Reply::Published(_)), "{reply:?}");
+
+    w.host.settle_round(now_ms() + 2 * DAY).await;
+    let s = w.state().await;
+    assert_eq!(s.thread(&published).unwrap().inbox.settle, None, "its change is open");
+    assert!(matches!(s.thread(&quiet).unwrap().inbox.settle, Some(Settle::Settled { by: SettledBy::Inactivity, .. })));
+    assert_eq!(w.run(Command::ThreadChangeEnded { thread: published.clone(), landed: true }).await, Reply::Ok);
+    assert!(matches!(w.state().await.thread(&published).unwrap().inbox.settle, Some(Settle::Settled { by: SettledBy::Landed, .. })));
 }

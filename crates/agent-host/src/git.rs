@@ -360,6 +360,55 @@ pub async fn worktree_remove(repo: &Path, path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Removes a clean worktree and its directory; the branch stays. Unlike [`worktree_remove`] git
+/// itself refuses a worktree with changes, untracked files, submodules or a lock, so nothing the
+/// user hasn't committed goes (ignored files do: check [`has_local_files`] first for those).
+pub async fn worktree_remove_clean(repo: &Path, path: &Path) -> anyhow::Result<()> {
+    git(repo, &["worktree", "remove"]).arg(path).run().await?;
+    git(repo, &["worktree", "prune"]).try_run().await?;
+    Ok(())
+}
+
+/// Puts a removed worktree back at `path` on its existing `branch`.
+pub async fn worktree_checkout(repo: &Path, path: &Path, branch: &str) -> anyhow::Result<()> {
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    git(repo, &["worktree", "prune"]).try_run().await?;
+    git(repo, &["worktree", "add", "--quiet"]).arg(path).arg(branch).run().await?;
+    Ok(())
+}
+
+/// Whether `refs/heads/<branch>` exists.
+pub async fn branch_exists(repo: &Path, branch: &str) -> anyhow::Result<bool> {
+    Ok(git(repo, &["rev-parse", "-q", "--verify"]).arg(format!("refs/heads/{branch}^{{commit}}")).try_run().await?.is_some())
+}
+
+/// Whether `commit` is in the repository.
+pub async fn has_commit(repo: &Path, commit: &str) -> anyhow::Result<bool> {
+    Ok(git(repo, &["cat-file", "-e"]).arg(format!("{commit}^{{commit}}")).try_run().await?.is_some())
+}
+
+/// The top of the work tree `dir` is in (`None` outside one).
+pub async fn toplevel(dir: &Path) -> Option<PathBuf> {
+    let out = git(dir, &["rev-parse", "--show-toplevel"]).try_run().await.ok()??;
+    Some(PathBuf::from(String::from_utf8_lossy(&out.stdout).trim()))
+}
+
+/// Whether the work tree at `dir` holds anything a removal would lose: changes to tracked files
+/// and untracked files, and with `ignored` ignored files too. Reads only (`GIT_OPTIONAL_LOCKS=0`:
+/// the index isn't refreshed).
+pub async fn has_local_files(dir: &Path, ignored: bool) -> anyhow::Result<bool> {
+    let mut status = git(dir, &["status", "--porcelain", "--untracked-files=normal", "--ignore-submodules=none"])
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        // A line is enough to know: git stops at the cap.
+        .cap(256);
+    if ignored {
+        status = status.arg("--ignored");
+    }
+    Ok(!status.text().await?.is_empty())
+}
+
 /// A private index holding the working tree as it is now (untracked files included, ignored
 /// files not). Removed on drop.
 struct PrivateIndex {

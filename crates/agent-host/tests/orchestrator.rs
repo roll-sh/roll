@@ -1151,7 +1151,8 @@ async fn project_settings_are_checked_and_the_setup_script_runs_in_new_worktrees
             script("setup", "Install", "printf '%s|%s' \"$ROLL_PROJECT_ROOT\" \"$ROLL_WORKTREE_PATH\" > setup.out", true),
             script("lint", "Lint", "printf '%s' \"$ROLL_PROJECT_ROOT\" > lint.out", false),
         ],
-        auto_settle: AutoSettle { after_days: Some(7), on_land: false },
+        auto_settle: AutoSettle { after_days: Some(7), on_land: false, keep_changes: true },
+        cleanup: Cleanup { worktree_after_days: Some(0), keep: CleanupKeep::AnyLocalFiles },
         ..ProjectSettings::default()
     };
     let update = |name: Option<&str>, settings: Option<ProjectSettings>| Command::ProjectUpdate {
@@ -1171,7 +1172,8 @@ async fn project_settings_are_checked_and_the_setup_script_runs_in_new_worktrees
     twice.scripts.push(script("lint", "Again", "true", false));
     let mut effort_option = settings.clone();
     effort_option.defaults.options = ModelOptions::from([("effort".to_string(), OptionValue::Choice("high".into()))]);
-    for bad in [twice, effort_option, ProjectSettings { scripts: vec![script("x y", "X", "true", false)], ..settings.clone() }, ProjectSettings {
+    let forever = ProjectSettings { cleanup: Cleanup { worktree_after_days: Some(Cleanup::MAX_DAYS + 1), ..Cleanup::default() }, ..settings.clone() };
+    for bad in [twice, effort_option, forever, ProjectSettings { scripts: vec![script("x y", "X", "true", false)], ..settings.clone() }, ProjectSettings {
         scripts: vec![script("empty", "Empty", "  ", false)],
         ..settings.clone()
     }] {

@@ -101,6 +101,7 @@ describe("agent-proto fixtures", () => {
       "project.remove": true,
       "project.update": true,
       "project.pull": true,
+      "project.cleanup": true,
       "thread.create": true,
       "thread.configure": true,
       "thread.fork": true,

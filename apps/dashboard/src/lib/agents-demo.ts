@@ -15,6 +15,7 @@ import type {
   ChangeStatus,
   Landing,
   Checkpoint,
+  CleanupReport,
   Command,
   ContextUsage,
   DiffStat,
@@ -697,6 +698,8 @@ export class DemoOwner implements AgentsTransport {
   private log: StreamEvent[] = [];
   private subs = new Set<{ threads: Set<string>; on: (ev: StreamEvent, id: number | null) => void }>();
   private sims = new Map<ThreadId, Sim>();
+  /** Worktrees with local changes: cleanup keeps them. */
+  private dirtyWorktrees = new Set<ThreadId>();
   /** Delegated threads still working: the orchestrator they report to and its task node. */
   private tasks = new Map<ThreadId, { parent: ThreadId; node: Node; title: string }>();
   /** Results waiting for a busy orchestrator's turn to end (the daemon's queued wake). */
@@ -1233,7 +1236,7 @@ export class DemoOwner implements AgentsTransport {
       created_at: t0 + 1000,
       change: { repo: "acme/roll", number: 41, status: "ready", url: "/acme/roll/changes/41", detail: "All 3 checks passed" },
       work: { id: "wi_demo38", repo: "acme/roll", number: 38, title: "roll code status --json" },
-      worktree: { path: "/Users/ada/.local/share/roll/agent/worktrees/prj_demo_roll/thr_demo_json", branch: "roll/add-json-to-status", base: "f35f34cf" },
+      worktree: { path: "/Users/ada/.local/share/roll/agent/worktrees/prj_demo_roll/thr_demo_json", branch: "roll/add-json-to-status", base: "f35f34cf", removed_at: null },
     });
     this.put("thread", done, MBP);
     this.completedRun("thr_demo_json", 1, "Add a --json flag to `roll code status`", "Added `--json` to `roll code status`: it prints the same fields as the table, pretty-printed. `roll-cli/tests/code.rs` covers both outputs.", [fc("crates/roll-cli/src/code/status.rs", "modify", DIFF_STATUS)], t0 + 2000);
@@ -1265,10 +1268,17 @@ export class DemoOwner implements AgentsTransport {
       this.putNode({ id: `nod_${tid}`, thread: tid, run: `run_${tid}`, parent: null, ordinal: 1, status: "completed", started_at: at - 1000, completed_at: at, body: { type: "message", text: `Done: ${title.toLowerCase()}.` } });
     };
     const settled = (by: "user" | "inactivity" | "landed", ago: number) => ({ settle: { state: "settled" as const, at: now() - ago, by } });
+    // Worktrees on the shelf: one cleanup already removed (its branch stays), one with local changes it keeps.
+    const wt = (tid: string, slugged: string, removed_at: number | null = null) => ({
+      worktree: { path: `/Users/ada/.local/share/roll/agent/worktrees/prj_demo_roll/${tid}`, branch: `roll/${slugged}`, base: "f35f34cf", removed_at },
+      cwd: `/Users/ada/.local/share/roll/agent/worktrees/prj_demo_roll/${tid}`,
+    });
     shelved("thr_demo_tokio", "prj_demo_roll", "Bump tokio to 1.48", "codex", "gpt-5.5-codex", 2 * DAY, settled("landed", 2 * DAY), {
       change: { repo: "acme/roll", number: 39, status: "landed", url: "/acme/roll/changes/39", detail: null },
+      ...wt("thr_demo_tokio", "bump-tokio", now() - DAY),
     });
-    shelved("thr_demo_docs", "prj_demo_roll", "Document the merge queue", "claude", "claude-opus-5-5", 4 * DAY, settled("inactivity", 4 * DAY));
+    shelved("thr_demo_docs", "prj_demo_roll", "Document the merge queue", "claude", "claude-opus-5-5", 4 * DAY, settled("inactivity", 4 * DAY), wt("thr_demo_docs", "document-the-merge-queue"));
+    this.dirtyWorktrees.add("thr_demo_docs");
     shelved("thr_demo_zoom", "prj_demo_web", "Tune the canvas zoom curve", "claude", "claude-sonnet-5", 26 * 3_600_000, settled("user", 26 * 3_600_000));
     const older = ["Rename the queue metrics", "Drop the legacy blob cache", "Fix a typo in the CLI help", "Trim the Docker image", "Pin the Rust toolchain", "Cache pnpm in CI", "Split the e2e suite", "Retry flaky clone tests", "Add a --quiet flag", "Upgrade Geist", "Fix the 404 page", "Tidy the README"];
     older.forEach((title, i) => {
@@ -1576,7 +1586,7 @@ export class DemoOwner implements AgentsTransport {
             effort: null,
             interaction_mode: "default",
             cwd: `${path}/../.roll-worktrees/${tid}`,
-            worktree: { path: `${path}/../.roll-worktrees/${tid}`, branch: `roll/${slug(task.title)}`, base: "f35f34cf" },
+            worktree: { path: `${path}/../.roll-worktrees/${tid}`, branch: `roll/${slug(task.title)}`, base: "f35f34cf", removed_at: null },
             status: "idle",
             lineage: { parent: parent.id, relation: "subagent", root: parent.lineage?.root ?? parent.id, from_run: sim.run },
             orchestrator: false,
@@ -1718,6 +1728,8 @@ export class DemoOwner implements AgentsTransport {
         if (!t) return notFound("thread");
         // A message brings the thread back: off the settled shelf, out of its snooze.
         if (t.inbox.settle || t.inbox.snooze) this.patchInbox(c.thread, { settle: null, snooze: null });
+        // A cleaned-up worktree comes back from its branch.
+        if (t.worktree?.removed_at) this.patchThread(c.thread, { worktree: { ...t.worktree, removed_at: null } });
         const busy = t.status !== "idle" && t.status !== "error";
         if (!busy) {
           this.sendMessage(c.thread, c.text, c.attachments ?? []);
@@ -1818,7 +1830,7 @@ export class DemoOwner implements AgentsTransport {
             runtime_mode: c.runtime_mode ?? "full_access",
             interaction_mode: c.interaction_mode ?? "default",
             cwd: p.path,
-            worktree: c.worktree ? { path: `${p.path}/../.roll-worktrees/${tid}`, branch: `roll/${slug(title)}`, base: "f35f34cf" } : null,
+            worktree: c.worktree ? { path: `${p.path}/../.roll-worktrees/${tid}`, branch: `roll/${slug(title)}`, base: "f35f34cf", removed_at: null } : null,
             status: "idle",
             lineage: null,
             orchestrator: c.orchestrator ?? false,
@@ -2029,6 +2041,23 @@ export class DemoOwner implements AgentsTransport {
       case "project.pull": {
         const result = this.demoPull(c.project, machine);
         return result ? { type: "pulled", ...result } : notFound("project");
+      }
+      case "project.cleanup": {
+        // The daemon's checks, as far as the demo knows: busy threads and dirty worktrees stay.
+        if (!this.get<Project>("project", c.project)) return notFound("project");
+        const report: CleanupReport = { removed: [], kept: [] };
+        for (const m of [...this.records.values()]) {
+          const t = m.entity;
+          if (t.kind !== "thread" || t.project !== c.project || !t.worktree || t.worktree.removed_at !== null) continue;
+          if (t.inbox.settle?.state !== "settled" && t.archived_at === null) continue;
+          if (t.status !== "idle" && t.status !== "error") report.kept.push({ thread: t.id, reason: "busy" });
+          else if (this.dirtyWorktrees.has(t.id)) report.kept.push({ thread: t.id, reason: "local_changes" });
+          else {
+            this.patchThread(t.id, { worktree: { ...t.worktree, removed_at: now() } });
+            report.removed.push(t.id);
+          }
+        }
+        return { type: "cleaned", ...report };
       }
       case "terminal.open": {
         const tid = id("trm_");

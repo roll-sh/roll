@@ -12,7 +12,7 @@ import { agentsHarness, fakeServices, renderAgents } from "@/test/agents-render"
 const change = { repo: "acme/roll", number: 42, status: "blocked" as const, url: "https://roll.sh/acme/roll/changes/42", detail: "Waiting on 1 required check" };
 const work = { id: "wi_7", repo: "acme/roll", number: 7, title: "Make the queue test deterministic" };
 const inRepo = project({ repo: { owner: "acme", repo: "roll" } });
-const worktree = { path: "/Users/ada/.roll/worktrees/prj_1/thr_1", branch: "roll/fix-the-flaky-test", base: "abc" };
+const worktree = { path: "/Users/ada/.roll/worktrees/prj_1/thr_1", branch: "roll/fix-the-flaky-test", base: "abc", removed_at: null };
 
 describe("roll code on a thread", () => {
   it("the change chip says where the change is and links to it", () => {

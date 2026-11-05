@@ -19,13 +19,15 @@ impl From<FsError> for Fail {
 
 impl Host {
     /// A run's diff (its base checkpoint → its checkpoint; the live working tree while it's
-    /// going), or the whole thread's (the base checkpoint → the working tree now).
+    /// going), or the whole thread's (the base checkpoint → the working tree now, or its newest
+    /// checkpoint while cleanup has removed its worktree).
     pub(crate) async fn diff_get(&self, thread: &ThreadId, run: Option<&RunId>) -> Res<Reply> {
         let rt = self.lock(thread).await?;
         if !rt.git {
             return Err(Fail::Invalid("the thread's directory is not a git repository, so it has no diffs".into()));
         }
-        let cwd = PathBuf::from(&rt.thread.cwd);
+        let cwd = self.git_dir(&rt.thread);
+        let cleaned = rt.thread.worktree.as_ref().is_some_and(|w| w.removed_at.is_some());
         let (from, to) = match run {
             Some(run_id) => {
                 let run = match self.store.get(EntityKind::Run, run_id.as_str())? {
@@ -58,7 +60,10 @@ impl Host {
                         None => return Ok(Reply::Diff(Diff { stat: DiffStat::default(), files: Vec::new(), truncated: false })),
                     },
                 };
-                (base, git::working_tree(&cwd).await?)
+                match (&rt.private.head, cleaned) {
+                    (Some(head), true) => (base, head.clone()),
+                    _ => (base, git::working_tree(&cwd).await?),
+                }
             }
         };
         drop(rt);
@@ -102,7 +107,12 @@ impl Host {
     }
 
     pub(crate) async fn git_status(&self, thread: &ThreadId) -> Res<Reply> {
-        let cwd = PathBuf::from(&self.stored_thread(thread)?.cwd);
+        let t = self.stored_thread(thread)?;
+        // A cleaned-up worktree has nothing uncommitted (it went only because it was clean).
+        if let Some(w) = t.worktree.as_ref().filter(|w| w.removed_at.is_some()) {
+            return Ok(Reply::GitStatus(GitStatus { branch: Some(w.branch.clone()), ahead: 0, behind: 0, files: Vec::new() }));
+        }
+        let cwd = PathBuf::from(&t.cwd);
         if git::root(&cwd).await.is_none() {
             return Err(Fail::Invalid("the thread's directory is not a git repository".into()));
         }

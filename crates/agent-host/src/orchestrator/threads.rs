@@ -115,7 +115,7 @@ impl Host {
         let path = self.worktree_path(project.id.as_str(), thread.as_str());
         git::worktree_add(repo, &path, &branch, &base).await?;
         let path = path.to_str().ok_or_else(|| Fail::Invalid("the data directory is not UTF-8".into()))?.to_string();
-        Ok(Worktree { path, branch, base })
+        Ok(Worktree { path, branch, base, removed_at: None })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -181,7 +181,11 @@ impl Host {
     }
 
     pub(crate) async fn thread_fork(&self, source: &ThreadId, at: Option<RunId>, worktree: bool) -> Res<Reply> {
-        let src = self.lock(source).await?;
+        let mut src = self.lock(source).await?;
+        if !worktree {
+            // The fork works in its parent's folder: a cleaned-up worktree comes back for it.
+            self.ensure_worktree(&mut src).await?;
+        }
         let runs = self.runs_of(source)?;
         let from = match &at {
             Some(id) => {
@@ -366,15 +370,20 @@ impl Host {
             }
             self.close_session(&mut rt).await;
             rt.thread.archived_at.get_or_insert_with(now);
-        } else {
-            rt.thread.archived_at = None;
+            // T3 closes an archived thread's terminals.
+            let closed = self.close_terminals(|x| x.thread.as_ref() == Some(thread))?;
+            self.put_thread(&mut rt)?;
+            self.put(closed)?;
+            return Ok(Reply::Ok);
         }
+        rt.thread.archived_at = None;
         self.put_thread(&mut rt)?;
         Ok(Reply::Ok)
     }
 
     /// Tombstones the thread and everything in it, ends its session and removes its worktree
-    /// (the branch stays).
+    /// unless the worktree has uncommitted changes (then the folder stays, as T3 never removes
+    /// one without asking); the branch always stays.
     pub(crate) async fn thread_delete(&self, id: &ThreadId) -> Res<()> {
         let mut rt = self.lock(id).await?;
         self.close_session(&mut rt).await;
@@ -382,10 +391,19 @@ impl Host {
         let project = self.project(&rt.thread.project).ok();
         if let Some(project) = &project {
             let repo = Path::new(&project.path);
-            if let Some(wt) = &rt.thread.worktree
-                && let Err(e) = git::worktree_remove(repo, Path::new(&wt.path)).await
-            {
-                tracing::warn!("removing the worktree of {id}: {e:#}");
+            if let Some(wt) = &rt.thread.worktree {
+                let path = Path::new(&wt.path);
+                let removed = match tokio::fs::try_exists(path).await {
+                    Ok(false) => git::worktree_remove_clean(repo, path).await.or(Ok(())),
+                    _ => match git::has_local_files(path, false).await {
+                        Ok(false) => git::worktree_remove_clean(repo, path).await,
+                        Ok(true) => Err(anyhow::anyhow!("it has uncommitted changes, so {} stays", wt.path)),
+                        Err(e) => Err(e),
+                    },
+                };
+                if let Err(e) = removed {
+                    tracing::warn!("keeping the worktree of {id}: {e:#}");
+                }
             }
             if rt.git
                 && let Err(e) = git::delete_refs(repo, &format!("refs/roll/checkpoints/{id}/")).await
@@ -417,6 +435,8 @@ impl Host {
             Some(Entity::Checkpoint(c)) if &c.thread == thread => c,
             _ => return Err(Fail::NotFound(format!("no checkpoint {checkpoint} in {thread}"))),
         };
+        // A cleaned-up worktree comes back first (T3's restore does the same).
+        self.ensure_worktree(&mut rt).await?;
         let cwd = Path::new(&rt.thread.cwd).to_path_buf();
         git::restore(&cwd, &target.commit).await?;
 
@@ -540,13 +560,14 @@ impl Host {
     /// Commits and pushes the thread's branch: to its roll code repo with the relay's grant (the
     /// relay turns the push into a change and lands it), or to `origin` for any other project.
     pub(crate) async fn thread_publish(&self, thread: &ThreadId, message: &str, land: bool, grant: Option<CodeGrant>) -> Res<Reply> {
-        let rt = self.lock(thread).await?;
+        let mut rt = self.lock(thread).await?;
         if rt.active.is_some() {
             return Err(Fail::Conflict("the thread is running: wait for it or interrupt it before publishing".into()));
         }
-        let Some(worktree) = &rt.thread.worktree else {
+        let Some(worktree) = rt.thread.worktree.clone() else {
             return Err(Fail::Invalid("only a thread in its own worktree can be published".into()));
         };
+        self.ensure_worktree(&mut rt).await?;
         let message = message.trim();
         if message.is_empty() {
             return Err(Fail::Invalid("the commit message is empty".into()));
@@ -563,6 +584,10 @@ impl Host {
         let published = git::publish(Path::new(&worktree.path), &worktree.branch, message, to.as_ref(), identity.as_ref().map(|(n, e)| (n.as_str(), e.as_str())))
             .await
             .map_err(Fail::git)?;
+        if to.is_some() && !rt.private.change_open {
+            rt.private.change_open = true;
+            self.save_private(&rt)?;
+        }
         Ok(Reply::Published(published))
     }
 }

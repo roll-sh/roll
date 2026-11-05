@@ -308,7 +308,12 @@
             ],
             "auto_settle": {
               "after_days": null,
-              "on_land": false
+              "on_land": false,
+              "keep_changes": true
+            },
+            "cleanup": {
+              "worktree_after_days": 7,
+              "keep": "any_local_files"
             },
             "color": "teal",
             "icon": {

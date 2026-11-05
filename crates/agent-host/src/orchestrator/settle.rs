@@ -80,9 +80,12 @@ impl Host {
             inbox.settle = Some(Settle::Settled { at: now(), by: SettledBy::User });
         }
         inbox.snooze = None;
-        // Like T3, a settled thread lets go of its idle provider session.
+        // Like T3, a settled thread lets go of its idle provider session, and of its terminals
+        // that have finished (T3's `closeIdle`; a running one, a dev server, stays).
         self.close_session(&mut rt).await;
+        let finished = self.close_terminals(|x| x.thread.as_ref() == Some(id) && x.status == TerminalStatus::Exited)?;
         self.put_thread(&mut rt)?;
+        self.put(finished)?;
         Ok(Reply::Ok)
     }
 
@@ -142,6 +145,9 @@ impl Host {
     /// merged PR when `sidebarAutoSettleOnMerge` is on, and on a closed one always).
     pub(crate) async fn thread_change_ended(&self, id: &ThreadId, landed: bool) -> Res<Reply> {
         let mut rt = self.lock(id).await?;
+        if std::mem::take(&mut rt.private.change_open) {
+            self.save_private(&rt)?;
+        }
         let rules = self.project(&rt.thread.project).map(|p| p.settings.auto_settle).unwrap_or_default();
         if (landed && !rules.on_land) || !may_auto_settle(&rt.thread, rt.active.is_some(), now()) {
             return Ok(Reply::Ok);
@@ -161,9 +167,13 @@ impl Host {
 
     /// One sweep at `at` (the daemon runs one a minute; tests pass a later clock): snoozes that
     /// are due wake, and threads inactive for their project's `auto_settle.after_days` settle.
+    /// After it, the cleanup round: idle sessions and old settled worktrees.
     pub async fn settle_round(&self, at: Millis) {
         if let Err(e) = self.try_settle_round(at).await {
             tracing::warn!("settling threads: {e:#}");
+        }
+        if let Err(e) = self.cleanup_round(at).await {
+            tracing::warn!("cleaning up: {e:#}");
         }
     }
 
@@ -177,7 +187,8 @@ impl Host {
         for entity in self.store.list(EntityKind::Thread)? {
             let Entity::Thread(t) = entity else { continue };
             let wakes = t.inbox.snooze.is_some_and(|s| s.until <= at);
-            let days = rules.get(&t.project).and_then(|r| r.after_days);
+            let rule = rules.get(&t.project).copied();
+            let days = rule.and_then(|r| r.after_days);
             if !wakes && (days.is_none() || !may_auto_settle(&t, false, at)) {
                 continue;
             }
@@ -190,6 +201,10 @@ impl Host {
             }
             let Some(days) = days else { continue };
             if !may_auto_settle(&rt.thread, rt.active.is_some(), at) {
+                continue;
+            }
+            // T3's `keepPullRequests`: an open change keeps it; landing or closing settles it.
+            if rule.is_some_and(|r| r.keep_changes) && rt.private.change_open {
                 continue;
             }
             let last = last_activity(&rt.thread, &self.runs_of(&t.id)?);
