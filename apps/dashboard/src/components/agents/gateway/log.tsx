@@ -140,17 +140,18 @@ function LogRow({
   const served = e.attempts[e.attempts.length - 1];
   return (
     <li className="text-[12px]" aria-label={`Request ${e.seq}`}>
-      <button type="button" onClick={onToggle} aria-expanded={open} className="flex w-full min-w-0 items-center gap-2.5 px-3 py-1.5 text-left transition-colors hover:bg-fg/[0.04]">
+      <button type="button" onClick={onToggle} aria-expanded={open} className="flex w-full min-w-0 flex-wrap items-center gap-x-2.5 gap-y-0.5 px-3 py-1.5 text-left transition-colors hover:bg-fg/[0.04] sm:flex-nowrap">
         <ChevronRight className={cn("size-3 shrink-0 text-subtle transition-transform duration-150 motion-reduce:transition-none", open && "rotate-90")} aria-hidden />
         <span className="shrink-0 font-mono text-[11px] tabular-nums text-subtle">{time}</span>
         <span className={cn("w-8 shrink-0 font-mono text-[11px] tabular-nums", failed ? "text-danger" : "text-muted")}>{e.status}</span>
-        <span className="min-w-0 truncate font-mono text-[11.5px] text-fg">{e.model}</span>
+        {/* On a phone the row wraps rather than cutting the model, the machine and the upstream. */}
+        <span className="min-w-0 font-mono text-[11.5px] break-all text-fg sm:truncate sm:break-normal">{e.model}</span>
         {isFailover(e) && (
           <span className="inline-flex shrink-0 items-center gap-1 rounded border border-line-2 px-1 text-[10.5px] text-muted" title="Failover: another upstream took over">
             <Shuffle className="size-2.5" aria-hidden /> failover
           </span>
         )}
-        <span className="hidden min-w-0 truncate text-subtle sm:inline">{machineName(e.machine)}</span>
+        <span className="min-w-0 truncate text-subtle">{machineName(e.machine)}</span>
         <span className="ml-auto shrink-0 font-mono text-[11px] tabular-nums text-subtle">
           {served ? upstreamName(served.upstream) : "—"} · {e.ms >= 1000 ? `${(e.ms / 1000).toFixed(1)} s` : `${e.ms} ms`}
         </span>

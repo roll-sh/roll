@@ -83,7 +83,7 @@ export function MembersList({
                     {m.machine === plan.host && <Note>runs it</Note>}
                     {machine?.sandbox && <Note>sandbox</Note>}
                   </div>
-                  <p className="truncate text-[11.5px] text-subtle">
+                  <p className="text-[11.5px] text-subtle [overflow-wrap:anywhere] sm:truncate">
                     {label ? `${label} · ` : ""}
                     <span className="font-mono">{m.url}</span>
                     {m.providers?.length ? ` · ${m.providers.join(", ")}` : ""}
