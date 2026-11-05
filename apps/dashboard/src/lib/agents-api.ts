@@ -746,6 +746,55 @@ export interface MachineConfig {
   config_path: string;
   /** The endpoints set from roll, with whether each has a key (never the key). */
   endpoints?: EndpointInfo[];
+  /** The agents the daemon installed from the ACP registry. Unset: a daemon that can't install them. */
+  registry?: RegistryInstalled[];
+}
+
+// ── the ACP registry (agent-proto `registry.rs`) ──
+
+/** How the registry distributes an agent: an archive for the machine, or an npm / PyPI package. */
+export type RegistryKind = "binary" | "npx" | "uvx";
+/** What vouches for the bytes an install runs: a listed SHA-256, an exact package version, or nothing. */
+export type RegistryIntegrity = "sha256" | "registry" | "none";
+
+/** One agent of the ACP registry as a daemon sees it (T3's `AcpRegistrySearchAgent`). */
+export interface RegistryAgent {
+  /** The registry's id; it installs as the provider `acp:<id>`. */
+  id: string;
+  name: string;
+  version: string;
+  description?: string;
+  website?: string;
+  repository?: string;
+  /** An SVG on the registry's CDN. */
+  icon?: string;
+  /** The distributions that suit the machine, in install order (a binary only for its OS and arch). */
+  kinds?: RegistryKind[];
+  /** `registry.install` can install it there (a binary for it, or npm/uv on its PATH). */
+  installable: boolean;
+  integrity: RegistryIntegrity;
+  /** The version the daemon installed. */
+  installed?: string;
+  /** The provider on the machine that is this agent already. */
+  offered?: ProviderId;
+}
+
+/** An agent the daemon installed from the registry. */
+export interface RegistryInstalled {
+  id: string;
+  version: string;
+  provider: ProviderId;
+  kind: RegistryKind;
+  installed_at: Millis;
+}
+
+/** `registry.list`'s answer. */
+export interface RegistryList {
+  agents: RegistryAgent[];
+  /** When the daemon last fetched the registry (0: never). */
+  fetched_at: Millis;
+  /** Why the list is old or empty (the registry couldn't be reached). */
+  error?: string;
 }
 
 export interface SettingsBase {
@@ -997,18 +1046,24 @@ export type Command =
   | { type: "endpoint.remove"; endpoint: string }
   /** Ask the endpoint for its models now (answers `endpoint_checked`). */
   | { type: "endpoint.check"; endpoint: string }
+  /** Install an agent of the ACP registry on the machine; replies once it's offered as `acp:<agent>`. */
+  | { type: "registry.install"; agent: string }
+  /** Remove an agent the daemon installed from the registry. */
+  | { type: "registry.remove"; agent: string }
   | { type: "diff.get"; thread: ThreadId; run?: RunId }
   | { type: "fs.list"; project?: ProjectId; path: string }
   | { type: "fs.read"; project: ProjectId; path: string }
   /** Write a text file in the thread's workspace (T3's `projects.writeFile`, "Save to workspace"); answers `written`. */
   | { type: "fs.write"; thread: ThreadId; path: string; text: string }
   | { type: "git.status"; thread: ThreadId }
-  | { type: "terminal.scrollback"; terminal: TerminalId };
+  | { type: "terminal.scrollback"; terminal: TerminalId }
+  /** The ACP registry's agents as the machine sees them (answers `registry`). */
+  | { type: "registry.list" };
 
 export type CommandType = Command["type"];
 
 /** Queries only answer; they never change state. */
-export const QUERIES: readonly CommandType[] = ["diff.get", "fs.list", "fs.read", "git.status", "terminal.scrollback"];
+export const QUERIES: readonly CommandType[] = ["diff.get", "fs.list", "fs.read", "git.status", "terminal.scrollback", "registry.list"];
 
 export interface CommandRequest {
   /** The idempotency key: retrying with the same id never runs the command twice. */
@@ -1073,6 +1128,7 @@ export type Reply =
   | ({ type: "cleaned" } & CleanupReport)
   | { type: "scrollback"; data: string }
   | ({ type: "endpoint_checked" } & EndpointCheck)
+  | ({ type: "registry" } & RegistryList)
   | { type: "error"; code: ErrorCode; message: string };
 
 // ── deltas and the stream ──
@@ -1688,6 +1744,27 @@ const endpointInfoD = obj<EndpointInfo>({
   checked_at: optional(int),
   error: optional(str),
 });
+const registryKindD = literal("binary", "npx", "uvx");
+const registryListD = obj<RegistryList>({
+  agents: array(
+    obj<RegistryAgent>({
+      id: str,
+      name: str,
+      version: str,
+      description: optional(str),
+      website: optional(str),
+      repository: optional(str),
+      icon: optional(str),
+      kinds: optional(array(registryKindD)),
+      installable: bool,
+      integrity: literal("sha256", "registry", "none"),
+      installed: optional(str),
+      offered: optional(str),
+    }),
+  ),
+  fetched_at: withDefault(int, () => 0),
+  error: optional(str),
+});
 const endpointCheckD = obj<EndpointCheck>({ ok: bool, models: withDefault(int, () => 0), ms: withDefault(int, () => 0), error: optional(str) });
 export const endpointProfileD = obj<EndpointProfile>({ ...endpointSpecFields, sandbox_default: optional(bool), updated_at: withDefault(int, () => 0) });
 const machineConfigD = obj<MachineConfig>({
@@ -1705,6 +1782,7 @@ const machineConfigD = obj<MachineConfig>({
   providers: array(obj<ProviderBase>({ id: str, name: str, binary: opt(str), args: withDefault(int, () => 0), env: vec(str) })),
   config_path: str,
   endpoints: optional(array(endpointInfoD)),
+  registry: optional(array(obj<RegistryInstalled>({ id: str, version: str, provider: str, kind: registryKindD, installed_at: int }))),
 });
 const machineInfoD = obj<MachineInfo>({
   hostname: str,
@@ -1813,6 +1891,9 @@ export const commandD: Decoder<Command> = tagged("type", {
   "endpoint.set": cmd<"endpoint.set">(obj({ endpoint: endpointSpecD, key: optional(keyChangeD) })),
   "endpoint.remove": cmd<"endpoint.remove">(obj({ endpoint: str })),
   "endpoint.check": cmd<"endpoint.check">(obj({ endpoint: str })),
+  "registry.install": cmd<"registry.install">(obj({ agent: str })),
+  "registry.remove": cmd<"registry.remove">(obj({ agent: str })),
+  "registry.list": cmd<"registry.list">(obj({})),
   "diff.get": cmd<"diff.get">(obj({ thread: str, run: optional(str) })),
   "fs.list": cmd<"fs.list">(obj({ project: optional(str), path: str })),
   "fs.read": cmd<"fs.read">(obj({ project: str, path: str })),
@@ -1845,6 +1926,7 @@ export const replyD: Decoder<Reply> = tagged("type", {
   scrollback: obj<{ data: string }>({ data: str }),
   written: obj<{ path: string }>({ path: str }),
   endpoint_checked: endpointCheckD,
+  registry: registryListD,
   pulled: pullResultD,
   cleaned: obj<CleanupReport>({ removed: array(str), kept: array(obj<{ thread: string; reason: KeptReason }>({ thread: str, reason: keptReasonD })) }),
   error: obj<{ code: ErrorCode; message: string }>({

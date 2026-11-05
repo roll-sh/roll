@@ -33,6 +33,8 @@ import type {
   Project,
   ModelOption,
   ProviderInfo,
+  RegistryAgent,
+  RegistryInstalled,
   UsageLimits,
   Question,
   Reply,
@@ -376,9 +378,30 @@ function demoConfig(home: string, all: readonly ProviderInfo[], set: MachineSett
       base: { worktree_dir: `${data}/worktrees`, branch_prefix: "roll", clone_dir: `${home}/roll`, pull_every: 60, max_depth: 3, max_children: 6, git_name: home.startsWith("/Users/") ? "Ada Lovelace" : null, git_email: null },
       providers: all.map((p) => ({ id: p.id, name: p.name, binary: p.id.startsWith("acp:") ? p.id.slice(4) : null, args: p.id.startsWith("acp:") ? 1 : 0, env: fileEnv[p.id] ?? [] })),
       config_path: `${data}/config.toml`,
+      registry: [],
     },
   };
 }
+
+const CDN = "https://cdn.agentclientprotocol.com/registry/v1/latest";
+/**
+ * The ACP registry as the demo daemons list it (`registry.list`): real agents in every state a row
+ * can be in. `same` is the providers that are the agent already (the daemon's `registry::same_as`).
+ */
+const DEMO_REGISTRY: (RegistryAgent & { same?: string[] })[] = [
+  { id: "goose", name: "goose", version: "1.57.0", description: "A local, extensible, open source AI agent that automates engineering tasks", repository: "https://github.com/block/goose", icon: `${CDN}/goose.svg`, kinds: ["binary"], installable: true, integrity: "sha256" },
+  { id: "auggie", name: "Auggie CLI", version: "0.37.0", description: "Augment Code's coding agent in the terminal", website: "https://www.augmentcode.com", icon: `${CDN}/auggie.svg`, kinds: ["npx"], installable: true, integrity: "registry" },
+  { id: "kimi", name: "Kimi CLI", version: "1.52.0", description: "Moonshot AI's agent for the command line", repository: "https://github.com/MoonshotAI/kimi-cli", icon: `${CDN}/kimi.svg`, kinds: ["binary"], installable: true, integrity: "sha256" },
+  { id: "mistral-vibe", name: "Mistral Vibe", version: "3.0.4", description: "Mistral's open-source coding assistant", repository: "https://github.com/mistralai/mistral-vibe", icon: `${CDN}/mistral-vibe.svg`, kinds: ["binary"], installable: true, integrity: "sha256" },
+  { id: "fast-agent", name: "fast-agent", version: "0.10.1", description: "Define, prompt and test MCP-enabled agents and workflows", website: "https://fast-agent.ai", icon: `${CDN}/fast-agent.svg`, kinds: ["uvx"], installable: false, integrity: "registry" },
+  { id: "junie", name: "Junie", version: "3959.5.0", description: "JetBrains' coding agent", website: "https://www.jetbrains.com/junie", icon: `${CDN}/junie.svg`, kinds: ["binary"], installable: true, integrity: "none" },
+  { id: "cline", name: "Cline", version: "3.0.74", description: "Autonomous coding agent", repository: "https://github.com/cline/cline", icon: `${CDN}/cline.svg`, kinds: ["npx"], installable: true, integrity: "registry" },
+  { id: "github-copilot-cli", name: "GitHub Copilot", version: "1.0.105", description: "GitHub's coding agent in your terminal", repository: "https://github.com/github/copilot-cli", icon: `${CDN}/github-copilot-cli.svg`, kinds: ["npx"], installable: true, integrity: "registry", same: ["acp:copilot"] },
+  { id: "gemini", name: "Gemini CLI", version: "0.67.0", description: "Google's open-source AI agent", repository: "https://github.com/google-gemini/gemini-cli", icon: `${CDN}/gemini.svg`, kinds: ["npx"], installable: true, integrity: "registry" },
+  { id: "grok-build", name: "Grok Build", version: "1.0.77", description: "xAI's coding agent", icon: `${CDN}/grok-build.svg`, kinds: ["npx"], installable: true, integrity: "registry", same: ["acp:grok"] },
+  { id: "opencode", name: "OpenCode", version: "2.2.5", description: "The open source coding agent", website: "https://opencode.ai", icon: `${CDN}/opencode.svg`, kinds: ["binary"], installable: true, integrity: "sha256", same: ["opencode"] },
+  { id: "antigravity-acp", name: "Google Antigravity", version: "1.4.5", description: "Google's agent-first coding environment", icon: `${CDN}/antigravity-acp.svg`, kinds: ["binary"], installable: true, integrity: "sha256", same: ["acp:antigravity"] },
+];
 
 const MBP = "mch_demo_ada";
 /** The demo daemons' seal key (a test key's public half): the demo never opens what is sealed to it. */
@@ -972,6 +995,8 @@ export class DemoOwner implements AgentsTransport {
     const m = this.machines.get(machine);
     if (m && !m.online && reachable(m)) await this.wake(machine);
     if (!this.machines.get(machine)?.online) return { type: "error", code: "machine_offline", message: "the machine isn't connected" };
+    // A download and an unpack, or a package install: long enough to see "Installing…".
+    if (command.type === "registry.install") await this.sleep(1600);
     try {
       return this.handle(machine, command);
     } catch (e) {
@@ -2205,7 +2230,8 @@ export class DemoOwner implements AgentsTransport {
         const fileEnv = Object.fromEntries((m.info.settings?.providers ?? []).map((p) => [p.id, p.env]));
         const config = demoConfig(m.info.home, all, c.settings, fileEnv);
         const endpoints = m.info.settings?.endpoints ?? [];
-        const next = { ...m, info: { ...m.info, providers: withEndpoints(config.providers, endpoints), settings: config.settings && { ...config.settings, endpoints } } };
+        const registry = m.info.settings?.registry ?? [];
+        const next = { ...m, info: { ...m.info, providers: withEndpoints(config.providers, endpoints), settings: config.settings && { ...config.settings, endpoints, registry } } };
         this.machines.set(machine, next);
         this.emit({ type: "machine", cursor: ++this.cursor, machine: next });
         return { type: "ok" };
@@ -2246,7 +2272,78 @@ export class DemoOwner implements AgentsTransport {
         if (e.kind === "custom") return { type: "endpoint_checked", ok: false, models: 0, ms: 0, error: "a custom endpoint doesn't list models: add them as custom models" };
         return { type: "endpoint_checked", ok: true, models: (e.models ?? []).length, ms: 140 };
       }
+      // The ACP registry as a daemon lists, installs and removes it (`registry.rs`).
+      case "registry.list": {
+        const m = this.machines.get(machine);
+        if (!m?.info?.settings) return notFound("machine");
+        const all = this.allProviders.get(machine) ?? m.info.providers;
+        const installed = m.info.settings.registry ?? [];
+        const agents = DEMO_REGISTRY.map(({ same, ...a }): RegistryAgent => {
+          const mine = installed.find((i) => i.id === a.id);
+          const offered = mine?.provider ?? [`acp:${a.id}`, ...(same ?? [])].find((id) => all.some((p) => p.id === id && p.installed));
+          return { ...a, installed: mine?.version, offered };
+        });
+        return { type: "registry", agents, fetched_at: now() - 90_000 };
+      }
+      case "registry.install": {
+        const m = this.machines.get(machine);
+        if (!m?.info?.settings) return notFound("machine");
+        const a = DEMO_REGISTRY.find((x) => x.id === c.agent);
+        if (!a) return { type: "error", code: "not_found", message: `the ACP registry has no agent ${c.agent}` };
+        const all = this.allProviders.get(machine) ?? m.info.providers;
+        const installed = m.info.settings.registry ?? [];
+        if (installed.some((i) => i.id === a.id)) return { type: "ok" };
+        if (!a.installable) return { type: "error", code: "provider", message: `installing ${a.name}: ${a.name} needs uv on this machine's PATH` };
+        const other = [`acp:${a.id}`, ...(a.same ?? [])].find((id) => all.some((p) => p.id === id && p.installed));
+        if (other) return { type: "error", code: "conflict", message: `${a.name} is on this machine already, as the provider ${other}` };
+        const p: ProviderInfo = {
+          id: `acp:${a.id}`,
+          name: a.name,
+          installed: true,
+          version: a.version,
+          auth: "unknown",
+          detail: "Signs in with: Log in",
+          models: [],
+          update_required: [],
+          capabilities: { steer: false, fork: false, rollback: false, plan_mode: true, images: true, subagents: false, mode_switch: true },
+        };
+        const entry: RegistryInstalled = { id: a.id, version: a.version, provider: p.id, kind: a.kinds?.[0] ?? "binary", installed_at: now() };
+        this.layRegistry(machine, [...all, p], [...installed, entry]);
+        return { type: "ok" };
+      }
+      case "registry.remove": {
+        const m = this.machines.get(machine);
+        const installed = m?.info?.settings?.registry ?? [];
+        const gone = installed.find((i) => i.id === c.agent);
+        if (!m?.info || !gone) return { type: "error", code: "not_found", message: `${c.agent} wasn't installed from the ACP registry on this machine` };
+        const all = (this.allProviders.get(machine) ?? m.info.providers).filter((p) => p.id !== gone.provider);
+        this.layRegistry(machine, all, installed.filter((i) => i.id !== c.agent));
+        return { type: "ok" };
+      }
     }
+  }
+
+  /** A machine's providers and registry installs replaced, as its daemon's `hello` would say them. */
+  private layRegistry(machine: MachineId, all: ProviderInfo[], registry: RegistryInstalled[]) {
+    const m = this.machines.get(machine);
+    if (!m?.info?.settings) return;
+    this.allProviders.set(machine, all);
+    const s = m.info.settings;
+    const data = `${m.info.home}/.local/share/roll/agent`;
+    const bases = all.map(
+      (p) =>
+        s.providers.find((b) => b.id === p.id) ?? {
+          id: p.id,
+          name: p.name,
+          binary: `${data}/acp/tools/${p.id.slice(4)}/${p.version}/${m.info!.os === "macos" ? "darwin" : m.info!.os}-${m.info!.arch}/${p.id.slice(4)}`,
+          args: 1,
+          env: [],
+        },
+    );
+    const providers = withEndpoints(offeredProviders(all, s.set), s.endpoints ?? []);
+    const next = { ...m, info: { ...m.info, providers, settings: { ...s, providers: bases, registry } } };
+    this.machines.set(machine, next);
+    this.emit({ type: "machine", cursor: ++this.cursor, machine: next });
   }
 
   /** A machine's endpoints replaced, and its providers as the daemon would report them. */

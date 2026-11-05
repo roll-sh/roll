@@ -82,6 +82,7 @@ pub(crate) fn agent_may(command: &Command, current: Option<(RuntimeMode, Interac
         Command::ProviderRefresh {} => owner_only("refresh providers"),
         Command::MachineConfigure { .. } => owner_only("change a machine's settings"),
         Command::EndpointSet { .. } | Command::EndpointRemove { .. } | Command::EndpointCheck { .. } => owner_only("change or check a machine's endpoints"),
+        Command::RegistryList {} | Command::RegistryInstall { .. } | Command::RegistryRemove { .. } => owner_only("list, install or remove a machine's agents"),
     }
 }
 
@@ -165,6 +166,9 @@ mod tests {
             (json!({ "type": "endpoint.set", "endpoint": { "id": "gw", "name": "Gateway", "kind": "openai", "base_url": "https://gw.example/v1" } }), None, false),
             (json!({ "type": "endpoint.remove", "endpoint": "gw" }), None, false),
             (json!({ "type": "endpoint.check", "endpoint": "gw" }), None, false),
+            (json!({ "type": "registry.list" }), None, false),
+            (json!({ "type": "registry.install", "agent": "goose" }), None, false),
+            (json!({ "type": "registry.remove", "agent": "goose" }), None, false),
             (json!({ "type": "diff.get", "thread": t }), None, true),
             (json!({ "type": "git.status", "thread": t }), None, true),
             (json!({ "type": "fs.list", "path": "/" }), None, false),

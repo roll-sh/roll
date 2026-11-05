@@ -301,6 +301,15 @@
               "key": "reference",
               "error": "1Password: the op CLI isn't signed in"
             }
+          ],
+          "registry": [
+            {
+              "id": "goose",
+              "version": "1.57.0",
+              "provider": "acp:goose",
+              "kind": "binary",
+              "installed_at": 1762000000000
+            }
           ]
         },
         "seal_key": "hSDwCYkwp1R0i33ctD73Wg2_Og0mOBr066SpjqqbTmo"

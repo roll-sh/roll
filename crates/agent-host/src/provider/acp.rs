@@ -46,12 +46,21 @@ pub struct Acp {
     /// What the last session start said about the login: `Missing` when the agent wanted a
     /// sign-in, `Ready` once one started. The probe can't tell without starting a session.
     auth: Mutex<Option<AuthStatus>>,
+    /// Its display name when the agent's own doesn't apply (an agent installed from the
+    /// registry: the registry's name).
+    title: Option<String>,
 }
 
 impl Acp {
     /// The agent `[[acp]]` names `name` (provider id `acp:<name>`).
     pub fn new(name: String, cfg: ProviderConfig) -> Self {
-        Self { name, cfg: super::LiveConfig::new(cfg), probe_timeout: PROBE_TIMEOUT, auth: Mutex::new(None) }
+        Self { name, cfg: super::LiveConfig::new(cfg), probe_timeout: PROBE_TIMEOUT, auth: Mutex::new(None), title: None }
+    }
+
+    /// Named `title` instead of what the agent calls itself (`crate::registry`).
+    pub fn with_title(mut self, title: String) -> Self {
+        self.title = Some(title);
+        self
     }
 
     /// How long the probe waits for `initialize` ([`PROBE_TIMEOUT`] unless set).
@@ -172,6 +181,9 @@ impl Provider for Acp {
     }
 
     fn name(&self) -> String {
+        if let Some(title) = &self.title {
+            return title.clone();
+        }
         KNOWN.iter().find(|k| k.name == self.name).map(|k| k.title.to_string()).unwrap_or_else(|| self.name.clone())
     }
 
@@ -192,6 +204,7 @@ impl Provider for Acp {
             match self.probe().await {
                 Ok(init) => {
                     if known.is_none()
+                        && self.title.is_none()
                         && let Some(title) = init.title.clone().or_else(|| (!init.name.is_empty()).then(|| init.name.clone()))
                     {
                         info.name = title;

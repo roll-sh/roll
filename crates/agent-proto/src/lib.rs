@@ -62,11 +62,13 @@ id! {
 pub mod automation;
 pub mod endpoint;
 pub mod identity;
+pub mod registry;
 
 pub use endpoint::{
     EndpointCheck, EndpointInfo, EndpointKind, EndpointModel, EndpointProfile, EndpointSpec, KeyChange, KeyState, SEAL_VERSION, SealedSecret, endpoint_limits,
 };
 pub use identity::{IdentityColor, MachineAppearance, MachineKind, ProjectIcon, ProjectLogo};
+pub use registry::{RegistryAgent, RegistryInstalled, RegistryIntegrity, RegistryKind, RegistryList, is_registry_id};
 
 /// A provider instance on a machine: `codex`, `claude`, or `acp:<name>` (an ACP agent from the
 /// daemon's config, e.g. `acp:gemini`).
@@ -1181,6 +1183,10 @@ pub struct MachineConfig {
     /// key) and the models it listed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub endpoints: Vec<EndpointInfo>,
+    /// The agents the daemon installed from the ACP registry (`registry.install`). Unset: a
+    /// daemon that can't install them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub registry: Option<Vec<RegistryInstalled>>,
 }
 
 /// What a machine's settings fall back to.
@@ -2299,6 +2305,17 @@ pub enum Command {
     /// Ask the endpoint for its models now (answers `endpoint_checked`, and keeps what it lists).
     #[serde(rename = "endpoint.check")]
     EndpointCheck { endpoint: String },
+    /// Install an agent of the ACP registry on the machine (docs/code/agents.md, "The ACP
+    /// registry"): the daemon fetches the registry, downloads and checks the agent (or installs
+    /// its package with the machine's own `npm`/`uv`) into its own directory, and offers it as the
+    /// provider `acp:<agent>` without a restart. Replies once it's installed and offered; its
+    /// probe follows in `hello`. Refused for an agent the machine already offers.
+    #[serde(rename = "registry.install")]
+    RegistryInstall { agent: String },
+    /// Remove an agent the daemon installed from the registry: its provider, its files and its
+    /// entry. Refused while one of its threads runs.
+    #[serde(rename = "registry.remove")]
+    RegistryRemove { agent: String },
 
     // Queries.
     /// The diff of a run (checkpoint before → after), or of the whole thread when `run` is
@@ -2329,6 +2346,10 @@ pub enum Command {
     /// Recent terminal output, for a client that just opened it (the last 256 KiB).
     #[serde(rename = "terminal.scrollback")]
     TerminalScrollback { terminal: TerminalId },
+    /// The ACP registry's agents as this machine sees them (answers `registry`). The daemon
+    /// fetches the registry (at most every 5 minutes) and keeps a copy for when it can't.
+    #[serde(rename = "registry.list")]
+    RegistryList {},
 }
 
 impl Command {
@@ -2341,6 +2362,7 @@ impl Command {
                 | Command::FsRead { .. }
                 | Command::GitStatus { .. }
                 | Command::TerminalScrollback { .. }
+                | Command::RegistryList {}
         )
     }
 }
@@ -2379,6 +2401,8 @@ pub enum Reply {
     },
     /// What `endpoint.check` found.
     EndpointChecked(EndpointCheck),
+    /// What `registry.list` found.
+    Registry(RegistryList),
     Error(ReplyError),
 }
 

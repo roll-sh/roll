@@ -353,7 +353,7 @@ impl Host {
     }
 
     fn available(&self, p: &ProviderInfo) -> bool {
-        p.installed && p.auth != AuthStatus::Missing && self.providers.contains_key(&p.id)
+        p.installed && p.auth != AuthStatus::Missing && self.has_provider(&p.id)
     }
 
     /// How many subagent hops above `thread` (0 for a thread the user started).

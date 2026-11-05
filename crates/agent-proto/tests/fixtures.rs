@@ -467,12 +467,15 @@ fn commands() -> Vec<Command> {
         Command::EndpointSet { endpoint: endpoint_spec(), key: KeyChange::Clear },
         Command::EndpointRemove { endpoint: "cliproxy".into() },
         Command::EndpointCheck { endpoint: "cliproxy".into() },
+        Command::RegistryInstall { agent: "goose".into() },
+        Command::RegistryRemove { agent: "goose".into() },
         Command::DiffGet { thread: thr(), run: Some(run()) },
         Command::FsList { project: None, path: "/home/ada".into() },
         Command::FsRead { project: prj(), path: "README.md".into() },
         Command::FsWrite { thread: thr(), path: "docs/plans/fix-the-queue.md".into(), text: "# Fix the queue\n".into() },
         Command::GitStatus { thread: thr() },
         Command::TerminalScrollback { terminal: trm() },
+        Command::RegistryList {},
     ]
 }
 
@@ -514,6 +517,9 @@ fn covered_command(c: &Command) {
         | Command::EndpointSet { .. }
         | Command::EndpointRemove { .. }
         | Command::EndpointCheck { .. }
+        | Command::RegistryInstall { .. }
+        | Command::RegistryRemove { .. }
+        | Command::RegistryList {}
         | Command::DiffGet { .. }
         | Command::FsList { .. }
         | Command::FsRead { .. }
@@ -568,6 +574,55 @@ fn replies() -> Vec<Reply> {
         Reply::Scrollback { data: "JCBscwo=".into() },
         Reply::EndpointChecked(EndpointCheck { ok: true, models: 42, ms: 180, error: None }),
         Reply::EndpointChecked(EndpointCheck { ok: false, models: 0, ms: 10_000, error: Some("the endpoint answered 401 Unauthorized".into()) }),
+        Reply::Registry(RegistryList {
+            agents: vec![
+                RegistryAgent {
+                    id: "goose".into(),
+                    name: "goose".into(),
+                    version: "1.57.0".into(),
+                    description: "A local, extensible, open source AI agent that automates engineering tasks".into(),
+                    website: None,
+                    repository: Some("https://github.com/block/goose".into()),
+                    icon: Some("https://cdn.agentclientprotocol.com/registry/v1/latest/goose.svg".into()),
+                    kinds: vec![RegistryKind::Binary],
+                    installable: true,
+                    integrity: RegistryIntegrity::Sha256,
+                    installed: Some("1.57.0".into()),
+                    offered: Some(ProviderId("acp:goose".into())),
+                },
+                RegistryAgent {
+                    id: "fast-agent".into(),
+                    name: "fast-agent".into(),
+                    version: "0.10.1".into(),
+                    description: String::new(),
+                    website: Some("https://fast-agent.ai".into()),
+                    repository: None,
+                    icon: None,
+                    kinds: vec![RegistryKind::Uvx],
+                    installable: false,
+                    integrity: RegistryIntegrity::Registry,
+                    installed: None,
+                    offered: None,
+                },
+                RegistryAgent {
+                    id: "junie".into(),
+                    name: "Junie".into(),
+                    version: "3959.5.0".into(),
+                    description: "JetBrains' coding agent".into(),
+                    website: None,
+                    repository: None,
+                    icon: None,
+                    kinds: vec![RegistryKind::Binary, RegistryKind::Npx],
+                    installable: true,
+                    integrity: RegistryIntegrity::None,
+                    installed: None,
+                    offered: None,
+                },
+            ],
+            fetched_at: T,
+            error: None,
+        }),
+        Reply::Registry(RegistryList { agents: vec![], fetched_at: 0, error: Some("couldn't fetch the ACP registry: timed out".into()) }),
         Reply::Error(ReplyError { code: ErrorCode::MachineOffline, message: "the machine isn't connected".into() }),
     ]
 }
@@ -586,6 +641,7 @@ fn covered_reply(r: &Reply) {
         | Reply::Cleaned(_)
         | Reply::Scrollback { .. }
         | Reply::EndpointChecked(_)
+        | Reply::Registry(_)
         | Reply::Error(_) => {}
     }
 }
@@ -787,6 +843,13 @@ fn info() -> MachineInfo {
                     error: Some("1Password: the op CLI isn't signed in".into()),
                 },
             ],
+            registry: Some(vec![RegistryInstalled {
+                id: "goose".into(),
+                version: "1.57.0".into(),
+                provider: ProviderId("acp:goose".into()),
+                kind: RegistryKind::Binary,
+                installed_at: T,
+            }]),
         })),
         seal_key: Some("hSDwCYkwp1R0i33ctD73Wg2_Og0mOBr066SpjqqbTmo".into()),
     }
@@ -1034,8 +1097,8 @@ fn every_variant_of_every_tagged_enum_is_sampled() {
     let tags = |v: serde_json::Value, key: &str| -> std::collections::BTreeSet<String> {
         v.as_array().unwrap().iter().map(|x| x[key].as_str().unwrap().to_string()).collect()
     };
-    assert_eq!(tags(serde_json::to_value(commands()).unwrap(), "type").len(), 42, "commands");
-    assert_eq!(tags(serde_json::to_value(replies()).unwrap(), "type").len(), 13, "replies");
+    assert_eq!(tags(serde_json::to_value(commands()).unwrap(), "type").len(), 45, "commands");
+    assert_eq!(tags(serde_json::to_value(replies()).unwrap(), "type").len(), 14, "replies");
     assert_eq!(tags(serde_json::to_value(entities()).unwrap(), "kind").len(), 8, "entities");
     let bodies: std::collections::BTreeSet<String> = entities()
         .iter()

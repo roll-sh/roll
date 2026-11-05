@@ -278,10 +278,10 @@ async fn login_with_token(api: &str, json_out: bool, token: &str) -> anyhow::Res
     saved_login(json_out, Saved { api, machine: who.machine.id.0, owner: who.owner, name: who.machine.name, token: token.to_string() })
 }
 
-/// The providers the daemon's config describes: Codex and Claude Code (ACP agents once their
-/// adapter lands).
+/// The providers the daemon's config describes: Codex, Claude Code, OpenCode, Pi, then the ACP
+/// agents (configured, installed from the ACP registry, found on `PATH`).
 fn providers(config: &agent_host::config::Config) -> Vec<Arc<dyn Provider>> {
-    use agent_host::provider::{acp, claude::Claude, codex::Codex, muse::Muse, opencode::OpenCode, pi::Pi};
+    use agent_host::provider::{claude::Claude, codex::Codex, muse::Muse, opencode::OpenCode, pi::Pi};
     use agent_proto::ProviderId;
     let mut all: Vec<Arc<dyn Provider>> = vec![
         Arc::new(Codex::new(config.provider(&ProviderId::codex()))),
@@ -293,8 +293,9 @@ fn providers(config: &agent_host::config::Config) -> Vec<Arc<dyn Provider>> {
         // Muse Code's own server (`muse serve`, MSP on stdio).
         Arc::new(Muse::new(config.provider(&Muse::provider_id()))),
     ];
-    // ACP agents: the configured ones, and any known agent installed here.
-    all.extend(acp::agents(&config.acp).into_iter().map(|a| Arc::new(acp::Acp::new(a.name, a.config)) as Arc<dyn Provider>));
+    // ACP agents: the configured ones, the ones installed from the registry, and any known
+    // agent installed here.
+    all.extend(agent_host::registry::acp_providers(config));
     all
 }
 

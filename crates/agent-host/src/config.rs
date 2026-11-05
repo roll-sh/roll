@@ -35,6 +35,9 @@
 //!
 //! [projects]                             # auto-pull (docs/code/agents.md, "Project settings")
 //! pull_every = 60                        # seconds between fetches; 0 never
+//!
+//! [registry]                             # the ACP registry (docs/code/agents.md, "The ACP registry")
+//! url = "https://…/registry.json"        # another copy of it; the official one when unset
 //! ```
 
 use crate::provider::ProviderConfig;
@@ -57,6 +60,9 @@ pub struct Config {
     pub clone_dir: Option<PathBuf>,
     /// `[projects] pull_every`; read it through [`Config::pull_every`].
     pub pull_every: Option<std::time::Duration>,
+    /// `[registry] url`: where the ACP registry's index is fetched from (`None`: the official
+    /// one, [`crate::registry::DEFAULT_URL`]).
+    pub registry_url: Option<String>,
 }
 
 /// `[delegation]`: limits on what agents may delegate through roll's orchestrator MCP.
@@ -99,6 +105,14 @@ struct File {
     code: RawCode,
     #[serde(default)]
     projects: RawProjects,
+    #[serde(default)]
+    registry: RawRegistry,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct RawRegistry {
+    url: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -200,6 +214,12 @@ impl Config {
                 },
             });
         }
+        let registry_url = file.registry.url.map(|u| u.trim().to_string()).filter(|u| !u.is_empty());
+        if let Some(u) = &registry_url
+            && !reqwest::Url::parse(u).is_ok_and(|u| matches!(u.scheme(), "https" | "http"))
+        {
+            anyhow::bail!("[registry] url {u:?} must be an http(s) URL");
+        }
         Ok(Config {
             home: PathBuf::new(),
             providers: file.providers.into_iter().map(|(k, v)| (k, v.into())).collect(),
@@ -210,6 +230,7 @@ impl Config {
             },
             clone_dir: file.code.clone_dir.filter(|d| !d.trim().is_empty()).map(|d| expand_tilde(d.trim())),
             pull_every: file.projects.pull_every.map(std::time::Duration::from_secs),
+            registry_url,
         })
     }
 
