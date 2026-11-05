@@ -17,6 +17,9 @@
 //! [providers.pi]                         # Pi (`pi --mode rpc`); args are Pi's launch arguments
 //! args = ["--provider", "openrouter", "--model", "deepseek/deepseek-v4-flash"]
 //!
+//! [providers.muse]                       # Muse Code (`muse serve`); signs in with `muse login`
+//! binary = "/opt/muse/bin/muse"
+//!
 //! [[acp]]                                # an ACP agent, provider id `acp:gemini`
 //! name = "gemini"
 //! binary = "gemini"
@@ -45,7 +48,7 @@ use std::path::{Path, PathBuf};
 pub struct Config {
     /// The data directory.
     pub home: PathBuf,
-    /// `[providers.<id>]`, keyed by provider id (`codex`, `claude`, `opencode`).
+    /// `[providers.<id>]`, keyed by provider id (`codex`, `claude`, `opencode`, `muse`).
     pub providers: BTreeMap<String, ProviderConfig>,
     /// `[[acp]]`: ACP agents, in file order.
     pub acp: Vec<AcpAgent>,

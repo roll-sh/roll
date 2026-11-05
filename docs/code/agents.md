@@ -346,6 +346,40 @@ completed, native thread ref). The orchestrator owns ids and turns those events 
   `get_available_models` (`provider/id`, plus "Pi default", which keeps Pi's own), with T3's
   thinking levels as the reasoning option (`set_thinking_level`). Pi lists only models it has
   credentials for: none means "log in", with `pi auth check` explaining an unusable default.
+- **Muse Code** (`muse.rs`, a port of T3's Muse driver): `muse serve` speaking MSP (JSON-RPC 2.0,
+  schema version 1) on stdio, one process per session: `--trust-workspace`, plus
+  `--disable-sandbox` in `full_access`. Muse gets the daemon's environment without
+  `META_API_KEY` (so it uses its own login, unless `[providers.muse]` sets one) and with
+  `MUSE_NO_AUTO_UPDATE=1`, in the workspace's real path. `initialize` asks for session MCP
+  servers (an older Muse that can't take them is refused); `session/start` takes a session id
+  roll mints (UUIDv7, like every command id), the model, and the approval mode and permission
+  profile (`allowAll`/`:unrestricted` in `full_access`, otherwise `promptUnmatched`/`:ask-me`:
+  Muse has no accept-edits mode); resuming is `session/resume` then `session/setApprovalMode`,
+  and a session Muse lost fails the start so the orchestrator starts fresh and hands the thread
+  over. A turn is `turn/start` with a turn id roll mints, `ifBusy: "queue"`, the effort, and
+  roll's instructions as the first text part (Muse has no system prompt); a model change is
+  `session/setModel` before the next turn. Steering is `turn/steer`, Stop is `turn/interrupt`
+  for the turn and any turn joined to it, and `/compact` is `session/compact` (a turn that ends
+  with its compaction item; `noop` fails it). Approvals (`approval/requested`, after the server
+  request is answered `{}`) offer the narrowest choice per decision (Muse's `abort` is the
+  decline for shell); questions are answered with labels and free text (`userInput/answer`).
+  Items show as T3's `itemPresentation.ts` does (shell, edits, web by tool name; the user's
+  message, reminder children and the todo/question/workflow tool calls hidden); subagents are
+  subagent nodes with their child session's items beneath them, a workflow's agents are
+  subagents under the workflow, and in `full_access` a child's approval is approved for it (Muse
+  doesn't pass `allowAll` to children). A child's approval that comes between turns is asked at
+  the start of the next turn. Usage is summed per turn from `session/tokenUsage`, the context
+  window is `session/contextUsage`, and `usage/changed` gives the account's windows (between
+  turns too); a quota failure ends the turn naming when the limit resets. The catalog is
+  `model/list` on a read-only host (`--disable-shell --disable-write --no-session-log`) with T3's
+  reasoning tiers; MSP has no login signal, so the login is always unknown and an empty catalog
+  says to run `muse login`. Fork, rollback, plan mode and switching modes in a session aren't
+  offered. Known gap: roll's orchestrator has no turns a provider starts by itself, so a turn
+  Muse starts while idle (its wake after a background workflow finishes) isn't adopted; its
+  events are dropped, and a background workflow's agents show only while one of our turns runs.
+  A turn Muse starts while one of ours runs (or that still runs when ours starts) is joined to
+  ours. roll never reads Muse's home directory, session logs or binary, which T3 reads for usage
+  history and updates.
 
 **Models and their options** follow T3 Code's model picker (`apps/web/src/components/chat/
 ProviderModelPicker.tsx`, `ModelPickerContent.tsx`, `ComposerModelEffort.tsx`) and its option
