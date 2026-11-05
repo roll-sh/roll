@@ -145,7 +145,8 @@ impl Host {
             for m in &set.models {
                 if !info.models.iter().any(|known| known.id == m.id) {
                     let name = m.name.clone().unwrap_or_else(|| m.id.clone());
-                    let options = provider.custom_model_options(&m.id, &info.models);
+                    // Its own options when the owner described them (T3's custom capabilities).
+                    let options = m.options.clone().unwrap_or_else(|| provider.custom_model_options(&m.id, &info.models));
                     info.models.push(ModelInfo { custom: true, options, ..ModelInfo::new(m.id.clone(), name) });
                 }
             }

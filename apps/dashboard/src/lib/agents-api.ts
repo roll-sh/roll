@@ -587,6 +587,8 @@ export interface ModelInfo {
   custom?: boolean;
   /** Listed by an endpoint the provider uses (its name), not by the provider itself. */
   via?: string;
+  /** T3's "New" badge: a week after a current model's release. */
+  badge?: "new";
 }
 
 /** A model the provider would offer after an update. */
@@ -827,6 +829,8 @@ export interface CustomModel {
   /** The slug the provider takes. */
   id: string;
   name?: string;
+  /** What the composer offers for it (T3's custom `optionDescriptors`); unset: the provider's own. */
+  options?: ModelOption[];
 }
 
 /** A provider's settings with the defaults filled in. */
@@ -1281,6 +1285,7 @@ const modelInfoWireD = obj<ModelInfo & { efforts: string[] }>({
   images: optional(bool),
   custom: optional(bool),
   via: optional(str),
+  badge: optional(literal("new")),
 });
 /** Daemons from before option descriptors send a model's reasoning levels alone, as `efforts` (agent-proto reads them the same way). */
 const modelInfoD: Decoder<ModelInfo> = (v, p, ctx) => {
@@ -1641,7 +1646,7 @@ const providerSettingsD = obj<ProviderSettings>({
   binary: optional(str),
   args: optional(array(str)),
   env: optional(map(str)),
-  models: optional(array(obj<CustomModel>({ id: str, name: optional(str) }))),
+  models: optional(array(obj<CustomModel>({ id: str, name: optional(str), options: optional(array(modelOptionD)) }))),
   auto_compact_window: optional(int),
   idle_compaction: optional(idleCompactionD),
 });

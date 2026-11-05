@@ -341,3 +341,18 @@ describe("models an endpoint lists", () => {
     expect(within(within(popup).getByRole("option", { name: /Gemini 2\.5 Pro/ })).queryByText(/^via /)).toBeNull();
   });
 });
+
+describe("a model the daemon marks new (T3's badge)", () => {
+  it("shows the New chip on that model only", async () => {
+    const claude = provider({
+      models: [
+        { id: "claude-opus-5-5", name: "Claude Opus 5.5", default: true, options: [] },
+        { id: "claude-haiku-5-5", name: "Claude Haiku 5.5", default: false, options: [], badge: "new" },
+      ],
+    });
+    renderAgents(<Picker list={[claude]} initial={choiceOf("claude")} />, agentsHarness());
+    const popup = await open();
+    expect(within(within(popup).getByRole("option", { name: /Haiku 5\.5/ })).getByLabelText("New model")).toHaveTextContent("New");
+    expect(within(within(popup).getByRole("option", { name: /Opus 5\.5/ })).queryByLabelText("New model")).toBeNull();
+  });
+});

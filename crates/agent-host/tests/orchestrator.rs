@@ -1383,7 +1383,14 @@ async fn machine_settings_are_checked_stored_applied_and_reported_without_creden
             binary: Some("/opt/claude".into()),
             args: vec!["--verbose".into()],
             env: [("CLAUDE_CONFIG_DIR".to_string(), "/set".to_string())].into(),
-            models: vec![CustomModel { id: "big-1".into(), name: Some("Big".into()) }],
+            models: vec![
+                CustomModel { id: "big-1".into(), name: Some("Big".into()), options: None },
+                CustomModel {
+                    id: "big-2".into(),
+                    name: None,
+                    options: Some(vec![ModelOption::Boolean { id: "turbo".into(), label: "Turbo".into(), description: None, default: true, role: None }]),
+                },
+            ],
             ..ProviderSettings::default()
         },
     );
@@ -1396,6 +1403,10 @@ async fn machine_settings_are_checked_stored_applied_and_reported_without_creden
     assert_eq!(ids(&info), ["claude"], "a provider turned off isn't offered");
     let big = info.providers[0].models.iter().find(|m| m.id == "big-1").expect("the custom model is listed");
     assert!(big.custom && big.name == "Big");
+    // Options the owner described are the model's (T3's custom capabilities); none: the provider's.
+    let big2 = info.providers[0].models.iter().find(|m| m.id == "big-2").expect("the second custom model");
+    assert_eq!(big2.options, vec![ModelOption::Boolean { id: "turbo".into(), label: "Turbo".into(), description: None, default: true, role: None }]);
+    assert!(big.options.is_empty());
     let applied = claude.configured().unwrap();
     assert_eq!(applied.binary, Some("/opt/claude".into()));
     assert_eq!(applied.args, vec!["--from-file", "--verbose"]);

@@ -614,7 +614,14 @@ fn settings() -> MachineSettings {
             binary: Some("/opt/claude/bin/claude".into()),
             args: vec!["--verbose".into()],
             env: [("CLAUDE_CONFIG_DIR".to_string(), "/Users/ada/.claude-work".to_string())].into(),
-            models: vec![CustomModel { id: "claude-opus-5-5[1m]".into(), name: Some("Opus 5.5 (1M)".into()) }],
+            models: vec![
+                CustomModel { id: "claude-opus-5-5[1m]".into(), name: Some("Opus 5.5 (1M)".into()), options: None },
+                CustomModel {
+                    id: "claude-opus-5-5-preview".into(),
+                    name: None,
+                    options: Some(vec![ModelOption::reasoning(vec![OptionChoice::new("low", "Low"), OptionChoice::new("high", "High")], Some("high"))]),
+                },
+            ],
             auto_compact_window: Some(300_000),
             idle_compaction: Some(IdleCompaction::BeforeCacheExpires),
         },
@@ -670,6 +677,7 @@ fn info() -> MachineInfo {
                     images: true,
                     custom: false,
                     via: None,
+                    badge: Some(ModelBadge::New),
                 }, ModelInfo {
                     id: "claude-sonnet-4-6".into(),
                     name: "Claude Sonnet 4.6".into(),
@@ -690,6 +698,7 @@ fn info() -> MachineInfo {
                     images: false,
                     custom: false,
                     via: None,
+                    badge: None,
                 }, ModelInfo { custom: true, ..ModelInfo::new("claude-opus-5-5-20261101", "Opus 5.5 (pinned)") },
                 ModelInfo { via: Some("CLIProxyAPI".into()), ..ModelInfo::new("gemini-2.5-pro", "gemini-2.5-pro") }],
                 update_required: vec![UpdateRequired { id: "claude-haiku-5-5".into(), name: "Claude Haiku 5.5".into(), min_version: "2.1.293".into() }],

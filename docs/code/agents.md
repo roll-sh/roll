@@ -966,7 +966,22 @@ next to `providers`, which they change; a lagged link sends `hello` again, so no
   `LiveConfig`); a running session keeps what it started with.
 - **Custom models** are added to the provider's `models` (`custom: true`), after its own, so every
   picker lists them and delegation accepts them. The panel holds T3's rules (a slug, at most 256
-  characters, not built in, not twice).
+  characters, not built in, not twice). Each one's chip opens T3's custom model editor ("Edit name
+  and options", `custom-model-editor.tsx`, logic in `lib/custom-models.ts`): a display name and the
+  options the composer shows for it (`CustomModel.options`, T3's custom `optionDescriptors`), copied
+  from one of the provider's models ("Copy from…", without Claude's context window), added from the
+  provider's presets (Reasoning, Fast Mode, Thinking on Claude; Reasoning and Speed, `serviceTier`,
+  on Codex; Reasoning elsewhere) or the owner's own (an id the provider takes, a label, choices or a
+  switch, a default). The reasoning levels are always a select with the id `effort` (the thread's
+  effort).
+  None: the provider's own options for a slug like it. The daemon checks them with T3's messages,
+  numbered as the editor shows them ("Option 2: id "a" is used twice."; `check_custom_options`), at
+  most 16 options and 64 choices, one line each. The editor closes on Save, Cancel or Escape, never
+  on focus leaving (Safari doesn't focus a clicked button).
+- **"New" models.** A current model is badged `new` for a week from its release day
+  (`ModelInfo.badge`, T3's `MODEL_NEW_BADGE_DURATION_MS` and `releasedAt` in
+  `model-manifest.json`; Claude Haiku 5.5 from 2026-10-07), and the picker shows a small New chip
+  after its name.
 - **Machine limits** (agent-proto `settings_limits`): 64 variables, 64 arguments, 100 custom models
   per provider; paths absolute or `~/…`; a branch prefix git takes; auto-pull at least daily;
   subagents at most 8 deep, 1 to 32 tasks per thread; a git name and email both or neither.

@@ -258,6 +258,28 @@
             {
               "id": "claude-opus-5-5[1m]",
               "name": "Opus 5.5 (1M)"
+            },
+            {
+              "id": "claude-opus-5-5-preview",
+              "options": [
+                {
+                  "type": "select",
+                  "id": "effort",
+                  "label": "Reasoning",
+                  "choices": [
+                    {
+                      "id": "low",
+                      "label": "Low"
+                    },
+                    {
+                      "id": "high",
+                      "label": "High"
+                    }
+                  ],
+                  "default": "high",
+                  "role": "reasoning"
+                }
+              ]
             }
           ],
           "auto_compact_window": 300000,
