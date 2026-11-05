@@ -16,6 +16,30 @@ use model_gateway::store::Store;
 use serde_json::json;
 use std::path::{Path, PathBuf};
 
+const SERVE_HELP: &str = "\
+A config file (TOML; docs/code/gateway.md, \"Standalone\"):
+
+  port = 8790
+  listen = [\"100.101.102.103\"]      # besides loopback
+  # data_dir = \"/var/lib/roll-gateway\"  # gateway.db (default: the file's directory)
+
+  [[upstreams]]
+  id = \"anthropic\"
+  name = \"Anthropic\"
+  kind = \"anthropic\"
+
+  [keys]                             # never the key itself
+  anthropic = \"env:ANTHROPIC_API_KEY\"  # or \"file:/path/to/key\"
+
+Then: roll gateway client add <name>, and point a client at it.";
+
+/// How a client uses the gateway with the key just printed.
+fn client_use_help() -> &'static str {
+    "Point a client at the gateway with it:\n  \
+     Claude Code, Anthropic SDKs: ANTHROPIC_BASE_URL=http://<address>:8790 ANTHROPIC_AUTH_TOKEN=<key>\n  \
+     Codex, OpenAI SDKs: OPENAI_BASE_URL=http://<address>:8790/v1 OPENAI_API_KEY=<key>"
+}
+
 #[derive(Args)]
 pub struct Gateway {
     /// The gateway's config file (TOML: its settings, and `[keys]` naming where each upstream's
@@ -30,6 +54,7 @@ pub struct Gateway {
 enum Cmd {
     /// Run the gateway from the config file, applying the file again when it's saved. Ctrl-C
     /// stops it (requests in flight finish).
+    #[command(after_long_help = SERVE_HELP)]
     Serve,
     /// Client keys: one per machine or tool that sends requests through the gateway.
     #[command(subcommand)]
@@ -100,6 +125,7 @@ fn client(path: &Path, json: bool, c: Client) -> anyhow::Result<()> {
             } else {
                 eprintln!("roll gateway: made {} ({}); this is the only time its key is shown:", client.id, client.name);
                 println!("{}", key.expose());
+                eprintln!("{}", client_use_help());
             }
         }
         Client::List => {

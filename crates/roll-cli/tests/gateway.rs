@@ -34,6 +34,16 @@ fn text(b: &[u8]) -> String {
 }
 
 #[test]
+fn serve_says_what_its_config_file_looks_like() {
+    let out = Command::new(env!("CARGO_BIN_EXE_roll")).args(["gateway", "serve", "--help"]).output().unwrap();
+    assert!(out.status.success());
+    let help = text(&out.stdout);
+    for want in ["[[upstreams]]", "[keys]", "env:ANTHROPIC_API_KEY", "data_dir", "roll gateway client add"] {
+        assert!(help.contains(want), "{want} not in:\n{help}");
+    }
+}
+
+#[test]
 fn client_keys_are_made_listed_and_revoked() {
     let dir = tempfile::tempdir().unwrap();
     let config = dir.path().join("gateway.toml");
@@ -44,6 +54,9 @@ fn client_keys_are_made_listed_and_revoked() {
     let key = text(&out.stdout).trim().to_string();
     assert!(key.starts_with("rgk_") && !key.contains('\n'), "{key}");
     assert!(text(&out.stderr).contains("only time its key is shown"), "{}", text(&out.stderr));
+    // And how a client uses it.
+    assert!(text(&out.stderr).contains("ANTHROPIC_BASE_URL=http://<address>:8790 ANTHROPIC_AUTH_TOKEN=<key>"), "{}", text(&out.stderr));
+    assert!(text(&out.stderr).contains("OPENAI_BASE_URL=http://<address>:8790/v1"), "{}", text(&out.stderr));
 
     // The server's lookup accepts it, for that machine.
     let db = dir.path().join("data").join("gateway.db");

@@ -51,7 +51,7 @@ These are the user's and roll's rules, not settings:
 The owner picks a computer, under "Set up the gateway on this computer". That computer's
 `roll agent up` runs the gateway in-process as a supervised task, so there is nothing else to
 install. A machine without the daemon can run it alone with `roll gateway serve --config
-gateway.toml`.
+gateway.toml` ("Standalone").
 
 - **Listening.**
   - It always listens on the loopback addresses.
@@ -223,6 +223,49 @@ For a request asking for model `m`:
   network). The client follows no redirects.
 - **Testing** (`gateway.test`). Asks each upstream for its model list (Bedrock: its foundation
   models; Vertex: a token). It never generates.
+
+## Standalone
+
+A computer without `roll agent up` runs the same gateway from a TOML file:
+
+```toml
+# gateway.toml
+port = 8790
+listen = ["100.101.102.103"]   # besides loopback: this computer's tailnet or LAN address
+# data_dir = "/var/lib/roll-gateway"   # where gateway.db lives (default: this file's directory)
+
+[[upstreams]]
+id = "anthropic"
+name = "Anthropic"
+kind = "anthropic"
+
+[[upstreams]]
+id = "openai"
+name = "OpenAI"
+kind = "openai"
+
+[[routes]]
+model = "fast"
+targets = [{ upstream = "anthropic", model = "claude-haiku-4-5" }]
+
+[keys]                          # never a key itself: an environment variable or a file
+anthropic = "env:ANTHROPIC_API_KEY"
+openai = "file:/etc/roll/openai.key"
+```
+
+The file is `GatewaySettings` (above) in TOML, plus `[keys]` and `data_dir`; relative paths are
+from the file's directory. Unlike the daemon's settings, `enabled` defaults to on.
+
+1. `roll gateway serve --config gateway.toml` serves it until Ctrl-C, and applies the file again
+   when it's saved (a file that doesn't parse or check is reported, and the settings in use stay).
+   A key file is read when the config is: after rotating one, touch the config.
+2. `roll gateway client add <name> --config gateway.toml` makes a client key and prints it once,
+   with the variables a client uses. `client list` and `client revoke <id>` manage them, with or
+   without a running `serve`; a revoked key is refused on its next request.
+3. A client points at the gateway:
+   - Claude Code and Anthropic SDKs: `ANTHROPIC_BASE_URL=http://<address>:8790` and
+     `ANTHROPIC_AUTH_TOKEN=<key>`;
+   - Codex and OpenAI SDKs: `OPENAI_BASE_URL=http://<address>:8790/v1` and `OPENAI_API_KEY=<key>`.
 
 ## Inbound
 
