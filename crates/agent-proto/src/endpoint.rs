@@ -49,6 +49,10 @@ pub enum EndpointKind {
     Cliproxy,
     /// The provider's own variables: the base URL goes in `url_env` and the key in `key_env`.
     Custom,
+    /// roll's model gateway on another of the owner's machines (docs/code/gateway.md): Messages,
+    /// Chat and Responses at its root, like `cliproxy` without Gemini's routes. Set by the relay
+    /// when a machine joins the gateway (id `roll-gateway`), with a client key of its own.
+    Gateway,
 }
 
 impl EndpointKind {
@@ -58,6 +62,7 @@ impl EndpointKind {
             EndpointKind::Openai => "OpenAI-compatible",
             EndpointKind::Cliproxy => "CLIProxyAPI",
             EndpointKind::Custom => "Custom variables",
+            EndpointKind::Gateway => "roll gateway",
         }
     }
 }
@@ -87,6 +92,10 @@ pub struct EndpointSpec {
     /// CLI signed in there) instead of being sealed to the daemon. A reference isn't a secret.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key_ref: Option<String>,
+    /// When the endpoint doesn't answer as a provider's process starts, start it on its own login
+    /// or keys instead (without this endpoint) rather than fail. Off: requests fail while it's down.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub fallback: bool,
 }
 
 impl EndpointSpec {
@@ -311,6 +320,7 @@ mod tests {
             url_env: None,
             key_env: None,
             key_ref: None,
+            fallback: false,
         }
     }
 

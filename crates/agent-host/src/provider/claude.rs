@@ -121,7 +121,7 @@ impl Provider for Claude {
         use agent_proto::EndpointKind as K;
         match endpoint.kind {
             K::Openai => Err("Claude Code speaks the Anthropic API: use an Anthropic-compatible endpoint or CLIProxyAPI".into()),
-            K::Anthropic | K::Cliproxy => Ok(crate::endpoints::anthropic_use(&endpoint.base_url, key)),
+            K::Anthropic | K::Cliproxy | K::Gateway => Ok(crate::endpoints::anthropic_use(&endpoint.base_url, key)),
             K::Custom => Ok(crate::endpoints::generic_use(endpoint, key)),
         }
     }
@@ -833,7 +833,7 @@ mod tests {
     fn claude_uses_anthropic_endpoints_and_refuses_openai_ones() {
         use agent_proto::{EndpointKind, EndpointSpec};
         let claude = Claude::new(ProviderConfig::default());
-        let spec = |kind| EndpointSpec { id: "e".into(), name: "E".into(), kind, base_url: "http://h:8317".into(), providers: vec![], url_env: None, key_env: None, key_ref: None };
+        let spec = |kind| EndpointSpec { id: "e".into(), name: "E".into(), kind, base_url: "http://h:8317".into(), providers: vec![], url_env: None, key_env: None, key_ref: None, fallback: false };
         let used = claude.endpoint_use(&spec(EndpointKind::Cliproxy), Some("k")).unwrap();
         assert_eq!(used.env, vec![("ANTHROPIC_BASE_URL".to_string(), "http://h:8317".to_string()), ("ANTHROPIC_AUTH_TOKEN".to_string(), "k".to_string())]);
         assert!(used.args.is_empty());

@@ -149,6 +149,7 @@ code-index = { path = "crates/code-index" }
 code-review = { path = "crates/code-review" }
 agent-proto = { path = "crates/agent-proto" }
 agent-host = { path = "crates/agent-host" }
+model-gateway = { path = "crates/model-gateway" }
 aes-gcm = "0.10"
 # Endpoint keys sealed to a daemon (agent-host `endpoints.rs`): X25519 and HKDF.
 curve25519-dalek = "4"

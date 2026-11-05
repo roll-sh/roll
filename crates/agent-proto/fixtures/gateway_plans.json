@@ -1,0 +1,36 @@
+[
+  {
+    "host": "mch_00000000000000aa",
+    "urls": [
+      {
+        "label": "Tailscale",
+        "url": "http://ai-server.tail1234.ts.net:8790"
+      },
+      {
+        "label": "Docker sandboxes",
+        "url": "http://172.30.0.1:8790"
+      }
+    ],
+    "members": [
+      {
+        "machine": "mch_fedcba0987654321",
+        "url": "http://ai-server.tail1234.ts.net:8790",
+        "client": "gwc_5f1d2c3b4a596877",
+        "joined_at": 1762000000000
+      },
+      {
+        "machine": "mch_00000000000000bb",
+        "url": "http://172.30.0.1:8790",
+        "providers": [
+          "claude"
+        ],
+        "joined_at": 1762000000000,
+        "error": "the machine isn't connected"
+      }
+    ],
+    "new_sandboxes": true,
+    "fallback": true,
+    "acknowledged_at": 1762000000000,
+    "updated_at": 1762000000000
+  }
+]

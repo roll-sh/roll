@@ -340,6 +340,168 @@
     "endpoint": "cliproxy"
   },
   {
+    "type": "gateway.configure",
+    "settings": {
+      "enabled": true,
+      "port": 8790,
+      "listen": [
+        "100.64.0.10"
+      ],
+      "upstreams": [
+        {
+          "id": "anthropic",
+          "name": "Anthropic",
+          "kind": "anthropic"
+        },
+        {
+          "id": "bedrock",
+          "name": "Amazon Bedrock",
+          "kind": "bedrock",
+          "region": "us-east-1",
+          "models": [
+            "anthropic.claude-*"
+          ],
+          "key_ref": "op://Dev/Bedrock/credential"
+        },
+        {
+          "id": "vertex",
+          "name": "Google Vertex AI",
+          "kind": "vertex",
+          "region": "us-east5",
+          "project": "acme-ai",
+          "disabled": true
+        },
+        {
+          "id": "openrouter",
+          "name": "OpenRouter",
+          "kind": "openrouter",
+          "headers": [
+            [
+              "http-referer",
+              "https://roll.sh"
+            ]
+          ]
+        },
+        {
+          "id": "azure",
+          "name": "Azure OpenAI",
+          "kind": "azure_openai",
+          "base_url": "https://acme.openai.azure.com"
+        },
+        {
+          "id": "compat",
+          "name": "Anthropic-compatible",
+          "kind": "anthropic_compatible",
+          "base_url": "https://gw.example.com"
+        },
+        {
+          "id": "openai",
+          "name": "OpenAI",
+          "kind": "openai",
+          "base_url": "https://api.openai.com/v1"
+        },
+        {
+          "id": "local",
+          "name": "OpenAI-compatible",
+          "kind": "openai_compatible",
+          "base_url": "http://127.0.0.1:11434/v1",
+          "models": [
+            "qwen3-coder*"
+          ],
+          "responses": true,
+          "allow_private": true
+        }
+      ],
+      "routes": [
+        {
+          "model": "fast",
+          "targets": [
+            {
+              "upstream": "anthropic",
+              "model": "claude-haiku-4-5"
+            },
+            {
+              "upstream": "bedrock",
+              "model": "anthropic.claude-haiku-4-5"
+            }
+          ]
+        }
+      ],
+      "prices": [
+        {
+          "model": "qwen3-coder*",
+          "input": 0,
+          "output": 0,
+          "cache_read": 0,
+          "cache_write": 0
+        }
+      ],
+      "log_bodies": true,
+      "affinity": false,
+      "retention_days": 90
+    }
+  },
+  {
+    "type": "gateway.key",
+    "upstream": "anthropic",
+    "key": {
+      "type": "set",
+      "sealed": {
+        "v": 1,
+        "epk": "3p7bfXt9wbTTW2HC7OQ1Nz-DQ8hbeGdNrfx-FG-IK08",
+        "nonce": "AAECAwQFBgcICQoL",
+        "ct": "bm90IGEgcmVhbCBrZXksIGp1c3QgYSBzaGFwZQ"
+      }
+    }
+  },
+  {
+    "type": "gateway.key",
+    "upstream": "openrouter",
+    "key": {
+      "type": "clear"
+    }
+  },
+  {
+    "type": "gateway.client.issue",
+    "name": "Ada's sandbox",
+    "machine": "mch_fedcba0987654321",
+    "seal_key": "hSDwCYkwp1R0i33ctD73Wg2_Og0mOBr066SpjqqbTmo"
+  },
+  {
+    "type": "gateway.client.revoke",
+    "client": "gwc_5f1d2c3b4a596877"
+  },
+  {
+    "type": "gateway.test"
+  },
+  {
+    "type": "gateway.test",
+    "upstream": "anthropic"
+  },
+  {
+    "type": "gateway.remove"
+  },
+  {
+    "type": "gateway.status"
+  },
+  {
+    "type": "gateway.usage",
+    "from": 1761395200000,
+    "to": 1762000000000,
+    "by": "machine",
+    "bucket": "day"
+  },
+  {
+    "type": "gateway.log",
+    "after": 41,
+    "limit": 50,
+    "errors": true
+  },
+  {
+    "type": "gateway.log.body",
+    "seq": 42
+  },
+  {
     "type": "diff.get",
     "thread": "thr_a1b2c3d4e5f60718",
     "run": "run_0011223344556677"

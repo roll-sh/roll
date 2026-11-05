@@ -1532,6 +1532,7 @@ async fn endpoint_keys_are_sealed_to_the_daemon_and_reach_only_their_providers()
         url_env: None,
         key_env: None,
         key_ref: None,
+        fallback: false,
     };
     let sealed = |endpoint: &str, key: &str| KeyChange::Set { sealed: agent_host::endpoints::seal(&seal_key, endpoint, key).unwrap() };
 

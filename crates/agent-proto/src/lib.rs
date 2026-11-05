@@ -61,10 +61,16 @@ id! {
 
 pub mod automation;
 pub mod endpoint;
+pub mod gateway;
 pub mod identity;
 
 pub use endpoint::{
     EndpointCheck, EndpointInfo, EndpointKind, EndpointModel, EndpointProfile, EndpointSpec, KeyChange, KeyState, SEAL_VERSION, SealedSecret, endpoint_limits,
+};
+pub use gateway::{
+    Attempt, CircuitState, ClientSeen, GatewayClient, GatewayInfo, GatewayJoin, GatewayMember, GatewayPlan, GatewayRun, GatewaySettings, GatewayStatus, GatewayUrl,
+    IssuedClient, LogBody, LogEntry, ModelPrice, RouteSpec, RouteTarget, UpstreamCheck, UpstreamHealth, UpstreamKey, UpstreamKind, UpstreamSpec, UsageBucket, UsageBy,
+    UsageReport, UsageRow, WireFormat, gateway_limits,
 };
 pub use identity::{IdentityColor, MachineAppearance, MachineKind, ProjectIcon, ProjectLogo};
 
@@ -1181,6 +1187,9 @@ pub struct MachineConfig {
     /// key) and the models it listed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub endpoints: Vec<EndpointInfo>,
+    /// roll's model gateway on this machine (docs/code/gateway.md); unset: never set up here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gateway: Option<Box<GatewayInfo>>,
 }
 
 /// What a machine's settings fall back to.
@@ -2203,6 +2212,73 @@ pub enum Command {
     #[serde(rename = "endpoint.check")]
     EndpointCheck { endpoint: String },
 
+    /// Set up, change, start or stop roll's model gateway on this machine
+    /// (docs/code/gateway.md); [`GatewaySettings`] are replaced whole and applied live. Replies
+    /// once stored and applied, and `hello` says the new [`GatewayInfo`].
+    #[serde(rename = "gateway.configure")]
+    GatewayConfigure { settings: Box<GatewaySettings> },
+    /// Change an upstream's key: sealed to this daemon with
+    /// [`gateway::upstream_key_context`], or cleared.
+    #[serde(rename = "gateway.key")]
+    GatewayKey {
+        upstream: String,
+        #[serde(default, skip_serializing_if = "endpoint::key_change_is_keep")]
+        key: KeyChange,
+    },
+    /// Mint a client key and answer it sealed to `seal_key` (the machine that will use it, as its
+    /// `roll-gateway` endpoint's key: [`IssuedClient`]). The gateway keeps only its hash. A
+    /// machine's earlier client is revoked.
+    #[serde(rename = "gateway.client.issue")]
+    GatewayClientIssue {
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        machine: Option<MachineId>,
+        seal_key: String,
+    },
+    /// Revoke a client key: its next request is refused.
+    #[serde(rename = "gateway.client.revoke")]
+    GatewayClientRevoke { client: String },
+    /// Ask upstreams (one, or all) for their model lists now: their keys open, they answer.
+    /// Never generates (costs nothing).
+    #[serde(rename = "gateway.test")]
+    GatewayTest {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        upstream: Option<String>,
+    },
+    /// Stop the gateway and forget it here: settings, upstream keys, clients and history.
+    #[serde(rename = "gateway.remove")]
+    GatewayRemove {},
+    /// Health of the gateway and its upstreams.
+    #[serde(rename = "gateway.status")]
+    GatewayStatus {},
+    /// Usage between `from` and `to`, grouped and bucketed.
+    #[serde(rename = "gateway.usage")]
+    GatewayUsage {
+        from: Millis,
+        to: Millis,
+        #[serde(default)]
+        by: UsageBy,
+        #[serde(default)]
+        bucket: UsageBucket,
+    },
+    /// The request log, newest first: entries after `after` (live tail) or before `before`
+    /// (paging back), at most `limit` ([`gateway_limits::LOG_PAGE`]).
+    #[serde(rename = "gateway.log")]
+    GatewayLog {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        after: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        before: Option<u64>,
+        #[serde(default)]
+        limit: u16,
+        /// Only failed requests and failovers.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        errors: bool,
+    },
+    /// A logged request's bodies (kept only while `log_bodies` is on).
+    #[serde(rename = "gateway.log.body")]
+    GatewayLogBody { seq: u64 },
+
     // Queries.
     /// The diff of a run (checkpoint before → after), or of the whole thread when `run` is
     /// unset (base → now, including uncommitted work).
@@ -2244,6 +2320,10 @@ impl Command {
                 | Command::FsRead { .. }
                 | Command::GitStatus { .. }
                 | Command::TerminalScrollback { .. }
+                | Command::GatewayStatus {}
+                | Command::GatewayUsage { .. }
+                | Command::GatewayLog { .. }
+                | Command::GatewayLogBody { .. }
         )
     }
 }
@@ -2282,6 +2362,14 @@ pub enum Reply {
     },
     /// What `endpoint.check` found.
     EndpointChecked(EndpointCheck),
+    /// `gateway.client.issue`'s client and its sealed key.
+    GatewayClient(IssuedClient),
+    /// What `gateway.test` found, one per upstream tried.
+    GatewayTested { checks: Vec<UpstreamCheck> },
+    GatewayStatus(GatewayStatus),
+    GatewayUsage(UsageReport),
+    GatewayLog { entries: Vec<LogEntry> },
+    GatewayLogBody(LogBody),
     Error(ReplyError),
 }
 

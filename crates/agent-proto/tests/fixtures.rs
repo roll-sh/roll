@@ -467,6 +467,18 @@ fn commands() -> Vec<Command> {
         Command::EndpointSet { endpoint: endpoint_spec(), key: KeyChange::Clear },
         Command::EndpointRemove { endpoint: "cliproxy".into() },
         Command::EndpointCheck { endpoint: "cliproxy".into() },
+        Command::GatewayConfigure { settings: Box::new(gateway_settings()) },
+        Command::GatewayKey { upstream: "anthropic".into(), key: KeyChange::Set { sealed: sealed() } },
+        Command::GatewayKey { upstream: "openrouter".into(), key: KeyChange::Clear },
+        Command::GatewayClientIssue { name: "Ada's sandbox".into(), machine: Some(mch()), seal_key: "hSDwCYkwp1R0i33ctD73Wg2_Og0mOBr066SpjqqbTmo".into() },
+        Command::GatewayClientRevoke { client: "gwc_5f1d2c3b4a596877".into() },
+        Command::GatewayTest { upstream: None },
+        Command::GatewayTest { upstream: Some("anthropic".into()) },
+        Command::GatewayRemove {},
+        Command::GatewayStatus {},
+        Command::GatewayUsage { from: T - 7 * 86_400_000, to: T, by: UsageBy::Machine, bucket: UsageBucket::Day },
+        Command::GatewayLog { after: Some(41), before: None, limit: 50, errors: true },
+        Command::GatewayLogBody { seq: 42 },
         Command::DiffGet { thread: thr(), run: Some(run()) },
         Command::FsList { project: None, path: "/home/ada".into() },
         Command::FsRead { project: prj(), path: "README.md".into() },
@@ -514,6 +526,16 @@ fn covered_command(c: &Command) {
         | Command::EndpointSet { .. }
         | Command::EndpointRemove { .. }
         | Command::EndpointCheck { .. }
+        | Command::GatewayConfigure { .. }
+        | Command::GatewayKey { .. }
+        | Command::GatewayClientIssue { .. }
+        | Command::GatewayClientRevoke { .. }
+        | Command::GatewayTest { .. }
+        | Command::GatewayRemove {}
+        | Command::GatewayStatus {}
+        | Command::GatewayUsage { .. }
+        | Command::GatewayLog { .. }
+        | Command::GatewayLogBody { .. }
         | Command::DiffGet { .. }
         | Command::FsList { .. }
         | Command::FsRead { .. }
@@ -568,6 +590,64 @@ fn replies() -> Vec<Reply> {
         Reply::Scrollback { data: "JCBscwo=".into() },
         Reply::EndpointChecked(EndpointCheck { ok: true, models: 42, ms: 180, error: None }),
         Reply::EndpointChecked(EndpointCheck { ok: false, models: 0, ms: 10_000, error: Some("the endpoint answered 401 Unauthorized".into()) }),
+        Reply::GatewayClient(IssuedClient { client: gateway_client(), sealed: sealed() }),
+        Reply::GatewayTested {
+            checks: vec![
+                UpstreamCheck { upstream: "anthropic".into(), ok: true, ms: 210, models: 9, error: None },
+                UpstreamCheck { upstream: "openrouter".into(), ok: false, ms: 80, models: 0, error: Some("OpenRouter answered 401 Unauthorized".into()) },
+            ],
+        },
+        Reply::GatewayStatus(GatewayStatus {
+            run: GatewayRun::Running { addresses: vec![addr([127, 0, 0, 1], 8790), addr([100, 64, 0, 10], 8790)], since: T },
+            upstreams: vec![
+                UpstreamHealth {
+                    upstream: "anthropic".into(),
+                    circuit: CircuitState::Closed,
+                    failures: 0,
+                    open_until: None,
+                    cooling_until: None,
+                    last_ok_at: Some(T),
+                    last_error: None,
+                    last_error_at: None,
+                    requests_hour: 312,
+                    p50_ms: Some(640),
+                },
+                UpstreamHealth {
+                    upstream: "bedrock".into(),
+                    circuit: CircuitState::Open,
+                    failures: 5,
+                    open_until: Some(T + 30_000),
+                    cooling_until: Some(T + 20_000),
+                    last_ok_at: None,
+                    last_error: Some("Amazon Bedrock answered 503 Service Unavailable".into()),
+                    last_error_at: Some(T),
+                    requests_hour: 4,
+                    p50_ms: None,
+                },
+            ],
+            clients_seen: vec![ClientSeen { client: "gwc_5f1d2c3b4a596877".into(), at: T }],
+            models: vec!["claude-sonnet-4-5".into(), "fast".into(), "gpt-5.5".into()],
+        }),
+        Reply::GatewayUsage(UsageReport {
+            by: UsageBy::Model,
+            bucket: UsageBucket::Day,
+            from: T - 86_400_000,
+            to: T,
+            rows: vec![UsageRow {
+                at: T - 86_400_000,
+                key: "claude-sonnet-4-5".into(),
+                requests: 1204,
+                errors: 3,
+                input_tokens: 8_400_000,
+                output_tokens: 610_000,
+                cache_read_tokens: 52_000_000,
+                cache_write_tokens: 1_900_000,
+                cost_micros: 55_485_000,
+            }],
+            truncated: false,
+        }),
+        Reply::GatewayLog { entries: vec![log_entry()] },
+        Reply::GatewayLogBody(LogBody { seq: 42, request: "{\"model\":\"fast\"}".into(), response: "event: message_start\n".into(), truncated: true }),
         Reply::Error(ReplyError { code: ErrorCode::MachineOffline, message: "the machine isn't connected".into() }),
     ]
 }
@@ -586,6 +666,12 @@ fn covered_reply(r: &Reply) {
         | Reply::Cleaned(_)
         | Reply::Scrollback { .. }
         | Reply::EndpointChecked(_)
+        | Reply::GatewayClient(_)
+        | Reply::GatewayTested { .. }
+        | Reply::GatewayStatus(_)
+        | Reply::GatewayUsage(_)
+        | Reply::GatewayLog { .. }
+        | Reply::GatewayLogBody(_)
         | Reply::Error(_) => {}
     }
 }
@@ -771,16 +857,166 @@ fn info() -> MachineInfo {
                         url_env: None,
                         key_env: Some("GEMINI_API_KEY".into()),
                         key_ref: Some("op://Dev/Gemini/credential".into()),
+                        fallback: false,
                     },
                     key: KeyState::Reference,
                     models: vec![],
                     checked_at: None,
                     error: Some("1Password: the op CLI isn't signed in".into()),
                 },
+                EndpointInfo {
+                    spec: EndpointSpec {
+                        id: gateway_limits::ENDPOINT_ID.into(),
+                        name: "roll gateway on ai-server".into(),
+                        kind: EndpointKind::Gateway,
+                        base_url: "http://ai-server.tail1234.ts.net:8790".into(),
+                        providers: vec![ProviderId::claude(), ProviderId::codex()],
+                        url_env: None,
+                        key_env: None,
+                        key_ref: None,
+                        fallback: true,
+                    },
+                    key: KeyState::Sealed,
+                    models: vec![EndpointModel { id: "fast".into(), name: None }],
+                    checked_at: Some(T),
+                    error: None,
+                },
             ],
+            gateway: Some(Box::new(GatewayInfo {
+                settings: gateway_settings(),
+                keys: vec![
+                    UpstreamKey { upstream: "anthropic".into(), key: KeyState::Sealed },
+                    UpstreamKey { upstream: "bedrock".into(), key: KeyState::Reference },
+                    UpstreamKey { upstream: "local".into(), key: KeyState::None },
+                ],
+                clients: vec![gateway_client()],
+                run: GatewayRun::Failed { error: format!("{} is in use", addr([100, 64, 0, 10], 8790)), addresses: vec![addr([127, 0, 0, 1], 8790)] },
+            })),
         })),
         seal_key: Some("hSDwCYkwp1R0i33ctD73Wg2_Og0mOBr066SpjqqbTmo".into()),
     }
+}
+
+fn addr(ip: [u8; 4], port: u16) -> String {
+    std::net::SocketAddr::from((ip, port)).to_string()
+}
+
+fn gateway_settings() -> GatewaySettings {
+    let up = |id: &str, kind: UpstreamKind| UpstreamSpec {
+        id: id.into(),
+        name: kind.label().into(),
+        kind,
+        base_url: None,
+        region: None,
+        project: None,
+        models: vec![],
+        responses: false,
+        headers: vec![],
+        allow_private: false,
+        key_ref: None,
+        disabled: false,
+    };
+    GatewaySettings {
+        enabled: true,
+        port: 8790,
+        listen: vec![std::net::Ipv4Addr::new(100, 64, 0, 10).to_string()],
+        upstreams: vec![
+            up("anthropic", UpstreamKind::Anthropic),
+            UpstreamSpec {
+                region: Some("us-east-1".into()),
+                models: vec!["anthropic.claude-*".into()],
+                key_ref: Some("op://Dev/Bedrock/credential".into()),
+                ..up("bedrock", UpstreamKind::Bedrock)
+            },
+            UpstreamSpec { region: Some("us-east5".into()), project: Some("acme-ai".into()), disabled: true, ..up("vertex", UpstreamKind::Vertex) },
+            UpstreamSpec { headers: vec![("http-referer".into(), "https://roll.sh".into())], ..up("openrouter", UpstreamKind::Openrouter) },
+            UpstreamSpec { base_url: Some("https://acme.openai.azure.com".into()), ..up("azure", UpstreamKind::AzureOpenai) },
+            UpstreamSpec { base_url: Some("https://gw.example.com".into()), ..up("compat", UpstreamKind::AnthropicCompatible) },
+            UpstreamSpec { base_url: Some("https://api.openai.com/v1".into()), ..up("openai", UpstreamKind::Openai) },
+            UpstreamSpec {
+                base_url: Some(format!("http://{}/v1", addr([127, 0, 0, 1], 11434))),
+                models: vec!["qwen3-coder*".into()],
+                responses: true,
+                allow_private: true,
+                ..up("local", UpstreamKind::OpenaiCompatible)
+            },
+        ],
+        routes: vec![RouteSpec {
+            model: "fast".into(),
+            targets: vec![
+                RouteTarget { upstream: "anthropic".into(), model: Some("claude-haiku-4-5".into()) },
+                RouteTarget { upstream: "bedrock".into(), model: Some("anthropic.claude-haiku-4-5".into()) },
+            ],
+        }],
+        prices: vec![ModelPrice { model: "qwen3-coder*".into(), input: 0, output: 0, cache_read: 0, cache_write: 0 }],
+        log_bodies: true,
+        affinity: false,
+        retention_days: 90,
+    }
+}
+
+fn gateway_client() -> GatewayClient {
+    GatewayClient { id: "gwc_5f1d2c3b4a596877".into(), name: "Ada's sandbox".into(), machine: Some(mch()), created_at: T }
+}
+
+fn log_entry() -> LogEntry {
+    LogEntry {
+        seq: 42,
+        at: T,
+        client: Some("gwc_5f1d2c3b4a596877".into()),
+        machine: Some(mch()),
+        project: Some(prj().0),
+        thread: Some(thr().0),
+        format: WireFormat::Responses,
+        model: "fast".into(),
+        stream: true,
+        status: 200,
+        ms: 4210,
+        first_byte_ms: Some(690),
+        attempts: vec![
+            Attempt { upstream: "anthropic".into(), model: "claude-haiku-4-5".into(), status: 529, ms: 120, error: Some("overloaded".into()) },
+            Attempt { upstream: "bedrock".into(), model: "anthropic.claude-haiku-4-5".into(), status: 200, ms: 4090, error: None },
+        ],
+        input_tokens: 12_000,
+        output_tokens: 800,
+        cache_read_tokens: 40_000,
+        cache_write_tokens: 0,
+        cost_micros: 19_200,
+        error: None,
+        has_body: true,
+    }
+}
+
+fn gateway_plans() -> Vec<GatewayPlan> {
+    vec![GatewayPlan {
+        host: MachineId::from_suffix("00000000000000aa"),
+        urls: vec![
+            GatewayUrl { label: "Tailscale".into(), url: "http://ai-server.tail1234.ts.net:8790".into() },
+            GatewayUrl { label: "Docker sandboxes".into(), url: "http://172.30.0.1:8790".into() },
+        ],
+        members: vec![
+            GatewayMember { machine: mch(), url: "http://ai-server.tail1234.ts.net:8790".into(), providers: vec![], client: Some("gwc_5f1d2c3b4a596877".into()), joined_at: T, error: None },
+            GatewayMember {
+                machine: MachineId::from_suffix("00000000000000bb"),
+                url: "http://172.30.0.1:8790".into(),
+                providers: vec![ProviderId::claude()],
+                client: None,
+                joined_at: T,
+                error: Some("the machine isn't connected".into()),
+            },
+        ],
+        new_sandboxes: true,
+        fallback: true,
+        acknowledged_at: T,
+        updated_at: T,
+    }]
+}
+
+fn gateway_joins() -> Vec<GatewayJoin> {
+    vec![
+        GatewayJoin { machine: mch(), url: None, providers: vec![] },
+        GatewayJoin { machine: mch(), url: Some("http://172.30.0.1:8790".into()), providers: vec![ProviderId::claude()] },
+    ]
 }
 
 fn endpoint_spec() -> EndpointSpec {
@@ -793,6 +1029,7 @@ fn endpoint_spec() -> EndpointSpec {
         url_env: None,
         key_env: None,
         key_ref: None,
+        fallback: false,
     }
 }
 
@@ -982,12 +1219,14 @@ fn fixtures() {
         vec![
             EndpointProfile { spec: endpoint_spec(), sandbox_default: true, updated_at: T },
             EndpointProfile {
-                spec: EndpointSpec { id: "gw".into(), name: "Team gateway".into(), kind: EndpointKind::Openai, base_url: "https://gw.example.com/v1".into(), providers: vec![ProviderId::codex()], url_env: None, key_env: None, key_ref: None },
+                spec: EndpointSpec { id: "gw".into(), name: "Team gateway".into(), kind: EndpointKind::Openai, base_url: "https://gw.example.com/v1".into(), providers: vec![ProviderId::codex()], url_env: None, key_env: None, key_ref: None, fallback: false },
                 sandbox_default: false,
                 updated_at: T,
             },
         ],
     );
+    check("gateway_plans", gateway_plans());
+    check("gateway_joins", gateway_joins());
     check(
         "shares",
         vec![Share {
@@ -1025,8 +1264,8 @@ fn every_variant_of_every_tagged_enum_is_sampled() {
     let tags = |v: serde_json::Value, key: &str| -> std::collections::BTreeSet<String> {
         v.as_array().unwrap().iter().map(|x| x[key].as_str().unwrap().to_string()).collect()
     };
-    assert_eq!(tags(serde_json::to_value(commands()).unwrap(), "type").len(), 42, "commands");
-    assert_eq!(tags(serde_json::to_value(replies()).unwrap(), "type").len(), 13, "replies");
+    assert_eq!(tags(serde_json::to_value(commands()).unwrap(), "type").len(), 52, "commands");
+    assert_eq!(tags(serde_json::to_value(replies()).unwrap(), "type").len(), 19, "replies");
     assert_eq!(tags(serde_json::to_value(entities()).unwrap(), "kind").len(), 8, "entities");
     let bodies: std::collections::BTreeSet<String> = entities()
         .iter()

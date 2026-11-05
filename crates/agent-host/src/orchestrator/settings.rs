@@ -190,6 +190,7 @@ impl Host {
                 providers,
                 config_path: self.config.home.join("config.toml").display().to_string(),
                 endpoints: self.endpoint_infos(),
+                gateway: None,
             })),
             seal_key: Some(self.seal_key()),
         }

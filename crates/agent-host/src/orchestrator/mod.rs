@@ -633,6 +633,17 @@ impl Host {
             Command::EndpointSet { endpoint, key } => self.endpoint_set(endpoint, key).await,
             Command::EndpointRemove { endpoint } => self.endpoint_remove(&endpoint).await,
             Command::EndpointCheck { endpoint } => self.endpoint_check(&endpoint).await,
+            // TODO(gateway lane): agent-host/src/gateway.rs takes these over.
+            Command::GatewayConfigure { .. }
+            | Command::GatewayKey { .. }
+            | Command::GatewayClientIssue { .. }
+            | Command::GatewayClientRevoke { .. }
+            | Command::GatewayTest { .. }
+            | Command::GatewayRemove {}
+            | Command::GatewayStatus {}
+            | Command::GatewayUsage { .. }
+            | Command::GatewayLog { .. }
+            | Command::GatewayLogBody { .. } => Err(Fail::Invalid("this daemon has no model gateway yet".into())),
             Command::DiffGet { thread, run } => self.diff_get(&thread, run.as_ref()).await,
             Command::FsList { project, path } => self.fs_list(project.as_ref(), &path).await,
             Command::FsRead { project, path } => self.fs_read(&project, &path).await,

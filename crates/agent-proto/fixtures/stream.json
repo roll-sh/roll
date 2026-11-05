@@ -358,8 +358,156 @@
               "key_ref": "op://Dev/Gemini/credential",
               "key": "reference",
               "error": "1Password: the op CLI isn't signed in"
+            },
+            {
+              "id": "roll-gateway",
+              "name": "roll gateway on ai-server",
+              "kind": "gateway",
+              "base_url": "http://ai-server.tail1234.ts.net:8790",
+              "providers": [
+                "claude",
+                "codex"
+              ],
+              "fallback": true,
+              "key": "sealed",
+              "models": [
+                {
+                  "id": "fast"
+                }
+              ],
+              "checked_at": 1762000000000
             }
-          ]
+          ],
+          "gateway": {
+            "settings": {
+              "enabled": true,
+              "port": 8790,
+              "listen": [
+                "100.64.0.10"
+              ],
+              "upstreams": [
+                {
+                  "id": "anthropic",
+                  "name": "Anthropic",
+                  "kind": "anthropic"
+                },
+                {
+                  "id": "bedrock",
+                  "name": "Amazon Bedrock",
+                  "kind": "bedrock",
+                  "region": "us-east-1",
+                  "models": [
+                    "anthropic.claude-*"
+                  ],
+                  "key_ref": "op://Dev/Bedrock/credential"
+                },
+                {
+                  "id": "vertex",
+                  "name": "Google Vertex AI",
+                  "kind": "vertex",
+                  "region": "us-east5",
+                  "project": "acme-ai",
+                  "disabled": true
+                },
+                {
+                  "id": "openrouter",
+                  "name": "OpenRouter",
+                  "kind": "openrouter",
+                  "headers": [
+                    [
+                      "http-referer",
+                      "https://roll.sh"
+                    ]
+                  ]
+                },
+                {
+                  "id": "azure",
+                  "name": "Azure OpenAI",
+                  "kind": "azure_openai",
+                  "base_url": "https://acme.openai.azure.com"
+                },
+                {
+                  "id": "compat",
+                  "name": "Anthropic-compatible",
+                  "kind": "anthropic_compatible",
+                  "base_url": "https://gw.example.com"
+                },
+                {
+                  "id": "openai",
+                  "name": "OpenAI",
+                  "kind": "openai",
+                  "base_url": "https://api.openai.com/v1"
+                },
+                {
+                  "id": "local",
+                  "name": "OpenAI-compatible",
+                  "kind": "openai_compatible",
+                  "base_url": "http://127.0.0.1:11434/v1",
+                  "models": [
+                    "qwen3-coder*"
+                  ],
+                  "responses": true,
+                  "allow_private": true
+                }
+              ],
+              "routes": [
+                {
+                  "model": "fast",
+                  "targets": [
+                    {
+                      "upstream": "anthropic",
+                      "model": "claude-haiku-4-5"
+                    },
+                    {
+                      "upstream": "bedrock",
+                      "model": "anthropic.claude-haiku-4-5"
+                    }
+                  ]
+                }
+              ],
+              "prices": [
+                {
+                  "model": "qwen3-coder*",
+                  "input": 0,
+                  "output": 0,
+                  "cache_read": 0,
+                  "cache_write": 0
+                }
+              ],
+              "log_bodies": true,
+              "affinity": false,
+              "retention_days": 90
+            },
+            "keys": [
+              {
+                "upstream": "anthropic",
+                "key": "sealed"
+              },
+              {
+                "upstream": "bedrock",
+                "key": "reference"
+              },
+              {
+                "upstream": "local",
+                "key": "none"
+              }
+            ],
+            "clients": [
+              {
+                "id": "gwc_5f1d2c3b4a596877",
+                "name": "Ada's sandbox",
+                "machine": "mch_fedcba0987654321",
+                "created_at": 1762000000000
+              }
+            ],
+            "run": {
+              "state": "failed",
+              "error": "100.64.0.10:8790 is in use",
+              "addresses": [
+                "127.0.0.1:8790"
+              ]
+            }
+          }
         },
         "seal_key": "hSDwCYkwp1R0i33ctD73Wg2_Og0mOBr066SpjqqbTmo"
       },

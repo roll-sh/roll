@@ -255,6 +255,12 @@ pub fn generic_use(spec: &EndpointSpec, key: Option<&str>) -> EndpointUse {
             put("GOOGLE_GEMINI_BASE_URL", Some(base));
             put("GEMINI_API_KEY", key);
         }
+        // roll's gateway: CLIProxyAPI's Anthropic and OpenAI routes, no Gemini.
+        EndpointKind::Gateway => {
+            anthropic_env(&mut put, base, key);
+            put("OPENAI_BASE_URL", Some(&format!("{base}/v1")));
+            put("OPENAI_API_KEY", key);
+        }
         EndpointKind::Custom => {
             if let Some(name) = &spec.url_env {
                 put(name, Some(base));
@@ -290,7 +296,7 @@ pub const CODEX_KEY_ENV: &str = "ROLL_ENDPOINT_KEY";
 pub fn codex_use(spec: &EndpointSpec, key: Option<&str>) -> Result<EndpointUse, String> {
     let base = match spec.kind {
         EndpointKind::Openai => spec.base_url.clone(),
-        EndpointKind::Cliproxy => format!("{}/v1", spec.base_url),
+        EndpointKind::Cliproxy | EndpointKind::Gateway => format!("{}/v1", spec.base_url),
         EndpointKind::Anthropic => return Err("Codex speaks the OpenAI API: use an OpenAI-compatible endpoint or CLIProxyAPI".into()),
         EndpointKind::Custom => return Ok(generic_use(spec, key)),
     };
@@ -339,7 +345,7 @@ pub fn models_url(spec: &EndpointSpec) -> Option<String> {
     let base = &spec.base_url;
     match spec.kind {
         EndpointKind::Anthropic => Some(format!("{base}/v1/models?limit=1000")),
-        EndpointKind::Cliproxy => Some(format!("{base}/v1/models")),
+        EndpointKind::Cliproxy | EndpointKind::Gateway => Some(format!("{base}/v1/models")),
         EndpointKind::Openai => Some(format!("{base}/models")),
         EndpointKind::Custom => None,
     }
@@ -361,7 +367,7 @@ pub async fn list_models(spec: &EndpointSpec, key: Option<&str>) -> Result<Vec<E
     let mut req = client.get(&url).header("accept", "application/json");
     if let Some(k) = key {
         req = req.bearer_auth(k);
-        if matches!(spec.kind, EndpointKind::Anthropic | EndpointKind::Cliproxy) {
+        if matches!(spec.kind, EndpointKind::Anthropic | EndpointKind::Cliproxy | EndpointKind::Gateway) {
             req = req.header("x-api-key", k);
         }
     }
@@ -483,6 +489,7 @@ mod tests {
             url_env: None,
             key_env: None,
             key_ref: None,
+            fallback: false,
         }
     }
 
