@@ -18,8 +18,8 @@
 use agent_host::provider::acp::{Acp, installed_agents, known_agents};
 use agent_host::provider::{McpServer, Provider, ProviderConfig, ProviderEvent, Session, SessionConfig, TurnEnd, TurnInput};
 use agent_proto::{
-    ApprovalAction, AuthStatus, Decision, InteractionMode, NodeBody, NodeStatus, RequestBody, Response, RuntimeMode,
-    TodoStatus, ToolKind,
+    ApprovalAction, AuthStatus, Decision, InteractionMode, ModelOption, NodeBody, NodeStatus, OptionRole, RequestBody, Response,
+    RuntimeMode, TodoStatus, ToolKind,
 };
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -89,7 +89,10 @@ fn replay(transcript: &Path, log: Option<PathBuf>) -> Result<i32, String> {
     let mut out = std::fs::OpenOptions::new().write(true).open("/dev/fd/3").map_err(|e| format!("fd 3: {e}"))?;
     let mut log = log.map(|p| std::fs::OpenOptions::new().create(true).append(true).open(p).expect("log"));
     if let Some(log) = &mut log {
-        writeln!(log, "{}", json!({ "pid": std::process::id() })).unwrap();
+        // The environment an agent's launch sets (Antigravity's harness).
+        let env: BTreeMap<String, String> =
+            ["ANTIGRAVITY_HARNESS_PATH", "PYTHONUNBUFFERED"].iter().filter_map(|k| Some((k.to_string(), std::env::var(k).ok()?))).collect();
+        writeln!(log, "{}", json!({ "pid": std::process::id(), "env": env })).unwrap();
     }
     let ws = std::fs::canonicalize(std::env::current_dir().unwrap()).unwrap().display().to_string();
     let text = std::fs::read_to_string(transcript).map_err(|e| format!("{}: {e}", transcript.display()))?;
@@ -137,6 +140,11 @@ fn replay(transcript: &Path, log: Option<PathBuf>) -> Result<i32, String> {
                     other => return Err(format!("line {at}: unknown kind {other:?}")),
                 };
                 writeln!(out, "{wire}").map_err(|e| e.to_string())?;
+                out.flush().map_err(|e| e.to_string())?;
+            }
+            // A line that isn't JSON-RPC (Antigravity prints its sign-in link on stdout).
+            "emit_raw" => {
+                writeln!(out, "{}", entry["line"].as_str().unwrap_or_default()).map_err(|e| e.to_string())?;
                 out.flush().map_err(|e| e.to_string())?;
             }
             "expect_outbound" => {
@@ -256,7 +264,12 @@ impl Harness {
     }
 
     async fn open_in(dir: tempfile::TempDir, transcript: &str, runtime: RuntimeMode, tweak: impl FnOnce(&mut SessionConfig)) -> Self {
-        let acp = Acp::new("test".into(), fake_config(&transcript_path(transcript), &dir.path().join("log.ndjson")));
+        Self::open_as("test", dir, transcript, runtime, tweak).await
+    }
+
+    /// As the agent `[[acp]]` names `name` (a known name starts it as that flavor).
+    async fn open_as(name: &str, dir: tempfile::TempDir, transcript: &str, runtime: RuntimeMode, tweak: impl FnOnce(&mut SessionConfig)) -> Self {
+        let acp = Acp::new(name.into(), fake_config(&transcript_path(transcript), &dir.path().join("log.ndjson")));
         let mut cfg = session_config(&std::fs::canonicalize(dir.path()).unwrap(), runtime);
         tweak(&mut cfg);
         let (session, rx) = acp.start(cfg).await.expect("start");
@@ -889,6 +902,298 @@ async fn grok_prompt_error() {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Antigravity (transcripts from T3 Code's Antigravity tests)
+// ---------------------------------------------------------------------------------------------
+
+/// Started as `antigravity`, so roll sends Antigravity's client capabilities.
+async fn antigravity(transcript: &str, runtime: RuntimeMode, files: &[(&str, &str)], tweak: impl FnOnce(&mut SessionConfig)) -> Harness {
+    let dir = tempfile::tempdir().unwrap();
+    for (name, text) in files {
+        std::fs::write(dir.path().join(name), text).unwrap();
+    }
+    Harness::open_as("antigravity", dir, transcript, runtime, tweak).await
+}
+
+/// 1.4.5: an eager `authenticate`, `run_workflow` off and the instructions in the system prompt
+/// (not the first prompt), the grouped model option and thinking, `yolo` for full access, and
+/// Gemini usage (cached reads in the input, thoughts in the output).
+#[tokio::test]
+async fn antigravity_new_session() {
+    let mut h = antigravity("antigravity_new_session", RuntimeMode::FullAccess, &[], |cfg| {
+        cfg.model = Some("gemini-3-pro-preview".into());
+        cfg.effort = Some("high".into());
+        cfg.instructions = Some("be brief".into());
+    })
+    .await;
+    assert_eq!(h.turn("Say hi").await, TurnEnd::Completed);
+    let ws = h.ws();
+    let (events, log) = h.finish().await;
+    golden("antigravity_new_session", &events, &ws);
+    assert_eq!(messages(&events), ["hi"]);
+    assert!(events.contains(&ProviderEvent::Model { model: "gemini-3-pro-preview".into() }));
+    // The catalog: its grouped model option, with its thinking levels as the reasoning option.
+    let catalog = events.iter().find_map(|e| if let ProviderEvent::Catalog { models } = e { Some(models) } else { None }).unwrap();
+    assert_eq!(catalog.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["gemini-3-flash", "gemini-3-pro-preview", "claude-sonnet-4-5"]);
+    assert_eq!(catalog[1].efforts(), ["low", "high"]);
+    let usage = events.iter().rev().find_map(|e| if let ProviderEvent::Usage(u) = e { Some(*u) } else { None }).unwrap();
+    assert_eq!((usage.input_tokens, usage.output_tokens, usage.cached_tokens), (140, 15, 40));
+    // roll names itself; it never claims to be another client.
+    assert_eq!(sent(&log, "initialize")[0]["clientInfo"]["name"], "roll");
+    let methods: Vec<_> = log.iter().filter_map(|f| f["method"].as_str()).take(3).collect();
+    assert_eq!(methods, ["initialize", "authenticate", "session/new"]);
+}
+
+/// A resume is `session/resume` (a load replays every tool call); 1.1.1 takes no session
+/// `_meta`, so instructions ride in front of the first prompt; `refusal` is the quota.
+#[tokio::test]
+async fn antigravity_resume_refusal() {
+    let mut h = antigravity("antigravity_resume_refusal", RuntimeMode::Ask, &[], |cfg| {
+        cfg.resume = Some("agy-session-1".into());
+        cfg.instructions = Some("be brief".into());
+    })
+    .await;
+    let TurnEnd::Failed(why) = h.turn("Go on").await else { panic!() };
+    assert_eq!(why, "You have reached your Antigravity quota for this period.");
+    let ws = h.ws();
+    let (events, log) = h.finish().await;
+    golden("antigravity_resume_refusal", &events, &ws);
+    assert!(sent(&log, "session/load").is_empty());
+    assert!(sent(&log, "session/resume")[0].get("_meta").is_none());
+    // Ask is its `default` mode, already current: nothing is written.
+    assert!(sent(&log, "session/set_config_option").is_empty());
+}
+
+/// A turn in ask mode: its `interaction_*` permission request is a single-choice question; a
+/// subagent launch shows the launch from its permission prompt and runs until the turn ends; a
+/// command keeps Antigravity's names (`CommandLine`, `combinedOutput`) and its "allow always"
+/// warning is the approval's reason.
+#[tokio::test]
+async fn antigravity_turn() {
+    let mut h = antigravity("antigravity_turn", RuntimeMode::Ask, &[], |_| {}).await;
+    h.send("Verify the probe").await;
+    let (id, item, body) = h.request().await;
+    let RequestBody::Questions { questions } = body else { panic!("{body:?}") };
+    assert_eq!(item, None);
+    assert_eq!((questions[0].id.as_str(), questions[0].header.as_str()), ("interaction_9960062f", "Question"));
+    assert_eq!(questions[0].question, "Which result label should be used for the verification?");
+    assert_eq!(questions[0].options.iter().map(|o| o.label.as_str()).collect::<Vec<_>>(), ["Verified", "Needs review"]);
+    assert!(!questions[0].multi);
+    // A free answer isn't one of its options: the question stays open.
+    let free = [("interaction_9960062f".to_string(), "Something else".to_string())].into();
+    assert!(h.session.respond(&id, &Response::Answers { answers: free }).await.is_err());
+    let answers = [("interaction_9960062f".to_string(), "Needs review".to_string())].into();
+    h.session.respond(&id, &Response::Answers { answers }).await.unwrap();
+
+    let (id, item, body) = h.request().await;
+    assert_eq!(item.as_deref(), Some("35bea692fa95447fbdae6333fec5515f"));
+    let RequestBody::Approval(approval) = body else { panic!() };
+    assert_eq!((approval.action, approval.title.as_str()), (ApprovalAction::Tool, "Run invoke_subagent?"));
+    h.decide(&id, Decision::Accept).await;
+
+    let (id, item, body) = h.request().await;
+    assert_eq!(item.as_deref(), Some("fc28d0af6ad14be8bbba20f4258d4d3e"));
+    let RequestBody::Approval(approval) = body else { panic!() };
+    assert_eq!((approval.action, approval.command.as_deref()), (ApprovalAction::Command, Some("cat probe.txt")));
+    assert_eq!(approval.reason.as_deref(), Some("Untrusted files could re-run this action without asking."));
+    assert_eq!(approval.decisions, [Decision::Accept, Decision::AcceptForSession, Decision::Decline, Decision::Cancel]);
+    h.decide(&id, Decision::AcceptForSession).await;
+    assert_eq!(h.turn_end().await, TurnEnd::Completed);
+
+    let ws = h.ws();
+    let (events, _) = h.finish().await;
+    golden("antigravity_turn", &events, &ws);
+    let all = latest(&events);
+    let launch = &all["35bea692fa95447fbdae6333fec5515f"];
+    assert_eq!(
+        launch.body,
+        NodeBody::Subagent { agent: "Readme Reader".into(), prompt: "Read README.md".into(), child: None, result: None, progress: None, model: None }
+    );
+    assert_eq!(launch.status, NodeStatus::Completed);
+    // Its tool said completed long before the turn ended: it ran until then.
+    assert!(items(&events).iter().any(|i| i.id == launch.id && i.status == NodeStatus::Running && matches!(i.body, NodeBody::Subagent { .. })));
+    let NodeBody::Tool(command) = &all["fc28d0af6ad14be8bbba20f4258d4d3e"].body else { panic!() };
+    assert_eq!((command.kind, command.title.as_str()), (ToolKind::Command, "cat probe.txt"));
+    assert_eq!((command.output.as_deref(), command.exit_code), (Some("after\n"), Some(0)));
+    assert!(!format!("{events:?}").contains("formatted_output"));
+}
+
+/// The agent never completes some `client_view_file` calls and later fails them with an
+/// unrelated error: a read roll served shows completed, before or after it was announced; a
+/// read roll refused fails.
+#[tokio::test]
+async fn antigravity_read_repair() {
+    let mut h = antigravity("antigravity_read_repair", RuntimeMode::FullAccess, &[("a.txt", "A\n"), ("b.txt", "B\n")], |_| {}).await;
+    assert_eq!(h.turn("Read both files").await, TurnEnd::Completed);
+    let ws = h.ws();
+    let (events, _) = h.finish().await;
+    golden("antigravity_read_repair", &events, &ws);
+    let all = latest(&events);
+    assert_eq!(all["call_late"].status, NodeStatus::Completed);
+    assert_eq!(all["call_now"].status, NodeStatus::Completed);
+    assert_eq!(all["call_refused"].status, NodeStatus::Failed);
+    // The step error a served read was failed with isn't shown.
+    let NodeBody::Tool(read) = &all["call_now"].body else { panic!() };
+    assert_eq!(read.output, None);
+}
+
+/// An Antigravity install: the fake as `agy_acp_server.par`, `localharness_external` beside it.
+fn agy_install(dir: &Path, harness: bool) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let install = dir.join("agy");
+    std::fs::create_dir_all(&install).unwrap();
+    let mut files = vec![("agy_acp_server.par", "#!/bin/sh\nexec /bin/sh \"$@\"\n")];
+    if harness {
+        files.push(("localharness_external", "#!/bin/sh\nexit 0\n"));
+    }
+    for (name, text) in files {
+        std::fs::write(install.join(name), text).unwrap();
+        std::fs::set_permissions(install.join(name), std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    install.join("agy_acp_server.par")
+}
+
+/// Not signed in, `authenticate` prints a sign-in link on stdout (not JSON): the start fails as
+/// a sign-in (the link isn't repeated), and the status says so from then on. The launch sets the
+/// harness beside the real binary.
+#[tokio::test]
+async fn antigravity_sign_in_required() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("log.ndjson");
+    let binary = agy_install(dir.path(), true);
+    let acp = Acp::new("antigravity".into(), ProviderConfig { binary: Some(binary.clone()), ..fake_config(&transcript_path("antigravity_sign_in"), &log) });
+    let ws = tempfile::tempdir().unwrap();
+    let err = acp.start(session_config(ws.path(), RuntimeMode::FullAccess)).await.err().expect("not signed in");
+    let why = format!("{err:#}");
+    assert!(why.contains("Google Antigravity isn't signed in"), "{why}");
+    assert!(!why.contains("accounts.google.com") && !why.contains("isn't JSON"), "{why}");
+    let first: Value = serde_json::from_str(std::fs::read_to_string(&log).unwrap().lines().next().unwrap()).unwrap();
+    let harness = std::fs::canonicalize(dir.path()).unwrap().join("agy/localharness_external");
+    assert_eq!(first["env"], json!({ "ANTIGRAVITY_HARNESS_PATH": harness, "PYTHONUNBUFFERED": "1" }));
+
+    let info = acp.info().await;
+    assert!(info.installed);
+    assert_eq!(info.auth, AuthStatus::Missing);
+    assert!(info.detail.unwrap().contains("isn't signed in"));
+}
+
+/// Its status never starts it (it unpacks about 1 GB each launch): installed is the binary with
+/// its harness beside it, no plan mode (its own `/plan` is a message), subagents reported.
+#[tokio::test]
+async fn antigravity_info_never_starts_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("log.ndjson");
+    let cfg = |binary: PathBuf| ProviderConfig { binary: Some(binary), ..fake_config(Path::new("/nonexistent"), &log) };
+    let info = Acp::new("antigravity".into(), cfg(agy_install(dir.path(), true))).info().await;
+    assert!(info.installed);
+    assert_eq!((info.name.as_str(), info.auth), ("Google Antigravity", AuthStatus::Unknown));
+    assert!(!info.capabilities.plan_mode && info.capabilities.subagents && info.capabilities.images);
+    assert!(!log.exists(), "the status check started the agent");
+
+    let other = tempfile::tempdir().unwrap();
+    let info = Acp::new("antigravity".into(), cfg(agy_install(other.path(), false))).info().await;
+    assert!(!info.installed);
+    assert!(info.detail.unwrap().contains("localharness_external"));
+    let missing = Acp::new("antigravity".into(), ProviderConfig::default()).info().await;
+    assert!(!missing.installed && missing.detail.unwrap().contains("ACP registry"));
+    let known = known_agents().into_iter().find(|a| a.name == "antigravity").unwrap();
+    assert_eq!(known.config.binary.as_deref(), Some(Path::new("agy_acp_server.par")));
+}
+
+// ---------------------------------------------------------------------------------------------
+// Cursor (its real `initialize`; the rest from its ACP server's source)
+// ---------------------------------------------------------------------------------------------
+
+/// `cursor-agent acp`: asked for its parameterized picker, a model's parameters become T3's
+/// options (effort as the thread's effort, `context` the window, `fast` the speed, `true`/`false`
+/// selects as switches, `auto` as its `default`); `$review` goes out as `/review` for a SKILL.md
+/// skill; `updateTodos` and `createPlan` show as todos and a plan; `task` is a subagent with
+/// its model and end; `cursor/ask_question` is a question answered with option ids.
+#[tokio::test]
+async fn cursor_turn() {
+    let dir = tempfile::tempdir().unwrap();
+    let skill = dir.path().join(".cursor/skills/review");
+    std::fs::create_dir_all(&skill).unwrap();
+    std::fs::write(skill.join("SKILL.md"), "---\nname: Review\ndescription: Reviews a diff\n---\n").unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let home_dir = home.path().display().to_string();
+    let mut h = Harness::open_as("cursor", dir, "cursor_turn", RuntimeMode::FullAccess, |cfg| {
+        cfg.model = Some("auto".into());
+        cfg.effort = Some("high".into());
+        cfg.options = agent_proto::ModelOptions::from([
+            ("fast".into(), agent_proto::OptionValue::Flag(true)),
+            ("context".into(), agent_proto::OptionValue::Choice("200k".into())),
+            ("thinking".into(), agent_proto::OptionValue::Flag(false)),
+        ]);
+        cfg.env = vec![("HOME".into(), home_dir)];
+    })
+    .await;
+    h.send("$review the diff, then $nothing").await;
+    let (id, item, body) = h.request().await;
+    assert_eq!(item, None);
+    let RequestBody::Questions { questions } = body else { panic!("{body:?}") };
+    assert_eq!((questions[0].header.as_str(), questions[0].question.as_str()), ("Review", "How deep?"));
+    let answers = [("depth".to_string(), "Thorough".to_string())].into();
+    h.session.respond(&id, &Response::Answers { answers }).await.unwrap();
+    assert_eq!(h.turn_end().await, TurnEnd::Completed);
+    let ws = h.ws();
+    let (events, _) = h.finish().await;
+    golden("cursor_turn", &events, &ws);
+
+    // The catalog, as T3 shows Cursor's parameters.
+    let catalog = events.iter().find_map(|e| if let ProviderEvent::Catalog { models } = e { Some(models) } else { None }).unwrap();
+    assert_eq!(catalog.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["default", "composer-2", "claude-opus-4-8"]);
+    let options = &catalog[1].options;
+    assert_eq!(options.iter().map(|o| o.id()).collect::<Vec<_>>(), ["effort", "context", "fast", "thinking"]);
+    assert_eq!(options.iter().map(|o| o.role()).collect::<Vec<_>>(), [Some(OptionRole::Reasoning), Some(OptionRole::ContextWindow), Some(OptionRole::Speed), None]);
+    assert!(matches!(options[2], ModelOption::Boolean { default: false, .. }) && matches!(options[3], ModelOption::Boolean { .. }));
+
+    let all = latest(&events);
+    // Todos merged by id; the plan an item of its own; no tool rows for either.
+    let NodeBody::Todos { items: todos } = &all["plan:1"].body else { panic!() };
+    assert_eq!(todos.iter().map(|t| (t.text.as_str(), t.status)).collect::<Vec<_>>(), [("Read the diff", TodoStatus::Completed), ("Write the review", TodoStatus::Pending)]);
+    assert_eq!(all["plan:1:toolu_plan_1"].body, NodeBody::Plan { text: "# Review\n\n1. Read\n2. Write".into() });
+    assert!(!all.contains_key("toolu_todos_1") && !all.contains_key("toolu_plan_1"));
+    let task = &all["toolu_task_1"];
+    assert_eq!(task.status, NodeStatus::Completed);
+    let NodeBody::Subagent { agent, prompt, model, result, .. } = &task.body else { panic!("{task:?}") };
+    assert_eq!((agent.as_str(), prompt.as_str(), model.as_deref(), result.as_deref()), ("explore", "List the crates", Some("composer-2"), Some("Found 3 crates.")));
+    // The child's session isn't this one's; the window is its `context` option's.
+    assert_eq!(messages(&events), ["Reviewed."]);
+    assert!(events.iter().any(|e| matches!(e, ProviderEvent::Context(c) if c.used_tokens == 5000 && c.max_tokens == Some(200_000))));
+}
+
+/// Cursor's status is its own: `cursor-agent status --format json` (as 2026.11.05 prints it).
+#[tokio::test]
+async fn cursor_status_is_its_own() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("log.ndjson");
+    let t = vec![
+        expect("request", "initialize", json!({ "protocolVersion": 2, "clientCapabilities": { "_meta": { "parameterizedModelPicker": true } } })),
+        emit("response", "initialize", serde_json::from_str::<Value>(include_str!("fixtures/acp/cursor-initialize.json")).unwrap()),
+        exit_ok(),
+    ];
+    let path = synthetic(dir.path(), "status", &t);
+    let status = |json: &str| {
+        // `status --format json` answers; anything else is the fake ACP agent.
+        let bin = dir.path().join("cursor-agent");
+        let script = format!("#!/bin/sh\nif [ \"$1\" = status ]; then printf '%s' '{json}'; exit 0; fi\nexec /bin/sh \"$@\"\n");
+        std::fs::write(&bin, script).unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        ProviderConfig { binary: Some(bin), ..fake_config(Path::new(&path), &log) }
+    };
+    let ok = status(r#"{ "status": "authenticated", "isAuthenticated": true, "userInfo": { "email": "a@b.c" } }"#);
+    let info = Acp::new("cursor".into(), ok).info().await;
+    assert!(info.installed);
+    assert_eq!((info.name.as_str(), info.auth, info.detail.as_deref()), ("Cursor", AuthStatus::Ready, Some("Logged in as a@b.c")));
+    assert!(info.capabilities.subagents && info.capabilities.plan_mode);
+    let out = status(r#"{ "status": "unauthenticated", "isAuthenticated": false, "message": "Not logged in" }"#);
+    let info = Acp::new("cursor".into(), out).info().await;
+    assert_eq!(info.auth, AuthStatus::Missing);
+    assert!(info.detail.unwrap().contains("cursor-agent login"));
+}
+
+// ---------------------------------------------------------------------------------------------
 // Written here
 // ---------------------------------------------------------------------------------------------
 
@@ -1146,9 +1451,10 @@ async fn info_probes_without_side_effects() {
     ];
     let path = synthetic(dir.path(), "info", &t);
     let log = dir.path().join("log.ndjson");
-    let info = Acp::new("antigravity".into(), fake_config(Path::new(&path), &log)).info().await;
+    let info = Acp::new("registry-agent".into(), fake_config(Path::new(&path), &log)).info().await;
     assert!(info.installed);
-    assert_eq!(info.id.as_str(), "acp:antigravity");
+    assert_eq!(info.id.as_str(), "acp:registry-agent");
+    // An agent roll doesn't know is named as it names itself.
     assert_eq!(info.name, "Google Antigravity");
     assert_eq!(info.version.as_deref(), Some("1.1.1"));
     assert_eq!(info.auth, AuthStatus::Unknown);
@@ -1179,7 +1485,7 @@ async fn info_marks_an_agent_that_never_answers_unavailable() {
 #[test]
 fn known_agents_cover_t3s() {
     let names: Vec<_> = known_agents().into_iter().map(|a| a.name).collect();
-    for name in ["gemini", "opencode", "grok", "kiro", "fx", "qwen", "goose", "copilot"] {
+    for name in ["gemini", "opencode", "grok", "kiro", "fx", "qwen", "goose", "copilot", "antigravity"] {
         assert!(names.contains(&name.to_string()), "{name}");
     }
     assert!(installed_agents().len() <= names.len());

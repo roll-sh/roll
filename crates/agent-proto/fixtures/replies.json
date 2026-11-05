@@ -295,6 +295,56 @@
     "truncated": true
   },
   {
+    "type": "registry",
+    "agents": [
+      {
+        "id": "goose",
+        "name": "goose",
+        "version": "1.57.0",
+        "description": "A local, extensible, open source AI agent that automates engineering tasks",
+        "repository": "https://github.com/block/goose",
+        "icon": "https://cdn.agentclientprotocol.com/registry/v1/latest/goose.svg",
+        "kinds": [
+          "binary"
+        ],
+        "installable": true,
+        "integrity": "sha256",
+        "installed": "1.57.0",
+        "offered": "acp:goose"
+      },
+      {
+        "id": "fast-agent",
+        "name": "fast-agent",
+        "version": "0.10.1",
+        "website": "https://fast-agent.ai",
+        "kinds": [
+          "uvx"
+        ],
+        "installable": false,
+        "integrity": "registry"
+      },
+      {
+        "id": "junie",
+        "name": "Junie",
+        "version": "3959.5.0",
+        "description": "JetBrains' coding agent",
+        "kinds": [
+          "binary",
+          "npx"
+        ],
+        "installable": true,
+        "integrity": "none"
+      }
+    ],
+    "fetched_at": 1762000000000
+  },
+  {
+    "type": "registry",
+    "agents": [],
+    "fetched_at": 0,
+    "error": "couldn't fetch the ACP registry: timed out"
+  },
+  {
     "type": "error",
     "code": "machine_offline",
     "message": "the machine isn't connected"

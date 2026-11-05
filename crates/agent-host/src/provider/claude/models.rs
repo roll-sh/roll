@@ -5,9 +5,9 @@
 //! `alwaysThinkingEnabled` in `--settings`, a `[1m]` suffix for the 1M context window, and an
 //! `Ultrathink:` prompt prefix. Each model's context window follows the manifest's
 //! `fixedContextWindowTokens` / `contextWindowTokens`, as `resolveClaudeCatalogContextWindowTokens`
-//! reads them.
+//! reads them. A current model is "new" for a week after its `releasedAt` (`ModelManifest.ts`).
 
-use agent_proto::{ModelInfo, ModelOption, ModelOptions, OptionChoice, OptionRole, OptionValue, UpdateRequired};
+use agent_proto::{ModelBadge, ModelInfo, ModelOption, ModelOptions, OptionChoice, OptionRole, OptionValue, UpdateRequired};
 
 /// A manifest profile: what a family of models takes.
 struct Profile {
@@ -30,6 +30,8 @@ struct Model {
     min_version: Option<(u32, u32, u32)>,
     legacy: bool,
     profile: &'static Profile,
+    /// The manifest's `releasedAt` (year, month, day), for the "New" badge.
+    released: Option<(i64, u32, u32)>,
 }
 
 const WITH_ULTRACODE: &[&str] = &["low", "medium", "high", "xhigh", "max", "ultracode", "ultrathink"];
@@ -53,19 +55,19 @@ const fn v(major: u32, minor: u32, patch: u32) -> Option<(u32, u32, u32)> {
 
 /// T3's default Claude model comes first; legacy ones after the current ones.
 const MODELS: &[Model] = &[
-    Model { id: "claude-opus-5-5", name: "Claude Opus 5.5", min_version: v(2, 1, 280), legacy: false, profile: &OPUS_5_5 },
-    Model { id: "claude-sonnet-5-5", name: "Claude Sonnet 5.5", min_version: v(2, 1, 284), legacy: false, profile: &SONNET_5 },
-    Model { id: "claude-haiku-5-5", name: "Claude Haiku 5.5", min_version: v(2, 1, 293), legacy: false, profile: &HAIKU_5_5 },
-    Model { id: "claude-fable-5-1", name: "Claude Fable 5.1", min_version: v(2, 1, 257), legacy: false, profile: &FABLE_5 },
-    Model { id: "claude-fable-5", name: "Claude Fable 5", min_version: v(2, 1, 169), legacy: true, profile: &FABLE_5 },
-    Model { id: "claude-opus-5", name: "Claude Opus 5", min_version: v(2, 1, 219), legacy: true, profile: &OPUS_5 },
-    Model { id: "claude-opus-4-8", name: "Claude Opus 4.8", min_version: v(2, 1, 154), legacy: true, profile: &OPUS_5 },
-    Model { id: "claude-opus-4-7", name: "Claude Opus 4.7", min_version: v(2, 1, 111), legacy: true, profile: &OPUS_4_7 },
-    Model { id: "claude-opus-4-6", name: "Claude Opus 4.6", min_version: None, legacy: true, profile: &OPUS_4_6 },
-    Model { id: "claude-opus-4-5", name: "Claude Opus 4.5", min_version: None, legacy: true, profile: &OPUS_4_5 },
-    Model { id: "claude-sonnet-5", name: "Claude Sonnet 5", min_version: None, legacy: true, profile: &SONNET_5 },
-    Model { id: "claude-sonnet-4-6", name: "Claude Sonnet 4.6", min_version: None, legacy: true, profile: &SONNET_4_6 },
-    Model { id: "claude-haiku-4-5", name: "Claude Haiku 4.5", min_version: None, legacy: true, profile: &HAIKU_4_5 },
+    Model { id: "claude-opus-5-5", name: "Claude Opus 5.5", min_version: v(2, 1, 280), legacy: false, profile: &OPUS_5_5, released: None },
+    Model { id: "claude-sonnet-5-5", name: "Claude Sonnet 5.5", min_version: v(2, 1, 284), legacy: false, profile: &SONNET_5, released: None },
+    Model { id: "claude-haiku-5-5", name: "Claude Haiku 5.5", min_version: v(2, 1, 293), legacy: false, profile: &HAIKU_5_5, released: Some((2026, 10, 7)) },
+    Model { id: "claude-fable-5-1", name: "Claude Fable 5.1", min_version: v(2, 1, 257), legacy: false, profile: &FABLE_5, released: None },
+    Model { id: "claude-fable-5", name: "Claude Fable 5", min_version: v(2, 1, 169), legacy: true, profile: &FABLE_5, released: None },
+    Model { id: "claude-opus-5", name: "Claude Opus 5", min_version: v(2, 1, 219), legacy: true, profile: &OPUS_5, released: None },
+    Model { id: "claude-opus-4-8", name: "Claude Opus 4.8", min_version: v(2, 1, 154), legacy: true, profile: &OPUS_5, released: None },
+    Model { id: "claude-opus-4-7", name: "Claude Opus 4.7", min_version: v(2, 1, 111), legacy: true, profile: &OPUS_4_7, released: None },
+    Model { id: "claude-opus-4-6", name: "Claude Opus 4.6", min_version: None, legacy: true, profile: &OPUS_4_6, released: None },
+    Model { id: "claude-opus-4-5", name: "Claude Opus 4.5", min_version: None, legacy: true, profile: &OPUS_4_5, released: None },
+    Model { id: "claude-sonnet-5", name: "Claude Sonnet 5", min_version: None, legacy: true, profile: &SONNET_5, released: None },
+    Model { id: "claude-sonnet-4-6", name: "Claude Sonnet 4.6", min_version: None, legacy: true, profile: &SONNET_4_6, released: None },
+    Model { id: "claude-haiku-4-5", name: "Claude Haiku 4.5", min_version: None, legacy: true, profile: &HAIKU_4_5, released: None },
 ];
 
 pub(super) const FAST_MODE: &str = "fastMode";
@@ -110,12 +112,39 @@ fn options(p: &Profile) -> Vec<ModelOption> {
     out
 }
 
-fn info(m: &Model, default: bool) -> ModelInfo {
+/// T3's `MODEL_NEW_BADGE_DURATION_MS`.
+const NEW_FOR_DAYS: i64 = 7;
+
+/// Days since 1970-01-01 of a civil date (Howard Hinnant's `days_from_civil`).
+fn days(y: i64, m: u32, d: u32) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let mp = (i64::from(m) + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + i64::from(d) - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+/// Today, in days since 1970-01-01 (UTC).
+fn today() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| (d.as_secs() / 86_400) as i64)
+}
+
+/// "New" from its release day for a week, for a current model (T3's `showNewBadge`).
+fn badge(m: &Model, today: i64) -> Option<ModelBadge> {
+    let (y, mo, d) = m.released?;
+    let age = today - days(y, mo, d);
+    (!m.legacy && (0..NEW_FOR_DAYS).contains(&age)).then_some(ModelBadge::New)
+}
+
+fn info(m: &Model, default: bool, today: i64) -> ModelInfo {
     ModelInfo {
         short_name: m.name.strip_prefix("Claude ").map(str::to_string),
         default,
         options: options(m.profile),
         legacy: m.legacy,
+        badge: badge(m, today),
         ..ModelInfo::new(m.id, m.name)
     }
 }
@@ -123,12 +152,17 @@ fn info(m: &Model, default: bool) -> ModelInfo {
 /// The models an installed Claude Code (`version` like `2.1.310`) can run, all of them when the
 /// version is unknown, and the current ones it is too old for.
 pub(super) fn models(version: Option<&str>) -> (Vec<ModelInfo>, Vec<UpdateRequired>) {
+    models_on(version, today())
+}
+
+/// [`models`] as of `today` (days since 1970-01-01).
+fn models_on(version: Option<&str>, today: i64) -> (Vec<ModelInfo>, Vec<UpdateRequired>) {
     let installed = version.and_then(parse_version);
     let runs = |m: &Model| match (installed, m.min_version) {
         (Some(have), Some(need)) => have >= need,
         _ => true,
     };
-    let models = MODELS.iter().filter(|m| runs(m)).enumerate().map(|(i, m)| info(m, i == 0)).collect();
+    let models = MODELS.iter().filter(|m| runs(m)).enumerate().map(|(i, m)| info(m, i == 0, today)).collect();
     let update = MODELS
         .iter()
         .filter(|m| !m.legacy && !runs(m))
@@ -253,6 +287,18 @@ pub(super) fn prompt_text(text: &str, compiled: &Compiled) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_current_model_is_new_for_a_week_after_its_release() {
+        assert_eq!(days(1970, 1, 1), 0);
+        assert_eq!(days(2026, 10, 7), 20_733);
+        let new = |today: i64| models_on(None, today).0.into_iter().filter(|m| m.badge == Some(ModelBadge::New)).map(|m| m.id).collect::<Vec<_>>();
+        let released = days(2026, 10, 7);
+        assert_eq!(new(released - 1), Vec::<String>::new(), "not before it's out");
+        assert_eq!(new(released), ["claude-haiku-5-5"]);
+        assert_eq!(new(released + 6), ["claude-haiku-5-5"]);
+        assert_eq!(new(released + 7), Vec::<String>::new(), "a week later it's just a model");
+    }
 
     fn ids(models: &[ModelInfo]) -> Vec<&str> {
         models.iter().filter(|m| !m.legacy).map(|m| m.id.as_str()).collect()

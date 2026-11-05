@@ -22,6 +22,17 @@ use tokio::sync::mpsc;
 /// Tool output kept on a node (agent-proto `ToolCall::output`): the middle of longer output is cut.
 const OUTPUT_CAP: usize = 64 << 10;
 
+/// Who started a run: a person (a message, a queued one, a plan to carry out), or the daemon
+/// itself, which the run's record says so the conversation never shows it as the user's words.
+pub(crate) enum StartedBy {
+    Person,
+    /// [`Run::idle_compaction`]: the idle thread compacted before its prompt cache expires (`idle.rs`).
+    IdleCompaction,
+    /// [`Run::delivers`]: these delegated tasks' results, waking the thread that delegated them
+    /// (`tasks.rs`).
+    Delivery(Vec<NodeId>),
+}
+
 /// The live part of the active run.
 pub(crate) struct Active {
     pub(crate) run: Run,
@@ -218,7 +229,7 @@ impl Host {
     }
 
     fn enqueue(&self, rt: &mut Rt, input: TurnInput) -> Res<Reply> {
-        let message = QueuedMessage { id: format!("msg_{}", suffix()), text: input.text, attachments: input.attachments, at: now() };
+        let message = QueuedMessage { id: format!("msg_{}", suffix()), text: input.text, attachments: input.attachments, at: now(), delivers: Vec::new() };
         let id = message.id.clone();
         rt.thread.queued.push(message);
         self.put_thread(rt)?;
@@ -309,11 +320,11 @@ impl Host {
     /// Starts a run for `input` on an idle thread. A run that fails to start is recorded as
     /// failed and the error returned.
     pub(crate) async fn start_run(&self, rt: &mut Rt, input: TurnInput) -> Res<RunId> {
-        self.start_run_as(rt, input, false).await
+        self.start_run_as(rt, input, StartedBy::Person).await
     }
 
-    /// [`Host::start_run`]; `idle_compaction`: the daemon compacts the idle thread (`idle.rs`).
-    pub(crate) async fn start_run_as(&self, rt: &mut Rt, input: TurnInput, idle_compaction: bool) -> Res<RunId> {
+    /// [`Host::start_run`] for a run the daemon may have started itself (`by`).
+    pub(crate) async fn start_run_as(&self, rt: &mut Rt, input: TurnInput, by: StartedBy) -> Res<RunId> {
         debug_assert!(rt.active.is_none());
         let at = now();
         let thread = &mut rt.thread;
@@ -328,7 +339,11 @@ impl Host {
             prompt: input.text.clone(),
             attachments: input.attachments.clone(),
             steers: Vec::new(),
-            idle_compaction,
+            idle_compaction: matches!(by, StartedBy::IdleCompaction),
+            delivers: match by {
+                StartedBy::Delivery(tasks) => tasks,
+                _ => Vec::new(),
+            },
             requested_at: at,
             started_at: None,
             completed_at: None,
@@ -1050,9 +1065,10 @@ impl Host {
             self.schedule_idle_compaction(&rt.thread, &active.run);
         }
         if let Some(next) = next {
+            let by = if next.delivers.is_empty() { StartedBy::Person } else { StartedBy::Delivery(next.delivers) };
             let input = TurnInput { text: next.text, attachments: next.attachments };
             // A failure is on the new run's record; nobody is waiting for this reply.
-            if let Err(Fail::Internal(e)) = Box::pin(self.start_run(rt, input)).await {
+            if let Err(Fail::Internal(e)) = Box::pin(self.start_run_as(rt, input, by)).await {
                 return Err(e);
             }
         }

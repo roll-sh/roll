@@ -41,7 +41,7 @@ impl Host {
     /// A provider's config: `config.toml`'s entry with the machine's settings over it, and the
     /// endpoint it uses over both (`endpoints.rs`).
     pub(crate) fn provider_config(&self, id: &ProviderId) -> ProviderConfig {
-        let cfg = merged(self.config.provider(id), &self.settings.lock().unwrap().provider(id));
+        let cfg = merged(self.base_config(id), &self.settings.lock().unwrap().provider(id));
         self.with_endpoint(id, cfg)
     }
 
@@ -97,7 +97,7 @@ impl Host {
     /// comes after that `hello`, so a client that has it sees the settings on the relay.
     pub(crate) async fn machine_configure(&self, settings: MachineSettings) -> Res<Reply> {
         let settings = settings.check().map_err(Fail::Invalid)?;
-        if let Some(id) = settings.providers.keys().find(|id| !self.providers.contains_key(*id)) {
+        if let Some(id) = settings.providers.keys().find(|id| !self.has_provider(id)) {
             return Err(Fail::Invalid(format!("no provider {} on this machine", id.0)));
         }
         let _guard = self.configuring.lock().await;
@@ -113,8 +113,8 @@ impl Host {
 
     /// Gives every provider its config with the settings over it.
     pub(crate) fn configure_providers(&self) {
-        for (id, provider) in &self.providers {
-            provider.configure(self.provider_config(id));
+        for (id, provider) in self.providers() {
+            provider.configure(self.provider_config(&id));
         }
     }
 
@@ -123,10 +123,11 @@ impl Host {
     /// what they fall back to.
     pub(crate) async fn machine_info(&self) -> MachineInfo {
         let settings = self.machine_settings();
-        let mut offered = Vec::with_capacity(self.providers.len());
-        let mut providers = Vec::with_capacity(self.providers.len());
-        for (id, provider) in &self.providers {
-            let file = self.config.provider(id);
+        let all = self.providers();
+        let mut offered = Vec::with_capacity(all.len());
+        let mut providers = Vec::with_capacity(all.len());
+        for (id, provider) in &all {
+            let file = self.base_config(id);
             let mut env: Vec<String> = file.env.iter().map(|(k, _)| k.clone()).collect();
             env.sort();
             env.dedup();
@@ -145,7 +146,8 @@ impl Host {
             for m in &set.models {
                 if !info.models.iter().any(|known| known.id == m.id) {
                     let name = m.name.clone().unwrap_or_else(|| m.id.clone());
-                    let options = provider.custom_model_options(&m.id, &info.models);
+                    // Its own options when the owner described them (T3's custom capabilities).
+                    let options = m.options.clone().unwrap_or_else(|| provider.custom_model_options(&m.id, &info.models));
                     info.models.push(ModelInfo { custom: true, options, ..ModelInfo::new(m.id.clone(), name) });
                 }
             }
@@ -194,6 +196,7 @@ impl Host {
                 config_path: self.config.home.join("config.toml").display().to_string(),
                 endpoints: self.endpoint_infos(),
                 gateway: self.gateway_info(),
+                registry: Some(self.registry.installed().iter().map(crate::registry::Installed::wire).collect()),
             })),
             seal_key: Some(self.seal_key()),
         }

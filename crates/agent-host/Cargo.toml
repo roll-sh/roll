@@ -13,8 +13,11 @@ anyhow.workspace = true
 async-trait.workspace = true
 axum.workspace = true
 base64.workspace = true
+# ACP registry archives (`registry/archive.rs`).
+bzip2.workspace = true
 curve25519-dalek.workspace = true
 diffy.workspace = true
+flate2.workspace = true
 futures-util.workspace = true
 hex.workspace = true
 hkdf.workspace = true
@@ -31,7 +34,10 @@ rusqlite.workspace = true
 rustls-native-certs.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# Skills' SKILL.md frontmatter (`provider/acp/cursor.rs`).
+serde_yaml_ng.workspace = true
 sha2.workspace = true
+tar.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tokio-rustls.workspace = true
@@ -39,6 +45,7 @@ tokio-tungstenite = { workspace = true, features = ["rustls-tls-native-roots"] }
 toml.workspace = true
 tracing.workspace = true
 zeroize = { workspace = true, features = ["serde"] }
+zip.workspace = true
 
 [dev-dependencies]
 code-control.workspace = true

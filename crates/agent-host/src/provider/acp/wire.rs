@@ -34,8 +34,21 @@ pub struct Initialize {
     pub auth_methods: Vec<AuthMethod>,
     /// Models advertised before any session (Grok: `_meta.modelState`).
     pub models: Option<Models>,
+    /// Which agent with quirks of its own this is, if any.
+    pub flavor: Flavor,
+}
+
+/// The agents with quirks of their own, told apart by what `initialize` says.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Flavor {
+    #[default]
+    Generic,
     /// Kiro (it sends no `agentInfo`, but its capabilities carry `_meta.kiro`).
-    pub kiro: bool,
+    Kiro,
+    /// Google Antigravity (`agentInfo.name` `antigravity-acp`; `antigravity.rs`).
+    Antigravity,
+    /// Cursor (`cursor-agent acp`; no `agentInfo`, but its `cursor_login` method; `cursor.rs`).
+    Cursor,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -69,9 +82,15 @@ pub fn initialize(v: &Value) -> Initialize {
         mcp_sse: false,
         auth_methods,
         models: models(&v["_meta"]["modelState"]),
-        kiro: false,
+        flavor: Flavor::Generic,
     };
-    init.kiro = init.name.to_lowercase().contains("kiro") || v["agentCapabilities"]["_meta"]["kiro"].is_object();
+    if init.name == super::antigravity::AGENT_NAME {
+        init.flavor = Flavor::Antigravity;
+    } else if init.auth_methods.iter().any(|m| m.id == super::cursor::AUTH_METHOD) || init.name.to_lowercase().contains("cursor") {
+        init.flavor = Flavor::Cursor;
+    } else if init.name.to_lowercase().contains("kiro") || v["agentCapabilities"]["_meta"]["kiro"].is_object() {
+        init.flavor = Flavor::Kiro;
+    }
     if v2 {
         // v2: the presence of a capability object is the capability.
         let session = &v["capabilities"]["session"];
@@ -278,6 +297,7 @@ mod tests {
         assert_eq!(init.generation, Generation::V1);
         assert_eq!(init.protocol_version, 2);
         assert_eq!(init.name, "antigravity-acp");
+        assert_eq!(init.flavor, Flavor::Antigravity);
         assert_eq!(init.version.as_deref(), Some("agy_acp_server_1.1.1"));
         assert!(init.load_session && init.resume_session && !init.close_session);
         assert!(init.images && init.mcp_http);
@@ -298,6 +318,12 @@ mod tests {
         let bare = initialize(&json!({}));
         assert_eq!(bare.generation, Generation::V1);
         assert!(!bare.load_session && !bare.images);
+
+        // cursor-agent 2026.11.05 sends no agentInfo: its sign-in method says it's Cursor.
+        let cursor: Value = serde_json::from_str(include_str!("../../../tests/fixtures/acp/cursor-initialize.json")).unwrap();
+        let cursor = initialize(&cursor);
+        assert_eq!((cursor.flavor, cursor.name.as_str()), (Flavor::Cursor, ""));
+        assert!(cursor.load_session && cursor.images && cursor.mcp_http && !cursor.resume_session);
     }
 
     #[test]

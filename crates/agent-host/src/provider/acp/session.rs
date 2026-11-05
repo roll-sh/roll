@@ -14,16 +14,19 @@
 //! effort and modes are applied with `session/set_config_option`, `session/set_model` or
 //! `session/set_mode`.
 
+use super::antigravity;
 use super::client::Client;
+use super::cursor;
 use super::policy::{self, OptionValue, Setting, Wanted};
 use super::rpc::{Inbound, Process, Rpc, RpcError};
 use super::translate::{Action, Quirks, Translator, rpc_id_string};
-use super::wire::{self, Generation, Initialize};
+use super::wire::{self, Flavor, Generation, Initialize};
 use crate::provider::{ProviderEvent, Session, SessionConfig, TurnInput};
 use agent_proto::{InteractionMode, Response, RuntimeMode};
 use anyhow::{Context, bail};
 use async_trait::async_trait;
 use serde_json::{Value, json};
+use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -57,23 +60,53 @@ struct State {
     options: agent_proto::ModelOptions,
     /// Sent in front of the first prompt (ACP has no system prompt).
     instructions: Option<String>,
+    /// Cursor's skills, whose `$name` mentions go out as its `/name`.
+    skills: BTreeSet<String>,
 }
 
 /// `initialize`: v2 fields with v1's alongside, so either generation can answer (T3:
-/// `toNegotiatingInitializeRequest`). The capabilities are what roll implements.
-pub fn initialize_params() -> Value {
+/// `toNegotiatingInitializeRequest`). The capabilities are what roll implements, less what the
+/// agent `expected` to answer handles badly (Antigravity: no writes, no terminals).
+pub fn initialize_params(expected: Flavor) -> Value {
     let info = json!({ "name": "roll", "title": "roll", "version": env!("CARGO_PKG_VERSION") });
+    let mut capabilities = json!({
+        "fs": { "readTextFile": true, "writeTextFile": true },
+        "terminal": true,
+        "elicitation": { "form": {} },
+    });
+    if expected == Flavor::Antigravity
+        && let (Some(caps), Value::Object(agy)) = (capabilities.as_object_mut(), antigravity::client_capabilities())
+    {
+        caps.extend(agy);
+    }
+    // Cursor lists a model's parameters as options of their own only when asked to.
+    if expected == Flavor::Cursor {
+        capabilities["_meta"] = cursor::client_meta();
+    }
     json!({
         "protocolVersion": 2,
         "info": info,
         "capabilities": { "elicitation": { "form": {} } },
         "clientInfo": info,
-        "clientCapabilities": {
-            "fs": { "readTextFile": true, "writeTextFile": true },
-            "terminal": true,
-            "elicitation": { "form": {} },
-        },
+        "clientCapabilities": capabilities,
     })
+}
+
+/// The agent needs a sign-in that roll never does for the user: ACP's -32000 ("authentication
+/// required", T3's `isAcpAuthenticationRequired`), or Antigravity's sign-in link.
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+pub struct SignInRequired(pub String);
+
+/// An error starting the session, as a [`SignInRequired`] when it is one.
+fn setup_error(e: RpcError, flavor: Flavor) -> anyhow::Error {
+    let antigravity = flavor == Flavor::Antigravity;
+    match &e {
+        RpcError::Server { code: -32000, .. } if antigravity => SignInRequired(antigravity::SIGN_IN.into()).into(),
+        RpcError::Server { code: -32000, .. } => SignInRequired(format!("{e}: sign in to the agent in a terminal first")).into(),
+        RpcError::Closed(why) if why == antigravity::SIGN_IN => SignInRequired(antigravity::SIGN_IN.into()).into(),
+        _ => e.into(),
+    }
 }
 
 /// roll's MCP servers, as the agent can take them (streamable HTTP only).
@@ -95,18 +128,44 @@ fn mcp_servers(init: &Initialize, cfg: &SessionConfig) -> Value {
     Value::Array(servers)
 }
 
-/// Start the session on a running agent: everything after `spawn`.
+/// Start the session on a running agent: everything after `spawn`. `expected` is the flavor
+/// the agent was started as (its client capabilities depend on it).
 pub(super) async fn open(
     rpc: Arc<Rpc>,
     process: Process,
     mut inbound: mpsc::UnboundedReceiver<Inbound>,
     cfg: &SessionConfig,
+    expected: Flavor,
 ) -> anyhow::Result<(AcpSession, mpsc::Receiver<ProviderEvent>)> {
-    let init = wire::initialize(&rpc.request("initialize", initialize_params()).await?);
+    let answer = rpc.request("initialize", initialize_params(expected)).await.map_err(|e| setup_error(e, expected))?;
+    let init = wire::initialize(&answer);
+    let flavor = init.flavor;
+    let antigravity = flavor == Flavor::Antigravity;
+    if antigravity {
+        // Eagerly, as T3 does: a session/new before it fails or starts a browser sign-in.
+        let method = antigravity::auth_method(&init.auth_methods);
+        rpc.request("authenticate", json!({ "methodId": method })).await.map_err(|e| match setup_error(e, flavor) {
+            e if e.is::<SignInRequired>() => e,
+            other => SignInRequired(format!("{} ({other:#})", antigravity::SIGN_IN)).into(),
+        })?;
+    }
+    let mut instructions = cfg.instructions.clone().filter(|i| !i.trim().is_empty());
+    // Antigravity 1.4.5 takes instructions as its system prompt's tail on every activation.
+    let meta = match antigravity {
+        true => antigravity::session_meta(init.version.as_deref(), instructions.as_deref()),
+        false => None,
+    };
+    if antigravity && antigravity::appends_system_prompt(init.version.as_deref()) {
+        instructions = None;
+    }
     let cwd = cfg.cwd.display().to_string();
     let servers = mcp_servers(&init, cfg);
-    let (method, params) = match (&cfg.resume, init.generation) {
+    let (method, mut params) = match (&cfg.resume, init.generation) {
         (None, _) => ("session/new", json!({ "cwd": cwd, "mcpServers": servers })),
+        // Antigravity: a load replays tool calls; a resume doesn't (T3's `resumeMethod`).
+        (Some(id), _) if antigravity && init.resume_session => {
+            ("session/resume", json!({ "sessionId": id, "cwd": cwd, "mcpServers": servers }))
+        }
         (Some(id), Generation::V1) if init.load_session => {
             ("session/load", json!({ "sessionId": id, "cwd": cwd, "mcpServers": servers }))
         }
@@ -116,6 +175,9 @@ pub(super) async fn open(
         }
         (Some(_), _) => bail!("{} can't resume a session (it offers neither session/load nor session/resume)", agent_name(&init)),
     };
+    if let Some(meta) = meta {
+        params["_meta"] = meta;
+    }
     let loading = method != "session/new";
     let tag = rpc.request_ordered(method, params);
     // Drive the connection until the setup answers; keep what arrives meanwhile.
@@ -125,7 +187,7 @@ pub(super) async fn open(
         match tokio::time::timeout(wait, inbound.recv()).await {
             Err(_) => break json!({}),
             Ok(None) => bail!("the agent closed the connection"),
-            Ok(Some(Inbound::Response { tag: t, result })) if t == tag => break result.map_err(setup_error)?,
+            Ok(Some(Inbound::Response { tag: t, result })) if t == tag => break result.map_err(|e| setup_error(e, flavor))?,
             Ok(Some(Inbound::Response { .. })) => {}
             Ok(Some(Inbound::Notification { method, params })) => early.push((method, params)),
             Ok(Some(Inbound::Request { id, method, .. })) => {
@@ -135,7 +197,10 @@ pub(super) async fn open(
                     _ => rpc.respond_error(&id, -32603, "the session isn't ready yet"),
                 }
             }
-            Ok(Some(Inbound::Closed { error })) => bail!("{}", error.unwrap_or_else(|| "the agent exited".into())),
+            Ok(Some(Inbound::Closed { error })) => {
+                let why = error.unwrap_or_else(|| "the agent exited".into());
+                return Err(if why == antigravity::SIGN_IN { SignInRequired(why).into() } else { anyhow::anyhow!(why) });
+            }
         }
     };
     let setup = wire::setup(&answer);
@@ -163,9 +228,18 @@ pub(super) async fn open(
     // What the agent offers, as it set the session up (before roll's choices are written): the
     // models and options the picker shows from now on (`catalog.rs`).
     let models = super::catalog::models(&tr.config, tr.models.as_ref());
+    // Cursor's parameters as T3 shows them.
+    let models = if flavor == Flavor::Cursor { cursor::catalog(models) } else { models };
     if !models.is_empty() {
         let _ = queue.send(ProviderEvent::Catalog { models });
     }
+    let skills = match flavor {
+        Flavor::Cursor => {
+            let (cwd, home) = (tr.cwd().to_path_buf(), home(&cfg.env));
+            tokio::task::spawn_blocking(move || cursor::skill_names(&cwd, home.as_deref())).await.unwrap_or_default()
+        }
+        _ => BTreeSet::new(),
+    };
     let client = Arc::new(Client::new(tr.cwd().to_path_buf(), cfg.env.clone()));
     let inner = Arc::new(Inner {
         rpc,
@@ -177,7 +251,8 @@ pub(super) async fn open(
             model: cfg.model.clone(),
             effort: cfg.effort.clone(),
             options: cfg.options.clone(),
-            instructions: cfg.instructions.clone().filter(|i| !i.trim().is_empty()),
+            instructions,
+            skills,
         }),
         queue,
         closing: AtomicBool::new(false),
@@ -191,17 +266,13 @@ pub(super) async fn open(
     Ok((AcpSession { inner }, rx))
 }
 
-fn setup_error(e: RpcError) -> anyhow::Error {
-    match &e {
-        // -32000 is ACP's "authentication required" (T3: `isAcpAuthenticationRequired`); roll
-        // never logs in on the user's behalf.
-        RpcError::Server { code: -32000, .. } => anyhow::anyhow!("{e}: sign in to the agent in a terminal first"),
-        _ => e.into(),
-    }
-}
-
 fn agent_name(init: &Initialize) -> &str {
     if init.name.is_empty() { "the agent" } else { &init.name }
+}
+
+/// The home directory the agent sees: the session's `HOME`, else the daemon's.
+fn home(env: &[(String, String)]) -> Option<std::path::PathBuf> {
+    env.iter().rev().find(|(k, _)| k == "HOME").map(|(_, v)| v.into()).or_else(|| std::env::var_os("HOME").map(Into::into))
 }
 
 /// Move queued events to the session's channel, in order, until `Exited`.
@@ -229,9 +300,18 @@ async fn pump(inner: std::sync::Weak<Inner>, mut inbound: mpsc::UnboundedReceive
             Inbound::Request { id, method, params } => {
                 if method.starts_with("fs/") || method.starts_with("terminal/") {
                     let access = inner.state.lock().unwrap().tr.access();
-                    let (rpc, client) = (inner.rpc.clone(), inner.client.clone());
+                    let (rpc, client, session) = (inner.rpc.clone(), inner.client.clone(), Arc::downgrade(&inner));
                     tokio::spawn(async move {
-                        match client.handle(&method, &params, access).await {
+                        let answer = client.handle(&method, &params, access).await;
+                        // Before the answer goes out, so the agent's next update sees it.
+                        if method == "fs/read_text_file"
+                            && let (Some(path), Some(inner)) = (params["path"].as_str(), session.upgrade())
+                        {
+                            let mut state = inner.state.lock().unwrap();
+                            let actions = state.tr.read_attempted(path, matches!(answer, Some(Ok(_))));
+                            inner.run_locked(actions);
+                        }
+                        match answer {
                             Some(Ok(result)) => rpc.respond(&id, result),
                             Some(Err(e)) => {
                                 tracing::debug!(target: "agent_host::acp", method, "refused: {}", e.message);
@@ -280,13 +360,20 @@ impl Inner {
         let (session, generation, settings) = {
             let state = self.state.lock().unwrap();
             let tr = &state.tr;
+            // Cursor's own id for T3's `auto`.
+            let offered: Vec<&str> = policy::model_option(&tr.config).map(|o| o.values().iter().map(|c| c.id.as_str()).collect()).unwrap_or_default();
+            let model = match self.init.flavor {
+                Flavor::Cursor => state.model.as_deref().map(|m| cursor::model(m, &offered)),
+                _ => state.model.as_deref(),
+            };
             let want = Wanted {
-                model: state.model.as_deref(),
+                model,
                 effort: state.effort.as_deref(),
                 options: &state.options,
                 runtime: tr.runtime,
                 interaction: tr.interaction,
                 opening,
+                permission_mode: (self.init.flavor == Flavor::Antigravity).then(|| antigravity::permission_mode(tr.runtime)),
             };
             let models = tr.models.as_ref();
             let settings = policy::settings(
@@ -391,6 +478,7 @@ impl Session for AcpSession {
         if state.tr.turn_active() {
             bail!("a turn is already running");
         }
+        let input = TurnInput { text: cursor::rewrite_mentions(&input.text, &state.skills), ..input };
         let prompt = inner.prompt(&input, state.instructions.as_deref())?;
         state.instructions = None;
         let params = json!({ "sessionId": state.tr.session(), "prompt": prompt });
@@ -471,11 +559,21 @@ mod tests {
 
     #[test]
     fn initialize_offers_v2_and_v1_and_what_roll_implements() {
-        let p = initialize_params();
+        let p = initialize_params(Flavor::Generic);
         assert_eq!(p["protocolVersion"], 2);
         assert_eq!(p["info"]["name"], "roll");
         assert_eq!(p["clientInfo"], p["info"]);
         assert_eq!(p["clientCapabilities"]["fs"], json!({ "readTextFile": true, "writeTextFile": true }));
         assert_eq!(p["clientCapabilities"]["terminal"], true);
+        // Antigravity reads through roll, but writes and runs commands itself.
+        let p = initialize_params(Flavor::Antigravity);
+        assert_eq!(p["clientCapabilities"]["fs"], json!({ "readTextFile": true, "writeTextFile": false }));
+        assert_eq!(p["clientCapabilities"]["terminal"], false);
+        assert_eq!(p["clientInfo"]["name"], "roll");
+        // Cursor is asked for its parameterized model picker.
+        let p = initialize_params(Flavor::Cursor);
+        assert_eq!(p["clientCapabilities"]["_meta"], json!({ "parameterizedModelPicker": true }));
+        assert_eq!(p["clientCapabilities"]["terminal"], true);
+        assert!(initialize_params(Flavor::Generic)["clientCapabilities"].get("_meta").is_none());
     }
 }

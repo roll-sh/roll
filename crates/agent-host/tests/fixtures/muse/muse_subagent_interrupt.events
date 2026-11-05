@@ -1,0 +1,9 @@
+{"native_thread":"01a12d28-7788-7000-a946-c407f380868e"}
+{"model":"muse-spark-1.3-contributor"}
+{"usage":{"cached_tokens":0,"input_tokens":32911,"output_tokens":264}}
+{"context":{"max_tokens":1007997,"used_tokens":33175}}
+{"item":{"body":{"input":{"command_id":"sleep-task-001","objective":"Run the shell command `sleep 30` and then reply with exactly: Done.","role":"sleeper"},"kind":"other","name":"subagent_spawn","title":"subagent_spawn","type":"tool"},"id":"01a12d28-885c-7a80-80d9-d97502d7cda8","parent":null,"status":"running"}}
+{"item":{"body":{"agent":"sleeper","prompt":"Run the shell command `sleep 30` and then reply with exactly: Done.","type":"subagent"},"id":"01a12d28-8885-71f3-9961-b8f4d747382b","parent":null,"status":"running"}}
+{"item":{"body":{"input":{"command_id":"sleep-task-001","objective":"Run the shell command `sleep 30` and then reply with exactly: Done.","role":"sleeper"},"kind":"other","name":"subagent_spawn","output":"tool cancelled","title":"subagent_spawn","type":"tool"},"id":"01a12d28-885c-7a80-80d9-d97502d7cda8","parent":null,"status":"interrupted"}}
+{"turn_ended":"interrupted"}
+{"exited":null}

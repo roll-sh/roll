@@ -66,7 +66,7 @@ describe("roll code on a thread", () => {
     await userEvent.click(await screen.findByRole("menuitem", { name: "Publish as a change" }));
     const form = screen.getByRole("form", { name: "Publish" });
     expect(within(form).getByRole("textbox", { name: "Commit message" })).toHaveValue("Fix the flaky queue test");
-    await userEvent.click(within(form).getByRole("checkbox", { name: "and land" }));
+    await userEvent.click(within(form).getByRole("switch", { name: "and land" }));
     await userEvent.click(within(form).getByRole("button", { name: "Publish" }));
     const done = await screen.findByRole("status", { name: "Published" });
     expect(h.command).toHaveBeenLastCalledWith("mch_1", expect.any(String), { type: "thread.publish", thread: "thr_1", message: "Fix the flaky queue test", land: true });
@@ -74,6 +74,21 @@ describe("roll code on a thread", () => {
     expect(within(done).getByText(/Not landed yet/)).not.toHaveClass("text-danger");
     expect(within(done).getByRole("list", { name: "Blockers" })).toHaveTextContent("check `test` hasn't passed");
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("says a queued landing once, not again in the landing's own words", async () => {
+    const t: Thread = thread({ worktree });
+    const reply = (c: Command): Reply =>
+      c.type === "thread.publish"
+        ? { type: "published", branch: "roll/x", commit: "4b825dc642cb", change: 43, url: "https://roll.sh/acme/roll/changes/43", landing: { status: "queued", message: "Queued: it lands once its batch passes the checks.", blockers: [] } }
+        : { type: "ok" };
+    const h = agentsHarness({ reply, entities: [mirrored("project", inRepo, 1), mirrored("thread", t, 2)], follow: ["thr_1"], ctx: { services: fakeServices() } });
+    renderAgents(<Conversation thread={t} machine={machine()} />, h);
+    await userEvent.click(screen.getByRole("button", { name: "More" }));
+    await userEvent.click(await screen.findByRole("menuitem", { name: "Publish as a change" }));
+    await userEvent.click(within(screen.getByRole("form", { name: "Publish" })).getByRole("button", { name: "Publish" }));
+    const done = await screen.findByRole("status", { name: "Published" });
+    expect(within(done).getAllByText(/it lands once its batch passes the checks/)).toHaveLength(1);
   });
 
   it("a thread outside a worktree is offered a fork into one before publishing", async () => {

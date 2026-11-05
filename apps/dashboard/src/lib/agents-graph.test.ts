@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { deriveGraph, keyOf, projectStats, rolling } from "./agents-graph";
+import { collapseUnused, deriveGraph, keyOf, projectStats, rolling } from "./agents-graph";
 import { arrange, bounds, centreAcross, dropIndex, fitView, mergeOrder, moveTo, nextCard, ROOTS, sideBySide, tidyLayout, withOrder, zoomAt, type LayoutOptions, type Point, type Rect, type Size } from "./agents-layout";
 import { applyEvents, emptyData, follow } from "./agents-store";
 import { approval, ev, machine, node, project, run, terminal, thread } from "@/test/agents";
@@ -377,5 +377,51 @@ describe("sandboxes and phones on the canvas", () => {
     // Never past the far end.
     const end = fitView(r, 390, 700, 24, 1, 0.55, { x: 2900, y: 0, w: 100, h: 100 });
     expect(end.x).toBeCloseTo(390 - 24 - 3000 * 0.55);
+  });
+});
+
+describe("projects without a card", () => {
+  // ada-mbp: roll (a thread), docs (nothing), cli (a terminal); build-box: web (nothing).
+  function world() {
+    return applyEvents(emptyData(), [
+      { type: "machine", cursor: 1, machine: machine() },
+      { type: "machine", cursor: 2, machine: machine({ id: "mch_2", name: "build-box" }) },
+      ev("project", project(), 3),
+      ev("project", project({ id: "prj_docs", name: "docs" }), 4),
+      ev("project", project({ id: "prj_cli", name: "cli" }), 5),
+      ev("project", project({ id: "prj_2", name: "web" }), 6, "mch_2"),
+      ev("thread", thread(), 7),
+      ev("terminal", terminal({ id: "trm_cli", project: "prj_cli", thread: null }), 8),
+    ]);
+  }
+
+  it("folds a project with nothing on the canvas into its machine's list, in name order", () => {
+    const { graph, unused } = collapseUnused(deriveGraph(world()), () => false);
+    expect(graph.nodes.get("m:mch_1")!.children).toEqual(["p:prj_cli", "p:prj_1"]);
+    expect(graph.nodes.has("p:prj_docs")).toBe(false);
+    expect(graph.edges.some((e) => e.to === "p:prj_docs")).toBe(false);
+    // A project with only a terminal on the canvas keeps its card.
+    expect(graph.nodes.has("p:prj_cli")).toBe(true);
+    expect(unused.get("mch_1")).toEqual(["prj_docs"]);
+    // A machine with no project card still shows, listing them.
+    expect(graph.roots).toEqual(["m:mch_1", "m:mch_2"]);
+    expect(graph.nodes.get("m:mch_2")!.children).toEqual([]);
+    expect(unused.get("mch_2")).toEqual(["prj_2"]);
+  });
+
+  it("keeps what it's told to (pinned, focused, filtered on), and a project's first thread brings its card back", () => {
+    const { graph, unused } = collapseUnused(deriveGraph(world()), (p) => p === "prj_docs");
+    expect(graph.nodes.has("p:prj_docs")).toBe(true);
+    expect(unused.has("mch_1")).toBe(false);
+    const more = applyEvents(world(), [ev("thread", thread({ id: "thr_d", project: "prj_2", title: "Docs" }), 9, "mch_2")]);
+    expect(collapseUnused(deriveGraph(more), () => false).graph.nodes.get("p:prj_2")!.children).toEqual(["t:thr_d"]);
+  });
+
+  it("leaves the graph as it is when every project has something, and projects as anchors alone", () => {
+    const g = deriveGraph(sample());
+    // Its only empty project (web) kept: nothing to fold.
+    expect(collapseUnused(g, (p) => p === "prj_2").graph).toBe(g);
+    const byProject = { ...g, roots: ["p:prj_2"], nodes: new Map([["p:prj_2", { ...g.nodes.get("p:prj_2")!, parent: null, children: [] }]]) };
+    expect(collapseUnused(byProject, () => false).graph).toBe(byProject);
   });
 });

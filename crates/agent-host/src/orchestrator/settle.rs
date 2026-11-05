@@ -232,6 +232,7 @@ mod tests {
             attachments: vec![],
             steers: vec![],
             idle_compaction: false,
+            delivers: Vec::new(),
             requested_at: requested,
             started_at: Some(requested + 1),
             completed_at: completed,

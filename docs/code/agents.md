@@ -248,6 +248,98 @@ completed, native thread ref). The orchestrator owns ids and turns those events 
   `auto_edit`, everything in `full_access`) and asks otherwise. The agent may call roll's
   `fs/*` and `terminal/*`, confined to the thread's directory; writes and terminals need the
   mode or an approval of the same kind in that turn.
+  - **Google Antigravity** (`acp:antigravity`, `acp/antigravity.rs`, ported from T3's
+    `provider/acp/Antigravity*.ts`, `AntigravityAcpSupport.ts`, `antigravityAuthSupport.ts`,
+    `AntigravityInstallation.ts`, `Drivers/AntigravityDriver.ts` and `AntigravityAdapterV2.ts`).
+    Google's ACP server `agy_acp_server.par` is found on `PATH` with its `localharness_external`
+    beside the real binary. It starts with `--uid=` on Linux, `ANTIGRAVITY_HARNESS_PATH` and
+    `PYTHONUNBUFFERED=1`. Missing, the detail says to get it from the ACP registry
+    (`antigravity-acp`). Its status never starts it, because it unpacks about 1 GB per launch:
+    installed means the binary and the harness are there. It is known as Antigravity by its name
+    (`antigravity`, or a binary named `agy_acp_server…`) before `initialize`, and by
+    `agentInfo.name == "antigravity-acp"` after.
+    - It's offered reads but no writes or terminals: advertising writes turns its diff edits into
+      whole-file writes. roll names itself; T3 claims to be Zed, which the agent's allowlist
+      rewards with Claude and GPT models, so roll's threads see the Gemini models only.
+    - `authenticate` goes out eagerly, before `session/new`, with `oauth-personal` (or the first
+      method offered). Sending it reads nothing: the agent uses its own stored login.
+    - Not signed in, the agent prints `Open the following link to authenticate the ACP server: …`
+      on stdout (not JSON). roll ends the start as a sign-in failure, never repeats the link, and
+      the provider reports `auth: missing` until a session starts. ACP's -32000 does the same, for
+      every ACP agent. To sign in, run it once in a terminal on the machine and send it
+      `authenticate` (`(printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1}}'
+      '{"jsonrpc":"2.0","id":2,"method":"authenticate","params":{"methodId":"oauth-personal"}}'; sleep 600) | agy_acp_server.par --uid=`
+      with `ANTIGRAVITY_HARNESS_PATH` set), then open the link it prints. Google's redirect goes to
+      `127.0.0.1` on that machine, so the browser must run there.
+    - A resume is `session/resume`, never a `session/load` that replays every tool call. 1.4.2 to
+      1.4.5 get `_meta.antigravity.disabledTools: ["run_workflow"]`, because otherwise it writes a
+      skill into the workspace. 1.4.5 gets a thread's instructions as
+      `_meta.antigravity.systemPrompt.append`; older ones get them in front of the first prompt.
+    - The runtime mode is its `mode` option: `yolo`, `auto_edit` or `default`. It has no plan mode
+      (its own `/plan` is a message), and it reports subagents.
+    - `interaction_*` permission requests are its questions. Each is a single choice of its own
+      options, checked before roll's policy, so full access still asks. The answer is the option's
+      label, kept unique.
+    - The `agy.security.warning` on "allow always" is the approval's reason.
+    - Tools are bounded as T3 bounds them: 8,000 characters kept from the end, inline images and
+      `formatted_output` dropped. Its names are read: `CommandLine`, `command_line` and
+      `commandLine`; `combinedOutput`; `exitCode` and `exit_code`. A command without a kind is
+      `execute`. Its titles are tool names (`Running client_view_file`), which become the tool's
+      name, with the path shown.
+    - `Running start_subagent` and `Run invoke_subagent?` (unless `_meta.is_mcp_tool_call`) are a
+      subagent batch, with the role and prompt from its permission prompt's `rawInput.Subagents`.
+      It runs until the turn ends, because no child session is reported.
+    - A `client_view_file` read that roll served is completed even when the agent later fails it
+      with an unrelated error.
+    - `stopReason: "refusal"` fails the turn as the quota.
+    - Usage is Gemini's: input plus cached reads, output plus thoughts.
+    - Models come from its grouped `model` option, and thinking from the `thought_level` option.
+
+    Not ported, by the credential rule or for cost:
+    - T3's own profile and credential store (`GEMINI_HOME`, `AGY_ACP_FORCE_FILE_STORAGE`, its
+      `acp_token.json`).
+    - The OAuth redirect relay (`antigravityCallback.ts`) and the API-key and Vertex sign-in
+      methods it stores.
+    - The quota reader (`antigravityUsageLimits.ts`), so there are no usage limits.
+    - The SQLite read of the agent's conversation database. Turns its log ends on an API error
+      stay completed.
+    - Edit hunks rebuilt from the file before an edit.
+    - Attachments other than images (audio, PDFs, video).
+    - Reading subagents' work.
+  - **Cursor** (`acp:cursor`, `acp/cursor.rs`). T3 runs Cursor through its SDK with an API key.
+    roll never holds that key, so it keeps `cursor-agent acp` and ports what needs no credential
+    from T3's `packages/provider-cursor` (`CursorSdkCatalog.ts`, `sdkModel.ts`, `status.ts`,
+    `skills.ts` and `adapter.ts`). The ACP shapes come from cursor-agent 2026.11.05 itself: its
+    real `initialize` answer is a fixture, and the rest was read from its ACP server's source. No
+    session was ever opened with the real agent.
+    - It's known as Cursor by its name (`cursor`, or a binary named `cursor-agent`) before
+      `initialize`. After it, its `cursor_login` method says so, since it sends no `agentInfo`.
+    - It's asked for its parameterized model picker
+      (`clientCapabilities._meta.parameterizedModelPicker`), so a model's parameters arrive as
+      config options rather than every combination as a model.
+    - The live catalog maps them as T3 does (`buildCursorCapabilitiesFromSdkModel`): effort or
+      reasoning first, then context, fast, thinking and the rest. A `"true"`/`"false"` select is
+      a switch, which goes back as `"true"`/`"false"`. `context` is the context window and `fast`
+      is the speed. A `thought_level` switch, such as thinking, is never the effort. `auto` is
+      written as its `default` (unverified: what its model list calls Auto). A `usage_update`
+      without a size takes the window from the `context` value (`200k`, `1m`).
+    - `$name` in a message goes out as Cursor's `/name` for the SKILL.md skills under
+      `{cwd,~}/{.cursor,.agents,.codex,.claude}/skills` and `~/.cursor/skills-cursor`. The scan
+      uses T3's bounds and reads only directory names and a skill's `metadata.surfaces`.
+    - Its own tools carry `rawInput._toolName`. `updateTodos` and `createPlan` aren't shown as
+      tools: `cursor/update_todos` (merged by id) is the turn's todos, and `cursor/create_plan`
+      is a plan item, answered `accepted`. `task` is a subagent (`subagentType`, `prompt`); its
+      model comes from `cursor/task` or `subagent_spawned`, and its end from
+      `subagent_state_update`. The child session's own updates aren't followed.
+      `cursor/ask_question` is a question answered with option ids (declined is `skipped`).
+      Other `cursor/*` requests get -32601.
+    - Status is its own: `cursor-agent status --format json`, which reads its own login and
+      prints `status` (`authenticated`, `unauthenticated`, …). roll reads only that and the
+      account's email. The format was checked in the CLI's source; the command was never run here
+      with a login.
+    - Not ported, by the credential rule: T3's API-key catalog (`/v1/models`, `/v1/me`), its
+      account, usage and usage-limit readers, the keychain and `~/.cursor/auth.json`. So there
+      are no usage limits.
 - **OpenCode** (`opencode.rs`, a port of T3's v2 OpenCode driver): OpenCode 2's own server,
   `opencode serve`, over HTTP and server-sent events (`GET /api/event`). One server per provider
   serves every session (each request names its directory); roll starts it with a password it keeps
@@ -288,6 +380,40 @@ completed, native thread ref). The orchestrator owns ids and turns those events 
   `get_available_models` (`provider/id`, plus "Pi default", which keeps Pi's own), with T3's
   thinking levels as the reasoning option (`set_thinking_level`). Pi lists only models it has
   credentials for: none means "log in", with `pi auth check` explaining an unusable default.
+- **Muse Code** (`muse.rs`, a port of T3's Muse driver): `muse serve` speaking MSP (JSON-RPC 2.0,
+  schema version 1) on stdio, one process per session: `--trust-workspace`, plus
+  `--disable-sandbox` in `full_access`. Muse gets the daemon's environment without
+  `META_API_KEY` (so it uses its own login, unless `[providers.muse]` sets one) and with
+  `MUSE_NO_AUTO_UPDATE=1`, in the workspace's real path. `initialize` asks for session MCP
+  servers (an older Muse that can't take them is refused); `session/start` takes a session id
+  roll mints (UUIDv7, like every command id), the model, and the approval mode and permission
+  profile (`allowAll`/`:unrestricted` in `full_access`, otherwise `promptUnmatched`/`:ask-me`:
+  Muse has no accept-edits mode); resuming is `session/resume` then `session/setApprovalMode`,
+  and a session Muse lost fails the start so the orchestrator starts fresh and hands the thread
+  over. A turn is `turn/start` with a turn id roll mints, `ifBusy: "queue"`, the effort, and
+  roll's instructions as the first text part (Muse has no system prompt); a model change is
+  `session/setModel` before the next turn. Steering is `turn/steer`, Stop is `turn/interrupt`
+  for the turn and any turn joined to it, and `/compact` is `session/compact` (a turn that ends
+  with its compaction item; `noop` fails it). Approvals (`approval/requested`, after the server
+  request is answered `{}`) offer the narrowest choice per decision (Muse's `abort` is the
+  decline for shell); questions are answered with labels and free text (`userInput/answer`).
+  Items show as T3's `itemPresentation.ts` does (shell, edits, web by tool name; the user's
+  message, reminder children and the todo/question/workflow tool calls hidden); subagents are
+  subagent nodes with their child session's items beneath them, a workflow's agents are
+  subagents under the workflow, and in `full_access` a child's approval is approved for it (Muse
+  doesn't pass `allowAll` to children). A child's approval that comes between turns is asked at
+  the start of the next turn. Usage is summed per turn from `session/tokenUsage`, the context
+  window is `session/contextUsage`, and `usage/changed` gives the account's windows (between
+  turns too); a quota failure ends the turn naming when the limit resets. The catalog is
+  `model/list` on a read-only host (`--disable-shell --disable-write --no-session-log`) with T3's
+  reasoning tiers; MSP has no login signal, so the login is always unknown and an empty catalog
+  says to run `muse login`. Fork, rollback, plan mode and switching modes in a session aren't
+  offered. Known gap: roll's orchestrator has no turns a provider starts by itself, so a turn
+  Muse starts while idle (its wake after a background workflow finishes) isn't adopted; its
+  events are dropped, and a background workflow's agents show only while one of our turns runs.
+  A turn Muse starts while one of ours runs (or that still runs when ours starts) is joined to
+  ours. roll never reads Muse's home directory, session logs or binary, which T3 reads for usage
+  history and updates.
 
 **Models and their options** follow T3 Code's model picker (`apps/web/src/components/chat/
 ProviderModelPicker.tsx`, `ModelPickerContent.tsx`, `ComposerModelEffort.tsx`) and its option
@@ -417,6 +543,76 @@ whether it works. An ACP agent on the PATH that doesn't answer `initialize` with
 not installed, with the reason as its detail, so nothing delegates to a hung agent until a refresh
 finds it answering. The dashboard shows a provider being checked as a quiet shimmering "Checking…",
 on the machine card and in machine settings. Code: `agent-host/src/orchestrator/probes.rs`.
+
+### The ACP registry
+
+T3 Code adds agents from the ACP registry (`cdn.agentclientprotocol.com/registry/v1/latest/registry.json`)
+as provider instances from its settings (`packages/provider-acp-registry`, `AcpRegistrySupport.ts`;
+`AddProviderInstanceDialog.tsx`, `AcpRegistrySearchStep.tsx`). roll does it per machine: a
+machine's settings have "Add agent" beside "Check again", and the daemon does all the work. Code:
+`agent-host/src/registry.rs` (`registry/{index,archive,packages}.rs`),
+`agent-host/src/orchestrator/registry.rs`, `components/agents/add-agent.tsx`, `lib/agents-registry.ts`.
+
+- **Fetching is the daemon's**, never the relay's (it only forwards the commands, which are the
+  owner's). The URL is fixed; only the daemon's own `config.toml` can point it elsewhere
+  (`[registry] url`; plain HTTP is accepted there, and then for that origin's archives too, for a
+  local copy and the tests). The index is read with a 30 s timeout, at most 1 MiB, redirects only on
+  the same host, and parsed with T3's bounds: at most 512 agents, ids `^[a-z0-9][a-z0-9._-]*$`,
+  versions that can't be `.` or `..` (they name folders), HTTPS URLs without credentials, packages
+  pinned to an exact version. An entry that breaks a bound is dropped; the rest stay.
+- **`registry.list`** (a query) answers `Reply::Registry { agents, fetched_at, error }`. It reuses a
+  fetch for 5 minutes (T3's search); the daemon keeps the last copy at `<home>/acp/registry.json`
+  (written to a temporary file, then renamed) and falls back to it when the registry can't be
+  reached, with `error` saying why. Each `RegistryAgent` says which distributions suit this machine
+  (`kinds`: a binary only for its OS and architecture, Windows on ARM taking x86-64 like T3; `npx`;
+  `uvx`), whether it's `installable` (a binary, or npm/uv on the PATH), what vouches for it
+  (`integrity`: `sha256` listed, `registry` for an exact package version, `none`), the version the
+  daemon `installed`, and the provider that is it already (`offered`): `acp:<id>`, a known agent's
+  own name (`github-copilot-cli` → `acp:copilot`, `factory-droid` → `acp:droid`, `grok-build` →
+  `acp:grok`, `qwen-code` → `acp:qwen`, `amp-acp` → `acp:amp`, `antigravity-acp` →
+  `acp:antigravity`) or a native driver (`opencode`, `opencode-v2` → `opencode`; `pi-acp` → `pi`)
+  that is installed. The dashboard shows those as "On this machine" and never installs them twice.
+- **Never at probe time.** Only `registry.install` installs; a probe stays `initialize` only (T3's
+  registry probe opens a throwaway session; roll's doesn't, as for every ACP agent).
+- **`registry.install {agent}`** fetches the registry (an install always does; the kept copy when
+  it can't), then uses the first of: the binary for this machine, npx with the machine's own `npm`,
+  uvx with its own `uv` (T3's order). One install per agent at a time.
+  - A binary is streamed to a temporary folder beside its destination with its SHA-256, at most
+    1 GiB and 20 minutes; a listed hash must match. It's unpacked in Rust (no system `tar` or
+    `unzip`) by its suffix: `.tar.gz`/`.tgz`, `.tar.bz2`/`.tbz2`, `.zip` (stored or deflated), else
+    it is the executable. Only regular files and folders: a symlink, hardlink, device or FIFO, an
+    absolute path, a `..`, or an entry listed twice refuses the archive; at most 20,000 entries and
+    2 GiB unpacked; files are created new. `cmd` is a relative path (no drive, no `..`), must be a
+    regular file inside the folder, and is made executable. The folder is renamed into
+    `<home>/acp/tools/<id>/<version>/<target>/` only when all of that holds.
+  - A package goes into `<home>/acp/tools/<id>/<version>/npm` (`npm install --global` with
+    `npm_config_prefix` there) or `…/python` (`uv tool install` with `UV_TOOL_DIR`/`UV_TOOL_BIN_DIR`
+    there): never global. The command is found as T3 finds it (the package's `bin`, the agent's id,
+    the package's name).
+  - A failure (a hash that doesn't match, a download that fails, an unsafe archive) leaves nothing:
+    no files, no entry, no provider. Other versions of the agent are removed after a successful one.
+  - `<home>/acp/installed.json` records it (id, the registry's name and version, the command, its
+    arguments and the registry's variables, when), and the provider `acp:<id>` is added to the
+    running daemon (`Host::add_provider`: configured, probed in the background, `hello` at once with
+    `checking`). It replies once all of that is done. The next start offers it too
+    (`registry::acp_providers`: `config.toml`'s `[[acp]]` first, then installed agents, then known
+    agents on the PATH; a configured `[[acp]]` of the same name wins). `MachineConfig.registry`
+    lists the installed agents, so their cards in the settings get "Remove" (unset: a daemon that
+    can't install, and the panel is read-only).
+  - The relay waits 30 s for a reply; a longer install answers `timeout`, and the dashboard sends
+    the same command id again: the daemon runs a command id once, so the retry waits for the same
+    install and gets its reply.
+- **`registry.remove {agent}`** is refused while a thread on it runs; its idle sessions close, the
+  provider goes, then its entry and its folder.
+- **Credentials: never.** The registry's variables are configuration (`AUGMENT_DISABLE_AUTO_UPDATE`);
+  any name `is_credential_env` flags is dropped when the index is parsed and when `installed.json`
+  is read. An installed agent signs in as any ACP agent does, in a terminal or through an endpoint.
+- **The dashboard** (`add-agent.tsx`): a popover from "Add agent" (glass, scaling from its trigger)
+  with T3's search and rows: the registry's icon (only from `https://cdn.agentclientprotocol.com/`,
+  recoloured to the text's colour with T3's SVG filter; the registry's mark otherwise), name, one
+  line of description, version, "About", and Install / Installing… / Installed / Update / On this
+  machine / Needs npm / Needs uv / Not for this machine. Errors show under their row. The demo's
+  daemons list a dozen real agents and install one after a short "Installing…".
 
 ## Turns: queue, steer, compact, subagents, plans
 
@@ -556,6 +752,10 @@ server (`docs/orchestration-v2/orchestrator-mcp-server.md` there), ported in
   behind the active run, and results that finish meanwhile join that message (16 KB of results
   inline, then a pointer to `task_status`). A result the parent reads first is taken out of the
   queued wake. A parent whose queue is held (it was stopped) keeps the wake queued.
+  The wake's run (or queued message) says which tasks it delivers (`Run.delivers`,
+  `QueuedMessage.delivers`), so the conversation, the card and the queue show "Delegated task
+  finished · <titles>" with the results under it, never as the user's words, and a queued wake
+  can't be edited in the composer (T3's `delegated_task` notification).
 - **Stopping.** `task_cancel` interrupts the child and everything it delegated; `run.interrupt`
   on a thread does the same for every task it delegated (T3's Stop). Cancelled tasks report
   `cancelled` and wake nobody; deleting a thread stops its tasks first.
@@ -913,23 +1113,28 @@ Code: `agent-host/src/orchestrator/settle.rs`; the threads sidebar is
   tomorrow, next week, or a custom time or duration) and wake. ⌘⇧S settles the open thread and
   opens the next one in the sidebar's order (wrapping, skipping settled and snoozed ones; the
   canvas when there's none), T3's settle and advance; on a settled thread it un-settles it.
-- **A project's shelf on the canvas** (`components/agents/project-shelf.tsx`). What left the canvas
-  stays with its project: the card's last line counts it ("Settled 10 · Snoozed 1 · Archived 2"),
-  and clicking the project's name (or that line) opens the shelf on the card, a tab per shelf, ten
-  rows and 25 more per "Show more". Focusing the project (F, ⌘K "Focus a project…" or "Settled
-  and archived in…") opens it too; which shelves are open is remembered per device
-  (`lib/agents-shelf.ts`). A row opens the conversation in the side panel with its transcript,
-  diffs and checkpoints as they were; its button restores it (un-settle, wake or unarchive). The
+- **The shelf** (`components/agents/project-shelf.tsx`, `lib/agents-shelf.ts`). What left the
+  canvas stays off it: no project card carries a list. "Shelf" in the canvas toolbar, beside
+  Display, counts what's settled, snoozed and archived (the focused project's while one fills the
+  canvas; no control when nothing is) and opens a popover with every one of them, grouped by
+  project, a tab per shelf, 40 rows and then 60 more per "Show more". The search matches every word
+  in the title or the project's name; ↑/↓ walk the rows, Enter opens the conversation in the side
+  panel with its transcript, diffs and checkpoints as they were, and ⌘Enter (or a row's button)
+  restores it (un-settle, wake or unarchive). A project's ⋯ menu ("Settled and archived (12)"),
+  ⌘K "Settled and archived in…" and a project's header in the popover open it narrowed to that
+  project, with a chip whose × widens it again (`?shelf` or `?shelf=<project>` in the URL opens it,
+  the demo's way in). Linear keeps its archive behind one control, not
+  on each team; T3 has the Settled shelf in its sidebar, which roll's sidebar keeps too. The
   conversation itself says where it is above the composer, T3's "Settled 2d ago" line with
   Un-settle (Wake, Unarchive), and that its worktree was cleaned up and comes back with the next
   message.
 - **Archive** is T3's: a thread leaves the inbox and the canvas, its session and terminals close;
   unarchive brings it back as it was. T3 lists archived threads in settings; roll keeps them on an
-  "Archived" shelf per project in the sidebar and on the project's card, and ⌘K finds them.
+  "Archived" shelf per project in the sidebar and on the toolbar's shelf, and ⌘K finds them.
   Delete asks first (the owner's "Confirm before deleting a thread", T3's text plus what roll
   keeps: the branch, and a worktree with uncommitted changes).
 - **Undo** (T3's `showThreadUndoNotice.ts`): settling, snoozing, archiving and restoring show one
-  notice at a time for 5 seconds, from wherever they were done (the sidebar, a card's shelf, the
+  notice at a time for 5 seconds, from wherever they were done (the sidebar, the shelf, the
   conversation's menu, ⌘K); Undo or ⌘Z (outside a text field) puts the thread back.
 
 ## Machine settings
@@ -966,11 +1171,29 @@ next to `providers`, which they change; a lagged link sends `hello` again, so no
   `LiveConfig`); a running session keeps what it started with.
 - **Custom models** are added to the provider's `models` (`custom: true`), after its own, so every
   picker lists them and delegation accepts them. The panel holds T3's rules (a slug, at most 256
-  characters, not built in, not twice).
+  characters, not built in, not twice). Each one's chip opens T3's custom model editor ("Edit name
+  and options", `custom-model-editor.tsx`, logic in `lib/custom-models.ts`): a display name and the
+  options the composer shows for it (`CustomModel.options`, T3's custom `optionDescriptors`), copied
+  from one of the provider's models ("Copy from…", without Claude's context window), added from the
+  provider's presets (Reasoning, Fast Mode, Thinking on Claude; Reasoning and Speed, `serviceTier`,
+  on Codex; Reasoning elsewhere) or the owner's own (an id the provider takes, a label, choices or a
+  switch, a default). The reasoning levels are always a select with the id `effort` (the thread's
+  effort).
+  None: the provider's own options for a slug like it. The daemon checks them with T3's messages,
+  numbered as the editor shows them ("Option 2: id "a" is used twice."; `check_custom_options`), at
+  most 16 options and 64 choices, one line each. The editor closes on Save, Cancel or Escape, never
+  on focus leaving (Safari doesn't focus a clicked button).
+- **"New" models.** A current model is badged `new` for a week from its release day
+  (`ModelInfo.badge`, T3's `MODEL_NEW_BADGE_DURATION_MS` and `releasedAt` in
+  `model-manifest.json`; Claude Haiku 5.5 from 2026-10-07), and the picker shows a small New chip
+  after its name.
 - **Machine limits** (agent-proto `settings_limits`): 64 variables, 64 arguments, 100 custom models
   per provider; paths absolute or `~/…`; a branch prefix git takes; auto-pull at least daily;
   subagents at most 8 deep, 1 to 32 tasks per thread; a git name and email both or neither.
 - Changing them is the owner's (`Code::manages`); agent tokens can't (agents/policy.rs).
+- **Agents from the ACP registry** are added and removed from the Providers section ("Add agent",
+  and "Remove" on an installed agent's card): `registry.list`, `registry.install` and
+  `registry.remove`, under "The ACP registry" in "Providers".
 
 ## Endpoints
 
@@ -1330,8 +1553,21 @@ The surface has three views:
     One machine is the common case, and then its card is a level that carries nothing.
   - **Show:** idle threads (not working, not waiting, nothing unseen; an idle thread stays while
     a fork under it works, or while a card of it is pinned) and terminals. Leaving idle threads
-    off makes the canvas the work in flight, the thing an owner checks most.
-  - "Reset to default" when anything differs.
+    off makes the canvas the work in flight, the thing an owner checks most. **Projects without
+    threads** (off by default) gives every project a card again.
+  - "Reset to default" when anything differs (projects pinned onto the view stay pinned).
+
+  **Projects without a card** (`collapseUnused` in `lib/agents-graph.ts`, `machine-projects.tsx`).
+  A project with nothing on the canvas in this view (no thread, terminal or pin, after the
+  filters and the display) isn't drawn. Its machine says so in one line, "3 more projects" (or
+  "3 projects" when none of its projects has a card) with their tiles stacked, which opens on
+  hover (250 ms) or a click into a list beside the card, scaling from the line: a row starts an
+  agent there, its pin keeps the project's card on this view (`Display.keep`, unpinned from the
+  card's ⋯ menu), its gear opens the project's settings, and "Add a project" is at the foot. A
+  project gets its card back with its first thread; projects focused or named by the view's
+  filter always keep theirs, and so do projects grouped as the anchors. Focusing a folded project
+  (a deep link, a palette pick) frames its machine. Linear folds empty groups the same way; T3's
+  sidebar shows every project but only those with threads take room.
 
   One canvas engine (canvas 2D + `requestAnimationFrame`, paused offscreen) draws edges,
   pulses and the dot field; cards are DOM, positioned by the same world transform. Navigation is
@@ -1449,7 +1685,11 @@ The surface has three views:
   cancelled (Esc). The bar stays while a conversation is open beside the canvas: centred over a
   wide canvas, across a narrow one above the zoom controls, and on a phone under "Waiting for you".
   Fitting, focusing and revealing cards keep them above it. Keyboard: Enter starts, Shift+Enter is
-  a new line, arrows switch Orchestrate and One agent, Esc leaves.
+  a new line, arrows switch Orchestrate and One agent, Esc leaves. It opens on focus or a press
+  and closes on a press outside it and its popups, Esc, or focus moving to something else, never
+  on a blur alone (Safari and Firefox on macOS don't focus a clicked button, so using its pickers
+  there used to close it). The pill and the open bar are one shape: the text stays put while the
+  toolbar grows in under it (docs/code/agents-design.md, "Motion").
 
 - **Getting started.** An owner with no machines sees the globe (`RollMark`) and the two ways in
   side by side, the same as "Add machine" on the canvas: connect your computer (install,

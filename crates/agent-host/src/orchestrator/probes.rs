@@ -121,34 +121,43 @@ impl Host {
     /// Turned-off providers are never probed.
     pub(crate) fn probe_providers(&self) {
         let settings = self.machine_settings();
-        for (id, provider) in &self.providers {
-            if !settings.provider(id).enabled {
-                continue;
+        for (id, provider) in self.providers() {
+            if settings.provider(&id).enabled {
+                self.probe(&id, provider);
             }
-            let probe = self.probes.next.fetch_add(1, Ordering::Relaxed);
-            self.probes.state.lock().unwrap().entry(id.clone()).or_default().running = Some(probe);
-            let (me, provider) = (self.me.clone(), Arc::clone(provider));
-            tokio::spawn(async move {
-                let info = provider.info().await;
-                let Some(host) = me.upgrade() else { return };
-                let current = {
-                    let mut state = host.probes.state.lock().unwrap();
-                    let entry = state.entry(provider.id()).or_default();
-                    let current = entry.running == Some(probe);
-                    if current {
-                        let mut info = info;
-                        // Limits sessions reported since stay unless the probe saw newer ones.
-                        let published = entry.last.as_mut().and_then(|l| l.usage_limits.take());
-                        info.usage_limits = UsageLimits::after_probe(published, info.usage_limits.take());
-                        *entry = Probe { last: Some(info), running: None };
-                    }
-                    current
-                };
-                if current {
-                    host.publish_info().await;
-                }
-            });
         }
+    }
+
+    /// Probes one provider in the background; `hello` goes out again when it answers.
+    pub(crate) fn probe(&self, id: &ProviderId, provider: Arc<dyn Provider>) {
+        let probe = self.probes.next.fetch_add(1, Ordering::Relaxed);
+        self.probes.state.lock().unwrap().entry(id.clone()).or_default().running = Some(probe);
+        let me = self.me.clone();
+        tokio::spawn(async move {
+            let info = provider.info().await;
+            let Some(host) = me.upgrade() else { return };
+            let current = {
+                let mut state = host.probes.state.lock().unwrap();
+                let entry = state.entry(provider.id()).or_default();
+                let current = entry.running == Some(probe);
+                if current {
+                    let mut info = info;
+                    // Limits sessions reported since stay unless the probe saw newer ones.
+                    let published = entry.last.as_mut().and_then(|l| l.usage_limits.take());
+                    info.usage_limits = UsageLimits::after_probe(published, info.usage_limits.take());
+                    *entry = Probe { last: Some(info), running: None };
+                }
+                current
+            };
+            if current {
+                host.publish_info().await;
+            }
+        });
+    }
+
+    /// Forgets a provider's probes (it was removed).
+    pub(crate) fn forget_probe(&self, id: &ProviderId) {
+        self.probes.state.lock().unwrap().remove(id);
     }
 
     /// A session reported `provider`'s usage limits: merge them into its info and say `hello`

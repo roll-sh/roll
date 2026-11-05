@@ -25,6 +25,7 @@ mod instructions;
 mod probes;
 mod projects;
 mod queries;
+mod registry;
 mod runs;
 mod settings;
 mod settle;
@@ -54,7 +55,11 @@ pub struct Host {
     me: Weak<Host>,
     config: Config,
     store: Store,
-    providers: BTreeMap<ProviderId, Arc<dyn Provider>>,
+    /// The providers on offer; agents installed from the ACP registry come and go while it runs
+    /// (`registry.rs`). Read it through [`Host::provider`] and [`Host::providers`].
+    providers: std::sync::RwLock<BTreeMap<ProviderId, Arc<dyn Provider>>>,
+    /// The ACP registry: its index, and the agents installed from it (`crate::registry`).
+    registry: crate::registry::Registry,
     out: broadcast::Sender<Outbound>,
     /// What `hello` says now; commands that need a provider's probe wait on it (`probes.rs`).
     info: tokio::sync::watch::Sender<MachineInfo>,
@@ -264,6 +269,7 @@ impl Host {
         let store = Store::open(&config.db_path())?;
         store.prune_receipts(now().saturating_sub(RECEIPT_DAYS * 86_400_000))?;
         let providers: BTreeMap<_, _> = providers.into_iter().map(|p| (p.id(), p)).collect();
+        let registry = crate::registry::Registry::new(&config);
         let settings = Host::stored_settings(&store);
         let seal = crate::endpoints::SealKey::load_or_create(&store)?;
         let endpoints = Host::stored_endpoints(&store);
@@ -275,7 +281,8 @@ impl Host {
             me: me.clone(),
             config,
             store,
-            providers,
+            providers: std::sync::RwLock::new(providers),
+            registry,
             out,
             info: tokio::sync::watch::Sender::new(MachineInfo {
                 hostname: hostname(),
@@ -457,7 +464,16 @@ impl Host {
     }
 
     pub(crate) fn provider(&self, id: &ProviderId) -> Res<Arc<dyn Provider>> {
-        self.providers.get(id).cloned().ok_or_else(|| Fail::Invalid(format!("no provider {} on this machine", id.0)))
+        self.providers.read().unwrap().get(id).cloned().ok_or_else(|| Fail::Invalid(format!("no provider {} on this machine", id.0)))
+    }
+
+    /// The providers on offer now.
+    pub(crate) fn providers(&self) -> Vec<(ProviderId, Arc<dyn Provider>)> {
+        self.providers.read().unwrap().iter().map(|(id, p)| (id.clone(), p.clone())).collect()
+    }
+
+    pub(crate) fn has_provider(&self, id: &ProviderId) -> bool {
+        self.providers.read().unwrap().contains_key(id)
     }
 
     pub(crate) fn project(&self, id: &ProjectId) -> Res<Project> {
@@ -652,6 +668,9 @@ impl Host {
             Command::GatewayUsage { from, to, by, bucket } => self.gateway_usage(from, to, by, bucket).await,
             Command::GatewayLog { after, before, limit, errors } => self.gateway_log(after, before, limit, errors).await,
             Command::GatewayLogBody { seq } => self.gateway_log_body(seq).await,
+            Command::RegistryList {} => self.registry_list().await,
+            Command::RegistryInstall { agent } => self.registry_install(&agent).await,
+            Command::RegistryRemove { agent } => self.registry_remove(&agent).await,
             Command::DiffGet { thread, run } => self.diff_get(&thread, run.as_ref()).await,
             Command::FsList { project, path } => self.fs_list(project.as_ref(), &path).await,
             Command::FsRead { project, path } => self.fs_read(&project, &path).await,

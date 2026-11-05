@@ -7,9 +7,12 @@ import { agentsPalette } from "@/lib/agents-palette";
 import { resetAgentsSurface, showAgents } from "@/lib/agents-surface";
 import { machine, mirrored, project, provider, thread, T0 } from "@/test/agents";
 import { agentsHarness, fakeServices, renderAgents, type AgentsHarness } from "@/test/agents-render";
+import { macClick } from "@/test/mac-click";
 import { MarkStateProvider } from "../mark-state";
 import { AgentsControl } from "./agents-control";
 import { goalDraftKey } from "./orchestrate";
+import { ModelPicker } from "./model-picker";
+import { Launcher } from "./new-agent";
 import { PromptBar } from "./prompt-bar";
 
 let conn: { client: AgentsHarness["client"] | null; services: ReturnType<typeof fakeServices> | null; error: string | null } = { client: null, services: null, error: null };
@@ -169,6 +172,126 @@ describe("the prompt bar", () => {
     await userEvent.keyboard("{Enter}");
     expect(await screen.findByRole("alert")).toHaveTextContent("ada-mbp is offline. Start it with roll agent up, or pick another project.");
     expect(creates(h)).toHaveLength(0);
+  });
+});
+
+describe("the prompt bar's open and close", () => {
+  const isOpen = () => screen.getByRole("form", { name: "Ask agents" }).hasAttribute("data-open");
+  const withMachines = () => {
+    const h = harness();
+    // Codex too, so the picker's rail has another provider to click.
+    act(() => h.client.enqueue({ type: "machine", cursor: 30, machine: machine({ info: { ...machine().info!, providers: [provider(), codex] } }) }));
+    return h;
+  };
+
+  it("stays open while its picker is used where a click doesn't focus a button (Safari, Firefox on macOS)", async () => {
+    renderAgents(
+      <>
+        <PromptBar />
+        <div data-testid="canvas" />
+      </>,
+      withMachines(),
+    );
+    await userEvent.click(goal());
+    await userEvent.click(screen.getByRole("button", { name: /^Model:/ }));
+    const search = await screen.findByRole("combobox", { name: "Search models" });
+    const rail = screen.getByRole("toolbar", { name: "Providers" });
+    const codexTab = within(rail).getByRole("button", { name: /Codex/ });
+    // Safari: the search blurs to nothing (the button it's going to doesn't take focus), and the
+    // press and click reach the button without focusing it.
+    fireEvent.focusOut(search, { relatedTarget: null });
+    expect(isOpen()).toBe(true);
+    fireEvent.pointerDown(codexTab);
+    expect(isOpen()).toBe(true);
+    fireEvent.mouseDown(codexTab);
+    fireEvent.click(codexTab);
+    expect(isOpen()).toBe(true);
+    expect(screen.getByRole("toolbar", { name: "Providers" })).toBeInTheDocument();
+    expect(within(screen.getByRole("toolbar", { name: "Providers" })).getByRole("button", { name: /Codex/ })).toHaveAttribute("aria-pressed", "true");
+    // A press on the picker's own background is the picker's: the text doesn't take focus from it.
+    const before = document.activeElement;
+    fireEvent.mouseDown(rail);
+    expect(document.activeElement).toBe(before);
+  });
+
+  it("closes on a press outside it (the canvas), on Escape, and when focus moves to a real element elsewhere; a blur alone never closes it", async () => {
+    renderAgents(
+      <>
+        <PromptBar />
+        <div data-testid="canvas" />
+        <button type="button">Elsewhere</button>
+      </>,
+      harness(),
+    );
+    await userEvent.click(goal());
+    expect(isOpen()).toBe(true);
+    fireEvent.focusOut(goal(), { relatedTarget: null });
+    expect(isOpen()).toBe(true);
+    fireEvent.pointerDown(screen.getByTestId("canvas"));
+    expect(isOpen()).toBe(false);
+
+    await userEvent.click(goal());
+    await userEvent.keyboard("{Escape}");
+    expect(isOpen()).toBe(false);
+
+    await userEvent.click(goal());
+    act(() => screen.getByRole("button", { name: "Elsewhere" }).focus());
+    expect(isOpen()).toBe(false);
+    // Something typed keeps it open wherever focus goes.
+    await userEvent.type(goal(), "half a goal");
+    fireEvent.pointerDown(screen.getByTestId("canvas"));
+    expect(isOpen()).toBe(true);
+  });
+
+  it("a press on the bar itself (not a control) focuses the text once", async () => {
+    renderAgents(<PromptBar />, harness());
+    const form = screen.getByRole("form", { name: "Ask agents" });
+    const focused = vi.fn();
+    goal().addEventListener("focus", focused);
+    fireEvent.mouseDown(form);
+    expect(document.activeElement).toBe(goal());
+    expect(focused).toHaveBeenCalledTimes(1);
+    expect(isOpen()).toBe(true);
+  });
+});
+
+describe("the model picker under a macOS click (Safari, Firefox: a click never focuses a button)", () => {
+  const providers = [provider(), codex];
+  const value = { provider: "claude", model: "claude-opus-5-5", effort: null, options: {} };
+  /** Opens the picker behind `trigger`, clicks Codex in its rail and then its model, as macOS does. */
+  async function pickCodex(trigger: HTMLElement) {
+    macClick(trigger);
+    const rail = await screen.findByRole("toolbar", { name: "Providers" });
+    macClick(within(rail).getByRole("button", { name: /Codex/ }));
+    // Still open, on Codex's models.
+    expect(within(screen.getByRole("toolbar", { name: "Providers" })).getByRole("button", { name: /Codex/ })).toHaveAttribute("aria-pressed", "true");
+    macClick(await screen.findByRole("option", { name: /GPT-5.5 Codex/ }));
+  }
+
+  it("on its own (as the automations' Start an agent step has it)", async () => {
+    const onChange = vi.fn();
+    renderAgents(<ModelPicker providers={providers} value={value} onChange={onChange} />, harness());
+    await pickCodex(screen.getByRole("button", { name: /^Model:/ }));
+    expect(onChange).toHaveBeenCalledWith(expect.objectContaining({ provider: "codex", model: "gpt-5.5-codex" }));
+  });
+
+  it("in the prompt bar, which stays open throughout", async () => {
+    const h = harness();
+    act(() => h.client.enqueue({ type: "machine", cursor: 30, machine: machine({ info: { ...machine().info!, providers } }) }));
+    renderAgents(<PromptBar />, h);
+    macClick(goal());
+    await pickCodex(screen.getByRole("button", { name: /^Model:/ }));
+    expect(screen.getByRole("form", { name: "Ask agents" })).toHaveAttribute("data-open");
+    expect(screen.getByRole("button", { name: /^Model: GPT-5.5 Codex/ })).toBeInTheDocument();
+  });
+
+  it("in the launcher's composer", async () => {
+    const h = harness();
+    act(() => h.client.enqueue({ type: "machine", cursor: 30, machine: machine({ info: { ...machine().info!, providers } }) }));
+    renderAgents(<Launcher onClose={vi.fn()} />, h);
+    await pickCodex(screen.getByRole("button", { name: /^Model:/ }));
+    expect(screen.getByRole("dialog", { name: "New agent" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^Model: GPT-5.5 Codex/ })).toBeInTheDocument();
   });
 });
 

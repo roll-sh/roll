@@ -660,6 +660,7 @@ mod tests {
             attachments: Vec::new(),
             steers: Vec::new(),
             idle_compaction: false,
+            delivers: Vec::new(),
             requested_at: 0,
             started_at: None,
             completed_at: None,

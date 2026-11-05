@@ -1191,7 +1191,7 @@ async fn machine_settings_go_to_the_daemon_and_credentials_never_do() {
         git_email: None,
     };
     let info = MachineInfo {
-        settings: Some(Box::new(MachineConfig { set: *settings, base, providers: vec![], config_path: "/home/me/.local/share/roll/agent/config.toml".into(), endpoints: vec![], gateway: None })),
+        settings: Some(Box::new(MachineConfig { set: *settings, base, providers: vec![], config_path: "/home/me/.local/share/roll/agent/config.toml".into(), endpoints: vec![], gateway: None, registry: None })),
         ..info()
     };
     d.send(&DaemonFrame::Hello { protocol: agent_proto::PROTOCOL, info }).await;

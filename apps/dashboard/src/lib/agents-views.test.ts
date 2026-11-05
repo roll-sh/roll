@@ -15,6 +15,10 @@ import {
   encodeDoc,
   focusOn,
   parseDisplay,
+  defaultDisplay,
+  isDefaultDisplay,
+  keepProject,
+  MAX_KEPT,
   MAX_PINS,
   MAX_VIEWS,
   moveView,
@@ -312,5 +316,22 @@ describe("display options", () => {
     const pos = tidyLayout(arrange(byProject, {}), size, { direction: "vertical", spreads: () => false });
     const ys = [...pos.values()];
     expect(new Set(ys.map((p) => `${p.x},${p.y}`)).size).toBe(ys.length);
+  });
+});
+
+describe("projects pinned onto a view", () => {
+  it("parses `projects` and `keep` (bounded), and pinning isn't a display choice", () => {
+    expect(parseDisplay({ projects: "all", keep: ["prj_1", "prj_1", 7, ""] })).toEqual({ projects: "all", keep: ["prj_1"] });
+    expect(parseDisplay({ projects: "some", keep: Array.from({ length: 100 }, (_, i) => `prj_${i}`) }).keep).toHaveLength(MAX_KEPT);
+    expect(isDefaultDisplay({ keep: ["prj_1"] })).toBe(true);
+    expect(isDefaultDisplay({ projects: "all" })).toBe(false);
+    expect(defaultDisplay({ density: "compact", projects: "all", keep: ["prj_1"] })).toEqual({ keep: ["prj_1"] });
+  });
+
+  it("pins and unpins a project", () => {
+    const one = keepProject({ density: "compact" }, "prj_1", true);
+    expect(one).toEqual({ density: "compact", keep: ["prj_1"] });
+    expect(keepProject(one, "prj_1", true)).toEqual(one);
+    expect(keepProject(one, "prj_1", false)).toEqual({ density: "compact" });
   });
 });

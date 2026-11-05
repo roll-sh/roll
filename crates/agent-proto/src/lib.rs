@@ -63,6 +63,7 @@ pub mod automation;
 pub mod endpoint;
 pub mod gateway;
 pub mod identity;
+pub mod registry;
 
 pub use endpoint::{
     EndpointCheck, EndpointInfo, EndpointKind, EndpointModel, EndpointProfile, EndpointSpec, KeyChange, KeyState, SEAL_VERSION, SealedSecret, endpoint_limits,
@@ -73,6 +74,7 @@ pub use gateway::{
     UsageReport, UsageRow, WireFormat, gateway_limits,
 };
 pub use identity::{IdentityColor, MachineAppearance, MachineKind, ProjectIcon, ProjectLogo};
+pub use registry::{RegistryAgent, RegistryInstalled, RegistryIntegrity, RegistryKind, RegistryList, is_registry_id};
 
 /// A provider instance on a machine: `codex`, `claude`, or `acp:<name>` (an ACP agent from the
 /// daemon's config, e.g. `acp:gemini`).
@@ -712,6 +714,10 @@ pub struct QueuedMessage {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<Attachment>,
     pub at: Millis,
+    /// Results of these delegated tasks waiting behind the active run (a wake, [`Run::delivers`]
+    /// once it runs); empty for a person's message.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub delivers: Vec<NodeId>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Default, Serialize, Deserialize)]
@@ -796,6 +802,11 @@ pub struct Run {
     /// compacted before cache expiry").
     #[serde(default)]
     pub idle_compaction: bool,
+    /// The daemon started it, not a person: it carries the results of these delegated tasks to
+    /// the thread that delegated them (T3's `delegated_task` notification, "Delegated task
+    /// finished"); `prompt` is what the agent was told. Empty for a person's run.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub delivers: Vec<NodeId>,
     pub requested_at: Millis,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started_at: Option<Millis>,
@@ -1190,6 +1201,10 @@ pub struct MachineConfig {
     /// roll's model gateway on this machine (docs/code/gateway.md); unset: never set up here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gateway: Option<Box<GatewayInfo>>,
+    /// The agents the daemon installed from the ACP registry (`registry.install`). Unset: a
+    /// daemon that can't install them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub registry: Option<Vec<RegistryInstalled>>,
 }
 
 /// What a machine's settings fall back to.
@@ -1340,6 +1355,91 @@ pub struct CustomModel {
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// What the composer offers for it (T3's custom model `capabilities.optionDescriptors`, its
+    /// "Options shown in the composer"). Unset: the provider's own for a slug like it (a known
+    /// family's, or its first model's). The reasoning option is a select with id `effort`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub options: Option<Vec<ModelOption>>,
+}
+
+impl CustomModel {
+    /// A slug alone, with the provider's options.
+    pub fn new(id: impl Into<String>) -> Self {
+        CustomModel { id: id.into(), name: None, options: None }
+    }
+}
+
+/// Checks a custom model's options (T3's `validateDraft`, numbered from 1 as its editor shows
+/// them), bounded like a thread's: trimmed, an empty label is the id, an empty list is none.
+pub fn check_custom_options(options: &mut Option<Vec<ModelOption>>) -> Result<(), String> {
+    use option_limits as l;
+    let Some(list) = options.as_mut() else { return Ok(()) };
+    if list.is_empty() {
+        *options = None;
+        return Ok(());
+    }
+    if list.len() > l::OPTIONS {
+        return Err(format!("a model shows at most {} options", l::OPTIONS));
+    }
+    let text = |s: &str| s.len() <= l::VALUE && !s.chars().any(char::is_control);
+    let mut ids = std::collections::HashSet::new();
+    for (i, option) in list.iter_mut().enumerate() {
+        let n = i + 1;
+        let (id, label, description, role) = match option {
+            ModelOption::Select { id, label, description, role, .. } | ModelOption::Boolean { id, label, description, role, .. } => (id, label, description, role),
+        };
+        *id = id.trim().to_string();
+        if id.is_empty() {
+            return Err(format!("Option {n} needs an id."));
+        }
+        if id.len() > l::ID || id.chars().any(char::is_control) {
+            return Err(format!("Option {n}: ids are at most {} bytes.", l::ID));
+        }
+        if !ids.insert(id.clone()) {
+            return Err(format!("Option {n}: id \"{id}\" is used twice."));
+        }
+        *label = label.trim().to_string();
+        if label.is_empty() {
+            *label = id.clone();
+        }
+        if !text(label) || description.as_deref().is_some_and(|d| !text(d)) {
+            return Err(format!("Option {n}: labels are one line of at most {} bytes.", l::VALUE));
+        }
+        // The reasoning levels are the thread's effort: one select, always `effort`.
+        let is_effort = id == EFFORT_OPTION;
+        if is_effort != (*role == Some(OptionRole::Reasoning)) || (is_effort && matches!(option, ModelOption::Boolean { .. })) {
+            return Err(format!("Option {n}: the reasoning levels are a list of choices with the id {EFFORT_OPTION}."));
+        }
+        if let ModelOption::Select { choices, default, .. } = option {
+            if choices.is_empty() {
+                return Err(format!("Option {n} needs at least one choice."));
+            }
+            if choices.len() > 64 {
+                return Err(format!("Option {n} has more than 64 choices."));
+            }
+            let mut seen = std::collections::HashSet::new();
+            for c in choices.iter_mut() {
+                c.id = c.id.trim().to_string();
+                if c.id.is_empty() {
+                    return Err(format!("Option {n} has a choice without a value."));
+                }
+                if !seen.insert(c.id.clone()) {
+                    return Err(format!("Option {n}: choice \"{}\" is used twice.", c.id));
+                }
+                c.label = c.label.trim().to_string();
+                if c.label.is_empty() {
+                    c.label = c.id.clone();
+                }
+                if !text(&c.id) || !text(&c.label) || c.description.as_deref().is_some_and(|d| !text(d)) {
+                    return Err(format!("Option {n}: choices are one line of at most {} bytes.", l::VALUE));
+                }
+            }
+            if default.as_ref().is_some_and(|d| !seen.contains(d)) {
+                return Err(format!("Option {n}: the default isn't one of its choices."));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// An environment variable that may carry a credential or point a provider somewhere else: API
@@ -1448,6 +1548,7 @@ impl MachineSettings {
                 if !seen.insert(m.id.clone()) {
                     return Err(format!("{} lists the custom model {} twice", id.0, m.id));
                 }
+                check_custom_options(&mut m.options).map_err(|e| format!("{}: {e}", m.id))?;
             }
         }
         self.providers.retain(|_, p| p != &ProviderSettings::default());
@@ -1716,6 +1817,15 @@ pub struct ModelInfo {
     /// Listed by an endpoint the provider uses (its name), not by the provider itself.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub via: Option<String>,
+    /// T3's model badge: "new" for a week after a current model's release.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub badge: Option<ModelBadge>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelBadge {
+    New,
 }
 
 fn is_true(b: &bool) -> bool {
@@ -1744,6 +1854,8 @@ struct ModelInfoWire {
     custom: bool,
     #[serde(default)]
     via: Option<String>,
+    #[serde(default)]
+    badge: Option<ModelBadge>,
 }
 
 impl From<ModelInfoWire> for ModelInfo {
@@ -1752,14 +1864,14 @@ impl From<ModelInfoWire> for ModelInfo {
         if !w.efforts.is_empty() && !options.iter().any(|o| o.role() == Some(OptionRole::Reasoning)) {
             options.insert(0, ModelOption::reasoning(w.efforts.iter().map(|e| OptionChoice::new(e, &effort_label(e))).collect(), None));
         }
-        ModelInfo { id: w.id, name: w.name, short_name: w.short_name, default: w.default, options, legacy: w.legacy, images: w.images, custom: w.custom, via: w.via }
+        ModelInfo { id: w.id, name: w.name, short_name: w.short_name, default: w.default, options, legacy: w.legacy, images: w.images, custom: w.custom, via: w.via, badge: w.badge }
     }
 }
 
 impl ModelInfo {
     /// A model with no options.
     pub fn new(id: impl Into<String>, name: impl Into<String>) -> Self {
-        ModelInfo { id: id.into(), name: name.into(), short_name: None, default: false, options: Vec::new(), legacy: false, images: true, custom: false, via: None }
+        ModelInfo { id: id.into(), name: name.into(), short_name: None, default: false, options: Vec::new(), legacy: false, images: true, custom: false, via: None, badge: None }
     }
 
     /// Its reasoning option, if it has one.
@@ -2211,6 +2323,17 @@ pub enum Command {
     /// Ask the endpoint for its models now (answers `endpoint_checked`, and keeps what it lists).
     #[serde(rename = "endpoint.check")]
     EndpointCheck { endpoint: String },
+    /// Install an agent of the ACP registry on the machine (docs/code/agents.md, "The ACP
+    /// registry"): the daemon fetches the registry, downloads and checks the agent (or installs
+    /// its package with the machine's own `npm`/`uv`) into its own directory, and offers it as the
+    /// provider `acp:<agent>` without a restart. Replies once it's installed and offered; its
+    /// probe follows in `hello`. Refused for an agent the machine already offers.
+    #[serde(rename = "registry.install")]
+    RegistryInstall { agent: String },
+    /// Remove an agent the daemon installed from the registry: its provider, its files and its
+    /// entry. Refused while one of its threads runs.
+    #[serde(rename = "registry.remove")]
+    RegistryRemove { agent: String },
 
     /// Set up, change, start or stop roll's model gateway on this machine
     /// (docs/code/gateway.md); [`GatewaySettings`] are replaced whole and applied live. Replies
@@ -2308,6 +2431,10 @@ pub enum Command {
     /// Recent terminal output, for a client that just opened it (the last 256 KiB).
     #[serde(rename = "terminal.scrollback")]
     TerminalScrollback { terminal: TerminalId },
+    /// The ACP registry's agents as this machine sees them (answers `registry`). The daemon
+    /// fetches the registry (at most every 5 minutes) and keeps a copy for when it can't.
+    #[serde(rename = "registry.list")]
+    RegistryList {},
 }
 
 impl Command {
@@ -2324,6 +2451,7 @@ impl Command {
                 | Command::GatewayUsage { .. }
                 | Command::GatewayLog { .. }
                 | Command::GatewayLogBody { .. }
+                | Command::RegistryList {}
         )
     }
 }
@@ -2370,6 +2498,8 @@ pub enum Reply {
     GatewayUsage(UsageReport),
     GatewayLog { entries: Vec<LogEntry> },
     GatewayLogBody(LogBody),
+    /// What `registry.list` found.
+    Registry(RegistryList),
     Error(ReplyError),
 }
 

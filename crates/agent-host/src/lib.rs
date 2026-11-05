@@ -17,6 +17,7 @@ pub mod git;
 pub mod logo;
 pub mod orchestrator;
 pub mod provider;
+pub mod registry;
 pub mod relay;
 pub mod store;
 pub mod terminal;

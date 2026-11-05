@@ -9,6 +9,7 @@ import { modelPrefs } from "@/lib/agents-models";
 import { DEFAULT_OWNER_SETTINGS, parseOwnerSettings } from "@/lib/owner-settings";
 import { machine, machineConfig, project, provider, SEAL_KEY, T0, thread } from "@/test/agents";
 import { agentsHarness, fakeServices, renderAgents, type AgentsHarness } from "@/test/agents-render";
+import { macClick } from "@/test/mac-click";
 import { MarkStateProvider } from "../mark-state";
 import { AgentsControl } from "./agents-control";
 import { Composer } from "./composer";
@@ -101,6 +102,55 @@ describe("a machine's settings", () => {
     await userEvent.type(screen.getByRole("textbox", { name: "Claude Code model slug" }), "claude-opus-5-5-1m{Enter}");
     expect(screen.getByRole("alert")).toHaveTextContent("That custom model is already saved.");
     expect(configures(h)).toHaveLength(4);
+  });
+
+  it("edits a custom model's name and the options the composer shows for it (T3's custom model editor)", async () => {
+    const { h } = configured({ providers: { claude: { models: [{ id: "claude-opus-5-5-preview" }] } } });
+    await userEvent.click(screen.getByRole("button", { name: "Claude Code details" }));
+    await userEvent.click(screen.getByRole("button", { name: "Edit name and options of claude-opus-5-5-preview" }));
+    const editor = screen.getByRole("form", { name: "Edit claude-opus-5-5-preview" });
+    expect(within(editor).getByText("No custom options. The composer uses the provider's default options.")).toBeInTheDocument();
+    const name = within(editor).getByRole("textbox", { name: "Display name" });
+    await userEvent.type(name, "Opus preview");
+    // Safari: clicking a button leaves focus for nothing (the field blurs, no relatedTarget).
+    // The editor stays open and takes the click.
+    macClick(within(editor).getByRole("button", { name: "Reasoning" }));
+    expect(document.activeElement).toBe(document.body);
+    expect(screen.getByRole("form", { name: "Edit claude-opus-5-5-preview" })).toBeInTheDocument();
+    macClick(within(editor).getByRole("button", { name: "Fast Mode" }));
+    // A custom option without an id is refused before anything is sent.
+    await userEvent.click(within(editor).getByRole("button", { name: "Custom option" }));
+    await userEvent.click(within(editor).getByRole("button", { name: "Save" }));
+    expect(within(editor).getByRole("alert")).toHaveTextContent("Option 3 needs an id.");
+    expect(configures(h)).toHaveLength(0);
+    await userEvent.click(within(editor).getByRole("button", { name: "Remove option 3" }));
+    macClick(within(editor).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(configures(h)).toHaveLength(1));
+    expect(configures(h)[0].providers?.claude?.models).toEqual([
+      {
+        id: "claude-opus-5-5-preview",
+        name: "Opus preview",
+        options: [
+          {
+            type: "select",
+            id: "effort",
+            label: "Reasoning",
+            choices: [
+              { id: "low", label: "Low" },
+              { id: "medium", label: "Medium" },
+              { id: "high", label: "High" },
+              { id: "xhigh", label: "Extra High" },
+              { id: "max", label: "Max" },
+            ],
+            default: "high",
+            role: "reasoning",
+          },
+          { type: "boolean", id: "fastMode", label: "Fast Mode", default: false, role: "speed" },
+        ],
+      },
+    ]);
+    await waitFor(() => expect(screen.queryByRole("form", { name: "Edit claude-opus-5-5-preview" })).toBeNull());
+    expect(screen.getByText("2 options")).toBeInTheDocument();
   });
 
   it("sets Claude's auto-compact window and when idle threads compact, over the machine's default (T3's Claude settings)", async () => {

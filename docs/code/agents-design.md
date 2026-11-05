@@ -167,6 +167,19 @@ state, or draw a project's logo inline (only in an `<img>`).
   muted label and a `Segmented` (layout, density, grouping), then "Show" with `Switch` rows, a
   hint in each row's tooltip. The compact density hides `[data-detail]` inside cards (globals.css)
   and lays out with `COMPACT_GAPS`.
+- **Shelf popover:** "Shelf" (archive icon, a mono count) before Display; absent when nothing is
+  shelved. A 400px popover (the phone's width less 8px each side) scaling from the trigger: a
+  bare search row over a hairline, a full-width `Segmented` of the three shelves with counts,
+  then 32px option rows under 11px project headers (icon, name, count), the active row
+  `bg-fg/[0.07]` with its restore button in place of the time, and an 11px key hint footer (not on
+  phones). The list's height animates (`AnimatedHeight`) as tabs and searches change it.
+  Settled and archived conversations never sit on a card.
+- **A machine's folded projects:** one 11.5px subtle line at the foot of the machine card (up to
+  three 14px tiles overlapping by 4px, each on a 1px `bg-panel` rim, the count, a chevron),
+  `fg/4%` on hover. It opens a 300px popover to the card's right (`openOnHover`, 250 ms in,
+  180 ms out): an 11px header, 2-line rows (20px tile, the name at 12.5px, the path or repo in
+  10.5px mono), the row's tools (+, pin, gear) fading in on hover or focus (always on touch),
+  "Add a project" under a hairline. No empty project cards on the canvas.
 - **Keyboard focus on the canvas:** a focused card gets the 2px accent outline offset by 2px,
   like any focus; the focus-a-project chip is a raised chip (`bg-panel-2`, highlight) in the
   views bar with the project's name and an ×.
@@ -230,6 +243,7 @@ Text levels: `--fg` `#f7f8f8`, `--soft` `#d0d6e0` (secondary body), `--muted` `#
 | hover and colour | 150ms; buttons press to scale 0.97 |
 | cards | ease to their layout slot (spring-like, 0.22 per frame); new cards grow from their parent |
 | state loops | the busy border and pulse dots breathe over 1.6s; shimmer runs 1.8s; no flashing |
+| a pill that opens into a composer (the canvas's prompt bar) | one structure in both states: the text line never moves; the rest grows from nothing (grid rows 0fr → 1fr) while the radius eases from a pill to 16px, 240ms on `--ease-out-soft`; its contents fade and rise 4px, 60ms behind; closing is the same backwards |
 
 The drawer curve `cubic-bezier(0.32,0.72,0,1)` is T3's `--ease-drawer`. Every keyframe class is
 switched off under `prefers-reduced-motion`, and the engine draws a static, state-correct frame.
@@ -249,6 +263,10 @@ switched off under `prefers-reduced-motion`, and the engine draws a static, stat
   already does it.
 - **Do** use the Horizon mark in the header (`HorizonMark`). **Don't** put the globe in a bar.
 - **Do** honour reduced motion. **Don't** animate anything that isn't changing state.
+- **Do** close something on a press outside it and its popups, on Escape, or when focus moves to
+  a real element elsewhere. **Don't** close it on a blur alone: Safari and Firefox on macOS don't
+  focus buttons on click, so `relatedTarget` is null while a popup's own buttons are used. Never
+  decide from `relatedTarget` alone.
 
 ## Automations
 

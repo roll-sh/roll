@@ -210,7 +210,12 @@ export const AgentsCanvas = forwardRef<
       if (!r || !w || h <= 0) return;
       const first = arranged.roots.find((k) => positions.has(k));
       const anchor = first ? bounds(positions, sizeOf, [first]) ?? undefined : undefined;
-      e.setView(w < 640 ? fitView(r, w, h, 24, 1, all ? 0 : 0.55, anchor) : fitView(r, w, h, 64, 1, all ? 0 : READABLE), animate);
+      if (w < 640) {
+        // A phone's waiting request puts the zoom bar at the top (`data-waiting`): frame below it.
+        const top = container.current?.closest("[data-waiting]") ? PHONE_TOP_BAR : 0;
+        const v = fitView(r, w, h - top, 24, 1, all ? 0 : 0.55, anchor);
+        e.setView({ ...v, y: v.y + top }, animate);
+      } else e.setView(fitView(r, w, h, 64, 1, all ? 0 : READABLE), animate);
     },
     [positions, sizeOf, arranged, coveredBelow],
   );
@@ -244,6 +249,31 @@ export const AgentsCanvas = forwardRef<
     following.current = true;
     fit(true);
   }, [direction, fit]);
+  // The canvas got narrower or wider (the side panel opened or closed, the window resized): frame
+  // it again, unless the view was moved by hand (then it stays where it was put).
+  useEffect(() => {
+    const c = container.current;
+    if (!c) return;
+    let width = c.getBoundingClientRect().width;
+    let t: ReturnType<typeof setTimeout> | undefined;
+    const ro = new ResizeObserver(() => {
+      const now = c.getBoundingClientRect().width;
+      if (Math.abs(now - width) < 24) return;
+      width = now;
+      clearTimeout(t);
+      t = setTimeout(() => fitted.current && following.current && fitRef.current(true), 120);
+    });
+    ro.observe(c);
+    return () => {
+      ro.disconnect();
+      clearTimeout(t);
+    };
+  }, []);
+  const fitRef = useRef(fit);
+  useEffect(() => {
+    fitRef.current = fit;
+  });
+
   // The stream re-renders constantly; only a change in the overall extent refits.
   const extent = useMemo(() => {
     const r = bounds(positions, sizeOf);
@@ -275,14 +305,18 @@ export const AgentsCanvas = forwardRef<
   useEffect(() => {
     const c = container.current;
     if (!c) return;
+    // Only moving the view by hand stops following: a drag on the background, the wheel, the
+    // pan and zoom keys. A click on a card (to open it) moves nothing.
     const stop = () => (following.current = false);
-    c.addEventListener("pointerdown", stop);
+    const down = (e: PointerEvent) => !(e.target as HTMLElement | null)?.closest?.("[data-card]") && stop();
+    const key = (e: KeyboardEvent) => VIEW_KEYS.has(e.key) && !(e.target as HTMLElement | null)?.closest?.("[data-card]") && stop();
+    c.addEventListener("pointerdown", down);
     c.addEventListener("wheel", stop, { passive: true });
-    c.addEventListener("keydown", stop);
+    c.addEventListener("keydown", key);
     return () => {
-      c.removeEventListener("pointerdown", stop);
+      c.removeEventListener("pointerdown", down);
       c.removeEventListener("wheel", stop);
-      c.removeEventListener("keydown", stop);
+      c.removeEventListener("keydown", key);
     };
   }, []);
 
@@ -301,11 +335,13 @@ export const AgentsCanvas = forwardRef<
   }, [storageKey]);
 
   const focus = useCallback(
-    (key: string, k?: number) => {
+    (key: string, k?: number, auto = false) => {
       const e = engine.current;
       const p = positions.get(key);
       if (!e || !p) return;
-      following.current = false;
+      // Asked for (a card shown from ⌘K, the keyboard): the view is the person's now. `auto` (a
+      // panel opening reveals its card) leaves the canvas following its work.
+      if (!auto) following.current = false;
       const s = sizeOf(key);
       const { w } = e.viewport;
       const h = e.viewport.h - coveredBelow();
@@ -327,7 +363,7 @@ export const AgentsCanvas = forwardRef<
       const { w } = e.viewport;
       const h = e.viewport.h - coveredBelow();
       const inView = p.x * k + x >= 0 && p.y * k + y >= 0 && (p.x + s.w) * k + x <= w && (p.y + s.h) * k + y <= h;
-      if (!inView) focus(key, e.view.k);
+      if (!inView) focus(key, e.view.k, true);
     },
     [positions, sizeOf, focus, coveredBelow],
   );
@@ -709,6 +745,10 @@ function LaunchGhost({ source, from, to, over }: { source: string; from: Point; 
 }
 /** The smallest zoom an automatic fit goes to on a desktop: cards stay legible. */
 const READABLE = 0.6;
+/** Keys that pan or zoom the canvas (with no card focused). */
+const VIEW_KEYS = new Set(["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "+", "=", "-", "0", "1"]);
+/** Room for a phone's zoom bar when it sits at the top (while a request waits at the bottom). */
+const PHONE_TOP_BAR = 48;
 
 /** Whether `r` (world) shows at all in a `viewport` seen through `v`. */
 function overlaps(r: { x: number; y: number; w: number; h: number }, v: View, viewport: { w: number; h: number }) {

@@ -245,6 +245,8 @@ export interface QueuedMessage {
   text: string;
   attachments: Attachment[];
   at: Millis;
+  /** Delegated tasks' results waiting behind the active run (a wake); empty for a person's message. */
+  delivers?: NodeId[];
 }
 
 export interface Usage {
@@ -381,6 +383,11 @@ export interface Run {
   steers: string[];
   /** The daemon compacted the idle conversation before its prompt cache expired (T3's idle compaction). */
   idle_compaction?: boolean;
+  /**
+   * The daemon started it with these delegated tasks' results, waking the thread that delegated
+   * them (T3's "Delegated task finished"); `prompt` is what the agent was told. Empty for a person's run.
+   */
+  delivers?: NodeId[];
   requested_at: Millis;
   started_at: Millis | null;
   completed_at: Millis | null;
@@ -588,6 +595,8 @@ export interface ModelInfo {
   custom?: boolean;
   /** Listed by an endpoint the provider uses (its name), not by the provider itself. */
   via?: string;
+  /** T3's "New" badge: a week after a current model's release. */
+  badge?: "new";
 }
 
 /** A model the provider would offer after an update. */
@@ -1035,6 +1044,55 @@ export interface MachineConfig {
   endpoints?: EndpointInfo[];
   /** roll's model gateway on this machine; unset: never set up here. */
   gateway?: GatewayInfo;
+  /** The agents the daemon installed from the ACP registry. Unset: a daemon that can't install them. */
+  registry?: RegistryInstalled[];
+}
+
+// ── the ACP registry (agent-proto `registry.rs`) ──
+
+/** How the registry distributes an agent: an archive for the machine, or an npm / PyPI package. */
+export type RegistryKind = "binary" | "npx" | "uvx";
+/** What vouches for the bytes an install runs: a listed SHA-256, an exact package version, or nothing. */
+export type RegistryIntegrity = "sha256" | "registry" | "none";
+
+/** One agent of the ACP registry as a daemon sees it (T3's `AcpRegistrySearchAgent`). */
+export interface RegistryAgent {
+  /** The registry's id; it installs as the provider `acp:<id>`. */
+  id: string;
+  name: string;
+  version: string;
+  description?: string;
+  website?: string;
+  repository?: string;
+  /** An SVG on the registry's CDN. */
+  icon?: string;
+  /** The distributions that suit the machine, in install order (a binary only for its OS and arch). */
+  kinds?: RegistryKind[];
+  /** `registry.install` can install it there (a binary for it, or npm/uv on its PATH). */
+  installable: boolean;
+  integrity: RegistryIntegrity;
+  /** The version the daemon installed. */
+  installed?: string;
+  /** The provider on the machine that is this agent already. */
+  offered?: ProviderId;
+}
+
+/** An agent the daemon installed from the registry. */
+export interface RegistryInstalled {
+  id: string;
+  version: string;
+  provider: ProviderId;
+  kind: RegistryKind;
+  installed_at: Millis;
+}
+
+/** `registry.list`'s answer. */
+export interface RegistryList {
+  agents: RegistryAgent[];
+  /** When the daemon last fetched the registry (0: never). */
+  fetched_at: Millis;
+  /** Why the list is old or empty (the registry couldn't be reached). */
+  error?: string;
 }
 
 export interface SettingsBase {
@@ -1118,6 +1176,8 @@ export interface CustomModel {
   /** The slug the provider takes. */
   id: string;
   name?: string;
+  /** What the composer offers for it (T3's custom `optionDescriptors`); unset: the provider's own. */
+  options?: ModelOption[];
 }
 
 /** A provider's settings with the defaults filled in. */
@@ -1299,18 +1359,24 @@ export type Command =
   /** Newest first: after `after` (the live tail) or before `before` (paging back). */
   | { type: "gateway.log"; after?: number; before?: number; limit: number; errors?: boolean }
   | { type: "gateway.log.body"; seq: number }
+  /** Install an agent of the ACP registry on the machine; replies once it's offered as `acp:<agent>`. */
+  | { type: "registry.install"; agent: string }
+  /** Remove an agent the daemon installed from the registry. */
+  | { type: "registry.remove"; agent: string }
   | { type: "diff.get"; thread: ThreadId; run?: RunId }
   | { type: "fs.list"; project?: ProjectId; path: string }
   | { type: "fs.read"; project: ProjectId; path: string }
   /** Write a text file in the thread's workspace (T3's `projects.writeFile`, "Save to workspace"); answers `written`. */
   | { type: "fs.write"; thread: ThreadId; path: string; text: string }
   | { type: "git.status"; thread: ThreadId }
-  | { type: "terminal.scrollback"; terminal: TerminalId };
+  | { type: "terminal.scrollback"; terminal: TerminalId }
+  /** The ACP registry's agents as the machine sees them (answers `registry`). */
+  | { type: "registry.list" };
 
 export type CommandType = Command["type"];
 
 /** Queries only answer; they never change state. */
-export const QUERIES: readonly CommandType[] = ["diff.get", "fs.list", "fs.read", "git.status", "terminal.scrollback", "gateway.status", "gateway.usage", "gateway.log", "gateway.log.body"];
+export const QUERIES: readonly CommandType[] = ["diff.get", "fs.list", "fs.read", "git.status", "terminal.scrollback", "registry.list", "gateway.status", "gateway.usage", "gateway.log", "gateway.log.body"];
 
 export interface CommandRequest {
   /** The idempotency key: retrying with the same id never runs the command twice. */
@@ -1381,6 +1447,7 @@ export type Reply =
   | ({ type: "gateway_usage" } & UsageReport)
   | { type: "gateway_log"; entries: LogEntry[] }
   | ({ type: "gateway_log_body" } & LogBody)
+  | ({ type: "registry" } & RegistryList)
   | { type: "error"; code: ErrorCode; message: string };
 
 // ── deltas and the stream ──
@@ -1593,6 +1660,7 @@ const modelInfoWireD = obj<ModelInfo & { efforts: string[] }>({
   images: optional(bool),
   custom: optional(bool),
   via: optional(str),
+  badge: optional(literal("new")),
 });
 /** Daemons from before option descriptors send a model's reasoning levels alone, as `efforts` (agent-proto reads them the same way). */
 const modelInfoD: Decoder<ModelInfo> = (v, p, ctx) => {
@@ -1732,7 +1800,7 @@ const threadD = obj<Thread>({
   lineage: opt(obj<Lineage>({ parent: str, relation: literal("fork", "subagent"), root: str, from_run: opt(str) })),
   orchestrator: withDefault(bool, () => false),
   active_run: opt(str),
-  queued: vec(obj<QueuedMessage>({ id: str, text: str, attachments: vec(attachmentD), at: int })),
+  queued: vec(obj<QueuedMessage>({ id: str, text: str, attachments: vec(attachmentD), at: int, delivers: withDefault(vec(str), () => []) })),
   run_count: int,
   pending_requests: int,
   plan_ready: withDefault(bool, () => false),
@@ -1781,6 +1849,7 @@ const runD = obj<Run>({
   attachments: vec(attachmentD),
   steers: vec(str),
   idle_compaction: withDefault(bool, () => false),
+  delivers: withDefault(vec(str), () => []),
   requested_at: int,
   started_at: opt(int),
   completed_at: opt(int),
@@ -1953,7 +2022,7 @@ const providerSettingsD = obj<ProviderSettings>({
   binary: optional(str),
   args: optional(array(str)),
   env: optional(map(str)),
-  models: optional(array(obj<CustomModel>({ id: str, name: optional(str) }))),
+  models: optional(array(obj<CustomModel>({ id: str, name: optional(str), options: optional(array(modelOptionD)) }))),
   auto_compact_window: optional(int),
   idle_compaction: optional(idleCompactionD),
 });
@@ -1994,6 +2063,27 @@ const endpointInfoD = obj<EndpointInfo>({
   key: withDefault(literal("none", "sealed", "reference"), () => "none" as const),
   models: optional(array(obj<EndpointModel>({ id: str, name: optional(str) }))),
   checked_at: optional(int),
+  error: optional(str),
+});
+const registryKindD = literal("binary", "npx", "uvx");
+const registryListD = obj<RegistryList>({
+  agents: array(
+    obj<RegistryAgent>({
+      id: str,
+      name: str,
+      version: str,
+      description: optional(str),
+      website: optional(str),
+      repository: optional(str),
+      icon: optional(str),
+      kinds: optional(array(registryKindD)),
+      installable: bool,
+      integrity: literal("sha256", "registry", "none"),
+      installed: optional(str),
+      offered: optional(str),
+    }),
+  ),
+  fetched_at: withDefault(int, () => 0),
   error: optional(str),
 });
 const endpointCheckD = obj<EndpointCheck>({ ok: bool, models: withDefault(int, () => 0), ms: withDefault(int, () => 0), error: optional(str) });
@@ -2134,6 +2224,7 @@ const machineConfigD = obj<MachineConfig>({
   config_path: str,
   endpoints: optional(array(endpointInfoD)),
   gateway: optional(gatewayInfoD),
+  registry: optional(array(obj<RegistryInstalled>({ id: str, version: str, provider: str, kind: registryKindD, installed_at: int }))),
 });
 const machineInfoD = obj<MachineInfo>({
   hostname: str,
@@ -2252,6 +2343,9 @@ export const commandD: Decoder<Command> = tagged("type", {
   "gateway.usage": cmd<"gateway.usage">(obj({ from: int, to: int, by: optional(usageByD), bucket: optional(usageBucketD) })),
   "gateway.log": cmd<"gateway.log">(obj({ after: optional(int), before: optional(int), limit: withDefault(int, () => 0), errors: optional(bool) })),
   "gateway.log.body": cmd<"gateway.log.body">(obj({ seq: int })),
+  "registry.install": cmd<"registry.install">(obj({ agent: str })),
+  "registry.remove": cmd<"registry.remove">(obj({ agent: str })),
+  "registry.list": cmd<"registry.list">(obj({})),
   "diff.get": cmd<"diff.get">(obj({ thread: str, run: optional(str) })),
   "fs.list": cmd<"fs.list">(obj({ project: optional(str), path: str })),
   "fs.read": cmd<"fs.read">(obj({ project: str, path: str })),
@@ -2290,6 +2384,7 @@ export const replyD: Decoder<Reply> = tagged("type", {
   gateway_usage: usageReportD,
   gateway_log: obj<{ entries: LogEntry[] }>({ entries: array(logEntryD) }),
   gateway_log_body: logBodyD,
+  registry: registryListD,
   pulled: pullResultD,
   cleaned: obj<CleanupReport>({ removed: array(str), kept: array(obj<{ thread: string; reason: KeptReason }>({ thread: str, reason: keptReasonD })) }),
   error: obj<{ code: ErrorCode; message: string }>({

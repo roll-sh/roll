@@ -145,15 +145,15 @@ describe("launching from the surface", () => {
   it("a project's handle dragged onto the canvas opens the launcher where it's dropped", async () => {
     surface();
     await userEvent.keyboard("{Meta>}j{/Meta}");
-    const handle = within(screen.getByLabelText("Project infra")).getByRole("button", { name: /^New agent here/ });
+    const handle = within(screen.getByLabelText("Project roll")).getByRole("button", { name: /^New agent here/ });
     fireEvent.pointerDown(handle, { pointerId: 1, button: 0, clientX: 10, clientY: 10 });
     fireEvent.pointerMove(handle, { pointerId: 1, clientX: 140, clientY: 160 });
     expect(screen.getByRole("status")).toHaveTextContent("New agent here");
     fireEvent.pointerUp(handle, { pointerId: 1, clientX: 140, clientY: 160 });
     expect(screen.queryByRole("status")).toBeNull();
     const view = agentsSurface.get().view;
-    expect(view).toMatchObject({ kind: "new", project: "prj_2", at: { x: 140, y: 160 } });
-    expect(within(screen.getByRole("dialog", { name: "New agent" })).getByRole("combobox", { name: "Project" })).toHaveTextContent("infra");
+    expect(view).toMatchObject({ kind: "new", project: "prj_1", at: { x: 140, y: 160 } });
+    expect(within(screen.getByRole("dialog", { name: "New agent" })).getByRole("combobox", { name: "Project" })).toHaveTextContent("roll");
   });
 
   it("a thread's fork handle dragged onto the canvas forks it and opens the fork", async () => {

@@ -29,7 +29,7 @@ impl Host {
 
     /// `cfg` with the endpoint `id` uses laid over it, if it uses one.
     pub(crate) fn with_endpoint(&self, id: &ProviderId, cfg: ProviderConfig) -> ProviderConfig {
-        let Some(provider) = self.providers.get(id) else { return cfg };
+        let Ok(provider) = self.provider(id) else { return cfg };
         let live = self.endpoints.lock().unwrap().iter().find(|l| l.stored.spec.serves(id)).cloned();
         let Some(live) = live else { return cfg };
         if self.fallen_back(&live) {
@@ -64,7 +64,7 @@ impl Host {
     pub(crate) async fn endpoint_set(&self, spec: EndpointSpec, key: KeyChange) -> Res<Reply> {
         let spec = spec.check().map_err(Fail::Invalid)?;
         for p in &spec.providers {
-            let provider = self.providers.get(p).ok_or_else(|| Fail::Invalid(format!("no provider {} on this machine", p.0)))?;
+            let provider = self.provider(p)?;
             provider.endpoint_use(&spec, Some("k")).map_err(Fail::Invalid)?;
         }
         if spec.key_ref.is_some() && matches!(key, KeyChange::Set { .. }) {

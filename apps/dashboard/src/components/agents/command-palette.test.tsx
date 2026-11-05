@@ -5,6 +5,7 @@ import type { Command } from "@/lib/agents-api";
 import { setActiveClient } from "@/lib/agents-client";
 import { agentsPalette, resetPalette } from "@/lib/agents-palette";
 import { agentsSurface, resetAgentsSurface, showAgents } from "@/lib/agents-surface";
+import { resetShelves } from "@/lib/agents-shelf";
 import { approval, mirrored, project, run, thread } from "@/test/agents";
 import { agentsHarness, fakeServices, renderAgents, type AgentsHarness } from "@/test/agents-render";
 import { MarkStateProvider } from "../mark-state";
@@ -50,7 +51,10 @@ beforeEach(() => {
   localStorage.clear();
   window.history.replaceState(null, "", "/dashboard");
 });
-afterEach(() => setActiveClient(null));
+afterEach(() => {
+  setActiveClient(null);
+  resetShelves();
+});
 
 describe("the agents' command palette", () => {
   it("opens with ⌘K over the agents (and the header's search), and a conversation found by name opens beside the canvas", async () => {
@@ -119,7 +123,7 @@ describe("the agents' command palette", () => {
     expect(creates(h)[0]).toMatchObject({ prompt: "Bump the lockfile and run the tests", runtime_mode: "full_access" });
   });
 
-  it("finds archived and settled conversations, and opens a project's shelf on the canvas", async () => {
+  it("finds archived and settled conversations, and opens a project's shelf from the canvas toolbar", async () => {
     const DAY = 86_400_000;
     setup([
       mirrored("thread", thread({ id: "thr_a", title: "Spike: edge middleware", archived_at: Date.now() - DAY }), 6),
@@ -139,7 +143,10 @@ describe("the agents' command palette", () => {
     await userEvent.keyboard("{Enter}");
     expect(within(palette()).getByRole("option", { name: /Settled 1 · Archived 1/ })).toBeInTheDocument();
     await userEvent.keyboard("{Enter}");
-    await waitFor(() => expect(JSON.parse(localStorage.getItem("roll:agents:shelves") ?? "[]")).toContain(project().id));
+    // The canvas, with the toolbar's shelf open on just that project.
+    const shelf = await screen.findByRole("dialog", { name: "Shelf" });
+    expect(within(shelf).getByRole("combobox")).toHaveAttribute("placeholder", `Search ${project().name}’s shelf…`);
+    expect(within(shelf).getByRole("option", { name: "Bump tokio" })).toBeInTheDocument();
     expect(agentsSurface.get().view).toEqual({ kind: "canvas" });
   });
 

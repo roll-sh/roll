@@ -887,6 +887,17 @@ async fn the_fake_orchestrator_delegates_through_the_server_and_sums_up_when_eve
         // A subagent does the work and delegates nothing.
         assert!(subagent_nodes(&s, &kid.id).is_empty() && tool_calls(&s, &kid.id).is_empty());
     }
+    // The wakes say which tasks they deliver, so the conversation shows them as results, never as
+    // the user's words; the user's goal delivers nothing.
+    assert!(runs[0].delivers.is_empty());
+    let mut delivered: Vec<&NodeId> = runs[1..].iter().flat_map(|r| &r.delivers).collect();
+    for r in &runs[1..] {
+        assert!(!r.delivers.is_empty() && r.delivers.iter().all(|t| r.prompt.contains(&format!("Delegated task {t} "))), "{r:?}");
+    }
+    let mut parts: Vec<NodeId> = subagent_nodes(&s, &lead).into_iter().map(|n| n.id).collect();
+    delivered.sort();
+    parts.sort();
+    assert_eq!(delivered, parts.iter().collect::<Vec<_>>());
     let told: Vec<String> = lead_provider.sessions().iter().filter_map(|x| x.config.instructions.clone()).collect();
     assert_eq!(told.iter().filter(|t| t.contains("## You are the orchestrator")).count(), 1);
     assert_eq!(told.iter().filter(|t| t.contains("## You are a subagent")).count(), 2);

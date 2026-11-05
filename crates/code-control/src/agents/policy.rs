@@ -93,6 +93,7 @@ pub(crate) fn agent_may(command: &Command, current: Option<(RuntimeMode, Interac
         | Command::GatewayUsage { .. }
         | Command::GatewayLog { .. }
         | Command::GatewayLogBody { .. } => owner_only("manage or read the model gateway"),
+        Command::RegistryList {} | Command::RegistryInstall { .. } | Command::RegistryRemove { .. } => owner_only("list, install or remove a machine's agents"),
     }
 }
 
@@ -186,6 +187,9 @@ mod tests {
             (json!({ "type": "gateway.usage", "from": 0, "to": 1 }), None, false),
             (json!({ "type": "gateway.log", "limit": 10 }), None, false),
             (json!({ "type": "gateway.log.body", "seq": 1 }), None, false),
+            (json!({ "type": "registry.list" }), None, false),
+            (json!({ "type": "registry.install", "agent": "goose" }), None, false),
+            (json!({ "type": "registry.remove", "agent": "goose" }), None, false),
             (json!({ "type": "diff.get", "thread": t }), None, true),
             (json!({ "type": "git.status", "thread": t }), None, true),
             (json!({ "type": "fs.list", "path": "/" }), None, false),

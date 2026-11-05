@@ -170,7 +170,13 @@ pub struct Spawn<'a> {
     pub args: Vec<String>,
     pub env: Vec<(String, String)>,
     pub cwd: Option<&'a Path>,
+    /// A stdout line that isn't JSON ends the connection; this says why for lines an agent is
+    /// known to print (Antigravity's sign-in link), instead of a parse error.
+    pub non_json: Option<NonJson>,
 }
+
+/// Why a known non-JSON stdout line ends the connection; `None` for any other line.
+pub type NonJson = fn(&[u8]) -> Option<String>;
 
 /// Start the process. Inbound messages arrive on the receiver until `Inbound::Closed`.
 pub fn spawn(spec: Spawn<'_>) -> anyhow::Result<(Arc<Rpc>, mpsc::UnboundedReceiver<Inbound>, Process)> {
@@ -203,7 +209,7 @@ pub fn spawn(spec: Spawn<'_>) -> anyhow::Result<(Arc<Rpc>, mpsc::UnboundedReceiv
 
     let (in_tx, in_rx) = mpsc::unbounded_channel();
     let rpc = Arc::new(Rpc { out: out_tx, calls: Mutex::default(), next: AtomicU64::new(0), inbound: in_tx.clone() });
-    tokio::spawn(read_loop(BufReader::new(stdout), rpc.clone(), in_tx, tail, stderr_done));
+    tokio::spawn(read_loop(BufReader::new(stdout), rpc.clone(), in_tx, tail, stderr_done, spec.non_json));
     let process = Process {
         child: tokio::sync::Mutex::new(Some(child)),
         pgid,
@@ -249,8 +255,11 @@ async fn read_loop(
     inbound: mpsc::UnboundedSender<Inbound>,
     tail: Arc<Mutex<VecDeque<u8>>>,
     stderr_done: tokio::task::JoinHandle<()>,
+    non_json: Option<NonJson>,
 ) {
     let mut line = Vec::new();
+    // A known line says all there is to say: stderr (which may hold the same link) is left out.
+    let mut known = false;
     let error = loop {
         line.clear();
         match read_line(&mut stdout, &mut line, MAX_LINE).await {
@@ -263,7 +272,13 @@ async fn read_loop(
         }
         let frame: Value = match serde_json::from_slice(&line) {
             Ok(frame) => frame,
-            Err(e) => break Some(format!("the agent sent a line that isn't JSON: {e}")),
+            Err(e) => match non_json.and_then(|f| f(&line)) {
+                Some(why) => {
+                    known = true;
+                    break Some(why);
+                }
+                None => break Some(format!("the agent sent a line that isn't JSON: {e}")),
+            },
         };
         if let Err(e) = route(&rpc, &inbound, frame) {
             break Some(e.to_string());
@@ -271,9 +286,12 @@ async fn read_loop(
     };
     // Give stderr a moment to drain so the error says why the agent died.
     let _ = tokio::time::timeout(Duration::from_millis(500), stderr_done).await;
-    let stderr = {
-        let tail = tail.lock().unwrap();
-        String::from_utf8_lossy(&tail.iter().copied().collect::<Vec<_>>()).trim().to_string()
+    let stderr = match known {
+        true => String::new(),
+        false => {
+            let tail = tail.lock().unwrap();
+            String::from_utf8_lossy(&tail.iter().copied().collect::<Vec<_>>()).trim().to_string()
+        }
     };
     let why = match (&error, stderr.is_empty()) {
         (Some(e), true) => e.clone(),

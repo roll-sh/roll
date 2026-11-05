@@ -100,7 +100,10 @@ fn thread() -> Thread {
         }),
         orchestrator: true,
         active_run: Some(run()),
-        queued: vec![QueuedMessage { id: "q1".into(), text: "then run clippy".into(), attachments: vec![], at: T }],
+        queued: vec![
+            QueuedMessage { id: "q1".into(), text: "then run clippy".into(), attachments: vec![], at: T, delivers: vec![] },
+            QueuedMessage { id: "q2".into(), text: "Delegated task nod_0000000000000002 (Tests) [completed]:\nAll green.".into(), attachments: vec![], at: T, delivers: vec![node(2)] },
+        ],
         run_count: 3,
         pending_requests: 1,
         plan_ready: true,
@@ -172,6 +175,7 @@ fn run_rec() -> Run {
         attachments: vec![Attachment { name: "trace.png".into(), mime: "image/png".into(), data: "iVBORw0KGgo=".into() }],
         steers: vec!["it only fails on Postgres".into()],
         idle_compaction: false,
+        delivers: vec![],
         requested_at: T,
         started_at: Some(T + 20),
         completed_at: None,
@@ -479,12 +483,15 @@ fn commands() -> Vec<Command> {
         Command::GatewayUsage { from: T - 7 * 86_400_000, to: T, by: UsageBy::Machine, bucket: UsageBucket::Day },
         Command::GatewayLog { after: Some(41), before: None, limit: 50, errors: true },
         Command::GatewayLogBody { seq: 42 },
+        Command::RegistryInstall { agent: "goose".into() },
+        Command::RegistryRemove { agent: "goose".into() },
         Command::DiffGet { thread: thr(), run: Some(run()) },
         Command::FsList { project: None, path: "/home/ada".into() },
         Command::FsRead { project: prj(), path: "README.md".into() },
         Command::FsWrite { thread: thr(), path: "docs/plans/fix-the-queue.md".into(), text: "# Fix the queue\n".into() },
         Command::GitStatus { thread: thr() },
         Command::TerminalScrollback { terminal: trm() },
+        Command::RegistryList {},
     ]
 }
 
@@ -536,6 +543,9 @@ fn covered_command(c: &Command) {
         | Command::GatewayUsage { .. }
         | Command::GatewayLog { .. }
         | Command::GatewayLogBody { .. }
+        | Command::RegistryInstall { .. }
+        | Command::RegistryRemove { .. }
+        | Command::RegistryList {}
         | Command::DiffGet { .. }
         | Command::FsList { .. }
         | Command::FsRead { .. }
@@ -648,6 +658,55 @@ fn replies() -> Vec<Reply> {
         }),
         Reply::GatewayLog { entries: vec![log_entry()] },
         Reply::GatewayLogBody(LogBody { seq: 42, request: "{\"model\":\"fast\"}".into(), response: "event: message_start\n".into(), truncated: true }),
+        Reply::Registry(RegistryList {
+            agents: vec![
+                RegistryAgent {
+                    id: "goose".into(),
+                    name: "goose".into(),
+                    version: "1.57.0".into(),
+                    description: "A local, extensible, open source AI agent that automates engineering tasks".into(),
+                    website: None,
+                    repository: Some("https://github.com/block/goose".into()),
+                    icon: Some("https://cdn.agentclientprotocol.com/registry/v1/latest/goose.svg".into()),
+                    kinds: vec![RegistryKind::Binary],
+                    installable: true,
+                    integrity: RegistryIntegrity::Sha256,
+                    installed: Some("1.57.0".into()),
+                    offered: Some(ProviderId("acp:goose".into())),
+                },
+                RegistryAgent {
+                    id: "fast-agent".into(),
+                    name: "fast-agent".into(),
+                    version: "0.10.1".into(),
+                    description: String::new(),
+                    website: Some("https://fast-agent.ai".into()),
+                    repository: None,
+                    icon: None,
+                    kinds: vec![RegistryKind::Uvx],
+                    installable: false,
+                    integrity: RegistryIntegrity::Registry,
+                    installed: None,
+                    offered: None,
+                },
+                RegistryAgent {
+                    id: "junie".into(),
+                    name: "Junie".into(),
+                    version: "3959.5.0".into(),
+                    description: "JetBrains' coding agent".into(),
+                    website: None,
+                    repository: None,
+                    icon: None,
+                    kinds: vec![RegistryKind::Binary, RegistryKind::Npx],
+                    installable: true,
+                    integrity: RegistryIntegrity::None,
+                    installed: None,
+                    offered: None,
+                },
+            ],
+            fetched_at: T,
+            error: None,
+        }),
+        Reply::Registry(RegistryList { agents: vec![], fetched_at: 0, error: Some("couldn't fetch the ACP registry: timed out".into()) }),
         Reply::Error(ReplyError { code: ErrorCode::MachineOffline, message: "the machine isn't connected".into() }),
     ]
 }
@@ -672,6 +731,7 @@ fn covered_reply(r: &Reply) {
         | Reply::GatewayUsage(_)
         | Reply::GatewayLog { .. }
         | Reply::GatewayLogBody(_)
+        | Reply::Registry(_)
         | Reply::Error(_) => {}
     }
 }
@@ -700,7 +760,14 @@ fn settings() -> MachineSettings {
             binary: Some("/opt/claude/bin/claude".into()),
             args: vec!["--verbose".into()],
             env: [("CLAUDE_CONFIG_DIR".to_string(), "/Users/ada/.claude-work".to_string())].into(),
-            models: vec![CustomModel { id: "claude-opus-5-5[1m]".into(), name: Some("Opus 5.5 (1M)".into()) }],
+            models: vec![
+                CustomModel { id: "claude-opus-5-5[1m]".into(), name: Some("Opus 5.5 (1M)".into()), options: None },
+                CustomModel {
+                    id: "claude-opus-5-5-preview".into(),
+                    name: None,
+                    options: Some(vec![ModelOption::reasoning(vec![OptionChoice::new("low", "Low"), OptionChoice::new("high", "High")], Some("high"))]),
+                },
+            ],
             auto_compact_window: Some(300_000),
             idle_compaction: Some(IdleCompaction::BeforeCacheExpires),
         },
@@ -756,6 +823,7 @@ fn info() -> MachineInfo {
                     images: true,
                     custom: false,
                     via: None,
+                    badge: Some(ModelBadge::New),
                 }, ModelInfo {
                     id: "claude-sonnet-4-6".into(),
                     name: "Claude Sonnet 4.6".into(),
@@ -776,6 +844,7 @@ fn info() -> MachineInfo {
                     images: false,
                     custom: false,
                     via: None,
+                    badge: None,
                 }, ModelInfo { custom: true, ..ModelInfo::new("claude-opus-5-5-20261101", "Opus 5.5 (pinned)") },
                 ModelInfo { via: Some("CLIProxyAPI".into()), ..ModelInfo::new("gemini-2.5-pro", "gemini-2.5-pro") }],
                 update_required: vec![UpdateRequired { id: "claude-haiku-5-5".into(), name: "Claude Haiku 5.5".into(), min_version: "2.1.293".into() }],
@@ -892,6 +961,13 @@ fn info() -> MachineInfo {
                 clients: vec![gateway_client()],
                 run: GatewayRun::Failed { error: format!("{} is in use", addr([100, 64, 0, 10], 8790)), addresses: vec![addr([127, 0, 0, 1], 8790)] },
             })),
+            registry: Some(vec![RegistryInstalled {
+                id: "goose".into(),
+                version: "1.57.0".into(),
+                provider: ProviderId("acp:goose".into()),
+                kind: RegistryKind::Binary,
+                installed_at: T,
+            }]),
         })),
         seal_key: Some("hSDwCYkwp1R0i33ctD73Wg2_Og0mOBr066SpjqqbTmo".into()),
     }
@@ -1264,8 +1340,8 @@ fn every_variant_of_every_tagged_enum_is_sampled() {
     let tags = |v: serde_json::Value, key: &str| -> std::collections::BTreeSet<String> {
         v.as_array().unwrap().iter().map(|x| x[key].as_str().unwrap().to_string()).collect()
     };
-    assert_eq!(tags(serde_json::to_value(commands()).unwrap(), "type").len(), 52, "commands");
-    assert_eq!(tags(serde_json::to_value(replies()).unwrap(), "type").len(), 19, "replies");
+    assert_eq!(tags(serde_json::to_value(commands()).unwrap(), "type").len(), 55, "commands");
+    assert_eq!(tags(serde_json::to_value(replies()).unwrap(), "type").len(), 20, "replies");
     assert_eq!(tags(serde_json::to_value(entities()).unwrap(), "kind").len(), 8, "entities");
     let bodies: std::collections::BTreeSet<String> = entities()
         .iter()

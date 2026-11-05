@@ -628,6 +628,12 @@ function ModelRow({
           {model.name}
           <span className="sr-only">, {model.providerName}</span>
         </span>
+        {/* T3's "New" chip, after the name and before what limits it. */}
+        {info.badge === "new" && (
+          <span aria-label="New model" className="shrink-0 rounded border border-accent/40 px-1 text-[10px] leading-4 font-medium tracking-wide text-accent uppercase">
+            New
+          </span>
+        )}
         {info.custom && <span className="shrink-0 rounded border border-line-2 px-1 text-[10px] leading-4 text-subtle">Custom</span>}
         {info.via && (
           <span className="max-w-32 shrink-0 truncate rounded border border-line-2 px-1 text-[10px] leading-4 text-subtle" title={`Listed by the endpoint ${info.via}`}>

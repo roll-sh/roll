@@ -11,9 +11,10 @@
  * to the machine in the browser (`endpoint-settings.tsx`), or stays in the machine's `config.toml`.
  */
 
-import { ChevronRight, Copy, KeyRound, Lock, LogIn, Plus, RefreshCw, Trash2, X } from "lucide-react";
+import { ChevronRight, Copy, KeyRound, Lock, LogIn, Pencil, Plus, RefreshCw, Trash2, X } from "lucide-react";
 import { useMemo, useState } from "react";
 import {
+  type CustomModel,
   IDLE_COMPACTION_LABELS,
   type IdleCompaction,
   type Machine,
@@ -31,8 +32,10 @@ import { customModelError, envNameError, parseAutoCompact, settingsError, withFi
 import { setAgentsView } from "@/lib/agents-surface";
 import { ENDPOINT_SETTINGS, MachineEndpoints, ProviderEndpointRow, providerEndpointSetting, type EndpointEdit } from "./endpoint-settings";
 import { GATEWAY_MACHINE_SETTING, GatewayMachineCard, ProviderGatewayNote } from "./gateway/machine";
+import { AddAgent, RegistryRemoveRow } from "./add-agent";
 import { endpointOf } from "@/lib/agents-endpoints";
 import { ModelPicker } from "./model-picker";
+import { CustomModelEditor } from "./custom-model-editor";
 import { ProviderLogo } from "./provider-logo";
 import { UsageLimitBars } from "./usage-limits";
 import { SandboxPanel } from "./sandbox";
@@ -471,9 +474,12 @@ function Providers({ ctx }: { ctx: Ctx }) {
       title="Providers"
       ids={ids}
       action={
-        <button type="button" disabled={!reachable(ctx.machine) || checking} onClick={refresh} className="flex h-6 items-center gap-1 rounded-md px-1.5 text-[11.5px] text-subtle hover:bg-fg/[0.06] hover:text-fg disabled:opacity-50" title="Check providers again (after a login)">
-          <RefreshCw className={cn("size-3", checking && "animate-spin motion-reduce:animate-none")} /> Check again
-        </button>
+        <span className="flex items-center gap-0.5">
+          <AddAgent machine={ctx.machine} />
+          <button type="button" disabled={!reachable(ctx.machine) || checking} onClick={refresh} className="flex h-6 items-center gap-1 rounded-md px-1.5 text-[11.5px] text-subtle hover:bg-fg/[0.06] hover:text-fg disabled:opacity-50" title="Check providers again (after a login)">
+            <RefreshCw className={cn("size-3", checking && "animate-spin motion-reduce:animate-none")} /> Check again
+          </button>
+        </span>
       }
     >
       {providers.map((p) => (
@@ -598,6 +604,7 @@ function ProviderCard({ ctx, base, info }: { ctx: Ctx; base: ProviderBase; info:
             <ModelsEditor base={base} info={info} models={p.models} disabled={!ctx.editable} onChange={(models) => ctx.save(withProvider(ctx.set, base.id, { models }))} />
           </SettingRow>
           {compacts(base) && <CompactionRows ctx={ctx} base={base} />}
+          <RegistryRemoveRow machine={ctx.machine} base={base} />
         </div>
       )}
     </div>
@@ -784,13 +791,16 @@ function ModelsEditor({
 }: {
   base: ProviderBase;
   info: ProviderInfo | undefined;
-  models: { id: string; name?: string }[];
+  models: CustomModel[];
   disabled: boolean;
-  onChange: (models: { id: string; name?: string }[]) => Promise<boolean>;
+  onChange: (models: CustomModel[]) => Promise<boolean>;
 }) {
   const [slug, setSlug] = useState("");
   const [name, setName] = useState("");
   const [problem, setProblem] = useState<string | null>(null);
+  // The custom model whose name and options are open (T3's "Edit name and options").
+  const [editing, setEditing] = useState<string | null>(null);
+  const edited = models.find((m) => m.id === editing);
   const add = async () => {
     const e = customModelError(slug, info, models);
     if (e) return setProblem(e);
@@ -805,12 +815,33 @@ function ModelsEditor({
       {models.length > 0 && (
         <ul className="flex flex-wrap gap-1" aria-label={`${base.name} custom models`}>
           {models.map((m) => (
-            <li key={m.id} className={chip}>
+            <li key={m.id} className={cn(chip, editing === m.id && "border-accent/50")}>
               <span className="truncate">{m.name ? `${m.name} · ${m.id}` : m.id}</span>
+              {m.options?.length ? <span className="shrink-0 font-sans text-[10.5px] text-subtle">{m.options.length === 1 ? "1 option" : `${m.options.length} options`}</span> : null}
+              <button
+                type="button"
+                aria-label={`Edit name and options of ${m.id}`}
+                title="Edit name and options"
+                disabled={disabled}
+                onClick={() => setEditing((e) => (e === m.id ? null : m.id))}
+                className="grid size-5 place-items-center rounded text-subtle hover:bg-fg/[0.06] hover:text-fg disabled:opacity-40"
+              >
+                <Pencil className="size-3" />
+              </button>
               <Remove label={`Remove ${m.id}`} disabled={disabled} onClick={() => void onChange(models.filter((x) => x.id !== m.id))} />
             </li>
           ))}
         </ul>
+      )}
+      {edited && (
+        <CustomModelEditor
+          key={edited.id}
+          provider={base.id}
+          info={info}
+          model={edited}
+          onSave={(m) => onChange(models.map((x) => (x.id === m.id ? m : x)))}
+          onCancel={() => setEditing(null)}
+        />
       )}
       <form
         className="flex flex-wrap gap-1.5"

@@ -67,6 +67,52 @@ fn auto_compact_and_idle_compaction() {
     assert_eq!(serde_json::to_value(IdleCompaction::BeforeCacheExpires).unwrap(), "before_cache_expires");
 }
 
+/// T3's custom model options (`validateDraft`'s messages, numbered from 1), bounded and trimmed.
+#[test]
+fn custom_model_options_are_checked_like_t3s_editor() {
+    let with = |options: Vec<ModelOption>| {
+        let mut s = MachineSettings::default();
+        let model = CustomModel { id: "preview".into(), name: None, options: Some(options) };
+        s.providers.insert(ProviderId::claude(), ProviderSettings { models: vec![model], ..ProviderSettings::default() });
+        s.check()
+    };
+    let select = |id: &str, choices: &[&str], default: Option<&str>| ModelOption::Select {
+        id: id.into(),
+        label: String::new(),
+        description: None,
+        choices: choices.iter().map(|c| OptionChoice::new(c, "")).collect(),
+        default: default.map(str::to_string),
+        role: None,
+    };
+    let toggle = |id: &str| ModelOption::Boolean { id: id.into(), label: "On".into(), description: None, default: false, role: None };
+    let err = |options| with(options).unwrap_err();
+    assert_eq!(err(vec![toggle(" ")]), "preview: Option 1 needs an id.");
+    assert_eq!(err(vec![toggle("a"), toggle("a")]), "preview: Option 2: id \"a\" is used twice.");
+    assert_eq!(err(vec![select("agent", &[], None)]), "preview: Option 1 needs at least one choice.");
+    assert_eq!(err(vec![select("agent", &["build", " "], None)]), "preview: Option 1 has a choice without a value.");
+    assert_eq!(err(vec![select("agent", &["x", " x"], None)]), "preview: Option 1: choice \"x\" is used twice.");
+    assert_eq!(err(vec![select("agent", &["build"], Some("plan"))]), "preview: Option 1: the default isn't one of its choices.");
+    assert!(err(vec![select("effort", &["low"], None)]).contains("the reasoning levels are a list of choices with the id effort"));
+    assert!(err(vec![toggle("effort")]).contains("the reasoning levels"));
+    assert!(err((0..17).map(|i| toggle(&format!("o{i}"))).collect()).contains("at most 16 options"));
+
+    // Trimmed, an empty label is the id, and the reasoning select is kept as the thread's effort.
+    let ok = with(vec![
+        ModelOption::reasoning(vec![OptionChoice::new(" low ", ""), OptionChoice::new("high", "High")], Some("high")),
+        select(" agent ", &["build"], Some("build")),
+    ])
+    .unwrap();
+    let model = &ok.provider(&ProviderId::claude()).models[0];
+    let options = model.options.as_ref().unwrap();
+    let ModelOption::Select { choices, .. } = &options[0] else { panic!() };
+    assert_eq!((choices[0].id.as_str(), choices[0].label.as_str()), ("low", "low"));
+    assert_eq!((options[1].id(), options[1].role()), ("agent", None));
+    let ModelOption::Select { label, .. } = &options[1] else { panic!() };
+    assert_eq!(label, "agent");
+    // No options is the provider's own.
+    assert_eq!(with(vec![]).unwrap().provider(&ProviderId::claude()).models[0].options, None);
+}
+
 #[test]
 fn env_names_must_be_names() {
     for bad in ["", "1X", "A-B", "A B", "Ä"] {
@@ -87,7 +133,7 @@ fn trims_unsets_empties_and_drops_default_providers() {
     s.providers.insert(ProviderId::codex(), ProviderSettings::default());
     s.providers.insert(
         ProviderId::claude(),
-        ProviderSettings { binary: Some(" ".into()), models: vec![CustomModel { id: " big ".into(), name: Some(" ".into()) }], ..ProviderSettings::default() },
+        ProviderSettings { binary: Some(" ".into()), models: vec![CustomModel { id: " big ".into(), name: Some(" ".into()), options: None }], ..ProviderSettings::default() },
     );
     let s = s.check().unwrap();
     assert_eq!(s.worktree_dir, None);
@@ -97,7 +143,7 @@ fn trims_unsets_empties_and_drops_default_providers() {
     assert!(!s.providers.contains_key(&ProviderId::codex()), "a provider with nothing set isn't kept");
     let claude = s.provider(&ProviderId::claude());
     assert_eq!(claude.binary, None);
-    assert_eq!(claude.models, vec![CustomModel { id: "big".into(), name: None }]);
+    assert_eq!(claude.models, vec![CustomModel { id: "big".into(), name: None, options: None }]);
     assert!(s.provider(&ProviderId::codex()).enabled, "unset is on");
 }
 
@@ -108,7 +154,7 @@ fn refuses_what_it_cant_keep() {
         let mut s = MachineSettings::default();
         s.providers.insert(
             ProviderId::codex(),
-            ProviderSettings { models: ids.iter().map(|id| CustomModel { id: id.to_string(), name: None }).collect(), ..ProviderSettings::default() },
+            ProviderSettings { models: ids.iter().map(|id| CustomModel { id: id.to_string(), name: None, options: None }).collect(), ..ProviderSettings::default() },
         );
         s
     };

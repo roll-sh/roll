@@ -55,7 +55,8 @@
                   "default": false,
                   "role": "speed"
                 }
-              ]
+              ],
+              "badge": "new"
             },
             {
               "id": "claude-sonnet-4-6",
@@ -193,6 +194,28 @@
                 {
                   "id": "claude-opus-5-5[1m]",
                   "name": "Opus 5.5 (1M)"
+                },
+                {
+                  "id": "claude-opus-5-5-preview",
+                  "options": [
+                    {
+                      "type": "select",
+                      "id": "effort",
+                      "label": "Reasoning",
+                      "choices": [
+                        {
+                          "id": "low",
+                          "label": "Low"
+                        },
+                        {
+                          "id": "high",
+                          "label": "High"
+                        }
+                      ],
+                      "default": "high",
+                      "role": "reasoning"
+                    }
+                  ]
                 }
               ],
               "auto_compact_window": 300000,
@@ -424,7 +447,16 @@
               "127.0.0.1:8790"
             ]
           }
-        }
+        },
+        "registry": [
+          {
+            "id": "goose",
+            "version": "1.57.0",
+            "provider": "acp:goose",
+            "kind": "binary",
+            "installed_at": 1762000000000
+          }
+        ]
       },
       "seal_key": "hSDwCYkwp1R0i33ctD73Wg2_Og0mOBr066SpjqqbTmo"
     }

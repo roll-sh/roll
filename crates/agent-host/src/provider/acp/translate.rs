@@ -6,9 +6,12 @@
 //! segments that a tool call closes, replayed updates dropped), `adapter.ts` (permission option
 //! selection, elicitation forms, stop reasons, a failed tool after Stop shown as interrupted) and
 //! `packages/provider-grok/src/server/xaiAcpExtension.ts` (Grok's `ask_user_question`).
+//! Antigravity's quirks are in `antigravity.rs`; the hooks here are marked with its name.
 
+use super::antigravity;
+use super::cursor;
 use super::policy::{self, Disposition, Grants, Kind};
-use super::wire::{self, ConfigOption, Generation, Models, Modes, PermissionOption};
+use super::wire::{self, ConfigOption, Flavor, Generation, Models, Modes, PermissionOption};
 use crate::provider::{Item, ProviderEvent, TurnEnd};
 use agent_proto::{
     Approval, ApprovalAction, ChangeKind, ContextUsage, Decision, FileChange, InteractionMode, NodeBody, NodeStatus, Question,
@@ -39,11 +42,17 @@ pub struct Quirks {
     /// Kiro's `allow_always` saves a workspace rule that outlives the session (T3:
     /// `kiroApprovalOptions`), so "accept for session" is never offered.
     pub no_session_allow: bool,
+    /// Which agent it is, for the quirks of its own (`antigravity.rs`).
+    pub flavor: Flavor,
 }
 
 impl Quirks {
     pub fn for_agent(init: &wire::Initialize) -> Quirks {
-        Quirks { no_session_allow: init.kiro }
+        Quirks { no_session_allow: init.flavor == Flavor::Kiro, flavor: init.flavor }
+    }
+
+    fn antigravity(&self) -> bool {
+        self.flavor == Flavor::Antigravity
     }
 }
 
@@ -61,6 +70,10 @@ enum PendingKind {
     Form { fields: Vec<(String, Field)>, wrapped: bool },
     /// Grok's `x.ai/ask_user_question`: answers are keyed by the question's text.
     GrokQuestions { questions: Vec<(String, String)> },
+    /// Antigravity's question as a permission request: one of its options, by id and label.
+    Choice { question: String, options: Vec<(String, String)> },
+    /// Cursor's `cursor/ask_question`: each question's option ids by label.
+    CursorQuestions { options: Vec<(String, Vec<(String, String)>)> },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -97,6 +110,8 @@ struct Tool {
     raw_output: Option<Value>,
     content: Vec<Value>,
     locations: Vec<String>,
+    agy: antigravity::ToolExtra,
+    cursor: cursor::ToolExtra,
 }
 
 #[derive(Debug)]
@@ -134,6 +149,10 @@ pub struct Translator {
     pending: BTreeMap<String, Pending>,
     grants: Grants,
     cost: Option<f64>,
+    /// Antigravity's `client_view_file` repair.
+    reads: antigravity::Reads,
+    /// Cursor's todo list and the tools it shows some other way.
+    cursor: cursor::State,
     /// History replayed by `session/load`: content is dropped, settings are kept.
     pub loading: bool,
 }
@@ -158,6 +177,8 @@ impl Translator {
             pending: BTreeMap::new(),
             grants: Grants::default(),
             cost: None,
+            reads: antigravity::Reads::default(),
+            cursor: cursor::State::default(),
             loading: false,
         };
         if let Some(config) = setup.config {
@@ -228,6 +249,8 @@ impl Translator {
     /// A prompt went out as ordered request `tag`.
     pub fn start_turn(&mut self, tag: u64) {
         self.turns += 1;
+        self.reads.reset();
+        self.cursor.hidden.clear();
         self.turn = Some(Turn {
             n: self.turns,
             prompt: tag,
@@ -320,7 +343,29 @@ impl Translator {
                 let text: String = wire::array(&update["content"]).iter().filter_map(wire::content_text).collect();
                 self.on_text(text_kind, wire::text(&update["messageId"]), &text, true, out);
             }
+            "tool_call" | "tool_call_update" if self.quirks.antigravity() => {
+                // Payloads bounded, and reads roll served shown as done.
+                let update = self.reads.repair(antigravity::sanitize_update(update));
+                self.on_tool(&update, out)
+            }
+            // Cursor: `updateTodos` and `createPlan` show as the todos and the plan.
+            "tool_call" | "tool_call_update" if self.quirks.flavor == Flavor::Cursor => {
+                let id = wire::text(&update["toolCallId"]).unwrap_or_default();
+                if cursor::tool_name(update).is_some_and(cursor::hidden) {
+                    self.cursor.hidden.insert(id);
+                } else if !self.cursor.hidden.contains(&id) {
+                    self.on_tool(update, out)
+                }
+            }
             "tool_call" | "tool_call_update" => self.on_tool(update, out),
+            // Cursor: the subagent a `task` tool started, by the tool's id.
+            "subagent_spawned" | "subagent_state_update" if self.quirks.flavor == Flavor::Cursor => {
+                let Some((id, extra)) = cursor::subagent_update(update) else { return };
+                let Some(tool) = self.turn.as_mut().and_then(|t| t.tools.get_mut(&id)) else { return };
+                tool.cursor.model = extra.model.or(tool.cursor.model.take());
+                tool.cursor.ended = extra.ended.or(tool.cursor.ended);
+                self.on_tool(&json!({ "toolCallId": id }), out);
+            }
             "tool_call_content_chunk" => {
                 let mut merged = json!({ "toolCallId": update["toolCallId"] });
                 if let Some(tool) = update["toolCallId"].as_str().and_then(|id| self.turn.as_ref()?.tools.get(id)) {
@@ -412,6 +457,7 @@ impl Translator {
     fn on_tool(&mut self, update: &Value, out: &mut Vec<Action>) {
         let Some(id) = wire::text(&update["toolCallId"]) else { return };
         let cwd = self.cwd.clone();
+        let agy = self.quirks.antigravity();
         let Some(turn) = self.turn.as_mut() else { return };
         if !turn.tools.contains_key(&id) {
             // A tool call ends the message before it.
@@ -439,6 +485,8 @@ impl Translator {
                 raw_output: None,
                 content: Vec::new(),
                 locations: Vec::new(),
+                agy: antigravity::ToolExtra::default(),
+                cursor: cursor::ToolExtra::default(),
             };
             turn.tools.insert(id.clone(), tool);
         }
@@ -450,7 +498,11 @@ impl Translator {
         if let Some(title) = wire::text(&update["title"]) {
             tool.title = Some(title);
         }
-        if let Some(name) = wire::text(&update["name"]).or_else(|| wire::text(&update["_meta"]["claudeCode"]["toolName"])) {
+        if let Some(name) = wire::text(&update["name"])
+            .or_else(|| wire::text(&update["_meta"]["claudeCode"]["toolName"]))
+            // Cursor names its own tools in their input.
+            .or_else(|| wire::text(&update["rawInput"]["_toolName"]))
+        {
             tool.name = Some(name);
         }
         if let Some(input) = update.get("rawInput").filter(|v| !v.is_null()) {
@@ -476,22 +528,42 @@ impl Translator {
         if let Some(status) = status {
             tool.item.status = status;
         }
-        let call = tool_call(tool, &cwd);
+        if agy {
+            tool.agy.merge(update);
+            // Its commands may come without a kind (T3's `normalizeAntigravityToolCall`).
+            if tool.kind.is_none() && tool_command(tool).is_some() {
+                tool.kind = Some("execute".into());
+            }
+        }
+        let call = call_of(tool, &cwd, agy);
         let previous = match &tool.item.body {
             NodeBody::Tool(previous) => previous.output.clone().unwrap_or_default(),
             _ => String::new(),
         };
-        tool.item.body = match subagent(tool, &call) {
-            Some(body) => body,
-            None => {
-                if let Some(output) = &call.output
-                    && let Some(delta) = output.strip_prefix(previous.as_str())
-                    && !delta.is_empty()
-                {
-                    out.push(Action::Event(ProviderEvent::OutputDelta { item: id.clone(), text: delta.to_string() }));
-                }
-                NodeBody::Tool(call)
+        let native = agy.then(|| antigravity::subagent(tool.kind.as_deref(), tool.title.as_deref(), &tool.agy, call.output.as_deref(), tool.item.status)).flatten();
+        tool.item.body = if let Some((body, status)) = native {
+            tool.item.status = status;
+            body
+        } else if let Some(mut body) = subagent(tool, &call) {
+            // Cursor says the subagent's model, and how it ended (a background one outlives
+            // its tool).
+            if let NodeBody::Subagent { model, .. } = &mut body
+                && model.is_none()
+            {
+                model.clone_from(&tool.cursor.model);
             }
+            if let Some(ended) = tool.cursor.ended {
+                tool.item.status = ended;
+            }
+            body
+        } else {
+            if let Some(output) = &call.output
+                && let Some(delta) = output.strip_prefix(previous.as_str())
+                && !delta.is_empty()
+            {
+                out.push(Action::Event(ProviderEvent::OutputDelta { item: id.clone(), text: delta.to_string() }));
+            }
+            NodeBody::Tool(call)
         };
         out.push(Action::Event(ProviderEvent::Item(tool.item.clone())));
     }
@@ -553,6 +625,13 @@ impl Translator {
         // The session's context window (T3's `UsageUpdated`: a size of 0 is an unknown window).
         let tokens = |k: &str| update[k].as_f64().filter(|n| n.is_finite()).map_or(0, |n| n.max(0.0).round() as u64);
         let size = tokens("size");
+        // Cursor: the window its `context` option names when it reports none.
+        let size = match size {
+            0 if self.quirks.flavor == Flavor::Cursor => {
+                self.config.iter().find(|o| o.id == "context").and_then(|o| o.current()).and_then(cursor::context_tokens).unwrap_or(0)
+            }
+            size => size,
+        };
         let context = ContextUsage { used_tokens: tokens("used"), max_tokens: (size > 0).then_some(size), total_processed_tokens: None, ..Default::default() };
         out.push(Action::Event(ProviderEvent::Context(context)));
         let cost = &update["cost"];
@@ -593,17 +672,24 @@ impl Translator {
     }
 
     /// T3: `error` fails the turn, `cancelled` interrupts it, anything else completed it.
+    /// Antigravity: `refusal` is its quota, and its usage is Gemini's.
     fn end_with_stop(&mut self, stop: &str, error: Option<String>, usage: &Value, out: &mut Vec<Action>) {
+        let agy = self.quirks.antigravity();
         let Some(turn) = self.turn.as_mut() else { return };
         if usage.is_object() {
-            let n = |k: &str| usage[k].as_u64().unwrap_or(0);
-            turn.usage.input_tokens = n("inputTokens");
-            turn.usage.output_tokens = n("outputTokens");
-            turn.usage.cached_tokens = n("cachedReadTokens");
+            if agy {
+                turn.usage = Usage { cost_usd: turn.usage.cost_usd, ..antigravity::usage(usage) };
+            } else {
+                let n = |k: &str| usage[k].as_u64().unwrap_or(0);
+                turn.usage.input_tokens = n("inputTokens");
+                turn.usage.output_tokens = n("outputTokens");
+                turn.usage.cached_tokens = n("cachedReadTokens");
+            }
         }
         let end = match stop {
             "error" => TurnEnd::Failed(error.unwrap_or_else(|| "the agent stopped with an error".into())),
             "cancelled" => TurnEnd::Interrupted,
+            "refusal" if agy => TurnEnd::Failed(antigravity::QUOTA.into()),
             _ => TurnEnd::Completed,
         };
         self.finish_turn(end, out);
@@ -657,6 +743,19 @@ impl Translator {
         self.turn.as_ref().map(|t| t.n)
     }
 
+    /// roll answered the agent's `fs/read_text_file` for `path` (or refused it): Antigravity's
+    /// read repair may complete the call it was for.
+    pub fn read_attempted(&mut self, path: &str, served: bool) -> Vec<Action> {
+        let mut out = Vec::new();
+        if self.quirks.antigravity()
+            && self.turn.is_some()
+            && let Some(id) = self.reads.attempted(path, served)
+        {
+            self.on_tool(&json!({ "toolCallId": id, "status": "completed" }), &mut out);
+        }
+        out
+    }
+
     fn cancel_pending(&mut self, out: &mut Vec<Action>) {
         for (id, pending) in std::mem::take(&mut self.pending) {
             out.push(Action::Reply { id: pending.rpc_id, result: cancelled(&pending.kind) });
@@ -679,9 +778,49 @@ impl Translator {
                 let params = if params["params"].is_object() { &params["params"] } else { params };
                 self.on_grok_questions(id, params, &mut out);
             }
+            _ if self.quirks.flavor == Flavor::Cursor => match cursor::extension(method, params) {
+                Some(ext) => self.on_cursor(id, ext, &mut out),
+                None => out.push(Action::ReplyError { id, code: -32601, message: format!("{method} is not supported") }),
+            },
             _ => out.push(Action::ReplyError { id, code: -32601, message: format!("{method} is not supported") }),
         }
         out
+    }
+
+    /// Cursor's own requests (`cursor.rs`): todos, a subagent's model, questions and a plan.
+    fn on_cursor(&mut self, rpc_id: Value, ext: cursor::Extension, out: &mut Vec<Action>) {
+        if self.turn.is_none() {
+            let result = match ext {
+                cursor::Extension::Ask(_) => cursor::unanswered(true),
+                other => cursor::acknowledged(&other),
+            };
+            return out.push(Action::Reply { id: rpc_id, result });
+        }
+        let result = cursor::acknowledged(&ext);
+        match ext {
+            cursor::Extension::Todos { todos, merge } => {
+                let items = self.cursor.todos.apply(todos, merge);
+                self.set_plan(NodeBody::Todos { items }, out);
+            }
+            cursor::Extension::Task { tool, model } => {
+                if let Some(t) = self.turn.as_mut().and_then(|t| t.tools.get_mut(&tool)) {
+                    t.cursor.model = model.or(t.cursor.model.take());
+                    self.on_tool(&json!({ "toolCallId": tool }), out);
+                }
+            }
+            cursor::Extension::Plan { tool, text } => {
+                // Its own item: the turn's todos keep theirs.
+                let turn = self.turn.as_mut().expect("checked above");
+                close_segment(turn, out);
+                let id = format!("plan:{}:{}", turn.n, tool.unwrap_or_else(|| "cursor".into()));
+                out.push(Action::Event(ProviderEvent::Item(Item { id, parent: None, status: NodeStatus::Completed, body: NodeBody::Plan { text } })));
+            }
+            cursor::Extension::Ask(ask) => {
+                let item = ask.tool.clone().filter(|id| self.turn.as_ref().is_some_and(|t| t.tools.contains_key(id)));
+                return self.ask(rpc_id, PendingKind::CursorQuestions { options: ask.options }, item, RequestBody::Questions { questions: ask.questions }, out);
+            }
+        }
+        out.push(Action::Reply { id: rpc_id, result });
     }
 
     fn ask(&mut self, rpc_id: Value, kind: PendingKind, item: Option<String>, body: RequestBody, out: &mut Vec<Action>) {
@@ -698,6 +837,14 @@ impl Translator {
         if self.turn.is_none() || params["sessionId"].as_str() != Some(self.session.as_str()) {
             return cancel(out, rpc_id);
         }
+        // Antigravity asks its questions this way: one of its own options, which roll's policy
+        // never answers (T3's `extractPermissionQuestion`, checked before the policy).
+        if self.quirks.antigravity() && antigravity::is_question(params) {
+            let Some(choice) = antigravity::question(params) else { return cancel(out, rpc_id) };
+            let item = Some(choice.question.id.clone()).filter(|id| self.turn.as_ref().is_some_and(|t| t.tools.contains_key(id)));
+            let pending = PendingKind::Choice { question: choice.question.id.clone(), options: choice.options };
+            return self.ask(rpc_id, pending, item, RequestBody::Questions { questions: vec![choice.question] }, out);
+        }
         // v1 carries the tool call; v2 a subject (T3: `normalizePermissionRequest`).
         let mut call = params["toolCall"].clone();
         if !call.is_object() {
@@ -711,9 +858,13 @@ impl Translator {
                 }),
             };
         }
+        if self.quirks.antigravity() {
+            call = antigravity::sanitize_update(&call);
+        }
         let Some(tool_id) = wire::text(&call["toolCallId"]) else { return cancel(out, rpc_id) };
         let turn = self.turn.as_ref().expect("checked above");
-        if !turn.tools.contains_key(&tool_id) {
+        // Antigravity's request carries what later updates leave out (a subagent's launch).
+        if !turn.tools.contains_key(&tool_id) || self.quirks.antigravity() {
             // The request comes first: the tool appears with it.
             self.on_tool(&call, out);
         }
@@ -751,7 +902,7 @@ impl Translator {
                     decisions.push(Decision::Decline);
                 }
                 decisions.push(Decision::Cancel);
-                let call = tool_call(tracked, &self.cwd);
+                let call = call_of(tracked, &self.cwd, self.quirks.antigravity());
                 let request_title = wire::text(&params["title"]).or_else(|| tracked.title.clone());
                 let (action, title) = match kind {
                     Kind::Execute => (ApprovalAction::Command, format!("Run `{}`", call.title)),
@@ -771,7 +922,7 @@ impl Translator {
                     command: (kind == Kind::Execute).then(|| call.title.clone()),
                     cwd: (kind == Kind::Execute).then(|| self.cwd.display().to_string()),
                     files: call.files.clone(),
-                    reason: wire::text(&params["description"]),
+                    reason: wire::text(&params["description"]).or_else(|| antigravity::security_warning(&params["options"])),
                     tool: Some(call.name.clone()),
                     input: call.input.clone(),
                     decisions,
@@ -913,6 +1064,20 @@ impl Translator {
                 json!({ "outcome": "accepted", "answers": keyed })
             }
             (PendingKind::GrokQuestions { .. }, Response::Decision { .. }) => json!({ "outcome": "cancelled" }),
+            (PendingKind::Choice { question, options }, Response::Answers { answers }) => {
+                let answer = answers.get(question).ok_or_else(|| anyhow!("no answer to {question}"))?;
+                let option = antigravity::answer(options, answer).ok_or_else(|| anyhow!("{answer:?} isn't one of the answers offered"))?;
+                json!({ "outcome": { "outcome": "selected", "optionId": option } })
+            }
+            (PendingKind::Choice { .. }, Response::Decision { decision: Decision::Cancel | Decision::Decline, .. }) => {
+                json!({ "outcome": { "outcome": "cancelled" } })
+            }
+            (PendingKind::Choice { .. }, Response::Decision { .. }) => bail!("a question takes one of its answers"),
+            (PendingKind::CursorQuestions { options }, Response::Answers { answers }) => {
+                let answers: BTreeMap<String, String> = answers.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                cursor::answered(options, &answers).map_err(|e| anyhow!(e))?
+            }
+            (PendingKind::CursorQuestions { .. }, Response::Decision { decision, .. }) => cursor::unanswered(*decision == Decision::Cancel),
         };
         let pending = self.pending.remove(request).expect("looked up above");
         Ok((pending.rpc_id, result))
@@ -928,10 +1093,11 @@ fn close_segment(turn: &mut Turn, out: &mut Vec<Action>) {
 
 fn cancelled(kind: &PendingKind) -> Value {
     match kind {
-        PendingKind::Permission { .. } => json!({ "outcome": { "outcome": "cancelled" } }),
+        PendingKind::Permission { .. } | PendingKind::Choice { .. } => json!({ "outcome": { "outcome": "cancelled" } }),
         PendingKind::Form { wrapped: true, .. } => json!({ "action": { "action": "cancel" } }),
         PendingKind::Form { wrapped: false, .. } => json!({ "action": "cancel" }),
         PendingKind::GrokQuestions { .. } => json!({ "outcome": "cancelled" }),
+        PendingKind::CursorQuestions { .. } => cursor::unanswered(true),
     }
 }
 
@@ -966,6 +1132,27 @@ fn shown(path: &str, cwd: &Path) -> String {
     Path::new(path).strip_prefix(cwd).map(|p| p.display().to_string()).unwrap_or_else(|_| path.to_string())
 }
 
+/// The tool's state as roll shows it, with Antigravity's ways where it's Antigravity (`agy`).
+fn call_of(tool: &Tool, cwd: &Path, agy: bool) -> ToolCall {
+    let mut call = tool_call(tool, cwd);
+    if agy {
+        call.output = call.output.map(|o| antigravity::bound(&o, antigravity::TEXT_LIMIT));
+        // Its titles are tool names: the name, and the path where the title would be.
+        if let Some(native) = tool.title.as_deref().and_then(antigravity::tool_name) {
+            if tool.name.is_none() {
+                call.name = native.to_string();
+            }
+            if tool.title.as_deref() == Some(call.title.as_str())
+                && let Some(path) = tool.locations.first()
+            {
+                call.title = shown(path, cwd);
+            }
+        }
+        call.title = antigravity::bound(&call.title, antigravity::TEXT_LIMIT);
+    }
+    call
+}
+
 /// The tool's state as roll shows it.
 fn tool_call(tool: &Tool, cwd: &Path) -> ToolCall {
     let kind_name = tool.kind.as_deref().unwrap_or("other");
@@ -985,7 +1172,7 @@ fn tool_call(tool: &Tool, cwd: &Path) -> ToolCall {
     let input = tool.raw_input.clone().unwrap_or(Value::Null);
     let mut paths = tool.locations.clone();
     paths.extend(input_paths(&input));
-    let command = (kind_name == "execute").then(|| command(&input, tool.title.as_deref())).flatten();
+    let command = (kind_name == "execute").then(|| tool_command(tool).or_else(|| command(&Value::Null, tool.title.as_deref()))).flatten();
     let title = command
         .clone()
         .or_else(|| tool.title.clone().filter(|t| !matches!(t.to_lowercase().as_str(), "terminal" | "tool call")))
@@ -1027,7 +1214,8 @@ fn tool_call(tool: &Tool, cwd: &Path) -> ToolCall {
             Value::String(s) => Some(s.clone()),
             Value::Object(o) => {
                 let parts: Vec<&str> =
-                    ["output", "stdout", "stderr", "content", "text"].iter().filter_map(|k| o.get(*k)?.as_str()).filter(|s| !s.is_empty()).collect();
+                    // Antigravity says `combinedOutput` (`combined_output` in history).
+                    ["output", "stdout", "stderr", "content", "text", "combinedOutput", "combined_output"].iter().filter_map(|k| o.get(*k)?.as_str()).filter(|s| !s.is_empty()).collect();
                 (!parts.is_empty()).then(|| parts.join("\n"))
             }
             _ => None,
@@ -1062,14 +1250,24 @@ fn subagent(tool: &Tool, call: &ToolCall) -> Option<NodeBody> {
     }
     let prompt = wire::text(&input["prompt"])?;
     let agent = wire::text(&input["subagent_type"])
+        .or_else(|| wire::text(&input["subagentType"]))
         .or_else(|| wire::text(&input["description"]))
         .unwrap_or_else(|| "subagent".into());
     let result = call.output.clone();
     Some(NodeBody::Subagent { agent, prompt, child: None, result, progress: None, model: wire::text(&input["model"]) })
 }
 
+/// The command a tool's input names, else the one Antigravity reports in its output.
+fn tool_command(tool: &Tool) -> Option<String> {
+    command(tool.raw_input.as_ref().unwrap_or(&Value::Null), None).or_else(|| {
+        let output = tool.raw_output.as_ref()?;
+        ["commandLine", "command_line"].iter().find_map(|k| wire::text(&output[*k]))
+    })
+}
+
 /// The command a tool runs (T3: `extractToolCallCommand`): `rawInput.command` (a string or an
-/// argv), `executable` + `args`, else the backticked part of an execute tool's title.
+/// argv; Antigravity's `CommandLine`, `command_line` or `commandLine`), `executable` + `args`,
+/// else the backticked part of an execute tool's title.
 fn command(input: &Value, title: Option<&str>) -> Option<String> {
     let join = |v: &Value| -> Option<String> {
         match v {
@@ -1081,7 +1279,7 @@ fn command(input: &Value, title: Option<&str>) -> Option<String> {
             _ => None,
         }
     };
-    if let Some(command) = join(&input["command"]) {
+    if let Some(command) = ["CommandLine", "command_line", "commandLine", "command"].iter().find_map(|k| join(&input[*k])) {
         return Some(command);
     }
     if let Some(exe) = wire::text(&input["executable"]) {
