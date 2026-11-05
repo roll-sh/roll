@@ -167,7 +167,7 @@ export function AgentsSurface({
 
   const threadOpen = view.kind === "thread" ? data.threads.get(view.thread) : undefined;
   // A conversation that's gone (deleted, or never loaded here) falls back to the canvas.
-  const gone = view.kind === "thread" && !threadOpen && snap.conn === "live";
+  const gone = useGone(view.kind === "thread" ? view.thread : null, !!threadOpen, snap.conn === "live");
   useEffect(() => {
     if (gone) setAgentsView({ kind: "canvas" });
   }, [gone]);
@@ -815,6 +815,30 @@ function EmptyView({ name, waitingOnly, onAll }: { name: string | null; waitingO
       </div>
     </div>
   );
+}
+
+/**
+ * How long a conversation asked for may take to arrive: a new thread's or a fork's record comes on
+ * the stream after the command's reply, and opening it then mustn't count as "gone".
+ */
+export const ARRIVAL_GRACE_MS = 5000;
+
+/**
+ * Whether the open conversation `id` is gone: it was here and isn't any more (deleted), or it
+ * never arrived within [`ARRIVAL_GRACE_MS`] (a link to one that isn't this owner's, or long gone).
+ */
+function useGone(id: string | null, present: boolean, live: boolean): boolean {
+  const [seen, setSeen] = useState<string | null>(null);
+  const [late, setLate] = useState<string | null>(null);
+  useEffect(() => {
+    if (id && present) setSeen(id);
+  }, [id, present]);
+  useEffect(() => {
+    if (!id || present || !live) return;
+    const t = setTimeout(() => setLate(id), ARRIVAL_GRACE_MS);
+    return () => clearTimeout(t);
+  }, [id, present, live]);
+  return !!id && !present && live && (seen === id || late === id);
 }
 
 /** The side panel's way to put its conversation on the canvas view that's showing. */

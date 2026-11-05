@@ -1,7 +1,7 @@
 import { act, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { agentsSurface, resetAgentsSurface } from "@/lib/agents-surface";
+import { agentsSurface, resetAgentsSurface, setAgentsView } from "@/lib/agents-surface";
 import { setActiveClient } from "@/lib/agents-client";
 import { approval, machine, mirrored, project, run, thread } from "@/test/agents";
 import { agentsHarness, fakeServices, renderAgents, type AgentsHarness } from "@/test/agents-render";
@@ -82,6 +82,28 @@ describe("the agents in the header", () => {
     await userEvent.keyboard("{Escape}");
     expect(screen.queryByRole("dialog", { name: "Agents" })).toBeNull();
     expect(window.location.hash).toBe("");
+  });
+
+  it("opens a conversation whose record comes after the reply (a fork), and leaves one that's deleted", async () => {
+    const h = setup();
+    await userEvent.click(screen.getByRole("button", { name: /Agents: 1 running/ }));
+    await act(() => new Promise((r) => setTimeout(r, 0)));
+    act(() => h.client.show(h.client.data)); // live
+    expect(h.client.getSnapshot().conn).toBe("live");
+    // A fork's reply names it before its record is on the stream: it isn't "gone" yet.
+    act(() => setAgentsView({ kind: "thread", thread: "thr_fork" }));
+    await act(() => new Promise((r) => setTimeout(r, 0)));
+    act(() => h.client.show(h.client.data)); // the stream is up (following the thread reopened it)
+    expect(h.client.getSnapshot().conn).toBe("live");
+    await act(() => new Promise((r) => setTimeout(r, 50)));
+    expect(agentsSurface.get().view).toEqual({ kind: "thread", thread: "thr_fork" });
+    act(() => h.client.enqueue({ type: "entity", ...mirrored("thread", thread({ id: "thr_fork", title: "Fork of the flaky test" }), 9) }));
+    expect(await screen.findByRole("complementary", { name: "Conversation" })).toHaveTextContent("Fork of the flaky test");
+    // Deleted (here a moment ago): back to the canvas at once.
+    act(() => h.client.enqueue({ type: "entity", cursor: 10, machine: "mch_1", entity: { kind: "removed", entity: "thread", id: "thr_fork", thread: null } }));
+    await act(() => new Promise((r) => setTimeout(r, 0)));
+    act(() => h.client.show(h.client.data)); // the stream is up again (following the thread reopened it)
+    expect(agentsSurface.get().view).toEqual({ kind: "canvas" });
   });
 
   it("\"New agent\" opens the launcher; ⌘J toggles the canvas; #agents links open it", async () => {
