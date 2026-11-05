@@ -773,6 +773,8 @@ impl Host {
                     self.save_private(rt)?;
                 }
             }
+            // The account's, not the thread's: it goes on the provider's info.
+            ProviderEvent::UsageLimits(limits) => self.usage_limits(&rt.thread.provider, &limits),
             ProviderEvent::Exited { error } => {
                 rt.live = None;
                 rt.generation += 1;

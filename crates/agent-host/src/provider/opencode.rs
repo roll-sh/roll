@@ -218,6 +218,7 @@ impl Provider for OpenCode {
             update_required: Vec::new(),
             capabilities: self.capabilities(),
             checking: false,
+            usage_limits: None,
         };
         let version = match self.cli_version().await {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {

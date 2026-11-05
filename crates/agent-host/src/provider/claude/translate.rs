@@ -219,6 +219,17 @@ impl Translator {
         if kind == Some("system") {
             return self.system(msg);
         }
+        // The account's limits, with or without a turn of ours (T3's `claudeRateLimitEventToUpdate`).
+        if kind == Some("rate_limit_event") {
+            let info: crate::provider::usage::ClaudeRateLimitInfo =
+                msg.get("rate_limit_info").and_then(|v| serde_json::from_value(v.clone()).ok()).unwrap_or_default();
+            if info.blocks()
+                && let Some(turn) = &mut self.turn
+            {
+                turn.rate_limited = true;
+            }
+            return crate::provider::usage::claude(&info, crate::provider::usage::now()).map(ProviderEvent::UsageLimits).into_iter().collect();
+        }
         // Output with no turn of ours (a background task waking the agent up) is dropped.
         if self.turn.is_none() {
             return Vec::new();
@@ -228,14 +239,6 @@ impl Translator {
             Some("user") => self.user(msg),
             Some("stream_event") => self.stream(msg),
             Some("result") => self.result(msg),
-            Some("rate_limit_event") => {
-                if msg.pointer("/rate_limit_info/status").and_then(Value::as_str) == Some("rejected")
-                    && let Some(turn) = &mut self.turn
-                {
-                    turn.rate_limited = true;
-                }
-                Vec::new()
-            }
             _ => Vec::new(),
         }
     }
@@ -1184,5 +1187,29 @@ mod tests {
         assert_eq!(t.rel("/etc/hosts"), "/etc/hosts");
         assert_eq!(t.title("mcp__roll__land", &json!({})), "roll: land");
         assert_eq!(t.title("Grep", &json!({"pattern": "fn main", "path": "/w/proj/src"})), "fn main in src");
+    }
+
+    #[test]
+    fn rate_limit_events_report_the_account_limits_with_or_without_a_turn() {
+        let mut t = Translator::new("/w".into(), "default");
+        let event = |status: &str, utilization: f64| {
+            json!({"type": "rate_limit_event", "rate_limit_info": {"status": status, "rateLimitType": "five_hour", "utilization": utilization, "resetsAt": 1779846000}})
+        };
+        // Between turns (a background task, another session): still the account's limits.
+        let out = t.line(&event("allowed_warning", 0.9));
+        let [ProviderEvent::UsageLimits(limits)] = out.as_slice() else { panic!("{out:?}") };
+        assert_eq!(limits.windows[0].id, "five_hour");
+        assert!((limits.windows[0].used_percent - 90.0).abs() < 1e-9);
+        assert_eq!(limits.windows[0].resets_at, Some(1_779_846_000_000));
+        // A rejection blocks the turn unless overage covers it.
+        t.begin_turn();
+        t.line(&event("rejected", 1.0));
+        assert!(t.turn.as_ref().unwrap().rate_limited);
+        let mut t = Translator::new("/w".into(), "default");
+        t.begin_turn();
+        t.line(&json!({"type": "rate_limit_event", "rate_limit_info": {"status": "rejected", "isUsingOverage": true}}));
+        assert!(!t.turn.as_ref().unwrap().rate_limited);
+        // Without a utilization (most real events) there's nothing to show.
+        assert!(t.line(&json!({"type": "rate_limit_event", "rate_limit_info": {"status": "allowed"}})).is_empty());
     }
 }

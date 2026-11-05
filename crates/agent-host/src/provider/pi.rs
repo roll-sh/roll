@@ -206,6 +206,7 @@ impl Provider for Pi {
             update_required: Vec::new(),
             capabilities: self.capabilities(),
             checking: false,
+            usage_limits: None,
         };
         let version = match self.run(&["--version"]).await {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {

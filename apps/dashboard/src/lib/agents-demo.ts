@@ -33,6 +33,7 @@ import type {
   Project,
   ModelOption,
   ProviderInfo,
+  UsageLimits,
   Question,
   Reply,
   Request,
@@ -109,7 +110,21 @@ const claude = (auth: ProviderInfo["auth"] = "ready"): ProviderInfo => ({
   ],
   update_required: [{ id: "claude-haiku-5-5", name: "Claude Haiku 5.5", min_version: "2.1.293" }],
   capabilities: { steer: true, fork: true, rollback: false, plan_mode: true, images: true, subagents: true, mode_switch: true, compact: true },
+  ...(auth === "ready" ? { usage_limits: demoLimits(38, 71) } : {}),
 });
+
+/** An account's limits as Codex and Claude Code report them: a 5-hour session and a week. */
+function demoLimits(session: number, weekly: number, plan?: string): UsageLimits {
+  const now = Date.now();
+  return {
+    checked_at: now,
+    windows: [
+      { id: "primary", kind: "session", label: "Session", used_percent: session, resets_at: now + 2 * 3_600_000 + 10 * 60_000, window_minutes: 300 },
+      { id: "secondary", kind: "weekly", label: "Weekly", used_percent: weekly, resets_at: now + 3 * 86_400_000, window_minutes: 10_080 },
+    ],
+    ...(plan ? { plan } : {}),
+  };
+}
 
 /** Codex's service tiers, as `model/list` reports them. */
 const serviceTier = (def = "default"): ModelOption => ({
@@ -138,6 +153,7 @@ const codex = (auth: ProviderInfo["auth"] = "ready"): ProviderInfo => ({
   ],
   update_required: [],
   capabilities: { steer: true, fork: true, rollback: true, plan_mode: true, images: true, subagents: true, mode_switch: false, compact: true },
+  ...(auth === "ready" ? { usage_limits: demoLimits(12, 46, "pro") } : {}),
 });
 
 const gemini: ProviderInfo = {
@@ -166,6 +182,74 @@ const grok: ProviderInfo = {
   models: [],
   update_required: [],
   capabilities: { steer: false, fork: false, rollback: false, plan_mode: true, images: true, subagents: false, mode_switch: true },
+};
+
+/** OpenCode 2 on its native driver (`opencode serve`): models from its catalog, a variant each. */
+const opencode: ProviderInfo = {
+  id: "opencode",
+  name: "OpenCode",
+  installed: true,
+  version: "2.0.18",
+  auth: "ready",
+  detail: "2 models",
+  models: [
+    { id: "opencode/space-bunny-free", name: "Space Bunny Free", default: true, options: [reasoningLevels(["low", "medium", "high", "xhigh", "max"], "medium")] },
+    { id: "anthropic/claude-sonnet-5", name: "Claude Sonnet 5", default: false, options: [reasoningLevels(["low", "high", "max"], "high")] },
+  ],
+  update_required: [],
+  capabilities: { steer: true, fork: true, rollback: true, plan_mode: true, images: true, subagents: true, mode_switch: true, compact: true },
+};
+
+/** Pi (`pi --mode rpc`): the models its providers are logged in for, thinking levels per model. */
+const pi: ProviderInfo = {
+  id: "pi",
+  name: "Pi",
+  installed: true,
+  version: "1.0.0",
+  auth: "ready",
+  detail: "Logged in for openrouter",
+  models: [
+    { id: "default", name: "Pi's default", default: true, options: [] },
+    { id: "openrouter/deepseek/deepseek-v4-flash", name: "DeepSeek V4 Flash", default: false, options: [reasoningLevels(["off", "high", "xhigh"], "high")] },
+  ],
+  update_required: [],
+  capabilities: { steer: true, fork: true, rollback: true, plan_mode: false, images: true, subagents: false, mode_switch: false, compact: true },
+};
+
+/** Muse Code (`muse serve`): Meta's models, reasoning per turn, its own usage window. */
+const muse: ProviderInfo = {
+  id: "muse",
+  name: "Muse Code",
+  installed: true,
+  version: "1.4.6-R6000.1",
+  auth: "unknown",
+  detail: "Muse doesn't say whether it's logged in; run `muse login` if a turn fails",
+  models: [{ id: "muse-spark-1.3-contributor", name: "Muse Spark 1.3", default: true, options: [reasoningLevels(["low", "medium", "high", "xhigh", "max"], "high")] }],
+  update_required: [],
+  capabilities: { steer: true, fork: false, rollback: false, plan_mode: false, images: true, subagents: true, mode_switch: false, compact: true },
+  usage_limits: {
+    checked_at: Date.now(),
+    windows: [
+      { id: "window", kind: "session", label: "Session", used_percent: 64, resets_at: Date.now() + 95 * 60_000, window_minutes: 300 },
+      { id: "weekly", kind: "weekly", label: "Weekly", used_percent: 22, resets_at: Date.now() + 4 * 86_400_000 },
+    ],
+  },
+};
+
+/** Google Antigravity's ACP server, with its own flavour (eager sign-in, questions, subagents). */
+const antigravity: ProviderInfo = {
+  id: "acp:antigravity",
+  name: "Google Antigravity",
+  installed: true,
+  version: "1.4.5",
+  auth: "unknown",
+  detail: "Signs in with: Log in with Google",
+  models: [
+    { id: "gemini-pro-agent", name: "Gemini 3.1 Pro (High)", default: true, options: [reasoningLevels(["low", "high"], "high")] },
+    { id: "gemini-3.8-flash", name: "Gemini 3.8 Flash", default: false, options: [] },
+  ],
+  update_required: [],
+  capabilities: { steer: false, fork: false, rollback: false, plan_mode: true, images: true, subagents: true, mode_switch: true },
 };
 
 const DEMO_SIZES: SandboxSize[] = [
@@ -1124,7 +1208,7 @@ export class DemoOwner implements AgentsTransport {
       id: MBP,
       name: "ada-mbp",
       online: true,
-      info: { hostname: "ada-mbp", os: "macos", arch: "aarch64", version: "0.1.0", home: "/Users/ada", seal_key: DEMO_SEAL_KEY, ...this.catalog(MBP, "/Users/ada", [claude(), codex(), gemini, grok], { claude: ["ANTHROPIC_API_KEY"] }) },
+      info: { hostname: "ada-mbp", os: "macos", arch: "aarch64", version: "0.1.0", home: "/Users/ada", seal_key: DEMO_SEAL_KEY, ...this.catalog(MBP, "/Users/ada", [claude(), codex(), opencode, pi, antigravity, gemini, grok], { claude: ["ANTHROPIC_API_KEY"] }) },
       sandbox: null,
       // Picked in its settings (the rest of the demo shows colours made from the record).
       appearance: { color: "slate" },
@@ -1137,7 +1221,7 @@ export class DemoOwner implements AgentsTransport {
       id: BOX,
       name: "build-box",
       online: true,
-      info: { hostname: "build-box", os: "linux", arch: "x86_64", version: "0.1.0", home: "/home/roll", seal_key: DEMO_SEAL_KEY, ...this.catalog(BOX, "/home/roll", [codex(), claude("missing")]) },
+      info: { hostname: "build-box", os: "linux", arch: "x86_64", version: "0.1.0", home: "/home/roll", seal_key: DEMO_SEAL_KEY, ...this.catalog(BOX, "/home/roll", [codex(), claude("missing"), muse]) },
       sandbox: { backend: "agent37", size: "standard", status: "running", hourly_cents: 3 },
       appearance: {},
       created_at: t0,

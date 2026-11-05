@@ -161,6 +161,7 @@ struct Probe {
     version: Option<String>,
     account: wire::AccountResponse,
     models: Vec<ModelInfo>,
+    limits: Option<agent_proto::UsageLimits>,
 }
 
 /// The option id of a Codex model's service tier (`turn/start`'s `serviceTier`).
@@ -244,8 +245,19 @@ impl Codex {
                     }
                 }
             }
+            // The account's usage limits (T3's `probeCodexAppServerProvider`); API-key accounts and
+            // older app-servers have none, which isn't a failure.
+            let limits = match account.account.is_some() {
+                true => rpc
+                    .request("account/rateLimits/read", Value::Null)
+                    .await
+                    .ok()
+                    .and_then(|v| serde_json::from_value::<super::usage::CodexRateLimits>(v).ok())
+                    .and_then(|l| super::usage::codex(&l, super::usage::now())),
+                false => None,
+            };
             let version = init.user_agent.split_whitespace().next().and_then(|ua| ua.split_once('/')).map(|(_, v)| v.to_string());
-            anyhow::Ok(Probe { version, account, models })
+            anyhow::Ok(Probe { version, account, models, limits })
         };
         let result = tokio::time::timeout(PROBE_TIMEOUT, result).await;
         process.close().await;
@@ -319,6 +331,7 @@ impl Provider for Codex {
             update_required: Vec::new(),
             capabilities: self.capabilities(),
             checking: false,
+            usage_limits: None,
         };
         match self.cli_version().await {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -338,6 +351,7 @@ impl Provider for Codex {
             Ok(probe) => {
                 info.version = info.version.or(probe.version);
                 info.models = probe.models;
+                info.usage_limits = probe.limits;
                 match (&probe.account.account, probe.account.requires_openai_auth) {
                     (Some(account), _) => {
                         info.auth = AuthStatus::Ready;

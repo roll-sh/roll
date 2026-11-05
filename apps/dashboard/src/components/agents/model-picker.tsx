@@ -31,6 +31,7 @@ import type { ModelInfo, ModelOption, ModelOptions, OptionValue, ProviderInfo, R
 import { modelKey, modelPrefs, searchModels, sortModels, useModelPrefs, type ModelKey, type PickerModel } from "@/lib/agents-models";
 import { acceptedOptions, effortValue, isFast, nextEffort, optionValue, otherOptions, reasoningOf, speedOf, traits, type BooleanOption, type SelectOption } from "@/lib/agents-model-options";
 import { ProviderLogo } from "./provider-logo";
+import { exhausted, usageSummary } from "@/lib/agents-usage";
 import { loginCommand } from "./shared";
 import {
   cn,
@@ -552,6 +553,9 @@ function Sidebar({ tabs, tab, providers, onSelect, onFocusSearch }: { tabs: Tab[
     const why = unavailable(p);
     if (why) return { hint: p.checking ? why : `${why}.${p.detail ? ` ${p.detail}` : ""}`, dim: true };
     if (p.auth === "missing") return { hint: `Not logged in.${p.detail ? ` ${p.detail}` : ""}`, dim: true };
+    // The account's usage, as its CLI reports it ("42% left · weekly").
+    const usage = usageSummary(p, Date.now());
+    if (usage) return { hint: usage, dim: !!exhausted(p.usage_limits) };
     return undefined;
   };
   return (
@@ -635,7 +639,12 @@ function ModelRow({
       {why ? (
         <span className="shrink-0 text-[11px] text-subtle">{why}</span>
       ) : (
-        provider.auth === "missing" && <span className="shrink-0 text-[11px] text-subtle">Log in first</span>
+        (provider.auth === "missing" && <span className="shrink-0 text-[11px] text-subtle">Log in first</span>) ||
+        (exhausted(provider.usage_limits) && (
+          <span className="shrink-0 text-[11px] text-subtle" title={usageSummary(provider, Date.now()) ?? undefined}>
+            Limit reached
+          </span>
+        ))
       )}
       <span className="flex shrink-0 items-center gap-1.5">
         {jump && <kbd className="font-mono text-[10px] text-subtle max-sm:hidden [@media(hover:none)]:hidden">{jump}</kbd>}

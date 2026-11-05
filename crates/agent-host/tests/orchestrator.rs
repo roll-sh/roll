@@ -1621,3 +1621,39 @@ async fn endpoint_keys_are_sealed_to_the_daemon_and_reach_only_their_providers()
     assert!(!claude.configured().unwrap().env.iter().any(|(k, _)| k.starts_with("ANTHROPIC")));
     assert!(matches!(run(&host, Command::EndpointRemove { endpoint: "cliproxy".into() }).await, Reply::Error(ReplyError { code: ErrorCode::NotFound, .. })));
 }
+
+/// Usage limits a session reports (Codex's `account/rateLimits/updated`, Claude's
+/// `rate_limit_event`) go on the provider's info, during a turn and between turns, merged by window
+/// (T3's `applyUsageLimitsUpdate`), and a probe that finds none keeps them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn session_usage_limits_go_on_the_providers_info() {
+    let fake = manual("codex", true);
+    let w = World::new(vec![fake.clone()]).await;
+    let thread = w.thread("codex", Some("one"), false).await;
+    let session = fake.session(0).await;
+    let window = |id: &str, kind, used| UsageWindow { resets_at: Some(9_000), ..UsageWindow::new(id, kind, id, used) };
+    session.emit(ProviderEvent::UsageLimits(UsageLimits::new(1, vec![window("primary", UsageWindowKind::Session, 40.0)])));
+    session.emit(ProviderEvent::TurnEnded(TurnEnd::Completed));
+    w.wait_thread(&thread, |t| t.status == ThreadStatus::Idle).await;
+    // Between turns: another window, and the first one moves on (its reset time kept).
+    session.emit(ProviderEvent::UsageLimits(UsageLimits::new(
+        2,
+        vec![UsageWindow::new("primary", UsageWindowKind::Session, "primary", 55.0), window("secondary", UsageWindowKind::Weekly, 10.0)],
+    )));
+    let limits = |info: &MachineInfo| info.providers[0].usage_limits.clone();
+    let mut got = None;
+    for _ in 0..100 {
+        got = limits(&w.host.info().await).filter(|l| l.windows.len() == 2);
+        if got.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let got = got.expect("both windows on the provider's info");
+    let shown: Vec<_> = got.windows.iter().map(|w| (w.id.as_str(), w.used_percent, w.resets_at)).collect();
+    assert_eq!(shown, [("primary", 55.0, Some(9_000)), ("secondary", 10.0, Some(9_000))]);
+
+    // Checking again (the fake's probe reports no limits) keeps them.
+    assert_eq!(run(&w.host, Command::ProviderRefresh {}).await, Reply::Ok);
+    assert_eq!(limits(&w.host.info().await).map(|l| l.windows.len()), Some(2));
+}

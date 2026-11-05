@@ -373,6 +373,25 @@ unless it is 0); Pi's `get_session_stats` at each turn's end (`contextUsage.toke
 `contextWindow`, the compaction's estimate while Pi has no count) and the running message's
 `usage.totalTokens` while it streams.
 
+**Usage limits** (T3's `ServerProviderUsageLimits` and its usage readers; `provider/usage.rs`)
+are `ProviderInfo.usage_limits`: windows (session, weekly, monthly, other), each with its percent
+used, when it resets and its length, plus the plan. They come only from what a provider's own CLI or
+protocol tells its client:
+- Codex: `account/rateLimits/read` in the probe and `account/rateLimits/updated` in sessions;
+- Claude Code: `rate_limit_event` (a rejection without overage still fails the turn as a usage
+  limit);
+- Muse: `usage/changed`.
+
+A session reports them as `ProviderEvent::UsageLimits`, during a turn or between turns. The daemon
+merges each window into the provider's info by id, keeping a reset time or length an update leaves
+out, and says `hello` again when something changed. A probe that finds none keeps what sessions
+reported. T3's readers for Cursor, OpenCode, Grok and Antigravity, and Claude's reset credits, read
+the CLI's stored login or keychain and call the vendor's API with it. roll never reads a
+credential, so those providers show no limits. The dashboard shows the windows as bars on the
+provider's card in machine settings, with "N% left", "resets in …" and T3's even-pace marker. The
+picker's provider tooltip gives the tightest window, and a model of a provider whose limit ran out
+says "Limit reached".
+
 **Auth is the user's own.** The daemon runs the provider CLIs installed on the machine with the
 logins already there, exactly as T3 Code and Conductor do; roll never reads, copies, pools or
 relays a provider credential in the clear. A provider can instead use an endpoint (a base URL and

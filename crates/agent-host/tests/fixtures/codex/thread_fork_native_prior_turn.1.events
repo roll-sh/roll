@@ -1,19 +1,23 @@
 {"native_thread":"019dd6ba-2681-7bf0-b051-141b0cbcbb27"}
 {"model":"gpt-5.5"}
+{"usage_limits":{"plan":null,"windows":[{"id":"primary","kind":"session","label":"Session","resets_at":1777429830000,"used_percent":61.0,"window_minutes":300},{"id":"secondary","kind":"weekly","label":"Weekly","resets_at":1777959590000,"used_percent":23.0,"window_minutes":10080}]}}
 {"item":{"body":{"text":"","type":"message"},"id":"msg_0e55e81d6295a5050169f15697bfc0819bb19113933c189c9a","parent":null,"status":"running"}}
 {"text_delta":{"item":"msg_0e55e81d6295a5050169f15697bfc0819bb19113933c189c9a","text":"fork boundary alpha"}}
 {"item":{"body":{"text":"fork boundary alpha","type":"message"},"id":"msg_0e55e81d6295a5050169f15697bfc0819bb19113933c189c9a","parent":null,"status":"completed"}}
 {"usage":{"cached_tokens":3456,"input_tokens":26900,"output_tokens":18}}
 {"context":{"max_tokens":258400,"total_processed_tokens":26918,"used_tokens":26918}}
+{"usage_limits":{"plan":null,"windows":[{"id":"primary","kind":"session","label":"Session","resets_at":1777429830000,"used_percent":61.0,"window_minutes":300},{"id":"secondary","kind":"weekly","label":"Weekly","resets_at":1777959590000,"used_percent":23.0,"window_minutes":10080}]}}
 {"turn_ref":"019dd6ba-268b-7f82-8f4c-9fde0edcfd55"}
 {"turn_ended":"completed"}
 {"usage":{"cached_tokens":0,"input_tokens":0,"output_tokens":0}}
 {"context":{"max_tokens":258400,"total_processed_tokens":26918,"used_tokens":26918}}
+{"usage_limits":{"plan":null,"windows":[{"id":"primary","kind":"session","label":"Session","resets_at":1777429830000,"used_percent":61.0,"window_minutes":300},{"id":"secondary","kind":"weekly","label":"Weekly","resets_at":1777959590000,"used_percent":23.0,"window_minutes":10080}]}}
 {"item":{"body":{"text":"","type":"message"},"id":"msg_0e55e81d6295a5050169f156990ae4819b9bc7f93dfdd76a91","parent":null,"status":"running"}}
 {"text_delta":{"item":"msg_0e55e81d6295a5050169f156990ae4819b9bc7f93dfdd76a91","text":"fork boundary beta"}}
 {"item":{"body":{"text":"fork boundary beta","type":"message"},"id":"msg_0e55e81d6295a5050169f156990ae4819b9bc7f93dfdd76a91","parent":null,"status":"completed"}}
 {"usage":{"cached_tokens":26496,"input_tokens":26927,"output_tokens":7}}
 {"context":{"max_tokens":258400,"total_processed_tokens":53852,"used_tokens":26934}}
+{"usage_limits":{"plan":null,"windows":[{"id":"primary","kind":"session","label":"Session","resets_at":1777429830000,"used_percent":61.0,"window_minutes":300},{"id":"secondary","kind":"weekly","label":"Weekly","resets_at":1777959590000,"used_percent":23.0,"window_minutes":10080}]}}
 {"turn_ref":"019dd6ba-416d-7902-95cf-d4179c3f4738"}
 {"turn_ended":"completed"}
 {"exited":null}

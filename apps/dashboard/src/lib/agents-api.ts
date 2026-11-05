@@ -624,6 +624,30 @@ export interface ProviderInfo {
    * or not installed with its login unknown when there was none.
    */
   checking?: boolean;
+  /**
+   * How much of the account's allowance is left, as the provider's own CLI reports it (Codex,
+   * Claude Code, Muse). Absent for a provider that reports none.
+   */
+  usage_limits?: UsageLimits;
+}
+
+/** T3's `ServerProviderUsageLimits`: windows sorted session, weekly, monthly, other. */
+export interface UsageLimits {
+  checked_at: Millis;
+  windows: UsageWindow[];
+  plan?: string;
+}
+
+export type UsageWindowKind = "session" | "weekly" | "monthly" | "other";
+
+export interface UsageWindow {
+  id: string;
+  kind: UsageWindowKind;
+  label: string;
+  /** 0 to 100. */
+  used_percent: number;
+  resets_at?: Millis;
+  window_minutes?: number;
 }
 
 export interface MachineInfo {
@@ -1594,6 +1618,22 @@ export const providerInfoD = obj<ProviderInfo>({
   update_required: vec(obj<UpdateRequired>({ id: str, name: str, min_version: str })),
   capabilities: capabilitiesD,
   checking: optional(bool),
+  usage_limits: optional(
+    obj<UsageLimits>({
+      checked_at: int,
+      windows: vec(
+        obj<UsageWindow>({
+          id: str,
+          kind: literal("session", "weekly", "monthly", "other"),
+          label: str,
+          used_percent: num,
+          resets_at: optional(int),
+          window_minutes: optional(int),
+        }),
+      ),
+      plan: optional(str),
+    }),
+  ),
 });
 const idleCompactionD = literal("on_return", "before_cache_expires", "off");
 const providerSettingsD = obj<ProviderSettings>({

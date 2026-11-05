@@ -128,6 +128,7 @@ impl Provider for Acp {
             update_required: Vec::new(),
             capabilities: Self::base_capabilities(true),
             checking: false,
+            usage_limits: None,
         };
         let binary = self.binary();
         if which(&binary).is_none() {

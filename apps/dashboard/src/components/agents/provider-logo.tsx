@@ -8,7 +8,7 @@
 
 import type { ProviderInfo } from "@/lib/agents-api";
 import type { Glyph } from "./brand-icons";
-import { ClaudeLogo, CursorLogo, FxLogo, GeminiLogo, GrokLogo, KiroLogo, OpenAILogo, OpenCodeLogo } from "./provider-logos";
+import { AntigravityLogo, ClaudeLogo, CursorLogo, FxLogo, GeminiLogo, GrokLogo, KiroLogo, MuseLogo, OpenAILogo, OpenCodeLogo, PiLogo } from "./provider-logos";
 import { cn } from "./ui";
 
 /** Marks by provider id: the built-in adapters and the ACP agents roll knows (`acp::known_agents`). */
@@ -23,6 +23,16 @@ const LOGOS: Record<string, Glyph> = {
   "acp:opencode": OpenCodeLogo,
   "acp:kiro": KiroLogo,
   "acp:fx": FxLogo,
+  // Native drivers (T3's OpenCode, Pi and Muse packages) and their ACP or registry flavours.
+  opencode: OpenCodeLogo,
+  pi: PiLogo,
+  "acp:pi-acp": PiLogo,
+  muse: MuseLogo,
+  "acp:antigravity": AntigravityLogo,
+  "acp:antigravity-acp": AntigravityLogo,
+  "acp:cursor-agent": CursorLogo,
+  "acp:gemini-cli": GeminiLogo,
+  "acp:grok-build": GrokLogo,
 };
 
 export const providerLogo = (id: string): Glyph | undefined => LOGOS[id];

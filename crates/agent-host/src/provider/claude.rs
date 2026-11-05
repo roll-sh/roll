@@ -139,6 +139,7 @@ impl Provider for Claude {
             update_required,
             capabilities: capabilities(),
             checking: false,
+            usage_limits: None,
         };
         let mut version = self.command(&[]);
         version.arg("--version").stdin(Stdio::null());

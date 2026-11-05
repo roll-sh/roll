@@ -15,7 +15,7 @@
 use super::Host;
 use crate::Outbound;
 use crate::provider::Provider;
-use agent_proto::{AuthStatus, ModelInfo, ProviderId, ProviderInfo};
+use agent_proto::{AuthStatus, ModelInfo, ProviderId, ProviderInfo, UsageLimits};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -99,6 +99,7 @@ impl Probes {
             update_required: Vec::new(),
             capabilities: provider.capabilities(),
             checking: false,
+            usage_limits: None,
         });
         info.checking = probe.is_some_and(|p| p.running.is_some());
         drop(state);
@@ -135,11 +136,39 @@ impl Host {
                     let entry = state.entry(provider.id()).or_default();
                     let current = entry.running == Some(probe);
                     if current {
+                        let mut info = info;
+                        // Limits sessions reported since stay unless the probe saw newer ones.
+                        let published = entry.last.as_mut().and_then(|l| l.usage_limits.take());
+                        info.usage_limits = UsageLimits::after_probe(published, info.usage_limits.take());
                         *entry = Probe { last: Some(info), running: None };
                     }
                     current
                 };
                 if current {
+                    host.publish_info().await;
+                }
+            });
+        }
+    }
+
+    /// A session reported `provider`'s usage limits: merge them into its info and say `hello`
+    /// again when they changed. A provider with no probe yet keeps them for when it has one.
+    pub(crate) fn usage_limits(&self, provider: &ProviderId, update: &UsageLimits) {
+        let changed = {
+            let mut state = self.probes.state.lock().unwrap();
+            let Some(info) = state.get_mut(provider).and_then(|p| p.last.as_mut()) else { return };
+            match UsageLimits::apply(info.usage_limits.as_ref(), update) {
+                Some(next) => {
+                    info.usage_limits = Some(next);
+                    true
+                }
+                None => false,
+            }
+        };
+        if changed {
+            let me = self.me.clone();
+            tokio::spawn(async move {
+                if let Some(host) = me.upgrade() {
                     host.publish_info().await;
                 }
             });

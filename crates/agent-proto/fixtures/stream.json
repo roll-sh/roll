@@ -220,6 +220,27 @@
               "subagents": true,
               "mode_switch": false,
               "compact": true
+            },
+            "usage_limits": {
+              "checked_at": 1780000000000,
+              "windows": [
+                {
+                  "id": "primary",
+                  "kind": "session",
+                  "label": "Session",
+                  "used_percent": 42.5,
+                  "resets_at": 1780010000000,
+                  "window_minutes": 300
+                },
+                {
+                  "id": "secondary",
+                  "kind": "weekly",
+                  "label": "Weekly",
+                  "used_percent": 100.0,
+                  "window_minutes": 10080
+                }
+              ],
+              "plan": "plus"
             }
           },
           {

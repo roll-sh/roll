@@ -33,6 +33,7 @@ import { ENDPOINT_SETTINGS, MachineEndpoints, ProviderEndpointRow, providerEndpo
 import { endpointOf } from "@/lib/agents-endpoints";
 import { ModelPicker } from "./model-picker";
 import { ProviderLogo } from "./provider-logo";
+import { UsageLimitBars } from "./usage-limits";
 import { SandboxPanel } from "./sandbox";
 import { field, Note, SaveState, SettingRow, SettingsPage, SettingsSection, TextField, useSearching, useShown, type Setting } from "./settings-ui";
 import { loginCommand } from "./shared";
@@ -555,6 +556,7 @@ function ProviderCard({ ctx, base, info }: { ctx: Ctx; base: ProviderBase; info:
           <ChevronRight className={cn("size-4 transition-transform duration-200 motion-reduce:transition-none", expanded && "rotate-90")} />
         </button>
       </div>
+      {p.enabled && info && <UsageLimitBars info={info} className="pb-3 pl-[50px] pr-[86px]" />}
       {expanded && (
         <div className="mx-3.5 mb-3 divide-y divide-line overflow-hidden rounded-lg border border-line-2 bg-panel-2">
           <ProviderEndpointRow machine={ctx.machine} provider={base} onNew={() => ctx.editEndpoint({ provider: base.id })} />

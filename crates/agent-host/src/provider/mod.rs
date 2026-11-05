@@ -29,6 +29,7 @@ pub mod codex;
 pub mod fake;
 pub mod opencode;
 pub mod pi;
+pub mod usage;
 
 /// A provider's entry in the daemon config. Every adapter is built from one:
 /// `codex::Codex::new(cfg)`, `claude::Claude::new(cfg)`, `opencode::OpenCode::new(cfg)`,
@@ -211,6 +212,10 @@ pub enum ProviderEvent {
     TurnRef { id: String },
     /// The current turn finished.
     TurnEnded(TurnEnd),
+    /// The account's usage limits changed (Codex's `account/rateLimits/updated`, Claude's
+    /// `rate_limit_event`, Muse's `usage/changed`): the windows it names replace the provider's
+    /// ones of the same id ([`agent_proto::UsageLimits::apply`]). It may come between turns.
+    UsageLimits(agent_proto::UsageLimits),
     /// The session ended (process exited). No more events follow.
     Exited { error: Option<String> },
 }

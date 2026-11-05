@@ -274,6 +274,12 @@ impl Translator {
                     out.push(Action::Event(ProviderEvent::RequestCancelled { id }));
                 }
             }),
+            // The account's limits (T3's `codexRateLimitsToUpdate`; the host drops repeats).
+            "account/rateLimits/updated" => parse(params).map(|p: crate::provider::usage::CodexRateLimits| {
+                if let Some(limits) = crate::provider::usage::codex(&p, crate::provider::usage::now()) {
+                    out.push(Action::Event(ProviderEvent::UsageLimits(limits)));
+                }
+            }),
             // Everything else (thread/status, mcpServer/startupStatus, account/*, configWarning,
             // turn/diff/updated, …) says nothing the canvas shows.
             _ => Ok(()),

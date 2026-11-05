@@ -432,6 +432,7 @@ fn event_json(e: &ProviderEvent) -> Value {
         ProviderEvent::TurnEnded(TurnEnd::Completed) => json!({ "turn_ended": "completed" }),
         ProviderEvent::TurnEnded(TurnEnd::Interrupted) => json!({ "turn_ended": "interrupted" }),
         ProviderEvent::TurnEnded(TurnEnd::Failed(m)) => json!({ "turn_ended": { "failed": m } }),
+        ProviderEvent::UsageLimits(l) => json!({ "usage_limits": { "windows": l.windows, "plan": l.plan } }),
         ProviderEvent::Exited { error } => json!({ "exited": error }),
     }
 }

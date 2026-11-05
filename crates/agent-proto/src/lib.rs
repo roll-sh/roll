@@ -1515,6 +1515,157 @@ pub struct ProviderInfo {
     /// installed and its login unknown until the probe answers.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub checking: bool,
+    /// How much of the account's allowance is left, as the provider's own CLI or protocol reports
+    /// it to its client (T3's `ServerProvider.usageLimits`). Unset for a provider that reports
+    /// none; roll never reads a credential to learn it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage_limits: Option<UsageLimits>,
+}
+
+impl ProviderInfo {
+    /// Not installed, login unknown, nothing else known yet: what an adapter's `info` starts from.
+    pub fn new(id: ProviderId, name: String, capabilities: Capabilities) -> Self {
+        ProviderInfo {
+            id,
+            name,
+            installed: false,
+            version: None,
+            auth: AuthStatus::Unknown,
+            detail: None,
+            models: Vec::new(),
+            update_required: Vec::new(),
+            capabilities,
+            checking: false,
+            usage_limits: None,
+        }
+    }
+}
+
+/// A provider account's usage limits (T3's `ServerProviderUsageLimits`,
+/// `packages/contracts/src/providerUsageLimits.ts`; merge rules from
+/// `packages/provider-core/src/server/usageLimits.ts`).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct UsageLimits {
+    /// When the provider last said.
+    pub checked_at: Millis,
+    /// Sorted: session, weekly, monthly, other; then by id.
+    #[serde(default)]
+    pub windows: Vec<UsageWindow>,
+    /// The account's plan, when the provider names it ("plus", "max").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<String>,
+}
+
+/// One allowance window ("Session", "Weekly", "Monthly credit limit").
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct UsageWindow {
+    /// Stable per provider (`primary`, `five_hour`, `seven_day`), so updates replace their row.
+    pub id: String,
+    pub kind: UsageWindowKind,
+    pub label: String,
+    /// 0 to 100.
+    pub used_percent: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resets_at: Option<Millis>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_minutes: Option<u32>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UsageWindowKind {
+    Session,
+    Weekly,
+    Monthly,
+    Other,
+}
+
+impl UsageWindow {
+    pub fn new(id: &str, kind: UsageWindowKind, label: &str, used_percent: f64) -> Self {
+        UsageWindow { id: id.into(), kind, label: label.into(), used_percent: clamp_percent(used_percent), resets_at: None, window_minutes: None }
+    }
+}
+
+/// A percentage held to 0..=100 (anything not finite is 0).
+pub fn clamp_percent(value: f64) -> f64 {
+    if value.is_finite() { value.clamp(0.0, 100.0) } else { 0.0 }
+}
+
+impl UsageLimits {
+    /// Limits made of `windows`, sorted.
+    pub fn new(checked_at: Millis, windows: Vec<UsageWindow>) -> Self {
+        let mut limits = UsageLimits { checked_at, windows, plan: None };
+        limits.sort();
+        limits
+    }
+
+    fn sort(&mut self) {
+        self.windows.sort_by(|a, b| a.kind.cmp(&b.kind).then_with(|| a.id.cmp(&b.id)));
+    }
+
+    /// The limits after a streamed update (T3's `applyUsageLimitsUpdate`): each window replaces
+    /// the one with its id, keeping the old reset time and length when the update leaves them out;
+    /// windows the update doesn't name stay. `None` when nothing changed.
+    pub fn apply(previous: Option<&UsageLimits>, update: &UsageLimits) -> Option<UsageLimits> {
+        if update.windows.is_empty() && update.plan.is_none() {
+            return None;
+        }
+        let mut next = previous.cloned().unwrap_or_default();
+        let mut changed = previous.is_none();
+        for window in &update.windows {
+            let existing = next.windows.iter_mut().find(|w| w.id == window.id);
+            let mut window = window.clone();
+            window.used_percent = clamp_percent(window.used_percent);
+            match existing {
+                Some(old) => {
+                    window.resets_at = window.resets_at.or(old.resets_at);
+                    window.window_minutes = window.window_minutes.or(old.window_minutes);
+                    if *old != window {
+                        *old = window;
+                        changed = true;
+                    }
+                }
+                None => {
+                    next.windows.push(window);
+                    changed = true;
+                }
+            }
+        }
+        if update.plan.is_some() && update.plan != next.plan {
+            next.plan = update.plan.clone();
+            changed = true;
+        }
+        if !changed {
+            return None;
+        }
+        next.checked_at = next.checked_at.max(update.checked_at);
+        next.sort();
+        Some(next)
+    }
+
+    /// What a probe's answer leaves (T3's `resolveUsageLimitsAfterProbe`): a probe that found
+    /// none keeps what sessions reported, and windows streamed after the probe began win.
+    pub fn after_probe(published: Option<UsageLimits>, probed: Option<UsageLimits>) -> Option<UsageLimits> {
+        match (published, probed) {
+            (published, None) => published,
+            (Some(published), Some(probed)) if published.checked_at > probed.checked_at => {
+                UsageLimits::apply(Some(&probed), &published).or(Some(probed)).map(|mut l| {
+                    l.checked_at = published.checked_at;
+                    l
+                })
+            }
+            (_, probed) => probed,
+        }
+    }
+
+    /// When every exhausted window resets, if all of them say (T3's `codexUsageLimitResetAt`).
+    pub fn reset_at(&self) -> Option<Millis> {
+        let full: Vec<_> = self.windows.iter().filter(|w| w.used_percent >= 100.0).collect();
+        if full.is_empty() {
+            return None;
+        }
+        full.iter().map(|w| w.resets_at).collect::<Option<Vec<_>>>()?.into_iter().max()
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

@@ -1251,6 +1251,10 @@ fn render(e: &ProviderEvent) -> String {
             c.used_tokens,
             c.max_tokens.map(|m| m.to_string()).unwrap_or_else(|| "?".into())
         ),
+        ProviderEvent::UsageLimits(l) => {
+            let windows: Vec<String> = l.windows.iter().map(|w| format!("{}={}%", w.id, w.used_percent)).collect();
+            format!("limits {}", windows.join(" "))
+        }
         ProviderEvent::TurnEnded(TurnEnd::Completed) => "turn completed".into(),
         ProviderEvent::TurnEnded(TurnEnd::Interrupted) => "turn interrupted".into(),
         ProviderEvent::TurnEnded(TurnEnd::Failed(m)) => format!("turn failed: {m}"),

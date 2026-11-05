@@ -294,6 +294,7 @@ impl Provider for FakeProvider {
             update_required: Vec::new(),
             capabilities: self.capabilities,
             checking: false,
+            usage_limits: None,
         };
         if unlisted {
             info.models.clear();

@@ -695,6 +695,7 @@ fn info() -> MachineInfo {
                 update_required: vec![UpdateRequired { id: "claude-haiku-5-5".into(), name: "Claude Haiku 5.5".into(), min_version: "2.1.293".into() }],
                 capabilities: Capabilities { steer: true, fork: true, rollback: false, plan_mode: true, images: true, subagents: true, mode_switch: true, compact: true },
                 checking: false,
+                usage_limits: None,
             },
             ProviderInfo {
                 id: ProviderId::codex(),
@@ -707,6 +708,18 @@ fn info() -> MachineInfo {
                 update_required: vec![],
                 capabilities: Capabilities { steer: true, fork: true, rollback: true, plan_mode: true, images: true, subagents: true, mode_switch: false, compact: true },
                 checking: false,
+                usage_limits: Some(UsageLimits {
+                    checked_at: 1_780_000_000_000,
+                    windows: vec![
+                        UsageWindow {
+                            resets_at: Some(1_780_010_000_000),
+                            window_minutes: Some(300),
+                            ..UsageWindow::new("primary", UsageWindowKind::Session, "Session", 42.5)
+                        },
+                        UsageWindow { window_minutes: Some(10080), ..UsageWindow::new("secondary", UsageWindowKind::Weekly, "Weekly", 100.0) },
+                    ],
+                    plan: Some("plus".into()),
+                }),
             },
             // Still being probed, with no earlier probe to show.
             ProviderInfo {
@@ -720,6 +733,7 @@ fn info() -> MachineInfo {
                 update_required: vec![],
                 capabilities: Capabilities { steer: false, fork: false, rollback: false, plan_mode: true, images: true, subagents: false, mode_switch: true, compact: false },
                 checking: true,
+                usage_limits: None,
             },
         ],
         settings: Some(Box::new(MachineConfig {
