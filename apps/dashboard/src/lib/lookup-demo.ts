@@ -82,6 +82,17 @@ export const DEMO_LOOKUPS: LookupRows = {
         ]
       : [],
   "linear/issues": ISSUES,
+  // roll code's own (the demo's repos in agents-demo.ts, its agent tokens).
+  "code/repos": [
+    { id: "roll", label: "roll", key: "acme/roll", hint: "keep the code rolling", icon: "repo" },
+    { id: "web", label: "web", key: "acme/web", hint: "The marketing site", icon: "repo" },
+    { id: "infra", label: "infra", key: "acme/infra", icon: "repo" },
+    { id: "docs", label: "docs", key: "acme/docs", hint: "Guides and the API reference", icon: "repo" },
+  ],
+  "code/agents": [
+    { id: "triage", label: "triage", key: "agent:triage", icon: "agent" },
+    { id: "release", label: "release", key: "agent:release", icon: "agent" },
+  ],
 };
 
 export const demoLookup = () => memoryLookup(DEMO_LOOKUPS);

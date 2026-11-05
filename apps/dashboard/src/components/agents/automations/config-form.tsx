@@ -533,7 +533,7 @@ function ProjectField({ value, onChange, error }: { value: ProjectRef | null; on
       )}
       {value?.type === "repo" && (
         <div className="flex flex-wrap gap-1.5">
-          <input aria-label="Repository" value={value.repo} onChange={(e) => onChange({ ...value, repo: e.target.value })} placeholder="owner/repo" className={cn(fieldClass, "w-56 font-mono text-[12px]")} />
+          <LookupPicker label="Repository" from={{ source: "code", kind: "repos" }} value={value.repo || null} onChange={(repo) => onChange({ ...value, repo: repo ?? "" })} placeholder="Pick a repo" custom className="w-56" />
           <input aria-label="Folder" value={value.path ?? ""} onChange={(e) => onChange({ ...value, path: e.target.value || null })} placeholder="Folder (optional)" className={cn(fieldClass, "w-44 font-mono text-[12px]")} />
         </div>
       )}

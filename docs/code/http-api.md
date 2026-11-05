@@ -931,6 +931,8 @@ GET    /v1/code/agents/{owner}/lookup/{source}/{kind}?q=&parent=&cursor=&ids=&li
        Cached per owner for 30 s; a rate limit holds the source off for the owner until its retry
        time (the cached page is still served with the problem). 400 a bad query or a kind that
        needs `parent`; 404 an unknown source or kind.
+         code:   repos (the owner's; id = name, key = owner/name), agents (its agent tokens' names;
+                 key = agent:<name>). Read from control.db, never cached.
          linear: teams, states (parent: team id or key; none: every team's, grouped), users,
                  labels (parent: the team's and the workspace's; groups aren't rows), projects,
                  cycles (parent required; not past), issues (q: a title, or an identifier ENG-12;

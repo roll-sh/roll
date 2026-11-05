@@ -17,6 +17,7 @@
 //!   take a typed value. Unknown sources or kinds are 404s, a missing `parent` a 400.
 
 mod linear;
+mod rollcode;
 
 use crate::agents::api::manageable;
 use crate::api::{Body, Q};
@@ -309,7 +310,7 @@ impl Code {
 // ── the routes ──
 
 /// The sources and kinds there are, for 404s that say what is.
-const SOURCES: &[(&str, &[&str])] = &[("linear", linear::KINDS)];
+const SOURCES: &[(&str, &[&str])] = &[("linear", linear::KINDS), ("code", rollcode::KINDS)];
 
 fn known(source: &str, kind: &str) -> Result<()> {
     let Some((_, kinds)) = SOURCES.iter().find(|(s, _)| *s == source) else {
@@ -324,6 +325,7 @@ fn known(source: &str, kind: &str) -> Result<()> {
 async fn fetch(code: &Code, owner_id: &str, source: &str, kind: &str, q: &Query) -> std::result::Result<Page, Failure> {
     match source {
         "linear" => linear::list(code, owner_id, kind, q).await,
+        "code" => rollcode::list(code, owner_id, kind, q).await,
         _ => Err(Failure::Refused(Error::NotFound(format!("lookup source {source:?}")))),
     }
 }
@@ -334,6 +336,13 @@ async fn list(State(code): S, caller: Caller, Path((owner, source, kind)): Path<
     known(&source, &kind)?;
     let query = Query::parse(raw)?;
     let key = Key { owner: o.id.clone(), source: source.clone(), kind: kind.clone(), query };
+    if source == "code" {
+        // roll's own rows are a read of control.db: always current, never cached.
+        return fetch(&code, &o.id, &source, &kind, &key.query).await.map(Json).map_err(|f| match f {
+            Failure::Refused(e) => e,
+            Failure::Problem(p) => Error::Unprocessable(problem_text(&p)),
+        });
+    }
     let cache = &code.agents.lookups;
     if let Some(p) = cache.fresh(&key) {
         return Ok(Json(p));

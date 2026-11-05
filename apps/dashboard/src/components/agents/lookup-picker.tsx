@@ -38,7 +38,10 @@ export function useLookupSource(source: string, kind: string, parent?: string | 
   }, [api, owner, source, kind, parent]);
 }
 
-export type LookupPickerProps = Omit<PickerProps, "source" | "onCreate"> & {
+/** `Omit` over each half of the union, so `multiple` still picks `value` and `onChange`. */
+type Without<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never;
+
+export type LookupPickerProps = Without<PickerProps, "source" | "onCreate"> & {
   from: { source: string; kind: string };
   /** The rows' parent (a team for its states). */
   parent?: string | null;

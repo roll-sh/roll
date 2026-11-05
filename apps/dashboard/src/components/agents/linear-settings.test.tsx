@@ -2,6 +2,8 @@ import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import { DISCONNECTED, memoryLinear, type LinearApi, type LinearStatus } from "@/lib/linear-api";
+import { memoryLookup } from "@/lib/lookup-api";
+import { macClick } from "@/test/mac-click";
 import { agentsHarness, fakeServices, renderAgents } from "@/test/agents-render";
 import { LinearSettingsSection } from "./linear-settings";
 
@@ -37,7 +39,8 @@ function spied(initial: LinearStatus, teams = [{ id: "t1", key: "ENG", name: "En
 }
 
 function show(linear: LinearApi) {
-  const h = agentsHarness({ ctx: { services: fakeServices({ linear }) } });
+  const lookup = memoryLookup({ "code/repos": ["roll", "web", "infra"].map((r) => ({ id: r, label: r, key: `acme/${r}`, icon: "repo" })) });
+  const h = agentsHarness({ ctx: { services: fakeServices({ linear, lookup }) } });
   renderAgents(<LinearSettingsSection />, h);
   return h;
 }
@@ -96,17 +99,18 @@ describe("the Linear settings", () => {
     expect(rows[0]).toHaveTextContent("recorded");
     expect(rows[1]).toHaveTextContent("ENG-1 moved to In Progress");
 
-    // Teams come from Linear; a repo for one is saved with the rest.
-    const web = await screen.findByLabelText("WEB repo");
-    expect(screen.getByLabelText("ENG repo")).toHaveValue("roll");
-    await userEvent.type(web, "acme/web{Enter}");
-    await waitFor(() => expect(linear.putSettings).toHaveBeenLastCalledWith("acme", { repos: { ENG: "roll", WEB: "acme/web" } }));
-    await userEvent.type(screen.getByLabelText("Default repo"), "roll{Enter}");
-    await waitFor(() => expect(linear.putSettings).toHaveBeenLastCalledWith("acme", { repos: { ENG: "roll", WEB: "acme/web" }, default_repo: "roll" }));
-    // Emptying a team's repo unmaps it.
-    await userEvent.clear(screen.getByLabelText("ENG repo"));
-    await userEvent.type(screen.getByLabelText("ENG repo"), "{Enter}");
-    await waitFor(() => expect(linear.putSettings).toHaveBeenLastCalledWith("acme", { repos: { WEB: "acme/web" }, default_repo: "roll" }));
+    // Teams come from Linear; a repo for one is picked from the owner's repos and saved with the rest.
+    const web = await screen.findByRole("button", { name: "WEB repo" });
+    expect(screen.getByRole("button", { name: "ENG repo" })).toHaveTextContent("roll");
+    macClick(web);
+    macClick(await within(await screen.findByRole("listbox", { name: "WEB repo" })).findByRole("option", { name: /web/ }));
+    await waitFor(() => expect(linear.putSettings).toHaveBeenLastCalledWith("acme", { repos: { ENG: "roll", WEB: "web" } }));
+    macClick(screen.getByRole("button", { name: "Default repo" }));
+    macClick(await within(await screen.findByRole("listbox", { name: "Default repo" })).findByRole("option", { name: /roll/ }));
+    await waitFor(() => expect(linear.putSettings).toHaveBeenLastCalledWith("acme", { repos: { ENG: "roll", WEB: "web" }, default_repo: "roll" }));
+    // Clearing a team's repo unmaps it.
+    macClick(screen.getByRole("button", { name: "Clear eng repo" }));
+    await waitFor(() => expect(linear.putSettings).toHaveBeenLastCalledWith("acme", { repos: { WEB: "web" }, default_repo: "roll" }));
   });
 
   it("disconnects only after it's asked again", async () => {

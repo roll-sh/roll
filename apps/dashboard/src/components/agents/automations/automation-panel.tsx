@@ -15,6 +15,7 @@ import { TEMPLATES } from "@/lib/automation-templates";
 import { setAgentsView, type AutomationsView } from "@/lib/agents-surface";
 import { blankSpec, sameSpec, sampleEvent, specOf, triggerSource, triggerSummary, validate, type Problems, type Schema } from "@/lib/automations-ui";
 import { ApiError } from "@/lib/code-api";
+import { LookupPicker } from "../lookup-picker";
 import { Menu } from "../menu";
 import { IconButton } from "../session";
 import { field as fieldClass } from "../settings-ui";
@@ -550,7 +551,7 @@ function SettingsTab({ draft, setDraft, automation }: { draft: AutomationSpec; s
         <Row
           title="Act as"
           description={draft.run_as ? `With the agent ${draft.run_as}'s narrower rights.` : "As you, the owner."}
-          control={<input value={draft.run_as ?? ""} onChange={(e) => setDraft({ ...draft, run_as: e.target.value.trim() || null })} placeholder="You" aria-label="Act as agent" className={cn(fieldClass, "w-44 font-mono text-[12px]")} />}
+          control={<LookupPicker label="Act as agent" from={{ source: "code", kind: "agents" }} value={draft.run_as ?? null} onChange={(a) => setDraft({ ...draft, run_as: a?.replace(/^agent:/, "").trim() || null })} placeholder="You" clearable custom className="w-48" />}
         />
         <Row title="Agents may run it" description="Your agent tokens can start it by hand (MCP, the CLI)." control={<Switch checked={!!draft.allow_agents} onCheckedChange={(on) => setDraft({ ...draft, allow_agents: on || undefined })} aria-label="Agents may run it" />} />
       </Group>

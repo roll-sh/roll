@@ -19,7 +19,7 @@
  */
 
 import { Popover as PopoverPrimitive } from "@base-ui/react/popover";
-import { Braces, Check, ChevronDown, Circle, CircleCheck, CircleDashed, CircleDot, CircleX, Hash, Lock, Plus, TriangleAlert, Users, X } from "lucide-react";
+import { Bot, Braces, Check, ChevronDown, Circle, CircleCheck, CircleDashed, CircleDot, CircleX, FolderGit2, GitBranch, GitPullRequest, Hash, Lock, Milestone, Plus, Server, Shield, Tag, TriangleAlert, Users, Workflow, X } from "lucide-react";
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { Combobox, ComboboxItem, ComboboxList, ComboboxSearchInput } from "./combobox";
 import { cn, glass, popupMotion } from "./cn";
@@ -547,11 +547,30 @@ function RowView({ row, picked, multiple, noun, creating, mono }: { row: Row; pi
 
 const STATE_ICONS: Record<string, typeof Circle> = { backlog: CircleDashed, triage: CircleDashed, unstarted: Circle, started: CircleDot, completed: CircleCheck, canceled: CircleX };
 
+/** A row's kind (`icon`) as a lucide icon, in the thing's colour when it has one. */
+const KIND_ICONS: Record<string, typeof Circle> = {
+  ...STATE_ICONS,
+  channel: Hash,
+  private: Lock,
+  group: Users,
+  team: Users,
+  role: Shield,
+  agent: Bot,
+  repo: FolderGit2,
+  github: FolderGit2,
+  branch: GitBranch,
+  label: Tag,
+  milestone: Milestone,
+  workflow: Workflow,
+  environment: Server,
+  pull: GitPullRequest,
+};
+
 /** What leads a row: a picture, a kind's icon in the thing's colour, or its colour as a dot. */
 function Lead({ option: o, size = "size-4" }: { option: PickerOption; size?: string }) {
   if (o.icon && typeof o.icon === "object") return <span className={cn("grid shrink-0 place-items-center", size)}>{o.icon}</span>;
   const kind = typeof o.icon === "string" ? o.icon : undefined;
-  if (o.avatar || kind === "user" || kind === "agent")
+  if (o.avatar || kind === "user")
     return o.avatar ? (
       // eslint-disable-next-line @next/next/no-img-element -- pictures from the integration, any host
       <img src={o.avatar} alt="" referrerPolicy="no-referrer" loading="lazy" className={cn("shrink-0 rounded-full bg-fg/[0.08] object-cover", size)} />
@@ -561,13 +580,10 @@ function Lead({ option: o, size = "size-4" }: { option: PickerOption; size?: str
       </span>
     );
   const style = o.color ? { color: o.color } : undefined;
-  if (kind && STATE_ICONS[kind]) {
-    const Icon = STATE_ICONS[kind];
+  if (kind && KIND_ICONS[kind]) {
+    const Icon = KIND_ICONS[kind];
     return <Icon aria-hidden className="size-3.5 shrink-0 text-subtle" style={style} />;
   }
-  if (kind === "channel") return <Hash aria-hidden className="size-3.5 shrink-0 text-subtle" />;
-  if (kind === "private") return <Lock aria-hidden className="size-3.5 shrink-0 text-subtle" />;
-  if (kind === "group") return <Users aria-hidden className="size-3.5 shrink-0 text-subtle" />;
   if (o.color) return <span aria-hidden className="mx-[3px] size-2.5 shrink-0 rounded-full" style={{ backgroundColor: o.color }} />;
   return null;
 }
