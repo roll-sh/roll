@@ -597,4 +597,20 @@ async fn reasoning_another_provider_signed_never_passes_through() {
     let blocks = sent["messages"][1]["content"].as_array().unwrap();
     assert_eq!(blocks.len(), 2);
     assert_eq!(blocks[0]["signature"], "EqQBCkYIBxgC");
+
+    // After a failover: the conversation was on OpenAI (which is down now), and Anthropic takes
+    // over without the reasoning OpenAI signed.
+    let openai = Mock::start(|_| status(500)).await;
+    let anthropic = Mock::start(|_| json(200, messages_answer("claude-x", 1, 1))).await;
+    let mut oai = upstream("oai", UpstreamKind::Openai, &openai.url("/v1"));
+    oai.models = vec!["claude-x".into()];
+    let ups = vec![oai, upstream("ant", UpstreamKind::Anthropic, &anthropic.url(""))];
+    g.gw.apply(settings(g.port, ups, vec![]), keys(&[("oai", "k"), ("ant", "k")])).await;
+    assert_eq!(g.post("/v1/messages", &body).await.status(), 200);
+    let log = g.logged(2).await;
+    assert_eq!(log[0].attempts.iter().map(|a| (a.upstream.as_str(), a.status)).collect::<Vec<_>>(), vec![("oai", 500), ("ant", 200)]);
+    let to_anthropic = anthropic.seen()[0].json();
+    let blocks = to_anthropic["messages"][1]["content"].as_array().unwrap();
+    assert!(blocks.iter().all(|b| !b["signature"].as_str().unwrap_or_default().starts_with("roll-oai:")), "{blocks:?}");
+    assert_eq!(blocks.len(), 2);
 }
