@@ -11,6 +11,9 @@
 //! [providers.codex]
 //! args = []
 //!
+//! [providers.opencode]                   # OpenCode 2 (`opencode serve`); 1.x runs as `acp:opencode`
+//! binary = "/opt/opencode/bin/opencode"
+//!
 //! [[acp]]                                # an ACP agent, provider id `acp:gemini`
 //! name = "gemini"
 //! binary = "gemini"
@@ -39,7 +42,7 @@ use std::path::{Path, PathBuf};
 pub struct Config {
     /// The data directory.
     pub home: PathBuf,
-    /// `[providers.<id>]`, keyed by provider id (`codex`, `claude`).
+    /// `[providers.<id>]`, keyed by provider id (`codex`, `claude`, `opencode`).
     pub providers: BTreeMap<String, ProviderConfig>,
     /// `[[acp]]`: ACP agents, in file order.
     pub acp: Vec<AcpAgent>,

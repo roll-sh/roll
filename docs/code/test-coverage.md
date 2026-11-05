@@ -1481,6 +1481,34 @@ written in the tests.
 | `roll agent up` offers the configured `[[acp]]` agents plus every known agent installed on `PATH` (configured entries win) | `agent-host/src/provider/acp.rs::configured_agents_win_over_discovered_ones` |
 | Robustness: crash → `Exited` with stderr; bounded lines; kill on close and on drop, reaped | `agent-host/tests/acp.rs::resume_unsupported_and_crashes`, `agent-host/src/provider/acp/rpc.rs::lines_are_bounded`, `agent-host/tests/acp.rs::close_kills_an_agent_that_ignores_stdin`, `agent-host/tests/acp.rs::dropping_a_session_kills_the_agent` |
 
+### OpenCode (`agent-host/tests/opencode.rs`, transcripts in `agent-host/tests/fixtures/opencode/`)
+
+T3 Code's OpenCode 2.0.18 replay fixtures (MIT, `opencode2-http.sse`), ported to roll (each file's
+`metadata.roll` says what changed), and transcripts written in the tests. The test binary is the
+fake `opencode serve` too: it answers HTTP and streams events from the transcript with T3's
+matching rules (subset match, `<any>`, roll's prompt ids bound to the recorded ones, a request
+waits until earlier recorded events went out) and checks Basic auth and the server's environment.
+
+| Feature | Tests |
+| --- | --- |
+| The shared server: `opencode serve --hostname=… --port=…`, the listening line, `/api/info`, roll's own password (an inherited `OPENCODE_SERVER_PASSWORD` dropped), `OPENCODE_CONFIG_CONTENT` `{}`, the event stream subscribed first | `agent-host/tests/opencode.rs::status_lists_models_and_never_their_settings`, `agent-host/src/provider/opencode/server.rs::the_listening_line_gives_the_url` |
+| A session for full access (location, model and variant, rules), roll's instructions entry, a prompt with roll's id, streamed text and reasoning, usage summed over steps, the context window from the last step | `agent-host/tests/opencode.rs::simple`, `agent-host/tests/opencode.rs::missing_step_usage` |
+| Tools by name (shell → command with exit code, edit/write → file change, glob/grep → search, read without its envelope, todowrite → todos, roll's MCP tools) | `agent-host/tests/opencode.rs::tool_call`, `agent-host/tests/opencode.rs::subagent`, `agent-host/src/provider/opencode/tools.rs::tools_map_by_name`, `agent-host/src/provider/opencode/tools.rs::read_envelopes_come_off` |
+| Permission asks → approvals: accept once, decline steers T3's note in then rejects with a message; supervised rules with the agent's path allows | `agent-host/tests/opencode.rs::permission`, `agent-host/src/provider/opencode/session.rs::rules_follow_the_modes` |
+| Forms → questions, answers back as option values; unsupported fields refused | `agent-host/tests/opencode.rs::question`, `agent-host/src/provider/opencode/translate.rs::form_answers_map_labels_to_values` |
+| Asks that come with no turn are refused; an execution OpenCode left running is stopped before the next turn starts | `agent-host/src/provider/opencode/translate.rs::requests_without_a_turn_are_refused`, `agent-host/tests/opencode.rs::an_execution_left_running_stops_before_the_next_turn` |
+| `interrupt`: the running tool interrupted, the turn ends interrupted | `agent-host/tests/opencode.rs::interrupt` |
+| Native steering (`delivery: "steer"`, roll's steer ids); an undelivered steer holds the turn's end | `agent-host/tests/opencode.rs::inbox_steer`, `agent-host/src/provider/opencode/translate.rs::a_steer_not_yet_delivered_holds_the_turn` |
+| `/compact` → `session.compact` with the turn's id; the compaction row with the context before it | `agent-host/tests/opencode.rs::compaction` |
+| Fork before the next turn's prompt (history read once, paginated), the copy's rules, a turn on the copy | `agent-host/tests/opencode.rs::fork` |
+| Rollback: `revert/stage` at the first dropped turn's prompt (history only), then `revert/commit` | `agent-host/tests/opencode.rs::revert` |
+| A workspace command (`/hello WORLD` → `session.command`), named by the message OpenCode made of it | `agent-host/tests/opencode.rs::command`, `agent-host/src/provider/opencode/session.rs::commands_parse` |
+| Subagents: the `subagent` call, its child session's work beneath it (scoped ids), its result without the wrapper, the child's model | `agent-host/tests/opencode.rs::subagent` |
+| Background subagents folded into their turn: the turn ends once OpenCode delivered the report, also for a background child of a subagent | `agent-host/tests/opencode.rs::background_subagent_folds_into_its_turn`, `agent-host/tests/opencode.rs::nested_background_subagents_fold_into_the_turn` |
+| Resume (`GET` the session, its rules brought to the modes, moved to the thread's folder), roll's MCP servers registered per session (and only theirs allowed) and removed on close, plan mode as the plan agent, the effort as the model's variant | `agent-host/tests/opencode.rs::resume_registers_mcp_and_switches_modes` |
+| `info()`: version, the catalog (variants as reasoning with T3's defaults, legacy releases, images), a model's `settings` never read or shown; no models → run `opencode auth login`; 1.x left to the ACP agent | `agent-host/tests/opencode.rs::status_lists_models_and_never_their_settings`, `agent-host/tests/opencode.rs::status_without_models_asks_for_a_login`, `agent-host/tests/opencode.rs::opencode_1x_is_left_to_the_acp_agent`, `agent-host/src/provider/opencode.rs::catalog_follows_t3`, `agent-host/src/provider/opencode/wire.rs::model_entries_never_keep_settings` |
+| Slugs (`provider/model`, split at the first `/`), versions, query encoding | `agent-host/src/provider/opencode/wire.rs::slugs_split_at_the_first_slash`, `agent-host/src/provider/opencode.rs::versions_parse`, `agent-host/src/provider/opencode/http.rs::queries_are_encoded` |
+
 ## Measurements
 
 | What | Test | Result |

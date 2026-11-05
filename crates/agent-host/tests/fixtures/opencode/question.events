@@ -1,0 +1,17 @@
+{"native_thread":"ses_f14865e15ffewHnFwxdBlN6Eqc"}
+{"model":"opencode/big-pickle"}
+{"item":{"body":{"text":"","type":"message"},"id":"msg_0eb79a277001Yxbds4JIg1DwOa:text:0","parent":null,"status":"running"}}
+{"text_delta":{"item":"msg_0eb79a277001Yxbds4JIg1DwOa:text:0","text":"I'll ask you"}}
+{"text_delta":{"item":"msg_0eb79a277001Yxbds4JIg1DwOa:text:0","text":" now."}}
+{"item":{"body":{"text":"I'll ask you now.","type":"message"},"id":"msg_0eb79a277001Yxbds4JIg1DwOa:text:0","parent":null,"status":"completed"}}
+{"request":{"body":{"questions":[{"header":"Color preference","id":"q0","multi":false,"options":[{"description":"Choose the color red","label":"Red"},{"description":"Choose the color blue","label":"Blue"}],"question":"Which color do you prefer?"}],"type":"questions"},"id":"frm_0eb79ab35001fkvFECSh3wYNVD","item":null}}
+{"usage":{"cached_tokens":487,"input_tokens":9259,"output_tokens":128}}
+{"context":{"max_tokens":160000,"used_tokens":9387}}
+{"item":{"body":{"text":"","type":"message"},"id":"msg_0eb79ab7a001RBCW3otDgQJ3x0:text:0","parent":null,"status":"running"}}
+{"text_delta":{"item":"msg_0eb79ab7a001RBCW3otDgQJ3x0:text:0","text":"blue"}}
+{"item":{"body":{"text":"blue","type":"message"},"id":"msg_0eb79ab7a001RBCW3otDgQJ3x0:text:0","parent":null,"status":"completed"}}
+{"usage":{"cached_tokens":9872,"input_tokens":18688,"output_tokens":130}}
+{"context":{"max_tokens":160000,"used_tokens":9431}}
+{"turn_ref":"msg_roll_turn_#1"}
+{"turn_ended":"completed"}
+{"exited":null}

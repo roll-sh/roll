@@ -23,7 +23,7 @@ image = { workspace = true, features = ["ico"] }
 libc.workspace = true
 rand.workspace = true
 # Endpoints' model lists (`endpoints.rs`); the fake orchestrator (`provider/fake.rs`) calls the
-# MCP server the way an agent does.
+# MCP server the way an agent does; OpenCode 2's HTTP API (`provider/opencode`).
 reqwest = { workspace = true, features = ["rustls"] }
 rusqlite.workspace = true
 rustls-native-certs.workspace = true

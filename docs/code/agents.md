@@ -242,6 +242,30 @@ completed, native thread ref). The orchestrator owns ids and turns those events 
   `auto_edit`, everything in `full_access`) and asks otherwise. The agent may call roll's
   `fs/*` and `terminal/*`, confined to the thread's directory; writes and terminals need the
   mode or an approval of the same kind in that turn.
+- **OpenCode** (`opencode.rs`, a port of T3's v2 OpenCode driver): OpenCode 2's own server,
+  `opencode serve`, over HTTP and server-sent events (`GET /api/event`). One server per provider
+  serves every session (each request names its directory); roll starts it with a password it keeps
+  in memory and stops it 30 s after its last session. A session is created with the permission
+  rules of the thread's modes (`full_access` allows everything; otherwise shell and edits ask,
+  edits are allowed in `auto_edit`, work outside the project asks; plan mode is OpenCode's `plan`
+  agent, which denies edits), changed between turns. A turn is a prompt whose id roll picks
+  (`msg_roll_turn_…`): it is the turn's ref, and rollback (`revert` at the first dropped turn's
+  prompt, history only) and fork (`fork` before the next turn's prompt) cut there. Steering is
+  native (`delivery: "steer"`), `/compact` is `session.compact`, and `/name` runs a workspace
+  command by that name. Permission asks are approvals (accept for session saves OpenCode's own
+  `save` patterns as session rules; decline steers T3's note in first, so the model doesn't
+  retry), forms with text and choice fields are questions, and `subagent` calls are subagents with
+  their child sessions' work beneath them. OpenCode answers a background subagent at once and later
+  delivers its report in an execution it starts itself; roll folds that into the turn that started
+  it, so the turn ends once the report is delivered. roll's MCP servers are registered per session
+  (`PUT /api/experimental/mcp/{name}`) and the session's rules allow only its own; instructions are
+  the `roll` instructions entry. The catalog is `GET /api/model` (variants as the reasoning option,
+  T3's defaults); a model's `settings` and `headers` (keys, base URLs) are never read. Status: an
+  empty catalog means no login (run `opencode auth login` in a terminal); OpenCode 1.x reports not
+  installed here and runs as the ACP agent `acp:opencode`. T3 reads OpenCode's `auth.json` and
+  database for usage limits; roll never reads OpenCode's private files, so OpenCode shows none.
+  Not done: T3's reconnect and backfill (a broken event stream ends the session; the next message
+  resumes it) and skills (`$name` mentions).
 
 **Models and their options** follow T3 Code's model picker (`apps/web/src/components/chat/
 ProviderModelPicker.tsx`, `ModelPickerContent.tsx`, `ComposerModelEffort.tsx`) and its option

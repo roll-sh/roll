@@ -1,0 +1,22 @@
+{"native_thread":"ses_f148ca2deffeJcwCnRQtb0YFNX"}
+{"model":"opencode/big-pickle"}
+{"item":{"body":{"text":"","type":"message"},"id":"msg_0eb735d5b001oAFVeY5jz3WD4Z:text:0","parent":null,"status":"running"}}
+{"text_delta":{"item":"msg_0eb735d5b001oAFVeY5jz3WD4Z:text:0","text":"I'll read the"}}
+{"text_delta":{"item":"msg_0eb735d5b001oAFVeY5jz3WD4Z:text:0","text":" file and run the command."}}
+{"item":{"body":{"input":{},"kind":"read","name":"read","title":"read","type":"tool"},"id":"call_function_xjy1lqis49ru_1","parent":null,"status":"running"}}
+{"item":{"body":{"input":{},"kind":"command","name":"shell","title":"shell","type":"tool"},"id":"call_function_xjy1lqis49ru_2","parent":null,"status":"running"}}
+{"item":{"body":{"input":{"path":"hello.txt"},"kind":"read","name":"read","title":"hello.txt","type":"tool"},"id":"call_function_xjy1lqis49ru_1","parent":null,"status":"running"}}
+{"item":{"body":{"input":{"command":"echo TOOL_OK"},"kind":"command","name":"shell","title":"echo TOOL_OK","type":"tool"},"id":"call_function_xjy1lqis49ru_2","parent":null,"status":"running"}}
+{"item":{"body":{"text":"I'll read the file and run the command.","type":"message"},"id":"msg_0eb735d5b001oAFVeY5jz3WD4Z:text:0","parent":null,"status":"completed"}}
+{"item":{"body":{"input":{"path":"hello.txt"},"kind":"read","name":"read","output":"Read file hello.txt, lines 1-1\n1: hello from the spike","title":"hello.txt","type":"tool"},"id":"call_function_xjy1lqis49ru_1","parent":null,"status":"completed"}}
+{"item":{"body":{"exit_code":0,"input":{"command":"echo TOOL_OK"},"kind":"command","name":"shell","output":"TOOL_OK\n","title":"echo TOOL_OK","type":"tool"},"id":"call_function_xjy1lqis49ru_2","parent":null,"status":"completed"}}
+{"usage":{"cached_tokens":487,"input_tokens":9254,"output_tokens":59}}
+{"context":{"max_tokens":160000,"used_tokens":9313}}
+{"item":{"body":{"text":"","type":"message"},"id":"msg_0eb7363b20015PvR7k5Er4JlrJ:text:0","parent":null,"status":"running"}}
+{"text_delta":{"item":"msg_0eb7363b20015PvR7k5Er4JlrJ:text:0","text":"Both tools worked:\n\n- `read hello.txt` → `hello from the spike`\n- `echo TOOL_OK` → `TOOL_OK`\n\nDONE"}}
+{"item":{"body":{"text":"Both tools worked:\n\n- `read hello.txt` → `hello from the spike`\n- `echo TOOL_OK` → `TOOL_OK`\n\nDONE","type":"message"},"id":"msg_0eb7363b20015PvR7k5Er4JlrJ:text:0","parent":null,"status":"completed"}}
+{"usage":{"cached_tokens":9798,"input_tokens":18610,"output_tokens":92}}
+{"context":{"max_tokens":160000,"used_tokens":9389}}
+{"turn_ref":"msg_roll_turn_#1"}
+{"turn_ended":"completed"}
+{"exited":null}

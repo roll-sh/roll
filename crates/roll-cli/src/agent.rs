@@ -281,10 +281,14 @@ async fn login_with_token(api: &str, json_out: bool, token: &str) -> anyhow::Res
 /// The providers the daemon's config describes: Codex and Claude Code (ACP agents once their
 /// adapter lands).
 fn providers(config: &agent_host::config::Config) -> Vec<Arc<dyn Provider>> {
-    use agent_host::provider::{acp, claude::Claude, codex::Codex};
+    use agent_host::provider::{acp, claude::Claude, codex::Codex, opencode::OpenCode};
     use agent_proto::ProviderId;
-    let mut all: Vec<Arc<dyn Provider>> =
-        vec![Arc::new(Codex::new(config.provider(&ProviderId::codex()))), Arc::new(Claude::new(config.provider(&ProviderId::claude())))];
+    let mut all: Vec<Arc<dyn Provider>> = vec![
+        Arc::new(Codex::new(config.provider(&ProviderId::codex()))),
+        Arc::new(Claude::new(config.provider(&ProviderId::claude()))),
+        // OpenCode 2's own server; a 1.x install runs as the ACP agent `acp:opencode`.
+        Arc::new(OpenCode::new(config.provider(&OpenCode::provider_id()))),
+    ];
     // ACP agents: the configured ones, and any known agent installed here.
     all.extend(acp::agents(&config.acp).into_iter().map(|a| Arc::new(acp::Acp::new(a.name, a.config)) as Arc<dyn Provider>));
     all

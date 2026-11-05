@@ -27,9 +27,11 @@ pub mod acp;
 pub mod claude;
 pub mod codex;
 pub mod fake;
+pub mod opencode;
 
 /// A provider's entry in the daemon config. Every adapter is built from one:
-/// `codex::Codex::new(cfg)`, `claude::Claude::new(cfg)`, `acp::Acp::new(name, cfg)`.
+/// `codex::Codex::new(cfg)`, `claude::Claude::new(cfg)`, `opencode::OpenCode::new(cfg)`,
+/// `acp::Acp::new(name, cfg)`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ProviderConfig {
     /// The binary to run; found on `PATH` when unset.
