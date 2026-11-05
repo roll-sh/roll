@@ -238,6 +238,16 @@ export function ProjectSettingsForm({ project, machine, onDone }: { project: Pro
       client.run(machine!.id, { type: "project.update", project: project.id, name: name.trim() !== project.name ? name.trim() : undefined, settings }, "ok"),
     ).then((ok) => ok && onDone?.());
 
+  const discard = () => {
+    setName(project.name);
+    setAutoPull(project.settings.auto_pull);
+    setDefaults(project.settings.defaults);
+    setScripts(project.settings.scripts);
+    setColor(project.settings.color);
+    setIcon(project.settings.icon ?? { kind: "auto" });
+    setError(null);
+  };
+
   const patchScript = (id: string, patch: Partial<ProjectScript>) => setScripts((all) => all.map((s) => (s.id === id ? { ...s, ...patch } : s)));
 
   return (
@@ -350,7 +360,19 @@ export function ProjectSettingsForm({ project, machine, onDone }: { project: Pro
         </SettingRow>
       </SettingsSection>
 
-      <div className="flex items-center gap-1.5">
+      {/* While something's changed the bar stays in view at the bottom and says so, so a change
+          is never left unsaved below the fold. */}
+      <div
+        role={changed ? "region" : undefined}
+        aria-label={changed ? "Unsaved changes" : undefined}
+        className={`flex items-center gap-1.5 ${changed ? "sticky bottom-0 z-10 -mx-1 border-t border-line bg-sheet px-1 py-3" : ""}`}
+      >
+        {changed && <span className="mr-auto text-[12.5px] text-muted">Unsaved changes</span>}
+        {changed && !onDone && (
+          <button type="button" onClick={discard} className={btn}>
+            Discard
+          </button>
+        )}
         <button type="submit" disabled={!changed || !scriptsOk || !online || busy !== null || !name.trim() || "error" in iconChecked} className={primary}>
           {busy === "save" ? <span className="shimmer">Saving…</span> : "Save"}
         </button>

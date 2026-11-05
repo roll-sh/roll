@@ -68,6 +68,20 @@ describe("ProjectSettingsForm", () => {
     ]);
   });
 
+  it("keeps an unsaved change in view at the bottom, with Discard", async () => {
+    const h = agentsHarness();
+    renderAgents(<ProjectSettingsForm project={withSettings({})} machine={machine()} />, h);
+    expect(screen.queryByRole("region", { name: "Unsaved changes" })).toBeNull();
+    const toggle = screen.getByRole("switch", { name: "Pull merged changes automatically" });
+    await userEvent.click(toggle);
+    const bar = screen.getByRole("region", { name: "Unsaved changes" });
+    expect(bar.className).toContain("sticky");
+    await userEvent.click(within(bar).getByRole("button", { name: "Discard" }));
+    expect(toggle).toHaveAttribute("aria-checked", "false");
+    expect(screen.queryByRole("region", { name: "Unsaved changes" })).toBeNull();
+    expect(updates(h)).toEqual([]);
+  });
+
   it("sets what new threads start with, and a change back is no change", async () => {
     const h = agentsHarness();
     const m = machine({ info: { ...machine().info!, providers: [provider(), provider({ id: "codex", name: "Codex", models: [] })] } });
