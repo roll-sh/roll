@@ -72,10 +72,10 @@ pub(super) fn verify(store: &Store, key: &str, now: u64) -> anyhow::Result<Optio
     if seen.len() > 4 * gateway_limits::CLIENTS {
         seen.clear();
     }
-    let entry = seen.entry(client.id.clone()).or_insert(Seen { at: now, written: 0 });
+    let entry = seen.entry(client.id.clone()).or_insert(Seen { at: now, written: None });
     entry.at = entry.at.max(now);
-    if now.saturating_sub(entry.written) >= TOUCH_EVERY {
-        entry.written = now;
+    if entry.written.is_none_or(|w| now.saturating_sub(w) >= TOUCH_EVERY) {
+        entry.written = Some(now);
         db.execute("UPDATE clients SET last_used_at = max(coalesce(last_used_at, 0), ?2) WHERE id = ?1", params![client.id, sql_int(now)])?;
     }
     Ok(Some(client))

@@ -163,13 +163,34 @@ fn read_capped(path: &Path, cap: u64) -> anyhow::Result<String> {
     Ok(out)
 }
 
+/// What [`watch`] found when the file changed.
+pub enum Reload {
+    /// Use these from now on.
+    Apply(Loaded),
+    /// The file changed but can't be used (gone, invalid, a key missing): keep what's in use.
+    Keep { why: String },
+}
+
+/// The settings' `data_dir` alone, without checking the rest or resolving keys: what
+/// `roll gateway client …` needs to find `gateway.db` while a key's variable isn't set.
+pub fn data_dir(path: &Path) -> anyhow::Result<PathBuf> {
+    let text = read_capped(path, FILE_CAP).with_context(|| format!("reading {}", path.display()))?;
+    let table: toml::Table = toml::from_str(&text).with_context(|| format!("{} isn't valid TOML", path.display()))?;
+    let dir = path.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    Ok(match table.get("data_dir") {
+        None => dir.to_path_buf(),
+        Some(toml::Value::String(d)) => dir.join(d),
+        Some(_) => bail!("data_dir in {} is a path", path.display()),
+    })
+}
+
 /// Looks at `path` every `every` (use [`INTERVAL`]) and, when it changed since `since`, loads
-/// it and calls `on_change` with the result. A file that doesn't load (gone, invalid, a key
-/// missing) is logged and skipped: the caller keeps what it has, and the next change is tried
-/// again. Runs until the future is dropped.
+/// it and tells `on_change`: [`Reload::Apply`] with what to use, or [`Reload::Keep`] with why
+/// the change can't be used (the caller keeps what it has and logs it; the next change is
+/// tried again). Runs until the future is dropped.
 pub async fn watch<F, Fut>(path: PathBuf, since: Stamp, every: Duration, mut on_change: F)
 where
-    F: FnMut(Loaded) -> Fut,
+    F: FnMut(Reload) -> Fut,
     Fut: std::future::Future<Output = ()>,
 {
     let mut last = Some(since);
@@ -183,16 +204,13 @@ where
             continue;
         }
         last = now;
-        if now.is_none() {
-            tracing::warn!("{} is gone: keeping the settings in use", path.display());
-            continue;
-        }
-        match load(&path) {
-            Ok(loaded) => {
-                tracing::info!("{} changed: applying it", path.display());
-                on_change(loaded).await;
-            }
-            Err(e) => tracing::warn!("{} changed but can't be used, so the settings in use stay: {e:#}", path.display()),
-        }
+        let reload = match now {
+            None => Reload::Keep { why: format!("{} is gone", path.display()) },
+            Some(_) => match load(&path) {
+                Ok(loaded) => Reload::Apply(loaded),
+                Err(e) => Reload::Keep { why: format!("{e:#}") },
+            },
+        };
+        on_change(reload).await;
     }
 }
