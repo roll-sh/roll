@@ -627,7 +627,8 @@ function ModelRow({
     >
       <ProviderLogo provider={provider} className="size-4" />
       <span className="flex min-w-0 flex-1 items-center gap-1.5">
-        <span className="min-w-0 truncate leading-snug" title={model.name}>
+        {/* The name keeps its room; a "via" tag gives way first. */}
+        <span className="min-w-0 max-w-full shrink-0 truncate leading-snug" title={model.name}>
           {model.name}
           <span className="sr-only">, {model.providerName}</span>
         </span>
@@ -639,7 +640,7 @@ function ModelRow({
         )}
         {info.custom && <span className="shrink-0 rounded border border-line-2 px-1 text-[10px] leading-4 text-subtle">Custom</span>}
         {info.via && (
-          <span className="max-w-32 shrink-0 truncate rounded border border-line-2 px-1 text-[10px] leading-4 text-subtle" title={`Listed by the endpoint ${info.via}`}>
+          <span className="min-w-6 max-w-32 shrink truncate rounded border border-line-2 px-1 text-[10px] leading-4 text-subtle" title={`Listed by the endpoint ${info.via}`}>
             via {info.via}
           </span>
         )}
