@@ -51,9 +51,14 @@ export function planFilename(markdown: string): string {
   return `${segment || "plan"}.md`;
 }
 
+/** The file's contents: the plan with one trailing newline (T3's download and "Save to workspace"). */
+export function planToSave(markdown: string): string {
+  return `${markdown.trimEnd()}\n`;
+}
+
 /** Download the plan as a markdown file (T3's "Download as markdown"). */
 export function downloadPlan(markdown: string): void {
-  const url = URL.createObjectURL(new Blob([`${markdown.trimEnd()}\n`], { type: "text/markdown;charset=utf-8" }));
+  const url = URL.createObjectURL(new Blob([planToSave(markdown)], { type: "text/markdown;charset=utf-8" }));
   const a = document.createElement("a");
   a.href = url;
   a.download = planFilename(markdown);

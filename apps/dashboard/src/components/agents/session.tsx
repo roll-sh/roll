@@ -132,6 +132,7 @@ export function Conversation({ thread, machine, start, end }: { thread: Thread; 
         openThread,
         openSubagent: setSub,
         hostsPlan: true,
+        savePlan: async (path, text) => (await client.run<{ type: "written"; path: string }>(mid!, { type: "fs.write", thread: thread.id, path, text }, "written")).path,
       };
 
   // Stick to the bottom while new work arrives, unless the reader scrolled up.

@@ -75,6 +75,20 @@ describe("ThreadNode, T3's thread row as a card", () => {
   });
 });
 
+describe("a plan the newest run left (T3's sidebar Plan Ready)", () => {
+  it("reads it off the thread record, in plan mode only, without loading the run", () => {
+    const planned = thread({ run_count: 1, interaction_mode: "plan", plan_ready: true });
+    const { rerender } = renderAgents(<ThreadNode thread={planned} machine={machine()} />, agentsHarness({ entities: [mirrored("thread", planned, 1)] }));
+    expect(screen.getByText("Plan ready")).toBeInTheDocument();
+    // Back in build mode (Implement switched it), the plan isn't waiting on anyone.
+    rerender(<ThreadNode thread={{ ...planned, interaction_mode: "default" }} machine={machine()} />);
+    expect(screen.queryByText("Plan ready")).toBeNull();
+    // Busy says Working first.
+    rerender(<ThreadNode thread={{ ...planned, status: "running" }} machine={machine()} />);
+    expect(screen.queryByText("Plan ready")).toBeNull();
+  });
+});
+
 describe("threadPill", () => {
   it("marks an orchestrator with the agents it started and how many still run (forks don't count)", () => {
     const o = thread({ id: "thr_o", title: "Ship the release", orchestrator: true });

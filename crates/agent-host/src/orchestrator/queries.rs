@@ -1,4 +1,5 @@
-//! Queries: they read, never change anything (`diff.get`, `fs.list`, `fs.read`, `git.status`).
+//! Queries: they read, never change anything (`diff.get`, `fs.list`, `fs.read`, `git.status`);
+//! and `fs.write`, the one command here, which writes a file in a thread's workspace.
 
 use super::{Fail, Host, Res};
 use crate::fs::{self, FsError};
@@ -82,6 +83,22 @@ impl Host {
         let root = PathBuf::from(&self.project(project)?.path);
         let file = fs::resolve(&root, path).await?;
         Ok(Reply::File(fs::read(&file, path.to_string()).await?))
+    }
+
+    /// `fs.write`: a text file in the thread's workspace (T3's `projects.writeFile`).
+    pub(crate) async fn fs_write(&self, thread: &ThreadId, path: &str, text: &str) -> Res<Reply> {
+        if text.len() > fs_limits::WRITE {
+            return Err(Fail::Invalid(format!("a file written from roll is at most {} bytes", fs_limits::WRITE)));
+        }
+        if path.trim().is_empty() || path.len() > fs_limits::PATH || path.contains('\0') {
+            return Err(Fail::Invalid("name a file in the workspace".into()));
+        }
+        let cwd = PathBuf::from(&self.stored_thread(thread)?.cwd);
+        let path = fs::write(&cwd, path.trim(), text).await.map_err(|e| match e {
+            FsError::Escapes => Fail::Invalid("the path leaves the workspace".into()),
+            other => other.into(),
+        })?;
+        Ok(Reply::Written { path })
     }
 
     pub(crate) async fn git_status(&self, thread: &ThreadId) -> Res<Reply> {

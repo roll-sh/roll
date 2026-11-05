@@ -801,6 +801,53 @@ async fn accepting_a_plan_leaves_plan_mode() {
     assert_eq!(fake.sessions().len(), 1);
 }
 
+/// T3's `hasActionableProposedPlan`: a run that completes with a plan (Codex's plan item) marks
+/// the thread `plan_ready`, so the canvas can say "Plan ready" without loading its runs; the next
+/// run clears it, and a run without a plan never sets it.
+#[tokio::test]
+async fn a_completed_plan_is_ready_until_the_next_run() {
+    let fake = FakeProvider::with("codex", Capabilities { plan_mode: true, ..Capabilities::default() }, Script::Manual);
+    let w = World::new(vec![fake.clone()]).await;
+    let Reply::Created { id } = w
+        .run(Command::ThreadCreate {
+            project: w.project.clone(),
+            provider: ProviderId::codex(),
+            model: None,
+            effort: None,
+            options: Default::default(),
+            runtime_mode: RuntimeMode::AutoEdit,
+            interaction_mode: InteractionMode::Plan,
+            worktree: false,
+            title: None,
+            prompt: Some("plan the refactor".into()),
+            attachments: Vec::new(),
+            orchestrator: false,
+        })
+        .await
+    else {
+        panic!("thread.create failed")
+    };
+    let thread = ThreadId(id);
+    let session = fake.session(0).await;
+    session.wait_calls(|c| c.len() == 1).await;
+    let plan = |status| ProviderEvent::Item(Item { id: "plan".into(), parent: None, status, body: NodeBody::Plan { text: "# Refactor\n\n1. Split the module".into() } });
+    session.emit(plan(NodeStatus::Running));
+    let t = w.wait_thread(&thread, |t| t.status == ThreadStatus::Running).await;
+    assert!(!t.plan_ready, "a plan still forming isn't ready");
+    session.emit(plan(NodeStatus::Completed));
+    session.emit(ProviderEvent::TurnEnded(TurnEnd::Completed));
+    let t = w.wait_thread(&thread, |t| t.status == ThreadStatus::Idle).await;
+    assert!(t.plan_ready);
+
+    // The next run (Refine, or Implement) retires it; a run without a plan doesn't bring it back.
+    w.run(Command::MessageSend { thread: thread.clone(), text: "shorter".into(), attachments: Vec::new(), mode: SendMode::Queue }).await;
+    let t = w.wait_thread(&thread, |t| t.status == ThreadStatus::Running).await;
+    assert!(!t.plan_ready);
+    session.emit(ProviderEvent::TurnEnded(TurnEnd::Completed));
+    let t = w.wait_thread(&thread, |t| t.status == ThreadStatus::Idle && t.run_count == 2).await;
+    assert!(!t.plan_ready);
+}
+
 // ── project settings and auto-pull (docs/code/agents.md, "Project settings") ──
 
 /// A bare remote whose `main` someone else lands work on (a merged PR, as the remote sees it),

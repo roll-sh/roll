@@ -57,7 +57,7 @@ export function runEnded(run: Run | undefined): boolean {
  * The one status worth saying about a thread, T3's order: what waits on you first, then what's
  * working, then what failed, a plan ready to carry out, and a finished run you haven't looked at.
  * `null` when there's nothing to say (idle and seen). `planReady`: the newest run ended with a plan
- * in plan mode (`readyPlan`, known where the thread's nodes are loaded).
+ * in plan mode (`readyPlan` where the thread's nodes are loaded; `thread.plan_ready` elsewhere).
  */
 export function threadPill(thread: Thread, pending: readonly Request[], lastRun: Run | undefined, planReady = false): ThreadPill | null {
   const waiting = pending.filter((r) => r.status === "pending" && r.thread === thread.id);

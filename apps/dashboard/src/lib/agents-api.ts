@@ -257,6 +257,8 @@ export interface Thread {
   queued: QueuedMessage[];
   run_count: number;
   pending_requests: number;
+  /** The newest run completed with a proposed plan (T3's `hasActionableProposedPlan`): "Plan ready" on the canvas while in plan mode. */
+  plan_ready: boolean;
   /** One line about what the agent is doing right now. */
   activity: string | null;
   usage: Usage;
@@ -830,6 +832,8 @@ export type Command =
   | { type: "diff.get"; thread: ThreadId; run?: RunId }
   | { type: "fs.list"; project?: ProjectId; path: string }
   | { type: "fs.read"; project: ProjectId; path: string }
+  /** Write a text file in the thread's workspace (T3's `projects.writeFile`, "Save to workspace"); answers `written`. */
+  | { type: "fs.write"; thread: ThreadId; path: string; text: string }
   | { type: "git.status"; thread: ThreadId }
   | { type: "terminal.scrollback"; terminal: TerminalId };
 
@@ -897,6 +901,7 @@ export type Reply =
   | ({ type: "git_status" } & GitStatus)
   | ({ type: "published" } & Published)
   | ({ type: "pulled" } & PullResult)
+  | { type: "written"; path: string }
   | { type: "scrollback"; data: string }
   | { type: "error"; code: ErrorCode; message: string };
 
@@ -1243,6 +1248,7 @@ const threadD = obj<Thread>({
   queued: vec(obj<QueuedMessage>({ id: str, text: str, attachments: vec(attachmentD), at: int })),
   run_count: int,
   pending_requests: int,
+  plan_ready: withDefault(bool, () => false),
   activity: opt(str),
   usage: usageD,
   context: opt(contextD),
@@ -1576,6 +1582,7 @@ export const commandD: Decoder<Command> = tagged("type", {
   "diff.get": cmd<"diff.get">(obj({ thread: str, run: optional(str) })),
   "fs.list": cmd<"fs.list">(obj({ project: optional(str), path: str })),
   "fs.read": cmd<"fs.read">(obj({ project: str, path: str })),
+  "fs.write": cmd<"fs.write">(obj({ thread: str, path: str, text: str })),
   "git.status": cmd<"git.status">(obj({ thread: str })),
   "terminal.scrollback": cmd<"terminal.scrollback">(obj({ terminal: str })),
 } satisfies Record<CommandType, Decoder<object>>);
@@ -1602,6 +1609,7 @@ export const replyD: Decoder<Reply> = tagged("type", {
     ),
   }),
   scrollback: obj<{ data: string }>({ data: str }),
+  written: obj<{ path: string }>({ path: str }),
   pulled: pullResultD,
   error: obj<{ code: ErrorCode; message: string }>({
     code: literal("not_found", "invalid", "conflict", "provider", "machine_offline", "timeout", "internal"),

@@ -1207,6 +1207,7 @@ export class DemoOwner implements AgentsTransport {
       queued: [],
       run_count: 0,
       pending_requests: 0,
+      plan_ready: false,
       activity: null,
       usage: { input_tokens: 0, output_tokens: 0, cached_tokens: 0, cost_usd: null },
       context: null,
@@ -1321,7 +1322,7 @@ export class DemoOwner implements AgentsTransport {
     read("crates/billing/tests/http.rs", 90_000);
     node({ type: "plan", text: BILLING_PLAN }, 120_000);
     node({ type: "message", text: "That's the plan. Say **Implement** to carry it out, or tell me what to change." }, 136_000);
-    this.patchThread(tid, { run_count: 1, usage, context, activity: null, updated_at: at + 140_000 });
+    this.patchThread(tid, { run_count: 1, usage, context, activity: null, plan_ready: true, updated_at: at + 140_000 });
   }
 
   /** A probe after a login: the providers `which` picks that were logged out are logged in. */
@@ -1385,7 +1386,7 @@ export class DemoOwner implements AgentsTransport {
       this.machineOf(tid),
     );
     // Any new run is activity: off the settled shelf.
-    this.patchThread(tid, { status: "running", active_run: rid, run_count: ordinal, activity: "Thinking", error: null, inbox: { ...t.inbox, settle: null } });
+    this.patchThread(tid, { status: "running", active_run: rid, run_count: ordinal, activity: "Thinking", error: null, plan_ready: false, inbox: { ...t.inbox, settle: null } });
     void this.play(sim, script, { ordinal: 0, files: [] }).then(() => this.finish(sim));
   }
 
@@ -1576,6 +1577,7 @@ export class DemoOwner implements AgentsTransport {
             queued: [],
             run_count: 0,
             pending_requests: 0,
+            plan_ready: false,
             activity: null,
             usage: { input_tokens: 0, output_tokens: 0, cached_tokens: 0, cost_usd: null },
             context: null,
@@ -1649,7 +1651,9 @@ export class DemoOwner implements AgentsTransport {
       cost_usd: usage.cost_usd === null ? t.usage.cost_usd : (t.usage.cost_usd ?? 0) + usage.cost_usd,
     };
     const [next, ...rest] = t.queued;
-    this.patchThread(sim.thread, { status: "idle", active_run: null, activity: null, usage: total, queued: rest });
+    // T3's actionable proposed plan: the run completed with one.
+    const planned = [...this.records.values()].some((m) => m.entity.kind === "node" && m.entity.run === sim.run && m.entity.body.type === "plan" && m.entity.body.text.trim() !== "");
+    this.patchThread(sim.thread, { status: "idle", active_run: null, activity: null, usage: total, queued: rest, plan_ready: planned });
     this.taskDone(sim.thread, sim.run);
     const woken = this.wakes.get(sim.thread);
     if (woken) {
@@ -1815,6 +1819,7 @@ export class DemoOwner implements AgentsTransport {
             queued: [],
             run_count: 0,
             pending_requests: 0,
+            plan_ready: false,
             activity: null,
             usage: { input_tokens: 0, output_tokens: 0, cached_tokens: 0, cost_usd: null },
             context: null,
@@ -1853,6 +1858,7 @@ export class DemoOwner implements AgentsTransport {
             active_run: null,
             queued: [],
             pending_requests: 0,
+            plan_ready: false,
             activity: null,
             run_count: 0,
             usage: { input_tokens: 0, output_tokens: 0, cached_tokens: 0, cost_usd: null },
@@ -1968,6 +1974,12 @@ export class DemoOwner implements AgentsTransport {
         return { type: "entries", entries: demoDir(c.path) };
       case "fs.read":
         return { type: "file", path: c.path, text: "# roll\n\nkeep the code rolling\n", size: 27 };
+      case "fs.write": {
+        if (!this.thread(c.thread)) return notFound("thread");
+        const path = c.path.trim().replace(/^\/+/, "");
+        if (!path || path.split("/").includes("..")) return { type: "error", code: "invalid", message: "the path leaves the workspace" };
+        return { type: "written", path };
+      }
       case "project.add": {
         const pid = id("prj_");
         const name = c.name ?? c.path.split("/").filter(Boolean).pop() ?? "project";

@@ -130,6 +130,7 @@ describe("agent-proto fixtures", () => {
       "diff.get": true,
       "fs.list": true,
       "fs.read": true,
+      "fs.write": true,
       "git.status": true,
       "terminal.scrollback": true,
     };

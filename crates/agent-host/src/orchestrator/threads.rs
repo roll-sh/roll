@@ -72,6 +72,7 @@ impl Host {
             queued: Vec::new(),
             run_count: 0,
             pending_requests: 0,
+            plan_ready: false,
             activity: None,
             usage: Usage::default(),
             context: None,
@@ -257,6 +258,7 @@ impl Host {
             queued: Vec::new(),
             run_count: 0,
             pending_requests: 0,
+            plan_ready: false,
             activity: None,
             usage: Usage::default(),
             // The parent's context at the fork point, until the fork's own conversation reports
@@ -442,6 +444,9 @@ impl Host {
         rt.private.refs.retain(|ordinal, _| *ordinal <= target.ordinal);
         self.rollback_providers(&mut rt, &rolled, target.ordinal).await?;
         rt.thread.context = self.conversation_context(&rt, target.ordinal)?;
+        if !rolled.is_empty() {
+            rt.thread.plan_ready = false;
+        }
         rt.thread.updated_at = now();
         batch.push(Entity::Thread(rt.thread.clone()));
         self.put(batch)?;

@@ -414,7 +414,8 @@ export function ThreadNode({ thread, machine }: { thread: Thread; machine: Machi
   const running = isRunning(thread.status);
   const lastRun = thread.active_run ? data.runs.get(thread.active_run)?.value : latestRun(data.runs.values(), thread.id);
   const pending = [...data.requests.values()].map((r) => r.value).filter((r) => r.thread === thread.id && r.status === "pending");
-  const pill = threadPill(thread, pending, lastRun);
+  // The card doesn't load runs: the thread record says whether its newest run left a plan (T3's sidebar "Plan ready").
+  const pill = threadPill(thread, pending, lastRun, thread.plan_ready && thread.interaction_mode === "plan");
   const done = threadDone(thread, lastRun);
   const usage = usageLine(thread.usage);
   const model = modelName(providers, thread.provider, thread.model);

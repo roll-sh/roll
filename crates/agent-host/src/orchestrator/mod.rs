@@ -610,6 +610,7 @@ impl Host {
             Command::DiffGet { thread, run } => self.diff_get(&thread, run.as_ref()).await,
             Command::FsList { project, path } => self.fs_list(project.as_ref(), &path).await,
             Command::FsRead { project, path } => self.fs_read(&project, &path).await,
+            Command::FsWrite { thread, path, text } => self.fs_write(&thread, &path, &text).await,
             Command::GitStatus { thread } => self.git_status(&thread).await,
         }
     }

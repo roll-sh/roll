@@ -41,6 +41,7 @@
       ],
       "run_count": 3,
       "pending_requests": 1,
+      "plan_ready": true,
       "activity": "Waiting to run `cargo test`",
       "usage": {
         "input_tokens": 12000,

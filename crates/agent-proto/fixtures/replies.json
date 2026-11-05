@@ -96,6 +96,10 @@
     }
   },
   {
+    "type": "written",
+    "path": "docs/plans/fix-the-queue.md"
+  },
+  {
     "type": "scrollback",
     "data": "JCBscwo="
   },

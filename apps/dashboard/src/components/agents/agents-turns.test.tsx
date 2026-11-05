@@ -143,6 +143,39 @@ describe("plan mode (T3's proposed plan)", () => {
     expect(sent(h).at(-1)).toEqual({ type: "message.send", thread: "thr_1", text: "Stream it in pages" });
   });
 
+  it("Save to workspace writes the plan into the thread's folder, named after its title", async () => {
+    const written = (c: Command) => (c.type === "fs.write" ? ({ type: "written", path: c.path } as const) : reply(c));
+    const h = agentsHarness({ machines: [m], entities, follow: ["thr_1"], reply: written });
+    renderAgents(<Conversation thread={inPlan} machine={m} />, h);
+    await userEvent.click(screen.getByRole("button", { name: "Plan actions" }));
+    await userEvent.click(await screen.findByRole("menuitem", { name: "Save to workspace" }));
+    const path = screen.getByRole("textbox", { name: /Workspace path/ });
+    expect(path).toHaveValue("export-invoices-as-csv.md");
+    // Typing replaces the name and keeps `.md` (T3 selects the name).
+    await userEvent.keyboard("plans/csv");
+    expect(path).toHaveValue("plans/csv.md");
+    await userEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(sent(h).at(-1)).toEqual({ type: "fs.write", thread: "thr_1", path: "plans/csv.md", text: `${plan}\n` });
+    expect(await screen.findByText(/Plan saved to workspace/)).toHaveTextContent("plans/csv.md");
+  });
+
+  it("Save to workspace says why it couldn't, and an empty path never goes out", async () => {
+    const refuse = (c: Command) => (c.type === "fs.write" ? ({ type: "error", code: "invalid", message: "the path leaves the workspace" } as const) : reply(c));
+    const h = agentsHarness({ machines: [m], entities, follow: ["thr_1"], reply: refuse });
+    renderAgents(<Conversation thread={inPlan} machine={m} />, h);
+    await userEvent.click(screen.getByRole("button", { name: "Plan actions" }));
+    await userEvent.click(await screen.findByRole("menuitem", { name: "Save to workspace" }));
+    const path = screen.getByRole("textbox", { name: /Workspace path/ });
+    await userEvent.clear(path);
+    await userEvent.keyboard("{Enter}");
+    expect(screen.getByRole("alert")).toHaveTextContent("Enter a workspace path");
+    expect(sent(h).some((c) => c.type === "fs.write")).toBe(false);
+    await userEvent.type(path, "../out.md{Enter}");
+    expect(await screen.findByRole("alert")).toHaveTextContent("Could not save plan: the path leaves the workspace");
+    await userEvent.keyboard("{Escape}");
+    expect(screen.queryByRole("form", { name: "Save plan to workspace" })).toBeNull();
+  });
+
   it("Implement in a new thread starts one in build mode with the plan and opens it", async () => {
     const h = agentsHarness({ machines: [m], entities, follow: ["thr_1"], reply });
     renderAgents(<Conversation thread={inPlan} machine={m} />, h);

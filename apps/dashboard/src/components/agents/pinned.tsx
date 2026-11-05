@@ -183,6 +183,7 @@ export function PinnedConversation({ pin, thread, machine, onUnpin, onResize }: 
           openThread(res.id);
         },
         openThread,
+        savePlan: async (path, text) => (await client.run<{ type: "written"; path: string }>(mid!, { type: "fs.write", thread: thread.id, path, text }, "written")).path,
       };
   const cpByRun = new Map(checkpoints.filter((c) => c.run).map((c) => [c.run!, c]));
 

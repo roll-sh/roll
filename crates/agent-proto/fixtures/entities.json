@@ -108,6 +108,7 @@
     ],
     "run_count": 3,
     "pending_requests": 1,
+    "plan_ready": true,
     "activity": "Waiting to run `cargo test`",
     "usage": {
       "input_tokens": 12000,
@@ -164,6 +165,7 @@
     "orchestrator": true,
     "run_count": 3,
     "pending_requests": 0,
+    "plan_ready": false,
     "usage": {
       "input_tokens": 12000,
       "output_tokens": 3400,
@@ -211,6 +213,7 @@
     "orchestrator": true,
     "run_count": 3,
     "pending_requests": 0,
+    "plan_ready": false,
     "usage": {
       "input_tokens": 12000,
       "output_tokens": 3400,

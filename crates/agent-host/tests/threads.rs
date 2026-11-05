@@ -675,6 +675,29 @@ async fn files_are_read_inside_the_project_only() {
     assert!(is_err(&w.run(Command::FsList { project: None, path: "relative".into() }).await, ErrorCode::Invalid));
 }
 
+/// `fs.write` (T3's `projects.writeFile`, behind a plan's "Save to workspace"): into the
+/// thread's own worktree, folders made, never out of it, with a size cap.
+#[tokio::test]
+async fn files_are_written_inside_the_threads_workspace_only() {
+    let fake = FakeProvider::new("codex");
+    let w = World::new(vec![fake]).await;
+    let thread = w.thread("codex", None, true).await;
+    let t = w.wait_thread(&thread, |t| t.worktree.is_some()).await;
+    let write = |path: &str, text: &str| Command::FsWrite { thread: thread.clone(), path: path.into(), text: text.into() };
+
+    assert_eq!(w.run(write("plans/refactor.md", "# Refactor\n")).await, Reply::Written { path: "plans/refactor.md".into() });
+    assert_eq!(std::fs::read_to_string(std::path::Path::new(&t.cwd).join("plans/refactor.md")).unwrap(), "# Refactor\n");
+    assert!(!w.repo.join("plans").exists(), "the worktree is the workspace, not the project's checkout");
+    for escape in ["../x.md", "/../x.md", "plans/../../x.md", "", "plans"] {
+        let reply = w.run(write(escape, "x")).await;
+        assert!(is_err(&reply, ErrorCode::Invalid), "{escape:?}: {reply:?}");
+    }
+    let big = "x".repeat(fs_limits::WRITE + 1);
+    assert!(is_err(&w.run(write("big.md", &big)).await, ErrorCode::Invalid));
+    let missing = Command::FsWrite { thread: ThreadId::from_suffix("ffffffffffffffff"), path: "a.md".into(), text: "x".into() };
+    assert!(is_err(&w.run(missing).await, ErrorCode::NotFound));
+}
+
 #[tokio::test]
 async fn projects_are_unique_by_path_and_removal_deletes_their_threads() {
     let fake = FakeProvider::new("codex");

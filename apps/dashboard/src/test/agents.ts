@@ -105,6 +105,7 @@ export function thread(over: Partial<Thread> = {}): Thread {
     queued: [],
     run_count: 0,
     pending_requests: 0,
+    plan_ready: false,
     activity: null,
     usage: { input_tokens: 0, output_tokens: 0, cached_tokens: 0, cost_usd: null },
     context: null,

@@ -338,6 +338,7 @@ impl Host {
         thread.status = ThreadStatus::Starting;
         thread.error = None;
         thread.activity = None;
+        thread.plan_ready = false;
         // Any new run (a queued message, a delegated task) is activity: off the settled shelf.
         thread.inbox.settle = None;
         if rt.private.auto_title {
@@ -995,7 +996,11 @@ impl Host {
             }
         }
         batch.push(Entity::Run(run.clone()));
+        // T3's actionable proposed plan: the run completed with one (Codex's plan item, ACP's
+        // plan, Claude's ExitPlanMode plan when it isn't still waiting on its approval).
+        let planned = status == RunStatus::Completed && active.nodes.values().any(|n| matches!(&n.body, NodeBody::Plan { text } if !text.trim().is_empty()));
         let thread = &mut rt.thread;
+        thread.plan_ready = planned;
         thread.status = if status == RunStatus::Failed { ThreadStatus::Error } else { ThreadStatus::Idle };
         if status == RunStatus::Failed {
             super::settle::wake_early(&mut thread.inbox, at);

@@ -371,8 +371,11 @@ mapping, and the web's `QueuedRunsControl.tsx`, `ContextWindowMeter.tsx`, `V2Lif
   which have no subagent view, open a provider's subagent inline under its row.
 - **Plans.** `interactionMode: plan` reaches Claude as `--permission-mode plan` and Codex as its
   collaboration mode `plan` (ACP: an agent's `plan`/`architect` mode). The plan is T3's card:
-  "Plan", its title (the first heading), a menu to copy or download it, long ones folded; it stays
-  out of the "Worked for" fold. A plan is ready (`lib/agents-plan.ts` `readyPlan`) when the
+  "Plan", its title (the first heading), a menu to copy it, download it or save it to the
+  workspace, long ones folded; it stays out of the "Worked for" fold. "Save to workspace" is T3's:
+  a path relative to the thread's folder (its worktree, else the project's), the title as the file
+  name by default, written with `fs.write` (folders made, never out of the workspace or through a
+  symlink, an existing file replaced, 1 MiB at most; the owner's only). A plan is ready (`lib/agents-plan.ts` `readyPlan`) when the
   newest run ended with one in plan mode (Codex, ACP) or Claude asks to leave plan mode with it
   (its ExitPlanMode is an approval with `action: plan`; T3 denies that tool and captures the plan
   instead, roll keeps it pending so Claude goes on in the same turn when accepted). Then the
@@ -482,7 +485,8 @@ server (`docs/orchestration-v2/orchestrator-mcp-server.md` there), ported in
     (modes only go down: `ask` < `auto_edit` < `full_access`, `plan` < `default`, against the
     thread as the relay mirrors it), fork, message, interrupt, archive and publish them, and read
     their state, diffs, status and files inside a project.
-  - Terminals, files outside a project (`fs.list` without one), answering a thread's approvals
+  - Terminals, files outside a project (`fs.list` without one), writing files (`fs.write`),
+    answering a thread's approvals
     and questions (an agent could approve itself), adding, changing (`project.update`,
     `project.pull`) or removing projects (also `POST …/projects`), deleting threads, rollbacks and
     `provider.refresh` need `Code::manages`, as do adding, renaming or revoking machines,
@@ -981,7 +985,10 @@ The surface has three views:
   1.6 s loop, off with reduced motion); the machine and project above them, and anything waiting
   on you, keep still. Cards stay small: a thread's card is T3's thread row as a card
   (`thread-status.tsx`): the project's icon and name and the machine it runs on ("Identity"), T3's status
-  pill (pending approval, awaiting input, plan ready, working, connecting, failed, completed), the
+  pill (pending approval, awaiting input, plan ready, working, connecting, failed, completed; the
+  card loads no runs, so "plan ready" for a plan a run ended with, Codex's or ACP's, comes from the
+  thread's `plan_ready`, T3's `hasActionableProposedPlan`, set when a run completes with a plan
+  and cleared by the next run or a rollback), the
   title and what it's doing, the PR and work item it's attached to, its worktree and running
   terminals, and what it cost; a run that finished since it was last opened turns its border
   green (T3's completed tone) until it's opened; a project's card sums it up like T3's project view (threads, running and

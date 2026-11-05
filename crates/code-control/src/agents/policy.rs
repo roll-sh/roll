@@ -66,6 +66,7 @@ pub(crate) fn agent_may(command: &Command, current: Option<(RuntimeMode, Interac
         | Command::FsList { project: Some(_), .. }
         | Command::FsRead { .. } => Ok(()),
         Command::FsList { project: None, .. } => owner_only("list the machine's files outside a project"),
+        Command::FsWrite { .. } => owner_only("write files"),
         Command::ProjectAdd { .. } => owner_only("add projects"),
         Command::ProjectRemove { .. } => owner_only("remove projects"),
         Command::ProjectUpdate { .. } => owner_only("change a project's settings"),
@@ -143,6 +144,7 @@ mod tests {
             (json!({ "type": "thread.publish", "thread": t, "message": "m", "land": true }), None, true),
             (json!({ "type": "request.respond", "request": "req_1", "response": { "type": "decision", "decision": "accept_for_session" } }), None, false),
             (json!({ "type": "checkpoint.rollback", "thread": t, "checkpoint": "chk_1" }), None, false),
+            (json!({ "type": "fs.write", "thread": t, "path": "plan.md", "text": "# Plan" }), None, false),
             (json!({ "type": "project.add", "path": "/" }), None, false),
             (json!({ "type": "project.add", "path": "", "clone": { "owner": "acme", "repo": "r" } }), None, false),
             (json!({ "type": "project.remove", "project": "prj_1" }), None, false),

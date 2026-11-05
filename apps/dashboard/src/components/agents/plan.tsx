@@ -3,16 +3,17 @@
 /**
  * Plan mode, as T3 Code does it (`ProposedPlanCard.tsx`, `ComposerPlanFollowUpBanner.tsx`,
  * `ComposerPrimaryActions.tsx`, `useProposedPlanSend.ts`; MIT): the proposed plan is a card in
- * the transcript (its title, a menu to copy or download it, long ones folded); while a plan is
+ * the transcript (its title, a menu to copy it, download it or save it into the workspace, long
+ * ones folded); while a plan is
  * ready the composer says so above itself and its button becomes "Implement" (with "Implement in
  * a new thread" beside it), or "Refine" once something is typed. The logic is
  * `lib/agents-plan.ts`.
  */
 
-import { Check, ChevronDown, Copy, Download, ListChecks, MoreHorizontal } from "lucide-react";
-import { useState } from "react";
+import { Check, ChevronDown, Copy, Download, FileDown, ListChecks, MoreHorizontal } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
 import type { Machine, Thread } from "@/lib/agents-api";
-import { downloadPlan, implementationPrompt, implementationThreadTitle, planBody, planTitle, type ReadyPlan } from "@/lib/agents-plan";
+import { downloadPlan, implementationPrompt, implementationThreadTitle, planBody, planFilename, planTitle, planToSave, type ReadyPlan } from "@/lib/agents-plan";
 import { Markdown } from "../code/markdown";
 import { Menu, MenuItem, MenuPopup, MenuTrigger } from "./ui";
 import { useAgents } from "./use-agents";
@@ -22,10 +23,15 @@ const LONG_CHARS = 900;
 const LONG_LINES = 20;
 const PREVIEW_LINES = 10;
 
-/** The plan card (T3's `ProposedPlanCard`): a "Plan" badge and the plan's title, its menu, the plan. */
-export function PlanCard({ text, running }: { text: string; running: boolean }) {
+/**
+ * The plan card (T3's `ProposedPlanCard`): a "Plan" badge and the plan's title, its menu, the plan.
+ * `onSave` writes it into the thread's workspace (T3's "Save to workspace": a path relative to the
+ * workspace, the title as the file name by default); unset where nothing may be written (a share).
+ */
+export function PlanCard({ text, running, onSave }: { text: string; running: boolean; onSave?: (path: string, text: string) => Promise<string> }) {
   const [open, setOpen] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [saving, setSaving] = useState(false);
   const title = planTitle(text);
   const body = title ? planBody(text) : text;
   const lines = body.split("\n");
@@ -57,9 +63,15 @@ export function PlanCard({ text, running }: { text: string; running: boolean }) 
             <MenuItem onClick={() => downloadPlan(text)}>
               <Download /> Download as markdown
             </MenuItem>
+            {onSave && !running && (
+              <MenuItem onClick={() => setSaving(true)}>
+                <FileDown /> Save to workspace
+              </MenuItem>
+            )}
           </MenuPopup>
         </Menu>
       </div>
+      {saving && onSave && <SavePlan text={text} onSave={onSave} onDone={() => setSaving(false)} />}
       <div className={long && !open ? "[mask-image:linear-gradient(to_bottom,black_70%,transparent)]" : ""}>
         <Markdown source={shown} className="markdown-sm" />
         {running && <span className="caret inline-block" aria-hidden />}
@@ -70,6 +82,92 @@ export function PlanCard({ text, running }: { text: string; running: boolean }) 
         </button>
       )}
     </div>
+  );
+}
+
+/**
+ * "Save plan to workspace" (T3's dialog, inline in the card): a path relative to the workspace,
+ * prefilled with the plan's file name; Enter saves, Esc cancels. Once saved it says where, briefly.
+ */
+function SavePlan({ text, onSave, onDone }: { text: string; onSave: (path: string, text: string) => Promise<string>; onDone: () => void }) {
+  const [path, setPath] = useState(() => planFilename(text));
+  const [state, setState] = useState<{ kind: "editing" | "saving" } | { kind: "error"; message: string } | { kind: "saved"; path: string }>({ kind: "editing" });
+  const input = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    // The name without `.md` selected, so typing replaces it.
+    const el = input.current;
+    if (!el) return;
+    el.focus();
+    const dot = el.value.lastIndexOf(".md");
+    el.setSelectionRange(0, dot > 0 ? dot : el.value.length);
+  }, []);
+  useEffect(() => {
+    if (state.kind !== "saved") return;
+    const t = setTimeout(onDone, 2400);
+    return () => clearTimeout(t);
+  }, [state, onDone]);
+  const save = async () => {
+    const rel = path.trim();
+    if (!rel) return setState({ kind: "error", message: "Enter a workspace path" });
+    setState({ kind: "saving" });
+    try {
+      setState({ kind: "saved", path: await onSave(rel, planToSave(text)) });
+    } catch (e) {
+      setState({ kind: "error", message: `Could not save plan: ${e instanceof Error ? e.message : String(e)}` });
+    }
+  };
+  if (state.kind === "saved") {
+    return (
+      <p role="status" className="rise mb-2 flex min-w-0 items-center gap-1.5 text-[12.5px] text-muted">
+        <Check className="size-3.5 shrink-0 text-accent" aria-hidden /> Plan saved to workspace <code className="min-w-0 truncate font-mono text-[12px] text-fg">{state.path}</code>
+      </p>
+    );
+  }
+  return (
+    <form
+      aria-label="Save plan to workspace"
+      className="rise mb-3 rounded-xl border border-line bg-bg/60 p-2.5"
+      onSubmit={(e) => {
+        e.preventDefault();
+        void save();
+      }}
+      onKeyDown={(e) => {
+        if (e.key === "Escape") {
+          e.preventDefault();
+          e.stopPropagation();
+          onDone();
+        }
+      }}
+    >
+      <label className="mb-1.5 block text-[12px] text-muted" htmlFor="plan-save-path">
+        Workspace path <span className="text-subtle">· relative to the thread&apos;s folder</span>
+      </label>
+      <div className="flex items-center gap-1.5">
+        <input
+          ref={input}
+          id="plan-save-path"
+          value={path}
+          onChange={(e) => {
+            setPath(e.target.value);
+            if (state.kind === "error") setState({ kind: "editing" });
+          }}
+          spellCheck={false}
+          autoComplete="off"
+          className="h-8 min-w-0 flex-1 rounded-md border border-line bg-panel px-2 font-mono text-[12.5px] outline-none focus-visible:border-accent/60"
+        />
+        <button type="button" onClick={onDone} className="h-8 rounded-md px-2.5 text-[12.5px] text-muted hover:bg-fg/[0.06] hover:text-fg">
+          Cancel
+        </button>
+        <button type="submit" disabled={state.kind === "saving"} className="h-8 rounded-md bg-fg px-3 text-[12.5px] font-medium text-bg transition hover:opacity-90 disabled:opacity-60">
+          {state.kind === "saving" ? "Saving..." : "Save"}
+        </button>
+      </div>
+      {state.kind === "error" && (
+        <p role="alert" className="mt-1.5 text-[12px] text-danger">
+          {state.message}
+        </p>
+      )}
+    </form>
   );
 }
 

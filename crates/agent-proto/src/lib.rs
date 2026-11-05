@@ -414,6 +414,11 @@ pub struct Thread {
     pub queued: Vec<QueuedMessage>,
     pub run_count: u32,
     pub pending_requests: u32,
+    /// The newest run completed with a proposed plan (T3's `hasActionableProposedPlan`): in a
+    /// thread still in plan mode with nothing pending, the canvas says "Plan ready" without
+    /// loading the run. A new run, or rolling the run back, clears it.
+    #[serde(default)]
+    pub plan_ready: bool,
     /// One line about what the agent is doing right now ("Editing src/lib.rs"), for the canvas.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activity: Option<String>,
@@ -1218,6 +1223,13 @@ pub fn is_credential_env(name: &str) -> bool {
     WORDS.iter().any(|w| upper.contains(w))
 }
 
+/// The limits on files written through `fs.write`.
+pub mod fs_limits {
+    /// 1 MiB, like a read.
+    pub const WRITE: usize = 1 << 20;
+    pub const PATH: usize = 4096;
+}
+
 /// The limits [`MachineSettings::check`] holds settings to.
 pub mod settings_limits {
     pub const ENV_VARS: usize = 64;
@@ -1902,6 +1914,12 @@ pub enum Command {
     },
     #[serde(rename = "fs.read")]
     FsRead { project: ProjectId, path: String },
+    /// Write a text file in a thread's workspace (its worktree, else its project's directory):
+    /// T3's `projects.writeFile`, behind "Save to workspace" on a plan. `path` is relative to the
+    /// workspace and may not leave it; missing folders are made, an existing file is replaced
+    /// (never a symlink or a folder). At most [`fs_limits::WRITE`] bytes. Answers `written`.
+    #[serde(rename = "fs.write")]
+    FsWrite { thread: ThreadId, path: String, text: String },
     #[serde(rename = "git.status")]
     GitStatus { thread: ThreadId },
     /// Recent terminal output, for a client that just opened it (the last 256 KiB).
@@ -1947,6 +1965,8 @@ pub enum Reply {
     Published(Published),
     /// What `project.pull` did.
     Pulled(PullResult),
+    /// `fs.write` wrote `path` (relative to the workspace).
+    Written { path: String },
     Scrollback {
         /// Base64.
         data: String,

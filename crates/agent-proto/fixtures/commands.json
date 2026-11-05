@@ -289,6 +289,12 @@
     "path": "README.md"
   },
   {
+    "type": "fs.write",
+    "thread": "thr_a1b2c3d4e5f60718",
+    "path": "docs/plans/fix-the-queue.md",
+    "text": "# Fix the queue\n"
+  },
+  {
     "type": "git.status",
     "thread": "thr_a1b2c3d4e5f60718"
   },

@@ -633,7 +633,7 @@ POST /v1/code/agents/{owner}/machines/{machine}/commands CommandRequest {id, com
        `thread.unarchive`, `message.send`, `message.unqueue`, `message.edit`, `message.reorder`,
        `message.promote`, `run.interrupt`, `thread.publish`,
        `diff.get`, `git.status`, and `fs.list`/`fs.read` in a project. The rest (`terminal.*`,
-       `fs.list` without a project, `request.respond`, `project.add`, `project.remove`,
+       `fs.write`, `fs.list` without a project, `request.respond`, `project.add`, `project.remove`,
        `project.update`, `project.pull`, `thread.delete`, `checkpoint.rollback`, `provider.refresh`,
        `machine.configure`) needs Code::manages.
        `machine.configure {settings: MachineSettings}` replaces the machine's settings whole

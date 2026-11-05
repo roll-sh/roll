@@ -51,6 +51,8 @@ export interface TranscriptActions {
   openSubagent?: (node: string) => void;
   /** The composer below carries a ready plan's Implement and Refine (the transcript just says so). */
   hostsPlan?: boolean;
+  /** Write a plan into the thread's workspace (T3's "Save to workspace"); answers the path written. */
+  savePlan?: (path: string, text: string) => Promise<string>;
 }
 
 interface Ctx {
@@ -353,7 +355,7 @@ export function NodeView({ t, requests, actions, live, now }: { t: NodeTree; req
     case "tool":
       return <StepRow node={n} />;
     case "plan":
-      return <PlanCard text={b.text} running={running} />;
+      return <PlanCard text={b.text} running={running} onSave={actions.savePlan} />;
     case "todos": {
       const done = b.items.filter((i) => i.status === "completed").length;
       const current = b.items.find((i) => i.status === "in_progress");

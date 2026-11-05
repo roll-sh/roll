@@ -101,6 +101,7 @@ fn thread() -> Thread {
         queued: vec![QueuedMessage { id: "q1".into(), text: "then run clippy".into(), attachments: vec![], at: T }],
         run_count: 3,
         pending_requests: 1,
+        plan_ready: true,
         activity: Some("Waiting to run `cargo test`".into()),
         usage: Usage { input_tokens: 12_000, output_tokens: 3_400, cached_tokens: 9_000, cost_usd: Some(0.42) },
         context: Some(ContextUsage { used_tokens: 124_000, max_tokens: Some(200_000), total_processed_tokens: Some(410_000) }),
@@ -129,6 +130,7 @@ fn shelved() -> Vec<Thread> {
         active_run: None,
         queued: vec![],
         pending_requests: 0,
+        plan_ready: false,
         activity: None,
         change: None,
         work: None,
@@ -459,6 +461,7 @@ fn commands() -> Vec<Command> {
         Command::DiffGet { thread: thr(), run: Some(run()) },
         Command::FsList { project: None, path: "/home/ada".into() },
         Command::FsRead { project: prj(), path: "README.md".into() },
+        Command::FsWrite { thread: thr(), path: "docs/plans/fix-the-queue.md".into(), text: "# Fix the queue\n".into() },
         Command::GitStatus { thread: thr() },
         Command::TerminalScrollback { terminal: trm() },
     ]
@@ -501,6 +504,7 @@ fn covered_command(c: &Command) {
         | Command::DiffGet { .. }
         | Command::FsList { .. }
         | Command::FsRead { .. }
+        | Command::FsWrite { .. }
         | Command::GitStatus { .. }
         | Command::TerminalScrollback { .. } => {}
     }
@@ -532,6 +536,7 @@ fn replies() -> Vec<Reply> {
             outcome: PullOutcome::Skipped { reason: PullSkip::LocalChanges, message: "the checkout has uncommitted changes".into() },
         }),
         Reply::Pulled(PullResult { at: T, outcome: PullOutcome::Failed { message: "fetching origin failed: could not resolve host".into() } }),
+        Reply::Written { path: "docs/plans/fix-the-queue.md".into() },
         Reply::Scrollback { data: "JCBscwo=".into() },
         Reply::Error(ReplyError { code: ErrorCode::MachineOffline, message: "the machine isn't connected".into() }),
     ]
@@ -547,6 +552,7 @@ fn covered_reply(r: &Reply) {
         | Reply::GitStatus(_)
         | Reply::Published(_)
         | Reply::Pulled(_)
+        | Reply::Written { .. }
         | Reply::Scrollback { .. }
         | Reply::Error(_) => {}
     }
@@ -908,8 +914,8 @@ fn every_variant_of_every_tagged_enum_is_sampled() {
     let tags = |v: serde_json::Value, key: &str| -> std::collections::BTreeSet<String> {
         v.as_array().unwrap().iter().map(|x| x[key].as_str().unwrap().to_string()).collect()
     };
-    assert_eq!(tags(serde_json::to_value(commands()).unwrap(), "type").len(), 37, "commands");
-    assert_eq!(tags(serde_json::to_value(replies()).unwrap(), "type").len(), 10, "replies");
+    assert_eq!(tags(serde_json::to_value(commands()).unwrap(), "type").len(), 38, "commands");
+    assert_eq!(tags(serde_json::to_value(replies()).unwrap(), "type").len(), 11, "replies");
     assert_eq!(tags(serde_json::to_value(entities()).unwrap(), "kind").len(), 8, "entities");
     let bodies: std::collections::BTreeSet<String> = entities()
         .iter()
