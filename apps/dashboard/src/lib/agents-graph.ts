@@ -50,6 +50,8 @@ export interface Graph {
 export interface GraphOptions {
   /** Threads open in place: their requests live inside the session, not beside it. */
   expanded?: ReadonlySet<string>;
+  /** The thread whose conversation is open beside the canvas: its terminals are in its drawer. */
+  docked?: string | null;
   showArchived?: boolean;
   /** Provider subagents shown per thread at most (the newest). */
   maxSubagents?: number;
@@ -174,6 +176,7 @@ export function deriveGraph(data: AgentsData, opts: GraphOptions = {}): Graph {
   const terminals = [...data.terminals.values()].sort((a, b) => a.value.created_at - b.value.created_at);
   for (const r of terminals) {
     const t = r.value;
+    if (t.thread && t.thread === opts.docked) continue;
     const parent = [t.thread && keyOf.thread(t.thread), t.project && keyOf.project(t.project), keyOf.machine(r.machine)].find(
       (k): k is string => !!k && nodes.has(k),
     );

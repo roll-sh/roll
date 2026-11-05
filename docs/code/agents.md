@@ -1090,7 +1090,8 @@ The surface has three views:
   ⌘/Ctrl queues it, the send button says which; the agent's questions sit on top of the composer
   and what's typed is your own answer; queued messages, a ready plan, compaction and subagents
   as in "Turns") with the machine, branch and cost in a strip below; the
-  thread's terminals in a resizable drawer under it all; the diff (of the thread or one run)
+  thread's terminals in a resizable drawer under it all (while it's open they're only there, not
+  cards on the canvas too); the diff (of the thread or one run)
   beside the chat when the panel is wide enough, else sliding over it. Everything is managed from
   there: fork, roll
   back, publish, share, rename, archive, delete, take a work item. The title is a switcher to the

@@ -39,6 +39,16 @@ describe("agents graph", () => {
     expect(g.edges.find((e) => e.to === "t:thr_2")).toMatchObject({ dashed: true, busy: false });
   });
 
+  it("leaves a thread's terminals to its drawer while its conversation is open beside the canvas", () => {
+    const d = applyEvents(sample(), [ev("terminal", terminal({ id: "trm_t", thread: "thr_1", title: "pnpm dev" }), 20)]);
+    expect(deriveGraph(d).nodes.get("t:thr_1")!.children).toContain("x:trm_t");
+    const docked = deriveGraph(d, { docked: "thr_1" });
+    expect(docked.nodes.has("x:trm_t")).toBe(false);
+    // Only that thread's: the project's and the machine's stay.
+    expect(docked.nodes.has("x:trm_1") && docked.nodes.has("x:trm_login")).toBe(true);
+    expect(deriveGraph(d, { docked: "thr_3" }).nodes.has("x:trm_t")).toBe(true);
+  });
+
   it("animates only what runs: not the machine and project above it, not what waits on you", () => {
     const g = deriveGraph(sample());
     expect(g.nodes.get("t:thr_1")!.busy).toBe(true);

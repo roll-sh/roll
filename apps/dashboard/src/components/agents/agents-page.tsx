@@ -632,7 +632,9 @@ function CanvasView({
   const filter = views.filter;
   // A pinned conversation answers its thread's requests itself.
   const expanded = useMemo(() => pinnedConversations(view), [view]);
-  const whole = useMemo(() => deriveGraph(data, { showArchived, expanded }), [data, showArchived, expanded]);
+  // The open conversation's terminals are in its drawer: not a second time on the canvas.
+  const docked = selected?.startsWith("t:") ? selected.slice(2) : null;
+  const whole = useMemo(() => deriveGraph(data, { showArchived, expanded, docked }), [data, showArchived, expanded, docked]);
   const display = view.display;
   const viewed = useMemo(() => {
     const g = applyView(whole, data, { filter, pins: view.pins }, Date.now());
