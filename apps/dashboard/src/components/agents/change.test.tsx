@@ -33,7 +33,7 @@ describe("roll code on a thread", () => {
     const t = thread({ change, work });
     renderAgents(<ThreadNode thread={t} machine={machine()} />, agentsHarness({ entities: [mirrored("thread", t, 1)] }));
     const card = screen.getByRole("button", { name: "Thread Fix the flaky queue test" });
-    expect(within(card).getByRole("link", { name: "Change 42, blocked" })).toBeInTheDocument();
+    expect(within(card).getByRole("link", { name: "Change 42, blocked" })).toHaveAttribute("target", "_blank");
     expect(within(card).getByRole("link", { name: /#7 Make the queue test deterministic/ })).toHaveAttribute("href", "/acme/roll/work");
   });
 
@@ -99,7 +99,7 @@ describe("roll code on a thread", () => {
     const h = agentsHarness({ reply, entities: [mirrored("project", empty, 1), mirrored("thread", t, 2)], follow: ["thr_1"] });
     renderAgents(<Conversation thread={t} machine={machine()} />, h);
     await userEvent.click(screen.getByRole("button", { name: "More" }));
-    await userEvent.click(await screen.findByRole("menuitem", { name: "Publish as a change" }));
+    await userEvent.click(await screen.findByRole("menuitem", { name: "Publish the first commit" }));
     const form = screen.getByRole("form", { name: "Publish" });
     expect(form).toHaveTextContent("acme/roll has no commits yet");
     expect(within(form).queryByRole("switch", { name: "and land" })).toBeNull();
@@ -148,7 +148,7 @@ describe("roll code on a thread", () => {
     expect(within(view).getByRole("textbox", { name: "Message" })).toBeInTheDocument();
     expect(within(view).queryByRole("button", { name: "Publish as a roll code change" })).toBeNull();
     await userEvent.click(within(view).getByRole("button", { name: "More" }));
-    expect(await screen.findByRole("menuitem", { name: "Publish as a change" })).toBeInTheDocument();
+    expect(await screen.findByRole("menuitem", { name: "Publish again (#42)" })).toBeInTheDocument();
     // Sharing works from a phone too.
     await userEvent.keyboard("{Escape}");
     await userEvent.click(within(view).getByRole("button", { name: "Share" }));

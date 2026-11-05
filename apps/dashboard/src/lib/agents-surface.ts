@@ -151,6 +151,11 @@ export function isNewAgentKey(e: KeyboardEvent): boolean {
   return (k === "n" && !e.shiftKey) || (k === "o" && e.shiftKey);
 }
 
+/** The new-agent shortcut to show: ⌘N on a Mac; elsewhere Ctrl+N is the browser's new window, so Ctrl+Shift+O. */
+export function newAgentHint(platform: string): string {
+  return /Mac|iPhone|iPad/.test(platform) ? "⌘N" : "Ctrl+Shift+O";
+}
+
 /** For tests. */
 export function resetAgentsSurface() {
   state = { open: false, view: { kind: "canvas" } };

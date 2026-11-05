@@ -34,13 +34,30 @@ const toneClass = {
   quiet: "border-line-2 text-muted",
 };
 
-/** The thread's roll code change: `#42 ready`, linking to the change page; `detail` in the title. */
+/**
+ * Whether publishing the thread is its repo's first commit: it works in the folder of a checkout
+ * with no commits yet (a worktree needs one), so there's nothing to branch a change from.
+ */
+export function firstCommit(thread: Thread, project: Project | undefined): boolean {
+  return !thread.worktree && !!project?.git && !project.git.head && thread.cwd === project.path;
+}
+
+/** What More's publish item says: the first commit, a new change, or more work on its open change. */
+export function publishLabel(thread: Thread, project: Project | undefined): string {
+  if (firstCommit(thread, project)) return "Publish the first commit";
+  const open = thread.change && thread.change.status !== "landed" && thread.change.status !== "closed";
+  return open ? `Publish again (#${thread.change!.number})` : "Publish as a change";
+}
+
+/** The thread's roll code change: `#42 ready`, linking to the change page (a tab of its own, so the agents stay open); `detail` in the title. */
 export function ChangeChip({ change, className = "" }: { change: ThreadChange; className?: string }) {
   const tone = changeTone(change.status);
   return (
     <a
       data-nodrag
       href={change.url}
+      target="_blank"
+      rel="noreferrer"
       onClick={(e) => e.stopPropagation()}
       title={`${change.repo}#${change.number}${change.detail ? ` · ${change.detail}` : ""}`}
       aria-label={`Change ${change.number}, ${changeStatusLabel[change.status]}`}
@@ -105,7 +122,7 @@ export function PublishForm({ thread, project, machine, onDone }: { thread: Thre
   const [busy, setBusy] = useState(false);
   const [done, setDone] = useState<Published | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const first = !thread.worktree && !!project?.git && !project.git.head && thread.cwd === project.path;
+  const first = firstCommit(thread, project);
   if (!thread.worktree && !first)
     return (
       <div className="flex flex-wrap items-center gap-2 border-t border-line px-4 py-2.5 text-[12.5px]" data-nodrag role="group" aria-label="Publish">

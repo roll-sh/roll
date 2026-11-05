@@ -23,7 +23,7 @@ import { checkpointsOf, nodeTree, runsOf } from "@/lib/agents-store";
 import { readyPlan } from "@/lib/agents-plan";
 import { DiffViewer } from "../code/diff";
 import { input } from "../ui";
-import { ChangeChip, PublishForm, TakeWorkForm, WorkChip } from "./change";
+import { ChangeChip, PublishForm, publishLabel, TakeWorkForm, WorkChip } from "./change";
 import { useEscapeLayer } from "./escape-layers";
 import { Composer } from "./composer";
 import { Menu } from "./menu";
@@ -546,7 +546,7 @@ function TitleBar({
                 { label: "Rename", icon: <Pencil />, onSelect: () => setRenaming(thread.title) },
                 phone && { label: "Terminal", icon: <SquareTerminal />, onSelect: openTerminal, disabled: !online },
                 { label: "Fork", icon: <Split />, onSelect: fork, disabled: !online },
-                !!project?.repo && { label: "Publish as a change", icon: <Upload />, onSelect: () => setPanel("publish"), disabled: !online || busy },
+                !!project?.repo && { label: publishLabel(thread, project), icon: <Upload />, onSelect: () => setPanel("publish"), disabled: !online || busy },
                 !!services && !thread.work && { label: "Take a work item", icon: <ClipboardList />, onSelect: () => setPanel("work") },
                 ...inboxMenu.items,
                 {

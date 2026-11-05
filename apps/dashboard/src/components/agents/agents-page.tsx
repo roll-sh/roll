@@ -12,7 +12,7 @@ import type { Direction, Size } from "@/lib/agents-layout";
 import { closePalette, noteThreadOpen, openPalette, togglePalette } from "@/lib/agents-palette";
 import { lastInputWasKeyboard } from "@/lib/input-modality";
 import type { AgentsServices } from "@/lib/agents-services";
-import { isNewAgentKey, setAgentsView, useAgentsSurface, viewFromHash, type AgentsView, type AutomationsView } from "@/lib/agents-surface";
+import { isNewAgentKey, newAgentHint, setAgentsView, useAgentsSurface, viewFromHash, type AgentsView, type AutomationsView } from "@/lib/agents-surface";
 import { isBuilder } from "@/lib/automations-nav";
 import { ALL, applyDisplay, applyView, directionOf, focusOn, isPinned, keepProject, loadFocused, pinKey, setFocused as setFocusedIn, pinnedConversations, pinOf, projectOf, viewStorageKey, withDirection, type Pin as PinRec } from "@/lib/agents-views";
 import { desktop, onDesktopDeepLink, useDesktop } from "@/lib/desktop";
@@ -48,6 +48,9 @@ import { PinTools, useCanvasViews, ViewsBar, type CanvasViews } from "./views";
 const MAX_FOLLOWED_BUSY = 12;
 
 const PHONE = "(max-width: 640px)";
+
+/** For a store that never changes (the platform). */
+const noSubscribe = () => () => {};
 
 /** A phone-sized screen. */
 export function usePhone(): boolean {
@@ -444,12 +447,13 @@ export function AgentsSurface({
     }),
     [showArchived, archived, views.views, views.current.id, views.select, direction, setDirection, focused, focusProject],
   );
+  const hint = useSyncExternalStore(noSubscribe, () => newAgentHint(navigator.platform), () => "⌘N");
   const end = (
     <>
       <button
         onClick={() => startNew()}
         className="ml-1 inline-flex h-7 items-center gap-1.5 rounded-md bg-fg pr-2.5 pl-2 text-[12.5px] font-medium tracking-[-0.01em] text-bg shadow-card inset-shadow-[0_1px_0_rgb(255_255_255/0.25)] transition-[opacity,scale] duration-150 hover:opacity-90 active:scale-[0.97]"
-        title="New agent (⌘N)"
+        title={`New agent (${hint})`}
       >
         <Plus className="size-3.5" strokeWidth={2} />
         <span className="max-sm:sr-only">New agent</span>
