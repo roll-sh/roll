@@ -131,10 +131,21 @@ pub struct McpServer {
     pub headers: Vec<(String, String)>,
 }
 
+/// The message that compacts a conversation instead of starting a turn with it (T3's
+/// `COMPACT_SLASH_COMMAND`), on a provider with `capabilities().compact`.
+pub const COMPACT: &str = "/compact";
+
 #[derive(Clone, Debug, Default)]
 pub struct TurnInput {
     pub text: String,
     pub attachments: Vec<Attachment>,
+}
+
+impl TurnInput {
+    /// Exactly `/compact` and nothing else: a compaction on a provider that can.
+    pub fn is_compact(&self) -> bool {
+        self.attachments.is_empty() && self.text.trim() == COMPACT
+    }
 }
 
 /// A unit of work as the provider names it. `id` and `parent` are the provider's item ids.
@@ -236,6 +247,14 @@ pub trait Session: Send + Sync {
 
     /// Stop the running turn; `TurnEnded(Interrupted)` follows.
     async fn interrupt(&self) -> anyhow::Result<()>;
+
+    /// Compact the conversation's context as a turn of its own (T3's `compactThread`): a
+    /// `NodeBody::Compaction` item and `TurnEnded` follow, as for `send`. Only called when
+    /// `capabilities().compact`. The default sends `/compact` as the turn's input, which is how
+    /// Claude Code takes it; Codex has a request of its own (`thread/compact/start`).
+    async fn compact(&self) -> anyhow::Result<()> {
+        self.send(TurnInput { text: COMPACT.into(), attachments: Vec::new() }).await
+    }
 
     /// Answer a request the session raised.
     async fn respond(&self, request: &str, response: &Response) -> anyhow::Result<()>;

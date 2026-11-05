@@ -66,6 +66,8 @@ struct Turn {
     rate_limited: bool,
     /// The main agent said something (else the result text becomes the message, as in T3).
     said: bool,
+    /// A compaction item came up in this turn (a `/compact`'s result text then says nothing new).
+    compacted: bool,
     cursor: Option<String>,
 }
 
@@ -207,6 +209,47 @@ impl Translator {
         }
     }
 
+    /// A frame about compacting: `status: compacting`, a status with `compact_result`, or the
+    /// `compact_boundary`. Claude Code sends them in that order (`recorded/compact.ndjson`).
+    fn compaction_frame(&self, msg: &Value) -> bool {
+        match str_at(msg, "subtype") {
+            Some("compact_boundary") => true,
+            Some("status") => str_at(msg, "status") == Some("compacting") || msg.get("compact_result").is_some(),
+            _ => false,
+        }
+    }
+
+    /// T3's compaction row: running while it compacts, completed at the boundary with the
+    /// context before and after, or failed with Claude's reason.
+    fn compaction_event(&mut self, msg: &Value) -> Vec<ProviderEvent> {
+        let mut events = Vec::new();
+        if str_at(msg, "subtype") == Some("compact_boundary") {
+            let id = self.compacting.take().unwrap_or_else(|| format!("compaction:{}", self.next_seq()));
+            let before = msg.pointer("/compact_metadata/pre_tokens").and_then(Value::as_u64).filter(|n| *n > 0);
+            let after = msg.pointer("/compact_metadata/post_tokens").and_then(Value::as_u64).filter(|n| *n > 0);
+            events.push(item(&id, None, NodeStatus::Completed, compaction(before, after, None)));
+            // What's left after the compaction is the context now.
+            self.message_usage = None;
+            if let Some(post) = after {
+                events.extend(self.emit_context(post));
+            }
+        } else if str_at(msg, "status") == Some("compacting") {
+            if self.compacting.is_none() {
+                let id = format!("compaction:{}", self.next_seq());
+                self.compacting = Some(id.clone());
+                events.push(item(&id, None, NodeStatus::Running, compaction(None, None, None)));
+            }
+        } else if let Some(result) = str_at(msg, "compact_result").filter(|r| *r != "success")
+            && let Some(id) = self.compacting.take()
+        {
+            // A compaction that didn't succeed ends here; no boundary follows.
+            let status = if result == "failed" { NodeStatus::Failed } else { NodeStatus::Interrupted };
+            let error = str_at(msg, "compact_error").map(|e| cut(e.trim(), 400)).filter(|e| !e.is_empty());
+            events.push(item(&id, None, status, compaction(None, None, error)));
+        }
+        events
+    }
+
     fn system(&mut self, msg: &Value) -> Vec<ProviderEvent> {
         let mut events = Vec::new();
         match str_at(msg, "subtype") {
@@ -218,26 +261,13 @@ impl Translator {
                 }
             }
             _ if self.turn.is_none() => {}
-            Some("status") => {
-                if str_at(msg, "status") == Some("compacting") && self.compacting.is_none() {
-                    let id = format!("compaction:{}", self.next_seq());
-                    self.compacting = Some(id.clone());
-                    events.push(item(&id, None, NodeStatus::Running, system_text("Compacting the conversation")));
+            Some("status" | "compact_boundary") if self.compaction_frame(msg) => {
+                if let Some(turn) = &mut self.turn {
+                    turn.compacted = true;
                 }
+                events = self.compaction_event(msg);
             }
-            Some("compact_boundary") => {
-                let id = self.compacting.take().unwrap_or_else(|| format!("compaction:{}", self.next_seq()));
-                let text = match msg.pointer("/compact_metadata/pre_tokens").and_then(Value::as_u64) {
-                    Some(n) => format!("Compacted the conversation ({n} tokens before)"),
-                    None => "Compacted the conversation".to_string(),
-                };
-                events.push(item(&id, None, NodeStatus::Completed, system_text(&text)));
-                // What's left after the compaction is the context now.
-                self.message_usage = None;
-                if let Some(post) = msg.pointer("/compact_metadata/post_tokens").and_then(Value::as_u64).filter(|n| *n > 0) {
-                    events.extend(self.emit_context(post));
-                }
-            }
+            Some("status") => {}
             Some("api_retry") => {
                 let id = format!("retry:{}", str_at(msg, "uuid").map(str::to_string).unwrap_or_else(|| self.next_seq().to_string()));
                 let error = [msg.get("error_status").and_then(Value::as_u64).map(|s| s.to_string()), str_at(msg, "error").map(str::to_string)]
@@ -270,10 +300,22 @@ impl Translator {
                     && str_at(msg, "task_type") == Some("local_agent")
                 {
                     let prompt = str_at(msg, "prompt").or(str_at(msg, "description")).unwrap_or_default();
-                    let body = NodeBody::Subagent { agent: "general-purpose".into(), prompt: prompt.into(), child: None, result: None };
+                    let body = NodeBody::Subagent { agent: "general-purpose".into(), prompt: prompt.into(), child: None, result: None, progress: None, model: None };
                     let it = Item { id: tool_use.to_string(), parent: None, status: NodeStatus::Running, body };
                     self.tools.insert(tool_use.to_string(), it.clone());
                     events.push(ProviderEvent::Item(it));
+                }
+            }
+            Some("task_progress") => {
+                // What a running subagent is doing (T3's `updateClaudeSubagentNode` progress).
+                let line = str_at(msg, "description").map(|d| cut(d.trim(), 200)).filter(|d| !d.is_empty());
+                if let (Some(tool_use), Some(line)) = (str_at(msg, "tool_use_id"), line)
+                    && let Some(it) = self.tools.get_mut(tool_use)
+                    && let NodeBody::Subagent { progress, .. } = &mut it.body
+                    && progress.as_deref() != Some(line.as_str())
+                {
+                    *progress = Some(line);
+                    events.push(ProviderEvent::Item(it.clone()));
                 }
             }
             Some("task_notification") => {
@@ -286,7 +328,8 @@ impl Translator {
                 if let Some(tool_use) = str_at(msg, "tool_use_id")
                     && let Some(mut it) = self.tools.remove(tool_use)
                 {
-                    if let NodeBody::Subagent { result, .. } = &mut it.body {
+                    if let NodeBody::Subagent { result, progress, .. } = &mut it.body {
+                        *progress = None;
                         *result = str_at(msg, "summary").map(str::to_string);
                     }
                     it.status = status;
@@ -462,6 +505,9 @@ impl Translator {
                 prompt: str_at(&input, "prompt").or(str_at(&input, "description")).unwrap_or_default().to_string(),
                 child: None,
                 result: None,
+                progress: None,
+                // T3's `rememberClaudeSubagentLaunch`: the model the Agent call asks for.
+                model: str_at(&input, "model").filter(|m| !m.is_empty()).map(str::to_string),
             },
             "TodoWrite" => NodeBody::Todos { items: todos(&input) },
             "ExitPlanMode" => NodeBody::Plan { text: str_at(&input, "plan").unwrap_or_default().trim().to_string() },
@@ -523,7 +569,10 @@ impl Translator {
                 }
                 _ => call.output = (!text.is_empty()).then(|| cap_output(&text)),
             },
-            NodeBody::Subagent { result, .. } => *result = Some(subagent_text(content)),
+            NodeBody::Subagent { result, progress, .. } => {
+                *result = Some(subagent_text(content));
+                *progress = None;
+            }
             // A declined plan is still the plan the agent proposed.
             NodeBody::Plan { .. } => it.status = NodeStatus::Completed,
             _ => {}
@@ -590,10 +639,20 @@ impl Translator {
                 .collect();
         }
         let end = turn_end(msg, turn);
+        let (said, compacted) = (turn.said, turn.compacted);
         let mut events = Vec::new();
-        if end == TurnEnd::Completed
-            && !turn.said
-            && let Some(text) = str_at(msg, "result").map(str::trim).filter(|t| !t.is_empty())
+        let text = str_at(msg, "result").map(str::trim).filter(|t| !t.is_empty());
+        if str_at(msg, "local_command") == Some("compact") {
+            // T3: a `/compact`'s result reports the compaction, which its item already shows.
+            // With no item, it never started ("Not enough messages to compact."): say so there.
+            if !compacted {
+                let id = format!("compaction:{}", self.next_seq());
+                let error = Some(text.unwrap_or("Claude didn't compact the conversation").to_string());
+                events.push(item(&id, None, NodeStatus::Failed, compaction(None, None, error)));
+            }
+        } else if end == TurnEnd::Completed
+            && !said
+            && let Some(text) = text
         {
             let id = format!("result:{}", str_at(msg, "uuid").unwrap_or_default());
             events.push(item(&id, None, NodeStatus::Completed, NodeBody::Message { text: text.to_string() }));
@@ -617,7 +676,7 @@ impl Translator {
             events.push(ProviderEvent::Item(it));
         }
         if let Some(id) = self.compacting.take() {
-            events.push(item(&id, None, status, system_text("Compacting the conversation")));
+            events.push(item(&id, None, status, compaction(None, None, None)));
         }
         for id in std::mem::take(&mut self.requests).into_keys() {
             events.push(ProviderEvent::RequestCancelled { id });
@@ -986,6 +1045,10 @@ fn item(id: &str, parent: Option<&str>, status: NodeStatus, body: NodeBody) -> P
 
 fn system_text(text: &str) -> NodeBody {
     NodeBody::System { text: text.to_string() }
+}
+
+fn compaction(before_tokens: Option<u64>, after_tokens: Option<u64>, error: Option<String>) -> NodeBody {
+    NodeBody::Compaction { before_tokens, after_tokens, error }
 }
 
 fn note(message: &Option<String>, default: &str) -> String {

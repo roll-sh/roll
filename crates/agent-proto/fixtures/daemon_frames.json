@@ -41,7 +41,8 @@
             "plan_mode": true,
             "images": true,
             "subagents": true,
-            "mode_switch": true
+            "mode_switch": true,
+            "compact": true
           }
         },
         {
@@ -58,7 +59,8 @@
             "plan_mode": true,
             "images": true,
             "subagents": true,
-            "mode_switch": false
+            "mode_switch": false,
+            "compact": true
           }
         },
         {
@@ -73,7 +75,8 @@
             "plan_mode": true,
             "images": true,
             "subagents": false,
-            "mode_switch": true
+            "mode_switch": true,
+            "compact": false
           },
           "checking": true
         }

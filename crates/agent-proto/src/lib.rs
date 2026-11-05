@@ -805,6 +805,25 @@ pub enum NodeBody {
         child: Option<ThreadId>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         result: Option<String>,
+        /// What it is doing now, while it runs, where the provider says (Claude's
+        /// `task_progress`; T3's subagent `progress`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        progress: Option<String>,
+        /// The model it runs, where the provider says (the Agent tool's `model`, Codex's collab
+        /// call's `model`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+    },
+    /// The provider compacted the conversation's context (T3's `compaction` turn item): running
+    /// while it summarises, then completed, failed (with `error`) or interrupted. The token
+    /// counts are the context window before and after, where known.
+    Compaction {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        before_tokens: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        after_tokens: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
     },
     /// An approval or question; the record is the `Request`.
     Request { request: RequestId },
@@ -1385,6 +1404,10 @@ pub struct Capabilities {
     pub subagents: bool,
     /// The runtime mode can change without a new session.
     pub mode_switch: bool,
+    /// The conversation's context can be compacted on request (T3's `compact` slash command):
+    /// a `message.send` of exactly `/compact` runs as a compaction.
+    #[serde(default)]
+    pub compact: bool,
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1526,6 +1549,31 @@ pub enum Command {
     /// Drop a queued message.
     #[serde(rename = "message.unqueue")]
     MessageUnqueue { thread: ThreadId, message: String },
+    /// Change a queued message's text (T3's `queued-run.edit`). `attachments` replaces its
+    /// images when set and keeps them when unset.
+    #[serde(rename = "message.edit")]
+    MessageEdit {
+        thread: ThreadId,
+        message: String,
+        text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        attachments: Option<Vec<Attachment>>,
+    },
+    /// Move a queued message in front of `before`, or to the end when unset (T3's
+    /// `queued-run.reorder`).
+    #[serde(rename = "message.reorder")]
+    MessageReorder {
+        thread: ThreadId,
+        message: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        before: Option<String>,
+    },
+    /// Send a queued message now (T3's "Send now"): into the active run as a steer (T3's
+    /// `queued-message.promote-to-steer`), or, on a thread whose queue is held (it was stopped,
+    /// or the run failed), as the next run, after which the rest of the queue drains (T3's
+    /// `queued-run.start`).
+    #[serde(rename = "message.promote")]
+    MessagePromote { thread: ThreadId, message: String },
     #[serde(rename = "run.interrupt")]
     RunInterrupt { thread: ThreadId },
     #[serde(rename = "request.respond")]

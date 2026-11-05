@@ -281,11 +281,15 @@ async fn a_sync_task_returns_the_childs_answer_and_the_records_show_the_subagent
     let parent_run = parent_thread.active_run.clone().unwrap();
     assert_eq!((node.thread.clone(), node.run.clone(), node.parent.clone()), (parent.clone(), parent_run.clone(), None));
     assert!(node.completed_at.is_some());
+    // The node names the model the child runs.
+    let c_model = s.thread(&child).unwrap().model.clone();
     assert_eq!(node.body, NodeBody::Subagent {
         agent: "claude".into(),
         prompt: "Count the files".into(),
         child: Some(child.clone()),
         result: Some("echo: Count the files".into()),
+        progress: None,
+        model: c_model,
     });
     let c = s.thread(&child).unwrap();
     assert_eq!(c.lineage, Some(Lineage {

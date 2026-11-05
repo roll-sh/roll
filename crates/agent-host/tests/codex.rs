@@ -570,7 +570,7 @@ async fn subagent_v2() {
     assert_subagents(&events, 1);
     let sub = latest(&events).into_values().find(|i| matches!(i.body, NodeBody::Subagent { .. })).unwrap();
     assert_eq!(sub.status, NodeStatus::Completed);
-    assert_eq!(sub.body, NodeBody::Subagent { agent: "say_hello".into(), prompt: String::new(), child: None, result: Some("Hello.".into()) });
+    assert_eq!(sub.body, NodeBody::Subagent { agent: "say_hello".into(), prompt: String::new(), child: None, result: Some("Hello.".into()), progress: None, model: None });
 }
 
 #[tokio::test]
@@ -995,11 +995,43 @@ async fn compaction_restores_instructions() {
     let mut h = Harness::open_with(&synthetic(dir.path(), "compact", &entries), |c| c.instructions = Some("Be brief.".into())).await;
     assert_eq!(h.turn("go").await, TurnEnd::Completed);
     let (events, log) = h.finish().await;
-    assert_eq!(latest(&events)["cc"].body, NodeBody::System { text: "Context compacted".into() });
+    assert_eq!(latest(&events)["cc"].body, NodeBody::Compaction { before_tokens: None, after_tokens: None, error: None });
     assert_eq!(
         sent(&log, "thread/inject_items")[0]["items"],
         json!([{ "type": "message", "role": "developer", "content": [{ "type": "input_text", "text": "<roll_instructions>Be brief.</roll_instructions>" }] }]),
     );
+}
+
+/// T3's `compactThread`: `thread/compact/start`, then the turn Codex starts for it is ours.
+#[tokio::test]
+async fn compacting_on_request_runs_as_a_turn_of_its_own() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut entries = opening();
+    entries.extend([
+        turn_completed("completed"),
+        expect(json!({ "id": 4, "method": "thread/compact/start", "params": { "threadId": "thr" } })),
+        emit(json!({ "id": 4, "result": {} })),
+        emit(json!({ "method": "turn/started", "params": { "threadId": "thr", "turn": { "id": "t2", "status": "inProgress" } } })),
+        emit(json!({ "method": "item/started", "params": { "threadId": "thr", "turnId": "t2", "item": { "type": "contextCompaction", "id": "cc" } } })),
+        emit(json!({ "method": "item/completed", "params": { "threadId": "thr", "turnId": "t2", "item": { "type": "contextCompaction", "id": "cc" } } })),
+        emit(json!({ "method": "thread/tokenUsage/updated", "params": { "threadId": "thr", "turnId": "t2", "tokenUsage": {
+            "last": { "totalTokens": 9000, "inputTokens": 8000, "cachedInputTokens": 0, "outputTokens": 1000, "reasoningOutputTokens": 0 },
+            "total": { "totalTokens": 90000, "inputTokens": 80000, "cachedInputTokens": 0, "outputTokens": 10000, "reasoningOutputTokens": 0 },
+            "modelContextWindow": 258000 } } })),
+        emit(json!({ "method": "turn/completed", "params": { "threadId": "thr", "turn": { "id": "t2", "status": "completed", "items": [] } } })),
+        exit_ok(),
+    ]);
+    let mut h = Harness::open(&synthetic(dir.path(), "compact_request", &entries)).await;
+    assert_eq!(h.turn("go").await, TurnEnd::Completed);
+    h.session.compact().await.expect("compact");
+    assert_eq!(h.turn_end().await, TurnEnd::Completed);
+    let (events, log) = h.finish().await;
+    assert_eq!(sent(&log, "thread/compact/start").len(), 1);
+    let cc: Vec<NodeStatus> = events.iter().filter_map(|e| if let ProviderEvent::Item(i) = e && i.id == "cc" { Some(i.status) } else { None }).collect();
+    assert_eq!(cc, [NodeStatus::Running, NodeStatus::Completed]);
+    assert_eq!(latest(&events)["cc"].body, NodeBody::Compaction { before_tokens: None, after_tokens: None, error: None });
+    assert!(events.iter().any(|e| matches!(e, ProviderEvent::Context(c) if c.used_tokens == 9000)), "the context drops to what's left");
+    assert!(events.contains(&ProviderEvent::TurnRef { id: "t2".into() }));
 }
 
 #[tokio::test]

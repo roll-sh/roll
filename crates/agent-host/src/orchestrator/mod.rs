@@ -572,6 +572,13 @@ impl Host {
                 self.message_send(&thread, text, attachments, mode).await
             }
             Command::MessageUnqueue { thread, message } => self.message_unqueue(&thread, &message).await,
+            Command::MessageEdit { thread, message, text, attachments } => {
+                self.message_edit(&thread, &message, text, attachments).await
+            }
+            Command::MessageReorder { thread, message, before } => {
+                self.message_reorder(&thread, &message, before.as_deref()).await
+            }
+            Command::MessagePromote { thread, message } => self.message_promote(&thread, &message).await,
             Command::RunInterrupt { thread } => {
                 // Like T3's Stop: the thread's delegated tasks stop with it.
                 let reply = self.run_interrupt(&thread).await;

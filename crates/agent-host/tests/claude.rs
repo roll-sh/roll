@@ -52,6 +52,8 @@ fn main() {
         ("mcp_tools_are_mcp_items", mcp_tools_are_mcp_items),
         ("real_cli_streams_text_and_reasoning", real_cli_streams_text_and_reasoning),
         ("real_cli_approval_interrupt_and_steer", real_cli_approval_interrupt_and_steer),
+        ("real_cli_compacts_on_request", real_cli_compacts_on_request),
+        ("compaction_failures_say_why", compaction_failures_say_why),
         ("questions_and_plan_approval", questions_and_plan_approval),
         ("todos_edits_and_notices", todos_edits_and_notices),
         ("crash_fails_the_turn_with_stderr", crash_fails_the_turn_with_stderr),
@@ -266,9 +268,13 @@ fn subagents_hang_their_work_off_the_agent_call() {
         let b = "toolu_0113VSWTCamvp1adXDZrK5NG";
         assert_eq!(r.items(a), [
             "running toolu_01FfHTrUeymLi4LfqJVmTZjz: subagent general-purpose prompt=Read the file `package.json` in the curr…",
+            // `task_progress` says what it's doing while it runs (T3's subagent progress)…
+            "running toolu_01FfHTrUeymLi4LfqJVmTZjz: subagent general-purpose prompt=Read the file `package.json` in the curr… progress=Reading package.json",
+            "running toolu_01FfHTrUeymLi4LfqJVmTZjz: subagent general-purpose prompt=Read the file `package.json` in the curr… progress=Summarizing package.json",
+            // …and its answer replaces that when it's done.
             "completed toolu_01FfHTrUeymLi4LfqJVmTZjz: subagent general-purpose prompt=Read the file `package.json` in the curr… result=Here are the full contents of `package.j…",
         ]);
-        assert_eq!(r.items(b).len(), 2);
+        assert_eq!(r.items(b).len(), 3);
         // The subagents' own tool calls hang off their Agent call.
         assert_eq!(r.items("toolu_01EV8j88CPEmhoWF3iuvaFSC").last().unwrap(), &format!("completed toolu_01EV8j88CPEmhoWF3iuvaFSC ^{a}: tool Read/read \"/private/var/folders/b3/b51_pdxj7dl0t981zpqkxxhr0000gn/T/t3-…\" out=1\\t{{\"name\":\"claude-read-only-fixture\",\"private\":true,\"script…"));
         assert_eq!(r.items("toolu_01P6KQcUPy8t2bCbFjv8K4Jz").last().unwrap().split(':').next().unwrap(), format!("completed toolu_01P6KQcUPy8t2bCbFjv8K4Jz ^{b}"));
@@ -414,6 +420,61 @@ fn real_cli_streams_text_and_reasoning() {
     });
 }
 
+/// T3's `/compact` on the real CLI: the compaction is a turn of its own; its row carries the
+/// context before and after, the context drops, and the result's text is no reply.
+fn real_cli_compacts_on_request() {
+    block_on(async {
+        let mut r = Replay::start("recorded/compact", opts(RuntimeMode::Ask).model("claude-haiku-5-5").effort("low")).await;
+        r.send_text("Reply with exactly: ok").await;
+        r.turn().await;
+        r.session.compact().await.unwrap();
+        assert_eq!(r.turn().await, TurnEnd::Completed);
+        r.close().await;
+        r.expect(&[
+            "thread (new)",
+            "thread 66f90b73-1efb-45ef-a55d-762c78b8fe11",
+            "model claude-haiku-5-5",
+            "running msg_011CgjM2RuKZRYaZRJmjuoBE:0: message ",
+            "completed msg_011CgjM2RuKZRYaZRJmjuoBE:0: message ok",
+            "usage in=25603 out=4 cached=0 cost=0.005291",
+            "turn completed",
+            "running compaction:1: compaction ?→?",
+            "completed compaction:1: compaction 25607→7378",
+            "usage in=0 out=0 cached=0 cost=0.003752",
+            "turn completed",
+            "exited",
+        ]);
+        let context: Vec<String> = r.with_context().rendered().into_iter().filter(|l| l.starts_with("context")).collect();
+        assert_eq!(context.last().map(String::as_str), Some("context 7378/1000000"));
+    });
+}
+
+/// A compaction that fails says why on its row; a `/compact` with nothing to compact has no
+/// compaction frames at all, only its result's text, which becomes the row's reason.
+fn compaction_failures_say_why() {
+    block_on(async {
+        let mut r = Replay::start("compact_failed", opts(RuntimeMode::FullAccess)).await;
+        r.session.compact().await.unwrap();
+        r.turn().await;
+        r.session.compact().await.unwrap();
+        r.turn().await;
+        r.close().await;
+        r.expect(&[
+            "thread (new)",
+            "thread 11111111-2222-4333-8444-555555555555",
+            "model claude-opus-5-5",
+            "running compaction:1: compaction ?→?",
+            "failed compaction:1: compaction ?→? error=API Error: 529 overloaded_error",
+            "usage in=0 out=0 cached=0 cost=0.000000",
+            "turn completed",
+            "failed compaction:2: compaction ?→? error=Not enough messages to compact.",
+            "usage in=0 out=0 cached=0 cost=0.000000",
+            "turn completed",
+            "exited",
+        ]);
+    });
+}
+
 fn real_cli_approval_interrupt_and_steer() {
     block_on(async {
         let resume = "46fb3af2-e190-4038-ac02-3942197a34c9";
@@ -519,8 +580,8 @@ fn todos_edits_and_notices() {
             "running toolu_e: tool Edit/edit \"src/lib.rs\" files=[src/lib.rs(modify)]",
             "request e1 for toolu_e: file_change \"Edit src/lib.rs\" [accept, accept_for_session, decline, cancel]",
             "completed toolu_e: tool Edit/edit \"src/lib.rs\" out=The file src/lib.rs has been updated. files=[src/lib.rs(modify)]",
-            "running compaction:1: system Compacting the conversation",
-            "completed compaction:1: system Compacted the conversation (150000 tokens before)",
+            "running compaction:1: compaction ?→?",
+            "completed compaction:1: compaction 150000→38000",
             "completed retry:retry1: system Retrying after an API error (529 overloaded_error), attempt 1 of 10",
             "failed hook:h1: system Hook PostToolUse:Edit failed: lint failed",
             "running toolu_w: tool WebFetch/web \"https://example.com\"",
@@ -1068,6 +1129,11 @@ fn render(e: &ProviderEvent) -> String {
                 NodeBody::Reasoning { text } => format!("reasoning {}", short(text, 40)),
                 NodeBody::Plan { text } => format!("plan {}", short(text, 60)),
                 NodeBody::System { text } => format!("system {text}"),
+                NodeBody::Compaction { before_tokens, after_tokens, error } => {
+                    let n = |t: &Option<u64>| t.map_or("?".to_string(), |t| t.to_string());
+                    let error = error.as_ref().map(|e| format!(" error={e}")).unwrap_or_default();
+                    format!("compaction {}→{}{error}", n(before_tokens), n(after_tokens))
+                }
                 NodeBody::Todos { items } => {
                     let items: Vec<String> = items
                         .iter()
@@ -1082,9 +1148,10 @@ fn render(e: &ProviderEvent) -> String {
                         .collect();
                     format!("todos {}", items.join("; "))
                 }
-                NodeBody::Subagent { agent, prompt, result, .. } => {
+                NodeBody::Subagent { agent, prompt, result, progress, .. } => {
                     let result = result.as_ref().map(|r| format!(" result={}", short(r, 40))).unwrap_or_default();
-                    format!("subagent {agent} prompt={}{result}", short(prompt, 40))
+                    let progress = progress.as_ref().map(|p| format!(" progress={}", short(p, 40))).unwrap_or_default();
+                    format!("subagent {agent} prompt={}{progress}{result}", short(prompt, 40))
                 }
                 NodeBody::Tool(t) => {
                     let kind = serde_json::to_value(t.kind).unwrap();

@@ -529,7 +529,7 @@ impl Host {
             status: NodeStatus::Running,
             started_at: at,
             completed_at: None,
-            body: NodeBody::Subagent { agent: provider.0.clone(), prompt: d.task.clone(), child: Some(id.clone()), result: None },
+            body: NodeBody::Subagent { agent: provider.0.clone(), prompt: d.task.clone(), child: Some(id.clone()), result: None, progress: None, model: thread.model.clone() },
         };
         self.store.put_thread_state(&id, &Private::default())?;
         self.tasks

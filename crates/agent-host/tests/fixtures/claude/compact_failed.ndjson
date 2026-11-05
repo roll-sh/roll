@@ -1,0 +1,10 @@
+{"dir":"out","line":{"type":"control_request","request_id":"r1","request":{"subtype":"initialize"}}}
+{"dir":"in","line":{"type":"control_response","response":{"subtype":"success","request_id":"r1","response":{}}}}
+{"dir":"out","line":{"type":"user","message":{"role":"user","content":"/compact"},"parent_tool_use_id":null}}
+{"dir":"in","line":{"type":"system","subtype":"init","session_id":"11111111-2222-4333-8444-555555555555","model":"claude-opus-5-5","permissionMode":"default","cwd":"/tmp/roll-claude-fixture"}}
+{"dir":"in","line":{"type":"system","subtype":"status","status":"compacting","session_id":"11111111-2222-4333-8444-555555555555"}}
+{"dir":"in","line":{"type":"system","subtype":"status","status":null,"compact_result":"failed","compact_error":"API Error: 529 overloaded_error","session_id":"11111111-2222-4333-8444-555555555555"}}
+{"dir":"in","line":{"type":"result","subtype":"success","is_error":false,"result":"Error during compaction: API Error: 529 overloaded_error","local_command":"compact","session_id":"11111111-2222-4333-8444-555555555555","uuid":"res1","usage":{"input_tokens":0,"output_tokens":0},"total_cost_usd":0}}
+{"dir":"out","line":{"type":"user","message":{"role":"user","content":"/compact"},"parent_tool_use_id":null}}
+{"dir":"in","line":{"type":"result","subtype":"success","is_error":false,"result":"Not enough messages to compact.","local_command":"compact","session_id":"11111111-2222-4333-8444-555555555555","uuid":"res2","usage":{"input_tokens":0,"output_tokens":0},"total_cost_usd":0}}
+{"dir":"exit","line":0}

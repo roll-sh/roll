@@ -88,6 +88,9 @@ impl Acp {
             subagents: false,
             // Modes go out with `session/set_config_option`/`set_mode`, and approvals are roll's.
             mode_switch: true,
+            // ACP has no compaction request; an agent's own `/compact` command still goes
+            // through as a message.
+            compact: false,
         }
     }
 }

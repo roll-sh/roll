@@ -239,6 +239,8 @@ fn entities() -> Vec<Entity> {
                 prompt: "Find every caller of claim()".into(),
                 child: None,
                 result: None,
+                progress: Some("Reading src/claims.rs".into()),
+                model: Some("claude-haiku-4-5".into()),
             },
         )),
         Entity::Node(node_rec(
@@ -257,6 +259,18 @@ fn entities() -> Vec<Entity> {
         )),
         Entity::Node(node_rec(8, None, NodeStatus::Waiting, NodeBody::Request { request: req() })),
         Entity::Node(node_rec(9, None, NodeStatus::Completed, NodeBody::System { text: "Context compacted".into() })),
+        Entity::Node(node_rec(
+            11,
+            None,
+            NodeStatus::Completed,
+            NodeBody::Compaction { before_tokens: Some(182_000), after_tokens: Some(41_000), error: None },
+        )),
+        Entity::Node(node_rec(
+            12,
+            None,
+            NodeStatus::Failed,
+            NodeBody::Compaction { before_tokens: None, after_tokens: None, error: Some("Not enough messages to compact.".into()) },
+        )),
         Entity::Request(Request {
             id: req(),
             thread: thr(),
@@ -343,6 +357,7 @@ fn covered_entity(e: &Entity) {
             | NodeBody::Todos { .. }
             | NodeBody::Tool(_)
             | NodeBody::Subagent { .. }
+            | NodeBody::Compaction { .. }
             | NodeBody::Request { .. }
             | NodeBody::System { .. } => {}
         },
@@ -417,6 +432,11 @@ fn commands() -> Vec<Command> {
         Command::ThreadChangeEnded { thread: thr(), landed: true },
         Command::MessageSend { thread: thr(), text: "also update the docs".into(), attachments: vec![], mode: SendMode::Steer },
         Command::MessageUnqueue { thread: thr(), message: "q1".into() },
+        Command::MessageEdit { thread: thr(), message: "q1".into(), text: "and the changelog".into(), attachments: None },
+        Command::MessageEdit { thread: thr(), message: "q1".into(), text: "no images".into(), attachments: Some(vec![]) },
+        Command::MessageReorder { thread: thr(), message: "q2".into(), before: Some("q1".into()) },
+        Command::MessageReorder { thread: thr(), message: "q1".into(), before: None },
+        Command::MessagePromote { thread: thr(), message: "q1".into() },
         Command::RunInterrupt { thread: thr() },
         Command::RequestRespond {
             request: req(),
@@ -460,6 +480,9 @@ fn covered_command(c: &Command) {
         | Command::ThreadChangeEnded { .. }
         | Command::MessageSend { .. }
         | Command::MessageUnqueue { .. }
+        | Command::MessageEdit { .. }
+        | Command::MessageReorder { .. }
+        | Command::MessagePromote { .. }
         | Command::RunInterrupt { .. }
         | Command::RequestRespond { .. }
         | Command::CheckpointRollback { .. }
@@ -593,7 +616,7 @@ fn info() -> MachineInfo {
                     efforts: vec![],
                     custom: true,
                 }],
-                capabilities: Capabilities { steer: true, fork: true, rollback: false, plan_mode: true, images: true, subagents: true, mode_switch: true },
+                capabilities: Capabilities { steer: true, fork: true, rollback: false, plan_mode: true, images: true, subagents: true, mode_switch: true, compact: true },
                 checking: false,
             },
             ProviderInfo {
@@ -604,7 +627,7 @@ fn info() -> MachineInfo {
                 auth: AuthStatus::Missing,
                 detail: Some("Run `codex login`".into()),
                 models: vec![],
-                capabilities: Capabilities { steer: true, fork: true, rollback: true, plan_mode: true, images: true, subagents: true, mode_switch: false },
+                capabilities: Capabilities { steer: true, fork: true, rollback: true, plan_mode: true, images: true, subagents: true, mode_switch: false, compact: true },
                 checking: false,
             },
             // Still being probed, with no earlier probe to show.
@@ -616,7 +639,7 @@ fn info() -> MachineInfo {
                 auth: AuthStatus::Unknown,
                 detail: None,
                 models: vec![],
-                capabilities: Capabilities { steer: false, fork: false, rollback: false, plan_mode: true, images: true, subagents: false, mode_switch: true },
+                capabilities: Capabilities { steer: false, fork: false, rollback: false, plan_mode: true, images: true, subagents: false, mode_switch: true, compact: false },
                 checking: true,
             },
         ],
@@ -850,14 +873,14 @@ fn every_variant_of_every_tagged_enum_is_sampled() {
     let tags = |v: serde_json::Value, key: &str| -> std::collections::BTreeSet<String> {
         v.as_array().unwrap().iter().map(|x| x[key].as_str().unwrap().to_string()).collect()
     };
-    assert_eq!(tags(serde_json::to_value(commands()).unwrap(), "type").len(), 34, "commands");
+    assert_eq!(tags(serde_json::to_value(commands()).unwrap(), "type").len(), 37, "commands");
     assert_eq!(tags(serde_json::to_value(replies()).unwrap(), "type").len(), 10, "replies");
     assert_eq!(tags(serde_json::to_value(entities()).unwrap(), "kind").len(), 8, "entities");
     let bodies: std::collections::BTreeSet<String> = entities()
         .iter()
         .filter_map(|e| if let Entity::Node(n) = e { Some(serde_json::to_value(&n.body).unwrap()["type"].as_str().unwrap().to_string()) } else { None })
         .collect();
-    assert_eq!(bodies.len(), 8, "node bodies");
+    assert_eq!(bodies.len(), 9, "node bodies");
 }
 
 #[test]
