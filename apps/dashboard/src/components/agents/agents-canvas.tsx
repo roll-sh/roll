@@ -18,6 +18,7 @@ import {
   arrange,
   bounds,
   centreAcross,
+  COMPACT_GAPS,
   dropIndex,
   fitView,
   loadOrder,
@@ -74,6 +75,8 @@ export const AgentsCanvas = forwardRef<
     direction?: Direction;
     /** With it, the toolbar switches the direction. */
     onDirection?: (direction: Direction) => void;
+    /** `compact`: cards fold their details (`[data-detail]`) and sit closer. */
+    density?: "compact";
     /** Enter on a focused card: open it, saying whether it did (else Enter goes into the card). */
     onOpen?: (key: string) => boolean;
     render: (node: GraphNode) => ReactNode;
@@ -90,7 +93,7 @@ export const AgentsCanvas = forwardRef<
      */
     onLaunch?: (source: string, at: Point) => void;
   }
->(function AgentsCanvas({ graph, storageKey, order: shownOrder, onOrder, fitKey, direction = "horizontal", onDirection, onOpen, render, defaultSize, onEscape, overlay, active = true, selected, onLaunch }, ref) {
+>(function AgentsCanvas({ graph, storageKey, order: shownOrder, onOrder, fitKey, direction = "horizontal", onDirection, density, onOpen, render, defaultSize, onEscape, overlay, active = true, selected, onLaunch }, ref) {
   const reduced = useReducedMotion();
   const container = useRef<HTMLDivElement>(null);
   const canvas = useRef<HTMLCanvasElement>(null);
@@ -162,8 +165,8 @@ export const AgentsCanvas = forwardRef<
   const spreads = useCallback((k: string) => graph.nodes.get(k)?.kind === "machine", [graph]);
   const across = useCallback((parent: string) => sideBySide(direction, parent, spreads), [direction, spreads]);
   const positions = useMemo(
-    () => tidyLayout(arranged, (k) => (graph.nodes.has(k) ? sizeOf(k) : { w: 0, h: 0 }), { direction, spreads }),
-    [arranged, graph, sizeOf, direction, spreads],
+    () => tidyLayout(arranged, (k) => (graph.nodes.has(k) ? sizeOf(k) : { w: 0, h: 0 }), { direction, spreads, ...(density === "compact" ? COMPACT_GAPS[direction] : {}) }),
+    [arranged, graph, sizeOf, direction, spreads, density],
   );
 
   useEffect(() => {
@@ -589,6 +592,7 @@ export const AgentsCanvas = forwardRef<
       aria-label="Agents canvas"
       role="application"
       data-direction={direction}
+      data-density={density ?? "comfortable"}
     >
       <canvas ref={canvas} aria-hidden className="pointer-events-none absolute inset-0" />
       <div ref={world} className="absolute top-0 left-0 origin-top-left" style={{ willChange: "transform" }}>

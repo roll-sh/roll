@@ -67,6 +67,12 @@ export const GAPS: Readonly<Record<Direction, Gaps>> = {
   vertical: { depthGap: 56, siblingGap: 32, rootGap: 72, indent: 28, listGap: 14 },
 };
 
+/** The compact density's gaps: about half, so more of the canvas fits on a screen. */
+export const COMPACT_GAPS: Readonly<Record<Direction, Gaps>> = {
+  horizontal: { depthGap: 44, siblingGap: 10, rootGap: 36, indent: 0, listGap: 0 },
+  vertical: { depthGap: 32, siblingGap: 16, rootGap: 40, indent: 20, listGap: 8 },
+};
+
 /**
  * Top-left corners for every node reachable from the roots, so that no two cards ever overlap.
  *

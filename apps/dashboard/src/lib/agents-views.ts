@@ -55,7 +55,17 @@ export interface Display {
   direction?: Direction;
   /** On a phone, chosen apart (a narrow screen reads top-down); `vertical` when absent. */
   phoneDirection?: Direction;
+  /** `compact`: smaller cards (the title, status and what it's doing) closer together; comfortable when absent. */
+  density?: "compact";
+  /** `project`: projects are the anchors (no machine cards); by machine when absent. */
+  group?: "project";
+  /** What's left off the canvas: threads with nothing going on, terminals. */
+  hide?: Hideable[];
 }
+
+/** What the display can leave off: `idle` threads (not working, not waiting, nothing unseen), `terminals`. */
+export type Hideable = "idle" | "terminals";
+export const HIDEABLE: readonly Hideable[] = ["idle", "terminals"];
 
 export interface SavedView {
   /** `v_…`. */
@@ -184,7 +194,62 @@ export function parseDisplay(v: unknown): Display {
   const out: Display = {};
   if (isDirection(v.direction)) out.direction = v.direction;
   if (isDirection(v.phoneDirection)) out.phoneDirection = v.phoneDirection;
+  if (v.density === "compact") out.density = "compact";
+  if (v.group === "project") out.group = "project";
+  const hide = strings(v.hide, HIDEABLE.length).filter((h): h is Hideable => (HIDEABLE as readonly string[]).includes(h));
+  if (hide.length) out.hide = hide;
   return out;
+}
+
+/** Whether a display is all defaults on every screen. */
+export const isDefaultDisplay = (d: Display) => Object.keys(parseDisplay(d)).length === 0;
+
+/**
+ * The graph as a display shows it: grouped by project (machine cards gone, projects the roots in
+ * name order, a machine's own terminals with it), without terminals, without idle threads. An
+ * idle thread stays while anything under it isn't (a running fork) or a card of it is pinned.
+ */
+export function applyDisplay(graph: Graph, display: Display, opts: { idle: (thread: string) => boolean; name?: (key: string) => string }): Graph {
+  const hide = new Set(display.hide ?? []);
+  if (!hide.size && display.group !== "project") return graph;
+  const drop = new Set<string>();
+  const dropTree = (k: string) => {
+    drop.add(k);
+    for (const c of graph.nodes.get(k)?.children ?? []) dropTree(c);
+  };
+  if (hide.has("terminals")) for (const n of graph.nodes.values()) if (n.kind === "terminal") drop.add(n.key);
+  if (hide.has("idle")) {
+    // Whether a thread (or anything under it) should stay.
+    const stays = (k: string): boolean => {
+      const n = graph.nodes.get(k)!;
+      const kids = n.children.map((c) => graph.nodes.get(c)!).filter(Boolean);
+      const own = n.kind !== "thread" || !opts.idle(n.id) || kids.some((c) => c.kind === "pin" || c.kind === "request");
+      // Every child is visited, so every idle thread below is decided too.
+      const below = kids.filter((c) => c.kind === "thread").map((c) => stays(c.key));
+      const keep = own || below.some(Boolean);
+      if (!keep) dropTree(k);
+      return keep;
+    };
+    for (const n of graph.nodes.values()) if (n.kind === "thread" && graph.nodes.get(n.parent ?? "")?.kind !== "thread") stays(n.key);
+  }
+  let roots = graph.roots;
+  if (display.group === "project") {
+    roots = [];
+    for (const r of graph.roots) {
+      drop.add(r);
+      for (const c of graph.nodes.get(r)?.children ?? []) if (graph.nodes.get(c)?.kind === "project") roots.push(c);
+        else dropTree(c);
+    }
+    const name = opts.name ?? ((k: string) => k);
+    roots = roots.map((k, i) => [k, i] as const).sort((a, b) => name(a[0]).localeCompare(name(b[0])) || a[1] - b[1]).map(([k]) => k);
+  }
+  const nodes = new Map<string, GraphNode>();
+  for (const n of graph.nodes.values()) {
+    if (drop.has(n.key)) continue;
+    const parent = n.parent && !drop.has(n.parent) ? n.parent : null;
+    nodes.set(n.key, { ...n, parent, children: n.children.filter((c) => !drop.has(c)) });
+  }
+  return { roots: roots.filter((r) => nodes.has(r)), nodes, edges: graph.edges.filter((e) => nodes.has(e.from) && nodes.has(e.to)) };
 }
 
 /** Which way a view's tree grows on this screen: the owner's choice for it, else across on a wide screen and down on a phone. */

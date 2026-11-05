@@ -7,11 +7,12 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, use
 import { isBusy } from "@/lib/agents-api";
 import { setActiveClient, type AgentsClient } from "@/lib/agents-client";
 import { deriveGraph, rolling, type GraphNode } from "@/lib/agents-graph";
+import { runsOf } from "@/lib/agents-store";
 import type { Direction, Size } from "@/lib/agents-layout";
 import { closePalette, noteThreadOpen, openPalette, togglePalette } from "@/lib/agents-palette";
 import type { AgentsServices } from "@/lib/agents-services";
 import { isNewAgentKey, setAgentsView, useAgentsSurface, viewFromHash, type AgentsView } from "@/lib/agents-surface";
-import { ALL, applyView, directionOf, focusOn, isPinned, pinKey, pinnedConversations, pinOf, projectOf, viewStorageKey, withDirection, type Pin as PinRec } from "@/lib/agents-views";
+import { ALL, applyDisplay, applyView, directionOf, focusOn, isPinned, pinKey, pinnedConversations, pinOf, projectOf, viewStorageKey, withDirection, type Pin as PinRec } from "@/lib/agents-views";
 import { desktop, onDesktopDeepLink, useDesktop } from "@/lib/desktop";
 import { LINK_PARAMS, type IntegrationsLink } from "@/lib/integrations-api";
 import { useModelPrefsSync, useOwnerSettings } from "@/lib/owner-settings";
@@ -33,6 +34,7 @@ import { SettingsPanel } from "./settings-panel";
 import { useSandboxes } from "./sandbox";
 import { Conversation, IconButton } from "./session";
 import { TerminalNode } from "./terminal";
+import { threadDone } from "./thread-status";
 import { SidebarToggle, ThreadsSidebar, useSidebarOpen } from "./threads-sidebar";
 import { AgentsContext, useAgents, useAgentsSnapshot, useHold, useMarkDriver, type AgentsCtx } from "./use-agents";
 import { useAgentsConnection } from "./use-connection";
@@ -631,7 +633,21 @@ function CanvasView({
   // A pinned conversation answers its thread's requests itself.
   const expanded = useMemo(() => pinnedConversations(view), [view]);
   const whole = useMemo(() => deriveGraph(data, { showArchived, expanded }), [data, showArchived, expanded]);
-  const viewed = useMemo(() => applyView(whole, data, { filter, pins: view.pins }, Date.now()), [whole, data, filter, view.pins]);
+  const display = view.display;
+  const viewed = useMemo(() => {
+    const g = applyView(whole, data, { filter, pins: view.pins }, Date.now());
+    return applyDisplay(g, display, {
+      // Idle: nothing going on and nothing unseen (a finished run you haven't opened stays).
+      idle: (id) => {
+        const t = data.threads.get(id)?.value;
+        if (!t) return false;
+        const runs = runsOf(data, id);
+        const last = t.active_run ? data.runs.get(t.active_run)?.value : runs[runs.length - 1];
+        return !isBusy(t.status) && t.status !== "error" && t.pending_requests === 0 && !threadDone(t, last);
+      },
+      name: (k) => data.projects.get(k.slice(2))?.value.name ?? k,
+    });
+  }, [whole, data, filter, view.pins, display]);
   const graph = useMemo(() => (focused ? focusOn(viewed, `p:${focused}`) : viewed), [viewed, focused]);
   // F on a card focuses its project (again: everything); Escape lets go first.
   useEffect(() => {
@@ -767,9 +783,10 @@ function CanvasView({
           storageKey={viewStorageKey(owner, view.id)}
           order={view.order}
           onOrder={views.setOrder}
-          fitKey={`${JSON.stringify(filter)}|${focused ?? ""}`}
+          fitKey={`${JSON.stringify(filter)}|${focused ?? ""}|${display.group ?? ""}|${display.hide?.join() ?? ""}|${display.density ?? ""}`}
           direction={direction}
           onDirection={onDirection}
+          density={display.density}
           onOpen={onOpen}
           render={render}
           defaultSize={sizeOf}

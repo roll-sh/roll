@@ -6,6 +6,7 @@ import { applyEvents, emptyData, follow } from "./agents-store";
 import {
   addView,
   ALL,
+  applyDisplay,
   applyView,
   countView,
   DEFAULT_VIEWS,
@@ -13,6 +14,7 @@ import {
   directionOf,
   encodeDoc,
   focusOn,
+  parseDisplay,
   MAX_PINS,
   MAX_VIEWS,
   moveView,
@@ -269,5 +271,46 @@ describe("focusing one project", () => {
     expect(projectOf(g, "m:mch_1")).toBeNull();
     // A project that's gone leaves the canvas whole.
     expect(focusOn(g, "p:gone")).toBe(g);
+  });
+});
+
+describe("display options", () => {
+  const idle = (id: string) => id === "thr_3" || id === "thr_f";
+  it("parse what they know and drop the rest", () => {
+    expect(parseDisplay({ density: "compact", group: "project", hide: ["idle", "terminals", "idle", "bogus"], extra: 1 })).toEqual({ density: "compact", group: "project", hide: ["idle", "terminals"] });
+    expect(parseDisplay({ density: "roomy", group: "status", hide: "idle" })).toEqual({});
+    const doc = setViewDisplay(parseDoc({}), "v_running", { density: "compact", hide: ["terminals"] });
+    expect(parseDoc(JSON.parse(JSON.stringify(encodeDoc(doc))))).toEqual(doc);
+  });
+
+  it("leave off terminals and idle threads; an idle thread stays for what's under it", () => {
+    const g = deriveGraph(sample());
+    expect(applyDisplay(g, {}, { idle })).toBe(g);
+    const noTerm = applyDisplay(g, { hide: ["terminals"] }, { idle });
+    expect([...noTerm.nodes.values()].some((n) => n.kind === "terminal")).toBe(false);
+    const quiet = applyDisplay(g, { hide: ["idle"] }, { idle });
+    expect(quiet.nodes.has("t:thr_3")).toBe(false);
+    expect(quiet.nodes.has("t:thr_1")).toBe(true);
+    expect(quiet.nodes.get("p:prj_1")!.children).not.toContain("t:thr_3");
+    // An idle thread with a running fork under it stays, as the fork's context.
+    const forked = applyEvents(sample(), [ev("thread", thread({ id: "thr_f", title: "Fork", created_at: 50, lineage: { parent: "thr_3", relation: "fork", root: "thr_3", from_run: "run_1" } }), 30), ev("thread", thread({ id: "thr_g", title: "Busy fork", status: "running", created_at: 60, lineage: { parent: "thr_f", relation: "fork", root: "thr_3", from_run: "run_1" } }), 31)]);
+    const kept = applyDisplay(deriveGraph(forked), { hide: ["idle"] }, { idle });
+    expect(["t:thr_3", "t:thr_f", "t:thr_g"].every((k) => kept.nodes.has(k))).toBe(true);
+    expect(kept.edges.every((e) => kept.nodes.has(e.from) && kept.nodes.has(e.to))).toBe(true);
+  });
+
+  it("group by project: projects are the anchors, by name, with no machine cards", () => {
+    const g = deriveGraph(sample());
+    const byProject = applyDisplay(g, { group: "project" }, { idle, name: (k) => ({ "p:prj_1": "roll", "p:prj_2": "web" })[k] ?? k });
+    expect(byProject.roots).toEqual(["p:prj_1", "p:prj_2"]);
+    expect([...byProject.nodes.values()].some((n) => n.kind === "machine")).toBe(false);
+    expect(byProject.nodes.get("p:prj_1")!.parent).toBeNull();
+    expect(byProject.nodes.get("t:thr_1")!.parent).toBe("p:prj_1");
+    expect(byProject.edges.some((e) => e.from.startsWith("m:"))).toBe(false);
+    // Laid out, nothing overlaps.
+    const size = () => ({ w: 300, h: 100 });
+    const pos = tidyLayout(arrange(byProject, {}), size, { direction: "vertical", spreads: () => false });
+    const ys = [...pos.values()];
+    expect(new Set(ys.map((p) => `${p.x},${p.y}`)).size).toBe(ys.length);
   });
 });

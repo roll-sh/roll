@@ -357,7 +357,7 @@ function StatsRows({ stats, providers }: { stats: ProjectStats; providers: reado
   const landed = stats.changes.filter((c) => c.status === "landed").length;
   const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
   return (
-    <div className="mx-3 mb-3 space-y-1 border-t border-line pt-2.5 text-[11px] text-subtle">
+    <div data-detail className="mx-3 mb-3 space-y-1 border-t border-line pt-2.5 text-[11px] text-subtle">
       <p className="flex items-center gap-1.5">
         <span className="min-w-0 truncate">
           {plural(stats.threads, "thread", "threads")}
@@ -468,7 +468,7 @@ export function ThreadNode({ thread, machine }: { thread: Thread; machine: Machi
         </p>
         )}
         {(thread.orchestrator || thread.change || thread.work || thread.worktree || terminals > 0 || origin) && (
-          <div className="mt-2 flex min-w-0 items-center gap-2 text-[11px] text-subtle">
+          <div data-detail className="mt-2 flex min-w-0 items-center gap-2 text-[11px] text-subtle">
             {origin && <AutomationChip origin={origin} />}
             {orchestrated && <OrchestratorChip {...orchestrated} />}
             {thread.change && <ChangeChip change={thread.change} />}
@@ -487,7 +487,7 @@ export function ThreadNode({ thread, machine }: { thread: Thread; machine: Machi
             )}
           </div>
         )}
-        <p className="mt-2 flex items-center gap-1.5 border-t border-line pt-2 text-[11px] text-subtle">
+        <p data-detail className="mt-2 flex items-center gap-1.5 border-t border-line pt-2 text-[11px] text-subtle">
           {thread.lineage && <GitFork className="size-3 shrink-0" aria-label={thread.lineage.relation === "fork" ? "Fork" : "Delegated"} />}
           <span className="min-w-0 truncate">
             {providerName(providers, thread.provider)}

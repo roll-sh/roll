@@ -589,6 +589,12 @@ body {
     var(--card-shadow-hover);
 }
 
+/* The canvas's compact density: cards keep their name, status and what they're doing, and fold
+   the rest (`data-detail` in nodes.tsx). */
+[data-density="compact"] [data-card] [data-detail] {
+  display: none;
+}
+
 /* A notice toast slides in from the right edge (T3's toasts: 0.5 s on an ease-out quint). */
 @keyframes toast-in {
   from {

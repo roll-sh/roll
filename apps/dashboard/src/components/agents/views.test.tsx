@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { setActiveClient } from "@/lib/agents-client";
 import { agentsSurface, resetAgentsSurface } from "@/lib/agents-surface";
 import { ALL, loadCurrentView, loadDoc, saveCurrentView, saveDoc, addView, parseDoc } from "@/lib/agents-views";
-import { approval, mirrored, node, project, run, thread } from "@/test/agents";
+import { approval, mirrored, node, project, run, terminal, thread } from "@/test/agents";
 import { agentsHarness, fakeServices, renderAgents } from "@/test/agents-render";
 import { AgentsSurface } from "./agents-page";
 
@@ -302,4 +302,47 @@ describe("moving around the canvas from the keyboard", () => {
     await userEvent.click(screen.getByRole("menuitem", { name: "Focus (F)" }));
     expect(card("Dark mode")).toBeNull();
   });
+});
+
+describe("the display menu", () => {
+  it("sets density, grouping and what's shown for the view, saved with it", async () => {
+    const services = fakeServices();
+    const extra = [mirrored("thread", thread({ id: "thr_q", title: "Docs pass" }), 8), mirrored("terminal", terminal(), 9)];
+    const h = agentsHarness({ entities: [...entities, ...extra], follow: ["thr_1", "thr_2"] });
+    renderAgents(<AgentsSurface client={h.client} services={services} demo={false} chrome="popup" />, h);
+    const canvas = screen.getByLabelText("Agents canvas");
+    expect(canvas).toHaveAttribute("data-density", "comfortable");
+    await userEvent.click(screen.getByRole("button", { name: "Display" }));
+    const menu = await screen.findByRole("dialog", { name: "Display options" });
+
+    await userEvent.click(within(menu).getByRole("button", { name: "Compact" }));
+    expect(canvas).toHaveAttribute("data-density", "compact");
+
+    expect(screen.getByLabelText("Machine ada-mbp")).toBeInTheDocument();
+    await userEvent.click(within(menu).getByRole("button", { name: "Project" }));
+    expect(screen.queryByLabelText("Machine ada-mbp")).toBeNull();
+    expect(screen.getByLabelText("Project roll")).toBeInTheDocument();
+
+    expect(screen.getByLabelText("Terminal zsh")).toBeInTheDocument();
+    await userEvent.click(within(menu).getByRole("switch", { name: "Terminals" }));
+    expect(screen.queryByLabelText("Terminal zsh")).toBeNull();
+
+    expect(card("Docs pass")).toBeInTheDocument();
+    await userEvent.click(within(menu).getByRole("switch", { name: "Idle threads" }));
+    expect(card("Docs pass")).toBeNull();
+    // What's working or waiting stays.
+    expect(card("Fix the flaky queue test")).toBeInTheDocument();
+    expect(card("Upgrade to Next 16.4")).toBeInTheDocument();
+    await waitFor(() => expect(lastSaved(services)).toMatchObject({ display: { density: "compact", group: "project", hide: ["idle", "terminals"] } }));
+
+    // Another view keeps its own.
+    await userEvent.keyboard("{Escape}");
+    await userEvent.click(tab(/Running/));
+    expect(canvas).toHaveAttribute("data-density", "comfortable");
+    await userEvent.click(tab("All"));
+    await userEvent.click(screen.getByRole("button", { name: "Display" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Reset to default" }));
+    expect(canvas).toHaveAttribute("data-density", "comfortable");
+    expect(card("Docs pass")).toBeInTheDocument();
+  }, 20_000);
 });

@@ -1,12 +1,17 @@
 "use client";
 
-import { Bookmark, ChevronDown, Focus as FocusIcon, Pencil, Pin as PinIcon, PinOff, Plus, Search, SlidersHorizontal, Trash2, X, ArrowLeft, ArrowRight, FileDiff as DiffIcon } from "lucide-react";
+import { ArrowDownFromLine, ArrowRightFromLine, Bookmark, ChevronDown, Focus as FocusIcon, ListFilter, Pencil, Pin as PinIcon, PinOff, Plus, Search, SlidersHorizontal, Trash2, X, ArrowLeft, ArrowRight, FileDiff as DiffIcon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { AgentsServices } from "@/lib/agents-services";
 import type { AgentsData } from "@/lib/agents-store";
 import {
   addView,
   ALL,
+  directionOf,
+  HIDEABLE,
+  isDefaultDisplay,
+  withDirection,
+  type Hideable,
   countView,
   deleteView,
   encodeDoc,
@@ -42,6 +47,7 @@ import {
 } from "@/lib/agents-views";
 import type { Order } from "@/lib/agents-layout";
 import { Menu } from "./menu";
+import { Popover, PopoverPopup, PopoverTrigger, Segmented, Switch } from "./ui";
 
 /** How long edits wait before they go to roll (typing a filter, resizing a card). */
 const SAVE_AFTER_MS = 350;
@@ -356,6 +362,7 @@ export function ViewsBar({
             />
           </label>
         )}
+        <DisplayMenu display={v.current.display} phone={phone} onChange={v.setDisplay} />
         <button
           onClick={() => setEditor((e) => (e ? null : { mode: "edit" }))}
           aria-expanded={!!editor}
@@ -363,7 +370,7 @@ export function ViewsBar({
           title="Filters"
           className={`flex h-7 items-center gap-1 rounded-md px-2 text-[12px] transition-colors duration-150 hover:bg-fg/[0.05] hover:text-fg ${filters ? "text-fg" : "text-subtle"} ${editor ? "bg-fg/[0.07]" : ""}`}
         >
-          <SlidersHorizontal className="size-3.5" strokeWidth={1.75} />
+          <ListFilter className="size-3.5" strokeWidth={1.75} />
           {filters > 0 && <span className="font-mono text-[10.5px] text-accent tabular-nums">{filters}</span>}
         </button>
         {draftActive && (
@@ -400,6 +407,108 @@ export function ViewsBar({
 
 const threadFilter = (f: ViewFilter) => !!(f.status?.length || f.providers?.length || f.text?.trim());
 const filterCount = (f: ViewFilter) => (f.machines?.length ?? 0) + (f.projects?.length ?? 0) + (f.status?.length ?? 0) + (f.providers?.length ?? 0) + (f.text?.trim() ? 1 : 0);
+
+const HIDE_LABEL: Record<Hideable, { label: string; hint: string }> = {
+  idle: { label: "Idle threads", hint: "Not working, not waiting, nothing new" },
+  terminals: { label: "Terminals", hint: "Shells and logins on the canvas" },
+};
+
+/**
+ * Linear's display options for the view showing (saved with it, so every device agrees): which way
+ * it grows (this screen's; a phone keeps its own), density, grouping, and what's shown.
+ */
+function DisplayMenu({ display, phone, onChange }: { display: Display; phone: boolean; onChange: (d: Display) => void }) {
+  const direction = directionOf(display, phone);
+  const set = (patch: Partial<Display>) => onChange({ ...display, ...patch });
+  const hidden = new Set(display.hide ?? []);
+  const changed = !isDefaultDisplay(display);
+  return (
+    <Popover>
+      <PopoverTrigger
+        render={
+          <button
+            type="button"
+            aria-label="Display"
+            title="Display"
+            className={`flex h-7 items-center gap-1 rounded-md px-2 text-[12px] transition-colors duration-150 hover:bg-fg/[0.05] hover:text-fg data-popup-open:bg-fg/[0.07] ${changed ? "text-fg" : "text-subtle"}`}
+          />
+        }
+      >
+        <SlidersHorizontal className="size-3.5" strokeWidth={1.75} />
+        <span className="max-sm:sr-only">Display</span>
+      </PopoverTrigger>
+      <PopoverPopup side="bottom" align="end" sideOffset={6} aria-label="Display options" className="w-[300px] flex-col gap-3 p-3 text-[12.5px]">
+        <DisplayRow label="Layout" hint={phone ? "On phones" : undefined}>
+          <Segmented
+            label="Layout"
+            value={direction}
+            onChange={(d) => onChange(withDirection(display, phone, d))}
+            options={[
+              { value: "horizontal", label: <><ArrowRightFromLine /> Across</>, title: "Left to right (⇧D)" },
+              { value: "vertical", label: <><ArrowDownFromLine /> Down</>, title: "Top-down, a column per project (⇧D)" },
+            ]}
+          />
+        </DisplayRow>
+        <DisplayRow label="Density">
+          <Segmented
+            label="Density"
+            value={display.density ?? "comfortable"}
+            onChange={(d) => set({ density: d === "compact" ? "compact" : undefined })}
+            options={[
+              { value: "comfortable", label: "Comfortable" },
+              { value: "compact", label: "Compact" },
+            ]}
+          />
+        </DisplayRow>
+        <DisplayRow label="Grouping">
+          <Segmented
+            label="Grouping"
+            value={display.group ?? "machine"}
+            onChange={(g) => set({ group: g === "project" ? "project" : undefined })}
+            options={[
+              { value: "machine", label: "Machine", title: "Machines, then their projects" },
+              { value: "project", label: "Project", title: "Projects as the anchors" },
+            ]}
+          />
+        </DisplayRow>
+        <div className="border-t border-line pt-2.5" role="group" aria-label="Show">
+          <p className="mb-1.5 text-[11px] font-medium tracking-wide text-subtle uppercase">Show</p>
+          {HIDEABLE.map((h) => (
+            <label key={h} className="flex h-8 cursor-pointer items-center gap-2" title={HIDE_LABEL[h].hint}>
+              <span className="min-w-0 flex-1 truncate text-fg">{HIDE_LABEL[h].label}</span>
+              <Switch
+                size="sm"
+                aria-label={HIDE_LABEL[h].label}
+                checked={!hidden.has(h)}
+                onCheckedChange={(on) => {
+                  const next = HIDEABLE.filter((x) => (x === h ? !on : hidden.has(x)));
+                  set({ hide: next.length ? next : undefined });
+                }}
+              />
+            </label>
+          ))}
+        </div>
+        {changed && (
+          <button type="button" onClick={() => onChange({})} className="self-start text-[12px] text-subtle transition-colors hover:text-fg">
+            Reset to default
+          </button>
+        )}
+      </PopoverPopup>
+    </Popover>
+  );
+}
+
+function DisplayRow({ label, hint, children }: { label: string; hint?: string; children: ReactNode }) {
+  return (
+    <div className="flex items-center gap-2">
+      <span className="min-w-0 flex-1 text-muted">
+        {label}
+        {hint && <span className="ml-1.5 text-[11px] text-subtle">{hint}</span>}
+      </span>
+      {children}
+    </div>
+  );
+}
 
 function NameField({ initial, label, onDone }: { initial: string; label: string; onDone: (name: string | null) => void }) {
   const [name, setName] = useState(initial);

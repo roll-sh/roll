@@ -925,6 +925,21 @@ The surface has three views:
   names it; its × or Escape (before Escape closes anything else) shows every project again. It's
   per device and on top of the view, so it never changes what a view picks.
 
+  **Display** (Linear's display options; `DisplayMenu` in `views.tsx`, `applyDisplay` in
+  `lib/agents-views.ts`). Each view has its own, kept with it in the canvas document, in a
+  popover beside the filters:
+  - **Layout:** across or down (this screen's; a phone keeps its own), as above.
+  - **Density:** comfortable, or compact. Compact folds each card to its name, status and what
+    it's doing (the rest is `data-detail` in `nodes.tsx`) and roughly halves the gaps, so about
+    twice as much work fits a screen when there's a lot running.
+  - **Grouping:** by machine (machines, then their projects), or by project (the projects are the
+    anchors, by name, and the machine cards go; the threads already say which machine they're on).
+    One machine is the common case, and then its card is a level that carries nothing.
+  - **Show:** idle threads (not working, not waiting, nothing unseen; an idle thread stays while
+    a fork under it works, or while a card of it is pinned) and terminals. Leaving idle threads
+    off makes the canvas the work in flight, the thing an owner checks most.
+  - "Reset to default" when anything differs.
+
   One canvas engine (canvas 2D + `requestAnimationFrame`, paused offscreen) draws edges,
   pulses and the dot field; cards are DOM, positioned by the same world transform. Navigation is
   Figma's: scrolling pans (two fingers on a trackpad, any direction; shift turns a mouse wheel
@@ -1054,7 +1069,8 @@ The surface has three views:
   JSON) and opaque to roll; the dashboard reaches it through `AgentsServices.canvas`. It is
   `{ order, pins?, display?, views? }`: `order`, `pins` and `display` are All's, `views` the
   owner's views (`{ id, name, filter, order?, pins?, display? }`, at most 16). `display` is how a
-  view is shown (`direction`, `phoneDirection`; absent means the default). A document from before
+  view is shown (`direction`, `phoneDirection`, `density`, `group`, `hide`; absent means the
+  default). A document from before
   views (`{ order }`) still parses and shows the built-in views, one without `display` the
   defaults; `views: []` means the owner deleted them all. Saves
   wait 350 ms (typing a filter, resizing a card is one save) and stay under the limit by

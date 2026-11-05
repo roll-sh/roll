@@ -161,6 +161,13 @@ state, or draw a project's logo inline (only in an `<img>`).
   (`bg-panel-2`, `border-line-2`, highlight, `shadow-card`). Other tabs are bare text with a
   translucent hover. Counts sit in 16px round badges. The filter field is the same quiet field as
   the palette trigger.
+- **Display popover:** "Display" beside the filters (the filters' icon is the funnel). Rows of a
+  muted label and a `Segmented` (layout, density, grouping), then "Show" with `Switch` rows, a
+  hint in each row's tooltip. The compact density hides `[data-detail]` inside cards (globals.css)
+  and lays out with `COMPACT_GAPS`.
+- **Keyboard focus on the canvas:** a focused card gets the 2px accent outline offset by 2px,
+  like any focus; the focus-a-project chip is a raised chip (`bg-panel-2`, highlight) in the
+  views bar with the project's name and an ×.
 - **Canvas panel:** `mx-2 mb-2 rounded-xl border border-line bg-canvas`. On a phone it's full
   bleed.
 - **Zoom bar:** glass, `rounded-[10px]`, `shadow-pop`, highlight, 28px buttons, the zoom in
