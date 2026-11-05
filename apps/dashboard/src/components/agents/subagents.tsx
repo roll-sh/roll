@@ -91,15 +91,17 @@ export function SubagentRow({ node, now, onOpen }: { node: Node; now: number; on
 
 /** Several subagents started together (T3's "{n} subagents" row). */
 export function SubagentGroup({ nodes, now, open }: { nodes: Node[]; now: number; open: (n: Node) => (() => void) | undefined }) {
-  const running = nodes.filter((n) => live(n.status)).length;
+  const running = nodes.filter((n) => n.status === "running").length;
+  const waiting = nodes.filter((n) => n.status === "waiting").length;
   return (
     <section aria-label={`${nodes.length} subagents`} className="space-y-1">
       <p className="flex min-h-6 items-center gap-1.5 px-0.5 text-[13px] text-muted">
         <span className="grid w-6 place-items-center">
-          <Bot className={`size-4 ${running ? "text-accent" : "opacity-70"}`} strokeWidth={1.5} />
+          <Bot className={`size-4 ${running || waiting ? "text-accent" : "opacity-70"}`} strokeWidth={1.5} />
         </span>
         {nodes.length} subagents
         {running > 0 && <span className="text-subtle">· {running} running</span>}
+        {waiting > 0 && <span className="text-subtle">· {waiting} waiting</span>}
       </p>
       <div className="ms-7 space-y-1">
         {nodes.map((n) => (
