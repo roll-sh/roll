@@ -28,6 +28,7 @@ import { pickByDigit, pill, QuestionsPanel, quiet, useQuestionFlow } from "./req
 import { Switch } from "./ui";
 import { newThreadSettings } from "./new-thread";
 import { useAgents, usePrefs } from "./use-agents";
+import { appendDraft, onCompose } from "@/lib/agents-compose";
 
 /** What a new thread starts with (the `thread.create` fields the composer picks). */
 export interface NewThreadFields {
@@ -203,6 +204,16 @@ export function Composer({
   useEffect(() => {
     if (autoFocus) area.current?.focus({ preventScroll: true });
   }, [autoFocus]);
+
+  // T3's "Edit from here": the message comes back appended to what's typed, its images too.
+  useEffect(() => {
+    if (!thread) return;
+    return onCompose(thread.id, (d) => {
+      setText((t) => appendDraft(t, d.text));
+      if (d.attachments.length) setAttachments((x) => [...x, ...d.attachments]);
+      area.current?.focus();
+    });
+  }, [thread]);
 
   const info = providers.find((p) => p.id === provider);
   const modelInfo = resolveModel(info, model);

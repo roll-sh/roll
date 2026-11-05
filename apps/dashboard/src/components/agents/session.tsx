@@ -28,6 +28,7 @@ import { useEscapeLayer } from "./escape-layers";
 import { Composer } from "./composer";
 import { Menu } from "./menu";
 import { deleteConfirm, ShelfStrip, useInboxMenu } from "./threads-sidebar";
+import { composeInto } from "@/lib/agents-compose";
 import { toFileDiff } from "./request-card";
 import { ShareButton } from "./share";
 import { Stat, StatusDot, usageLine } from "./shared";
@@ -119,12 +120,24 @@ export function Conversation({ thread, machine, start, end }: { thread: Thread; 
     }
   };
   const mid = machine?.id;
+  // T3 blocks "Edit from here" while the thread runs.
+  const busyThread = isBusy(thread.status);
   const actions: TranscriptActions = readOnly
     ? { openThread, openSubagent: setSub }
     : {
         respond: (request, response) => client.run(mid!, { type: "request.respond", request, response }),
         showDiff: (r) => setSide({ kind: "diff", run: r }),
         rollback: (c: Checkpoint) => run(() => client.run(mid!, { type: "checkpoint.rollback", thread: thread.id, checkpoint: c.id })),
+        // T3's "Edit from here": back to the checkpoint before the message, which goes back in the composer.
+        editFrom: busyThread
+          ? undefined
+          : (r: Run) =>
+              run(async () => {
+                const before = [...(data.checkpoints.get(thread.id)?.values() ?? [])].map((c) => c.value).find((c) => c.ordinal === r.ordinal - 1);
+                if (!before) throw new Error("There's no checkpoint from before this message to go back to.");
+                await client.run(mid!, { type: "checkpoint.rollback", thread: thread.id, checkpoint: before.id });
+                composeInto(thread.id, { text: r.prompt, attachments: r.attachments });
+              }),
         fork: (r: Run) =>
           run(async () => {
             const res = await client.run<{ type: "created"; id: string }>(mid!, { type: "thread.fork", thread: thread.id, at: r.id }, "created");

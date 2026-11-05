@@ -345,7 +345,18 @@ mapping, and the web's `QueuedRunsControl.tsx`, `ContextWindowMeter.tsx`, `V2Lif
   its MCP tools). ⌘⇧Enter with nothing typed sends the first queued message into the turn. A
   stopped or failed run holds the queue, and a restart keeps it held (the thread's `queued`
   persists): the panel says "Queue paused" with Resume, the empty send button is "Resume thread",
-  and a new message starts at once with the queue resuming after it.
+  and a new message starts at once with the queue resuming after it. All of this was checked
+  against T3's rules on a real stack (rolld and `roll agent up` with the fake provider: queue,
+  edit, reorder, remove, refusals, a daemon restart with a parked run, drain, Stop holding the
+  queue, Send now both ways, steer); the one difference is on failure, where roll holds the
+  queue whatever failed and T3 lets a validation error or another provider's run through.
+- **Messages.** A sent message has T3's "Edit from here" (`useTimelineRewind.ts`): after asking,
+  the thread goes back to the checkpoint before it (`checkpoint.rollback`: the files, and the
+  conversation where the provider can) and the message comes back in the composer, appended to
+  what's typed, images too (`lib/agents-compose.ts`); not while the thread runs, and not without a
+  checkpoint (a project outside git). Copy, and Fork on a finished run, are T3's; T3 has no retry
+  either (Resume continues a stopped thread). T3's rollback without restoring files isn't
+  offered: a checkpoint is the files.
 - **Compaction.** Claude Code and Codex compact on their own as the context fills; both also
   compact on request (`Capabilities.compact`). A message of exactly `/compact` runs as a
   compaction, a run of its own (T3's `compactThread`): Codex `thread/compact/start` (the turn it

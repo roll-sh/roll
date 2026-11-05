@@ -22,6 +22,7 @@ import {
   ListChecks,
   ListTodo,
   Minimize2,
+  Pencil,
   RotateCcw,
   Split,
   X,
@@ -47,6 +48,11 @@ export interface TranscriptActions {
   showDiff?: (run: string | null) => void;
   rollback?: (checkpoint: Checkpoint) => Promise<unknown>;
   fork?: (run: Run) => Promise<unknown>;
+  /**
+   * T3's "Edit from here": roll the files and the conversation back to before this message and
+   * put it back in the composer (unset: not offered, e.g. read-only, running, no checkpoint).
+   */
+  editFrom?: (run: Run) => Promise<unknown>;
   openThread: (thread: string) => void;
   /** Open a provider subagent's own transcript (unset: its work opens inline under its row). */
   openSubagent?: (node: string) => void;
@@ -94,7 +100,7 @@ export function RunView({
   return (
     <section className={`group/run flex flex-col gap-3 ${run.status === "rolled_back" ? "opacity-45" : ""}`} aria-label={`Run ${run.ordinal}`}>
       {/* Nobody typed an idle compaction: its row says what happened (T3). */}
-      {!run.idle_compaction && <UserMessage run={run} />}
+      {!run.idle_compaction && <UserMessage run={run} editFrom={run.status !== "rolled_back" ? actions.editFrom : undefined} />}
       {turn.fold && (
         <div className="border-b border-line pt-1 pb-2">
           <button
@@ -216,9 +222,10 @@ function CopyButton({ text, label = "Copy" }: { text: string; label?: string }) 
 
 const clock = (at: number) => new Date(at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 
-/** The user's turn (T3's user row): a bubble on the right; a long one folds; its time and copy on hover. */
-function UserMessage({ run }: { run: Run }) {
+/** The user's turn (T3's user row): a bubble on the right; a long one folds; its time, copy and "Edit from here" on hover. */
+function UserMessage({ run, editFrom }: { run: Run; editFrom?: (run: Run) => Promise<unknown> }) {
   const [open, setOpen] = useState(false);
+  const [confirming, setConfirming] = useState(false);
   const long = run.prompt.length > 600 || run.prompt.split("\n").length > 8;
   return (
     <div className="group/user flex flex-col items-end gap-1 pb-1">
@@ -248,9 +255,43 @@ function UserMessage({ run }: { run: Run }) {
           {s}
         </div>
       ))}
-      <div className="flex items-center gap-1 text-[11px] text-subtle opacity-0 transition-opacity duration-200 group-hover/user:opacity-100 focus-within:opacity-100 motion-reduce:transition-none [@media(hover:none)]:opacity-100">
-        <time className="tabular-nums">{clock(run.requested_at)}</time>
-        <CopyButton text={run.prompt} label="Copy the message" />
+      <div
+        className={`flex items-center gap-1 text-[11px] text-subtle transition-opacity duration-200 group-hover/user:opacity-100 focus-within:opacity-100 motion-reduce:transition-none [@media(hover:none)]:opacity-100 ${confirming ? "opacity-100" : "opacity-0"}`}
+      >
+        {confirming ? (
+          <>
+            <span className="text-muted">Go back to before this message? Later runs and their file changes are undone.</span>
+            <button
+              type="button"
+              onClick={() => {
+                setConfirming(false);
+                void editFrom?.(run);
+              }}
+              className="rounded-md px-1.5 py-0.5 font-medium text-fg hover:bg-fg/[0.06]"
+            >
+              Go back and edit
+            </button>
+            <button type="button" onClick={() => setConfirming(false)} className="rounded-md px-1.5 py-0.5 hover:bg-fg/[0.06] hover:text-fg">
+              Keep
+            </button>
+          </>
+        ) : (
+          <>
+            <time className="tabular-nums">{clock(run.requested_at)}</time>
+            <CopyButton text={run.prompt} label="Copy the message" />
+            {editFrom && (
+              <button
+                type="button"
+                onClick={() => setConfirming(true)}
+                aria-label="Edit from here"
+                title="Edit from here: go back to before this message and change it"
+                className="inline-grid size-6 place-items-center rounded-md transition-colors hover:bg-fg/[0.06] hover:text-fg"
+              >
+                <Pencil className="size-3" />
+              </button>
+            )}
+          </>
+        )}
       </div>
     </div>
   );
