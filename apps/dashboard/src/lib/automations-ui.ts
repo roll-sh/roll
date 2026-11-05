@@ -558,10 +558,16 @@ function eachString(v: unknown, at: string, fn: (s: string, at: string) => void)
   else if (v && typeof v === "object") for (const [k, x] of Object.entries(v)) eachString(x, `${at}.${k}`, fn);
 }
 
-/** What's wrong with a spec before the server says so, for the builder's inline messages. */
-export function validate(spec: AutomationSpec, c: Catalog): Problems {
+/**
+ * What's wrong with a spec before the server says so, for the builder's inline messages. `taken`:
+ * the owner's other automations' names (two with one name can't be told apart in a list, a run or
+ * a notice).
+ */
+export function validate(spec: AutomationSpec, c: Catalog, taken: readonly string[] = []): Problems {
   const p: Problems = {};
-  if (!spec.name.trim()) p.name = "Give it a name.";
+  const name = spec.name.trim();
+  if (!name) p.name = "Give it a name.";
+  else if (taken.some((t) => t.trim().toLowerCase() === name.toLowerCase())) p.name = `Another automation is called ${name}.`;
   const t = spec.trigger;
   if (t.type === "schedule") {
     const bad = cronShape(t.cron);

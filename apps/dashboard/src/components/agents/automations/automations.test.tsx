@@ -6,6 +6,7 @@ import { automation, automationRun, fakeApi, T } from "@/test/automations";
 import { agentsSurface, resetAgentsSurface } from "@/lib/agents-surface";
 import { machine, mirrored, project, provider, thread } from "@/test/agents";
 import { agentsHarness, fakeServices, renderAgents } from "@/test/agents-render";
+import { macClick } from "@/test/mac-click";
 import { ThreadNode } from "../nodes";
 import { AutomationPanel, forgetDrafts } from "./automation-panel";
 import { AutomationsView } from "./automations-view";
@@ -175,6 +176,24 @@ describe("Automation builder", () => {
     expect(screen.getByRole("contentinfo")).toHaveTextContent("2 things to fix");
     expect(screen.getByText("Add a step: what should happen.")).toBeInTheDocument();
     expect(api.create).not.toHaveBeenCalled();
+  });
+
+  it("refuses a name another automation has, and a Create that can't go takes you to what's wrong", async () => {
+    const api = fakeApi([automation({ id: "aut_1", name: "Morning triage" })]);
+    renderAgents(<AutomationPanel view={{ kind: "automations", open: "new" }} />, harness(api));
+    await userEvent.type(screen.getByRole("textbox", { name: "Name" }), "morning triage");
+    await userEvent.click(screen.getByRole("button", { name: "Add a step" }));
+    await userEvent.click(await screen.findByRole("menuitem", { name: /Notify me/ }));
+    await userEvent.click(screen.getByRole("button", { name: "Create" }));
+    expect(api.create).not.toHaveBeenCalled();
+    const name = screen.getByRole("textbox", { name: "Name" });
+    expect(name).toHaveAttribute("aria-invalid", "true");
+    expect(name).toHaveAttribute("title", "Another automation is called morning triage.");
+    await waitFor(() => expect(name).toHaveFocus());
+    // The footer goes there again.
+    await userEvent.click(screen.getByRole("button", { name: "Add a step" }));
+    macClick(within(screen.getByRole("contentinfo")).getByRole("button", { name: "2 things to fix" }));
+    await waitFor(() => expect(name).toHaveFocus());
   });
 
   it("opens a template ready to go, pointing at the owner's own machine and project", async () => {

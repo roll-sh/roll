@@ -77,15 +77,33 @@ export function AutomationPanel({ view }: { view: AutomationsView & { open: stri
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [serverProblems, setServerProblems] = useState<Problems>({});
+  const taken = useMemo(() => [...automations.values()].filter((a) => a.id !== automation?.id).map((a) => a.name), [automations, automation?.id]);
   const problems = useMemo(() => {
-    const p = { ...validate(draft, catalog), ...serverProblems };
+    const p = { ...validate(draft, catalog, taken), ...serverProblems };
     if (!tried) {
       delete p.name;
       delete p.steps;
     }
     return p;
-  }, [draft, catalog, serverProblems, tried]);
-  const count = Object.keys(validate(draft, catalog)).length;
+  }, [draft, catalog, serverProblems, tried, taken]);
+  const local = useMemo(() => validate(draft, catalog, taken), [draft, catalog, taken]);
+  const count = Object.keys(local).length;
+  // Takes the eye to the first thing to fix (after a Create that can't go, or from the footer): it
+  // may be far up the sheet, or in a step that's folded.
+  const footer = useRef<HTMLElement>(null);
+  const [seek, setSeek] = useState(0);
+  useEffect(() => {
+    if (!seek) return;
+    const frame = requestAnimationFrame(() => {
+      const body = footer.current?.parentElement;
+      const first = [...(body?.querySelectorAll<HTMLElement>('[aria-invalid="true"], .text-danger') ?? [])].find((el) => !footer.current?.contains(el));
+      if (!first) return;
+      first.scrollIntoView({ block: "center", behavior: "smooth" });
+      const target = first.matches("input, textarea, button, [tabindex]") ? first : first.closest<HTMLElement>("section, [role=region]")?.querySelector<HTMLElement>("button, input, textarea");
+      target?.focus({ preventScroll: true });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [seek]);
 
   const [test, setTest] = useState<{ event: TestEvent; text: string; result: TestResult | null; error: string | null; busy: boolean; open: boolean } | null>(null);
   const runTest = async (event?: TestEvent) => {
@@ -102,7 +120,8 @@ export function AutomationPanel({ view }: { view: AutomationsView & { open: stri
 
   const save = async () => {
     setTried(true);
-    if (!store || count > 0) return;
+    if (count > 0) return setSeek((n) => n + 1);
+    if (!store) return;
     setSaving(true);
     setError(null);
     setServerProblems({});
@@ -162,7 +181,8 @@ export function AutomationPanel({ view }: { view: AutomationsView & { open: stri
           placeholder="Name this automation"
           aria-label="Name"
           aria-invalid={problems.name ? true : undefined}
-          className={cn("w-full min-w-0 rounded-md bg-transparent px-1 -mx-1 text-[14.5px] font-[590] tracking-[-0.02em] outline-none placeholder:text-faint hover:bg-fg/[0.03] focus:bg-fg/[0.04]", problems.name && "placeholder:text-danger/70")}
+          className={cn("w-full min-w-0 rounded-md bg-transparent px-1 -mx-1 text-[14.5px] font-[590] tracking-[-0.02em] outline-none hover:bg-fg/[0.03] focus:bg-fg/[0.04]", problems.name ? "text-danger placeholder:text-danger/70" : "placeholder:text-faint")}
+          title={problems.name}
         />
       }
       subtitle={triggerSummary(draft.trigger, catalog)}
@@ -287,16 +307,16 @@ export function AutomationPanel({ view }: { view: AutomationsView & { open: stri
           </>
         )}
       </div>
-      <footer className="flex shrink-0 items-center gap-2 border-t border-line px-4 py-2.5">
+      <footer ref={footer} className="flex shrink-0 items-center gap-2 border-t border-line px-4 py-2.5">
         <span className="min-w-0 flex-1 truncate text-[12px]">
           {error ? (
             <span className="text-danger" role="alert">
               {error}
             </span>
           ) : tried && count > 0 ? (
-            <span className="text-danger">
-              {count} thing{count === 1 ? "" : "s"} to fix
-            </span>
+            <button type="button" onClick={() => setSeek((n) => n + 1)} className="max-w-full truncate text-danger hover:underline">
+              {count === 1 ? Object.values(local)[0] : `${count} things to fix`}
+            </button>
           ) : saving ? (
             <span className="shimmer text-subtle">Saving…</span>
           ) : dirty && !isNew ? (
