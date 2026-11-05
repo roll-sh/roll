@@ -1324,6 +1324,18 @@ export class DemoOwner implements AgentsTransport {
     this.patchThread(tid, { run_count: 1, usage, context, activity: null, updated_at: at + 140_000 });
   }
 
+  /** A probe after a login: the providers `which` picks that were logged out are logged in. */
+  private logIn(machine: MachineId, which: (p: ProviderInfo) => boolean) {
+    const m = this.machines.get(machine);
+    if (!m?.info) return;
+    const all = (this.allProviders.get(machine) ?? m.info.providers).map((p) => (p.auth === "missing" && which(p) ? { ...p, auth: "ready" as const, detail: "Logged in" } : p));
+    this.allProviders.set(machine, all);
+    const set = m.info.settings?.set ?? {};
+    const next = { ...m, info: { ...m.info, providers: offeredProviders(all, set) } };
+    this.machines.set(machine, next);
+    this.emit({ type: "machine", cursor: ++this.cursor, machine: next });
+  }
+
   private completedRun(tid: ThreadId, ordinal: number, prompt: string, answer: string, files: FileChange[], at: number) {
     const rid = `run_demo_json${ordinal}`;
     const s = stat(files);
@@ -2013,6 +2025,17 @@ export class DemoOwner implements AgentsTransport {
             out("Opening the browser to log in…\r\nIf it doesn't open, visit \x1b[4mhttps://claude.ai/oauth/device\x1b[0m and enter \x1b[1mWXYZ-2345\x1b[0m\r\n");
           } else out(`\x1b[2mroll demo shell · ${cwd}\x1b[0m\r\n$ `);
         });
+        // The demo's login "completes" on its own; the daemon checks the providers again when a
+        // terminal exits while one is logged out (`terminals.rs`), so the machine shows it.
+        const bin = c.command?.split(" ")[0];
+        if (bin && (this.allProviders.get(machine) ?? this.machines.get(machine)?.info?.providers ?? []).some((p) => p.auth === "missing" && p.id.replace(/^acp:/, "") === bin)) {
+          this.after(4000, () => {
+            if (!this.records.has(`terminal:${tid}`)) return;
+            out("\r\n\x1b[32m✓\x1b[0m Logged in.\r\n");
+            this.put("terminal", { ...term, status: "exited", exit_code: 0 }, machine);
+            this.logIn(machine, (p) => p.id.replace(/^acp:/, "") === bin);
+          });
+        }
         return { type: "created", id: tid };
       }
       case "terminal.input": {
@@ -2029,18 +2052,9 @@ export class DemoOwner implements AgentsTransport {
         return { type: "ok" };
       case "terminal.scrollback":
         return { type: "scrollback", data: "" };
-      case "provider.refresh": {
-        const m = this.machines.get(machine);
-        if (m?.info) {
-          const all = (this.allProviders.get(machine) ?? m.info.providers).map((p) => (p.auth === "missing" ? { ...p, auth: "ready" as const, detail: "Logged in" } : p));
-          this.allProviders.set(machine, all);
-          const set = m.info.settings?.set ?? {};
-          const next = { ...m, info: { ...m.info, providers: offeredProviders(all, set) } };
-          this.machines.set(machine, next);
-          this.emit({ type: "machine", cursor: ++this.cursor, machine: next });
-        }
+      case "provider.refresh":
+        this.logIn(machine, () => true);
         return { type: "ok" };
-      }
       case "machine.configure": {
         const m = this.machines.get(machine);
         if (!m?.info) return notFound("machine");

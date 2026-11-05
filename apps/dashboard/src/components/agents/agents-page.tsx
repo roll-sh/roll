@@ -33,7 +33,7 @@ import { PendingRequest } from "./pending-request";
 import { SettingsPanel } from "./settings-panel";
 import { useSandboxes } from "./sandbox";
 import { Conversation, IconButton } from "./session";
-import { TerminalNode } from "./terminal";
+import { CloseTerminal, TerminalNode } from "./terminal";
 import { threadDone } from "./thread-status";
 import { SidebarToggle, ThreadsSidebar, useSidebarOpen } from "./threads-sidebar";
 import { AgentsContext, useAgents, useAgentsSnapshot, useHold, useMarkDriver, type AgentsCtx } from "./use-agents";
@@ -746,7 +746,7 @@ function CanvasView({
         return <RequestNode request={data.requests.get(n.id)!.value} />;
       case "terminal":
         return (
-          <PinTools view={view} onToggle={toggle} items={[{ kind: "terminal", id: n.id, label: "the terminal" }]}>
+          <PinTools view={view} onToggle={toggle} items={[{ kind: "terminal", id: n.id, label: "the terminal" }]} extra={<CloseTerminal terminal={data.terminals.get(n.id)!.value} machine={machineOf(n)} />}>
             <TerminalNode terminal={data.terminals.get(n.id)!.value} machine={machineOf(n)} />
           </PinTools>
         );

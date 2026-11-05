@@ -1158,7 +1158,9 @@ The surface has three views:
   `GET …/sandboxes`, optional provider keys). A new sandbox is on the canvas at once and pulses
   while it boots. A sandbox's card shows its size, status, price and this month's usage, with
   start, stop and delete, and puts logging a provider in first (a terminal on the canvas running
-  the device login). A machine with no projects offers adding one (a folder, a clone of one of the
+  the device login). The daemon probes its providers again whenever a terminal exits while one is
+  logged out, so a finished login moves the card on by itself ("Check again" is there for a login
+  done elsewhere). A machine with no projects offers adding one (a folder, a clone of one of the
   owner's roll code repos, or a new repo, with auto-pull offered right there: on for a clone, off
   for a folder); a project's card has "Settings" in its menu (in the side panel beside the canvas: auto-pull and
   its last result, new-thread defaults, scripts); a project with no threads offers starting one. Offline

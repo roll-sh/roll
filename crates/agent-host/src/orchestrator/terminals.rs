@@ -122,6 +122,13 @@ impl Host {
                     tracing::warn!("recording the exit of {exit_id}: {e:#}");
                 }
             }
+            // A provider login runs in a terminal (the card's "Log in to …", or typed in a
+            // shell): when one ends while a provider is logged out, check again, so the machine
+            // shows the login without anyone asking for a refresh.
+            if host.logged_out() {
+                host.probe_providers();
+                host.publish_info().await;
+            }
         });
         Ok(Reply::Created { id: id.0 })
     }

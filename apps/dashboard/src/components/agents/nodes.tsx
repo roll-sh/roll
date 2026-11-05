@@ -220,7 +220,12 @@ export function MachineNode({ machine }: { machine: Machine }) {
                 </button>
               ))}
             </div>
-            <p className="text-[11px] text-subtle">It opens a terminal: follow the link it prints, then paste the code.</p>
+            <p className="text-[11px] text-subtle">
+              It opens a terminal: follow the link it prints, then paste the code. The card moves on when it&apos;s done.{" "}
+              <button data-nodrag disabled={busy !== null} onClick={() => run("refresh", () => client.run(machine.id, { type: "provider.refresh" }))} className="text-muted underline-offset-2 hover:text-fg hover:underline disabled:opacity-40">
+                {busy === "refresh" ? <span className="shimmer">Checking…</span> : "Logged in elsewhere? Check again"}
+              </button>
+            </p>
           </div>
         ) : (
           listed.length > 0 && (

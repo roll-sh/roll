@@ -106,6 +106,14 @@ describe("agents demo", () => {
     const { machine } = await services.sandboxes.create("demo", { name: "first", env: {} });
     await until("it to boot", () => client.data.machines.get(machine.id)?.value.online === true);
     expect(client.data.machines.size).toBe(1);
+    // Its login runs in a terminal, finishes, and the machine shows the provider logged in.
+    const claude = () => client.data.machines.get(machine.id)?.value.info?.providers.find((p) => p.id === "claude");
+    expect(claude()?.auth).toBe("missing");
+    const opened = await client.send(machine.id, { type: "terminal.open", command: "claude /login", cols: 80, rows: 24 });
+    if (opened.type !== "created") throw new Error(JSON.stringify(opened));
+    await until("the login", () => claude()?.auth === "ready");
+    expect(client.data.terminals.get(opened.id)?.value).toMatchObject({ status: "exited", exit_code: 0 });
+    expect(client.data.machines.get(machine.id)?.value.info?.providers.find((p) => p.id === "codex")?.auth).toBe("missing");
     release();
   });
 

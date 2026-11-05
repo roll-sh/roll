@@ -152,6 +152,17 @@ describe("pinned cards", () => {
     expect(pinned).toHaveStyle({ width: "760px", height: "600px" });
     await waitFor(() => expect(lastSaved(services)).toMatchObject({ pins: [{ kind: "diff", w: 760, h: 600 }] }));
   });
+
+  it("a terminal card's tools float over it as one toolbar: pin, and close (which hangs it up)", async () => {
+    const h = agentsHarness({ entities: [...entities, mirrored("terminal", terminal({ id: "trm_1", title: "claude /login" }), 8)], follow: ["thr_1", "thr_2"] });
+    renderAgents(<AgentsSurface client={h.client} services={fakeServices()} demo={false} chrome="popup" />, h);
+    const slot = screen.getByLabelText("Terminal claude /login").parentElement!;
+    const tools = within(slot).getByRole("button", { name: "Pin the terminal" }).parentElement!;
+    await userEvent.click(within(tools).getByRole("button", { name: "Close terminal" }));
+    expect(h.command).toHaveBeenCalledWith("mch_1", expect.any(String), { type: "terminal.close", terminal: "trm_1" });
+    // Nothing else in the card closes it, so nothing hides under the toolbar.
+    expect(within(screen.getByLabelText("Terminal claude /login")).queryByRole("button", { name: "Close terminal" })).toBeNull();
+  });
 });
 
 describe("kept by roll and on this device", () => {

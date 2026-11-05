@@ -5,6 +5,7 @@ import { SquareTerminal, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import type { Machine, Terminal as TerminalRec } from "@/lib/agents-api";
 import { Card } from "./nodes";
+import { resolveColor } from "@roll/brand";
 import { useAgents } from "./use-agents";
 
 function decode(b64: string): Uint8Array {
@@ -27,13 +28,45 @@ function encode(text: string): string {
 
 const cssVar = (name: string) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 
-/** A PTY on the machine as a canvas card. */
+/** A PTY on the machine as a canvas card (its Close is in the card's floating tools). */
 export function TerminalNode({ terminal, machine }: { terminal: TerminalRec; machine: Machine | undefined }) {
   return (
     <Card width={620} label={`Terminal ${terminal.title}`}>
-      <TerminalView terminal={terminal} machine={machine} className="h-[340px]" />
+      <TerminalView terminal={terminal} machine={machine} className="h-[340px] rounded-b-[11px]" />
     </Card>
   );
+}
+
+/** Closes a terminal (hangs up its session): a tool in the terminal card's floating toolbar. */
+export function CloseTerminal({ terminal, machine }: { terminal: TerminalRec; machine: Machine | undefined }) {
+  const { client } = useAgents();
+  return (
+    <button
+      type="button"
+      onClick={(e) => {
+        e.stopPropagation();
+        if (machine) client.run(machine.id, { type: "terminal.close", terminal: terminal.id }).catch(() => {});
+      }}
+      aria-label="Close terminal"
+      title="Close terminal"
+      className="grid size-6 place-items-center rounded-md transition-colors duration-150 hover:bg-panel-3 hover:text-fg [&>svg]:size-3.5 [&>svg]:stroke-[1.75]"
+    >
+      <X />
+    </button>
+  );
+}
+
+/** The terminal's colours, from what its host paints (resolved, so oklch works), in xterm's terms. */
+function themeOf(el: HTMLElement) {
+  const s = getComputedStyle(el);
+  const rgb = (css: string, fallback: string) => `rgb(${resolveColor(css.trim() || fallback).join(",")})`;
+  const accent = resolveColor(s.getPropertyValue("--accent").trim() || "#4c8dff");
+  return {
+    background: rgb(s.backgroundColor, "#08090a"),
+    foreground: rgb(s.getPropertyValue("--fg"), "#ededed"),
+    cursor: `rgb(${accent.join(",")})`,
+    selectionBackground: `rgba(${accent.join(",")},0.3)`,
+  };
 }
 
 /**
@@ -63,13 +96,12 @@ export function TerminalView({ terminal, machine, className = "", bare = false }
         cursorBlink: false,
         scrollback: 5000,
         allowProposedApi: false,
-        theme: {
-          background: cssVar("--bg") || "#000",
-          foreground: cssVar("--fg") || "#ededed",
-          cursor: cssVar("--accent") || "#4c8dff",
-          selectionBackground: "rgba(76,141,255,0.3)",
-        },
+        theme: themeOf(el),
       });
+      // Follow light/dark switches, like the canvas engine.
+      const scheme = window.matchMedia("(prefers-color-scheme: light)");
+      const onScheme = () => (term.options.theme = themeOf(el));
+      scheme.addEventListener("change", onScheme);
       const fit = new FitAddon();
       term.loadAddon(fit);
       term.open(el);
@@ -115,6 +147,7 @@ export function TerminalView({ terminal, machine, className = "", bare = false }
       ro.observe(el);
 
       cleanup = () => {
+        scheme.removeEventListener("change", onScheme);
         ro.disconnect();
         onData.dispose();
         sub.off();
@@ -137,14 +170,6 @@ export function TerminalView({ terminal, machine, className = "", bare = false }
         <span className="min-w-0 flex-1 truncate font-mono">{terminal.title}</span>
         <span className="truncate font-mono text-[11px] text-subtle">{terminal.cwd}</span>
         {exited && <span className="text-[11px] text-subtle">exited{terminal.exit_code !== null ? ` ${terminal.exit_code}` : ""}</span>}
-        <button
-          onClick={() => mid && client.run(mid, { type: "terminal.close", terminal: terminal.id }).catch((e: Error) => setError(e.message))}
-          className="p-0.5 text-subtle hover:text-fg"
-          aria-label="Close terminal"
-          title="Close"
-        >
-          <X className="size-3.5" />
-        </button>
       </div>
       )}
       <div ref={host} data-nodrag data-scroll className={`cursor-text overflow-hidden bg-bg px-2 py-1.5 ${className}`} />

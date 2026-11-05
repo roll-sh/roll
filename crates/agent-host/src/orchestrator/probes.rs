@@ -101,6 +101,11 @@ impl Host {
         }
     }
 
+    /// Whether an installed provider's last probe said it isn't logged in.
+    pub(crate) fn logged_out(&self) -> bool {
+        self.probes.state.lock().unwrap().values().any(|p| p.last.as_ref().is_some_and(|i| i.installed && i.auth == AuthStatus::Missing))
+    }
+
     /// Gathers the machine info, keeps the probes for the next start, and sends `hello` with
     /// them. One at a time, so the newest info is the one sent last.
     pub(crate) async fn publish_info(&self) {

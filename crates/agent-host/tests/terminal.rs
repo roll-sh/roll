@@ -144,3 +144,43 @@ async fn thread_terminals_run_in_the_thread_and_go_with_it() {
     let unknown = w.run(Command::TerminalScrollback { terminal: TerminalId("trm_nope".into()) }).await;
     assert!(matches!(unknown, Reply::Error(ReplyError { code: ErrorCode::NotFound, .. })));
 }
+
+/// A login finished in a terminal shows on the machine without a refresh: when a terminal exits
+/// while a provider is logged out, the daemon probes again and says hello with what it found.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_terminal_exiting_while_logged_out_checks_the_providers_again() {
+    let claude = FakeProvider::new("claude");
+    claude.set_auth(AuthStatus::Missing);
+    let w = World::new(vec![claude.clone()]).await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let p = w.host.info().await.providers[0].clone();
+        if p.auth == AuthStatus::Missing && !p.checking {
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "the first probe never answered: {p:?}");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // "Logging in": the command ends, and the provider is logged in from then on.
+    let mut events = w.host.subscribe();
+    let open = |command: &str| Command::TerminalOpen { project: None, thread: None, command: Some(command.into()), script: None, cols: 80, rows: 24 };
+    let Reply::Created { id } = w.run(open("read done")).await else { panic!("terminal.open") };
+    claude.set_auth(AuthStatus::Ready);
+    assert_eq!(w.run(input(&id, "ok\r")).await, Reply::Ok);
+    let seen = loop {
+        match tokio::time::timeout_at(deadline, events.recv()).await.expect("hello with the login").unwrap() {
+            Outbound::Info(info) if info.providers[0].auth == AuthStatus::Ready && !info.providers[0].checking => break info.providers[0].clone(),
+            _ => {}
+        }
+    };
+    assert!(seen.installed, "{seen:?}");
+
+    // Logged in: another terminal exiting checks nothing.
+    let mut events = w.host.subscribe();
+    let Reply::Created { id } = w.run(open("true")).await else { panic!("terminal.open") };
+    w.wait("the exit", |s| terminal(s, &id).filter(|t| t.status == TerminalStatus::Exited)).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let probed = std::iter::from_fn(|| events.try_recv().ok()).any(|o| matches!(o, Outbound::Info(i) if i.providers[0].checking));
+    assert!(!probed, "nothing to check once logged in");
+}

@@ -753,18 +753,22 @@ export function PinTools({
   view,
   items,
   onToggle,
+  extra,
   children,
 }: {
   view: ViewLike;
   items: { kind: PinKind; id: string; label: string }[];
   onToggle: (kind: PinKind, id: string) => void;
+  /** More of the card's tools, after the pins (a terminal's Close). */
+  extra?: ReactNode;
   children: ReactNode;
 }) {
+  // The cards' floating toolbar (`HoverActions` in nodes.tsx), so the two read as one.
   return (
     <div className="group/slot relative">
       {children}
       <div
-        className="absolute -top-3 right-3 z-10 flex items-center gap-0.5 rounded-md border border-line bg-panel p-0.5 text-subtle opacity-0 shadow-[0_4px_14px_-6px_rgb(0_0_0/0.5)] transition-opacity duration-150 group-hover/slot:opacity-100 focus-within:opacity-100 [@media(hover:none)]:opacity-100"
+        className="pointer-events-none absolute -top-3.5 right-2.5 z-10 flex translate-y-1 items-center gap-0.5 rounded-lg border border-line-2 p-0.5 text-muted opacity-0 shadow-pop inset-shadow-highlight glass transition-[opacity,translate] duration-150 ease-out group-hover/slot:pointer-events-auto group-hover/slot:translate-y-0 group-hover/slot:opacity-100 focus-within:pointer-events-auto focus-within:translate-y-0 focus-within:opacity-100 motion-reduce:transition-none [@media(hover:none)]:pointer-events-auto [@media(hover:none)]:translate-y-0 [@media(hover:none)]:opacity-100"
         data-nodrag
       >
         {items.map((i) => {
@@ -782,12 +786,13 @@ export function PinTools({
                 e.stopPropagation();
                 onToggle(i.kind, i.id);
               }}
-              className={`grid size-6 place-items-center rounded transition hover:bg-panel-2 hover:text-fg [&>svg]:size-3.5 ${pinned ? "text-accent" : ""}`}
+              className={`grid size-6 place-items-center rounded-md transition-colors duration-150 hover:bg-panel-3 hover:text-fg [&>svg]:size-3.5 [&>svg]:stroke-[1.75] ${pinned ? "text-accent" : ""}`}
             >
               {i.kind === "diff" ? <DiffIcon /> : pinned ? <PinOff /> : <PinIcon />}
             </button>
           );
         })}
+        {extra}
       </div>
     </div>
   );

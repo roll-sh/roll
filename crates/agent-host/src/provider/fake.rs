@@ -71,6 +71,8 @@ pub struct FakeProvider {
     changed: Arc<Notify>,
     /// While true, `info` doesn't answer (a slow probe).
     held: tokio::sync::watch::Sender<bool>,
+    /// What `info` says about the login.
+    auth: Mutex<AuthStatus>,
 }
 
 impl FakeProvider {
@@ -91,7 +93,13 @@ impl FakeProvider {
             configured: Mutex::new(None),
             changed: Arc::new(Notify::new()),
             held: tokio::sync::watch::Sender::new(false),
+            auth: Mutex::new(AuthStatus::Ready),
         })
+    }
+
+    /// What the next probe says about the login (logged out with `Missing`).
+    pub fn set_auth(&self, auth: AuthStatus) {
+        *self.auth.lock().unwrap() = auth;
     }
 
     /// `info` waits from now until [`FakeProvider::release_probes`], like a provider whose probe
@@ -172,7 +180,7 @@ impl Provider for FakeProvider {
             name: format!("Fake {}", self.id.0),
             installed: true,
             version: Some("0.0.0".into()),
-            auth: AuthStatus::Ready,
+            auth: *self.auth.lock().unwrap(),
             detail: None,
             models: vec![
                 ModelInfo {
