@@ -1,5 +1,6 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { StrictMode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { approval, machine, mirrored, node, project, run, share, thread } from "@/test/agents";
 import { agentsHarness, renderAgents } from "@/test/agents-render";
@@ -65,6 +66,17 @@ describe("ShareView", () => {
     expect(await screen.findByRole("button", { name: "Replay" }, { timeout: 11_000 })).toBeInTheDocument();
     expect(screen.getByText("0123456789")).toBeInTheDocument();
   }, 15_000);
+
+  it("starts playing under strict mode too (it stayed rewound at 0:00 on 'No runs yet')", async () => {
+    restore = reducedMotion(false);
+    render(
+      <StrictMode>
+        <ShareView share={share()} />
+      </StrictMode>,
+      { wrapper: MarkStateProvider },
+    );
+    expect(await screen.findByRole("button", { name: "Pause" }, { timeout: 2000 })).toBeInTheDocument();
+  });
 
   it("scrubs to any moment", async () => {
     restore = reducedMotion(true);

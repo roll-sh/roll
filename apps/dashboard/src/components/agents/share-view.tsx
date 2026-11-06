@@ -56,12 +56,15 @@ export function ShareView({ share }: { share: Share }) {
   const canvas = useRef<CanvasHandle>(null);
   const started = useRef(false);
 
-  // Rewind and play once, unless motion is reduced.
+  // Rewind and play once, unless motion is reduced. Started only once it plays: an effect run
+  // that's cleaned up first (strict mode's) must not leave it rewound at 0:00 for good.
   useEffect(() => {
     if (started.current || reduced || tl.duration === 0) return;
-    started.current = true;
     setMs(0);
-    const t = setTimeout(() => setPlaying(true), 500);
+    const t = setTimeout(() => {
+      started.current = true;
+      setPlaying(true);
+    }, 500);
     return () => clearTimeout(t);
   }, [reduced, tl.duration]);
 
