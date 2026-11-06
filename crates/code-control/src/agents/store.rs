@@ -522,7 +522,7 @@ pub fn mirror(db: &code_sql::Db, owner_id: &str, machine_id: &str, items: &[Stam
                         .and_then(|j| serde_json::from_str(&j).ok()),
                     None => None,
                 };
-                automated |= super::automations::triggers::record_agent_events(c, owner_id, machine_id, old.as_ref(), &s.entity, s.seq)?;
+                automated |= super::automations::triggers::record_agent_events(c, owner_id, machine_id, old.as_ref(), &s.entity, s.seq, &batch)?;
             }
             // What roll code knows about a thread is the relay's: it goes over the daemon's.
             let mut entity = s.entity.clone();

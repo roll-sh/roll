@@ -26,6 +26,7 @@ import {
   type Trigger,
   type TriggerInfo,
 } from "./automations-api";
+import builtInCatalog from "./automation-catalog.json";
 
 // ── the catalog, with the built-ins ──
 
@@ -231,41 +232,40 @@ export const BUILT_IN_STEPS: Record<(typeof STEP_KINDS)[number], { title: string
 /** An event a trigger brings: its kind, title, the fields templates can read, and a sample (`null`: made from the fields). */
 export const ev = (kind: string, title: string, fields: string[], sample: unknown = null): EventInfo => ({ kind, title, fields, sample });
 
+/**
+ * A built-in trigger's events as the server's registry has them (their fields and a sample of
+ * their `event.data`, `automation-catalog.json`), titled for people.
+ */
+function eventsOf(source: string, titles: Record<string, string>): EventInfo[] {
+  const t = (builtInCatalog as unknown as Catalog).triggers.find((x) => x.source === source);
+  return (t?.events ?? []).map((e) => ev(e.kind, titles[e.kind] ?? e.kind, e.fields, e.sample));
+}
+
 /** The built-in triggers, with the fields their events bring (what `{{event.data.…}}` offers). */
 export const BUILT_IN_TRIGGERS: TriggerInfo[] = [
-  { source: "manual", title: "By hand", description: "A button here, `roll agent automation run`, or MCP.", events: [ev("run", "Run", ["input", "by"])], config: null },
-  { source: "schedule", title: "On a schedule", description: "A cron schedule in your time zone.", events: [ev("tick", "Tick", ["at", "scheduled"])], config: null },
-  { source: "interval", title: "Every so often", description: "Every few minutes or hours.", events: [ev("tick", "Tick", ["at", "scheduled"])], config: null },
-  { source: "webhook", title: "Webhook", description: "A signed POST to its own URL, from anything.", events: [ev("post", "Request", ["body", "headers"])], config: null },
+  { source: "manual", title: "By hand", description: "A button here, `roll agent automation run`, or MCP.", events: eventsOf("manual", { run: "Run" }), config: null },
+  { source: "schedule", title: "On a schedule", description: "A cron schedule in your time zone.", events: eventsOf("schedule", { tick: "Tick" }), config: null },
+  { source: "interval", title: "Every so often", description: "Every few minutes or hours.", events: eventsOf("interval", { tick: "Tick" }), config: null },
+  { source: "webhook", title: "Webhook", description: "A signed POST to its own URL, from anything.", events: eventsOf("webhook", { post: "Request" }), config: null },
   {
     source: "code",
     title: "roll code",
     description: "Landings, changes, checks, reviews and work items.",
-    events: [
-      ev("landed", "Landed", ["repo", "changeset", "message", "author", "change", "files", "ref"]),
-      ev("change", "Change", ["repo", "number", "title", "status", "author", "url", "labels"]),
-      ev("check", "Check", ["repo", "change", "check.name", "check.status", "status.state", "status.context"]),
-      ev("review", "Review", ["repo", "change", "verdict", "reviewer"]),
-      ev("queue", "Merge queue", ["repo", "state", "paused", "depth"]),
-      ev("work", "Work item", ["repo", "number", "title", "state", "labels", "priority"]),
-      ev("preview", "Preview", ["repo", "change", "preview.url", "preview.status"]),
-      ev("push", "Push", ["repo", "ref", "before", "after", "pusher"]),
-      ev("thread", "Discussion", ["repo", "change", "body", "author"]),
-    ],
+    events: eventsOf("code", { landed: "Landed", change: "Change", check: "Check", review: "Review", queue: "Merge queue", work: "Work item", preview: "Preview", push: "Push", thread: "Discussion" }),
     config: null,
   },
   {
     source: "agent",
     title: "Agents",
     description: "A thread finishing, failing, waiting on you or asking.",
-    events: [
-      ev("thread.created", "Thread started", ["machine", "project", "thread", "title"]),
-      ev("thread.done", "Thread done", ["machine", "project", "thread", "title", "run"]),
-      ev("thread.failed", "Thread failed", ["machine", "project", "thread", "title", "error"]),
-      ev("thread.waiting", "Waiting on you", ["machine", "project", "thread", "title", "request"]),
-      ev("thread.settled", "Thread settled", ["machine", "project", "thread", "title"]),
-      ev("request.opened", "Request opened", ["machine", "project", "thread", "request", "action", "command"]),
-    ],
+    events: eventsOf("agent", {
+      "thread.created": "Thread started",
+      "thread.done": "Thread done",
+      "thread.failed": "Thread failed",
+      "thread.waiting": "Waiting on you",
+      "thread.settled": "Thread settled",
+      "request.opened": "Request opened",
+    }),
     config: null,
   },
 ];
@@ -764,8 +764,8 @@ export function sampleEvent(t: Trigger, c: Catalog, now = Date.now(), filters: r
       const leaf = f.split(".").at(-1)!;
       setPath(data, f, leaf === "at" || leaf === "scheduled" ? now : (SAMPLES[leaf] ?? `sample ${leaf}`));
     }
-    if (t.type === "code") data.repo = t.repos[0] ?? data.repo ?? "acme/app";
   }
+  if (t.type === "code") data.repo = t.repos[0] ?? data.repo ?? "acme/app";
   for (const f of filters) {
     if (f.not || !f.field.startsWith("event.data.")) continue;
     const path = f.field.slice(11).split(".");

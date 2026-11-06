@@ -87,8 +87,8 @@ answers it from its receipt instead of running it twice.
 | `schedule {cron, timezone}` | `tick` | `{at, scheduled}` |
 | `interval {every_s}` | `tick` | `{at, scheduled}` |
 | `webhook` | `post` | `{body, headers}` |
-| `code {events, repos}` | the webhook events | the webhook payload's `data`, plus `repo` |
-| `agent {events}` | `thread.created`, `thread.done`, `thread.failed`, `thread.waiting`, `thread.settled`, `request.opened` | `{machine, project, thread, run?, request?}` |
+| `code {events, repos}` | the webhook events | the webhook payload's `data` (a work item's `number`, `title`, `labels`, …; a check's `{change, check}`), plus `repo` and `repo_id` |
+| `agent {events}` | `thread.created`, `thread.done`, `thread.failed`, `thread.waiting`, `thread.settled`, `request.opened` | `{machine, project, thread, run?, request?}`: `thread` is the thread's brief on every event (`thread.id`, `thread.title`, `thread.status`, `thread.provider`, `thread.change`, …; only `thread.id` if the relay hasn't seen the thread), `run` the run (`run.status`, `run.error`, `run.prompt`) on `thread.done` and `thread.failed` and `{id}` on `request.opened`, `request` the request (`request.body.action`, `request.body.command`) |
 | `integration {source, events, config}` | the integration's | the integration's |
 
 ## Templates
@@ -181,8 +181,13 @@ middle of an attempt stops at that step's next write; what the attempt did is ke
 builder. Configs are `{type: "object", properties, required}`, in display order; a string's
 `format` picks its widget: `template` (one line), `template-long` (prompts, bodies), `roll-thread`,
 `roll-target`, `roll-project`, `roll-model`, `roll-secret`. A trigger's `events[].fields` are the
-`event.data` paths worth filtering on and `sample` a realistic `event.data`; a step's `output` its
-`steps.<id>.…` fields.
+`event.data` paths worth filtering on and `sample` a realistic `event.data`, with the fields a real
+event of that kind has (the agent events' samples are made by the code that makes the events, and
+tests compare a real work item's and a real `thread.done`'s data with theirs); a step's `output` its
+`steps.<id>.…` fields. The dashboard keeps a copy of the built-in entries
+(`apps/dashboard/src/lib/automation-catalog.json`, `ROLL_FIXTURES=write cargo test -p code-control
+--test automations`): its templates are tested against these samples, so a template that reads a
+field its event doesn't have fails.
 
 ## For integrations
 

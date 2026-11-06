@@ -586,6 +586,49 @@ async fn slack_status_buttons_answer_requests_and_replies_steer() {
     assert_eq!(w.mock.calls_to("chat.postMessage").len(), 2, "nothing posted twice");
 }
 
+/// "Agents in my Slack DMs": a notice step with no machine or thread follows the agent event's
+/// (`event.data.thread` is the thread's brief: its id is `thread.id`). It read the brief as a
+/// string, so the notice named no thread.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_slack_notice_follows_the_agent_events_thread() {
+    let w = world().await;
+    w.install("T1").await;
+    let automation = w.automation("slack").await;
+    let url = w.a.serve().await;
+    let (s, m) = w.a.req("POST", "/v1/code/agents/acme/machines", Some(json!({ "name": "build-box" })), Some(&w.owner)).await;
+    assert_eq!(s, StatusCode::CREATED);
+    let (machine, token) = (m["machine"]["id"].as_str().unwrap().to_string(), m["token"].as_str().unwrap().to_string());
+    let (mut d, _) = Daemon::connect(&url, &token).await;
+    let thread: Entity = serde_json::from_value(json!({
+        "kind": "thread", "id": "thr_1", "project": "prj_1", "title": "Fix the flaky login test", "provider": "codex", "model": null,
+        "runtime_mode": "ask", "interaction_mode": "default", "cwd": "/src/app", "status": "error", "run_count": 1, "pending_requests": 0, "created_at": 1, "updated_at": 2
+    }))
+    .unwrap();
+    d.upsert(vec![Stamped { seq: 1, entity: thread }]).await;
+    // The event as the relay records it (triggers.rs `agent_events`).
+    let event = json!({ "source": "agent", "kind": "thread.failed", "data": {
+        "machine": machine, "project": "prj_1", "thread": { "id": "thr_1", "title": "Fix the flaky login test", "status": "error" }, "run": { "id": "run_1", "status": "failed", "error": "boom" } } });
+    let mut ctx = StepContext::new(
+        w.a.code.clone(),
+        OwnerRef { id: w.owner_id.clone(), name: "acme".into() },
+        automation,
+        "Agents in my Slack DMs".into(),
+        None,
+        AutomationRunId("arn_1".into()),
+        serde_json::from_value::<Step>(json!({ "id": "notify", "kind": "slack.notify", "config": { "to": "C1" } })).unwrap(),
+        1,
+        json!({ "event": event, "steps": {} }),
+        Value::Null,
+        code_sql::now_ms(),
+    );
+    let kind = w.a.code.automations.registry.step("slack.notify").expect("registered");
+    let out = kind.run(&mut ctx).await;
+    assert!(!matches!(out, StepOutcome::Fail(_) | StepOutcome::Retry(_)), "{out:?}");
+    let posts = w.mock.calls_to("chat.postMessage");
+    assert_eq!(posts.first().map(|p| p["channel"].clone()), Some(json!("C1")), "{posts:?}");
+    assert!(posts[0].to_string().contains("Fix the flaky login test"), "the notice is the event's thread's: {}", posts[0]);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn discord_interactions_are_verified_and_reach_the_inbox() {
     let w = world().await;

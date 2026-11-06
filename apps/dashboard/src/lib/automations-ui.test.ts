@@ -67,14 +67,15 @@ describe("automations: templates in fields", () => {
   it("offers the trigger's fields, the run, and only earlier steps' outputs", () => {
     const spec: AutomationSpec = { ...blankSpec(), trigger: { type: "agent", events: ["thread.done"] }, steps: [step("start", "agent.start"), step("wait", "agent.wait"), step("tell", "notify")] };
     const at2 = variablesAt(spec, catalog, 2).map((v) => v.path);
-    expect(at2).toContain("event.data.thread");
+    expect(at2).toContain("event.data.thread.id");
+    expect(at2).toContain("event.data.thread.title");
     expect(at2).toContain("steps.start.thread");
     expect(at2).toContain("steps.wait.status");
     expect(at2).not.toContain("steps.tell.id");
     const at0 = variablesAt(spec, catalog, 0).map((v) => v.path);
     expect(at0.some((p) => p.startsWith("steps."))).toBe(false);
     // Prefix matches come first, the `event.data.` prefix may be left out.
-    expect(matchVariables(variablesAt(spec, catalog, 2), "thr")[0].path).toBe("event.data.thread");
+    expect(matchVariables(variablesAt(spec, catalog, 2), "thr")[0].path).toBe("event.data.thread.id");
   });
 
   it("splits text and tokens for the highlighter", () => {
@@ -156,8 +157,12 @@ describe("automations: the catalog and samples", () => {
   });
 
   it("makes a sample event from the trigger's fields, or takes the server's", () => {
+    // The server's sample of a work item (automation-catalog.json), in the trigger's repo.
     const e = sampleEvent({ type: "code", events: ["work"], repos: ["acme/web"] }, catalog, 5);
-    expect(e).toMatchObject({ source: "code", kind: "work", data: { repo: "acme/web", number: 42, labels: ["bug"] } });
+    expect(e).toMatchObject({ source: "code", kind: "work", data: { repo: "acme/web", number: 7, title: "main is broken: test", labels: ["broken-main"] } });
+    // No sample: made from the fields.
+    const bare = withBuiltIns({ triggers: [{ source: "acme", title: "", description: "", events: [ev("x", "X", ["number", "labels"])], config: null }], steps: [] });
+    expect(sampleEvent({ type: "integration", source: "acme", events: ["x"], config: {} }, bare, 5).data).toEqual({ number: 42, labels: ["bug"] });
     const withSample = withBuiltIns({ triggers: [{ source: "manual", title: "", description: "", events: [ev("run", "Run", [], { by: "ada" })], config: null }], steps: [] });
     expect(sampleEvent({ type: "manual" }, withSample).data).toEqual({ by: "ada" });
   });

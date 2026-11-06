@@ -376,6 +376,34 @@ async fn catalog_fields_keep_their_order() {
     assert_eq!(order(step("webhook"))[..2], ["url", "method"]);
 }
 
+/// The dashboard's copy of the built-in triggers and steps (`apps/dashboard/src/lib/automation-catalog.json`:
+/// its template tests render every template against these triggers' samples) is what the registry
+/// says. `ROLL_FIXTURES=write` rewrites it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_dashboard_has_the_built_in_catalog() {
+    let w = world().await;
+    let cat = w.ok("GET", "/v1/code/agents/acme/automations/catalog", None).await;
+    let built_in = ["manual", "schedule", "interval", "webhook", "code", "agent"];
+    let mut triggers: Vec<Value> = cat["triggers"].as_array().unwrap().iter().filter(|t| built_in.contains(&t["source"].as_str().unwrap())).cloned().collect();
+    let mut steps: Vec<Value> = cat["steps"].as_array().unwrap().iter().filter(|s| s["integration"].is_null()).cloned().collect();
+    for v in triggers.iter_mut().chain(steps.iter_mut()) {
+        v.as_object_mut().unwrap().remove("needs_setup");
+    }
+    assert_eq!((triggers.len(), steps.len()), (built_in.len(), agent_proto::automation::step_kinds::ALL.len()));
+    for t in &triggers {
+        for e in t["events"].as_array().unwrap() {
+            assert!(e["sample"].is_object(), "{} {} has no sample", t["source"], e["kind"]);
+        }
+    }
+    let want = json!({ "triggers": triggers, "steps": steps });
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../apps/dashboard/src/lib/automation-catalog.json");
+    if std::env::var("ROLL_FIXTURES").as_deref() == Ok("write") {
+        std::fs::write(&path, serde_json::to_string_pretty(&want).unwrap() + "\n").unwrap();
+    }
+    let have: Value = serde_json::from_str(&std::fs::read_to_string(&path).expect("the fixture (ROLL_FIXTURES=write)")).unwrap();
+    assert_eq!(have, want, "apps/dashboard/src/lib/automation-catalog.json is stale: ROLL_FIXTURES=write cargo test -p code-control --test automations");
+}
+
 /// Every step kind in the catalog saves the way the builder writes a new step: its required
 /// fields filled in, and `null` for each field nobody set. Webhook (`headers`), agent.start,
 /// agent.wait, the Linear, Discord and GitHub steps refused those nulls, so "start an agent, wait
@@ -633,6 +661,7 @@ async fn agent_events_start_runs_once() {
     }))
     .await;
     let done = |seq: u64, prompt: &str| Stamped { seq, entity: entity(run_json("run_x", "thr_x", "completed", prompt)) };
+    let _ = fake.out.send(DaemonFrame::Entities { items: vec![Stamped { seq: 99, entity: entity(thread_json("thr_x", "prj_x", "running", "Deploy the app", Some("run_x"))) }] });
     let _ = fake.out.send(DaemonFrame::Entities { items: vec![Stamped { seq: 100, entity: entity(run_json("run_x", "thr_x", "running", "deploy it")) }] });
     let _ = fake.out.send(DaemonFrame::Entities { items: vec![done(101, "deploy it")] });
     // The same record again (a reconnect's replay) and a run the filter refuses.
@@ -643,6 +672,37 @@ async fn agent_events_start_runs_once() {
     let runs2 = w.ok("GET", "/v1/code/agents/acme/automations/runs", None).await;
     assert_eq!(runs2.as_array().unwrap().len(), 1, "{runs2}");
     assert_eq!(runs[0]["event"]["kind"], "thread.done");
+    // A run's event carries its thread as the thread's own events do (templates read
+    // `event.data.thread.title`), and has every field the catalog's sample shows.
+    let detail = w.ok("GET", &format!("/v1/code/agents/acme/automations/runs/{}", runs[0]["id"].as_str().unwrap()), None).await;
+    let data = &detail["event"]["data"];
+    assert_eq!((data["thread"]["id"].as_str(), data["thread"]["title"].as_str(), data["project"].as_str()), (Some("thr_x"), Some("Deploy the app"), Some("prj_x")), "{data}");
+    assert_eq!(data["run"]["prompt"], "deploy it");
+    has_the_samples_fields(&w, "agent", "thread.done", data).await;
+}
+
+/// Every object path of `v` (`thread`, `thread.title`; not into lists).
+fn paths(v: &Value, at: &str, out: &mut std::collections::BTreeSet<String>) {
+    if let Some(m) = v.as_object() {
+        for (k, x) in m {
+            let p = if at.is_empty() { k.clone() } else { format!("{at}.{k}") };
+            paths(x, &p, out);
+            out.insert(p);
+        }
+    }
+}
+
+/// A real event of `source`/`kind` has every field its sample in the catalog has: the
+/// builder's tests and the dashboard's templates read the samples as the events' shapes.
+async fn has_the_samples_fields(w: &World, source: &str, kind: &str, real: &Value) {
+    let cat = w.ok("GET", "/v1/code/agents/acme/automations/catalog", None).await;
+    let t = cat["triggers"].as_array().unwrap().iter().find(|t| t["source"] == source).unwrap();
+    let sample = &t["events"].as_array().unwrap().iter().find(|e| e["kind"] == kind).unwrap()["sample"];
+    let (mut want, mut have) = Default::default();
+    paths(sample, "", &mut want);
+    paths(real, "", &mut have);
+    let missing: Vec<&String> = want.difference(&have).collect();
+    assert!(missing.is_empty(), "{source} {kind}: the sample has {missing:?}, the real event doesn't: {real}");
 }
 
 /// roll code events reach automations from the deliveries' write: a work item opened in a repo
@@ -660,6 +720,8 @@ async fn code_events_start_runs() {
     let detail = w.ok("GET", &format!("/v1/code/agents/acme/automations/runs/{}", runs[0]["id"].as_str().unwrap()), None).await;
     assert_eq!(detail["event"]["data"]["repo"], "acme/app");
     assert_eq!(detail["event"]["source"], "code");
+    assert_eq!(detail["event"]["data"]["title"], "Fix the queue");
+    has_the_samples_fields(&w, "code", "work", &detail["event"]["data"]).await;
 }
 
 /// Concurrency: `skip` records a second run as skipped while one waits; `queue` holds it until

@@ -192,8 +192,8 @@ export class DemoAutomations {
           trigger: { type: "agent", events: ["thread.done"] },
           filters: [{ field: "event.data.project", op: "equals", value: roll?.id ?? "prj_demo_roll" }],
           steps: [
-            step("publish", "agent.publish", { thread: "{{ event.data.thread }}", message: null, land: true }),
-            step("settle", "agent.settle", { thread: "{{ event.data.thread }}", action: "settle" }),
+            step("publish", "agent.publish", { thread: "{{ event.data.thread.id }}", land: true }),
+            step("settle", "agent.settle", { thread: "{{ event.data.thread.id }}", action: "settle" }),
           ],
         },
         t - 9 * DAY,
@@ -221,10 +221,10 @@ export class DemoAutomations {
           name: "Approve tests and builds",
           description: "Yes to test, build and lint commands.",
           trigger: { type: "agent", events: ["request.opened"] },
-          filters: [{ field: "event.data.action", op: "equals", value: "command" }],
+          filters: [{ field: "event.data.request.body.action", op: "equals", value: "command" }],
           steps: [
             step("answer", "agent.respond", {
-              thread: "{{ event.data.thread }}",
+              thread: "{{ event.data.thread.id }}",
               rules: [
                 { action: "command", command: "cargo test*", files: null, tool: null, decision: "accept" },
                 { action: "command", command: "pnpm test*", files: null, tool: null, decision: "accept" },
@@ -680,7 +680,12 @@ function eventKind(a: Automation): string {
 function demoEventData(a: Automation, summary: string): unknown {
   const t = a.trigger;
   if (t.type === "code") return { repo: t.repos[0] ?? "acme/roll", number: Number(/#(\d+)/.exec(summary)?.[1] ?? 1), title: summary.replace(/^.*?#\d+ /, ""), state: "open", labels: ["broken-main"] };
-  if (t.type === "agent") return { machine: "mch_demo_ada", project: "prj_demo_roll", thread: "thr_demo_json", title: summary.replace(/^[^:]+: /, ""), action: "command", command: summary.replace(/^Request: /, "") };
+  // The server's shape (`agent_events` in triggers.rs): the thread's brief, then the run or the request.
+  if (t.type === "agent") {
+    const data = { machine: "mch_demo_ada", project: "prj_demo_roll", thread: { id: "thr_demo_json", title: summary.replace(/^[^:]+: /, ""), status: "idle", provider: "codex" } };
+    if (t.events.includes("request.opened")) return { ...data, run: { id: "run_demo_json" }, request: { id: "req_demo_json", status: "pending", body: { type: "approval", action: "command", title: summary, command: summary.replace(/^Request: /, "") } } };
+    return { ...data, run: { id: "run_demo_json", status: "completed", error: null } };
+  }
   if (t.type === "manual") return { by: "ada", input: { prompt: "Pick an open work item and fix it." } };
   if (t.type === "webhook") return { body: { service: "api", log: "error: health check failed" }, headers: { "content-type": "application/json" } };
   return { at: Date.now(), scheduled: Date.now() };

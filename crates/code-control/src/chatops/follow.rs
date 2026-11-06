@@ -196,9 +196,9 @@ fn bind(ctx: &StepContext, install: &Install, f: &Follow, thread_ts: &str) -> Re
 }
 
 /// The machine and thread a step names, or the agent event's (`event.data.machine`,
-/// `event.data.thread`).
+/// `event.data.thread.id`: an agent event's thread is the thread's brief).
 pub(crate) fn target(ctx: &StepContext, machine: Option<String>, thread: Option<String>) -> (String, String) {
     let ev = &ctx.context()["event"]["data"];
-    let pick = |v: Option<String>, k: &str| v.filter(|s| !s.trim().is_empty()).or_else(|| ev[k].as_str().map(str::to_string)).unwrap_or_default();
-    (pick(machine, "machine"), pick(thread, "thread"))
+    let pick = |v: Option<String>, from: Option<&str>| v.filter(|s| !s.trim().is_empty()).or_else(|| from.map(str::to_string)).unwrap_or_default();
+    (pick(machine, ev["machine"].as_str()), pick(thread, ev["thread"]["id"].as_str().or_else(|| ev["thread"].as_str())))
 }

@@ -2,10 +2,12 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { CHATOPS_TEMPLATES, TEMPLATES, type TemplateContext } from "./automation-templates";
-import { automationSpecD, STEP_CONFIGS, STEP_KINDS, type BuiltInStepKind } from "./automations-api";
+import builtInCatalog from "./automation-catalog.json";
+import { automationSpecD, STEP_CONFIGS, STEP_KINDS, type AutomationSpec, type BuiltInStepKind, type Catalog } from "./automations-api";
 import { BUILT_IN_STEPS, withBuiltIns, validate } from "./automations-ui";
 import { CHATOPS_CATALOG, withChatops } from "./chatops-catalog";
 import { decode } from "./decode";
+import { LINEAR_CATALOG } from "./linear-templates";
 
 /** Chat ops' trigger sources and step kinds, from the server's registry (chatops-catalog.json). */
 const SOURCES = Object.fromEntries(CHATOPS_CATALOG.triggers.map((t) => [t.source, t]));
@@ -114,6 +116,73 @@ describe("step outputs", () => {
       for (const [, id, field] of JSON.stringify(spec).matchAll(/steps\.([a-z_0-9]+)\.([a-z_0-9]+)/g)) {
         const known = outputs[kindOf[id]];
         if (known) expect(known, `${t.id}: steps.${id}.${field}`).toContain(field);
+      }
+    }
+  });
+});
+
+describe("templates read what their events bring", () => {
+  // Every trigger's events with a sample of their `event.data`, from the server's registry: the
+  // built-ins (automation-catalog.json), chat ops' and Linear's.
+  const triggers = [...(builtInCatalog as unknown as Catalog).triggers, ...CHATOPS_CATALOG.triggers, ...LINEAR_CATALOG.triggers];
+
+  /** The value at `path` (`thread.title`) of `v`; `undefined` where it has none. */
+  const at = (v: unknown, path: string) => path.split(".").reduce<unknown>((o, k) => (o !== null && typeof o === "object" ? (o as Record<string, unknown>)[k] : undefined), v);
+
+  /** The events a spec's trigger listens for. */
+  function kindsOf(spec: AutomationSpec): string[] {
+    const t = spec.trigger;
+    const all = () => triggers.find((x) => x.source === (t.type === "integration" ? t.source : t.type))!.events.map((e) => e.kind);
+    switch (t.type) {
+      case "manual":
+        return ["run"];
+      case "schedule":
+      case "interval":
+        return ["tick"];
+      case "webhook":
+        return ["post"];
+      default:
+        return t.events.length ? [...t.events] : all();
+    }
+  }
+
+  /** Each `{{ … }}` in the strings of `v`: (where, path, pipes). */
+  function* refs(v: unknown, where: string): Generator<[string, string, string[]]> {
+    if (typeof v === "string") {
+      for (const m of v.matchAll(/\{\{([^}]*)\}\}/g)) {
+        const [path, ...pipes] = m[1].split("|").map((x) => x.trim());
+        yield [where, path, pipes];
+      }
+    } else if (Array.isArray(v)) for (const [i, x] of v.entries()) yield* refs(x, `${where}.${i}`);
+    else if (v && typeof v === "object") for (const [k, x] of Object.entries(v)) yield* refs(x, `${where}.${k}`);
+  }
+
+  /** What the sender makes up, so no sample has it: a webhook's body, a manual run's input. */
+  const FREE_FORM: Record<string, string> = { webhook: "event.data.body.", manual: "event.data.input." };
+
+  it.each(TEMPLATES.map((t) => [t.id, t] as const))("%s", (id, t) => {
+    const spec = t.build(ctx);
+    const source = spec.trigger.type === "integration" ? spec.trigger.source : spec.trigger.type;
+    const trigger = triggers.find((x) => x.source === source);
+    expect(trigger, `${id}: trigger ${source}`).toBeDefined();
+    /** Fields a filter makes sure of (`exists`): a step may read them even if a sample has none. */
+    const sure = (when: AutomationSpec["filters"]) => when.filter((f) => f.op === "exists" && !f.not).map((f) => f.field);
+    const reads = spec.steps.flatMap((st, i) => [...refs(st.config, `steps.${i}.config`)].map(([where, path, pipes]) => ({ where, path, pipes, sure: [...sure(spec.filters), ...sure(st.when)] })));
+    for (const kind of kindsOf(spec)) {
+      const sample = trigger!.events.find((e) => e.kind === kind)?.sample;
+      expect(sample, `${id}: ${source} ${kind} has a sample`).toBeTypeOf("object");
+      for (const { where, path, pipes, sure } of reads) {
+        if (!path.startsWith("event.data.") || pipes.some((p) => p.startsWith("default")) || path.startsWith(FREE_FORM[source] ?? "\0")) continue;
+        if (sure.some((f) => path === f || path.startsWith(`${f}.`))) continue;
+        const v = at(sample, path.slice("event.data.".length));
+        expect(v, `${id} (${kind}): ${where} reads ${path}, which the event doesn't have`).not.toBeUndefined();
+        // A thread id, a title, a link: a template renders a scalar (an object comes out as JSON).
+        if (v !== null && typeof v === "object" && !pipes.some((p) => /^(json|join|first|last|length)\b/.test(p))) expect.fail(`${id} (${kind}): ${where} renders ${path}, an object`);
+      }
+      const filters = [...spec.filters.map((f, i) => [`filters.${i}`, f] as const), ...spec.steps.flatMap((s, i) => s.when.map((f, j) => [`steps.${i}.when.${j}`, f] as const))];
+      for (const [where, f] of filters) {
+        if (!f.field.startsWith("event.data.") || f.op === "exists") continue;
+        expect(at(sample, f.field.slice("event.data.".length)), `${id} (${kind}): ${where} filters on ${f.field}, which the event doesn't have`).not.toBeUndefined();
       }
     }
   });

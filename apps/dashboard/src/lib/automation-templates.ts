@@ -301,8 +301,8 @@ export const TEMPLATES: AutomationTemplate[] = [
         "Done threads become changes in the merge queue.",
         { type: "agent", events: ["thread.done"] },
         [
-          step("publish", "agent.publish", { thread: "{{ event.data.thread }}", message: null, land: true }),
-          step("settle", "agent.settle", { thread: "{{ event.data.thread }}", action: "settle" }),
+          step("publish", "agent.publish", { thread: "{{ event.data.thread.id }}", land: true }),
+          step("settle", "agent.settle", { thread: "{{ event.data.thread.id }}", action: "settle" }),
         ],
       ),
   },
@@ -315,7 +315,7 @@ export const TEMPLATES: AutomationTemplate[] = [
     build: () =>
       spec("Approve tests and builds", "Yes to test, build and lint commands.", { type: "agent", events: ["request.opened"] }, [
         step("answer", "agent.respond", {
-          thread: "{{ event.data.thread }}",
+          thread: "{{ event.data.thread.id }}",
           rules: [
             { action: "command", command: "cargo test*", files: null, tool: null, decision: "accept" },
             { action: "command", command: "pnpm test*", files: null, tool: null, decision: "accept" },
@@ -356,7 +356,7 @@ export const TEMPLATES: AutomationTemplate[] = [
     steps: ["notify"],
     build: () =>
       spec("Failures", "A notice for every failed thread.", { type: "agent", events: ["thread.failed"] }, [
-        step("tell", "notify", { title: "{{ event.data.title }} failed", body: "{{ event.data.error | truncate:200 }}", level: "error", link: "#agents/{{ event.data.thread }}" }),
+        step("tell", "notify", { title: "{{ event.data.thread.title }} failed", body: "{{ event.data.run.error | truncate:200 }}", level: "error", link: "#agents/{{ event.data.thread.id }}" }),
       ]),
   },
   ...CHATOPS_TEMPLATES,
