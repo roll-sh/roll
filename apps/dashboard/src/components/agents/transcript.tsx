@@ -41,6 +41,7 @@ import { RequestCard, toFileDiff } from "./request-card";
 import { SubagentGroup, SubagentRow } from "./subagents";
 import { StepRow, WorkGroup } from "./work-log";
 import { elapsed, runStatusLabel, Stat, usageLine } from "./shared";
+import { useAgents } from "./use-agents";
 
 export interface TranscriptActions {
   /** Answer a request (unset when read-only: requests show what they asked). */
@@ -101,7 +102,7 @@ export function RunView({
   return (
     <section className={`group/run flex flex-col gap-3 ${run.status === "rolled_back" ? "opacity-45" : ""}`} aria-label={`Run ${run.ordinal}`}>
       {/* Nobody typed an idle compaction or a delegated task's result: their rows say what happened (T3). */}
-      {run.delivers?.length ? <Delivered run={run} /> : !run.idle_compaction && <UserMessage run={run} editFrom={run.status !== "rolled_back" ? actions.editFrom : undefined} />}
+      {run.delivers?.length ? <Delivered run={run} actions={actions} /> : !run.idle_compaction && <UserMessage run={run} editFrom={run.status !== "rolled_back" ? actions.editFrom : undefined} />}
       {turn.fold && (
         <div className="border-b border-line pt-1 pb-2">
           <button
@@ -303,10 +304,18 @@ function UserMessage({ run, editFrom }: { run: Run; editFrom?: (run: Run) => Pro
  * finished" notification, not a message from the user. Each task's title and how it ended, from
  * the wake the agent was given (`delegatedTasks`); the whole of it on demand.
  */
-function Delivered({ run }: { run: Run }) {
+function Delivered({ run, actions }: { run: Run; actions: TranscriptActions }) {
+  const { client } = useAgents();
   const [open, setOpen] = useState(false);
   const tasks = delegatedTasks(run);
   const failed = tasks.filter((t) => t.status !== "completed").length;
+  // Each task's subagent, one click away (its thread, or the provider's subagent).
+  const nodes = client.data.nodes.get(run.thread);
+  const links = tasks.flatMap((t) => {
+    const n = nodes?.get(t.id)?.value;
+    const go = n && openSubagent(n, actions);
+    return go ? [{ ...t, go }] : [];
+  });
   return (
     <div className="pb-1">
       <button
@@ -318,6 +327,15 @@ function Delivered({ run }: { run: Run }) {
         <span className="truncate">{deliveredLabel(run)}</span>
         <ChevronRight className={`size-3.5 shrink-0 transition-transform duration-200 motion-reduce:transition-none ${open ? "rotate-90" : ""}`} />
       </button>
+      {links.length > 0 && (
+        <p className="mt-0.5 ml-6 flex flex-wrap gap-x-3 text-[12px]">
+          {links.map((t) => (
+            <button key={t.id} type="button" onClick={t.go} className="text-accent hover:underline">
+              Open {t.title}
+            </button>
+          ))}
+        </p>
+      )}
       <Collapse open={open}>
         <p className="mt-2 ml-6 border-l border-line pl-3 text-[13px] leading-relaxed whitespace-pre-wrap text-muted">{run.prompt}</p>
       </Collapse>

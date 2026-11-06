@@ -2,7 +2,7 @@ import { screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { deliveredLabel } from "@/lib/agents-worklog";
-import { machine, mirrored, run, thread } from "@/test/agents";
+import { machine, mirrored, node, run, thread } from "@/test/agents";
 import { agentsHarness, renderAgents } from "@/test/agents-render";
 import { ThreadNode } from "./nodes";
 import { QueuedMessages } from "./queue";
@@ -33,6 +33,16 @@ describe("a run that delivers delegated tasks' results (Run.delivers)", () => {
     await userEvent.click(row);
     expect(row).toHaveAttribute("aria-expanded", "true");
     expect(screen.getByText(/Done: the build passes\./)).toBeInTheDocument();
+  });
+
+  it("links each task to its subagent's thread", async () => {
+    const sub = (id: string, child: string) => node({ type: "subagent", agent: "roll", prompt: "go", child, result: null }, { id, status: "completed" });
+    const h = agentsHarness({ follow: ["thr_1"], entities: [mirrored("thread", thread(), 1), mirrored("node", sub("nod_0000000000000001", "thr_build"), 2), mirrored("node", sub("nod_0000000000000002", "thr_docs"), 3)] });
+    const openThread = vi.fn();
+    renderAgents(<RunView run={wake} tree={[]} requests={new Map()} checkpoint={undefined} now={Date.now()} actions={{ openThread }} busyThread={false} />, h);
+    await userEvent.click(screen.getByRole("button", { name: "Open Docs" }));
+    expect(openThread).toHaveBeenCalledWith("thr_docs");
+    expect(screen.getByRole("button", { name: "Open Build" })).toBeInTheDocument();
   });
 
   it("is a person's message when it delivers nothing", () => {
