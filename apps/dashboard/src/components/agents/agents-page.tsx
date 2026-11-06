@@ -13,7 +13,7 @@ import { closePalette, noteThreadOpen, openPalette, togglePalette } from "@/lib/
 import { useKeyboard } from "@/lib/keyboard-inset";
 import { lastInputWasKeyboard } from "@/lib/input-modality";
 import type { AgentsServices } from "@/lib/agents-services";
-import { hashFor, isNewAgentKey, newAgentHint, setAgentsView, useAgentsSurface, viewFromHash, type AgentsView, type AutomationsView } from "@/lib/agents-surface";
+import { hashFor, isNewAgentKey, newAgentHint, setAgentsView, threadOfView, useAgentsSurface, viewFromHash, type AgentsView, type AutomationsView } from "@/lib/agents-surface";
 import { isBuilder } from "@/lib/automations-nav";
 import { ALL, applyDisplay, applyView, deleteView, directionOf, focusOn, isPinned, keepProject, loadFocused, pinKey, setFocused as setFocusedIn, pinnedConversations, pinOf, projectOf, viewStorageKey, withDirection, type Pin as PinRec } from "@/lib/agents-views";
 import { desktop, onDesktopDeepLink, useDesktop } from "@/lib/desktop";
@@ -85,10 +85,13 @@ export function AgentsPage({
   integrations?: IntegrationsLink | null;
 }) {
   const { client, services, error } = useAgentsConnection({ owner, demo });
+  // The link it opened with, read once: the URL below follows the view, so by a second run of the
+  // effect (React's strict mode runs it twice) it already says the canvas, and a link to the
+  // automations sheet fell back to it.
+  const [linked] = useState(() => (typeof window === "undefined" ? null : viewFromHash(window.location.hash)));
   // Where the window opens (`?new`, `?focus=t:thr_…`, `?settings=integrations`, or a `#agents/…`
   // link as the popup takes them), before the first paint.
   useLayoutEffect(() => {
-    const linked = viewFromHash(window.location.hash);
     if (integrations) {
       openIntegrations(integrations);
       // Shown once: a reload or a shared URL doesn't say it again.
@@ -223,7 +226,9 @@ export function AgentsSurface({
   // Detail for the open conversation, and for busy threads so their subagents appear.
   useEffect(() => {
     const want = new Set<string>();
-    if (shown.kind === "thread") want.add(shown.thread);
+    // A conversation opened over a run in the sheet too (it stayed "Loading the conversation…").
+    const open = threadOfView(shown);
+    if (open) want.add(open);
     let busy = 0;
     for (const r of data.threads.values()) {
       if (isBusy(r.value.status) && busy < MAX_FOLLOWED_BUSY) {

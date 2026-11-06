@@ -35,6 +35,11 @@ export interface AutomationsView {
   thread?: string;
 }
 
+/** The conversation a view shows: its own, or one opened over a run in the automations sheet. */
+export function threadOfView(view: AgentsView): string | null {
+  return view.kind === "thread" || view.kind === "automations" ? (view.thread ?? null) : null;
+}
+
 export interface AgentsSurface {
   /** The popup is showing (the full-window surface ignores this). */
   open: boolean;

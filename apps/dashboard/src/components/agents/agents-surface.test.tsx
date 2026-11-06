@@ -1,5 +1,6 @@
 import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { StrictMode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { agentsSurface, resetAgentsSurface, setAgentsView } from "@/lib/agents-surface";
 import { setActiveClient } from "@/lib/agents-client";
@@ -338,5 +339,39 @@ describe("the agents page (/dashboard/agents)", () => {
       window.dispatchEvent(new HashChangeEvent("hashchange"));
     });
     expect(agentsSurface.get().view).toEqual({ kind: "settings", target: "owner" });
+  });
+
+  it("opens a link to the automations sheet under strict mode too (its second run read the URL the first had already reset)", async () => {
+    const h = agentsHarness({ entities, follow: ["thr_1", "thr_2"] });
+    conn = { client: h.client, services: fakeServices(), error: null };
+    window.history.replaceState(null, "", "/dashboard/agents#agents/automations/notices");
+    renderAgents(
+      <StrictMode>
+        <MarkStateProvider>
+          <AgentsPage />
+        </MarkStateProvider>
+      </StrictMode>,
+      h,
+    );
+    await screen.findByLabelText("Agents canvas");
+    expect(agentsSurface.get().view).toEqual({ kind: "automations", list: "notices" });
+    await waitFor(() => expect(window.location.hash).toBe("#agents/automations/notices"));
+  });
+
+  it("loads a conversation opened over a run in the automations sheet (it stayed 'Loading the conversation…')", async () => {
+    // An idle one: busy and waiting threads are followed anyway.
+    const h = agentsHarness({ entities: [...entities, mirrored("thread", thread({ id: "thr_idle", title: "Done earlier", status: "idle" }), 6)] });
+    conn = { client: h.client, services: fakeServices(), error: null };
+    const follow = vi.spyOn(h.client, "follow");
+    window.history.replaceState(null, "", "/dashboard/agents");
+    renderAgents(
+      <MarkStateProvider>
+        <AgentsPage />
+      </MarkStateProvider>,
+      h,
+    );
+    await screen.findByLabelText("Agents canvas");
+    act(() => setAgentsView({ kind: "automations", open: "aut_1", tab: "runs", run: "arn_1", thread: "thr_idle" }));
+    await waitFor(() => expect(follow.mock.calls.some(([key, ids]) => key === "surface" && [...ids].includes("thr_idle"))).toBe(true));
   });
 });
