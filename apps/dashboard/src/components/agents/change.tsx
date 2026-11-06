@@ -133,7 +133,7 @@ export function RebaseActions({
   if (progress === "rebased" && onPublish)
     return (
       <span className="inline-flex shrink-0 items-center gap-1.5" data-nodrag>
-        <span className="text-[11.5px] text-subtle">Rebased.</span>
+        <span className="text-[11.5px] text-subtle">The rebase run finished.</span>
         <button
           type="button"
           onClick={onPublish}

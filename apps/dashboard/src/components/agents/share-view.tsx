@@ -25,6 +25,7 @@ import { Card, RequestNode, SubagentNode, ThreadNode } from "./nodes";
 import { Conversation, IconButton } from "./session";
 import { Select } from "./ui";
 import { AgentsContext, useMarkDriver, type AgentsCtx } from "./use-agents";
+import { LocalTime } from "./local-time";
 
 export const SPEEDS = [0.5, 1, 2, 4, 8] as const;
 
@@ -239,7 +240,7 @@ export function ShareView({ share }: { share: Share }) {
             />
           </span>
           <span className="ml-auto hidden text-[11px] text-subtle sm:inline">
-            {new Date(real).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "medium" })}
+            <LocalTime at={real} format={(ms) => new Date(ms).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "medium" })} />
           </span>
         </div>
       </div>
@@ -261,7 +262,7 @@ function ShareHeader({ share, stats }: { share: Share; stats: ReturnType<typeof 
           Shared by <span className="text-muted">{share.owner}</span> · {share.machine.name}
           {share.machine.os ? ` (${OS[share.machine.os] ?? share.machine.os})` : ""} · {stats.runs} run{stats.runs === 1 ? "" : "s"} · {stats.steps} step
           {stats.steps === 1 ? "" : "s"}
-          {stats.threads > 1 ? ` · ${stats.threads} threads` : ""} · {new Date(share.created_at).toLocaleDateString(undefined, { dateStyle: "medium" })}
+          {stats.threads > 1 ? ` · ${stats.threads} threads` : ""} · <LocalTime at={share.created_at} format={(ms) => new Date(ms).toLocaleDateString(undefined, { dateStyle: "medium" })} />
           {share.trimmed ? " · long outputs shortened" : ""}
         </p>
       </div>

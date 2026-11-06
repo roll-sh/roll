@@ -43,6 +43,7 @@ import { SubagentGroup, SubagentRow } from "./subagents";
 import { StepRow, WorkGroup } from "./work-log";
 import { DeliveredText, elapsed, runStatusLabel, Stat, usageLine } from "./shared";
 import { useAgents } from "./use-agents";
+import { LocalTime } from "./local-time";
 
 export interface TranscriptActions {
   /** Answer a request (unset when read-only: requests show what they asked). */
@@ -213,7 +214,11 @@ function RunMeta({ run, tree, checkpoint, actions, busyThread, last }: { run: Ru
           {run.started_at && run.completed_at ? ` in ${elapsed(run.completed_at - run.started_at)}` : ""}
         </span>
         {usage && <span className="font-mono text-[11px]">{usage}</span>}
-        {run.completed_at && <time className="text-[11px]">{clock(run.completed_at)}</time>}
+        {run.completed_at && (
+          <time className="text-[11px]">
+            <LocalTime at={run.completed_at} format={clock} />
+          </time>
+        )}
       </span>
     </div>
   );
@@ -316,7 +321,9 @@ function UserMessage({ run, steers, editFrom }: { run: Run; steers: readonly str
           </>
         ) : (
           <>
-            <time className="tabular-nums">{clock(run.requested_at)}</time>
+            <time className="tabular-nums">
+              <LocalTime at={run.requested_at} format={clock} />
+            </time>
             <CopyButton text={run.prompt} label="Copy the message" />
             {editFrom && (
               <button
