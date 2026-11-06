@@ -40,6 +40,7 @@ export function Dialog({
   children,
   footer,
   className,
+  busy = false,
 }: {
   open: boolean;
   onClose: () => void;
@@ -49,6 +50,8 @@ export function Dialog({
   /** Buttons, right-aligned under a hairline. */
   footer?: ReactNode;
   className?: string;
+  /** Working on something that mustn't be left half done: Escape, a press outside and × wait. */
+  busy?: boolean;
 }) {
   const popup = useRef<HTMLDivElement>(null);
   const origin = useRef<{ x: number; y: number } | null>(null);
@@ -62,7 +65,7 @@ export function Dialog({
     el.style.transformOrigin = `${Math.round(o.x - r.left)}px ${Math.round(o.y - r.top)}px`;
   }, [open]);
   return (
-    <Primitive.Root open={open} onOpenChange={(next) => !next && onClose()}>
+    <Primitive.Root open={open} onOpenChange={(next) => !next && !busy && onClose()}>
       <Primitive.Portal>
         <Primitive.Backdrop className="fixed inset-0 z-[125] bg-(--scrim) backdrop-blur-[3px] transition-opacity duration-200 ease-out data-ending-style:opacity-0 data-starting-style:opacity-0 motion-reduce:transition-none" />
         <Primitive.Viewport className="fixed inset-0 z-[125] grid grid-rows-[1fr_auto_3fr] justify-items-center overflow-y-auto p-3 sm:p-4">
@@ -84,7 +87,7 @@ export function Dialog({
                 <Primitive.Title className="text-[17px] font-[590] tracking-[-0.025em]">{title}</Primitive.Title>
                 {lead && <Primitive.Description className="text-[12.5px] text-muted">{lead}</Primitive.Description>}
               </div>
-              <Primitive.Close aria-label="Close" className="-mt-1 -mr-1 grid size-8 shrink-0 place-items-center rounded-lg text-subtle transition-colors duration-150 hover:bg-fg/[0.06] hover:text-fg">
+              <Primitive.Close aria-label="Close" disabled={busy} className="disabled:opacity-40 -mt-1 -mr-1 grid size-8 shrink-0 place-items-center rounded-lg text-subtle transition-colors duration-150 hover:bg-fg/[0.06] hover:text-fg">
                 <X className="size-4" strokeWidth={1.75} />
               </Primitive.Close>
             </div>

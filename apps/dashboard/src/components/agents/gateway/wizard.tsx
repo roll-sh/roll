@@ -13,19 +13,20 @@
  * 5. **Set up and test**: `gateway.configure`, each `gateway.key`, the plan, `gateway.test` (each
  *    upstream's check, which never generates), then each machine joins through the relay.
  *
- * It closes on Escape, the close button or a press on the scrim; never on a blur (Safari).
+ * The shared dialog (`ui/dialog.tsx`): focus is taken and kept inside, and given back after. It
+ * closes on Escape, the close button or a press on the scrim, never on a blur (Safari), and not
+ * while it sets up.
  */
 
 import { Check, ChevronLeft, Plus, Server, Trash2, X } from "lucide-react";
 import { useMemo, useState } from "react";
-import { createPortal } from "react-dom";
 import { GATEWAY_PORT, reachable, type GatewayPlan, type GatewaySettings, type GatewayUrl, type KeyChange, type Machine, type UpstreamCheck, type UpstreamSpec } from "@/lib/agents-api";
 import { checkSettings, checkUrl, gatewayOn, isIPv4, isIPv6, listenError, reachProblem, upstreamKeyChange, upstreamUrl, URL_LABELS, urlChoices, urlFor } from "@/lib/agents-gateway";
-import { useEscapeLayer } from "../escape-layers";
 import { machineKind } from "@/lib/agents-identity";
 import { MachineIcon } from "../identity";
 import { field, Note } from "../settings-ui";
 import { cn, Select, Switch } from "../ui";
+import { Dialog } from "../ui/dialog";
 import { useAgents } from "../use-agents";
 import { GatewayNotice } from "./notice";
 import { iconBtn, KindTile, Labeled, message, primaryBtn, Problem, smallBtn } from "./shared";
@@ -87,7 +88,6 @@ export function GatewaySetup({
   const [checks, setChecks] = useState<UpstreamCheck[] | null>(null);
   const [running, setRunning] = useState<"idle" | "busy" | "done">("idle");
   const [problem, setProblem] = useState<string | null>(null);
-  useEscapeLayer(true, () => running !== "busy" && onClose());
 
   const plan: Pick<GatewayPlan, "host" | "urls"> = { host: hostId ?? "", urls: addresses.map(({ label, url }) => ({ label, url })) };
   const isMember = (m: Machine) => members.get(m.id)?.on ?? m.id === hostId;
@@ -168,19 +168,46 @@ export function GatewaySetup({
     setRunning("done");
   };
 
-  return createPortal(
-    <div data-agents className="fade-in fixed inset-0 z-[120] grid place-items-center overflow-y-auto p-3 backdrop-blur-[3px]" style={{ background: "var(--scrim)" }} onPointerDown={(e) => e.target === e.currentTarget && running !== "busy" && onClose()}>
-      <div role="dialog" aria-modal="true" aria-label="Set up the model gateway" className="sheet-in flex max-h-[min(760px,calc(100dvh-24px))] w-[min(600px,100%)] flex-col rounded-2xl border border-line-2 bg-sheet text-fg shadow-sheet inset-shadow-highlight">
-        <div className="flex items-start gap-2 px-5 pt-5">
-          <div className="min-w-0 space-y-1">
-            <h2 className="text-[17px] font-[590] tracking-[-0.025em]">Set up the model gateway</h2>
-            <p className="text-[12.5px] text-muted">One of your computers sends your machines' model requests on to your own API keys, with usage and cost in one place.</p>
-          </div>
-          <button type="button" onClick={onClose} disabled={running === "busy"} aria-label="Close" className="-mt-1 -mr-1 ml-auto grid size-8 shrink-0 place-items-center rounded-lg text-subtle transition-colors hover:bg-fg/[0.06] hover:text-fg disabled:opacity-40">
-            <X className="size-4" strokeWidth={1.75} />
-          </button>
-        </div>
-        <ol className="flex gap-1 px-5 pt-4" aria-label="Steps">
+  // The shared dialog (M5): portaled, focus taken and kept inside, given back after; Escape, a press
+  // outside and × wait while it sets up. Escape with an upstream open in its editor closes the
+  // editor first.
+  const dismiss = () => {
+    if (editing !== null) return setEditing(null);
+    onClose();
+  };
+  return (
+    <Dialog
+      open
+      onClose={dismiss}
+      busy={running === "busy"}
+      className="sm:w-[min(600px,100%)]"
+      title="Set up the model gateway"
+      lead="One of your computers sends your machines' model requests on to your own API keys, with usage and cost in one place."
+      footer={
+        <>
+          {step > 0 && running === "idle" && (
+            <button type="button" onClick={() => setStep((s) => s - 1)} className="flex h-8 items-center gap-1 rounded-lg px-2 text-[12.5px] text-muted hover:text-fg">
+              <ChevronLeft className="size-3.5" /> Back
+            </button>
+          )}
+          <span className="ml-auto" />
+          {step < 4 ? (
+            <button type="button" disabled={!canNext} onClick={() => setStep((s) => s + 1)} className={primaryBtn}>
+              {step === 3 ? "Review" : "Continue"}
+            </button>
+          ) : running === "done" ? (
+            <button type="button" onClick={onClose} className={primaryBtn}>
+              Done
+            </button>
+          ) : (
+            <button type="button" disabled={running === "busy" || !services?.gateway} onClick={() => void run()} className={primaryBtn}>
+              {running === "busy" ? <span className="shimmer">Setting up…</span> : phases.length ? "Try again" : "Set up and test"}
+            </button>
+          )}
+        </>
+      }
+    >
+        <ol className="sticky top-0 z-10 -mx-5 flex gap-1 bg-sheet px-5 pb-3" aria-label="Steps">
           {STEPS.map((s, i) => (
             <li key={s} aria-current={i === step ? "step" : undefined} className="min-w-0 flex-1">
               <div className={cn("h-0.5 rounded-full transition-colors duration-200", i <= step ? "bg-fg/70" : "bg-line-2")} />
@@ -188,7 +215,7 @@ export function GatewaySetup({
             </li>
           ))}
         </ol>
-        <div className="min-h-0 flex-1 space-y-3 overflow-y-auto px-5 py-4" key={step}>
+        <div className="space-y-3 pt-1" key={step}>
           {step === 0 && (
             <Labeled label="Which computer runs it?" hint="An always-on computer is best: when it's offline, the machines that use it can't reach their models.">
               <ul className="divide-y divide-line overflow-hidden rounded-xl border border-line-2 bg-panel inset-shadow-highlight" role="radiogroup" aria-label="Computers">
@@ -354,30 +381,7 @@ export function GatewaySetup({
           )}
           {problem && <Problem>{problem}</Problem>}
         </div>
-        <div className="flex items-center gap-2 border-t border-line px-5 py-3">
-          {step > 0 && running === "idle" && (
-            <button type="button" onClick={() => setStep((s) => s - 1)} className="flex h-8 items-center gap-1 rounded-lg px-2 text-[12.5px] text-muted hover:text-fg">
-              <ChevronLeft className="size-3.5" /> Back
-            </button>
-          )}
-          <span className="ml-auto" />
-          {step < 4 ? (
-            <button type="button" disabled={!canNext} onClick={() => setStep((s) => s + 1)} className={primaryBtn}>
-              {step === 3 ? "Review" : "Continue"}
-            </button>
-          ) : running === "done" ? (
-            <button type="button" onClick={onClose} className={primaryBtn}>
-              Done
-            </button>
-          ) : (
-            <button type="button" disabled={running === "busy" || !services?.gateway} onClick={() => void run()} className={primaryBtn}>
-              {running === "busy" ? <span className="shimmer">Setting up…</span> : phases.length ? "Try again" : "Set up and test"}
-            </button>
-          )}
-        </div>
-      </div>
-    </div>,
-    document.body,
+    </Dialog>
   );
 
   async function saveUpstream(at: number | "new", u: UpstreamSpec, key: string | null | undefined): Promise<string | null> {

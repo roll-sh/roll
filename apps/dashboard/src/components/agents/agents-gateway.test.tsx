@@ -45,6 +45,24 @@ describe("setting up the gateway", () => {
     expect(within(dlg).getByRole("radio", { name: "ada-mbp" })).not.toBeChecked();
   });
 
+  it("takes focus (the shared dialog keeps it inside); Escape closes an open upstream editor first, then the wizard (M5)", async () => {
+    const h = agentsHarness({ machines: [LAPTOP, HOST], ctx: { services: fakeServices({ gateway: memoryGateway().api }) } });
+    const onClose = vi.fn();
+    renderAgents(<GatewaySetup machines={[LAPTOP, HOST]} initialHost="mch_srv" onClose={onClose} onDone={vi.fn()} />, h);
+    const dlg = screen.getByRole("dialog", { name: "Set up the model gateway" });
+    await waitFor(() => expect(dlg.contains(document.activeElement)).toBe(true));
+    macClick(within(dlg).getByRole("button", { name: "Continue" }));
+    macClick(within(dlg).getByRole("checkbox", { name: /I understand/ }));
+    macClick(within(dlg).getByRole("button", { name: "Continue" }));
+    macClick(within(dlg).getByRole("button", { name: "Add an upstream" }));
+    expect(within(dlg).getByLabelText("API key")).toBeInTheDocument();
+    fireEvent.keyDown(within(dlg).getByLabelText("API key"), { key: "Escape" });
+    await waitFor(() => expect(within(dlg).queryByLabelText("API key")).toBeNull());
+    expect(onClose).not.toHaveBeenCalled();
+    fireEvent.keyDown(dlg, { key: "Escape" });
+    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+  });
+
   it("walks the five steps under a macOS click, seals the key before sending it, and acknowledges the notice", async () => {
     const gw = memoryGateway();
     const h = agentsHarness({
