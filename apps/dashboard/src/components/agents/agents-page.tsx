@@ -39,6 +39,7 @@ import { SettingsPanel } from "./settings-panel";
 import { useSandboxes } from "./sandbox";
 import { Conversation, IconButton } from "./session";
 import { closeTopLayer } from "./escape-layers";
+import { useFocusRescue } from "./focus-rescue";
 import { CloseTerminal, TerminalNode } from "./terminal";
 import { threadDone } from "./thread-status";
 import { SidebarToggle, ThreadsSidebar, useSidebarOpen } from "./threads-sidebar";
@@ -187,6 +188,7 @@ export function AgentsSurface({
   const dock = useRef<HTMLDivElement>(null);
   const views = useCanvasViews(services.canvas, client.owner, data.canvas?.revision ?? 0);
   const root = useRef<HTMLDivElement>(null);
+  useFocusRescue(root);
   const pendingFocus = useRef<string | null>(initialFocus ?? null);
 
   const threadOpen = view.kind === "thread" ? data.threads.get(view.thread) : undefined;
