@@ -52,6 +52,7 @@ import { ShelfControl } from "./project-shelf";
 import { openShelf } from "@/lib/agents-shelf";
 import { openPalette } from "@/lib/agents-palette";
 import { Popover, PopoverPopup, PopoverTrigger, Segmented, Switch } from "./ui";
+import { SlidingThumb } from "./ui/thumb";
 
 /** How long edits wait before they go to roll (typing a filter, resizing a card). */
 const SAVE_AFTER_MS = 350;
@@ -293,7 +294,9 @@ export function ViewsBar({
 
   return (
     <div ref={bar} className="chrome-in relative z-10 flex h-11 shrink-0 items-center gap-2 border-b border-line px-2" data-nodrag>
-      <div ref={tabs} role="tablist" aria-label="Canvas views" className="flex min-w-0 flex-1 items-center gap-0.5 overflow-x-auto [scrollbar-width:none]">
+      <div ref={tabs} role="tablist" aria-label="Canvas views" className="relative flex min-w-0 flex-1 items-center gap-0.5 overflow-x-auto [scrollbar-width:none]">
+        {/* The selected tab's raised look slides from tab to tab (it scrolls with them). */}
+        <SlidingThumb selector="[data-tab][data-selected]" className="rounded-md border border-line-2 bg-panel-2 shadow-card inset-shadow-highlight" />
         {views.map((view, i) => {
           const selected = view.id === v.current.id;
           const count = view.id === ALL || !threadFilter(view.filter) ? null : countView(data, view.filter, now);
@@ -313,7 +316,9 @@ export function ViewsBar({
           return (
             <div
               key={view.id}
-              className={`group/tab flex shrink-0 items-center rounded-md border transition-colors duration-150 ${selected ? "border-line-2 bg-panel-2 text-fg shadow-card inset-shadow-highlight" : "border-transparent text-muted hover:bg-fg/[0.04] hover:text-fg"} ${dragging === view.id ? "opacity-50" : ""}`}
+              data-tab
+              data-selected={selected || undefined}
+              className={`group/tab relative flex shrink-0 items-center rounded-md border border-transparent transition-colors duration-150 ${selected ? "text-fg" : "text-muted hover:bg-fg/[0.04] hover:text-fg"} ${dragging === view.id ? "opacity-50" : ""}`}
               draggable={view.id !== ALL}
               onDragStart={(e) => {
                 setDragging(view.id);

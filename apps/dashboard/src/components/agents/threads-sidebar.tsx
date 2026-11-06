@@ -41,6 +41,8 @@ import { EdgeSheet, useAfterFirstFrame } from "./edge-sheet";
 import { Menu as ActionsMenu, type MenuItem as MenuEntry } from "./menu";
 import { useProjectActions } from "./project-actions";
 import { Dialog, useKept } from "./ui/dialog";
+import { Collapse } from "./animated-height";
+import { useFlip, useFold } from "./list-motion";
 import { Menu, MenuItem, MenuPopup, MenuRadioGroup, MenuRadioItem, MenuSeparator, MenuShortcut, MenuSub, MenuSubPopup, MenuSubTrigger, MenuTrigger, Segmented } from "./ui";
 import { useAgents, usePrefs } from "./use-agents";
 import { MachineIcon, ProjectIcon } from "./identity";
@@ -619,6 +621,8 @@ function ProjectGroup({
   actions: Actions;
 }) {
   const [settledShown, setSettledShown] = useState(SETTLED_FIRST);
+  const list = useRef<HTMLUListElement>(null);
+  useFlip(list);
   const row = (r: InboxRow) => <ThreadRow key={r.thread.id} row={r} selected={r.thread.id === openThread} onPick={onPick} now={now} actions={actions} />;
   const isOpen = (r: InboxRow) => r.thread.id === openThread;
   const hidden = group.settled.length - settledShown;
@@ -643,37 +647,45 @@ function ProjectGroup({
         )}
         <ProjectMenu project={group.project} />
       </div>
-      {!collapsed && (
-        <ul aria-label={`${group.project.name} threads`} className="mt-0.5 space-y-px">
-          {group.active.map(row)}
-          {group.active.length === 0 && group.snoozed.length + group.settled.length + group.archived.length === 0 && <li className="py-1 pl-8 text-[12px] text-subtle">No threads</li>}
-          {group.snoozed.length > 0 && (
-            <>
-              <ShelfHeader label="Snoozed" count={group.snoozed.length} open={shelves.snoozed} onToggle={() => onShelf("snoozed")} />
-              {(shelves.snoozed ? group.snoozed : group.snoozed.filter(isOpen)).map(row)}
-            </>
-          )}
-          {group.settled.length > 0 && (
-            <>
-              <ShelfHeader label="Settled" count={group.settled.length} open={shelves.settled} onToggle={() => onShelf("settled")} />
-              {(shelves.settled ? group.settled.slice(0, settledShown) : group.settled.filter(isOpen)).map(row)}
-              {shelves.settled && hidden > 0 && (
-                <li>
+      {/* A project folds open and shut; its rows fold in and out as they're settled, snoozed or
+          woken, and slide from shelf to shelf (list-motion.ts): one list, keyed by thread. */}
+      <Collapse open={!collapsed}>
+        <ul ref={list} aria-label={`${group.project.name} threads`} className="mt-0.5 space-y-px">
+          <AnimatePresence initial={false}>
+            {[
+              ...group.active.map(row),
+              group.active.length === 0 && group.snoozed.length + group.settled.length + group.archived.length === 0 && (
+                <FoldLi key="empty" className="py-1 pl-8 text-[12px] text-subtle">
+                  No threads
+                </FoldLi>
+              ),
+              group.snoozed.length > 0 && <ShelfHeader key="h:snoozed" label="Snoozed" count={group.snoozed.length} open={shelves.snoozed} onToggle={() => onShelf("snoozed")} />,
+              ...(group.snoozed.length > 0 ? (shelves.snoozed ? group.snoozed : group.snoozed.filter(isOpen)).map(row) : []),
+              group.settled.length > 0 && <ShelfHeader key="h:settled" label="Settled" count={group.settled.length} open={shelves.settled} onToggle={() => onShelf("settled")} />,
+              ...(group.settled.length > 0 ? (shelves.settled ? group.settled.slice(0, settledShown) : group.settled.filter(isOpen)).map(row) : []),
+              group.settled.length > 0 && shelves.settled && hidden > 0 && (
+                <FoldLi key="more">
                   <button type="button" onClick={() => setSettledShown((n) => n + SETTLED_PAGE)} className="ml-7 rounded-md px-1.5 py-1 text-[12px] text-subtle transition hover:bg-panel-2 hover:text-fg">
                     Show {Math.min(hidden, SETTLED_PAGE)} more
                   </button>
-                </li>
-              )}
-            </>
-          )}
-          {group.archived.length > 0 && (
-            <>
-              <ShelfHeader label="Archived" count={group.archived.length} open={shelves.archived} onToggle={() => onShelf("archived")} />
-              {(shelves.archived ? group.archived : group.archived.filter(isOpen)).map(row)}
-            </>
-          )}
+                </FoldLi>
+              ),
+              group.archived.length > 0 && <ShelfHeader key="h:archived" label="Archived" count={group.archived.length} open={shelves.archived} onToggle={() => onShelf("archived")} />,
+              ...(group.archived.length > 0 ? (shelves.archived ? group.archived : group.archived.filter(isOpen)).map(row) : []),
+            ].filter(Boolean)}
+          </AnimatePresence>
         </ul>
-      )}
+      </Collapse>
+    </li>
+  );
+}
+
+/** A list item that folds in and out with the rows around it. */
+function FoldLi({ className, children }: { className?: string; children: ReactNode }) {
+  const { ref, leaving } = useFold<HTMLLIElement>();
+  return (
+    <li ref={ref} inert={leaving} className={className}>
+      {children}
     </li>
   );
 }
@@ -685,8 +697,9 @@ function ProjectMenu({ project }: { project: Project }) {
 }
 
 function ShelfHeader({ label, count, open, onToggle }: { label: string; count: number; open: boolean; onToggle: () => void }) {
+  const fold = useFold<HTMLLIElement>();
   return (
-    <li>
+    <li ref={fold.ref} data-flip={`h:${label}`} inert={fold.leaving}>
       <button type="button" onClick={onToggle} aria-expanded={open} className="mt-1 flex h-7 w-full items-center gap-1.5 rounded-md pr-2 pl-2.5 text-left text-[11.5px] text-subtle transition hover:bg-panel-2/60 hover:text-muted">
         {open ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />}
         <span className="font-medium">{label}</span>
@@ -707,6 +720,7 @@ const STATUS_DOT: Record<RowStatus, string> = {
 function ThreadRow({ row, selected, onPick, now, actions }: { row: InboxRow; selected: boolean; onPick: (thread: string) => void; now: number; actions: Actions }) {
   const t = row.thread;
   const [menu, setMenu] = useState(false);
+  const fold = useFold<HTMLLIElement>();
   const quiet = row.status === null || row.shelf !== "active";
   const pill = row.status === "waiting" || row.status === "failed" || row.status === "woke" ? row.status : null;
   const meta =
@@ -728,7 +742,10 @@ function ThreadRow({ row, selected, onPick, now, actions }: { row: InboxRow; sel
           : { label: "Settle thread", icon: <Check className="size-3.5" strokeWidth={1.5} />, run: () => actions.settle(t), disabled: !!cantPark(t, "settle") };
   return (
     <li
+      ref={fold.ref}
       data-row
+      data-flip={t.id}
+      inert={fold.leaving}
       className={`group/r relative flex h-[30px] items-center pointer-coarse:h-10 rounded-md transition-colors duration-150 ${selected ? "bg-fg/[0.07] text-fg inset-shadow-highlight" : "hover:bg-fg/[0.04]"} ${menu ? "bg-fg/[0.04]" : ""}`}
     >
       <button type="button" onClick={() => onPick(t.id)} aria-current={selected ? "true" : undefined} className="flex h-full min-w-0 flex-1 items-center gap-2 rounded-md pr-1 pl-2.5 text-left outline-none focus-visible:ring-1 focus-visible:ring-accent/60 focus-visible:ring-inset" title={t.title}>

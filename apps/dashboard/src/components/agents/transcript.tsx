@@ -132,7 +132,7 @@ export function RunView({
         </Fragment>
       ))}
       {live ? (
-        <p className="flex h-6 items-center gap-2 px-1 text-[13px] text-muted tabular-nums transition-opacity duration-150 starting:opacity-0">
+        <p className="flex h-6 items-center gap-2 px-1 text-[13px] text-muted tabular-nums transition-opacity duration-150 starting:opacity-0 motion-reduce:transition-none">
           <span className={`size-1.5 rounded-full bg-accent ${run.status === "waiting" ? "" : "pulse-dot"}`} aria-hidden />
           <span className={run.status === "waiting" ? "" : "shimmer"}>
             {run.status === "waiting" ? "Waiting for you" : "Working"}

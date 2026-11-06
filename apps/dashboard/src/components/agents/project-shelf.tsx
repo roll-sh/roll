@@ -11,13 +11,15 @@
  */
 
 import { AlarmClock, AlarmClockOff, Archive, ArchiveRestore, Check, Eraser, Search, Undo2, X } from "lucide-react";
-import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { AnimatePresence } from "motion/react";
+import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 import { inbox, restoreOf, shortAgo, snoozeLeft, type InboxRow } from "@/lib/agents-inbox";
 import { closeShelf, narrowShelf, openShelf, PARKED, PARKED_LABEL, shelfCount, shelfList, useShelf, type Parked } from "@/lib/agents-shelf";
 import type { AgentsData } from "@/lib/agents-store";
 import { ProjectIcon } from "./identity";
 import { useInboxActions } from "./threads-sidebar";
 import { AnimatedHeight } from "./animated-height";
+import { useFold } from "./list-motion";
 import { Popover, PopoverPopup, PopoverTrigger, Segmented } from "./ui";
 import { useAgents } from "./use-agents";
 
@@ -181,12 +183,15 @@ function ShelfPanel({ data, project, tab: asked, phone }: { data: AgentsData; pr
               {query ? `Nothing ${PARKED_LABEL[list.tab].toLowerCase()} matches “${query}”.` : `Nothing ${PARKED_LABEL[list.tab].toLowerCase()}${narrowed ? ` in ${narrowed.name}` : ""}.`}
             </p>
           )}
+          {/* A row restored (or woken) folds out, and its project with its last row; a tab or a
+              search shows its rows at once (keyed by them). */}
+          <AnimatePresence key={`${list.tab}|${query}`} initial={false}>
           {list.sections.map((s) => {
             if (left <= 0) return null;
             const rows = s.rows.slice(0, left);
             left -= rows.length;
             return (
-              <div key={s.project.id} role="group" aria-label={s.project.name}>
+              <ShelfSection key={s.project.id} name={s.project.name}>
                 {!project && (
                   <button
                     type="button"
@@ -203,13 +208,16 @@ function ShelfPanel({ data, project, tab: asked, phone }: { data: AgentsData; pr
                     <span className="font-mono tabular-nums">{s.rows.length}</span>
                   </button>
                 )}
-                {rows.map((r) => {
-                  const i = index++;
-                  return <ShelfRow key={r.thread.id} id={`${listId}-${i}`} row={r} active={i === at} onHover={() => setActive(i)} onOpen={() => open(r)} />;
-                })}
-              </div>
+                <AnimatePresence initial={false}>
+                  {rows.map((r) => {
+                    const i = index++;
+                    return <ShelfRow key={r.thread.id} id={`${listId}-${i}`} row={r} active={i === at} onHover={() => setActive(i)} onOpen={() => open(r)} />;
+                  })}
+                </AnimatePresence>
+              </ShelfSection>
             );
           })}
+          </AnimatePresence>
           {list.rows.length > count && (
             <button type="button" onClick={() => setCount((n) => n + SHELF_PAGE)} className="w-full rounded-md px-2 py-1.5 text-left text-[11.5px] text-subtle transition hover:bg-fg/[0.05] hover:text-fg">
               Show {Math.min(list.rows.length - count, SHELF_PAGE)} more
@@ -231,6 +239,16 @@ function ShelfPanel({ data, project, tab: asked, phone }: { data: AgentsData; pr
   );
 }
 
+/** A project's rows on the shelf: folds out with its last row. */
+function ShelfSection({ name, children }: { name: string; children: ReactNode }) {
+  const fold = useFold<HTMLDivElement>();
+  return (
+    <div ref={fold.ref} inert={fold.leaving} role="group" aria-label={name}>
+      {children}
+    </div>
+  );
+}
+
 function ShelfRow({ id, row, active, onHover, onOpen }: { id: string; row: InboxRow; active: boolean; onHover: () => void; onOpen: () => void }) {
   const actions = useInboxActions();
   const t = row.thread;
@@ -239,8 +257,11 @@ function ShelfRow({ id, row, active, onHover, onOpen }: { id: string; row: Inbox
   const Icon = SHELF_ICON[shelf];
   const Restore = RESTORE_ICON[shelf];
   const now = Date.now();
+  const fold = useFold<HTMLDivElement>();
   return (
     <div
+      ref={fold.ref}
+      inert={fold.leaving}
       id={id}
       role="option"
       aria-selected={active}

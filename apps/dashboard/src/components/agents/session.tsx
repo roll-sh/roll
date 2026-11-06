@@ -208,7 +208,7 @@ export function Conversation({ thread, machine, start, end }: { thread: Thread; 
                   stick.current = true;
                   scroller.current?.scrollTo({ top: scroller.current.scrollHeight, behavior: "smooth" });
                 }}
-                className="glass absolute bottom-3 left-1/2 flex h-7 -translate-x-1/2 items-center gap-1 rounded-full border border-outline px-3 text-[12px] text-muted shadow-pop transition-opacity duration-150 starting:opacity-0 hover:text-fg"
+                className="glass absolute bottom-3 left-1/2 flex h-7 -translate-x-1/2 items-center gap-1 rounded-full border border-outline px-3 text-[12px] text-muted shadow-pop transition-opacity duration-150 starting:opacity-0 motion-reduce:transition-none hover:text-fg"
               >
                 <ChevronDown className="size-3.5" /> Scroll to end
                 {thread.queued.length > 0 && <span className="text-subtle">· {thread.queued.length} queued</span>}

@@ -597,14 +597,14 @@ export function Composer({
     >
       {asked ? (
         // T3's attached banner: tucked 1rem under the card's top edge (the padding keeps its rows clear), scrolling on its own past 24rem or 40% of the screen.
-        <div className="mx-[1.375rem] -mb-4 rounded-t-2xl border border-b-0 border-outline bg-raised pt-3 pb-5 transition-opacity duration-150 starting:opacity-0">
+        <div className="mx-[1.375rem] -mb-4 rounded-t-2xl border border-b-0 border-outline bg-raised pt-3 pb-5 transition-opacity duration-150 starting:opacity-0 motion-reduce:transition-none">
           <div className="max-h-[min(24rem,40dvh)] overflow-y-auto overscroll-contain px-3.5 pb-1" data-scroll>
             <QuestionsPanel flow={flow} />
           </div>
         </div>
       ) : (
         (planActive || (thread && thread.queued.length > 0)) && (
-          <div className="mx-[1.375rem] -mb-4 space-y-1 rounded-t-2xl border border-b-0 border-outline bg-raised pt-2 pb-5 transition-opacity duration-150 starting:opacity-0">
+          <div className="mx-[1.375rem] -mb-4 space-y-1 rounded-t-2xl border border-b-0 border-outline bg-raised pt-2 pb-5 transition-opacity duration-150 starting:opacity-0 motion-reduce:transition-none">
             {thread && thread.queued.length > 0 && (
               <div className="max-h-[min(14rem,30dvh)] overflow-y-auto overscroll-contain" data-scroll>
                 <QueuedMessages queued={thread.queued} held={queueHeld} running={running} editing={editing?.id ?? null} actions={queueActions} onResume={() => void act(() => promote(thread.queued[0]))} />
@@ -638,7 +638,7 @@ export function Composer({
         {attachments.length > 0 && (
           <ul className="flex flex-wrap gap-1.5 px-4 pt-3.5" aria-label="Attachments">
             {attachments.map((a, i) => (
-              <li key={`${a.name}-${i}`} className="group relative transition-[opacity,scale] duration-300 ease-drawer starting:scale-95 starting:opacity-0">
+              <li key={`${a.name}-${i}`} className="group relative transition-[opacity,scale] duration-300 ease-drawer starting:scale-95 starting:opacity-0 motion-reduce:transition-none">
                 {/* eslint-disable-next-line @next/next/no-img-element */}
                 <img src={`data:${a.mime};base64,${a.data}`} alt={a.name} className="size-12 rounded-lg border border-line-2 object-cover" />
                 <button
