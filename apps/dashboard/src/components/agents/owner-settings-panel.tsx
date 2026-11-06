@@ -20,6 +20,7 @@ import { desktop } from "@/lib/desktop";
 import { DEFAULT_OWNER_SETTINGS, RESTORABLE, type NotifyMode, type OwnerSettings } from "@/lib/owner-settings";
 import { INTEGRATION_SETTINGS, IntegrationsSection } from "./integrations";
 import { LINEAR_SETTINGS, LinearSettingsSection } from "./linear-settings";
+import { ShareLinks } from "./share";
 import { ENDPOINT_SETTINGS, EndpointProfilesSection } from "./endpoint-settings";
 import { GATEWAY_SETTINGS, GatewaySection } from "./gateway/section";
 import { DefaultsRows } from "./machine-settings";
@@ -50,6 +51,7 @@ const S = {
   permissions: { id: "new.permissions", title: "Permissions", section: "New threads", terms: ["runtime mode", "full access", "auto edit", "ask", "approvals"] },
   mode: { id: "new.mode", title: "Plan first", section: "New threads", terms: ["interaction mode", "plan mode"] },
   workspace: { id: "new.workspace", title: "Workspace", section: "New threads", terms: ["worktree", "checkout"] },
+  shares: { id: "shares", title: "Shared links", section: "Shared links", description: "Read-only replays of conversations, frozen when made. Revoking one removes it at once.", terms: ["share", "links", "public", "replay", "revoke"] },
   keyboard: { id: "keyboard", title: "Keyboard shortcuts", section: "Keyboard", terms: ["keys", "hotkeys", "keybindings", "shortcut"] },
   restore: { id: "restore", title: "Restore defaults", section: "General", description: "Put every setting on this page back (favourite models stay).", terms: ["reset"] },
 } satisfies Record<string, Setting>;
@@ -121,7 +123,7 @@ export function ownerSettingItems(machines: readonly Machine[], services: Agents
 }
 
 export function OwnerSettingsPanel({ onClose, elsewhere }: { onClose: () => void; elsewhere?: readonly SettingsElsewhere[] }) {
-  const { client, owner, prefs, services } = useAgents();
+  const { client, owner, prefs, services, demo } = useAgents();
   const settings = prefs?.settings ?? DEFAULT_OWNER_SETTINGS;
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -229,6 +231,13 @@ export function OwnerSettingsPanel({ onClose, elsewhere }: { onClose: () => void
       {services?.gateway && <GatewaySection />}
       {services && <IntegrationsSection owner={owner} api={services.integrations} />}
       <LinearSettingsSection />
+      {!demo && (
+        <SettingsSection title="Shared links" ids={[S.shares.id]}>
+          <SettingRow s={S.shares}>
+            <ShareLinks owner={owner} flush />
+          </SettingRow>
+        </SettingsSection>
+      )}
       <SettingsSection title="Keyboard" ids={[S.keyboard.id]}>
         <SettingRow s={S.keyboard}>
           <dl className="mt-2 grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 text-[12.5px]">

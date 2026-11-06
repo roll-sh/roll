@@ -40,6 +40,7 @@ import { SettingsPanel } from "./settings-panel";
 import { useSandboxes } from "./sandbox";
 import { Conversation, IconButton } from "./session";
 import { closeTopLayer } from "./escape-layers";
+import { openSettings } from "./provider-setup";
 import { useFocusRescue } from "./focus-rescue";
 import { CloseTerminal, TerminalNode } from "./terminal";
 import { threadDone } from "./thread-status";
@@ -575,7 +576,8 @@ export function AgentsSurface({
                   phone && { label: "Add a machine", icon: <Server />, onSelect: () => setAdding(true) },
                   phone && { label: "Agents settings", icon: <Settings />, onSelect: () => setAgentsView({ kind: "settings", target: "owner" }) },
                   archived > 0 && { label: `${showArchived ? "Hide" : "Show"} archived (${archived})`, icon: <Archive />, onSelect: () => setShowArchived((s) => !s) },
-                  !demo && { label: "Shared links", icon: <Share2 />, onSelect: () => window.location.assign(`/dashboard/agents/shares?owner=${encodeURIComponent(client.owner)}`) },
+                  // In the agents' own settings (it was a page outside the agents, the general dashboard's).
+                  !demo && { label: "Shared links", icon: <Share2 />, onSelect: () => openSettings("owner", "Shared links") },
                 ]}
               />
               {end}

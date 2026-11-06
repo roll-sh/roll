@@ -22,7 +22,12 @@ import { useAgents } from "./use-agents";
  * `then` runs on the section once it's there (opening "Add agent").
  */
 export function openMachineSettings(machine: string, section?: string, then?: (el: HTMLElement) => void) {
-  setAgentsView({ kind: "settings", target: `m:${machine}` });
+  openSettings(`m:${machine}`, section, then);
+}
+
+/** Settings beside the canvas (`owner`, `m:…`, `p:…`), scrolled to one of its sections. */
+export function openSettings(target: string, section?: string, then?: (el: HTMLElement) => void) {
+  setAgentsView({ kind: "settings", target });
   if (!section || typeof document === "undefined") return;
   let tries = 0;
   const find = () => {

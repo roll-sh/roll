@@ -7,12 +7,12 @@
  */
 
 import { ExternalLink, Link2, Share2, Trash2, X } from "lucide-react";
-import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { agentsApi, type ShareSummary, type Thread } from "@/lib/agents-api";
 import { codeApi } from "@/lib/code-api";
 import { btn, CopyButton, ErrorNote, Panel, primary, useCopy } from "../ui";
 import { compact } from "./shared";
+import { openSettings } from "./provider-setup";
 import { useAgents } from "./use-agents";
 
 /** The public page of a share, on this web app. */
@@ -97,9 +97,16 @@ export function ShareButton({ thread }: { thread: Thread }) {
               <p className="text-[11.5px] text-subtle">
                 {made.threads > 1 ? `${made.threads} threads · ` : ""}
                 {made.runs} run{made.runs === 1 ? "" : "s"} · {compact(made.bytes)} B ·{" "}
-                <Link href={`/dashboard/agents/shares?owner=${encodeURIComponent(owner)}`} className="text-accent hover:underline">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setOpen(false);
+                    openSettings("owner", "Shared links");
+                  }}
+                  className="text-accent hover:underline"
+                >
                   Manage shares
-                </Link>
+                </button>
               </p>
             </div>
           ) : (
@@ -160,6 +167,27 @@ function useShareOwner(param: string | undefined) {
 /** `/dashboard/agents/shares`: an owner's links, newest first, each revocable. */
 export function SharesList({ owner: param }: { owner?: string }) {
   const { owner, error: ownerError } = useShareOwner(param);
+  return (
+    <div className="mx-auto max-w-3xl space-y-6">
+      <div className="flex items-center gap-3">
+        <Share2 className="size-5 text-muted" />
+        <h1 className="text-2xl font-semibold tracking-[-0.045em]">Shared threads</h1>
+        {owner && <span className="font-mono text-[13px] text-subtle">{owner}</span>}
+      </div>
+      <Panel title="Links" aside={<span className="text-[12px] text-subtle">Read-only replays, frozen when made. Revoking one removes it at once.</span>}>
+        {owner && <ShareLinks owner={owner} />}
+      </Panel>
+      <ErrorNote error={ownerError} />
+    </div>
+  );
+}
+
+/**
+ * An owner's share links, each to open, copy or revoke: on the shares page and in the agents
+ * settings ("Shared links", where the header's ⋯ goes, so they're found without leaving the agents).
+ */
+export function ShareLinks({ owner, flush = false }: { owner: string; /** In a settings row (its own padding). */ flush?: boolean }) {
+  const pad = flush ? "" : "px-5";
   const [shares, setShares] = useState<ShareSummary[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [confirm, setConfirm] = useState<string | null>(null);
@@ -190,29 +218,19 @@ export function SharesList({ owner: param }: { owner?: string }) {
   const origin = typeof window === "undefined" ? "" : window.location.origin;
 
   return (
-    <div className="mx-auto max-w-3xl space-y-6">
-      <div className="flex items-center gap-3">
-        <Share2 className="size-5 text-muted" />
-        <h1 className="text-2xl font-semibold tracking-[-0.045em]">Shared threads</h1>
-        {owner && <span className="font-mono text-[13px] text-subtle">{owner}</span>}
-      </div>
-      <Panel title="Links" aside={<span className="text-[12px] text-subtle">Read-only replays, frozen when made. Revoking one removes it at once.</span>}>
+    <div>
         {shares === null ? (
-          <p className="px-5 py-4 text-[13px] text-subtle">
+          <p className={`${pad} py-4 text-[13px] text-subtle`}>
             <span className="shimmer">Loading…</span>
           </p>
         ) : shares.length === 0 ? (
-          <p className="px-5 py-4 text-[13px] text-muted">
-            Nothing shared yet. Open a{" "}
-            <a href="#agents" className="text-accent hover:underline">
-              conversation
-            </a>{" "}
-            and use <Share2 className="inline size-3.5" aria-label="Share" /> in its header.
+          <p className={`${pad} py-4 text-[13px] text-muted`}>
+            Nothing shared yet. Open a conversation and use <Share2 className="inline size-3.5" aria-label="Share" /> in its header.
           </p>
         ) : (
           <ul className="divide-y divide-line" aria-label="Shares">
             {shares.map((s) => (
-              <li key={s.id} className="flex items-center gap-3 px-5 py-3 text-[13px]">
+              <li key={s.id} className={`flex items-center gap-3 ${pad} py-3 text-[13px]`}>
                 <div className="min-w-0 flex-1">
                   <a href={shareHref(s.id)} target="_blank" rel="noreferrer" className="block truncate font-medium hover:underline">
                     {s.title}
@@ -241,8 +259,7 @@ export function SharesList({ owner: param }: { owner?: string }) {
             ))}
           </ul>
         )}
-      </Panel>
-      <ErrorNote error={error ?? ownerError} />
+      <ErrorNote error={error} />
     </div>
   );
 }

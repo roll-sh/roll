@@ -3,13 +3,15 @@ import userEvent from "@testing-library/user-event";
 import { StrictMode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { approval, machine, mirrored, node, project, run, share, thread } from "@/test/agents";
-import { agentsHarness, renderAgents } from "@/test/agents-render";
+import { agentsHarness, fakeServices, renderAgents } from "@/test/agents-render";
+import { SettingsPanel } from "./settings-panel";
 import { MarkStateProvider } from "../mark-state";
 
 const agents = vi.hoisted(() => ({ createShare: vi.fn(), shares: vi.fn(), revokeShare: vi.fn() }));
 vi.mock("@/lib/agents-api", async (orig) => ({ ...(await orig()), agentsApi: agents }));
 
 import { ShareButton, SharesList } from "./share";
+import { agentsSurface } from "@/lib/agents-surface";
 import { clock, ShareView } from "./share-view";
 import { Conversation } from "./session";
 
@@ -151,9 +153,10 @@ describe("ShareButton", () => {
     expect(agents.createShare).toHaveBeenCalledWith("acme", "thr_1", false);
     expect(await within(dialog).findByText(`${window.location.origin}/agents/s/shr_1`)).toBeInTheDocument();
     expect(within(dialog).getByRole("link", { name: "Open the share" })).toHaveAttribute("href", "/agents/s/shr_1");
-    expect(within(dialog).getByRole("link", { name: "Manage shares" })).toHaveAttribute("href", "/dashboard/agents/shares?owner=acme");
-    await userEvent.keyboard("{Escape}");
-    expect(screen.queryByRole("dialog")).toBeNull();
+    // Managed in the agents' own settings, not on a page outside them.
+    await userEvent.click(within(dialog).getByRole("button", { name: "Manage shares" }));
+    expect(agentsSurface.get().view).toEqual({ kind: "settings", target: "owner" });
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   });
 
   it("can include the subagent threads, and shows a refusal", async () => {
@@ -190,5 +193,13 @@ describe("SharesList", () => {
     agents.shares.mockResolvedValue([]);
     render(<SharesList owner="acme" />);
     expect(await screen.findByText(/Nothing shared yet/)).toBeInTheDocument();
+  });
+
+  it("are in the agents' settings too, under Shared links (where the header's ⋯ and Manage shares go)", async () => {
+    agents.shares.mockResolvedValue([summary]);
+    renderAgents(<SettingsPanel target="owner" onClose={() => {}} />, agentsHarness({ ctx: { services: fakeServices() } }));
+    const section = await screen.findByRole("region", { name: "Shared links" });
+    expect(await within(section).findByRole("list", { name: "Shares" })).toBeInTheDocument();
+    expect(agents.shares).toHaveBeenCalledWith("acme");
   });
 });
