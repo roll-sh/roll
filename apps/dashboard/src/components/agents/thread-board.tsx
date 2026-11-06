@@ -91,7 +91,7 @@ export function ThreadBoard({ c }: { c: Collection }) {
     }
   };
   return (
-    <div role="grid" aria-label="Threads board" tabIndex={0} onKeyDown={onKey} className="h-full overflow-auto outline-none" data-thread-board>
+    <div role="grid" aria-label="Threads board" tabIndex={0} onKeyDown={onKey} className="h-full overflow-auto outline-none max-sm:snap-x max-sm:snap-mandatory max-sm:scroll-px-3" data-thread-board>
       {lanes ? <Lanes c={c} cursor={cursor} setCursor={setCursor} /> : <Columns c={c} columns={columns} cursor={cursor} setCursor={setCursor} />}
     </div>
   );
@@ -185,7 +185,7 @@ function Column({ c, group, cursor, setCursor }: { c: Collection; group: Group; 
     cards.push(<BoardCard key={r.id} row={r} c={c} column={group.key} y={i * STEP} order={order} any={sel.ids.size > 0} cursor={cursor === r.id} setCursor={setCursor} />);
   }
   return (
-    <section aria-label={`${group.label}, ${group.count}`} style={{ width: widthOf(group) }} className="flex min-h-0 shrink-0 flex-col" {...drop.props}>
+    <section aria-label={`${group.label}, ${group.count}`} style={{ width: widthOf(group) }} className="flex min-h-0 shrink-0 snap-start flex-col" {...drop.props}>
       <ColumnHead group={group} drop={takesDrop(c, group)} />
       <div
         ref={body}

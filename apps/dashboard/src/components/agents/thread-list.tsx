@@ -615,7 +615,7 @@ const GroupRow = memo(function GroupRow({ item, y, cursor, onToggle, onCursor }:
         onToggle(g.key);
       }}
       style={{ ...place(y, reduced), height: GROUP_H, paddingLeft: 6 + item.depth * 20 }}
-      className={`group/group absolute inset-x-0 top-0 flex cursor-pointer items-center gap-2 border-b border-line bg-panel/40 pr-3 text-[12.5px] select-none ${cursor ? "bg-fg/[0.05]" : "hover:bg-fg/[0.03]"}`}
+      className={`group/group absolute inset-x-0 top-0 flex cursor-pointer items-center gap-2 border-b border-line pr-3 text-[12.5px] select-none ${cursor ? "bg-[color-mix(in_oklab,var(--fg)_5%,var(--canvas))]" : "bg-[color-mix(in_oklab,var(--panel)_40%,var(--canvas))] hover:bg-[color-mix(in_oklab,var(--fg)_3%,var(--canvas))]"}`}
     >
       <GroupPick group={g} />
       <ChevronRight className={`size-3.5 shrink-0 text-subtle transition-transform duration-150 motion-reduce:transition-none ${item.collapsed ? "" : "rotate-90"}`} />
@@ -682,7 +682,7 @@ function RowBody({ row, y, template, cols, c, any, order, cursor, open, onCursor
       }}
       style={{ ...place(y, reduced), height: ROW_H, gridTemplateColumns: template, ...(project ? tint(projectColor(project)) : null) }}
       className={`group/row absolute inset-x-0 top-0 grid cursor-pointer items-center border-b border-line/60 text-[13px] select-none ${
-        on ? "bg-accent/[0.07]" : open ? "bg-fg/[0.06]" : cursor ? "bg-fg/[0.04]" : "hover:bg-fg/[0.03]"
+        on ? "bg-[color-mix(in_oklab,var(--accent)_8%,var(--canvas))]" : open ? "bg-[color-mix(in_oklab,var(--fg)_6%,var(--canvas))]" : cursor ? "bg-[color-mix(in_oklab,var(--fg)_4%,var(--canvas))]" : "bg-canvas hover:bg-[color-mix(in_oklab,var(--fg)_3%,var(--canvas))]"
       }`}
     >
       {/* The project's colour as the row's left edge, as on its canvas card; the cursor's in accent. */}
