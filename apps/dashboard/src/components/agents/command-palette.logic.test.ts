@@ -41,11 +41,15 @@ describe("the command palette's search", () => {
     expect(titles(search("new agent in web"))[0]).toEqual(["Suggestions", ["New agent in web"]]);
   });
 
-  it("puts the goal rows first when nothing has every word at a word start", () => {
-    expect([0, 1, 2, 3].map(goalsFirst)).toEqual([true, true, false, false]);
+  it("puts the goal rows first only when nothing matches by its words", () => {
+    expect([0, 1, 2, 3].map(goalsFirst)).toEqual([true, false, false, false]);
     expect(search("zzzz")[0].label).toBe("Ask agents");
     expect(search("add dark mode to the settings page")[0].label).toBe("Ask agents");
     expect(search("fix flaky")[0].label).toBe("Threads");
+    // A verb in front of a command's name, and a typo, still name it.
+    expect(titles(search("open the add machine"))[0]).toEqual(["Actions", ["Add machine"]]);
+    expect(search("show sandbox").at(-1)?.label).toBe("Ask agents");
+    expect(search("upgarde")[0].label).toBe("Threads");
   });
 
   it("limits '>' to actions and offers no goal for it", () => {

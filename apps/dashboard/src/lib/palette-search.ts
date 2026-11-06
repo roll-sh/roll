@@ -574,8 +574,24 @@ const KEYWORD_QUALITY = 0.65;
 // Below this, keyword prefixes match too much; a short query still matches a keyword it equals.
 const KEYWORD_QUERY_MIN_LENGTH = 4;
 
-/** A command or name: the first term is its name, the rest are keywords that count less. */
+// Words people put before a command or a name ("open the shelf", "go to settings", "show roll").
+const COMMAND_VERBS = new Set(["open", "show", "go", "goto", "view", "see", "display", "find", "jump"]);
+
+/**
+ * A command or name: the first term is its name, the rest are keywords that count less. A leading
+ * verb the command doesn't hold ("open the shelf" for "Shelf") is dropped, so a phrase that names
+ * a command runs it rather than reading as a goal.
+ */
 export function scoreSearchTerms(normalizedQuery: string, terms: ReadonlyArray<string>, options?: { readonly typos?: boolean }): SearchTermsMatch | null {
+  const match = scoreTerms(normalizedQuery, terms, options);
+  if (match) return match;
+  const [verb, ...rest] = normalizedQuery.split(" ");
+  while (rest.length > 1 && FILLER_WORDS.has(rest[0]!)) rest.shift();
+  if (!verb || !COMMAND_VERBS.has(verb) || rest.length === 0) return null;
+  return scoreTerms(rest.join(" "), terms, options);
+}
+
+function scoreTerms(normalizedQuery: string, terms: ReadonlyArray<string>, options?: { readonly typos?: boolean }): SearchTermsMatch | null {
   const meaningful = normalizedQuery
     .split(" ")
     .filter((token) => !FILLER_WORDS.has(token))

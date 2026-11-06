@@ -199,12 +199,13 @@ export function filterGroups(input: FilterInput): PaletteGroup[] {
 }
 
 /**
- * Whether the goal rows lead: when nothing has every word typed at a word start (only typos,
- * hits inside words, or nothing at all). A sentence rarely names a row that way, and a name or a
- * command ("upgr", "switch view running") does.
+ * Whether the goal rows lead: only when nothing matches by its words (nothing at all, or only
+ * hits inside words). A row that every word names, even with a typo or a verb in front ("open the
+ * shelf", "upgr", "switch view running"), comes first and Enter runs it; starting agents is then
+ * the Ask agents rows below it, or ⌘Enter.
  */
 export function goalsFirst(best: number): boolean {
-  return best < 2;
+  return best < 1;
 }
 
 /**

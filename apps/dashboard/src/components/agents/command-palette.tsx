@@ -28,6 +28,7 @@ import {
   Focus,
   LayoutGrid,
   GitFork,
+  GitMerge,
   Maximize,
   MessageSquare,
   Play,
@@ -81,10 +82,13 @@ import { inbox, shelfOf, snoozePresets, type Shelf } from "@/lib/agents-inbox";
 import { openShelf } from "@/lib/agents-shelf";
 import { NO_CANVAS } from "./machine-projects";
 import { projectActions } from "./project-actions";
+import { rebasePrompt } from "./change";
 
 const SHELF_NAME: Record<Exclude<Shelf, "active">, string> = { settled: "Settled", snoozed: "Snoozed", archived: "Archived" };
 
 const ICON = "size-4 text-subtle";
+// The palette renders only on the client, so the platform is known.
+const MOD = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform) ? "⌘" : "Ctrl+";
 
 const HIDE_NAMES: Record<Hideable, string> = { idle: "idle threads", terminals: "terminals" };
 
@@ -278,6 +282,7 @@ function PaletteDialog({ session, intent, host }: { session: number; intent: Pal
   const groups = useMemo((): { root: PaletteGroup[]; threads: PaletteItem[]; projects: PaletteItem[]; machines: PaletteItem[] } => {
     const { requests } = rolling(data);
     const live = [...data.threads.values()].filter((r) => r.value.archived_at === null);
+    const conflicts = live.filter((r) => r.value.change?.status === "conflict").sort((a, b) => Number(b.value.id === openThreadId) - Number(a.value.id === openThreadId));
     const shelved = inbox(data, now).filter((g) => g.settled.length + g.snoozed.length + g.archived.length > 0);
     const projectsView = (label: string, run: (p: (typeof projects)[number]) => void): PaletteView => ({
       label,
@@ -292,6 +297,21 @@ function PaletteDialog({ session, intent, host }: { session: number; intent: Pal
       { kind: "action", value: "action:new", title: "New agent", searchTerms: ["new thread", "launch", "start", "conversation"], icon: <Plus className={ICON} />, run: () => startNew?.() },
       projects.length > 0 && { kind: "submenu", value: "action:new-in", title: "New agent in…", searchTerms: ["new thread in", "project"], icon: <Plus className={ICON} />, view: projectsView("New agent in", (p) => startNew?.(p.id)) },
       requests.length > 0 && { kind: "action", value: "action:waiting", title: `Answer what's waiting (${requests.length})`, searchTerms: ["approval", "question", "request", "waiting"], icon: <Bell className="size-4 text-accent" />, run: () => openThread(requests[0].thread) },
+      // A conflicting change, the open conversation's first: the agent gets the header's "Ask to rebase" message.
+      ...(ctx.readOnly ? [] : conflicts).map(
+        ({ value: t, machine: m }): PaletteAction => ({
+          kind: "action",
+          value: `action:rebase:${t.id}`,
+          title: `Ask to rebase #${t.change!.number} “${t.title}”`,
+          searchTerms: ["conflict", "rebase", "merge conflict", "change", t.change!.repo],
+          description: t.change!.detail ? `Conflicts in ${t.change!.detail}` : "Conflicts with the default branch",
+          icon: <GitMerge className="size-4 text-danger" />,
+          run: async () => {
+            await client.run(m, { type: "message.send", thread: t.id, text: rebasePrompt(t.change!) });
+            openThread(t.id);
+          },
+        }),
+      ),
       !!open && isBusy(open.status) && { kind: "action", value: "action:stop", title: `Stop “${open.title}”`, searchTerms: ["interrupt", "cancel"], icon: <Square className={ICON} />, run: () => client.run(at, { type: "run.interrupt", thread: open.id }) },
       !!open && { kind: "action", value: "action:fork", title: `Fork “${open.title}”`, searchTerms: ["branch", "copy"], icon: <GitFork className={ICON} />, run: async () => openThread((await client.run<{ type: "created"; id: string }>(at, { type: "thread.fork", thread: open.id, worktree: !!open.worktree }, "created")).id) },
       !!open && {
@@ -329,6 +349,15 @@ function PaletteDialog({ session, intent, host }: { session: number; intent: Pal
         searchTerms: ["archive", "unarchive", "settle", "hide", "done", "restore"],
         icon: open.archived_at === null ? <Archive className={ICON} /> : <ArchiveRestore className={ICON} />,
         run: () => (open.archived_at === null ? inboxActions.archive(open) : inboxActions.restore(open)),
+      },
+      {
+        kind: "action",
+        value: "action:open-shelf",
+        title: "Open the shelf",
+        searchTerms: ["settled", "archived", "snoozed", "parked", "old conversations"],
+        icon: <Archive className={ICON} />,
+        shortcut: "⇧S",
+        run: () => (setAgentsView({ kind: "canvas" }), openShelf()),
       },
       shelved.length > 0 && {
         kind: "submenu",
@@ -626,6 +655,11 @@ function PaletteDialog({ session, intent, host }: { session: number; intent: Pal
     } else if (e.key === "ArrowUp" || (e.ctrlKey && e.key === "p")) {
       e.preventDefault();
       move(-1);
+    } else if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+      // ⌘Enter hands what's typed to agents, whatever row is highlighted.
+      e.preventDefault();
+      const ask = shown.find((g) => g.value === "goal")?.items.find((i) => !i.disabled);
+      if (ask) void execute(ask);
     } else if (e.key === "Enter") {
       e.preventDefault();
       const item = findItem(shown, highlighted);
@@ -642,6 +676,9 @@ function PaletteDialog({ session, intent, host }: { session: number; intent: Pal
   };
 
   const picked = findItem(shown, highlighted);
+  const askRows = shown.find((g) => g.value === "goal")?.items ?? [];
+  const canAsk = askRows.some((i) => !i.disabled);
+  const askHighlighted = askRows.some((i) => i.value === highlighted);
   // A thread or a project opens; anything else runs.
   const enterLabel = view?.enterLabel ?? (picked?.kind === "submenu" || /^(thread|project):/.test(picked?.value ?? "") ? "Open" : "Run");
   const empty = view?.build ? (query.trim() ? "Add a project to give agents a goal." : `Say what should get done. The orchestrator plans it and spins up agents${target ? ` in ${targetLabel(target, machineCount)}` : ""}.`) : query.startsWith(">") ? "No matching actions." : "Nothing matches.";
@@ -742,7 +779,15 @@ function PaletteDialog({ session, intent, host }: { session: number; intent: Pal
               <Kbd>Esc</Kbd>
               {view ? "Back" : "Close"}
             </span>
-            {!view && <span className="ml-auto truncate text-subtle">Type a goal to hand it to agents</span>}
+            {!view &&
+              (canAsk && highlighted !== null && !askHighlighted ? (
+                <span className="ml-auto flex items-center gap-1 truncate">
+                  <Kbd>{MOD}Enter</Kbd>
+                  Ask agents
+                </span>
+              ) : (
+                !canAsk && <span className="ml-auto truncate text-subtle">Type a goal to hand it to agents</span>
+              ))}
           </div>
         </motion.div>
       </div>

@@ -137,6 +137,27 @@ describe("the agents' command palette", () => {
     expect(selected()).toHaveTextContent("Orchestrate: unarchive");
   });
 
+  it("runs a command a phrase names: 'open the shelf' opened a thread called that (gaps7), and ⌘Enter is the ask", async () => {
+    const h = setup();
+    await userEvent.keyboard("{Meta>}k{/Meta}");
+    await userEvent.type(screen.getByRole("combobox"), "open the shelf");
+    expect(selected()).toHaveTextContent("Open the shelf");
+    // Starting agents is the Ask agents rows, below, and the footer says how.
+    const labels = [...palette().querySelectorAll("#palette-list > p")].map((e) => e.textContent);
+    expect(labels.at(-1)).toBe("Ask agents");
+    expect(palette()).toHaveTextContent("Ask agents");
+    await userEvent.keyboard("{Enter}");
+    expect(await screen.findByRole("dialog", { name: "Shelf" })).toBeInTheDocument();
+    expect(creates(h)).toEqual([]);
+
+    await userEvent.click(screen.getByRole("button", { name: "Command palette" }));
+    await userEvent.type(within(palette()).getByRole("combobox"), "go to settings");
+    expect(selected()).toHaveTextContent(/settings$/);
+    await userEvent.keyboard("{Meta>}{Enter}{/Meta}");
+    await waitFor(() => expect(creates(h)).toHaveLength(1));
+    expect(creates(h)[0]).toMatchObject({ prompt: "go to settings", orchestrator: true });
+  });
+
   it("finds Unarchive for an archived conversation by 'archive' or 'unarchive' (it matched only inside the word: goal rows led)", async () => {
     const h = setup([mirrored("thread", thread({ id: "thr_a", title: "Spike: edge middleware", archived_at: Date.now() - 86_400_000 }), 6)]);
     act(() => showAgents({ kind: "thread", thread: "thr_a" }));
@@ -178,6 +199,18 @@ describe("the agents' command palette", () => {
     expect(within(shelf).getByRole("combobox")).toHaveAttribute("placeholder", `Search ${project().name}’s shelf…`);
     expect(within(shelf).getByRole("option", { name: "Bump tokio" })).toBeInTheDocument();
     expect(agentsSurface.get().view).toEqual({ kind: "canvas" });
+  });
+
+  it("asks a conflicting change's agent to rebase, and opens it", async () => {
+    const change = { repo: "ada/roll", number: 42, status: "conflict" as const, url: "", detail: "src/queue.rs" };
+    const h = setup([mirrored("thread", thread({ id: "thr_c", title: "Queue retries", change }), 6)]);
+    await userEvent.keyboard("{Meta>}k{/Meta}");
+    await userEvent.type(screen.getByRole("combobox"), "rebase");
+    expect(selected()).toHaveTextContent("Ask to rebase #42 “Queue retries”");
+    expect(selected()).toHaveTextContent("Conflicts in src/queue.rs");
+    await userEvent.keyboard("{Enter}");
+    await waitFor(() => expect(h.command.mock.calls.map((c) => c[2])).toContainEqual({ type: "message.send", thread: "thr_c", text: expect.stringContaining("Change #42 conflicts with the default branch (in src/queue.rs)") }));
+    await waitFor(() => expect(agentsSurface.get().view).toEqual({ kind: "thread", thread: "thr_c" }));
   });
 
   it("switches the canvas's view, and settles the open conversation", async () => {

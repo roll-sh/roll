@@ -1768,9 +1768,12 @@ The surface has three views:
   appear on the canvas under it as they start and leave it as they finish; "New agent: …" starts
   one agent with it as its prompt. Both go to the last project used (on a machine that can take
   it; "Somewhere else…" picks another), with its new-thread defaults and full access unless they
-  say otherwise, and the conversation opens beside the canvas. They lead the list when the query
-  names nothing (no row has every word typed at a word start: a sentence, a typo), else they come
-  last. The same goal can be typed in the prompt bar at the bottom of the canvas ("What should
+  say otherwise, and the conversation opens beside the canvas. They lead the list only when the
+  query names nothing (no row matches every word, even with a typo: a sentence); a query that
+  names a row runs it on Enter, a leading verb ("open the shelf", "go to settings", "show roll")
+  optional, and the goal rows come last under "Ask agents", which ⌘Enter (Ctrl+Enter) runs from any
+  row (the footer says so). One word alone is never a goal on Enter. A conflicting change's
+  conversation has "Ask to rebase #N" (the header's message to its agent). The same goal can be typed in the prompt bar at the bottom of the canvas ("What should
   the agents get done?", Orchestrate or One agent).
 - **The prompt bar** (`prompt-bar.tsx`) and the launcher (`new-agent.tsx`) share one set of rules
   (`new-thread.ts`): the default project is the last one a thread was started in, else the one

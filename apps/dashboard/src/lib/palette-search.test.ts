@@ -21,6 +21,15 @@ describe("palette search (T3's ranking)", () => {
     expect(scoreThreadSearch(q("laky"), subject("Fix the flaky test"), NOW)?.quality).toBeCloseTo(0.3);
   });
 
+  it("drops a leading verb a command doesn't hold ('open the shelf' names the shelf)", () => {
+    expect(scoreSearchTerms(q("open the shelf"), ["Shelf", "settled"])?.strong).toBe(true);
+    expect(scoreSearchTerms(q("go to settings"), ["Agents settings"])).not.toBeNull();
+    // A verb the command holds still counts, and the rest must still match.
+    expect(scoreSearchTerms(q("open in vs code"), ["Open in VS Code"])?.ranges[0]).toEqual({ start: 0, end: 4 });
+    expect(scoreSearchTerms(q("open the fridge"), ["Shelf"])).toBeNull();
+    expect(scoreSearchTerms(q("open"), ["Shelf"])).toBeNull();
+  });
+
   it("forgives a typo only when nothing matches strongly", () => {
     const groups = [{ group: "threads", items: [subject("Upgrade to Next 16.4"), subject("Fix the flaky queue test")] }];
     const typo = rankSearchGroups(groups, (t, o) => scoreThreadSearch(q("upgarde"), t, NOW, o));
