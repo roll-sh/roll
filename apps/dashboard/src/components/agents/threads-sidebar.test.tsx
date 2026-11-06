@@ -141,6 +141,17 @@ describe("the threads sidebar", () => {
     expect(Math.abs(custom.until - (Date.now() + 2 * D))).toBeLessThan(5_000);
   });
 
+  it("on a phone, Snooze… opens the presets dialog (a submenu covered the menu it came from)", async () => {
+    const h = world();
+    h.ctx.phone = true;
+    sidebar(h);
+    await userEvent.click(within(row("Fix the parser")).getByRole("button", { name: "Thread actions" }));
+    await userEvent.click(await screen.findByRole("menuitem", { name: "Snooze…" }));
+    const dialog = await screen.findByRole("dialog", { name: "Snooze" });
+    await userEvent.click(within(dialog).getByRole("button", { name: /In 1 hour/ }));
+    await waitFor(() => expect(sent(h).find((c) => c.type === "thread.snooze")).toMatchObject({ thread: "thr_a" }));
+  });
+
   it("wakes a snoozed thread and un-settles a settled one from their rows, each saying so with its undo", async () => {
     const h = world();
     sidebar(h);

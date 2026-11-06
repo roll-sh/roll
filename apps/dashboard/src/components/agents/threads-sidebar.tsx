@@ -705,7 +705,8 @@ const STATUS_DOT: Record<RowStatus, string> = {
 function ThreadRow({ row, selected, onPick, now, actions }: { row: InboxRow; selected: boolean; onPick: (thread: string) => void; now: number; actions: Actions }) {
   const t = row.thread;
   const [menu, setMenu] = useState(false);
-  const [custom, setCustom] = useState(false);
+  // The snooze dialog: "custom" (Custom…), or "presets" (a phone: the presets too, no submenu over the menu).
+  const [custom, setCustom] = useState<false | "custom" | "presets">(false);
   const quiet = row.status === null || row.shelf !== "active";
   const pill = row.status === "waiting" || row.status === "failed" || row.status === "woke" ? row.status : null;
   const meta =
@@ -728,7 +729,7 @@ function ThreadRow({ row, selected, onPick, now, actions }: { row: InboxRow; sel
   return (
     <li
       data-row
-      className={`group/r relative flex h-[30px] items-center rounded-md transition-colors duration-150 ${selected ? "bg-fg/[0.07] text-fg inset-shadow-highlight" : "hover:bg-fg/[0.04]"} ${menu ? "bg-fg/[0.04]" : ""}`}
+      className={`group/r relative flex h-[30px] items-center pointer-coarse:h-10 rounded-md transition-colors duration-150 ${selected ? "bg-fg/[0.07] text-fg inset-shadow-highlight" : "hover:bg-fg/[0.04]"} ${menu ? "bg-fg/[0.04]" : ""}`}
     >
       <button type="button" onClick={() => onPick(t.id)} aria-current={selected ? "true" : undefined} className="flex h-full min-w-0 flex-1 items-center gap-2 rounded-md pr-1 pl-2.5 text-left outline-none focus-visible:ring-1 focus-visible:ring-accent/60 focus-visible:ring-inset" title={t.title}>
         <span className="grid size-3 shrink-0 place-items-center">
@@ -752,15 +753,15 @@ function ThreadRow({ row, selected, onPick, now, actions }: { row: InboxRow; sel
       {!actions.readOnly && (
         <span
           data-row-actions
-          className={`flex shrink-0 items-center ${menu ? "pr-1" : "w-0 overflow-hidden opacity-0 group-hover/r:w-auto group-hover/r:overflow-visible group-hover/r:pr-1 group-hover/r:opacity-100 focus-within:w-auto focus-within:overflow-visible focus-within:pr-1 focus-within:opacity-100 [@media(hover:none)]:w-auto [@media(hover:none)]:pr-1 [@media(hover:none)]:opacity-100"}`}
+          className={`flex shrink-0 items-center pointer-coarse:gap-1.5 ${menu ? "pr-1" : "w-0 overflow-hidden opacity-0 group-hover/r:w-auto group-hover/r:overflow-visible group-hover/r:pr-1 group-hover/r:opacity-100 focus-within:w-auto focus-within:overflow-visible focus-within:pr-1 focus-within:opacity-100 [@media(hover:none)]:w-auto [@media(hover:none)]:pr-1 [@media(hover:none)]:opacity-100"}`}
         >
-          <button type="button" title={quick.label} aria-label={quick.label} disabled={quick.disabled} onClick={() => void quick.run()} className="grid size-6 place-items-center rounded-md text-subtle transition hover:bg-panel hover:text-fg disabled:opacity-30">
+          <button type="button" title={quick.label} aria-label={quick.label} disabled={quick.disabled} onClick={() => void quick.run()} className="grid size-6 place-items-center rounded-md text-subtle transition hover:bg-panel hover:text-fg pointer-coarse:size-9 disabled:opacity-30">
             {quick.icon}
           </button>
-          <RowMenu thread={t} row={row} open={menu} setOpen={setMenu} actions={actions} onPick={() => onPick(t.id)} onCustom={() => setCustom(true)} now={now} />
+          <RowMenu thread={t} row={row} open={menu} setOpen={setMenu} actions={actions} onPick={() => onPick(t.id)} onCustom={(presets) => setCustom(presets ? "presets" : "custom")} now={now} />
         </span>
       )}
-      {custom && <SnoozeDialog onClose={() => setCustom(false)} onSnooze={(until) => void actions.snooze(t, until)} />}
+      {custom && <SnoozeDialog presets={custom === "presets"} onClose={() => setCustom(false)} onSnooze={(until) => void actions.snooze(t, until)} />}
     </li>
   );
 }
@@ -782,11 +783,13 @@ function RowMenu({
   setOpen: (open: boolean) => void;
   actions: Actions;
   onPick: () => void;
-  onCustom: () => void;
+  /** The snooze dialog; `presets`: with the presets (a phone's, in place of the submenu). */
+  onCustom: (presets?: boolean) => void;
   now: number;
 }) {
   const settleBlocked = cantPark(thread, "settle");
   const snoozeBlocked = cantPark(thread, "snooze");
+  const { phone = false } = useAgents();
   const [deleting, setDeleting] = useState(false);
   const prefs = usePrefs();
   const del = () => {
@@ -800,7 +803,7 @@ function RowMenu({
         <MenuTrigger
           aria-label="Thread actions"
           title="Thread actions"
-          className={`grid size-6 place-items-center rounded-md text-subtle transition hover:bg-panel hover:text-fg ${open ? "bg-panel text-fg" : ""}`}
+          className={`grid size-6 place-items-center rounded-md text-subtle transition hover:bg-panel hover:text-fg pointer-coarse:size-9 ${open ? "bg-panel text-fg" : ""}`}
         >
           <MoreHorizontal className="size-3.5" strokeWidth={1.5} />
         </MenuTrigger>
@@ -824,7 +827,7 @@ function RowMenu({
       <MenuTrigger
         aria-label="Thread actions"
         title="Thread actions"
-        className={`grid size-6 place-items-center rounded-md text-subtle transition hover:bg-panel hover:text-fg ${open ? "bg-panel text-fg" : ""}`}
+        className={`grid size-6 place-items-center rounded-md text-subtle transition hover:bg-panel hover:text-fg pointer-coarse:size-9 ${open ? "bg-panel text-fg" : ""}`}
       >
         <MoreHorizontal className="size-3.5" strokeWidth={1.5} />
       </MenuTrigger>
@@ -852,6 +855,12 @@ function RowMenu({
             <AlarmClock />
             Snooze
           </MenuItem>
+        ) : phone ? (
+          // A phone has no room beside the menu: the submenu covered it. The presets dialog instead.
+          <MenuItem onClick={() => onCustom(true)}>
+            <AlarmClock />
+            Snooze…
+          </MenuItem>
         ) : (
           <MenuSub>
             <MenuSubTrigger>
@@ -866,7 +875,7 @@ function RowMenu({
                 </MenuItem>
               ))}
               <MenuSeparator />
-              <MenuItem onClick={onCustom}>Custom…</MenuItem>
+              <MenuItem onClick={() => onCustom()}>Custom…</MenuItem>
             </MenuSubPopup>
           </MenuSub>
         )}

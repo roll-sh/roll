@@ -85,7 +85,8 @@ export function MenuSeparator({ className, ...props }: MenuPrimitive.Separator.P
 }
 
 export function MenuShortcut({ className, ...props }: ComponentProps<"kbd">) {
-  return <kbd className={cn("ms-auto font-sans text-[11px] tracking-widest text-subtle", className)} {...props} />;
+  // A key a touch screen has no keyboard for: not on a phone.
+  return <kbd className={cn("ms-auto font-sans text-[11px] tracking-widest text-subtle pointer-coarse:hidden", className)} {...props} />;
 }
 
 export function MenuSubTrigger({ className, children, ...props }: MenuPrimitive.SubmenuTrigger.Props) {
