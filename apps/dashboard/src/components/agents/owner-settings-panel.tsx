@@ -61,15 +61,29 @@ const NOTIFY: { value: NotifyMode; label: string }[] = [
   { value: "both", label: "Notifications and sound" },
 ];
 
+/** Every key the agents surface answers (each is handled where its row says; a test checks a few). */
 const KEYS: [string, string][] = [
   ["⌘J", "Open or close the agents"],
+  ["⌘K", "Search threads, projects and commands"],
+  ["⌘N  ⌘⇧O", "A new agent"],
+  ["⌘B", "Show or hide the threads"],
   ["⌘,", "These settings"],
   ["Esc", "Back to the canvas, then close"],
-  ["/", "Search settings"],
-  ["Enter", "Send (Shift+Enter: a new line)"],
+  ["A", "Automations"],
+  ["F", "Focus one project"],
+  ["⇧S", "The shelf: settled, snoozed and archived threads"],
+  ["⌘⇧S", "Settle the open thread and go to the next"],
+  ["⌘Z", "Undo the last settle, snooze or archive"],
+  ["/", "Filter threads (in settings: search them)"],
+  ["[  ]", "The canvas view before or after"],
+  ["⌥1 – ⌥9", "A canvas view by its place"],
+  ["⌥S", "Save the filter as a canvas view"],
+  ["Enter", "Send (Shift+Enter: a new line), or open the focused card"],
   ["⌘Enter", "Steer instead of queueing, or the other way round, once"],
   ["Shift+Tab", "Plan first, or not"],
+  ["← → ↑ ↓", "Pan the canvas"],
   ["+ − 0 1", "Zoom the canvas, fit it, actual size"],
+  ["⇧D", "Lay the canvas out left to right, or top-down"],
   ["⌥↑ ⌥↓", "Move a card among its siblings"],
 ];
 

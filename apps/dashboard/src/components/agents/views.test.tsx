@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { setActiveClient } from "@/lib/agents-client";
 import { agentsSurface, resetAgentsSurface } from "@/lib/agents-surface";
 import { resetShelves } from "@/lib/agents-shelf";
+import { agentsPalette, closePalette } from "@/lib/agents-palette";
 import { ALL, loadCurrentView, loadDoc, saveCurrentView, saveDoc, addView, parseDoc } from "@/lib/agents-views";
 import { approval, mirrored, node, project, run, terminal, thread } from "@/test/agents";
 import { agentsHarness, fakeServices, renderAgents } from "@/test/agents-render";
@@ -336,6 +337,13 @@ describe("moving around the canvas from the keyboard", () => {
     await userEvent.keyboard("{Escape}");
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "Shelf" })).not.toBeInTheDocument());
     resetShelves();
+  });
+
+  it("F opens the palette on Focus a project…, as its row's shortcut says", async () => {
+    start();
+    await userEvent.keyboard("f");
+    expect(agentsPalette.get()).toMatchObject({ open: true, intent: { kind: "focus-project" } });
+    closePalette();
   });
 
   it("the canvas is one tab stop: the card last focused (else the first), then its own controls, never another card's (18)", async () => {

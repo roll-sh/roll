@@ -15,7 +15,9 @@ export type PaletteIntent =
   /** "What should the agents get done?" with the goal so far. */
   | { kind: "orchestrate"; goal?: string }
   | { kind: "add-project" }
-  | { kind: "new-in" };
+  | { kind: "new-in" }
+  /** "Focus a project…" (F). */
+  | { kind: "focus-project" };
 
 export interface PaletteState {
   open: boolean;

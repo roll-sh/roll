@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Command } from "@/lib/agents-api";
 import { setActiveClient } from "@/lib/agents-client";
-import { agentsPalette, resetPalette } from "@/lib/agents-palette";
+import { agentsPalette, openPalette, resetPalette } from "@/lib/agents-palette";
 import { agentsSurface, resetAgentsSurface, showAgents } from "@/lib/agents-surface";
 import { resetShelves } from "@/lib/agents-shelf";
 import { approval, mirrored, project, run, thread } from "@/test/agents";
@@ -260,5 +260,17 @@ describe("the canvas's prompt bar", () => {
     await userEvent.type(within(palette()).getByRole("combobox"), "settings");
     await userEvent.keyboard("{Enter}");
     expect(agentsSurface.get().view).toEqual({ kind: "settings", target: `p:${project().id}` });
+  });
+
+  it("opened by F, it's on Focus a project… (its row's shortcut), listing the projects", async () => {
+    setup([mirrored("project", project({ id: "prj_2", name: "web" }), 20)]);
+    act(() => openPalette({ kind: "focus-project" }));
+    const names = await waitFor(() => {
+      const n = within(palette()).getAllByRole("option").map((o) => o.textContent ?? "");
+      expect(n.some((x) => x.includes("web"))).toBe(true);
+      return n;
+    });
+    expect(names.some((x) => x.includes("roll"))).toBe(true);
+    expect(names.some((x) => x.includes("Upgrade to Next"))).toBe(false);
   });
 });

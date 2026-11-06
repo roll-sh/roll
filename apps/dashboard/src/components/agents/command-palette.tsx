@@ -553,6 +553,9 @@ function PaletteDialog({ session, intent, host }: { session: number; intent: Pal
     else if (intent.kind === "new-in") {
       const item = groups.root[0].items.find((i) => i.value === "action:new-in");
       if (item?.kind === "submenu") dispatch({ type: "reset", view: item.view });
+    } else if (intent.kind === "focus-project") {
+      const item = groups.root.flatMap((g) => g.items).find((i) => i.value === "action:focus-project");
+      if (item?.kind === "submenu") dispatch({ type: "reset", view: item.view });
     } else if (intent.kind === "add-project" && !addProject.disabled) {
       // The palette steps aside for the dialog.
       closePalette();
