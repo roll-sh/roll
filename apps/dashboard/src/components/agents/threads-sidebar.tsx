@@ -47,6 +47,7 @@ import { Collapse } from "./animated-height";
 import { useFlip, useFold } from "./list-motion";
 import { Menu, MenuItem, MenuPopup, MenuRadioGroup, MenuRadioItem, MenuSeparator, MenuShortcut, MenuSub, MenuSubPopup, MenuSubTrigger, MenuTrigger, Segmented } from "./ui";
 import { useAgents, usePrefs } from "./use-agents";
+import { selectFromClick, useSelected } from "@/lib/agents-selection";
 import { MachineIcon, ProjectIcon } from "./identity";
 
 const OPEN_KEY = "roll:agents:sidebar";
@@ -835,15 +836,30 @@ function ThreadRowBody({ row, selected, onPick, now, actions, arrive = true }: R
         : row.shelf === "snoozed"
           ? { label: "Wake thread now", icon: <AlarmClockOff className="size-3.5" strokeWidth={1.5} />, run: () => actions.wake(t), disabled: false }
           : { label: "Settle thread", icon: <Check className="size-3.5" strokeWidth={1.5} />, run: () => actions.settle(t), disabled: !!cantPark(t, "settle") };
+  // Picked for a bulk action (⌘/Shift-click, x): shared with the list, the board and the canvas.
+  const picked = useSelected(t.id);
   return (
     <li
       ref={fold.ref}
       data-row
       data-flip={t.id}
+      data-thread={t.id}
+      aria-selected={picked || undefined}
       inert={fold.leaving}
-      className={`group/r relative flex h-[30px] items-center [contain-intrinsic-size:auto_30px] [content-visibility:auto] pointer-coarse:h-10 pointer-coarse:[contain-intrinsic-size:auto_40px] rounded-md transition-colors duration-150 ${selected ? "bg-fg/[0.07] text-fg inset-shadow-highlight" : "hover:bg-fg/[0.04]"} ${menu ? "bg-fg/[0.04]" : ""}`}
+      className={`group/r relative flex h-[30px] items-center [contain-intrinsic-size:auto_30px] [content-visibility:auto] pointer-coarse:h-10 pointer-coarse:[contain-intrinsic-size:auto_40px] rounded-md transition-colors duration-150 ${picked ? "bg-accent/[0.1] text-fg" : selected ? "bg-fg/[0.07] text-fg inset-shadow-highlight" : "hover:bg-fg/[0.04]"} ${menu ? "bg-fg/[0.04]" : ""}`}
     >
-      <button type="button" onClick={() => onPick(t.id)} aria-current={selected ? "true" : undefined} className="flex h-full min-w-0 flex-1 items-center gap-2 rounded-md pr-1 pl-2.5 text-left outline-none focus-visible:ring-1 focus-visible:ring-accent/60 focus-visible:ring-inset" title={t.title}>
+      <button
+        type="button"
+        onClick={(e) => {
+          // In the order the sidebar shows them, for a Shift-click's range.
+          const nav = e.currentTarget.closest("nav");
+          const order = () => [...(nav?.querySelectorAll<HTMLElement>("[data-row][data-flip]") ?? [])].map((el) => el.dataset.flip!);
+          if (!selectFromClick(e, t.id, order)) onPick(t.id);
+        }}
+        aria-current={selected ? "true" : undefined}
+        className="flex h-full min-w-0 flex-1 items-center gap-2 rounded-md pr-1 pl-2.5 text-left outline-none focus-visible:ring-1 focus-visible:ring-accent/60 focus-visible:ring-inset"
+        title={t.title}
+      >
         <span className="grid size-3 shrink-0 place-items-center">
           {row.status === "woke" ? (
             <AlarmClock className="size-3 text-fg" strokeWidth={1.75} aria-hidden />

@@ -1,6 +1,6 @@
 "use client";
 
-import { ArrowDownFromLine, ArrowRightFromLine, Bookmark, ChevronDown, ChevronRight, Focus as FocusIcon, ListFilter, Pencil, Pin as PinIcon, PinOff, Plus, Search, SlidersHorizontal, Trash2, X, ArrowLeft, ArrowRight, FileDiff as DiffIcon } from "lucide-react";
+import { ArrowDownFromLine, ArrowDownWideNarrow, ArrowRightFromLine, ArrowUpNarrowWide, Bookmark, ChevronDown, ChevronRight, Columns3, Focus as FocusIcon, ListFilter, Network, Pencil, Pin as PinIcon, PinOff, Plus, Rows3, Search, SlidersHorizontal, Trash2, X, ArrowLeft, ArrowRight, FileDiff as DiffIcon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { AgentsServices } from "@/lib/agents-services";
 import type { AgentsData } from "@/lib/agents-store";
@@ -45,13 +45,23 @@ import {
   type PinKind,
   type ViewFilter,
   type ViewLike,
+  GROUP_BYS,
+  groupByOf,
+  layoutOf,
+  LAYOUTS,
+  SORT_KEYS,
+  sortOf,
+  subGroupByOf,
+  withLayout,
+  type Layout,
 } from "@/lib/agents-views";
+import { firstDir, groupLabel, sortLabel } from "@/lib/agents-collection";
 import type { Order } from "@/lib/agents-layout";
 import { Menu } from "./menu";
 import { ShelfControl } from "./project-shelf";
 import { openShelf } from "@/lib/agents-shelf";
 import { openPalette } from "@/lib/agents-palette";
-import { Popover, PopoverPopup, PopoverTrigger, Segmented, Switch } from "./ui";
+import { Popover, PopoverPopup, PopoverTrigger, Segmented, Select, Switch } from "./ui";
 import { SlidingThumb } from "./ui/thumb";
 import { useReducedMotion } from "@roll/brand";
 import { AnimatePresence, motion, type Transition } from "motion/react";
@@ -255,6 +265,9 @@ export function ViewsBar({
 
   const { views, select } = v;
   const currentId = v.current.id;
+  const { setDisplay } = v;
+  const shownDisplay = v.current.display;
+  const setLayout = useCallback((l: Layout) => setDisplay(withLayout(shownDisplay, l)), [setDisplay, shownDisplay]);
   useEffect(() => {
     const on = (r: ViewRequest) => {
       if (r === "new") setEditor({ mode: "new" });
@@ -286,6 +299,8 @@ export function ViewsBar({
       else if (e.key === "/") field.current?.focus();
       // The shelf: settled, snoozed and archived conversations (the focused project's, if one fills the canvas).
       else if (e.shiftKey && e.code === "KeyS") openShelf(focused?.id ?? null);
+      // ⇧C ⇧L ⇧B: the view as the canvas, a list or a board.
+      else if (e.shiftKey && LAYOUT_KEYS[e.code]) setLayout(LAYOUT_KEYS[e.code]);
       // F: "Focus a project…", as the palette's row says.
       else if (!e.shiftKey && e.code === "KeyF") openPalette({ kind: "focus-project" });
       else return;
@@ -293,7 +308,7 @@ export function ViewsBar({
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [active, views, select, v.current.id, focused?.id]);
+  }, [active, views, select, v.current.id, focused?.id, setLayout]);
 
   // The shown tab stays in view in a bar that scrolls.
   useEffect(() => {
@@ -356,6 +371,8 @@ export function ViewsBar({
                 title={i < 9 ? `${view.name} (⌥${i + 1})` : view.name}
                 className="flex h-[26px] items-center gap-1.5 px-2.5 text-[12.5px] font-[510] tracking-[-0.01em] whitespace-nowrap"
               >
+                {/* A view saved as a list or a board says so. */}
+                {view.display.layout === "list" ? <Rows3 className="size-3 text-subtle" aria-hidden /> : view.display.layout === "board" ? <Columns3 className="size-3 text-subtle" aria-hidden /> : null}
                 {view.name}
                 {count !== null && count > 0 && (
                   <span className={`grid h-4 min-w-4 place-items-center rounded-full px-1 font-mono text-[10px] tabular-nums ${waiting ? "bg-accent/15 text-accent" : "bg-fg/[0.07] text-muted"}`} aria-label={`${count} thread${count === 1 ? "" : "s"}`}>
@@ -451,6 +468,7 @@ export function ViewsBar({
             />
           </label>
         )}
+        <LayoutSwitch layout={layoutOf(shownDisplay)} onChange={setLayout} />
         <ShelfControl data={data} focused={focused?.id ?? null} phone={phone} />
         <DisplayMenu display={v.current.display} phone={phone} onChange={v.setDisplay} />
         <button
@@ -522,6 +540,10 @@ function DisplayMenu({ display, phone, onChange }: { display: Display; phone: bo
         <span className="max-sm:sr-only">Display</span>
       </PopoverTrigger>
       <PopoverPopup side="bottom" align="end" sideOffset={6} aria-label="Display options" className="w-[300px] flex-col gap-3 p-3 text-[12.5px]">
+        {layoutOf(display) !== "canvas" ? (
+          <CollectionDisplay display={display} set={set} />
+        ) : (
+        <>
         <DisplayRow label="Layout" hint={phone ? "On phones" : undefined}>
           <Segmented
             label="Layout"
@@ -576,6 +598,8 @@ function DisplayMenu({ display, phone, onChange }: { display: Display; phone: bo
             <Switch size="sm" aria-label="Projects without threads" checked={display.projects === "all"} onCheckedChange={(on) => set({ projects: on ? "all" : undefined })} />
           </label>
         </div>
+        </>
+        )}
         {changed && (
           <button type="button" onClick={() => onChange(defaultDisplay(display))} className="self-start text-[12px] text-subtle transition-colors hover:text-fg">
             Reset to default
@@ -583,6 +607,72 @@ function DisplayMenu({ display, phone, onChange }: { display: Display; phone: bo
         )}
       </PopoverPopup>
     </Popover>
+  );
+}
+
+const LAYOUT_KEYS: Record<string, Layout> = { KeyC: "canvas", KeyL: "list", KeyB: "board" };
+const LAYOUT_LABEL: Record<Layout, { label: string; key: string; icon: ReactNode }> = {
+  canvas: { label: "Canvas", key: "⇧C", icon: <Network /> },
+  list: { label: "List", key: "⇧L", icon: <Rows3 /> },
+  board: { label: "Board", key: "⇧B", icon: <Columns3 /> },
+};
+
+/** Canvas · List · Board for the view showing (saved with it): Linear's view switcher. */
+function LayoutSwitch({ layout, onChange }: { layout: Layout; onChange: (l: Layout) => void }) {
+  return (
+    <span role="radiogroup" aria-label="Show as" className="relative flex h-7 items-center rounded-md border border-line p-px">
+      <SlidingThumb selector="[data-layout][aria-checked=true]" className="rounded-[5px] bg-fg/[0.08]" />
+      {LAYOUTS.map((l) => (
+        <button
+          key={l}
+          type="button"
+          role="radio"
+          data-layout={l}
+          aria-checked={layout === l}
+          aria-label={LAYOUT_LABEL[l].label}
+          title={`${LAYOUT_LABEL[l].label} (${LAYOUT_LABEL[l].key})`}
+          onClick={() => onChange(l)}
+          className={`relative grid h-full w-7 place-items-center rounded-[5px] transition-colors duration-150 [&>svg]:size-3.5 [&>svg]:stroke-[1.75] ${layout === l ? "text-fg" : "text-subtle hover:text-fg"}`}
+        >
+          {LAYOUT_LABEL[l].icon}
+        </button>
+      ))}
+    </span>
+  );
+}
+
+/** The list's and the board's display: grouping, sub-grouping, and the order inside a group. */
+function CollectionDisplay({ display, set }: { display: Display; set: (patch: Partial<Display>) => void }) {
+  const by = groupByOf(display);
+  const sub = subGroupByOf(display);
+  const sort = sortOf(display);
+  const board = display.layout === "board";
+  return (
+    <>
+      <DisplayRow label={board ? "Columns" : "Grouping"}>
+        <Select label={board ? "Columns" : "Grouping"} variant="ghost" className="min-w-32 justify-between" value={by} onChange={(g) => set({ groupBy: g === "status" ? undefined : g, ...(g === sub ? { subGroupBy: undefined } : {}) })} options={GROUP_BYS.map((g) => ({ value: g, label: groupLabel[g] }))} />
+      </DisplayRow>
+      <DisplayRow label={board ? "Swimlanes" : "Sub-grouping"}>
+        <Select label={board ? "Swimlanes" : "Sub-grouping"} variant="ghost" className="min-w-32 justify-between" value={sub} onChange={(g) => set({ subGroupBy: g === "none" ? undefined : g })} options={GROUP_BYS.filter((g) => g !== by || g === "none").map((g) => ({ value: g, label: groupLabel[g] }))} />
+      </DisplayRow>
+      <DisplayRow label="Ordering">
+        <span className="flex items-center gap-1">
+          <Select label="Ordering" variant="ghost" className="min-w-28 justify-between" value={sort.key} onChange={(k) => set({ sort: k === "activity" && sort.dir === "desc" ? undefined : { key: k, dir: sort.key === k ? sort.dir : firstDir(k) } })} options={SORT_KEYS.map((k) => ({ value: k, label: sortLabel[k] }))} />
+          <button
+            type="button"
+            onClick={() => {
+              const dir = sort.dir === "asc" ? "desc" : "asc";
+              set({ sort: sort.key === "activity" && dir === "desc" ? undefined : { key: sort.key, dir } });
+            }}
+            aria-label={sort.dir === "asc" ? "Ascending" : "Descending"}
+            title={sort.dir === "asc" ? "Ascending" : "Descending"}
+            className="grid size-7 place-items-center rounded-md text-muted hover:bg-fg/[0.06] hover:text-fg"
+          >
+            {sort.dir === "asc" ? <ArrowUpNarrowWide className="size-3.5" /> : <ArrowDownWideNarrow className="size-3.5" />}
+          </button>
+        </span>
+      </DisplayRow>
+    </>
   );
 }
 

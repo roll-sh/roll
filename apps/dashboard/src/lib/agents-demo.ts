@@ -881,7 +881,8 @@ export class DemoOwner implements AgentsTransport {
   /**
    * `speed` scales every delay (tests run the demo fast); `keepAlive` starts new work whenever
    * the canvas goes quiet; `empty` starts with no machines (`?demo=empty`: the first-run screen);
-   * `busy` gives one project many threads (`?demo=busy`).
+   * `busy` gives one project many threads (`?demo=busy`); `many` adds that many threads across
+   * the projects (`?demo=1000`: the list and the board at scale).
    */
   constructor(
     private speed = 1,
@@ -889,6 +890,7 @@ export class DemoOwner implements AgentsTransport {
     private empty = false,
     /** `?demo=busy`: one project (web) with 30 more threads, to see the canvas at scale. */
     private busy = false,
+    private many = 0,
   ) {}
 
   // ── records ──
@@ -1440,6 +1442,30 @@ export class DemoOwner implements AgentsTransport {
       worktree: { path: "/Users/ada/.local/share/roll/agent/worktrees/prj_demo_roll/thr_demo_json", branch: "roll/add-json-to-status", base: "f35f34cf", removed_at: null },
     });
     this.put("thread", done, MBP);
+    // `?demo=1000`: that many more threads, to see the surface at scale (statuses spread like a busy owner's).
+    const places = [["prj_demo_roll", MBP], ["prj_demo_web", MBP], ["prj_demo_docs", MBP], ["prj_demo_infra", BOX]] as const;
+    const verbs = ["Fix", "Add", "Refactor", "Document", "Speed up", "Test", "Migrate", "Remove"];
+    const things = ["the billing webhook", "search ranking", "the avatar upload", "dark mode", "the rate limiter", "markdown preview", "API pagination", "the session timeout", "i18n strings", "the flaky e2e test"];
+    for (let i = 0; i < this.many; i++) {
+      const [pid, m] = places[i % places.length];
+      const r = (i * 7919) % 100;
+      const status = r < 4 ? "waiting" : r < 12 ? "running" : r < 16 ? "error" : "idle";
+      this.put(
+        "thread",
+        base(`thr_many_${i}`, pid, `${verbs[i % verbs.length]} ${things[(i >> 3) % things.length]} (${i})`, i % 3 ? "claude" : "codex", i % 3 ? "claude-opus-5-5" : "gpt-5.5-codex", {
+          status,
+          pending_requests: status === "waiting" ? 1 : 0,
+          error: status === "error" ? "The run failed" : null,
+          queued: r === 20 ? [{ id: `msg_many_${i}`, text: "and then the docs", attachments: [], created_at: t0 } as unknown as Thread["queued"][number]] : [],
+          activity: status === "running" ? "Reading the code" : null,
+          usage: { input_tokens: 1000 + i * 37, output_tokens: 200 + i * 11, cached_tokens: 0, cost_usd: (i % 50) / 100 },
+          change: r > 90 ? { repo: "acme/roll", number: 100 + i, status: r > 95 ? "ready" : "checking", url: "/acme/roll/changes/1", detail: null } : null,
+          created_at: t0 - i * 60_000,
+          updated_at: t0 - i * 60_000,
+        }),
+        m,
+      );
+    }
     this.completedRun("thr_demo_json", 1, "Add a --json flag to `roll code status`", "Added `--json` to `roll code status`: it prints the same fields as the table, pretty-printed. `roll-cli/tests/code.rs` covers both outputs.", [fc("crates/roll-cli/src/code/status.rs", "modify", DIFF_STATUS)], t0 + 2000);
     this.put(
       "thread",

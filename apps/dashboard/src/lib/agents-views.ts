@@ -68,7 +68,41 @@ export interface Display {
   projects?: "all";
   /** Projects pinned onto this view: they keep their card with nothing under it. */
   keep?: string[];
+  /** The same threads as Linear's list or board instead of the canvas (`canvas` when absent). */
+  layout?: "list" | "board";
+  /** List and board: the groups (the board's columns); `status` when absent. */
+  groupBy?: GroupBy;
+  /** List and board: groups inside each group (the board's swimlanes); none when absent. */
+  subGroupBy?: GroupBy;
+  /** List and board: the order inside a group; the newest activity first when absent. */
+  sort?: Sort;
 }
+
+export type Layout = "canvas" | "list" | "board";
+export const LAYOUTS: readonly Layout[] = ["canvas", "list", "board"];
+
+/** How the list and the board group threads (`lib/agents-collection.ts`). */
+export type GroupBy = "none" | "status" | "project" | "machine" | "agent" | "pr";
+export const GROUP_BYS: readonly GroupBy[] = ["status", "project", "machine", "agent", "pr", "none"];
+
+export type SortKey = "activity" | "created" | "title" | "status" | "project" | "machine" | "agent" | "changes" | "cost";
+export const SORT_KEYS: readonly SortKey[] = ["activity", "created", "title", "status", "project", "machine", "agent", "changes", "cost"];
+
+export interface Sort {
+  key: SortKey;
+  dir: "asc" | "desc";
+}
+
+export const layoutOf = (d: Display): Layout => d.layout ?? "canvas";
+
+/** The display showing the view as the canvas, a list or a board (everything else kept). */
+export function withLayout(d: Display, layout: Layout): Display {
+  const { layout: _, ...rest } = d;
+  return layout === "canvas" ? rest : { ...rest, layout };
+}
+export const groupByOf = (d: Display): GroupBy => d.groupBy ?? "status";
+export const subGroupByOf = (d: Display): GroupBy => (d.subGroupBy && d.subGroupBy !== groupByOf(d) ? d.subGroupBy : "none");
+export const sortOf = (d: Display): Sort => d.sort ?? { key: "activity", dir: "desc" };
 
 /** How many projects a view can pin. */
 export const MAX_KEPT = 64;
@@ -211,14 +245,20 @@ export function parseDisplay(v: unknown): Display {
   if (v.projects === "all") out.projects = "all";
   const keep = strings(v.keep, MAX_KEPT, 64);
   if (keep.length) out.keep = keep;
+  if (v.layout === "list" || v.layout === "board") out.layout = v.layout;
+  const isGroup = (g: unknown): g is GroupBy => (GROUP_BYS as readonly unknown[]).includes(g);
+  if (isGroup(v.groupBy) && v.groupBy !== "status") out.groupBy = v.groupBy;
+  if (isGroup(v.subGroupBy) && v.subGroupBy !== "none" && v.subGroupBy !== (out.groupBy ?? "status")) out.subGroupBy = v.subGroupBy;
+  if (isObject(v.sort) && (SORT_KEYS as readonly unknown[]).includes(v.sort.key) && (v.sort.dir === "asc" || v.sort.dir === "desc") && !(v.sort.key === "activity" && v.sort.dir === "desc"))
+    out.sort = { key: v.sort.key as SortKey, dir: v.sort.dir };
   return out;
 }
 
-/** Whether a display is all defaults on every screen (pinned projects aren't a display choice). */
-export const isDefaultDisplay = (d: Display) => Object.keys(parseDisplay(d)).every((k) => k === "keep");
+/** Whether a display is all defaults on every screen (pinned projects and the layout aren't display choices). */
+export const isDefaultDisplay = (d: Display) => Object.keys(parseDisplay(d)).every((k) => k === "keep" || k === "layout");
 
-/** The display back to its defaults, keeping the projects pinned onto the view. */
-export const defaultDisplay = (d: Display): Display => (d.keep?.length ? { keep: d.keep } : {});
+/** The display back to its defaults, keeping the projects pinned onto the view and its layout. */
+export const defaultDisplay = (d: Display): Display => ({ ...(d.keep?.length ? { keep: d.keep } : {}), ...(d.layout ? { layout: d.layout } : {}) });
 
 /** Pin a project onto the view (it keeps its card with no threads), or unpin it. */
 export function keepProject(d: Display, project: string, on: boolean): Display {

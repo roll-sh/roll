@@ -9,7 +9,7 @@ import { isBusy, reachable } from "@/lib/agents-api";
 import { POP_IN, POP_OUT } from "@/lib/agents-motion";
 import { setActiveClient, type AgentsClient } from "@/lib/agents-client";
 import { collapseUnused, deriveGraph, foldQuiet, groupByStatus, newestRuns, rolling, SHOWN_IN_GROUP, SHOWN_THREADS, type GraphNode } from "@/lib/agents-graph";
-import { runsOf } from "@/lib/agents-store";
+import { emptyData, runsOf } from "@/lib/agents-store";
 import type { Direction, Size } from "@/lib/agents-layout";
 import { closePalette, noteThreadOpen, openPalette, togglePalette } from "@/lib/agents-palette";
 import { useKeyboard } from "@/lib/keyboard-inset";
@@ -55,6 +55,12 @@ import { SidebarToggle, ThreadsSidebar, useSidebarOpen } from "./threads-sidebar
 import { AgentsContext, useAgents, useAgentsSnapshot, useHold, useMarkDriver, type AgentsCtx } from "./use-agents";
 import { useAgentsConnection } from "./use-connection";
 import { PinTools, useCanvasViews, ViewsBar, type CanvasViews } from "./views";
+import { BulkBar, SelectionHost, useBulk, type Bulk } from "./bulk-bar";
+import { ThreadCollection, useCollection } from "./thread-list";
+import { needsMe, nextOf, rowsOf } from "@/lib/agents-collection";
+import { layoutOf } from "@/lib/agents-views";
+import { agentsSurface } from "@/lib/agents-surface";
+import { showInboxToast } from "./threads-sidebar";
 
 /** Threads whose detail the canvas follows besides the open one, so their subagents show. */
 const MAX_FOLLOWED_BUSY = 12;
@@ -369,6 +375,29 @@ export function AgentsSurface({
     [client, demo, openThread, close, startNew, focus, focusProject, services, sandboxes, phone, prefs],
   );
 
+  // Many threads at once: the bulk actions, and "Next that needs me" (N, ⌘K) in every layout:
+  // the longest-waiting thread's conversation, then the next, round to the first.
+  const bulk = useBulk(client);
+  const nextNeedsMe = useCallback(() => {
+    const d = client.data;
+    const order = needsMe(d, rowsOf(d, { now: Date.now(), showArchived: false, filter: {}, focused }));
+    const v = agentsSurface.get().view;
+    const next = nextOf(order, v.kind === "thread" ? v.thread : null);
+    if (next) openThread(next);
+    else showInboxToast({ text: "Nothing needs you right now" });
+  }, [client, focused, openThread]);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.defaultPrevented || e.metaKey || e.ctrlKey || e.altKey || e.shiftKey || e.repeat || e.key !== "n") return;
+      const el = e.target as HTMLElement | null;
+      if (el && (el.isContentEditable || /^(INPUT|SELECT|TEXTAREA)$/.test(el.tagName) || el.closest(".xterm, [role=dialog]:not([data-surface]), [role=menu], [role=listbox]"))) return;
+      e.preventDefault();
+      nextNeedsMe();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [nextNeedsMe]);
+
   // ⌘N / ⌘⇧O (T3's `chat.new`): the launcher, except in a terminal. ⌘, (T3's "Settings…"): the
   // owner's settings beside the canvas; the header control does it on other pages, this on the
   // full page and the desktop app's Agents window.
@@ -514,8 +543,9 @@ export function AgentsSurface({
       },
       focused,
       focusProject,
+      scale: { display, setDisplay, nextNeedsMe, bulk: bulk.run },
     }),
-    [showArchived, archived, views, direction, setDirection, display, setDisplay, focused, focusProject],
+    [showArchived, archived, views, direction, setDirection, display, setDisplay, focused, focusProject, nextNeedsMe, bulk.run],
   );
   const hint = useSyncExternalStore(noSubscribe, () => newAgentHint(navigator.platform), () => "⌘N");
   const end = (
@@ -666,6 +696,7 @@ export function AgentsSurface({
                       phone={phone}
                       onLaunch={onLaunch}
                       keepClear={dock}
+                      bulk={bulk}
                     />
                   </div>
                 </>
@@ -710,6 +741,7 @@ export function AgentsSurface({
           </div>
         </div>
         <Notices />
+        <SelectionHost data={data} />
         <ProjectDialogs />
         {addMachine.value && <AddMachineDialog key={addMachine.key} open={addMachine.open} onExited={addMachine.onExited} onClose={() => setAdding(false)} onCreated={onSandbox} />}
         {launcher.value && (
@@ -822,6 +854,7 @@ function CanvasViewBody({
   phone,
   onLaunch,
   keepClear,
+  bulk,
 }: {
   canvasRef: React.RefObject<CanvasHandle | null>;
   data: AgentsClient["data"];
@@ -840,17 +873,38 @@ function CanvasViewBody({
   phone: boolean;
   onLaunch?: (source: string, at: { x: number; y: number }) => void;
   keepClear?: React.RefObject<HTMLElement | null>;
+  bulk: Bulk;
 }) {
   const { client, owner, readOnly } = useAgents();
   const view = views.current;
   // Deferred: the field updates at once and the canvas follows in an interruptible render (each
   // key re-laid out every card: ~150 ms a key at 200 threads).
   const filter = useDeferredValue(views.filter);
+  // The same threads as a list or a board (the view's layout). The canvas isn't mounted under them:
+  // kept hidden it rendered every card again on each record of the stream (at 1000 threads that
+  // was most of every frame); its frame is remembered per view, so it comes back where it was.
+  const layout = layoutOf(view.display);
+  const canvasShown = layout === "canvas";
+  const settle = useCallback((ids: readonly string[]) => bulk.run({ kind: "settle" }, ids), [bulk]);
+  const collection = useCollection({
+    data: layout === "canvas" ? EMPTY_DATA : data,
+    filter,
+    display: view.display,
+    setDisplay: views.setDisplay,
+    showArchived,
+    focused,
+    open: selected?.startsWith("t:") ? selected.slice(2) : null,
+    phone,
+    storageKey: viewStorageKey(owner, view.id),
+    settle,
+  });
   // A pinned conversation answers its thread's requests itself.
   const expanded = useMemo(() => pinnedConversations(view), [view]);
   // The open conversation's terminals are in its drawer: not a second time on the canvas.
   const docked = selected?.startsWith("t:") ? selected.slice(2) : null;
-  const whole = useMemo(() => deriveGraph(data, { showArchived, expanded, docked }), [data, showArchived, expanded, docked]);
+  // Only the canvas needs the graph (the list and the board are rows).
+  const graphData = canvasShown ? data : EMPTY_DATA;
+  const whole = useMemo(() => deriveGraph(graphData, { showArchived, expanded, docked }), [graphData, showArchived, expanded, docked]);
   const display = view.display;
   const viewed = useMemo(() => {
     const g = applyView(whole, data, { filter, pins: view.pins }, Date.now());
@@ -1073,10 +1127,19 @@ function CanvasViewBody({
     [view],
   );
   const empty = graph.nodes.size === 0 && whole.nodes.size > 0;
+  // What this layout shows: the bulk bar says how many selected threads it doesn't.
+  const shownIds = useMemo(() => new Set(layout === "canvas" ? [...graph.nodes.values()].filter((n) => n.kind === "thread").map((n) => n.id) : collection.rows.map((r) => r.id)), [layout, graph, collection.rows]);
   return (
     <div className="flex h-full min-h-0 flex-col">
       <ViewsBar views={views} data={data} active={visible} phone={phone} reveal={(k) => canvasRef.current?.reveal(k)} focused={focused ? { id: focused, name: data.projects.get(focused)?.value.name ?? "project", clear: () => onFocus(null) } : undefined} />
+      <BulkBar data={data} bulk={bulk} phone={phone} visible={shownIds} />
       <div className="relative min-h-0 flex-1">
+        {layout !== "canvas" && (
+          <div key={layout} className="fade-in absolute inset-0">
+            <ThreadCollection layout={layout} collection={collection} />
+          </div>
+        )}
+        {canvasShown && (
         <CanvasProjectsProvider value={projects}>
           <CanvasFoldsProvider value={foldsCtx}>
           <AgentsCanvas
@@ -1101,10 +1164,13 @@ function CanvasViewBody({
           />
           </CanvasFoldsProvider>
         </CanvasProjectsProvider>
+        )}
       </div>
     </div>
   );
 }
+
+const EMPTY_DATA = emptyData();
 
 /** A view that picks nothing right now: say so calmly, and the way back to everything. */
 function EmptyView({ name, waitingOnly, onAll }: { name: string | null; waitingOnly: boolean; onAll: () => void }) {

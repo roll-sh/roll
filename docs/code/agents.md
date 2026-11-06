@@ -1718,6 +1718,48 @@ The surface has three views:
   or projects alone keeps them whole. Switching eases the cards to their new places and the frame
   to the view's (or fits it); ⌥1…⌥9 jump to a view (1 is All), `[` and `]` step, `/` filters
   (the canvas's own + − 0 1 and arrows stay). Which view shows is per device.
+- **Working at scale: list, board, selection, bulk actions** (`lib/agents-collection.ts`,
+  `lib/agents-selection.ts`, `lib/agents-bulk.ts`; `thread-list.tsx`, `thread-board.tsx`,
+  `bulk-bar.tsx`, `palette-scale.tsx`). A view shows its threads as the canvas, a list or a board
+  (Linear's), switched in the views bar (⇧C, ⇧L, ⇧B, ⌘K "Show as…") and kept with the view
+  (`display.layout`), so a saved view is what it picks and how it shows it. The list and the board
+  show exactly the canvas's threads for the view (archived only when asked, settled and snoozed on
+  the shelf, a finished delegated agent gone), narrowed by the same filter and focus.
+  - **List:** a dense table drawn only where it shows (a few dozen rows whatever the count):
+    status, title (with what it's doing), project, machine, agent and model, waiting, last
+    activity, changes, PR, cost. Headers sort (again reverses), edges resize (remembered on the
+    device), and a narrow list (a conversation open beside it) drops the least needed columns.
+    Keyboard: j/k or ↑/↓ move, Enter opens, x selects, Shift+j/k extends, ⌘A selects everything
+    shown, ← goes to the row's group, ←/→/Enter fold a group. On a phone the rows are cards.
+  - **Board:** a column per group (by status: Needs you · Running · Queued · Failed · Done, with
+    ready-to-land changes first in Done; every status column always there, an empty one narrow),
+    the sub-grouping as swimlanes. A column draws only the cards in view. A card whose state
+    changes glides to its place, or over from its old column. Dropping cards on Done settles them;
+    no other column takes a drop (the rest is what the agents are doing). h/l or ←/→ across.
+  - **Grouping and order** (both, in Display and ⌘K): group and sub-group by status, project,
+    machine, agent, PR state or nothing; order by last activity (the default), created, title,
+    status, project, machine, agent, changes or cost, either way. Groups fold (per device) and
+    count their threads. Threads have no labels, so there is no label grouping.
+  - **Selection**, one for the whole surface (T3's `threadSelectionStore`): ⌘/Ctrl-click toggles a
+    thread and makes it the anchor, Shift-click selects from the anchor in the order that place
+    shows (a list, a column, the sidebar, the canvas's reading order), x toggles the focused one, a
+    group's box all or none, Escape clears. On a phone a long press (or Select) starts picking and
+    taps pick more. Canvas cards and sidebar rows take part; a selected card or row has a faint
+    accent fill.
+  - **The bulk bar** is a strip of the frame under the views bar while anything is selected (never
+    floating): Settle, Snooze, Archive, Approve, Decline, Stop, Retry (failed threads are told to
+    try again), Model, Follow-up (one message to all, typed in the bar), Publish. Each shows how
+    many it applies to when that's fewer than selected, and is off when none. Every action is the
+    single action's daemon command per thread, a fresh command id each (the daemon's idempotency
+    key; a step that got no answer is retried with the same id, one refused gets a new one), 12 at
+    a time; the result is one notice, "12 settled · 1 failed (why) · 3 skipped", with Undo (⌘Z)
+    where the single action has one, and the failures stay selected with Retry. Moving threads to
+    another project or machine isn't offered: a conversation lives in its project's folder on one
+    machine.
+  - **Next that needs me** (N, ⌘K): the conversation of the thread that has waited longest, then the
+    next, round to the first, in every layout.
+  - At 1000 threads (`?demo=1000` adds them to the demo) the list scrolls and selects at 60 fps;
+    under the list and the board the canvas isn't mounted.
 - **Pinned cards.** A thread's conversation or diff, or a terminal, can be pinned onto a view
   (the pin buttons over a card, or the pin in the side panel's title bar) as a big live card
   beside its thread: a pinned conversation shows its newest runs as they stream, answers its

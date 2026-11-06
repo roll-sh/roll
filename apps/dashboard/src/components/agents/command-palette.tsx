@@ -85,6 +85,7 @@ import { NO_CANVAS } from "./machine-projects";
 import { projectActions } from "./project-actions";
 import { publishLabel, rebasePrompt } from "./change";
 import { requestPublish } from "./session";
+import { scaleItems, type ScaleHost } from "./palette-scale";
 
 const SHELF_NAME: Record<Exclude<Shelf, "active">, string> = { settled: "Settled", snoozed: "Snoozed", archived: "Archived" };
 
@@ -140,6 +141,8 @@ export interface PaletteHost {
   /** The project filling the canvas, and focusing one (`null`: everything again). */
   focused: string | null;
   focusProject: (project: string | null) => void;
+  /** Layouts, grouping, order, "Next that needs me" and the bulk actions (`palette-scale.tsx`). */
+  scale?: ScaleHost;
 }
 
 /**
@@ -318,6 +321,7 @@ function PaletteDialog({ session, intent, host }: { session: number; intent: Pal
       { kind: "action", value: "action:new", title: "New agent", searchTerms: ["new thread", "launch", "start", "conversation"], icon: <Plus className={ICON} />, run: () => startNew?.() },
       projects.length > 0 && { kind: "submenu", value: "action:new-in", title: "New agent in…", searchTerms: ["new thread in", "project"], icon: <Plus className={ICON} />, view: projectsView("New agent in", (p) => startNew?.(p.id)) },
       requests.length > 0 && { kind: "action", value: "action:waiting", title: `Answer what's waiting (${requests.length})`, searchTerms: ["approval", "question", "request", "waiting"], icon: <Bell className="size-4 text-accent" />, run: () => openThread(requests[0].thread) },
+      ...(host.scale ? scaleItems(host.scale, data) : []),
       // The open conversation's publish form (it was only in its More menu).
       !!open && !ctx.readOnly && !!data.projects.get(open.project)?.value.repo && {
         kind: "action",

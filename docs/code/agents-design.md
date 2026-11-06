@@ -334,6 +334,31 @@ switched off under `prefers-reduced-motion`, and the engine draws a static, stat
   the pointer until it ends, freezes the live canvas in a snapshot, and a second transition skips
   the first to its end.
 
+## List, board and the bulk bar
+
+The list and the board (`thread-list.tsx`, `thread-board.tsx`) are the same surface as the canvas,
+in its inset panel. They follow Linear's density, not the canvas's cards:
+
+- **List rows** are 34 px, one line, 13 px text, the title in `text-soft` with what it's doing after
+  it in `text-subtle`; ids, times, counts and cost in Geist Mono. Group headers are 34 px on a faint
+  `bg-panel/40` with a hairline. A row's left edge is its project's colour (2 px, the full height,
+  as on its card), the keyboard cursor's edge is accent. The open conversation's row is
+  `bg-fg/[0.06]`; a selected row `bg-accent/[0.07]`. The checkbox shows on hover and always once
+  anything is selected. Headers are sticky over a translucent `bg-canvas`.
+- **Board cards** are the canvas card's frame made small (`bg-panel`, `border-line-2`, radius 10,
+  `shadow-card`, the project's colour as a full-height left edge), 92 px high: the status pill and
+  time, two lines of title, then project · machine, PR, +/−, cost. Columns are 284 px; an empty
+  status column is 152 px so it stays without pushing the others away. The only drop target (Done)
+  takes an accent wash and a hairline while something is over it.
+- **The bulk bar** is part of the frame: a 40 px strip under the views bar, opaque (`--accent` at
+  5 % over `--canvas`), a hairline under it, folding open and shut with `Collapse`. Actions are
+  ghost buttons with lucide icons; disabled ones fade to 35 %. No floating bar, no glow, no
+  second outline. Selected canvas cards get an accent hairline and a 7 % accent fill; their
+  coloured left edge stays.
+- **Motion:** rows and cards move by `transform` (180–200 ms ease-out) when a sort or a state
+  change reorders them; a card that changes column slides over from its old place (260 ms); the
+  layout switcher's thumb slides. Reduced motion: they jump.
+
 ## Do / don't
 
 - **Do** use the tokens (`bg-canvas`, `bg-sheet`, `bg-panel`, `border-line-2`, `shadow-pop`,
