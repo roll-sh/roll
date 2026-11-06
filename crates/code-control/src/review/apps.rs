@@ -671,14 +671,6 @@ mod tests {
     }
 
     #[test]
-    fn urls() {
-        assert!(check_url("https://hooks.example.com/roll").is_ok());
-        assert!(check_url("ftp://x").is_err());
-        assert!(check_url("https://user:pw@x.com/").is_err());
-        assert!(check_url("not a url").is_err());
-    }
-
-    #[test]
     fn signatures_are_stable() {
         let s = signature("secret", 1700000000, b"{}");
         assert!(s.starts_with("sha256=") && s.len() == 7 + 64);

@@ -321,41 +321,6 @@ async fn published_threads_become_changes_that_land_through_the_queue() {
     assert_eq!(t.change.map(|c| c.status), Some(ChangeStatus::Landed));
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn threads_take_work_items() {
-    let w = world().await;
-    let project = w.clone_app().await;
-    let thread = w.created(json!({ "type": "thread.create", "project": project, "provider": "codex" })).await;
-    w.thread(&thread).await;
-    let (s, item) = w.req("POST", &format!("{APP}/work"), Some(json!({ "title": "Fix the login bug", "priority": 0 }))).await;
-    assert_eq!(s, StatusCode::CREATED, "{item}");
-    let mut stream = Threads::open(&w).await;
-    let path = format!("/v1/code/agents/acme/threads/{thread}/work");
-
-    // Claimed for the thread: the next open item of the repo.
-    let (s, v) = w.req("POST", &path, Some(json!({ "repo": "acme/app" }))).await;
-    assert_eq!(s, StatusCode::OK, "{v}");
-    assert_eq!((v["id"].as_str(), v["state"].as_str(), v["claimed_by"].as_str()), (item["id"].as_str(), Some("claimed"), Some("agent:box")));
-    let t = stream.until(&thread, "work", |t| t.work.is_some()).await;
-    let work = t.work.unwrap();
-    assert_eq!((work.id.as_str(), work.repo.as_str(), work.number, work.title.as_str()), (item["id"].as_str().unwrap(), "acme/app", item["number"].as_u64().unwrap(), "Fix the login bug"));
-    // Nothing else to claim.
-    assert_eq!(w.req("POST", &path, Some(json!({ "repo": "acme/app" }))).await.0, StatusCode::NO_CONTENT);
-    // Let go, then take a given item.
-    assert_eq!(w.req("DELETE", &path, None).await.0, StatusCode::NO_CONTENT);
-    stream.until(&thread, "no work", |t| t.work.is_none()).await;
-    let (s, v) = w.req("POST", &path, Some(json!({ "work": format!("acme/app#{}", item["number"]) }))).await;
-    assert_eq!(s, StatusCode::OK, "{v}");
-    stream.until(&thread, "work again", |t| t.work.is_some()).await;
-    assert_eq!(w.req("POST", &path, Some(json!({}))).await.0, StatusCode::BAD_REQUEST);
-    assert_eq!(w.req("POST", "/v1/code/agents/acme/threads/thr_nope/work", Some(json!({ "repo": "acme/app" }))).await.0, StatusCode::NOT_FOUND);
-    // A thread record the daemon sends again keeps its work item.
-    let (s, v) = w.cmd(json!({ "type": "thread.configure", "thread": thread, "title": "Login" })).await;
-    assert_eq!(s, StatusCode::OK, "{v}");
-    let t = stream.until(&thread, "renamed", |t| t.title == "Login").await;
-    assert!(t.work.is_some());
-}
-
 /// A work item as the API shows it now.
 async fn work_item(w: &World, id: &str) -> Value {
     let (s, v) = w.req("GET", &format!("/v1/code/work/{id}"), None).await;
@@ -431,9 +396,26 @@ async fn publishing_does_the_threads_work_item() {
     let (_, item) = w.req("POST", &format!("{APP}/work"), Some(json!({ "title": "Fix the login bug" }))).await;
     let id = item["id"].as_str().unwrap().to_string();
     let mut stream = Threads::open(&w).await;
-    let (s, v) = w.req("POST", &format!("/v1/code/agents/acme/threads/{thread}/work"), Some(json!({ "repo": "acme/app" }))).await;
-    assert_eq!((s, v["state"].as_str()), (StatusCode::OK, Some("claimed")), "{v}");
-    stream.until(&thread, "work", |t| t.work.is_some()).await;
+    let path = format!("/v1/code/agents/acme/threads/{thread}/work");
+
+    // Claimed for the thread (as its machine's agent): the next open item of the repo.
+    let (s, v) = w.req("POST", &path, Some(json!({ "repo": "acme/app" }))).await;
+    assert_eq!((s, v["id"].as_str(), v["state"].as_str(), v["claimed_by"].as_str()), (StatusCode::OK, Some(id.as_str()), Some("claimed"), Some("agent:box")), "{v}");
+    let work = stream.until(&thread, "work", |t| t.work.is_some()).await.work.unwrap();
+    assert_eq!((work.id.as_str(), work.repo.as_str(), work.number, work.title.as_str()), (id.as_str(), "acme/app", item["number"].as_u64().unwrap(), "Fix the login bug"));
+    // Nothing else to claim; let go, then take a given item.
+    assert_eq!(w.req("POST", &path, Some(json!({ "repo": "acme/app" }))).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(w.req("DELETE", &path, None).await.0, StatusCode::NO_CONTENT);
+    stream.until(&thread, "no work", |t| t.work.is_none()).await;
+    let (s, v) = w.req("POST", &path, Some(json!({ "work": format!("acme/app#{}", item["number"]) }))).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    stream.until(&thread, "work again", |t| t.work.is_some()).await;
+    assert_eq!(w.req("POST", &path, Some(json!({}))).await.0, StatusCode::BAD_REQUEST);
+    assert_eq!(w.req("POST", "/v1/code/agents/acme/threads/thr_nope/work", Some(json!({ "repo": "acme/app" }))).await.0, StatusCode::NOT_FOUND);
+    // A thread record the daemon sends again keeps its work item.
+    let (s, v) = w.cmd(json!({ "type": "thread.configure", "thread": thread, "title": "Login" })).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert!(stream.until(&thread, "renamed", |t| t.title == "Login").await.work.is_some());
 
     // Published: the change does the item, which goes to review.
     std::fs::write(Path::new(&worktree.path).join("login.txt"), "fixed\n").unwrap();

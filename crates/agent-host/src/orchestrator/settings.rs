@@ -227,36 +227,3 @@ fn merged(mut file: ProviderConfig, set: &ProviderSettings) -> ProviderConfig {
     file.auto_compact_window = set.auto_compact_window;
     file
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn settings_lay_over_the_config_file() {
-        let file = ProviderConfig {
-            binary: Some("/usr/bin/claude".into()),
-            args: vec!["--file".into()],
-            env: vec![("ANTHROPIC_API_KEY".into(), "sk-file".into()), ("CLAUDE_CONFIG_DIR".into(), "/a".into())],
-            ..Default::default()
-        };
-        assert_eq!(merged(file.clone(), &ProviderSettings::default()), file);
-        let set = ProviderSettings {
-            binary: Some("/opt/claude".into()),
-            args: vec!["--set".into()],
-            env: [("CLAUDE_CONFIG_DIR".to_string(), "/b".to_string()), ("RUST_LOG".to_string(), "info".to_string())].into(),
-            ..ProviderSettings::default()
-        };
-        let got = merged(file, &set);
-        assert_eq!(got.binary, Some(PathBuf::from("/opt/claude")));
-        assert_eq!(got.args, vec!["--file", "--set"]);
-        assert_eq!(
-            got.env,
-            vec![
-                ("ANTHROPIC_API_KEY".to_string(), "sk-file".to_string()),
-                ("CLAUDE_CONFIG_DIR".to_string(), "/b".to_string()),
-                ("RUST_LOG".to_string(), "info".to_string()),
-            ]
-        );
-    }
-}

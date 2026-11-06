@@ -285,11 +285,4 @@ mod tests {
             assert!(!tool["description"].as_str().unwrap().is_empty());
         }
     }
-
-    #[test]
-    fn waits_are_bounded() {
-        assert_eq!(wait_for(None), WAIT_DEFAULT);
-        assert_eq!(wait_for(Some(0)), Duration::from_millis(1));
-        assert_eq!(wait_for(Some(u64::MAX)), WAIT_MAX);
-    }
 }

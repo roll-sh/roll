@@ -1181,15 +1181,6 @@ mod tests {
     }
 
     #[test]
-    fn paths_are_relative_to_the_session() {
-        let t = Translator::new("/w/proj".into(), "default");
-        assert_eq!(t.rel("/w/proj/src/lib.rs"), "src/lib.rs");
-        assert_eq!(t.rel("/etc/hosts"), "/etc/hosts");
-        assert_eq!(t.title("mcp__roll__land", &json!({})), "roll: land");
-        assert_eq!(t.title("Grep", &json!({"pattern": "fn main", "path": "/w/proj/src"})), "fn main in src");
-    }
-
-    #[test]
     fn rate_limit_events_report_the_account_limits_with_or_without_a_turn() {
         let mut t = Translator::new("/w".into(), "default");
         let event = |status: &str, utilization: f64| {

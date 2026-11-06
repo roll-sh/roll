@@ -551,10 +551,6 @@ fn messages(events: &[ProviderEvent]) -> Vec<String> {
     out
 }
 
-fn ends(events: &[ProviderEvent]) -> Vec<&TurnEnd> {
-    events.iter().filter_map(|e| if let ProviderEvent::TurnEnded(end) = e { Some(end) } else { None }).collect()
-}
-
 // Transcripts written here ---------------------------------------------------------------------
 
 /// The ids hand-written transcripts let the client mint.
@@ -701,16 +697,6 @@ async fn simple() {
 }
 
 #[tokio::test]
-async fn multi_turn() {
-    let mut h = Harness::t3("multi_turn", RuntimeMode::FullAccess).await;
-    assert_eq!(h.turn("Respond with exactly: first fixture turn complete").await, TurnEnd::Completed);
-    assert_eq!(h.turn("Respond with exactly: second fixture turn complete").await, TurnEnd::Completed);
-    let (events, _) = h.finish().await;
-    golden("multi_turn", &events);
-    assert_eq!(messages(&events), ["first fixture turn complete", "second fixture turn complete"]);
-}
-
-#[tokio::test]
 async fn turn_interrupt() {
     let mut h = Harness::t3("turn_interrupt", RuntimeMode::FullAccess).await;
     h.session.send(text_input("Do not answer immediately. First run the local shell command `sleep 30`, then respond with exactly: interrupt fixture should not finish naturally.")).await.unwrap();
@@ -767,48 +753,6 @@ async fn muse_permission() {
     let tool = &latest(&events)["01a11a6d-4730-75f1-bc60-4e5df1a3cdc0"];
     let NodeBody::Tool(t) = &tool.body else { panic!() };
     assert_eq!((t.kind, t.title.as_str(), t.exit_code, t.output.as_deref()), (ToolKind::Command, "touch muse-approved.txt", Some(0), None));
-}
-
-#[tokio::test]
-async fn muse_subagent_approval() {
-    let mut h = Harness::t3("muse_subagent_approval", RuntimeMode::Ask).await;
-    h.session.send(text_input("Do not run any commands yourself. Spawn one subagent whose only task is to run this exact shell command: printf 'subagent approval fixture' > subagent-approval.txt and then reply with exactly: Written. Wait for it to finish, then reply with exactly what it said.")).await.unwrap();
-    let (id, item, _) = h.request().await;
-    // A subagent's approval shows on the subagent.
-    assert_eq!(item.as_deref(), Some("01a12d1d-b4d9-74e2-ae49-6a2363589cbc"));
-    h.session.respond(&id, &Response::Decision { decision: Decision::Accept, message: None }).await.unwrap();
-    assert_eq!(h.turn_end().await, TurnEnd::Completed);
-    let (events, frames) = h.finish().await;
-    golden("muse_subagent_approval", &events);
-    assert_eq!(sent(&frames, "approval/decide")[0]["choiceId"], "allow_once");
-    assert_eq!(messages(&events), ["Written"]);
-}
-
-#[tokio::test]
-async fn muse_subagent_interrupt() {
-    let mut h = Harness::t3("muse_subagent_interrupt", RuntimeMode::FullAccess).await;
-    h.session.send(text_input("Spawn one subagent whose only task is to run the shell command `sleep 30` and then reply with exactly: Done. Wait for it to finish, then reply with exactly what it said.")).await.unwrap();
-    h.until("the subagent", |e| matches!(e, ProviderEvent::Item(i) if matches!(i.body, NodeBody::Subagent { .. }))).await;
-    h.session.interrupt().await.unwrap();
-    assert_eq!(h.turn_end().await, TurnEnd::Interrupted);
-    let (events, _) = h.finish().await;
-    golden("muse_subagent_interrupt", &events);
-    assert_eq!(latest(&events)["01a12d28-885c-7a80-80d9-d97502d7cda8"].status, NodeStatus::Interrupted);
-}
-
-#[tokio::test]
-async fn muse_workflow() {
-    let mut h = Harness::t3("muse_workflow", RuntimeMode::FullAccess).await;
-    assert_eq!(h.turn("Use your workflow tool to launch a workflow with exactly TWO agents: one labeled 'ping' that replies with the word PING, and one labeled 'pong' that replies with the word PONG. Launch it and end your turn; do not wait for it.").await, TurnEnd::Completed);
-    let (events, _) = h.finish().await;
-    golden("muse_workflow", &events);
-    let wf = &latest(&events)["e1f5bbdc-9a2d-52c5-8501-9b6ef280aa94"];
-    let NodeBody::Tool(t) = &wf.body else { panic!() };
-    assert_eq!((t.name.as_str(), t.title.as_str()), ("workflow", "ping-pong"));
-    // The workflow's agents ran after the turn, and Muse's own wake turn isn't adopted (a known
-    // gap): one turn, and none of the wake turn's message.
-    assert_eq!(ends(&events), [&TurnEnd::Completed]);
-    assert!(messages(&events).is_empty(), "{events:#?}");
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1201,20 +1145,16 @@ async fn info_reads_version_and_models_without_side_effects() {
     let methods: Vec<_> = frames(&log).iter().filter_map(|f| f["method"].as_str().map(str::to_string)).collect();
     assert_eq!(methods, ["initialize", "initialized", "model/list"]);
     assert_eq!(started(&log)["env"]["MUSE_NO_AUTO_UPDATE"], "1");
-}
 
-#[tokio::test]
-async fn info_without_models_says_to_log_in() {
+    // No models: run `muse login`.
     let dir = tempfile::tempdir().unwrap();
     let muse = Muse::new(fake_config(Path::new(&probe_transcript(dir.path(), json!([]))), &dir.path().join("log.ndjson")));
     let info = muse.info().await;
     assert!(info.installed && info.models.is_empty());
     assert_eq!(info.auth, AuthStatus::Unknown);
     assert!(info.detail.as_deref().unwrap().contains("muse login"), "{info:?}");
-}
 
-#[tokio::test]
-async fn info_without_muse() {
+    // Not installed.
     let muse = Muse::new(ProviderConfig { binary: Some("/nonexistent/muse".into()), ..Default::default() });
     let info = muse.info().await;
     assert!(!info.installed);

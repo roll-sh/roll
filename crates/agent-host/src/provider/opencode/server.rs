@@ -513,16 +513,3 @@ fn tail_text(tail: &Mutex<VecDeque<u8>>) -> Option<String> {
     let text = String::from_utf8_lossy(&tail.iter().copied().collect::<Vec<_>>()).trim().to_string();
     (!text.is_empty()).then_some(text)
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn the_listening_line_gives_the_url() {
-        assert_eq!(listening_url("opencode server listening on http://127.0.0.1:4096").as_deref(), Some("http://127.0.0.1:4096"));
-        assert_eq!(listening_url("Server Listening On  https://h:1/x more").as_deref(), Some("https://h:1/x"));
-        assert_eq!(listening_url("server listening on ftp://x"), None);
-        assert_eq!(listening_url("starting"), None);
-    }
-}

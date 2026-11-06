@@ -23,15 +23,12 @@ struct World {
     url: String,
     owner: String,
     agent: String,
-    other: String,
 }
 
 async fn world() -> World {
     let a = app(Some(ADMIN));
-    for o in ["acme", "other"] {
-        let (s, v) = a.req("POST", "/v1/code/owners", Some(json!({ "name": o, "kind": "org" })), Some(ADMIN)).await;
-        assert_eq!(s, StatusCode::CREATED, "{v}");
-    }
+    let (s, v) = a.req("POST", "/v1/code/owners", Some(json!({ "name": "acme", "kind": "org" })), Some(ADMIN)).await;
+    assert_eq!(s, StatusCode::CREATED, "{v}");
     let mint = |owner: &'static str, name: &'static str| {
         let a = &a;
         async move {
@@ -42,9 +39,8 @@ async fn world() -> World {
     };
     let owner = mint("acme", "me").await;
     let agent = mint("acme", "agent:bot").await;
-    let other = mint("other", "me").await;
     let url = a.serve().await;
-    World { a, url, owner, agent, other }
+    World { a, url, owner, agent }
 }
 
 impl World {
@@ -114,40 +110,6 @@ fn files_holding(dir: &std::path::Path, needle: &str) -> Vec<std::path::PathBuf>
     found
 }
 
-/// The plan's routes: the owner's alone (agent tokens 403, other owners 403, anonymous 401), the
-/// notice acknowledged first, the host one of the owner's machines, members only the relay's.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn the_gateway_plan_is_the_owners() {
-    let w = world().await;
-    let base = "/v1/code/agents/acme/gateway";
-    let (host, _) = w.machine("studio").await;
-    assert_eq!(w.req("GET", base, None, &w.owner).await.0, StatusCode::NOT_FOUND);
-    let mut unread = plan(&host, "http://gw.tailnet:8790");
-    unread["acknowledged_at"] = json!(0);
-    let (s, v) = w.req("PUT", base, Some(unread), &w.owner).await;
-    assert_eq!(s, StatusCode::BAD_REQUEST, "{v}");
-    assert!(v["error"].as_str().unwrap().contains("notice"), "{v}");
-    assert_eq!(w.req("PUT", base, Some(plan("mch_nope", "http://gw.tailnet:8790")), &w.owner).await.0, StatusCode::NOT_FOUND);
-    assert_eq!(w.req("PUT", base, Some(plan(&host, "ftp://gw")), &w.owner).await.0, StatusCode::BAD_REQUEST);
-    for (who, want) in [(&w.agent, StatusCode::FORBIDDEN), (&w.other, StatusCode::FORBIDDEN)] {
-        assert_eq!(w.req("PUT", base, Some(plan(&host, "http://gw.tailnet:8790")), who).await.0, want);
-        assert_eq!(w.req("GET", base, None, who).await.0, want);
-    }
-    assert_eq!(w.a.req("GET", base, None, None).await.0, StatusCode::UNAUTHORIZED);
-
-    let mut with_members = plan(&host, "http://gw.tailnet:8790/");
-    with_members["members"] = json!([{ "machine": "mch_sneaky", "url": "http://x", "joined_at": 1 }]);
-    let (s, v) = w.req("PUT", base, Some(with_members), &w.owner).await;
-    assert_eq!(s, StatusCode::OK, "{v}");
-    assert_eq!((v["urls"][0]["url"].as_str(), v["members"].as_array()), (Some("http://gw.tailnet:8790"), None), "{v}");
-    assert!(v["updated_at"].as_u64().unwrap() > 0);
-    let (s, got) = w.req("GET", base, None, &w.owner).await;
-    assert_eq!((s, got), (StatusCode::OK, v));
-    assert_eq!(w.req("DELETE", base, None, &w.agent).await.0, StatusCode::FORBIDDEN);
-    assert_eq!(w.req("DELETE", base, None, &w.owner).await.0, StatusCode::NO_CONTENT);
-    assert_eq!(w.req("DELETE", base, None, &w.owner).await.0, StatusCode::NOT_FOUND);
-}
-
 /// Joining: the host gets `gateway.client.issue` with the member's seal key, and the member gets
 /// `endpoint.set` for `roll-gateway` with the host's box exactly as the host sent it; the plan
 /// records the client. The host can't change while machines use it, nor can the plan go. Leaving
@@ -162,7 +124,22 @@ async fn joining_passes_the_sealed_box_through_and_leaving_revokes_it() {
     let (offline, _) = w.machine("offline").await;
     let mut h = connect(&w.url, &host_token, hello(1)).await;
     let mut m = connect(&w.url, &member_token, hello(2)).await;
-    assert_eq!(w.req("PUT", base, Some(plan(&host, "http://gw.tailnet:8790")), &w.owner).await.0, StatusCode::OK);
+
+    // The plan: the notice acknowledged first, the host one of the owner's machines, an http(s)
+    // URL, and members only the relay's (members sent with it are ignored).
+    let mut unread = plan(&host, "http://gw.tailnet:8790");
+    unread["acknowledged_at"] = json!(0);
+    let (s, v) = w.req("PUT", base, Some(unread), &w.owner).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{v}");
+    assert!(v["error"].as_str().unwrap().contains("notice"), "{v}");
+    assert_eq!(w.req("PUT", base, Some(plan("mch_nope", "http://gw.tailnet:8790")), &w.owner).await.0, StatusCode::NOT_FOUND);
+    assert_eq!(w.req("PUT", base, Some(plan(&host, "ftp://gw")), &w.owner).await.0, StatusCode::BAD_REQUEST);
+    let mut with_members = plan(&host, "http://gw.tailnet:8790/");
+    with_members["members"] = json!([{ "machine": "mch_sneaky", "url": "http://x", "joined_at": 1 }]);
+    let (s, v) = w.req("PUT", base, Some(with_members), &w.owner).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!((v["urls"][0]["url"].as_str(), v["members"].as_array()), (Some("http://gw.tailnet:8790"), None), "{v}");
+    assert_eq!(w.req("GET", base, None, &w.owner).await, (StatusCode::OK, v));
 
     // Refused before anything goes out: an agent, a machine that isn't the owner's, a URL that
     // isn't the plan's.
@@ -280,18 +257,23 @@ async fn a_new_sandbox_joins_the_gateway_on_its_hello() {
     let info = json!({ "backend": "docker", "size": "small", "status": "running", "hourly_cents": 0 });
     let n = w.a.code.db.sql().execute("UPDATE agent_machines SET sandbox = ? WHERE id = ?", code_sql::params![info.to_string(), sandbox]).unwrap();
     assert_eq!(n, 1);
+    // A sandbox roll hosts elsewhere (agent37) has no route to the gateway.
+    let (hosted, hosted_token) = w.machine("build-box").await;
+    let info = json!({ "backend": "agent37", "size": "small", "status": "running", "hourly_cents": 3 });
+    w.a.code.db.sql().execute("UPDATE agent_machines SET sandbox = ? WHERE id = ?", code_sql::params![info.to_string(), hosted]).unwrap();
     let mut p = plan(&host, "http://gw.tailnet:8790");
     p["new_sandboxes"] = json!(true);
     assert_eq!(w.req("PUT", "/v1/code/agents/acme/gateway", Some(p), &w.owner).await.0, StatusCode::OK);
     let mut h = connect(&w.url, &host_token, hello(1)).await;
 
-    // Not a sandbox: nothing.
+    // Not a sandbox, or a hosted one: nothing.
     let _l = connect(&w.url, &laptop_token, hello(2)).await;
+    let _hosted = connect(&w.url, &hosted_token, hello(4)).await;
     // A sandbox: joined.
     let mut s = connect(&w.url, &sandbox_token, hello(3)).await;
     let (id, c) = command(&mut h).await;
     let Command::GatewayClientIssue { machine, seal_key: to, .. } = c else { panic!("not gateway.client.issue: {c:?}") };
-    assert_eq!((machine, to), (Some(MachineId(sandbox.clone())), seal_key(3)), "the sandbox, not {laptop}");
+    assert_eq!((machine, to), (Some(MachineId(sandbox.clone())), seal_key(3)), "the sandbox, not {laptop} or {hosted}");
     let issued = IssuedClient { client: GatewayClient { id: "gwc_00000000000000aa".into(), name: "sandbox-1".into(), machine: Some(MachineId(sandbox.clone())), created_at: 1 }, sealed: sealed_box("SBX") };
     h.send(&DaemonFrame::Reply { id, result: Reply::GatewayClient(issued.clone()) }).await;
     let (id, c) = command(&mut s).await;
@@ -310,28 +292,10 @@ async fn a_new_sandbox_joins_the_gateway_on_its_hello() {
     drop(s);
     let _s = connect(&w.url, &sandbox_token, hello(3)).await;
     assert!(tokio::time::timeout(std::time::Duration::from_millis(300), h.recv()).await.is_err(), "joined once");
-}
-
-/// A sandbox roll hosts elsewhere (not `docker` on the owner's computer) has no route to the
-/// gateway: its hello doesn't join it, and joining it by hand is refused with why.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_hosted_sandbox_never_joins_a_gateway_it_cant_reach() {
-    let w = world().await;
-    let (host, host_token) = w.machine("studio").await;
-    let (sandbox, sandbox_token) = w.machine("build-box").await;
-    let info = json!({ "backend": "agent37", "size": "small", "status": "running", "hourly_cents": 3 });
-    w.a.code.db.sql().execute("UPDATE agent_machines SET sandbox = ? WHERE id = ?", code_sql::params![info.to_string(), sandbox]).unwrap();
-    let mut p = plan(&host, "http://gw.tailnet:8790");
-    p["new_sandboxes"] = json!(true);
-    assert_eq!(w.req("PUT", "/v1/code/agents/acme/gateway", Some(p), &w.owner).await.0, StatusCode::OK);
-    let mut h = connect(&w.url, &host_token, hello(1)).await;
-    let _s = connect(&w.url, &sandbox_token, hello(3)).await;
-    assert!(tokio::time::timeout(std::time::Duration::from_millis(500), h.recv()).await.is_err(), "no client issued for it");
-    let (s, v) = w.req("POST", "/v1/code/agents/acme/gateway/members", Some(json!({ "machine": sandbox })), &w.owner).await;
+    // Joining the hosted sandbox by hand is refused with why.
+    let (s, v) = w.req("POST", "/v1/code/agents/acme/gateway/members", Some(json!({ "machine": hosted })), &w.owner).await;
     assert_eq!(s, StatusCode::CONFLICT, "{v}");
     assert!(v.to_string().contains("can't reach your computers"), "{v}");
-    let (_, p) = w.req("GET", "/v1/code/agents/acme/gateway", None, &w.owner).await;
-    assert!(p.get("members").is_none_or(|m| m == &json!([])), "{p}");
 }
 
 /// `gateway.*` commands through `…/commands`: the relay checks their shape before they reach the

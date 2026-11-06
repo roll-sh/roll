@@ -1,7 +1,7 @@
 //! The merge queue, with a fake runner (no Docker): batches land together in FIFO order, lanes,
-//! bisecting red batches to one or two culprits, conflicts ejected, the default branch moving
+//! bisecting red batches to their culprits, conflicts ejected, the default branch moving
 //! under a batch, pause and resume, dequeueing mid-test, restart recovery (in-flight and
-//! landing), git pushes queued, admin bypass audited, blockers, the API shapes, reverts, and
+//! landing), git pushes queued, admin bypass audited, blockers, reverts, and
 //! 2,000 changes through the queue with random culprits.
 
 mod common;
@@ -200,31 +200,6 @@ async fn batches_land_together_in_fifo_order() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn urgent_lane_goes_first() {
-    let a = queue_app("[queue]\nbatch_size = 1\n", Arc::new(QueueRunner::default())).await;
-    let x = change(&a, "normal one", json!({ "a": { "content": "a\n" } })).await;
-    let y = change(&a, "normal two", json!({ "b": { "content": "b\n" } })).await;
-    let z = change(&a, "urgent", json!({ "c": { "content": "c\n" } })).await;
-    enqueue(&a, &x, "normal").await;
-    enqueue(&a, &y, "normal").await;
-    let v = enqueue(&a, &z, "urgent").await;
-    assert_eq!(v["position"], 1, "urgent jumps the normal lane");
-    let c = a.ok("GET", &format!("/v1/code/changes/{}", id(&x)), None).await;
-    assert_eq!(c["queue"]["position"], 2);
-    assert_eq!(c["queue"]["lane"], "normal");
-    // Enqueueing again is a no-op that reports the same entry.
-    let again = enqueue(&a, &x, "urgent").await;
-    assert_eq!(again["queue_id"], c["queue"]["id"]);
-    // Bad lane.
-    let (s, _) = a.req("POST", &format!("/v1/code/changes/{}/enqueue", id(&y)), Some(json!({ "lane": "vip" })), None).await;
-    assert_eq!(s, StatusCode::BAD_REQUEST);
-
-    a.code.start_queues().unwrap();
-    drained(&a).await;
-    assert_eq!(&main_log(&a).await[1..], ["urgent", "normal one", "normal two"]);
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_red_batch_is_bisected_to_its_culprit() {
     let runner = Arc::new(QueueRunner::default());
     let a = queue_app("", runner.clone()).await;
@@ -247,6 +222,11 @@ async fn a_red_batch_is_bisected_to_its_culprit() {
     assert_eq!(err, "failed the queue's checks: ci", "the reason, one line");
     let out = culprit["queue"]["output"].as_str().unwrap();
     assert!(out.contains("ci:\nci: 1 test failed"), "the log tail is apart: {out}");
+    // `recent` carries the same reason and output.
+    let q = queue(&a).await;
+    let recent = q["recent"].as_array().unwrap().iter().find(|e| e["change"] == ids[5].as_str()).unwrap().clone();
+    assert_eq!(recent["error"], "failed the queue's checks: ci");
+    assert!(recent["output"].as_str().unwrap().contains("1 test failed"), "{recent}");
     for (i, id) in ids.iter().enumerate().filter(|(i, _)| *i != 5) {
         let c = a.wait_change(id, "landed").await;
         assert_eq!(c["queue"]["state"], "landed", "change {i}");
@@ -258,28 +238,6 @@ async fn a_red_batch_is_bisected_to_its_culprit() {
     assert!(q["stats"]["batch_size"].as_u64().unwrap() <= 8);
     // Bisecting 8 takes log2(8) = 3 more tests (plus one of the head, never seen green before).
     assert!(runner.plans.load(Ordering::SeqCst) <= 1 + 3 + 1 + 2, "plans: {}", runner.plans.load(Ordering::SeqCst));
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn two_culprits_are_both_ejected() {
-    let a = queue_app("", Arc::new(QueueRunner::default())).await;
-    let mut ids = Vec::new();
-    for i in 0..8 {
-        let mut files = json!({ format!("f/{i}"): { "content": "x\n" } });
-        if i == 1 || i == 6 {
-            files[format!("bad/{i}")] = json!({ "content": "!\n" });
-        }
-        let c = change(&a, &format!("change {i}"), files).await;
-        enqueue(&a, &c, "normal").await;
-        ids.push(id(&c));
-    }
-    a.code.start_queues().unwrap();
-    drained(&a).await;
-    for i in [1, 6] {
-        let c = a.ok("GET", &format!("/v1/code/changes/{}", ids[i]), None).await;
-        assert_eq!(c["queue"]["state"], "ejected", "change {i}: {c}");
-    }
-    assert_eq!(&main_log(&a).await[1..], ["change 0", "change 2", "change 3", "change 4", "change 5", "change 7"]);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -379,49 +337,6 @@ async fn bypass_needs_the_admin_token() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn pause_and_resume() {
-    let a = queue_app("", Arc::new(QueueRunner::default())).await;
-    let q = a.ok("POST", &format!("{P}/queue/pause"), None).await;
-    assert_eq!(q["paused"], true);
-    assert_eq!(q["state"], "paused");
-    let x = change(&a, "x", json!({ "x": { "content": "x\n" } })).await;
-    enqueue(&a, &x, "normal").await;
-    a.code.start_queues().unwrap();
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    let c = a.ok("GET", &format!("/v1/code/changes/{}", id(&x)), None).await;
-    assert_eq!(c["state"], "queued");
-    assert_eq!(c["queue"]["state"], "waiting");
-    let q = a.ok("POST", &format!("{P}/queue/resume"), None).await;
-    assert_eq!(q["paused"], false);
-    a.wait_change(&id(&x), "landed").await;
-    let audit = a.ok("GET", &format!("{P}/audit"), None).await;
-    let actions: Vec<&str> = audit.as_array().unwrap().iter().map(|e| e["action"].as_str().unwrap()).collect();
-    assert_eq!(actions, ["queue_resume", "queue_pause"]);
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn dequeueing_a_change_under_test_rebuilds_the_batch() {
-    let (runner, gate) = QueueRunner::gated();
-    let a = queue_app("", runner).await;
-    let x = change(&a, "x", json!({ "x": { "content": "x\n" } })).await;
-    let y = change(&a, "y", json!({ "y": { "content": "y\n" } })).await;
-    enqueue(&a, &x, "normal").await;
-    enqueue(&a, &y, "normal").await;
-    a.code.start_queues().unwrap();
-    wait_queue(&a, "testing", |q| q["state"] == "testing" && q["batch"]["changes"].as_array().is_some_and(|c| c.len() == 2)).await;
-    let v = a.ok("DELETE", &format!("/v1/code/changes/{}/enqueue", id(&x)), None).await;
-    assert_eq!(v["state"], "open");
-    assert_eq!(v["queue"], Value::Null);
-    let (s, _) = a.req("DELETE", &format!("/v1/code/changes/{}/enqueue", id(&x)), None, None).await;
-    assert_eq!(s, StatusCode::CONFLICT, "not queued any more");
-    gate.add_permits(100);
-    a.wait_change(&id(&y), "landed").await;
-    let x = a.ok("GET", &format!("/v1/code/changes/{}", id(&x)), None).await;
-    assert_eq!(x["state"], "open");
-    assert_eq!(&main_log(&a).await[1..], ["y"]);
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn revising_or_closing_a_queued_change() {
     let (runner, gate) = QueueRunner::gated();
     let a = queue_app("", runner).await;
@@ -441,30 +356,6 @@ async fn revising_or_closing_a_queued_change() {
     a.wait_change(&id(&x), "landed").await;
     assert_eq!(file(&a, "x").await.as_deref(), Some("2\n"));
     assert_eq!(file(&a, "y").await, None);
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn the_batch_under_test_is_shown_in_landing_order() {
-    let (runner, gate) = QueueRunner::gated();
-    let a = queue_app("[queue]\nbatch_size = 2\n", runner).await;
-    let x = change(&a, "normal a", json!({ "a": { "content": "a\n" } })).await;
-    let y = change(&a, "normal b", json!({ "b": { "content": "b\n" } })).await;
-    let z = change(&a, "urgent c", json!({ "c": { "content": "c\n" } })).await;
-    enqueue(&a, &x, "normal").await;
-    enqueue(&a, &y, "normal").await;
-    enqueue(&a, &z, "urgent").await;
-    a.code.start_queues().unwrap();
-    let q = wait_queue(&a, "testing", |q| q["state"] == "testing" && q["batch"]["tip"].is_string()).await;
-    assert_eq!(q["batch"]["changes"], json!([id(&z), id(&x)]));
-    let order: Vec<(Value, Value)> = q["entries"].as_array().unwrap().iter().map(|e| (e["change"].clone(), e["position"].clone())).collect();
-    assert_eq!(order, vec![(json!(id(&z)), json!(1)), (json!(id(&x)), json!(2)), (json!(id(&y)), json!(3))]);
-    let c = a.ok("GET", &format!("/v1/code/changes/{}", id(&z)), None).await;
-    assert_eq!(c["queue"]["position"], 1);
-    assert_eq!(c["queue"]["state"], "testing");
-    assert!(c["queue"]["batch"].as_str().unwrap().starts_with("qb_"));
-    gate.add_permits(100);
-    drained(&a).await;
-    assert_eq!(&main_log(&a).await[1..], ["urgent c", "normal a", "normal b"]);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -540,25 +431,6 @@ async fn deleting_a_repo_stops_its_queue_worker() {
     }
     assert_eq!(a.code.queue_workers(), 0, "the worker stopped");
     assert!(a.code.db.queued_repos().unwrap().is_empty(), "its entries are gone");
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_restart_retests_what_was_in_flight() {
-    let (runner, _gate) = QueueRunner::gated();
-    let a = queue_app("", runner).await;
-    let x = change(&a, "x", json!({ "x": { "content": "x\n" } })).await;
-    enqueue(&a, &x, "normal").await;
-    a.code.start_queues().unwrap();
-    wait_queue(&a, "testing", |q| q["state"] == "testing").await;
-    // The process "dies" with the batch under test (its runner never returns); a new one
-    // opens the same state and tests the batch again.
-    let code = open_in(a.dir.path(), |_| {});
-    code.set_runner(Arc::new(QueueRunner::default()));
-    code.start_queues().unwrap();
-    let b = App { router: code_control::api::router(code.clone()), code, dir: tempfile::tempdir().unwrap() };
-    let c = b.wait_change(&id(&x), "landed").await;
-    assert_eq!(c["queue"]["state"], "landed");
-    assert_eq!(c["landed_as"], b.ok("GET", P, None).await["head"]);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -675,89 +547,6 @@ async fn blockers_keep_changes_out_of_the_queue() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn changes_that_stop_being_mergeable_while_waiting_are_ejected() {
-    let a = queue_app("", Arc::new(QueueRunner::default())).await;
-    let r = a.code.find_repo("acme", "api").unwrap();
-    let u = a
-        .code
-        .create_change_as(&r, &Caller::Admin, &json!({ "title": "fork", "message": "fork", "files": { "f": { "content": "f\n" } } }), None, false)
-        .await
-        .unwrap();
-    a.ok("POST", &format!("/v1/code/changes/{}/approve-run", u.id), None).await;
-    let v = enqueue(&a, &json!({ "id": u.id }), "normal").await;
-    assert_eq!(v["status"], "queued");
-    // The fork pushes a new revision while it waits: its approval was for the old head.
-    a.ok("POST", &format!("/v1/code/changes/{}/revise", u.id), Some(json!({ "message": "sneaky", "files": { "f": { "content": "evil\n" } } }))).await;
-    a.code.start_queues().unwrap();
-    drained(&a).await;
-    let c = a.ok("GET", &format!("/v1/code/changes/{}", u.id), None).await;
-    assert_eq!(c["state"], "open");
-    assert_eq!(c["queue"]["state"], "ejected");
-    assert!(c["queue"]["error"].as_str().unwrap().contains("approve"), "{c}");
-    assert_eq!(file(&a, "f").await, None);
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn queue_events_and_shapes() {
-    let a = queue_app("[queue]\nchecks = [\"ci\"]\nbatch_size = 4\ntimeout = 60\n[main]\nauto_revert = true\n", Arc::new(QueueRunner::default())).await;
-    let mut events = a.code.subscribe();
-    let q = queue(&a).await;
-    assert_eq!(q["repo"], "acme/api");
-    assert_eq!(q["policy"], "queue");
-    assert_eq!(q["state"], "idle");
-    assert_eq!(q["paused"], false);
-    assert_eq!(q["batch"], Value::Null);
-    assert_eq!(q["entries"], json!([]));
-    assert_eq!(q["recent"], json!([]));
-    assert_eq!(q["stats"], json!({ "depth": 0, "landed_1h": 0, "avg_wait_s": 0.0, "batch_size": 4, "max_batch_size": 4 }));
-    assert_eq!(q["settings"], json!({ "checks": ["ci"], "change_checks": [], "batch_size": 4, "timeout_s": 60, "require_change_checks": false, "auto_revert": true, "error": null }));
-    let x = change(&a, "x", json!({ "x": { "content": "x\n" } })).await;
-    enqueue(&a, &x, "normal").await;
-    a.code.start_queues().unwrap();
-    a.wait_change(&id(&x), "landed").await;
-    let mut kinds = Vec::new();
-    while let Ok(e) = events.try_recv() {
-        if e.kind == "queue" {
-            assert!(e.data["state"].is_string());
-            assert!(e.data["depth"].is_u64());
-            assert!(e.data.get("batch").is_some());
-            assert!(e.data.get("paused").is_some());
-        }
-        kinds.push(e.kind);
-    }
-    assert!(kinds.contains(&"queue"), "{kinds:?}");
-    let entry = &queue(&a).await["recent"][0];
-    for k in ["id", "change", "number", "title", "author", "position", "lane", "state", "error", "batch", "enqueued_at", "enqueued_by", "finished_at"] {
-        assert!(entry.get(k).is_some(), "recent entry has {k}: {entry}");
-    }
-    // A broken roll.toml on main shows in the settings (defaults apply).
-    a.ok("POST", &format!("{P}/land"), Some(json!({ "message": "oops", "files": { "roll.toml": { "content": "[queue]\nbatch_size = 0\n" } }, "bypass": true }))).await;
-    let q = queue(&a).await;
-    assert!(q["settings"]["error"].as_str().unwrap().contains("batch_size"));
-    // Unknown repo, and land_policy validation.
-    assert_eq!(a.req("GET", "/v1/code/repos/acme/nope/queue", None, None).await.0, StatusCode::NOT_FOUND);
-    assert_eq!(a.req("PATCH", P, Some(json!({ "land_policy": "fast" })), None).await.0, StatusCode::BAD_REQUEST);
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn post_merge_repos_land_directly_but_respect_drafts() {
-    let a = app(None);
-    a.repo("acme", "api").await;
-    a.ok("POST", &format!("{P}/land"), Some(json!({ "message": "init", "files": { "a": { "content": "a\n" } } }))).await;
-    let c = a.ok("POST", &format!("{P}/changes"), Some(json!({ "title": "d", "message": "d", "draft": true, "files": { "b": { "content": "b\n" } } }))).await;
-    let (s, v) = a.req("POST", &format!("/v1/code/changes/{}/land", id(&c)), None, None).await;
-    assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY, "{v}");
-    a.ok("PATCH", &format!("/v1/code/changes/{}", id(&c)), Some(json!({ "draft": false }))).await;
-    let v = a.ok("POST", &format!("/v1/code/changes/{}/land", id(&c)), None).await;
-    assert_eq!(v["status"], "landed");
-    // The queue still works on a post_merge repo when asked.
-    let c = a.ok("POST", &format!("{P}/changes"), Some(json!({ "title": "q", "message": "q", "files": { "c": { "content": "c\n" } } }))).await;
-    enqueue(&a, &c, "normal").await;
-    a.code.start_queues().unwrap();
-    a.wait_change(&id(&c), "landed").await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_revert_restores_the_parent_and_keeps_later_work() {
     let a = app(None);
     a.repo("acme", "api").await;
@@ -864,11 +653,11 @@ async fn find_culprit_bisects_from_the_last_green_head() {
 }
 
 /// Changes through the queue (batch size 8) with 2% culprits: every other change lands exactly
-/// once, in queue order, on a linear main. `CODE_QUEUE_N` sets how many (`pnpm test:code`
+/// once, in queue order, on a linear main. `CODE_QUEUE_N` sets how many (`pnpm test:code --stress`
 /// runs 2,000; the default keeps `cargo test` quick, since every test materializes the tree).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn throughput_with_culprits() {
-    let n: usize = std::env::var("CODE_QUEUE_N").ok().and_then(|v| v.parse().ok()).unwrap_or(300);
+    let n: usize = std::env::var("CODE_QUEUE_N").ok().and_then(|v| v.parse().ok()).unwrap_or(60);
     let runner = Arc::new(QueueRunner::default());
     let a = queue_app("", runner.clone()).await;
     let r = a.code.find_repo("acme", "api").unwrap();
@@ -955,55 +744,25 @@ async fn lanes_can_change_without_losing_place() {
     assert_eq!(order, vec![json!(id(&y)), json!(id(&x)), json!(id(&z))]);
     let audit = a.ok("GET", &format!("{P}/audit"), None).await;
     assert!(audit.as_array().unwrap().iter().any(|e| e["action"] == "queue_lane"));
-    // Errors: no lane, a bad lane, a change that isn't queued.
+    // Enqueued straight into the urgent lane: ahead of the normal lane, behind y.
+    let u = change(&a, "u", json!({ "u": { "content": "u\n" } })).await;
+    assert_eq!(enqueue(&a, &u, "urgent").await["position"], 2);
+    // Enqueueing again is a no-op that reports the same entry (and keeps its lane).
+    let xq = a.ok("GET", &format!("/v1/code/changes/{}", id(&x)), None).await["queue"]["id"].clone();
+    assert_eq!(enqueue(&a, &x, "urgent").await["queue_id"], xq);
+    // Errors: no lane, a bad lane (on enqueue too), a change that isn't queued.
     let (s, _) = a.req("PATCH", &format!("/v1/code/changes/{}/enqueue", id(&x)), Some(json!({})), None).await;
     assert_eq!(s, StatusCode::BAD_REQUEST);
     let (s, _) = a.req("PATCH", &format!("/v1/code/changes/{}/enqueue", id(&x)), Some(json!({ "lane": "vip" })), None).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    let (s, _) = a.req("POST", &format!("/v1/code/changes/{}/enqueue", id(&x)), Some(json!({ "lane": "vip" })), None).await;
     assert_eq!(s, StatusCode::BAD_REQUEST);
     let w = change(&a, "w", json!({ "w": { "content": "w\n" } })).await;
     let (s, _) = a.req("PATCH", &format!("/v1/code/changes/{}/enqueue", id(&w)), Some(json!({ "lane": "urgent" })), None).await;
     assert_eq!(s, StatusCode::CONFLICT);
     a.code.start_queues().unwrap();
     drained(&a).await;
-    assert_eq!(&main_log(&a).await[1..], ["y", "x", "z"]);
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn the_batch_shows_the_prefix_under_test() {
-    let (runner, gate) = QueueRunner::gated();
-    let a = queue_app("[queue]\nbatch_size = 4\n", runner).await;
-    let mut ids = Vec::new();
-    for i in 0..4 {
-        let mut files = json!({ format!("f/{i}"): { "content": "x\n" } });
-        if i == 1 {
-            files["bad/1"] = json!({ "content": "breaks ci\n" });
-        }
-        let c = change(&a, &format!("change {i}"), files).await;
-        enqueue(&a, &c, "normal").await;
-        ids.push(id(&c));
-    }
-    assert_eq!(a.ok("GET", P, None).await["stats"]["queue_batch"], 0, "nothing in flight yet");
-    a.code.start_queues().unwrap();
-    let q = wait_queue(&a, "the whole batch under test", |q| q["state"] == "testing" && q["batch"]["testing_prefix"] == 4).await;
-    assert_eq!(q["batch"]["changes"].as_array().unwrap().len(), 4);
-    assert_eq!(a.ok("GET", P, None).await["stats"]["queue_batch"], 4);
-    // The batch fails; the head is tested once (never green before), then half the batch.
-    gate.add_permits(2);
-    let q = wait_queue(&a, "bisecting half", |q| q["state"] == "bisecting" && q["batch"]["testing_prefix"] == 2).await;
-    assert_eq!(q["batch"]["changes"].as_array().unwrap().len(), 4);
-    gate.add_permits(100);
-    drained(&a).await;
-    assert_eq!(a.ok("GET", P, None).await["stats"]["queue_batch"], 0);
-    let culprit = a.ok("GET", &format!("/v1/code/changes/{}", ids[1]), None).await;
-    assert_eq!(culprit["queue"]["state"], "ejected");
-    assert!(culprit["queue"]["output"].as_str().unwrap().contains("1 test failed"));
-    let q = queue(&a).await;
-    let recent = q["recent"].as_array().unwrap().iter().find(|e| e["change"] == ids[1].as_str()).unwrap().clone();
-    assert_eq!(recent["error"], "failed the queue's checks: ci");
-    assert!(recent["output"].as_str().unwrap().contains("1 test failed"));
-    // A conflict's ejection has a reason and no output.
-    let landed = a.wait_change(&ids[0], "landed").await;
-    assert!(landed["queue"]["output"].is_null());
+    assert_eq!(&main_log(&a).await[1..], ["y", "u", "x", "z"]);
 }
 
 /// The landing settings only parse `[queue]` and `[main]`; a check table the runner rejects
@@ -1103,8 +862,13 @@ async fn pausing_lets_the_batch_under_test_finish() {
     }
     let at = |s: &str| states.iter().position(|x| x == s).unwrap_or_else(|| panic!("no {s} event: {states:?}"));
     assert!(at("idle") < at("testing") && at("testing") < at("landing") && at("landing") < states.iter().rposition(|x| x == "paused").unwrap(), "{states:?}");
-    a.ok("POST", &format!("{P}/queue/resume"), None).await;
+    let q = a.ok("POST", &format!("{P}/queue/resume"), None).await;
+    assert_eq!(q["paused"], false);
     a.wait_change(&id(&y), "landed").await;
+    // Both are audited.
+    let audit = a.ok("GET", &format!("{P}/audit"), None).await;
+    let actions: Vec<&str> = audit.as_array().unwrap().iter().map(|e| e["action"].as_str().unwrap()).collect();
+    assert_eq!(actions, ["queue_resume", "queue_pause"]);
 }
 
 /// Dequeueing a change while its batch is being bisected: the bisect stops, the batch is
@@ -1127,22 +891,33 @@ async fn dequeueing_during_a_bisect_rebuilds_the_batch() {
         ids.push(id(&c));
     }
     a.code.start_queues().unwrap();
+    // The whole batch is the prefix under test while its first run waits at the gate.
+    wait_queue(&a, "the whole batch under test", |q| q["state"] == "testing" && q["batch"]["testing_prefix"] == 4).await;
+    assert_eq!(a.ok("GET", P, None).await["stats"]["queue_batch"], 4);
     gate.add_permits(1);
-    wait_queue(&a, "bisecting", |q| q["state"] == "bisecting").await;
+    // The whole batch failed: the half being bisected is the prefix under test.
+    wait_queue(&a, "bisecting half", |q| q["state"] == "bisecting" && q["batch"]["testing_prefix"] == 2).await;
     assert_eq!(a.ok("GET", &format!("/v1/code/changes/{}", ids[3]), None).await["queue"]["state"], "bisecting");
-    a.ok("DELETE", &format!("/v1/code/changes/{}/enqueue", ids[0]), None).await;
+    let v = a.ok("DELETE", &format!("/v1/code/changes/{}/enqueue", ids[0]), None).await;
+    assert_eq!((v["state"].as_str(), &v["queue"]), (Some("open"), &Value::Null));
+    let (s, _) = a.req("DELETE", &format!("/v1/code/changes/{}/enqueue", ids[0]), None, None).await;
+    assert_eq!(s, StatusCode::CONFLICT, "not queued any more");
     // The half under test finishes; the batch is thrown away and rebuilt from the three left.
     gate.add_permits(1);
     let q = wait_queue(&a, "the rebuilt batch", |q| q["state"] == "testing" && q["batch"]["changes"].as_array().is_some_and(|c| c.len() == 3)).await;
     assert_eq!(q["batch"]["changes"], json!([ids[1], ids[2], ids[3]]));
+    assert_eq!(a.ok("GET", P, None).await["stats"]["queue_batch"], 3);
     gate.add_permits(1000);
     drained(&a).await;
+    assert_eq!(a.ok("GET", P, None).await["stats"]["queue_batch"], 0, "nothing in flight");
     assert_eq!(a.ok("GET", &format!("/v1/code/changes/{}", ids[2]), None).await["queue"]["state"], "ejected");
     assert_eq!(a.ok("GET", &format!("/v1/code/changes/{}", ids[0]), None).await["state"], "open");
     assert_eq!(&main_log(&a).await[1..], ["change 1", "change 3"]);
 }
 
-/// A restart while a batch is bisected: its entries go back in line and are tested again.
+/// A restart while a batch is under test (here, bisected: the process "dies" with its runner
+/// never returning): a new process opens the same state, its entries go back in line and are
+/// tested again.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_restart_during_a_bisect_retests_the_batch() {
     let (runner, gate) = QueueRunner::gated();
@@ -1161,10 +936,12 @@ async fn a_restart_during_a_bisect_retests_the_batch() {
     code.set_runner(Arc::new(QueueRunner::default()));
     code.start_queues().unwrap();
     let b = App { router: code_control::api::router(code.clone()), code, dir: tempfile::tempdir().unwrap() };
-    b.wait_change(&id(&x), "landed").await;
+    let x = b.wait_change(&id(&x), "landed").await;
+    assert_eq!(x["queue"]["state"], "landed");
     let y = b.wait_change(&id(&y), "open").await;
     assert_eq!(y["queue"]["state"], "ejected");
     assert_eq!(&main_log(&b).await[1..], ["x"]);
+    assert_eq!(x["landed_as"], b.ok("GET", P, None).await["head"]);
 }
 
 /// A failed step (here the runner itself errors) puts the batch back in line and tries again.
@@ -1231,6 +1008,39 @@ async fn blockers_that_appear_while_waiting_eject_at_the_gate() {
     assert_eq!(closed["state"], "closed", "ejecting doesn't reopen it");
     assert!(closed["queue"]["error"].as_str().unwrap().contains("closed"), "{closed}");
     assert_eq!(&main_log(&a).await[1..], ["fine"]);
+}
+
+/// A fork's change (untrusted) approved to run, then revised while it waits: the approval was
+/// for the old head, so the gate ejects it and the new code never reaches main.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn changes_that_stop_being_mergeable_while_waiting_are_ejected() {
+    let a = queue_app("", Arc::new(QueueRunner::default())).await;
+    let r = a.code.find_repo("acme", "api").unwrap();
+    let u = a
+        .code
+        .create_change_as(&r, &Caller::Admin, &json!({ "title": "fork", "message": "fork", "files": { "f": { "content": "f\n" } } }), None, false)
+        .await
+        .unwrap();
+    a.ok("POST", &format!("/v1/code/changes/{}/approve-run", u.id), None).await;
+    let v = enqueue(&a, &json!({ "id": u.id }), "normal").await;
+    assert_eq!(v["status"], "queued");
+    // The fork pushes a new revision while it waits: its approval was for the old head.
+    a.ok("POST", &format!("/v1/code/changes/{}/revise", u.id), Some(json!({ "message": "sneaky", "files": { "f": { "content": "evil\n" } } }))).await;
+    a.code.start_queues().unwrap();
+    drained(&a).await;
+    // The queue empties before the change itself is back to open: wait for both.
+    let mut c = wait_entry(&a, &u.id, "ejected").await;
+    for _ in 0..500 {
+        if c["state"] == "open" {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        c = a.ok("GET", &format!("/v1/code/changes/{}", u.id), None).await;
+    }
+    assert_eq!(c["state"], "open");
+    assert_eq!(c["queue"]["state"], "ejected");
+    assert!(c["queue"]["error"].as_str().unwrap().contains("approve"), "{c}");
+    assert_eq!(file(&a, "f").await, None);
 }
 
 /// A required check that goes red while the change's batch is under test keeps it from

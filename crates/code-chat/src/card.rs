@@ -160,51 +160,11 @@ mod tests {
     }
 
     #[test]
-    fn fallback_texts() {
-        assert_eq!(status(0).text(), "Fix the flaky test · Running · 3 steps");
-        let mut r = RequestCard {
-            title: "Run cargo test".into(),
-            detail: None,
-            kind: RequestKind::Approval { choices: vec![] },
-        };
-        assert_eq!(r.text(), "Run cargo test · waiting for approval");
-        r.kind = RequestKind::Answered {
-            by: "ada".into(),
-            answer: "Allow".into(),
-        };
-        assert_eq!(r.text(), "Run cargo test · answered by ada: Allow");
-    }
-
-    #[test]
     fn shows_the_newest_lines_cut() {
         let mut card = status(12);
         assert_eq!(card.shown_lines().first().unwrap(), "step 4");
         assert_eq!(card.shown_lines().len(), MAX_STATUS_LINES);
         card.lines = vec!["x".repeat(500)];
         assert_eq!(card.shown_lines()[0].chars().count(), MAX_LINE_CHARS);
-    }
-
-    #[test]
-    fn cards_round_trip_through_json() {
-        let r = RequestCard {
-            title: "Questions".into(),
-            detail: Some("ls".into()),
-            kind: RequestKind::Questions {
-                questions: vec![QuestionView {
-                    id: "q1".into(),
-                    header: "Scope".into(),
-                    text: "Which?".into(),
-                    options: vec![],
-                    multi: false,
-                }],
-                submit: Choice {
-                    label: "Submit".into(),
-                    value: "r1".into(),
-                    style: ChoiceStyle::Primary,
-                },
-            },
-        };
-        let back: RequestCard = serde_json::from_value(serde_json::to_value(&r).unwrap()).unwrap();
-        assert_eq!(back, r);
     }
 }

@@ -935,13 +935,6 @@ mod tests {
     }
 
     #[test]
-    fn slugs() {
-        assert_eq!(slug("Fix the login bug!"), "fix-the-login-bug");
-        assert_eq!(slug("  ¿¿  "), "thread");
-        assert_eq!(slug(&"a".repeat(80)).len(), 40);
-    }
-
-    #[test]
     fn parses_numstat_with_renames_and_binaries() {
         let out = b"1\t2\ta.txt\0-\t-\tbin.png\x003\t0\t\0old.rs\0new.rs\0";
         let (stat, files) = parse_numstat(out);

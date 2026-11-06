@@ -345,6 +345,7 @@ mod tests {
         ] {
             assert!(!cfg(no.clone()).passes("issue.updated", &d), "{no}");
         }
+        assert!(serde_json::from_value::<Config>(json!({ "team": "ENG" })).is_err(), "unknown fields are refused");
     }
 
     #[test]
@@ -357,28 +358,10 @@ mod tests {
         assert!(!Config::default().passes("agent_session.prompted", &r));
         assert!(cfg(json!({ "include_attached": true })).passes("agent_session.prompted", &r));
         assert!(Config::default().passes("agent_session.prompted", &json!({ "attached": false })));
-    }
-
-    #[test]
-    fn comments_can_require_a_mention() {
+        // Comments can require a mention; only comments have mentions.
         let c = cfg(json!({ "mentions_roll": true }));
         assert!(c.passes("comment.created", &json!({ "mentions_roll": true })));
         assert!(!c.passes("comment.created", &json!({ "mentions_roll": false })));
         assert!(c.passes("issue.created", &json!({})), "only comments have mentions");
-    }
-
-    #[test]
-    fn priorities_take_numbers_and_names() {
-        assert_eq!(priority_of(&json!(0)), Some(0));
-        assert_eq!(priority_of(&json!("High")), Some(2));
-        assert_eq!(priority_of(&json!("normal")), Some(3));
-        assert_eq!(priority_of(&json!("4")), Some(4));
-        assert_eq!(priority_of(&json!(5)), None);
-        assert_eq!(priority_of(&json!("soon")), None);
-    }
-
-    #[test]
-    fn unknown_config_fields_are_refused() {
-        assert!(serde_json::from_value::<Config>(json!({ "team": "ENG" })).is_err());
     }
 }

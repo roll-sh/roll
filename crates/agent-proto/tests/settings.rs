@@ -114,14 +114,6 @@ fn custom_model_options_are_checked_like_t3s_editor() {
 }
 
 #[test]
-fn env_names_must_be_names() {
-    for bad in ["", "1X", "A-B", "A B", "Ä"] {
-        assert!(with_env(bad, "x").check().is_err(), "{bad:?}");
-    }
-    assert!(with_env("CODEX_HOME", &"x".repeat(settings_limits::ENV_VALUE + 1)).check().is_err());
-}
-
-#[test]
 fn trims_unsets_empties_and_drops_default_providers() {
     let mut s = MachineSettings {
         worktree_dir: Some("  ".into()),
@@ -145,6 +137,10 @@ fn trims_unsets_empties_and_drops_default_providers() {
     assert_eq!(claude.binary, None);
     assert_eq!(claude.models, vec![CustomModel { id: "big".into(), name: None, options: None }]);
     assert!(s.provider(&ProviderId::codex()).enabled, "unset is on");
+    // Turned off, it's kept and written as just that.
+    let mut off = MachineSettings::default();
+    off.providers.insert(ProviderId::codex(), ProviderSettings { enabled: false, ..ProviderSettings::default() });
+    assert_eq!(serde_json::to_value(&off).unwrap(), serde_json::json!({ "providers": { "codex": { "enabled": false } } }));
 }
 
 #[test]
@@ -171,14 +167,8 @@ fn refuses_what_it_cant_keep() {
     assert!(MachineSettings { max_children: Some(0), ..MachineSettings::default() }.check().is_err());
     assert!(MachineSettings { git_email: Some("ada".into()), ..MachineSettings::default() }.check().is_err());
     assert!(MachineSettings { git_name: Some("Ada <x>".into()), ..MachineSettings::default() }.check().is_err());
-}
-
-#[test]
-fn a_provider_turned_off_serializes_and_on_is_the_default() {
-    let mut s = MachineSettings::default();
-    s.providers.insert(ProviderId::codex(), ProviderSettings { enabled: false, ..ProviderSettings::default() });
-    let json = serde_json::to_value(&s).unwrap();
-    assert_eq!(json, serde_json::json!({ "providers": { "codex": { "enabled": false } } }));
-    let back: MachineSettings = serde_json::from_value(serde_json::json!({ "providers": { "codex": {} } })).unwrap();
-    assert!(back.provider(&ProviderId::codex()).enabled);
+    for bad in ["", "1X", "A-B", "A B", "Ä"] {
+        assert!(with_env(bad, "x").check().is_err(), "env name {bad:?}");
+    }
+    assert!(with_env("CODEX_HOME", &"x".repeat(settings_limits::ENV_VALUE + 1)).check().is_err());
 }

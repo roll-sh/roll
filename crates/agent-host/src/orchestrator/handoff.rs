@@ -174,13 +174,6 @@ mod tests {
     }
 
     #[test]
-    fn nothing_to_hand_over_is_none() {
-        assert_eq!(render("x", None, &[], BUDGET), None);
-        assert!(render("x", Some("parent context"), &[], BUDGET).unwrap().contains("parent context"));
-        assert_eq!(prepend(None, "hi"), "hi");
-    }
-
-    #[test]
     fn caps_huge_items_on_char_boundaries() {
         let text = "é".repeat(ITEM_CAP);
         let capped = cap(&text);

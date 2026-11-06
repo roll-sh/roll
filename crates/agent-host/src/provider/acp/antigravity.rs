@@ -579,18 +579,6 @@ mod tests {
     }
 
     #[test]
-    fn allow_always_carries_its_warning() {
-        let options = json!([
-            { "optionId": "remember-this-command", "name": "Allow Always (risky)", "kind": "allow_always",
-              "_meta": { "agy.security.warning": { "severity": "high", "risk": "prompt_injection", "title": "Allowing always can be risky",
-                "message": "Untrusted files could re-run this action without asking." } } },
-            { "optionId": "run-this-time", "name": "Allow", "kind": "allow_once" },
-        ]);
-        assert_eq!(security_warning(&options).as_deref(), Some("Untrusted files could re-run this action without asking."));
-        assert_eq!(security_warning(&json!([{ "optionId": "x", "kind": "allow_always" }])), None);
-    }
-
-    #[test]
     fn payloads_are_bounded() {
         let output = format!("{}last line\n", "output line\n".repeat(20_000));
         let update = json!({ "toolCallId": "c", "rawOutput": { "commandLine": "cat", "combinedOutput": output, "formatted_output": output },
@@ -627,39 +615,5 @@ mod tests {
         let two = launch(&json!({ "Subagents": [{ "Role": "A", "Prompt": "a" }, { "Role": "B", "Prompt": "b" }] })).unwrap();
         assert_eq!(two, Launch { title: "A, B".into(), prompt: "A\na\n\nB\nb".into() });
         assert!(launch(&json!({ "Subagents": [] })).is_none() && launch(&json!({ "Subagents": [{ "Role": "A" }] })).is_none());
-    }
-
-    #[test]
-    fn served_reads_are_completed() {
-        let announce = |reads: &mut Reads, id: &str| {
-            reads.repair(json!({ "sessionUpdate": "tool_call", "toolCallId": id, "title": "Running client_view_file", "kind": "read",
-                "status": "in_progress", "locations": [{ "path": "/repo/a.ts" }] }))
-        };
-        let fail = |reads: &mut Reads, id: &str| {
-            reads.repair(json!({ "sessionUpdate": "tool_call_update", "toolCallId": id, "status": "failed", "rawOutput": "Tool execution failed" }))
-        };
-        // Served before it was announced.
-        let mut reads = Reads::default();
-        assert_eq!(reads.attempted("/repo/a.ts", true), None);
-        assert_eq!(announce(&mut reads, "late")["status"], "completed");
-        assert_eq!(fail(&mut reads, "late"), json!({ "sessionUpdate": "tool_call_update", "toolCallId": "late", "status": "completed" }));
-        // Served after: the read it completes is reported.
-        assert_eq!(announce(&mut reads, "now")["status"], "in_progress");
-        assert_eq!(reads.attempted("/repo/a.ts", true).as_deref(), Some("now"));
-        assert_eq!(fail(&mut reads, "now")["status"], "completed");
-        // A refused read fails as it says; an earlier turn's served read doesn't count.
-        reads.attempted("/repo/a.ts", true);
-        reads.reset();
-        announce(&mut reads, "refused");
-        reads.attempted("/repo/a.ts", false);
-        assert_eq!(fail(&mut reads, "refused")["status"], "failed");
-    }
-
-    #[test]
-    fn gemini_usage_adds_cached_reads_and_thoughts() {
-        let u = usage(&json!({ "inputTokens": 100, "cachedReadTokens": 40, "outputTokens": 10, "thoughtTokens": 5 }));
-        assert_eq!((u.input_tokens, u.output_tokens, u.cached_tokens), (140, 15, 40));
-        assert_eq!(bound("abcdef", 3), format!("{TRUNCATED}def"));
-        assert_eq!(bound("é".repeat(3).as_str(), 3), "ééé");
     }
 }

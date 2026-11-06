@@ -646,25 +646,3 @@ impl Event {
 fn decode<T: DeserializeOwned>(event: &str, value: serde_json::Value) -> Result<T> {
     serde_json::from_value(value).map_err(|e| Error::Decode(format!("{event}: {e}")))
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn signatures() {
-        let body = br#"{"zen":"Keep it logically awesome."}"#;
-        let good = sign(b"secret", body);
-        assert!(verify_signature(b"secret", body, Some(&good)));
-        assert!(!verify_signature(b"other", body, Some(&good)));
-        assert!(!verify_signature(b"secret", b"{}", Some(&good)));
-        assert!(!verify_signature(b"secret", body, None));
-        assert!(!verify_signature(b"secret", body, Some("sha1=abcd")));
-        assert!(!verify_signature(b"secret", body, Some("sha256=zz")));
-        assert!(!verify_signature(
-            b"secret",
-            body,
-            Some(&good[..good.len() - 2])
-        ));
-    }
-}

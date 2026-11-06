@@ -274,7 +274,7 @@ pub(crate) fn response(r: &Request, pick: &str, picked: &[(String, Vec<String>)]
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_proto::{Approval, ApprovalAction, Decision, Question, QuestionOption};
+    use agent_proto::{Approval, Question, QuestionOption};
 
     fn req(body: RequestBody) -> Request {
         serde_json::from_value(json!({
@@ -282,29 +282,6 @@ mod tests {
             "body": serde_json::to_value(&body).unwrap(), "created_at": 1
         }))
         .unwrap()
-    }
-
-    #[test]
-    fn approvals_become_buttons_and_clicks_become_decisions() {
-        let a: Approval = serde_json::from_value(json!({
-            "action": "command", "title": "Run npm test", "command": "npm test", "input": null,
-            "decisions": ["accept", "accept_for_session", "decline", "cancel"]
-        }))
-        .unwrap();
-        assert_eq!(a.action, ApprovalAction::Command);
-        let r = req(RequestBody::Approval(a));
-        let card = request("chr_x", &r);
-        let RequestKind::Approval { choices } = &card.kind else { panic!() };
-        assert_eq!(choices.iter().map(|c| c.label.as_str()).collect::<Vec<_>>(), ["Approve", "Approve for session", "Decline", "Stop"]);
-        assert_eq!(card.detail.as_deref(), Some("npm test"));
-        let (card_id, pick) = parse_value(&choices[2].value).unwrap();
-        assert_eq!(card_id, "chr_x");
-        let (resp, words) = response(&r, pick, &[]).unwrap();
-        assert_eq!(resp, json!({ "type": "decision", "decision": "decline" }));
-        assert_eq!(words, "Decline");
-        assert!(response(&r, "d9", &[]).is_err());
-        assert!(response(&r, "s", &[]).is_err());
-        let _ = Decision::Accept;
     }
 
     fn view(thread: Value, run: &str, steps: usize) -> ThreadView {
@@ -367,5 +344,21 @@ mod tests {
         assert_eq!(resp, json!({ "type": "answers", "answers": { "db": "SQLite", "why": "smaller" } }));
         assert_eq!(words, "SQLite; smaller");
         assert!(parse_value("x:chr:s").is_none());
+        // An approval's buttons are its decisions; a click picks one of them, nothing else.
+        let a: Approval = serde_json::from_value(json!({
+            "action": "command", "title": "Run npm test", "command": "npm test", "input": null,
+            "decisions": ["accept", "accept_for_session", "decline", "cancel"]
+        }))
+        .unwrap();
+        let r = req(RequestBody::Approval(a));
+        let card = request("chr_x", &r);
+        let RequestKind::Approval { choices } = &card.kind else { panic!() };
+        let (card_id, pick) = parse_value(&choices[2].value).unwrap();
+        assert_eq!(card_id, "chr_x");
+        let (resp, words) = response(&r, pick, &[]).unwrap();
+        assert_eq!(resp, json!({ "type": "decision", "decision": "decline" }));
+        assert_eq!(words, "Decline");
+        assert!(response(&r, "d9", &[]).is_err());
+        assert!(response(&r, "s", &[]).is_err());
     }
 }

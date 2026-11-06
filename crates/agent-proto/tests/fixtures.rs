@@ -1387,13 +1387,10 @@ fn records_from_before_settling_parse() {
     assert!(serde_json::to_value(ProjectSettings::default()).unwrap().get("cleanup").is_none());
     let worktree: Worktree = serde_json::from_value(json!({ "path": "/w", "branch": "roll/x", "base": "abc" })).unwrap();
     assert_eq!(worktree.removed_at, None);
-}
-
-#[test]
-fn records_from_before_context_usage_parse() {
-    let mut thread = serde_json::to_value(thread()).unwrap();
-    thread.as_object_mut().unwrap().remove("context");
-    assert_eq!(serde_json::from_value::<Thread>(thread).unwrap().context, None);
+    // Records from before context usage parse without it.
+    let mut old = serde_json::to_value(crate::thread()).unwrap();
+    old.as_object_mut().unwrap().remove("context");
+    assert_eq!(serde_json::from_value::<Thread>(old).unwrap().context, None);
     let mut run = serde_json::to_value(run_rec()).unwrap();
     run.as_object_mut().unwrap().remove("context");
     assert_eq!(serde_json::from_value::<Run>(run).unwrap().context, None);

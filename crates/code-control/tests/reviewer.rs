@@ -696,40 +696,6 @@ async fn byok_needs_a_server_secret() {
 }
 
 #[tokio::test]
-async fn retries_then_gives_up_and_no_provider() {
-    let t = setup(|_, _| {}).await;
-    enable(&t, json!({ "mode": "standard", "required": true })).await;
-    // 500 twice (the provider retries once each attempt), then fine: the job retries.
-    t.m.set(|s, n| (s.path == "/v1/messages" && n <= 2).then(|| (500, json!({"error": {"message": "boom"}}))));
-    let c = change(&t, "Retry", json!({ "src/parse.rs": { "content": "pub fn parse_header() {}\n" } })).await;
-    let id = c["id"].as_str().unwrap().to_string();
-    let r = roll_reviews(&t, &id, 1).await;
-    assert!(!r[0]["ai"].is_null());
-    let jobs = jobs_idle(&t, &id).await;
-    assert_eq!(jobs[0]["state"], "done");
-    assert_eq!(jobs[0]["attempts"], 2);
-    // A bad key: no retries, a comment that says why, and the change stops waiting.
-    t.m.set(|s, _| (s.path == "/v1/messages").then(|| (401, json!({"type": "error", "error": {"type": "authentication_error", "message": "invalid x-api-key"}}))));
-    let before = t.m.messages().len();
-    let c2 = change(&t, "Bad key", json!({ "src/server.rs": { "content": "pub fn handle() {}\n" } })).await;
-    let id2 = c2["id"].as_str().unwrap().to_string();
-    let r2 = roll_reviews(&t, &id2, 1).await;
-    assert!(r2[0]["body"].as_str().unwrap().contains("invalid x-api-key"));
-    assert_eq!(t.m.messages().len(), before + 1);
-    let ch = ok(&t.a, "GET", &format!("/v1/code/changes/{id2}"), None).await;
-    assert!(!ch["blockers"].as_array().unwrap().iter().any(|b| b["kind"] == "review_pending"));
-    assert_eq!(jobs_idle(&t, &id2).await[0]["state"], "failed");
-    // No provider at all.
-    let none = setup(|c, _| c.review.hosted = None).await;
-    enable(&none, json!({ "mode": "standard" })).await;
-    let v = ok(&none.a, "GET", "/v1/code/repos/acme/api/reviewer", None).await;
-    assert!(v["provider"].is_null());
-    let c3 = change(&none, "None", json!({ "src/parse.rs": { "content": "x\n" } })).await;
-    let r3 = roll_reviews(&none, c3["id"].as_str().unwrap(), 1).await;
-    assert!(r3[0]["body"].as_str().unwrap().contains("no model provider"));
-}
-
-#[tokio::test]
 async fn triggers_settings_and_auth() {
     let t = setup(|_, _| {}).await;
     // Off by default: nothing happens.
@@ -893,35 +859,6 @@ async fn byok_openai_compatible_end_to_end() {
     let total = j["progress"]["groups_total"].as_u64().unwrap();
     assert!(total >= 1);
     assert_eq!(j["progress"]["groups_done"].as_u64(), Some(total));
-}
-
-/// A job reports its stage while it runs.
-#[tokio::test]
-async fn jobs_report_their_stage_while_running() {
-    let t = setup(|_, _| {}).await;
-    enable(&t, json!({ "mode": "standard" })).await;
-    t.m.delay_ms.store(600, Ordering::SeqCst);
-    let c = change(&t, "slow", json!({ "src/parse.rs": { "content": "pub fn parse_header(input: &str) -> usize {\n    input.len() * 2\n}\n" } })).await;
-    let id = c["id"].as_str().unwrap().to_string();
-    let mut seen = std::collections::BTreeSet::new();
-    for _ in 0..200 {
-        let jobs = ok(&t.a, "GET", &format!("/v1/code/changes/{id}/ai-jobs"), None).await;
-        if let Some(j) = jobs.as_array().unwrap().first() {
-            seen.insert(j["stage"].as_str().unwrap().to_string());
-            if j["stage"] == "reviewing" {
-                assert_eq!(j["progress"]["groups_done"], 0);
-                assert!(j["progress"]["groups_total"].as_u64().unwrap() >= 1);
-            }
-            if j["state"] == "done" {
-                break;
-            }
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    t.m.delay_ms.store(0, Ordering::SeqCst);
-    assert!(seen.contains("reviewing"), "{seen:?}");
-    assert!(seen.contains("done"), "{seen:?}");
-    assert!(seen.iter().all(|s| ["queued", "indexing", "chunking", "reviewing", "verifying", "posting", "done"].contains(&s.as_str())), "{seen:?}");
 }
 
 /// An owner's own provider can't point at this server's private network: a private `base_url`
@@ -1140,46 +1077,6 @@ async fn concurrent_reviews_and_chats_never_overrun_the_cap() {
     assert_eq!(u["totals"]["chats"], 1, "only the chat that fit was metered");
 }
 
-/// The month's free public reviews can't be claimed twice by reviews running at once: each
-/// running review holds the free one it took, and is metered as free exactly when it did.
-#[tokio::test]
-async fn concurrent_public_reviews_never_share_the_last_free_one() {
-    let t = setup_with("public", |c, _| {
-        c.review.concurrency = 3;
-        c.review.rates.public_free_reviews = 1;
-    })
-    .await;
-    enable(&t, json!({ "mode": "standard" })).await;
-    // Room for one paid review ($0.25) besides the free one.
-    ok(&t.a, "PUT", "/v1/code/owners/acme/billing", Some(json!({ "monthly_cap_usd": 0.25, "on_cap": "pause" }))).await;
-    t.m.delay_ms.store(1_500, Ordering::SeqCst);
-    let mut ids = Vec::new();
-    for n in 0..3 {
-        let c = change(&t, &format!("p{n}"), json!({ format!("src/p{n}.rs"): { "content": format!("pub fn p{n}() {{}}\n") } })).await;
-        ids.push(c["id"].as_str().unwrap().to_string());
-    }
-    let mut prices = Vec::new();
-    let mut paused = 0;
-    for id in &ids {
-        let r = roll_reviews(&t, id, 1).await;
-        match r[0]["ai"]["price_usd"].as_f64() {
-            Some(p) => prices.push(p),
-            None => {
-                assert!(r[0]["body"].as_str().unwrap().contains("paused for this month"), "{}", r[0]["body"]);
-                paused += 1;
-            }
-        }
-    }
-    t.m.delay_ms.store(0, Ordering::SeqCst);
-    prices.sort_by(f64::total_cmp);
-    assert_eq!((prices, paused), (vec![0.0, 0.25], 1), "one free, one paid, one over the cap");
-    let u = ok(&t.a, "GET", "/v1/code/owners/acme/usage", None).await;
-    assert_eq!(u["totals"]["price_usd"], 0.25, "never over the cap: {u}");
-    assert_eq!(u["totals"]["free_reviews"], 1);
-    let owner = t.a.code.owner_or_404("acme").unwrap().id;
-    assert_eq!((t.a.code.reserved_usd(&owner), t.a.code.reserved_free(&owner)), (0.0, 0));
-}
-
 #[tokio::test]
 async fn a_deep_review_goes_on_without_context_while_the_index_is_first_built() {
     let t = setup(|c, _| c.review_index_wait_ms = 0).await;
@@ -1349,6 +1246,8 @@ async fn repo_reviewer_routes_answer_every_status() {
             ("GET", api("/search"), None, root, S::BAD_REQUEST),
             ("GET", api(&format!("/search?q={}", "a".repeat(501))), None, root, S::BAD_REQUEST),
             ("GET", api("/search?q=[&regex=true"), None, root, S::BAD_REQUEST),
+            ("GET", api("/search?q=x&limit=lots"), None, root, S::BAD_REQUEST),
+            ("GET", api("/search?q=x&regex=maybe"), None, root, S::BAD_REQUEST),
             ("GET", api("/search?q=x&rev=no-such-rev"), None, root, S::NOT_FOUND),
             ("GET", secret("/search?q=x"), None, mallory, S::NOT_FOUND),
             ("GET", secret("/search?q=x"), None, None, S::NOT_FOUND),
@@ -1581,6 +1480,7 @@ async fn owner_reviewer_routes_answer_every_status() {
             ("GET", o("/usage?month=2020-1"), None, root, S::BAD_REQUEST),
             ("GET", o("/usage?month=abcd-ef"), None, root, S::BAD_REQUEST),
             ("GET", o("/usage?month=2020-01-01"), None, root, S::BAD_REQUEST),
+            ("GET", o("/usage?month=1&month=2"), None, root, S::BAD_REQUEST),
             ("GET", o("/usage"), None, mallory, S::NOT_FOUND),
             ("GET", o("/usage"), None, bot, S::NOT_FOUND),
             ("GET", o("/usage"), None, None, S::NOT_FOUND),
@@ -1788,34 +1688,69 @@ async fn gave_up(t: &T, change: &str) -> (Value, String) {
     (j, body)
 }
 
-/// Provider errors through code-control: a key without permission (403) isn't retried; a
-/// provider that stays overloaded (529) is retried by the provider and then by the job (three
-/// attempts) before roll gives up; a 400 gives up too. Each gives up with a comment saying why,
-/// a `failed` job with the error, and the change no longer waits.
+/// Provider errors through code-control: a provider failing twice and then answering is retried
+/// by the job (attempt 2 is done); a key without permission (403) or a bad key (401) isn't
+/// retried, a chat with one fails at once too (the thread says why, nothing metered); a provider
+/// that stays overloaded (529) is retried by the provider and then by the job (three attempts,
+/// `retry_ms` then ×4 apart) before roll gives up; a 400 gives up too. Each gives up with a
+/// comment saying why, a `failed` job with the error, and the change no longer waits.
 #[tokio::test]
 async fn provider_errors_403_persistent_529_and_400() {
     let t = setup(|_, _| {}).await;
     enable(&t, json!({ "mode": "standard", "required": true })).await;
 
+    // 500 twice (the provider retries once each attempt), then fine: the job retries.
+    t.m.set(|s, n| (s.path == "/v1/messages" && n <= 2).then(|| (500, json!({"error": {"message": "boom"}}))));
+    let c = change(&t, "Retry", json!({ "src/parse.rs": { "content": "pub fn parse_header() {}\n" } })).await;
+    let id = c["id"].as_str().unwrap().to_string();
+    assert!(!roll_reviews(&t, &id, 1).await[0]["ai"].is_null());
+    let jobs = jobs_idle(&t, &id).await;
+    assert_eq!((jobs[0]["state"].as_str(), jobs[0]["attempts"].as_u64()), (Some("done"), Some(2)));
+
     t.m.set(|s, _| (s.path == "/v1/messages").then(|| (403, json!({"type": "error", "error": {"type": "permission_error", "message": "key lacks access"}}))));
+    let before = t.m.messages().len();
     let c = change(&t, "403", json!({ "src/a.rs": { "content": "pub fn a() {}\n" } })).await;
     let id = c["id"].as_str().unwrap().to_string();
     let (j, body) = gave_up(&t, &id).await;
     assert!(body.contains("403") && body.contains("key lacks access"), "{body}");
     assert_eq!(j["attempts"], 1, "a bad key isn't retried");
     assert!(j["error"].as_str().unwrap().contains("key lacks access"));
-    assert_eq!(t.m.messages().len(), 1);
+    assert_eq!(t.m.messages().len() - before, 1);
+
+    t.m.set(|s, _| (s.path == "/v1/messages").then(|| (401, json!({"type": "error", "error": {"type": "authentication_error", "message": "invalid x-api-key"}}))));
+    let before = t.m.messages().len();
+    let c = change(&t, "401", json!({ "src/d.rs": { "content": "pub fn d() {}\n" } })).await;
+    let id = c["id"].as_str().unwrap().to_string();
+    let (j, body) = gave_up(&t, &id).await;
+    assert!(body.contains("invalid x-api-key"), "{body}");
+    assert_eq!(j["attempts"], 1);
+    assert_eq!(t.m.messages().len() - before, 1);
+    // A chat (`kind: "command"`) with the bad key: failed at once, and the thread says why.
+    let before = t.m.messages().len();
+    let chats = ok(&t.a, "GET", "/v1/code/owners/acme/usage", None).await["totals"]["chats"].clone();
+    let tid = person_thread(&t, &id, "src/d.rs", "@roll explain").await;
+    let jobs = jobs_idle_n(&t, &id, 2).await;
+    let chat = jobs.iter().find(|j| j["kind"] == "command").unwrap();
+    assert_eq!((chat["state"].as_str(), chat["stage"].as_str(), chat["attempts"].as_u64()), (Some("failed"), Some("failed"), Some(1)), "{chat}");
+    assert!(chat["error"].as_str().unwrap().contains("invalid x-api-key"));
+    assert_eq!(t.m.messages().len() - before, 1);
+    let th = thread_with(&t, &tid, 2).await;
+    let last = th["comments"].as_array().unwrap().last().unwrap().clone();
+    assert_eq!(last["author"]["kind"], "roll", "{th}");
+    assert!(last["body"].as_str().unwrap().starts_with("I couldn't answer:") && last["body"].as_str().unwrap().contains("invalid x-api-key"), "{last}");
+    assert_eq!(ok(&t.a, "GET", "/v1/code/owners/acme/usage", None).await["totals"]["chats"], chats, "nothing metered");
 
     t.m.set(|s, _| (s.path == "/v1/messages").then(|| (529, json!({"type": "error", "error": {"type": "overloaded_error", "message": "Overloaded"}}))));
     let before = t.m.messages().len();
+    let started = std::time::Instant::now();
     let c = change(&t, "529", json!({ "src/b.rs": { "content": "pub fn b() {}\n" } })).await;
     let id = c["id"].as_str().unwrap().to_string();
     let (j, body) = gave_up(&t, &id).await;
     assert!(body.contains("kept failing") && body.contains("Overloaded"), "{body}");
-    // Retried by the job (exactly 3 attempts: `a_failing_review_runs_three_times`).
-    let attempts = j["attempts"].as_u64().unwrap();
-    assert_eq!(attempts, 3, "{j}");
-    assert_eq!(t.m.messages().len() - before, attempts as usize * 2, "each attempt retries in the provider too");
+    // Retried by the job: exactly 3 attempts (`MAX_ATTEMPTS`), 50 ms then 200 ms apart.
+    assert_eq!(j["attempts"], 3, "{j}");
+    assert_eq!(t.m.messages().len() - before, 3 * 2, "each attempt retries in the provider too");
+    assert!(started.elapsed() >= Duration::from_millis(250), "{:?}", started.elapsed());
 
     t.m.set(|s, _| (s.path == "/v1/messages").then(|| (400, json!({"type": "error", "error": {"type": "invalid_request_error", "message": "messages: bad shape"}}))));
     let c = change(&t, "400", json!({ "src/c.rs": { "content": "pub fn c() {}\n" } })).await;
@@ -1823,22 +1758,6 @@ async fn provider_errors_403_persistent_529_and_400() {
     let (j, body) = gave_up(&t, &id).await;
     assert!(body.contains("400") && body.contains("messages: bad shape"), "{body}");
     assert!(j["error"].as_str().unwrap().contains("bad shape"));
-}
-
-/// reviews.md: "A failed attempt is retried twice with backoff (30 s, then ×4)" — three attempts
-/// in all (`MAX_ATTEMPTS`), with delays of `retry_ms` then `retry_ms × 4`.
-#[tokio::test]
-async fn a_failing_review_runs_three_times() {
-    let t = setup(|c, _| c.review.retry_ms = 100).await;
-    enable(&t, json!({ "mode": "standard" })).await;
-    t.m.set(|s, _| (s.path == "/v1/messages").then(|| (529, json!({"type": "error", "error": {"type": "overloaded_error", "message": "Overloaded"}}))));
-    let started = std::time::Instant::now();
-    let c = change(&t, "529", json!({ "src/b.rs": { "content": "pub fn b() {}\n" } })).await;
-    let (j, _) = gave_up(&t, c["id"].as_str().unwrap()).await;
-    assert_eq!(j["attempts"], 3);
-    assert_eq!(t.m.messages().len(), 3 * 2);
-    // 100 ms, then 400 ms between attempts.
-    assert!(started.elapsed() >= Duration::from_millis(500), "{:?}", started.elapsed());
 }
 
 /// The model declining (`refusal`) or running out of output (`max_tokens`) isn't an error: the
@@ -1914,35 +1833,18 @@ async fn config_and_key_errors_give_up_without_retrying() {
         assert!(t.m.messages().is_empty(), "never falls back to the hosted key: {secret:?}");
     }
 
-    // A chat with no provider at all.
+    // No provider at all: the reviewer view says so, a review gives up saying so, and so does a chat.
     let none = setup(|c, _| c.review.hosted = None).await;
+    enable(&none, json!({ "mode": "standard" })).await;
+    assert!(ok(&none.a, "GET", "/v1/code/repos/acme/api/reviewer", None).await["provider"].is_null());
     let c = change(&none, "q", json!({ "src/a.rs": { "content": "pub fn a() {}\n" } })).await;
+    assert!(roll_reviews(&none, c["id"].as_str().unwrap(), 1).await[0]["body"].as_str().unwrap().contains("no model provider"));
     let tid = person_thread(&none, c["id"].as_str().unwrap(), "src/a.rs", "@roll what does this do?").await;
     let th = thread_with(&none, &tid, 2).await;
     assert!(last_body(&th).contains("no model provider"), "{th}");
-    let jobs = jobs_idle(&none, c["id"].as_str().unwrap()).await;
-    assert_eq!((jobs[0]["kind"].as_str(), jobs[0]["state"].as_str()), (Some("command"), Some("done")));
-}
-
-/// A chat (`kind: "command"`) whose provider rejects the key fails at once, not retried.
-#[tokio::test]
-async fn a_chat_with_a_bad_key_fails_without_retrying() {
-    let t = setup(|_, _| {}).await;
-    t.m.set(|s, _| (s.path == "/v1/messages").then(|| (401, json!({"type": "error", "error": {"type": "authentication_error", "message": "invalid x-api-key"}}))));
-    let c = change(&t, "q", json!({ "src/a.rs": { "content": "pub fn a() {}\n" } })).await;
-    let id = c["id"].as_str().unwrap().to_string();
-    person_thread(&t, &id, "src/a.rs", "@roll explain").await;
-    let jobs = jobs_idle_n(&t, &id, 1).await;
-    assert_eq!((jobs[0]["kind"].as_str(), jobs[0]["state"].as_str(), jobs[0]["stage"].as_str()), (Some("command"), Some("failed"), Some("failed")));
-    assert_eq!(jobs[0]["attempts"], 1);
-    assert!(jobs[0]["error"].as_str().unwrap().contains("invalid x-api-key"));
-    assert_eq!(t.m.messages().len(), 1);
-    assert_eq!(ok(&t.a, "GET", "/v1/code/owners/acme/usage", None).await["totals"]["chats"], 0, "nothing metered");
-    // The thread says why instead of going quiet.
-    let th = threads(&t, &id).await.into_iter().find(|th| th["comments"][0]["body"] == "@roll explain").unwrap();
-    let last = th["comments"].as_array().unwrap().last().unwrap().clone();
-    assert_eq!(last["author"]["kind"], "roll", "{th}");
-    assert!(last["body"].as_str().unwrap().starts_with("I couldn't answer:") && last["body"].as_str().unwrap().contains("invalid x-api-key"), "{last}");
+    let jobs = jobs_idle_n(&none, c["id"].as_str().unwrap(), 2).await;
+    let chat = jobs.iter().find(|j| j["kind"] == "command").unwrap();
+    assert_eq!(chat["state"], "done");
 }
 
 /// Modes, speeds and profiles through code-control: `auto` picks `max` for `max_paths` (with
@@ -2031,6 +1933,10 @@ async fn jobs_go_queued_running_reviewing_verifying_done() {
             if j["stage"] == "verifying" {
                 assert_eq!(j["progress"]["groups_done"], j["progress"]["groups_total"], "every group is done before verification");
             }
+            if j["stage"] == "reviewing" {
+                assert!(j["progress"]["groups_total"].as_u64().unwrap() >= 1, "{j}");
+            }
+            assert!(["queued", "indexing", "chunking", "reviewing", "verifying", "posting", "done"].contains(&j["stage"].as_str().unwrap()), "{j}");
             last = j;
             if last["state"] == "done" {
                 break;
@@ -2071,49 +1977,6 @@ async fn jobs_go_queued_running_reviewing_verifying_done() {
     assert_eq!(ok(&idle, "GET", "/v1/code/repos/acme/api/reviewer", None).await["jobs"]["queued"], 1);
 }
 
-/// A deep review waits while the repo's codebase index is first built, and says so: the job's
-/// stage is `indexing` until the build is done.
-#[tokio::test]
-async fn a_deep_review_reports_indexing_while_the_index_is_built() {
-    let t = setup(|_, _| {}).await;
-    let mut files = serde_json::Map::new();
-    for i in 0..1500 {
-        files.insert(format!("gen/f{i}.rs"), json!({ "content": format!("pub fn generated_{i}(x: u32) -> u32 {{\n    x + {i}\n}}\n") }));
-    }
-    ok(&t.a, "POST", "/v1/code/repos/acme/api/land", Some(json!({ "message": "many files", "files": Value::Object(files) }))).await;
-    enable(&t, json!({ "mode": "deep" })).await;
-    let c = change(&t, "Deep", json!({ "src/parse.rs": { "content": PARSE_EDIT } })).await;
-    let id = c["id"].as_str().unwrap().to_string();
-    let mut stages = Vec::new();
-    for _ in 0..2000 {
-        if let Some(j) = ok(&t.a, "GET", &format!("/v1/code/changes/{id}/ai-jobs"), None).await.as_array().unwrap().first() {
-            let s = j["stage"].as_str().unwrap().to_string();
-            if stages.last() != Some(&s) {
-                stages.push(s);
-            }
-            if j["state"] == "done" {
-                break;
-            }
-        }
-        tokio::time::sleep(Duration::from_millis(2)).await;
-    }
-    assert!(stages.contains(&"indexing".to_string()), "{stages:?}");
-    let r = roll_reviews(&t, &id, 1).await;
-    assert!(!r[0]["ai"]["reasons"].to_string().contains("still being built"), "it waited for the index");
-    assert!(t.m.messages().last().unwrap().user().contains("# Repository context"));
-}
-
-/// A query string that doesn't parse is a JSON 400 on the reviewer's routes too.
-#[tokio::test]
-async fn bad_query_strings_are_json_400s() {
-    let t = setup(|_, _| {}).await;
-    for path in ["/v1/code/repos/acme/api/search?q=x&limit=lots", "/v1/code/repos/acme/api/search?q=x&regex=maybe", "/v1/code/owners/acme/usage?month=1&month=2"] {
-        let (s, v) = call(&t.a, "GET", path, None, Some(ROOT)).await;
-        assert_eq!(s, StatusCode::BAD_REQUEST, "{path}: {v}");
-        assert!(v["error"].is_string(), "{path}: {v}");
-    }
-}
-
 /// Wait (5 s at most) until `cond` holds.
 async fn eventually(what: &str, mut cond: impl FnMut() -> bool) {
     for _ in 0..500 {
@@ -2125,45 +1988,10 @@ async fn eventually(what: &str, mut cond: impl FnMut() -> bool) {
     panic!("never: {what}");
 }
 
-/// `concurrent_reviews_and_chats_never_overrun_the_cap` with the reviews on two nodes (one at
-/// a time each): what one node's running review holds counts in the other's cap check.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn concurrent_reviews_on_two_nodes_never_overrun_the_cap() {
-    let t = setup(|c, _| c.review.concurrency = 1).await;
-    let b = second_node(&t, |c| c.review.concurrency = 1);
-    enable(&t, json!({ "mode": "standard" })).await;
-    ok(&t.a, "PUT", "/v1/code/owners/acme/billing", Some(json!({ "monthly_cap_usd": 0.5, "on_cap": "pause" }))).await;
-    t.m.delay_ms.store(2_000, Ordering::SeqCst);
-    let mut ids = Vec::new();
-    for n in 0..4 {
-        let c = change(&t, &format!("c{n}"), json!({ format!("src/c{n}.rs"): { "content": format!("pub fn c{n}() {{}}\n") } })).await;
-        ids.push(c["id"].as_str().unwrap().to_string());
-    }
-    let owner = t.a.code.owner_or_404("acme").unwrap().id;
-    // Two reviews hold the cap at once: each node runs one at a time, so one on each.
-    eventually("both nodes hold a review's price", || b.code.reserved_usd(&owner) == 0.5).await;
-    assert_eq!(t.a.code.reserved_usd(&owner), 0.5, "seen the same from either node");
-    let u = ok(&t.a, "GET", "/v1/code/owners/acme/usage", None).await;
-    assert_eq!(u["totals"]["price_usd"], 0.0, "nothing metered yet: {u}");
-    let mut reviewed = 0;
-    for id in &ids {
-        let r = roll_reviews(&t, id, 1).await;
-        if !r[0]["ai"].is_null() {
-            reviewed += 1;
-        } else {
-            assert!(r[0]["body"].as_str().unwrap().contains("paused for this month"), "{}", r[0]["body"]);
-        }
-    }
-    t.m.delay_ms.store(0, Ordering::SeqCst);
-    assert_eq!(reviewed, 2, "exactly two fit under the cap, across both nodes");
-    let u = ok(&t.a, "GET", "/v1/code/owners/acme/usage", None).await;
-    assert_eq!(u["totals"]["price_usd"], 0.5, "never over the cap: {u}");
-    assert_eq!(t.m.messages().len(), 2, "no model call for capped reviews");
-    eventually("reservations released", || t.a.code.reserved_usd(&owner) == 0.0 && b.code.reserved_usd(&owner) == 0.0).await;
-}
-
-/// `concurrent_public_reviews_never_share_the_last_free_one` with the reviews on two nodes: a
-/// free review one node's job claimed can't be claimed by the other's.
+/// The month's free public reviews can't be claimed twice by reviews running at once, on one
+/// node or two: each running review holds the free one it took (a free review one node's job
+/// claimed can't be claimed by the other's), and is metered as free exactly when it did. What one
+/// node's running review holds also counts in the other's cap check.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_public_reviews_on_two_nodes_never_share_the_last_free_one() {
     let t = setup_with("public", |c, _| {

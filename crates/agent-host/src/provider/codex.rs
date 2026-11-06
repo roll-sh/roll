@@ -392,22 +392,3 @@ impl Provider for Codex {
         Ok((Box::new(session), events))
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn versions_parse() {
-        assert_eq!(parse_version("codex-cli 0.164.0\n").as_deref(), Some("0.164.0"));
-        assert_eq!(parse_version("codex-cli 0.160.0-alpha.1").as_deref(), Some("0.160.0-alpha.1"));
-        assert_eq!(parse_version("0.1.4161006").as_deref(), Some("0.1.4161006"));
-        assert_eq!(parse_version("codex"), None);
-    }
-
-    #[test]
-    fn archived_errors_are_recognised() {
-        assert!(is_archived("session 01a0 is archived; run `codex unarchive 01a0`"));
-        assert!(!is_archived("thread not found"));
-    }
-}

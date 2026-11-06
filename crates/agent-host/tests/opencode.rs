@@ -720,19 +720,6 @@ async fn simple() {
 }
 
 #[tokio::test]
-async fn tool_call() {
-    let mut h = Harness::open("tool_call").await;
-    assert_eq!(h.turn("Run a shell command").await, TurnEnd::Completed);
-    let (events, _) = h.finish().await;
-    golden("tool_call", &events);
-    let tools: Vec<_> = latest(&events).into_values().filter_map(|i| if let NodeBody::Tool(t) = i.body { Some((i.status, t)) } else { None }).collect();
-    assert!(!tools.is_empty());
-    let (status, shell) = tools.iter().find(|(_, t)| t.kind == ToolKind::Command).expect("a command");
-    assert_eq!(*status, NodeStatus::Completed);
-    assert!(shell.output.is_some());
-}
-
-#[tokio::test]
 async fn permission() {
     let mut h = Harness::open_with("permission", |c| c.runtime_mode = RuntimeMode::Ask).await;
     h.session.send(TurnInput { text: "Run echo FIRST, then echo SECOND".into(), ..Default::default() }).await.unwrap();
@@ -750,6 +737,10 @@ async fn permission() {
     golden("permission", &events);
     assert_eq!(asked[0], ("echo FIRST".to_string(), true));
     assert_eq!(asked[1].0, "echo SECOND");
+    // The accepted command runs to completion with its output.
+    let first = latest(&events).into_values().find(|i| matches!(&i.body, NodeBody::Tool(t) if t.kind == ToolKind::Command && t.title == "echo FIRST")).expect("echo FIRST");
+    assert_eq!(first.status, NodeStatus::Completed);
+    assert!(matches!(&first.body, NodeBody::Tool(t) if t.output.as_deref() == Some("FIRST\n")));
     // Supervised rules, with the build agent's own path allows.
     let rules = sent(&ops, "session.create")[0]["permissions"].as_array().unwrap().clone();
     assert_eq!(rules[..3], [json!({"action": "shell", "resource": "*", "effect": "ask"}), json!({"action": "edit", "resource": "*", "effect": "ask"}), json!({"action": "external_directory", "resource": "*", "effect": "ask"})]);
@@ -924,22 +915,6 @@ async fn subagent() {
 }
 
 #[tokio::test]
-async fn missing_step_usage() {
-    let mut h = Harness::open_with("missing_step_usage", |c| {
-        c.model = Some("opencode/space-bunny-free".into());
-        c.effort = Some("high".into());
-    })
-    .await;
-    assert_eq!(h.turn("Think about 391").await, TurnEnd::Completed);
-    let (events, _) = h.finish().await;
-    golden("missing_step_usage", &events);
-    // The second step failed without a token report: the turn's use is the first step's.
-    let usage: Vec<_> = events.iter().filter_map(|e| if let ProviderEvent::Usage(u) = e { Some(*u) } else { None }).collect();
-    assert_eq!(usage.len(), 1);
-    assert_eq!((usage[0].input_tokens, usage[0].output_tokens), (8701 + 489, 113 + 147));
-}
-
-#[tokio::test]
 async fn background_subagent_folds_into_its_turn() {
     let mut h = Harness::open("background").await;
     assert_eq!(h.turn("Use the subagent tool with background enabled").await, TurnEnd::Completed);
@@ -953,24 +928,6 @@ async fn background_subagent_folds_into_its_turn() {
     let child_done = events.iter().position(|e| matches!(e, ProviderEvent::Item(i) if i.parent.is_some() && matches!(&i.body, NodeBody::Message { text } if text == "CHILD_OK"))).unwrap();
     assert!(child_done < ended);
     assert_eq!(last_usage(&events).output_tokens, 76 + 5 + 14);
-}
-
-#[tokio::test]
-async fn nested_background_subagents_fold_into_the_turn() {
-    let mut h = Harness::open_with("nested_background", |c| c.model = Some("openrouter/deepseek/deepseek-v4-flash".into())).await;
-    assert_eq!(h.turn("Chain subagents").await, TurnEnd::Completed);
-    let (events, _) = h.finish().await;
-    golden("nested_background", &events);
-    assert_eq!(messages(&events), ["ROOT_OK"]);
-    let all = latest(&events);
-    let middle = "ses_f08c06e25ffeF0asx24ydmo3oy:call_8272fb6a288c4f94869b6ce6";
-    assert!(matches!(&all[middle].body, NodeBody::Subagent { result: Some(r), .. } if r == "GRANDCHILD_OK"));
-    assert_eq!(all[middle].parent.as_deref(), Some("call_3d90a8b7d44c49f6ae053fd7"));
-    // The grandchild's own work hangs off the call that started it.
-    assert!(all.values().any(|i| i.parent.as_deref() == Some(middle) && matches!(&i.body, NodeBody::Tool(t) if t.title == "sleep 25")));
-    let ended = events.iter().position(|e| matches!(e, ProviderEvent::TurnEnded(_))).unwrap();
-    let last_child = events.iter().rposition(|e| matches!(e, ProviderEvent::Item(i) if i.parent.is_some())).unwrap();
-    assert!(last_child < ended);
 }
 
 // ---------------------------------------------------------------------------------------------

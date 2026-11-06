@@ -651,89 +651,6 @@ async fn limits_providers_models_modes_worktrees_and_follow_ups() {
     assert_eq!(mcp.refused("delegate_task", json!({ "task": "late" })).await, "parent_not_active");
 }
 
-/// "Orchestrate" on the canvas: the thread is an orchestrator, its sessions are told to plan and
-/// delegate (and every session is told how delegation works), the run records only the user's
-/// goal, its tasks are plain subagents told to do the work themselves, and a fork goes on
-/// orchestrating.
-#[tokio::test]
-async fn an_orchestrator_is_told_to_plan_and_delegate_and_its_tasks_to_do_the_work() {
-    let codex = manual("codex");
-    let claude = FakeProvider::new("claude");
-    let w = world(vec![codex.clone(), claude.clone()], "").await;
-    let goal = "Add dark mode to the settings page, with tests";
-    let reply = w
-        .run(Command::ThreadCreate {
-            project: w.project.clone(),
-            provider: ProviderId::codex(),
-            model: None,
-            effort: None,
-            options: Default::default(),
-            runtime_mode: RuntimeMode::FullAccess,
-            interaction_mode: InteractionMode::Default,
-            worktree: false,
-            title: None,
-            prompt: Some(goal.into()),
-            attachments: Vec::new(),
-            orchestrator: true,
-        })
-        .await;
-    let Reply::Created { id } = reply else { panic!("thread.create: {reply:?}") };
-    let lead = ThreadId(id);
-    let t = w.wait_thread(&lead, |t| t.status == ThreadStatus::Running).await;
-    assert!(t.orchestrator);
-    assert_eq!(w.state().await.runs(&lead)[0].prompt, goal, "the run keeps what the user sent");
-
-    let session = codex.session(0).await;
-    assert_eq!(sends(&session.calls()), vec![goal]);
-    let told = session.config.instructions.clone().unwrap();
-    assert!(told.contains("## roll orchestration") && told.contains("## You are the orchestrator"), "{told}");
-    assert!(!told.contains("## You are a subagent"));
-
-    // It plans, then hands out the parts: each an ordinary subagent in its own worktree.
-    let mcp = Mcp::of(&session).await;
-    mcp.ok("orchestrator_capabilities", json!({})).await;
-    let (_, tokens) = mcp.delegate(json!({ "task": "Theme tokens for dark mode", "provider": "claude", "worktree": true, "title": "Tokens" })).await;
-    let (_, tests) = mcp.delegate(json!({ "task": "Tests for the theme switch", "provider": "claude", "worktree": true, "title": "Tests" })).await;
-    let s = w.state().await;
-    for child in [&tokens, &tests] {
-        let c = s.thread(child).unwrap();
-        assert!(!c.orchestrator, "a task is never an orchestrator");
-        assert_eq!(c.lineage.as_ref().map(|l| (&l.parent, l.relation)), Some((&lead, Relation::Subagent)));
-        assert!(c.worktree.is_some());
-    }
-    let child = claude.session(0).await.config.instructions.clone().unwrap();
-    assert!(child.contains("## roll orchestration") && child.contains("## You are a subagent"), "{child}");
-    assert!(!child.contains("## You are the orchestrator"));
-
-    // A thread the user starts as usual only learns how delegation works.
-    answer(&codex.session(0).await, "planned");
-    let plain = w.thread("claude", Some("hi"), false).await;
-    w.wait_thread(&plain, |t| t.run_count == 1 && t.active_run.is_none()).await;
-    let sessions = claude.sessions();
-    let mine = sessions.iter().find(|s| sends(&s.calls()) == ["hi"]).expect("the plain thread's session");
-    let told = mine.config.instructions.clone().unwrap();
-    assert!(told.contains("## roll orchestration") && !told.contains("## You are"), "{told}");
-
-    // The tasks' results wake the orchestrator once its planning turn is over (together, or one
-    // after the other as they finish).
-    let (mut seen, mut woke) = (1, String::new());
-    while !(woke.contains("(Tokens) [completed]") && woke.contains("(Tests) [completed]")) {
-        let t = w.wait_thread(&lead, |t| t.run_count > seen && t.active_run.is_some()).await;
-        for run in &w.state().await.runs(&lead)[seen as usize..t.run_count as usize] {
-            woke.push_str(&run.prompt);
-        }
-        seen = t.run_count;
-        answer(&codex.session(0).await, "checked");
-    }
-    w.wait_thread(&lead, |t| t.active_run.is_none()).await;
-
-    // Forking the orchestrator forks an orchestrator.
-    let Reply::Created { id } = w.run(Command::ThreadFork { thread: lead.clone(), at: None, worktree: false }).await else {
-        panic!("thread.fork")
-    };
-    assert!(w.state().await.thread(&ThreadId(id)).unwrap().orchestrator);
-}
-
 /// Delegating while the daemon is still probing its providers waits for the probe rather than
 /// calling the provider unavailable.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -899,8 +816,24 @@ async fn the_fake_orchestrator_delegates_through_the_server_and_sums_up_when_eve
     parts.sort();
     assert_eq!(delivered, parts.iter().collect::<Vec<_>>());
     let told: Vec<String> = lead_provider.sessions().iter().filter_map(|x| x.config.instructions.clone()).collect();
+    assert!(told.iter().all(|t| t.contains("## roll orchestration")), "every session is told how delegation works");
     assert_eq!(told.iter().filter(|t| t.contains("## You are the orchestrator")).count(), 1);
     assert_eq!(told.iter().filter(|t| t.contains("## You are a subagent")).count(), 2);
+    assert!(s.thread(&lead).unwrap().orchestrator);
+
+    // A thread the user starts as usual only learns how delegation works.
+    let plain = w.thread("orchestrate", Some("hi"), false).await;
+    w.wait_thread(&plain, |t| t.run_count == 1 && t.active_run.is_none()).await;
+    let sessions = lead_provider.sessions();
+    let mine = sessions.iter().find(|x| sends(&x.calls()) == ["hi"]).expect("the plain thread's session");
+    let told = mine.config.instructions.clone().unwrap();
+    assert!(told.contains("## roll orchestration") && !told.contains("## You are"), "{told}");
+
+    // Forking the orchestrator forks an orchestrator.
+    let Reply::Created { id } = w.run(Command::ThreadFork { thread: lead.clone(), at: None, worktree: false }).await else {
+        panic!("thread.fork")
+    };
+    assert!(w.state().await.thread(&ThreadId(id)).unwrap().orchestrator);
 }
 
 /// A subagent whose run fails: its node fails with the run's error as the result, the wake says

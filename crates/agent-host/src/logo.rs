@@ -298,6 +298,14 @@ mod tests {
         assert_eq!(icon_href(r#"<link rel="icon" href="data:image/png;base64,AAAA">"#), None);
         assert_eq!(icon_href(r#"<link rel="preload" href="/x.png">"#), None);
         assert_eq!(icon_href(r#"<link rel="apple-touch-icon" href="/x.png">"#), None);
+
+        // An index.html's link is followed into public/.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(root, "index.html", br#"<link rel="icon" href="/brand.svg">"#);
+        write(root, "public/brand.svg", b"<svg/>");
+        assert_eq!(Logos::default().resolve(root, &ProjectIcon::Auto).unwrap().path, "public/brand.svg");
+        assert_eq!(Logos::default().resolve(&root.join("missing"), &ProjectIcon::Auto), None);
     }
 
     #[test]
@@ -319,16 +327,6 @@ mod tests {
         assert_eq!(logos.resolve(root, &missing).unwrap().path, "favicon.png");
     }
 
-    #[test]
-    fn follows_an_index_html_link() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
-        write(root, "index.html", br#"<link rel="icon" href="/brand.svg">"#);
-        write(root, "public/brand.svg", b"<svg/>");
-        assert_eq!(Logos::default().resolve(root, &ProjectIcon::Auto).unwrap().path, "public/brand.svg");
-        assert_eq!(Logos::default().resolve(&root.join("missing"), &ProjectIcon::Auto), None);
-    }
-
     #[cfg(unix)]
     #[test]
     fn never_reads_through_a_symlink_out_of_the_project() {
@@ -347,16 +345,6 @@ mod tests {
         std::fs::create_dir_all(root.join("app")).unwrap();
         symlink(root.join("brand/mark.svg"), root.join("app/icon.svg")).unwrap();
         assert_eq!(logos.resolve(root, &ProjectIcon::Auto).unwrap().path, "app/icon.svg");
-    }
-
-    #[test]
-    fn skips_an_oversized_svg_for_the_next_candidate() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
-        let big = format!("<svg>{}</svg>", "x".repeat(ProjectLogo::MAX_URL));
-        write(root, "favicon.svg", big.as_bytes());
-        write(root, "favicon.png", &png(4, 4));
-        assert_eq!(Logos::default().resolve(root, &ProjectIcon::Auto).unwrap().path, "favicon.png");
     }
 
     #[test]

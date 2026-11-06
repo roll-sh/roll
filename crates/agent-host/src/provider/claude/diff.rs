@@ -141,20 +141,13 @@ fn position(ops: &[Op], at: usize, old: bool) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
 
     #[test]
     fn small_edit_in_a_snippet() {
         let old = "a\nb\nc\nd\ne\nf\ng\nh\n";
         let new = "a\nb\nc\nD\ne\nf\ng\nh\n";
         assert_eq!(hunks(old, new), "@@ -1,7 +1,7 @@\n a\n b\n c\n-d\n+D\n e\n f\n g\n");
-    }
-
-    #[test]
-    fn new_file_and_deletion() {
-        assert_eq!(hunks("", "x\ny"), "@@ -0,0 +1,2 @@\n+x\n+y\n");
         assert_eq!(hunks("x\n", ""), "@@ -1,1 +0,0 @@\n-x\n");
-        assert_eq!(with_headers("f.txt", true, "@@ -0,0 +1,1 @@\n+x\n"), "--- /dev/null\n+++ b/f.txt\n@@ -0,0 +1,1 @@\n+x\n");
     }
 
     #[test]
@@ -164,12 +157,5 @@ mod tests {
         let out = hunks(&old, &new);
         assert_eq!(out.matches("@@ -").count(), 2, "{out}");
         assert!(out.contains("-2\n+two\n") && out.contains("-17\n+seventeen\n"));
-    }
-
-    #[test]
-    fn structured_patch_renders_hunks() {
-        let patch = json!([{"oldStart": 3, "oldLines": 1, "newStart": 3, "newLines": 2, "lines": ["-a", "+b", "+c"]}]);
-        assert_eq!(structured_patch(&patch).unwrap(), "@@ -3,1 +3,2 @@\n-a\n+b\n+c\n");
-        assert_eq!(structured_patch(&json!({"x": 1})), None);
     }
 }

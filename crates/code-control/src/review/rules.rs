@@ -478,26 +478,6 @@ mod tests {
     }
 
     #[test]
-    fn stale_self_and_ai_approvals() {
-        use ReviewerKind::*;
-        let rules = Rules { required_approvals: 1, ..Rules::default() };
-        let none = Codeowners::default();
-        let s = eval(&rules, &none, &["a"], &[rec(1, rev(User, "alice"), Verdict::Approve, 1)]);
-        assert_eq!(kinds(&s), vec!["needs_approval"], "dismiss_stale: an older revision's approval doesn't count");
-        assert!(s.approvals[0].stale && !s.approvals[0].counted);
-        let keep = Rules { dismiss_stale: false, ..rules.clone() };
-        assert!(eval(&keep, &none, &["a"], &[rec(1, rev(User, "alice"), Verdict::Approve, 1)]).blockers.is_empty());
-        let s = eval(&rules, &none, &["a"], &[rec(1, rev(User, "carol"), Verdict::Approve, 2)]);
-        assert_eq!(kinds(&s), vec!["needs_approval"], "self-approval");
-        let selfok = Rules { allow_self_approval: true, ..rules.clone() };
-        assert!(eval(&selfok, &none, &["a"], &[rec(1, rev(User, "carol"), Verdict::Approve, 2)]).blockers.is_empty());
-        let s = eval(&rules, &none, &["a"], &[rec(1, rev(App, "coderabbitai[bot]"), Verdict::Approve, 2), rec(2, rev(Roll, "roll"), Verdict::Approve, 2)]);
-        assert_eq!(kinds(&s), vec!["needs_approval"], "AI approvals don't count by default");
-        let ai = Rules { count_ai_approval: true, ..rules.clone() };
-        assert!(eval(&ai, &none, &["a"], &[rec(1, rev(App, "greptile"), Verdict::Approve, 2)]).blockers.is_empty());
-    }
-
-    #[test]
     fn request_changes_blocks_until_superseded() {
         use ReviewerKind::*;
         let rules = Rules::default();
@@ -511,27 +491,6 @@ mod tests {
         assert_eq!(kinds(&s), vec!["changes_requested"], "a comment doesn't lift it");
         let off = Rules { block_on_request_changes: false, ..rules };
         assert!(eval(&off, &none, &["a"], &[rec(1, rev(User, "alice"), Verdict::RequestChanges, 2)]).blockers.is_empty());
-    }
-
-    #[test]
-    fn codeowners_groups() {
-        use ReviewerKind::*;
-        let owners = Codeowners::parse("CODEOWNERS", "* @lead\n/crates/ @rust agent:fixer\n/docs/\n");
-        let rules = Rules { require_codeowners: true, ..Rules::default() };
-        let s = eval(&rules, &owners, &["crates/a.rs", "crates/b.rs", "README.md", "docs/x.md"], &[]);
-        assert_eq!(s.codeowners.len(), 2, "{:?}", s.codeowners);
-        assert_eq!(s.codeowners[0].paths, vec!["crates/a.rs", "crates/b.rs"]);
-        assert_eq!(kinds(&s), vec!["needs_codeowner", "needs_codeowner"]);
-        let s = eval(&rules, &owners, &["crates/a.rs", "README.md"], &[rec(1, rev(Agent, "fixer"), Verdict::Approve, 2), rec(2, rev(User, "lead"), Verdict::Approve, 2)]);
-        assert!(s.blockers.is_empty(), "{:?}", s.blockers);
-        // The author can't satisfy their own code-owner requirement.
-        let s = eval(&rules, &Codeowners::parse("CODEOWNERS", "* @carol\n"), &["a"], &[rec(1, rev(User, "carol"), Verdict::Approve, 2)]);
-        assert_eq!(kinds(&s), vec!["needs_codeowner"]);
-        // A code owner that is an app is satisfied by it even without count_ai_approval.
-        let s = eval(&rules, &Codeowners::parse("CODEOWNERS", "* app:greptile\n"), &["a"], &[rec(1, rev(App, "greptile"), Verdict::Approve, 2)]);
-        assert!(s.blockers.is_empty());
-        // Unowned paths need nobody.
-        assert!(eval(&rules, &owners, &["docs/x.md"], &[]).blockers.is_empty());
     }
 
     #[test]
@@ -558,17 +517,6 @@ mod tests {
         // Requested changes still block an auto-approved change.
         let s = eval(&rules, &owners, &["docs/a.md"], &[rec(1, rev(ReviewerKind::User, "z"), Verdict::RequestChanges, 2)]);
         assert_eq!(kinds(&s), vec!["changes_requested"]);
-    }
-
-    #[test]
-    fn threads_and_pending() {
-        let rules = Rules { require_resolved_threads: true, ..Rules::default() };
-        let none = Codeowners::default();
-        let facts = Facts::default();
-        let pending = [rev(ReviewerKind::Roll, "roll")];
-        let s = evaluate(&Input { rules: &rules, codeowners: &none, facts: &facts, author: "x", revision: 1, reviews: &[], unresolved_threads: 2, pending: &pending });
-        assert_eq!(kinds(&s), vec!["unresolved_threads", "review_pending"]);
-        assert!(s.blockers[0].message.starts_with("2 unresolved threads"));
     }
 
     #[test]

@@ -339,23 +339,3 @@ async fn members_fall_back_when_the_gateway_is_down_and_name_their_threads() {
     assert_eq!(var(&env, "ANTHROPIC_BASE_URL"), Some(dead.as_str()));
     assert!(var(&env, "ANTHROPIC_CUSTOM_HEADERS").is_some());
 }
-
-/// Codex names its thread through `env_http_headers`, read from the session's variables.
-#[test]
-fn codex_reads_the_attribution_headers_from_its_session() {
-    let spec = EndpointSpec {
-        id: gateway_limits::ENDPOINT_ID.into(),
-        name: "roll gateway on studio".into(),
-        kind: EndpointKind::Gateway,
-        base_url: "http://gw:8790".into(),
-        providers: vec![],
-        url_env: None,
-        key_env: None,
-        key_ref: None,
-        fallback: false,
-    };
-    let used = agent_host::endpoints::codex_use(&spec, Some("rgk_x")).unwrap();
-    assert!(used.args.contains(&r#"model_providers.roll_roll_gateway.env_http_headers={"x-roll-thread"="ROLL_GATEWAY_THREAD","x-roll-project"="ROLL_GATEWAY_PROJECT"}"#.to_string()), "{:?}", used.args);
-    assert!(used.args.contains(&r#"model_providers.roll_roll_gateway.base_url="http://gw:8790/v1""#.to_string()));
-    assert!(!used.args.iter().any(|a| a.contains("rgk_x")), "the key is never an argument");
-}

@@ -291,6 +291,20 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o755);
         }
+
+        // A .tar.bz2, and a bare download that is the command itself.
+        let t = tar_of(&[("agent", F, b"bz", None)]);
+        let mut e = bzip2::write::BzEncoder::new(Vec::new(), bzip2::Compression::fast());
+        e.write_all(&t).unwrap();
+        let (_d, got) = unpack_bytes(Kind::TarBz2, &e.finish().unwrap(), "agent", Limits::default());
+        assert_eq!(std::fs::read(got.unwrap()).unwrap(), b"bz");
+        let (_d, got) = unpack_bytes(Kind::Raw, b"\x7fELF", "bin/agent", Limits::default());
+        assert_eq!(std::fs::read(got.unwrap()).unwrap(), b"\x7fELF");
+        // The kind comes from the URL's suffix.
+        assert_eq!(kind("https://x/a.TGZ?x=1"), Kind::TarGz);
+        assert_eq!(kind("https://x/a.tar.bz2"), Kind::TarBz2);
+        assert_eq!(kind("https://x/a.zip"), Kind::Zip);
+        assert_eq!(kind("https://x/sigit-linux-amd64"), Kind::Raw);
     }
 
     #[test]
@@ -328,15 +342,6 @@ mod tests {
         assert!(got.unwrap_err().to_string().contains("more than"));
     }
 
-    #[test]
-    fn unpacks_a_tar_bz2() {
-        let t = tar_of(&[("agent", F, b"bz", None)]);
-        let mut e = bzip2::write::BzEncoder::new(Vec::new(), bzip2::Compression::fast());
-        e.write_all(&t).unwrap();
-        let (_d, got) = unpack_bytes(Kind::TarBz2, &e.finish().unwrap(), "agent", Limits::default());
-        assert_eq!(std::fs::read(got.unwrap()).unwrap(), b"bz");
-    }
-
     fn zip_of(f: impl FnOnce(&mut zip::ZipWriter<std::io::Cursor<Vec<u8>>>)) -> Vec<u8> {
         let mut w = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
         f(&mut w);
@@ -367,20 +372,5 @@ mod tests {
             let (_d, got) = unpack_bytes(Kind::Zip, &bytes, "agent", Limits::default());
             assert!(got.is_err(), "{what}");
         }
-    }
-
-    #[test]
-    fn a_raw_download_is_the_command() {
-        let (_d, got) = unpack_bytes(Kind::Raw, b"\x7fELF", "bin/agent", Limits::default());
-        assert_eq!(std::fs::read(got.unwrap()).unwrap(), b"\x7fELF");
-    }
-
-    #[test]
-    fn kinds_by_suffix() {
-        assert_eq!(kind("https://x/a.tar.gz"), Kind::TarGz);
-        assert_eq!(kind("https://x/a.TGZ?x=1"), Kind::TarGz);
-        assert_eq!(kind("https://x/a.tar.bz2"), Kind::TarBz2);
-        assert_eq!(kind("https://x/a.zip"), Kind::Zip);
-        assert_eq!(kind("https://x/sigit-linux-amd64"), Kind::Raw);
     }
 }

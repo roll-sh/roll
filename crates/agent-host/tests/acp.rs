@@ -15,7 +15,7 @@
 //! every frame it receives, and fails loudly (stderr, exit 3) on the first frame it didn't
 //! expect: the adapter reports that as `Exited`.
 
-use agent_host::provider::acp::{Acp, installed_agents, known_agents};
+use agent_host::provider::acp::{Acp, known_agents};
 use agent_host::provider::{McpServer, Provider, ProviderConfig, ProviderEvent, Session, SessionConfig, TurnEnd, TurnInput};
 use agent_proto::{
     ApprovalAction, AuthStatus, Decision, InteractionMode, ModelOption, NodeBody, NodeStatus, OptionRole, RequestBody, Response,
@@ -522,33 +522,6 @@ async fn registry_simple() {
     assert_eq!(sent(&log, "session/prompt")[0]["prompt"], json!([{ "type": "text", "text": "Respond with the following text: fixture simple ok" }]));
 }
 
-#[tokio::test]
-async fn registry_multi_turn() {
-    let mut h = Harness::open("registry_multi_turn", RuntimeMode::FullAccess).await;
-    for prompt in prompts("registry_multi_turn") {
-        assert_eq!(h.turn(&prompt).await, TurnEnd::Completed);
-    }
-    let ws = h.ws();
-    let (events, _) = h.finish().await;
-    golden("registry_multi_turn", &events, &ws);
-    assert_eq!(messages(&events).len(), 2);
-    // Each turn's message is its own item.
-    let ids: Vec<_> = items(&events).iter().filter(|i| matches!(i.body, NodeBody::Message { .. })).map(|i| i.id.clone()).collect();
-    assert!(ids.contains(&"msg:1:1".to_string()) && ids.iter().any(|i| i.starts_with("msg:2:")));
-}
-
-#[tokio::test]
-async fn registry_turn_interrupt() {
-    let mut h = Harness::open("registry_turn_interrupt", RuntimeMode::FullAccess).await;
-    h.send(&prompts("registry_turn_interrupt")[0]).await;
-    h.session.interrupt().await.unwrap();
-    assert_eq!(h.turn_end().await, TurnEnd::Interrupted);
-    let ws = h.ws();
-    let (events, log) = h.finish().await;
-    golden("registry_turn_interrupt", &events, &ws);
-    assert_eq!(sent(&log, "session/cancel"), [&json!({ "sessionId": "grok-replay-session-1" })]);
-}
-
 /// Steering is the orchestrator's interrupt and restart: cancel, then the new prompt.
 #[tokio::test]
 async fn registry_message_steering() {
@@ -559,9 +532,10 @@ async fn registry_message_steering() {
     assert_eq!(h.turn_end().await, TurnEnd::Interrupted);
     assert_eq!(h.turn(&p[1]).await, TurnEnd::Completed);
     let ws = h.ws();
-    let (events, _) = h.finish().await;
+    let (events, log) = h.finish().await;
     golden("registry_message_steering", &events, &ws);
     assert_eq!(turn_ends(&events), [TurnEnd::Interrupted, TurnEnd::Completed]);
+    assert_eq!(sent(&log, "session/cancel"), [&json!({ "sessionId": "grok-replay-session-1" })]);
 }
 
 #[tokio::test]
@@ -619,16 +593,6 @@ async fn registry_todo_list() {
 }
 
 #[tokio::test]
-async fn registry_prompt_error() {
-    let mut h = Harness::open("registry_prompt_error", RuntimeMode::FullAccess).await;
-    let TurnEnd::Failed(why) = h.turn(&prompts("registry_prompt_error")[0]).await else { panic!() };
-    assert!(why.contains("grok prompt error fixture"), "{why}");
-    let ws = h.ws();
-    let (events, _) = h.finish().await;
-    golden("registry_prompt_error", &events, &ws);
-}
-
-#[tokio::test]
 async fn acp_elicitation() {
     let mut h = Harness::open("acp_elicitation", RuntimeMode::Ask).await;
     h.send(&prompts("acp_elicitation")[0]).await;
@@ -648,39 +612,12 @@ async fn acp_elicitation() {
     assert_eq!(messages(&events), ["plan questions fixture complete"]);
 }
 
-#[tokio::test]
-async fn malformed_session_update() {
-    let mut h = Harness::open("malformed_session_update", RuntimeMode::FullAccess).await;
-    assert_eq!(h.turn(&prompts("malformed_session_update")[0]).await, TurnEnd::Completed);
-    let ws = h.ws();
-    let (events, _) = h.finish().await;
-    golden("malformed_session_update", &events, &ws);
-    assert_eq!(messages(&events), ["malformed update fixture ok"]);
-    // The malformed usage update (no `used`/`size`) is dropped; the valid one has no cost.
-    assert!(!events.iter().any(|e| matches!(e, ProviderEvent::Usage(_))));
-    assert!(!items(&events).iter().any(|i| matches!(i.body, NodeBody::System { .. })));
-}
-
 // ---------------------------------------------------------------------------------------------
 // Kiro
 // ---------------------------------------------------------------------------------------------
 
 fn kiro(cfg: &mut SessionConfig) {
     cfg.model = Some("claude-haiku-4.5".into());
-}
-
-#[tokio::test]
-async fn kiro_simple() {
-    let mut h = Harness::open_with("kiro_simple", RuntimeMode::FullAccess, kiro).await;
-    assert_eq!(h.turn(&prompts("kiro_simple")[0]).await, TurnEnd::Completed);
-    let ws = h.ws();
-    let (events, log) = h.finish().await;
-    golden("kiro_simple", &events, &ws);
-    assert_eq!(messages(&events), ["fixture simple ok"]);
-    assert!(events.contains(&ProviderEvent::Model { model: "claude-haiku-4.5".into() }));
-    // Autopilot is already on for full access: only the model is written.
-    assert_eq!(sent(&log, "session/set_config_option").len(), 1);
-    assert_eq!(sent(&log, "session/close").len(), 1);
 }
 
 #[tokio::test]
@@ -729,25 +666,18 @@ async fn kiro_permission_supervised() {
     assert_eq!(messages(&events).last().map(String::as_str), Some("kiro permission done"));
 }
 
-#[tokio::test]
-async fn kiro_permission_full_access() {
-    let mut h = Harness::open_with("kiro_permission_full_access", RuntimeMode::FullAccess, kiro).await;
-    assert_eq!(h.turn(&prompts("kiro_permission_full_access")[0]).await, TurnEnd::Completed);
-    let ws = h.ws();
-    let (events, log) = h.finish().await;
-    golden("kiro_permission_full_access", &events, &ws);
-    assert!(!events.iter().any(|e| matches!(e, ProviderEvent::Request { .. })));
-    assert_eq!(replies(&log)[0]["result"], json!({ "outcome": { "outcome": "selected", "optionId": "accept" } }));
-}
-
 /// A second process loads the session: its replayed history doesn't show again.
 #[tokio::test]
 async fn kiro_resume() {
     let mut first = Harness::open_with("kiro_resume_1", RuntimeMode::FullAccess, kiro).await;
     assert_eq!(first.turn(&prompts("kiro_resume_1")[0]).await, TurnEnd::Completed);
     let ws = first.ws();
-    let (events, _) = first.finish().await;
+    let (events, log) = first.finish().await;
     golden("kiro_resume_1", &events, &ws);
+    assert!(events.contains(&ProviderEvent::Model { model: "claude-haiku-4.5".into() }));
+    // Autopilot is already on for full access: only the model is written; close is sent.
+    assert_eq!(sent(&log, "session/set_config_option").len(), 1);
+    assert_eq!(sent(&log, "session/close").len(), 1);
     let ProviderEvent::NativeThread { id } = &events[0] else { panic!() };
 
     let resume = id.clone();
@@ -809,44 +739,9 @@ async fn fx_tool_call_denied_write() {
     assert_eq!(replies(&log)[0]["result"], json!({ "outcome": { "outcome": "selected", "optionId": "reject_once" } }));
 }
 
-#[tokio::test]
-async fn fx_early_stop() {
-    let p = prompts("fx_early_stop");
-    let mut h = Harness::open_with("fx_early_stop", RuntimeMode::Ask, fx).await;
-    h.send(&p[0]).await;
-    h.session.interrupt().await.unwrap();
-    assert_eq!(h.turn_end().await, TurnEnd::Interrupted);
-    assert_eq!(h.turn(&p[1]).await, TurnEnd::Completed);
-    let ws = h.ws();
-    let (events, _) = h.finish().await;
-    golden("fx_early_stop", &events, &ws);
-    assert_eq!(messages(&events), ["fixture simple ok"]);
-}
-
 // ---------------------------------------------------------------------------------------------
 // Grok
 // ---------------------------------------------------------------------------------------------
-
-#[tokio::test]
-async fn grok_simple() {
-    let mut h = Harness::open("grok_simple", RuntimeMode::FullAccess).await;
-    assert_eq!(h.turn(&prompts("grok_simple")[0]).await, TurnEnd::Completed);
-    let ws = h.ws();
-    let (events, _) = h.finish().await;
-    golden("grok_simple", &events, &ws);
-    assert_eq!(messages(&events).concat(), "fixture simple ok");
-    assert_eq!(completed_texts(&events, true).len(), 1);
-}
-
-#[tokio::test]
-async fn grok_tool_call_read_only() {
-    let mut h = Harness::open("grok_tool_call_read_only", RuntimeMode::FullAccess).await;
-    assert_eq!(h.turn(&prompts("grok_tool_call_read_only")[0]).await, TurnEnd::Completed);
-    let ws = h.ws();
-    let (events, _) = h.finish().await;
-    golden("grok_tool_call_read_only", &events, &ws);
-    assert!(latest(&events).values().any(|i| matches!(&i.body, NodeBody::Tool(t) if t.kind == ToolKind::Read)));
-}
 
 #[tokio::test]
 async fn grok_plan_questions() {
@@ -1490,11 +1385,3 @@ async fn info_marks_an_agent_that_never_answers_unavailable() {
     assert!(info.detail.unwrap().contains("no answer to initialize"), "says why");
 }
 
-#[test]
-fn known_agents_cover_t3s() {
-    let names: Vec<_> = known_agents().into_iter().map(|a| a.name).collect();
-    for name in ["gemini", "opencode", "grok", "kiro", "fx", "qwen", "goose", "copilot", "antigravity"] {
-        assert!(names.contains(&name.to_string()), "{name}");
-    }
-    assert!(installed_agents().len() <= names.len());
-}

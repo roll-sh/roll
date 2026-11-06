@@ -150,18 +150,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn defaults_without_tables() {
-        let s = parse("[checks.test]\nimage = \"alpine\"\nrun = \"true\"\n").unwrap();
-        assert_eq!(s.queue, QueueSettings::default());
-        assert!(!s.main.auto_revert);
-        assert_eq!(s.declared_checks, vec!["test".to_string()]);
-        assert_eq!(s.batch_checks(), vec!["test".to_string()]);
-        assert!(s.change_checks(&[]).is_empty(), "a change's own checks aren't required by default");
-        assert_eq!(s.change_checks(&["ci/external".into()]), vec!["ci/external".to_string()]);
-    }
-
-    #[test]
     fn queue_and_main_tables() {
+        let d = parse("[checks.test]\nimage = \"alpine\"\nrun = \"true\"\n").unwrap();
+        assert_eq!(d.queue, QueueSettings::default());
+        assert!(!d.main.auto_revert);
+        assert_eq!(d.declared_checks, vec!["test".to_string()]);
+        assert_eq!(d.batch_checks(), vec!["test".to_string()]);
+        assert!(d.change_checks(&[]).is_empty(), "a change's own checks aren't required by default");
+        assert_eq!(d.change_checks(&["ci/external".into()]), vec!["ci/external".to_string()]);
         let s = parse(
             "[queue]\nchecks = [\"a\"]\nbatch_size = 3\ntimeout = 60\nrequire_change_checks = true\n[main]\nauto_revert = true\n",
         )

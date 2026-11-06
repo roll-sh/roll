@@ -402,18 +402,8 @@ mod tests {
         let ev = agent_events("mch_1", Some(&Entity::Thread(thread.clone())), &Entity::Thread(waiting.clone()), 2, None);
         assert_eq!(ev.iter().map(|e| e.0).collect::<Vec<_>>(), vec![AgentEvent::ThreadWaiting]);
         assert!(agent_events("mch_1", Some(&Entity::Thread(waiting.clone())), &Entity::Thread(waiting), 3, None).is_empty());
-    }
-
-    /// Every agent event has the thread's brief (`thread.title`) and its project, like a
-    /// thread's own events: "Tell me when an agent fails" read `event.data.title` and showed
-    /// " failed". A run whose thread the relay hasn't seen keeps the thread's id.
-    #[test]
-    fn agent_events_carry_their_thread() {
-        let thread: agent_proto::Thread = serde_json::from_value(json!({
-            "id": "thr_1", "project": "prj_1", "title": "Fix", "provider": "codex", "model": null, "runtime_mode": "full_access",
-            "interaction_mode": "default", "cwd": "/w", "status": "running", "run_count": 1, "pending_requests": 0, "created_at": 1, "updated_at": 1
-        }))
-        .unwrap();
+        // Every agent event has the thread's brief (`thread.title`) and its project; a run whose
+        // thread the relay hasn't seen keeps the thread's id.
         let failed: Entity = serde_json::from_value(json!({ "kind": "run", "id": "run_1", "thread": "thr_1", "ordinal": 2, "provider": "codex", "model": null, "status": "failed", "error": "boom", "prompt": "p", "requested_at": 1 })).unwrap();
         let ev = agent_events("mch_1", None, &failed, 1, Some(&thread));
         assert_eq!(ev[0].0, AgentEvent::ThreadFailed);

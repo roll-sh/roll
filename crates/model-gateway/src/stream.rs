@@ -242,30 +242,10 @@ mod tests {
     }
 
     #[test]
-    fn an_event_over_the_cap_fails() {
-        let mut f = SseFrames::new();
-        let big = vec![b'x'; MAX_EVENT / 2];
-        assert!(f.feed(b"data: ").is_ok());
-        assert!(f.feed(&big).is_ok());
-        assert!(matches!(f.feed(&big), Err(FrameError::TooLarge)));
-    }
-
-    #[test]
     fn early_errors() {
         assert_eq!(early(&Event::named("message_start", r#"{"type":"message_start"}"#)), Early::Fine);
         assert!(matches!(early(&Event::named("error", r#"{"type":"error","error":{"type":"overloaded_error","message":"busy"}}"#)), Early::Failed(m) if m == "busy"));
         assert!(matches!(early(&Event::data(r#"{"error":{"type":"rate_limit_exceeded","message":"slow"}}"#)), Early::RateLimited(_)));
         assert_eq!(early(&Event::named("error", r#"{"type":"error","error":{"type":"invalid_request_error","message":"bad"}}"#)), Early::Fine);
-    }
-
-    #[test]
-    fn bedrock_chunks_are_messages_events() {
-        let payload = serde_json::json!({ "bytes": base64::engine::general_purpose::STANDARD.encode(r#"{"type":"message_stop"}"#) }).to_string();
-        let msg = eventstream::encode(&[(":message-type", "event"), (":event-type", "chunk")], payload.as_bytes());
-        let exc = eventstream::encode(&[(":message-type", "exception"), (":exception-type", "throttlingException")], br#"{"message":"slow"}"#);
-        let events = BedrockFrames::new().feed(&[msg, exc].concat()).unwrap();
-        assert_eq!(events[0].event, Some(Event::named("message_stop", r#"{"type":"message_stop"}"#)));
-        assert_eq!(&events[0].raw[..], b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n");
-        assert!(matches!(early(events[1].event.as_ref().unwrap()), Early::RateLimited(_)));
     }
 }

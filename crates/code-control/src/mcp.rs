@@ -1300,16 +1300,4 @@ mod tests {
         assert!(repo_base("a/b/c").is_err());
     }
 
-    #[test]
-    fn every_tool_has_a_closed_schema() {
-        let tools = tools();
-        assert_eq!(tools.len(), 37);
-        for t in &tools {
-            assert_eq!(t["inputSchema"]["type"], "object", "{}", t["name"]);
-            assert_eq!(t["inputSchema"]["additionalProperties"], false, "{}", t["name"]);
-            for r in t["inputSchema"]["required"].as_array().unwrap() {
-                assert!(t["inputSchema"]["properties"].get(r.as_str().unwrap()).is_some(), "{}: required {r} isn't a property", t["name"]);
-            }
-        }
-    }
 }

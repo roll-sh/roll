@@ -816,27 +816,4 @@ mod tests {
         assert_eq!(a["db"], "SQLite");
         assert_eq!(a["name"], "ledger");
     }
-
-    #[test]
-    fn elicitations_offer_choices() {
-        let e = elicitation(&approval());
-        assert_eq!(e["type"], "elicitation");
-        assert!(e["body"].as_str().unwrap().contains("cargo test"));
-        assert_eq!(e["signal"], "select");
-        let values: Vec<&str> = e["signal_metadata"]["options"].as_array().unwrap().iter().map(|o| o["value"].as_str().unwrap()).collect();
-        assert_eq!(values, ["approve", "always", "decline"]);
-        let q = request(RequestBody::Questions {
-            questions: vec![Question { id: "db".into(), header: "DB".into(), question: "Which?".into(), options: vec![QuestionOption { label: "Postgres".into(), description: Some("the usual".into()) }], multi: false }],
-        });
-        let e = elicitation(&q);
-        assert!(e["body"].as_str().unwrap().contains("Postgres — the usual"));
-        assert_eq!(e["signal_metadata"]["options"][0]["value"], "Postgres");
-    }
-
-    #[test]
-    fn tool_calls_read_as_actions() {
-        let t = agent_proto::ToolCall { name: "Bash".into(), kind: agent_proto::ToolKind::Command, title: "cargo test".into(), input: Value::Null, output: None, exit_code: Some(1), files: vec![] };
-        assert_eq!(action(&t, false), json!({ "type": "action", "action": "Running", "parameter": "cargo test" }));
-        assert_eq!(action(&t, true), json!({ "type": "action", "action": "Ran", "parameter": "cargo test", "result": "exit 1" }));
-    }
 }

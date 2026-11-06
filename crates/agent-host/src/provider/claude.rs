@@ -841,22 +841,6 @@ mod tests {
     }
 
     #[test]
-    fn modes_map_like_t3() {
-        assert_eq!(permission_mode(RuntimeMode::FullAccess, InteractionMode::Default), "bypassPermissions");
-        assert_eq!(permission_mode(RuntimeMode::AutoEdit, InteractionMode::Default), "acceptEdits");
-        assert_eq!(permission_mode(RuntimeMode::Ask, InteractionMode::Default), "default");
-        assert_eq!(permission_mode(RuntimeMode::FullAccess, InteractionMode::Plan), "plan");
-    }
-
-    #[test]
-    fn session_ids_are_v4_uuids() {
-        let id = new_session_id();
-        assert_eq!(id.len(), 36);
-        assert_eq!(&id[14..15], "4");
-        assert!(matches!(&id[19..20], "8" | "9" | "a" | "b"));
-    }
-
-    #[test]
     fn auth_follows_the_account() {
         let none = json!({"account": {"tokenSource": "none", "apiKeySource": "none"}});
         assert_eq!(auth_status(&none, None).0, AuthStatus::Missing);

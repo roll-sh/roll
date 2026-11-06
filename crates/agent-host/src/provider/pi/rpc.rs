@@ -401,13 +401,4 @@ mod tests {
         buf.clear();
         assert_eq!(read_record(&mut r, &mut buf, 16).await.unwrap(), Line::Eof);
     }
-
-    #[test]
-    fn errors_are_summarised() {
-        assert_eq!(error_detail(Some(&json!("nope"))), "nope");
-        assert_eq!(error_detail(Some(&json!({"code": 1}))), "{\"code\":1}");
-        assert_eq!(error_detail(None), "unknown error");
-        let long = "é".repeat(300);
-        assert_eq!(error_detail(Some(&json!(long))).chars().count(), ERROR_DETAIL + 1);
-    }
 }

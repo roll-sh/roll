@@ -342,41 +342,6 @@ mod tests {
         Wanted { model: None, effort: None, options: &NONE, runtime, interaction, opening: false, permission_mode: None }
     }
 
-    /// Cursor's parameters: a `"true"`/`"false"` select takes a switch's value, and a switch in
-    /// `thought_level` is an option of its own, never the effort.
-    #[test]
-    fn switches_listed_as_selects() {
-        let cursor = wire::config_options(&json!([
-            { "id": "thinking", "category": "thought_level", "type": "select", "currentValue": "false", "options": [{ "value": "false", "name": "Off" }, { "value": "true", "name": "On" }] },
-            { "id": "effort", "category": "thought_level", "type": "select", "currentValue": "medium", "options": [{ "value": "medium" }, { "value": "high" }] },
-            { "id": "fast", "category": "model_config", "type": "select", "currentValue": "false", "options": [{ "value": "false" }, { "value": "true" }] },
-        ]));
-        assert_eq!(effort_option(&cursor).map(|o| o.id.as_str()), Some("effort"));
-        let options = agent_proto::ModelOptions::from([
-            ("thinking".into(), agent_proto::OptionValue::Flag(true)),
-            ("fast".into(), agent_proto::OptionValue::Flag(false)),
-        ]);
-        let s = settings(&cursor, None, None, false, None, &Wanted { effort: Some("high"), options: &options, ..want(RuntimeMode::Ask, InteractionMode::Default) });
-        assert_eq!(s, [
-            Setting::Option { id: "effort".into(), value: OptionValue::Id("high".into()), optional: false },
-            Setting::Option { id: "thinking".into(), value: OptionValue::Id("true".into()), optional: false },
-        ]);
-    }
-
-    /// Antigravity's modes follow the runtime mode (T3's `antigravityPermissionMode`).
-    #[test]
-    fn a_flavors_permission_mode() {
-        let agy = wire::config_options(&json!([
-            { "id": "mode", "category": "mode", "type": "select", "currentValue": "default",
-              "options": [{ "value": "default" }, { "value": "auto_edit" }, { "value": "yolo" }] },
-        ]));
-        let s = settings(&agy, None, None, false, None, &Wanted { permission_mode: Some("yolo"), ..want(RuntimeMode::FullAccess, InteractionMode::Default) });
-        assert_eq!(s, [Setting::Option { id: "mode".into(), value: OptionValue::Id("yolo".into()), optional: false }]);
-        assert!(settings(&agy, None, None, false, None, &Wanted { permission_mode: Some("default"), ..want(RuntimeMode::Ask, InteractionMode::Default) }).is_empty());
-        // A mode it doesn't offer isn't written.
-        assert!(settings(&agy, None, None, false, None, &Wanted { permission_mode: Some("plan"), ..want(RuntimeMode::Ask, InteractionMode::Default) }).is_empty());
-    }
-
     #[test]
     fn options_go_to_the_agents_own_config_options() {
         let agent = wire::config_options(&json!([

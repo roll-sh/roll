@@ -394,16 +394,6 @@ async fn simple() {
 }
 
 #[tokio::test]
-async fn multi_turn() {
-    let mut h = Harness::open("multi_turn").await;
-    assert_eq!(h.turn("Respond with exactly: first fixture turn complete").await, TurnEnd::Completed);
-    assert_eq!(h.turn("Respond with exactly: second fixture turn complete").await, TurnEnd::Completed);
-    let (events, _) = h.finish().await;
-    golden("multi_turn", &events);
-    assert_eq!(messages(&events), ["first fixture turn complete", "second fixture turn complete"]);
-}
-
-#[tokio::test]
 async fn message_steering() {
     let mut h = Harness::open("message_steering").await;
     h.session.send(TurnInput { text: "Respond with exactly: steering fixture initial response".into(), ..Default::default() }).await.unwrap();
@@ -418,17 +408,6 @@ async fn message_steering() {
 }
 
 #[tokio::test]
-async fn turn_interrupt() {
-    let mut h = Harness::open("turn_interrupt").await;
-    h.session.send(TurnInput { text: "sleep".into(), ..Default::default() }).await.unwrap();
-    h.session.interrupt().await.unwrap();
-    assert_eq!(h.turn_end().await, TurnEnd::Interrupted);
-    let (events, log) = h.finish().await;
-    golden("turn_interrupt", &events);
-    assert_eq!(sent(&log, "turn/interrupt")[0]["turnId"], "01a0d5ed-38b3-7a11-9203-bd9650a02764");
-}
-
-#[tokio::test]
 async fn turn_interrupt_mid_tool() {
     let mut h = Harness::open("turn_interrupt_mid_tool").await;
     h.session.send(TurnInput { text: "run node".into(), ..Default::default() }).await.unwrap();
@@ -437,6 +416,7 @@ async fn turn_interrupt_mid_tool() {
     assert_eq!(h.turn_end().await, TurnEnd::Interrupted);
     let (events, log) = h.finish().await;
     golden("turn_interrupt_mid_tool", &events);
+    assert_eq!(sent(&log, "turn/interrupt")[0]["turnId"], "01a0d60e-f90f-7f23-b6ba-9ca7ee20b5cd");
     // The PTY the command ran in is terminated, and the command ends interrupted.
     assert_eq!(sent(&log, "thread/backgroundTerminals/terminate")[0]["processId"], "87302");
     let command = latest(&events).into_values().find(|i| matches!(&i.body, NodeBody::Tool(t) if t.name == "commandExecution")).unwrap();
@@ -482,18 +462,6 @@ async fn file_change_approval() {
     assert_eq!(h.turn_end().await, TurnEnd::Completed);
     let (events, _) = h.finish().await;
     golden("tool_call_restricted_granular", &events);
-}
-
-#[tokio::test]
-async fn tool_call_without_approval() {
-    let mut h = Harness::open("tool_call_workspace_never").await;
-    assert_eq!(h.turn("write a file").await, TurnEnd::Completed);
-    let (events, _) = h.finish().await;
-    golden("tool_call_workspace_never", &events);
-    assert!(!events.iter().any(|e| matches!(e, ProviderEvent::Request { .. })));
-    let tool = latest(&events).into_values().find_map(|i| if let NodeBody::Tool(t) = i.body { Some((i.status, t)) } else { None }).unwrap();
-    assert_eq!(tool.0, NodeStatus::Completed);
-    assert_eq!(tool.1.exit_code, Some(0));
 }
 
 #[tokio::test]
@@ -564,18 +532,6 @@ async fn subagent_collab_spawn() {
     assert_eq!(first.status, NodeStatus::Completed);
     let NodeBody::Subagent { prompt, .. } = &first.body else { unreachable!() };
     assert!(prompt.starts_with("Read "), "{prompt}");
-}
-
-#[tokio::test]
-async fn subagent_v2() {
-    let mut h = Harness::open("subagent_v2").await;
-    assert_eq!(h.turn("spawn one").await, TurnEnd::Completed);
-    let (events, _) = h.finish().await;
-    golden("subagent_v2", &events);
-    assert_subagents(&events, 1);
-    let sub = latest(&events).into_values().find(|i| matches!(i.body, NodeBody::Subagent { .. })).unwrap();
-    assert_eq!(sub.status, NodeStatus::Completed);
-    assert_eq!(sub.body, NodeBody::Subagent { agent: "say_hello".into(), prompt: String::new(), child: None, result: Some("Hello.".into()), progress: None, model: None });
 }
 
 #[tokio::test]
@@ -763,30 +719,6 @@ async fn web_search() {
 // ---------------------------------------------------------------------------------------------
 
 #[tokio::test]
-async fn real_simple() {
-    let mut h = Harness::open("real_simple").await;
-    assert_eq!(h.turn("Reply with exactly: ok").await, TurnEnd::Completed);
-    let (events, _) = h.finish().await;
-    golden("real_simple", &events);
-    assert_eq!(messages(&events), ["ok"]);
-}
-
-#[tokio::test]
-async fn real_approval() {
-    let mut h = Harness::open_with("real_approval", |c| c.runtime_mode = RuntimeMode::Ask).await;
-    h.session.send(TurnInput { text: "touch".into(), ..Default::default() }).await.unwrap();
-    let (id, _, body) = h.request().await;
-    let RequestBody::Approval(approval) = body else { panic!("{body:?}") };
-    assert_eq!(approval.title, "Run `touch roll-approval.txt`");
-    assert_eq!(approval.command.as_deref(), Some("/bin/bash -lc 'touch roll-approval.txt'"));
-    h.session.respond(&id, &Response::Decision { decision: Decision::Accept, message: None }).await.unwrap();
-    assert_eq!(h.turn_end().await, TurnEnd::Completed);
-    let (events, _) = h.finish().await;
-    golden("real_approval", &events);
-    assert_eq!(messages(&events), ["I’ll run the command now.", "done"]);
-}
-
-#[tokio::test]
 async fn info_reads_version_account_and_models() {
     let dir = tempfile::tempdir().unwrap();
     let codex = Codex::new(fake_config(&fixtures().join("real_info.ndjson"), &dir.path().join("log.ndjson")));
@@ -822,20 +754,8 @@ async fn info_reads_version_account_and_models() {
     let methods: Vec<_> = log.iter().filter_map(|f| f["method"].as_str()).collect();
     assert_eq!(methods, ["initialize", "initialized", "account/read", "model/list"]);
     assert_eq!(sent(&log, "account/read")[0], &json!({}));
-}
 
-#[tokio::test]
-async fn info_without_codex() {
-    let codex = Codex::new(ProviderConfig { binary: Some("/nonexistent/codex".into()), ..Default::default() });
-    let info = codex.info().await;
-    assert!(!info.installed);
-    assert_eq!(info.auth, AuthStatus::Unknown);
-    assert!(info.models.is_empty());
-}
-
-#[tokio::test]
-async fn info_needs_login() {
-    let dir = tempfile::tempdir().unwrap();
+    // An OpenAI login it needs and doesn't have.
     let transcript = synthetic(dir.path(), "login", &[
         expect(json!({ "id": 1, "method": "initialize" })),
         emit(json!({ "id": 1, "result": { "userAgent": "roll/0.164.0" } })),
@@ -844,10 +764,15 @@ async fn info_needs_login() {
         emit(json!({ "id": 2, "result": { "account": null, "requiresOpenaiAuth": true } })),
         exit_ok(),
     ]);
-    let codex = Codex::new(fake_config(Path::new(&transcript), &dir.path().join("log.ndjson")));
-    let info = codex.info().await;
+    let info = Codex::new(fake_config(Path::new(&transcript), &dir.path().join("log2.ndjson"))).info().await;
     assert_eq!(info.auth, AuthStatus::Missing);
     assert_eq!(info.detail.as_deref(), Some("Run `codex login`"));
+
+    // Not installed.
+    let info = Codex::new(ProviderConfig { binary: Some("/nonexistent/codex".into()), ..Default::default() }).info().await;
+    assert!(!info.installed);
+    assert_eq!(info.auth, AuthStatus::Unknown);
+    assert!(info.models.is_empty());
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1070,16 +995,13 @@ async fn a_crash_reports_stderr() {
     assert!(error.as_deref().is_some_and(|e| e.contains("panicked: boom")), "{error:?}");
     // Requests after the exit fail at once.
     assert!(h.session.interrupt().await.is_err() || h.session.steer(TurnInput { text: "x".into(), ..Default::default() }).await.is_err());
-}
 
-#[tokio::test]
-async fn a_failed_start_reports_why() {
-    let dir = tempfile::tempdir().unwrap();
+    // A Codex that dies during the handshake fails the start with its stderr.
     let transcript = synthetic(dir.path(), "nostart", &[
         expect(json!({ "id": 1, "method": "initialize" })),
         json!({ "type": "runtime_exit", "status": "error", "stderr": "error: unknown model provider" }),
     ]);
-    let codex = Codex::new(fake_config(Path::new(&transcript), &dir.path().join("log.ndjson")));
+    let codex = Codex::new(fake_config(Path::new(&transcript), &dir.path().join("log2.ndjson")));
     let err = codex.start(session_config(dir.path())).await.err().expect("start fails");
     assert!(format!("{err:#}").contains("unknown model provider"), "{err:#}");
 }

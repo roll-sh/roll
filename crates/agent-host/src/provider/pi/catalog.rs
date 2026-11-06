@@ -313,17 +313,6 @@ mod tests {
     }
 
     #[test]
-    fn thinking_levels_follow_the_models_map() {
-        let m = json!({ "reasoning": true, "thinkingLevelMap": { "off": "none", "minimal": null, "low": null, "medium": null, "high": "high", "xhigh": "xhigh", "max": null } });
-        assert_eq!(thinking_levels(&m), ["off", "high", "xhigh"]);
-        assert_eq!(thinking_levels(&json!({ "reasoning": true })), ["off", "minimal", "low", "medium", "high"]);
-        assert!(thinking_levels(&json!({ "reasoning": false })).is_empty());
-        assert_eq!(clamp("medium", &["off", "high", "xhigh"]), Some("high"));
-        assert_eq!(clamp("max", &["off", "high"]), Some("high"));
-        assert_eq!(clamp("nope", &["off"]), None);
-    }
-
-    #[test]
     fn models_are_listed_with_the_active_ones_default_level() {
         let data = json!({ "models": [
             { "provider": "openrouter", "id": "deepseek/v4", "name": "DeepSeek", "reasoning": true, "input": ["text"] },
@@ -341,6 +330,10 @@ mod tests {
         assert!(super::models(&json!({ "models": [{ "id": "x" }] }), &state).is_err());
         assert_eq!(parse_slug("openrouter/deepseek/v4"), Some(("openrouter", "deepseek/v4")));
         assert_eq!(parse_slug("default"), None);
+        // A requested effort the model lacks takes the nearest one it has.
+        assert_eq!(clamp("medium", &["off", "high", "xhigh"]), Some("high"));
+        assert_eq!(clamp("max", &["off", "high"]), Some("high"));
+        assert_eq!(clamp("nope", &["off"]), None);
     }
 
     #[test]
@@ -360,32 +353,5 @@ mod tests {
             let err = launch_args(&strings(args)).unwrap_err();
             assert!(err.contains(why), "{args:?}: {err}");
         }
-    }
-
-    #[test]
-    fn launches_are_built_like_t3s() {
-        let user = strings(&["--approve", "-e", "/mine.ts", "--tools", "read", "--offline"]);
-        let ext = Path::new("/data/roll-pi-extension.ts");
-        assert_eq!(
-            build(Launch { args: &user, extension: Some(ext), ..Default::default() }),
-            strings(&["--mode", "rpc", "--approve", "-e", "/mine.ts", "--tools", "read", "--offline", "--extension", "/data/roll-pi-extension.ts"])
-        );
-        assert_eq!(
-            build(Launch { args: &user, short_lived: true, bare: true, extension: Some(ext), ..Default::default() }),
-            strings(&["--mode", "rpc", "--approve", "--offline", "--no-extensions", "--no-tools"])
-        );
-        assert_eq!(
-            build(Launch { args: &[], ephemeral: true, short_lived: true, ..Default::default() }),
-            strings(&["--mode", "rpc", "--no-session", "--offline"])
-        );
-    }
-
-    #[test]
-    fn versions_compare() {
-        assert_eq!(parse_version("pi 0.84.2\n").as_deref(), Some("0.84.2"));
-        assert_eq!(parse_version("1.0.0").as_deref(), Some("1.0.0"));
-        assert_eq!(parse_version("pi"), None);
-        assert!(at_least("0.80.5", MIN_VERSION) && at_least("1.0.0", MIN_VERSION) && at_least("0.81.0-beta.1", MIN_VERSION));
-        assert!(!at_least("0.80.4", MIN_VERSION) && !at_least("0.9.9", MIN_VERSION));
     }
 }

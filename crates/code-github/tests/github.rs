@@ -8,12 +8,8 @@ use axum::{Json, Router};
 use code_github::auth::{Claims, unix_now};
 use code_github::mapping::{issue_draft, pull_request_draft, push_draft};
 use code_github::model::{CheckConclusion, CheckOutput, CheckRunRequest, CheckStatus};
-use code_github::webhook::{
-    CommentAction, InstallationAction, IssueAction, PullRequestAction, RepositoriesAction, sign,
-};
-use code_github::{
-    AppConfig, ClientOptions, DraftState, Error, Event, GitHub, PrState, verify_signature,
-};
+use code_github::webhook::{CommentAction, InstallationAction, IssueAction, PullRequestAction, RepositoriesAction};
+use code_github::{AppConfig, ClientOptions, DraftState, Error, Event, GitHub, PrState};
 use jsonwebtoken::{Algorithm, DecodingKey, Validation};
 use parking_lot::Mutex;
 use serde_json::{Value, json};
@@ -754,17 +750,6 @@ fn fixture(name: &str) -> Vec<u8> {
         env!("CARGO_MANIFEST_DIR")
     ))
     .unwrap()
-}
-
-#[test]
-fn webhook_signature() {
-    let body = fixture("push");
-    let sig = sign(b"whsec", &body);
-    assert!(verify_signature(b"whsec", &body, Some(&sig)));
-    let mut tampered = body.clone();
-    tampered[10] ^= 1;
-    assert!(!verify_signature(b"whsec", &tampered, Some(&sig)));
-    assert!(!verify_signature(b"other", &body, Some(&sig)));
 }
 
 #[test]

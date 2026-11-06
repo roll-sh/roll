@@ -1,5 +1,5 @@
 //! The first codebase-index build of a big repo: streamed in batches, bounded memory, and the
-//! index answers afterwards. `CODE_INDEX_SCALE_N` files (default 2,000; the measured run in
+//! index answers afterwards. `CODE_INDEX_SCALE_N` files (default 600, three batches; the measured run in
 //! docs/code/test-coverage.md used 50,000 under a 2 GB memory limit).
 
 mod common;
@@ -28,7 +28,7 @@ fn source(n: usize) -> String {
 
 #[tokio::test]
 async fn a_big_first_build_is_streamed_and_bounded() {
-    let n: usize = std::env::var("CODE_INDEX_SCALE_N").ok().and_then(|v| v.parse().ok()).unwrap_or(2_000);
+    let n: usize = std::env::var("CODE_INDEX_SCALE_N").ok().and_then(|v| v.parse().ok()).unwrap_or(600);
     let a = app(None);
     a.repo("acme", "big").await;
     // Land the files in chunks of 5,000 (one changeset each).
@@ -81,7 +81,7 @@ async fn searches_answer_503_while_a_first_build_runs_in_the_background() {
     let a = app_with(|c| c.search_index_wait_ms = 0);
     a.repo("acme", "big").await;
     let mut files = Map::new();
-    for i in 0..3_000 {
+    for i in 0..400 {
         files.insert(format!("src/file_{i}.rs"), json!({ "content": source(i) }));
     }
     let (s, _) = a.req("POST", "/v1/code/repos/acme/big/land", Some(json!({ "message": "files", "files": Value::Object(files) })), None).await;

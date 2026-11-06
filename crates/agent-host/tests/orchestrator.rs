@@ -277,7 +277,8 @@ async fn queued_messages_are_edited_reordered_and_sent_now() {
 async fn compact_runs_as_a_compaction_and_steering_it_queues() {
     let caps = Capabilities { steer: true, compact: true, ..Capabilities::default() };
     let fake = FakeProvider::with("codex", caps, Script::Manual);
-    let w = World::new(vec![fake.clone()]).await;
+    let grok = manual("acp:grok", false);
+    let w = World::new(vec![fake.clone(), grok.clone()]).await;
     let thread = w.thread("codex", Some("one"), false).await;
     let session = fake.session(0).await;
     session.emit(ProviderEvent::Context(ContextUsage { used_tokens: 180_000, max_tokens: Some(258_000), total_processed_tokens: None, ..Default::default() }));
@@ -308,6 +309,10 @@ async fn compact_runs_as_a_compaction_and_steering_it_queues() {
     let compaction = s.nodes(&thread).into_iter().find(|n| matches!(n.body, NodeBody::Compaction { .. })).unwrap();
     assert_eq!(compaction.body, NodeBody::Compaction { before_tokens: Some(180_000), after_tokens: Some(30_000), error: None });
     assert_eq!(compaction.run, runs[1].id);
+
+    // On a provider that can't compact, `/compact` is an ordinary message.
+    w.thread("acp:grok", Some("/compact"), false).await;
+    assert_eq!(grok.session(0).await.wait_calls(|c| !c.is_empty()).await, [Call::Send("/compact".into())]);
 }
 
 /// T3's idle compaction before the prompt cache expires: with the machine set to
@@ -351,15 +356,6 @@ async fn an_idle_conversation_compacts_before_its_prompt_cache_expires() {
     assert_eq!(w.state().await.runs(&thread).len(), 2);
     assert_eq!(w.state().await.runs(&quiet).len(), 1);
     assert!(!fake.session(0).await.calls().contains(&Call::Compact));
-}
-
-/// On a provider that can't compact, `/compact` is an ordinary message.
-#[tokio::test]
-async fn compact_is_a_message_where_the_provider_cant() {
-    let fake = manual("acp:grok", false);
-    let w = World::new(vec![fake.clone()]).await;
-    w.thread("acp:grok", Some("/compact"), false).await;
-    assert_eq!(fake.session(0).await.wait_calls(|c| !c.is_empty()).await, [Call::Send("/compact".into())]);
 }
 
 #[tokio::test]
@@ -427,33 +423,6 @@ async fn approvals_wait_and_are_answered_once() {
     assert_eq!(request.resolved_by.as_deref(), Some("owner"));
     let again = w.run(answer(Decision::Accept)).await;
     assert!(matches!(again, Reply::Error(ReplyError { code: ErrorCode::Conflict, .. })), "{again:?}");
-}
-
-#[tokio::test]
-async fn a_withdrawn_request_is_cancelled() {
-    let fake = manual("codex", false);
-    let w = World::new(vec![fake.clone()]).await;
-    let thread = w.thread("codex", Some("ask me"), false).await;
-    let session = fake.session(0).await;
-    session.wait_calls(|c| c.len() == 1).await;
-    session.emit(ProviderEvent::Request {
-        id: "q1".into(),
-        item: None,
-        body: RequestBody::Questions {
-            questions: vec![Question {
-                id: "color".into(),
-                header: "Color".into(),
-                question: "Which?".into(),
-                options: Vec::new(),
-                multi: false,
-            }],
-        },
-    });
-    w.wait_thread(&thread, |t| t.status == ThreadStatus::Waiting).await;
-    session.emit(ProviderEvent::RequestCancelled { id: "q1".into() });
-    let t = w.wait_thread(&thread, |t| t.status == ThreadStatus::Running).await;
-    assert_eq!(t.pending_requests, 0);
-    assert_eq!(w.state().await.requests(&thread)[0].status, RequestStatus::Cancelled);
 }
 
 #[tokio::test]
@@ -685,7 +654,10 @@ async fn a_request_pending_when_the_daemon_stops_is_answered_after_a_restart() {
     // Something else still asks.
     resumed.emit(ProviderEvent::Request { id: "rpc-10".into(), item: None, body: approval("rm -rf dist") });
     wait(&host, |s| s.thread(&thread).filter(|t| t.status == ThreadStatus::Waiting).cloned(), "a new ask").await;
+    // The agent withdraws it: cancelled, and the run goes on.
     resumed.emit(ProviderEvent::RequestCancelled { id: "rpc-10".into() });
+    wait(&host, |s| s.thread(&thread).filter(|t| t.status == ThreadStatus::Running && t.pending_requests == 0).cloned(), "the ask withdrawn").await;
+    assert_eq!(state(&host).await.requests(&thread).iter().filter(|r| r.status == RequestStatus::Cancelled).count(), 1);
 
     // The run completes; the queued message runs next.
     resumed.emit(ProviderEvent::TurnEnded(TurnEnd::Completed));

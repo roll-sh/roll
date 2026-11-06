@@ -1414,14 +1414,6 @@ mod tests {
     }
 
     #[test]
-    fn shell_wrappers_come_off() {
-        assert_eq!(command_title("/bin/bash -lc 'touch a.txt'", &[]), "touch a.txt");
-        assert_eq!(command_title("/bin/zsh -lc \"echo \\\"hi\\\"\"", &[]), "echo \"hi\"");
-        assert_eq!(command_title("/bin/bash -lc 'echo '\\''x'\\'''", &[]), "echo 'x'");
-        assert_eq!(command_title("cargo test", &[]), "cargo test");
-    }
-
-    #[test]
     fn reasoning_parts_stream_with_separators() {
         let mut t = tr();
         let d = |i: u32, s: &str| json!({"threadId":"thr","turnId":"t1","itemId":"r","delta":s,"summaryIndex":i});

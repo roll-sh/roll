@@ -399,10 +399,7 @@ mod tests {
         assert_eq!(split_by_month(t(2026, 1, 31, 23), t(2026, 2, 1, 2)), vec![("2026-01".into(), 3_600_000), ("2026-02".into(), 7_200_000)]);
         assert_eq!(split_by_month(t(2026, 12, 31, 0), t(2027, 1, 1, 1)), vec![("2026-12".into(), 86_400_000), ("2027-01".into(), 3_600_000)]);
         assert_eq!(split_by_month(t(2026, 5, 1, 0), t(2026, 5, 1, 0)), vec![]);
-    }
-
-    #[test]
-    fn running_time_is_priced_by_the_hour() {
+        // Running time is priced by the hour.
         let hour = 3_600_000;
         assert_eq!(round_usd(price_usd(hour, 3)), 0.03);
         assert_eq!(round_usd(price_usd(hour * 3 / 2, 3)), 0.045);
@@ -439,10 +436,7 @@ mod tests {
         for bad in [("ROLL_SANDBOX_IDLE_STOP", "soon"), ("ROLL_SANDBOX_IDLE_STOP", "5d"), ("ROLL_SANDBOX_WAKE_TIMEOUT", "0")] {
             assert!(SandboxConfig::from_lookup(move |k: &str| (k == bad.0).then(|| bad.1.to_string())).is_err(), "{bad:?}");
         }
-    }
-
-    #[test]
-    fn spec_debug_hides_env_values() {
+        // A spec's env values never show in Debug output either.
         let spec = SandboxSpec { id: "sbx_1".into(), name: "n".into(), size: default_sizes()[0].clone(), env: [("ROLL_AGENT_TOKEN".to_string(), "rlm_secret".to_string())].into() };
         let d = format!("{spec:?}");
         assert!(d.contains("ROLL_AGENT_TOKEN") && !d.contains("rlm_secret"), "{d}");

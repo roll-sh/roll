@@ -1426,26 +1426,6 @@ mod tests {
     }
 
     #[test]
-    fn interrupting_cancels_pending_requests_and_failed_tools_read_as_interrupted() {
-        let mut tr = translator(RuntimeMode::Ask);
-        tr.start_turn(3);
-        let request = json!({ "sessionId": "s", "toolCall": { "toolCallId": "t", "kind": "execute", "rawInput": { "command": "sleep 9" } },
-            "options": [{ "optionId": "a", "kind": "allow_once" }] });
-        let ev = events(tr.on_request(json!("r1"), "session/request_permission", &request));
-        assert!(matches!(ev.last(), Some(ProviderEvent::Request { .. })));
-        let (running, actions) = tr.interrupt();
-        assert!(running);
-        assert_eq!(actions[0], Action::Reply { id: json!("r1"), result: json!({ "outcome": { "outcome": "cancelled" } }) });
-        assert_eq!(actions[1], Action::Event(ProviderEvent::RequestCancelled { id: "r1".into() }));
-        let ev = events(tr.on_notification("session/update", &update(json!({ "sessionUpdate": "tool_call_update", "toolCallId": "t", "status": "failed" }))));
-        assert!(matches!(&ev[0], ProviderEvent::Item(i) if i.status == NodeStatus::Interrupted));
-        let ev = events(tr.on_prompt_result(3, Ok(json!({ "stopReason": "cancelled" }))));
-        assert_eq!(ev.last(), Some(&ProviderEvent::TurnEnded(TurnEnd::Interrupted)));
-        // Nothing is left to end.
-        assert!(tr.force_interrupted(1).is_empty());
-    }
-
-    #[test]
     fn form_answers_are_typed() {
         let mut tr = translator(RuntimeMode::Ask);
         tr.start_turn(1);

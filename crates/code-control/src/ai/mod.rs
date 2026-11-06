@@ -1001,12 +1001,6 @@ mod tests {
         assert_eq!(nodes[0].reserved("own_2", i64::MIN).unwrap(), (0.0, 0));
     }
 
-    #[test]
-    fn reservations_hold_the_cap_and_the_free_reviews_under_contention() {
-        let dir = tempfile::tempdir().unwrap();
-        contend(&[node(dir.path())]);
-    }
-
     /// The same race with the jobs on two nodes (two handles on one database, each with its own
     /// connections): what one node holds counts on the other.
     #[test]

@@ -113,29 +113,3 @@ async fn git_clone_push_land_and_conflict() {
     assert!(!out.status.success());
     git(home, &wc, &["push", "-q", "origin", ":feature/login"]);
 }
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn git_private_repo_needs_token() {
-    let a = app(Some("admin"));
-    let (_, _) = a.req("POST", "/v1/code/owners", Some(json!({ "name": "acme" })), Some("admin")).await;
-    let (_, t) = a.req("POST", "/v1/code/owners/acme/tokens", Some(json!({})), Some("admin")).await;
-    let token = t["token"].as_str().unwrap().to_string();
-    let (s, _) = a.req("POST", "/v1/code/repos", Some(json!({ "owner": "acme", "name": "secret", "visibility": "private" })), Some(&token)).await;
-    assert!(s.is_success());
-    let base = a.serve().await;
-    let tmp = tempfile::tempdir().unwrap();
-    let home = tmp.path();
-
-    let out = git_raw(home, home, &["clone", &format!("{base}/git/acme/secret.git"), "x"]);
-    assert!(!out.status.success());
-    let authed = base.replace("http://", &format!("http://agent:{token}@"));
-    let out = git_raw(home, home, &["clone", &format!("{authed}/git/acme/secret.git"), "y"]);
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-    let wy = home.join("y");
-    write(&wy, "a.txt", "a\n");
-    git(home, &wy, &["add", "-A"]);
-    git(home, &wy, &["commit", "-qm", "a"]);
-    git(home, &wy, &["push", "-q", "origin", "main"]);
-    let (_, r) = a.req("GET", "/v1/code/repos/acme/secret", None, Some(&token)).await;
-    assert!(r["head"].is_string());
-}

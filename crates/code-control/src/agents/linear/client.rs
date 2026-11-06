@@ -348,18 +348,14 @@ mod tests {
     }
 
     #[test]
-    fn scopes_come_as_a_string_or_a_list() {
+    fn credentials_never_print() {
+        assert_eq!(format!("{:?}", Auth::Key("lin_api_secret".into())), "Auth::Key([redacted])");
+        assert!(already_made(&LinearError::Failed("Linear: Entity already exists".into())));
+        assert!(!already_made(&LinearError::Failed("Linear: no such team".into())));
         let t: TokenAnswer = serde_json::from_value(json!({ "access_token": "tok-123", "scope": "read write app:assignable" })).unwrap();
         assert_eq!(t.scopes(), "read,write,app:assignable");
         let t: TokenAnswer = serde_json::from_value(json!({ "access_token": "tok-123", "scope": ["read", "write"] })).unwrap();
         assert_eq!(t.scopes(), "read,write");
         assert!(!format!("{t:?}").contains("tok-123"), "tokens never print");
-    }
-
-    #[test]
-    fn credentials_never_print() {
-        assert_eq!(format!("{:?}", Auth::Key("lin_api_secret".into())), "Auth::Key([redacted])");
-        assert!(already_made(&LinearError::Failed("Linear: Entity already exists".into())));
-        assert!(!already_made(&LinearError::Failed("Linear: no such team".into())));
     }
 }

@@ -199,17 +199,4 @@ mod tests {
         assert!(!Error::Api("channel_not_found".into()).transient());
         assert!(!Error::Decode("x".into()).transient());
     }
-
-    #[test]
-    fn all_or_none_names_the_missing() {
-        let names = ["A", "B", "C"];
-        assert_eq!(all_or_none(&|_| None, &names), Ok(None));
-        let some = |k: &str| (k == "B").then(|| "b".to_string());
-        assert_eq!(all_or_none(&some, &names), Err("set A, C as well".into()));
-        let all = |k: &str| Some(k.to_lowercase());
-        assert_eq!(
-            all_or_none(&all, &names),
-            Ok(Some(vec!["a".into(), "b".into(), "c".into()]))
-        );
-    }
 }

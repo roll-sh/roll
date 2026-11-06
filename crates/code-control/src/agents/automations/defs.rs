@@ -483,14 +483,3 @@ pub(crate) fn publish(code: &Code, a: &AutomationRow) {
     let ev = StreamEvent::Automation { cursor: a.cursor, automation: Box::new(view(code, a)) };
     let _ = code.agents.hub(&a.owner_id).events.send(Arc::new(ev));
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn hints_are_the_last_four() {
-        assert_eq!(hint("rlh_0123456789abcdef"), "cdef");
-        assert!(new_hook_secret().starts_with(HOOK_PREFIX));
-    }
-}

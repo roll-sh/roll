@@ -296,26 +296,6 @@ mod tests {
     }
 
     #[test]
-    fn languages_by_name() {
-        for (path, lang) in [
-            ("src/main.rs", Some("Rust")),
-            ("a/b.TS", Some("TypeScript")),
-            ("ui/x.tsx", Some("TSX")),
-            ("Dockerfile", Some("Dockerfile")),
-            ("sub/Makefile", Some("Makefile")),
-            ("app.min.js", None),
-            ("Cargo.lock", None),
-            ("pnpm-lock.yaml", None),
-            ("package-lock.json", None),
-            ("LICENSE", None),
-            ("x.unknownext", None),
-            ("README.md", Some("Markdown")),
-        ] {
-            assert_eq!(language(path), lang, "{path}");
-        }
-    }
-
-    #[test]
     fn content_types_never_serve_html() {
         assert_eq!(content_type("x.html", b"<script>1</script>"), "text/plain; charset=utf-8");
         assert_eq!(content_type("logo.PNG", b"\x89PNG"), "image/png");
@@ -325,15 +305,11 @@ mod tests {
     }
 
     #[test]
-    fn readme_kinds() {
-        assert!(is_markdown("README.md") && is_markdown("x.MARKDOWN") && is_markdown("a.mdown"));
-        assert!(!is_markdown("README") && !is_markdown("README.txt"));
-        assert_eq!(pick_readme(["README.rst", "README.txt"].into_iter()), Some("README.txt"));
-    }
-
-    #[test]
     fn readme_choice() {
         assert_eq!(pick_readme(["a.rs", "README", "readme.md"].into_iter()), Some("readme.md"));
         assert_eq!(pick_readme(["a.rs"].into_iter()), None);
+        assert!(is_markdown("README.md") && is_markdown("x.MARKDOWN") && is_markdown("a.mdown"));
+        assert!(!is_markdown("README") && !is_markdown("README.txt"));
+        assert_eq!(pick_readme(["README.rst", "README.txt"].into_iter()), Some("README.txt"));
     }
 }

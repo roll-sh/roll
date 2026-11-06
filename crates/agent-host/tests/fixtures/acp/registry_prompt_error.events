@@ -1,8 +1,0 @@
-{"native_thread":"grok-replay-session-1"}
-{"model":"grok-build"}
-{"catalog":[{"default":true,"id":"grok-build","name":"Grok Build"}]}
-{"item":{"body":{"input":{"command":"bun run dev"},"kind":"command","name":"execute","title":"bun run dev","type":"tool"},"id":"dev-server","parent":null,"status":"running"}}
-{"item":{"body":{"input":{"command":"bun run dev"},"kind":"command","name":"execute","title":"bun run dev","type":"tool"},"id":"dev-server","parent":null,"status":"running"}}
-{"item":{"body":{"input":{"command":"bun run dev"},"kind":"command","name":"execute","title":"bun run dev","type":"tool"},"id":"dev-server","parent":null,"status":"failed"}}
-{"turn_ended":{"failed":"session/prompt: Internal error: API error (status 400 Bad Request): invalid_request_error: grok prompt error fixture (-32603)"}}
-{"exited":null}

@@ -135,10 +135,13 @@ async fn worktrees_get_their_own_branch_and_removal_keeps_it() {
     let head = git::head(p).await.unwrap().unwrap();
     let branch = git::unique_branch(p, "roll", &git::slug("Fix the bug")).await.unwrap();
     assert_eq!(branch, "roll/fix-the-bug");
+    assert_eq!((git::slug("  ¿¿  ").as_str(), git::slug(&"a".repeat(80)).len()), ("thread", 40));
     git::worktree_add(p, &path, &branch, &head).await.unwrap();
     assert_eq!(std::fs::read_to_string(path.join("a.txt")).unwrap(), "one\ntwo\n");
     assert_eq!(git::current_branch(&path).await.unwrap().as_deref(), Some("roll/fix-the-bug"));
     assert_eq!(git::unique_branch(p, "roll", "fix-the-bug").await.unwrap(), "roll/fix-the-bug-2");
+    // The machine's branch prefix can have slashes.
+    assert_eq!(git::unique_branch(p, "ada/wip", "fix").await.unwrap(), "ada/wip/fix");
 
     // Checkpoints in a worktree work the same, and live in the shared repository.
     std::fs::write(path.join("w.txt"), "in worktree\n").unwrap();
@@ -186,6 +189,10 @@ async fn status_reports_branch_and_changes() {
     let info = git::info(p).await.unwrap();
     assert!(info.dirty);
     assert_eq!(info.branch.as_deref(), Some("main"));
+
+    let dir = tempfile::tempdir().unwrap();
+    assert!(git::root(dir.path()).await.is_none());
+    assert!(git::info(dir.path()).await.is_none());
 }
 
 #[tokio::test]
@@ -213,19 +220,6 @@ async fn publish_commits_and_pushes_the_thread_branch() {
     git::publish(&wt, "roll/feature", "More", None, Some(("Ada Lovelace", email))).await.unwrap();
     let who = sh(remote.path(), &["log", "-1", "--format=%an <%ae>|%cn <%ce>", "roll/feature"]);
     assert_eq!(who.trim(), format!("Ada Lovelace <{email}>|Ada Lovelace <{email}>"));
-}
-
-#[tokio::test]
-async fn branches_take_the_machines_prefix() {
-    let repo = repo();
-    assert_eq!(git::unique_branch(repo.path(), "ada/wip", "fix").await.unwrap(), "ada/wip/fix");
-}
-
-#[tokio::test]
-async fn non_git_directories_have_no_git() {
-    let dir = tempfile::tempdir().unwrap();
-    assert!(git::root(dir.path()).await.is_none());
-    assert!(git::info(dir.path()).await.is_none());
 }
 
 /// A project in a subdirectory of a repository: its checkpoints' diffs, its status and its

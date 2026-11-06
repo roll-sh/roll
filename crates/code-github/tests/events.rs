@@ -213,6 +213,8 @@ fn signature_header_forms() {
     let sig = sign(b"s", body);
     assert!(verify_signature(b"s", body, Some(&sig)));
     assert!(verify_signature(b"s", body, Some(&format!("  {sig} "))), "surrounding whitespace is fine");
+    assert!(!verify_signature(b"other", body, Some(&sig)), "another secret");
+    assert!(!verify_signature(b"s", br#"{"zen":"y"}"#, Some(&sig)), "a tampered body");
     assert!(!verify_signature(b"s", body, None));
     assert!(!verify_signature(b"s", body, Some(&sig.replace("sha256=", "sha1="))));
     assert!(!verify_signature(b"s", body, Some("sha256=zz")));
@@ -261,6 +263,23 @@ fn app_config_errors() {
     })
     .unwrap_err();
     assert!(err.to_string().contains("/nonexistent/key.pem"), "{err}");
+    // A pasted key's `\n`s are unescaped; a GHES API URL; the install link carries its state.
+    let c = AppConfig::from_lookup(|k| match k {
+        "ROLL_GITHUB_PRIVATE_KEY" => Some("-----BEGIN-----\\nabc\\n-----END-----".into()),
+        "ROLL_GITHUB_API_URL" => Some("https://ghe.example/api/v3/".into()),
+        "ROLL_GITHUB_WEB_URL" => None,
+        "ROLL_GITHUB_APP_SLUG" => Some("roll-code".into()),
+        k => full(k),
+    })
+    .unwrap()
+    .unwrap();
+    assert_eq!(c.private_key_pem, "-----BEGIN-----\nabc\n-----END-----");
+    assert_eq!(c.api_base, "https://ghe.example/api/v3");
+    assert_eq!(c.install_url(Some("a b")), "https://github.com/apps/roll-code/installations/new?state=a%20b");
+    assert_eq!(c.bot_login(), "roll-code[bot]");
+    // Nothing set: no App; a bad id is an error.
+    assert!(AppConfig::from_lookup(|_| None).unwrap().is_none());
+    assert!(AppConfig::from_lookup(|k| (k == "ROLL_GITHUB_APP_ID").then(|| "x".into())).is_err());
 }
 
 #[test]

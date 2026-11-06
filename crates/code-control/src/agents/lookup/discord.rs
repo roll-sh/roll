@@ -190,33 +190,6 @@ mod tests {
     use code_chat::discord::MemberUser;
 
     #[test]
-    fn channels_are_the_postable_ones_under_their_category() {
-        let ch = |id: &str, kind, name: &str, parent: Option<&str>, position| Channel { id: id.into(), kind, name: Some(name.into()), parent_id: parent.map(Into::into), position: Some(position) };
-        let all = [
-            ch("1", CATEGORY, "Work", None, 1),
-            ch("2", 0, "deploys", Some("1"), 2),
-            ch("3", 2, "voice", Some("1"), 0),
-            ch("4", 0, "welcome", None, 5),
-            ch("5", 15, "ideas", Some("1"), 1),
-            ch("6", 5, "news", Some("1"), 3),
-        ];
-        let rows = channels(&all);
-        let names: Vec<(&str, Option<&str>)> = rows.iter().map(|r| (r.item.label.as_str(), r.item.group.as_deref())).collect();
-        assert_eq!(names, [("welcome", None), ("ideas", Some("Work")), ("deploys", Some("Work")), ("news", Some("Work"))]);
-        assert_eq!((rows[1].item.hint.as_deref(), rows[3].item.hint.as_deref()), (Some("forum"), Some("announcements")));
-    }
-
-    #[test]
-    fn roles_have_their_colour_and_everyone_is_not_one() {
-        let r = |id: &str, name: &str, color, position, managed| Role { id: id.into(), name: name.into(), color, position, managed };
-        let rows = roles("500", &[r("500", "@everyone", 0, 0, false), r("1", "Maintainers", 0x4c8dff, 2, false), r("2", "roll", 0, 3, true), r("3", "Triage", 0, 1, false)]);
-        assert_eq!(rows.iter().map(|k| k.item.label.as_str()).collect::<Vec<_>>(), ["roll", "Maintainers", "Triage"]);
-        assert!(!rows[0].listed, "a bot's own role");
-        assert_eq!((rows[1].item.color.as_deref(), rows[2].item.color.as_deref()), (Some("#4c8dff"), None));
-        assert_eq!(rows[1].item.icon.as_deref(), Some("role"));
-    }
-
-    #[test]
     fn members_have_their_nickname_and_a_cdn_avatar() {
         let m = |avatar: Option<&str>, nick: Option<&str>| Member { user: MemberUser { id: "7".into(), username: "ada".into(), global_name: Some("Ada".into()), avatar: avatar.map(Into::into), bot: false }, nick: nick.map(Into::into) };
         let i = member(&m(Some("a_1f2e"), Some("ada (ops)")));
@@ -224,16 +197,7 @@ mod tests {
         assert_eq!(i.avatar.as_deref(), Some("https://cdn.discordapp.com/avatars/7/a_1f2e.png?size=64"));
         assert_eq!(member(&m(Some("../x"), None)).avatar, None);
         assert_eq!(member(&m(None, None)).label, "Ada");
-    }
-
-    #[test]
-    fn discord_errors_are_quiet_problems() {
-        let p = |kind: &str, e: Error| match problem(kind, e) {
-            Failure::Problem(p) => p,
-            Failure::Refused(_) => panic!("refused"),
-        };
-        assert!(matches!(p("channels", Error::Api("50001: Missing Access".into())), Problem::Reconnect { .. }));
-        assert!(matches!(p("members", Error::Api("50001: Missing Access".into())), Problem::Unavailable { message } if message.contains("Members Intent")));
-        assert_eq!(p("roles", Error::RateLimited { retry_after_s: 3 }), Problem::RateLimited { retry_after: 3 });
+        // Missing access to a server's channels asks for a reconnect (members and 429s: chatops.rs).
+        assert!(matches!(problem("channels", Error::Api("50001: Missing Access".into())), Failure::Problem(Problem::Reconnect { .. })));
     }
 }

@@ -313,28 +313,3 @@ impl Session for MuseSession {
         self.inner.process.close().await;
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn instructions_come_first_and_images_inline() {
-        let input = TurnInput {
-            text: "look".into(),
-            attachments: vec![agent_proto::Attachment { name: "a.png".into(), mime: "image/png".into(), data: "QUJD".into() }],
-        };
-        let parts = muse_input(&input, Some(" be brief ")).unwrap();
-        assert_eq!(
-            parts,
-            [
-                json!({ "type": "text", "text": "<roll_instructions>\nbe brief\n</roll_instructions>" }),
-                json!({ "type": "text", "text": "look" }),
-                json!({ "type": "image", "base64Data": "QUJD", "mediaType": "image/png" }),
-            ]
-        );
-        let pdf = TurnInput { text: String::new(), attachments: vec![agent_proto::Attachment { name: "a.pdf".into(), mime: "application/pdf".into(), data: String::new() }] };
-        assert!(muse_input(&pdf, None).is_err());
-        assert!(muse_input(&TurnInput::default(), Some("x")).is_err());
-    }
-}

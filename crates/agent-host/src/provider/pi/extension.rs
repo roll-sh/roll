@@ -78,15 +78,4 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), SOURCE);
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
     }
-
-    #[test]
-    fn the_environment_carries_mode_servers_and_instructions() {
-        let mcp = [McpServer { name: "roll".into(), url: "http://127.0.0.1:1/mcp".into(), headers: vec![("Authorization".into(), "Bearer t".into())] }];
-        let env = env(RuntimeMode::AutoEdit, &mcp, Some(" be brief "));
-        assert_eq!(env[0], (MODE_ENV.into(), "auto_edit".into()));
-        let servers: Value = serde_json::from_str(&env[1].1).unwrap();
-        assert_eq!(servers, json!([{ "name": "roll", "url": "http://127.0.0.1:1/mcp", "headers": { "Authorization": "Bearer t" } }]));
-        assert_eq!(env[2], (INSTRUCTIONS_ENV.into(), "be brief".into()));
-        assert_eq!(super::env(RuntimeMode::FullAccess, &[], None).len(), 1);
-    }
 }

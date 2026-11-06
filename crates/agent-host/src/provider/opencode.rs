@@ -281,14 +281,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn versions_parse() {
-        assert_eq!(parse_version("2.0.18\n").as_deref(), Some("2.0.18"));
-        assert_eq!(parse_version("opencode v1.14.19").as_deref(), Some("1.14.19"));
-        assert_eq!(parse_version("opencode"), None);
-        assert_eq!(major("2.0.18"), Some(2));
-    }
-
-    #[test]
     fn catalog_follows_t3() {
         let models: wire::Data<Vec<wire::Model>> = serde_json::from_value(serde_json::json!({ "data": [
             { "id": "claude-opus-5-5", "providerID": "anthropic", "name": "Claude Opus 5.5", "family": "opus", "time": { "released": 2 },

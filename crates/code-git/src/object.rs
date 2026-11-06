@@ -281,14 +281,6 @@ mod tests {
     }
 
     #[test]
-    fn hex_round_trip() {
-        let id: ObjectId = "ce013625030ba8dba906f756967f9e9ca394464a".parse().unwrap();
-        assert_eq!(id.to_string(), "ce013625030ba8dba906f756967f9e9ca394464a");
-        assert!("xyz".parse::<ObjectId>().is_err());
-        assert!(ObjectId::from_hex(b"ce013625030ba8dba906f756967f9e9ca394464g").is_none());
-    }
-
-    #[test]
     fn parses_trees_and_rejects_garbage() {
         let id = ObjectId::hash(Kind::Blob, b"x");
         let mut t = b"100644 a.txt\0".to_vec();

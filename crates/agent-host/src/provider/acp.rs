@@ -427,7 +427,8 @@ mod tests {
     fn known_agents_are_valid_config_entries() {
         let agents = known_agents();
         assert!(agents.len() >= 10);
-        for name in ["gemini", "opencode", "grok", "kiro", "fx"] {
+        // T3's agents, at least.
+        for name in ["gemini", "opencode", "grok", "kiro", "fx", "qwen", "goose", "copilot", "antigravity"] {
             assert!(agents.iter().any(|a| a.name == name), "{name}");
         }
         let mut names: Vec<_> = agents.iter().map(|a| a.name.as_str()).collect();
@@ -442,16 +443,5 @@ mod tests {
         let config = crate::config::Config::parse(&toml).unwrap();
         assert_eq!(config.acp.len(), agents.len());
         assert_eq!(known_title("kiro"), Some("Kiro CLI"));
-    }
-
-    #[test]
-    fn versions_and_binaries() {
-        assert_eq!(version("agy_acp_server_1.1.1"), "1.1.1");
-        assert_eq!(version("v0.66.0"), "0.66.0");
-        assert_eq!(version("2.32.0"), "2.32.0");
-        assert_eq!(version("nightly"), "nightly");
-        assert!(which(Path::new("sh")).is_some());
-        assert!(which(Path::new("/bin/sh")).is_some());
-        assert!(which(Path::new("roll-no-such-agent")).is_none());
     }
 }

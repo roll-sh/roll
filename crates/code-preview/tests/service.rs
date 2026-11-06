@@ -282,9 +282,10 @@ async fn interrupted_checks_resume_after_a_restart() {
 }
 
 /// A pull request from a fork is code from someone without write access: roll doesn't run its
-/// checks (or start its preview) on its own. The trusted change next to it still runs.
+/// checks (or start its preview) on its own; the trusted change next to it still runs. Approved,
+/// it runs; a queued change's checks run as well.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn fork_changes_run_nothing_on_their_own() {
+async fn approved_fork_changes_and_queued_changes_run_their_checks() {
     let a = app(true, TOML).await;
     let input = json!({ "title": "from a fork", "message": "fork", "files": { "x": { "content": "1" }, "n": { "content": "fork" } } });
     let fork = a.code.create_change_as(&a.repo, &code_control::Caller::Admin, &input, None, false).await.unwrap();
@@ -295,6 +296,14 @@ async fn fork_changes_run_nothing_on_their_own() {
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert!(a.get(&fork.id).checks.is_empty(), "{:?}", a.get(&fork.id).checks);
     assert!(a.runner.runs.lock().iter().all(|(_, n)| n != "fork"), "the fork's tree ran");
+    a.code.approve_run(&a.repo, &code_control::Caller::Admin, &fork).unwrap();
+    until("the approved fork's check", 10, || a.get(&fork.id).checks.into_iter().find(|k| k.status == CheckStatus::Success)).await;
+    assert!(a.runner.runs.lock().iter().any(|(_, n)| n == "fork"));
+
+    // A queued change's checks run as well (and their results stay with it).
+    let c = a.change(json!({ "x": { "content": "q" } })).await;
+    a.code.enqueue(&a.repo, &c, code_control::model::Lane::Normal, &code_control::Caller::Admin).await.unwrap();
+    until("the queued change's check", 10, || a.get(&c.id).checks.into_iter().find(|k| k.status == CheckStatus::Success)).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -317,21 +326,4 @@ async fn auto_revert_undoes_the_change_that_broke_main() {
     assert_eq!(&status.data[..], b"pass", "main is back to passing");
     assert!(a.code.store.read_file(&a.repo.id, &head, "other").await.unwrap().is_some(), "only the culprit was reverted");
     until("the item to finish", 10, || (a.code.work_or_404(&item.id).unwrap().state == code_control::model::WorkState::Done).then_some(())).await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn approved_fork_changes_and_queued_changes_run_their_checks() {
-    let a = app(true, TOML).await;
-    let input = json!({ "title": "from a fork", "message": "fork", "files": { "x": { "content": "1" }, "n": { "content": "fork" } } });
-    let fork = a.code.create_change_as(&a.repo, &code_control::Caller::Admin, &input, None, false).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    assert!(a.get(&fork.id).checks.is_empty());
-    a.code.approve_run(&a.repo, &code_control::Caller::Admin, &fork).unwrap();
-    until("the approved fork's check", 10, || a.get(&fork.id).checks.into_iter().find(|k| k.status == CheckStatus::Success)).await;
-    assert!(a.runner.runs.lock().iter().any(|(_, n)| n == "fork"));
-
-    // A queued change's checks run as well (and their results stay with it).
-    let c = a.change(json!({ "x": { "content": "q" } })).await;
-    a.code.enqueue(&a.repo, &c, code_control::model::Lane::Normal, &code_control::Caller::Admin).await.unwrap();
-    until("the queued change's check", 10, || a.get(&c.id).checks.into_iter().find(|k| k.status == CheckStatus::Success)).await;
 }

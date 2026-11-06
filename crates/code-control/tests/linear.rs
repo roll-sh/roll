@@ -455,6 +455,12 @@ async fn an_api_key_connects_and_its_webhook_is_verified() {
     assert_eq!(v["app"]["oauth"], true);
     let (s, _) = w.a.req("PUT", "/v1/code/agents/acme/linear/key", Some(json!({ "key": KEY })), Some(&w.agent)).await;
     assert_eq!(s, StatusCode::FORBIDDEN, "agent tokens don't manage the owner's Linear");
+    // The trigger needs a connection; agent sessions need roll as an app, not an API key.
+    let reg = &w.a.code.automations.registry;
+    let owner = OwnerRef { id: w.owner_id.clone(), name: "acme".into() };
+    let t = reg.trigger("linear").unwrap();
+    assert!(t.needs_setup(&owner));
+    assert!(t.check(&owner, &["issue.created".into()], &Value::Null).unwrap_err().contains("connect Linear"));
 
     let (s, v) = w.req("PUT", "/v1/code/agents/acme/linear/key", Some(json!({ "key": "lin_api_wrong" }))).await;
     assert_eq!(s, StatusCode::BAD_REQUEST, "a key Linear refuses: {v}");
@@ -467,6 +473,8 @@ async fn an_api_key_connects_and_its_webhook_is_verified() {
     assert_eq!(c["webhook"]["mode"], "workspace", "roll made the webhook itself");
     assert_eq!(c["webhook"]["status"], "waiting");
     assert!(!v.to_string().contains(KEY), "the key is never returned");
+    assert!(t.check(&owner, &["issue.created".into()], &Value::Null).is_ok());
+    assert!(t.check(&owner, &["agent_session.created".into()], &Value::Null).unwrap_err().contains("OAuth"));
     let secret = w.mock.s.lock().webhook_secret.clone().expect("roll gave Linear a signing secret");
     let made = &w.mock.ops("RollWebhook")[0]["input"];
     let hook_url = c["webhook"]["url"].as_str().unwrap();
@@ -796,19 +804,6 @@ async fn linear_steps_comment_update_link_create_and_post_activities() {
     assert!(cat.steps.iter().filter(|s| s.integration.as_deref() == Some("linear")).count() >= 6);
 }
 
-#[tokio::test]
-async fn sessions_need_roll_as_an_app_not_an_api_key() {
-    let w = world().await;
-    let reg = &w.a.code.automations.registry;
-    let owner = OwnerRef { id: w.owner_id.clone(), name: "acme".into() };
-    let t = reg.trigger("linear").unwrap();
-    assert!(t.needs_setup(&owner));
-    assert!(t.check(&owner, &["issue.created".into()], &Value::Null).unwrap_err().contains("connect Linear"));
-    w.req("PUT", "/v1/code/agents/acme/linear/key", Some(json!({ "key": KEY }))).await;
-    assert!(t.check(&owner, &["issue.created".into()], &Value::Null).is_ok());
-    assert!(t.check(&owner, &["agent_session.created".into()], &Value::Null).unwrap_err().contains("OAuth"));
-}
-
 /// A daemon with a fake `codex` that plays T3's demo turn (it asks to run a command, then
 /// finishes), connected as machine `box`, its clones in a temp dir.
 struct Daemon {
@@ -1046,7 +1041,6 @@ async fn mentioning_roll_on_an_issue_runs_the_linear_agent_end_to_end() {
     assert!(prompt.contains("ENG-12: Fix login") && prompt.contains("@roll please fix this"), "{prompt}");
 }
 
-
 /// The dashboard's copy of Linear's catalog (`apps/dashboard/src/lib/linear-catalog.json`: the
 /// demo and the template checks use it) is the server's. `ROLL_FIXTURES=write` rewrites it.
 #[tokio::test]
@@ -1068,26 +1062,8 @@ async fn the_dashboard_has_linear_s_catalog() {
 /// The pickers' lookups (`GET/POST /v1/code/agents/{owner}/lookup/linear/{kind}`, lookup/linear.rs):
 /// rows through the owner's connection with Linear's filters and cursors, never its key; pages
 /// served again from the cache until a write through roll (a new label) drops them; stored values
-/// resolved; and the problems said quietly (not connected, a rate limit that holds Linear off).
-#[tokio::test]
-async fn roll_is_one_row_in_a_users_picker_when_installed_as_an_app() {
-    // Installed as an app, roll is a user of the workspace; the field's own `roll` row stands for
-    // it, so the users list leaves it out (with a key, the key's user is a person: kept).
-    let w = world().await;
-    let base = "/v1/code/agents/acme/lookup/linear";
-    let (s, v) = w.req("PUT", "/v1/code/agents/acme/linear/key", Some(json!({ "key": KEY }))).await;
-    assert_eq!(s, StatusCode::OK, "{v}");
-    let (_, v) = w.req("GET", &format!("{base}/users?cursor=c1"), None).await;
-    let ids: Vec<&str> = v["items"].as_array().unwrap().iter().map(|i| i["id"].as_str().unwrap()).collect();
-    assert_eq!(ids, ["user-cy", "app-user"], "{v}");
-    let (s, _) = w.req("DELETE", "/v1/code/agents/acme/linear", None).await;
-    assert!(s.is_success(), "{s}");
-    w.install().await;
-    let (_, v) = w.req("GET", &format!("{base}/users?cursor=c1"), None).await;
-    let ids: Vec<&str> = v["items"].as_array().unwrap().iter().map(|i| i["id"].as_str().unwrap()).collect();
-    assert_eq!(ids, ["user-cy"], "{v}");
-}
-
+/// resolved; the problems said quietly (not connected, a rate limit that holds Linear off); and
+/// roll one row in a users picker when installed as an app.
 #[tokio::test]
 async fn pickers_look_up_linear_through_the_owners_connection() {
     let w = world().await;
@@ -1130,7 +1106,8 @@ async fn pickers_look_up_linear_through_the_owners_connection() {
     assert!(v["items"][1].get("avatar").is_none(), "{v}");
     assert_eq!(w.mock.ops("RollLookupUsers")[0]["filter"], json!({ "active": { "eq": true } }));
     let (_, v) = w.req("GET", &format!("{base}/users?limit=2&cursor=c1"), None).await;
-    assert_eq!(v["items"][0]["id"], "user-cy");
+    let ids: Vec<&str> = v["items"].as_array().unwrap().iter().map(|i| i["id"].as_str().unwrap()).collect();
+    assert_eq!(ids, ["user-cy", "app-user"], "with a key, roll's app user is a person like any other: {v}");
     assert_eq!(w.mock.ops("RollLookupUsers")[1]["after"], "c1");
 
     // Labels: a group isn't a row, its labels say it; a team's labels with the workspace's.
@@ -1181,4 +1158,12 @@ async fn pickers_look_up_linear_through_the_owners_connection() {
     assert_eq!(s, StatusCode::NO_CONTENT);
     let (_, v) = w.req("GET", &format!("{base}/teams?q=en"), None).await;
     assert_eq!(v["problem"]["code"], "not_connected", "{v}");
+
+    // Installed as an app, roll is a user of the workspace; the field's own `roll` row stands for
+    // it, so the users list leaves it out.
+    w.mock.s.lock().rate_limited = false;
+    w.install().await;
+    let (_, v) = w.req("GET", &format!("{base}/users?cursor=c1"), None).await;
+    let ids: Vec<&str> = v["items"].as_array().unwrap().iter().map(|i| i["id"].as_str().unwrap()).collect();
+    assert_eq!(ids, ["user-cy"], "{v}");
 }

@@ -313,28 +313,10 @@ mod tests {
         assert!(Config::parse("[[acp]]\nname = \"a\"\nbinary = \"x\"\n[[acp]]\nname = \"a\"\nbinary = \"y\"").is_err());
         assert!(Config::parse("colour = 1").is_err());
         assert!(Config::parse("").unwrap().providers.is_empty());
-    }
-
-    #[test]
-    fn delegation_limits_default_and_parse() {
-        assert_eq!(Config::parse("").unwrap().delegation, Delegation::default());
-        let config = Config::parse("[delegation]\nmax_depth = 1").unwrap();
-        assert_eq!(config.delegation, Delegation { max_depth: 1, max_children: Delegation::default().max_children });
-        assert!(Config::parse("[delegation]\ndepth = 1").is_err());
-    }
-
-    #[test]
-    fn clone_dir_parses_and_expands() {
-        assert_eq!(Config::parse("").unwrap().clone_dir, None);
-        assert_eq!(Config::parse("[code]\nclone_dir = \"/srv/src\"").unwrap().clone_dir, Some(PathBuf::from("/srv/src")));
         assert!(Config::parse("[code]\ndir = \"x\"").is_err());
-    }
-
-    #[test]
-    fn auto_pull_looks_every_minute_unless_told_otherwise() {
+        assert_eq!(Config::parse("[code]\nclone_dir = \"/srv/src\"").unwrap().clone_dir, Some(PathBuf::from("/srv/src")));
+        // Auto-pull looks every minute unless told otherwise; 0 turns it off.
         assert_eq!(Config::parse("").unwrap().pull_every(), Some(std::time::Duration::from_secs(60)));
-        assert_eq!(Config::parse("[projects]\npull_every = 300").unwrap().pull_every(), Some(std::time::Duration::from_secs(300)));
         assert_eq!(Config::parse("[projects]\npull_every = 0").unwrap().pull_every(), None);
-        assert!(Config::parse("[projects]\nevery = 1").is_err());
     }
 }

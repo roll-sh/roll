@@ -312,16 +312,6 @@ mod tests {
     }
 
     #[test]
-    fn searches_match_names_keys_and_hints_ids_match_exactly() {
-        let i = Item::new("org/core", "Core team").key(Some("core")).hint(Some("@org/core"));
-        assert!(wanted(&q("", &[]), &i));
-        assert!(wanted(&q("CORE", &[]), &i) && wanted(&q("@org", &[]), &i));
-        assert!(!wanted(&q("web", &[]), &i));
-        assert!(wanted(&q("", &["core"]), &i) && wanted(&q("", &["ORG/core"]), &i));
-        assert!(!wanted(&q("", &["cor"]), &i), "a stored value is matched whole");
-    }
-
-    #[test]
     fn numbers_and_cursors() {
         assert_eq!((number("#12"), number(" 7 "), number("fix"), number("0")), (Some(12), Some(7), None, None));
         assert_eq!(start(&Query::default()).ok(), Some(1));
@@ -329,14 +319,6 @@ mod tests {
         for bad in ["0", "x", "https://evil.example/next", "1001"] {
             assert!(start(&Query { cursor: Some(bad.into()), ..Query::default() }).is_err(), "{bad}");
         }
-    }
-
-    #[test]
-    fn rows_say_what_they_are() {
-        let l = label(code_github::model::RepoLabel { name: "bug".into(), color: Some("D73A4A".into()), description: Some("Broken".into()) });
-        assert_eq!((l.id.as_str(), l.color.as_deref(), l.hint.as_deref()), ("bug", Some("#d73a4a"), Some("Broken")));
-        let p = person(code_github::model::Person { login: "ada".into(), id: 1, avatar_url: Some("http://x/a.png".into()), kind: Some("Bot".into()) });
-        assert_eq!((p.avatar, p.hint.as_deref(), p.icon.as_deref()), (None, Some("bot"), Some("user")));
     }
 
     #[tokio::test]

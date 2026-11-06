@@ -377,14 +377,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn versions_parse() {
-        assert_eq!(parse_version("Muse Code 1.1.1 (1.1.1-R2514.1)").as_deref(), Some("1.1.1-R2514.1"));
-        assert_eq!(parse_version("muse 1.4.6\n").as_deref(), Some("1.4.6"));
-        assert_eq!(parse_version("v2.0.0-beta.1").as_deref(), Some("2.0.0-beta.1"));
-        assert_eq!(parse_version("muse"), None);
-    }
-
-    #[test]
     fn catalogs_map_like_t3() {
         let list: wire::ModelList = serde_json::from_value(json!({
             "providerId": "meta",

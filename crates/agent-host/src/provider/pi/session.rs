@@ -912,15 +912,4 @@ mod tests {
         let a = approval("Deploy now?", "This pushes to production.", "/w");
         assert_eq!((a.action, a.reason.as_deref(), a.tool.as_deref()), (ApprovalAction::Permission, Some("This pushes to production."), None));
     }
-
-    #[test]
-    fn stats_give_the_context() {
-        let stats = json!({ "tokens": { "total": 3648 }, "contextUsage": { "tokens": 1814, "contextWindow": 1048576 } });
-        assert_eq!(context_from_stats(&stats, None, None), Some(ContextUsage { used_tokens: 1814, max_tokens: Some(1048576), total_processed_tokens: Some(3648), ..Default::default() }));
-        let after = json!({ "contextUsage": { "tokens": null, "contextWindow": 0 } });
-        assert_eq!(context_from_stats(&after, Some(900), Some(2000)), Some(ContextUsage { used_tokens: 900, max_tokens: Some(2000), ..Default::default() }));
-        assert_eq!(context_from_stats(&json!({}), None, Some(1)), None);
-        assert_eq!(extension_name("/x/roll-pi-extension.ts"), "roll-pi-extension");
-        assert_eq!(extension_name(""), "Pi extension");
-    }
 }

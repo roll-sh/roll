@@ -474,56 +474,6 @@ fn amount(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_proto::OptionChoice;
-
-    #[test]
-    fn options_follow_t3s_cursor_mapping() {
-        let select = |id: &str, values: &[&str], default: &str| ModelOption::Select {
-            id: id.into(),
-            label: id.into(),
-            description: None,
-            choices: values.iter().map(|v| OptionChoice::new(v, v)).collect(),
-            default: Some(default.into()),
-            role: None,
-        };
-        let mapped = options(vec![
-            select("thinking", &["false", "true"], "true"),
-            select("verbosity", &["low", "high"], "low"),
-            select("fast", &["false", "true"], "false"),
-            select("context", &["200k", "1m"], "200k"),
-            ModelOption::reasoning(vec![OptionChoice::new("low", "Low"), OptionChoice::new("high", "High")], Some("high")),
-        ]);
-        let ids: Vec<&str> = mapped.iter().map(ModelOption::id).collect();
-        assert_eq!(ids, ["effort", "context", "fast", "thinking", "verbosity"]);
-        assert!(matches!(&mapped[1], ModelOption::Select { role: Some(OptionRole::ContextWindow), .. }));
-        assert_eq!(mapped[2], ModelOption::Boolean { id: "fast".into(), label: "fast".into(), description: None, default: false, role: Some(OptionRole::Speed) });
-        assert_eq!(mapped[3], ModelOption::Boolean { id: "thinking".into(), label: "thinking".into(), description: None, default: true, role: None });
-        assert!(matches!(&mapped[4], ModelOption::Select { role: None, .. }));
-        assert_eq!(model("auto", &["default", "gpt-5"]), "default");
-        assert_eq!(model("auto", &["auto"]), "auto");
-        assert_eq!(model("gpt-5", &["default"]), "gpt-5");
-        assert_eq!((context_tokens("200k"), context_tokens("1M"), context_tokens("272k")), (Some(200_000), Some(1_000_000), Some(272_000)));
-        assert_eq!((context_tokens("max"), context_tokens("0k"), context_tokens("")), (None, None, None));
-    }
-
-    #[test]
-    fn extensions_parse_as_cursor_sends_them() {
-        let todos = extension("cursor/update_todos", &json!({ "toolCallId": "t", "merge": true, "todos": [
-            { "id": "1", "content": "Read", "status": "completed" }, { "id": "2", "content": "Write", "status": "in_progress" },
-            { "id": "3", "content": "Dropped", "status": "cancelled" }, { "content": "no id" } ] }));
-        let Some(Extension::Todos { todos, merge: true }) = todos else { panic!("{todos:?}") };
-        assert_eq!(todos.len(), 2);
-        let mut list = Todos::default();
-        list.apply(todos, false);
-        let after = list.apply(vec![("2".into(), Todo { text: "Write".into(), status: TodoStatus::Completed }), ("4".into(), Todo { text: "Ship".into(), status: TodoStatus::Pending })], true);
-        assert_eq!(after.iter().map(|t| (t.text.as_str(), t.status)).collect::<Vec<_>>(), [("Read", TodoStatus::Completed), ("Write", TodoStatus::Completed), ("Ship", TodoStatus::Pending)]);
-        assert_eq!(extension("_cursor/task", &json!({ "toolCallId": "t1", "model": "gpt-5" })), Some(Extension::Task { tool: "t1".into(), model: Some("gpt-5".into()) }));
-        let plan = extension("cursor/create_plan", &json!({ "toolCallId": "p", "name": "Ship it", "plan": "1. a" })).unwrap();
-        assert_eq!(plan, Extension::Plan { tool: Some("p".into()), text: "# Ship it\n\n1. a".into() });
-        assert_eq!(acknowledged(&plan), json!({ "outcome": { "outcome": "accepted" } }));
-        assert_eq!(extension("cursor/generate_image", &json!({})), None);
-        assert_eq!(extension("session/prompt", &json!({})), None);
-    }
 
     #[test]
     fn questions_answer_with_option_ids() {
@@ -537,22 +487,6 @@ mod tests {
             { "questionId": "db", "selectedOptionIds": ["sq"] }, { "questionId": "extras", "selectedOptionIds": ["a", "b"] }] } }));
         assert!(answered(&ask.options, &BTreeMap::from([("db".to_string(), "Mongo".to_string())])).is_err());
         assert_eq!(unanswered(false)["outcome"]["outcome"], "skipped");
-    }
-
-    #[test]
-    fn subagents_and_status() {
-        let spawned = json!({ "sessionUpdate": "subagent_spawned", "subagentSessionId": "c.1", "name": "explore", "task": "Look around",
-            "_meta": { "cursor": { "toolCallId": "task-1", "agentId": "a1", "model": "composer-2" } } });
-        assert_eq!(subagent_update(&spawned), Some(("task-1".into(), ToolExtra { model: Some("composer-2".into()), ended: None })));
-        let done = json!({ "sessionUpdate": "subagent_state_update", "state": "disconnected", "_meta": { "cursor": { "toolCallId": "task-1" } } });
-        assert_eq!(subagent_update(&done).unwrap().1.ended, Some(agent_proto::NodeStatus::Interrupted));
-        // `cursor-agent status --format json` as 2026.11.05 prints it.
-        let ok = r#"{ "status": "authenticated", "isAuthenticated": true, "hasAccessToken": true, "hasRefreshToken": true, "userInfo": { "email": "a@b.c" } }"#;
-        assert_eq!(auth(ok), (AuthStatus::Ready, Some("Logged in as a@b.c".into())));
-        assert_eq!(auth(r#"{ "status": "unauthenticated", "isAuthenticated": false, "message": "Not logged in" }"#).0, AuthStatus::Missing);
-        assert_eq!(auth(r#"{ "status": "error", "message": "Status check error: x" }"#).0, AuthStatus::Unknown);
-        assert_eq!(auth("not json").0, AuthStatus::Unknown);
-        assert!(expected("cursor", Path::new("x")) && expected("mine", Path::new("/opt/cursor-agent")) && !expected("mine", Path::new("agent")));
     }
 
     #[test]

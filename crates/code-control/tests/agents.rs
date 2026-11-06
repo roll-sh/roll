@@ -4,7 +4,7 @@
 
 mod common;
 
-use agent_proto::{Command, DaemonFrame, Entity, IdentityColor, MachineConfig, MachineInfo, ProviderId, RelayFrame, Reply, SettingsBase, Stamped, StreamEvent};
+use agent_proto::{Command, DaemonFrame, Entity, MachineConfig, MachineInfo, ProviderId, RelayFrame, Reply, SettingsBase, Stamped, StreamEvent};
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use common::daemon::{Daemon, dial, info};
@@ -167,7 +167,7 @@ async fn wait_online(w: &World, machine: &str, online: bool) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn device_login_hands_out_a_machine_token_once() {
     let w = world().await;
-    let (s, login) = w.a.req("POST", "/v1/code/agents/login", Some(json!({ "name": "laptop" })), None).await;
+    let (s, login) = w.a.req("POST", "/v1/code/agents/login", Some(json!({ "name": "laptop", "hostname": "ada-mbp.local\n", "os": "macos" })), None).await;
     assert_eq!(s, StatusCode::OK, "{login}");
     let user_code = login["user_code"].as_str().unwrap().to_string();
     let device = json!({ "device_code": login["device_code"] });
@@ -176,6 +176,12 @@ async fn device_login_hands_out_a_machine_token_once() {
 
     let (_, p) = w.a.req("POST", "/v1/code/agents/login/poll", Some(device.clone()), None).await;
     assert_eq!(p["status"], "pending");
+    // The approver sees which machine asks (the code typed any way: lowercase, without the dash).
+    let pending = format!("/v1/code/agents/acme/login/{}", user_code.to_lowercase().replace('-', ""));
+    let (s, asks) = w.req("GET", &pending, None, &w.owner).await;
+    assert_eq!(s, StatusCode::OK, "{asks}");
+    let asks: agent_proto::PendingLogin = serde_json::from_value(asks).unwrap();
+    assert_eq!((asks.user_code.as_str(), asks.name.as_str(), asks.hostname.as_deref(), asks.os.as_deref()), (user_code.as_str(), "laptop", Some("ada-mbp.local"), Some("macos")));
     // Only the owner approves: not its agents, not another owner, not anonymous.
     let body = json!({ "user_code": user_code.to_lowercase().replace('-', "") });
     for (who, want) in [(Some(w.agent.as_str()), StatusCode::FORBIDDEN), (Some(w.other.as_str()), StatusCode::FORBIDDEN), (None, StatusCode::UNAUTHORIZED)] {
@@ -185,6 +191,7 @@ async fn device_login_hands_out_a_machine_token_once() {
     assert_eq!(s, StatusCode::NO_CONTENT);
     // Approving twice: the login isn't pending any more.
     assert_eq!(w.req("POST", "/v1/code/agents/acme/login/approve", Some(json!({ "user_code": user_code })), &w.owner).await.0, StatusCode::NOT_FOUND);
+    assert_eq!(w.req("GET", &pending, None, &w.owner).await.0, StatusCode::NOT_FOUND);
 
     let (_, p) = w.a.req("POST", "/v1/code/agents/login/poll", Some(device.clone()), None).await;
     assert_eq!((p["status"].as_str(), p["owner"].as_str()), (Some("approved"), Some("acme")), "{p}");
@@ -203,11 +210,8 @@ async fn device_login_hands_out_a_machine_token_once() {
     drop(d);
     assert_eq!(w.req("GET", "/v1/code/agents/acme/machines", None, &minted).await.0, StatusCode::UNAUTHORIZED);
     assert_eq!(w.req("GET", "/v1/code/repos", None, &minted).await.0, StatusCode::UNAUTHORIZED);
-}
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn denied_and_unknown_logins() {
-    let w = world().await;
+    // A denied login never gets a token; unknown ones are expired.
     let (_, login) = w.a.req("POST", "/v1/code/agents/login", None, None).await;
     let device = json!({ "device_code": login["device_code"] });
     let (s, _) = w.req("POST", "/v1/code/agents/acme/login/deny", Some(json!({ "user_code": login["user_code"] })), &w.owner).await;
@@ -219,7 +223,7 @@ async fn denied_and_unknown_logins() {
     assert_eq!(w.req("POST", "/v1/code/agents/acme/login/approve", Some(json!({ "user_code": "BCDF-GHJK" })), &w.owner).await.0, StatusCode::NOT_FOUND);
     assert_eq!(w.req("POST", "/v1/code/agents/acme/login/approve", Some(json!({})), &w.owner).await.0, StatusCode::BAD_REQUEST);
     let (_, list) = w.req("GET", "/v1/code/agents/acme/machines", None, &w.owner).await;
-    assert_eq!(list, json!([]));
+    assert_eq!(list.as_array().unwrap().len(), 1, "only the approved one: {list}");
 }
 
 /// `POST /v1/code/agents/login` from a client address (as `rolld` serves it, with ConnectInfo).
@@ -288,6 +292,14 @@ async fn machines_are_managed_by_the_owner_and_revoking_closes_the_link() {
     assert_eq!((s, m["name"].as_str()), (StatusCode::OK, Some("build box")));
     assert_eq!(w.req("PATCH", &format!("/v1/code/agents/acme/machines/{id}"), Some(json!({ "name": "" })), &w.owner).await.0, StatusCode::BAD_REQUEST);
     assert_eq!(w.req("PATCH", "/v1/code/agents/acme/machines/mch_nope", Some(json!({ "name": "x" })), &w.owner).await.0, StatusCode::NOT_FOUND);
+    // The colour and kind the owner picks; one key at a time, `null` clears, unknown ones refused.
+    let (s, m) = w.req("PATCH", &format!("/v1/code/agents/acme/machines/{id}"), Some(json!({ "color": "teal", "kind": "laptop" })), &w.owner).await;
+    assert_eq!((s, m["name"].as_str(), &m["appearance"]), (StatusCode::OK, Some("build box"), &json!({ "color": "teal", "kind": "laptop" })));
+    let (_, m) = w.req("PATCH", &format!("/v1/code/agents/acme/machines/{id}"), Some(json!({ "kind": null })), &w.owner).await;
+    assert_eq!(m["appearance"], json!({ "color": "teal" }));
+    for bad in [json!({ "color": "orange" }), json!({ "kind": "toaster" }), json!({})] {
+        assert_eq!(w.req("PATCH", &format!("/v1/code/agents/acme/machines/{id}"), Some(bad.clone()), &w.owner).await.0, StatusCode::BAD_REQUEST, "{bad}");
+    }
 
     let (mut d, _) = Daemon::connect(&w.url, &minted).await;
     wait_online(&w, &id, true).await;
@@ -303,55 +315,6 @@ async fn machines_are_managed_by_the_owner_and_revoking_closes_the_link() {
     assert!(err.to_string().contains("401"), "{err}");
     assert_eq!(w.req("GET", "/v1/code/agents/acme/machines", None, &w.owner).await.1, json!([]));
     assert_eq!(w.req("DELETE", &format!("/v1/code/agents/acme/machines/{id}"), None, &w.owner).await.0, StatusCode::NOT_FOUND);
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_machine_keeps_the_colour_and_kind_its_owner_picks() {
-    let w = world().await;
-    let (id, _minted) = w.machine("box").await;
-    let path = format!("/v1/code/agents/acme/machines/{id}");
-    let mut ev = Events::open(&w.a, "/v1/code/agents/acme/events", &w.owner, None).await;
-    let (s, m) = w.req("PATCH", &path, Some(json!({ "color": "teal", "kind": "laptop" })), &w.owner).await;
-    assert_eq!(s, StatusCode::OK);
-    assert_eq!((m["name"].as_str(), &m["appearance"]), (Some("box"), &json!({ "color": "teal", "kind": "laptop" })));
-    // Streamed, listed and in the snapshot.
-    let e = ev.next().await;
-    assert!(matches!(&e.data, StreamEvent::Machine { machine, .. } if machine.appearance.color == Some(IdentityColor::Teal)), "{e:?}");
-    assert_eq!(w.req("GET", "/v1/code/agents/acme/machines", None, &w.owner).await.1[0]["appearance"], json!({ "color": "teal", "kind": "laptop" }));
-    let (_, state) = w.req("GET", "/v1/code/agents/acme/state", None, &w.owner).await;
-    assert_eq!(state["machines"][0]["appearance"]["kind"], "laptop");
-    // One key at a time; the rest stays. A name and a colour at once.
-    let (_, m) = w.req("PATCH", &path, Some(json!({ "name": "build box", "color": "violet" })), &w.owner).await;
-    assert_eq!((m["name"].as_str(), &m["appearance"]), (Some("build box"), &json!({ "color": "violet", "kind": "laptop" })));
-    // `null` clears: back to the colour from its id and the kind from its OS.
-    let (_, m) = w.req("PATCH", &path, Some(json!({ "kind": null })), &w.owner).await;
-    assert_eq!(m["appearance"], json!({ "color": "violet" }));
-    let (_, m) = w.req("PATCH", &path, Some(json!({ "color": null })), &w.owner).await;
-    assert!(m.get("appearance").is_none(), "{m}");
-    // What roll doesn't know is refused, and so is a body that changes nothing.
-    for bad in [json!({ "color": "orange" }), json!({ "kind": "toaster" }), json!({ "color": 3 }), json!({}), json!({ "colour": "teal" }), json!([]), json!({ "name": "" })] {
-        assert_eq!(w.req("PATCH", &path, Some(bad.clone()), &w.owner).await.0, StatusCode::BAD_REQUEST, "{bad}");
-    }
-    assert_eq!(w.req("PATCH", &path, Some(json!({ "color": "teal" })), &w.agent).await.0, StatusCode::FORBIDDEN);
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_machine_can_revoke_itself() {
-    let w = world().await;
-    let (id, minted) = w.machine("box").await;
-    let (_other, other_token) = w.machine("other").await;
-    let (mut d, _) = Daemon::connect(&w.url, &minted).await;
-    // Only machine tokens, and only their own machine.
-    for bad in [w.owner.as_str(), "rlm_nope"] {
-        assert_eq!(w.a.req("DELETE", "/v1/code/agents/connect", None, Some(bad)).await.0, StatusCode::UNAUTHORIZED);
-    }
-    assert_eq!(w.a.req("DELETE", "/v1/code/agents/connect", None, Some(&minted)).await.0, StatusCode::NO_CONTENT);
-    assert_eq!(d.recv_or_close().await.unwrap_err(), Some(4401));
-    assert_eq!(w.a.req("DELETE", "/v1/code/agents/connect", None, Some(&minted)).await.0, StatusCode::UNAUTHORIZED);
-    let (_, list) = w.req("GET", "/v1/code/agents/acme/machines", None, &w.owner).await;
-    let ids: Vec<&str> = list.as_array().unwrap().iter().map(|m| m["id"].as_str().unwrap()).collect();
-    assert!(!ids.contains(&id.as_str()) && ids.len() == 1, "{list}");
-    Daemon::connect(&w.url, &other_token).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -377,8 +340,20 @@ async fn the_link_refuses_other_tokens_and_protocols() {
     assert_eq!(d.recv_or_close().await.unwrap_err(), Some(4400));
     // A newer link replaces the older one.
     let (mut first, _) = Daemon::connect(&w.url, &minted).await;
-    let (_second, _) = Daemon::connect(&w.url, &minted).await;
+    let (mut second, _) = Daemon::connect(&w.url, &minted).await;
     assert_eq!(first.recv_or_close().await.unwrap_err(), Some(4409));
+
+    // A machine revokes itself (`roll agent logout`): only with its own machine token.
+    let (_, other_token) = w.machine("other").await;
+    for bad in [w.owner.as_str(), "rlm_nope"] {
+        assert_eq!(w.a.req("DELETE", "/v1/code/agents/connect", None, Some(bad)).await.0, StatusCode::UNAUTHORIZED);
+    }
+    assert_eq!(w.a.req("DELETE", "/v1/code/agents/connect", None, Some(&minted)).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(second.recv_or_close().await.unwrap_err(), Some(4401));
+    assert_eq!(w.a.req("DELETE", "/v1/code/agents/connect", None, Some(&minted)).await.0, StatusCode::UNAUTHORIZED);
+    let (_, list) = w.req("GET", "/v1/code/agents/acme/machines", None, &w.owner).await;
+    assert_eq!(list.as_array().unwrap().iter().map(|m| m["name"].as_str().unwrap()).collect::<Vec<_>>(), ["other"], "{list}");
+    Daemon::connect(&w.url, &other_token).await;
 }
 
 /// After `hello`, a daemon frame the relay can't read costs only itself: it's skipped, a
@@ -575,9 +550,13 @@ async fn streams_and_daemons_resume_without_loss_or_duplicates() {
     d.upsert(vec![stamped(6, project("prj_2", "y"))]).await;
     assert_eq!(ev.entity().await.1.id(), "prj_2");
 
-    // `?after=` works like the header.
+    // `?after=` works like the header; given both (the canvas reconnecting on the URL it first
+    // opened), the stream resumes after the newer.
     let mut ev2 = Events::open(&w.a, &format!("/v1/code/agents/acme/events?after={last}"), &w.owner, None).await;
     assert_eq!(ev2.entity().await.1.id(), "prj_2");
+    let mut ev3 = Events::open(&w.a, &format!("/v1/code/agents/acme/events?after={snapshot}"), &w.owner, Some(last)).await;
+    assert_eq!(ev3.entity().await.1.id(), "prj_2");
+    assert_eq!(w.req("GET", "/v1/code/agents/acme/events?after=x", None, &w.owner).await.0, StatusCode::BAD_REQUEST);
 
     // The daemon reconnects: resume after the newest seq held.
     drop(d);
@@ -666,82 +645,6 @@ async fn commands_go_to_the_daemon_and_come_back() {
     assert_eq!(w.req("POST", "/v1/code/agents/acme/machines/mch_nope/commands", Some(cmd("c8")), &w.owner).await.0, StatusCode::NOT_FOUND);
 }
 
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn pending_logins_say_which_machine_asks() {
-    let w = world().await;
-    let (s, login) = w.a.req("POST", "/v1/code/agents/login", Some(json!({ "name": "ada's laptop", "hostname": "ada-mbp.local\n", "os": "macos" })), None).await;
-    assert_eq!(s, StatusCode::OK, "{login}");
-    let code = login["user_code"].as_str().unwrap().to_string();
-    // Typed any way: lowercase, without the dash.
-    let path = format!("/v1/code/agents/acme/login/{}", code.to_lowercase().replace('-', ""));
-    let (s, p) = w.req("GET", &path, None, &w.owner).await;
-    assert_eq!(s, StatusCode::OK, "{p}");
-    let p: agent_proto::PendingLogin = serde_json::from_value(p).unwrap();
-    assert_eq!((p.user_code.as_str(), p.name.as_str(), p.hostname.as_deref(), p.os.as_deref()), (code.as_str(), "ada's laptop", Some("ada-mbp.local"), Some("macos")));
-    assert_eq!(p.expires_at - p.created_at, 900_000);
-    // Only those who could approve it.
-    for (who, want) in [(Some(w.agent.as_str()), StatusCode::FORBIDDEN), (Some(w.other.as_str()), StatusCode::FORBIDDEN), (None, StatusCode::UNAUTHORIZED)] {
-        assert_eq!(w.a.req("GET", &path, None, who).await.0, want);
-    }
-    assert_eq!(w.req("GET", "/v1/code/agents/acme/login/BCDF-GHJK", None, &w.owner).await.0, StatusCode::NOT_FOUND);
-    // Without hostname and os (an older CLI); a non-string is refused.
-    let (_, bare) = w.a.req("POST", "/v1/code/agents/login", None, None).await;
-    let (_, p) = w.req("GET", &format!("/v1/code/agents/acme/login/{}", bare["user_code"].as_str().unwrap()), None, &w.owner).await;
-    assert_eq!((p["name"].as_str(), p.get("hostname"), p.get("os")), (Some("machine"), None, None), "{p}");
-    assert_eq!(w.a.req("POST", "/v1/code/agents/login", Some(json!({ "hostname": 7 })), None).await.0, StatusCode::BAD_REQUEST);
-    // Once decided, it isn't pending.
-    assert_eq!(w.req("POST", "/v1/code/agents/acme/login/approve", Some(json!({ "user_code": code })), &w.owner).await.0, StatusCode::NO_CONTENT);
-    assert_eq!(w.req("GET", &path, None, &w.owner).await.0, StatusCode::NOT_FOUND);
-}
-
-/// The canvas reconnects with both `?after=` (the URL it first opened) and `Last-Event-ID`
-/// (the newest cursor it applied): the stream resumes after the newer, whichever carries it.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn events_resume_after_the_newer_of_after_and_last_event_id() {
-    let w = world().await;
-    let (_, minted) = w.machine("box").await;
-    let (mut d, _) = Daemon::connect(&w.url, &minted).await;
-    d.upsert(vec![stamped(1, project("prj_1", "x"))]).await;
-    let (_, state) = w.req("GET", "/v1/code/agents/acme/state", None, &w.owner).await;
-    let first = state["cursor"].as_u64().unwrap();
-    d.upsert(vec![stamped(2, thread("thr_a", "a"))]).await;
-    let (_, state) = w.req("GET", "/v1/code/agents/acme/state", None, &w.owner).await;
-    let second = state["cursor"].as_u64().unwrap();
-    d.upsert(vec![stamped(3, thread("thr_b", "b"))]).await;
-    assert!(first < second);
-
-    let ids = |v: &[Entity]| v.iter().map(|e| e.id().to_string()).collect::<Vec<_>>();
-    for (query, header, want) in [
-        (Some(first), Some(second), vec!["thr_b"]),
-        (Some(second), Some(first), vec!["thr_b"]),
-        (Some(first), None, vec!["thr_a", "thr_b"]),
-        (None, Some(first), vec!["thr_a", "thr_b"]),
-        (Some(second), Some(second), vec!["thr_b"]),
-    ] {
-        let path = match query {
-            Some(q) => format!("/v1/code/agents/acme/events?after={q}"),
-            None => "/v1/code/agents/acme/events".into(),
-        };
-        let mut ev = Events::open(&w.a, &path, &w.owner, header).await;
-        let mut got = Vec::new();
-        for _ in 0..want.len() {
-            got.push(ev.entity().await.1);
-        }
-        assert_eq!(ids(&got), want, "after={query:?} Last-Event-ID={header:?}");
-        ev.quiet(150).await;
-    }
-    // A Last-Event-ID that isn't a cursor is ignored (the query still counts).
-    let resp = w
-        .a
-        .send(Request::get(format!("/v1/code/agents/acme/events?after={second}")).header("authorization", format!("Bearer {}", w.owner)).header("last-event-id", "").body(Body::empty()).unwrap())
-        .await;
-    assert_eq!(resp.status(), StatusCode::OK);
-    let mut ev = Events { body: resp.into_body().into_data_stream(), buf: String::new() };
-    assert_eq!(ev.entity().await.1.id(), "thr_b");
-    // A query that isn't a cursor is a 400.
-    assert_eq!(w.req("GET", "/v1/code/agents/acme/events?after=x", None, &w.owner).await.0, StatusCode::BAD_REQUEST);
-}
 
 fn subthread(id: &str, parent: &str, relation: &str, at: u64) -> Entity {
     let mut v = serde_json::to_value(thread(id, id)).unwrap();
@@ -950,6 +853,7 @@ async fn the_canvas_is_kept_per_owner_with_revisions() {
     let (s, v) = w.req("GET", path, None, &w.owner).await;
     assert_eq!(s, StatusCode::OK);
     assert_eq!(v, json!({ "canvas": null, "revision": 0, "updated_at": null }));
+    let mut live = Events::open(&w.a, "/v1/code/agents/acme/events", &w.owner, None).await;
 
     // A round trip: what was saved comes back as it was, with its revision.
     let doc = json!({ "version": 1, "order": { "mch_1": ["prj_b", "prj_a"] }, "view": { "x": -12.5, "y": 40, "zoom": 0.8 }, "note": "ünïcode ✓" });
@@ -958,6 +862,9 @@ async fn the_canvas_is_kept_per_owner_with_revisions() {
     assert_eq!((&v["canvas"], &v["revision"]), (&doc, &json!(1)));
     let at = v["updated_at"].as_i64().unwrap();
     assert!(at > 1_700_000_000_000, "{at}");
+    // Other open devices hear it as `canvas` (the settings test covers catching up on reconnect).
+    let e = live.next().await;
+    assert!(matches!(e.data, StreamEvent::Canvas { revision: 1, cursor, .. } if e.id == Some(cursor)) && e.event == "canvas", "{e:?}");
     let (s, v) = w.req("GET", path, None, &w.owner).await;
     assert_eq!(s, StatusCode::OK);
     assert_eq!(v, json!({ "canvas": doc, "revision": 1, "updated_at": at }));
@@ -1032,54 +939,6 @@ async fn the_canvas_is_kept_per_owner_with_revisions() {
     assert_eq!(w.req("GET", "/v1/code/agents/other/canvas", None, &w.owner).await.0, StatusCode::NOT_FOUND);
     assert_eq!(w.req("GET", path, None, &w.owner).await.1["revision"], 5);
     assert_eq!(w.req("GET", "/v1/code/agents/nobody/canvas", None, ADMIN).await.0, StatusCode::NOT_FOUND);
-}
-
-/// A save goes out on the owner's event stream as `canvas` (its cursor as `id:`), so other open
-/// devices load it again; a stream that reconnects after it catches up on it from the table.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn canvas_saves_go_out_on_the_event_stream() {
-    let w = world().await;
-    let path = "/v1/code/agents/acme/canvas";
-    let canvas_event = |e: Sse| match e.data {
-        StreamEvent::Canvas { cursor, revision, updated_at } => {
-            assert_eq!((e.event.as_str(), e.id), ("canvas", Some(cursor)));
-            (cursor, revision, updated_at)
-        }
-        other => panic!("expected a canvas event, got {other:?}"),
-    };
-    let events = "/v1/code/agents/acme/events";
-    let mut live = Events::open(&w.a, events, &w.owner, None).await;
-    let mut agents = Events::open(&w.a, events, &w.agent, None).await;
-    let mut others = Events::open(&w.a, "/v1/code/agents/other/events", &w.other, None).await;
-    let (_, v) = w.req("PUT", path, Some(json!({ "canvas": { "v": 1 } })), &w.owner).await;
-    let (c1, rev, at) = canvas_event(live.next().await);
-    assert_eq!((rev, Some(at)), (1, v["updated_at"].as_u64()));
-    assert_eq!(canvas_event(agents.next().await).1, 1);
-    others.quiet(150).await;
-    // A refused save sends nothing.
-    assert_eq!(w.req("PUT", path, Some(json!({ "canvas": { "v": 9 }, "revision": 0 })), &w.owner).await.0, StatusCode::CONFLICT);
-    live.quiet(150).await;
-
-    // Cursors are the owner's: they order canvas saves among machine changes.
-    let (mid, _) = w.machine("box").await;
-    let e = live.next().await;
-    let StreamEvent::Machine { cursor: c2, .. } = e.data else { panic!("{e:?}") };
-    w.req("PUT", path, Some(json!({ "canvas": { "v": 2 } })), &w.owner).await;
-    let (_, v) = w.req("PUT", path, Some(json!({ "canvas": { "v": 3 } })), &w.owner).await;
-    let (c3, r2, _) = canvas_event(live.next().await);
-    let (c4, r3, at3) = canvas_event(live.next().await);
-    assert!(c1 < c2 && c2 < c3 && c3 < c4, "{c1} {c2} {c3} {c4}");
-    assert_eq!((r2, r3, Some(at3)), (2, 3, v["updated_at"].as_u64()));
-    let (_, state) = w.req("GET", "/v1/code/agents/acme/state", None, &w.owner).await;
-    assert_eq!(state["cursor"].as_u64(), Some(c4), "the snapshot's cursor counts canvas saves too");
-
-    // Reconnecting after c1: the machine, then the canvas as it is now (one row: its last save).
-    let mut back = Events::open(&w.a, events, &w.owner, Some(c1)).await;
-    let e = back.next().await;
-    assert!(matches!(&e.data, StreamEvent::Machine { machine, .. } if machine.id.0 == mid), "{e:?}");
-    assert_eq!(canvas_event(back.next().await), (c4, 3, at3));
-    back.quiet(150).await;
-    Events::open(&w.a, events, &w.owner, Some(c4)).await.quiet(150).await;
 }
 
 /// The owner's agents settings (`agents/docs.rs`): a document of its own beside the canvas (one

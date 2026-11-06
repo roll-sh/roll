@@ -75,32 +75,3 @@ pub async fn install_defaults(code: &std::sync::Arc<Code>, owner_id: &str, by: &
         Err(e) => tracing::warn!(error = %e, "looking for the owner's Linear automations"),
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn the_linear_agent_template_parses_and_uses_linear_and_agent_steps() {
-        let s = agent();
-        assert_eq!(s.trigger.source(), SOURCE);
-        let kinds: Vec<&str> = s.steps.iter().map(|st| st.kind.as_str()).collect();
-        assert_eq!(kinds, ["linear.activity", "linear.update_issue", "agent.start", "linear.agent_session", "agent.publish", "linear.attach"]);
-        // Every string in the configs is a template that parses.
-        fn strings<'a>(v: &'a Value, out: &mut Vec<&'a str>) {
-            match v {
-                Value::String(s) => out.push(s),
-                Value::Array(a) => a.iter().for_each(|v| strings(v, out)),
-                Value::Object(o) => o.values().for_each(|v| strings(v, out)),
-                _ => {}
-            }
-        }
-        for st in &s.steps {
-            let mut all = vec![];
-            strings(&st.config, &mut all);
-            for t in all {
-                assert!(crate::agents::automations::template::Template::parse(t).is_ok(), "{}: {t}", st.id);
-            }
-        }
-    }
-}

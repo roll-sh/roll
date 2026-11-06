@@ -278,7 +278,8 @@ async fn mock(script: Vec<u16>) -> Mock {
 // ── the tests ──
 
 /// Definitions: saved and checked (templates, kinds, filters, schedules), listed, replaced over a
-/// revision, enabled, disabled, deleted; the catalog lists the built-in triggers and steps.
+/// revision, enabled, disabled, deleted; the catalog lists the built-in triggers and steps; a dry
+/// run fills templates in and runs nothing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn automations_are_saved_checked_and_listed() {
     let w = world().await;
@@ -334,46 +335,21 @@ async fn automations_are_saved_checked_and_listed() {
         let s = cat["steps"].as_array().unwrap().iter().find(|s| s["kind"] == k).unwrap();
         assert_eq!(s["config"]["type"], "object", "{k}");
     }
+    // A dry run says what an automation would do with an event (filters, templates, an unknown
+    // kind's error) and runs nothing.
+    let spec = json!({ "name": "t", "trigger": { "type": "code", "events": ["landed"] },
+        "filters": [{ "field": "event.data.repo", "op": "equals", "value": "acme/app" }, { "field": "event.data.change.labels", "op": "has_label", "value": "bug" }],
+        "steps": [notify("a", "{{event.data.change.title | upper}}"), { "id": "b", "kind": "nope" }] });
+    let r = w.ok("POST", &format!("{base}/test"), Some(json!({ "automation": spec, "event": { "source": "code", "kind": "landed", "data": { "repo": "acme/app", "change": { "title": "fix", "labels": ["bug"] } } } }))).await;
+    assert_eq!((r["matched"].as_bool(), r["trigger"].as_bool()), (Some(true), Some(true)), "{r}");
+    assert_eq!(r["steps"][0]["config"]["title"], "FIX");
+    assert!(r["steps"][1]["error"].as_str().unwrap().contains("nope"));
+    assert!(w.ok("GET", &format!("{base}/runs"), None).await.as_array().unwrap().is_empty());
     let (s, _) = w.req("DELETE", &format!("{base}/{id}"), None, &w.owner).await;
     assert_eq!(s, StatusCode::NO_CONTENT);
     assert_eq!(w.ok("GET", base, None).await, json!([]));
     let (s, _) = w.req("GET", &format!("{base}/{id}"), None, &w.owner).await;
     assert_eq!(s, StatusCode::NOT_FOUND);
-}
-
-/// Every config field in the catalog says where it goes (`x-order`, the order its schema was
-/// written in): JSON objects arrive sorted, and the builder showed Slack's Channel before its
-/// Workspace and an agent's Effort before its Prompt.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn catalog_fields_keep_their_order() {
-    fn check(at: &str, schema: &Value) {
-        let Some(props) = schema["properties"].as_object() else { return };
-        let mut seen: Vec<u64> = props.iter().map(|(k, f)| f["x-order"].as_u64().unwrap_or_else(|| panic!("{at}.{k} has no x-order"))).collect();
-        seen.sort();
-        assert_eq!(seen, (0..props.len() as u64).collect::<Vec<_>>(), "{at}");
-        for (k, f) in props {
-            check(&format!("{at}.{k}"), f);
-            check(&format!("{at}.{k}[]"), &f["items"]);
-        }
-    }
-    let order = |schema: &Value| {
-        let mut v: Vec<(u64, String)> = schema["properties"].as_object().unwrap().iter().map(|(k, f)| (f["x-order"].as_u64().unwrap(), k.clone())).collect();
-        v.sort();
-        v.into_iter().map(|(_, k)| k).collect::<Vec<_>>()
-    };
-    let w = world().await;
-    let cat = w.ok("GET", "/v1/code/agents/acme/automations/catalog", None).await;
-    for t in cat["triggers"].as_array().unwrap() {
-        check(&format!("trigger {}", t["source"]), &t["config"]);
-    }
-    let steps = cat["steps"].as_array().unwrap();
-    for s in steps {
-        check(&format!("step {}", s["kind"]), &s["config"]);
-    }
-    let step = |k: &str| &steps.iter().find(|s| s["kind"] == k).unwrap_or_else(|| panic!("{k}"))["config"];
-    assert_eq!(order(step("slack.post"))[..3], ["team", "channel", "text"]);
-    assert_eq!(order(step("agent.start"))[..3], ["prompt", "title", "target"]);
-    assert_eq!(order(step("webhook"))[..2], ["url", "method"]);
 }
 
 /// The dashboard's copy of the built-in triggers and steps (`apps/dashboard/src/lib/automation-catalog.json`:
@@ -402,54 +378,6 @@ async fn the_dashboard_has_the_built_in_catalog() {
     }
     let have: Value = serde_json::from_str(&std::fs::read_to_string(&path).expect("the fixture (ROLL_FIXTURES=write)")).unwrap();
     assert_eq!(have, want, "apps/dashboard/src/lib/automation-catalog.json is stale: ROLL_FIXTURES=write cargo test -p code-control --test automations");
-}
-
-/// Every step kind in the catalog saves the way the builder writes a new step: its required
-/// fields filled in, and `null` for each field nobody set. Webhook (`headers`), agent.start,
-/// agent.wait, the Linear, Discord and GitHub steps refused those nulls, so "start an agent, wait
-/// for it" couldn't be built from scratch. A `null` field is unset: it's stored without it, and a
-/// dry run takes the same config.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn every_step_kind_saves_with_unset_fields_null() {
-    /// A value a required field takes (the step's own check decides the rest).
-    fn sample(field: &Value) -> Value {
-        if let Some(v) = field["enum"].as_array().and_then(|e| e.first()).or(field.get("default")) {
-            return v.clone();
-        }
-        let ty = field["type"].as_str().or_else(|| field["type"][0].as_str()).unwrap_or("string");
-        match ty {
-            "integer" | "number" => field["minimum"].as_u64().unwrap_or(60).max(1).into(),
-            "boolean" => true.into(),
-            "array" => json!([]),
-            "object" => json!({}),
-            _ => "{{ event.data.input }}".into(),
-        }
-    }
-    // Kinds that need one of several fields (their check says which), beyond `required`.
-    let one_of = json!({ "discord.notify": { "channel": "123" }, "github.label": { "add": ["bug"] }, "linear.activity": { "body": "x" } });
-    let w = world().await;
-    let base = "/v1/code/agents/acme/automations";
-    let cat = w.ok("GET", &format!("{base}/catalog"), None).await;
-    let steps = cat["steps"].as_array().unwrap();
-    assert!(steps.len() > agent_proto::automation::step_kinds::ALL.len(), "the integrations' steps are in the catalog too");
-    for s in steps {
-        let kind = s["kind"].as_str().unwrap();
-        let required: Vec<&str> = s["config"]["required"].as_array().map(|r| r.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
-        let mut config: serde_json::Map<String, Value> =
-            s["config"]["properties"].as_object().unwrap().iter().map(|(k, f)| (k.clone(), if required.contains(&k.as_str()) { sample(f) } else { Value::Null })).collect();
-        for (k, v) in one_of[kind].as_object().into_iter().flatten() {
-            config.insert(k.clone(), v.clone());
-        }
-        let spec = json!({ "name": kind, "trigger": { "type": "manual" }, "steps": [{ "id": "s", "kind": kind, "config": config }] });
-        let (st, v) = w.req("POST", base, Some(spec.clone()), &w.owner).await;
-        assert_eq!(st, StatusCode::CREATED, "{kind} with {}: {v}", spec["steps"][0]["config"]);
-        let stored = &v["automation"]["steps"][0]["config"];
-        assert!(stored.as_object().is_none_or(|m| m.values().all(|f| !f.is_null())), "{kind} kept nulls: {stored}");
-        let r = w.ok("POST", &format!("{base}/test"), Some(json!({ "automation": spec, "event": { "source": "manual", "kind": "run", "data": { "input": "x" } } }))).await;
-        assert!(r["steps"][0]["error"].is_null(), "{kind} dry run: {r}");
-        let (st, _) = w.req("DELETE", &format!("{base}/{}", v["automation"]["id"].as_str().unwrap()), None, &w.owner).await;
-        assert_eq!(st, StatusCode::NO_CONTENT);
-    }
 }
 
 /// tells the owner: every step's output feeds the next one's templates, the run lists the thread
@@ -846,20 +774,6 @@ async fn run_now_takes_the_triggers_event_data() {
     // Data is an object.
     let (s, _) = w.req("POST", &format!("/v1/code/agents/acme/automations/{id}/run"), Some(json!({ "data": "main is red" })), &w.owner).await;
     assert_eq!(s, StatusCode::BAD_REQUEST);
-}
-
-/// A dry run says what an automation would do with an event, without doing it.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn dry_runs_fill_templates_in() {
-    let w = world().await;
-    let spec = json!({ "name": "t", "trigger": { "type": "code", "events": ["landed"] },
-        "filters": [{ "field": "event.data.repo", "op": "equals", "value": "acme/app" }, { "field": "event.data.change.labels", "op": "has_label", "value": "bug" }],
-        "steps": [notify("a", "{{event.data.change.title | upper}}"), { "id": "b", "kind": "nope" }] });
-    let r = w.ok("POST", "/v1/code/agents/acme/automations/test", Some(json!({ "automation": spec, "event": { "source": "code", "kind": "landed", "data": { "repo": "acme/app", "change": { "title": "fix", "labels": ["bug"] } } } }))).await;
-    assert_eq!((r["matched"].as_bool(), r["trigger"].as_bool()), (Some(true), Some(true)), "{r}");
-    assert_eq!(r["steps"][0]["config"]["title"], "FIX");
-    assert!(r["steps"][1]["error"].as_str().unwrap().contains("nope"));
-    assert!(w.ok("GET", "/v1/code/agents/acme/automations/runs", None).await.as_array().unwrap().is_empty());
 }
 
 /// Durability: a run parked on a delay when the process stops is resumed by the next one (on

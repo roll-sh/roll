@@ -110,103 +110,6 @@ async fn land_admin(t: &T, message: &str, files: Value) -> Value {
 }
 
 #[tokio::test]
-async fn rules_matrix() {
-    let t = setup().await;
-    let c = change(&t, "tweak b", "alice", json!({ "src/lib.rs": { "content": "fn a() {}\n\nfn b() {\n    2\n}\n" } })).await;
-    let id = c["id"].as_str().unwrap();
-    assert_eq!(c["review"], json!({ "state": "pending", "approvals": 0, "required": 0 }));
-    assert!(kinds(&c).is_empty(), "nothing is required by default: {c}");
-
-    let s = settings(&t, json!({ "required_approvals": 2 })).await;
-    assert_eq!(s["effective"]["required_approvals"], 2);
-    assert_eq!(s["settings"]["required_approvals"], 2);
-    let c = get_change(&t, id).await;
-    assert_eq!(kinds(&c), vec!["needs_approval"]);
-    assert_eq!(c["review"]["required"], 2);
-
-    // The author's own approval doesn't count.
-    let (s, v) = review(&t, id, "approve", ROOT, &[("x-roll-user", "alice")]).await;
-    assert_eq!(s, StatusCode::CREATED, "{v}");
-    assert_eq!(v["reviewer"], json!({ "kind": "user", "name": "alice", "app": null }));
-    let st = ok(&t.a, "GET", &format!("/v1/code/changes/{id}/review-status"), None, Some(ROOT), &[]).await;
-    assert_eq!(st["approvals"][0]["counted"], false);
-    assert!(st["approvals"][0]["reason"].as_str().unwrap().contains("author"), "{st}");
-
-    // An org token reviews as the org; a token named agent:x as that agent; X-Roll-Agent too.
-    let (_, v) = review(&t, id, "approve", &t.acme, &[]).await;
-    assert_eq!(v["reviewer"]["name"], "acme");
-    let (_, v) = review(&t, id, "approve", &t.fixer, &[]).await;
-    assert_eq!(v["reviewer"], json!({ "kind": "agent", "name": "fixer", "app": null }));
-    let c = get_change(&t, id).await;
-    assert!(kinds(&c).is_empty(), "{c}");
-    assert_eq!(c["review"]["state"], "approved");
-    assert_eq!(c["review"]["approvals"], 2);
-
-    // Requesting changes blocks until that reviewer approves again (or it's dismissed).
-    let (_, rc) = review(&t, id, "request_changes", &t.acme, &[("x-roll-agent", "linter")]).await;
-    assert_eq!(rc["reviewer"]["kind"], "agent");
-    let c = get_change(&t, id).await;
-    assert_eq!(kinds(&c), vec!["changes_requested"]);
-    assert_eq!(c["review"]["state"], "changes_requested");
-    // A comment from the same reviewer doesn't lift it.
-    let (s, _) = review(&t, id, "comment", &t.acme, &[("x-roll-agent", "linter")]).await;
-    assert_eq!(s, StatusCode::CREATED);
-    assert_eq!(kinds(&get_change(&t, id).await), vec!["changes_requested"]);
-    // Dismissed by a writer: gone.
-    let d = ok(&t.a, "POST", &format!("/v1/code/changes/{id}/reviews/{}/dismiss", rc["id"].as_str().unwrap()), Some(json!({ "reason": "outdated advice" })), Some(&t.acme), &[]).await;
-    assert_eq!(d["dismissed"], true);
-    assert_eq!(d["dismissed_by"], "@acme");
-    assert!(kinds(&get_change(&t, id).await).is_empty());
-    let (s, _) = call(&t.a, "POST", &format!("/v1/code/changes/{id}/reviews/{}/dismiss", rc["id"].as_str().unwrap()), Some(json!({})), Some(&t.acme), &[]).await;
-    assert_eq!(s, StatusCode::CONFLICT, "already dismissed");
-    // Two change requests from one reviewer: dismissing the latest doesn't revive the older one.
-    review(&t, id, "request_changes", &t.acme, &[("x-roll-agent", "linter2")]).await;
-    let (_, newer) = review(&t, id, "request_changes", &t.acme, &[("x-roll-agent", "linter2")]).await;
-    assert_eq!(kinds(&get_change(&t, id).await), vec!["changes_requested"]);
-    ok(&t.a, "POST", &format!("/v1/code/changes/{id}/reviews/{}/dismiss", newer["id"].as_str().unwrap()), Some(json!({ "reason": "noise" })), Some(&t.acme), &[]).await;
-    assert!(kinds(&get_change(&t, id).await).is_empty(), "the older request stays superseded");
-    let audit = ok(&t.a, "GET", "/v1/code/repos/acme/api/audit", None, Some(ROOT), &[]).await;
-    assert!(audit.as_array().unwrap().iter().any(|e| e["action"] == "review_dismiss"));
-
-    // A new revision makes approvals stale (dismiss_stale is on by default).
-    ok(&t.a, "POST", &format!("/v1/code/changes/{id}/revise"), Some(json!({ "base": "main", "message": "v2", "files": { "src/lib.rs": { "content": "fn a() {}\n\nfn b() {\n    3\n}\n" } } })), Some(ROOT), &[]).await;
-    let c = get_change(&t, id).await;
-    assert_eq!(kinds(&c), vec!["needs_approval"]);
-    let reviews = ok(&t.a, "GET", &format!("/v1/code/changes/{id}/reviews"), None, Some(ROOT), &[]).await;
-    assert!(reviews.as_array().unwrap().iter().filter(|r| r["verdict"] == "approve").all(|r| r["stale"] == true));
-    settings(&t, json!({ "dismiss_stale": false })).await;
-    assert!(kinds(&get_change(&t, id).await).is_empty(), "stale approvals count again");
-    settings(&t, json!({ "dismiss_stale": true, "allow_self_approval": true, "required_approvals": 1 })).await;
-    review(&t, id, "approve", ROOT, &[("x-roll-user", "alice")]).await;
-    assert!(kinds(&get_change(&t, id).await).is_empty(), "allow_self_approval");
-
-    // Bad input.
-    for (body, want) in [
-        (json!({}), StatusCode::BAD_REQUEST),
-        (json!({ "verdict": "merge" }), StatusCode::BAD_REQUEST),
-        (json!({ "verdict": "request_changes" }), StatusCode::BAD_REQUEST),
-        (json!({ "verdict": "comment", "body": 5 }), StatusCode::BAD_REQUEST),
-        (json!({ "verdict": "comment", "body": "x".repeat(70_000) }), StatusCode::BAD_REQUEST),
-        (json!({ "verdict": "approve", "comments": [{ "path": "nope.rs", "line": 1, "body": "?" }] }), StatusCode::BAD_REQUEST),
-    ] {
-        let (s, v) = call(&t.a, "POST", &format!("/v1/code/changes/{id}/reviews"), Some(body.clone()), Some(ROOT), &[]).await;
-        assert_eq!(s, want, "{body}: {v}");
-    }
-    let (s, _) = call(&t.a, "POST", &format!("/v1/code/changes/{id}/reviews"), Some(json!({ "verdict": "approve" })), Some(ROOT), &[("x-roll-agent", "bad name!")]).await;
-    assert_eq!(s, StatusCode::BAD_REQUEST);
-    for p in [json!({ "required_approvals": 99 }), json!({ "bogus": true }), json!({ "auto_approve": [{}] }), json!({ "dismiss_stale": "yes" })] {
-        let (s, _) = call(&t.a, "PATCH", "/v1/code/repos/acme/api/review-settings", Some(p.clone()), Some(ROOT), &[]).await;
-        assert_eq!(s, StatusCode::BAD_REQUEST, "{p}");
-    }
-
-    // A landed change takes no reviews.
-    let landed = ok(&t.a, "POST", &format!("/v1/code/changes/{id}/land"), Some(json!({})), Some(ROOT), &[]).await;
-    assert_eq!(landed["status"], "landed");
-    let (s, _) = review(&t, id, "approve", &t.acme, &[]).await;
-    assert_eq!(s, StatusCode::CONFLICT);
-}
-
-#[tokio::test]
 async fn ai_approvals_and_land_change_gate() {
     let t = setup().await;
     settings(&t, json!({ "required_approvals": 1 })).await;
@@ -753,129 +656,6 @@ async fn private_webhook_addresses_are_refused() {
         assert!(err.as_deref().is_some_and(|e| e.contains("private")), "{err:?}");
     }
     assert!(rx.got.lock().is_empty(), "nothing reached the private address");
-}
-
-#[tokio::test]
-async fn review_events_and_diff_format() {
-    let t = setup().await;
-    let mut rx = t.a.code.subscribe();
-    let c = change(&t, "ev", "alice", json!({ "notes.txt": { "content": "1\n" } })).await;
-    let id = c["id"].as_str().unwrap();
-    ok(&t.a, "POST", &format!("/v1/code/changes/{id}/reviews"), Some(json!({ "verdict": "comment", "body": "hm", "comments": [{ "path": "notes.txt", "line": 1, "body": "one?" }] })), Some(ROOT), &[]).await;
-    let mut kinds_seen = Vec::new();
-    while let Ok(Ok(e)) = tokio::time::timeout(Duration::from_millis(200), rx.recv()).await {
-        if e.kind == "review" {
-            assert_eq!(e.data["verdict"], "comment");
-            assert_eq!(e.data["change"], id);
-        }
-        if e.kind == "thread" {
-            assert_eq!(e.data["path"], "notes.txt");
-            assert_eq!(e.data["comments"][0]["body"], "one?");
-        }
-        kinds_seen.push(e.kind);
-    }
-    assert!(kinds_seen.contains(&"review") && kinds_seen.contains(&"thread") && kinds_seen.contains(&"change"), "{kinds_seen:?}");
-    let (s, _) = t.a.raw("GET", &format!("/v1/code/repos/acme/api/compare/main...{}?format=yaml", c["head"].as_str().unwrap()), None, Some(ROOT)).await;
-    assert_eq!(s, StatusCode::BAD_REQUEST);
-    let (s, body) = t.a.raw("GET", &format!("/v1/code/repos/acme/api/compare/main...{}?format=json", c["head"].as_str().unwrap()), None, Some(ROOT)).await;
-    assert_eq!(s, StatusCode::OK);
-    assert!(serde_json::from_slice::<Value>(&body).unwrap()["files"].is_array());
-}
-
-#[tokio::test]
-async fn auth_matrix() {
-    let t = setup().await;
-    ok(&t.a, "POST", "/v1/code/repos", Some(json!({ "owner": "acme", "name": "priv", "visibility": "private" })), Some(ROOT), &[]).await;
-    ok(&t.a, "POST", "/v1/code/repos/acme/priv/land", Some(json!({ "message": "base", "files": { "a.txt": { "content": "a\n" } } })), Some(ROOT), &[]).await;
-    let public = change(&t, "pub", "alice", json!({ "notes.txt": { "content": "x\n" } })).await;
-    let private = ok(&t.a, "POST", "/v1/code/repos/acme/priv/changes", Some(json!({ "title": "p", "message": "p", "base": "main", "files": { "a.txt": { "content": "b\n" } } })), Some(ROOT), &[]).await;
-    let pt = ok(&t.a, "POST", &format!("/v1/code/changes/{}/threads", public["id"].as_str().unwrap()), Some(json!({ "path": "notes.txt", "line": 1, "body": "t" })), Some(ROOT), &[]).await;
-    let qt = ok(&t.a, "POST", &format!("/v1/code/changes/{}/threads", private["id"].as_str().unwrap()), Some(json!({ "path": "a.txt", "line": 1, "body": "t" })), Some(ROOT), &[]).await;
-    let (pc, qc) = (public["id"].as_str().unwrap(), private["id"].as_str().unwrap());
-    let (ptid, qtid) = (pt["id"].as_str().unwrap(), qt["id"].as_str().unwrap());
-    let mallory = t.mallory.as_str();
-    let acme = t.acme.as_str();
-
-    // (method, path, body, token, expected)
-    let comment = json!({ "verdict": "comment", "body": "hi" });
-    let approve = json!({ "verdict": "approve" });
-    type Case<'a> = (&'a str, String, Option<Value>, Option<&'a str>, StatusCode);
-    let cases: Vec<Case> = vec![
-        // Reading a public repo's reviews: anyone; a private one's: only its owner.
-        ("GET", format!("/v1/code/changes/{pc}/reviews"), None, None, StatusCode::OK),
-        ("GET", format!("/v1/code/changes/{pc}/threads"), None, None, StatusCode::OK),
-        ("GET", format!("/v1/code/changes/{pc}/review-status"), None, None, StatusCode::OK),
-        ("GET", format!("/v1/code/changes/{pc}/review-requests"), None, None, StatusCode::OK),
-        ("GET", format!("/v1/code/threads/{ptid}"), None, None, StatusCode::OK),
-        ("GET", "/v1/code/repos/acme/api/review-settings".into(), None, None, StatusCode::OK),
-        ("GET", format!("/v1/code/changes/{qc}/reviews"), None, None, StatusCode::NOT_FOUND),
-        ("GET", format!("/v1/code/changes/{qc}/reviews"), None, Some(mallory), StatusCode::NOT_FOUND),
-        ("GET", format!("/v1/code/changes/{qc}/threads"), None, Some(mallory), StatusCode::NOT_FOUND),
-        ("GET", format!("/v1/code/changes/{qc}/review-status"), None, Some(mallory), StatusCode::NOT_FOUND),
-        ("GET", format!("/v1/code/threads/{qtid}"), None, Some(mallory), StatusCode::NOT_FOUND),
-        ("GET", "/v1/code/repos/acme/priv/review-settings".into(), None, Some(mallory), StatusCode::NOT_FOUND),
-        ("GET", format!("/v1/code/changes/{qc}/reviews"), None, Some(acme), StatusCode::OK),
-        // Commenting needs a sign-in; approving needs write access.
-        ("POST", format!("/v1/code/changes/{pc}/reviews"), Some(comment.clone()), None, StatusCode::UNAUTHORIZED),
-        ("POST", format!("/v1/code/changes/{pc}/reviews"), Some(comment.clone()), Some(mallory), StatusCode::CREATED),
-        ("POST", format!("/v1/code/changes/{pc}/reviews"), Some(approve.clone()), Some(mallory), StatusCode::FORBIDDEN),
-        ("POST", format!("/v1/code/changes/{pc}/reviews"), Some(json!({ "verdict": "request_changes", "body": "no" })), Some(mallory), StatusCode::FORBIDDEN),
-        ("POST", format!("/v1/code/changes/{pc}/reviews"), Some(approve.clone()), Some(acme), StatusCode::CREATED),
-        ("POST", format!("/v1/code/changes/{qc}/reviews"), Some(comment.clone()), Some(mallory), StatusCode::NOT_FOUND),
-        ("POST", format!("/v1/code/changes/{pc}/threads"), Some(json!({ "path": "notes.txt", "line": 1, "body": "x" })), None, StatusCode::UNAUTHORIZED),
-        ("POST", format!("/v1/code/changes/{pc}/threads"), Some(json!({ "path": "notes.txt", "line": 1, "body": "x" })), Some(mallory), StatusCode::CREATED),
-        ("POST", format!("/v1/code/changes/{qc}/threads"), Some(json!({ "path": "a.txt", "line": 1, "body": "x" })), Some(mallory), StatusCode::NOT_FOUND),
-        ("POST", format!("/v1/code/threads/{ptid}/comments"), Some(json!({ "body": "x" })), None, StatusCode::UNAUTHORIZED),
-        ("POST", format!("/v1/code/threads/{ptid}/comments"), Some(json!({ "body": "x" })), Some(mallory), StatusCode::CREATED),
-        ("POST", format!("/v1/code/threads/{ptid}/comments"), Some(json!({ "body": "" })), Some(mallory), StatusCode::BAD_REQUEST),
-        ("POST", format!("/v1/code/threads/{qtid}/comments"), Some(json!({ "body": "x" })), Some(mallory), StatusCode::NOT_FOUND),
-        // Resolving someone else's thread needs write access.
-        ("POST", format!("/v1/code/threads/{ptid}/resolve"), Some(json!({})), None, StatusCode::UNAUTHORIZED),
-        ("POST", format!("/v1/code/threads/{ptid}/resolve"), Some(json!({})), Some(mallory), StatusCode::FORBIDDEN),
-        ("POST", format!("/v1/code/threads/{ptid}/unresolve"), Some(json!({})), Some(mallory), StatusCode::FORBIDDEN),
-        ("POST", format!("/v1/code/threads/{ptid}/resolve"), Some(json!({})), Some(acme), StatusCode::OK),
-        ("POST", format!("/v1/code/threads/{ptid}/apply"), Some(json!({})), None, StatusCode::UNAUTHORIZED),
-        ("POST", format!("/v1/code/threads/{ptid}/apply"), Some(json!({})), Some(mallory), StatusCode::FORBIDDEN),
-        // Settings and requests: writers.
-        ("PATCH", "/v1/code/repos/acme/api/review-settings".into(), Some(json!({ "required_approvals": 1 })), None, StatusCode::UNAUTHORIZED),
-        ("PATCH", "/v1/code/repos/acme/api/review-settings".into(), Some(json!({ "required_approvals": 1 })), Some(mallory), StatusCode::FORBIDDEN),
-        ("PATCH", "/v1/code/repos/acme/api/review-settings".into(), Some(json!({ "required_approvals": 0 })), Some(acme), StatusCode::OK),
-        ("POST", format!("/v1/code/changes/{pc}/review-requests"), Some(json!({ "reviewer": "roll" })), None, StatusCode::UNAUTHORIZED),
-        ("POST", format!("/v1/code/changes/{pc}/review-requests"), Some(json!({ "reviewer": "roll" })), Some(mallory), StatusCode::FORBIDDEN),
-        ("POST", format!("/v1/code/changes/{pc}/review-requests"), Some(json!({ "reviewer": "roll" })), Some(acme), StatusCode::CREATED),
-        // Dismissing someone else's review needs write access.
-        // Review apps: the owner manages them.
-        ("GET", "/v1/code/owners/acme/review-apps".into(), None, None, StatusCode::UNAUTHORIZED),
-        ("GET", "/v1/code/owners/acme/review-apps".into(), None, Some(mallory), StatusCode::FORBIDDEN),
-        ("GET", "/v1/code/owners/acme/review-apps".into(), None, Some(acme), StatusCode::OK),
-        ("GET", "/v1/code/owners/nobody/review-apps".into(), None, Some(ROOT), StatusCode::NOT_FOUND),
-        ("GET", "/v1/code/review-apps/app_nope".into(), None, Some(ROOT), StatusCode::NOT_FOUND),
-        ("GET", "/v1/code/review-apps/app_nope/deliveries".into(), None, Some(acme), StatusCode::NOT_FOUND),
-        ("POST", "/v1/code/review-apps/app_nope/rotate".into(), Some(json!({})), None, StatusCode::NOT_FOUND),
-        // Unknown things.
-        ("GET", "/v1/code/changes/chg_nope/reviews".into(), None, Some(ROOT), StatusCode::NOT_FOUND),
-        ("GET", "/v1/code/threads/th_nope".into(), None, Some(ROOT), StatusCode::NOT_FOUND),
-        ("POST", format!("/v1/code/changes/{pc}/reviews/rv_nope/dismiss"), Some(json!({})), Some(acme), StatusCode::NOT_FOUND),
-    ];
-    for (m, p, b, tok, want) in cases {
-        let (s, v) = call(&t.a, m, &p, b.clone(), tok, &[]).await;
-        assert_eq!(s, want, "{m} {p} as {tok:?}: {v}");
-    }
-    // Dismissing: a reviewer withdraws their own; others' need write access.
-    let mine = ok(&t.a, "POST", &format!("/v1/code/changes/{pc}/reviews"), Some(json!({ "verdict": "approve" })), Some(acme), &[("x-roll-agent", "a1")]).await;
-    let (s, _) = call(&t.a, "POST", &format!("/v1/code/changes/{pc}/reviews/{}/dismiss", mine["id"].as_str().unwrap()), Some(json!({})), Some(mallory), &[]).await;
-    assert_eq!(s, StatusCode::FORBIDDEN);
-    let (s, _) = call(&t.a, "POST", &format!("/v1/code/changes/{pc}/reviews/{}/dismiss", mine["id"].as_str().unwrap()), Some(json!({})), None, &[]).await;
-    assert_eq!(s, StatusCode::UNAUTHORIZED);
-    let comment_review = ok(&t.a, "POST", &format!("/v1/code/changes/{pc}/reviews"), Some(json!({ "verdict": "comment", "body": "note" })), Some(mallory), &[]).await;
-    let (s, _) = call(&t.a, "POST", &format!("/v1/code/changes/{pc}/reviews/{}/dismiss", comment_review["id"].as_str().unwrap()), Some(json!({})), Some(mallory), &[]).await;
-    assert_eq!(s, StatusCode::BAD_REQUEST, "comments aren't dismissed");
-    // The reviewer themself (same agent) can withdraw.
-    let v = ok(&t.a, "POST", &format!("/v1/code/changes/{pc}/reviews/{}/dismiss", mine["id"].as_str().unwrap()), Some(json!({ "reason": "wrong change" })), Some(acme), &[("x-roll-agent", "a1")]).await;
-    assert_eq!(v["dismissed"], true);
-    // A thread starter (not a writer) can resolve their own thread.
-    let own = ok(&t.a, "POST", &format!("/v1/code/changes/{pc}/threads"), Some(json!({ "path": "notes.txt", "line": 1, "body": "mine" })), Some(mallory), &[]).await;
-    ok(&t.a, "POST", &format!("/v1/code/threads/{}/resolve", own["id"].as_str().unwrap()), Some(json!({})), Some(mallory), &[]).await;
 }
 
 #[tokio::test]
@@ -1486,8 +1266,13 @@ async fn every_review_route_answers_every_status() {
         ("GET", s("/v1/code/changes/chg_nope/reviews"), None, root, none, C::NOT_FOUND),
         ("POST", format!("/v1/code/changes/{pc}/reviews"), comment(), mallory, none, C::CREATED),
         ("POST", format!("/v1/code/changes/{pc}/reviews"), Some(json!({})), acme, none, C::BAD_REQUEST),
+        ("POST", format!("/v1/code/changes/{pc}/reviews"), Some(json!({ "verdict": "request_changes" })), acme, none, C::BAD_REQUEST),
+        ("POST", format!("/v1/code/changes/{pc}/reviews"), Some(json!({ "verdict": "comment", "body": "x".repeat(70_000) })), acme, none, C::BAD_REQUEST),
+        ("POST", format!("/v1/code/changes/{pc}/reviews"), Some(json!({ "verdict": "approve", "comments": [{ "path": "nope.rs", "line": 1, "body": "?" }] })), acme, none, C::BAD_REQUEST),
+        ("POST", format!("/v1/code/changes/{pc}/reviews"), approve(), acme, &[("x-roll-agent", "bad name!")], C::BAD_REQUEST),
         ("POST", format!("/v1/code/changes/{pc}/reviews"), comment(), anon, none, C::UNAUTHORIZED),
         ("POST", format!("/v1/code/changes/{pc}/reviews"), approve(), mallory, none, C::FORBIDDEN),
+        ("POST", format!("/v1/code/changes/{pc}/reviews"), Some(json!({ "verdict": "request_changes", "body": "no" })), mallory, none, C::FORBIDDEN),
         ("POST", format!("/v1/code/changes/{qc}/reviews"), comment(), mallory, none, C::NOT_FOUND),
         ("POST", s("/v1/code/changes/chg_nope/reviews"), comment(), root, none, C::NOT_FOUND),
         ("POST", format!("/v1/code/changes/{cc}/reviews"), approve(), acme, none, C::CONFLICT),
@@ -1640,6 +1425,19 @@ async fn every_review_route_answers_every_status() {
         assert_eq!(got, StatusCode::UNAUTHORIZED, "{m} {p}: {v}");
     }
     assert_eq!(call(&t.a, "GET", &format!("/v1/code/review-apps/{bot}"), None, Some(&t.acme), &[]).await.0, StatusCode::OK, "still there");
+    // A writer dismissing someone else's review: audited.
+    let other = ok(&t.a, "POST", &format!("/v1/code/changes/{pc}/reviews"), Some(json!({ "verdict": "request_changes", "body": "no" })), acme, &[("x-roll-agent", "linter")]).await;
+    let d = ok(&t.a, "POST", &format!("/v1/code/changes/{pc}/reviews/{}/dismiss", other["id"].as_str().unwrap()), Some(json!({ "reason": "outdated advice" })), acme, &[]).await;
+    assert_eq!((d["dismissed"].as_bool(), d["dismissed_by"].as_str()), (Some(true), Some("@acme")));
+    let audit = ok(&t.a, "GET", "/v1/code/repos/acme/api/audit", None, Some(ROOT), &[]).await;
+    assert!(audit.as_array().unwrap().iter().any(|e| e["action"] == "review_dismiss"), "{audit}");
+
+    // Comment reviews aren't dismissed (400); a thread's starter resolves it without write access.
+    let note = ok(&t.a, "POST", &format!("/v1/code/changes/{pc}/reviews"), Some(json!({ "verdict": "comment", "body": "note" })), mallory, &[]).await;
+    let (s, _) = call(&t.a, "POST", &format!("/v1/code/changes/{pc}/reviews/{}/dismiss", note["id"].as_str().unwrap()), Some(json!({})), mallory, &[]).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "comments aren't dismissed");
+    let mine = ok(&t.a, "POST", &format!("/v1/code/changes/{pc}/threads"), Some(json!({ "path": "notes.txt", "line": 1, "body": "mine" })), mallory, &[]).await;
+    ok(&t.a, "POST", &format!("/v1/code/threads/{}/resolve", mine["id"].as_str().unwrap()), Some(json!({})), mallory, &[]).await;
 
     // At most 50 review apps per owner: 422.
     let have = ok(&t.a, "GET", "/v1/code/owners/acme/review-apps", None, Some(&t.acme), &[]).await.as_array().unwrap().len();

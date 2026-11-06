@@ -7,17 +7,15 @@ fn window(id: &str, kind: UsageWindowKind, used: f64) -> UsageWindow {
 }
 
 #[test]
-fn windows_sort_by_kind_then_id_and_percentages_are_clamped() {
+fn an_update_replaces_its_window_and_keeps_what_it_leaves_out() {
+    // Windows sort by kind then id, and percentages are clamped.
     let limits = UsageLimits::new(
         1,
         vec![window("b", UsageWindowKind::Weekly, 150.0), window("z", UsageWindowKind::Session, -3.0), window("a", UsageWindowKind::Weekly, f64::NAN)],
     );
     let got: Vec<_> = limits.windows.iter().map(|w| (w.id.as_str(), w.used_percent)).collect();
     assert_eq!(got, [("z", 0.0), ("a", 0.0), ("b", 100.0)]);
-}
 
-#[test]
-fn an_update_replaces_its_window_and_keeps_what_it_leaves_out() {
     let mut session = window("primary", UsageWindowKind::Session, 10.0);
     session.resets_at = Some(5_000);
     session.window_minutes = Some(300);

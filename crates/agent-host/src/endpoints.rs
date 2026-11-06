@@ -550,6 +550,14 @@ mod tests {
         assert!(openai.args.contains(&"model_providers.roll_e.base_url=\"https://gw/v1\"".to_string()));
         assert!(openai.env.is_empty());
         assert!(codex_use(&spec(EndpointKind::Anthropic), None).is_err());
+
+        // A roll gateway: Codex names its thread through `env_http_headers`, read from the
+        // session's variables, and the client key is never an argument.
+        let gw = EndpointSpec { id: agent_proto::gateway_limits::ENDPOINT_ID.into(), base_url: "http://gw:8790".into(), ..spec(EndpointKind::Gateway) };
+        let used = codex_use(&gw, Some("rgk_x")).unwrap();
+        assert!(used.args.contains(&r#"model_providers.roll_roll_gateway.env_http_headers={"x-roll-thread"="ROLL_GATEWAY_THREAD","x-roll-project"="ROLL_GATEWAY_PROJECT"}"#.to_string()), "{:?}", used.args);
+        assert!(used.args.contains(&r#"model_providers.roll_roll_gateway.base_url="http://gw:8790/v1""#.to_string()));
+        assert!(!used.args.iter().any(|a| a.contains("rgk_x")));
     }
 
     #[test]

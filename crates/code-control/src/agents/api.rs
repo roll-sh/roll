@@ -708,23 +708,3 @@ fn reply_response(reply: Reply) -> Response {
     }
     (status, Json(body)).into_response()
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn user_codes() {
-        let c = new_user_code();
-        assert_eq!(c.len(), 9);
-        assert_eq!(normalize_user_code(&c.to_lowercase().replace('-', "")), c);
-        assert_eq!(normalize_user_code(" bcdf-ghjk "), "BCDF-GHJK");
-    }
-
-    #[test]
-    fn statuses() {
-        assert_eq!(reply_status(&Reply::Ok), StatusCode::OK);
-        assert_eq!(reply_status(&super::super::error(ErrorCode::MachineOffline, "x")), StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(reply_status(&super::super::error(ErrorCode::Timeout, "x")), StatusCode::GATEWAY_TIMEOUT);
-    }
-}

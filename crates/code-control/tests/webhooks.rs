@@ -943,6 +943,18 @@ async fn every_event_is_the_same_on_the_stream_and_in_webhooks() {
         (Some("refs/heads/feature"), Some(sha.as_str()), &Value::Null, Some(true))
     );
 
+    // Another repo's events don't leak into this feed.
+    a.repo("acme", "other").await;
+    a.ok("POST", "/v1/code/repos/acme/other/work", Some(json!({ "title": "elsewhere" }))).await;
+    a.ok("POST", &format!("{P}/work"), Some(json!({ "title": "here" }))).await;
+    loop {
+        let w = ev.next("work").await;
+        assert_ne!(w["title"], "elsewhere", "{w}");
+        if w["title"] == "here" {
+            break;
+        }
+    }
+
     // Every kind came, and each event reached the webhook with the same data.
     let mut kinds: Vec<&str> = ev.all.iter().map(|(k, _)| k.as_str()).collect();
     kinds.sort();
@@ -1368,6 +1380,16 @@ async fn events_promised_by_a_state_change_survive_a_crash_after_its_commit() {
     hook(&a, &rx.url, json!(["change", "review", "check"])).await;
     rx.wait("ping", 1, 30).await;
     let change = |n: usize| json!({ "title": format!("t{n}"), "message": "t", "base": "main", "files": { format!("c{n}.txt"): { "content": "c\n" } } });
+    // Without a crash, a promise is kept by the node that made it at once and leaves nothing behind.
+    let c0 = a.ok("POST", &format!("{P}/changes"), Some(change(0))).await;
+    for _ in 0..1000 {
+        if rx.answered("change").iter().any(|v| v["data"]["id"] == c0["id"]) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(rx.answered("change").iter().any(|v| v["data"]["id"] == c0["id"]));
+    assert_eq!(outbox(&a), 0);
     // Every promised event from here on "dies" right after its commit.
     a.code.crash_after_commit(u32::MAX);
     let c1 = a.ok("POST", &format!("{P}/changes"), Some(change(1))).await;
@@ -1409,21 +1431,4 @@ async fn events_promised_by_a_state_change_survive_a_crash_after_its_commit() {
     let state_of = |id: &str, state: &str| rx.answered("change").into_iter().filter(|v| v["data"]["id"] == id && v["data"]["state"] == state).count();
     assert_eq!(state_of(&id2, "closed"), 2, "c2's opening and closing, both read after the close");
     assert!(state_of(&id1, "landed") >= 4, "c1's promised events, read after it landed");
-}
-
-/// Promises are kept by the node that made them as soon as it emits the event: nothing waits
-/// for the recovery, and nothing is left in the outbox.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn promised_events_are_delivered_at_once_and_leave_nothing_behind() {
-    let a = setup().await;
-    let rx = counter(false, None).await;
-    hook(&a, &rx.url, json!(["change"])).await;
-    rx.wait("ping", 1, 30).await;
-    let c = a.ok("POST", &format!("{P}/changes"), Some(json!({ "title": "t", "message": "t", "base": "main", "files": { "x.txt": { "content": "x\n" } } }))).await;
-    a.ok("POST", &format!("/v1/code/changes/{}/close", c["id"].as_str().unwrap()), None).await;
-    rx.wait("change", 2, 10).await;
-    assert_eq!(outbox(&a), 0);
-    let states: Vec<String> = rx.answered("change").iter().map(|v| v["data"]["state"].as_str().unwrap().to_string()).collect();
-    assert_eq!(states.len(), 2, "{states:?}");
-    assert!(states.contains(&"open".to_string()) && states.contains(&"closed".to_string()), "{states:?}");
 }

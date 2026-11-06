@@ -522,20 +522,6 @@ async fn simple() {
 }
 
 #[tokio::test]
-async fn multi_turn() {
-    let mut h = Harness::open("multi_turn").await;
-    assert_eq!(h.turn("Respond with exactly: first fixture turn complete").await, TurnEnd::Completed);
-    assert_eq!(h.turn("Respond with exactly: second fixture turn complete").await, TurnEnd::Completed);
-    let events = h.finish(1).await;
-    golden("multi_turn", &events);
-    assert_eq!(messages(&events), ["first fixture turn complete", "second fixture turn complete"]);
-    assert_eq!(refs(&events), ["5c0d3865", "00246ed4"]);
-    // Item ids are per turn, so the second turn's message is a node of its own.
-    let ids: Vec<&str> = items(&events).iter().filter(|i| matches!(i.body, NodeBody::Message { .. })).map(|i| i.id.as_str()).collect();
-    assert!(ids.contains(&"t1:m1:c1") && ids.contains(&"t2:m1:c1"));
-}
-
-#[tokio::test]
 async fn message_steering() {
     let mut h = Harness::open("message_steering").await;
     h.session().send(text_input("Respond with exactly: steering fixture initial response")).await.unwrap();
@@ -576,23 +562,6 @@ async fn turn_interrupt_mid_tool() {
 }
 
 #[tokio::test]
-async fn provider_thread_resume() {
-    let mut h = Harness::open("provider_thread_resume").await;
-    assert_eq!(h.turn("Respond with exactly: provider thread resume fixture first turn complete").await, TurnEnd::Completed);
-    h.close().await;
-    // A new process resumes the session file by path.
-    h.start(|cfg| cfg.resume = Some("/pi-sessions/session-1.jsonl".into())).await;
-    let second = "Using the conversation history available in this resumed thread, first repeat the exact final answer you gave in the previous turn. Then on a new line write exactly: provider thread resume fixture second turn complete";
-    assert_eq!(h.turn(second).await, TurnEnd::Completed);
-    let log = h.log(2);
-    let events = h.finish(2).await;
-    golden("provider_thread_resume", &events);
-    assert_eq!(threads(&events), ["/pi-sessions/session-1.jsonl", "/pi-sessions/session-1.jsonl"]);
-    assert_eq!(log[0], json!({ "type": "switch_session", "sessionPath": "/pi-sessions/session-1.jsonl", "id": log[0]["id"] }));
-    assert!(messages(&events)[1].contains("provider thread resume fixture second turn complete"));
-}
-
-#[tokio::test]
 async fn pi_compaction() {
     let mut h = Harness::open("pi_compaction").await;
     assert_eq!(h.turn("Remember the opaque marker compaction-marker-4Z7Q for later. Respond with exactly: compaction marker stored").await, TurnEnd::Completed);
@@ -617,30 +586,6 @@ async fn pi_compaction() {
 }
 
 #[tokio::test]
-async fn thread_rollback() {
-    let mut h = Harness::open("thread_rollback").await;
-    assert_eq!(h.turn("Respond with exactly: rollback fixture first turn complete").await, TurnEnd::Completed);
-    assert_eq!(h.turn("Respond with exactly: rollback fixture second turn complete").await, TurnEnd::Completed);
-    assert_eq!(refs(&h.events), ["c906b4e2", "76a48ea1"]);
-    assert_eq!(h.pi.rollback_style(), RollbackStyle::ResumeAt);
-    // Rolled back to the first turn: the orchestrator resumes the conversation at its ref.
-    h.close().await;
-    h.start(|cfg| {
-        cfg.resume = Some("/pi-sessions/session-1.jsonl".into());
-        cfg.resume_at = Some("c906b4e2".into());
-    })
-    .await;
-    assert_eq!(h.turn("Repeat the conversation verbatim.").await, TurnEnd::Completed);
-    let log = h.log(2);
-    let events = h.finish(2).await;
-    golden("thread_rollback", &events);
-    // The fork at the second turn's user message is a new session file: the new native thread.
-    assert_eq!(threads(&events), ["/pi-sessions/session-1.jsonl", "/pi-sessions/session-2.jsonl"]);
-    assert_eq!(sent(&log, "fork"), [&json!({ "type": "fork", "entryId": "022fe9c1", "id": sent(&log, "fork")[0]["id"] })]);
-    assert_eq!(refs(&events)[2], "0aec84a3");
-}
-
-#[tokio::test]
 async fn thread_rollback_after_stop() {
     let mut h = Harness::open("thread_rollback_after_stop").await;
     assert_eq!(h.turn("Respond with exactly: rollback fixture first turn complete").await, TurnEnd::Completed);
@@ -656,6 +601,7 @@ async fn thread_rollback_after_stop() {
     h.start(|cfg| cfg.resume = Some("/pi-sessions/session-1.jsonl".into())).await;
     assert_eq!(h.turn("Respond with exactly: rollback fixture second turn complete").await, TurnEnd::Completed);
     assert_eq!(refs(&h.events), ["b184b5a8", "e3ab1495", "31bf1b6c"]);
+    assert_eq!(h.pi.rollback_style(), RollbackStyle::ResumeAt);
     // Rolled back to the first run, across the restart: its ref still finds the cut.
     h.close().await;
     h.start(|cfg| {

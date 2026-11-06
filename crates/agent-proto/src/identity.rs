@@ -179,10 +179,8 @@ mod tests {
         assert!(file("a//b.png").is_err());
         assert!(file("logo.txt").is_err());
         assert!(file("AppIcon.icns").is_err());
-    }
 
-    #[test]
-    fn defaults_stay_off_the_wire() {
+        // Unset identity fields stay off the wire.
         assert_eq!(serde_json::to_string(&MachineAppearance::default()).unwrap(), "{}");
         assert_eq!(serde_json::to_string(&ProjectIcon::Auto).unwrap(), r#"{"kind":"auto"}"#);
         let m: ProjectIcon = serde_json::from_str(r#"{"kind":"monogram"}"#).unwrap();

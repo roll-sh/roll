@@ -505,6 +505,11 @@ fn the_config_file_parses_checks_and_resolves_keys() {
     std::fs::write(dir.path().join("local.key"), vec![b'k'; 16 * 1024 + 1]).unwrap();
     let err = format!("{:#}", config::load(&path).err().unwrap());
     assert!(err.contains("bigger than"), "{err}");
+    // The client commands find the store without resolving keys.
+    std::fs::write(&path, CONFIG.replace("env:HOME", "env:ROLL_GATEWAY_TEST_UNSET")).unwrap();
+    assert_eq!(config::data_dir(&path).unwrap(), dir.path().join("state"));
+    std::fs::write(&path, "port = 9000\n").unwrap();
+    assert_eq!(config::data_dir(&path).unwrap(), dir.path());
 }
 
 #[tokio::test]
@@ -561,15 +566,4 @@ async fn the_config_file_reloads_and_a_bad_change_keeps_the_last_good_one() {
     assert!(seen[2].as_ref().is_err_and(|why| why.contains("is gone")), "{:?}", seen[2]);
     assert_eq!(seen[3], Ok(18792));
     task.abort();
-}
-
-#[test]
-fn the_client_commands_find_the_store_without_resolving_keys() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("gateway.toml");
-    std::fs::write(&path, CONFIG.replace("env:HOME", "env:ROLL_GATEWAY_TEST_UNSET")).unwrap();
-    assert!(config::load(&path).is_err());
-    assert_eq!(config::data_dir(&path).unwrap(), dir.path().join("state"));
-    std::fs::write(&path, "port = 9000\n").unwrap();
-    assert_eq!(config::data_dir(&path).unwrap(), dir.path());
 }

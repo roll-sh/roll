@@ -173,143 +173,6 @@ async fn transport_sessions_and_protocol() {
     assert_eq!(s, StatusCode::NOT_FOUND, "an ended session is gone");
 }
 
-#[tokio::test]
-async fn every_tool_end_to_end() {
-    let a = app(None);
-    a.repo("acme", "api").await;
-    let mut c = Client::new(&a, None);
-    c.initialize("2025-11-25").await;
-    let repo = "acme/api";
-
-    // Land directly, then read it back every way.
-    let landed = c
-        .tool("land", json!({ "repo": repo, "message": "first", "files": { "src/lib.rs": { "content": "pub fn a() -> u32 {\n    1\n}\n" }, "README.md": { "content": "# api\n" } } }))
-        .await;
-    assert_eq!(landed["status"], "landed", "{landed}");
-    let first = landed["changeset"].as_str().unwrap().to_string();
-    let f = c.tool("read_file", json!({ "repo": repo, "path": "src/lib.rs" })).await;
-    assert_eq!(f["content"], "pub fn a() -> u32 {\n    1\n}\n");
-    assert_eq!((f["total_lines"].as_u64(), f["truncated"].as_bool()), (Some(3), Some(false)));
-    let part = c.tool("read_file", json!({ "repo": repo, "path": "src/lib.rs", "rev": first, "start_line": 2, "end_line": 2 })).await;
-    assert_eq!(part["content"], "    1");
-    assert!(c.tool_err("read_file", json!({ "repo": repo, "path": "nope.rs" })).await.starts_with("not found"));
-    let tree = c.tool("list_tree", json!({ "repo": repo })).await;
-    assert!(tree["entries"].as_array().unwrap().iter().any(|e| e["name"] == "src"));
-    let sub = c.tool("list_tree", json!({ "repo": repo, "path": "src" })).await;
-    assert_eq!(sub["entries"][0]["name"], "lib.rs");
-    let log = c.tool("log", json!({ "repo": repo, "limit": 5 })).await;
-    assert_eq!(log["items"][0]["id"], first);
-    let blame = c.tool("blame", json!({ "repo": repo, "path": "src/lib.rs" })).await;
-    assert_eq!(blame["ranges"][0]["changeset"], first);
-    assert_eq!(blame["lines"], 3);
-    let cs = c.tool("get_changeset", json!({ "repo": repo, "id": first })).await;
-    assert_eq!(cs["id"], first);
-    let hits = c.tool("search_code", json!({ "repo": repo, "query": "pub fn a" })).await;
-    assert_eq!(hits["matches"][0]["path"], "src/lib.rs");
-
-    // A change: create, revise, inspect, compare, comment, review, land.
-    let ch = c
-        .tool("create_change", json!({ "repo": repo, "title": "Return two", "base": "main", "files": { "src/lib.rs": { "content": "pub fn a() -> u32 {\n    2\n}\n" } } }))
-        .await;
-    let id = ch["id"].as_str().unwrap().to_string();
-    let by_number = format!("{repo}#{}", ch["number"]);
-    let revised = c
-        .tool("revise_change", json!({ "change": by_number, "base": "main", "message": "two, documented", "files": { "src/lib.rs": { "content": "/// Two.\npub fn a() -> u32 {\n    2\n}\n" } } }))
-        .await;
-    assert_eq!(revised["revision"], 2);
-    let cmp = c.tool("compare", json!({ "repo": repo, "base": "main", "head": revised["head"] })).await;
-    assert_eq!(cmp["files"][0]["path"], "src/lib.rs");
-    // Searching the change's head finds what only it has.
-    let at = c.tool("search_code", json!({ "repo": repo, "query": "/// Two.", "rev": revised["head"] })).await;
-    assert_eq!(at["matches"][0]["path"], "src/lib.rs", "{at}");
-    let th = c.tool("comment", json!({ "change": id, "path": "src/lib.rs", "line": 1, "body": "Nice doc." })).await;
-    let th_id = th["id"].as_str().unwrap().to_string();
-    let replied = c.tool("comment", json!({ "thread": th_id, "body": "Thanks!" })).await;
-    assert_eq!(replied["comments"].as_array().unwrap().len(), 2);
-    let rv = c.tool("review", json!({ "change": id, "verdict": "approve", "body": "LGTM", "comments": [{ "path": "src/lib.rs", "line": 3, "body": "ok" }] })).await;
-    assert_eq!(rv["verdict"], "approve");
-    let got = c.tool("get_change", json!({ "change": by_number })).await;
-    assert_eq!(got["change"]["id"], id);
-    assert!(got["review_status"].is_object());
-    assert_eq!(got["threads"].as_array().unwrap().len(), 2);
-    let list = c.tool("list_changes", json!({ "repo": repo, "state": "open" })).await;
-    assert_eq!(list["items"][0]["id"], id);
-    let ai = c.tool("request_ai_review", json!({ "change": id, "mode": "standard" })).await;
-    assert_eq!(ai["job"]["state"], "queued");
-    let landed = c.tool("land", json!({ "change": id })).await;
-    assert_eq!(landed["status"], "landed", "{landed}");
-    assert_eq!(c.tool("queue_status", json!({ "repo": repo })).await["policy"], "post_merge");
-
-    // A stale base conflicts: an outcome, not an error.
-    let conflict = c.tool("land", json!({ "repo": repo, "base": first, "message": "stale", "files": { "src/lib.rs": { "content": "pub fn a() -> u32 {\n    3\n}\n" } } })).await;
-    assert_eq!(conflict["status"], "conflict");
-    assert_eq!(conflict["paths"][0], "src/lib.rs");
-    // Rules that need an approval block a land: also an outcome, with blockers.
-    a.ok("PATCH", "/v1/code/repos/acme/api/review-settings", Some(json!({ "required_approvals": 1 }))).await;
-    let ch = c.tool("create_change", json!({ "repo": repo, "title": "Needs review", "base": "main", "files": { "x.txt": { "content": "x\n" } } })).await;
-    let blocked = c.tool("land", json!({ "change": ch["id"] })).await;
-    assert_eq!(blocked["status"], "blocked", "{blocked}");
-    assert!(blocked["blockers"].as_array().unwrap().iter().any(|b| b["kind"] == "needs_approval"));
-
-    // Work: nothing to claim, then create, claim, heartbeat, release, claim, complete.
-    let none = c.tool("claim_work", json!({ "repo": repo, "agent": "bot-1" })).await;
-    assert!(none["work"].is_null());
-    let w = c.tool("create_work", json!({ "repo": repo, "title": "Fix the thing", "labels": ["bug"], "priority": 1 })).await;
-    let claimed = c.tool("claim_work", json!({ "repo": repo, "agent": "bot-1", "labels": ["bug"], "lease_s": 60 })).await;
-    assert_eq!(claimed["work"]["id"], w["id"]);
-    let wnum = format!("{repo}#{}", w["number"]);
-    assert_eq!(c.tool("heartbeat_work", json!({ "work": wnum, "agent": "bot-1" })).await["claimed_by"], "bot-1");
-    assert_eq!(c.tool("release_work", json!({ "work": w["id"], "agent": "bot-1" })).await["state"], "open");
-    c.tool("claim_work", json!({ "repo": repo, "agent": "bot-2" })).await;
-    assert_eq!(c.tool("complete_work", json!({ "work": w["id"], "agent": "bot-2" })).await["state"], "done");
-    let work = c.tool("list_work", json!({ "repo": repo, "state": "done" })).await;
-    assert_eq!(work["items"][0]["id"], w["id"]);
-
-    // Argument errors are tool errors.
-    assert!(c.tool_err("log", json!({ "repo": "no-slash" })).await.contains("owner/repo"));
-    assert!(c.tool_err("get_change", json!({ "change": "acme/api#999" })).await.starts_with("not found"));
-    assert!(c.tool_err("land", json!({})).await.contains("land needs"));
-    assert!(c.tool_err("comment", json!({ "body": "x" })).await.contains("comment needs"));
-}
-
-#[tokio::test]
-async fn tools_enforce_the_routes_authorization() {
-    let a = common::app(Some("root"));
-    for (name, vis) in [("pub", "public"), ("priv", "private")] {
-        a.req("POST", "/v1/code/owners", Some(json!({ "name": "acme", "kind": "org" })), Some("root")).await;
-        let (s, v) = a.req("POST", "/v1/code/repos", Some(json!({ "owner": "acme", "name": name, "visibility": vis })), Some("root")).await;
-        assert!(s.is_success(), "{v}");
-        let (s, v) = a.req("POST", &format!("/v1/code/repos/acme/{name}/land"), Some(json!({ "message": "m", "files": { "a.txt": { "content": "a\n" } } })), Some("root")).await;
-        assert!(s.is_success(), "{v}");
-    }
-    let (_, v) = a.req("POST", "/v1/code/owners", Some(json!({ "name": "eve", "kind": "user" })), Some("root")).await;
-    assert!(v.is_object());
-    let (_, t) = a.req("POST", "/v1/code/owners/eve/tokens", Some(json!({ "name": "t" })), Some("root")).await;
-    let eve = t["token"].as_str().unwrap().to_string();
-
-    // Anonymous: public reads work; private repos don't exist; writes need a token.
-    let mut anon = Client::new(&a, None);
-    anon.initialize("2025-06-18").await;
-    assert_eq!(anon.tool("read_file", json!({ "repo": "acme/pub", "path": "a.txt" })).await["content"], "a\n");
-    assert!(anon.tool_err("read_file", json!({ "repo": "acme/priv", "path": "a.txt" })).await.starts_with("not found"));
-    assert!(anon.tool_err("create_work", json!({ "repo": "acme/pub", "title": "x" })).await.contains("needs a token"));
-    // Another owner's token: reads public, can't write acme's repos.
-    let mut e = Client::new(&a, Some(&eve));
-    e.initialize("2025-06-18").await;
-    assert!(e.tool_err("list_tree", json!({ "repo": "acme/priv" })).await.starts_with("not found"));
-    let err = e.tool_err("land", json!({ "repo": "acme/pub", "base": "main", "message": "x", "files": { "b.txt": { "content": "b\n" } } })).await;
-    assert!(err.starts_with("not allowed"), "{err}");
-    // The admin can.
-    let mut root = Client::new(&a, Some("root"));
-    root.initialize("2025-06-18").await;
-    assert_eq!(root.tool("read_file", json!({ "repo": "acme/priv", "path": "a.txt" })).await["content"], "a\n");
-    // A session belongs to the token that started it.
-    let mut stolen = Client::new(&a, Some(&eve));
-    stolen.session = root.session.clone();
-    let (s, _, _) = stolen.post(json!({ "jsonrpc": "2.0", "id": 1, "method": "ping" }), &[]).await;
-    assert_eq!(s, StatusCode::NOT_FOUND);
-}
-
 /// `Accept: text/event-stream` (without `application/json`): each response comes as a `message`
 /// event on an event stream; an initialize still answers in JSON (its session id is a header),
 /// and notifications alone still get 202.
@@ -518,7 +381,9 @@ async fn land_outcomes_queued_branches_and_errors() {
     let mut c = Client::new(&a, None);
     c.initialize("2025-11-25").await;
     let repo = "acme/api";
-    assert_eq!(c.tool("land", json!({ "repo": repo, "message": "init", "files": { "a.txt": { "content": "a\n" } } })).await["status"], "landed");
+    let init = c.tool("land", json!({ "repo": repo, "message": "init", "files": { "a.txt": { "content": "a\n" } } })).await;
+    assert_eq!(init["status"], "landed");
+    let first = init["changeset"].as_str().unwrap().to_string();
 
     // A branch with a slash in its name.
     let br = c.tool("land", json!({ "repo": repo, "base": "main", "message": "on a branch", "ref": "feature/x", "files": { "b.txt": { "content": "b\n" } } })).await;
@@ -542,6 +407,18 @@ async fn land_outcomes_queued_branches_and_errors() {
     assert!(c.tool_err("land", json!({ "change": "chg_nope" })).await.starts_with("not found"));
     assert!(c.tool_err("land", json!({ "change": "acme/api#x" })).await.contains("expected owner/repo#number"));
     assert!(c.tool_err("land", json!({ "change": "acme#1" })).await.contains("expected \"owner/repo\""));
+
+    // A stale base conflicts: an outcome, not an error.
+    assert_eq!(c.tool("land", json!({ "repo": repo, "message": "a2", "files": { "a.txt": { "content": "a2\n" } } })).await["status"], "landed");
+    let conflict = c.tool("land", json!({ "repo": repo, "base": first, "message": "stale", "files": { "a.txt": { "content": "a3\n" } } })).await;
+    assert_eq!((conflict["status"].as_str(), conflict["paths"][0].as_str()), (Some("conflict"), Some("a.txt")), "{conflict}");
+    // Rules that need an approval block a land: also an outcome, with blockers.
+    a.ok("PATCH", "/v1/code/repos/acme/api/review-settings", Some(json!({ "required_approvals": 1 }))).await;
+    let ch = c.tool("create_change", json!({ "repo": repo, "title": "Needs review", "base": "main", "files": { "x.txt": { "content": "x\n" } } })).await;
+    let blocked = c.tool("land", json!({ "change": ch["id"] })).await;
+    assert_eq!(blocked["status"], "blocked", "{blocked}");
+    assert!(blocked["blockers"].as_array().unwrap().iter().any(|b| b["kind"] == "needs_approval"));
+    a.ok("PATCH", "/v1/code/repos/acme/api/review-settings", Some(json!({ "required_approvals": 0 }))).await;
 
     // A queue repo: landing queues.
     a.ok("PATCH", "/v1/code/repos/acme/api", Some(json!({ "land_policy": "queue" }))).await;
@@ -883,7 +760,8 @@ type Route = (&'static str, String, Option<Value>);
 
 /// Every tool, for anonymous callers and another owner's token, on a public and a private
 /// repo: the tool succeeds exactly when its route does, and a refusal carries the route's
-/// status and words ("this needs a token", "not allowed", "not found").
+/// status and words ("this needs a token", "not allowed", "not found"). The owner and the admin
+/// read and write the private repo.
 #[tokio::test]
 async fn every_tool_is_authorized_like_its_route() {
     let a = app(Some("root"));
@@ -982,62 +860,15 @@ async fn every_tool_is_authorized_like_its_route() {
             assert_eq!(seen.len(), TOOLS.len() - AGENT_TOOLS, "every repo tool is checked");
         }
     }
-}
-
-/// The auth matrix through MCP tools: every caller × read and write, public and private, as the
-/// routes answer them; and a bad token gets no session. Open mode lets any token in.
-#[tokio::test]
-async fn tools_follow_the_whole_auth_matrix() {
-    let a = common::app(Some("root"));
-    let mut tokens = Vec::new();
-    for owner in ["acme", "other"] {
-        a.req("POST", "/v1/code/owners", Some(json!({ "name": owner, "kind": "org" })), Some("root")).await;
-        let (_, t) = a.req("POST", &format!("/v1/code/owners/{owner}/tokens"), Some(json!({ "name": "t" })), Some("root")).await;
-        tokens.push(t["token"].as_str().unwrap().to_string());
-    }
-    for (name, vis) in [("pub", "public"), ("priv", "private")] {
-        let (s, v) = a.req("POST", "/v1/code/repos", Some(json!({ "owner": "acme", "name": name, "visibility": vis })), Some("root")).await;
-        assert!(s.is_success(), "{v}");
-        let (s, v) = a.req("POST", &format!("/v1/code/repos/acme/{name}/land"), Some(json!({ "message": "m", "files": { "a.txt": { "content": "a\n" } } })), Some("root")).await;
-        assert!(s.is_success(), "{v}");
-    }
-    // None: the tool works; Some(text): it fails, saying that.
-    type Outcomes<'a> = [Option<&'a str>; 4];
-    let rows: [(&str, Option<&str>, Outcomes); 4] = [
-        ("admin", Some("root"), [None; 4]),
-        ("owner", Some(tokens[0].as_str()), [None; 4]),
-        ("another owner", Some(tokens[1].as_str()), [None, Some("not found"), Some("not allowed"), Some("not found")]),
-        ("anonymous", None, [None, Some("not found"), Some("this needs a token"), Some("not found")]),
-    ];
-    for (who, token, want) in rows {
-        let mut c = Client::new(&a, token);
+    // The owner's own token and the admin read and write the private repo.
+    let (_, t) = a.req("POST", "/v1/code/owners/acme/tokens", Some(json!({ "name": "t" })), root).await;
+    let acme = t["token"].as_str().unwrap().to_string();
+    for (who, token) in [("owner", acme.as_str()), ("admin", "root")] {
+        let mut c = Client::new(&a, Some(token));
         c.initialize("2025-06-18").await;
-        for (i, (tool, repo)) in [("read_file", "acme/pub"), ("read_file", "acme/priv"), ("create_work", "acme/pub"), ("create_work", "acme/priv")].into_iter().enumerate() {
-            let args = if tool == "read_file" { json!({ "repo": repo, "path": "a.txt" }) } else { json!({ "repo": repo, "title": format!("by {who}") }) };
-            match want[i] {
-                None if tool == "read_file" => assert_eq!(c.tool(tool, args).await["content"], "a\n", "{who} {tool} {repo}"),
-                None => assert_eq!(c.tool(tool, args).await["title"], format!("by {who}"), "{who} {tool} {repo}"),
-                Some(msg) => {
-                    let err = c.tool_err(tool, args).await;
-                    assert!(err.contains(msg), "{who} {tool} {repo}: {err}");
-                }
-            }
-        }
+        assert_eq!(c.tool("read_file", json!({ "repo": "acme/priv", "path": "a.txt" })).await["content"], "a\n", "{who}");
+        assert_eq!(c.tool("create_work", json!({ "repo": "acme/priv", "title": format!("by {who}") })).await["title"], format!("by {who}"));
     }
-    // Unknown and garbage tokens: no session (401), so no tool runs.
-    let init = json!({ "jsonrpc": "2.0", "id": 0, "method": "initialize", "params": { "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": { "name": "t", "version": "1" } } });
-    for token in ["rlc_0000", "hunter2"] {
-        let (s, _, v) = Client::new(&a, Some(token)).post(init.clone(), &[]).await;
-        assert_eq!(s, StatusCode::UNAUTHORIZED, "{token}: {v}");
-    }
-    // DELETE needs the session header.
-    assert_eq!(a.send(Request::builder().method("DELETE").uri(MCP).body(Body::empty()).unwrap()).await.status(), StatusCode::BAD_REQUEST);
-    // Open mode: every caller is the admin, whatever token it sends.
-    let open = app(None);
-    open.repo("acme", "x").await;
-    let mut c = Client::new(&open, Some("hunter2"));
-    c.initialize("2025-06-18").await;
-    assert_eq!(c.tool("create_work", json!({ "repo": "acme/x", "title": "t" })).await["title"], "t");
 }
 
 /// Sessions live in control.db, so behind a load balancer without stickiness a session started

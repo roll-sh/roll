@@ -33,24 +33,6 @@ async fn turn(w: &World, session: &FakeSession, thread: &ThreadId, files: &[(&st
 }
 
 #[tokio::test]
-async fn a_repository_with_no_commits_yet_starts_its_threads_in_the_project_folder() {
-    // A fresh `git init` (or an empty roll code repo, cloned): nothing to branch a worktree from.
-    let fake = FakeProvider::new("codex");
-    let w = World::with_repo(vec![fake.clone()], false).await;
-    sh(&w.repo, &["init", "-q", "-b", "main"]);
-    let thread = w.thread("codex", Some("Write the first file"), true).await;
-    let t = w.wait_thread(&thread, |t| t.status == ThreadStatus::Idle && t.run_count == 1).await;
-    assert!(t.worktree.is_none(), "{:?}", t.worktree);
-    assert_eq!(t.cwd, w.repo.to_string_lossy());
-    // Once there's a commit, a thread gets its worktree again.
-    std::fs::write(w.repo.join("README.md"), "hi\n").unwrap();
-    sh(&w.repo, &["add", "."]);
-    sh(&w.repo, &["-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-qm", "first"]);
-    let next = w.thread("codex", None, true).await;
-    assert!(w.state().await.thread(&next).unwrap().worktree.is_some());
-}
-
-#[tokio::test]
 async fn publishing_in_a_repository_with_no_commits_makes_its_first_commit() {
     use agent_host::Daemon;
     let w = World::new(vec![FakeProvider::new("codex")]).await;
@@ -115,18 +97,24 @@ async fn publishing_in_a_repository_with_no_commits_makes_its_first_commit() {
     let again = w.host.run_granted(id, "owner".into(), cmd, grant(true, Some("trunk"))).await;
     assert!(is_err(&again, ErrorCode::Invalid), "{again:?}");
 
-    // Any other project: the folder's own branch, pushed to origin.
+    // Any other project (a fresh `git init`): its threads start in the project folder, nothing to
+    // branch a worktree from; publishing commits on the folder's own branch, pushed to origin.
     let plain = World::with_repo(vec![FakeProvider::new("codex")], false).await;
     sh(&plain.repo, &["init", "-q", "-b", "main"]);
     let origin = tempfile::tempdir().unwrap();
     sh(origin.path(), &["init", "-q", "--bare", "o.git"]);
     sh(&plain.repo, &["remote", "add", "origin", &origin.path().join("o.git").to_string_lossy()]);
     let thread = plain.thread("codex", Some("Write the first file"), true).await;
-    plain.wait_thread(&thread, |t| t.status == ThreadStatus::Idle && t.run_count == 1).await;
+    let t = plain.wait_thread(&thread, |t| t.status == ThreadStatus::Idle && t.run_count == 1).await;
+    assert!(t.worktree.is_none(), "{:?}", t.worktree);
+    assert_eq!(t.cwd, plain.repo.to_string_lossy());
     std::fs::write(plain.repo.join("first.txt"), "1\n").unwrap();
     let Reply::Published(p) = plain.run(Command::ThreadPublish { thread: thread.clone(), message: "First".into(), land: false }).await else { panic!() };
     assert_eq!(p.branch, "main");
     assert_eq!(sh(&origin.path().join("o.git"), &["rev-parse", "refs/heads/main"]).trim(), p.commit);
+    // Once there's a commit, a thread gets its worktree again.
+    let next = plain.thread("codex", None, true).await;
+    assert!(plain.state().await.thread(&next).unwrap().worktree.is_some());
 }
 
 #[tokio::test]
@@ -162,6 +150,14 @@ async fn worktree_threads_get_a_branch_and_delete_leaves_only_tombstones_and_the
     assert_eq!(removed.last(), Some(&EntityKind::Thread));
     assert!(fake.session(0).await.calls().contains(&Call::Close));
     assert!(is_err(&w.send(&thread, "hi", SendMode::Queue).await, ErrorCode::NotFound));
+
+    // A worktree with uncommitted changes is kept on delete, with its branch.
+    let (kept, dir) = idle_worktree(&w, "Keep my notes").await;
+    std::fs::write(dir.join("notes.txt"), "mine\n").unwrap();
+    assert_eq!(w.run(Command::ThreadDelete { thread: kept.clone() }).await, Reply::Ok);
+    assert!(w.state().await.thread(&kept).is_none());
+    assert_eq!(std::fs::read_to_string(dir.join("notes.txt")).unwrap(), "mine\n");
+    assert!(sh(&w.repo, &["branch", "--list", "roll/keep-my-notes"]).contains("roll/keep-my-notes"));
 }
 
 #[tokio::test]
@@ -287,6 +283,9 @@ async fn forks_carry_a_summary_and_the_files_of_their_run() {
     let text = sends(&forked.wait_calls(|c| !c.is_empty()).await).remove(0);
     assert!(text.contains("make one") && !text.contains("make two"), "{text}");
     assert!(text.ends_with("continue"));
+    // No native forks: noted once, in the run that settled it.
+    let noted = w.wait("the fork's note", |s| Some(notes(s, &fork)).filter(|n| !n.is_empty())).await;
+    assert_eq!(noted, vec!["Forked with a summary: codex starts fresh with a summary of the parent thread"]);
 
     // A fork of a fork keeps the root.
     let Reply::Created { id } = w.run(Command::ThreadFork { thread: fork.clone(), at: None, worktree: false }).await else { panic!() };
@@ -397,16 +396,6 @@ async fn forks_hand_a_summary_over_when_a_native_fork_cant_be_had() {
     exchange(&w, &switched, "four").await;
     assert!(sends(&claude.session(0).await.calls())[0].contains("<roll-context>"));
     assert_eq!(notes(&w.state().await, &switched), vec!["Forked with a summary: claude starts fresh with a summary of the parent thread"]);
-
-    // A provider without native forks.
-    let plain = FakeProvider::new("codex");
-    let w = World::new(vec![plain.clone()]).await;
-    let thread = w.thread("codex", None, false).await;
-    exchange(&w, &thread, "one").await;
-    let portable = fork(&w, &thread, None).await;
-    exchange(&w, &portable, "two").await;
-    assert_eq!(plain.session(1).await.config.fork, None);
-    assert_eq!(notes(&w.state().await, &portable), vec![summary]);
 }
 
 #[tokio::test]
@@ -864,21 +853,6 @@ async fn a_failed_clone_runs_again_with_the_same_id_and_a_refusal_does_not() {
     assert!(is_err(&refused, ErrorCode::Invalid), "{refused:?}");
     std::fs::remove_file(taken.join("mine.txt")).unwrap();
     assert_eq!(w.host.run_granted("clone-2".into(), "owner".into(), add, Some(grant())).await, refused);
-}
-
-#[tokio::test]
-async fn archive_and_unarchive() {
-    let fake = FakeProvider::new("codex");
-    let w = World::new(vec![fake]).await;
-    let thread = w.thread("codex", None, false).await;
-    assert_eq!(w.state().await.thread(&thread).unwrap().title, "New thread");
-    assert_eq!(w.run(Command::ThreadArchive { thread: thread.clone() }).await, Reply::Ok);
-    assert!(w.state().await.thread(&thread).unwrap().archived_at.is_some());
-    assert_eq!(w.run(Command::ThreadUnarchive { thread: thread.clone() }).await, Reply::Ok);
-    assert!(w.state().await.thread(&thread).unwrap().archived_at.is_none());
-    // The first message names an untitled thread.
-    w.send(&thread, "Name me after this", SendMode::Queue).await;
-    w.wait_thread(&thread, |t| t.title == "Name me after this").await;
 }
 
 #[tokio::test]
@@ -1364,21 +1338,13 @@ async fn idle_provider_sessions_close_after_half_an_hour() {
 }
 
 #[tokio::test]
-async fn deleting_a_thread_keeps_a_worktree_with_uncommitted_changes() {
-    let w = World::new(vec![FakeProvider::new("codex")]).await;
-    let (thread, dir) = idle_worktree(&w, "Keep my notes").await;
-    std::fs::write(dir.join("notes.txt"), "mine\n").unwrap();
-    assert_eq!(w.run(Command::ThreadDelete { thread: thread.clone() }).await, Reply::Ok);
-    assert!(w.state().await.thread(&thread).is_none());
-    assert_eq!(std::fs::read_to_string(dir.join("notes.txt")).unwrap(), "mine\n");
-    assert!(sh(&w.repo, &["branch", "--list", "roll/keep-my-notes"]).contains("roll/keep-my-notes"));
-}
-
-#[tokio::test]
 async fn settling_closes_finished_terminals_and_archiving_closes_them_all() {
     let w = World::new(vec![FakeProvider::new("codex")]).await;
-    let thread = w.thread("codex", Some("one"), false).await;
-    w.wait_thread(&thread, |t| t.status == ThreadStatus::Idle && t.run_count == 1).await;
+    // The first message names an untitled thread.
+    let thread = w.thread("codex", None, false).await;
+    assert_eq!(w.state().await.thread(&thread).unwrap().title, "New thread");
+    w.send(&thread, "Name me after this", SendMode::Queue).await;
+    w.wait_thread(&thread, |t| t.title == "Name me after this" && t.status == ThreadStatus::Idle && t.run_count == 1).await;
     let Reply::Created { id: done } = w.run(terminal(&thread, "true")).await else { panic!() };
     let Reply::Created { id: server } = w.run(terminal(&thread, "sleep 600")).await else { panic!() };
     let term = |s: &Records, id: &str| s.live.get(&(EntityKind::Terminal, id.to_string())).cloned();
@@ -1390,6 +1356,9 @@ async fn settling_closes_finished_terminals_and_archiving_closes_them_all() {
     assert_eq!(w.run(Command::ThreadUnsettle { thread: thread.clone(), restore: None }).await, Reply::Ok);
     assert_eq!(w.run(Command::ThreadArchive { thread: thread.clone() }).await, Reply::Ok);
     assert!(term(&w.state().await, &server).is_none(), "T3 closes an archived thread's terminals");
+    assert!(w.state().await.thread(&thread).unwrap().archived_at.is_some());
+    assert_eq!(w.run(Command::ThreadUnarchive { thread: thread.clone() }).await, Reply::Ok);
+    assert!(w.state().await.thread(&thread).unwrap().archived_at.is_none());
 }
 
 #[tokio::test]

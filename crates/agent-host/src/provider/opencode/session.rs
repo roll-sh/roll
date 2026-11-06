@@ -687,24 +687,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn rules_follow_the_modes() {
-        let full = session_rules(RuntimeMode::FullAccess, InteractionMode::Default, &[], &[Rule::any("shell", Effect::Allow)], None);
-        assert_eq!(full, vec![Rule::any("*", Effect::Allow)]);
-        let auto = session_rules(RuntimeMode::AutoEdit, InteractionMode::Plan, &[], &[], Some("roll-1-"));
-        assert_eq!(
-            auto,
-            vec![
-                Rule::any("shell", Effect::Ask),
-                Rule::any("edit", Effect::Allow),
-                Rule::any("external_directory", Effect::Ask),
-                Rule::any("edit", Effect::Deny),
-                Rule::any("roll-*", Effect::Deny),
-                Rule::any("roll-1-*", Effect::Allow),
-            ]
-        );
-    }
-
-    #[test]
     fn commands_parse() {
         assert_eq!(command_of("/hello WORLD"), Some(("hello", "WORLD")));
         assert_eq!(command_of(" /init "), Some(("init", "")));

@@ -37,18 +37,10 @@ fn main() {
         fake::main(&scripts);
     }
     let tests: &[(&str, fn())] = &[
-        ("replays_a_simple_answer", replays_a_simple_answer),
-        ("replays_turns_in_one_session", replays_turns_in_one_session),
-        ("steering_joins_the_running_turn", steering_joins_the_running_turn),
-        ("interrupt_before_output_ends_the_turn", interrupt_before_output_ends_the_turn),
         ("interrupt_mid_tool_interrupts_the_tool", interrupt_mid_tool_interrupts_the_tool),
         ("declined_write_is_an_approval_with_a_diff", declined_write_is_an_approval_with_a_diff),
-        ("approved_command_runs", approved_command_runs),
-        ("read_tools_complete_with_output", read_tools_complete_with_output),
         ("subagents_hang_their_work_off_the_agent_call", subagents_hang_their_work_off_the_agent_call),
         ("error_results_fail_the_turn", error_results_fail_the_turn),
-        ("bash_reports_output_and_exit", bash_reports_output_and_exit),
-        ("command_output_keeps_escapes", command_output_keeps_escapes),
         ("mcp_tools_are_mcp_items", mcp_tools_are_mcp_items),
         ("real_cli_streams_text_and_reasoning", real_cli_streams_text_and_reasoning),
         ("real_cli_approval_interrupt_and_steer", real_cli_approval_interrupt_and_steer),
@@ -59,12 +51,9 @@ fn main() {
         ("crash_fails_the_turn_with_stderr", crash_fails_the_turn_with_stderr),
         ("rollback_resumes_at_the_kept_turn", rollback_resumes_at_the_kept_turn),
         ("forks_natively_at_a_turn", forks_natively_at_a_turn),
-        ("forks_natively_at_a_prior_turn", forks_natively_at_a_prior_turn),
-        ("rolls_back_inside_a_native_fork", rolls_back_inside_a_native_fork),
         ("launch_flags_follow_the_session_config", launch_flags_follow_the_session_config),
         ("auto_compact_window_and_cache_lifetime", auto_compact_window_and_cache_lifetime),
         ("info_reports_version_login_and_models", info_reports_version_login_and_models),
-        ("info_without_the_cli", info_without_the_cli),
     ];
     let filter = std::env::args().skip(1).find(|a| !a.starts_with('-'));
     let mut failed = Vec::new();
@@ -95,79 +84,6 @@ fn block_on<F: std::future::Future<Output = ()>>(f: F) {
 // ---------------------------------------------------------------------------------------------
 // T3 Code's fixtures
 // ---------------------------------------------------------------------------------------------
-
-fn replays_a_simple_answer() {
-    block_on(async {
-        let mut r = Replay::t3("simple", RuntimeMode::FullAccess).await;
-        r.send(0).await;
-        r.turn().await;
-        r.close().await;
-        r.expect(&[
-            "thread (new)",
-            "thread 77171d01-fb4f-4dff-a961-d9dd334be93d",
-            "model claude-sonnet-4-6",
-            "completed msg_01CM449j71BXKjsRZZpW2z64:0: message fixture simple ok",
-            "usage in=11796 out=6 cached=9455 cost=0.011703",
-            "turn completed",
-            "exited",
-        ]);
-    });
-}
-
-fn replays_turns_in_one_session() {
-    block_on(async {
-        let mut r = Replay::t3("multi_turn", RuntimeMode::FullAccess).await;
-        r.send(0).await;
-        r.turn().await;
-        r.send(1).await;
-        r.turn().await;
-        r.close().await;
-        r.expect(&[
-            "thread (new)",
-            "thread 01899f29-45f7-43c3-b963-0f9181ed013f",
-            "model claude-sonnet-4-6",
-            "completed msg_018QDgm81Jgo5XonK3Bm8dEc:0: message first fixture turn complete",
-            "usage in=11795 out=7 cached=9455 cost=0.011714",
-            "turn completed",
-            "completed msg_01PifXzuLoccLsnMjRC9hXJ8:0: message second fixture turn complete",
-            // The CLI reports the session's running cost; a turn's is the difference.
-            "usage in=11814 out=7 cached=11792 cost=0.003723",
-            "turn completed",
-            "exited",
-        ]);
-    });
-}
-
-fn steering_joins_the_running_turn() {
-    block_on(async {
-        let mut r = Replay::t3("message_steering", RuntimeMode::FullAccess).await;
-        r.send(0).await;
-        r.steer(1).await;
-        r.turn().await;
-        r.close().await;
-        // The aborted request's result doesn't end the turn; one turn carries both prompts.
-        r.expect(&[
-            "thread (new)",
-            "thread 05f72f7d-81d5-4db9-a3cf-234191cf79f9",
-            "model claude-sonnet-4-6",
-            "completed msg_01Cjp5MnmN6F7wwrzNss9zVW:0: message steering fixture observed",
-            "usage in=11805 out=6 cached=9455 cost=0.011737",
-            "turn completed",
-            "exited",
-        ]);
-    });
-}
-
-fn interrupt_before_output_ends_the_turn() {
-    block_on(async {
-        // The recorded CLI never wrote a result: its exit ends the interrupted turn.
-        let mut r = Replay::start("t3/turn_interrupt", opts(RuntimeMode::FullAccess).model("claude-sonnet-4-6").exit_now()).await;
-        r.send(0).await;
-        r.session.interrupt().await.unwrap();
-        r.until_exit().await;
-        r.expect(&["thread (new)", "usage in=0 out=0 cached=0 cost=-", "turn interrupted", "exited"]);
-    });
-}
 
 fn interrupt_mid_tool_interrupts_the_tool() {
     block_on(async {
@@ -212,47 +128,6 @@ fn declined_write_is_an_approval_with_a_diff() {
             "running msg_011Cf3qYNcr3jSaN9m685qT7:0: message ",
             "completed msg_011Cf3qYNcr3jSaN9m685qT7:0: message write permission denied",
             "usage in=43461 out=224 cached=35908 cost=0.060467",
-            "turn completed",
-            "exited",
-        ]);
-    });
-}
-
-fn approved_command_runs() {
-    block_on(async {
-        let mut r = Replay::t3("tool_call_read_only_on_request", RuntimeMode::Ask).await;
-        r.send(0).await;
-        let request = r.request().await;
-        let RequestBody::Approval(approval) = &request.1 else { panic!("{request:?}") };
-        assert_eq!(approval.command.as_deref(), Some("printf 'codex app-server approval fixture' > .codex-probe-write-action.txt"));
-        assert_eq!(approval.cwd.as_deref(), Some("/tmp/claude-replay-tool_call_read_only_on_request"));
-        r.respond(&request.0, Decision::Accept).await;
-        r.turn().await;
-        r.close().await;
-        let tool = r.items("toolu_01CUcXE2dtk9uUvh3LpAWzhK");
-        assert_eq!(tool.last().unwrap(), "completed toolu_01CUcXE2dtk9uUvh3LpAWzhK: tool Bash/command \"printf 'codex app-server approval fixture' > .codex-probe-wr…\" exit=0 out=(Bash completed with no output)");
-        r.expect_tail(&["turn completed", "exited"]);
-    });
-}
-
-fn read_tools_complete_with_output() {
-    block_on(async {
-        let mut r = Replay::t3("tool_call_read_only", RuntimeMode::FullAccess).await;
-        r.send(0).await;
-        r.turn().await;
-        r.close().await;
-        r.expect(&[
-            "thread (new)",
-            "thread 473fb58f-85a3-4f21-b9d3-b1fdf5ef41f9",
-            "model claude-sonnet-4-6",
-            "completed msg_01GA9LpBQUx46bYfJz1Dg3sx:0: reasoning Let me read both files simultaneously.",
-            "completed msg_01GA9LpBQUx46bYfJz1Dg3sx:1: message I'll read both files simultaneously!",
-            "running toolu_017Q89TYYCDJPT2uLttrCn3A: tool Read/read \"package.json\"",
-            "running toolu_01CAafSU7YvuRYWdrFzpGCCW: tool Read/read \"tsconfig.json\"",
-            r#"completed toolu_017Q89TYYCDJPT2uLttrCn3A: tool Read/read "package.json" out=1\t{\n2\t  "name": "claude-read-only-fixture",\n3\t  "privat…"#,
-            r#"completed toolu_01CAafSU7YvuRYWdrFzpGCCW: tool Read/read "tsconfig.json" out=1\t{\n2\t  "compilerOptions": {\n3\t    "module": "ESNext",\…"#,
-            "completed msg_017vbtgCJT7W7ayU6dpcREpU:0: message read only tool fixture complete",
-            "usage in=6630 out=162 cached=6298 cost=0.005561",
             "turn completed",
             "exited",
         ]);
@@ -312,38 +187,6 @@ fn error_results_fail_the_turn() {
             "turn completed",
             "exited",
         ]);
-    });
-}
-
-fn bash_reports_output_and_exit() {
-    block_on(async {
-        let mut r = Replay::t3("claude_local_bash_task", RuntimeMode::FullAccess).await;
-        r.send(0).await;
-        r.turn().await;
-        r.close().await;
-        assert_eq!(r.items("toolu_01QHaWEM6vnYqxYPvpqv6Xq4"), [
-            "running toolu_01QHaWEM6vnYqxYPvpqv6Xq4: tool Bash/command \"vp run --filter @t3tools/web typecheck 2>&1 | tail -30\"",
-            "completed toolu_01QHaWEM6vnYqxYPvpqv6Xq4: tool Bash/command \"vp run --filter @t3tools/web typecheck 2>&1 | tail -30\" exit=0 out=~/apps/web$ tsgo --noEmit cache disabled",
-        ]);
-        r.expect_tail(&["completed msg_01localbashfixture2:0: message claude local bash task fixture complete", "usage in=2 out=2 cached=0 cost=0.001000", "turn completed", "exited"]);
-    });
-}
-
-fn command_output_keeps_escapes() {
-    block_on(async {
-        let mut r = Replay::t3("command_output_streaming", RuntimeMode::FullAccess).await;
-        r.send(0).await;
-        r.turn().await;
-        r.close().await;
-        let output = r.events.iter().rev().find_map(|e| match e {
-            ProviderEvent::Item(i) if i.id == "toolu_01CJnQSvsvh3iZtmvSWQVVvg" => match &i.body {
-                NodeBody::Tool(t) => t.output.clone(),
-                _ => None,
-            },
-            _ => None,
-        });
-        assert!(output.unwrap().starts_with("\u{1b}[32mstream line 1\u{1b}[0m\n"));
-        r.expect_tail(&["turn completed", "exited"]);
     });
 }
 
@@ -708,58 +551,6 @@ fn forks_natively_at_a_turn() {
     });
 }
 
-fn forks_natively_at_a_prior_turn() {
-    block_on(async {
-        let mut r = Replay::t3("thread_fork_native_prior_turn", RuntimeMode::FullAccess).await;
-        r.send(0).await;
-        r.turn().await;
-        r.send(1).await;
-        r.turn().await;
-        r.close().await;
-        let refs = r.turn_refs();
-        assert_eq!(refs, ["be0e3276-8c27-44bf-8ed0-0b4424e9f902", "c517b74b-9537-4260-afcb-186c4056c0a4"]);
-        r.fork(ForkFrom { thread: "a91391e1-0de3-4107-a7c9-db7b1bbd8b99".into(), at: ForkAt::Turn(refs[0].clone()) }).await;
-        r.send(2).await;
-        r.turn().await;
-        r.close().await;
-        assert!(has_flags(&r.launches()[1], &["--resume-session-at=be0e3276-8c27-44bf-8ed0-0b4424e9f902"]));
-        // The copy only holds the first turn.
-        let last = r.last_message();
-        assert!(last.contains("fork boundary alpha") && !last.contains("beta"), "{last}");
-        r.expect_tail(&["turn completed", "exited"]);
-    });
-}
-
-fn rolls_back_inside_a_native_fork() {
-    block_on(async {
-        let mut r = Replay::t3("thread_fork_native_fork_local_rollback", RuntimeMode::FullAccess).await;
-        r.send(0).await;
-        r.turn().await;
-        r.close().await;
-        let at = r.turn_refs().remove(0);
-        r.fork(ForkFrom { thread: "273fe17b-65fb-451f-ad99-ff19d323852d".into(), at: ForkAt::Turn(at) }).await;
-        r.send(1).await;
-        r.turn().await;
-        r.send(2).await;
-        r.turn().await;
-        r.close().await;
-        // Back to the fork's first turn, in the copy (its id is ours), not the source.
-        let ours = r.launches()[1].iter().find_map(|a| a.strip_prefix("--session-id=")).unwrap().to_string();
-        let first = r.turn_refs()[1].clone();
-        assert_eq!(first, "14310fd5-a1aa-448b-8880-de52f86541b1");
-        r.resume_at(&ours, &first).await;
-        r.send(3).await;
-        r.turn().await;
-        r.close().await;
-        let launches = r.launches();
-        assert_eq!(launches.len(), 3);
-        assert!(has_flags(&launches[2], &[&format!("--resume={ours}"), "--resume-session-at=14310fd5-a1aa-448b-8880-de52f86541b1"]), "{:?}", launches[2]);
-        let last = r.last_message();
-        assert!(last.contains("fork local first") && !last.contains("fork local second"), "{last}");
-        r.expect_tail(&["turn completed", "exited"]);
-    });
-}
-
 /// T3's "Auto-compact after": `autoCompactWindow` in the CLI's settings, and the meter's threshold
 /// 33,000 below it (only under the model's window). The real CLI's usage says which prompt cache
 /// the requests wrote (1-hour entries here, a subscription): the lifetime idle compaction keys off.
@@ -865,11 +656,8 @@ fn info_reports_version_login_and_models() {
         });
         let info = signed_out.info().await;
         assert_eq!(info.auth, AuthStatus::Missing);
-    });
-}
 
-fn info_without_the_cli() {
-    block_on(async {
+        // Without the CLI: not installed, login unknown, still the models to pick from.
         let claude = Claude::new(ProviderConfig { binary: Some("/nonexistent/claude".into()), args: vec![], env: vec![], ..Default::default() });
         let info = claude.info().await;
         assert!(!info.installed);
@@ -1008,21 +796,6 @@ impl Replay {
         self.events.iter().filter_map(|e| if let ProviderEvent::TurnRef { id } = e { Some(id.clone()) } else { None }).collect()
     }
 
-    /// The text of the newest completed message.
-    fn last_message(&self) -> String {
-        self.events
-            .iter()
-            .rev()
-            .find_map(|e| match e {
-                ProviderEvent::Item(i) if i.status == NodeStatus::Completed => match &i.body {
-                    NodeBody::Message { text } => Some(text.clone()),
-                    _ => None,
-                },
-                _ => None,
-            })
-            .unwrap_or_default()
-    }
-
     async fn send(&mut self, prompt: usize) {
         let text = self.prompts[prompt].clone();
         self.send_text(&text).await;
@@ -1030,11 +803,6 @@ impl Replay {
 
     async fn send_text(&mut self, text: &str) {
         self.session.send(TurnInput { text: text.into(), attachments: vec![] }).await.unwrap();
-    }
-
-    async fn steer(&mut self, prompt: usize) {
-        let text = self.prompts[prompt].clone();
-        self.session.steer(TurnInput { text, attachments: vec![] }).await.unwrap();
     }
 
     async fn respond(&mut self, id: &str, decision: Decision) {

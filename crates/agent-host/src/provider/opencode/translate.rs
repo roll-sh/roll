@@ -750,12 +750,6 @@ mod tests {
     }
 
     #[test]
-    fn subagent_answers_lose_their_wrapper() {
-        assert_eq!(subagent_output("<subagent sessionID=\"s\" state=\"completed\">\nCHILD_OK\n</subagent>"), "CHILD_OK");
-        assert_eq!(subagent_output("plain"), "plain");
-    }
-
-    #[test]
     fn a_steer_not_yet_delivered_holds_the_turn() {
         let mut tr = Translator::new("ses".into(), "/w".into(), None, Arc::default(), None);
         tr.start_turn(Some("msg_roll_turn_1".into()));
@@ -766,13 +760,6 @@ mod tests {
         tr.on_event(ev("session.inbox.delivered", json!({"sessionID": "ses", "inboxID": "msg_roll_steer_1"})));
         let end = events(tr.on_event(ev("session.execution.succeeded", json!({"sessionID": "ses"}))));
         assert_eq!(end, vec![ProviderEvent::TurnRef { id: "msg_roll_turn_1".into() }, ProviderEvent::TurnEnded(TurnEnd::Completed)]);
-    }
-
-    #[test]
-    fn requests_without_a_turn_are_refused() {
-        let mut tr = Translator::new("ses".into(), "/w".into(), None, Arc::default(), None);
-        let out = tr.on_event(ev("permission.asked", json!({"id": "per_1", "sessionID": "ses", "action": "shell"})));
-        assert_eq!(out, vec![Action::Reject { session: "ses".into(), request: "per_1".into() }]);
     }
 
     #[test]

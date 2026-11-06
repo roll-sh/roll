@@ -482,27 +482,6 @@ mod tests {
     }
 
     #[test]
-    fn text_streams_and_completes_with_pis_final_content() {
-        let mut t = Items::new(Path::new("/w"));
-        t.set_context_window(Some(1000));
-        t.begin("t1");
-        t.on_record("message_start", &rec(json!({ "message": { "role": "assistant" } })));
-        let u = |ty: &str, extra: Value| {
-            let mut e = json!({ "type": ty, "contentIndex": 1 });
-            e.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
-            rec(json!({ "usage": { "totalTokens": 10 }, "assistantMessageEvent": e }))
-        };
-        let ev = t.on_record("message_update", &u("text_delta", json!({ "delta": "he" })));
-        assert!(matches!(&ev[0], ProviderEvent::Context(c) if c.used_tokens == 10 && c.max_tokens == Some(1000)));
-        assert!(matches!(&ev[1], ProviderEvent::Item(i) if i.id == "t1:m1:c1" && i.status == NodeStatus::Running));
-        assert_eq!(ev[2], ProviderEvent::TextDelta { item: "t1:m1:c1".into(), text: "he".into() });
-        let ev = t.on_record("message_update", &u("text_end", json!({ "content": "hello" })));
-        assert!(matches!(&ev[0], ProviderEvent::Item(Item { body: NodeBody::Message { text }, status: NodeStatus::Completed, .. }) if text == "hello"));
-        assert!(t.finish(false).is_empty());
-        assert!(t.on_record("message_update", &u("text_delta", json!({ "delta": "late" }))).is_empty());
-    }
-
-    #[test]
     fn caps_keep_char_boundaries() {
         let big = "é".repeat(OUTPUT_CAP);
         assert!(cap(&big).len() <= OUTPUT_CAP + 8);

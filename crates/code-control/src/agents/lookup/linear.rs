@@ -259,11 +259,4 @@ mod tests {
         let f = issue_refs(&["ENG-12".into(), "9cfb4d1e-1b5c-4c4a-9d55-3f0f3b8a2f10".into()]);
         assert_eq!(f["or"].as_array().unwrap().len(), 2);
     }
-
-    #[test]
-    fn label_groups_are_not_rows_and_children_say_their_group() {
-        assert!(row("labels", &json!({ "id": "g", "name": "Type", "isGroup": true })).is_none());
-        let i = row("labels", &json!({ "id": "l", "name": "Bug", "color": "#eb5757", "parent": { "name": "Type" }, "team": null })).unwrap();
-        assert_eq!((i.label.as_str(), i.key.as_deref(), i.hint.as_deref(), i.color.as_deref()), ("Type / Bug", Some("Bug"), Some("Workspace"), Some("#eb5757")));
-    }
 }

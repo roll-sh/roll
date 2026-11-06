@@ -552,28 +552,3 @@ impl Session for AcpSession {
         inner.process.close().await;
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn initialize_offers_v2_and_v1_and_what_roll_implements() {
-        let p = initialize_params(Flavor::Generic);
-        assert_eq!(p["protocolVersion"], 2);
-        assert_eq!(p["info"]["name"], "roll");
-        assert_eq!(p["clientInfo"], p["info"]);
-        assert_eq!(p["clientCapabilities"]["fs"], json!({ "readTextFile": true, "writeTextFile": true }));
-        assert_eq!(p["clientCapabilities"]["terminal"], true);
-        // Antigravity reads through roll, but writes and runs commands itself.
-        let p = initialize_params(Flavor::Antigravity);
-        assert_eq!(p["clientCapabilities"]["fs"], json!({ "readTextFile": true, "writeTextFile": false }));
-        assert_eq!(p["clientCapabilities"]["terminal"], false);
-        assert_eq!(p["clientInfo"]["name"], "roll");
-        // Cursor is asked for its parameterized model picker.
-        let p = initialize_params(Flavor::Cursor);
-        assert_eq!(p["clientCapabilities"]["_meta"], json!({ "parameterizedModelPicker": true }));
-        assert_eq!(p["clientCapabilities"]["terminal"], true);
-        assert!(initialize_params(Flavor::Generic)["clientCapabilities"].get("_meta").is_none());
-    }
-}

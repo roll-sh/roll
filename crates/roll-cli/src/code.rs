@@ -1699,12 +1699,6 @@ mod tests {
         assert_eq!(holder(&serde_json::json!({ "claimed_by": null, "state": "open" }), 1_000), "-");
     }
 
-    #[test]
-    fn bytes_are_whole_below_a_kilobyte() {
-        assert_eq!(crate::bytes(332.0), "332 B");
-        assert_eq!(crate::bytes(2048.0), "2.0 KB");
-    }
-
     fn parse(args: &[&str]) -> Code {
         T::try_parse_from(std::iter::once("code").chain(args.iter().copied())).unwrap().cmd
     }

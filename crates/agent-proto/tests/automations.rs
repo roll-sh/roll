@@ -126,8 +126,9 @@ fn every_built_in_config_parses_as_its_type() {
     }
 }
 
+/// Defaults fill in what a spec leaves out, and a config field that is `null` is unset.
 #[test]
-fn defaults_fill_in() {
+fn null_config_fields_are_unset() {
     let a: AutomationSpec = serde_json::from_value(serde_json::json!({
         "name": "x", "trigger": { "type": "schedule", "cron": "* * * * *" }, "steps": []
     }))
@@ -137,14 +138,10 @@ fn defaults_fill_in() {
     assert_eq!(a.concurrency, Concurrency::Parallel);
     let t: Target = serde_json::from_value(serde_json::json!({ "type": "sandbox" })).unwrap();
     assert_eq!(t, Target::Sandbox { size: "standard".into(), keep: false });
-    let w: WebhookCall = serde_json::from_value(serde_json::json!({ "url": "https://x" })).unwrap();
-    assert_eq!(w.method, "POST");
-}
 
-/// A config field that is `null` is unset: the builder sends nulls for fields nobody filled in,
-/// and kinds with a `#[serde(default)]` map, list or flag refused them. Nulls deeper in are data.
-#[test]
-fn null_config_fields_are_unset() {
+    // A config field that is `null` is unset: the builder sends nulls for fields nobody filled
+    // in, and kinds with a `#[serde(default)]` map, list or flag refused them. Nulls deeper in
+    // are data.
     let a: AutomationSpec = serde_json::from_value(serde_json::json!({
         "name": "x",
         "trigger": { "type": "integration", "source": "slack", "config": { "team": null, "channel": "C1" } },

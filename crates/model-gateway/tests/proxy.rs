@@ -39,13 +39,7 @@ async fn health_needs_no_key_and_everything_else_does() {
     for path in ["/v1/clients", "/v1/settings", "/admin", "/v0/management/config"] {
         assert_eq!(g.http.get(g.url(path)).bearer_auth(&g.key).send().await.unwrap().status(), 404, "{path}");
     }
-}
-
-#[tokio::test]
-async fn a_revoked_key_is_refused_at_once() {
-    let mock = Mock::start(|_| json(200, messages_answer("claude-x", 1, 1))).await;
-    let g = Gw::start(vec![upstream("a", UpstreamKind::Anthropic, &mock.url(""))], vec![], &[("a", "sk-a")]).await;
-    assert_eq!(g.post("/v1/messages", &messages("claude-x", false)).await.status(), 200);
+    // A revoked key is refused at once.
     let client = g.gw.clients().into_iter().next().unwrap();
     assert!(g.gw.revoke_client(&client.id).unwrap());
     assert_eq!(g.post("/v1/messages", &messages("claude-x", false)).await.status(), 401);
@@ -130,6 +124,7 @@ async fn requests_go_out_as_the_gateway_with_only_what_upstream_needs() {
         .header("cookie", "session=secret")
         .header("x-claude-code-session-id", "sess-1")
         .header("x-roll-thread", "thr_1")
+        .header("x-roll-project", "prj_9")
         .header("x-stainless-os", "MacOS")
         .json(&messages("claude-x", false))
         .send()
@@ -142,10 +137,19 @@ async fn requests_go_out_as_the_gateway_with_only_what_upstream_needs() {
     assert_eq!(s.header("anthropic-version"), Some("2023-06-01"));
     assert_eq!(s.header("anthropic-beta"), Some("interleaved-thinking-2025-05-14"));
     assert_eq!(s.header("anthropic-organization"), Some("org-1"));
-    for gone in ["cookie", "authorization", "x-claude-code-session-id", "x-roll-thread", "x-stainless-os"] {
+    for gone in ["cookie", "authorization", "x-claude-code-session-id", "x-roll-thread", "x-roll-project", "x-stainless-os"] {
         assert_eq!(s.header(gone), None, "{gone} went upstream");
     }
     assert!(!String::from_utf8_lossy(&s.body).contains(&g.key));
+
+    // The thread and project are logged (a thread that isn't an id is dropped), with the client.
+    g.http.post(g.url("/v1/messages")).bearer_auth(&g.key).header("x-roll-thread", "not an id; drop table").json(&messages("claude-x", false)).send().await.unwrap();
+    let log = g.logged(2).await;
+    assert_eq!(log[1].thread.as_deref(), Some("thr_1"));
+    assert_eq!(log[1].project.as_deref(), Some("prj_9"));
+    assert_eq!(log[0].thread, None);
+    let client = g.gw.clients().into_iter().next().unwrap();
+    assert_eq!(log[0].client.as_deref(), Some(client.id.as_str()));
 }
 
 #[tokio::test]
@@ -154,7 +158,9 @@ async fn failover_on_500_529_refused_and_timeout_in_priority_order() {
     let overloaded = Mock::start(|_| status(529)).await;
     let slow = Mock::delayed(Duration::from_secs(5), |_| json(200, messages_answer("claude-x", 1, 1))).await;
     let good = Mock::start(|_| json(200, messages_answer("claude-x", 1, 1))).await;
-    let refused = format!("http://{}:{}", Ipv4Addr::LOCALHOST, free_port());
+    // Port 9 (discard): nothing listens there. A freed ephemeral port could be taken by another
+    // test binary running alongside.
+    let refused = format!("http://{}:9", Ipv4Addr::LOCALHOST);
     let ups = vec![
         upstream("five", UpstreamKind::AnthropicCompatible, &five.url("")),
         upstream("overloaded", UpstreamKind::AnthropicCompatible, &overloaded.url("")),
@@ -328,23 +334,6 @@ async fn private_addresses_are_refused_unless_allowed() {
     up.allow_private = true;
     g.gw.apply(settings(g.port, vec![up], vec![]), keys(&[])).await;
     assert_eq!(g.post("/v1/messages", &messages("claude-x", false)).await.status(), 200);
-}
-
-#[tokio::test]
-async fn threads_and_projects_are_logged_and_never_forwarded() {
-    let mock = Mock::start(|_| json(200, messages_answer("claude-x", 1, 1))).await;
-    let g = Gw::start(vec![upstream("a", UpstreamKind::Anthropic, &mock.url(""))], vec![], &[("a", "k")]).await;
-    let send = |thread: &'static str| {
-        g.http.post(g.url("/v1/messages")).bearer_auth(&g.key).header("x-roll-thread", thread).header("x-roll-project", "prj_9").json(&messages("claude-x", false)).send()
-    };
-    send("thr_1").await.unwrap();
-    send("not an id; drop table").await.unwrap();
-    let log = g.logged(2).await;
-    assert_eq!(log[1].thread.as_deref(), Some("thr_1"));
-    assert_eq!(log[1].project.as_deref(), Some("prj_9"));
-    assert_eq!(log[0].thread, None);
-    let client = g.gw.clients().into_iter().next().unwrap();
-    assert_eq!(log[0].client.as_deref(), Some(client.id.as_str()));
 }
 
 #[tokio::test]

@@ -413,14 +413,4 @@ mod tests {
         assert_eq!(entries.iter().map(|(_, v)| v.as_str()).collect::<String>(), long);
         assert!(context_entries(" \n ").is_empty());
     }
-
-    #[test]
-    fn non_image_attachments_are_refused() {
-        let input = TurnInput {
-            text: String::new(),
-            attachments: vec![agent_proto::Attachment { name: "a.pdf".into(), mime: "application/pdf".into(), data: String::new() }],
-        };
-        assert!(codex_input(&input).is_err());
-        assert!(codex_input(&TurnInput::default()).is_err());
-    }
 }

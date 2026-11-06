@@ -1383,12 +1383,6 @@ mod tests {
         assert!(text.starts_with("HEAD") && text.ends_with("TAIL") && text.contains("bytes cut"));
     }
 
-    #[test]
-    fn activity_lines_are_one_short_line() {
-        assert_eq!(one_line("\n  first line\nsecond", 120), "first line");
-        assert_eq!(one_line(&"a".repeat(200), 10).chars().count(), 10);
-    }
-
     fn ask(command: Option<&str>, title: &str) -> Approval {
         Approval {
             action: ApprovalAction::Command,

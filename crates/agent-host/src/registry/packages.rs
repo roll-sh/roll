@@ -152,10 +152,7 @@ mod tests {
         assert_eq!(npm_command("x", "@s/y", Some(&same)).as_deref(), Some("a"));
         assert_eq!(npm_command("x", "@s/y", Some(&json!({ "a": "1.js", "b": "2.js" }))), None);
         assert_eq!(npm_command("x", "y", None), None);
-    }
-
-    #[test]
-    fn uv_command_candidates() {
+        // uv: the agent's id, then the package's name.
         assert_eq!(command_candidates("fast-agent", "fast-agent-acp"), ["fast-agent", "fast-agent-acp"]);
         assert_eq!(command_candidates("minion-code", "minion-code"), ["minion-code"]);
     }

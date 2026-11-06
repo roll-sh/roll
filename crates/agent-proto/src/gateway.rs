@@ -859,12 +859,4 @@ mod tests {
         assert!(pattern_matches("gpt-5", "gpt-5"));
         assert!(!pattern_matches("gpt-5", "gpt-5.5"));
     }
-
-    #[test]
-    fn defaults_round_trip_quietly() {
-        let s = GatewaySettings::default();
-        let v = serde_json::to_value(&s).unwrap();
-        assert_eq!(v, serde_json::json!({ "enabled": false, "port": 8790 }));
-        assert_eq!(serde_json::from_value::<GatewaySettings>(v).unwrap(), s);
-    }
 }

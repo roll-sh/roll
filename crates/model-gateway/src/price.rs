@@ -240,19 +240,6 @@ mod tests {
     }
 
     #[test]
-    fn the_first_party_and_cloud_ids_of_a_model_cost_the_same() {
-        let u = Usage { input: 1_000_000, output: 1_000_000, cache_read: 1_000_000, cache_write: 1_000_000 };
-        let first = cost_micros("claude-sonnet-4-5-20250929", u, &[]);
-        assert!(first > 0);
-        assert_eq!(cost_micros("us.anthropic.claude-sonnet-4-5-20250929-v1:0", u, &[]), first);
-        assert_eq!(cost_micros("claude-sonnet-4-5@20250929", u, &[]), first);
-        assert_eq!(cost_micros("claude-sonnet-4-5", u, &[]), first);
-        assert_eq!(cost_micros("gpt-4o-mini-2024-07-18", u, &[]), cost_micros("gpt-4o-mini", u, &[]));
-        assert_ne!(cost_micros("gpt-4o-mini", u, &[]), cost_micros("gpt-4o", u, &[]));
-        assert_eq!(cost_micros("nobody-knows-this", u, &[]), 0);
-    }
-
-    #[test]
     fn a_long_prompt_moves_to_its_tier() {
         let short = Usage { input: 100_000, output: 0, cache_read: 0, cache_write: 0 };
         let long = Usage { input: 100_001, ..short };

@@ -525,7 +525,7 @@ fn message(id: &str) -> Value {
 
 /// A sandbox stays up while a thread on it runs, sleeps a window after it only waits on its
 /// user (stopped at agent37, metering ended, its records still there), and a command wakes it:
-/// held until the daemon connects again, then delivered once.
+/// held until the daemon connects again, then delivered once. Terminal traffic keeps it up too.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_idle_sandbox_sleeps_and_a_command_wakes_it() {
     let w = world(|c| c.idle_stop = IDLE).await;
@@ -579,20 +579,13 @@ async fn an_idle_sandbox_sleeps_and_a_command_wakes_it() {
     tokio::time::timeout(Duration::from_millis(300), d.recv()).await.expect_err("sent once");
     // The wake counts as activity: it doesn't go straight back to sleep.
     assert_eq!(w.sandbox(&id).await.unwrap()["status"], "running");
-}
-
-/// Terminal output (a provider login) keeps a sandbox up; silence puts it to sleep.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn terminal_traffic_keeps_a_sandbox_up() {
-    let w = world(|c| c.idle_stop = IDLE).await;
-    let (id, _, token) = w.running().await;
-    let (mut d, _) = Daemon::connect(&w.url, &token).await;
-    for _ in 0..12 {
+    // Terminal output (a provider login) keeps it up past a window; silence puts it to sleep.
+    for _ in 0..6 {
         d.send(&DaemonFrame::Delta { delta: Delta::Terminal { terminal: TerminalId("term_1".into()), data: "aGk=".into() } }).await;
         tokio::time::sleep(IDLE / 4).await;
     }
     assert_eq!(w.sandbox(&id).await.unwrap()["status"], "running", "up while its terminal talks");
-    w.until(&id, "asleep", |s| s["stopped_reason"] == "idle").await;
+    w.until(&id, "asleep again", |s| s["stopped_reason"] == "idle").await;
 }
 
 /// A relay that starts (a restart, or another node taking the owner's agents over) doesn't know

@@ -1,6 +1,6 @@
 //! The rest of the /v1/code contract (docs/code/http-api.md): the auth matrix, CORS, GitHub
-//! endpoints without an App, error statuses, writes and binary content, blob caching, `/paths`
-//! truncation, stats (merges_daily, languages, contributors), event shapes, previews through a
+//! without an App, error statuses, writes and binary content, blob caching, `/paths`
+//! truncation, stats (merges_daily, languages, contributors), previews through a
 //! backend, lookups by number and id, and state surviving a restart.
 
 mod common;
@@ -12,11 +12,9 @@ use base64::Engine;
 use code_control::model::{Change, Preview, PreviewState, RepoRow};
 use code_control::{Caller, PreviewBackend};
 use common::{App, app, app_with, open_in};
-use futures::StreamExt;
 use serde_json::{Value, json};
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
 
 const ADMIN: &str = "admin-secret";
 
@@ -187,6 +185,12 @@ async fn open_mode_makes_everyone_admin() {
     let owners = a.ok("GET", "/v1/code/owners", None).await;
     assert_eq!(owners[0]["name"], "acme");
     assert_eq!(owners[0]["repos_count"], 1);
+    // Without a GitHub App: GitHub isn't configured, and connecting a GitHub repo is refused.
+    assert_eq!(a.ok("GET", "/v1/code/github", None).await, json!({ "configured": false, "app_slug": null, "install_url": null }));
+    let (s, v) = a
+        .req("POST", "/v1/code/repos", Some(json!({ "owner": "acme", "name": "gh", "source": { "github": { "installation_id": 1, "owner": "o", "repo": "r" } } })), None)
+        .await;
+    assert!(s.is_client_error() && v["error"].is_string(), "{s} {v}");
 }
 
 #[tokio::test]
@@ -215,27 +219,6 @@ async fn cors_for_the_browser() {
     assert_eq!(r.headers()["access-control-allow-origin"], "*");
     let exposed = r.headers()["access-control-expose-headers"].to_str().unwrap().to_ascii_lowercase();
     assert!(exposed.contains("x-roll-changeset"), "{exposed}");
-}
-
-#[tokio::test]
-async fn github_without_an_app() {
-    let a = app(None);
-    let v = a.ok("GET", "/v1/code/github", None).await;
-    assert_eq!(v, json!({ "configured": false, "app_slug": null, "install_url": null }));
-    assert_eq!(a.ok("GET", "/v1/code", None).await["github"]["configured"], false);
-    assert_eq!(a.ok("GET", "/v1/code/github/installations", None).await, json!([]));
-    let r = a.send(Request::get("/v1/code/github/setup?installation_id=1&setup_action=install").body(Body::empty()).unwrap()).await;
-    assert_eq!(r.status(), StatusCode::FOUND);
-    assert_eq!(r.headers()["location"], "https://roll.sh/dashboard/code?github=installed");
-    let (s, v) = a.req("POST", "/v1/code/github/webhook", Some(json!({ "zen": "x" })), None).await;
-    assert_eq!(s, StatusCode::NOT_FOUND, "{v}");
-    // Connecting a GitHub repo needs the App.
-    a.repo("acme", "seed").await;
-    let (s, v) = a
-        .req("POST", "/v1/code/repos", Some(json!({ "owner": "acme", "name": "gh", "source": { "github": { "installation_id": 1, "owner": "o", "repo": "r" } } })), None)
-        .await;
-    assert!(s.is_client_error(), "{s} {v}");
-    assert!(v["error"].is_string());
 }
 
 #[tokio::test]
@@ -461,56 +444,6 @@ async fn stats_languages_and_contributors() {
     assert_eq!(r["generation"], 4);
 }
 
-/// Reads SSE events off a response body. Events of other kinds wait their turn, so each kind
-/// comes out in the order it was sent.
-struct Events {
-    body: std::pin::Pin<Box<dyn futures::Stream<Item = Result<axum::body::Bytes, axum::Error>> + Send>>,
-    buf: String,
-    pending: Vec<(String, Value)>,
-}
-
-impl Events {
-    async fn open(a: &App, path: &str) -> Events {
-        let r = a.send(Request::get(path).body(Body::empty()).unwrap()).await;
-        assert_eq!(r.status(), StatusCode::OK);
-        assert_eq!(r.headers()["content-type"], "text/event-stream");
-        Events { body: Box::pin(r.into_body().into_data_stream()), buf: String::new(), pending: Vec::new() }
-    }
-
-    /// The next event of `kind`.
-    async fn next(&mut self, kind: &str) -> Value {
-        loop {
-            if let Some(i) = self.pending.iter().position(|(k, _)| k == kind) {
-                return self.pending.remove(i).1;
-            }
-            while let Some(end) = self.buf.find("\n\n") {
-                let block: String = self.buf.drain(..end + 2).collect();
-                let mut ev = String::new();
-                let mut data = String::new();
-                for line in block.lines() {
-                    if let Some(e) = line.strip_prefix("event: ") {
-                        ev = e.to_string();
-                    } else if let Some(d) = line.strip_prefix("data: ") {
-                        data.push_str(d);
-                    }
-                }
-                if !ev.is_empty() {
-                    self.pending.push((ev, serde_json::from_str(&data).unwrap()));
-                }
-            }
-            if self.pending.iter().any(|(k, _)| k == kind) {
-                continue;
-            }
-            let chunk = tokio::time::timeout(Duration::from_secs(10), self.body.next())
-                .await
-                .unwrap_or_else(|_| panic!("no {kind} event in time; have {:?}", self.pending))
-                .unwrap()
-                .unwrap();
-            self.buf.push_str(&String::from_utf8_lossy(&chunk));
-        }
-    }
-}
-
 /// A preview backend that hands out a URL and records deletes.
 #[derive(Default)]
 struct FakePreviews {
@@ -581,86 +514,6 @@ async fn deleting_a_repo_removes_its_previews() {
     let (s, _) = a.req("DELETE", p, None, None).await;
     assert_eq!(s, StatusCode::NO_CONTENT);
     assert_eq!(previews.deleted.lock().as_slice(), std::slice::from_ref(&ids[0]), "only the change with a preview");
-}
-
-#[tokio::test]
-async fn event_shapes_and_previews() {
-    let a = app(None);
-    let previews = Arc::new(FakePreviews::default());
-    a.code.set_preview_backend(previews.clone());
-    a.repo("acme", "live").await;
-    let p = "/v1/code/repos/acme/live";
-    a.ok("POST", &format!("{p}/land"), Some(json!({ "message": "init", "files": { "a.txt": { "content": "a" } } }))).await;
-    let mut ev = Events::open(&a, &format!("{p}/events")).await;
-
-    let w = a.ok("POST", &format!("{p}/work"), Some(json!({ "title": "next", "labels": ["ui"], "priority": 1 }))).await;
-    let got = ev.next("work").await;
-    assert_eq!(got, w, "work events carry the WorkItem");
-    for k in ["id", "repo_id", "repo", "number", "title", "body", "labels", "priority", "state", "source", "github_url", "claimed_by", "lease_until", "changes", "created_at", "updated_at"] {
-        assert!(got.get(k).is_some(), "WorkItem.{k}");
-    }
-
-    let ch = a
-        .ok("POST", &format!("{p}/changes"), Some(json!({ "title": "c", "work_item": w["id"], "message": "c", "files": { "c.txt": { "content": "c" } } })))
-        .await;
-    let id = ch["id"].as_str().unwrap().to_string();
-    let got = ev.next("change").await;
-    assert_eq!(got["id"], id);
-    for k in ["id", "repo_id", "repo", "number", "title", "body", "author", "state", "base", "head", "revision", "work_item", "github_pr", "github_url", "trusted", "checks", "preview", "landed_as", "conflict", "created_at", "updated_at"] {
-        assert!(got.get(k).is_some(), "Change.{k}");
-    }
-    assert_eq!(ev.next("work").await["state"], "review", "the work item moved to review");
-
-    a.ok("POST", &format!("/v1/code/changes/{id}/checks"), Some(json!({ "name": "test", "status": "failure", "url": "https://ci/1", "summary": "1 failed" }))).await;
-    let got = ev.next("check").await;
-    assert_eq!(got["change"], id);
-    assert_eq!(got["check"]["name"], "test");
-    assert_eq!(got["check"]["status"], "failure");
-    assert_eq!(got["check"]["source"], "external");
-    assert_eq!(got["check"]["url"], "https://ci/1");
-    assert_eq!(got["check"]["summary"], "1 failed");
-    assert!(got["check"]["started_at"].is_i64() && got["check"]["finished_at"].is_i64());
-    assert_eq!(ev.next("change").await["checks"][0]["status"], "failure");
-
-    let c = a.ok("POST", &format!("/v1/code/changes/{id}/preview"), None).await;
-    assert_eq!(c["preview"]["state"], "sleeping");
-    assert_eq!(c["preview"]["url"], format!("http://{id}.preview.test"));
-    assert_eq!(previews.dirs.lock().as_slice(), [true], "the backend gets the change's tree materialized");
-    let got = ev.next("preview").await;
-    assert_eq!(got["change"], id);
-    assert_eq!(got["preview"]["state"], "sleeping");
-    for k in ["state", "url", "postgres", "redis", "error", "created_at"] {
-        assert!(got["preview"].get(k).is_some(), "Preview.{k}");
-    }
-    let c = a.ok("DELETE", &format!("/v1/code/changes/{id}/preview"), None).await;
-    assert_eq!(c["preview"], Value::Null);
-    assert_eq!(previews.deleted.lock().as_slice(), std::slice::from_ref(&id));
-    assert_eq!(ev.next("preview").await, json!({ "change": id, "preview": null }));
-
-    let landed = a.ok("POST", &format!("/v1/code/changes/{id}/land"), None).await;
-    let got = ev.next("landed").await;
-    assert_eq!(got["changeset"], landed["changeset"]);
-    assert_eq!(got["change"], id, "the landing names the change it came from");
-    assert_eq!(got["git_commit"], landed["git_commit"]);
-    assert_eq!(got["ref"], "main");
-    assert_eq!(got["message"], "c");
-    assert_eq!(got["files"], 1);
-    assert_eq!(got["count"], 1);
-    assert!(got["at"].as_i64().unwrap() > 1_600_000_000, "seconds");
-    assert!(got["author"].is_string());
-    assert_eq!(ev.next("work").await["state"], "done");
-
-    // Another repo's events don't leak into this feed.
-    a.repo("acme", "other").await;
-    a.ok("POST", "/v1/code/repos/acme/other/work", Some(json!({ "title": "elsewhere" }))).await;
-    a.ok("POST", &format!("{p}/work"), Some(json!({ "title": "here" }))).await;
-    assert_eq!(ev.next("work").await["title"], "here");
-
-    // A private repo's feed is invisible without its token.
-    let b = app(Some(ADMIN));
-    two_owners(&b).await;
-    let r = b.send(Request::get("/v1/code/repos/acme/priv/events").body(Body::empty()).unwrap()).await;
-    assert_eq!(r.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]

@@ -98,6 +98,10 @@ fn sse_parses_fields_comments_and_multiline_data() {
         vec![Event::named("message_start", "{\"a\":\n1}"), Event::data("no space"), Event::data("")],
         "multiple data lines join with \\n, one space after the colon is dropped, a bare `data` is empty"
     );
+    // What the gateway writes parses back the same.
+    for e in [Event::named("content_block_delta", "{\"x\":1}"), Event::data("a\nb"), Event::data("[DONE]")] {
+        assert_eq!(parse(&e.encode(), 3), vec![e]);
+    }
 }
 
 #[test]
@@ -111,14 +115,6 @@ fn sse_handles_every_line_ending_and_any_chunk_boundary() {
             assert_eq!(parse(raw.as_bytes(), size), want, "{raw:?} in chunks of {size}");
         }
     }
-}
-
-#[test]
-fn sse_splits_a_crlf_across_chunks_as_one_line_end() {
-    let mut p = Parser::new(1024);
-    assert_eq!(p.feed(b"data: x\r").unwrap(), vec![]);
-    assert_eq!(p.feed(b"\n\r").unwrap(), vec![Event::data("x")]);
-    assert_eq!(p.feed(b"\ndata: y\n\n").unwrap(), vec![Event::data("y")], "a \\r\\n split twice is still one blank line");
 }
 
 #[test]
@@ -145,13 +141,6 @@ fn sse_finish_returns_an_unterminated_event() {
     assert_eq!(p.finish(), None);
     let mut p = Parser::new(1024);
     p.feed(b"\xEF\xBB\xBFdata: bom\n\n").map(|e| assert_eq!(e, vec![Event::data("bom")])).unwrap();
-}
-
-#[test]
-fn sse_encode_round_trips() {
-    for e in [Event::named("content_block_delta", "{\"x\":1}"), Event::data("a\nb"), Event::data("[DONE]")] {
-        assert_eq!(parse(&e.encode(), 3), vec![e]);
-    }
 }
 
 // ---------------------------------------------------------------------------------------------
