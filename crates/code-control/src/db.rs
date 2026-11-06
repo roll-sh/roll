@@ -446,6 +446,18 @@ impl Db {
         for (table, column, decl) in COLUMNS {
             sql.add_column(table, column, decl)?;
         }
+        // Sandbox prices were per month (`monthly_cents`) before they were per running hour: the
+        // column takes its new name and a price a month becomes one an hour (730 h, rounded up).
+        // Every sandbox query read `hourly_cents`, so an old database answered 500 everywhere.
+        sql.migrate("agent_sandboxes_hourly_cents", |c| {
+            for table in ["agent_sandboxes", "agent_sandbox_usage"] {
+                if c.has_column(table, "monthly_cents")? && !c.has_column(table, "hourly_cents")? {
+                    c.execute_batch(&format!("ALTER TABLE {table} RENAME COLUMN monthly_cents TO hourly_cents"))?;
+                    c.execute(&format!("UPDATE {table} SET hourly_cents = (hourly_cents + 729) / 730"), ())?;
+                }
+            }
+            Ok(())
+        })?;
         // Old tokens get an id (idempotent: only rows without one), then ids are unique.
         sql.execute("UPDATE owner_tokens SET id = 'tok_' || substr(hash, 1, 14) WHERE id IS NULL", ())?;
         sql.ensure_schema("CREATE UNIQUE INDEX IF NOT EXISTS owner_tokens_id ON owner_tokens (id)")?;

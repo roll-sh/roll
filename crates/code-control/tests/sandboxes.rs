@@ -801,3 +801,38 @@ async fn the_sandbox_image_comes_online_with_its_token() {
         assert_eq!(info["installed"], true, "{info}");
     }
 }
+
+/// A control.db from before prices were per running hour (`monthly_cents`) opens: the column is
+/// renamed and its prices become hourly, so the sandbox list and usage read it (every sandbox
+/// query answered 500 on such a database).
+#[test]
+fn a_database_with_monthly_prices_opens_with_hourly_ones() {
+    use code_control::agents::sandbox::store;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("control.db");
+    {
+        let sql = code_sql::Db::open_sqlite(&path, code_sql::SqliteOptions::default()).unwrap();
+        sql.ensure_schema(&store::SCHEMA.replace("hourly_cents", "monthly_cents")).unwrap();
+        sql.execute(
+            "INSERT INTO agent_sandboxes (id, owner_id, machine_id, name, backend, size, cpu, memory_gb, disk_gb, monthly_cents, status, desired, created_at, updated_at) \
+             VALUES ('sbx_old', 'own_1', 'mch_1', 'box', 'docker', 'standard', 2, 4, 20, 2000, 'running', 'running', 1, 1)",
+            (),
+        )
+        .unwrap();
+        sql.execute(
+            "INSERT INTO agent_sandbox_usage (sandbox_id, month, owner_id, size, monthly_cents, running_ms) \
+             VALUES ('sbx_old', '2026-11', 'own_1', 'standard', 2000, 3600000)",
+            (),
+        )
+        .unwrap();
+    }
+    // Twice: the second open must leave the converted prices alone.
+    for _ in 0..2 {
+        let sql = code_sql::Db::open_sqlite(&path, code_sql::SqliteOptions::default()).unwrap();
+        let db = code_control::db::Db::open(sql).unwrap();
+        let live = store::live(db.sql(), "own_1").unwrap();
+        assert_eq!(live.len(), 1);
+        assert_eq!(live[0].size.hourly_cents, 3, "2000¢ a month is 3¢ a running hour");
+        assert_eq!(store::usage(db.sql(), "own_1", "2026-11").unwrap()[0].hourly_cents, 3);
+    }
+}
