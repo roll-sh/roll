@@ -23,7 +23,7 @@ import { useMarkState, useMarkStateValue } from "../mark-state";
 import { AddMachineDialog, AddMachinePaths } from "./add-machine";
 import { AgentsCanvas, type CanvasHandle } from "./agents-canvas";
 import { AutomationsSheet } from "./automations/sheet";
-import { Notices } from "./automations/notices";
+import { Notices, useUnseenNotices } from "./automations/notices";
 import { CommandPalette, type PaletteHost } from "./command-palette";
 import { openIntegrations } from "./integrations";
 import { Menu } from "./menu";
@@ -422,6 +422,13 @@ export function AgentsSurface({
   const working = focused ? all.busy.filter((t) => t.project === focused) : all.busy;
   const requests = focused ? all.requests.filter((r) => inFocus(r.thread)) : all.requests;
   const toggleAutomations = useCallback(() => setAgentsView(shown.kind === "automations" ? { kind: "canvas" } : { kind: "automations" }), [shown.kind]);
+  // Notices nobody saw (A12): the automations button says so and opens them.
+  const unseen = useUnseenNotices(client, services.automations);
+  const newNotices = unseen > 0 ? `${unseen} new notice${unseen === 1 ? "" : "s"}` : "";
+  const openAutomations = useCallback(
+    () => (unseen > 0 && shown.kind !== "automations" ? setAgentsView({ kind: "automations", list: "notices" }) : toggleAutomations()),
+    [unseen, shown.kind, toggleAutomations],
+  );
   // A (no modifiers, not typing, nothing open over the canvas): the automations sheet, like the ⚡ button.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -429,11 +436,11 @@ export function AgentsSurface({
       const el = e.target as HTMLElement | null;
       if (el && (el.isContentEditable || /^(INPUT|SELECT|TEXTAREA)$/.test(el.tagName) || el.closest(".xterm, [role=dialog]:not([data-surface]), [role=menu], [role=listbox]"))) return;
       e.preventDefault();
-      toggleAutomations();
+      openAutomations();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [toggleAutomations]);
+  }, [openAutomations]);
   // Waiting on you isn't running: those show as the waiting count.
   const running = working.filter((t) => t.status !== "waiting").length;
   const archived = [...data.threads.values()].filter((r) => r.value.archived_at !== null).length;
@@ -524,8 +531,11 @@ export function AgentsSurface({
               </button>
               {/* On a phone these are under More; the bar keeps its room for what is live. */}
               <span className="flex max-sm:hidden">
-                <IconButton label={shown.kind === "automations" ? "Close automations (A)" : "Automations (A)"} active={shown.kind === "automations"} onClick={toggleAutomations}>
-                  <Zap className="size-4" strokeWidth={1.75} />
+                <IconButton label={shown.kind === "automations" ? "Close automations (A)" : newNotices ? `Automations (A): ${newNotices}` : "Automations (A)"} active={shown.kind === "automations"} onClick={openAutomations}>
+                  <span className="relative grid place-items-center">
+                    <Zap className="size-4" strokeWidth={1.75} />
+                    {unseen > 0 && <span className="absolute -top-0.5 -right-0.5 size-1.5 rounded-full bg-accent" aria-hidden />}
+                  </span>
                 </IconButton>
                 <IconButton label="Add a machine" onClick={() => setAdding(true)}>
                   <Server className="size-4" strokeWidth={1.75} />
@@ -538,7 +548,7 @@ export function AgentsSurface({
                 label="More"
                 trigger={<MoreHorizontal className="size-4" strokeWidth={1.75} />}
                 items={[
-                  phone && { label: shown.kind === "automations" ? "Close automations" : "Automations", icon: <Zap />, onSelect: toggleAutomations },
+                  phone && { label: shown.kind === "automations" ? "Close automations" : newNotices ? `Automations · ${newNotices}` : "Automations", icon: <Zap />, onSelect: openAutomations },
                   phone && { label: "Add a machine", icon: <Server />, onSelect: () => setAdding(true) },
                   phone && { label: "Agents settings", icon: <Settings />, onSelect: () => setAgentsView({ kind: "settings", target: "owner" }) },
                   archived > 0 && { label: `${showArchived ? "Hide" : "Show"} archived (${archived})`, icon: <Archive />, onSelect: () => setShowArchived((s) => !s) },

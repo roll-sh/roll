@@ -4,15 +4,90 @@
  * A `notify` step's notices (the `notice` stream event) as calm toasts (T3's toasts: 360px, glass,
  * sliding in from the edge) in the surface's bottom-right corner, so they never cover the side
  * panel's tools; the newest nearest the corner. Each closes by
- * itself after a while unless the pointer is on it; its link and its run are one click away.
+ * itself after a while unless the pointer is on it; its link, its thread and its run are one click
+ * away. The server keeps them too (`GET …/automations/notices`): the automations sheet's Notices
+ * list has the ones a person missed, new ones marked until the list is seen on this device (the
+ * header's automations button shows a dot meanwhile), like a notification inbox.
  */
 
 import { CircleAlert, CircleCheck, Info, TriangleAlert, X } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
-import type { Notice } from "@/lib/automations-api";
+import { useEffect, useMemo, useRef, useState } from "react";
+import type { AgentsClient } from "@/lib/agents-client";
+import type { AutomationRun, AutomationsApi, Notice } from "@/lib/automations-api";
+import { automationsFor, unseenNotices, useAutomationsState } from "@/lib/automations-store";
 import { setAgentsView, viewFromHash } from "@/lib/agents-surface";
+import { ago } from "../shared";
 import { cn } from "../ui";
-import { useAutomationsStore } from "./shared";
+import { useAgents } from "../use-agents";
+import { QuietButton, useAutomations, useAutomationsStore } from "./shared";
+
+/** What a notice opens: its link, the thread its run started (the newest), its run. */
+export function noticeActions(n: Notice, run: AutomationRun | undefined, openThread: (thread: string) => void): { label: string; go: () => void }[] {
+  const out: { label: string; go: () => void }[] = [];
+  if (n.link) {
+    const v = n.link.startsWith("#") ? viewFromHash(n.link) : null;
+    if (v) out.push({ label: "Open", go: () => setAgentsView(v) });
+    else if (/^https?:\/\//.test(n.link)) out.push({ label: "Open", go: () => window.open(n.link!, "_blank", "noopener,noreferrer") });
+  }
+  const thread = run?.threads.at(-1)?.thread;
+  if (thread) out.push({ label: "Open the thread", go: () => openThread(thread) });
+  if (n.automation && n.run) out.push({ label: "View the run", go: () => setAgentsView({ kind: "automations", open: n.automation!, tab: "runs", run: n.run! }) });
+  return out;
+}
+
+/** Notices this device hasn't seen in the list yet (outside the agents context: its store given). */
+export function useUnseenNotices(client: AgentsClient, api: AutomationsApi | undefined): number {
+  const store = useMemo(() => (api ? automationsFor(client, api) : null), [client, api]);
+  return unseenNotices(useAutomationsState(store));
+}
+
+/** Every notice kept, newest first: what a person missed while nothing was open. */
+export function NoticeList() {
+  const { store, notices, noticesSeen, runs } = useAutomations();
+  const { openThread } = useAgents();
+  const [now] = useState(() => Date.now());
+  // What was new when the list opened stays marked while it's open; seeing it is seeing them.
+  const [seenAt] = useState(noticesSeen);
+  const [end, setEnd] = useState(false);
+  useEffect(() => store?.markNoticesSeen(), [store, notices]);
+  if (!notices.length)
+    return <p className="py-16 text-center text-[13px] text-subtle">No notices yet. A Notify step's notices land here, and stay when nothing was open.</p>;
+  return (
+    <>
+      <ol className="overflow-hidden rounded-xl border border-line-2 bg-panel shadow-card inset-shadow-highlight" aria-label="Notices">
+        {notices.map((n) => {
+          const Icon = icons[n.level];
+          const fresh = n.at > seenAt;
+          return (
+            <li key={n.id} className="flex items-start gap-2.5 border-line px-3.5 py-2.5 [&+&]:border-t" aria-label={fresh ? `New: ${n.title}` : n.title}>
+              <Icon className={cn("mt-px size-4 shrink-0", tones[n.level])} strokeWidth={1.75} aria-hidden />
+              <div className="min-w-0 flex-1">
+                <p className="text-[13px] leading-snug font-[510] tracking-[-0.01em]">{n.title}</p>
+                {n.body && <p className="mt-0.5 line-clamp-2 text-[12px] leading-snug text-muted">{n.body}</p>}
+                <p className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[12px]">
+                  <span className="text-subtle tabular-nums" title={new Date(n.at).toLocaleString()}>
+                    {ago(n.at, now)}
+                  </span>
+                  {noticeActions(n, n.run ? runs.get(n.run) : undefined, openThread).map((x) => (
+                    <button key={x.label} type="button" onClick={x.go} className="font-medium text-accent hover:underline">
+                      {x.label}
+                    </button>
+                  ))}
+                </p>
+              </div>
+              {fresh && <span className="mt-1.5 size-1.5 shrink-0 rounded-full bg-accent" aria-hidden />}
+            </li>
+          );
+        })}
+      </ol>
+      {!end && notices.length >= 50 && (
+        <div className="mt-3 flex justify-center">
+          <QuietButton onClick={() => void store?.moreNotices().then((p) => p.length < 50 && setEnd(true), () => setEnd(true))}>Older notices</QuietButton>
+        </div>
+      )}
+    </>
+  );
+}
 
 /** Toasts kept at once; older ones go. */
 const MAX = 3;
@@ -37,21 +112,15 @@ const icons = { info: Info, success: CircleCheck, warning: TriangleAlert, error:
 const tones = { info: "text-muted", success: "text-ok", warning: "text-soft", error: "text-danger" };
 
 function Toast({ notice: n, onDismiss }: { notice: Notice; onDismiss: () => void }) {
+  const { runs } = useAutomations();
+  const { openThread } = useAgents();
   const hover = useRef(false);
   useEffect(() => {
     const t = setInterval(() => !hover.current && Date.now() - n.at > STAY_MS && onDismiss(), 1000);
     return () => clearInterval(t);
   }, [n.at, onDismiss]);
   const Icon = icons[n.level];
-  const open = () => {
-    if (n.link) {
-      const v = n.link.startsWith("#") ? viewFromHash(n.link) : null;
-      if (v) setAgentsView(v);
-      else if (/^https?:\/\//.test(n.link)) window.open(n.link, "_blank", "noopener,noreferrer");
-    } else if (n.automation && n.run) setAgentsView({ kind: "automations", open: n.automation, tab: "runs", run: n.run });
-    onDismiss();
-  };
-  const actionable = !!n.link || !!(n.automation && n.run);
+  const actions = noticeActions(n, n.run ? runs.get(n.run) : undefined, openThread);
   return (
     <li
       role="status"
@@ -64,10 +133,22 @@ function Toast({ notice: n, onDismiss }: { notice: Notice; onDismiss: () => void
         <div className="min-w-0 flex-1">
           <p className="text-[13px] leading-snug font-[510] tracking-[-0.01em]">{n.title}</p>
           {n.body && <p className="mt-0.5 line-clamp-3 text-[12px] leading-snug text-muted">{n.body}</p>}
-          {actionable && (
-            <button type="button" onClick={open} className="mt-1.5 text-[12px] font-medium text-accent hover:underline">
-              {n.link ? "Open" : "View the run"}
-            </button>
+          {actions.length > 0 && (
+            <p className="mt-1.5 flex flex-wrap gap-x-3 text-[12px]">
+              {actions.map((x) => (
+                <button
+                  key={x.label}
+                  type="button"
+                  onClick={() => {
+                    x.go();
+                    onDismiss();
+                  }}
+                  className="font-medium text-accent hover:underline"
+                >
+                  {x.label}
+                </button>
+              ))}
+            </p>
           )}
         </div>
         <button type="button" onClick={onDismiss} aria-label="Dismiss" className="grid size-6 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-fg/[0.06] hover:text-fg">

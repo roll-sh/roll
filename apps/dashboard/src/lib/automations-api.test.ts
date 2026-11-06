@@ -105,6 +105,13 @@ describe("automations client", () => {
     expect((await api.runDetail("acme", "arn_1")).run.id).toBe("arn_0a0b0c0d0e0f1011");
     expect((await api.run("acme", "aut_x", { key: "k" })).status).toBe("queued");
     expect(call).toHaveBeenLastCalledWith("POST", "/v1/code/agents/acme/automations/aut_x/run", { input: null, key: "k" });
+    // The event's data as a trigger sends it goes along (A9).
+    await api.run("acme", "aut_x", { data: { title: "main is red" } });
+    expect(call).toHaveBeenLastCalledWith("POST", "/v1/code/agents/acme/automations/aut_x/run", { input: null, data: { title: "main is red" }, key: null });
+    // Notices kept for later (A12), a page before a time.
+    call.mockImplementationOnce(async () => [{ id: "ntc_1", title: "Done", level: "success", at: 5 }]);
+    expect((await api.notices("acme", { before: 10, limit: 5 }))[0]).toEqual({ id: "ntc_1", title: "Done", level: "success", link: null, automation: null, run: null, at: 5 });
+    expect(call).toHaveBeenLastCalledWith("GET", "/v1/code/agents/acme/automations/notices?before=10&limit=5");
     await api.runs("acme", { automation: "aut_x", limit: 20 });
     expect(call).toHaveBeenLastCalledWith("GET", "/v1/code/agents/acme/automations/runs?automation=aut_x&limit=20");
     await api.setSecret("acme", "aut_x", "TOKEN", "v");

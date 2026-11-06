@@ -10,7 +10,7 @@
 
 import { Copy, FlaskConical, Link2, MoreHorizontal, Play, Plus, Trash2, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import type { Automation, AutomationSpec, Concurrency, TestEvent, TestResult } from "@/lib/automations-api";
+import type { Automation, AutomationSpec, Concurrency, RunNow, TestEvent, TestResult } from "@/lib/automations-api";
 import { TEMPLATES } from "@/lib/automation-templates";
 import { setAgentsView, type AutomationsView } from "@/lib/agents-surface";
 import { blankSpec, sameSpec, sampleEvent, specOf, triggerSource, triggerSummary, validate, type Problems, type Schema } from "@/lib/automations-ui";
@@ -352,26 +352,50 @@ function PanelFrame({ icon, title, subtitle, tools, children }: { icon: ReactNod
 
 /** Run now; for a manual automation, with what to pass in (GitHub's "Run workflow" popover). */
 export function RunButton({ automation, manual, list }: { automation: Automation; manual: boolean; list?: AutomationsView["list"] }) {
-  const { store } = useAutomations();
+  const { store, catalog } = useAutomations();
   const [open, setOpen] = useState(false);
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Another trigger: what's typed is the event's data as that trigger sends it, starting from its
+  // sample (made to meet the automation's conditions), so steps reading event.data.title get it.
+  const sample = () => JSON.stringify(sampleEvent(automation.trigger, catalog, Date.now(), automation.filters).data, null, 2);
+  const onOpenChange = (o: boolean) => {
+    if (o && !manual && !text) setText(sample());
+    setOpen(o);
+  };
   const go = async () => {
     if (!store) return;
+    let req: RunNow;
+    const t = text.trim();
+    if (manual) {
+      let input: unknown = null;
+      if (t) {
+        try {
+          input = JSON.parse(t);
+        } catch {
+          input = { prompt: t };
+        }
+      }
+      req = { input, key: null };
+    } else {
+      let data: unknown = null;
+      try {
+        data = t ? JSON.parse(t) : null;
+      } catch {
+        setError("The event's data is JSON: an object, like the sample.");
+        return;
+      }
+      if (data !== null && (typeof data !== "object" || Array.isArray(data))) {
+        setError("The event's data is an object, like the sample.");
+        return;
+      }
+      req = { input: null, data: data as Record<string, unknown> | null, key: null };
+    }
     setBusy(true);
     setError(null);
-    let input: unknown = null;
-    const t = text.trim();
-    if (t) {
-      try {
-        input = JSON.parse(t);
-      } catch {
-        input = { prompt: t };
-      }
-    }
     try {
-      const r = await store.api.run(store.owner, automation.id, { input });
+      const r = await store.api.run(store.owner, automation.id, req);
       store.putRun(r);
       setOpen(false);
       setText("");
@@ -383,13 +407,15 @@ export function RunButton({ automation, manual, list }: { automation: Automation
     }
   };
   return (
-    <Popover open={open} onOpenChange={setOpen}>
+    <Popover open={open} onOpenChange={onOpenChange}>
       <PopoverTrigger render={<button type="button" className="inline-flex h-7 items-center gap-1.5 rounded-md border border-line-2 bg-fg/[0.03] px-2.5 text-[12.5px] font-[510] text-soft inset-shadow-highlight transition-[background-color,border-color,color,scale] duration-150 hover:border-line-3 hover:bg-fg/[0.06] hover:text-fg active:scale-[0.97]" aria-label="Run now" />}>
         <Play className="size-3.5" /> Run
       </PopoverTrigger>
       <PopoverPopup side="bottom" align="end" sideOffset={6} aria-label="Run it now" className="w-80 p-3">
         <p className="text-[13px] font-[590] tracking-[-0.01em]">Run {automation.name}</p>
-        <p className="mt-0.5 text-[12px] text-subtle">{manual ? "Give it a prompt (event.data.input.prompt), or JSON (event.data.input)." : "A run by hand; its conditions still apply."}</p>
+        <p className="mt-0.5 text-[12px] text-subtle">
+          {manual ? "Give it a prompt (event.data.input.prompt), or JSON (event.data.input)." : "The event's data as its trigger sends it (event.data), from a sample. Its conditions still apply."}
+        </p>
         <textarea
           value={text}
           onChange={(e) => setText(e.target.value)}
@@ -399,11 +425,17 @@ export function RunButton({ automation, manual, list }: { automation: Automation
               void go();
             }
           }}
-          rows={3}
-          aria-label="Input"
-          placeholder={manual ? "Fix the flaky login test" : '{"note": "by hand"}'}
-          className="mt-2.5 w-full resize-none rounded-lg border border-line-2 bg-panel-2 px-2.5 py-2 text-[13px] outline-none placeholder:text-faint focus:border-line-3"
+          rows={manual ? 3 : 8}
+          aria-label={manual ? "Input" : "Event data"}
+          spellCheck={manual}
+          placeholder={manual ? "Fix the flaky login test" : "{}"}
+          className={cn("mt-2.5 w-full resize-none rounded-lg border border-line-2 bg-panel-2 px-2.5 py-2 text-[13px] outline-none placeholder:text-faint focus:border-line-3", !manual && "font-mono text-[11.5px] leading-[17px]")}
         />
+        {!manual && (
+          <button type="button" onClick={() => setText(sample())} className="mt-1 text-[11.5px] text-subtle underline-offset-2 hover:text-fg hover:underline">
+            Start from the sample again
+          </button>
+        )}
         {error && <p className="mt-1.5 text-[11.5px] text-danger">{error}</p>}
         <div className="mt-2.5 flex items-center justify-end gap-2">
           <span className="mr-auto text-[11px] text-subtle">⌘↵</span>

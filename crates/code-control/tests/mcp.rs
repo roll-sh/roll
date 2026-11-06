@@ -1314,12 +1314,13 @@ async fn automation_tools_map_onto_their_routes() {
     assert_eq!(saved["automation"]["revision"], 2);
     let listed = owner.tool("list_agent_automations", json!({ "owner": "acme" })).await;
     assert_eq!(listed["items"][0]["name"], "Hello again", "{listed}");
-    let run = owner.tool("run_agent_automation", json!({ "owner": "acme", "automation": "Hello again", "input": { "x": 1 }, "key": "k" })).await;
+    let run = owner.tool("run_agent_automation", json!({ "owner": "acme", "automation": "Hello again", "input": { "x": 1 }, "data": { "title": "main is red" }, "key": "k" })).await;
     let rid = run["id"].as_str().unwrap().to_string();
     let runs = owner.tool("list_agent_automation_runs", json!({ "owner": "acme", "automation": id })).await;
     assert_eq!(runs["items"][0]["id"], rid.as_str(), "{runs}");
     let detail = owner.tool("get_agent_automation_run", json!({ "owner": "acme", "run": rid })).await;
     assert_eq!(detail["event"]["data"]["input"]["x"], 1);
+    assert_eq!(detail["event"]["data"]["title"], "main is red", "the event's data as its trigger sends it");
     let mut agent = Client::new(&a, Some(&tokens[1]));
     agent.initialize("2025-11-25").await;
     let err = agent.tool_err("run_agent_automation", json!({ "owner": "acme", "automation": id })).await;

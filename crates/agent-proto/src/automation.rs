@@ -793,11 +793,17 @@ pub struct RunDetail {
 pub struct RunNow {
     #[serde(default, skip_serializing_if = "Value::is_null")]
     pub input: Value,
+    /// The event's data as its trigger would send it (an object): a run by hand of an automation
+    /// a code, agent or integration event starts, its steps reading `event.data.title` and the
+    /// like. Its fields go into `event.data` beside `by` and `input`, which roll sets.
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub data: Value,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
 }
 
-/// A `notify` step's notice, on the owner's stream (ephemeral: no cursor).
+/// A `notify` step's notice, on the owner's stream (no cursor) and kept for later, the newest
+/// 200 per owner (`GET …/automations/notices`).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Notice {
     pub id: String,

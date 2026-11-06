@@ -18,6 +18,7 @@ import {
   type AutomationsApi,
   type Catalog,
   type Filter,
+  type Notice,
   type RunState,
   type Step,
   type StepRun,
@@ -74,6 +75,8 @@ export class DemoAutomations {
   private automations = new Map<string, Automation>();
   private runs = new Map<string, AutomationRun>();
   private events = new Map<string, WireEvent>();
+  /** Notices kept as the server keeps them (newest first). */
+  private notices: Notice[] = [];
   private seeded = false;
 
   constructor(private host: DemoHost) {}
@@ -336,6 +339,14 @@ export class DemoAutomations {
       const last = [...this.runs.values()].filter((r) => r.automation === a.id).sort((x, y) => y.created_at - x.created_at)[0];
       if (last) this.automations.set(a.id, { ...this.automations.get(a.id)!, last_run: { id: last.id, status: last.status, at: last.created_at } });
     }
+    // Notices from before the page opened (the ones a person missed).
+    const ended = (a: Automation, status: RunState) => [...this.runs.values()].filter((r) => r.automation === a.id && r.status === status).sort((x, y) => y.created_at - x.created_at)[0];
+    const fixed = ended(mainfix, "succeeded");
+    const missed = ended(triage, "failed");
+    if (missed) this.notices.push({ id: nid("ntc_demo"), title: "Morning triage didn't run", body: missed.reason ?? undefined, level: "error", link: null, automation: triage.id, run: missed.id, at: missed.finished_at ?? missed.created_at });
+    if (fixed) this.notices.push({ id: nid("ntc_demo"), title: "Main is green again", body: "An agent fixed lander_retries_once flaking on acme/roll#88.", level: "success", link: null, automation: mainfix.id, run: fixed.id, at: fixed.finished_at ?? fixed.created_at });
+    this.notices.sort((a, b) => b.at - a.at);
+
     // It finishes on its own a little later, so the run detail moves while you watch.
     this.host.after(24_000, () => this.finishWaiting(live.id, "done", "Fixed: the queue test waited on a timer; it now waits on the event."));
   }
@@ -471,7 +482,9 @@ export class DemoAutomations {
       case "notify": {
         await wait(300);
         const r = this.runs.get(rid)!;
-        this.host.emit({ type: "notice", notice: { id: nid("ntc_demo"), title: String(cfg.title ?? "Notice"), body: cfg.body ? String(cfg.body) : undefined, level: (cfg.level as "info") ?? "info", link: (cfg.link as string) ?? null, automation: r.automation, run: rid, at: Date.now() } });
+        const notice: Notice = { id: nid("ntc_demo"), title: String(cfg.title ?? "Notice"), body: cfg.body ? String(cfg.body) : undefined, level: (cfg.level as "info") ?? "info", link: (cfg.link as string) ?? null, automation: r.automation, run: rid, at: Date.now() };
+        this.notices.unshift(notice);
+        this.host.emit({ type: "notice", notice });
         this.log(rid, s.id, "Notice sent");
         return { id: nid("ntc_") };
       }
@@ -554,7 +567,7 @@ export class DemoAutomations {
       },
       async run(_o, id, req = {}) {
         const a = me.must(id);
-        return me.startRun(a, "manual", "run", { by: "ada", input: req.input ?? null }, "Run by ada");
+        return me.startRun(a, "manual", "run", { ...(req.data ?? {}), by: "ada", input: req.input ?? null }, "Run by ada");
       },
       async runsOf(_o, id, q = {}) {
         me.seed();
@@ -563,6 +576,10 @@ export class DemoAutomations {
       async runs(_o, q = {}) {
         me.seed();
         return page([...me.runs.values()].filter((r) => !q.automation || r.automation === q.automation), q);
+      },
+      async notices(_o, q = {}) {
+        me.seed();
+        return me.notices.filter((n) => q.before === undefined || n.at < q.before).slice(0, q.limit ?? 50);
       },
       async runDetail(_o, rid) {
         me.seed();

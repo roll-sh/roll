@@ -9,6 +9,7 @@ import {
   ArrowRightFromLine,
   ArrowUp,
   Bell,
+  Inbox,
   Bot,
   Check,
   ChevronLeft,
@@ -54,6 +55,7 @@ import {
 import { targetLabel, type Target as GoalTarget } from "./new-thread";
 import { useGoalTargets, useLaunchGoal, type GoalKind } from "./orchestrate";
 import { useAutomations } from "./automations/shared";
+import { unseenNotices } from "@/lib/automations-store";
 import { openProjectDialog } from "@/lib/agents-project-dialogs";
 import { StatusDot } from "./shared";
 import { MachineIcon, ProjectIcon } from "./identity";
@@ -277,6 +279,14 @@ function PaletteDialog({ session, intent, host }: { session: number; intent: Pal
       addProject,
       { kind: "action", value: "action:add-machine", title: "Add machine", searchTerms: ["connect", "computer", "sandbox", "rent"], icon: <Server className={ICON} />, run: host.addMachine },
       !!auto.store && { kind: "action", value: "action:automations", title: "Automations", searchTerms: ["workflow", "trigger", "schedule", "cron", "webhook", "zap", "rules"], icon: <Zap className={ICON} />, shortcut: "A", run: () => setAgentsView({ kind: "automations" }) },
+      !!auto.store && {
+        kind: "action",
+        value: "action:notices",
+        title: unseenNotices(auto) > 0 ? `Notices (${unseenNotices(auto)} new)` : "Notices",
+        searchTerms: ["notifications", "inbox", "missed", "alerts", "notify"],
+        icon: <Inbox className={ICON} />,
+        run: () => setAgentsView({ kind: "automations", list: "notices" }),
+      },
       !!auto.store && { kind: "action", value: "action:new-automation", title: "New automation", searchTerms: ["workflow", "trigger", "schedule", "template"], icon: <Plus className={ICON} />, run: () => setAgentsView({ kind: "automations", open: "new" }) },
       auto.automations.size > 0 && {
         kind: "submenu",

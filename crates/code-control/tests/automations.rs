@@ -399,6 +399,12 @@ async fn a_run_starts_an_agent_waits_for_it_and_notifies() {
             _ => {}
         }
     }
+    // Kept for a dashboard that wasn't open (A12): listed newest first, with its run.
+    let kept = w.ok("GET", "/v1/code/agents/acme/automations/notices", None).await;
+    assert_eq!(kept[0]["title"], "done: did: Please fix the queue (Fix it)", "{kept}");
+    assert_eq!(kept[0]["run"], rid.as_str());
+    let older = w.ok("GET", &format!("/v1/code/agents/acme/automations/notices?before={}", kept[0]["at"]), None).await;
+    assert!(older.as_array().unwrap().iter().all(|n| n["id"] != kept[0]["id"]), "{older}");
 }
 
 /// A repo project the machine doesn't have is cloned onto it; any online machine is picked; a
@@ -666,6 +672,36 @@ async fn rate_limits_and_agent_tokens() {
     assert_eq!(s, StatusCode::ACCEPTED, "{r}");
     let d = w.finished(r["id"].as_str().unwrap()).await;
     assert_eq!(d["event"]["data"]["by"], "agent:bot");
+}
+
+/// Run now on an automation another trigger starts: `data` is the event's data as that trigger
+/// sends it, so its conditions and its steps' templates read what was typed (A9).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn run_now_takes_the_triggers_event_data() {
+    let w = world().await;
+    let id = w
+        .create(json!({ "name": "on landing", "trigger": { "type": "code", "events": ["landed"] },
+            "filters": [{ "field": "event.data.repo", "op": "equals", "value": "acme/app" }],
+            "steps": [notify("t", "{{event.data.change.title}}")] }))
+        .await["automation"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let r = w.run(&id, json!({ "data": { "repo": "acme/app", "change": { "title": "fix the login" } }, "input": { "note": "by hand" } })).await;
+    let d = w.finished(r["id"].as_str().unwrap()).await;
+    assert_eq!(d["run"]["status"], "succeeded", "{d}");
+    let data = &d["event"]["data"];
+    assert_eq!((data["repo"].as_str(), data["change"]["title"].as_str(), data["input"]["note"].as_str()), (Some("acme/app"), Some("fix the login"), Some("by hand")), "{d}");
+    // roll says who ran it, whatever the data says.
+    let r = w.run(&id, json!({ "data": { "repo": "acme/app", "by": "someone else" } })).await;
+    assert_eq!(w.finished(r["id"].as_str().unwrap()).await["event"]["data"]["by"], data["by"]);
+    assert_ne!(data["by"], "someone else");
+    // Without the data its conditions don't hold.
+    let r = w.run(&id, json!({})).await;
+    assert_ne!(w.finished(r["id"].as_str().unwrap()).await["run"]["status"], "succeeded");
+    // Data is an object.
+    let (s, _) = w.req("POST", &format!("/v1/code/agents/acme/automations/{id}/run"), Some(json!({ "data": "main is red" })), &w.owner).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
 }
 
 /// A dry run says what an automation would do with an event, without doing it.

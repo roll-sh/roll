@@ -670,8 +670,8 @@ pub fn tools() -> Vec<Value> {
         tool(
             "run_agent_automation",
             "Run an automation",
-            "Run an automation now; input is event.data.input in its templates, and the same key is the same run. Agent tokens may when the automation allows agents.",
-            json!({ "owner": owner.clone(), "automation": s("An automation id (aut_…) or name"), "input": json!({ "description": "Any JSON" }), "key": s("Idempotency key") }),
+            "Run an automation now; input is event.data.input in its templates, data (an object) is the event's data as its trigger sends it (event.data.title…), and the same key is the same run. Agent tokens may when the automation allows agents.",
+            json!({ "owner": owner.clone(), "automation": s("An automation id (aut_…) or name"), "input": json!({ "description": "Any JSON" }), "data": json!({ "type": "object", "description": "The event's data as the automation's trigger sends it" }), "key": s("Idempotency key") }),
             &["owner", "automation"],
             false,
         ),
@@ -1148,7 +1148,7 @@ async fn run(c: &Call<'_>, name: &str, args: &Value) -> std::result::Result<Outc
             let owner = c.owner(args)?;
             let a = str_arg(args, "automation").ok_or_else(|| fail("automation is required (aut_… or its name)"))?;
             let id = c.automation_id(owner, a).await?;
-            let body = json!({ "input": args.get("input").cloned().unwrap_or(Value::Null), "key": opt(args, "key") });
+            let body = json!({ "input": args.get("input").cloned().unwrap_or(Value::Null), "data": args.get("data").cloned().unwrap_or(Value::Null), "key": opt(args, "key") });
             pass(c.post(&format!("/v1/code/agents/{}/automations/{}/run", seg(owner), seg(&id)), body).await)
         }
         "list_agent_automation_runs" => {

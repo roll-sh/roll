@@ -919,6 +919,8 @@ async fn automation_routes_follow_the_auth_matrix() {
         ("GET", format!("{base}/catalog"), None, OK),
         ("POST", format!("{base}/test"), Some(test), OK),
         ("GET", format!("{base}/runs"), None, OK),
+        ("GET", format!("{base}/notices"), None, OK),
+        ("GET", format!("{base}/notices?limit=0"), None, StatusCode::BAD_REQUEST),
         ("GET", format!("{base}/runs/arn_nope"), None, NOT_FOUND),
         ("GET", format!("{base}/{id}"), None, OK),
         ("GET", format!("{base}/{id}/runs"), None, OK),
@@ -934,6 +936,8 @@ async fn automation_routes_follow_the_auth_matrix() {
         ("POST", format!("{base}/runs/arn_nope/cancel"), None, NOT_FOUND),
         ("POST", format!("{base}/runs/arn_nope/retry"), None, NOT_FOUND),
         ("POST", format!("{base}/{id}/run"), Some(json!({})), StatusCode::ACCEPTED),
+        ("POST", format!("{base}/{id}/run"), Some(json!({ "data": { "title": "main is red" } })), StatusCode::ACCEPTED),
+        ("POST", format!("{base}/{id}/run"), Some(json!({ "data": "main is red" })), StatusCode::BAD_REQUEST),
     ];
     for (who, token) in [("admin", Some(ADMIN)), ("owner", Some(w.acme.as_str()))] {
         for (m, p, b, want) in reads.iter().chain(&writes) {

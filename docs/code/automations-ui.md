@@ -218,7 +218,13 @@ last list (auto-core's note): `lastRunOf` takes the newest run the store has.
 
 - A `notify` step's `notice` is a toast: glass, 360px, the level's icon, the title at 13/510, up to
   three lines of body, and "Open" for its link (`#agents/…` links navigate the surface; http(s)
-  links open a new tab) or "View the run".
+  links open a new tab), "Open the thread" (the newest thread its run started) and "View the run".
+- The server keeps them (the newest 200 per owner, `GET …/automations/notices`), so a notice nobody
+  saw isn't gone: the sheet's **Notices** list (`#agents/automations/notices`, ⌘K "Notices") has
+  them newest first with the same actions, "Older notices" for more. Ones newer than this device
+  last saw the list are new: a count on the Notices segment, an accent dot on the header's
+  automations button (it opens the list then; A too) and on each new row while the list is open.
+  "Seen" is per device (`roll:agents:notices-seen:<owner>`), like a notification inbox.
 - Toasts sit bottom-right, above the zoom bar, so they never cover the side panel's tools. They
   slide in from the edge over 0.5s on an ease-out quint (T3's toasts; static under reduced motion).
 - At most three show at once. Each closes after 7s unless the pointer is on it.

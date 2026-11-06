@@ -46,6 +46,10 @@ enum Cmd {
         /// JSON for `event.data.input`.
         #[arg(long)]
         input: Option<String>,
+        /// A JSON object: the event's data as the automation's trigger sends it (`event.data.title`…),
+        /// to run a code, agent or integration automation by hand.
+        #[arg(long)]
+        data: Option<String>,
         /// The same key is the same run.
         #[arg(long)]
         key: Option<String>,
@@ -196,13 +200,17 @@ pub async fn run(base: &str, json_out: bool, a: Automation) -> anyhow::Result<()
         }
         Cmd::Enable { automation } => c.call(Method::POST, &format!("{root}/{}/enable", enc(&id_of(automation).await?)), None).await?,
         Cmd::Disable { automation } => c.call(Method::POST, &format!("{root}/{}/disable", enc(&id_of(automation).await?)), None).await?,
-        Cmd::Run { automation, input, key, wait } => {
+        Cmd::Run { automation, input, data, key, wait } => {
             let input: Value = match input {
                 Some(i) => serde_json::from_str(&i).context("--input isn't JSON")?,
                 None => Value::Null,
             };
+            let data: Value = match data {
+                Some(d) => serde_json::from_str(&d).context("--data isn't JSON")?,
+                None => Value::Null,
+            };
             let id = id_of(automation).await?;
-            let mut r = c.call(Method::POST, &format!("{root}/{}/run", enc(&id)), Some(json!({ "input": input, "key": key }))).await?;
+            let mut r = c.call(Method::POST, &format!("{root}/{}/run", enc(&id)), Some(json!({ "input": input, "data": data, "key": key }))).await?;
             if wait {
                 let path = format!("{root}/runs/{}", enc(&t(&r["id"])));
                 while !matches!(r["status"].as_str(), Some("succeeded" | "failed" | "cancelled" | "skipped")) {

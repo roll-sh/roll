@@ -22,6 +22,8 @@ import { cn, Segmented } from "../ui";
 import { useAgents } from "../use-agents";
 import type { ListFilter as Filter } from "@/lib/automations-list";
 import { AutomationList, FilterButton } from "./list";
+import { NoticeList } from "./notices";
+import { unseenNotices } from "@/lib/automations-store";
 import { SheetHeader } from "./sheet";
 import { PrimaryButton, QuietButton, RunDot, RunStatus, stepIcon, Tile, triggerIcon, useAutomations } from "./shared";
 
@@ -36,6 +38,7 @@ export function AutomationsView({ view, phone }: { view: View; phone: boolean })
   const setSearch = (q: string) => setQuery((kept.query = q));
   const setFilter = (f: Filter) => setFilterState((kept.filter = f));
   const empty = a.loaded && !a.error && automations.length === 0;
+  const unseen = unseenNotices(a);
 
   if (!a.store)
     return (
@@ -64,6 +67,7 @@ export function AutomationsView({ view, phone }: { view: View; phone: boolean })
           options={[
             { value: "automations", label: <>Automations{automations.length > 0 && <Count n={automations.length} />}</> },
             { value: "runs", label: <>Runs{running(a.runs) > 0 && <Count n={running(a.runs)} accent />}</> },
+            { value: "notices", label: <>Notices{unseen > 0 && <Count n={unseen} accent />}</> },
             { value: "templates", label: "Templates" },
           ]}
         />
@@ -92,6 +96,10 @@ export function AutomationsView({ view, phone }: { view: View; phone: boolean })
         ) : list === "runs" ? (
           <Section>
             <AllRuns runs={a.runs} automations={a.automations} selected={view.run} />
+          </Section>
+        ) : list === "notices" ? (
+          <Section>
+            <NoticeList />
           </Section>
         ) : empty ? (
           <EmptyState />

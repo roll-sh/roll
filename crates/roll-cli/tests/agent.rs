@@ -519,6 +519,14 @@ async fn automation_commands_drive_the_routes() {
     assert_eq!(runs[0]["id"], rid.as_str());
     let out = run(a(&["show", &rid])).await;
     assert!(String::from_utf8_lossy(&out.stdout).contains("hi"), "{}", String::from_utf8_lossy(&out.stdout));
+    // --data is the event's data as a trigger would send it.
+    let out = run(a(&["run", "Hello", "--data", r#"{"title":"main is red"}"#, "--wait"])).await;
+    assert!(out.status.success(), "{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    let with_data = String::from_utf8_lossy(&out.stdout).split_whitespace().next().unwrap().to_string();
+    let mut json_args = vec!["--json".to_string()];
+    json_args.extend(a(&["show", &with_data]));
+    let shown: Value = serde_json::from_slice(&run(json_args).await.stdout).unwrap();
+    assert_eq!(shown["event"]["data"]["title"], "main is red", "{shown}");
     let event = e.dir.path().join("event.json");
     std::fs::write(&event, json!({ "source": "manual", "kind": "run", "data": { "input": { "who": "bo" } } }).to_string()).unwrap();
     let mut json_args = vec!["--json".to_string()];

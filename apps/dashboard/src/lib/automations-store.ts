@@ -34,7 +34,26 @@ export interface AutomationsState {
   runs: ReadonlyMap<AutomationRunId, AutomationRun>;
   threads: ReadonlyMap<ThreadId, ThreadOrigin>;
   catalog: Catalog | null;
+  /** The notify steps' notices, newest first: the ones kept on the server and the ones since. */
+  notices: readonly Notice[];
+  /** The newest notice's time this device has seen the list at (`markNoticesSeen`). */
+  noticesSeen: number;
 }
+
+/** Notices kept in memory (the server keeps 200). */
+const MAX_NOTICES = 200;
+const SEEN_KEY = (owner: string) => `roll:agents:notices-seen:${owner}`;
+
+function readSeen(owner: string): number {
+  try {
+    return Number(localStorage.getItem(SEEN_KEY(owner))) || 0;
+  } catch {
+    return 0;
+  }
+}
+
+/** Notices newer than what this device has seen. */
+export const unseenNotices = (s: Pick<AutomationsState, "notices" | "noticesSeen">) => s.notices.filter((n) => n.at > s.noticesSeen).length;
 
 /** Runs kept in memory; the oldest finished ones go first. */
 const MAX_RUNS = 600;
@@ -42,7 +61,7 @@ const MAX_RUNS = 600;
 const FIRST_PAGE = 200;
 
 export class AutomationsStore {
-  private state: AutomationsState = { loaded: false, error: null, automations: new Map(), runs: new Map(), threads: new Map(), catalog: null };
+  private state: AutomationsState = { loaded: false, error: null, automations: new Map(), runs: new Map(), threads: new Map(), catalog: null, notices: [], noticesSeen: 0 };
   private listeners = new Set<() => void>();
   private notices = new Set<(n: Notice) => void>();
   private loading: Promise<void> | null = null;
@@ -52,7 +71,9 @@ export class AutomationsStore {
   constructor(
     readonly owner: string,
     readonly api: AutomationsApi,
-  ) {}
+  ) {
+    this.state = { ...this.state, noticesSeen: readSeen(owner) };
+  }
 
   subscribe = (fn: () => void) => {
     this.listeners.add(fn);
@@ -79,11 +100,16 @@ export class AutomationsStore {
 
   private async load() {
     try {
-      const [list, runs, catalog] = await Promise.all([
+      const [list, runs, catalog, notices] = await Promise.all([
         this.api.list(this.owner),
         this.api.runs(this.owner, { limit: FIRST_PAGE }),
         this.api.catalog(this.owner).catch(() => null),
+        // A server from before notices were kept has none to list.
+        Promise.resolve()
+          .then(() => this.api.notices(this.owner, { limit: 50 }))
+          .catch(() => [] as Notice[]),
       ]);
+      this.addNotices(notices);
       const automations = new Map(this.state.automations);
       for (const a of list) this.mergeAutomation(automations, a);
       // Whatever the list doesn't have any more was deleted while nobody listened.
@@ -146,6 +172,7 @@ export class AutomationsStore {
         break;
       }
       case "notice":
+        this.addNotices([ev.notice]);
         for (const fn of this.notices) fn(ev.notice);
         break;
     }
@@ -174,6 +201,33 @@ export class AutomationsStore {
     return page;
   }
 
+  private addNotices(more: readonly Notice[]) {
+    if (!more.length) return;
+    const byId = new Map(this.state.notices.map((n) => [n.id, n]));
+    for (const n of more) byId.set(n.id, n);
+    const notices = [...byId.values()].sort((a, b) => b.at - a.at || b.id.localeCompare(a.id)).slice(0, MAX_NOTICES);
+    this.set({ notices });
+  }
+
+  /** The list was seen (on this device): what's in it isn't new any more. */
+  markNoticesSeen() {
+    const at = this.state.notices[0]?.at ?? 0;
+    if (at <= this.state.noticesSeen) return;
+    try {
+      localStorage.setItem(SEEN_KEY(this.owner), String(at));
+    } catch {
+      // Private mode: seen for this page only.
+    }
+    this.set({ noticesSeen: at });
+  }
+
+  /** Older notices, for paging the list. */
+  async moreNotices(): Promise<Notice[]> {
+    const page = await this.api.notices(this.owner, { before: this.state.notices.at(-1)?.at, limit: 50 });
+    this.addNotices(page);
+    return page;
+  }
+
   onNotice(fn: (n: Notice) => void) {
     this.notices.add(fn);
     return () => void this.notices.delete(fn);
@@ -199,7 +253,7 @@ export function automationsFor(client: AgentsClient, api: AutomationsApi): Autom
   return s;
 }
 
-const EMPTY: AutomationsState = { loaded: false, error: null, automations: new Map(), runs: new Map(), threads: new Map(), catalog: null };
+const EMPTY: AutomationsState = { loaded: false, error: null, automations: new Map(), runs: new Map(), threads: new Map(), catalog: null, notices: [], noticesSeen: 0 };
 const none = () => () => {};
 const empty = () => EMPTY;
 

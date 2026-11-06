@@ -898,6 +898,10 @@ impl StepKind for Notify {
                 at: code_sql::now_ms().max(0) as u64,
             };
             let id = notice.id.clone();
+            // Kept first, so a dashboard that isn't open finds it later; then to whoever is.
+            if let Err(e) = super::store::keep_notice(ctx.code.db.sql(), &ctx.owner().id, &notice) {
+                ctx.log(LogLevel::Warn, format!("the notice wasn't kept for later: {e}"));
+            }
             let _ = ctx.code.agents.hub(&ctx.owner().id).events.send(Arc::new(agent_proto::StreamEvent::Notice { notice }));
             Ok(StepOutcome::Done(json!({ "id": id })))
         };

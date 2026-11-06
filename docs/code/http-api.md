@@ -851,7 +851,7 @@ included (404 to everyone else); changing automations, their secrets, cancelling
 Code::manages (401 anonymous, 403 agent tokens); running one by hand is Code::manages, or an agent token
 when the automation has `allow_agents`. Every change of an automation or a run is an `automation`,
 `automation_removed` or `automation_run` event on the owner's stream (`GET …/events`, with a cursor, so a
-reconnect catches up), and a `notify` step's notice is a `notice` event (no cursor).
+reconnect catches up), and a `notify` step's notice is a `notice` event (no cursor), kept for later too.
 
 ```
 GET    /v1/code/agents/{owner}/automations → [Automation] /* oldest first, deleted ones left out */
@@ -868,6 +868,9 @@ POST   /v1/code/agents/{owner}/automations/test TestRequest → TestResult
 GET    /v1/code/agents/{owner}/automations/runs?automation=&status=&before=&limit= → [AutomationRun]
        newest first, 50 by default, at most 200; `before` a run id (the next page)
 GET    /v1/code/agents/{owner}/automations/runs/{run} → RunDetail {run, event}
+GET    /v1/code/agents/{owner}/automations/notices?before=&limit= → [Notice]
+       the notify steps' notices, newest first (the newest 200 per owner are kept), 50 by default, at most
+       200; `before` a notice's `at` (the next page). For a dashboard that wasn't open when they came.
 POST   /v1/code/agents/{owner}/automations/runs/{run}/cancel → AutomationRun /* "cancelled"; what its steps
        made only for the run (a sandbox) is cleaned up; a final run is answered as it is */
 POST   /v1/code/agents/{owner}/automations/runs/{run}/retry → AutomationRun /* a failed or cancelled run goes on
@@ -881,9 +884,12 @@ PUT    /v1/code/agents/{owner}/automations/{id} AutomationSpec & {revision?} →
 DELETE /v1/code/agents/{owner}/automations/{id} → 204 /* its runs going on are cancelled; its secrets dropped */
 POST   /v1/code/agents/{owner}/automations/{id}/enable  → Automation
 POST   /v1/code/agents/{owner}/automations/{id}/disable → Automation /* new events start nothing; runs going on go on */
-POST   /v1/code/agents/{owner}/automations/{id}/run RunNow {input?, key?} → 202 AutomationRun
-       an event of source `manual`, kind `run`, data {by, input}; the same `key` is the same run (200 then).
-       Any trigger can be run by hand (its filters still apply: a run they refuse is "skipped").
+POST   /v1/code/agents/{owner}/automations/{id}/run RunNow {input?, data?, key?} → 202 AutomationRun
+       an event of source `manual`, kind `run`, data {…data, by, input}; the same `key` is the same run (200 then).
+       Any trigger can be run by hand (its filters still apply: a run they refuse is "skipped"). `data` is
+       the event's data as the automation's trigger sends it (an object, at most 256 KiB; 400 otherwise),
+       so a code or integration automation's steps read `event.data.title` and the like; `by` and `input`
+       are roll's, whatever `data` says. The dashboard starts it from the trigger's sample.
 GET    /v1/code/agents/{owner}/automations/{id}/runs?status=&before=&limit= → [AutomationRun]
 PUT    /v1/code/agents/{owner}/automations/{id}/secrets/{name} {value} → 204
        name: [A-Z0-9_], 1 to 64; value at most 8 KiB, sealed with ROLL_SECRET_KEY (422 without it) and never

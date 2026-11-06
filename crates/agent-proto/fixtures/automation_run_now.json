@@ -5,5 +5,11 @@
     },
     "key": "key-1"
   },
+  {
+    "data": {
+      "repo": "acme/app",
+      "title": "main is red"
+    }
+  },
   {}
 ]

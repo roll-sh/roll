@@ -354,6 +354,11 @@ export interface RunDetail {
 export interface RunNow {
   /** `event.data.input` in templates. */
   input: unknown;
+  /**
+   * The event's data as its trigger would send it (an object): a run by hand of an automation a
+   * code, agent or integration event starts. Its fields go into `event.data` beside `by` and `input`.
+   */
+  data?: Record<string, unknown> | null;
   /** The same key is the same run. */
   key: string | null;
 }
@@ -688,7 +693,7 @@ export const runDetailD = obj<RunDetail>({
   run: automationRunD,
   event: automationEventD,
 });
-export const runNowD = obj<RunNow>({ input: json, key: opt(str) });
+export const runNowD = obj<RunNow>({ input: json, data: opt(json) as never, key: opt(str) });
 
 export const noticeD = obj<Notice>({
   id: str,
@@ -753,6 +758,10 @@ export interface RunsQuery {
 }
 
 function runsQuery(q: RunsQuery & { automation?: AutomationId } = {}): string {
+  return query(q);
+}
+
+function query(q: object): string {
   const p = new URLSearchParams();
   for (const [k, v] of Object.entries(q)) if (v !== undefined && v !== null) p.set(k, String(v));
   const s = p.toString();
@@ -780,6 +789,7 @@ export function createAutomationsApi(call: Call) {
         automationRunD,
         await call("POST", `${base(owner)}/${enc(id)}/run`, {
           input: req.input ?? null,
+          ...(req.data ? { data: req.data } : {}),
           key: req.key ?? null,
         }),
       ),
@@ -789,6 +799,8 @@ export function createAutomationsApi(call: Call) {
     runs: async (owner: string, q: RunsQuery & { automation?: AutomationId } = {}) =>
       decode(array(automationRunD), await call("GET", `${base(owner)}/runs${runsQuery(q)}`)),
     runDetail: async (owner: string, run: AutomationRunId) => decode(runDetailD, await call("GET", `${base(owner)}/runs/${enc(run)}`)),
+    /** The notify steps' notices, newest first: kept for a dashboard that wasn't open (`before`: a notice's `at`). */
+    notices: async (owner: string, q: { before?: number; limit?: number } = {}) => decode(array(noticeD), await call("GET", `${base(owner)}/notices${query(q)}`)),
     cancel: async (owner: string, run: AutomationRunId) =>
       decode(automationRunD, await call("POST", `${base(owner)}/runs/${enc(run)}/cancel`)),
     /** Run a failed or cancelled run again from the step that stopped it. */

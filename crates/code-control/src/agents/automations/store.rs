@@ -2,7 +2,7 @@
 //! touches the database (closures may re-run on Postgres); ids and tokens are made before it.
 
 use super::registry::NewEvent;
-use agent_proto::automation::{AutomationEventId, limits};
+use agent_proto::automation::{AutomationEventId, Notice, limits};
 use code_sql::{Conn, OptionalExtension, params};
 
 pub const SCHEMA: &str = r#"
@@ -112,7 +112,47 @@ CREATE TABLE IF NOT EXISTS automation_tokens (
     expires_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS automation_tokens_expiry ON automation_tokens (expires_at);
+CREATE TABLE IF NOT EXISTS automation_notices (
+    -- A notify step's notices, the newest NOTICES_KEPT per owner: a dashboard that wasn't open
+    -- lists what it missed (the stream's `notice` is only for whoever is watching).
+    id TEXT PRIMARY KEY,
+    owner_id TEXT NOT NULL,
+    at INTEGER NOT NULL,
+    -- Notice JSON.
+    json TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS automation_notices_owner ON automation_notices (owner_id, at);
 "#;
+
+/// Notices kept per owner (the oldest go).
+pub(crate) const NOTICES_KEPT: i64 = 200;
+
+/// Keep a notice for whoever wasn't watching, once per id; only the newest [`NOTICES_KEPT`] stay.
+pub(crate) fn keep_notice(db: &code_sql::Db, owner_id: &str, n: &Notice) -> code_sql::Result<()> {
+    let json = serde_json::to_string(n).unwrap_or_default();
+    db.write(|c| {
+        c.execute(
+            "INSERT INTO automation_notices (id, owner_id, at, json) VALUES (?, ?, ?, ?) ON CONFLICT (id) DO NOTHING",
+            params![&n.id, owner_id, n.at as i64, &json],
+        )?;
+        c.execute(
+            "DELETE FROM automation_notices WHERE owner_id = ? AND at < \
+             (SELECT MIN(at) FROM (SELECT at FROM automation_notices WHERE owner_id = ? ORDER BY at DESC LIMIT ?) AS kept)",
+            params![owner_id, owner_id, NOTICES_KEPT],
+        )?;
+        Ok(())
+    })
+}
+
+/// An owner's notices, newest first; `before` a notice's time (the next page).
+pub(crate) fn notices(db: &code_sql::Db, owner_id: &str, before: Option<u64>, limit: i64) -> code_sql::Result<Vec<Notice>> {
+    let rows: Vec<String> = db.query(
+        "SELECT json FROM automation_notices WHERE owner_id = ? AND at < ? ORDER BY at DESC, id DESC LIMIT ?",
+        params![owner_id, before.map_or(i64::MAX, |b| b as i64), limit],
+        |r| r.get(0),
+    )?;
+    Ok(rows.iter().filter_map(|j| serde_json::from_str(j).ok()).collect())
+}
 
 /// What a secret is sealed to: its automation and its name.
 pub(crate) fn secret_scope(automation_id: &str, name: &str) -> String {
@@ -174,4 +214,39 @@ pub(crate) fn token(db: &code_sql::Db, hash: &str) -> code_sql::Result<Option<(S
         |r| Ok((r.get(0)?, r.get(1)?)),
     )
     .optional()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Notices are kept once per id, only the newest per owner, and read newest first in pages.
+    #[test]
+    fn notices_keep_the_newest_per_owner() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.path().join("control.db")), "notices").unwrap();
+        db.ensure_schema(SCHEMA).unwrap();
+        let n = |owner: &str, i: u64| Notice {
+            id: format!("ntc_{owner}_{i}"),
+            title: format!("n{i}"),
+            body: String::new(),
+            level: Default::default(),
+            link: None,
+            automation: None,
+            run: None,
+            at: 1000 + i,
+        };
+        let over = NOTICES_KEPT as u64 + 5;
+        for i in 0..over {
+            keep_notice(&db, "own_a", &n("a", i)).unwrap();
+        }
+        keep_notice(&db, "own_a", &n("a", over - 1)).unwrap();
+        keep_notice(&db, "own_b", &n("b", 0)).unwrap();
+        let all = notices(&db, "own_a", None, 200).unwrap();
+        assert_eq!(all.len(), NOTICES_KEPT as usize);
+        assert_eq!((all[0].title.as_str(), all[all.len() - 1].title.as_str()), ("n204", "n5"));
+        assert_eq!(notices(&db, "own_b", None, 50).unwrap().len(), 1, "another owner's are its own");
+        let page: Vec<String> = notices(&db, "own_a", Some(1010), 3).unwrap().into_iter().map(|n| n.title).collect();
+        assert_eq!(page, ["n9", "n8", "n7"]);
+    }
 }

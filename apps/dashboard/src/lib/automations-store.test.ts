@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentsClient } from "./agents-client";
 import { DemoOwner } from "./agents-demo";
 import type { Automation, AutomationRun, AutomationsApi } from "./automations-api";
-import { AutomationsStore, automationsFor } from "./automations-store";
+import { AutomationsStore, automationsFor, unseenNotices } from "./automations-store";
 
 const auto = (id: string, cursor: number, name = id): Automation => ({
   id,
@@ -92,6 +92,35 @@ describe("automations store", () => {
     // The canvas's records don't change for them.
     expect(client.data.cursor).toBe(0);
     expect(automationsFor(client, s.api)).toBe(s);
+  });
+
+  it("keeps the notices it missed and the ones since, new until this device sees the list (A12)", async () => {
+    const kept = new Map<string, string>();
+    vi.stubGlobal("localStorage", { getItem: (k: string) => kept.get(k) ?? null, setItem: (k: string, v: string) => void kept.set(k, v) });
+    const note = (id: string, at: number) => ({ id, title: id, level: "info" as const, link: null, automation: "aut_1", run: "arn_1", at });
+    const a = { ...api([]), notices: vi.fn(async () => [note("n2", 20), note("n1", 10)]) } as unknown as AutomationsApi;
+    const s = new AutomationsStore("acme", a);
+    await s.ensure();
+    expect(s.getSnapshot().notices.map((n) => n.id)).toEqual(["n2", "n1"]);
+    expect(unseenNotices(s.getSnapshot())).toBe(2);
+    s.apply({ type: "notice", notice: note("n3", 30) });
+    s.apply({ type: "notice", notice: note("n3", 30) });
+    expect(s.getSnapshot().notices.map((n) => n.id)).toEqual(["n3", "n2", "n1"]);
+    s.markNoticesSeen();
+    expect(unseenNotices(s.getSnapshot())).toBe(0);
+    // Remembered on this device: another page load starts with them seen.
+    const again = new AutomationsStore("acme", a);
+    await again.ensure();
+    again.apply({ type: "notice", notice: note("n3", 30) });
+    expect(unseenNotices(again.getSnapshot())).toBe(0);
+    again.apply({ type: "notice", notice: note("n4", 40) });
+    expect(unseenNotices(again.getSnapshot())).toBe(1);
+    // A server from before notices were kept: none listed, nothing breaks.
+    const old = new AutomationsStore("acme", api([auto("aut_1", 1)]));
+    await old.ensure();
+    expect(old.getSnapshot().notices).toEqual([]);
+    expect(old.getSnapshot().error).toBeNull();
+    vi.unstubAllGlobals();
   });
 });
 

@@ -4,7 +4,7 @@
 
 use agent_proto::automation::*;
 use agent_proto::{ApprovalAction, Decision, InteractionMode, MachineId, Millis, ProviderId, RuntimeMode, SendMode, ThreadId};
-use serde_json::json;
+use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
 pub const T: Millis = 1_762_000_000_000;
@@ -338,5 +338,9 @@ pub fn test_results() -> Vec<TestResult> {
 }
 
 pub fn run_now() -> Vec<RunNow> {
-    vec![RunNow { input: json!({ "scope": "api" }), key: Some("key-1".into()) }, RunNow::default()]
+    vec![
+        RunNow { input: json!({ "scope": "api" }), data: Value::Null, key: Some("key-1".into()) },
+        RunNow { input: Value::Null, data: json!({ "repo": "acme/app", "title": "main is red" }), key: None },
+        RunNow::default(),
+    ]
 }

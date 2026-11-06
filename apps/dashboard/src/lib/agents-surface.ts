@@ -27,7 +27,7 @@ export type AgentsView =
 
 export interface AutomationsView {
   kind: "automations";
-  list?: "runs" | "templates";
+  list?: "runs" | "templates" | "notices";
   open?: string;
   tab?: "edit" | "runs" | "settings";
   run?: string;
@@ -114,7 +114,7 @@ export function viewFromHash(hash: string): AgentsView | null {
 function automationsFromPath(p: string[]): AutomationsView {
   const v: AutomationsView = { kind: "automations" };
   if (!p.length) return v;
-  if (p[0] === "runs" || p[0] === "templates") return p.length === 1 ? { ...v, list: p[0] } : v;
+  if (p[0] === "runs" || p[0] === "templates" || p[0] === "notices") return p.length === 1 ? { ...v, list: p[0] } : v;
   if (p[0] === "new") return p[1] ? { ...v, open: "new", template: p[1] } : { ...v, open: "new" };
   const open = { ...v, open: p[0] };
   if (p[1] === "edit" || p[1] === "settings") return { ...open, tab: p[1] };

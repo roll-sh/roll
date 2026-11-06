@@ -1,6 +1,6 @@
 /** Automations fixtures for component tests: records, runs and an in-memory API. */
 import { vi } from "vitest";
-import type { Automation, AutomationRun, AutomationsApi, AutomationSpec, StepRun } from "@/lib/automations-api";
+import type { Automation, AutomationRun, AutomationsApi, AutomationSpec, Notice, StepRun } from "@/lib/automations-api";
 
 export const T = Date.now();
 
@@ -61,6 +61,7 @@ export function fakeApi(list: Automation[] = [], runs: AutomationRun[] = []): Au
     run: vi.fn(async () => automationRun({ id: "arn_now", status: "queued" })),
     runsOf: vi.fn(async () => runs),
     runs: vi.fn(async () => runs),
+    notices: vi.fn(async () => [] as Notice[]),
     runDetail: vi.fn(async (_o: string, id: string) => ({ run: runs.find((r) => r.id === id)!, event: { id: "aev_1", source: "schedule", kind: "tick", key: "schedule:1", at: T, data: { at: T }, automation: "aut_1" } })),
     cancel: vi.fn(async (_o: string, id: string) => ({ ...runs.find((r) => r.id === id)!, status: "cancelled" as const, cursor: 30 })),
     retry: vi.fn(),

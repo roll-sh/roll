@@ -8,7 +8,7 @@ import { machine, mirrored, project, provider, thread } from "@/test/agents";
 import { agentsHarness, fakeServices, renderAgents } from "@/test/agents-render";
 import { macClick } from "@/test/mac-click";
 import { ThreadNode } from "../nodes";
-import { AutomationPanel, forgetDrafts } from "./automation-panel";
+import { AutomationPanel, forgetDrafts, RunButton } from "./automation-panel";
 import { AutomationsView } from "./automations-view";
 import { RunDetail } from "./runs";
 
@@ -220,6 +220,43 @@ describe("Automation builder", () => {
 });
 
 describe("Automation runs", () => {
+  it("lists the notices a person missed, new ones marked, each opening its thread or its run (A12)", async () => {
+    localStorage.clear();
+    const api = fakeApi([automation()], [automationRun()]);
+    const note = (id: string, title: string, at: number) => ({ id, title, level: "success" as const, link: null, automation: "aut_1", run: "arn_1", at });
+    api.notices = vi.fn(async () => [note("ntc_2", "Main is green again", T + 2), note("ntc_1", "Triage done", T + 1)]);
+    const h = harness(api);
+    renderAgents(<AutomationsView view={{ kind: "automations", list: "notices" }} phone={false} />, h);
+    const list = await screen.findByRole("list", { name: "Notices" });
+    expect(within(list).getAllByRole("listitem").map((li) => li.getAttribute("aria-label"))).toEqual(["New: Main is green again", "New: Triage done"]);
+    // Seen now, on this device; the marks stay while the list is open.
+    expect(Number(localStorage.getItem("roll:agents:notices-seen:acme"))).toBe(T + 2);
+    const first = within(list).getAllByRole("listitem")[0];
+    await userEvent.click(within(first).getByRole("button", { name: "Open the thread" }));
+    expect(h.openThread).toHaveBeenCalledWith("thr_1");
+    await userEvent.click(within(first).getByRole("button", { name: "View the run" }));
+    expect(agentsSurface.get().view).toEqual({ kind: "automations", open: "aut_1", tab: "runs", run: "arn_1" });
+  });
+
+  it("runs another trigger's automation by hand with the event's data, starting from a sample that meets its conditions (A9)", async () => {
+    const api = fakeApi();
+    const x = automation({ id: "aut_2", name: "On landing", trigger: { type: "code", events: ["landed"], repos: ["acme/app"] }, filters: [{ field: "event.data.repo", op: "equals", value: "acme/web" }] });
+    renderAgents(<RunButton automation={x} manual={false} />, harness(api));
+    await userEvent.click(screen.getByRole("button", { name: "Run now" }));
+    const box = await screen.findByRole("textbox", { name: "Event data" });
+    const sample = JSON.parse((box as HTMLTextAreaElement).value);
+    expect(sample.repo).toBe("acme/web");
+    // Not JSON: says so and doesn't run.
+    await userEvent.clear(box);
+    await userEvent.type(box, "main is red");
+    await userEvent.click(within(screen.getByRole("dialog", { name: "Run it now" })).getByRole("button", { name: "Run now" }));
+    expect(await screen.findByText(/The event's data is JSON/)).toBeInTheDocument();
+    expect(api.run).not.toHaveBeenCalled();
+    await userEvent.click(screen.getByRole("button", { name: "Start from the sample again" }));
+    await userEvent.click(within(screen.getByRole("dialog", { name: "Run it now" })).getByRole("button", { name: "Run now" }));
+    expect(api.run).toHaveBeenCalledWith("acme", "aut_2", { input: null, data: expect.objectContaining({ repo: "acme/web" }), key: null });
+  });
+
   it("follows a run live: steps move as automation_run events arrive, its thread opens beside the canvas", async () => {
     const r = automationRun();
     const api = fakeApi([automation()], [r]);

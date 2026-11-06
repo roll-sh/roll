@@ -141,7 +141,7 @@ for steps that call out (`webhook`). Provider credentials are never touched (doc
 | `agent.script` | runs a project script in a terminal (the thread's worktree, or the project's checkout) | `terminal`, `machine` |
 | `agent.settle` | settle, archive or un-settle | `thread`, `action` |
 | `webhook` | an HTTP request to a public address (`review::apps::PublicOnly`, no redirects, the literal-host check, 30 s, answers read up to 1 MiB); signed with one of the automation's secrets like roll's own webhooks; `X-Roll-Delivery` and `Idempotency-Key` are the step's idempotency key, the same on every attempt. 5xx, 429, 408 and network errors are retried, other statuses fail. It is a step, not a delivery queue: its answer feeds later steps, and the engine's retries are its redelivery. | `status`, `headers`, `body` |
-| `notify` | a `notice` on the owner's stream (a toast on every open device) | `id` |
+| `notify` | a `notice` on the owner's stream (a toast on every open device), kept for later (the newest 200 per owner, `GET …/automations/notices`) | `id` |
 | `delay` | waits, durably | — |
 
 Steps without a thread say which by `thread` (a template); unset, the run's latest thread. A step's

@@ -7,7 +7,7 @@
 use super::defs::{self, Saved};
 use super::engine;
 use super::registry::{NewEvent, OwnerRef};
-use super::{filter, template, triggers};
+use super::{filter, store, template, triggers};
 use crate::agents::api::{manageable, readable, sender};
 use crate::api::{Body, Q};
 use crate::model::Owner;
@@ -33,6 +33,7 @@ pub fn routes() -> Router<Arc<Code>> {
         .route("/v1/code/agents/{owner}/automations/catalog", get(catalog))
         .route("/v1/code/agents/{owner}/automations/test", post(test))
         .route("/v1/code/agents/{owner}/automations/runs", get(owner_runs))
+        .route("/v1/code/agents/{owner}/automations/notices", get(owner_notices))
         .route("/v1/code/agents/{owner}/automations/runs/{run}", get(run_detail))
         .route("/v1/code/agents/{owner}/automations/runs/{run}/cancel", post(cancel))
         .route("/v1/code/agents/{owner}/automations/runs/{run}/retry", post(retry))
@@ -249,6 +250,18 @@ async fn owner_runs(State(code): S, caller: Caller, Path(owner): Path<String>, Q
     Ok(Json(json!(runs)))
 }
 
+#[derive(Deserialize)]
+struct NoticesQuery {
+    before: Option<u64>,
+    limit: Option<i64>,
+}
+
+/// `GET …/automations/notices`: the notify steps' notices, newest first, for a dashboard that wasn't open.
+async fn owner_notices(State(code): S, caller: Caller, Path(owner): Path<String>, Q(q): Q<NoticesQuery>) -> Result<Json<Value>> {
+    let o = readable(&code, &caller, &owner)?;
+    Ok(Json(json!(store::notices(code.db.sql(), &o.id, q.before, limit(q.limit)?)?)))
+}
+
 async fn automation_runs(State(code): S, caller: Caller, Path((owner, id)): Path<(String, String)>, Q(q): Q<RunsQuery>) -> Result<Json<Value>> {
     let o = readable(&code, &caller, &owner)?;
     found(&code, &o, &id)?;
@@ -295,14 +308,25 @@ async fn run_now(State(code): S, caller: Caller, Path((owner, id)): Path<(String
     if req.key.as_ref().is_some_and(|k| k.is_empty() || k.len() > 128) {
         return Err(Error::Invalid("key: 1 to 128 characters".into()));
     }
+    let mut data = match req.data {
+        Value::Null => serde_json::Map::new(),
+        Value::Object(m) => m,
+        _ => return Err(Error::Invalid("data: an object, the event's data as its trigger sends it".into())),
+    };
     code.start_automations();
     let by = sender(&caller);
+    data.insert("by".into(), json!(by));
+    data.insert("input".into(), req.input);
+    let data = Value::Object(data);
+    if serde_json::to_vec(&data).map_or(0, |v| v.len()) > limits::EVENT {
+        return Err(Error::Invalid(format!("data: at most {} KiB", limits::EVENT >> 10)));
+    }
     let key = req.key.clone().unwrap_or_else(|| crate::new_id("run"));
     let e = NewEvent {
         source: "manual".into(),
         kind: "run".into(),
         id: format!("{id}:{key}"),
-        data: json!({ "by": by, "input": req.input }),
+        data,
         summary: format!("Run by {by}"),
         automation: Some(AutomationId(id.clone())),
     };
