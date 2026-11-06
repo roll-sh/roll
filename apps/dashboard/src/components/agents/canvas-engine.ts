@@ -58,6 +58,10 @@ export interface EngineOptions {
 const PULSE_S = 1.6;
 /** An edge to a card that left fades this long, with the card (`CARD_OUT`). */
 const EDGE_OUT_MS = 160;
+/** How far past the screen (px) a card counts as off it (`data-off`: its animations pause). */
+const OFF_MARGIN = 160;
+/** How far from the pointer (px) dots swell and move. */
+const POINTER_REACH = 280;
 const DOT_SPACING = 28;
 /** How long the zoom rests before a touch screen's `--zoom` follows it. */
 const ZOOM_CSS_MS = 120;
@@ -490,8 +494,17 @@ export class CanvasEngine {
     this.raf = requestAnimationFrame(this.frame);
   };
 
+  // What each element's transform was last set to: unchanged, it isn't written again (the loop runs
+  // every frame while anything works, and rewriting 200 cards' transforms restyled them each frame).
+  private shown = new WeakMap<HTMLElement, string>();
+  private setTransform(el: HTMLElement, v: string) {
+    if (this.shown.get(el) === v) return;
+    this.shown.set(el, v);
+    el.style.transform = v;
+  }
+
   private place(el: HTMLElement, p: Point) {
-    el.style.transform = `translate3d(${p.x}px, ${p.y}px, 0)`;
+    this.setTransform(el, `translate(${p.x}px, ${p.y}px)`);
   }
 
   private frame = (ms: number) => {
@@ -513,7 +526,7 @@ export class CanvasEngine {
       else moving = true;
       this.opts.onView?.(this.view);
     }
-    this.world.style.transform = `translate3d(${this.view.x}px, ${this.view.y}px, 0) scale(${this.view.k})`;
+    this.setTransform(this.world, `translate3d(${this.view.x}px, ${this.view.y}px, 0) scale(${this.view.k})`);
     // The scale for CSS too (`--zoom`): a touch screen's card tools keep a finger's size with it.
     if (this.view.k !== this.zoomShown && this.touchCss?.matches) {
       // The card whose tools show (tapped, focused, open beside the canvas) follows at once, on
@@ -528,6 +541,7 @@ export class CanvasEngine {
     }
 
     // Cards ease to their targets.
+    const { x: vx, y: vy, k: vk } = this.view;
     for (const [k, target] of this.tgt) {
       const c = this.cur.get(k) ?? target;
       let next = target;
@@ -541,7 +555,19 @@ export class CanvasEngine {
       }
       this.cur.set(k, next);
       const el = this.els.get(k);
-      if (el) this.place(el, next);
+      if (el) {
+        this.place(el, next);
+        // Well off screen, its animations (a busy card's border, shimmer, pulses) pause: 80 busy
+        // cards at 1000 threads repainted every frame, most of them out of sight.
+        const s = this.size.get(k);
+        let off = false;
+        if (s && this.w > 0) {
+          const left = next.x * vk + vx;
+          const top = next.y * vk + vy;
+          off = left + s.w * vk < -OFF_MARGIN || left > this.w + OFF_MARGIN || top + s.h * vk < -OFF_MARGIN || top > this.h + OFF_MARGIN;
+        }
+        if (off !== el.hasAttribute("data-off")) el.toggleAttribute("data-off", off);
+      }
     }
 
     this.pointer.s += ((this.pointer.active && !reduced ? 1 : 0) - this.pointer.s) * 0.1;
@@ -559,6 +585,49 @@ export class CanvasEngine {
     if (moving || live) this.kick();
   };
 
+  // One dot on a tile the grid's spacing wide, and the pattern made of it (made again as the spacing
+  // or the colour changes).
+  private dotTile: { key: string; pattern: CanvasPattern; size: number } | null = null;
+  private tileCanvas: HTMLCanvasElement | null = null;
+
+  /**
+   * The plain dot field (`s` apart from `x0`, `y0`) as one pattern fill, leaving out the pointer's
+   * reach (drawn dot by dot). False when a pattern can't be made: draw them all one by one.
+   */
+  private fillDots(ctx: CanvasRenderingContext2D, s: number, x0: number, y0: number, pointer: Point | null): boolean {
+    if (typeof DOMMatrix === "undefined" || typeof document === "undefined") return false;
+    const size = Math.max(2, Math.round(s * this.dpr));
+    const color = rgba(this.ink, Math.min(0.9, this.dotAlpha));
+    const key = `${size}|${s.toFixed(2)}|${color}`;
+    if (this.dotTile?.key !== key) {
+      const c = (this.tileCanvas ??= document.createElement("canvas"));
+      c.width = c.height = size;
+      const t = c.getContext("2d");
+      if (!t) return false;
+      t.clearRect(0, 0, size, size);
+      t.fillStyle = color;
+      t.beginPath();
+      t.arc(size / 2, size / 2, (0.9 * size) / s, 0, Math.PI * 2);
+      t.fill();
+      const pattern = ctx.createPattern(c, "repeat");
+      if (!pattern) return false;
+      this.dotTile = { key, pattern, size };
+    }
+    const { pattern } = this.dotTile;
+    pattern.setTransform(new DOMMatrix().translateSelf(x0 - s / 2, y0 - s / 2).scaleSelf(s / size));
+    ctx.save();
+    if (pointer) {
+      const clip = new Path2D();
+      clip.rect(0, 0, this.w, this.h);
+      clip.arc(pointer.x, pointer.y, POINTER_REACH, 0, Math.PI * 2);
+      ctx.clip(clip, "evenodd");
+    }
+    ctx.fillStyle = pattern;
+    ctx.fillRect(0, 0, this.w, this.h);
+    ctx.restore();
+    return true;
+  }
+
   private draw(t: number, reduced: boolean) {
     const ctx = this.ctx;
     if (!ctx) return;
@@ -574,11 +643,21 @@ export class CanvasEngine {
     const s = step * gk;
     const x0 = (((vx % s) + s) % s) - s;
     const y0 = (((vy % s) + s) % s) - s;
-    const r2 = 140 * 140;
+    const r2 = (POINTER_REACH / 2) ** 2;
     const ps = this.pointer;
     const plain = new Path2D();
-    for (let y = y0; y <= this.h + s; y += s) {
-      for (let x = x0; x <= this.w + s; x += s) {
+    // Nothing lighting the field but (maybe) the pointer: the plain dots are one pattern fill, and
+    // only the dots near the pointer are drawn one by one (6,000 arcs a frame were most of a zoom).
+    const local = this.ripples.length === 0 && (this.busyMix <= 0.01 || reduced) && this.fillDots(ctx, s, x0, y0, ps.s > 0.01 ? ps : null);
+    const reach = POINTER_REACH;
+    const yFrom = local ? (ps.s > 0.01 ? y0 + Math.max(0, Math.ceil((ps.y - reach - y0) / s)) * s : Infinity) : y0;
+    const yTo = local ? Math.min(this.h + s, ps.y + reach) : this.h + s;
+    const xFrom = local ? x0 + Math.max(0, Math.ceil((ps.x - reach - x0) / s)) * s : x0;
+    const xTo = local ? Math.min(this.w + s, ps.x + reach) : this.w + s;
+    for (let y = yFrom; y <= yTo; y += s) {
+      for (let x = xFrom; x <= xTo; x += s) {
+        // The pattern drew the dots out of the pointer's reach.
+        if (local && (x - ps.x) ** 2 + (y - ps.y) ** 2 >= r2 * 4) continue;
         let boost = 0;
         let lit = 0;
         let px = x;

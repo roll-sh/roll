@@ -7,6 +7,7 @@ import {
   useEffect,
   useImperativeHandle,
   useLayoutEffect,
+  useReducer,
   useMemo,
   useRef,
   useState,
@@ -783,6 +784,34 @@ export const AgentsCanvas = forwardRef<
 
   const arrangedByUser = Object.keys(order).length > 0;
 
+  // Many cards arriving at once (a filter cleared, 200 threads unfolded, the first load) mount a
+  // few frames apart, STAGE at a time in the graph's order: 200 at once were one ~150 ms task of
+  // style, layout and paint. Their edges join them as they're placed.
+  const mounted = useRef<ReadonlySet<string>>(new Set());
+  // Cards that arrived with many others: they mount still (no rise, no fade in), so a hundred
+  // entrances at once don't repaint the canvas for their whole length.
+  const still = useRef(new Set<string>());
+  const staging = useRef(false);
+  // Many leaving at once (a filter's first key): they go without their exit, read by each as it leaves.
+  const massExit = useRef(false);
+  const [, nextStage] = useReducer((n: number) => n + 1, 0);
+  const all = [...graph.nodes.values()];
+  const arriving = all.filter((n) => !mounted.current.has(n.key)).length;
+  let leaving = 0;
+  for (const k of mounted.current) if (!graph.nodes.has(k)) leaving++;
+  massExit.current = leaving > STAGE;
+  let fresh = 0;
+  const staged = all.filter((n) => mounted.current.has(n.key) || fresh++ < STAGE);
+  if (arriving > STAGE || staging.current) for (const n of staged) if (!mounted.current.has(n.key)) still.current.add(n.key);
+  useLayoutEffect(() => {
+    mounted.current = new Set(staged.map((n) => n.key));
+    staging.current = staged.length < all.length;
+    for (const k of still.current) if (!graph.nodes.has(k)) still.current.delete(k);
+    if (staged.length === all.length) return;
+    const id = requestAnimationFrame(nextStage);
+    return () => cancelAnimationFrame(id);
+  });
+
   return (
     <div
       ref={container}
@@ -809,8 +838,8 @@ export const AgentsCanvas = forwardRef<
       >
         {/* A card that leaves the graph fades and shrinks where it was before it unmounts (it was gone in a frame). */}
         <AnimatePresence initial={false}>
-          {[...graph.nodes.values()].map((n) => (
-            <CardSlot key={n.key} node={n} engine={engine} selected={n.key === selected || !!highlighted?.includes(n.key)}>
+          {staged.map((n) => (
+            <CardSlot key={n.key} node={n} engine={engine} still={still.current.has(n.key)} massExit={massExit} selected={n.key === selected || !!highlighted?.includes(n.key)}>
               {render(n)}
             </CardSlot>
           ))}
@@ -958,6 +987,8 @@ const SNUG = 0.5;
 const FIT_FLOOR = 0.35;
 /** Growing right, a parent with this many children draws one trunk to them. */
 const TRUNK_AT = 4;
+/** How many new cards mount in one frame (more wait for the next). */
+const STAGE = 48;
 /** What Fit always frames: the structure, and what waits on you. */
 const FRAMED: ReadonlySet<GraphNode["kind"]> = new Set(["machine", "project", "group", "request"]);
 /** Keys that pan or zoom the canvas (with no card focused). */
@@ -985,7 +1016,8 @@ function ToolButton({ label, onClick, pressed, children }: { label: string; onCl
  * graph, it stays where it was, inert and out of the pointer's way, fading and shrinking to 0.96
  * over 160 ms, then unmounts; back while it goes, it turns around.
  */
-function CardSlot({ node, engine, selected, children }: { node: GraphNode; engine: React.RefObject<CanvasEngine | null>; selected: boolean; children: ReactNode }) {
+/** `still`: it arrived with many others, so it mounts in place without its entrance (it still leaves as one). */
+function CardSlot({ node, engine, selected, still, massExit, children }: { node: GraphNode; engine: React.RefObject<CanvasEngine | null>; selected: boolean; still: boolean; massExit: React.RefObject<boolean>; children: ReactNode }) {
   const el = useRef<HTMLDivElement>(null);
   const reduced = useReducedMotion();
   const fade = useMotionValue(1);
@@ -993,8 +1025,8 @@ function CardSlot({ node, engine, selected, children }: { node: GraphNode; engin
   const none: Transition = { duration: 0 };
   const present = usePresenceTracks(
     [
-      { value: fade, shown: 1, hidden: 0, enter: reduced ? none : POPOVER_IN, leave: reduced ? none : CARD_OUT },
-      { value: scale, shown: 1, hidden: 0.96, enter: reduced ? none : POPOVER_IN, leave: reduced ? none : CARD_OUT },
+      { value: fade, shown: 1, hidden: 0, enter: reduced || still ? none : POPOVER_IN, leave: reduced || massExit.current ? none : CARD_OUT },
+      { value: scale, shown: 1, hidden: 0.96, enter: reduced || still ? none : POPOVER_IN, leave: reduced || massExit.current ? none : CARD_OUT },
     ],
     String(reduced),
   );
@@ -1024,10 +1056,10 @@ function CardSlot({ node, engine, selected, children }: { node: GraphNode; engin
         e.currentTarget.setAttribute("data-tapped", "");
       }}
       className={`absolute top-0 left-0 rounded-xl outline-hidden focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent/70 ${present ? "" : "pointer-events-none"}`}
-      style={{ transform: "translate3d(-99999px,0,0)" }}
+      style={{ transform: "translate(-99999px, 0)" }}
     >
       <motion.div style={{ opacity: fade, scale }}>
-        <div className="rise">{children}</div>
+        <div className={still ? undefined : "rise"}>{children}</div>
       </motion.div>
     </div>
   );

@@ -38,11 +38,13 @@ export function SlidingThumb({ selector, className }: { selector: string; classN
     if (prev && prev.x === next.x && prev.y === next.y && prev.w === next.w && prev.h === next.h) return;
     setBox((last.current = next));
   };
-  // Every render of the owner (a new choice), before paint.
-  useLayoutEffect(measure);
+  // Placed before the first paint; later choices arrive through the observers below. (Measuring on
+  // every render of the owner forced a layout of the whole page into each commit: with 200 cards on
+  // the canvas, ~80 ms of every filter key.)
   useLayoutEffect(() => {
     const c = self.current?.parentElement;
     if (!c) return;
+    measure();
     // Items growing (a count appearing, fonts loading) move it too; so does a choice made outside
     // a render of its owner.
     const ro = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(() => measure());

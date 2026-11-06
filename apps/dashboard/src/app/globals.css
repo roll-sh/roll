@@ -287,7 +287,8 @@ body {
 }
 
 .rise {
-  animation: rise 0.35s ease-out both;
+  /* `backwards`, not `both`: held at its end, a finished rise kept every card a composited layer (200 cards: 200 layers to commit every frame). */
+  animation: rise 0.35s ease-out backwards;
 }
 
 /* Detail drawers slide in from the right. */
@@ -580,6 +581,12 @@ body {
   animation: busy-border 1.6s ease-in-out infinite;
 }
 
+/* A card well off screen (the engine's `data-off`) drops its animations: nothing out of sight repaints,
+   and a paused animation still keeps its element a composited layer. They start again as it comes back. */
+[data-card][data-off] * {
+  animation: none !important;
+}
+
 @media (prefers-reduced-motion: reduce) {
   [data-card] [data-drag][data-tone="busy"] {
     animation: none;
@@ -650,6 +657,17 @@ body {
 [data-desktop="agents-mac"] [data-drag-region] :is(button, a, input, select, textarea, label, [data-nodrag]) {
   app-region: no-drag;
   -webkit-app-region: no-drag;
+}
+
+/* A card's floating tools blur what's under them only while they show: a backdrop filter makes a
+   composited layer even at opacity 0, and every card has its tools (200 cards: 200 more layers). */
+[data-card] [data-touch-tools] {
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+[data-card]:is(:hover, :focus-within, [data-tapped], [data-selected]) [data-touch-tools] {
+  -webkit-backdrop-filter: blur(16px) saturate(1.15);
+  backdrop-filter: blur(16px) saturate(1.15);
 }
 
 /* A card's floating tools on a touch screen (no hover): they show on the card that was tapped
