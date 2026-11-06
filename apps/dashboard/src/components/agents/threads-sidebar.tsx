@@ -647,14 +647,19 @@ function ThreadsSidebarBody({
   );
 }
 
-/** Puts `node` (kept by its owner) inside this spot while it's mounted, and takes it out after. */
+/**
+ * Puts `node` (kept by its owner) inside this spot while it's mounted, and takes it out after. A
+ * node out of the document loses its scroll place: it's kept and put back.
+ */
 function Attach({ node }: { node: HTMLElement | null }) {
   const host = useRef<HTMLDivElement>(null);
   useLayoutEffect(() => {
     const h = host.current;
     if (!h || !node) return;
     h.appendChild(node);
+    node.scrollTop = Number(node.dataset.scroll ?? 0);
     return () => {
+      node.dataset.scroll = String(node.scrollTop);
       if (node.parentNode === h) h.removeChild(node);
     };
   }, [node]);

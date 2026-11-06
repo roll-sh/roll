@@ -514,10 +514,14 @@ export class CanvasEngine {
     this.world.style.transform = `translate3d(${this.view.x}px, ${this.view.y}px, 0) scale(${this.view.k})`;
     // The scale for CSS too (`--zoom`): a touch screen's card tools keep a finger's size with it.
     if (this.view.k !== this.zoomShown && this.touchCss?.matches) {
+      // The card whose tools show (tapped, focused, open beside the canvas) follows at once, on
+      // its own (a small restyle); the rest once the zoom rests.
+      for (const el of this.world.querySelectorAll<HTMLElement>("[data-card]:is([data-tapped], :focus-within, [data-selected])")) el.style.setProperty("--zoom", String(this.view.k));
       clearTimeout(this.zoomCss);
       this.zoomCss = window.setTimeout(() => {
         this.zoomShown = this.view.k;
         this.world.style.setProperty("--zoom", String(this.view.k));
+        for (const el of this.world.querySelectorAll<HTMLElement>("[data-card][style*='--zoom']")) el.style.removeProperty("--zoom");
       }, ZOOM_CSS_MS);
     }
 

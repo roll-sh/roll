@@ -3,13 +3,13 @@
 import { Plus } from "lucide-react";
 import { useReducedMotion } from "@roll/brand";
 import { AnimatePresence, motion, type Transition } from "motion/react";
-import { useEffect, useLayoutEffect, useState, useSyncExternalStore, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { DRAWER, FADE_IN, POP_OUT } from "@/lib/agents-motion";
 import { useEnteringValue, usePresenceTracks } from "./presence";
 import { activeClient, DEMO_OWNER, type AgentsClient } from "@/lib/agents-client";
 import { rolling } from "@/lib/agents-graph";
-import { agentsSurface, hashFor, hideAgents, isNewAgentKey, showAgents, useAgentsSurface, viewFromHash } from "@/lib/agents-surface";
+import { agentsSurface, hashFor, hideAgents, isNewAgentKey, showAgents, useAgentsSurface, viewFromHash, writeAgentsUrl } from "@/lib/agents-surface";
 import { useAgentNotifications } from "@/lib/agents-notify";
 import type { AgentsServices } from "@/lib/agents-services";
 import { desktop, useDesktop } from "@/lib/desktop";
@@ -56,6 +56,8 @@ export function AgentsControl() {
     const onHash = () => {
       const v = viewFromHash(window.location.hash);
       if (v) showAgents(v);
+      // Back past the popup's entry: it closes.
+      else if (agentsSurface.get().open) hideAgents();
     };
     onHash();
     window.addEventListener("keydown", onKey);
@@ -129,14 +131,18 @@ function Pill({ count, waiting, first }: { count: number; waiting: number; first
 function Popup({ client, services, error, demo }: Pick<ReturnType<typeof useAgentsConnection>, "client" | "services" | "error"> & { demo: boolean }) {
   const { open, view } = useAgentsSurface();
 
-  // The URL says what's open, so a reload (or a copied link) comes back to it.
+  // The URL says what's open, so a reload (or a copied link) comes back to it; opening the popup is
+  // a history entry, so Back closes it.
+  const wasOpen = useRef(false);
   useEffect(() => {
+    const was = wasOpen.current;
+    wasOpen.current = open;
     const { hash, pathname, search } = window.location;
     const want = open ? hashFor(view) : "";
     const shown = viewFromHash(hash);
     // Already showing it; a query after the view (`?linear=connected`) stays for whoever reads it.
     if (open ? shown !== null && hashFor(shown) === want : !shown) return;
-    window.history.replaceState(window.history.state, "", pathname + search + want);
+    writeAgentsUrl(pathname + search + want, open ? 1 : 0, was ? 1 : 0);
   }, [open, view]);
 
   // The page behind doesn't scroll while it's open.

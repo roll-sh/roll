@@ -29,8 +29,9 @@ export function EdgeSheet({ label, width, phone, instant = false, className = ""
     `${phone}|${width}|${reduced}`,
   );
   if (phone) {
+    // Over a conversation or settings open in the right dock (z-30): it opened behind them.
     return (
-      <motion.aside aria-label={label} data-state={present ? "open" : "closing"} inert={!present} className={`absolute inset-0 z-30 flex min-h-0 flex-col ${className}`} style={{ x: slide }}>
+      <motion.aside aria-label={label} data-state={present ? "open" : "closing"} inert={!present} className={`absolute inset-0 z-40 flex min-h-0 flex-col ${className}`} style={{ x: slide }}>
         {children}
       </motion.aside>
     );

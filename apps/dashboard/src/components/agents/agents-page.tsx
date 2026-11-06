@@ -15,7 +15,7 @@ import { closePalette, noteThreadOpen, openPalette, togglePalette } from "@/lib/
 import { useKeyboard } from "@/lib/keyboard-inset";
 import { lastInputWasKeyboard } from "@/lib/input-modality";
 import type { AgentsServices } from "@/lib/agents-services";
-import { hashFor, isNewAgentKey, newAgentHint, setAgentsView, threadOfView, useAgentsSurface, viewFromHash, type AgentsView, type AutomationsView } from "@/lib/agents-surface";
+import { hashFor, isNewAgentKey, newAgentHint, setAgentsView, threadOfView, useAgentsSurface, viewFromHash, writeAgentsUrl, type AgentsView, type AutomationsView } from "@/lib/agents-surface";
 import { isBuilder } from "@/lib/automations-nav";
 import { ALL, applyDisplay, applyView, deleteView, directionOf, focusOn, isPinned, keepProject, loadFocused, pinKey, setFocused as setFocusedIn, pinnedConversations, pinOf, projectOf, viewStorageKey, withDirection, type Pin as PinRec } from "@/lib/agents-views";
 import { desktop, onDesktopDeepLink, useDesktop } from "@/lib/desktop";
@@ -132,14 +132,19 @@ export function AgentsPage({
   }, []);
   // The URL says what's open, as the popup's does: a reload or a copied link comes back to it
   // (after Create, an automation's own page, not `…/new`).
+  // A panel (a conversation, settings, the launcher) is a history entry over the canvas: Back closes it.
   const { view: shownView } = useAgentsSurface();
+  const depth = shownView.kind === "canvas" ? 0 : 1;
+  const wasDepth = useRef(0);
   useEffect(() => {
+    const was = wasDepth.current;
+    wasDepth.current = depth;
     const { hash, pathname, search } = window.location;
     const want = hashFor(shownView);
     const shown = viewFromHash(hash);
     if (shown !== null && hashFor(shown) === want) return;
-    window.history.replaceState(window.history.state, "", pathname + search + want);
-  }, [shownView]);
+    writeAgentsUrl(pathname + search + want, depth, was);
+  }, [shownView, depth]);
   const mac = typeof window !== "undefined" && desktop()?.window === "agents" && desktop()?.platform === "darwin";
   return (
     <div className="h-dvh bg-bg text-fg" data-agents data-desktop={mac ? "agents-mac" : undefined}>

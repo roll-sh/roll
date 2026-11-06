@@ -176,6 +176,20 @@ export function hashFor(view: AgentsView): string {
   }
 }
 
+/**
+ * Write what's open into the URL, with a history entry for each level opened (the popup over the
+ * page, then a panel over the canvas): Back closes the newest level, as a phone's back gesture
+ * should, instead of leaving the dashboard. Closing a level from the UI goes back over the entry it
+ * pushed (the hash change that follows sets the view it already has). Same level: replaced.
+ */
+export function writeAgentsUrl(url: string, depth: number, wasDepth: number) {
+  const h = window.history;
+  const state = (h.state ?? {}) as Record<string, unknown>;
+  if (depth > wasDepth) h.pushState({ ...state, agentsDepth: depth }, "", url);
+  else if (depth < wasDepth && state.agentsDepth === wasDepth) h.back();
+  else h.replaceState(h.state, "", url);
+}
+
 /** ⌘N or ⌘⇧O (Ctrl elsewhere): a new agent, T3's `chat.new` bindings. */
 export function isNewAgentKey(e: KeyboardEvent): boolean {
   if (!(e.metaKey || e.ctrlKey) || e.altKey) return false;
