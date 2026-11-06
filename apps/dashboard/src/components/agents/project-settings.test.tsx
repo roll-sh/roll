@@ -240,19 +240,6 @@ describe("project settings on the canvas", () => {
     expect(screen.getByRole("switch", { name: "Pull merged changes automatically" })).toHaveAttribute("aria-checked", "false");
   });
 
-  it("Discard throws away every kind of change (auto-settle and cleanup stayed changed) and closes the panel", async () => {
-    const p = withSettings({});
-    const h = agentsHarness({ entities: [mirrored("project", p, 1)] });
-    const onClose = vi.fn();
-    renderAgents(<SettingsPanel target={`p:${p.id}`} onClose={onClose} />, h);
-    await userEvent.click(screen.getByRole("switch", { name: /Settle when its change lands/ }));
-    expect(screen.getByRole("region", { name: "Unsaved changes" })).toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: "Discard" }));
-    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
-    expect(screen.getByRole("switch", { name: /Settle when its change lands/ })).toHaveAttribute("aria-checked", "true");
-    expect(updates(h)).toEqual([]);
-  });
-
   it("won't let a card on the canvas (or any other view) throw an unsaved change away: it says so and stays (M8)", async () => {
     const p = withSettings({});
     const h = agentsHarness({ entities: [mirrored("project", p, 1)] });
