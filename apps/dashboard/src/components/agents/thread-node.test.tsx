@@ -49,7 +49,7 @@ describe("ThreadNode, T3's thread row as a card", () => {
     expect(within(card).getByText("roll web")).toBeInTheDocument();
     expect(within(card).getByText("RW")).toBeInTheDocument();
     expect(within(card).getByLabelText("On ada-mbp")).toHaveTextContent("ada-mbp");
-    expect(within(card).getByRole("link", { name: "Change 41, ready" })).toHaveAttribute("href", "/acme/roll/changes/41");
+    expect(within(card).getByRole("link", { name: "Change 41, ready" })).toHaveAttribute("href", "/dashboard/code/acme/roll/changes/41");
     expect(within(card).getByRole("img", { name: "Worktree roll/fix-queue" })).toBeInTheDocument();
     expect(within(card).getByRole("img", { name: "1 terminal running" })).toBeInTheDocument();
   });
