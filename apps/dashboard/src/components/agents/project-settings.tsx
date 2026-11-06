@@ -295,8 +295,7 @@ export function ProjectSettingsForm({ project, machine, onDone, onLeave }: { pro
     auto_pull: autoPull,
     defaults,
     scripts,
-    // Without a repo the auto colour comes from the name: a rename keeps the colour it had.
-    color: color ?? (!project.repo && name.trim() !== project.name ? projectColor(project) : undefined),
+    color,
     icon: "icon" in iconChecked && iconChecked.icon.kind !== "auto" ? iconChecked.icon : undefined,
     auto_settle: { after_days: autoSettle.after_days, on_land: autoSettle.on_land, keep_changes: autoSettle.keep_changes || undefined },
     // Off and kept as the default leaves no trace, as the daemon writes it.
@@ -330,10 +329,20 @@ export function ProjectSettingsForm({ project, machine, onDone, onLeave }: { pro
       setBusy(null);
     }
   };
-  const save = () =>
-    act("save", () =>
+  const save = () => {
+    // Without a repo the auto colour comes from the name: a rename keeps the colour it had (and the
+    // form shows it picked, so it matches what's saved).
+    if (!color && !project.repo && name.trim() !== project.name) {
+      const kept = projectColor(project);
+      setColor(kept);
+      return act("save", () =>
+        client.run(machine!.id, { type: "project.update", project: project.id, name: name.trim(), settings: { ...settings, color: kept } }, "ok"),
+      ).then((ok) => ok && onDone?.());
+    }
+    return act("save", () =>
       client.run(machine!.id, { type: "project.update", project: project.id, name: name.trim() !== project.name ? name.trim() : undefined, settings }, "ok"),
     ).then((ok) => ok && onDone?.());
+  };
 
   // Discard throws the edits away and leaves: where a held move was going, else the panel closes,
   // and focus goes back to what opened it (the page does that), not to the top of the form. The
@@ -360,7 +369,8 @@ export function ProjectSettingsForm({ project, machine, onDone, onLeave }: { pro
     setLeave(go ? "left" : null);
     go?.();
   }, [leave, changed, onLeave]);
-  const bar = changed || leave !== null;
+  // It stays a moment after a save, saying so (the button's place in the page can be far below).
+  const bar = changed || leave !== null || justSaved;
 
   const patchScript = (id: string, patch: Partial<ProjectScript>) => setScripts((all) => all.map((s) => (s.id === id ? { ...s, ...patch } : s)));
 
@@ -387,8 +397,8 @@ export function ProjectSettingsForm({ project, machine, onDone, onLeave }: { pro
         </SettingRow>
       </SettingsSection>
 
-      {/* A plain folder has nothing to pull. */}
-      {project.git && (
+      {/* A plain folder, or a checkout with no remote, has nothing to pull. */}
+      {project.git?.remote && (
       <SettingsSection title="Pull merged changes" ids={[P.autoPull.id]}>
         <SettingRow
           s={{ ...P.autoPull, description: `Keeps ${branch} current: when a change lands, roll fast-forwards this checkout, but only while it's on ${branch} with no local changes or commits.` }}
@@ -549,18 +559,21 @@ export function ProjectSettingsForm({ project, machine, onDone, onLeave }: { pro
         className={`flex items-center gap-1.5 ${bar ? "sticky bottom-0 z-10 -mx-1 border-t border-line bg-sheet px-1 py-3" : ""}`}
       >
         {bar && (
-          <span role={held ? "alert" : undefined} className={`mr-auto text-[12.5px] ${held ? "text-fg" : "text-muted"}`}>
-            {held ? "Save or discard your changes first" : "Unsaved changes"}
+          <span role={held ? "alert" : changed ? undefined : "status"} className={`mr-auto text-[12.5px] ${held ? "text-fg" : "text-muted"}`}>
+            {held ? "Save or discard your changes first" : changed || leave !== null ? "Unsaved changes" : "Saved"}
           </span>
         )}
-        {bar && !onDone && (
+        {bar && changed && !onDone && (
           <button type="button" onClick={discard} className={btn}>
             Discard
           </button>
         )}
-        <button type="submit" disabled={!changed || !scriptsOk || !online || busy !== null || !name.trim() || "error" in iconChecked} className={primary}>
-          {busy === "save" ? <span className="shimmer">Saving…</span> : justSaved ? "Saved" : "Save"}
-        </button>
+        {/* Just saved, the bar says so; the button is back once something changes. */}
+        {!(justSaved && !changed && busy === null) && (
+          <button type="submit" disabled={!changed || !scriptsOk || !online || busy !== null || !name.trim() || "error" in iconChecked} className={primary}>
+            {busy === "save" ? <span className="shimmer">Saving…</span> : "Save"}
+          </button>
+        )}
         {onDone && (
           <button type="button" onClick={onDone} className={btn}>
             Cancel

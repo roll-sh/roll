@@ -91,7 +91,7 @@ export function projectActions(env: ProjectActionsEnv, project: Project, opts: {
     !!services && !readOnly && !!project.repo && { label: "New sandbox for this project", icon: <Cloud />, onSelect: () => openProjectDialog({ kind: "sandbox", project: project.id }) },
     !!focusProject && { label: "Focus on this project only", icon: <Focus />, onSelect: () => focusProject(project.id) },
     !!canvas.keep && { label: kept ? "Unpin from the canvas" : "Pin to the canvas", icon: kept ? <PinOff /> : <Pin />, onSelect: () => canvas.keep?.(project.id, !kept) },
-    !readOnly && !!project.git && { label: "Pull", icon: <ArrowDownToLine />, disabled: !online, onSelect: () => void pull() },
+    !readOnly && !!project.git?.remote && { label: "Pull", icon: <ArrowDownToLine />, disabled: !online, onSelect: () => void pull() },
     !!project.repo && !demo && { label: "Open in roll code", icon: <ArrowUpRight />, onSelect: () => window.location.assign(`/${project.repo!.owner}/${project.repo!.repo}`) },
     { label: "Settings", icon: <Settings2 />, onSelect: () => setAgentsView({ kind: "settings", target: `p:${project.id}` }) },
     shelved > 0 && { label: `Settled and archived (${shelved})`, icon: <Archive />, onSelect: () => openShelf(project.id) },

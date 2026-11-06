@@ -13,7 +13,7 @@ import { agentsHarness, renderAgents } from "@/test/agents-render";
 const updates = (h: ReturnType<typeof agentsHarness>) => h.command.mock.calls.map((c) => c[2]).filter((c): c is Extract<Command, { type: "project.update" }> => c.type === "project.update");
 
 const withSettings = (over: Partial<Project["settings"]> = {}, rest: Partial<Project> = {}) =>
-  project({ git: { branch: "main", head: "f35f34cf", remote: null, dirty: false }, settings: { ...NO_SETTINGS, ...over }, ...rest });
+  project({ git: { branch: "main", head: "f35f34cf", remote: "git@github.com:ada/roll.git", dirty: false }, settings: { ...NO_SETTINGS, ...over }, ...rest });
 
 describe("ProjectSettingsForm", () => {
   it("turns auto-pull on and saves the settings whole", async () => {
