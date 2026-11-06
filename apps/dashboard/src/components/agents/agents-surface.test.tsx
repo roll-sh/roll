@@ -148,6 +148,17 @@ describe("the canvas under a trackpad", () => {
     e.destroy();
   });
 
+  it("never eases the zoom out of bounds when a frame began before the move did (⇧D at 15% froze the page)", () => {
+    const { e } = engine();
+    const now = performance.now();
+    e.setView({ x: 0, y: 0, k: 0.15 });
+    e.setView({ x: 0, y: 0, k: 1 }, true);
+    // A frame stamped a whole second before the move.
+    (e as unknown as { frame: (ms: number) => void }).frame(now - 1000);
+    expect(e.view.k).toBeCloseTo(0.15);
+    e.destroy();
+  });
+
   it("Safari's pinch gestures zoom too, and scrollable content keeps its wheel", () => {
     const { e, container } = engine();
     container.dispatchEvent(Object.assign(new Event("gesturestart", { cancelable: true }), { scale: 1 }));

@@ -489,9 +489,11 @@ export class CanvasEngine {
     const t = ms / 1000;
     let moving = false;
 
-    // View animation (ease-out cubic).
+    // View animation (ease-out cubic). A frame's timestamp is when the frame began, which can be
+    // before `setView` stamped `viewT0` in a long task: a negative `u` eased backwards past zero
+    // (⇧D at 15% froze the page: the dot grid never reached its spacing at a negative zoom).
     if (this.viewTo && this.viewFrom) {
-      const u = Math.min(1, (ms - this.viewT0) / this.viewMs);
+      const u = Math.min(1, Math.max(0, (ms - this.viewT0) / this.viewMs));
       const e = 1 - (1 - u) ** 3;
       const a = this.viewFrom;
       const b = this.viewTo;
@@ -548,8 +550,10 @@ export class CanvasEngine {
 
     // Dot field in world space, coarser as you zoom out.
     let step = DOT_SPACING;
-    while (step * k < 14) step *= 2;
-    const s = step * k;
+    // Never at or below zero, so the spacing loop and the rows below always end.
+    const gk = Number.isFinite(k) && k > 0.01 ? k : 0.01;
+    while (step * gk < 14) step *= 2;
+    const s = step * gk;
     const x0 = (((vx % s) + s) % s) - s;
     const y0 = (((vy % s) + s) % s) - s;
     const r2 = 140 * 140;
