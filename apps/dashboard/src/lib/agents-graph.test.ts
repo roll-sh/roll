@@ -150,7 +150,7 @@ describe("agents layout", () => {
       for (const order of orders) {
         const tree = arrange({ roots: ["m1", "m2"], nodes }, order);
         const grids = wrap ? planGrids(tree, sz, { direction: plain.direction!, aspect: 1.6, wraps: (k) => k.startsWith("p") }) : undefined;
-        if (wrap) expect(grids!.get("p1")!.members.length).toBe(10);
+        if (wrap) expect(grids!.get("p1")!.members.length).toBe(12);
         const opts = { ...plain, grids };
         const direction = `${opts.spreads ? "board" : opts.direction}${wrap ? " wrapped" : ""}`;
         const p = tidyLayout(tree, sz, opts);

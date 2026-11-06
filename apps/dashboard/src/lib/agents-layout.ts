@@ -122,7 +122,7 @@ export function tidyLayout(tree: TreeLike, size: (key: string) => Size, opts: La
     const at = out.get(key);
     out.delete(key);
     if (!at) continue;
-    g.members.forEach((m, i) => out.set(m, { x: at.x + g.cells[i].x, y: at.y + g.cells[i].y }));
+    for (const [k, p] of g.placed) out.set(k, { x: at.x + p.x, y: at.y + p.y });
   }
   return out;
 }
@@ -132,16 +132,20 @@ const GRID = "#grid:";
 /**
  * A parent's cards wrapped into a grid (a busy project's threads), placed as one block: in columns
  * of `rows` growing right, or rows of `cols` growing down, whichever way the tree grows, so the
- * block keeps near the screen's shape instead of one long column. Only the cards with nothing under
- * them wrap (a thread with requests or subagents keeps its place in the tree, with them).
+ * block keeps near the screen's shape instead of one long column. A card with something under it
+ * (requests, subagents, a fork) takes its whole subtree into its cell, laid out as the tree would.
  */
 export interface Grid {
   members: readonly string[];
   /** Top-left of each member inside the block. */
   cells: readonly Point[];
+  /** Every card in the block (members and what's under them), from the block's top-left. */
+  placed: ReadonlyMap<string, Point>;
   size: Size;
   /** Members in the block's first column (the ones its parent's edges go into). */
   first: ReadonlySet<string>;
+  /** How many go down a column before the next (growing right), or across a row (growing down). */
+  per: number;
 }
 
 /** Fewer cards than this stay one column. */
@@ -150,38 +154,80 @@ export const WRAP_AT: Readonly<Record<Direction, number>> = { horizontal: 5, ver
 /**
  * The grids for the parents `wraps` picks, sized for a screen `aspect` (width ÷ height) wide: a
  * block of n cards gets the number of rows that makes it about that shape (at least 3, growing
- * right; columns are as wide as their widest card, rows as tall as their tallest).
+ * right; columns are as wide as their widest cell, rows as tall as their tallest). Siblings wrap
+ * alike: once one of them wraps, every sibling longer than its side wraps to the same side (a
+ * project's Done beside its Quiet), so no group stays one long column beside a grid.
  */
-export function planGrids(tree: TreeLike, size: (key: string) => Size, opts: { direction: Direction; aspect: number; wraps: (key: string) => boolean; gap?: Point }): Map<string, Grid> {
+export function planGrids(
+  tree: TreeLike,
+  size: (key: string) => Size,
+  opts: { direction: Direction; aspect: number; wraps: (key: string) => boolean; gap?: Point; layout?: LayoutOptions },
+): Map<string, Grid> {
   const out = new Map<string, Grid>();
+  const horizontal = opts.direction === "horizontal";
   const gx = opts.gap?.x ?? 20;
-  const gy = opts.gap?.y ?? (opts.direction === "vertical" ? 14 : 20);
-  for (const [k, n] of tree.nodes) {
-    if (!opts.wraps(k)) continue;
-    const members = n.children.filter((c) => !(tree.nodes.get(c)?.children.length));
-    if (members.length < WRAP_AT[opts.direction]) continue;
-    const sizes = members.map(size);
-    const w = Math.max(...sizes.map((s) => s.w)) + gx;
-    const h = sizes.reduce((sum, s) => sum + s.h, 0) / sizes.length + gy;
-    const fit = Math.sqrt((members.length * w) / (h * Math.max(0.3, opts.aspect)));
-    const rows = Math.max(opts.direction === "horizontal" ? 3 : 1, Math.min(members.length, Math.round(fit)));
-    const cols = Math.ceil(members.length / rows);
+  const gy = opts.gap?.y ?? (horizontal ? 20 : 14);
+  const parentOf = new Map<string, string>();
+  for (const [k, n] of tree.nodes) for (const c of n.children) if (!parentOf.has(c)) parentOf.set(c, k);
+  type Cell = { placed: Map<string, Point>; size: Size };
+  // A member's subtree laid out on its own, from its top-left.
+  const cell = (key: string): Cell => {
+    if (!tree.nodes.get(key)?.children.length) return { placed: new Map([[key, { x: 0, y: 0 }]]), size: size(key) };
+    const p = tidyLayout({ roots: [key], nodes: tree.nodes }, size, { ...opts.layout, direction: opts.direction, grids: undefined });
+    const r = bounds(p, size)!;
+    const placed = new Map<string, Point>();
+    for (const [k, q] of p) placed.set(k, { x: q.x - r.x, y: q.y - r.y });
+    return { placed, size: { w: r.w, h: r.h } };
+  };
+  type Plan = { members: readonly string[]; cells: Cell[]; per: number };
+  const candidates = new Map<string, Omit<Plan, "per">>();
+  for (const [k, n] of tree.nodes) if (opts.wraps(k) && n.children.length > 1) candidates.set(k, { members: n.children, cells: n.children.map(cell) });
+  // The side (rows growing right, columns growing down) a block of these would take on its own.
+  const side = ({ members, cells }: Omit<Plan, "per">) => {
+    const w = Math.max(...cells.map((s) => s.size.w)) + gx;
+    const h = cells.reduce((sum, s) => sum + s.size.h, 0) / cells.length + gy;
+    const rows = Math.max(horizontal ? 3 : 1, Math.min(members.length, Math.round(Math.sqrt((members.length * w) / (h * Math.max(0.3, opts.aspect))))));
+    return horizontal ? rows : Math.ceil(members.length / rows);
+  };
+  const plans = new Map<string, Plan>();
+  const shared = new Map<string, number>();
+  for (const [k, c] of candidates) {
+    if (c.members.length < WRAP_AT[opts.direction]) continue;
+    const per = side(c);
+    plans.set(k, { ...c, per });
+    const up = parentOf.get(k) ?? ROOTS;
+    shared.set(up, Math.max(shared.get(up) ?? 0, per));
+  }
+  for (const [k, c] of candidates) {
+    const per = shared.get(parentOf.get(k) ?? ROOTS);
+    if (per !== undefined && (plans.has(k) || c.members.length > per)) plans.set(k, { ...c, per });
+  }
+  for (const [k, { members, cells, per }] of plans) {
+    const rows = horizontal ? Math.min(per, members.length) : Math.ceil(members.length / per);
+    const cols = horizontal ? Math.ceil(members.length / per) : Math.min(per, members.length);
     // Growing right, columns fill first (newest down the first column); growing down, rows do.
-    const at = (i: number) => (opts.direction === "horizontal" ? { c: Math.floor(i / rows), r: i % rows } : { c: i % cols, r: Math.floor(i / cols) });
+    const at = (i: number) => (horizontal ? { c: Math.floor(i / per), r: i % per } : { c: i % per, r: Math.floor(i / per) });
     const colW = new Array<number>(cols).fill(0);
-    const rowH = new Array<number>(opts.direction === "horizontal" ? rows : Math.ceil(members.length / cols)).fill(0);
-    members.forEach((_, i) => {
+    const rowH = new Array<number>(rows).fill(0);
+    cells.forEach((s, i) => {
       const { c, r } = at(i);
-      colW[c] = Math.max(colW[c], sizes[i].w);
-      rowH[r] = Math.max(rowH[r], sizes[i].h);
+      colW[c] = Math.max(colW[c], s.size.w);
+      rowH[r] = Math.max(rowH[r], s.size.h);
     });
     const colX = colW.map((_, c) => colW.slice(0, c).reduce((s, x) => s + x + gx, 0));
     const rowY = rowH.map((_, r) => rowH.slice(0, r).reduce((s, y) => s + y + gy, 0));
+    const placed = new Map<string, Point>();
+    cells.forEach((s, i) => {
+      const { c, r } = at(i);
+      for (const [key, q] of s.placed) placed.set(key, { x: colX[c] + q.x, y: rowY[r] + q.y });
+    });
     out.set(k, {
       members,
-      cells: members.map((_, i) => ({ x: colX[at(i).c], y: rowY[at(i).r] })),
-      size: { w: colX[cols - 1] + colW[cols - 1], h: rowY[rowH.length - 1] + rowH[rowH.length - 1] },
+      cells: members.map((m) => placed.get(m)!),
+      placed,
+      size: { w: colX[cols - 1] + colW[cols - 1], h: rowY[rows - 1] + rowH[rows - 1] },
       first: new Set(members.filter((_, i) => at(i).c === 0)),
+      per,
     });
   }
   return out;
@@ -402,9 +448,20 @@ export function moveTo(list: readonly string[], key: string, index: number): str
  * Where a sibling dragged with its centre at `at` drops: after every other sibling that reads
  * before it. Side by side (`across`) that's by x; listed, by y, except along a row that siblings
  * share (idle machines growing right): with `at` level with it, by x. `rects` are where the
- * siblings (the dragged one too) were as the drag started.
+ * siblings (the dragged one too) were as the drag started. In a grid (`"grid"`), the nearest cell.
  */
-export function dropIndex(siblings: readonly string[], key: string, at: Point, rects: ReadonlyMap<string, Rect>, across: boolean): number {
+export function dropIndex(siblings: readonly string[], key: string, at: Point, rects: ReadonlyMap<string, Rect>, across: boolean | "grid"): number {
+  // Wrapped into a grid, the siblings fill its cells in order: it drops into the cell nearest it.
+  if (across === "grid") {
+    let best = 0;
+    let near = Infinity;
+    siblings.forEach((s, i) => {
+      const r = rects.get(s);
+      const d = r ? Math.hypot(r.x + r.w / 2 - at.x, r.y + r.h / 2 - at.y) : Infinity;
+      if (d < near) (near = d), (best = i);
+    });
+    return best;
+  }
   const level = (a: Rect, b: Rect) => a.y < b.y + b.h && b.y < a.y + a.h;
   let i = 0;
   for (const s of siblings) {

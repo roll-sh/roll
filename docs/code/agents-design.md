@@ -214,7 +214,9 @@ state, or draw a project's logo inline (only in an `<img>`).
   bleed.
 - **Zoom bar:** glass, `rounded-[10px]`, `shadow-pop`, highlight, 28px buttons, the zoom in
   tabular mono. Auto-fit never goes below 60% (cards stay readable) and frames from the top.
-  "Fit everything" (`1`) fits all of it.
+  Fit (`1`) fits all of it while that stays above 35%; past that it frames what matters (the
+  machines, projects and status groups, what runs, waits on you or failed, the open card) and Fit
+  again shows everything.
 - **Side panel:** a floating sheet, `rounded-xl border-line-2 bg-sheet shadow-sheet`, inset 8px
   from the window and level with the canvas panel's top. The resize grip is a 3px pill that
   appears in the gap on hover and turns accent while held. On a phone it covers the canvas.

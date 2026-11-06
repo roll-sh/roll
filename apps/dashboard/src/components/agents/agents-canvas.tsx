@@ -98,6 +98,8 @@ export const AgentsCanvas = forwardRef<
     selected?: string;
     /** More cards marked the same way (a run's threads while the automations sheet shows it). */
     highlighted?: readonly string[];
+    /** Threads Fit frames when everything is too small to read (running, waiting on you, failed). */
+    matters?: (key: string) => boolean;
     /**
      * A card's launch handle (`data-launch="p:…"`, `m:…`, `t:…`) dragged out and dropped on empty
      * canvas, with where (client coordinates). A plain click on the handle stays a click.
@@ -109,7 +111,7 @@ export const AgentsCanvas = forwardRef<
      */
     keepClear?: React.RefObject<HTMLElement | null>;
   }
->(function AgentsCanvas({ graph, storageKey, order: shownOrder, onOrder, fitKey, direction = "horizontal", onDirection, density, wrap = true, semantic = true, onOpen, render, defaultSize, onEscape, overlay, active = true, selected, highlighted, onLaunch, keepClear }, ref) {
+>(function AgentsCanvas({ graph, storageKey, order: shownOrder, onOrder, fitKey, direction = "horizontal", onDirection, density, wrap = true, semantic = true, onOpen, render, defaultSize, onEscape, overlay, active = true, selected, highlighted, matters, onLaunch, keepClear }, ref) {
   const reduced = useReducedMotion();
   const container = useRef<HTMLDivElement>(null);
   const canvas = useRef<HTMLCanvasElement>(null);
@@ -205,12 +207,14 @@ export const AgentsCanvas = forwardRef<
   const [aspect, setAspect] = useState(1.6);
   const grids = useMemo(() => {
     if (!wrap) return new Map();
+    // A project's threads, or a status group's; never a drilled project's groups (they're the board's columns).
     const wraps = (k: string) => {
-      const kind = graph.nodes.get(k)?.kind;
-      return kind === "project" || kind === "group";
+      const n = graph.nodes.get(k);
+      return n?.kind === "group" || (n?.kind === "project" && !n.children.some((c) => graph.nodes.get(c)?.kind === "group"));
     };
-    return planGrids(arranged, (k) => (graph.nodes.has(k) ? sizeOf(k) : { w: 0, h: 0 }), { direction, aspect, wraps, gap: density === "compact" ? { x: 10, y: direction === "vertical" ? 8 : 10 } : undefined });
-  }, [wrap, arranged, graph, sizeOf, direction, aspect, density]);
+    const gaps = density === "compact" ? COMPACT_GAPS[direction] : {};
+    return planGrids(arranged, (k) => (graph.nodes.has(k) ? sizeOf(k) : { w: 0, h: 0 }), { direction, aspect, wraps, gap: density === "compact" ? { x: 10, y: direction === "vertical" ? 8 : 10 } : undefined, layout: { spreads, ...gaps } });
+  }, [wrap, arranged, graph, sizeOf, direction, aspect, density, spreads]);
   const positions = useMemo(
     () => tidyLayout(arranged, (k) => (graph.nodes.has(k) ? sizeOf(k) : { w: 0, h: 0 }), { direction, spreads, grids, ...(density === "compact" ? COMPACT_GAPS[direction] : {}) }),
     [arranged, graph, sizeOf, direction, spreads, density, grids],
@@ -226,9 +230,11 @@ export const AgentsCanvas = forwardRef<
       sz.set(n.key, sizeOf(n.key));
     }
     // Into a grid, only its first column has edges: the rest would cross the cards before them.
-    const edges: SceneEdge[] = graph.edges
-      .filter((x) => !grids.get(x.from) || !grids.get(x.from)!.members.includes(x.to) || grids.get(x.from)!.first.has(x.to))
-      .map((x) => ({ ...x, route: direction === "horizontal" ? "right" : across(x.from) ? "down" : "list" }));
+    const kept = graph.edges.filter((x) => !grids.get(x.from) || !grids.get(x.from)!.members.includes(x.to) || grids.get(x.from)!.first.has(x.to));
+    // Growing right, a parent with many children runs one trunk to them (a fan of curves merges into a bar).
+    const fan = new Map<string, number>();
+    for (const x of kept) fan.set(x.from, (fan.get(x.from) ?? 0) + 1);
+    const edges: SceneEdge[] = kept.map((x) => ({ ...x, route: direction === "horizontal" ? (fan.get(x.from)! >= TRUNK_AT ? "trunk" : "right") : across(x.from) ? "down" : "list" }));
     e.setScene(positions, meta, edges, sz);
   }, [positions, graph, sizeOf, direction, across, grids]);
 
@@ -245,6 +251,10 @@ export const AgentsCanvas = forwardRef<
     return Math.max(0, Math.min(box.bottom - top, box.height / 2));
   }, [keepClear]);
 
+  const mattersRef = useRef(matters);
+  mattersRef.current = matters;
+  const selectedRef = useRef(selected);
+  selectedRef.current = selected;
   const fit = useCallback(
     (animate = true, all = false) => {
       const e = engine.current;
@@ -255,14 +265,35 @@ export const AgentsCanvas = forwardRef<
       if (!r || !w || h <= 0) return;
       const first = arranged.roots.find((k) => positions.has(k));
       const anchor = first ? bounds(positions, sizeOf, [first]) ?? undefined : undefined;
-      if (w < 640) {
-        // A phone's waiting request puts the zoom bar at the top (`data-waiting`): frame below it.
-        const top = container.current?.closest("[data-waiting]") ? PHONE_TOP_BAR : 0;
-        const v = fitView(r, w, h - top, 24, 1, all ? 0 : 0.55, anchor);
+      const phone = w < 640;
+      // A phone's waiting request puts the zoom bar at the top (`data-waiting`): frame below it.
+      const top = phone && container.current?.closest("[data-waiting]") ? PHONE_TOP_BAR : 0;
+      const pad = phone ? 24 : 64;
+      if (!all) {
+        const v = phone ? fitView(r, w, h - top, pad, 1, 0.55, anchor) : fitReadable(r, w, h, pad, READABLE, SNUG);
         e.setView({ ...v, y: v.y + top }, animate);
-      } else e.setView(all ? fitView(r, w, h, 64, 1, 0) : fitReadable(r, w, h, 64, READABLE, SNUG), animate);
+        return;
+      }
+      let v = fitView(r, w, h - top, pad, 1, 0, anchor);
+      // Too much to read at once: frame what matters (the machines, projects and status groups,
+      // what's running, waiting on you or failed, the open card), readable; Fit again from there
+      // shows everything.
+      if (v.k < FIT_FLOOR) {
+        const keys = [...positions.keys()].filter((k) => {
+          const n = graph.nodes.get(k);
+          return !!n && (FRAMED.has(n.kind) || n.busy || k === selectedRef.current || !!mattersRef.current?.(k));
+        });
+        const m = bounds(positions, sizeOf, keys);
+        const k = m && fitView(m, w, h - top, pad, 1, phone ? 0.55 : FIT_FLOOR).k;
+        // At that zoom, as much of the rest as shows with all of it.
+        const framed = m && fitView(r, w, h - top, pad, k!, k!, m);
+        const now = e.goal;
+        const there = framed && Math.abs(now.k - framed.k) < 0.01 && Math.abs(now.x - framed.x) < 2 && Math.abs(now.y - framed.y - top) < 2;
+        if (framed && !there) v = framed;
+      }
+      e.setView({ ...v, y: v.y + top }, animate);
     },
-    [positions, sizeOf, arranged, coveredBelow],
+    [positions, sizeOf, arranged, coveredBelow, graph],
   );
 
   // Fit once, when the first layout with measured cards is in; then keep everything in view as
@@ -454,8 +485,8 @@ export const AgentsCanvas = forwardRef<
     parent: string;
     list: string[];
     rects: Map<string, Rect>;
-    /** The siblings sit side by side (measured on x), else one under another (on y). */
-    across: boolean;
+    /** The siblings sit side by side (measured on x), else one under another (on y), or fill a grid. */
+    across: boolean | "grid";
   } | null>(null);
   // Dragging a launch handle out of a card: where it started, and the ghost line drawn meanwhile.
   const launch = useRef<{ source: string; id: number; start: Point; from: Point; moved: boolean } | null>(null);
@@ -493,7 +524,7 @@ export const AgentsCanvas = forwardRef<
     const { parent, list } = siblingsOf(key);
     // Where the siblings are as the drag starts: the gap moves, what it's measured against doesn't.
     const rects = new Map(list.map((k) => [k, { ...(positions.get(k) ?? { x: 0, y: 0 }), ...sizeOf(k) }]));
-    drag.current = { key, id: ev.pointerId, start: toWorld(e.view, ev.clientX - r.left, ev.clientY - r.top), from, moved: false, el: card!, parent, list, rects, across: across(parent) };
+    drag.current = { key, id: ev.pointerId, start: toWorld(e.view, ev.clientX - r.left, ev.clientY - r.top), from, moved: false, el: card!, parent, list, rects, across: grids.has(parent) ? "grid" : across(parent) };
   };
   const onPointerMove = (ev: React.PointerEvent) => {
     const l = launch.current;
@@ -814,7 +845,7 @@ export const AgentsCanvas = forwardRef<
             {waiting.length}
           </button>
         )}
-        <ToolButton label="Fit everything (1)" onClick={() => fit(true, true)}>
+        <ToolButton label="Fit (1); again for everything" onClick={() => fit(true, true)}>
           <Maximize className="size-3.5" />
         </ToolButton>
         {onDirection && (
@@ -923,6 +954,12 @@ const FAR = [
 const READABLE = 0.6;
 /** What a fit may go down to when that shows everything clear of the prompt bar. */
 const SNUG = 0.5;
+/** Fit shows everything down to this zoom (far out, cards show their names big); below it, what matters. */
+const FIT_FLOOR = 0.35;
+/** Growing right, a parent with this many children draws one trunk to them. */
+const TRUNK_AT = 4;
+/** What Fit always frames: the structure, and what waits on you. */
+const FRAMED: ReadonlySet<GraphNode["kind"]> = new Set(["machine", "project", "group", "request"]);
 /** Keys that pan or zoom the canvas (with no card focused). */
 const VIEW_KEYS = new Set(["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "+", "=", "-", "0", "1"]);
 /** Room for a phone's zoom bar when it sits at the top (while a request waits at the bottom). */

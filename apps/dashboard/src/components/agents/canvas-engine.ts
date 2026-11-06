@@ -27,9 +27,11 @@ export interface SceneMeta {
  * How an edge runs: `right` from a parent's right edge into its child's left (the tree growing
  * right); `down` from the middle of a parent's bottom into the middle of its child's top (children
  * side by side under it); `list` down a trunk inside the parent's left edge and into the child's
- * left (children listed under it, indented).
+ * left (children listed under it, indented); `trunk` growing right to many children: out of the
+ * parent to a shared upright just before the children, then a short branch into each, so dozens of
+ * edges read as one line of structure instead of a fan.
  */
-export type EdgeRoute = "right" | "down" | "list";
+export type EdgeRoute = "right" | "down" | "list" | "trunk";
 
 export interface SceneEdge {
   from: string;
@@ -631,6 +633,8 @@ export class CanvasEngine {
     ctx.lineJoin = "round";
     const at = (key: string) => this.cur.get(key) ?? this.gone.get(key);
     const drawn = [...this.edges.map((edge) => ({ edge, alpha: 1 })), ...this.fading.map((f) => ({ edge: f.edge, alpha: 1 - Math.min(1, Math.max(0, (this.frameMs - f.t0) / EDGE_OUT_MS)) ** 2 }))];
+    // Trunks drawn after their branches: one stem and upright per parent, however many children.
+    const trunks = new Map<string, { p0: Point; x: number; lo: number; hi: number; stroke: string; alpha: number }>();
     for (const { edge: e, alpha } of drawn) {
       const a = at(e.from);
       const b = at(e.to);
@@ -653,12 +657,22 @@ export class CanvasEngine {
       ctx.lineWidth = 1.25;
       ctx.strokeStyle = stroke;
       ctx.beginPath();
-      path.trace(ctx);
+      const x = path.upright;
+      if (x !== undefined) {
+        const t = trunks.get(e.from);
+        if (t) (t.lo = Math.min(t.lo, p3.y)), (t.hi = Math.max(t.hi, p3.y)), (t.alpha = Math.max(t.alpha, alpha));
+        else trunks.set(e.from, { p0, x, lo: Math.min(p0.y, p3.y), hi: Math.max(p0.y, p3.y), stroke: e.tint ? rgba(this.tint(e.tint), 0.42) : rgba(this.line, 1), alpha });
+      }
+      // A busy child's edge runs whole, in the accent, over the trunk.
+      if (x !== undefined && !e.busy) {
+        ctx.moveTo(x, p3.y);
+        ctx.lineTo(p3.x, p3.y);
+      } else path.trace(ctx);
       ctx.stroke();
       ctx.setLineDash([]);
       // Ports: a small ring where the edge leaves its parent and meets its child.
       const pr = Math.max(1.6, 2.75 * Math.min(1, k));
-      for (const q of [p0, p3]) {
+      for (const q of x !== undefined ? [p3] : [p0, p3]) {
         ctx.beginPath();
         ctx.arc(q.x, q.y, pr, 0, Math.PI * 2);
         ctx.fillStyle = rgba(this.ground, 1);
@@ -680,6 +694,22 @@ export class CanvasEngine {
         }
       }
     }
+    for (const t of trunks.values()) {
+      ctx.globalAlpha = t.alpha;
+      ctx.lineWidth = 1.25;
+      ctx.strokeStyle = t.stroke;
+      ctx.beginPath();
+      ctx.moveTo(t.p0.x, t.p0.y);
+      ctx.lineTo(t.x, t.p0.y);
+      ctx.moveTo(t.x, t.lo);
+      ctx.lineTo(t.x, t.hi);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(t.p0.x, t.p0.y, Math.max(1.6, 2.75 * Math.min(1, k)), 0, Math.PI * 2);
+      ctx.fillStyle = rgba(this.ground, 1);
+      ctx.fill();
+      ctx.stroke();
+    }
     ctx.globalAlpha = 1;
   }
 }
@@ -690,11 +720,17 @@ export interface EdgePath {
   end: Point;
   trace: (ctx: Pick<CanvasRenderingContext2D, "moveTo" | "lineTo" | "bezierCurveTo" | "arcTo">) => void;
   at: (u: number) => Point;
+  /** A trunk edge's upright (screen x): the stem and upright are drawn once for all its siblings. */
+  upright?: number;
 }
 
 /** An edge between two cards (world rects) on screen (`scr` maps world to screen, `k` the zoom). */
 export function edgePath(route: EdgeRoute, a: Rect, b: Rect, scr: (p: Point) => Point, k: number): EdgePath {
   if (route === "list") return edgeList(scr({ x: a.x + (b.x - a.x) / 2, y: a.y + a.h }), scr({ x: b.x, y: b.y + Math.min(b.h / 2, 22) }), k);
+  if (route === "trunk") {
+    const from = { x: a.x + a.w, y: a.y + Math.min(a.h / 2, 28) };
+    return edgeTrunk(scr(from), scr({ x: Math.max(from.x + 12, b.x - TRUNK_BEFORE), y: 0 }).x, scr({ x: b.x, y: b.y + Math.min(b.h / 2, 28) }), k);
+  }
   const [p0, p1, p2, p3] =
     route === "down"
       ? edgeDown(scr({ x: a.x + a.w / 2, y: a.y + a.h }), scr({ x: b.x + b.w / 2, y: b.y }), k)
@@ -732,6 +768,40 @@ export function edgeList(p0: Point, p3: Point, k: number): EdgePath {
     at: (u) => {
       const d = Math.min(1, Math.max(0, u)) * total;
       return d <= down ? { x: p0.x, y: p0.y + d } : { x: corner.x + (d - down), y: corner.y };
+    },
+  };
+}
+
+/** How far before its children (world px) a trunk's upright runs. */
+const TRUNK_BEFORE = 18;
+
+/**
+ * A trunk edge (screen space): right from `p0` to the upright at `x`, along it (rounded corners) to
+ * the child's level, then right into the child at `p3`. Siblings share the stem and the upright.
+ */
+export function edgeTrunk(p0: Point, x: number, p3: Point, k: number): EdgePath {
+  const c1 = { x, y: p0.y };
+  const c2 = { x, y: p3.y };
+  const legs = [Math.max(0, x - p0.x), Math.abs(p3.y - p0.y), Math.max(0, p3.x - x)];
+  const r = Math.min(8 * k, legs[0], legs[1] / 2, legs[2]);
+  const total = legs[0] + legs[1] + legs[2] || 1;
+  return {
+    upright: x,
+    start: p0,
+    end: p3,
+    trace: (ctx) => {
+      ctx.moveTo(p0.x, p0.y);
+      if (r > 0.5 && legs[1] > 1) {
+        ctx.arcTo(c1.x, c1.y, c2.x, c2.y, r);
+        ctx.arcTo(c2.x, c2.y, p3.x, p3.y, r);
+      } else ctx.lineTo(c1.x, c1.y), ctx.lineTo(c2.x, c2.y);
+      ctx.lineTo(p3.x, p3.y);
+    },
+    at: (u) => {
+      const d = Math.min(1, Math.max(0, u)) * total;
+      if (d <= legs[0]) return { x: p0.x + d, y: p0.y };
+      if (d <= legs[0] + legs[1]) return { x, y: p0.y + Math.sign(p3.y - p0.y) * (d - legs[0]) };
+      return { x: x + (d - legs[0] - legs[1]), y: p3.y };
     },
   };
 }

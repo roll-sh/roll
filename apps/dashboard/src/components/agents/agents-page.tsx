@@ -970,6 +970,15 @@ function CanvasViewBody({
     [folds.folded, onFocus, focused],
   );
   const folded = folds.graph;
+  // What Fit frames when everything is too much to read: work going on, waiting on you or failed.
+  const matters = useCallback(
+    (key: string) => {
+      if (!key.startsWith("t:")) return false;
+      const t = data.threads.get(key.slice(2))?.value;
+      return !!t && (isBusy(t.status) || t.status === "error" || t.pending_requests > 0);
+    },
+    [data],
+  );
   // Projects with nothing on the canvas fold into their machine's "3 more projects", unless pinned
   // onto the view, focused, or named by its filter.
   const collapsed = useMemo(() => {
@@ -1158,6 +1167,7 @@ function CanvasViewBody({
             active={visible}
             selected={selected}
             highlighted={highlighted}
+            matters={matters}
             onLaunch={onLaunch}
             keepClear={keepClear}
             overlay={empty && <EmptyView name={view.id === ALL ? null : view.name} waitingOnly={filter.status?.length === 1 && filter.status[0] === "waiting"} onAll={() => (view.id === ALL ? views.setFilter({}) : views.select(ALL))} />}
