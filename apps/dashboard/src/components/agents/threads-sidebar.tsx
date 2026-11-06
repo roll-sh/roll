@@ -264,10 +264,12 @@ export function useInboxActions() {
     },
     [client, machineOf, readOnly, send],
   );
+  // Every inbox move says what it did, with its undo (Wake and Un-settle said nothing).
   const unsettle = useCallback(
     async (t: Thread) => {
       const m = machineOf(t);
-      if (m && !readOnly) await send(m, { type: "thread.unsettle", thread: t.id });
+      if (!m || readOnly) return;
+      if (await send(m, { type: "thread.unsettle", thread: t.id })) showInboxToast({ text: `Un-settled ${quoted(t.title)}`, undo: () => void send(m, { type: "thread.settle", thread: t.id }) });
     },
     [machineOf, readOnly, send],
   );
@@ -276,7 +278,7 @@ export function useInboxActions() {
       const m = machineOf(t);
       if (!m || readOnly) return;
       if (await send(m, { type: "thread.snooze", thread: t.id, until })) {
-        showInboxToast({ text: `Snoozed until ${new Date(until).toLocaleString(undefined, { weekday: "short", hour: "2-digit", minute: "2-digit" })}`, undo: () => void send(m, { type: "thread.unsnooze", thread: t.id }) });
+        showInboxToast({ text: `Snoozed ${quoted(t.title)} until ${new Date(until).toLocaleString(undefined, { weekday: "short", hour: "2-digit", minute: "2-digit" })}`, undo: () => void send(m, { type: "thread.unsnooze", thread: t.id }) });
       }
     },
     [machineOf, readOnly, send],
@@ -284,7 +286,10 @@ export function useInboxActions() {
   const wake = useCallback(
     async (t: Thread) => {
       const m = machineOf(t);
-      if (m && !readOnly) await send(m, { type: "thread.unsnooze", thread: t.id });
+      if (!m || readOnly) return;
+      const until = t.inbox.snooze?.until;
+      if (!(await send(m, { type: "thread.unsnooze", thread: t.id }))) return;
+      showInboxToast({ text: `Woken ${quoted(t.title)}`, undo: until && until > Date.now() ? () => void send(m, { type: "thread.snooze", thread: t.id, until }) : undefined });
     },
     [machineOf, readOnly, send],
   );

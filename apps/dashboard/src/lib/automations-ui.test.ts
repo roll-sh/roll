@@ -246,4 +246,26 @@ describe("cron patterns", () => {
     expect(cronShape("0 0 1 13 *")).toBe("The month is 1 to 12: 13 isn't one.");
     expect(cronShape("61 0 9 * * *")).toBe("The second is 0 to 59: 61 isn't one.");
   });
+
+  it("take @daily and the other names, say how many fields there were, and refuse a date that never comes (as the server does)", () => {
+    for (const m of ["@daily", "@hourly", "@weekly", "@monthly", "@yearly", "@annually", "@midnight", "@DAILY"]) expect(cronShape(m)).toBeNull();
+    expect(cronShape("@sometimes")).toBe("Use @hourly, @daily, @weekly, @monthly or @yearly, or 5 fields.");
+    expect(cronText("@daily")).toBe("Daily at 00:00");
+    expect(cronText("@weekly")).toBe("Sundays at 00:00");
+    expect(cronText("@monthly")).toBe("Monthly on day 1 at 00:00");
+    expect(cronText("@yearly")).toBe("Yearly on 1 January at 00:00");
+    expect(cronShape("0 9 * *")).toBe("A cron expression has 5 fields (minute hour day month weekday), or 6 with seconds first: this has 4.");
+    expect(cronShape("0 0 9 * * * *")).toMatch(/this has 7\.$/);
+    // Six fields: seconds first, said as such.
+    expect(cronShape("*/10 * * * * *")).toBeNull();
+    expect(cronText("*/10 * * * * *")).toBe("Every 10 seconds");
+    expect(cronText("0 0 9 * * 1-5")).toBe("Weekdays at 09:00");
+    expect(cronText("30 0 9 * * *")).toBeNull();
+    expect(cronShape("0 9 31 2 *")).toBe("It would never run: February has no day 31.");
+    expect(cronShape("0 9 31 4,6 *")).toBe("It would never run: April or June have no day 31.");
+    expect(cronShape("0 9 29 2 *")).toBeNull();
+    expect(cronShape("0 9 31 2,3 *")).toBeNull();
+    // A weekday too: cron runs on either, so it does run.
+    expect(cronShape("0 9 31 2 1")).toBeNull();
+  });
 });

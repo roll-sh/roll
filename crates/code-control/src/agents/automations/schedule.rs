@@ -23,6 +23,12 @@ impl Schedule {
                     return Err("cron must be 1 to 200 characters".into());
                 }
                 let c = CronParser::builder().seconds(Seconds::Optional).build().parse(pattern).map_err(|e| format!("bad cron pattern {pattern:?}: {e}"))?;
+                // A pattern no date matches (`0 9 31 2 *`, the 31st of February) would be saved
+                // and never run: refused, as a typo should be.
+                let now = tz.from_utc_datetime(&Utc::now().naive_utc());
+                if c.find_next_occurrence(&now, false).is_err() {
+                    return Err(format!("cron pattern {pattern:?} never runs: no date matches it"));
+                }
                 Ok(Some(Schedule::Cron(Box::new(c), tz)))
             }
             Trigger::Interval { every_s } => {
@@ -83,10 +89,16 @@ mod tests {
             Trigger::Schedule { cron: "61 * * * *".into(), timezone: "UTC".into() },
             Trigger::Schedule { cron: "0 3 * * *".into(), timezone: "Mars/Olympus".into() },
             Trigger::Schedule { cron: "".into(), timezone: "UTC".into() },
+            Trigger::Schedule { cron: "0 9 31 2 *".into(), timezone: "UTC".into() },
             Trigger::Interval { every_s: 5 },
         ] {
             assert!(Schedule::of(&t).is_err(), "{t:?}");
         }
         assert!(Schedule::of(&Trigger::Manual).unwrap().is_none());
+        // A leap day runs (every fourth year), and so do the macros.
+        for cron in ["0 0 29 2 *", "@daily", "@hourly", "@weekly", "@monthly", "@yearly"] {
+            assert!(Schedule::of(&Trigger::Schedule { cron: cron.into(), timezone: "UTC".into() }).is_ok_and(|s| s.is_some()), "{cron}");
+        }
+        assert!(Schedule::of(&Trigger::Schedule { cron: "0 9 31 2 *".into(), timezone: "UTC".into() }).err().unwrap().contains("never runs"));
     }
 }

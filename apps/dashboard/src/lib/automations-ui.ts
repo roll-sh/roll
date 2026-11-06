@@ -321,9 +321,28 @@ export const isBuiltInTrigger = (source: string) => BUILT_IN_TRIGGER_TYPES.has(s
 const DAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 const pad = (n: number) => String(n).padStart(2, "0");
 
+/** The `@` names croner takes, as the five fields they stand for. */
+const CRON_MACROS: Record<string, string> = {
+  "@yearly": "0 0 1 1 *",
+  "@annually": "0 0 1 1 *",
+  "@monthly": "0 0 1 * *",
+  "@weekly": "0 0 * * 0",
+  "@daily": "0 0 * * *",
+  "@midnight": "0 0 * * *",
+  "@hourly": "0 * * * *",
+};
+
 /** A cron expression in words when it's a common shape ("Weekdays at 09:00"), else `null`. */
 export function cronText(cron: string): string | null {
+  const name = cron.trim().toLowerCase();
+  if (name === "@yearly" || name === "@annually") return "Yearly on 1 January at 00:00";
+  if (CRON_MACROS[name]) return cronText(CRON_MACROS[name]);
   const f = cron.trim().split(/\s+/);
+  // Six fields lead with seconds: only a whole minute (0) reads as the five after it.
+  if (f.length === 6 && f[0] !== "0") {
+    const every = /^\*\/(\d+)$/.exec(f[0])?.[1];
+    return every && f.slice(1).every((x) => x === "*") ? `Every ${every} seconds` : f[0] === "*" && f.slice(1).every((x) => x === "*") ? "Every second" : null;
+  }
   const p = f.length === 6 ? f.slice(1) : f;
   if (p.length !== 5) return null;
   const [min, hour, dom, mon, dow] = p;
@@ -348,10 +367,16 @@ export function cronText(cron: string): string | null {
   return null;
 }
 
-/** Is it a cron expression the server takes (5 fields, or 6 with seconds)? Only the shape. */
+/**
+ * Is it a cron expression the server takes (5 fields, 6 with seconds first, or an `@` name like
+ * `@daily`), and does some date match it? Only the shape and the plain impossibles (the 31st of
+ * February): the server's croner says the rest.
+ */
 export function cronShape(cron: string): string | null {
-  const f = cron.trim().split(/\s+/).filter(Boolean);
-  if (f.length !== 5 && f.length !== 6) return "A cron expression has 5 fields (minute hour day month weekday).";
+  const t = cron.trim();
+  if (t.startsWith("@")) return CRON_MACROS[t.toLowerCase()] ? null : "Use @hourly, @daily, @weekly, @monthly or @yearly, or 5 fields.";
+  const f = t.split(/\s+/).filter(Boolean);
+  if (f.length !== 5 && f.length !== 6) return `A cron expression has 5 fields (minute hour day month weekday), or 6 with seconds first: this has ${f.length}.`;
   if (!f.every((x) => /^[\d*/,\-A-Za-z?LW#]+$/.test(x))) return "Each field is numbers, *, ranges (1-5), lists (1,3) or steps (*/15).";
   // Each value in its field's range (the server's croner refuses the rest); six fields lead with seconds.
   const ranges = (f.length === 6 ? [CRON_SECONDS] : []).concat(CRON_FIELDS);
@@ -362,7 +387,20 @@ export function cronShape(cron: string): string | null {
       if (n < lo || n > hi) return `The ${name} is ${lo} to ${hi}: ${n} isn't one.`;
     }
   }
-  return null;
+  return neverRuns(f.length === 6 ? f.slice(1) : f);
+}
+
+const MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+const MONTH_DAYS = [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+
+/** Days of the month that no month it names has, and no weekday to fall back on (cron ORs the two). */
+function neverRuns([, , dom, mon, dow]: string[]): string | null {
+  const list = (s: string) => (/^\d+(,\d+)*$/.test(s) ? s.split(",").map(Number) : null);
+  const days = list(dom);
+  const months = list(mon);
+  if (!days || !months || (dow !== "*" && dow !== "?")) return null;
+  if (months.some((m) => days.some((d) => d <= MONTH_DAYS[m - 1]))) return null;
+  return `It would never run: ${months.map((m) => MONTHS[m - 1]).join(" or ")} ${months.length === 1 ? "has" : "have"} no day ${Math.min(...days)}.`;
 }
 
 const CRON_SECONDS: [string, number, number] = ["second", 0, 59];

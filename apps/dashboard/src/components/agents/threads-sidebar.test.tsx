@@ -141,14 +141,20 @@ describe("the threads sidebar", () => {
     expect(Math.abs(custom.until - (Date.now() + 2 * D))).toBeLessThan(5_000);
   });
 
-  it("wakes a snoozed thread and un-settles a settled one from their rows", async () => {
+  it("wakes a snoozed thread and un-settles a settled one from their rows, each saying so with its undo", async () => {
     const h = world();
     sidebar(h);
     await userEvent.click(screen.getByRole("button", { name: /Snoozed/ }));
     await userEvent.click(screen.getByRole("button", { name: /Settled/ }));
     await userEvent.click(within(row("Later")).getByRole("button", { name: "Wake thread now" }));
+    expect(await screen.findByRole("status")).toHaveTextContent("Woken “Later”");
+    await userEvent.click(within(screen.getByRole("status")).getByRole("button", { name: /Undo/ }));
+    await waitFor(() => expect(sent(h).at(-1)).toEqual({ type: "thread.snooze", thread: "thr_z", until: NOW + 3 * H }));
     await userEvent.click(within(row("Old work")).getByRole("button", { name: "Un-settle thread" }));
-    await waitFor(() => expect(sent(h)).toEqual(expect.arrayContaining([{ type: "thread.unsnooze", thread: "thr_z" }, { type: "thread.unsettle", thread: "thr_s" }])));
+    expect(await screen.findByText("Un-settled “Old work”")).toBeInTheDocument();
+    await userEvent.click(within(screen.getByRole("status")).getByRole("button", { name: /Undo/ }));
+    await waitFor(() => expect(sent(h).at(-1)).toEqual({ type: "thread.settle", thread: "thr_s" }));
+    expect(sent(h)).toEqual(expect.arrayContaining([{ type: "thread.unsnooze", thread: "thr_z" }, { type: "thread.unsettle", thread: "thr_s" }]));
   });
 
   it("keeps each project's archived threads on a shelf of their own: unarchive, or delete after T3's confirmation", async () => {
