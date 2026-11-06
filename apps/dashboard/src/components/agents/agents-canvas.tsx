@@ -508,6 +508,40 @@ export const AgentsCanvas = forwardRef<
   // ── moving between cards from the keyboard ──
 
   const slotOf = useCallback((key: string) => world.current?.querySelector<HTMLElement>(`[data-card][data-key="${CSS.escape(key)}"]`) ?? null, []);
+
+  // One tab stop for the canvas (WAI-ARIA's roving tabindex): the card last focused, else the
+  // first in reading order. Tab goes on into that card's own controls, then out of the canvas; the
+  // arrows go from card to card. Every other card's controls are out of the tab order (they took
+  // 39 Tabs before the first conversation).
+  const [current, setCurrent] = useState<string | null>(null);
+  const entry = useMemo(() => {
+    if (current && positions.has(current)) return current;
+    let best: string | null = null;
+    for (const [k, p] of positions) {
+      const b = best ? positions.get(best)! : null;
+      if (!b || p.y < b.y - 0.5 || (Math.abs(p.y - b.y) <= 0.5 && p.x < b.x)) best = k;
+    }
+    return best;
+  }, [current, positions]);
+  useLayoutEffect(() => {
+    const root = world.current;
+    if (!root) return;
+    const apply = () => {
+      for (const slot of root.querySelectorAll<HTMLElement>("[data-card]")) rove(slot, slot.dataset.key === entry);
+    };
+    apply();
+    // Cards render their insides on their own (a request's answers, a terminal): keep up.
+    let frame = 0;
+    const seen = new MutationObserver(() => {
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(apply);
+    });
+    seen.observe(root, { childList: true, subtree: true });
+    return () => {
+      seen.disconnect();
+      cancelAnimationFrame(frame);
+    };
+  }, [entry, graph]);
   /** The card a focused element is the card itself of (not a control inside it). */
   const cardAt = useCallback((el: HTMLElement | null) => {
     const slot = el?.closest<HTMLElement>("[data-card]");
@@ -652,7 +686,15 @@ export const AgentsCanvas = forwardRef<
       data-density={density ?? "comfortable"}
     >
       <canvas ref={canvas} aria-hidden className="pointer-events-none absolute inset-0" />
-      <div ref={world} className="absolute top-0 left-0 origin-top-left" style={{ willChange: "transform" }}>
+      <div
+        ref={world}
+        className="absolute top-0 left-0 origin-top-left"
+        style={{ willChange: "transform" }}
+        onFocus={(e) => {
+          const k = (e.target as HTMLElement).closest<HTMLElement>("[data-card]")?.dataset.key;
+          if (k && k !== current) setCurrent(k);
+        }}
+      >
         {[...graph.nodes.values()].map((n) => (
           <CardSlot key={n.key} node={n} engine={engine} selected={n.key === selected || !!highlighted?.includes(n.key)}>
             {render(n)}
@@ -705,7 +747,34 @@ const FOCUSABLE = "button:not([disabled]), [href], input, textarea, select, [tab
 
 /** What takes focus for a card: its own clickable frame (a thread's), else its slot. */
 function focusTarget(slot: HTMLElement): HTMLElement {
-  return slot.querySelector<HTMLElement>("[data-drag][tabindex='0']") ?? slot;
+  return slot.querySelector<HTMLElement>("[data-drag][role=button]") ?? slot;
+}
+
+const TABBABLE = "a[href], button, input, select, textarea, [tabindex]";
+
+/**
+ * A card in or out of the tab order: the one the canvas's tab stop is on keeps its card at 0 and
+ * its controls as they are; any other is -1 throughout (the original tabindex is kept in
+ * `data-roving` to put back).
+ */
+function rove(slot: HTMLElement, on: boolean) {
+  const target = focusTarget(slot);
+  const want = on ? "0" : "-1";
+  if (target.getAttribute("tabindex") !== want) target.setAttribute("tabindex", want);
+  if (target !== slot && slot.getAttribute("tabindex") !== "-1") slot.setAttribute("tabindex", "-1");
+  for (const el of slot.querySelectorAll<HTMLElement>(TABBABLE)) {
+    if (el === target) continue;
+    if (on) {
+      if (!el.hasAttribute("data-roving")) continue;
+      const was = el.getAttribute("data-roving");
+      if (was) el.setAttribute("tabindex", was);
+      else el.removeAttribute("tabindex");
+      el.removeAttribute("data-roving");
+    } else if (!el.hasAttribute("data-roving")) {
+      el.setAttribute("data-roving", el.getAttribute("tabindex") ?? "");
+      el.setAttribute("tabindex", "-1");
+    }
+  }
 }
 
 /** Whether a point (client coordinates) is on a card. */

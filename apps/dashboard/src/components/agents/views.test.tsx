@@ -338,6 +338,26 @@ describe("moving around the canvas from the keyboard", () => {
     resetShelves();
   });
 
+  it("the canvas is one tab stop: the card last focused (else the first), then its own controls, never another card's (18)", async () => {
+    start();
+    const world = () => document.querySelector("[data-card]")!.parentElement!;
+    const stops = () => [...world().querySelectorAll<HTMLElement>("[tabindex]")].filter((el) => el.getAttribute("tabindex") === "0").map((el) => el.closest<HTMLElement>("[data-card]")!.dataset.key);
+    // Before anything is focused: the first card in reading order, alone.
+    await waitFor(() => expect(new Set(stops()).size).toBe(1));
+    const first = stops()[0];
+    const others = [...world().querySelectorAll<HTMLElement>("[data-card]")].filter((s) => s.dataset.key !== first);
+    for (const s of others) for (const b of s.querySelectorAll("button")) expect(b).toHaveAttribute("tabindex", "-1");
+    // Focus moves the stop with it; the card it left gives its controls back.
+    card("Fix the flaky queue test")!.focus();
+    await waitFor(() => expect(new Set(stops())).toEqual(new Set(["t:thr_1"])));
+    const tools = [...card("Fix the flaky queue test")!.closest("[data-card]")!.querySelectorAll("button")];
+    expect(tools.length).toBeGreaterThan(0);
+    for (const b of tools) expect(b).not.toHaveAttribute("tabindex", "-1");
+    // Tab goes into its controls, not to the next card.
+    await userEvent.tab();
+    expect(document.activeElement?.closest("[data-card]")).toHaveAttribute("data-key", "t:thr_1");
+  });
+
   it("arrows go from card to card along the tree, Enter opens, Space goes to what's waiting", async () => {
     start();
     card("Fix the flaky queue test")!.focus();

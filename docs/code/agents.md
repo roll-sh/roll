@@ -1561,7 +1561,10 @@ The surface has three views:
 
   **Working from the keyboard** (`nextCard` in `lib/agents-layout.ts`). The canvas is where an
   owner triages many agents, and Linear and T3 both move by keyboard faster than by pointer, so
-  every card can be reached and answered without the mouse. A card takes focus from Tab or a
+  every card can be reached and answered without the mouse. The canvas is one tab stop (a roving
+  tabindex): Tab lands on the card last focused, else the first in reading order, then goes
+  through that card's own controls and on out of the canvas; other cards' controls are out of the
+  tab order (39 Tabs went by before the first conversation). A card takes focus from Tab or a
   click; then the arrows go to the nearest card that way, in line first and the first in reading
   order of those as near. That follows the tree either way it grows: left to right, ← is the
   parent, → a child and ↑/↓ the next card in the column (across parents); top-down, ↑/↓ walk a
