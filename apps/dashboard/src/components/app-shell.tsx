@@ -3,7 +3,6 @@
 import { RollLogo } from "@roll/brand";
 import {
   Activity,
-  ChevronsUpDown,
   Database,
   GitBranch,
   Globe,
@@ -26,6 +25,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { Suspense, useEffect, useState, type ReactNode } from "react";
 import { AgentsControl } from "./agents/agents-control";
+import { useShownOwner } from "./agents/use-connection";
 import { AskPanel } from "./ask";
 import { useMarkState } from "./mark-state";
 
@@ -54,6 +54,7 @@ const nav = [
  */
 export function AppShell({ crumb, actions, bleed = false, children }: { crumb: ReactNode; actions?: ReactNode; bleed?: boolean; children: ReactNode }) {
   const { state } = useMarkState();
+  const shown = useShownOwner();
   const [paletteOpen, setPaletteOpen] = useState(false);
 
   useEffect(() => {
@@ -76,11 +77,11 @@ export function AppShell({ crumb, actions, bleed = false, children }: { crumb: R
           <Link href="/" className="px-2 py-1" aria-label="roll home">
             <RollLogo state={state} size={19} />
           </Link>
-          <button className="mt-5 flex items-center gap-2 rounded-lg border border-line px-2.5 py-2 text-left text-[13px] hover:border-line-2">
-            <span className="grid size-5 place-items-center rounded bg-accent text-[10px] font-bold text-white">A</span>
-            <span className="flex-1">acme</span>
-            <ChevronsUpDown className="size-3.5 text-subtle" />
-          </button>
+          <div className="mt-5 flex items-center gap-2 rounded-lg border border-line px-2.5 py-2 text-left text-[13px]" title={shown?.admin ? "Signed in as admin" : undefined}>
+            <span className="grid size-5 place-items-center rounded bg-accent text-[10px] font-bold text-white uppercase">{shown?.owner?.[0] ?? "·"}</span>
+            <span className={`min-w-0 flex-1 truncate ${shown?.owner ? "" : "text-muted"}`}>{shown === undefined ? "" : (shown.owner ?? "Signed out")}</span>
+            {shown?.admin && <span className="text-[11px] text-subtle">admin</span>}
+          </div>
           <Suspense fallback={<Nav pathname={null} />}>
             <CurrentNav />
           </Suspense>
@@ -93,7 +94,12 @@ export function AppShell({ crumb, actions, bleed = false, children }: { crumb: R
               <RollLogo state={state} size={17} />
             </span>
             <span className="hidden text-[13px] text-muted sm:inline">
-              acme <span className="text-subtle">/</span> <span className="text-fg">{crumb}</span>
+              {shown?.owner && (
+                <>
+                  {shown.owner} <span className="text-subtle">/</span>{" "}
+                </>
+              )}
+              <span className="text-fg">{crumb}</span>
             </span>
             <button
               onClick={() => setPaletteOpen(true)}

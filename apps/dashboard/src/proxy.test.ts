@@ -57,6 +57,9 @@ describe("proxy", () => {
     const res = await proxy(new NextRequest("https://roll.sh/acme/web/blob/main/a.ts?plain=1"));
     expect(res.status).toBe(308);
     expect(res.headers.get("location")).toBe("https://roll.sh/acme/site/blob/main/a.ts?plain=1");
+    // A repo tab typed as a path opens the tab.
+    const tab = await proxy(new NextRequest("https://roll.sh/dashboard/code/acme/web/changes"));
+    expect(tab.headers.get("location")).toBe("https://roll.sh/dashboard/code/acme/web#changes");
   });
 
   it("renders normally when the control plane is down", async () => {

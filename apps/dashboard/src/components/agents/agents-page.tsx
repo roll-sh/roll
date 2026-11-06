@@ -54,6 +54,7 @@ import { threadDone } from "./thread-status";
 import { SidebarToggle, ThreadsSidebar, useSidebarOpen } from "./threads-sidebar";
 import { AgentsContext, useAgents, useAgentsSnapshot, useHold, useMarkDriver, type AgentsCtx } from "./use-agents";
 import { useAgentsConnection } from "./use-connection";
+import { NoOwner } from "./no-owner";
 import { PinTools, useCanvasViews, ViewsBar, type CanvasViews } from "./views";
 import { BulkBar, SelectionHost, useBulk, type Bulk } from "./bulk-bar";
 import { ThreadCollection, useCollection } from "./thread-list";
@@ -107,7 +108,7 @@ export function AgentsPage({
   /** Back from installing Slack or Discord (`?settings=integrations&…`): the settings, on the integrations. */
   integrations?: IntegrationsLink | null;
 }) {
-  const { client, services, error } = useAgentsConnection({ owner, demo });
+  const { client, services, error, need } = useAgentsConnection({ owner, demo });
   // The link it opened with, read once: the URL below follows the view, so by a second run of the
   // effect (React's strict mode runs it twice) it already says the canvas, and a link to the
   // automations sheet fell back to it.
@@ -157,7 +158,7 @@ export function AgentsPage({
       {client && services ? (
         <AgentsSurface client={client} services={services} demo={demo} chrome="window" focus={focus && !focus.startsWith("t:") ? focus : undefined} />
       ) : (
-        <CenterNote shimmer={!error} action={error ? <SignIn /> : undefined}>
+        <CenterNote shimmer={!error} action={need === "owner" ? <NoOwner /> : error ? <SignIn /> : undefined}>
           {error ?? "Connecting…"}
         </CenterNote>
       )}

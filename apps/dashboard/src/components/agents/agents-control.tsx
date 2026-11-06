@@ -15,6 +15,8 @@ import type { AgentsServices } from "@/lib/agents-services";
 import { desktop, useDesktop } from "@/lib/desktop";
 import { useOwnerSettings } from "@/lib/owner-settings";
 import { AgentsSurface, CenterNote } from "./agents-page";
+import { NoOwner } from "./no-owner";
+import { SignIn } from "../code/sign-in";
 import { useAgentsSnapshot, useHold, useMarkDriver } from "./use-agents";
 import { useAgentsConnection, useDemoParam } from "./use-connection";
 
@@ -71,7 +73,7 @@ export function AgentsControl() {
   return (
     <>
       {client ? <Counts client={client} services={conn.services ?? undefined} /> : <Pill count={0} waiting={0} />}
-      <Popup client={conn.client} services={conn.services} error={conn.error} demo={demo} />
+      <Popup client={conn.client} services={conn.services} error={conn.error} need={conn.need} demo={demo} />
     </>
   );
 }
@@ -128,7 +130,7 @@ function Pill({ count, waiting, first }: { count: number; waiting: number; first
 }
 
 /** The agents over the page: the whole window, like an app of its own. */
-function Popup({ client, services, error, demo }: Pick<ReturnType<typeof useAgentsConnection>, "client" | "services" | "error"> & { demo: boolean }) {
+function Popup({ client, services, error, need, demo }: Pick<ReturnType<typeof useAgentsConnection>, "client" | "services" | "error" | "need"> & { demo: boolean }) {
   const { open, view } = useAgentsSurface();
 
   // The URL says what's open, so a reload (or a copied link) comes back to it; opening the popup is
@@ -166,7 +168,9 @@ function Popup({ client, services, error, demo }: Pick<ReturnType<typeof useAgen
           {client && services ? (
             <AgentsSurface client={client} services={services} demo={demo} chrome="popup" onClose={hideAgents} />
           ) : (
-            <CenterNote shimmer={!error}>{error ?? "Connecting…"}</CenterNote>
+            <CenterNote shimmer={!error} action={need === "owner" ? <NoOwner /> : need === "sign-in" ? <SignIn /> : undefined}>
+              {error ?? "Connecting…"}
+            </CenterNote>
           )}
         </PopupFrame>
       )}

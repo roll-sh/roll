@@ -56,7 +56,18 @@ async function shareExists(request: NextRequest, id: string) {
   return res.status === 404 ? NextResponse.rewrite(new URL(MISSING, request.url)) : NextResponse.next();
 }
 
+/**
+ * A repo's tab typed or linked as a path (`/dashboard/code/o/r/changes`): the repo page with that
+ * tab open (`#changes`). Only the change pages under `changes/<n>` are real routes.
+ */
+export function repoTab(pathname: string): string | null {
+  const m = /^(\/dashboard\/code\/[^/]+\/[^/]+)\/(overview|work|changes|queue|code|settings)\/?$/.exec(pathname);
+  return m ? `${m[1]}#${m[2]}` : null;
+}
+
 export async function proxy(request: NextRequest) {
+  const tab = repoTab(request.nextUrl.pathname);
+  if (tab) return NextResponse.redirect(new URL(tab, request.url), 307);
   const share = shareOf(request.nextUrl.pathname);
   if (share) return shareExists(request, share);
   const t = classify(request.nextUrl.pathname);
