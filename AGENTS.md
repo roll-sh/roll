@@ -215,12 +215,21 @@ The product should feel alive: dots react to the cursor and the marks "think". E
   - Public pages stream, so `apps/dashboard/src/proxy.ts` checks that the owner or repo exists
     before rendering. That gives real 404s and 308s for renamed repos. Keep the check there,
     not in the pages.
-  - After touching anything code-related, run `pnpm test:code`. It skips itself when nothing
-    relevant changed, and it runs:
-    - the dashboard's vitest suite
-    - the Docker preview tests
-    - 40,000 merges in release
-    - 2,000 changes through the merge queue
+  - After touching anything code-related, run `pnpm test:code` (about a minute warm). Each part
+    skips itself when nothing it covers changed. By default it runs:
+    - clippy and the code crates' tests on SQLite, including a small merge-queue throughput run
+    - `roll code` against a live API
+    - typecheck and the dashboard's and desktop's tests (shared with `test:agents`)
+
+    The slow suites are opt-in. Run them before a PR to `main` merges, and after touching the
+    subsystem they cover:
+    - `--docker`: the stores on Postgres (after touching SQL, `code-sql` or the cluster), checks
+      and previews in real Docker (after touching `code-preview`), and the cluster as real
+      `rolld` containers (after touching `code-cluster` or `cluster.rs`)
+    - `--stress`: 40,000 merges in release and 2,000 changes through the merge queue (after
+      touching the lander, `Store::advance` or the queue)
+  - Local gates share one cargo package set (`scripts/lib/gate.sh`) so nothing builds twice. A
+    new gate or suite uses it rather than its own `cargo test -p` calls.
   - A test is added when it guards behaviour a person relies on and nothing else covers it: one
     per flow, not one per fix, and never for copy, layout, focus or animation details. The merge
     gate (`.github/workflows/ci.yml`) must finish in under a minute.
@@ -247,7 +256,7 @@ The product should feel alive: dots react to the cursor and the marks "think". E
     - HTTP statuses and the auth matrix for every route: `code-control/tests/routes.rs`
     - the cluster in one process: `code-control/tests/cluster.rs`; as real `rolld` containers
       in Docker (kills, rolling restarts, Postgres restarts under load):
-      `rolld/tests/code_cluster_e2e.rs` (`ROLL_E2E=1`; the image is `deploy/code/Dockerfile`)
+      `rolld/tests/code_cluster_e2e.rs` (`pnpm test:code --docker`; the image is `deploy/code/Dockerfile`)
     - event stream limits: `code-control/tests/streams.rs`
     - the cluster (several nodes in one process: routing, takeover, joining, draining):
       `code-control/tests/cluster.rs`
@@ -320,7 +329,8 @@ The product should feel alive: dots react to the cursor and the marks "think". E
     fork's pull request counts only after `approve-run`. Tests: `code-control/tests/chatops.rs`,
     `github.rs` (`automations_*`), `roll-cli/tests/agent.rs::a_slack_button_answers_the_fake_providers_approval`.
   - After touching anything agents-related, run `pnpm test:agents` (its Rust, web and end-to-end
-    parts each skip themselves when nothing they cover changed; `--unit` skips the end-to-end
+    parts each skip themselves when nothing they cover changed; the end-to-end run builds the
+    dashboard only when the dashboard changed; `--unit` skips the end-to-end
     run). New tests (see the rule above: one per behaviour nothing else covers) go in
     `agent-host/tests/{orchestrator,threads,git,terminal,mcp,relay,codex,claude,acp}.rs`,
     `code-control/tests/{agents,agents_code}.rs` (+ `routes.rs` for the auth matrix),

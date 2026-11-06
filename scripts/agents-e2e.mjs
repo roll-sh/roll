@@ -339,9 +339,13 @@ async function main() {
     const dash = join(ROOT, "apps/dashboard");
     log("building the dashboard (next build)…");
     // Into `.next` (`next dev` keeps its own `.next/dev`), with this rolld's address built in.
-    const webEnv = env({ NEXT_PUBLIC_ROLL_API: API, ROLL_API_URL: API, NEXT_TELEMETRY_DISABLED: "1" });
-    execFileSync("pnpm", ["exec", "next", "build"], { cwd: dash, env: webEnv, stdio: ["ignore", "inherit", "inherit"] });
-    start("next start", "pnpm", ["exec", "next", "start", "-H", "127.0.0.1", "-p", String(webPort)], { cwd: dash, env: webEnv });
+    // Next's own type check is skipped: the gate runs `pnpm typecheck` (24 s of a 36 s build).
+    const webEnv = env({ NEXT_PUBLIC_ROLL_API: API, ROLL_API_URL: API, NEXT_TELEMETRY_DISABLED: "1", ROLL_NEXT_SKIP_TYPECHECK: "1" });
+    // next's own CLI under node, not `pnpm exec`: a signal to pnpm's launcher left the server running
+    // (every e2e run leaked a `next start`).
+    const nextBin = join(dash, "node_modules/next/dist/bin/next");
+    execFileSync(process.execPath, [nextBin, "build"], { cwd: dash, env: webEnv, stdio: ["ignore", "inherit", "inherit"] });
+    start("next start", process.execPath, [nextBin, "start", "-H", "127.0.0.1", "-p", String(webPort)], { cwd: dash, env: webEnv });
     const page = async (path) => {
       const r = await fetch(`${WEB}${path}`, { redirect: "manual" });
       return { status: r.status, text: await r.text(), type: r.headers.get("content-type") };

@@ -63,7 +63,7 @@ jobs:
       - uses: actions/checkout@v5
       - name: Validate test scripts
         run: |
-          for script in scripts/test-*.sh scripts/nosql-conformance.sh; do
+          for script in scripts/test-*.sh scripts/lib/*.sh scripts/nosql-conformance.sh; do
             bash -n "$script"
           done
       - name: Validate workflows
