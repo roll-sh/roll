@@ -350,7 +350,7 @@ function GatewayRows({ g, onSetup }: { g: ReturnType<typeof useGatewayPlan>; onS
             {asking ? (
               <>
                 <span className="min-w-0 flex-1 text-[12px] text-muted">
-                  Remove the gateway? {listNames((plan.members ?? []).map((m) => machineName(m.machine))) || "No machine"} stop{(plan.members ?? []).length === 1 ? "s" : ""} using it, their keys are revoked, and {host?.name ?? "its computer"} forgets its upstreams' keys, usage and log.
+                  Remove the gateway? {listNames((plan.members ?? []).map((m) => machineName(m.machine))) || "No machine"} stop{(plan.members ?? []).length === 1 ? "s" : ""} using it, their keys are revoked, and {host?.name ?? "its computer"} forgets its upstreams' keys, usage and log. A provider that was on another endpoint before goes back to it.
                 </span>
                 <button type="button" disabled={removing} onClick={() => void removeAll()} className={dangerBtn}>
                   {removing ? <span className="shimmer">Removing…</span> : "Remove the gateway"}

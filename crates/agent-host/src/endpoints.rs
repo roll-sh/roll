@@ -18,7 +18,7 @@
 
 use crate::provider::ProviderConfig;
 use aes_gcm::aead::{Aead, KeyInit, Payload};
-use agent_proto::{EndpointKind, EndpointModel, EndpointSpec, KeyState, SEAL_VERSION, SealedSecret, endpoint_limits};
+use agent_proto::{EndpointKind, EndpointModel, EndpointSpec, KeyState, ProviderId, SEAL_VERSION, SealedSecret, endpoint_limits};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
 use curve25519_dalek::montgomery::MontgomeryPoint;
@@ -168,6 +168,11 @@ pub struct Stored {
     pub checked_at: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// The providers it took from the machine's other endpoints when it was set (provider, the
+    /// endpoint it was on): removing it gives each back, if that endpoint is still there (joining
+    /// the gateway and leaving it again leaves a provider on its CLIProxyAPI, not on nothing).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub taken: Vec<(ProviderId, String)>,
 }
 
 impl std::fmt::Debug for Stored {

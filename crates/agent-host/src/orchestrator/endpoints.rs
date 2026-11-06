@@ -84,12 +84,22 @@ impl Host {
         if old.is_none() && list.len() >= endpoint_limits::ENDPOINTS {
             return Err(Fail::Invalid(format!("a machine has at most {} endpoints", endpoint_limits::ENDPOINTS)));
         }
-        // A provider uses one endpoint: this one takes its providers from the others.
+        // A provider uses one endpoint: this one takes its providers from the others, and keeps
+        // where they were (set again, it keeps what it took before and still serves).
+        let mut taken: Vec<(ProviderId, String)> = old.as_ref().map(|o| o.stored.taken.iter().filter(|(p, _)| spec.serves(p)).cloned().collect()).unwrap_or_default();
         for other in &mut list {
-            other.stored.spec.providers.retain(|p| !spec.serves(p));
+            other.stored.spec.providers.retain(|p| {
+                if !spec.serves(p) {
+                    return true;
+                }
+                if !taken.iter().any(|(q, _)| q == p) {
+                    taken.push((p.clone(), other.stored.spec.id.clone()));
+                }
+                false
+            });
         }
         let same_server = old.as_ref().is_some_and(|o| o.stored.spec.base_url == spec.base_url && o.stored.spec.kind == spec.kind);
-        let mut stored = Stored { spec: spec.clone(), key: None, models: Vec::new(), checked_at: None, error: None };
+        let mut stored = Stored { spec: spec.clone(), key: None, models: Vec::new(), checked_at: None, error: None, taken };
         if let Some(o) = &old
             && same_server
         {
@@ -120,14 +130,23 @@ impl Host {
         Ok(Reply::Ok)
     }
 
-    /// `endpoint.remove`: forget it and its key; its providers go back to their own config.
+    /// `endpoint.remove`: forget it and its key; the providers it took from another endpoint go
+    /// back to it (if it's still there and nothing else took them since), the rest to their own config.
     pub(crate) async fn endpoint_remove(&self, id: &str) -> Res<Reply> {
         let _guard = self.configuring.lock().await;
         let mut list = self.endpoints.lock().unwrap().clone();
         let Some(i) = list.iter().position(|l| l.stored.spec.id == id) else {
             return Err(Fail::NotFound(format!("endpoint {id}")));
         };
-        list.remove(i);
+        let gone = list.remove(i);
+        for (p, from) in gone.stored.taken {
+            if list.iter().any(|l| l.stored.spec.serves(&p)) {
+                continue;
+            }
+            if let Some(back) = list.iter_mut().find(|l| l.stored.spec.id == from) {
+                back.stored.spec.providers.push(p);
+            }
+        }
         self.save_endpoints(&list)?;
         *self.endpoints.lock().unwrap() = list;
         self.configure_providers();

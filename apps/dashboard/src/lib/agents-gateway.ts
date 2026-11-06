@@ -146,7 +146,8 @@ export interface KindPreset {
   project?: boolean;
   /** Patterns it needs (Bedrock can't list its models). */
   models?: string;
-  key: { label: string; placeholder: string; hint: string; multiline?: boolean };
+  /** `optional`: it can go without one (a local model server); every other kind refuses requests without it. */
+  key: { label: string; placeholder: string; hint: string; multiline?: boolean; optional?: boolean };
 }
 
 /** The kinds, in the order the picker offers them. */
@@ -209,7 +210,7 @@ export const KIND_PRESETS: Record<UpstreamKind, KindPreset> = {
     speaks: "Chat (Responses when it says so)",
     url: "https://models.example.com/v1",
     needsUrl: true,
-    key: { label: "API key", placeholder: "Key (optional)", hint: "Sent as a bearer token. A local model server may need none." },
+    key: { label: "API key", placeholder: "Key (optional)", hint: "Sent as a bearer token. A local model server may need none.", optional: true },
   },
 };
 

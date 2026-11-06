@@ -57,9 +57,15 @@ describe("setting up the gateway", () => {
     expect(within(dlg).getByRole("button", { name: "Continue" })).toBeDisabled();
     macClick(within(dlg).getByRole("checkbox", { name: /I understand/ }));
     expect(onClose).not.toHaveBeenCalled();
+    // Escape past the first step asks before the setup goes.
+    fireEvent.keyDown(dlg, { key: "Escape" });
+    expect(within(dlg).getByRole("alert").textContent).toContain("Close the setup?");
+    macClick(within(dlg).getByRole("button", { name: "Keep setting up" }));
+    expect(onClose).not.toHaveBeenCalled();
     next();
-    // 3. An upstream with a key: sealed at once, the field emptied.
+    // 3. An upstream with a key (without one, it says so): sealed at once, the field emptied.
     macClick(within(dlg).getByRole("button", { name: "Add an upstream" }));
+    expect(within(dlg).getByRole("button", { name: "Add without a key" })).toBeInTheDocument();
     fireEvent.change(within(dlg).getByLabelText("API key"), { target: { value: "sk-ant-plaintext-42" } });
     macClick(within(dlg).getByRole("button", { name: "Add upstream" }));
     await waitFor(() => expect(within(dlg).getByText("key sealed")).toBeInTheDocument());

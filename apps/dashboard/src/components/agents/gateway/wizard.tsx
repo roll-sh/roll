@@ -21,7 +21,7 @@
 import { Check, ChevronLeft, Plus, Server, Trash2, X } from "lucide-react";
 import { useMemo, useState } from "react";
 import { GATEWAY_PORT, reachable, type GatewayPlan, type GatewaySettings, type GatewayUrl, type KeyChange, type Machine, type UpstreamCheck, type UpstreamSpec } from "@/lib/agents-api";
-import { checkSettings, checkUrl, gatewayOn, isIPv4, isIPv6, joinProviders, listenError, onOtherEndpoints, reachProblem, upstreamKeyChange, upstreamUrl, URL_LABELS, urlChoices, urlFor } from "@/lib/agents-gateway";
+import { checkSettings, checkUrl, gatewayOn, isIPv4, isIPv6, joinProviders, KIND_PRESETS, listenError, onOtherEndpoints, reachProblem, upstreamKeyChange, upstreamUrl, URL_LABELS, urlChoices, urlFor } from "@/lib/agents-gateway";
 import { machineKind } from "@/lib/agents-identity";
 import { MachineIcon } from "../identity";
 import { field, Note } from "../settings-ui";
@@ -106,6 +106,9 @@ export function GatewaySetup({
   const chosen = machines.filter(isMember);
   const others = chosen.filter((m) => m.id !== hostId).map((m) => m.name);
   const hostName = host?.name ?? "the computer you pick";
+  // An upstream left without a key, of a kind that needs one: it will refuse every request.
+  const keyless = (u: UpstreamSpec) => !KIND_PRESETS[u.kind].key.optional && !u.key_ref && !keys.has(u.id);
+  const unkeyed = upstreams.filter(keyless);
 
   const pickHost = (id: string) => {
     if (id === hostId) return;
@@ -187,9 +190,13 @@ export function GatewaySetup({
 
   // The shared dialog (M5): portaled, focus taken and kept inside, given back after; Escape, a press
   // outside and × wait while it sets up. Escape with an upstream open in its editor closes the
-  // editor first.
+  // editor first. Past the first step, closing asks before what was entered (keys typed again) goes;
+  // Escape again keeps setting up.
+  const [leaving, setLeaving] = useState(false);
   const dismiss = () => {
     if (editing !== null) return setEditing(null);
+    if (leaving) return setLeaving(false);
+    if (step > 0 && running !== "done") return setLeaving(true);
     onClose();
   };
   return (
@@ -202,6 +209,19 @@ export function GatewaySetup({
       title="Set up the model gateway"
       lead="One of your computers sends your machines' model requests on to your own API keys, with usage and cost in one place."
       footer={
+        leaving ? (
+          <>
+            <p className="min-w-0 flex-1 text-[12.5px] text-muted" role="alert">
+              Close the setup? What you&apos;ve entered here goes{keys.size ? ", keys too" : ""}.
+            </p>
+            <button type="button" autoFocus onClick={() => setLeaving(false)} className="h-8 rounded-lg px-3 text-[12.5px] text-muted hover:text-fg">
+              Keep setting up
+            </button>
+            <button type="button" onClick={onClose} className={primaryBtn}>
+              Close
+            </button>
+          </>
+        ) : (
         <>
           {step > 0 && running === "idle" && (
             <button type="button" onClick={() => setStep((s) => s - 1)} className="flex h-8 items-center gap-1 rounded-lg px-2 text-[12.5px] text-muted hover:text-fg">
@@ -223,6 +243,7 @@ export function GatewaySetup({
             </button>
           )}
         </>
+        )
       }
     >
         <ol className="sticky top-0 z-10 -mx-5 flex gap-1 bg-sheet px-5 pb-3" aria-label="Steps">
@@ -283,7 +304,7 @@ export function GatewaySetup({
                           <p className="truncate font-medium">{u.name}</p>
                           <p className="truncate font-mono text-[11.5px] text-subtle">{upstreamUrl(u)}</p>
                         </div>
-                        <Note>{u.key_ref ? "1Password" : keys.has(u.id) ? "key sealed" : "no key"}</Note>
+                        {keyless(u) ? <span className="shrink-0 text-[11.5px] text-danger">No key</span> : <Note>{u.key_ref ? "1Password" : keys.has(u.id) ? "key sealed" : "no key"}</Note>}
                         <button type="button" onClick={() => setEditing(i)} className={smallBtn}>
                           Edit
                         </button>
@@ -368,6 +389,15 @@ export function GatewaySetup({
               <p className="text-[12.5px] text-muted">
                 {host.name} starts the gateway with {upstreams.length === 1 ? "1 upstream" : `${upstreams.length} upstreams`}; then {chosen.length === 1 ? "1 machine joins" : `${chosen.length} machines join`}, each with a key of its own that only it can open.
               </p>
+              {unkeyed.length > 0 && phases.length === 0 && (
+                <p className="text-[12.5px] text-danger">
+                  {unkeyed.map((u) => u.name).join(", ")} {unkeyed.length === 1 ? "has" : "have"} no key, so {unkeyed.length === 1 ? "it refuses" : "they refuse"} every request
+                  {unkeyed.length === upstreams.length ? ": nothing would answer. " : ". "}
+                  <button type="button" onClick={() => setStep(2)} className="underline underline-offset-2">
+                    Add {unkeyed.length === 1 ? "it" : "them"}
+                  </button>
+                </p>
+              )}
               <ol className="space-y-1.5" aria-label="Progress">
                 {phases.map((p) => (
                   <li key={p.what} className="flex items-start gap-2 text-[12.5px]">

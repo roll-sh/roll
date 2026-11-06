@@ -135,7 +135,9 @@ A member machine has an ordinary endpoint (agents.md, "Endpoints"):
 - **Providers on another endpoint.** A provider uses one endpoint on a machine, so joining with it
   takes it from the endpoint it uses (a CLIProxyAPI, say). The setup wizard lists those per machine
   and joins without them unless the owner ticks them (`GatewayJoin.providers`); a machine whose
-  every provider stays where it is doesn't join.
+  every provider stays where it is doesn't join. The daemon remembers which endpoint each provider
+  came from (`Stored.taken`): leaving (or removing the gateway) puts it back there, if that endpoint
+  is still on the machine and nothing else took the provider since.
 
 ## Reachability
 

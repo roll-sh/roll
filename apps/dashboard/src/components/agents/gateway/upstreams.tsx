@@ -69,6 +69,8 @@ export function UpstreamEditor({
   const [key, setKey] = useState("");
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
+  // Nothing to authenticate with, for a kind that needs it: said before it's saved.
+  const keyless = !preset.key.optional && !fromOp && !(sealed && !clearKey) && !key.trim();
   const box = useRef<HTMLFormElement>(null);
   useEscapeLayer(true, onCancel);
   useEffect(() => {
@@ -239,12 +241,13 @@ export function UpstreamEditor({
         </div>
       </Labeled>
       {problem && <Problem>{problem}</Problem>}
+      {keyless && !problem && <p className="text-[12px] text-muted">Without {preset.key.label === "API key" ? "a key" : `its ${preset.key.label.toLowerCase()}`}, {name.trim() || preset.label} refuses every request. You can add it later from the gateway&apos;s settings.</p>}
       <div className="flex items-center justify-end gap-2">
         <button type="button" onClick={onCancel} className="h-8 rounded-lg px-3 text-[12.5px] text-muted hover:text-fg">
           Cancel
         </button>
         <button type="submit" disabled={busy} className={primaryBtn}>
-          {busy ? <span className="shimmer">Saving…</span> : initial ? "Save" : "Add upstream"}
+          {busy ? <span className="shimmer">Saving…</span> : keyless ? (initial ? "Save without a key" : "Add without a key") : initial ? "Save" : "Add upstream"}
         </button>
       </div>
     </form>

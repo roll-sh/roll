@@ -1604,6 +1604,9 @@ async fn endpoint_keys_are_sealed_to_the_daemon_and_reach_only_their_providers()
     let endpoints = host.info().await.settings.unwrap().endpoints;
     assert_eq!(endpoints.iter().find(|e| e.spec.id == "cliproxy").unwrap().spec.providers, vec![ProviderId::claude()]);
     assert!(!format!("{:?}", codex.configured().unwrap()).contains(KEY));
+    // Removing it gives Codex back to the endpoint it was taken from (leaving the gateway).
+    assert_eq!(run(&host, Command::EndpointRemove { endpoint: "gw".into() }).await, Reply::Ok);
+    assert!(codex.configured().unwrap().env.contains(&("OPENAI_API_KEY".into(), KEY.into())));
     // Cleared, then removed: the provider goes back to its own login.
     assert_eq!(run(&host, endpoint_set(&spec, KeyChange::Clear)).await, Reply::Ok);
     assert!(!claude.configured().unwrap().env.iter().any(|(k, _)| k == "ANTHROPIC_AUTH_TOKEN"));
