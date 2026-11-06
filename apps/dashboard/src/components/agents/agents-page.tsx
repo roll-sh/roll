@@ -5,7 +5,7 @@ import { AnimatePresence, motion, useIsPresent } from "motion/react";
 import { Archive, ArrowLeft, ChevronDown, ChevronUp, MoreHorizontal, PanelRightClose, Pin, PinOff, Plus, Search, Server, Settings, Share2, X, Zap } from "lucide-react";
 import Link from "next/link";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
-import { isBusy } from "@/lib/agents-api";
+import { isBusy, reachable } from "@/lib/agents-api";
 import { POP_IN, POP_OUT } from "@/lib/agents-motion";
 import { setActiveClient, type AgentsClient } from "@/lib/agents-client";
 import { collapseUnused, deriveGraph, rolling, type GraphNode } from "@/lib/agents-graph";
@@ -536,10 +536,30 @@ export function AgentsSurface({
             </span>
             <span className="h-4 w-px shrink-0 bg-line-2 max-sm:hidden" aria-hidden />
             <span className="flex min-w-0 items-center gap-2 text-[12.5px] text-muted">
-              <span className={`size-1.5 shrink-0 rounded-full ${snap.conn === "live" ? (running ? "pulse-dot bg-accent" : data.machines.size ? "bg-ok" : "bg-subtle") : snap.conn === "error" ? "bg-danger" : "bg-subtle"}`} aria-hidden />
-              <span className="truncate">
-                {snap.conn === "live" ? (running ? `${running} running` : data.machines.size ? "All idle" : "No machines yet") : snap.conn === "error" ? (snap.error ?? "Can't reach roll") : "Reconnecting…"}
-              </span>
+              {(() => {
+                // "All idle" only when it's true: not beside something waiting, not with every machine offline.
+                const anyOnline = [...data.machines.values()].some((r) => reachable(r.value));
+                const [dot, label] =
+                  snap.conn === "error"
+                    ? ["bg-danger", snap.error ?? "Can't reach roll"]
+                    : snap.conn !== "live"
+                      ? ["bg-subtle", "Reconnecting…"]
+                      : running
+                        ? ["pulse-dot bg-accent", `${running} running`]
+                        : data.machines.size === 0
+                          ? ["bg-subtle", "No machines yet"]
+                          : !anyOnline
+                            ? ["bg-subtle", data.machines.size === 1 ? "Machine offline" : "Machines offline"]
+                            : requests.length > 0
+                              ? ["bg-ok", "Nothing running"]
+                              : ["bg-ok", "All idle"];
+                return (
+                  <>
+                    <span className={`size-1.5 shrink-0 rounded-full ${dot}`} aria-hidden />
+                    <span className="truncate">{label}</span>
+                  </>
+                );
+              })()}
               {requests.length > 0 && (
                 <button
                   onClick={() => openThread(requests[0].thread)}
@@ -595,7 +615,7 @@ export function AgentsSurface({
             </span>
           </header>
           <div className="relative flex min-h-0 flex-1">
-            <ThreadsSidebar data={data} open={sidebar} setOpen={setSidebar} phone={phone} openThread={shown.kind === "thread" ? shown.thread : null} only={focused} onShowAll={() => focusProject(null)} />
+            <ThreadsSidebar data={data} open={sidebar} setOpen={setSidebar} phone={phone} openThread={shown.kind === "thread" ? shown.thread : null} only={focused} onShowAll={() => focusProject(null)} onAddMachine={() => setAdding(true)} />
             {/* The canvas and the right sheet beside it; the sheet slides in past its right edge. */}
             <div className="relative flex min-h-0 min-w-0 flex-1 overflow-x-clip">
             {/* The working area: an inset panel one step up from the chrome (Linear's inverted L). It

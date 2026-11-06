@@ -230,11 +230,24 @@ function PaletteDialog({ session, intent, host }: { session: number; intent: Pal
     value: "action:add-project",
     title: "Add project…",
     searchTerms: ["folder", "clone", "repo", "new repository"],
+    // Why it can't, where it can't (a disabled row with no reason was a dead end).
+    description: online.length > 0 ? undefined : machines.length === 0 ? "Connect a machine first" : "Your machines are offline",
     icon: <FolderPlus className={ICON} />,
     disabled: online.length === 0,
     run: () => openProjectDialog({ kind: "add", machine: online.length === 1 ? online[0].id : null }),
   };
-  const addProjectFirst: PaletteSubmenuLike = { ...addProject, value: "goal:add-project", title: "Add a project first", description: "Agents work in a project on one of your machines" };
+  // A goal with nowhere to go says what comes first, and does it.
+  const addProjectFirst: PaletteSubmenuLike =
+    online.length > 0
+      ? { ...addProject, value: "goal:add-project", title: "Add a project first", description: "Agents work in a project on one of your machines" }
+      : {
+          kind: "action",
+          value: "goal:add-machine",
+          title: machines.length === 0 ? "Connect a machine first" : "Bring a machine online first",
+          description: machines.length === 0 ? "Agents run on your computer or a rented sandbox" : "Start roll agent up on it, or connect another",
+          icon: <Server className={ICON} />,
+          run: host.addMachine,
+        };
 
   const threadRow = (t: Thread, machine: string, query: string): PaletteAction => {
     const projectRecord = data.projects.get(t.project)?.value;

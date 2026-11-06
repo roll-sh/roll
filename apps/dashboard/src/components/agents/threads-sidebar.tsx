@@ -13,7 +13,8 @@
 
 import { AlarmClock, AlarmClockOff, Archive, ArchiveRestore, Check, ChevronDown, Eraser, ChevronRight, MoreHorizontal, PanelLeft, PanelLeftClose, Plus, Trash2, Undo2, X } from "lucide-react";
 import { useCallback, useEffect, useId, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
-import type { Command, Machine, MachineId, Project, Thread } from "@/lib/agents-api";
+import { reachable, type Command, type Machine, type MachineId, type Project, type Thread } from "@/lib/agents-api";
+import { openProjectDialog } from "@/lib/agents-project-dialogs";
 import {
   cantPark,
   inbox,
@@ -442,6 +443,7 @@ export function ThreadsSidebar({
   openThread,
   only = null,
   onShowAll,
+  onAddMachine,
 }: {
   data: AgentsData;
   open: boolean;
@@ -451,6 +453,8 @@ export function ThreadsSidebar({
   /** "Focus on this project only": just its group. */
   only?: string | null;
   onShowAll?: () => void;
+  /** The empty sidebar's next step when no machine can take a project. */
+  onAddMachine?: () => void;
 }) {
   const { client, startNew, readOnly } = useAgents();
   const actions = useInboxActions();
@@ -568,7 +572,7 @@ export function ThreadsSidebar({
                 )}
               </p>
             )}
-            {groups.length === 0 && <p className="px-2 py-6 text-center text-[12.5px] text-subtle">No projects yet.</p>}
+            {groups.length === 0 && <EmptySidebar data={data} readOnly={readOnly} onAddMachine={onAddMachine} />}
             <ul aria-label="Projects">
             {groups.map((g) => (
               <ProjectGroup
@@ -1082,5 +1086,28 @@ export function SnoozeDialog({
         {error && <p className="mt-2 text-[12px] text-danger">{error}</p>}
       </form>
     </Dialog>
+  );
+}
+
+/** No projects: what to do next, with the button for it (a project on a machine that's online, else a machine). */
+function EmptySidebar({ data, readOnly, onAddMachine }: { data: AgentsData; readOnly?: boolean; onAddMachine?: () => void }) {
+  const machines = [...data.machines.values()].map((r) => r.value);
+  const online = machines.filter((m) => reachable(m));
+  const [text, action] =
+    online.length > 0
+      ? ["Agents work in a project: a folder or a repository on one of your machines.", { label: "Add a project", run: () => openProjectDialog({ kind: "add", machine: online.length === 1 ? online[0].id : null }) }]
+      : machines.length > 0
+        ? ["Your machines are offline. Start roll agent up on one, or connect another.", onAddMachine && { label: "Add a machine", run: onAddMachine }]
+        : ["Agents run on your computer or a rented sandbox. Connect one to add a project.", onAddMachine && { label: "Connect a machine", run: onAddMachine }];
+  return (
+    <div className="flex flex-col items-center gap-3 px-3 py-6 text-center">
+      <p className="text-[12.5px] text-subtle">{text}</p>
+      {action && !readOnly && (
+        <button type="button" onClick={action.run} className="inline-flex h-7 items-center gap-1.5 rounded-md border border-line-2 px-2.5 text-[12.5px] text-soft transition-colors hover:border-line-3 hover:bg-fg/[0.04] hover:text-fg">
+          <Plus className="size-3.5" />
+          {action.label}
+        </button>
+      )}
+    </div>
   );
 }
