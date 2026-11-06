@@ -34,7 +34,7 @@ import { Launcher } from "./new-agent";
 import { useKept } from "./ui/dialog";
 import { AgentsLayer } from "./ui/layer";
 import { PinnedConversation, PinnedDiff, PinnedTerminal } from "./pinned";
-import { MachineNode, ProjectNode, RequestNode, SubagentNode, ThreadNode } from "./nodes";
+import { MachineNode, ProjectNode, RequestNode, SubagentNode, ThreadCard, useThreadFacts } from "./nodes";
 import { CanvasProjectsProvider, type CanvasProjects } from "./machine-projects";
 import { CanvasFoldsProvider, type CanvasFolds } from "./canvas-folds";
 import { FoldedThreads, StatusHeader } from "./folded-threads";
@@ -1078,6 +1078,7 @@ function CanvasViewBody({
   const exists = (p: PinRec) => (p.kind === "terminal" ? data.terminals.has(p.id) : data.threads.has(p.id));
   const toggle = (kind: PinRec["kind"], id: string) => views.togglePin(kind, id, exists);
   const machineOf = (n: GraphNode) => data.machines.get(n.machine)?.value;
+  const facts = useThreadFacts(data);
   const render = (n: GraphNode) => {
     switch (n.kind) {
       case "machine":
@@ -1094,7 +1095,7 @@ function CanvasViewBody({
               { kind: "diff", id: n.id, label: "the diff" },
             ]}
           >
-            <ThreadNode thread={data.threads.get(n.id)!.value} machine={machineOf(n)} />
+            <ThreadCard thread={data.threads.get(n.id)!.value} machine={machineOf(n)} {...facts(data.threads.get(n.id)!.value)} />
           </PinTools>
         );
       case "subagent": {

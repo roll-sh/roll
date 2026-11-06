@@ -21,7 +21,7 @@ import type { Size } from "@/lib/agents-layout";
 import { frameAt, realAt, replayAt, shareStats, step, timeline } from "@/lib/agents-replay";
 import { useMarkState } from "../mark-state";
 import { AgentsCanvas, type CanvasHandle } from "./agents-canvas";
-import { Card, RequestNode, SubagentNode, ThreadNode } from "./nodes";
+import { Card, RequestNode, SubagentNode, ThreadCard, useThreadFacts } from "./nodes";
 import { Conversation, IconButton } from "./session";
 import { Select } from "./ui";
 import { AgentsContext, useMarkDriver, type AgentsCtx } from "./use-agents";
@@ -113,6 +113,7 @@ export function ShareView({ share }: { share: Share }) {
   );
 
   const graph = useMemo(() => deriveGraph(data), [data]);
+  const facts = useThreadFacts(data);
   const thread = open ? data.threads.get(open) : undefined;
   const render = (n: GraphNode) => {
     switch (n.kind) {
@@ -125,7 +126,7 @@ export function ShareView({ share }: { share: Share }) {
       case "thread": {
         const t = data.threads.get(n.id)!.value;
         const m = data.machines.get(n.machine)?.value;
-        return <ThreadNode thread={t} machine={m} />;
+        return <ThreadCard thread={t} machine={m} {...facts(t)} />;
       }
       case "subagent": {
         const node = [...data.nodes.values()].map((x) => x.get(n.id)).find(Boolean)?.value;

@@ -1,10 +1,10 @@
 "use client";
 
 import { ArrowUpRight, CircleAlert, FolderGit2, FolderPlus, GitBranch, GitFork, GitPullRequest, LogIn, MoreHorizontal, Plus, RefreshCw, Settings2, SquareTerminal } from "lucide-react";
-import { useState, type ReactNode } from "react";
+import { memo, useCallback, useMemo, useState, type ReactNode } from "react";
 import { coming, isRunning, machineState, reachable, type IdentityColor, type Machine, type Node, type Project, type ProviderInfo, type Request, type Run, type Thread } from "@/lib/agents-api";
-import { projectStats, type ProjectStats } from "@/lib/agents-graph";
-import { providersFor } from "@/lib/agents-store";
+import { newestRuns, projectStats, type ProjectStats } from "@/lib/agents-graph";
+import { providersFor, type AgentsData } from "@/lib/agents-store";
 import { setAgentsView } from "@/lib/agents-surface";
 import { btn, primary } from "../ui";
 import { AutomationChip, useThreadOrigin } from "./automations/chip";
@@ -446,9 +446,64 @@ function StatusStrip({ stats }: { stats: ProjectStats }) {
  * opened yet gives it T3's completed tone: a green border.
  */
 export function ThreadNode({ thread, machine }: { thread: Thread; machine: Machine | undefined }) {
+  const facts = useThreadFacts(useAgents().client.data);
+  return <ThreadCard thread={thread} machine={machine} {...facts(thread)} />;
+}
+
+const NO_REQUESTS: readonly Request[] = [];
+const NO_PROVIDERS: readonly ProviderInfo[] = [];
+
+/** What a thread's card shows besides the thread and its machine (`useThreadFacts`). */
+export interface ThreadFacts {
+  project: Project | undefined;
+  /** Its running run, else its newest. */
+  lastRun: Run | undefined;
+  /** Its requests waiting for an answer. */
+  pending: readonly Request[];
+  /** Its terminals still running. */
+  terminals: number;
+  /** An orchestrator's agents (`orchestration`). */
+  orchestrated: ReturnType<typeof orchestration> | null;
+}
+
+/**
+ * Each thread card's facts, indexed once per change of what they read: a card used to scan every
+ * run, request, terminal and thread itself (200 cards: 200 scans each render). Unchanged facts keep
+ * their identity, so a memoised `ThreadCard` renders again only when its own thread's changed.
+ */
+export function useThreadFacts(data: AgentsData): (thread: Thread) => ThreadFacts {
+  const newest = useMemo(() => newestRuns(data), [data.runs]); // eslint-disable-line react-hooks/exhaustive-deps
+  const pending = useMemo(() => {
+    const out = new Map<string, Request[]>();
+    for (const r of data.requests.values()) if (r.value.status === "pending") out.set(r.value.thread, [...(out.get(r.value.thread) ?? []), r.value]);
+    return out;
+  }, [data.requests]);
+  const terminals = useMemo(() => {
+    const out = new Map<string, number>();
+    for (const r of data.terminals.values()) if (r.value.thread && r.value.status !== "exited") out.set(r.value.thread, (out.get(r.value.thread) ?? 0) + 1);
+    return out;
+  }, [data.terminals]);
+  const orchestrated = useMemo(() => {
+    const all = [...data.threads.values()].map((r) => r.value);
+    return new Map(all.filter((t) => t.orchestrator).map((t) => [t.id, orchestration(t, all)]));
+  }, [data.threads]);
+  const { runs, projects } = data;
+  return useCallback(
+    (t: Thread) => ({
+      project: projects.get(t.project)?.value,
+      lastRun: t.active_run ? runs.get(t.active_run)?.value : newest.get(t.id),
+      pending: pending.get(t.id) ?? NO_REQUESTS,
+      terminals: terminals.get(t.id) ?? 0,
+      orchestrated: orchestrated.get(t.id) ?? null,
+    }),
+    [projects, runs, newest, pending, terminals, orchestrated],
+  );
+}
+
+/** A thread's card from its facts alone, so it renders again only when they change. */
+export const ThreadCard = memo(function ThreadCard({ thread, machine, project, lastRun, pending, terminals, orchestrated }: { thread: Thread; machine: Machine | undefined } & ThreadFacts) {
   const { client, openThread, startNew, readOnly } = useAgents();
-  const data = client.data;
-  const providers = providersFor(data, machine?.id);
+  const providers = machine?.info?.providers ?? NO_PROVIDERS;
   const { run: runFork, error: forkError } = useRun();
   // A fork from the card (T3's fork from the latest point): click, or drag the handle onto the canvas.
   const forkable = !!startNew && !readOnly && thread.archived_at === null && reachable(machine) && providers.find((p) => p.id === thread.provider)?.capabilities.fork !== false;
@@ -458,16 +513,11 @@ export function ThreadNode({ thread, machine }: { thread: Thread; machine: Machi
       openThread(r.id);
     });
   const running = isRunning(thread.status);
-  const lastRun = thread.active_run ? data.runs.get(thread.active_run)?.value : latestRun(data.runs.values(), thread.id);
-  const pending = [...data.requests.values()].map((r) => r.value).filter((r) => r.thread === thread.id && r.status === "pending");
   // The card doesn't load runs: the thread record says whether its newest run left a plan (T3's sidebar "Plan ready").
   const pill = threadPill(thread, pending, lastRun, thread.plan_ready && thread.interaction_mode === "plan");
   const done = threadDone(thread, lastRun);
   const usage = usageLine(thread.usage);
   const model = modelName(providers, thread.provider, thread.model);
-  const project = data.projects.get(thread.project)?.value;
-  const terminals = [...data.terminals.values()].filter((r) => r.value.thread === thread.id && r.value.status !== "exited").length;
-  const orchestrated = thread.orchestrator ? orchestration(thread, [...data.threads.values()].map((r) => r.value)) : null;
   // Started by an automation: its tag, opening the run.
   const origin = useThreadOrigin(thread.id);
   // Idle with nothing to say but the last prompt: no line when that's the title again.
@@ -568,7 +618,7 @@ export function ThreadNode({ thread, machine }: { thread: Thread; machine: Machi
       </div>
     </Card>
   );
-}
+});
 
 /**
  * When the thread last did something: made, its newest run asked for or ended. Not `updated_at`,
@@ -578,11 +628,6 @@ function lastActive(thread: Thread, run: Run | undefined): number {
   return run ? Math.max(thread.created_at, run.requested_at, run.completed_at ?? 0) : thread.created_at;
 }
 
-function latestRun(runs: Iterable<{ value: Run }>, thread: string) {
-  let best: Run | undefined;
-  for (const r of runs) if (r.value.thread === thread && (!best || r.value.ordinal > best.ordinal)) best = r.value;
-  return best;
-}
 
 /**
  * Semantic zoom: far out (`[data-far]` on the canvas) a card shows its name big, over its details:
