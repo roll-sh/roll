@@ -375,6 +375,55 @@ async fn catalog_fields_keep_their_order() {
     assert_eq!(order(step("agent.start"))[..3], ["prompt", "title", "target"]);
     assert_eq!(order(step("webhook"))[..2], ["url", "method"]);
 }
+
+/// Every step kind in the catalog saves the way the builder writes a new step: its required
+/// fields filled in, and `null` for each field nobody set. Webhook (`headers`), agent.start,
+/// agent.wait, the Linear, Discord and GitHub steps refused those nulls, so "start an agent, wait
+/// for it" couldn't be built from scratch. A `null` field is unset: it's stored without it, and a
+/// dry run takes the same config.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn every_step_kind_saves_with_unset_fields_null() {
+    /// A value a required field takes (the step's own check decides the rest).
+    fn sample(field: &Value) -> Value {
+        if let Some(v) = field["enum"].as_array().and_then(|e| e.first()).or(field.get("default")) {
+            return v.clone();
+        }
+        let ty = field["type"].as_str().or_else(|| field["type"][0].as_str()).unwrap_or("string");
+        match ty {
+            "integer" | "number" => field["minimum"].as_u64().unwrap_or(60).max(1).into(),
+            "boolean" => true.into(),
+            "array" => json!([]),
+            "object" => json!({}),
+            _ => "{{ event.data.input }}".into(),
+        }
+    }
+    // Kinds that need one of several fields (their check says which), beyond `required`.
+    let one_of = json!({ "discord.notify": { "channel": "123" }, "github.label": { "add": ["bug"] }, "linear.activity": { "body": "x" } });
+    let w = world().await;
+    let base = "/v1/code/agents/acme/automations";
+    let cat = w.ok("GET", &format!("{base}/catalog"), None).await;
+    let steps = cat["steps"].as_array().unwrap();
+    assert!(steps.len() > agent_proto::automation::step_kinds::ALL.len(), "the integrations' steps are in the catalog too");
+    for s in steps {
+        let kind = s["kind"].as_str().unwrap();
+        let required: Vec<&str> = s["config"]["required"].as_array().map(|r| r.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
+        let mut config: serde_json::Map<String, Value> =
+            s["config"]["properties"].as_object().unwrap().iter().map(|(k, f)| (k.clone(), if required.contains(&k.as_str()) { sample(f) } else { Value::Null })).collect();
+        for (k, v) in one_of[kind].as_object().into_iter().flatten() {
+            config.insert(k.clone(), v.clone());
+        }
+        let spec = json!({ "name": kind, "trigger": { "type": "manual" }, "steps": [{ "id": "s", "kind": kind, "config": config }] });
+        let (st, v) = w.req("POST", base, Some(spec.clone()), &w.owner).await;
+        assert_eq!(st, StatusCode::CREATED, "{kind} with {}: {v}", spec["steps"][0]["config"]);
+        let stored = &v["automation"]["steps"][0]["config"];
+        assert!(stored.as_object().is_none_or(|m| m.values().all(|f| !f.is_null())), "{kind} kept nulls: {stored}");
+        let r = w.ok("POST", &format!("{base}/test"), Some(json!({ "automation": spec, "event": { "source": "manual", "kind": "run", "data": { "input": "x" } } }))).await;
+        assert!(r["steps"][0]["error"].is_null(), "{kind} dry run: {r}");
+        let (st, _) = w.req("DELETE", &format!("{base}/{}", v["automation"]["id"].as_str().unwrap()), None, &w.owner).await;
+        assert_eq!(st, StatusCode::NO_CONTENT);
+    }
+}
+
 /// tells the owner: every step's output feeds the next one's templates, the run lists the thread
 /// it started, and the stream carries the run and the notice.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

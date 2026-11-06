@@ -195,3 +195,13 @@ describe("Slack and Discord fields name their things", () => {
     await waitFor(() => expect(screen.queryByRole("listbox", { name: "Channels" })).toBeNull());
   });
 });
+
+describe("automation fields that are cleared", () => {
+  // An unset field is absent, never `null`: the server refused `null` for a kind's maps, lists
+  // and flags, so a step built here couldn't be saved.
+  it("leave the config, rather than staying as null", () => {
+    const { onValue } = show(step("linear.comment"), { body: "Done", parent: "cmt_1" });
+    fireEvent.change(screen.getByLabelText("Parent", { selector: "input" }), { target: { value: "" } });
+    expect(onValue).toHaveBeenLastCalledWith({ body: "Done" });
+  });
+});

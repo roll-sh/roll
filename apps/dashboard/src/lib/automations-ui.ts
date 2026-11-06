@@ -653,16 +653,25 @@ export function newStepId(kind: string, taken: Iterable<string>): string {
   for (let i = 2; ; i++) if (!used.has(`${base}_${i}`)) return `${base}_${i}`;
 }
 
-/** A config from the schema's defaults (and nulls where the wire wants a field). */
+/**
+ * A new step's config: the schema's defaults, and an empty value for a required string or list
+ * (its field asks for it). Every other field is left out: an unset field is absent, never `null`
+ * (the server drops `null` fields too, docs/code/automations.md, "Steps").
+ */
 export function defaultConfig(schema: Schema): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const [k, s] of Object.entries(schema.properties ?? {})) {
     if (s.default !== undefined) out[k] = s.default;
+    else if (!schema.required?.includes(k)) continue;
     else if (s.type === "array") out[k] = [];
-    else if (schema.required?.includes(k) && s.type === "string") out[k] = "";
-    else out[k] = null;
+    else if (s.type === "string") out[k] = "";
   }
   return out;
+}
+
+/** `config` without its unset fields (`null`, `undefined`): what a form hands back after an edit. */
+export function withoutUnset(config: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(config).filter(([, v]) => v != null));
 }
 
 export function newStep(kind: string, c: Catalog, taken: Iterable<string>): Step {

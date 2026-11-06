@@ -147,7 +147,7 @@ pub enum Trigger {
         source: String,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         events: Vec<String>,
-        #[serde(default, skip_serializing_if = "Value::is_null")]
+        #[serde(default, skip_serializing_if = "Value::is_null", deserialize_with = "config_fields")]
         config: Value,
     },
 }
@@ -258,8 +258,9 @@ pub struct Step {
     pub name: String,
     /// `agent.start`, `webhook`, `linear.comment`, …
     pub kind: String,
-    /// The kind's config. Strings in it are templates (`{{event.…}}`).
-    #[serde(default, skip_serializing_if = "Value::is_null")]
+    /// The kind's config. Strings in it are templates (`{{event.…}}`). A field that is `null` is
+    /// unset (see [`config_fields`]).
+    #[serde(default, skip_serializing_if = "Value::is_null", deserialize_with = "config_fields")]
     pub config: Value,
     /// Run only when all of these hold (on the event and the steps before); otherwise skipped.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -272,6 +273,19 @@ pub struct Step {
     /// The longest the step may take, waits included (unset: the kind's own).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_s: Option<u64>,
+}
+
+/// A config (a step's, an integration trigger's) as parsed: its fields that are `null` are unset,
+/// so they're dropped, and every kind reads `{"headers": null}` as `{}`. The builder used to send
+/// `null` for a field nobody filled in (templates still may), and a kind's `#[serde(default)]`
+/// map, list or flag refused it ("invalid type: null, expected a map"). Only the config's own
+/// fields: a `null` deeper in is the user's data (a webhook's JSON body).
+fn config_fields<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Value, D::Error> {
+    let mut v = Value::deserialize(d)?;
+    if let Value::Object(m) = &mut v {
+        m.retain(|_, f| !f.is_null());
+    }
+    Ok(v)
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

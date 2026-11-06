@@ -1,25 +1,30 @@
 import { describe, expect, it } from "vitest";
 import type { Automation, AutomationRun, AutomationSpec, Catalog } from "./automations-api";
 import { TEMPLATES } from "./automation-templates";
-import { withChatops } from "./chatops-catalog";
+import { STEP_KINDS } from "./automations-api";
+import { CHATOPS_CATALOG, withChatops } from "./chatops-catalog";
 import { LINEAR_CATALOG } from "./linear-templates";
 import {
   blankSpec,
   cronShape,
   cronText,
+  defaultConfig,
   ev,
   insertVariable,
   lastRunOf,
   matchVariables,
+  newStep,
   newStepId,
   openTemplate,
   sampleEvent,
+  schemaOf,
   templateParts,
   triggerSummary,
   validate,
   variablesAt,
   weekOf,
   withBuiltIns,
+  withoutUnset,
 } from "./automations-ui";
 import { hashFor, viewFromHash, type AgentsView } from "./agents-surface";
 
@@ -109,6 +114,31 @@ describe("automations: validation", () => {
     expect(newStepId("agent.start", [])).toBe("start");
     expect(newStepId("agent.start", ["start", "start_2"])).toBe("start_3");
     expect(newStepId("linear.comment", [])).toBe("comment");
+  });
+});
+
+describe("automations: a new step's config", () => {
+  // Every kind the builder offers: the built-ins, chat ops' and Linear's (the server's own schemas).
+  const all = withChatops(withBuiltIns({ triggers: [], steps: LINEAR_CATALOG.steps }));
+  const kinds = all.steps;
+
+  it.each(kinds.map((s) => [s.kind, s] as const))("%s starts with only its defaults and what it needs", (kind, info) => {
+    const schema = schemaOf(info);
+    const config = newStep(kind, all, []).config as Record<string, unknown>;
+    expect(config).toEqual(defaultConfig(schema));
+    for (const [k, v] of Object.entries(config)) {
+      // An unset field is absent: the server refused `null` for maps, lists and flags.
+      expect(v, `${kind}.${k}`).not.toBeNull();
+      expect(schema.properties?.[k]?.default !== undefined || schema.required?.includes(k), `${kind}.${k} is neither a default nor required`).toBe(true);
+    }
+  });
+
+  it("covers every kind there is", () => {
+    expect(kinds.length).toBe(STEP_KINDS.length + CHATOPS_CATALOG.steps.length + LINEAR_CATALOG.steps.length);
+  });
+
+  it("drops what a form clears", () => {
+    expect(withoutUnset({ a: 1, b: null, c: undefined, d: "", e: false, f: [] })).toEqual({ a: 1, d: "", e: false, f: [] });
   });
 });
 

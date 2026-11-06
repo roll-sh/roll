@@ -11,7 +11,7 @@ import { Minus, Plus } from "lucide-react";
 import { createContext, useContext, useMemo, type ReactNode } from "react";
 import type { ModelOptions, ProviderInfo } from "@/lib/agents-api";
 import type { ProjectRef, Target } from "@/lib/automations-api";
-import type { Problems, Schema, Variable } from "@/lib/automations-ui";
+import { type Problems, type Schema, type Variable, withoutUnset } from "@/lib/automations-ui";
 import { LookupPicker } from "../lookup-picker";
 import { ModelPicker } from "../model-picker";
 import { field as fieldClass } from "../settings-ui";
@@ -50,9 +50,11 @@ export function fieldOrder(schema: Schema): [string, Schema][] {
 /** Whether the field a `Label` titles must be filled. */
 const RequiredCtx = createContext(false);
 
-export function ConfigForm({ schema, value, onChange, ctx }: { schema: Schema; value: Obj; onChange: (next: Obj) => void; ctx: FormContext }) {
+export function ConfigForm({ schema, value, onChange: change, ctx }: { schema: Schema; value: Obj; onChange: (next: Obj) => void; ctx: FormContext }) {
   const props = fieldOrder(schema);
   const hasModel = props.some(([, s]) => s.format === "roll-model");
+  // A field that's cleared is left out, never sent as `null`.
+  const onChange = (next: Obj) => change(withoutUnset(next));
   const set = (k: string, v: unknown) => onChange({ ...value, [k]: v });
   if (!props.length) return <p className="text-[12px] text-subtle">Nothing to set up.</p>;
   return (
@@ -282,7 +284,7 @@ function FieldFor({
               </button>
             </div>
           ))}
-          <AddButton onClick={() => onChange([...rows, Object.fromEntries(Object.keys(s.items!.properties ?? {}).map((k) => [k, s.items!.properties![k].enum && s.items!.properties![k].title === "Answer" ? "accept" : null]))])}>Add {singular(title)}</AddButton>
+          <AddButton onClick={() => onChange([...rows, Object.fromEntries(Object.entries(s.items!.properties ?? {}).flatMap(([k, p]) => (p.enum && p.title === "Answer" ? [[k, "accept"]] : [])))])}>Add {singular(title)}</AddButton>
         </div>
       </Label>
     );

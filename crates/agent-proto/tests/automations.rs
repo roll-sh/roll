@@ -140,3 +140,20 @@ fn defaults_fill_in() {
     let w: WebhookCall = serde_json::from_value(serde_json::json!({ "url": "https://x" })).unwrap();
     assert_eq!(w.method, "POST");
 }
+
+/// A config field that is `null` is unset: the builder sends nulls for fields nobody filled in,
+/// and kinds with a `#[serde(default)]` map, list or flag refused them. Nulls deeper in are data.
+#[test]
+fn null_config_fields_are_unset() {
+    let a: AutomationSpec = serde_json::from_value(serde_json::json!({
+        "name": "x",
+        "trigger": { "type": "integration", "source": "slack", "config": { "team": null, "channel": "C1" } },
+        "steps": [{ "id": "w", "kind": "webhook", "config": { "url": "https://x", "headers": null, "method": null, "body": { "a": null } } }]
+    }))
+    .unwrap();
+    let Trigger::Integration { config, .. } = &a.trigger else { panic!("{:?}", a.trigger) };
+    assert_eq!(config, &serde_json::json!({ "channel": "C1" }));
+    assert_eq!(a.steps[0].config, serde_json::json!({ "url": "https://x", "body": { "a": null } }));
+    let w: WebhookCall = serde_json::from_value(a.steps[0].config.clone()).unwrap();
+    assert_eq!((w.method.as_str(), w.headers.len()), ("POST", 0));
+}

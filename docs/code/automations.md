@@ -144,6 +144,10 @@ for steps that call out (`webhook`). Provider credentials are never touched (doc
 | `notify` | a `notice` on the owner's stream (a toast on every open device), kept for later (the newest 200 per owner, `GET …/automations/notices`) | `id` |
 | `delay` | waits, durably | — |
 
+A config field that is `null` is unset, the same as leaving it out: it's dropped as the automation is
+parsed (`agent_proto::automation`), so every kind's defaults apply (only the config's own fields: a
+`null` deeper in, in a webhook's JSON body, is data). The builder leaves unset fields out.
+
 Steps without a thread say which by `thread` (a template); unset, the run's latest thread. A step's
 `when` filters decide whether it runs; `on_error: continue` lets the run go on (later steps see
 `steps.<id>.error`); `retry {attempts, backoff_s}` (×2 each time, an hour at most) and `timeout_s`
