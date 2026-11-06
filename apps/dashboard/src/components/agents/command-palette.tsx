@@ -821,7 +821,8 @@ function Row({ item, active, onHover, onPick }: { item: PaletteItem; active: boo
       </span>
       {item.trailing}
       {item.timestamp && <span className="min-w-10 shrink-0 text-right text-[11.5px] text-subtle tabular-nums">{item.timestamp}</span>}
-      {item.shortcut && <Kbd>{item.shortcut}</Kbd>}
+      {/* A touch screen has no keys to press. */}
+      {item.shortcut && <span className="pointer-coarse:hidden"><Kbd>{item.shortcut}</Kbd></span>}
       {item.kind === "submenu" && <ChevronRight className="-mr-0.5 size-4 shrink-0 text-subtle" />}
     </div>
   );
