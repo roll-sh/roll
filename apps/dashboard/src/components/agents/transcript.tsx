@@ -136,7 +136,7 @@ export function RunView({
           <span className={`size-1.5 rounded-full bg-accent ${run.status === "waiting" ? "" : "pulse-dot"}`} aria-hidden />
           <span className={run.status === "waiting" ? "" : "shimmer"}>
             {run.status === "waiting" ? "Waiting for you" : "Working"}
-            {run.started_at ? ` for ${elapsed(now - run.started_at)}` : "…"}
+            {since(run, requests) ? ` for ${elapsed(now - since(run, requests)!)}` : "…"}
           </span>
         </p>
       ) : (
@@ -148,6 +148,19 @@ export function RunView({
       {run.error && <p className="rounded-xl border border-danger/40 bg-danger/10 px-3 py-2 text-[12.5px] text-danger">{run.error}</p>}
     </section>
   );
+}
+
+/**
+ * Since when the live line counts: a waiting run from its newest pending request (it counted from
+ * the run's start, so a request asked again after a steer said minutes at once), else its start.
+ */
+function since(run: Run, requests: ReadonlyMap<string, Request>): number | null {
+  if (run.status === "waiting") {
+    let at = 0;
+    for (const r of requests.values()) if (r.run === run.id && r.status === "pending") at = Math.max(at, r.created_at);
+    if (at) return at;
+  }
+  return run.started_at ?? null;
 }
 
 /** Under a finished run (T3's assistant meta row): how it ended, what it cost, copy, fork, roll back. */
