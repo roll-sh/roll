@@ -10,6 +10,12 @@ export const EASE_DRAWER = [0.32, 0.72, 0, 1] as const;
 /** `--ease-out-soft`: popovers, fades, small moves. */
 export const EASE_OUT_SOFT = [0.23, 1, 0.32, 1] as const;
 /**
+ * The emphasized ease-out: a size that changes (the prompt bar opening, a dialog fitting new
+ * content). `EASE_OUT_SOFT` covers more than half the way in the first 30 ms frame, so a height
+ * on it reads as a jump; this one is seen moving the whole way and still lands softly.
+ */
+export const EASE_EMPHASIZED = [0.2, 0, 0, 1] as const;
+/**
  * Leaving: the standard ease-in-out. An ease-out (the drawer curve, even a quad) covers most of the
  * way in the first 100 ms, so a closing panel read as gone at once (the user: "maybe 100 ms but
  * that's the maximum"); this one is seen moving over its whole time and still settles softly.

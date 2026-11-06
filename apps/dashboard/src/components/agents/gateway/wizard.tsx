@@ -26,6 +26,7 @@ import { machineKind } from "@/lib/agents-identity";
 import { MachineIcon } from "../identity";
 import { field, Note } from "../settings-ui";
 import { cn, Select, Switch } from "../ui";
+import { SlidePages } from "../slide-pages";
 import { Dialog } from "../ui/dialog";
 import { useAgents } from "../use-agents";
 import { GatewayNotice } from "./notice";
@@ -69,6 +70,9 @@ export function GatewaySetup({
 }) {
   const { client, services, owner } = useAgents();
   const [step, setStep] = useState(0);
+  // Which way the steps move: Continue slides the next in from the right, Back from the left.
+  const [nav, setNav] = useState<{ step: number; dir: -1 | 1 }>({ step, dir: 1 });
+  if (nav.step !== step) setNav({ step, dir: step > nav.step ? 1 : -1 });
   const computers = machines.filter((m) => !m.sandbox);
   // An always-on computer first (a server, a desktop), then any that can host it: a laptop sleeps.
   const [hostId, setHostId] = useState<string | null>(() => {
@@ -221,7 +225,8 @@ export function GatewaySetup({
             </li>
           ))}
         </ol>
-        <div className="space-y-3 pt-1" key={step}>
+        <SlidePages page={String(step)} direction={nav.dir}>
+        <div className="space-y-3 pt-1">
           {step === 0 && (
             <Labeled label="Which computer runs it?" hint="An always-on computer is best: when it's offline, the machines that use it can't reach their models.">
               <ul className="divide-y divide-line overflow-hidden rounded-xl border border-line-2 bg-panel inset-shadow-highlight" role="radiogroup" aria-label="Computers">
@@ -387,6 +392,7 @@ export function GatewaySetup({
           )}
           {problem && <Problem>{problem}</Problem>}
         </div>
+        </SlidePages>
     </Dialog>
   );
 

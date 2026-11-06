@@ -3,6 +3,7 @@
 import { ChevronRight, Cloud, KeyRound, Laptop } from "lucide-react";
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
+import { flushSync } from "react-dom";
 import type { EndpointProfile, Machine } from "@/lib/agents-api";
 import { NewSandboxGatewayNotice } from "./gateway/machine";
 import { KIND_LABEL } from "@/lib/agents-endpoints";
@@ -14,6 +15,7 @@ import { apiFlag, useInstallLine } from "./connect";
 import { applyWhenReady, type PendingApply } from "./endpoint-settings";
 import { field } from "./settings-ui";
 import { Select } from "./ui";
+import { SlidePages } from "./slide-pages";
 import { Dialog } from "./ui/dialog";
 import { useAgents } from "./use-agents";
 
@@ -49,15 +51,28 @@ export function AddMachinePaths({ onCreated, dialog = false }: { onCreated?: (m:
   );
 }
 
-function Path({ icon, title, lead, children }: { icon: React.ReactNode; title: string; lead: string; children: React.ReactNode }) {
+/** One way to add a machine. `page` names what it shows: a change crossfades in place (loading, the form, setting up). */
+function Path({ icon, title, lead, page, children }: { icon: React.ReactNode; title: string; lead: string; page?: string; children: React.ReactNode }) {
   return (
     <section className="flex min-w-0 flex-col gap-3 rounded-xl border border-line-2 bg-panel p-4 shadow-card inset-shadow-highlight" aria-label={title}>
       <div className="flex items-center gap-2.5">
         <span className="grid size-7 shrink-0 place-items-center rounded-lg border border-line bg-panel-2 text-muted inset-shadow-highlight [&>svg]:size-3.5">{icon}</span>
         <h2 className="text-[14px] font-[590] tracking-[-0.02em]">{title}</h2>
       </div>
-      <p className="text-[12.5px] leading-relaxed text-muted">{lead}</p>
-      {children}
+      <p className="relative text-[12.5px] leading-relaxed text-muted">
+        <SlidePages as="span" page={lead} direction={0} className="block">
+          {lead}
+        </SlidePages>
+      </p>
+      {page === undefined ? (
+        children
+      ) : (
+        <div className="relative">
+          <SlidePages page={page} direction={0} className="flex flex-col gap-3">
+            {children}
+          </SlidePages>
+        </div>
+      )}
     </section>
   );
 }
@@ -149,10 +164,15 @@ function RentSandbox({ onCreated, dialog }: { onCreated?: (m: Machine) => void; 
   };
 
   const lead = "An always-on machine roll hosts for you, with Claude Code and Codex installed. Log the providers in from the canvas, or give it API keys.";
-  if (pending) return <Applying pending={pending} onDone={() => onCreated?.(pending.machine)} />;
+  if (pending)
+    return (
+      <Path icon={<Cloud className="size-4 text-muted" />} title="Rent a sandbox" lead={`${pending.machine.name} is on the canvas, starting up.`} page="applying">
+        <Applying pending={pending} onDone={() => onCreated?.(pending.machine)} />
+      </Path>
+    );
   if (!services || (!list && !sandboxes?.error))
     return (
-      <Path icon={<Cloud className="size-4 text-muted" />} title="Rent a sandbox" lead={lead}>
+      <Path icon={<Cloud className="size-4 text-muted" />} title="Rent a sandbox" lead={lead} page="loading">
         <p className="text-[12.5px] text-subtle">
           <span className="shimmer">Loading sizes…</span>
         </p>
@@ -160,7 +180,7 @@ function RentSandbox({ onCreated, dialog }: { onCreated?: (m: Machine) => void; 
     );
   if (!list || !list.backend)
     return (
-      <Path icon={<Cloud className="size-4 text-muted" />} title="Rent a sandbox" lead={lead}>
+      <Path icon={<Cloud className="size-4 text-muted" />} title="Rent a sandbox" lead={lead} page="off">
         {!list ? (
           <SandboxesProblem error={sandboxes?.error ?? { message: "Only the owner can rent sandboxes.", forbidden: true }} onRetry={() => sandboxes?.reload()} />
         ) : (
@@ -170,7 +190,7 @@ function RentSandbox({ onCreated, dialog }: { onCreated?: (m: Machine) => void; 
     );
 
   return (
-    <Path icon={<Cloud className="size-4 text-muted" />} title="Rent a sandbox" lead={lead}>
+    <Path icon={<Cloud className="size-4 text-muted" />} title="Rent a sandbox" lead={lead} page="form">
       <form
         className="flex flex-col gap-3"
         onSubmit={async (e) => {
@@ -180,10 +200,14 @@ function RentSandbox({ onCreated, dialog }: { onCreated?: (m: Machine) => void; 
           setError(null);
           try {
             const r = await services.sandboxes.create(owner, { name: name.trim() || undefined, size: chosen.name, env: sandboxEnv(keys) });
-            setKeys({});
             // The key waits in the wait's closure only, until the sandbox's seal key comes.
             const key = profile && !profile.key_ref ? endpointKey.trim() || undefined : undefined;
-            setEndpointKey("");
+            // Emptied in a commit of their own before the form gives way: it stays drawn while it
+            // fades out, and it mustn't hold the keys then.
+            flushSync(() => {
+              setKeys({});
+              setEndpointKey("");
+            });
             // On the canvas at once; the stream keeps it up to date from here.
             client.enqueue({ type: "machine", cursor: 0, machine: r.machine });
             sandboxes?.reload();
@@ -291,7 +315,7 @@ function useProfiles(): EndpointProfile[] | null {
 function Applying({ pending: { machine, profile, state }, onDone }: { pending: { machine: Machine; profile: EndpointProfile; state: PendingApply }; onDone: () => void }) {
   const stuck = state.state === "failed" || state.state === "timeout";
   return (
-    <Path icon={<Cloud className="size-4 text-muted" />} title="Rent a sandbox" lead={`${machine.name} is on the canvas, starting up.`}>
+    <>
       <div className="space-y-2 rounded-lg border border-line bg-panel-2 px-3 py-2.5 text-[12.5px]" role="status" aria-label="Setting up the endpoint">
         {stuck ? (
           <p className="text-danger">{state.state === "failed" ? state.error : `${machine.name} didn't connect within 3 minutes.`}</p>
@@ -310,11 +334,11 @@ function Applying({ pending: { machine, profile, state }, onDone }: { pending: {
         </p>
       </div>
       {stuck && (
-        <button type="button" onClick={onDone} className={`${primary} self-start`}>
+        <button type="button" onClick={onDone} className={`fade-in ${primary} self-start`}>
           Go to {machine.name}
         </button>
       )}
-    </Path>
+    </>
   );
 }
 

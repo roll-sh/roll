@@ -154,3 +154,22 @@ describe("the agents popup", () => {
     expect(first?.parentElement).not.toHaveAttribute("inert");
   });
 });
+
+describe("a dialog whose title changes (add a project → Project added)", () => {
+  function Titled() {
+    const [done, setDone] = useState(false);
+    return (
+      <Dialog open onClose={() => {}} title={done ? "Project added" : "Add a project"}>
+        <button onClick={() => setDone(true)}>add</button>
+      </Dialog>
+    );
+  }
+
+  it("is named by the new title, never by none (its text crossfades inside one Title)", async () => {
+    render(<Titled />);
+    const dialog = screen.getByRole("dialog", { name: "Add a project" });
+    fireEvent.click(within(dialog).getByRole("button", { name: "add" }));
+    await waitFor(() => expect(dialog.querySelector("[aria-hidden=true][data-page]")).toBeNull());
+    expect(screen.getByRole("dialog", { name: "Project added" })).toBe(dialog);
+  });
+});

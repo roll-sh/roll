@@ -24,6 +24,7 @@ import { MachineIcon, ProjectIcon } from "./identity";
 import { Steps } from "./project-actions";
 import { shortPath } from "./shared";
 import { Segmented, Select, Switch } from "./ui";
+import { SlidePages } from "./slide-pages";
 import { Dialog } from "./ui/dialog";
 import { useAgents } from "./use-agents";
 
@@ -76,6 +77,8 @@ export function AddProjectDialog({ open, onExited, machine, onClose }: { open: b
       title={project ? "Project added" : "Add a project"}
       lead={project ? undefined : m ? `Agents work in a project: a folder on ${m.name}, a clone of one of your roll repos, or a new one.` : undefined}
     >
+      {/* The form gives way to where it ended (and back, for another), sliding; the dialog eases to fit. */}
+      <SlidePages page={project && m ? "added" : m ? "form" : "none"} direction={project ? 1 : -1}>
       {project && m ? (
         <Added project={project} machine={m} onClose={onClose} onAnother={() => setAdded(null)} />
       ) : !m ? (
@@ -97,6 +100,7 @@ export function AddProjectDialog({ open, onExited, machine, onClose }: { open: b
           <AddProjectForm key={m.id} machine={m} onAdded={setAdded} />
         </div>
       )}
+      </SlidePages>
     </Dialog>
   );
 }

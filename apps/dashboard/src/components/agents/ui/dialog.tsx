@@ -17,6 +17,7 @@ import { Dialog as Primitive } from "@base-ui/react/dialog";
 import { X } from "lucide-react";
 import { useCallback, useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { cn } from "./cn";
+import { SlidePages, useContentGlide } from "../slide-pages";
 import { useLayer } from "./layer";
 
 // Where the last press was: a dialog opened by it grows from there (Safari doesn't focus a
@@ -175,18 +176,64 @@ export function Dialog({
       busy={busy}
       className={cn("row-start-2 flex max-h-[calc(100dvh-1.5rem)] w-[min(520px,100%)] min-w-0 flex-col rounded-2xl border border-line-2 bg-sheet text-fg shadow-sheet inset-shadow-highlight", className)}
     >
-      <div className="flex items-start gap-2 px-5 pt-5 pb-3">
-        <div className="min-w-0 flex-1 space-y-1">
-          <Primitive.Title className="text-[17px] font-[590] tracking-[-0.025em]">{title}</Primitive.Title>
-          {lead && <Primitive.Description className="text-[12.5px] text-muted">{lead}</Primitive.Description>}
+      <DialogLayout title={title} lead={lead} footer={footer} busy={busy}>
+        {children}
+      </DialogLayout>
+    </DialogSheet>
+  );
+}
+
+/**
+ * The dialog's insides, mounted with its sheet. When what it shows changes (a step replaced by the
+ * next, a result appearing, a footer coming), the sheet's height eases to fit (`useContentGlide`)
+ * instead of jumping, and a title or lead that changes crossfades. Steps inside the body slide with
+ * `SlidePages` (the body is positioned for it).
+ */
+function DialogLayout({ title, lead, footer, busy, children }: { title: ReactNode; lead?: ReactNode; footer?: ReactNode; busy: boolean; children: ReactNode }) {
+  const header = useRef<HTMLDivElement>(null);
+  const body = useRef<HTMLDivElement>(null);
+  const foot = useRef<HTMLDivElement>(null);
+  const sheet = useCallback(() => header.current?.parentElement ?? null, []);
+  useContentGlide(sheet, [header, body, foot]);
+  // A lead that goes (the last step has none) fades out where it was, as the header shrinks.
+  const hadLead = useRef(false);
+  if (lead) hadLead.current = true;
+  return (
+    <>
+      <div ref={header} className="flex items-start gap-2 px-5 pt-5 pb-3">
+        <div className="min-w-0 flex-1">
+          <Primitive.Title className="relative text-[17px] font-[590] tracking-[-0.025em]">
+            <Crossfade>{title}</Crossfade>
+          </Primitive.Title>
+          {hadLead.current && (
+            <Primitive.Description className="relative mt-1 text-[12.5px] text-muted has-[>[data-page=current]:empty]:mt-0">
+              <Crossfade>{lead}</Crossfade>
+            </Primitive.Description>
+          )}
         </div>
         <Primitive.Close aria-label="Close" disabled={busy} className="disabled:opacity-40 -mt-1 -mr-1 grid size-8 shrink-0 place-items-center rounded-lg text-subtle transition-colors duration-150 hover:bg-fg/[0.06] hover:text-fg">
           <X className="size-4" strokeWidth={1.75} />
         </Primitive.Close>
       </div>
-      <div className="min-h-0 flex-1 overflow-y-auto px-5 pb-5">{children}</div>
-      {footer && <div className="flex items-center justify-end gap-2 border-t border-line px-5 py-3">{footer}</div>}
-    </DialogSheet>
+      {/* While the sheet eases, its scroller doesn't flash a scroll bar. */}
+      <div className="relative min-h-0 flex-1 overflow-y-auto px-5 pb-5 [[data-gliding]>&]:overflow-hidden">
+        <div ref={body}>{children}</div>
+      </div>
+      <div ref={foot} className="shrink-0">
+        {footer && <div className="flex items-center justify-end gap-2 border-t border-line px-5 py-3">{footer}</div>}
+      </div>
+    </>
+  );
+}
+
+/** Text that crossfades when it changes or goes (a title, a lead); anything else shows as it is. */
+function Crossfade({ children }: { children: ReactNode }) {
+  const text = children === undefined || children === null || children === false ? "" : children;
+  if (typeof text !== "string") return children;
+  return (
+    <SlidePages as="span" page={text} direction={0} className="block">
+      {text}
+    </SlidePages>
   );
 }
 

@@ -29,6 +29,7 @@ import { useCanvasProjects, type CanvasProjects } from "./machine-projects";
 import { AddProjectDialog } from "./project-new";
 import type { MenuItem } from "./menu";
 import { showInboxToast } from "./threads-sidebar";
+import { SlidePages } from "./slide-pages";
 import { Dialog, useKept } from "./ui/dialog";
 import { openMachineSettings } from "./provider-setup";
 import { useAgents, type AgentsCtx } from "./use-agents";
@@ -192,15 +193,21 @@ function SandboxForProject({ project }: { project: Project }) {
     check();
   };
 
+  // The form gives way to the steps, sliding; the dialog eases to fit each change.
+  const page = (key: "form" | "progress", node: ReactNode) => (
+    <SlidePages page={key} direction={key === "form" ? -1 : 1}>
+      {node}
+    </SlidePages>
+  );
   if (phase.at === "form") {
     if (!services || !list)
-      return sandboxes?.error ? (
+      return page("form", sandboxes?.error ? (
         <SandboxesProblem error={sandboxes.error} onRetry={sandboxes.reload} />
       ) : (
         <p className="text-[12.5px] text-subtle">{list === null && services ? <span className="shimmer">Loading sizes…</span> : "Only the owner can rent sandboxes."}</p>
-      );
-    if (!list.backend) return <p className="text-[12.5px] text-muted">Sandboxes aren&apos;t on for this roll server.</p>;
-    return (
+      ));
+    if (!list.backend) return page("form", <p className="text-[12.5px] text-muted">Sandboxes aren&apos;t on for this roll server.</p>);
+    return page("form",
       <form
         className="flex flex-col gap-3"
         onSubmit={async (e) => {
@@ -234,7 +241,7 @@ function SandboxForProject({ project }: { project: Project }) {
           </span>
         </div>
         {full && <p className="text-[12px] text-muted">You have as many sandboxes as you can. Delete one to rent another.</p>}
-      </form>
+      </form>,
     );
   }
 
@@ -244,7 +251,7 @@ function SandboxForProject({ project }: { project: Project }) {
   const machineName = "machine" in phase && phase.machine ? phase.machine.name : name.trim() || "the sandbox";
   const ready = phase.at === "ready" ? phase : null;
   const loggedIn = ready?.machine && client.data.machines.get(ready.machine.id)?.value.info?.providers.some((p) => p.installed && p.auth === "ready");
-  return (
+  return page("progress",
     <div className="space-y-4">
       <Steps
         steps={[
@@ -254,12 +261,12 @@ function SandboxForProject({ project }: { project: Project }) {
         ]}
       />
       {phase.at === "failed" && (
-        <p role="alert" className="text-[12.5px] text-danger">
+        <p role="alert" className="fade-in text-[12.5px] text-danger">
           {phase.error}
         </p>
       )}
       {ready && (
-        <div className="space-y-3">
+        <div className="fade-in space-y-3">
           <p className="text-[12.5px] text-muted">
             {project.name} is ready on {ready.machine.name}.{!loggedIn && " Log in to a provider on its card to start working there."}
           </p>
@@ -290,7 +297,7 @@ function SandboxForProject({ project }: { project: Project }) {
           </div>
         </div>
       )}
-    </div>
+    </div>,
   );
 }
 
