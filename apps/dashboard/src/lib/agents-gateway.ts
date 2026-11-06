@@ -41,7 +41,6 @@ import {
 } from "./agents-api";
 import type { AgentsClient } from "./agents-client";
 import type { Call } from "./automations-api";
-import { ApiError } from "./code-api";
 import { decode } from "./decode";
 import { sealUpstreamKey } from "./agents-seal";
 
@@ -67,13 +66,8 @@ export function createGatewayApi(call: Call): GatewayApi {
   const base = (owner: string) => `/v1/code/agents/${enc(owner)}/gateway`;
   return {
     get: async (owner) => {
-      try {
-        const v = await call("GET", base(owner));
-        return v === null || v === undefined || v === "" ? null : decode(gatewayPlanD, v);
-      } catch (e) {
-        if (e instanceof ApiError && e.status === 404) return null;
-        throw e;
-      }
+      const v = await call("GET", base(owner));
+      return v === null || v === undefined || v === "" ? null : decode(gatewayPlanD, v);
     },
     save: async (owner, plan) => decode(gatewayPlanD, await call("PUT", base(owner), plan)),
     remove: async (owner) => {

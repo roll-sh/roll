@@ -530,11 +530,12 @@ body {
   }
 }
 
-/* agents: a busy status dot breathes (calm, 1.6 s, no flashing). */
+/* agents: a busy status dot breathes (calm, 1.6 s, no flashing). Opacity only: a running transform
+   animation has no bounds the browser can trust, so everything painted after it on the canvas
+   became its own layer (140 of them with 30 busy cards, painted and composited every frame). */
 @keyframes pulse-dot {
   50% {
-    opacity: 0.45;
-    transform: scale(0.8);
+    opacity: 0.4;
   }
 }
 
@@ -558,7 +559,8 @@ body {
   animation: fade-in 0.2s ease-out both;
 }
 
-/* The chrome settles in a beat after the sheet (header, views bar, toolbar). */
+/* The chrome settles in a beat after the sheet (header, views bar, toolbar). Filled backwards only:
+   its end is the element's own style, and an animation held at its end keeps its element a layer. */
 @keyframes chrome-in {
   from {
     opacity: 0;
@@ -567,7 +569,7 @@ body {
 }
 
 .chrome-in {
-  animation: chrome-in 0.3s cubic-bezier(0.32, 0.72, 0, 1) 0.05s both;
+  animation: chrome-in 0.3s cubic-bezier(0.32, 0.72, 0, 1) 0.05s backwards;
 }
 
 /* A busy card's border breathes with the accent (1.6 s, calm); the open card keeps its own. */
@@ -586,6 +588,15 @@ body {
 [data-card][data-off] * {
   animation: none !important;
 }
+
+/* While the canvas's view moves, what breathes on it holds still (the engine's `data-moving`): a
+   frame with any repaint paints, layerizes and commits the whole page again. Named, so only these
+   elements restyle as it starts and stops. */
+[data-moving] :is(.pulse-dot, .shimmer, [data-tone="busy"]) {
+  /* Over each animation's own (more specific) shorthand. */
+  animation-play-state: paused !important;
+}
+
 
 @media (prefers-reduced-motion: reduce) {
   [data-card] [data-drag][data-tone="busy"] {

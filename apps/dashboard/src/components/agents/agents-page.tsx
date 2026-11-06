@@ -54,6 +54,7 @@ import { threadDone } from "./thread-status";
 import { SidebarToggle, ThreadsSidebar, useSidebarOpen } from "./threads-sidebar";
 import { AgentsContext, useAgents, useAgentsSnapshot, useHold, useMarkDriver, type AgentsCtx } from "./use-agents";
 import { useAgentsConnection } from "./use-connection";
+import { OwnerSwitcher } from "./owner-switcher";
 import { NoOwner } from "./no-owner";
 import { PinTools, useCanvasViews, ViewsBar, type CanvasViews } from "./views";
 import { BulkBar, SelectionHost, useBulk, type Bulk } from "./bulk-bar";
@@ -108,7 +109,7 @@ export function AgentsPage({
   /** Back from installing Slack or Discord (`?settings=integrations&…`): the settings, on the integrations. */
   integrations?: IntegrationsLink | null;
 }) {
-  const { client, services, error, need } = useAgentsConnection({ owner, demo });
+  const { client, services, error, need, admin } = useAgentsConnection({ owner, demo });
   // The link it opened with, read once: the URL below follows the view, so by a second run of the
   // effect (React's strict mode runs it twice) it already says the canvas, and a link to the
   // automations sheet fell back to it.
@@ -156,7 +157,7 @@ export function AgentsPage({
   return (
     <div className="h-dvh bg-bg text-fg" data-agents data-desktop={mac ? "agents-mac" : undefined}>
       {client && services ? (
-        <AgentsSurface client={client} services={services} demo={demo} chrome="window" focus={focus && !focus.startsWith("t:") ? focus : undefined} />
+        <AgentsSurface client={client} services={services} demo={demo} admin={admin} chrome="window" focus={focus && !focus.startsWith("t:") ? focus : undefined} />
       ) : (
         <CenterNote shimmer={!error} action={need === "owner" ? <NoOwner /> : error ? <SignIn /> : undefined}>
           {error ?? "Connecting…"}
@@ -191,6 +192,7 @@ export function AgentsSurface({
   chrome,
   onClose,
   focus: initialFocus,
+  admin: signedInAsAdmin = false,
 }: {
   client: AgentsClient;
   services: AgentsServices;
@@ -199,6 +201,8 @@ export function AgentsSurface({
   onClose?: () => void;
   /** A canvas node to show first (`m:…`, `x:…`). */
   focus?: string;
+  /** Signed in as admin: the header switches between owners (the dashboard's sidebar does too). */
+  admin?: boolean;
 }) {
   useHold(client);
   useEffect(() => {
@@ -209,6 +213,7 @@ export function AgentsSurface({
   const data = snap.data;
   const phone = usePhone();
   const sandboxes = useSandboxes(services, client.owner, data);
+  const admin = signedInAsAdmin && !demo;
   const { view } = useAgentsSurface();
   const [adding, setAdding] = useState(false);
   const [showArchived, setShowArchived] = useState(false);
@@ -585,6 +590,11 @@ export function AgentsSurface({
               <SidebarToggle open={sidebar} onToggle={() => setSidebar(!sidebar)} />
               {chrome === "window" ? <WindowHome /> : <HeaderMark />}
               <h2 className="text-[14px] font-[590] tracking-[-0.02em]">Agents</h2>
+              {admin && (
+                <span data-nodrag>
+                  <OwnerSwitcher owner={client.owner} className="w-36 max-sm:w-28" />
+                </span>
+              )}
             </span>
             <span className="h-4 w-px shrink-0 bg-line-2 max-sm:hidden" aria-hidden />
             <span className="flex min-w-0 items-center gap-2 text-[12.5px] text-muted">

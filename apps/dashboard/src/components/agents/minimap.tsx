@@ -35,7 +35,9 @@ export function Minimap({
   engine: React.RefObject<CanvasEngine | null>;
 }) {
   const root = useRef<HTMLDivElement>(null);
-  const frame = useRef<SVGRectElement>(null);
+  // The frame's four edges, 1px boxes stretched by their transforms: moving them is the compositor's
+  // alone (attributes on an SVG rect repainted the page under every frame of a zoom).
+  const edges = useRef<(HTMLSpanElement | null)[]>([]);
   const world = useMemo(() => bounds(positions, sizeOf), [positions, sizeOf]);
   // World → map: the whole canvas fits, centred, with a little room.
   const map = useMemo(() => {
@@ -49,8 +51,8 @@ export function Minimap({
       last.current = v;
       const e = engine.current;
       const el = root.current;
-      const f = frame.current;
-      if (!e || !el || !f || !world || !map) return;
+      const [top, right, bottom, left] = edges.current;
+      if (!e || !el || !top || !right || !bottom || !left || !world || !map) return;
       const { w, h } = e.viewport;
       // Only when there's more canvas than screen.
       const bigger = world.w * v.k > w + 1 || world.h * v.k > h + 1;
@@ -58,10 +60,14 @@ export function Minimap({
       if (!bigger) return;
       const x0 = (-v.x / v.k) * map.s + map.x;
       const y0 = (-v.y / v.k) * map.s + map.y;
-      f.setAttribute("x", String(Math.max(0, x0)));
-      f.setAttribute("y", String(Math.max(0, y0)));
-      f.setAttribute("width", String(Math.max(4, Math.min(W, x0 + (w / v.k) * map.s) - Math.max(0, x0))));
-      f.setAttribute("height", String(Math.max(4, Math.min(H, y0 + (h / v.k) * map.s) - Math.max(0, y0))));
+      const x = Math.max(0, x0);
+      const y = Math.max(0, y0);
+      const fw = Math.max(4, Math.min(W, x0 + (w / v.k) * map.s) - x);
+      const fh = Math.max(4, Math.min(H, y0 + (h / v.k) * map.s) - y);
+      top.style.transform = `translate(${x}px, ${y}px) scale(${fw}, 1)`;
+      bottom.style.transform = `translate(${x}px, ${y + fh - 1}px) scale(${fw}, 1)`;
+      left.style.transform = `translate(${x}px, ${y}px) scale(1, ${fh})`;
+      right.style.transform = `translate(${x + fw - 1}px, ${y}px) scale(1, ${fh})`;
     },
     [engine, world, map],
   );
@@ -106,8 +112,17 @@ export function Minimap({
           const tone = n.kind === "request" ? "var(--accent)" : n.busy ? "color-mix(in oklab, var(--accent) 60%, transparent)" : n.kind === "machine" || n.kind === "project" ? "var(--muted)" : "var(--line-3, var(--subtle))";
           return <rect key={k} x={p.x * map.s + map.x} y={p.y * map.s + map.y} width={Math.max(1.5, s.w * map.s)} height={Math.max(1.5, s.h * map.s)} rx={1} fill={tone} opacity={n.kind === "group" ? 0.5 : 0.9} />;
         })}
-        <rect ref={frame} fill="none" stroke="var(--fg)" strokeOpacity={0.55} strokeWidth={1} rx={2} />
       </svg>
+      {[0, 1, 2, 3].map((i) => (
+        <span
+          key={i}
+          ref={(el) => {
+            edges.current[i] = el;
+          }}
+          aria-hidden
+          className="pointer-events-none absolute top-0 left-0 size-px origin-top-left bg-fg/55 will-change-transform"
+        />
+      ))}
     </div>
   );
 }

@@ -71,9 +71,10 @@ fn no_plan() -> Error {
     Error::NotFound("the gateway (set it up first)".into())
 }
 
-pub(super) async fn get_plan(State(code): State<Arc<Code>>, caller: Caller, Path(owner): Path<String>) -> Result<Json<GatewayPlan>> {
+/// `GET …/gateway`: the plan, or `null` while none is set up (no gateway is a state, not an error).
+pub(super) async fn get_plan(State(code): State<Arc<Code>>, caller: Caller, Path(owner): Path<String>) -> Result<Json<Option<GatewayPlan>>> {
     let o = manageable(&code, &caller, &owner)?;
-    plan(code.db.sql(), &o.id)?.map(Json).ok_or_else(no_plan)
+    Ok(Json(plan(code.db.sql(), &o.id)?))
 }
 
 /// `PUT …/gateway GatewayPlan`: the host, URLs, `new_sandboxes`, `fallback` and when the owner

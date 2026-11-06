@@ -60,9 +60,34 @@ const PULSE_S = 1.6;
 const EDGE_OUT_MS = 160;
 /** How far past the screen (px) a card counts as off it (`data-off`: its animations pause). */
 const OFF_MARGIN = 160;
+/** How long after the view last moved it counts as resting (`data-moving` goes). */
+const VIEW_REST_MS = 160;
 /** How far from the pointer (px) dots swell and move. */
 const POINTER_REACH = 280;
 const DOT_SPACING = 28;
+/** The busy sweep: crests along x + 0.6y (screen px), `SWEEP_WAVE`·2π apart, moving at `SWEEP_SPEED` radians a second. */
+const SWEEP_WAVE = 220;
+const SWEEP_SPEED = 1.6;
+/** Below this the sweep doesn't change a dot (its boost would be under 0.002). */
+const SWEEP_FLOOR = 0.004;
+
+/** How much the busy sweep lifts a dot at screen (x, y): 0–`mix`. */
+const sweepAt = (x: number, y: number, t: number, mix: number) => Math.max(0, Math.cos((x + y * 0.6) / SWEEP_WAVE - t * SWEEP_SPEED)) ** 12 * mix;
+
+/**
+ * Where the busy sweep lifts dots at all, as stretches of x + 0.6y between `lo` and `hi`: about a
+ * quarter of the screen. Outside them the field is the plain pattern.
+ */
+function sweepBands(t: number, mix: number, lo: number, hi: number): [number, number][] {
+  const floor = SWEEP_FLOOR / mix;
+  if (floor >= 1) return [];
+  const half = Math.acos(floor ** (1 / 12)) * SWEEP_WAVE;
+  const period = 2 * Math.PI * SWEEP_WAVE;
+  const phase = t * SWEEP_SPEED * SWEEP_WAVE;
+  const out: [number, number][] = [];
+  for (let c = phase + Math.ceil((lo - half - phase) / period) * period; c - half <= hi; c += period) out.push([c - half, c + half]);
+  return out;
+}
 /** How long the zoom rests before a touch screen's `--zoom` follows it. */
 const ZOOM_CSS_MS = 120;
 
@@ -97,6 +122,10 @@ export class CanvasEngine {
   private viewMs = 280;
 
   private els = new Map<string, HTMLElement>();
+  /** Cards marked `data-off`, kept here: reading the attribute back off every card each frame cost a few ms at 1000 threads. */
+  private offCards = new WeakSet<HTMLElement>();
+  /** When the view last moved (ms, `performance.now()`): until `VIEW_REST_MS` after, it's moving. */
+  private viewMovedAt = -Infinity;
   private cur = new Map<string, Point>();
   private tgt = new Map<string, Point>();
   /** The layout's targets, before a drag holds one card. */
@@ -338,6 +367,7 @@ export class CanvasEngine {
 
   setView(v: View, animate = false) {
     const next = { x: v.x, y: v.y, k: clampZoom(v.k) };
+    this.viewMovedAt = performance.now();
     if (!animate || this.opts.reducedMotion) {
       this.viewFrom = this.viewTo = null;
       this.view = next;
@@ -527,8 +557,16 @@ export class CanvasEngine {
       this.view = { x: a.x + (b.x - a.x) * e, y: a.y + (b.y - a.y) * e, k: a.k + (b.k - a.k) * e };
       if (u >= 1) this.viewFrom = this.viewTo = null;
       else moving = true;
+      this.viewMovedAt = ms;
       this.opts.onView?.(this.view);
     }
+    // While the view moves (a zoom, a pan, Fit easing), nothing on the canvas repaints: any repaint
+    // has the browser paint, layerize and commit the whole page again, every frame (~20 ms at 1000
+    // threads). So the breathing animations hold (`data-moving`, globals.css) and cards keep their
+    // `data-off` until it rests.
+    const shifting = ms - this.viewMovedAt < VIEW_REST_MS;
+    if (shifting !== this.container.hasAttribute("data-moving")) this.container.toggleAttribute("data-moving", shifting);
+    if (shifting) moving = true;
     this.setTransform(this.world, `translate3d(${this.view.x}px, ${this.view.y}px, 0) scale(${this.view.k})`);
     // The scale for CSS too (`--zoom`): a touch screen's card tools keep a finger's size with it.
     if (this.view.k !== this.zoomShown && this.touchCss?.matches) {
@@ -563,13 +601,17 @@ export class CanvasEngine {
         // Well off screen, its animations (a busy card's border, shimmer, pulses) pause: 80 busy
         // cards at 1000 threads repainted every frame, most of them out of sight.
         const s = this.size.get(k);
-        let off = false;
-        if (s && this.w > 0) {
+        let off = this.offCards.has(el);
+        if (s && this.w > 0 && !shifting) {
           const left = next.x * vk + vx;
           const top = next.y * vk + vy;
           off = left + s.w * vk < -OFF_MARGIN || left > this.w + OFF_MARGIN || top + s.h * vk < -OFF_MARGIN || top > this.h + OFF_MARGIN;
         }
-        if (off !== el.hasAttribute("data-off")) el.toggleAttribute("data-off", off);
+        if (off !== this.offCards.has(el)) {
+          el.toggleAttribute("data-off", off);
+          if (off) this.offCards.add(el);
+          else this.offCards.delete(el);
+        }
       }
     }
 
@@ -595,9 +637,10 @@ export class CanvasEngine {
 
   /**
    * The plain dot field (`s` apart from `x0`, `y0`) as one pattern fill, leaving out the pointer's
-   * reach (drawn dot by dot). False when a pattern can't be made: draw them all one by one.
+   * reach and the busy sweep's `bands` (drawn dot by dot). False when a pattern can't be made: draw
+   * them all one by one.
    */
-  private fillDots(ctx: CanvasRenderingContext2D, s: number, x0: number, y0: number, pointer: Point | null): boolean {
+  private fillDots(ctx: CanvasRenderingContext2D, s: number, x0: number, y0: number, pointer: Point | null, bands: readonly [number, number][]): boolean {
     if (typeof DOMMatrix === "undefined" || typeof document === "undefined") return false;
     const size = Math.max(2, Math.round(s * this.dpr));
     const color = rgba(this.ink, Math.min(0.9, this.dotAlpha));
@@ -619,10 +662,25 @@ export class CanvasEngine {
     const { pattern } = this.dotTile;
     pattern.setTransform(new DOMMatrix().translateSelf(x0 - s / 2, y0 - s / 2).scaleSelf(s / size));
     ctx.save();
+    // Two clips, so where the pointer's reach crosses a band it stays out (one even-odd path would let it back in).
     if (pointer) {
       const clip = new Path2D();
       clip.rect(0, 0, this.w, this.h);
       clip.arc(pointer.x, pointer.y, POINTER_REACH, 0, Math.PI * 2);
+      ctx.clip(clip, "evenodd");
+    }
+    if (bands.length) {
+      const clip = new Path2D();
+      clip.rect(0, 0, this.w, this.h);
+      const h = this.h;
+      for (const [a, b] of bands) {
+        // x + 0.6y between a and b, over the screen's height.
+        clip.moveTo(a, 0);
+        clip.lineTo(b, 0);
+        clip.lineTo(b - 0.6 * h, h);
+        clip.lineTo(a - 0.6 * h, h);
+        clip.closePath();
+      }
       ctx.clip(clip, "evenodd");
     }
     ctx.fillStyle = pattern;
@@ -648,64 +706,98 @@ export class CanvasEngine {
     const y0 = (((vy % s) + s) % s) - s;
     const r2 = (POINTER_REACH / 2) ** 2;
     const ps = this.pointer;
-    const plain = new Path2D();
-    // Nothing lighting the field but (maybe) the pointer: the plain dots are one pattern fill, and
-    // only the dots near the pointer are drawn one by one (6,000 arcs a frame were most of a zoom).
-    const local = this.ripples.length === 0 && (this.busyMix <= 0.01 || reduced) && this.fillDots(ctx, s, x0, y0, ps.s > 0.01 ? ps : null);
+    const pointer = ps.s > 0.01 ? ps : null;
+    const mix = reduced ? 0 : this.busyMix;
+    const xEnd = this.w + s;
+    const yEnd = this.h + s;
+    const bands = mix > 0.01 ? sweepBands(t, mix, x0 + 0.6 * y0, xEnd + 0.6 * yEnd) : [];
+    // Without a ripple, the plain dots are one pattern fill, and only the dots the pointer or the
+    // sweep lift are drawn one by one: 6,000 arcs a frame, each its own fill, were most of a frame
+    // whenever anything ran.
+    const patterned = this.ripples.length === 0 && this.fillDots(ctx, s, x0, y0, pointer, bands);
     const reach = POINTER_REACH;
-    const yFrom = local ? (ps.s > 0.01 ? y0 + Math.max(0, Math.ceil((ps.y - reach - y0) / s)) * s : Infinity) : y0;
-    const yTo = local ? Math.min(this.h + s, ps.y + reach) : this.h + s;
-    const xFrom = local ? x0 + Math.max(0, Math.ceil((ps.x - reach - x0) / s)) * s : x0;
-    const xTo = local ? Math.min(this.w + s, ps.x + reach) : this.w + s;
-    for (let y = yFrom; y <= yTo; y += s) {
-      for (let x = xFrom; x <= xTo; x += s) {
-        // The pattern drew the dots out of the pointer's reach.
-        if (local && (x - ps.x) ** 2 + (y - ps.y) ** 2 >= r2 * 4) continue;
-        let boost = 0;
-        let lit = 0;
-        let px = x;
-        let py = y;
-        if (ps.s > 0.01) {
-          const dx = x - ps.x;
-          const dy = y - ps.y;
-          const d2 = dx * dx + dy * dy;
-          if (d2 < r2 * 4) {
-            const f = Math.exp(-d2 / (r2 * 0.5)) * ps.s;
-            boost += f;
-            lit = Math.max(lit, f * 0.4);
-            const d = Math.sqrt(d2) + 1;
-            px += (dx / d) * f * 5;
-            py += (dy / d) * f * 5;
+    const plain = new Path2D();
+    // Lifted dots by how much (boost and light, in twentieths): one fill per step, not per dot.
+    const lifted = new Map<number, Path2D>();
+    const dot = (x: number, y: number) => {
+      let boost = 0;
+      let lit = 0;
+      let px = x;
+      let py = y;
+      if (pointer) {
+        const dx = x - pointer.x;
+        const dy = y - pointer.y;
+        const d2 = dx * dx + dy * dy;
+        if (d2 < r2 * 4) {
+          const f = Math.exp(-d2 / (r2 * 0.5)) * pointer.s;
+          boost += f;
+          lit = Math.max(lit, f * 0.4);
+          const d = Math.sqrt(d2) + 1;
+          px += (dx / d) * f * 5;
+          py += (dy / d) * f * 5;
+        }
+      }
+      for (const r of this.ripples) {
+        const age = t - r.t0;
+        const d = Math.hypot(x - r.x, y - r.y);
+        const rw = Math.exp(-((d - age * 520) ** 2) / 1800) * Math.exp(-age * 1.4);
+        boost += rw;
+        lit = Math.max(lit, rw * 0.7);
+      }
+      if (mix > 0.01) {
+        // The DotField "thinking" sweep, quieter: work is happening somewhere on the canvas.
+        const wave = sweepAt(x, y, t, mix);
+        boost += wave * 0.5;
+        lit = Math.max(lit, wave * 0.35);
+      }
+      if (boost < 0.002 && lit <= 0.01) {
+        plain.moveTo(px + 0.9, py);
+        plain.arc(px, py, 0.9, 0, Math.PI * 2);
+        return;
+      }
+      const qb = Math.min(63, Math.round(boost * 20));
+      const ql = Math.round(Math.min(1, lit) * 20);
+      const key = qb * 32 + ql;
+      let path = lifted.get(key);
+      if (!path) lifted.set(key, (path = new Path2D()));
+      const r = 0.9 + (qb / 20) * 1.2;
+      path.moveTo(px + r, py);
+      path.arc(px, py, r, 0, Math.PI * 2);
+    };
+    const spans: [number, number][] = [];
+    for (let j = 0, y = y0; y <= yEnd; j++, y = y0 + j * s) {
+      // This row's stretches drawn dot by dot: all of it, or (over the pattern) the sweep's bands and the pointer's reach.
+      spans.length = 0;
+      if (!patterned) spans.push([x0, xEnd]);
+      else {
+        for (const [a, b] of bands) spans.push([a - 0.6 * y, b - 0.6 * y]);
+        if (pointer) {
+          const dy = y - pointer.y;
+          if (dy * dy < reach * reach) {
+            const dx = Math.sqrt(reach * reach - dy * dy);
+            spans.push([pointer.x - dx, pointer.x + dx]);
           }
         }
-        for (const r of this.ripples) {
-          const age = t - r.t0;
-          const d = Math.hypot(x - r.x, y - r.y);
-          const rw = Math.exp(-((d - age * 520) ** 2) / 1800) * Math.exp(-age * 1.4);
-          boost += rw;
-          lit = Math.max(lit, rw * 0.7);
-        }
-        if (this.busyMix > 0.01 && !reduced) {
-          // The DotField "thinking" sweep, quieter: work is happening somewhere on the canvas.
-          const wave = Math.max(0, Math.cos((x + y * 0.6) / 220 - t * 1.6)) ** 12 * this.busyMix;
-          boost += wave * 0.5;
-          lit = Math.max(lit, wave * 0.35);
-        }
-        if (boost < 0.002 && lit <= 0.01) {
-          // A plain dot: into one path, filled once below (a fill per dot was most of a frame).
-          plain.moveTo(px + 0.9, py);
-          plain.arc(px, py, 0.9, 0, Math.PI * 2);
-          continue;
-        }
-        const c = lit > 0.01 ? mixRgb(this.ink, this.accent, Math.min(1, lit)) : this.ink;
-        ctx.fillStyle = rgba(c, Math.min(0.9, this.dotAlpha + boost * 0.5));
-        ctx.beginPath();
-        ctx.arc(px, py, 0.9 + boost * 1.2, 0, Math.PI * 2);
-        ctx.fill();
+        if (!spans.length) continue;
+        spans.sort((p, q) => p[0] - q[0]);
+      }
+      // Grid columns, so a dot two stretches share is drawn once.
+      let next = 0;
+      for (const [a, b] of spans) {
+        const last = Math.floor((Math.min(b, xEnd) - x0) / s);
+        for (let i = Math.max(next, Math.ceil((a - x0) / s)); i <= last; i++) dot(x0 + i * s, y);
+        next = Math.max(next, last + 1);
       }
     }
     ctx.fillStyle = rgba(this.ink, Math.min(0.9, this.dotAlpha));
     ctx.fill(plain);
+    for (const [key, path] of lifted) {
+      const qb = key >> 5;
+      const ql = (key & 31) / 20;
+      const c = ql > 0.01 ? mixRgb(this.ink, this.accent, ql) : this.ink;
+      ctx.fillStyle = rgba(c, Math.min(0.9, this.dotAlpha + (qb / 20) * 0.5));
+      ctx.fill(path);
+    }
 
     const scr = (p: Point) => ({ x: p.x * k + vx, y: p.y * k + vy });
     const phase = (t / PULSE_S) % 1;

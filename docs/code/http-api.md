@@ -632,7 +632,7 @@ DELETE /v1/code/agents/{owner}/endpoints/{id} → 204
        owners; 404 deleting one that isn't there). Applying a profile to a machine is `endpoint.set`
        through …/commands, with the key sealed to that machine in the browser.
 
-GET /v1/code/agents/{owner}/gateway → GatewayPlan
+GET /v1/code/agents/{owner}/gateway → GatewayPlan | null
 PUT /v1/code/agents/{owner}/gateway GatewayPlan → GatewayPlan
 DELETE /v1/code/agents/{owner}/gateway → 204
        The owner's model gateway (docs/code/gateway.md): {host: MachineId, urls?: [{label, url}],
@@ -641,7 +641,8 @@ DELETE /v1/code/agents/{owner}/gateway → 204
        read the notice (0: 400), URLs are http(s) without credentials (400); members sent with it are
        ignored (only joining and leaving change them), and another host while machines use the gateway is
        a 409 ("remove the machines first"). DELETE is a 409 while machines use it. The host's gateway
-       itself is set up and removed with `gateway.*` commands. 404 when none is set up.
+       itself is set up and removed with `gateway.*` commands. With none set up, GET answers `null`
+       (200: no gateway is a state, not an error), and DELETE and the member routes are 404s.
 POST /v1/code/agents/{owner}/gateway/members GatewayJoin {machine, url?, providers?} → GatewayPlan
        Joins a machine: the relay sends `gateway.client.issue {name, machine, seal_key}` to the host
        (the member's seal key from its last `hello`), then `endpoint.set` to the member with

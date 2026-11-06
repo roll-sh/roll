@@ -24,21 +24,34 @@ export function keyboardOf(innerHeight: number, vv: { height: number; offsetTop:
   return { inset: inset > 40 ? inset : 0, visible: Math.round(vv.height) };
 }
 
-let last: Keyboard = NONE;
-function read(): Keyboard {
+// Measured when the visual viewport moves, never while rendering: reading it makes the browser lay
+// out the page first, and the agents re-render on every streamed record (at 1000 threads that was
+// a forced layout of the whole canvas each time).
+let last: Keyboard | null = null;
+function measure() {
   const next = keyboardOf(window.innerHeight, window.visualViewport);
-  if (next.inset !== last.inset || next.visible !== last.visible) last = next;
-  return last;
+  if (!last || next.inset !== last.inset || next.visible !== last.visible) last = next;
+}
+
+function read(): Keyboard {
+  if (!last) measure();
+  return last!;
 }
 
 function subscribe(fn: () => void): () => void {
+  const on = () => {
+    measure();
+    fn();
+  };
+  // It may have moved before anyone listened.
+  measure();
   const vv = window.visualViewport;
-  if (!vv) return () => {};
-  vv.addEventListener("resize", fn);
-  vv.addEventListener("scroll", fn);
+  const target: EventTarget = vv ?? window;
+  target.addEventListener("resize", on);
+  if (vv) vv.addEventListener("scroll", on);
   return () => {
-    vv.removeEventListener("resize", fn);
-    vv.removeEventListener("scroll", fn);
+    target.removeEventListener("resize", on);
+    if (vv) vv.removeEventListener("scroll", on);
   };
 }
 

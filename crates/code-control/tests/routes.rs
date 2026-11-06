@@ -646,7 +646,7 @@ async fn agents_routes_follow_the_auth_matrix() {
 
 /// The model gateway's routes (`agents/gateway.rs`): all the owner's (Code::manages), not its
 /// agents'; 403 for agents, review apps and other owners, 401 for anonymous callers and bad tokens.
-/// The owner gets a 404 for a gateway that isn't set up, after the check.
+/// The owner reads `null` for a gateway that isn't set up and gets a 404 changing it, after the check.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn agents_gateway_routes_follow_the_auth_matrix() {
     let w = world().await;
@@ -675,9 +675,10 @@ async fn agents_gateway_routes_follow_the_auth_matrix() {
             assert_eq!(call(a, m, p, *body, Some(bad)).await, UNAUTHORIZED, "{bad}: {m} {p}");
         }
     }
-    // The owner: nothing set up is a 404; then the plan, a join (the host has no link: 409, it
-    // never said its seal key), a member that isn't one, and the plan removed.
-    for (m, p, body) in routes.iter().filter(|(m, ..)| *m != "PUT") {
+    // The owner: nothing set up reads as null and is a 404 to change; then the plan, a join (the
+    // host has no link: 409, it never said its seal key), a member that isn't one, and the plan removed.
+    assert_eq!(a.req("GET", base, None, acme).await, (OK, serde_json::Value::Null));
+    for (m, p, body) in routes.iter().filter(|(m, ..)| *m != "PUT" && *m != "GET") {
         assert_eq!(call(a, m, p, *body, acme).await, NOT_FOUND, "owner: {m} {p}");
     }
     assert_eq!(call(a, "PUT", base, Some(&plan), acme).await, OK);

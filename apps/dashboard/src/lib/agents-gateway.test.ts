@@ -3,7 +3,6 @@ import type { Command, GatewaySettings, LogEntry, UsageRow } from "./agents-api"
 import { AgentsClient } from "./agents-client";
 import { DemoOwner } from "./agents-demo";
 import { checkSettings, createGatewayApi, gatewayOn, isIPv6, joinProviders, listenError, LOOPBACK, mergeLog, OTHER, reachProblem, stackUsage, urlChoices, urlFor } from "./agents-gateway";
-import { ApiError } from "./code-api";
 
 const PUB = "KMIZzg7UJuV-Nxs3gUarEXCHzKlAkKSSSCaXrdLz4zg";
 
@@ -130,11 +129,10 @@ describe("usage", () => {
 });
 
 describe("the relay client", () => {
-  it("calls the plan routes, and reads a missing plan as none", async () => {
+  it("calls the plan routes, and reads no plan (null) as none", async () => {
     const calls: [string, string, unknown][] = [];
     const api = createGatewayApi(async (method, path, body) => {
       calls.push([method, path, body]);
-      if (method === "GET") throw new ApiError("no plan", 404, null);
       if (method === "PUT") return body;
       return null;
     });

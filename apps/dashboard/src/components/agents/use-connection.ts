@@ -102,6 +102,8 @@ export interface AgentsConnection {
   error: string | null;
   /** What would give it one: signing in, or an owner to work as (none exists yet). */
   need?: "sign-in" | "owner";
+  /** Signed in as admin: any owner can be shown (the owner switcher). */
+  admin?: boolean;
 }
 
 let http: AgentsServices | null = null;
@@ -130,7 +132,7 @@ export function useAgentsConnection({ owner: param, demo: isDemo = false }: { ow
           });
         const o = r.owner;
         localStorage.setItem(LAST_OWNER, o);
-        setConn({ client: clientFor(o), services: (http ??= httpServices()), error: null });
+        setConn({ client: clientFor(o), services: (http ??= httpServices()), error: null, admin: r.admin });
       } catch (e) {
         if (live) setConn({ client: null, services: null, error: e instanceof Error ? e.message : String(e) });
       }

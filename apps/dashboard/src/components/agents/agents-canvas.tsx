@@ -145,6 +145,8 @@ export const AgentsCanvas = forwardRef<
 
   useLayoutEffect(() => {
     if (!container.current || !canvas.current || !world.current) return;
+    let zoomTextAt = 0;
+    let zoomTextLater: ReturnType<typeof setTimeout> | undefined;
     const e = new CanvasEngine(container.current, canvas.current, world.current, {
       reducedMotion: reduced,
       onView: (v: View) => {
@@ -160,8 +162,16 @@ export const AgentsCanvas = forwardRef<
           }
         }
         minimap.current?.view(v);
+        // The zoom's readout: new text repaints the page, so while it changes, at most every
+        // ZOOM_TEXT_MS, and where it rests.
         const text = `${Math.round(v.k * 100)}%`;
-        if (zoomText.current && zoomText.current.textContent !== text) zoomText.current.textContent = text;
+        const show = () => {
+          if (zoomText.current && zoomText.current.textContent !== text) zoomText.current.textContent = text;
+          zoomTextAt = performance.now();
+        };
+        clearTimeout(zoomTextLater);
+        if (performance.now() - zoomTextAt >= ZOOM_TEXT_MS) show();
+        else zoomTextLater = setTimeout(show, ZOOM_TEXT_MS);
         viewChanged.current?.(v);
       },
       onSizes: (changed) =>
@@ -181,6 +191,7 @@ export const AgentsCanvas = forwardRef<
     mq.addEventListener("change", onTheme);
     return () => {
       mq.removeEventListener("change", onTheme);
+      clearTimeout(zoomTextLater);
       e.destroy();
       engine.current = null;
     };
@@ -264,9 +275,16 @@ export const AgentsCanvas = forwardRef<
       const { w } = e.viewport;
       const h = e.viewport.h - coveredBelow();
       if (!r || !w || h <= 0) return;
-      const first = arranged.roots.find((k) => positions.has(k));
-      const anchor = first ? bounds(positions, sizeOf, [first]) ?? undefined : undefined;
       const phone = w < 640;
+      const first = arranged.roots.find((k) => positions.has(k));
+      // A phone reads a drilled-in project from its first status column (they hang under the
+      // project side by side, centred under it: centring the machine cut the first off the left).
+      let column: string | undefined;
+      if (phone)
+        for (const [k, p] of positions)
+          if (graph.nodes.get(k)?.kind === "group" && (column === undefined || p.x < positions.get(column)!.x)) column = k;
+      const lead = column ?? first;
+      const anchor = lead ? bounds(positions, sizeOf, [lead]) ?? undefined : undefined;
       // A phone's waiting request puts the zoom bar at the top (`data-waiting`): frame below it.
       const top = phone && container.current?.closest("[data-waiting]") ? PHONE_TOP_BAR : 0;
       const pad = phone ? 24 : 64;
@@ -989,6 +1007,8 @@ const FIT_FLOOR = 0.35;
 const TRUNK_AT = 4;
 /** How many new cards mount in one frame (more wait for the next). */
 const STAGE = 48;
+/** The zoom readout changes at most this often while the zoom moves. */
+const ZOOM_TEXT_MS = 150;
 /** What Fit always frames: the structure, and what waits on you. */
 const FRAMED: ReadonlySet<GraphNode["kind"]> = new Set(["machine", "project", "group", "request"]);
 /** Keys that pan or zoom the canvas (with no card focused). */

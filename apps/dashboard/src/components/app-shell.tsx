@@ -26,6 +26,7 @@ import { usePathname } from "next/navigation";
 import { Suspense, useEffect, useState, type ReactNode } from "react";
 import { AgentsControl } from "./agents/agents-control";
 import { useShownOwner } from "./agents/use-connection";
+import { OwnerSwitcher } from "./agents/owner-switcher";
 import { AskPanel } from "./ask";
 import { useMarkState } from "./mark-state";
 
@@ -77,11 +78,19 @@ export function AppShell({ crumb, actions, bleed = false, children }: { crumb: R
           <Link href="/" className="px-2 py-1" aria-label="roll home">
             <RollLogo state={state} size={19} />
           </Link>
-          <div className="mt-5 flex items-center gap-2 rounded-lg border border-line px-2.5 py-2 text-left text-[13px]" title={shown?.admin ? "Signed in as admin" : undefined}>
-            <span className="grid size-5 place-items-center rounded bg-accent text-[10px] font-bold text-white uppercase">{shown?.owner?.[0] ?? "·"}</span>
-            <span className={`min-w-0 flex-1 truncate ${shown?.owner ? "" : "text-muted"}`}>{shown === undefined ? "" : (shown.owner ?? "Signed out")}</span>
-            {shown?.admin && <span className="text-[11px] text-subtle">admin</span>}
-          </div>
+          {shown?.admin && shown.owner ? (
+            // An admin works as any owner: which one shows, everywhere.
+            <div className="mt-5">
+              <OwnerSwitcher owner={shown.owner} />
+              <p className="mt-1 px-1 text-[11px] text-subtle">Signed in as admin</p>
+            </div>
+          ) : (
+            <div className="mt-5 flex items-center gap-2 rounded-lg border border-line px-2.5 py-2 text-left text-[13px]" title={shown?.admin ? "Signed in as admin" : undefined}>
+              <span className="grid size-5 place-items-center rounded bg-accent text-[10px] font-bold text-white uppercase">{shown?.owner?.[0] ?? "·"}</span>
+              <span className={`min-w-0 flex-1 truncate ${shown?.owner ? "" : "text-muted"}`}>{shown === undefined ? "" : (shown.owner ?? "Signed out")}</span>
+              {shown?.admin && <span className="text-[11px] text-subtle">admin</span>}
+            </div>
+          )}
           <Suspense fallback={<Nav pathname={null} />}>
             <CurrentNav />
           </Suspense>

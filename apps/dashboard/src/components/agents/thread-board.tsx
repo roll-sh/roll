@@ -28,10 +28,41 @@ const CARD_H = 92;
 const GAP = 8;
 const STEP = CARD_H + GAP;
 const COL_W = 284;
+/** The narrowest a column with cards gets before the board scrolls sideways (four of them and a strip beside a conversation). */
+const MIN_W = 168;
 /** An empty column stays (columns never come and go) but is only its header: the room goes to the others. */
-const widthOf = (g: Group) => (g.count ? COL_W : 104);
+const EMPTY_W = 104;
+/** Short of room (a conversation open beside the board), an empty column is a strip with its name down it. */
+const SLIM_W = 36;
+const COL_GAP = 12;
 /** Cards a swimlane's cell shows before "N more". */
 const CELL_FIRST = 12;
+
+type Widths = ReadonlyMap<string, { w: number; slim: boolean }>;
+
+/**
+ * Each column's width in a board `width` wide: columns with cards at their full width while
+ * everything fits, then sharing the room down to `MIN_W`, then with the empty columns folded to
+ * strips; only past that does the board scroll sideways. A phone shows a column at a time (snap).
+ */
+function columnWidths(columns: readonly Group[], width: number, phone: boolean): Widths {
+  const full = (g: Group) => (g.count ? COL_W : EMPTY_W);
+  const out = new Map<string, { w: number; slim: boolean }>();
+  const n = columns.filter((g) => g.count).length;
+  const empty = columns.length - n;
+  const room = width - 24 - COL_GAP * Math.max(0, columns.length - 1);
+  const fits = (emptyW: number, w: number) => n * w + empty * emptyW <= room;
+  if (phone || !width || n === 0 || fits(EMPTY_W, COL_W)) {
+    for (const g of columns) out.set(g.key, { w: full(g), slim: false });
+    return out;
+  }
+  const slim = !fits(EMPTY_W, MIN_W);
+  const emptyW = slim ? SLIM_W : EMPTY_W;
+  const w = Math.floor(Math.max(MIN_W, Math.min(COL_W, (room - empty * emptyW) / n)));
+  for (const g of columns) out.set(g.key, g.count ? { w, slim: false } : { w: emptyW, slim });
+  return out;
+}
+const widthIn = (widths: Widths, g: Group) => widths.get(g.key)?.w ?? (g.count ? COL_W : EMPTY_W);
 
 // A card that changes column slides over from where it was. Only those cards are measured: the
 // board notes which threads changed column as it renders (the old card is still on the page then)
@@ -62,6 +93,18 @@ export function ThreadBoard({ c }: { c: Collection }) {
     if (c.open) setCursor(c.open);
   }, [c.open]);
   const columns = c.groups;
+  // The board's own width (a conversation open beside it takes half the window): columns fit it.
+  const root = useRef<HTMLDivElement>(null);
+  const [width, setWidth] = useState(0);
+  useLayoutEffect(() => {
+    const el = root.current;
+    if (!el) return;
+    setWidth(el.clientWidth);
+    const ro = new ResizeObserver(() => setWidth(el.clientWidth));
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+  const widths = useMemo(() => columnWidths(columns, width, c.phone), [columns, width, c.phone]);
   // Before this render's cards replace the last ones.
   const noted = useRef<readonly Group[] | null>(null);
   if (noted.current !== columns) {
@@ -91,8 +134,8 @@ export function ThreadBoard({ c }: { c: Collection }) {
     }
   };
   return (
-    <div role="grid" aria-label="Threads board" tabIndex={0} onKeyDown={onKey} className="h-full overflow-auto outline-none max-sm:snap-x max-sm:snap-mandatory max-sm:scroll-px-3" data-thread-board>
-      {lanes ? <Lanes c={c} cursor={cursor} setCursor={setCursor} /> : <Columns c={c} columns={columns} cursor={cursor} setCursor={setCursor} />}
+    <div ref={root} role="grid" aria-label="Threads board" tabIndex={0} onKeyDown={onKey} className="h-full overflow-auto outline-none max-sm:snap-x max-sm:snap-mandatory max-sm:scroll-px-3" data-thread-board>
+      {lanes ? <Lanes c={c} widths={widths} cursor={cursor} setCursor={setCursor} /> : <Columns c={c} columns={columns} widths={widths} cursor={cursor} setCursor={setCursor} />}
     </div>
   );
 }
@@ -100,13 +143,23 @@ export function ThreadBoard({ c }: { c: Collection }) {
 /** Whether a column takes dropped cards: only Done, by status (dropping there settles them). */
 const takesDrop = (c: Collection, g: Group) => c.by === "status" && g.value === "done";
 
-function Columns({ c, columns, cursor, setCursor }: { c: Collection; columns: Group[]; cursor: ThreadId | null; setCursor: (id: ThreadId) => void }) {
+function Columns({ c, columns, widths, cursor, setCursor }: { c: Collection; columns: Group[]; widths: Widths; cursor: ThreadId | null; setCursor: (id: ThreadId) => void }) {
   return (
     <div className="flex h-full min-w-max gap-3 px-3 pt-3">
-      {columns.map((g) => (
-        <Column key={g.key} c={c} group={g} cursor={cursor} setCursor={setCursor} />
-      ))}
+      {columns.map((g) =>
+        widths.get(g.key)?.slim ? <SlimColumn key={g.key} group={g} /> : <Column key={g.key} c={c} group={g} width={widthIn(widths, g)} cursor={cursor} setCursor={setCursor} />,
+      )}
     </div>
+  );
+}
+
+/** An empty column short of room: its name and count down a strip. */
+function SlimColumn({ group }: { group: Group }) {
+  return (
+    <section aria-label={`${group.label}, ${group.count}`} style={{ width: SLIM_W }} className="flex shrink-0 flex-col items-center gap-2 pt-2 text-[12.5px]" title={`${group.label}: none`}>
+      <span className="font-mono text-[11px] text-subtle tabular-nums">{group.count}</span>
+      <span className="font-[560] whitespace-nowrap text-muted [writing-mode:vertical-rl]">{group.label}</span>
+    </section>
   );
 }
 
@@ -150,7 +203,7 @@ function useDrop(c: Collection, group: Group) {
 
 const DRAG_TYPE = "text/x-roll-threads";
 
-function Column({ c, group, cursor, setCursor }: { c: Collection; group: Group; cursor: ThreadId | null; setCursor: (id: ThreadId) => void }) {
+function Column({ c, group, width, cursor, setCursor }: { c: Collection; group: Group; width: number; cursor: ThreadId | null; setCursor: (id: ThreadId) => void }) {
   const body = useRef<HTMLDivElement>(null);
   const [view, setView] = useState({ y: 0, h: 800 });
   const frame = useRef(0);
@@ -185,7 +238,7 @@ function Column({ c, group, cursor, setCursor }: { c: Collection; group: Group; 
     cards.push(<BoardCard key={r.id} row={r} c={c} column={group.key} y={i * STEP} order={order} any={sel.ids.size > 0} cursor={cursor === r.id} setCursor={setCursor} />);
   }
   return (
-    <section aria-label={`${group.label}, ${group.count}`} style={{ width: widthOf(group) }} className="flex min-h-0 shrink-0 snap-start flex-col" {...drop.props}>
+    <section aria-label={`${group.label}, ${group.count}`} style={{ width }} className="@container/column flex min-h-0 shrink-0 snap-start flex-col" {...drop.props}>
       <ColumnHead group={group} drop={takesDrop(c, group)} />
       <div
         ref={body}
@@ -208,7 +261,7 @@ function Column({ c, group, cursor, setCursor }: { c: Collection; group: Group; 
 }
 
 /** Sub-grouped: a lane per sub-group, folding, each a row of cells under the columns. */
-function Lanes({ c, cursor, setCursor }: { c: Collection; cursor: ThreadId | null; setCursor: (id: ThreadId) => void }) {
+function Lanes({ c, widths, cursor, setCursor }: { c: Collection; widths: Widths; cursor: ThreadId | null; setCursor: (id: ThreadId) => void }) {
   const columns = c.groups;
   // The lanes: every sub-group any column has, in the first order they appear.
   const lanes = useMemo(() => {
@@ -220,8 +273,8 @@ function Lanes({ c, cursor, setCursor }: { c: Collection; cursor: ThreadId | nul
     <div className="min-w-max px-3 pt-3 pb-28">
       <div className="sticky top-0 z-[2] flex gap-3 bg-canvas pb-1">
         {columns.map((g) => (
-          <div key={g.key} style={{ width: widthOf(g) }}>
-            <ColumnHead group={g} drop={false} />
+          <div key={g.key} style={{ width: widthIn(widths, g) }}>
+            {widths.get(g.key)?.slim ? <SlimColumn group={g} /> : <ColumnHead group={g} drop={false} />}
           </div>
         ))}
       </div>
@@ -238,7 +291,7 @@ function Lanes({ c, cursor, setCursor }: { c: Collection; cursor: ThreadId | nul
             {!shut && (
               <div className="flex gap-3">
                 {columns.map((col) => (
-                  <Cell key={col.key} c={c} group={col.groups?.find((s) => s.value === lane.value)} column={col} cursor={cursor} setCursor={setCursor} />
+                  <Cell key={col.key} c={c} group={col.groups?.find((s) => s.value === lane.value)} column={col} width={widthIn(widths, col)} cursor={cursor} setCursor={setCursor} />
                 ))}
               </div>
             )}
@@ -249,7 +302,7 @@ function Lanes({ c, cursor, setCursor }: { c: Collection; cursor: ThreadId | nul
   );
 }
 
-function Cell({ c, group, column, cursor, setCursor }: { c: Collection; group: Group | undefined; column: Group; cursor: ThreadId | null; setCursor: (id: ThreadId) => void }) {
+function Cell({ c, group, column, width, cursor, setCursor }: { c: Collection; group: Group | undefined; column: Group; width: number; cursor: ThreadId | null; setCursor: (id: ThreadId) => void }) {
   const [all, setAll] = useState(false);
   const drop = useDrop(c, column);
   const rows = group?.rows ?? [];
@@ -257,7 +310,7 @@ function Cell({ c, group, column, cursor, setCursor }: { c: Collection; group: G
   const order = useCallback(() => rows.map((r) => r.id), [rows]);
   const sel = useSelection();
   return (
-    <div style={{ width: widthOf(column) }} className={`flex min-h-12 flex-col gap-2 rounded-lg transition-colors duration-150 ${drop.over ? "bg-accent/[0.06] outline outline-1 -outline-offset-1 outline-accent/40" : ""}`} {...drop.props}>
+    <div style={{ width }} className={`@container/column flex min-h-12 flex-col gap-2 rounded-lg transition-colors duration-150 ${drop.over ? "bg-accent/[0.06] outline outline-1 -outline-offset-1 outline-accent/40" : ""}`} {...drop.props}>
       {shown.map((r) => (
         <div key={r.id} className="relative" style={{ height: CARD_H }}>
           <BoardCard row={r} c={c} column={column.key} y={0} order={order} any={sel.ids.size > 0} cursor={cursor === r.id} setCursor={setCursor} />
@@ -357,7 +410,7 @@ function BoardCardBody({ row, c, column, y, order, any, cursor, setCursor }: Car
           <Pick id={row.id} order={order} any={any || c.editing} />
         </span>
       </span>
-      <span className={`line-clamp-2 leading-[1.35] ${open ? "font-[560] text-fg" : "text-soft"}`}>{t.title}</span>
+      <span className={`line-clamp-2 leading-[1.35] @max-[13.75rem]/column:line-clamp-1 ${open ? "font-[560] text-fg" : "text-soft"}`}>{t.title}</span>
       <span className="mt-auto flex min-w-0 items-center gap-2 text-[11.5px] text-muted">
         <span aria-hidden className="size-1.5 shrink-0 rounded-full bg-(--tint)" />
         <span className="min-w-0 truncate">
