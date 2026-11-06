@@ -39,6 +39,10 @@ import {
   Workflow,
   Zap,
 } from "lucide-react";
+import { useReducedMotion } from "@roll/brand";
+import { AnimatePresence, motion, type Transition } from "motion/react";
+import { FADE_IN, POP_IN, POP_OUT } from "@/lib/agents-motion";
+import { useEnteringValue, usePresenceTracks } from "./presence";
 import { useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { isBusy, reachable, type Machine, type Thread } from "@/lib/agents-api";
@@ -140,8 +144,11 @@ export interface PaletteHost {
  */
 export function CommandPalette({ host }: { host: PaletteHost }) {
   const { open, intent, session } = usePalette();
-  if (!open || typeof document === "undefined") return null;
-  return createPortal(<PaletteDialog key={session} session={session} intent={intent} host={host} />, document.body);
+  const [client, setClient] = useState(false);
+  useEffect(() => setClient(true), []);
+  if (!client) return null;
+  // However it closes (Escape, ⌘K, a pick, the scrim, another surface), it fades out, then unmounts.
+  return createPortal(<AnimatePresence>{open && <PaletteDialog key={session} session={session} intent={intent} host={host} />}</AnimatePresence>, document.body);
 }
 
 function PaletteDialog({ session, intent, host }: { session: number; intent: PaletteIntent; host: PaletteHost }) {
@@ -556,13 +563,21 @@ function PaletteDialog({ session, intent, host }: { session: number; intent: Pal
   }, []);
   useEffect(() => input.current?.focus({ preventScroll: true }), [view]);
 
-  const [leaving, setLeaving] = useState(false);
-  const close = () => {
-    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return closePalette();
-    setLeaving(true);
-    // Only this palette: ⌘K may have opened a new one meanwhile.
-    setTimeout(() => agentsPalette.get().session === session && closePalette(), 140);
-  };
+  // Only this palette: ⌘K may have opened a new one meanwhile.
+  const close = () => agentsPalette.get().session === session && closePalette();
+  const reduced = useReducedMotion();
+  const none: Transition = { duration: 0 };
+  const glass = useEnteringValue(0, 1);
+  const scale = useEnteringValue(0.98, 1);
+  const scrim = useEnteringValue(0, 1);
+  const present = usePresenceTracks(
+    [
+      { value: glass, shown: 1, hidden: 0, enter: reduced ? none : POP_IN, leave: reduced ? none : POP_OUT },
+      { value: scale, shown: 1, hidden: 0.98, enter: reduced ? none : POP_IN, leave: reduced ? none : POP_OUT },
+      { value: scrim, shown: 1, hidden: 0, enter: reduced ? none : FADE_IN, leave: reduced ? none : POP_OUT },
+    ],
+    String(reduced),
+  );
 
   const execute = async (item: PaletteItem) => {
     if (item.disabled || busy) return;
@@ -617,14 +632,16 @@ function PaletteDialog({ session, intent, host }: { session: number; intent: Pal
   const empty = view?.build ? (query.trim() ? "Add a project to give agents a goal." : `Say what should get done. The orchestrator plans it and spins up agents${target ? ` in ${targetLabel(target, machineCount)}` : ""}.`) : query.startsWith(">") ? "No matching actions." : "Nothing matches.";
 
   return (
-    <div className="fixed inset-0 z-[60]" data-palette>
-      <div className={`palette-backdrop absolute inset-0 transition-opacity duration-200 ${leaving ? "opacity-0" : "fade-in"}`} onPointerDown={close} aria-hidden />
+    // Leaving, it's inert: a click lands on what's behind it at once.
+    <div className={`fixed inset-0 z-[60] ${present ? "" : "pointer-events-none"}`} data-palette data-state={present ? "open" : "closing"} inert={!present} aria-hidden={!present || undefined}>
+      <motion.div className="palette-backdrop absolute inset-0" style={{ opacity: scrim }} onPointerDown={close} aria-hidden />
       <div className="pointer-events-none absolute inset-0 flex flex-col items-center px-3 pt-[max(1rem,4vh)] sm:pt-[12vh]">
-        <div
+        <motion.div
           role="dialog"
           aria-modal="true"
           aria-label="Command palette"
-          className={`palette-glass pointer-events-auto flex max-h-[min(30rem,80vh)] min-h-0 w-full max-w-xl flex-col overflow-hidden rounded-2xl text-fg transition-[opacity,scale] duration-150 ease-in ${leaving ? "scale-[0.98] opacity-0" : "palette-in"}`}
+          className="palette-glass pointer-events-auto flex max-h-[min(30rem,80vh)] min-h-0 w-full max-w-xl flex-col overflow-hidden rounded-2xl text-fg"
+          style={{ opacity: glass, scale }}
         >
           <div className="flex items-center gap-2 px-3.5">
             {view ? (
@@ -708,7 +725,7 @@ function PaletteDialog({ session, intent, host }: { session: number; intent: Pal
             </span>
             {!view && <span className="ml-auto truncate text-subtle">Type a goal to hand it to agents</span>}
           </div>
-        </div>
+        </motion.div>
       </div>
     </div>
   );

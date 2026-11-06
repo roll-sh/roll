@@ -61,7 +61,9 @@ export function closePalette() {
   if (back)
     setTimeout(() => {
       const a = document.activeElement;
-      if (back.isConnected && (!a || a === document.body) && lastInputWasKeyboard()) back.focus({ preventScroll: true });
+      // Focus left in the palette as it fades out (inert) is lost too.
+      const lost = !a || a === document.body || !!a.closest("[data-palette][data-state=closing]");
+      if (back.isConnected && lost && lastInputWasKeyboard()) back.focus({ preventScroll: true });
     }, 0);
 }
 

@@ -40,7 +40,8 @@ export function Menu({
         open={open}
         onOpenChange={(o) => {
           setOpen(o);
-          if (!o) setArmed(null);
+          // Disarmed as it opens, not as it closes: "Delete thread?" turned back into "Delete" while the menu faded.
+          if (o) setArmed(null);
         }}
       >
         <MenuTrigger

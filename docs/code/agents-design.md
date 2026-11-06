@@ -262,7 +262,8 @@ Text levels: `--fg` `#f7f8f8`, `--soft` `#d0d6e0` (secondary body), `--muted` `#
 | phone sheets | the conversation, settings and automations slide over the canvas from the right edge, the sidebar from the left; back out the same way |
 | a page in the automations sheet | `.stack-push` (deeper, from 24px right) / `.stack-pop` (back, from 24px left), fade, 220ms on the drawer curve; a tab on the same level doesn't move |
 | popovers and menus | scale 0.98 → 1 plus fade, 150ms, `--ease-out-soft` `(0.23,1,0.32,1)`, from the trigger |
-| palette and dialogs | scale 0.98 plus fade, 200ms on the drawer curve, with the scrim fading in over 200ms |
+| palette and dialogs | scale 0.98 plus fade, 200ms on the drawer curve, with the scrim fading in over 200ms; out the same way over 170ms (`POP_OUT`), inert, however it closes |
+| disclosures (`Collapse`) | the height eases open and shut (200ms); shutting folds what it showed, then unmounts it; it clips from the first frame |
 | hover and colour | 150ms; buttons press to scale 0.97 |
 | cards | ease to their layout slot (spring-like, 0.22 per frame); new cards grow from their parent |
 | state loops | the busy border and pulse dots breathe over 1.6s; shimmer runs 1.8s; no flashing |

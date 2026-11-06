@@ -69,7 +69,8 @@ export function ShelfControl({ data, focused, phone }: { data: AgentsData; focus
         aria-label="Shelf"
         className={`flex-col overflow-hidden text-[12.5px] ${phone ? "w-[calc(100vw-1rem)]" : "w-[400px]"}`}
       >
-        {shelf.open && <ShelfPanel data={data} project={shelf.project} tab={shelf.tab} phone={phone} />}
+        {/* Kept while the popup fades out (Base UI unmounts it after): it closed to an empty box. */}
+        <ShelfPanel data={data} project={shelf.project} tab={shelf.tab} phone={phone} />
       </PopoverPopup>
     </Popover>
   );

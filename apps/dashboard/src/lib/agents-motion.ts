@@ -24,5 +24,9 @@ export const LEAVE: Transition = { duration: 0.26, ease: EASE_LEAVE };
 export const FADE_OUT: Transition = { duration: 0.16, delay: 0.1, ease: "easeIn" };
 /** Fading in as something slides in. */
 export const FADE_IN: Transition = { duration: 0.2, ease: "easeOut" };
+/** The palette and dialogs: scale 0.98 → 1 with a fade, on the drawer curve. */
+export const POP_IN: Transition = { duration: 0.2, ease: EASE_DRAWER };
+/** …and back out: a touch quicker, but long enough to be seen going. */
+export const POP_OUT: Transition = { duration: 0.17, ease: "easeIn" };
 /** One pane replacing another in the same frame. */
 export const PANE_SWITCH: Transition = { duration: 0.2, ease: EASE_OUT_SOFT };
