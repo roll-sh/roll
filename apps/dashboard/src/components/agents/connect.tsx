@@ -33,11 +33,12 @@ export function useInstallLine(): string {
 
 const OS_NAMES: Record<string, string> = { macos: "macOS", linux: "Linux", windows: "Windows", freebsd: "FreeBSD" };
 
-/** "ada-mbp (macOS)": what a pending login says it is. */
+/** "ada-laptop (ada-mbp, macOS)": what a pending login will be called (`--name`, else its hostname), and what it is. */
 export function machineLabel(p: Pick<PendingLogin, "name" | "hostname" | "os">): string {
-  const who = p.hostname?.replace(/\.local$/, "") || p.name;
-  const os = p.os ? (OS_NAMES[p.os] ?? p.os) : null;
-  return os ? `${who} (${os})` : who;
+  const host = p.hostname?.replace(/\.local$/, "") || null;
+  const who = p.name || host || "A machine";
+  const about = [host !== who && host, p.os && (OS_NAMES[p.os] ?? p.os)].filter(Boolean);
+  return about.length ? `${who} (${about.join(", ")})` : who;
 }
 
 /** Owners the signed-in caller can connect machines to: itself, or every owner for the admin. */

@@ -10,7 +10,7 @@ vi.mock("@/lib/agents-api", async (orig) => ({ ...(await orig()), agentsApi: age
 
 import { ConnectAgents } from "./connect";
 
-const pending = { user_code: "WXYZ-2345", name: "ada-mbp", hostname: "ada-mbp.local", os: "macos", created_at: 0, expires_at: 900_000 };
+const pending = { user_code: "WXYZ-2345", name: "ada-laptop", hostname: "ada-mbp.local", os: "macos", created_at: 0, expires_at: 900_000 };
 
 describe("ConnectAgents", () => {
   beforeEach(() => {
@@ -24,7 +24,7 @@ describe("ConnectAgents", () => {
     agents.approveLogin.mockResolvedValue(undefined);
     render(<ConnectAgents code="WXYZ-2345" />);
     expect(screen.getByText("WXYZ-2345")).toBeInTheDocument();
-    expect(await screen.findByText("Approve ada-mbp (macOS)?")).toBeInTheDocument();
+    expect(await screen.findByText("Approve ada-laptop (ada-mbp, macOS)?")).toBeInTheDocument();
     expect(agents.pendingLogin).toHaveBeenCalledWith("acme", "WXYZ-2345");
     await waitFor(() => expect(screen.getByRole("combobox", { name: "Owner" })).toHaveTextContent("acme"));
     await userEvent.type(screen.getByRole("textbox", { name: "Machine name" }), "ada-mbp");
