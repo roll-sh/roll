@@ -1383,7 +1383,7 @@ appears on the canvas like any other machine (`Machine.sandbox`: backend, size, 
 the product for people who don't want to connect their own machine: 3¢ per running hour for a
 2 vCPU / 4 GB (`standard`; `large` 6¢, `xlarge` 10¢; sizes are priced in config), and it runs only
 while its agents work: it sleeps when idle and wakes when an agent needs it ("Sleep and wake" below).
-Prices are integer US cents per running hour (`hourly_cents`), and that is what's charged. Code: `code-control/src/agents/sandbox/`;
+Prices are integer US cents per running hour (`hourly_cents`), and that is what's charged, from the first time its daemon connects: a sandbox that never reaches roll is never billed. Code: `code-control/src/agents/sandbox/`;
 routes: docs/code/http-api.md, "Sandboxes".
 
 - **Backends** implement `SandboxBackend` (create, find by roll's id, status, start, stop, delete;

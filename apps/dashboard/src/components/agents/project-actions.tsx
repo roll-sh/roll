@@ -182,7 +182,7 @@ function SandboxForProject({ project }: { project: Project }) {
       if (started) return;
       started = true;
       stop();
-      show({ at: "failed", step: 1, error: "It hasn't connected to roll in 3 minutes, so roll can't clone into it yet. Keep waiting, or delete it: it's billed while it runs. If it comes up later, add the project from its card on the canvas.", machine: client.data.machines.get(machine)?.value });
+      show({ at: "failed", step: 1, error: "It hasn't connected to roll in 3 minutes, so roll can't clone into it yet. Keep waiting, or delete it. It isn't billed until it connects. If it comes up later, add the project from its card on the canvas.", machine: client.data.machines.get(machine)?.value });
     }, CONNECT_WAIT_MS);
     const off = client.subscribe(check);
     const stop = () => {
@@ -265,7 +265,7 @@ function SandboxForProject({ project }: { project: Project }) {
           {phase.error}
         </p>
       )}
-      {/* It never connected: wait on, or delete it (it was a dead end, then slept and billed). */}
+      {/* It never connected: wait on, or delete it (it was a dead end). */}
       {phase.at === "failed" && phase.step === 1 && phase.machine && (
         <NotConnected
           machine={phase.machine}

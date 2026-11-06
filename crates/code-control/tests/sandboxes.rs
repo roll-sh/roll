@@ -295,6 +295,9 @@ async fn a_sandbox_runs_on_agent37_from_create_to_delete() {
     let sealed: Option<String> = w.a.code.db.sql().query_row("SELECT sealed FROM agent_sandboxes WHERE id = ?", [&id], |r| r.get(0)).unwrap();
     assert_eq!(sealed, None);
     assert_eq!(w.machine(&machine).await.unwrap()["sandbox"]["status"], "running");
+    // Running but never connected: not billed (a few looks go by).
+    tokio::time::sleep(Duration::from_millis(350)).await;
+    assert_eq!(w.metered_ms().await, 0, "billed before its daemon connected");
 
     // The token the sandbox got opens the relay link as its machine.
     let (_daemon, _) = Daemon::connect(&w.url, &token).await;

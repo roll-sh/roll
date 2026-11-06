@@ -232,8 +232,14 @@ pub fn create(db: &code_sql::Db, n: &NewSandbox<'_>) -> code_sql::Result<Created
     })
 }
 
-/// Add `[from, to)` of running time to the sandbox's months.
+/// Add `[from, to)` of running time to the sandbox's months, once its daemon has connected: a
+/// sandbox that never reached roll was of no use, so its running time isn't billed (the caller
+/// still moves `metered_at` on, so the wait isn't billed when it connects later).
 fn meter(c: &Conn<'_>, s: &SandboxRow, from: i64, to: i64) -> code_sql::Result<()> {
+    let connected = c.query_row("SELECT 1 FROM agent_machines WHERE id = ? AND last_seen IS NOT NULL", [&s.machine_id], |_| Ok(())).optional()?.is_some();
+    if !connected {
+        return Ok(());
+    }
     for (month, ms) in super::split_by_month(from, to) {
         c.execute(
             "INSERT INTO agent_sandbox_usage (sandbox_id, month, owner_id, size, hourly_cents, running_ms) VALUES (?, ?, ?, ?, ?, ?) \

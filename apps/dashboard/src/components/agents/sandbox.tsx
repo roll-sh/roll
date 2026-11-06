@@ -191,7 +191,11 @@ export function SandboxPanel({ machine }: { machine: Machine }) {
           <span className="font-mono text-muted">{used.running_hours.toFixed(1)} h</span> this month · <span className="font-mono text-muted">{dollars(used.price_usd)}</span>
         </p>
       )}
-      {status === "creating" && <p className="text-[11.5px] text-subtle">Booting. It connects on its own in a minute or so.</p>}
+      {status === "creating" && <p className="text-[11.5px] text-subtle">Booting. It connects on its own in a minute or so, and isn't billed until it does.</p>}
+      {/* Up, but its daemon never said hello: the server bills nothing until it does. */}
+      {status === "running" && !machine.online && !machine.last_seen && (
+        <p className="text-[11.5px] text-subtle">Running, but it hasn't connected to roll yet, so it isn't billed. If that takes more than a few minutes, it can't reach this roll server (a network or firewall between them).</p>
+      )}
       {asleep && <p className="text-[11.5px] text-subtle">Wakes when an agent needs it. Asleep, it isn't billed.</p>}
       {sb?.error && <p className="text-[11.5px] text-danger">{sb.error}</p>}
       {confirm && sb && services && (
