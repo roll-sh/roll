@@ -15,8 +15,12 @@ import { useAgents, useAgentsSnapshot, usePrefs } from "./use-agents";
 const ADD = "+";
 /** Its popups (portaled out of the form): the model picker, a picker's option menu, the project list. */
 const OWN_POPUPS = "[data-base-ui-portal], [data-model-picker], [data-option-menu], [role=listbox]";
-/** The open and close: T3's ease-out, height and radius together. */
-const EASE = "duration-[240ms] ease-[cubic-bezier(0.23,1,0.32,1)] motion-reduce:transition-none";
+/**
+ * The open and close, height and radius together, on the emphasized ease-out (0.2, 0, 0, 1): seen
+ * moving over its whole 240 ms. T3's (0.23, 1, 0.32, 1) was 78% of the way in 60 ms, so the bar read
+ * as jumping open and its radius as changing at once (the user's complaint; filmed in shots/motion2).
+ */
+const EASE = "duration-[240ms] ease-[cubic-bezier(0.2,0,0,1)] motion-reduce:transition-none";
 const KINDS = [
   ["orchestrate", "Orchestrate", Workflow, "An orchestrator plans it and spins up agents"],
   ["agent", "One agent", Bot, "One agent with this as its prompt"],

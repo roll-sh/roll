@@ -193,7 +193,8 @@ describe("pinned cards", () => {
     const pinned = screen.getByRole("region", { name: "Pinned conversation Upgrade to Next 16.4" });
     // The request is answered inside the card, not beside the thread.
     expect(within(pinned).getByRole("button", { name: "Approve" })).toBeInTheDocument();
-    expect(screen.queryByLabelText("Waiting for you")).toBeNull();
+    // (A card leaving the canvas fades out first.)
+    await waitFor(() => expect(screen.queryByLabelText("Waiting for you")).toBeNull());
     expect(within(pinned).getByRole("textbox")).toBeInTheDocument();
     await waitFor(() => expect(lastSaved(services)).toMatchObject({ views: [{ id: "v_waiting", pins: [{ kind: "conversation", id: "thr_2", w: 520, h: 600 }] }, { id: "v_running" }] }));
     // Only on that view.
@@ -445,12 +446,12 @@ describe("the display menu", () => {
 
     expect(screen.getByLabelText("Machine ada-mbp")).toBeInTheDocument();
     await userEvent.click(within(menu).getByRole("button", { name: "Project" }));
-    expect(screen.queryByLabelText("Machine ada-mbp")).toBeNull();
+    await waitFor(() => expect(screen.queryByLabelText("Machine ada-mbp")).toBeNull());
     expect(screen.getByLabelText("Project roll")).toBeInTheDocument();
 
     expect(screen.getByLabelText("Terminal zsh")).toBeInTheDocument();
     await userEvent.click(within(menu).getByRole("switch", { name: "Terminals" }));
-    expect(screen.queryByLabelText("Terminal zsh")).toBeNull();
+    await waitFor(() => expect(screen.queryByLabelText("Terminal zsh")).toBeNull());
 
     expect(card("Docs pass")).toBeInTheDocument();
     await userEvent.click(within(menu).getByRole("switch", { name: "Idle threads" }));

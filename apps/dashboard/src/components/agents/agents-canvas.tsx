@@ -41,6 +41,9 @@ import {
   type View,
 } from "@/lib/agents-layout";
 import { CanvasEngine, type SceneEdge, type SceneMeta } from "./canvas-engine";
+import { AnimatePresence, motion, useMotionValue, type Transition } from "motion/react";
+import { CARD_OUT, POPOVER_IN } from "@/lib/agents-motion";
+import { usePresenceTracks } from "./presence";
 
 export interface CanvasHandle {
   /** Pan (and zoom) so a node is in view; `zoom` sets the scale. */
@@ -539,7 +542,7 @@ export const AgentsCanvas = forwardRef<
     const root = world.current;
     if (!root) return;
     const apply = () => {
-      for (const slot of root.querySelectorAll<HTMLElement>("[data-card]")) rove(slot, slot.dataset.key === entry);
+      for (const slot of root.querySelectorAll<HTMLElement>("[data-card]")) rove(slot, slot.dataset.key === entry && !slot.hasAttribute("data-leaving"));
     };
     apply();
     // Cards render their insides on their own (a request's answers, a terminal): keep up.
@@ -707,11 +710,14 @@ export const AgentsCanvas = forwardRef<
           if (k && k !== current) setCurrent(k);
         }}
       >
-        {[...graph.nodes.values()].map((n) => (
-          <CardSlot key={n.key} node={n} engine={engine} selected={n.key === selected || !!highlighted?.includes(n.key)}>
-            {render(n)}
-          </CardSlot>
-        ))}
+        {/* A card that leaves the graph fades and shrinks where it was before it unmounts (it was gone in a frame). */}
+        <AnimatePresence initial={false}>
+          {[...graph.nodes.values()].map((n) => (
+            <CardSlot key={n.key} node={n} engine={engine} selected={n.key === selected || !!highlighted?.includes(n.key)}>
+              {render(n)}
+            </CardSlot>
+          ))}
+        </AnimatePresence>
       </div>
       {overlay}
       {ghost && <LaunchGhost {...ghost} />}
@@ -851,9 +857,24 @@ function ToolButton({ label, onClick, pressed, children }: { label: string; onCl
   );
 }
 
-/** A card's slot in the world layer; the engine positions it. */
+/**
+ * A card's slot in the world layer; the engine positions it. It comes in with `.rise`; leaving the
+ * graph, it stays where it was, inert and out of the pointer's way, fading and shrinking to 0.96
+ * over 160 ms, then unmounts; back while it goes, it turns around.
+ */
 function CardSlot({ node, engine, selected, children }: { node: GraphNode; engine: React.RefObject<CanvasEngine | null>; selected: boolean; children: ReactNode }) {
   const el = useRef<HTMLDivElement>(null);
+  const reduced = useReducedMotion();
+  const fade = useMotionValue(1);
+  const scale = useMotionValue(1);
+  const none: Transition = { duration: 0 };
+  const present = usePresenceTracks(
+    [
+      { value: fade, shown: 1, hidden: 0, enter: reduced ? none : POPOVER_IN, leave: reduced ? none : CARD_OUT },
+      { value: scale, shown: 1, hidden: 0.96, enter: reduced ? none : POPOVER_IN, leave: reduced ? none : CARD_OUT },
+    ],
+    String(reduced),
+  );
   useLayoutEffect(() => {
     const e = engine.current;
     const d = el.current;
@@ -867,7 +888,10 @@ function CardSlot({ node, engine, selected, children }: { node: GraphNode; engin
       data-card
       data-key={node.key}
       data-kind={node.kind}
-      data-selected={selected || undefined}
+      data-selected={(present && selected) || undefined}
+      data-leaving={!present || undefined}
+      inert={!present}
+      aria-hidden={!present || undefined}
       tabIndex={-1}
       onPointerDown={(e) => {
         // A tap shows this card's tools on a touch screen (globals.css, `data-tapped`): not
@@ -876,10 +900,12 @@ function CardSlot({ node, engine, selected, children }: { node: GraphNode; engin
         for (const t of document.querySelectorAll("[data-card][data-tapped]")) if (t !== e.currentTarget) t.removeAttribute("data-tapped");
         e.currentTarget.setAttribute("data-tapped", "");
       }}
-      className="absolute top-0 left-0 rounded-xl outline-hidden focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent/70"
+      className={`absolute top-0 left-0 rounded-xl outline-hidden focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent/70 ${present ? "" : "pointer-events-none"}`}
       style={{ transform: "translate3d(-99999px,0,0)" }}
     >
-      <div className="rise">{children}</div>
+      <motion.div style={{ opacity: fade, scale }}>
+        <div className="rise">{children}</div>
+      </motion.div>
     </div>
   );
 }

@@ -206,7 +206,7 @@ export function requestView(r: ViewRequest) {
  * in the filter field goes there.
  */
 export function firstShownCard(root: ParentNode = document): HTMLElement | null {
-  const cards = [...root.querySelectorAll<HTMLElement>('[data-card][data-key^="t:"]')];
+  const cards = [...root.querySelectorAll<HTMLElement>('[data-card][data-key^="t:"]:not([data-leaving])')];
   const at = (el: HTMLElement) => el.getBoundingClientRect();
   cards.sort((a, b) => at(a).top - at(b).top || at(a).left - at(b).left);
   return cards[0] ?? null;

@@ -36,3 +36,5 @@ export const PANE_SWITCH: Transition = { duration: 0.2, ease: EASE_OUT_SOFT };
 export const POPOVER_IN: Transition = { duration: 0.15, ease: EASE_OUT_SOFT };
 /** …and closing, a touch quicker. */
 export const POPOVER_OUT: Transition = { duration: 0.12, ease: "easeIn" };
+/** A canvas card leaving the graph: it fades and shrinks where it was. */
+export const CARD_OUT: Transition = { duration: 0.16, ease: "easeIn" };

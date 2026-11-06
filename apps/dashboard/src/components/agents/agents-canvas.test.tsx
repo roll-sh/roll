@@ -156,3 +156,31 @@ describe("the canvas grows right or down", () => {
     expect(edgeList({ x: 0, y: 0 }, { x: 10, y: 50 }, 1).at(0.99).y).toBe(50);
   });
 });
+
+describe("a card leaving the canvas", () => {
+  const without = (key: string): Graph => ({ ...graph, nodes: new Map([...graph.nodes].filter(([k]) => k !== key)) });
+  const slot = (key: string) => document.querySelector<HTMLElement>(`[data-card][data-key="${key}"]`);
+  const canvas = (g: Graph) => <AgentsCanvas graph={g} storageKey="o" render={(n) => <button data-drag>{n.key}</button>} defaultSize={() => ({ w: 100, h: 40 })} />;
+
+  it("stays where it was, inert, hidden and out of the pointer's way while it fades, then goes", async () => {
+    const { rerender } = render(canvas(graph));
+    const b = slot("b")!;
+    rerender(canvas(without("b")));
+    expect(slot("b")).toBe(b);
+    expect(b).toHaveAttribute("data-leaving");
+    expect(b).toHaveAttribute("inert");
+    expect(b).toHaveClass("pointer-events-none");
+    expect(screen.queryByRole("button", { name: "b" })).toBeNull();
+    await waitFor(() => expect(slot("b")).toBeNull());
+  });
+
+  it("back while it fades, it's the same card, live again", () => {
+    const { rerender } = render(canvas(graph));
+    const b = slot("b")!;
+    rerender(canvas(without("b")));
+    rerender(canvas(graph));
+    expect(slot("b")).toBe(b);
+    expect(b).not.toHaveAttribute("data-leaving");
+    expect(b).not.toHaveAttribute("inert");
+  });
+});
