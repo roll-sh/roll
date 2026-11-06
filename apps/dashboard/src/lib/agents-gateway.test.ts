@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Command, GatewaySettings, LogEntry, UsageRow } from "./agents-api";
 import { AgentsClient } from "./agents-client";
 import { DemoOwner } from "./agents-demo";
-import { checkSettings, createGatewayApi, gatewayOn, isIPv6, listenError, LOOPBACK, mergeLog, OTHER, reachProblem, stackUsage, urlChoices, urlFor } from "./agents-gateway";
+import { checkSettings, createGatewayApi, gatewayOn, isIPv6, joinProviders, listenError, LOOPBACK, mergeLog, OTHER, reachProblem, stackUsage, urlChoices, urlFor } from "./agents-gateway";
 import { ApiError } from "./code-api";
 
 const PUB = "KMIZzg7UJuV-Nxs3gUarEXCHzKlAkKSSSCaXrdLz4zg";
@@ -64,6 +64,19 @@ describe("reaching the gateway", () => {
     expect(reachProblem(m("mch_x"), { host: "mch_h" })).toMatch(/Add an address/);
     expect(reachProblem(m("mch_x", "agent37"), plan)).toMatch(/hosted sandbox/);
     expect(reachProblem(m("mch_x", "docker"), plan)).toBeNull();
+  });
+
+  it("joins without the providers another endpoint serves, unless they're moved", () => {
+    const providers = [{ id: "claude", name: "Claude Code" }, { id: "codex", name: "Codex" }];
+    const proxy = { id: "cpa", name: "CLIProxy", kind: "openai", base_url: "http://cpa:8317", providers: ["claude"], key: "sealed" };
+    const gw = { ...proxy, id: "roll-gateway", providers: ["codex"] };
+    const with_ = (endpoints: unknown[]) => ({ ...m("mch_x"), info: { providers, settings: { endpoints } } }) as unknown as Parameters<typeof joinProviders>[0];
+    // Nothing elsewhere (the gateway's own endpoint doesn't count): every provider, as before.
+    expect(joinProviders(with_([gw]), new Set())).toBeUndefined();
+    // Claude Code stays on the proxy; moved, it joins too; nothing left, nothing joins.
+    expect(joinProviders(with_([proxy]), new Set())).toEqual(["codex"]);
+    expect(joinProviders(with_([proxy]), new Set(["claude"]))).toBeUndefined();
+    expect(joinProviders(with_([proxy, { ...proxy, id: "other", providers: ["codex"] }]), new Set())).toEqual([]);
   });
 });
 

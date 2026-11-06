@@ -21,7 +21,7 @@
 import { Check, ChevronLeft, Plus, Server, Trash2, X } from "lucide-react";
 import { useMemo, useState } from "react";
 import { GATEWAY_PORT, reachable, type GatewayPlan, type GatewaySettings, type GatewayUrl, type KeyChange, type Machine, type UpstreamCheck, type UpstreamSpec } from "@/lib/agents-api";
-import { checkSettings, checkUrl, gatewayOn, isIPv4, isIPv6, listenError, reachProblem, upstreamKeyChange, upstreamUrl, URL_LABELS, urlChoices, urlFor } from "@/lib/agents-gateway";
+import { checkSettings, checkUrl, gatewayOn, isIPv4, isIPv6, joinProviders, listenError, onOtherEndpoints, reachProblem, upstreamKeyChange, upstreamUrl, URL_LABELS, urlChoices, urlFor } from "@/lib/agents-gateway";
 import { machineKind } from "@/lib/agents-identity";
 import { MachineIcon } from "../identity";
 import { field, Note } from "../settings-ui";
@@ -90,7 +90,10 @@ export function GatewaySetup({
   const [keys, setKeys] = useState<Map<string, KeyChange>>(new Map());
   const [editing, setEditing] = useState<number | "new" | null>(null);
   const [addresses, setAddresses] = useState<Address[]>([]);
-  const [members, setMembers] = useState<Map<string, { on: boolean; url?: string }>>(new Map());
+  // Per machine: whether it joins, at which address, and which providers it moves off the
+  // endpoints they use now (none unless asked: joining took them silently).
+  const [members, setMembers] = useState<Map<string, { on: boolean; url?: string; move?: ReadonlySet<string> }>>(new Map());
+  const movedOf = (m: Machine) => members.get(m.id)?.move ?? new Set<string>();
   const [newSandboxes, setNewSandboxes] = useState(false);
   const [fallback, setFallback] = useState(false);
   const [phases, setPhases] = useState<Phase[]>([]);
@@ -166,8 +169,13 @@ export function GatewaySetup({
     });
     for (const m of chosen) {
       const url = members.get(m.id)?.url ?? urlChoices(plan, GATEWAY_PORT, m.id)[0]?.url;
+      const providers = joinProviders(m, movedOf(m));
+      if (providers?.length === 0) {
+        await step(`${m.name} keeps its endpoints`, async () => "every provider there stays on the endpoint it uses");
+        continue;
+      }
       await step(`${m.name} uses it`, async () => {
-        await services.gateway!.join(owner, { machine: m.id, ...(url ? { url } : {}) });
+        await services.gateway!.join(owner, { machine: m.id, ...(url ? { url } : {}), ...(providers ? { providers } : {}) });
         const after = await services.gateway!.get(owner);
         const member = after?.members?.find((x) => x.machine === m.id);
         if (after) onDone(after);
@@ -330,12 +338,13 @@ export function GatewaySetup({
                               className="w-44"
                               disabled={!on}
                               value={members.get(m.id)?.url ?? choices[0].url}
-                              onChange={(url) => setMembers((all) => new Map(all).set(m.id, { on, url }))}
+                              onChange={(url) => setMembers((all) => new Map(all).set(m.id, { ...all.get(m.id), on, url }))}
                               options={choices.map((c) => ({ value: c.url, label: c.label, hint: c.url }))}
                             />
                           )}
                         </div>
                         {why && <p className="mt-1 pl-6 text-[11.5px] text-subtle">{why}</p>}
+                        {on && !blocked && <TakenProviders machine={m} moved={movedOf(m)} onChange={(move) => setMembers((all) => new Map(all).set(m.id, { ...all.get(m.id), on, move }))} />}
                       </li>
                     );
                   })}
@@ -484,3 +493,36 @@ export function Addresses({ addresses, onChange, hostName, port = GATEWAY_PORT }
 }
 
 export type { Address };
+
+/**
+ * A member's providers that another endpoint serves now (a CLIProxyAPI, say): they stay there unless
+ * ticked, since a provider uses one endpoint and joining would take them from it.
+ */
+function TakenProviders({ machine, moved, onChange }: { machine: Machine; moved: ReadonlySet<string>; onChange: (move: ReadonlySet<string>) => void }) {
+  const taken = onOtherEndpoints(machine);
+  if (!taken.length) return null;
+  return (
+    <ul className="mt-1.5 space-y-1 pl-6 text-[11.5px] text-subtle" aria-label={`${machine.name}: providers on other endpoints`}>
+      {taken.map((t) => (
+        <li key={t.provider}>
+          <label className="flex items-center gap-2">
+            <input
+              type="checkbox"
+              checked={moved.has(t.provider)}
+              onChange={(e) => {
+                const next = new Set(moved);
+                if (e.target.checked) next.add(t.provider);
+                else next.delete(t.provider);
+                onChange(next);
+              }}
+              className="accent-[var(--accent)]"
+            />
+            <span>
+              {t.name} uses <span className="text-muted">{t.endpoint}</span> here: {moved.has(t.provider) ? "moves to the gateway" : "stays on it"}
+            </span>
+          </label>
+        </li>
+      ))}
+    </ul>
+  );
+}

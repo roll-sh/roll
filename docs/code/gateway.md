@@ -132,6 +132,10 @@ A member machine has an ordinary endpoint (agents.md, "Endpoints"):
   relay spawns the join on the node holding the owner's agents lease. A sandbox roll hosts elsewhere
   (a backend other than `docker`) has no route to the gateway ("Reachability"): the relay never
   joins it, and a join asked for by hand is refused (409) with why.
+- **Providers on another endpoint.** A provider uses one endpoint on a machine, so joining with it
+  takes it from the endpoint it uses (a CLIProxyAPI, say). The setup wizard lists those per machine
+  and joins without them unless the owner ticks them (`GatewayJoin.providers`); a machine whose
+  every provider stays where it is doesn't join.
 
 ## Reachability
 

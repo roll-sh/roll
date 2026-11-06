@@ -14,7 +14,7 @@
 import { Table2 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { Machine, UsageBy, UsageReport } from "@/lib/agents-api";
-import { compact, formatMetric, niceMax, OTHER, stackUsage, usageTotals, usd, type UsageMetric } from "@/lib/agents-gateway";
+import { axisTick, compact, formatMetric, niceMax, OTHER, rowsInRange, stackUsage, usageTotals, usd, type UsageMetric } from "@/lib/agents-gateway";
 import type { GatewayCommands } from "@/lib/agents-gateway";
 import { cn, Segmented, Select } from "../ui";
 import { useAgents, useAgentsSnapshot } from "../use-agents";
@@ -98,7 +98,8 @@ export function UsageCharts({ gw, upstreamName }: { gw: GatewayCommands; upstrea
   };
   const stack = useMemo(() => (report ? stackUsage(report, metric) : null), [report, metric]);
   const colour = useColours(stack?.series.map((s) => s.key) ?? [], by);
-  const totals = useMemo(() => usageTotals(report?.rows ?? []), [report]);
+  // The same rows as the chart: the tiles said 2 requests while the chart had nothing in range.
+  const totals = useMemo(() => usageTotals(report ? rowsInRange(report) : []), [report]);
 
   return (
     <div className="space-y-3">
@@ -132,7 +133,18 @@ export function UsageCharts({ gw, upstreamName }: { gw: GatewayCommands; upstrea
                 <span className="font-mono text-[11.5px] tabular-nums text-fg">{formatMetric(s.total, metric)}</span>
               </li>
             ))}
-            {stack.series.length === 0 && <li className="text-subtle">Nothing in this range yet.</li>}
+            {stack.series.length === 0 &&
+              (totals.requests > 0 && metric !== "requests" ? (
+                // Requests with no price (or no tokens counted): the measure is empty, not the range.
+                <li className="text-subtle">
+                  {compact(totals.requests)} {totals.requests === 1 ? "request" : "requests"} in this range, with no {metric === "cost" ? "price" : "tokens"} to show.{" "}
+                  <button type="button" onClick={() => setMetric("requests")} className="text-accent hover:underline">
+                    Show requests
+                  </button>
+                </li>
+              ) : (
+                <li className="text-subtle">Nothing in this range yet.</li>
+              ))}
           </ul>
           <button type="button" onClick={() => setTable((t) => !t)} aria-expanded={table} className="mt-2 flex h-6 items-center gap-1.5 rounded-md px-1.5 text-[11.5px] text-subtle hover:bg-fg/[0.06] hover:text-fg">
             <Table2 className="size-3" /> {table ? "Hide the table" : "Show as a table"}
@@ -191,7 +203,7 @@ function StackedColumns({ stack, metric, colour, name }: { stack: ReturnType<typ
           <g key={t}>
             <line x1={left} x2={width} y1={y(t)} y2={y(t)} stroke="var(--line)" strokeWidth={1} shapeRendering="crispEdges" />
             <text x={left - 8} y={y(t)} dy="0.32em" textAnchor="end" className="fill-subtle font-mono text-[10.5px] tabular-nums">
-              {formatMetric(t, metric)}
+              {axisTick(t, metric, max)}
             </text>
           </g>
         ))}

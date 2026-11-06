@@ -29,6 +29,7 @@ import {
   type LogEntry,
   type Machine,
   type MachineId,
+  type ProviderId,
   type Reply,
   type RouteSpec,
   type UpstreamKind,
@@ -451,6 +452,32 @@ export function urlFor(address: string, port: number): string {
 /** A sandbox roll hosts elsewhere (not Docker on the owner's computer): no route to the gateway. */
 export const hostedSandbox = (machine: Pick<Machine, "sandbox">): boolean => !!machine.sandbox && machine.sandbox.backend !== "docker";
 
+/**
+ * The providers of `machine` that another of its endpoints serves now. A provider uses one endpoint,
+ * so joining the gateway with them takes them from it (the daemon's `endpoint.set`): the wizard
+ * asks first.
+ */
+export function onOtherEndpoints(machine: Machine): { provider: ProviderId; name: string; endpoint: string }[] {
+  const names = new Map((machine.info?.providers ?? []).map((p) => [p.id, p.name]));
+  const out: { provider: ProviderId; name: string; endpoint: string }[] = [];
+  for (const e of machine.info?.settings?.endpoints ?? []) {
+    if (e.id === GATEWAY_LIMITS.endpointId) continue;
+    for (const p of e.providers ?? []) out.push({ provider: p, name: names.get(p) ?? p, endpoint: e.name || e.id });
+  }
+  return out;
+}
+
+/**
+ * What a machine joins the gateway with: every provider (unset), or, when some are on another
+ * endpoint, the others and those `moved` (an empty list: nothing joins).
+ */
+export function joinProviders(machine: Machine, moved: ReadonlySet<ProviderId>): ProviderId[] | undefined {
+  const taken = onOtherEndpoints(machine).filter((t) => !moved.has(t.provider));
+  if (!taken.length) return undefined;
+  const kept = new Set(taken.map((t) => t.provider));
+  return (machine.info?.providers ?? []).map((p) => p.id).filter((p) => !kept.has(p));
+}
+
 export function reachProblem(machine: Machine, plan: Pick<GatewayPlan, "host" | "urls">): string | null {
   if (machine.id === plan.host) return null;
   if (hostedSandbox(machine)) return "A hosted sandbox can't reach your computers: give it its own keys or login.";
@@ -547,10 +574,28 @@ const HOUR = 3_600_000;
  * The report as stacked columns: one per bucket from `from` to `to`, the `top` biggest groups by
  * `metric` and the rest folded into one series (so colours never cycle).
  */
-export function stackUsage(report: Pick<UsageReport, "rows" | "from" | "to" | "bucket">, metric: UsageMetric, top = 4): UsageStack {
+/** The report's buckets: what the chart has a column for (at most 400). */
+function buckets(report: Pick<UsageReport, "from" | "to" | "bucket">): { step: number; at: number[] } {
   const step = report.bucket === "hour" ? HOUR : DAY;
   const at: number[] = [];
   for (let t = Math.floor(report.from / step) * step; t < report.to && at.length < 400; t += step) at.push(t);
+  return { step, at };
+}
+
+/** The rows the chart draws (inside its buckets): the totals add up these, so the two agree. */
+export function rowsInRange(report: Pick<UsageReport, "rows" | "from" | "to" | "bucket">): UsageRow[] {
+  const { step, at } = buckets(report);
+  if (!at.length) return [];
+  const first = at[0];
+  const end = at[at.length - 1] + step;
+  return report.rows.filter((r) => {
+    const b = Math.floor(r.at / step) * step;
+    return b >= first && b < end;
+  });
+}
+
+export function stackUsage(report: Pick<UsageReport, "rows" | "from" | "to" | "bucket">, metric: UsageMetric, top = 4): UsageStack {
+  const { step, at } = buckets(report);
   const index = new Map(at.map((t, i) => [t, i]));
   const byKey = new Map<string, number[]>();
   for (const r of report.rows) {
@@ -621,3 +666,10 @@ export function usd(micros: number): string {
 }
 
 export const formatMetric = (v: number, m: UsageMetric) => (m === "cost" ? usd(v) : compact(v));
+
+/** An axis tick: under a cent, enough decimals that the ticks differ (they all read "<$0.01"). */
+export function axisTick(v: number, m: UsageMetric, max: number): string {
+  if (m !== "cost" || v === 0 || max / 1e6 >= 0.01) return formatMetric(v, m);
+  const digits = Math.min(6, Math.ceil(-Math.log10(max / 1e6)) + 1);
+  return `$${(v / 1e6).toFixed(digits)}`;
+}
