@@ -12,7 +12,7 @@
  */
 
 import { AlarmClock, AlarmClockOff, Archive, ArchiveRestore, Check, ChevronDown, Eraser, ChevronRight, MoreHorizontal, PanelLeft, PanelLeftClose, Plus, Trash2, Undo2, X } from "lucide-react";
-import { useCallback, useEffect, useId, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
+import { memo, startTransition, useCallback, useEffect, useId, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { reachable, type Command, type Machine, type MachineId, type Project, type Thread } from "@/lib/agents-api";
 import { openProjectDialog } from "@/lib/agents-project-dialogs";
 import {
@@ -52,6 +52,8 @@ const OPEN_KEY = "roll:agents:sidebar";
 type Parked = "snoozed" | "settled" | "archived";
 const SHELF_KEY = (shelf: Parked) => `roll:agents:sidebar:${shelf}-expanded`;
 const COLLAPSED_KEY = "roll:agents:sidebar:collapsed";
+/** Active rows rendered with the key press that opens the sidebar: more than a tall screen shows. */
+const FIRST_ROWS = 40;
 
 function stored(key: string): string | null {
   try {
@@ -531,11 +533,23 @@ export function ThreadsSidebar({
       return { ...s, [shelf]: !s[shelf] };
     });
 
-  const pick = (thread: string) => {
-    setAgentsView({ kind: "thread", thread });
-    if (phone) setOpen(false);
-  };
+  // Stable, so the rows (memoised: 200 of them) don't render again when the sidebar does.
+  const pick = useCallback(
+    (thread: string) => {
+      setAgentsView({ kind: "thread", thread });
+      if (phone) setOpen(false);
+    },
+    [phone, setOpen],
+  );
   const active = groups.reduce((n, g) => n + g.active.length, 0);
+  // Opening shows the first rows with the key press and fills in the rest in a transition (React
+  // renders it in slices): mounting 200 rows at once was one ~300 ms task.
+  const [filled, setFilled] = useState(false);
+  useEffect(() => {
+    if (!open) return setFilled(false);
+    startTransition(() => setFilled(true));
+  }, [open]);
+  let left = filled ? Infinity : FIRST_ROWS;
 
   return (
     <>
@@ -574,9 +588,13 @@ export function ThreadsSidebar({
             )}
             {groups.length === 0 && <EmptySidebar data={data} readOnly={readOnly} onAddMachine={onAddMachine} />}
             <ul aria-label="Projects">
-            {groups.map((g) => (
+            {groups.map((g) => {
+              const limit = left;
+              left -= g.active.length;
+              return (
               <ProjectGroup
                 key={g.project.id}
+                limit={Math.max(0, limit)}
                 group={g}
                 machine={data.machines.get(g.machine)?.value}
                 collapsed={collapsed.has(g.project.id)}
@@ -589,7 +607,8 @@ export function ThreadsSidebar({
                 now={now}
                 actions={actions}
               />
-            ))}
+              );
+            })}
             </ul>
           </nav>
         </EdgeSheet>
@@ -602,6 +621,7 @@ export function ThreadsSidebar({
 type Actions = ReturnType<typeof useInboxActions>;
 
 function ProjectGroup({
+  limit,
   group,
   machine,
   collapsed,
@@ -614,6 +634,8 @@ function ProjectGroup({
   now,
   actions,
 }: {
+  /** How many active rows to show yet (the sidebar fills in the rest just after opening). */
+  limit: number;
   group: ProjectInbox;
   machine: Machine | undefined;
   collapsed: boolean;
@@ -629,7 +651,12 @@ function ProjectGroup({
   const [settledShown, setSettledShown] = useState(SETTLED_FIRST);
   const list = useRef<HTMLUListElement>(null);
   useFlip(list);
-  const row = (r: InboxRow) => <ThreadRow key={r.thread.id} row={r} selected={r.thread.id === openThread} onPick={onPick} now={now} actions={actions} />;
+  // Rows filled in after opening were there all along: they just show, not fold open.
+  const shown = useRef(limit);
+  useEffect(() => {
+    shown.current = limit;
+  }, [limit]);
+  const row = (r: InboxRow, i = -1) => <ThreadRow key={r.thread.id} row={r} arrive={i < shown.current || limit <= shown.current} selected={r.thread.id === openThread} onPick={onPick} now={now} actions={actions} />;
   const isOpen = (r: InboxRow) => r.thread.id === openThread;
   const hidden = group.settled.length - settledShown;
   return (
@@ -659,7 +686,7 @@ function ProjectGroup({
         <ul ref={list} aria-label={`${group.project.name} threads`} className="mt-0.5 space-y-px">
           <AnimatePresence initial={false}>
             {[
-              ...group.active.map(row),
+              ...group.active.slice(0, limit).map((r, i) => row(r, i)),
               group.active.length === 0 && group.snoozed.length + group.settled.length + group.archived.length === 0 && (
                 <FoldLi key="empty" className="py-1 pl-8 text-[12px] text-subtle">
                   No threads
@@ -723,10 +750,22 @@ const STATUS_DOT: Record<RowStatus, string> = {
   done: "bg-ok",
 };
 
-function ThreadRow({ row, selected, onPick, now, actions }: { row: InboxRow; selected: boolean; onPick: (thread: string) => void; now: number; actions: Actions }) {
+type RowProps = { row: InboxRow; selected: boolean; onPick: (thread: string) => void; now: number; actions: Actions; arrive?: boolean };
+
+/**
+ * A row renders again only when what it shows changed: `inbox()` makes new row objects on every
+ * record of the stream, and with 200 threads rendering them all was most of opening the sidebar.
+ */
+const ThreadRow = memo(
+  ThreadRowBody,
+  (a: RowProps, b: RowProps) =>
+    a.row.thread === b.row.thread && a.row.shelf === b.row.shelf && a.row.status === b.row.status && a.row.at === b.row.at && a.selected === b.selected && a.onPick === b.onPick && a.now === b.now && a.actions === b.actions,
+);
+
+function ThreadRowBody({ row, selected, onPick, now, actions, arrive = true }: RowProps) {
   const t = row.thread;
   const [menu, setMenu] = useState(false);
-  const fold = useFold<HTMLLIElement>();
+  const fold = useFold<HTMLLIElement>(arrive);
   const quiet = row.status === null || row.shelf !== "active";
   const pill = row.status === "waiting" || row.status === "failed" || row.status === "woke" ? row.status : null;
   const meta =
@@ -752,7 +791,7 @@ function ThreadRow({ row, selected, onPick, now, actions }: { row: InboxRow; sel
       data-row
       data-flip={t.id}
       inert={fold.leaving}
-      className={`group/r relative flex h-[30px] items-center pointer-coarse:h-10 rounded-md transition-colors duration-150 ${selected ? "bg-fg/[0.07] text-fg inset-shadow-highlight" : "hover:bg-fg/[0.04]"} ${menu ? "bg-fg/[0.04]" : ""}`}
+      className={`group/r relative flex h-[30px] items-center [contain-intrinsic-size:auto_30px] [content-visibility:auto] pointer-coarse:h-10 pointer-coarse:[contain-intrinsic-size:auto_40px] rounded-md transition-colors duration-150 ${selected ? "bg-fg/[0.07] text-fg inset-shadow-highlight" : "hover:bg-fg/[0.04]"} ${menu ? "bg-fg/[0.04]" : ""}`}
     >
       <button type="button" onClick={() => onPick(t.id)} aria-current={selected ? "true" : undefined} className="flex h-full min-w-0 flex-1 items-center gap-2 rounded-md pr-1 pl-2.5 text-left outline-none focus-visible:ring-1 focus-visible:ring-accent/60 focus-visible:ring-inset" title={t.title}>
         <span className="grid size-3 shrink-0 place-items-center">
@@ -891,12 +930,7 @@ function RowMenu({
               Snooze
             </MenuSubTrigger>
             <MenuSubPopup className="w-60">
-              {snoozePresets(now).map((p) => (
-                <MenuItem key={p.label} onClick={() => void actions.snooze(thread, p.until)}>
-                  {p.label}
-                  <span className="ms-auto text-[11px] text-subtle">{p.when}</span>
-                </MenuItem>
-              ))}
+              <SnoozePresetItems now={now} onSnooze={(until) => void actions.snooze(thread, until)} />
               <MenuSeparator />
               <MenuItem onClick={() => onCustom()}>Custom…</MenuItem>
             </MenuSubPopup>
@@ -919,6 +953,16 @@ function RowMenu({
       </MenuPopup>
     </Menu>
   );
+}
+
+/** The presets, worked out only while the submenu is open (dates in words cost ~0.5 ms a row). */
+function SnoozePresetItems({ now, onSnooze }: { now: number; onSnooze: (until: number) => void }) {
+  return snoozePresets(now).map((p) => (
+    <MenuItem key={p.label} onClick={() => onSnooze(p.until)}>
+      {p.label}
+      <span className="ms-auto text-[11px] text-subtle">{p.when}</span>
+    </MenuItem>
+  ));
 }
 
 // ── custom snooze ──

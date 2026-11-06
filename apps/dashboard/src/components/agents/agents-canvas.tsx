@@ -114,7 +114,9 @@ export const AgentsCanvas = forwardRef<
   const order = shownOrder ?? ownOrder;
   // While a card is dragged: its siblings in the order it would drop into.
   const [preview, setPreview] = useState<{ parent: string; list: string[] } | null>(null);
-  const [zoom, setZoom] = useState(1);
+  // The zoom bar's "60%", written as the view moves: as state, every step of a zoom rendered the
+  // whole canvas (200 cards) again.
+  const zoomText = useRef<HTMLSpanElement>(null);
   const fitted = useRef(false);
   const viewChanged = useRef<((v: View) => void) | null>(null);
   const controlled = shownOrder !== undefined;
@@ -136,7 +138,8 @@ export const AgentsCanvas = forwardRef<
     const e = new CanvasEngine(container.current, canvas.current, world.current, {
       reducedMotion: reduced,
       onView: (v: View) => {
-        setZoom((z) => (Math.abs(z - v.k) > 0.005 ? v.k : z));
+        const text = `${Math.round(v.k * 100)}%`;
+        if (zoomText.current && zoomText.current.textContent !== text) zoomText.current.textContent = text;
         viewChanged.current?.(v);
       },
       onSizes: (changed) =>
@@ -147,6 +150,7 @@ export const AgentsCanvas = forwardRef<
         }),
     });
     engine.current = e;
+    if (zoomText.current) zoomText.current.textContent = `${Math.round(e.view.k * 100)}%`;
     // Cards mounted before the engine existed register now.
     world.current.querySelectorAll<HTMLElement>("[data-card]").forEach((el) => e.register(el.dataset.key!, el));
     // Follow light/dark switches.
@@ -731,7 +735,7 @@ export const AgentsCanvas = forwardRef<
           className="h-7 w-12 rounded-md text-center font-mono text-[11px] tabular-nums transition-colors duration-150 hover:bg-panel-2 hover:text-fg"
           title="Zoom to 100% (0)"
         >
-          {Math.round(zoom * 100)}%
+          <span ref={zoomText} />
         </button>
         <ToolButton label="Zoom in (+)" onClick={() => engine.current?.zoomBy(1.25)}>
           <Plus className="size-3.5" />

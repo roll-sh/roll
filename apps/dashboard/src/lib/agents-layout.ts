@@ -77,8 +77,8 @@ export const COMPACT_GAPS: Readonly<Record<Direction, Gaps>> = {
  * Top-left corners for every node reachable from the roots, so that no two cards ever overlap.
  *
  * Growing right, it's a tidy tree: each subtree takes the height of its children stacked (or its
- * own, if taller) and its root sits centred on them; depths are columns as wide as their widest
- * card, so cards line up.
+ * own, if taller) and its root sits centred on them (beside the first ones of a long column); depths
+ * are columns as wide as their widest card, so cards line up.
  *
  * Growing down, it's a board: what spreads (the roots, a machine's projects) sits side by side in
  * rows as tall as their tallest card, its parent centred over them; everything else lists its
@@ -89,6 +89,12 @@ export const COMPACT_GAPS: Readonly<Record<Direction, Gaps>> = {
 export function tidyLayout(tree: TreeLike, size: (key: string) => Size, opts: LayoutOptions = {}): Map<string, Point> {
   return opts.direction === "vertical" ? boardLayout(tree, size, opts) : treeLayout(tree, size, opts);
 }
+
+/**
+ * How far below the top of its children a parent may sit, growing right (world px): a few children
+ * still centre it; a long column keeps it beside the first ones.
+ */
+const MAX_DROP = 160;
 
 function treeLayout(tree: TreeLike, size: (key: string) => Size, opts: LayoutOptions): Map<string, Point> {
   const depthGap = opts.depthGap ?? GAPS.horizontal.depthGap;
@@ -123,7 +129,9 @@ function treeLayout(tree: TreeLike, size: (key: string) => Size, opts: LayoutOpt
     if (out.has(key)) return;
     const s = span.get(key)!;
     const d = depth.get(key)!;
-    out.set(key, { x: colX[d], y: top + (s - size(key).h) / 2 });
+    // Centred on its children, but never further down than MAX_DROP: a project with 200 threads
+    // would put itself (and its machine) thousands of pixels below the top, off every first view.
+    out.set(key, { x: colX[d], y: top + Math.min((s - size(key).h) / 2, MAX_DROP) });
     let y = top + (s - (childBlock.get(key) ?? 0)) / 2;
     for (const c of tree.nodes.get(key)?.children ?? []) {
       if (depth.get(c) !== d + 1 || out.has(c)) continue;

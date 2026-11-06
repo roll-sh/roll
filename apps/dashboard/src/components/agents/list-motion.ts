@@ -19,16 +19,17 @@ const OUT = { duration: 160, easing: `cubic-bezier(${EASE_LEAVE.join(",")})` };
 
 /**
  * For a row under `AnimatePresence`: put `ref` on it. A row there from the first render (or under
- * `initial={false}` on the list's first render) just shows; one added later folds open; removed, it
- * folds shut and then unmounts. `leaving` while it goes (make it inert).
+ * `initial={false}` on the list's first render) just shows; one added later folds open (unless
+ * `arrive` is false: a list filling in what it already had); removed, it folds shut and then
+ * unmounts. `leaving` while it goes (make it inert).
  */
-export function useFold<T extends HTMLElement>(): { ref: RefObject<T | null>; leaving: boolean } {
+export function useFold<T extends HTMLElement>(arrive = true): { ref: RefObject<T | null>; leaving: boolean } {
   const ref = useRef<T | null>(null);
   const [present, safeToRemove] = usePresence();
   const presence = useContext(PresenceContext);
   const reduced = useReducedMotion();
   // Whether it arrives animated: under a presence that plays entrances.
-  const enters = useRef(presence !== null && presence.initial !== false);
+  const enters = useRef(arrive && presence !== null && presence.initial !== false);
   const ran = useRef(false);
   const remove = useRef(safeToRemove);
   remove.current = safeToRemove;

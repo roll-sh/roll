@@ -57,6 +57,8 @@ const PULSE_S = 1.6;
 /** An edge to a card that left fades this long, with the card (`CARD_OUT`). */
 const EDGE_OUT_MS = 160;
 const DOT_SPACING = 28;
+/** How long the zoom rests before a touch screen's `--zoom` follows it. */
+const ZOOM_CSS_MS = 120;
 
 const rgba = (c: RGB, a: number) => `rgba(${c[0]},${c[1]},${c[2]},${a})`;
 const mixRgb = (a: RGB, b: RGB, t: number): RGB => [0, 1, 2].map((i) => Math.round(a[i] + (b[i] - a[i]) * t)) as RGB;
@@ -75,8 +77,14 @@ export class CanvasEngine {
   private destroyed = false;
 
   view: View = { x: 0, y: 0, k: 1 };
-  /** The `--zoom` last written on the world. */
+  /**
+   * The `--zoom` last written on the world. Only a touch screen's CSS reads it, and writing it
+   * restyles every card (it's inherited: ~100 ms at 200 cards), so it's written only there, once the
+   * zoom rests.
+   */
   private zoomShown = Number.NaN;
+  private zoomCss = 0;
+  private touchCss = typeof window !== "undefined" && typeof window.matchMedia === "function" ? window.matchMedia("(hover: none)") : null;
   private viewFrom: View | null = null;
   private viewTo: View | null = null;
   private viewT0 = 0;
@@ -185,6 +193,7 @@ export class CanvasEngine {
   destroy() {
     this.destroyed = true;
     cancelAnimationFrame(this.raf);
+    clearTimeout(this.zoomCss);
     this.ro.disconnect();
     this.cardRo.disconnect();
     this.io.disconnect();
@@ -504,9 +513,12 @@ export class CanvasEngine {
     }
     this.world.style.transform = `translate3d(${this.view.x}px, ${this.view.y}px, 0) scale(${this.view.k})`;
     // The scale for CSS too (`--zoom`): a touch screen's card tools keep a finger's size with it.
-    if (this.view.k !== this.zoomShown) {
-      this.zoomShown = this.view.k;
-      this.world.style.setProperty("--zoom", String(this.view.k));
+    if (this.view.k !== this.zoomShown && this.touchCss?.matches) {
+      clearTimeout(this.zoomCss);
+      this.zoomCss = window.setTimeout(() => {
+        this.zoomShown = this.view.k;
+        this.world.style.setProperty("--zoom", String(this.view.k));
+      }, ZOOM_CSS_MS);
     }
 
     // Cards ease to their targets.
@@ -621,6 +633,12 @@ export class CanvasEngine {
       const sa = this.size.get(e.from);
       const sb = this.size.get(e.to);
       if (!a || !b || !sa || !sb || alpha <= 0) continue;
+      // Off screen (most of 200 threads' edges): nothing to stroke.
+      const left = Math.min(a.x, b.x) * k + vx;
+      const top = Math.min(a.y, b.y) * k + vy;
+      const right = Math.max(a.x + sa.w, b.x + sb.w) * k + vx;
+      const bottom = Math.max(a.y + sa.h, b.y + sb.h) * k + vy;
+      if (right < -8 || bottom < -8 || left > this.w + 8 || top > this.h + 8) continue;
       ctx.globalAlpha = alpha;
       const path = edgePath(e.route ?? "right", { ...a, ...sa }, { ...b, ...sb }, scr, k);
       const p0 = path.start;
