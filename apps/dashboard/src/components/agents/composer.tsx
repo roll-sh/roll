@@ -553,7 +553,9 @@ export function Composer({
                   ? "Send a message to redirect the agent"
                   : mode.kind === "new"
                     ? "Describe the task. Enter starts it."
-                    : "Ask anything. / for commands";
+                    : commands.length
+                      ? "Ask anything. / for commands"
+                      : "Ask anything";
   const value = question ? flow.custom(question) : text;
   const setValue = question ? flow.setCustom : setText;
   const hasText = !!text.trim() || attachments.length > 0;
