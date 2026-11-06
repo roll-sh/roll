@@ -19,7 +19,7 @@ describe("a live run's line", () => {
 
   it("counts work from the run's start", () => {
     const now = Date.now();
-    renderAgents(<RunView run={run({ id: "run_1", status: "running", started_at: now - 65_000 })} tree={[]} requests={new Map()} checkpoint={undefined} now={now} actions={{}} busyThread last />, agentsHarness());
+    renderAgents(<RunView run={run({ id: "run_1", status: "running", started_at: now - 65_000 })} tree={[]} requests={new Map()} checkpoint={undefined} now={now} actions={{ openThread: vi.fn() }} busyThread last />, agentsHarness());
     expect(screen.getByText(/^Working for 1m 0?5s$/)).toBeInTheDocument();
   });
 });

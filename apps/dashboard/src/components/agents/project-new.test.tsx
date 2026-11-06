@@ -138,6 +138,20 @@ describe("adding a project (one dialog)", () => {
     await waitFor(() => expect(createProject).toHaveBeenCalledWith("acme", "mch_1", { id: expect.stringMatching(/^cmd_/), repo: { name: "site", description: "The site", visibility: "public" } }));
   });
 
+  it("a new repo's name that's taken says so and offers to clone that repo (it cloned it and said 'Project added')", async () => {
+    const createProject = vi.fn(async (): Promise<Reply> => ({ type: "created", id: "prj_web" }));
+    dialog({ services: { createProject, repos: vi.fn(async () => repos) } });
+    await userEvent.click(within(sheet()).getByRole("button", { name: "New repo" }));
+    await userEvent.type(within(sheet()).getByRole("textbox", { name: "Repo name" }), "Web");
+    expect(await within(sheet()).findByText("acme/Web already exists.")).toBeInTheDocument();
+    expect(within(sheet()).getByRole("button", { name: "Create and clone" })).toBeDisabled();
+    await userEvent.click(within(sheet()).getByRole("button", { name: "Clone it instead" }));
+    // The clone tab, narrowed to it.
+    expect(await within(sheet()).findByRole("button", { name: /acme\/web|^web/ })).toBeInTheDocument();
+    expect(within(sheet()).queryByRole("button", { name: /acme\/roll|^roll/ })).toBeNull();
+    expect(createProject).not.toHaveBeenCalled();
+  });
+
   it("a refused create shows the daemon's answer", async () => {
     const createProject = vi.fn(async (): Promise<Reply> => ({ type: "error", code: "machine_offline", message: "the machine isn't connected" }));
     dialog({ services: { createProject } });

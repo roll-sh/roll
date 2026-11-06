@@ -152,6 +152,8 @@ function Added({ project, machine, onClose, onAnother }: { project: Project; mac
 function AddProjectForm({ machine, onAdded }: { machine: Machine; onAdded: (project: string) => void }) {
   const { client, services } = useAgents();
   const [tab, setTab] = useState<Tab>("folder");
+  // "Clone it instead" from New repo: the clone tab, narrowed to that repo.
+  const [cloneFilter, setCloneFilter] = useState("");
   const [pull, setPull] = useState<boolean | null>(null);
   const autoPull = pull ?? tab !== "folder";
   const tabs = services ? TABS : TABS.slice(0, 1);
@@ -167,8 +169,17 @@ function AddProjectForm({ machine, onAdded }: { machine: Machine; onAdded: (proj
     <div className="space-y-3">
       {tabs.length > 1 && <Segmented label="Add a project from" value={tab} onChange={setTab} className="w-full [&>button]:flex-1" options={tabs} />}
       {tab === "folder" && <DirBrowser machine={machine} onAdded={added} onExisting={onAdded} />}
-      {tab === "clone" && <CloneRepo machine={machine} onAdded={added} onExisting={onAdded} />}
-      {tab === "new" && <NewRepo machine={machine} onAdded={added} />}
+      {tab === "clone" && <CloneRepo machine={machine} onAdded={added} onExisting={onAdded} initialFilter={cloneFilter} />}
+      {tab === "new" && (
+        <NewRepo
+          machine={machine}
+          onAdded={added}
+          onCloneInstead={(name) => {
+            setCloneFilter(name);
+            setTab("clone");
+          }}
+        />
+      )}
       <label className="flex items-start gap-2 border-t border-line pt-3 text-[12.5px] text-muted" title="You can change it later in the project's settings">
         <Switch size="sm" className="mt-0.5" checked={autoPull} onCheckedChange={setPull} aria-label="Pull merged changes" />
         <span>
@@ -331,12 +342,12 @@ export function DirBrowser({ machine, onAdded, onExisting }: Step) {
 }
 
 /** Clone one of the owner's roll code repos onto the machine (into its clone dir, `~/roll/<owner>/<repo>`). */
-function CloneRepo({ machine, onAdded, onExisting }: Step) {
+function CloneRepo({ machine, onAdded, onExisting, initialFilter = "" }: Step & { initialFilter?: string }) {
   const { client, owner, services } = useAgents();
   const { busy, error, act } = useAct();
   const [repos, setRepos] = useState<RepoChoice[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [filter, setFilter] = useState("");
+  const [filter, setFilter] = useState(initialFilter);
   // One id per repo picked: a retry of the same clone gets the daemon's receipt.
   const [ids] = useState(() => new Map<string, string>());
   useEffect(() => {
@@ -420,7 +431,7 @@ function CloneRepo({ machine, onAdded, onExisting }: Step) {
 }
 
 /** Start a new roll code repo and clone it onto the machine as a project, in one step. */
-function NewRepo({ machine, onAdded }: Step) {
+function NewRepo({ machine, onAdded, onCloneInstead }: Step & { onCloneInstead: (name: string) => void }) {
   const { owner, services, demo } = useAgents();
   const { busy, error, act } = useAct();
   const [name, setName] = useState("");
@@ -428,8 +439,22 @@ function NewRepo({ machine, onAdded }: Step) {
   const [priv, setPriv] = useState(true);
   // The idempotency key of this form's create: a retry after a timeout answers the same.
   const [id, setId] = useState(commandId);
+  // The owner's repos: a name that's taken would clone that repo (the server takes the one of
+  // that name, so a retry finds what it made), and "Project added" said nothing about it.
+  const [taken, setTaken] = useState<ReadonlySet<string>>(() => new Set());
+  useEffect(() => {
+    let live = true;
+    services
+      ?.repos(owner)
+      .then((r) => live && setTaken(new Set(r.map((x) => x.name.toLowerCase()))))
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [services, owner]);
+  const exists = taken.has(name.trim().toLowerCase());
   const problem = repoNameProblem(name);
-  const valid = name.trim().length > 0 && !problem;
+  const valid = name.trim().length > 0 && !problem && !exists;
   if (busy)
     return (
       <Steps
@@ -464,12 +489,20 @@ function NewRepo({ machine, onAdded }: Step) {
           onChange={(e) => setName(e.target.value)}
           placeholder="repo-name"
           aria-label="Repo name"
-          aria-invalid={!!problem}
+          aria-invalid={!!problem || exists}
           spellCheck={false}
           className={`${input} min-w-0 flex-1 font-mono text-[12.5px] aria-invalid:border-danger/50`}
         />
       </div>
       {problem && <p className="text-[11.5px] text-danger">{problem}</p>}
+      {!problem && exists && (
+        <p className="flex flex-wrap items-center gap-x-2 text-[11.5px] text-danger">
+          {owner}/{name.trim()} already exists.
+          <button type="button" onClick={() => onCloneInstead(name.trim())} className="font-medium text-accent hover:underline">
+            Clone it instead
+          </button>
+        </p>
+      )}
       <input value={description} onChange={(e) => setDescription(e.target.value)} placeholder="Description (optional)" aria-label="Description" className={`${input} w-full text-[12.5px]`} />
       <label className="flex items-center gap-1.5 text-[12.5px] text-muted">
         <Switch size="sm" checked={priv} onCheckedChange={setPriv} aria-label="Private" /> Private
