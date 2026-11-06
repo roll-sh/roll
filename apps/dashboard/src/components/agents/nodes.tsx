@@ -448,7 +448,7 @@ export function ThreadNode({ thread, machine }: { thread: Thread; machine: Machi
               <span className="truncate">{machine.name}</span>
             </span>
           )}
-          <span className="ml-auto flex shrink-0 items-center gap-1.5">{pill ? <StatusPill pill={pill} /> : <span className="tabular-nums">{ago(thread.updated_at)}</span>}</span>
+          <span className="ml-auto flex shrink-0 items-center gap-1.5">{pill ? <StatusPill pill={pill} /> : <span className="tabular-nums" title="Last activity">{ago(lastActive(thread, lastRun))}</span>}</span>
         </div>
         <div className="mt-1.5 flex items-start gap-2">
           <p className="line-clamp-2 min-w-0 flex-1 text-[13.5px] leading-snug font-medium tracking-[-0.01em]">{thread.title}</p>
@@ -530,6 +530,14 @@ export function ThreadNode({ thread, machine }: { thread: Thread; machine: Machi
       </div>
     </Card>
   );
+}
+
+/**
+ * When the thread last did something: made, its newest run asked for or ended. Not `updated_at`,
+ * which a settle, an undo or a rename moves too (a settle undone said "just now").
+ */
+function lastActive(thread: Thread, run: Run | undefined): number {
+  return run ? Math.max(thread.created_at, run.requested_at, run.completed_at ?? 0) : thread.created_at;
 }
 
 function latestRun(runs: Iterable<{ value: Run }>, thread: string) {

@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import { ThreadNode } from "./nodes";
 import { threadPill } from "./thread-status";
 import { Conversation } from "./session";
-import { approval, M1, machine, mirrored, node, project, question, run, terminal, thread } from "@/test/agents";
+import { approval, M1, machine, mirrored, node, project, question, run, T0, terminal, thread } from "@/test/agents";
 import { agentsHarness, renderAgents } from "@/test/agents-render";
 
 // xterm needs a real canvas: the drawer's terminal is a stand-in here.
@@ -31,6 +31,18 @@ describe("ThreadNode", () => {
     expect(screen.getByText("Find out why")).toBeInTheDocument();
     rerender(<ThreadNode thread={thread({ status: "error", error: "claude exited with 1" })} machine={machine()} />);
     expect(screen.getByText("claude exited with 1")).toBeInTheDocument();
+  });
+
+  it("says when it last did something, not when its record last changed (a settle undone said just now)", () => {
+    vi.useFakeTimers({ now: T0 + 5 * 3_600_000 });
+    try {
+      const done = run({ status: "completed", requested_at: T0, completed_at: T0 + 3_600_000, prompt: "Find out why" });
+      const seen = thread({ run_count: 1, updated_at: T0 + 5 * 3_600_000 - 1000, inbox: { settle: { state: "active", at: T0 + 5 * 3_600_000 - 1000, by: "user" }, snooze: null, woke_at: null, visited_at: T0 + 4 * 3_600_000, manual: false } });
+      renderAgents(<ThreadNode thread={seen} machine={machine()} />, agentsHarness({ entities: [mirrored("run", done, 2)] }));
+      expect(screen.getByTitle("Last activity")).toHaveTextContent("4 h ago");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
