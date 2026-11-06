@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { collapseUnused, deriveGraph, keyOf, projectStats, rolling } from "./agents-graph";
-import { arrange, bounds, centreAcross, dropIndex, fitReadable, fitView, mergeOrder, moveTo, nextCard, ROOTS, sideBySide, tidyLayout, withOrder, zoomAt, type LayoutOptions, type Point, type Rect, type Size } from "./agents-layout";
+import { arrange, bounds, dropIndex, fitReadable, fitView, mergeOrder, moveTo, nextCard, ROOTS, sideBySide, tidyLayout, withOrder, zoomAt, type LayoutOptions, type Point, type Rect, type Size } from "./agents-layout";
 import { applyEvents, emptyData, follow } from "./agents-store";
 import { approval, ev, machine, node, project, run, terminal, thread } from "@/test/agents";
 import { EMPTY_INBOX, type Thread } from "./agents-api";
@@ -268,14 +268,50 @@ describe("agents layout", () => {
   });
 
   it("measures siblings along the axis they're laid out on, so dragging works either way", () => {
-    const at: Point = { x: 100, y: 40 };
     const s: Size = { w: 200, h: 80 };
-    expect(centreAcross(at, s, false)).toBe(80);
-    expect(centreAcross(at, s, true)).toBe(200);
     // Dragged sideways past b in a top-down tree, a drops after it.
     const p = tidyLayout({ roots: ["m"], nodes: new Map([["m", { children: ["a", "b", "c"] }], ["a", { children: [] }], ["b", { children: [] }], ["c", { children: [] }]]) }, () => s, { direction: "vertical" });
-    const centre = (k: string) => centreAcross(p.get(k)!, s, true);
-    expect(moveTo(["a", "b", "c"], "a", dropIndex(["a", "b", "c"], "a", centre("b") + 1, centre))).toEqual(["b", "a", "c"]);
+    const rects = new Map(["a", "b", "c"].map((k) => [k, { ...p.get(k)!, ...s }]));
+    const b = rects.get("b")!;
+    expect(moveTo(["a", "b", "c"], "a", dropIndex(["a", "b", "c"], "a", { x: b.x + b.w / 2 + 1, y: b.y + 40 }, rects, true))).toEqual(["b", "a", "c"]);
+  });
+
+  it("lays machines with nothing open side by side, within the width the work takes", () => {
+    // m1 has work three columns deep; m2, m3, m4 have nothing under them; m5 has work again.
+    const t = {
+      roots: ["m1", "m2", "m3", "m4", "m5"],
+      nodes: new Map<string, { children: string[] }>([
+        ["m1", { children: ["p1"] }],
+        ["p1", { children: ["t1"] }],
+        ["t1", { children: [] }],
+        ["m2", { children: [] }],
+        ["m3", { children: [] }],
+        ["m4", { children: [] }],
+        ["m5", { children: ["p5"] }],
+        ["p5", { children: [] }],
+      ]),
+    };
+    const sz = (k: string) => (k === "m3" ? { w: 100, h: 90 } : { w: 100, h: 50 });
+    const p = tidyLayout(t, sz, { depthGap: 50, siblingGap: 10, rootGap: 40 });
+    // Three columns: 100 + 50 + 100 + 50 + 100 = 400 wide. m2, m3 and m4 fit side by side, 20 apart.
+    expect(p.get("m2")).toEqual({ x: 0, y: 90 });
+    expect(p.get("m3")).toEqual({ x: 120, y: 90 });
+    expect(p.get("m4")).toEqual({ x: 240, y: 90 });
+    // The next tree starts below the row (as tall as its tallest card).
+    expect(p.get("m5")).toEqual({ x: 0, y: 90 + 90 + 40 });
+    // Narrower work wraps the row.
+    const narrow = tidyLayout(t, sz, { depthGap: 10, siblingGap: 10, rootGap: 40 });
+    expect(narrow.get("m4")).toEqual({ x: 0, y: 90 + 90 + 40 });
+    // Nothing open anywhere: the machines stay a column.
+    const bare = { roots: ["a", "b"], nodes: new Map([["a", { children: [] }], ["b", { children: [] }]]) };
+    expect(tidyLayout(bare, () => ({ w: 100, h: 50 }), { rootGap: 40 }).get("b")).toEqual({ x: 0, y: 90 });
+    // Dragged along the row, m2 drops after m3; level with its old place, it stays; far below, last.
+    const roots = ["m1", "m2", "m3", "m4", "m5"];
+    const rects = new Map(roots.map((k) => [k, { ...p.get(k)!, ...sz(k) }]));
+    const drop = (x: number, y: number) => moveTo(roots, "m2", dropIndex(roots, "m2", { x, y }, rects, false));
+    expect(drop(200, 115)).toEqual(["m1", "m3", "m2", "m4", "m5"]);
+    expect(drop(50, 115)).toEqual(roots);
+    expect(drop(50, 600)).toEqual(["m1", "m3", "m4", "m5", "m2"]);
   });
 
   it("moves between cards with the arrows along the tree, either way it grows", () => {
@@ -331,8 +367,8 @@ describe("agents layout", () => {
   });
 
   it("drops a dragged card after the siblings it passed", () => {
-    const centres = new Map([["a", 20], ["b", 100], ["c", 180]]);
-    const at = (y: number) => moveTo(["a", "b", "c"], "a", dropIndex(["a", "b", "c"], "a", y, (k) => centres.get(k)!));
+    const rects = new Map(["a", "b", "c"].map((k, i) => [k, { x: 0, y: i * 80, w: 100, h: 40 }]));
+    const at = (y: number) => moveTo(["a", "b", "c"], "a", dropIndex(["a", "b", "c"], "a", { x: 50, y }, rects, false));
     expect(at(30)).toEqual(["a", "b", "c"]);
     expect(at(120)).toEqual(["b", "a", "c"]);
     expect(at(400)).toEqual(["b", "c", "a"]);

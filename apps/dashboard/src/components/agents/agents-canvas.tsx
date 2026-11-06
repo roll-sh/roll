@@ -17,7 +17,6 @@ import type { Graph, GraphNode } from "@/lib/agents-graph";
 import {
   arrange,
   bounds,
-  centreAcross,
   COMPACT_GAPS,
   dropIndex,
   fitReadable,
@@ -393,7 +392,7 @@ export const AgentsCanvas = forwardRef<
     el: HTMLElement;
     parent: string;
     list: string[];
-    centres: Map<string, number>;
+    rects: Map<string, Rect>;
     /** The siblings sit side by side (measured on x), else one under another (on y). */
     across: boolean;
   } | null>(null);
@@ -432,8 +431,8 @@ export const AgentsCanvas = forwardRef<
     const r = container.current!.getBoundingClientRect();
     const { parent, list } = siblingsOf(key);
     // Where the siblings are as the drag starts: the gap moves, what it's measured against doesn't.
-    const centres = new Map(list.map((k) => [k, centreAcross(positions.get(k) ?? { x: 0, y: 0 }, sizeOf(k), across(parent))]));
-    drag.current = { key, id: ev.pointerId, start: toWorld(e.view, ev.clientX - r.left, ev.clientY - r.top), from, moved: false, el: card!, parent, list, centres, across: across(parent) };
+    const rects = new Map(list.map((k) => [k, { ...(positions.get(k) ?? { x: 0, y: 0 }), ...sizeOf(k) }]));
+    drag.current = { key, id: ev.pointerId, start: toWorld(e.view, ev.clientX - r.left, ev.clientY - r.top), from, moved: false, el: card!, parent, list, rects, across: across(parent) };
   };
   const onPointerMove = (ev: React.PointerEvent) => {
     const l = launch.current;
@@ -460,7 +459,8 @@ export const AgentsCanvas = forwardRef<
     const at = { x: d.from.x + dx, y: d.from.y + dy };
     e.setDrag(d.key, at);
     if (d.list.length < 2) return;
-    const list = moveTo(d.list, d.key, dropIndex(d.list, d.key, centreAcross(at, sizeOf(d.key), d.across), (k) => d.centres.get(k) ?? 0));
+    const s = sizeOf(d.key);
+    const list = moveTo(d.list, d.key, dropIndex(d.list, d.key, { x: at.x + s.w / 2, y: at.y + s.h / 2 }, d.rects, d.across));
     setPreview((cur) => (cur && cur.parent === d.parent && cur.list.join() === list.join() ? cur : { parent: d.parent, list }));
   };
   const onPointerUp = (ev: React.PointerEvent) => {

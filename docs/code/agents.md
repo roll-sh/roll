@@ -1536,6 +1536,9 @@ The surface has three views:
   (`lib/agents-layout.ts`), and cards never overlap either way:
   - **Left to right** (the default on a wide screen): a tidy tree in columns, one per depth, as
     wide as its widest card; machines on the left, then projects, threads and their satellites.
+    Machines with nothing open (no card under them) share rows, side by side within the width the
+    work already takes, so four machines with two of them idle aren't four trees tall; with no
+    work anywhere the machines stay a column. Dragging reads such a row left to right.
   - **Top-down** (the default on a phone): a board, like Linear's. The machines sit in a row on
     top, each spreading its projects side by side under it in a row as tall as its tallest card;
     everything in a project is a list down that project's column, indented, each thread's

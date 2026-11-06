@@ -132,11 +132,32 @@ function treeLayout(tree: TreeLike, size: (key: string) => Size, opts: LayoutOpt
     }
   };
 
+  // Roots with nothing under them (a machine with nothing open) share rows, side by side within the
+  // width the work already takes, so they don't make the canvas taller than its work. With no work
+  // anywhere that's one card wide: the machines stay a column.
+  const idle = (r: string) => !childBlock.get(r);
+  const width = colX[colX.length - 1] + (colW[colW.length - 1] ?? 0);
+  // Each root once, unless something placed it already.
+  const roots = [...new Set(tree.roots)].filter((r) => depth.get(r) === 0);
   let top = 0;
-  for (const r of tree.roots) {
-    if (out.has(r)) continue;
-    place(r, top);
-    top += span.get(r)! + rootGap;
+  for (let i = 0; i < roots.length; ) {
+    const r = roots[i];
+    if (!idle(r)) {
+      place(r, top);
+      top += span.get(r)! + rootGap;
+      i++;
+      continue;
+    }
+    let x = 0;
+    let tallest = 0;
+    for (; i < roots.length && idle(roots[i]); i++) {
+      const s = size(roots[i]);
+      if (x > 0 && x + s.w > width) break;
+      out.set(roots[i], { x, y: top });
+      x += s.w + rootGap / 2;
+      tallest = Math.max(tallest, s.h);
+    }
+    top += tallest + rootGap;
   }
   return out;
 }
@@ -231,11 +252,6 @@ export function sideBySide(direction: Direction, parent: string, spreads: (key: 
   return direction === "vertical" && (parent === ROOTS || spreads(parent));
 }
 
-/** Where a card is among its siblings: its centre on the axis they're laid out along. */
-export function centreAcross(p: Point, s: Size, across: boolean): number {
-  return across ? p.x + s.w / 2 : p.y + s.h / 2;
-}
-
 // ── the user's arrangement ──
 
 /** Where the roots' order is kept in an `Order`. */
@@ -278,12 +294,21 @@ export function moveTo(list: readonly string[], key: string, index: number): str
 }
 
 /**
- * Where a sibling dragged with its centre at `at` (on the axis siblings are laid out along) drops:
- * after every other sibling whose centre comes before it.
+ * Where a sibling dragged with its centre at `at` drops: after every other sibling that reads
+ * before it. Side by side (`across`) that's by x; listed, by y, except along a row that siblings
+ * share (idle machines growing right): with `at` level with it, by x. `rects` are where the
+ * siblings (the dragged one too) were as the drag started.
  */
-export function dropIndex(siblings: readonly string[], key: string, at: number, centre: (key: string) => number): number {
+export function dropIndex(siblings: readonly string[], key: string, at: Point, rects: ReadonlyMap<string, Rect>, across: boolean): number {
+  const level = (a: Rect, b: Rect) => a.y < b.y + b.h && b.y < a.y + a.h;
   let i = 0;
-  for (const s of siblings) if (s !== key && centre(s) < at) i++;
+  for (const s of siblings) {
+    const r = rects.get(s);
+    if (s === key || !r) continue;
+    const row = !across && siblings.some((o) => o !== s && rects.has(o) && level(rects.get(o)!, r));
+    const byX = across || (row && at.y >= r.y && at.y <= r.y + r.h);
+    if (byX ? r.x + r.w / 2 < at.x : r.y + r.h / 2 < at.y) i++;
+  }
   return i;
 }
 
