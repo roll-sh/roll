@@ -7,6 +7,7 @@ import type { EndpointProfile, Machine } from "@/lib/agents-api";
 import { NewSandboxGatewayNotice } from "./gateway/machine";
 import { KIND_LABEL } from "@/lib/agents-endpoints";
 import { formatHourly, type SandboxSize } from "@/lib/sandboxes-api";
+import { SandboxesProblem } from "./sandbox";
 import { CopyButton, primary, useCopy } from "../ui";
 import { useAutomationsStore } from "./automations/shared";
 import { apiFlag, useInstallLine } from "./connect";
@@ -159,9 +160,11 @@ function RentSandbox({ onCreated, dialog }: { onCreated?: (m: Machine) => void; 
   if (!list || !list.backend)
     return (
       <Path icon={<Cloud className="size-4 text-muted" />} title="Rent a sandbox" lead={lead}>
-        <p className="rounded-lg border border-line bg-bg px-3 py-2 text-[12.5px] text-muted">
-          {!list ? "Only the owner can rent sandboxes." : "Sandboxes aren't on for this roll server."}
-        </p>
+        {!list ? (
+          <SandboxesProblem error={sandboxes?.error ?? { message: "Only the owner can rent sandboxes.", forbidden: true }} onRetry={() => sandboxes?.reload()} />
+        ) : (
+          <p className="rounded-lg border border-line bg-bg px-3 py-2 text-[12.5px] text-muted">Sandboxes aren&apos;t on for this roll server.</p>
+        )}
       </Path>
     );
 

@@ -3,6 +3,7 @@
 import { Play, Square, Trash2, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Machine, SandboxInfo } from "@/lib/agents-api";
+import { ApiError } from "@/lib/code-api";
 import type { AgentsData } from "@/lib/agents-store";
 import type { AgentsServices } from "@/lib/agents-services";
 import { canStart, canStop, formatHourly, type Sandbox, type SandboxList, type SandboxUsageRow } from "@/lib/sandboxes-api";
@@ -13,11 +14,37 @@ import { useEscapeLayer } from "./escape-layers";
 export interface SandboxesState {
   /** `null` while loading, or when the caller can't manage sandboxes (agent tokens). */
   list: SandboxList | null;
-  error: string | null;
+  /** Why the list didn't load, in words: not allowed (403), or what went wrong (try again). */
+  error: SandboxesError | null;
   byMachine: ReadonlyMap<string, Sandbox>;
   usage: ReadonlyMap<string, SandboxUsageRow>;
   /** Load again now (after an action; status changes reload on their own). */
   reload: () => void;
+}
+
+export interface SandboxesError {
+  message: string;
+  /** Only the owner can (an agent's or another member's token): trying again won't help. */
+  forbidden: boolean;
+}
+
+function sandboxesError(e: unknown): SandboxesError {
+  if (e instanceof ApiError && (e.status === 401 || e.status === 403)) return { message: "Only the owner can rent sandboxes.", forbidden: true };
+  return { message: `Couldn't load sandboxes: ${e instanceof Error ? e.message : String(e)}`, forbidden: false };
+}
+
+/** Why the sandbox sizes didn't load, with Try again when it might work next time. */
+export function SandboxesProblem({ error, onRetry }: { error: SandboxesError; onRetry: () => void }) {
+  return (
+    <p role={error.forbidden ? undefined : "alert"} className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg border border-line bg-bg px-3 py-2 text-[12.5px] text-muted">
+      <span className="min-w-0">{error.message}</span>
+      {!error.forbidden && (
+        <button type="button" onClick={onRetry} className="font-medium text-accent hover:underline">
+          Try again
+        </button>
+      )}
+    </p>
+  );
 }
 
 /** What the sandbox machines look like on the canvas, as one string: a change reloads the list. */
@@ -35,7 +62,7 @@ export function sandboxSignature(data: AgentsData): string {
 export function useSandboxes(services: AgentsServices | undefined, owner: string, data: AgentsData): SandboxesState {
   const [list, setList] = useState<SandboxList | null>(null);
   const [usage, setUsage] = useState<SandboxUsageRow[]>([]);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<SandboxesError | null>(null);
   const [tick, setTick] = useState(0);
   const sig = sandboxSignature(data);
   const gen = useRef(0);
@@ -53,7 +80,7 @@ export function useSandboxes(services: AgentsServices | undefined, owner: string
           if (g === gen.current && u) setUsage(u.sandboxes);
         }
       } catch (e) {
-        if (g === gen.current) setError(e instanceof Error ? e.message : String(e));
+        if (g === gen.current) setError(sandboxesError(e));
       }
     })();
   }, [services, owner, sig, tick]);

@@ -1,10 +1,11 @@
-import { screen, waitFor, within } from "@testing-library/react";
+import { fireEvent, renderHook, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { Machine } from "@/lib/agents-api";
 import type { Sandbox } from "@/lib/sandboxes-api";
 import { AddMachineDialog, AddMachinePaths, sandboxEnv } from "./add-machine";
-import type { SandboxesState } from "./sandbox";
+import { useSandboxes, type SandboxesState } from "./sandbox";
+import { ApiError } from "@/lib/code-api";
 import { machine } from "@/test/agents";
 import { agentsHarness, fakeServices, renderAgents, SIZE } from "@/test/agents-render";
 
@@ -74,10 +75,19 @@ describe("AddMachinePaths", () => {
     expect(screen.getByText("Sandboxes aren't on for this roll server.")).toBeInTheDocument();
     unmount();
 
-    const agent = agentsHarness({ ctx: { services: fakeServices(), sandboxes: state({ list: null, error: "403 Forbidden" }) } });
+    const agent = agentsHarness({ ctx: { services: fakeServices(), sandboxes: state({ list: null, error: { message: "Only the owner can rent sandboxes.", forbidden: true } }) } });
     const second = renderAgents(<AddMachinePaths />, agent);
     expect(screen.getByText("Only the owner can rent sandboxes.")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Try again" })).toBeNull();
     second.unmount();
+
+    // The server failing isn't "only the owner" (a 500 said so): what went wrong, and Try again.
+    const broken = state({ list: null, error: { message: "Couldn't load sandboxes: internal error", forbidden: false } });
+    const third = renderAgents(<AddMachinePaths />, agentsHarness({ ctx: { services: fakeServices(), sandboxes: broken } }));
+    expect(screen.getByRole("alert")).toHaveTextContent("Couldn't load sandboxes: internal error");
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    expect(broken.reload).toHaveBeenCalled();
+    third.unmount();
 
     const full = agentsHarness({ ctx: { services: fakeServices(), sandboxes: state({ list: { sandboxes: [sandbox, sandbox, sandbox], sizes: [SIZE], max: 3, backend: "docker" } }) } });
     renderAgents(<AddMachinePaths />, full);
@@ -103,5 +113,20 @@ describe("AddMachinePaths", () => {
   it("sends only keys that have a value", () => {
     expect(sandboxEnv({ ANTHROPIC_API_KEY: "  ", OPENAI_API_KEY: " sk " })).toEqual({ OPENAI_API_KEY: "sk" });
     expect(sandboxEnv({})).toBeUndefined();
+  });
+});
+
+describe("loading the owner's sandboxes", () => {
+  it("tells a server error (try again) from not being the owner", async () => {
+    const data = agentsHarness().client.data;
+    for (const [status, message, forbidden] of [
+      [500, "Couldn't load sandboxes: internal error", false],
+      [403, "Only the owner can rent sandboxes.", true],
+    ] as const) {
+      const services = fakeServices({ sandboxes: { list: vi.fn().mockRejectedValue(new ApiError("internal error", status, null)) } });
+      const { result, unmount } = renderHook(() => useSandboxes(services, "acme", data));
+      await waitFor(() => expect(result.current.error).toEqual({ message, forbidden }));
+      unmount();
+    }
   });
 });

@@ -24,6 +24,7 @@ import { setAgentsView } from "@/lib/agents-surface";
 import { formatHourly } from "@/lib/sandboxes-api";
 import { btn, input, primary } from "../ui";
 import { SizeOption } from "./add-machine";
+import { SandboxesProblem } from "./sandbox";
 import { useCanvasProjects, type CanvasProjects } from "./machine-projects";
 import { AddProjectDialog } from "./project-new";
 import type { MenuItem } from "./menu";
@@ -197,7 +198,11 @@ function SandboxForProject({ project }: { project: Project }) {
 
   if (phase.at === "form") {
     if (!services || !list)
-      return <p className="text-[12.5px] text-subtle">{sandboxes?.error ? sandboxes.error : list === null && !sandboxes?.error ? <span className="shimmer">Loading sizes…</span> : "Only the owner can rent sandboxes."}</p>;
+      return sandboxes?.error ? (
+        <SandboxesProblem error={sandboxes.error} onRetry={sandboxes.reload} />
+      ) : (
+        <p className="text-[12.5px] text-subtle">{list === null && services ? <span className="shimmer">Loading sizes…</span> : "Only the owner can rent sandboxes."}</p>
+      );
     if (!list.backend) return <p className="text-[12.5px] text-muted">Sandboxes aren&apos;t on for this roll server.</p>;
     return (
       <form
