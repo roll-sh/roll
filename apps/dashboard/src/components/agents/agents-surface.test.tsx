@@ -206,6 +206,15 @@ describe("a new agent", () => {
     expect(defaultProject([a, b], [], undefined, "prj_gone")?.id).toBe("prj_a");
   });
 
+  it("prefers the project of the thread a person opened last over an automation's newer one nobody opened", () => {
+    const a = project({ id: "prj_a" });
+    const b = project({ id: "prj_b" });
+    const mine = { project: "prj_a", updated_at: 5, inbox: { visited_at: 6 } };
+    const automation = { project: "prj_b", updated_at: 9, inbox: { visited_at: null } };
+    expect(defaultProject([a, b], [automation, mine])?.id).toBe("prj_a");
+    expect(defaultProject([a, b], [automation, mine], undefined, "prj_b")?.id).toBe("prj_b");
+  });
+
   it("creates the thread where it was pointed and opens its conversation", async () => {
     // The daemon's reply comes first, then the thread's record (it opens once that's in).
     const h: AgentsHarness = agentsHarness({

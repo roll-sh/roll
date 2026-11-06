@@ -1772,7 +1772,8 @@ The surface has three views:
   the agents get done?", Orchestrate or One agent).
 - **The prompt bar** (`prompt-bar.tsx`) and the launcher (`new-agent.tsx`) share one set of rules
   (`new-thread.ts`): the default project is the last one a thread was started in, else the one
-  with the newest thread, preferring machines that can take one; the model and modes are the
+  with the thread a person opened last (so an automation's threads nobody looked at don't pull
+  it), else the one with the newest thread, preferring machines that can take one; the model and modes are the
   project's, then the machine's, then the owner's new-thread defaults. Once something is drafted
   the bar pins its project: thread updates never move it, only its project chip (a picker of
   every project, "Add a project…" last) does, and an offline machine says so instead of the draft

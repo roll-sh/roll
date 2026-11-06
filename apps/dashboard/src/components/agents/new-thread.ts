@@ -64,22 +64,26 @@ export function rememberProject(id: string) {
 
 /**
  * Where a new thread starts by default: `wanted` if it exists; else, among the projects `usable`
- * says can take one (all by default), the last one used, the one with the newest thread, the
- * first; else the same among the rest (so an offline machine's project still shows, as offline).
+ * says can take one (all by default), the last one used, the one with the thread a person opened
+ * last (`inbox.visited_at`: an automation's threads nobody looked at don't pull it to their project),
+ * the one with the newest thread, the first; else the same among the rest (so an offline machine's
+ * project still shows, as offline).
  */
 export function defaultProject<P extends Project>(
   projects: readonly P[],
-  threads: readonly Pick<Thread, "project" | "updated_at">[],
+  threads: readonly (Pick<Thread, "project" | "updated_at"> & { inbox?: Pick<Thread["inbox"], "visited_at"> })[],
   wanted?: string,
   last?: string | null,
   usable: (p: P) => boolean = () => true,
 ): P | undefined {
   const asked = wanted ? projects.find((p) => p.id === wanted) : undefined;
   if (asked) return asked;
+  const seen = (t: (typeof threads)[number]) => t.inbox?.visited_at ?? 0;
+  const opened = threads.filter(seen).sort((a, b) => seen(b) - seen(a));
   const newest = [...threads].sort((a, b) => b.updated_at - a.updated_at);
   const pick = (pool: readonly P[]) => {
     const by = (id: string | null | undefined) => (id ? pool.find((p) => p.id === id) : undefined);
-    return by(last) ?? newest.map((t) => by(t.project)).find(Boolean) ?? pool[0];
+    return by(last) ?? opened.map((t) => by(t.project)).find(Boolean) ?? newest.map((t) => by(t.project)).find(Boolean) ?? pool[0];
   };
   return pick(projects.filter(usable)) ?? pick(projects);
 }
