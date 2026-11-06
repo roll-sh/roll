@@ -861,7 +861,8 @@ POST   /v1/code/agents/{owner}/automations AutomationSpec → 201 AutomationSave
        422 at 200 automations, or a webhook trigger without ROLL_SECRET_KEY on the server.
        A webhook trigger gets its URL and a secret (AutomationSaved.webhook_secret, `rlh_…`, shown once).
 GET    /v1/code/agents/{owner}/automations/catalog → Catalog /* every trigger source and step kind, with
-       JSON Schemas; integrations' too (needs_setup: not connected yet) */
+       JSON Schemas; integrations' too (needs_setup: not connected yet). Each field of a config's
+       properties has "x-order": n, the order to show it in (JSON objects arrive sorted) */
 POST   /v1/code/agents/{owner}/automations/test TestRequest → TestResult
        what the automation would do with the event: the trigger's and each filter's verdict, each step's
        config with its templates filled in. Runs nothing; secrets are never filled in.

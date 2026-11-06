@@ -9,7 +9,7 @@ use super::store;
 use super::trigger::{PRIORITIES, STATE_TYPES, priority_of};
 use crate::agents::lookup::Pick;
 use crate::Code;
-use crate::agents::automations::{OwnerRef, StepContext, StepKind, StepOutcome};
+use crate::agents::automations::{OwnerRef, props, StepContext, StepKind, StepOutcome};
 use agent_proto::automation::StepInfo;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
@@ -220,7 +220,7 @@ impl StepKind for Comment {
             "Comment on a Linear issue",
             "Post a markdown comment on the issue (the event's, unless `issue` says) as roll",
             schema(
-                json!({
+                props!({
                     "issue": issue_field("Issue id or identifier (ENG-12); default: the event's issue"),
                     "body": long_field("Body", "Markdown (a template)"),
                     "parent": text_field("Parent", "Reply under this comment id"),
@@ -307,7 +307,7 @@ impl StepKind for UpdateIssue {
             "Update a Linear issue",
             "Change the issue's state, assignee, delegate, labels, priority, title or description",
             schema(
-                json!({
+                props!({
                     "issue": issue_field("Issue id or identifier; default: the event's issue"),
                     "state": state_field(None, "A kind of state moves it to the first state of that kind in the issue's team"),
                     "assignee": assignee_field("roll, no one, or a person"),
@@ -471,7 +471,7 @@ impl StepKind for Attach {
             "Link to a Linear issue",
             "Attach a link (the roll change, a PR, a preview) to the issue, and show it on the agent session",
             schema(
-                json!({
+                props!({
                     "issue": text_field("Issue", "Issue id or identifier; default: the event's issue"),
                     "url": text_field("URL", "The link (e.g. {{steps.publish.url}})"),
                     "title": text_field("Title", "Its title (default: the URL)"),
@@ -558,7 +558,7 @@ impl StepKind for CreateIssue {
             "Create a Linear issue",
             "Open an issue in a team, optionally delegated to roll",
             schema(
-                json!({
+                props!({
                     "team": Pick::from(SOURCE, "teams").one("Team", "The team the issue goes in"),
                     "title": text_field("Title", "Title (a template)"),
                     "description": long_field("Description", "Markdown"),
@@ -724,7 +724,7 @@ impl StepKind for Activity {
             "Post a Linear agent activity",
             "Show a thought, action, response, question (elicitation) or error on the agent session",
             schema(
-                json!({
+                props!({
                     "session": text_field("Session", "Agent session id; default: the event's"),
                     "type": { "type": "string", "enum": ACTIVITY_TYPES },
                     "body": long_field("Body", "Markdown (thought, response, elicitation, error)"),

@@ -29,6 +29,7 @@ pub(crate) mod triggers;
 
 pub use context::{ApiAnswer, HttpAnswer, HttpError, Secret, StepContext};
 pub use registry::{NewEvent, OwnerRef, Registry, StepKind, StepOutcome, TriggerSource, record_event};
+pub(crate) use registry::props;
 pub use store::SCHEMA;
 
 use crate::review::apps::{PublicOnly, check_url, literal_private_host};

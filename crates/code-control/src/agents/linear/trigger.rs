@@ -5,7 +5,7 @@
 use super::SOURCE;
 use super::store;
 use crate::Code;
-use crate::agents::automations::{OwnerRef, TriggerSource};
+use crate::agents::automations::{OwnerRef, props, TriggerSource};
 use agent_proto::automation::{AutomationEvent, EventInfo, TriggerInfo};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -169,7 +169,7 @@ pub fn config_schema() -> Value {
     json!({
         "type": "object",
         "additionalProperties": false,
-        "properties": {
+        "properties": props!({
             "teams": Pick::from(SOURCE, "teams").many("Teams", "Only issues of these teams"),
             "projects": Pick::from(SOURCE, "projects").many("Projects", "Only issues in these projects"),
             "labels": labels.many("Labels", "The issue has one of these labels"),
@@ -182,7 +182,7 @@ pub fn config_schema() -> Value {
             "mentions_roll": { "type": "boolean", "description": "Comments: only those that mention roll" },
             "include_roll": { "type": "boolean", "description": "Also events roll caused itself" },
             "include_attached": { "type": "boolean", "description": "Session replies a running automation already takes" },
-        },
+        }),
     })
 }
 

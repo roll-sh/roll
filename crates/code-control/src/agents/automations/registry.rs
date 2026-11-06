@@ -25,6 +25,38 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+/// `json!({ "a": …, "b": … })` for a config schema's `properties`, keeping the order they're
+/// written in: each field's schema gets `"x-order": <n>`. serde_json's maps are sorted, so without
+/// it the builder showed fields alphabetically (Slack's Channel before its Workspace).
+macro_rules! props {
+    ({ $($body:tt)* }) => {{
+        let mut keys: Vec<&'static str> = Vec::new();
+        $crate::agents::automations::props!(@key keys; $($body)*);
+        $crate::agents::automations::registry::in_order(serde_json::json!({ $($body)* }), &keys)
+    }};
+    (@key $k:ident;) => {};
+    (@key $k:ident; $key:literal : $($rest:tt)*) => {
+        $k.push($key);
+        $crate::agents::automations::props!(@value $k; $($rest)*);
+    };
+    (@value $k:ident;) => {};
+    (@value $k:ident; , $($rest:tt)*) => { $crate::agents::automations::props!(@key $k; $($rest)*); };
+    (@value $k:ident; $t:tt $($rest:tt)*) => { $crate::agents::automations::props!(@value $k; $($rest)*); };
+}
+pub(crate) use props;
+
+/// Number `properties`' fields in `keys`' order (see [`props!`]).
+pub(crate) fn in_order(mut properties: Value, keys: &[&str]) -> Value {
+    if let Value::Object(m) = &mut properties {
+        for (i, k) in keys.iter().enumerate() {
+            if let Some(Value::Object(field)) = m.get_mut(*k) {
+                field.insert("x-order".into(), i.into());
+            }
+        }
+    }
+    properties
+}
+
 /// The owner an automation belongs to.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OwnerRef {

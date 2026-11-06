@@ -16,7 +16,7 @@
 //!   `github.comment`, `github.label`, `github.status`, and `github.pr`, which opens a pull
 //!   request from a roll change (pushing its head as a branch first).
 
-use crate::agents::automations::{NewEvent, OwnerRef, Registry, StepContext, StepKind, StepOutcome, TriggerSource};
+use crate::agents::automations::{NewEvent, OwnerRef, Registry, StepContext, StepKind, StepOutcome, TriggerSource, props};
 use crate::agents::lookup::Pick;
 use crate::github::{Hub, Link, link_of};
 use crate::model::RepoRow;
@@ -264,12 +264,12 @@ impl TriggerSource for GitHubTrigger {
             ],
             config: json!({
                 "type": "object",
-                "properties": {
+                "properties": props!({
                     "repos": Pick::from(SOURCE, "repos").many("Repos", "Repos (names); unset: every connected repo."),
                     "labels": Pick { parent: Some("repos"), ..Pick::from(SOURCE, "labels") }.many("Labels", "issue.labeled: one of these labels; issue.opened: having one."),
                     "branches": Pick { parent: Some("repos"), ..Pick::from(SOURCE, "branches") }.many("Branches", "check.failed: on these branches."),
                     "anyone": { "type": "boolean", "description": "Issues from anyone, not just people who can push." }
-                }
+                })
             }),
             needs_setup: false,
         }
@@ -390,10 +390,10 @@ impl GitHubStep {
         number["type"] = json!(["integer", "string"]);
         let labels = |title: &str, d: &str, create: bool| Pick { parent: Some("repo"), create, ..Pick::from(SOURCE, "labels") }.many(title, d);
         let (props, required) = match self.kind {
-            Kind::Comment => (json!({ "repo": repo, "number": number, "body": s("Markdown (a template).") }), json!(["body"])),
-            Kind::Label => (json!({ "repo": repo, "number": number, "add": labels("Add labels", "Labels to add.", true), "remove": labels("Remove labels", "Labels to take off.", false) }), json!([])),
+            Kind::Comment => (props!({ "repo": repo, "number": number, "body": s("Markdown (a template).") }), json!(["body"])),
+            Kind::Label => (props!({ "repo": repo, "number": number, "add": labels("Add labels", "Labels to add.", true), "remove": labels("Remove labels", "Labels to take off.", false) }), json!([])),
             Kind::Status => (
-                json!({
+                props!({
                     "repo": repo, "sha": s("The commit; unset: the event's."), "state": { "type": "string", "enum": ["pending", "success", "failure", "error"] },
                     "context": Pick { extras: &[("roll/automation", "roll/automation")], ..Pick::default() }.one("Context", "The status's name (default roll/automation)."),
                     "description": s("One line."), "target_url": s("A link.")
@@ -401,7 +401,7 @@ impl GitHubStep {
                 json!(["state"]),
             ),
             Kind::Pr => (
-                json!({
+                props!({
                     "repo": repo, "change": json!({ "type": ["integer", "string"], "description": "The roll change (steps.<publish>.change)." }),
                     "title": s("Unset: the change's title."), "body": s("Unset: the change's description."), "draft": { "type": ["boolean", "string"] }
                 }),

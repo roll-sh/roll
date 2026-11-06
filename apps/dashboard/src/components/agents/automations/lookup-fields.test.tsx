@@ -142,6 +142,12 @@ describe("automation fields that name a thing", { timeout: 15_000 }, () => {
 describe("Slack and Discord fields name their things", () => {
   const chat = (kind: string) => chatopsCatalog.steps.find((s) => s.kind === kind)!.config as unknown as Schema;
 
+  it("fields come in the order the server wrote them (x-order): a post's workspace before its channel", () => {
+    show(chat("slack.post"));
+    const labels = [...document.querySelectorAll("label")].map((l) => l.textContent?.replace("Required", ""));
+    expect(labels.slice(0, 2)).toEqual(["Workspace", "Channel"]);
+  });
+
   it("a Slack DM picks a person of the workspace; a notice goes to a channel or a person", async () => {
     const { onValue, lookup } = show(chat("slack.dm"));
     macClick(screen.getByRole("button", { name: "Workspace" }));

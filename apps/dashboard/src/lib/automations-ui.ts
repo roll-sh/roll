@@ -53,6 +53,8 @@ export interface Schema {
   additionalProperties?: Schema | boolean;
   /** `format: "lookup"`: where the picker's rows come from (code-control `lookup::Pick`). */
   lookup?: SchemaLookup;
+  /** Where the field goes among its siblings (code-control's `props!`: the order it was written in). */
+  "x-order"?: number;
 }
 
 /**

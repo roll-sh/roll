@@ -5,7 +5,7 @@
 //! receipt instead of running twice.
 
 use super::context::{HttpError, StepContext};
-use super::registry::{OwnerRef, StepKind, StepOutcome};
+use super::registry::{OwnerRef, StepKind, StepOutcome, props};
 use crate::Code;
 use crate::review::pattern::Pattern;
 use agent_proto::automation::{
@@ -52,17 +52,17 @@ fn f(d: &str, format: &str) -> Value {
 
 fn target_schema() -> Value {
     json!({ "format": "roll-target", "oneOf": [
-        { "type": "object", "properties": { "type": { "const": "machine" }, "machine": s("A machine's id (mch_…) or name") }, "required": ["type", "machine"] },
-        { "type": "object", "properties": { "type": { "const": "sandbox" }, "size": s("A sandbox size (default standard)"), "keep": { "type": "boolean", "description": "Keep the sandbox when the run ends" } }, "required": ["type"] },
-        { "type": "object", "properties": { "type": { "const": "any_online" } }, "required": ["type"] },
-        { "type": "object", "properties": { "type": { "const": "project_machine" } }, "required": ["type"] },
+        { "type": "object", "properties": props!({ "type": { "const": "machine" }, "machine": s("A machine's id (mch_…) or name") }), "required": ["type", "machine"] },
+        { "type": "object", "properties": props!({ "type": { "const": "sandbox" }, "size": s("A sandbox size (default standard)"), "keep": { "type": "boolean", "description": "Keep the sandbox when the run ends" } }), "required": ["type"] },
+        { "type": "object", "properties": props!({ "type": { "const": "any_online" } }), "required": ["type"] },
+        { "type": "object", "properties": props!({ "type": { "const": "project_machine" } }), "required": ["type"] },
     ] })
 }
 
 fn project_schema() -> Value {
     json!({ "format": "roll-project", "oneOf": [
-        { "type": "object", "properties": { "type": { "const": "id" }, "id": s("A project id (prj_…)") }, "required": ["type", "id"] },
-        { "type": "object", "properties": { "type": { "const": "repo" }, "repo": s("A roll code repo (repo or owner/repo)"), "path": s("Where to clone it when the machine has none") }, "required": ["type", "repo"] },
+        { "type": "object", "properties": props!({ "type": { "const": "id" }, "id": s("A project id (prj_…)") }), "required": ["type", "id"] },
+        { "type": "object", "properties": props!({ "type": { "const": "repo" }, "repo": s("A roll code repo (repo or owner/repo)"), "path": s("Where to clone it when the machine has none") }), "required": ["type", "repo"] },
     ] })
 }
 
@@ -275,14 +275,15 @@ impl StepKind for StartAgent {
             step_kinds::AGENT_START,
             "Start an agent",
             "Start a thread on a machine, a new sandbox, any connected machine with the project, or the project's machine. Unset fields come from the automation's defaults, then the project's.",
-            json!({ "type": "object", "required": ["prompt"], "properties": {
+            json!({ "type": "object", "required": ["prompt"], "properties": props!({
+                "prompt": f("What the agent is asked", "template-long"), "title": f("The thread's title", "template"),
                 "target": target_schema(), "project": project_schema(),
                 "provider": s("codex, claude or acp:<name>"), "model": f("A model id", "roll-model"), "effort": s("low … max"),
                 "options": { "type": "object", "description": "The model's other options by id (a speed, a context window, …)" },
                 "runtime_mode": { "enum": ["full_access", "auto_edit", "ask"] }, "interaction_mode": { "enum": ["default", "plan"] },
-                "worktree": { "type": "boolean", "description": "Its own git worktree" }, "title": f("The thread's title", "template"), "prompt": f("What the agent is asked", "template-long"),
+                "worktree": { "type": "boolean", "description": "Its own git worktree" },
                 "orchestrator": { "type": "boolean", "description": "Plan and delegate to subagents" },
-            } }),
+            }) }),
             &["machine", "project", "thread", "sandbox"],
         )
     }
@@ -457,12 +458,12 @@ impl StepKind for WaitAgent {
             step_kinds::AGENT_WAIT,
             "Wait for the agent",
             "Wait until the thread is done, failed, waiting on you or settled (default done or failed), at most timeout_s (default an hour).",
-            json!({ "type": "object", "properties": {
+            json!({ "type": "object", "properties": props!({
                 "thread": thread_schema(),
                 "until": { "type": "array", "items": { "enum": ["done", "failed", "waiting", "settled"] } },
                 "timeout_s": { "type": "integer", "minimum": 1 },
                 "on_timeout": { "enum": ["fail", "continue"] },
-            } }),
+            }) }),
             &["outcome", "thread", "run", "status", "error", "message"],
         )
     }
@@ -525,7 +526,7 @@ impl StepKind for MessageAgent {
             step_kinds::AGENT_MESSAGE,
             "Message the agent",
             "Send a message to the thread: a new run when it's idle; queued after the active run, or steering it.",
-            json!({ "type": "object", "required": ["text"], "properties": { "thread": thread_schema(), "text": f("The message", "template-long"), "mode": { "enum": ["queue", "steer"] } } }),
+            json!({ "type": "object", "required": ["text"], "properties": props!({ "thread": thread_schema(), "text": f("The message", "template-long"), "mode": { "enum": ["queue", "steer"] } }) }),
             &["thread", "run"],
         )
     }
@@ -576,16 +577,16 @@ impl StepKind for RespondAgent {
             step_kinds::AGENT_RESPOND,
             "Answer the agent",
             "Answer the thread's pending approvals by rules (the first that matches decides, else `otherwise`) and its questions (by id or header, or their first option). What no rule decides is left for you.",
-            json!({ "type": "object", "properties": {
+            json!({ "type": "object", "properties": props!({
                 "thread": thread_schema(),
-                "rules": { "type": "array", "items": { "type": "object", "required": ["decision"], "properties": {
+                "rules": { "type": "array", "items": { "type": "object", "required": ["decision"], "properties": props!({
                     "action": { "enum": ["command", "file_change", "permission", "tool", "plan"] }, "command": s("A glob on the command"),
                     "files": s("A glob every changed file matches"), "tool": s("A glob on the tool"),
-                    "decision": { "enum": ["accept", "accept_for_session", "decline", "cancel"] } } } },
+                    "decision": { "enum": ["accept", "accept_for_session", "decline", "cancel"] } }) } },
                 "otherwise": { "enum": ["accept", "accept_for_session", "decline", "cancel"] },
                 "answers": { "type": "object", "additionalProperties": { "type": "string" } },
                 "first_option": { "type": "boolean" }, "message": f("A note to the agent with a decline", "template"),
-            } }),
+            }) }),
             &["answered", "left"],
         )
     }
@@ -655,7 +656,7 @@ impl StepKind for PublishAgent {
             step_kinds::AGENT_PUBLISH,
             "Publish the agent's work",
             "Commit the thread's worktree on its branch and push it: a roll code change (land sends it to landing: the merge queue on queue repos, else the landing rules).",
-            json!({ "type": "object", "properties": { "thread": thread_schema(), "message": f("The commit message (default: the thread's title)", "template"), "land": { "type": "boolean" } } }),
+            json!({ "type": "object", "properties": props!({ "thread": thread_schema(), "message": f("The commit message (default: the thread's title)", "template"), "land": { "type": "boolean" } }) }),
             &["branch", "commit", "change", "url", "landing"],
         )
     }
@@ -690,7 +691,7 @@ impl StepKind for RunScript {
             step_kinds::AGENT_SCRIPT,
             "Run a project script",
             "Run one of the project's scripts in a terminal: in the thread's worktree when thread is set, else in the project's checkout.",
-            json!({ "type": "object", "required": ["script"], "properties": { "script": s("The script's id"), "thread": thread_schema(), "project": project_schema(), "target": target_schema() } }),
+            json!({ "type": "object", "required": ["script"], "properties": props!({ "script": s("The script's id"), "thread": thread_schema(), "project": project_schema(), "target": target_schema() }) }),
             &["terminal", "machine"],
         )
     }
@@ -750,7 +751,7 @@ impl StepKind for SettleAgent {
             step_kinds::AGENT_SETTLE,
             "Settle or archive",
             "Settle, archive or un-settle the thread.",
-            json!({ "type": "object", "properties": { "thread": thread_schema(), "action": { "enum": ["settle", "archive", "unsettle"] } } }),
+            json!({ "type": "object", "properties": props!({ "thread": thread_schema(), "action": { "enum": ["settle", "archive", "unsettle"] } }) }),
             &["thread", "action"],
         )
     }
@@ -785,13 +786,13 @@ impl StepKind for CallWebhook {
             step_kinds::WEBHOOK,
             "Call a webhook",
             "An HTTP request to a public address (no redirects, private addresses refused, the answer read up to 1 MiB). With secret, the body is signed like roll's webhooks (X-Roll-Signature-256). Header values may use {{secrets.<name>}}.",
-            json!({ "type": "object", "required": ["url"], "properties": {
+            json!({ "type": "object", "required": ["url"], "properties": props!({
                 "url": f("Where to send it", "template"), "method": { "enum": ["GET", "POST", "PUT", "PATCH", "DELETE"] },
                 "headers": { "type": "object", "additionalProperties": { "type": "string", "format": "template" } },
                 "body": { "description": "A template, or JSON whose strings are templates (default: the event)", "format": "template-long" },
                 "secret": f("One of the automation's secrets to sign with", "roll-secret"),
                 "ok_statuses": { "type": "array", "items": { "type": "integer" } },
-            } }),
+            }) }),
             &["status", "headers", "body"],
         )
     }
@@ -874,7 +875,7 @@ impl StepKind for Notify {
             step_kinds::NOTIFY,
             "Notify",
             "A notice in the dashboard (a toast on every open device).",
-            json!({ "type": "object", "required": ["title"], "properties": { "title": f("The notice", "template"), "body": f("More about it", "template-long"), "level": { "enum": ["info", "success", "warning", "error"] }, "link": f("Where it links", "template") } }),
+            json!({ "type": "object", "required": ["title"], "properties": props!({ "title": f("The notice", "template"), "body": f("More about it", "template-long"), "level": { "enum": ["info", "success", "warning", "error"] }, "link": f("Where it links", "template") }) }),
             &["id"],
         )
     }
@@ -918,7 +919,7 @@ struct Delay;
 #[async_trait::async_trait]
 impl StepKind for Delay {
     fn info(&self) -> StepInfo {
-        info(step_kinds::DELAY, "Wait", "Wait this long (a restart doesn't start it over).", json!({ "type": "object", "required": ["seconds"], "properties": { "seconds": { "type": "integer", "minimum": 1, "maximum": 604800 } } }), &[])
+        info(step_kinds::DELAY, "Wait", "Wait this long (a restart doesn't start it over).", json!({ "type": "object", "required": ["seconds"], "properties": props!({ "seconds": { "type": "integer", "minimum": 1, "maximum": 604800 } }) }), &[])
     }
 
     fn check(&self, _owner: &OwnerRef, config: &Value) -> Result<(), String> {

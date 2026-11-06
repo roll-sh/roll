@@ -12,7 +12,7 @@ use super::cards;
 use super::follow::{self, Failure, Follow, Surface};
 use super::{Handled, Install, Platform};
 use crate::Code;
-use crate::agents::automations::{NewEvent, OwnerRef, Registry, StepContext, StepKind, StepOutcome, TriggerSource};
+use crate::agents::automations::{NewEvent, OwnerRef, Registry, StepContext, StepKind, StepOutcome, TriggerSource, props};
 use crate::agents::lookup::Pick;
 use agent_proto::automation::{AutomationEvent, EventInfo, Retry, StepInfo, TriggerInfo};
 use code_chat::card::{RequestCard, StatusCard};
@@ -60,10 +60,10 @@ impl TriggerSource for DiscordTrigger {
             }],
             config: json!({
                 "type": "object",
-                "properties": {
+                "properties": props!({
                     "guild": Pick::from(SOURCE, "guilds").one("Server", "Unset: the owner's only one"),
                     "channels": Pick { parent: Some("guild"), ..Pick::from(SOURCE, "channels") }.many("Channels", "Only /roll in these; unset: any")
-                }
+                })
             }),
             needs_setup: false,
         }
@@ -365,21 +365,21 @@ impl StepKind for DiscordStep {
             Kind::Post => (
                 "Post to Discord",
                 "Post a message to a channel, or DM a user.",
-                json!({ "guild": guild, "channel": channel("Unset: the event's"), "user": user("DM them instead"), "text": s("The message (a template).") }),
+                props!({ "guild": guild, "channel": channel("Unset: the event's"), "user": user("DM them instead"), "text": s("The message (a template).") }),
                 json!(["text"]),
                 &["channel", "id"],
             ),
             Kind::Status => (
                 "Live status in Discord",
                 "Follow an agent thread in Discord: a status message that updates, buttons and selects for its requests, and a Reply button to steer it.",
-                json!({ "guild": guild, "machine": fmt("Machine", "The agent's machine (steps.<start>.machine)", "roll-machine"), "thread": fmt("Thread", "The agent thread (steps.<start>.thread)", "roll-thread"), "channel": channel("Unset: the event's"), "message": s("Reply to this message.") }),
+                props!({ "guild": guild, "machine": fmt("Machine", "The agent's machine (steps.<start>.machine)", "roll-machine"), "thread": fmt("Thread", "The agent thread (steps.<start>.thread)", "roll-thread"), "channel": channel("Unset: the event's"), "message": s("Reply to this message.") }),
                 json!(["machine", "thread"]),
                 &["channel", "ts", "status", "title", "change.url"],
             ),
             Kind::Notify => (
                 "Notify in Discord",
                 "Tell a channel or person about an agent, with buttons to answer what it waits on.",
-                json!({ "guild": guild, "channel": channel("Where to tell"), "user": user("Or DM them"), "machine": fmt("Machine", "Unset: the agent event's", "roll-machine"), "thread": fmt("Thread", "Unset: the agent event's", "roll-thread") }),
+                props!({ "guild": guild, "channel": channel("Where to tell"), "user": user("Or DM them"), "machine": fmt("Machine", "Unset: the agent event's", "roll-machine"), "thread": fmt("Thread", "Unset: the agent event's", "roll-thread") }),
                 json!([]),
                 &["channel", "ts", "status"],
             ),

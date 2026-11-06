@@ -8,41 +8,48 @@
             "description": "action: what it does (Ran)",
             "format": "template",
             "title": "Action",
-            "type": "string"
+            "type": "string",
+            "x-order": 3
           },
           "body": {
             "description": "Markdown (thought, response, elicitation, error)",
             "format": "template-long",
             "title": "Body",
-            "type": "string"
+            "type": "string",
+            "x-order": 2
           },
           "ephemeral": {
-            "type": "boolean"
+            "type": "boolean",
+            "x-order": 6
           },
           "options": {
             "description": "elicitation: choices",
             "items": {
               "type": "string"
             },
-            "type": "array"
+            "type": "array",
+            "x-order": 7
           },
           "parameter": {
             "description": "action: on what (cargo test)",
             "format": "template",
             "title": "Parameter",
-            "type": "string"
+            "type": "string",
+            "x-order": 4
           },
           "result": {
             "description": "action: what came of it",
             "format": "template",
             "title": "Result",
-            "type": "string"
+            "type": "string",
+            "x-order": 5
           },
           "session": {
             "description": "Agent session id; default: the event's",
             "format": "template",
             "title": "Session",
-            "type": "string"
+            "type": "string",
+            "x-order": 0
           },
           "type": {
             "enum": [
@@ -52,7 +59,8 @@
               "elicitation",
               "error"
             ],
-            "type": "string"
+            "type": "string",
+            "x-order": 1
           }
         },
         "required": [
@@ -74,37 +82,44 @@
         "properties": {
           "actions": {
             "description": "Tool calls as actions (default on)",
-            "type": "boolean"
+            "type": "boolean",
+            "x-order": 3
           },
           "machine": {
             "description": "Where a new thread starts (default: the project's)",
             "format": "roll-machine",
             "title": "Machine",
-            "type": "string"
+            "type": "string",
+            "x-order": 2
           },
           "plan": {
             "description": "The agent's todos as the session's plan (default on)",
-            "type": "boolean"
+            "type": "boolean",
+            "x-order": 5
           },
           "respond": {
             "description": "The final message as the response (default on)",
-            "type": "boolean"
+            "type": "boolean",
+            "x-order": 6
           },
           "session": {
             "description": "Agent session id; default: the event's",
             "format": "template",
             "title": "Session",
-            "type": "string"
+            "type": "string",
+            "x-order": 0
           },
           "thoughts": {
             "description": "Reasoning and interim messages as thoughts (default on)",
-            "type": "boolean"
+            "type": "boolean",
+            "x-order": 4
           },
           "thread": {
             "description": "Default: an earlier step's, else the issue's",
             "format": "roll-thread",
             "title": "Thread",
-            "type": "string"
+            "type": "string",
+            "x-order": 1
           }
         },
         "type": "object"
@@ -130,37 +145,43 @@
             "description": "A png or jpg icon",
             "format": "template",
             "title": "Icon URL",
-            "type": "string"
+            "type": "string",
+            "x-order": 4
           },
           "issue": {
             "description": "Issue id or identifier; default: the event's issue",
             "format": "template",
             "title": "Issue",
-            "type": "string"
+            "type": "string",
+            "x-order": 0
           },
           "session": {
             "description": "Also on this agent session (default: the event's)",
             "format": "template",
             "title": "Session",
-            "type": "string"
+            "type": "string",
+            "x-order": 5
           },
           "subtitle": {
             "description": "A line under it",
             "format": "template",
             "title": "Subtitle",
-            "type": "string"
+            "type": "string",
+            "x-order": 3
           },
           "title": {
             "description": "Its title (default: the URL)",
             "format": "template",
             "title": "Title",
-            "type": "string"
+            "type": "string",
+            "x-order": 2
           },
           "url": {
             "description": "The link (e.g. {{steps.publish.url}})",
             "format": "template",
             "title": "URL",
-            "type": "string"
+            "type": "string",
+            "x-order": 1
           }
         },
         "required": [
@@ -185,7 +206,8 @@
             "description": "Markdown (a template)",
             "format": "template-long",
             "title": "Body",
-            "type": "string"
+            "type": "string",
+            "x-order": 1
           },
           "issue": {
             "description": "Issue id or identifier (ENG-12); default: the event's issue",
@@ -195,13 +217,15 @@
               "source": "linear"
             },
             "title": "Issue",
-            "type": "string"
+            "type": "string",
+            "x-order": 0
           },
           "parent": {
             "description": "Reply under this comment id",
             "format": "template",
             "title": "Parent",
-            "type": "string"
+            "type": "string",
+            "x-order": 2
           }
         },
         "required": [
@@ -240,7 +264,8 @@
               "source": "linear"
             },
             "title": "Assignee",
-            "type": "string"
+            "type": "string",
+            "x-order": 4
           },
           "delegate": {
             "description": "roll: the agent takes it",
@@ -258,13 +283,15 @@
               ]
             },
             "title": "Delegate",
-            "type": "string"
+            "type": "string",
+            "x-order": 5
           },
           "description": {
             "description": "Markdown",
             "format": "template-long",
             "title": "Description",
-            "type": "string"
+            "type": "string",
+            "x-order": 2
           },
           "labels": {
             "description": "Put these labels on it",
@@ -279,7 +306,8 @@
               "source": "linear"
             },
             "title": "Labels",
-            "type": "array"
+            "type": "array",
+            "x-order": 6
           },
           "parent": {
             "description": "A sub-issue of this issue",
@@ -289,7 +317,8 @@
               "source": "linear"
             },
             "title": "Issue",
-            "type": "string"
+            "type": "string",
+            "x-order": 9
           },
           "priority": {
             "description": "How urgent it is",
@@ -319,7 +348,8 @@
               ]
             },
             "title": "Priority",
-            "type": "string"
+            "type": "string",
+            "x-order": 7
           },
           "project": {
             "description": "Add it to this project",
@@ -329,7 +359,8 @@
               "source": "linear"
             },
             "title": "Project",
-            "type": "string"
+            "type": "string",
+            "x-order": 8
           },
           "state": {
             "description": "Default: the team's first backlog or triage state",
@@ -367,7 +398,8 @@
               "source": "linear"
             },
             "title": "State",
-            "type": "string"
+            "type": "string",
+            "x-order": 3
           },
           "team": {
             "description": "The team the issue goes in",
@@ -377,13 +409,15 @@
               "source": "linear"
             },
             "title": "Team",
-            "type": "string"
+            "type": "string",
+            "x-order": 0
           },
           "title": {
             "description": "Title (a template)",
             "format": "template",
             "title": "Title",
-            "type": "string"
+            "type": "string",
+            "x-order": 1
           }
         },
         "required": [
@@ -418,7 +452,8 @@
               "source": "linear"
             },
             "title": "Add labels",
-            "type": "array"
+            "type": "array",
+            "x-order": 5
           },
           "assignee": {
             "description": "roll, no one, or a person",
@@ -438,7 +473,8 @@
               "source": "linear"
             },
             "title": "Assignee",
-            "type": "string"
+            "type": "string",
+            "x-order": 2
           },
           "delegate": {
             "description": "roll (the agent works on it), or no one",
@@ -456,13 +492,15 @@
               ]
             },
             "title": "Delegate",
-            "type": "string"
+            "type": "string",
+            "x-order": 3
           },
           "description": {
             "description": "A new description (markdown)",
             "format": "template-long",
             "title": "Description",
-            "type": "string"
+            "type": "string",
+            "x-order": 9
           },
           "issue": {
             "description": "Issue id or identifier; default: the event's issue",
@@ -472,7 +510,8 @@
               "source": "linear"
             },
             "title": "Issue",
-            "type": "string"
+            "type": "string",
+            "x-order": 0
           },
           "labels": {
             "description": "Replace the labels",
@@ -486,7 +525,8 @@
               "source": "linear"
             },
             "title": "Labels",
-            "type": "array"
+            "type": "array",
+            "x-order": 4
           },
           "priority": {
             "description": "How urgent it is",
@@ -516,7 +556,8 @@
               ]
             },
             "title": "Priority",
-            "type": "string"
+            "type": "string",
+            "x-order": 7
           },
           "remove_labels": {
             "description": "Take these labels off it",
@@ -529,7 +570,8 @@
               "source": "linear"
             },
             "title": "Remove labels",
-            "type": "array"
+            "type": "array",
+            "x-order": 6
           },
           "state": {
             "description": "A kind of state moves it to the first state of that kind in the issue's team",
@@ -566,13 +608,15 @@
               "source": "linear"
             },
             "title": "State",
-            "type": "string"
+            "type": "string",
+            "x-order": 1
           },
           "title": {
             "description": "A new title",
             "format": "template",
             "title": "Title",
-            "type": "string"
+            "type": "string",
+            "x-order": 8
           }
         },
         "required": [],
@@ -616,15 +660,18 @@
               "source": "linear"
             },
             "title": "Assignees",
-            "type": "array"
+            "type": "array",
+            "x-order": 6
           },
           "include_attached": {
             "description": "Session replies a running automation already takes",
-            "type": "boolean"
+            "type": "boolean",
+            "x-order": 11
           },
           "include_roll": {
             "description": "Also events roll caused itself",
-            "type": "boolean"
+            "type": "boolean",
+            "x-order": 10
           },
           "label_added": {
             "description": "An update added one of these labels",
@@ -638,7 +685,8 @@
               "source": "linear"
             },
             "title": "Label added",
-            "type": "array"
+            "type": "array",
+            "x-order": 3
           },
           "labels": {
             "description": "The issue has one of these labels",
@@ -652,15 +700,18 @@
               "source": "linear"
             },
             "title": "Labels",
-            "type": "array"
+            "type": "array",
+            "x-order": 2
           },
           "matches": {
             "description": "Words in the title, description or comment (case-insensitive)",
-            "type": "string"
+            "type": "string",
+            "x-order": 8
           },
           "mentions_roll": {
             "description": "Comments: only those that mention roll",
-            "type": "boolean"
+            "type": "boolean",
+            "x-order": 9
           },
           "priorities": {
             "description": "The issue has one of these priorities",
@@ -693,7 +744,8 @@
               ]
             },
             "title": "Priorities",
-            "type": "array"
+            "type": "array",
+            "x-order": 7
           },
           "projects": {
             "description": "Only issues in these projects",
@@ -706,7 +758,8 @@
               "source": "linear"
             },
             "title": "Projects",
-            "type": "array"
+            "type": "array",
+            "x-order": 1
           },
           "state_changed_to": {
             "description": "An update moved it into one of these states",
@@ -747,7 +800,8 @@
               "source": "linear"
             },
             "title": "State changed to",
-            "type": "array"
+            "type": "array",
+            "x-order": 5
           },
           "states": {
             "description": "The issue is in one of these states (a kind of state matches it in any team)",
@@ -788,7 +842,8 @@
               "source": "linear"
             },
             "title": "States",
-            "type": "array"
+            "type": "array",
+            "x-order": 4
           },
           "teams": {
             "description": "Only issues of these teams",
@@ -801,7 +856,8 @@
               "source": "linear"
             },
             "title": "Teams",
-            "type": "array"
+            "type": "array",
+            "x-order": 0
           }
         },
         "type": "object"

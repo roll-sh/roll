@@ -11,7 +11,7 @@ use super::cards;
 use super::follow::{self, Failure, Follow, Surface};
 use super::{Handled, Install, Platform};
 use crate::Code;
-use crate::agents::automations::{NewEvent, OwnerRef, Registry, StepContext, StepKind, StepOutcome, TriggerSource};
+use crate::agents::automations::{NewEvent, OwnerRef, Registry, StepContext, StepKind, StepOutcome, TriggerSource, props};
 use crate::agents::lookup::Pick;
 use agent_proto::automation::{AutomationEvent, EventInfo, LogLevel, Retry, StepInfo, TriggerInfo};
 use code_chat::card::{RequestCard, StatusCard};
@@ -69,11 +69,11 @@ impl TriggerSource for SlackTrigger {
             ],
             config: json!({
                 "type": "object",
-                "properties": {
+                "properties": props!({
                     "team": Pick::from(SOURCE, "workspaces").one("Workspace", "Unset: the owner's only one"),
                     "channels": Pick { parent: Some("team"), ..Pick::from(SOURCE, "channels") }.many("Channels", "Listen in these; unset: any channel the bot is in. Needed for message."),
                     "reactions": { "type": "array", "items": { "type": "string" }, "title": "Reactions", "description": "Reaction names (no colons); unset: robot_face." }
-                }
+                })
             }),
             needs_setup: false,
         }
@@ -466,19 +466,19 @@ impl SlackStep {
         let text = str_("The message (a template; Slack mrkdwn).");
         let blocks = json!({ "type": "array", "description": "Block Kit blocks (strings in them are templates); text is the fallback." });
         let (props, required) = match self.kind {
-            Kind::Post => (json!({ "team": team, "channel": channel("Where to post"), "text": text, "blocks": blocks, "thread_ts": str_("Post in this thread.") }), json!(["channel", "text"])),
-            Kind::Update => (json!({ "team": team, "channel": channel("Where the message is"), "ts": str_("The message to edit (an earlier step's ts)."), "text": text, "blocks": blocks }), json!(["channel", "ts", "text"])),
-            Kind::Reply => (json!({ "team": team, "channel": channel("Unset: the event's"), "thread_ts": str_("Unset: the event's thread."), "text": text, "blocks": blocks }), json!(["text"])),
-            Kind::Dm => (json!({ "team": team, "user": in_team("users").one("Person", "Who gets the message"), "text": text, "blocks": blocks }), json!(["user", "text"])),
+            Kind::Post => (props!({ "team": team, "channel": channel("Where to post"), "text": text, "blocks": blocks, "thread_ts": str_("Post in this thread.") }), json!(["channel", "text"])),
+            Kind::Update => (props!({ "team": team, "channel": channel("Where the message is"), "ts": str_("The message to edit (an earlier step's ts)."), "text": text, "blocks": blocks }), json!(["channel", "ts", "text"])),
+            Kind::Reply => (props!({ "team": team, "channel": channel("Unset: the event's"), "thread_ts": str_("Unset: the event's thread."), "text": text, "blocks": blocks }), json!(["text"])),
+            Kind::Dm => (props!({ "team": team, "user": in_team("users").one("Person", "Who gets the message"), "text": text, "blocks": blocks }), json!(["user", "text"])),
             Kind::Status => (
-                json!({
+                props!({
                     "team": team, "machine": machine, "thread": thread,
                     "channel": channel("Unset: the event's"), "thread_ts": str_("Unset: the event's thread; none: the status starts one."), "ts": str_("Edit this status message instead of posting one.")
                 }),
                 json!(["machine", "thread"]),
             ),
             Kind::Notify => (
-                json!({
+                props!({
                     "team": team, "to": in_team("targets").one("To", "A channel, or a person (a DM)"),
                     "machine": fmt("Machine", "Unset: the agent event's", "roll-machine"), "thread": fmt("Thread", "Unset: the agent event's", "roll-thread"), "text": str_("A line above the card (a template).")
                 }),

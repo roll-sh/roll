@@ -25,7 +25,7 @@ use super::client::{LinearError, uuid_for};
 use super::steps::{self, post_activity};
 use super::store::{self, Claim, PendingAsk};
 use crate::Code;
-use crate::agents::automations::{OwnerRef, StepContext, StepKind, StepOutcome};
+use crate::agents::automations::{OwnerRef, props, StepContext, StepKind, StepOutcome};
 use agent_proto::automation::{LogLevel, Retry, RunState, StepInfo};
 use agent_proto::{Command, Decision, Entity, Node, NodeBody, NodeStatus, Request, RequestBody, RequestStatus, Response, SendMode, Thread, ThreadStatus, TodoStatus};
 use serde::{Deserialize, Serialize};
@@ -344,7 +344,7 @@ impl StepKind for AgentSession {
             config: json!({
                 "type": "object",
                 "additionalProperties": false,
-                "properties": {
+                "properties": props!({
                     "session": { "type": "string", "title": "Session", "description": "Agent session id; default: the event's", "format": "template" },
                     "thread": { "type": "string", "title": "Thread", "description": "Default: an earlier step's, else the issue's", "format": "roll-thread" },
                     "machine": { "type": "string", "title": "Machine", "description": "Where a new thread starts (default: the project's)", "format": "roll-machine" },
@@ -352,7 +352,7 @@ impl StepKind for AgentSession {
                     "thoughts": { "type": "boolean", "description": "Reasoning and interim messages as thoughts (default on)" },
                     "plan": { "type": "boolean", "description": "The agent's todos as the session's plan (default on)" },
                     "respond": { "type": "boolean", "description": "The final message as the response (default on)" },
-                },
+                }),
             }),
             output: ["outcome", "thread", "machine", "session", "message", "change_url"].map(String::from).to_vec(),
             integration: Some(super::SOURCE.into()),

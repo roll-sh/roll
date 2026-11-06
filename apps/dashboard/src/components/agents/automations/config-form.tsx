@@ -35,13 +35,16 @@ export interface FormContext {
 type Obj = Record<string, unknown>;
 
 /**
- * A schema's fields in the order to fill them: the required ones first, as the schema lists them
- * (`properties` arrive alphabetical: the server's JSON keeps no order), then the rest.
+ * A schema's fields in the order to fill them: the server's (`x-order`, the order its schema was
+ * written in: its JSON objects arrive sorted); without one, the required ones first, as the schema
+ * lists them, then the rest.
  */
 export function fieldOrder(schema: Schema): [string, Schema][] {
+  const fields = Object.entries(schema.properties ?? {});
+  if (fields.some(([, s]) => typeof s["x-order"] === "number")) return fields.sort(([, a], [, b]) => (a["x-order"] ?? fields.length) - (b["x-order"] ?? fields.length));
   const req = schema.required ?? [];
   const rank = (k: string) => (req.includes(k) ? req.indexOf(k) : req.length);
-  return Object.entries(schema.properties ?? {}).sort(([a], [b]) => rank(a) - rank(b));
+  return fields.sort(([a], [b]) => rank(a) - rank(b));
 }
 
 /** Whether the field a `Label` titles must be filled. */

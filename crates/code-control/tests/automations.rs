@@ -341,7 +341,40 @@ async fn automations_are_saved_checked_and_listed() {
     assert_eq!(s, StatusCode::NOT_FOUND);
 }
 
-/// A manual run starts an agent on a machine by name in a project by id, waits for it, then
+/// Every config field in the catalog says where it goes (`x-order`, the order its schema was
+/// written in): JSON objects arrive sorted, and the builder showed Slack's Channel before its
+/// Workspace and an agent's Effort before its Prompt.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn catalog_fields_keep_their_order() {
+    fn check(at: &str, schema: &Value) {
+        let Some(props) = schema["properties"].as_object() else { return };
+        let mut seen: Vec<u64> = props.iter().map(|(k, f)| f["x-order"].as_u64().unwrap_or_else(|| panic!("{at}.{k} has no x-order"))).collect();
+        seen.sort();
+        assert_eq!(seen, (0..props.len() as u64).collect::<Vec<_>>(), "{at}");
+        for (k, f) in props {
+            check(&format!("{at}.{k}"), f);
+            check(&format!("{at}.{k}[]"), &f["items"]);
+        }
+    }
+    let order = |schema: &Value| {
+        let mut v: Vec<(u64, String)> = schema["properties"].as_object().unwrap().iter().map(|(k, f)| (f["x-order"].as_u64().unwrap(), k.clone())).collect();
+        v.sort();
+        v.into_iter().map(|(_, k)| k).collect::<Vec<_>>()
+    };
+    let w = world().await;
+    let cat = w.ok("GET", "/v1/code/agents/acme/automations/catalog", None).await;
+    for t in cat["triggers"].as_array().unwrap() {
+        check(&format!("trigger {}", t["source"]), &t["config"]);
+    }
+    let steps = cat["steps"].as_array().unwrap();
+    for s in steps {
+        check(&format!("step {}", s["kind"]), &s["config"]);
+    }
+    let step = |k: &str| &steps.iter().find(|s| s["kind"] == k).unwrap_or_else(|| panic!("{k}"))["config"];
+    assert_eq!(order(step("slack.post"))[..3], ["team", "channel", "text"]);
+    assert_eq!(order(step("agent.start"))[..3], ["prompt", "title", "target"]);
+    assert_eq!(order(step("webhook"))[..2], ["url", "method"]);
+}
 /// tells the owner: every step's output feeds the next one's templates, the run lists the thread
 /// it started, and the stream carries the run and the notice.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
