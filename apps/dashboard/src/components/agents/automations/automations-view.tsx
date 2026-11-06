@@ -13,7 +13,7 @@ import { useMemo, useState, type ReactNode } from "react";
 import type { Automation, AutomationRun, RunState } from "@/lib/automations-api";
 import { TEMPLATES, type AutomationTemplate, type TemplateContext } from "@/lib/automation-templates";
 import { setAgentsView, type AutomationsView as View } from "@/lib/agents-surface";
-import { duration, runLabel, took } from "@/lib/automations-ui";
+import { duration, runLabel, runStart, took } from "@/lib/automations-ui";
 import { automationPlaces } from "@/lib/agents-identity";
 import { MachineIcon, ProjectIcon } from "../identity";
 import { integrationOf } from "../brand-icons";
@@ -203,7 +203,7 @@ export function RunRows({ runs, selected, showName, onOpen, now }: { runs: Autom
   return (
     <ul className="overflow-hidden rounded-xl border border-line-2 bg-panel shadow-card inset-shadow-highlight" aria-label="Runs">
       {runs.map((r) => {
-        const ms = took(r.started_at, r.finished_at, now);
+        const ms = took(runStart(r), r.finished_at, now);
         const done = r.steps.filter((s) => s.status === "succeeded").length;
         return (
           <li key={r.id} className="border-line [&+&]:border-t">

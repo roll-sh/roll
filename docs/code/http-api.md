@@ -871,7 +871,9 @@ GET    /v1/code/agents/{owner}/automations/runs/{run} → RunDetail {run, event}
 POST   /v1/code/agents/{owner}/automations/runs/{run}/cancel → AutomationRun /* "cancelled"; what its steps
        made only for the run (a sandbox) is cleaned up; a final run is answered as it is */
 POST   /v1/code/agents/{owner}/automations/runs/{run}/retry → AutomationRun /* a failed or cancelled run goes on
-       from the step that stopped it (its attempts start over); 409 for a run that isn't */
+       from the step that stopped it (its attempts start over); 409 for a run that isn't. The run gets
+       `retried_at` (its time counts from there); each step that goes again keeps its error and a
+       "Retried after the run failed: …" line in its log */
 GET    /v1/code/agents/{owner}/automations/{id} → Automation
 PUT    /v1/code/agents/{owner}/automations/{id} AutomationSpec & {revision?} → AutomationSaved
        replaces the definition; with `revision`, 409 {error, current: Automation} when it isn't the current one.

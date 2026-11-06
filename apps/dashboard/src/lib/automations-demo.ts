@@ -581,7 +581,18 @@ export class DemoAutomations {
         const r = me.runs.get(rid);
         if (!r) throw new ApiError("no such run", 404, null);
         if (r.status !== "failed" && r.status !== "cancelled") throw new ApiError("only a failed or cancelled run goes again", 409, null);
-        const next = me.putRun({ ...r, status: "running", finished_at: null, reason: null, steps: r.steps.map((s) => (s.status === "failed" || s.status === "cancelled" || (s.status === "skipped" && s.started_at === null) ? { ...s, status: "pending", attempt: 0, error: null, finished_at: null, log: s.log } : s)) });
+        // As the server does: the failure stays in the step's log, and the run says when it was retried.
+        const now = Date.now();
+        const why = r.status === "cancelled" ? "Retried after the run was cancelled" : `Retried after the run failed${r.reason ? `: ${r.reason}` : ""}`;
+        const again = (s: StepRun): StepRun => ({
+          ...s,
+          status: "pending",
+          attempt: 0,
+          error: null,
+          finished_at: null,
+          log: [...s.log, ...(s.error && s.log.at(-1)?.text !== s.error ? [{ at: s.finished_at ?? now, level: "error" as const, text: s.error }] : []), { at: now, level: "info" as const, text: why }],
+        });
+        const next = me.putRun({ ...r, status: "running", finished_at: null, reason: null, retried_at: now, steps: r.steps.map((s) => (s.status === "failed" || s.status === "cancelled" ? again(s) : s.status === "skipped" && s.started_at === null ? { ...s, status: "pending", attempt: 0, finished_at: null } : s)) });
         me.host.after(400, () => void me.advance(rid));
         return next;
       },

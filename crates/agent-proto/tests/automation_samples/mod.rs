@@ -261,6 +261,7 @@ pub fn run(status: RunState) -> AutomationRun {
         started_at: Some(T),
         finished_at: status.is_final().then_some(T + 120_000),
         reason: matches!(status, RunState::Failed | RunState::Skipped | RunState::Cancelled).then(|| "another run was going".to_string()),
+        retried_at: (status == RunState::Running).then_some(T + 100_000),
     }
 }
 

@@ -342,6 +342,8 @@ export interface AutomationRun {
   started_at: Millis | null;
   finished_at: Millis | null;
   reason: string | null;
+  /** When it was last retried: its time counts from here; the stopped attempt stays in its steps' logs. */
+  retried_at?: Millis | null;
 }
 
 export interface RunDetail {
@@ -679,6 +681,7 @@ export const automationRunD = obj<AutomationRun>({
   started_at: opt(int),
   finished_at: opt(int),
   reason: opt(str),
+  retried_at: opt(int),
 });
 
 export const runDetailD = obj<RunDetail>({

@@ -818,6 +818,18 @@ export function took(start: number | null, end: number | null, now = Date.now())
   return start === null ? null : Math.max(0, (end ?? now) - start);
 }
 
+/** Where a run's time counts from: its last retry, else its start (a retried run sat failed in between). */
+export const runStart = (r: AutomationRun): number | null => r.retried_at ?? r.started_at;
+
+/**
+ * A step's log line's time: "+1.2s" from the step's start, or, for a line from before it (an
+ * attempt before a retry), the time of day.
+ */
+export function logTime(at: number, stepStart: number | null): string {
+  if (stepStart !== null && at < stepStart) return new Date(at).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  return `+${((at - (stepStart ?? at)) / 1000).toFixed(1)}s`;
+}
+
 export function duration(ms: number): string {
   if (ms < 1000) return `${ms} ms`;
   const s = Math.round(ms / 1000);

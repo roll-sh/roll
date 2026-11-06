@@ -339,6 +339,7 @@ fn new_run(c: &Conn<'_>, a: &AutomationRow, e: &AutomationEvent, summary: &str, 
         started_at: None,
         finished_at: status.is_final().then_some(now.max(0) as u64),
         reason,
+        retried_at: None,
     };
     let private = Private { spec: Some(a.spec.clone()), owner: owner.to_string(), run_as: a.spec.run_as.clone(), ..Private::default() };
     let next_at = (status == RunState::Running).then_some(now);
@@ -903,7 +904,21 @@ impl Code {
             if !matches!(r.run.status, RunState::Failed | RunState::Cancelled) {
                 return Ok(Err(()));
             }
+            let now = ms_now().max(0) as u64;
+            // What stopped it stays readable: the step's error and the run's reason go into the
+            // step's log before they're cleared.
+            let why = match (&r.run.status, &r.run.reason) {
+                (RunState::Cancelled, _) => "Retried after the run was cancelled".to_string(),
+                (_, Some(reason)) => format!("Retried after the run failed: {reason}"),
+                _ => "Retried after the run failed".to_string(),
+            };
             for s in r.run.steps.iter_mut().filter(|s| matches!(s.status, StepState::Failed | StepState::Cancelled)) {
+                let mut lines = Vec::new();
+                if let Some(e) = s.error.take().filter(|e| s.log.last().is_none_or(|l| &l.text != e)) {
+                    lines.push(LogLine { at: s.finished_at.unwrap_or(now), level: LogLevel::Error, text: e.chars().take(limits::LOG_LINE).collect() });
+                }
+                lines.push(line(LogLevel::Info, why.as_str()));
+                push_log(s, lines);
                 s.status = StepState::Pending;
                 s.attempt = 0;
                 s.started_at = None;
@@ -915,6 +930,7 @@ impl Code {
             r.run.status = RunState::Running;
             r.run.finished_at = None;
             r.run.reason = None;
+            r.run.retried_at = Some(now);
             r.private.cleanup = false;
             r.next_at = Some(ms_now());
             Ok(Ok(Some(save_on(c, &r, None, false)?)))

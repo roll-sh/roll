@@ -29,7 +29,11 @@ describe("the automations demo", () => {
     const api = demo.services().automations!;
     const r = await api.run("demo", "aut_demo_triage", {});
     expect((await api.cancel("demo", r.id)).status).toBe("cancelled");
-    expect((await api.retry("demo", r.id)).status).toBe("running");
+    const again = await api.retry("demo", r.id);
+    expect(again.status).toBe("running");
+    // As the server: the run says when, and the stopped step's log says why.
+    expect(again.retried_at).toBeGreaterThan(0);
+    expect(again.steps.some((s) => s.log.some((l) => l.text === "Retried after the run was cancelled"))).toBe(true);
     await api.setSecret("demo", "aut_demo_triage", "TOKEN", "s3cret");
     const a = await api.get("demo", "aut_demo_triage");
     expect(a.secrets).toEqual(["TOKEN"]);

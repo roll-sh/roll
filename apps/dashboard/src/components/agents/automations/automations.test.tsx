@@ -251,6 +251,40 @@ describe("Automation runs", () => {
     expect(api.cancel).toHaveBeenCalledWith("acme", "arn_1");
     expect(await screen.findByText("Cancelled")).toBeInTheDocument();
   });
+
+  it("keeps a retried run's failure in sight and times it from the retry", async () => {
+    const base = automationRun();
+    const now = Date.now();
+    const hour = 3600_000;
+    const r = {
+      ...base,
+      status: "running" as const,
+      started_at: now - 30 * hour,
+      retried_at: now - 5000,
+      steps: [
+        base.steps[0],
+        {
+          ...base.steps[1],
+          status: "running" as const,
+          started_at: now - 4000,
+          error: null,
+          log: [
+            { at: now - 29 * hour, level: "error" as const, text: "hooks.example.com answered 400" },
+            { at: now - 5000, level: "info" as const, text: "Retried after the run failed: step wait failed" },
+            { at: now - 2000, level: "info" as const, text: "Waiting for thr_1" },
+          ],
+        },
+      ],
+    };
+    renderAgents(<RunDetail run="arn_1" />, harness(fakeApi([automation()], [r])));
+    const card = (await screen.findByText(/· retried/)).parentElement!;
+    // From the retry (seconds), not from the first start a day earlier.
+    expect(card).not.toHaveTextContent(/\b(29|30)h\b/);
+    const log = screen.getByLabelText("Log");
+    expect(log).toHaveTextContent("hooks.example.com answered 400");
+    expect(log).toHaveTextContent("+2.0s");
+    expect(log).not.toHaveTextContent("+-");
+  });
 });
 
 describe("the canvas card", () => {

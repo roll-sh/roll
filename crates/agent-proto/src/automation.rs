@@ -699,6 +699,10 @@ pub struct AutomationRun {
     /// Why it was skipped, cancelled or failed: one line.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// When it was last retried (a failed or cancelled run going on from the step that stopped
+    /// it): what it takes counts from here, and the attempt that stopped stays in its steps' logs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retried_at: Option<Millis>,
 }
 
 /// A thread a run started.

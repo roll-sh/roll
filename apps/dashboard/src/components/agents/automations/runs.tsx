@@ -11,7 +11,7 @@
 import { ChevronRight, CircleAlert, CircleStop, MessageSquare, RotateCcw } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { isRunFinal, type AutomationEvent, type AutomationRun, type StepRun } from "@/lib/automations-api";
-import { canCancel, canRetry, duration, stepInfo, stepLabel, took } from "@/lib/automations-ui";
+import { canCancel, canRetry, duration, logTime, runStart, stepInfo, stepLabel, took } from "@/lib/automations-ui";
 import { setAgentsView, type AutomationsView } from "@/lib/agents-surface";
 import { ago } from "../shared";
 import { cn } from "../ui";
@@ -101,7 +101,7 @@ export function RunDetail({ run: id, onThread }: { run: string; onThread?: (thre
         <p className="py-16 text-center text-[13px] text-subtle">{error ?? <span className="shimmer">Loading the run…</span>}</p>
       </>
     );
-  const total = took(run.started_at ?? run.created_at, run.finished_at, now);
+  const total = took(runStart(run) ?? run.created_at, run.finished_at, now);
   const act = async (what: "retry" | "cancel") => {
     if (!store) return;
     setActing(what);
@@ -148,6 +148,11 @@ export function RunDetail({ run: id, onThread }: { run: string; onThread?: (thre
           <RunStatus status={run.status} className="text-[12.5px] font-medium" />
           <span className="text-faint">·</span>
           <span className="font-mono text-[11.5px] text-subtle tabular-nums">{total === null ? "not started" : duration(total)}</span>
+          {run.retried_at && (
+            <span className="text-[11.5px] text-subtle" title={`First started ${new Date(run.started_at ?? run.created_at).toLocaleString()}`}>
+              · retried {ago(run.retried_at, now)}
+            </span>
+          )}
           <span className="ml-auto text-[11.5px] text-subtle tabular-nums" title={new Date(run.created_at).toLocaleString()}>
             {new Date(run.created_at).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}
           </span>
@@ -220,7 +225,7 @@ export function RunDetail({ run: id, onThread }: { run: string; onThread?: (thre
                     <div className="max-h-96 overflow-y-auto rounded-lg border border-line bg-bg/60 px-2.5 py-2 font-mono text-[11.5px] leading-[18px]" aria-label="Log">
                       {s.log.map((l, j) => (
                         <div key={j} className={cn("flex gap-3", l.level === "error" ? "text-danger" : l.level === "warn" ? "text-soft" : "text-muted")}>
-                          <span className="shrink-0 text-faint tabular-nums">+{((l.at - (s.started_at ?? l.at)) / 1000).toFixed(1)}s</span>
+                          <span className="shrink-0 text-faint tabular-nums">{logTime(l.at, s.started_at)}</span>
                           <span className="min-w-0 break-words whitespace-pre-wrap">{l.text}</span>
                         </div>
                       ))}

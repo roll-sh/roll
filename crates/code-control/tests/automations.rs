@@ -627,6 +627,19 @@ async fn concurrency_cancel_and_retry() {
     let done = w.finished(&r).await;
     assert_eq!(done["run"]["status"], "succeeded", "{done}");
     assert_eq!(done["run"]["steps"][0]["attempt"], 1, "the first step wasn't run again");
+    // The retry is on the run, and the failed attempt stays in the step's log, before its new start.
+    let retried = done["run"]["retried_at"].as_u64().expect("retried_at");
+    assert!(retried >= failed["run"]["finished_at"].as_u64().unwrap(), "{done}");
+    let log: Vec<(&str, &str, u64)> = done["run"]["steps"][1]["log"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| (l["level"].as_str().unwrap_or("info"), l["text"].as_str().unwrap(), l["at"].as_u64().unwrap()))
+        .collect();
+    let at = log.iter().position(|(_, t, _)| t.starts_with("Retried after the run failed")).unwrap_or_else(|| panic!("{log:?}"));
+    assert!(log[..at].iter().any(|(level, t, _)| *level == "error" && t.contains("400")), "the failure stays: {log:?}");
+    assert!(log[at].2 <= done["run"]["steps"][1]["started_at"].as_u64().unwrap(), "{log:?}");
+    assert!(done["run"]["steps"][1].get("error").is_none(), "{done}");
 }
 
 /// Rate limits skip runs past them; agent tokens run an automation only when it allows agents.
