@@ -58,6 +58,8 @@ export function useFocusRescue(root: RefObject<HTMLElement | null>) {
       for (const r of records) {
         if (![...r.removedNodes].some((n) => n === lost || n.contains(lost))) continue;
         held = null;
+        // A whole panel closing (settings, a conversation): the page gives focus back to what opened it.
+        if (lost.closest("[data-panel]")) return;
         rescueTarget(r.target, r.previousSibling, r.nextSibling, el)?.focus();
         return;
       }

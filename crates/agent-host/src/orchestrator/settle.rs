@@ -89,9 +89,25 @@ impl Host {
         Ok(Reply::Ok)
     }
 
-    pub(crate) async fn thread_unsettle(&self, id: &ThreadId) -> Res<Reply> {
+    pub(crate) async fn thread_unsettle(&self, id: &ThreadId, restore: Option<InboxBefore>) -> Res<Reply> {
         let mut rt = self.lock(id).await?;
-        rt.thread.inbox.settle = Some(Settle::Active { at: now() });
+        let inbox = &mut rt.thread.inbox;
+        match restore {
+            None => inbox.settle = Some(Settle::Active { at: now() }),
+            // Undoing a settle: only the user's, still standing (new activity or another device
+            // may have moved it since). A settle that found it settled changed nothing to undo.
+            Some(before) => {
+                let by_user = matches!(inbox.settle, Some(Settle::Settled { by: SettledBy::User, .. }));
+                if !by_user || matches!(before.settle, Some(Settle::Settled { .. })) {
+                    return Ok(Reply::Ok);
+                }
+                inbox.settle = before.settle;
+                // A snooze comes back while it still has time to run.
+                if inbox.snooze.is_none() {
+                    inbox.snooze = before.snooze.filter(|s| s.until > now());
+                }
+            }
+        }
         self.put_thread(&mut rt)?;
         Ok(Reply::Ok)
     }

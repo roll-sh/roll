@@ -226,7 +226,7 @@ describe("project settings on the canvas", () => {
     expect(onClose).toHaveBeenCalled();
   });
 
-  it("won't close over an unsaved change without saying so: once refused, then Discard and it closes", async () => {
+  it("won't close over an unsaved change without saying so: once refused, then Discard closes it", async () => {
     const p = withSettings({});
     const h = agentsHarness({ entities: [mirrored("project", p, 1)] });
     const onClose = vi.fn();
@@ -236,8 +236,21 @@ describe("project settings on the canvas", () => {
     expect(onClose).not.toHaveBeenCalled();
     expect(screen.getByRole("alert")).toHaveTextContent("Save or discard your changes first");
     await userEvent.click(screen.getByRole("button", { name: "Discard" }));
-    await userEvent.click(screen.getByRole("button", { name: "Close (Esc)" }));
-    expect(onClose).toHaveBeenCalled();
+    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+    expect(screen.getByRole("switch", { name: "Pull merged changes automatically" })).toHaveAttribute("aria-checked", "false");
+  });
+
+  it("Discard throws away every kind of change (auto-settle and cleanup stayed changed) and closes the panel", async () => {
+    const p = withSettings({});
+    const h = agentsHarness({ entities: [mirrored("project", p, 1)] });
+    const onClose = vi.fn();
+    renderAgents(<SettingsPanel target={`p:${p.id}`} onClose={onClose} />, h);
+    await userEvent.click(screen.getByRole("switch", { name: /Settle when its change lands/ }));
+    expect(screen.getByRole("region", { name: "Unsaved changes" })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Discard" }));
+    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+    expect(screen.getByRole("switch", { name: /Settle when its change lands/ })).toHaveAttribute("aria-checked", "true");
+    expect(updates(h)).toEqual([]);
   });
 
   it("won't let a card on the canvas (or any other view) throw an unsaved change away: it says so and stays (M8)", async () => {
@@ -251,9 +264,9 @@ describe("project settings on the canvas", () => {
     expect(agentsSurface.get().view).toEqual({ kind: "settings", target: `p:${p.id}` });
     expect(screen.getByRole("alert")).toHaveTextContent("Save or discard your changes first");
     expect(screen.getByRole("switch", { name: "Pull merged changes automatically" })).toHaveAttribute("aria-checked", "true");
+    // Discard goes where the click was going.
     await userEvent.click(screen.getByRole("button", { name: "Discard" }));
-    act(() => setAgentsView({ kind: "thread", thread: "thr_1" }));
-    expect(agentsSurface.get().view).toEqual({ kind: "thread", thread: "thr_1" });
+    await waitFor(() => expect(agentsSurface.get().view).toEqual({ kind: "thread", thread: "thr_1" }));
   });
 
   it("are offered while adding a project: on for a clone, off for a folder", async () => {

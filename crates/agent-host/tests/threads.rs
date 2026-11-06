@@ -994,10 +994,27 @@ async fn settling_by_hand_and_what_brings_a_thread_back() {
     assert_eq!(again, Some(Settle::Settled { at, by: SettledBy::User }), "settling again keeps when");
 
     // Un-settled by hand: kept active, so the sweep leaves it alone.
-    assert_eq!(w.run(Command::ThreadUnsettle { thread: thread.clone() }).await, Reply::Ok);
+    assert_eq!(w.run(Command::ThreadUnsettle { thread: thread.clone(), restore: None }).await, Reply::Ok);
     assert!(matches!(w.state().await.thread(&thread).unwrap().inbox.settle, Some(Settle::Active { .. })));
     w.host.settle_round(now_ms() + 30 * DAY).await;
     assert!(matches!(w.state().await.thread(&thread).unwrap().inbox.settle, Some(Settle::Active { .. })));
+
+    // Undoing a settle puts the inbox back as it was: under the project's rules again (not kept
+    // active by hand), with its snooze.
+    let snooze = Snooze { until: now_ms() + 3_600_000, at: now_ms() };
+    let undo = Command::ThreadUnsettle { thread: thread.clone(), restore: Some(InboxBefore { settle: None, snooze: Some(snooze) }) };
+    assert_eq!(w.run(settle.clone()).await, Reply::Ok);
+    assert_eq!(w.run(undo.clone()).await, Reply::Ok);
+    let inbox = w.state().await.thread(&thread).unwrap().inbox.clone();
+    assert_eq!((inbox.settle, inbox.snooze), (None, Some(snooze)));
+    // A second undo (another device) finds nothing of the user's to undo.
+    assert_eq!(w.run(undo).await, Reply::Ok);
+    assert_eq!(w.state().await.thread(&thread).unwrap().inbox.snooze, Some(snooze));
+    w.host.settle_round(now_ms() + 30 * DAY).await;
+    assert!(
+        matches!(w.state().await.thread(&thread).unwrap().inbox.settle, Some(Settle::Settled { by: SettledBy::Inactivity, .. })),
+        "back under auto-settle"
+    );
 
     // A message brings a settled thread back, and spends "keep it active".
     assert_eq!(w.run(settle).await, Reply::Ok);
@@ -1086,7 +1103,7 @@ async fn threads_settle_by_themselves_after_days_without_activity_or_when_their_
     let archived = idle(&w, "d").await;
     let snoozed = idle(&w, "e").await;
     let last = w.state().await.runs(&plain)[0].completed_at.unwrap();
-    assert_eq!(w.run(Command::ThreadUnsettle { thread: kept.clone() }).await, Reply::Ok);
+    assert_eq!(w.run(Command::ThreadUnsettle { thread: kept.clone(), restore: None }).await, Reply::Ok);
     assert_eq!(w.run(Command::ThreadAutoSettle { thread: manual_.clone(), enabled: false }).await, Reply::Ok);
     assert!(w.state().await.thread(&manual_).unwrap().inbox.manual);
     assert_eq!(w.run(Command::ThreadArchive { thread: archived.clone() }).await, Reply::Ok);
@@ -1370,7 +1387,7 @@ async fn settling_closes_finished_terminals_and_archiving_closes_them_all() {
     let s = w.state().await;
     assert!(term(&s, &done).is_none(), "a finished terminal goes");
     assert!(term(&s, &server).is_some(), "a running one, a dev server, stays");
-    assert_eq!(w.run(Command::ThreadUnsettle { thread: thread.clone() }).await, Reply::Ok);
+    assert_eq!(w.run(Command::ThreadUnsettle { thread: thread.clone(), restore: None }).await, Reply::Ok);
     assert_eq!(w.run(Command::ThreadArchive { thread: thread.clone() }).await, Reply::Ok);
     assert!(term(&w.state().await, &server).is_none(), "T3 closes an archived thread's terminals");
 }

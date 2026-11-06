@@ -575,6 +575,17 @@ pub struct Snooze {
     pub at: Millis,
 }
 
+/// What a thread's inbox was before `thread.settle`, as the client saw it: what undoing the
+/// settle (`thread.unsettle` with `restore`) puts back.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InboxBefore {
+    /// `None`: the daemon settled it by the project's rules.
+    #[serde(default)]
+    pub settle: Option<Settle>,
+    #[serde(default)]
+    pub snooze: Option<Snooze>,
+}
+
 /// For `skip_serializing_if`: a flag that's off isn't written, so records without it read the same.
 fn is_false(b: &bool) -> bool {
     !*b
@@ -2221,9 +2232,15 @@ pub enum Command {
     #[serde(rename = "thread.settle")]
     ThreadSettle { thread: ThreadId },
     /// Take a thread off the settled shelf and keep it active: auto-settle leaves it alone until
-    /// it is active again.
+    /// it is active again. With `restore` it undoes a `thread.settle` instead: the inbox goes back
+    /// to what it was before (under the project's auto-settle rules again, its snooze back if it
+    /// hasn't passed); nothing happens unless the thread is still settled by its user.
     #[serde(rename = "thread.unsettle")]
-    ThreadUnsettle { thread: ThreadId },
+    ThreadUnsettle {
+        thread: ThreadId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        restore: Option<InboxBefore>,
+    },
     /// Hide a thread until `until` (T3's `thread.snooze`). Refused while it waits on its user or
     /// has queued messages, and for a time that isn't in the future (at most a year ahead).
     #[serde(rename = "thread.snooze")]

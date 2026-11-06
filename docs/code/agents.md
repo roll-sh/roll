@@ -1073,7 +1073,9 @@ Code: `agent-host/src/orchestrator/settle.rs`; the threads sidebar is
   provider session, as T3 detaches it, and the thread's terminals that have finished (T3's
   `closeIdle`; a running one, a dev server, stays); settling a settled thread keeps its time.
   Archiving closes all of the thread's terminals, as T3 does. `thread.unsettle`
-  sets `active`. `thread.auto_settle {enabled}` turns auto-settle off or on for one thread.
+  sets `active`; with `restore` (the `settle` and `snooze` the client saw before it settled) it
+  undoes the user's settle instead, if it still stands: back under the project's rules (or kept
+  active, if it was), its snooze back while it has time left. `thread.auto_settle {enabled}` turns auto-settle off or on for one thread.
 - **What brings a thread back.** Every new run (a message, a queued message draining, a delegated
   task) clears `settle`, `active` included, as T3 clears the override on every dispatch. A message
   also ends a snooze. A request or a failed run ends a snooze early and records `woke_at` (T3's
@@ -1165,7 +1167,8 @@ Code: `agent-host/src/orchestrator/settle.rs`; the threads sidebar is
   keeps: the branch, and a worktree with uncommitted changes).
 - **Undo** (T3's `showThreadUndoNotice.ts`): settling, snoozing, archiving and restoring show one
   notice at a time for 5 seconds, from wherever they were done (the sidebar, the shelf, the
-  conversation's menu, ⌘K); Undo or ⌘Z (outside a text field) puts the thread back.
+  conversation's menu, ⌘K); Undo or ⌘Z (outside a text field) puts the thread back exactly
+  (a settle's undo is `thread.unsettle` with `restore`, not "kept active by hand").
 
 ## Machine settings
 
@@ -1697,7 +1700,7 @@ The surface has three views:
   the canvas) or runs, one run (its threads' cards highlighted on the canvas), and a conversation
   that run started, with Back to the run. Back and Escape go up one level, from the list Escape,
   ⚡ and A close it. docs/code/automations-ui.md has the details.
-- **A conversation.** Clicking a thread opens it in a panel docked beside the canvas (resizable, remembered; on a phone it covers the canvas), its card selected on the canvas. A machine's or project's settings open in the same panel (`#agents/settings/<key>`, from its card), and so do the owner's (`#agents/settings/owner`, the header's gear or ⌘,; "Machine settings", "Owner settings"). Unsaved project settings hold the panel: closing it, or opening anything else (a card, a row, ⌘K), says "Save or discard your changes first" and keeps the edit. Finished subagents (a done provider subagent, a delegated thread that's done) leave the canvas; their results stay in the parent's transcript, and an orchestrator's chip (on its card and in its header) is a menu of every agent it started, each opening its conversation. The conversation is T3's chat
+- **A conversation.** Clicking a thread opens it in a panel docked beside the canvas (resizable, remembered; on a phone it covers the canvas), its card selected on the canvas. A machine's or project's settings open in the same panel (`#agents/settings/<key>`, from its card), and so do the owner's (`#agents/settings/owner`, the header's gear or ⌘,; "Machine settings", "Owner settings"). Unsaved project settings hold the panel: closing it, or opening anything else (a card, a row, ⌘K), says "Save or discard your changes first" and keeps the edit; Discard throws the edit away and goes on (where the held move was going, else the panel closes), with focus back on what opened the settings. Finished subagents (a done provider subagent, a delegated thread that's done) leave the canvas; their results stay in the parent's transcript, and an orchestrator's chip (on its card and in its header) is a menu of every agent it started, each opening its conversation. The conversation is T3's chat
   view (`session.tsx`, `transcript.tsx`, `work-log.tsx`, `composer.tsx`; the grouping is
   `lib/agents-worklog.ts`): a header that is a breadcrumb (the project, the title, T3's status
   pill) with Diff, Terminal and Share and the rest under More; the transcript in a 46 rem column

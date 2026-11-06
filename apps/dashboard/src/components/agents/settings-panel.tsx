@@ -37,7 +37,7 @@ export function SettingsPanel({ target, onClose }: { target: string; onClose: ()
       // The × asks what's open inside first (unsaved project settings hold it: `escape-layers.ts`).
       <SettingsPage icon={<ProjectIcon project={r.value} className="size-4" />} title={r.value.name} subtitle="Project settings" onClose={() => closeTopLayer() || onClose()} items={[]} search={false}>
         <ProjectOverview project={r.value} machine={machine} />
-        <ProjectSettingsForm project={r.value} machine={machine} />
+        <ProjectSettingsForm project={r.value} machine={machine} onLeave={onClose} />
       </SettingsPage>
     );
   }

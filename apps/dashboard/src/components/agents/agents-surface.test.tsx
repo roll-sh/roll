@@ -113,6 +113,24 @@ describe("the agents in the header", () => {
     await waitFor(() => expect(display).toHaveFocus());
   });
 
+  it("Discard in project settings closes them and gives focus back to what opened them (it went to the Name field)", async () => {
+    setup();
+    await userEvent.click(screen.getByRole("button", { name: /Agents: 1 running/ }));
+    await userEvent.keyboard("{Escape}");
+    const opener = screen.getByRole("button", { name: /Display/ });
+    opener.focus();
+    act(() => setAgentsView({ kind: "settings", target: "p:prj_1" }));
+    const toggle = await screen.findByRole("switch", { name: "Pull merged changes automatically" });
+    toggle.focus();
+    await userEvent.keyboard(" ");
+    screen.getByRole("button", { name: "Discard" }).focus();
+    await userEvent.keyboard("{Enter}");
+    await waitFor(() => expect(agentsSurface.get().view).toEqual({ kind: "canvas" }));
+    // The page gives focus back a tick after the panel starts to leave.
+    await act(() => new Promise((r) => setTimeout(r, 50)));
+    expect(opener).toHaveFocus();
+  });
+
   it("opens a conversation whose record comes after the reply (a fork), and leaves one that's deleted", async () => {
     const h = setup();
     await userEvent.click(screen.getByRole("button", { name: /Agents: 1 running/ }));

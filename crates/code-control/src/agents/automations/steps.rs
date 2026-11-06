@@ -764,7 +764,7 @@ impl StepKind for SettleAgent {
             let cmd = match c.action {
                 SettleAction::Settle => Command::ThreadSettle { thread },
                 SettleAction::Archive => Command::ThreadArchive { thread },
-                SettleAction::Unsettle => Command::ThreadUnsettle { thread },
+                SettleAction::Unsettle => Command::ThreadUnsettle { thread, restore: None },
             };
             ctx.command(&machine, "settle", cmd).await?;
             Ok(StepOutcome::Done(json!({ "thread": t.id, "action": c.action })))

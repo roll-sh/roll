@@ -1,7 +1,7 @@
 "use client";
 
 import { ArrowDownToLine, Bug, Check, CircleAlert, Eraser, FlaskConical, Hammer, ListChecks, Pause, Play, Plus, Settings2, Trash2 } from "lucide-react";
-import { useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   type AutoSettle,
   type Cleanup,
@@ -264,8 +264,11 @@ const canon = (v: unknown) =>
       : x,
   );
 
-/** The settings of one project, edited and saved whole. `onDone` after a save or a cancel. */
-export function ProjectSettingsForm({ project, machine, onDone }: { project: Project; machine: Machine | undefined; onDone?: () => void }) {
+/**
+ * The settings of one project, edited and saved whole. `onDone` after a save or a cancel (in a
+ * dialog); `onLeave` closes the panel it's in, which Discard does.
+ */
+export function ProjectSettingsForm({ project, machine, onDone, onLeave }: { project: Project; machine: Machine | undefined; onDone?: () => void; onLeave?: () => void }) {
   const { client } = useAgents();
   const online = reachable(machine);
   const providers = useMemo(() => (machine?.info?.providers ?? []).filter((p) => p.installed), [machine]);
@@ -302,7 +305,12 @@ export function ProjectSettingsForm({ project, machine, onDone }: { project: Pro
   const [held, setHeld] = useState(false);
   useEscapeLayer(changed, () => setHeld(true));
   // So is opening something else: a card on the canvas, a row, ⌘K (it threw the edits away).
-  useLeaveGuard(changed && !onDone, () => setHeld(true));
+  // Discard then goes where the user was going.
+  const resume = useRef<(() => void) | null>(null);
+  useLeaveGuard(changed && !onDone, (go) => {
+    resume.current = go;
+    setHeld(true);
+  });
   const scriptsOk = scripts.every((s) => s.name.trim() && s.command.trim());
   const branch = project.git?.branch && project.git.branch !== "HEAD" ? project.git.branch : "the default branch";
 
@@ -324,6 +332,10 @@ export function ProjectSettingsForm({ project, machine, onDone }: { project: Pro
       client.run(machine!.id, { type: "project.update", project: project.id, name: name.trim() !== project.name ? name.trim() : undefined, settings }, "ok"),
     ).then((ok) => ok && onDone?.());
 
+  // Discard throws the edits away and leaves: where a held move was going, else the panel closes,
+  // and focus goes back to what opened it (the page does that), not to the top of the form. The
+  // bar stays as it was while the panel leaves: focus stays on Discard, in the leaving panel.
+  const [leave, setLeave] = useState<"discarding" | "left" | null>(null);
   const discard = () => {
     setName(project.name);
     setAutoPull(project.settings.auto_pull);
@@ -331,8 +343,21 @@ export function ProjectSettingsForm({ project, machine, onDone }: { project: Pro
     setScripts(project.settings.scripts);
     setColor(project.settings.color);
     setIcon(project.settings.icon ?? { kind: "auto" });
+    setAutoSettle(project.settings.auto_settle);
+    setCleanup(project.settings.cleanup ?? {});
     setError(null);
+    setHeld(false);
+    setLeave("discarding");
   };
+  // After the reset commits, so the leave guard has let go.
+  useEffect(() => {
+    if (leave !== "discarding" || changed) return;
+    const go = resume.current ?? onLeave;
+    resume.current = null;
+    setLeave(go ? "left" : null);
+    go?.();
+  }, [leave, changed, onLeave]);
+  const bar = changed || leave !== null;
 
   const patchScript = (id: string, patch: Partial<ProjectScript>) => setScripts((all) => all.map((s) => (s.id === id ? { ...s, ...patch } : s)));
 
@@ -513,16 +538,16 @@ export function ProjectSettingsForm({ project, machine, onDone }: { project: Pro
       {/* While something's changed the bar stays in view at the bottom and says so, so a change
           is never left unsaved below the fold. */}
       <div
-        role={changed ? "region" : undefined}
-        aria-label={changed ? "Unsaved changes" : undefined}
-        className={`flex items-center gap-1.5 ${changed ? "sticky bottom-0 z-10 -mx-1 border-t border-line bg-sheet px-1 py-3" : ""}`}
+        role={bar ? "region" : undefined}
+        aria-label={bar ? "Unsaved changes" : undefined}
+        className={`flex items-center gap-1.5 ${bar ? "sticky bottom-0 z-10 -mx-1 border-t border-line bg-sheet px-1 py-3" : ""}`}
       >
-        {changed && (
+        {bar && (
           <span role={held ? "alert" : undefined} className={`mr-auto text-[12.5px] ${held ? "text-fg" : "text-muted"}`}>
             {held ? "Save or discard your changes first" : "Unsaved changes"}
           </span>
         )}
-        {changed && !onDone && (
+        {bar && !onDone && (
           <button type="button" onClick={discard} className={btn}>
             Discard
           </button>

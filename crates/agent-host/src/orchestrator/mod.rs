@@ -613,7 +613,7 @@ impl Host {
                 self.thread_delete(&thread).await.map(|()| Reply::Ok)
             }
             Command::ThreadSettle { thread } => self.thread_settle(&thread).await,
-            Command::ThreadUnsettle { thread } => self.thread_unsettle(&thread).await,
+            Command::ThreadUnsettle { thread, restore } => self.thread_unsettle(&thread, restore).await,
             Command::ThreadSnooze { thread, until } => self.thread_snooze(&thread, until).await,
             Command::ThreadUnsnooze { thread } => self.thread_unsnooze(&thread).await,
             Command::ThreadVisit { thread } => self.thread_visit(&thread).await,

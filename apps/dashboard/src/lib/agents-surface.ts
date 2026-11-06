@@ -49,30 +49,31 @@ export interface AgentsSurface {
 let state: AgentsSurface = { open: false, view: { kind: "canvas" } };
 const listeners = new Set<() => void>();
 /** Unsaved work in what's shown (`useLeaveGuard`), newest last. */
-const holds: (() => void)[] = [];
+const holds: ((resume: () => void) => void)[] = [];
 
 function set(next: AgentsSurface) {
   if (next.open === state.open && sameView(next.view, state.view)) return;
   // Leaving what's shown (another view, or the popup closing) with unsaved work in it: the work
   // says so and stays, as its panel's × does; Save or Discard, then go.
   const hold = holds.at(-1);
-  if (hold && (!next.open || !sameView(next.view, state.view))) return hold();
+  if (hold && (!next.open || !sameView(next.view, state.view))) return hold(() => set(next));
   state = next;
   for (const l of listeners) l();
 }
 
 /**
  * While `dirty`, nothing leaves the view that shows it (a card clicked on the canvas, a row in the
- * sidebar, ⌘K, a link): `hold` runs instead, to say why and how to go on.
+ * sidebar, ⌘K, a link): `hold` runs instead, to say why and how to go on. `resume` goes where the
+ * user was going, once the work is saved or discarded (it's held again while still dirty).
  */
-export function useLeaveGuard(dirty: boolean, hold: () => void) {
+export function useLeaveGuard(dirty: boolean, hold: (resume: () => void) => void) {
   const latest = useRef(hold);
   useEffect(() => {
     latest.current = hold;
   });
   useEffect(() => {
     if (!dirty) return;
-    const h = () => latest.current();
+    const h = (resume: () => void) => latest.current(resume);
     holds.push(h);
     return () => {
       const i = holds.lastIndexOf(h);

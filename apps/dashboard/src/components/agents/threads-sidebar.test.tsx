@@ -84,7 +84,7 @@ describe("the threads sidebar", () => {
     expect(shown()).toBe(41);
   });
 
-  it("⌘⇧S settles the open thread and opens the next; Undo un-settles it; opening it was a visit", async () => {
+  it("⌘⇧S settles the open thread and opens the next; Undo puts its inbox back as it was (not kept active by hand); opening it was a visit", async () => {
     const h = world();
     setAgentsView({ kind: "thread", thread: "thr_a" });
     sidebar(h, "thr_a");
@@ -93,7 +93,7 @@ describe("the threads sidebar", () => {
     await waitFor(() => expect(sent(h)).toContainEqual({ type: "thread.settle", thread: "thr_a" }));
     await waitFor(() => expect(agentsSurface.get().view).toEqual({ kind: "thread", thread: "thr_b" }));
     await userEvent.click(await screen.findByRole("button", { name: "Undo" }));
-    expect(sent(h)).toContainEqual({ type: "thread.unsettle", thread: "thr_a" });
+    expect(sent(h)).toContainEqual({ type: "thread.unsettle", thread: "thr_a", restore: { settle: null, snooze: null } });
   });
 
   it("a row's quick action settles it, and a refusal is shown, not swallowed", async () => {

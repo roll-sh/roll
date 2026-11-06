@@ -334,6 +334,13 @@ export interface Snooze {
   at: Millis;
 }
 
+/** The inbox before `thread.settle`, as this device saw it: what undoing the settle puts back. */
+export interface InboxBefore {
+  /** `null`: back under the project's auto-settle rules. */
+  settle: Settle | null;
+  snooze: Snooze | null;
+}
+
 export const EMPTY_INBOX: Inbox = { settle: null, snooze: null, woke_at: null, visited_at: null, manual: false };
 
 export type ChangeStatus = "checking" | "failing" | "blocked" | "ready" | "queued" | "landed" | "conflict" | "closed";
@@ -1318,7 +1325,8 @@ export type Command =
   | { type: "thread.unarchive"; thread: ThreadId }
   | { type: "thread.delete"; thread: ThreadId }
   | { type: "thread.settle"; thread: ThreadId }
-  | { type: "thread.unsettle"; thread: ThreadId }
+  /** With `restore`, undoes a settle: the inbox as it was before (back under auto-settle), if the user's settle still stands. */
+  | { type: "thread.unsettle"; thread: ThreadId; restore?: InboxBefore }
   | { type: "thread.snooze"; thread: ThreadId; until: Millis }
   | { type: "thread.unsnooze"; thread: ThreadId }
   | { type: "thread.visit"; thread: ThreadId }
@@ -1799,6 +1807,12 @@ const contextD = obj<ContextUsage>({ used_tokens: int, max_tokens: opt(int), tot
 
 export const ZERO_USAGE: Usage = { input_tokens: 0, output_tokens: 0, cached_tokens: 0, cost_usd: null };
 
+const settleD = tagged("state", {
+  settled: obj<{ at: Millis; by: SettledBy }>({ at: int, by: literal("user", "inactivity", "landed", "closed") }),
+  active: obj<{ at: Millis }>({ at: int }),
+} satisfies Record<Settle["state"], Decoder<object>>);
+const snoozeD = obj<Snooze>({ until: int, at: int });
+
 const threadD = obj<Thread>({
   id: str,
   project: str,
@@ -1838,13 +1852,8 @@ const threadD = obj<Thread>({
   archived_at: opt(int),
   inbox: withDefault(
     obj<Inbox>({
-      settle: opt(
-        tagged("state", {
-          settled: obj<{ at: Millis; by: SettledBy }>({ at: int, by: literal("user", "inactivity", "landed", "closed") }),
-          active: obj<{ at: Millis }>({ at: int }),
-        } satisfies Record<Settle["state"], Decoder<object>>),
-      ),
-      snooze: opt(obj<Snooze>({ until: int, at: int })),
+      settle: opt(settleD),
+      snooze: opt(snoozeD),
       woke_at: opt(int),
       visited_at: opt(int),
       manual: withDefault(bool, () => false),
@@ -2323,7 +2332,7 @@ export const commandD: Decoder<Command> = tagged("type", {
   "thread.unarchive": cmd<"thread.unarchive">(obj({ thread: str })),
   "thread.delete": cmd<"thread.delete">(obj({ thread: str })),
   "thread.settle": cmd<"thread.settle">(obj({ thread: str })),
-  "thread.unsettle": cmd<"thread.unsettle">(obj({ thread: str })),
+  "thread.unsettle": cmd<"thread.unsettle">(obj({ thread: str, restore: optional(obj<InboxBefore>({ settle: opt(settleD), snooze: opt(snoozeD) })) })),
   "thread.snooze": cmd<"thread.snooze">(obj({ thread: str, until: int })),
   "thread.unsnooze": cmd<"thread.unsnooze">(obj({ thread: str })),
   "thread.visit": cmd<"thread.visit">(obj({ thread: str })),

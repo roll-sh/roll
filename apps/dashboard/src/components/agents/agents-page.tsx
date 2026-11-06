@@ -286,7 +286,9 @@ export function AgentsSurface({
       // Focus left in a panel that is sliding out is lost too (it goes with the panel).
       if ((a && a !== document.body && a.isConnected && !a.closest("[data-panel][data-state=closing]")) || !lastInputWasKeyboard()) return;
       const card = key ? root.current?.querySelector<HTMLElement>(`[data-card][data-key="${CSS.escape(key)}"]`) : null;
-      const back = card ?? (lastCanvasFocus.current?.isConnected ? lastCanvasFocus.current : null);
+      const opener = lastCanvasFocus.current?.isConnected ? lastCanvasFocus.current : null;
+      // Settings go back to what opened them (a card's ⋯, the sidebar's project menu), a conversation to its card.
+      const back = before.kind === "settings" ? (opener ?? card) : (card ?? opener);
       back?.focus({ preventScroll: true });
     }, 0);
     return () => clearTimeout(t);

@@ -2112,10 +2112,18 @@ export class DemoOwner implements AgentsTransport {
         this.patchInbox(c.thread, { settle: t.inbox.settle?.state === "settled" ? t.inbox.settle : { state: "settled", at: now(), by: "user" }, snooze: null });
         return { type: "ok" };
       }
-      case "thread.unsettle":
-        if (!this.thread(c.thread)) return notFound("thread");
-        this.patchInbox(c.thread, { settle: { state: "active", at: now() } });
+      case "thread.unsettle": {
+        const t = this.thread(c.thread);
+        if (!t) return notFound("thread");
+        if (!c.restore) this.patchInbox(c.thread, { settle: { state: "active", at: now() } });
+        // Undoing the user's settle, while it stands: the inbox as it was.
+        else if (t.inbox.settle?.state === "settled" && t.inbox.settle.by === "user" && c.restore.settle?.state !== "settled") {
+          const snooze = t.inbox.snooze ?? (c.restore.snooze && c.restore.snooze.until > now() ? c.restore.snooze : null);
+          this.patchInbox(c.thread, { settle: c.restore.settle, snooze });
+          if (snooze) this.wakeAt(c.thread, snooze.until);
+        }
         return { type: "ok" };
+      }
       case "thread.snooze": {
         const t = this.thread(c.thread);
         if (!t) return notFound("thread");

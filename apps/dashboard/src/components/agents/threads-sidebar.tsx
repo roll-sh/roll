@@ -262,7 +262,9 @@ export function useInboxActions() {
       const next = open ? nextAfter(inbox(client.data, Date.now()), t.id) : null;
       if (!(await send(m, { type: "thread.settle", thread: t.id }))) return;
       if (open) setAgentsView(next ? { kind: "thread", thread: next } : { kind: "canvas" });
-      showInboxToast({ text: `Settled ${quoted(t.title)}`, undo: () => void send(m, { type: "thread.unsettle", thread: t.id }) });
+      // Undo puts the inbox back as it was (under the project's auto-settle rules again), not "kept active by hand".
+      const restore = { settle: t.inbox.settle, snooze: t.inbox.snooze };
+      showInboxToast({ text: `Settled ${quoted(t.title)}`, undo: () => void send(m, { type: "thread.unsettle", thread: t.id, restore }) });
     },
     [client, machineOf, readOnly, send],
   );
