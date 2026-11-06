@@ -530,7 +530,7 @@ export function ThreadsSidebar({
               </button>
             </span>
           </div>
-          <div className="min-h-0 flex-1 overflow-y-auto px-1.5 pb-4" role="tree" aria-label="Projects">
+          <nav className="min-h-0 flex-1 overflow-y-auto px-1.5 pb-4" aria-label="Projects">
             {onlyProject && (
               <p className="mt-1 flex h-7 items-center gap-1.5 rounded-md border border-line-2 bg-panel-2 pr-0.5 pl-2 text-[12px] inset-shadow-highlight" role="status">
                 <span className="min-w-0 flex-1 truncate text-muted">
@@ -544,6 +544,7 @@ export function ThreadsSidebar({
               </p>
             )}
             {groups.length === 0 && <p className="px-2 py-6 text-center text-[12.5px] text-subtle">No projects yet.</p>}
+            <ul aria-label="Projects">
             {groups.map((g) => (
               <ProjectGroup
                 key={g.project.id}
@@ -560,7 +561,8 @@ export function ThreadsSidebar({
                 actions={actions}
               />
             ))}
-          </div>
+            </ul>
+          </nav>
         </EdgeSheet>
         )}
       </AnimatePresence>
@@ -600,9 +602,9 @@ function ProjectGroup({
   const isOpen = (r: InboxRow) => r.thread.id === openThread;
   const hidden = group.settled.length - settledShown;
   return (
-    <section className="mt-2" role="treeitem" aria-expanded={!collapsed} aria-label={group.project.name}>
+    <li className="mt-2" aria-label={group.project.name}>
       <div className="group/p flex h-7 items-center gap-1.5 rounded-md pr-1 pl-1.5 text-subtle">
-        <button type="button" onClick={onToggle} className="flex min-w-0 flex-1 items-center gap-1.5 text-left hover:text-fg" aria-label={`${collapsed ? "Show" : "Hide"} ${group.project.name}`}>
+        <button type="button" onClick={onToggle} aria-expanded={!collapsed} className="flex min-w-0 flex-1 items-center gap-1.5 text-left hover:text-fg" aria-label={`${collapsed ? "Show" : "Hide"} ${group.project.name}`}>
           <ProjectIcon project={group.project} className="size-4" />
           <span className="truncate text-[12px] font-medium text-muted">{group.project.name}</span>
           {machine && (
@@ -621,9 +623,9 @@ function ProjectGroup({
         <ProjectMenu project={group.project} />
       </div>
       {!collapsed && (
-        <div role="group" className="mt-0.5 space-y-px">
+        <ul aria-label={`${group.project.name} threads`} className="mt-0.5 space-y-px">
           {group.active.map(row)}
-          {group.active.length === 0 && group.snoozed.length + group.settled.length + group.archived.length === 0 && <p className="py-1 pl-8 text-[12px] text-subtle">No threads</p>}
+          {group.active.length === 0 && group.snoozed.length + group.settled.length + group.archived.length === 0 && <li className="py-1 pl-8 text-[12px] text-subtle">No threads</li>}
           {group.snoozed.length > 0 && (
             <>
               <ShelfHeader label="Snoozed" count={group.snoozed.length} open={shelves.snoozed} onToggle={() => onShelf("snoozed")} />
@@ -635,9 +637,11 @@ function ProjectGroup({
               <ShelfHeader label="Settled" count={group.settled.length} open={shelves.settled} onToggle={() => onShelf("settled")} />
               {(shelves.settled ? group.settled.slice(0, settledShown) : group.settled.filter(isOpen)).map(row)}
               {shelves.settled && hidden > 0 && (
-                <button type="button" onClick={() => setSettledShown((n) => n + SETTLED_PAGE)} className="ml-7 rounded-md px-1.5 py-1 text-[12px] text-subtle transition hover:bg-panel-2 hover:text-fg">
-                  Show {Math.min(hidden, SETTLED_PAGE)} more
-                </button>
+                <li>
+                  <button type="button" onClick={() => setSettledShown((n) => n + SETTLED_PAGE)} className="ml-7 rounded-md px-1.5 py-1 text-[12px] text-subtle transition hover:bg-panel-2 hover:text-fg">
+                    Show {Math.min(hidden, SETTLED_PAGE)} more
+                  </button>
+                </li>
               )}
             </>
           )}
@@ -647,9 +651,9 @@ function ProjectGroup({
               {(shelves.archived ? group.archived : group.archived.filter(isOpen)).map(row)}
             </>
           )}
-        </div>
+        </ul>
       )}
-    </section>
+    </li>
   );
 }
 
@@ -661,11 +665,13 @@ function ProjectMenu({ project }: { project: Project }) {
 
 function ShelfHeader({ label, count, open, onToggle }: { label: string; count: number; open: boolean; onToggle: () => void }) {
   return (
-    <button type="button" onClick={onToggle} aria-expanded={open} className="mt-1 flex h-7 w-full items-center gap-1.5 rounded-md pr-2 pl-2.5 text-left text-[11.5px] text-subtle transition hover:bg-panel-2/60 hover:text-muted">
-      {open ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />}
-      <span className="font-medium">{label}</span>
-      <span className="font-mono text-[10.5px]">{count}</span>
-    </button>
+    <li>
+      <button type="button" onClick={onToggle} aria-expanded={open} className="mt-1 flex h-7 w-full items-center gap-1.5 rounded-md pr-2 pl-2.5 text-left text-[11.5px] text-subtle transition hover:bg-panel-2/60 hover:text-muted">
+        {open ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />}
+        <span className="font-medium">{label}</span>
+        <span className="font-mono text-[10.5px]">{count}</span>
+      </button>
+    </li>
   );
 }
 
@@ -701,12 +707,11 @@ function ThreadRow({ row, selected, onPick, now, actions }: { row: InboxRow; sel
           ? { label: "Wake thread now", icon: <AlarmClockOff className="size-3.5" strokeWidth={1.5} />, run: () => actions.wake(t), disabled: false }
           : { label: "Settle thread", icon: <Check className="size-3.5" strokeWidth={1.5} />, run: () => actions.settle(t), disabled: !!cantPark(t, "settle") };
   return (
-    <div
-      role="treeitem"
-      aria-selected={selected}
+    <li
+      data-row
       className={`group/r relative flex h-[30px] items-center rounded-md transition-colors duration-150 ${selected ? "bg-fg/[0.07] text-fg inset-shadow-highlight" : "hover:bg-fg/[0.04]"} ${menu ? "bg-fg/[0.04]" : ""}`}
     >
-      <button type="button" onClick={() => onPick(t.id)} className="flex h-full min-w-0 flex-1 items-center gap-2 pr-1 pl-2.5 text-left" title={t.title}>
+      <button type="button" onClick={() => onPick(t.id)} aria-current={selected ? "true" : undefined} className="flex h-full min-w-0 flex-1 items-center gap-2 rounded-md pr-1 pl-2.5 text-left outline-none focus-visible:ring-1 focus-visible:ring-accent/60 focus-visible:ring-inset" title={t.title}>
         <span className="grid size-3 shrink-0 place-items-center">
           {row.status === "woke" ? (
             <AlarmClock className="size-3 text-fg" strokeWidth={1.75} aria-hidden />
@@ -717,7 +722,7 @@ function ThreadRow({ row, selected, onPick, now, actions }: { row: InboxRow; sel
         <span className={`min-w-0 flex-1 truncate text-[13px] tracking-[-0.005em] ${selected ? "font-[510] text-fg" : quiet ? "text-muted" : "text-soft"}`}>{t.title}</span>
         {row.status && <span className="sr-only">{rowStatusLabel[row.status]}</span>}
       </button>
-      <span className={`flex shrink-0 items-center gap-1 pr-2 font-mono text-[10.5px] text-subtle ${actions.readOnly ? "" : "group-hover/r:hidden"} ${menu ? "hidden" : ""}`}>
+      <span className={`flex shrink-0 items-center gap-1 pr-2 font-mono text-[10.5px] text-subtle ${actions.readOnly ? "" : "group-hover/r:hidden group-has-[[data-row-actions]:focus-within]/r:hidden"} ${menu ? "hidden" : ""}`}>
         {pill && (
           <span className={`rounded-full px-1.5 py-px font-sans text-[10.5px] ${pill === "failed" ? "bg-danger/12 text-danger" : pill === "waiting" ? "bg-accent/15 text-accent" : "bg-fg/[0.06] text-muted"}`}>
             {rowStatusLabel[pill]}
@@ -726,7 +731,10 @@ function ThreadRow({ row, selected, onPick, now, actions }: { row: InboxRow; sel
         {!pill && meta}
       </span>
       {!actions.readOnly && (
-        <span className={`shrink-0 items-center pr-1 ${menu ? "flex" : "hidden group-hover/r:flex [@media(hover:none)]:flex"}`}>
+        <span
+          data-row-actions
+          className={`flex shrink-0 items-center ${menu ? "pr-1" : "w-0 overflow-hidden opacity-0 group-hover/r:w-auto group-hover/r:overflow-visible group-hover/r:pr-1 group-hover/r:opacity-100 focus-within:w-auto focus-within:overflow-visible focus-within:pr-1 focus-within:opacity-100 [@media(hover:none)]:w-auto [@media(hover:none)]:pr-1 [@media(hover:none)]:opacity-100"}`}
+        >
           <button type="button" title={quick.label} aria-label={quick.label} disabled={quick.disabled} onClick={() => void quick.run()} className="grid size-6 place-items-center rounded-md text-subtle transition hover:bg-panel hover:text-fg disabled:opacity-30">
             {quick.icon}
           </button>
@@ -734,7 +742,7 @@ function ThreadRow({ row, selected, onPick, now, actions }: { row: InboxRow; sel
         </span>
       )}
       {custom && <SnoozeDialog onClose={() => setCustom(false)} onSnooze={(until) => void actions.snooze(t, until)} />}
-    </div>
+    </li>
   );
 }
 

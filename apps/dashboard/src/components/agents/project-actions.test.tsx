@@ -84,8 +84,8 @@ describe("a project's actions", () => {
     const h = agentsHarness({ entities: [mirrored("project", ROLL, 1), mirrored("project", web, 2), mirrored("thread", thread(), 3)] });
     const onShowAll = vi.fn();
     renderAgents(<ThreadsSidebar data={h.client.data} open setOpen={() => {}} phone={false} openThread={null} only="prj_web" onShowAll={onShowAll} />, h);
-    expect(screen.getByRole("treeitem", { name: "web" })).toBeInTheDocument();
-    expect(screen.queryByRole("treeitem", { name: "roll" })).not.toBeInTheDocument();
+    expect(screen.getByRole("listitem", { name: "web" })).toBeInTheDocument();
+    expect(screen.queryByRole("listitem", { name: "roll" })).not.toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "Show every project, not only web" }));
     expect(onShowAll).toHaveBeenCalled();
   });

@@ -29,8 +29,8 @@ function sidebar(h: AgentsHarness, openThread: string | null = null) {
 }
 
 const sent = (h: AgentsHarness) => h.command.mock.calls.map(([, , c]) => c);
-/** A thread's row (projects are tree items too, without `aria-selected`). */
-const row = (title: string) => screen.getAllByRole("treeitem").find((r) => r.hasAttribute("aria-selected") && r.textContent?.includes(title))!;
+/** A thread's row (a list item of its project's threads; projects are list items too). */
+const row = (title: string) => screen.getAllByRole("listitem").find((r) => r.hasAttribute("data-row") && r.textContent?.includes(title))!;
 
 afterEach(() => {
   resetAgentsSurface();
@@ -41,7 +41,7 @@ describe("the threads sidebar", () => {
   it("lists active threads with the snoozed and settled shelves collapsed, and opens one in the side panel", async () => {
     const h = world();
     sidebar(h);
-    const tree = screen.getByRole("tree", { name: "Projects" });
+    const tree = screen.getByRole("navigation", { name: "Projects" });
     expect(within(tree).getByText("Fix the parser")).toBeInTheDocument();
     expect(within(tree).queryByText("Later")).not.toBeInTheDocument();
     expect(within(tree).queryByText("Old work")).not.toBeInTheDocument();
@@ -55,11 +55,28 @@ describe("the threads sidebar", () => {
     expect(agentsSurface.get().view).toEqual({ kind: "thread", thread: "thr_b" });
   });
 
+  it("is lists as T3's sidebar is (no ARIA tree without arrow keys): a project's toggle says if it's open, the open thread is the current one, and Tab reaches a row's actions (M6)", async () => {
+    const h = world();
+    sidebar(h, "thr_b");
+    expect(screen.queryByRole("tree")).toBeNull();
+    const project = screen.getByRole("list", { name: /threads$/ });
+    expect(within(project).getAllByRole("listitem").length).toBeGreaterThan(1);
+    const toggle = screen.getAllByRole("button", { name: /^Hide (?!threads)/ })[0];
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    expect(within(row("Add a flag")).getByRole("button", { name: "Add a flag" })).toHaveAttribute("aria-current", "true");
+    expect(within(row("Fix the parser")).getByRole("button", { name: "Fix the parser" })).not.toHaveAttribute("aria-current");
+    within(row("Fix the parser")).getByRole("button", { name: "Fix the parser" }).focus();
+    await userEvent.tab();
+    expect(within(row("Fix the parser")).getByRole("button", { name: "Settle thread" })).toHaveFocus();
+    await userEvent.tab();
+    expect(within(row("Fix the parser")).getByRole("button", { name: "Thread actions" })).toHaveFocus();
+  });
+
   it("pages the settled shelf: ten, then 25 more", async () => {
     const many = Array.from({ length: 40 }, (_, i) => thread({ id: `thr_o${i}`, title: `Settled ${String(i).padStart(2, "0")}`, inbox: box({ settle: { state: "settled", at: NOW - (i + 1) * H, by: "user" } }) }));
     sidebar(world(many));
     await userEvent.click(screen.getByRole("button", { name: /^Settled/ }));
-    const shown = () => screen.getAllByRole("treeitem").filter((r) => r.hasAttribute("aria-selected") && /Settled \d\d|Old work/.test(r.textContent ?? "")).length;
+    const shown = () => screen.getAllByRole("listitem").filter((r) => r.hasAttribute("data-row") && /Settled \d\d|Old work/.test(r.textContent ?? "")).length;
     expect(shown()).toBe(10);
     await userEvent.click(screen.getByRole("button", { name: "Show 25 more" }));
     expect(shown()).toBe(35);
@@ -106,7 +123,7 @@ describe("the threads sidebar", () => {
     const dialog = await screen.findByRole("dialog", { name: "Custom snooze" });
     // On the page, not inside the sidebar (fixed in its transformed aside, it was 268px wide), and
     // holding focus.
-    expect(dialog.closest("aside, nav, [role=tree]")).toBeNull();
+    expect(dialog.closest("aside, nav, [aria-label=Projects]")).toBeNull();
     await waitFor(() => expect(dialog.contains(document.activeElement)).toBe(true));
     await userEvent.click(within(dialog).getByRole("button", { name: "Duration" }));
     const amount = within(dialog).getByRole("textbox", { name: "How long" });
