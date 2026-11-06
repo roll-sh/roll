@@ -7,6 +7,7 @@ import {
   ClipboardList,
   FileDiff as DiffIcon,
   ArrowUpLeft,
+  GitFork,
   GitBranch,
   MoreHorizontal,
   Pencil,
@@ -101,6 +102,7 @@ export function Conversation({ thread, machine, start, end }: { thread: Thread; 
   }, [sub]);
   // A delegated thread names the thread that delegated it (T3's "Open parent").
   const parent = thread.lineage?.relation === "subagent" ? data.threads.get(thread.lineage.parent)?.value : undefined;
+  const forkedFrom = thread.lineage?.relation === "fork" ? thread.lineage.parent : null;
   const terminals = [...data.terminals.values()].filter((r) => r.value.thread === thread.id).map((r) => r.value);
   const sideTerminal = side?.kind === "terminal" ? terminals.find((t) => t.id === side.id) : undefined;
   // The drawer closes when its terminal goes away, not while a just-opened one is on its way.
@@ -181,6 +183,7 @@ export function Conversation({ thread, machine, start, end }: { thread: Thread; 
           <div className="relative min-h-0 flex-1">
             <div ref={scroller} onScroll={onScroll} className="h-full overflow-y-auto overscroll-contain select-text" data-scroll>
               <div className="mx-auto w-full max-w-[46rem] px-4 pt-4 pb-6 sm:px-6">
+                {forkedFrom && <ForkedFrom title={data.threads.get(forkedFrom)?.value.title ?? null} onOpen={() => openThread(forkedFrom)} />}
                 {!loaded ? (
                   <EmptyTranscript>
                     <span className="shimmer">Loading the conversation…</span>
@@ -188,7 +191,7 @@ export function Conversation({ thread, machine, start, end }: { thread: Thread; 
                 ) : subagent ? (
                   <SubagentTranscript t={subagent} requests={requests} actions={actions} now={now} />
                 ) : runs.length === 0 ? (
-                  <EmptyTranscript>{readOnly ? "No runs yet." : "Send a message to start the conversation."}</EmptyTranscript>
+                  <EmptyTranscript>{readOnly ? "No runs yet." : forkedFrom ? "Send a message to go on from where it was forked." : "Send a message to start the conversation."}</EmptyTranscript>
                 ) : (
                   <div className="space-y-8">
                     {runs.map((r, i) => (
@@ -280,6 +283,24 @@ export function Conversation({ thread, machine, start, end }: { thread: Thread; 
 }
 
 const DRAWER_HEIGHT = "roll:agents:terminal-height";
+
+/**
+ * The top of a fork's transcript (T3's `V2LifecycleRow` fork divider): where it came from and the
+ * way back. Its conversation starts at the fork point, so it opened blank with nothing saying so.
+ */
+function ForkedFrom({ title, onOpen }: { title: string | null; onOpen: () => void }) {
+  return (
+    <div className="mb-6 flex min-w-0 items-center gap-2 text-[12px] text-subtle" role="note">
+      <span className="h-px flex-1 bg-line" />
+      <GitFork className="size-3.5 shrink-0" />
+      <span className="min-w-0 truncate">Forked from {title ? <span className="text-muted">{title}</span> : "a conversation"}</span>
+      <button type="button" onClick={onOpen} className="inline-flex shrink-0 items-center gap-1 rounded-md px-1.5 py-0.5 text-muted transition-colors hover:bg-fg/[0.06] hover:text-fg">
+        <ArrowUpLeft className="size-3.5" /> Open source conversation
+      </button>
+      <span className="h-px flex-1 bg-line" />
+    </div>
+  );
+}
 
 /** Above a delegated thread's composer: who delegated it, and the way back (T3's "Open parent"). */
 function DelegatedBy({ parent, onOpen }: { parent: Thread; onOpen: () => void }) {

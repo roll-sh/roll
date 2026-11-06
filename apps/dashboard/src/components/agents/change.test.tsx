@@ -175,6 +175,17 @@ describe("roll code on a thread", () => {
     expect(screen.queryByText("Loading the conversation…")).not.toBeInTheDocument();
     expect(screen.getByText("Send a message to start the conversation.")).toBeInTheDocument();
   });
+
+  it("a fork says where it came from, with the way back (T3's fork divider; it opened blank)", async () => {
+    const source = thread({ id: "thr_src", title: "Write the demo file" });
+    const fork = thread({ id: "thr_fork", title: "Write the demo file", run_count: 0, lineage: { parent: "thr_src", relation: "fork", root: "thr_src", from_run: "run_2" } });
+    const h = agentsHarness({ entities: [mirrored("thread", source, 1), mirrored("thread", fork, 2)], follow: ["thr_fork"] });
+    renderAgents(<Conversation thread={fork} machine={machine()} />, h);
+    expect(screen.getByRole("note")).toHaveTextContent("Forked from Write the demo file");
+    expect(screen.getByText("Send a message to go on from where it was forked.")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Open source conversation" }));
+    expect(h.openThread).toHaveBeenCalledWith("thr_src");
+  });
 });
 
 describe("landing notes and diffs", () => {
