@@ -104,6 +104,10 @@ describe("the threads sidebar", () => {
     await userEvent.click(await screen.findByRole("menuitem", { name: /Snooze/ }));
     await userEvent.click(await screen.findByRole("menuitem", { name: "Custom…" }));
     const dialog = await screen.findByRole("dialog", { name: "Custom snooze" });
+    // On the page, not inside the sidebar (fixed in its transformed aside, it was 268px wide), and
+    // holding focus.
+    expect(dialog.closest("aside, nav, [role=tree]")).toBeNull();
+    await waitFor(() => expect(dialog.contains(document.activeElement)).toBe(true));
     await userEvent.click(within(dialog).getByRole("button", { name: "Duration" }));
     const amount = within(dialog).getByRole("textbox", { name: "How long" });
     await userEvent.clear(amount);

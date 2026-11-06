@@ -12,7 +12,7 @@
  */
 
 import { AlarmClock, AlarmClockOff, Archive, ArchiveRestore, Check, ChevronDown, Eraser, ChevronRight, MoreHorizontal, PanelLeft, PanelLeftClose, Plus, Trash2, Undo2, X } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import type { Command, Machine, MachineId, Project, Thread } from "@/lib/agents-api";
 import {
   cantPark,
@@ -36,6 +36,7 @@ import { runsOf, type AgentsData } from "@/lib/agents-store";
 import { agentsSurface, setAgentsView } from "@/lib/agents-surface";
 import { Menu as ActionsMenu, type MenuItem as MenuEntry } from "./menu";
 import { useProjectActions } from "./project-actions";
+import { Dialog } from "./ui/dialog";
 import { Menu, MenuItem, MenuPopup, MenuRadioGroup, MenuRadioItem, MenuSeparator, MenuShortcut, MenuSub, MenuSubPopup, MenuSubTrigger, MenuTrigger, Segmented } from "./ui";
 import { useAgents, usePrefs } from "./use-agents";
 import { MachineIcon, ProjectIcon } from "./identity";
@@ -859,6 +860,7 @@ export function SnoozeDialog({ onSnooze, onClose, presets = false }: { onSnooze:
   const [amount, setAmount] = useState("2");
   const [unit, setUnit] = useState<SnoozeUnit>("hours");
   const [error, setError] = useState<string | null>(null);
+  const formId = useId();
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
@@ -884,13 +886,28 @@ export function SnoozeDialog({ onSnooze, onClose, presets = false }: { onSnooze:
     if (until === null) return setError("Enter a positive duration.");
     done(until);
   };
+  // The shared dialog: portaled to the page (it was fixed inside the sidebar's transformed aside,
+  // trapped in its 268px), focus taken, kept and given back.
   return (
-    <div className="fade-in fixed inset-0 z-[60] grid place-items-center bg-(--scrim) p-4 backdrop-blur-[2px]" onPointerDown={(e) => e.target === e.currentTarget && onClose()}>
-      <form role="dialog" aria-modal aria-label={presets ? "Snooze" : "Custom snooze"} onSubmit={submit} className="sheet-in w-full max-w-[380px] rounded-xl border border-line-2 bg-sheet p-4 shadow-sheet inset-shadow-highlight">
-        <h2 className="text-[15px] font-[590] tracking-[-0.02em]">{presets ? "Snooze" : "Custom snooze"}</h2>
-        <p className="mt-1 text-[12.5px] text-muted">Choose when snoozed threads return to your inbox.</p>
+    <Dialog
+      open
+      onClose={onClose}
+      title={presets ? "Snooze" : "Custom snooze"}
+      lead="Choose when snoozed threads return to your inbox."
+      footer={
+        <>
+          <button type="button" onClick={onClose} className="h-8 rounded-md px-3 text-[12.5px] text-muted transition hover:bg-panel-2 hover:text-fg">
+            Cancel
+          </button>
+          <button type="submit" form={formId} className="h-8 rounded-md bg-fg px-3 text-[12.5px] font-medium text-bg transition hover:opacity-85">
+            Snooze
+          </button>
+        </>
+      }
+    >
+      <form id={formId} onSubmit={submit}>
         {presets && (
-          <div className="mt-3 grid gap-px">
+          <div className="grid gap-px">
             {snoozePresets(Date.now()).map((p) => (
               <button key={p.label} type="button" onClick={() => done(p.until)} className="flex items-center justify-between rounded-md px-2 py-1.5 text-left text-[13px] text-muted transition hover:bg-panel-2 hover:text-fg">
                 {p.label}
@@ -940,15 +957,7 @@ export function SnoozeDialog({ onSnooze, onClose, presets = false }: { onSnooze:
           </div>
         )}
         {error && <p className="mt-2 text-[12px] text-danger">{error}</p>}
-        <div className="mt-4 flex justify-end gap-2">
-          <button type="button" onClick={onClose} className="h-8 rounded-md px-3 text-[12.5px] text-muted transition hover:bg-panel-2 hover:text-fg">
-            Cancel
-          </button>
-          <button type="submit" className="h-8 rounded-md bg-fg px-3 text-[12.5px] font-medium text-bg transition hover:opacity-85">
-            Snooze
-          </button>
-        </div>
       </form>
-    </div>
+    </Dialog>
   );
 }
