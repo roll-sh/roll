@@ -239,6 +239,20 @@ export function DirBrowser({ machine, onAdded, onExisting }: Step) {
   const [entries, setEntries] = useState<FsEntry[] | null>(null);
   const [listError, setListError] = useState<string | null>(null);
   const [typed, setTyped] = useState<string | null>(null);
+  // A typed path, with ~ for home.
+  const resolve = (t: string) => {
+    const v = t.trim();
+    return v === "~" || v.startsWith("~/") ? `${(machine.info?.home ?? "").replace(/\/$/, "")}${v.slice(1)}` || "/" : v;
+  };
+  // The list follows what's typed (it waited for Enter): once typing stops, a path is listed.
+  useEffect(() => {
+    if (typed === null) return;
+    const to = resolve(typed);
+    if (!to.startsWith("/") || to === path) return;
+    const t = setTimeout(() => setPath(to), 350);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [typed]);
 
   useEffect(() => {
     let live = true;
@@ -266,14 +280,18 @@ export function DirBrowser({ machine, onAdded, onExisting }: Step) {
       <form
         onSubmit={(e) => {
           e.preventDefault();
-          if (typed?.trim()) setPath(typed.trim());
+          if (typed?.trim()) setPath(resolve(typed));
           setTyped(null);
         }}
       >
         <input
           value={typed ?? shortPath(path, machine.info?.home)}
           onFocus={() => setTyped(path)}
-          onBlur={() => setTyped(null)}
+          // Leaving the field keeps what was typed (it went back to the old path, and Add added that one).
+          onBlur={() => {
+            if (typed?.trim() && resolve(typed).startsWith("/")) setPath(resolve(typed));
+            setTyped(null);
+          }}
           onChange={(e) => setTyped(e.target.value)}
           aria-label="Directory"
           spellCheck={false}

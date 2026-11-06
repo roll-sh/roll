@@ -63,6 +63,17 @@ describe("adding a project (one dialog)", () => {
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
   });
 
+  it("lists a typed path once typing stops (it waited for Enter), and Add adds what was typed", async () => {
+    const { h } = dialog();
+    await within(sheet()).findByRole("list", { name: "Folders" });
+    const field = within(sheet()).getByRole("textbox", { name: "Directory" });
+    await userEvent.clear(field);
+    await userEvent.type(field, "~/roll");
+    await waitFor(() => expect(h.command).toHaveBeenCalledWith("mch_1", expect.any(String), { type: "fs.list", path: "/Users/ada/roll" }));
+    await userEvent.click(within(sheet()).getByRole("button", { name: "Add roll" }));
+    expect(h.command).toHaveBeenCalledWith("mch_1", expect.any(String), { type: "project.add", path: "/Users/ada/roll" });
+  });
+
   it("a folder that's already a project goes to it", async () => {
     dialog({ entities: [mirrored("project", project({ id: "prj_roll", name: "roll", path: "/Users/ada/roll" }), 1)] });
     const list = await within(sheet()).findByRole("list", { name: "Folders" });
