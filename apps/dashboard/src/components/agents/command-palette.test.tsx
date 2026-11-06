@@ -170,6 +170,21 @@ describe("the agents' command palette", () => {
     await waitFor(() => expect(h.command.mock.calls.map((c) => c[2])).toContainEqual({ type: "thread.settle", thread: "thr_1" }));
   });
 
+  it("snoozes the open conversation from the keyboard: T3's presets (no keyboard path before)", async () => {
+    const h = setup();
+    act(() => showAgents({ kind: "thread", thread: "thr_1" }));
+    await userEvent.keyboard("{Meta>}k{/Meta}");
+    await userEvent.type(screen.getByRole("combobox"), ">snooze");
+    expect(selected()).toHaveTextContent("Snooze “Fix the flaky queue test”…");
+    await userEvent.keyboard("{Enter}");
+    expect(screen.getByRole("combobox")).toHaveAttribute("placeholder", "Until when?");
+    await userEvent.type(screen.getByRole("combobox"), "in 1 hour");
+    await userEvent.keyboard("{Enter}");
+    await waitFor(() => expect(h.command.mock.calls.map((c) => c[2])).toContainEqual(expect.objectContaining({ type: "thread.snooze", thread: "thr_1" })));
+    const sent = h.command.mock.calls.map((c) => c[2] as { type: string; until?: number }).find((c) => c.type === "thread.snooze")!;
+    expect(sent.until! - Date.now()).toBeGreaterThan(55 * 60_000);
+  });
+
   it("opens straight into 'Orchestrate…' with what was typed, and lists where it can go", async () => {
     setup();
     await userEvent.keyboard("{Meta>}k{/Meta}");

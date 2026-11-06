@@ -1061,7 +1061,7 @@ Code: `agent-host/src/orchestrator/settle.rs`; the threads sidebar is
 - **The record** (`Inbox`): `settle` is unset (the daemon decides), `settled {at, by}` (`by`:
   `user`, `inactivity`, `landed`, `closed`) or `active {at}` (un-settled by hand: auto-settle leaves
   it alone until it is active again), T3's `settledOverride` with its times. `snooze {until, at}`,
-  `woke_at` (a snooze that ended by itself: the thread reads "Woke" until it is visited after
+  `woke_at` (a snooze that ended by itself: the thread reads "Back from snooze" (T3's "Woke") until it is visited after
   that), `visited_at` (`thread.visit`, when the conversation was last opened; runs that ended after
   it are unread) and `manual` (auto-settle off for the thread, T3's `autoSettleDisabledAt`).
 - **By hand.** `thread.settle` is refused (`conflict`) while the thread runs, waits on its user or
@@ -1077,7 +1077,7 @@ Code: `agent-host/src/orchestrator/settle.rs`; the threads sidebar is
   can't settle while one waits, and it has to run to get one.
 - **Snooze.** `thread.snooze {until}` hides a thread until then (in the future, at most a year
   ahead), refused while it waits on its user or has queued messages; a settled thread snoozed comes
-  back to the inbox when it wakes. `thread.unsnooze` wakes it now (no "Woke"). T3's clients work
+  back to the inbox when it wakes. `thread.unsnooze` wakes it now (no "Back from snooze"). T3's clients work
   out when a snooze is over; roll's daemon does it in its sweep and records `woke_at`, so every
   device shows the same thing at the same time.
 - **Automatically** (T3's rules, per project: `ProjectSettings.auto_settle {after_days, on_land}`,

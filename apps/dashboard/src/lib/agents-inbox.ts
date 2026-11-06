@@ -26,7 +26,7 @@ export const rowStatusLabel: Record<RowStatus, string> = {
   working: "Working",
   waiting: "Needs you",
   failed: "Failed",
-  woke: "Woke",
+  woke: "Back from snooze",
   done: "Done",
 };
 

@@ -1,6 +1,7 @@
 "use client";
 
 import {
+  AlarmClock,
   AlarmClockOff,
   Archive,
   ArchiveRestore,
@@ -70,7 +71,7 @@ import { StatusDot } from "./shared";
 import { MachineIcon, ProjectIcon } from "./identity";
 import { useAgents } from "./use-agents";
 import { useInboxActions } from "./threads-sidebar";
-import { inbox, shelfOf, type Shelf } from "@/lib/agents-inbox";
+import { inbox, shelfOf, snoozePresets, type Shelf } from "@/lib/agents-inbox";
 import { openShelf } from "@/lib/agents-shelf";
 import { NO_CANVAS } from "./machine-projects";
 import { projectActions } from "./project-actions";
@@ -281,6 +282,24 @@ function PaletteDialog({ session, intent, host }: { session: number; intent: Pal
         icon: <CircleCheck className={ICON} />,
         // Through the sidebar's actions: T3's undo notice, and settle and advance.
         run: () => (open.inbox.settle?.state === "settled" ? inboxActions.restore(open) : inboxActions.settle(open)),
+      },
+      !!open && open.inbox.snooze === null && open.archived_at === null && {
+        kind: "submenu",
+        value: "action:snooze",
+        title: `Snooze “${open.title}”…`,
+        searchTerms: ["later", "remind", "hide", "inbox"],
+        icon: <AlarmClock className={ICON} />,
+        view: {
+          label: "Snooze",
+          placeholder: "Until when?",
+          groups: [
+            {
+              value: "presets",
+              label: "Back on the canvas",
+              items: snoozePresets(Date.now()).map((p) => ({ kind: "action" as const, value: `snooze:${p.until}`, title: p.label, trailing: <span className="text-[11.5px] text-subtle">{p.when}</span>, icon: <AlarmClock className={ICON} />, run: () => inboxActions.snooze(open, p.until) })),
+            },
+          ],
+        },
       },
       !!open && open.inbox.snooze !== null && { kind: "action", value: "action:wake", title: `Wake “${open.title}”`, searchTerms: ["snooze", "unsnooze", "restore"], icon: <AlarmClockOff className={ICON} />, run: () => inboxActions.restore(open) },
       !!open && {
