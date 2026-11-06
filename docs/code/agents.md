@@ -1776,7 +1776,8 @@ The surface has three views:
   names a row runs it on Enter, a leading verb ("open the shelf", "go to settings", "show roll")
   optional, and the goal rows come last under "Ask agents", which ⌘Enter (Ctrl+Enter) runs from any
   row (the footer says so). One word alone is never a goal on Enter. A conflicting change's
-  conversation has "Ask to rebase #N" (the header's message to its agent). The same goal can be typed in the prompt bar at the bottom of the canvas ("What should
+  conversation has "Ask to rebase #N" (the header's message to its agent), and the open
+  conversation has its publish ("Publish as a change", "Publish again (#N)"). The same goal can be typed in the prompt bar at the bottom of the canvas ("What should
   the agents get done?", Orchestrate or One agent).
 - **The prompt bar** (`prompt-bar.tsx`) and the launcher (`new-agent.tsx`) share one set of rules
   (`new-thread.ts`): the default project is the last one a thread was started in, else the one

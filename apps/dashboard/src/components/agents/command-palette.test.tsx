@@ -117,6 +117,14 @@ describe("the agents' command palette", () => {
     expect(creates(h)[0]).toMatchObject({ prompt: "go to settings", orchestrator: true });
   });
 
+  it("offers Publish for the open conversation of a project with a repo (it was only in its More menu)", async () => {
+    setup([mirrored("project", project({ repo: { owner: "ada", repo: "roll" } }), 7)]);
+    act(() => showAgents({ kind: "thread", thread: "thr_1" }));
+    await userEvent.keyboard("{Meta>}k{/Meta}");
+    await userEvent.type(screen.getByRole("combobox"), "publish");
+    expect(selected()).toHaveTextContent("Publish as a change");
+  });
+
   it("switches the canvas's view, and settles the open conversation", async () => {
     const h = setup();
     await userEvent.keyboard("{Meta>}k{/Meta}");

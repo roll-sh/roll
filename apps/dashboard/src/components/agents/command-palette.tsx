@@ -29,6 +29,7 @@ import {
   LayoutGrid,
   GitFork,
   GitMerge,
+  Upload,
   Maximize,
   MessageSquare,
   Play,
@@ -82,7 +83,8 @@ import { inbox, shelfOf, snoozePresets, type Shelf } from "@/lib/agents-inbox";
 import { openShelf } from "@/lib/agents-shelf";
 import { NO_CANVAS } from "./machine-projects";
 import { projectActions } from "./project-actions";
-import { rebasePrompt } from "./change";
+import { publishLabel, rebasePrompt } from "./change";
+import { requestPublish } from "./session";
 
 const SHELF_NAME: Record<Exclude<Shelf, "active">, string> = { settled: "Settled", snoozed: "Snoozed", archived: "Archived" };
 
@@ -316,6 +318,16 @@ function PaletteDialog({ session, intent, host }: { session: number; intent: Pal
       { kind: "action", value: "action:new", title: "New agent", searchTerms: ["new thread", "launch", "start", "conversation"], icon: <Plus className={ICON} />, run: () => startNew?.() },
       projects.length > 0 && { kind: "submenu", value: "action:new-in", title: "New agent in…", searchTerms: ["new thread in", "project"], icon: <Plus className={ICON} />, view: projectsView("New agent in", (p) => startNew?.(p.id)) },
       requests.length > 0 && { kind: "action", value: "action:waiting", title: `Answer what's waiting (${requests.length})`, searchTerms: ["approval", "question", "request", "waiting"], icon: <Bell className="size-4 text-accent" />, run: () => openThread(requests[0].thread) },
+      // The open conversation's publish form (it was only in its More menu).
+      !!open && !ctx.readOnly && !!data.projects.get(open.project)?.value.repo && {
+        kind: "action",
+        value: "action:publish",
+        title: publishLabel(open, data.projects.get(open.project)?.value),
+        searchTerms: ["publish", "pull request", "pr", "change", "commit", "push", "ship", "land", "merge"],
+        description: `“${open.title}”`,
+        icon: <Upload className={ICON} />,
+        run: () => void requestPublish(open.id),
+      },
       // A conflicting change, the open conversation's first: the agent gets the header's "Ask to rebase" message.
       ...(ctx.readOnly ? [] : conflicts).map(
         ({ value: t, machine: m }): PaletteAction => ({

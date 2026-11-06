@@ -488,6 +488,12 @@ function TitleBar({
   const [panel, setPanel] = useState<"publish" | "work" | null>(null);
   useEscapeLayer(panel !== null, () => setPanel(null));
   useEffect(() => setPanel(null), [thread.id]);
+  // ⌘K "Publish …" on the open conversation opens the same form as More's item.
+  useEffect(() => {
+    const on = (id: string) => id === thread.id && setPanel("publish");
+    publishRequests.add(on);
+    return () => void publishRequests.delete(on);
+  }, [thread.id]);
   const mid = machine?.id;
   // An asleep sandbox counts: what's sent to it wakes it.
   const online = reachable(machine);
@@ -872,4 +878,12 @@ export function DiffPane({
       </div>
     </>
   );
+}
+
+const publishRequests = new Set<(thread: string) => void>();
+
+/** Opens the publish form of `thread`'s open conversation (⌘K's "Publish …"); false when it isn't open. */
+export function requestPublish(thread: string): boolean {
+  for (const f of publishRequests) f(thread);
+  return publishRequests.size > 0;
 }

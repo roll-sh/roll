@@ -171,7 +171,8 @@ export function landingNote(l: Landing): { tone: "ok" | "busy" | "quiet" | "bad"
  */
 export function PublishForm({ thread, project, machine, onDone }: { thread: Thread; project?: Project; machine: Machine; onDone: () => void }) {
   const { client, openThread } = useAgents();
-  const [message, setMessage] = useState(thread.title);
+  // A title cut short ends in "…": not in a commit message.
+  const [message, setMessage] = useState(thread.title.replace(/\s*(…|\.\.\.)$/u, ""));
   const [land, setLand] = useState(false);
   const [busy, setBusy] = useState(false);
   const [done, setDone] = useState<Published | null>(null);
@@ -270,7 +271,7 @@ export function PublishForm({ thread, project, machine, onDone }: { thread: Thre
           {project?.repo ? `${project.repo.owner}/${project.repo.repo}` : project?.name} has no commits yet: publishing makes the thread&apos;s files its first commit.
         </p>
       )}
-      <input value={message} onChange={(e) => setMessage(e.target.value)} aria-label="Commit message" className={`${input} min-w-0 flex-1 basis-48`} />
+      <input value={message} onChange={(e) => setMessage(e.target.value)} aria-label="Commit message" autoFocus className={`${input} min-w-0 flex-1 basis-48`} />
       {!first && (
         <label className="flex items-center gap-1.5 text-[12px] text-muted" title="Through the landing rules (the merge queue on a queue repo)">
           <Switch checked={land} onCheckedChange={setLand} aria-label="and land" /> and land
@@ -278,6 +279,10 @@ export function PublishForm({ thread, project, machine, onDone }: { thread: Thre
       )}
       <button type="submit" disabled={busy || !message.trim()} className={primary}>
         {busy ? <span className="shimmer">Publishing…</span> : first ? "Publish the first commit" : "Publish"}
+      </button>
+      {/* Escape closes it too; a phone has no Escape. */}
+      <button type="button" onClick={onDone} className="text-subtle hover:text-fg" aria-label="Close">
+        <X className="size-3.5" />
       </button>
       {error && <p className="w-full text-[12px] text-danger">{error}</p>}
     </form>
