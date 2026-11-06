@@ -226,7 +226,9 @@ export function RunDetail({ run: id, onThread }: { run: string; onThread?: (thre
                       {s.log.map((l, j) => (
                         <div key={j} className={cn("flex gap-3", l.level === "error" ? "text-danger" : l.level === "warn" ? "text-soft" : "text-muted")}>
                           <span className="shrink-0 text-faint tabular-nums">{logTime(l.at, s.started_at)}</span>
-                          <span className="min-w-0 break-words whitespace-pre-wrap">{l.text}</span>
+                          <span className="min-w-0 break-words whitespace-pre-wrap">
+                            <LogText text={l.text} onThread={openOnCanvas} />
+                          </span>
                         </div>
                       ))}
                     </div>
@@ -247,6 +249,26 @@ export function RunDetail({ run: id, onThread }: { run: string; onThread?: (thre
         })}
       </ol>
     </div>
+    </>
+  );
+}
+
+/** A log line, its thread ids (`thr_…`) as the threads' titles, each opening its conversation. */
+function LogText({ text, onThread }: { text: string; onThread: (thread: string) => void }) {
+  const { client } = useAgents();
+  const parts = text.split(/\b(thr_[A-Za-z0-9]+)\b/);
+  if (parts.length === 1) return <>{text}</>;
+  return (
+    <>
+      {parts.map((p, i) => {
+        if (i % 2 === 0) return p;
+        const title = client.data.threads.get(p)?.value.title;
+        return (
+          <button key={i} type="button" onClick={() => onThread(p)} title={title ? p : "Open the conversation"} className="text-soft underline decoration-line-3 underline-offset-2 hover:text-fg">
+            {title ?? p}
+          </button>
+        );
+      })}
     </>
   );
 }

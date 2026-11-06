@@ -276,7 +276,10 @@ describe("Automation runs", () => {
     renderAgents(<RunDetail run="arn_1" />, h);
     const steps = await screen.findByRole("list", { name: "Steps" });
     expect(within(steps).getByText("Waiting")).toBeInTheDocument();
-    expect(within(steps).getByText("Waiting for thr_1")).toBeInTheDocument();
+    // The log names the thread it waits for, a link to it (titled when its record is here).
+    expect(within(steps).getByLabelText("Log")).toHaveTextContent(/Waiting for (thr_1|Fix the flaky queue test)/);
+    await userEvent.click(within(within(steps).getByLabelText("Log")).getByRole("button", { name: /thr_1|Fix the flaky queue test/ }));
+    expect(h.openThread).toHaveBeenLastCalledWith("thr_1");
 
     act(() =>
       h.client.enqueue({
