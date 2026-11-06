@@ -27,6 +27,8 @@ export function ShareButton({ thread }: { thread: Thread }) {
   const [subtree, setSubtree] = useState(true);
   const [busy, setBusy] = useState(false);
   const [made, setMade] = useState<ShareSummary | null>(null);
+  // `made` is a link made earlier (found when it opened), not one just made.
+  const [earlier, setEarlier] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const { copied, copy } = useCopy();
   const box = useRef<HTMLDivElement>(null);
@@ -51,11 +53,31 @@ export function ShareButton({ thread }: { thread: Thread }) {
     };
   }, [open]);
 
+  // Reopened on a shared thread: its newest link, not "Create link" again (a second copy got made).
+  useEffect(() => {
+    if (!open) return;
+    let live = true;
+    agentsApi
+      .shares(owner)
+      .then((all) => {
+        const mine = all.filter((s) => s.thread === thread.id).sort((a, b) => b.created_at - a.created_at)[0];
+        if (live && mine) {
+          setMade((m) => m ?? mine);
+          setEarlier(true);
+        }
+      })
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [open, owner, thread.id]);
+
   const create = async () => {
     setBusy(true);
     setError(null);
     try {
       setMade(await agentsApi.createShare(owner, thread.id, delegated && subtree));
+      setEarlier(false);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -70,6 +92,7 @@ export function ShareButton({ thread }: { thread: Thread }) {
         onClick={() => {
           setOpen((o) => !o);
           setMade(null);
+          setEarlier(false);
           setError(null);
         }}
         title="Share a read-only replay"
@@ -94,6 +117,14 @@ export function ShareButton({ thread }: { thread: Thread }) {
                   <ExternalLink className="size-3.5" />
                 </a>
               </div>
+              {earlier && (
+                <p className="flex items-center gap-2 text-[11.5px] text-subtle">
+                  Made {new Date(made.created_at).toLocaleDateString(undefined, { month: "short", day: "numeric" })}: later work isn&apos;t in it.
+                  <button type="button" disabled={busy} onClick={() => void create()} className="text-accent hover:underline disabled:opacity-60">
+                    {busy ? <span className="shimmer">Making…</span> : "Make a new one as it is now"}
+                  </button>
+                </p>
+              )}
               <p className="text-[11.5px] text-subtle">
                 {made.threads > 1 ? `${made.threads} threads · ` : ""}
                 {made.runs} run{made.runs === 1 ? "" : "s"} · {compact(made.bytes)} B ·{" "}

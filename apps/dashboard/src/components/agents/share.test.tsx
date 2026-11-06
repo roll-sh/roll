@@ -98,7 +98,10 @@ describe("Conversation, read-only", () => {
 });
 
 describe("ShareButton", () => {
-  beforeEach(() => Object.values(agents).forEach((f) => f.mockReset()));
+  beforeEach(() => {
+    Object.values(agents).forEach((f) => f.mockReset());
+    agents.shares.mockResolvedValue([]);
+  });
 
   it("makes a link to the thread", async () => {
     agents.createShare.mockResolvedValue(summary);
@@ -116,6 +119,17 @@ describe("ShareButton", () => {
     await userEvent.click(within(dialog).getByRole("button", { name: "Manage shares" }));
     expect(agentsSurface.get().view).toEqual({ kind: "settings", target: "owner" });
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
+
+  it("shows a shared thread's link when reopened, instead of making a second one", async () => {
+    agents.shares.mockResolvedValue([{ ...summary, thread: "thr_1" }]);
+    const h = agentsHarness({ entities: [mirrored("thread", thread(), 1)] });
+    renderAgents(<ShareButton thread={thread()} />, h);
+    await userEvent.click(screen.getByRole("button", { name: "Share" }));
+    const dialog = screen.getByRole("dialog", { name: "Share this thread" });
+    expect(await within(dialog).findByText(`${window.location.origin}/agents/s/shr_1`)).toBeInTheDocument();
+    expect(within(dialog).queryByRole("button", { name: "Create link" })).toBeNull();
+    expect(agents.createShare).not.toHaveBeenCalled();
   });
 });
 
