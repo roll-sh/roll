@@ -22,7 +22,7 @@ import { checkProjectIcon, projectColor } from "@/lib/agents-identity";
 import { ColorPicker, ProjectIcon } from "./identity";
 import { btn, primary } from "../ui";
 import { DefaultsRows } from "./machine-settings";
-import { field, SettingRow, SettingsSection, type Setting } from "./settings-ui";
+import { field, SettingRow, SettingsSection, useJustSaved, type Setting } from "./settings-ui";
 import { ago } from "./shared";
 import { Select, Switch } from "./ui";
 import { useEscapeLayer } from "./escape-layers";
@@ -284,6 +284,8 @@ export function ProjectSettingsForm({ project, machine, onDone, onLeave }: { pro
   const iconChecked = checkProjectIcon(icon);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // The Save button says "Saved" for a moment after it did (T3 confirms a save in place).
+  const justSaved = useJustSaved(busy === "save", !!error);
   const saved = useMemo(() => new Set(project.settings.scripts.map((s) => s.id)), [project.settings.scripts]);
 
   const cleanupDays = cleanup.worktree_after_days ?? null;
@@ -402,7 +404,7 @@ export function ProjectSettingsForm({ project, machine, onDone, onLeave }: { pro
       </SettingsSection>
 
       <SettingsSection title="New threads" ids={[P.model.id, P.permissions.id, P.mode.id, P.workspace.id]}>
-        <DefaultsRows rows={P} defaults={defaults} providers={providers} disabled={false} onChange={setDefaults} />
+        <DefaultsRows inherits="machine" rows={P} defaults={defaults} providers={providers} disabled={false} onChange={setDefaults} />
       </SettingsSection>
 
       <SettingsSection title="Settling and cleanup" ids={[P.autoSettle.id, P.onLand.id, P.keepChanges.id, P.cleanup.id, P.cleanupKeep.id]}>
@@ -553,7 +555,7 @@ export function ProjectSettingsForm({ project, machine, onDone, onLeave }: { pro
           </button>
         )}
         <button type="submit" disabled={!changed || !scriptsOk || !online || busy !== null || !name.trim() || "error" in iconChecked} className={primary}>
-          {busy === "save" ? <span className="shimmer">Saving…</span> : "Save"}
+          {busy === "save" ? <span className="shimmer">Saving…</span> : justSaved ? "Saved" : "Save"}
         </button>
         {onDone && (
           <button type="button" onClick={onDone} className={btn}>

@@ -203,7 +203,7 @@ export function OwnerSettingsPanel({ onClose, elsewhere }: { onClose: () => void
         />
       </SettingsSection>
       <SettingsSection title="New threads" ids={[S.model.id, S.permissions.id, S.mode.id, S.workspace.id]}>
-        <DefaultsRows rows={S} defaults={settings.defaults} providers={providers} disabled={disabled} onChange={(defaults) => void save({ defaults })} />
+        <DefaultsRows inherits="provider" rows={S} defaults={settings.defaults} providers={providers} disabled={disabled} onChange={(defaults) => void save({ defaults })} />
       </SettingsSection>
       <SettingsSection title="Machines" ids={machines.map((m) => `machine.${m.id}`)}>
         {machines.map((m) => (

@@ -10,7 +10,7 @@
  * each opening that page with the same search.
  */
 
-import { ChevronRight, RotateCcw, Search, X } from "lucide-react";
+import { Check, ChevronRight, RotateCcw, Search, X } from "lucide-react";
 import { createContext, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { setAgentsView } from "@/lib/agents-surface";
 import { searchSettings, type SettingItem } from "@/lib/settings-search";
@@ -77,6 +77,17 @@ export function SettingsPage({
     return q;
   });
   const box = useRef<HTMLInputElement>(null);
+  const page = useRef<HTMLDivElement>(null);
+  // Opening moves focus into the panel, so Tab and Escape work there at once: the search on a
+  // desktop (typing finds a setting), the page itself on a touch screen (no keyboard popping up).
+  useEffect(() => {
+    const root = page.current;
+    if (!root || root.contains(document.activeElement)) return;
+    const touch = window.matchMedia?.("(pointer: coarse)").matches;
+    (search && !touch ? box.current : root)?.focus({ preventScroll: true });
+    // On opening only.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   const matches = useMemo(() => (query.trim() ? new Set(searchSettings(query, items).map((i) => i.id)) : null), [query, items]);
   const others = useMemo(
     () => (query.trim() && elsewhere ? elsewhere.map((e) => ({ ...e, hits: searchSettings(query, e.items) })).filter((e) => e.hits.length > 0) : []),
@@ -97,7 +108,7 @@ export function SettingsPage({
     return () => window.removeEventListener("keydown", onKey);
   }, [search]);
   return (
-    <div className="flex min-h-0 flex-1 flex-col">
+    <div ref={page} tabIndex={-1} aria-label={`${title}: ${subtitle}`} className="flex min-h-0 flex-1 flex-col outline-none">
       <div className="flex h-12 shrink-0 items-center gap-2.5 border-b border-line px-3">
         {icon}
         <div className="min-w-0 flex-1 leading-tight">
@@ -290,11 +301,42 @@ export function TextField({
 
 /** What saving is doing, for a page's footer line. */
 export function SaveState({ saving, error, offline }: { saving: boolean; error: string | null; offline?: string | null }) {
+  const saved = useJustSaved(saving, !!error);
   if (offline) return <p className="mb-4 rounded-lg border border-line-2 bg-raised px-3 py-2 text-[12px] text-subtle">{offline}</p>;
-  if (!saving && !error) return null;
+  if (error)
+    return (
+      <p role="alert" className="mb-4 rounded-lg border border-danger/40 bg-danger/5 px-3 py-2 text-[12px] text-danger">
+        {error}
+      </p>
+    );
+  // Saving, then "Saved" for a moment: in the corner, over the page, so nothing below moves.
   return (
-    <p role={error ? "alert" : "status"} className={cn("mb-4 rounded-lg border px-3 py-2 text-[12px]", error ? "border-danger/40 bg-danger/5 text-danger" : "border-line-2 bg-raised text-subtle")}>
-      {error ?? <span className="shimmer">Saving…</span>}
-    </p>
+    <div className="pointer-events-none sticky top-0 z-10 flex h-0 justify-end">
+      <p role="status" className={cn("flex h-6 items-center gap-1 rounded-full border px-2.5 text-[11.5px] transition-opacity duration-150", saving || saved ? "border-line-2 bg-raised text-muted opacity-100 inset-shadow-highlight" : "border-transparent opacity-0")}>
+        {saving ? (
+          <span className="shimmer">Saving…</span>
+        ) : saved ? (
+          <>
+            <Check className="size-3 text-ok" aria-hidden /> Saved
+          </>
+        ) : null}
+      </p>
+    </div>
   );
+}
+
+/** True for a moment after `saving` ends without a failure: long enough to read "Saved". */
+export function useJustSaved(saving: boolean, failed: boolean, ms = 1600): boolean {
+  const [shown, setShown] = useState(false);
+  const was = useRef(saving);
+  useEffect(() => {
+    const ended = was.current && !saving;
+    was.current = saving;
+    if (saving || failed) return setShown(false);
+    if (!ended) return;
+    setShown(true);
+    const t = setTimeout(() => setShown(false), ms);
+    return () => clearTimeout(t);
+  }, [saving, failed, ms]);
+  return shown;
 }

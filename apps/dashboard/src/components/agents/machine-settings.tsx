@@ -886,20 +886,29 @@ function ModelsEditor({
 
 // ── new threads, git ──
 
-/** What new threads start with, as rows: the model, permissions, plan and workspace, each with "Default". */
+const INHERITS = { machine: "Machine's", owner: "Owner's", provider: "Provider's" } as const;
+
+/**
+ * What new threads start with, as rows: the model, permissions, plan and workspace. Each can be
+ * left to the next layer (project, then machine, then owner, then the provider): `inherits` names
+ * whose default that is, so the choice says so.
+ */
 export function DefaultsRows({
   defaults,
   providers,
   disabled,
   onChange,
   rows,
+  inherits,
 }: {
   defaults: ThreadDefaults;
   providers: readonly ProviderInfo[];
   disabled: boolean;
   onChange: (next: ThreadDefaults) => void;
   rows: { model: Setting; permissions: Setting; mode: Setting; workspace: Setting };
+  inherits: "machine" | "owner" | "provider";
 }) {
+  const whose = INHERITS[inherits];
   const patch = (p: Partial<ThreadDefaults>) => {
     const next: Record<string, unknown> = { ...defaults, ...p };
     for (const k of Object.keys(next)) if (next[k] === undefined) delete next[k];
@@ -936,7 +945,7 @@ export function DefaultsRows({
             disabled={disabled}
             value={defaults.runtime_mode ?? "default"}
             onChange={(v) => patch({ runtime_mode: v === "default" ? undefined : (v as RuntimeMode) })}
-            options={[{ value: "default", label: "Default" }, ...RUNTIME]}
+            options={[{ value: "default", label: whose }, ...RUNTIME]}
           />
         }
       />
@@ -948,7 +957,7 @@ export function DefaultsRows({
             value={defaults.interaction_mode ?? "default_mode"}
             onChange={(v) => patch({ interaction_mode: v === "plan" ? "plan" : v === "default" ? "default" : undefined })}
             options={[
-              { value: "default_mode", label: "Default" },
+              { value: "default_mode", label: whose },
               { value: "default", label: "Off" },
               { value: "plan", label: "Plan first" },
             ]}
@@ -963,7 +972,8 @@ export function DefaultsRows({
             value={defaults.worktree === undefined ? "default" : defaults.worktree ? "worktree" : "checkout"}
             onChange={(v) => patch({ worktree: v === "default" ? undefined : v === "worktree" })}
             options={[
-              { value: "default", label: "Default" },
+              // Past the owner it's a worktree when the project has a repo (new-thread.ts).
+              { value: "default", label: inherits === "provider" ? "Auto" : whose },
               { value: "checkout", label: "Checkout" },
               { value: "worktree", label: "Worktree" },
             ]}
@@ -979,6 +989,7 @@ function NewThreads({ ctx }: { ctx: Ctx }) {
   return (
     <SettingsSection title="New threads" ids={Object.values(rows).map((r) => r.id)}>
       <DefaultsRows
+        inherits="owner"
         rows={rows}
         defaults={ctx.set.defaults ?? {}}
         providers={ctx.machine.info?.providers ?? []}
