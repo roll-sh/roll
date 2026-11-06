@@ -8,7 +8,7 @@ roll's reviewer. `pnpm test:code` runs all of them: about 430 Rust tests across 
 
 GitHub Actions uses `.github/workflows/ci.yml` for pull requests and merge groups. Its merge
 gate finishes in under a minute: Rust smoke tests, TypeScript checks (TypeScript 7), the dashboard's
-vitest suite in two shards, its node tests, the desktop app's tests, and script/workflow validation,
+vitest suite in three shards, its node tests, the desktop app's tests, and script/workflow validation,
 each job in parallel with a two-minute timeout. It does not run the full feature map before merging.
 The full code suite remains available manually in `.github/workflows/code.yml`; the other
 service workflows are also manual. Docker matrices, conformance and stress tests run there.
