@@ -269,9 +269,11 @@ export function EndpointEditor({
   };
 
   const save = async () => {
+    // Left empty, it's named for its kind (the field's placeholder), not refused with the daemon's rule.
+    const named = name.trim() || KIND_LABEL[kind];
     const spec: EndpointSpec = {
-      id: initial?.id ?? endpointId(name, taken),
-      name,
+      id: initial?.id ?? endpointId(named, taken),
+      name: named,
       kind,
       base_url: url,
       ...(picked.length ? { providers: picked } : {}),
@@ -279,6 +281,8 @@ export function EndpointEditor({
       ...(fromOp ? { key_ref: ref } : {}),
     };
     if (fromOp && !ref.trim()) return setProblem("Enter the op:// reference, or turn off From 1Password.");
+    // A profile is for the providers it lists; one for none would never be used.
+    if (!withKey && !picked.length && providers.length) return setProblem("Pick the providers this profile is for.");
     const checked = checkEndpoint(spec);
     if ("error" in checked) return setProblem(checked.error);
     let change: string | null | undefined;
@@ -317,7 +321,16 @@ export function EndpointEditor({
       </Labeled>
       <div className="grid gap-3 sm:grid-cols-[minmax(0,2fr)_minmax(0,3fr)]">
         <Labeled label="Name">
-          <input aria-label="Endpoint name" value={name} onChange={(e) => setName(e.target.value)} placeholder={KIND_LABEL[kind]} spellCheck={false} className={cn(field, "w-full")} />
+          <input
+            aria-label="Endpoint name"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            placeholder={KIND_LABEL[kind]}
+            spellCheck={false}
+            // A new one starts at its name (New endpoint… from a provider's card too).
+            autoFocus={!initial && !replaceKey}
+            className={cn(field, "w-full")}
+          />
         </Labeled>
         <Labeled label="Base URL">
           <input aria-label="Base URL" value={url} onChange={(e) => setUrl(e.target.value)} placeholder={placeholder} spellCheck={false} inputMode="url" className={cn(field, "w-full font-mono text-[12px]")} />

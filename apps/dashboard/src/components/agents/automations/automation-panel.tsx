@@ -269,6 +269,7 @@ export function AutomationPanel({ view }: { view: AutomationsView & { open: stri
             <Builder
               draft={draft}
               onChange={setDraft}
+              attempts={seek}
               catalog={catalog}
               problems={problems}
               automation={automation}

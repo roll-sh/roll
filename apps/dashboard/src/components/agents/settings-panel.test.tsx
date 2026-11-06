@@ -615,6 +615,8 @@ describe("a machine's endpoints", () => {
     const form = within(endpointsRegion()).getByRole("form", { name: "New endpoint" });
     expect(within(form).getByRole("checkbox", { name: /Codex/ })).toBeChecked();
     expect(within(form).getByRole("checkbox", { name: /Claude Code/ })).not.toBeChecked();
+    // It starts at the name.
+    expect(within(form).getByRole("textbox", { name: "Endpoint name" })).toHaveFocus();
     expect(sentOf(h, "endpoint.set")).toHaveLength(2);
   });
 
@@ -699,8 +701,11 @@ describe("the owner's endpoint profiles", () => {
     await userEvent.click(within(endpointsRegion()).getByRole("button", { name: "Add profile" }));
     const form = within(endpointsRegion()).getByRole("form", { name: "New profile" });
     expect(within(form).queryByLabelText("Key")).toBeNull();
-    await userEvent.type(within(form).getByRole("textbox", { name: "Endpoint name" }), "CLIProxyAPI");
+    // Left unnamed it's named for its kind; for no provider it's refused in words, not the daemon's rule.
     await userEvent.type(within(form).getByRole("textbox", { name: "Base URL" }), "http://proxy.local:8317");
+    await userEvent.click(within(form).getByRole("button", { name: "Add profile" }));
+    expect(await within(form).findByText("Pick the providers this profile is for.")).toBeInTheDocument();
+    expect(services.endpoints.save).not.toHaveBeenCalled();
     await userEvent.click(within(form).getByRole("checkbox", { name: /Claude Code/ }));
     await userEvent.click(within(form).getByRole("checkbox", { name: /Codex/ }));
     await userEvent.click(within(form).getByRole("button", { name: "Add profile" }));

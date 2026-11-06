@@ -23,7 +23,7 @@ import {
   TriangleAlert,
   X,
 } from "lucide-react";
-import { useMemo, useState, type ReactNode } from "react";
+import { useMemo, useRef, useState, type ReactNode } from "react";
 import type { Automation, AutomationSpec, Catalog, Filter, FilterOp, Step, TestResult, Trigger } from "@/lib/automations-api";
 import {
   AGENT_EVENTS,
@@ -67,6 +67,7 @@ export function Builder({
   revealed,
   onRotate,
   test,
+  attempts = 0,
 }: {
   draft: AutomationSpec;
   onChange: (next: AutomationSpec) => void;
@@ -78,8 +79,28 @@ export function Builder({
   revealed: string | null;
   onRotate?: () => void;
   test: BuilderTest | null;
+  /** Saves tried that had something to fix: what a new step lacks shows from then on. */
+  attempts?: number;
 }) {
   const [open, setOpen] = useState<string | null>(() => (draft.steps.length === 1 || !draft.steps.length ? (draft.steps[0]?.id ?? null) : null));
+  // Steps just added: not red before they're filled in or a save is tried (they started red).
+  const [fresh, setFresh] = useState<ReadonlySet<string>>(new Set());
+  const [seenAttempts, setSeenAttempts] = useState(attempts);
+  if (attempts !== seenAttempts) {
+    setSeenAttempts(attempts);
+    setFresh(new Set());
+  }
+  const root = useRef<HTMLDivElement>(null);
+  const shown = useMemo(() => {
+    if (!fresh.size) return problems;
+    const hide = draft.steps.flatMap((s, i) => (fresh.has(s.id) ? [`steps.${i}`] : []));
+    return Object.fromEntries(Object.entries(problems).filter(([k]) => !hide.some((h) => k === h || k.startsWith(`${h}.`))));
+  }, [problems, fresh, draft.steps]);
+  // A new step comes into view (it was added below the fold).
+  const reveal = (id: string) =>
+    requestAnimationFrame(() =>
+      root.current?.querySelector(`[data-step="${CSS.escape(id)}"]`)?.scrollIntoView?.({ block: "nearest", behavior: window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" }),
+    );
   const sample = useMemo(() => sampler(test?.data), [test?.data]);
   const setSteps = (steps: Step[]) => onChange({ ...draft, steps });
   const keys = useStepKeys(draft.steps.map((x) => x.id));
@@ -89,6 +110,8 @@ export function Builder({
     steps.splice(at, 0, s);
     setSteps(steps);
     setOpen(s.id);
+    setFresh((f) => new Set(f).add(s.id));
+    reveal(s.id);
   };
   const move = (i: number, by: number) => {
     const j = i + by;
@@ -98,12 +121,12 @@ export function Builder({
     setSteps(steps);
   };
   return (
-    <div className="mx-auto w-full max-w-[620px] pb-4" aria-label="Builder">
+    <div ref={root} className="mx-auto w-full max-w-[620px] pb-4" aria-label="Builder">
       <TriggerCard draft={draft} onChange={onChange} catalog={catalog} problems={problems} automation={automation} revealed={revealed} onRotate={onRotate} verdict={test?.result ? test.result.trigger : null} />
       <Connector />
       <FiltersCard filters={draft.filters} onChange={(filters) => onChange({ ...draft, filters })} variables={variablesAt(draft, catalog, -1)} problems={problems} verdicts={test?.result?.filters ?? null} sample={sample} />
       {draft.steps.map((s, i) => (
-        <div key={keys[i]}>
+        <div key={keys[i]} data-step={s.id}>
           <Connector onAdd={(kind) => insert(i, kind)} catalog={catalog} label={`Add a step before ${s.name || s.id}`} />
           <StepCard
             step={s}
@@ -111,11 +134,12 @@ export function Builder({
             count={draft.steps.length}
             draft={draft}
             catalog={catalog}
-            problems={problems}
+            problems={shown}
             open={open === s.id}
             onToggle={() => setOpen(open === s.id ? null : s.id)}
             onChange={(next) => {
               setSteps(draft.steps.map((x, j) => (j === i ? next : x)));
+              if (fresh.has(s.id)) setFresh((f) => new Set([...f].filter((x) => x !== s.id)));
               if (next.id !== s.id && open === s.id) setOpen(next.id);
             }}
             onMove={(by) => move(i, by)}
@@ -126,6 +150,7 @@ export function Builder({
               steps.splice(i + 1, 0, copy);
               setSteps(steps);
               setOpen(copy.id);
+              reveal(copy.id);
             }}
             secrets={automation?.secrets ?? []}
             sample={sample}

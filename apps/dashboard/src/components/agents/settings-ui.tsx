@@ -224,9 +224,9 @@ export function SettingRow({
 }
 
 /** A quiet tag after a row's title. */
-export function Note({ children, title }: { children: ReactNode; title?: string }) {
+export function Note({ children, title, className }: { children: ReactNode; title?: string; className?: string }) {
   return (
-    <span className="rounded border border-line-2 bg-panel-2 px-1 py-px text-[10.5px] text-subtle" title={title}>
+    <span className={`rounded border border-line-2 bg-panel-2 px-1 py-px text-[10.5px] text-subtle ${className ?? "shrink-0"}`} title={title}>
       {children}
     </span>
   );

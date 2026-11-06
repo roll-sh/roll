@@ -152,6 +152,18 @@ describe("Automation builder", () => {
     expect(agentsSurface.get().view).toEqual({ kind: "automations", open: "aut_new" });
   });
 
+  it("a step added to a saved automation isn't red before it's filled in or a save is tried", async () => {
+    const api = fakeApi([automation()]);
+    renderAgents(<AutomationPanel view={{ kind: "automations", open: "aut_1", tab: "edit" }} />, harness(api));
+    await userEvent.click(await screen.findByRole("button", { name: "Add a step" }));
+    await userEvent.click(await screen.findByRole("menuitem", { name: /Call a webhook/ }));
+    const card = screen.getByRole("region", { name: "Step 2: Call a webhook" });
+    expect(card.querySelector(".text-danger")).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(api.update).not.toHaveBeenCalled();
+    await waitFor(() => expect(screen.getByRole("region", { name: "Step 2: Call a webhook" }).querySelector(".text-danger")).not.toBeNull());
+  });
+
   it("renames a step in place: its card and its open section stay while its id is typed", async () => {
     renderAgents(<AutomationPanel view={{ kind: "automations", open: "new" }} />, harness(fakeApi()));
     await userEvent.click(screen.getByRole("button", { name: "Add a step" }));

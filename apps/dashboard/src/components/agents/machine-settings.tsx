@@ -545,10 +545,15 @@ function ProviderCard({ ctx, base, info }: { ctx: Ctx; base: ProviderBase; info:
       <div className="flex items-center gap-3 px-3.5 py-3">
         <ProviderLogo provider={base} className="size-5" />
         <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-1.5">
-            <h4 className="font-medium tracking-[-0.01em]">{base.name}</h4>
+          {/* The name keeps its line; the notes give way (on a phone "Claude Code" wrapped beside "via …"). */}
+          <div className="flex min-w-0 items-center gap-1.5">
+            <h4 className="shrink-0 font-medium tracking-[-0.01em] whitespace-nowrap">{base.name}</h4>
             {changed && <Note>customized</Note>}
-            {via && <Note title={`Its requests go to the endpoint ${via.name}`}>via {via.name}</Note>}
+            {via && (
+              <Note title={`Its requests go to the endpoint ${via.name}`} className="min-w-0 truncate">
+                via {via.name}
+              </Note>
+            )}
           </div>
           <p className="truncate text-[12px] text-subtle">{p.enabled && info?.checking ? <span className="shimmer">Checking…</span> : providerStatus(p.enabled, info)}</p>
         </div>
