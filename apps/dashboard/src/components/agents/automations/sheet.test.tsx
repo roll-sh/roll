@@ -36,13 +36,15 @@ describe("the automations sheet", () => {
     setup();
     await userEvent.click(screen.getByRole("button", { name: "Automations (A)" }));
     const aside = sheet()!;
-    expect(aside).toHaveClass("panel-in");
+    expect(aside).toHaveAttribute("data-state", "open");
     expect(await within(aside).findByRole("button", { name: "Morning triage" })).toBeInTheDocument();
     expect(screen.getByRole("form", { name: "Ask agents" })).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "Thread Upgrade to Next 16.4" }));
     expect(view()).toEqual({ kind: "thread", thread: "thr_2" });
+    // The same frame now holds the conversation (the sheet's page fades out under it, hidden).
     expect(sheet()).toBeNull();
     expect(screen.getAllByRole("complementary")).toHaveLength(1);
+    expect(screen.getByRole("complementary", { name: "Conversation" })).toBe(aside);
   });
 
   it("⚡ closes it and it slides out; A opens and closes it, Escape closes it from the list", async () => {
@@ -50,8 +52,9 @@ describe("the automations sheet", () => {
     act(() => setAgentsView({ kind: "automations" }));
     await userEvent.click(screen.getByRole("button", { name: "Close automations (A)" }));
     expect(view()).toEqual({ kind: "canvas" });
-    // It slides out, then it's gone.
-    expect(sheet()).toHaveAttribute("data-leaving");
+    // It slides out (inert meanwhile), then it's gone.
+    expect(sheet()).toHaveAttribute("data-state", "closing");
+    expect(sheet()).toHaveAttribute("inert");
     await waitFor(() => expect(sheet()).toBeNull());
 
     await userEvent.keyboard("a");
@@ -145,10 +148,10 @@ describe("the automations sheet", () => {
     setup();
     act(() => setAgentsView({ kind: "automations", open: "aut_1", tab: "edit" }));
     await userEvent.click(await screen.findByRole("button", { name: "Maximize the sheet" }));
-    expect(screen.getByRole("form", { name: "Ask agents", hidden: true }).closest(".bg-canvas")).toHaveClass("hidden");
+    expect(screen.getByRole("form", { name: "Ask agents", hidden: true }).closest(".bg-canvas")).toHaveAttribute("data-folded");
     expect(localStorage.getItem("roll:agents:automations-maximized")).toBe("1");
     await userEvent.click(screen.getByRole("button", { name: "Back to overview (Esc)" }));
     expect(screen.queryByRole("button", { name: /Maximize the sheet|Restore the sheet's size/ })).toBeNull();
-    expect(screen.getByRole("form", { name: "Ask agents" }).closest(".bg-canvas")).not.toHaveClass("hidden");
+    expect(screen.getByRole("form", { name: "Ask agents" }).closest(".bg-canvas")).not.toHaveAttribute("data-folded");
   });
 });

@@ -1,6 +1,6 @@
 "use client";
 
-import { DotField, HorizonMark, RollMark, useReducedMotion } from "@roll/brand";
+import { DotField, HorizonMark, RollMark } from "@roll/brand";
 import { Archive, ArrowLeft, ChevronDown, ChevronUp, MoreHorizontal, PanelRightClose, Pin, PinOff, Plus, Search, Server, Settings, Share2, X, Zap } from "lucide-react";
 import Link from "next/link";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
@@ -33,6 +33,7 @@ import { MachineNode, ProjectNode, RequestNode, SubagentNode, ThreadNode } from 
 import { CanvasProjectsProvider, type CanvasProjects } from "./machine-projects";
 import { ProjectDialogs } from "./project-actions";
 import { PromptBar } from "./prompt-bar";
+import { RightDock } from "./right-dock";
 import { PendingRequest } from "./pending-request";
 import { SettingsPanel } from "./settings-panel";
 import { useSandboxes } from "./sandbox";
@@ -204,9 +205,7 @@ export function AgentsSurface({
   const runInSheet = useRef<{ view: AutomationsView; keys: readonly string[] } | null>(null);
   const sheetBack = useRef<(() => void) | null>(null);
   const [maximized, setMaximized] = useMaximized();
-  const sheet = useLeaving(shown.kind === "automations" ? shown : null, useReducedMotion() ? 0 : SHEET_OUT_MS);
-  const sheetView = sheet.leaving && shown.kind !== "canvas" ? null : sheet.value;
-  const wide = !phone && maximized && !!sheetView && !sheet.leaving && isBuilder(sheetView);
+  const wide = !phone && maximized && shown.kind === "automations" && isBuilder(shown);
   const firstHighlight = highlighted[0];
   useEffect(() => {
     runInSheet.current = shown.kind === "automations" && shown.run && highlighted.length ? { view: shown, keys: highlighted } : null;
@@ -271,7 +270,8 @@ export function AgentsSurface({
     const key = before.kind === "thread" ? `t:${before.thread}` : before.kind === "settings" && before.target !== "owner" ? before.target : null;
     const t = setTimeout(() => {
       const a = document.activeElement;
-      if ((a && a !== document.body && a.isConnected) || !lastInputWasKeyboard()) return;
+      // Focus left in a panel that is sliding out is lost too (it goes with the panel).
+      if ((a && a !== document.body && a.isConnected && !a.closest("[data-panel][data-state=closing]")) || !lastInputWasKeyboard()) return;
       const card = key ? root.current?.querySelector<HTMLElement>(`[data-card][data-key="${CSS.escape(key)}"]`) : null;
       const back = card ?? (lastCanvasFocus.current?.isConnected ? lastCanvasFocus.current : null);
       back?.focus({ preventScroll: true });
@@ -571,10 +571,16 @@ export function AgentsSurface({
           </header>
           <div className="relative flex min-h-0 flex-1">
             <ThreadsSidebar data={data} open={sidebar} setOpen={setSidebar} phone={phone} openThread={shown.kind === "thread" ? shown.thread : null} only={focused} onShowAll={() => focusProject(null)} />
-            {/* The working area: an inset panel one step up from the chrome (Linear's inverted L). */}
+            {/* The canvas and the right sheet beside it; the sheet slides in past its right edge. */}
+            <div className="relative flex min-h-0 min-w-0 flex-1 overflow-x-clip">
+            {/* The working area: an inset panel one step up from the chrome (Linear's inverted L). It
+                folds to nothing (still mounted) under a maximized builder, as the sheet grows over it. */}
             <div
               data-waiting={(phone && shown.kind === "canvas" && requests.length > 0) || undefined}
-              className={`relative min-h-0 min-w-0 flex-1 overflow-hidden bg-canvas ${phone ? "" : "mx-2 mb-2 rounded-xl border border-line"} ${wide ? "hidden" : ""}`}
+              data-folded={wide || undefined}
+              inert={wide}
+              aria-hidden={wide || undefined}
+              className={`relative min-h-0 min-w-0 flex-1 overflow-hidden bg-canvas ${phone ? "" : `mb-2 rounded-xl border-line transition-[margin,border-width,opacity] duration-[260ms] ease-(--ease-drawer) motion-reduce:transition-none ${wide ? "mx-0 border-0 opacity-0" : "mx-2 border"}`}`}
             >
               {data.machines.size === 0 && snap.conn !== "connecting" ? (
                 <Empty demo={demo} onCreated={onSandbox} />
@@ -610,30 +616,39 @@ export function AgentsSurface({
               {/* Beside an open conversation too (the canvas narrows; the draft stays); on a phone, under what's waiting. */}
               {data.machines.size > 0 && <PromptBar ref={dock} above={phone && shown.kind === "canvas" && requests.length > 0 && <PhoneWaiting client={client} />} />}
             </div>
-            {shown.kind === "thread" && threadOpen && (
-              <SidePanel phone={phone} label="Conversation">
-                <Conversation
-                  thread={threadOpen.value}
-                  machine={data.machines.get(threadOpen.machine)?.value}
-                  end={!phone && <PinConversation views={views} thread={threadOpen.value.id} />}
-                  start={
-                    <IconButton label="Close the conversation (Esc)" onClick={close}>
-                      {phone ? <ArrowLeft className="size-4" /> : <PanelRightClose className="size-4" />}
-                    </IconButton>
-                  }
-                />
-              </SidePanel>
-            )}
-            {shown.kind === "settings" && (
-              <SidePanel phone={phone} label="Settings">
-                <SettingsPanel key={shown.target} target={shown.target} onClose={close} />
-              </SidePanel>
-            )}
-            {sheetView && (
-              <SidePanel phone={phone} label="Automations" wide={wide} leaving={sheet.leaving}>
-                <AutomationsSheet view={sheetView} phone={phone} maximized={maximized} setMaximized={setMaximized} backRef={sheetBack} onHighlight={setHighlighted} />
-              </SidePanel>
-            )}
+            <RightDock
+              phone={phone}
+              wide={wide}
+              pane={
+                shown.kind === "thread" && threadOpen
+                  ? {
+                      key: `thread:${shown.thread}`,
+                      label: "Conversation",
+                      node: (
+                        <Conversation
+                          thread={threadOpen.value}
+                          machine={data.machines.get(threadOpen.machine)?.value}
+                          end={!phone && <PinConversation views={views} thread={threadOpen.value.id} />}
+                          start={
+                            <IconButton label="Close the conversation (Esc)" onClick={close}>
+                              {phone ? <ArrowLeft className="size-4" /> : <PanelRightClose className="size-4" />}
+                            </IconButton>
+                          }
+                        />
+                      ),
+                    }
+                  : shown.kind === "settings"
+                    ? { key: `settings:${shown.target}`, label: "Settings", node: <SettingsPanel target={shown.target} onClose={close} /> }
+                    : shown.kind === "automations"
+                      ? {
+                          key: "automations",
+                          label: "Automations",
+                          node: <AutomationsSheet view={shown} phone={phone} maximized={maximized} setMaximized={setMaximized} backRef={sheetBack} onHighlight={setHighlighted} />,
+                        }
+                      : null
+              }
+            />
+            </div>
           </div>
         </div>
         <Notices />
@@ -646,10 +661,7 @@ export function AgentsSurface({
   );
 }
 
-const PANEL_WIDTH = "roll:agents:panel-width";
 const MAXIMIZED = "roll:agents:automations-maximized";
-/** The automations sheet sliding out (`.panel-out`). */
-const SHEET_OUT_MS = 180;
 
 /** The automations builder filling the working area (T3's maximized right panel), per device. */
 function useMaximized(): [boolean, (on: boolean) => void] {
@@ -670,78 +682,6 @@ function useMaximized(): [boolean, (on: boolean) => void] {
     }
   }, []);
   return [on, set];
-}
-
-/** `value`, kept for `ms` after it becomes `null` (`leaving` meanwhile), so it can animate out. */
-function useLeaving<T>(value: T | null, ms: number): { value: T | null; leaving: boolean } {
-  const [kept, setKept] = useState<T | null>(value);
-  if (value !== null && value !== kept) setKept(value);
-  const leaving = value === null && kept !== null;
-  useEffect(() => {
-    if (!leaving) return;
-    const t = setTimeout(() => setKept(null), ms);
-    return () => clearTimeout(t);
-  }, [leaving, ms]);
-  return { value: value ?? kept, leaving };
-}
-
-/**
- * What's open beside the canvas (a conversation, settings, the automations sheet): docked on the
- * right, sliding in, as wide as it was last dragged to; on a phone it covers the canvas. `wide`
- * fills the working area (the maximized builder); `leaving` slides it out before it unmounts.
- */
-function SidePanel({ phone, label, wide = false, leaving = false, children }: { phone: boolean; label: string; wide?: boolean; leaving?: boolean; children: ReactNode }) {
-  const [width, setWidth] = useState(() => {
-    const saved = typeof window === "undefined" ? NaN : Number(localStorage.getItem(PANEL_WIDTH));
-    return Number.isFinite(saved) && saved > 0 ? saved : 640;
-  });
-  const clamp = (w: number) => Math.round(Math.max(380, Math.min(w, window.innerWidth - 320)));
-  const onPointerDown = (e: React.PointerEvent) => {
-    e.preventDefault();
-    const x0 = e.clientX;
-    const w0 = width;
-    const el = e.currentTarget as HTMLElement;
-    el.setPointerCapture(e.pointerId);
-    let last = w0;
-    const move = (m: PointerEvent) => setWidth((last = clamp(w0 + x0 - m.clientX)));
-    const up = () => {
-      el.removeEventListener("pointermove", move);
-      el.removeEventListener("pointerup", up);
-      try {
-        localStorage.setItem(PANEL_WIDTH, String(last));
-      } catch {
-        // Not remembered.
-      }
-    };
-    el.addEventListener("pointermove", move);
-    el.addEventListener("pointerup", up);
-  };
-  return (
-    <aside
-      aria-label={label}
-      data-panel
-      className={`${leaving ? "panel-out pointer-events-none" : "panel-in"} flex min-h-0 flex-col ${phone ? "absolute inset-0 z-20 bg-sheet" : wide ? "relative min-w-0 flex-1 pr-2 pb-2 pl-2" : "relative shrink-0 pr-2 pb-2"}`}
-      style={phone || wide ? undefined : { width: `min(${width}px, calc(100% - 320px))` }}
-      data-leaving={leaving || undefined}
-    >
-      {!phone && !wide && (
-        <div
-          role="separator"
-          aria-orientation="vertical"
-          aria-label="Resize the panel"
-          onPointerDown={onPointerDown}
-          className="group/resize absolute inset-y-0 -left-2 z-10 flex w-2 cursor-col-resize justify-center"
-        >
-          <span className="my-auto h-10 w-[3px] rounded-full bg-line-3 opacity-0 transition-[opacity,height,background-color] duration-150 group-hover/resize:h-16 group-hover/resize:bg-accent/70 group-hover/resize:opacity-100" />
-        </div>
-      )}
-      {phone ? (
-        children
-      ) : (
-        <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-line-2 bg-sheet shadow-sheet inset-shadow-highlight">{children}</div>
-      )}
-    </aside>
-  );
 }
 
 function MarkDriver({ client }: { client: AgentsClient }) {

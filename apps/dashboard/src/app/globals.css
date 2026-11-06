@@ -578,30 +578,6 @@ body {
   animation: fade-in 0.2s ease-out both;
 }
 
-/* The agents side panel slides in from the right edge. */
-@keyframes panel-in {
-  from {
-    opacity: 0;
-    transform: translateX(28px);
-  }
-}
-
-.panel-in {
-  animation: panel-in 0.24s cubic-bezier(0.32, 0.72, 0, 1) both;
-}
-
-/* The automations sheet sliding back out to the right when it closes (180 ms, then it unmounts). */
-@keyframes panel-out {
-  to {
-    opacity: 0;
-    transform: translateX(28px);
-  }
-}
-
-.panel-out {
-  animation: panel-out 0.18s cubic-bezier(0.4, 0, 1, 1) both;
-}
-
 /* A page of the automations sheet's stack: deeper slides in from the right, back from the left. */
 @keyframes stack-push {
   from {
@@ -623,18 +599,6 @@ body {
 
 .stack-pop {
   animation: stack-pop 0.22s cubic-bezier(0.32, 0.72, 0, 1) both;
-}
-
-/* The agents threads sidebar slides in from the left edge. */
-@keyframes sidebar-in {
-  from {
-    opacity: 0;
-    transform: translateX(-16px);
-  }
-}
-
-.sidebar-in {
-  animation: sidebar-in 0.24s cubic-bezier(0.32, 0.72, 0, 1) both;
 }
 
 /* The chrome settles in a beat after the sheet (header, views bar, toolbar). */
@@ -695,11 +659,8 @@ body {
 @media (prefers-reduced-motion: reduce) {
   .pop,
   .sheet-in,
-  .panel-in,
-  .panel-out,
   .stack-push,
   .stack-pop,
-  .sidebar-in,
   .fade-in,
   .chrome-in,
   .toast-in {

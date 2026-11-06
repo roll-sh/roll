@@ -255,8 +255,11 @@ Text levels: `--fg` `#f7f8f8`, `--soft` `#d0d6e0` (secondary body), `--muted` `#
 |---|---|
 | popup opening | `.sheet-in`: translateY 10px, scale 0.985 → 1, fade, 260ms, `--ease-drawer` |
 | chrome settling | `.chrome-in`: translateY −4px, fade, 300ms on the drawer curve, 50ms after the sheet |
-| side panel and sidebar | `.panel-in` / `.sidebar-in`: translateX ±28px, fade, 240ms on the drawer curve |
-| automations sheet closing | `.panel-out`: back out 28px to the right with a fade, 180ms ease-in, then it unmounts |
+| the right sheet (conversation, settings, automations) | one frame (`RightDock`, right-dock.tsx): an in-flow gap grows to the sheet's width with the sheet pinned to its left edge, so the sheet slides in from the window's edge and the canvas narrows in step; 260ms on the drawer curve, the sheet fading in over 200ms. Closing is the same backwards over 260ms on `EASE_LEAVE` (the standard ease-in-out: on an ease-out a closing sheet covered most of the way in 100 ms and read as gone at once), holding its opacity for 100ms before fading, inert meanwhile, then it unmounts |
+| switching what the right sheet shows | the frame stays put; the new pane fades in (and 8px across) over the old one fading out, 200ms on `--ease-out-soft`. Never a second sheet, never an empty frame |
+| the maximized builder | the sheet's gap grows over the working area while the canvas folds (margins, border, opacity) beside it; the canvas stays mounted |
+| threads sidebar (⌘B) | `EdgeSheet` (edge-sheet.tsx): the same gap from the left edge, 268px, both ways; not on the frame it opens because it was left open |
+| phone sheets | the conversation, settings and automations slide over the canvas from the right edge, the sidebar from the left; back out the same way |
 | a page in the automations sheet | `.stack-push` (deeper, from 24px right) / `.stack-pop` (back, from 24px left), fade, 220ms on the drawer curve; a tab on the same level doesn't move |
 | popovers and menus | scale 0.98 → 1 plus fade, 150ms, `--ease-out-soft` `(0.23,1,0.32,1)`, from the trigger |
 | palette and dialogs | scale 0.98 plus fade, 200ms on the drawer curve, with the scrim fading in over 200ms |
@@ -267,6 +270,28 @@ Text levels: `--fg` `#f7f8f8`, `--soft` `#d0d6e0` (secondary body), `--muted` `#
 
 The drawer curve `cubic-bezier(0.32,0.72,0,1)` is T3's `--ease-drawer`. Every keyframe class is
 switched off under `prefers-reduced-motion`, and the engine draws a static, state-correct frame.
+
+**How (the rules for anything that opens, closes or switches):**
+
+- **Exits are real.** Something that goes away animates out, then unmounts. Never
+  `{open && <X/>}` for a surface that opened with motion. React-owned surfaces go under motion's
+  `AnimatePresence` and drive their values with `usePresenceTracks` (`presence.ts`): every change
+  animates from where the value is, so open → close → open turns around without a jump (motion's
+  declarative `exit` replays `initial` when a child comes back, which jumped a reopened sheet to
+  nothing). Base UI popups and dialogs keep their Root mounted and animate with
+  `data-starting-style`/`data-ending-style`. CSS keyframe classes are for entrances only: a keyframe
+  can't be interrupted.
+- **What's leaving never blocks input.** It's `inert` from the moment it starts to leave, so a click
+  lands on what's behind it at once; focus left inside it counts as lost.
+- **Layout moves with it.** A panel that takes room takes it through an in-flow gap animating its
+  width (T3's sidebar gap), so what's beside it moves in step instead of snapping at the end.
+- **Switches crossfade in place.** The container stays; the content changes inside it.
+- **Reduced motion** sets every duration to 0: the end state at once, every state change still shown.
+- **Timing lives in `lib/agents-motion.ts`** (`DRAWER`, `LEAVE`, `FADE_IN`, `PANE_SWITCH`).
+- **Libraries:** motion (motion.dev) for presence and in-place switches; Base UI's transitions for
+  its popups; CSS for toggles of things that stay mounted. Not the View Transitions API: it takes
+  the pointer until it ends, freezes the live canvas in a snapshot, and a second transition skips
+  the first to its end.
 
 ## Do / don't
 

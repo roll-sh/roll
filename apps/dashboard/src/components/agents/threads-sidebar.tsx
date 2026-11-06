@@ -34,6 +34,8 @@ import {
 } from "@/lib/agents-inbox";
 import { runsOf, type AgentsData } from "@/lib/agents-store";
 import { agentsSurface, setAgentsView } from "@/lib/agents-surface";
+import { AnimatePresence } from "motion/react";
+import { EdgeSheet, useAfterFirstFrame } from "./edge-sheet";
 import { Menu as ActionsMenu, type MenuItem as MenuEntry } from "./menu";
 import { useProjectActions } from "./project-actions";
 import { Dialog } from "./ui/dialog";
@@ -428,6 +430,7 @@ export function ThreadsSidebar({
 }) {
   const { client, startNew, readOnly } = useAgents();
   const actions = useInboxActions();
+  const settled = useAfterFirstFrame();
   const [now, setNow] = useState(() => Date.now());
   // Snoozes count down and "3h" moves on.
   useEffect(() => {
@@ -509,11 +512,10 @@ export function ThreadsSidebar({
   return (
     <>
       <InboxToast />
-      {open && (
-        <aside
-          aria-label="Threads"
-          className={`sidebar-in flex min-h-0 flex-col bg-bg ${phone ? "absolute inset-0 z-30" : "relative w-[268px] shrink-0"}`}
-        >
+      {/* Slides in and out with the canvas moving over in step (edge-sheet.tsx); not on the frame it opens because it was left open. */}
+      <AnimatePresence initial={false}>
+        {open && (
+        <EdgeSheet key="threads" label="Threads" width={268} phone={phone} instant={!settled} className="bg-bg">
           <div className="flex h-10 shrink-0 items-center gap-2 pr-1.5 pl-3">
             <h3 className="text-[12.5px] font-[590] tracking-[-0.01em]">Threads</h3>
             <span className="font-mono text-[11px] text-subtle">{active}</span>
@@ -559,8 +561,9 @@ export function ThreadsSidebar({
               />
             ))}
           </div>
-        </aside>
-      )}
+        </EdgeSheet>
+        )}
+      </AnimatePresence>
     </>
   );
 }
