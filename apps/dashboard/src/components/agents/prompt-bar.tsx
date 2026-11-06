@@ -168,7 +168,7 @@ export function PromptBar({ ref, above }: { ref?: Ref<HTMLDivElement>; above?: R
   const offline = !!target && !reachable(target.machine);
 
   return (
-    <div ref={ref} className="@container/bar pointer-events-none absolute inset-x-0 bottom-0 z-20 flex flex-col items-center gap-2 px-3" style={keyboard.inset ? { bottom: keyboard.inset } : undefined} data-nodrag>
+    <div ref={ref} className="@container/bar pointer-events-none absolute inset-x-0 bottom-0 z-20 flex flex-col items-center gap-2 px-3" style={keyboard.inset ? { bottom: keyboard.inset } : undefined} data-nodrag data-prompt-bar>
       {above && <div className="pointer-events-auto w-full">{above}</div>}
       <form
         ref={box}

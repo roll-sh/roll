@@ -118,6 +118,24 @@ const subscribeToast = (f: () => void) => {
   };
 };
 
+/**
+ * Where the notice goes: over the canvas's column, above its prompt bar (centred on the page, it
+ * covered an open conversation's composer); with no canvas showing (a phone's conversation, where
+ * the waiting request's Approve is at the bottom), under the header.
+ */
+function toastPlace(): { top: boolean; left: number | null; bottom: number | null } {
+  if (typeof document === "undefined") return { top: false, left: null, bottom: null };
+  const canvas = document.querySelector('[aria-label="Agents canvas"]');
+  const r = canvas?.getBoundingClientRect();
+  // Showing: what's on top at its middle is the canvas (a phone's conversation covers it).
+  const hit = r && r.width > 0 && typeof document.elementFromPoint === "function" ? document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2) : null;
+  if (!r || !hit || !canvas!.contains(hit)) return { top: true, left: null, bottom: null };
+  // Just above the prompt bar (and what waits above it), however tall it is.
+  const bar = document.querySelector("[data-prompt-bar]")?.getBoundingClientRect();
+  const bottom = bar && bar.height ? Math.round(window.innerHeight - bar.top + 8) : null;
+  return { top: false, left: Math.round(r.left + r.width / 2), bottom };
+}
+
 /** The undo notice: 5 s (T3's), longer for an error; Undo or ⌘Z undoes it. Rendered once, by the sidebar. */
 export function InboxToast() {
   const toast = useSyncExternalStore(subscribeToast, () => toastNow, () => null);
@@ -158,11 +176,16 @@ export function InboxToast() {
     };
   }, [toast]);
   if (!toast) return null;
+  const at = toastPlace();
   return (
     <div
       key={toast.key}
       role="status"
-      className="rise fixed bottom-[calc(max(1rem,env(safe-area-inset-bottom))+4.75rem)] left-1/2 z-[70] flex max-w-[calc(100vw-2rem)] -translate-x-1/2 items-center gap-3 rounded-lg border border-outline px-3 py-2 text-[12.5px] shadow-pop inset-shadow-highlight glass"
+      data-place={at.top ? "top" : "bottom"}
+      style={{ ...(at.left === null ? {} : { left: at.left }), ...(at.bottom === null ? {} : { bottom: at.bottom }) }}
+      className={`rise fixed left-1/2 z-[70] flex max-w-[calc(100vw-2rem)] -translate-x-1/2 items-center gap-3 rounded-lg border border-outline px-3 py-2 text-[12.5px] shadow-pop inset-shadow-highlight glass ${
+        at.top ? "top-[calc(env(safe-area-inset-top)+3.75rem)]" : "bottom-[calc(max(1rem,env(safe-area-inset-bottom))+4.75rem)]"
+      }`}
     >
       <span className={`min-w-0 truncate ${toast.error ? "text-danger" : "text-fg"}`}>{toast.text}</span>
       {toast.undo && (
