@@ -412,7 +412,7 @@ export function RunButton({ automation, manual, list }: { automation: Automation
       <PopoverTrigger render={<button type="button" className="inline-flex h-7 items-center gap-1.5 rounded-md border border-line-2 bg-fg/[0.03] px-2.5 text-[12.5px] font-[510] text-soft inset-shadow-highlight transition-[background-color,border-color,color,scale] duration-150 hover:border-line-3 hover:bg-fg/[0.06] hover:text-fg active:scale-[0.97]" aria-label="Run now" />}>
         <Play className="size-3.5" /> Run
       </PopoverTrigger>
-      <PopoverPopup side="bottom" align="end" sideOffset={6} aria-label="Run it now" className="w-80 p-3">
+      <PopoverPopup side="bottom" align="end" sideOffset={6} aria-label="Run it now" className="w-80 flex-col p-3">
         <p className="text-[13px] font-[590] tracking-[-0.01em]">Run {automation.name}</p>
         <p className="mt-0.5 text-[12px] text-subtle">
           {manual ? "Give it a prompt (event.data.input.prompt), or JSON (event.data.input)." : "The event's data as its trigger sends it (event.data), from a sample. Its conditions still apply."}
@@ -433,7 +433,7 @@ export function RunButton({ automation, manual, list }: { automation: Automation
           className={cn("mt-2.5 w-full resize-none rounded-lg border border-line-2 bg-panel-2 px-2.5 py-2 text-[13px] outline-none placeholder:text-faint focus:border-line-3", !manual && "font-mono text-[11.5px] leading-[17px]")}
         />
         {!manual && (
-          <button type="button" onClick={() => setText(sample())} className="mt-1 text-[11.5px] text-subtle underline-offset-2 hover:text-fg hover:underline">
+          <button type="button" onClick={() => setText(sample())} className="mt-1 self-start text-[11.5px] text-subtle underline-offset-2 hover:text-fg hover:underline">
             Start from the sample again
           </button>
         )}

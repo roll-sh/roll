@@ -256,6 +256,9 @@ describe("Automation runs", () => {
     renderAgents(<RunButton automation={x} manual={false} />, harness(api));
     await userEvent.click(screen.getByRole("button", { name: "Run now" }));
     const box = await screen.findByRole("textbox", { name: "Event data" });
+    // Its title, note, data and buttons stack in a column (the popup is a row by default: they
+    // were squeezed side by side into its 20rem).
+    expect(screen.getByRole("dialog", { name: "Run it now" })).toHaveClass("flex-col");
     const sample = JSON.parse((box as HTMLTextAreaElement).value);
     expect(sample.repo).toBe("acme/web");
     // Not JSON: says so and doesn't run.
