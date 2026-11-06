@@ -20,6 +20,7 @@ import { desktop, onDesktopDeepLink, useDesktop } from "@/lib/desktop";
 import { LINK_PARAMS, type IntegrationsLink } from "@/lib/integrations-api";
 import { useModelPrefsSync, useOwnerSettings } from "@/lib/owner-settings";
 import { useMarkState, useMarkStateValue } from "../mark-state";
+import { SignIn } from "../code/sign-in";
 import { AddMachineDialog, AddMachinePaths } from "./add-machine";
 import { AgentsCanvas, type CanvasHandle } from "./agents-canvas";
 import { AutomationsSheet } from "./automations/sheet";
@@ -134,19 +135,22 @@ export function AgentsPage({
       {client && services ? (
         <AgentsSurface client={client} services={services} demo={demo} chrome="window" focus={focus && !focus.startsWith("t:") ? focus : undefined} />
       ) : (
-        <CenterNote shimmer={!error}>{error ?? "Connecting…"}</CenterNote>
+        <CenterNote shimmer={!error} action={error ? <SignIn /> : undefined}>
+          {error ?? "Connecting…"}
+        </CenterNote>
       )}
     </div>
   );
 }
 
-/** Connecting, or why it can't: the mark thinking (or still) over a line of text. */
-export function CenterNote({ children, shimmer = false }: { children: ReactNode; shimmer?: boolean }) {
+/** Connecting, or why it can't: the mark thinking (or still) over a line of text, and what to do about it. */
+export function CenterNote({ children, shimmer = false, action }: { children: ReactNode; shimmer?: boolean; action?: ReactNode }) {
   return (
     <div className="fade-in grid h-full place-items-center px-6 text-center">
       <div className="flex flex-col items-center gap-4 text-fg">
         <HorizonMark size={40} state={shimmer ? "thinking" : "error"} label="" />
         <span className={`text-[13px] ${shimmer ? "shimmer" : "text-muted"}`}>{children}</span>
+        {action}
       </div>
     </div>
   );
