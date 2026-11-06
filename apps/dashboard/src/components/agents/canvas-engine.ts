@@ -558,6 +558,7 @@ export class CanvasEngine {
     const y0 = (((vy % s) + s) % s) - s;
     const r2 = 140 * 140;
     const ps = this.pointer;
+    const plain = new Path2D();
     for (let y = y0; y <= this.h + s; y += s) {
       for (let x = x0; x <= this.w + s; x += s) {
         let boost = 0;
@@ -590,6 +591,12 @@ export class CanvasEngine {
           boost += wave * 0.5;
           lit = Math.max(lit, wave * 0.35);
         }
+        if (boost < 0.002 && lit <= 0.01) {
+          // A plain dot: into one path, filled once below (a fill per dot was most of a frame).
+          plain.moveTo(px + 0.9, py);
+          plain.arc(px, py, 0.9, 0, Math.PI * 2);
+          continue;
+        }
         const c = lit > 0.01 ? mixRgb(this.ink, this.accent, Math.min(1, lit)) : this.ink;
         ctx.fillStyle = rgba(c, Math.min(0.9, this.dotAlpha + boost * 0.5));
         ctx.beginPath();
@@ -597,6 +604,8 @@ export class CanvasEngine {
         ctx.fill();
       }
     }
+    ctx.fillStyle = rgba(this.ink, Math.min(0.9, this.dotAlpha));
+    ctx.fill(plain);
 
     const scr = (p: Point) => ({ x: p.x * k + vx, y: p.y * k + vy });
     const phase = (t / PULSE_S) % 1;

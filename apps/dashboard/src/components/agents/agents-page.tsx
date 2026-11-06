@@ -4,7 +4,7 @@ import { DotField, HorizonMark, RollMark, useReducedMotion } from "@roll/brand";
 import { AnimatePresence, motion, useIsPresent } from "motion/react";
 import { Archive, ArrowLeft, ChevronDown, ChevronUp, MoreHorizontal, PanelRightClose, Pin, PinOff, Plus, Search, Server, Settings, Share2, X, Zap } from "lucide-react";
 import Link from "next/link";
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
+import { useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { isBusy, reachable } from "@/lib/agents-api";
 import { POP_IN, POP_OUT } from "@/lib/agents-motion";
 import { setActiveClient, type AgentsClient } from "@/lib/agents-client";
@@ -61,15 +61,21 @@ const PHONE = "(max-width: 640px)";
 /** For a store that never changes (the platform). */
 const noSubscribe = () => () => {};
 
+let phoneQuery: { of: typeof window.matchMedia; mq: MediaQueryList } | null = null;
+// One query list: a snapshot is read on every render of every card (`matchMedia` per render showed in profiles).
+const phoneMq = () => {
+  if (phoneQuery?.of !== window.matchMedia) phoneQuery = { of: window.matchMedia, mq: window.matchMedia(PHONE) };
+  return phoneQuery.mq;
+};
 /** A phone-sized screen. */
 export function usePhone(): boolean {
   return useSyncExternalStore(
     (fn) => {
-      const mq = window.matchMedia(PHONE);
+      const mq = phoneMq();
       mq.addEventListener("change", fn);
       return () => mq.removeEventListener("change", fn);
     },
-    () => window.matchMedia(PHONE).matches,
+    () => phoneMq().matches,
     () => false,
   );
 }
@@ -820,7 +826,9 @@ function CanvasView({
 }) {
   const { client, owner, readOnly } = useAgents();
   const view = views.current;
-  const filter = views.filter;
+  // Deferred: the field updates at once and the canvas follows in an interruptible render (each
+  // key re-laid out every card: ~150 ms a key at 200 threads).
+  const filter = useDeferredValue(views.filter);
   // A pinned conversation answers its thread's requests itself.
   const expanded = useMemo(() => pinnedConversations(view), [view]);
   // The open conversation's terminals are in its drawer: not a second time on the canvas.

@@ -33,11 +33,18 @@ export function colorToken(c: IdentityColor): string {
 
 /** T3's hash (`projectColor`): the same seed is the same colour on every device. */
 export function seedColor(seed: string): IdentityColor {
+  // Every card asks on every render: remember the answers (bounded).
+  const known = seeded.get(seed);
+  if (known) return known;
   const s = seed.normalize("NFKC").trim().toLocaleLowerCase("en-US") || "project";
   let i = 0;
   for (const g of s) i = (i * 31 + (g.codePointAt(0) ?? 0)) % IDENTITY_COLORS.length;
-  return IDENTITY_COLORS[i] ?? "slate";
+  const color = IDENTITY_COLORS[i] ?? "slate";
+  if (seeded.size > 2000) seeded.clear();
+  seeded.set(seed, color);
+  return color;
 }
+const seeded = new Map<string, IdentityColor>();
 
 /**
  * A project's colour: the one its owner picked, else one made from its repo (`owner/repo`) or its

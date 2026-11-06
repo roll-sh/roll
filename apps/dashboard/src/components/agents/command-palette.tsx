@@ -179,6 +179,11 @@ function PaletteDialog({ session, intent, host }: { session: number; intent: Pal
   }, []);
   const view = stack.views.at(-1)?.view ?? null;
   const query = stack.query;
+  // What's typed, for a thread pick to remember (read when picked, so the rows aren't rebuilt per key).
+  const typed = useRef(query);
+  useLayoutEffect(() => {
+    typed.current = query;
+  }, [query]);
   // Which way the pages move: deeper slides in from the right, back from the left.
   const depth = stack.views.length;
   const [nav, setNav] = useState<{ depth: number; dir: -1 | 0 | 1 }>({ depth, dir: 0 });
@@ -249,7 +254,7 @@ function PaletteDialog({ session, intent, host }: { session: number; intent: Pal
           run: host.addMachine,
         };
 
-  const threadRow = (t: Thread, machine: string, query: string): PaletteAction => {
+  const threadRow = (t: Thread, machine: string): PaletteAction => {
     const projectRecord = data.projects.get(t.project)?.value;
     const project = projectRecord?.name;
     const branch = t.worktree?.branch;
@@ -284,6 +289,7 @@ function PaletteDialog({ session, intent, host }: { session: number; intent: Pal
       },
       secondary: t.id === openThreadId,
       run: () => {
+        const query = typed.current;
         noteThreadOpen(t.id, query.trim() && !query.startsWith(">") ? query : undefined);
         openThread(t.id);
       },
@@ -508,13 +514,13 @@ function PaletteDialog({ session, intent, host }: { session: number; intent: Pal
       .filter((r) => r.value.lineage?.relation !== "subagent" || isBusy(r.value.status))
       .sort((a, b) => used(b) - used(a))
       .slice(0, RECENT_THREAD_LIMIT)
-      .map((r) => threadRow(r.value, r.machine, ""));
+      .map((r) => threadRow(r.value, r.machine));
     const root: PaletteGroup[] = [{ value: "actions", label: "Actions", items: actions.filter((a): a is PaletteItem => !!a) }];
     if (recent.length) root.push({ value: "recent", label: "Recent", items: recent });
     return {
       root,
       // Archived ones too: searching is how an old conversation is found.
-      threads: [...data.threads.values()].map((r) => threadRow(r.value, r.machine, query)),
+      threads: [...data.threads.values()].map((r) => threadRow(r.value, r.machine)),
       // "Project: roll": the canvas on it, then what can be done with it (its card's actions).
       projects: projects.map((p) => ({
         kind: "submenu" as const,
@@ -556,9 +562,10 @@ function PaletteDialog({ session, intent, host }: { session: number; intent: Pal
         run: () => focus(`m:${m.id}`),
       })),
     };
-    // Rebuilt when the records change; `query` only tags thread picks.
+    // Rebuilt when the records change, not on every key (206 thread rows a key cost ~100 ms); a
+    // pick reads what's typed from `typed`.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [data, projects, machines, openRecord, host, targets, query, auto.automations, auto.store, auto.notices, auto.noticesSeen, inboxActions, ctx]);
+  }, [data, projects, machines, openRecord, host, targets, auto.automations, auto.store, auto.notices, auto.noticesSeen, inboxActions, ctx]);
 
   const shown: PaletteGroup[] = useMemo(() => {
     if (view?.panel) return [];
