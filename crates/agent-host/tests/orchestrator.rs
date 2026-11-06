@@ -1569,11 +1569,14 @@ async fn endpoint_keys_are_sealed_to_the_daemon_and_reach_only_their_providers()
     assert!(env.contains(&("ANTHROPIC_AUTH_TOKEN".into(), KEY.into())));
     assert!(!format!("{:?}", codex.configured().unwrap()).contains(KEY), "only the providers that use it");
 
-    // The models come from the endpoint, with the key, and are offered under its name.
+    // The models come from the endpoint, with the key, and are offered under its name. The
+    // provider's list takes them in after the check (under load, a beat later): wait for both.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
     let info = loop {
         let info = host.info().await;
         let listed = info.settings.as_ref().unwrap().endpoints.first().is_some_and(|e| e.checked_at.is_some());
-        if listed {
+        let offered = info.providers.iter().any(|p| p.id == ProviderId::claude() && p.models.iter().any(|m| m.via.is_some()));
+        if listed && offered || std::time::Instant::now() > deadline {
             break info;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
