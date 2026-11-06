@@ -248,7 +248,10 @@ export function useInboxActions() {
         await client.run(machine, command);
         return true;
       } catch (e) {
-        showInboxToast({ text: e instanceof Error ? e.message : String(e), error: true });
+        const text = e instanceof Error ? e.message : String(e);
+        // The relay's "the machine isn't connected" by the machine's name.
+        const name = client.data.machines.get(machine)?.value.name;
+        showInboxToast({ text: /isn't connected|machine_offline/.test(text) && name ? `${name} is offline: try again once it's back` : text, error: true });
         return false;
       }
     },
@@ -261,6 +264,9 @@ export function useInboxActions() {
     async (t: Thread) => {
       const m = machineOf(t);
       if (!m || readOnly) return;
+      // From ⌘K or a key, where nothing showed it disabled: say why instead.
+      const why = cantPark(t, "settle", client.data.machines.get(m)?.value);
+      if (why) return showInboxToast({ text: `Can't settle ${quoted(t.title)}: ${why[0].toLowerCase()}${why.slice(1)}`, error: true });
       const view = agentsSurface.get().view;
       const open = view.kind === "thread" && view.thread === t.id;
       // Planned before: the settled thread leaves the order.
@@ -355,7 +361,15 @@ export function useInboxActions() {
     },
     [machineOf, readOnly, send],
   );
-  return useMemo(() => ({ settle, unsettle, snooze, wake, autoSettle, archive, restore, remove, readOnly: !!readOnly }), [settle, unsettle, snooze, wake, autoSettle, archive, restore, remove, readOnly]);
+  // Why it can't be settled or snoozed now, its machine included (offline: it would only fail).
+  const cant = useCallback(
+    (t: Thread, what: "settle" | "snooze") => {
+      const m = client.data.threads.get(t.id)?.machine;
+      return cantPark(t, what, m ? client.data.machines.get(m)?.value : undefined);
+    },
+    [client],
+  );
+  return useMemo(() => ({ settle, unsettle, snooze, wake, autoSettle, archive, restore, remove, cant, readOnly: !!readOnly }), [settle, unsettle, snooze, wake, autoSettle, archive, restore, remove, cant, readOnly]);
 }
 
 /**
@@ -372,10 +386,10 @@ export function useInboxMenu(thread: Thread): { items: MenuEntry[]; extra: React
   const items: MenuEntry[] = [
     settled
       ? { label: "Un-settle", icon: <Undo2 />, onSelect: () => void actions.unsettle(thread) }
-      : { label: "Settle", icon: <Check />, disabled: !!cantPark(thread, "settle"), onSelect: () => void actions.settle(thread) },
+      : { label: "Settle", icon: <Check />, disabled: !!actions.cant(thread, "settle"), onSelect: () => void actions.settle(thread) },
     snoozed
       ? { label: "Wake now", icon: <AlarmClockOff />, onSelect: () => void actions.wake(thread) }
-      : { label: "Snooze…", icon: <AlarmClock />, disabled: !!cantPark(thread, "snooze"), onSelect: () => setSnoozing(true) },
+      : { label: "Snooze…", icon: <AlarmClock />, disabled: !!actions.cant(thread, "snooze"), onSelect: () => setSnoozing(true) },
     thread.archived_at !== null
       ? { label: "Unarchive", icon: <ArchiveRestore />, onSelect: () => void actions.restore(thread) }
       : { label: "Archive", icon: <Archive />, disabled: thread.status === "running" || thread.status === "starting", onSelect: () => void actions.archive(thread) },
@@ -835,7 +849,7 @@ function ThreadRowBody({ row, selected, onPick, now, actions, arrive = true }: R
         ? { label: "Un-settle thread", icon: <Undo2 className="size-3.5" strokeWidth={1.5} />, run: () => actions.unsettle(t), disabled: false }
         : row.shelf === "snoozed"
           ? { label: "Wake thread now", icon: <AlarmClockOff className="size-3.5" strokeWidth={1.5} />, run: () => actions.wake(t), disabled: false }
-          : { label: "Settle thread", icon: <Check className="size-3.5" strokeWidth={1.5} />, run: () => actions.settle(t), disabled: !!cantPark(t, "settle") };
+          : { label: "Settle thread", icon: <Check className="size-3.5" strokeWidth={1.5} />, run: () => actions.settle(t), disabled: !!actions.cant(t, "settle") };
   // Picked for a bulk action (⌘/Shift-click, x): shared with the list, the board and the canvas.
   const picked = useSelected(t.id);
   return (
@@ -915,8 +929,8 @@ function RowMenu({
   onCustom: (presets?: boolean) => void;
   now: number;
 }) {
-  const settleBlocked = cantPark(thread, "settle");
-  const snoozeBlocked = cantPark(thread, "snooze");
+  const settleBlocked = actions.cant(thread, "settle");
+  const snoozeBlocked = actions.cant(thread, "snooze");
   const { phone = false } = useAgents();
   const [deleting, setDeleting] = useState(false);
   const prefs = usePrefs();

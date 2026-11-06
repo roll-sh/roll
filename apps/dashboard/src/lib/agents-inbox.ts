@@ -6,7 +6,7 @@
  * settled, this only reads `Thread.inbox`.
  */
 
-import type { MachineId, Project, Run, Thread, ThreadId } from "./agents-api";
+import { reachable, type Machine, type MachineId, type Project, type Run, type Thread, type ThreadId } from "./agents-api";
 import type { AgentsData } from "./agents-store";
 
 export type Shelf = "active" | "snoozed" | "settled" | "archived";
@@ -221,8 +221,12 @@ export function shortAgo(at: number, now: number): string {
   return d < 14 ? `${d}d` : `${Math.floor(d / 7)}w`;
 }
 
-/** Why a thread can't be settled or snoozed now (the daemon's checks), or `null`. */
-export function cantPark(t: Thread, what: "settle" | "snooze"): string | null {
+/**
+ * Why a thread can't be settled or snoozed now (the daemon's checks, and its machine has to be there
+ * to make them), or `null`.
+ */
+export function cantPark(t: Thread, what: "settle" | "snooze", machine?: Machine): string | null {
+  if (machine && !reachable(machine)) return `${machine.name} is offline`;
   if (t.archived_at !== null) return "It's archived";
   if (t.pending_requests > 0) return "It's waiting for your answer";
   if (t.queued.length > 0) return "It has a queued message";

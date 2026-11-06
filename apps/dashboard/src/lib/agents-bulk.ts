@@ -116,12 +116,12 @@ export function planBulk(data: AgentsData, ids: Iterable<ThreadId>, spec: BulkSp
     switch (spec.kind) {
       case "settle": {
         if (t.inbox.settle?.state === "settled") skip(id, "It's settled already");
-        else if (cantPark(t, "settle")) skip(id, cantPark(t, "settle")!);
+        else if (cantPark(t, "settle", data.machines.get(machine)?.value)) skip(id, cantPark(t, "settle", data.machines.get(machine)?.value)!);
         else step({ type: "thread.settle", thread: id }, { type: "thread.unsettle", thread: id, restore: { settle: t.inbox.settle, snooze: t.inbox.snooze } });
         break;
       }
       case "snooze": {
-        const why = cantPark(t, "snooze");
+        const why = cantPark(t, "snooze", data.machines.get(machine)?.value);
         if (why) skip(id, why);
         else if (spec.until <= now) skip(id, "That time has passed");
         else step({ type: "thread.snooze", thread: id, until: spec.until }, t.inbox.snooze ? { type: "thread.snooze", thread: id, until: t.inbox.snooze.until } : { type: "thread.unsnooze", thread: id });
