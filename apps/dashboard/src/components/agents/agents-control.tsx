@@ -1,8 +1,12 @@
 "use client";
 
 import { Plus } from "lucide-react";
-import { useEffect, useLayoutEffect, useSyncExternalStore } from "react";
+import { useReducedMotion } from "@roll/brand";
+import { AnimatePresence, motion, type Transition } from "motion/react";
+import { useEffect, useLayoutEffect, useState, useSyncExternalStore, type ReactNode } from "react";
 import { createPortal } from "react-dom";
+import { DRAWER, FADE_IN, POP_OUT } from "@/lib/agents-motion";
+import { useEnteringValue, usePresenceTracks } from "./presence";
 import { activeClient, DEMO_OWNER, type AgentsClient } from "@/lib/agents-client";
 import { rolling } from "@/lib/agents-graph";
 import { agentsSurface, hashFor, hideAgents, isNewAgentKey, showAgents, useAgentsSurface, viewFromHash } from "@/lib/agents-surface";
@@ -145,25 +149,55 @@ function Popup({ client, services, error, demo }: Pick<ReturnType<typeof useAgen
     };
   }, [open]);
 
-  if (!open) return null;
+  // Portaled only once mounted: the server renders nothing here.
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => setMounted(true), []);
+  if (!mounted) return null;
   return createPortal(
-    <div className="fixed inset-0 z-50">
-      <div className="fade-in absolute inset-0 bg-(--scrim) backdrop-blur-[2px]" onMouseDown={hideAgents} aria-hidden />
-      <div
-        role="dialog"
-        aria-modal="true"
-        aria-label="Agents"
-        data-surface
-        data-agents
-        className="sheet-in absolute inset-0 overflow-hidden bg-bg text-fg"
-      >
-        {client && services ? (
-          <AgentsSurface client={client} services={services} demo={demo} chrome="popup" onClose={hideAgents} />
-        ) : (
-          <CenterNote shimmer={!error}>{error ?? "Connecting…"}</CenterNote>
-        )}
-      </div>
-    </div>,
+    <AnimatePresence>
+      {open && (
+        <PopupFrame key="agents">
+          {client && services ? (
+            <AgentsSurface client={client} services={services} demo={demo} chrome="popup" onClose={hideAgents} />
+          ) : (
+            <CenterNote shimmer={!error}>{error ?? "Connecting…"}</CenterNote>
+          )}
+        </PopupFrame>
+      )}
+    </AnimatePresence>,
     document.body,
+  );
+}
+
+/**
+ * The popup's frame: in as `.sheet-in` was (up 10px from 0.985 with a fade, on the drawer curve),
+ * out the same way over 170 ms however it closes (⌘J, Escape, ×, the scrim), inert and hidden from
+ * assistive tech as it goes, so a click lands on the page behind at once; then it unmounts. Was
+ * gone in a frame. Not the shared dialog: the surface portals its own layers (the palette, toasts),
+ * which a modal dialog's focus trap would shut out.
+ */
+export function PopupFrame({ children }: { children: ReactNode }) {
+  const reduced = useReducedMotion();
+  const none: Transition = { duration: 0 };
+  const fade = useEnteringValue(0, 1);
+  const scale = useEnteringValue(0.985, 1);
+  const y = useEnteringValue(10, 0);
+  const scrim = useEnteringValue(0, 1);
+  const present = usePresenceTracks(
+    [
+      { value: fade, shown: 1, hidden: 0, enter: reduced ? none : FADE_IN, leave: reduced ? none : POP_OUT },
+      { value: scale, shown: 1, hidden: 0.985, enter: reduced ? none : DRAWER, leave: reduced ? none : POP_OUT },
+      { value: y, shown: 0, hidden: 10, enter: reduced ? none : DRAWER, leave: reduced ? none : POP_OUT },
+      { value: scrim, shown: 1, hidden: 0, enter: reduced ? none : FADE_IN, leave: reduced ? none : POP_OUT },
+    ],
+    String(reduced),
+  );
+  return (
+    <div className={`fixed inset-0 z-50 ${present ? "" : "pointer-events-none"}`} data-state={present ? "open" : "closing"} inert={!present} aria-hidden={!present || undefined}>
+      <motion.div className="absolute inset-0 bg-(--scrim) backdrop-blur-[2px]" style={{ opacity: scrim }} onMouseDown={hideAgents} aria-hidden />
+      <motion.div role="dialog" aria-modal="true" aria-label="Agents" data-surface data-agents className="absolute inset-0 overflow-hidden bg-bg text-fg" style={{ opacity: fade, scale, y }}>
+        {children}
+      </motion.div>
+    </div>
   );
 }

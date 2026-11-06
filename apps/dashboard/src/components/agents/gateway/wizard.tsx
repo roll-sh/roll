@@ -55,12 +55,17 @@ export function GatewaySetup({
   initialHost,
   onClose,
   onDone,
+  open = true,
+  onExited,
 }: {
   machines: Machine[];
   /** "Set up the gateway on this computer" from a machine's settings. */
   initialHost?: string;
   onClose: () => void;
   onDone: (plan: GatewayPlan) => void;
+  /** False while it plays its way out (`useKept`). */
+  open?: boolean;
+  onExited?: () => void;
 }) {
   const { client, services, owner } = useAgents();
   const [step, setStep] = useState(0);
@@ -177,7 +182,8 @@ export function GatewaySetup({
   };
   return (
     <Dialog
-      open
+      open={open}
+      onExited={onExited}
       onClose={dismiss}
       busy={running === "busy"}
       className="sm:w-[min(600px,100%)]"

@@ -54,7 +54,7 @@ function projectAt(projects: Iterable<{ machine: string; value: Project }>, mach
 }
 
 /** The dialog: `machine` preselects one (else the only one online, else a pick). */
-export function AddProjectDialog({ open, machine, onClose }: { open: boolean; machine: string | null; onClose: () => void }) {
+export function AddProjectDialog({ open, onExited, machine, onClose }: { open: boolean; onExited?: () => void; machine: string | null; onClose: () => void }) {
   const { client } = useAgents();
   const machines = useMemo(
     () =>
@@ -71,6 +71,7 @@ export function AddProjectDialog({ open, machine, onClose }: { open: boolean; ma
   return (
     <Dialog
       open={open}
+      onExited={onExited}
       onClose={onClose}
       title={project ? "Project added" : "Add a project"}
       lead={project ? undefined : m ? `Agents work in a project: a folder on ${m.name}, a clone of one of your roll repos, or a new one.` : undefined}

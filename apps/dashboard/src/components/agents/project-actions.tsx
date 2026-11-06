@@ -29,7 +29,7 @@ import { useCanvasProjects, type CanvasProjects } from "./machine-projects";
 import { AddProjectDialog } from "./project-new";
 import type { MenuItem } from "./menu";
 import { showInboxToast } from "./threads-sidebar";
-import { Dialog } from "./ui/dialog";
+import { Dialog, useKept } from "./ui/dialog";
 import { openMachineSettings } from "./provider-setup";
 import { useAgents, type AgentsCtx } from "./use-agents";
 
@@ -108,20 +108,16 @@ export function useProjectActions(project: Project, opts: { remove?: () => void 
 
 /** The page's project dialogs (add a project, a new sandbox for one); mount once. */
 export function ProjectDialogs() {
-  const dialog = useProjectDialog();
   const { client } = useAgents();
   // Kept while it animates shut; each opening starts fresh (its own key).
-  const last = useRef(dialog);
-  const opened = useRef(0);
-  if (dialog && dialog !== last.current) opened.current++;
-  if (dialog) last.current = dialog;
-  const shown = dialog ?? last.current;
+  const kept = useKept(useProjectDialog());
+  const shown = kept.value;
   if (!shown) return null;
-  if (shown.kind === "add") return <AddProjectDialog key={opened.current} open={!!dialog} machine={shown.machine} onClose={closeProjectDialog} />;
+  if (shown.kind === "add") return <AddProjectDialog key={kept.key} open={kept.open} onExited={kept.onExited} machine={shown.machine} onClose={closeProjectDialog} />;
   const project = client.data.projects.get(shown.project)?.value;
   if (!project) return null;
   return (
-    <Dialog key={opened.current} open={!!dialog} onClose={closeProjectDialog} title={`New sandbox for ${project.name}`} lead={`A machine roll hosts for you, with ${project.repo ? `${project.repo.owner}/${project.repo.repo}` : project.name} cloned and ready for an agent.`}>
+    <Dialog key={kept.key} open={kept.open} onExited={kept.onExited} onClose={closeProjectDialog} title={`New sandbox for ${project.name}`} lead={`A machine roll hosts for you, with ${project.repo ? `${project.repo.owner}/${project.repo.repo}` : project.name} cloned and ready for an agent.`}>
       <SandboxForProject project={project} />
     </Dialog>
   );

@@ -14,6 +14,7 @@
 
 import { Check, ChevronRight, KeyRound, Network, RefreshCw } from "lucide-react";
 import { useState } from "react";
+import { useKept } from "../ui/dialog";
 import { reachable, type EndpointCheck, type EndpointInfo, type Machine, type ProviderId, type Reply } from "@/lib/agents-api";
 import { endpointOf } from "@/lib/agents-endpoints";
 import { setAgentsView } from "@/lib/agents-surface";
@@ -50,6 +51,7 @@ function ManageLink() {
 export function GatewayMachineCard({ machine }: { machine: Machine }) {
   const g = useGatewayPlan();
   const [setup, setSetup] = useState(false);
+  const wizard = useKept(setup);
   const info = machine.info?.settings?.gateway;
   const hosts = g.plan?.host === machine.id || !!info;
   if (g.unavailable || g.plan === undefined) return null;
@@ -81,7 +83,7 @@ export function GatewayMachineCard({ machine }: { machine: Machine }) {
           }
         />
       )}
-      {setup && <GatewaySetup machines={g.machines} initialHost={machine.id} onClose={() => (setSetup(false), void g.reload())} onDone={(p) => g.setPlan(p)} />}
+      {wizard.value && <GatewaySetup key={wizard.key} open={wizard.open} onExited={wizard.onExited} machines={g.machines} initialHost={machine.id} onClose={() => (setSetup(false), void g.reload())} onDone={(p) => g.setPlan(p)} />}
     </SettingsSection>
   );
 }

@@ -12,6 +12,7 @@
 
 import { ChevronRight, Network, Plus, RefreshCw, X } from "lucide-react";
 import { useMemo, useRef, useState } from "react";
+import { useKept } from "../ui/dialog";
 import { GATEWAY_PORT, GATEWAY_RETENTION, reachable, type GatewaySettings, type GatewayStatus, type UpstreamCheck, type UpstreamSpec } from "@/lib/agents-api";
 import { checkSettings, gatewayOn, isIPv4, isIPv6, listNames, type GatewayCommands } from "@/lib/agents-gateway";
 import { setAgentsView } from "@/lib/agents-surface";
@@ -53,6 +54,7 @@ const RETENTION = [30, 90, 180, 400, 730, 1825];
 export function GatewaySection() {
   const g = useGatewayPlan();
   const [setup, setSetup] = useState(false);
+  const wizard = useKept(setup);
   const { plan } = g;
   return (
     <SettingsSection title="Gateway" ids={GATEWAY_SETTING_IDS}>
@@ -83,7 +85,7 @@ export function GatewaySection() {
       ) : (
         <GatewayRows g={g} onSetup={() => setSetup(true)} />
       )}
-      {setup && <GatewaySetup machines={g.machines} onClose={() => (setSetup(false), void g.reload())} onDone={(p) => g.setPlan(p)} />}
+      {wizard.value && <GatewaySetup key={wizard.key} open={wizard.open} onExited={wizard.onExited} machines={g.machines} onClose={() => (setSetup(false), void g.reload())} onDone={(p) => g.setPlan(p)} />}
     </SettingsSection>
   );
 }

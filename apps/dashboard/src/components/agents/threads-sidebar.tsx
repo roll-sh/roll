@@ -40,7 +40,7 @@ import { POP_IN, POP_OUT } from "@/lib/agents-motion";
 import { EdgeSheet, useAfterFirstFrame } from "./edge-sheet";
 import { Menu as ActionsMenu, type MenuItem as MenuEntry } from "./menu";
 import { useProjectActions } from "./project-actions";
-import { Dialog } from "./ui/dialog";
+import { Dialog, useKept } from "./ui/dialog";
 import { Menu, MenuItem, MenuPopup, MenuRadioGroup, MenuRadioItem, MenuSeparator, MenuShortcut, MenuSub, MenuSubPopup, MenuSubTrigger, MenuTrigger, Segmented } from "./ui";
 import { useAgents, usePrefs } from "./use-agents";
 import { MachineIcon, ProjectIcon } from "./identity";
@@ -356,6 +356,7 @@ export function useInboxActions() {
 export function useInboxMenu(thread: Thread): { items: MenuEntry[]; extra: ReactNode } {
   const actions = useInboxActions();
   const [snoozing, setSnoozing] = useState(false);
+  const snooze = useKept(snoozing);
   if (actions.readOnly) return { items: [], extra: null };
   const settled = thread.inbox.settle?.state === "settled";
   const snoozed = thread.inbox.snooze !== null;
@@ -370,7 +371,7 @@ export function useInboxMenu(thread: Thread): { items: MenuEntry[]; extra: React
       ? { label: "Unarchive", icon: <ArchiveRestore />, onSelect: () => void actions.restore(thread) }
       : { label: "Archive", icon: <Archive />, disabled: thread.status === "running" || thread.status === "starting", onSelect: () => void actions.archive(thread) },
   ];
-  const extra = snoozing && <SnoozeDialog presets onClose={() => setSnoozing(false)} onSnooze={(until) => void actions.snooze(thread, until)} />;
+  const extra = snooze.value && <SnoozeDialog key={snooze.key} open={snooze.open} onExited={snooze.onExited} presets onClose={() => setSnoozing(false)} onSnooze={(until) => void actions.snooze(thread, until)} />;
   return { items, extra };
 }
 
@@ -531,6 +532,7 @@ export function ThreadsSidebar({
   return (
     <>
       <InboxToast />
+      <SnoozeHost />
       {/* Slides in and out with the canvas moving over in step (edge-sheet.tsx); not on the frame it opens because it was left open. */}
       <AnimatePresence initial={false}>
         {open && (
@@ -705,8 +707,6 @@ const STATUS_DOT: Record<RowStatus, string> = {
 function ThreadRow({ row, selected, onPick, now, actions }: { row: InboxRow; selected: boolean; onPick: (thread: string) => void; now: number; actions: Actions }) {
   const t = row.thread;
   const [menu, setMenu] = useState(false);
-  // The snooze dialog: "custom" (Custom…), or "presets" (a phone: the presets too, no submenu over the menu).
-  const [custom, setCustom] = useState<false | "custom" | "presets">(false);
   const quiet = row.status === null || row.shelf !== "active";
   const pill = row.status === "waiting" || row.status === "failed" || row.status === "woke" ? row.status : null;
   const meta =
@@ -758,10 +758,10 @@ function ThreadRow({ row, selected, onPick, now, actions }: { row: InboxRow; sel
           <button type="button" title={quick.label} aria-label={quick.label} disabled={quick.disabled} onClick={() => void quick.run()} className="grid size-6 place-items-center rounded-md text-subtle transition hover:bg-panel hover:text-fg pointer-coarse:size-9 disabled:opacity-30">
             {quick.icon}
           </button>
-          <RowMenu thread={t} row={row} open={menu} setOpen={setMenu} actions={actions} onPick={() => onPick(t.id)} onCustom={(presets) => setCustom(presets ? "presets" : "custom")} now={now} />
+          {/* The snooze dialog: Custom…, or on a phone the presets too (no submenu over the menu). */}
+          <RowMenu thread={t} row={row} open={menu} setOpen={setMenu} actions={actions} onPick={() => onPick(t.id)} onCustom={(presets) => openRowSnooze({ thread: t, presets: !!presets })} now={now} />
         </span>
       )}
-      {custom && <SnoozeDialog presets={custom === "presets"} onClose={() => setCustom(false)} onSnooze={(until) => void actions.snooze(t, until)} />}
     </li>
   );
 }
@@ -913,10 +913,50 @@ function localInput(ms: number): string {
 }
 
 /**
+ * A row's snooze dialog (Custom…; on a phone, with the presets), shown by one host beside the
+ * sidebar: the row it was opened from leaves its list as the thread snoozes, which unmounted the
+ * dialog mid-way instead of letting it close.
+ */
+type RowSnooze = { thread: Thread; presets: boolean };
+let snoozeNow: RowSnooze | null = null;
+const snoozeSubs = new Set<() => void>();
+function openRowSnooze(open: RowSnooze | null) {
+  snoozeNow = open;
+  for (const f of snoozeSubs) f();
+}
+const subscribeSnooze = (f: () => void) => {
+  snoozeSubs.add(f);
+  return () => {
+    snoozeSubs.delete(f);
+  };
+};
+
+function SnoozeHost() {
+  const actions = useInboxActions();
+  const kept = useKept(useSyncExternalStore(subscribeSnooze, () => snoozeNow, () => null));
+  const open = kept.value;
+  if (!open) return null;
+  return <SnoozeDialog key={kept.key} open={kept.open} onExited={kept.onExited} presets={open.presets} onClose={() => openRowSnooze(null)} onSnooze={(until) => void actions.snooze(open.thread, until)} />;
+}
+
+/**
  * T3's custom snooze: a date and time, or a duration. `presets` lists T3's presets above it (the
  * conversation's menu has no submenu for them).
  */
-export function SnoozeDialog({ onSnooze, onClose, presets = false }: { onSnooze: (until: number) => void; onClose: () => void; presets?: boolean }) {
+export function SnoozeDialog({
+  onSnooze,
+  onClose,
+  presets = false,
+  open = true,
+  onExited,
+}: {
+  onSnooze: (until: number) => void;
+  onClose: () => void;
+  presets?: boolean;
+  /** False while it plays its way out (`useKept`). */
+  open?: boolean;
+  onExited?: () => void;
+}) {
   const [mode, setMode] = useState<"date" | "duration">("date");
   const [date, setDate] = useState(() => localInput(Date.now() + 3_600_000));
   const [amount, setAmount] = useState("2");
@@ -924,6 +964,7 @@ export function SnoozeDialog({ onSnooze, onClose, presets = false }: { onSnooze:
   const [error, setError] = useState<string | null>(null);
   const formId = useId();
   useEffect(() => {
+    if (!open) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
       e.stopPropagation();
@@ -931,7 +972,7 @@ export function SnoozeDialog({ onSnooze, onClose, presets = false }: { onSnooze:
     };
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
-  }, [onClose]);
+  }, [open, onClose]);
   const done = (until: number) => {
     onSnooze(until);
     onClose();
@@ -952,7 +993,8 @@ export function SnoozeDialog({ onSnooze, onClose, presets = false }: { onSnooze:
   // trapped in its 268px), focus taken, kept and given back.
   return (
     <Dialog
-      open
+      open={open}
+      onExited={onExited}
       onClose={onClose}
       title={presets ? "Snooze" : "Custom snooze"}
       lead="Choose when snoozed threads return to your inbox."

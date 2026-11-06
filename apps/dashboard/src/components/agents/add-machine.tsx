@@ -1,6 +1,6 @@
 "use client";
 
-import { ChevronRight, Cloud, KeyRound, Laptop, X } from "lucide-react";
+import { ChevronRight, Cloud, KeyRound, Laptop } from "lucide-react";
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import type { EndpointProfile, Machine } from "@/lib/agents-api";
@@ -14,6 +14,7 @@ import { apiFlag, useInstallLine } from "./connect";
 import { applyWhenReady, type PendingApply } from "./endpoint-settings";
 import { field } from "./settings-ui";
 import { Select } from "./ui";
+import { Dialog } from "./ui/dialog";
 import { useAgents } from "./use-agents";
 
 /** Provider keys a sandbox can be given at create (passed to the sandbox only, never shown again). */
@@ -338,36 +339,14 @@ export function SizeOption({ size, checked, onChange }: { size: SandboxSize; che
   );
 }
 
-/** "Add machine" on the canvas: both paths in a sheet over it. Esc or the backdrop closes it. */
-export function AddMachineDialog({ onClose, onCreated }: { onClose: () => void; onCreated: (m: Machine) => void }) {
-  const panel = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
-    window.addEventListener("keydown", onKey);
-    panel.current?.focus();
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+/**
+ * "Add machine" on the canvas: both paths in the shared dialog over it (focus kept inside and given
+ * back; Escape or a press outside closes it, and it shrinks back out before it unmounts).
+ */
+export function AddMachineDialog({ open = true, onExited, onClose, onCreated }: { open?: boolean; onExited?: () => void; onClose: () => void; onCreated: (m: Machine) => void }) {
   return (
-    <div className="fade-in absolute inset-0 z-30 overflow-y-auto bg-(--scrim) backdrop-blur-[3px]" onPointerDown={(e) => e.target === e.currentTarget && onClose()}>
-      <div
-        ref={panel}
-        tabIndex={-1}
-        role="dialog"
-        aria-modal="true"
-        aria-label="Add a machine"
-        className="sheet-in mx-auto my-4 w-[min(760px,calc(100%-1.5rem))] space-y-4 rounded-2xl border border-line-2 bg-sheet p-5 shadow-sheet inset-shadow-highlight outline-none sm:my-[10vh]"
-      >
-        <div className="flex items-start gap-2">
-          <div className="space-y-1">
-            <h2 className="text-[17px] font-[590] tracking-[-0.025em]">Add a machine</h2>
-            <p className="text-[12.5px] text-muted">Run agents on your own computer, or on a sandbox roll hosts for you.</p>
-          </div>
-          <button onClick={onClose} aria-label="Close" className="-mt-1 -mr-1 ml-auto grid size-8 place-items-center rounded-lg text-subtle transition-colors duration-150 hover:bg-fg/[0.06] hover:text-fg">
-            <X className="size-4" strokeWidth={1.75} />
-          </button>
-        </div>
-        <AddMachinePaths onCreated={onCreated} dialog />
-      </div>
-    </div>
+    <Dialog open={open} onClose={onClose} onExited={onExited} className="sm:w-[min(760px,100%)]" title="Add a machine" lead="Run agents on your own computer, or on a sandbox roll hosts for you.">
+      <AddMachinePaths onCreated={onCreated} dialog />
+    </Dialog>
   );
 }

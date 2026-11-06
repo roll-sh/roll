@@ -253,7 +253,7 @@ Text levels: `--fg` `#f7f8f8`, `--soft` `#d0d6e0` (secondary body), `--muted` `#
 
 | What | How |
 |---|---|
-| popup opening | `.sheet-in`: translateY 10px, scale 0.985 → 1, fade, 260ms, `--ease-drawer` |
+| popup opening and closing | `PopupFrame` (agents-control.tsx, presence): translateY 10px, scale 0.985 → 1, fade, 260ms on `--ease-drawer`; out the same way over 170ms (`POP_OUT`) however it closes, inert, then unmounts |
 | chrome settling | `.chrome-in`: translateY −4px, fade, 300ms on the drawer curve, 50ms after the sheet |
 | the right sheet (conversation, settings, automations) | one frame (`RightDock`, right-dock.tsx): an in-flow gap grows to the sheet's width with the sheet pinned to its left edge, so the sheet slides in from the window's edge and the canvas narrows in step; 260ms on the drawer curve, the sheet fading in over 200ms. Closing is the same backwards over 260ms on `EASE_LEAVE` (the standard ease-in-out: on an ease-out a closing sheet covered most of the way in 100 ms and read as gone at once), holding its opacity for 100ms before fading, inert meanwhile, then it unmounts |
 | switching what the right sheet shows | the frame stays put; the new pane fades in (and 8px across) over the old one fading out, 200ms on `--ease-out-soft`. Never a second sheet, never an empty frame |
@@ -262,7 +262,7 @@ Text levels: `--fg` `#f7f8f8`, `--soft` `#d0d6e0` (secondary body), `--muted` `#
 | phone sheets | the conversation, settings and automations slide over the canvas from the right edge, the sidebar from the left; back out the same way |
 | a page in the automations sheet | `.stack-push` (deeper, from 24px right) / `.stack-pop` (back, from 24px left), fade, 220ms on the drawer curve; a tab on the same level doesn't move |
 | popovers and menus | scale 0.98 → 1 plus fade, 150ms, `--ease-out-soft` `(0.23,1,0.32,1)`, from the trigger |
-| palette and dialogs | scale 0.98 plus fade, 200ms on the drawer curve, with the scrim fading in over 200ms; out the same way over 170ms (`POP_OUT`), inert, however it closes |
+| palette and dialogs | scale 0.98 plus fade, 200ms on the drawer curve, growing from the press or control that opened it, with the scrim fading in over 200ms; out the same way over 170ms (`POP_OUT`), inert, however it closes. The launcher (new agent) is one too, in the surface; asked for elsewhere while open, it glides there |
 | toasts and notices | in from the right edge (automation notices, 300ms ease-out quint) or rising 6px (the undo notice), out the way they came over 170ms, inert and no longer announced; the toasts left glide into place |
 | disclosures (`Collapse`) | the height eases open and shut (200ms); shutting folds what it showed, then unmounts it; it clips from the first frame |
 | hover and colour | 150ms; buttons press to scale 0.97 |
@@ -281,7 +281,13 @@ switched off under `prefers-reduced-motion`, and the engine draws a static, stat
   animates from where the value is, so open → close → open turns around without a jump (motion's
   declarative `exit` replays `initial` when a child comes back, which jumped a reopened sheet to
   nothing). Base UI popups and dialogs keep their Root mounted and animate with
-  `data-starting-style`/`data-ending-style`. CSS keyframe classes are for entrances only: a keyframe
+  `data-starting-style`/`data-ending-style`. A dialog shown for a value goes through `useKept`
+  (`ui/dialog.tsx`): mount it while the kept value is set, with `open` and `onExited`, so it stays
+  until its exit ends; a dialog opened from a row that can leave its list (a row's snooze) is
+  hosted outside the list. Every modal is the shared dialog (`Dialog`, or `DialogSheet` for its own
+  layout, as the launcher has): never a hand-built `role="dialog"`. Base UI only plays the way in
+  when `open` turns on in a mounted Root, so `DialogSheet` commits its Root closed once and opens
+  it before paint. CSS keyframe classes are for entrances only: a keyframe
   can't be interrupted.
 - **What's leaving never blocks input.** It's `inert` from the moment it starts to leave, so a click
   lands on what's behind it at once; focus left inside it counts as lost.

@@ -10,6 +10,7 @@ import { readiness } from "@/lib/agents-setup";
 import { ProviderSetup } from "./provider-setup";
 import { MachineIcon, ProjectIcon } from "./identity";
 import { Select } from "./ui";
+import { DialogSheet, DialogTitle } from "./ui/dialog";
 import { defaultProject, lastProject, rememberProject, usableIn, useStartThread } from "./new-thread";
 import { useAgents } from "./use-agents";
 
@@ -23,7 +24,61 @@ const ADD = "+";
  * project card, or a card's handle dropped on the canvas (then it opens where it was dropped).
  * With no machine yet, the ways to connect one.
  */
-export function Launcher({ project: wanted, machine: wantedMachine, at, onClose }: { project?: string; machine?: string; at?: { x: number; y: number }; onClose: () => void }) {
+export function Launcher({
+  project: wanted,
+  machine: wantedMachine,
+  at,
+  onClose,
+  open = true,
+  onExited,
+  container,
+}: {
+  project?: string;
+  machine?: string;
+  at?: { x: number; y: number };
+  onClose: () => void;
+  /** False while it plays its way out (kept mounted by `useKept`). */
+  open?: boolean;
+  onExited?: () => void;
+  /** The agents surface: a drop point is in its coordinates. */
+  container?: HTMLElement | null;
+}) {
+  // Dropped on the canvas: open there, kept inside the surface. Asked for somewhere else while it's
+  // open (another + or drop), it glides there and starts over inside (it replayed its entrance).
+  const panel = useRef<HTMLDivElement | null>(null);
+  const [pos, setPos] = useState(at ? { left: at.x - 24, top: at.y - 20 } : null);
+  useLayoutEffect(() => {
+    const el = panel.current?.parentElement;
+    const host = el?.offsetParent as HTMLElement | null;
+    if (!at) return setPos(null);
+    if (!el || !host) return;
+    const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(v, Math.max(lo, hi)));
+    setPos({ left: clamp(at.x - 24, 12, host.clientWidth - el.offsetWidth - 12), top: clamp(at.y - 20, 56, host.clientHeight - el.offsetHeight - 12) });
+  }, [at]);
+  return (
+    // The shared dialog's frame (Base UI): focus taken, kept inside and given back; Escape (a
+    // picker's closes the picker only) and a press outside close it; it shrinks back and fades,
+    // inert, before it unmounts. Portaled into the surface, so a drop point is where it opens.
+    <DialogSheet
+      open={open}
+      onClose={onClose}
+      onExited={onExited}
+      label="New agent"
+      container={container}
+      backdropClassName={`${container ? "absolute" : "fixed"} inset-0 z-40 bg-black/25`}
+      viewportClassName={`${container ? "absolute" : "fixed"} inset-0 z-50`}
+      className={`absolute w-[min(640px,calc(100%-24px))] rounded-2xl border border-line-2 bg-panel p-2 shadow-[0_24px_64px_-24px_rgb(0_0_0/0.7)] ${pos ? "" : "top-[min(14vh,120px)] left-1/2 -ml-[min(320px,calc(50%-12px))]"}`}
+      // Retargeted, it glides to the new point on the same curve.
+      style={pos ? { left: pos.left, top: pos.top, transformOrigin: "24px 20px", transitionProperty: "scale, opacity, left, top" } : undefined}
+    >
+      <div ref={panel} data-launcher>
+        <LauncherBody key={`${wanted ?? ""}|${wantedMachine ?? ""}|${at?.x ?? ""},${at?.y ?? ""}`} project={wanted} machine={wantedMachine} onClose={onClose} />
+      </div>
+    </DialogSheet>
+  );
+}
+
+function LauncherBody({ project: wanted, machine: wantedMachine, onClose }: { project?: string; machine?: string; onClose: () => void }) {
   const { client, focus } = useAgents();
   const start = useStartThread();
   const data = client.data;
@@ -51,37 +106,10 @@ export function Launcher({ project: wanted, machine: wantedMachine, at, onClose 
     rememberProject(p.id);
   };
 
-  // Dropped on the canvas: open there, kept inside the surface.
-  const panel = useRef<HTMLDivElement>(null);
-  const [pos, setPos] = useState(at ? { left: at.x - 24, top: at.y - 20 } : null);
-  useLayoutEffect(() => {
-    const el = panel.current;
-    const host = el?.offsetParent as HTMLElement | null;
-    if (!at || !el || !host) return;
-    const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(v, Math.max(lo, hi)));
-    setPos({ left: clamp(at.x - 24, 12, host.clientWidth - el.offsetWidth - 12), top: clamp(at.y - 20, 56, host.clientHeight - el.offsetHeight - 12) });
-  }, [at]);
-
   return (
     <>
-      <div className="fade-in absolute inset-0 z-40 bg-black/25" onMouseDown={onClose} aria-hidden />
-      <div
-        ref={panel}
-        role="dialog"
-        aria-label="New agent"
-        data-launcher
-        className={`sheet-in absolute z-50 w-[min(640px,calc(100%-24px))] rounded-2xl border border-line-2 bg-panel p-2 shadow-[0_24px_64px_-24px_rgb(0_0_0/0.7)] ${pos ? "" : "top-[min(14vh,120px)] left-1/2 -ml-[min(320px,calc(50%-12px))]"}`}
-        style={pos ? { left: pos.left, top: pos.top, transformOrigin: "top left" } : { transformOrigin: "top center" }}
-        onKeyDown={(e) => {
-          if (e.key !== "Escape" || e.defaultPrevented) return;
-          // A picker's Escape closes the picker only (its popup is portaled, outside the panel).
-          if (!panel.current?.contains(e.target as Node)) return;
-          e.preventDefault();
-          onClose();
-        }}
-      >
         <div className="flex items-center gap-0.5 px-1 pb-2 text-[12px] text-subtle">
-          <h2 className="pr-1.5 pl-1.5 text-[13px] font-semibold tracking-[-0.02em] text-fg">New agent</h2>
+          <DialogTitle className="pr-1.5 pl-1.5 text-[13px] font-semibold tracking-[-0.02em] text-fg">New agent</DialogTitle>
           {machines.length > 0 && (
             <>
               <Select
@@ -155,7 +183,6 @@ export function Launcher({ project: wanted, machine: wantedMachine, at, onClose 
             </span>
           </p>
         )}
-      </div>
     </>
   );
 }

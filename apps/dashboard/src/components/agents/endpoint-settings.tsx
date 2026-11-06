@@ -11,7 +11,6 @@
 
 import { Check, KeyRound, Pencil, Plus, RefreshCw, Trash2, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { createPortal } from "react-dom";
 import { reachable, type EndpointCheck, type EndpointInfo, type EndpointKind, type EndpointProfile, type EndpointSpec, type KeyState, type Machine, type ProviderId, type Reply } from "@/lib/agents-api";
 import type { AgentsClient } from "@/lib/agents-client";
 import { checkEndpoint, endpointId, endpointOf, incompatible, KIND_LABEL, KIND_URL, keyChange, keyLabel } from "@/lib/agents-endpoints";
@@ -21,6 +20,7 @@ import { MachineIcon } from "./identity";
 import { field, Note, SettingRow, type Setting } from "./settings-ui";
 import { ago } from "./shared";
 import { cn, Segmented, Select, Switch } from "./ui";
+import { Dialog, useKept } from "./ui/dialog";
 import { useAgents, useAgentsSnapshot } from "./use-agents";
 
 const KINDS: EndpointKind[] = ["cliproxy", "anthropic", "openai", "custom"];
@@ -774,6 +774,7 @@ export function EndpointProfilesSection() {
   const [asking, setAsking] = useState<string | null>(null);
   useEscapeLayer(asking !== null, () => setAsking(null));
   const [applying, setApplying] = useState<EndpointProfile | null>(null);
+  const apply = useKept(applying);
   const load = async () => {
     if (!api) return;
     try {
@@ -911,7 +912,7 @@ export function EndpointProfilesSection() {
           </div>
         ),
       )}
-      {applying && <ApplyDialog profile={applying} machines={machines} onClose={() => setApplying(null)} />}
+      {apply.value && <ApplyDialog key={apply.key} open={apply.open} onExited={apply.onExited} profile={apply.value} machines={machines} onClose={() => setApplying(null)} />}
     </>
   );
 }
@@ -922,13 +923,12 @@ type Outcome = "busy" | { ok: true } | { error: string };
  * "Apply to machines…": the machines that can take it (a seal key, and online or a sandbox), the
  * key typed once and sealed to each machine separately, and how each one went.
  */
-function ApplyDialog({ profile, machines, onClose }: { profile: EndpointProfile; machines: Machine[]; onClose: () => void }) {
+function ApplyDialog({ profile, machines, onClose, open = true, onExited }: { profile: EndpointProfile; machines: Machine[]; onClose: () => void; open?: boolean; onExited?: () => void }) {
   const { client } = useAgents();
   const [picked, setPicked] = useState<Set<string>>(() => new Set(machines.filter((m) => !endpointsLocked(m)).map((m) => m.id)));
   const [key, setKey] = useState("");
   const [outcomes, setOutcomes] = useState<Map<string, Outcome>>(new Map());
   const [sent, setSent] = useState(false);
-  useEscapeLayer(true, onClose);
   const busy = [...outcomes.values()].some((o) => o === "busy");
   const chosen = machines.filter((m) => picked.has(m.id) && !endpointsLocked(m));
 
@@ -951,20 +951,39 @@ function ApplyDialog({ profile, machines, onClose }: { profile: EndpointProfile;
     );
   };
 
-  return createPortal(
-    <div data-agents className="fade-in fixed inset-0 z-[120] grid place-items-center overflow-y-auto p-3 backdrop-blur-[3px]" style={{ background: "var(--scrim)" }} onPointerDown={(e) => e.target === e.currentTarget && !busy && onClose()}>
-      <div role="dialog" aria-modal="true" aria-label={`Apply ${profile.name}`} className="sheet-in w-[min(460px,100%)] space-y-4 rounded-2xl border border-line-2 bg-sheet p-5 text-fg shadow-sheet inset-shadow-highlight">
-        <div className="flex items-start gap-2">
-          <div className="min-w-0 space-y-1">
-            <h2 className="text-[17px] font-[590] tracking-[-0.025em]">Apply {profile.name}</h2>
-            <p className="text-[12.5px] text-muted">
-              {KIND_LABEL[profile.kind]} at <span className="font-mono text-[12px]">{profile.base_url}</span>, set on each machine you pick with the same id.
-            </p>
-          </div>
-          <button type="button" onClick={onClose} aria-label="Close" className="-mt-1 -mr-1 ml-auto grid size-8 shrink-0 place-items-center rounded-lg text-subtle transition-colors hover:bg-fg/[0.06] hover:text-fg">
-            <X className="size-4" strokeWidth={1.75} />
+  // The shared dialog: focus kept inside and given back; Escape, a press outside and × wait while
+  // it applies; it shrinks back out before it unmounts.
+  return (
+    <Dialog
+      open={open}
+      onClose={onClose}
+      onExited={onExited}
+      busy={busy}
+      className="sm:w-[min(460px,100%)]"
+      title={`Apply ${profile.name}`}
+      lead={
+        <>
+          {KIND_LABEL[profile.kind]} at <span className="font-mono text-[12px]">{profile.base_url}</span>, set on each machine you pick with the same id.
+        </>
+      }
+      footer={
+        sent ? (
+          <button type="button" disabled={busy} onClick={onClose} className={primaryBtn}>
+            Done
           </button>
-        </div>
+        ) : (
+          <>
+            <button type="button" onClick={onClose} className="h-8 rounded-lg px-3 text-[12.5px] text-muted hover:text-fg">
+              Cancel
+            </button>
+            <button type="button" disabled={chosen.length === 0} onClick={() => void apply()} className={primaryBtn}>
+              {chosen.length === 1 ? "Apply to 1 machine" : `Apply to ${chosen.length} machines`}
+            </button>
+          </>
+        )
+      }
+    >
+      <div className="space-y-4">
         <ul className="divide-y divide-line overflow-hidden rounded-xl border border-line-2 bg-panel inset-shadow-highlight" aria-label="Machines">
           {machines.map((m) => {
             const why = endpointsLocked(m);
@@ -1019,24 +1038,7 @@ function ApplyDialog({ profile, machines, onClose }: { profile: EndpointProfile;
             <KeyInput label="Key" value={key} onChange={setKey} placeholder="Key" />
           </Labeled>
         )}
-        <div className="flex items-center justify-end gap-2">
-          {sent ? (
-            <button type="button" disabled={busy} onClick={onClose} className={primaryBtn}>
-              Done
-            </button>
-          ) : (
-            <>
-              <button type="button" onClick={onClose} className="h-8 rounded-lg px-3 text-[12.5px] text-muted hover:text-fg">
-                Cancel
-              </button>
-              <button type="button" disabled={chosen.length === 0} onClick={() => void apply()} className={primaryBtn}>
-                {chosen.length === 1 ? "Apply to 1 machine" : `Apply to ${chosen.length} machines`}
-              </button>
-            </>
-          )}
-        </div>
       </div>
-    </div>,
-    document.body,
+    </Dialog>
   );
 }

@@ -28,6 +28,7 @@ import { CommandPalette, type PaletteHost } from "./command-palette";
 import { openIntegrations } from "./integrations";
 import { Menu } from "./menu";
 import { Launcher } from "./new-agent";
+import { useKept } from "./ui/dialog";
 import { PinnedConversation, PinnedDiff, PinnedTerminal } from "./pinned";
 import { MachineNode, ProjectNode, RequestNode, SubagentNode, ThreadNode } from "./nodes";
 import { CanvasProjectsProvider, type CanvasProjects } from "./machine-projects";
@@ -187,8 +188,14 @@ export function AgentsSurface({
   // The prompt bar's dock: the canvas keeps cards clear of it.
   const dock = useRef<HTMLDivElement>(null);
   const views = useCanvasViews(services.canvas, client.owner, data.canvas?.revision ?? 0);
-  const root = useRef<HTMLDivElement>(null);
+  const root = useRef<HTMLDivElement | null>(null);
   useFocusRescue(root);
+  // The same element as state: the launcher portals into it.
+  const [rootEl, setRootEl] = useState<HTMLDivElement | null>(null);
+  const attachRoot = useCallback((el: HTMLDivElement | null) => {
+    root.current = el;
+    setRootEl(el);
+  }, []);
   const pendingFocus = useRef<string | null>(initialFocus ?? null);
 
   const threadOpen = view.kind === "thread" ? data.threads.get(view.thread) : undefined;
@@ -198,6 +205,9 @@ export function AgentsSurface({
     if (gone) setAgentsView({ kind: "canvas" });
   }, [gone]);
   const shown: AgentsView = gone ? { kind: "canvas" } : view;
+  // Kept while they play their way out.
+  const launcher = useKept(shown.kind === "new" && shown);
+  const addMachine = useKept(adding);
   // The card beside the open panel, selected on the canvas (a conversation opened from a run, in the automations sheet, too).
   const selected =
     shown.kind === "thread" ? `t:${shown.thread}` : shown.kind === "automations" && shown.thread ? `t:${shown.thread}` : shown.kind === "settings" && shown.target !== "owner" ? shown.target : undefined;
@@ -502,7 +512,7 @@ export function AgentsSurface({
 
   return (
     <AgentsContext.Provider value={ctx}>
-      <div ref={root} className="relative flex h-full min-h-0 flex-col bg-bg text-fg">
+      <div ref={attachRoot} className="relative flex h-full min-h-0 flex-col bg-bg text-fg">
         {/* The full window drives the logo itself (in the popup, the header already does). */}
         {chrome === "window" && <MarkDriver client={client} />}
         <div className="flex min-h-0 flex-1 flex-col">
@@ -655,8 +665,19 @@ export function AgentsSurface({
         </div>
         <Notices />
         <ProjectDialogs />
-        {adding && <AddMachineDialog onClose={() => setAdding(false)} onCreated={onSandbox} />}
-        {shown.kind === "new" && <Launcher key={`${shown.project ?? ""}|${shown.machine ?? ""}|${shown.at?.x ?? ""},${shown.at?.y ?? ""}`} project={shown.project} machine={shown.machine} at={shown.at} onClose={close} />}
+        {addMachine.value && <AddMachineDialog key={addMachine.key} open={addMachine.open} onExited={addMachine.onExited} onClose={() => setAdding(false)} onCreated={onSandbox} />}
+        {launcher.value && (
+          <Launcher
+            key={launcher.key}
+            open={launcher.open}
+            onExited={launcher.onExited}
+            container={rootEl}
+            project={launcher.value.project}
+            machine={launcher.value.machine}
+            at={launcher.value.at}
+            onClose={close}
+          />
+        )}
         <CommandPalette host={host} />
       </div>
     </AgentsContext.Provider>
