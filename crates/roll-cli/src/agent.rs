@@ -316,6 +316,13 @@ fn fake_providers() -> Option<Vec<Arc<dyn Provider>>> {
 async fn up(api: &str) -> anyhow::Result<()> {
     let saved = match env_login(api)? {
         Some(s) => s,
+        // Not logged in yet, at a terminal: log in first (the code to confirm), then go on. A
+        // service (no terminal) still stops with what to run.
+        None if !saved_path()?.exists() && std::io::IsTerminal::is_terminal(&std::io::stdin()) => {
+            eprintln!("roll agent: this machine isn't connected to roll yet: logging in first");
+            login(api, false, None).await?;
+            load()?
+        }
         None => load()?,
     };
     let config = agent_host::config::Config::load()?;

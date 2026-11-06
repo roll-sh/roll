@@ -163,7 +163,7 @@ function RentSandbox({ onCreated, dialog }: { onCreated?: (m: Machine) => void; 
     });
   };
 
-  const lead = "An always-on machine roll hosts for you, with Claude Code and Codex installed. Log the providers in from the canvas, or give it API keys.";
+  const lead = "A machine roll hosts for you, with Claude Code and Codex installed. It runs while its agents work, sleeps when they're idle (not billed asleep) and wakes when one needs it. Log the providers in from the canvas, or give it API keys.";
   if (pending)
     return (
       <Path icon={<Cloud className="size-4 text-muted" />} title="Rent a sandbox" lead={`${pending.machine.name} is on the canvas, starting up.`} page="applying">

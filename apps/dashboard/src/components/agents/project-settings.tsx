@@ -295,7 +295,8 @@ export function ProjectSettingsForm({ project, machine, onDone, onLeave }: { pro
     auto_pull: autoPull,
     defaults,
     scripts,
-    color,
+    // Without a repo the auto colour comes from the name: a rename keeps the colour it had.
+    color: color ?? (!project.repo && name.trim() !== project.name ? projectColor(project) : undefined),
     icon: "icon" in iconChecked && iconChecked.icon.kind !== "auto" ? iconChecked.icon : undefined,
     auto_settle: { after_days: autoSettle.after_days, on_land: autoSettle.on_land, keep_changes: autoSettle.keep_changes || undefined },
     // Off and kept as the default leaves no trace, as the daemon writes it.
@@ -386,6 +387,8 @@ export function ProjectSettingsForm({ project, machine, onDone, onLeave }: { pro
         </SettingRow>
       </SettingsSection>
 
+      {/* A plain folder has nothing to pull. */}
+      {project.git && (
       <SettingsSection title="Pull merged changes" ids={[P.autoPull.id]}>
         <SettingRow
           s={{ ...P.autoPull, description: `Keeps ${branch} current: when a change lands, roll fast-forwards this checkout, but only while it's on ${branch} with no local changes or commits.` }}
@@ -402,6 +405,7 @@ export function ProjectSettingsForm({ project, machine, onDone, onLeave }: { pro
           <PullLine pull={project.pull} className="mt-2" />
         </SettingRow>
       </SettingsSection>
+      )}
 
       <SettingsSection title="New threads" ids={[P.model.id, P.permissions.id, P.mode.id, P.workspace.id]}>
         <DefaultsRows inherits="machine" rows={P} defaults={defaults} providers={providers} disabled={false} onChange={setDefaults} />

@@ -143,7 +143,7 @@ describe("SharesList", () => {
     const list = await screen.findByRole("list", { name: "Shares" });
     expect(agents.shares).toHaveBeenCalledWith("acme");
     expect(within(list).getByRole("link", { name: "Second" })).toHaveAttribute("href", "/agents/s/shr_2");
-    expect(within(list).getByText(/3 threads · 2 runs · 18k B · by acme/)).toBeInTheDocument();
+    expect(within(list).getByText(/3 threads · 2 runs · .* · by acme/)).toBeInTheDocument();
     await userEvent.click(within(list).getByRole("button", { name: "Revoke Second" }));
     await userEvent.click(within(list).getByRole("button", { name: "Revoke link" }));
     expect(agents.revokeShare).toHaveBeenCalledWith("acme", "shr_2");

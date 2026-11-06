@@ -11,7 +11,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { agentsApi, type ShareSummary, type Thread } from "@/lib/agents-api";
 import { codeApi } from "@/lib/code-api";
 import { btn, CopyButton, ErrorNote, Panel, primary, useCopy } from "../ui";
-import { compact } from "./shared";
+import { formatBytes } from "@/lib/roll-api";
 import { openSettings } from "./provider-setup";
 import { useAgents } from "./use-agents";
 
@@ -127,7 +127,7 @@ export function ShareButton({ thread }: { thread: Thread }) {
               )}
               <p className="text-[11.5px] text-subtle">
                 {made.threads > 1 ? `${made.threads} threads · ` : ""}
-                {made.runs} run{made.runs === 1 ? "" : "s"} · {compact(made.bytes)} B ·{" "}
+                {made.runs} run{made.runs === 1 ? "" : "s"} · {formatBytes(made.bytes)} ·{" "}
                 <button
                   type="button"
                   onClick={() => {
@@ -268,7 +268,7 @@ export function ShareLinks({ owner, flush = false }: { owner: string; /** In a s
                   </a>
                   <p className="mt-0.5 font-mono text-[11px] text-subtle">
                     {new Date(s.created_at).toLocaleString()} · {s.threads > 1 ? `${s.threads} threads · ` : ""}
-                    {s.runs} run{s.runs === 1 ? "" : "s"} · {compact(s.bytes)} B · by {s.created_by}
+                    {s.runs} run{s.runs === 1 ? "" : "s"} · {formatBytes(s.bytes)} · by {s.created_by}
                   </p>
                 </div>
                 <CopyButton id={s.id} text={`${origin}${shareHref(s.id)}`} copied={copied} onCopy={copy} />

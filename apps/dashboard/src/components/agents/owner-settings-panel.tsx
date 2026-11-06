@@ -26,6 +26,7 @@ import { GATEWAY_SETTINGS, GatewaySection } from "./gateway/section";
 import { DefaultsRows } from "./machine-settings";
 import { SaveState, SettingRow, SettingsPage, SettingsSection, useSearching, type Setting, type SettingsElsewhere } from "./settings-ui";
 import { MachineIcon } from "./identity";
+import { dollars } from "./sandbox";
 import { Segmented, Select, Switch } from "./ui";
 import { useAgents } from "./use-agents";
 import { useEscapeLayer } from "./escape-layers";
@@ -44,7 +45,7 @@ const S = {
     id: "chat.follow-up",
     title: "While a run is going",
     section: "Chat",
-    description: "What a message does to a busy thread. ⌘/Ctrl+Enter does the other one once.",
+    description: "What a message does to a busy thread. ⌘/Ctrl+Enter (on a phone, holding Send) does the other one once.",
     terms: ["queue", "steer", "follow up", "interrupt", "running"],
   },
   model: { id: "new.model", title: "Model", section: "New threads", description: "On every machine, after the project's and the machine's defaults.", terms: ["provider", "default model", "effort"] },
@@ -124,7 +125,9 @@ export function ownerSettingItems(machines: readonly Machine[], services: Agents
 }
 
 export function OwnerSettingsPanel({ onClose, elsewhere }: { onClose: () => void; elsewhere?: readonly SettingsElsewhere[] }) {
-  const { client, owner, prefs, services, demo } = useAgents();
+  const { client, owner, prefs, services, demo, sandboxes } = useAgents();
+  // What the sandboxes ran this month, deleted ones too (each card shows its own).
+  const spend = sandboxes?.usage.size ? [...sandboxes.usage.values()].reduce((t, u) => ({ hours: t.hours + u.running_hours, usd: t.usd + u.price_usd }), { hours: 0, usd: 0 }) : null;
   const settings = prefs?.settings ?? DEFAULT_OWNER_SETTINGS;
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -205,7 +208,17 @@ export function OwnerSettingsPanel({ onClose, elsewhere }: { onClose: () => void
       <SettingsSection title="New threads" ids={[S.model.id, S.permissions.id, S.mode.id, S.workspace.id]}>
         <DefaultsRows inherits="provider" rows={S} defaults={settings.defaults} providers={providers} disabled={disabled} onChange={(defaults) => void save({ defaults })} />
       </SettingsSection>
-      <SettingsSection title="Machines" ids={machines.map((m) => `machine.${m.id}`)}>
+      <SettingsSection
+        title="Machines"
+        ids={machines.map((m) => `machine.${m.id}`)}
+        action={
+          spend && (
+            <span className="font-mono text-[11.5px] text-subtle" title="Sandboxes' running time and cost this month (UTC), deleted ones included">
+              Sandboxes this month: {spend.hours.toFixed(1)} h · {dollars(spend.usd)}
+            </span>
+          )
+        }
+      >
         {machines.map((m) => (
           <SettingRow
             key={m.id}
