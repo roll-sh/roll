@@ -227,6 +227,11 @@ export class CanvasEngine {
     return { w: this.w, h: this.h };
   }
 
+  /** Where the view is going (the view itself when it isn't easing anywhere). */
+  get goal(): View {
+    return this.viewTo ?? this.view;
+  }
+
   // ── cards ──
 
   register(key: string, el: HTMLElement) {

@@ -39,7 +39,7 @@ describe("agents graph", () => {
     expect(g.edges.find((e) => e.to === "t:thr_2")).toMatchObject({ dashed: true, busy: false });
   });
 
-  it("leaves a thread's terminals to its drawer while its conversation is open beside the canvas", () => {
+  it("leaves a thread's terminals to its drawer and its requests to its conversation while that is open beside the canvas", () => {
     const d = applyEvents(sample(), [ev("terminal", terminal({ id: "trm_t", thread: "thr_1", title: "pnpm dev" }), 20)]);
     expect(deriveGraph(d).nodes.get("t:thr_1")!.children).toContain("x:trm_t");
     const docked = deriveGraph(d, { docked: "thr_1" });
@@ -47,6 +47,9 @@ describe("agents graph", () => {
     // Only that thread's: the project's and the machine's stay.
     expect(docked.nodes.has("x:trm_1") && docked.nodes.has("x:trm_login")).toBe(true);
     expect(deriveGraph(d, { docked: "thr_3" }).nodes.has("x:trm_t")).toBe(true);
+    // Its requests are answered in the conversation: no second copy beside the card (it ran off the canvas, under the panel).
+    expect(docked.nodes.has("r:req_1")).toBe(false);
+    expect(deriveGraph(d, { docked: "thr_3" }).nodes.has("r:req_1")).toBe(true);
   });
 
   it("a login on the machine that finished cleanly leaves the canvas; a failed one stays", () => {

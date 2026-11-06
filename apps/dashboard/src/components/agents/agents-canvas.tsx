@@ -245,12 +245,14 @@ export const AgentsCanvas = forwardRef<
   }, [fitKey]);
   // The tree turned: everything moves, so frame it again (the cards ease there with the view).
   const shownDirection = useRef(direction);
+  // `fit`, then the open conversation's card revealed (set below, once `reveal` exists).
+  const frameRef = useRef<(animate: boolean) => void>(() => {});
   useEffect(() => {
     if (shownDirection.current === direction) return;
     shownDirection.current = direction;
     following.current = true;
-    fit(true);
-  }, [direction, fit]);
+    frameRef.current(true);
+  }, [direction]);
   // The canvas got narrower or wider (the side panel opened or closed, the window resized): frame
   // it again, unless the view was moved by hand (then it stays where it was put).
   useEffect(() => {
@@ -263,7 +265,7 @@ export const AgentsCanvas = forwardRef<
       if (Math.abs(now - width) < 24) return;
       width = now;
       clearTimeout(t);
-      t = setTimeout(() => fitted.current && following.current && fitRef.current(true), 120);
+      t = setTimeout(() => fitted.current && following.current && frameRef.current(true), 120);
     });
     ro.observe(c);
     return () => {
@@ -271,10 +273,6 @@ export const AgentsCanvas = forwardRef<
       clearTimeout(t);
     };
   }, []);
-  const fitRef = useRef(fit);
-  useEffect(() => {
-    fitRef.current = fit;
-  });
 
   // The stream re-renders constantly; only a change in the overall extent refits.
   const extent = useMemo(() => {
@@ -295,11 +293,11 @@ export const AgentsCanvas = forwardRef<
       if (e && saved && r && overlaps(r, saved, e.viewport)) {
         following.current = false;
         e.setView(saved, animate);
-      } else fit(animate);
+      } else frameRef.current(animate);
       return;
     }
     if (!following.current) return;
-    const t = setTimeout(() => following.current && fit(true), 250);
+    const t = setTimeout(() => following.current && frameRef.current(true), 250);
     return () => clearTimeout(t);
     // `fit` changes with every layout; the extent is what matters.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -360,15 +358,29 @@ export const AgentsCanvas = forwardRef<
       const e = engine.current;
       const p = positions.get(key);
       if (!e || !p) return;
-      const s = sizeOf(key);
-      const { x, y, k } = e.view;
+      // Where the view is going, not where an easing has got to: a reveal right after a refit
+      // judges the frame the refit is heading for.
+      const { x, y, k } = e.goal;
       const { w } = e.viewport;
       const h = e.viewport.h - coveredBelow();
-      const inView = p.x * k + x >= 0 && p.y * k + y >= 0 && (p.x + s.w) * k + x <= w && (p.y + s.h) * k + y <= h;
-      if (!inView) focus(key, e.view.k, true);
+      // The card and what's waiting beside it (its request cards) all in view, above the prompt bar.
+      const r = bounds(positions, sizeOf, [key, ...(graph.nodes.get(key)?.children.filter((c) => graph.nodes.get(c)?.kind === "request") ?? [])]) ?? { x: p.x, y: p.y, ...sizeOf(key) };
+      const inView = r.x * k + x >= 0 && r.y * k + y >= 0 && (r.x + r.w) * k + x <= w && (r.y + r.h) * k + y <= h;
+      if (!inView) focus(key, k, true);
     },
-    [positions, sizeOf, focus, coveredBelow],
+    [positions, sizeOf, focus, coveredBelow, graph],
   );
+
+  // Framing by itself (following new work, the panel changing the canvas's width) keeps the open
+  // conversation's card in view too: a refit that lands after the panel revealed it must not put
+  // it back under the prompt bar. A layout effect, so it's set before the effects above frame the
+  // first layout.
+  useLayoutEffect(() => {
+    frameRef.current = (animate: boolean) => {
+      fit(animate);
+      if (selected && positions.has(selected)) reveal(selected);
+    };
+  });
 
   useImperativeHandle(ref, () => ({ focus, reveal, fit: () => fit(true) }), [focus, reveal, fit]);
 

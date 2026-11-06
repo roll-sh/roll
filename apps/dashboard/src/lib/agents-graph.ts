@@ -50,7 +50,7 @@ export interface Graph {
 export interface GraphOptions {
   /** Threads open in place: their requests live inside the session, not beside it. */
   expanded?: ReadonlySet<string>;
-  /** The thread whose conversation is open beside the canvas: its terminals are in its drawer. */
+  /** The thread whose conversation is open beside the canvas: its terminals are in its drawer, its requests in it. */
   docked?: string | null;
   showArchived?: boolean;
   /** Provider subagents shown per thread at most (the newest). */
@@ -165,10 +165,11 @@ export function deriveGraph(data: AgentsData, opts: GraphOptions = {}): Graph {
     }
   }
 
-  // Pending requests beside their thread (inside it when it's open).
+  // Pending requests beside their thread; inside it when it's open in place or its conversation
+  // is open beside the canvas (answered there: a second copy beside the card only crowded it).
   for (const q of pendingRequests(data)) {
     const tk = keyOf.thread(q.thread);
-    if (!nodes.has(tk) || expanded.has(q.thread)) continue;
+    if (!nodes.has(tk) || expanded.has(q.thread) || q.thread === opts.docked) continue;
     add({ key: keyOf.request(q.id), kind: "request", id: q.id, machine: nodes.get(tk)!.machine, parent: tk, busy: false, relation: null });
   }
 
