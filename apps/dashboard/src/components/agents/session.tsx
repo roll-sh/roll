@@ -229,7 +229,7 @@ export function Conversation({ thread, machine, start, end }: { thread: Thread; 
                     <Composer key={thread.id} mode={{ kind: "thread", thread, machine }} autoFocus={!phone} />
                   </>
                 )}
-                {!subagent && <ContextStrip thread={thread} machine={machine} runs={runs} />}
+                {!subagent && <ContextStrip thread={thread} machine={machine} runs={runs} onDiff={actions.showDiff} />}
                 {error && (
                   <p className="mt-2 text-[12px] text-danger" role="alert">
                     {error}
@@ -423,9 +423,10 @@ function TerminalDrawer({
  * The plain row under the composer (T3's `ComposerSurface.ContextStrip`): where the thread runs
  * (the machine, its worktree's branch) and what it has cost and changed so far.
  */
-function ContextStrip({ thread, machine, runs }: { thread: Thread; machine: Machine | undefined; runs: Run[] }) {
+function ContextStrip({ thread, machine, runs, onDiff }: { thread: Thread; machine: Machine | undefined; runs: Run[]; onDiff?: (run: string) => void }) {
   const usage = usageLine(thread.usage);
-  const stat = runs.findLast((r) => r.status !== "rolled_back")?.stat ?? null;
+  const last = runs.findLast((r) => r.status !== "rolled_back");
+  const stat = last?.stat ?? null;
   if (!machine && !thread.worktree && !usage) return null;
   return (
     <div className="flex min-w-0 items-center gap-3 overflow-hidden px-2 pt-2 text-[11.5px] whitespace-nowrap text-subtle">
@@ -443,7 +444,19 @@ function ContextStrip({ thread, machine, runs }: { thread: Thread; machine: Mach
       )}
       <span className="ml-auto flex shrink-0 items-center gap-2 font-mono tabular-nums">
         {usage}
-        <Stat stat={stat} />
+        {/* The last run's lines, the same numbers as its diff (the whole thread's are in the diff's "Whole thread"). */}
+        {stat && last && (stat.additions > 0 || stat.deletions > 0) && (
+          <button
+            type="button"
+            onClick={onDiff && (() => onDiff(last.id))}
+            disabled={!onDiff}
+            aria-label={`Last run: ${stat.additions} added, ${stat.deletions} removed${onDiff ? ". Open its diff" : ""}`}
+            title={`Run ${last.ordinal}'s changes`}
+            className="rounded px-0.5 transition-colors enabled:hover:bg-fg/[0.06] enabled:hover:text-fg"
+          >
+            <Stat stat={stat} />
+          </button>
+        )}
       </span>
     </div>
   );
@@ -607,7 +620,7 @@ function TitleBar({
       </div>
       {(thread.change || thread.work || orchestrated) && (
         <div className="flex min-w-0 items-center gap-3 px-4 pb-2.5">
-          {orchestrated && <OrchestratorChip {...orchestrated} />}
+          {orchestrated && <OrchestratorChip {...orchestrated} onOpen={openThread} />}
           {thread.change && <ChangeChip change={thread.change} />}
           {thread.change?.detail && <span className="min-w-0 truncate text-[11.5px] text-subtle">{thread.change.detail}</span>}
           {thread.work && <WorkChip work={thread.work} className="min-w-0 flex-1" onRelease={readOnly || !services ? undefined : () => act(() => services.releaseWork(owner, thread.id))} />}

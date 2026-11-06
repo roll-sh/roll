@@ -114,7 +114,9 @@ Machine            a daemon (hostname, os, providers and their auth state, onlin
 - **Checkpoints.** Before the first run the daemon records the base tree; after every run it
   snapshots the worktree into a commit under `refs/roll/checkpoints/<thread>/<ordinal>` using a
   private index (`GIT_INDEX_FILE`), never touching the user's index or HEAD. The diff of run N is
-  checkpoint N-1 → N. `checkpoint.rollback` restores the tree of a checkpoint and marks later
+  checkpoint N-1 → N; the run records its stat and, per file, `Run.files` (at most 200), which its
+  changed-files card shows, so the card, Open diff and the footer agree (T3's turn diff summary).
+  `checkpoint.rollback` restores the tree of a checkpoint and marks later
   runs `rolled_back` (and rolls back the provider thread where the provider can). A project in a
   subdirectory of a repository owns only that directory: its diffs, `git.status` and rollbacks
   cover the files under it, and a rollback never touches a file outside it (the user's edits
@@ -1695,7 +1697,7 @@ The surface has three views:
   the canvas) or runs, one run (its threads' cards highlighted on the canvas), and a conversation
   that run started, with Back to the run. Back and Escape go up one level, from the list Escape,
   ⚡ and A close it. docs/code/automations-ui.md has the details.
-- **A conversation.** Clicking a thread opens it in a panel docked beside the canvas (resizable, remembered; on a phone it covers the canvas), its card selected on the canvas. A machine's or project's settings open in the same panel (`#agents/settings/<key>`, from its card), and so do the owner's (`#agents/settings/owner`, the header's gear or ⌘,; "Machine settings", "Owner settings"). Finished subagents (a done provider subagent, a delegated thread that's done) leave the canvas; their results stay in the parent's transcript. The conversation is T3's chat
+- **A conversation.** Clicking a thread opens it in a panel docked beside the canvas (resizable, remembered; on a phone it covers the canvas), its card selected on the canvas. A machine's or project's settings open in the same panel (`#agents/settings/<key>`, from its card), and so do the owner's (`#agents/settings/owner`, the header's gear or ⌘,; "Machine settings", "Owner settings"). Finished subagents (a done provider subagent, a delegated thread that's done) leave the canvas; their results stay in the parent's transcript, and an orchestrator's chip (on its card and in its header) is a menu of every agent it started, each opening its conversation. The conversation is T3's chat
   view (`session.tsx`, `transcript.tsx`, `work-log.tsx`, `composer.tsx`; the grouping is
   `lib/agents-worklog.ts`): a header that is a breadcrumb (the project, the title, T3's status
   pill) with Diff, Terminal and Share and the rest under More; the transcript in a 46 rem column

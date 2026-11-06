@@ -462,6 +462,16 @@ async fn rollback_restores_files_and_starts_the_provider_fresh_with_a_summary() 
     let checkpoints = s.checkpoints(&thread);
     assert_eq!(checkpoints.iter().map(|c| c.ordinal).collect::<Vec<_>>(), vec![0, 1, 2]);
     assert_eq!(checkpoints[2].stat, DiffStat { files: 2, additions: 2, deletions: 1 });
+    // The run lists what its checkpoint counts, per file (its changed-files card agrees with its diff).
+    let second = s.runs(&thread)[1].clone();
+    assert_eq!(second.stat, Some(checkpoints[2].stat));
+    assert_eq!(
+        second.files,
+        vec![
+            FileStat { path: "a.txt".into(), change: ChangeKind::Modify, additions: 1, deletions: 1 },
+            FileStat { path: "b.txt".into(), change: ChangeKind::Add, additions: 1, deletions: 0 },
+        ]
+    );
 
     let reply = w.run(Command::CheckpointRollback { thread: thread.clone(), checkpoint: checkpoints[1].id.clone() }).await;
     assert_eq!(reply, Reply::Ok);

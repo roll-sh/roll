@@ -300,3 +300,43 @@ describe("subagents (T3's subagent rows)", () => {
     expect(h.openThread).toHaveBeenCalledWith("thr_p");
   });
 });
+
+describe("a run's changed files (T3's changed-files card reads the checkpoint diff)", () => {
+  // The tool said it added a line; git says it replaced one, and a command changed another file.
+  const edit = { type: "tool", name: "Edit", kind: "edit", title: "Edit ROLL_DEMO.md", input: null, output: null, exit_code: 0, files: [{ path: "ROLL_DEMO.md", change: "modify", diff: "@@ -0,0 +1 @@\n+hello" }] } as const;
+  const done = run({
+    status: "completed",
+    completed_at: 2,
+    stat: { files: 2, additions: 3, deletions: 2 },
+    files: [
+      { path: "ROLL_DEMO.md", change: "modify", additions: 1, deletions: 1 },
+      { path: "Cargo.lock", change: "modify", additions: 2, deletions: 1 },
+    ],
+  });
+  const entities = (r = done) => [mirrored("thread", thread({ run_count: 1 }), 1), mirrored("run", r, 2), mirrored("node", node(edit as never, { status: "completed" }), 3)];
+
+  it("counts what the run's diff counts, files a command changed too, and the footer's numbers open that diff", async () => {
+    const h = agentsHarness({ machines: [m], entities: entities(), follow: ["thr_1"] });
+    renderAgents(<Conversation thread={thread({ run_count: 1 })} machine={m} />, h);
+    const box = screen.getByLabelText("Changed files");
+    expect(box).toHaveTextContent(/2 changed files\s*\+3 −2/);
+    expect(within(box).getByText("Cargo.lock")).toBeInTheDocument();
+    expect(within(box).getByRole("button", { name: /ROLL_DEMO\.md/ })).toHaveTextContent("+1 −1");
+    await userEvent.click(screen.getByRole("button", { name: "Last run: 3 added, 2 removed. Open its diff" }));
+    expect(sent(h).at(-1)).toEqual({ type: "diff.get", thread: "thr_1", run: "run_1" });
+  });
+
+  it("falls back to what the tools said without a checkpoint (no git), and shows nothing when git saw no change", () => {
+    const h = agentsHarness({ machines: [m], entities: entities(run({ status: "completed", completed_at: 2 })), follow: ["thr_1"] });
+    const { unmount } = renderAgents(<Conversation thread={thread({ run_count: 1 })} machine={m} />, h);
+    expect(screen.getByLabelText("Changed files")).toHaveTextContent(/1 changed file\s*\+1 −0/);
+    unmount();
+    // An older daemon's run: git's total, the tools' paths without numbers that would disagree with it.
+    const older = renderAgents(<Conversation thread={thread({ run_count: 1 })} machine={m} />, agentsHarness({ machines: [m], entities: entities(run({ status: "completed", completed_at: 2, stat: { files: 1, additions: 1, deletions: 1 } })), follow: ["thr_1"] }));
+    expect(screen.getByLabelText("Changed files")).toHaveTextContent(/1 changed file\s*\+1 −1/);
+    expect(screen.getByRole("button", { name: "ROLL_DEMO.md" })).toHaveTextContent(/^ROLL_DEMO\.md$/);
+    older.unmount();
+    renderAgents(<Conversation thread={thread({ run_count: 1 })} machine={m} />, agentsHarness({ machines: [m], entities: entities(run({ status: "completed", completed_at: 2, stat: { files: 0, additions: 0, deletions: 0 } })), follow: ["thr_1"] }));
+    expect(screen.queryByLabelText("Changed files")).toBeNull();
+  });
+});

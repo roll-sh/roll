@@ -181,7 +181,11 @@ fn run_rec() -> Run {
         started_at: Some(T + 20),
         completed_at: None,
         checkpoint: None,
-        stat: None,
+        stat: Some(DiffStat { files: 2, additions: 3, deletions: 1 }),
+        files: vec![
+            FileStat { path: "src/queue.rs".into(), change: ChangeKind::Modify, additions: 2, deletions: 1 },
+            FileStat { path: "tests/queue_flaky.rs".into(), change: ChangeKind::Add, additions: 1, deletions: 0 },
+        ],
         usage: Usage::default(),
         context: Some(ContextUsage { used_tokens: 18_500, max_tokens: None, total_processed_tokens: None, ..Default::default() }),
         error: None,

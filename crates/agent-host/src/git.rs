@@ -14,7 +14,7 @@
 //! Projects that aren't git repositories have no checkpoints, diffs or worktrees; everything else
 //! (runs, terminals, files) works the same.
 
-use agent_proto::{ChangeKind, CodeGrant, Diff, DiffStat, FileChange, GitInfo, GitStatus, Published, PullOutcome, PullSkip};
+use agent_proto::{ChangeKind, CodeGrant, Diff, DiffStat, FileChange, FileStat, GitInfo, GitStatus, Published, PullOutcome, PullSkip};
 use anyhow::{Context, bail};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -534,7 +534,25 @@ const DIFF_FLAGS: &[&str] = &["--no-color", "--no-ext-diff", "--no-textconv", "-
 /// Lines added and removed in `dir` between two commits or trees (paths are the repository's).
 pub async fn stat(dir: &Path, from: &str, to: &str) -> anyhow::Result<DiffStat> {
     let out = git(dir, &["diff", "--numstat", "-z"]).arg("-M").arg(from).arg(to).only_here().run().await?;
-    Ok(parse_numstat(&out.stdout))
+    Ok(parse_numstat(&out.stdout).0)
+}
+
+/// [`stat`], and the first `max` files with their own lines and kind of change (the stat still
+/// counts every file).
+pub async fn stat_files(dir: &Path, from: &str, to: &str, max: usize) -> anyhow::Result<(DiffStat, Vec<FileStat>)> {
+    let out = git(dir, &["diff", "--numstat", "-z"]).arg("-M").arg(from).arg(to).only_here().run().await?;
+    let (stat, lines) = parse_numstat(&out.stdout);
+    if lines.is_empty() {
+        return Ok((stat, Vec::new()));
+    }
+    let names = git(dir, &["diff", "--name-status", "-z"]).arg("-M").arg(from).arg(to).only_here().run().await?;
+    let kinds: std::collections::HashMap<String, ChangeKind> = parse_name_status(&names.stdout).into_iter().collect();
+    let files = lines
+        .into_iter()
+        .take(max)
+        .map(|(path, additions, deletions)| FileStat { change: kinds.get(&path).copied().unwrap_or(ChangeKind::Modify), path, additions, deletions })
+        .collect();
+    Ok((stat, files))
 }
 
 /// The unified diff in `dir` between two commits or trees, per file, cut at `cap` bytes of patch
@@ -598,8 +616,10 @@ fn parse_name_status(out: &[u8]) -> Vec<(String, ChangeKind)> {
     entries
 }
 
-fn parse_numstat(out: &[u8]) -> DiffStat {
+/// The totals, and each file's path (the new one for a rename) with its lines added and removed.
+fn parse_numstat(out: &[u8]) -> (DiffStat, Vec<(String, u32, u32)>) {
     let mut stat = DiffStat::default();
+    let mut files = Vec::new();
     let mut fields = out.split(|b| *b == 0);
     while let Some(field) = fields.next() {
         if field.is_empty() {
@@ -609,16 +629,21 @@ fn parse_numstat(out: &[u8]) -> DiffStat {
         let mut parts = text.splitn(3, '\t');
         let added = parts.next().and_then(|n| n.parse::<u32>().ok()).unwrap_or(0);
         let deleted = parts.next().and_then(|n| n.parse::<u32>().ok()).unwrap_or(0);
-        if parts.next().is_some_and(|p| p.is_empty()) {
+        let path = match parts.next() {
             // A rename: the old and new paths follow as their own fields.
-            fields.next();
-            fields.next();
-        }
+            Some("") => {
+                fields.next();
+                fields.next().map(|p| String::from_utf8_lossy(p).into_owned()).unwrap_or_default()
+            }
+            Some(p) => p.to_string(),
+            None => String::new(),
+        };
         stat.files += 1;
         stat.additions = stat.additions.saturating_add(added);
         stat.deletions = stat.deletions.saturating_add(deleted);
+        files.push((path, added, deleted));
     }
-    stat
+    (stat, files)
 }
 
 /// The branch, how far it is from its upstream, and the changed files in `dir` (untracked
@@ -906,7 +931,9 @@ mod tests {
     #[test]
     fn parses_numstat_with_renames_and_binaries() {
         let out = b"1\t2\ta.txt\0-\t-\tbin.png\x003\t0\t\0old.rs\0new.rs\0";
-        assert_eq!(parse_numstat(out), DiffStat { files: 3, additions: 4, deletions: 2 });
+        let (stat, files) = parse_numstat(out);
+        assert_eq!(stat, DiffStat { files: 3, additions: 4, deletions: 2 });
+        assert_eq!(files, vec![("a.txt".to_string(), 1, 2), ("bin.png".to_string(), 0, 0), ("new.rs".to_string(), 3, 0)]);
     }
 
     #[test]

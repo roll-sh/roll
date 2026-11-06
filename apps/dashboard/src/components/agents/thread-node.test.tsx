@@ -96,7 +96,7 @@ describe("threadPill", () => {
       mirrored("thread", thread({ id, status, lineage: { parent: "thr_o", relation, root: "thr_o", from_run: null } }), 2);
     const h = agentsHarness({ entities: [mirrored("thread", o, 1), kid("thr_a", "running"), kid("thr_b", "idle"), kid("thr_c", "running", "fork")] });
     renderAgents(<ThreadNode thread={o} machine={machine()} />, h);
-    expect(screen.getByLabelText("Orchestrator · 2 agents, 1 running")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Orchestrator · 2 agents, 1 running: open one" })).toBeInTheDocument();
   });
   it("follows T3's order: what waits on you, working, failed, plan ready, completed", () => {
     const t = thread();

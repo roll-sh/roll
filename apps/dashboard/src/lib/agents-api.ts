@@ -396,6 +396,8 @@ export interface Run {
   completed_at: Millis | null;
   checkpoint: CheckpointId | null;
   stat: DiffStat | null;
+  /** What `stat` counts, per file, from the same checkpoint diff (at most 200; empty from older daemons): the changed-files card shows these, so it agrees with Open diff. */
+  files?: FileStat[];
   usage: Usage;
   /** The context window as the run left it. */
   context: ContextUsage | null;
@@ -410,6 +412,14 @@ export type ChangeKind = "add" | "modify" | "delete" | "rename";
 export interface Todo {
   text: string;
   status: TodoStatus;
+}
+
+/** One file of a checkpoint diff (the repository's path, the new one for a rename). */
+export interface FileStat {
+  path: string;
+  change: ChangeKind;
+  additions: number;
+  deletions: number;
 }
 
 export interface FileChange {
@@ -1843,6 +1853,8 @@ const threadD = obj<Thread>({
   ),
 });
 const diffStatD = obj<DiffStat>({ files: int, additions: int, deletions: int });
+const changeKindD = literal("add", "modify", "delete", "rename");
+const fileStatD = obj<FileStat>({ path: str, change: changeKindD, additions: int, deletions: int });
 const runD = obj<Run>({
   id: str,
   thread: str,
@@ -1861,11 +1873,11 @@ const runD = obj<Run>({
   completed_at: opt(int),
   checkpoint: opt(str),
   stat: opt(diffStatD),
+  files: withDefault(vec(fileStatD), () => []),
   usage: usageD,
   context: opt(contextD),
   error: opt(str),
 });
-const changeKindD = literal("add", "modify", "delete", "rename");
 const fileChangeD = obj<FileChange>({ path: str, change: changeKindD, diff: opt(str) });
 const toolFields = {
   name: str,

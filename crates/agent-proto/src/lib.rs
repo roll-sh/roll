@@ -820,6 +820,11 @@ pub struct Run {
     pub checkpoint: Option<CheckpointId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stat: Option<DiffStat>,
+    /// What `stat` counts, per file, from the same checkpoint diff (T3's turn diff summary): the
+    /// run's changed-files card shows these, so it agrees with its diff. At most
+    /// [`RUN_FILES_MAX`] (`stat` still counts every file); empty from daemons before it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<FileStat>,
     #[serde(default)]
     pub usage: Usage,
     /// The context window as the run left it: its provider's newest report during the run
@@ -1131,6 +1136,19 @@ pub struct Checkpoint {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct DiffStat {
     pub files: u32,
+    pub additions: u32,
+    pub deletions: u32,
+}
+
+/// Most files a run lists in [`Run::files`].
+pub const RUN_FILES_MAX: usize = 200;
+
+/// One file of a checkpoint diff: its path (the repository's, the new one for a rename) and the
+/// lines added and removed (0 and 0 for a binary file).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileStat {
+    pub path: String,
+    pub change: ChangeKind,
     pub additions: u32,
     pub deletions: u32,
 }

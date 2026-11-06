@@ -30,7 +30,7 @@ import {
 } from "lucide-react";
 import { Fragment, useState, type ReactNode } from "react";
 import { useEscapeLayer } from "./escape-layers";
-import type { Checkpoint, FileChange, Node, Request, RequestResponse, Run } from "@/lib/agents-api";
+import type { Checkpoint, DiffStat, FileChange, Node, Request, RequestResponse, Run } from "@/lib/agents-api";
 import { formatContextTokens } from "@/lib/agents-context";
 import type { NodeTree } from "@/lib/agents-store";
 import { delegatedTasks, deliveredLabel, ended, foldLabel, foldTurn, splitAtSteers, timelineItems, type TimelineItem } from "@/lib/agents-worklog";
@@ -99,7 +99,7 @@ export function RunView({
   const steered = splitAtSteers(turn.rest, run);
   const [folded, setFolded] = useState(true);
   const ctx: Ctx = { requests, actions, now, idle: run.idle_compaction };
-  const files = changedFiles(tree);
+  const changes = runChanges(run, changedFiles(tree));
   return (
     <section className={`group/run flex flex-col gap-3 ${run.status === "rolled_back" ? "opacity-45" : ""}`} aria-label={`Run ${run.ordinal}`}>
       {/* Nobody typed an idle compaction or a delegated task's result: their rows say what happened (T3). */}
@@ -141,7 +141,7 @@ export function RunView({
         </p>
       ) : (
         <>
-          {files.length > 0 && run.status !== "rolled_back" && <ChangedFiles files={files} onOpen={actions.showDiff && (() => actions.showDiff!(run.id))} />}
+          {changes && run.status !== "rolled_back" && <ChangedFiles {...changes} onOpen={actions.showDiff && (() => actions.showDiff!(run.id))} />}
           <RunMeta run={run} tree={tree} checkpoint={checkpoint} actions={actions} busyThread={busyThread} last={last} />
         </>
       )}
@@ -427,15 +427,45 @@ function changedFiles(tree: readonly NodeTree[]): FileChange[] {
   return [...by.values()];
 }
 
+/**
+ * What a finished run changed (T3's changed-files card reads the turn's checkpoint diff): the
+ * daemon's per-file stat of the run's checkpoint when it took one, so the card agrees with Open
+ * diff and lists files a command changed too; else (no git, an older daemon) what the steps' tools
+ * said they edited. `null`: nothing changed.
+ */
+export function runChanges(run: Run, toolFiles: readonly FileChange[]): { total: DiffStat; rows: ChangedRow[] } | null {
+  if (run.stat) {
+    if (run.stat.files === 0) return null;
+    // An older daemon's run has no per-file stat: the tools' paths, without numbers that could disagree with the total.
+    const rows = run.files?.length ? run.files.map(({ path, additions, deletions }) => ({ path, additions, deletions })) : toolRows(toolFiles).map((f) => ({ ...f, counted: false }));
+    return { total: run.stat, rows };
+  }
+  const rows = toolRows(toolFiles);
+  if (rows.length === 0) return null;
+  return { total: rows.reduce((s, f) => ({ files: s.files + 1, additions: s.additions + f.additions, deletions: s.deletions + f.deletions }), { files: 0, additions: 0, deletions: 0 }), rows };
+}
+
+/** A run's changed file as its card lists it. */
+export interface ChangedRow {
+  path: string;
+  additions: number;
+  deletions: number;
+  /** `false`: its numbers aren't known (left out). */
+  counted?: boolean;
+}
+
+function toolRows(files: readonly FileChange[]): ChangedRow[] {
+  return files.map(toFileDiff).map(({ path, additions, deletions }) => ({ path, additions, deletions }));
+}
+
 /** Under a finished run's answer (T3's changed-files card): what changed, and the way to the diff. */
-function ChangedFiles({ files, onOpen }: { files: FileChange[]; onOpen?: () => void }) {
-  const diffs = files.map(toFileDiff);
-  const total = diffs.reduce((s, f) => ({ files: s.files + 1, additions: s.additions + f.additions, deletions: s.deletions + f.deletions }), { files: 0, additions: 0, deletions: 0 });
+function ChangedFiles({ total, rows, onOpen }: { total: DiffStat; rows: ChangedRow[]; onOpen?: () => void }) {
+  const more = Math.max(total.files, rows.length) - Math.min(rows.length, 8);
   return (
     <div className="rounded-xl border border-line bg-raised" aria-label="Changed files">
       <div className="flex items-center gap-2 px-3 pt-2 pb-1.5 text-[12.5px]">
         <span className="font-medium">
-          {files.length} changed file{files.length === 1 ? "" : "s"}
+          {total.files} changed file{total.files === 1 ? "" : "s"}
         </span>
         <Stat stat={total} className="text-[11.5px]" />
         {onOpen && (
@@ -445,7 +475,7 @@ function ChangedFiles({ files, onOpen }: { files: FileChange[]; onOpen?: () => v
         )}
       </div>
       <ul className="px-1.5 pb-1.5">
-        {diffs.slice(0, 8).map((f) => (
+        {rows.slice(0, 8).map((f) => (
           <li key={f.path}>
             <button
               onClick={onOpen}
@@ -453,11 +483,11 @@ function ChangedFiles({ files, onOpen }: { files: FileChange[]; onOpen?: () => v
               className="grid h-7 w-full grid-cols-[minmax(0,1fr)_auto] items-center gap-3 rounded-md px-1.5 text-left font-mono text-[12px] text-muted transition-colors enabled:hover:bg-fg/[0.05] enabled:hover:text-fg"
             >
               <span className="truncate">{f.path}</span>
-              <Stat stat={{ files: 1, additions: f.additions, deletions: f.deletions }} className="text-[11px]" />
+              {f.counted !== false && <Stat stat={{ files: 1, additions: f.additions, deletions: f.deletions }} className="text-[11px]" />}
             </button>
           </li>
         ))}
-        {diffs.length > 8 && <li className="px-1.5 py-1 text-[11.5px] text-subtle">and {diffs.length - 8} more</li>}
+        {more > 0 && <li className="px-1.5 py-1 text-[11.5px] text-subtle">and {more} more</li>}
       </ul>
     </div>
   );

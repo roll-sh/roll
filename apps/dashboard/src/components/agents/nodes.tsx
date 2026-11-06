@@ -488,7 +488,7 @@ export function ThreadNode({ thread, machine }: { thread: Thread; machine: Machi
         {(thread.orchestrator || thread.change || thread.work || thread.worktree || terminals > 0 || origin) && (
           <div data-detail className="mt-2 flex min-w-0 items-center gap-2 text-[11px] text-subtle">
             {origin && <AutomationChip origin={origin} />}
-            {orchestrated && <OrchestratorChip {...orchestrated} />}
+            {orchestrated && <OrchestratorChip {...orchestrated} onOpen={openThread} />}
             {thread.change && <ChangeChip change={thread.change} />}
             {thread.work && <WorkChip work={thread.work} className="min-w-0 flex-1" />}
             {thread.worktree && (
@@ -515,7 +515,11 @@ export function ThreadNode({ thread, machine }: { thread: Thread; machine: Machi
           </span>
           <span className="ml-auto flex shrink-0 items-center gap-1.5 font-mono text-[10.5px]">
             {usage}
-            <Stat stat={lastRun?.status === "rolled_back" ? null : lastRun?.stat} />
+            {lastRun?.stat && lastRun.status !== "rolled_back" && (lastRun.stat.additions > 0 || lastRun.stat.deletions > 0) && (
+              <span title={`Run ${lastRun.ordinal}'s changes`}>
+                <Stat stat={lastRun.stat} />
+              </span>
+            )}
             {thread.context && <ContextMeter context={thread.context} size={12} label />}
           </span>
         </p>

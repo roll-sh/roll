@@ -691,6 +691,7 @@ mod tests {
             completed_at: None,
             checkpoint: None,
             stat: None,
+            files: Vec::new(),
             usage: Usage::default(),
             context: None,
             error: None,

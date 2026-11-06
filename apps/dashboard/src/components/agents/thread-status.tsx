@@ -7,31 +7,52 @@
  * in `identity.tsx`.
  */
 
-import { Workflow } from "lucide-react";
+import { ChevronDown, Workflow } from "lucide-react";
 import { isBusy, type Request, type Run, type Thread } from "@/lib/agents-api";
+import { Menu, MenuGroup, MenuGroupLabel, MenuItem, MenuPopup, MenuTrigger } from "./ui/menu";
 
 /**
- * What an orchestrator has spun up: the agents it started (delegated threads), how many still run
- * and how many wait for you (not running: the header's count says the same).
+ * What an orchestrator has spun up: the agents it started (delegated threads, oldest first), how
+ * many still run and how many wait for you (not running: the header's count says the same).
  */
-export function orchestration(thread: Thread, threads: Iterable<Thread>): { started: number; running: number; waiting: number } {
-  let started = 0;
+export function orchestration(thread: Thread, threads: Iterable<Thread>): { started: number; running: number; waiting: number; agents: Thread[] } {
   let running = 0;
   let waiting = 0;
+  const agents: Thread[] = [];
   for (const t of threads) {
     if (t.lineage?.parent !== thread.id || t.lineage.relation !== "subagent") continue;
-    started++;
+    agents.push(t);
     if (t.status === "waiting") waiting++;
     else if (isBusy(t.status)) running++;
   }
-  return { started, running, waiting };
+  agents.sort((a, b) => a.created_at - b.created_at || a.id.localeCompare(b.id));
+  return { started: agents.length, running, waiting, agents };
 }
 
-/** An orchestrator's mark (the palette's `Workflow` glyph), with the agents it started, how many still run and how many wait. */
-export function OrchestratorChip({ started, running, waiting = 0, className = "" }: { started: number; running: number; waiting?: number; className?: string }) {
+/**
+ * An orchestrator's mark (the palette's `Workflow` glyph), with the agents it started, how many
+ * still run and how many wait. With `onOpen` it's a menu of those agents, each opening its
+ * conversation: a finished subagent leaves the canvas, and this is the way back to it (T3's
+ * subagent rows open their threads the same way).
+ */
+export function OrchestratorChip({
+  started,
+  running,
+  waiting = 0,
+  agents = [],
+  onOpen,
+  className = "",
+}: {
+  started: number;
+  running: number;
+  waiting?: number;
+  agents?: readonly Thread[];
+  onOpen?: (id: string) => void;
+  className?: string;
+}) {
   const label = `Orchestrator${started ? ` · ${started} agent${started === 1 ? "" : "s"}${running ? `, ${running} running` : ""}${waiting ? `, ${waiting} waiting for you` : ""}` : ""}`;
-  return (
-    <span aria-label={label} title={label} className={`inline-flex min-w-0 shrink-0 items-center gap-1 rounded-full border border-line-2 px-1.5 py-px text-[10.5px] leading-[16px] text-muted ${className}`}>
+  const body = (
+    <>
       <Workflow className={`size-3 shrink-0 ${running ? "text-accent" : ""}`} aria-hidden />
       <span aria-hidden>Orchestrator</span>
       {started > 0 && (
@@ -41,8 +62,53 @@ export function OrchestratorChip({ started, running, waiting = 0, className = ""
           {waiting > 0 && <span className="text-accent"> · {waiting} waiting</span>}
         </span>
       )}
+    </>
+  );
+  const chip = `inline-flex min-w-0 shrink-0 items-center gap-1 rounded-full border border-line-2 px-1.5 py-px text-[10.5px] leading-[16px] text-muted ${className}`;
+  if (!onOpen || agents.length === 0)
+    return (
+      <span aria-label={label} title={label} className={chip}>
+        {body}
+      </span>
+    );
+  return (
+    // The card under it opens its own thread on a click: picks here stay here (a portal still bubbles in React).
+    <span className="inline-flex min-w-0 shrink-0" data-nodrag onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}>
+      <Menu>
+        <MenuTrigger
+          aria-label={`${label}: open one`}
+          title={label}
+          className={`${chip} cursor-pointer transition-colors duration-150 hover:border-line-3 hover:text-fg data-popup-open:border-line-3 data-popup-open:text-fg`}
+        >
+          {body}
+          <ChevronDown className="size-3 shrink-0" aria-hidden />
+        </MenuTrigger>
+        <MenuPopup aria-label="Agents it started" align="start" sideOffset={6} className="w-72">
+          <MenuGroup>
+            <MenuGroupLabel>Agents it started</MenuGroupLabel>
+            {agents.map((t) => {
+              const s = subagentState(t);
+              return (
+                <MenuItem key={t.id} onClick={() => onOpen(t.id)} aria-label={`${t.title}, ${s.label}`}>
+                  <span aria-hidden className={`size-1.5 shrink-0 rounded-full ${toneDot[s.tone]} ${s.pulse ? "pulse-dot" : ""}`} />
+                  <span className="min-w-0 flex-1 truncate">{t.title}</span>
+                  <span className={`shrink-0 text-[11px] ${toneText[s.tone]}`}>{s.label}</span>
+                </MenuItem>
+              );
+            })}
+          </MenuGroup>
+        </MenuPopup>
+      </Menu>
     </span>
   );
+}
+
+/** One word for a delegated agent in its orchestrator's menu (its runs aren't loaded there). */
+function subagentState(t: Thread): ThreadPill {
+  if (t.status === "waiting" || t.pending_requests > 0) return { label: "Needs you", tone: "accent", pulse: false };
+  if (isBusy(t.status)) return { label: "Working", tone: "accent", pulse: true };
+  if (t.status === "error" || t.error) return { label: "Failed", tone: "danger", pulse: false };
+  return { label: "Done", tone: "muted", pulse: false };
 }
 
 export type PillTone = "accent" | "ok" | "danger" | "muted";

@@ -288,6 +288,25 @@
     "idle_compaction": false,
     "requested_at": 1762000000000,
     "started_at": 1762000000020,
+    "stat": {
+      "files": 2,
+      "additions": 3,
+      "deletions": 1
+    },
+    "files": [
+      {
+        "path": "src/queue.rs",
+        "change": "modify",
+        "additions": 2,
+        "deletions": 1
+      },
+      {
+        "path": "tests/queue_flaky.rs",
+        "change": "add",
+        "additions": 1,
+        "deletions": 0
+      }
+    ],
     "usage": {
       "input_tokens": 0,
       "output_tokens": 0,

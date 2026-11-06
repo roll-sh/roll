@@ -350,6 +350,7 @@ impl Host {
             completed_at: None,
             checkpoint: None,
             stat: None,
+            files: Vec::new(),
             usage: Usage::default(),
             context: None,
             error: None,
@@ -373,7 +374,7 @@ impl Host {
 
         if rt.git && rt.private.head.is_none() {
             match self.capture(rt, 0, None).await {
-                Ok(base) => batch.push(Entity::Checkpoint(base)),
+                Ok((base, _)) => batch.push(Entity::Checkpoint(base)),
                 Err(e) => tracing::warn!("base checkpoint of {}: {e:#}", rt.thread.id),
             }
         }
@@ -1031,9 +1032,10 @@ impl Host {
         run.usage = active.usage_done;
         if rt.git && rt.private.head.is_some() {
             match self.capture(rt, run.ordinal, Some(run.id.clone())).await {
-                Ok(checkpoint) => {
+                Ok((checkpoint, files)) => {
                     run.checkpoint = Some(checkpoint.id.clone());
                     run.stat = Some(checkpoint.stat);
+                    run.files = files;
                     batch.push(Entity::Checkpoint(checkpoint));
                 }
                 Err(e) => tracing::warn!("checkpoint of {}: {e:#}", run.id),
@@ -1076,14 +1078,15 @@ impl Host {
         Ok(())
     }
 
-    /// Snapshots the thread's files as checkpoint `ordinal`.
-    pub(crate) async fn capture(&self, rt: &mut Rt, ordinal: u32, run: Option<RunId>) -> anyhow::Result<Checkpoint> {
+    /// Snapshots the thread's files as checkpoint `ordinal`, with the files it changed since the
+    /// one before (at most [`RUN_FILES_MAX`]).
+    pub(crate) async fn capture(&self, rt: &mut Rt, ordinal: u32, run: Option<RunId>) -> anyhow::Result<(Checkpoint, Vec<FileStat>)> {
         let cwd = Path::new(&rt.thread.cwd);
         let refname = format!("refs/roll/checkpoints/{}/{ordinal}", rt.thread.id);
         let commit = crate::git::capture(cwd, &refname, &format!("roll checkpoint {} {ordinal}", rt.thread.id)).await?;
-        let stat = match &rt.private.head {
-            Some(from) => crate::git::stat(cwd, from, &commit).await?,
-            None => DiffStat::default(),
+        let (stat, files) = match &rt.private.head {
+            Some(from) => crate::git::stat_files(cwd, from, &commit, RUN_FILES_MAX).await?,
+            None => (DiffStat::default(), Vec::new()),
         };
         let checkpoint = Checkpoint {
             id: CheckpointId::from_suffix(&suffix()),
@@ -1097,7 +1100,7 @@ impl Host {
         if let Some(from) = rt.private.head.replace(commit) {
             rt.private.from.insert(checkpoint.id.0.clone(), from);
         }
-        Ok(checkpoint)
+        Ok((checkpoint, files))
     }
 
     async fn steer(&self, rt: &mut Rt, input: TurnInput) -> Res<()> {
