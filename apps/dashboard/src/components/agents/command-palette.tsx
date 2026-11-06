@@ -10,6 +10,13 @@ import {
   ArrowUp,
   Bell,
   Inbox,
+  Bookmark,
+  Eye,
+  EyeOff,
+  Pencil,
+  Rows3,
+  SlidersHorizontal,
+  Trash2,
   Bot,
   Check,
   ChevronLeft,
@@ -35,6 +42,8 @@ import { useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, type
 import { createPortal } from "react-dom";
 import { isBusy, reachable, type Machine, type Thread } from "@/lib/agents-api";
 import type { Direction } from "@/lib/agents-layout";
+import { ALL, HIDEABLE, type Display, type Hideable } from "@/lib/agents-views";
+import { requestView } from "./views";
 import { rolling } from "@/lib/agents-graph";
 import { agentsPalette, closePalette, noteThreadOpen, threadOpens, usePalette, type PaletteIntent } from "@/lib/agents-palette";
 import { setAgentsView, useAgentsSurface } from "@/lib/agents-surface";
@@ -70,6 +79,32 @@ const SHELF_NAME: Record<Exclude<Shelf, "active">, string> = { settled: "Settled
 
 const ICON = "size-4 text-subtle";
 
+const HIDE_NAMES: Record<Hideable, string> = { idle: "idle threads", terminals: "terminals" };
+
+/** The Display popover's choices as rows, each saying what it does to the view now (Linear's ⌘K display). */
+function displayItems(host: PaletteHost): PaletteItem[] {
+  const d = host.display;
+  const set = (patch: Partial<Display>) => () => {
+    setAgentsView({ kind: "canvas" });
+    host.setDisplay({ ...d, ...patch });
+  };
+  const hidden = d.hide ?? [];
+  return [
+    { kind: "action", value: "display:density", title: d.density === "compact" ? "Comfortable cards" : "Compact cards", icon: <Rows3 className={ICON} />, run: set({ density: d.density === "compact" ? undefined : "compact" }) },
+    ...HIDEABLE.map(
+      (h): PaletteItem => ({
+        kind: "action",
+        value: `display:hide:${h}`,
+        title: hidden.includes(h) ? `Show ${HIDE_NAMES[h]}` : `Hide ${HIDE_NAMES[h]}`,
+        icon: hidden.includes(h) ? <Eye className={ICON} /> : <EyeOff className={ICON} />,
+        run: set({ hide: hidden.includes(h) ? hidden.filter((x) => x !== h) : [...hidden, h] }),
+      }),
+    ),
+    { kind: "action", value: "display:group", title: d.group === "project" ? "Group by machine" : "Group by project", icon: <LayoutGrid className={ICON} />, run: set({ group: d.group === "project" ? undefined : "project" }) },
+    { kind: "action", value: "display:projects", title: d.projects === "all" ? "Fold projects with nothing on the canvas" : "Show every project", icon: <Folder className={ICON} />, run: set({ projects: d.projects === "all" ? undefined : "all" }) },
+  ];
+}
+
 /** What the palette can do that only the surface knows. */
 export interface PaletteHost {
   addMachine: () => void;
@@ -84,6 +119,11 @@ export interface PaletteHost {
   /** Which way the shown view's tree grows, and switching it (saved with the view). */
   direction: Direction;
   setDirection: (d: Direction) => void;
+  /** The shown view's display options, and changing them (saved with the view). */
+  display: Display;
+  setDisplay: (d: Display) => void;
+  /** Delete a saved view (All shows then). */
+  deleteView: (id: string) => void;
   /** The project filling the canvas, and focusing one (`null`: everything again). */
   focused: string | null;
   focusProject: (project: string | null) => void;
@@ -225,6 +265,7 @@ function PaletteDialog({ session, intent, host }: { session: number; intent: Pal
     });
     const open = openRecord?.value ?? null;
     const at = openRecord?.machine ?? "";
+    const currentView = host.views.find((x) => x.id === host.view)?.name ?? "All";
     const actions: (PaletteItem | false)[] = [
       { kind: "submenu", value: "action:orchestrate", title: "Orchestrate…", searchTerms: ["goal", "plan", "spin up", "agents", "delegate", "prompt"], description: "Say what to get done: an orchestrator plans it and spins up agents", icon: <Workflow className="size-4 text-accent" />, view: goalView("") },
       { kind: "action", value: "action:new", title: "New agent", searchTerms: ["new thread", "launch", "start", "conversation"], icon: <Plus className={ICON} />, run: () => startNew?.() },
@@ -355,6 +396,25 @@ function PaletteDialog({ session, intent, host }: { session: number; intent: Pal
           ],
         },
       },
+      { kind: "action", value: "action:new-view", title: "New view…", searchTerms: ["save", "filter", "bookmark", "canvas"], icon: <Bookmark className={ICON} />, shortcut: "⌥S", run: () => (setAgentsView({ kind: "canvas" }), requestView("new")) },
+      host.view !== ALL && { kind: "action", value: "action:rename-view", title: `Rename view “${currentView}”…`, searchTerms: ["view", "name"], icon: <Pencil className={ICON} />, run: () => (setAgentsView({ kind: "canvas" }), requestView("rename")) },
+      host.view !== ALL && {
+        kind: "submenu",
+        value: "action:delete-view",
+        title: `Delete view “${currentView}”…`,
+        searchTerms: ["view", "remove"],
+        icon: <Trash2 className={ICON} />,
+        view: { label: "Delete view", placeholder: "Delete it?", groups: [{ value: "confirm", label: "It can't be undone", items: [{ kind: "action" as const, value: "delete-view:yes", title: `Delete “${currentView}”`, icon: <Trash2 className={ICON} />, run: () => host.deleteView(host.view) }] }] },
+      },
+      {
+        kind: "submenu",
+        value: "action:display",
+        title: "Display options…",
+        searchTerms: ["density", "compact", "comfortable", "hide", "idle", "terminals", "group", "projects", "layout"],
+        icon: <SlidersHorizontal className={ICON} />,
+        view: { label: "Display options", placeholder: "Change how the canvas shows…", groups: [{ value: "display", label: currentView, items: displayItems(host) }] },
+      },
+      { kind: "action", value: "action:settings", title: "Agents settings", searchTerms: ["owner", "preferences", "configure", "providers", "endpoints", "gateway", "integrations"], icon: <Settings2 className={ICON} />, shortcut: "⌘,", run: () => setAgentsView({ kind: "settings", target: "owner" }) },
       { kind: "action", value: "action:fit", title: "Fit the canvas", searchTerms: ["zoom", "view", "overview", "all"], icon: <Maximize className={ICON} />, shortcut: "1", run: () => (setAgentsView({ kind: "canvas" }), host.fit()) },
       host.direction === "vertical"
         ? { kind: "action", value: "action:direction", title: "Lay out left to right", searchTerms: ["horizontal", "direction", "layout", "sideways", "tree"], icon: <ArrowRightFromLine className={ICON} />, shortcut: "⇧D", run: () => (setAgentsView({ kind: "canvas" }), host.setDirection("horizontal")) }
@@ -417,7 +477,7 @@ function PaletteDialog({ session, intent, host }: { session: number; intent: Pal
     };
     // Rebuilt when the records change; `query` only tags thread picks.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [data, projects, machines, openRecord, host, targets, query, auto.automations, auto.store, inboxActions, ctx]);
+  }, [data, projects, machines, openRecord, host, targets, query, auto.automations, auto.store, auto.notices, auto.noticesSeen, inboxActions, ctx]);
 
   const shown: PaletteGroup[] = useMemo(() => {
     if (view?.panel) return [];

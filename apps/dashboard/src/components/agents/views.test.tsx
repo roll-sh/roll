@@ -101,6 +101,61 @@ describe("canvas views", () => {
     await waitFor(() => expect((lastSaved(services)!.views as unknown[]).length).toBe(2));
   });
 
+  it("the filter field: ⌥S saves from inside it, ↓ goes to the first result, Save view appears without moving it (17, 19, 26)", async () => {
+    setup();
+    const field = screen.getByRole("textbox", { name: "Filter threads" });
+    await userEvent.type(field, "next");
+    // Save view and Clear come in left of the field: it stays where it was.
+    const save = screen.getByRole("button", { name: "Save view" });
+    expect(save.compareDocumentPosition(field) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    // ↓ (or Enter) goes to the first card the filter shows.
+    await userEvent.keyboard("{ArrowDown}");
+    expect(document.activeElement?.closest("[data-card]")).toHaveAttribute("data-key", "t:thr_2");
+    // ⌥S while typing in it saves the filter as a view.
+    await userEvent.click(field);
+    await userEvent.keyboard("{Alt>}s{/Alt}");
+    const dialog = screen.getByRole("dialog", { name: "New view" });
+    expect(field).toHaveValue("next");
+    await userEvent.keyboard("{Escape}");
+    // With nothing filtered, a new view can't be made (it would be All).
+    await userEvent.clear(field);
+    await userEvent.click(screen.getByRole("button", { name: "New view" }));
+    const empty = screen.getByRole("dialog", { name: "New view" });
+    await userEvent.type(within(empty).getByRole("textbox", { name: "View name" }), "Everything");
+    expect(within(empty).getByRole("button", { name: "Create view" })).toBeDisabled();
+    await userEvent.click(within(empty).getByRole("button", { name: "Waiting on me" }));
+    expect(within(empty).getByRole("button", { name: "Create view" })).toBeEnabled();
+    expect(dialog).not.toBeInTheDocument();
+  });
+
+  it("⌘K has the view's display options, new/rename/delete view and the agents settings (25)", async () => {
+    setup();
+    const run = async (q: string, pick?: string) => {
+      await userEvent.keyboard("{Meta>}k{/Meta}");
+      await userEvent.type(await screen.findByRole("combobox"), q);
+      if (pick) {
+        await userEvent.keyboard("{Enter}");
+        await userEvent.type(within(screen.getByRole("dialog", { name: "Command palette" })).getByRole("combobox"), pick);
+      }
+      await userEvent.keyboard("{Enter}");
+      await waitFor(() => expect(screen.queryByRole("dialog", { name: "Command palette" })).toBeNull());
+    };
+    await run("display options", "compact cards");
+    expect(document.querySelector("[data-density]")).toHaveAttribute("data-density", "compact");
+    await run("new view");
+    expect(screen.getByRole("dialog", { name: "New view" })).toBeInTheDocument();
+    await userEvent.keyboard("{Escape}");
+    await userEvent.click(tab(/Waiting on me/));
+    await run("rename view");
+    expect(screen.getByRole("textbox", { name: "View name" })).toHaveValue("Waiting on me");
+    await userEvent.keyboard("{Escape}");
+    await run("delete view", "delete");
+    expect(screen.queryByRole("tab", { name: /Waiting on me/ })).toBeNull();
+    expect(tab("All")).toHaveAttribute("aria-selected", "true");
+    await run("agents settings");
+    expect(agentsSurface.get().view).toEqual({ kind: "settings", target: "owner" });
+  }, 15_000);
+
   it("edits a view's filters as toggles", async () => {
     setup();
     await userEvent.click(tab(/Running/));

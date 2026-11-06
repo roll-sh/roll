@@ -187,6 +187,25 @@ export function useCanvasViews(canvas: AgentsServices["canvas"] | undefined, own
 
 const typing = (el: Element | null) => !!el && ((el as HTMLElement).isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName) || !!el.closest(".xterm"));
 
+type ViewRequest = "new" | "rename";
+const viewRequests = new Set<(r: ViewRequest) => void>();
+
+/** ⌘K's "New view…" and "Rename view…": the bar opens its editor or the tab's name field. */
+export function requestView(r: ViewRequest) {
+  for (const fn of viewRequests) fn(r);
+}
+
+/**
+ * The first card a filter shows, in reading order (top to bottom, then left to right): ↓ or Enter
+ * in the filter field goes there.
+ */
+export function firstShownCard(root: ParentNode = document): HTMLElement | null {
+  const cards = [...root.querySelectorAll<HTMLElement>('[data-card][data-key^="t:"]')];
+  const at = (el: HTMLElement) => el.getBoundingClientRect();
+  cards.sort((a, b) => at(a).top - at(b).top || at(a).left - at(b).left);
+  return cards[0] ?? null;
+}
+
 /**
  * The views bar over the canvas: All and the owner's views as tabs (with how many threads each
  * picks), a filter field and the filter editor, and saving what's filtered as a view. Keys (not
@@ -199,6 +218,7 @@ export function ViewsBar({
   active,
   phone,
   focused,
+  reveal,
 }: {
   views: CanvasViews;
   data: AgentsData;
@@ -206,6 +226,8 @@ export function ViewsBar({
   phone: boolean;
   /** The project filling the canvas: a chip that lets go of it. */
   focused?: { id: string; name: string; clear: () => void };
+  /** Bring a card into view (↓ / Enter from the filter field goes to the first result). */
+  reveal?: (key: string) => void;
 }) {
   const [editor, setEditor] = useState<null | { mode: "new" | "edit" }>(null);
   const [renaming, setRenaming] = useState<string | null>(null);
@@ -218,6 +240,23 @@ export function ViewsBar({
   const draftActive = onAll && !isEmptyFilter(v.filter);
 
   const { views, select } = v;
+  const currentId = v.current.id;
+  useEffect(() => {
+    const on = (r: ViewRequest) => {
+      if (r === "new") setEditor({ mode: "new" });
+      else if (currentId !== ALL) setRenaming(currentId);
+    };
+    viewRequests.add(on);
+    return () => void viewRequests.delete(on);
+  }, [currentId]);
+  // ↓ / Enter in the filter field: the first card it shows.
+  const toResults = () => {
+    const card = firstShownCard(bar.current?.parentElement ?? document);
+    if (!card) return false;
+    (card.querySelector<HTMLElement>("[data-drag][tabindex='0']") ?? card).focus({ preventScroll: true });
+    if (card.dataset.key) reveal?.(card.dataset.key);
+    return true;
+  };
   useEffect(() => {
     if (!active) return;
     const onKey = (e: KeyboardEvent) => {
@@ -349,6 +388,18 @@ export function ViewsBar({
             </button>
           </span>
         )}
+        {/* Left of the field, so the field stays where it is as they appear. */}
+        {draftActive && (
+          <>
+            <button onClick={() => setEditor({ mode: "new" })} title="Save as a view (⌥S)" className="flex h-7 items-center gap-1 rounded-md bg-fg px-2 text-[12px] font-medium text-bg transition hover:opacity-85">
+              <Bookmark className="size-3.5" />
+              <span className="max-sm:sr-only">Save view</span>
+            </button>
+            <button onClick={() => v.setFilter({})} title="Clear the filter" aria-label="Clear the filter" className="grid size-7 place-items-center rounded-md text-subtle hover:bg-panel-2 hover:text-fg">
+              <X className="size-3.5" />
+            </button>
+          </>
+        )}
         {!phone && (
           <label className="flex h-7 w-56 items-center gap-1.5 rounded-md border border-line bg-fg/[0.03] px-2 text-subtle inset-shadow-highlight transition-colors duration-150 hover:border-line-2 focus-within:border-accent/50 focus-within:text-fg">
             <Search className="size-3.5 shrink-0" strokeWidth={1.75} />
@@ -361,6 +412,12 @@ export function ViewsBar({
                   e.stopPropagation();
                   if (v.filter.text) v.setFilter({ ...v.filter, text: "" });
                   else e.currentTarget.blur();
+                } else if (e.altKey && e.code === "KeyS") {
+                  // ⌥S saves the filter as a view here too (on a Mac it would type ß).
+                  e.preventDefault();
+                  setEditor({ mode: "new" });
+                } else if ((e.key === "ArrowDown" || e.key === "Enter") && !e.altKey && !e.metaKey && !e.ctrlKey && !e.shiftKey) {
+                  if (toResults()) e.preventDefault();
                 }
               }}
               placeholder={onAll ? "Filter threads…  /" : `Filter ${v.current.name}…`}
@@ -381,17 +438,6 @@ export function ViewsBar({
           <ListFilter className="size-3.5" strokeWidth={1.75} />
           {filters > 0 && <span className="font-mono text-[10.5px] text-accent tabular-nums">{filters}</span>}
         </button>
-        {draftActive && (
-          <>
-            <button onClick={() => setEditor({ mode: "new" })} title="Save as a view (⌥S)" className="flex h-7 items-center gap-1 rounded-md bg-fg px-2 text-[12px] font-medium text-bg transition hover:opacity-85">
-              <Bookmark className="size-3.5" />
-              <span className="max-sm:sr-only">Save view</span>
-            </button>
-            <button onClick={() => v.setFilter({})} title="Clear the filter" aria-label="Clear the filter" className="grid size-7 place-items-center rounded-md text-subtle hover:bg-panel-2 hover:text-fg">
-              <X className="size-3.5" />
-            </button>
-          </>
-        )}
       </div>
       {editor && (
         <FilterEditor
@@ -604,7 +650,7 @@ function FilterEditor({
   const providers = new Map<string, string>();
   for (const m of machines) for (const p of m.info?.providers ?? []) if (p.installed) providers.set(p.id, p.name);
   for (const r of data.threads.values()) if (!providers.has(r.value.provider)) providers.set(r.value.provider, r.value.provider);
-  const save = () => name.trim() && onSave(name, f);
+  const save = () => name.trim() && !isEmptyFilter(f) && onSave(name, f);
 
   return (
     <div
@@ -690,7 +736,12 @@ function FilterEditor({
             <button onClick={onClose} className="h-7 rounded-md px-3 text-[12px] text-muted hover:bg-panel-2 hover:text-fg">
               Cancel
             </button>
-            <button onClick={save} disabled={!name.trim()} className="h-7 rounded-md bg-fg px-3 text-[12px] font-medium text-bg hover:opacity-85 disabled:opacity-40">
+            <button
+              onClick={save}
+              disabled={!name.trim() || isEmptyFilter(f)}
+              title={isEmptyFilter(f) ? "Pick what it shows first: a view with no filter is All" : undefined}
+              className="h-7 rounded-md bg-fg px-3 text-[12px] font-medium text-bg hover:opacity-85 disabled:opacity-40"
+            >
               Create view
             </button>
           </>

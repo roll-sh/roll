@@ -26,6 +26,8 @@ export function openMachineSettings(machine: string, section?: string, then?: (e
   if (!section || typeof document === "undefined") return;
   let tries = 0;
   const find = () => {
+    // The page went away while it looked (a test's document torn down).
+    if (typeof document === "undefined") return;
     const el = document.querySelector<HTMLElement>(`[data-panel] section[aria-label="${CSS.escape(section)}"], section[aria-label="${CSS.escape(section)}"]`);
     if (el) {
       const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;

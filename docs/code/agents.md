@@ -1664,8 +1664,12 @@ The surface has three views:
   projects, thread status: running, waiting on me, errors, recent; providers; a text match on the
   title, project and machine) with its own sibling order and its own frame (pan and zoom, per
   device). It starts with "Waiting on me" and "Running"; views are created with + (or from All's
-  filter: type in the filter field or open the filter editor, then "Save view" or ⌥S), renamed
-  (double-click or the tab's menu), reordered (drag a tab, or "Move left/right") and deleted. A
+  filter: type in the filter field or open the filter editor, then "Save view" or ⌥S, in the
+  field too), renamed (double-click or the tab's menu), reordered (drag a tab, or "Move
+  left/right") and deleted; ⌘K has New view, Rename and Delete the shown view, and its Display
+  options. A view with no filter would be All, so it can't be created. In the filter field ↓ or
+  Enter goes to the first card it shows; "Save view" and Clear appear left of the field, which
+  stays put. A
   filter that picks threads keeps them, what they hang off and their satellites; one on machines
   or projects alone keeps them whole. Switching eases the cards to their new places and the frame
   to the view's (or fits it); ⌥1…⌥9 jump to a view (1 is All), `[` and `]` step, `/` filters

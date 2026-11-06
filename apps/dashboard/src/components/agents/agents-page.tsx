@@ -15,7 +15,7 @@ import { lastInputWasKeyboard } from "@/lib/input-modality";
 import type { AgentsServices } from "@/lib/agents-services";
 import { hashFor, isNewAgentKey, newAgentHint, setAgentsView, useAgentsSurface, viewFromHash, type AgentsView, type AutomationsView } from "@/lib/agents-surface";
 import { isBuilder } from "@/lib/automations-nav";
-import { ALL, applyDisplay, applyView, directionOf, focusOn, isPinned, keepProject, loadFocused, pinKey, setFocused as setFocusedIn, pinnedConversations, pinOf, projectOf, viewStorageKey, withDirection, type Pin as PinRec } from "@/lib/agents-views";
+import { ALL, applyDisplay, applyView, deleteView, directionOf, focusOn, isPinned, keepProject, loadFocused, pinKey, setFocused as setFocusedIn, pinnedConversations, pinOf, projectOf, viewStorageKey, withDirection, type Pin as PinRec } from "@/lib/agents-views";
 import { desktop, onDesktopDeepLink, useDesktop } from "@/lib/desktop";
 import { LINK_PARAMS, type IntegrationsLink } from "@/lib/integrations-api";
 import { useModelPrefsSync, useOwnerSettings } from "@/lib/owner-settings";
@@ -460,10 +460,16 @@ export function AgentsSurface({
       selectView: views.select,
       direction,
       setDirection,
+      display,
+      setDisplay,
+      deleteView: (id: string) => {
+        views.select(ALL);
+        views.update((d) => deleteView(d, id));
+      },
       focused,
       focusProject,
     }),
-    [showArchived, archived, views.views, views.current.id, views.select, direction, setDirection, focused, focusProject],
+    [showArchived, archived, views, direction, setDirection, display, setDisplay, focused, focusProject],
   );
   const hint = useSyncExternalStore(noSubscribe, () => newAgentHint(navigator.platform), () => "⌘N");
   const end = (
@@ -967,7 +973,7 @@ function CanvasView({
   const empty = graph.nodes.size === 0 && whole.nodes.size > 0;
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <ViewsBar views={views} data={data} active={visible} phone={phone} focused={focused ? { id: focused, name: data.projects.get(focused)?.value.name ?? "project", clear: () => onFocus(null) } : undefined} />
+      <ViewsBar views={views} data={data} active={visible} phone={phone} reveal={(k) => canvasRef.current?.reveal(k)} focused={focused ? { id: focused, name: data.projects.get(focused)?.value.name ?? "project", clear: () => onFocus(null) } : undefined} />
       <div className="relative min-h-0 flex-1">
         <CanvasProjectsProvider value={projects}>
           <AgentsCanvas
