@@ -34,7 +34,9 @@ import {
 } from "@/lib/agents-inbox";
 import { runsOf, type AgentsData } from "@/lib/agents-store";
 import { agentsSurface, setAgentsView } from "@/lib/agents-surface";
-import { AnimatePresence } from "motion/react";
+import { useReducedMotion } from "@roll/brand";
+import { AnimatePresence, motion, useIsPresent } from "motion/react";
+import { POP_IN, POP_OUT } from "@/lib/agents-motion";
 import { EdgeSheet, useAfterFirstFrame } from "./edge-sheet";
 import { Menu as ActionsMenu, type MenuItem as MenuEntry } from "./menu";
 import { useProjectActions } from "./project-actions";
@@ -177,15 +179,27 @@ export function InboxToast() {
       window.removeEventListener("input", onInput, true);
     };
   }, [toast]);
-  if (!toast) return null;
-  const at = toastPlace();
+  // It rises in and sinks back out (it vanished); a new one replaces it the same way.
+  return <AnimatePresence initial={false}>{toast && <UndoNotice key={toast.key} toast={toast} />}</AnimatePresence>;
+}
+
+function UndoNotice({ toast }: { toast: NonNullable<typeof toastNow> }) {
+  const reduced = useReducedMotion();
+  const present = useIsPresent();
+  const [at] = useState(toastPlace);
+  const t = reduced ? { duration: 0 } : POP_IN;
   return (
-    <div
-      key={toast.key}
-      role="status"
+    <motion.div
+      // Going, it's out of the way at once: no longer announced, and Undo no longer takes a click.
+      role={present ? "status" : undefined}
+      aria-hidden={!present || undefined}
       data-place={at.top ? "top" : "bottom"}
+      inert={!present}
+      initial={{ opacity: 0, y: at.top ? -6 : 6 }}
+      animate={{ opacity: 1, y: 0, transition: t }}
+      exit={{ opacity: 0, y: at.top ? -6 : 6, transition: reduced ? { duration: 0 } : POP_OUT }}
       style={{ ...(at.left === null ? {} : { left: at.left }), ...(at.bottom === null ? {} : { bottom: at.bottom }) }}
-      className={`rise fixed left-1/2 z-[70] flex max-w-[calc(100vw-2rem)] -translate-x-1/2 items-center gap-3 rounded-lg border border-outline px-3 py-2 text-[12.5px] shadow-pop inset-shadow-highlight glass ${
+      className={`fixed left-1/2 z-[70] flex max-w-[calc(100vw-2rem)] -translate-x-1/2 items-center gap-3 rounded-lg border border-outline px-3 py-2 text-[12.5px] shadow-pop inset-shadow-highlight glass ${
         at.top ? "top-[calc(env(safe-area-inset-top)+3.75rem)]" : "bottom-[calc(max(1rem,env(safe-area-inset-bottom))+4.75rem)]"
       }`}
     >
@@ -203,7 +217,7 @@ export function InboxToast() {
           Undo
         </button>
       )}
-    </div>
+    </motion.div>
   );
 }
 

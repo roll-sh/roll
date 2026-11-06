@@ -28,5 +28,7 @@ export const FADE_IN: Transition = { duration: 0.2, ease: "easeOut" };
 export const POP_IN: Transition = { duration: 0.2, ease: EASE_DRAWER };
 /** …and back out: a touch quicker, but long enough to be seen going. */
 export const POP_OUT: Transition = { duration: 0.17, ease: "easeIn" };
+/** A toast sliding in from the right edge (T3's ease-out quint, within the 300 ms UI limit). */
+export const TOAST_IN: Transition = { duration: 0.3, ease: [0.22, 1, 0.36, 1] };
 /** One pane replacing another in the same frame. */
 export const PANE_SWITCH: Transition = { duration: 0.2, ease: EASE_OUT_SOFT };

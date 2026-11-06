@@ -644,26 +644,13 @@ body {
   display: none;
 }
 
-/* A notice toast slides in from the right edge (T3's toasts: 0.5 s on an ease-out quint). */
-@keyframes toast-in {
-  from {
-    opacity: 0;
-    transform: translateX(24px);
-  }
-}
-
-.toast-in {
-  animation: toast-in 0.5s cubic-bezier(0.22, 1, 0.36, 1) both;
-}
-
 @media (prefers-reduced-motion: reduce) {
   .pop,
   .sheet-in,
   .stack-push,
   .stack-pop,
   .fade-in,
-  .chrome-in,
-  .toast-in {
+  .chrome-in {
     animation: none;
   }
 }

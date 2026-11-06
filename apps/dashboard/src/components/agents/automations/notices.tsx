@@ -11,7 +11,10 @@
  */
 
 import { CircleAlert, CircleCheck, Info, TriangleAlert, X } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useReducedMotion } from "@roll/brand";
+import { AnimatePresence, motion, useIsPresent } from "motion/react";
+import { forwardRef, useEffect, useMemo, useRef, useState } from "react";
+import { DRAWER, POP_OUT, TOAST_IN } from "@/lib/agents-motion";
 import type { AgentsClient } from "@/lib/agents-client";
 import type { AutomationRun, AutomationsApi, Notice } from "@/lib/automations-api";
 import { automationsFor, unseenNotices, useAutomationsState } from "@/lib/automations-store";
@@ -98,12 +101,14 @@ export function Notices() {
   const [shown, setShown] = useState<Notice[]>([]);
   useEffect(() => store?.onNotice((n) => setShown((s) => [n, ...s.filter((x) => x.id !== n.id)].slice(0, MAX))), [store]);
   const dismiss = (id: string) => setShown((s) => s.filter((x) => x.id !== id));
-  if (!shown.length) return null;
   return (
     <ol className="pointer-events-none absolute right-3 bottom-16 z-[60] flex w-[min(360px,calc(100%-1.5rem))] flex-col-reverse gap-2" aria-label="Notices" aria-live="polite">
-      {shown.map((n) => (
-        <Toast key={n.id} notice={n} onDismiss={() => dismiss(n.id)} />
-      ))}
+      {/* A toast that goes slides back out; the others glide into its place (they jumped). */}
+      <AnimatePresence initial={false} mode="popLayout">
+        {shown.map((n) => (
+          <Toast key={n.id} notice={n} onDismiss={() => dismiss(n.id)} />
+        ))}
+      </AnimatePresence>
     </ol>
   );
 }
@@ -111,7 +116,9 @@ export function Notices() {
 const icons = { info: Info, success: CircleCheck, warning: TriangleAlert, error: CircleAlert };
 const tones = { info: "text-muted", success: "text-ok", warning: "text-soft", error: "text-danger" };
 
-function Toast({ notice: n, onDismiss }: { notice: Notice; onDismiss: () => void }) {
+const Toast = forwardRef<HTMLLIElement, { notice: Notice; onDismiss: () => void }>(function Toast({ notice: n, onDismiss }, ref) {
+  const reduced = useReducedMotion();
+  const present = useIsPresent();
   const { runs } = useAutomations();
   const { openThread } = useAgents();
   const hover = useRef(false);
@@ -122,11 +129,20 @@ function Toast({ notice: n, onDismiss }: { notice: Notice; onDismiss: () => void
   const Icon = icons[n.level];
   const actions = noticeActions(n, n.run ? runs.get(n.run) : undefined, openThread);
   return (
-    <li
-      role="status"
+    <motion.li
+      ref={ref}
+      // Going: no longer announced, and its buttons no longer take a click.
+      role={present ? "status" : undefined}
+      aria-hidden={!present || undefined}
+      inert={!present}
+      layout={!reduced}
+      initial={{ opacity: 0, x: 24 }}
+      animate={{ opacity: 1, x: 0, transition: reduced ? { duration: 0 } : TOAST_IN }}
+      exit={{ opacity: 0, x: 24, transition: reduced ? { duration: 0 } : POP_OUT }}
+      transition={reduced ? { duration: 0 } : DRAWER}
       onPointerEnter={() => (hover.current = true)}
       onPointerLeave={() => (hover.current = false)}
-      className="toast-in pointer-events-auto rounded-[10px] border border-outline glass shadow-pop inset-shadow-highlight"
+      className="pointer-events-auto rounded-[10px] border border-outline glass shadow-pop inset-shadow-highlight"
     >
       <div className="flex items-start gap-2.5 py-2.5 pr-2 pl-3">
         <Icon className={cn("mt-px size-4 shrink-0", tones[n.level])} strokeWidth={1.75} aria-hidden />
@@ -155,6 +171,6 @@ function Toast({ notice: n, onDismiss }: { notice: Notice; onDismiss: () => void
           <X className="size-3.5" />
         </button>
       </div>
-    </li>
+    </motion.li>
   );
-}
+});
