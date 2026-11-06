@@ -104,7 +104,8 @@ export function AppShell({ crumb, actions, bleed = false, children }: { crumb: R
               <kbd className="rounded border border-line px-1.5 font-mono text-[10px] max-sm:hidden">⌘K</kbd>
             </button>
             <AgentsControl />
-            {actions}
+            {/* A page's buttons (Review, Land, sign-in) scroll sideways on a phone rather than widen the page. */}
+            <span className="flex min-w-0 shrink items-center gap-2 overflow-x-auto [scrollbar-width:none]">{actions}</span>
           </header>
 
           {bleed ? (

@@ -209,7 +209,8 @@ function OverviewTab({
         ]}
       />
       {repo.import && repo.import.state !== "done" && <ImportNote repo={repo} />}
-      <div className="grid gap-4 lg:grid-cols-5">
+      {/* min-w-0: a grid item is as wide as its widest line (the curl example), wider than a phone. */}
+      <div className="grid gap-4 lg:grid-cols-5 [&>*]:min-w-0">
         <Panel
           title="Landing"
           className="lg:col-span-3"
