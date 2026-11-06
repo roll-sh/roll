@@ -542,20 +542,6 @@ body {
   }
 }
 
-/* agents motion (docs/code/agents-design.md): popovers scale 0.98 → 1 with a fade in 150 ms;
-   sheets and panels glide on the drawer curve in 240 ms; nothing bounces. */
-@keyframes pop {
-  from {
-    opacity: 0;
-    transform: translateY(-2px) scale(0.98);
-  }
-}
-
-.pop {
-  animation: pop 0.15s var(--ease-out-soft) both;
-  transform-origin: top;
-}
-
 @keyframes fade-in {
   from {
     opacity: 0;
@@ -610,7 +596,6 @@ body {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .pop,
   .fade-in,
   .chrome-in {
     animation: none;

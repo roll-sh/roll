@@ -27,6 +27,7 @@ import { QueuedMessages } from "./queue";
 import { pickByDigit, pill, QuestionsPanel, quiet, useQuestionFlow } from "./request-card";
 import { Switch } from "./ui";
 import { newThreadSettings } from "./new-thread";
+import { Pop } from "./pop";
 import { useAgents, usePrefs } from "./use-agents";
 import { appendDraft, onCompose } from "@/lib/agents-compose";
 
@@ -614,24 +615,23 @@ export function Composer({
           </div>
         )
       )}
-      {slash.length > 0 && (
-        // The commands a `/` could be (T3's composer command menu): ↑↓ to choose, Enter or Tab to run.
-        <ul role="listbox" aria-label="Commands" className="pop absolute inset-x-3 bottom-full z-30 mb-2 rounded-lg border border-line bg-panel p-1 shadow-pop">
-          {slash.map((c, i) => (
-            <li key={c.name} role="option" aria-selected={i === Math.min(slashAt, slash.length - 1)}>
-              <button
-                type="button"
-                onMouseDown={(e) => e.preventDefault()}
-                onClick={() => runSlash(c)}
-                className={`flex w-full items-baseline gap-2 rounded-md px-2 py-1.5 text-left text-[12.5px] ${i === Math.min(slashAt, slash.length - 1) ? "bg-fg/[0.06]" : "hover:bg-fg/[0.04]"}`}
-              >
-                <span className="font-mono text-fg">/{c.name}</span>
-                <span className="min-w-0 truncate text-muted">{c.description}</span>
-              </button>
-            </li>
-          ))}
-        </ul>
-      )}
+      {/* The commands a `/` could be (T3's composer command menu): ↑↓ to choose, Enter or Tab to run;
+          it rises from the composer and sinks back when the `/` goes or one runs. */}
+      <Pop open={slash.length > 0} as="ul" from="up" role="listbox" aria-label="Commands" className="absolute inset-x-3 bottom-full z-30 mb-2 rounded-lg border border-line bg-panel p-1 shadow-pop">
+        {slash.map((c, i) => (
+          <li key={c.name} role="option" aria-selected={i === Math.min(slashAt, slash.length - 1)}>
+            <button
+              type="button"
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => runSlash(c)}
+              className={`flex w-full items-baseline gap-2 rounded-md px-2 py-1.5 text-left text-[12.5px] ${i === Math.min(slashAt, slash.length - 1) ? "bg-fg/[0.06]" : "hover:bg-fg/[0.04]"}`}
+            >
+              <span className="font-mono text-fg">/{c.name}</span>
+              <span className="min-w-0 truncate text-muted">{c.description}</span>
+            </button>
+          </li>
+        ))}
+      </Pop>
       <div
         className={`@container/composer relative z-10 rounded-2xl border bg-raised shadow-float inset-shadow-highlight transition-colors duration-200 ${dragging ? "border-accent/60 ring-1 ring-accent/40 ring-inset" : "border-outline"}`}
       >

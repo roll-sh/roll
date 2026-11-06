@@ -11,6 +11,8 @@
 import { Braces } from "lucide-react";
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { insertVariable, matchVariables, openTemplate, templateParts, type Variable } from "@/lib/automations-ui";
+import { useDismiss } from "../dismiss";
+import { Pop } from "../pop";
 import { cn } from "../ui";
 
 const box =
@@ -52,6 +54,9 @@ export function TemplateInput({
   const options = useMemo(() => (pick ? matchVariables(variables, pick.query).slice(0, 40) : []), [pick, variables]);
   // An open picker sits under the field: bring it into the panel's view (jsdom has no scrolling).
   const listEl = useRef<HTMLUListElement>(null);
+  // The variables close on a press or focus outside, Escape or a pick; never on a blur alone (Safari).
+  const wrap = useRef<HTMLDivElement>(null);
+  useDismiss(!!pick, [wrap], () => setPick(null));
   const open = !!pick && options.length > 0;
   useEffect(() => {
     if (open) listEl.current?.scrollIntoView?.({ block: "nearest" });
@@ -140,7 +145,6 @@ export function TemplateInput({
     onKeyUp: (e: KeyboardEvent) => !["ArrowDown", "ArrowUp", "Enter", "Tab", "Escape"].includes(e.key) && look(),
     onClick: look,
     onScroll: sync,
-    onBlur: () => setTimeout(() => setPick(null), 120),
     className: cn(
       "relative block w-full resize-none bg-transparent text-transparent caret-fg outline-none placeholder:text-faint selection:bg-accent/30 selection:text-transparent",
       multiline ? "py-[7px]" : "h-8 py-[5px] whitespace-pre",
@@ -149,7 +153,7 @@ export function TemplateInput({
   };
   const parts = templateParts(value);
   return (
-    <div className="relative">
+    <div ref={wrap} className="relative">
       <div className={cn(box, "relative pr-8", error && !open ? "border-danger/50" : "border-line-2")}>
         <div
           ref={back}
@@ -180,46 +184,46 @@ export function TemplateInput({
           <Braces className="size-3.5" strokeWidth={1.75} />
         </button>
       </div>
-      {pick && options.length > 0 && (
-        <ul
-          id={list}
-          ref={listEl}
-          role="listbox"
-          aria-label="Variables"
-          className="pop absolute inset-x-0 top-full z-[140] mt-1 max-h-64 overflow-y-auto rounded-[10px] border border-outline bg-panel-2 p-1 shadow-pop inset-shadow-highlight"
-          onMouseDown={(e) => e.preventDefault()}
-        >
-          {options.map((v, i) => {
-            const groupStart = i === 0 || options[i - 1].group !== v.group;
-            const s = sample?.(v.path);
-            return (
-              <li key={v.path} role="presentation">
-                {groupStart && <p className="px-2 pt-1.5 pb-1 text-[11px] font-medium text-subtle">{v.group}</p>}
-                <div
-                  id={`${list}-${i}`}
-                  role="option"
-                  aria-selected={i === index}
-                  onMouseEnter={() => setIndex(i)}
-                  onClick={() => choose(v)}
-                  className={cn("flex min-h-7 cursor-pointer items-center gap-2 rounded-md px-2 text-[12px]", i === index && "bg-fg/[0.08]")}
-                >
-                  <span className="min-w-0 truncate font-mono">
-                    {v.path.startsWith("event.data.") ? (
-                      <>
-                        <span className="text-subtle">event.data.</span>
-                        {v.path.slice(11)}
-                      </>
-                    ) : (
-                      v.path
-                    )}
-                  </span>
-                  <span className="ml-auto min-w-0 shrink truncate text-[11.5px] text-subtle">{s ?? v.hint}</span>
-                </div>
-              </li>
-            );
-          })}
-        </ul>
-      )}
+      <Pop
+      open={!!pick && options.length > 0}
+      as="ul"
+      id={list}
+      ref={listEl}
+      role="listbox"
+      aria-label="Variables"
+      className="absolute inset-x-0 top-full z-[140] mt-1 max-h-64 overflow-y-auto rounded-[10px] border border-outline bg-panel-2 p-1 shadow-pop inset-shadow-highlight"
+      onMouseDown={(e) => e.preventDefault()}
+    >
+        {options.map((v, i) => {
+          const groupStart = i === 0 || options[i - 1].group !== v.group;
+          const s = sample?.(v.path);
+          return (
+            <li key={v.path} role="presentation">
+              {groupStart && <p className="px-2 pt-1.5 pb-1 text-[11px] font-medium text-subtle">{v.group}</p>}
+              <div
+                id={`${list}-${i}`}
+                role="option"
+                aria-selected={i === index}
+                onMouseEnter={() => setIndex(i)}
+                onClick={() => choose(v)}
+                className={cn("flex min-h-7 cursor-pointer items-center gap-2 rounded-md px-2 text-[12px]", i === index && "bg-fg/[0.08]")}
+              >
+                <span className="min-w-0 truncate font-mono">
+                  {v.path.startsWith("event.data.") ? (
+                    <>
+                      <span className="text-subtle">event.data.</span>
+                      {v.path.slice(11)}
+                    </>
+                  ) : (
+                    v.path
+                  )}
+                </span>
+                <span className="ml-auto min-w-0 shrink truncate text-[11.5px] text-subtle">{s ?? v.hint}</span>
+              </div>
+            </li>
+          );
+        })}
+      </Pop>
       {error && !open ? (
         <p className="mt-1 text-[11.5px] text-danger">{error}</p>
       ) : preview != null ? (

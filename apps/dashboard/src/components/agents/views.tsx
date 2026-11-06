@@ -53,6 +53,10 @@ import { openShelf } from "@/lib/agents-shelf";
 import { openPalette } from "@/lib/agents-palette";
 import { Popover, PopoverPopup, PopoverTrigger, Segmented, Switch } from "./ui";
 import { SlidingThumb } from "./ui/thumb";
+import { useReducedMotion } from "@roll/brand";
+import { AnimatePresence, motion, type Transition } from "motion/react";
+import { POPOVER_IN, POPOVER_OUT } from "@/lib/agents-motion";
+import { useEnteringValue, usePresenceTracks } from "./presence";
 
 /** How long edits wait before they go to roll (typing a filter, resizing a card). */
 const SAVE_AFTER_MS = 350;
@@ -232,6 +236,10 @@ export function ViewsBar({
   reveal?: (key: string) => void;
 }) {
   const [editor, setEditor] = useState<null | { mode: "new" | "edit" }>(null);
+  // Each opening of the editor is a fresh one (reopened while the last fades, the two cross).
+  const opened = useRef({ was: false, n: 0 });
+  if (editor && !opened.current.was) opened.current.n++;
+  opened.current.was = !!editor;
   const [renaming, setRenaming] = useState<string | null>(null);
   const [dragging, setDragging] = useState<string | null>(null);
   const field = useRef<HTMLInputElement>(null);
@@ -447,22 +455,27 @@ export function ViewsBar({
           {filters > 0 && <span className="font-mono text-[10.5px] text-accent tabular-nums">{filters}</span>}
         </button>
       </div>
-      {editor && (
-        <FilterEditor
-          key={`${editor.mode}:${v.current.id}`}
-          bar={bar}
-          data={data}
-          mode={editor.mode === "new" ? "new" : onAll ? "draft" : "edit"}
-          name={editor.mode === "new" ? "" : v.current.name}
-          filter={v.filter}
-          onChange={editor.mode === "new" ? undefined : v.setFilter}
-          onSave={(name, f) => {
-            setEditor(null);
-            v.saveAs(name, f);
-          }}
-          onClose={() => setEditor(null)}
-        />
-      )}
+      {/* The editor pops in and out (it was gone in a frame) and stays put across tabs: only what's
+          inside starts over for another view (it replayed its pop on every tab). */}
+      <AnimatePresence>
+        {editor && (
+          <FilterShell key={`${editor.mode}:${opened.current.n}`} bar={bar} label={editor.mode === "new" ? "New view" : "View filters"} onClose={() => setEditor(null)}>
+            <FilterEditor
+              key={v.current.id}
+              data={data}
+              mode={editor.mode === "new" ? "new" : onAll ? "draft" : "edit"}
+              name={editor.mode === "new" ? "" : v.current.name}
+              filter={v.filter}
+              onChange={editor.mode === "new" ? undefined : v.setFilter}
+              onClose={() => setEditor(null)}
+              onSave={(name, f) => {
+                setEditor(null);
+                v.saveAs(name, f);
+              }}
+            />
+          </FilterShell>
+        )}
+      </AnimatePresence>
     </div>
   );
 }
@@ -612,9 +625,7 @@ function FilterEditor({
   onChange,
   onSave,
   onClose,
-  bar,
 }: {
-  bar: React.RefObject<HTMLElement | null>;
   data: AgentsData;
   mode: "new" | "draft" | "edit";
   name: string;
@@ -627,25 +638,6 @@ function FilterEditor({
   const [name, setName] = useState(mode === "new" ? "" : initialName);
   const f = onChange ? initial : own;
   const set = (next: ViewFilter) => (onChange ? onChange(next) : setOwn(next));
-  const box = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    const onDown = (e: PointerEvent) => {
-      const t = e.target as Element;
-      // The bar's own buttons (tabs, filters, new view) act on the editor themselves.
-      if (!box.current?.contains(t) && !bar.current?.contains(t)) onClose();
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key !== "Escape") return;
-      e.stopPropagation();
-      onClose();
-    };
-    window.addEventListener("pointerdown", onDown, true);
-    window.addEventListener("keydown", onKey, true);
-    return () => {
-      window.removeEventListener("pointerdown", onDown, true);
-      window.removeEventListener("keydown", onKey, true);
-    };
-  }, [onClose, bar]);
 
   const toggle = <K extends "machines" | "projects" | "status" | "providers">(k: K, value: string) => {
     const list = (f[k] ?? []) as string[];
@@ -661,12 +653,7 @@ function FilterEditor({
   const save = () => name.trim() && !isEmptyFilter(f) && onSave(name, f);
 
   return (
-    <div
-      ref={box}
-      role="dialog"
-      aria-label={mode === "new" ? "New view" : "View filters"}
-      className="pop absolute top-full right-2 z-30 mt-1.5 w-[min(380px,calc(100vw-1rem))] rounded-xl border border-line bg-panel p-3 text-[12.5px] shadow-[0_16px_40px_-16px_rgb(0_0_0/0.55)]"
-    >
+    <>
       {mode === "new" ? (
         <input
           autoFocus
@@ -761,7 +748,61 @@ function FilterEditor({
           disabled={isEmptyFilter(f)}
         />
       )}
-    </div>
+    </>
+  );
+}
+
+/**
+ * The filter editor's frame under the views bar: it pops in and out as Base UI's popovers do
+ * (`Pop`'s motion), and closes on a press outside it and the bar, or Escape.
+ */
+function FilterShell({ bar, label, onClose, children }: { bar: React.RefObject<HTMLElement | null>; label: string; onClose: () => void; children: ReactNode }) {
+  const box = useRef<HTMLDivElement>(null);
+  const reduced = useReducedMotion();
+  const none: Transition = { duration: 0 };
+  const opacity = useEnteringValue(0, 1);
+  const scale = useEnteringValue(0.98, 1);
+  const y = useEnteringValue(-2, 0);
+  const present = usePresenceTracks(
+    [
+      { value: opacity, shown: 1, hidden: 0, enter: reduced ? none : POPOVER_IN, leave: reduced ? none : POPOVER_OUT },
+      { value: scale, shown: 1, hidden: 0.98, enter: reduced ? none : POPOVER_IN, leave: reduced ? none : POPOVER_OUT },
+      { value: y, shown: 0, hidden: -2, enter: reduced ? none : POPOVER_IN, leave: reduced ? none : POPOVER_OUT },
+    ],
+    String(reduced),
+  );
+  useEffect(() => {
+    if (!present) return;
+    const onDown = (e: PointerEvent) => {
+      const t = e.target as Element;
+      // The bar's own buttons (tabs, filters, new view) act on the editor themselves.
+      if (!box.current?.contains(t) && !bar.current?.contains(t)) onClose();
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      e.stopPropagation();
+      onClose();
+    };
+    window.addEventListener("pointerdown", onDown, true);
+    window.addEventListener("keydown", onKey, true);
+    return () => {
+      window.removeEventListener("pointerdown", onDown, true);
+      window.removeEventListener("keydown", onKey, true);
+    };
+  }, [present, onClose, bar]);
+  return (
+    <motion.div
+      ref={box}
+      role="dialog"
+      aria-label={label}
+      data-state={present ? "open" : "closing"}
+      inert={!present}
+      aria-hidden={!present || undefined}
+      className="absolute top-full right-2 z-30 mt-1.5 w-[min(380px,calc(100vw-1rem))] rounded-xl border border-line bg-panel p-3 text-[12.5px] shadow-[0_16px_40px_-16px_rgb(0_0_0/0.55)]"
+      style={{ opacity, scale, y, transformOrigin: "top right" }}
+    >
+      {children}
+    </motion.div>
   );
 }
 

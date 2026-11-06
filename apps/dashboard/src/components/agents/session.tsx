@@ -40,6 +40,7 @@ import { Select } from "./ui";
 import { orchestration, OrchestratorChip, StatusPill, threadPill } from "./thread-status";
 import { EmptyTranscript, RunView, SubagentTranscript, type TranscriptActions } from "./transcript";
 import { findTree, SubagentBar } from "./subagents";
+import { Pop } from "./pop";
 import { useAgents, usePrefs } from "./use-agents";
 
 /** What sits beside the transcript: a diff (of one run, or `null` for the whole thread) or a terminal. */
@@ -710,69 +711,67 @@ function Switcher({ thread, onRename }: { thread: Thread; onRename?: () => void 
         <h2 className="truncate text-[13.5px] leading-tight font-semibold tracking-[-0.02em]">{thread.title}</h2>
         <ChevronDown className="size-3.5 shrink-0 text-subtle group-hover:text-fg" />
       </button>
-      {open && (
-        <div className="pop absolute top-full left-0 z-50 mt-1.5 flex w-[min(380px,calc(100vw-1.5rem))] flex-col rounded-lg border border-line bg-panel p-1">
-          <input
-            autoFocus
-            value={query}
-            onChange={(e) => {
-              setQuery(e.target.value);
-              setActive(0);
-            }}
-            onKeyDown={(e) => {
-              if (e.key === "ArrowDown" || e.key === "ArrowUp") {
-                e.preventDefault();
-                const n = others.length;
-                if (n) setActive((at + (e.key === "ArrowDown" ? 1 : n - 1)) % n);
-              } else if (e.key === "Enter") {
-                e.preventDefault();
-                pick(others[at]);
-              }
-            }}
-            role="combobox"
-            aria-label="Find a conversation"
-            aria-expanded
-            aria-controls="switcher-list"
-            aria-activedescendant={others[at] ? `switcher-${others[at].id}` : undefined}
-            placeholder="Find a conversation…"
-            className="mb-1 h-8 rounded-md bg-panel-2 px-2 text-[12.5px] outline-hidden placeholder:text-subtle"
-          />
-          <div ref={list} id="switcher-list" role="listbox" aria-label="Conversations" className="max-h-[min(60vh,420px)] overflow-y-auto" data-scroll>
-            {others.length === 0 && <p className="px-2 py-2 text-[12px] text-subtle">No conversation matches.</p>}
-            {others.map((t, i) => {
-              const p = data.projects.get(t.project)?.value;
-              return (
-                <button
-                  key={t.id}
-                  id={`switcher-${t.id}`}
-                  data-index={i}
-                  role="option"
-                  tabIndex={-1}
-                  aria-selected={i === at}
-                  aria-current={t.id === thread.id || undefined}
-                  onMouseMove={() => i !== at && setActive(i)}
-                  onClick={() => pick(t)}
-                  className={`flex w-full items-center gap-2.5 rounded-md px-2 py-1.5 text-left ${i === at ? "bg-panel-2" : ""}`}
-                >
-                  <StatusDot status={t.status} className="shrink-0" />
-                  <span className="min-w-0 flex-1">
-                    <span className="block truncate text-[12.5px]">{t.title}</span>
-                    <span className="block truncate text-[11px] text-subtle">
-                      {p?.name}
-                      {isBusy(t.status) && t.activity ? ` · ${t.activity}` : ""}
-                    </span>
+      <Pop open={open} className="absolute top-full left-0 z-50 mt-1.5 flex w-[min(380px,calc(100vw-1.5rem))] flex-col rounded-lg border border-line bg-panel p-1">
+        <input
+          autoFocus
+          value={query}
+          onChange={(e) => {
+            setQuery(e.target.value);
+            setActive(0);
+          }}
+          onKeyDown={(e) => {
+            if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+              e.preventDefault();
+              const n = others.length;
+              if (n) setActive((at + (e.key === "ArrowDown" ? 1 : n - 1)) % n);
+            } else if (e.key === "Enter") {
+              e.preventDefault();
+              pick(others[at]);
+            }
+          }}
+          role="combobox"
+          aria-label="Find a conversation"
+          aria-expanded
+          aria-controls="switcher-list"
+          aria-activedescendant={others[at] ? `switcher-${others[at].id}` : undefined}
+          placeholder="Find a conversation…"
+          className="mb-1 h-8 rounded-md bg-panel-2 px-2 text-[12.5px] outline-hidden placeholder:text-subtle"
+        />
+        <div ref={list} id="switcher-list" role="listbox" aria-label="Conversations" className="max-h-[min(60vh,420px)] overflow-y-auto" data-scroll>
+          {others.length === 0 && <p className="px-2 py-2 text-[12px] text-subtle">No conversation matches.</p>}
+          {others.map((t, i) => {
+            const p = data.projects.get(t.project)?.value;
+            return (
+              <button
+                key={t.id}
+                id={`switcher-${t.id}`}
+                data-index={i}
+                role="option"
+                tabIndex={-1}
+                aria-selected={i === at}
+                aria-current={t.id === thread.id || undefined}
+                onMouseMove={() => i !== at && setActive(i)}
+                onClick={() => pick(t)}
+                className={`flex w-full items-center gap-2.5 rounded-md px-2 py-1.5 text-left ${i === at ? "bg-panel-2" : ""}`}
+              >
+                <StatusDot status={t.status} className="shrink-0" />
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate text-[12.5px]">{t.title}</span>
+                  <span className="block truncate text-[11px] text-subtle">
+                    {p?.name}
+                    {isBusy(t.status) && t.activity ? ` · ${t.activity}` : ""}
                   </span>
-                  {t.pending_requests > 0 ? (
-                    <span className="rounded-full bg-accent px-1.5 font-mono text-[10.5px] font-semibold text-white tabular-nums">{t.pending_requests}</span>
-                  ) : t.id === thread.id ? (
-                    <Check className="size-3.5 text-subtle" />
-                  ) : null}
-                </button>
-              );
-            })}
-          </div>
+                </span>
+                {t.pending_requests > 0 ? (
+                  <span className="rounded-full bg-accent px-1.5 font-mono text-[10.5px] font-semibold text-white tabular-nums">{t.pending_requests}</span>
+                ) : t.id === thread.id ? (
+                  <Check className="size-3.5 text-subtle" />
+                ) : null}
+              </button>
+            );
+          })}
         </div>
-      )}
+      </Pop>
     </div>
   );
 }

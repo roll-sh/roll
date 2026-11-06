@@ -32,3 +32,7 @@ export const POP_OUT: Transition = { duration: 0.17, ease: "easeIn" };
 export const TOAST_IN: Transition = { duration: 0.3, ease: [0.22, 1, 0.36, 1] };
 /** One pane replacing another in the same frame. */
 export const PANE_SWITCH: Transition = { duration: 0.2, ease: EASE_OUT_SOFT };
+/** A popover or a small hand-built list opening from its anchor (as Base UI's popups: 150 ms). */
+export const POPOVER_IN: Transition = { duration: 0.15, ease: EASE_OUT_SOFT };
+/** …and closing, a touch quicker. */
+export const POPOVER_OUT: Transition = { duration: 0.12, ease: "easeIn" };

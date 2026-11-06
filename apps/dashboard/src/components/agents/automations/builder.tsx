@@ -48,6 +48,8 @@ import {
 import { field as fieldClass, openSettings } from "../settings-ui";
 import { cn, Menu, MenuGroup, MenuGroupLabel, MenuItem, MenuPopup, MenuSeparator, MenuTrigger, Segmented, Select } from "../ui";
 import { LookupPicker } from "../lookup-picker";
+import { useDismiss } from "../dismiss";
+import { Pop } from "../pop";
 import { useAgents } from "../use-agents";
 import { AddButton, Chips, ConfigForm } from "./config-form";
 import { NumberField, stepIcon, Tile, triggerIcon, SizedSelect } from "./shared";
@@ -690,8 +692,11 @@ function PathInput({ value, onChange, variables, invalid }: { value: string; onC
   const [open, setOpen] = useState(false);
   const [index, setIndex] = useState(0);
   const options = matchVariables(variables, value === variables.find((v) => v.path === value)?.path ? "" : value).slice(0, 30);
+  // Closes on a press or focus outside, Escape or a pick; never on a blur alone (Safari).
+  const wrap = useRef<HTMLSpanElement>(null);
+  useDismiss(open, [wrap], () => setOpen(false));
   return (
-    <span className="relative min-w-40 flex-[1.4]">
+    <span ref={wrap} className="relative min-w-40 flex-[1.4]">
       <input
         aria-label="Field"
         role="combobox"
@@ -700,7 +705,6 @@ function PathInput({ value, onChange, variables, invalid }: { value: string; onC
         value={value}
         spellCheck={false}
         onFocus={() => setOpen(true)}
-        onBlur={() => setTimeout(() => setOpen(false), 120)}
         onChange={(e) => (onChange(e.target.value), setOpen(true), setIndex(0))}
         onKeyDown={(e) => {
           if (!open || !options.length) return;
@@ -720,16 +724,14 @@ function PathInput({ value, onChange, variables, invalid }: { value: string; onC
         placeholder="event.data.…"
         className={cn(fieldClass, "w-full font-mono text-[12px]", invalid && "border-danger/50")}
       />
-      {open && options.length > 0 && (
-        <ul role="listbox" aria-label="Fields" className="pop absolute inset-x-0 top-full z-[140] mt-1 max-h-56 min-w-64 overflow-y-auto rounded-[10px] border border-outline bg-panel-2 p-1 shadow-pop inset-shadow-highlight" onMouseDown={(e) => e.preventDefault()}>
-          {options.map((v, i) => (
-            <li key={v.path} role="option" aria-selected={i === index} onMouseEnter={() => setIndex(i)} onClick={() => (onChange(v.path), setOpen(false))} className={cn("flex min-h-7 cursor-pointer items-center gap-2 rounded-md px-2 font-mono text-[12px]", i === index && "bg-fg/[0.08]")}>
-              <span className="truncate">{v.path}</span>
-              <span className="ml-auto shrink-0 font-sans text-[11px] text-subtle">{v.group}</span>
-            </li>
-          ))}
-        </ul>
-      )}
+      <Pop open={open && options.length > 0} as="ul" role="listbox" aria-label="Fields" className="absolute inset-x-0 top-full z-[140] mt-1 max-h-56 min-w-64 overflow-y-auto rounded-[10px] border border-outline bg-panel-2 p-1 shadow-pop inset-shadow-highlight" onMouseDown={(e) => e.preventDefault()}>
+        {options.map((v, i) => (
+          <li key={v.path} role="option" aria-selected={i === index} onMouseEnter={() => setIndex(i)} onClick={() => (onChange(v.path), setOpen(false))} className={cn("flex min-h-7 cursor-pointer items-center gap-2 rounded-md px-2 font-mono text-[12px]", i === index && "bg-fg/[0.08]")}>
+            <span className="truncate">{v.path}</span>
+            <span className="ml-auto shrink-0 font-sans text-[11px] text-subtle">{v.group}</span>
+          </li>
+        ))}
+      </Pop>
     </span>
   );
 }
