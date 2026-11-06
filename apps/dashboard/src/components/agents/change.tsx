@@ -3,7 +3,9 @@
 import { Switch } from "./ui";
 import { ArrowUpRight, ClipboardList, GitPullRequest, X } from "lucide-react";
 import { useRef, useState } from "react";
-import type { ChangeStatus, Landing, Machine, Project, Published, Thread, ThreadChange, WorkRef } from "@/lib/agents-api";
+import type { ChangeStatus, Landing, Machine, Project, Published, Run, Thread, ThreadChange, WorkRef } from "@/lib/agents-api";
+import type { AgentsClient } from "@/lib/agents-client";
+import { runsOf } from "@/lib/agents-store";
 import { parseWorkRef } from "@/lib/agents-services";
 import { btn, input, primary } from "../ui";
 import { useAgents } from "./use-agents";
@@ -88,14 +90,59 @@ export function rebasePrompt(change: Pick<ThreadChange, "number" | "detail">): s
 }
 
 /**
- * Ask the agent to rebase its conflicting change: a message into its conversation (queued behind
- * a running turn), where a conflict was only a red chip and a note saying to ask.
+ * How far asking to rebase got, from the thread's runs (so it holds after a reload, on any
+ * device): its latest run is the request, still going (`rebasing`) or finished (`rebased`: the
+ * change still conflicts until it's published again), else `none`.
  */
-export function AskToRebase({ thread, machine, change }: { thread: Thread; machine: Machine | undefined; change: Pick<ThreadChange, "number" | "detail"> }) {
+export function rebaseProgress(runs: readonly Run[], change: Pick<ThreadChange, "number">): "none" | "rebasing" | "rebased" {
+  const last = runs.at(-1);
+  if (!last?.prompt.startsWith(`Change #${change.number} conflicts with the default branch`)) return "none";
+  if (last.status === "completed") return "rebased";
+  return last.status === "failed" || last.status === "interrupted" || last.status === "cancelled" || last.status === "rolled_back" ? "none" : "rebasing";
+}
+
+/**
+ * Ask the agent to rebase its conflicting change: a message into its conversation (queued behind
+ * a running turn), where a conflict was only a red chip and a note saying to ask. Once that run
+ * finishes, "Publish again" (T3 offers the push once the branch is ahead): `onPublish` opens it.
+ */
+export function AskToRebase({ thread, machine, change, onPublish }: { thread: Thread; machine: Machine | undefined; change: Pick<ThreadChange, "number" | "detail">; onPublish?: () => void }) {
   const { client, readOnly } = useAgents();
+  if (readOnly) return null;
+  return <RebaseActions client={client} thread={thread} machine={machine} change={change} onPublish={onPublish} />;
+}
+
+/** `AskToRebase` with its client given: the change page in roll code has no agents surface around it. */
+export function RebaseActions({
+  client,
+  thread,
+  machine,
+  change,
+  onPublish,
+}: {
+  client: AgentsClient;
+  thread: Thread;
+  machine: Machine | undefined;
+  change: Pick<ThreadChange, "number" | "detail">;
+  onPublish?: () => void;
+}) {
   const [state, setState] = useState<"idle" | "busy" | "sent">("idle");
   const [error, setError] = useState<string | null>(null);
-  if (readOnly || !machine) return null;
+  if (!machine) return null;
+  const progress = rebaseProgress(runsOf(client.data, thread.id), change);
+  if (progress === "rebased" && onPublish)
+    return (
+      <span className="inline-flex shrink-0 items-center gap-1.5" data-nodrag>
+        <span className="text-[11.5px] text-subtle">Rebased.</span>
+        <button
+          type="button"
+          onClick={onPublish}
+          className="inline-flex h-6 items-center rounded-md border border-accent/40 px-2 text-[11.5px] text-accent transition-colors hover:border-accent/70 hover:bg-accent/10"
+        >
+          Publish again (#{change.number})
+        </button>
+      </span>
+    );
   const ask = async () => {
     setState("busy");
     setError(null);
@@ -112,11 +159,11 @@ export function AskToRebase({ thread, machine, change }: { thread: Thread; machi
       <button
         type="button"
         onClick={() => void ask()}
-        disabled={state !== "idle"}
+        disabled={state !== "idle" || progress === "rebasing"}
         title={rebasePrompt(change)}
         className="inline-flex h-6 items-center rounded-md border border-line-2 px-2 text-[11.5px] text-soft transition-colors hover:border-line-3 hover:bg-fg/[0.04] hover:text-fg disabled:opacity-60"
       >
-        {state === "sent" ? "Asked to rebase" : state === "busy" ? <span className="shimmer">Asking…</span> : "Ask to rebase"}
+        {progress === "rebasing" ? <span className="shimmer">Rebasing…</span> : state === "sent" ? "Asked to rebase" : state === "busy" ? <span className="shimmer">Asking…</span> : "Ask to rebase"}
       </button>
       {error && <span role="alert" className="text-[11.5px] text-danger">{error}</span>}
     </span>
@@ -232,7 +279,7 @@ export function PublishForm({ thread, project, machine, onDone }: { thread: Thre
             {done.landing.message && !repeats(done.landing.message, note.text) && <p className="mt-0.5 text-muted">{done.landing.message}</p>}
             {done.landing.status === "conflict" && done.change !== null && (
               <p className="mt-1.5">
-                <AskToRebase thread={thread} machine={machine} change={{ number: done.change, detail: thread.change?.number === done.change ? thread.change.detail : null }} />
+                <AskToRebase thread={thread} machine={machine} change={{ number: done.change, detail: thread.change?.number === done.change ? thread.change.detail : null }} onPublish={() => setDone(null)} />
               </p>
             )}
             {done.landing.blockers.length > 0 && (

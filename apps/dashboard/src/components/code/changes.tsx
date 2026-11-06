@@ -20,6 +20,7 @@ import { checkRows } from "@/lib/ci";
 import { canWrite, isAdmin, landSummary, landVerb } from "@/lib/queue";
 import { addDraft, draftFor, emptyPending, removeDraft, reviewHeadline, reviewPayload, updateDraft, type LineSelection } from "@/lib/review";
 import { CodeShell } from "./shell";
+import { ChangeAgent } from "./change-agent";
 import { ago, btn, Confirm, EmptyPanel, ErrorNote, Panel, panel, primary } from "../ui";
 import { DiffViewer, type DiffReview } from "./diff";
 import { AiProgress, RunAiReview, useAiJobs } from "./ai";
@@ -327,8 +328,9 @@ export function CodeChange({ fullName, id }: { fullName: string; id: string }) {
           const out: { res: LandResult | null } = { res: null };
           await run(key, async () => {
             out.res = await fn();
-            // A conflict or a blocker is an answer, not a failure, but the marks should still say it didn't land.
-            if (out.res.status === "conflict" || out.res.status === "blocked") throw new Error(landSummary(out.res).text);
+            // A blocker is an answer, not a failure, but the marks should still say it didn't land. A
+            // conflict has its own note below (with what to do): not said twice.
+            if (out.res.status === "blocked") throw new Error(landSummary(out.res).text);
             return out.res;
           });
           setLanded(out.res);
@@ -359,9 +361,9 @@ export function CodeChange({ fullName, id }: { fullName: string; id: string }) {
                 {canLand && queuePolicy && writer && (
                   <button
                     onClick={() => enqueue("urgent")}
-                    disabled={busy !== null || blockers.length > 0}
+                    disabled={busy !== null || blockers.length > 0 || c.state === "conflict"}
                     className={btn}
-                    title="Queue it ahead of the normal lane"
+                    title={c.state === "conflict" ? "It conflicts: rebase it first" : "Queue it ahead of the normal lane"}
                   >
                     {busy === "enqueue-urgent" ? <span className="shimmer">Queueing…</span> : "Urgent"}
                   </button>
@@ -369,7 +371,9 @@ export function CodeChange({ fullName, id }: { fullName: string; id: string }) {
                 {canLand && (
                   <button
                     onClick={() => (queuePolicy ? enqueue() : land("land", () => codeApi.landChange(c.id)))}
-                    disabled={busy !== null || (queuePolicy && blockers.length > 0)}
+                    // Landing again conflicts again until a new revision is on top of the branch.
+                    disabled={busy !== null || (queuePolicy && blockers.length > 0) || c.state === "conflict"}
+                    title={c.state === "conflict" ? "It conflicts: rebase it first" : undefined}
                     className={primary}
                   >
                     {busy === "land" ? (
@@ -431,7 +435,8 @@ export function CodeChange({ fullName, id }: { fullName: string; id: string }) {
               </p>
             )}
             {c.state === "open" && c.queue?.state === "ejected" && c.queue.error && <EjectedNote reason={c.queue.error} output={c.queue.output ?? null} />}
-            {conflict && c.state !== "landed" && <ConflictNote paths={conflict.paths} head={conflict.head} />}
+            {conflict && c.state !== "landed" && <ConflictNote paths={conflict.paths} head={conflict.head} branch={r.default_branch} />}
+            <ChangeAgent repo={r.full_name} number={c.number} conflict={!!conflict && c.state !== "landed" && c.state !== "closed"} />
 
             <div className="mt-6 grid gap-4 lg:grid-cols-3">
               <div className="min-w-0 space-y-4 lg:col-span-2">
@@ -603,11 +608,11 @@ export function CodeChange({ fullName, id }: { fullName: string; id: string }) {
   );
 }
 
-function ConflictNote({ paths, head }: { paths: string[]; head: string }) {
+function ConflictNote({ paths, head, branch }: { paths: string[]; head: string; branch: string }) {
   return (
     <div className="rise mt-4 rounded-lg border border-danger/40 bg-danger/5 px-4 py-3 text-[13px]">
       <p className="flex items-center gap-2 text-danger">
-        <GitMergeConflict className="size-4" /> Didn&apos;t land: {paths.length} file{paths.length === 1 ? "" : "s"} changed on main
+        <GitMergeConflict className="size-4" /> Didn&apos;t land: {paths.length} file{paths.length === 1 ? "" : "s"} changed on {branch}{" "}
         since this change&apos;s base and couldn&apos;t merge cleanly.
       </p>
       <ul className="mt-2 space-y-0.5 font-mono text-[12px] text-muted">
@@ -616,7 +621,9 @@ function ConflictNote({ paths, head }: { paths: string[]; head: string }) {
         ))}
       </ul>
       <p className="mt-2 text-[12px] text-subtle">
-        Revise it on top of <span className="font-mono">{shortId(head)}</span> and land again.
+        Rebase the branch onto <span className="font-mono">{branch}</span> (<span className="font-mono">{shortId(head)}</span>):{" "}
+        <span className="font-mono text-muted">git fetch &amp;&amp; git rebase origin/{branch}</span>, resolve the conflicts and push it again. The new
+        revision can land.
       </p>
     </div>
   );

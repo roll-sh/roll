@@ -173,12 +173,13 @@ describe("CodeChange: landing and the merge queue", () => {
     expect(screen.getByText("test is failing")).toBeInTheDocument();
   });
 
-  it("a conflict lists the files and the head to revise on", async () => {
+  it("a conflict lists the files and holds Land until it is rebased", async () => {
     api.change.mockResolvedValue(change({ state: "conflict", conflict: { paths: ["src/app.ts", "README.md"], head: "cs_main0000000" } }));
     await openChange();
     const note = screen.getByText(/Didn't land: 2 files changed on main/).closest("div")!;
     expect(within(note).getAllByRole("listitem").map((li) => li.textContent)).toEqual(["src/app.ts", "README.md"]);
-    expect(note).toHaveTextContent("Revise it on top of cs_main0000000 and land again.");
+    // Landing again would conflict again: the note says how to rebase instead.
+    expect(screen.getByRole("button", { name: /^(Land|Add to queue)$/ })).toBeDisabled();
   });
 
 });

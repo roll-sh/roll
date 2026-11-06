@@ -634,7 +634,7 @@ function TitleBar({
               {thread.change.status === "conflict" ? `Conflicts in ${thread.change.detail}` : thread.change.detail}
             </span>
           )}
-          {thread.change?.status === "conflict" && <AskToRebase thread={thread} machine={machine} change={thread.change} />}
+          {thread.change?.status === "conflict" && <AskToRebase thread={thread} machine={machine} change={thread.change} onPublish={() => setPanel("publish")} />}
           {thread.work && <WorkChip work={thread.work} className="min-w-0 flex-1" onRelease={readOnly || !services ? undefined : () => act(() => services.releaseWork(owner, thread.id))} />}
         </div>
       )}
