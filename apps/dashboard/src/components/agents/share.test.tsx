@@ -106,6 +106,22 @@ describe("Conversation, read-only", () => {
     for (const name of ["Approve", "Share", "More", "Diff", "Fork this conversation"]) expect(screen.queryByRole("button", { name })).toBeNull();
     expect(screen.queryByRole("textbox")).toBeNull();
   });
+
+  it("shows what the agent changed from its edits, without a daemon to ask (P8)", async () => {
+    const t = thread({ status: "idle", run_count: 1 });
+    const edit = node(
+      { type: "tool", name: "Edit", kind: "edit", title: "Edit src/queue.rs", input: null, output: null, exit_code: 0, files: [{ path: "src/queue.rs", change: "modify", diff: "@@ -1 +1 @@\n-let a = 1;\n+let a = 2;" }] },
+      { id: "nod_e", status: "completed" },
+    );
+    const h = agentsHarness({ follow: ["thr_1"], entities: [mirrored("project", project(), 1), mirrored("thread", t, 2), mirrored("run", run({ status: "completed" }), 3), mirrored("node", edit, 4)] });
+    h.ctx.readOnly = true;
+    renderAgents(<Conversation thread={t} machine={machine()} />, h);
+    await userEvent.click(screen.getByRole("button", { name: "Diff" }));
+    const pane = screen.getByRole("complementary", { name: "Diff" });
+    expect(pane).toHaveTextContent("src/queue.rs");
+    expect(pane).toHaveTextContent("The agent's edits, in the order it made them.");
+    expect(h.command.mock.calls.some((c) => (c[2] as { type: string }).type === "diff.get")).toBe(false);
+  });
 });
 
 describe("ShareButton", () => {

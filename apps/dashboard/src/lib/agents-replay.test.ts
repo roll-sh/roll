@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import type { Entity, Share } from "./agents-api";
-import { frameAt, MAX_GAP, providerLabel, realAt, replayAt, SHARE_MACHINE, shareStats, step, timeline } from "./agents-replay";
-import { nodeTree, runsOf } from "./agents-store";
-import { share, T0 } from "@/test/agents";
+import { editsDiff, frameAt, MAX_GAP, providerLabel, realAt, replayAt, SHARE_MACHINE, shareStats, step, timeline } from "./agents-replay";
+import { applySnapshot, emptyData, nodeTree, runsOf } from "./agents-store";
+import { machine, mirrored, node, project, run, share, T0, thread } from "@/test/agents";
 
 const at = (ms: number) => T0 + ms;
 
@@ -100,5 +100,53 @@ describe("replaying a share", () => {
     const t = timeline(empty);
     expect(t.duration).toBe(0);
     expect(frameAt(empty, t, at(0)).projects.size).toBe(1);
+  });
+});
+
+describe("a share's diff (P8)", () => {
+  type File = { path: string; change: "add" | "modify" | "delete"; diff: string | null };
+  const edit = (id: string, ordinal: number, files: File[], over: Parameters<typeof node>[1] = {}) =>
+    node({ type: "tool", name: "Edit", kind: "edit", title: "Edit", input: null, output: null, exit_code: 0, files }, { id, ordinal, status: "completed", ...over });
+  const data = () =>
+    applySnapshot(
+      emptyData(),
+      {
+        cursor: 10,
+        machines: [machine()],
+        entities: [
+          mirrored("project", project(), 1),
+          mirrored("thread", thread(), 2),
+          mirrored("run", run(), 3),
+          mirrored("run", run({ id: "run_2", ordinal: 2 }), 4),
+          mirrored("run", run({ id: "run_3", ordinal: 3, status: "rolled_back" }), 5),
+          mirrored("node", edit("nod_1", 1, [{ path: "src/queue.rs", change: "modify", diff: "--- a/src/queue.rs\n+++ b/src/queue.rs\n@@ -1,2 +1,2 @@\n-let a = 1;\n+let a = 2;\n" }]), 6),
+          mirrored("node", edit("nod_2", 2, [{ path: "src/new.rs", change: "add", diff: "@@ -0,0 +1 @@\n+fn new() {}" }]), 7),
+          mirrored("node", edit("nod_3", 1, [{ path: "src/queue.rs", change: "modify", diff: "@@ -5 +5 @@\n-b\n+c" }, { path: "src/new.rs", change: "modify", diff: "@@ -1 +1 @@\n-fn new() {}\n+fn new() -> u8 { 1 }" }], { run: "run_2" }), 8),
+          mirrored("node", edit("nod_4", 2, [{ path: "src/broken.rs", change: "modify", diff: "@@ -1 +1 @@\n-x\n+y" }], { run: "run_2", status: "failed" }), 9),
+          mirrored("node", edit("nod_5", 1, [{ path: "src/gone.rs", change: "delete", diff: null }], { run: "run_3" }), 10),
+        ],
+      },
+      new Set(["thr_1"]),
+    );
+
+  it("is every file the thread's edits touched, each edit's hunks after the one before", () => {
+    const d = editsDiff(data(), "thr_1", null);
+    expect(d.files.map((f) => [f.path, f.change])).toEqual([
+      ["src/queue.rs", "modify"],
+      ["src/new.rs", "add"],
+    ]);
+    // The file headers go; both edits' hunks stay, in order.
+    expect(d.files[0].diff).toBe("@@ -1,2 +1,2 @@\n-let a = 1;\n+let a = 2;\n@@ -5 +5 @@\n-b\n+c");
+    expect(d.stat).toEqual({ files: 2, additions: 4, deletions: 3 });
+    // A failed edit and a rolled-back run aren't changes.
+    expect(d.files.some((f) => f.path === "src/broken.rs" || f.path === "src/gone.rs")).toBe(false);
+  });
+
+  it("can be one run's", () => {
+    expect(editsDiff(data(), "thr_1", "run_2").files.map((f) => [f.path, f.change])).toEqual([
+      ["src/queue.rs", "modify"],
+      ["src/new.rs", "modify"],
+    ]);
+    expect(editsDiff(data(), "thr_1", "run_3").files).toEqual([]);
   });
 });

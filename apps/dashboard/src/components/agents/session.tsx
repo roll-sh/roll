@@ -31,6 +31,7 @@ import { deleteConfirm, ShelfStrip, useInboxMenu } from "./threads-sidebar";
 import { composeInto } from "@/lib/agents-compose";
 import { toFileDiff } from "./request-card";
 import { ShareButton } from "./share";
+import { editsDiff } from "@/lib/agents-replay";
 import { Stat, StatusDot, usageLine } from "./shared";
 import { MachineIcon, ProjectIcon } from "./identity";
 import { TerminalView } from "./terminal";
@@ -123,7 +124,7 @@ export function Conversation({ thread, machine, start, end }: { thread: Thread; 
   // T3 blocks "Edit from here" while the thread runs.
   const busyThread = isBusy(thread.status);
   const actions: TranscriptActions = readOnly
-    ? { openThread, openSubagent: setSub }
+    ? { openThread, openSubagent: setSub, showDiff: (r) => setSide({ kind: "diff", run: r }) }
     : {
         respond: (request, response) => client.run(mid!, { type: "request.respond", request, response }),
         showDiff: (r) => setSide({ kind: "diff", run: r }),
@@ -260,7 +261,7 @@ export function Conversation({ thread, machine, start, end }: { thread: Thread; 
           )}
           {readOnly && error && <p className="px-6 pb-3 text-[12px] text-danger">{error}</p>}
         </div>
-        {side?.kind === "diff" && !readOnly && (
+        {side?.kind === "diff" && (
           // T3's diff panel: beside the chat when there's room, over it (a sheet sliding in) when there isn't.
           <aside
             aria-label="Diff"
@@ -483,6 +484,9 @@ function TitleBar({
       openThread(r.id);
     });
   const diffOpen = side?.kind === "diff";
+  // A share shows a diff only when the agent edited something.
+  const editNodes = readOnly ? client.data.nodes.get(thread.id) : undefined;
+  const edited = useMemo(() => !!editNodes && [...editNodes.values()].some((n) => n.value.body.type === "tool" && n.value.body.files.length > 0), [editNodes]);
   const terminalOpen = side?.kind === "terminal";
 
   return (
@@ -527,6 +531,14 @@ function TitleBar({
           {pill && <StatusPill pill={pill} className="@max-[22rem]/header:hidden" />}
           {sleeping && <span className={`shrink-0 truncate text-[11.5px] text-subtle @max-[30rem]/header:hidden ${coming(state) ? "shimmer" : ""}`}>{sleeping}</span>}
         </div>
+        {readOnly && edited && (
+          // A share: its diff is the agent's edits (P8).
+          <div className="flex shrink-0 items-center gap-0.5 text-muted" data-nodrag>
+            <IconButton label={diffOpen ? "Hide the diff" : "Diff"} onClick={() => setSide((s) => (s?.kind === "diff" ? null : { kind: "diff", run: null }))} active={diffOpen}>
+              <DiffIcon className="size-4" />
+            </IconButton>
+          </div>
+        )}
         {!readOnly && (
           <div className="flex shrink-0 items-center gap-0.5 text-muted" data-nodrag>
             <IconButton label={diffOpen ? "Hide the diff" : "Diff"} onClick={() => setSide((s) => (s?.kind === "diff" ? null : { kind: "diff", run: null }))} active={diffOpen}>
@@ -757,14 +769,18 @@ export function DiffPane({
   onRun: (r: string | null) => void;
   onClose: () => void;
 }) {
-  const { client } = useAgents();
-  const [diff, setDiff] = useState<Diff | null>(null);
+  const { client, readOnly = false } = useAgents();
+  const [fetched, setDiff] = useState<Diff | null>(null);
   const [error, setError] = useState<string | null>(null);
   const lastRun = runs[runs.length - 1];
+  // A share has no daemon to ask: the diff is its edits' (and follows the replay).
+  const nodes = client.data.nodes.get(thread.id);
+  const edits = useMemo(() => (readOnly ? editsDiff(client.data, thread.id, run) : null), [readOnly, client.data, nodes, thread.id, run]);
+  const diff = edits ?? fetched;
   // Re-fetch when the scope changes or a run finishes.
   const version = `${run}:${lastRun?.id}:${lastRun?.status}`;
   useEffect(() => {
-    if (!machine) return;
+    if (!machine || readOnly) return;
     let live = true;
     setDiff(null);
     setError(null);
@@ -811,6 +827,7 @@ export function DiffPane({
         ) : (
           <>
             {diff.truncated && <p className="mb-2 text-[12px] text-subtle">Some files were left out to keep this under 4 MB.</p>}
+            {edits && <p className="mb-2 text-[12px] text-subtle">The agent&apos;s edits, in the order it made them.</p>}
             <DiffViewer files={diff.files.map(toFileDiff)} />
           </>
         )}

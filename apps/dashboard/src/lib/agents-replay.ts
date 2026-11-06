@@ -23,12 +23,16 @@ import {
   type Node,
   type ProviderInfo,
   type Request,
+  type Diff,
+  type FileChange,
   type Run,
+  type RunId,
   type Share,
   type Thread,
+  type ThreadId,
   type ThreadStatus,
 } from "./agents-api";
-import { applySnapshot, emptyData, type AgentsData } from "./agents-store";
+import { applySnapshot, emptyData, runsOf, type AgentsData } from "./agents-store";
 
 /** The shared machine's id on the replay canvas (shares don't carry the real one). */
 export const SHARE_MACHINE = "mch_share";
@@ -305,4 +309,46 @@ export function shareStats(share: Share) {
     } else if (e.kind === "checkpoint") files += e.stat.files;
   }
   return { runs, steps, threads, files, providers: [...providers].sort() };
+}
+
+/**
+ * What a thread changed, from its records alone (a share has no daemon to ask for a git diff,
+ * P8): every file its tools edited, each edit's hunks after the one before, in the order they were
+ * made. `run`: only that run's. Failed edits and runs rolled back are left out. A file the thread
+ * added is "add" however often it was edited after; one it deleted last is "delete".
+ */
+export function editsDiff(data: AgentsData, thread: ThreadId, run: RunId | null): Diff {
+  const runs = runsOf(data, thread);
+  const order = new Map(runs.map((r) => [r.id, r.ordinal]));
+  const kept = new Set(runs.filter((r) => r.status !== "rolled_back" && (run === null || r.id === run)).map((r) => r.id));
+  const edits = [...(data.nodes.get(thread)?.values() ?? [])]
+    .map((r) => r.value)
+    .filter((n) => kept.has(n.run) && n.status !== "failed" && n.body.type === "tool" && n.body.files.length > 0)
+    .sort((a, b) => (order.get(a.run) ?? 0) - (order.get(b.run) ?? 0) || a.ordinal - b.ordinal);
+  const files = new Map<string, FileChange>();
+  let additions = 0;
+  let deletions = 0;
+  for (const n of edits) {
+    if (n.body.type !== "tool") continue;
+    for (const f of n.body.files) {
+      const patch = hunksOf(f.diff);
+      for (const l of (patch ?? "").split("\n")) {
+        if (l.startsWith("+")) additions++;
+        else if (l.startsWith("-")) deletions++;
+      }
+      const had = files.get(f.path);
+      const change = had?.change === "add" && f.change !== "delete" ? "add" : f.change;
+      const diff = [had?.diff, patch].filter(Boolean).join("\n") || null;
+      files.set(f.path, { path: f.path, change, diff });
+    }
+  }
+  return { stat: { files: files.size, additions, deletions }, files: [...files.values()], truncated: false };
+}
+
+/** A unified diff's hunks (from its first `@@`), without the file headers. */
+function hunksOf(diff: string | null): string | null {
+  if (diff === null) return null;
+  if (diff.startsWith("@@")) return diff.replace(/\n$/, "");
+  const at = diff.indexOf("\n@@");
+  return at < 0 ? null : diff.slice(at + 1).replace(/\n$/, "");
 }

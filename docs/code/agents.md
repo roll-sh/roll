@@ -844,6 +844,10 @@ credentials that look like what they are become `<prefix>[redacted]`: roll's `rl
 that no secret can be in it: the owner chooses what to share. The page is the canvas in read-only mode with **replay**: a timeline
 rebuilt from the records' timestamps (threads appear, nodes start, text streams, the accent pulse
 while a run is going), a play button and speed, and the final frame at once with reduced motion.
+A share has no daemon to ask for a git diff, so its conversation's **Diff** is built from the
+records (`editsDiff` in `lib/agents-replay.ts`): every file its edit tools touched, each edit's
+hunks after the one before, per run or the whole thread, failed edits and rolled-back runs left
+out; it follows the replay. The button shows only when the agent edited something.
 Revoking a share removes it; nothing else does. Routes are in docs/code/http-api.md ("Shares").
 
 ## Agents in roll code
