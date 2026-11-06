@@ -35,7 +35,8 @@ export function AnimatedHeight({ children, className = "", closed = false, onClo
 
   const measure = useCallback(() => {
     const el = content.current;
-    if (!el) return;
+    // Out of the document (a list kept while its sheet is closed) it measures nothing: not a height.
+    if (!el?.isConnected) return;
     const h = closed ? 0 : Math.ceil(el.scrollHeight || el.getBoundingClientRect().height);
     setState((s) => (s.height === h ? s : { height: h, clipping: s.height !== null }));
   }, [closed]);

@@ -152,7 +152,8 @@ export function useCanvasViews(canvas: AgentsServices["canvas"] | undefined, own
     [owner, flush],
   );
 
-  const current = viewById(doc, currentId);
+  // Kept while the document is (All is made afresh each time): the canvas renders again only for a change.
+  const current = useMemo(() => viewById(doc, currentId), [doc, currentId]);
   const select = useCallback(
     (id: string) => {
       setCurrentId(id);
@@ -188,7 +189,10 @@ export function useCanvasViews(canvas: AgentsServices["canvas"] | undefined, own
   );
   const resize = useCallback((p: Pin, w: number, h: number) => update((d) => resizePin(d, id, p.kind, p.id, w, h)), [id, update]);
   const views = useMemo(() => viewsOf(doc), [doc]);
-  return { doc, views, current, filter, select, setFilter, saveAs, update, setOrder, setDisplay, togglePin, resize };
+  return useMemo(
+    () => ({ doc, views, current, filter, select, setFilter, saveAs, update, setOrder, setDisplay, togglePin, resize }),
+    [doc, views, current, filter, select, setFilter, saveAs, update, setOrder, setDisplay, togglePin, resize],
+  );
 }
 
 const typing = (el: Element | null) => !!el && ((el as HTMLElement).isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName) || !!el.closest(".xterm"));

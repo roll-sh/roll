@@ -8,7 +8,7 @@
  * their schema. Keys it doesn't know (a newer dashboard's) are kept as they are.
  */
 
-import { useCallback, useEffect, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useMemo, useSyncExternalStore } from "react";
 import { SettingsConflict, type ModelOptions, type ProviderId, type SendMode, type ThreadDefaults } from "./agents-api";
 import { MAX_FAVORITES, MAX_RECENT, modelKeys, modelPrefs, type ModelKey } from "./agents-models";
 import type { AgentsServices } from "./agents-services";
@@ -213,7 +213,9 @@ export function useOwnerSettings(docs: Docs | undefined, owner: string, announce
     if (!store) throw new Error("not signed in");
     await store.save(patch);
   }, [store]);
-  return { ...state, save };
+  // One object while nothing changed: it goes into the agents context, and a new one each render
+  // rendered every card and sidebar row again with anything on the surface (⌘B, a filter key).
+  return useMemo(() => ({ ...state, save }), [state, save]);
 }
 
 /**

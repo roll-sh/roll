@@ -80,6 +80,8 @@ export function useFlip(list: RefObject<HTMLElement | null>) {
   useLayoutEffect(() => {
     const el = list.current;
     if (!el) return;
+    // Out of the document nothing has a place: start again once it's back.
+    if (!el.isConnected) return void (last.current = null);
     const items = [...el.querySelectorAll<HTMLElement>(":scope > [data-flip]")];
     const order = items.map((i) => i.dataset.flip!);
     const tops = new Map(items.map((i) => [i.dataset.flip!, i.offsetTop]));

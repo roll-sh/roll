@@ -4,7 +4,7 @@ import { DotField, HorizonMark, RollMark, useReducedMotion } from "@roll/brand";
 import { AnimatePresence, motion, useIsPresent } from "motion/react";
 import { Archive, ArrowLeft, ChevronDown, ChevronUp, MoreHorizontal, PanelRightClose, Pin, PinOff, Plus, Search, Server, Settings, Share2, X, Zap } from "lucide-react";
 import Link from "next/link";
-import { useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
+import { memo, useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { isBusy, reachable } from "@/lib/agents-api";
 import { POP_IN, POP_OUT } from "@/lib/agents-motion";
 import { setActiveClient, type AgentsClient } from "@/lib/agents-client";
@@ -346,6 +346,9 @@ export function AgentsSurface({
     },
     [client.owner, viewId],
   );
+  // Stable, for the memoised sidebar.
+  const showAll = useCallback(() => focusProject(null), [focusProject]);
+  const openAddMachine = useCallback(() => setAdding(true), []);
   const focusedGone = focused !== null && data.projects.size > 0 && !data.projects.has(focused);
   useEffect(() => {
     if (focusedGone) focusProject(null);
@@ -621,7 +624,7 @@ export function AgentsSurface({
             </span>
           </header>
           <div className="relative flex min-h-0 flex-1">
-            <ThreadsSidebar data={data} open={sidebar} setOpen={setSidebar} phone={phone} openThread={shown.kind === "thread" ? shown.thread : null} only={focused} onShowAll={() => focusProject(null)} onAddMachine={() => setAdding(true)} />
+            <ThreadsSidebar data={data} open={sidebar} setOpen={setSidebar} phone={phone} openThread={shown.kind === "thread" ? shown.thread : null} only={focused} onShowAll={showAll} onAddMachine={openAddMachine} />
             {/* The canvas and the right sheet beside it; the sheet slides in past its right edge. */}
             <div className="relative flex min-h-0 min-w-0 flex-1 overflow-x-clip">
             {/* The working area: an inset panel one step up from the chrome (Linear's inverted L). It
@@ -789,7 +792,13 @@ function WindowHome() {
   );
 }
 
-function CanvasView({
+/**
+ * Memoised: the surface renders for things beside the canvas too (⌘B, a panel, a toast), and each
+ * render of this one renders every card again (~200 at 200 threads).
+ */
+const CanvasView = memo(CanvasViewBody);
+
+function CanvasViewBody({
   canvasRef,
   data,
   showArchived,

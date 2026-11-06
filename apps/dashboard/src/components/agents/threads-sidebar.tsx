@@ -12,7 +12,8 @@
  */
 
 import { AlarmClock, AlarmClockOff, Archive, ArchiveRestore, Check, ChevronDown, Eraser, ChevronRight, MoreHorizontal, PanelLeft, PanelLeftClose, Plus, Trash2, Undo2, X } from "lucide-react";
-import { memo, startTransition, useCallback, useEffect, useId, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
+import { memo, startTransition, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import { reachable, type Command, type Machine, type MachineId, type Project, type Thread } from "@/lib/agents-api";
 import { openProjectDialog } from "@/lib/agents-project-dialogs";
 import {
@@ -437,7 +438,10 @@ export function ShelfStrip({ thread, now = Date.now() }: { thread: Thread; now?:
  * The sidebar, and what works while it's hidden too: the shortcuts, and telling the daemon a
  * conversation was seen (`thread.visit`: when it opens, and when one of its runs ends while open).
  */
-export function ThreadsSidebar({
+/** Memoised: the surface renders for things beside it too (a filter key, a panel). */
+export const ThreadsSidebar = memo(ThreadsSidebarBody);
+
+function ThreadsSidebarBody({
   data,
   open,
   setOpen,
@@ -515,23 +519,31 @@ export function ThreadsSidebar({
       // Nothing remembered.
     }
   }, []);
-  const toggleProject = (id: string) =>
-    setCollapsed((c) => {
-      const next = new Set(c);
-      if (!next.delete(id)) next.add(id);
-      store(COLLAPSED_KEY, JSON.stringify([...next]));
-      return next;
-    });
+  // Stable callbacks: the project groups are memoised (opening and closing rendered every group).
+  const toggleProject = useCallback(
+    (id: string) =>
+      setCollapsed((c) => {
+        const next = new Set(c);
+        if (!next.delete(id)) next.add(id);
+        store(COLLAPSED_KEY, JSON.stringify([...next]));
+        return next;
+      }),
+    [],
+  );
   const [shelves, setShelves] = useState<Record<Parked, boolean>>({ snoozed: false, settled: false, archived: false });
   useEffect(
     () => setShelves({ snoozed: stored(SHELF_KEY("snoozed")) === "1", settled: stored(SHELF_KEY("settled")) === "1", archived: stored(SHELF_KEY("archived")) === "1" }),
     [],
   );
-  const toggleShelf = (shelf: Parked) =>
-    setShelves((s) => {
-      store(SHELF_KEY(shelf), s[shelf] ? "0" : "1");
-      return { ...s, [shelf]: !s[shelf] };
-    });
+  const toggleShelf = useCallback(
+    (shelf: Parked) =>
+      setShelves((s) => {
+        store(SHELF_KEY(shelf), s[shelf] ? "0" : "1");
+        return { ...s, [shelf]: !s[shelf] };
+      }),
+    [],
+  );
+  const newIn = useMemo(() => (startNew && !readOnly ? (project: string) => startNew(project) : undefined), [startNew, readOnly]);
 
   // Stable, so the rows (memoised: 200 of them) don't render again when the sidebar does.
   const pick = useCallback(
@@ -542,13 +554,24 @@ export function ThreadsSidebar({
     [phone, setOpen],
   );
   const active = groups.reduce((n, g) => n + g.active.length, 0);
-  // Opening shows the first rows with the key press and fills in the rest in a transition (React
-  // renders it in slices): mounting 200 rows at once was one ~300 ms task.
+  // The rows stay mounted once the sidebar first opened (T3's sidebar stays mounted too): they live
+  // in a list element of their own, which the sheet takes in while it shows. Mounting and unmounting
+  // 200 rows was most of every ⌘B (~300 ms). Made after hydration (the server has no document).
+  const [list, setList] = useState<HTMLElement | null>(null);
+  useEffect(() => {
+    const nav = document.createElement("nav");
+    nav.className = "min-h-0 flex-1 overflow-y-auto px-1.5 pb-4";
+    nav.setAttribute("aria-label", "Projects");
+    setList(nav);
+  }, []);
+  const [kept, setKept] = useState(open);
+  if (open && !kept) setKept(true);
+  // The first opening shows the first rows with the key press and fills in the rest in a transition
+  // (React renders it in slices).
   const [filled, setFilled] = useState(false);
   useEffect(() => {
-    if (!open) return setFilled(false);
-    startTransition(() => setFilled(true));
-  }, [open]);
+    if (open && !filled) startTransition(() => setFilled(true));
+  }, [open, filled]);
   let left = filled ? Infinity : FIRST_ROWS;
 
   return (
@@ -573,7 +596,14 @@ export function ThreadsSidebar({
               </button>
             </span>
           </div>
-          <nav className="min-h-0 flex-1 overflow-y-auto px-1.5 pb-4" aria-label="Projects">
+          <Attach node={list} />
+        </EdgeSheet>
+        )}
+      </AnimatePresence>
+      {kept &&
+        list &&
+        createPortal(
+          <>
             {onlyProject && (
               <p className="mt-1 flex h-7 items-center gap-1.5 rounded-md border border-line-2 bg-panel-2 pr-0.5 pl-2 text-[12px] inset-shadow-highlight" role="status">
                 <span className="min-w-0 flex-1 truncate text-muted">
@@ -598,29 +628,44 @@ export function ThreadsSidebar({
                 group={g}
                 machine={data.machines.get(g.machine)?.value}
                 collapsed={collapsed.has(g.project.id)}
-                onToggle={() => toggleProject(g.project.id)}
+                onToggle={toggleProject}
                 shelves={shelves}
                 onShelf={toggleShelf}
                 openThread={openThread}
                 onPick={pick}
-                onNew={startNew && !readOnly ? () => startNew(g.project.id) : undefined}
+                onNew={newIn}
                 now={now}
                 actions={actions}
               />
               );
             })}
             </ul>
-          </nav>
-        </EdgeSheet>
+          </>,
+          list,
         )}
-      </AnimatePresence>
     </>
   );
 }
 
+/** Puts `node` (kept by its owner) inside this spot while it's mounted, and takes it out after. */
+function Attach({ node }: { node: HTMLElement | null }) {
+  const host = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    const h = host.current;
+    if (!h || !node) return;
+    h.appendChild(node);
+    return () => {
+      if (node.parentNode === h) h.removeChild(node);
+    };
+  }, [node]);
+  return <div ref={host} className="contents" />;
+}
+
 type Actions = ReturnType<typeof useInboxActions>;
 
-function ProjectGroup({
+const ProjectGroup = memo(ProjectGroupBody);
+
+function ProjectGroupBody({
   limit,
   group,
   machine,
@@ -639,12 +684,12 @@ function ProjectGroup({
   group: ProjectInbox;
   machine: Machine | undefined;
   collapsed: boolean;
-  onToggle: () => void;
+  onToggle: (project: string) => void;
   shelves: Record<Parked, boolean>;
   onShelf: (shelf: Parked) => void;
   openThread: string | null;
   onPick: (thread: string) => void;
-  onNew?: () => void;
+  onNew?: (project: string) => void;
   now: number;
   actions: Actions;
 }) {
@@ -662,7 +707,7 @@ function ProjectGroup({
   return (
     <li className="mt-2" aria-label={group.project.name}>
       <div className="group/p flex h-7 items-center gap-1.5 rounded-md pr-1 pl-1.5 text-subtle">
-        <button type="button" onClick={onToggle} aria-expanded={!collapsed} className="flex min-w-0 flex-1 items-center gap-1.5 text-left hover:text-fg" aria-label={`${collapsed ? "Show" : "Hide"} ${group.project.name}`}>
+        <button type="button" onClick={() => onToggle(group.project.id)} aria-expanded={!collapsed} className="flex min-w-0 flex-1 items-center gap-1.5 text-left hover:text-fg" aria-label={`${collapsed ? "Show" : "Hide"} ${group.project.name}`}>
           <ProjectIcon project={group.project} className="size-4" />
           <span className="truncate text-[12px] font-medium text-muted">{group.project.name}</span>
           {machine && (
@@ -674,7 +719,7 @@ function ProjectGroup({
           {collapsed ? <ChevronRight className="size-3 shrink-0" /> : <ChevronDown className="size-3 shrink-0 opacity-0 group-hover/p:opacity-100" />}
         </button>
         {onNew && (
-          <button type="button" onClick={onNew} title={`New agent in ${group.project.name}`} aria-label={`New agent in ${group.project.name}`} className="grid size-6 place-items-center rounded-md opacity-0 transition group-hover/p:opacity-100 hover:bg-panel-2 hover:text-fg focus-visible:opacity-100 [@media(hover:none)]:opacity-100">
+          <button type="button" onClick={() => onNew(group.project.id)} title={`New agent in ${group.project.name}`} aria-label={`New agent in ${group.project.name}`} className="grid size-6 place-items-center rounded-md opacity-0 transition group-hover/p:opacity-100 hover:bg-panel-2 hover:text-fg focus-visible:opacity-100 [@media(hover:none)]:opacity-100">
             <Plus className="size-3.5" strokeWidth={1.5} />
           </button>
         )}
