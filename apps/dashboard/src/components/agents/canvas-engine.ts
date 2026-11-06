@@ -503,8 +503,11 @@ export class CanvasEngine {
     el.style.transform = v;
   }
 
-  private place(el: HTMLElement, p: Point) {
-    this.setTransform(el, `translate(${p.x}px, ${p.y}px)`);
+  // Moving (easing, dragged), a card is a layer of its own (translate3d), so it moves without the
+  // canvas repainting under it (Safari repaints otherwise); at rest it's plain (translate), so 200
+  // cards aren't 200 layers to commit every frame (Chromium).
+  private place(el: HTMLElement, p: Point, moving = false) {
+    this.setTransform(el, moving ? `translate3d(${p.x}px, ${p.y}px, 0)` : `translate(${p.x}px, ${p.y}px)`);
   }
 
   private frame = (ms: number) => {
@@ -556,7 +559,7 @@ export class CanvasEngine {
       this.cur.set(k, next);
       const el = this.els.get(k);
       if (el) {
-        this.place(el, next);
+        this.place(el, next, next !== target || this.drag?.key === k);
         // Well off screen, its animations (a busy card's border, shimmer, pulses) pause: 80 busy
         // cards at 1000 threads repainted every frame, most of them out of sight.
         const s = this.size.get(k);
