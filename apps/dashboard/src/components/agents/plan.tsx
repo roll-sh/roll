@@ -15,6 +15,8 @@ import { useEffect, useRef, useState } from "react";
 import type { Machine, Thread } from "@/lib/agents-api";
 import { downloadPlan, implementationPrompt, implementationThreadTitle, planBody, planFilename, planTitle, planToSave, type ReadyPlan } from "@/lib/agents-plan";
 import { Markdown } from "../code/markdown";
+import { Collapse } from "./animated-height";
+import { useHeightGlide } from "./slide-pages";
 import { Menu, MenuItem, MenuPopup, MenuTrigger } from "./ui";
 import { useAgents } from "./use-agents";
 
@@ -37,6 +39,9 @@ export function PlanCard({ text, running, onSave }: { text: string; running: boo
   const lines = body.split("\n");
   const long = !running && (body.length > LONG_CHARS || lines.length > LONG_LINES);
   const shown = long && !open ? `${lines.slice(0, PREVIEW_LINES).join("\n").trimEnd()}\n\n…` : body;
+  // Expand plan / Collapse plan: the body's height eases between the preview and the whole plan.
+  const bodyRef = useRef<HTMLDivElement>(null);
+  useHeightGlide(bodyRef, String(open));
   return (
     <div className="rounded-2xl border border-line bg-raised p-4 sm:p-5" aria-label={title ? `Plan: ${title}` : "Proposed plan"}>
       <div className="mb-2 flex items-center gap-2">
@@ -71,8 +76,9 @@ export function PlanCard({ text, running, onSave }: { text: string; running: boo
           </MenuPopup>
         </Menu>
       </div>
-      {saving && onSave && <SavePlan text={text} onSave={onSave} onDone={() => setSaving(false)} />}
-      <div className={long && !open ? "[mask-image:linear-gradient(to_bottom,black_70%,transparent)]" : ""}>
+      {/* Folds open, and away once it has said where it saved (it vanished after 2.4 s). */}
+      <Collapse open={saving && !!onSave}>{onSave && <SavePlan text={text} onSave={onSave} onDone={() => setSaving(false)} />}</Collapse>
+      <div ref={bodyRef} className={long ? `overflow-hidden ${open ? "" : "[mask-image:linear-gradient(to_bottom,black_70%,transparent)]"}` : ""}>
         <Markdown source={shown} className="markdown-sm" />
         {running && <span className="caret inline-block" aria-hidden />}
       </div>

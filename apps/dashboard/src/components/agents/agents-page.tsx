@@ -1,10 +1,12 @@
 "use client";
 
-import { DotField, HorizonMark, RollMark } from "@roll/brand";
+import { DotField, HorizonMark, RollMark, useReducedMotion } from "@roll/brand";
+import { AnimatePresence, motion, useIsPresent } from "motion/react";
 import { Archive, ArrowLeft, ChevronDown, ChevronUp, MoreHorizontal, PanelRightClose, Pin, PinOff, Plus, Search, Server, Settings, Share2, X, Zap } from "lucide-react";
 import Link from "next/link";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { isBusy } from "@/lib/agents-api";
+import { POP_IN, POP_OUT } from "@/lib/agents-motion";
 import { setActiveClient, type AgentsClient } from "@/lib/agents-client";
 import { collapseUnused, deriveGraph, rolling, type GraphNode } from "@/lib/agents-graph";
 import { runsOf } from "@/lib/agents-store";
@@ -629,11 +631,7 @@ export function AgentsSurface({
                   </div>
                 </>
               )}
-              {launchError && (
-                <p role="alert" className="rise absolute bottom-4 left-4 z-10 rounded-lg border border-danger/40 bg-panel px-3 py-2 text-[12px] text-danger">
-                  {launchError}
-                </p>
-              )}
+              <AnimatePresence initial={false}>{launchError && <LaunchError key={launchError} text={launchError} />}</AnimatePresence>
               {/* Beside an open conversation too (the canvas narrows; the draft stays); on a phone, under what's waiting. */}
               {data.machines.size > 0 && <PromptBar ref={dock} above={phone && shown.kind === "canvas" && requests.length > 0 && <PhoneWaiting client={client} />} />}
             </div>
@@ -719,6 +717,28 @@ function useMaximized(): [boolean, (on: boolean) => void] {
 function MarkDriver({ client }: { client: AgentsClient }) {
   useMarkDriver(useAgentsSnapshot(client));
   return null;
+}
+
+/**
+ * Why a drop on the canvas didn't launch: rises in, and after 5 s sinks back out the way it came
+ * (it vanished), no longer announced or in the way as it goes.
+ */
+function LaunchError({ text }: { text: string }) {
+  const reduced = useReducedMotion();
+  const present = useIsPresent();
+  return (
+    <motion.p
+      role={present ? "alert" : undefined}
+      aria-hidden={!present || undefined}
+      inert={!present}
+      initial={{ opacity: 0, y: 6 }}
+      animate={{ opacity: 1, y: 0, transition: reduced ? { duration: 0 } : POP_IN }}
+      exit={{ opacity: 0, y: 6, transition: reduced ? { duration: 0 } : POP_OUT }}
+      className="absolute bottom-4 left-4 z-10 rounded-lg border border-danger/40 bg-panel px-3 py-2 text-[12px] text-danger"
+    >
+      {text}
+    </motion.p>
+  );
 }
 
 /** The popup's logo: the Horizon mark, following the shared state. */

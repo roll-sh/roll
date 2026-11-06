@@ -15,6 +15,7 @@ import { stepFailed, stepLabel, summarize, thoughtLine } from "@/lib/agents-work
 import { FileDiffView } from "../code/diff";
 import { Markdown } from "../code/markdown";
 import { Collapse } from "./animated-height";
+import { SlidePages } from "./slide-pages";
 import { toFileDiff } from "./request-card";
 import { Stat } from "./shared";
 
@@ -38,11 +39,22 @@ export const stepRunning = (n: Node) => n.status === "running" || n.status === "
 
 /**
  * A group of steps (T3's work group): one step is its own row; a live group shows the step it's
- * on; a finished one is a sentence that opens to every step.
+ * on; a finished one is a sentence that opens to every step. A lone step that gets company
+ * crossfades into the group's row in place.
  */
 export function WorkGroup({ entries }: { entries: NodeTree[] }) {
+  const one = entries.length === 1;
+  return (
+    <div className="relative">
+      <SlidePages page={one ? "step" : "group"} direction={0}>
+        {one ? <StepRow node={entries[0].node} /> : <StepGroup entries={entries} />}
+      </SlidePages>
+    </div>
+  );
+}
+
+function StepGroup({ entries }: { entries: NodeTree[] }) {
   const [open, setOpen] = useState(false);
-  if (entries.length === 1) return <StepRow node={entries[0].node} />;
   const current = [...entries].reverse().find((t) => stepRunning(t.node));
   const { summary, failed } = summarize(entries);
   const kinds = new Set(entries.map((t) => (t.node.body.type === "tool" ? t.node.body.kind : "reasoning")));

@@ -28,7 +28,7 @@ import {
   Split,
   X,
 } from "lucide-react";
-import { Fragment, useState, type ReactNode } from "react";
+import { Fragment, useRef, useState, type ReactNode } from "react";
 import { useEscapeLayer } from "./escape-layers";
 import type { Checkpoint, DiffStat, FileChange, Node, Request, RequestResponse, Run } from "@/lib/agents-api";
 import { formatContextTokens } from "@/lib/agents-context";
@@ -36,6 +36,7 @@ import type { NodeTree } from "@/lib/agents-store";
 import { delegatedTasks, ended, foldLabel, foldTurn, splitAtSteers, timelineItems, type TimelineItem } from "@/lib/agents-worklog";
 import { Markdown } from "../code/markdown";
 import { Collapse } from "./animated-height";
+import { useHeightGlide } from "./slide-pages";
 import { PlanCard } from "./plan";
 import { RequestCard, toFileDiff } from "./request-card";
 import { SubagentGroup, SubagentRow } from "./subagents";
@@ -266,6 +267,9 @@ function UserMessage({ run, steers, editFrom }: { run: Run; steers: readonly str
   const [open, setOpen] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const long = run.prompt.length > 600 || run.prompt.split("\n").length > 8;
+  // Show full message / Show less: the text's height eases between the two.
+  const text = useRef<HTMLParagraphElement>(null);
+  useHeightGlide(text, String(open));
   return (
     <div className="group/user flex flex-col items-end gap-1 pb-1">
       <div className="max-w-[80%] rounded-2xl bg-message px-3.5 py-2.5 text-fg">
@@ -278,7 +282,8 @@ function UserMessage({ run, steers, editFrom }: { run: Run; steers: readonly str
           </div>
         )}
         <p
-          className={`text-[14px] leading-relaxed whitespace-pre-wrap ${long && !open ? "max-h-44 overflow-hidden [mask-image:linear-gradient(to_bottom,black_70%,transparent)]" : ""}`}
+          ref={text}
+          className={`text-[14px] leading-relaxed whitespace-pre-wrap ${long ? "overflow-hidden" : ""} ${long && !open ? "max-h-44 [mask-image:linear-gradient(to_bottom,black_70%,transparent)]" : ""}`}
         >
           {run.prompt}
         </p>

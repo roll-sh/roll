@@ -54,6 +54,8 @@ export interface EngineOptions {
 
 /** A loop of the accent pulse along an edge. */
 const PULSE_S = 1.6;
+/** An edge to a card that left fades this long, with the card (`CARD_OUT`). */
+const EDGE_OUT_MS = 160;
 const DOT_SPACING = 28;
 
 const rgba = (c: RGB, a: number) => `rgba(${c[0]},${c[1]},${c[2]},${a})`;
@@ -88,6 +90,14 @@ export class CanvasEngine {
   private size = new Map<string, Size>();
   private meta = new Map<string, SceneMeta>();
   private edges: SceneEdge[] = [];
+  /**
+   * Edges to a card that left the graph: drawn where it was, fading out with it (`CARD_OUT`,
+   * 160 ms ease-in), then dropped; they vanished at once while the card faded. `gone` is where
+   * each card that left was.
+   */
+  private fading: { edge: SceneEdge; t0: number }[] = [];
+  private gone = new Map<string, Point>();
+  private frameMs = 0;
   private anyBusy = false;
   private drag: { key: string; p: Point } | null = null;
 
@@ -263,6 +273,17 @@ export class CanvasEngine {
   /** The layout's targets; nodes ease there. New nodes grow out of their parent. */
   setScene(targets: ReadonlyMap<string, Point>, meta: ReadonlyMap<string, SceneMeta>, edges: SceneEdge[], sizes: ReadonlyMap<string, Size>) {
     for (const [k, s] of sizes) if (!this.size.has(k)) this.size.set(k, s);
+    if (!this.opts.reducedMotion) {
+      const now = performance.now();
+      for (const e of this.edges) {
+        if (targets.has(e.from) && targets.has(e.to)) continue;
+        if (this.cur.has(e.from) && this.cur.has(e.to)) this.fading.push({ edge: e, t0: now });
+      }
+      for (const [k, p] of this.cur) if (!targets.has(k)) this.gone.set(k, p);
+    }
+    // Back while its edges fade: the live edges take over.
+    for (const k of targets.keys()) this.gone.delete(k);
+    this.fading = this.fading.filter((f) => !(targets.has(f.edge.from) && targets.has(f.edge.to)));
     for (const k of [...this.cur.keys()]) if (!targets.has(k)) this.cur.delete(k);
     for (const [k, p] of targets) {
       if (!this.cur.has(k)) {
@@ -506,10 +527,15 @@ export class CanvasEngine {
     this.pointer.s += ((this.pointer.active && !reduced ? 1 : 0) - this.pointer.s) * 0.1;
     this.busyMix += ((this.anyBusy ? 1 : 0) - this.busyMix) * (reduced ? 1 : 0.04);
     this.ripples = this.ripples.filter((r) => t - r.t0 < 2.2);
+    this.frameMs = ms;
+    if (this.fading.length) {
+      this.fading = reduced ? [] : this.fading.filter((f) => ms - f.t0 < EDGE_OUT_MS);
+      if (!this.fading.length) this.gone.clear();
+    }
 
     this.draw(reduced ? 0 : t, reduced);
 
-    const live = !reduced && (this.anyBusy || this.pointer.s > 0.01 || this.ripples.length > 0 || this.busyMix > 0.01);
+    const live = !reduced && (this.anyBusy || this.pointer.s > 0.01 || this.ripples.length > 0 || this.busyMix > 0.01 || this.fading.length > 0);
     if (moving || live) this.kick();
   };
 
@@ -574,12 +600,15 @@ export class CanvasEngine {
     // Edges, routed as the layout placed the child (`EdgeRoute`).
     ctx.lineCap = "round";
     ctx.lineJoin = "round";
-    for (const e of this.edges) {
-      const a = this.cur.get(e.from);
-      const b = this.cur.get(e.to);
+    const at = (key: string) => this.cur.get(key) ?? this.gone.get(key);
+    const drawn = [...this.edges.map((edge) => ({ edge, alpha: 1 })), ...this.fading.map((f) => ({ edge: f.edge, alpha: 1 - Math.min(1, Math.max(0, (this.frameMs - f.t0) / EDGE_OUT_MS)) ** 2 }))];
+    for (const { edge: e, alpha } of drawn) {
+      const a = at(e.from);
+      const b = at(e.to);
       const sa = this.size.get(e.from);
       const sb = this.size.get(e.to);
-      if (!a || !b || !sa || !sb) continue;
+      if (!a || !b || !sa || !sb || alpha <= 0) continue;
+      ctx.globalAlpha = alpha;
       const path = edgePath(e.route ?? "right", { ...a, ...sa }, { ...b, ...sb }, scr, k);
       const p0 = path.start;
       const p3 = path.end;
@@ -616,6 +645,7 @@ export class CanvasEngine {
         }
       }
     }
+    ctx.globalAlpha = 1;
   }
 }
 
