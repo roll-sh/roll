@@ -116,7 +116,7 @@ export function DialogSheet({
   return (
     <Primitive.Root open={shown} onOpenChange={(next) => !next && !busy && onClose()} onOpenChangeComplete={(now) => !now && onExited?.()}>
       <Primitive.Portal container={container ?? undefined} {...layer}>
-        <Primitive.Backdrop className={cn(backdropClassName ?? "fixed inset-0 z-[125] bg-(--scrim) backdrop-blur-[3px]", "transition-opacity duration-200 ease-out data-ending-style:opacity-0 data-ending-style:duration-[170ms] data-starting-style:opacity-0 motion-reduce:transition-none")} />
+        <Primitive.Backdrop className={cn(backdropClassName ?? "fixed inset-0 z-[125] bg-(--scrim) backdrop-blur-[3px]", "transition-opacity duration-200 ease-out data-ending-style:opacity-0 data-ending-style:duration-[170ms] motion-safe:data-starting-style:opacity-0 motion-reduce:transition-none")} />
         <Primitive.Viewport className={viewportClassName ?? "fixed inset-0 z-[125] grid grid-rows-[1fr_auto_3fr] justify-items-center overflow-y-auto p-3 sm:p-4"}>
           <Primitive.Popup
             ref={attach}
@@ -131,7 +131,7 @@ export function DialogSheet({
             }
             // In on the drawer curve over 200 ms, out on an ease-in over 170 ms (`POP_IN`/`POP_OUT`).
             className={cn(
-              "outline-none transition-[scale,opacity] duration-200 ease-(--ease-drawer) data-ending-style:scale-98 data-ending-style:opacity-0 data-ending-style:duration-[170ms] data-ending-style:ease-in data-starting-style:scale-98 data-starting-style:opacity-0 motion-reduce:transition-none [-webkit-app-region:no-drag]",
+              "outline-none transition-[scale,opacity] duration-200 ease-(--ease-drawer) data-ending-style:scale-98 data-ending-style:opacity-0 data-ending-style:duration-[170ms] data-ending-style:ease-in motion-safe:data-starting-style:scale-98 motion-safe:data-starting-style:opacity-0 motion-reduce:transition-none [-webkit-app-region:no-drag]",
               className,
             )}
             style={style}

@@ -1,5 +1,6 @@
 "use client";
 
+import { useReducedMotion } from "@roll/brand";
 import { animate, PresenceContext, useMotionValue, usePresence, type MotionValue, type Transition } from "motion/react";
 import { useContext, useEffect, useRef } from "react";
 
@@ -40,11 +41,13 @@ export function usePresenceTracks(tracks: Track[], key: string): boolean {
 
 /**
  * A motion value starting at `hidden` when its component enters through `AnimatePresence` (at
- * `shown` if the presence says `initial={false}`, or outside any presence).
+ * `shown` if the presence says `initial={false}`, outside any presence, or with reduced motion: a
+ * page switch drew one blank frame there, the old page gone and the new one still at 0).
  */
 export function useEnteringValue(hidden: number, shown: number): MotionValue<number>;
 export function useEnteringValue(hidden: string, shown: string): MotionValue<string>;
 export function useEnteringValue(hidden: number | string, shown: number | string): MotionValue<number> | MotionValue<string> {
   const presence = useContext(PresenceContext);
-  return useMotionValue(presence && presence.initial !== false ? hidden : shown) as MotionValue<number> | MotionValue<string>;
+  const reduced = useReducedMotion();
+  return useMotionValue(presence && presence.initial !== false && !reduced ? hidden : shown) as MotionValue<number> | MotionValue<string>;
 }

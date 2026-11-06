@@ -303,7 +303,7 @@ switched off under `prefers-reduced-motion`, and the engine draws a static, stat
 - **Layout moves with it.** A panel that takes room takes it through an in-flow gap animating its
   width (T3's sidebar gap), so what's beside it moves in step instead of snapping at the end.
 - **Switches crossfade in place.** The container stays; the content changes inside it.
-- **Reduced motion** sets every duration to 0: the end state at once, every state change still shown.
+- **Reduced motion** sets every duration to 0: the end state at once, every state change still shown. An entrance starts at its shown value (`useEnteringValue`), and Base UI starting styles are `motion-safe:` only: a duration of 0 still drew one frame at opacity 0 (a blank frame between two pages, a dialog a frame late).
 - **Timing lives in `lib/agents-motion.ts`** (`DRAWER`, `LEAVE`, `FADE_IN`, `PANE_SWITCH`).
 - **Libraries:** motion (motion.dev) for presence and in-place switches; Base UI's transitions for
   its popups; CSS for toggles of things that stay mounted. Not the View Transitions API: it takes

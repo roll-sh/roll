@@ -18,7 +18,7 @@ export const glass = "border border-outline glass shadow-pop inset-shadow-highli
 
 /** How popups grow out of their trigger and go (T3: scale 0.98 and a fade, about 150 ms). */
 export const popupMotion =
-  "origin-(--transform-origin) transition-[scale,opacity] duration-150 ease-out data-starting-style:scale-98 data-starting-style:opacity-0 data-ending-style:scale-98 data-ending-style:opacity-0 motion-reduce:transition-none";
+  "origin-(--transform-origin) transition-[scale,opacity] duration-150 ease-out motion-safe:data-starting-style:scale-98 motion-safe:data-starting-style:opacity-0 data-ending-style:scale-98 data-ending-style:opacity-0 motion-reduce:transition-none";
 
 /** A row in a menu, select or list (T3's item: 28px, a neutral fill when highlighted). */
 export const itemRow =
