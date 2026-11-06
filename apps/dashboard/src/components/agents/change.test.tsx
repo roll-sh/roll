@@ -15,10 +15,10 @@ const inRepo = project({ repo: { owner: "acme", repo: "roll" } });
 const worktree = { path: "/Users/ada/.roll/worktrees/prj_1/thr_1", branch: "roll/fix-the-flaky-test", base: "abc", removed_at: null };
 
 describe("roll code on a thread", () => {
-  it("the change chip says where the change is and links to it", () => {
+  it("the change chip says where the change is and links to its page in the dashboard (the public page is anonymous: a private repo's was a 404)", () => {
     renderAgents(<ChangeChip change={{ ...change, status: "ready", detail: null }} />, agentsHarness());
     const chip = screen.getByRole("link", { name: "Change 42, ready" });
-    expect(chip).toHaveAttribute("href", "https://roll.sh/acme/roll/changes/42");
+    expect(chip).toHaveAttribute("href", "/dashboard/code/acme/roll/changes/42");
     expect(chip).toHaveTextContent("#42ready");
     expect(changeTone("checking")).toBe("busy");
     expect(changeTone("queued")).toBe("busy");
@@ -34,7 +34,7 @@ describe("roll code on a thread", () => {
     renderAgents(<ThreadNode thread={t} machine={machine()} />, agentsHarness({ entities: [mirrored("thread", t, 1)] }));
     const card = screen.getByRole("button", { name: "Thread Fix the flaky queue test" });
     expect(within(card).getByRole("link", { name: "Change 42, blocked" })).toHaveAttribute("target", "_blank");
-    expect(within(card).getByRole("link", { name: /#7 Make the queue test deterministic/ })).toHaveAttribute("href", "/acme/roll/work");
+    expect(within(card).getByRole("link", { name: /#7 Make the queue test deterministic/ })).toHaveAttribute("href", "/dashboard/code/acme/roll#work");
   });
 
   it("the session header shows the change's detail and lets go of the work item", async () => {
@@ -70,7 +70,7 @@ describe("roll code on a thread", () => {
     await userEvent.click(within(form).getByRole("button", { name: "Publish" }));
     const done = await screen.findByRole("status", { name: "Published" });
     expect(h.command).toHaveBeenLastCalledWith("mch_1", expect.any(String), { type: "thread.publish", thread: "thr_1", message: "Fix the flaky queue test", land: true });
-    expect(within(done).getByRole("link", { name: /change #42/ })).toHaveAttribute("href", "https://roll.sh/acme/roll/changes/42");
+    expect(within(done).getByRole("link", { name: /change #42/ })).toHaveAttribute("href", "/dashboard/code/acme/roll/changes/42");
     expect(within(done).getByRole("link", { name: /change #42/ })).toHaveAttribute("target", "_blank");
     expect(within(done).getByText(/Not landed yet/)).not.toHaveClass("text-danger");
     expect(within(done).getByRole("list", { name: "Blockers" })).toHaveTextContent("check `test` hasn't passed");

@@ -49,13 +49,22 @@ export function publishLabel(thread: Thread, project: Project | undefined): stri
   return open ? `Publish again (#${thread.change!.number})` : "Publish as a change";
 }
 
+/**
+ * A change's page in the dashboard (`owner/repo`, number), signed in like the rest of it. The
+ * record's `url` is the public roll.sh page, which reads anonymously: a private repo's answered
+ * 404 there, even to its owner.
+ */
+export function changePageHref(repo: string, number: number): string {
+  return `/dashboard/code/${repo.split("/").map(encodeURIComponent).join("/")}/changes/${number}`;
+}
+
 /** The thread's roll code change: `#42 ready`, linking to the change page (a tab of its own, so the agents stay open); `detail` in the title. */
 export function ChangeChip({ change, className = "" }: { change: ThreadChange; className?: string }) {
   const tone = changeTone(change.status);
   return (
     <a
       data-nodrag
-      href={change.url}
+      href={changePageHref(change.repo, change.number)}
       target="_blank"
       rel="noreferrer"
       onClick={(e) => e.stopPropagation()}
@@ -75,7 +84,7 @@ export function WorkChip({ work, onRelease, className = "" }: { work: WorkRef; o
   return (
     <span className={`inline-flex min-w-0 items-center gap-1 text-[11px] text-muted ${className}`} title={`${work.repo}#${work.number}: ${work.title}`}>
       <ClipboardList className="size-3 shrink-0 text-subtle" />
-      <a data-nodrag href={`/${owner}/${repo}/work`} onClick={(e) => e.stopPropagation()} className="min-w-0 truncate hover:text-fg">
+      <a data-nodrag href={`/dashboard/code/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}#work`} target="_blank" rel="noreferrer" onClick={(e) => e.stopPropagation()} className="min-w-0 truncate hover:text-fg">
         <span className="font-mono text-subtle">#{work.number}</span> {work.title}
       </a>
       {onRelease && (
@@ -162,8 +171,8 @@ export function PublishForm({ thread, project, machine, onDone }: { thread: Thre
         <p className="flex flex-wrap items-center gap-x-2 gap-y-1">
           Published <span className="font-mono text-muted">{done.branch}</span>
           <span className="font-mono text-[11px] text-subtle">{done.commit.slice(0, 8)}</span>
-          {done.url && done.change !== null && (
-            <a href={done.url} target="_blank" rel="noreferrer" className="inline-flex items-center gap-0.5 text-accent hover:underline">
+          {done.change !== null && (done.url || project?.repo) && (
+            <a href={project?.repo ? changePageHref(`${project.repo.owner}/${project.repo.repo}`, done.change) : done.url!} target="_blank" rel="noreferrer" className="inline-flex items-center gap-0.5 text-accent hover:underline">
               change #{done.change} <ArrowUpRight className="size-3" />
             </a>
           )}
