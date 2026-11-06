@@ -78,6 +78,47 @@ export function ChangeChip({ change, className = "" }: { change: ThreadChange; c
   );
 }
 
+/** What "Ask to rebase" tells the agent about its conflicting change. */
+export function rebasePrompt(change: Pick<ThreadChange, "number" | "detail">): string {
+  return `Change #${change.number} conflicts with the default branch${change.detail ? ` (in ${change.detail})` : ""}. Rebase this branch onto the default branch, resolve the conflicts, run the checks, and tell me when it's ready to publish again.`;
+}
+
+/**
+ * Ask the agent to rebase its conflicting change: a message into its conversation (queued behind
+ * a running turn), where a conflict was only a red chip and a note saying to ask.
+ */
+export function AskToRebase({ thread, machine, change }: { thread: Thread; machine: Machine | undefined; change: Pick<ThreadChange, "number" | "detail"> }) {
+  const { client, readOnly } = useAgents();
+  const [state, setState] = useState<"idle" | "busy" | "sent">("idle");
+  const [error, setError] = useState<string | null>(null);
+  if (readOnly || !machine) return null;
+  const ask = async () => {
+    setState("busy");
+    setError(null);
+    try {
+      await client.run(machine.id, { type: "message.send", thread: thread.id, text: rebasePrompt(change) });
+      setState("sent");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      setState("idle");
+    }
+  };
+  return (
+    <span className="inline-flex shrink-0 items-center gap-1.5" data-nodrag>
+      <button
+        type="button"
+        onClick={() => void ask()}
+        disabled={state !== "idle"}
+        title={rebasePrompt(change)}
+        className="inline-flex h-6 items-center rounded-md border border-line-2 px-2 text-[11.5px] text-soft transition-colors hover:border-line-3 hover:bg-fg/[0.04] hover:text-fg disabled:opacity-60"
+      >
+        {state === "sent" ? "Asked to rebase" : state === "busy" ? <span className="shimmer">Asking…</span> : "Ask to rebase"}
+      </button>
+      {error && <span role="alert" className="text-[11.5px] text-danger">{error}</span>}
+    </span>
+  );
+}
+
 /** The work item the thread took: `#38 title`, with a release button when it can be let go. */
 export function WorkChip({ work, onRelease, className = "" }: { work: WorkRef; onRelease?: () => void; className?: string }) {
   const [owner, repo] = work.repo.split("/");
@@ -113,7 +154,7 @@ export function landingNote(l: Landing): { tone: "ok" | "busy" | "quiet" | "bad"
     case "blocked":
       return { tone: "quiet", text: "Not landed yet: the landing rules are waiting on something." };
     case "conflict":
-      return { tone: "quiet", text: "Not landed: it conflicts with the default branch. Ask the agent to rebase, then publish again." };
+      return { tone: "quiet", text: "Not landed: it conflicts with the default branch." };
     case "failed":
       return { tone: "bad", text: "Landing didn't go through." };
   }
@@ -184,6 +225,11 @@ export function PublishForm({ thread, project, machine, onDone }: { thread: Thre
           <div className={`rounded-lg border px-2.5 py-1.5 text-[12px] ${note.tone === "ok" ? "border-ok/30" : note.tone === "busy" ? "border-accent/30" : note.tone === "bad" ? "border-danger/30" : "border-line"}`}>
             <p className={note.tone === "bad" ? "text-danger" : "text-fg"}>{note.text}</p>
             {done.landing.message && !repeats(done.landing.message, note.text) && <p className="mt-0.5 text-muted">{done.landing.message}</p>}
+            {done.landing.status === "conflict" && done.change !== null && (
+              <p className="mt-1.5">
+                <AskToRebase thread={thread} machine={machine} change={{ number: done.change, detail: thread.change?.number === done.change ? thread.change.detail : null }} />
+              </p>
+            )}
             {done.landing.blockers.length > 0 && (
               <ul className="mt-1 list-disc space-y-0.5 pl-4 text-muted" aria-label="Blockers">
                 {done.landing.blockers.map((b) => (

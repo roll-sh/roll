@@ -259,6 +259,11 @@ describe("Automation runs", () => {
     // Its title, note, data and buttons stack in a column (the popup is a row by default: they
     // were squeezed side by side into its 20rem).
     expect(screen.getByRole("dialog", { name: "Run it now" })).toHaveClass("flex-col");
+    // The box is as tall as the sample (it was cut at 8 rows), up to half the window.
+    vi.spyOn(HTMLTextAreaElement.prototype, "scrollHeight", "get").mockReturnValue(5000);
+    await userEvent.type(box, " ");
+    expect((box as HTMLTextAreaElement).style.height).toBe(`${Math.round(window.innerHeight * 0.5)}px`);
+    vi.restoreAllMocks();
     const sample = JSON.parse((box as HTMLTextAreaElement).value);
     expect(sample.repo).toBe("acme/web");
     // Not JSON: says so and doesn't run.

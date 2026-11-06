@@ -358,6 +358,13 @@ export function RunButton({ automation, manual, list }: { automation: Automation
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // The box grows with what's in it (a sample's JSON was cut off at 8 rows and scrolled inside a
+  // 320px popover), up to half the window; then it scrolls.
+  const fit = (el: HTMLTextAreaElement | null) => {
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${Math.min(el.scrollHeight + 2, Math.round(window.innerHeight * 0.5))}px`;
+  };
   // Another trigger: what's typed is the event's data as that trigger sends it, starting from its
   // sample (made to meet the automation's conditions), so steps reading event.data.title get it.
   const sample = () => JSON.stringify(sampleEvent(automation.trigger, catalog, Date.now(), automation.filters).data, null, 2);
@@ -412,21 +419,25 @@ export function RunButton({ automation, manual, list }: { automation: Automation
       <PopoverTrigger render={<button type="button" className="inline-flex h-7 items-center gap-1.5 rounded-md border border-line-2 bg-fg/[0.03] px-2.5 text-[12.5px] font-[510] text-soft inset-shadow-highlight transition-[background-color,border-color,color,scale] duration-150 hover:border-line-3 hover:bg-fg/[0.06] hover:text-fg active:scale-[0.97]" aria-label="Run now" />}>
         <Play className="size-3.5" /> Run
       </PopoverTrigger>
-      <PopoverPopup side="bottom" align="end" sideOffset={6} aria-label="Run it now" className="w-80 flex-col p-3">
+      <PopoverPopup side="bottom" align="end" sideOffset={6} aria-label="Run it now" className={cn("flex-col p-3", manual ? "w-[min(22rem,calc(100vw-1.5rem))]" : "w-[min(28rem,calc(100vw-1.5rem))]")}>
         <p className="text-[13px] font-[590] tracking-[-0.01em]">Run {automation.name}</p>
         <p className="mt-0.5 text-[12px] text-subtle">
           {manual ? "Give it a prompt (event.data.input.prompt), or JSON (event.data.input)." : "The event's data as its trigger sends it (event.data), from a sample. Its conditions still apply."}
         </p>
         <textarea
+          ref={fit}
           value={text}
-          onChange={(e) => setText(e.target.value)}
+          onChange={(e) => {
+            setText(e.target.value);
+            fit(e.target);
+          }}
           onKeyDown={(e) => {
             if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
               e.preventDefault();
               void go();
             }
           }}
-          rows={manual ? 3 : 8}
+          rows={3}
           aria-label={manual ? "Input" : "Event data"}
           spellCheck={manual}
           placeholder={manual ? "Fix the flaky login test" : "{}"}
@@ -439,7 +450,7 @@ export function RunButton({ automation, manual, list }: { automation: Automation
         )}
         {error && <p className="mt-1.5 text-[11.5px] text-danger">{error}</p>}
         <div className="mt-2.5 flex items-center justify-end gap-2">
-          <span className="mr-auto text-[11px] text-subtle">⌘↵</span>
+          <span className="mr-auto text-[11px] text-subtle pointer-coarse:invisible">⌘↵</span>
           <PrimaryButton onClick={() => void go()} disabled={busy}>
             <Play /> {busy ? "Starting…" : "Run now"}
           </PrimaryButton>

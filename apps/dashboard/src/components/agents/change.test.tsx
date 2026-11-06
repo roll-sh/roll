@@ -47,6 +47,23 @@ describe("roll code on a thread", () => {
     expect(services.releaseWork).toHaveBeenCalledWith("acme", "thr_1");
   });
 
+  it("a conflicting change says where it conflicts once (the chip says conflict), and Ask to rebase asks the agent in its conversation", async () => {
+    const t = thread({ change: { ...change, status: "conflict", detail: "ROLL_DEMO.md" } });
+    const h = agentsHarness({ entities: [mirrored("project", inRepo, 1), mirrored("thread", t, 2)], follow: ["thr_1"], ctx: { services: fakeServices() } });
+    renderAgents(<Conversation thread={t} machine={machine()} />, h);
+    expect(screen.getByRole("link", { name: "Change 42, conflict" })).toBeInTheDocument();
+    expect(screen.getByText("Conflicts in ROLL_DEMO.md")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Ask to rebase" }));
+    await waitFor(() =>
+      expect(h.command).toHaveBeenLastCalledWith("mch_1", expect.any(String), {
+        type: "message.send",
+        thread: "thr_1",
+        text: "Change #42 conflicts with the default branch (in ROLL_DEMO.md). Rebase this branch onto the default branch, resolve the conflicts, run the checks, and tell me when it's ready to publish again.",
+      }),
+    );
+    expect(await screen.findByRole("button", { name: "Asked to rebase" })).toBeDisabled();
+  });
+
   it("publishes and lands; a blocked land reads as a calm result with its blockers", async () => {
     const t: Thread = thread({ worktree });
     const reply = (c: Command): Reply =>

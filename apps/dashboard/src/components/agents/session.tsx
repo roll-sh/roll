@@ -24,7 +24,7 @@ import { checkpointsOf, nodeTree, runsOf } from "@/lib/agents-store";
 import { readyPlan } from "@/lib/agents-plan";
 import { DiffViewer } from "../code/diff";
 import { input } from "../ui";
-import { ChangeChip, PublishForm, publishLabel, TakeWorkForm, WorkChip } from "./change";
+import { AskToRebase, ChangeChip, PublishForm, publishLabel, TakeWorkForm, WorkChip } from "./change";
 import { useEscapeLayer } from "./escape-layers";
 import { Composer } from "./composer";
 import { Menu } from "./menu";
@@ -622,7 +622,12 @@ function TitleBar({
         <div className="flex min-w-0 items-center gap-3 px-4 pb-2.5">
           {orchestrated && <OrchestratorChip {...orchestrated} onOpen={openThread} />}
           {thread.change && <ChangeChip change={thread.change} />}
-          {thread.change?.detail && <span className="min-w-0 truncate text-[11.5px] text-subtle">{thread.change.detail}</span>}
+          {thread.change?.detail && (
+            <span className="min-w-0 truncate text-[11.5px] text-subtle" title={thread.change.detail}>
+              {thread.change.status === "conflict" ? `Conflicts in ${thread.change.detail}` : thread.change.detail}
+            </span>
+          )}
+          {thread.change?.status === "conflict" && <AskToRebase thread={thread} machine={machine} change={thread.change} />}
           {thread.work && <WorkChip work={thread.work} className="min-w-0 flex-1" onRelease={readOnly || !services ? undefined : () => act(() => services.releaseWork(owner, thread.id))} />}
         </div>
       )}
