@@ -880,12 +880,15 @@ export class DemoOwner implements AgentsTransport {
   });
   /**
    * `speed` scales every delay (tests run the demo fast); `keepAlive` starts new work whenever
-   * the canvas goes quiet; `empty` starts with no machines (`?demo=empty`: the first-run screen).
+   * the canvas goes quiet; `empty` starts with no machines (`?demo=empty`: the first-run screen);
+   * `busy` gives one project many threads (`?demo=busy`).
    */
   constructor(
     private speed = 1,
     private keepAlive = true,
     private empty = false,
+    /** `?demo=busy`: one project (web) with 30 more threads, to see the canvas at scale. */
+    private busy = false,
   ) {}
 
   // ── records ──
@@ -1453,6 +1456,23 @@ export class DemoOwner implements AgentsTransport {
     this.put("thread", base("thr_demo_ci", "prj_demo_infra", "Move CI to roll checks", "codex", "gpt-5.5-codex", { created_at: t0 + 7000, interaction_mode: "plan", cwd: "/home/roll/infra" }), BOX);
     this.plannedRun(base("thr_demo_billing", "prj_demo_web", "Plan the CSV invoice export", "codex", "gpt-5.5-codex", { created_at: t0 + 6000, interaction_mode: "plan" }));
     this.put("thread", base("thr_demo_old", "prj_demo_web", "Spike: edge middleware", "codex", "gpt-5.5", { created_at: t0, archived_at: t0 + 100 }), MBP);
+
+    // `?demo=busy`: one busy project, as an owner's canvas gets after a few weeks (the canvas folds
+    // its quiet threads; its space groups them by status).
+    if (this.busy) {
+      const topics = ["Fix the login redirect", "Speed up the image grid", "Add dark mode to settings", "Port the pricing page", "Audit the cookie banner", "Translate the onboarding", "Retry failed webhooks", "Lazy-load the charts", "Tidy the 404 page", "Cache the blog index"];
+      for (let i = 0; i < 30; i++) {
+        const tid = `thr_demo_busy${i}`;
+        const at = t0 - (i + 1) * 47 * 60_000;
+        const title = `${topics[i % topics.length]}${i >= topics.length ? ` (${Math.floor(i / topics.length) + 1})` : ""}`;
+        this.put("thread", base(tid, "prj_demo_web", title, i % 3 ? "claude" : "codex", i % 3 ? "claude-sonnet-5" : "gpt-5.5-codex", { created_at: at, updated_at: at, cwd: "/Users/ada/web", ...(i === 4 ? { status: "error" as const, error: "the dev server didn't start" } : {}) }), MBP);
+        // Every third one finished a run nobody has opened yet (green).
+        if (i % 3 === 0) {
+          this.put("run", { id: `run_demo_busy${i}`, thread: tid, ordinal: 1, provider: "claude", model: "claude-sonnet-5", status: "completed", prompt: title, attachments: [], steers: [], requested_at: at, started_at: at, completed_at: at + 90_000, checkpoint: null, stat: null, usage: { input_tokens: 9_000, output_tokens: 1_200, cached_tokens: 0, cost_usd: null }, context: null, error: null }, MBP);
+          this.patchThread(tid, { run_count: 1, updated_at: at + 90_000 });
+        }
+      }
+    }
 
     // The inbox: settled threads (by hand, after days without activity, a landed change),
     // a snoozed one, and one whose snooze just woke.

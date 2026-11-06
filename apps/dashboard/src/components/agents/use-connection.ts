@@ -10,13 +10,15 @@ const LAST_OWNER = "roll:agents:owner";
 
 /**
  * The demo's in-memory owner, shared by its client and its services (loaded only when asked for).
- * `?demo=empty` starts it with no machines, to see the first-run screen.
+ * `?demo=empty` starts it with no machines, to see the first-run screen; `?demo=busy` gives one
+ * project 30 more threads, to see the canvas at scale.
  */
 let demo: Promise<{ client: AgentsClient; services: AgentsServices }> | null = null;
 
 function loadDemo() {
   demo ??= import("@/lib/agents-demo").then(({ DemoOwner }) => {
-    const owner = new DemoOwner(1, true, new URLSearchParams(window.location.search).get("demo") === "empty");
+    const variant = new URLSearchParams(window.location.search).get("demo");
+    const owner = new DemoOwner(1, true, variant === "empty", variant === "busy");
     return { client: clientFor(DEMO_OWNER, () => owner), services: owner.services() };
   });
   return demo;

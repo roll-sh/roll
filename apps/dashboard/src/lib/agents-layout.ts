@@ -57,9 +57,13 @@ export interface LayoutOptions {
   indent?: number;
   /** Growing down: between a parent and the first child it lists, and between listed children. */
   listGap?: number;
+  /** Parents whose leaf children are laid out as a grid block (`planGrids`). */
+  grids?: ReadonlyMap<string, Grid>;
+  /** Growing right: nodes that don't widen their column (a grid block). */
+  overflows?: (key: string) => boolean;
 }
 
-export type Gaps = Required<Omit<LayoutOptions, "direction" | "spreads">>;
+export type Gaps = Required<Omit<LayoutOptions, "direction" | "spreads" | "grids" | "overflows">>;
 
 /** The gaps a direction lays out with by default (the canvas's comfortable density). */
 export const GAPS: Readonly<Record<Direction, Gaps>> = {
@@ -87,7 +91,100 @@ export const COMPACT_GAPS: Readonly<Record<Direction, Gaps>> = {
  * bottom like Linear's board, a column per project.
  */
 export function tidyLayout(tree: TreeLike, size: (key: string) => Size, opts: LayoutOptions = {}): Map<string, Point> {
-  return opts.direction === "vertical" ? boardLayout(tree, size, opts) : treeLayout(tree, size, opts);
+  const grids = opts.grids;
+  if (!grids?.size) return opts.direction === "vertical" ? boardLayout(tree, size, opts) : treeLayout(tree, size, opts);
+  // Each grid is one block in its parent's place for the first of its cards; the cards go in it after.
+  const block = new Map<string, Grid>();
+  const nodes = new Map<string, { children: readonly string[] }>();
+  for (const [k, n] of tree.nodes) {
+    const g = grids.get(k);
+    if (!g) {
+      nodes.set(k, n);
+      continue;
+    }
+    const key = `${GRID}${k}`;
+    block.set(key, g);
+    const members = new Set(g.members);
+    const children: string[] = [];
+    for (const c of n.children) {
+      if (!members.has(c)) children.push(c);
+      else if (c === g.members[0]) children.push(key);
+    }
+    nodes.set(k, { children });
+  }
+  for (const key of block.keys()) nodes.set(key, { children: [] });
+  const sized = (k: string) => block.get(k)?.size ?? size(k);
+  // A block's band is its own (siblings never share one), so growing right it may reach past its
+  // column: the columns after it stay where the cards' widths put them.
+  const inner: LayoutOptions = { ...opts, grids: undefined, overflows: (k) => block.has(k) };
+  const out = opts.direction === "vertical" ? boardLayout({ roots: tree.roots, nodes }, sized, inner) : treeLayout({ roots: tree.roots, nodes }, sized, inner);
+  for (const [key, g] of block) {
+    const at = out.get(key);
+    out.delete(key);
+    if (!at) continue;
+    g.members.forEach((m, i) => out.set(m, { x: at.x + g.cells[i].x, y: at.y + g.cells[i].y }));
+  }
+  return out;
+}
+
+const GRID = "#grid:";
+
+/**
+ * A parent's cards wrapped into a grid (a busy project's threads), placed as one block: in columns
+ * of `rows` growing right, or rows of `cols` growing down, whichever way the tree grows, so the
+ * block keeps near the screen's shape instead of one long column. Only the cards with nothing under
+ * them wrap (a thread with requests or subagents keeps its place in the tree, with them).
+ */
+export interface Grid {
+  members: readonly string[];
+  /** Top-left of each member inside the block. */
+  cells: readonly Point[];
+  size: Size;
+  /** Members in the block's first column (the ones its parent's edges go into). */
+  first: ReadonlySet<string>;
+}
+
+/** Fewer cards than this stay one column. */
+export const WRAP_AT: Readonly<Record<Direction, number>> = { horizontal: 5, vertical: 9 };
+
+/**
+ * The grids for the parents `wraps` picks, sized for a screen `aspect` (width ÷ height) wide: a
+ * block of n cards gets the number of rows that makes it about that shape (at least 3, growing
+ * right; columns are as wide as their widest card, rows as tall as their tallest).
+ */
+export function planGrids(tree: TreeLike, size: (key: string) => Size, opts: { direction: Direction; aspect: number; wraps: (key: string) => boolean; gap?: Point }): Map<string, Grid> {
+  const out = new Map<string, Grid>();
+  const gx = opts.gap?.x ?? 20;
+  const gy = opts.gap?.y ?? (opts.direction === "vertical" ? 14 : 20);
+  for (const [k, n] of tree.nodes) {
+    if (!opts.wraps(k)) continue;
+    const members = n.children.filter((c) => !(tree.nodes.get(c)?.children.length));
+    if (members.length < WRAP_AT[opts.direction]) continue;
+    const sizes = members.map(size);
+    const w = Math.max(...sizes.map((s) => s.w)) + gx;
+    const h = sizes.reduce((sum, s) => sum + s.h, 0) / sizes.length + gy;
+    const fit = Math.sqrt((members.length * w) / (h * Math.max(0.3, opts.aspect)));
+    const rows = Math.max(opts.direction === "horizontal" ? 3 : 1, Math.min(members.length, Math.round(fit)));
+    const cols = Math.ceil(members.length / rows);
+    // Growing right, columns fill first (newest down the first column); growing down, rows do.
+    const at = (i: number) => (opts.direction === "horizontal" ? { c: Math.floor(i / rows), r: i % rows } : { c: i % cols, r: Math.floor(i / cols) });
+    const colW = new Array<number>(cols).fill(0);
+    const rowH = new Array<number>(opts.direction === "horizontal" ? rows : Math.ceil(members.length / cols)).fill(0);
+    members.forEach((_, i) => {
+      const { c, r } = at(i);
+      colW[c] = Math.max(colW[c], sizes[i].w);
+      rowH[r] = Math.max(rowH[r], sizes[i].h);
+    });
+    const colX = colW.map((_, c) => colW.slice(0, c).reduce((s, x) => s + x + gx, 0));
+    const rowY = rowH.map((_, r) => rowH.slice(0, r).reduce((s, y) => s + y + gy, 0));
+    out.set(k, {
+      members,
+      cells: members.map((_, i) => ({ x: colX[at(i).c], y: rowY[at(i).r] })),
+      size: { w: colX[cols - 1] + colW[cols - 1], h: rowY[rowH.length - 1] + rowH[rowH.length - 1] },
+      first: new Set(members.filter((_, i) => at(i).c === 0)),
+    });
+  }
+  return out;
 }
 
 /**
@@ -111,7 +208,7 @@ function treeLayout(tree: TreeLike, size: (key: string) => Size, opts: LayoutOpt
     if (depth.has(key)) return 0;
     depth.set(key, d);
     const { w, h } = size(key);
-    colW[d] = Math.max(colW[d] ?? 0, w);
+    colW[d] = Math.max(colW[d] ?? 0, opts.overflows?.(key) ? 0 : w);
     const kids = (tree.nodes.get(key)?.children ?? []).filter((c) => !depth.has(c));
     let block = 0;
     kids.forEach((c, i) => (block += measure(c, d + 1) + (i ? siblingGap : 0)));

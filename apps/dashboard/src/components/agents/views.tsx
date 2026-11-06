@@ -1,6 +1,6 @@
 "use client";
 
-import { ArrowDownFromLine, ArrowRightFromLine, Bookmark, ChevronDown, Focus as FocusIcon, ListFilter, Pencil, Pin as PinIcon, PinOff, Plus, Search, SlidersHorizontal, Trash2, X, ArrowLeft, ArrowRight, FileDiff as DiffIcon } from "lucide-react";
+import { ArrowDownFromLine, ArrowRightFromLine, Bookmark, ChevronDown, ChevronRight, Focus as FocusIcon, ListFilter, Pencil, Pin as PinIcon, PinOff, Plus, Search, SlidersHorizontal, Trash2, X, ArrowLeft, ArrowRight, FileDiff as DiffIcon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { AgentsServices } from "@/lib/agents-services";
 import type { AgentsData } from "@/lib/agents-store";
@@ -398,15 +398,20 @@ export function ViewsBar({
       </div>
       <div className="flex shrink-0 items-center gap-1">
         {focused && (
-          <span className="fade-in flex h-7 max-w-44 items-center gap-1.5 rounded-md border border-line-2 bg-panel-2 pr-0.5 pl-2 text-[12px] text-fg inset-shadow-highlight" role="status">
-            <FocusIcon className="size-3.5 shrink-0 text-muted" strokeWidth={1.75} aria-hidden />
-            <span className="truncate">
-              <span className="text-muted">Only</span> {focused.name}
+          // Inside a project's space: the way back out, as a breadcrumb.
+          <nav aria-label="Where the canvas is" className="fade-in flex h-7 max-w-64 items-center gap-1 rounded-md border border-line-2 bg-panel-2 pr-0.5 pl-1 text-[12px] text-fg inset-shadow-highlight">
+            <button onClick={focused.clear} title="Every project (Esc)" className="flex h-6 shrink-0 items-center gap-1.5 rounded px-1 text-muted transition-colors hover:bg-fg/[0.06] hover:text-fg">
+              <FocusIcon className="size-3.5 shrink-0" strokeWidth={1.75} aria-hidden />
+              All projects
+            </button>
+            <ChevronRight className="size-3 shrink-0 text-subtle" aria-hidden />
+            <span className="truncate" aria-current="page">
+              {focused.name}
             </span>
             <button onClick={focused.clear} title="Show every project (Esc)" aria-label={`Stop focusing ${focused.name}`} className="grid size-6 shrink-0 place-items-center rounded text-subtle hover:bg-fg/[0.06] hover:text-fg">
               <X className="size-3" />
             </button>
-          </span>
+          </nav>
         )}
         {/* Left of the field, so the field stays where it is as they appear. */}
         {draftActive && (

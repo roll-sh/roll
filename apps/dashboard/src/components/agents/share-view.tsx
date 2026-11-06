@@ -134,6 +134,8 @@ export function ShareView({ share }: { share: Share }) {
         return <RequestNode request={data.requests.get(n.id)!.value} />;
       case "terminal":
       case "pin":
+      case "fold":
+      case "group":
         return null;
     }
   };
@@ -152,6 +154,8 @@ export function ShareView({ share }: { share: Share }) {
           return { w: 340, h: 160 };
         case "terminal":
         case "pin":
+        case "fold":
+        case "group":
           return { w: 0, h: 0 };
       }
     },

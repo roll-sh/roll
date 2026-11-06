@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { collapseUnused, deriveGraph, keyOf, rolling } from "./agents-graph";
-import { arrange, bounds, dropIndex, fitView, mergeOrder, moveTo, nextCard, ROOTS, tidyLayout, withOrder, zoomAt, type LayoutOptions, type Point, type Rect, type Size } from "./agents-layout";
+import { collapseUnused, deriveGraph, foldQuiet, groupByStatus, keyOf, rolling, SHOWN_THREADS } from "./agents-graph";
+import { arrange, bounds, dropIndex, fitView, mergeOrder, moveTo, nextCard, planGrids, ROOTS, tidyLayout, withOrder, zoomAt, type LayoutOptions, type Point, type Rect, type Size } from "./agents-layout";
 import { applyEvents, emptyData, follow } from "./agents-store";
 import { approval, ev, machine, node, project, run, terminal, thread } from "@/test/agents";
 import { EMPTY_INBOX, type Thread } from "./agents-api";
@@ -126,7 +126,10 @@ describe("agents layout", () => {
     };
     add("m1", { w: 272, h: 120 }, ["p1", "p2", "x1"]);
     add("m2", { w: 272, h: 180 }, ["p3"]);
-    add("p1", { w: 256, h: 64 }, ["t1", "t2", "t3"]);
+    // p1 is busy: enough plain threads that they wrap into a grid (`planGrids`).
+    const many = Array.from({ length: 9 }, (_, i) => `q${i}`);
+    add("p1", { w: 256, h: 64 }, ["t1", "t2", "t3", ...many]);
+    for (const [i, q] of many.entries()) add(q, { w: 296, h: 96 + (i % 3) * 22 });
     add("p2", { w: 256, h: 110 }, []);
     add("p3", { w: 256, h: 64 }, ["t4"]);
     add("x1", { w: 620, h: 380 });
@@ -142,10 +145,15 @@ describe("agents layout", () => {
     const sz = (k: string) => sizes.get(k)!;
     const orders = [{}, withOrder(withOrder({}, ROOTS, ["m2", "m1"]), "t1", ["s1", "r1", "pc1"])];
     const layouts: LayoutOptions[] = [{ direction: "horizontal" }, { direction: "vertical" }, { direction: "vertical", spreads: (k) => k.startsWith("m") }];
-    for (const opts of layouts)
+    for (const plain of layouts)
+      for (const wrap of [false, true])
       for (const order of orders) {
-        const direction = opts.spreads ? "board" : opts.direction;
-        const p = tidyLayout(arrange({ roots: ["m1", "m2"], nodes }, order), sz, opts);
+        const tree = arrange({ roots: ["m1", "m2"], nodes }, order);
+        const grids = wrap ? planGrids(tree, sz, { direction: plain.direction!, aspect: 1.6, wraps: (k) => k.startsWith("p") }) : undefined;
+        if (wrap) expect(grids!.get("p1")!.members.length).toBe(10);
+        const opts = { ...plain, grids };
+        const direction = `${opts.spreads ? "board" : opts.direction}${wrap ? " wrapped" : ""}`;
+        const p = tidyLayout(tree, sz, opts);
         expect(p.size).toBe(nodes.size);
         const keys = [...p.keys()];
         for (const a of keys)
@@ -158,7 +166,7 @@ describe("agents layout", () => {
         // Children are past their parent in the direction the tree grows.
         for (const [k, n] of nodes)
           for (const c of n.children) {
-            if (direction !== "horizontal") expect(p.get(c)!.y).toBeGreaterThan(p.get(k)!.y + sz(k).h);
+            if (!direction.startsWith("horizontal")) expect(p.get(c)!.y).toBeGreaterThan(p.get(k)!.y + sz(k).h);
             else expect(p.get(c)!.x).toBeGreaterThan(p.get(k)!.x + sz(k).w);
           }
       }
@@ -280,5 +288,60 @@ describe("projects without a card", () => {
     expect(collapseUnused(g, (p) => p === "prj_2").graph).toBe(g);
     const byProject = { ...g, roots: ["p:prj_2"], nodes: new Map([["p:prj_2", { ...g.nodes.get("p:prj_2")!, parent: null, children: [] }]]) };
     expect(collapseUnused(byProject, () => false).graph).toBe(byProject);
+  });
+});
+
+describe("a busy project", () => {
+  // One project with 20 threads: one running, one waiting on you, one failed, the rest idle
+  // (thr_9 the most recently active of those, thr_19 the least).
+  function busy() {
+    let d = emptyData();
+    const events = [{ type: "machine" as const, cursor: 1, machine: machine() }, ev("project", project(), 2)];
+    for (let i = 0; i < 20; i++) {
+      const status = i === 0 ? "running" : i === 1 ? "waiting" : i === 2 ? "error" : "idle";
+      events.push(ev("thread", thread({ id: `thr_${i}`, title: `T${i}`, status, pending_requests: i === 1 ? 1 : 0, created_at: 100 - i }), 3 + i));
+    }
+    d = applyEvents(d, events);
+    return d;
+  }
+  const keep = (d: ReturnType<typeof busy>, also: string[] = []) => (id: string) => {
+    const t = d.threads.get(id)!.value;
+    return t.status !== "idle" || also.includes(id);
+  };
+
+  it("shows what matters and the most recent, folds the rest into one card last; inside it groups by status", () => {
+    const d = busy();
+    const g = deriveGraph(d);
+    const activity = (id: string) => d.threads.get(id)!.value.created_at;
+    const shown = (n: { kind: string }) => (n.kind === "project" ? SHOWN_THREADS : null);
+    const { graph, folded } = foldQuiet(g, { shown, keep: keep(d), activity });
+    const kids = graph.nodes.get("p:prj_1")!.children;
+    // Running, waiting, failed always; the newest idle ones fill up to SHOWN_THREADS; the fold card last.
+    expect(kids).toEqual(["t:thr_0", "t:thr_1", "t:thr_2", "t:thr_3", "f:p:prj_1"]);
+    expect(folded.get("p:prj_1")).toEqual({ threads: Array.from({ length: 16 }, (_, i) => `thr_${i + 4}`), expanded: false });
+    expect(graph.nodes.has("t:thr_10")).toBe(false);
+    expect(graph.edges.some((e) => e.to === "t:thr_10")).toBe(false);
+    expect(graph.edges.some((e) => e.from === "p:prj_1" && e.to === "f:p:prj_1")).toBe(true);
+    // The open conversation's card (or one asked for) always shows, wherever it was.
+    const open = foldQuiet(g, { shown, keep: keep(d, ["thr_17"]), activity });
+    expect(open.graph.nodes.has("t:thr_17")).toBe(true);
+    expect(open.folded.get("p:prj_1")!.threads).not.toContain("thr_17");
+    // Expanded: everything shows, and the fold card stays last to fold them back.
+    const all = foldQuiet(g, { shown, keep: keep(d), activity, expanded: new Set(["p:prj_1"]) });
+    expect(all.graph.nodes.get("p:prj_1")!.children).toHaveLength(21);
+    expect(all.graph.nodes.get("p:prj_1")!.children.at(-1)).toBe("f:p:prj_1");
+    // A project with a few threads never folds.
+    expect(foldQuiet(g, { shown: () => 30, keep: keep(d), activity }).graph).toBe(g);
+
+    // Its space: a header per status that has threads, in order; long quiet groups fold there.
+    const status = (id: string) => (id === "thr_0" ? "running" : id === "thr_1" ? "needs" : id === "thr_2" ? "failed" : "quiet");
+    const space = groupByStatus(g, "p:prj_1", status);
+    expect(space.nodes.get("p:prj_1")!.children).toEqual(["g:prj_1:needs", "g:prj_1:running", "g:prj_1:failed", "g:prj_1:quiet"]);
+    expect(space.nodes.get("g:prj_1:quiet")!.children).toHaveLength(17);
+    expect(space.nodes.get("t:thr_5")!.parent).toBe("g:prj_1:quiet");
+    expect(space.edges.some((e) => e.from === "p:prj_1" && e.to.startsWith("t:"))).toBe(false);
+    const inGroups = foldQuiet(space, { shown: (n) => (n.kind === "group" && n.id === "quiet" ? 12 : null), keep: keep(d), activity });
+    expect(inGroups.graph.nodes.get("g:prj_1:quiet")!.children).toHaveLength(13);
+    expect(inGroups.folded.get("g:prj_1:quiet")!.threads).toHaveLength(5);
   });
 });

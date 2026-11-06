@@ -1,6 +1,6 @@
 "use client";
 
-import { ArrowDownFromLine, ArrowRightFromLine, ListRestart, Maximize, Minus, Plus } from "lucide-react";
+import { ArrowDownFromLine, ArrowRightFromLine, CircleDot, ListRestart, Maximize, Minus, Plus } from "lucide-react";
 import {
   forwardRef,
   useCallback,
@@ -25,6 +25,7 @@ import {
   nextCard,
   loadView,
   moveTo,
+  planGrids,
   ROOTS,
   saveOrder,
   saveView,
@@ -44,6 +45,7 @@ import { CanvasEngine, type SceneEdge, type SceneMeta } from "./canvas-engine";
 import { AnimatePresence, motion, useMotionValue, type Transition } from "motion/react";
 import { CARD_OUT, POPOVER_IN } from "@/lib/agents-motion";
 import { usePresenceTracks } from "./presence";
+import { Minimap, type MinimapHandle } from "./minimap";
 
 export interface CanvasHandle {
   /** Pan (and zoom) so a node is in view; `zoom` sets the scale. */
@@ -80,6 +82,10 @@ export const AgentsCanvas = forwardRef<
     onDirection?: (direction: Direction) => void;
     /** `compact`: cards fold their details (`[data-detail]`) and sit closer. */
     density?: "compact";
+    /** A busy project's threads wrap into a grid about the screen's shape (`planGrids`) instead of one long column. */
+    wrap?: boolean;
+    /** Far out, cards show their name big (`FarLabel`, `[data-far]`) instead of shrunk details. */
+    semantic?: boolean;
     /** Enter on a focused card: open it, saying whether it did (else Enter goes into the card). */
     onOpen?: (key: string) => boolean;
     render: (node: GraphNode) => ReactNode;
@@ -103,7 +109,7 @@ export const AgentsCanvas = forwardRef<
      */
     keepClear?: React.RefObject<HTMLElement | null>;
   }
->(function AgentsCanvas({ graph, storageKey, order: shownOrder, onOrder, fitKey, direction = "horizontal", onDirection, density, onOpen, render, defaultSize, onEscape, overlay, active = true, selected, highlighted, onLaunch, keepClear }, ref) {
+>(function AgentsCanvas({ graph, storageKey, order: shownOrder, onOrder, fitKey, direction = "horizontal", onDirection, density, wrap = true, semantic = true, onOpen, render, defaultSize, onEscape, overlay, active = true, selected, highlighted, onLaunch, keepClear }, ref) {
   const reduced = useReducedMotion();
   const container = useRef<HTMLDivElement>(null);
   const canvas = useRef<HTMLCanvasElement>(null);
@@ -117,6 +123,7 @@ export const AgentsCanvas = forwardRef<
   // The zoom bar's "60%", written as the view moves: as state, every step of a zoom rendered the
   // whole canvas (200 cards) again.
   const zoomText = useRef<HTMLSpanElement>(null);
+  const minimap = useRef<MinimapHandle | null>(null);
   const fitted = useRef(false);
   const viewChanged = useRef<((v: View) => void) | null>(null);
   const controlled = shownOrder !== undefined;
@@ -138,6 +145,18 @@ export const AgentsCanvas = forwardRef<
     const e = new CanvasEngine(container.current, canvas.current, world.current, {
       reducedMotion: reduced,
       onView: (v: View) => {
+        // Zoomed far out, cards show their name big instead of shrunk details (`[data-far]`).
+        const c = container.current;
+        if (c && c.dataset.semantic === "on") {
+          // Two steps out, with a margin each way so a zoom resting on a step doesn't flicker.
+          const was = Number(c.dataset.far ?? 0);
+          const far = v.k < FAR[1].in || (was === 2 && v.k < FAR[1].out) ? 2 : v.k < FAR[0].in || (was >= 1 && v.k < FAR[0].out) ? 1 : 0;
+          if (far !== was) {
+            if (far) c.dataset.far = String(far);
+            else delete c.dataset.far;
+          }
+        }
+        minimap.current?.view(v);
         const text = `${Math.round(v.k * 100)}%`;
         if (zoomText.current && zoomText.current.textContent !== text) zoomText.current.textContent = text;
         viewChanged.current?.(v);
@@ -176,11 +195,25 @@ export const AgentsCanvas = forwardRef<
   const arranged = useMemo(() => arrange(graph, preview ? withOrder(order, preview.parent, preview.list) : order), [graph, order, preview]);
   // Growing down, a machine spreads its projects side by side; everything under a project is a
   // list down its column.
-  const spreads = useCallback((k: string) => graph.nodes.get(k)?.kind === "machine", [graph]);
+  // Inside a project's space its status groups sit side by side too, a column each (Linear's board).
+  const spreads = useCallback((k: string) => {
+    const n = graph.nodes.get(k);
+    return n?.kind === "machine" || (n?.kind === "project" && n.children.some((c) => graph.nodes.get(c)?.kind === "group"));
+  }, [graph]);
   const across = useCallback((parent: string) => sideBySide(direction, parent, spreads), [direction, spreads]);
+  // The canvas's shape (width ÷ height), coarse: a busy project's grid is sized for it.
+  const [aspect, setAspect] = useState(1.6);
+  const grids = useMemo(() => {
+    if (!wrap) return new Map();
+    const wraps = (k: string) => {
+      const kind = graph.nodes.get(k)?.kind;
+      return kind === "project" || kind === "group";
+    };
+    return planGrids(arranged, (k) => (graph.nodes.has(k) ? sizeOf(k) : { w: 0, h: 0 }), { direction, aspect, wraps, gap: density === "compact" ? { x: 10, y: direction === "vertical" ? 8 : 10 } : undefined });
+  }, [wrap, arranged, graph, sizeOf, direction, aspect, density]);
   const positions = useMemo(
-    () => tidyLayout(arranged, (k) => (graph.nodes.has(k) ? sizeOf(k) : { w: 0, h: 0 }), { direction, spreads, ...(density === "compact" ? COMPACT_GAPS[direction] : {}) }),
-    [arranged, graph, sizeOf, direction, spreads, density],
+    () => tidyLayout(arranged, (k) => (graph.nodes.has(k) ? sizeOf(k) : { w: 0, h: 0 }), { direction, spreads, grids, ...(density === "compact" ? COMPACT_GAPS[direction] : {}) }),
+    [arranged, graph, sizeOf, direction, spreads, density, grids],
   );
 
   useEffect(() => {
@@ -192,9 +225,12 @@ export const AgentsCanvas = forwardRef<
       meta.set(n.key, { busy: n.busy, parent: n.parent });
       sz.set(n.key, sizeOf(n.key));
     }
-    const edges: SceneEdge[] = graph.edges.map((x) => ({ ...x, route: direction === "horizontal" ? "right" : across(x.from) ? "down" : "list" }));
+    // Into a grid, only its first column has edges: the rest would cross the cards before them.
+    const edges: SceneEdge[] = graph.edges
+      .filter((x) => !grids.get(x.from) || !grids.get(x.from)!.members.includes(x.to) || grids.get(x.from)!.first.has(x.to))
+      .map((x) => ({ ...x, route: direction === "horizontal" ? "right" : across(x.from) ? "down" : "list" }));
     e.setScene(positions, meta, edges, sz);
-  }, [positions, graph, sizeOf, direction, across]);
+  }, [positions, graph, sizeOf, direction, across, grids]);
 
   // `all`: everything, however small (the Fit button, `1`). Otherwise readable cards beat seeing
   // everything: never below READABLE (a phone, 0.55), framed from the top; a phone starts on the
@@ -267,7 +303,13 @@ export const AgentsCanvas = forwardRef<
     if (!c) return;
     let width = c.getBoundingClientRect().width;
     let t: ReturnType<typeof setTimeout> | undefined;
+    const shape = () => {
+      const r = c.getBoundingClientRect();
+      if (r.width && r.height) setAspect(Math.round((r.width / r.height) * 4) / 4);
+    };
+    shape();
     const ro = new ResizeObserver(() => {
+      shape();
       const now = c.getBoundingClientRect().width;
       if (Math.abs(now - width) < 24) return;
       width = now;
@@ -592,6 +634,25 @@ export const AgentsCanvas = forwardRef<
     },
     [graph, arranged],
   );
+  // Every request on the canvas in reading order: the toolbar's "next waiting on you" walks them.
+  const waiting = useMemo(() => {
+    const out: string[] = [];
+    const walk = (k: string) => {
+      if (graph.nodes.get(k)?.kind === "request") out.push(k);
+      for (const c of arranged.nodes.get(k)?.children ?? []) walk(c);
+    };
+    arranged.roots.forEach(walk);
+    return out;
+  }, [graph, arranged]);
+  const lastWaiting = useRef<string | null>(null);
+  const nextWaiting = useCallback(() => {
+    if (!waiting.length) return;
+    const at = lastWaiting.current ? waiting.indexOf(lastWaiting.current) : -1;
+    const to = waiting[(at + 1) % waiting.length];
+    lastWaiting.current = to;
+    following.current = false;
+    goTo(to, true);
+  }, [waiting, goTo]);
   useEffect(() => {
     if (!active) return;
     // Before the card's own Space (which would open it) and the engine's space-to-pan.
@@ -703,6 +764,7 @@ export const AgentsCanvas = forwardRef<
       role="application"
       data-direction={direction}
       data-density={density ?? "comfortable"}
+      data-semantic={semantic ? "on" : undefined}
     >
       <canvas ref={canvas} aria-hidden className="pointer-events-none absolute inset-0" />
       <div
@@ -725,6 +787,7 @@ export const AgentsCanvas = forwardRef<
       </div>
       {overlay}
       {ghost && <LaunchGhost {...ghost} />}
+      <Minimap ref={minimap} positions={positions} sizeOf={sizeOf} nodes={graph.nodes} engine={engine} />
       {/* At the top while a phone's waiting request sits at the bottom (`data-waiting` above), so both can be reached. */}
       <div className="chrome-in absolute right-3 bottom-3 flex items-center gap-0.5 rounded-[10px] border border-line-2 p-0.5 text-muted shadow-pop inset-shadow-highlight glass [[data-waiting]_&]:top-3 [[data-waiting]_&]:bottom-auto">
         <ToolButton label="Zoom out (−)" onClick={() => engine.current?.zoomBy(0.8)}>
@@ -740,6 +803,17 @@ export const AgentsCanvas = forwardRef<
         <ToolButton label="Zoom in (+)" onClick={() => engine.current?.zoomBy(1.25)}>
           <Plus className="size-3.5" />
         </ToolButton>
+        {waiting.length > 0 && (
+          <button
+            onClick={nextWaiting}
+            title={`Next waiting on you (${waiting.length})`}
+            aria-label={`Next waiting on you, ${waiting.length} in all`}
+            className="flex h-7 items-center gap-1 rounded-md px-1.5 font-mono text-[11px] text-accent tabular-nums transition-colors duration-150 hover:bg-accent/10"
+          >
+            <CircleDot className="size-3.5 stroke-[1.75]" />
+            {waiting.length}
+          </button>
+        )}
         <ToolButton label="Fit everything (1)" onClick={() => fit(true, true)}>
           <Maximize className="size-3.5" />
         </ToolButton>
@@ -837,6 +911,14 @@ function LaunchGhost({ source, from, to, over }: { source: string; from: Point; 
     </>
   );
 }
+/**
+ * Semantic zoom: below `in` cards show their name big (`FarLabel`: a line at 1, bigger at 2); back
+ * above `out` they show their details again.
+ */
+const FAR = [
+  { in: 0.5, out: 0.56 },
+  { in: 0.3, out: 0.34 },
+] as const;
 /** The smallest zoom an automatic fit goes to on a desktop: cards stay legible. */
 const READABLE = 0.6;
 /** What a fit may go down to when that shows everything clear of the prompt bar. */

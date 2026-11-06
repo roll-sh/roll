@@ -5,12 +5,16 @@
  * their thread (or project, or machine). Pure; `agents-layout.ts` places it.
  */
 
-import { isBusy, isRunning, type MachineId, type Node, type ProjectId, type ProviderId, type Request, type Thread, type ThreadChange } from "./agents-api";
+import { isBusy, isRunning, type MachineId, type Node, type ProjectId, type ProviderId, type Request, type Run, type Thread, type ThreadChange } from "./agents-api";
 import { pendingRequests, runsOf, type AgentsData } from "./agents-store";
 import { colorToken, machineColor, projectColor } from "./agents-identity";
 
-/** `pin`: a card pinned onto a canvas view (`lib/agents-views.ts` adds them; `deriveGraph` never does). */
-export type GraphKind = "machine" | "project" | "thread" | "subagent" | "request" | "terminal" | "pin";
+/**
+ * `pin`: a card pinned onto a canvas view (`lib/agents-views.ts` adds them; `deriveGraph` never does).
+ * `fold`: a project's quiet threads folded into one card (`foldQuiet`). `group`: a status header
+ * inside a project's space (`groupByStatus`).
+ */
+export type GraphKind = "machine" | "project" | "group" | "thread" | "subagent" | "request" | "terminal" | "pin" | "fold";
 
 export interface GraphNode {
   /** `m:` machine, `p:` project, `t:` thread, `s:` subagent node, `r:` request, `x:` terminal; `pc:`/`pd:`/`px:` a pinned conversation, diff, terminal. */
@@ -64,6 +68,8 @@ export const keyOf = {
   subagent: (id: string) => `s:${id}`,
   request: (id: string) => `r:${id}`,
   terminal: (id: string) => `x:${id}`,
+  /** A container's folded threads (a project's, or a status group's inside it). */
+  fold: (container: string) => `f:${container}`,
 };
 
 export function deriveGraph(data: AgentsData, opts: GraphOptions = {}): Graph {
@@ -259,6 +265,154 @@ export function collapseUnused(graph: Graph, keep: (project: ProjectId) => boole
   return { graph: { roots: graph.roots, nodes, edges: graph.edges.filter((e) => !drop.has(e.to)) }, unused };
 }
 
+/** How many of a project's threads the overview shows before it folds the quiet ones (`foldQuiet`). */
+export const SHOWN_THREADS = 4;
+/** Inside a project, how many done or quiet threads a status group shows before it folds the rest. */
+export const SHOWN_IN_GROUP = 12;
+/** Folding fewer than this many would trade a card or two for a card: they show. */
+const FOLD_AT_LEAST = 3;
+
+export interface Fold {
+  /** The threads that aren't drawn (ids, most recently active first). */
+  threads: readonly string[];
+  /** Shown anyway (the container was expanded): the fold card, last, folds them back. */
+  expanded: boolean;
+}
+
+export interface Folds {
+  graph: Graph;
+  /**
+   * Per container key (a project's in the overview, a status group's inside a project), what it
+   * folded. Each has a `fold` card (`f:<container>`) last among its children: "22 more threads".
+   */
+  folded: ReadonlyMap<string, Fold>;
+}
+
+export interface FoldOptions {
+  /** How many threads a node shows before its quiet ones fold; `null`: it never folds. */
+  shown: (node: GraphNode) => number | null;
+  /** A thread that always keeps its card: it's working, waiting on you or failed, open, or asked for. */
+  keep: (thread: string) => boolean;
+  /** When a thread was last active (newest first among the quiet ones). */
+  activity: (thread: string) => number;
+  /** Containers whose threads are all shown. */
+  expanded?: ReadonlySet<string>;
+}
+
+/**
+ * A busy project stays readable (docs/code/agents.md, "Canvas"): per container, every thread that
+ * matters now keeps its card (working, waiting on you, failed, open beside the canvas, pinned, or
+ * with any of that under it), the most recently active of the rest fill up to `shown` cards, and
+ * the others fold into one card after them. 2 threads or 200, a project is a few cards, the way
+ * unused projects fold into their machine's "3 more projects" (`collapseUnused`).
+ */
+export function foldQuiet(graph: Graph, opts: FoldOptions): Folds {
+  const folded = new Map<string, Fold>();
+  // Whether anything in a thread's subtree has to show (a request, a pin, a working subagent or fork).
+  const matters = (key: string): boolean => {
+    const n = graph.nodes.get(key);
+    if (!n) return false;
+    if (n.kind === "request" || n.kind === "pin" || n.busy) return true;
+    if (n.kind === "thread" && opts.keep(n.id)) return true;
+    return n.children.some(matters);
+  };
+  const drop = new Set<string>();
+  const add: GraphNode[] = [];
+  for (const p of graph.nodes.values()) {
+    const limit = p.kind === "project" || p.kind === "group" ? opts.shown(p) : null;
+    if (limit === null) continue;
+    const threads = p.children.filter((c) => graph.nodes.get(c)?.kind === "thread");
+    if (threads.length < limit + FOLD_AT_LEAST) continue;
+    const quiet = threads.filter((k) => !matters(k));
+    const room = Math.max(0, limit - (threads.length - quiet.length));
+    const last = new Map(quiet.map((k) => [k, opts.activity(graph.nodes.get(k)!.id)]));
+    const rest = [...quiet].sort((a, b) => last.get(b)! - last.get(a)! || a.localeCompare(b)).slice(room);
+    if (rest.length < FOLD_AT_LEAST) continue;
+    const expanded = !!opts.expanded?.has(p.key);
+    folded.set(p.key, { threads: rest.map((k) => graph.nodes.get(k)!.id), expanded });
+    if (!expanded) for (const k of rest) dropTree(graph, k, drop);
+    add.push({ key: keyOf.fold(p.key), kind: "fold", id: p.key, machine: p.machine, parent: p.key, children: [], busy: false, relation: null, tint: p.tint });
+  }
+  if (!add.length) return { graph, folded };
+  const nodes = new Map<string, GraphNode>();
+  for (const n of graph.nodes.values()) {
+    if (drop.has(n.key)) continue;
+    const fold = folded.has(n.key) ? keyOf.fold(n.key) : null;
+    nodes.set(n.key, fold || n.children.some((c) => drop.has(c)) ? { ...n, children: [...n.children.filter((c) => !drop.has(c)), ...(fold ? [fold] : [])] } : n);
+  }
+  for (const f of add) nodes.set(f.key, f);
+  const edges = graph.edges.filter((e) => !drop.has(e.to));
+  for (const f of add) edges.push({ from: f.parent!, to: f.key, busy: false, dashed: false, tint: f.tint });
+  return { graph: { roots: graph.roots, nodes, edges }, folded };
+}
+
+/** Where a thread stands, for grouping a project's threads (in this order). */
+export type StatusGroup = "needs" | "running" | "failed" | "done" | "quiet";
+export const STATUS_GROUPS: readonly StatusGroup[] = ["needs", "running", "failed", "done", "quiet"];
+export const statusGroupLabel: Record<StatusGroup, string> = { needs: "Needs you", running: "Running", failed: "Failed", done: "Done", quiet: "Quiet" };
+
+/**
+ * A project's space (drilled into it): its threads under one header per status that has any,
+ * Needs you · Running · Failed · Done · Quiet, like Linear's board columns. A thread's own subtree
+ * goes with it; what isn't a thread (terminals, pins) stays on the project. Group nodes are
+ * `g:<project>:<status>`, with the status as their id.
+ */
+export function groupByStatus(graph: Graph, project: string, groupOf: (thread: string) => StatusGroup): Graph {
+  const p = graph.nodes.get(project);
+  if (p?.kind !== "project") return graph;
+  const byGroup = new Map<StatusGroup, string[]>();
+  const rest: string[] = [];
+  for (const c of p.children) {
+    const n = graph.nodes.get(c);
+    if (n?.kind !== "thread") {
+      rest.push(c);
+      continue;
+    }
+    const g = groupOf(n.id);
+    byGroup.set(g, [...(byGroup.get(g) ?? []), c]);
+  }
+  if (!byGroup.size) return graph;
+  const nodes = new Map(graph.nodes);
+  const moved = new Set([...byGroup.values()].flat());
+  const edges = graph.edges.filter((e) => !(e.from === project && moved.has(e.to)));
+  const groups: string[] = [];
+  for (const g of STATUS_GROUPS) {
+    const kids = byGroup.get(g);
+    if (!kids) continue;
+    const key = `g:${p.id}:${g}`;
+    groups.push(key);
+    nodes.set(key, { key, kind: "group", id: g, machine: p.machine, parent: project, children: kids, busy: g === "running", relation: null, tint: p.tint });
+    for (const k of kids) {
+      nodes.set(k, { ...graph.nodes.get(k)!, parent: key });
+      const old = graph.edges.find((e) => e.from === project && e.to === k);
+      edges.push({ ...(old ?? { busy: false, dashed: false }), from: key, to: k, tint: p.tint });
+    }
+    edges.push({ from: project, to: key, busy: false, dashed: false, tint: p.tint });
+  }
+  nodes.set(project, { ...p, children: [...groups, ...rest] });
+  return { roots: graph.roots, nodes, edges };
+}
+
+function dropTree(graph: Graph, key: string, into: Set<string>) {
+  into.add(key);
+  for (const c of graph.nodes.get(key)?.children ?? []) dropTree(graph, c, into);
+}
+
+/** A finished run nobody has opened yet (thread-status.tsx's `threadDone`, without its import). */
+function unseenDone(t: Thread, run: Run | undefined): boolean {
+  return t.status === "idle" && !t.error && run?.status === "completed" && t.archived_at === null && (t.inbox?.visited_at == null || (run.completed_at ?? 0) > t.inbox.visited_at);
+}
+
+/** Each thread's newest run, in one pass over the runs. */
+export function newestRuns(data: AgentsData): Map<string, Run> {
+  const out = new Map<string, Run>();
+  for (const r of data.runs.values()) {
+    const had = out.get(r.value.thread);
+    if (!had || r.value.ordinal > had.ordinal) out.set(r.value.thread, r.value);
+  }
+  return out;
+}
+
 /** Everything the "rolling" popover lists: busy threads and the requests waiting on someone. */
 export interface Rolling {
   busy: Thread[];
@@ -277,6 +431,10 @@ export interface ProjectStats {
   threads: number;
   running: number;
   waiting: number;
+  /** Failed (the thread's status is `error`). */
+  failed: number;
+  /** A finished run nobody has opened yet (T3's completed tone). */
+  done: number;
   /** The roll code changes (PRs) its threads were published as, newest thread first. */
   changes: ThreadChange[];
   /** The agents working in it (by provider, with the models used), most threads first. */
@@ -286,14 +444,17 @@ export interface ProjectStats {
 }
 
 export function projectStats(data: AgentsData, project: ProjectId): ProjectStats {
-  const out: ProjectStats = { threads: 0, running: 0, waiting: 0, changes: [], agents: [], cost_usd: null };
+  const out: ProjectStats = { threads: 0, running: 0, waiting: 0, failed: 0, done: 0, changes: [], agents: [], cost_usd: null };
+  const newest = newestRuns(data);
   const agents = new Map<string, ProjectStats["agents"][number]>();
   const threads = [...data.threads.values()].map((r) => r.value).filter((t) => t.project === project && t.archived_at === null);
   threads.sort((a, b) => b.updated_at - a.updated_at);
   for (const t of threads) {
     out.threads++;
     if (isRunning(t.status)) out.running++;
-    else if (t.status === "waiting") out.waiting++;
+    else if (t.status === "waiting" || t.pending_requests > 0) out.waiting++;
+    else if (t.status === "error") out.failed++;
+    else if (unseenDone(t, newest.get(t.id))) out.done++;
     if (t.change) out.changes.push(t.change);
     const a = agents.get(t.provider) ?? { provider: t.provider, models: [], threads: 0 };
     a.threads++;

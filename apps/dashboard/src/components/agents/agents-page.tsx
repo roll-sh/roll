@@ -8,7 +8,7 @@ import { memo, useCallback, useDeferredValue, useEffect, useLayoutEffect, useMem
 import { isBusy, reachable } from "@/lib/agents-api";
 import { POP_IN, POP_OUT } from "@/lib/agents-motion";
 import { setActiveClient, type AgentsClient } from "@/lib/agents-client";
-import { collapseUnused, deriveGraph, rolling, type GraphNode } from "@/lib/agents-graph";
+import { collapseUnused, deriveGraph, foldQuiet, groupByStatus, newestRuns, rolling, SHOWN_IN_GROUP, SHOWN_THREADS, type GraphNode } from "@/lib/agents-graph";
 import { runsOf } from "@/lib/agents-store";
 import type { Direction, Size } from "@/lib/agents-layout";
 import { closePalette, noteThreadOpen, openPalette, togglePalette } from "@/lib/agents-palette";
@@ -36,6 +36,9 @@ import { AgentsLayer } from "./ui/layer";
 import { PinnedConversation, PinnedDiff, PinnedTerminal } from "./pinned";
 import { MachineNode, ProjectNode, RequestNode, SubagentNode, ThreadNode } from "./nodes";
 import { CanvasProjectsProvider, type CanvasProjects } from "./machine-projects";
+import { CanvasFoldsProvider, type CanvasFolds } from "./canvas-folds";
+import { FoldedThreads, StatusHeader } from "./folded-threads";
+import type { StatusGroup } from "@/lib/agents-graph";
 import { ProjectDialogs } from "./project-actions";
 import { PromptBar } from "./prompt-bar";
 import { RightDock } from "./right-dock";
@@ -859,13 +862,62 @@ function CanvasViewBody({
     });
   }, [whole, data, filter, view.pins, display]);
   const narrowed = useMemo(() => (focused ? focusOn(viewed, `p:${focused}`) : viewed), [viewed, focused]);
+  // The canvas at scale (docs/code/agents.md, "Canvas"): the overview shows each project's work
+  // that matters now and folds its quiet threads into one card; drilled into a project (its space,
+  // `focused`), its threads sit under status headers and only long Done and Quiet groups fold.
+  const [expandedFolds, setExpandedFolds] = useState<ReadonlySet<string>>(() => new Set());
+  // Threads asked for (a deep link, ⌘K) keep their card while they're shown.
+  const [asked, setAsked] = useState<ReadonlySet<string>>(() => new Set());
+  const folds = useMemo(() => {
+    const newest = newestRuns(data);
+    const highlight = new Set(highlighted ?? []);
+    const keep = (id: string) => {
+      const t = data.threads.get(id)?.value;
+      return !!t && (isBusy(t.status) || t.status === "error" || t.pending_requests > 0 || id === docked || asked.has(id) || highlight.has(`t:${id}`));
+    };
+    const space = focused ? `p:${focused}` : null;
+    const grouped = space
+      ? groupByStatus(narrowed, space, (id) => {
+          const t = data.threads.get(id)!.value;
+          if (t.pending_requests > 0) return "needs";
+          if (isBusy(t.status)) return "running";
+          if (t.status === "error") return "failed";
+          return threadDone(t, newest.get(id)) ? "done" : "quiet";
+        })
+      : narrowed;
+    return foldQuiet(grouped, {
+      shown: (n) => (space ? (n.kind === "group" && (n.id === "done" || n.id === "quiet") ? SHOWN_IN_GROUP : null) : n.kind === "project" ? SHOWN_THREADS : null),
+      keep,
+      activity: (id) => {
+        const t = data.threads.get(id)?.value;
+        const r = newest.get(id);
+        return t ? Math.max(t.created_at, r?.requested_at ?? 0, r?.completed_at ?? 0) : 0;
+      },
+      expanded: expandedFolds,
+    });
+  }, [narrowed, data, docked, asked, highlighted, expandedFolds, focused]);
+  const foldsCtx: CanvasFolds = useMemo(
+    () => ({
+      folded: folds.folded,
+      toggle: (container) =>
+        setExpandedFolds((prev) => {
+          const next = new Set(prev);
+          if (!next.delete(container)) next.add(container);
+          return next;
+        }),
+      drill: (project) => onFocus(project),
+      drilled: focused,
+    }),
+    [folds.folded, onFocus, focused],
+  );
+  const folded = folds.graph;
   // Projects with nothing on the canvas fold into their machine's "3 more projects", unless pinned
   // onto the view, focused, or named by its filter.
   const collapsed = useMemo(() => {
-    if (display.projects === "all") return { graph: narrowed, unused: new Map<string, readonly string[]>() };
+    if (display.projects === "all") return { graph: folded, unused: new Map<string, readonly string[]>() };
     const keep = new Set([...(display.keep ?? []), ...(filter.projects ?? []), ...(focused ? [focused] : [])]);
-    return collapseUnused(narrowed, (p) => keep.has(p));
-  }, [narrowed, display.projects, display.keep, filter.projects, focused]);
+    return collapseUnused(folded, (p) => keep.has(p));
+  }, [folded, display.projects, display.keep, filter.projects, focused]);
   const graph = collapsed.graph;
   const { setDisplay } = views;
   const projects: CanvasProjects = useMemo(
@@ -943,6 +995,11 @@ function CanvasViewBody({
         for (const ms of [60, 420]) setTimeout(() => canvasRef.current?.focus(`m:${p.machine}`), ms);
         return;
       }
+      // A quiet thread folded into its project's card: it keeps a card of its own while asked for.
+      if (k.startsWith("t:") && !asked.has(k.slice(2)) && [...folds.folded.values()].some((f) => f.threads.includes(k.slice(2)))) {
+        setAsked((prev) => new Set(prev).add(k.slice(2)));
+        return;
+      }
       // Not in this view: All has everything.
       if (view.id !== ALL && whole.nodes.has(k)) views.select(ALL);
       return;
@@ -984,6 +1041,10 @@ function CanvasViewBody({
             <TerminalNode terminal={data.terminals.get(n.id)!.value} machine={machineOf(n)} />
           </PinTools>
         );
+      case "fold":
+        return <FoldedThreads container={n.id} />;
+      case "group":
+        return <StatusHeader group={n.id as StatusGroup} count={n.children.filter((c) => c.startsWith("t:")).length + (folds.folded.get(n.key)?.expanded === false ? folds.folded.get(n.key)!.threads.length : 0)} />;
       case "pin": {
         const p = pinOf(view, n.key);
         if (!p) return null;
@@ -1012,6 +1073,7 @@ function CanvasViewBody({
       <ViewsBar views={views} data={data} active={visible} phone={phone} reveal={(k) => canvasRef.current?.reveal(k)} focused={focused ? { id: focused, name: data.projects.get(focused)?.value.name ?? "project", clear: () => onFocus(null) } : undefined} />
       <div className="relative min-h-0 flex-1">
         <CanvasProjectsProvider value={projects}>
+          <CanvasFoldsProvider value={foldsCtx}>
           <AgentsCanvas
             ref={canvasRef}
             graph={graph}
@@ -1032,6 +1094,7 @@ function CanvasViewBody({
             keepClear={keepClear}
             overlay={empty && <EmptyView name={view.id === ALL ? null : view.name} waitingOnly={filter.status?.length === 1 && filter.status[0] === "waiting"} onAll={() => (view.id === ALL ? views.setFilter({}) : views.select(ALL))} />}
           />
+          </CanvasFoldsProvider>
         </CanvasProjectsProvider>
       </div>
     </div>
@@ -1104,6 +1167,10 @@ function defaultSize(n: GraphNode): Size {
       return { w: 620, h: 380 };
     case "pin":
       return { w: 520, h: 600 };
+    case "fold":
+      return { w: 296, h: 96 };
+    case "group":
+      return { w: 296, h: 40 };
   }
 }
 

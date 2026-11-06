@@ -1662,6 +1662,40 @@ The surface has three views:
   (a deep link, a palette pick) frames its machine. Linear folds empty groups the same way; T3's
   sidebar shows every project but only those with threads take room.
 
+  **At scale** (`foldQuiet`, `groupByStatus` in `lib/agents-graph.ts`; `planGrids` in
+  `lib/agents-layout.ts`; `folded-threads.tsx`, `minimap.tsx`). One busy project (25 threads, or
+  200) must not turn the canvas into one unreadable column, either way it grows. The structure is
+  an overview you drill into:
+  - **The overview** shows, per project, every thread that matters now (working, waiting on you,
+    failed, open beside the canvas, pinned, or asked for by a link or ⌘K, or with any of that under
+    it), then the most recently active up to four cards, and folds the rest into one card after
+    them, "27 more threads", drawn as a small stack. Its summary line ("9 done · 18 quiet") peeks
+    at the list on hover (250 ms) or a click: a row opens that conversation, and its card shows
+    while it's open. Folding needs at least three to fold; a project with six threads shows them
+    all. The project's card sums it up: a hairline status strip in proportion (needs you and
+    running in the accent, failed red, done green, the rest the line colour) over "38 threads · 1
+    need you · 1 failed · 11 done".
+  - **A project's space.** A click on a project's card or its fold card (or F, or ⌘K "Focus a
+    project…") drills in: the canvas is that project, its machine above it, and its threads under
+    status headers, Needs you · Running · Failed · Done · Quiet, only those with threads, in that
+    order: rows growing right, columns growing down (Linear's board). Done and Quiet show their 12
+    most recent and fold the rest into a card that expands the group in place (and folds it
+    back). The views bar's breadcrumb, "All projects › site", or Escape goes back out.
+  - **Wrapping.** A project's or group's plain threads (nothing under them) wrap into a grid about
+    the canvas's shape once there are five of them growing right (at least three rows), nine
+    growing down; a thread with requests or subagents keeps its place in the tree with them. Edges
+    go into a grid's first column only (the rest would cross the cards before them), and a grid
+    reaches past its column without pushing the next depth over.
+  - **Semantic zoom.** Below 50 % a card shows its name big over its details (`FarLabel`: a
+    status dot and the title at 28 px world size), below 30 % bigger still; the card keeps its
+    size, so nothing moves as the zoom crosses a step (6 % of margin each way so a resting zoom
+    doesn't flicker).
+  - **Getting around.** While the canvas is bigger than the screen a minimap sits over the zoom bar:
+    every card as a block (requests and busy work in the accent) and the screen's frame; a press
+    or a drag moves the view there. The zoom bar's accent "◉ 2" goes to the next request waiting
+    on you in reading order (round again), its answer focused, as Space does from a card.
+  - **The busy demo** (`?demo=busy`) gives the web project 30 more threads.
+
   One canvas engine (canvas 2D + `requestAnimationFrame`, paused offscreen) draws edges,
   pulses and the dot field; cards are DOM, positioned by the same world transform. Navigation is
   Figma's: scrolling pans (two fingers on a trackpad, any direction; shift turns a mouse wheel

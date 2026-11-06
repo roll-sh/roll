@@ -112,6 +112,30 @@ punch out the edge ports. `refreshColors()` reruns on a theme change (the canvas
   scaled by the canvas's `--zoom` so it stays a finger's size (about 36px). It takes no room in the card, so names never
   truncate.
 
+## The canvas at scale
+
+The rules are in agents.md, "Canvas" › "At scale". How it looks:
+
+- **Fold card** (`FoldedThreads`): a thread card's frame (296 px, the project's full-height left
+  edge), "27 more threads" in the title's type, the newest one's time top right, and a summary
+  line that peeks (`ChevronRight`). Under it, two sheets of the same card (4 px and 8 px lower,
+  inset 8 and 16 px, hairline, no shadow) so it reads as a pile; expanded, no sheets and
+  "Show fewer". In the overview its arrow is `CornerDownRight` (it goes into the project); in a
+  status group `ChevronDown` (it opens in place).
+- **Status header** (`StatusHeader`): 296 × 40, `bg-panel-2/60`, a hairline, radius 8, a 8 px
+  dot (accent for Needs you and Running, which pulses calmly; red Failed; green Done; subtle
+  Quiet), the name at 12.5 px weight 500, the count in mono. Not a card: no shadow, no highlight.
+- **Status strip** (project card): 4 px high, rounded, 1 px gaps, segments in proportion with a
+  3 px minimum; information, not decoration, so no gradient and no glow.
+- **Far label** (`FarLabel`): the card's own panel over its details, a 16 px dot (24 px further
+  out) and the title at 28 px, weight 600, `-0.02em` (56 px further out), two lines at most.
+- **Minimap**: 168 × 112, glass like the zoom bar, 12 px above it; blocks are `--muted` for
+  machines and projects, the line colour for the rest, accent for requests and busy work; the
+  frame is a 1 px `--fg` line at 55 %. Hidden when everything fits, and on a phone.
+- **Next waiting**: an accent `CircleDot` and the count in mono in the zoom bar, only while
+  something waits.
+- **Breadcrumb**: the views bar's chip reads "All projects › site ×"; "All projects" is a button.
+
 ## Identity
 
 The user said the canvas was "too black": every project, machine and sandbox now carries a colour

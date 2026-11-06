@@ -17,6 +17,7 @@ import { PendingRequest } from "./pending-request";
 import { SandboxPanel } from "./sandbox";
 import { ago, DeliveredText, loginCommand, modelName, providerName, shortPath, Stat, StatusDot, threadStatusLabel, usageLine } from "./shared";
 import { orchestration, OrchestratorChip, StatusPill, threadDone, threadPill } from "./thread-status";
+import { useCanvasFolds } from "./canvas-folds";
 import { MachineIcon, ProjectIcon, tint as tintStyle } from "./identity";
 import { machineColor, projectColor } from "@/lib/agents-identity";
 import { useAgents } from "./use-agents";
@@ -184,6 +185,7 @@ export function MachineNode({ machine }: { machine: Machine }) {
     });
   return (
     <Card width={272} tone={state === "offline" ? "muted" : undefined} tint={machineColor(machine)} label={`Machine ${machine.name}`}>
+      <FarLabel title={machine.name} />
       <TintedHeader>
         <MachineIcon machine={machine} tile className="size-6" />
         <span className="min-w-0 flex-1 truncate text-[13.5px] font-semibold tracking-[-0.015em]">{machine.name}</span>
@@ -304,8 +306,18 @@ export function ProjectNode({ project, machine }: { project: Project; machine: M
   const stats = projectStats(client.data, project.id);
   // The same actions everywhere a project shows (its settled and archived conversations among them).
   const actions = useProjectActions(project, { remove: () => void run("remove", () => client.run(machine!.id, { type: "project.remove", project: project.id })) });
+  // A click goes into the project's space (its threads by status), as F does from the keyboard;
+  // Enter keeps opening its settings. Its own buttons, links and menus keep their clicks.
+  const { drill, drilled } = useCanvasFolds();
+  const enter = drill && drilled !== project.id && stats.threads > 0 ? () => drill(project.id) : undefined;
   return (
+    <div
+      onClick={enter && ((e) => !(e.target as HTMLElement).closest("button, a, input, [role=menu], [role=menuitem], [data-nodrag]") && enter())}
+      title={enter ? `Open ${project.name}: its threads by status (F)` : undefined}
+      className={enter ? "cursor-pointer" : undefined}
+    >
     <Card width={256} tint={projectColor(project)} label={`Project ${project.name}`}>
+      <FarLabel title={project.name} />
       <TintedHeader>
         <ProjectIcon project={project} className="size-6" />
         <span className="min-w-0 flex-1 truncate text-[13.5px] font-semibold tracking-[-0.015em]">{project.name}</span>
@@ -363,6 +375,7 @@ export function ProjectNode({ project, machine }: { project: Project; machine: M
       )}
       {error && <p className="px-3 pb-3 text-[12px] text-danger">{error}</p>}
     </Card>
+    </div>
   );
 }
 
@@ -372,11 +385,14 @@ function StatsRows({ stats, providers }: { stats: ProjectStats; providers: reado
   const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
   return (
     <div data-detail className="mx-3 mb-3 space-y-1 border-t border-line pt-2.5 text-[11px] text-subtle">
+      <StatusStrip stats={stats} />
       <p className="flex items-center gap-1.5">
         <span className="min-w-0 truncate">
           {plural(stats.threads, "thread", "threads")}
+          {stats.waiting > 0 && <span className="text-accent"> · {stats.waiting} need you</span>}
           {stats.running > 0 && <span className="text-fg"> · {stats.running} running</span>}
-          {stats.waiting > 0 && <span className="text-muted"> · {stats.waiting} waiting</span>}
+          {stats.failed > 0 && <span className="text-danger"> · {stats.failed} failed</span>}
+          {stats.done > 0 && <span className="text-ok"> · {stats.done} done</span>}
         </span>
         {stats.changes.length > 0 && (
           <span className="ml-auto flex shrink-0 items-center gap-1" title={stats.changes.map((c) => `#${c.number} ${changeStatusLabel[c.status]}`).join(" · ")}>
@@ -396,6 +412,27 @@ function StatsRows({ stats, providers }: { stats: ProjectStats; providers: reado
         ))}
         {stats.cost_usd != null && <span className="font-mono tabular-nums"> · ${stats.cost_usd.toFixed(2)}</span>}
       </p>
+    </div>
+  );
+}
+
+/**
+ * Where a project's threads stand at a glance: one hairline bar split in proportion, needs you and
+ * running in the accent, failed in red, done in green, the quiet rest in the line colour.
+ */
+function StatusStrip({ stats }: { stats: ProjectStats }) {
+  if (stats.threads < 2) return null;
+  const quiet = Math.max(0, stats.threads - stats.waiting - stats.running - stats.failed - stats.done);
+  const parts: [number, string][] = [
+    [stats.waiting, "bg-accent"],
+    [stats.running, "bg-accent/50"],
+    [stats.failed, "bg-danger"],
+    [stats.done, "bg-ok/70"],
+    [quiet, "bg-fg/12"],
+  ];
+  return (
+    <div aria-hidden className="mb-1.5 flex h-1 gap-px overflow-hidden rounded-full">
+      {parts.map(([n, tone], i) => n > 0 && <span key={i} className={tone} style={{ flexGrow: n, flexBasis: 0, minWidth: 3 }} />)}
     </div>
   );
 }
@@ -438,6 +475,7 @@ export function ThreadNode({ thread, machine }: { thread: Thread; machine: Machi
   const tone = thread.status === "error" ? "error" : running ? "busy" : thread.archived_at ? "muted" : done ? "done" : undefined;
   return (
     <Card width={296} tone={tone} tint={project ? projectColor(project) : undefined} edge onClick={() => openThread(thread.id)} label={`Thread ${thread.title}`}>
+      <FarLabel title={thread.title} tone={tone} />
       <div className="px-3.5 pt-3 pb-3">
         <div className="flex min-w-0 items-center gap-1.5 text-[11px] text-subtle">
           {project && <ProjectIcon project={project} className="size-3.5" />}
@@ -544,6 +582,21 @@ function latestRun(runs: Iterable<{ value: Run }>, thread: string) {
   let best: Run | undefined;
   for (const r of runs) if (r.value.thread === thread && (!best || r.value.ordinal > best.ordinal)) best = r.value;
   return best;
+}
+
+/**
+ * Semantic zoom: far out (`[data-far]` on the canvas) a card shows its name big, over its details:
+ * at 40 % a 13.5 px title is 5 px on screen, this one 11 px; further out (`data-far="2"`) bigger
+ * still. The card keeps its size, so the layout doesn't move as the zoom crosses a step.
+ */
+export function FarLabel({ title, tone }: { title: string; tone?: string }) {
+  const dot = tone === "busy" ? "bg-accent" : tone === "error" ? "bg-danger" : tone === "done" ? "bg-ok" : "bg-subtle/60";
+  return (
+    <div aria-hidden className="absolute inset-0 z-[5] hidden items-center gap-3 rounded-[inherit] bg-panel px-5 [[data-far]_&]:flex">
+      <span className={`size-4 shrink-0 rounded-full ${dot} [[data-far='2']_&]:size-6`} />
+      <span className="line-clamp-2 min-w-0 text-[28px] leading-[1.15] font-semibold tracking-[-0.02em] [[data-far='2']_&]:text-[56px] [[data-far='2']_&]:leading-[1.05]">{title}</span>
+    </div>
+  );
 }
 
 // ── provider subagent ──
