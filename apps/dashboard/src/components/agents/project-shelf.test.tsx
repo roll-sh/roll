@@ -1,4 +1,4 @@
-import { screen, within } from "@testing-library/react";
+import { act, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it } from "vitest";
 import { EMPTY_INBOX, type Thread } from "@/lib/agents-api";
@@ -207,5 +207,27 @@ describe("the conversation's shelf line", () => {
     const h = agentsHarness({ entities: [mirrored("project", project(), 1), mirrored("thread", t, 2)] });
     const { container } = renderAgents(<ShelfStrip thread={t} now={NOW} />, h);
     expect(container).toBeEmptyDOMElement();
+  });
+});
+
+describe("the undo notice's ⌘Z", () => {
+  it("undoes from the composer a keyboard settle focused, until a key is typed there (T3's claim)", async () => {
+    render(
+      <>
+        <textarea aria-label="Message" />
+        <InboxToast />
+      </>,
+    );
+    screen.getByRole("textbox", { name: "Message" }).focus();
+    let undone = 0;
+    act(() => showInboxToast({ text: "Settled “Bump tokio”", undo: () => void undone++ }));
+    await userEvent.keyboard("{Meta>}z{/Meta}");
+    expect(undone).toBe(1);
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+    // Typed into: the field's own undo again.
+    act(() => showInboxToast({ text: "Settled “Bump tokio”", undo: () => void undone++ }));
+    await userEvent.keyboard("a{Meta>}z{/Meta}");
+    expect(undone).toBe(1);
+    expect(screen.getByRole("status")).toBeInTheDocument();
   });
 });

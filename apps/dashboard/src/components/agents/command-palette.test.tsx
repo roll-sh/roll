@@ -125,6 +125,34 @@ describe("the agents' command palette", () => {
     expect(creates(h)[0]).toMatchObject({ prompt: "Bump the lockfile and run the tests", runtime_mode: "full_access" });
   });
 
+  it("never takes one word as a goal on Enter: 'unarchive' with nothing archived launched an orchestrator", async () => {
+    const h = setup();
+    await userEvent.keyboard("{Meta>}k{/Meta}");
+    await userEvent.type(screen.getByRole("combobox"), "unarchive");
+    expect(within(palette()).queryByRole("option", { selected: true })).toBeNull();
+    await userEvent.keyboard("{Enter}");
+    expect(creates(h)).toEqual([]);
+    // Still there one ↓ away.
+    await userEvent.keyboard("{ArrowDown}");
+    expect(selected()).toHaveTextContent("Orchestrate: unarchive");
+  });
+
+  it("finds Unarchive for an archived conversation by 'archive' or 'unarchive' (it matched only inside the word: goal rows led)", async () => {
+    const h = setup([mirrored("thread", thread({ id: "thr_a", title: "Spike: edge middleware", archived_at: Date.now() - 86_400_000 }), 6)]);
+    act(() => showAgents({ kind: "thread", thread: "thr_a" }));
+    const options = () => within(palette()).getAllByRole("option").map((o) => o.textContent ?? "");
+    await userEvent.keyboard("{Meta>}k{/Meta}");
+    await userEvent.type(screen.getByRole("combobox"), "archive");
+    expect(options()).toContain("Unarchive “Spike: edge middleware”");
+    expect(options()[0]).not.toMatch(/^Orchestrate/);
+    await userEvent.clear(screen.getByRole("combobox"));
+    await userEvent.type(screen.getByRole("combobox"), "unarchive");
+    expect(selected()).toHaveTextContent("Unarchive “Spike: edge middleware”");
+    await userEvent.keyboard("{Enter}");
+    await waitFor(() => expect(h.command.mock.calls.map((c) => c[2])).toContainEqual({ type: "thread.unarchive", thread: "thr_a" }));
+    expect(creates(h)).toEqual([]);
+  });
+
   it("finds archived and settled conversations, and opens a project's shelf from the canvas toolbar", async () => {
     const DAY = 86_400_000;
     setup([

@@ -52,6 +52,7 @@ import { splitSearchText, type SearchMatchHint } from "@/lib/palette-search";
 import {
   buildRows,
   filterGroups,
+  autoHighlight,
   findItem,
   nestedItems,
   placeholderFor,
@@ -278,7 +279,7 @@ function PaletteDialog({ session, intent, host }: { session: number; intent: Pal
         kind: "action",
         value: "action:settle",
         title: open.inbox.settle?.state === "settled" ? `Unsettle “${open.title}”` : `Settle “${open.title}”`,
-        searchTerms: ["done", "inbox", "resolve", "restore"],
+        searchTerms: ["settle", "unsettle", "done", "inbox", "resolve", "restore"],
         icon: <CircleCheck className={ICON} />,
         // Through the sidebar's actions: T3's undo notice, and settle and advance.
         run: () => (open.inbox.settle?.state === "settled" ? inboxActions.restore(open) : inboxActions.settle(open)),
@@ -306,7 +307,7 @@ function PaletteDialog({ session, intent, host }: { session: number; intent: Pal
         kind: "action",
         value: "action:archive",
         title: open.archived_at === null ? `Archive “${open.title}”` : `Unarchive “${open.title}”`,
-        searchTerms: ["settle", "hide", "done", "restore"],
+        searchTerms: ["archive", "unarchive", "settle", "hide", "done", "restore"],
         icon: open.archived_at === null ? <Archive className={ICON} /> : <ArchiveRestore className={ICON} />,
         run: () => (open.archived_at === null ? inboxActions.archive(open) : inboxActions.restore(open)),
       },
@@ -529,10 +530,11 @@ function PaletteDialog({ session, intent, host }: { session: number; intent: Pal
   const { rows, values } = useMemo(() => buildRows(shown), [shown]);
   const [highlighted, setHighlighted] = useState<string | null>(null);
   // The first row on every new query or view (T3's autoHighlight); kept while the rows update live.
-  useLayoutEffect(() => setHighlighted(values[0] ?? null), [query, view]); // eslint-disable-line react-hooks/exhaustive-deps
+  const firstRow = autoHighlight(shown, values, view ? "" : query);
+  useLayoutEffect(() => setHighlighted(firstRow), [query, view]); // eslint-disable-line react-hooks/exhaustive-deps
   useLayoutEffect(() => {
-    if (highlighted === null || !values.includes(highlighted)) setHighlighted(values[0] ?? null);
-  }, [values, highlighted]);
+    if (highlighted === null ? firstRow !== null : !values.includes(highlighted)) setHighlighted(firstRow);
+  }, [values, highlighted, firstRow]);
   useEffect(() => {
     if (!highlighted) return;
     [...(list.current?.querySelectorAll<HTMLElement>("[data-value]") ?? [])].find((el) => el.dataset.value === highlighted)?.scrollIntoView({ block: "nearest" });

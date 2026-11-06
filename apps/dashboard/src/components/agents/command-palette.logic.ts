@@ -207,6 +207,17 @@ export function goalsFirst(best: number): boolean {
   return best < 2;
 }
 
+/**
+ * The row Enter runs before any arrow key: the first, except that one word is never taken as a
+ * goal ("unarchive" with nothing to unarchive launched an orchestrator); its goal rows are still
+ * there below ↓.
+ */
+export function autoHighlight(groups: readonly PaletteGroup[], values: readonly string[], query: string): string | null {
+  const goal = new Set(groups.find((g) => g.value === "goal")?.items.map((i) => i.value));
+  if (/\s/.test(query.trim())) return values[0] ?? null;
+  return values.find((v) => !goal.has(v)) ?? null;
+}
+
 function searchGroups(input: FilterInput): Filtered {
   if (input.root && input.inSubmenu) {
     const scoped = searchGroups({ ...input, root: undefined });

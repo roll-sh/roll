@@ -127,17 +127,34 @@ export function InboxToast() {
   }, [toast]);
   useEffect(() => {
     if (!toast?.undo) return;
+    // The notice claims ⌘Z, even in a text field (a keyboard settle opens the next thread with
+    // its composer focused), until any other key or edit hands it back (T3's
+    // `threadUndoClaimsShortcut`).
+    let claimed = true;
     const onKey = (e: KeyboardEvent) => {
-      if (!(e.metaKey || e.ctrlKey) || e.shiftKey || e.altKey || e.key.toLowerCase() !== "z" || e.defaultPrevented) return;
-      // Text fields keep their own undo.
+      if (["Meta", "Control", "Shift", "Alt"].includes(e.key)) return;
+      const undoKey = (e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "z";
+      if (!undoKey) {
+        claimed = false;
+        return;
+      }
+      if (e.defaultPrevented) return;
+      // Otherwise text fields keep their own undo.
       const el = e.target as HTMLElement | null;
-      if (el?.closest?.("input, textarea, [contenteditable=true], .xterm")) return;
+      if (!claimed && el?.closest?.("input, textarea, [contenteditable=true], .xterm")) return;
       e.preventDefault();
       toast.undo?.();
       showInboxToast(null);
     };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    const onInput = () => {
+      claimed = false;
+    };
+    window.addEventListener("keydown", onKey, true);
+    window.addEventListener("input", onInput, true);
+    return () => {
+      window.removeEventListener("keydown", onKey, true);
+      window.removeEventListener("input", onInput, true);
+    };
   }, [toast]);
   if (!toast) return null;
   return (
