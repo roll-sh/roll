@@ -110,9 +110,9 @@ export function RequestCard({
 }) {
   if (request.status !== "pending") return <Resolved request={request} />;
   if (!onRespond) return <Waiting request={request} />;
-  if (request.body.type === "approval") return <ApprovalForm approval={request.body} onRespond={onRespond} context={context} compact={compact} />;
+  if (request.body.type === "approval") return <ApprovalForm approval={request.body} thread={request.thread} onRespond={onRespond} context={context} compact={compact} />;
   if (hostedQuestions) return <AskedBelow count={request.body.questions.length} />;
-  return <StandaloneQuestions questions={request.body.questions} onRespond={onRespond} context={context} />;
+  return <StandaloneQuestions questions={request.body.questions} thread={request.thread} onRespond={onRespond} context={context} />;
 }
 
 /** The questions are in the composer's panel: say so where they were asked. */
@@ -157,14 +157,32 @@ function Command({ text }: { text: string }) {
   );
 }
 
-function useSend(onRespond: (r: RequestResponse) => Promise<unknown>) {
+/**
+ * Where the keyboard goes once an answered request's controls are gone (focus fell to the page):
+ * in a conversation its composer (T3's), on the canvas the thread's own card.
+ */
+function afterAnswer(from: Element | null, thread: string): (() => HTMLElement | null) | null {
+  const region = from?.closest('[role="region"][aria-label^="Thread "]');
+  if (region) return () => region.querySelector<HTMLElement>('textarea[aria-label="Message"]');
+  if (from?.closest("[data-card]")) return () => document.querySelector<HTMLElement>(`[data-card][data-key="t:${CSS.escape(thread)}"]`);
+  return null;
+}
+
+function useSend(onRespond: (r: RequestResponse) => Promise<unknown>, thread: string) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const send = async (r: RequestResponse) => {
     setBusy(true);
     setError(null);
+    const from = document.activeElement;
+    const next = afterAnswer(from, thread);
     try {
       await onRespond(r);
+      if (next)
+        requestAnimationFrame(() => {
+          const now = document.activeElement;
+          if (!now || now === document.body || !from?.isConnected) next()?.focus({ preventScroll: true });
+        });
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
       setBusy(false);
@@ -173,8 +191,26 @@ function useSend(onRespond: (r: RequestResponse) => Promise<unknown>) {
   return { busy, error, send };
 }
 
-function ApprovalForm({ approval, onRespond, context, compact }: { approval: Approval; onRespond: (r: RequestResponse) => Promise<unknown>; context?: ReactNode; compact: boolean }) {
-  const { busy, error, send } = useSend(onRespond);
+function ApprovalForm({
+  approval,
+  thread,
+  onRespond,
+  context,
+  compact,
+}: {
+  approval: Approval;
+  thread: string;
+  onRespond: (r: RequestResponse) => Promise<unknown>;
+  context?: ReactNode;
+  compact: boolean;
+}) {
+  const { busy, error, send } = useSend(onRespond, thread);
+  const declineButton = useRef<HTMLButtonElement>(null);
+  // Back from the reason (Escape or Back): to the Decline that opened it, not the page.
+  const stopDeclining = () => {
+    setDeclining(false);
+    requestAnimationFrame(() => declineButton.current?.focus({ preventScroll: true }));
+  };
   const [declining, setDeclining] = useState(false);
   const [note, setNote] = useState("");
   const [openFile, setOpenFile] = useState<string | null>(null);
@@ -246,7 +282,7 @@ function ApprovalForm({ approval, onRespond, context, compact }: { approval: App
                   e.preventDefault();
                   void decide("decline", note.trim() || undefined);
                 }
-                if (e.key === "Escape") setDeclining(false);
+                if (e.key === "Escape") stopDeclining();
               }}
               placeholder={plan ? "What should change in the plan?" : "Tell the agent what to do instead (optional)"}
               aria-label="Note to the agent"
@@ -256,7 +292,7 @@ function ApprovalForm({ approval, onRespond, context, compact }: { approval: App
               <button type="submit" disabled={busy} className={pill}>
                 {busy ? <span className="shimmer">Sending…</span> : decisionLabel("decline", plan)}
               </button>
-              <button type="button" onClick={() => setDeclining(false)} className={quiet}>
+              <button type="button" onClick={stopDeclining} className={quiet}>
                 Back
               </button>
             </div>
@@ -269,7 +305,7 @@ function ApprovalForm({ approval, onRespond, context, compact }: { approval: App
               </button>
             )}
             {has("decline") && (
-              <button type="button" disabled={busy} onClick={() => setDeclining(true)} className={quiet}>
+              <button ref={declineButton} type="button" disabled={busy} onClick={() => setDeclining(true)} className={quiet}>
                 {decisionLabel("decline", plan)}
               </button>
             )}
@@ -470,9 +506,19 @@ export function QuestionsPanel({ flow, context, children }: { flow: QuestionFlow
 }
 
 /** Questions with nothing below to type in (the canvas): the panel with its own answer line and buttons. */
-function StandaloneQuestions({ questions, onRespond, context }: { questions: Question[]; onRespond: (r: RequestResponse) => Promise<unknown>; context?: ReactNode }) {
+function StandaloneQuestions({
+  questions,
+  thread,
+  onRespond,
+  context,
+}: {
+  questions: Question[];
+  thread: string;
+  onRespond: (r: RequestResponse) => Promise<unknown>;
+  context?: ReactNode;
+}) {
   const flow = useQuestionFlow(questions);
-  const { busy, error, send } = useSend(onRespond);
+  const { busy, error, send } = useSend(onRespond, thread);
   const q = flow.question;
   const submit = () => {
     if (!flow.last) return flow.answered && flow.next();

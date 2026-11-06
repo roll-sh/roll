@@ -1,4 +1,5 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { useState } from "react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { RequestCard } from "./request-card";
@@ -119,5 +120,30 @@ describe("RequestCard", () => {
     expect(screen.getByText("Declined: “not now”")).toBeInTheDocument();
     expect(screen.getByText("by ada")).toBeInTheDocument();
     expect(screen.queryByRole("button")).not.toBeInTheDocument();
+  });
+});
+
+describe("the keyboard after answering", () => {
+  /** A conversation: the request in its transcript, answered from the keyboard, then resolved. */
+  function Conversation() {
+    const [req, setReq] = useState(approval());
+    return (
+      <div role="region" aria-label="Thread Fix it">
+        <RequestCard request={req} onRespond={async (response) => setReq({ ...req, status: "resolved", response })} />
+        <textarea aria-label="Message" />
+      </div>
+    );
+  }
+
+  it("goes to the composer once Approve is gone (it fell to the page), and back to Decline from its reason", async () => {
+    render(<Conversation />);
+    screen.getByRole("button", { name: "Decline" }).focus();
+    await userEvent.keyboard(" ");
+    expect(screen.getByRole("textbox", { name: "Note to the agent" })).toHaveFocus();
+    await userEvent.keyboard("{Escape}");
+    await waitFor(() => expect(screen.getByRole("button", { name: "Decline" })).toHaveFocus());
+    screen.getByRole("button", { name: "Approve" }).focus();
+    await userEvent.keyboard(" ");
+    await waitFor(() => expect(screen.getByRole("textbox", { name: "Message" })).toHaveFocus());
   });
 });
