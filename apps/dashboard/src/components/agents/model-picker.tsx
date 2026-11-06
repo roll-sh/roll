@@ -154,6 +154,7 @@ export function ModelPicker({
   shortcuts = false,
   multi,
   finalFocus,
+  unset = "Choose model",
 }: {
   providers: readonly ProviderInfo[];
   value: ModelChoice;
@@ -166,12 +167,14 @@ export function ModelPicker({
   multi?: MultiPick;
   /** Where focus goes when it closes (Base UI's; the trigger by default). */
   finalFocus?: FinalFocus;
+  /** What it says with nothing chosen ("Machine's" for a default left to the next layer). */
+  unset?: string;
 }) {
   const [open, setOpen] = useState(false);
   const info = providers.find((p) => p.id === value.provider);
   const current = resolveModel(info, value.model);
   const many = multi?.selected && multi.selected.length > 1 ? multi.selected : null;
-  const label = many ? modelsLabel(many, providers) : (current?.short_name ?? current?.name ?? info?.name ?? "Choose model");
+  const label = many ? modelsLabel(many, providers) : (current?.short_name ?? current?.name ?? info?.name ?? unset);
   const t = traits(current, value.effort, value.options);
   const latest = useRef({ value, current, onChange, disabled });
   latest.current = { value, current, onChange, disabled };

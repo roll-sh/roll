@@ -22,4 +22,4 @@ export const popupMotion =
 
 /** A row in a menu, select or list (T3's item: 28px, a neutral fill when highlighted). */
 export const itemRow =
-  "flex min-h-7 cursor-pointer select-none items-center gap-2 rounded-sm px-2 py-1 text-[13px] text-fg outline-none data-highlighted:bg-fg/[0.08] data-disabled:pointer-events-none data-disabled:cursor-not-allowed data-disabled:opacity-60 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-3.5 [&>svg:not([class*='text-'])]:text-muted";
+  "flex min-h-7 pointer-coarse:min-h-10 cursor-pointer select-none items-center gap-2 rounded-sm px-2 py-1 text-[13px] text-fg outline-none data-highlighted:bg-fg/[0.08] data-disabled:pointer-events-none data-disabled:cursor-not-allowed data-disabled:opacity-60 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-3.5 [&>svg:not([class*='text-'])]:text-muted";

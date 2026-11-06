@@ -926,6 +926,7 @@ export function DefaultsRows({
               <ModelPicker
                 providers={installed}
                 side="bottom"
+                unset={whose}
                 disabled={disabled}
                 value={{ provider: defaults.provider ?? "", model: defaults.model ?? null, effort: defaults.effort ?? null, options: defaults.options ?? {} }}
                 onChange={(c) => patch({ provider: c.provider, model: c.model ?? undefined, effort: c.effort ?? undefined, options: Object.keys(c.options).length ? c.options : undefined })}
