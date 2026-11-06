@@ -28,6 +28,7 @@ describe("a run that delivers delegated tasks' results (Run.delivers)", () => {
   it("shows in the conversation as a finished-task row, not the user's message; the results open under it", async () => {
     renderAgents(<RunView run={wake} tree={[]} requests={new Map()} checkpoint={undefined} now={Date.now()} actions={{ openThread: vi.fn() }} busyThread={false} />, agentsHarness());
     const row = screen.getByRole("button", { name: "2 delegated tasks finished · Build, Docs failed" });
+    expect(within(row).getByText("Docs failed")).toHaveClass("text-danger");
     expect(screen.queryByRole("button", { name: "Copy the message" })).toBeNull();
     expect(row).toHaveAttribute("aria-expanded", "false");
     await userEvent.click(row);
@@ -55,7 +56,10 @@ describe("a run that delivers delegated tasks' results (Run.delivers)", () => {
     const t = thread({ orchestrator: true, run_count: 2, title: "Ship dark mode" });
     renderAgents(<ThreadNode thread={t} machine={machine()} />, agentsHarness({ entities: [mirrored("thread", t, 1), mirrored("run", run({ status: "completed", prompt: "Ship dark mode" }), 2), mirrored("run", wake, 3)] }));
     const card = screen.getByRole("button", { name: "Thread Ship dark mode" });
-    expect(within(card).getByText("2 delegated tasks finished · Build, Docs failed")).toBeInTheDocument();
+    expect(card).toHaveTextContent("2 delegated tasks finished · Build, Docs failed");
+    // What failed is red; what completed isn't.
+    expect(within(card).getByText("Docs failed")).toHaveClass("text-danger");
+    expect(within(card).getByText("Build")).not.toHaveClass("text-danger");
     expect(within(card).queryByText(/Delegated task nod_/)).toBeNull();
   });
 

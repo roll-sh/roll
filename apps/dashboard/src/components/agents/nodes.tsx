@@ -6,7 +6,6 @@ import { coming, isRunning, machineState, reachable, type IdentityColor, type Ma
 import { projectStats, type ProjectStats } from "@/lib/agents-graph";
 import { providersFor } from "@/lib/agents-store";
 import { setAgentsView } from "@/lib/agents-surface";
-import { deliveredLabel } from "@/lib/agents-worklog";
 import { btn, primary } from "../ui";
 import { AutomationChip, useThreadOrigin } from "./automations/chip";
 import { ChangeChip, changeStatusLabel, WorkChip } from "./change";
@@ -16,7 +15,7 @@ import { openProjectDialog } from "@/lib/agents-project-dialogs";
 import { PullLine } from "./project-settings";
 import { PendingRequest } from "./pending-request";
 import { SandboxPanel } from "./sandbox";
-import { ago, loginCommand, modelName, providerName, shortPath, Stat, StatusDot, threadStatusLabel, usageLine } from "./shared";
+import { ago, DeliveredText, loginCommand, modelName, providerName, shortPath, Stat, StatusDot, threadStatusLabel, usageLine } from "./shared";
 import { orchestration, OrchestratorChip, StatusPill, threadDone, threadPill } from "./thread-status";
 import { MachineIcon, ProjectIcon, tint as tintStyle } from "./identity";
 import { machineColor, projectColor } from "@/lib/agents-identity";
@@ -477,7 +476,7 @@ export function ThreadNode({ thread, machine }: { thread: Thread; machine: Machi
           ) : thread.status === "waiting" ? (
             (thread.activity ?? threadStatusLabel.waiting)
           ) : lastRun?.delivers?.length ? (
-            deliveredLabel(lastRun)
+            <DeliveredText run={lastRun} />
           ) : lastRun ? (
             lastRun.prompt
           ) : (

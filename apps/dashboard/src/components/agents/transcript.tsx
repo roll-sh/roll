@@ -33,14 +33,14 @@ import { useEscapeLayer } from "./escape-layers";
 import type { Checkpoint, DiffStat, FileChange, Node, Request, RequestResponse, Run } from "@/lib/agents-api";
 import { formatContextTokens } from "@/lib/agents-context";
 import type { NodeTree } from "@/lib/agents-store";
-import { delegatedTasks, deliveredLabel, ended, foldLabel, foldTurn, splitAtSteers, timelineItems, type TimelineItem } from "@/lib/agents-worklog";
+import { delegatedTasks, ended, foldLabel, foldTurn, splitAtSteers, timelineItems, type TimelineItem } from "@/lib/agents-worklog";
 import { Markdown } from "../code/markdown";
 import { Collapse } from "./animated-height";
 import { PlanCard } from "./plan";
 import { RequestCard, toFileDiff } from "./request-card";
 import { SubagentGroup, SubagentRow } from "./subagents";
 import { StepRow, WorkGroup } from "./work-log";
-import { elapsed, runStatusLabel, Stat, usageLine } from "./shared";
+import { DeliveredText, elapsed, runStatusLabel, Stat, usageLine } from "./shared";
 import { useAgents } from "./use-agents";
 
 export interface TranscriptActions {
@@ -356,7 +356,9 @@ function Delivered({ run, actions }: { run: Run; actions: TranscriptActions }) {
         className="flex max-w-full items-center gap-2 rounded-md px-1 text-left text-[13px] text-muted transition-colors hover:text-fg"
       >
         <CornerDownRight className={`size-3.5 shrink-0 ${failed ? "text-danger" : "text-accent"}`} strokeWidth={1.5} aria-hidden />
-        <span className="truncate">{deliveredLabel(run)}</span>
+        <span className="truncate">
+          <DeliveredText run={run} />
+        </span>
         <ChevronRight className={`size-3.5 shrink-0 transition-transform duration-200 motion-reduce:transition-none ${open ? "rotate-90" : ""}`} />
       </button>
       {links.length > 0 && (

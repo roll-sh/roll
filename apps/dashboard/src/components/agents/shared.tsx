@@ -1,6 +1,23 @@
 "use client";
 
-import type { DiffStat, ProviderInfo, RunStatus, ThreadStatus, Usage } from "@/lib/agents-api";
+import type { DiffStat, ProviderInfo, Run, RunStatus, ThreadStatus, Usage } from "@/lib/agents-api";
+import { delegatedTasks } from "@/lib/agents-worklog";
+
+/** `deliveredLabel` with what didn't complete in red: "2 delegated tasks finished · Build, Docs failed". */
+export function DeliveredText({ run }: { run: Pick<Run, "prompt" | "delivers"> }) {
+  const tasks = delegatedTasks(run);
+  return (
+    <>
+      {tasks.length === 1 ? "Delegated task finished" : `${tasks.length} delegated tasks finished`} ·{" "}
+      {tasks.map((t, i) => (
+        <span key={t.id}>
+          {i > 0 && ", "}
+          {t.status === "completed" ? t.title : <span className="text-danger">{`${t.title} ${t.status}`}</span>}
+        </span>
+      ))}
+    </>
+  );
+}
 
 /** 12.3k, 1.2M. */
 export function compact(n: number) {
