@@ -5,16 +5,16 @@
  * conversation's frame and motion, `SidePanel` in agents-page.tsx), a stack you go into and back
  * out of (lib/automations-nav.ts): the list → an automation's overview → its builder or its runs →
  * one run → a conversation that run started. A page deeper in slides in from the right, one you
- * go back to from the left (T3's and iOS's navigation stack, 220 ms on the drawer curve; static
- * under reduced motion). The canvas stays live beside it, with a run's threads highlighted.
+ * go back to from the left (`SlidePages`: the old page slides the other way and fades, inert; 200 ms;
+ * static under reduced motion). The canvas stays live beside it, with a run's threads highlighted.
  */
 
-import { useReducedMotion } from "@roll/brand";
 import { ArrowLeft, Maximize2, Minimize2, PanelRightClose, X } from "lucide-react";
 import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 import { setAgentsView, type AutomationsView } from "@/lib/agents-surface";
 import { backOf, isBuilder, levelKey, levelOf, step, type Trail } from "@/lib/automations-nav";
 import { Conversation, IconButton } from "../session";
+import { SlidePages } from "../slide-pages";
 import { useAgents } from "../use-agents";
 import { AutomationPanel } from "./automation-panel";
 import { forgetListState, AutomationsView as List } from "./automations-view";
@@ -57,7 +57,6 @@ export function AutomationsSheet({
   /** Canvas keys to highlight beside the sheet (a run's threads, the open conversation). */
   onHighlight: (keys: readonly string[]) => void;
 }) {
-  const reduced = useReducedMotion();
   // The trail follows the view (adjusted while rendering, React's way to derive from a prop).
   const [nav, setNav] = useState<{ trail: Trail; dir: -1 | 0 | 1; top: AutomationsView }>(() => ({ trail: [view], dir: 0, top: view }));
   let current = nav;
@@ -113,13 +112,13 @@ export function AutomationsSheet({
     );
   return (
     <SheetContext.Provider value={sheet}>
-      <div
-        key={levelKey(level)}
-        className={`flex min-h-0 flex-1 flex-col ${reduced || current.dir === 0 ? "" : current.dir > 0 ? "stack-push" : "stack-pop"}`}
-        data-level={level.kind}
-      >
-        {page}
-      </div>
+      {/* A level deeper slides in from the right, Back from the left; the page left behind slides
+          the other way and fades, inert (it was gone at once). A tab on the same level stays put. */}
+      <SlidePages page={levelKey(level)} direction={current.dir} className="flex min-h-0 flex-1 flex-col">
+        <div className="flex min-h-0 flex-1 flex-col" data-level={level.kind}>
+          {page}
+        </div>
+      </SlidePages>
     </SheetContext.Provider>
   );
 }

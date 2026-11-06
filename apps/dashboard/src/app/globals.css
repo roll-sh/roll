@@ -556,18 +556,6 @@ body {
   transform-origin: top;
 }
 
-/* The agents popup opening over the page. */
-@keyframes sheet-in {
-  from {
-    opacity: 0;
-    transform: translateY(10px) scale(0.985);
-  }
-}
-
-.sheet-in {
-  animation: sheet-in 0.26s cubic-bezier(0.32, 0.72, 0, 1) both;
-}
-
 @keyframes fade-in {
   from {
     opacity: 0;
@@ -576,29 +564,6 @@ body {
 
 .fade-in {
   animation: fade-in 0.2s ease-out both;
-}
-
-/* A page of the automations sheet's stack: deeper slides in from the right, back from the left. */
-@keyframes stack-push {
-  from {
-    opacity: 0;
-    transform: translateX(24px);
-  }
-}
-
-@keyframes stack-pop {
-  from {
-    opacity: 0;
-    transform: translateX(-24px);
-  }
-}
-
-.stack-push {
-  animation: stack-push 0.22s cubic-bezier(0.32, 0.72, 0, 1) both;
-}
-
-.stack-pop {
-  animation: stack-pop 0.22s cubic-bezier(0.32, 0.72, 0, 1) both;
 }
 
 /* The chrome settles in a beat after the sheet (header, views bar, toolbar). */
@@ -646,9 +611,6 @@ body {
 
 @media (prefers-reduced-motion: reduce) {
   .pop,
-  .sheet-in,
-  .stack-push,
-  .stack-pop,
   .fade-in,
   .chrome-in {
     animation: none;
@@ -682,21 +644,8 @@ body {
   animation: palette-in 0.2s cubic-bezier(0.32, 0.72, 0, 1) both;
 }
 
-/* A view replacing another inside the open palette (a submenu, back). */
-@keyframes palette-view {
-  from {
-    opacity: 0;
-    transform: translateY(4px);
-  }
-}
-
-.palette-view {
-  animation: palette-view 0.15s ease-out both;
-}
-
 @media (prefers-reduced-motion: reduce) {
-  .palette-in,
-  .palette-view {
+  .palette-in {
     animation: none;
   }
 }

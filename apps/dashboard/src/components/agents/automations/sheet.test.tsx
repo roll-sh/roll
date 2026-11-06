@@ -73,7 +73,7 @@ describe("the automations sheet", () => {
     expect(view()).toEqual({ kind: "automations", list: undefined, open: "aut_1" });
     const steps = await screen.findByRole("list", { name: "Steps" });
     expect(within(steps).getByText("Notify me")).toBeInTheDocument();
-    expect(sheet()!.querySelector("[data-level]")).toHaveClass("stack-push");
+    expect(sheet()!.querySelector("[data-page=current]")).toHaveAttribute("data-from", "right");
 
     await userEvent.click(screen.getByRole("button", { name: "Edit" }));
     expect(view()).toMatchObject({ open: "aut_1", tab: "edit" });
@@ -84,7 +84,7 @@ describe("the automations sheet", () => {
 
     await userEvent.click(screen.getByRole("button", { name: "Back to overview (Esc)" }));
     expect(view()).toEqual({ kind: "automations", list: undefined, open: "aut_1" });
-    expect(sheet()!.querySelector("[data-level]")).toHaveClass("stack-pop");
+    expect(sheet()!.querySelector("[data-page=current]")).toHaveAttribute("data-from", "left");
     await userEvent.keyboard("{Escape}");
     expect(view()).toEqual({ kind: "automations" });
     await userEvent.keyboard("{Escape}");

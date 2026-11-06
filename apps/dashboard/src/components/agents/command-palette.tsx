@@ -43,7 +43,8 @@ import { useReducedMotion } from "@roll/brand";
 import { AnimatePresence, motion, type Transition } from "motion/react";
 import { FADE_IN, POP_IN, POP_OUT } from "@/lib/agents-motion";
 import { useEnteringValue, usePresenceTracks } from "./presence";
-import { useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, type ReactNode } from "react";
+import { SlidePages, useHeightGlide } from "./slide-pages";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { isBusy, reachable, type Machine, type Thread } from "@/lib/agents-api";
 import type { Direction } from "@/lib/agents-layout";
@@ -167,9 +168,20 @@ function PaletteDialog({ session, intent, host }: { session: number; intent: Pal
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const input = useRef<HTMLInputElement>(null);
-  const list = useRef<HTMLDivElement>(null);
+  const list = useRef<HTMLDivElement | null>(null);
+  // Only ever set: a page leaving detaches its list after the new page's attached.
+  const setList = useCallback((el: HTMLDivElement | null) => {
+    if (el) list.current = el;
+  }, []);
   const view = stack.views.at(-1)?.view ?? null;
   const query = stack.query;
+  // Which way the pages move: deeper slides in from the right, back from the left.
+  const depth = stack.views.length;
+  const [nav, setNav] = useState<{ depth: number; dir: -1 | 0 | 1 }>({ depth, dir: 0 });
+  if (nav.depth !== depth) setNav({ depth, dir: depth > nav.depth ? 1 : -1 });
+  const glassRef = useRef<HTMLDivElement>(null);
+  const pageKey = `${depth}:${view?.label ?? "root"}`;
+  useHeightGlide(glassRef, pageKey);
 
   const machines = useMemo(() => [...data.machines.values()].map((r) => r.value).sort((a, b) => Number(b.online) - Number(a.online) || a.name.localeCompare(b.name)), [data.machines]);
   const projects = useMemo(() => [...data.projects.values()].map((r) => ({ ...r.value, machine: r.machine })).sort((a, b) => a.name.localeCompare(b.name)), [data.projects]);
@@ -643,7 +655,8 @@ function PaletteDialog({ session, intent, host }: { session: number; intent: Pal
           role="dialog"
           aria-modal="true"
           aria-label="Command palette"
-          className="palette-glass pointer-events-auto flex max-h-[min(30rem,80vh)] min-h-0 w-full max-w-xl flex-col overflow-hidden rounded-2xl text-fg"
+          ref={glassRef}
+          className="palette-glass pointer-events-auto relative flex max-h-[min(30rem,80vh)] min-h-0 w-full max-w-xl flex-col overflow-hidden rounded-2xl text-fg"
           style={{ opacity: glass, scale }}
         >
           <div className="flex items-center gap-2 px-3.5">
@@ -680,25 +693,28 @@ function PaletteDialog({ session, intent, host }: { session: number; intent: Pal
             {busy && <span className="shimmer shrink-0 text-[12px] text-muted">Starting…</span>}
           </div>
           <div className="h-px shrink-0 bg-fg/[0.07]" />
-          {view?.panel ? (
-            <div key={view.label} className="palette-view min-h-0 overflow-y-auto" onKeyDown={(e) => e.key === "Escape" && (e.stopPropagation(), dispatch({ type: "back" }))}>
-              {view.panel(close)}
-            </div>
-          ) : rows.length === 0 ? (
-            <p className="px-6 py-9 text-center text-[13px] text-muted">{empty}</p>
-          ) : (
-            <div ref={list} id="palette-list" role="listbox" key={view?.label ?? "root"} className="palette-view min-h-0 overflow-y-auto overscroll-contain p-2">
-              {rows.map((row, i) =>
-                row.kind === "label" ? (
-                  <p key={row.key} className={`px-2 pb-1 text-[11.5px] font-medium text-subtle ${i === 0 ? "pt-1" : "pt-2.5"}`}>
-                    {row.label}
-                  </p>
-                ) : (
-                  <Row key={row.key} item={row.item} active={row.item.value === highlighted} onHover={() => row.index !== null && setHighlighted(row.item.value)} onPick={() => void execute(row.item)} />
-                ),
-              )}
-            </div>
-          )}
+          {/* A submenu slides in from the right and Back from the left, the palette's height easing between them. */}
+          <SlidePages page={pageKey} direction={nav.dir} className="flex min-h-0 flex-col">
+            {view?.panel ? (
+              <div className="min-h-0 overflow-y-auto" onKeyDown={(e) => e.key === "Escape" && (e.stopPropagation(), dispatch({ type: "back" }))}>
+                {view.panel(close)}
+              </div>
+            ) : rows.length === 0 ? (
+              <p className="px-6 py-9 text-center text-[13px] text-muted">{empty}</p>
+            ) : (
+              <div ref={setList} id="palette-list" role="listbox" className="min-h-0 overflow-y-auto overscroll-contain p-2">
+                {rows.map((row, i) =>
+                  row.kind === "label" ? (
+                    <p key={row.key} className={`px-2 pb-1 text-[11.5px] font-medium text-subtle ${i === 0 ? "pt-1" : "pt-2.5"}`}>
+                      {row.label}
+                    </p>
+                  ) : (
+                    <Row key={row.key} item={row.item} active={row.item.value === highlighted} onHover={() => row.index !== null && setHighlighted(row.item.value)} onPick={() => void execute(row.item)} />
+                  ),
+                )}
+              </div>
+            )}
+          </SlidePages>
           {error && <p className="border-t border-fg/[0.07] px-4 py-2 text-[12.5px] text-danger">{error}</p>}
           <div className="flex shrink-0 items-center gap-3 border-t border-fg/[0.07] bg-fg/[0.025] px-4 py-2.5 text-[12px] font-medium text-muted max-sm:hidden">
             <span className="flex items-center gap-1">
