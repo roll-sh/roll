@@ -182,7 +182,7 @@ function SandboxForProject({ project }: { project: Project }) {
       if (started) return;
       started = true;
       stop();
-      show({ at: "failed", step: 1, error: "It didn't connect in time. It's on the canvas: add the project from its card once it's up.", machine: client.data.machines.get(machine)?.value });
+      show({ at: "failed", step: 1, error: "It hasn't connected to roll in 3 minutes, so roll can't clone into it yet. Keep waiting, or delete it: it's billed while it runs. If it comes up later, add the project from its card on the canvas.", machine: client.data.machines.get(machine)?.value });
     }, CONNECT_WAIT_MS);
     const off = client.subscribe(check);
     const stop = () => {
@@ -265,6 +265,16 @@ function SandboxForProject({ project }: { project: Project }) {
           {phase.error}
         </p>
       )}
+      {/* It never connected: wait on, or delete it (it was a dead end, then slept and billed). */}
+      {phase.at === "failed" && phase.step === 1 && phase.machine && (
+        <NotConnected
+          machine={phase.machine}
+          onWait={() => {
+            setPhase({ at: "starting", machine: phase.machine!, since: Date.now() });
+            waitThenClone(phase.machine!.id);
+          }}
+        />
+      )}
       {ready && (
         <div className="fade-in space-y-3">
           <p className="text-[12.5px] text-muted">
@@ -298,6 +308,45 @@ function SandboxForProject({ project }: { project: Project }) {
         </div>
       )}
     </div>,
+  );
+}
+
+/** A rented sandbox that didn't connect: keep waiting, or delete it. */
+function NotConnected({ machine, onWait }: { machine: Machine; onWait: () => void }) {
+  const { owner, services, sandboxes } = useAgents();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const sb = sandboxes?.byMachine.get(machine.id);
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center gap-2">
+        <button type="button" className={primary} onClick={onWait} autoFocus>
+          Keep waiting
+        </button>
+        {services && sb && (
+          <button
+            type="button"
+            className={btn}
+            disabled={busy}
+            onClick={async () => {
+              setBusy(true);
+              setError(null);
+              try {
+                await services.sandboxes.remove(owner, sb.id);
+                sandboxes?.reload();
+                closeProjectDialog();
+              } catch (e) {
+                setError(e instanceof Error ? e.message : String(e));
+                setBusy(false);
+              }
+            }}
+          >
+            {busy ? <span className="shimmer">Deleting…</span> : `Delete ${machine.name}`}
+          </button>
+        )}
+      </div>
+      {error && <p className="text-[12px] text-danger">{error}</p>}
+    </div>
   );
 }
 
