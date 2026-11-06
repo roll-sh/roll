@@ -443,7 +443,10 @@ export function AgentsSurface({
   );
 
   // Escape: back to the canvas, and from the canvas out of the popup. Not while typing, except in
-  // an empty composer (it has focus in a conversation, so Escape would never leave otherwise).
+  // an empty composer (it has focus in a conversation, so Escape would never leave otherwise). A
+  // popup opened straight into a conversation (a change page's link) goes back to that page.
+  const enteredAt = useRef(onClose && shown.kind === "thread" ? shown.thread : null);
+  if (enteredAt.current && !(shown.kind === "thread" && shown.thread === enteredAt.current)) enteredAt.current = null;
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape" || e.defaultPrevented) return;
@@ -460,6 +463,7 @@ export function AgentsSurface({
       if (typing) return;
       // The automations sheet goes up one level; from its list, it closes.
       if (shown.kind === "automations") (sheetBack.current ?? close)();
+      else if (enteredAt.current) onClose?.();
       else if (shown.kind !== "canvas") close();
       else onClose?.();
     };

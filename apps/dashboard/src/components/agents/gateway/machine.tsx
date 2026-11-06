@@ -156,17 +156,20 @@ export function NewSandboxGatewayNotice({ backend }: { backend: string }) {
   );
 }
 
-/** Under a provider whose requests go through the gateway. */
+/**
+ * Under a provider whose requests go through the gateway: one line. The notice itself is said once
+ * on the page, on the gateway's endpoint (`GatewayEndpointItem`), not again under every provider.
+ */
 export function ProviderGatewayNote({ machine, provider }: { machine: Machine; provider: ProviderId }) {
   const e = endpointOf(machine.info, provider);
   if (!e || e.kind !== "gateway") return null;
   const host = hostOfEndpoint(e);
   return (
-    <div className="space-y-1">
-      <GatewayNotice variant="inline" host={host} who={{ kind: "this" }} fallback={!!e.fallback} self={host === machine.name} />
-      <button type="button" onClick={openGatewaySettings} className={cn(textBtn, "ml-4 text-[11.5px]")}>
+    <p className="flex flex-wrap items-center gap-x-2 text-[11.5px] text-subtle">
+      <span>{host === machine.name ? "Through the gateway on this computer" : `Through the gateway: its requests go out from ${host}`}</span>
+      <button type="button" onClick={openGatewaySettings} className={cn(textBtn, "text-[11.5px]")}>
         Manage in Gateway settings
       </button>
-    </div>
+    </p>
   );
 }

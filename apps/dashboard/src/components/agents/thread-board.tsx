@@ -28,8 +28,8 @@ const CARD_H = 92;
 const GAP = 8;
 const STEP = CARD_H + GAP;
 const COL_W = 284;
-/** An empty column stays (columns never come and go) but gives its room to the others. */
-const widthOf = (g: Group) => (g.count ? COL_W : 152);
+/** An empty column stays (columns never come and go) but is only its header: the room goes to the others. */
+const widthOf = (g: Group) => (g.count ? COL_W : 104);
 /** Cards a swimlane's cell shows before "N more". */
 const CELL_FIRST = 12;
 

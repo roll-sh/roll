@@ -126,7 +126,8 @@ describe("the agents' command palette", () => {
   });
 
   it("switches the canvas's view, and settles the open conversation", async () => {
-    const h = setup();
+    // An idle one: a running thread can't be settled (the palette says why instead).
+    const h = setup([mirrored("thread", thread({ id: "thr_3", title: "Tidy the docs", status: "idle" }), 6)]);
     await userEvent.keyboard("{Meta>}k{/Meta}");
     // A submenu's option is a row of its own.
     await search(screen.getByRole("combobox"), "switch view running");
@@ -135,12 +136,12 @@ describe("the agents' command palette", () => {
     expect(screen.getByRole("tab", { name: /Running/ })).toHaveAttribute("aria-selected", "true");
 
     await waitFor(() => expect(agentsPalette.get().open).toBe(false));
-    act(() => showAgents({ kind: "thread", thread: "thr_1" }));
+    act(() => showAgents({ kind: "thread", thread: "thr_3" }));
     await userEvent.keyboard("{Meta>}k{/Meta}");
     await search(screen.getByRole("combobox"), ">settle");
-    expect(selected()).toHaveTextContent("Settle “Fix the flaky queue test”");
+    expect(selected()).toHaveTextContent("Settle “Tidy the docs”");
     await userEvent.keyboard("{Enter}");
-    await waitFor(() => expect(h.command.mock.calls.map((c) => c[2])).toContainEqual({ type: "thread.settle", thread: "thr_1" }));
+    await waitFor(() => expect(h.command.mock.calls.map((c) => c[2])).toContainEqual({ type: "thread.settle", thread: "thr_3" }));
   });
 });
 

@@ -14,9 +14,11 @@ import { HorizonMark, RollLogo, useReducedMotion } from "@roll/brand";
 import { ChevronLeft, ChevronRight, Folder, MessageSquare, Network, Pause, Play, RotateCcw, Server } from "lucide-react";
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { Share } from "@/lib/agents-api";
 import { AgentsClient, type AgentsTransport } from "@/lib/agents-client";
-import { deriveGraph, type GraphNode } from "@/lib/agents-graph";
+import { deriveGraph, foldQuiet, newestRuns, SHOWN_THREADS, type GraphNode } from "@/lib/agents-graph";
+import { isBusy, type Share } from "@/lib/agents-api";
+import { CanvasFoldsProvider, type CanvasFolds } from "./canvas-folds";
+import { FoldedThreads } from "./folded-threads";
 import type { Size } from "@/lib/agents-layout";
 import { frameAt, realAt, replayAt, shareStats, step, timeline } from "@/lib/agents-replay";
 import { useMarkState } from "../mark-state";
@@ -112,7 +114,38 @@ export function ShareView({ share }: { share: Share }) {
     [client, share.owner, openThread, close, focus, real],
   );
 
-  const graph = useMemo(() => deriveGraph(data), [data]);
+  // Folded as the owner's overview is (a project shows what's working and the newest few, the rest
+  // in one card); its "show them here" expands in place, as there's no project space to go into.
+  const [expandedFolds, setExpandedFolds] = useState<ReadonlySet<string>>(() => new Set());
+  const folds = useMemo(() => {
+    const newest = newestRuns(data);
+    return foldQuiet(deriveGraph(data), {
+      shown: (n) => (n.kind === "project" ? SHOWN_THREADS : null),
+      keep: (id) => {
+        const t = data.threads.get(id)?.value;
+        return id === share.thread || id === open || (!!t && (isBusy(t.status) || t.status === "error" || t.pending_requests > 0));
+      },
+      activity: (id) => {
+        const t = data.threads.get(id)?.value;
+        const r = newest.get(id);
+        return t ? Math.max(t.created_at, r?.requested_at ?? 0, r?.completed_at ?? 0) : 0;
+      },
+      expanded: expandedFolds,
+    });
+  }, [data, share.thread, open, expandedFolds]);
+  const graph = folds.graph;
+  const foldsCtx: CanvasFolds = useMemo(
+    () => ({
+      folded: folds.folded,
+      toggle: (container) =>
+        setExpandedFolds((prev) => {
+          const next = new Set(prev);
+          if (!next.delete(container)) next.add(container);
+          return next;
+        }),
+    }),
+    [folds.folded],
+  );
   const facts = useThreadFacts(data);
   const thread = open ? data.threads.get(open) : undefined;
   const render = (n: GraphNode) => {
@@ -134,9 +167,10 @@ export function ShareView({ share }: { share: Share }) {
       }
       case "request":
         return <RequestNode request={data.requests.get(n.id)!.value} />;
+      case "fold":
+        return <FoldedThreads container={n.id} />;
       case "terminal":
       case "pin":
-      case "fold":
       case "group":
         return null;
     }
@@ -154,9 +188,10 @@ export function ShareView({ share }: { share: Share }) {
           return { w: 248, h: 84 };
         case "request":
           return { w: 340, h: 160 };
+        case "fold":
+          return { w: 296, h: 96 };
         case "terminal":
         case "pin":
-        case "fold":
         case "group":
           return { w: 0, h: 0 };
       }
@@ -189,6 +224,7 @@ export function ShareView({ share }: { share: Share }) {
               }
             />
           ) : (
+            <CanvasFoldsProvider value={foldsCtx}>
             <AgentsCanvas
               ref={canvas}
               graph={graph}
@@ -202,6 +238,7 @@ export function ShareView({ share }: { share: Share }) {
                 </button>
               }
             />
+            </CanvasFoldsProvider>
           )}
         </div>
         <div className="flex flex-wrap items-center gap-3 border-t border-line bg-panel px-4 py-2.5" role="group" aria-label="Replay">
