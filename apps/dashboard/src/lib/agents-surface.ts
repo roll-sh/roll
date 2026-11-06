@@ -5,7 +5,7 @@
  * filling the window. One store for all of it, so the header, the popup and deep links agree.
  */
 
-import { useSyncExternalStore } from "react";
+import { useEffect, useRef, useSyncExternalStore } from "react";
 import { openAgentsWindow } from "./desktop";
 
 /**
@@ -48,11 +48,37 @@ export interface AgentsSurface {
 
 let state: AgentsSurface = { open: false, view: { kind: "canvas" } };
 const listeners = new Set<() => void>();
+/** Unsaved work in what's shown (`useLeaveGuard`), newest last. */
+const holds: (() => void)[] = [];
 
 function set(next: AgentsSurface) {
   if (next.open === state.open && sameView(next.view, state.view)) return;
+  // Leaving what's shown (another view, or the popup closing) with unsaved work in it: the work
+  // says so and stays, as its panel's × does; Save or Discard, then go.
+  const hold = holds.at(-1);
+  if (hold && (!next.open || !sameView(next.view, state.view))) return hold();
   state = next;
   for (const l of listeners) l();
+}
+
+/**
+ * While `dirty`, nothing leaves the view that shows it (a card clicked on the canvas, a row in the
+ * sidebar, ⌘K, a link): `hold` runs instead, to say why and how to go on.
+ */
+export function useLeaveGuard(dirty: boolean, hold: () => void) {
+  const latest = useRef(hold);
+  useEffect(() => {
+    latest.current = hold;
+  });
+  useEffect(() => {
+    if (!dirty) return;
+    const h = () => latest.current();
+    holds.push(h);
+    return () => {
+      const i = holds.lastIndexOf(h);
+      if (i >= 0) holds.splice(i, 1);
+    };
+  }, [dirty]);
 }
 
 export const sameView = (a: AgentsView, b: AgentsView) => {

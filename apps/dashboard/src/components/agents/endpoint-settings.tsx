@@ -256,7 +256,36 @@ export function EndpointEditor({
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
   const box = useRef<HTMLFormElement>(null);
-  useEscapeLayer(true, onCancel);
+  // Escape with something typed asks first (it threw the values away without a word); Cancel and
+  // × are asked for, so they go at once. Escape again keeps editing.
+  const dirty =
+    kind !== (initial?.kind ?? "cliproxy") ||
+    name !== (initial?.name ?? "") ||
+    url !== (initial?.base_url ?? "") ||
+    picked.join() !== (initial?.providers ?? (pick ? [pick] : [])).join() ||
+    urlEnv !== (initial?.url_env ?? "") ||
+    keyEnv !== (initial?.key_env ?? "") ||
+    fromOp !== !!initial?.key_ref ||
+    ref !== (initial?.key_ref ?? "") ||
+    key !== "" ||
+    clearKey;
+  const [asking, setAsking] = useState(false);
+  // Keep editing goes back to the field that was being typed in.
+  const typedIn = useRef<HTMLElement | null>(null);
+  const ask = () => {
+    typedIn.current = document.activeElement instanceof HTMLElement && box.current?.contains(document.activeElement) ? document.activeElement : null;
+    setAsking(true);
+  };
+  const keepEditing = () => {
+    setAsking(false);
+    setTimeout(() => typedIn.current?.focus({ preventScroll: true }), 0);
+  };
+  useEscapeLayer(true, () => (dirty ? ask() : onCancel()));
+  useEscapeLayer(asking, keepEditing);
+  const keepButton = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    if (asking) keepButton.current?.focus({ preventScroll: true });
+  }, [asking]);
   // Braces: Chromium's scrollIntoView answers a promise, and an effect may only return its cleanup.
   useEffect(() => {
     box.current?.scrollIntoView?.({ block: "nearest", behavior: "smooth" });
@@ -423,6 +452,17 @@ export function EndpointEditor({
         {clearKey && <p className="text-[11.5px] text-subtle">The key is removed when you save.</p>}
       </Labeled>
       {problem && <Problem>{problem}</Problem>}
+      {asking ? (
+        <div role="alertdialog" aria-label="Discard your changes?" className="flex flex-wrap items-center gap-2 rounded-lg border border-line-2 bg-panel-2 px-2.5 py-2 text-[12px]">
+          <span className="min-w-0 flex-1 text-muted">Discard what you typed?</span>
+          <button type="button" ref={keepButton} onClick={keepEditing} className="h-7 rounded-md px-2.5 text-[12px] text-muted hover:text-fg">
+            Keep editing
+          </button>
+          <button type="button" onClick={onCancel} className="h-7 rounded-md bg-danger/10 px-2.5 text-[12px] font-medium text-danger hover:bg-danger/20">
+            Discard
+          </button>
+        </div>
+      ) : (
       <div className="flex items-center justify-end gap-2">
         <button type="button" onClick={onCancel} className="h-8 rounded-lg px-3 text-[12.5px] text-muted hover:text-fg">
           Cancel
@@ -431,6 +471,7 @@ export function EndpointEditor({
           {busy ? <span className="shimmer">Saving…</span> : initial ? "Save" : withKey ? "Add endpoint" : "Add profile"}
         </button>
       </div>
+      )}
     </form>
   );
 }

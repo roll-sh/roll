@@ -1,7 +1,7 @@
 import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { agentsSurface, resetAgentsSurface } from "@/lib/agents-surface";
+import { agentsSurface, resetAgentsSurface, setAgentsView } from "@/lib/agents-surface";
 import type { Command, Project, Reply } from "@/lib/agents-api";
 import { NO_SETTINGS } from "@/lib/agents-api";
 import { Composer } from "./composer";
@@ -238,6 +238,22 @@ describe("project settings on the canvas", () => {
     await userEvent.click(screen.getByRole("button", { name: "Discard" }));
     await userEvent.click(screen.getByRole("button", { name: "Close (Esc)" }));
     expect(onClose).toHaveBeenCalled();
+  });
+
+  it("won't let a card on the canvas (or any other view) throw an unsaved change away: it says so and stays (M8)", async () => {
+    const p = withSettings({});
+    const h = agentsHarness({ entities: [mirrored("project", p, 1)] });
+    setAgentsView({ kind: "settings", target: `p:${p.id}` });
+    renderAgents(<SettingsPanel target={`p:${p.id}`} onClose={vi.fn()} />, h);
+    await userEvent.click(screen.getByRole("switch", { name: "Pull merged changes automatically" }));
+    // What a card's click does (the page's openThread).
+    act(() => setAgentsView({ kind: "thread", thread: "thr_1" }));
+    expect(agentsSurface.get().view).toEqual({ kind: "settings", target: `p:${p.id}` });
+    expect(screen.getByRole("alert")).toHaveTextContent("Save or discard your changes first");
+    expect(screen.getByRole("switch", { name: "Pull merged changes automatically" })).toHaveAttribute("aria-checked", "true");
+    await userEvent.click(screen.getByRole("button", { name: "Discard" }));
+    act(() => setAgentsView({ kind: "thread", thread: "thr_1" }));
+    expect(agentsSurface.get().view).toEqual({ kind: "thread", thread: "thr_1" });
   });
 
   it("are offered while adding a project: on for a clone, off for a folder", async () => {

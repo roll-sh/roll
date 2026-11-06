@@ -562,6 +562,32 @@ describe("a machine's endpoints", () => {
     expect(within(item).getByText("http://proxy.local:8317")).toBeInTheDocument();
   });
 
+  it("Escape with something typed asks before discarding it; Escape again keeps editing, in the field it was in (M9)", async () => {
+    withEndpoints();
+    await userEvent.click(within(endpointsRegion()).getByRole("button", { name: "Add endpoint" }));
+    const form = within(endpointsRegion()).getByRole("form", { name: "New endpoint" });
+    // Nothing typed: Escape just closes it.
+    act(() => expect(closeTopLayer()).toBe(true));
+    expect(within(endpointsRegion()).queryByRole("form")).toBeNull();
+
+    await userEvent.click(within(endpointsRegion()).getByRole("button", { name: "Add endpoint" }));
+    const again = within(endpointsRegion()).getByRole("form", { name: "New endpoint" });
+    const url = within(again).getByRole("textbox", { name: "Base URL" });
+    await userEvent.type(url, "http://proxy.local:8317/");
+    act(() => void closeTopLayer());
+    const ask = within(again).getByRole("alertdialog", { name: "Discard your changes?" });
+    expect(within(ask).getByRole("button", { name: "Keep editing" })).toHaveFocus();
+    act(() => void closeTopLayer());
+    expect(within(again).queryByRole("alertdialog")).toBeNull();
+    await waitFor(() => expect(url).toHaveFocus());
+    expect(url).toHaveValue("http://proxy.local:8317/");
+
+    act(() => void closeTopLayer());
+    await userEvent.click(within(again).getByRole("button", { name: "Discard" }));
+    expect(within(endpointsRegion()).queryByRole("form")).toBeNull();
+    expect(form).not.toBeInTheDocument();
+  });
+
   it("checks one, replaces and removes its key, and removes it after asking", async () => {
     const { h } = withEndpoints([PROXY]);
     const item = () => within(endpointsRegion()).getByRole("group", { name: "Endpoint CLIProxyAPI" });

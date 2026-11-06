@@ -26,6 +26,7 @@ import { field, SettingRow, SettingsSection, type Setting } from "./settings-ui"
 import { ago } from "./shared";
 import { Select, Switch } from "./ui";
 import { useEscapeLayer } from "./escape-layers";
+import { useLeaveGuard } from "@/lib/agents-surface";
 import { useAgents } from "./use-agents";
 
 /**
@@ -300,6 +301,8 @@ export function ProjectSettingsForm({ project, machine, onDone }: { project: Pro
   // change is never dropped without a word; Discard or Save, then close.
   const [held, setHeld] = useState(false);
   useEscapeLayer(changed, () => setHeld(true));
+  // So is opening something else: a card on the canvas, a row, ⌘K (it threw the edits away).
+  useLeaveGuard(changed && !onDone, () => setHeld(true));
   const scriptsOk = scripts.every((s) => s.name.trim() && s.command.trim());
   const branch = project.git?.branch && project.git.branch !== "HEAD" ? project.git.branch : "the default branch";
 
