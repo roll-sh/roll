@@ -86,6 +86,18 @@ describe("the shelf (the canvas toolbar's Shelf)", () => {
     expect(screen.queryByRole("dialog", { name: "Shelf" })).not.toBeInTheDocument();
   });
 
+  it("stays on the tab it opened on when its last row goes back (it jumped to an empty Settled)", async () => {
+    const only = thread({ id: "thr_a", title: "Spike: edge middleware", archived_at: NOW - 5 * D });
+    const h = agentsHarness({ entities: [mirrored("project", project({ name: "hello" }), 1), mirrored("thread", only, 2)] });
+    const r = toolbar(h);
+    await userEvent.click(screen.getByRole("button", { name: /^Shelf/ }));
+    expect(await screen.findByRole("listbox", { name: "Archived conversations" })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Unarchive Spike: edge middleware" }));
+    act(() => h.client.enqueue({ type: "entity", ...mirrored("thread", { ...only, archived_at: null }, 3) }));
+    r.rerender(<ShelfControl data={h.client.data} focused={null} phone={false} />);
+    expect(await screen.findByRole("listbox", { name: "Archived conversations" })).toHaveTextContent("Nothing archived");
+  });
+
   it("restores from a row's button: unarchive, and a snooze woken early comes back with its own time", async () => {
     const h = world();
     toolbar(h);

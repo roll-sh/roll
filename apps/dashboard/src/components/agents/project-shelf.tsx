@@ -91,6 +91,10 @@ function ShelfPanel({ data, project, tab: asked, phone }: { data: AgentsData; pr
   const narrowed = project ? data.projects.get(project)?.value : undefined;
   // A new tab, search or project starts at the top.
   useEffect(() => setActive(0), [list.tab, query, project]);
+  // The tab it opened on stays when its last row goes back (it jumped to an empty Settled).
+  useEffect(() => {
+    if (tab === null && list.rows.length > 0) setTab(list.tab);
+  }, [tab, list.tab, list.rows.length]);
   useEffect(() => {
     document.getElementById(`${listId}-${at}`)?.scrollIntoView?.({ block: "nearest" });
   }, [listId, at]);
