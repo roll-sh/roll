@@ -76,7 +76,9 @@ Machine            a daemon (hostname, os, providers and their auth state, onlin
   nodes. The canvas draws both.
 - **Runs and steering.** A message to a running thread is queued (`message.send` with
   `mode: queue`) or steers the active run (`mode: steer`): providers that can steer natively get
-  the input; others are interrupted and the run restarts with the new input appended. The queue
+  the input; others are interrupted and the run restarts with the new input appended. The run
+  keeps each steer's text and when it came (`steers`, `steered_at`), so the transcript shows it
+  after the work before it, as T3 does, not under the prompt. The queue
   drains only after a run completes: an interrupt (or a failure) holds it, as T3's Stop does.
   Queued messages are edited, reordered and sent now (`message.edit`, `message.reorder`,
   `message.promote`); "Turns" below has the rest.

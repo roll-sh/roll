@@ -95,7 +95,8 @@ describe("the automations sheet", () => {
     await waitFor(() => expect(card("t:thr_1")).toHaveAttribute("data-selected"));
     expect(card("t:thr_2")).not.toHaveAttribute("data-selected");
 
-    await userEvent.click(within(sheet()!).getByRole("button", { name: /Fix the flaky queue test/ }));
+    // The run's thread chip (its log names the thread too, a link of its own).
+    await userEvent.click(within(sheet()!).getAllByRole("button", { name: /Fix the flaky queue test/ })[0]);
     expect(view()).toEqual({ kind: "automations", open: "aut_1", tab: "runs", run: "arn_1", thread: "thr_1" });
     // One right sheet: the conversation is inside it.
     expect(screen.getAllByRole("complementary")).toHaveLength(1);

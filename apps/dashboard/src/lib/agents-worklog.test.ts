@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { NodeBody, ToolKind } from "./agents-api";
 import type { NodeTree } from "./agents-store";
-import { foldLabel, foldTurn, stepLabel, stepsBefore, summarize, thoughtLine, timelineItems } from "./agents-worklog";
+import { foldLabel, foldTurn, splitAtSteers, stepLabel, stepsBefore, summarize, thoughtLine, timelineItems } from "./agents-worklog";
 import { node } from "@/test/agents";
 
 let n = 0;
@@ -63,5 +63,25 @@ describe("the work log (T3's grouping)", () => {
     const { steps, total } = stepsBefore(tree, req.node.id, 2);
     expect(total).toBe(3);
     expect(steps.map((s) => (s.body.type === "tool" ? s.body.title : ""))).toEqual(["rg claim", "b"]);
+  });
+});
+
+describe("steers in time (T3: a steer is a message where it came)", () => {
+  const at = (id: string, started_at: number): NodeTree => ({ node: node({ type: "message", text: id }, { id, status: "completed", started_at }), children: [] });
+  const items = timelineItems([at("a", 100), at("b", 200), at("c", 300)]);
+  const ids = (xs: { items: ReturnType<typeof timelineItems> }[]) => xs.map((p) => p.items.map((i) => (i.kind === "node" ? i.t.node.id : i.id)));
+
+  it("cuts the work where each steer came, after what started before it", () => {
+    const r = splitAtSteers(items, { steers: ["first", "second", "late"], steered_at: [150, 150, 999] });
+    expect(r.before).toEqual([]);
+    expect(ids(r.parts)).toEqual([["a"], ["b", "c"], []]);
+    expect(r.parts.map((p) => p.steers)).toEqual([["first", "second"], ["late"], []]);
+  });
+
+  it("puts one from before any work, or with no time (an older daemon), under the prompt", () => {
+    expect(splitAtSteers(items, { steers: ["early"], steered_at: [50] }).before).toEqual(["early"]);
+    const old = splitAtSteers(items, { steers: ["old"] });
+    expect(old.before).toEqual(["old"]);
+    expect(ids(old.parts)).toEqual([["a", "b", "c"]]);
   });
 });

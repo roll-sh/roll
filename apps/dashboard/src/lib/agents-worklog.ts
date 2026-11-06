@@ -16,6 +16,34 @@ import type { NodeTree } from "./agents-store";
 
 export type TimelineItem = { kind: "node"; t: NodeTree } | { kind: "work"; id: string; entries: NodeTree[] };
 
+/**
+ * A run's work cut where its steers came (T3 shows a steer as a message at its time, after the
+ * work before it): `before` are the steers to show under the prompt (no time, or before any work),
+ * then each part of `items` followed by the steers that came after it.
+ */
+export function splitAtSteers(items: readonly TimelineItem[], run: Pick<Run, "steers" | "steered_at">): { before: string[]; parts: { items: TimelineItem[]; steers: string[] }[] } {
+  const start = (it: TimelineItem) => (it.kind === "node" ? it.t.node.started_at : (it.entries[0]?.node.started_at ?? 0));
+  const before: string[] = [];
+  const after = new Map<number, string[]>();
+  run.steers.forEach((text, i) => {
+    const at = run.steered_at?.[i];
+    if (at === undefined) return void before.push(text);
+    // The first item that started after it; the steer goes before that.
+    const next = items.findIndex((it) => start(it) > at);
+    const cut = next < 0 ? items.length : next;
+    if (cut === 0) before.push(text);
+    else after.set(cut, [...(after.get(cut) ?? []), text]);
+  });
+  const parts: { items: TimelineItem[]; steers: string[] }[] = [];
+  let from = 0;
+  for (const cut of [...after.keys()].sort((a, b) => a - b)) {
+    parts.push({ items: items.slice(from, cut), steers: after.get(cut)! });
+    from = cut;
+  }
+  parts.push({ items: items.slice(from), steers: [] });
+  return { before, parts };
+}
+
 /** Thinking and tool calls: the steps a group is made of. */
 export function isStep(n: Node): boolean {
   return n.body.type === "tool" || n.body.type === "reasoning";

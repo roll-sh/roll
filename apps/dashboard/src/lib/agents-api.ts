@@ -382,6 +382,8 @@ export interface Run {
   prompt: string;
   attachments: Attachment[];
   steers: string[];
+  /** When each steer came (one per steer); absent from older daemons. */
+  steered_at?: Millis[];
   /** The daemon compacted the idle conversation before its prompt cache expired (T3's idle compaction). */
   idle_compaction?: boolean;
   /**
@@ -1851,6 +1853,7 @@ const runD = obj<Run>({
   prompt: str,
   attachments: vec(attachmentD),
   steers: vec(str),
+  steered_at: withDefault(vec(int), () => []),
   idle_compaction: withDefault(bool, () => false),
   delivers: withDefault(vec(str), () => []),
   requested_at: int,

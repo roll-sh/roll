@@ -797,6 +797,10 @@ pub struct Run {
     /// Inputs that steered the run while it was going.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub steers: Vec<String>,
+    /// When each steer came (beside `steers`, one each), so a transcript puts it after the work
+    /// before it. Absent from daemons before it: steers then show under the prompt.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub steered_at: Vec<Millis>,
     /// The daemon started it, not a person: a compaction of the idle conversation just before its
     /// prompt cache expired (T3's `idleCompaction: beforeCacheExpires`, "Context automatically
     /// compacted before cache expiry").

@@ -28,12 +28,12 @@ import {
   Split,
   X,
 } from "lucide-react";
-import { useState, type ReactNode } from "react";
+import { Fragment, useState, type ReactNode } from "react";
 import { useEscapeLayer } from "./escape-layers";
 import type { Checkpoint, FileChange, Node, Request, RequestResponse, Run } from "@/lib/agents-api";
 import { formatContextTokens } from "@/lib/agents-context";
 import type { NodeTree } from "@/lib/agents-store";
-import { delegatedTasks, deliveredLabel, ended, foldLabel, foldTurn, timelineItems, type TimelineItem } from "@/lib/agents-worklog";
+import { delegatedTasks, deliveredLabel, ended, foldLabel, foldTurn, splitAtSteers, timelineItems, type TimelineItem } from "@/lib/agents-worklog";
 import { Markdown } from "../code/markdown";
 import { Collapse } from "./animated-height";
 import { PlanCard } from "./plan";
@@ -96,13 +96,14 @@ export function RunView({
   const live = !ended(run);
   const items = timelineItems(tree);
   const turn = foldTurn(items, run);
+  const steered = splitAtSteers(turn.rest, run);
   const [folded, setFolded] = useState(true);
   const ctx: Ctx = { requests, actions, now, idle: run.idle_compaction };
   const files = changedFiles(tree);
   return (
     <section className={`group/run flex flex-col gap-3 ${run.status === "rolled_back" ? "opacity-45" : ""}`} aria-label={`Run ${run.ordinal}`}>
       {/* Nobody typed an idle compaction or a delegated task's result: their rows say what happened (T3). */}
-      {run.delivers?.length ? <Delivered run={run} actions={actions} /> : !run.idle_compaction && <UserMessage run={run} editFrom={run.status !== "rolled_back" ? actions.editFrom : undefined} />}
+      {run.delivers?.length ? <Delivered run={run} actions={actions} /> : !run.idle_compaction && <UserMessage run={run} steers={steered.before} editFrom={run.status !== "rolled_back" ? actions.editFrom : undefined} />}
       {turn.fold && (
         <div className="border-b border-line pt-1 pb-2">
           <button
@@ -120,7 +121,16 @@ export function RunView({
           </Collapse>
         </div>
       )}
-      <Items items={turn.rest} ctx={ctx} live={live} />
+      {steered.parts.map((part, i) => (
+        <Fragment key={i}>
+          <Items items={part.items} ctx={ctx} live={live && i === steered.parts.length - 1} />
+          {part.steers.length > 0 && (
+            <div className="flex flex-col items-end gap-1">
+              <Steers steers={part.steers} />
+            </div>
+          )}
+        </Fragment>
+      ))}
       {live ? (
         <p className="flex h-6 items-center gap-2 px-1 text-[13px] text-muted tabular-nums transition-opacity duration-150 starting:opacity-0">
           <span className={`size-1.5 rounded-full bg-accent ${run.status === "waiting" ? "" : "pulse-dot"}`} aria-hidden />
@@ -225,7 +235,21 @@ function CopyButton({ text, label = "Copy" }: { text: string; label?: string }) 
 const clock = (at: number) => new Date(at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 
 /** The user's turn (T3's user row): a bubble on the right; a long one folds; its time, copy and "Edit from here" on hover. */
-function UserMessage({ run, editFrom }: { run: Run; editFrom?: (run: Run) => Promise<unknown> }) {
+/** Steers, as the person's messages they are, marked so. */
+function Steers({ steers }: { steers: readonly string[] }) {
+  return (
+    <>
+      {steers.map((s, i) => (
+        <div key={i} className="max-w-[80%] rounded-2xl rounded-tr-md bg-message px-3.5 py-2 text-[13.5px] whitespace-pre-wrap">
+          <span className="mr-1.5 font-mono text-[10px] tracking-wide text-accent uppercase">steer</span>
+          {s}
+        </div>
+      ))}
+    </>
+  );
+}
+
+function UserMessage({ run, steers, editFrom }: { run: Run; steers: readonly string[]; editFrom?: (run: Run) => Promise<unknown> }) {
   const [open, setOpen] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const long = run.prompt.length > 600 || run.prompt.split("\n").length > 8;
@@ -251,12 +275,7 @@ function UserMessage({ run, editFrom }: { run: Run; editFrom?: (run: Run) => Pro
           </button>
         )}
       </div>
-      {run.steers.map((s, i) => (
-        <div key={i} className="max-w-[80%] rounded-2xl rounded-tr-md bg-message px-3.5 py-2 text-[13.5px] whitespace-pre-wrap">
-          <span className="mr-1.5 font-mono text-[10px] tracking-wide text-accent uppercase">steer</span>
-          {s}
-        </div>
-      ))}
+      <Steers steers={steers} />
       <div
         className={`flex items-center gap-1 text-[11px] text-subtle transition-opacity duration-200 group-hover/user:opacity-100 focus-within:opacity-100 motion-reduce:transition-none [@media(hover:none)]:opacity-100 ${confirming ? "opacity-100" : "opacity-0"}`}
       >

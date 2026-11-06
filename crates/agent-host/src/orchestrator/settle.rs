@@ -231,6 +231,7 @@ mod tests {
             prompt: String::new(),
             attachments: vec![],
             steers: vec![],
+            steered_at: vec![],
             idle_compaction: false,
             delivers: Vec::new(),
             requested_at: requested,

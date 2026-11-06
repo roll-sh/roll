@@ -683,6 +683,7 @@ mod tests {
             prompt: String::new(),
             attachments: Vec::new(),
             steers: Vec::new(),
+            steered_at: Vec::new(),
             idle_compaction: false,
             delivers: Vec::new(),
             requested_at: 0,

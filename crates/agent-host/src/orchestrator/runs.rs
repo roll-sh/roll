@@ -339,6 +339,7 @@ impl Host {
             prompt: input.text.clone(),
             attachments: input.attachments.clone(),
             steers: Vec::new(),
+            steered_at: Vec::new(),
             idle_compaction: matches!(by, StartedBy::IdleCompaction),
             delivers: match by {
                 StartedBy::Delivery(tasks) => tasks,
@@ -1105,6 +1106,7 @@ impl Host {
             // waited on.
             let active = rt.active.as_mut().expect("checked");
             active.run.steers.push(input.text.clone());
+            active.run.steered_at.push(now());
             return self.resume_parked(rt, Vec::new(), input).await;
         }
         let Some(live) = rt.live.as_ref() else {
@@ -1114,6 +1116,7 @@ impl Host {
         let native = live.capabilities.steer;
         let active = rt.active.as_mut().expect("steer needs an active run");
         active.run.steers.push(input.text.clone());
+        active.run.steered_at.push(now());
         let run = Entity::Run(active.run.clone());
         self.put(vec![run])?;
         if native && session.steer(input.clone()).await.is_ok() {

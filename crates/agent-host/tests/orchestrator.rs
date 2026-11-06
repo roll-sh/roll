@@ -176,6 +176,9 @@ async fn steering_goes_into_the_turn_when_the_provider_can() {
     assert_eq!(session.wait_calls(|c| c.len() == 2).await, vec![Call::Send("one".into()), Call::Steer("also this".into())]);
     let runs = w.wait("the steer", |s| Some(s.runs(&thread)).filter(|r| r[0].steers.len() == 1)).await;
     assert_eq!(runs[0].steers, vec!["also this"]);
+    // When it came, so a transcript shows it after the work before it.
+    assert_eq!(runs[0].steered_at.len(), 1);
+    assert!(runs[0].steered_at[0] >= runs[0].started_at.unwrap_or(runs[0].requested_at), "{:?}", runs[0]);
     assert_eq!(runs.len(), 1);
 }
 

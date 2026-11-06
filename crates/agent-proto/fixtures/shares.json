@@ -294,6 +294,9 @@
         "steers": [
           "it only fails on Postgres"
         ],
+        "steered_at": [
+          1762000000900
+        ],
         "idle_compaction": false,
         "requested_at": 1762000000000,
         "started_at": 1762000000020,

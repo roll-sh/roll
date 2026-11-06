@@ -174,6 +174,7 @@ fn run_rec() -> Run {
         prompt: "The queue test fails one time in ten. Find out why.".into(),
         attachments: vec![Attachment { name: "trace.png".into(), mime: "image/png".into(), data: "iVBORw0KGgo=".into() }],
         steers: vec!["it only fails on Postgres".into()],
+        steered_at: vec![T + 900],
         idle_compaction: false,
         delivers: vec![],
         requested_at: T,
