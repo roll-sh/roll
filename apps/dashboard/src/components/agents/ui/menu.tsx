@@ -6,6 +6,7 @@ import { Menu as MenuPrimitive } from "@base-ui/react/menu";
 import { Check, ChevronRight } from "lucide-react";
 import type { ComponentProps } from "react";
 import { cn, mergeClass, glass, itemRow, popupMotion } from "./cn";
+import { useLayer } from "./layer";
 
 export const Menu = MenuPrimitive.Root;
 export const MenuTrigger = MenuPrimitive.Trigger;
@@ -29,8 +30,9 @@ export function MenuPopup({
   alignOffset?: MenuPrimitive.Positioner.Props["alignOffset"];
   anchor?: MenuPrimitive.Positioner.Props["anchor"];
 }) {
+  const layer = useLayer();
   return (
-    <MenuPrimitive.Portal>
+    <MenuPrimitive.Portal {...layer}>
       <MenuPrimitive.Positioner className="z-[130]" side={side} align={align} sideOffset={sideOffset} alignOffset={alignOffset} anchor={anchor}>
         <MenuPrimitive.Popup
           className={mergeClass(cn("relative flex min-w-[min(10rem,calc(100vw-2rem))] max-w-[calc(100vw-2rem)] rounded-lg outline-none [-webkit-app-region:no-drag]", glass, popupMotion), className)}

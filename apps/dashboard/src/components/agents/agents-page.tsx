@@ -29,6 +29,7 @@ import { openIntegrations } from "./integrations";
 import { Menu } from "./menu";
 import { Launcher } from "./new-agent";
 import { useKept } from "./ui/dialog";
+import { AgentsLayer } from "./ui/layer";
 import { PinnedConversation, PinnedDiff, PinnedTerminal } from "./pinned";
 import { MachineNode, ProjectNode, RequestNode, SubagentNode, ThreadNode } from "./nodes";
 import { CanvasProjectsProvider, type CanvasProjects } from "./machine-projects";
@@ -514,7 +515,7 @@ export function AgentsSurface({
   );
 
   return (
-    <AgentsContext.Provider value={ctx}>
+    <AgentsLayer><AgentsContext.Provider value={ctx}>
       <div ref={attachRoot} className="relative flex h-full min-h-0 flex-col bg-bg text-fg">
         {/* The full window drives the logo itself (in the popup, the header already does). */}
         {chrome === "window" && <MarkDriver client={client} />}
@@ -684,7 +685,7 @@ export function AgentsSurface({
         )}
         <CommandPalette host={host} />
       </div>
-    </AgentsContext.Provider>
+    </AgentsContext.Provider></AgentsLayer>
   );
 }
 

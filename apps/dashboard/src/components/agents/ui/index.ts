@@ -8,8 +8,9 @@
  * - `Combobox`, `ComboboxSearchInput`, `ComboboxList`, `ComboboxItem`, `ComboboxEmpty`
  * - `Switch`; `Segmented` (or `ToggleGroup`/`Toggle`)
  *
- * Popups portal to the body above the agents popup, grow out of their trigger and honour reduced
- * motion. Pass a trigger element with `render={<button … />}` as Base UI does.
+ * Popups portal to the body above the agents popup, carrying the agents tokens when opened from the
+ * surface (`ui/layer.tsx`), grow out of their trigger and honour reduced motion. Pass a trigger
+ * element with `render={<button … />}` as Base UI does.
  */
 export * from "./cn";
 export * from "./combobox";

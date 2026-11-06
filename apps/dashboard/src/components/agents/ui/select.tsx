@@ -9,6 +9,7 @@ import { Select as SelectPrimitive } from "@base-ui/react/select";
 import { Check, ChevronDown, ChevronUp } from "lucide-react";
 import type { ReactNode } from "react";
 import { cn, mergeClass, glass, itemRow, popupMotion } from "./cn";
+import { useLayer } from "./layer";
 
 export const SelectRoot = SelectPrimitive.Root;
 export const SelectGroup = SelectPrimitive.Group;
@@ -61,8 +62,9 @@ export function SelectPopup({
   align?: SelectPrimitive.Positioner.Props["align"];
   alignItemWithTrigger?: boolean;
 }) {
+  const layer = useLayer();
   return (
-    <SelectPrimitive.Portal>
+    <SelectPrimitive.Portal {...layer}>
       <SelectPrimitive.Positioner className="z-[130] select-none" side={side} sideOffset={sideOffset} align={align} alignItemWithTrigger={alignItemWithTrigger}>
         <SelectPrimitive.Popup className={cn("rounded-lg text-fg outline-none", popupMotion)}>
           <SelectPrimitive.ScrollUpArrow className="top-0 z-10 flex h-6 w-full cursor-default items-center justify-center">

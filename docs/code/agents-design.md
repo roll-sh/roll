@@ -205,7 +205,11 @@ state, or draw a project's logo inline (only in an `<img>`).
   lead. `ui/dialog.tsx` (T3's Base UI dialog) is the one to use for new ones: centred a third
   of the way down, it grows from the press or the focused control that opened it (scale 0.98 and
   a fade, 200 ms; none with reduced motion), traps focus and gives it back, and closes on Escape,
-  a press outside or its ×. Work that takes a while inside one is a `Steps` list
+  a press outside or its ×. Dialogs, popovers, menus and selects portal to the body, outside
+  `[data-agents]`; opened from the surface (`AgentsLayer`, `ui/layer.tsx`) their portal element
+  carries `data-agents data-layer`, so they take the agents ladder (`--fg`, `--muted`, `--line`,
+  `--panel-2`) in both schemes, and the same components elsewhere (the share page, Connect) keep
+  the dashboard's. A new portal in the surface spreads `useLayer()` on its element. Work that takes a while inside one is a `Steps` list
   (`project-actions.tsx`): a 16px ring per step (done: `ok` tick; now: an accent dot, the label
   shimmering, its time in mono at the right; next: subtle; failed: `danger`).
 - **"Only roll" chips:** focusing a project puts a raised chip in the views bar ("Only" muted,

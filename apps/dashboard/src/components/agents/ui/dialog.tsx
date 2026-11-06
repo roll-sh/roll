@@ -17,6 +17,7 @@ import { Dialog as Primitive } from "@base-ui/react/dialog";
 import { X } from "lucide-react";
 import { useCallback, useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { cn } from "./cn";
+import { useLayer } from "./layer";
 
 // Where the last press was: a dialog opened by it grows from there (Safari doesn't focus a
 // clicked button, so the focused element can't say).
@@ -110,9 +111,10 @@ export function DialogSheet({
     const r = el.getBoundingClientRect();
     el.style.transformOrigin = `${Math.round(o.x - r.left)}px ${Math.round(o.y - r.top)}px`;
   }, []);
+  const layer = useLayer();
   return (
     <Primitive.Root open={shown} onOpenChange={(next) => !next && !busy && onClose()} onOpenChangeComplete={(now) => !now && onExited?.()}>
-      <Primitive.Portal container={container ?? undefined}>
+      <Primitive.Portal container={container ?? undefined} {...layer}>
         <Primitive.Backdrop className={cn(backdropClassName ?? "fixed inset-0 z-[125] bg-(--scrim) backdrop-blur-[3px]", "transition-opacity duration-200 ease-out data-ending-style:opacity-0 data-ending-style:duration-[170ms] data-starting-style:opacity-0 motion-reduce:transition-none")} />
         <Primitive.Viewport className={viewportClassName ?? "fixed inset-0 z-[125] grid grid-rows-[1fr_auto_3fr] justify-items-center overflow-y-auto p-3 sm:p-4"}>
           <Primitive.Popup

@@ -685,7 +685,7 @@ function PaletteDialog({ session, intent, host }: { session: number; intent: Pal
 
   return (
     // Leaving, it's inert: a click lands on what's behind it at once.
-    <div className={`fixed inset-0 z-[60] ${present ? "" : "pointer-events-none"}`} data-palette data-state={present ? "open" : "closing"} inert={!present} aria-hidden={!present || undefined}>
+    <div className={`fixed inset-0 z-[60] ${present ? "" : "pointer-events-none"}`} data-palette data-agents data-layer data-state={present ? "open" : "closing"} inert={!present} aria-hidden={!present || undefined}>
       <motion.div className="palette-backdrop absolute inset-0" style={{ opacity: scrim }} onPointerDown={close} aria-hidden />
       <div className="pointer-events-none absolute inset-0 flex flex-col items-center px-3 pt-[max(1rem,4vh)] sm:pt-[12vh]">
         <motion.div

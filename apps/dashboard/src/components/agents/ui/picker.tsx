@@ -23,6 +23,7 @@ import { Bot, Braces, Check, ChevronDown, Circle, CircleCheck, CircleDashed, Cir
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { Combobox, ComboboxItem, ComboboxList, ComboboxSearchInput } from "./combobox";
 import { cn, popupMotion } from "./cn";
+import { useLayer } from "./layer";
 
 export interface PickerOption {
   id: string;
@@ -352,6 +353,7 @@ export function Picker(props: PickerProps) {
   const keys = rows.map((r) => r.key);
   const emptyText = mode === "variables" ? "No variables match" : remote.loading ? null : problem ? null : q ? "Nothing matches" : "Nothing here yet";
 
+  const layer = useLayer();
   return (
     <PopoverPrimitive.Root
       open={open}
@@ -393,7 +395,7 @@ export function Picker(props: PickerProps) {
         )}
       </div>
       {error && <p className="mt-1 text-[11.5px] text-danger">{error}</p>}
-      <PopoverPrimitive.Portal>
+      <PopoverPrimitive.Portal {...layer}>
         <PopoverPrimitive.Positioner className="z-[130]" side="bottom" align="start" sideOffset={4}>
           <PopoverPrimitive.Popup
             data-picker-popup

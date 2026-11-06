@@ -112,6 +112,11 @@
   color: var(--fg);
 }
 
+/* A popup, menu or dialog portaled out of the surface (`ui/layer.tsx`): the tokens, not a fill. */
+[data-agents][data-layer] {
+  background: none;
+}
+
 /* Inside the floating side panel, "the background" is the sheet's own surface. */
 [data-agents] [data-panel] {
   --bg: var(--sheet);

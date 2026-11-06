@@ -4,6 +4,7 @@
 
 import { Popover as PopoverPrimitive } from "@base-ui/react/popover";
 import { cn, mergeClass, glass, popupMotion } from "./cn";
+import { useLayer } from "./layer";
 
 export const Popover = PopoverPrimitive.Root;
 export const PopoverTrigger = PopoverPrimitive.Trigger;
@@ -26,8 +27,9 @@ export function PopoverPopup({
   alignOffset?: PopoverPrimitive.Positioner.Props["alignOffset"];
   anchor?: PopoverPrimitive.Positioner.Props["anchor"];
 }) {
+  const layer = useLayer();
   return (
-    <PopoverPrimitive.Portal>
+    <PopoverPrimitive.Portal {...layer}>
       <PopoverPrimitive.Positioner className="z-[130]" side={side} align={align} sideOffset={sideOffset} alignOffset={alignOffset} anchor={anchor}>
         <PopoverPrimitive.Popup
           className={mergeClass(cn("relative flex max-h-(--available-height) max-w-(--available-width) rounded-lg text-fg outline-none [-webkit-app-region:no-drag]", glass, popupMotion), className)}
