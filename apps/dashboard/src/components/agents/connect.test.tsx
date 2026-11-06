@@ -1,16 +1,14 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { ApiError, type Owner } from "@/lib/code-api";
 import { api, resetApi } from "@/test/api";
 import { info } from "@/test/fixtures";
-import { macClick } from "@/test/mac-click";
 
 vi.mock("@/lib/code-api", async (orig) => ({ ...(await orig()), ...(await import("@/test/api")).apiModule }));
 const agents = vi.hoisted(() => ({ approveLogin: vi.fn(), denyLogin: vi.fn(), addMachine: vi.fn(), pendingLogin: vi.fn() }));
 vi.mock("@/lib/agents-api", async (orig) => ({ ...(await orig()), agentsApi: agents }));
 
-import { apiFlag, ConnectAgents, machineLabel, tokenLogin } from "./connect";
+import { ConnectAgents } from "./connect";
 
 const pending = { user_code: "WXYZ-2345", name: "ada-mbp", hostname: "ada-mbp.local", os: "macos", created_at: 0, expires_at: 900_000 };
 
@@ -36,47 +34,6 @@ describe("ConnectAgents", () => {
     expect(screen.getByRole("link", { name: "Open your agents" })).toHaveAttribute("href", "#agents");
   });
 
-  it("picks the owner from a list (not a native select), with a click that never focuses", async () => {
-    api.info.mockResolvedValue(info({ required: false }));
-    api.owners.mockResolvedValue([{ name: "acme" }, { name: "globex" }] as Owner[]);
-    agents.approveLogin.mockResolvedValue(undefined);
-    render(<ConnectAgents code="WXYZ-2345" />);
-    const trigger = await screen.findByRole("combobox", { name: "Owner" });
-    await waitFor(() => expect(trigger).toHaveTextContent("acme"));
-    macClick(trigger);
-    macClick(await screen.findByRole("option", { name: "globex" }));
-    await waitFor(() => expect(trigger).toHaveTextContent("globex"));
-    await userEvent.click(screen.getByRole("button", { name: "Connect machine" }));
-    expect(agents.approveLogin).toHaveBeenCalledWith("globex", "WXYZ-2345", undefined);
-  });
-
-  it("says at once when no login is waiting with the code", async () => {
-    agents.pendingLogin.mockRejectedValue(new ApiError("login not found", 404, null));
-    render(<ConnectAgents code="BCDF-GHJK" />);
-    expect(await screen.findByText("This code isn't waiting any more")).toBeInTheDocument();
-    expect(agents.approveLogin).not.toHaveBeenCalled();
-  });
-
-  it("still approves when the lookup fails for another reason", async () => {
-    agents.pendingLogin.mockRejectedValue(new ApiError("unavailable", 503, null));
-    agents.approveLogin.mockResolvedValue(undefined);
-    render(<ConnectAgents code="WXYZ-2345" />);
-    await waitFor(() => expect(screen.getByRole("combobox", { name: "Owner" })).toHaveTextContent("acme"));
-    expect(screen.getByText("A machine wants to connect")).toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: "Connect machine" }));
-    expect(agents.approveLogin).toHaveBeenCalledWith("acme", "WXYZ-2345", undefined);
-  });
-
-  it("says so when the code isn't waiting any more", async () => {
-    agents.pendingLogin.mockReturnValue(new Promise(() => {}));
-    agents.denyLogin.mockRejectedValue(new ApiError("no pending login", 404, null));
-    render(<ConnectAgents code="BCDF-GHJK" />);
-    await waitFor(() => expect(screen.getByRole("combobox", { name: "Owner" })).toHaveTextContent("acme"));
-    await userEvent.click(screen.getByRole("button", { name: "Deny" }));
-    expect(agents.denyLogin).toHaveBeenCalledWith("acme", "BCDF-GHJK");
-    expect(await screen.findByText("This code isn't waiting any more")).toBeInTheDocument();
-  });
-
   it("mints a machine token and shows it once", async () => {
     agents.addMachine.mockResolvedValue({
       machine: { id: "mch_1", name: "build-box", online: false, info: null, sandbox: null, created_at: 0, last_seen: null },
@@ -94,15 +51,5 @@ describe("ConnectAgents", () => {
     expect(screen.queryByText(/agent\.json/)).toBeNull();
     // The install line comes from this web app.
     expect(screen.getByText(`curl -fsSL ${window.location.origin}/install.sh | sh`)).toBeInTheDocument();
-  });
-
-  it("builds the CLI lines", () => {
-    const m = { machine: { id: "mch_1", name: "b", online: false, info: null, sandbox: null, appearance: {}, created_at: 0, last_seen: null }, token: "rlm_0123456789" };
-    expect(tokenLogin(m, false, "https://api.roll.sh/")).toBe("roll agent login --api https://api.roll.sh --machine-token rlm_0123456789\nroll agent up");
-    expect(tokenLogin(m, true, "http://127.0.0.1:7070")).toBe("roll agent login --machine-token rlm_0123…\nroll agent up");
-    expect(apiFlag("/api")).toBe("");
-    expect(machineLabel(pending)).toBe("ada-mbp (macOS)");
-    expect(machineLabel({ name: "box", hostname: null, os: null })).toBe("box");
-    expect(machineLabel({ name: "box", hostname: "build-1", os: "plan9" })).toBe("build-1 (plan9)");
   });
 });

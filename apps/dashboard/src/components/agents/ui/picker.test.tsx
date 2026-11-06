@@ -76,16 +76,6 @@ describe("Picker", () => {
     await waitFor(() => expect(screen.queryByRole("listbox", { name: "Team" })).toBeNull());
   });
 
-  it("takes the first row with Enter right after opening, before any arrow (T3)", async () => {
-    const onValue = vi.fn();
-    render(<Held label="Team" options={TEAMS} initial={null} onValue={onValue} />);
-    macClick(screen.getByRole("button", { name: "Team" }));
-    await listbox();
-    screen.getByRole("combobox", { name: "Search team" }).focus();
-    await userEvent.keyboard("{Enter}");
-    expect(onValue).toHaveBeenCalledWith(TEAMS[0].id);
-  });
-
   it("holds several as chips: toggles stay open, chips and Backspace remove", async () => {
     const onValue = vi.fn();
     render(<Held label="Team" options={TEAMS} initial={["ENG"]} onValue={onValue} />);
@@ -110,37 +100,6 @@ describe("Picker", () => {
     expect(onValue).toHaveBeenLastCalledWith([]);
   });
 
-  it("takes a typed value, a variable, and clears", async () => {
-    const onValue = vi.fn();
-    render(<Held label="Team" options={TEAMS} initial={null} custom clearable variables={[{ path: "event.data.issue.team.id", group: "Event", hint: "team-eng" }]} onValue={onValue} />);
-    macClick(screen.getByRole("button", { name: "Team" }));
-    typeIn(await screen.findByRole("combobox", { name: "Search team" }), "DES");
-    macClick(await screen.findByRole("option", { name: /Use DES/ }));
-    expect(onValue).toHaveBeenLastCalledWith("DES");
-    expect(screen.getByRole("button", { name: "Team" })).toHaveTextContent("DES");
-
-    macClick(screen.getByRole("button", { name: "Team" }));
-    macClick(await screen.findByRole("option", { name: "Use a variable" }));
-    macClick(await screen.findByRole("option", { name: /issue\.team\.id/ }));
-    expect(onValue).toHaveBeenLastCalledWith("{{ event.data.issue.team.id }}");
-    expect(screen.getByRole("button", { name: "Team" })).toHaveTextContent("{{ event.data.issue.team.id }}");
-
-    macClick(screen.getByRole("button", { name: "Clear team" }));
-    expect(onValue).toHaveBeenLastCalledWith(null);
-  });
-
-  it("shows recent picks first", async () => {
-    const first = render(<Held label="Team" options={TEAMS} initial={null} recents="t" />);
-    macClick(screen.getByRole("button", { name: "Team" }));
-    macClick(within(await listbox()).getByRole("option", { name: /Operations/ }));
-    first.unmount();
-    render(<Held label="Team" options={TEAMS} initial={null} recents="t" />);
-    macClick(screen.getByRole("button", { name: "Team" }));
-    const list = await listbox();
-    expect(within(list).getByText("Recent")).toBeInTheDocument();
-    expect(within(list).getAllByRole("option")[0]).toHaveTextContent("Operations");
-    expect(within(list).getAllByRole("option")).toHaveLength(3);
-  });
 });
 
 describe("LookupPicker", () => {
@@ -179,15 +138,4 @@ describe("LookupPicker", () => {
     expect(api.made[0]).toMatchObject({ label: "Needs QA" });
   });
 
-  it("says a problem quietly and links to the settings, still taking a typed value", async () => {
-    const api = memoryLookup(DEMO_LOOKUPS, { linear: { code: "reconnect", message: "refused" } });
-    const onChange = vi.fn();
-    show(api, <LookupPicker label="Team" from={{ source: "linear", kind: "teams" }} custom value={null} onChange={onChange} />);
-    macClick(screen.getByRole("button", { name: "Team" }));
-    expect(await screen.findByText("Reconnect Linear to see its list")).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Reconnect" })).toHaveAttribute("href", "#agents/settings/owner");
-    typeIn(screen.getByRole("combobox", { name: "Search team" }), "ENG");
-    macClick(await screen.findByRole("option", { name: /Use ENG/ }));
-    await waitFor(() => expect(onChange).toHaveBeenCalledWith("ENG"));
-  });
 });

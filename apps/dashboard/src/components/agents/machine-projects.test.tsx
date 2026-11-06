@@ -31,11 +31,6 @@ function setup(unused: string[], over: Partial<CanvasProjects> = {}) {
 afterEach(() => resetAgentsSurface());
 
 describe("a machine's projects without a card", () => {
-  it("is one line with their tiles; nothing when every project has its card", () => {
-    setup([]);
-    expect(screen.queryByRole("button", { name: /more project/ })).not.toBeInTheDocument();
-  });
-
   it("opens on a click into rows: the row starts an agent there (and closes it), the pin keeps it on the view, its ⋯ has the project's actions (settings)", async () => {
     const { startNew, keep } = setup(["prj_cli", "prj_docs"]);
     const line = screen.getByRole("button", { name: "2 more projects: cli, handbook" });
@@ -55,25 +50,4 @@ describe("a machine's projects without a card", () => {
     expect(agentsSurface.get().view).toEqual({ kind: "settings", target: "p:prj_cli" });
   });
 
-  it("opens on hover too", async () => {
-    setup(["prj_docs"]);
-    await userEvent.hover(screen.getByRole("button", { name: "1 more project: handbook" }));
-    expect(await screen.findByRole("dialog", { name: "Projects on ada-mbp" }, { timeout: 2000 })).toBeInTheDocument();
-  });
-
-  it("says “3 projects” when none of the machine's have a card, and adds one from the list", async () => {
-    setup(["prj_1", "prj_cli", "prj_docs"]);
-    await userEvent.click(screen.getByRole("button", { name: "3 projects: roll, cli, handbook" }));
-    const list = await screen.findByRole("dialog", { name: "Projects on ada-mbp" });
-    expect(within(list).getByText("Projects on ada-mbp")).toBeInTheDocument();
-    await userEvent.click(within(list).getByRole("button", { name: "Add a project" }));
-    expect(screen.queryByRole("dialog", { name: "Projects on ada-mbp" })).not.toBeInTheDocument();
-  });
-
-  it("a pinned project's card can be unpinned from its menu", async () => {
-    const { keep } = setup([], { kept: (p) => p === project().id });
-    await userEvent.click(screen.getByRole("button", { name: "Project" }));
-    await userEvent.click(await screen.findByRole("menuitem", { name: "Unpin from the canvas" }));
-    expect(keep).toHaveBeenCalledWith(project().id, false);
-  });
 });

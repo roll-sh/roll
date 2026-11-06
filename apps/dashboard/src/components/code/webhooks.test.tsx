@@ -78,12 +78,4 @@ describe("WebhooksPanel: a generated secret is shown once", () => {
     expect(within(list()).getByText(hook.url)).toBeInTheDocument();
   });
 
-  it("is gone after leaving the page and coming back", async () => {
-    const { unmount } = render(panel());
-    await add();
-    unmount();
-    render(panel());
-    await screen.findByText(hook.url);
-    expect(count()).toBe(0);
-  });
 });

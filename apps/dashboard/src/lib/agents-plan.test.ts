@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { NodeBody, Run } from "./agents-api";
 import { AgentsClient } from "./agents-client";
 import { DemoOwner } from "./agents-demo";
-import { implementationPrompt, implementationThreadTitle, PLAN_IMPLEMENTATION_PREFIX, planBody, planFilename, planTitle, readyPlan } from "./agents-plan";
+import { implementationPrompt, PLAN_IMPLEMENTATION_PREFIX, readyPlan } from "./agents-plan";
 import { nodeTree, runsOf } from "./agents-store";
 import { foldTurn, timelineItems } from "./agents-worklog";
 
@@ -13,24 +13,6 @@ const until = async (what: string, ok: () => boolean, ms = 6000) => {
     await new Promise((r) => setTimeout(r, 5));
   }
 };
-
-describe("T3's proposed-plan helpers", () => {
-  const plan = "# Export invoices as CSV!\n\n## Summary\n\nAdd a route.\n\n1. Route\n2. Button\n";
-
-  it("titles the plan by its first heading, and strips it (and a Summary heading) for the card", () => {
-    expect(planTitle(plan)).toBe("Export invoices as CSV!");
-    expect(planTitle("1. Just steps")).toBeNull();
-    expect(planBody(plan)).toBe("Add a route.\n\n1. Route\n2. Button");
-  });
-
-  it("builds Implement's message, the new thread's title and the download's name", () => {
-    expect(implementationPrompt(`  ${plan}`)).toBe(`PLEASE IMPLEMENT THIS PLAN:\n${plan.trim()}`);
-    expect(implementationThreadTitle(plan)).toBe("Implement Export invoices as CSV!");
-    expect(implementationThreadTitle("1. Steps")).toBe("Implement plan");
-    expect(planFilename(plan)).toBe("export-invoices-as-csv.md");
-    expect(planFilename("no title")).toBe("plan.md");
-  });
-});
 
 describe("the turn fold", () => {
   const n = (ordinal: number, body: NodeBody) => ({ node: { id: `n${ordinal}`, thread: "t", run: "r", parent: null, ordinal, status: "completed" as const, started_at: 0, completed_at: 0, body }, children: [] });

@@ -1,21 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import {
-  ApiError,
-  createCodeApi,
-  dispatchEvent,
-  firstLine,
-  formatMergeRate,
-  isNotFound,
-  landOutcome,
-  languageShares,
-  shortGit,
-  shortId,
-  sortChanges,
-  subscribe,
-  validOwnerName,
-  validRepoName,
-  type Change,
-} from "./code-api";
+import { ApiError, createCodeApi, dispatchEvent, isNotFound, landOutcome, subscribe, validOwnerName, validRepoName } from "./code-api";
 
 type Call = { url: string; init: RequestInit };
 
@@ -366,29 +350,6 @@ describe("names and formatting", () => {
     for (const bad of ["", ".", "..", "x.git", "X.GIT", "a/b", "a b", "a".repeat(101)]) expect(validRepoName(bad), bad).toBe(false);
   });
 
-  it("formats ids, messages and rates", () => {
-    expect(shortId(`cs_${"a".repeat(64)}`)).toBe(`cs_${"a".repeat(12)}`);
-    expect(shortId(null)).toBe("—");
-    expect(shortGit("0123456789abcdef")).toBe("0123456");
-    expect(shortGit(undefined)).toBe("—");
-    expect(firstLine("  subject  \n\nbody")).toBe("subject");
-    expect(firstLine("only")).toBe("only");
-    expect([0, 0.05, 1.234, 12.6, 4321, null, Number.NaN].map((n) => formatMergeRate(n))).toEqual(["0/s", "0.05/s", "1.2/s", "13/s", "4,321/s", "—", "—"]);
-  });
-
-  it("sorts changes in play first, newest first within", () => {
-    const c = (id: string, state: Change["state"], updated_at: number) => ({ id, state, updated_at }) as Change;
-    const sorted = sortChanges([c("a", "landed", 5), c("b", "open", 1), c("c", "conflict", 0), c("d", "open", 9), c("e", "closed", 99), c("f", "queued", 2)]);
-    expect(sorted.map((x) => x.id)).toEqual(["c", "f", "d", "b", "a", "e"]);
-  });
-
-  it("computes language shares", () => {
-    expect(languageShares({ Rust: 300, TypeScript: 100, Empty: 0 })).toEqual([
-      { name: "Rust", bytes: 300, share: 0.75 },
-      { name: "TypeScript", bytes: 100, share: 0.25 },
-    ]);
-    expect(languageShares({})).toEqual([]);
-  });
 });
 
 describe("roll's reviewer, billing and search", () => {

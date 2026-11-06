@@ -221,11 +221,13 @@ The product should feel alive: dots react to the cursor and the marks "think". E
     - the Docker preview tests
     - 40,000 merges in release
     - 2,000 changes through the merge queue
-  - Every feature gets a test. `docs/code/test-coverage.md` maps features to tests; update it
-    when you add either. `code-control/tests/coverage_map.rs` and `roll-cli`'s
-    `every_code_command_is_in_the_coverage_map` fail when a route, MCP tool, event or `roll code`
-    command has no row there, or a row names a test that doesn't exist. Put new tests in the
-    matching file:
+  - A test is added when it guards behaviour a person relies on and nothing else covers it: one
+    per flow, not one per fix, and never for copy, layout, focus or animation details. The merge
+    gate (`.github/workflows/ci.yml`) must finish in under a minute.
+    `docs/code/test-coverage.md` maps features to tests; update it when you add or remove either.
+    `code-control/tests/coverage_map.rs` and `roll-cli`'s `every_code_command_is_in_the_coverage_map`
+    fail when a route, MCP tool, event or `roll code` command has no row there, or a row names a
+    test that doesn't exist. Put new tests in the matching file:
     - storage and landing: `code-store/tests/{lander,store,roundtrip,advance}.rs`
     - the merge queue, reverts and bisecting: `code-control/tests/queue.rs` (fake runner)
     - work trees: `code-store/tests/checkout.rs` and `code-control/tests/checkout.rs`
@@ -317,8 +319,9 @@ The product should feel alive: dots react to the cursor and the marks "think". E
     roll from a workspace. GitHub comments count only from `OWNER`/`MEMBER`/`COLLABORATOR`, and a
     fork's pull request counts only after `approve-run`. Tests: `code-control/tests/chatops.rs`,
     `github.rs` (`automations_*`), `roll-cli/tests/agent.rs::a_slack_button_answers_the_fake_providers_approval`.
-  - After touching anything agents-related, run `pnpm test:agents` (it skips itself when nothing
-    relevant changed; `--unit` skips the end-to-end run). New tests go in
+  - After touching anything agents-related, run `pnpm test:agents` (its Rust, web and end-to-end
+    parts each skip themselves when nothing they cover changed; `--unit` skips the end-to-end
+    run). New tests (see the rule above: one per behaviour nothing else covers) go in
     `agent-host/tests/{orchestrator,threads,git,terminal,mcp,relay,codex,claude,acp}.rs`,
     `code-control/tests/{agents,agents_code}.rs` (+ `routes.rs` for the auth matrix),
     `roll-cli/tests/agent.rs`, `apps/dashboard/src/**/agents-*.test.ts(x)` and

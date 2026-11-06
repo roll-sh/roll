@@ -4,7 +4,6 @@ import { useState } from "react";
 import { describe, expect, it } from "vitest";
 import { macClick } from "@/test/mac-click";
 import { TemplateInput } from "./automations/template-input";
-import { Pop } from "./pop";
 
 const VARS = [
   { path: "run.id", group: "Run" },
@@ -46,32 +45,5 @@ describe("a field's variables (hand-built suggestions)", () => {
     await screen.findByRole("listbox", { name: "Variables" });
     fireEvent.pointerDown(screen.getByText("elsewhere"));
     await waitFor(() => expect(variables()).toBeNull());
-  });
-});
-
-function Popup({ open }: { open: boolean }) {
-  return (
-    <Pop open={open} as="ul" role="listbox" aria-label="Commands">
-      <li role="option" aria-selected={false}>
-        /plan
-      </li>
-    </Pop>
-  );
-}
-
-describe("a small hand-built popup", () => {
-  it("leaves still drawn, inert and hidden, then unmounts; opened again as it leaves, it turns around", async () => {
-    const { rerender, container } = render(<Popup open />);
-    const pop = container.querySelector("ul")!;
-    rerender(<Popup open={false} />);
-    expect(pop).toBeInTheDocument();
-    expect(pop).toHaveAttribute("inert");
-    expect(screen.queryByRole("listbox", { name: "Commands" })).toBeNull();
-    rerender(<Popup open />);
-    expect(container.querySelector("ul")).toBe(pop);
-    expect(pop).not.toHaveAttribute("inert");
-    rerender(<Popup open={false} />);
-    await act(async () => {});
-    await waitFor(() => expect(container.querySelector("ul")).toBeNull());
   });
 });

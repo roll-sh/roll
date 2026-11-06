@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { NodeBody, ToolKind } from "./agents-api";
 import type { NodeTree } from "./agents-store";
-import { foldLabel, foldTurn, splitAtSteers, stepLabel, stepsBefore, summarize, thoughtLine, timelineItems } from "./agents-worklog";
+import { foldLabel, foldTurn, splitAtSteers, stepsBefore, timelineItems } from "./agents-worklog";
 import { node } from "@/test/agents";
 
 let n = 0;
@@ -20,21 +20,6 @@ describe("the work log (T3's grouping)", () => {
     expect(items.map((i) => (i.kind === "work" ? `work:${i.entries.length}` : i.t.node.body.type))).toEqual(["work:3", "message", "work:1", "request", "work:1"]);
   });
 
-  it("says what a group did in one sentence, like T3's summarizeToolGroup", () => {
-    expect(summarize([tool("command"), tool("command"), tool("command"), tool("read"), tool("read")]).summary).toBe("Ran 3 commands and read 2 files");
-    // What changed things comes first; the rest are "other actions".
-    expect(summarize([tool("read"), tool("search"), tool("edit", "a", { files: [{ path: "a", change: "modify", diff: null }, { path: "b", change: "add", diff: null }] }), tool("web")]).summary).toBe("Read 1 file, changed 2 files, and performed 2 other actions",
-    );
-    expect(summarize([tool("search")]).summary).toBe("Searched code 1 time");
-    expect(summarize([tool("web"), tool("web")]).summary).toBe("Searched the web 2 times");
-    expect(summarize([tool("mcp")]).summary).toBe("Used 1 tool");
-    expect(summarize([think("a"), think("b")]).summary).toBe("Thought (×2)");
-    expect(summarize([think("a")]).summary).toBe("Thought");
-    // A failed command marks the group.
-    expect(summarize([tool("command", "cargo test", { exit_code: 101 })]).failed).toBe(true);
-    expect(summarize([tool("command", "ls", { exit_code: 0 })]).failed).toBe(false);
-  });
-
   it("folds an ended run's work under its final message", () => {
     const items = timelineItems([tool("read"), say("Looking"), tool("edit"), say("Done: the claim is atomic now.")]);
     const turn = foldTurn(items, { status: "completed" });
@@ -45,15 +30,6 @@ describe("the work log (T3's grouping)", () => {
     expect(foldTurn(timelineItems([tool("read"), tool("edit")]), { status: "completed" }).fold).toBeNull();
     expect(foldLabel({ status: "completed", started_at: 0, completed_at: 133_000 })).toBe("Worked for 2m 13s");
     expect(foldLabel({ status: "interrupted", started_at: 0, completed_at: 12_000 })).toBe("You stopped after 12s");
-  });
-
-  it("labels steps: the command, Read path, Thinking then Thought; a thought's first line", () => {
-    expect(stepLabel(tool("command", "cargo test").node)).toBe("cargo test");
-    expect(stepLabel(tool("read", "src/queue.rs").node)).toBe("Read src/queue.rs");
-    expect(stepLabel(tool("search", "claim\\(").node)).toBe("Searched claim\\(");
-    expect(stepLabel(think("read the queue").node)).toBe("Thought");
-    expect(thoughtLine("\n**Plan**: read the queue\nthen fix")).toBe("Plan: read the queue");
-    expect(stepLabel(leaf({ type: "reasoning", text: "" }, "running").node)).toBe("Thinking");
   });
 
   it("finds the last steps before a request, a subagent's included", () => {

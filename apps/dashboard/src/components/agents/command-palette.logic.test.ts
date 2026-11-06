@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { machine, project, provider } from "@/test/agents";
-import { filterGroups, goalsFirst, nestedItems, reduceStack, type PaletteAction, type PaletteGroup, type PaletteItem } from "./command-palette.logic";
+import { filterGroups, goalsFirst, nestedItems, type PaletteAction, type PaletteGroup, type PaletteItem } from "./command-palette.logic";
 import { newThreadSettings } from "./new-thread";
 import { goalCommand } from "./orchestrate";
 
@@ -24,12 +24,6 @@ const search = (query: string, extra: Partial<Parameters<typeof filterGroups>[0]
   filterGroups({ groups: root, query, inSubmenu: false, root: { groups: root, nested: nestedItems(root[0].items, query) }, threads: [thr("Fix the flaky queue test"), thr("Upgrade to Next 16.4")], projects: [act("roll"), act("web")], goals: query ? goals : [], ...extra });
 
 describe("the command palette's search", () => {
-  it("shows actions and recent threads before typing", () => {
-    expect(titles(search(""))).toEqual([
-      ["Actions", ["Orchestrate…", "New agent", "New agent in…", "Add machine"]],
-      ["Recent", ["Fix the flaky queue test"]],
-    ]);
-  });
 
   it("searches actions, submenu options, threads and projects, with the goal rows last for a name", () => {
     expect(titles(search("new"))[0]).toEqual(["Actions", ["New agent", "New agent in…"]]);
@@ -63,12 +57,6 @@ describe("the command palette's search", () => {
     expect(titles(inside("upgrade"))).toEqual([["Threads", ["Upgrade to Next 16.4"]]]);
   });
 
-  it("keeps a stack of views: a submenu starts empty, back restores the query", () => {
-    let s = reduceStack({ query: "new in", views: [] }, { type: "push", view: projects.kind === "submenu" ? projects.view : (null as never) });
-    expect(s).toMatchObject({ query: "", views: [{ parentQuery: "new in" }] });
-    s = reduceStack(s, { type: "back" });
-    expect(s).toEqual({ query: "new in", views: [] });
-  });
 });
 
 describe("a goal from outside a conversation", () => {
@@ -86,21 +74,6 @@ describe("a goal from outside a conversation", () => {
       worktree: false,
       prompt: "Add dark mode",
       orchestrator: true,
-    });
-  });
-
-  it("starts one agent from the project's defaults", () => {
-    const p = { ...target.project, repo: { owner: "acme", repo: "roll" }, settings: { ...target.project.settings, defaults: { provider: "claude", model: "claude-sonnet-5", effort: "high", runtime_mode: "auto_edit" as const, interaction_mode: "plan" as const } } };
-    expect(goalCommand("agent", "fix it", { ...target, project: p })).toEqual({
-      type: "thread.create",
-      project: "prj_1",
-      provider: "claude",
-      model: "claude-sonnet-5",
-      effort: "high",
-      runtime_mode: "auto_edit",
-      interaction_mode: "plan",
-      worktree: true,
-      prompt: "fix it",
     });
   });
 

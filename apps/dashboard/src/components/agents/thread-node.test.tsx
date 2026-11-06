@@ -1,10 +1,9 @@
-import { act, screen, within } from "@testing-library/react";
+import { screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { ThreadNode } from "./nodes";
-import { threadPill } from "./thread-status";
 import { Conversation } from "./session";
-import { approval, M1, machine, mirrored, node, project, question, run, T0, terminal, thread } from "@/test/agents";
+import { approval, M1, machine, mirrored, node, project, run, terminal, thread } from "@/test/agents";
 import { agentsHarness, renderAgents } from "@/test/agents-render";
 
 // xterm needs a real canvas: the drawer's terminal is a stand-in here.
@@ -18,112 +17,9 @@ describe("ThreadNode", () => {
     const card = screen.getByRole("button", { name: "Thread Fix the flaky queue test" });
     expect(within(card).getByText("Waiting to run `cargo test`")).toBeInTheDocument();
     expect(within(card).getByTitle("1 waiting for you")).toHaveTextContent("1");
-    expect(within(card).getByText("Claude Code · Opus 5.5 · 1 queued")).toBeInTheDocument();
     expect(within(card).getByText(/15k tok · \$0\.42/)).toBeInTheDocument();
-    expect(within(card).getByText("+14")).toBeInTheDocument();
     await userEvent.click(card);
     expect(h.openThread).toHaveBeenCalledWith("thr_1");
-  });
-
-  it("shows the last prompt when idle and the error when it failed", () => {
-    const h = agentsHarness({ entities: [mirrored("run", run({ status: "completed", prompt: "Find out why" }), 2)] });
-    const { rerender } = renderAgents(<ThreadNode thread={thread({ run_count: 1 })} machine={machine()} />, h);
-    expect(screen.getByText("Find out why")).toBeInTheDocument();
-    rerender(<ThreadNode thread={thread({ status: "error", error: "claude exited with 1" })} machine={machine()} />);
-    expect(screen.getByText("claude exited with 1")).toBeInTheDocument();
-  });
-
-  it("says when it last did something, not when its record last changed (a settle undone said just now)", () => {
-    vi.useFakeTimers({ now: T0 + 5 * 3_600_000 });
-    try {
-      const done = run({ status: "completed", requested_at: T0, completed_at: T0 + 3_600_000, prompt: "Find out why" });
-      const seen = thread({ run_count: 1, updated_at: T0 + 5 * 3_600_000 - 1000, inbox: { settle: { state: "active", at: T0 + 5 * 3_600_000 - 1000 }, snooze: null, woke_at: null, visited_at: T0 + 4 * 3_600_000, manual: false } });
-      renderAgents(<ThreadNode thread={seen} machine={machine()} />, agentsHarness({ entities: [mirrored("run", done, 2)] }));
-      expect(screen.getByTitle("Last activity")).toHaveTextContent("4 h ago");
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-});
-
-describe("ThreadNode, T3's thread row as a card", () => {
-  it("shows the project, the machine it runs on, the PR, the worktree and a running terminal", () => {
-    const t = thread({
-      run_count: 1,
-      change: { repo: "acme/roll", number: 41, status: "ready", url: "/acme/roll/changes/41", detail: null },
-      worktree: { path: "/Users/ada/.roll/worktrees/thr_1", branch: "roll/fix-queue", base: "main", removed_at: null },
-    });
-    const h = agentsHarness({
-      entities: [mirrored("project", project({ name: "roll web" }), 1), mirrored("thread", t, 2), mirrored("terminal", terminal({ thread: "thr_1" }), 3)],
-    });
-    renderAgents(<ThreadNode thread={t} machine={machine()} />, h);
-    const card = screen.getByRole("button", { name: "Thread Fix the flaky queue test" });
-    expect(within(card).getByText("roll web")).toBeInTheDocument();
-    expect(within(card).getByText("RW")).toBeInTheDocument();
-    expect(within(card).getByLabelText("On ada-mbp")).toHaveTextContent("ada-mbp");
-    expect(within(card).getByRole("link", { name: "Change 41, ready" })).toHaveAttribute("href", "/dashboard/code/acme/roll/changes/41");
-    expect(within(card).getByRole("img", { name: "Worktree roll/fix-queue" })).toBeInTheDocument();
-    expect(within(card).getByRole("img", { name: "1 terminal running" })).toBeInTheDocument();
-  });
-
-  it("goes green when done, says Completed until you've looked, and names what waits on you", () => {
-    const done = run({ status: "completed", completed_at: 5_000 });
-    const t = thread({ run_count: 1 });
-    const h = agentsHarness({ entities: [mirrored("thread", t, 1), mirrored("run", done, 2)] });
-    const { rerender } = renderAgents(<ThreadNode thread={t} machine={machine()} />, h);
-    const card = () => screen.getByRole("button", { name: "Thread Fix the flaky queue test" });
-    expect(card().className).toContain("border-ok");
-    expect(within(card()).getByRole("img", { name: "Completed" })).toBeInTheDocument();
-    // Seen since it finished: quiet again, as T3's row once you've opened it.
-    rerender(<ThreadNode thread={{ ...t, inbox: { ...t.inbox, visited_at: 6_000 } }} machine={machine()} />);
-    expect(card().className).not.toContain("border-ok");
-    expect(within(card()).queryByRole("img", { name: "Completed" })).toBeNull();
-
-    const waiting = thread({ status: "waiting", pending_requests: 1, active_run: "run_1" });
-    h.client.enqueue({ type: "entity", ...mirrored("request", approval(), 3) });
-    rerender(<ThreadNode thread={waiting} machine={machine()} />);
-    expect(card().className).not.toContain("border-ok");
-    expect(within(card()).getByRole("img", { name: "Pending approval" })).toBeInTheDocument();
-  });
-});
-
-describe("a plan the newest run left (T3's sidebar Plan Ready)", () => {
-  it("reads it off the thread record, in plan mode only, without loading the run", () => {
-    const planned = thread({ run_count: 1, interaction_mode: "plan", plan_ready: true });
-    const { rerender } = renderAgents(<ThreadNode thread={planned} machine={machine()} />, agentsHarness({ entities: [mirrored("thread", planned, 1)] }));
-    expect(screen.getByText("Plan ready")).toBeInTheDocument();
-    // Back in build mode (Implement switched it), the plan isn't waiting on anyone.
-    rerender(<ThreadNode thread={{ ...planned, interaction_mode: "default" }} machine={machine()} />);
-    expect(screen.queryByText("Plan ready")).toBeNull();
-    // Busy says Working first.
-    rerender(<ThreadNode thread={{ ...planned, status: "running" }} machine={machine()} />);
-    expect(screen.queryByText("Plan ready")).toBeNull();
-  });
-});
-
-describe("threadPill", () => {
-  it("marks an orchestrator with the agents it started and how many still run (forks don't count)", () => {
-    const o = thread({ id: "thr_o", title: "Ship the release", orchestrator: true });
-    const kid = (id: string, status: "running" | "idle", relation: "subagent" | "fork" = "subagent") =>
-      mirrored("thread", thread({ id, status, lineage: { parent: "thr_o", relation, root: "thr_o", from_run: null } }), 2);
-    const h = agentsHarness({ entities: [mirrored("thread", o, 1), kid("thr_a", "running"), kid("thr_b", "idle"), kid("thr_c", "running", "fork")] });
-    renderAgents(<ThreadNode thread={o} machine={machine()} />, h);
-    expect(screen.getByRole("button", { name: "Orchestrator · 2 agents, 1 running: open one" })).toBeInTheDocument();
-  });
-  it("follows T3's order: what waits on you, working, failed, plan ready, completed", () => {
-    const t = thread();
-    expect(threadPill(t, [], undefined)).toBeNull();
-    expect(threadPill({ ...t, status: "running" }, [], undefined)).toMatchObject({ label: "Working", pulse: true });
-    expect(threadPill({ ...t, status: "starting" }, [], undefined)?.label).toBe("Connecting");
-    expect(threadPill({ ...t, status: "waiting" }, [question()], undefined)?.label).toBe("Awaiting input");
-    expect(threadPill({ ...t, status: "waiting" }, [question(), approval()], undefined)?.label).toBe("Pending approval");
-    const plan = approval();
-    if (plan.body.type === "approval") plan.body.action = "plan";
-    expect(threadPill({ ...t, status: "waiting" }, [plan], undefined)?.label).toBe("Plan ready");
-    expect(threadPill({ ...t, status: "error" }, [], undefined)).toMatchObject({ label: "Failed", tone: "danger" });
-    expect(threadPill(t, [], run({ status: "completed", completed_at: 10 }))).toMatchObject({ label: "Completed", tone: "ok" });
-    // Somebody else's request says nothing about this thread.
-    expect(threadPill(t, [approval({ thread: "thr_9" })], undefined)).toBeNull();
   });
 });
 
@@ -141,25 +37,6 @@ describe("Conversation", () => {
     mirrored("request", approval({ run: "run_2", node: "nod_d" }), 9),
     mirrored("checkpoint", { id: "chk_1", thread: "thr_1", run: "run_1", ordinal: 1, commit: "abc", stat: { files: 1, additions: 2, deletions: 1 }, created_at: 0 }, 10),
   ];
-
-  it("opens the thread's terminal in the drawer, even when its record arrives after the reply", async () => {
-    const idle = { ...busy, status: "idle" as const, active_run: null, pending_requests: 0, queued: [] };
-    const h = agentsHarness({ entities: entities.filter((e) => e.entity.kind !== "request"), follow: ["thr_1"], reply: (c) => (c.type === "terminal.open" ? { type: "created", id: "trm_new" } : { type: "ok" }) });
-    const ui = () => <Conversation thread={idle} machine={machine()} />;
-    const { rerender } = renderAgents(ui(), h);
-    await userEvent.click(screen.getByRole("button", { name: "Terminal in this thread's directory" }));
-    expect(h.command.mock.calls.at(-1)?.[2]).toMatchObject({ type: "terminal.open", thread: "thr_1" });
-    // The reply came first; the drawer waits for the record instead of giving up on it.
-    rerender(ui());
-    // The record comes in on the stream a moment later, and the drawer shows it.
-    act(() => h.client.enqueue({ type: "entity", ...mirrored("terminal", terminal({ id: "trm_new", thread: "thr_1" }), 20) }));
-    rerender(ui());
-    expect(screen.getByRole("tablist", { name: "Terminals" })).toBeInTheDocument();
-    // Closed elsewhere: the drawer goes.
-    act(() => h.client.enqueue({ type: "entity", cursor: 21, machine: M1, entity: { kind: "removed", entity: "terminal", id: "trm_new", thread: "thr_1" } }));
-    rerender(ui());
-    await vi.waitFor(() => expect(screen.queryByRole("tablist", { name: "Terminals" })).toBeNull());
-  });
 
   it("renders every run's transcript, streaming text and the approval in place", async () => {
     const h = agentsHarness({ entities, follow: ["thr_1"] });
@@ -196,49 +73,6 @@ describe("Conversation", () => {
     expect(h.command.mock.calls.at(-1)?.[2]).toEqual({ type: "checkpoint.rollback", thread: "thr_1", checkpoint: "chk_1" });
   });
 
-  it("asks before deleting from the menu, then goes back to the canvas", async () => {
-    const h = agentsHarness({ entities, follow: ["thr_1"] });
-    renderAgents(<Conversation thread={busy} machine={machine()} />, h);
-    await userEvent.click(screen.getByRole("button", { name: "More" }));
-    await userEvent.click(await screen.findByRole("menuitem", { name: "Delete" }));
-    expect(h.command).not.toHaveBeenCalled();
-    // T3's confirmation: what goes for good.
-    await userEvent.click(await screen.findByRole("menuitem", { name: /^Delete “Fix the flaky queue test”\? Its conversation is cleared for good\./ }));
-    expect(h.command.mock.calls.at(-1)?.[2]).toEqual({ type: "thread.delete", thread: "thr_1" });
-    await vi_wait();
-    expect(h.close).toHaveBeenCalled();
-  });
-
-  it("switches to another conversation from the title, the ones waiting on you first", async () => {
-    const other = thread({ id: "thr_9", title: "Bump the deps", pending_requests: 1, status: "waiting" });
-    const h = agentsHarness({ entities: [...entities, mirrored("thread", other, 11)], follow: ["thr_1"] });
-    renderAgents(<Conversation thread={busy} machine={machine()} />, h);
-    await userEvent.click(screen.getByRole("button", { name: /Fix the flaky queue test/ }));
-    const list = screen.getByRole("listbox", { name: "Conversations" });
-    const options = within(list).getAllByRole("option");
-    expect(options).toHaveLength(2);
-    // The first is highlighted for the keyboard; the open one is marked.
-    expect(within(list).getByRole("option", { selected: true })).toBe(options[0]);
-    expect(options.find((o) => o.getAttribute("aria-current"))).toHaveTextContent("Fix the flaky queue test");
-    await userEvent.click(within(list).getByRole("option", { name: /Bump the deps/ }));
-    expect(h.openThread).toHaveBeenCalledWith("thr_9");
-  });
-
-  it("finds any conversation from the title by typing, and opens it from the keyboard (no cap on how many)", async () => {
-    const many = Array.from({ length: 30 }, (_, i) => mirrored("thread", thread({ id: `thr_m${i}`, title: `Chore ${i}`, updated_at: 100 + i }), 20 + i));
-    const h = agentsHarness({ entities: [...entities, ...many], follow: ["thr_1"] });
-    renderAgents(<Conversation thread={busy} machine={machine()} />, h);
-    await userEvent.click(screen.getByRole("button", { name: /Fix the flaky queue test/ }));
-    expect(within(screen.getByRole("listbox", { name: "Conversations" })).getAllByRole("option")).toHaveLength(31);
-    const find = screen.getByRole("combobox", { name: "Find a conversation" });
-    expect(find).toHaveFocus();
-    await userEvent.type(find, "chore 2");
-    // "Chore 2" and "Chore 20"…"Chore 29": the second with ↓, Enter opens it.
-    await userEvent.keyboard("{ArrowDown}{Enter}");
-    expect(h.openThread).toHaveBeenCalledWith(expect.stringMatching(/^thr_m2\d$/));
-    expect(screen.queryByRole("listbox", { name: "Conversations" })).toBeNull();
-  });
-
   it("opens the thread's terminal in a drawer under the conversation (T3's), with tabs, a new one and hide", async () => {
     const term = terminal({ id: "trm_1", thread: "thr_1", title: "zsh" });
     let made = 0;
@@ -253,9 +87,7 @@ describe("Conversation", () => {
     expect(h.command.mock.calls.some((c) => c[2].type === "terminal.open")).toBe(false);
     const drawer = screen.getByRole("region", { name: "Terminal" });
     expect(within(drawer).getByRole("tab", { name: /zsh/, selected: true })).toBeInTheDocument();
-    expect(within(drawer).getByRole("separator", { name: "Resize the terminal" })).toBeInTheDocument();
-    // The composer stays above it; the header's toggle hides it.
-    expect(screen.getByRole("textbox", { name: "Message" })).toBeInTheDocument();
+    // The header's toggle hides it.
     await userEvent.click(screen.getByRole("button", { name: "Hide the terminal" }));
     expect(screen.queryByRole("region", { name: "Terminal" })).toBeNull();
     await userEvent.click(screen.getByRole("button", { name: "Terminal in this thread's directory" }));

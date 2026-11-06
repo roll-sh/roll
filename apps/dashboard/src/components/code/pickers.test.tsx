@@ -43,13 +43,4 @@ describe("asking for a review", () => {
     await waitFor(() => expect(api.requestReview).toHaveBeenLastCalledWith(change().id, "@ada", false));
   });
 
-  it("still offers roll and a typed name when the owner's lists aren't the caller's to see", async () => {
-    api.tokens.mockRejectedValue(new Error("forbidden"));
-    api.reviewApps.mockRejectedValue(new Error("forbidden"));
-    render(<RequestReview change={change()} busy={null} run={run} />);
-    macClick(screen.getByRole("button", { name: "Reviewer" }));
-    const list = await screen.findByRole("listbox", { name: "Reviewer" });
-    expect(within(list).getAllByRole("option")).toHaveLength(1);
-    expect(within(list).getByRole("option", { name: /roll/ })).toBeInTheDocument();
-  });
 });

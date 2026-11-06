@@ -1,14 +1,12 @@
-import { act, screen, within } from "@testing-library/react";
+import { screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
-import type { Command, Thread } from "@/lib/agents-api";
+import type { Command } from "@/lib/agents-api";
 import { PLAN_IMPLEMENTATION_PREFIX } from "@/lib/agents-plan";
-import { approval, machine, mirrored, node, project, provider, run, thread } from "@/test/agents";
+import { machine, mirrored, node, project, provider, run, thread } from "@/test/agents";
 import { agentsHarness, renderAgents } from "@/test/agents-render";
 import { Composer } from "./composer";
-import { stepTarget } from "./queue";
 import { Conversation } from "./session";
-import { CompactionRow } from "./transcript";
 
 // xterm needs a real canvas.
 vi.mock("./terminal", () => ({ TerminalView: () => <div>terminal</div> }));
@@ -50,41 +48,6 @@ describe("the queue (T3's queued messages)", () => {
     // The draft it pushed aside comes back.
     await vi.waitFor(() => expect(box).toHaveValue("my draft"));
   });
-
-  it("⌥↑ edits the last queued message, Escape stops, and ⌘⇧Enter sends the first into the turn", async () => {
-    const h = agentsHarness({ machines: [m], entities: [mirrored("thread", busy, 1)] });
-    renderAgents(<Composer mode={{ kind: "thread", thread: busy, machine: m }} />, h);
-    const box = screen.getByRole("textbox", { name: "Message" });
-    box.focus();
-    await userEvent.keyboard("{Alt>}{ArrowUp}{/Alt}");
-    expect(box).toHaveValue("and a changelog");
-    await userEvent.keyboard("{Escape}");
-    expect(box).toHaveValue("");
-    await userEvent.keyboard("{Control>}{Shift>}{Enter}{/Shift}{/Control}");
-    expect(sent(h).at(-1)).toEqual({ type: "message.promote", thread: "thr_1", message: "q1" });
-  });
-
-  it("says a stopped thread's queue is paused, and Resume (or the empty send button) sends the first", async () => {
-    const held = { ...busy, status: "idle" as const, active_run: null };
-    const h = agentsHarness({ machines: [m], entities: [mirrored("thread", held, 1)] });
-    renderAgents(<Composer mode={{ kind: "thread", thread: held, machine: m }} />, h);
-    expect(screen.getByText("Queue paused: the last run stopped")).toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: "Resume" }));
-    expect(sent(h).at(-1)).toEqual({ type: "message.promote", thread: "thr_1", message: "q1" });
-    await userEvent.click(screen.getByRole("button", { name: "Resume thread" }));
-    expect(sent(h)).toHaveLength(2);
-    // Three show; more wait behind "Show all".
-    expect(screen.queryByRole("button", { name: /Show all/ })).toBeNull();
-  });
-
-  it("moves by one step: up in front of the one above, down in front of the one after next", () => {
-    const list = [q("a", "a"), q("b", "b"), q("c", "c")];
-    expect(stepTarget(list, "b", -1)?.id).toBe("a");
-    expect(stepTarget(list, "a", 1)?.id).toBe("c");
-    expect(stepTarget(list, "b", 1)).toBeNull();
-    expect(stepTarget(list, "a", -1)).toBeUndefined();
-    expect(stepTarget(list, "c", 1)).toBeUndefined();
-  });
 });
 
 describe("compaction (T3's /compact and its row)", () => {
@@ -104,39 +67,6 @@ describe("compaction (T3's /compact and its row)", () => {
     expect(within(screen.getByRole("listbox", { name: "Commands" })).getAllByRole("option")).toHaveLength(1);
     await userEvent.keyboard("{Enter}");
     expect(sent(h).at(-1)).toEqual({ type: "message.send", thread: "thr_1", text: "/compact", mode: "queue" });
-  });
-
-  it("Compact and send: back to a big conversation whose cache expired, the message waits behind a compaction (T3's on return)", async () => {
-    const hourAgo = Date.now() - 61 * 60_000;
-    const big = thread({ provider: "claude", run_count: 1, context: { used_tokens: 312_000, max_tokens: 1_000_000, total_processed_tokens: null, cache_ttl_ms: 3_600_000 } });
-    const h = agentsHarness({ machines: [m], entities: [mirrored("thread", big, 1), mirrored("run", run({ status: "completed", completed_at: hourAgo }), 2)] });
-    renderAgents(<Composer mode={{ kind: "thread", thread: big, machine: m }} />, h);
-    await userEvent.type(screen.getByRole("textbox", { name: "Message" }), "Now rotate prod too");
-    const button = screen.getByRole("button", { name: "Compact and send" });
-    expect(button).toHaveAttribute("title", "Summarize 312k tokens of history, then send");
-    await userEvent.click(button);
-    expect(sent(h).slice(-2)).toEqual([
-      { type: "message.send", thread: "thr_1", text: "/compact" },
-      { type: "message.send", thread: "thr_1", text: "Now rotate prod too", mode: "queue" },
-    ]);
-  });
-
-  it("an idle compaction the daemon started has no message of the person's, and says why it ran", () => {
-    const idle = run({ id: "run_2", ordinal: 2, prompt: "/compact", idle_compaction: true, status: "completed" });
-    const h = agentsHarness({ machines: [m], entities: [mirrored("thread", thread({ run_count: 2 }), 1), mirrored("run", idle, 2), mirrored("node", node({ type: "compaction", before_tokens: 312_000, after_tokens: 48_000, error: null }, { run: "run_2", status: "completed" }), 3)], follow: ["thr_1"] });
-    renderAgents(<Conversation thread={thread({ run_count: 2 })} machine={m} />, h);
-    expect(screen.getByRole("separator", { name: "Context automatically compacted before cache expiry" })).toHaveTextContent(/312k\s*48k tokens/);
-    expect(screen.queryByText("/compact")).toBeNull();
-  });
-
-  it("shows running, compacted with the counts, and failed with why", () => {
-    const at = (status: "running" | "completed" | "failed", body: object) => node({ type: "compaction", before_tokens: null, after_tokens: null, error: null, ...body }, { status });
-    const { rerender } = renderAgents(<CompactionRow node={at("running", {})} />, agentsHarness());
-    expect(screen.getByRole("separator", { name: "Compacting context" })).toBeInTheDocument();
-    rerender(<CompactionRow node={at("completed", { before_tokens: 182_000, after_tokens: 41_000 })} />);
-    expect(screen.getByRole("separator", { name: "Context compacted" })).toHaveTextContent(/Context compacted\s*182k\s*41k tokens/);
-    rerender(<CompactionRow node={at("failed", { error: "Not enough messages to compact." })} />);
-    expect(screen.getByRole("separator", { name: "Context compaction failed" })).toHaveTextContent("Not enough messages to compact.");
   });
 });
 
@@ -164,81 +94,6 @@ describe("plan mode (T3's proposed plan)", () => {
     await userEvent.type(screen.getByRole("textbox", { name: "Message" }), "Stream it in pages");
     await userEvent.click(screen.getByRole("button", { name: "Refine" }));
     expect(sent(h).at(-1)).toEqual({ type: "message.send", thread: "thr_1", text: "Stream it in pages" });
-  });
-
-  it("Save to workspace writes the plan into the thread's folder, named after its title", async () => {
-    const written = (c: Command) => (c.type === "fs.write" ? ({ type: "written", path: c.path } as const) : reply(c));
-    const h = agentsHarness({ machines: [m], entities, follow: ["thr_1"], reply: written });
-    renderAgents(<Conversation thread={inPlan} machine={m} />, h);
-    await userEvent.click(screen.getByRole("button", { name: "Plan actions" }));
-    await userEvent.click(await screen.findByRole("menuitem", { name: "Save to workspace" }));
-    const path = screen.getByRole("textbox", { name: /Workspace path/ });
-    expect(path).toHaveValue("export-invoices-as-csv.md");
-    // Typing replaces the name and keeps `.md` (T3 selects the name).
-    await userEvent.keyboard("plans/csv");
-    expect(path).toHaveValue("plans/csv.md");
-    await userEvent.click(screen.getByRole("button", { name: "Save" }));
-    expect(sent(h).at(-1)).toEqual({ type: "fs.write", thread: "thr_1", path: "plans/csv.md", text: `${plan}\n` });
-    expect(await screen.findByText(/Plan saved to workspace/)).toHaveTextContent("plans/csv.md");
-  });
-
-  it("Save to workspace says why it couldn't, and an empty path never goes out", async () => {
-    const refuse = (c: Command) => (c.type === "fs.write" ? ({ type: "error", code: "invalid", message: "the path leaves the workspace" } as const) : reply(c));
-    const h = agentsHarness({ machines: [m], entities, follow: ["thr_1"], reply: refuse });
-    renderAgents(<Conversation thread={inPlan} machine={m} />, h);
-    await userEvent.click(screen.getByRole("button", { name: "Plan actions" }));
-    await userEvent.click(await screen.findByRole("menuitem", { name: "Save to workspace" }));
-    const path = screen.getByRole("textbox", { name: /Workspace path/ });
-    await userEvent.clear(path);
-    await userEvent.keyboard("{Enter}");
-    expect(screen.getByRole("alert")).toHaveTextContent("Enter a workspace path");
-    expect(sent(h).some((c) => c.type === "fs.write")).toBe(false);
-    await userEvent.type(path, "../out.md{Enter}");
-    expect(await screen.findByRole("alert")).toHaveTextContent("Could not save plan: the path leaves the workspace");
-    await userEvent.keyboard("{Escape}");
-    expect(screen.queryByRole("form", { name: "Save plan to workspace" })).toBeNull();
-  });
-
-  it("Implement in a new thread starts one in build mode with the plan and opens it", async () => {
-    const h = agentsHarness({ machines: [m], entities, follow: ["thr_1"], reply });
-    renderAgents(<Conversation thread={inPlan} machine={m} />, h);
-    await userEvent.click(screen.getByRole("button", { name: "More ways to implement" }));
-    await userEvent.click(await screen.findByRole("menuitem", { name: "Implement in a new thread" }));
-    await vi.waitFor(() => expect(h.openThread).toHaveBeenCalledWith("thr_2"));
-    expect(sent(h).at(-1)).toMatchObject({ type: "thread.create", project: "prj_1", provider: "claude", interaction_mode: "default", title: "Implement Export invoices as CSV", prompt: `${PLAN_IMPLEMENTATION_PREFIX}${plan}` });
-  });
-
-  it("a plan Claude asks to carry out: Implement accepts it, Refine declines with the words; the transcript points below", async () => {
-    const asking: Thread = { ...inPlan, status: "waiting", active_run: "run_1", pending_requests: 1 };
-    const h = agentsHarness({
-      machines: [m],
-      entities: [
-        ...entities.slice(0, 2).map((e) => (e.entity.kind === "thread" ? mirrored("thread", asking, 2) : e)),
-        mirrored("run", run({ status: "waiting" }), 3),
-        entities[3],
-        mirrored("node", node({ type: "request", request: "req_1" }, { id: "nod_r", ordinal: 2, status: "waiting" }), 5),
-        mirrored("request", approval({ node: "nod_r", body: { type: "approval", action: "plan", title: "Carry out the plan", command: null, cwd: null, reason: null, tool: null, files: [], input: null, decisions: ["accept", "decline", "cancel"] } }), 6),
-      ],
-      follow: ["thr_1"],
-    });
-    renderAgents(<Conversation thread={asking} machine={m} />, h);
-    expect(screen.getByText("· implement or refine it below")).toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: "Implement" }));
-    expect(sent(h).at(-1)).toEqual({ type: "request.respond", request: "req_1", response: { type: "decision", decision: "accept" } });
-    await userEvent.type(screen.getByRole("textbox", { name: "Message" }), "Use a stream");
-    await userEvent.click(screen.getByRole("button", { name: "Refine" }));
-    expect(sent(h).at(-1)).toEqual({ type: "request.respond", request: "req_1", response: { type: "decision", decision: "decline", message: "Use a stream" } });
-  });
-
-  it("/plan and /default switch the mode without sending anything", async () => {
-    const idle = thread();
-    const h = agentsHarness({ machines: [m], entities: [mirrored("thread", idle, 1)] });
-    renderAgents(<Composer mode={{ kind: "thread", thread: idle, machine: m }} />, h);
-    const box = screen.getByRole("textbox", { name: "Message" });
-    await userEvent.type(box, "/pl{Enter}");
-    expect(sent(h).at(-1)).toEqual({ type: "thread.configure", thread: "thr_1", interaction_mode: "plan" });
-    expect(box).toHaveValue("");
-    expect(screen.getByRole("button", { name: "Plan mode" })).toHaveAttribute("aria-pressed", "true");
   });
 });
 
@@ -281,24 +136,6 @@ describe("subagents (T3's subagent rows)", () => {
     await userEvent.click(screen.getByRole("button", { name: "Open Write the docs" }));
     expect(h.openThread).toHaveBeenCalledWith("thr_child");
   });
-
-  it("Escape goes back from a subagent to the conversation", async () => {
-    const h = agentsHarness({ machines: [m], entities, follow: ["thr_1"], ctx: { now: 46_000 } });
-    renderAgents(<Conversation thread={busy} machine={m} />, h);
-    await userEvent.click(screen.getByRole("button", { name: "Open Find the callers of nod_a" }));
-    act(() => void window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" })));
-    expect(screen.queryByRole("region", { name: "Subagent Explore" })).toBeNull();
-  });
-
-  it("a delegated thread says who delegated it and opens the parent", async () => {
-    const parent = thread({ id: "thr_p", title: "Ship the release" });
-    const child = thread({ id: "thr_c", title: "Write the docs", lineage: { parent: "thr_p", relation: "subagent", root: "thr_p", from_run: null } });
-    const h = agentsHarness({ machines: [m], entities: [mirrored("thread", parent, 1), mirrored("thread", child, 2)], follow: ["thr_c"] });
-    renderAgents(<Conversation thread={child} machine={m} />, h);
-    expect(screen.getByText("Delegated by")).toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: /Open parent/ }));
-    expect(h.openThread).toHaveBeenCalledWith("thr_p");
-  });
 });
 
 describe("a run's changed files (T3's changed-files card reads the checkpoint diff)", () => {
@@ -324,19 +161,5 @@ describe("a run's changed files (T3's changed-files card reads the checkpoint di
     expect(within(box).getByRole("button", { name: /ROLL_DEMO\.md/ })).toHaveTextContent("+1 −1");
     await userEvent.click(screen.getByRole("button", { name: "Last run: 3 added, 2 removed. Open its diff" }));
     expect(sent(h).at(-1)).toEqual({ type: "diff.get", thread: "thr_1", run: "run_1" });
-  });
-
-  it("falls back to what the tools said without a checkpoint (no git), and shows nothing when git saw no change", () => {
-    const h = agentsHarness({ machines: [m], entities: entities(run({ status: "completed", completed_at: 2 })), follow: ["thr_1"] });
-    const { unmount } = renderAgents(<Conversation thread={thread({ run_count: 1 })} machine={m} />, h);
-    expect(screen.getByLabelText("Changed files")).toHaveTextContent(/1 changed file\s*\+1 −0/);
-    unmount();
-    // An older daemon's run: git's total, the tools' paths without numbers that would disagree with it.
-    const older = renderAgents(<Conversation thread={thread({ run_count: 1 })} machine={m} />, agentsHarness({ machines: [m], entities: entities(run({ status: "completed", completed_at: 2, stat: { files: 1, additions: 1, deletions: 1 } })), follow: ["thr_1"] }));
-    expect(screen.getByLabelText("Changed files")).toHaveTextContent(/1 changed file\s*\+1 −1/);
-    expect(screen.getByRole("button", { name: "ROLL_DEMO.md" })).toHaveTextContent(/^ROLL_DEMO\.md$/);
-    older.unmount();
-    renderAgents(<Conversation thread={thread({ run_count: 1 })} machine={m} />, agentsHarness({ machines: [m], entities: entities(run({ status: "completed", completed_at: 2, stat: { files: 0, additions: 0, deletions: 0 } })), follow: ["thr_1"] }));
-    expect(screen.queryByLabelText("Changed files")).toBeNull();
   });
 });

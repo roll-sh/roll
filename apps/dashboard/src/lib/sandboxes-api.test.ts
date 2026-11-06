@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { canStart, canStop, createSandboxesApi, formatHourly, sandboxListD, type Sandbox } from "./sandboxes-api";
+import { createSandboxesApi, sandboxListD, type Sandbox } from "./sandboxes-api";
 import { decode } from "./decode";
 
 const sandbox = (over: Partial<Sandbox> = {}): Sandbox => ({
@@ -78,14 +78,4 @@ describe("sandboxes api", () => {
     expect(() => decode(sandboxListD, { ...wire, sandboxes: [{ ...sandbox(), status: "asleep" }] })).toThrow();
   });
 
-  it("formats prices and says what can be done", () => {
-    expect(formatHourly(3)).toBe("$0.03/h");
-    expect(formatHourly(10)).toBe("$0.10/h");
-    expect(formatHourly(undefined)).toBe("");
-    expect(formatHourly(120)).toBe("$1.20/h");
-    expect(canStop(sandbox())).toBe(true);
-    expect(canStart(sandbox())).toBe(false);
-    expect(canStart(sandbox({ status: "stopped", desired: "stopped" }))).toBe(true);
-    expect(canStart(sandbox({ status: "stopped", desired: "deleted" }))).toBe(false);
-  });
 });

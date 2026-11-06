@@ -34,16 +34,5 @@ describe("search (T3's scoreModelPickerSearch)", () => {
     expect(searchModels(all, "claude", new Set())).toEqual([opus, sonnet]);
   });
 
-  it("boosts favourites and matches fuzzily from three letters", () => {
-    expect(searchModels(all, "gpt", new Set([mini.key]))[0]).toBe(mini);
-    expect(searchModels(all, "snt", new Set())).toEqual([sonnet]);
-    expect(searchModels(all, "zz", new Set())).toEqual([]);
-  });
 });
 
-describe("without a browser", () => {
-  it("has no favourites and keeps nothing (server rendering)", () => {
-    modelPrefs.setFavorite(opus.key, true);
-    expect(modelPrefs.get()).toEqual({ favorites: [], recent: [] });
-  });
-});

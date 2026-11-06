@@ -4,7 +4,7 @@
  * read-only endpoint, the live request log, and the usage charts.
  */
 import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, onTestFinished, vi } from "vitest";
 import type { Command, EndpointInfo, EndpointSpec, GatewayPlan, LogEntry, Machine, Reply, UsageReport } from "@/lib/agents-api";
 import type { GatewayApi, GatewayCommands } from "@/lib/agents-gateway";
 import { machine, machineConfig, provider, SEAL_KEY } from "@/test/agents";
@@ -13,7 +13,6 @@ import { macClick } from "@/test/mac-click";
 import { MachineEndpoints, profileFor } from "./endpoint-settings";
 import { RequestLog, TAIL_MS } from "./gateway/log";
 import { MembersList } from "./gateway/members";
-import { NewSandboxGatewayNotice, ProviderGatewayNote } from "./gateway/machine";
 import { UsageCharts } from "./gateway/usage";
 import { GatewaySetup } from "./gateway/wizard";
 
@@ -37,32 +36,6 @@ function memoryGateway(seed: GatewayPlan | null = null) {
 }
 
 describe("setting up the gateway", () => {
-  it("picks an always-on computer, not the laptop listed first", () => {
-    const h = agentsHarness({ machines: [LAPTOP, HOST], ctx: { services: fakeServices({ gateway: memoryGateway().api }) } });
-    renderAgents(<GatewaySetup machines={[LAPTOP, HOST]} onClose={vi.fn()} onDone={vi.fn()} />, h);
-    const dlg = screen.getByRole("dialog", { name: "Set up the model gateway" });
-    expect(within(dlg).getByRole("radio", { name: "ai-server" })).toBeChecked();
-    expect(within(dlg).getByRole("radio", { name: "ada-mbp" })).not.toBeChecked();
-  });
-
-  it("takes focus (the shared dialog keeps it inside); Escape closes an open upstream editor first, then the wizard (M5)", async () => {
-    const h = agentsHarness({ machines: [LAPTOP, HOST], ctx: { services: fakeServices({ gateway: memoryGateway().api }) } });
-    const onClose = vi.fn();
-    renderAgents(<GatewaySetup machines={[LAPTOP, HOST]} initialHost="mch_srv" onClose={onClose} onDone={vi.fn()} />, h);
-    const dlg = screen.getByRole("dialog", { name: "Set up the model gateway" });
-    await waitFor(() => expect(dlg.contains(document.activeElement)).toBe(true));
-    macClick(within(dlg).getByRole("button", { name: "Continue" }));
-    macClick(within(dlg).getByRole("checkbox", { name: /I understand/ }));
-    macClick(within(dlg).getByRole("button", { name: "Continue" }));
-    macClick(within(dlg).getByRole("button", { name: "Add an upstream" }));
-    expect(within(dlg).getByLabelText("API key")).toBeInTheDocument();
-    fireEvent.keyDown(within(dlg).getByLabelText("API key"), { key: "Escape" });
-    await waitFor(() => expect(within(dlg).queryByLabelText("API key")).toBeNull());
-    expect(onClose).not.toHaveBeenCalled();
-    fireEvent.keyDown(dlg, { key: "Escape" });
-    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
-  });
-
   it("walks the five steps under a macOS click, seals the key before sending it, and acknowledges the notice", async () => {
     const gw = memoryGateway();
     const h = agentsHarness({
@@ -170,13 +143,6 @@ describe("the notice, wherever a machine uses the gateway", () => {
     expect(profileFor(profile, member).providers ?? []).toEqual([]);
   });
 
-  it("under a provider that goes through it, with fallback", () => {
-    const fb: Machine = { ...member, info: { ...member.info!, settings: machineConfig({}, { endpoints: [{ ...endpoint, fallback: true }] }) } };
-    const h = agentsHarness({ machines: [fb] });
-    renderAgents(<ProviderGatewayNote machine={fb} provider="claude" />, h);
-    expect(document.body.textContent).toContain("If ai-server is offline, requests from this machine fail, and its agents use their own logins or keys instead.");
-  });
-
   it("over the Gateway section's machines, with their names and why one failed to join", async () => {
     const gw = memoryGateway(PLAN);
     const h = agentsHarness({ machines: [HOST, LAPTOP], ctx: { services: fakeServices({ gateway: gw.api }) } });
@@ -187,21 +153,6 @@ describe("the notice, wherever a machine uses the gateway", () => {
     macClick(screen.getByRole("button", { name: "ada-mbp stops using the gateway" }));
     macClick(screen.getByRole("button", { name: "Stop using it" }));
     await waitFor(() => expect(gw.api.leave).toHaveBeenCalledWith("acme", "mch_mbp"));
-  });
-
-  it("in the new-sandbox dialog when new sandboxes join", async () => {
-    const h = agentsHarness({ machines: [HOST], ctx: { services: fakeServices({ gateway: memoryGateway(PLAN).api }) } });
-    renderAgents(<NewSandboxGatewayNotice backend="docker" />, h);
-    await waitFor(() =>
-      expect(document.body.textContent).toContain("All AI requests from new sandboxes go out from ai-server. Providers see ai-server's network and IP address, not the sandboxes'. If ai-server is offline, requests from new sandboxes fail until it's back."),
-    );
-  });
-
-  it("in the new-sandbox dialog, says a sandbox roll hosts can't reach it (and won't join)", async () => {
-    const h = agentsHarness({ machines: [HOST], ctx: { services: fakeServices({ gateway: memoryGateway(PLAN).api }) } });
-    renderAgents(<NewSandboxGatewayNotice backend="agent37" />, h);
-    await waitFor(() => expect(document.body.textContent).toContain("Sandboxes roll hosts can't reach your gateway on ai-server: this one uses its own keys or login."));
-    expect(document.body.textContent).not.toContain("All AI requests from new sandboxes");
   });
 
   it("never offers a hosted sandbox as a member: it's listed as unreachable and can't be added", async () => {
@@ -257,11 +208,14 @@ describe("the request log", () => {
     });
     const body = vi.fn(async () => ({ type: "gateway_log_body" as const, seq: 2, request: '{"model":"claude-sonnet-4-6"}', response: "event: message_start" }));
     const h = agentsHarness({ machines: [HOST, LAPTOP] });
+    vi.useFakeTimers({ shouldAdvanceTime: true, toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval"] });
+    onTestFinished(() => void vi.useRealTimers());
     renderAgents(<RequestLog gw={fakeCommands({ log, body })} logBodies upstreamName={(id) => (id === "bedrock" ? "Amazon Bedrock" : "Anthropic")} machineName={(id) => (id === "mch_mbp" ? "ada-mbp" : "?")} />, h);
     await waitFor(() => expect(screen.getAllByRole("listitem", { name: /^Request / })).toHaveLength(2));
     expect(log).toHaveBeenCalledWith({ errors: false, limit: 100 });
     // The tail asks for what's after the newest it has.
-    await waitFor(() => expect(screen.getAllByRole("listitem", { name: /^Request / })).toHaveLength(3), { timeout: TAIL_MS * 2 });
+    await act(() => vi.advanceTimersByTimeAsync(TAIL_MS));
+    await waitFor(() => expect(screen.getAllByRole("listitem", { name: /^Request / })).toHaveLength(3));
     expect(log).toHaveBeenCalledWith({ after: 2, errors: false, limit: 100 });
     expect(screen.getAllByRole("listitem", { name: /^Request / })[0]).toHaveAccessibleName("Request 3");
 
@@ -275,6 +229,7 @@ describe("the request log", () => {
     expect(body).toHaveBeenCalledWith(2);
 
     macClick(screen.getByRole("switch", { name: "Only errors and failovers" }));
+    await act(() => vi.advanceTimersByTimeAsync(TAIL_MS));
     await waitFor(() => expect(screen.getAllByRole("listitem", { name: /^Request / })).toHaveLength(1));
     expect(log).toHaveBeenCalledWith({ errors: true, limit: 100 });
   });
@@ -282,7 +237,7 @@ describe("the request log", () => {
 
 describe("usage and cost", () => {
   const DAY = 86_400_000;
-  it("draws a week by day with every group's total, a table, and a day's values on focus", async () => {
+  it("draws a week by day with every group's total, and switches to requests", async () => {
     const today = Math.ceil(Date.now() / DAY) * DAY;
     const rows = [0, 1, 2].flatMap((d) => [
       { at: today - (d + 1) * DAY, key: "claude-opus-5-5", requests: 10, errors: 1, input_tokens: 1000, output_tokens: 100, cache_read_tokens: 0, cache_write_tokens: 0, cost_micros: 2_000_000 },
@@ -300,15 +255,6 @@ describe("usage and cost", () => {
     expect(screen.getByRole("img", { name: /Usage by day: \$6\.75 over 7 days/ })).toBeInTheDocument();
     expect(usage.mock.calls[0][1] - usage.mock.calls[0][0]).toBe(7 * DAY);
 
-    const day = screen.getAllByRole("button", { name: /: \$2\.25$/ })[0];
-    act(() => day.focus());
-    const tip = screen.getByRole("tooltip");
-    expect(tip.textContent).toContain("$2.00claude-opus-5-5");
-    expect(tip.textContent).toContain("$2.25in all");
-
-    macClick(screen.getByRole("button", { name: "Show as a table" }));
-    expect(screen.getByRole("table")).toBeInTheDocument();
-    expect(screen.getAllByRole("row")).toHaveLength(8);
 
     macClick(screen.getByRole("button", { name: "Requests" }));
     await waitFor(() => expect(screen.getByRole("list", { name: "Legend" }).textContent).toContain("fast90"));

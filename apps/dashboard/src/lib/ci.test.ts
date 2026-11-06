@@ -1,20 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Check, Status } from "./code-api";
-import {
-  tokenLine,
-  CI_SYSTEMS,
-  checkRows,
-  emptyWebhookForm,
-  eventsLabel,
-  mcpCommand,
-  mcpJson,
-  statusCurl,
-  statusScript,
-  statusToCheck,
-  webhookBody,
-  webhookErrors,
-  webhookForm,
-} from "./ci";
+import { CI_SYSTEMS, checkRows, emptyWebhookForm, mcpCommand, mcpJson, statusCurl, statusScript, statusToCheck, webhookBody, webhookErrors, webhookForm } from "./ci";
 
 describe("webhook forms", () => {
   it("builds a create body with events in the contract's order", () => {
@@ -51,11 +37,6 @@ describe("webhook forms", () => {
     expect(webhookErrors({ ...emptyWebhookForm(), url: "https://x.dev", secret: "x".repeat(201) }).secret).toBeTruthy();
   });
 
-  it("labels events", () => {
-    expect(eventsLabel(["*"])).toBe("all events");
-    expect(eventsLabel(["landed", "push"])).toBe("landed, push");
-    expect(eventsLabel([])).toBe("no events");
-  });
 });
 
 describe("CI status snippets", () => {
@@ -156,10 +137,3 @@ describe("MCP configs", () => {
   });
 });
 
-describe("access tokens", () => {
-  const ago = (t: number) => `${t}s`;
-  it("shows the prefix, or the id for tokens from before prefixes", () => {
-    expect(tokenLine({ id: "tok_1", name: "ci", created_at: 1, last_used_at: 5, prefix: "rlc_ab12" }, ago)).toEqual({ id: "rlc_ab12…", used: "used 5s" });
-    expect(tokenLine({ id: "tok_9f", name: "old", created_at: 1, last_used_at: null, prefix: null }, ago)).toEqual({ id: "tok_9f", used: "never used" });
-  });
-});

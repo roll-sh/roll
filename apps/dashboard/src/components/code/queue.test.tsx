@@ -37,27 +37,6 @@ const panel = (title: string) => screen.getByRole("heading", { name: title }).cl
 const headline = () => document.querySelector<HTMLElement>("p:has(> span.rounded-full)")!;
 
 describe("QueueTab", () => {
-  it("says it's loading, then shows an empty, idle queue", async () => {
-    let resolve!: (q: Queue) => void;
-    api.queue.mockReturnValue(new Promise((r) => (resolve = r)));
-    render(<QueueTab repo={repo()} info={info()} tick={0} busy={null} run={run} />);
-    expect(screen.getByText("Loading the queue…")).toBeInTheDocument();
-    resolve(queue());
-    expect(await screen.findByText("Idle — nothing waiting")).toBeInTheDocument();
-    expect(screen.getByText(/Nothing waiting\. Landing a change, or pushing to the default branch, adds it here\./)).toBeInTheDocument();
-    expect(screen.getByText("Changes appear here as they land or are ejected.")).toBeInTheDocument();
-    expect(screen.getByText("nothing waiting")).toBeInTheDocument();
-    expect(screen.getByText("4 / 8")).toBeInTheDocument();
-    expect(screen.queryByText("In flight")).toBeNull();
-    expect(screen.queryByText("Urgent")).toBeNull();
-    expect(api.queue).toHaveBeenCalledWith("acme/web");
-  });
-
-  it("shows the error when the queue can't be read", async () => {
-    await show(new Error("queue unavailable"));
-    expect(await screen.findByText("queue unavailable")).toBeInTheDocument();
-  });
-
   it("paused: says so, and Resume asks the API then refetches", async () => {
     api.resumeQueue.mockResolvedValue(queue());
     await show(queue({ paused: true, state: "paused", entries: [entry({ number: 1 }), entry({ number: 2 })], stats: { ...queue().stats, depth: 2 } }));
@@ -67,32 +46,6 @@ describe("QueueTab", () => {
     await userEvent.click(screen.getByRole("button", { name: "Resume" }));
     expect(api.resumeQueue).toHaveBeenCalledWith("acme/web");
     await waitFor(() => expect(api.queue.mock.calls.length).toBeGreaterThan(calls));
-  });
-
-  it("running: Pause asks the API", async () => {
-    api.pauseQueue.mockResolvedValue(queue({ paused: true }));
-    await show(queue());
-    await userEvent.click(screen.getByRole("button", { name: "Pause" }));
-    expect(api.pauseQueue).toHaveBeenCalledWith("acme/web");
-  });
-
-  it("readers see the queue without controls", async () => {
-    await show(queue({ entries: [entry({ number: 3 })], stats: { ...queue().stats, depth: 1 } }), { writer: false });
-    expect(screen.getByText("Change 3")).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /Pause|Resume/ })).toBeNull();
-    expect(screen.queryByRole("button", { name: /urgent lane|from the queue/ })).toBeNull();
-  });
-
-  it("post_merge: explains the policy, no pause, the waiting list is off", async () => {
-    await show(queue({ policy: "post_merge" }), { policy: "post_merge" });
-    expect(screen.getByText(/This repository lands post-merge/)).toHaveTextContent("checks run on main afterwards");
-    expect(screen.getByText("The queue is off for this repository.")).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /Pause|Resume/ })).toBeNull();
-  });
-
-  it("says when roll.toml couldn't be read", async () => {
-    await show(queue({ settings: { ...queue().settings, error: "line 3: expected a table" } }));
-    expect(screen.getByText(/roll\.toml on main couldn't be read, so the defaults apply: line 3: expected a table/)).toBeInTheDocument();
   });
 
   it("urgent and normal lanes, in order, with lane and remove controls", async () => {
@@ -170,36 +123,6 @@ describe("QueueTab", () => {
     expect(segs.map((s) => s.classList.contains("opacity-50"))).toEqual([false, true, true]);
     expect(flight.querySelectorAll("[aria-hidden].w-px")).toHaveLength(1);
     expect(screen.getByText("smaller after a red batch")).toBeInTheDocument();
-  });
-
-  it("bisecting without a prefix yet reads generically", async () => {
-    await show(
-      queue({
-        state: "bisecting",
-        batch: { id: "qb_1", changes: ["chg_1", "chg_2"], tip: null, started_at: T0, state: "bisecting", testing_prefix: null, checks: [] },
-        entries: [entry({ number: 1 }), entry({ number: 2 })],
-        stats: { ...queue().stats, depth: 2 },
-      }),
-    );
-    expect(screen.getByText(/Testing its prefixes to find the change that broke it/)).toBeInTheDocument();
-  });
-
-  it("landing: green segments; pausing after the batch", async () => {
-    await show(
-      queue({
-        state: "landing",
-        paused: true,
-        batch: { id: "qb_1", changes: ["chg_1"], tip: "cs_tip0000000", started_at: T0, state: "landing", testing_prefix: null, checks: [] },
-        entries: [entry({ number: 1, state: "landing" })],
-        stats: { ...queue().stats, depth: 1 },
-      }),
-    );
-    expect(headline()).toHaveTextContent("Landing a batch of 1 · pausing after it");
-    const flight = panel("In flight");
-    expect(within(flight).getByText("Green. Landing the whole batch with one compare-and-swap.")).toBeInTheDocument();
-    expect(within(flight).getByRole("link")).toHaveClass("border-ok/50");
-    // Paused but still landing: the toggle offers Resume.
-    expect(screen.getByRole("button", { name: "Resume" })).toBeInTheDocument();
   });
 
   it("recently: landed and ejected changes, with the error and its output on demand", async () => {

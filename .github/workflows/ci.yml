@@ -1,7 +1,7 @@
 name: ci
 
-# The merge gate is a bounded smoke check. Docker, compatibility and stress suites
-# remain available through the individual workflows' manual triggers.
+# The merge gate is a bounded smoke check that finishes in under a minute. Docker, compatibility
+# and stress suites remain available through the individual workflows' manual triggers.
 on:
   pull_request:
   merge_group:
@@ -30,20 +30,31 @@ jobs:
       # Git framing/packs, reviewer schemas/pricing/key sealing, RESP and S3 auth/parsing.
       - run: cargo test --locked -p code-git -p code-review -p redis-proto -p s3-proto --lib
 
-  dashboard:
+  # Every package's types (TypeScript 7, scripts/typecheck.mjs), the dashboard's node tests and the
+  # desktop app's tests.
+  web:
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
       - uses: actions/checkout@v5
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v5
-        with:
-          node-version: 24
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
+      - uses: ./.github/actions/setup-web
       - run: pnpm typecheck
-      - run: pnpm --filter dashboard test
+      - run: pnpm --filter dashboard test:node
       - run: pnpm --filter @roll/desktop test
+
+  # The dashboard's vitest suite, split across runners.
+  dashboard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    strategy:
+      matrix:
+        shard: [1, 2]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/setup-web
+        with:
+          filter: dashboard...
+      - run: pnpm --filter dashboard exec vitest run --shard=${{ matrix.shard }}/2
 
   scripts:
     runs-on: ubuntu-latest
@@ -62,7 +73,7 @@ jobs:
           ./actionlint -shellcheck=
 
   ci:
-    needs: [rust, dashboard, scripts]
+    needs: [rust, web, dashboard, scripts]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 2

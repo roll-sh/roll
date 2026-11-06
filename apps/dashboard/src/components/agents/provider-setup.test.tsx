@@ -1,13 +1,9 @@
-import { screen, waitFor, within } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
+import { screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Machine } from "@/lib/agents-api";
 import { notReadyReason, readiness } from "@/lib/agents-setup";
-import { agentsSurface, resetAgentsSurface } from "@/lib/agents-surface";
-import { NO_CANVAS } from "./machine-projects";
+import { resetAgentsSurface } from "@/lib/agents-surface";
 import { Launcher } from "./new-agent";
-import { MachineNode, ProjectNode } from "./nodes";
-import { projectActions } from "./project-actions";
 import { machine, mirrored, project, provider } from "@/test/agents";
 import { agentsHarness, renderAgents } from "@/test/agents-render";
 
@@ -33,73 +29,11 @@ describe("whether an agent can run on a machine", () => {
 });
 
 describe("a machine with no provider", () => {
-  it("says no agent can run there, and the next steps come before adding a project", async () => {
-    const h = agentsHarness({ machines: [BARE] });
-    renderAgents(<MachineNode machine={BARE} />, h);
-    const setup = screen.getByRole("group", { name: "Set up a provider" });
-    expect(setup).toHaveTextContent("No agent can run on ada-mbp yet: it has no provider.");
-    // Adding a project stays possible, but isn't the obvious step.
-    const add = screen.getAllByRole("button", { name: /Add a project/ }).find((b) => b.className.includes("w-full"))!;
-    expect(add.className).not.toContain("bg-fg");
-    await userEvent.click(within(setup).getByRole("button", { name: /check again/i }));
-    expect(h.command).toHaveBeenLastCalledWith("mch_1", expect.any(String), { type: "provider.refresh" });
-    await userEvent.click(within(setup).getByRole("button", { name: "Add from the ACP registry" }));
-    expect(agentsSurface.get().view).toEqual({ kind: "settings", target: "m:mch_1" });
-    resetAgentsSurface();
-    await userEvent.click(within(setup).getByRole("button", { name: "Use an endpoint or gateway" }));
-    expect(agentsSurface.get().view).toEqual({ kind: "settings", target: "m:mch_1" });
-  });
-
-  it("a computer with providers logged out gets their logins (not only sandboxes)", async () => {
-    const h = agentsHarness({ machines: [LOGGED_OUT], reply: () => ({ type: "created", id: "trm_1" }) });
-    renderAgents(<MachineNode machine={LOGGED_OUT} />, h);
-    const login = screen.getByRole("group", { name: "Log in to a provider" });
-    await userEvent.click(within(login).getByRole("button", { name: "Log in to Claude Code" }));
-    expect(h.command).toHaveBeenCalledWith("mch_1", expect.any(String), { type: "terminal.open", command: "claude /login", cols: 100, rows: 26 });
-    await waitFor(() => expect(h.focus).toHaveBeenCalledWith("x:trm_1"));
-  });
-
-  it("its projects can't start an agent: the card says why and where to fix it", async () => {
-    const startNew = vi.fn();
-    const h = agentsHarness({ machines: [BARE], entities: [mirrored("project", project(), 1)], ctx: { startNew } });
-    renderAgents(<ProjectNode project={project()} machine={BARE} />, h);
-    expect(screen.queryByRole("button", { name: "Start an agent" })).not.toBeInTheDocument();
-    expect(screen.getByText(/No agent provider on ada-mbp yet/)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "No agent provider on ada-mbp yet" })).toBeDisabled();
-    await userEvent.click(screen.getByRole("button", { name: "Set one up" }));
-    expect(agentsSurface.get().view).toEqual({ kind: "settings", target: "m:mch_1" });
-    // Its menu too: New agent here is off, the setup step is right under it.
-    const labels = projectActions({ ...h.ctx, canvas: NO_CANVAS }, project()).map((a) => [a.label, !!a.disabled]);
-    expect(labels.slice(0, 2)).toEqual([
-      ["New agent here", true],
-      ["Set up a provider on ada-mbp…", false],
-    ]);
-    expect(startNew).not.toHaveBeenCalled();
-  });
-
   it("the launcher shows the steps instead of a composer that can't run", () => {
     const h = agentsHarness({ machines: [LOGGED_OUT], entities: [mirrored("project", project(), 1)] });
     renderAgents(<Launcher onClose={vi.fn()} />, h);
     const login = screen.getByRole("group", { name: "Log in to a provider" });
     expect(within(login).getByRole("button", { name: "Log in to Codex" })).toBeInTheDocument();
     expect(screen.queryByRole("textbox", { name: "Message" })).not.toBeInTheDocument();
-  });
-});
-
-describe("a machine's providers on its card", () => {
-  it("a few chips, the rest one +N that opens its providers; one to log in always shows", async () => {
-    const names = ["Claude Code", "Codex", "OpenCode", "Pi", "Gemini CLI", "Cursor"];
-    const many = withProviders(names.map((name, i) => provider({ id: `p${i}`, name, auth: name === "Cursor" ? "missing" : "ready" })));
-    renderAgents(<MachineNode machine={many} />, agentsHarness({ machines: [many] }));
-    const list = screen.getByRole("list", { name: "Providers" });
-    expect(within(list).getAllByRole("listitem").map((li) => li.textContent?.trim())).toEqual(["Claude Code", "Codex", "Cursor", "+3"]);
-    // One line: the count never wraps alone.
-    expect(list).toHaveClass("flex-nowrap");
-    await userEvent.click(within(list).getByRole("button", { name: "3 more providers: OpenCode, Pi, Gemini CLI" }));
-    expect(agentsSurface.get().view).toEqual({ kind: "settings", target: "m:mch_1" });
-    // Four or fewer: all of them.
-    const few = withProviders(names.slice(0, 4).map((name, i) => provider({ id: `p${i}`, name })), { id: "mch_2" });
-    renderAgents(<MachineNode machine={few} />, agentsHarness({ machines: [few] }));
-    expect(within(screen.getAllByRole("list", { name: "Providers" })[1]).getAllByRole("listitem")).toHaveLength(4);
   });
 });

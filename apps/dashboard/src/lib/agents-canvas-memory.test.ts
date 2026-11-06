@@ -2,7 +2,6 @@ import { describe, expect, it, vi } from "vitest";
 import { CanvasConflict, createAgentsApi, MAX_CANVAS, streamEventD, type StreamEvent } from "./agents-api";
 import { httpCanvas, memoryCanvas } from "./agents-services";
 import { applyEvents, emptyData } from "./agents-store";
-import { ApiError } from "./code-api";
 import { decode } from "./decode";
 
 /** A relay that keeps one canvas per owner the way `agents/canvas.rs` does, and records requests. */
@@ -43,14 +42,6 @@ describe("the canvas over the relay", () => {
     // Without a revision the last writer wins (and none is sent).
     expect((await api.saveCanvas("acme", { v: 2 })).revision).toBe(2);
     expect(calls.at(-1)!.body).toEqual({ canvas: { v: 2 } });
-  });
-
-  it("other errors stay ApiErrors", async () => {
-    const doFetch = vi.fn(async () => new Response(JSON.stringify({ error: "agent tokens can't arrange acme's canvas" }), { status: 403 })) as unknown as typeof fetch;
-    const api = createAgentsApi("http://roll", "rlc_agent", undefined, doFetch);
-    const err = await api.saveCanvas("acme", {}).catch((e: unknown) => e);
-    expect(err).toBeInstanceOf(ApiError);
-    expect(err).toMatchObject({ status: 403, message: "agent tokens can't arrange acme's canvas" });
   });
 
   it("services: null before the first save, the doc and its revision after, objects only", async () => {

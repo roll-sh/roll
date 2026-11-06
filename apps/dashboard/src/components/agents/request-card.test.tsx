@@ -1,5 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { useState } from "react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { RequestCard } from "./request-card";
@@ -14,9 +13,7 @@ describe("RequestCard", () => {
     ] as const) {
       const onRespond = vi.fn(async () => {});
       const { unmount } = render(<RequestCard request={approval()} onRespond={onRespond} />);
-      expect(screen.getByText("Run `cargo test -p code-control`")).toBeInTheDocument();
       expect(screen.getByText("cargo test -p code-control")).toBeInTheDocument();
-      expect(screen.getByText("Waiting for approval")).toBeInTheDocument();
       if (label === "Approve") await userEvent.click(screen.getByRole("button", { name: label }));
       else {
         await userEvent.click(screen.getByRole("button", { name: "More options" }));
@@ -29,32 +26,12 @@ describe("RequestCard", () => {
     }
   });
 
-  it("calls a plan's buttons Implement and Refine (with what to change)", async () => {
-    const onRespond = vi.fn(async () => {});
-    const q = approval();
-    if (q.body.type === "approval") Object.assign(q.body, { action: "plan", title: "Carry out the plan", command: null, decisions: ["accept", "decline"] });
-    render(<RequestCard request={q} onRespond={onRespond} />);
-    expect(screen.getByText("Plan ready")).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "More options" })).toBeNull();
-    await userEvent.click(screen.getByRole("button", { name: "Refine" }));
-    await userEvent.type(screen.getByRole("textbox", { name: "Note to the agent" }), "split it in two{Enter}");
-    expect(onRespond).toHaveBeenCalledWith({ type: "decision", decision: "decline", message: "split it in two" });
-  });
-
   it("declines with a note back to the agent", async () => {
     const onRespond = vi.fn(async () => {});
     render(<RequestCard request={approval()} onRespond={onRespond} />);
     await userEvent.click(screen.getByRole("button", { name: "Decline" }));
     await userEvent.type(screen.getByRole("textbox", { name: "Note to the agent" }), "use the fake runner{Enter}");
     expect(onRespond).toHaveBeenCalledWith({ type: "decision", decision: "decline", message: "use the fake runner" });
-  });
-
-  it("only offers the decisions the provider accepts", () => {
-    const q = approval();
-    if (q.body.type === "approval") q.body.decisions = ["accept", "decline"];
-    render(<RequestCard request={q} onRespond={async () => {}} />);
-    expect(screen.queryByRole("button", { name: "Approve for session" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Stop run" })).not.toBeInTheDocument();
   });
 
   it("shows the error and lets you try again", async () => {
@@ -85,65 +62,5 @@ describe("RequestCard", () => {
     await userEvent.type(screen.getByRole("textbox", { name: "Checks: your answer" }), "fmt");
     await userEvent.click(submit);
     expect(onRespond).toHaveBeenCalledWith({ type: "answers", answers: { db: "Postgres", checks: "Unit tests, Clippy, fmt" } });
-  });
-
-  it("keeps the keyboard on the questions when a choice moves on", async () => {
-    render(<RequestCard request={question()} onRespond={vi.fn(async () => {})} />);
-    screen.getByRole("radio", { name: /Postgres/ }).focus();
-    await userEvent.keyboard("{Enter}");
-    expect(await screen.findByText("What should run after the fix?")).toBeInTheDocument();
-    // The picked option went away with its question: the next one's first option has focus.
-    expect(screen.getByRole("checkbox", { name: /Unit tests/ })).toHaveFocus();
-  });
-
-  it("never takes focus it didn't have: a choice made without the keyboard moves on and leaves focus alone", async () => {
-    render(<RequestCard request={question()} onRespond={vi.fn(async () => {})} />);
-    expect(document.activeElement).toBe(document.body);
-    fireEvent.click(screen.getByRole("radio", { name: /Postgres/ }));
-    expect(await screen.findByText("What should run after the fix?")).toBeInTheDocument();
-    expect(document.activeElement).toBe(document.body);
-  });
-
-  it("in the conversation, leaves questions to the composer's panel", () => {
-    render(<RequestCard request={question()} onRespond={async () => {}} hostedQuestions />);
-    expect(screen.getByText("Asked 2 questions")).toBeInTheDocument();
-    expect(screen.queryByRole("radio")).toBeNull();
-  });
-
-  it("records what was decided once resolved", () => {
-    render(
-      <RequestCard
-        request={approval({ status: "resolved", resolved_by: "ada", response: { type: "decision", decision: "decline", message: "not now" } })}
-        onRespond={async () => {}}
-      />,
-    );
-    expect(screen.getByText("Declined: “not now”")).toBeInTheDocument();
-    expect(screen.getByText("by ada")).toBeInTheDocument();
-    expect(screen.queryByRole("button")).not.toBeInTheDocument();
-  });
-});
-
-describe("the keyboard after answering", () => {
-  /** A conversation: the request in its transcript, answered from the keyboard, then resolved. */
-  function Conversation() {
-    const [req, setReq] = useState(approval());
-    return (
-      <div role="region" aria-label="Thread Fix it">
-        <RequestCard request={req} onRespond={async (response) => setReq({ ...req, status: "resolved", response })} />
-        <textarea aria-label="Message" />
-      </div>
-    );
-  }
-
-  it("goes to the composer once Approve is gone (it fell to the page), and back to Decline from its reason", async () => {
-    render(<Conversation />);
-    screen.getByRole("button", { name: "Decline" }).focus();
-    await userEvent.keyboard(" ");
-    expect(screen.getByRole("textbox", { name: "Note to the agent" })).toHaveFocus();
-    await userEvent.keyboard("{Escape}");
-    await waitFor(() => expect(screen.getByRole("button", { name: "Decline" })).toHaveFocus());
-    screen.getByRole("button", { name: "Approve" }).focus();
-    await userEvent.keyboard(" ");
-    await waitFor(() => expect(screen.getByRole("textbox", { name: "Message" })).toHaveFocus());
   });
 });

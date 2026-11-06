@@ -1,0 +1,30 @@
+name: Set up the web workspace
+description: Node 24, pnpm (the packageManager version, standalone), the pnpm store cache and an install.
+inputs:
+  filter:
+    description: Install only these projects (a pnpm --filter), or everything when empty.
+    default: ''
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@v5
+      with:
+        node-version: 24
+        package-manager-cache: false
+    # The standalone build is one download (pnpm/action-setup installs it through npm: ~7 s).
+    - shell: bash
+      run: |
+        version=$(jq -r '.packageManager | sub("^pnpm@"; "")' package.json)
+        mkdir -p "$RUNNER_TEMP/pnpm"
+        curl -fsSL "https://github.com/pnpm/pnpm/releases/download/v$version/pnpm-linux-x64.tar.gz" | tar -xz -C "$RUNNER_TEMP/pnpm"
+        echo "$RUNNER_TEMP/pnpm" >> "$GITHUB_PATH"
+        echo "PNPM_STORE=$("$RUNNER_TEMP/pnpm/pnpm" store path)" >> "$GITHUB_ENV"
+    - uses: actions/cache@v4
+      with:
+        path: ${{ env.PNPM_STORE }}
+        key: pnpm-store-${{ inputs.filter || 'all' }}-${{ hashFiles('pnpm-lock.yaml') }}
+        restore-keys: pnpm-store-${{ inputs.filter || 'all' }}-
+    - shell: bash
+      env:
+        FILTER: ${{ inputs.filter }}
+      run: pnpm install --frozen-lockfile --prefer-offline ${FILTER:+--filter "$FILTER"}

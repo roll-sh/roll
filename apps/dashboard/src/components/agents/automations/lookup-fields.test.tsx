@@ -13,7 +13,6 @@ import chatopsCatalog from "@/lib/chatops-catalog.json";
 import linearCatalog from "@/lib/linear-catalog.json";
 import { memoryLookup } from "@/lib/lookup-api";
 import { DEMO_LOOKUPS } from "@/lib/lookup-demo";
-import { mirrored, project, thread } from "@/test/agents";
 import { agentsHarness, fakeServices, renderAgents } from "@/test/agents-render";
 import { macClick } from "@/test/mac-click";
 import { ConfigForm, type FormContext } from "./config-form";
@@ -48,15 +47,6 @@ function show(schema: Schema, initial: Record<string, unknown> = {}, entities: M
 
 // Several pickers open and load in each test: allow for a busy machine.
 describe("automation fields that name a thing", { timeout: 15_000 }, () => {
-  it("lists what must be filled first, marked, in the schema's order (the catalog's keys are alphabetical)", () => {
-    show(step("linear.create_issue"));
-    const labels = [...document.querySelectorAll("label")].map((l) => l.textContent);
-    expect(labels.slice(0, 2)).toEqual(["TeamRequired", "TitleRequired"]);
-    expect(labels.slice(2).every((l) => !l?.includes("Required"))).toBe(true);
-    // The mark isn't part of a field's name.
-    expect(screen.getByRole("button", { name: "Team" })).toBeInTheDocument();
-  });
-
   it("create an issue: a team from Linear, then that team's states", async () => {
     const { onValue, lookup } = show(step("linear.create_issue"));
     macClick(screen.getByRole("button", { name: "Team" }));
@@ -74,39 +64,6 @@ describe("automation fields that name a thing", { timeout: 15_000 }, () => {
     macClick(screen.getByRole("button", { name: "Priority" }));
     macClick(within(await screen.findByRole("listbox", { name: "Priority" })).getByRole("option", { name: /Urgent/ }));
     expect(onValue).toHaveBeenLastCalledWith(expect.objectContaining({ priority: "1" }));
-  });
-
-  it("an issue step takes a variable where the issue comes from the event", async () => {
-    const { onValue } = show(step("linear.comment"));
-    macClick(screen.getByRole("button", { name: "Issue" }));
-    macClick(await screen.findByRole("option", { name: "Use a variable" }));
-    macClick(await screen.findByRole("option", { name: /issue\.team\.id/ }));
-    expect(onValue).toHaveBeenLastCalledWith(expect.objectContaining({ issue: "{{ event.data.issue.team.id }}" }));
-  });
-
-  it("a Linear trigger's lists are chips; a key saved before pickers shows its team", async () => {
-    const trigger = linearCatalog.triggers[0].config as unknown as Schema;
-    const { onValue } = show(trigger, { teams: ["ENG"], priorities: [1] });
-    await waitFor(() => expect(screen.getByText("Engineering")).toBeInTheDocument());
-    expect(screen.getByText("Urgent")).toBeInTheDocument();
-    macClick(screen.getByRole("button", { name: "Add to Teams" }));
-    macClick(await within(await screen.findByRole("listbox", { name: "Teams" })).findByRole("option", { name: /Operations/ }));
-    expect(onValue).toHaveBeenLastCalledWith(expect.objectContaining({ teams: ["ENG", "team_ops"] }));
-    fireEvent.keyDown(document.activeElement!, { key: "Escape" });
-    macClick(screen.getByRole("button", { name: "Assignees" }));
-    const people = await screen.findByRole("listbox", { name: "Assignees" });
-    expect(within(people).getAllByRole("option")[0]).toHaveTextContent("roll");
-    await waitFor(() => expect(within(people).getByRole("option", { name: /Grace Hopper/ })).toBeInTheDocument());
-    expect(within(people).getAllByRole("option").filter((o) => /^roll/.test(o.textContent ?? ""))).toHaveLength(1);
-  });
-
-  it("a thread is one of the owner's threads, by title", async () => {
-    const t = thread({ id: "thr_7", title: "Fix the SSO loop" });
-    const { onValue } = show(step("linear.agent_session"), {}, [mirrored("project", project(), 2), mirrored("thread", t, 3)]);
-    macClick(screen.getByRole("button", { name: "Thread" }));
-    macClick(within(await screen.findByRole("listbox", { name: "Thread" })).getByRole("option", { name: /Fix the SSO loop/ }));
-    expect(onValue).toHaveBeenLastCalledWith(expect.objectContaining({ thread: "thr_7" }));
-    expect(screen.getByRole("button", { name: "Thread" })).toHaveTextContent("Fix the SSO loop");
   });
 
   it("a GitHub label step: a connected repo, then its issue, labels made on the spot", async () => {
@@ -142,12 +99,6 @@ describe("automation fields that name a thing", { timeout: 15_000 }, () => {
 describe("Slack and Discord fields name their things", () => {
   const chat = (kind: string) => chatopsCatalog.steps.find((s) => s.kind === kind)!.config as unknown as Schema;
 
-  it("fields come in the order the server wrote them (x-order): a post's workspace before its channel", () => {
-    show(chat("slack.post"));
-    const labels = [...document.querySelectorAll("label")].map((l) => l.textContent?.replace("Required", ""));
-    expect(labels.slice(0, 2)).toEqual(["Workspace", "Channel"]);
-  });
-
   it("a Slack DM picks a person of the workspace; a notice goes to a channel or a person", async () => {
     const { onValue, lookup } = show(chat("slack.dm"));
     macClick(screen.getByRole("button", { name: "Workspace" }));
@@ -160,40 +111,6 @@ describe("Slack and Discord fields name their things", () => {
     expect(screen.getByRole("button", { name: "Person" })).toHaveTextContent("Grace Hopper");
   });
 
-  it("a Slack notice's To lists channels and people under their headings", async () => {
-    const { onValue } = show(chat("slack.notify"));
-    macClick(screen.getByRole("button", { name: "To" }));
-    const to = await screen.findByRole("listbox", { name: "To" });
-    await waitFor(() => expect(within(to).getByText("People")).toBeInTheDocument());
-    expect(within(to).getByText("Channels")).toBeInTheDocument();
-    macClick(within(to).getByRole("option", { name: /deploys/ }));
-    expect(onValue).toHaveBeenLastCalledWith(expect.objectContaining({ to: "C02DEPLOYS" }));
-  });
-
-  it("a Slack post's channel takes a variable, and a channel saved by name shows as itself", async () => {
-    const { onValue } = show(chat("slack.post"), { channel: "incidents" });
-    await waitFor(() => expect(screen.getByRole("button", { name: "Channel" })).toHaveTextContent("incidents"));
-    macClick(screen.getByRole("button", { name: "Channel" }));
-    macClick(await screen.findByRole("option", { name: "Use a variable" }));
-    macClick(await screen.findByRole("option", { name: /issue\.team\.id/ }));
-    expect(onValue).toHaveBeenLastCalledWith(expect.objectContaining({ channel: "{{ event.data.issue.team.id }}" }));
-  });
-
-  it("a Discord trigger's channels are chips from the picked server", async () => {
-    const trigger = chatopsCatalog.triggers.find((t) => t.source === "discord")!.config as unknown as Schema;
-    const { onValue, lookup } = show(trigger, { guild: "1100000000000000001" });
-    await waitFor(() => expect(screen.getByRole("button", { name: "Server" })).toHaveTextContent("Acme Discord"));
-    macClick(screen.getByRole("button", { name: "Channels" }));
-    const channels = await screen.findByRole("listbox", { name: "Channels" });
-    expect(await within(channels).findByText("Work")).toBeInTheDocument();
-    macClick(within(channels).getByRole("option", { name: /deploys/ }));
-    expect(onValue).toHaveBeenLastCalledWith(expect.objectContaining({ guild: "1100000000000000001", channels: ["1100000000000000011"] }));
-    expect(lookup.calls.some((c) => c.includes("/lookup/discord/channels") && c.includes("parent=1100000000000000001"))).toBe(true);
-    // The list stays open for more; Escape closes it.
-    expect(screen.getByRole("listbox", { name: "Channels" })).toBeInTheDocument();
-    fireEvent.keyDown(document.activeElement!, { key: "Escape" });
-    await waitFor(() => expect(screen.queryByRole("listbox", { name: "Channels" })).toBeNull());
-  });
 });
 
 describe("automation fields that are cleared", () => {

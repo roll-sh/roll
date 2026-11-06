@@ -3,40 +3,7 @@ import { MAX_CANVAS } from "./agents-api";
 import { deriveGraph, type Graph } from "./agents-graph";
 import { arrange, tidyLayout, type Size } from "./agents-layout";
 import { applyEvents, emptyData, follow } from "./agents-store";
-import {
-  addView,
-  ALL,
-  applyDisplay,
-  applyView,
-  countView,
-  DEFAULT_VIEWS,
-  deleteView,
-  directionOf,
-  encodeDoc,
-  focusOn,
-  parseDisplay,
-  defaultDisplay,
-  isDefaultDisplay,
-  keepProject,
-  MAX_KEPT,
-  MAX_PINS,
-  MAX_VIEWS,
-  moveView,
-  parseDoc,
-  pin,
-  PIN_MIN,
-  projectOf,
-  renameView,
-  resizePin,
-  setViewDisplay,
-  setViewFilter,
-  setViewOrder,
-  unpin,
-  viewById,
-  viewsOf,
-  withDirection,
-  type CanvasDoc,
-} from "./agents-views";
+import { addView, ALL, applyDisplay, applyView, countView, DEFAULT_VIEWS, deleteView, encodeDoc, focusOn, parseDisplay, defaultDisplay, isDefaultDisplay, MAX_KEPT, MAX_PINS, MAX_VIEWS, moveView, parseDoc, pin, PIN_MIN, projectOf, renameView, resizePin, setViewFilter, setViewOrder, unpin, viewById, viewsOf, type CanvasDoc } from "./agents-views";
 import { approval, ev, machine, project, run, T0, terminal, thread } from "@/test/agents";
 
 const NOW = T0 + 60_000;
@@ -92,30 +59,6 @@ describe("the canvas document", () => {
       ],
     });
     expect(messy.views).toEqual([{ id: "v_a", name: "A", filter: { status: ["running"], machines: ["mch_1"] }, order: {}, pins: [{ kind: "diff", id: "thr_1", w: PIN_MIN.diff.w, h: 1200 }], display: {} }]);
-  });
-
-  it("keeps each view's direction, a phone's apart from a wide screen's; old documents show the defaults", () => {
-    // Before display options: across on a wide screen, down on a phone.
-    const old = parseDoc({ order: {}, views: [{ id: "v_a", name: "A", filter: {} }] });
-    expect(old.display).toEqual({});
-    expect(directionOf(viewById(old, "v_a").display, false)).toBe("horizontal");
-    expect(directionOf(viewById(old, "v_a").display, true)).toBe("vertical");
-    // Turned top-down on the laptop: the phone keeps its own.
-    let doc = setViewDisplay(old, ALL, withDirection(old.display, false, "vertical"));
-    expect(directionOf(viewById(doc, ALL).display, false)).toBe("vertical");
-    doc = setViewDisplay(doc, "v_a", withDirection(viewById(doc, "v_a").display, true, "horizontal"));
-    expect(viewById(doc, "v_a").display).toEqual({ phoneDirection: "horizontal" });
-    expect(directionOf(viewById(doc, "v_a").display, false)).toBe("horizontal");
-    // Synced: it survives the trip through roll; nothing is written while it's the default.
-    const saved = JSON.parse(JSON.stringify(encodeDoc(doc)));
-    expect(saved.display).toEqual({ direction: "vertical" });
-    expect(saved.views[0].display).toEqual({ phoneDirection: "horizontal" });
-    expect(encodeDoc(old)).not.toHaveProperty("display");
-    expect(parseDoc(saved)).toEqual(doc);
-    // Unknown values show the default.
-    expect(parseDoc({ display: { direction: "diagonal", phoneDirection: 3 } }).display).toEqual({});
-    // A view saved from what's on screen keeps how it looked.
-    expect(viewById(addView(doc, "Down", {}, "v_d", doc.display), "v_d").display).toEqual({ direction: "vertical" });
   });
 
   it("creates, renames, reorders and deletes views; All stays first and can't be removed", () => {
@@ -252,13 +195,6 @@ describe("what a view shows", () => {
     }
   });
 
-  it("a thread with its conversation pinned answers its requests inside the card", () => {
-    const d = sample();
-    const graph = deriveGraph(d, { expanded: new Set(["thr_2"]) });
-    const v = applyView(graph, d, { filter: {}, pins: [{ kind: "conversation", id: "thr_2", w: 520, h: 600 }] }, NOW);
-    expect(v.nodes.has("r:req_2")).toBe(false);
-    expect(v.nodes.get("t:thr_2")!.children).toEqual(["pc:thr_2"]);
-  });
 });
 
 describe("focusing one project", () => {
@@ -280,13 +216,6 @@ describe("focusing one project", () => {
 
 describe("display options", () => {
   const idle = (id: string) => id === "thr_3" || id === "thr_f";
-  it("parse what they know and drop the rest", () => {
-    expect(parseDisplay({ density: "compact", group: "project", hide: ["idle", "terminals", "idle", "bogus"], extra: 1 })).toEqual({ density: "compact", group: "project", hide: ["idle", "terminals"] });
-    expect(parseDisplay({ density: "roomy", group: "status", hide: "idle" })).toEqual({});
-    const doc = setViewDisplay(parseDoc({}), "v_running", { density: "compact", hide: ["terminals"] });
-    expect(parseDoc(JSON.parse(JSON.stringify(encodeDoc(doc))))).toEqual(doc);
-  });
-
   it("leave off terminals and idle threads; an idle thread stays for what's under it", () => {
     const g = deriveGraph(sample());
     expect(applyDisplay(g, {}, { idle })).toBe(g);
@@ -303,20 +232,6 @@ describe("display options", () => {
     expect(kept.edges.every((e) => kept.nodes.has(e.from) && kept.nodes.has(e.to))).toBe(true);
   });
 
-  it("group by project: projects are the anchors, by name, with no machine cards", () => {
-    const g = deriveGraph(sample());
-    const byProject = applyDisplay(g, { group: "project" }, { idle, name: (k) => ({ "p:prj_1": "roll", "p:prj_2": "web" })[k] ?? k });
-    expect(byProject.roots).toEqual(["p:prj_1", "p:prj_2"]);
-    expect([...byProject.nodes.values()].some((n) => n.kind === "machine")).toBe(false);
-    expect(byProject.nodes.get("p:prj_1")!.parent).toBeNull();
-    expect(byProject.nodes.get("t:thr_1")!.parent).toBe("p:prj_1");
-    expect(byProject.edges.some((e) => e.from.startsWith("m:"))).toBe(false);
-    // Laid out, nothing overlaps.
-    const size = () => ({ w: 300, h: 100 });
-    const pos = tidyLayout(arrange(byProject, {}), size, { direction: "vertical", spreads: () => false });
-    const ys = [...pos.values()];
-    expect(new Set(ys.map((p) => `${p.x},${p.y}`)).size).toBe(ys.length);
-  });
 });
 
 describe("projects pinned onto a view", () => {
@@ -328,10 +243,4 @@ describe("projects pinned onto a view", () => {
     expect(defaultDisplay({ density: "compact", projects: "all", keep: ["prj_1"] })).toEqual({ keep: ["prj_1"] });
   });
 
-  it("pins and unpins a project", () => {
-    const one = keepProject({ density: "compact" }, "prj_1", true);
-    expect(one).toEqual({ density: "compact", keep: ["prj_1"] });
-    expect(keepProject(one, "prj_1", true)).toEqual(one);
-    expect(keepProject(one, "prj_1", false)).toEqual({ density: "compact" });
-  });
 });

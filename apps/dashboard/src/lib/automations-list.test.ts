@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { automation, automationRun, T } from "@/test/automations";
-import { filterAutomations, filterOptions, liveRunOf, recentRunsOf } from "./automations-list";
+import { filterAutomations, liveRunOf, recentRunsOf } from "./automations-list";
 
 const triage = automation();
 const broken = automation({ id: "aut_2", name: "Fix a broken main", trigger: { type: "code", events: ["work"], repos: ["acme/roll"] } });
@@ -39,19 +39,4 @@ describe("the automations list", () => {
     expect(filterAutomations(all, "", { trigger: "code", status: "paused" }, ctx)).toEqual([]);
   });
 
-  it("offers only the values that occur, with counts", () => {
-    const o = filterOptions(all, ctx);
-    expect(o.status).toEqual([
-      { value: "on", count: 2 },
-      { value: "paused", count: 1 },
-      { value: "failing", count: 1 },
-      { value: "running", count: 1 },
-    ]);
-    expect(o.trigger).toEqual([
-      { value: "schedule", count: 1 },
-      { value: "code", count: 1 },
-      { value: "webhook", count: 1 },
-    ]);
-    expect(o.project).toEqual([{ value: "prj_roll", count: 1 }]);
-  });
 });

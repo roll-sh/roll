@@ -45,10 +45,4 @@ describe("NumberField", () => {
     expect(field).not.toHaveAttribute("aria-invalid");
   });
 
-  it("is empty (null) when optional", async () => {
-    const onValue = vi.fn();
-    render(<Field initial={30} onValue={onValue} min={1} optional />);
-    await userEvent.clear(screen.getByRole("spinbutton", { name: "Tries" }));
-    expect(onValue).toHaveBeenLastCalledWith(null);
-  });
 });

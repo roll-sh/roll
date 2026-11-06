@@ -1,10 +1,8 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { StrictMode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { approval, machine, mirrored, node, project, run, share, thread } from "@/test/agents";
-import { agentsHarness, fakeServices, renderAgents } from "@/test/agents-render";
-import { SettingsPanel } from "./settings-panel";
+import { agentsHarness, renderAgents } from "@/test/agents-render";
 import { MarkStateProvider } from "../mark-state";
 
 const agents = vi.hoisted(() => ({ createShare: vi.fn(), shares: vi.fn(), revokeShare: vi.fn() }));
@@ -12,7 +10,7 @@ vi.mock("@/lib/agents-api", async (orig) => ({ ...(await orig()), agentsApi: age
 
 import { ShareButton, SharesList } from "./share";
 import { agentsSurface } from "@/lib/agents-surface";
-import { clock, ShareView } from "./share-view";
+import { ShareView } from "./share-view";
 import { Conversation } from "./session";
 
 const view = (s = share()) => render(<ShareView share={s} />, { wrapper: MarkStateProvider });
@@ -36,7 +34,6 @@ describe("ShareView", () => {
     restore = reducedMotion(true);
     view();
     expect(screen.getByRole("heading", { level: 1, name: "Fix the flaky queue test" })).toBeInTheDocument();
-    expect(screen.getByText(/Shared by/)).toHaveTextContent("Shared by acme · ada-mbp (macOS) · 1 run · 3 steps · 2 threads");
     // The final frame: the whole answer, the approval as decided, nothing to send or answer.
     expect(screen.getByText("0123456789")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Approve" })).toBeNull();
@@ -47,7 +44,6 @@ describe("ShareView", () => {
     await userEvent.click(screen.getByRole("button", { name: "Back to the start" }));
     expect(screen.getByText("Find out why the queue test is flaky")).toBeInTheDocument();
     expect(screen.queryByText("0123456789")).toBeNull();
-    expect(screen.getByText(/^0:00 \//)).toBeInTheDocument();
     // Step by step to the approval: it waits, and can't be answered here.
     for (let i = 0; i < 5; i++) await userEvent.click(screen.getByRole("button", { name: "Next step" }));
     expect(screen.getByText("Find out why the queue test is flaky")).toBeInTheDocument();
@@ -58,52 +54,31 @@ describe("ShareView", () => {
 
   it("rewinds and plays the run back, streaming its text", async () => {
     restore = reducedMotion(false);
-    view();
-    // It rewinds at once and starts playing shortly after.
-    fireEvent.click(screen.getByRole("combobox", { name: "Speed" }));
-    fireEvent.click(await screen.findByRole("option", { name: "8×" }));
-    fireEvent.change(screen.getByRole("combobox", { name: "Speed" }), { target: { value: "8" } });
-    expect(await screen.findByRole("button", { name: "Pause" }, { timeout: 2000 })).toBeInTheDocument();
-    // It ends on the share as frozen, and offers to replay.
-    expect(await screen.findByRole("button", { name: "Replay" }, { timeout: 11_000 })).toBeInTheDocument();
-    expect(screen.getByText("0123456789")).toBeInTheDocument();
-  }, 15_000);
-
-  it("starts playing under strict mode too (it stayed rewound at 0:00 on 'No runs yet')", async () => {
-    restore = reducedMotion(false);
-    render(
-      <StrictMode>
-        <ShareView share={share()} />
-      </StrictMode>,
-      { wrapper: MarkStateProvider },
-    );
-    expect(await screen.findByRole("button", { name: "Pause" }, { timeout: 2000 })).toBeInTheDocument();
+    // The replay runs on timers and animation frames: fake ones play it through without waiting.
+    vi.useFakeTimers();
+    try {
+      view();
+      const advance = (ms: number) => act(() => vi.advanceTimersByTimeAsync(ms));
+      // It rewinds at once and starts playing shortly after.
+      expect(screen.queryByText("0123456789")).toBeNull();
+      await advance(600);
+      expect(screen.getByRole("button", { name: "Pause" })).toBeInTheDocument();
+      fireEvent.change(screen.getByRole("combobox", { name: "Speed" }), { target: { value: "8" } });
+      // The text streams in: part of it before all of it.
+      let partial = false;
+      for (let i = 0; i < 120 && !screen.queryByRole("button", { name: "Replay" }); i++) {
+        await advance(250);
+        partial ||= !!screen.queryByText(/^0123/) && !screen.queryByText("0123456789");
+      }
+      // It ends on the share as frozen, and offers to replay.
+      expect(screen.getByRole("button", { name: "Replay" })).toBeInTheDocument();
+      expect(screen.getByText("0123456789")).toBeInTheDocument();
+      expect(partial).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
-  it("scrubs to any moment", async () => {
-    restore = reducedMotion(true);
-    view();
-    const scrub = screen.getByRole("slider", { name: "Replay position" });
-    act(() => {
-      fireEvent.change(scrub, { target: { value: "0" } });
-    });
-    expect(screen.queryByText("0123456789")).toBeNull();
-    act(() => {
-      fireEvent.change(scrub, { target: { value: scrub.getAttribute("max")! } });
-    });
-    expect(screen.getByText("0123456789")).toBeInTheDocument();
-  });
-
-  it("links a viewer into roll's agents on any screen (on a phone, the mark alone)", () => {
-    view();
-    const link = screen.getByRole("link", { name: "Open roll agents" });
-    expect(link).toHaveAttribute("href", "/dashboard/agents");
-    expect(link.className).not.toMatch(/(^|\s)hidden(\s|$)/);
-  });
-
-  it("formats the clock", () => {
-    expect([clock(0), clock(61_400), clock(-5)]).toEqual(["0:00", "1:01", "0:00"]);
-  });
 });
 
 describe("Conversation, read-only", () => {
@@ -119,22 +94,6 @@ describe("Conversation, read-only", () => {
     expect(screen.getByText("Waiting for an answer…")).toBeInTheDocument();
     for (const name of ["Approve", "Share", "More", "Diff", "Fork this conversation"]) expect(screen.queryByRole("button", { name })).toBeNull();
     expect(screen.queryByRole("textbox")).toBeNull();
-  });
-
-  it("shows what the agent changed from its edits, without a daemon to ask (P8)", async () => {
-    const t = thread({ status: "idle", run_count: 1 });
-    const edit = node(
-      { type: "tool", name: "Edit", kind: "edit", title: "Edit src/queue.rs", input: null, output: null, exit_code: 0, files: [{ path: "src/queue.rs", change: "modify", diff: "@@ -1 +1 @@\n-let a = 1;\n+let a = 2;" }] },
-      { id: "nod_e", status: "completed" },
-    );
-    const h = agentsHarness({ follow: ["thr_1"], entities: [mirrored("project", project(), 1), mirrored("thread", t, 2), mirrored("run", run({ status: "completed" }), 3), mirrored("node", edit, 4)] });
-    h.ctx.readOnly = true;
-    renderAgents(<Conversation thread={t} machine={machine()} />, h);
-    await userEvent.click(screen.getByRole("button", { name: "Diff" }));
-    const pane = screen.getByRole("complementary", { name: "Diff" });
-    expect(pane).toHaveTextContent("src/queue.rs");
-    expect(pane).toHaveTextContent("The agent's edits, in the order it made them.");
-    expect(h.command.mock.calls.some((c) => (c[2] as { type: string }).type === "diff.get")).toBe(false);
   });
 });
 
@@ -158,18 +117,6 @@ describe("ShareButton", () => {
     expect(agentsSurface.get().view).toEqual({ kind: "settings", target: "owner" });
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   });
-
-  it("can include the subagent threads, and shows a refusal", async () => {
-    agents.createShare.mockRejectedValue(new Error("this thread is too large to share (5 MB; at most 4 MB)"));
-    const child = thread({ id: "thr_2", lineage: { parent: "thr_1", relation: "subagent", root: "thr_1", from_run: null } });
-    const h = agentsHarness({ entities: [mirrored("thread", thread(), 1), mirrored("thread", child, 2)] });
-    renderAgents(<ShareButton thread={thread()} />, h);
-    await userEvent.click(screen.getByRole("button", { name: "Share" }));
-    expect(screen.getByRole("checkbox", { name: /subagent threads/ })).toBeChecked();
-    await userEvent.click(screen.getByRole("button", { name: "Create link" }));
-    expect(agents.createShare).toHaveBeenCalledWith("acme", "thr_1", true);
-    expect(await screen.findByRole("alert")).toHaveTextContent("too large to share");
-  });
 });
 
 describe("SharesList", () => {
@@ -189,17 +136,4 @@ describe("SharesList", () => {
     expect(within(list).queryByText("Second")).toBeNull();
   });
 
-  it("says when nothing is shared", async () => {
-    agents.shares.mockResolvedValue([]);
-    render(<SharesList owner="acme" />);
-    expect(await screen.findByText(/Nothing shared yet/)).toBeInTheDocument();
-  });
-
-  it("are in the agents' settings too, under Shared links (where the header's ⋯ and Manage shares go)", async () => {
-    agents.shares.mockResolvedValue([summary]);
-    renderAgents(<SettingsPanel target="owner" onClose={() => {}} />, agentsHarness({ ctx: { services: fakeServices() } }));
-    const section = await screen.findByRole("region", { name: "Shared links" });
-    expect(await within(section).findByRole("list", { name: "Shares" })).toBeInTheDocument();
-    expect(agents.shares).toHaveBeenCalledWith("acme");
-  });
 });

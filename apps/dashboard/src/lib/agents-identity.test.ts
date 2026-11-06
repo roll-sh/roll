@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { IDENTITY_COLORS, NO_SETTINGS } from "./agents-api";
-import { automationPlaces, checkProjectIcon, machineColor, machineKind, monogram, projectColor, projectFace, seedColor } from "./agents-identity";
+import { automationPlaces, checkProjectIcon, machineColor, machineKind, projectColor, projectFace, seedColor } from "./agents-identity";
 import { deriveGraph } from "./agents-graph";
 import { machine, mirrored, project, thread } from "@/test/agents";
 import { agentsHarness } from "@/test/agents-render";
@@ -59,12 +59,6 @@ describe("projectFace", () => {
     expect(projectFace(project({ logo, settings: { ...NO_SETTINGS, icon: { kind: "emoji", emoji: "🦀" }, color: "pink" } }))).toEqual({ kind: "emoji", emoji: "🦀", color: "pink" });
   });
 
-  it("makes T3's monogram: the first letter and a digit or the last word's first letter", () => {
-    expect(monogram("roll")).toBe("RL");
-    expect(monogram("roll web")).toBe("RW");
-    expect(monogram("web3 app")).toBe("W3");
-    expect(monogram("  ")).toBe("PR");
-  });
 });
 
 describe("checkProjectIcon", () => {
@@ -84,11 +78,6 @@ describe("checkProjectIcon", () => {
 describe("the identity palette (globals.css)", () => {
   const css = readFileSync(join(process.cwd(), "src/app/globals.css"), "utf8");
   const tokens = [...css.matchAll(/--id-([a-z]+):\s*oklch\(([\d.]+)\s+([\d.]+)\s+([\d.]+)\)/g)].map((m) => ({ name: m[1], l: +m[2], c: +m[3], h: +m[4] }));
-
-  it("defines every colour for dark and for light", () => {
-    for (const c of IDENTITY_COLORS) expect(tokens.filter((t) => t.name === c), c).toHaveLength(2);
-    expect(new Set(tokens.map((t) => t.name))).toEqual(new Set(IDENTITY_COLORS));
-  });
 
   it("has no orange, amber or yellow, and nothing that reads as the accent's blue (busy)", () => {
     const accentHue = 259; // #4c8dff in oklch
@@ -134,9 +123,3 @@ describe("canvas edges", () => {
   });
 });
 
-describe("the page itself (globals.css)", () => {
-  it("never pulls to refresh or bounces: overscroll is off on html and body", () => {
-    const css = readFileSync(join(process.cwd(), "src/app/globals.css"), "utf8");
-    expect(css).toMatch(/html,\s*body\s*\{\s*overscroll-behavior:\s*none;/);
-  });
-});

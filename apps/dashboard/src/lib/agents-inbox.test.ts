@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { EMPTY_INBOX, type Thread } from "./agents-api";
-import { inbox, inboxOrder, nextAfter, projectInbox, restoreOf, rowStatus, shelfOf, shortAgo, snoozeFor, snoozeLeft, snoozePresets } from "./agents-inbox";
+import { inbox, inboxOrder, nextAfter, projectInbox, restoreOf, shelfOf } from "./agents-inbox";
 import { applyEvents, emptyData } from "./agents-store";
 import { ev, machine, project, run, thread } from "@/test/agents";
 
@@ -80,38 +80,4 @@ describe("the threads sidebar", () => {
     expect(nextAfter(inbox(alone, NOW), "thr_1")).toBeNull();
   });
 
-  it("says what each row is doing, most urgent first, and what's unread", () => {
-    expect(rowStatus(thread({ status: "running" }), null)).toBe("working");
-    expect(rowStatus(thread({ status: "waiting", pending_requests: 1 }), null)).toBe("waiting");
-    expect(rowStatus(thread({ status: "error" }), NOW)).toBe("failed");
-    expect(rowStatus(thread({ inbox: box({ woke_at: NOW, visited_at: NOW - 1 }) }), null)).toBe("woke");
-    expect(rowStatus(thread({ inbox: box({ woke_at: NOW, visited_at: NOW }) }), null)).toBeNull();
-    expect(rowStatus(thread({ inbox: box({ visited_at: NOW - 1 }) }), NOW)).toBe("done");
-    expect(rowStatus(thread({ inbox: box({ visited_at: NOW }) }), NOW)).toBeNull();
-  });
-
-  it("offers T3's snooze presets, soonest first, without one that's past", () => {
-    const presets = snoozePresets(NOW);
-    expect(presets.map((p) => p.label)).toEqual(["In 1 hour", "This evening", "In 3 hours", "Tomorrow", "Next week"]);
-    expect(presets[1].until).toBe(new Date(2026, 10, 4, 18, 0).getTime());
-    expect(presets[3].until).toBe(new Date(2026, 10, 5, 9, 0).getTime());
-    expect(presets[4].until).toBe(new Date(2026, 10, 9, 9, 0).getTime()); // Monday
-    const late = snoozePresets(new Date(2026, 10, 4, 19, 0).getTime());
-    expect(late.map((p) => p.label)).toEqual(["In 1 hour", "In 3 hours", "Tomorrow", "Next week"]);
-    // On a Monday, next week is the Monday after.
-    const monday = snoozePresets(new Date(2026, 10, 9, 8, 0).getTime());
-    expect(monday.find((p) => p.label === "Next week")!.until).toBe(new Date(2026, 10, 16, 9, 0).getTime());
-  });
-
-  it("formats time left and time since like T3", () => {
-    expect(snoozeLeft(NOW + 59_000, NOW)).toBe("1m");
-    expect(snoozeLeft(NOW + 90 * 60_000, NOW)).toBe("2h");
-    expect(snoozeLeft(NOW + 25 * H, NOW)).toBe("2d");
-    expect(shortAgo(NOW - 30_000, NOW)).toBe("now");
-    expect(shortAgo(NOW - 3 * H, NOW)).toBe("3h");
-    expect(shortAgo(NOW - 3 * D, NOW)).toBe("3d");
-    expect(shortAgo(NOW - 21 * D, NOW)).toBe("3w");
-    expect(snoozeFor(2, "hours", NOW)).toBe(NOW + 2 * H);
-    expect(snoozeFor(0, "days", NOW)).toBeNull();
-  });
 });

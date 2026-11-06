@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { isCredentialEnv } from "./agents-api";
-import { customModelError, envNameError, offeredProviders, parseAutoCompact, settingsError, withFields, withProvider } from "./machine-settings";
+import { customModelError, envNameError, parseAutoCompact, settingsError, withFields, withProvider } from "./machine-settings";
 import { memorySettings } from "./agents-services";
 import { DEFAULT_OWNER_SETTINGS, newThreadDefaults, parseOwnerSettings } from "./owner-settings";
 import { notices, seen } from "./agents-notify";
@@ -48,16 +48,6 @@ describe("machine settings in the dashboard", () => {
     expect(withFields({ defaults: { worktree: true } }, { defaults: {} })).toEqual({});
   });
 
-  it("offers what's on, with custom models after the provider's own", () => {
-    const all = [provider(), provider({ id: "codex", name: "Codex", models: [] })];
-    const offered = offeredProviders(all, { providers: { codex: { enabled: false }, claude: { models: [{ id: "big" }, { id: "claude-opus-5-5" }] } } });
-    expect(offered.map((p) => p.id)).toEqual(["claude"]);
-    expect(offered[0].models.map((m) => [m.id, !!m.custom])).toEqual([
-      ["claude-opus-5-5", false],
-      ["claude-sonnet-5", false],
-      ["big", true],
-    ]);
-  });
 });
 
 describe("the owner's settings", () => {

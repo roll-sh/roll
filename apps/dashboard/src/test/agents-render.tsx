@@ -10,7 +10,7 @@ import { NO_INTEGRATIONS } from "@/lib/integrations-api";
 import { DISCONNECTED, memoryLinear } from "@/lib/linear-api";
 import type { SandboxSize } from "@/lib/sandboxes-api";
 import { AgentsContext, type AgentsCtx } from "@/components/agents/use-agents";
-import { machine as machineFixture, M1 } from "./agents";
+import { machine as machineFixture, M1, mirrored, thread as threadFixture } from "./agents";
 
 export interface AgentsHarness {
   client: AgentsClient;
@@ -23,9 +23,27 @@ export interface AgentsHarness {
 }
 
 export function agentsHarness(
-  opts: { machines?: Machine[]; entities?: Mirrored[]; follow?: string[]; reply?: (c: Command) => Reply; ctx?: Partial<AgentsCtx> } = {},
+  opts: {
+    machines?: Machine[];
+    entities?: Mirrored[];
+    follow?: string[];
+    reply?: (c: Command) => Reply;
+    ctx?: Partial<AgentsCtx>;
+    /** A `created` reply to thread.create/fork comes after its thread's record, as the daemon's
+     * does (else the dashboard waits up to 2 s for it). false: the test sends the record itself. */
+    records?: boolean;
+  } = {},
 ): AgentsHarness {
-  const command = vi.fn(async (_m: MachineId, _id: string, c: Command): Promise<Reply> => opts.reply?.(c) ?? { type: "ok" });
+  let cursor = 10_000;
+  const command = vi.fn(async (m: MachineId, _id: string, c: Command): Promise<Reply> => {
+    const r = opts.reply?.(c) ?? { type: "ok" };
+    if (opts.records !== false && r.type === "created" && (c.type === "thread.create" || c.type === "thread.fork") && !client.data.threads.has(r.id)) {
+      const from = c.type === "thread.fork" ? client.data.threads.get(c.thread)?.value : undefined;
+      const project = c.type === "thread.create" ? c.project : (from?.project ?? "prj_1");
+      client.enqueue({ type: "entity", ...mirrored("thread", threadFixture({ ...from, id: r.id, project, title: (c.type === "thread.create" && (c.title ?? c.prompt)) || "New thread" }), ++cursor, m) });
+    }
+    return r;
+  });
   const transport: AgentsTransport = {
     state: async () => ({ cursor: 0, machines: [], entities: [] }),
     stream: () => () => {},

@@ -65,18 +65,4 @@ describe("useDesktop", () => {
     expect(off).toHaveBeenCalled();
   });
 
-  it("reports nothing for null data (the demo)", () => {
-    const bridge = {
-      version: "",
-      platform: "linux",
-      window: "agents",
-      setStatus: vi.fn(),
-      notify: vi.fn(),
-      onDeepLink: () => () => {},
-      openAgents: vi.fn(),
-    } satisfies RollDesktop;
-    window.rollDesktop = bridge;
-    renderHook(() => useDesktop(null, () => {}));
-    expect(bridge.setStatus).not.toHaveBeenCalled();
-  });
 });

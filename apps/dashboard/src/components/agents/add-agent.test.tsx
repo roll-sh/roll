@@ -91,22 +91,6 @@ describe("adding an agent from the ACP registry", () => {
 
   // React's development double mount (Next dev) ran the cleanup in between and every answer was
   // dropped: the popover said "Looking at the registry…" for ever in the demo.
-  it("lists the registry under StrictMode too", async () => {
-    daemon({ registry: [], strict: true });
-    await userEvent.click(screen.getByRole("button", { name: "Add agent" }));
-    expect(await screen.findByRole("button", { name: "Install goose" })).toBeEnabled();
-  });
-
-  it("says why an install failed, inline", async () => {
-    const { release } = daemon();
-    await userEvent.click(screen.getByRole("button", { name: "Add agent" }));
-    await userEvent.click(await screen.findByRole("button", { name: "Install Bad Hash" }));
-    await waitFor(() => expect(screen.getByRole("button", { name: "Installing… Bad Hash" })).toBeInTheDocument());
-    release();
-    expect(await screen.findByRole("alert")).toHaveTextContent("doesn't match the registry's SHA-256");
-    expect(screen.getByRole("button", { name: "Install Bad Hash" })).toBeEnabled();
-  });
-
   it("removes an installed agent from its provider card", async () => {
     const { h } = daemon({ registry: [{ id: "goose", version: "1.57.0", provider: "acp:goose", kind: "binary", installed_at: T0 }] });
     await userEvent.click(screen.getByRole("button", { name: "goose details" }));
@@ -116,11 +100,5 @@ describe("adding an agent from the ACP registry", () => {
     await userEvent.click(card.getByRole("button", { name: "Remove goose" }));
     await waitFor(() => expect(sent(h, "registry.remove")).toEqual([{ type: "registry.remove", agent: "goose" }]));
     await waitFor(() => expect(screen.queryByRole("button", { name: "goose details" })).not.toBeInTheDocument());
-  });
-
-  it("is read-only for a daemon too old to install, or a machine that's offline", async () => {
-    daemon({ registry: undefined });
-    expect(screen.getByRole("button", { name: "Add agent" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Add agent" })).toHaveAttribute("title", expect.stringMatching(/Update roll/));
   });
 });

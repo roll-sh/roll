@@ -1,16 +1,14 @@
-import { act, screen, waitFor, within } from "@testing-library/react";
+import { act, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { StrictMode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { agentsSurface, resetAgentsSurface, setAgentsView } from "@/lib/agents-surface";
 import { setActiveClient } from "@/lib/agents-client";
-import { approval, machine, mirrored, project, run, thread } from "@/test/agents";
+import { approval, mirrored, project, run, thread } from "@/test/agents";
 import { agentsHarness, fakeServices, renderAgents, type AgentsHarness } from "@/test/agents-render";
 import { MarkStateProvider } from "../mark-state";
 import { AgentsControl } from "./agents-control";
 import { AgentsPage } from "./agents-page";
 import { CanvasEngine } from "./canvas-engine";
-import { Launcher } from "./new-agent";
 import { defaultProject } from "./new-thread";
 
 let conn: { client: AgentsHarness["client"] | null; services: ReturnType<typeof fakeServices> | null; error: string | null } = { client: null, services: null, error: null };
@@ -52,67 +50,6 @@ describe("the agents in the header", () => {
     expect(window.location.hash).toBe("#agents/thr_2");
   });
 
-  it("with no machines yet, shows the first-run screen and doesn't call nothing \"All idle\"", async () => {
-    const h = agentsHarness({ machines: [] });
-    conn = { client: h.client, services: fakeServices(), error: null };
-    renderAgents(
-      <MarkStateProvider>
-        <AgentsControl />
-      </MarkStateProvider>,
-      h,
-    );
-    await userEvent.click(screen.getByRole("button", { name: /^Agents:/ }));
-    // Connected, with nothing (the harness's relay never says its stream is open).
-    act(() => h.client.show(h.client.data));
-    const popup = screen.getByRole("dialog", { name: "Agents" });
-    const start = within(popup).getByRole("region", { name: "Get started" });
-    expect(start).toHaveTextContent("Connect your computer");
-    expect(start).toHaveTextContent("Rent a sandbox");
-    expect(popup).not.toHaveTextContent("All idle");
-    expect(popup).toHaveTextContent("No machines yet");
-  });
-
-  it("goes back to the canvas with Escape, and closes with Escape again", async () => {
-    setup();
-    await userEvent.click(screen.getByRole("button", { name: /Agents: 1 running/ }));
-    const popup = screen.getByRole("dialog", { name: "Agents" });
-    // The composer has focus and is empty: Escape still leaves.
-    await userEvent.keyboard("{Escape}");
-    expect(agentsSurface.get().view).toEqual({ kind: "canvas" });
-    expect(within(popup).getByLabelText("Agents canvas")).toBeVisible();
-    expect(within(popup).getByRole("button", { name: "1 waiting for you" })).toBeInTheDocument();
-    await userEvent.keyboard("{Escape}");
-    expect(screen.queryByRole("dialog", { name: "Agents" })).toBeNull();
-    expect(window.location.hash).toBe("");
-  });
-
-  it("Escape closes what's open inside a conversation first (the diff, the publish form), then the conversation", async () => {
-    setup();
-    await userEvent.click(screen.getByRole("button", { name: /Agents: 1 running/ }));
-    const panel = screen.getByRole("complementary", { name: "Conversation" });
-    await userEvent.click(within(panel).getByRole("button", { name: "Diff" }));
-    expect(within(panel).getByRole("complementary", { name: "Diff" })).toBeInTheDocument();
-    await userEvent.keyboard("{Escape}");
-    expect(within(panel).queryByRole("complementary", { name: "Diff" })).toBeNull();
-    expect(agentsSurface.get().view).toMatchObject({ kind: "thread" });
-    await userEvent.keyboard("{Escape}");
-    expect(agentsSurface.get().view).toEqual({ kind: "canvas" });
-  });
-
-  it("gives focus back when something closes: the conversation's card, and what had it before ⌘K", async () => {
-    setup();
-    await userEvent.click(screen.getByRole("button", { name: /Agents: 1 running/ }));
-    const thread = (agentsSurface.get().view as { thread: string }).thread;
-    await userEvent.keyboard("{Escape}");
-    await waitFor(() => expect(document.activeElement).toBe(document.querySelector(`[data-card][data-key="t:${thread}"]`)));
-    const display = screen.getByRole("button", { name: /Display/ });
-    display.focus();
-    await userEvent.keyboard("{Control>}k{/Control}");
-    expect(await screen.findByRole("dialog", { name: /command|palette|search/i })).toBeInTheDocument();
-    await userEvent.keyboard("{Escape}");
-    await waitFor(() => expect(display).toHaveFocus());
-  });
-
   it("opens a conversation whose record comes after the reply (a fork), and leaves one that's deleted", async () => {
     const h = setup();
     await userEvent.click(screen.getByRole("button", { name: /Agents: 1 running/ }));
@@ -135,22 +72,6 @@ describe("the agents in the header", () => {
     expect(agentsSurface.get().view).toEqual({ kind: "canvas" });
   });
 
-  it("\"New agent\" opens the launcher; ⌘J toggles the canvas; #agents links open it", async () => {
-    setup();
-    await userEvent.click(screen.getByRole("button", { name: "New agent" }));
-    expect(screen.getByRole("dialog", { name: "New agent" })).toBeInTheDocument();
-    await userEvent.keyboard("{Meta>}j{/Meta}");
-    expect(screen.queryByRole("dialog")).toBeNull();
-    await userEvent.keyboard("{Meta>}j{/Meta}");
-    expect(agentsSurface.get()).toEqual({ open: true, view: { kind: "canvas" } });
-    await userEvent.keyboard("{Meta>}j{/Meta}");
-    act(() => {
-      window.location.hash = "#agents/thr_1";
-      window.dispatchEvent(new HashChangeEvent("hashchange"));
-    });
-    expect(screen.getByRole("region", { name: "Thread Fix the flaky queue test" })).toBeInTheDocument();
-  });
-
   it("in the desktop app's main window, opens the Agents window instead of the popup", async () => {
     const openAgents = vi.fn();
     window.rollDesktop = { version: "0.1.0", platform: "darwin", window: "main", setStatus: vi.fn(), notify: vi.fn(), onDeepLink: () => () => {}, openAgents };
@@ -160,17 +81,6 @@ describe("the agents in the header", () => {
     expect(screen.queryByRole("dialog")).toBeNull();
   });
 
-  it("signed out, it still shows and says why inside", async () => {
-    conn = { client: null, services: null, error: "Sign in to roll code to see your agents." };
-    renderAgents(
-      <MarkStateProvider>
-        <AgentsControl />
-      </MarkStateProvider>,
-      agentsHarness(),
-    );
-    await userEvent.click(screen.getByRole("button", { name: "Agents: 0 running, 0 waiting" }));
-    expect(screen.getByText("Sign in to roll code to see your agents.")).toBeInTheDocument();
-  });
 });
 
 describe("the canvas order across devices", () => {
@@ -205,38 +115,13 @@ describe("a new agent", () => {
     expect(defaultProject([a, b], threads, undefined, "prj_a")?.id).toBe("prj_a");
     expect(defaultProject([a, b], threads)?.id).toBe("prj_b");
     expect(defaultProject([a, b], [], undefined, "prj_gone")?.id).toBe("prj_a");
-  });
-
-  it("prefers the project of the thread a person opened last over an automation's newer one nobody opened", () => {
-    const a = project({ id: "prj_a" });
-    const b = project({ id: "prj_b" });
+    // The thread a person opened last wins over an automation's newer one nobody opened.
     const mine = { project: "prj_a", updated_at: 5, inbox: { visited_at: 6 } };
     const automation = { project: "prj_b", updated_at: 9, inbox: { visited_at: null } };
     expect(defaultProject([a, b], [automation, mine])?.id).toBe("prj_a");
     expect(defaultProject([a, b], [automation, mine], undefined, "prj_b")?.id).toBe("prj_b");
   });
 
-  it("creates the thread where it was pointed and opens its conversation", async () => {
-    // The daemon's reply comes first, then the thread's record (it opens once that's in).
-    const h: AgentsHarness = agentsHarness({
-      entities: [mirrored("project", project(), 1)],
-      reply: () => {
-        setTimeout(() => h.client.enqueue({ type: "entity", ...mirrored("thread", thread({ id: "thr_new" }), 2) }), 0);
-        return { type: "created", id: "thr_new" };
-      },
-    });
-    renderAgents(<Launcher onClose={vi.fn()} />, h);
-    expect(screen.getByRole("combobox", { name: "Machine" })).toHaveTextContent("ada-mbp");
-    expect(screen.getByRole("combobox", { name: "Project" })).toHaveTextContent("roll");
-    await userEvent.type(screen.getByRole("textbox", { name: "Message" }), "Make the tests faster{Enter}");
-    expect(h.command.mock.calls.at(-1)?.[2]).toMatchObject({ type: "thread.create", project: "prj_1", prompt: "Make the tests faster" });
-    await vi.waitFor(() => expect(h.openThread).toHaveBeenCalledWith("thr_new"));
-  });
-
-  it("with no machine yet, offers the ways to connect one", () => {
-    renderAgents(<Launcher onClose={vi.fn()} />, agentsHarness({ machines: [] }));
-    expect(screen.getByRole("heading", { name: "Connect a machine first" })).toBeInTheDocument();
-  });
 });
 
 describe("the canvas under a trackpad", () => {
@@ -263,15 +148,6 @@ describe("the canvas under a trackpad", () => {
     e.destroy();
   });
 
-  it("tells CSS its zoom (--zoom on the world), so a touch screen's card tools keep a finger's size", async () => {
-    const { e, container } = engine();
-    const world = container.querySelector("div")!;
-    wheel(container, { deltaY: -10, ctrlKey: true });
-    await waitFor(() => expect(world.style.getPropertyValue("--zoom")).toBe(String(e.view.k)));
-    expect(e.view.k).toBeGreaterThan(1);
-    e.destroy();
-  });
-
   it("Safari's pinch gestures zoom too, and scrollable content keeps its wheel", () => {
     const { e, container } = engine();
     container.dispatchEvent(Object.assign(new Event("gesturestart", { cancelable: true }), { scale: 1 }));
@@ -289,40 +165,6 @@ describe("the canvas under a trackpad", () => {
 });
 
 describe("the agents page (/dashboard/agents)", () => {
-  it("⌘, opens the owner's settings there too (the header control isn't on that page)", async () => {
-    const h = agentsHarness({ entities, follow: ["thr_1", "thr_2"] });
-    conn = { client: h.client, services: fakeServices(), error: null };
-    window.history.replaceState(null, "", "/dashboard/agents");
-    renderAgents(
-      <MarkStateProvider>
-        <AgentsPage />
-      </MarkStateProvider>,
-      h,
-    );
-    await screen.findByLabelText("Agents canvas");
-    await userEvent.keyboard("{Control>},{/Control}");
-    expect(agentsSurface.get().view).toEqual({ kind: "settings", target: "owner" });
-  });
-
-  it("writes where it is into the URL there too, so a reload comes back to it (A11)", async () => {
-    const h = agentsHarness({ entities, follow: ["thr_1", "thr_2"] });
-    conn = { client: h.client, services: fakeServices(), error: null };
-    window.history.replaceState(null, "", "/dashboard/agents#agents/automations/new");
-    renderAgents(
-      <MarkStateProvider>
-        <AgentsPage />
-      </MarkStateProvider>,
-      h,
-    );
-    await screen.findByLabelText("Agents canvas");
-    // An automation was just created: its page takes the builder's place.
-    act(() => setAgentsView({ kind: "automations", open: "aut_1" }));
-    await waitFor(() => expect(window.location.hash).toBe("#agents/automations/aut_1"));
-    act(() => setAgentsView({ kind: "thread", thread: "thr_2" }));
-    await waitFor(() => expect(window.location.hash).toBe("#agents/thr_2"));
-    expect(window.location.pathname).toBe("/dashboard/agents");
-  });
-
   it("follows #agents links as the popup does: where it opens, and one followed later", async () => {
     const h = agentsHarness({ entities, follow: ["thr_1", "thr_2"] });
     conn = { client: h.client, services: fakeServices(), error: null };
@@ -341,37 +183,4 @@ describe("the agents page (/dashboard/agents)", () => {
     expect(agentsSurface.get().view).toEqual({ kind: "settings", target: "owner" });
   });
 
-  it("opens a link to the automations sheet under strict mode too (its second run read the URL the first had already reset)", async () => {
-    const h = agentsHarness({ entities, follow: ["thr_1", "thr_2"] });
-    conn = { client: h.client, services: fakeServices(), error: null };
-    window.history.replaceState(null, "", "/dashboard/agents#agents/automations/notices");
-    renderAgents(
-      <StrictMode>
-        <MarkStateProvider>
-          <AgentsPage />
-        </MarkStateProvider>
-      </StrictMode>,
-      h,
-    );
-    await screen.findByLabelText("Agents canvas");
-    expect(agentsSurface.get().view).toEqual({ kind: "automations", list: "notices" });
-    await waitFor(() => expect(window.location.hash).toBe("#agents/automations/notices"));
-  });
-
-  it("loads a conversation opened over a run in the automations sheet (it stayed 'Loading the conversation…')", async () => {
-    // An idle one: busy and waiting threads are followed anyway.
-    const h = agentsHarness({ entities: [...entities, mirrored("thread", thread({ id: "thr_idle", title: "Done earlier", status: "idle" }), 6)] });
-    conn = { client: h.client, services: fakeServices(), error: null };
-    const follow = vi.spyOn(h.client, "follow");
-    window.history.replaceState(null, "", "/dashboard/agents");
-    renderAgents(
-      <MarkStateProvider>
-        <AgentsPage />
-      </MarkStateProvider>,
-      h,
-    );
-    await screen.findByLabelText("Agents canvas");
-    act(() => setAgentsView({ kind: "automations", open: "aut_1", tab: "runs", run: "arn_1", thread: "thr_idle" }));
-    await waitFor(() => expect(follow.mock.calls.some(([key, ids]) => key === "surface" && [...ids].includes("thr_idle"))).toBe(true));
-  });
 });

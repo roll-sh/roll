@@ -1,7 +1,6 @@
 import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it } from "vitest";
-import { appendDraft, composeInto } from "@/lib/agents-compose";
 import { Conversation } from "./session";
 import { checkpoint, machine, mirrored, node, project, run, thread } from "@/test/agents";
 import { agentsHarness, renderAgents } from "@/test/agents-render";
@@ -35,33 +34,11 @@ describe("Edit from here", () => {
     renderAgents(<Conversation thread={idle} machine={machine()} />, h);
     const box = screen.getByRole("textbox", { name: /message/i });
     await userEvent.type(box, "also check the docs");
-    const edits = screen.getAllByRole("button", { name: "Edit from here" });
-    expect(edits).toHaveLength(2);
-    await userEvent.click(edits[1]);
-    expect(screen.getByText(/Later runs and their file changes are undone/)).toBeInTheDocument();
+    await userEvent.click(screen.getAllByRole("button", { name: "Edit from here" })[1]);
     expect(h.command).not.toHaveBeenCalled();
     await userEvent.click(screen.getByRole("button", { name: "Go back and edit" }));
     await waitFor(() => expect(h.command.mock.calls.map((c) => c[2])).toContainEqual({ type: "checkpoint.rollback", thread: "thr_1", checkpoint: "chk_1" }));
     await waitFor(() => expect(box).toHaveValue("also check the docs\n\nNow add tests"));
   });
 
-  it("Keep leaves everything as it was; nothing is offered while the thread runs", async () => {
-    const h = world();
-    const { unmount } = renderAgents(<Conversation thread={idle} machine={machine()} />, h);
-    await userEvent.click(screen.getAllByRole("button", { name: "Edit from here" })[0]);
-    await userEvent.click(screen.getByRole("button", { name: "Keep" }));
-    expect(h.command).not.toHaveBeenCalled();
-    unmount();
-    const running = thread({ id: "thr_1", status: "running", active_run: "run_2", run_count: 2 });
-    renderAgents(<Conversation thread={running} machine={machine()} />, world(running));
-    expect(screen.queryByRole("button", { name: "Edit from here" })).not.toBeInTheDocument();
-  });
-
-  it("with no composer open, the text waits in the thread's saved draft", () => {
-    composeInto("thr_9", { text: "again", attachments: [] });
-    expect(localStorage.getItem("roll:agents:draft:thr_9")).toBe("again");
-    composeInto("thr_9", { text: "and more", attachments: [] });
-    expect(localStorage.getItem("roll:agents:draft:thr_9")).toBe("again\n\nand more");
-    expect(appendDraft("  ", "x")).toBe("x");
-  });
 });

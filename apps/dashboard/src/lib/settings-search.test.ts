@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { normalizeSearch, searchSettings, type SettingItem } from "./settings-search";
+import { searchSettings, type SettingItem } from "./settings-search";
 
 const items: SettingItem[] = [
   { id: "notify", title: "Notifications", section: "General", terms: ["sound", "alert when an agent needs you"] },
@@ -11,10 +11,6 @@ const items: SettingItem[] = [
 ];
 
 describe("searchSettings (T3's settingsSearch)", () => {
-  it("normalizes case, accents and spaces", () => {
-    expect(normalizeSearch("  Ünïcode   Thing ")).toBe("unicode thing");
-  });
-
   it("finds nothing for an empty query", () => {
     expect(searchSettings("   ", items)).toEqual([]);
   });
@@ -37,8 +33,4 @@ describe("searchSettings (T3's settingsSearch)", () => {
     expect(searchSettings("work tree", ranked).map((i) => i.id)).toEqual(["exact", "prefix", "contains", "words", "phrase"]);
   });
 
-  it("keeps the panel's order between equals", () => {
-    expect(searchSettings("worktrees", items).map((i) => i.id)).toEqual(["worktrees", "branch"]);
-    expect(searchSettings("no", items).map((i) => i.id)).toEqual(["notify", "notes"]);
-  });
 });

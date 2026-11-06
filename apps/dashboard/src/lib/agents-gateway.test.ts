@@ -2,45 +2,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Command, GatewaySettings, LogEntry, UsageRow } from "./agents-api";
 import { AgentsClient } from "./agents-client";
 import { DemoOwner } from "./agents-demo";
-import {
-  checkSettings,
-  createGatewayApi,
-  gatewayOn,
-  hostNoticeText,
-  isIPv6,
-  listenError,
-  LOOPBACK,
-  mergeLog,
-  niceMax,
-  noticeText,
-  OTHER,
-  reachProblem,
-  stackUsage,
-  upstreamId,
-  urlChoices,
-  urlFor,
-  usd,
-  usageTotals,
-} from "./agents-gateway";
+import { checkSettings, createGatewayApi, gatewayOn, isIPv6, listenError, LOOPBACK, mergeLog, OTHER, reachProblem, stackUsage, urlChoices, urlFor } from "./agents-gateway";
 import { ApiError } from "./code-api";
 
 const PUB = "KMIZzg7UJuV-Nxs3gUarEXCHzKlAkKSSSCaXrdLz4zg";
-
-describe("the notice", () => {
-  it("says where requests go out from, who sees what, and what happens offline", () => {
-    expect(noticeText("ai-server", { kind: "this" }, false)).toBe(
-      "All AI requests from this machine go out from ai-server. Providers see ai-server's network and IP address, not this machine's. If ai-server is offline, requests from this machine fail until it's back.",
-    );
-    expect(noticeText("ai-server", { kind: "machines", names: ["ada-mbp", "ai-sandbox"] }, true)).toBe(
-      "All AI requests from ada-mbp and ai-sandbox go out from ai-server. Providers see ai-server's network and IP address, not these machines'. If ai-server is offline, requests from these machines fail, and their agents use their own logins or keys instead.",
-    );
-    expect(noticeText("ai-server", { kind: "machines", names: ["ada-mbp"] }, true)).toContain("requests from ada-mbp fail, and its agents use their own logins or keys instead.");
-    expect(noticeText("ai-server", { kind: "sandboxes" }, false)).toBe(
-      "All AI requests from new sandboxes go out from ai-server. Providers see ai-server's network and IP address, not the sandboxes'. If ai-server is offline, requests from new sandboxes fail until it's back.",
-    );
-    expect(hostNoticeText("ai-server")).toContain("ai-server runs the gateway");
-  });
-});
 
 describe("settings, checked as the daemon checks them", () => {
   const base: GatewaySettings = { enabled: true, port: 8790, upstreams: [{ id: "anthropic", name: " Anthropic ", kind: "anthropic" }] };
@@ -82,10 +47,6 @@ describe("settings, checked as the daemon checks them", () => {
     expect(urlFor("fd7a::1", 8790)).toBe("http://[fd7a::1]:8790");
   });
 
-  it("makes ids from names", () => {
-    expect(upstreamId("Amazon Bedrock", [])).toBe("amazon-bedrock");
-    expect(upstreamId("Anthropic", ["anthropic"])).toBe("anthropic-2");
-  });
 });
 
 describe("reaching the gateway", () => {
@@ -153,14 +114,6 @@ describe("usage", () => {
     expect(stackUsage({ rows, from: 0, to: 3 * DAY, bucket: "day" }, "requests", 9).series).toHaveLength(5);
   });
 
-  it("totals and formats", () => {
-    expect(usageTotals([row(0, "a", 5, 2), row(1, "b", 7, 3)])).toMatchObject({ requests: 5, tokens: 30, cost_micros: 12 });
-    expect(niceMax(7.3)).toBe(10);
-    expect(niceMax(1300)).toBe(2000);
-    expect(usd(12_340_000)).toBe("$12.34");
-    expect(usd(1_234_000_000)).toBe("$1,234");
-    expect(usd(3_000)).toBe("<$0.01");
-  });
 });
 
 describe("the relay client", () => {

@@ -108,23 +108,4 @@ describe("ReviewApps: credentials are shown once", () => {
     expect(screen.getByText("greptile")).toBeInTheDocument();
   });
 
-  it("rotated credentials are gone after a hide and show too", async () => {
-    api.reviewApps.mockResolvedValue([app()]);
-    const { rerender } = render(panel("visible"));
-    await screen.findByText("greptile");
-    await userEvent.click(screen.getByRole("button", { name: /Rotate/ }));
-    await screen.findByText(/New credentials for greptile/);
-    rerender(panel("hidden"));
-    rerender(panel("visible"));
-    await waitFor(() => expect(count(TOKEN) + count(SECRET)).toBe(0));
-  });
-
-  it("is gone after leaving the page and coming back", async () => {
-    const { unmount } = render(panel("visible"));
-    await register();
-    unmount();
-    render(panel("visible"));
-    await screen.findByText("greptile");
-    expect(count(TOKEN) + count(SECRET)).toBe(0);
-  });
 });

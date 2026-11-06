@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { BlameRange } from "./code-api";
-import { blameChangesets, blameNote, blameRows, isBlameKey } from "./blame";
+import { blameChangesets, blameRows } from "./blame";
 
 const range = (start: number, end: number, changeset: string, time = 100): BlameRange => ({
   start,
@@ -51,26 +51,4 @@ describe("blame extras", () => {
     expect(list.map((r) => r.changeset)).toEqual(["cs_b", "cs_a"]);
   });
 
-  it("explains binary files and truncated history", () => {
-    expect(blameNote({ binary: true, complete: true })).toMatch(/binary/);
-    expect(blameNote({ binary: false, complete: false })).toMatch(/oldest changeset/);
-    expect(blameNote({ binary: false, complete: true })).toBeNull();
-  });
-
-  it("toggles on b, not while typing or with modifiers", () => {
-    const k = (key: string, mods: Partial<Record<"metaKey" | "ctrlKey" | "altKey", boolean>> = {}) => ({
-      key,
-      metaKey: false,
-      ctrlKey: false,
-      altKey: false,
-      ...mods,
-    });
-    expect(isBlameKey(k("b"), { tagName: "BODY" })).toBe(true);
-    expect(isBlameKey(k("b"), null)).toBe(true);
-    expect(isBlameKey(k("B"), null)).toBe(false);
-    expect(isBlameKey(k("b", { metaKey: true }), null)).toBe(false);
-    expect(isBlameKey(k("b"), { tagName: "INPUT" })).toBe(false);
-    expect(isBlameKey(k("b"), { tagName: "TEXTAREA" })).toBe(false);
-    expect(isBlameKey(k("b"), { tagName: "DIV", isContentEditable: true })).toBe(false);
-  });
 });

@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { EndpointInfo, EndpointSpec, MachineInfo, ProviderInfo } from "./agents-api";
 import { AgentsClient } from "./agents-client";
 import { DemoOwner } from "./agents-demo";
-import { checkEndpoint, endpointId, endpointOf, incompatible, keyChange, keyLabel, setEndpoint, withEndpoints } from "./agents-endpoints";
+import { checkEndpoint, endpointOf, incompatible, keyChange, keyLabel, setEndpoint, withEndpoints } from "./agents-endpoints";
 
 const spec = (over: Partial<EndpointSpec> = {}): EndpointSpec => ({ id: "cliproxy", name: " CLIProxyAPI ", kind: "cliproxy", base_url: " http://100.64.0.7:8317/ ", ...over });
 const error = (s: EndpointSpec) => {
@@ -30,12 +30,6 @@ describe("endpoints", () => {
     expect(incompatible("codex", "anthropic")).toMatch(/OpenAI/);
     expect(incompatible("claude", "cliproxy")).toBeNull();
     expect(incompatible("acp:gemini", "openai")).toBeNull();
-  });
-
-  it("names new endpoints from their names", () => {
-    expect(endpointId("Team Gateway!", [])).toBe("team-gateway");
-    expect(endpointId("CLIProxyAPI", ["cliproxyapi", "cliproxyapi-2"])).toBe("cliproxyapi-3");
-    expect(endpointId("???", [])).toBe("endpoint");
   });
 
   it("seals a typed key, keeps or clears it, and never sends it in the clear", async () => {

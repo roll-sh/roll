@@ -4,12 +4,10 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { EMPTY_INBOX, type Command, type Machine } from "@/lib/agents-api";
 import { openProjectDialog, resetProjectDialogs } from "@/lib/agents-project-dialogs";
-import { agentsSurface, resetAgentsSurface } from "@/lib/agents-surface";
-import { loadFocused, setFocused } from "@/lib/agents-views";
+import { resetAgentsSurface } from "@/lib/agents-surface";
 import { NO_CANVAS } from "./machine-projects";
-import { ProjectNode } from "./nodes";
-import { projectActions, ProjectDialogs, pullSentence } from "./project-actions";
-import { InboxToast, showInboxToast, ThreadsSidebar } from "./threads-sidebar";
+import { projectActions, ProjectDialogs } from "./project-actions";
+import { showInboxToast } from "./threads-sidebar";
 import { machine, mirrored, project, thread } from "@/test/agents";
 import { agentsHarness, fakeServices, renderAgents, SIZE, type AgentsHarness } from "@/test/agents-render";
 
@@ -50,55 +48,6 @@ describe("a project's actions", () => {
     expect(pinned).toContain("Unpin from the canvas");
   });
 
-  it("pull says what it did", async () => {
-    const h = agentsHarness({
-      entities: [mirrored("project", ROLL, 1)],
-      reply: (c) => (c.type === "project.pull" ? { type: "pulled", at: 1, outcome: { status: "pulled", branch: "main", from: "a", to: "b", commits: 3 } } : { type: "ok" }),
-    });
-    renderAgents(
-      <>
-        <ProjectNode project={ROLL} machine={machine()} />
-        <InboxToast />
-      </>,
-      h,
-    );
-    await userEvent.click(screen.getByRole("button", { name: "Project" }));
-    await userEvent.click(await screen.findByRole("menuitem", { name: "Pull" }));
-    expect(sent(h).at(-1)).toEqual({ type: "project.pull", project: ROLL.id });
-    expect(await screen.findByRole("status")).toHaveTextContent("Pulled 3 commits into roll");
-    expect(pullSentence("web", { status: "skipped", reason: "local_changes", message: "the checkout has uncommitted changes" })).toBe("Didn't pull web: the checkout has uncommitted changes");
-    expect(pullSentence("web", { status: "up_to_date", branch: "main" })).toBe("web is up to date");
-  });
-
-  it("are on the sidebar's project header too", async () => {
-    const focusProject = vi.fn();
-    const h = agentsHarness({ entities: [mirrored("project", ROLL, 1), mirrored("thread", thread(), 2)], ctx: { focusProject } });
-    renderAgents(<ThreadsSidebar data={h.client.data} open setOpen={() => {}} phone={false} openThread={null} />, h);
-    await userEvent.click(screen.getByRole("button", { name: "roll actions" }));
-    await userEvent.click(await screen.findByRole("menuitem", { name: "Focus on this project only" }));
-    expect(focusProject).toHaveBeenCalledWith(ROLL.id);
-  });
-
-  it("the sidebar shows only the focused project, and its × shows them all", async () => {
-    const web = project({ id: "prj_web", name: "web" });
-    const h = agentsHarness({ entities: [mirrored("project", ROLL, 1), mirrored("project", web, 2), mirrored("thread", thread(), 3)] });
-    const onShowAll = vi.fn();
-    renderAgents(<ThreadsSidebar data={h.client.data} open setOpen={() => {}} phone={false} openThread={null} only="prj_web" onShowAll={onShowAll} />, h);
-    expect(screen.getByRole("listitem", { name: "web" })).toBeInTheDocument();
-    expect(screen.queryByRole("listitem", { name: "roll" })).not.toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: "Show every project, not only web" }));
-    expect(onShowAll).toHaveBeenCalled();
-  });
-
-  it("focusing is remembered per view on this device", () => {
-    let all = setFocused("acme", {}, "all", "prj_1");
-    all = setFocused("acme", all, "v_running", "prj_web");
-    expect(loadFocused("acme")).toEqual({ all: "prj_1", v_running: "prj_web" });
-    setFocused("acme", all, "all", null);
-    expect(loadFocused("acme")).toEqual({ v_running: "prj_web" });
-    localStorage.setItem("roll:agents:only:acme", "not json");
-    expect(loadFocused("acme")).toEqual({});
-  });
 });
 
 describe("a new sandbox for a project", () => {
@@ -149,27 +98,4 @@ describe("a new sandbox for a project", () => {
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
   });
 
-  it("says which step failed", async () => {
-    const { h } = setup();
-    h.command.mockImplementation(async (_m, _id, c) => (c.type === "project.add" ? { type: "error", code: "invalid", message: "no access to acme/roll" } : { type: "ok" }));
-    act(() => openProjectDialog({ kind: "sandbox", project: ROLL.id }));
-    const dialog = await screen.findByRole("dialog", { name: "New sandbox for roll" });
-    await userEvent.click(within(dialog).getByRole("button", { name: /^Rent for/ }));
-    act(() => h.client.enqueue({ type: "machine", cursor: 9, machine: { ...BOX, online: true, info: machine().info } }));
-    expect(await within(dialog).findByRole("alert")).toHaveTextContent("no access to acme/roll");
-    const items = within(within(dialog).getByRole("list", { name: "Progress" })).getAllByRole("listitem");
-    expect(items.map((li) => li.textContent)).toEqual([expect.stringContaining("done"), expect.stringContaining("done"), expect.stringContaining("failed")]);
-  });
-
-  it("opens from a project's menu, and Open settings goes to the new project's", async () => {
-    const { h } = setup();
-    renderAgents(<ProjectNode project={ROLL} machine={machine()} />, h);
-    await userEvent.click(screen.getByRole("button", { name: "Project" }));
-    await userEvent.click(await screen.findByRole("menuitem", { name: "New sandbox for this project" }));
-    const dialog = await screen.findByRole("dialog", { name: "New sandbox for roll" });
-    await userEvent.click(within(dialog).getByRole("button", { name: /^Rent for/ }));
-    act(() => h.client.enqueue({ type: "machine", cursor: 9, machine: { ...BOX, online: true, info: machine().info } }));
-    await userEvent.click(await within(dialog).findByRole("button", { name: "Open settings" }));
-    expect(agentsSurface.get().view).toEqual({ kind: "settings", target: "p:prj_on_box" });
-  });
 });

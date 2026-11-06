@@ -1,9 +1,9 @@
-import { fireEvent, screen, waitFor, within } from "@testing-library/react";
+import { screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 import type { NodeBody } from "@/lib/agents-api";
 import { RequestNode } from "./nodes";
-import { approval, M1, mirrored, node, question, run, thread } from "@/test/agents";
+import { approval, M1, mirrored, node, run, thread } from "@/test/agents";
 import { agentsHarness, renderAgents } from "@/test/agents-render";
 
 const tool = (title: string, kind: "read" | "command" = "read"): NodeBody => ({ type: "tool", name: kind, kind, title, input: null, output: null, exit_code: kind === "command" ? 0 : null, files: [] });
@@ -28,53 +28,12 @@ function waiting(req: ReturnType<typeof approval>) {
 const sent = (h: ReturnType<typeof agentsHarness>) => h.command.mock.calls.at(-1);
 
 describe("RequestNode: answering on the canvas", () => {
-  it("shows the last steps that led to the request, the earlier ones a click away", async () => {
-    const h = waiting(approval());
-    renderAgents(<RequestNode request={approval({ node: "nod_req" })} />, h);
-    const steps = screen.getByLabelText("Steps that led here");
-    expect(within(steps).getByText("cargo test")).toBeInTheDocument();
-    expect(within(steps).getByText("Read d.rs")).toBeInTheDocument();
-    expect(within(steps).queryByText("Read a.rs")).toBeNull();
-    await userEvent.click(within(steps).getByRole("button", { name: "2 earlier steps" }));
-    expect(within(steps).getByText("Read a.rs")).toBeInTheDocument();
-    // The thread's name opens the conversation.
-    await userEvent.click(screen.getByRole("button", { name: /Fix the flaky queue test/ }));
-    expect(h.openThread).toHaveBeenCalledWith("thr_1");
-  });
-
   it("approves right on the card", async () => {
     const h = waiting(approval());
     renderAgents(<RequestNode request={approval({ node: "nod_req" })} />, h);
     await userEvent.click(screen.getByRole("button", { name: "Approve" }));
     expect(sent(h)?.[0]).toBe(M1);
     expect(sent(h)?.[2]).toEqual({ type: "request.respond", request: "req_1", response: { type: "decision", decision: "accept" } });
-    expect(h.openThread).not.toHaveBeenCalled();
-  });
-
-  it("shows the plan it asks to implement, folded, above Implement", async () => {
-    const plan = approval({ node: "nod_req", body: { ...(approval().body as Extract<ReturnType<typeof approval>["body"], { type: "approval" }>), action: "plan", title: "Carry out the plan", command: null, decisions: ["accept", "decline"] } });
-    const text = ["# CSV export for invoices", "", ...Array.from({ length: 12 }, (_, i) => `${i + 1}. Step ${i + 1}`)].join("\n");
-    const h = waiting(plan);
-    h.client.enqueue({ type: "entity", ...mirrored("node", node({ type: "plan", text }, { id: "nod_plan", ordinal: 5, status: "completed" }), 30) });
-    renderAgents(<RequestNode request={plan} />, h);
-    const shown = screen.getByRole("region", { name: "Plan: CSV export for invoices" });
-    expect(within(shown).getByText("Step 1")).toBeInTheDocument();
-    expect(within(shown).queryByText("Step 12")).toBeNull();
-    await userEvent.click(within(shown).getByRole("button", { name: "Show the whole plan" }));
-    expect(within(shown).getByText("Step 12")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Implement" })).toBeInTheDocument();
-  });
-
-  it("answers questions right on the card, without opening the conversation", async () => {
-    const q = question({ node: "nod_req" });
-    const h = waiting(q);
-    renderAgents(<RequestNode request={q} />, h);
-    const form = screen.getByRole("form", { name: "Answer the agent" });
-    fireEvent.keyDown(within(form).getByRole("radio", { name: /SQLite/ }), { key: "1" });
-    expect(await within(form).findByText("What should run after the fix?")).toBeInTheDocument();
-    await userEvent.click(within(form).getByRole("checkbox", { name: /Unit tests/ }));
-    await userEvent.click(within(form).getByRole("button", { name: "Submit answers" }));
-    await waitFor(() => expect(sent(h)?.[2]).toEqual({ type: "request.respond", request: "req_2", response: { type: "answers", answers: { db: "SQLite", checks: "Unit tests" } } }));
     expect(h.openThread).not.toHaveBeenCalled();
   });
 

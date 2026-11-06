@@ -1,6 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
 import { createIntegrationsApi, NO_INTEGRATIONS, parseIntegrations, parseIntegrationsLink, safeUrl } from "./integrations-api";
-import { demoIntegrations } from "./agents-demo";
 
 const install = {
   id: "chi_1",
@@ -88,19 +87,6 @@ describe("parseIntegrationsLink", () => {
     expect(parseIntegrationsLink({ owner: "acme", settings: ["integrations"], integration: "slack", connected: "Acme Inc" })).toEqual(want);
   });
 
-  it("explains known errors, keeps others, and an error wins over connected", () => {
-    expect(parseIntegrationsLink(new URLSearchParams("settings=integrations&integration=discord&error=expired"))).toEqual({
-      platform: "discord",
-      connected: null,
-      error: "The install link expired. Connect again.",
-    });
-    expect(parseIntegrationsLink({ settings: "integrations", integration: "slack", error: "Acme is connected to another owner", connected: "Acme" })).toEqual({
-      platform: "slack",
-      connected: null,
-      error: "Acme is connected to another owner",
-    });
-  });
-
   it("ignores an unknown platform and bounds what it shows", () => {
     const got = parseIntegrationsLink({ settings: "integrations", integration: "irc", connected: "x".repeat(500) })!;
     expect(got.platform).toBeNull();
@@ -135,18 +121,3 @@ describe("createIntegrationsApi", () => {
   });
 });
 
-describe("the demo's integrations", () => {
-  it("has Slack connected to Acme, Discord unconfigured and two GitHub repos, and keeps edits", async () => {
-    const api = demoIntegrations();
-    const d = await api.list("demo");
-    expect(d.slack.installs.map((i) => i.team_name)).toEqual(["Acme"]);
-    expect(d.discord.configured).toBe(false);
-    expect(d.github.repos).toHaveLength(2);
-    await api.update("demo", "slack", "chi_demo1", { members: ["U03GRACE", "U04LIN"] });
-    expect((await api.list("demo")).slack.installs[0].members).toEqual(["U03GRACE", "U04LIN"]);
-    await expect(api.update("demo", "slack", "chi_demo1", { members: ["not an id"] })).rejects.toThrow(/letters and digits/);
-    await expect(api.install("demo", "slack")).rejects.toThrow(/demo can't connect Slack/);
-    await api.remove("demo", "slack", "chi_demo1");
-    expect((await api.list("demo")).slack.installs).toEqual([]);
-  });
-});

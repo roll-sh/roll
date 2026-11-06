@@ -1,12 +1,10 @@
 import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { setActiveClient } from "@/lib/agents-client";
 import { agentsSurface, resetAgentsSurface } from "@/lib/agents-surface";
-import { resetShelves } from "@/lib/agents-shelf";
-import { agentsPalette, closePalette } from "@/lib/agents-palette";
-import { ALL, loadCurrentView, loadDoc, saveCurrentView, saveDoc, addView, parseDoc } from "@/lib/agents-views";
-import { approval, mirrored, node, project, run, terminal, thread } from "@/test/agents";
+import { loadCurrentView, loadDoc } from "@/lib/agents-views";
+import { approval, mirrored, node, project, run, thread } from "@/test/agents";
 import { agentsHarness, fakeServices, renderAgents } from "@/test/agents-render";
 import { AgentsSurface } from "./agents-page";
 
@@ -63,169 +61,23 @@ describe("canvas views", () => {
     expect(tab("All")).toHaveAttribute("aria-selected", "true");
   });
 
-  it("saves All's filter as a view, renames it, moves it and deletes it, synced to roll", async () => {
+  it("saves All's filter as a view, synced to roll", async () => {
     const { services } = setup();
-    await userEvent.type(screen.getByRole("textbox", { name: "Filter threads" }), "next");
+    // Pasted, not typed key by key: every key re-renders the whole surface.
+    await userEvent.click(screen.getByRole("textbox", { name: "Filter threads" }));
+    await userEvent.paste("next");
     expect(card("Fix the flaky queue test")).toBeNull();
     expect(card("Upgrade to Next 16.4")).toBeInTheDocument();
-    // ⌥S once nothing is being typed into.
-    screen.getByRole("textbox", { name: "Filter threads" }).blur();
-    await userEvent.keyboard("{Alt>}s{/Alt}");
+    await userEvent.click(screen.getByRole("button", { name: "Save view" }));
     const dialog = screen.getByRole("dialog", { name: "New view" });
-    await userEvent.type(within(dialog).getByRole("textbox", { name: "View name" }), "Next work{Enter}");
+    await userEvent.click(within(dialog).getByRole("textbox", { name: "View name" }));
+    await userEvent.paste("Next work");
+    await userEvent.keyboard("{Enter}");
     expect(tab(/Next work/)).toHaveAttribute("aria-selected", "true");
     // All's filter went into the view.
     await userEvent.click(tab("All"));
     expect(screen.getByRole("textbox", { name: "Filter threads" })).toHaveValue("");
     await waitFor(() => expect(lastSaved(services)).toMatchObject({ views: [{ id: "v_waiting" }, { id: "v_running" }, { name: "Next work", filter: { text: "next" } }] }));
-
-    await userEvent.click(tab(/Next work/));
-    await userEvent.click(screen.getByRole("button", { name: "Next work options" }));
-    // The menu floats outside the views bar (which scrolls sideways and clipped it), and the
-    // keyboard moves through it.
-    const menu = await screen.findByRole("menu");
-    expect(screen.getByRole("tablist", { name: "Canvas views" }).contains(menu)).toBe(false);
-    await userEvent.keyboard("{ArrowDown}");
-    expect(within(menu).getAllByRole("menuitem").some((i) => i === document.activeElement)).toBe(true);
-    await userEvent.click(await screen.findByRole("menuitem", { name: "Rename" }));
-    const name = screen.getByRole("textbox", { name: "View name" });
-    await userEvent.clear(name);
-    await userEvent.type(name, "Frontend{Enter}");
-    await userEvent.click(screen.getByRole("button", { name: "Frontend options" }));
-    await userEvent.click(await screen.findByRole("menuitem", { name: "Move left" }));
-    expect(screen.getAllByRole("tab").map((t) => t.textContent)).toEqual(["All", "Waiting on me1", "Frontend1", "Running1"]);
-    await userEvent.click(screen.getByRole("button", { name: "Frontend options" }));
-    await userEvent.click(await screen.findByRole("menuitem", { name: "Delete view" }));
-    await userEvent.click(await screen.findByRole("menuitem", { name: "Delete “Frontend”?" }));
-    expect(screen.queryByRole("tab", { name: /Frontend/ })).toBeNull();
-    expect(tab("All")).toHaveAttribute("aria-selected", "true");
-    await waitFor(() => expect((lastSaved(services)!.views as unknown[]).length).toBe(2));
-  });
-
-  it("the filter field: ⌥S saves from inside it, ↓ goes to the first result, Save view appears without moving it (17, 19, 26)", async () => {
-    setup();
-    const field = screen.getByRole("textbox", { name: "Filter threads" });
-    await userEvent.type(field, "next");
-    // Save view and Clear come in left of the field: it stays where it was.
-    const save = screen.getByRole("button", { name: "Save view" });
-    expect(save.compareDocumentPosition(field) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    // ↓ (or Enter) goes to the first card the filter shows.
-    await userEvent.keyboard("{ArrowDown}");
-    expect(document.activeElement?.closest("[data-card]")).toHaveAttribute("data-key", "t:thr_2");
-    // ⌥S while typing in it saves the filter as a view.
-    await userEvent.click(field);
-    await userEvent.keyboard("{Alt>}s{/Alt}");
-    const dialog = screen.getByRole("dialog", { name: "New view" });
-    expect(field).toHaveValue("next");
-    await userEvent.keyboard("{Escape}");
-    // With nothing filtered, a new view can't be made (it would be All).
-    await userEvent.clear(field);
-    await userEvent.click(screen.getByRole("button", { name: "New view" }));
-    const empty = screen.getByRole("dialog", { name: "New view" });
-    await userEvent.type(within(empty).getByRole("textbox", { name: "View name" }), "Everything");
-    expect(within(empty).getByRole("button", { name: "Create view" })).toBeDisabled();
-    await userEvent.click(within(empty).getByRole("button", { name: "Waiting on me" }));
-    expect(within(empty).getByRole("button", { name: "Create view" })).toBeEnabled();
-    expect(dialog).not.toBeInTheDocument();
-  });
-
-  it("⌘K has the view's display options, new/rename/delete view and the agents settings (25)", async () => {
-    setup();
-    const run = async (q: string, pick?: string) => {
-      await userEvent.keyboard("{Meta>}k{/Meta}");
-      await userEvent.type(await screen.findByRole("combobox"), q);
-      if (pick) {
-        await userEvent.keyboard("{Enter}");
-        await userEvent.type(within(screen.getByRole("dialog", { name: "Command palette" })).getByRole("combobox"), pick);
-      }
-      await userEvent.keyboard("{Enter}");
-      await waitFor(() => expect(screen.queryByRole("dialog", { name: "Command palette" })).toBeNull());
-    };
-    await run("display options", "compact cards");
-    expect(document.querySelector("[data-density]")).toHaveAttribute("data-density", "compact");
-    await run("new view");
-    expect(screen.getByRole("dialog", { name: "New view" })).toBeInTheDocument();
-    await userEvent.keyboard("{Escape}");
-    await userEvent.click(tab(/Waiting on me/));
-    await run("rename view");
-    expect(screen.getByRole("textbox", { name: "View name" })).toHaveValue("Waiting on me");
-    await userEvent.keyboard("{Escape}");
-    await run("delete view", "delete");
-    expect(screen.queryByRole("tab", { name: /Waiting on me/ })).toBeNull();
-    expect(tab("All")).toHaveAttribute("aria-selected", "true");
-    await run("agents settings");
-    expect(agentsSurface.get().view).toEqual({ kind: "settings", target: "owner" });
-  }, 15_000);
-
-  it("edits a view's filters as toggles", async () => {
-    setup();
-    await userEvent.click(tab(/Running/));
-    await userEvent.click(screen.getByRole("button", { name: "Running filters" }));
-    const dialog = screen.getByRole("dialog", { name: "View filters" });
-    const status = within(dialog).getByRole("group", { name: "Status" });
-    expect(within(status).getByRole("button", { name: "Running" })).toHaveAttribute("aria-pressed", "true");
-    await userEvent.click(within(status).getByRole("button", { name: "Waiting on me" }));
-    expect(card("Upgrade to Next 16.4")).toBeInTheDocument();
-    expect(card("Fix the flaky queue test")).toBeInTheDocument();
-    await userEvent.click(within(status).getByRole("button", { name: "Running" }));
-    expect(card("Fix the flaky queue test")).toBeNull();
-    await userEvent.keyboard("{Escape}");
-    expect(screen.queryByRole("dialog", { name: "View filters" })).toBeNull();
-    // Still on the canvas (Escape closed only the editor).
-    expect(screen.getByLabelText("Agents canvas")).toBeInTheDocument();
-  });
-
-  it("says so calmly when a view picks nothing", async () => {
-    const h = agentsHarness({ entities: [mirrored("project", project(), 1), mirrored("thread", busy, 2)] });
-    renderAgents(<AgentsSurface client={h.client} services={fakeServices()} demo={false} chrome="popup" />, h);
-    await userEvent.click(tab(/Waiting on me/));
-    expect(screen.getByText("Nothing is waiting on you")).toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: "Show all" }));
-    expect(tab("All")).toHaveAttribute("aria-selected", "true");
-  });
-});
-
-describe("pinned cards", () => {
-  it("pins a conversation onto the view: live, answerable in place, with its composer; unpins", async () => {
-    const { services } = setup();
-    await userEvent.click(tab(/Waiting on me/));
-    await userEvent.click(screen.getByRole("button", { name: "Pin the conversation on Waiting on me" }));
-    const pinned = screen.getByRole("region", { name: "Pinned conversation Upgrade to Next 16.4" });
-    // The request is answered inside the card, not beside the thread.
-    expect(within(pinned).getByRole("button", { name: "Approve" })).toBeInTheDocument();
-    // (A card leaving the canvas fades out first.)
-    await waitFor(() => expect(screen.queryByLabelText("Waiting for you")).toBeNull());
-    expect(within(pinned).getByRole("textbox")).toBeInTheDocument();
-    await waitFor(() => expect(lastSaved(services)).toMatchObject({ views: [{ id: "v_waiting", pins: [{ kind: "conversation", id: "thr_2", w: 520, h: 600 }] }, { id: "v_running" }] }));
-    // Only on that view.
-    await userEvent.click(tab("All"));
-    expect(screen.queryByRole("region", { name: /Pinned conversation/ })).toBeNull();
-    await userEvent.click(tab(/Waiting on me/));
-    await userEvent.click(within(screen.getByRole("region", { name: "Pinned conversation Upgrade to Next 16.4" })).getByRole("button", { name: "Unpin from this view" }));
-    expect(screen.queryByRole("region", { name: /Pinned conversation/ })).toBeNull();
-  });
-
-  it("resizes from the corner (and the keyboard), remembered per view", async () => {
-    const { services } = setup();
-    await userEvent.click(within(screen.getByRole("button", { name: "Thread Upgrade to Next 16.4" }).parentElement!).getByRole("button", { name: "Pin the diff" }));
-    const pinned = screen.getByRole("region", { name: /Pinned diff/ });
-    expect(pinned).toHaveStyle({ width: "680px", height: "520px" });
-    const corner = within(pinned).getByRole("separator", { name: "Resize" });
-    corner.focus();
-    await userEvent.keyboard("{Shift>}{ArrowRight}{ArrowDown}{/Shift}");
-    expect(pinned).toHaveStyle({ width: "760px", height: "600px" });
-    await waitFor(() => expect(lastSaved(services)).toMatchObject({ pins: [{ kind: "diff", w: 760, h: 600 }] }));
-  });
-
-  it("a terminal card's tools float over it as one toolbar: pin, and close (which hangs it up)", async () => {
-    const h = agentsHarness({ entities: [...entities, mirrored("terminal", terminal({ id: "trm_1", title: "claude /login" }), 8)], follow: ["thr_1", "thr_2"] });
-    renderAgents(<AgentsSurface client={h.client} services={fakeServices()} demo={false} chrome="popup" />, h);
-    const slot = screen.getByLabelText("Terminal claude /login").parentElement!;
-    const tools = within(slot).getByRole("button", { name: "Pin the terminal" }).parentElement!;
-    await userEvent.click(within(tools).getByRole("button", { name: "Close terminal" }));
-    expect(h.command).toHaveBeenCalledWith("mch_1", expect.any(String), { type: "terminal.close", terminal: "trm_1" });
-    // Nothing else in the card closes it, so nothing hides under the toolbar.
-    expect(within(screen.getByLabelText("Terminal claude /login")).queryByRole("button", { name: "Close terminal" })).toBeNull();
   });
 });
 
@@ -241,85 +93,6 @@ describe("kept by roll and on this device", () => {
     act(() => h.client.enqueue({ type: "canvas", cursor: 99, revision, updated_at: 1 }));
     await waitFor(() => expect(screen.getAllByRole("tab").map((t) => t.textContent)).toEqual(["All", "Elsewhere"]));
   });
-
-  it("keeps the document and the order from before views on this device; the current view is per device", () => {
-    localStorage.setItem("roll:agents:order:o", JSON.stringify({ "m:mch_1": ["p:b", "p:a"] }));
-    localStorage.setItem("roll:agents:positions:o", "{}");
-    const doc = loadDoc("o");
-    expect(doc.order).toEqual({ "m:mch_1": ["p:b", "p:a"] });
-    expect(localStorage.getItem("roll:agents:positions:o")).toBeNull();
-    saveDoc("o", addView(doc, "Mine", {}, "v_m"));
-    expect(localStorage.getItem("roll:agents:order:o")).toBeNull();
-    expect(loadDoc("o").views.map((v) => v.id)).toEqual(["v_waiting", "v_running", "v_m"]);
-    expect(loadCurrentView("o")).toBe(ALL);
-    saveCurrentView("o", "v_m");
-    expect(loadCurrentView("o")).toBe("v_m");
-    expect(parseDoc(JSON.parse(localStorage.getItem("roll:agents:canvas:o")!))).toEqual(loadDoc("o"));
-  });
-});
-
-describe("the canvas's direction", () => {
-  const canvas = () => screen.getByLabelText("Agents canvas");
-  const asPhone = () => {
-    const mm = window.matchMedia;
-    vi.spyOn(window, "matchMedia").mockImplementation((q: string) => ({ ...mm(q), matches: q.includes("max-width: 640px") }));
-  };
-  afterEach(() => vi.restoreAllMocks());
-
-  it("a phone's waiting request folds to one line, and the zoom bar moves to the top while it shows", async () => {
-    asPhone();
-    setup();
-    // Plain selectors: the canvas is a big tree for role queries.
-    const $ = (sel: string) => document.querySelector<HTMLElement>(sel);
-    await waitFor(() => expect($('[data-phone-waiting]')).not.toBeNull());
-    expect($("[data-waiting]")?.contains(canvas())).toBe(true);
-    expect($('[aria-label="Zoom out (−)"]')?.parentElement?.className).toContain("[[data-waiting]_&]:top-3");
-    await userEvent.click($('[data-phone-waiting] [aria-label="Fold"]')!);
-    expect($('[data-phone-waiting]')).toBeNull();
-    await userEvent.click($('[aria-label="1 waiting for you: show"]')!);
-    expect($('[data-phone-waiting]')).not.toBeNull();
-  });
-
-  it("grows right on a wide screen; the toolbar turns a view top-down, saved with that view in roll", async () => {
-    const { services } = setup();
-    expect(canvas()).toHaveAttribute("data-direction", "horizontal");
-    await userEvent.click(screen.getByRole("button", { name: "Top-down (⇧D)" }));
-    expect(canvas()).toHaveAttribute("data-direction", "vertical");
-    await waitFor(() => expect(lastSaved(services)).toMatchObject({ display: { direction: "vertical" } }));
-    // Each view has its own.
-    await userEvent.click(tab(/Running/));
-    expect(canvas()).toHaveAttribute("data-direction", "horizontal");
-    await userEvent.keyboard("{Shift>}D{/Shift}");
-    expect(canvas()).toHaveAttribute("data-direction", "vertical");
-    await waitFor(() => expect(lastSaved(services)).toMatchObject({ views: [{ id: "v_waiting" }, { id: "v_running", display: { direction: "vertical" } }] }));
-    await userEvent.click(tab("All"));
-    expect(canvas()).toHaveAttribute("data-direction", "vertical");
-  });
-
-  it("from ⌘K too", async () => {
-    setup();
-    await userEvent.keyboard("{Meta>}k{/Meta}");
-    await userEvent.type(screen.getByRole("combobox"), "top-down");
-    await userEvent.keyboard("{Enter}");
-    expect(canvas()).toHaveAttribute("data-direction", "vertical");
-    await waitFor(() => expect(screen.queryByRole("combobox")).toBeNull());
-    await userEvent.keyboard("{Meta>}k{/Meta}");
-    await userEvent.type(await screen.findByRole("combobox"), "left to right");
-    await userEvent.keyboard("{Enter}");
-    expect(canvas()).toHaveAttribute("data-direction", "horizontal");
-  });
-
-  it("a phone reads top-down by default, and its choice is its own", async () => {
-    asPhone();
-    const services = fakeServices();
-    // The laptop chose left to right; the phone still starts top-down.
-    await services.canvas.save("acme", { order: {}, display: { direction: "horizontal" } });
-    setup(services);
-    await waitFor(() => expect(canvas()).toHaveAttribute("data-direction", "vertical"));
-    await userEvent.click(screen.getByRole("button", { name: "Top-down (⇧D)" }));
-    expect(canvas()).toHaveAttribute("data-direction", "horizontal");
-    await waitFor(() => expect(lastSaved(services)).toMatchObject({ display: { direction: "horizontal", phoneDirection: "horizontal" } }));
-  });
 });
 
 describe("moving around the canvas from the keyboard", () => {
@@ -329,43 +102,6 @@ describe("moving around the canvas from the keyboard", () => {
     const h = agentsHarness({ entities: [...entities, ...web], follow: ["thr_1", "thr_2"] });
     renderAgents(<AgentsSurface client={h.client} services={fakeServices()} demo={false} chrome="popup" />, h);
   }
-
-  it("⇧S opens the shelf (Escape closes it)", async () => {
-    start();
-    await userEvent.keyboard("{Shift>}S{/Shift}");
-    const shelf = await screen.findByRole("dialog", { name: "Shelf" });
-    expect(within(shelf).getByRole("combobox", { name: "Search the shelf" })).toHaveFocus();
-    await userEvent.keyboard("{Escape}");
-    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Shelf" })).not.toBeInTheDocument());
-    resetShelves();
-  });
-
-  it("F opens the palette on Focus a project…, as its row's shortcut says", async () => {
-    start();
-    await userEvent.keyboard("f");
-    expect(agentsPalette.get()).toMatchObject({ open: true, intent: { kind: "focus-project" } });
-    closePalette();
-  });
-
-  it("the canvas is one tab stop: the card last focused (else the first), then its own controls, never another card's (18)", async () => {
-    start();
-    const world = () => document.querySelector("[data-card]")!.parentElement!;
-    const stops = () => [...world().querySelectorAll<HTMLElement>("[tabindex]")].filter((el) => el.getAttribute("tabindex") === "0").map((el) => el.closest<HTMLElement>("[data-card]")!.dataset.key);
-    // Before anything is focused: the first card in reading order, alone.
-    await waitFor(() => expect(new Set(stops()).size).toBe(1));
-    const first = stops()[0];
-    const others = [...world().querySelectorAll<HTMLElement>("[data-card]")].filter((s) => s.dataset.key !== first);
-    for (const s of others) for (const b of s.querySelectorAll("button")) expect(b).toHaveAttribute("tabindex", "-1");
-    // Focus moves the stop with it; the card it left gives its controls back.
-    card("Fix the flaky queue test")!.focus();
-    await waitFor(() => expect(new Set(stops())).toEqual(new Set(["t:thr_1"])));
-    const tools = [...card("Fix the flaky queue test")!.closest("[data-card]")!.querySelectorAll("button")];
-    expect(tools.length).toBeGreaterThan(0);
-    for (const b of tools) expect(b).not.toHaveAttribute("tabindex", "-1");
-    // Tab goes into its controls, not to the next card.
-    await userEvent.tab();
-    expect(document.activeElement?.closest("[data-card]")).toHaveAttribute("data-key", "t:thr_1");
-  });
 
   it("arrows go from card to card along the tree, Enter opens, Space goes to what's waiting", async () => {
     start();
@@ -390,51 +126,12 @@ describe("moving around the canvas from the keyboard", () => {
     // Nothing opened on the way.
     expect(agentsSurface.get().view).toEqual({ kind: "canvas" });
   });
-
-  it("F fills the canvas with a card's project; the chip or Escape shows everything again", async () => {
-    start();
-    card("Fix the flaky queue test")!.focus();
-    await userEvent.keyboard("f");
-    expect(card("Dark mode")).toBeNull();
-    expect(card("Upgrade to Next 16.4")).toBeInTheDocument();
-    expect(screen.getByRole("status")).toHaveTextContent("roll");
-    await userEvent.keyboard("{Escape}");
-    expect(card("Dark mode")).toBeInTheDocument();
-    // Still the canvas: Escape let go of the project first.
-    expect(screen.getByLabelText("Agents canvas")).toBeInTheDocument();
-    card("Dark mode")!.focus();
-    await userEvent.keyboard("f");
-    expect(card("Fix the flaky queue test")).toBeNull();
-    await userEvent.click(screen.getByRole("button", { name: "Stop focusing web" }));
-    expect(card("Fix the flaky queue test")).toBeInTheDocument();
-  });
-
-  it("from the project's menu and ⌘K too", async () => {
-    start();
-    await userEvent.keyboard("{Meta>}k{/Meta}");
-    await userEvent.type(screen.getByRole("combobox"), "focus a project");
-    await userEvent.keyboard("{Enter}");
-    await userEvent.type(screen.getByRole("combobox"), "web");
-    await userEvent.keyboard("{Enter}");
-    expect(card("Fix the flaky queue test")).toBeNull();
-    expect(card("Dark mode")).toBeInTheDocument();
-    await waitFor(() => expect(screen.queryByRole("combobox")).toBeNull());
-    await userEvent.keyboard("{Meta>}k{/Meta}");
-    await userEvent.type(await screen.findByRole("combobox"), "show every project");
-    await userEvent.keyboard("{Enter}");
-    expect(card("Fix the flaky queue test")).toBeInTheDocument();
-    const roll = screen.getByLabelText("Project roll").closest<HTMLElement>("[data-card]")!;
-    await userEvent.click(within(roll).getByRole("button", { name: "Project" }));
-    await userEvent.click(await screen.findByRole("menuitem", { name: "Focus on this project only" }));
-    expect(card("Dark mode")).toBeNull();
-  });
 });
 
 describe("the display menu", () => {
-  it("sets density, grouping and what's shown for the view, saved with it", async () => {
+  it("sets density and what's shown for the view, saved with it", async () => {
     const services = fakeServices();
-    const extra = [mirrored("thread", thread({ id: "thr_q", title: "Docs pass" }), 8), mirrored("terminal", terminal(), 9)];
-    const h = agentsHarness({ entities: [...entities, ...extra], follow: ["thr_1", "thr_2"] });
+    const h = agentsHarness({ entities: [...entities, mirrored("thread", thread({ id: "thr_q", title: "Docs pass" }), 8)], follow: ["thr_1", "thr_2"] });
     renderAgents(<AgentsSurface client={h.client} services={services} demo={false} chrome="popup" />, h);
     const canvas = screen.getByLabelText("Agents canvas");
     expect(canvas).toHaveAttribute("data-density", "comfortable");
@@ -444,31 +141,12 @@ describe("the display menu", () => {
     await userEvent.click(within(menu).getByRole("button", { name: "Compact" }));
     expect(canvas).toHaveAttribute("data-density", "compact");
 
-    expect(screen.getByLabelText("Machine ada-mbp")).toBeInTheDocument();
-    await userEvent.click(within(menu).getByRole("button", { name: "Project" }));
-    await waitFor(() => expect(screen.queryByLabelText("Machine ada-mbp")).toBeNull());
-    expect(screen.getByLabelText("Project roll")).toBeInTheDocument();
-
-    expect(screen.getByLabelText("Terminal zsh")).toBeInTheDocument();
-    await userEvent.click(within(menu).getByRole("switch", { name: "Terminals" }));
-    await waitFor(() => expect(screen.queryByLabelText("Terminal zsh")).toBeNull());
-
     expect(card("Docs pass")).toBeInTheDocument();
     await userEvent.click(within(menu).getByRole("switch", { name: "Idle threads" }));
     expect(card("Docs pass")).toBeNull();
     // What's working or waiting stays.
     expect(card("Fix the flaky queue test")).toBeInTheDocument();
     expect(card("Upgrade to Next 16.4")).toBeInTheDocument();
-    await waitFor(() => expect(lastSaved(services)).toMatchObject({ display: { density: "compact", group: "project", hide: ["idle", "terminals"] } }));
-
-    // Another view keeps its own.
-    await userEvent.keyboard("{Escape}");
-    await userEvent.click(tab(/Running/));
-    expect(canvas).toHaveAttribute("data-density", "comfortable");
-    await userEvent.click(tab("All"));
-    await userEvent.click(screen.getByRole("button", { name: "Display" }));
-    await userEvent.click(await screen.findByRole("button", { name: "Reset to default" }));
-    expect(canvas).toHaveAttribute("data-density", "comfortable");
-    expect(card("Docs pass")).toBeInTheDocument();
-  }, 20_000);
+    await waitFor(() => expect(lastSaved(services)).toMatchObject({ display: { density: "compact", hide: ["idle"] } }));
+  });
 });

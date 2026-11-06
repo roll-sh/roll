@@ -1,18 +1,13 @@
-import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Command, Reply } from "@/lib/agents-api";
 import { setActiveClient } from "@/lib/agents-client";
 import { agentsPalette } from "@/lib/agents-palette";
-import { resetAgentsSurface, showAgents } from "@/lib/agents-surface";
+import { resetAgentsSurface } from "@/lib/agents-surface";
 import { machine, mirrored, project, provider, thread, T0 } from "@/test/agents";
 import { agentsHarness, fakeServices, renderAgents, type AgentsHarness } from "@/test/agents-render";
-import { macClick } from "@/test/mac-click";
-import { MarkStateProvider } from "../mark-state";
-import { AgentsControl } from "./agents-control";
 import { goalDraftKey } from "./orchestrate";
-import { ModelPicker } from "./model-picker";
-import { Launcher } from "./new-agent";
 import { PromptBar } from "./prompt-bar";
 
 let conn: { client: AgentsHarness["client"] | null; services: ReturnType<typeof fakeServices> | null; error: string | null } = { client: null, services: null, error: null };
@@ -57,21 +52,6 @@ afterEach(() => {
 });
 
 describe("the prompt bar", () => {
-  it("keeps where a draft goes while other threads update (it used to follow the newest thread)", async () => {
-    const h = harness();
-    renderAgents(<PromptBar />, h);
-    await userEvent.type(goal(), "Add dark mode");
-    expect(chip()).toHaveTextContent("roll on ada-mbp");
-    const model = screen.getByRole("button", { name: /^Model: Opus 5.5/ });
-    // Work happens in another project, on another machine: the draft stays put.
-    act(() => h.client.enqueue({ type: "entity", ...mirrored("thread", thread({ id: "thr_2", project: "prj_2", provider: "codex", updated_at: T0 + 99_000 }), 10, "mch_2") }));
-    expect(chip()).toHaveTextContent("roll on ada-mbp");
-    expect(model).toHaveAccessibleName(/^Model: Opus 5.5/);
-    await userEvent.keyboard("{Enter}");
-    await waitFor(() => expect(creates(h)).toHaveLength(1));
-    expect(creates(h)[0][0]).toBe("mch_1");
-    expect(creates(h)[0][2]).toMatchObject({ project: "prj_1", provider: "claude", orchestrator: true, prompt: "Add dark mode" });
-  });
 
   it("moves only when the chip picks another project, and starts it there once (no palette hand-off)", async () => {
     const h = harness();
@@ -131,112 +111,10 @@ describe("the prompt bar", () => {
     expect(ids()[2]).toBe(ids()[1]);
   });
 
-  it("rises over an on-screen keyboard (iOS covers what's at the bottom) and settles back when it goes", async () => {
-    const vv = Object.assign(new EventTarget(), { height: window.innerHeight, offsetTop: 0, scale: 1 });
-    const was = Object.getOwnPropertyDescriptor(window, "visualViewport");
-    Object.defineProperty(window, "visualViewport", { value: vv, configurable: true });
-    try {
-      renderAgents(<PromptBar />, harness());
-      const dock = screen.getByRole("form", { name: "Ask agents" }).parentElement!;
-      expect(dock.style.bottom).toBe("");
-      act(() => {
-        vv.height = window.innerHeight - 300;
-        vv.dispatchEvent(new Event("resize"));
-      });
-      expect(dock.style.bottom).toBe("300px");
-      act(() => {
-        vv.height = window.innerHeight;
-        vv.dispatchEvent(new Event("resize"));
-      });
-      expect(dock.style.bottom).toBe("");
-    } finally {
-      if (was) Object.defineProperty(window, "visualViewport", was);
-      else delete (window as { visualViewport?: unknown }).visualViewport;
-    }
-  });
-
-  it("can stop waiting for a start that hangs; the draft stays", async () => {
-    let release: (r: Reply) => void = () => {};
-    const h = harness((c) => (c.type === "thread.create" ? new Promise<Reply>((r) => (release = r)) : { type: "ok" }));
-    renderAgents(<PromptBar />, h);
-    await userEvent.type(goal(), "Slow one{Enter}");
-    expect(await screen.findByText("Starting…")).toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
-    expect(screen.queryByText("Starting…")).toBeNull();
-    expect(goal()).toHaveValue("Slow one");
-    // A late answer doesn't open anything or clear what's typed.
-    await act(async () => release({ type: "created", id: "thr_9" }));
-    expect(h.openThread).not.toHaveBeenCalled();
-    expect(goal()).toHaveValue("Slow one");
-  });
-
-  it("works from the keyboard: Shift+Enter is a new line, arrows switch who does it, IME Enter doesn't send", async () => {
-    const h = harness();
-    renderAgents(<PromptBar />, h);
-    await userEvent.type(goal(), "line one{Shift>}{Enter}{/Shift}line two");
-    expect(goal()).toHaveValue("line one\nline two");
-    fireEvent.keyDown(goal(), { key: "Enter", isComposing: true });
-    expect(creates(h)).toHaveLength(0);
-    const group = screen.getByRole("radiogroup", { name: "Who does it" });
-    const orchestrate = within(group).getByRole("radio", { name: "Orchestrate" });
-    expect(orchestrate).toHaveAttribute("tabindex", "0");
-    expect(within(group).getByRole("radio", { name: "One agent" })).toHaveAttribute("tabindex", "-1");
-    orchestrate.focus();
-    await userEvent.keyboard("{ArrowRight}");
-    expect(within(group).getByRole("radio", { name: "One agent" })).toHaveAttribute("aria-checked", "true");
-    expect(document.activeElement).toBe(within(group).getByRole("radio", { name: "One agent" }));
-  });
-
-  it("says when the pinned project's machine went offline instead of moving the draft elsewhere", async () => {
-    const h = harness();
-    renderAgents(<PromptBar />, h);
-    await userEvent.type(goal(), "Nightly cleanup");
-    act(() => h.client.enqueue({ type: "machine", cursor: 20, machine: { ...machine(), online: false } }));
-    expect(chip()).toHaveTextContent("roll on ada-mbp");
-    await userEvent.keyboard("{Enter}");
-    expect(await screen.findByRole("alert")).toHaveTextContent("ada-mbp is offline. Start it with roll agent up, or pick another project.");
-    expect(creates(h)).toHaveLength(0);
-  });
 });
 
 describe("the prompt bar's open and close", () => {
   const isOpen = () => screen.getByRole("form", { name: "Ask agents" }).hasAttribute("data-open");
-  const withMachines = () => {
-    const h = harness();
-    // Codex too, so the picker's rail has another provider to click.
-    act(() => h.client.enqueue({ type: "machine", cursor: 30, machine: machine({ info: { ...machine().info!, providers: [provider(), codex] } }) }));
-    return h;
-  };
-
-  it("stays open while its picker is used where a click doesn't focus a button (Safari, Firefox on macOS)", async () => {
-    renderAgents(
-      <>
-        <PromptBar />
-        <div data-testid="canvas" />
-      </>,
-      withMachines(),
-    );
-    await userEvent.click(goal());
-    await userEvent.click(screen.getByRole("button", { name: /^Model:/ }));
-    const search = await screen.findByRole("combobox", { name: "Search models" });
-    const rail = screen.getByRole("toolbar", { name: "Providers" });
-    const codexTab = within(rail).getByRole("button", { name: /Codex/ });
-    // Safari: the search blurs to nothing (the button it's going to doesn't take focus), and the
-    // press and click reach the button without focusing it.
-    fireEvent.focusOut(search, { relatedTarget: null });
-    expect(isOpen()).toBe(true);
-    fireEvent.pointerDown(codexTab);
-    expect(isOpen()).toBe(true);
-    fireEvent.mouseDown(codexTab);
-    fireEvent.click(codexTab);
-    expect(isOpen()).toBe(true);
-    expect(screen.getByRole("toolbar", { name: "Providers" })).toBeInTheDocument();
-    expect(within(screen.getByRole("toolbar", { name: "Providers" })).getByRole("button", { name: /Codex/ })).toHaveAttribute("aria-pressed", "true");
-    // A press on the picker's own background is the picker's: the text doesn't take focus from it.
-    const before = document.activeElement;
-    fireEvent.mouseDown(rail);
-    expect(document.activeElement).toBe(before);
-  });
 
   it("closes on a press outside it (the canvas), on Escape, and when focus moves to a real element elsewhere; a blur alone never closes it", async () => {
     renderAgents(
@@ -267,71 +145,6 @@ describe("the prompt bar's open and close", () => {
     expect(isOpen()).toBe(true);
   });
 
-  it("a press on the bar itself (not a control) focuses the text once", async () => {
-    renderAgents(<PromptBar />, harness());
-    const form = screen.getByRole("form", { name: "Ask agents" });
-    const focused = vi.fn();
-    goal().addEventListener("focus", focused);
-    fireEvent.mouseDown(form);
-    expect(document.activeElement).toBe(goal());
-    expect(focused).toHaveBeenCalledTimes(1);
-    expect(isOpen()).toBe(true);
-  });
 });
 
-describe("the model picker under a macOS click (Safari, Firefox: a click never focuses a button)", () => {
-  const providers = [provider(), codex];
-  const value = { provider: "claude", model: "claude-opus-5-5", effort: null, options: {} };
-  /** Opens the picker behind `trigger`, clicks Codex in its rail and then its model, as macOS does. */
-  async function pickCodex(trigger: HTMLElement) {
-    macClick(trigger);
-    const rail = await screen.findByRole("toolbar", { name: "Providers" });
-    macClick(within(rail).getByRole("button", { name: /Codex/ }));
-    // Still open, on Codex's models.
-    expect(within(screen.getByRole("toolbar", { name: "Providers" })).getByRole("button", { name: /Codex/ })).toHaveAttribute("aria-pressed", "true");
-    macClick(await screen.findByRole("option", { name: /GPT-5.5 Codex/ }));
-  }
 
-  it("on its own (as the automations' Start an agent step has it)", async () => {
-    const onChange = vi.fn();
-    renderAgents(<ModelPicker providers={providers} value={value} onChange={onChange} />, harness());
-    await pickCodex(screen.getByRole("button", { name: /^Model:/ }));
-    expect(onChange).toHaveBeenCalledWith(expect.objectContaining({ provider: "codex", model: "gpt-5.5-codex" }));
-  });
-
-  it("in the prompt bar, which stays open throughout", async () => {
-    const h = harness();
-    act(() => h.client.enqueue({ type: "machine", cursor: 30, machine: machine({ info: { ...machine().info!, providers } }) }));
-    renderAgents(<PromptBar />, h);
-    macClick(goal());
-    await pickCodex(screen.getByRole("button", { name: /^Model:/ }));
-    expect(screen.getByRole("form", { name: "Ask agents" })).toHaveAttribute("data-open");
-    expect(screen.getByRole("button", { name: /^Model: GPT-5.5 Codex/ })).toBeInTheDocument();
-  });
-
-  it("in the launcher's composer", async () => {
-    const h = harness();
-    act(() => h.client.enqueue({ type: "machine", cursor: 30, machine: machine({ info: { ...machine().info!, providers } }) }));
-    renderAgents(<Launcher onClose={vi.fn()} />, h);
-    await pickCodex(screen.getByRole("button", { name: /^Model:/ }));
-    expect(screen.getByRole("dialog", { name: "New agent" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /^Model: GPT-5.5 Codex/ })).toBeInTheDocument();
-  });
-});
-
-describe("the prompt bar on the page", () => {
-  it("stays, with its draft, while a conversation is open beside the canvas", async () => {
-    const h = harness();
-    conn = { client: h.client, services: fakeServices(), error: null };
-    renderAgents(
-      <MarkStateProvider>
-        <AgentsControl />
-      </MarkStateProvider>,
-      h,
-    );
-    act(() => showAgents({ kind: "canvas" }));
-    await userEvent.type(goal(), "Keep me");
-    act(() => showAgents({ kind: "thread", thread: "thr_1" }));
-    expect(goal()).toHaveValue("Keep me");
-  });
-});

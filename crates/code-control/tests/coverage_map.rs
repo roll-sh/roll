@@ -137,3 +137,40 @@ fn every_test_the_map_names_exists() {
     assert!(checked > 200, "checked only {checked} references");
     assert!(wrong.is_empty(), "docs/code/test-coverage.md names tests that don't exist:\n  {}", wrong.join("\n  "));
 }
+
+/// Every dashboard or desktop test file the map names (`src/…/x.test.tsx`, relative to its app or
+/// the repo, or a bare file name under the dashboard's `src/`) exists.
+#[test]
+fn every_web_test_file_the_map_names_exists() {
+    fn names(dir: &Path, out: &mut BTreeSet<String>) {
+        for e in std::fs::read_dir(dir).unwrap().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                names(&p, out);
+            } else if let Some(n) = p.file_name().and_then(|n| n.to_str()) {
+                out.insert(n.to_owned());
+            }
+        }
+    }
+    let mut bare = BTreeSet::new();
+    names(&root().join("apps/dashboard/src"), &mut bare);
+    let doc = read("docs/code/test-coverage.md");
+    let mut checked = 0;
+    let mut wrong = Vec::new();
+    for cap in doc.split('`').skip(1).step_by(2) {
+        if !(cap.ends_with(".test.ts") || cap.ends_with(".test.tsx")) || cap.contains('*') || cap.contains(' ') {
+            continue;
+        }
+        checked += 1;
+        let found = if cap.contains('/') {
+            ["", "apps/dashboard", "apps/desktop"].iter().any(|base| root().join(base).join(cap).exists())
+        } else {
+            bare.contains(cap)
+        };
+        if !found {
+            wrong.push(cap.to_owned());
+        }
+    }
+    assert!(checked > 50, "checked only {checked} references");
+    assert!(wrong.is_empty(), "docs/code/test-coverage.md names web test files that don't exist:\n  {}", wrong.join("\n  "));
+}

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Entity, Share } from "./agents-api";
-import { editsDiff, frameAt, MAX_GAP, providerLabel, realAt, replayAt, SHARE_MACHINE, shareStats, step, timeline } from "./agents-replay";
+import { editsDiff, frameAt, MAX_GAP, realAt, replayAt, SHARE_MACHINE, step, timeline } from "./agents-replay";
 import { applySnapshot, emptyData, nodeTree, runsOf } from "./agents-store";
 import { machine, mirrored, node, project, run, share, T0, thread } from "@/test/agents";
 
@@ -68,31 +68,10 @@ describe("replaying a share", () => {
     expect(d.nodes.get("thr_1")!.get("nod_m")!.value.body).toEqual({ type: "message", text: "0123456789" });
   });
 
-  it("shows a run's context window once the run has finished", () => {
-    const context = { used_tokens: 48_000, max_tokens: 200_000, total_processed_tokens: null };
-    const withContext: Share = { ...s, entities: s.entities.map((e) => (e.kind === "run" || (e.kind === "thread" && e.id === "thr_1") ? { ...e, context } : e)) };
-    const t2 = timeline(withContext);
-    let d = frameAt(withContext, t2, at(700));
-    expect(d.runs.get("run_1")!.value.context).toBeNull();
-    expect(d.threads.get("thr_1")!.value.context).toBeNull();
-    d = frameAt(withContext, t2, at(9000));
-    expect(d.threads.get("thr_1")!.value.context).toEqual(context);
-  });
-
   it("shows text whole without streaming (reduced motion), but still steps through states", () => {
     const d = frameAt(s, tl, at(700), { stream: false });
     expect(d.nodes.get("thr_1")!.get("nod_m")!.value.body).toEqual({ type: "message", text: "0123456789" });
     expect(d.threads.get("thr_1")!.value.status).toBe("running");
-  });
-
-  it("names the providers the threads ran on", () => {
-    const providers = frameAt(s, tl, at(9000)).machines.get(SHARE_MACHINE)!.value.info!.providers;
-    expect(providers.map((p) => [p.id, p.name, p.models.map((m) => m.id)])).toEqual([["claude", "Claude Code", ["claude-opus-5-5"]]]);
-    expect([providerLabel("codex"), providerLabel("acp:gemini")]).toEqual(["Codex", "Gemini"]);
-  });
-
-  it("counts what happened", () => {
-    expect(shareStats(s)).toEqual({ runs: 1, steps: 3, threads: 2, files: 2, providers: ["claude"] });
   });
 
   it("handles a share with no times", () => {

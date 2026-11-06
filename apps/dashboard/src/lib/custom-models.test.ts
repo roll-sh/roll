@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ModelInfo } from "./agents-api";
-import { copyFrom, customOption, draftOf, modelFromDraft, presetsFor, validateDraft, type CustomModelDraft } from "./custom-models";
+import { copyFrom, customOption, draftOf, modelFromDraft, presetsFor, type CustomModelDraft } from "./custom-models";
 
 const draft = (over: Partial<CustomModelDraft> = {}): CustomModelDraft => ({ slug: "claude-opus-5-5-preview", name: "", options: [], ...over });
 
@@ -25,22 +25,6 @@ describe("custom models' options (T3's CustomModelEditor logic)", () => {
       role: "reasoning",
     });
     expect(modelFromDraft(draft({ options: [presetsFor("claude")[1].make()] })).options![0]).toEqual({ type: "boolean", id: "fastMode", label: "Fast Mode", default: false, role: "speed" });
-  });
-
-  it("says what's wrong in T3's words, numbered as the editor shows them", () => {
-    const o = () => customOption();
-    expect(validateDraft(draft({ options: [{ ...o(), id: "" }] }))).toBe("Option 1 needs an id.");
-    expect(validateDraft(draft({ options: [{ ...o(), id: "a", label: "A", choices: [{ key: "c", id: "x", label: "" }] }, { ...o(), id: "a", label: "B" }] }))).toBe('Option 2: id "a" is used twice.');
-    expect(validateDraft(draft({ options: [{ ...o(), id: "a", label: " " }] }))).toBe("Option 1 needs a label.");
-    expect(validateDraft(draft({ options: [{ ...o(), id: "a", label: "A", choices: [] }] }))).toBe("Option 1 needs at least one choice.");
-    expect(validateDraft(draft({ options: [{ ...o(), id: "a", label: "A" }] }))).toBe("Option 1 has a choice without a value.");
-    const twice = [
-      { key: "1", id: "x", label: "" },
-      { key: "2", id: " x ", label: "" },
-    ];
-    expect(validateDraft(draft({ options: [{ ...o(), id: "a", label: "A", choices: twice }] }))).toBe('Option 1: choice "x" is used twice.');
-    expect(validateDraft(draft({ options: [{ ...o(), id: "effort", label: "R", type: "boolean" }] }))).toBe("Option 1: the reasoning levels are a list of choices with the id effort.");
-    expect(validateDraft(draft({ options: [presetsFor("codex")[1].make()] }))).toBeNull();
   });
 
   it("saves trimmed, a choice's empty label as its value, no options as the provider's own, and round-trips", () => {

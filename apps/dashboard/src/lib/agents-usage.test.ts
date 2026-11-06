@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { UsageLimits, UsageWindow } from "./agents-api";
-import { aheadOfPace, exhausted, pace, percentLeft, planLabel, resetsIn, tightest, usageSummary } from "./agents-usage";
+import { aheadOfPace, exhausted, pace, planLabel, tightest, usageSummary } from "./agents-usage";
 
 const NOW = 1_780_000_000_000;
 const MIN = 60_000;
@@ -13,16 +13,6 @@ const w = (id: string, used: number, extra: Partial<UsageWindow> = {}): UsageWin
 });
 
 describe("usage limits", () => {
-  it("reads percent left and reset times like T3", () => {
-    expect(percentLeft(w("primary", 61.4))).toBe(39);
-    expect(percentLeft(w("primary", 130))).toBe(0);
-    expect(resetsIn(w("p", 1), NOW)).toBeNull();
-    expect(resetsIn(w("p", 1, { resets_at: NOW - MIN }), NOW)).toBe("resets soon");
-    expect(resetsIn(w("p", 1, { resets_at: NOW + 45 * MIN }), NOW)).toBe("resets in 45m");
-    expect(resetsIn(w("p", 1, { resets_at: NOW + 130 * MIN }), NOW)).toBe("resets in 2h 10m");
-    expect(resetsIn(w("p", 1, { resets_at: NOW + 3 * 24 * 60 * MIN }), NOW)).toBe("resets in 3d");
-  });
-
   it("marks a window used faster than its pace", () => {
     // A 5-hour window, 2.5 hours in: the pace is 50%.
     const half = { resets_at: NOW + 150 * MIN, window_minutes: 300 };

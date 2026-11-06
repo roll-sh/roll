@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { decode } from "./decode";
 import { providerInfoD, type ModelInfo, type ModelOption } from "./agents-api";
-import { acceptedOptions, effortValue, modelEfforts, nextEffort, reasoningLevels, traits } from "./agents-model-options";
+import { acceptedOptions, effortValue, modelEfforts, nextEffort, reasoningLevels } from "./agents-model-options";
 
 const fast: ModelOption = { type: "boolean", id: "fastMode", label: "Fast Mode", default: false, role: "speed" };
 const tiers: ModelOption = {
@@ -31,16 +31,6 @@ const opus: ModelInfo = { id: "claude-opus-4-6", name: "Claude Opus 4.6", defaul
 const gpt: ModelInfo = { id: "gpt", name: "GPT", default: true, options: [reasoningLevels(["low", "xhigh"]), tiers] };
 
 describe("model options (T3's traits)", () => {
-  it("the trigger reads the reasoning level, a fast speed and the context window, defaults when nothing is picked", () => {
-    expect(traits(opus, null, {})).toEqual({ effort: "High", fast: null, context: "1M", detail: "High · 1M" });
-    expect(traits(opus, "max", { fastMode: true, contextWindow: "200k" }).detail).toBe("Max · Fast · 200k");
-    // Values the model doesn't offer fall back to its defaults.
-    expect(traits(opus, "xhigh", { fastMode: "yes", contextWindow: "2m" }).detail).toBe("High · 1M");
-    expect(traits(gpt, null, { serviceTier: "ultrafast" })).toMatchObject({ effort: null, fast: "Ultrafast" });
-    expect(traits(gpt, "xhigh", { serviceTier: "default" }).detail).toBe("Extra High");
-    expect(traits(undefined, "high", {}).detail).toBe("");
-  });
-
   it("a model switch keeps the options the new model takes; the effort is never an option", () => {
     expect(acceptedOptions(gpt, { fastMode: true, contextWindow: "1m", serviceTier: "priority", effort: "low" })).toEqual({ serviceTier: "priority" });
     expect(acceptedOptions(opus, { fastMode: true, contextWindow: "2m" })).toEqual({ fastMode: true });

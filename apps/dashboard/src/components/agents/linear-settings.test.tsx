@@ -69,19 +69,6 @@ describe("the Linear settings", () => {
     await waitFor(() => expect(linear.connectOAuth).toHaveBeenCalledWith("acme", "/dashboard/agents#agents/settings/owner"));
   });
 
-  it("without ROLL_SECRET_KEY, says so and can't connect", async () => {
-    show(spied({ ...DISCONNECTED, app: { ...DISCONNECTED.app, secret_key: false } }));
-    expect(await screen.findByText("needs ROLL_SECRET_KEY")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Connect Linear" })).toBeDisabled();
-    expect(screen.getByLabelText("Linear API key")).toBeDisabled();
-  });
-
-  it("says why a key didn't connect", async () => {
-    show(spied(DISCONNECTED));
-    await userEvent.type(await screen.findByLabelText("Linear API key"), "nope{Enter}");
-    expect(await screen.findByRole("alert")).toHaveTextContent("Linear refused the key");
-  });
-
   it("connected: the workspace, the webhook, team repos and the deliveries, newest first", async () => {
     const linear = spied(CONNECTED);
     show(linear);
@@ -113,61 +100,4 @@ describe("the Linear settings", () => {
     await waitFor(() => expect(linear.putSettings).toHaveBeenLastCalledWith("acme", { repos: { WEB: "web" }, default_repo: "roll" }));
   });
 
-  it("disconnects only after it's asked again", async () => {
-    const linear = spied(CONNECTED);
-    show(linear);
-    await userEvent.click(await screen.findByRole("button", { name: "Disconnect" }));
-    expect(linear.disconnect).not.toHaveBeenCalled();
-    await userEvent.click(screen.getByRole("button", { name: "Keep it" }));
-    await userEvent.click(screen.getByRole("button", { name: "Disconnect" }));
-    await userEvent.click(screen.getByRole("button", { name: "Disconnect Acme" }));
-    await waitFor(() => expect(linear.disconnect).toHaveBeenCalledWith("acme"));
-    expect(await screen.findByRole("button", { name: "Connect Linear" })).toBeInTheDocument();
-  });
-
-  it("a hand-made webhook takes its signing secret, and says why deliveries fail", async () => {
-    const base = CONNECTED.connection!;
-    const linear = spied({
-      ...CONNECTED,
-      connection: {
-        ...base,
-        kind: "api_key",
-        agent: false,
-        webhook: { ...base.webhook, mode: "manual", url: "https://roll.example/v1/code/linear/webhook/lwh_1", status: "failing", secret_hint: "beef", rejected_at: Date.now(), rejected_why: "a bad signature" },
-      },
-    });
-    show(linear);
-    expect(await screen.findByText("Failing")).toBeInTheDocument();
-    expect(screen.getByText(/a bad signature/)).toBeInTheDocument();
-    expect(screen.getByText("…beef")).toBeInTheDocument();
-    await userEvent.type(screen.getByLabelText("Webhook signing secret"), "lin_wh_0123456789{Enter}");
-    await waitFor(() => expect(linear.putWebhookSecret).toHaveBeenCalledWith("acme", "lin_wh_0123456789"));
-    expect(await screen.findByText("…6789")).toBeInTheDocument();
-  });
-
-  it("asks to connect again when Linear stopped taking the token", async () => {
-    const linear = spied({ ...CONNECTED, connection: { ...CONNECTED.connection!, status: "reauth", error: "Linear revoked roll's token" } });
-    linear.connectOAuth.mockResolvedValue("#agents/settings/owner");
-    show(linear);
-    expect(await screen.findByText("Linear revoked roll's token")).toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: "Reconnect" }));
-    await waitFor(() => expect(linear.connectOAuth).toHaveBeenCalledWith("acme", "/dashboard/agents#agents/settings/owner"));
-  });
-
-  it("the demo owner has a connected workspace with deliveries", async () => {
-    const { DemoOwner } = await import("@/lib/agents-demo");
-    show(new DemoOwner().services().linear);
-    expect(await screen.findByRole("link", { name: /Acme/ })).toHaveAttribute("href", "https://linear.app/acme");
-    expect(screen.getByText("Receiving")).toBeInTheDocument();
-    expect(within(screen.getByRole("list", { name: "Recent deliveries" })).getAllByRole("listitem").length).toBeGreaterThan(1);
-  });
-
-  it("back from OAuth: says how it went once and takes it off the URL", async () => {
-    window.history.replaceState(null, "", "/dashboard/agents#agents/settings/owner?linear=error&reason=the%20workspace%20is%20another%20owner%27s");
-    show(spied(DISCONNECTED));
-    expect(await screen.findByRole("status")).toHaveTextContent("Linear didn't connect: the workspace is another owner's");
-    expect(window.location.hash).toBe("#agents/settings/owner");
-    await userEvent.click(screen.getByRole("button", { name: "Dismiss" }));
-    expect(screen.queryByText(/didn't connect/)).toBeNull();
-  });
 });

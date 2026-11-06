@@ -158,7 +158,23 @@ struct Route {
 }
 
 impl Server {
+    /// The free port is found by binding one and letting it go, so another process can take it
+    /// before `opencode serve` binds it: a server that exits before it listens gets another port
+    /// (three tries in all).
     async fn start(spec: &Spec) -> anyhow::Result<Arc<Server>> {
+        let mut tries = 1;
+        loop {
+            match Self::start_once(spec).await {
+                Err(e) if tries < 3 && e.is::<ExitedEarly>() => {
+                    tracing::debug!(target: "agent_host::opencode", "retrying on another port: {e}");
+                    tries += 1;
+                }
+                r => return r,
+            }
+        }
+    }
+
+    async fn start_once(spec: &Spec) -> anyhow::Result<Arc<Server>> {
         let port = std::net::TcpListener::bind(("127.0.0.1", 0)).and_then(|l| l.local_addr()).context("finding a free port")?.port();
         let mut secret = [0u8; 32];
         rand::thread_rng().fill_bytes(&mut secret);
@@ -192,7 +208,7 @@ impl Server {
         let mut stdout = BufReader::new(stdout);
         let url = match tokio::time::timeout(LISTEN_TIMEOUT, listening(&mut stdout)).await {
             Ok(Ok(url)) => url,
-            Ok(Err(e)) => bail!("{e}{}", tail_text(&tail).map(|t| format!(": {t}")).unwrap_or_default()),
+            Ok(Err(e)) => return Err(ExitedEarly(format!("{e}{}", tail_text(&tail).map(|t| format!(": {t}")).unwrap_or_default())).into()),
             Err(_) => bail!("opencode serve didn't say where it listens within {}s", LISTEN_TIMEOUT.as_secs()),
         };
         tokio::spawn(drain(stdout));
@@ -412,6 +428,18 @@ async fn read_events(server: Weak<Server>, mut events: http::Events) {
 }
 
 /// Read stdout until `server listening on <url>` (T3: `/server listening on\s+(https?:\/\/\S+)/i`).
+/// `opencode serve` ended (or its output did) before it said where it listens.
+#[derive(Debug)]
+struct ExitedEarly(String);
+
+impl std::fmt::Display for ExitedEarly {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for ExitedEarly {}
+
 async fn listening(stdout: &mut (impl AsyncBufRead + Unpin)) -> anyhow::Result<String> {
     let mut line = Vec::new();
     loop {

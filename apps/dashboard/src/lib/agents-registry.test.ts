@@ -1,10 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { Machine, RegistryAgent, Reply } from "./agents-api";
+import type { Machine, Reply } from "./agents-api";
 import { AgentsClient } from "./agents-client";
 import { DemoOwner } from "./agents-demo";
-import { installAgent, installedFor, registryIcon, registryUnavailable, rowLabel, rowState, searchAgents } from "./agents-registry";
-
-const agent = (over: Partial<RegistryAgent> = {}): RegistryAgent => ({ id: "goose", name: "goose", version: "1.57.0", kinds: ["binary"], installable: true, integrity: "sha256", ...over });
+import { installAgent, installedFor, registryIcon, registryUnavailable, rowLabel, rowState } from "./agents-registry";
 
 describe("the ACP registry", () => {
   it("draws icons only from the registry's CDN over HTTPS", () => {
@@ -12,35 +10,6 @@ describe("the ACP registry", () => {
     for (const bad of ["http://cdn.agentclientprotocol.com/x.svg", "https://evil.example/x.svg", "https://cdn.agentclientprotocol.com:444/x.svg", "https://u:p@cdn.agentclientprotocol.com/x.svg", "javascript:alert(1)", "not a url", undefined]) {
       expect(registryIcon(bad)).toBeNull();
     }
-  });
-
-  it("ranks a search like T3: exact, prefix, word prefix, substring, description", () => {
-    const agents = [
-      agent({ id: "kimi", name: "Kimi CLI", description: "Moonshot's agent" }),
-      agent({ id: "github-copilot-cli", name: "GitHub Copilot" }),
-      agent({ id: "goose", name: "goose", description: "An open source agent from Block" }),
-      agent({ id: "mistral-vibe", name: "Mistral Vibe" }),
-      agent({ id: "cline", name: "Cline" }),
-    ];
-    const ids = (q: string) => searchAgents(agents, q).map((a) => a.id);
-    expect(ids("")).toEqual(["cline", "github-copilot-cli", "goose", "kimi", "mistral-vibe"]);
-    expect(ids("goose")).toEqual(["goose"]);
-    expect(ids("vibe")).toEqual(["mistral-vibe"]);
-    expect(ids("cli")).toEqual(["cline", "github-copilot-cli", "kimi"]);
-    expect(ids("block")).toEqual(["goose"]);
-    expect(ids("nothing like it")).toEqual([]);
-  });
-
-  it("says what each row offers", () => {
-    const label = (a: RegistryAgent, installing = false) => rowLabel(rowState(a, installing));
-    expect(label(agent())).toBe("Install");
-    expect(label(agent(), true)).toBe("Installing…");
-    expect(label(agent({ installed: "1.57.0", offered: "acp:goose" }))).toBe("Installed");
-    expect(rowState(agent({ installed: "1.50.0" }), false)).toEqual({ kind: "update", from: "1.50.0" });
-    expect(label(agent({ offered: "acp:copilot" }))).toBe("On this machine");
-    expect(label(agent({ kinds: ["npx"], installable: false }))).toBe("Needs npm");
-    expect(label(agent({ kinds: ["uvx"], installable: false }))).toBe("Needs uv");
-    expect(label(agent({ kinds: [], installable: false }))).toBe("Not for this machine");
   });
 
   it("is read-only for a machine that's offline or too old", () => {

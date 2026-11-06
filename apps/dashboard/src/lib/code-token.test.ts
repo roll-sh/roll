@@ -49,22 +49,4 @@ describe("code token", () => {
     expect(changed).toHaveBeenCalledTimes(2);
   });
 
-  it("asks the prompt to open", async () => {
-    const t = await import("./code-token");
-    const opened = vi.fn();
-    const off = t.onSignInRequest(opened);
-    t.requestSignIn();
-    off();
-    t.requestSignIn();
-    expect(opened).toHaveBeenCalledTimes(1);
-  });
-
-  it("does nothing without a window (server rendering)", async () => {
-    vi.unstubAllGlobals();
-    const t = await import("./code-token");
-    expect(t.getToken()).toBeUndefined();
-    expect(() => t.setToken("x")).not.toThrow();
-    expect(() => t.requestSignIn()).not.toThrow();
-    t.subscribeToken(() => {})();
-  });
 });

@@ -37,6 +37,8 @@ const TRANSCRIPT: &str = "ROLL_FAKE_OPENCODE";
 const LOG: &str = "ROLL_FAKE_OPENCODE_LOG";
 const ARGS: &str = "ROLL_FAKE_OPENCODE_ARGS";
 const WORK: &str = "ROLL_FAKE_OPENCODE_WORK";
+/// A file whose presence makes the next start fail as a port taken meanwhile would (it's removed).
+const BUSY: &str = "ROLL_FAKE_OPENCODE_BUSY";
 
 // ---------------------------------------------------------------------------------------------
 // The fake
@@ -108,6 +110,10 @@ mod fake {
         });
         ctl.write(json!({ "args": args, "server_password_inherited": std::env::var_os("OPENCODE_SERVER_PASSWORD").is_some(),
             "config_content": std::env::var("OPENCODE_CONFIG_CONTENT").ok() }));
+        if let Some(busy) = std::env::var_os(BUSY).filter(|p| Path::new(p).exists()) {
+            std::fs::remove_file(busy).map_err(|e| e.to_string())?;
+            return Err("Address already in use (os error 98)".into());
+        }
         let listener = tokio::net::TcpListener::bind(format!("{host}:{port}")).await.map_err(|e| e.to_string())?;
         println!("opencode server listening on http://{host}:{port}");
         let app = axum::Router::new().fallback(handle).with_state(ctl);
@@ -800,6 +806,25 @@ async fn inbox_steer() {
     assert_eq!(prompts[1]["delivery"], "steer");
     assert!(prompts[1]["id"].as_str().unwrap().starts_with("msg_roll_steer_"));
     assert_eq!(turn_refs(&events), ["msg_roll_turn_#1", "msg_roll_turn_#2"]);
+}
+
+/// The port is picked by binding one and letting it go: when something takes it before the server
+/// binds it, the server exits before it listens and starts again on another.
+#[tokio::test]
+async fn a_port_taken_before_the_server_binds_it_gets_another() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("log.ndjson");
+    let busy = dir.path().join("busy");
+    std::fs::write(&busy, "").unwrap();
+    let mut config = fake_config(&transcript_path("tool_call"), &log, dir.path(), "2.0.18");
+    config.env.push((BUSY.into(), busy.display().to_string()));
+    let (_session, _rx) = OpenCode::new(config).start(session_config(dir.path())).await.expect("start");
+    let ports: Vec<String> = read_log(&log)
+        .iter()
+        .filter_map(|l| l["args"].as_str()?.split_whitespace().find_map(|a| a.strip_prefix("--port=")).map(str::to_owned))
+        .collect();
+    assert_eq!(ports.len(), 2, "{ports:?}");
+    assert_ne!(ports[0], ports[1]);
 }
 
 #[tokio::test]

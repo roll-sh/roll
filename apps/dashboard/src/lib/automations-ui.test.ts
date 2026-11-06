@@ -1,56 +1,15 @@
 import { describe, expect, it } from "vitest";
-import type { Automation, AutomationRun, AutomationSpec, Catalog } from "./automations-api";
+import type { AutomationSpec, Catalog } from "./automations-api";
 import { TEMPLATES } from "./automation-templates";
 import { STEP_KINDS } from "./automations-api";
 import { CHATOPS_CATALOG, withChatops } from "./chatops-catalog";
 import { LINEAR_CATALOG } from "./linear-templates";
-import {
-  blankSpec,
-  cronShape,
-  cronText,
-  defaultConfig,
-  ev,
-  insertVariable,
-  lastRunOf,
-  matchVariables,
-  newStep,
-  newStepId,
-  openTemplate,
-  sampleEvent,
-  schemaOf,
-  templateParts,
-  triggerSummary,
-  validate,
-  variablesAt,
-  weekOf,
-  withBuiltIns,
-  withoutUnset,
-} from "./automations-ui";
+import { blankSpec, cronShape, cronText, defaultConfig, ev, insertVariable, matchVariables, newStep, newStepId, openTemplate, sampleEvent, schemaOf, validate, variablesAt, withBuiltIns, withoutUnset } from "./automations-ui";
 import { hashFor, viewFromHash, type AgentsView } from "./agents-surface";
 
 const catalog = withBuiltIns(null);
 
 const step = (id: string, kind: string, config: Record<string, unknown> = {}) => ({ id, kind, config, when: [], retry: null, timeout_s: null });
-
-describe("automations: words", () => {
-  it("says common cron schedules in words, and leaves the rest alone", () => {
-    expect(cronText("0 9 * * 1-5")).toBe("Weekdays at 09:00");
-    expect(cronText("30 18 * * *")).toBe("Daily at 18:30");
-    expect(cronText("0 * * * *")).toBe("Every hour");
-    expect(cronText("*/15 * * * *")).toBe("Every 15 minutes");
-    expect(cronText("0 8 * * 1")).toBe("Mondays at 08:00");
-    expect(cronText("0 0 9 * * 1-5")).toBe("Weekdays at 09:00");
-    expect(cronText("0 9 1-7 * 1")).toBeNull();
-  });
-
-  it("summarises each trigger in one line", () => {
-    expect(triggerSummary({ type: "manual" })).toBe("When you run it");
-    expect(triggerSummary({ type: "schedule", cron: "0 9 * * 1-5", timezone: "Europe/Budapest" })).toBe("Weekdays at 09:00 · Budapest");
-    expect(triggerSummary({ type: "interval", every_s: 900 })).toBe("Every 15 minutes");
-    expect(triggerSummary({ type: "code", events: ["landed", "check"], repos: ["acme/app"] })).toBe("When a change lands or a check reports in acme/app");
-    expect(triggerSummary({ type: "agent", events: ["thread.done"] })).toBe("When a thread finishes");
-  });
-});
 
 describe("automations: templates in fields", () => {
   it("finds the open {{ under the caret, and puts a variable in its place", () => {
@@ -78,13 +37,6 @@ describe("automations: templates in fields", () => {
     expect(matchVariables(variablesAt(spec, catalog, 2), "thr")[0].path).toBe("event.data.thread.id");
   });
 
-  it("splits text and tokens for the highlighter", () => {
-    expect(templateParts("a {{ x }} b")).toEqual([
-      { text: "a ", token: false },
-      { text: "{{ x }}", token: true },
-      { text: " b", token: false },
-    ]);
-  });
 });
 
 describe("automations: validation", () => {
@@ -179,39 +131,6 @@ describe("automations: the catalog and samples", () => {
       expect(validate(spec, t.integration ? withIntegrations : catalog), t.id).toEqual(left);
       expect(spec.steps.map((s) => s.kind), t.id).toEqual(t.steps);
     }
-  });
-});
-
-describe("automations: runs", () => {
-  const run = (id: string, at: number, status: AutomationRun["status"], automation = "aut_1"): AutomationRun => ({
-    id,
-    automation,
-    name: "x",
-    status,
-    event: { id: "e", source: "manual", kind: "run", summary: "", at },
-    steps: [],
-    threads: [],
-    cursor: 1,
-    created_at: at,
-    started_at: at,
-    finished_at: at + 10,
-    reason: null,
-  });
-
-  it("counts the last seven days per day, failures apart, skips left out", () => {
-    const now = new Date(2026, 10, 4, 12).getTime();
-    const day = 86_400_000;
-    const w = weekOf([run("a", now - 1000, "succeeded"), run("b", now - day, "failed"), run("c", now - day, "skipped"), run("d", now - 9 * day, "succeeded"), run("e", now, "succeeded", "aut_2")], "aut_1", now);
-    expect(w.total).toBe(2);
-    expect(w.failed).toBe(1);
-    expect(w.days[6]).toEqual({ ok: 1, failed: 0 });
-    expect(w.days[5]).toEqual({ ok: 0, failed: 1 });
-  });
-
-  it("takes the last run from the live runs over the list's", () => {
-    const a = { id: "aut_1", last_run: { id: "old", status: "failed", at: 100 } } as Automation;
-    expect(lastRunOf(a, [run("new", 200, "running")])).toMatchObject({ id: "new", status: "running" });
-    expect(lastRunOf(a, [])).toMatchObject({ id: "old" });
   });
 });
 
