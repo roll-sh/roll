@@ -37,7 +37,7 @@ describe("ThreadNode", () => {
     vi.useFakeTimers({ now: T0 + 5 * 3_600_000 });
     try {
       const done = run({ status: "completed", requested_at: T0, completed_at: T0 + 3_600_000, prompt: "Find out why" });
-      const seen = thread({ run_count: 1, updated_at: T0 + 5 * 3_600_000 - 1000, inbox: { settle: { state: "active", at: T0 + 5 * 3_600_000 - 1000, by: "user" }, snooze: null, woke_at: null, visited_at: T0 + 4 * 3_600_000, manual: false } });
+      const seen = thread({ run_count: 1, updated_at: T0 + 5 * 3_600_000 - 1000, inbox: { settle: { state: "active", at: T0 + 5 * 3_600_000 - 1000 }, snooze: null, woke_at: null, visited_at: T0 + 4 * 3_600_000, manual: false } });
       renderAgents(<ThreadNode thread={seen} machine={machine()} />, agentsHarness({ entities: [mirrored("run", done, 2)] }));
       expect(screen.getByTitle("Last activity")).toHaveTextContent("4 h ago");
     } finally {

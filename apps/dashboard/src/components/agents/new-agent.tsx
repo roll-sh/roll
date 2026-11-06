@@ -168,7 +168,8 @@ function LauncherBody({ project: wanted, machine: wantedMachine, onClose }: { pr
           <Offline machine={machine} onAdd={addProject} />
         )}
         {inProject && machine && !needsSetup(machine) && (
-          <p className="flex flex-wrap gap-x-3 px-2 pt-2 text-[11px] text-subtle">
+          // Keys, for a keyboard: not on a touch screen.
+          <p className="flex flex-wrap gap-x-3 px-2 pt-2 text-[11px] text-subtle pointer-coarse:hidden">
             <span>
               <Kbd>Enter</Kbd> starts it
             </span>
