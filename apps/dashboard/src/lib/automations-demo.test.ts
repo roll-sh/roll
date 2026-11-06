@@ -24,6 +24,30 @@ describe("the automations demo", () => {
     expect(new Set(list.map((a) => a.trigger.type))).toEqual(new Set(["code", "schedule", "agent", "manual", "webhook"]));
   });
 
+  it("runs a connected integration's step (they all failed 'connect slack first')", async () => {
+    demo = new DemoOwner(0.01, false);
+    const api = demo.services().automations!;
+    const step = (await api.catalog("demo")).steps.find((k) => k.integration && !k.needs_setup)!;
+    expect(step).toBeDefined();
+    const saved = await api.create("demo", { name: "Tell the team", enabled: true, trigger: { type: "manual" }, filters: [], steps: [{ id: "tell", kind: step.kind, config: {}, when: [], retry: null, timeout_s: null }], concurrency: "parallel", rate_limit: null, run_as: null });
+    const r = await api.run("demo", saved.automation.id, {});
+    const t0 = Date.now();
+    let now = r;
+    while (!["succeeded", "failed"].includes(now.status) && Date.now() - t0 < 8000) {
+      await new Promise((res) => setTimeout(res, 50));
+      now = (await api.runDetail("demo", r.id)).run;
+    }
+    expect(now.status).toBe("succeeded");
+  });
+
+  it("starts with none in the first-run demo (?demo=empty)", async () => {
+    demo = new DemoOwner(0.01, false, true);
+    const api = demo.services().automations!;
+    expect(await api.list("demo")).toEqual([]);
+    expect(await api.runs("demo")).toEqual([]);
+    expect(await api.notices("demo")).toEqual([]);
+  });
+
   it("cancels, retries and keeps secret names only", async () => {
     demo = new DemoOwner(0.01, false);
     const api = demo.services().automations!;

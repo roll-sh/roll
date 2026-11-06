@@ -38,6 +38,8 @@ export interface DemoHost {
   command(machine: MachineId, c: Command): Promise<Reply>;
   threadStatus(thread: string): ThreadStatus | undefined;
   after(ms: number, fn: () => void): void;
+  /** The first-run demo (`?demo=empty`): no automations yet either. */
+  empty?(): boolean;
 }
 
 const MIN = 60_000;
@@ -122,6 +124,7 @@ export class DemoAutomations {
   private seed() {
     if (this.seeded) return;
     this.seeded = true;
+    if (this.host.empty?.()) return;
     const t = Date.now();
     const machines = this.host.machines();
     const mbp = machines.find((m) => !m.sandbox) ?? machines[0];
@@ -506,11 +509,19 @@ export class DemoAutomations {
         if (cfg.land) this.log(rid, s.id, "Queued to land (position 1)");
         return { change: 94, url: "https://roll.sh/acme/roll/changes/94", queued: !!cfg.land };
       }
-      default:
-        if (s.kind.includes(".") && !s.kind.startsWith("agent.")) throw new Error(`connect ${s.kind.split(".")[0]} first`);
+      default: {
+        // An integration's step: as the demo shows it connected, it goes (one not connected says so).
+        const known = CATALOG.steps.find((k) => k.kind === s.kind);
+        if (known?.needs_setup) throw new Error(`connect ${known.integration ?? s.kind.split(".")[0]} first`);
+        if (known?.integration) {
+          await wait(900);
+          this.log(rid, s.id, `${known.title}: done (demo)`);
+          return { ok: true, id: nid(`${known.integration}_`) };
+        }
         await wait(800);
         this.log(rid, s.id, `${BUILT_IN_STEPS[s.kind as keyof typeof BUILT_IN_STEPS]?.title ?? s.kind}: done`);
         return {};
+      }
     }
   }
 

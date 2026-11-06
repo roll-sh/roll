@@ -876,6 +876,7 @@ export class DemoOwner implements AgentsTransport {
     command: (machine, c) => this.command(machine, `auto_${Date.now()}`, c),
     threadStatus: (tid) => this.get<Thread>("thread", tid)?.status,
     after: (ms, fn) => this.after(ms, fn),
+    empty: () => this.empty,
   });
   /**
    * `speed` scales every delay (tests run the demo fast); `keepAlive` starts new work whenever
