@@ -407,7 +407,9 @@ export function AgentsSurface({
         e.preventDefault();
         return;
       }
-      const typing = el && (el.isContentEditable || /^(INPUT|SELECT)$/.test(el.tagName) || (el.tagName === "TEXTAREA" && (el as HTMLTextAreaElement).value !== ""));
+      // An empty search box (settings') isn't typing: its first Escape cleared it, the next closes.
+      const emptySearch = el instanceof HTMLInputElement && el.type === "search" && el.value === "";
+      const typing = el && !emptySearch && (el.isContentEditable || /^(INPUT|SELECT)$/.test(el.tagName) || (el.tagName === "TEXTAREA" && (el as HTMLTextAreaElement).value !== ""));
       if (typing) return;
       // The automations sheet goes up one level; from its list, it closes.
       if (shown.kind === "automations") (sheetBack.current ?? close)();

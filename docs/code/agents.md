@@ -1349,7 +1349,7 @@ dashboard or desktop app already decides, or features roll doesn't have.
 | Favourite models (`favorites`) and roll's recent models | `favorite_models`, `recent_models` (localStorage is the cache; `agents-models.ts`) | owner |
 | Default model (`defaultModelSelection`), permissions (`defaultRuntimeMode`), workspace (`defaultThreadEnvMode`), plan mode | new-thread defaults: project, then machine, then owner (`newThreadDefaults`) | project, machine, owner |
 | Worktrees: `worktreesDirectory`, `branchNamePrefix` | worktree folder, branch prefix | machine |
-| `branchNamingMode`, `newWorktreesStartFromOrigin`, `worktreeSubmodules` | not applicable (branches are `<prefix>/<title>`, from the checkout's HEAD) | — |
+| `branchNamingMode`, `newWorktreesStartFromOrigin`, `worktreeSubmodules` | not a setting: branches are `<prefix>/<title>`, from the checkout's HEAD, or from its upstream as last fetched when HEAD is only behind it (auto-pull refused over local changes; a stale base made every first publish conflict) | — |
 | `worktreeCleanup`, `storageCleanup.worktreeSettledAfterDays`, `worktreeKeepWhen` | `ProjectSettings.cleanup` (`worktree_after_days`, `keep`: uncommitted changes or any local files), "Clean up now" (`project.cleanup`) ("Settling") | project |
 | `storageCleanup.worktreeAfterDays`, `worktreeOnMerge`, `worktreeUnchanged`, `worktreeOnDelete`, browser artifacts, rotated logs | not applicable (an inactive or merged thread settles and then its settled rule applies; delete removes a clean worktree; no browser artifacts or rotated logs) | — |
 | Git identity for commits | `git_name`, `git_email` for publishing | machine |

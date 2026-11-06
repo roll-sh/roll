@@ -263,6 +263,19 @@ pub async fn head(dir: &Path) -> anyhow::Result<Option<String>> {
     Ok(out.map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()))
 }
 
+/// Where a new worktree starts: the checkout's HEAD, or its branch's upstream as last fetched
+/// when HEAD is only behind it (an ancestor with nothing of its own: auto-pull was refused over
+/// local changes). Branching from the stale HEAD made every first publish conflict.
+pub async fn worktree_base(dir: &Path) -> anyhow::Result<Option<String>> {
+    let Some(head) = head(dir).await? else { return Ok(None) };
+    let upstream = git(dir, &["rev-parse", "-q", "--verify", "@{upstream}^{commit}"]).try_run().await?;
+    let Some(upstream) = upstream.map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).filter(|u| !u.is_empty() && *u != head) else {
+        return Ok(Some(head));
+    };
+    let behind = git(dir, &["merge-base", "--is-ancestor"]).arg(&head).arg(&upstream).try_run().await?.is_some();
+    Ok(Some(if behind { upstream } else { head }))
+}
+
 pub async fn current_branch(dir: &Path) -> anyhow::Result<Option<String>> {
     let out = git(dir, &["symbolic-ref", "-q", "--short", "HEAD"]).try_run().await?;
     Ok(out.map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).filter(|b| !b.is_empty()))

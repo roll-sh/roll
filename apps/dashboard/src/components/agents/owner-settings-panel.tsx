@@ -112,6 +112,7 @@ export function ownerSettingItems(machines: readonly Machine[], services: Agents
     S.permissions,
     S.mode,
     S.workspace,
+    S.shares,
     ...machines.map((m) => ({ id: `machine.${m.id}`, title: m.name, section: "Machines", terms: ["machine settings", "providers", m.info?.os ?? "", m.sandbox ? "sandbox" : "computer"] })),
     ...(services ? [ENDPOINT_SETTINGS.owner] : []),
     ...(services?.gateway ? Object.values(GATEWAY_SETTINGS) : []),

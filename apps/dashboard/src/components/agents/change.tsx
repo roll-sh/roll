@@ -78,9 +78,13 @@ export function ChangeChip({ change, className = "" }: { change: ThreadChange; c
   );
 }
 
-/** What "Ask to rebase" tells the agent about its conflicting change. */
+/**
+ * What "Ask to rebase" tells the agent about its conflicting change. It names the remote's default
+ * branch: the checkout's own copy can be behind (auto-pull refused), and rebasing onto it changed
+ * nothing.
+ */
 export function rebasePrompt(change: Pick<ThreadChange, "number" | "detail">): string {
-  return `Change #${change.number} conflicts with the default branch${change.detail ? ` (in ${change.detail})` : ""}. Rebase this branch onto the default branch, resolve the conflicts, run the checks, and tell me when it's ready to publish again.`;
+  return `Change #${change.number} conflicts with the default branch${change.detail ? ` (in ${change.detail})` : ""}. Fetch from origin and rebase this branch onto the default branch as it is on origin (the local copy may be behind), resolve the conflicts, run the checks, and tell me when it's ready to publish again.`;
 }
 
 /**

@@ -105,8 +105,8 @@ impl Host {
         Ok(Reply::Created { id: id.0 })
     }
 
-    /// A worktree for a thread on a new `roll/<slug>` branch at `base` (the project's HEAD when
-    /// unset).
+    /// A worktree for a thread on a new `roll/<slug>` branch at `base` (unset: the project's HEAD,
+    /// or its upstream when HEAD is only behind it, `git::worktree_base`).
     pub(crate) async fn make_worktree(&self, project: &Project, thread: &ThreadId, title: &str, base: Option<String>) -> Res<Worktree> {
         let repo = Path::new(&project.path);
         if git::root(repo).await.is_none() {
@@ -114,7 +114,7 @@ impl Host {
         }
         let base = match base {
             Some(base) => base,
-            None => git::head(repo).await?.ok_or_else(|| Fail::Invalid("the repository has no commits yet".into()))?,
+            None => git::worktree_base(repo).await?.ok_or_else(|| Fail::Invalid("the repository has no commits yet".into()))?,
         };
         let branch = git::unique_branch(repo, &self.branch_prefix(), &git::slug(title)).await?;
         let path = self.worktree_path(project.id.as_str(), thread.as_str());

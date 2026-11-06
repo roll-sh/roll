@@ -153,6 +153,27 @@ async fn worktrees_get_their_own_branch_and_removal_keeps_it() {
 }
 
 #[tokio::test]
+async fn new_worktrees_start_from_the_upstream_when_the_checkout_is_only_behind_it() {
+    let origin = repo();
+    let dir = tempfile::tempdir().unwrap();
+    let clone = dir.path().join("clone");
+    sh(dir.path(), &["clone", "-q", origin.path().to_str().unwrap(), "clone"]);
+    let start = git::head(&clone).await.unwrap().unwrap();
+    assert_eq!(git::worktree_base(&clone).await.unwrap().as_deref(), Some(start.as_str()));
+    // Main moves on; the checkout fetched it but couldn't fast-forward (a local edit).
+    std::fs::write(origin.path().join("a.txt"), "one\ntwo\nthree\n").unwrap();
+    sh(origin.path(), &["commit", "-qam", "more"]);
+    let upstream = git::head(origin.path()).await.unwrap().unwrap();
+    sh(&clone, &["fetch", "-q"]);
+    std::fs::write(clone.join("b.txt"), "local edit\n").unwrap();
+    assert_eq!(git::worktree_base(&clone).await.unwrap().as_deref(), Some(upstream.as_str()));
+    // A local commit of its own: the checkout's HEAD, never a base that drops it.
+    sh(&clone, &["-c", "user.name=T", "-c", "user.email=t@e", "commit", "-qam", "mine"]);
+    let mine = git::head(&clone).await.unwrap().unwrap();
+    assert_eq!(git::worktree_base(&clone).await.unwrap().as_deref(), Some(mine.as_str()));
+}
+
+#[tokio::test]
 async fn status_reports_branch_and_changes() {
     let repo = repo();
     let p = repo.path();
