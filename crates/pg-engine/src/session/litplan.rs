@@ -649,6 +649,8 @@ pub(crate) struct ParamPlans {
     uses: u64,
     /// Custom plans made from their Parse's analysis with the values put in (tests).
     from_analysis: u64,
+    /// Of those, the last custom plan with its scan chosen again (tests).
+    rechosen: u64,
 }
 
 struct ParamEntry {
@@ -665,6 +667,17 @@ struct ParamEntry {
     /// Whether its analysis with a custom plan's values put in (`Analyzed::bind_values`) was
     /// found to be the custom plan binding them gives (None: not checked yet).
     values_ok: Option<bool>,
+    /// The last custom plan made from its analysis, for the next values to choose its scan
+    /// again (`Analyzed::rechosen`).
+    kept: Option<KeptCustom>,
+}
+
+/// A custom plan of a lone scan kept for the next execution: the choice of its scan's path
+/// (`paths::ScanChoice`) and the sizes planning read, which must read the same.
+struct KeptCustom {
+    bq: Arc<BoundQuery>,
+    choice: Arc<crate::sql::paths::ScanChoice>,
+    reads: Watched,
 }
 
 /// What a Parse of a query found.
@@ -690,6 +703,12 @@ impl Session {
     /// (`Analyzed::bind_values`).
     pub fn analysis_custom_uses(&self) -> u64 {
         self.param_plans.from_analysis
+    }
+
+    /// How many custom plans were the one before with their scan chosen again for the
+    /// values (`Analyzed::rechosen`).
+    pub fn rechosen_custom_uses(&self) -> u64 {
+        self.param_plans.rechosen
     }
 
     fn param_entry(&mut self, sql: &str, oids: &[u32]) -> Option<&mut ParamEntry> {
@@ -754,7 +773,7 @@ impl Session {
         let (bq, reads) = self.lit_replan(&u, &env.path);
         let parsed = Parsed { bq: Arc::new(bq?), ..parsed };
         let e = self.param_entry(sql, oids)?;
-        (e.parsed, e.reads, e.custom_cost) = (parsed.clone(), Watched::new(reads), None);
+        (e.parsed, e.reads, e.custom_cost, e.kept) = (parsed.clone(), Watched::new(reads), None, None);
         Some((parsed, env.version, env.path, env.who, custom))
     }
 
@@ -778,14 +797,14 @@ impl Session {
                 e.custom_is_generic = None;
                 e.values_ok = None;
             }
-            (e.env, e.reads, e.parsed, e.unplanned, e.custom_cost) = (env, Watched::new(reads), parsed, unplanned, None);
+            (e.env, e.reads, e.parsed, e.unplanned, e.custom_cost, e.kept) = (env, Watched::new(reads), parsed, unplanned, None, None);
             return e.custom_is_generic == Some(true);
         }
         if self.param_plans.map.len() >= MAX_PARAM_KEYS {
             self.param_plans.map.clear();
         }
         let reads = Watched::new(reads);
-        let e = ParamEntry { oids: oids.into(), env, reads, parsed, unplanned, custom_is_generic: None, custom_cost: None, values_ok: None };
+        let e = ParamEntry { oids: oids.into(), env, reads, parsed, unplanned, custom_is_generic: None, custom_cost: None, values_ok: None, kept: None };
         self.param_plans.map.entry(sql.into()).or_default().push(e);
         false
     }
@@ -875,8 +894,10 @@ impl Session {
     /// A custom plan of `p` with `params` made from its Parse's analysis with the values put
     /// in (`Analyzed::bind_values`), PostgreSQL's custom plan of its cached query tree. The
     /// first one of an entry is checked against binding the values afresh (and every one in
-    /// debug builds); None: bind afresh.
-    pub(super) fn values_custom(&mut self, p: &Prepared, stmt: &Node, params: &[Value]) -> Option<BoundQuery> {
+    /// debug builds); None: bind afresh. `reuse`: when the custom plan before is a lone scan
+    /// whose sizes read the same, its scan's path chosen again for these values
+    /// (`Analyzed::rechosen`, planning's result) instead (not for EXPLAIN EXECUTE).
+    pub(super) fn values_custom(&mut self, p: &Prepared, stmt: &Node, params: &[Value], reuse: bool) -> Option<Arc<BoundQuery>> {
         let oids = {
             let plans = p.plans.lock();
             if !plans.param_oids.is_empty() {
@@ -891,16 +912,46 @@ impl Session {
             return None;
         }
         let (a, checked) = (e.unplanned.clone()?, e.values_ok == Some(true));
-        let made = self.with_ctx(params, |ctx| Ok(a.bind_values(params, ctx))).ok()?;
-        let bq = match made {
-            Custom::Plan(Ok(bq)) => bq,
+        let kept = e.kept.as_ref().filter(|_| reuse && checked).map(|k| (k.bq.clone(), k.choice.clone(), k.reads.clone()));
+        if let Some((kb, choice, mut reads)) = kept
+            && self.reads_hold(&mut reads)
+            && let Some(bq) = self.with_ctx(params, |ctx| Ok(a.rechosen(&kb, &choice, params, ctx))).ok().flatten()
+        {
+            // (Debug builds: it is the plan planning the values gives, costing the same.)
+            #[cfg(debug_assertions)]
+            if let Ok(Custom::Plan(Ok(own))) = self.with_ctx(params, |ctx| Ok(a.bind_values(params, ctx))) {
+                assert!(same_plan(&own, &bq, &[], &[]), "rechosen custom plan of {:?} with {params:?}:\n{:?}\n{:?}", p.sql, own.plan, bq.plan);
+                let (c, r) = (self.plan_cost(&own, params, true), self.plan_cost(&bq, params, true));
+                assert!((c - r).abs() <= 1e-9 * c.abs().max(1.0), "rechosen custom cost of {:?}: {c} {r}", p.sql);
+            }
+            if let Some(k) = self.param_entry(&p.sql, &oids).and_then(|e| e.kept.as_mut()) {
+                k.reads = reads;
+            }
+            self.param_plans.from_analysis += 1;
+            self.param_plans.rechosen += 1;
+            return Some(Arc::new(bq));
+        }
+        let ((made, choice), mut reads) = crate::sql::literals::recording(|| {
+            crate::sql::paths::keeping_choice(|| self.with_ctx(params, |ctx| Ok(a.bind_values(params, ctx))))
+        });
+        for r in &reads {
+            crate::sql::literals::note_read(|| r.clone());
+        }
+        let bq = match made.ok()? {
+            Custom::Plan(Ok(bq)) => Arc::new(bq),
             Custom::Plan(Err(_)) | Custom::Rebind => return None,
             Custom::Never => {
                 self.param_entry(&p.sql, &oids)?.values_ok = Some(false);
                 return None;
             }
         };
+        // (A scan's estimates read from its data are made again as its path is chosen.)
+        reads.retain(|r| *r != SizeRead::Data);
+        let kept = choice.filter(|_| a.rechoosable()).map(|choice| KeptCustom { bq: bq.clone(), choice, reads: Watched::new(reads) });
         if checked && !cfg!(debug_assertions) {
+            if let Some(e) = self.param_entry(&p.sql, &oids) {
+                e.kept = kept;
+            }
             self.param_plans.from_analysis += 1;
             return Some(bq);
         }
@@ -912,9 +963,10 @@ impl Session {
         debug_assert!(same, "custom plan from the analysis of {:?} with {params:?}:\n{:?}\n{:?}", p.sql, own.plan, bq.plan);
         if let Some(e) = self.param_entry(&p.sql, &oids) {
             e.values_ok = Some(same);
+            e.kept = kept.filter(|_| same);
         }
         self.param_plans.from_analysis += u64::from(same);
-        Some(own)
+        Some(Arc::new(own))
     }
 }
 
