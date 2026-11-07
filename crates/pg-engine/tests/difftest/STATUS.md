@@ -460,6 +460,21 @@ all of it (round 9's seeds too with `GUARD_SEEDS`).
 | 2026-11-03, rounds 6-9 (agent 162) | `5386239f` / `31066020` (agent 149's scan cost round 3, batch 2, 4e89b2ff) | 93,717 | 0 | 0 |
 | 2026-11-07, rounds 6-9 (agent 162; the first verification train, below) | `31066020` / `fe7b0023c` (+ docs and tools: `c59b1523`): every push of 2026-11-03 to 11-07, agents 144, 146, 148, 149, 150, 155, 157, 159, 160, 161, 162 | 93,717 | 0 | 37: binary array headers' 54000 (9 lines; eb450f4e9), round 9's statistics (pg_stats n_distinct, `arr @> '{2}'` estimates), indisready and plan counts (28) |
 
+## Verification train (agent 162, since 2026-11-07)
+
+After each wave of pushes (every 3-4 hours, or 4+ code commits) the full suite runs on origin's
+head in one heavy job (HANDOFF, machine rules): the guard above, debug and release crate tests,
+`crash_random` seeds 1-30 x 4 rounds (release), full regress on a private reference (0 units
+changed against `tests/regress/results.tsv`), isolation, pg_dump_tap. A failure is bisected to
+its commit and sent to the coordinator.
+
+| train | head | guard | crate tests | crash_random | regress | isolation | pg_dump_tap |
+|---|---|---|---|---|---|---|---|
+| 1, 2026-11-07 | `fe7b0023c` (as `c59b15238`: + docs, tools) | 0 new (above) | release and debug pass; goldens and clippy (18 warnings, as before) also on this head, which settles a39990c5's skipped post-rebase check | 1-30 x 4 clean | 51,148 / 51,150, 0 changed | 121 / 122 specs, 1,647 / 1,648 | 14,817 / 14,817 |
+
+Round 10's seeds 10000-10149 on the same head: wrong_rows 314, plan_variance 2, engine_error 49,
+missing_error 4, wrong_error 3, eval_error 25, error_detail 13 (as on `75f83bc0` with eb450f4e9).
+
 ## Round 9 (agent 156)
 
 Seeds 9000-9149 (23,502 statements, release, on `ed0c85fe`): wrong_rows 126, engine_error 38,
