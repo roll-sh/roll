@@ -137,32 +137,57 @@ pub fn set_idle_hook(f: fn()) {
 /// sleeps in the read (`set_wait_spin`; zero: it sleeps at once).
 static WAIT_SPIN_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/// Threads polling their sockets now, and how many may at once (half the cores the process
-/// may run on: past that the polling takes CPU from the statements).
+/// Connection threads at work (not waiting for their clients) and threads polling their
+/// sockets, counted while a spin is set: a thread polls only while both together fit in the
+/// cores the process may run on, so polling never takes a core a statement could use (at 32
+/// clients on 4 cores, polling with a fixed cap cost 15% of the throughput).
+static WORKING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 static SPINNING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-static MAX_SPINNING: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+static CORES: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
 
-/// Poll for a client's next message this long before sleeping (performance mode's): a reply
-/// that comes back within it skips the sleep and the wake-up.
+/// Poll for a client's next message up to this long before sleeping, while cores are free
+/// (performance mode's): a reply that comes back within it skips the sleep and the wake-up.
+/// Set before serving.
 pub fn set_wait_spin(d: std::time::Duration) {
     WAIT_SPIN_NS.store(d.as_nanos().min(u64::MAX as u128) as u64, Ordering::Relaxed);
 }
 
-/// The client's next bytes if they come within `set_wait_spin`'s time (None: they didn't, or
-/// no spin is set or free).
+/// A connection thread out of `WORKING` while it waits for its client.
+struct Waiting(bool);
+
+impl Waiting {
+    fn new(counted: bool) -> Waiting {
+        if counted {
+            WORKING.fetch_sub(1, Ordering::Relaxed);
+        }
+        Waiting(counted)
+    }
+}
+
+impl Drop for Waiting {
+    fn drop(&mut self) {
+        if self.0 {
+            WORKING.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
+/// The client's next bytes if they come within `set_wait_spin`'s time while cores are free
+/// (None: they didn't, or no spin is set, or no core is free).
 fn spin_read(s: &TcpStream, buf: &mut [u8]) -> Option<std::io::Result<usize>> {
     use std::os::fd::AsRawFd;
     let ns = WAIT_SPIN_NS.load(Ordering::Relaxed);
     if ns == 0 || buf.is_empty() {
         return None;
     }
-    let max = *MAX_SPINNING.get_or_init(|| std::thread::available_parallelism().map_or(1, |n| (n.get() / 2).max(1)));
-    if SPINNING.fetch_add(1, Ordering::Relaxed) >= max {
-        SPINNING.fetch_sub(1, Ordering::Relaxed);
-        return None;
-    }
+    let cores = *CORES.get_or_init(|| std::thread::available_parallelism().map_or(1, |n| n.get()));
+    let fits = || WORKING.load(Ordering::Relaxed) + SPINNING.load(Ordering::Relaxed) <= cores;
+    SPINNING.fetch_add(1, Ordering::Relaxed);
     let start = std::time::Instant::now();
     let r = loop {
+        if !fits() {
+            break None;
+        }
         // SAFETY: recv writes at most buf.len() bytes into buf, a live exclusive slice.
         let n = unsafe { libc::recv(s.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len(), libc::MSG_DONTWAIT) };
         if n >= 0 {
@@ -189,6 +214,16 @@ struct IdleRead {
     s: Arc<TcpStream>,
     armed: bool,
     deadline: Option<std::time::Instant>,
+    /// Counted in `WORKING` (a spin was set when the connection came).
+    counted: bool,
+}
+
+impl Drop for IdleRead {
+    fn drop(&mut self) {
+        if self.counted {
+            WORKING.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
 }
 
 /// The error a read past `IdleRead::deadline` fails with.
@@ -208,7 +243,11 @@ impl IdleRead {
         if IDLE_HOOK.get().is_some() {
             s.set_read_timeout(Some(IDLE_TRIM))?;
         }
-        Ok(IdleRead { s, armed: true, deadline: None })
+        let counted = WAIT_SPIN_NS.load(Ordering::Relaxed) != 0;
+        if counted {
+            WORKING.fetch_add(1, Ordering::Relaxed);
+        }
+        Ok(IdleRead { s, armed: true, deadline: None, counted })
     }
 
     /// Wake for the pending idle trim or a session deadline; otherwise block for data.
@@ -227,6 +266,7 @@ impl IdleRead {
 
 impl Read for IdleRead {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let _waiting = Waiting::new(self.counted);
         if self.deadline.is_some() {
             self.s.set_read_timeout(self.wait_for())?;
         }

@@ -298,6 +298,8 @@ fn main() -> anyhow::Result<()> {
             hba_lines: a.hba_lines,
             ident_file: a.ident_file,
         },
+        // EXPERIMENT (a180, remove before commit)
+        memtable_bytes: std::env::var("ROLL_EXP_MEMTABLE_MB").ok().and_then(|v| v.parse::<usize>().ok()).map_or(8 << 20, |m| m << 20),
         ..EngineOptions::default()
     })?;
     if a.downgrade_catalog {
