@@ -896,6 +896,8 @@ export class DemoOwner implements AgentsTransport {
     /** `?demo=busy`: one project (web) with 30 more threads, to see the canvas at scale. */
     private busy = false,
     private many = 0,
+    /** Nothing steps: no runs start (the canvas checker's frozen data, `&still`). */
+    private still = false,
   ) {}
 
   // ── records ──
@@ -1544,6 +1546,11 @@ export class DemoOwner implements AgentsTransport {
     });
 
     if (this.keepAlive) this.idle();
+    if (this.still) {
+      // Frozen (`&still`): the three busy threads stay running where they are, nothing steps.
+      for (const id of ["thr_demo_flaky", "thr_demo_next", "thr_demo_ci"]) this.patchThread(id, { status: "running", activity: "Reading the code" });
+      return;
+    }
     this.after(400, () => this.begin("thr_demo_flaky", "The queue test fails one time in ten. Find out why and fix it.", flakyScript));
     this.after(1200, () => this.begin("thr_demo_next", "Upgrade the web app to Next 16.4", nextScript));
     this.after(2000, () => this.begin("thr_demo_ci", "Move our CI from GitHub Actions to roll checks", ciScript));

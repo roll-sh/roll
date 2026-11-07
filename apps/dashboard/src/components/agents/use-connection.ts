@@ -22,7 +22,8 @@ function loadDemo() {
     // `?demo=1000`: that many more threads (at most 5000), to see the list and the board at scale.
     const many = Math.min(5000, Math.max(0, Number(variant) || 0));
     // `&still`: no new runs once the first ones end (frozen data, for the canvas checker's shots).
-    const owner = new DemoOwner(1, !params.has("still"), variant === "empty", variant === "busy", many);
+    const still = params.has("still");
+    const owner = new DemoOwner(1, !still, variant === "empty", variant === "busy", many, still);
     return { client: clientFor(DEMO_OWNER, () => owner), services: owner.services() };
   });
   return demo;

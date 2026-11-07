@@ -19,7 +19,7 @@
 //
 // Usage:
 //   node scripts/canvas-check.mjs [--base URL] [--engine chromium|webkit] [--only REGEX]
-//        [--out DIR] [--shots] [--jobs N] [--zooms 0.75,0.5,0.35]
+//        [--out DIR] [--shots] [--jobs N] [--zooms 1.25,0.75,0.5,0.35] [--scheme dark|light]
 //   node scripts/canvas-check.mjs --compare DIR      # j: chromium.json vs webkit.json in DIR
 //   node scripts/canvas-check.mjs --report DIR       # the table again from DIR/<engine>.json
 // env: CANVAS_CHECK_TOKENS="ada=/path/to/token,bea=…,northwind=…" (owner token files, never printed),
@@ -232,7 +232,7 @@ async function runGroup(browser, g, ctxOpts) {
   const phone = g.w < 640;
   const ctx = await browser.newContext({
     viewport: { width: g.w, height: g.h },
-    colorScheme: "dark",
+    colorScheme: ctxOpts.scheme,
     deviceScaleFactor: 1,
     hasTouch: phone,
     isMobile: phone && ctxOpts.engine !== "firefox",
@@ -318,15 +318,28 @@ async function runGroup(browser, g, ctxOpts) {
         }
         const shot = async (tag) => {
           if (!ctxOpts.shots) return;
-          const dir = join(OUT, "shots", ctxOpts.engine);
+          const dir = join(OUT, "shots", `${ctxOpts.engine}${ctxOpts.scheme === "light" ? "-light" : ""}`);
           mkdirSync(dir, { recursive: true });
           await page.screenshot({ path: join(dir, `${name}-${tag}.png`) });
         };
         frames.auto = await read(page);
         await shot("auto");
         // Moved by hand first, so Fit frames (pressed on a framed canvas it would go to the overview).
-        await press(page, "ArrowLeft");
-        await page.waitForTimeout(250);
+        {
+          const was = await page.evaluate(() => document.querySelector('[aria-label="Agents canvas"]').__canvasCheck().goal);
+          for (let i = 0; i < 4; i++) {
+            if (phone) await press(page, "ArrowLeft");
+            else {
+              const box = await page.locator('[aria-label="Agents canvas"]').boundingBox();
+              await page.mouse.move(box.x + box.width / 2, box.y + box.height / 3);
+              await page.mouse.wheel(60, 40);
+              await page.mouse.move(1, 1);
+            }
+            await page.waitForTimeout(250);
+            const now = await page.evaluate(() => document.querySelector('[aria-label="Agents canvas"]').__canvasCheck().goal);
+            if (Math.abs(now.x - was.x) > 10 || Math.abs(now.y - was.y) > 10) break;
+          }
+        }
         await pressFit(page);
         await settle(page);
         frames.fit1 = await read(page);
@@ -380,6 +393,8 @@ async function runGroup(browser, g, ctxOpts) {
             const was = new Map(base.snap.nodes.map((n) => [n.key, n]));
             const why = f.snap.nodes.filter((n) => { const o = was.get(n.key); return !o || o.w !== n.w || o.h !== n.h || o.important !== n.important; }).map((n) => { const o = was.get(n.key); return o ? `${n.key} ${o.w}×${o.h}${o.important ? "!" : ""}→${n.w}×${n.h}${n.important ? "!" : ""}` : `${n.key} new`; });
             const gone = base.snap.nodes.length - f.snap.nodes.length;
+            // What else the planner read that differs (the tree, levels, sections, spacing, the screen).
+            for (const part of ["tree", "levels", "sections", "spacing", "direction", "screen", "important"]) if (JSON.stringify(base.snap.input[part]) !== JSON.stringify(f.snap.input[part])) why.push(`input.${part}`);
             r.fails.push(`i z${Math.round(z * 100)}: ${m.length} cards moved on zoom (${m.slice(0, 3).join(", ")}); changed: ${why.slice(0, 3).join(", ") || "none"}${gone ? `, ${gone} fewer cards` : ""}; wraps ${JSON.stringify(base.snap.wraps)}→${JSON.stringify(f.snap.wraps)} screen ${JSON.stringify(base.snap.input.screen)}→${JSON.stringify(f.snap.input.screen)} overview ${base.snap.overview}→${f.snap.overview}`);
           }
           const cz = checkFrame(f, `z${Math.round(z * 100)}`, { fit: false });
@@ -462,6 +477,7 @@ if (flag("report")) {
 }
 
 const engine = opt("engine", "chromium");
+const scheme = opt("scheme", "dark");
 const base = opt("base", "http://localhost:3474");
 const only = opt("only") ? new RegExp(opt("only")) : null;
 const zooms = opt("zooms", "1.25,0.75,0.5,0.35").split(",").map(Number);
@@ -487,12 +503,12 @@ const results = [];
 const queue = [...todo];
 await Promise.all(
   Array.from({ length: Math.min(jobs, queue.length) }, async () => {
-    while (queue.length) results.push(...(await runGroup(browser, queue.shift(), { engine, base, key, tokens, zooms, shots: flag("shots") })));
+    while (queue.length) results.push(...(await runGroup(browser, queue.shift(), { engine, scheme, base, key, tokens, zooms, shots: flag("shots") })));
   }),
 );
 await browser.close();
 // Merge into what an earlier (--only) run left, so the table is always the whole matrix.
-const file = join(OUT, `${engine}.json`);
+const file = join(OUT, `${engine}${scheme === "light" ? "-light" : ""}.json`);
 const prev = only && existsSync(file) ? JSON.parse(readFileSync(file, "utf8")) : [];
 const merged = [...prev.filter((r) => !results.some((x) => x.case === r.case)), ...results];
 writeFileSync(file, JSON.stringify(merged));

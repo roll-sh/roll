@@ -449,10 +449,12 @@ export function layoutCanvas(tree: TreeLike, size: (key: string) => Size, shape:
       idle.h = y + b.h;
     }
   }
-  if (idle.at.length) blocks.push(idle);
   const per = wraps.roots > 0 ? wraps.roots : Infinity;
-  across.set(ROOTS, per < blocks.length ? "grid" : !horizontal);
+  across.set(ROOTS, per < blocks.length + (idle.at.length ? 1 : 0) ? "grid" : !horizontal);
   const all = { at: [] as [string, Point][], routes: [] as [string, Point[]][] };
+  const put = (b: Block, line: number, along: number) => (horizontal ? add(all, b, line, along) : add(all, b, along, line));
+  // Machines with work, `per` to a line; each line's offset, how far along it's used and how thick.
+  const used: { line: number; along: number; thick: number }[] = [];
   let line = 0;
   let along = 0;
   let thick = 0;
@@ -462,11 +464,28 @@ export function layoutCanvas(tree: TreeLike, size: (key: string) => Size, shape:
       along = 0;
       thick = 0;
     }
-    if (horizontal) add(all, b, line, along);
-    else add(all, b, along, line);
+    put(b, line, along);
     along += (horizontal ? b.h : b.w) + g.root;
     thick = Math.max(thick, horizontal ? b.w : b.h);
+    if (used.at(-1)?.line === line) used[used.length - 1] = { line, along, thick };
+    else used.push({ line, along, thick });
   });
+  if (idle.at.length) {
+    // The idle machines fill the shortest line if they fit there without making it the longest
+    // (they left an empty corner under a short machine); else they come last, as one more.
+    const longest = Math.max(0, ...used.map((u) => u.along - g.root));
+    const len = horizontal ? idle.h : idle.w;
+    const across = horizontal ? idle.w : idle.h;
+    const fit = used.filter((u) => u.along + len <= longest + 0.5 && across <= u.thick + 0.5).sort((a, b) => a.along - b.along)[0];
+    if (fit) put(idle, fit.line, fit.along);
+    else {
+      if (blocks.length && blocks.length % per === 0) {
+        line += thick + g.root;
+        along = 0;
+      }
+      put(idle, line, along);
+    }
+  }
   for (const [k, p] of all.at) out.positions.set(k, p);
   for (const [k, pts] of all.routes) out.routes.set(k, pts);
   return out;
