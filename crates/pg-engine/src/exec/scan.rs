@@ -3545,6 +3545,7 @@ impl ScanNode {
                     raw: Vec::new(),
                     topk: None,
                     toast: None,
+                    vplan: Default::default(),
                 };
                 let buf = super::parscan::LazyBuf::new(&d);
                 let cmps = d.filter.as_ref().and_then(super::kernel::StoredCmps::of);
@@ -4094,14 +4095,14 @@ impl ScanNode {
             drop(txn);
             heap_order(&p.table, &mut rows, false, ctx);
             let per = rows.len().div_ceil(ParScan::chunks(workers)).max(1);
-            let mut it = rows.into_iter().map(Ok);
+            let mut it = rows.into_iter();
             let mut out = Vec::new();
             loop {
                 let c: Vec<_> = it.by_ref().take(per).collect();
                 if c.is_empty() {
                     break;
                 }
-                out.push(super::parscan::Source::Rows(Box::new(c.into_iter())));
+                out.push(super::parscan::Source::Fill(Box::new(super::parscan::ListFill(c.into_iter()))));
             }
             out
         } else {
@@ -4161,6 +4162,7 @@ impl ScanNode {
             raw: computed.raw,
             topk: computed.topk,
             toast,
+            vplan: Default::default(),
         };
         if inline {
             return Ok(Some(ParScan::start_inline(scans, d)));
@@ -4265,6 +4267,7 @@ impl ScanNode {
             need_raw: None,
             topk: None,
             toast: None,
+            vplan: Default::default(),
         };
         Ok(ParScan::start(scans, workers, pool, d))
     }
@@ -4336,6 +4339,7 @@ impl ScanNode {
             need_raw: None,
             topk: None,
             toast: None,
+            vplan: Default::default(),
         };
         let par = ParScan::start(scans, workers, pool, d);
         // (No worker started: the keys are read here after all.)

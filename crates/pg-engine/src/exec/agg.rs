@@ -2970,7 +2970,11 @@ impl AggNode {
             // 0, under a nondeterministic collation) show.
             let presort = presort.or_else(|| {
                 // (Estimated only when it can matter: a plain aggregate has one group.)
-                let shown = colls.iter().any(Option::is_some) || self.groups.iter().any(|g| equal_apart(&g.ty()));
+                let shown = self
+                    .groups
+                    .iter()
+                    .zip(&colls)
+                    .any(|(g, c)| !shows_alike(g, c.as_ref(), input.projection()));
                 if self.groups.is_empty() || (!shown && self.aggs.iter().all(order_insensitive)) {
                     return None;
                 }
@@ -3081,11 +3085,20 @@ impl AggNode {
                             let mut map = Vec::with_capacity(p.groups.len());
                             let mut parts = Vec::with_capacity(p.groups.len());
                             for (k, st) in p.groups {
-                                let hk = if nondet { group_key(&k, &colls) } else { k.clone() };
-                                let h = index.hash(&hk);
-                                let gi = match find_group!(h, &hk) {
-                                    Some(i) => i,
-                                    None => new_group!(h, k, hk),
+                                // (The key compared is the key itself unless normalised.)
+                                let gi = if nondet {
+                                    let hk = group_key(&k, &colls);
+                                    let h = index.hash(&hk);
+                                    match find_group!(h, &hk) {
+                                        Some(i) => i,
+                                        None => new_group!(h, k, hk),
+                                    }
+                                } else {
+                                    let h = index.hash(&k);
+                                    match find_group!(h, &k) {
+                                        Some(i) => i,
+                                        None => new_group!(h, k, Vec::new()),
+                                    }
                                 };
                                 map.push(gi);
                                 parts.push(st);
@@ -3673,6 +3686,45 @@ fn through_projection(e: &crate::sql::expr::Expr, proj: &[crate::sql::expr::Expr
 /// exact sums and averages, min / max of types whose equal values are the same).
 /// Whether two equal values of type `t` can look different (interval_eq, numeric_eq,
 /// float8eq over -0 / 0, jsonb's numbers, arrays and ranges of them).
+/// Whether equal values of group key `g` (compared as `coll` has them) always look alike, so
+/// that its group shows the same value whichever of its rows comes first.
+fn shows_alike(g: &crate::sql::expr::Expr, coll: Option<&KeyNorm>, proj: Option<&[crate::sql::expr::Expr]>) -> bool {
+    match coll {
+        None => !key_equal_apart(g, proj),
+        // (A char(n) value is always padded to n: equal ones are the same string.)
+        Some(KeyNorm::Bpchar(None)) => {
+            let ty = match (g, proj) {
+                (crate::sql::expr::Expr::Col(i, _), Some(p)) => p.get(*i).map_or_else(|| g.ty(), |e| e.ty()),
+                _ => g.ty(),
+            };
+            matches!(ty, crate::types::DataType::Bpchar(n) if n > 0)
+        }
+        Some(_) => false,
+    }
+}
+
+/// Whether a group key's values may be equal and look different (`equal_apart` of its type,
+/// unless the expression only makes whole numbers: EXTRACT of a date's field; a column of
+/// the projection `proj` below, its expression).
+fn key_equal_apart(e: &crate::sql::expr::Expr, proj: Option<&[crate::sql::expr::Expr]>) -> bool {
+    let mut x = e;
+    while let crate::sql::expr::Expr::Relabel(y, _) = x {
+        x = y;
+    }
+    if let (crate::sql::expr::Expr::Col(i, _), Some(p)) = (x, proj)
+        && let Some(y) = p.get(*i)
+    {
+        return key_equal_apart(y, None);
+    }
+    if let crate::sql::expr::Expr::Call(def, args, _) = x
+        && let [_, arg] = &args[..]
+        && crate::sql::func::datetime::extracts_whole(def.imp, &arg.ty())
+    {
+        return false;
+    }
+    equal_apart(&e.ty())
+}
+
 fn equal_apart(t: &crate::types::DataType) -> bool {
     use crate::types::DataType as D;
     match t {

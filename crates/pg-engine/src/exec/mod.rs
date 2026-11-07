@@ -595,6 +595,38 @@ impl Instr {
     pub(crate) fn update(&self, key: usize, f: impl FnOnce(&mut NodeStats)) {
         f(self.nodes.borrow_mut().entry(key).or_default())
     }
+
+    /// Counts contributed by one collected inner run, including nested cached runs.
+    pub(crate) fn rescan_delta(&self, before: &HashMap<usize, NodeStats>) -> Vec<(usize, NodeStats)> {
+        let nodes = self.nodes.borrow();
+        before.iter().filter_map(|(&key, old)| {
+            let now = nodes.get(&key).copied().unwrap_or_default();
+            let delta = NodeStats {
+                loops: now.loops.saturating_sub(old.loops),
+                rows: now.rows.saturating_sub(old.rows),
+                removed: now.removed.saturating_sub(old.removed),
+                searches: now.searches.saturating_sub(old.searches),
+                fetches: now.fetches.saturating_sub(old.fetches),
+                pages: now.pages.saturating_sub(old.pages),
+                ..Default::default()
+            };
+            (delta.loops != 0 || delta.rows != 0 || delta.removed != 0 || delta.searches != 0 || delta.fetches != 0 || delta.pages != 0)
+                .then_some((key, delta))
+        }).collect()
+    }
+
+    pub(crate) fn repeat_rescan(&self, deltas: &[(usize, NodeStats)]) {
+        for &(key, d) in deltas {
+            self.update(key, |s| {
+                s.loops = s.loops.saturating_add(d.loops);
+                s.rows = s.rows.saturating_add(d.rows);
+                s.removed = s.removed.saturating_add(d.removed);
+                s.searches = s.searches.saturating_add(d.searches);
+                s.fetches = s.fetches.saturating_add(d.fetches);
+                s.pages = s.pages.saturating_add(d.pages);
+            });
+        }
+    }
 }
 
 /// A node under EXPLAIN ANALYZE: counts its loops and rows and times its `next` calls.
