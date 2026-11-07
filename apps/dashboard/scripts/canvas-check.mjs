@@ -15,6 +15,11 @@
 //   i  zooming never lays the canvas out again (each card keeps its world position)
 //   l  Fit cuts the canvas though all of it reads at ≥ 65 %
 //   k  what's drawn is where the layout put it (1 px), and text never grows as you zoom out
+//   m  nothing readable in the strips between and around the prompt bar, zoom bar and a docked sheet
+//   n  after Fit, no card cut at the canvas's left or right edge (a partial column)
+//   o  a gap (8 world px) between every two cards as drawn
+//   p  sections ≥ 80 % of the section gap apart, each with its own edge
+//   q  a phone's Fit again keeps two columns
 //   j  (--compare) Chromium and WebKit agree within 2 px
 //
 // Usage:
@@ -94,7 +99,8 @@ async function read(page) {
     const dock = document.querySelector("[data-prompt-bar]");
     const prompt = dock ? [...dock.children].map(visible).filter(Boolean) : [];
     const dom = {};
-    for (const el of c.querySelectorAll("[data-card]:not([data-leaving])")) {
+    // Off screen (`data-off`) a card measures as its content-visibility placeholder, not as drawn.
+    for (const el of c.querySelectorAll("[data-card]:not([data-leaving]):not([data-off])")) {
       const r = el.getBoundingClientRect();
       if (r.width) dom[el.dataset.key] = rel(r);
     }
@@ -109,6 +115,12 @@ async function read(page) {
       prompt,
       zoom: visible(c.querySelector("[data-zoom-bar]")),
       minimap: visible(c.querySelector("[data-minimap]")),
+      // The band that hides the canvas under the bottom chrome; its top `fade` px fade in.
+      band: (() => {
+        const el = c.querySelector("[data-chrome-band]");
+        const r = visible(el);
+        return r && { ...r, fade: +(el.dataset.fade ?? 0) };
+      })(),
       waiting: !!c.closest("[data-waiting]"),
       dom,
       title,
@@ -370,7 +382,7 @@ async function runGroup(browser, g, ctxOpts) {
 
         {
           const f = frames.fit1;
-          writeFileSync(join(OUT, "input", `${name}.json`), JSON.stringify({ input: f.snap.input, viewport: f.snap.viewport, covered: f.snap.covered, chrome: { canvas: f.canvas, prompt: f.prompt, zoom: f.zoom, minimap: f.minimap, waiting: f.waiting } }));
+          writeFileSync(join(OUT, "input", `${name}.json`), JSON.stringify({ input: f.snap.input, viewport: f.snap.viewport, covered: f.snap.covered, chrome: { canvas: f.canvas, prompt: f.prompt, zoom: f.zoom, minimap: f.minimap, waiting: f.waiting, band: f.band } }));
         }
         const c1 = checkFrame(frames.auto, "auto", { fit: true });
         const c2 = checkFrame(frames.fit1, "fit", { fit: true });
@@ -404,7 +416,7 @@ async function runGroup(browser, g, ctxOpts) {
             r.fails.push(`i z${Math.round(z * 100)}: ${m.length} cards moved on zoom (${m.slice(0, 3).join(", ")}); changed: ${why.slice(0, 3).join(", ") || "none"}${gone ? `, ${gone} fewer cards` : ""}; wraps ${JSON.stringify(base.snap.wraps)}→${JSON.stringify(f.snap.wraps)} screen ${JSON.stringify(base.snap.input.screen)}→${JSON.stringify(f.snap.input.screen)} overview ${base.snap.overview}→${f.snap.overview}`);
           }
           const cz = checkFrame(f, `z${Math.round(z * 100)}`, { fit: false });
-          r.fails.push(...cz.fails.filter((x) => /^[bgk]/.test(x)));
+          r.fails.push(...cz.fails.filter((x) => /^[bgkmo]/.test(x)));
           if (f.title > lastTitle + 0.01) r.fails.push(`k z${Math.round(z * 100)}: title text grew to ${f.title}px (world) from ${lastTitle}px`);
           lastTitle = Math.max(lastTitle, f.title);
         }
@@ -428,7 +440,7 @@ async function runGroup(browser, g, ctxOpts) {
 
 // ── reporting ──
 function report(results) {
-  const codes = "abcdefghikl!".split("");
+  const codes = "abcdefghiklmnopq!".split("");
   const lines = [];
   let pass = 0;
   for (const r of results.sort((a, b) => a.case.localeCompare(b.case))) {

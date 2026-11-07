@@ -51,10 +51,12 @@ function frameFor(c, overview) {
     ms,
     frame: {
       ...c.chrome,
+      // The band under the bottom chrome: what `covered` measured (its top 24 px fade in).
+      band: c.chrome.band ?? (c.covered > 0 ? { x: 0, y: c.chrome.canvas.h - c.covered, w: c.chrome.canvas.w, h: c.covered, fade: 24 } : null),
       minimap,
       dom: {},
       title: 0,
-      snap: { view: fit, goal: fit, room, overview, plan: { k: fit.k, all: fit.all }, nodes: snapNodes, input },
+      snap: { view: fit, goal: fit, room, overview, plan: { k: fit.k, all: fit.all }, nodes: snapNodes, edges: [...placed.routes.keys()], input },
     },
     bounds: bounds(placed.positions, size),
   };

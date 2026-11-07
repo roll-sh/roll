@@ -65,8 +65,10 @@ export function checkFrame(f, label, { fit }) {
   const L = new Map(nodes.map((n) => [n.key, toScreen(n)]));
   const D = f.dom;
   const chrome = [...f.prompt.map((r) => ["prompt bar", r]), ...(f.zoom ? [["zoom bar", f.zoom]] : []), ...(f.minimap ? [["minimap", f.minimap]] : [])];
-  // The free area: the canvas above the prompt bar and the zoom bar (a phone's zoom bar at the top: below it).
-  const barTop = Math.min(f.canvas.h, ...f.prompt.map((r) => r.y), ...(f.zoom && !f.waiting ? [f.zoom.y] : []));
+  // The free area: the canvas above the prompt bar and the zoom bar (a phone's zoom bar at the top:
+  // below it), and above the band that hides the canvas under them (its fade too).
+  const chromeTop = Math.min(f.canvas.h, ...f.prompt.map((r) => r.y), ...(f.zoom && !f.waiting ? [f.zoom.y] : []));
+  const barTop = Math.min(chromeTop, ...(f.band ? [f.band.y] : []));
   const top = f.waiting && f.zoom ? f.zoom.y + f.zoom.h : 0;
   const free = { x: 0, y: top, w: f.canvas.w, h: barTop - top };
   const all = !!s.plan?.all;
@@ -100,9 +102,10 @@ export function checkFrame(f, label, { fit }) {
   // c: what matters wholly in view after Fit.
   if (fit) {
     const view = clip(f.canvas, free);
+    // Whole, and clear of the bars (not just out from under them).
     const bad = nodes.filter((n) => n.important).filter((n) => {
       const r = rectOf(n.key);
-      return !inside(r, view) || chrome.some(([, c]) => meets(r, c));
+      return !inside(r, { ...view, h: view.h - CLEAR }) || chrome.some(([, c]) => meets(r, inflate(c, CLEAR)));
     });
     // Not required when it can't be done: the canvas's cells (everything is interleaved with what
     // matters) at 55 %, where titles still read, packed at about half (parents beside grids, requests
@@ -189,6 +192,74 @@ export function checkFrame(f, label, { fit }) {
       if (Math.abs(d.x - l.x) > 1.5 || Math.abs(d.y - l.y) > 1.5) bad.push(`${n.key} drawn ${fmt(d)} laid out ${fmt(l)}`);
     }
     if (bad.length) say("k", `${bad.length} cards: ${bad.slice(0, 2).join("; ")}`);
+  }
+  // m: nothing readable in the strips under the bottom chrome (between and around the prompt bar,
+  // the zoom bar and a docked request sheet): every bit of a card below the chrome's top is under a
+  // bar or the band that hides the canvas there. Sampled every 4 px; a sliver under 6 px is noise.
+  {
+    const strip = { x: 0, y: chromeTop - 4, w: f.canvas.w, h: f.canvas.h - chromeTop + 4 };
+    const hidden = [...chrome.map(([, c]) => c), ...(f.band ? [{ ...f.band, y: f.band.y + (f.band.fade ?? 0), h: f.band.h - (f.band.fade ?? 0) }] : [])];
+    const bad = [];
+    for (const n of nodes) {
+      const d = D[n.key];
+      if (!d || !meets(d, strip)) continue;
+      const r = clip(clip(d, strip), f.canvas);
+      let seen = 0;
+      let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+      for (let y = r.y + 2; y < r.y + r.h; y += 4)
+        for (let x = r.x + 2; x < r.x + r.w; x += 4) {
+          if (hidden.some((c) => x >= c.x && x <= c.x + c.w && y >= c.y && y <= c.y + c.h)) continue;
+          seen++;
+          (x0 = Math.min(x0, x)), (x1 = Math.max(x1, x)), (y0 = Math.min(y0, y)), (y1 = Math.max(y1, y));
+        }
+      if (seen && x1 - x0 >= 6 && y1 - y0 >= 6) bad.push(`${n.key} shows ${Math.round(x1 - x0 + 4)}×${Math.round(y1 - y0 + 4)} at ${Math.round(x0)},${Math.round(y0)}`);
+    }
+    if (bad.length) say("m", `${bad.length} cards show in the strips around the bars: ${bad.slice(0, 3).join("; ")}`);
+  }
+  if (fit) {
+    // n: no card cut at the canvas's left or right edge (a partial column).
+    {
+      const bad = [];
+      for (const n of nodes) {
+        const r = rectOf(n.key);
+        if (r.y > barTop || r.y + r.h < free.y) continue;
+        if ((r.x < -0.5 && r.x + r.w > 0.5) || (r.x < f.canvas.w - 0.5 && r.x + r.w > f.canvas.w + 0.5)) bad.push(`${n.key} (${fmt(r)})`);
+      }
+      if (bad.length) say("n", `${bad.length} cards cut at a side edge: ${bad.slice(0, 3).join("; ")}`);
+    }
+    // q: a phone's Fit again shows two columns of a grid that has two cards or more.
+    if (label === "fit2" && f.canvas.w < 640 && s.overview) {
+      const bad = [...kids].filter(([, ks]) => ks.length >= 2 && new Set(ks.map((n) => Math.round(n.x))).size < 2).map(([p]) => p);
+      if (bad.length) say("q", `phone Fit again: ${bad.length} grids one column wide (${bad.slice(0, 3).join(", ")}) at ${Math.round(k * 100)} %`);
+    }
+  }
+  // o: a gap between every two cards as drawn (8 world px at least; a request or pin stacks a gap under its card).
+  {
+    const G = 8 * k;
+    const rs = Object.entries(D).filter(([key]) => L.has(key)).sort((p, q) => p[1].x - q[1].x);
+    const bad = [];
+    for (let i = 0; i < rs.length && bad.length < 4; i++)
+      for (let j = i + 1; j < rs.length && rs[j][1].x < rs[i][1].x + rs[i][1].w + G; j++) {
+        const [a, b] = [rs[i][1], rs[j][1]];
+        if (meets(inflate(a, G / 2 - 0.5), inflate(b, G / 2 - 0.5))) bad.push(`${rs[i][0]} × ${rs[j][0]}`);
+      }
+    if (bad.length) say("o", `cards closer than 8 px (world): ${bad.join("; ")}`);
+  }
+  // p: sections read as sections: ≥ 80 % of the section gap from each other (header and cards), and each has its own edge.
+  {
+    const secs = nodes.filter((n) => (s.input.sections ?? []).includes(n.key));
+    const block = (sec) => union(nodes.filter((n) => n.key === sec.key || n.parent === sec.key).map((n) => ({ x: n.x, y: n.y, w: n.w, h: n.h })));
+    const gap = (s.input.spacing?.[s.input.direction]?.section ?? 80) * 0.8;
+    const bad = [];
+    for (let i = 0; i < secs.length; i++)
+      for (let j = i + 1; j < secs.length; j++) {
+        if (secs[i].parent !== secs[j].parent) continue;
+        const [a, b] = [block(secs[i]), block(secs[j])];
+        const apart = Math.max(b.x - (a.x + a.w), a.x - (b.x + b.w), b.y - (a.y + a.h), a.y - (b.y + b.h));
+        if (apart < gap) bad.push(`${secs[i].key} and ${secs[j].key} ${Math.round(apart)} apart`);
+      }
+    if (s.edges) for (const n of secs) if (n.parent && !s.edges.includes(`${n.parent}>${n.key}`)) bad.push(`${n.key} has no edge`);
+    if (bad.length) say("p", bad.slice(0, 3).join("; "));
   }
   return { fails, metrics };
 }
