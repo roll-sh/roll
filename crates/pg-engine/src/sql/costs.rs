@@ -641,7 +641,7 @@ pub(crate) fn strip(e: &Expr) -> &Expr {
 }
 
 /// A cast to or from a string type that pg_cast has no function for: CoerceViaIO.
-fn io_cast(from: &DataType, to: &DataType) -> bool {
+pub(crate) fn io_cast(from: &DataType, to: &DataType) -> bool {
     use DataType as T;
     let string = |t: &DataType| matches!(t, T::Text | T::Varchar(_) | T::Bpchar(_));
     let with_function = |t: &DataType| {
@@ -681,6 +681,18 @@ fn constant(e: &Expr) -> Option<Option<Value>> {
 }
 
 impl Est<'_> {
+    /// `constant`, a cast of a constant left to run (a custom plan's value through a stable
+    /// input routine) evaluated as estimate_expression_value evaluates it.
+    fn constant(&self, e: &Expr) -> Option<Option<Value>> {
+        if let Expr::Cast(x, from, to, explicit) = strip(e)
+            && let Some(Some(v)) = self.constant(x)
+            && !v.is_null()
+        {
+            return Some(crate::types::cast::cast_value(v, from, to, self.fmt, *explicit).ok());
+        }
+        constant(e)
+    }
+
     fn var(&self, e: &Expr) -> Option<VarRef> {
         match strip(e) {
             Expr::Col(i, _) => (self.vars)(*i),
@@ -761,9 +773,9 @@ impl Est<'_> {
         if args.len() != 2 {
             return None;
         }
-        let (var, c, op) = match (self.var(&args[0]), constant(&args[1])) {
+        let (var, c, op) = match (self.var(&args[0]), self.constant(&args[1])) {
             (Some(v), Some(c)) => (v, c, d.name),
-            _ => match (constant(&args[0]), self.var(&args[1])) {
+            _ => match (self.constant(&args[0]), self.var(&args[1])) {
                 (Some(c), Some(v)) => (v, c, commute(d.name)),
                 _ => return None,
             },
@@ -826,9 +838,9 @@ impl Est<'_> {
                 // compared by it, var_eq_const with the operator's collation.)
                 if matches!(d.name, "=" | "<>")
                     && let Some(coll) = d.coll.as_ref().filter(|c| !c.deterministic)
-                    && let Some((var, Some(c))) = match (self.var(&args[0]), constant(&args[1])) {
+                    && let Some((var, Some(c))) = match (self.var(&args[0]), self.constant(&args[1])) {
                         (Some(v), Some(c)) => Some((v, c)),
-                        _ => match (constant(&args[0]), self.var(&args[1])) {
+                        _ => match (self.constant(&args[0]), self.var(&args[1])) {
                             (Some(c), Some(v)) => Some((v, c)),
                             _ => None,
                         },
@@ -865,7 +877,11 @@ impl Est<'_> {
                     return s;
                 }
                 // scalararraysel: equality ANY of disjoint values sums, else combine.
-                let items: Vec<Expr> = match strip(right) {
+                let folded = match strip(right) {
+                    Expr::Cast(..) => self.constant(right).flatten().map(|v| Expr::Const(v, right.ty())),
+                    _ => None,
+                };
+                let items: Vec<Expr> = match strip(folded.as_ref().unwrap_or(&**right)) {
                     Expr::Array(items, _) => items.clone(),
                     Expr::Const(Value::Array(a), ty) => {
                         let et = ty.elem().cloned().unwrap_or(DataType::Unknown);
@@ -962,9 +978,9 @@ impl Est<'_> {
                 u?.hidden.iter().find(|(x, _)| x.same_as(e)).map(|(_, v)| v.clone())
             })
         };
-        let (var, c, varonleft) = match (var_of(l), constant(r)) {
+        let (var, c, varonleft) = match (var_of(l), self.constant(r)) {
             (Some(v), Some(c)) => (v, c, true),
-            _ => match (constant(l), var_of(r)) {
+            _ => match (self.constant(l), var_of(r)) {
                 (Some(c), Some(v)) => (v, c, false),
                 _ => return Some(default),
             },
@@ -1132,9 +1148,9 @@ impl Est<'_> {
 
     fn binary_op(&self, op: &str, l: &Expr, r: &Expr) -> f64 {
         let mut varonleft = true;
-        let (var, c, op) = match (self.var(l), constant(r)) {
+        let (var, c, op) = match (self.var(l), self.constant(r)) {
             (Some(v), Some(c)) => (v, c, op),
-            _ => match (constant(l), self.var(r)) {
+            _ => match (self.constant(l), self.var(r)) {
                 (Some(c), Some(v)) => {
                     varonleft = false;
                     (v, c, commute(op))
@@ -1143,7 +1159,7 @@ impl Est<'_> {
                     // An expression without statistics against a NULL: the (strict)
                     // operator never holds.
                     let null = |x: &Expr| matches!(strip(x), Expr::Const(Value::Null, _));
-                    let var_side = |x: &Expr| constant(x).is_none();
+                    let var_side = |x: &Expr| self.constant(x).is_none();
                     if ((null(r) && var_side(l)) || (null(l) && var_side(r)))
                         && (matches!(op, "=" | "<>") || ineq(op).is_some())
                     {
@@ -1155,7 +1171,7 @@ impl Est<'_> {
                         Expr::Col(i, _) => self.distinct.and_then(|d| d(*i)),
                         _ => None,
                     };
-                    let nd = match (small(l), constant(r), constant(l), small(r)) {
+                    let nd = match (small(l), self.constant(r), self.constant(l), small(r)) {
                         (Some(d), Some(_), _, _) | (_, _, Some(_), Some(d)) => Some(d.max(1.0)),
                         _ => None,
                     };
@@ -1190,7 +1206,7 @@ impl Est<'_> {
                         "~~" | "~~*" | "~" | "~*" | "!~~" | "!~~*" | "!~" | "!~*"
                             if !strip(l).columns().is_empty()
                                 && matches!(l.ty(), DataType::Text | DataType::Varchar(_) | DataType::Name | DataType::Bpchar(_))
-                                && let Some(Some(Value::Text(t))) = constant(r) =>
+                                && let Some(Some(Value::Text(t))) = self.constant(r) =>
                         {
                             let negate = op.starts_with('!');
                             let ptype = match op.trim_start_matches('!') {
