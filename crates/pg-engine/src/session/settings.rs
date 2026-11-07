@@ -555,7 +555,7 @@ pub struct Hot {
 /// A session's search path (`session_search_path`) for a `$user` and backend id: what every
 /// statement looks names up in, worked out once per change of the settings, user or backend.
 #[derive(Default)]
-struct PathMemo(parking_lot::Mutex<Option<(String, i32, Vec<String>)>>);
+struct PathMemo(parking_lot::Mutex<Option<(String, i32, crate::catalog::names::SearchPath)>>);
 
 impl Clone for PathMemo {
     fn clone(&self) -> Self {
@@ -2389,7 +2389,7 @@ impl Settings {
         user: &str,
         pid: i32,
         temp: impl FnOnce() -> String,
-    ) -> Vec<String> {
+    ) -> crate::catalog::names::SearchPath {
         let d = self.derived();
         let mut memo = d.path_memo.0.lock();
         if let Some((u, p, path)) = &*memo
@@ -2404,6 +2404,7 @@ impl Settings {
             Some(i) => path[i] = temp,
             None => path.insert(0, temp),
         }
+        let path: crate::catalog::names::SearchPath = path.into();
         *memo = Some((user.to_string(), pid, path.clone()));
         path
     }

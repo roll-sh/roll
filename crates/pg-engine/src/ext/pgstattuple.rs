@@ -92,7 +92,7 @@ fn stat_relation(c: &FnCtx, rel: Rel) -> Result<Value> {
             match ix.method.as_str() {
                 "btree" => {
                     let (s, _, _) = sizing::btree_page_stats(rel.oid, c.exec)?.unwrap_or_default();
-                    Ok(tuple_row(blocks * BLCKSZ, s.items, s.item_bytes, 0, 0, s.free))
+                    Ok(tuple_row(blocks * BLCKSZ, s.items, s.item_bytes, s.dead_items, s.dead_bytes, s.free))
                 }
                 "hash" | "gist" => {
                     let free = (blocks.max(1) - 1) as u64 * (BLCKSZ as u64 - 40);

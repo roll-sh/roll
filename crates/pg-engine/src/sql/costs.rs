@@ -216,7 +216,7 @@ pub fn rel_size(t: &Table, ctx: &ExecCtx) -> RelSize {
         }
         return unanalyzed_size(width);
     }
-    let curpages = crate::exec::sizing::heap_blocks(t, ctx)
+    let curpages = crate::exec::sizing::planned_heap_blocks(t, ctx)
         .ok()
         .flatten()
         .unwrap_or(0);

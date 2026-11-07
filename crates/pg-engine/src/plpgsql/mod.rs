@@ -5301,7 +5301,7 @@ pub fn system_query(ctx: &ExecCtx, sql: &str) -> Result<(Vec<Row>, Vec<OutCol>)>
         return Err(crate::error::internal("empty system view"));
     };
     let mut child = ctx.child(&[]);
-    child.search_path = vec!["pg_catalog".into()];
+    child.search_path = ["pg_catalog".to_string()].into();
     let r = (|| {
         let mut b = Binder::new(&child, Vec::new());
         let bq = b.bind_statement(&node)?;

@@ -217,7 +217,7 @@ struct Bound {
 struct Env {
     version: u64,
     settings: u64,
-    path: Vec<String>,
+    path: crate::catalog::names::SearchPath,
     who: (u32, bool),
 }
 
@@ -229,7 +229,7 @@ impl Session {
         let cat = self.txn.as_ref().unwrap().borrow().next_catalog();
         let st = self.state.settings.borrow();
         let who = (self.state.current_role(&cat), st.get_str("row_security") != Some("off"));
-        Env { version: cat.version, settings: st.generation(), path: self.state.search_path(), who }
+        Env { version: cat.version, settings: st.generation(), path: self.state.shared_search_path(), who }
     }
 
     /// The plan kept for `p`'s template that fits it now, with the values of its parameters
@@ -329,9 +329,9 @@ impl Session {
 
     /// Bind `generic` (a template with parameters of `types`), and what the planner read
     /// (None when it failed, or read a column's data).
-    fn lit_bind(&mut self, generic: &Node, types: Vec<DataType>, path: &[String]) -> (Option<Bound>, Vec<SizeRead>) {
+    fn lit_bind(&mut self, generic: &Node, types: Vec<DataType>, path: &crate::catalog::names::SearchPath) -> (Option<Bound>, Vec<SizeRead>) {
         let (bound, reads) = crate::sql::literals::recording(|| {
-            self.with_ctx_path(&[], Some(path.to_vec()), |ctx| {
+            self.with_ctx_path(&[], Some(path.clone()), |ctx| {
                 let (bq, unplanned) = analyzed_bound(Binder::new(ctx, types).analyze_statement(generic)?, ctx)?;
                 Ok(Bound { bq, unplanned })
             })
@@ -340,9 +340,9 @@ impl Session {
     }
 
     /// `u`'s statement planned again, and what the planner read.
-    fn lit_replan(&mut self, u: &Analyzed, path: &[String]) -> (Option<BoundQuery>, Vec<SizeRead>) {
+    fn lit_replan(&mut self, u: &Analyzed, path: &crate::catalog::names::SearchPath) -> (Option<BoundQuery>, Vec<SizeRead>) {
         let (bound, reads) =
-            crate::sql::literals::recording(|| self.with_ctx_path(&[], Some(path.to_vec()), |ctx| u.plan(ctx)));
+            crate::sql::literals::recording(|| self.with_ctx_path(&[], Some(path.clone()), |ctx| u.plan(ctx)));
         (bound.ok().filter(|_| !reads.contains(&SizeRead::Data)), reads)
     }
 
@@ -587,7 +587,7 @@ struct SharedEnv {
     db: u64,
     version: u64,
     values: Arc<crate::session::settings::ValuesKey>,
-    path: Vec<String>,
+    path: crate::catalog::names::SearchPath,
     who: (u32, bool),
 }
 
@@ -733,7 +733,7 @@ impl Session {
     /// What a Parse of `sql` with `oids` found before, with the binding's catalog version,
     /// search_path and role, when binding it now would find the same; and whether its custom
     /// plans are that binding.
-    pub(super) fn param_parsed(&mut self, sql: &str, oids: &[u32]) -> Option<(Parsed, u64, Vec<String>, (u32, bool), bool)> {
+    pub(super) fn param_parsed(&mut self, sql: &str, oids: &[u32]) -> Option<(Parsed, u64, crate::catalog::names::SearchPath, (u32, bool), bool)> {
         self.param_plans.map.get(sql)?;
         let env = self.lit_env();
         let e = self.param_entry(sql, oids)?;

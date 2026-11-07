@@ -1636,7 +1636,7 @@ impl Ddl<'_, '_> {
                 }
             }
             let mut row = match &need {
-                Some(need) if !sizing || stored.is_some() => {
+                Some(need) if !sizing || stored.is_some_and(|len| len <= crate::exec::sizing::TOAST_THRESHOLD) => {
                     crate::exec::scan::decode_table_row_need(t, &bytes, need)?
                 }
                 _ => crate::exec::scan::decode_table_row(t, &bytes)?,
@@ -1661,7 +1661,7 @@ impl Ddl<'_, '_> {
                         tid = ((first + (i / per) as u32).min(last), (i % per + 1) as u16);
                     }
                     None => {
-                        let size = match stored {
+                        let size = match stored.filter(|&len| len <= crate::exec::sizing::TOAST_THRESHOLD) {
                             Some(len) => {
                                 // (Debug builds check it against the size of the row decoded.)
                                 #[cfg(debug_assertions)]
@@ -1677,19 +1677,26 @@ impl Ddl<'_, '_> {
                                 relsize::heap_tuple_of_len(len)
                             }
                             None => {
-                                // (Sized with its virtual columns null, as stored; put back for
-                                // the indexes.)
+                                // (Sized with its virtual columns null: they have no stored
+                                // representation, while a dropped column's old values still
+                                // take space; put back for the indexes.)
                                 let n = row.len();
                                 let held: Vec<(usize, Value)> = virt
                                     .iter()
                                     .filter(|&&i| i < n)
                                     .map(|&i| (i, std::mem::replace(&mut row[i], Value::Null)))
                                     .collect();
-                                let size = relsize::heap_tuple(&types, &row, &text);
+                                let raw = relsize::heap_tuple_len(&types, &row, &text);
+                                // (Large scan values are detoasted: their on-page layout.)
+                                let len = if raw <= crate::exec::sizing::TOAST_THRESHOLD {
+                                    raw
+                                } else {
+                                    crate::exec::sizing::layout(t, &row, self.ctx, &unpinned).0
+                                };
                                 for (i, v) in held {
                                     row[i] = v;
                                 }
-                                size
+                                relsize::heap_tuple_of_len(len)
                             }
                         };
                         packer.push(size);

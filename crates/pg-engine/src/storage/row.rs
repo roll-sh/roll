@@ -887,7 +887,7 @@ pub fn decode_row_need(b: &[u8], need: &[bool]) -> Result<Vec<Value>> {
 pub fn decode_row_need_spare(b: &[u8], need: &[bool], spare: usize) -> Result<Vec<Value>> {
     let mut pos = 0;
     let n = get_varint(b, &mut pos)? as usize;
-    let mut row = Vec::with_capacity(n + spare);
+    let mut row = Vec::with_capacity(n.max(need.len()) + spare);
     // (The values after the last column needed aren't walked.)
     let last = need[..need.len().min(n)].iter().rposition(|&x| x).map_or(0, |i| i + 1);
     for &want in &need[..last] {

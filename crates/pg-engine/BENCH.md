@@ -4033,6 +4033,33 @@ select-only base 0.151 / 0.165, new 0.151 / 0.161 (peak 309-361 / 307-308); tpcb
 engine CPU base 122 / 116 s, new 111 s, PostgreSQL 46 s (**2.4x**); peak RSS base 4,298 /
 4,330 MB, new 4,058 MB.
 
+### Batch 3: dense fetches as stored, the heap model's per-scan Fetcher (against batch 2's head `4e89b2ff`)
+
+The range read on head (the planner's and the size models' rounds since, 145 / 151): 1,126-1,128k
+instructions per op at batch 2's head, 1,086-1,090k with batch 3 (-3.5%; three interleaved
+rounds, release), server CPU 300-321 against 290-303 µs per op, ops/s 11.7-12.6k against
+12.8-13.3k, peak RSS unchanged (103-108 MB). PostgreSQL 396k instructions per op: **2.75x**.
+Where it goes now (frame pointers, head + batch 3): planning a custom plan 46.5% (agent 145),
+the scan 27% (entries 3.5%, the rows' fetch 8.9%, decode 4%), the wire and the rest.
+pgbench select-only 0.052 / 0.049 against 0.049 / 0.049 ms CPU per transaction, tpcb-like
+0.542 / 0.546 against 0.573 / 0.524 (unchanged); TPC-H SF1 57 / 57 s CPU, peak RSS 2,501 /
+2,491 MB, every hash equal to PostgreSQL's (46 s: **1.24x**).
+
+### Batch 3 against PostgreSQL in containers (dist engine `a9e01ff0`, `tools/bench/run.sh` with `ENGINE_DOCKER=1`)
+
+Both servers in system.slice on CPUs 20-23, the client on 28-31, durable, CPU and memory
+(anon + shmem) from each container's cgroup; three alternating rounds.
+
+| workload | engine | PostgreSQL 18.6 | engine / PG |
+|---|---|---|---|
+| 8-client 100-row PK range reads, server CPU µs per op | 250-269 | 109-138 | 2.0-2.3x |
+| same, ops/s | 13.5-14.5k | 22.7-31.2k | |
+| 200k nested-loop PK lookups (`generate_series` join, hash and merge joins off), server CPU ms | 445-505 | 289-351 | 1.4-1.7x |
+| memory after the runs, MB | 68-74 | 167 | 0.41-0.44x |
+
+The kept cursors and point fetches took the nested loop's in-process time from 637-677 ms
+(batch 2's head with agent 160's rescan) to 448-498 ms.
+
 ## Scan cost, round 2 (round 23, agent 130)
 
 What changed (HANDOFF "Scan cost, round 2"): storage hands rows to the scan node a batch at a
@@ -8080,6 +8107,81 @@ on-CPU samples, `scanned_pages` 0.44% of it, the parking_lot slow paths 0.2%. Th
 At 300,000 rows everything matches but mw1_pkey's pgstatindex after the VACUUM: deleted_pages
 162 on both (before this round the model deleted none), leaf pages 1,613 + 1 empty against
 1,614 + 0 (with PostgreSQL's autovacuum off too).
+
+## Size models, round 6 (agent 170)
+
+HANDOFF.md, "Size models, round 6", has what changed. Engines are the dist builds of
+5c312235 ("base") and of this round's changes on it ("head"), in containers as run.sh's
+`ENGINE_DOCKER` on cores 32-35 at CPU weight 2, PostgreSQL 18.6 the same, clients on 12-15;
+other agents' builds ran unpinned throughout, so single cells moved by up to 2x (read the
+pairs and the profiles, not one cell).
+
+**Apply** (`apply.sh`, PostgreSQL publisher, 60,000 transactions, 3 rounds; every subscriber
+ends with the publisher's md5 of every row; pages: acc / acc_pkey / hist / hist_pkey):
+
+| subscriber | CPU | memory | pages |
+|---|---|---|---|
+| PostgreSQL 18.6 | 2.66-3.25 s | apply worker 30 MB | 162 / 30 / 382 / 166 |
+| engine base | 3.62-4.04 s | +46-49 MB | **1,077 / 57** / 383 / 166 |
+| engine head | 3.93-4.97 s | +30-35 MB | 162 / 30 / 382 / 166 |
+
+(hist_aid varied between rounds on PostgreSQL itself, 103-119, and matched each round.) The
+base subscriber never pruned the pages it updated (HANDOFF). Head's apply thread (host
+profile, LBR): models ~28%, of which pruning on the identity lookups 15% (`Heap::prune`
+1% self, its line-pointer copies and per-page vectors), `inserted_with` 9%, `updated` 3%
+(HOT again); base's were `updated` 18%, `index_insert` 15%, `inserted_with` 10%.
+
+**pgbench** (scale 10, `-M prepared`, 20 s, 2 rounds, the 400k limit; CPU ms per transaction):
+
+| | PostgreSQL | base | head |
+|---|---|---|---|
+| select-only c8 | 0.051 / 0.078 | 0.057 / 0.054 | 0.056 / 0.049 |
+| simple-update c8 | 0.252 / 0.256 | 0.250 / 0.235 | 0.309 / 0.235 |
+| tpcb-like c8 | 0.446 / 0.380 | 0.509 / 0.466 | 1.018 / 0.470 |
+| select-only c32 | 0.050 / 0.049 | 0.051 / 0.054 | 0.051 / 0.053 |
+| simple-update c32 | 0.227 / 0.227 | 0.262 / 0.259 | 0.274 / 0.294 |
+| tpcb-like c32 | 0.460 / 0.471 | 0.548 / 0.584 | 0.570 / 0.627 |
+
+Head's first c8 round ran with a neighbour's build on its cores (620 tps; its second round
+6,659). An A/B pair with profiles of simple-update c32 (perf -p on the
+container's engine) gave 13,676 / 12,778 tps base and 7,743 / 11,174 head, with identical
+flat profiles: the models, hash tables and lock tables are 2.51% of base's samples and 2.09%
+of head's; the rest is the store, the protocol and allocation. No difference from this
+round's code shows beyond the noise.
+
+**The lift table** (`liftcmp.sh` on head, 2 rounds; CPU s or ms per transaction, peak MB):
+
+| check | 400k | lifted | PostgreSQL | round 5 lifted |
+|---|---|---|---|---|
+| COPY 1M (g) | 1.98 / 1.99 s | 2.23 / 2.22 s | 0.80 / 0.76 s | 2.04 / 2.22 |
+| VACUUM (v) | 0.39 / 0.41 s | 0.18 / 0.19 s | 0.17 / 0.17 s | 0.51 / 0.20 |
+| primary key (p) | 0.77 / 0.87 s | 0.76 / 0.74 s | 0.56 / 0.55 s | 2.62 / 2.61 |
+| CREATE INDEX (bid) | 1.13 / 1.23 s | 0.80 / 0.88 s | 0.44 / 0.45 s | 1.20 / 1.19 |
+| DELETE 10% | 0.64 / 0.60 s | 0.87 / 0.94 s | 0.17 / 0.18 s | 0.81 / 1.15 |
+| VACUUM after DELETE | 0.65 / 0.65 s | 0.69 / 0.93 s | 0.26 / 0.27 s | 0.38 / 0.39 |
+| first statement after restart | 11 / 15 ms | 10 / 18 ms | 2.2 / 2.7 ms | 246 / 240 |
+| select-only c8 | 0.049 / 0.049, 454 / 407 MB | 0.049 / 0.052, 479 / 525 MB | 0.051 / 0.047, 246 MB | |
+| simple-update c8 | 0.234 / 0.244, 252 / 292 MB | 0.276 / 0.287, 376 / 362 MB | 0.429 / 0.213, 260 / 273 MB | |
+| tpcb-like c8 | 0.471 / 0.538, 297 / 323 MB | 0.514 / 0.544, 351 / 367 MB | 0.336 / 0.319, 261 / 277 MB | |
+
+The primary key, CREATE INDEX, VACUUM and the first statement are now at or below the 400k
+column; COPY, DELETE, VACUUM after DELETE, simple-update and the peaks are not: the limit
+stays. Host runs of the release builds (one engine, nice 19): the lifted primary key 2.82 s
+base / 0.94 s head of process CPU (dist base 2.63 s: no dist/release gap, both were the
+`UniqueKeys` collisions), its profile now the store's flush and compaction of the index's
+entries; the first statement 242 / 323 / 247 ms base, 21 / 12 / 23 ms head.
+
+**Model memory** (RSS of a host engine after a restart and one write to pgbench_accounts,
+lifted, `--cache-mb 64`): scale 10 base 140 / 153 MB, head 138 / 135 MB (400k: 47 / 56 and
+46 / 56); scale 30 base 211 / 330 MB, head 179 / 291 MB.
+
+**Page counts against PostgreSQL 18.6** (`mw.py`, STATS=1, `-c autovacuum=off` on both;
+lifted): 60,000 and 300,000 rows match in every line (the 300k empty leaf: pgstatindex's
+classification, HANDOFF); 3,000,000 rows match but `Bitmap Index Scan on mw1_k`'s cost
+(197.59 against 197.60) and its parent's startup cost. Base at 3M had mw2_ref 2,485 pages
+against 2,564 (posting list splits; reproduced with 200k rows, `a170_btree_posting_split`).
+With the engine's autovacuum on and PostgreSQL's off, the engine's ANALYZE changed the
+estimates and widths: compare the two servers configured alike.
 
 ## Where it is still slower, and why
 

@@ -1723,7 +1723,7 @@ fn rows_key(table: SysTable, ctx: &ExecCtx) -> SysRowsKey {
     // (pg_depend reads stored texts under the session's path, whatever the statement's.)
     let path = match table {
         SysTable::PgDepend => ctx.sess.search_path(),
-        _ => ctx.search_path.clone(),
+        _ => ctx.search_path.to_vec(),
     };
     // The session's own temporary schema leads every session's path under a name of its
     // own (`pg_temp_<pid>`): one that doesn't exist names nothing, and one that does is

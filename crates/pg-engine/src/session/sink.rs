@@ -92,7 +92,7 @@ pub(crate) fn format_ctx(ctx: &ExecCtx) -> FormatCtx {
     let mut f = ctx.sess.settings.borrow().format_ctx();
     f.names = Some(std::sync::Arc::new(crate::catalog::names::CatalogNames::new(
         ctx.catalog(),
-        ctx.sess.search_path(),
+        ctx.sess.shared_search_path(),
     )));
     f
 }
