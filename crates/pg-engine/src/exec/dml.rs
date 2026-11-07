@@ -903,7 +903,7 @@ fn unique_wait_context(
 /// A row version's heap TID as its ctid shows it: the one stored with it, else where the heap
 /// model put it (another transaction's version in progress), else the key's stand-in (a row
 /// not written yet: the unique checks run before the heap write).
-fn row_tid(t: &Table, key: &[u8], ctx: &ExecCtx) -> (u32, u16) {
+pub(crate) fn row_tid(t: &Table, key: &[u8], ctx: &ExecCtx) -> (u32, u16) {
     let stored = ctx.txn.try_borrow().ok().and_then(|x| x.get(key).ok().flatten());
     if let Some(tid) = stored.as_deref().and_then(super::scan::stored_tid) {
         return tid;
@@ -1403,11 +1403,18 @@ fn put_index_entries_with(
             continue;
         }
         if let Some(vals) = vals {
-            let k = index_entry_key(t, &bix.index, vals, dkey, &bix.colls);
             let tracked = ctx.txn.borrow().serializable_tracked();
+            let stored = super::scan::stores_entries(bix);
+            if !stored && !tracked {
+                continue;
+            }
+            let k = index_entry_key(t, &bix.index, vals, dkey, &bix.colls);
             if tracked {
                 let me = ctx.txn.borrow().id;
                 ctx.sess.db.ssi.wrote_entry(me, bix.index.oid, &k);
+            }
+            if !stored {
+                continue;
             }
             if fresh {
                 ctx.txn.borrow_mut().put_fresh(k, dkey.to_vec())?;
@@ -1518,7 +1525,7 @@ fn delete_index_entries(
     ctx: &ExecCtx,
 ) -> Result<()> {
     for bix in indexes {
-        if bix.index.id == 0 {
+        if !super::scan::stores_entries(bix) {
             continue;
         }
         if !crate::ext::index_am::builtin_method(&bix.index.method)
@@ -2370,7 +2377,8 @@ fn scan_matching(
     // (The primary key's index is `pkey_index`, not among `indexes`.)
     let pkey = t.pkey_index.and_then(|p| cat.indexes.get(&p).cloned()).filter(|ix| ix.id != 0);
     for ix in pkey.into_iter().chain(cat.table_indexes(t)).filter(|_| nondet.is_none()) {
-        if ix.predicate.is_some() || ix.columns.len() < cols.len() {
+        // (Only an index whose entries are stored has entries to find rows by.)
+        if ix.predicate.is_some() || ix.columns.len() < cols.len() || !matches!(ix.method.as_str(), "btree" | "hash") {
             continue;
         }
         let lead: Vec<Option<usize>> = ix.columns[..cols.len()]
@@ -2998,40 +3006,54 @@ pub fn update_row_rls(
         .collect();
     let mut new_vals: Vec<Option<Option<Vec<Value>>>> = vec![None; rules.indexes.len()];
     let mut old_vals: Vec<Option<Option<Vec<Value>>>> = vec![None; rules.indexes.len()];
-    // Unique and exclusion indexes whose key changed.
+    // The new version went into the heap before its index entries found a clash or an
+    // entry too big (`rowsize`): it stays, dead, where it was put (its TID the error's).
+    let dead = || match new_key == dkey {
+        true => super::sizing::updated(t, &rules.indexes, dkey, old, &new_key, &new, ctx).ok().flatten().map(|u| u.0),
+        false => None,
+    };
+    // Indexes whose key changed: an entry's size as it is formed, a unique or exclusion
+    // index's check, then a btree entry's size again (ExecInsertIndexTuples, index by index).
     for (i, bix) in rules.indexes.iter().enumerate() {
-        if !checks_rows(bix) || !changed[i] {
+        if !changed[i] {
             continue;
         }
         let nv = index_values(bix, &new, ctx)?;
         new_vals[i] = Some(nv.clone());
-        let ov = index_values(bix, old, ctx)?;
-        old_vals[i] = Some(ov.clone());
-        let Some(nv) = nv else {
-            continue;
-        };
-        check_without_overlaps(t, bix, &nv)?;
-        if ov
-            .as_ref()
-            .is_some_and(|o| super::agg::cmp_rows(o, &nv) == std::cmp::Ordering::Equal)
-        {
-            continue;
+        if let Err(e) = super::rowsize::on_form(t, bix, nv.as_deref(), &new, ctx) {
+            dead();
+            return Err(e);
         }
-        if defer_recheck(t, bix, &nv, &new_key, Some(dkey), ctx)? {
-            continue;
-        }
-        let entering = Entering { token: None, row: None, key: Some(new_key.as_slice()) };
-        if let Some((_, other)) =
-            index_conflict(t, bix, &nv, Some(dkey), Some(&entering), Dirty::Wait, false, ctx)?
-        {
-            ssi_change(t, &rules.indexes, dkey, old, Some(&new), ctx)?;
-            // The new version went into the heap before its index entries found the
-            // clash: it stays, dead, where it was put.
-            if new_key == dkey {
-                let _ = super::sizing::updated(t, &rules.indexes, dkey, old, &new_key, &new, ctx);
+        'unique: {
+            if !checks_rows(bix) {
+                break 'unique;
             }
-            return Err(index_violation(t, bix, &nv, other.as_deref(), ctx));
+            let ov = index_values(bix, old, ctx)?;
+            old_vals[i] = Some(ov.clone());
+            let Some(nv) = nv.as_deref() else {
+                break 'unique;
+            };
+            check_without_overlaps(t, bix, nv)?;
+            if ov
+                .as_ref()
+                .is_some_and(|o| super::agg::cmp_rows(o, nv) == std::cmp::Ordering::Equal)
+            {
+                break 'unique;
+            }
+            if defer_recheck(t, bix, nv, &new_key, Some(dkey), ctx)? {
+                break 'unique;
+            }
+            let entering = Entering { token: None, row: None, key: Some(new_key.as_slice()) };
+            if let Some((_, other)) =
+                index_conflict(t, bix, nv, Some(dkey), Some(&entering), Dirty::Wait, false, ctx)?
+            {
+                ssi_change(t, &rules.indexes, dkey, old, Some(&new), ctx)?;
+                dead();
+                return Err(index_violation(t, bix, nv, other.as_deref(), ctx));
+            }
         }
+        let tid = || dead().unwrap_or_else(|| row_tid(t, &new_key, ctx));
+        super::rowsize::on_insert(t, bix, nv.as_deref(), &new, tid, ctx)?;
     }
     let upd = super::sizing::updated(t, &rules.indexes, dkey, old, &new_key, &new, ctx)?;
     let tid = upd.map(|u| u.0);
@@ -3057,7 +3079,7 @@ pub fn update_row_rls(
             continue;
         }
         // (A native method's index: the new version's entry; the old one's stays.)
-        if am_insert(t, bix, nv.as_deref(), &new_key, new_key == dkey, ctx)? {
+        if am_insert(t, bix, nv.as_deref(), &new_key, new_key == dkey, ctx)? || !super::scan::stores_entries(bix) {
             continue;
         }
         if let Some(ov) = ov {
@@ -3380,8 +3402,20 @@ fn index_entries_checked(
         entered: Vec::new(),
         excl: Vec::new(),
     };
+    // (An entry too big for its index fails as it is formed, and a btree's past a third of
+    // a page after its unique check: `rowsize`. The heap tuple stays, dead, as for a
+    // unique violation.)
+    let dead = |out: &CheckedEntries| {
+        if t.has_rowid() {
+            let _ = super::sizing::inserted_with(t, &rules.indexes, &p.dkey, &p.row, Some(&out.vals), ctx);
+        }
+    };
     for bix in &rules.indexes {
         let vals = index_values(bix, &p.row, ctx)?;
+        if let Err(e) = super::rowsize::on_form(t, bix, vals.as_deref(), &p.row, ctx) {
+            dead(&out);
+            return Err(e);
+        }
         if let Some(v) = &vals
             && checks_rows(bix)
         {
@@ -3447,6 +3481,15 @@ fn index_entries_checked(
                 }
             }
         }
+        // (The dead tuple's TID is the error's.)
+        let tid = || {
+            let placed = t.has_rowid().then(|| super::sizing::inserted_with(t, &rules.indexes, &p.dkey, &p.row, Some(&out.vals), ctx));
+            match placed {
+                Some(Ok(Some(tid))) => tid,
+                _ => row_tid(t, &p.dkey, ctx),
+            }
+        };
+        super::rowsize::on_insert(t, bix, vals.as_deref(), &p.row, tid, ctx)?;
         out.vals.push(vals);
     }
     Ok(out)
@@ -3903,9 +3946,10 @@ impl InsertNode {
         };
         let mut at_flush = false;
         let r = self.insert(src, ctx).map_err(|e| {
+            // (And an index entry too big, `rowsize`: its index insertion is the flush's too.)
             if c.multi
                 && !e.stacked
-                && (e.code == code::UNIQUE_VIOLATION || e.code == code::EXCLUSION_VIOLATION)
+                && (e.code == code::UNIQUE_VIOLATION || e.code == code::EXCLUSION_VIOLATION || e.code == code::PROGRAM_LIMIT_EXCEEDED)
             {
                 at_flush = true;
                 frames.borrow_mut()[n] = Frame::Copy {

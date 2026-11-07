@@ -649,6 +649,27 @@ pub fn skip_value(b: &[u8], pos: &mut usize) -> Result<()> {
             }
             return Ok(());
         }
+        // (Its kind, then its floats.)
+        tag::GEO => {
+            *pos += 2;
+            let n = get_varint(b, pos)? as usize;
+            take(b, pos, 8 * n)?;
+            return Ok(());
+        }
+        // (Its element type, dimensions, then its items.)
+        tag::ARRAY => {
+            *pos += 1;
+            take(b, pos, 8)?;
+            let nd = get_varint(b, pos)? as usize;
+            for _ in 0..nd {
+                get_varint(b, pos)?;
+                take(b, pos, 4)?;
+            }
+            for _ in 0..get_varint(b, pos)? {
+                skip_value_fast(b, pos)?;
+            }
+            return Ok(());
+        }
         // (The rest: decoded and dropped.)
         _ => {
             decode_value(b, pos)?;
@@ -702,8 +723,8 @@ pub fn external_at(b: &[u8], col: usize) -> bool {
 /// What `relsize::heap_tuple_len` gives the stored row `b` (its encoded values) taken as
 /// `types`, the columns `null` stored as nulls (virtual generated ones), without decoding it.
 /// None when a value's size needs it decoded: anything but nulls, booleans, fixed-size numbers,
-/// dates and timestamps of the column's own type and ASCII text in a text, varchar or char(n)
-/// column;
+/// dates and timestamps of the column's own type, ASCII text in a text, varchar or char(n)
+/// column, jsonb, tsvectors, fixed-size geometric values and arrays of fixed-size elements;
 /// and rows shorter than `types` (they get columns added since).
 pub fn stored_tuple_len(b: &[u8], types: &[DataType], null: &[bool]) -> Option<usize> {
     use crate::catalog::relsize::{datum_len_at, tuple_header};
@@ -743,6 +764,33 @@ pub fn stored_tuple_len(b: &[u8], types: &[DataType], null: &[bool]) -> Option<u
                 vals.push((!null.get(i).copied().unwrap_or(false)).then_some(Some(payload)));
                 continue;
             }
+            // (Varlenas sized from their stored form: jsonb's text, tsvector's send format,
+            // an array of fixed-size elements.)
+            DataType::Jsonb | DataType::TsVector | DataType::Array(_) if matches!(t, tag::JSONB | tag::TSVECTOR | tag::ARRAY) => {
+                let payload = match (ty, t) {
+                    (DataType::Jsonb, tag::JSONB) => {
+                        let len = get_varint(b, &mut pos).ok()? as usize;
+                        let s = std::str::from_utf8(b.get(pos..pos + len)?).ok()?;
+                        pos += len;
+                        crate::catalog::relsize::jsonb_size(s) - 4
+                    }
+                    (DataType::TsVector, tag::TSVECTOR) => {
+                        let len = get_varint(b, &mut pos).ok()? as usize;
+                        let v = b.get(pos..pos + len)?;
+                        pos += len;
+                        tsvector_payload(v)?
+                    }
+                    (DataType::Array(e), tag::ARRAY) => stored_array_payload(b, &mut pos, e)?,
+                    _ => return None,
+                };
+                vals.push((!null.get(i).copied().unwrap_or(false)).then_some(Some(payload)));
+                continue;
+            }
+            // (A fixed-size geometric value: its kind, then its floats.)
+            DataType::Point | DataType::Lseg | DataType::GBox | DataType::Line | DataType::Circle if t == tag::GEO => {
+                pos += 1;
+                8 * get_varint(b, &mut pos).ok()? as usize
+            }
             _ => return None,
         };
         pos += skip;
@@ -762,6 +810,73 @@ pub fn stored_tuple_len(b: &[u8], types: &[DataType], null: &[bool]) -> Option<u
 /// Rows `stored_tuple_len` sized (tests read it).
 pub static STORED_SIZES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// The stored bytes of a fixed-size value tagged `t` in a column of type `ty`, when the tag
+/// is that type's own (None: anything else).
+fn fixed_stored(ty: &DataType, t: u8) -> Option<usize> {
+    match (ty, t) {
+        (DataType::Bool, tag::TRUE | tag::FALSE) => Some(0),
+        (DataType::Int2, tag::INT2) => Some(2),
+        (DataType::Int4, tag::INT4) | (DataType::Date, tag::DATE) | (DataType::Float4, tag::FLOAT4) => Some(4),
+        (DataType::Int8, tag::INT8)
+        | (DataType::Float8, tag::FLOAT8)
+        | (DataType::Timestamp(_), tag::TIMESTAMP)
+        | (DataType::Timestamptz(_), tag::TIMESTAMPTZ) => Some(8),
+        _ => None,
+    }
+}
+
+/// `relsize::varlena_payload` of a tsvector stored in its send format `v`.
+fn tsvector_payload(v: &[u8]) -> Option<usize> {
+    let n = u32::from_be_bytes(v.get(..4)?.try_into().ok()?) as usize;
+    let (mut pos, mut strlen) = (4, 0usize);
+    for _ in 0..n {
+        let word = v.get(pos..)?.iter().position(|&c| c == 0)?;
+        strlen += word;
+        pos += word + 1;
+        let npos = u16::from_be_bytes(v.get(pos..pos + 2)?.try_into().ok()?) as usize;
+        pos += 2 + 2 * npos;
+        if npos > 0 {
+            strlen = (strlen + 1) & !1;
+            strlen += 2 + 2 * npos;
+        }
+    }
+    Some(8 + 4 * n + strlen - 4)
+}
+
+/// `relsize::varlena_payload` of an array of `elem` stored at `pos` (past its tag), when its
+/// elements are of a fixed size (None: anything else).
+fn stored_array_payload(b: &[u8], pos: &mut usize, elem: &DataType) -> Option<usize> {
+    use crate::catalog::relsize::type_layout;
+    let (len, al) = type_layout(elem);
+    if len <= 0 {
+        return None;
+    }
+    // (The elements' own type: their tags are checked against the column's below.)
+    decode_type(b, pos).ok()?;
+    let nd = get_varint(b, pos).ok()? as usize;
+    for _ in 0..nd {
+        get_varint(b, pos).ok()?;
+        *pos += 4;
+    }
+    let items = get_varint(b, pos).ok()? as usize;
+    let mut present = 0usize;
+    for _ in 0..items {
+        let t = *b.get(*pos)?;
+        *pos += 1;
+        if t != tag::NULL {
+            *pos += fixed_stored(elem, t)?;
+            present += 1;
+        }
+    }
+    let align = |n: usize, a: usize| n.div_ceil(a) * a;
+    let nulls = if present < items { items.div_ceil(8) } else { 0 };
+    let mut n = align(16 + 8 * nd + nulls, 8);
+    for _ in 0..present {
+        n = align(n, al) + len as usize;
+    }
+    Some(n - 4)
+}
+
 /// `decode_row` building only the values `need` marks (the others NULL; a value past the
 /// mask's end isn't needed).
 pub fn decode_row_need(b: &[u8], need: &[bool]) -> Result<Vec<Value>> {
@@ -772,7 +887,7 @@ pub fn decode_row_need(b: &[u8], need: &[bool]) -> Result<Vec<Value>> {
 pub fn decode_row_need_spare(b: &[u8], need: &[bool], spare: usize) -> Result<Vec<Value>> {
     let mut pos = 0;
     let n = get_varint(b, &mut pos)? as usize;
-    let mut row = Vec::with_capacity(n + spare);
+    let mut row = Vec::with_capacity(n.max(need.len()) + spare);
     // (The values after the last column needed aren't walked.)
     let last = need[..need.len().min(n)].iter().rposition(|&x| x).map_or(0, |i| i + 1);
     for &want in &need[..last] {
@@ -790,6 +905,39 @@ pub fn decode_row_need_spare(b: &[u8], need: &[bool], spare: usize) -> Result<Ve
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A row of jsonb, tsvector, array and point values is sized from its stored bytes as
+    /// its decoded values size it.
+    #[test]
+    fn stored_sizes_of_varlenas() {
+        use crate::types::geo::{Geo, parse_point};
+        let types = [DataType::Jsonb, DataType::TsVector, DataType::Array(Box::new(DataType::Int4)), DataType::Point, DataType::Array(Box::new(DataType::Int8))];
+        let text = |v: &Value, ty: &DataType| crate::types::text::format_value(v, ty, &Default::default());
+        let rows = [
+            (r#"{"user": 7, "kind": "k3", "p12": true}"#, "'w12' 'x3' 'common'", vec![Some(1), Some(2), Some(1003)], "(3.5,7)"),
+            ("[1, \"a\", {\"b\": null}]", "a:1,3 bb:2A cc", vec![None, Some(-4)], "(0,0)"),
+            ("{}", "", vec![], "(-1e10,2)"),
+        ];
+        for (j, tsv, arr, p) in rows {
+            let ints: Vec<Value> = arr.iter().map(|v| v.map_or(Value::Null, Value::Int4)).collect();
+            let row = vec![
+                Value::Jsonb(Arc::new(parse_jsonb(j).unwrap())),
+                Value::TsVector(Arc::new(crate::types::tsearch::parse_tsvector(tsv).unwrap())),
+                Value::Array(Arc::new(ArrayValue::from_vec(DataType::Int4, ints))),
+                Value::Geo(Arc::new(Geo::Point(parse_point(p).unwrap()))),
+                Value::Array(Arc::new(ArrayValue::from_vec(DataType::Int8, (0..40).map(Value::Int8).collect()))),
+            ];
+            let enc = encode_row(&row);
+            let got = stored_tuple_len(&enc, &types, &[false; 5]);
+            let want = crate::catalog::relsize::heap_tuple(&types, &row, &text);
+            assert_eq!(got.map(crate::catalog::relsize::heap_tuple_of_len), Some(want), "{j} / {tsv} / {arr:?} / {p}");
+            // (Each value stepped over: `skip_value`.)
+            for i in 0..row.len() {
+                let need: Vec<bool> = (0..row.len()).map(|c| c == i).collect();
+                assert_eq!(decode_row_need(&enc, &need).unwrap()[i], row[i]);
+            }
+        }
+    }
 
     #[test]
     fn roundtrip() {

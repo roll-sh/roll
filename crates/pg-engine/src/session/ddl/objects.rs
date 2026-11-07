@@ -505,7 +505,7 @@ impl Ddl<'_, '_> {
             // before the phase that marks it ready) not ready for inserts.
             if s.concurrent
                 && !t.temporary
-                && let Some(e) = self.index_duplicate(&t, &ix)?
+                && let Some(e) = self.index_build_error(&t, &ix)?
             {
                 self.cat.put_index(Index {
                     valid: false,

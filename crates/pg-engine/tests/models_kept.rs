@@ -236,3 +236,36 @@ fn kept_models_not_used_when_stale() {
     s.query("TRUNCATE km2; INSERT INTO km2 VALUES (1, 'a')").unwrap();
     assert_eq!(rows(&mut s, "SELECT ctid FROM km2"), ["[Tid(0, 1)]"]);
 }
+
+/// A kept table whose pages were all visible is planned from its record's sizes while its
+/// models are still being laid out (`kept::sizes`): the plans, costs and sizes its first
+/// statements see are those of its models once laid out, and of before the restart.
+#[test]
+fn kept_sizes_plan_as_the_models_do() {
+    let dir = tempfile::tempdir().unwrap();
+    let checks = [
+        "EXPLAIN SELECT pad FROM ks WHERE id = 12345",
+        "EXPLAIN SELECT * FROM ks WHERE a = 7",
+        "SELECT pg_relation_size('ks'), pg_relation_size('ks_pkey'), pg_relation_size('ks_a')",
+        "SELECT pad FROM ks WHERE id = 12345",
+    ];
+    let before: Vec<Vec<String>> = {
+        let eng = open(dir.path());
+        let mut s = eng.connect(1, "postgres", "postgres", "t").unwrap();
+        exec(&mut s, "CREATE TABLE ks (id int PRIMARY KEY, a int, pad text); CREATE INDEX ks_a ON ks (a);
+            INSERT INTO ks SELECT g, g % 101, repeat('p', 60) FROM generate_series(1, 150000) g;
+            DELETE FROM ks WHERE id % 10 = 0; VACUUM ks");
+        let out = checks.iter().map(|q| rows(&mut s, q)).collect();
+        drop(s);
+        eng.shutdown();
+        out
+    };
+    let eng = open(dir.path());
+    let mut s = eng.connect(1, "postgres", "postgres", "t").unwrap();
+    let first: Vec<Vec<String>> = checks.iter().map(|q| rows(&mut s, q)).collect();
+    // (A ctid lays the models out, if the background builder hasn't yet.)
+    rows(&mut s, "SELECT ctid FROM ks WHERE id = 1");
+    let laid: Vec<Vec<String>> = checks.iter().map(|q| rows(&mut s, q)).collect();
+    assert_eq!(first, before);
+    assert_eq!(laid, before);
+}

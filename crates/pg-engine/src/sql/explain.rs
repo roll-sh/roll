@@ -17309,10 +17309,14 @@ pub(crate) fn sys_tuples(table: crate::catalog::system::SysTable, ctx: &ExecCtx)
         }
         .map_or(1000.0, |n| n as f64)
     } else {
-        // (Counted without generating the rows where it can be: `row_count`.)
+        // (Counted without generating the rows where it can be: `row_count`; the statistics
+        // views estimated from the relation maps' sizes, `stat_views::row_estimate`.)
         match crate::catalog::system::row_count(table, ctx) {
             Some(n) => n as f64,
-            None => crate::catalog::system::rows(table, ctx).map_or(1000.0, |r| r.len() as f64),
+            None => match crate::catalog::stat_views::row_estimate(table, ctx) {
+                Some(n) => n,
+                None => crate::catalog::system::rows(table, ctx).map_or(1000.0, |r| r.len() as f64),
+            },
         }
     }
     .max(1.0);
@@ -19122,7 +19126,19 @@ fn sys_index_scan(
     filter: &Expr,
     cols: &[(String, DataType)],
 ) -> Option<(String, Vec<SysCond>, Vec<Expr>)> {
-    static INDEXES: &str = include_str!("../catalog/sys_indexes.tsv");
+    // (The system catalogs' indexes, (table, index, key columns), parsed once: splitting the
+    // file's lines on every catalog scan's estimate was 5% of psql's `\d`.)
+    static INDEXES: std::sync::OnceLock<Vec<(&'static str, &'static str, Vec<&'static str>)>> =
+        std::sync::OnceLock::new();
+    let indexes = INDEXES.get_or_init(|| {
+        (include_str!("../catalog/sys_indexes.tsv").lines())
+            .filter(|l| !l.starts_with('#'))
+            .filter_map(|l| {
+                let f: Vec<&'static str> = l.split('\t').collect();
+                (f.len() >= 3).then(|| (f[0], f[1], f[2].split(',').collect()))
+            })
+            .collect()
+    });
     let mut quals = Vec::new();
     conjuncts(filter, &mut quals);
     let col_of = |e: &Expr| -> Option<usize> {
@@ -19142,15 +19158,14 @@ fn sys_index_scan(
     };
     // (conditions, quals used whole, quals kept as filters too, matched columns)
     let mut best: Option<(String, Vec<SysCond>, Vec<usize>, Vec<usize>, usize)> = None;
-    for line in INDEXES.lines().filter(|l| !l.starts_with('#')) {
-        let f: Vec<&str> = line.split('\t').collect();
-        if f.len() < 3 || f[0] != table {
+    for (itable, iname, ikeys) in indexes.iter() {
+        if *itable != table {
             continue;
         }
         let mut conds = Vec::new();
         let (mut used, mut lossy) = (Vec::new(), Vec::new());
         let mut matched = 0;
-        for key in f[2].split(',') {
+        for key in ikeys.iter().copied() {
             let Some(col) = cols.iter().position(|(n, _)| n == key) else {
                 break;
             };
@@ -19224,7 +19239,7 @@ fn sys_index_scan(
             }
         }
         if matched > 0 && best.as_ref().is_none_or(|b| matched > b.4) {
-            best = Some((f[1].to_string(), conds, used, lossy, matched));
+            best = Some((iname.to_string(), conds, used, lossy, matched));
         }
     }
     let (index, conds, used, _, _) = best?;

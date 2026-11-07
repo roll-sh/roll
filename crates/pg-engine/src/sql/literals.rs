@@ -424,7 +424,7 @@ impl SizeRead {
         use crate::exec::sizing;
         match self {
             SizeRead::Heap(oid, n) => ctx.catalog().table(*oid).is_some_and(|t| {
-                sizing::heap_blocks(t, ctx).ok().flatten().unwrap_or(0) == *n
+                sizing::planned_heap_blocks(t, ctx).ok().flatten().unwrap_or(0) == *n
             }),
             SizeRead::Fork(oid, n) => {
                 sizing::fork_blocks(*oid, sizing::Fork::Main, ctx).ok().flatten().unwrap_or(1) == *n

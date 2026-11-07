@@ -1,5 +1,5 @@
 //! The executor's in-memory hash tables (hash joins' and aggregates' keys, DISTINCT,
-//! subquery caches): a word-at-a-time multiply-rotate hasher with a final avalanche, seeded
+//! subquery caches): a word-at-a-time folded-multiply hasher with a final avalanche, seeded
 //! once per process, in place of SipHash. Nothing observable depends on these tables'
 //! iteration order (Postgres's own hash orders are modelled apart, `pghash`); the seed keeps
 //! their layout from being predictable across processes.
@@ -37,9 +37,15 @@ pub struct FastHasher(u64);
 const K: u64 = 0x517c_c1b7_2722_0a95;
 
 impl FastHasher {
+    /// The state and the next word, multiplied to 128 bits, the product's halves folded:
+    /// every bit of either reaches every bit of the next state. (A 64-bit multiply only
+    /// carries bits upward: with `rotate_left(5)` between words, keys whose words differ in
+    /// their high bytes, a key encoding's integers' low bytes, met in a few thousand states.
+    /// A million int8 keys gave 32,768 distinct hashes, a million text keys 24,000 repeats.)
     #[inline]
     fn add(&mut self, w: u64) {
-        self.0 = (self.0.rotate_left(5) ^ w).wrapping_mul(K);
+        let m = u128::from(self.0 ^ w) * u128::from(K);
+        self.0 = m as u64 ^ (m >> 64) as u64;
     }
 }
 
@@ -152,5 +158,30 @@ mod tests {
         assert!(max <= 12, "max bucket load {max}");
         let (lo, hi) = (*top.iter().min().unwrap(), *top.iter().max().unwrap());
         assert!(hi < lo * 2, "control bytes {lo}..{hi}");
+    }
+
+    /// Keys whose differing bytes end a word or spill into the next (an encoded int8 after
+    /// a table prefix, text numbered in order) hash apart.
+    #[test]
+    fn encoded_values_hash_apart() {
+        let s = FastState::default();
+        let distinct = |keys: &mut dyn Iterator<Item = Vec<u8>>| {
+            let mut n = 0;
+            let mut seen = std::collections::HashSet::new();
+            for k in keys {
+                n += 1;
+                seen.insert(s.hash_one(&k[..]));
+            }
+            n - seen.len()
+        };
+        let int8 = |prefix: &[u8], v: u64| {
+            let mut k = prefix.to_vec();
+            crate::storage::keys::encode_value(&mut k, &crate::types::Value::Int8(v as i64), false);
+            k
+        };
+        let n = 1u64 << 18;
+        assert_eq!(distinct(&mut (0..n).map(|v| int8(&[], v))), 0, "int8 keys");
+        assert_eq!(distinct(&mut (0..n).map(|v| int8(&crate::storage::keys::index_prefix(16384, 0), v))), 0, "data keys");
+        assert_eq!(distinct(&mut (0..n).map(|v| format!("key-{v}").into_bytes())), 0, "text keys");
     }
 }

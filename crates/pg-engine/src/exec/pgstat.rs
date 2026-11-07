@@ -236,11 +236,11 @@ pub struct Shared {
     pub shared_db: DbEntry,
     /// The cluster's fixed-numbered statistics (locked after this database's).
     pub fixed: ClusterStats,
-    /// Backends' counts kept unflushed when they went idle, by process id.
-    pub unflushed: HashMap<i32, Unflushed>,
-    /// When a reader flushed an idle backend's counts (its idle timeout), until the
-    /// backend next reports.
-    idle_flushed: HashMap<i32, Instant>,
+    /// Backends' counts kept unflushed when they went idle, by process id: each backend's
+    /// own slot (`UnflushedSlot`), registered the first time it keeps counts, so a backend
+    /// keeping counts at each transaction's end or marking itself busy at each statement
+    /// locks its slot, not these statistics (PostgreSQL's pending counts are backend-local).
+    pub unflushed: HashMap<i32, UnflushedSlot>,
     /// Relations rewritten (new files) since they were last read: a scan reads them in.
     pub cold: std::collections::HashSet<u32>,
     /// User tables whose modification counters (n_mod_since_analyze, n_ins_since_vacuum,
@@ -491,9 +491,10 @@ pub struct Pending {
     /// The backend's own WAL (pg_stat_get_backend_wal): records and bytes.
     pub wal: (i64, i64),
     pub tabs: super::fasthash::HashMap<u32, TabCounts>,
-    /// Tuples returned by scans of one relation in a row (`count_returned`, a row at a
-    /// time), not yet in `tabs` (`flush_returned`).
-    returned_run: Option<(u32, i64)>,
+    /// Tuples returned and fetched and blocks read by scans of one relation in a row
+    /// (`count_returned`, `count_fetched`, `count_blocks`: a row at a time), not yet in
+    /// `tabs` (`flush_returned`).
+    returned_run: Option<(u32, [i64; 3])>,
     pub funcs: HashMap<u32, FuncCounts>,
     /// New sessions to count in the database's entry.
     pub sessions: i64,
@@ -512,8 +513,13 @@ pub struct Pending {
     /// pgstat_report_stat's last_flush and pending_since.
     last_flush: Option<Instant>,
     pending_since: Option<Instant>,
-    /// Counts are kept unflushed in `Shared::unflushed`.
+    /// Counts are kept unflushed in `slot`.
     parked: bool,
+    /// Its slot in `Shared::unflushed`, once registered.
+    slot: Option<UnflushedSlot>,
+    /// The idle timeout autovacuum was last told about (`note_autovacuum`): told once per
+    /// timeout, not at every transaction's end.
+    noted_due: Option<Instant>,
     /// A snapshot (snapshot mode, with its time) or the entries read (cache mode).
     snapshot: Option<(i64, Box<Shared>)>,
     cache: Fetched,
@@ -537,8 +543,12 @@ impl Pending {
 
     /// `returned_run` into `tabs`: before anything reads them.
     pub fn flush_returned(&mut self) {
-        if let Some((rel, n)) = self.returned_run.take() {
-            self.tabs.entry(rel).or_default().tuples_returned += n;
+        if let Some((rel, [returned, fetched, blocks])) = self.returned_run.take() {
+            let t = self.tabs.entry(rel).or_default();
+            t.tuples_returned += returned;
+            t.tuples_fetched += fetched;
+            t.blocks_fetched += blocks;
+            t.blocks_hit += blocks;
         }
     }
 
@@ -770,10 +780,19 @@ pub fn scan_counts(ctx: &ExecCtx) -> bool {
 /// Tuples a scan of `rel` returned (pgstat_count_heap_getnext /
 /// pgstat_count_index_tuples).
 pub fn count_returned(ctx: &ExecCtx, rel: u32, n: i64) {
-    if n > 0 {
+    count_run(ctx, rel, [n, 0, 0]);
+}
+
+/// `n` added to `rel`'s counts in a row (`Pending::returned_run`).
+fn count_run(ctx: &ExecCtx, rel: u32, n: [i64; 3]) {
+    if n.iter().any(|&c| c > 0) {
         let mut p = ctx.sess.pgstat.borrow_mut();
         match &mut p.returned_run {
-            Some((r, c)) if *r == rel => *c += n,
+            Some((r, c)) if *r == rel => {
+                for (c, n) in c.iter_mut().zip(n) {
+                    *c += n;
+                }
+            }
             _ => {
                 p.flush_returned();
                 p.returned_run = Some((rel, n));
@@ -782,22 +801,20 @@ pub fn count_returned(ctx: &ExecCtx, rel: u32, n: i64) {
     }
 }
 
+/// An index scan's tuple: returned and fetched through `rel`, and a block of it read.
+pub fn count_index_tuple(ctx: &ExecCtx, rel: u32) {
+    count_run(ctx, rel, [1, 1, 1]);
+}
+
 /// Heap tuples fetched through `rel` (an index, or a table by a bitmap scan)
 /// (pgstat_count_heap_fetch).
 pub fn count_fetched(ctx: &ExecCtx, rel: u32, n: i64) {
-    if n > 0 {
-        ctx.sess.pgstat.borrow_mut().tab(rel).tuples_fetched += n;
-    }
+    count_run(ctx, rel, [0, n, 0]);
 }
 
 /// Blocks of `rel` read (all hits here: everything is in memory).
 pub fn count_blocks(ctx: &ExecCtx, rel: u32, n: i64) {
-    if n > 0 {
-        let mut p = ctx.sess.pgstat.borrow_mut();
-        let t = p.tab(rel);
-        t.blocks_fetched += n;
-        t.blocks_hit += n;
-    }
+    count_run(ctx, rel, [0, 0, n]);
 }
 
 fn nest(ctx: &ExecCtx) -> usize {
@@ -1245,7 +1262,12 @@ pub struct Unflushed {
     slru_zeroed: HashMap<String, i64>,
     /// When the idle timeout fires (None: the backend is busy).
     due: Option<Instant>,
+    /// When a reader flushed these counts (the idle timeout), until the backend next reports.
+    idle_flushed: Option<Instant>,
 }
+
+/// A backend's `Unflushed`, locked after `Shared` when both are.
+pub type UnflushedSlot = std::sync::Arc<parking_lot::Mutex<Unflushed>>;
 
 /// Add pending table counts `c` to `t` (a later transaction's after an earlier's: a
 /// truncation in the later one starts the live / dead deltas over).
@@ -1381,8 +1403,10 @@ pub fn take_autovacuum_changes(db: &crate::txn::Database) -> (Vec<u32>, HashMap<
     let later = s
         .unflushed
         .values()
-        .filter(|u| u.tabs.iter().any(|(r, c)| *r >= crate::catalog::FIRST_USER_OID && modifies(c)))
-        .filter_map(|u| u.due)
+        .filter_map(|u| {
+            let u = u.lock();
+            u.tabs.iter().any(|(r, c)| *r >= crate::catalog::FIRST_USER_OID && modifies(c)).then_some(u.due).flatten()
+        })
         .min();
     if let Some(at) = later {
         note_autovacuum(&mut s, at);
@@ -1442,21 +1466,22 @@ fn flush_idle(s: &mut Shared, db: &crate::txn::Database) {
         return;
     }
     let now = Instant::now();
-    let due: Vec<i32> = s
+    let due: Vec<Unflushed> = s
         .unflushed
-        .iter()
-        .filter(|(_, u)| u.due.is_some_and(|d| d <= now))
-        .map(|(pid, _)| *pid)
+        .values()
+        .filter_map(|slot| {
+            let mut u = slot.lock();
+            u.due
+                .is_some_and(|d| d <= now)
+                .then(|| std::mem::replace(&mut *u, Unflushed { idle_flushed: Some(now), ..Default::default() }))
+        })
         .collect();
     if due.is_empty() {
         return;
     }
     let cat = db.catalog();
-    for pid in due {
-        if let Some(u) = s.unflushed.remove(&pid) {
-            flush(s, u, &cat);
-            s.idle_flushed.insert(pid, now);
-        }
+    for u in due {
+        flush(s, u, &cat);
     }
 }
 
@@ -1470,18 +1495,14 @@ fn shared(db: &crate::txn::Database) -> parking_lot::MutexGuard<'_, Shared> {
 /// The backend's counts kept unflushed for table `rel` (pg_stat_get_xact_*'s pending
 /// entry holds them too).
 pub fn unflushed_table(sess: &crate::session::state::SessionState, rel: u32) -> Option<TabCounts> {
-    if !sess.pgstat.borrow().parked {
-        return None;
-    }
-    sess.db.pgstat.lock().unflushed.get(&sess.pid).and_then(|u| u.tabs.get(&rel).copied())
+    let p = sess.pgstat.borrow();
+    p.slot.as_ref().filter(|_| p.parked).and_then(|u| u.lock().tabs.get(&rel).copied())
 }
 
 /// The backend's counts kept unflushed for function `func`.
 pub fn unflushed_function(sess: &crate::session::state::SessionState, func: u32) -> Option<FuncCounts> {
-    if !sess.pgstat.borrow().parked {
-        return None;
-    }
-    sess.db.pgstat.lock().unflushed.get(&sess.pid).and_then(|u| u.funcs.get(&func).copied())
+    let p = sess.pgstat.borrow();
+    p.slot.as_ref().filter(|_| p.parked).and_then(|u| u.lock().funcs.get(&func).copied())
 }
 
 /// pg_stat_force_next_flush: the backend's next report flushes whatever the interval.
@@ -1506,11 +1527,9 @@ pub fn count_slru_zeroed(sess: &crate::session::state::SessionState, name: &str,
 /// A statement starts: a backend that kept counts unflushed isn't idle any more (its
 /// idle-stats-update timeout is disabled until it is idle again).
 pub fn busy(sess: &crate::session::state::SessionState) {
-    if !sess.pgstat.borrow().parked {
-        return;
-    }
-    if let Some(u) = sess.db.pgstat.lock().unflushed.get_mut(&sess.pid) {
-        u.due = None;
+    let p = sess.pgstat.borrow();
+    if let Some(u) = p.slot.as_ref().filter(|_| p.parked) {
+        u.lock().due = None;
     }
 }
 
@@ -1518,6 +1537,12 @@ pub fn busy(sess: &crate::session::state::SessionState) {
 pub fn session_ends(sess: &crate::session::state::SessionState) {
     flush_io(sess);
     report(sess, true, &sess.db.catalog());
+    if let Some(slot) = sess.pgstat.borrow_mut().slot.take() {
+        let mut shared = sess.db.pgstat.lock();
+        if shared.unflushed.get(&sess.pid).is_some_and(|current| std::sync::Arc::ptr_eq(current, &slot)) {
+            shared.unflushed.remove(&sess.pid);
+        }
+    }
 }
 
 /// AtEOXact_PgStat and the report that follows when the backend goes idle: the
@@ -1625,13 +1650,22 @@ fn report(sess: &crate::session::state::SessionState, mut force: bool, cat: &cra
     {
         return;
     }
-    let mut s = sess.db.pgstat.lock();
+    // (Registered once: from then on keeping counts locks only the backend's slot.)
+    let slot = match &p.slot {
+        Some(slot) => slot.clone(),
+        None => {
+            let slot = UnflushedSlot::default();
+            sess.db.pgstat.lock().unflushed.insert(sess.pid, slot.clone());
+            p.slot = Some(slot.clone());
+            slot
+        }
+    };
+    let mut u = slot.lock();
     // (An idle timeout flushed what was kept: that was the last flush.)
-    if let Some(t) = s.idle_flushed.remove(&sess.pid) {
+    if let Some(t) = u.idle_flushed.take() {
         p.last_flush = Some(t);
         p.pending_since = None;
     }
-    let mut u = s.unflushed.remove(&sess.pid).unwrap_or_default();
     for (rel, c) in p.tabs.drain() {
         add_pending(u.tabs.entry(rel).or_default(), &c);
     }
@@ -1665,13 +1699,20 @@ fn report(sess: &crate::session::state::SessionState, mut force: bool, cat: &cra
         // PGSTAT_IDLE_INTERVAL - (now - pending_since).)
         let due = *p.pending_since.get_or_insert(now) + IDLE_INTERVAL;
         u.due = Some(due);
-        if u.tabs.iter().any(|(r, c)| *r >= crate::catalog::FIRST_USER_OID && modifies(c)) {
-            note_autovacuum(&mut s, due);
-        }
-        s.unflushed.insert(sess.pid, u);
+        let tell = p.noted_due != Some(due)
+            && u.tabs.iter().any(|(r, c)| *r >= crate::catalog::FIRST_USER_OID && modifies(c));
+        drop(u);
         p.parked = true;
+        if tell {
+            p.noted_due = Some(due);
+            note_autovacuum(&mut sess.db.pgstat.lock(), due);
+        }
         return;
     }
+    // (The statistics, then the slot: a reader flushing idle backends locks them so.)
+    drop(u);
+    let mut s = sess.db.pgstat.lock();
+    let u = std::mem::take(&mut *slot.lock());
     flush(&mut s, u, cat);
     p.parked = false;
     p.last_flush = Some(now);

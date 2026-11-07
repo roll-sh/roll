@@ -382,7 +382,10 @@ pub fn check(perms: &Perms, ctx: &ExecCtx) -> Result<()> {
     lock_relations(perms, ctx)?;
     // The system views' columns read (see `ExecCtx::sys_cols`).
     for p in &perms.rels {
-        if !p.select_cols.is_empty() && crate::catalog::system::SysTable::by_oid(p.oid).is_some() {
+        if !p.select_cols.is_empty()
+            && p.oid < crate::catalog::FIRST_USER_OID
+            && crate::catalog::system::SysTable::by_oid(p.oid).is_some()
+        {
             ctx.sys_cols
                 .borrow_mut()
                 .entry(p.oid)
@@ -392,12 +395,15 @@ pub fn check(perms: &Perms, ctx: &ExecCtx) -> Result<()> {
     }
     let cat = ctx.catalog();
     let me = ctx.current_user();
-    let db_owner = ctx.db_owner();
+    // (Looked up only when a check needs it: a superuser's need none.)
+    let owner_cell = std::cell::OnceCell::new();
+    let db_owner = || *owner_cell.get_or_init(|| ctx.db_owner());
     for p in &perms.rels {
         let user = p.as_user.unwrap_or(me);
         if cat.is_superuser(user) {
             continue;
         }
+        let db_owner = db_owner();
         let Some((held, _)) = cat.rel_mask(p.oid, user, db_owner) else {
             continue;
         };
@@ -462,7 +468,7 @@ pub fn check(perms: &Perms, ctx: &ExecCtx) -> Result<()> {
         if cat.is_superuser(me) {
             break;
         }
-        let (held, _) = cat.obj_mask(ObjKind::Function, *f, me, db_owner);
+        let (held, _) = cat.obj_mask(ObjKind::Function, *f, me, db_owner());
         if held & acl::EXECUTE == 0 {
             let (word, name) = match cat.functions.get(f) {
                 Some(f) => (

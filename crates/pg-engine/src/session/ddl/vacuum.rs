@@ -1427,25 +1427,26 @@ impl Ddl<'_, '_> {
     }
 
     /// Whether building index `ix` of `t` measures them in the build's own pass over the
-    /// rows (`measure_rows_with`): a btree of a table too big to model, whose measure is the
-    /// rows' stored sizes and the index's keys sorted, none of which the build changes.
+    /// rows (`measure_rows_with`): an index of a built-in method on a table too big to
+    /// model, whose measure is the rows' stored sizes and the index's keys sorted
+    /// (`btree_pages_of`, for every method), none of which the build changes.
     pub(super) fn measures_in_build(&self, t: &Table, ix: &crate::catalog::Index) -> bool {
         let db = &self.ctx.sess.db;
         ix.id != 0
-            && ix.method == "btree"
+            && crate::ext::index_am::builtin_method(&ix.method)
             && crate::exec::sizing::is_estimated(t.oid, db)
             && crate::exec::sizing::btree_blocks(t.oid, ix.oid, db).is_none()
     }
 
-    /// `measure_rows`, handing `each` (when given) each row's data key and key values of
-    /// the one index measured, as its measure computes them: an index build's own pass
+    /// `measure_rows`, handing `each` (when given) the data key, index values and decoded
+    /// row of the one index measured, as its measure computes them: a build's own pass
     /// (`measures_in_build`), so the rows are read and the keys computed once. None (nothing
     /// read): the index isn't measured by its keys alone after all.
     pub(super) fn measure_rows_with(
         &self,
         t: &Table,
         indexes: Option<Option<u32>>,
-        mut each: Option<&mut dyn FnMut(&[u8], &[Value]) -> Result<()>>,
+        mut each: Option<&mut dyn FnMut(&[u8], &[Value], &[Value]) -> Result<()>>,
     ) -> Result<Option<RowMeasure>> {
         let db = &self.ctx.sess.db;
         let blocks = crate::exec::sizing::heap_blocks(t, self.ctx);
@@ -1562,6 +1563,12 @@ impl Ddl<'_, '_> {
         }
         let (mut xmins, mut may_toast) = ((u64::MAX, 0u64), false);
         let snap = self.ctx.txn.borrow().snapshot_ts();
+        // (An index's measure of a table nothing changed in since its last measure: the
+        // heap's live pages are the kept ones, so only the index's columns are decoded.
+        // Sizing a row's tuple decodes all of it: a jsonb or tsvector is parsed for it.)
+        let kept_live = (frozen.is_none() && modelled.is_none() && !ixs.is_empty())
+            .then(|| self.kept_live(t, layout, snap))
+            .flatten();
         let unpinned = std::collections::HashSet::new();
         let scan = self.ctx.txn.borrow().scan(&start, &crate::storage::keys::prefix_end(&start));
         for r in scan {
@@ -1584,8 +1591,10 @@ impl Ddl<'_, '_> {
                 self.vacuum_delay_point(1)?;
             }
             let stored = match modelled {
-                None => crate::storage::row::stored_tuple_len(crate::exec::scan::row_data(&bytes)?, &types, &virt_mask),
-                Some(_) => None,
+                None if kept_live.is_none() => {
+                    crate::storage::row::stored_tuple_len(crate::exec::scan::row_data(&bytes)?, &types, &virt_mask)
+                }
+                _ => None,
             };
             may_toast |= stored.is_none_or(|len| len > crate::exec::sizing::TOAST_THRESHOLD);
             if let Some(floor) = toast_frozen {
@@ -1601,7 +1610,7 @@ impl Ddl<'_, '_> {
                 }
             }
             let mut row = match &need {
-                Some(need) if modelled.is_some() || stored.is_some() => {
+                Some(need) if modelled.is_some() || stored.is_some_and(|len| len <= crate::exec::sizing::TOAST_THRESHOLD) || kept_live.is_some() => {
                     crate::exec::scan::decode_table_row_need(t, &bytes, need)?
                 }
                 _ => crate::exec::scan::decode_table_row(t, &bytes)?,
@@ -1611,7 +1620,7 @@ impl Ddl<'_, '_> {
                     continue;
                 };
                 if let Some(f) = each.as_mut() {
-                    f(&dkey, &vals)?;
+                    f(&dkey, &vals, &row)?;
                 }
                 ix.tuples += 1;
                 if let Some(keys) = &mut ix.btree_keys {
@@ -1628,8 +1637,8 @@ impl Ddl<'_, '_> {
                     ix.keys.push((prefix, sort, relsize::index_tuple(&ix.types, &vals, &text)));
                 }
             }
-            if modelled.is_none() {
-                if let Some(len) = stored {
+            if modelled.is_none() && kept_live.is_none() {
+                if let Some(len) = stored.filter(|&len| len <= crate::exec::sizing::TOAST_THRESHOLD) {
                     // (Debug builds check it against the size of the row decoded.)
                     #[cfg(debug_assertions)]
                     {
@@ -1644,12 +1653,21 @@ impl Ddl<'_, '_> {
                     sizes.push(relsize::heap_tuple_of_len(len));
                     continue;
                 }
+                // DROP does not rewrite old tuples: their stored values still occupy
+                // space. Virtual columns, in contrast, have no stored representation.
                 for &i in &virt {
-                    if i < row.len() {
-                        row[i] = Value::Null;
+                    if let Some(value) = row.get_mut(i) {
+                        *value = Value::Null;
                     }
                 }
-                sizes.push(relsize::heap_tuple(&types, &row, &text));
+                let raw = relsize::heap_tuple_len(&types, &row, &text);
+                // Large scan values are detoasted, so use their on-page layout.
+                let len = if raw <= crate::exec::sizing::TOAST_THRESHOLD {
+                    raw
+                } else {
+                    crate::exec::sizing::layout(t, &row, self.ctx, &unpinned).0
+                };
+                sizes.push(relsize::heap_tuple_of_len(len));
             }
         }
         if let Some(old) = frozen {
@@ -1657,7 +1675,7 @@ impl Ddl<'_, '_> {
         }
         let (modelled, live) = match modelled {
             Some(n) => (Some(n), n),
-            None => (None, relsize::heap_pages(sizes.into_iter())),
+            None => (None, kept_live.unwrap_or_else(|| relsize::heap_pages(sizes.into_iter()))),
         };
         if whole {
             let m = crate::txn::unchanged::Measured { ts: snap, armed: 0, layout, rows, live, xmin: xmins, may_toast };
@@ -1698,8 +1716,25 @@ impl Ddl<'_, '_> {
         let old = frozen?;
         let oldest = m.oldest_xmin(old)?;
         self.measured_xmin.set(Some((t.oid, old, oldest, toast_frozen.map(|f| (f, u64::MAX)))));
-        crate::txn::unchanged::SKIPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        crate::txn::unchanged::note_skip();
         Some(RowMeasure::new(m.rows, m.live, Vec::new()))
+    }
+
+    /// The live heap pages of `t`'s measure kept from its last (`txn::unchanged`), while
+    /// nothing changed in it since, its rows are sized alike, the snapshot `snap` sees what
+    /// the measure did and the transaction wrote none of its rows.
+    fn kept_live(&self, t: &Table, layout: u64, snap: u64) -> Option<i32> {
+        let db = &self.ctx.sess.db;
+        let m = db.unchanged.valid(&db.store, t.oid)?;
+        if m.layout != layout || snap < m.ts {
+            return None;
+        }
+        let start = crate::storage::keys::index_prefix(t.oid, 0);
+        let end = crate::storage::keys::prefix_end(&start);
+        if !self.ctx.txn.borrow().writes_in(&start, &end).ok()?.is_empty() {
+            return None;
+        }
+        Some(m.live)
     }
 
     /// pg_class stats of indexes measured (`measure_rows`).

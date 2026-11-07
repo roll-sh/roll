@@ -16,8 +16,20 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 
-/// VACUUMs that took a kept measure instead of reading the table, for tests.
-pub static SKIPS: AtomicUsize = AtomicUsize::new(0);
+thread_local! {
+    /// VACUUMs on this thread that took a kept measure instead of reading the table.
+    static SKIPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// VACUUMs on this thread that took a kept measure instead of reading the table, for tests
+/// (other tests' VACUUMs, on threads of their own, don't count).
+pub fn skips() -> usize {
+    SKIPS.with(std::cell::Cell::get)
+}
+
+pub(crate) fn note_skip() {
+    SKIPS.with(|c| c.set(c.get() + 1));
+}
 
 /// VACUUMs that took kept xmins instead of reading the table for its frozen xid, for tests.
 pub static XMIN_SKIPS: AtomicUsize = AtomicUsize::new(0);
@@ -114,8 +126,8 @@ pub struct Load {
     pages: crate::catalog::relsize::HeapPacker,
     xmin: (u64, u64),
     may_toast: bool,
-    /// Every row's size was known from its stored bytes (else the measure sizes it from
-    /// its values: none is kept).
+    /// Every row's on-page size was known without TOAST (else a later measure sizes it
+    /// from its values: none is kept).
     sized: bool,
 }
 
@@ -132,7 +144,11 @@ impl Load {
         match stored {
             Some(len) => {
                 self.may_toast |= len > crate::exec::sizing::TOAST_THRESHOLD;
-                self.pages.push(crate::catalog::relsize::heap_tuple_of_len(len));
+                if len <= crate::exec::sizing::TOAST_THRESHOLD {
+                    self.pages.push(crate::catalog::relsize::heap_tuple_of_len(len));
+                } else {
+                    self.sized = false;
+                }
             }
             None => self.sized = false,
         }

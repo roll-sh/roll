@@ -3602,19 +3602,23 @@ impl Ddl<'_, '_> {
         Ok(())
     }
 
-    /// The error building index `ix` would stop at (computing a key, or a unique index's
-    /// duplicate; None: none), found without building it.
-    pub(super) fn index_duplicate(&mut self, t: &Table, ix: &Index) -> Result<Option<Error>> {
+    /// The error building index `ix` would stop at, found without writing entries.
+    /// Concurrent builds commit their INVALID catalog row when this preflight fails.
+    pub(super) fn index_build_error(&mut self, t: &Table, ix: &Index) -> Result<Option<Error>> {
         let ta = Arc::new(t.clone());
         let mut b = self.binder();
         b.cat = Arc::new(self.cat.clone());
-        let Some(bix) = b
+        let Some(mut bix) = b
             .bound_indexes_all(&ta)?
             .into_iter()
             .find(|b| b.index.oid == ix.oid)
         else {
             return Ok(None);
         };
+        // A concurrent REINDEX copy has its own name before it is in the catalog.
+        bix.index = Arc::new(ix.clone());
+        let mut sizes = crate::exec::rowsize::BuildSizes::default();
+        let mut duplicate = None;
         let blocks = crate::exec::sizing::heap_blocks_for_build(t, self.ctx)?;
         let progress = super::idxprogress::IndexProgress::start(self, t, ix, blocks);
         progress.scanning();
@@ -3642,17 +3646,23 @@ impl Ddl<'_, '_> {
                 Ok(None) => continue,
                 Err(e) => return Ok(Some(e)),
             };
-            if ix.unique && (ix.nulls_not_distinct || !vals.iter().any(Value::is_null)) {
+            if let Err(e) = sizes.row(t, &bix, &vals, &row, &dkey, self.ctx) {
+                return Ok(Some(e));
+            }
+            if duplicate.is_none() && ix.unique && (ix.nulls_not_distinct || !vals.iter().any(Value::is_null)) {
                 let first = seen.insert(unique_key(&vals), &dkey, |d| {
                     Ok(stored_values(d)?.map(|v| unique_key(&v)))
                 })?;
                 if let Some(first) = first {
                     let first = stored_values(&first)?;
-                    return Ok(Some(self.duplicate_key(t, &bix, first.as_deref().unwrap_or(&vals), &ix.name)));
+                    duplicate = Some(self.duplicate_key(t, &bix, first.as_deref().unwrap_or(&vals), &ix.name));
                 }
             }
         }
-        Ok(None)
+        if duplicate.is_some() {
+            return Ok(duplicate);
+        }
+        Ok(sizes.finish(t, &bix, self.ctx).err())
     }
 
     /// Remove an index's entries (before it is built again).
@@ -3717,10 +3727,13 @@ impl Ddl<'_, '_> {
         let quad = crate::exec::dml::quad_point_index(&bix, self.ctx);
         let (mut points, mut nan) = (0usize, false);
         let counts = self.ctx;
-        let mut step = |dkey: &[u8], vals: &[Value]| -> Result<()> {
+        let mut sizes = crate::exec::rowsize::BuildSizes::default();
+        let mut duplicate = None;
+        let mut step = |dkey: &[u8], vals: &[Value], row: &[Value]| -> Result<()> {
             crate::exec::pgstat::count_returned(counts, t.oid, 1);
             entries += 1;
             progress.scanned(entries);
+            sizes.row(t, &bix, vals, row, dkey, counts)?;
             if quad && let Some(v) = vals.first().filter(|v| !v.is_null()) {
                 points += 1;
                 nan |= crate::exec::dml::nan_point(v);
@@ -3728,16 +3741,18 @@ impl Ddl<'_, '_> {
                     return Err(crate::exec::dml::quadrant_error());
                 }
             }
-            if ix.unique && (ix.nulls_not_distinct || !vals.iter().any(Value::is_null)) {
+            if duplicate.is_none() && ix.unique && (ix.nulls_not_distinct || !vals.iter().any(Value::is_null)) {
                 let first = seen.insert(unique_key(vals), dkey, |d| {
                     Ok(stored_values(d)?.map(|v| unique_key(&v)))
                 })?;
                 if let Some(first) = first {
                     let first = stored_values(&first)?;
-                    return Err(self.duplicate_key(t, &bix, first.as_deref().unwrap_or(vals), &ix.name));
+                    // PostgreSQL forms every heap row before its unique sort. A later
+                    // unformable tuple must still win over this duplicate.
+                    duplicate = Some(self.duplicate_key(t, &bix, first.as_deref().unwrap_or(vals), &ix.name));
                 }
             }
-            if ix.id != 0 {
+            if crate::exec::scan::stores_entries(&bix) {
                 let k = index_entry_key(t, ix, vals, dkey, &bix.colls);
                 batch_bytes += k.len() + dkey.len() + 64;
                 batch.push((k, dkey.to_vec()));
@@ -3759,31 +3774,39 @@ impl Ddl<'_, '_> {
         let scope = IndexScope::enter(&bix, self);
         progress.scanning();
         // (With workers, as max_parallel_maintenance_workers has it: `parbuild`.)
-        let parallel = match self.measures_in_build(t, ix) && !quad {
-            true => match super::parbuild::index_workers(self, t, crate::exec::sizing::heap_blocks(t, self.ctx)?.unwrap_or(0)) {
+        // (A modelled table's btree in the workers too: its model laid out from the keys they
+        // take, `sizing::btree_from_build`, as the serial pass below takes them.)
+        let ctx = self.ctx;
+        let measures = self.measures_in_build(t, ix);
+        let writes = (ix.method == "btree").then(|| crate::exec::sizing::heap_writes(t.oid, &ctx.sess.db)).flatten();
+        let parallel = match ((measures && ix.method == "btree") || (writes.is_some() && ix.id != 0)) && !quad {
+            true => match super::parbuild::index_workers(self, t, blocks.unwrap_or(0)) {
                 0 => None,
-                w => self.build_index_parallel(t, ix, &bix, w, &progress)?,
+                w => self.build_index_parallel(t, ix, &bix, w, &progress, !measures)?,
             },
             false => None,
         };
         // (A parallel build reports its own scan's end and its load.)
         let serial = parallel.is_none();
-        let measured = if parallel.is_some() {
-            parallel
-        } else if self.measures_in_build(t, ix) {
-            self.measure_rows_with(t, Some(Some(ix.oid)), Some(&mut step))?
-        } else {
-            None
+        let mut model_keys = writes.map(|w| (w, Vec::new()));
+        let mut par_counted = None;
+        let measured = match parallel {
+            Some(super::parbuild::ParBuilt::Measured(m)) => Some(m),
+            Some(super::parbuild::ParBuilt::Modelled { rows, tuples, keys }) => {
+                par_counted = Some((rows, tuples));
+                model_keys = model_keys.map(|(w, _)| (w, keys));
+                None
+            }
+            None if measures => self.measure_rows_with(t, Some(Some(ix.oid)), Some(&mut step))?,
+            None => None,
         };
         let mut rows = 0usize;
         // (A modelled table's btree: its model from this pass's keys, not from a second read
         // of the rows: `sizing::btree_from_build`.)
-        let ctx = self.ctx;
-        let mut model_keys = (measured.is_none() && ix.method == "btree")
-            .then(|| crate::exec::sizing::heap_writes(t.oid, &ctx.sess.db))
-            .flatten()
-            .map(|w| (w, Vec::new()));
-        if measured.is_none() {
+        if measured.is_some() {
+            model_keys = None;
+        }
+        if measured.is_none() && par_counted.is_none() {
             // (Only the columns its keys, predicate and INCLUDE columns read are decoded.)
             let mut cols = std::collections::HashSet::new();
             crate::exec::sizing::index_columns(&bix, &mut cols);
@@ -3793,7 +3816,7 @@ impl Ddl<'_, '_> {
                 let (dkey, row) = r?;
                 rows += 1;
                 if let Some(vals) = index_values(&bix, &row, self)? {
-                    step(&dkey, &vals)?;
+                    step(&dkey, &vals, &row)?;
                     if let Some((_, keys)) = &mut model_keys {
                         keys.push((crate::exec::sizing::btree_key(t, &bix, vals, &row, ctx), dkey));
                     }
@@ -3816,10 +3839,14 @@ impl Ddl<'_, '_> {
             }
         }
         drop(seen);
+        if let Some(e) = duplicate {
+            return Err(e);
+        }
+        sizes.finish(t, &bix, self.ctx)?;
         if serial {
             progress.loaded(entries);
         }
-        let counted = measured.is_none().then_some((rows, entries as usize));
+        let counted = par_counted.or_else(|| measured.is_none().then_some((rows, entries as usize)));
         let prebuilt = model_keys.and_then(|(w, keys)| crate::exec::sizing::btree_from_build(t, &bix, keys, w, &ctx.sess.db));
         self.index_built_from(t, ix, measured, counted, prebuilt)
     }
@@ -3926,7 +3953,7 @@ impl Ddl<'_, '_> {
                     return Err(self.duplicate_key(new, bix, &vals, &bix.index.name));
                 }
                 // (A native method's index is built again after the statement.)
-                if bix.index.id != 0 && !crate::ext::index_am::is_native(&self.cat, &bix.index.method) {
+                if crate::exec::scan::stores_entries(bix) && !crate::ext::index_am::is_native(&self.cat, &bix.index.method) {
                     self.ctx
                         .txn
                         .borrow_mut()
@@ -4016,7 +4043,7 @@ impl Ddl<'_, '_> {
                 }
                 dkey
             };
-            for bix in bixs.iter().filter(|b| b.index.id != 0 && !crate::ext::index_am::is_native(&self.cat, &b.index.method)) {
+            for bix in bixs.iter().filter(|b| crate::exec::scan::stores_entries(b) && !crate::ext::index_am::is_native(&self.cat, &b.index.method)) {
                 if let Some(vals) = index_values(bix, &row, self)? {
                     self.ctx
                         .txn
@@ -9516,8 +9543,8 @@ impl Ddl<'_, '_> {
                     if concurrently {
                         // (The copy it builds is committed first: left INVALID when its
                         // build fails.)
-                        let copy_name = format!("{}_ccnew", ix.name);
-                        if let Some(e) = self.index_duplicate(&t, &Index {
+                        let copy_name = self.cat.choose_name(t.schema, &Catalog::object_name(&ix.name, &[], "ccnew"));
+                        if let Some(e) = self.index_build_error(&t, &Index {
                             name: copy_name.clone(),
                             ..ix.clone()
                         })? {
