@@ -3,6 +3,10 @@
 //! and nowhere else; explicit operator settings (`--cache-mb` and the others) then override
 //! single fields. Both modes give the same query results, errors, SQL-visible behaviour and
 //! durability (fsync on commit, crash safety): only memory, idle CPU and speed differ.
+//!
+//! Measured and left out (BENCH.md "Modes"): transparent huge pages (no workload faster, 20 MB
+//! more), larger memtables (bulk loads slower), never purging the allocator's free pages (no
+//! faster, 80 MB more).
 
 use std::time::Duration;
 
@@ -15,7 +19,8 @@ pub enum Mode {
     #[default]
     Efficient,
     /// Speed, for production: caches sized from the memory the server may use (the
-    /// container's limit, else the machine's), sessions and databases kept warm.
+    /// container's limit, else the machine's), sessions and databases kept warm, a waiting
+    /// connection polling for its client while cores are free.
     Performance,
 }
 
@@ -47,10 +52,12 @@ pub struct Profile {
     /// Close a database this long after its last session ends (`Duration::MAX`: never).
     pub idle_close: Duration,
     /// A connection waiting a while for its client gives its thread's free memory back
-    /// (`server::set_idle_hook`); off, idle sessions keep it and wake for nothing.
+    /// (`server::set_idle_hook`): its next statement pays 50-190 µs of CPU taking it again.
+    /// Off, idle sessions keep it and never wake.
     pub idle_trim: bool,
-    /// Transparent huge pages for the process's memory.
-    pub huge_pages: bool,
+    /// How long a connection's thread polls for its client's next message, while cores are
+    /// free, before it sleeps (`server::set_wait_spin`; zero: it sleeps at once).
+    pub wait_spin: Duration,
 }
 
 /// Efficient mode's block cache (what `roll-engine` always had).
@@ -66,7 +73,7 @@ impl Profile {
                 plan_cache_bytes: crate::lru::PLAN_CACHE_BYTES,
                 idle_close: Duration::from_secs(60),
                 idle_trim: true,
-                huge_pages: false,
+                wait_spin: Duration::ZERO,
             },
             Mode::Performance => {
                 // A quarter of the memory for the shared caches, PostgreSQL's shared_buffers
@@ -80,7 +87,10 @@ impl Profile {
                     plan_cache_bytes: plans,
                     idle_close: Duration::MAX,
                     idle_trim: false,
-                    huge_pages: true,
+                    // (A client's next message within it skips the sleep and the wake-up:
+                    // one client's select-only 1.46x, TPC-B-like 1.09x; 100 µs gained
+                    // no more.)
+                    wait_spin: Duration::from_micros(50),
                 }
             }
         }

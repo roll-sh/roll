@@ -39,6 +39,10 @@ pub struct Conns {
     /// runs at DECLARE), by the scan's plan node address: its first FETCH uses them as
     /// they are. Forgotten at the transaction's end.
     pub begun: std::collections::HashMap<usize, (u32, u32)>,
+    /// The remote cursors of declared cursors' scans, by the scan's plan node address:
+    /// (connection, cursor number, declared remotely yet). Closing the cursor closes them
+    /// (EndForeignScan, `scan::end_scans`); one read to its end is closed already.
+    pub declared: std::collections::HashMap<usize, (u32, u32, bool)>,
 }
 
 /// What a connection is for: its server, user mapping and the user it maps.
@@ -287,9 +291,44 @@ fn begin_remote_xact(e: &mut Entry, ctx: &ExecCtx) -> Result<()> {
 pub fn scan_connection(ctx: &ExecCtx, at: usize, m: &Mapping) -> Result<(u32, Option<u32>)> {
     let got = ctx.sess.remote.borrow_mut().fdw.begun.remove(&at);
     match got {
-        Some((k, n)) if k == m.mapping.oid => Ok((k, Some(n))),
+        Some((k, n)) if k == m.mapping.oid => {
+            ctx.sess.remote.borrow_mut().fdw.declared.insert(at, (k, n, false));
+            Ok((k, Some(n)))
+        }
         _ => Ok((get_connection(ctx, m, false)?, None)),
     }
+}
+
+/// A declared cursor's remote cursor `n` on connection `key`: declared remotely (`open`)
+/// or closed at its end (dropped from `Conns::declared`).
+pub fn note_declared(ctx: &ExecCtx, key: u32, n: u32, open: bool) {
+    let mut r = ctx.sess.remote.borrow_mut();
+    let d = &mut r.fdw.declared;
+    let at = d.iter().find(|(_, v)| v.0 == key && v.1 == n).map(|(a, _)| *a);
+    if let Some(at) = at {
+        if open {
+            d.insert(at, (key, n, true));
+        } else {
+            d.remove(&at);
+        }
+    }
+}
+
+/// close_cursor at a declared cursor's CLOSE (EndForeignScan of the scan at `at`): sent
+/// with the connection's next command, or failing now as libpq's send on a lost connection.
+pub fn close_declared(ctx: &ExecCtx, at: usize) -> Result<()> {
+    let got = ctx.sess.remote.borrow_mut().fdw.declared.remove(&at);
+    let Some((key, n, true)) = got else { return Ok(()) };
+    let sql = format!("CLOSE c{n}");
+    let intr = crate::remote::interrupts(ctx);
+    with_conn_raw(ctx, key, |c| {
+        if c.bad {
+            let r = c.exec(&sql, &intr)?;
+            return Err(report(&r, c, Some(&sql)));
+        }
+        c.defer(sql.clone());
+        Ok(())
+    })
 }
 
 /// Note the connection a declared cursor's scan got, and its cursor number (GetCursorNumber
@@ -500,6 +539,7 @@ pub fn pre_commit(sess: &crate::session::state::SessionState) -> Result<()> {
     st.xact_got_connection = false;
     st.cursor_number = 0;
     st.begun.clear();
+    st.declared.clear();
     Ok(())
 }
 
@@ -535,6 +575,7 @@ pub fn abort(sess: &crate::session::state::SessionState) {
     st.xact_got_connection = false;
     st.cursor_number = 0;
     st.begun.clear();
+    st.declared.clear();
 }
 
 /// pgfdw_subxact_callback for the subtransaction at `level` ending (commit: RELEASE, else

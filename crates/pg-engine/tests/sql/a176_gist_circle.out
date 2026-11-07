@@ -1,0 +1,275 @@
+> CREATE TABLE gc (id int, p point)
+-- CREATE TABLE
+
+> INSERT INTO gc SELECT g, point((g * 37) % 100 + (g % 7) / 10.0, (g * 91) % 100 + (g % 3) / 4.0)
+>   FROM generate_series(1, 20000) g
+-- INSERT 0 20000
+
+> INSERT INTO gc VALUES (100001, point(70, 50)), (100002, point(50, 30)), (100003, point(70.0000005, 50)),
+>   (100004, point(50, 69.9999999)), (100005, point(70.00001, 50)), (100006, point(64.142135623730950, 64.142135623730950)),
+>   (100007, point(64.1421357, 64.1421357)),
+>   (100010, NULL)
+-- INSERT 0 8
+
+> CREATE INDEX gc_p ON gc USING gist (p)
+-- CREATE INDEX
+
+> ANALYZE gc
+-- ANALYZE
+
+> SET enable_seqscan = off
+-- SET
+
+> SET enable_bitmapscan = off
+-- SET
+
+> EXPLAIN (COSTS OFF) SELECT count(*) FROM gc WHERE p <@ circle(point(50, 50), 20)
+QUERY PLAN:text
+Aggregate
+  ->  Index Only Scan using gc_p on gc
+        Index Cond: (p <@ '<(50,50),20>'::circle)
+-- EXPLAIN
+
+> SELECT count(*) FROM gc WHERE p <@ circle(point(50, 50), 20)
+count:int8
+2623
+-- SELECT 1
+
+> SELECT id FROM gc WHERE p <@ circle(point(50, 50), 20) AND id > 100000 ORDER BY id
+id:int4
+100001
+100002
+100004
+-- SELECT 3
+
+> SELECT count(*) FROM gc WHERE p <@ circle(point(0, 0), 15)
+count:int8
+600
+-- SELECT 1
+
+> SELECT count(*) FROM gc WHERE p <@ circle(point(99.5, 0.5), 3)
+count:int8
+0
+-- SELECT 1
+
+> SELECT count(*) FROM gc WHERE p <@ circle(point(50, 50), 0)
+count:int8
+10
+-- SELECT 1
+
+> SELECT count(*) FROM gc WHERE p <@ circle(point(50, 50), 1e9)
+count:int8
+20007
+-- SELECT 1
+
+> SELECT count(*) FROM gc WHERE circle(point(25, 75), 10) @> p
+count:int8
+600
+-- SELECT 1
+
+> SELECT id FROM gc WHERE p <@ circle(point(25, 75), 10) LIMIT 3
+id:int4
+2814
+4914
+714
+-- SELECT 3
+
+> RESET enable_bitmapscan
+-- RESET
+
+> SET enable_indexscan = off
+-- SET
+
+> EXPLAIN (COSTS OFF) SELECT count(*) FROM gc WHERE p <@ circle(point(50, 50), 20)
+QUERY PLAN:text
+Aggregate
+  ->  Bitmap Heap Scan on gc
+        Recheck Cond: (p <@ '<(50,50),20>'::circle)
+        ->  Bitmap Index Scan on gc_p
+              Index Cond: (p <@ '<(50,50),20>'::circle)
+-- EXPLAIN
+
+> SELECT count(*) FROM gc WHERE p <@ circle(point(50, 50), 20)
+count:int8
+2623
+-- SELECT 1
+
+> RESET enable_indexscan
+-- RESET
+
+> RESET enable_seqscan
+-- RESET
+
+> SELECT count(*) FROM gc WHERE p <@ circle(point(50, 50), 20)
+count:int8
+2623
+-- SELECT 1
+
+> SELECT count(*) FROM gc WHERE p <@ circle(point(0, 0), 15)
+count:int8
+600
+-- SELECT 1
+
+> BEGIN
+-- BEGIN
+
+> INSERT INTO gc SELECT 200000 + g, point(50 + 19.99 * cos(g), 50 + 19.99 * sin(g)) FROM generate_series(1, 2000) g
+-- INSERT 0 2000
+
+> INSERT INTO gc VALUES (300001, point(70.001, 50))
+-- INSERT 0 1
+
+> SET LOCAL enable_seqscan = off
+-- SET
+
+> SET LOCAL enable_bitmapscan = off
+-- SET
+
+> SELECT count(*) FROM gc WHERE p <@ circle(point(50, 50), 20)
+count:int8
+4623
+-- SELECT 1
+
+> SELECT count(*) FROM gc WHERE p <@ circle(point(50, 50), 20) AND id > 300000
+count:int8
+0
+-- SELECT 1
+
+> SET LOCAL enable_bitmapscan = on
+-- SET
+
+> SET LOCAL enable_indexscan = off
+-- SET
+
+> SELECT count(*) FROM gc WHERE p <@ circle(point(50, 50), 20)
+count:int8
+4623
+-- SELECT 1
+
+> SELECT count(*) FROM gc WHERE p <@ circle(point(50, 50), 20) AND id > 300000
+count:int8
+0
+-- SELECT 1
+
+> SELECT count(*) FROM gc WHERE p <@ box(point(30, 30), point(70, 70))
+count:int8
+5405
+-- SELECT 1
+
+> ROLLBACK
+-- ROLLBACK
+
+> UPDATE gc SET p = point(50, 50) WHERE id IN (100005, 100007)
+-- UPDATE 2
+
+> UPDATE gc SET p = point(0, 0) WHERE id IN (100001, 100002)
+-- UPDATE 2
+
+> SET enable_seqscan = off
+-- SET
+
+> SET enable_indexscan = off
+-- SET
+
+> SELECT id FROM gc WHERE p <@ circle(point(50, 50), 20) AND id > 100000 ORDER BY id
+id:int4
+100004
+100005
+100007
+-- SELECT 3
+
+> SELECT count(*) FROM gc WHERE p <@ circle(point(50, 50), 20)
+count:int8
+2623
+-- SELECT 1
+
+> SELECT count(*) FROM gc WHERE p <@ box(point(30, 30), point(70, 70))
+count:int8
+3404
+-- SELECT 1
+
+> SELECT count(*) FROM gc WHERE p <@ polygon '((40,40),(60,40),(50,70))'
+count:int8
+547
+-- SELECT 1
+
+> SELECT count(*) FROM gc WHERE p << point(10, 0) AND p <@ box(point(0, 0), point(20, 20))
+count:int8
+602
+-- SELECT 1
+
+> SELECT id FROM gc WHERE p ~= point(50, 50) ORDER BY id
+id:int4
+1050
+3150
+5250
+7350
+9450
+11550
+13650
+15750
+17850
+19950
+100005
+100007
+-- SELECT 12
+
+> RESET enable_indexscan
+-- RESET
+
+> RESET enable_seqscan
+-- RESET
+
+> CREATE TABLE gcc (id int, c circle)
+-- CREATE TABLE
+
+> INSERT INTO gcc SELECT g, circle(point((g * 37) % 100, (g * 91) % 100), (g % 5) + 0.5) FROM generate_series(1, 20000) g
+-- INSERT 0 20000
+
+> INSERT INTO gcc VALUES (100001, circle(point(80, 50), 10)), (100002, circle(point(80.0000001, 50), 10)), (100003, circle(point(80.001, 50), 10))
+-- INSERT 0 3
+
+> CREATE INDEX gcc_c ON gcc USING gist (c)
+-- CREATE INDEX
+
+> SET enable_seqscan = off
+-- SET
+
+> SET enable_bitmapscan = off
+-- SET
+
+> SELECT count(*) FROM gcc WHERE c && circle(point(50, 50), 20)
+count:int8
+3402
+-- SELECT 1
+
+> SELECT id FROM gcc WHERE c && circle(point(50, 50), 20) AND id > 100000 ORDER BY id
+id:int4
+100001
+100002
+-- SELECT 2
+
+> SELECT count(*) FROM gcc WHERE c <@ circle(point(50, 50), 20)
+count:int8
+2200
+-- SELECT 1
+
+> RESET enable_seqscan
+-- RESET
+
+> RESET enable_bitmapscan
+-- RESET
+
+> SELECT count(*) FROM gcc WHERE c && circle(point(50, 50), 20)
+count:int8
+3402
+-- SELECT 1
+
+> SELECT count(*) FROM gcc WHERE c <@ circle(point(50, 50), 20)
+count:int8
+2200
+-- SELECT 1
+
+> DROP TABLE gc, gcc
+-- DROP TABLE
+

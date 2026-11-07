@@ -42,6 +42,8 @@ GATE_NAMES = {
     'idle_cpu_s_5min': 'idle CPU over 5 minutes (s)',
     'idle_100_sessions_mb': 'memory with 100 idle sessions (MB)',
     'fresh_data_mb': 'fresh data directory (MB)',
+    # (Informational, no baseline: 100 sessions' CPU while they sit idle.)
+    'idle_100_sessions_cpu_s_5min': 'CPU with 100 idle sessions over 5 minutes (s)',
 }
 
 
@@ -223,15 +225,19 @@ def table(score, gate, order, mode, rounds, idle):
     for k, name in GATE_NAMES.items():
         g = gate.get(k, {})
         e, p = g.get('engine'), g.get('pg')
-        base, slack, share = GATE_BASELINE[k]
-        ok = e is not None and p is not None and e <= max(base + slack, base * (1 + share)) and e < p
-        failed |= not ok
-        # (No idle CPU measured: the lead is at least PostgreSQL's over one 10 ms clock tick,
-        # scaled as the measurement is.)
-        floor = 0.01 * 300 / idle if k == 'idle_cpu_s_5min' else None
+        if k in GATE_BASELINE:
+            base, slack, share = GATE_BASELINE[k]
+            ok = e is not None and p is not None and e <= max(base + slack, base * (1 + share)) and e < p
+            failed |= not ok
+            base, status = f'{base:g}', 'pass' if ok else '**FAIL**'
+        else:
+            base, status = 'n/a', 'info'
+        # (No CPU measured: the lead is at least PostgreSQL's over one 10 ms clock tick, scaled
+        # as the measurement is.)
+        floor = {'idle_cpu_s_5min': 0.01 * 300 / idle, 'idle_100_sessions_cpu_s_5min': 0.01 * 300 / 20}.get(k)
         lead = ('n/a' if e is None or not p else f'{p / e:.1f}x' if e > 0
                 else f'>{p / floor:.1f}x' if floor else 'n/a')
-        out.append(f'| {name} | {fmt(e)} | {fmt(p)} | {lead} | {base:g} | {"pass" if ok else "**FAIL**"} |'
+        out.append(f'| {name} | {fmt(e)} | {fmt(p)} | {lead} | {base} | {status} |'
                    + ''.join(f' {fmt(g.get(t))} |' for t in others))
     return '\n'.join(out), failed
 

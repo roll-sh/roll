@@ -182,8 +182,12 @@ for t in $SERVERS; do
   docker run --rm --network host --cpuset-cpus "$CLIENT_CPUS" -e PGPASSWORD=pw -v "$BENCH_DATA:$BENCH_DATA" "$IMG" \
     pgbench -h 127.0.0.1 -p "$port" -U postgres -n -c 100 -j 4 -t 1 -f "$BENCH_DATA/idle-session.sql" postgres >>"$LOG" 2>&1 &
   bp=$!
-  sleep 25
+  sleep 12
+  # (The sessions' CPU while they sit idle, 12 s to 32 s into their 40 s sleep, scaled to 5 minutes.)
+  c0=$(cpu "$t"); sleep 13
   printf 'GATE\t%s\tidle_100_sessions_mb\t%s\n' "$t" "$(calc "$(mem "$t") / 1048576")" | tee -a "$OUT"
+  sleep 7; c1=$(cpu "$t")
+  printf 'GATE\t%s\tidle_100_sessions_cpu_s_5min\t%s\n' "$t" "$(calc "($c1 - $c0) * 300 / 20")" | tee -a "$OUT"
   wait "$bp"
   stop "$t"
 done

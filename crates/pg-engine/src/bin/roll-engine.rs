@@ -178,16 +178,6 @@ fn profile(a: &mut Args) -> anyhow::Result<Profile> {
     if let Some(s) = a.idle_close_secs {
         p.idle_close = Duration::from_secs(s);
     }
-    // EXPERIMENT (a180, remove before commit): single knobs by environment.
-    if let Ok(v) = std::env::var("ROLL_EXP_THP") {
-        p.huge_pages = v == "1";
-    }
-    if let Ok(v) = std::env::var("ROLL_EXP_TRIM") {
-        p.idle_trim = v == "1";
-    }
-    if let Some(us) = std::env::var("ROLL_EXP_SPIN_US").ok().and_then(|v| v.parse::<u64>().ok()) {
-        pg_engine::server::set_wait_spin(Duration::from_micros(us));
-    }
     Ok(p)
 }
 
@@ -262,6 +252,7 @@ fn main() -> anyhow::Result<()> {
     let mut a = Args::parse();
     let profile = profile(&mut a)?;
     idle::setup(&profile);
+    pg_engine::server::set_wait_spin(profile.wait_spin);
     // --listen is `postgres -h host -p port`: listen_addresses is the host as given (the port
     // is the one bound, which sessions read from the listener).
     if a.settings.iter().any(|(k, _)| k == "port" || k == "listen_addresses") {
@@ -298,8 +289,6 @@ fn main() -> anyhow::Result<()> {
             hba_lines: a.hba_lines,
             ident_file: a.ident_file,
         },
-        // EXPERIMENT (a180, remove before commit)
-        memtable_bytes: std::env::var("ROLL_EXP_MEMTABLE_MB").ok().and_then(|v| v.parse::<usize>().ok()).map_or(8 << 20, |m| m << 20),
         ..EngineOptions::default()
     })?;
     if a.downgrade_catalog {
@@ -433,9 +422,10 @@ fn main() -> anyhow::Result<()> {
 
 /// Idle sessions keep little memory (each connection is a thread of its own). Transparent
 /// huge pages are off for the process: with the system's `always` mode every thread's first
-/// heap pages took a 2 MB page, 2-3 MB per idle session (BENCH.md). And a connection idle for
-/// a while (`server::set_idle_hook`) gives its thread's free heap pages and the stack its
-/// statements touched but no longer use back to the system.
+/// heap pages took a 2 MB page, 2-3 MB per idle session (BENCH.md); in performance mode too,
+/// where they sped up nothing measured (BENCH.md "Modes"). And in efficient mode a connection
+/// idle for a while (`server::set_idle_hook`) gives its thread's free heap pages and the stack
+/// its statements touched but no longer use back to the system.
 #[cfg(target_os = "linux")]
 mod idle {
     use std::ffi::{c_int, c_ulong, c_void};
@@ -451,14 +441,11 @@ mod idle {
     const MADV_DONTNEED: c_int = 4;
 
     pub fn setup(p: &pg_engine::mode::Profile) {
-        if !p.huge_pages {
-            // SAFETY: prctl with PR_SET_THP_DISABLE only sets a flag of this process.
-            unsafe { prctl(PR_SET_THP_DISABLE, 1 as c_ulong, 0 as c_ulong, 0 as c_ulong, 0 as c_ulong) };
+        // SAFETY: prctl with PR_SET_THP_DISABLE only sets a flag of this process.
+        unsafe { prctl(PR_SET_THP_DISABLE, 1 as c_ulong, 0 as c_ulong, 0 as c_ulong, 0 as c_ulong) };
+        if p.idle_trim {
+            pg_engine::server::set_idle_hook(trim);
         }
-        if !p.idle_trim {
-            return;
-        }
-        pg_engine::server::set_idle_hook(trim);
         // Memory freed by busy threads, or by threads that ended, goes back to the system
         // only when some thread runs the allocator's collection: after a burst of sessions
         // nothing would, and the process would keep its peak (BENCH.md "Memory under

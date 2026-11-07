@@ -1389,8 +1389,8 @@ impl LockManager {
     }
 
     /// Lock row `row` (its data key) in `mode` for (sub)transaction `holder` of top-level
-    /// transaction `owner`, as heap_lock_tuple does: Ok(false) only for SKIP LOCKED. `tuple`
-    /// is the row's heavyweight tuple lock key; `xid` the holder's transaction id. The
+    /// transaction `owner`, as heap_lock_tuple does: Ok(false) only for SKIP LOCKED. `tuple_of`
+    /// gives the row's heavyweight tuple lock key; `xid` the holder's transaction id. The
     /// holder's transaction lock (`xact_key(holder)`) is held from here on. With `compact`,
     /// a new hold may go into the transaction's compact set (`bulklocks`), which it is told:
     /// such a hold is released with the transaction (or its subtransaction), not by row.
@@ -1398,7 +1398,7 @@ impl LockManager {
     pub fn lock_row(
         &self,
         row: &[u8],
-        tuple: &[u8],
+        tuple_of: &dyn Fn() -> Vec<u8>,
         holder: u64,
         owner: u64,
         proc: u64,
@@ -1409,12 +1409,15 @@ impl LockManager {
         mut compact: Option<&mut bool>,
         xact_ctx: &dyn Fn() -> Option<String>,
     ) -> Result<bool> {
+        // (The tuple lock's key, made only for a wait.)
+        let tuple_key = std::cell::OnceCell::new();
+        let tuple = || tuple_key.get_or_init(tuple_of).as_slice();
         let mut have_tuple_lock = false;
         let mut first = true;
         let mut skip_tuple_lock = false;
         let release_tuple = |this: &Self, have: bool| {
             if have {
-                this.release(tuple, owner, mode.heavy());
+                this.release(tuple(), owner, mode.heavy());
             }
         };
         loop {
@@ -1432,6 +1435,32 @@ impl LockManager {
                 && !s.rows.contains_key(row)
                 && s.bulk.keys().all(|&o| o == owner)
             {
+                // (One probe when the transaction's only compact set is this holder's, as
+                // without savepoints: that set's transaction lock is held already.)
+                if let Some(b) = s.bulk.get_mut(&owner)
+                    && let [g] = &mut b.segs[..]
+                    && g.holder == holder
+                    && g.xid != 0
+                {
+                    let mut prior = None;
+                    if g.rows.upsert(row, |t| {
+                        prior = t;
+                        t.unwrap_or(row_tag(mode, false))
+                    }) {
+                        match prior.map(|t| untag(t).0) {
+                            None => {
+                                if let Some(flag) = compact.as_deref_mut() {
+                                    *flag = true;
+                                }
+                                COMPACT_HOLDS.fetch_add(1, Ordering::Relaxed);
+                                return Ok(true);
+                            }
+                            Some(m) if m >= mode => return Ok(true),
+                            // (A weaker hold of ours: promoted the usual way.)
+                            Some(_) => {}
+                        }
+                    }
+                }
                 let held = s.bulk.get(&owner).and_then(|b| b.segs.iter().filter_map(|g| g.rows.get(row)).map(|t| untag(t).0).max());
                 if held.is_some_and(|m| m >= mode) {
                     return Ok(true);
@@ -1510,7 +1539,7 @@ impl LockManager {
                 _ => {}
             }
             if !have_tuple_lock && !skip_tuple_lock {
-                let got = match self.acquire(tuple, owner, proc, mode.heavy(), w, &|| {
+                let got = match self.acquire(tuple(), owner, proc, mode.heavy(), w, &|| {
                     format!("row in relation \"{}\"", what())
                 }) {
                     Ok(g) => g,

@@ -1046,6 +1046,56 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
   BENCH.md "postgres_fdw, round 7" (`tools/fdwtraffic/compare.sh`: both servers in
   containers, each one's CPU and peak memory from its cgroup, phases picked by `PGT_PHASES`
   for profiles).
+  Round 27 (agent 172, postgres_fdw round 8): `UPDATE ... FROM` / `DELETE ... USING` sent as
+  one remote statement. The level's UPDATE / DELETE target joins remotely: `plan_level` sets
+  `Planner::fdw_dml_target` (`direct::join_target`: a postgres_fdw target the statement could
+  be sent whole for: no row triggers, RLS, check options, stored generated columns or
+  inheritance), so `fdw_base` takes its `with_key` scan (not its sorted or parameterized
+  paths, whose pushdown would replace the target's). The binder gives the target range
+  table index 1 (`add_rte` before the FROM items: PostgreSQL's `r1`). A Foreign Scan of a
+  join holding it fetches `r1.ctid` as the row's key (`JoinScan::key_of`, `Field::Key`,
+  `modify::row_key`) and locks it (`FOR UPDATE OF r1`), so a statement that can't be sent
+  whole (a SET or condition that doesn't ship) updates per row over the pushed join.
+  `direct::update` / `delete` fall to `directjoin::join_update` / `join_delete` when the source
+  is such a join with nothing checked locally: deparseDirectUpdateSql's `UPDATE t r1 SET ...
+  FROM <the others> WHERE ...` (`Sql::rels_without`, deparseFromExprForRel with an
+  ignore_rel: the inner joins' clauses holding the target go to the WHERE after the join's
+  remote conditions), RETURNING what build_remote_returning returns (the target's columns,
+  others' columns, another relation's whole row as its `CASE WHEN (rN.*)::text ...`;
+  `JoinBack` puts them into the source row RETURNING reads). EXPLAIN: the Foreign Update /
+  Delete of a join names no relation and has its scan path's width. A per-row DELETE takes
+  RETURNING's values from the remote DELETE (`exec/dml.rs` `foreign_delete_returning`,
+  store_returning_result): the pushed join fetches only the ctid. Widths: a foreign scan's
+  reltarget has its whole row (24 + data width) when its row mark copies it (locked, or
+  another relation of a locking level / UPDATE / DELETE: `Planner::fdw_whole_row_width`,
+  `rowmarks::key`'s `copy_mark`) or it is an UPDATE's target (`fdw_wholerow_target`), and 6
+  for a target's ctid: in the never-analyzed 10-page size and in the join search's widths
+  (`FOR UPDATE OF loc` over `ft`: `rows=538 width=128` as PostgreSQL's). Relations: lines
+  are schema-qualified only under VERBOSE (postgresExplainForeignScan). A foreign join's
+  cost charged its clauses' cpu_operator_cost twice (`costs::qual_cost` is per tuple
+  already): a join of two 20k / 2k-row tables cost 1,134 against PostgreSQL's 100,884, so
+  the engine pushed joins PostgreSQL runs locally (with analyzed tables, or under a locking
+  level with the copy widths above); now its estimates are PostgreSQL's. `fdw_loopback`'s
+  two pushed-join recheck tests set `fdw_tuple_cost '10'`, under which PostgreSQL pushes
+  those joins too (without it neither does). A declared cursor's CLOSE closes its scans'
+  remote cursors (EndForeignScan: `scan::end_scans` from `session/utility.rs`
+  `close_cursor` through `cursor::Lazy::end_foreign_scans`; `Conns::declared`, by the scan's
+  plan address, set when the DECLARE goes out and dropped at the scan's end): the CLOSE goes
+  with the connection's next command, and on a lost connection fails now as libpq's send,
+  "no connection to the server" with `remote SQL command: CLOSE c1` (2037).
+  Contrib postgres_fdw 1,950 / 2,053 (598, 606, 616, 622, 2037 gained, none lost against a
+  base run), dblink 218, file_fdw 187. Verified with the targeted train (clippy, release
+  `fdw_loopback`, the three contrib suites, fdw traffic in containers); the full suite is
+  162's train.
+  Still open: a per-row UPDATE / DELETE over a pushed join shows PostgreSQL's
+  `ft.ctid, ft.*, ft2.*` junk and EPQ outer plan there (628, 636: the target's whole row and
+  the others' copies in the remote SELECT, `with_copy_marks` for a DML level); 1071 / 1074 /
+  1126. A pushed join's width counts a text column at its type's 32 where PostgreSQL has the
+  foreign table's ANALYZE width (`SELECT ft.v FROM ft JOIN fs ...`: 32 against 11), and an
+  ANALYZE of a foreign table fetches every row (1.7 MB in against PostgreSQL's 0.9 MB:
+  analyze_sampling). The remote statement itself is the engine's UPDATE ... FROM, about 3x
+  PostgreSQL's per statement on the remote side (1.3 against 0.4 ms for 10 rows by a nested
+  loop of index scans; routed to 165 / 167). Numbers: BENCH.md "postgres_fdw, round 8".
 - **file_fdw** (round 19, agent 66): native (`src/ext/file_fdw.rs`), 187 / 187 of its
   contrib test. Foreign scans of a file_fdw table read the file with COPY FROM's parser
   (`session/copy.rs` `parse_copy_data`, shared with COPY) a chunk at a time; the file is a
@@ -4193,6 +4243,26 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
   - COPY TO writes integers and floats without the escape pass only when the delimiter can't
     be in their text (not `-`, `+`, `I`, `N`): before, a `-` delimiter left negative integers
     unescaped (PostgreSQL writes `\-1`). Golden `a175_copy_plain`.
+  - **Batch 2.** INSERT … SELECT takes the plain insert path too, under `model_deferrable`'s
+    rule (its source runs nothing volatile and doesn't read the table) and the same table
+    conditions; its counts go in per row while the table has CHECK constraints, else a
+    batch at a time, before anything leaves `next`. A DELETE's row lock
+    (`LockManager::lock_row`) takes one probe of the compact set when the transaction's only
+    compact set is the locking (sub)transaction's own, as without savepoints (every set is
+    made with its holder's transaction lock held, and both go together), and the tuple lock's
+    key is made only for a wait. ANALYZE of a big table reads chosen pages next to each other
+    with one scan (`analyze_columns`): a 1M-row table, every page chosen, was one range scan
+    per page, a seek of every source each.
+  - Not done (round 8): DELETE's index-entry tombstones left for VACUUM (needs agent 163's
+    index readers to check the row; proposed through the coordinator, not started); the
+    source scan of DELETE (parallel workers, about half of its CPU: agents 149 / 169); COPY
+    out from stored bytes (the executor's decoded rows are most of what's left in the
+    connection thread; background compaction of the earlier steps' files is most of the
+    engine container's CPU during the step: agent 169); spilling parallel index builds past
+    `maintenance_work_mem`; writing index entries once (agent 169's store side). A parallel
+    build keeping its heap measure for the next (`txn::unchanged`, as VACUUM's is) would save
+    sizing the rows again (7% of a CREATE UNIQUE INDEX after a CREATE INDEX), but the build's
+    own linked run invalidates the table's watch when it commits; not done.
 - **Result rows stream** (round 19, agent 65): a top-level SELECT's rows go to the client as
   the executor returns them, as PostgreSQL's printtup sends a DataRow per row. A
   `session::RowSink` (`session/sink.rs`, PostgreSQL's DestReceiver) takes them in
@@ -6161,6 +6231,87 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
       (agent 103's box case, 610 pages against 1,011) and the SP-GiST quad tree's NaN after a
       later split (144's "Left").
 
+- **Index access at index cost, round 7** (round 25, agent 176; BENCH.md "Index access,
+  round 7"):
+  - GIN and BRIN builds of a table too big to model measure the index the way its access
+    method lays it out (`session/ddl/am_measure.rs`), not by a btree-style sort of every key
+    (`btree_pages_of`):
+    - BRIN: brinbuild's one summary tuple per page range (minmax: the range's least and
+      greatest values; box_inclusion_ops: a fixed-size union), formed when the scan leaves the
+      range, placeholders for the ranges no row is in, packed after the metapage and the
+      range map. Inclusion classes other than box's, bloom and minmax-multi fall back to the
+      old measure.
+    - GIN: ginbuild's BuildAccumulator: per-key posting lists held until the memory it would
+      count passes maintenance_work_mem, then inserted in key order into `ginsim::GinIndex`.
+      jsonb_path_ops' keys are its path hashes (`sizing::gin_keys`, 10091; only for this
+      measure: `gin_model` still declines it, their order among themselves isn't
+      PostgreSQL's hash_numeric's).
+    - A row's TID is where `relsize::HeapPacker` puts it. A build takes the heap's pages from
+      the table's estimate (`estimated`, what index_update_stats reads from the file) and
+      sizes only its first `SIZED_SAMPLE` (256) rows; past them a row's TID is the sample's
+      density (a VACUUM or ANALYZE still sizes every row: they tell the reusable space).
+      Before, every build sized every row's tuple (a jsonb parsed for it: 60% of a BRIN
+      build), and `measured_live` raised the estimate to it anyway.
+    - pg_relation_size of a BRIN or GIN index of a table too big to model is its measured
+      relpages (`fork_blocks`), as a btree's is; it was the empty index's size.
+    - `tests/big_tables.rs` `brin_gin_builds_measure_as_postgres`: relpages and
+      pg_relation_size of BRIN (one and two columns), GIN int[], tsvector, jsonb_ops and
+      jsonb_path_ops as 18.6 has them, after a build and after a VACUUM.
+  - GiST and SP-GiST point indexes' bitmap scans decide their quals on the points the search
+    structure placed (`search::candidate_points`, `scan::point_keys`; `Grid::pts`, 16 bytes
+    a row of a point grid): no row is fetched to check `<@ circle` and the like. A row placed
+    more than once (written again since the build) or written by the transaction is read and
+    checked as before. The heap side checks those quals again on the rows it reads
+    (`bitmap_checked`'s `unchecked`): the structure's point is the newest committed one, which
+    an older snapshot may not see. Not under EXPLAIN ANALYZE or predicate locking.
+  - Two-dimensional grid searches (`Grid::search`) read a partition's x range by strips
+    (`search_strips`: each strip's y order cut to the query's y bounds, its leading blocks
+    below the y high bound skipped), and a circle's `<@` / `&&` drops entries whose cell lies
+    outside the circle widened past EPSILON (`Query::disc`, `meets_disc`, `Quant::low/high`).
+    Golden `a176_gist_circle` (index, index-only and bitmap scans; points on, just inside and
+    just past the edge; the transaction's rows; rows moved in and out after the build;
+    circles overlapping circles).
+  - Verified (targeted, per the verification train), on `fe78d36c` with the batch: release
+    build; clippy (no warning in the files touched); release lib, big_tables, parallel_scan,
+    deep_input and golden tests; regress files create_index, create_index_spgist, gist,
+    spgist, gin, brin, btree_index, hash_index, indexing, select_parallel, geometry, tsearch,
+    point, box, polygon, circle, create_misc, create_table, stats 4,116 / 4,116 (release,
+    private reference); contrib btree_gist 613 / 616, pg_trgm 261, citext 544, bloom 58,
+    pgvector 803 / 915 against `a89-pgvector` (its bench flags' INFO lines, as round 5).
+  - Left after round 7 (agent 176):
+    - GIN and BRIN builds trail 1.2-2.8x (BENCH round 7, dist; round 6 2.8-8.5x):
+      PostgreSQL 18 builds both with parallel workers. Next: a parallel build pass for their measures (`parbuild`; BRIN's
+      ranges and GIN's accumulators per worker, merged; PostgreSQL's parallel GIN build
+      inserts each key once with its merged TIDs, `_gin_parallel_merge`, which the engine's
+      measure must then follow for a parallel plan), and keys extracted from the stored
+      tsvector / jsonb bytes without building the value.
+    - hnsw build memory (added to this list by the coordinator after agent 149's round 3, not
+      started): the design in agent 149's "hnsw build memory: not started" notes (elements,
+      values and neighbor tuples paged through `AmStore` behind an LRU sized from
+      maintenance_work_mem, `Graph` keeping the meta page and a slot -> tid index). Gate:
+      build time within ~20%, search speed unchanged, `pgvector_equality` identical, build
+      time and recall measured against pgvector 0.8.x. It changes every reader of
+      `Graph::elems` (insert, search, scan, vacuum: about 1,900 lines of `ext/vector/hnsw/`),
+      so it wants a round of its own.
+    - gin_tsvector_and (2.0x): the candidates' point fetches (37% of the query) and their
+      decode and tsquery check (18%). The structure (`search::Elements`) keeps postings of
+      rows written again, so its selection isn't exact: an exact one (a row number per data
+      key, its old postings dropped) would let AND / OR of plain lexemes skip the check.
+    - Statement overhead in the short index queries: `parallel_part::start` builds EXPLAIN
+      text for the Gather check each execution (`total_and_gathers`, a quarter of skip_scan's
+      profile, 16%): agent 145's.
+    - The index-only lineitem counts (item 2 of the round's list), GiST and BRIN index row
+      size errors, the multi-row COPY's TID in an index row size error's DETAIL, the GiST box
+      size model (610 against 1,011 pages: needs gist_box_picksplit's insertion build in
+      `gistsim`) and the SP-GiST quad NaN: not reached.
+    - DELETE leaving index entries for VACUUM (agent 175's proposal), the reader side
+      proposed through the coordinator: index scans already fetch each entry's row by data
+      key and skip a missing one, and unique checks read the row; what doesn't are the
+      index-only paths answered from entries (`ROWS_FROM_INDEX_ENTRIES`, `parscan::IosRow`,
+      counts from entries). Those need a per-index "has dead entries" mark, set by a DELETE
+      that leaves its entries and cleared by VACUUM's index pass, under which they fetch the
+      row (PostgreSQL's VM check for a page not all-visible).
+
 - **Stored scans** (round 24, agent 149):
   - Recovered `eb44c2c9` and `78f4186f` onto `251924c1`. String comparisons
     use stored bytes when the operator and collation permit bytewise comparison.
@@ -6293,6 +6444,28 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
     regress run on a private reference 51,148 / 51,150 with 0 units changed against
     results.tsv, pg_dump_tap 14,817 / 14,817, contrib pgvector 915 / 915, bloom 58, pg_trgm
     261, btree_gist 613 / 616, cube 316, pgvector_equality 480 / 480.
+- **hnsw build memory: not started, for the index agent** (round 24, agent 149's notes). A
+  fresh-process build of vector(128) x 100,000 (m 16, ef_construction 64, maintenance_work_mem
+  64 MB) peaks at +217 MB against pgvector's +66 MB (BENCH "Scan cost, round 2").
+  - Where the memory goes: the in-memory phase (`hnsw/build.rs` `Build`: `elems`, `items`,
+    `heads`, `vdata`, its Generation context) is bounded by maintenance_work_mem as
+    pgvector's is (`memory_used >= memory_total` flushes and goes on disk). The excess is the
+    on-disk phase: after `flush`, the graph is held whole as `graph::Graph` (every `Elem`,
+    every value in `vdata`, every neighbor list) because every insert and search reads that
+    object model, and it stays in the process-wide index cache (`hnsw/mod.rs` `cache()`)
+    afterwards. pgvector's on-disk phase reads pages through shared buffers instead, so
+    its build is bounded by maintenance_work_mem plus the buffer pool.
+  - Design: page elements through `AmStore` behind a bounded cache. `Graph` keeps only
+    the meta page and a slot -> (block, offset) index; `Elem`s, values and neighbor tuples
+    are read from their records on demand (they are one record per tuple already) into an
+    LRU sized from maintenance_work_mem during a build and from the engine's memory budget
+    afterwards; dirty tuples are written back as now (`dirty_e` / `dirty_n`). Searches and
+    inserts take elements by slot through the cache instead of `&self.elems[slot]`.
+    Agent 127's eviction of dropped indexes' graphs (`evict_dropped`) stays.
+  - Gate: build time within ~20% of today's, search speed unchanged, and recall equal to
+    pgvector's (`tests/pgvector_equality.rs` must stay result-for-result identical, since the
+    build order and tie-breaks must not change). Memory goes under agent 132's query-memory
+    budget.
 
 ## Repository layout
 

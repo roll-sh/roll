@@ -132,5 +132,12 @@ fn loopback_traffic() {
     phase(&mut s, "inherited updates, sent whole (50 rows)", &inh2);
     let locked: Vec<String> = (0..20).map(|i| format!("SELECT loc.id, ft.v FROM loc JOIN ft ON ft.id = loc.id WHERE loc.id < {} FOR UPDATE OF loc", 300 + i)).collect();
     phase(&mut s, "locked local join foreign", &locked);
+    phase(&mut s, "analyze foreign tables", &["ANALYZE ft, fs".to_string()]);
+    let upf: Vec<String> =
+        (0..50).map(|i| format!("UPDATE ft SET v = ft.v || 'u' FROM fs WHERE ft.id = fs.id AND fs.id BETWEEN {} AND {}", i * 20 + 1, i * 20 + 10)).collect();
+    phase(&mut s, "update from foreign join (10 rows)", &upf);
+    let delu: Vec<String> =
+        (0..100).map(|i| format!("DELETE FROM ft USING fs WHERE ft.id = fs.id + 99999 AND fs.id BETWEEN {} AND {}", i * 3 + 1, i * 3 + 3)).collect();
+    phase(&mut s, "delete using foreign join (3 rows)", &delu);
     println!("peak RSS {} kB (after setup {} kB)", peak_kb(), base);
 }

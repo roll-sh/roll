@@ -138,12 +138,14 @@ pub fn set_idle_hook(f: fn()) {
 static WAIT_SPIN_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Connection threads at work (not waiting for their clients) and threads polling their
-/// sockets, counted while a spin is set: a thread polls only while both together fit in the
-/// cores the process may run on, so polling never takes a core a statement could use (at 32
-/// clients on 4 cores, polling with a fixed cap cost 15% of the throughput).
+/// sockets, counted while a spin is set: a thread polls only while both together fit in half
+/// the cores the process may run on, so polling doesn't take the core a woken thread needs
+/// (it counts as working only once it runs). At 32 clients on 4 cores, two pollers at most
+/// cost 15% of the throughput; while working and polling threads filled all 4 cores, 8
+/// clients lost 8%.
 static WORKING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 static SPINNING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-static CORES: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+static HALF_CORES: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
 
 /// Poll for a client's next message up to this long before sleeping, while cores are free
 /// (performance mode's): a reply that comes back within it skips the sleep and the wake-up.
@@ -180,8 +182,8 @@ fn spin_read(s: &TcpStream, buf: &mut [u8]) -> Option<std::io::Result<usize>> {
     if ns == 0 || buf.is_empty() {
         return None;
     }
-    let cores = *CORES.get_or_init(|| std::thread::available_parallelism().map_or(1, |n| n.get()));
-    let fits = || WORKING.load(Ordering::Relaxed) + SPINNING.load(Ordering::Relaxed) <= cores;
+    let half = *HALF_CORES.get_or_init(|| std::thread::available_parallelism().map_or(1, |n| (n.get() / 2).max(1)));
+    let fits = || WORKING.load(Ordering::Relaxed) + SPINNING.load(Ordering::Relaxed) <= half;
     SPINNING.fetch_add(1, Ordering::Relaxed);
     let start = std::time::Instant::now();
     let r = loop {

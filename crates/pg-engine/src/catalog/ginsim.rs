@@ -28,7 +28,7 @@ fn shortalign(n: usize) -> usize {
 
 /// A key of the index: its null category (0 for a normal key), a byte string that sorts
 /// as the operator class compares keys, and its datum's size in a tuple (from offset 8).
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct GinKey {
     pub category: u8,
     pub sort: Vec<u8>,

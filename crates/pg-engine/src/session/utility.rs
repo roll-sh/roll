@@ -1114,6 +1114,11 @@ impl Session {
             return Ok(QueryResult::command("CLOSE CURSOR ALL"));
         }
         let cursor = self.state.cursors.borrow_mut().remove(&s.portalname);
+        // (Its postgres_fdw scans' remote cursors: EndForeignScan.)
+        let declared = !self.state.remote.borrow().fdw.declared.is_empty();
+        if declared && let Some(lazy) = cursor.as_ref().and_then(|c| c.lazy.as_ref()) {
+            self.with_ctx(&[], |ctx| lazy.end_foreign_scans(ctx))?;
+        }
         match cursor {
             Some(c) => c.close()?,
             None => return Err(Error::new(

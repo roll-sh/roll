@@ -9869,7 +9869,15 @@ impl Builder<'_, '_> {
                         }
                         names
                     } else {
-                        c.exported.clone()
+                        let mut names = c.exported.clone();
+                        // (A foreign target's columns come back from its remote statement:
+                        // the target's Vars, though a join sent whole fetched none of them.)
+                        if t.foreign.is_some() && !dp.inh {
+                            for (n, col) in names.iter_mut().zip(t.columns.iter()) {
+                                *n = Name::col(&refname, &col.name);
+                            }
+                        }
+                        names
                     };
                     let names = old_new_names(exported, dp.old_new.as_ref(), t);
                     let cx = if dp.old_new.is_some() { Cx::Upper } else { Cx::Output };
@@ -12168,7 +12176,7 @@ impl Builder<'_, '_> {
         match crate::ext::postgres_fdw::direct::update(up, &self.ctx.catalog(), self.ctx.fmt()) {
             Some(d) => {
                 n.details.retain(|x| !matches!(x, Detail::Text("Remote SQL", _)));
-                let f = self.foreign_modify("Update", &up.rules.table, refname, d.sql, &child);
+                let f = self.foreign_modify("Update", (d.join.is_none()).then_some(&*up.rules.table), refname, d.sql, &child);
                 n.children.push(f.child("Outer"));
             }
             None => {
@@ -12194,7 +12202,7 @@ impl Builder<'_, '_> {
         match crate::ext::postgres_fdw::direct::delete(dp, &cat, self.ctx.fmt()) {
             Some(d) => {
                 n.details.retain(|x| !matches!(x, Detail::Text("Remote SQL", _)));
-                let f = self.foreign_modify("Delete", &dp.table, refname, d.sql, &child);
+                let f = self.foreign_modify("Delete", (d.join.is_none()).then_some(&*dp.table), refname, d.sql, &child);
                 n.children.push(f.child("Outer"));
             }
             None => {
@@ -12220,6 +12228,10 @@ impl Builder<'_, '_> {
             let refname = self.refname(sp);
             if let Plan::Scan(s) = &**sp {
                 let mut ns = self.table_names(&s.table, &refname);
+                // (An UPDATE / DELETE target joined remotely: its key is its ctid.)
+                if s.with_key {
+                    ns.push(Name::col(&refname, "ctid"));
+                }
                 if let Some(al) = &s.col_aliases {
                     for (c, n) in s.table.columns.iter().zip(ns.iter_mut()) {
                         if let Some((_, a)) = al.iter().find(|(o, _)| *o == c.name) {
@@ -12312,13 +12324,19 @@ impl Builder<'_, '_> {
     }
 
     /// A postgres_fdw direct modification's node (Foreign Update / Foreign Delete).
-    fn foreign_modify(&self, op: &str, t: &crate::catalog::Table, refname: &str, sql: String, child: &ExNode) -> ExNode {
+    /// (`t`: the table a statement of it alone changes; a join's names none.)
+    fn foreign_modify(&self, op: &str, t: Option<&crate::catalog::Table>, refname: &str, sql: String, child: &ExNode) -> ExNode {
         let mut f = ExNode::new(if op == "Update" { "Foreign Update" } else { "Foreign Delete" });
-        let schema = self.ctx.catalog().schema_name(t.schema).to_string();
-        self.target(&mut f, Some("Relation Name"), Some(&t.name), Some(&schema), refname);
+        if let Some(t) = t {
+            let schema = self.ctx.catalog().schema_name(t.schema).to_string();
+            self.target(&mut f, Some("Relation Name"), Some(&t.name), Some(&schema), refname);
+        }
         f.startup_cost = child.startup_cost;
         f.total_cost = child.total_cost;
         f.rows = child.rows;
+        // (The width of the scan path it replaces: its target list, the new values, ctid and
+        // whole-row junk included.)
+        f.width = child.width;
         if self.o.verbose {
             f.details.push(Detail::Text("Remote SQL", sql));
         }

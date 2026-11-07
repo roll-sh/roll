@@ -2,6 +2,7 @@
 //! and stores it in the transaction, so DDL commits or rolls back with everything else.
 
 mod am_index;
+mod am_measure;
 mod composite;
 mod inherit;
 mod objects;
