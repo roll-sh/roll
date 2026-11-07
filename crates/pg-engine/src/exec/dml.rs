@@ -3717,7 +3717,7 @@ pub struct InsertNode {
     plain_counts: std::cell::Cell<i64>,
     /// A multi-insert COPY on the general path: its rows not counted yet, per table
     /// (`pgstat::count_stored`, `flush_plain_counts`).
-    held_counts: RefCell<Vec<(u32, i64)>>,
+    held_counts: std::cell::RefCell<Vec<(u32, i64)>>,
 }
 
 impl InsertNode {
