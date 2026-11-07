@@ -200,9 +200,6 @@ export class CanvasEngine {
         // Off screen its contents are skipped and it measures as the placeholder: keep its real
         // size (taken, the layout moved cards on and off screen and never settled).
         if (el.hasAttribute("data-off") && this.size.has(key)) continue;
-        // Zoomed out, its details hide (`[data-brief]`): keep the size it has with them, so zooming
-        // never lays the canvas out again.
-        if (this.container.hasAttribute("data-brief") && this.size.has(key)) continue;
         if (!el.hasAttribute("data-off")) this.measured.add(key);
         const prev = this.size.get(key);
         if (prev && prev.w === s.w && prev.h === s.h) continue;

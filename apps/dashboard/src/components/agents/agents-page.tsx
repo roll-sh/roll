@@ -34,6 +34,7 @@ import { Launcher } from "./new-agent";
 import { useKept } from "./ui/dialog";
 import { AgentsLayer } from "./ui/layer";
 import { PinnedConversation, PinnedDiff, PinnedTerminal } from "./pinned";
+import { changeTone } from "./change";
 import { insideRows, MachineNode, ProjectNode, RequestNode, SubagentNode, THREAD_H, ThreadCard, useThreadFacts, type InsideRow, type ThreadFacts } from "./nodes";
 import { CanvasProjectsProvider, type CanvasProjects } from "./machine-projects";
 import { CanvasFoldsProvider, type CanvasFolds } from "./canvas-folds";
@@ -1158,14 +1159,19 @@ function CanvasViewBody({
   const folded = folds.graph;
   // What Fit frames when everything is too much to read: work going on, waiting on you or failed.
   // Read when used, so the canvas and the cards' tools keep one callback while records stream.
+  // As the card says it: its own run, a change that conflicts or fails, a fork or subagent on it.
   const latest = useRef(data);
+  const latestInside = useRef<ReadonlyMap<string, InsideRow[]>>(new Map());
   useLayoutEffect(() => {
     latest.current = data;
   });
   const matters = useCallback((key: string) => {
     if (!key.startsWith("t:")) return false;
     const t = latest.current.threads.get(key.slice(2))?.value;
-    return !!t && (isBusy(t.status) || t.status === "error" || t.pending_requests > 0);
+    if (!t) return false;
+    if (isBusy(t.status) || t.status === "error" || t.pending_requests > 0) return true;
+    if (t.change && changeTone(t.change.status) === "bad") return true;
+    return !!latestInside.current.get(key)?.some((r) => r.status !== "done" && r.status !== "idle");
   }, []);
   // Projects with nothing on the canvas fold into their machine's "3 more projects", unless pinned
   // onto the view, focused, or named by its filter.
@@ -1180,6 +1186,9 @@ function CanvasViewBody({
   const absorbed = useMemo(() => absorbChildren(collapsed.graph), [collapsed.graph]);
   const graph = useMemo(() => (shaped.current = sameGraph(shaped.current, absorbed.graph)), [absorbed.graph]);
   const inside = useMemo(() => insideRows(data, absorbed.inside), [data, absorbed.inside]);
+  useLayoutEffect(() => {
+    latestInside.current = inside;
+  });
   const { setDisplay } = views;
   const projects: CanvasProjects = useMemo(
     () => ({

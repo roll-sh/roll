@@ -296,14 +296,15 @@ export const AgentsCanvas = memo(forwardRef<
     e.setScene(positions, meta, edges, sz);
   }, [positions, graph, shownSize, shown]);
 
-  // How much of the canvas's bottom `keepClear` covers now (at most half of it).
+  // How much of the canvas's bottom `keepClear` covers now, with the band that fades the canvas out
+  // above it (`data-chrome-band`), at most half of it.
   const coveredBelow = useCallback(() => {
     const el = keepClear?.current;
     const c = container.current;
     if (!el || !c) return 0;
     const box = c.getBoundingClientRect();
     const top = el.getBoundingClientRect().top;
-    return Math.max(0, Math.min(box.bottom - top, box.height / 2));
+    return Math.max(0, Math.min(box.bottom - top + BAND_FADE, box.height / 2));
   }, [keepClear]);
 
   /**
@@ -371,6 +372,7 @@ export const AgentsCanvas = memo(forwardRef<
     let t: ReturnType<typeof setTimeout> | undefined;
     const shape = () => {
       const r = c.getBoundingClientRect();
+      c.style.setProperty("--covered", `${coveredBelow()}px`);
       // In steps of 32 px, so a few pixels of the prompt bar growing don't lay everything out again.
       const step = (v: number) => Math.max(32, Math.round(v / 32) * 32);
       if (r.width && r.height) setScreen((s) => (s.w === step(r.width) && s.h === step(r.height - coveredBelow()) ? s : { w: step(r.width), h: step(r.height - coveredBelow()) }));
@@ -575,6 +577,7 @@ export const AgentsCanvas = memo(forwardRef<
         wraps: shown.wraps,
         plan: room ? fitPlan(positions, shownSize, room, important) : null,
         nodes,
+        edges: [...shown.routes.keys()],
         // What the planner was given, to replay it without a browser.
         input: {
           tree: { roots: arranged.roots, nodes: Object.fromEntries([...arranged.nodes].map(([k, n]) => [k, n.children])) },
@@ -1002,6 +1005,10 @@ export const AgentsCanvas = memo(forwardRef<
           ))}
         </AnimatePresence>
       </div>
+      {/* The canvas ends above the prompt bar: under it and the zoom bar (and a phone's waiting
+          request) it fades into its own colour, so nothing reads in the gaps between them. It
+          takes presses there, so a hidden card can't be opened; a drag on it still pans. */}
+      <div data-chrome-band data-fade={BAND_FADE} aria-hidden className="absolute inset-x-0 bottom-0 h-(--covered) bg-[linear-gradient(to_bottom,transparent,var(--canvas)_24px)]" />
       {overlay}
       {ghost && <LaunchGhost {...ghost} />}
       <Minimap ref={minimap} positions={positions} sizeOf={shownSize} nodes={graph.nodes} engine={engine} />
@@ -1149,6 +1156,8 @@ const FRAMED: ReadonlySet<GraphNode["kind"]> = new Set(["machine", "project", "g
 const VIEW_KEYS = new Set(["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "+", "=", "-", "0"]);
 /** Room for a phone's zoom bar when it sits at the top (while a request waits at the bottom). */
 const PHONE_TOP_BAR = 48;
+/** How far above the prompt bar the canvas fades out (`data-chrome-band`; the gradient's 24px). */
+const BAND_FADE = 24;
 
 /** Whether `r` (world) shows at all in a `viewport` seen through `v`. */
 function overlaps(r: { x: number; y: number; w: number; h: number }, v: View, viewport: { w: number; h: number }) {

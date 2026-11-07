@@ -145,8 +145,12 @@ interface Block {
   h: number;
   at: [string, Point][];
   routes: [string, Point[]][];
-  /** What an edge into the block meets: its row heads or lanes, with the line (`y`) and their top. */
-  heads: { key: string; x: number; y: number; top: number; bus?: number }[];
+  /**
+   * What an edge into the block meets: its row heads or lanes, with the line (`y`) and their top.
+   * `bus`: the line above them a row of lanes hangs off (growing down); with `drop`, a head beside
+   * another (a section sharing its row) is reached along `bus` and down the gap before it at `drop`.
+   */
+  heads: { key: string; x: number; y: number; top: number; bus?: number; drop?: number }[];
   /** The heads sit side by side (a row of lanes): fed by a bus above them, not a trunk beside. */
   row: boolean;
   /** The line an edge into the block meets, from its top. */
@@ -155,6 +159,15 @@ interface Block {
 
 /** Where a top-down drop runs, in from the card's left (world px). */
 const RAIL = 16;
+
+/**
+ * From a trunk at `tx` into a head of a block placed at (`bx`, `by`): along its line, or, for a
+ * head beside another (`drop`), along the bus above its row and down the gap before it.
+ */
+function reach(h: Block["heads"][number], tx: number, bx: number, by: number): Point[] {
+  if (h.drop === undefined || h.bus === undefined) return [{ x: tx, y: by + h.y }, { x: bx + h.x, y: by + h.y }];
+  return [{ x: tx, y: by + h.bus }, { x: bx + h.drop, y: by + h.bus }, { x: bx + h.drop, y: by + h.y }, { x: bx + h.x, y: by + h.y }];
+}
 
 /**
  * Lay the canvas out: machines, then their projects (lanes), then each project's threads in a grid
@@ -253,8 +266,11 @@ export function layoutCanvas(tree: TreeLike, size: (key: string) => Size, shape:
   const lane = (k: string, top?: number): Block => {
     const level = shape.level(k);
     if (!level) return stack(k);
-    const solo = wraps.band && !listed && level === "lanes" ? kids(k).filter((c) => tree.nodes.has(c) && !claimed.has(c)) : [];
-    if (solo.length === 1 && shape.level(solo[0]) && !shape.section?.(solo[0])) {
+    const solo = wraps.band && level === "lanes" ? kids(k).filter((c) => tree.nodes.has(c) && !claimed.has(c)) : [];
+    // Listed down the screen, a machine with more projects sits beside its first one too, the rest
+    // under it (a list left the corner beside the machine empty).
+    const rest = listed && roots.has(k) ? solo.slice(1) : [];
+    if ((solo.length === 1 || rest.length) && shape.level(solo[0]) && !shape.section?.(solo[0])) {
       const s = size(k);
       const a = ANCHOR(s.h);
       const b: Block = { w: 0, h: 0, at: [], routes: [], heads: [], row: false, lead: 0 };
@@ -273,15 +289,31 @@ export function layoutCanvas(tree: TreeLike, size: (key: string) => Size, shape:
       const sub = shape.level(c) === "items" ? grid(c) : lanes(c);
       let w = cx + cs.w;
       let h = band;
+      const ind = SPACING.vertical.indent;
+      // With projects listed after it, its grid is a step further in, under the band, as theirs are under them.
+      const sind = rest.length ? ind + g.indent : ind;
+      // Their trunks: the project's down its indent (a phone's lists have none: just left of the
+      // cards, as theirs), the machine's further left, so the two never run as one line.
+      const ct = g.indent > 0 || !rest.length ? sind - ind / 2 : sind - 12;
+      const mt = g.indent > 0 ? ind / 2 : RAIL / 2;
       if (sub) {
-        const ind = SPACING.vertical.indent;
         const by = band + g.lane;
         const bus = band + g.lane / 2;
-        add(b, sub, ind, by);
+        add(b, sub, sind, by);
         // Down from the project to a line under the band, back along it, and down the indent into each lane.
-        for (const hd of sub.heads) b.routes.push([`${c}>${hd.key}`, simplify([{ x: cx + RAIL, y: cy + cs.h }, { x: cx + RAIL, y: bus }, { x: ind / 2, y: bus }, { x: ind / 2, y: by + hd.y }, { x: ind + hd.x, y: by + hd.y }])]);
-        w = Math.max(w, ind + sub.w);
+        for (const hd of sub.heads) b.routes.push([`${c}>${hd.key}`, simplify([{ x: cx + RAIL, y: cy + cs.h }, { x: cx + RAIL, y: bus }, { x: ct, y: bus }, ...reach(hd, ct, sind, by)])]);
+        w = Math.max(w, sind + sub.w);
         h = by + sub.h;
+      }
+      // The rest of its projects, listed under, a trunk down from the machine into each.
+      for (const r of rest) {
+        if (!claim(r)) continue;
+        const l = lane(r);
+        const ry = h + g.lane;
+        add(b, l, ind, ry);
+        b.routes.push([`${k}>${r}`, simplify([{ x: mt, y: ky + s.h }, { x: mt, y: ry + l.lead }, { x: ind, y: ry + l.lead }])]);
+        w = Math.max(w, ind + l.w);
+        h = ry + l.h;
       }
       Object.assign(b, { w, h, heads: [{ key: k, x: 0, y: ky + a, top: ky }], lead: ky + a });
       return b;
@@ -319,7 +351,7 @@ export function layoutCanvas(tree: TreeLike, size: (key: string) => Size, shape:
       const tx = s.w + g.depth / 2;
       b.at.push([k, { x: 0, y: cy }]);
       add(b, child, bx, by);
-      for (const h of child.heads) b.routes.push([`${k}>${h.key}`, simplify([{ x: s.w, y: cy + a }, { x: tx, y: cy + a }, { x: tx, y: by + h.y }, { x: bx + h.x, y: by + h.y }])]);
+      for (const h of child.heads) b.routes.push([`${k}>${h.key}`, simplify([{ x: s.w, y: cy + a }, { x: tx, y: cy + a }, ...reach(h, tx, bx, by)])]);
       Object.assign(b, { w: bx + child.w, h: Math.max(cy + s.h, by + child.h), heads: [{ key: k, x: 0, y: cy + a, top: cy }], lead: cy + a });
     } else if (child.row) {
       // A row of lanes under it: down to a bus in the gap above them, along, and into each top.
@@ -371,9 +403,10 @@ export function layoutCanvas(tree: TreeLike, size: (key: string) => Size, shape:
     return b;
   };
 
-  // Growing right, a drilled project's sections flow into rows as wide as a grid of `lines`, side by
-  // side a column's gap apart (their cards stay on the grid's columns), so a section of one card
-  // doesn't leave a row empty. An edge meets each row's first label; the rest sit beside it.
+  // Growing right, a drilled project's sections share a row while they fit in a grid of `lines`
+  // (a one-card Failed left a row of empty cells), a section's gap apart so each reads as one. An
+  // edge meets each row's first label from the trunk; the rest, along a bus above the row and down
+  // the gap before them.
   const sectionRows = (k: string): Block | null => {
     const all = kids(k).filter((c) => tree.nodes.has(c) && !claimed.has(c));
     if (!all.length) return null;
@@ -382,21 +415,42 @@ export function layoutCanvas(tree: TreeLike, size: (key: string) => Size, shape:
     const b: Block = { w: 0, h: 0, at: [], routes: [], heads: [], row: false, lead: 0 };
     let y = 0;
     let x = 0;
+    let n = 0;
     let thick = 0;
+    // A section's size with its grid `cols` wide, before it's laid out (laying out claims its cards).
+    const sized = (c: string, cols: number): Size => {
+      const { mine } = cells.get(c) ?? { mine: [] };
+      let h = 0;
+      for (let r = 0; r * cols < mine.length; r++) h += Math.max(...mine.slice(r * cols, r * cols + cols).map((m) => m.h)) + g.cellY;
+      const wide = Math.min(cols, mine.length);
+      const s = size(c);
+      return { w: Math.max(s.w, (colX[wide - 1] ?? 0) + (colW[wide - 1] ?? 0)), h: s.h + (mine.length ? g.head + h - g.cellY : 0) };
+    };
     for (const c of all) {
       if (!claim(c)) continue;
+      // The gaps between sections are wider than a grid's: they don't cost a column.
+      const room = budget + n * (g.section - g.cellX) - x;
+      const cell = cells.get(c);
+      if (x > 0 && cell && sized(c, cell.cols).w > room + 0.5) {
+        // Narrower beside the one before it, if that's no taller than a row of its own.
+        let fit = cell.cols - 1;
+        while (fit > 0 && sized(c, fit).w > room + 0.5) fit--;
+        if (fit > 0 && sized(c, fit).h <= thick + g.section + sized(c, cell.cols).h) cell.cols = fit;
+      }
       const l = lane(c);
-      if (x > 0 && x + l.w > budget + 0.5) {
+      if (x > 0 && x + l.w > budget + n * (g.section - g.cellX) + 0.5) {
         y += thick + g.section;
         x = 0;
+        n = 0;
         thick = 0;
       }
       add(b, l, x, y);
-      if (x === 0) b.heads.push({ key: c, x: 0, y: y + l.lead, top: y });
+      b.heads.push(x === 0 ? { key: c, x: 0, y: y + l.lead, top: y } : { key: c, x, y: y + l.lead, top: y, bus: y ? y - g.section / 2 : -g.lane / 2, drop: x - g.section / 2 });
       b.w = Math.max(b.w, x + l.w);
       thick = Math.max(thick, l.h);
       b.h = y + thick;
-      x += l.w + g.cellX;
+      x += l.w + g.section;
+      n++;
     }
     b.lead = b.heads[0]?.y ?? 0;
     return b;
@@ -453,8 +507,8 @@ export function layoutCanvas(tree: TreeLike, size: (key: string) => Size, shape:
   across.set(ROOTS, per < blocks.length + (idle.at.length ? 1 : 0) ? "grid" : !horizontal);
   const all = { at: [] as [string, Point][], routes: [] as [string, Point[]][] };
   const put = (b: Block, line: number, along: number) => (horizontal ? add(all, b, line, along) : add(all, b, along, line));
-  // Machines with work, `per` to a line; each line's offset, how far along it's used and how thick.
-  const used: { line: number; along: number; thick: number }[] = [];
+  // Machines with work, `per` to a line; where each went (world px).
+  const placed: Rect[] = [];
   let line = 0;
   let along = 0;
   let thick = 0;
@@ -465,26 +519,23 @@ export function layoutCanvas(tree: TreeLike, size: (key: string) => Size, shape:
       thick = 0;
     }
     put(b, line, along);
+    placed.push(horizontal ? { x: line, y: along, w: b.w, h: b.h } : { x: along, y: line, w: b.w, h: b.h });
     along += (horizontal ? b.h : b.w) + g.root;
     thick = Math.max(thick, horizontal ? b.w : b.h);
-    if (used.at(-1)?.line === line) used[used.length - 1] = { line, along, thick };
-    else used.push({ line, along, thick });
   });
   if (idle.at.length) {
-    // The idle machines fill the shortest line if they fit there without making it the longest
-    // (they left an empty corner under a short machine); else they come last, as one more.
-    const longest = Math.max(0, ...used.map((u) => u.along - g.root));
-    const len = horizontal ? idle.h : idle.w;
-    const across = horizontal ? idle.w : idle.h;
-    const fit = used.filter((u) => u.along + len <= longest + 0.5 && across <= u.thick + 0.5).sort((a, b) => a.along - b.along)[0];
-    if (fit) put(idle, fit.line, fit.along);
-    else {
-      if (blocks.length && blocks.length % per === 0) {
-        line += thick + g.root;
-        along = 0;
-      }
-      put(idle, line, along);
-    }
+    // The idle machines go where the canvas grows least: the end of a line, under or beside a
+    // machine that leaves an empty corner (a short one beside a tall one), or a line of their own.
+    const next = horizontal ? { x: line + thick + g.root, y: 0 } : { x: 0, y: line + thick + g.root };
+    const spots: Point[] = blocks.length ? [{ x: horizontal ? line : along, y: horizontal ? along : line }, next] : [{ x: 0, y: 0 }];
+    for (const r of placed) spots.push({ x: r.x, y: r.y + r.h + g.root }, { x: r.x + r.w + g.root, y: r.y });
+    const clear = (p: Point) => placed.every((r) => !(p.x < r.x + r.w + g.root - 0.5 && r.x < p.x + idle.w + g.root - 0.5 && p.y < r.y + r.h + g.root - 0.5 && r.y < p.y + idle.h + g.root - 0.5));
+    const grown = (p: Point) => {
+      const b = bounds(new Map<string, Point>(placed.map((r, i) => [String(i), r])).set("idle", p), (k) => (k === "idle" ? idle : placed[+k]))!;
+      return b.w * b.h;
+    };
+    const spot = spots.filter(clear).reduce((a, p) => (grown(p) < grown(a) - 0.5 ? p : a));
+    add(all, idle, spot.x, spot.y);
   }
   for (const [k, p] of all.at) out.positions.set(k, p);
   for (const [k, pts] of all.routes) out.routes.set(k, pts);
@@ -523,7 +574,8 @@ export function fitPlan(positions: ReadonlyMap<string, Point>, size: (key: strin
   const r = bounds(positions, size);
   if (!r) return { k: 1, all: true };
   const all = fitZoom(r, room);
-  if (room.overview && room.least && all < room.least) return { k: room.least, all: false };
+  // A phone's overview: as wide as the screen (its two columns whole), titles still reading.
+  if (room.overview && room.least && all < room.least) return { k: Math.max(PHONE_FLOOR, Math.min(room.least, (room.w - room.pad * 2) / Math.max(1, r.w))), all: false };
   if (room.overview || all >= (room.stretch ?? room.floor)) return { k: Math.max(MIN_ZOOM, all), all: true };
   let right = 0;
   let bottom = 0;
@@ -534,7 +586,9 @@ export function fitPlan(positions: ReadonlyMap<string, Point>, size: (key: strin
       bottom = Math.max(bottom, p.y + s.h - r.y);
     }
   const k = bottom ? Math.min(room.floor, Math.max(room.brief ?? room.floor, fitZoom({ w: right, h: bottom }, { ...room, w: room.w - (room.reserve ?? 0) }))) : room.floor;
-  return { k, all: false };
+  // Never a column cut at the right: a few points less, still brief, shows it whole.
+  const across = (room.w - (room.reserve ?? 0) - ACROSS_PAD * 2) / Math.max(1, r.w);
+  return { k: across < k ? Math.max(ACROSS_FLOOR, across) : k, all: false };
 }
 
 /** Fit doesn't frame part of the canvas smaller than cards read (titles ~10 px, meta ~8 px)… */
@@ -543,8 +597,13 @@ export const READABLE = 0.75;
 export const STRETCH = 0.65;
 /** …and frames part of it down to this to keep what matters in view (titles read, details hide). */
 export const BRIEF_ZOOM = 0.55;
+/** …and down to this so no column is cut at the right (titles still read), 24 px in from each side. */
+const ACROSS_FLOOR = 0.5;
+const ACROSS_PAD = 24;
 /** A phone's Fit pressed again stops here: two columns of titles, never bars. */
 export const PHONE_LEAST = 0.55;
+/** …or less on a narrow one, so its two columns fit whole, but not below this. */
+const PHONE_FLOOR = 0.45;
 /** What the prompt bar keeps clear above it: no card ends closer than this to its top. */
 const CLEAR = 16;
 /** The minimap's corner (its width and margin), kept clear while the canvas is bigger than the screen. */
@@ -568,6 +627,9 @@ export function fitTo(positions: ReadonlyMap<string, Point>, size: (key: string)
   const plan = fitPlan(positions, size, room, important);
   const v = plan.all ? fitView(r, room.w, room.h, room.pad, 1, 0) : fitView(r, room.w - (room.reserve ?? 0), room.h, room.pad, plan.k, plan.k);
   if (!plan.all) {
+    // Wider than the padded screen (zoomed out to show every column whole): centred across it.
+    const wide = room.w - (room.reserve ?? 0);
+    if (r.w * v.k > wide - room.pad * 2) v.x = (wide - r.w * v.k) / 2 - r.x * v.k;
     // Framed from the top, the canvas runs on under the prompt bar: no card ends just above it
     // (it read as tucked under the bar), they end well clear or run on under it.
     let down = 0;
@@ -596,6 +658,15 @@ export function planWraps(tree: TreeLike, size: (key: string) => Size, shape: Ca
   // nothing more, so Fit's own layout stays (and nothing moves).
   if (room.overview) {
     const first = planWraps(tree, size, shape, { ...room, overview: false }, important);
+    // A phone's: two columns of titles (one was a long strip of bars down the middle), a machine
+    // beside its one project if that leaves no empty corner.
+    if (room.w < 640) {
+      const two = { ...first, lines: Math.max(2, first.lines) };
+      const band = { ...two, band: true };
+      const q = (w: Wraps) => judge(tree, shape, layoutCanvas(tree, size, shape, w).positions, size, room, important);
+      const [a, b] = [q(two), q(band)];
+      return b.bad < a.bad || (b.bad === a.bad && b.score > a.score * 1.02) ? band : two;
+    }
     const again = planWraps(tree, size, shape, { ...room, overview: false, stretch: 0 }, important);
     const k = (w: Wraps) => fitPlan(layoutCanvas(tree, size, shape, w).positions, size, { ...room, overview: true }, important).k;
     return k(again) > k(first) * 1.02 ? again : first;
@@ -620,12 +691,14 @@ export function planWraps(tree: TreeLike, size: (key: string) => Size, shape: Ca
     for (const [k, n] of tree.nodes) if (shape.level(k) === "lanes") widest = Math.max(widest, n.children.length);
     const lanes: number[] = turn ? [1] : shape.direction === "vertical" ? [0, 1, ...[2, 3, 4, 5, 6].filter((n) => n < widest)] : [0];
     const stacks = turn || down ? [false] : [false, true];
-    const bands = !turn && chain ? [false, true] : [false];
+    // …and listed down the screen, a machine beside its first project.
+    const bands = chain || down ? [false, true] : [false];
     for (const bd of bands)
     for (const st of stacks)
     for (const r of roots)
       for (const l of lanes)
         for (const c of lines) {
+          if (bd && !chain && !(turn || l === 1)) continue;
           const wraps: Wraps = { lines: c, lanes: l, roots: r, turn: turn || undefined, stack: st || undefined, band: bd || undefined };
           const p = layoutCanvas(tree, size, shape, wraps);
           const q = judge(tree, shape, p.positions, size, room, important);
@@ -651,8 +724,9 @@ function judge(tree: TreeLike, shape: CanvasShape, positions: ReadonlyMap<string
   const w = room.w - room.pad * 2 - (all ? 0 : (room.reserve ?? 0));
   const h = room.h - room.pad * 2;
   let bad = 0;
-  // Cut off at the right: never (the canvas reads down, not across).
-  if (r.w * k > w + 1) bad++;
+  // Cut off at the right: never (the canvas reads down, not across; a partial column is the worst
+  // there is, worse than what matters waiting below).
+  if (r.w * k > (all ? w : room.w - (room.reserve ?? 0) - ACROSS_PAD * 2) + 1) bad += 4;
   // What's framed: all of it, or from the top as far as the screen goes.
   const framed = { x: r.x, y: r.y, w: Math.min(r.w, w / k), h: Math.min(r.h, h / k) };
   const dead = emptiest(positions, size, framed, 36);

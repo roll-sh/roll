@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { collapseUnused, deriveGraph, foldQuiet, groupByStatus, keyOf, rolling, SHOWN_THREADS } from "./agents-graph";
-import { arrange, bounds, dropIndex, fitView, fitZoom, layoutCanvas, mergeOrder, moveTo, nextCard, NO_WRAPS, planWraps, roomFor, ROOTS, withOrder, zoomAt, type Level, type Point, type Rect, type Room, type Size, type Wraps } from "./agents-layout";
+import { arrange, bounds, dropIndex, fitPlan, fitView, fitZoom, layoutCanvas, mergeOrder, moveTo, nextCard, NO_WRAPS, planWraps, roomFor, ROOTS, withOrder, zoomAt, type Level, type Point, type Rect, type Room, type Size, type Wraps } from "./agents-layout";
 import { applyEvents, emptyData, follow } from "./agents-store";
 import { approval, ev, machine, node, project, run, terminal, thread } from "@/test/agents";
 import { EMPTY_INBOX, type Thread } from "./agents-api";
@@ -188,13 +188,16 @@ describe("agents layout", () => {
       const wide = room(1980, 860);
       const box = bounds(layoutCanvas(small, sz, shape, planWraps(small, sz, shape, wide)).positions, sz)!;
       expect(fitZoom(box, wide), direction).toBeGreaterThanOrEqual(wide.stretch!);
-      // Far too much for any screen: as wide as the screen takes at the floor, clear of the minimap, never cut off at the right.
+      // Far too much for any screen: as wide as the screen takes at Fit's zoom, clear of the minimap, never cut off at the right.
       const big = tree([90, 80, 70]);
       for (const r of [wide, room(1440, 780), room(1800, 1900)]) {
-        const b = bounds(layoutCanvas(big, sz, shape, planWraps(big, sz, shape, r)).positions, sz)!;
-        expect(b.w * r.floor, `${direction} ${r.w}`).toBeLessThanOrEqual(r.w - r.pad * 2 - r.reserve!);
+        const p = layoutCanvas(big, sz, shape, planWraps(big, sz, shape, r)).positions;
+        const b = bounds(p, sz)!;
+        const { k } = fitPlan(p, sz, r);
+        expect(k, `${direction} ${r.w}`).toBeGreaterThanOrEqual(0.5);
+        expect(b.w * k, `${direction} ${r.w}`).toBeLessThanOrEqual(r.w - 48 - r.reserve!);
         // …and it uses that width: another column wouldn't fit.
-        expect((b.w + 324) * r.floor, `${direction} ${r.w}`).toBeGreaterThan(r.w - r.pad * 2 - r.reserve! - (direction === "vertical" ? 3 * 324 * r.floor : 0));
+        expect((b.w + 324) * k, `${direction} ${r.w}`).toBeGreaterThan(r.w - r.pad * 2 - r.reserve! - (direction === "vertical" ? 3 * 324 * k : 0));
       }
     }
   });
