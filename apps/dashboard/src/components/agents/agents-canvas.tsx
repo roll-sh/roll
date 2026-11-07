@@ -161,6 +161,8 @@ export const AgentsCanvas = memo(forwardRef<
         // Too small to read, a card's text is a bar its own length and its details go (`[data-greek]`):
         // the card keeps its size, so nothing moves.
         if (c && v.k < GREEK !== c.hasAttribute("data-greek")) c.toggleAttribute("data-greek", v.k < GREEK);
+        // A step before: details (meta lines, chips) go while titles still read (`[data-brief]`).
+        if (c && v.k < BRIEF !== c.hasAttribute("data-brief")) c.toggleAttribute("data-brief", v.k < BRIEF);
         minimap.current?.view(v);
         // The zoom's readout: new text repaints the page, so while it changes, at most every
         // ZOOM_TEXT_MS, and where it rests.
@@ -305,7 +307,7 @@ export const AgentsCanvas = memo(forwardRef<
       const lead = key ? (bounds(positions, shownSize, [key]) ?? undefined) : undefined;
       // Asked for (the Fit button, `1`): follow the work again, so cards that grow or arrive stay framed.
       if (all) following.current = true;
-      const floor = phone ? 0.55 : READABLE;
+      const floor = phone ? 1 : READABLE;
       let v = fitView(r, w, room, pad, 1, all ? 0 : floor, lead);
       if (all && v.k < floor) {
         // Too much to read at once: what matters (the structure, what's running, waiting on you or
@@ -1055,8 +1057,10 @@ function LaunchGhost({ source, from, to, over }: { source: string; from: Point; 
   );
 }
 /** Fit doesn't zoom the overview out further than this (its titles are ~10 px there); `1` twice does. */
-/** Fit doesn't zoom out further than cards read (titles ~7 px); `1` twice does. */
-const READABLE = 0.5;
+/** Fit doesn't zoom out further than cards read (titles ~10 px, meta ~8 px); `1` twice does. */
+const READABLE = 0.75;
+/** Below this a card's details hide (`[data-brief]`), its titles stay. */
+const BRIEF = 0.55;
 /** Below this a card's text is a bar (`[data-greek]`). */
 const GREEK = 0.4;
 /** Room over a wrapped block for the bus its later columns hang off (world px). */

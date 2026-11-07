@@ -1708,11 +1708,12 @@ The surface has three views:
     its cell), and each column stacks its own cells, so a card with something under it never
     opens an empty row beside it.
   - **Zooming out never enlarges text** (the user's rule): everything shrinks in proportion, as in
-    Figma. Below 40 % (`[data-greek]`) a card keeps its frame, colours and size, its title becomes a
-    quiet bar its own length and the rest of its text hides; nothing moves. Readability comes from
+    Figma. Below 55 % (`[data-brief]`) a card's details hide and its title stays; below 40 %
+    (`[data-greek]`) the title becomes a quiet bar its own length. The card keeps its frame, colours
+    and size; nothing moves. Readability comes from
     the layout, folding, drilling in and Fit.
   - **Fit** frames everything, filling about 80 % of the room above the prompt bar (a tenth of it
-    clear each side, at least 48 px), but never below 50 %, where cards read: then it frames what
+    clear each side, at least 48 px), but never below 75 % (100 % on a phone), where cards read: then it frames what
     matters (the structure, what's running, waiting on you or failed, the open card) from the top,
     and the minimap and panning reach the rest; pressing it again shows everything. Fit follows the
     work again: cards that grow or arrive stay framed until the view is moved by hand.

@@ -624,6 +624,7 @@ body {
 /* Too small to read (the canvas's `data-greek`, below 40 %): a card keeps its frame, colours and
    size (nothing moves); its title is a quiet bar its own length and everything else in it goes.
    Text is never enlarged to compensate: Fit stops at a zoom where cards read. */
+[data-brief] [data-card] :is(p, span, a, code, kbd, svg, img, button):not([data-title]):not(:has([data-title])),
 [data-greek] [data-card] :is(p, span, a, code, kbd, svg, img, button):not([data-title]):not(:has([data-title])) {
   visibility: hidden;
 }

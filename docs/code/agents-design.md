@@ -134,8 +134,8 @@ The rules are in agents.md, "Canvas" › "At scale". How it looks:
   and Running, which pulses calmly; red Failed; green Done; subtle Quiet), the name at 12.5 px
   weight 500, the count in mono, over a `--line-2` hairline as wide as the section's cards
   (`--section-w`). No fill, no frame, no edges to its cards.
-- **Far out** (`[data-greek]`, below 40 %): never bigger type. A card keeps its frame, colours and
-  size; its title (`data-title`) is a bar its own length (`--fg` at 16 %, a third of the line high,
+- **Far out**: never bigger type. Below 55 % (`[data-brief]`) a card's details hide; below 40 %
+  (`[data-greek]`) its title (`data-title`) is a bar its own length (`--fg` at 16 %, a third of the line high,
   fully rounded) and the rest of its text hides.
 - **Minimap**: 168 × 112, glass like the zoom bar, 12 px above it; blocks are `--muted` for
   machines and projects, the line colour for the rest, accent for requests and busy work; the
