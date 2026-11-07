@@ -62,6 +62,8 @@ const EDGE_OUT_MS = 160;
 const OFF_MARGIN = 160;
 /** How long after the view last moved it counts as resting (`data-moving` goes). */
 const VIEW_REST_MS = 160;
+/** At most this many cards moving at once are each a layer of their own while they move (`place`). */
+const OWN_LAYERS_MOVING = 12;
 /** How far from the pointer (px) dots swell and move. */
 const POINTER_REACH = 280;
 const DOT_SPACING = 28;
@@ -535,10 +537,15 @@ export class CanvasEngine {
 
   // Moving (easing, dragged), a card is a layer of its own (translate3d), so it moves without the
   // canvas repainting under it (Safari repaints otherwise); at rest it's plain (translate), so 200
-  // cards aren't 200 layers to commit every frame (Chromium).
+  // cards aren't 200 layers to commit every frame (Chromium). A crowd moving together (a filter
+  // cleared, a group unfolded) stays plain: 200 layers made and dropped in one frame repainted
+  // every card (a 70 ms frame at 206 threads).
   private place(el: HTMLElement, p: Point, moving = false) {
-    this.setTransform(el, moving ? `translate3d(${p.x}px, ${p.y}px, 0)` : `translate(${p.x}px, ${p.y}px)`);
+    const own = moving && this.movingCards <= OWN_LAYERS_MOVING;
+    this.setTransform(el, own ? `translate3d(${p.x}px, ${p.y}px, 0)` : `translate(${p.x}px, ${p.y}px)`);
   }
+  /** How many cards moved last frame. */
+  private movingCards = 0;
 
   private frame = (ms: number) => {
     this.raf = 0;
@@ -581,8 +588,10 @@ export class CanvasEngine {
       }, ZOOM_CSS_MS);
     }
 
-    // Cards ease to their targets.
+    // Cards ease to their targets: where each goes this frame, and how many move (`place`).
     const { x: vx, y: vy, k: vk } = this.view;
+    const steps: [string, Point, boolean][] = [];
+    let movers = 0;
     for (const [k, target] of this.tgt) {
       const c = this.cur.get(k) ?? target;
       let next = target;
@@ -595,9 +604,15 @@ export class CanvasEngine {
         }
       }
       this.cur.set(k, next);
+      const goes = next !== target || this.drag?.key === k;
+      if (goes) movers++;
+      steps.push([k, next, goes]);
+    }
+    this.movingCards = movers;
+    for (const [k, next, goes] of steps) {
       const el = this.els.get(k);
       if (el) {
-        this.place(el, next, next !== target || this.drag?.key === k);
+        this.place(el, next, goes);
         // Well off screen, its animations (a busy card's border, shimmer, pulses) pause: 80 busy
         // cards at 1000 threads repainted every frame, most of them out of sight.
         const s = this.size.get(k);

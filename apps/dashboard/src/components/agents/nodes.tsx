@@ -2,6 +2,7 @@
 
 import { ArrowUpRight, CircleAlert, FolderGit2, FolderPlus, GitBranch, GitFork, GitPullRequest, LogIn, MoreHorizontal, Plus, RefreshCw, Settings2, SquareTerminal } from "lucide-react";
 import { memo, useCallback, useMemo, useState, type ReactNode } from "react";
+import { useToolsArmed } from "./card-tools";
 import { coming, isRunning, machineState, reachable, type IdentityColor, type Machine, type Node, type Project, type ProviderInfo, type Request, type Run, type Thread } from "@/lib/agents-api";
 import { newestRuns, projectStats, type ProjectStats } from "@/lib/agents-graph";
 import { providersFor, type AgentsData } from "@/lib/agents-store";
@@ -99,16 +100,19 @@ function TintedHeader({ children }: { children: ReactNode }) {
 /**
  * A card's tools: a small floating toolbar over its top-right corner while the pointer is on it
  * (always on touch screens, and while one has keyboard focus). It takes no room in the card, so
- * names never truncate for buttons that aren't showing.
+ * names never truncate for buttons that aren't showing. Its buttons mount once they're first
+ * needed (`useToolsArmed`).
  */
 function HoverActions({ children, className = "" }: { children: ReactNode; className?: string }) {
+  const { armed, ref } = useToolsArmed();
   return (
     <div
-      className={`pointer-events-none absolute -top-3.5 right-2.5 z-10 flex translate-y-1 items-center gap-0.5 rounded-lg border border-line-2 p-0.5 text-muted opacity-0 shadow-pop inset-shadow-highlight glass transition-[opacity,translate] duration-150 ease-out motion-reduce:transition-none group-hover/card:pointer-events-auto group-hover/card:translate-y-0 group-hover/card:opacity-100 focus-within:pointer-events-auto focus-within:translate-y-0 focus-within:opacity-100 ${className}`}
+      ref={ref}
+      className={`pointer-events-none absolute -top-3.5 right-2.5 z-10 flex translate-y-1 items-center gap-0.5 rounded-lg border border-line-2 p-0.5 text-muted opacity-0 shadow-pop inset-shadow-highlight glass transition-[opacity,translate] duration-150 ease-out starting:translate-y-1 starting:opacity-0 motion-reduce:transition-none group-hover/card:pointer-events-auto group-hover/card:translate-y-0 group-hover/card:opacity-100 focus-within:pointer-events-auto focus-within:translate-y-0 focus-within:opacity-100 ${armed ? "" : "hidden"} ${className}`}
       data-nodrag
       data-touch-tools
     >
-      {children}
+      {armed && children}
     </div>
   );
 }

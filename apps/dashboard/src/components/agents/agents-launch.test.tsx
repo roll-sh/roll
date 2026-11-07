@@ -92,7 +92,10 @@ describe("launching from the surface", () => {
   it("a thread's fork handle dragged onto the canvas forks it and opens the fork", async () => {
     const h = surface();
     await userEvent.keyboard("{Meta>}j{/Meta}");
-    const handle = within(screen.getByLabelText("Thread Fix the flaky queue test")).getByRole("button", { name: /^Fork/ });
+    // The card's tools come with the pointer.
+    const card = screen.getByLabelText("Thread Fix the flaky queue test");
+    await userEvent.hover(card);
+    const handle = await within(card.closest<HTMLElement>("[data-card]")!).findByRole("button", { name: /^Fork/ });
     fireEvent.pointerDown(handle, { pointerId: 1, button: 0, clientX: 10, clientY: 10 });
     fireEvent.pointerMove(handle, { pointerId: 1, clientX: 300, clientY: 40 });
     expect(screen.getByRole("status")).toHaveTextContent("Fork here");

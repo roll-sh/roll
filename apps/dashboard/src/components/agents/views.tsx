@@ -67,6 +67,7 @@ import { useReducedMotion } from "@roll/brand";
 import { AnimatePresence, motion, type Transition } from "motion/react";
 import { POPOVER_IN, POPOVER_OUT } from "@/lib/agents-motion";
 import { useEnteringValue, usePresenceTracks } from "./presence";
+import { useToolsArmed } from "./card-tools";
 
 /** How long edits wait before they go to roll (typing a filter, resizing a card). */
 const SAVE_AFTER_MS = 350;
@@ -974,16 +975,20 @@ export function PinTools({
   extra?: ReactNode;
   children: ReactNode;
 }) {
-  // The cards' floating toolbar (`HoverActions` in nodes.tsx), so the two read as one.
+  // The cards' floating toolbar (`HoverActions` in nodes.tsx), so the two read as one; its
+  // buttons mount once they're first needed (`useToolsArmed`).
+  const { armed, ref } = useToolsArmed();
   return (
     <div className="group/slot relative">
       {children}
       <div
-        className="pointer-events-none absolute -top-3.5 right-2.5 z-10 flex translate-y-1 items-center gap-0.5 rounded-lg border border-line-2 p-0.5 text-muted opacity-0 shadow-pop inset-shadow-highlight glass transition-[opacity,translate] duration-150 ease-out group-hover/slot:pointer-events-auto group-hover/slot:translate-y-0 group-hover/slot:opacity-100 focus-within:pointer-events-auto focus-within:translate-y-0 focus-within:opacity-100 motion-reduce:transition-none"
+        ref={ref}
+        className={`pointer-events-none absolute -top-3.5 right-2.5 z-10 flex translate-y-1 items-center gap-0.5 rounded-lg border border-line-2 p-0.5 text-muted opacity-0 shadow-pop inset-shadow-highlight glass transition-[opacity,translate] duration-150 ease-out starting:translate-y-1 starting:opacity-0 group-hover/slot:pointer-events-auto group-hover/slot:translate-y-0 group-hover/slot:opacity-100 focus-within:pointer-events-auto focus-within:translate-y-0 focus-within:opacity-100 motion-reduce:transition-none ${armed ? "" : "hidden"}`}
         data-nodrag
         data-touch-tools
       >
-        {items.map((i) => {
+        {armed &&
+          items.map((i) => {
           const pinned = isPinned(view, i.kind, i.id);
           const label = `${pinned ? "Unpin" : "Pin"} ${i.label}${view.id === ALL ? "" : ` on ${view.name}`}`;
           return (
@@ -1004,7 +1009,7 @@ export function PinTools({
             </button>
           );
         })}
-        {extra}
+        {armed && extra}
       </div>
     </div>
   );
