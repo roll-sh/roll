@@ -430,8 +430,10 @@ const RESTART: usize = 16;
 /// storage key the index key already ends with (`derived`: the table's prefix, then the
 /// key's last bytes before the version). TPC-H SF1's entries take 1.4 GB so, against 2.1 GB
 /// in the files' form. An entry is `shared | unshared << 2 | flags | value field | key
-/// suffix | value`: flag `F_TS` puts the block's version after the suffix, `F_DERIVED`
-/// makes the value field the length of the key's tail the value ends with.
+/// suffix`, the entries' values after all of them (in entry order): a seek walks the keys
+/// alone, a few cache lines, not the rows between them. Flag `F_TS` puts the block's
+/// version after the suffix, `F_DERIVED` makes the value field the length of the key's tail
+/// the value ends with.
 pub struct Block {
     data: Bytes,
     /// Every `RESTART`th entry: its key as a number in the high 32 bits (as
@@ -440,6 +442,8 @@ pub struct Block {
     /// entries: a point read's block is seldom in the CPU's cache, and every restart it
     /// compared was a miss (three quarters of `seek`).
     restarts: Vec<u64>,
+    /// Where each restart's entry's value is (each value follows the one before's).
+    rvals: Vec<u32>,
     common: usize,
     len: usize,
     last_key: Box<[u8]>,
@@ -457,6 +461,8 @@ const F_DERIVED: usize = 2;
 pub struct BlockPos {
     i: usize,
     next: u32,
+    /// Where the value of the entry after `i` starts (if it has one stored).
+    vnext: u32,
     /// `shared` of entry `i`.
     shared: u32,
     key: Vec<u8>,
@@ -527,6 +533,12 @@ fn head(b: &[u8], pos: &mut usize) -> (usize, usize, usize) {
     (shared, unshared, v(b, pos))
 }
 
+/// The length of the prefix `a` and `b` share.
+#[inline]
+fn lcp(a: &[u8], b: &[u8]) -> usize {
+    a.iter().zip(b).take_while(|(x, y)| x == y).count()
+}
+
 /// `a ++ b` compared with `key`.
 fn cmp_split(a: &[u8], b: &[u8], key: &[u8]) -> std::cmp::Ordering {
     use std::cmp::Ordering::*;
@@ -585,9 +597,9 @@ impl Block {
         } else if vf == 0 {
             pos.val_len = TOMBSTONE;
         } else {
-            pos.val_off = p as u32;
+            pos.val_off = pos.vnext;
             pos.val_len = (vf - 1) as u32;
-            p += vf - 1;
+            pos.vnext += pos.val_len;
         }
         pos.next = p as u32;
     }
@@ -600,6 +612,7 @@ impl Block {
         }
         let r = i / RESTART;
         pos.next = self.restarts[r] as u32;
+        pos.vnext = self.rvals[r];
         pos.key.clear();
         pos.i = r * RESTART;
         self.read(pos);
@@ -663,6 +676,7 @@ impl Block {
         // The keys from the restart's on, the entries' values left alone until the one
         // found.
         pos.next = self.restarts[r] as u32;
+        pos.vnext = self.rvals[r];
         pos.key.clear();
         pos.i = r * RESTART;
         self.read(pos);
@@ -671,9 +685,13 @@ impl Block {
         }
         let b = &self.data[..];
         let end = ((r + 1) * RESTART).min(self.len);
-        let mut p = pos.next as usize;
+        let (mut p, mut v) = (pos.next as usize, pos.vnext);
+        // (What the key so far shares with `key`: an entry sharing more of the key before it
+        // is below `key` as that one is, so it is passed with no comparison; one sharing
+        // less or as much is compared from there on.)
+        let mut m = lcp(&pos.key, key);
         for i in pos.i + 1..end {
-            let at = p;
+            let at = (p, v);
             let (shared, us, vf) = head(b, &mut p);
             let unshared = us >> 2;
             pos.key.truncate(shared);
@@ -681,21 +699,24 @@ impl Block {
             if us & F_TS != 0 {
                 pos.key.extend_from_slice(&self.ts);
             }
-            // (`read` makes this key again from the one it has: their first `shared` bytes
-            // are the same.)
-            if pos.key.as_slice() >= key {
-                pos.next = at as u32;
-                pos.i = i;
-                self.read(pos);
-                return;
+            if shared <= m {
+                m = shared + lcp(&pos.key[shared..], &key[shared.min(key.len())..]);
+                // (`read` makes this key again from the one it has: their first `shared`
+                // bytes are the same.)
+                if m == key.len() || m < pos.key.len() && pos.key[m] > key[m] {
+                    (pos.next, pos.vnext) = (at.0 as u32, at.1);
+                    pos.i = i;
+                    self.read(pos);
+                    return;
+                }
             }
             p += unshared;
             if us & F_DERIVED == 0 && vf > 0 {
-                p += vf - 1;
+                v += (vf - 1) as u32;
             }
         }
         // (The next restart's entry: its key is >= `key`, or the block ends.)
-        pos.next = p as u32;
+        (pos.next, pos.vnext) = (p as u32, v);
         pos.i = end - 1;
         self.step(pos);
     }
@@ -730,7 +751,7 @@ impl Block {
 
     /// The bytes it holds (what the block cache counts).
     pub fn mem_bytes(&self) -> usize {
-        self.data.len() + self.restarts.capacity() * 8 + self.last_key.len() + std::mem::size_of::<Block>()
+        self.data.len() + self.restarts.capacity() * 8 + self.rvals.capacity() * 4 + self.last_key.len() + std::mem::size_of::<Block>()
     }
 
     /// Every entry with its key whole, for readers that go backwards or read a block once.
@@ -780,6 +801,9 @@ impl Block {
         let bad = || internal("bad sst block");
         let mut restarts: Vec<u64> = Vec::with_capacity(raw.len() / 512 + 1);
         let mut out = Vec::with_capacity(raw.len());
+        // (The values, put after every key when the block is done.)
+        let mut vals = Vec::with_capacity(raw.len());
+        let mut rvals: Vec<u32> = Vec::with_capacity(raw.len() / 512 + 1);
         let mut key: Vec<u8> = Vec::new();
         // (The last restart's key.)
         // (Every restart's key, and how much of the first one is stored.)
@@ -836,6 +860,7 @@ impl Block {
             }
             let share = if n.is_multiple_of(RESTART) {
                 restarts.push(out.len() as u64);
+                rvals.push(vals.len() as u32);
                 rkeys.extend_from_slice(&key);
                 rends.push(rkeys.len());
                 if n == 0 {
@@ -850,12 +875,18 @@ impl Block {
             put_varint(&mut out, tail.unwrap_or(vl) as u64);
             out.extend_from_slice(&key[share..ukey]);
             if let (Some(v), None) = (value, tail) {
-                out.extend_from_slice(v);
+                vals.extend_from_slice(v);
             }
             n += 1;
         }
+        // (The values after every key: `vbase`.)
+        let vbase = out.len() as u32;
+        out.reserve_exact(vals.len());
+        out.extend_from_slice(&vals);
         out.shrink_to_fit();
         restarts.shrink_to_fit();
+        rvals.iter_mut().for_each(|v| *v += vbase);
+        rvals.shrink_to_fit();
         let rkey_at = |i: usize| &rkeys[if i == 0 { 0 } else { rends[i - 1] }..rends[i]];
         let common = match rends.len() {
             0 => 0,
@@ -870,6 +901,7 @@ impl Block {
         Ok(Block {
             data: Bytes::from(out),
             restarts,
+            rvals,
             common,
             len: n,
             last_key: key.as_slice().into(),
