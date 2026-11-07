@@ -4,7 +4,8 @@
 #
 #   tools/bench/run.sh pg-start | pg-stop | engine-start [--no-sync] | engine-stop
 #   tools/bench/run.sh pgrust-start | pgrust-stop
-#   tools/bench/run.sh pgbench <pg|engine|pgrust> <pgbench args...>
+#   tools/bench/run.sh pgdef-start | pgdef-stop | engperf-start | engperf-stop
+#   tools/bench/run.sh pgbench <pg|engine|pgrust|pgdef|engperf> <pgbench args...>
 #   tools/bench/run.sh bench <pg|engine> <workload> [--opt value...]
 #   tools/bench/run.sh inproc <workload> [--opt value...]   (the engine server stopped)
 #   tools/bench/run.sh psql <pg|engine> <sql>
@@ -44,16 +45,91 @@ mkdir -p "$DATA/logs"
 PGRUST_NAME=${PGRUST_NAME:-$PG_NAME-pgrust}
 PGRUST_PORT=${PGRUST_PORT:-55362}
 PGRUST_IMAGE=${PGRUST_IMAGE:-malisper/pgrust@sha256:9ec8cbd68b422729ef3d5f6062e8ac501607357a0a5832bd1c6e0b69670360a9}
-port() { case $1 in pg) echo "$PG_PORT" ;; pgrust) echo "$PGRUST_PORT" ;; *) echo "$ENGINE_PORT" ;; esac; }
+# Two more servers for the modes' comparison: pgdef, PostgreSQL with its stock settings (pg is
+# tuned: shared_buffers=2GB and the others below), and engperf, the engine in performance mode
+# (`--mode performance`, its caches sized from the container's memory; engine is the engine as
+# given: efficient mode unless ENGINE_ARGS says otherwise, --cache-mb CACHE_MB).
+PGDEF_NAME=${PGDEF_NAME:-$PG_NAME-def}
+PGDEF_PORT=${PGDEF_PORT:-55363}
+ENGPERF_NAME=${ENGPERF_NAME:-$PG_NAME-engperf}
+ENGPERF_PORT=${ENGPERF_PORT:-55364}
+# SERVER_MEM (e.g. 8g) caps every server container's memory (docker --memory): performance mode
+# sizes its caches from it, as PostgreSQL's tuning guidance sizes shared_buffers (a quarter).
+MEMOPT=${SERVER_MEM:+--memory $SERVER_MEM}
+port() {
+  case $1 in pg) echo "$PG_PORT" ;; pgrust) echo "$PGRUST_PORT" ;; pgdef) echo "$PGDEF_PORT" ;;
+    engperf) echo "$ENGPERF_PORT" ;; *) echo "$ENGINE_PORT" ;; esac
+}
+cname() {
+  case $1 in pg) echo "$PG_NAME" ;; pgrust) echo "$PGRUST_NAME" ;; pgdef) echo "$PGDEF_NAME" ;;
+    engperf) echo "$ENGPERF_NAME" ;; *) echo "$ENGINE_NAME" ;; esac
+}
+is_engine() { [ "$1" = engine ] || [ "$1" = engperf ]; }
 memopt() {
-  if [ "$1" = pg ] || [ "$1" = pgrust ]; then
-    id=$(docker inspect -f '{{.Id}}' "$([ "$1" = pg ] && echo "$PG_NAME" || echo "$PGRUST_NAME")")
-    echo "--mem-cgroup /sys/fs/cgroup/system.slice/docker-$id.scope"
-  elif [ -n "${ENGINE_DOCKER:-}" ]; then
-    id=$(docker inspect -f '{{.Id}}' "$ENGINE_NAME")
+  if ! is_engine "$1" || [ -n "${ENGINE_DOCKER:-}" ]; then
+    id=$(docker inspect -f '{{.Id}}' "$(cname "$1")")
     echo "--mem-cgroup /sys/fs/cgroup/system.slice/docker-$id.scope"
   else
-    echo "--mem-pid $(cat "$DATA/engine.pid")"
+    echo "--mem-pid $(cat "$DATA/$1.pid")"
+  fi
+}
+# pg_start <name> <port> <volume> <settings...>: a PostgreSQL container.
+pg_start() {
+  n=$1; p=$2; shift 2
+  # PG_NETWORK=host serves on the host network (no docker-proxy between client and server: the
+  # engine has none); PG_CPU_SHARES lowers its CPU weight (2 is about nice 19's, for runs at
+  # low priority).
+  if [ "${PG_NETWORK:-}" = host ]; then
+    net="--network host"; listen="-c port=$p -c listen_addresses=127.0.0.1"; inport=$p
+  else
+    net="-p 127.0.0.1:$p:5432"; listen=""; inport=5432
+  fi
+  # shellcheck disable=SC2086
+  docker run -d --name "$n" --cpuset-cpus "$SERVER_CPUS" --shm-size=1g $MEMOPT \
+    ${PG_CPU_SHARES:+--cpu-shares "$PG_CPU_SHARES"} $net -v "$n-data":/var/lib/postgresql \
+    -e POSTGRES_PASSWORD=pw -e POSTGRES_INITDB_ARGS="--locale=C --encoding=UTF8" \
+    "$PG_IMAGE" "$@" $listen >/dev/null
+  i=0; until docker exec "$n" pg_isready -U postgres -h 127.0.0.1 -p "$inport" -q 2>/dev/null; do sleep 1; i=$((i+1)); [ $i -lt 60 ]; done
+  sleep 2
+  docker exec "$n" psql -U postgres -p "$inport" -Atc "select version()"
+}
+# engine_start <engine|engperf> <roll-engine args...>: data in $DATA/<t>, pid in $DATA/<t>.pid.
+engine_start() {
+  t=$1; shift; n=$(cname "$t"); p=$(port "$t"); d=$DATA/$t
+  if ss -ltn | grep -q ":$p "; then echo "port $p busy" >&2; exit 1; fi
+  mkdir -p "$d"
+  if [ -n "${ENGINE_DOCKER:-}" ]; then
+    docker rm -f "$n" >/dev/null 2>&1 || true
+    # shellcheck disable=SC2086
+    docker run -d --name "$n" --cpuset-cpus "$SERVER_CPUS" $MEMOPT \
+      ${PG_CPU_SHARES:+--cpu-shares "$PG_CPU_SHARES"} --network host --user "$(id -u):$(id -g)" \
+      -v "$BIN:$BIN:ro" -v "$d:$d" -v /usr/share/zoneinfo:/usr/share/zoneinfo:ro \
+      -e TMPDIR="$d" $(for e in ${ENGINE_ENV:-}; do printf ' -e %s' "$e"; done) \
+      "$ENGINE_IMAGE" "$BIN/roll-engine" --data "$d" \
+      --listen 127.0.0.1:$p --password pw "$@" >/dev/null
+    # (The container's process, as the host sees it: /proc probes work as for a host engine.)
+    docker inspect -f '{{.State.Pid}}' "$n" >"$DATA/$t.pid"
+  else
+    env ${ENGINE_ENV:-} taskset -c "$SERVER_CPUS" "$BIN/roll-engine" --data "$d" --listen 127.0.0.1:$p \
+      --password pw "$@" >>"$DATA/logs/$t.log" 2>&1 &
+    echo $! >"$DATA/$t.pid"
+  fi
+  i=0; until ss -ltn | grep -q ":$p "; do sleep 0.2; i=$((i+1)); [ $i -lt 300 ]; done
+  echo "$t pid $(cat "$DATA/$t.pid")"
+}
+engine_stop() {
+  t=$1; n=$(cname "$t")
+  if [ -n "${ENGINE_DOCKER:-}" ]; then
+    if docker inspect "$n" >/dev/null 2>&1; then
+      docker logs "$n" >>"$DATA/logs/$t.log" 2>&1 || true
+      docker stop -t 60 "$n" >/dev/null 2>&1 || true
+      docker rm -f "$n" >/dev/null 2>&1 || true
+    fi
+    rm -f "$DATA/$t.pid"
+  elif [ -f "$DATA/$t.pid" ]; then
+    kill "$(cat "$DATA/$t.pid")" 2>/dev/null || true
+    while kill -0 "$(cat "$DATA/$t.pid")" 2>/dev/null; do sleep 0.2; done
+    rm -f "$DATA/$t.pid"
   fi
 }
 
@@ -61,23 +137,20 @@ cmd=$1; shift
 case $cmd in
 pg-start)
   # Plan-affecting settings (work_mem, effective_cache_size, random_page_cost) stay at their
-  # defaults, as the engine has them, so both run the same plans. PG_NETWORK=host serves on
-  # the host network (no docker-proxy between client and server: the engine has none);
-  # PG_CPU_SHARES lowers its CPU weight (2 is about nice 19's, for runs at low priority).
-  if [ "${PG_NETWORK:-}" = host ]; then
-    net="--network host"; listen="-c port=$PG_PORT -c listen_addresses=127.0.0.1"; inport=$PG_PORT
-  else
-    net="-p 127.0.0.1:$PG_PORT:5432"; listen=""; inport=5432
-  fi
-  # shellcheck disable=SC2086
-  docker run -d --name "$PG_NAME" --cpuset-cpus "$SERVER_CPUS" --shm-size=1g \
-    ${PG_CPU_SHARES:+--cpu-shares "$PG_CPU_SHARES"} $net -v "$PG_NAME-data":/var/lib/postgresql \
-    -e POSTGRES_PASSWORD=pw -e POSTGRES_INITDB_ARGS="--locale=C --encoding=UTF8" \
-    "$PG_IMAGE" -c shared_buffers=2GB -c maintenance_work_mem=256MB -c max_wal_size=8GB \
-    -c checkpoint_timeout=30min -c max_connections=300 $listen >/dev/null
-  i=0; until docker exec "$PG_NAME" pg_isready -U postgres -h 127.0.0.1 -p "$inport" -q 2>/dev/null; do sleep 1; i=$((i+1)); [ $i -lt 60 ]; done
-  sleep 2
-  docker exec "$PG_NAME" psql -U postgres -p "$inport" -Atc "select version()"
+  # defaults, as the engine has them, so both run the same plans.
+  pg_start "$PG_NAME" "$PG_PORT" -c shared_buffers=2GB -c maintenance_work_mem=256MB -c max_wal_size=8GB \
+    -c checkpoint_timeout=30min -c max_connections=300
+  ;;
+pgdef-start)
+  # PostgreSQL as installed: its stock settings, but for max_connections (the footprint gate's
+  # 100 idle sessions and the 100-session workload need more than the stock 100's 97).
+  docker rm -f "$PGDEF_NAME" >/dev/null 2>&1 || true
+  docker volume rm "$PGDEF_NAME-data" >/dev/null 2>&1 || true
+  pg_start "$PGDEF_NAME" "$PGDEF_PORT" -c max_connections=300
+  ;;
+pgdef-stop)
+  docker rm -f "$PGDEF_NAME" >/dev/null 2>&1 || true
+  docker volume rm "$PGDEF_NAME-data" >/dev/null 2>&1 || true
   ;;
 pg-stop)
   docker rm -f "$PG_NAME" >/dev/null 2>&1 || true
@@ -91,7 +164,7 @@ pgrust-start)
   docker rm -f "$PGRUST_NAME" >/dev/null 2>&1 || true
   docker volume rm "$PGRUST_NAME-data" >/dev/null 2>&1 || true
   # shellcheck disable=SC2086
-  docker run -d --name "$PGRUST_NAME" --cpuset-cpus "$SERVER_CPUS" --shm-size=1g \
+  docker run -d --name "$PGRUST_NAME" --cpuset-cpus "$SERVER_CPUS" --shm-size=1g $MEMOPT \
     ${PG_CPU_SHARES:+--cpu-shares "$PG_CPU_SHARES"} --network host --ulimit stack=67108864 \
     -e RUST_MIN_STACK=33554432 -e PGPORT="$PGRUST_PORT" -v "$PGRUST_NAME-data":/var/lib/postgresql \
     -e POSTGRES_PASSWORD=pw -e POSTGRES_INITDB_ARGS="--locale=C --encoding=UTF8" \
@@ -113,40 +186,17 @@ pgrust-stop)
   docker volume rm "$PGRUST_NAME-data" >/dev/null 2>&1 || true
   ;;
 engine-start)
-  if ss -ltn | grep -q ":$ENGINE_PORT "; then echo "port $ENGINE_PORT busy" >&2; exit 1; fi
-  mkdir -p "$DATA/engine"
-  if [ -n "${ENGINE_DOCKER:-}" ]; then
-    docker rm -f "$ENGINE_NAME" >/dev/null 2>&1 || true
-    # shellcheck disable=SC2086
-    docker run -d --name "$ENGINE_NAME" --cpuset-cpus "$SERVER_CPUS" \
-      ${PG_CPU_SHARES:+--cpu-shares "$PG_CPU_SHARES"} --network host --user "$(id -u):$(id -g)" \
-      -v "$BIN:$BIN:ro" -v "$DATA/engine:$DATA/engine" -v /usr/share/zoneinfo:/usr/share/zoneinfo:ro \
-      -e TMPDIR="$DATA/engine" $(for e in ${ENGINE_ENV:-}; do printf ' -e %s' "$e"; done) \
-      "$ENGINE_IMAGE" "$BIN/roll-engine" --data "$DATA/engine" \
-      --listen 127.0.0.1:$ENGINE_PORT --password pw --cache-mb "${CACHE_MB:-2048}" "$@" >/dev/null
-    # (The container's process, as the host sees it: /proc probes work as for a host engine.)
-    docker inspect -f '{{.State.Pid}}' "$ENGINE_NAME" >"$DATA/engine.pid"
-  else
-    env ${ENGINE_ENV:-} taskset -c "$SERVER_CPUS" "$BIN/roll-engine" --data "$DATA/engine" --listen 127.0.0.1:$ENGINE_PORT \
-      --password pw --cache-mb "${CACHE_MB:-2048}" "$@" >>"$DATA/logs/engine.log" 2>&1 &
-    echo $! >"$DATA/engine.pid"
-  fi
-  i=0; until ss -ltn | grep -q ":$ENGINE_PORT "; do sleep 0.2; i=$((i+1)); [ $i -lt 300 ]; done
-  echo "engine pid $(cat "$DATA/engine.pid")"
+  engine_start engine --cache-mb "${CACHE_MB:-2048}" ${ENGINE_ARGS:-} "$@"
   ;;
 engine-stop)
-  if [ -n "${ENGINE_DOCKER:-}" ]; then
-    if docker inspect "$ENGINE_NAME" >/dev/null 2>&1; then
-      docker logs "$ENGINE_NAME" >>"$DATA/logs/engine.log" 2>&1 || true
-      docker stop -t 60 "$ENGINE_NAME" >/dev/null 2>&1 || true
-      docker rm -f "$ENGINE_NAME" >/dev/null 2>&1 || true
-    fi
-    rm -f "$DATA/engine.pid"
-  elif [ -f "$DATA/engine.pid" ]; then
-    kill "$(cat "$DATA/engine.pid")" 2>/dev/null || true
-    while kill -0 "$(cat "$DATA/engine.pid")" 2>/dev/null; do sleep 0.2; done
-    rm -f "$DATA/engine.pid"
-  fi
+  engine_stop engine
+  ;;
+engperf-start)
+  # Performance mode with its own sizing (from SERVER_MEM's limit, else the machine's memory).
+  engine_start engperf --mode performance ${ENGPERF_ARGS:-} "$@"
+  ;;
+engperf-stop)
+  engine_stop engperf
   ;;
 pgbench)
   t=$1; shift

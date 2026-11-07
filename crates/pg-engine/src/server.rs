@@ -133,6 +133,82 @@ pub fn set_idle_hook(f: fn()) {
     let _ = IDLE_HOOK.set(f);
 }
 
+/// How long a connection's thread polls its socket for the client's next message before it
+/// sleeps in the read (`set_wait_spin`; zero: it sleeps at once).
+static WAIT_SPIN_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Connection threads at work (not waiting for their clients) and threads polling their
+/// sockets, counted while a spin is set: a thread polls only while both together fit in half
+/// the cores the process may run on, so polling doesn't take the core a woken thread needs
+/// (it counts as working only once it runs). At 32 clients on 4 cores, two pollers at most
+/// cost 15% of the throughput; while working and polling threads filled all 4 cores, 8
+/// clients lost 8%.
+static WORKING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static SPINNING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static HALF_CORES: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+
+/// Poll for a client's next message up to this long before sleeping, while cores are free
+/// (performance mode's): a reply that comes back within it skips the sleep and the wake-up.
+/// Set before serving.
+pub fn set_wait_spin(d: std::time::Duration) {
+    WAIT_SPIN_NS.store(d.as_nanos().min(u64::MAX as u128) as u64, Ordering::Relaxed);
+}
+
+/// A connection thread out of `WORKING` while it waits for its client.
+struct Waiting(bool);
+
+impl Waiting {
+    fn new(counted: bool) -> Waiting {
+        if counted {
+            WORKING.fetch_sub(1, Ordering::Relaxed);
+        }
+        Waiting(counted)
+    }
+}
+
+impl Drop for Waiting {
+    fn drop(&mut self) {
+        if self.0 {
+            WORKING.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
+/// The client's next bytes if they come within `set_wait_spin`'s time while cores are free
+/// (None: they didn't, or no spin is set, or no core is free).
+fn spin_read(s: &TcpStream, buf: &mut [u8]) -> Option<std::io::Result<usize>> {
+    use std::os::fd::AsRawFd;
+    let ns = WAIT_SPIN_NS.load(Ordering::Relaxed);
+    if ns == 0 || buf.is_empty() {
+        return None;
+    }
+    let half = *HALF_CORES.get_or_init(|| std::thread::available_parallelism().map_or(1, |n| (n.get() / 2).max(1)));
+    let fits = || WORKING.load(Ordering::Relaxed) + SPINNING.load(Ordering::Relaxed) <= half;
+    SPINNING.fetch_add(1, Ordering::Relaxed);
+    let start = std::time::Instant::now();
+    let r = loop {
+        if !fits() {
+            break None;
+        }
+        // SAFETY: recv writes at most buf.len() bytes into buf, a live exclusive slice.
+        let n = unsafe { libc::recv(s.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len(), libc::MSG_DONTWAIT) };
+        if n >= 0 {
+            break Some(Ok(n as usize));
+        }
+        let e = std::io::Error::last_os_error();
+        match e.kind() {
+            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted => {}
+            _ => break Some(Err(e)),
+        }
+        if start.elapsed().as_nanos() as u64 >= ns {
+            break None;
+        }
+        std::hint::spin_loop();
+    };
+    SPINNING.fetch_sub(1, Ordering::Relaxed);
+    r
+}
+
 /// A connection's reading side: a read that waits past `IDLE_TRIM` runs the idle hook (once
 /// until the client sends something again) and goes on waiting; one waiting past `deadline`
 /// (an idle timeout) fails with `IdleTimeout`.
@@ -140,6 +216,16 @@ struct IdleRead {
     s: Arc<TcpStream>,
     armed: bool,
     deadline: Option<std::time::Instant>,
+    /// Counted in `WORKING` (a spin was set when the connection came).
+    counted: bool,
+}
+
+impl Drop for IdleRead {
+    fn drop(&mut self) {
+        if self.counted {
+            WORKING.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
 }
 
 /// The error a read past `IdleRead::deadline` fails with.
@@ -159,12 +245,16 @@ impl IdleRead {
         if IDLE_HOOK.get().is_some() {
             s.set_read_timeout(Some(IDLE_TRIM))?;
         }
-        Ok(IdleRead { s, armed: true, deadline: None })
+        let counted = WAIT_SPIN_NS.load(Ordering::Relaxed) != 0;
+        if counted {
+            WORKING.fetch_add(1, Ordering::Relaxed);
+        }
+        Ok(IdleRead { s, armed: true, deadline: None, counted })
     }
 
-    /// The socket's read timeout: the idle hook's period, and no later than the deadline.
+    /// Wake for the pending idle trim or a session deadline; otherwise block for data.
     fn wait_for(&self) -> Option<std::time::Duration> {
-        let hook = IDLE_HOOK.get().map(|_| IDLE_TRIM);
+        let hook = IDLE_HOOK.get().filter(|_| self.armed).map(|_| IDLE_TRIM);
         let left = self.deadline.map(|d| {
             d.saturating_duration_since(std::time::Instant::now())
                 .max(std::time::Duration::from_millis(1))
@@ -178,13 +268,23 @@ impl IdleRead {
 
 impl Read for IdleRead {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let _waiting = Waiting::new(self.counted);
         if self.deadline.is_some() {
             self.s.set_read_timeout(self.wait_for())?;
+        }
+        if let Some(r) = spin_read(&self.s, buf) {
+            let n = r?;
+            if !std::mem::replace(&mut self.armed, true) {
+                self.s.set_read_timeout(self.wait_for())?;
+            }
+            return Ok(n);
         }
         loop {
             match (&*self.s).read(buf) {
                 Ok(n) => {
-                    self.armed = true;
+                    if !std::mem::replace(&mut self.armed, true) {
+                        self.s.set_read_timeout(self.wait_for())?;
+                    }
                     return Ok(n);
                 }
                 Err(e)
@@ -201,9 +301,7 @@ impl Read for IdleRead {
                     {
                         h();
                     }
-                    if self.deadline.is_some() {
-                        self.s.set_read_timeout(self.wait_for())?;
-                    }
+                    self.s.set_read_timeout(self.wait_for())?;
                 }
                 Err(e) => return Err(e),
             }
@@ -317,7 +415,7 @@ impl Conn {
         if deadline.is_some() {
             let r = self.rd.get_mut();
             r.deadline = None;
-            r.s.set_read_timeout(IDLE_HOOK.get().map(|_| IDLE_TRIM))?;
+            r.s.set_read_timeout(r.wait_for())?;
         }
         if first? == 0 {
             return Ok(None);
@@ -2442,6 +2540,40 @@ fn close_msg(c: &mut Conn, s: &mut Session, body: &[u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::parse_options;
+
+    #[test]
+    fn idle_read_parks_after_trimming_and_rearms_on_data() {
+        use super::{IDLE_TRIM, IdleRead, IdleTimeout, set_idle_hook};
+        use std::io::{Read, Write};
+        use std::net::{TcpListener, TcpStream};
+        use std::time::{Duration, Instant};
+
+        set_idle_hook(|| {});
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let socket = listener.accept().unwrap().0;
+        let observer = socket.try_clone().unwrap();
+        let mut reader = IdleRead::new(socket).unwrap();
+        let worker = std::thread::spawn(move || {
+            let mut byte = [0];
+            reader.read_exact(&mut byte).unwrap();
+            (reader, byte)
+        });
+        let deadline = Instant::now() + Duration::from_secs(6);
+        while observer.read_timeout().unwrap().is_some() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let parked = observer.read_timeout().unwrap().is_none();
+        client.write_all(&[42]).unwrap();
+        let (mut reader, byte) = worker.join().unwrap();
+        assert!(parked, "a trimmed idle connection still has a polling timeout");
+        assert_eq!(byte, [42]);
+        assert_eq!(observer.read_timeout().unwrap(), Some(IDLE_TRIM));
+
+        reader.deadline = Some(Instant::now() + IDLE_TRIM + Duration::from_millis(50));
+        let error = reader.read(&mut [0]).unwrap_err();
+        assert!(error.get_ref().unwrap().is::<IdleTimeout>());
+    }
 
     #[test]
     fn startup_options() {
