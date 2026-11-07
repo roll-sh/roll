@@ -7064,6 +7064,94 @@ new), the regression suite in full (debug, private reference): 51,148 / 51,150, 
 against `results.tsv`; isolation 121 / 122 specs (intra-grant-inplace) and the 17 roll-* specs;
 `pg_dump_tap` 14,817 / 14,817; the difftest smoke.
 
+## Catalog round 10 (round 25, agent 166)
+
+HANDOFF.md "Catalog round 10, first batch" has what changed. 10,000 tables of three columns
+with a primary key and a default in 10 schemas, and a partitioned table of 1,000 partitions
+(`bench scale`'s objects, loaded with psql). The engine is the dist build in a container
+(`run.sh` `ENGINE_DOCKER=1`), PostgreSQL 18.6 in its container on the host network, both on
+cores 8-11; psql `\timing` (ms) from a client container on the host network; crate tests ran
+on the machine meanwhile, at nice 19.
+
+Statistics views, again in a session (PostgreSQL / round 9's engine / this batch):
+
+| query | PostgreSQL | round 9 | round 10 |
+|---|---|---|---|
+| `count(*)` of pg_stat_user_tables | 20.5-20.7 | 13 | 6.7-8.5 |
+| one table's row, `relname = 't5005'` | 1.2-1.4 | 3.0 | 0.39-0.69 |
+| one table's row, `relid = 'sc5.t5005'::regclass` | 1.0-1.1 | (every row) | 0.41-0.44 |
+| `count(*)` of pg_stat_user_indexes | 29-42 | 14-39 | 15-16 |
+| one table's indexes, `relname =` | 1.0-1.1 | 3.4 | 0.16-0.19 |
+| pg_statio_user_tables, `relname =` | 0.9 | (its SQL) | 0.15-0.16 |
+| `count(*)` of pg_statio_user_tables | 8.0-10.5 | (its SQL) | 4.2-4.4 |
+| `count(*)` of pg_statio_user_indexes | 28-44 | (its SQL) | 18-28 |
+| `count(*)` of pg_statio_all_sequences | 5.2-7.8 | (its SQL) | 0.3-0.6 |
+| one table's row right after a COMMENT | 0.8-2.7 | 20 | 0.18-0.29 |
+| `SELECT * FROM pg_class` | 88 | | 74 |
+
+First query after a server start (each query on a freshly started server; the second run
+after it; the engine's CPU and peak RSS over both):
+
+| query | PostgreSQL | round 9 | round 10 (CPU, RSS) |
+|---|---|---|---|
+| `count(*)` of pg_stat_user_tables | 53 / 20 | 188 / 13 | 75 / 9.9 (0.12 s, 94 MB) |
+| pg_stat_user_tables `relname =` | 6.3 / 1.0 | | 30 / 0.55 (0.03 s, 47 MB) |
+| `count(*)` of pg_statio_user_tables | 15 / 7.9 | | 52 / 6.6 (0.11 s, 85 MB) |
+| psql `\dt` of a schema | 17 / 8.1 | 150-190 | 110 / 15 (0.16 s, 100 MB) |
+| pgAdmin's tables of a schema | 19 / 14 | | 88 / 10 (0.13 s, 96 MB) |
+| pg_class × pg_attribute of a schema | 18 / 15 | | 141 / 51 (0.25 s, 103 MB) |
+| Django's table list | 182 / 15 | | 215 / 14 (0.29 s, 124 MB) |
+| `count(*)` of pg_class | 8.1 / 5.3 | 10-21 | 24 / 0.65 (0.04 s, 43 MB) |
+| `SELECT * FROM pg_class` | 178 / 84 | | 231 / 79 (0.33 s, 113 MB) |
+
+What is left of a first read is parsing the stored entries it reads (HANDOFF: a stored
+directory is the next step).
+
+psql's `\d sc0.t5000` (its 11 queries, each right after a `COMMENT ON TABLE`; the sum, three
+rounds): PostgreSQL 12.0-12.8, the engine 22.8-38.0 (round 9 measured 26-27 on the same
+probe, with no DDL in between too). Per query, in psql's order, PostgreSQL / engine: lookup
+0.5 / 1.0, table 0.5 / 0.9, columns 0.6-0.7 / 1.7-2.4, indexes 1.1-1.2 / 2.8-3.6, foreign keys
+0.3 / 0.6, referenced by 5.6-6.3 / 9.9-22, policies 0.7 / 0.7-0.9, statistics 0.3 / 0.4-0.5,
+publications 1.4 / 2.7-3.8, inherits 0.4 / 1.1-1.6, partitions 0.5-0.6 / 1.0-1.3. HANDOFF has
+where it goes (planning, the referenced-by plan).
+
+ORM and driver introspection of one table (`sc0.t5000`; first right after a COMMENT, then
+three more):
+
+| query | PostgreSQL | engine |
+|---|---|---|
+| pgjdbc getColumns | 11.7 / 2.0-2.3 | 74 / 9-14 |
+| pgjdbc getIndexInfo | 6.0 / 1.6-2.0 | 5.9 / 4.9-5.4 |
+| Django get_table_list | 247 / 41-56 | 68 / 17 |
+| Django get_table_description | 3.2 / 1.9-2.9 | 5.3 / 3.6-4.5 |
+| Django get_constraints (constraints) | 2.0 / 0.7-0.8 | 34 / 2.3-2.6 |
+| Django get_constraints (indexes) | 3.4 / 1.4-1.9 | 7.1 / 5.4-7.8 |
+| pgAdmin's tables of a schema | 7.8 / 7.5-7.6 | 7.3 / 7.6-9.8 |
+| psql `\dt` of a schema | 7.7 / 7.5-10.3 | 9.8 / 9.6-12.9 |
+
+The per-table ORM queries are planning bound on the engine (HANDOFF).
+
+Memory at 10,000 tables (fresh; after reading pg_class, pg_attribute, pg_type, pg_index,
+pg_constraint and pg_stat_user_tables whole in one session): the engine's RSS 22 / 166 MB,
+PostgreSQL's cgroup `memory.current` 29 / 134 MB.
+
+The scoreboard's footprint gate (quick) passes: idle CPU over 5 minutes 0.035 s (PostgreSQL
+0.725), memory with 100 idle sessions 27.8 MB (211), fresh data directory 3.03 MB (38.9).
+pgbench at scale 1 (quick, 2 rounds; nothing this batch changes is on its paths; engine /
+PostgreSQL, CPU per 1,000 transactions and peak memory): select-only 1 client 55-58 / 51-62
+ms, 65-77 / 112-118 MB; 8 clients 46-52 / 40-45 ms; 32 clients 48-60 / 45-54 ms, 83-84 /
+156-163 MB; tpcb-like 1 client 431-466 / 325-410 ms, 76-80 / 113-118 MB; 8 clients 435-545 /
+433-493 ms; 32 clients 568-581 / 658-748 ms, 97-102 / 168 MB.
+
+### Verification (round 25, agent 166, first batch)
+
+On `912559c`: `cargo test -p pg-engine` debug and release (every binary; goldens
+`a166_statio_views`, `a166_class_where`, `a166_lazy_snapshot`, `a166_lazy_keys_count` and
+`catalog_lazy_snapshot.rs` new), clippy (nothing new), the difftest smoke, isolation 138 /
+139 specs with the 17 roll-* specs (intra-grant-inplace), the regression suite in full
+(debug, private reference): 51,148 / 51,150, no unit changed against `results.tsv`.
+pg_dump_tap was queued and cancelled under the verification train (agent 162's full suite).
+
 ## OLTP round 3 (round 23, agent 136)
 
 HANDOFF.md, "OLTP round 3", has what changed: extended-protocol statements bound once per

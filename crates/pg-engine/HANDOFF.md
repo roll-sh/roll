@@ -3534,6 +3534,73 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
   where PostgreSQL hashes (the engine estimates 203 pg_class rows for `relnamespace = x`
   against PostgreSQL's 1,949: catalog column statistics, agent 155's ANALYZE of system
   catalogs); its execution is 33 ms against 35 with EXPLAIN ANALYZE's timing on both sides.
+- **Catalog round 10, first batch** (round 25, agent 166; BENCH.md "Catalog round 10"):
+  - pg_class's directory without its rows (`catalog/system.rs` `class_keys`, `ClassSel`,
+    `ClassKeep`): a relation's oid, relnamespace, relkind, relname and reltoastrelid read from
+    the relation maps (tables, views, sequences, indexes, TOAST relations, composite types,
+    Postgres's static rows), of every relation, of one oid, or of one name through the name
+    index (TOAST and composite names apart). `ClassKeep` limits it to some kinds and
+    namespaces: only the maps holding a kind kept are read whole first (on several threads),
+    and a name is made only once its relation is kept. Debug builds compare it with
+    pg_class's generated rows. None when a superuser's UPDATE moved oids (`rel_oid_edits`):
+    the callers use the generated rows then.
+  - The statistics views are made from that directory (`catalog/stat_views.rs` `rows_of`,
+    `StatSel`): pg_stat_{all,user,sys}_{tables,indexes} as before, and now the nine
+    pg_statio_* views natively (they ran their SQL definitions: a LATERAL sum over pg_index
+    per relation). A filter's leading `relid = ...` / `indexrelid = ...` pins the rows to one
+    relation (`exec/nodes.rs` `is_named_rows`, `stat_views::oid_columns`) as `relname =` /
+    `schemaname =` did, a name is found through the name index instead of every pg_class
+    row, a table's indexes are its own list (`Table::indexes`, the primary key's, TOAST
+    indexes; debug builds check them against every index entry), and only the columns the
+    query reads are made (`StatSel::reads` from the scan's `need` and filter, `stat_reads`:
+    `count(*)` fetches no statistics entry; the others are NULL). Rows in relation oid order
+    (the statio views' definitions have no ORDER BY: PostgreSQL's order isn't deterministic
+    there). Golden `a166_statio_views`.
+  - The planner's row count of a statistics view (`sql/explain.rs` `sys_tuples`) is an
+    estimate from the maps' sizes (`stat_views::row_estimate`): the executor's parallel check
+    (`paths::parallel::may_gather` → `syscat::sys_size`) made every row of a view a query read,
+    once per catalog version: 17 ms after each DDL statement at 10,000 tables.
+  - pg_class's first read in a catalog version (no statement generated its rows yet) makes
+    only the rows its filter or a hash join above it fixes (`system::class_rows_where`,
+    `ClassWhere`; `exec/nodes.rs` `class_where`, `LazyRowsNode`): `oid`, `relnamespace` and
+    `relkind` compared with values (`=`, `= ANY`, `IN`) in conjuncts after conjuncts that can't
+    raise anything, or the keys an inner or semi hash join hands its outer scan
+    (`restrict_keys` on oid or relnamespace: psql's `\dt` joins pg_namespace), when under a
+    quarter of pg_class's rows (and `WHERE_MAX`, 8,192), made relation by relation in
+    pg_class's order. pg_attribute the same way for a hash join's attrelid keys
+    (`system::attribute_rows_of`). `LazyRowsNode` replaced `CountedRowsNode` (filter-less
+    scans: `count(*)` without rows). It captures the catalog when opened and generates its
+    deferred rows from that version (`ExecCtx::reading_catalog`): nested volatile DDL between
+    the open and the first row read (an inner side built first) must not show (the resume
+    session after the 2026-11-04 stop found it; test `catalog_lazy_snapshot.rs`, goldens
+    `a166_lazy_snapshot`, `a166_lazy_keys_count`). Debug builds compare the rows with the
+    whole catalog's. Golden `a166_class_where`.
+  - A database's first read of pg_namespace parsed every relation's stored entry
+    (`rows_generated_chunked` read every map first, for every catalog): every statistics view
+    reads pg_namespace, so a named lookup's first run took 130-150 ms at 10,000 tables. Only
+    catalogs made from the relation maps read them first now (`reads_relations`).
+  - pg_inherits is made from the inheritance index (`Catalog::inheritance`) and
+    `IndexIx::attached` instead of every table and index (a millisecond a read at 10,000
+    tables; psql's `\d` reads it twice), a detach view's omitted partitions included.
+  - The system catalogs' index list (`sys_indexes.tsv`) is parsed once (`sql/explain.rs`
+    `sys_index_scan` split every line of it per catalog scan's estimate: 5% of psql's `\d`).
+  - Measured, not this batch's (reported to the planner and executor owners): psql's `\d` at
+    10,000 tables is about 2x PostgreSQL's in steady state, the same with or without DDL in
+    between; most of it is planning (`explain::estimate_in` builds EXPLAIN nodes to cost
+    plans: 0.7-2.8 ms a query against PostgreSQL's 0.1-0.3) and the referenced-by query
+    (`confrelid IN (SELECT pg_partition_ancestors(...))`): a bitmap scan on conparentid with
+    the hashed subplan's test before `contype = 'f'` (PostgreSQL: a seq scan, quals ordered by
+    cost), 10 ms against 3-6. pgjdbc's getColumns and Django's index and constraint queries
+    are planning bound too (the join search and estimates over 70% of their CPU). A plan's
+    OnceLock in `exec::parallel_part::start` was 6% of `\d`.
+  - Left: a query's first read of the catalog after an open parses every stored entry it
+    reads (`PMap::read_all`, serde_json, the store's reads): 50-230 ms at 10,000 tables against
+    PostgreSQL's 8-180; a directory of its own (oid, namespace, kind, name, TOAST oid per
+    relation, stored as index records like the name index) would answer the statistics views
+    and schema-filtered pg_class reads without parsing a table (a catalog format change, with
+    its downgrade). Catalog entries weren't shrunk: at 10,000 tables after reading pg_class,
+    pg_attribute, pg_type, pg_index, pg_constraint and pg_stat_user_tables whole the engine's
+    RSS is 166 MB against PostgreSQL's cgroup 134 MB (22 against 29 MB fresh).
 - **Client libraries** (round 17, agent 38; round 18, agent 51): drivers' and ORMs' own test
   suites against the engine and against PostgreSQL 18.6, test by test: `tests/clients/`
   (runner, per-suite scripts, `STATUS.md` with the per-suite counts and every difference
