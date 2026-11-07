@@ -17,10 +17,12 @@ let demo: Promise<{ client: AgentsClient; services: AgentsServices }> | null = n
 
 function loadDemo() {
   demo ??= import("@/lib/agents-demo").then(({ DemoOwner }) => {
-    const variant = new URLSearchParams(window.location.search).get("demo");
+    const params = new URLSearchParams(window.location.search);
+    const variant = params.get("demo");
     // `?demo=1000`: that many more threads (at most 5000), to see the list and the board at scale.
     const many = Math.min(5000, Math.max(0, Number(variant) || 0));
-    const owner = new DemoOwner(1, true, variant === "empty", variant === "busy", many);
+    // `&still`: no new runs once the first ones end (frozen data, for the canvas checker's shots).
+    const owner = new DemoOwner(1, !params.has("still"), variant === "empty", variant === "busy", many);
     return { client: clientFor(DEMO_OWNER, () => owner), services: owner.services() };
   });
   return demo;

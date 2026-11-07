@@ -245,6 +245,9 @@ export const AgentsCanvas = memo(forwardRef<
     [graph],
   );
   const planned = useRef<{ sig: string; wraps: Wraps } | null>(null);
+  // What matters, as a value: `important` reads refs (the page's `matters`, the open card), so the
+  // layout re-plans when it changes, not at whatever render comes next (a zoom step re-laid it out).
+  const mattering = [...graph.nodes.keys()].filter(important).join(",");
   /** The layout: the cards' measured sizes, wrapped the way that shows them best on this screen (`planWraps`). */
   const shown = useMemo((): Placement & { size: (k: string) => Size; wraps: Wraps; shape: CanvasShape } => {
     const size = (k: string): Size => {
@@ -270,7 +273,7 @@ export const AgentsCanvas = memo(forwardRef<
       planned.current = { sig, wraps };
     }
     return { ...layoutCanvas(arranged, size, shape, wraps), size, wraps, shape };
-  }, [graph, sizeOf, direction, density, level, isSection, wrap, arranged, screen, overview, important]);
+  }, [graph, sizeOf, direction, density, level, isSection, wrap, arranged, screen, overview, important, mattering]);
   const { positions } = shown;
   const shownSize = shown.size;
   const across = useCallback((parent: string) => shown.across.get(parent) ?? false, [shown]);

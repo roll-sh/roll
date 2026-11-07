@@ -44,8 +44,8 @@ const OUT = opt("out", join(process.env.HOME ?? ".", ".cache/canvas-check"));
 const OWNERS = [
   { id: "ada", token: "ada", url: "" },
   { id: "bea", token: "bea", url: "" },
-  { id: "busy", token: "ada", url: "?demo=busy" },
-  { id: "d1000", token: "ada", url: "?demo=1000" },
+  { id: "busy", token: "ada", url: "?demo=busy&still" },
+  { id: "d1000", token: "ada", url: "?demo=1000&still" },
   { id: "nw", token: "northwind", url: "" },
 ];
 const SIZES = [
@@ -118,7 +118,7 @@ async function read(page) {
 }
 
 /** Wait until the view has arrived where it's going and nothing drawn moves. */
-async function settle(page, ms = 6000) {
+async function settle(page, ms = 10000) {
   const t0 = Date.now();
   let last = "";
   let same = 0;
@@ -142,8 +142,11 @@ async function settle(page, ms = 6000) {
     last = sig;
     await page.waitForTimeout(160);
   }
+  settleTimeouts++;
   return false;
 }
+/** How often a frame never came to rest (reported: a canvas that keeps moving is a failure too). */
+let settleTimeouts = 0;
 
 /** Wait for the data to stop changing (the demo's runs step for a while): node keys and what matters. */
 async function steady(page, ms = 40000) {
@@ -283,6 +286,7 @@ async function runGroup(browser, g, ctxOpts) {
       const name = `${g.name}-${v.dir[0]}${v.panel ? "-panel" : ""}`;
       const frames = {};
       const r = { case: name, engine: ctxOpts.engine, fails: [], metrics: {}, notes: [] };
+      const restless = settleTimeouts;
       try {
         if (v.panel !== panelOpen) {
           await setPanel(page, v.panel);
@@ -383,6 +387,7 @@ async function runGroup(browser, g, ctxOpts) {
           if (f.title > lastTitle + 0.01) r.fails.push(`k z${Math.round(z * 100)}: title text grew to ${f.title}px (world) from ${lastTitle}px`);
           lastTitle = Math.max(lastTitle, f.title);
         }
+        if (settleTimeouts > restless) r.fails.push(`k: the canvas didn't come to rest within 10 s (${settleTimeouts - restless} times)`);
         // For --compare: the drawn rects at each frame.
         r.frames = Object.fromEntries(Object.entries(frames).map(([t, f]) => [t, { goal: f.snap.goal, dom: f.dom }]));
       } catch (e) {

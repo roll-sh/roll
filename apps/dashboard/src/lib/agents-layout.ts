@@ -653,8 +653,9 @@ function judge(tree: TreeLike, shape: CanvasShape, positions: ReadonlyMap<string
         cw = Math.max(cw, size(c).w);
         left = Math.min(left, p.x);
       }
+      // Weighs double: a tall single column is what reads worst (the user's first complaint).
       if (xs.size === 1 && (left - r.x + 2 * cw + SPACING.horizontal.cellX) * k <= w) {
-        bad++;
+        bad += 2;
         break;
       }
     }
