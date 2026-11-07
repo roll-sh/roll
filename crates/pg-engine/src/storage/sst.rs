@@ -1079,7 +1079,7 @@ impl SstReader {
             None => raw,
         };
         let block = Arc::new(Block::decode(raw)?);
-        if fill {
+        if fill && !super::in_read_once() {
             let size = block.mem_bytes();
             // (A bulk read's block takes only room the cache has free: it evicts nothing.)
             if super::in_bulk_read() {

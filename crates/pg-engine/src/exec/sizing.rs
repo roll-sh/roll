@@ -4705,8 +4705,9 @@ impl CopyLoad {
             || rf.bulk.get(&self.key).and_then(|b| b.defer.as_ref()).is_some_and(|d| d.deferring())
     }
 
-    /// A line was read and its row stored (or skipped): the buffer is flushed once full.
-    pub fn row_done(&self, line_len: usize, ctx: &ExecCtx) -> Result<()> {
+    /// A line was read and its row stored (or skipped): the buffer is flushed once full
+    /// (true: it was).
+    pub fn row_done(&self, line_len: usize, ctx: &ExecCtx) -> Result<bool> {
         let full = {
             let mut rf = self.db.relfiles.of(self.key.0).write();
             match rf.bulk.get_mut(&self.key).and_then(|b| b.batch.as_mut()) {
@@ -4720,7 +4721,7 @@ impl CopyLoad {
         if full {
             self.flush(ctx);
         }
-        self.failed.take().map_or(Ok(()), Err)
+        self.failed.take().map_or(Ok(full), Err)
     }
 
     fn flush(&self, ctx: &ExecCtx) {

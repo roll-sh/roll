@@ -317,3 +317,28 @@ fn pushed_join_rechecks_with_outer_plan() {
         ]
     );
 }
+
+/// A never-analyzed foreign table is estimated as postgresGetForeignRelSize does: 10 pages
+/// of rows as wide as the columns the query reads, costed with the wrapper's transfer
+/// costs, and enable_seqscan doesn't disable its scan (PostgreSQL 18.6's numbers).
+#[test]
+fn unanalyzed_foreign_table_estimates() {
+    let (_data, engine) = loopback();
+    let mut s = engine.connect(1, "postgres", "postgres", "t").unwrap();
+    run(&mut s, "CREATE TABLE base (id int PRIMARY KEY, v text, n numeric)");
+    run(&mut s, "CREATE FOREIGN TABLE ft (id int, v text, n numeric) SERVER loopback OPTIONS (table_name 'base')");
+    let mut plan = |q: &str| run(&mut s, &format!("EXPLAIN {q}")).join("\n");
+    for (q, want) in [
+        ("SELECT * FROM ft", "Foreign Scan on ft  (cost=100.00..305.80 rows=890 width=68)"),
+        ("SELECT id FROM ft", "Foreign Scan on ft  (cost=100.00..753.50 rows=2925 width=4)"),
+        ("SELECT * FROM ft WHERE id = 1", "Foreign Scan on ft  (cost=100.00..121.97 rows=4 width=68)"),
+        ("SELECT count(*) FROM ft", "Foreign Scan  (cost=108.53..152.88 rows=1 width=8)"),
+        ("SELECT count(*), sum(n) FROM ft WHERE id > 100", "Foreign Scan  (cost=102.44..130.93 rows=1 width=40)"),
+    ] {
+        let p = plan(q);
+        assert!(p.contains(want), "{q}: {p}");
+    }
+    run(&mut s, "SET enable_seqscan = off");
+    let p = run(&mut s, "EXPLAIN SELECT id FROM ft").join("\n");
+    assert!(!p.contains("Disabled"), "{p}");
+}

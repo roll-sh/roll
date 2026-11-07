@@ -39,3 +39,10 @@ resources they start, and retain containers and data directories for inspection.
 Repeated rounds archive their stopped PostgreSQL containers and engine data.
 The scripts require Linux, Docker, `taskset`, `ss`, and cgroup v2 CPU accounting.
 Use release binaries and repeated interleaved runs before reporting performance.
+
+Compare with PostgreSQL from containers on both sides: `ENGINE_DOCKER=1` runs each engine
+in a container of the pinned glibc image (`ENGINE_IMAGE`, the binary mounted, on `E_CPUS`),
+as `tools/bench/run.sh` does, its host pid in the pid file. Build it with `--profile dist`.
+In `apply.sh` the PostgreSQL subscriber runs on `E_CPUS` too, so every subscriber has the
+same four cores apart from the publisher's; in `pubn.sh` the subscriber has `SUB_CPUS`
+(16-19), so either publisher has its four alone. `pg_up` takes another cpuset from `CPUS`.

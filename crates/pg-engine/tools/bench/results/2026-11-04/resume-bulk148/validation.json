@@ -1,0 +1,22 @@
+{
+  "command_outputs": 72,
+  "measurements": 72,
+  "checked_tables": 12,
+  "commands_with_error_text": 0,
+  "rows_and_integer_sums": "pass",
+  "float_sums": "pass tolerance 1e-12 relative; exact sums differ by accumulation order",
+  "comparison_verdict": "inconclusive: pending batch had 3 pairs, below 5-pair claim gate; no new limiter profile",
+  "disk_size": "invalid engine submetric: du did not follow data symlink; zero is not an engine disk measurement",
+  "peak_cgroup_MB": {
+    "engine": [
+      449,
+      455,
+      457
+    ],
+    "PostgreSQL": [
+      956,
+      956,
+      957
+    ]
+  }
+}

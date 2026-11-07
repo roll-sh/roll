@@ -1,0 +1,119 @@
+{
+  "status": "PASS",
+  "cases": [
+    {
+      "case": "real-prefixed-pass",
+      "command": [
+        "/usr/bin/python3",
+        "/home/meszmate/worktrees/roll/t3-d4020b98/crates/pg-engine/tools/bench/results/2026-11-04/resume-orchestration/checkpoint-r3/validator-controls/audit-array.py",
+        "/home/meszmate/worktrees/roll/t3-d4020b98/crates/pg-engine/tools/bench/results/2026-11-04/resume-orchestration/checkpoint-r3/validator-controls/array-validator-proof/real-prefixed-pass.log",
+        "/home/meszmate/worktrees/roll/t3-d4020b98/crates/pg-engine/tools/bench/results/2026-11-04/resume-orchestration/checkpoint-r3/validator-controls/array-validator-proof/array-header.sql"
+      ],
+      "exit": 0,
+      "input_sha256": "1875cde619bbbfe1747a70ca5136d872905fbb2731f3d6cca3febebb89834813"
+    },
+    {
+      "case": "injected-failure",
+      "command": [
+        "/usr/bin/python3",
+        "/home/meszmate/worktrees/roll/t3-d4020b98/crates/pg-engine/tools/bench/results/2026-11-04/resume-orchestration/checkpoint-r3/validator-controls/audit-array.py",
+        "/home/meszmate/worktrees/roll/t3-d4020b98/crates/pg-engine/tools/bench/results/2026-11-04/resume-orchestration/checkpoint-r3/validator-controls/array-validator-proof/injected-failure.log",
+        "/home/meszmate/worktrees/roll/t3-d4020b98/crates/pg-engine/tools/bench/results/2026-11-04/resume-orchestration/checkpoint-r3/validator-controls/array-validator-proof/array-header.sql"
+      ],
+      "exit": 1,
+      "input_sha256": "b27883a464066126cb9fd2a9ffdc8377175c33c95dbe68795aa038d9541471bc"
+    },
+    {
+      "case": "missing-case",
+      "command": [
+        "/usr/bin/python3",
+        "/home/meszmate/worktrees/roll/t3-d4020b98/crates/pg-engine/tools/bench/results/2026-11-04/resume-orchestration/checkpoint-r3/validator-controls/audit-array.py",
+        "/home/meszmate/worktrees/roll/t3-d4020b98/crates/pg-engine/tools/bench/results/2026-11-04/resume-orchestration/checkpoint-r3/validator-controls/array-validator-proof/missing-case.log",
+        "/home/meszmate/worktrees/roll/t3-d4020b98/crates/pg-engine/tools/bench/results/2026-11-04/resume-orchestration/checkpoint-r3/validator-controls/array-validator-proof/array-header.sql"
+      ],
+      "exit": 1,
+      "input_sha256": "26561a6626e6e1a32306af7084df3ebd696f7fd48694377577e79100e2c17f06"
+    },
+    {
+      "case": "duplicate-case",
+      "command": [
+        "/usr/bin/python3",
+        "/home/meszmate/worktrees/roll/t3-d4020b98/crates/pg-engine/tools/bench/results/2026-11-04/resume-orchestration/checkpoint-r3/validator-controls/audit-array.py",
+        "/home/meszmate/worktrees/roll/t3-d4020b98/crates/pg-engine/tools/bench/results/2026-11-04/resume-orchestration/checkpoint-r3/validator-controls/array-validator-proof/duplicate-case.log",
+        "/home/meszmate/worktrees/roll/t3-d4020b98/crates/pg-engine/tools/bench/results/2026-11-04/resume-orchestration/checkpoint-r3/validator-controls/array-validator-proof/array-header.sql"
+      ],
+      "exit": 1,
+      "input_sha256": "5507dcfdf88223863ffb9d6265a905b2e212235b2fd756b0594a121f0a0bd5d1"
+    },
+    {
+      "case": "truncated-tail",
+      "command": [
+        "/usr/bin/python3",
+        "/home/meszmate/worktrees/roll/t3-d4020b98/crates/pg-engine/tools/bench/results/2026-11-04/resume-orchestration/checkpoint-r3/validator-controls/audit-array.py",
+        "/home/meszmate/worktrees/roll/t3-d4020b98/crates/pg-engine/tools/bench/results/2026-11-04/resume-orchestration/checkpoint-r3/validator-controls/array-validator-proof/truncated-tail.log",
+        "/home/meszmate/worktrees/roll/t3-d4020b98/crates/pg-engine/tools/bench/results/2026-11-04/resume-orchestration/checkpoint-r3/validator-controls/array-validator-proof/array-header.sql"
+      ],
+      "exit": 1,
+      "input_sha256": "c733a0ae08d6772804c67fe11e3776f71cac2b726bc955a36a9a90c6b8746ccc"
+    },
+    {
+      "case": "real-baseline-failure",
+      "command": [
+        "/usr/bin/python3",
+        "/home/meszmate/worktrees/roll/t3-d4020b98/crates/pg-engine/tools/bench/results/2026-11-04/resume-orchestration/checkpoint-r3/validator-controls/audit-array.py",
+        "/home/meszmate/worktrees/roll/t3-d4020b98/crates/pg-engine/tools/bench/results/2026-11-04/resume-orchestration/checkpoint-r3/validator-controls/array-validator-proof/real-baseline-failure.log",
+        "/home/meszmate/worktrees/roll/t3-d4020b98/crates/pg-engine/tools/bench/results/2026-11-04/resume-orchestration/checkpoint-r3/validator-controls/array-validator-proof/array-header.sql"
+      ],
+      "exit": 1,
+      "input_sha256": "e04bc4887e9d096cec0a8d6e1a0808682ead09a5e47ecf8577290ff908f55e88"
+    },
+    {
+      "case": "original-regex-real",
+      "command": [
+        "rg",
+        "-q",
+        "pg_dump (PostgreSQL) 18.6",
+        "/home/meszmate/worktrees/roll/t3-d4020b98/crates/pg-engine/tools/bench/results/2026-11-04/resume-orchestration/checkpoint-r3/validator-controls/version-matcher-proof/original-regex-real.log"
+      ],
+      "exit": 1,
+      "input_sha256": "355982edc1324b738d94e0bf2679678cb29cd8921f3c6b434f17a817cbff2d2e"
+    },
+    {
+      "case": "literal-real",
+      "command": [
+        "rg",
+        "-F",
+        "-q",
+        "pg_dump (PostgreSQL) 18.6",
+        "/home/meszmate/worktrees/roll/t3-d4020b98/crates/pg-engine/tools/bench/results/2026-11-04/resume-orchestration/checkpoint-r3/validator-controls/version-matcher-proof/literal-real.log"
+      ],
+      "exit": 0,
+      "input_sha256": "355982edc1324b738d94e0bf2679678cb29cd8921f3c6b434f17a817cbff2d2e"
+    },
+    {
+      "case": "literal-wrong-version",
+      "command": [
+        "rg",
+        "-F",
+        "-q",
+        "pg_dump (PostgreSQL) 18.6",
+        "/home/meszmate/worktrees/roll/t3-d4020b98/crates/pg-engine/tools/bench/results/2026-11-04/resume-orchestration/checkpoint-r3/validator-controls/version-matcher-proof/literal-wrong-version.log"
+      ],
+      "exit": 1,
+      "input_sha256": "a56238d21c862332134ed1f48f5a00b0ebd26f2ce816875962da90364df1ae08"
+    },
+    {
+      "case": "literal-missing-client",
+      "command": [
+        "rg",
+        "-F",
+        "-q",
+        "pg_dump (PostgreSQL) 18.6",
+        "/home/meszmate/worktrees/roll/t3-d4020b98/crates/pg-engine/tools/bench/results/2026-11-04/resume-orchestration/checkpoint-r3/validator-controls/version-matcher-proof/literal-missing-client.log"
+      ],
+      "exit": 1,
+      "input_sha256": "757bb4992915d608207d5e4ee3886d6d99d5dae89b950f3295cedaf686d72b2b"
+    }
+  ],
+  "services_started": false
+}

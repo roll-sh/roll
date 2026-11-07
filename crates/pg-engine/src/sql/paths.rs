@@ -50,7 +50,7 @@ pub(crate) mod sublinkcopy;
 pub(crate) use sublinkcopy::make_copy as make_subquery_copy;
 mod syscat;
 pub use syscat::{sys_index_order, sys_size, sys_table};
-pub(crate) use syscat::sys_unique_col;
+pub(crate) use syscat::{stand_in_of, sys_unique_col};
 
 pub const CPU_INDEX_TUPLE_COST: f64 = 0.005;
 /// DEFAULT_PAGE_CPU_MULTIPLIER.
@@ -421,6 +421,8 @@ struct Rel {
     /// loop passes in. Postgres passes only the outer Vars (nestloop params) and the scan
     /// evaluates the rest of a clause, so costs see the clause as written.
     params: Arc<Vec<Expr>>,
+    /// A postgres_fdw table's plain path (estimate_path_cost_size): startup and total cost.
+    fdw: Option<(f64, f64)>,
 }
 
 impl Rel {
@@ -3052,6 +3054,7 @@ impl Rel {
             acl: self.acl.clone(),
             hidden: self.hidden.clone(),
             params: self.params.clone(),
+            fdw: self.fdw,
         }
     }
 }
@@ -3277,15 +3280,17 @@ impl Planner<'_, '_> {
         let seq_total = rel.qual_startup
             + self.g.seq_page_cost * rel.size.pages
             + (seq_cpu_tuple_cost(&self.cat, &rel.table) + rel.qual_cost) * rel.size.tuples;
+        // (A foreign scan is no sequential scan: enable_seqscan doesn't disable it.)
+        let (seq_startup, seq_total) = rel.fdw.unwrap_or((rel.qual_startup, seq_total));
         add_path(
             &mut list,
             Path {
                 kind: PathKind::Seq,
-                startup: rel.qual_startup,
+                startup: seq_startup,
                 total: seq_total,
                 rows: rel.rows,
                 keys: Vec::new(),
-                disabled: (!self.g.seqscan) as u32,
+                disabled: (!self.g.seqscan && !rel.table.is_foreign()) as u32,
             },
             startup,
         );
@@ -3677,7 +3682,12 @@ impl Planner<'_, '_> {
                     .filter(|(_, n)| **n)
                     .map(|(i, _)| costs::col_width(&self.cat, &t, i))
                     .sum();
-                crate::ext::file_fdw::estimate(&t, width, self.ctx).unwrap_or(size)
+                // (With use_remote_estimate the remote EXPLAIN sizes it: no 10-page guess.)
+                let remote = crate::ext::fdw::wrapper_of(&self.cat, &t).is_some()
+                    && crate::ext::postgres_fdw::join::opts(&self.cat, &t).use_remote_estimate;
+                crate::ext::file_fdw::estimate(&t, width, self.ctx).unwrap_or_else(|| {
+                    (!remote).then(|| costs::fdw_unanalyzed_size(&t, width, self.ctx)).flatten().unwrap_or(size)
+                })
             }
             false => size,
         };
@@ -3812,6 +3822,7 @@ impl Planner<'_, '_> {
             acl,
             hidden: Arc::new(hidden),
             params: s.params.0.clone(),
+            fdw: None,
         };
         {
             let mut pq = self.phv_quals.borrow_mut();
@@ -3823,6 +3834,15 @@ impl Planner<'_, '_> {
         }
         rel.rows = costs::clamp_rows(size.tuples * self.sel(&rel, &rel.quals));
         (rel.qual_startup, rel.qual_cost) = self.rel_quals_cost(&rel, &rel.quals);
+        // (Not with use_remote_estimate: its estimate is the remote EXPLAIN's, made where
+        // the join search plans the relation, `fdw_base`.)
+        let o = crate::ext::fdw::wrapper_of(&self.cat, &rel.table).map(|_| crate::ext::postgres_fdw::join::opts(&self.cat, &rel.table));
+        if let Some(o) = o.filter(|o| !o.use_remote_estimate) {
+            let spec = crate::ext::postgres_fdw::scan::spec(s, None, &self.cat, self.ctx.fmt());
+            let local_sel = if spec.local.is_empty() { 1.0 } else { self.sel(&rel, &spec.local) };
+            let q = (rel.qual_startup, rel.qual_cost);
+            rel.fdw = Some(crate::ext::postgres_fdw::join::base_path_cost(&o, rel.rows, size.tuples, size.pages, q, local_sel, self.g.seq_page_cost));
+        }
         Some(rel)
     }
 }
@@ -4517,16 +4537,21 @@ fn describe_need(ctx: &ExecCtx, s: &ScanPlan, par: Option<(usize, f64)>, needed:
     match &s.access {
         Access::Unplanned => None,
         Access::Seq => Some(ScanDesc {
-            startup: rel.qual_startup,
-            total: rel.qual_startup
-                + p.g.seq_page_cost * rel.size.pages
-                + (seq_cpu_tuple_cost(&p.cat, &rel.table) + rel.qual_cost) * rel.size.tuples / div,
+            startup: rel.fdw.map_or(rel.qual_startup, |c| c.0),
+            total: rel.fdw.map_or_else(
+                || {
+                    rel.qual_startup
+                        + p.g.seq_page_cost * rel.size.pages
+                        + (seq_cpu_tuple_cost(&p.cat, &rel.table) + rel.qual_cost) * rel.size.tuples / div
+                },
+                |c| c.1,
+            ),
             rows: prows(rel.rows),
             index_conds: Vec::new(),
             recheck: Vec::new(),
             filter: rel.quals.clone(),
             bitmap: None,
-            disabled: !p.g.seqscan,
+            disabled: !p.g.seqscan && !rel.table.is_foreign(),
             order_by: Vec::new(),
             tid_conds: Vec::new(),
         }),
@@ -7004,6 +7029,7 @@ pub fn index_order(ctx: &ExecCtx, s: &ScanPlan) -> Vec<SortKey> {
         acl: Default::default(),
         hidden: Default::default(),
         params: Default::default(),
+        fdw: None,
     };
     let mut out = Vec::new();
     for (i, k) in b.keys.iter().enumerate() {

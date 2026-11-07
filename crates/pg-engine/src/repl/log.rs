@@ -5,7 +5,7 @@
 //! commit record holding the transaction's WAL positions (`seal`), taken from the cluster's
 //! counter under the store's commit lock so a database's commit records are in commit
 //! order. Decoding (`decode`) reads commit records in position order and each one's change
-//! records; what every slot has confirmed is removed (`gc_writes`). Without a slot nothing
+//! records; what every slot has confirmed is discarded (`discard_below`). Without a slot nothing
 //! is logged, and a commit only moves the WAL position on.
 
 use crate::catalog::Table;
@@ -17,9 +17,9 @@ use crate::types::{DataType, Value};
 use bytes::Bytes;
 use parking_lot::{Condvar, Mutex};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64};
+use std::sync::atomic::AtomicBool;
 
 /// Reserved keyspace (table oid 0) of the change stream.
 pub const PREFIX: &[u8] = &[0, 0, 0, 0, 0, 0, 0, 0x30];
@@ -46,6 +46,11 @@ pub fn changes_range(xid: u64) -> (Vec<u8>, Vec<u8>) {
     let mut b = a.clone();
     b.extend_from_slice(&[0xff; 5]);
     (a, b)
+}
+
+/// The transaction id of change record key `k` (`change_key`).
+pub fn xid_of(k: &[u8]) -> u64 {
+    k.get(PREFIX.len() + 1..PREFIX.len() + 9).map_or(0, |b| u64::from_be_bytes(b.try_into().unwrap()))
 }
 
 pub fn is_log_key(k: &[u8]) -> bool {
@@ -136,6 +141,9 @@ pub struct TxnLog {
     /// (sub)transaction id writing from there; the top level's when none).
     subs: Vec<(u32, u64)>,
 }
+
+/// A row of a multi-insert batch (heap_multi_insert): `MULTI rel batch row`.
+const MULTI: u8 = b'J';
 
 /// A prepared transaction's PREPARE, as its COMMIT / ROLLBACK PREPARED record repeats it.
 #[derive(Clone, Debug, Default)]
@@ -372,6 +380,26 @@ impl Marker {
     }
 }
 
+/// A commit record sealed and not yet confirmed: its position, end and transaction id (0:
+/// none, a message outside a transaction).
+#[derive(Clone, Copy, Debug)]
+pub struct Unconfirmed {
+    pub commit_lsn: u64,
+    pub end_lsn: u64,
+    pub xid: u64,
+}
+
+/// Unconfirmed commits kept one by one (a subscriber far behind: neighbours merge past it).
+const UNCONFIRMED_KEPT: usize = 4096;
+
+/// The older of two transaction ids, 0 being none.
+fn older(a: u64, b: u64) -> u64 {
+    match (a, b) {
+        (0, x) | (x, 0) => x,
+        (a, b) => a.min(b),
+    }
+}
+
 /// A database's change stream state.
 #[derive(Default)]
 pub struct DbLog {
@@ -387,8 +415,8 @@ pub struct DbLog {
     committed: Condvar,
     /// Relation descriptions made, by relation: (definition hash, record).
     descs: Mutex<HashMap<u32, (u64, Arc<Vec<u8>>)>>,
-    /// Records ending at or before this position were removed (`gc_writes`).
-    pub gc_upto: AtomicU64,
+    /// Commits sealed and not yet confirmed by every slot, in position order (`confirmed`).
+    unconfirmed: Mutex<VecDeque<Unconfirmed>>,
     /// What the database's decoders share (`decode::Shared`).
     pub decoded: super::decode::Shared,
 }
@@ -414,6 +442,61 @@ impl DbLog {
         *self.commits.lock()
     }
 
+    fn note(&self, u: Unconfirmed) {
+        let mut q = self.unconfirmed.lock();
+        if q.len() >= UNCONFIRMED_KEPT {
+            // (Neighbours merge: the first's position, the second's end, the older xid. Its
+            // records stay a little longer, none goes early.)
+            let old = std::mem::take(&mut *q);
+            let mut it = old.into_iter();
+            while let Some(a) = it.next() {
+                q.push_back(match it.next() {
+                    Some(b) => Unconfirmed { commit_lsn: a.commit_lsn, end_lsn: b.end_lsn, xid: older(a.xid, b.xid) },
+                    None => a,
+                });
+            }
+        }
+        q.push_back(u);
+    }
+
+    /// What every slot confirming `upto` lets go: change records of xids below the first
+    /// floor and commit records at positions below the second (`forget` then drops them). `running`: the oldest
+    /// transaction id running (or the next one), read before this (a transaction that ended
+    /// since was sealed before it ended, so it's here unless confirmed).
+    pub fn confirmed(&self, upto: u64, running: u64, wal: &super::lsn::WalPos) -> (u64, u64) {
+        // (Under `pending`, as `seal` takes a position and notes it: any commit sealed
+        // after this has a position at or after `wal_now`.)
+        let p = self.pending.lock();
+        let wal_now = wal.current();
+        let q = self.unconfirmed.lock();
+        drop(p);
+        let mut left = q.iter().skip_while(|u| u.end_lsn <= upto).peekable();
+        // (One confirmed ends at or before `upto`, so its position is below it.)
+        let lsn = left.peek().map_or(wal_now.min(upto.saturating_add(1)), |u| u.commit_lsn);
+        (left.fold(running, |m, u| older(m, u.xid)), lsn)
+    }
+
+    /// Every slot confirmed `upto` (and its floors were applied): forget what ends there.
+    pub fn forget(&self, upto: u64) {
+        let mut q = self.unconfirmed.lock();
+        while q.front().is_some_and(|u| u.end_lsn <= upto) {
+            q.pop_front();
+        }
+    }
+
+    /// The commit records a restart left (`Repl::opened`), with the ones sealed since.
+    pub fn recover_unconfirmed(&self, found: Vec<Unconfirmed>) {
+        let mut q = self.unconfirmed.lock();
+        let mut all: Vec<Unconfirmed> = found.into_iter().chain(q.drain(..)).collect();
+        all.sort_by_key(|u| u.commit_lsn);
+        all.dedup_by_key(|u| u.commit_lsn);
+        for u in all {
+            drop(q);
+            self.note(u);
+            q = self.unconfirmed.lock();
+        }
+    }
+
     /// Wake decoders (a slot was dropped or the database is closing, too).
     pub fn wake(&self) {
         let mut n = self.commits.lock();
@@ -433,6 +516,7 @@ pub fn seal(log: &DbLog, wal: &super::lsn::WalPos, mut m: Marker, bytes: u64) ->
     m.commit_lsn = base + bytes;
     m.end_lsn = super::lsn::align(m.commit_lsn + COMMIT_SIZE + extra);
     p.insert(m.commit_lsn);
+    log.note(Unconfirmed { commit_lsn: m.commit_lsn, end_lsn: m.end_lsn, xid: m.xid });
     ((commit_key(m.commit_lsn), Some(Bytes::from(m.encode()))), m.commit_lsn)
 }
 
@@ -666,9 +750,40 @@ pub fn insert(t: &Table, row: &[Value], ctx: &ExecCtx) -> Result<()> {
     if !capturing(ctx) || !logged(t) {
         return Ok(());
     }
-    let mut b = head(b'I', t);
+    let batch = {
+        let txn = ctx.txn.borrow();
+        let cid = txn.current_cid();
+        txn.copy_batch.filter(|m| m.0 == cid).map(|m| m.1)
+    };
+    let mut b = head(if batch.is_some() { MULTI } else { b'I' }, t);
+    if let Some(n) = batch {
+        b.extend_from_slice(&n.to_be_bytes());
+    }
     b.extend_from_slice(&encode_row(&stored(t, row)));
     put(ctx, Some(t), b)
+}
+
+/// The running COPY inserts its next rows as a multi-insert batch (CopyFrom's CIM_MULTI;
+/// called at its start and when a batch fills): heap_multi_insert TOASTs a batch's rows
+/// before logging any, which decoding's memory accounting follows (`plugin.rs` `run`).
+pub fn multi_insert(ctx: &ExecCtx) {
+    if !ctx.sess.db.log.capture.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    // (A batch's number tells its rows from the next batch's: unique in the process.)
+    static BATCHES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+    let n = BATCHES.fetch_add(1, std::sync::atomic::Ordering::Relaxed).max(1);
+    let mut txn = ctx.txn.borrow_mut();
+    let cid = txn.current_cid();
+    txn.copy_batch = Some((cid, n));
+}
+
+/// The batch number of multi-insert record `b` (0: another record).
+pub fn batch_of(b: &[u8]) -> u32 {
+    match (b.first(), b.get(5..9)) {
+        (Some(&MULTI), Some(n)) => u32::from_be_bytes(n.try_into().unwrap()),
+        _ => 0,
+    }
 }
 
 /// A row a table rewrite wrote into the table's new storage (heap_insert into the transient
@@ -787,6 +902,7 @@ pub fn decode_rec(b: &[u8]) -> Result<Rec> {
             Rec::Rel(Arc::new(d))
         }
         Some(b'I' | b'W') => Rec::Insert { rel: rel()?, new: decode_row(&b[5..])? },
+        Some(&MULTI) => Rec::Insert { rel: rel()?, new: decode_row(b.get(9..).ok_or_else(bad)?)? },
         Some(b'U') => {
             let mut p = 5;
             let old = old_at(&mut p)?;
@@ -833,29 +949,22 @@ pub fn decode_rec(b: &[u8]) -> Result<Rec> {
     })
 }
 
-/// Writes removing what every slot of the database has confirmed: commit records ending
-/// at or before `upto`, and the change records of the transactions they end. (Records of
-/// transactions that wrote while a slot was being dropped have no slot to read them and
-/// go once a later commit is confirmed, or with the last slot.)
-pub fn gc_writes(store: &crate::storage::Store, upto: u64) -> Result<Vec<(Vec<u8>, Option<Bytes>)>> {
-    let ts = store.visible_ts();
-    let from = commit_key(1);
-    let to = commit_key(upto.saturating_add(1));
+/// The change stream's key ranges below the floors `DbLog::confirmed` gives, which nobody
+/// reads again: the store leaves them out as it flushes and compacts (`Store::discard`), so
+/// removing them reads and writes nothing. (A prepared transaction's records stay: its xid
+/// runs until COMMIT / ROLLBACK PREPARED, whose record holds it until confirmed.)
+pub fn discard_below(store: &crate::storage::Store, xid: u64, lsn: u64) {
+    let (changes, _) = changes_range(0);
+    store.discard(&changes[..PREFIX.len() + 1], change_key(xid, 0));
+    store.discard(&commit_key(1), commit_key(lsn));
+}
+
+/// The commit records in the store (a restart's: `Repl::opened`).
+pub fn stored_commits(store: &crate::storage::Store) -> Result<Vec<Unconfirmed>> {
     let mut out = Vec::new();
-    for r in store.scan(&from, &to, ts) {
-        let (k, v) = r?;
-        let m = Marker::decode(&v)?;
-        if m.end_lsn > upto {
-            continue;
-        }
-        // (A prepared transaction's records stay for its COMMIT / ROLLBACK PREPARED.)
-        if !matches!(m.kind, Kind::Message | Kind::Prepare) {
-            let (a, b) = changes_range(m.xid);
-            for c in store.scan(&a, &b, ts) {
-                out.push((c?.0, None));
-            }
-        }
-        out.push((k, None));
+    for r in store.scan(&commit_key(1), &commit_key(u64::MAX), store.visible_ts()) {
+        let m = Marker::decode(&r?.1)?;
+        out.push(Unconfirmed { commit_lsn: m.commit_lsn, end_lsn: m.end_lsn, xid: m.xid });
     }
     Ok(out)
 }
@@ -947,3 +1056,7 @@ pub fn recovered(db: &crate::txn::Database, txn: &mut crate::txn::Txn, gid: &str
     }));
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "log_tests.rs"]
+mod tests;

@@ -786,6 +786,8 @@ impl Engine {
                 let _ = self.save(&r);
             }
         }
+        // (The change stream's floors hold back for the prepared ones' ids, running now.)
+        self.repl.opened(&db);
         // The models its last clean close kept (valid until the next one; dropped now if
         // there was none).
         crate::exec::sizing::kept::open(&db, &reset)?;

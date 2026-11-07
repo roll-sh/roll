@@ -1,0 +1,4 @@
+d599cf05ce3e3c7e7c1ba4831ac0bddd1a8ab3bc	refs/heads/docs/postgres-architecture-strategy
+df94ffba8849314982b8ad5626a2031eb2e1b2a0	refs/heads/wip/resume-20261104-a162-evidence
+80f870d7fb8d15ad4e6fae3647897693e6852fae	refs/heads/wip/resume-20261104-a169
+7c7d65019a1566b94f844b47dc86f61f1cfcab03	refs/heads/wip/resume-20261104-planner-evidence

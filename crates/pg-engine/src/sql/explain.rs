@@ -6078,7 +6078,12 @@ impl Builder<'_, '_> {
                             let t = self.show(f, &names, Cx::Scan);
                             n.details.push(Detail::Text("Filter", t));
                             let cat = self.ctx.catalog();
-                            let vars = |_: usize| None;
+                            // (The catalog's columns with their statistics: initdb's, or an
+                            // ANALYZE of the catalog's.)
+                            let stand_in = crate::sql::paths::sys_table(*table);
+                            let vars = |i: usize| {
+                                (i < stand_in.columns.len()).then(|| costs::VarRef::column(stand_in.clone(), i, tuples))
+                            };
                             let est = costs::Est {
                                 cat: &cat,
                                 fmt: self.ctx.fmt(),

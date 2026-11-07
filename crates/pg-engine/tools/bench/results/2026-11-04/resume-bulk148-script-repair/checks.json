@@ -1,0 +1,60 @@
+{
+  "cases": [
+    {
+      "name": "step-success",
+      "exit": 0,
+      "expected_exit": 0,
+      "pass": true
+    },
+    {
+      "name": "step-sql-failure",
+      "exit": 23,
+      "expected_exit": 23,
+      "pass": true
+    },
+    {
+      "name": "step-docker-failure",
+      "exit": 29,
+      "expected_exit": 29,
+      "pass": true
+    },
+    {
+      "name": "bulk-success",
+      "exit": 0,
+      "expected_exit": 0,
+      "pass": true
+    },
+    {
+      "name": "bulk-step-failure",
+      "exit": 23,
+      "expected_exit": 23,
+      "pass": true
+    },
+    {
+      "name": "crun-success",
+      "exit": 0,
+      "expected_exit": 0,
+      "pass": true
+    },
+    {
+      "name": "crun-bulk-failure",
+      "exit": 24,
+      "expected_exit": 24,
+      "pass": true
+    },
+    {
+      "name": "crun-run-failure",
+      "exit": 31,
+      "expected_exit": 31,
+      "pass": true
+    }
+  ],
+  "services_started": 0,
+  "benchmarks_run": 0,
+  "source_sha256": {
+    "step.sh": "90f3562ececfee03bdf752f8f800b52423f12b354c6e0cb7e4f0e263017d1900",
+    "bulk.sh": "f311088f74f29956db7ab6b4085034ceca879eb8dab46cd2466140b7159cb3ac",
+    "crun.sh": "01eb88ce8bb5bafa35f7c85c21b5f0b5fe9c52468045d3c03afca971be958ced"
+  },
+  "note": "Fixture-only cgroup paths and run adapter; fake Docker only. No completed timing or acceptance rule changed."
+}

@@ -179,6 +179,16 @@ struct Clause {
     /// items (`or_restrictions`), which its own selectivity is divided by in turn so the
     /// join's size stays as it was.
     sel_div: Vec<f64>,
+    /// A mergeable `name = text` equality (`Search::ec_name_text`), known once.
+    name_text: bool,
+}
+
+/// Whether a clause is a mergeable `name = text` equality.
+fn mergeable_name_text(mergeable: bool, eq: &Option<(Expr, Expr, u32, u32)>) -> bool {
+    mergeable
+        && eq
+            .as_ref()
+            .is_some_and(|(a, b, _, _)| crate::sql::binder::optimize::name_text_pair(&a.ty(), &b.ty()))
 }
 
 /// A pathkey of the group: an equivalence class and a direction.
@@ -1082,10 +1092,13 @@ impl<'s, 'c, 'a> Search<'s, 'c, 'a> {
         }
         let ec = self.clauses.iter().filter(|c| c.mergeable).find_map(|c| {
             let (a, b, _, _) = c.eq.as_ref()?;
-            if a.same_as(e) {
-                key_col(b).map(|g| self.ec[g])
-            } else if b.same_as(e) {
-                key_col(a).map(|g| self.ec[g])
+            // (Only an expression side can be `e`, which is no column: a side the same as it
+            // would be one too.)
+            let (ka, kb) = (key_col(a), key_col(b));
+            if ka.is_none() && a.same_as(e) {
+                kb.map(|g| self.ec[g])
+            } else if kb.is_none() && b.same_as(e) {
+                ka.map(|g| self.ec[g])
             } else {
                 None
             }
@@ -1340,11 +1353,13 @@ impl<'s, 'c, 'a> Search<'s, 'c, 'a> {
                 let expr = Expr::Call(def.clone(), vec![ex.clone(), ey.clone()], rt.clone());
                 // (The engine merges on a column against an expression, not two of them.)
                 let cols = key_col(&ex).is_some() || key_col(&ey).is_some();
+                let eq = Some((ex, ey, lx, ly));
                 add.push(Clause {
                     cost: costs::qual_cost(&expr),
                     expr,
                     leaves: lx | ly,
-                    eq: Some((ex, ey, lx, ly)),
+                    name_text: mergeable_name_text(template.mergeable && cols, &eq),
+                    eq,
                     hashable: template.hashable,
                     mergeable: template.mergeable && cols,
                     ecable: true,
@@ -2258,10 +2273,9 @@ impl Search<'_, '_, '_> {
     /// made with the clause's collation, initialize_mergeclause_eclasses.)
     fn ec_name_text(&self, ec: usize) -> bool {
         self.clauses.iter().any(|c| {
-            c.mergeable
+            c.name_text
                 && c.eq.as_ref().is_some_and(|(a, b, _, _)| {
-                    crate::sql::binder::optimize::name_text_pair(&a.ty(), &b.ty())
-                        && [a, b].iter().any(|x| key_col(x).is_some_and(|g| self.ec[g] == ec))
+                    [a, b].iter().any(|x| key_col(x).is_some_and(|g| self.ec[g] == ec))
                 })
         })
     }
@@ -4383,6 +4397,7 @@ impl Search<'_, '_, '_> {
                     req: leaves,
                     nullable: 0,
                     sel_div: Vec::new(),
+                    name_text: false,
                 };
                 let s = self.clause_sel(&c, None);
                 self.leaves[l].moved[k].1 = s;
@@ -9102,6 +9117,7 @@ impl Planner<'_, '_> {
             s.clauses.push(Clause {
                 expr: e,
                 leaves: leaves_mask,
+                name_text: mergeable_name_text(mergeable_, &eq),
                 eq,
                 hashable,
                 mergeable: mergeable_,

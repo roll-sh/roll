@@ -472,9 +472,23 @@ pub fn base_info(cat: &Catalog, b: &BaseIn) -> Option<RelInfo> {
         startup: 0.0,
         total: 0.0,
     };
-    let retrieved = crate::sql::costs::clamp_rows(b.rows / b.local_sel).min(b.tuples);
-    let startup = b.qual.0;
-    let run = b.seq_page_cost * b.pages + (CPU_TUPLE_COST + b.qual.1) * b.tuples;
-    finish(&mut r, b.rows, b.width, retrieved, startup, startup + run);
+    let (retrieved, startup, total) = base_estimate(b.rows, b.tuples, b.pages, b.qual, b.local_sel, b.seq_page_cost);
+    finish(&mut r, b.rows, b.width, retrieved, startup, total);
     Some(r)
+}
+
+/// estimate_path_cost_size of a base relation without remote estimates: the rows retrieved
+/// (its rows over the local conditions' selectivity, at most its tuples) and the cost of
+/// a sequential scan of it, as though every condition ran remotely.
+fn base_estimate(rows: f64, tuples: f64, pages: f64, qual: (f64, f64), local_sel: f64, seq_page_cost: f64) -> (f64, f64, f64) {
+    let retrieved = crate::sql::costs::clamp_rows(rows / local_sel).min(tuples);
+    let run = seq_page_cost * pages + (CPU_TUPLE_COST + qual.1) * tuples;
+    (retrieved, qual.0, qual.0 + run)
+}
+
+/// The startup and total cost of postgresGetForeignPaths' plain path of a base relation
+/// (`base_estimate` with the transfer costs on top).
+pub fn base_path_cost(o: &Opts, rows: f64, tuples: f64, pages: f64, qual: (f64, f64), local_sel: f64, seq_page_cost: f64) -> (f64, f64) {
+    let (retrieved, startup, total) = base_estimate(rows, tuples, pages, qual, local_sel, seq_page_cost);
+    (startup + o.startup_cost, total + o.startup_cost + (o.tuple_cost + CPU_TUPLE_COST) * retrieved)
 }
