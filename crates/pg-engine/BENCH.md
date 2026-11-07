@@ -7547,6 +7547,119 @@ less). The machine ran at load 20-30.
   touches), which was left out of the commit. The committed code wasn't measured again in
   dist (the heavy queue held 20+ jobs): the next scoreboard run should confirm 29-30 MB.
 
+## OLTP, round 6 (round 26, agent 165)
+
+HANDOFF.md, "OLTP round 6", has what changed (batch 1, fe78d36c): the shared search path,
+per-backend pg_stat_activity and statistics slots, one socket per connection, held relation
+locks found without a key copy, the transaction's own lock on the fast path.
+
+### Against PostgreSQL (container on both sides, dist build)
+
+**base** is origin's `fe7b0023`, **new** is batch 1 (`c8618834`, the same code before its rebase),
+both `--profile dist`, each in a container of the pinned debian image; PostgreSQL 18.6 in its
+own (shared_buffers 2 GB); all three on cores 8-11 with --cpu-shares 2, pgbench 18.6 in a fourth
+container on 12-13,18-19; scale 10, 10 s per run after a select-only warm-up, fresh data per
+server and round, two interleaved rounds (order reversed in the second). CPU ms per transaction
+from each server's cgroup; each cell the range over the rounds; ratio = mean CPU per
+transaction / PostgreSQL's. The machine was loaded (other agents' builds and this round's own
+debug tests during the first matrix): the write workloads moved by up to 2x within a server, so
+they were run again in two more rounds (second table); read the write rows as +-15%.
+
+| workload | mode | c | pg tps | pg ms | base tps | base ms | new tps | new ms | base/pg | new/pg |
+| select-only | extended | 1 | 7,658-8,327 | 0.093-0.098 | 9,849-12,173 | 0.059-0.073 | 7,525-12,424 | 0.056-0.073 | 0.69 | 0.68 |
+| select-only | extended | 8 | 41,619-42,661 | 0.085-0.087 | 60,587-63,023 | 0.056-0.058 | 68,362-71,791 | 0.050-0.051 | 0.66 | 0.58 |
+| select-only | extended | 32 | 42,624-43,254 | 0.090-0.092 | 66,119-67,533 | 0.059-0.059 | 71,611-71,875 | 0.055-0.055 | 0.64 | 0.60 |
+| select-only | prepared | 1 | 12,513-12,785 | 0.054-0.056 | 12,889-13,123 | 0.052-0.054 | 12,677-13,836 | 0.050-0.053 | 0.97 | 0.94 |
+| select-only | prepared | 8 | 74,049-87,498 | 0.039-0.047 | 72,944-84,180 | 0.042-0.049 | 73,558-92,880 | 0.037-0.047 | 1.07 | 0.98 |
+| select-only | prepared | 32 | 80,172-89,557 | 0.043-0.049 | 76,532-91,218 | 0.043-0.051 | 83,176-100,815 | 0.039-0.047 | 1.03 | 0.93 |
+| select-only | simple | 1 | 8,642-9,179 | 0.084-0.086 | 11,701-12,205 | 0.058-0.058 | 12,077-12,748 | 0.053-0.055 | 0.68 | 0.64 |
+| select-only | simple | 8 | 40,440-49,075 | 0.070-0.077 | 68,007-74,059 | 0.045-0.051 | 80,118-83,278 | 0.042-0.043 | 0.65 | 0.58 |
+| select-only | simple | 32 | 50,507-52,467 | 0.075-0.077 | 78,343-81,535 | 0.048-0.049 | 51,663-86,418 | 0.045-0.061 | 0.64 | 0.69 |
+| simple-update | extended | 1 | 1,413-1,834 | 0.408-0.465 | 2,203-2,420 | 0.305-0.323 | 2,257-2,273 | 0.312-0.313 | 0.72 | 0.72 |
+| simple-update | extended | 8 | 7,830-10,322 | 0.333-0.377 | 6,446-10,678 | 0.317-0.384 | 10,783-10,939 | 0.305-0.316 | 0.99 | 0.87 |
+| simple-update | extended | 32 | 9,759-10,539 | 0.349-0.367 | 9,457-9,894 | 0.379-0.394 | 8,777-10,169 | 0.367-0.380 | 1.08 | 1.04 |
+| simple-update | prepared | 1 | 2,417-2,756 | 0.238-0.268 | 2,263-2,354 | 0.282-0.331 | 2,489-2,616 | 0.259-0.301 | 1.21 | 1.11 |
+| simple-update | prepared | 8 | 11,936-17,342 | 0.186-0.243 | 14,302-15,392 | 0.217-0.232 | 15,970-16,390 | 0.205-0.210 | 1.05 | 0.97 |
+| simple-update | prepared | 32 | 1,126-17,467 | 0.195-0.595 | 3,586-15,124 | 0.243-0.472 | 9,705-15,738 | 0.233-0.309 | 0.90 | 0.69 |
+| simple-update | simple | 1 | 1,675-2,255 | 0.319-0.373 | 2,348-2,359 | 0.280-0.285 | 2,350-2,511 | 0.263-0.279 | 0.82 | 0.78 |
+| simple-update | simple | 8 | 10,884-11,085 | 0.295-0.309 | 10,407-11,092 | 0.297-0.313 | 7,230-10,820 | 0.301-0.351 | 1.01 | 1.08 |
+| simple-update | simple | 32 | 11,102-11,868 | 0.300-0.312 | 5,929-9,281 | 0.397-0.483 | 1,614-9,202 | 0.392-0.698 | 1.44 | 1.78 |
+| tpcb-like | extended | 1 | 1,189-1,266 | 0.605-0.645 | 1,417-1,591 | 0.496-0.559 | 1,354-1,378 | 0.528-0.635 | 0.84 | 0.93 |
+| tpcb-like | extended | 8 | 5,784-6,556 | 0.519-0.574 | 6,555-7,378 | 0.438-0.489 | 6,254-8,024 | 0.436-0.538 | 0.85 | 0.89 |
+| tpcb-like | extended | 32 | 5,454-5,905 | 0.592-0.665 | 5,882-7,538 | 0.461-0.615 | 5,166-6,888 | 0.517-0.662 | 0.86 | 0.94 |
+| tpcb-like | prepared | 1 | 1,752-1,940 | 0.366-0.369 | 1,462-1,741 | 0.375-0.542 | 1,477-1,520 | 0.462-0.470 | 1.25 | 1.27 |
+| tpcb-like | prepared | 8 | 8,288-10,773 | 0.290-0.356 | 7,336-7,649 | 0.387-0.449 | 7,491-8,098 | 0.413-0.435 | 1.29 | 1.31 |
+| tpcb-like | prepared | 32 | 6,983-9,332 | 0.360-0.441 | 5,705-7,599 | 0.423-0.556 | 6,558-6,684 | 0.501-0.526 | 1.22 | 1.28 |
+| tpcb-like | simple | 1 | 1,514-1,515 | 0.463-0.504 | 1,437-1,517 | 0.472-0.545 | 868-1,446 | 0.494-0.657 | 1.05 | 1.19 |
+| tpcb-like | simple | 8 | 7,395-7,813 | 0.421-0.466 | 6,846-7,588 | 0.432-0.486 | 5,668-6,726 | 0.503-0.558 | 1.03 | 1.20 |
+| tpcb-like | simple | 32 | 6,521-6,715 | 0.524-0.532 | 7,834-7,877 | 0.443-0.455 | 4,484-7,328 | 0.485-0.712 | 0.85 | 1.13 |
+| range | extended | 1 | 3,924-5,657 | 0.145-0.202 | 2,723-3,163 | 0.274-0.330 | 2,609-3,231 | 0.271-0.331 | 1.74 | 1.74 |
+| range | extended | 8 | 15,242-25,094 | 0.152-0.224 | 2,020-10,634 | 0.344-0.603 | 3,594-13,938 | 0.281-0.529 | 2.52 | 2.16 |
+| range | extended | 32 | 21,069-24,580 | 0.160-0.186 | 10,866-12,823 | 0.310-0.367 | 9,811-11,244 | 0.351-0.404 | 1.96 | 2.18 |
+| range | prepared | 1 | 5,937-6,169 | 0.137-0.139 | 3,080-3,352 | 0.262-0.296 | 3,034-3,238 | 0.274-0.295 | 2.03 | 2.07 |
+| range | prepared | 8 | 29,495-31,438 | 0.120-0.128 | 11,366-14,802 | 0.264-0.331 | 13,412-14,450 | 0.270-0.293 | 2.40 | 2.27 |
+| range | prepared | 32 | 22,464-28,941 | 0.136-0.157 | 10,440-11,647 | 0.342-0.362 | 10,910-12,989 | 0.307-0.351 | 2.40 | 2.25 |
+| range | simple | 1 | 5,278-6,310 | 0.127-0.165 | 2,603-3,396 | 0.258-0.347 | 2,791-3,436 | 0.254-0.325 | 2.07 | 1.98 |
+| range | simple | 8 | 26,654-31,692 | 0.120-0.147 | 9,519-15,159 | 0.257-0.418 | 11,932-15,402 | 0.253-0.334 | 2.52 | 2.19 |
+| range | simple | 32 | 25,523-30,880 | 0.127-0.156 | 10,127-14,253 | 0.277-0.394 | 11,426-14,457 | 0.275-0.349 | 2.37 | 2.20 |
+peak anon+shmem MB: pg 316, base 341, new 324
+
+The write workloads again (two more interleaved rounds, a quieter machine):
+
+| workload | mode | c | pg tps | pg ms | base tps | base ms | new tps | new ms | base/pg | new/pg |
+| select-only | prepared | 8 | 71,173-84,659 | 0.041-0.048 | 63,509-76,702 | 0.046-0.055 | 71,623-87,605 | 0.041-0.048 | 1.13 | 0.99 |
+| simple-update | extended | 1 | 1,792-1,891 | 0.373-0.416 | 2,036-2,228 | 0.295-0.395 | 2,142-2,285 | 0.334-0.381 | 0.87 | 0.91 |
+| simple-update | extended | 8 | 9,092-9,141 | 0.336-0.378 | 9,907-11,595 | 0.277-0.329 | 11,140-12,568 | 0.255-0.296 | 0.85 | 0.77 |
+| simple-update | extended | 32 | 8,757-10,023 | 0.345-0.402 | 10,814-12,009 | 0.296-0.341 | 11,049-12,063 | 0.296-0.334 | 0.85 | 0.84 |
+| simple-update | prepared | 1 | 2,536-2,657 | 0.241-0.265 | 2,216-2,425 | 0.286-0.328 | 2,280-2,568 | 0.276-0.298 | 1.21 | 1.13 |
+| simple-update | prepared | 8 | 9,434-14,807 | 0.214-0.230 | 11,907-13,499 | 0.231-0.277 | 12,867-14,231 | 0.227-0.256 | 1.14 | 1.09 |
+| simple-update | prepared | 32 | 12,933-15,342 | 0.219-0.257 | 11,935-12,170 | 0.284-0.301 | 8,593-10,951 | 0.305-0.329 | 1.23 | 1.33 |
+| simple-update | simple | 1 | 1,955-2,101 | 0.348-0.370 | 1,852-2,287 | 0.313-0.329 | 2,195-2,345 | 0.282-0.318 | 0.90 | 0.84 |
+| simple-update | simple | 8 | 11,125-11,483 | 0.286-0.302 | 10,509-10,944 | 0.306-0.319 | 11,194-11,727 | 0.285-0.310 | 1.06 | 1.01 |
+| simple-update | simple | 32 | 11,029-11,795 | 0.290-0.327 | 8,594-9,491 | 0.381-0.425 | 8,696-9,948 | 0.365-0.406 | 1.31 | 1.25 |
+| tpcb-like | extended | 1 | 1,146-1,157 | 0.650-0.673 | 1,295-1,362 | 0.558-0.561 | 1,181-1,482 | 0.482-0.708 | 0.85 | 0.90 |
+| tpcb-like | extended | 8 | 5,743-6,582 | 0.520-0.588 | 5,886-6,922 | 0.482-0.542 | 5,475-7,089 | 0.473-0.614 | 0.92 | 0.98 |
+| tpcb-like | extended | 32 | 5,472-5,834 | 0.614-0.656 | 4,960-5,904 | 0.600-0.682 | 4,610-6,148 | 0.576-0.743 | 1.01 | 1.04 |
+| tpcb-like | prepared | 1 | 1,629-1,787 | 0.393-0.402 | 1,492-1,533 | 0.488-0.496 | 1,137-1,401 | 0.486-0.547 | 1.24 | 1.30 |
+| tpcb-like | prepared | 8 | 9,811-9,864 | 0.317-0.324 | 7,427-8,293 | 0.391-0.418 | 5,983-8,658 | 0.378-0.530 | 1.26 | 1.42 |
+| tpcb-like | prepared | 32 | 6,542-7,903 | 0.424-0.451 | 5,999-8,368 | 0.421-0.515 | 5,374-7,732 | 0.438-0.594 | 1.07 | 1.18 |
+| tpcb-like | simple | 1 | 1,387-1,412 | 0.526-0.558 | 1,259-1,280 | 0.592-0.609 | 1,277-1,366 | 0.549-0.589 | 1.11 | 1.05 |
+| tpcb-like | simple | 8 | 6,469-7,355 | 0.449-0.510 | 5,124-5,803 | 0.587-0.660 | 5,220-6,014 | 0.566-0.631 | 1.30 | 1.25 |
+| tpcb-like | simple | 32 | 5,603-6,445 | 0.552-0.622 | 5,046-5,212 | 0.662-0.684 | 4,679-5,082 | 0.675-0.724 | 1.15 | 1.19 |
+peak anon+shmem MB: pg 308, base 328, new 323
+
+- **select-only**: 0.58-0.69 of PostgreSQL's CPU on simple and extended, 0.93-0.98 prepared
+  (base 0.97-1.07): ahead on every protocol and client count. From the profile: the per-statement
+  busy mark on the statistics mutex (spinning at 32 clients), the read-only transaction's lock
+  table round trips (its own lock now on the fast path), the per-message activity updates.
+- **simple-update / tpcb-like**: within noise of base: their remaining gap is execution (the
+  UPDATEs' scans of the hot tellers / branches rows, 31% of tpcb-like prepared) and the store's
+  commit, not session work (HANDOFF "OLTP round 6", where the time is).
+- **The range read** is unchanged (2.0-2.3x): `bind_values` 20% and `plan_cost` 18% (agent
+  171) are the next items.
+- **Footprint gate** (scoreboard's three measures, the engine alone in its container, base and
+  new alternated, six runs each): fresh data directory 3.0 MB either side; idle CPU 0.02-0.03 s
+  per 5 minutes either side; with 100 idle sessions the container's anon + shmem 27.9-31.8 MB
+  base (median 30.75), 29.2-31.1 MB new (median 30.83): the same within the runs' spread, under
+  the 33 MB gate. Round 5's code (363366c2) measured here against the commit before it (e3e993ad):
+  29.9-30.9 against 30.3-31.7 MB (medians 30.0 / 30.8): round 5 added about 0.8 MB with 100
+  sessions even without the lock-table presize, not traced further.
+- **Cursors** (batch 2): a 20,000-row table read through `DECLARE c CURSOR ... ; FETCH 100`
+  until done (postgres_fdw's way), simple protocol, 10 s per run, two interleaved rounds,
+  dist, containers as above (**cur** is batch 2):
+
+  | clients | pg tps | pg ms | new tps | new ms | cur tps | cur ms | new/pg | cur/pg |
+  |---:|---:|---:|---:|---:|---:|---:|---:|---:|
+  | 1 | 33-35 | 19.8-20.5 | 25-26 | 26.9-27.5 | 25-29 | 24.0-25.9 | 1.35 | 1.24 |
+  | 8 | 190-202 | 14.5-15.5 | 123-142 | 22.4-24.7 | 127-162 | 19.1-22.6 | 1.57 | 1.39 |
+
+  Peak anon + shmem over the runs: PostgreSQL 100 MB, new 163 MB, cur 73 MB. What is left is
+  per FETCH (201 simple-protocol statements per transaction) and the row output, not the kept
+  rows.
+- **Connections**: 1,000 idle sessions with the engine's open-file limit at 1,024 (soft and
+  hard): new 1,013 descriptors, all connected, 213 MB; base fails at about 640 connections
+  (7 descriptors each).
+
 ## Application CPU (round 24, agent 133)
 
 Server CPU of the application suites (tests/clients, STATUS.md "Round 7"), profiled with perf

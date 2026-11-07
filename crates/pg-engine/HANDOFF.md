@@ -4902,6 +4902,92 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
     (`describe_here`, 1.7%); `bind_values` for DML, sub-select levels, partition pruning
     and the `= ANY` / LIKE rewrites (155's later steps), and removing the serial cost tree
     once the planner hands over its chosen cost (155's item).
+- **OLTP round 6** (round 26, agent 165; BENCH.md "OLTP, round 6"): per-statement session
+  work, per-backend activity and statistics slots, one socket per connection, the
+  transaction's own lock on the fast path (fe78d36c, batch 1).
+  - *The search path is shared* (`catalog::names::SearchPath`, an `Arc<[String]>`): the
+    session's memo (`Settings::session_search_path`) hands out the same one while settings,
+    user and role hold; statements, their contexts (`ExecCtx::search_path`,
+    `CatalogNames`) and kept-plan checks compare and copy a pointer. `SessionState::search_path`
+    still returns a `Vec` for DDL; the hot paths take `shared_search_path`. The path less the
+    schemas a non-superuser may not use is worked out once per catalog version, role, database
+    owner and path (`SessionState::usable_path_memo`, `exec::usable_path`): it was 2.2% of a
+    non-superuser's select-only CPU.
+  - *pg_stat_activity per backend* (`engine::ActivitySlot`, PostgreSQL's PgBackendStatus): the
+    server loop updates its backend's entry under the entry's own lock, found once per
+    connection; readers take the backends table, then each entry (that order). The xmin is
+    looked up only when the entry has none (once per statement, was per message); the
+    statement text is copied only when it changed.
+  - *Statistics kept between flushes per backend* (`pgstat::UnflushedSlot`): a backend's
+    counts kept unflushed live in its own slot, registered in `Shared::unflushed` once; the
+    per-statement busy mark (`pgstat::busy`, which spun on the database's statistics mutex at
+    32 clients: 2.8% of the context switches) and the per-transaction report lock only the
+    slot; autovacuum is told once per idle timeout (`Pending::noted_due`). Readers flush idle
+    backends' slots as before (statistics, then slot); a session's end removes only its own
+    slot (`Arc::ptr_eq`).
+  - *One socket per connection*: the reader, writer, notices, notifications and the backend
+    table share one `Arc<TcpStream>` (it was cloned six times: 7 descriptors per connection,
+    and ~150 connections exhausted a container's 1,024 open files: agent 164's burst). 1,000
+    sessions under a 1,024 limit: 1,013 descriptors, all connect (base fails at ~640).
+  - *Relation locks held already* are found without copying the key (`txn::HeldKey`, hashbrown
+    `Equivalent`, `locks::relation_key_bytes`).
+  - *The transaction's own lock on the fast path* (`LockManager::hold_xact_fast`,
+    VirtualXactLockTableInsert): a transaction's virtual transaction lock goes in its backend's
+    fast-path slot (`FastSlot::xact`); `acquire` of an xact key moves it to the main table
+    first (`move_fast_xact`, only the slot holding it). `Txn::table_used` marks anything that
+    went to the main table (a lock off the fast path, row locks, key holders, exclusion
+    entries, the xid's lock); a transaction with none ends without the lock table's mutex,
+    unless a hold of its moved meanwhile (`FastHolds::moved`, per owner). PREPARE detaches
+    the fast slot and clears the moved marks of the transferred owner. pg_locks shows a moved
+    vxid hold with fastpath true, as PostgreSQL does.
+  - Smaller: the database owner is looked up only when a privilege check needs it;
+    system-view column tracking only for oids below 16384; the temporary schema's name is
+    made once per thread (`catalog::set_session_temp_schema_of`); transaction_timeout read
+    by value.
+  - Tests: `tests/backend_lifecycle.rs` (activity and statistics slots across backends and
+    their ends), `tests/twophase.rs` (prepared transactions' lock ownership with the
+    fast-path transaction lock).
+  - Verified on the batch (c8618834 before its rebase): crate tests debug and release (455 /
+    455 each), clippy (the ten baseline warnings, none in the files touched), difftest smoke,
+    isolation with the roll-* specs 1,805 / 1,806 permutations (intra-grant-inplace, as
+    before), pg_dump_tap 14,817 / 14,817, the full regression suite on a private reference
+    whose `pg_stat_statements` preload made 419 units differ: every one is the reference's
+    Query Identifier line in EXPLAIN VERBOSE or prepared_xacts run with
+    max_prepared_transactions on the reference only (classified unit by unit); after the
+    rebase onto c1800df3: release build, clippy, --lib, wire, kept_plans, backend_lifecycle,
+    twophase, memory_load, golden, session_state, deep_input (288 / 288). A regress reference
+    must be set up as the baseline's (default settings) to compare against `results.tsv`.
+  - Where the time is now (frame-pointer release, 8 clients): tpcb-like prepared's session
+    work in `run_query` is ~7% (begin_statement 1.1%, perms 0.9%, relation locks 0.6%,
+    ExecCtx 0.3%, search path 0.2%); execution 46% (the UPDATEs' seq scans of hot tellers /
+    branches 31%: storage and executor), send 14% and receive 6% (one each per Sync, as
+    PostgreSQL), commit 8% (the store's part: wait_durable 2.7%, apply_hot 1.1%, memtable
+    0.9%, WAL append 0.85%; the session's under 1%). The allocator is 13.5% as leaf, its
+    biggest callers the scans' row decode (`scan_row_need` 1.5%, the hot ranges 0.8%) and
+    message bodies (`read_body`'s zeroed `Vec` per message, 0.9%). select-only prepared:
+    the read-only commit 4.6% (release_locks 1.8% before the fast-path change), Bind's
+    `ensure_txn` 2.2% (PostgreSQL starts the transaction there too).
+  - *Cursors stream their rows* (batch 2, `session/cursor.rs`; agent 157's postgres_fdw item):
+    a cursor kept every row it returned so FETCH could go back (15% of a 20k-row foreign
+    scan's CPU, and the memory). As PostgreSQL's portal, a NO SCROLL cursor (the default when
+    the plan can't run backward) keeps none it has passed (`Cursor::streams`, `base`: `rows[0]`
+    is row `base + 1`); a SCROLL cursor over a replayable plan (plain stored-row scans,
+    filters, projections, limits, appends whose expressions are all immutable built-ins:
+    `replayable`, `replayable_expr`) streams too and, the first time it is moved back past what
+    it let go, runs its query again from the start up to the row (`rerun_to`, ExecutorRewind)
+    and then keeps rows. Every other SCROLL cursor, a holdable cursor at commit, and a query
+    whose target list or qual is evaluated as rows are passed keep their rows as before.
+    WHERE CURRENT OF keeps the current row's key (`current_key`) and the first multi-scan key
+    (`multi_reference`); `Lazy::for_cursor` splits the target list and qual only for SCROLL
+    cursors. Goldens a165_cursor_stream, _edges, _embedded, _replay, _scalar (recorded from
+    PostgreSQL 18.6); memory_load: a streamed cursor's memory stays bounded. The 20k-row FETCH
+    100 loop: 0.75-0.85x batch 1's CPU and 0.45x its peak memory (BENCH).
+  - Left: pipelined fsync (agent
+    174's conditions: an appended watermark, observed_ts snapshots, a durability barrier on
+    every output path, power-loss proof first; the engine makes a commit visible only when
+    durable, so releasing locks at the commit record alone loses updates); cheaper
+    `bind_values` (precomputed substitution sites, no tree clone: 20.5% of the range read)
+    and reusing the previous custom plan, with agent 171; the message body buffer.
 - The full crate test suite (`cargo test -p pg-engine`) passes: unit tests, 350+ golden
   files in engine and wire mode, the wire tests (including a concurrency stress test), the
   storage-format and layout tests.
