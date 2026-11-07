@@ -344,14 +344,24 @@ pub(super) fn change<T>(what: Change<'_>, f: impl FnOnce() -> io::Result<T>) -> 
 /// (`ROLL_POWERLOSS`), which must be dead. `keep`: a seed, to keep a random part of what
 /// wasn't fsynced (each pending write of a file, each entry of a directory as it is now
 /// against as its fsync left it); none keeps nothing.
-pub fn power_cut(root: &Path, shadow: &Path, keep: Option<u64>) -> io::Result<()> {
+pub fn power_cut(root: &Path, shadow: &Path, keep: Option<u64>) -> io::Result<Cut> {
     let mut rng = keep.map(|s| s.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1);
     let stage = root.with_extension("powercut");
     let _ = std::fs::remove_dir_all(&stage);
     std::fs::create_dir_all(&stage)?;
-    rebuild(shadow, 0, &stage, &mut rng)?;
+    let mut cut = Cut::default();
+    rebuild(shadow, 0, &stage, &mut rng, &mut cut)?;
     std::fs::remove_dir_all(root)?;
-    std::fs::rename(&stage, root)
+    std::fs::rename(&stage, root)?;
+    Ok(cut)
+}
+
+/// What a power cut took: writes no fsync covered, and directory entries (creates, renames,
+/// removals) whose directory no fsync covered.
+#[derive(Debug, Default)]
+pub struct Cut {
+    pub writes: usize,
+    pub entries: usize,
 }
 
 fn coin(rng: &mut Option<u64>) -> bool {
@@ -359,46 +369,50 @@ fn coin(rng: &mut Option<u64>) -> bool {
     *x ^= *x << 13;
     *x ^= *x >> 7;
     *x ^= *x << 17;
-    *x >> 32 & 1 == 1
+    (*x >> 32) & 1 == 1
 }
 
-fn rebuild(shadow: &Path, id: u64, at: &Path, rng: &mut Option<u64>) -> io::Result<()> {
+fn rebuild(shadow: &Path, id: u64, at: &Path, rng: &mut Option<u64>, cut: &mut Cut) -> io::Result<()> {
     let read = |name: String| std::fs::read(shadow.join(name)).unwrap_or_default();
     let mut entries = parse_listing(&String::from_utf8_lossy(&read(format!("d{id}"))));
-    if rng.is_some() {
-        let now = parse_listing(&String::from_utf8_lossy(&read(format!("c{id}"))));
-        let names: Vec<String> = entries.keys().chain(now.keys()).cloned().collect();
-        for n in names {
-            if coin(rng) {
-                match now.get(&n) {
-                    Some(e) => entries.insert(n, *e),
-                    None => entries.remove(&n),
-                };
-            }
+    let now = parse_listing(&String::from_utf8_lossy(&read(format!("c{id}"))));
+    let names: std::collections::BTreeSet<String> = entries.keys().chain(now.keys()).cloned().collect();
+    for n in names {
+        if entries.get(&n) == now.get(&n) {
+            continue;
         }
+        if !coin(rng) {
+            cut.entries += 1;
+            continue;
+        }
+        match now.get(&n) {
+            Some(e) => entries.insert(n, *e),
+            None => entries.remove(&n),
+        };
     }
     for (name, (cid, dir)) in entries {
         let to = at.join(&name);
         if dir {
             std::fs::create_dir_all(&to)?;
-            rebuild(shadow, cid, &to, rng)?;
+            rebuild(shadow, cid, &to, rng, cut)?;
             continue;
         }
         let mut data = read(format!("f{cid}"));
-        if rng.is_some() {
-            let done = u64::from_le_bytes(read(format!("a{cid}")).get(..8).map_or([0; 8], |b| b.try_into().unwrap()));
-            for (n, kind, off, w) in pending(&read(format!("p{cid}"))) {
-                if n > done && coin(rng) {
-                    if kind == 1 {
-                        data.resize(off as usize, 0);
-                    } else {
-                        let end = off as usize + w.len();
-                        if data.len() < end {
-                            data.resize(end, 0);
-                        }
-                        data[off as usize..end].copy_from_slice(w);
-                    }
+        let done = u64::from_le_bytes(read(format!("a{cid}")).get(..8).map_or([0; 8], |b| b.try_into().unwrap()));
+        for (n, kind, off, w) in pending(&read(format!("p{cid}"))) {
+            if n <= done {
+                continue;
+            }
+            if !coin(rng) {
+                cut.writes += 1;
+            } else if kind == 1 {
+                data.resize(off as usize, 0);
+            } else {
+                let end = off as usize + w.len();
+                if data.len() < end {
+                    data.resize(end, 0);
                 }
+                data[off as usize..end].copy_from_slice(w);
             }
         }
         std::fs::write(&to, data)?;

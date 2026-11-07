@@ -430,7 +430,7 @@ impl Store {
             .filter(|g| !g.is_empty())
             .map(|g| Frozen::Mem(Arc::new(g)))
             .collect();
-        let wal = WalWriter::create(dir, replay_seq, if opts.sync { wal::PREALLOC } else { 0 })?;
+        let wal = WalWriter::create(dir, replay_seq, opts.sync)?;
         let store = Arc::new(Store {
             dir: dir.to_path_buf(),
             opts,
@@ -1527,11 +1527,7 @@ impl Store {
     /// `rotate` under the commit lock.
     fn rotate_locked(&self, c: &mut CommitState) -> Result<()> {
         let seq = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let new_wal = WalWriter::create(
-            &self.dir,
-            seq,
-            if self.opts.sync { wal::PREALLOC } else { 0 },
-        )?;
+        let new_wal = WalWriter::create(&self.dir, seq, self.opts.sync)?;
         fileio::wal_added();
         // The memtable frozen here holds only durable commits (group commits waiting for an
         // fsync of the old file get it now).

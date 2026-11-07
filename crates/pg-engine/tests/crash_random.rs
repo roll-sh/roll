@@ -386,7 +386,8 @@ fn power_loss() -> bool {
 
 #[cfg(feature = "powerloss")]
 fn cut_power(dir: &Path, shadow: &Path, keep: Option<u64>, seed: u64, round: u64) {
-    pg_engine::storage::powerloss::power_cut(&dir.join("data"), shadow, keep).unwrap();
+    let cut = pg_engine::storage::powerloss::power_cut(&dir.join("data"), shadow, keep).unwrap();
+    eprintln!("seed {seed} round {round}: the power cut took {} writes and {} directory entries (kept some: {})", cut.writes, cut.entries, keep.is_some());
     // (Files changed outside `storage::durable` and taken as fsynced: none of the databases'.)
     let adopted = std::fs::read_to_string(shadow.join("adopted")).unwrap_or_default();
     let ours: Vec<&str> = adopted.lines().filter(|l| l.contains("/base/") || l.ends_with("databases.json")).collect();
@@ -836,12 +837,12 @@ fn power_cut_keeps_only_what_was_fsynced() {
         a.write_all_at(b"synced", 0).unwrap();
         durable::sync_dir(d).unwrap();
         a.sync_data().unwrap();
+        durable::replace(&d.join("e"), b"durable", true).unwrap();
         a.write_all_at(b"-lost", 6).unwrap();
         // (Created and fsynced, but never in a fsynced directory.)
         DFile::create(&d.join("b")).unwrap().sync_all().unwrap();
         // (Renamed over an old file without a directory fsync: the old one comes back.)
         durable::replace(&d.join("c"), b"new", false).unwrap();
-        durable::replace(&d.join("e"), b"durable", true).unwrap();
         sigkill();
     }
     let tmp = tempfile::tempdir().unwrap();
@@ -861,4 +862,48 @@ fn power_cut_keeps_only_what_was_fsynced() {
     assert_eq!(read("b"), None);
     assert_eq!(read("c").as_deref(), Some("old"));
     assert_eq!(read("e").as_deref(), Some("durable"));
+}
+
+/// Commits acknowledged into a WAL file the store just made (at open, and after a memtable
+/// filled and the WAL rotated) survive a power cut: the file's directory entry is durable
+/// before they are. The child commits key `k<i>` until `ROTATIONS` rotations have happened
+/// and then 5 more, printing each acknowledged `i`, and dies.
+#[cfg(feature = "powerloss")]
+#[test]
+fn power_cut_keeps_commits_in_a_new_wal() {
+    use pg_engine::storage::{Store, StoreOptions};
+    let opts = || StoreOptions { memtable_bytes: 64 << 10, background: false, ..Default::default() };
+    let wals = |d: &Path| std::fs::read_dir(d).unwrap().flatten().filter(|e| e.path().extension().is_some_and(|x| x == "wal")).count();
+    if let Ok(dir) = std::env::var("POWER_WAL_CHILD") {
+        let (d, rotations) = (Path::new(&dir), std::env::var("ROTATIONS").unwrap().parse::<usize>().unwrap());
+        let s = Store::open(&d.join("db"), opts()).unwrap();
+        let (mut i, mut after) = (0u64, 0);
+        while after < 5 {
+            s.commit(vec![(format!("k{i}").into_bytes(), Some(vec![b'x'; 1000].into()))], |_| Ok(())).unwrap();
+            println!("acked {i}");
+            i += 1;
+            if wals(&d.join("db")) > rotations {
+                after += 1;
+            }
+        }
+        sigkill();
+    }
+    for rotations in [0, 1, 3] {
+        let tmp = tempfile::tempdir().unwrap();
+        let (data, shadow) = (tmp.path().join("data"), tmp.path().join("shadow"));
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "power_cut_keeps_commits_in_a_new_wal", "--nocapture"])
+            .env("POWER_WAL_CHILD", &data)
+            .env("ROTATIONS", rotations.to_string())
+            .env("ROLL_POWERLOSS", format!("{}:{}", data.display(), shadow.display()))
+            .output()
+            .unwrap();
+        assert!(out.status.code().is_none(), "{}", String::from_utf8_lossy(&out.stderr));
+        let acked = String::from_utf8_lossy(&out.stdout).lines().filter_map(|l| l.strip_prefix("acked ")?.parse::<u64>().ok()).max().unwrap();
+        pg_engine::storage::powerloss::power_cut(&data, &shadow, None).unwrap();
+        let s = Store::open(&data.join("db"), opts()).unwrap();
+        let ts = s.visible_ts();
+        let lost: Vec<u64> = (0..=acked).filter(|i| s.get(format!("k{i}").as_bytes(), ts).unwrap().is_none()).collect();
+        assert!(lost.is_empty(), "{} WAL file(s), acknowledged commits lost to a power cut: {} of {}, the first {:?}", rotations, lost.len(), acked + 1, &lost[..lost.len().min(5)]);
+    }
 }

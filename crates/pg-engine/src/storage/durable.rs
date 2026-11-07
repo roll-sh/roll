@@ -146,11 +146,6 @@ pub fn create_dir_all_synced(path: &Path) -> io::Result<()> {
     path.parent().map_or(Ok(()), sync_dir)
 }
 
-/// Write a whole file (not synced).
-pub fn write(path: &Path, data: &[u8]) -> io::Result<()> {
-    DFile::create(path)?.write_all(data)
-}
-
 /// Replace `path` with `data` durably: written to `<path>.tmp`, fsynced, renamed over it,
 /// and the directory fsynced. (Without `sync`, the same steps less the fsyncs.)
 pub fn replace(path: &Path, data: &[u8], sync: bool) -> io::Result<()> {

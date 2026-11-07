@@ -35,9 +35,16 @@ pub const PREALLOC: u64 = 1 << 20;
 pub type Entry = (Vec<u8>, Option<Bytes>);
 
 impl WalWriter {
-    /// A new WAL file, zero-filled `prealloc` bytes at a time ahead of its records.
-    pub fn create(dir: &Path, seq: u64, prealloc: u64) -> Result<WalWriter> {
+    /// A new WAL file. `sync` (the store fsyncs its commits): zero-filled `PREALLOC` bytes at
+    /// a time ahead of its records, and its directory entry made durable now, before any
+    /// commit in it is: an fdatasync of the file doesn't cover its name, and a power cut
+    /// would otherwise take the file, with every commit acknowledged in it, along.
+    pub fn create(dir: &Path, seq: u64, sync: bool) -> Result<WalWriter> {
         let file = DFile::open_write(&wal_path(dir, seq))?;
+        if sync {
+            super::durable::sync_dir(dir)?;
+        }
+        let prealloc = if sync { PREALLOC } else { 0 };
         let bytes = file.metadata()?.len();
         Ok(WalWriter {
             file: std::sync::Arc::new(file),
