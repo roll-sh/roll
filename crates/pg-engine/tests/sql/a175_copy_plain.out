@@ -1,0 +1,119 @@
+> CREATE TABLE a175_p (id int NOT NULL, a int CHECK (a >= 0), b text DEFAULT 'dflt', c float8)
+-- CREATE TABLE
+
+> CREATE INDEX a175_p_a ON a175_p (a)
+-- CREATE INDEX
+
+> COPY a175_p (id, a, c) FROM STDIN
+>> 1	10	0.1
+>> 2	20	-1.5e-7
+>> 3	\N	1e300
+-- COPY 3
+
+> COPY a175_p FROM STDIN
+>> 4	40	x	2.5
+>> 5	\N	\N	\N
+-- COPY 2
+
+> SELECT * FROM a175_p ORDER BY id
+id:int4 | a:int4 | b:text | c:float8
+1 | 10 | dflt | 0.1
+2 | 20 | dflt | -1.5e-07
+3 | NULL | dflt | 1e+300
+4 | 40 | x | 2.5
+5 | NULL | NULL | NULL
+-- SELECT 5
+
+> COPY a175_p FROM STDIN
+>> 6	60	y	1
+>> \N	70	z	2
+ERROR 23502: null value in column "id" of relation "a175_p" violates not-null constraint
+DETAIL: Failing row contains (null, 70, z, 2).
+CONTEXT: COPY a175_p, line 2: "\N	70	z	2"
+OBJECTS: schema=public table=a175_p column=id
+
+> COPY a175_p FROM STDIN
+>> 8	80	y	1
+>> 9	-1	z	2
+ERROR 23514: new row for relation "a175_p" violates check constraint "a175_p_a_check"
+DETAIL: Failing row contains (9, -1, z, 2).
+CONTEXT: COPY a175_p, line 2: "9	-1	z	2"
+OBJECTS: schema=public table=a175_p constraint=a175_p_a_check
+
+> COPY a175_p FROM STDIN
+>> 10	abc	y	1
+ERROR 22P02: invalid input syntax for type integer: "abc"
+CONTEXT: COPY a175_p, line 1, column a: "abc"
+
+> COPY a175_p FROM STDIN
+>> 11	1
+ERROR 22P04: missing data for column "b"
+CONTEXT: COPY a175_p, line 1: "11	1"
+
+> SELECT count(*) FROM a175_p
+count:int8
+5
+-- SELECT 1
+
+> BEGIN
+-- BEGIN
+
+> COPY a175_p FROM STDIN
+>> 12	1	a	1
+>> 13	1	b	2
+>> 14	5	c	3
+-- COPY 3
+
+> SELECT n_tup_ins FROM pg_stat_xact_user_tables WHERE relname = 'a175_p'
+n_tup_ins:int8
+8
+-- SELECT 1
+
+> SAVEPOINT s
+-- SAVEPOINT
+
+> COPY a175_p FROM STDIN
+>> 15	1	a	1
+>> 16	1	b	2
+>> \N	5	c	3
+ERROR 23502: null value in column "id" of relation "a175_p" violates not-null constraint
+DETAIL: Failing row contains (null, 5, c, 3).
+CONTEXT: COPY a175_p, line 3: "\N	5	c	3"
+OBJECTS: schema=public table=a175_p column=id
+
+> ROLLBACK TO s
+-- ROLLBACK
+
+> SELECT n_tup_ins FROM pg_stat_xact_user_tables WHERE relname = 'a175_p'
+n_tup_ins:int8
+8
+-- SELECT 1
+
+> ROLLBACK
+-- ROLLBACK
+
+> COPY (SELECT -1 AS i, -2.5::float8 AS f, 1e-7::float8 AS e, 'x-y' AS t) TO STDOUT (DELIMITER '-')
+copy:text
+\-1-\-2.5-1e\-07-x\-y
+-- COPY 1
+
+> COPY (SELECT 1.5::float8, 'NaN'::float8, '-Infinity'::float8, 0.1::float8, 123456789012345678::float8) TO STDOUT (DELIMITER 'N')
+ERROR 22023: COPY delimiter character must not appear in the NULL specification
+
+> COPY (SELECT 1.5::float8, 3::int) TO STDOUT (DELIMITER '+')
+copy:text
+1.5+3
+-- COPY 1
+
+> COPY a175_p TO STDOUT
+copy:text
+1	10	dflt	0.1
+2	20	dflt	-1.5e-07
+3	\N	dflt	1e+300
+4	40	x	2.5
+5	\N	\N	\N
+-- COPY 5
+
+> DROP TABLE a175_p
+-- DROP TABLE
+
