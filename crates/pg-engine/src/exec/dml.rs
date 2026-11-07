@@ -4003,6 +4003,8 @@ impl InsertNode {
             self.copy_buf = (self.copy_buf.0 + 1, self.copy_buf.1 + raw_len);
             if self.copy_buf.0 >= super::sizing::COPY_TUPLES || self.copy_buf.1 >= super::sizing::COPY_BYTES {
                 self.copy_buf = (0, 0);
+                // (heap_multi_insert counts the buffer's rows as it is flushed.)
+                self.flush_plain_counts(ctx);
                 if let Some(e) = self.copy_err.take() {
                     return Err(e);
                 }
@@ -4015,13 +4017,25 @@ impl InsertNode {
     /// triggers, RLS, generated columns, partitions, foreign storage, view checks or unique /
     /// exclusion indexes, in the same order (defaults, domains, NOT NULL and CHECK, the row
     /// id, SSI, the index values, the model, the write, the entries), without the general
-    /// path's per-row checks. Without CHECK constraints (nothing the row runs can read the
-    /// counts) its pg_stat counts go in a batch at a time (`flush_plain_counts`).
+    /// path's per-row checks. A COPY's pg_stat counts go in as its multi-insert buffer is
+    /// flushed (CopyMultiInsertBufferFlush's heap_multi_insert): a row failing its
+    /// constraints drops the buffer's rows before it uncounted. (A temporary table's I/O
+    /// counts follow its model row by row.)
     fn insert_plain(&mut self, src: Row, ctx: &ExecCtx) -> Result<Option<(Row, Vec<u8>, Option<Row>)>> {
         let rules = &self.plan.rules;
         let t = &rules.table;
-        let row = new_row(rules, &self.plan.target, src, ctx)?;
-        check_row_rls(rules, &[], &row, ctx)?;
+        // (A COPY row's defaults and constraints fail it before it is buffered, as
+        // ExecConstraints does in CopyFrom: the buffer's rows before it never go in.)
+        let formed = new_row(rules, &self.plan.target, src, ctx).and_then(|row| check_row_rls(rules, &[], &row, ctx).map(|()| row));
+        let row = match formed {
+            Ok(row) => row,
+            Err(e) => {
+                if self.plan.copy.is_some() {
+                    self.plain_counts.set(0);
+                }
+                return Err(e);
+            }
+        };
         let rowid = if t.has_rowid() {
             Some(ctx.sess.db.nextval_by_one(t.oid, || crate::session::ddl::rowid_sequence(t))?)
         } else {
@@ -4033,7 +4047,7 @@ impl InsertNode {
         let vals = index_entries_checked(rules, &p, None, None, ctx)?;
         let Prepared { row, dkey } = p;
         let tid = super::sizing::inserted_with(t, &rules.indexes, &dkey, &row, Some(&vals.vals), ctx)?;
-        if rules.checks.is_empty() && !t.temporary {
+        if !t.temporary && (self.plan.copy.is_some() || rules.checks.is_empty()) {
             self.plain_counts.set(self.plain_counts.get() + 1);
         } else {
             super::pgstat::count_insert(ctx, t.oid, 1);
