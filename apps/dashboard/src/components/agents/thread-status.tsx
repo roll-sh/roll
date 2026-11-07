@@ -137,6 +137,8 @@ export function threadPill(thread: Thread, pending: readonly Request[], lastRun:
   if (approval && approval.body.type === "approval" && approval.body.action === "plan") return { label: "Plan ready", tone: "accent", pulse: false };
   if (approval) return { label: "Pending approval", tone: "accent", pulse: false };
   if (waiting.length > 0) return { label: "Awaiting input", tone: "accent", pulse: false };
+  // The record says it waits even before its request has arrived here: one status, the one that needs you.
+  if (thread.pending_requests > 0) return { label: "Needs you", tone: "accent", pulse: false };
   if (thread.status === "running" || thread.status === "waiting") return { label: "Working", tone: "accent", pulse: true };
   if (thread.status === "starting") return { label: "Connecting", tone: "accent", pulse: true };
   if (thread.status === "error" || lastRun?.status === "failed") return { label: "Failed", tone: "danger", pulse: false };

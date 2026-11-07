@@ -622,32 +622,53 @@ body {
   animation-play-state: paused !important;
 }
 
-/* Small (the canvas's `data-brief`, below 55 %): a card's details go and its titles stay. The
-   text goes transparent rather than hidden, so every box keeps its frame and fill (a chip's
-   outline, the sandbox's stats box, a status dot). Text is never enlarged to compensate: Fit
-   stops at a zoom where cards read. */
-[data-brief] [data-card] :not([data-title], [data-title] *) {
+/* Small (the canvas's `data-brief`, below 55 %): a card's details go and its titles stay. Text
+   goes transparent rather than hidden, so every box keeps its frame and fill (a chip's outline, a
+   status dot); identity tiles stay whole. Text is never enlarged to compensate: Fit stops at a
+   zoom where cards read. */
+[data-brief] [data-card] :is(p, span, a, code, kbd, button, li, label, small, time, strong, em):not([data-title], [data-title] *, [data-identity] *) {
   color: transparent !important;
 }
-[data-brief] [data-card] :is(svg, img) {
+[data-brief] [data-card] :is(svg, img):not([data-identity] *) {
   visibility: hidden;
 }
 [data-brief] [data-card] ::placeholder {
   color: transparent;
 }
-[data-brief] [data-card] .shimmer {
+[data-brief] [data-card] .shimmer:not([data-title] *) {
   background: none;
 }
 
-/* Too small to read (`data-greek`, below 40 %): a title is a quiet bar per line, each as long as
-   its text (a line-through as thick as the letters), in a card that keeps its size, so nothing
-   moves. */
+/* Too small to read (`data-greek`, below 40 %): a card is its frame, its identity (tile and edge,
+   a header's tint, a project's status strip) and its title as one quiet bar per line, as long as
+   the line; everything else (chips, dots, icons, buttons) goes. Nothing moves. */
+[data-greek] [data-card] [data-drag] * {
+  visibility: hidden;
+}
+[data-greek] [data-card] :is([data-title], [data-title] *, [data-identity], [data-identity] *, [data-edge], [data-edge] *, [data-keep], [data-keep] *) {
+  visibility: visible;
+}
 [data-greek] [data-card] :is([data-title], [data-title] *) {
   color: transparent !important;
-  text-decoration-line: line-through;
-  text-decoration-thickness: 0.62em;
-  text-decoration-skip-ink: none;
-  text-decoration-color: color-mix(in oklab, var(--fg) 24%, transparent);
+  --bar: color-mix(in oklab, var(--fg) 22%, transparent);
+}
+/* A title that wraps: its text's own span carries the bar, cut per line (both engines). */
+[data-greek] [data-card] [data-bar] {
+  background: linear-gradient(var(--bar), var(--bar)) 0 50% / 100% 0.62em no-repeat;
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
+  border-radius: 999px;
+}
+/* A one-line title: the bar is the element, as long as its text. */
+[data-greek] [data-card] [data-title]:not(:has([data-bar])) {
+  width: fit-content;
+  max-width: 100%;
+  background: linear-gradient(var(--bar), var(--bar)) 0 50% / 100% 0.62em no-repeat;
+  border-radius: 999px;
+}
+/* A phone lists every card at one width (the list has no indents). */
+[data-phone] [data-card] [data-drag] {
+  width: 296px !important;
 }
 /* The identity edge stays at least 2 screen px (3 world px at 100 %). */
 [data-greek] [data-card] [data-edge] > span {
@@ -657,12 +678,15 @@ body {
   width: 10px;
 }
 @media (prefers-color-scheme: light) {
-  /* White on white: the frames carry the shape, so they're drawn firmer. */
+  /* White on white: the frames carry the shape, so they're drawn firmer (and the done tone too). */
+  [data-card] [data-drag][data-tone="done"] {
+    border-color: color-mix(in oklab, var(--ok) 70%, transparent);
+  }
   [data-brief] [data-card] [data-drag]:not([data-tone]) {
-    border-color: color-mix(in oklab, var(--fg) 24%, transparent);
+    border-color: color-mix(in oklab, var(--fg) 26%, transparent);
   }
   [data-greek] [data-card] :is([data-title], [data-title] *) {
-    text-decoration-color: color-mix(in oklab, var(--fg) 30%, transparent);
+    --bar: color-mix(in oklab, var(--fg) 28%, transparent);
   }
 }
 

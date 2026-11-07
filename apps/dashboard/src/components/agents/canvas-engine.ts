@@ -163,6 +163,8 @@ export class CanvasEngine {
   private pointer = { x: -9999, y: -9999, s: 0, active: false };
   private ripples: { x: number; y: number; t0: number }[] = [];
   private busyMix = 0;
+  /** When cards last eased (ms). */
+  private lastEase = 0;
 
   private pan: { id: number; x: number; y: number; moved: number } | null = null;
   private touches = new Map<number, { x: number; y: number }>();
@@ -605,6 +607,11 @@ export class CanvasEngine {
     const { x: vx, y: vy, k: vk } = this.view;
     const steps: [string, Point, boolean][] = [];
     let movers = 0;
+    // Ease-out by time, not frames: 99 % of the way in ~250 ms at any frame rate.
+    const now = performance.now();
+    const dt = Math.min(34, Math.max(1, now - (this.lastEase || now - 16)));
+    this.lastEase = now;
+    const ease = 1 - Math.exp(-dt / 54);
     for (const [k, target] of this.tgt) {
       const c = this.cur.get(k) ?? target;
       let next = target;
@@ -612,7 +619,7 @@ export class CanvasEngine {
         const dx = target.x - c.x;
         const dy = target.y - c.y;
         if (Math.abs(dx) > 0.3 || Math.abs(dy) > 0.3) {
-          next = { x: c.x + dx * 0.22, y: c.y + dy * 0.22 };
+          next = { x: c.x + dx * ease, y: c.y + dy * ease };
           moving = true;
         }
       }

@@ -98,7 +98,7 @@ export function Card({
  * fading nothing; the body below stays the plain panel.
  */
 function TintedHeader({ children }: { children: ReactNode }) {
-  return <div className="flex items-center gap-2.5 rounded-t-[11px] border-b border-line bg-(--tint)/[0.06] px-3 py-2.5">{children}</div>;
+  return <div data-keep className="flex items-center gap-2.5 rounded-t-[11px] border-b border-line bg-(--tint)/[0.06] px-3 py-2.5">{children}</div>;
 }
 
 /**
@@ -112,7 +112,7 @@ function HoverActions({ children, className = "" }: { children: ReactNode; class
   return (
     <div
       ref={ref}
-      className={`pointer-events-none absolute -top-3.5 right-2.5 z-10 flex translate-y-1 items-center gap-0.5 rounded-lg border border-line-2 p-0.5 text-muted opacity-0 shadow-pop inset-shadow-highlight glass transition-[opacity,translate] duration-150 ease-out starting:translate-y-1! starting:opacity-0! motion-reduce:transition-none group-hover/card:pointer-events-auto group-hover/card:translate-y-0 group-hover/card:opacity-100 focus-within:pointer-events-auto focus-within:translate-y-0 focus-within:opacity-100 ${armed ? "" : "hidden"} ${className}`}
+      className={`pointer-events-none absolute right-2 bottom-[calc(100%+6px)] z-10 flex translate-y-1 items-center gap-0.5 rounded-lg border border-line-2 bg-popover p-0.5 text-fg/80 opacity-0 shadow-pop inset-shadow-highlight transition-[opacity,translate] duration-150 ease-out starting:translate-y-1! starting:opacity-0! motion-reduce:transition-none group-hover/card:pointer-events-auto group-hover/card:translate-y-0 group-hover/card:opacity-100 focus-within:pointer-events-auto focus-within:translate-y-0 focus-within:opacity-100 ${armed ? "" : "hidden"} ${className}`}
       data-nodrag
       data-touch-tools
     >
@@ -232,7 +232,7 @@ export function MachineNode({ machine }: { machine: Machine }) {
         )}
         {!machine.online && !sandbox && (
           <p className="text-[11.5px] text-subtle">
-            {machine.last_seen ? `Last seen ${ago(machine.last_seen)}.` : "Not connected yet."} Start it with <code className="font-mono text-muted">roll agent up</code>.
+            {machine.last_seen ? `Last seen ${ago(machine.last_seen)}.` : "Not connected yet."} <span className="whitespace-nowrap">Start it with <code className="font-mono text-muted">roll agent up</code>.</span>
           </p>
         )}
         {sandbox && <SandboxPanel machine={machine} />}
@@ -266,7 +266,7 @@ export function MachineNode({ machine }: { machine: Machine }) {
                       className="inline-flex min-w-0 items-center gap-1.5 rounded-md border border-line px-1.5 py-0.5 text-[11px] text-muted"
                       title={[p.name, p.version, p.auth === "ready" ? "logged in" : p.detail].filter(Boolean).join(" · ") || undefined}
                     >
-                      <span className={`size-1 shrink-0 rounded-full ${p.auth === "ready" ? "bg-ok" : "bg-subtle"}`} aria-label={p.auth === "ready" ? "Logged in" : "Unknown"} />
+                      <span className={`size-1 shrink-0 rounded-full ${p.auth === "ready" && machine.online ? "bg-ok" : "bg-subtle"}`} aria-label={p.auth === "ready" ? "Logged in" : "Unknown"} />
                       <span className="truncate">{p.name}</span>
                     </span>
                   )}
@@ -417,15 +417,8 @@ function StatsRows({ stats, providers }: { stats: ProjectStats; providers: reado
           </span>
         )}
       </p>
-      <p className="truncate" aria-label="Agents in this project">
-        {stats.agents.map((a, i) => (
-          <span key={a.provider} title={`${plural(a.threads, "thread", "threads")}: ${a.models.map((m) => modelName(providers, a.provider, m) ?? "default model").join(", ")}`}>
-            {i > 0 && " · "}
-            <span className="text-muted">{providerName(providers, a.provider)}</span>
-            {a.threads > 1 && <span className="font-mono tabular-nums"> ×{a.threads}</span>}
-          </span>
-        ))}
-        {stats.cost_usd != null && <span className="font-mono tabular-nums"> · ${stats.cost_usd.toFixed(2)}</span>}
+      <p className="truncate text-muted" aria-label="Agents in this project" title={stats.agents.map((a) => `${providerName(providers, a.provider)}: ${plural(a.threads, "thread", "threads")}`).join(", ")}>
+        {fitWords([...stats.agents.map((a) => `${providerName(providers, a.provider)}${a.threads > 1 ? ` ×${a.threads}` : ""}`), ...(stats.cost_usd != null ? [`$${stats.cost_usd.toFixed(2)}`] : [])].join(" · "), 246, 11, /( · )/)}
       </p>
     </div>
   );
@@ -447,7 +440,7 @@ function StatusStrip({ stats }: { stats: ProjectStats }) {
     [quiet, "bg-fg/12"],
   ];
   return (
-    <div aria-hidden className="mb-1.5 flex h-1 gap-px overflow-hidden rounded-full">
+    <div aria-hidden data-keep className="mb-1.5 flex h-1 gap-px overflow-hidden rounded-full">
       {parts.map(([n, tone], i) => n > 0 && <span key={i} className={tone} style={{ flexGrow: n, flexBasis: 0, minWidth: 3 }} />)}
     </div>
   );
@@ -518,7 +511,7 @@ export function useThreadFacts(data: AgentsData): (thread: Thread) => ThreadFact
 
 /** A thread's card from its facts alone, so it renders again only when they change. */
 /** A thread card's height on the canvas: fixed, so a grid's rows line up and its cells match. */
-export const THREAD_H = 152;
+export const THREAD_H = 128;
 /** The width a thread card's lines have (its 296 less its padding). */
 const LINE_W = 268;
 
@@ -533,7 +526,7 @@ export interface InsideRow {
 }
 
 /** A thread's card from its facts alone, so it renders again only when they change. */
-export const ThreadCard = memo(function ThreadCard({ thread, machine, project, lastRun, pending, terminals, orchestrated, inside }: { thread: Thread; machine: Machine | undefined; inside?: readonly InsideRow[] } & ThreadFacts) {
+export const ThreadCard = memo(function ThreadCard({ thread, machine, project, lastRun, pending, terminals, orchestrated, inside, section }: { thread: Thread; machine: Machine | undefined; inside?: readonly InsideRow[]; section?: string | null } & ThreadFacts) {
   const { client, openThread, startNew, readOnly } = useAgents();
   const providers = machine?.info?.providers ?? NO_PROVIDERS;
   const { run: runFork, error: forkError } = useRun();
@@ -545,46 +538,47 @@ export const ThreadCard = memo(function ThreadCard({ thread, machine, project, l
       openThread(r.id);
     });
   const running = isRunning(thread.status);
+  // A fork or subagent of it failed: so did this card's work, whatever its own run says.
+  const childFailed = inside?.find((r) => r.status === "error");
   // The card doesn't load runs: the thread record says whether its newest run left a plan (T3's sidebar "Plan ready").
-  const pill = threadPill(thread, pending, lastRun, thread.plan_ready && thread.interaction_mode === "plan");
-  const done = threadDone(thread, lastRun);
+  let pill = threadPill(thread, pending, lastRun, thread.plan_ready && thread.interaction_mode === "plan");
+  if (childFailed && (!pill || pill.tone === "ok")) pill = { label: `${childFailed.kind === "fork" ? "Fork" : "Subagent"} failed`, tone: "danger", pulse: false };
+  // In a Done section the header says it: the cards show when instead of a green each.
+  if (section === "done" && pill?.tone === "ok") pill = null;
+  const done = threadDone(thread, lastRun) && section !== "done" && (!pill || pill.tone === "ok");
   const usage = usageLine(thread.usage);
   const model = modelName(providers, thread.provider, thread.model);
   // Started by an automation: its tag, opening the run.
   const origin = useThreadOrigin(thread.id);
   // Idle with nothing to say but the last prompt: no line when that's the title again.
   const quiet = !thread.error && !running && thread.status !== "waiting";
-  const tone = thread.status === "error" ? "error" : running ? "busy" : thread.archived_at ? "muted" : done ? "done" : undefined;
-  // A fork on its own card (what it came from isn't on the canvas): it says so where the project would.
+  const tone = thread.status === "error" || childFailed ? "error" : running ? "busy" : thread.archived_at ? "muted" : done ? "done" : undefined;
+  // A fork on its own card (what it came from isn't on the canvas): it says so first.
   const forkOf = thread.lineage?.relation === "fork" ? (client.data.threads.get(thread.lineage.parent)?.value.title ?? "a settled thread") : null;
   const line = thread.error ? null : running ? (thread.activity ?? threadStatusLabel[thread.status]) : thread.status === "waiting" ? (thread.activity ?? threadStatusLabel.waiting) : lastRun?.delivers?.length ? null : lastRun ? lastRun.prompt : null;
-  const extras = !!(inside?.length || thread.orchestrator || thread.change || thread.work || thread.worktree || terminals > 0 || origin);
+  // Where it sits says its project and machine (the tree, its colour): the card says what tells it apart.
   return (
     <Card width={296} height={THREAD_H} tone={tone} tint={project ? projectColor(project) : undefined} edge onClick={() => openThread(thread.id)} label={`Thread ${thread.title}`}>
-      <div className="flex h-full flex-col px-3.5 pt-2.5 pb-2">
+      <div className="flex h-full flex-col px-3.5 pt-2.5 pb-2.5">
         <div className="flex h-4 min-w-0 items-center gap-1.5 text-[11px] text-subtle">
-          {project && <ProjectIcon project={project} className="size-3.5" />}
           {forkOf ? (
             <span className="flex min-w-0 items-center gap-1 text-muted" title={`Fork of ${forkOf}`}>
               <GitFork className="size-3 shrink-0" aria-hidden />
               <span className="truncate">Fork of {forkOf}</span>
             </span>
           ) : (
-            <>
-              {project && <span className="min-w-0 truncate text-muted">{project.name}</span>}
-              {machine && (
-                <span className="flex min-w-0 shrink items-center gap-1" title={`On ${machine.name}`} aria-label={`On ${machine.name}`}>
-                  <MachineIcon machine={machine} className="size-3" />
-                  <span className="truncate">{machine.name}</span>
-                </span>
-              )}
-            </>
+            <span className="min-w-0 truncate" title={machine ? `On ${machine.name}` : undefined}>
+              {providerName(providers, thread.provider)}
+              {model && ` · ${model}`}
+              {thread.interaction_mode === "plan" && " · plan"}
+              {thread.queued.length > 0 && ` · ${thread.queued.length} queued`}
+            </span>
           )}
           <span className="ml-auto flex shrink-0 items-center gap-1.5">{pill ? <StatusPill pill={pill} /> : <span className="tabular-nums" title="Last activity">{ago(lastActive(thread, lastRun))}</span>}</span>
         </div>
         <div className="mt-1.5 flex items-start gap-2">
           <p data-title className="line-clamp-2 min-w-0 flex-1 text-[13.5px] leading-snug font-medium tracking-[-0.01em]">
-            {unbroken(thread.title).map((w, i) => (typeof w === "string" ? w : <span key={i} className="whitespace-nowrap">{w.nowrap}</span>))}
+            <span data-bar>{unbroken(thread.title).map((w, i) => (typeof w === "string" ? w : <span key={i} className="whitespace-nowrap">{w.nowrap}</span>))}</span>
           </p>
           {forkable && (
             <HoverActions>
@@ -616,17 +610,18 @@ export const ThreadCard = memo(function ThreadCard({ thread, machine, project, l
           )}
         </p>
         )}
-        {extras && (
-          <div data-detail className="mt-1.5 flex min-w-0 items-center gap-2 text-[11px] text-subtle">
+        {/* Whole chips or none: a chip that doesn't fit wraps onto a hidden second line rather than losing its meaning. */}
+        <div data-detail className="mt-auto flex min-w-0 items-end gap-2 pt-1.5 text-[11px] text-subtle">
+          <div className="flex h-[19px] min-w-0 flex-1 flex-wrap items-center gap-x-1.5 gap-y-2 overflow-hidden [&>*]:max-w-full">
             {inside?.length ? <InsideChip rows={inside} onOpen={openThread} /> : null}
-            {origin && <AutomationChip origin={origin} />}
             {orchestrated && <OrchestratorChip {...orchestrated} onOpen={openThread} />}
             {thread.change && <ChangeChip change={thread.change} />}
-            {thread.work && <WorkChip work={thread.work} className="min-w-0 flex-1" />}
-            {thread.worktree && (
+            {thread.work && <WorkChip work={thread.work} className="min-w-0" />}
+            {origin && <AutomationChip origin={origin} />}
+            {thread.worktree && !thread.work && (
               <span className="flex min-w-0 items-center gap-1 font-mono" role="img" aria-label={`Worktree ${thread.worktree.branch}`} title={`Worktree: ${thread.worktree.path} (${thread.worktree.branch})`}>
                 <FolderGit2 className="size-3 shrink-0" />
-                {!thread.work && <span className="truncate">{thread.worktree.branch}</span>}
+                <span className="truncate">{thread.worktree.branch}</span>
               </span>
             )}
             {terminals > 0 && (
@@ -636,20 +631,12 @@ export const ThreadCard = memo(function ThreadCard({ thread, machine, project, l
               </span>
             )}
           </div>
-        )}
-        <p data-detail className="mt-auto flex items-center gap-1.5 border-t border-line pt-1.5 text-[11px] text-subtle">
-          <span className="min-w-0 truncate">
-            {providerName(providers, thread.provider)}
-            {model && ` · ${model}`}
-            {thread.interaction_mode === "plan" && " · plan"}
-            {thread.queued.length > 0 && ` · ${thread.queued.length} queued`}
-          </span>
-          <span className="ml-auto flex shrink-0 items-center gap-1.5 font-mono text-[10.5px]">
+          <span className="flex h-[19px] shrink-0 items-center gap-1.5 font-mono text-[10.5px]">
             {usage}
             <ThreadChanges thread={thread} last={lastRun} />
             {thread.context && <ContextMeter context={thread.context} size={12} label />}
           </span>
-        </p>
+        </div>
         {forkError && (
           <p role="alert" className="absolute inset-x-3.5 -bottom-6 truncate text-[11.5px] text-danger">
             Couldn&apos;t fork: {forkError}

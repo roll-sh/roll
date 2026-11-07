@@ -455,13 +455,14 @@ export function ViewsBar({
       <div className="flex min-w-0 shrink-[12] items-center gap-1">
         {focused && (
           // Inside a project's space: the way back out, as a breadcrumb.
-          <nav aria-label="Where the canvas is" className="fade-in flex h-7 max-w-64 items-center gap-1 rounded-md border border-line-2 bg-panel-2 pr-0.5 pl-1 text-[12px] text-fg inset-shadow-highlight">
-            <button onClick={focused.clear} title="Every project (Esc)" className="flex h-6 shrink-0 items-center gap-1.5 rounded px-1 text-muted transition-colors hover:bg-fg/[0.06] hover:text-fg">
+          // The project's name never gives way: "All projects" does first.
+          <nav aria-label="Where the canvas is" className="fade-in flex h-7 max-w-80 shrink-0 items-center gap-1 rounded-md border border-line-2 bg-panel-2 pr-0.5 pl-1 text-[12px] text-fg inset-shadow-highlight">
+            <button onClick={focused.clear} title="Every project (Esc)" className="flex h-6 min-w-0 items-center gap-1.5 rounded px-1 text-muted transition-colors hover:bg-fg/[0.06] hover:text-fg">
               <FocusIcon className="size-3.5 shrink-0" strokeWidth={1.75} aria-hidden />
-              All projects
+              <span className="truncate">All projects</span>
             </button>
             <ChevronRight className="size-3 shrink-0 text-subtle" aria-hidden />
-            <span className="truncate" aria-current="page">
+            <span className="max-w-48 shrink-0 truncate" aria-current="page">
               {focused.name}
             </span>
             <button onClick={focused.clear} title="Show every project (Esc)" aria-label={`Stop focusing ${focused.name}`} className="grid size-6 shrink-0 place-items-center rounded text-subtle hover:bg-fg/[0.06] hover:text-fg">
