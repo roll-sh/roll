@@ -1690,14 +1690,15 @@ The surface has three views:
     row by row, every grid sharing its column widths and each row as tall as its tallest cell, so
     cards line up across projects. Thread cards have a fixed height. Growing right, projects stack
     down the screen and each grid takes up to N to a row; growing down, projects sit side by side
-    and each grid takes up to N rows, as many columns as that needs (a phone lists projects down
+    and each grid takes up to N rows, as many columns as that needs, every grid in the row starting at one line (a phone lists projects down
     instead). Machines wrap into columns (rows); machines with nothing open share one stack, last.
     The canvas lays out every N (and 0–3 machines to a line) for its real room (above the prompt
     bar, beside any panel) and scores each at the zoom Fit will use: if everything reads (at 75 %
     or more), the biggest wins; if nothing does, the arrangement as wide as the screen takes at
     75 % (whole columns, clear of the minimap's corner) and shortest wins, so the rest runs on
     below and never off the right. A wrap must earn 2 %. A thread's requests, terminals and pins
-    stack under it in its cell; its forks and subagents are a chip on its card (`absorbChildren`
+    stack under it in its cell, a grid's gap apart; its forks and subagents are a chip on its card,
+    a failed one marking the card and putting it under Failed (`absorbChildren`
     in `lib/agents-graph.ts`), so nothing hangs indented in the gutter, and revealing or opening
     one reveals and marks that card. The fold card is the grid's last cell. A parent lines up with
     its first child (their edge is straight). The layout routes the edges: growing right a trunk
@@ -1717,12 +1718,18 @@ The surface has three views:
     bar per line, as long as its text, and the identity edges widen so they stay ~2 screen px.
     The card keeps its frame, colours and size; nothing moves. Readability comes from the layout,
     folding, drilling in and Fit.
-  - **Fit** frames everything, filling about 80 % of the room above the prompt bar (a tenth of it
-    clear each side, at least 48 px), but never below 75 % (100 % on a phone), where cards read:
-    then it frames what matters (the structure, what's running, waiting on you or failed, the open
-    card) from the top at 75 %, keeping clear of the minimap, and the minimap and panning reach the
-    rest; pressing it again shows everything. Fit follows the work again: cards that grow or arrive
-    stay framed until the view is moved by hand.
+  - **Fit** (`fitPlan`) frames everything, filling about 80 % of the room above the prompt bar (a
+    tenth of it clear each side, at least 48 px), if that's 75 % or more (100 % on a phone), where
+    cards read. Else, from the top, it zooms out as far as 55 % (titles still read) to keep
+    everything running, waiting on you or failed (and the open card) in view, clear of the minimap,
+    and the minimap and panning reach the rest. The planner scores arrangements at that zoom, and
+    growing right it may turn the canvas into a list down the screen (each card over what it holds,
+    so the grids get the whole width) when the cards beside them would starve them; a phone is
+    always that list, every card one width. Pressing Fit again, when it couldn't show everything,
+    lays the canvas out for everything at once and frames it; when everything shows, it only
+    refits. Fit follows the work again: cards that grow or arrive stay framed until the view is
+    moved by hand. Off screen a card keeps its last real size (its contents are skipped there), so
+    the layout settles.
   - **Getting around.** While the canvas is bigger than the screen a minimap sits over the zoom bar:
     every card as a block (requests and busy work in the accent) and the screen's frame; a press
     or a drag moves the view there. The zoom bar's accent "◉ 2" goes to the next request waiting

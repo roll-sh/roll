@@ -137,22 +137,31 @@ The rules are in agents.md, "Canvas" › "At scale". How it looks:
   title's size (14 px, weight 600), the count in mono, over a `--line-2` hairline as wide as the
   section's cards (`--section-w`). No fill, no frame, no edges to its cards. Sections are 80 px
   apart (at least twice a grid's gaps), so each reads as one.
-- **Thread cards** are 296 × 152 on the canvas whatever they say (`THREAD_H`), so a grid's rows
-  line up: meta (project · machine, or "⑂ Fork of …" for a fork on its own card), a title of up
-  to two lines (a hyphenated name never breaks at its hyphen), what it's doing (cut after a whole
-  word, `fit-words.ts`), one row of chips, the footer pinned to the bottom. Forks and subagents
-  are never cards of their own: a chip on the card they came from (the one that matters most, its
-  status dot, "+N"; a click opens it), and what waited on them waits on that card. The fold card
-  is a cell of the same size, its project's last.
+- **Thread cards** are 296 × 128 on the canvas whatever they say (`THREAD_H`), so a grid's rows
+  line up. They say what tells them apart, not where they sit (the tree and the identity edge say
+  that): provider · model (or "⑂ Fork of …" for a fork on its own card) and one status (the one
+  that needs you first; a fork's or subagent's failure is the card's) or when it last did
+  something, a title of up to two lines (a hyphenated name never breaks), what it's doing (cut
+  after a whole word, `fit-words.ts`), and one row pinned to the bottom: whole chips only (one that
+  doesn't fit drops out, never cut) and its usage. In a Done section the header says done: no
+  green border or "Completed" on each, just when. Forks and subagents are never cards of their
+  own: a chip on the card they came from (the one that matters most, its status dot, "+N"; a click
+  opens it), and what waited on them waits on that card. A request stacks under its thread, a
+  grid's gap apart. The fold card is a cell of the same size, its project's last: "15 more
+  threads", its summary and the newest two titles, two sheets under it.
+- **Card tools** float above the card's top-right corner on the popover fill, never over its status.
 - **Far out**: never bigger type. Below 55 % (`[data-brief]`) a card's text other than its title
-  goes transparent (boxes, chips, dots and frames stay); below 40 % (`[data-greek]`) its title is
-  one bar per line, as long as the text (a line-through as thick as the letters, `--fg` at 24 %,
-  30 % in light mode, where the frames also go to `--fg` 24 %). The identity edge widens to 6 px
+  goes transparent (boxes, chips, dots and frames stay; identity tiles stay whole); below 40 %
+  (`[data-greek]`) a card is its frame, its identity (tile, edge, header tint, status strip) and
+  its title as one even bar per line, as long as the line (`--fg` at 22 %, 28 % in light mode, a
+  band 0.62 em high, cut per line in both engines); icons, dots, chips and buttons go. In light
+  mode the frames go to `--fg` 26 % below 55 %, and the done tone is `--ok` at 70 % at any zoom. The identity edge widens to 6 px
   world below 40 % and 10 px below 30 %, so it stays about 2 screen px.
 - **Minimap**: 168 × 112, glass like the zoom bar, 12 px above it; blocks are `--muted` for
   machines and projects, the line colour for the rest, accent for requests and busy work; the
-  frame is a 1 px `--fg` line at 55 %. Hidden when everything fits, on a phone, and on a canvas
-  under 1200 px (beside a panel).
+  frame is a 1 px `--fg` line at 55 %. Each axis is scaled on its own to fill the box (never more
+  than 2.5 × the other), and the accent stays a signal (requests at 55 %, busy work at 35 %). Hidden
+  when everything fits, on a phone, and on a canvas under 1200 px (beside a panel).
 - **Next waiting**: an accent `CircleDot` and the count in mono in the zoom bar, only while
   something waits.
 - **Breadcrumb**: the views bar's chip reads "All projects › site ×"; "All projects" is a button.
@@ -234,12 +243,13 @@ state, or draw a project's logo inline (only in an `<img>`).
 - **Canvas panel:** `mx-2 mb-2 rounded-xl border border-line bg-canvas`. On a phone it's full
   bleed.
 - **Zoom bar:** glass, `rounded-[10px]`, `shadow-pop`, highlight, 28px buttons, the zoom in
-  tabular mono. Fit never goes below 75 % (a phone 100 %) and keeps clear of the prompt bar,
-  and, while the canvas is bigger than the screen, of the minimap's corner. The layout is planned
-  for that zoom (`planWraps`): everything if it reads, else as many whole columns as the screen
-  takes, the rest running on below. Too much to read at once, Fit (`1`) frames what matters at the
-  floor (the machines, projects and status groups, what runs, waits on you or failed, the open
-  card); Fit again shows everything.
+  tabular mono. Fit (`fitPlan`) shows everything if that reads (75 % or more, a phone 100 %);
+  else, framed from the top, it zooms out as far as 55 % (titles still read) to keep everything
+  running, waiting on you or failed in view, clear of the prompt bar and the minimap's corner. The
+  layout is planned for that zoom (`planWraps`); growing right, when the machine and project cards
+  would starve the grids it lists down instead (each card over what it holds, the grids the
+  whole width), and a phone always does. Fit again, when the first couldn't show everything, lays
+  the canvas out for everything at once and frames it; when everything shows, it only refits.
 - **Side panel:** a floating sheet, `rounded-xl border-line-2 bg-sheet shadow-sheet`, inset 8px
   from the window and level with the canvas panel's top. The resize grip is a 3px pill that
   appears in the gap on hover and turns accent while held. On a phone it covers the canvas.
