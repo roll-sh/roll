@@ -2198,7 +2198,13 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
       power loss, where writes that weren't fsynced go too. Testing power loss needs a file
       layer that can drop unsynced writes (not built). Until then, the fsync ordering in
       `wait_durable` / `rotate_locked` has been reviewed but not crash-tested.
-    - Verified: see the "Verified (agent 168)" line below.
+    - Verified (agent 168, b626d5dd3 on 86b519409; the engine's source unchanged since
+      fe7b0023c): seeds 1-30 × 4 rounds ten times over (1,200 crashes, a third mid-file-write),
+      and twice with `CRASH_ASYNC=1` (240), none failed; crate tests in release and debug,
+      454 passed / 0 failed / 18 ignored each; clippy with no warning in the crash tests.
+      The resumed session's earlier evidence (the same 1,200 + 120 async on 00325dac7, the
+      saved cut log) is on origin `wip/resume-20261104-a168`. No engine code changed, so the
+      commit path, regress, isolation, pg_dump_tap and pgbench are origin's own.
   - **UNLOGGED relations after a crash** (`tests/crash_unlogged.rs`). PostgreSQL empties them
     at the end of crash recovery: it copies each init fork over the relation's data, so
     unlogged sequences start over too. A clean shutdown keeps them. The engine used to keep
