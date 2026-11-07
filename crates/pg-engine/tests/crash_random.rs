@@ -116,6 +116,9 @@ enum Op {
     AddCol(String, i32),
     Index(bool),
     MkTable(String, i32),
+    /// Rows inserted into a table e<i>: after a rolled-back DROP they must not take the row
+    /// ids of the rows already there.
+    InsE(String, i32),
     DropTable(String),
     TruncB,
     /// Ops in a savepoint rolled back.
@@ -170,6 +173,7 @@ impl Model {
             Op::MkTable(t, n) => {
                 self.tables.insert(t.clone(), *n);
             }
+            Op::InsE(t, n) => *self.tables.get_mut(t).unwrap() += n,
             Op::DropTable(t) => {
                 self.tables.remove(t);
             }
@@ -181,7 +185,7 @@ impl Model {
     /// A random op valid in this state; `id` is a key no other op uses.
     fn gen_op(&self, r: &mut Rng, id: i32, ddl: bool) -> Op {
         loop {
-            let op = match r.below(if ddl { 16 } else { 11 }) {
+            let op = match r.below(if ddl { 17 } else { 11 }) {
                 0 | 1 => Op::InsA(id, r.below(500) as i32, wval(r, id)),
                 2 if r.below(4) == 0 => Op::BulkA(id, 1 + r.below(150) as i32),
                 3 => match r.pick(&self.a) {
@@ -220,6 +224,10 @@ impl Model {
                     None => continue,
                 },
                 15 if r.below(3) == 0 => Op::TruncB,
+                16 => match self.tables.keys().nth(r.below(self.tables.len() as u64) as usize) {
+                    Some(t) => Op::InsE(t.clone(), 1 + r.below(50) as i32),
+                    None => continue,
+                },
                 _ => continue,
             };
             return op;
@@ -247,6 +255,7 @@ fn op_sql(op: &Op, out: &mut Vec<String>) {
         Op::MkTable(t, n) => format!(
             "CREATE TABLE {t} AS SELECT g AS k, repeat('e', g % 40) AS z FROM generate_series(1, {n}) g"
         ),
+        Op::InsE(t, n) => format!("INSERT INTO {t} SELECT g, repeat('e', g % 40) FROM generate_series(1, {n}) g"),
         Op::DropTable(t) => format!("DROP TABLE {t}"),
         Op::TruncB => "TRUNCATE b".into(),
         Op::Undone(ops) => {

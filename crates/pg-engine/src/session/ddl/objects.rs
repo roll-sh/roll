@@ -1846,7 +1846,7 @@ impl Ddl<'_, '_> {
             self.cat.drop_comments(oid);
             if let Some(st) = &v.storage {
                 crate::exec::dml::truncate(st, self.ctx)?;
-                self.ctx.sess.db.reset_seq(st.oid, None)?;
+                self.ctx.txn.borrow_mut().seq_drops.push(st.oid);
                 for i in &st.indexes {
                     if let Some(ix) = self.cat.indexes.remove(i) {
                         self.cat.remove_name(v.schema, &ix.name);
@@ -6153,7 +6153,7 @@ impl Ddl<'_, '_> {
     fn drop_table_now(&mut self, t: &Arc<Table>) -> Result<()> {
         crate::exec::dml::truncate(t, self.ctx)?;
         crate::exec::pgstat::count_drop(self.ctx, t.oid);
-        self.ctx.sess.db.reset_seq(rowid_sequence(t).oid, None)?;
+        self.ctx.txn.borrow_mut().seq_drops.push(rowid_sequence(t).oid);
         for c in &t.columns {
             if let Some(s) = c.seq
                 && self
@@ -6162,7 +6162,7 @@ impl Ddl<'_, '_> {
                     .get(&s)
                     .is_some_and(|q| q.owned_by.map(|o| o.0) == Some(t.oid))
             {
-                self.ctx.sess.db.reset_seq(s, None)?;
+                self.ctx.txn.borrow_mut().seq_drops.push(s);
             }
         }
         if let Some(p) = t.pkey_index
@@ -6370,7 +6370,7 @@ impl Ddl<'_, '_> {
                 } else if let Some(q) = self.cat.sequences.remove(&oid) {
                     self.cat.remove_name(q.schema, &q.name);
                     self.cat.drop_comments(oid);
-                    self.ctx.sess.db.reset_seq(oid, None)?;
+                    self.ctx.txn.borrow_mut().seq_drops.push(oid);
                 } else if let Some(ix) = self.cat.indexes.get(&oid).cloned() {
                     // A constraint's index goes with the constraint.
                     let owned = self
