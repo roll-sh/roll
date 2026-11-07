@@ -1666,8 +1666,8 @@ The surface has three views:
   (a deep link, a palette pick) frames its machine. Linear folds empty groups the same way; T3's
   sidebar shows every project but only those with threads take room.
 
-  **At scale** (`foldQuiet`, `groupByStatus` in `lib/agents-graph.ts`; `planWraps` in
-  `lib/agents-layout.ts`; `folded-threads.tsx`, `minimap.tsx`). One busy project (25 threads, or
+  **At scale** (`foldQuiet`, `groupByStatus`, `absorbChildren` in `lib/agents-graph.ts`;
+  `planWraps` in `lib/agents-layout.ts`; `folded-threads.tsx`, `minimap.tsx`). One busy project (25 threads, or
   200) must not turn the canvas into one unreadable column, either way it grows. The structure is
   an overview you drill into:
   - **The overview** shows, per project, every thread that matters now (working, waiting on you,
@@ -1685,38 +1685,44 @@ The surface has three views:
     order: rows growing right, columns growing down (Linear's board). Done and Quiet show their 12
     most recent and fold the rest into a card that expands the group in place (and folds it
     back). The views bar's breadcrumb, "All projects › site", or Escape goes back out.
-  - **Wrapping, planned for the screen** (`planWraps`, `gridsFor`, `routeEdges` in
-    `lib/agents-layout.ts`). Nothing is ever one tall column. A lane's threads wrap into columns
-    (growing right) or rows (growing down); machines wrap into columns (rows); a machine's projects
-    keep their own column growing right and their own row growing down (side by side with another
-    project's threads they misread the tree), except that a narrow screen stacks them. The canvas
-    lays out every combination (0, 3, 4, 6, 8, 12 threads per column; 0, 2, 3, 4, 6 per row; 0–3
-    machines) for the room it has (its width ÷ its height above the prompt bar, so a panel beside it
-    or a phone gets a taller arrangement) and keeps the one that shows everything biggest; each
-    kind of wrap must earn 3 %. Over 400 cards it tries fewer. Fold cards stay out of the grid and
-    follow it in the project's flow; machines with nothing open stack in the machines' column. A
-    parent lines up with its first child (their edge is straight), never centred over a long
-    column. Edges are orthogonal: a trunk in the gap before the children, and a grid's later
-    columns hang off a bus in room kept over the block, through the gaps between columns, so no
-    line crosses or skims a card; siblings share theirs, and only a busy child's last leg is the
+  - **Grids, planned for the screen** (`layoutCanvas`, `planWraps` in `lib/agents-layout.ts`).
+    Nothing is ever one tall column. A project's (or a section's) threads fill a grid of cells,
+    row by row, every grid sharing its column widths and each row as tall as its tallest cell, so
+    cards line up across projects. Thread cards have a fixed height. Growing right, projects stack
+    down the screen and each grid takes up to N to a row; growing down, projects sit side by side
+    and each grid takes up to N rows, as many columns as that needs (a phone lists projects down
+    instead). Machines wrap into columns (rows); machines with nothing open share one stack, last.
+    The canvas lays out every N (and 0–3 machines to a line) for its real room (above the prompt
+    bar, beside any panel) and scores each at the zoom Fit will use: if everything reads (at 75 %
+    or more), the biggest wins; if nothing does, the arrangement as wide as the screen takes at
+    75 % (whole columns, clear of the minimap's corner) and shortest wins, so the rest runs on
+    below and never off the right. A wrap must earn 2 %. A thread's requests, terminals and pins
+    stack under it in its cell; its forks and subagents are a chip on its card (`absorbChildren`
+    in `lib/agents-graph.ts`), so nothing hangs indented in the gutter, and revealing or opening
+    one reveals and marks that card. The fold card is the grid's last cell. A parent lines up with
+    its first child (their edge is straight). The layout routes the edges: growing right a trunk
+    in the gap before the children into each row's first card (the rest of a row sits beside it);
+    growing down one bus in the gap above a row of lanes, dropping into each card's top, and a
+    trunk down a project's indent into each row's first card. Only a busy child's last leg is the
     accent. The dot field keeps still behind the work (and 56 px around it): no pointer swell,
-    ripple or busy sweep there, and none over the canvas's controls.
-  - **Sections.** In a project's space each status group is a section: its header row (dot, name,
-    count, a hairline as wide as its cards) with its cards in a grid under it, flush left; no edge
-    from the header to each card. Every items grid in it shares one column width, so Done lines up
-    with Quiet. In a grid a thread's requests, subagents and forks sit under it, indented (inside
-    its cell), and each column stacks its own cells, so a card with something under it never
-    opens an empty row beside it.
+    ripple or busy sweep there, the sweep fading out over 220 px as it nears it, and none over the
+    canvas's controls.
+  - **Sections.** In a project's space each status group is a section: its header row (dot, name
+    at a title's size, count, a hairline as wide as its cards) with its cards in a grid under it,
+    flush left; no edge from the header to each card, and an edge into it meets its label, never
+    its rule. Sections are 80 px apart, at least twice a grid's gaps.
   - **Zooming out never enlarges text** (the user's rule): everything shrinks in proportion, as in
-    Figma. Below 55 % (`[data-brief]`) a card's details hide and its title stays; below 40 %
-    (`[data-greek]`) the title becomes a quiet bar its own length. The card keeps its frame, colours
-    and size; nothing moves. Readability comes from
-    the layout, folding, drilling in and Fit.
+    Figma. Below 55 % (`[data-brief]`) a card's text other than its title goes transparent (its
+    boxes, chips and dots keep their shape); below 40 % (`[data-greek]`) the title becomes one quiet
+    bar per line, as long as its text, and the identity edges widen so they stay ~2 screen px.
+    The card keeps its frame, colours and size; nothing moves. Readability comes from the layout,
+    folding, drilling in and Fit.
   - **Fit** frames everything, filling about 80 % of the room above the prompt bar (a tenth of it
-    clear each side, at least 48 px), but never below 75 % (100 % on a phone), where cards read: then it frames what
-    matters (the structure, what's running, waiting on you or failed, the open card) from the top,
-    and the minimap and panning reach the rest; pressing it again shows everything. Fit follows the
-    work again: cards that grow or arrive stay framed until the view is moved by hand.
+    clear each side, at least 48 px), but never below 75 % (100 % on a phone), where cards read:
+    then it frames what matters (the structure, what's running, waiting on you or failed, the open
+    card) from the top at 75 %, keeping clear of the minimap, and the minimap and panning reach the
+    rest; pressing it again shows everything. Fit follows the work again: cards that grow or arrive
+    stay framed until the view is moved by hand.
   - **Getting around.** While the canvas is bigger than the screen a minimap sits over the zoom bar:
     every card as a block (requests and busy work in the accent) and the screen's frame; a press
     or a drag moves the view there. The zoom bar's accent "◉ 2" goes to the next request waiting
