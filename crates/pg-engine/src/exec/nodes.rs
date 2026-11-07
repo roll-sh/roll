@@ -1205,7 +1205,23 @@ fn class_name_bounds(
         if d.coll.as_ref().is_some_and(|c| !c.bytewise()) {
             continue;
         }
-        let (Expr::Col(1, _), other) = (&args[0], &args[1]) else { continue };
+        // (`relname` itself, or read as text: psql's `relname ~ '^(t)$' COLLATE default`
+        // gives the index condition `relname = 't'::text`, whose relname is cast to text, and
+        // it generated every pg_class row for one: 30-80 ms at 10,000 tables.)
+        fn relname(e: &Expr) -> bool {
+            match e {
+                Expr::Col(1, _) => true,
+                Expr::Cast(x, from, to, _) => {
+                    matches!(from, crate::types::DataType::Name) && matches!(to, crate::types::DataType::Text) && relname(x)
+                }
+                Expr::Collate(x, ..) => relname(x),
+                _ => false,
+            }
+        }
+        if !relname(&args[0]) {
+            continue;
+        }
+        let other = &args[1];
         let mut sub = false;
         other.walk(&mut |e| sub |= matches!(e, Expr::Subquery(_)));
         if sub || !other.columns().is_empty() || other.is_volatile() {
