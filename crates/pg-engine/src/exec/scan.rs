@@ -598,6 +598,7 @@ pub fn open_scan(s: &ScanPlan, shared: Option<&Arc<crate::sql::plan::Plan>>, nee
             spare: None,
             fscan: None,
             fetch_calls: 0,
+            dscan: None,
             run: Default::default(),
             pending: None,
             one_run: false,
@@ -691,6 +692,7 @@ pub fn open_scan(s: &ScanPlan, shared: Option<&Arc<crate::sql::plan::Plan>>, nee
             spare: None,
             fscan: None,
             fetch_calls: 0,
+            dscan: None,
             run: Default::default(),
             pending: None,
             one_run: false,
@@ -774,6 +776,7 @@ pub fn open_scan(s: &ScanPlan, shared: Option<&Arc<crate::sql::plan::Plan>>, nee
             spare: None,
             fscan: None,
             fetch_calls: 0,
+            dscan: None,
             run: Default::default(),
             pending: None,
             one_run: false,
@@ -924,6 +927,7 @@ fn open_scan_as(
         spare: None,
         fscan: None,
         fetch_calls: 0,
+        dscan: None,
         run: Default::default(),
         pending: None,
         blocks: Default::default(),
@@ -1789,6 +1793,7 @@ fn dense_bitmap_scan(
         spare: None,
         fscan: None,
         fetch_calls: 0,
+        dscan: None,
         run: Default::default(),
         pending: None,
         one_run: false,
@@ -2237,6 +2242,8 @@ struct ScanNode {
     /// Calls of `fetch_kept` so far: the first fetch is a lookup; a kept scan only pays once
     /// the scan fetches again (a rescan, more entries).
     fetch_calls: u32,
+    /// Dense fetches' raw scan of the table's rows, kept from batch to batch (`fetch_dense`).
+    dscan: Option<Box<TxnScan>>,
     /// Such a scan read by worker threads (`parscan`), once decided (`par_tried`).
     par: Option<super::parscan::ParScan>,
     par_tried: bool,
@@ -2409,7 +2416,7 @@ const RB_MAX: usize = 256;
 /// them, read together (`Txn::get_many_snap`). Without a statement snapshot, one at a time
 /// through the transaction's writes as they are now.
 pub(super) fn fetch_rows(keys: &[Vec<u8>], ctx: &ExecCtx) -> Result<Vec<Option<bytes::Bytes>>> {
-    if let Some(rows) = fetch_dense(keys, false, ctx)? {
+    if let Some(rows) = fetch_dense(keys, false, None, ctx)? {
         return Ok(rows);
     }
     let txn = ctx.txn.borrow();
@@ -2445,8 +2452,9 @@ fn get_sorted(txn: &crate::txn::Txn, keys: &[Vec<u8>], s: &crate::txn::Snap, res
 /// (an index made after its table's rows, a bulk load's): one range read, its rows matched
 /// to the keys, instead of a lookup each. None: not such keys. `raw`: read as stored, a batch
 /// at a time; None also when a row has values stored out of line (`fetch_rows` puts them
-/// back).
-fn fetch_dense(keys: &[Vec<u8>], raw: bool, ctx: &ExecCtx) -> Result<Option<Vec<Option<bytes::Bytes>>>> {
+/// back). `kept`: a raw read's scan, kept from call to call (`ScanNode::dscan`) and sought on
+/// to each call's range.
+fn fetch_dense(keys: &[Vec<u8>], raw: bool, kept: Option<&mut Option<Box<TxnScan>>>, ctx: &ExecCtx) -> Result<Option<Vec<Option<bytes::Bytes>>>> {
     let id = |k: &[u8]| -> Option<i64> {
         let mut pos = 8;
         match crate::storage::keys::decode_index_value(k, &mut pos, &crate::types::DataType::Int8, false)? {
@@ -2466,17 +2474,27 @@ fn fetch_dense(keys: &[Vec<u8>], raw: bool, ctx: &ExecCtx) -> Result<Option<Vec<
     }
     let end = prefix_end(last);
     let txn = ctx.txn.borrow();
-    let it = match ctx.snapshot().as_deref() {
-        Some(s) => txn.scan_snap(first, &end, s),
-        None => txn.scan(first, &end),
-    };
+    let snap = ctx.snapshot();
     let mut out = Vec::with_capacity(keys.len());
     let mut want = keys.iter().peekable();
     if raw {
-        // (Rows as stored, a batch at a time by reference: no key made per row.)
-        let mut it = it.raw();
+        // (Rows as stored, a batch at a time by reference: no key made per row. The scan of
+        // the last call read on over this one's range when it can be: `kept`.)
+        let mut kept = kept;
+        let reused = match (kept.as_deref_mut(), snap.as_deref()) {
+            (Some(k), Some(s)) => k.take().and_then(|mut it| txn.reseek_snap(&mut it, first, &end, s).then_some(it)),
+            _ => None,
+        };
+        let mut it = match reused {
+            Some(it) => it,
+            None => Box::new(match snap.as_deref() {
+                Some(s) => txn.scan_snap(first, &end, s),
+                None => txn.scan(first, &end),
+            }.raw()),
+        };
         let mut b = crate::storage::batch::RowBatch::default();
-        while want.peek().is_some() {
+        let mut external = false;
+        'fill: while want.peek().is_some() {
             b.clear();
             it.fill_batch(&mut b, keys.len() - out.len())?;
             if b.is_empty() {
@@ -2490,7 +2508,8 @@ fn fetch_dense(keys: &[Vec<u8>], raw: bool, ctx: &ExecCtx) -> Result<Option<Vec<
                 if want.next_if(|w| w.as_slice() == k).is_some() {
                     // (A row with values stored out of line: they're put back after all.)
                     if crate::storage::toast::has_external(b.get(i).1) {
-                        return Ok(None);
+                        external = true;
+                        break 'fill;
                     }
                     out.push(Some(b.value_bytes(i)));
                 }
@@ -2499,9 +2518,19 @@ fn fetch_dense(keys: &[Vec<u8>], raw: bool, ctx: &ExecCtx) -> Result<Option<Vec<
                 }
             }
         }
+        if let (Some(k), true) = (kept, snap.is_some()) {
+            *k = Some(it);
+        }
+        if external {
+            return Ok(None);
+        }
         out.resize(keys.len(), None);
         return Ok(Some(out));
     }
+    let it = match snap.as_deref() {
+        Some(s) => txn.scan_snap(first, &end, s),
+        None => txn.scan(first, &end),
+    };
     for r in it {
         let (k, v) = r?;
         while want.next_if(|w| w.as_slice() < k.as_slice()).is_some() {
@@ -3455,7 +3484,7 @@ impl ScanNode {
             // (Keys close together: one range read a batch at a time, the rows as stored when
             // none has values out of line.)
             if ctx.snapshot().is_some()
-                && let Some(rows) = fetch_dense(keys, true, ctx)?
+                && let Some(rows) = fetch_dense(keys, true, Some(&mut self.dscan), ctx)?
             {
                 return Ok(rows);
             }
@@ -5408,6 +5437,7 @@ fn keyed_scan(s: &ScanPlan, plan: ScanPlan, ix: &Index, keys: Keys, ctx: &ExecCt
         spare: None,
         fscan: None,
         fetch_calls: 0,
+        dscan: None,
         run: Default::default(),
         pending: None,
         one_run: false,
