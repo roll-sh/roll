@@ -335,7 +335,7 @@ The product should feel alive: dots react to the cursor and the marks "think". E
     `agent-host/tests/{orchestrator,threads,git,terminal,mcp,relay,codex,claude,acp}.rs`,
     `code-control/tests/{agents,agents_code}.rs` (+ `routes.rs` for the auth matrix),
     `roll-cli/tests/agent.rs`, `apps/dashboard/src/**/agents-*.test.ts(x)` and
-    `apps/desktop/test/`; map them in `docs/code/test-coverage.md`.
+    `apps/desktop/src/main/*.test.ts` (fakes in `apps/desktop/test/`); map them in `docs/code/test-coverage.md`.
 - **Storage (S3-compatible):**
   - `crates/s3-proto` is the wire protocol with no I/O: SigV4, SigV4a and SigV2 (headers, presigned, aws-chunked with trailers, POST policies), SSE headers, XML, checksums, ranges and conditionals, S3 error codes.
   - `crates/s3-store` is the metadata (SQLite plus a durable log in object storage), branching, refcounts, trash, lifecycle, keys, metering, the blob backend (`aws-sdk-s3` or a local directory) and the GC/scrub jobs. It has no HTTP.

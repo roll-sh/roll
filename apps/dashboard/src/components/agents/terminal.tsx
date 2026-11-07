@@ -1,7 +1,7 @@
 "use client";
 
 import "@xterm/xterm/css/xterm.css";
-import { SquareTerminal, X } from "lucide-react";
+import { SquareTerminal, Trash2 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import type { Machine, Terminal as TerminalRec } from "@/lib/agents-api";
 import { Card } from "./nodes";
@@ -48,11 +48,12 @@ export function CloseTerminal({ terminal, machine }: { terminal: TerminalRec; ma
         e.stopPropagation();
         if (machine) client.run(machine.id, { type: "terminal.close", terminal: terminal.id }).catch(() => {});
       }}
-      aria-label="Close terminal"
-      title="Close terminal"
+      // The conversation's terminal pane says it the same way: a bin ends the session, an X only hides.
+      aria-label="Close the terminal"
+      title="Close the terminal (ends its session)"
       className="grid size-6 place-items-center rounded-md transition-colors duration-150 hover:bg-panel-3 hover:text-fg [&>svg]:size-3.5 [&>svg]:stroke-[1.75]"
     >
-      <X />
+      <Trash2 />
     </button>
   );
 }

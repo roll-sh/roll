@@ -269,7 +269,7 @@ export function PinnedDiff({ pin, thread, machine, onUnpin, onResize }: PinProps
   const [run, setRun] = useState<string | null>(null);
   return (
     <PinnedFrame pin={pin} label={`Pinned diff ${thread.title}`} icon={<DiffIcon />} title={thread.title} sub="Diff" onOpen={() => openThread(thread.id)} onUnpin={onUnpin} onResize={onResize}>
-      <DiffPane thread={thread} machine={machine} runs={runs} run={run} onRun={setRun} onClose={onUnpin} />
+      <DiffPane thread={thread} machine={machine} runs={runs} run={run} onRun={setRun} />
     </PinnedFrame>
   );
 }

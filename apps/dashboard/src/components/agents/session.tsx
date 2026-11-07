@@ -811,7 +811,8 @@ export function DiffPane({
   runs: Run[];
   run: string | null;
   onRun: (r: string | null) => void;
-  onClose: () => void;
+  /** Unset on the canvas: its frame's Unpin closes it (one way out, not two). */
+  onClose?: () => void;
 }) {
   const { client, readOnly = false } = useAgents();
   const [fetched, setDiff] = useState<Diff | null>(null);
@@ -853,11 +854,13 @@ export function DiffPane({
           ]}
         />
         {diff && <Stat stat={diff.stat} className="text-[11.5px]" />}
-        <span className="ml-auto">
-          <IconButton label="Close the diff" onClick={onClose}>
-            <X className="size-3.5" />
-          </IconButton>
-        </span>
+        {onClose && (
+          <span className="ml-auto">
+            <IconButton label="Close the diff" onClick={onClose}>
+              <X className="size-3.5" />
+            </IconButton>
+          </span>
+        )}
       </div>
       <div className="min-h-0 flex-1 overflow-auto overscroll-contain p-3 select-text" data-scroll>
         {error ? (
