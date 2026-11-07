@@ -788,6 +788,28 @@ impl Store {
         }
     }
 
+    /// The first row visible at `r`'s snapshot with a user key in [start, end) (an empty
+    /// `end`: unbounded): an equality lookup's row (a unique index's, a primary key's), read
+    /// without a merging scan; the hot ranges first. With its out-of-line values put back
+    /// when `resolve`. `First::Unknown`: scan the range instead.
+    pub fn first_with(&self, r: &mut point::PointReader, start: &[u8], end: &[u8], resolve: bool) -> Result<point::First> {
+        let ts = r.ts();
+        let first = match self.hot.scan(start, end, ts) {
+            Some(rows) => match rows.into_iter().next() {
+                Some((k, v)) => point::First::Row(k.to_vec(), v),
+                None => point::First::None,
+            },
+            None => r.first_raw(start, end)?,
+        };
+        Ok(match first {
+            point::First::Row(k, v) if resolve && toast::has_external(&v) => {
+                let v = toast::resolve(r.view(), &k, v, ts)?;
+                point::First::Row(k, v)
+            }
+            other => other,
+        })
+    }
+
     /// Ascending scan of user keys in [start, end) at snapshot `ts`, rows with their
     /// out-of-line values put back (`toast`).
     pub fn scan(&self, start: &[u8], end: &[u8], ts: u64) -> Scan {
@@ -3526,6 +3548,20 @@ mod tests {
                 .map(|e| e.1);
             assert_eq!(g.and_then(|(_, v)| v), want, "{what}: get_versions {k:?} at {ts}");
             assert_eq!(s.get(k, ts).unwrap(), want, "{what}: get {k:?} at {ts}");
+        }
+        // The first row of ranges (one point reader, ranges ascending and not): the first
+        // row of a scan, or `Unknown` past deleted keys.
+        let mut r = s.point_reader(ts, false);
+        let bounds: Vec<Vec<u8>> = model.keys().flat_map(|k| [k.clone(), [k.as_slice(), &[0]].concat()]).collect();
+        for (i, start) in bounds.iter().enumerate().chain(bounds.iter().enumerate().rev().step_by(3)) {
+            for end in [bounds.get(i + 1).cloned().unwrap_or_default(), bounds.get(i + 7).cloned().unwrap_or_default(), Vec::new()] {
+                let want = expect.iter().find(|(k, _)| k >= start && (end.is_empty() || k < &end));
+                match s.first_with(&mut r, start, &end, true).unwrap() {
+                    point::First::Row(k, v) => assert_eq!(Some(&(k, v)), want, "{what}: first in {start:?}..{end:?} at {ts}"),
+                    point::First::None => assert_eq!(want, None, "{what}: first in {start:?}..{end:?} at {ts}"),
+                    point::First::Unknown => {}
+                }
+            }
         }
     }
 

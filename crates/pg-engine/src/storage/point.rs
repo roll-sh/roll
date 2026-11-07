@@ -60,6 +60,121 @@ impl PointReader {
         let hit = newest(&self.view, key, &self.seek, self.bloom_last, &mut self.held, &mut self.pos)?;
         Ok(deleted_by_range(&self.view, key, hit, self.ts))
     }
+
+    /// The first row visible at the reader's snapshot with a user key in [start, end) (an
+    /// empty `end`: unbounded), values as stored: an equality lookup's one row, read with no
+    /// merging scan (no cursor, source list or allocation per lookup). Ok(None): there is
+    /// none. Err-free `Unknown` (`First::Unknown`): more than a few keys in the range had no
+    /// visible version (deleted ones): a scan is cheaper.
+    pub fn first_raw(&mut self, start: &[u8], end: &[u8]) -> Result<First> {
+        let mut from = std::mem::take(&mut self.seek);
+        from.clear();
+        from.extend_from_slice(start);
+        let mut cand = Vec::new();
+        let mut tries = 0;
+        let out = loop {
+            if !smallest_key(&self.view, &from, &mut self.held, &mut self.pos, &mut cand)? {
+                break First::None;
+            }
+            if !end.is_empty() && cand.as_slice() >= end {
+                break First::None;
+            }
+            from.clear();
+            from.extend_from_slice(&cand);
+            from.extend_from_slice(&(!self.ts).to_be_bytes());
+            let hit = newest(&self.view, &cand, &from, true, &mut self.held, &mut self.pos)?;
+            if let Some((_, Some(v))) = deleted_by_range(&self.view, &cand, hit, self.ts) {
+                break First::Row(cand, v);
+            }
+            tries += 1;
+            if tries == FIRST_TRIES {
+                break First::Unknown;
+            }
+            // (Past every version of this key: no other user key starts with it.)
+            from.truncate(cand.len());
+            from.extend_from_slice(&[0xFF; 9]);
+        };
+        self.seek = from;
+        Ok(out)
+    }
+}
+
+/// `PointReader::first_raw`'s answer.
+#[derive(Debug, PartialEq)]
+pub enum First {
+    /// The row (its user key, its value as stored).
+    Row(Vec<u8>, Bytes),
+    None,
+    /// Not found in a few tries: scan the range.
+    Unknown,
+}
+
+/// Keys without a visible version `first_raw` steps over before it gives up.
+const FIRST_TRIES: u32 = 4;
+
+/// The smallest user key at or after `from` that any source of `view` holds a version of,
+/// into `out` (false: none).
+fn smallest_key(view: &View, from: &[u8], held: &mut [Option<Held>], pos: &mut BlockPos, out: &mut Vec<u8>) -> Result<bool> {
+    let mut found = false;
+    let mut take = |k: &[u8], out: &mut Vec<u8>| {
+        if !found || k < out.as_slice() {
+            out.clear();
+            out.extend_from_slice(k);
+            found = true;
+        }
+    };
+    for m in view.memtables() {
+        if let Some(e) = m.map.range::<[u8], _>((Bound::Included(from), Bound::Unbounded)).next() {
+            take(user_key(e.key()), out);
+        }
+    }
+    let mut slot = 0;
+    let files = view
+        .imm
+        .iter()
+        .filter_map(|f| match f {
+            Frozen::Sst(s) => Some(std::slice::from_ref(s)),
+            Frozen::Mem(_) => None,
+        })
+        .chain(view.l0.iter().map(std::slice::from_ref))
+        .chain((!view.l1.is_empty()).then_some(view.l1.as_slice()));
+    for ssts in files {
+        if let Some(k) = file_first(ssts, held.get_mut(slot), from, pos)? {
+            take(user_key(k), out);
+        }
+        slot += 1;
+    }
+    Ok(found)
+}
+
+/// The first storage key at or after `from` in non-overlapping files in key order, through
+/// the block `held` keeps when `from` falls in it (`pos` is left on it).
+fn file_first<'a>(ssts: &[Arc<SstReader>], mut held: Option<&mut Option<Held>>, from: &[u8], pos: &'a mut BlockPos) -> Result<Option<&'a [u8]>> {
+    if let Some(Some(h)) = held.as_deref()
+        && h.from.as_slice() <= from
+        && h.block.last_key().is_some_and(|l| from <= l)
+    {
+        h.block.seek(from, pos);
+        return Ok((pos.index() < h.block.len()).then(|| pos.key()));
+    }
+    let f = ssts.partition_point(|s| s.meta.last_key.as_slice() < from);
+    for sst in &ssts[f.min(ssts.len())..] {
+        let first = sst.find_block(from);
+        for b in first..sst.block_count() {
+            let block = sst.block(b)?;
+            block.seek(from, pos);
+            if pos.index() >= block.len() {
+                continue;
+            }
+            if b == first
+                && let Some(slot) = held.as_deref_mut()
+            {
+                *slot = Some(Held { block, from: from.to_vec() });
+            }
+            return Ok(Some(pos.key()));
+        }
+    }
+    Ok(None)
 }
 
 /// `hit` with the range deletions of `view` applied: a version one hides reads as the
