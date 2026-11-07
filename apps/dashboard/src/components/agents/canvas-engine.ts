@@ -121,6 +121,12 @@ export class CanvasEngine {
   private els = new Map<string, HTMLElement>();
   /** Cards marked `data-off`, kept here: reading the attribute back off every card each frame cost a few ms at 1000 threads. */
   private offCards = new WeakSet<HTMLElement>();
+  /**
+   * Cards measured with their contents laid out. Only those go `data-off`: off, a card's contents
+   * are skipped and it measures as the placeholder, so a card that went off before it was ever
+   * measured laid out as 280 × 120 and grew under a Fit that had framed it.
+   */
+  private measured = new Set<string>();
   /** When the view last moved (ms, `performance.now()`): until `VIEW_REST_MS` after, it's moving. */
   private viewMovedAt = -Infinity;
   private cur = new Map<string, Point>();
@@ -187,10 +193,7 @@ export class CanvasEngine {
         const s = { w: el.offsetWidth, h: el.offsetHeight };
         // Hidden (the canvas is under a conversation): keep the last real size.
         if (s.w === 0 && s.h === 0) continue;
-        // Off screen its contents are skipped (`data-off`, content-visibility): what it reports is
-        // the placeholder size, not its own (WebKit laid a phone's first view out with every card
-        // 280 × 120, overlapping). Its real size comes when it nears the screen.
-        if (el.hasAttribute("data-off")) continue;
+        if (!el.hasAttribute("data-off")) this.measured.add(key);
         const prev = this.size.get(key);
         if (prev && prev.w === s.w && prev.h === s.h) continue;
         this.size.set(key, s);
@@ -625,7 +628,7 @@ export class CanvasEngine {
         // cards at 1000 threads repainted every frame, most of them out of sight.
         const s = this.size.get(k);
         let off = this.offCards.has(el);
-        if (s && this.w > 0) {
+        if (s && this.w > 0 && this.measured.has(k)) {
           const left = next.x * vk + vx;
           const top = next.y * vk + vy;
           const outside = left + s.w * vk < -OFF_MARGIN || left > this.w + OFF_MARGIN || top + s.h * vk < -OFF_MARGIN || top > this.h + OFF_MARGIN;

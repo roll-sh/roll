@@ -303,6 +303,8 @@ export const AgentsCanvas = memo(forwardRef<
           if (graph.nodes.get(k)?.kind === "group" && (column === undefined || p.x < positions.get(column)!.x)) column = k;
       const key = column ?? arranged.roots.find((k) => positions.has(k));
       const lead = key ? (bounds(positions, shownSize, [key]) ?? undefined) : undefined;
+      // Asked for (the Fit button, `1`): follow the work again, so cards that grow or arrive stay framed.
+      if (all) following.current = true;
       const floor = phone ? 0.55 : READABLE;
       let v = fitView(r, w, room, pad, 1, all ? 0 : floor, lead);
       if (all && v.k < floor) {
@@ -1080,7 +1082,7 @@ const ZOOM_TEXT_MS = 150;
 /** What Fit always frames: the structure, and what waits on you. */
 const FRAMED: ReadonlySet<GraphNode["kind"]> = new Set(["machine", "project", "group", "request"]);
 /** Keys that pan or zoom the canvas (with no card focused). */
-const VIEW_KEYS = new Set(["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "+", "=", "-", "0", "1"]);
+const VIEW_KEYS = new Set(["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "+", "=", "-", "0"]);
 /** Room for a phone's zoom bar when it sits at the top (while a request waits at the bottom). */
 const PHONE_TOP_BAR = 48;
 
