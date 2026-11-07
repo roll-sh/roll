@@ -773,9 +773,9 @@ impl Est<'_> {
         if args.len() != 2 {
             return None;
         }
-        let (var, c, op) = match (self.var(&args[0]), constant(&args[1])) {
+        let (var, c, op) = match (self.var(&args[0]), self.constant(&args[1])) {
             (Some(v), Some(c)) => (v, c, d.name),
-            _ => match (constant(&args[0]), self.var(&args[1])) {
+            _ => match (self.constant(&args[0]), self.var(&args[1])) {
                 (Some(c), Some(v)) => (v, c, commute(d.name)),
                 _ => return None,
             },
@@ -838,9 +838,9 @@ impl Est<'_> {
                 // compared by it, var_eq_const with the operator's collation.)
                 if matches!(d.name, "=" | "<>")
                     && let Some(coll) = d.coll.as_ref().filter(|c| !c.deterministic)
-                    && let Some((var, Some(c))) = match (self.var(&args[0]), constant(&args[1])) {
+                    && let Some((var, Some(c))) = match (self.var(&args[0]), self.constant(&args[1])) {
                         (Some(v), Some(c)) => Some((v, c)),
-                        _ => match (constant(&args[0]), self.var(&args[1])) {
+                        _ => match (self.constant(&args[0]), self.var(&args[1])) {
                             (Some(c), Some(v)) => Some((v, c)),
                             _ => None,
                         },
@@ -978,9 +978,9 @@ impl Est<'_> {
                 u?.hidden.iter().find(|(x, _)| x.same_as(e)).map(|(_, v)| v.clone())
             })
         };
-        let (var, c, varonleft) = match (var_of(l), constant(r)) {
+        let (var, c, varonleft) = match (var_of(l), self.constant(r)) {
             (Some(v), Some(c)) => (v, c, true),
-            _ => match (constant(l), var_of(r)) {
+            _ => match (self.constant(l), var_of(r)) {
                 (Some(c), Some(v)) => (v, c, false),
                 _ => return Some(default),
             },
@@ -1159,7 +1159,7 @@ impl Est<'_> {
                     // An expression without statistics against a NULL: the (strict)
                     // operator never holds.
                     let null = |x: &Expr| matches!(strip(x), Expr::Const(Value::Null, _));
-                    let var_side = |x: &Expr| constant(x).is_none();
+                    let var_side = |x: &Expr| self.constant(x).is_none();
                     if ((null(r) && var_side(l)) || (null(l) && var_side(r)))
                         && (matches!(op, "=" | "<>") || ineq(op).is_some())
                     {
@@ -1171,7 +1171,7 @@ impl Est<'_> {
                         Expr::Col(i, _) => self.distinct.and_then(|d| d(*i)),
                         _ => None,
                     };
-                    let nd = match (small(l), constant(r), constant(l), small(r)) {
+                    let nd = match (small(l), self.constant(r), self.constant(l), small(r)) {
                         (Some(d), Some(_), _, _) | (_, _, Some(_), Some(d)) => Some(d.max(1.0)),
                         _ => None,
                     };
@@ -1206,7 +1206,7 @@ impl Est<'_> {
                         "~~" | "~~*" | "~" | "~*" | "!~~" | "!~~*" | "!~" | "!~*"
                             if !strip(l).columns().is_empty()
                                 && matches!(l.ty(), DataType::Text | DataType::Varchar(_) | DataType::Name | DataType::Bpchar(_))
-                                && let Some(Some(Value::Text(t))) = constant(r) =>
+                                && let Some(Some(Value::Text(t))) = self.constant(r) =>
                         {
                             let negate = op.starts_with('!');
                             let ptype = match op.trim_start_matches('!') {

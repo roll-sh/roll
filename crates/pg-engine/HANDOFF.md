@@ -6293,6 +6293,28 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
     regress run on a private reference 51,148 / 51,150 with 0 units changed against
     results.tsv, pg_dump_tap 14,817 / 14,817, contrib pgvector 915 / 915, bloom 58, pg_trgm
     261, btree_gist 613 / 616, cube 316, pgvector_equality 480 / 480.
+- **hnsw build memory: not started, for the index agent** (round 24, agent 149's notes). A
+  fresh-process build of vector(128) x 100,000 (m 16, ef_construction 64, maintenance_work_mem
+  64 MB) peaks at +217 MB against pgvector's +66 MB (BENCH "Scan cost, round 2").
+  - Where the memory goes: the in-memory phase (`hnsw/build.rs` `Build`: `elems`, `items`,
+    `heads`, `vdata`, its Generation context) is bounded by maintenance_work_mem as
+    pgvector's is (`memory_used >= memory_total` flushes and goes on disk). The excess is the
+    on-disk phase: after `flush`, the graph is held whole as `graph::Graph` (every `Elem`,
+    every value in `vdata`, every neighbor list) because every insert and search reads that
+    object model, and it stays in the process-wide index cache (`hnsw/mod.rs` `cache()`)
+    afterwards. pgvector's on-disk phase reads pages through shared buffers instead, so
+    its build is bounded by maintenance_work_mem plus the buffer pool.
+  - Design: page elements through `AmStore` behind a bounded cache. `Graph` keeps only
+    the meta page and a slot -> (block, offset) index; `Elem`s, values and neighbor tuples
+    are read from their records on demand (they are one record per tuple already) into an
+    LRU sized from maintenance_work_mem during a build and from the engine's memory budget
+    afterwards; dirty tuples are written back as now (`dirty_e` / `dirty_n`). Searches and
+    inserts take elements by slot through the cache instead of `&self.elems[slot]`.
+    Agent 127's eviction of dropped indexes' graphs (`evict_dropped`) stays.
+  - Gate: build time within ~20% of today's, search speed unchanged, and recall equal to
+    pgvector's (`tests/pgvector_equality.rs` must stay result-for-result identical, since the
+    build order and tie-breaks must not change). Memory goes under agent 132's query-memory
+    budget.
 
 ## Repository layout
 

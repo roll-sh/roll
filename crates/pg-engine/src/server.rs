@@ -1567,7 +1567,7 @@ fn message_loop(
         };
         let r: Result<()> = match t {
             b'Q' => {
-                let sql = match Body::new(&body).cstr() {
+                let sql = match Body::new(body).cstr() {
                     Ok(q) => q.to_string(),
                     Err(e) => {
                         c.error(&e);
@@ -1615,27 +1615,27 @@ fn message_loop(
                 continue;
             }
             b'P' => {
-                let mut b = Body::new(&body);
+                let mut b = Body::new(body);
                 last_stmt = b.cstr().ok().and_then(|_| b.cstr().ok()).map(str::to_string);
-                extended_activity(&act, s, t, &body);
+                extended_activity(&act, s, t, body);
                 s.start_xact_command();
-                guard(c, s, |c, s| parse_msg(c, s, &body))
+                guard(c, s, |c, s| parse_msg(c, s, body))
             }
             b'B' => {
-                extended_activity(&act, s, t, &body);
+                extended_activity(&act, s, t, body);
                 s.start_xact_command();
-                guard(c, s, |c, s| bind_msg(c, s, &body))
+                guard(c, s, |c, s| bind_msg(c, s, body))
             }
             b'D' => {
                 s.start_xact_command();
-                guard(c, s, |c, s| describe_msg(c, s, &body))
+                guard(c, s, |c, s| describe_msg(c, s, body))
             }
             b'E' => {
-                extended_activity(&act, s, t, &body);
+                extended_activity(&act, s, t, body);
                 s.start_xact_command();
-                guard(c, s, |c, s| execute_msg(c, s, &body))
+                guard(c, s, |c, s| execute_msg(c, s, body))
             }
-            b'C' => guard(c, s, |c, s| close_msg(c, s, &body)),
+            b'C' => guard(c, s, |c, s| close_msg(c, s, body)),
             b'S' => {
                 skipping = false;
                 if let Err(e) = guard(c, s, |_, s| s.sync()) {
@@ -1658,7 +1658,7 @@ fn message_loop(
             b'd' | b'c' | b'f' => continue,
             b'F' => {
                 start_activity(&act, s, "fastpath function call", None);
-                let r = guard(c, s, |c, s| fastpath_msg(c, s, &body));
+                let r = guard(c, s, |c, s| fastpath_msg(c, s, body));
                 send_notices(c, s);
                 if let Err(e) = r {
                     c.error(&e);

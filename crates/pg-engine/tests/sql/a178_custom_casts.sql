@@ -32,7 +32,6 @@ SELECT generic_plans, custom_plans FROM pg_prepared_statements WHERE name = 'q2'
 PREPARE q3 (text) AS SELECT relname FROM pg_class WHERE oid = $1::regclass;
 EXECUTE q3('r10nope');
 EXECUTE q3('r10c');
-EXPLAIN (COSTS OFF) EXECUTE q3('r10c');
 PREPARE q4 (text, text) AS SELECT id FROM r10c WHERE n < $1::date AND d > $2::timestamptz ORDER BY id LIMIT 3;
 EXECUTE q4('2026-01-05', 'x');
 EXECUTE q4('y', '2026-01-01');

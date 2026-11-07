@@ -181,7 +181,7 @@ impl Analyzed {
     }
 
     /// The scan with the WHERE placed again, the values in.
-    fn placed(&self, site: &WhereSite, sub: &Subst) -> Put<Box<ScanPlan>> {
+    fn placed(&self, site: &WhereSite, sub: &Subst<'_, '_>) -> Put<Box<ScanPlan>> {
         let pred = sub.expr(&site.pred, true)?;
         let mut scan = site.scan.clone();
         if !site.alone {
