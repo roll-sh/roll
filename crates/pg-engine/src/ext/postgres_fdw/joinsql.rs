@@ -185,17 +185,17 @@ impl<'a> Sql<'a> {
 
     /// deparseFromExprForRel.
     fn rel_from_sql(&self, rel: &RelInfo, use_alias: bool, additional: &mut Vec<String>) -> String {
-        self.from_expr(rel, use_alias, None, &mut Vec::new(), additional)
+        self.deparse_from(rel, use_alias, None, &mut Vec::new(), additional)
     }
 
     /// deparseFromExprForRel with an ignore_rel: the FROM / USING list of a direct UPDATE /
     /// DELETE of base `target` (deparseDirectUpdateSql), without it; the clauses of the
     /// inner joins it is in go to `ignore_conds`, for the WHERE (its joins are all inner).
-    pub fn from_without(&self, rel: &RelInfo, target: usize, ignore_conds: &mut Vec<Expr>, additional: &mut Vec<String>) -> String {
-        self.from_expr(rel, true, Some(target), ignore_conds, additional)
+    pub fn rels_without(&self, rel: &RelInfo, target: usize, ignore_conds: &mut Vec<Expr>, additional: &mut Vec<String>) -> String {
+        self.deparse_from(rel, true, Some(target), ignore_conds, additional)
     }
 
-    fn from_expr(&self, rel: &RelInfo, use_alias: bool, ignore: Option<usize>, ignore_conds: &mut Vec<Expr>, additional: &mut Vec<String>) -> String {
+    fn deparse_from(&self, rel: &RelInfo, use_alias: bool, ignore: Option<usize>, ignore_conds: &mut Vec<Expr>, additional: &mut Vec<String>) -> String {
         match &rel.kind {
             Kind::Base(k) => {
                 let b = &self.bases[*k];
@@ -214,8 +214,8 @@ impl<'a> Sql<'a> {
                         ignore_conds.extend(joinclauses.iter().cloned());
                         joinclauses = &[];
                     }
-                    outer_is_target = is(&**outer, t);
-                    inner_is_target = !outer_is_target && is(&**inner, t);
+                    outer_is_target = is(outer, t);
+                    inner_is_target = !outer_is_target && is(inner, t);
                 }
                 let mut add_o = Vec::new();
                 let mut add_i = Vec::new();
@@ -256,7 +256,7 @@ impl<'a> Sql<'a> {
     /// deparseRangeTblRef: a relation of a join, as a subquery when it must be one.
     fn range_tbl_ref(&self, rel: &RelInfo, make_subquery: bool, ignore: Option<usize>, ignore_conds: &mut Vec<Expr>, additional: &mut Vec<String>) -> String {
         if !make_subquery {
-            return self.from_expr(rel, true, ignore, ignore_conds, additional);
+            return self.deparse_from(rel, true, ignore, ignore_conds, additional);
         }
         let sub = self.select(rel, None, &rel.remote_conds, &Tail::default());
         let mut s = format!("({sub}) s{}", rel.relation_index);

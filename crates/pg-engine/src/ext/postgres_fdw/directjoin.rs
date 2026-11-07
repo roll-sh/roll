@@ -55,10 +55,10 @@ impl Source<'_> {
 
     /// ` FROM ... WHERE ...`: the other relations (`word` FROM or USING) and the conditions,
     /// the join's remote ones then the clauses of the inner joins the target is in.
-    fn from_where(&self, q: &Sql, word: &str) -> String {
+    fn rels_and_conditions(&self, q: &Sql, word: &str) -> String {
         let mut ignore = Vec::new();
         let mut additional = Vec::new();
-        let from = q.from_without(&self.js.info, self.target, &mut ignore, &mut additional);
+        let from = q.rels_without(&self.js.info, self.target, &mut ignore, &mut additional);
         let mut conds = self.js.info.remote_conds.clone();
         conds.extend(ignore);
         let mut sql = format!(" {word} {from}");
@@ -164,7 +164,7 @@ pub fn join_update(up: &UpdatePlan, cat: &Catalog, fmt: &crate::types::text::For
         parts.push(format!("{} = {}", d.column(*c), q.expr(&src.js.info, &e)));
     }
     let mut sql = format!("UPDATE {} SET {}", src.target_rel(cat), parts.join(", "));
-    sql.push_str(&src.from_where(&q, "FROM"));
+    sql.push_str(&src.rels_and_conditions(&q, "FROM"));
     let width = crate::sql::binder::plan_width(&up.source);
     let (ret, back) = src.returning(t, &up.returning, width, &q)?;
     sql.push_str(&ret);
@@ -180,7 +180,7 @@ pub fn join_delete(dp: &DeletePlan, cat: &Catalog, fmt: &crate::types::text::For
     let src = source(&dp.source, t.oid)?;
     let q = Sql::new(cat, fmt, &src.js.bases);
     let mut sql = format!("DELETE FROM {}", src.target_rel(cat));
-    sql.push_str(&src.from_where(&q, "USING"));
+    sql.push_str(&src.rels_and_conditions(&q, "USING"));
     let width = crate::sql::binder::plan_width(&dp.source);
     let (ret, back) = src.returning(t, &dp.returning, width, &q)?;
     sql.push_str(&ret);
