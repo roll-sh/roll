@@ -485,6 +485,7 @@ impl Database {
             deferrable: false,
             moved_out: Vec::new(),
             seq_undo: Vec::new(),
+            seq_drops: Vec::new(),
             pgstat: Default::default(),
             db_owner_undo: Vec::new(),
             db_options_undo: Vec::new(),
@@ -822,6 +823,7 @@ struct Savepoint {
     /// Ids of subtransactions released into this one (they end as it does).
     committed: Vec<u64>,
     seq_undo_len: usize,
+    seq_drops_len: usize,
     /// The change stream's next record number when it was made (`repl::log::rolled_back_to`).
     log_seq: u32,
 }
@@ -1016,6 +1018,10 @@ pub struct Txn {
     /// Sequences given a new file here (TRUNCATE ... RESTART IDENTITY), with the state of
     /// the old one, which a rollback makes current again.
     pub seq_undo: Vec<(u32, (i64, bool, i64, i64))>,
+    /// Sequences dropped here, a table's hidden row ids' too: their state goes once the
+    /// transaction commits (a rollback keeps it: a table whose DROP rolled back must not
+    /// hand out its row ids again).
+    pub seq_drops: Vec<u32>,
     /// The transactional statistics counts (`exec::pgstat`).
     pub pgstat: crate::exec::pgstat::XactStats,
     /// Databases whose owner this transaction changed: (name, the previous owner), put
@@ -1825,6 +1831,12 @@ impl Txn {
         self.report_subxacts();
         let undo = std::mem::take(&mut self.seq_undo);
         let renewed = std::mem::take(&mut self.new_storage);
+        let dropped = std::mem::take(&mut self.seq_drops);
+        if committed {
+            for oid in dropped {
+                let _ = self.db.reset_seq(oid, None);
+            }
+        }
         if !committed {
             for (oid, st) in undo.into_iter().rev() {
                 self.db.restore_seq(oid, st);
@@ -3365,6 +3377,7 @@ impl Txn {
             xid: 0,
             committed: Vec::new(),
             seq_undo_len: self.seq_undo.len(),
+            seq_drops_len: self.seq_drops.len(),
             log_seq: self.log.as_ref().map_or(0, |l| l.seq),
         });
     }
@@ -3420,6 +3433,7 @@ impl Txn {
         self.deferred_triggers.truncate(sp.deferred_triggers_len);
         self.notifies.truncate(sp.notifies_len);
         (self.constraint_modes, self.all_deferred) = sp.modes.clone();
+        self.seq_drops.truncate(sp.seq_drops_len);
         let seq_undo_len = sp.seq_undo_len;
         while self.seq_undo.len() > seq_undo_len {
             let (oid, st) = self.seq_undo.pop().unwrap();
