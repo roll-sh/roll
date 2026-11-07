@@ -419,12 +419,13 @@ fn brin_gin_builds_measure_as_postgres() {
              CREATE INDEX am_bt ON am USING brin (t, id) WITH (pages_per_range = 2);
              CREATE INDEX am_g ON am USING gin (tags);
              CREATE INDEX am_d ON am USING gin (doc);
-             CREATE INDEX am_j ON am USING gin (j)";
+             CREATE INDEX am_j ON am USING gin (j);
+             CREATE INDEX am_jp ON am USING gin (j jsonb_path_ops)";
         let stats = "SELECT string_agg(relname || ' ' || relpages, ', ' ORDER BY relname) FROM pg_class WHERE relname LIKE 'am%'";
-        let want = [r#"[Text("am 91, am_b 3, am_bt 3, am_d 11, am_g 8, am_j 10")]"#];
+        let want = [r#"[Text("am 91, am_b 3, am_bt 3, am_d 11, am_g 8, am_j 10, am_jp 8")]"#];
         run(&mut s, build);
         assert_eq!(rows(&mut s, stats), want);
-        run(&mut s, "DROP INDEX am_b, am_bt, am_g, am_d, am_j; VACUUM am");
+        run(&mut s, "DROP INDEX am_b, am_bt, am_g, am_d, am_j, am_jp;\nVACUUM am");
         run(&mut s, build);
         assert_eq!(rows(&mut s, stats), want);
     });

@@ -1387,7 +1387,7 @@ impl Ddl<'_, '_> {
             }
             let heap = crate::exec::sizing::heap_blocks_known(t, &self.cat, db).flatten()?;
             let pages = crate::exec::sizing::btree_blocks(t.oid, index.oid, db)?;
-            Some(RowMeasure { rows, modelled: Some(heap as i32), live: heap as i32, indexes: vec![(index.oid, pages as i32, tuples as f64)] })
+            Some(RowMeasure { rows, modelled: Some(heap as i32), live: heap as i32, estimated: false, indexes: vec![(index.oid, pages as i32, tuples as f64)] })
         });
         // index_update_stats leaves the table's statistics alone when autovacuum is off
         // for it (a dump restoring statistics before its indexes keeps them).
@@ -1583,6 +1583,17 @@ impl Ddl<'_, '_> {
         let kept_live = (frozen.is_none() && modelled.is_none() && !ixs.is_empty())
             .then(|| self.kept_live(t, layout, snap))
             .flatten();
+        // (An index build of a table too big to model takes the heap's pages from its estimate,
+        // as index_update_stats takes the file's: its rows aren't sized but for a sample at
+        // its start, whose density spreads the rest over pages for the TIDs an index measured
+        // as its access method lays it out needs. A VACUUM or ANALYZE measures the live rows,
+        // which tell the space reusable.)
+        let estimated = match blocks {
+            Ok(Some(n)) if each.is_some() && modelled.is_none() && kept_live.is_none() => Some(n as i32),
+            _ => None,
+        };
+        let mut sampled: Option<(u32, usize)> = None;
+        let mut sample_bytes = 0usize;
         let unpinned = std::collections::HashSet::new();
         let scan = self.ctx.txn.borrow().scan(&start, &crate::storage::keys::prefix_end(&start));
         for r in scan {
@@ -1604,8 +1615,9 @@ impl Ddl<'_, '_> {
                 }
                 self.vacuum_delay_point(1)?;
             }
-            let stored = match modelled {
-                None if kept_live.is_none() => {
+            let sizing = modelled.is_none() && kept_live.is_none() && (estimated.is_none() || rows <= SIZED_SAMPLE);
+            let stored = match sizing {
+                true => {
                     crate::storage::row::stored_tuple_len(crate::exec::scan::row_data(&bytes)?, &types, &virt_mask)
                 }
                 _ => None,
@@ -1624,7 +1636,7 @@ impl Ddl<'_, '_> {
                 }
             }
             let mut row = match &need {
-                Some(need) if modelled.is_some() || stored.is_some() || kept_live.is_some() => {
+                Some(need) if !sizing || stored.is_some() => {
                     crate::exec::scan::decode_table_row_need(t, &bytes, need)?
                 }
                 _ => crate::exec::scan::decode_table_row(t, &bytes)?,
@@ -1637,6 +1649,16 @@ impl Ddl<'_, '_> {
                     Some((live, kept_rows)) => {
                         let per = kept_rows.div_ceil(live.max(1) as usize).max(1);
                         tid = (((rows - 1) / per) as u32, ((rows - 1) % per + 1) as u16);
+                    }
+                    None if !sizing => {
+                        // (Past the sample: its tuples' mean size, as many a page as fit.)
+                        let (first, per) = *sampled.get_or_insert_with(|| {
+                            let mean = (sample_bytes / SIZED_SAMPLE).max(1);
+                            (packer.pages() as u32, (relsize::HEAP_PAGE_ROOM / mean).clamp(1, relsize::MAX_HEAP_TUPLES))
+                        });
+                        let i = rows - 1 - SIZED_SAMPLE;
+                        let last = estimated.map_or(u32::MAX, |n| (n.max(1) - 1) as u32);
+                        tid = ((first + (i / per) as u32).min(last), (i % per + 1) as u16);
                     }
                     None => {
                         let size = match stored {
@@ -1671,6 +1693,7 @@ impl Ddl<'_, '_> {
                             }
                         };
                         packer.push(size);
+                        sample_bytes += size;
                         tid = packer.last();
                     }
                 }
@@ -1705,7 +1728,7 @@ impl Ddl<'_, '_> {
         }
         let (modelled, live) = match modelled {
             Some(n) => (Some(n), n),
-            None => (None, kept_live.map_or_else(|| packer.pages(), |k| k.0)),
+            None => (None, estimated.or(kept_live.map(|k| k.0)).unwrap_or_else(|| packer.pages())),
         };
         if whole {
             let m = crate::txn::unchanged::Measured { ts: snap, armed: 0, layout, rows, live, xmin: xmins, may_toast };
@@ -1729,6 +1752,7 @@ impl Ddl<'_, '_> {
             rows,
             modelled,
             live,
+            estimated: estimated.is_some(),
             indexes: measured,
         }))
     }
@@ -1784,6 +1808,10 @@ impl Ddl<'_, '_> {
     }
 }
 
+/// The rows at the start of a table too big to model an index build sizes
+/// (`measure_rows_with`).
+const SIZED_SAMPLE: usize = 256;
+
 /// What `measure_rows` found.
 pub(super) struct RowMeasure {
     rows: usize,
@@ -1791,6 +1819,9 @@ pub(super) struct RowMeasure {
     /// packed afresh (`Ddl::heap_pages`).
     modelled: Option<i32>,
     live: i32,
+    /// `live` is the heap's estimated pages, not a measure of its live rows (an index
+    /// build's: `measure_rows_with`).
+    estimated: bool,
     /// (index, pages, tuples).
     indexes: Vec<(u32, i32, f64)>,
 }
@@ -1802,6 +1833,7 @@ impl RowMeasure {
             rows,
             modelled: None,
             live,
+            estimated: false,
             indexes,
         }
     }
@@ -1854,6 +1886,7 @@ impl Ddl<'_, '_> {
     fn heap_pages(&self, t: &Table, m: &RowMeasure) -> i32 {
         match m.modelled {
             Some(n) => n,
+            None if m.estimated => m.live,
             None => crate::exec::sizing::measured_live(t.oid, m.live.max(0) as u32, &self.ctx.sess.db)
                 .map_or(m.live, |p| p as i32),
         }
