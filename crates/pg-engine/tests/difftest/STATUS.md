@@ -458,6 +458,7 @@ all of it (round 9's seeds too with `GUARD_SEEDS`).
 | 2026-11-03, `tools/difftest-guard.sh`, rounds 6-9 | `847fbdba` / `1f676b8a` | 93,717 | 3 lines, one case (seed 9014 #82: a generic plan's Index Only Scan where PostgreSQL has a Bitmap Heap Scan), not reproducible from its reduced case on either binary: background VACUUM timing (both servers' autovacuum visits a seed's tables at random points), so round 9's tables no longer autovacuum | 6: agent 145's result-type check (0A000, seeds 9060, 9061, 9067, 9090) and binary array dimensions (54000, seed 9073) |
 | 2026-11-03, rounds 6-9 (head with round 9's tables not autovacuuming) | `1f676b8a` / `5386239f` (agent 154's batch execution 86c04b88, agent 148's COPY flush bd7ba755) | 93,717 | 0 | 7: COPY's sequence values after a late duplicate (seeds 9010, 9093, 9119), and plans of seeds 9017, 9046 (the autovacuum change) |
 | 2026-11-03, rounds 6-9 (agent 162) | `5386239f` / `31066020` (agent 149's scan cost round 3, batch 2, 4e89b2ff) | 93,717 | 0 | 0 |
+| 2026-11-07, rounds 6-9 (agent 162; the first verification train, below) | `31066020` / `fe7b0023c` (+ docs and tools: `c59b1523`): every push of 2026-11-03 to 11-07, agents 144, 146, 148, 149, 150, 155, 157, 159, 160, 161, 162 | 93,717 | 0 | 37: binary array headers' 54000 (9 lines; eb450f4e9), round 9's statistics (pg_stats n_distinct, `arr @> '{2}'` estimates), indisready and plan counts (28) |
 
 ## Round 9 (agent 156)
 
