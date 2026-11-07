@@ -518,7 +518,10 @@ export function projectStats(data: AgentsData, project: ProjectId): ProjectStats
   const out: ProjectStats = { threads: 0, running: 0, waiting: 0, failed: 0, done: 0, changes: [], agents: [], cost_usd: null };
   const newest = newestRuns(data);
   const agents = new Map<string, ProjectStats["agents"][number]>();
-  const threads = [...data.threads.values()].map((r) => r.value).filter((t) => t.project === project && t.archived_at === null);
+  // What the canvas has of it: not what's on the shelves, nor a delegated subagent that's done (it left).
+  const threads = [...data.threads.values()]
+    .map((r) => r.value)
+    .filter((t) => t.project === project && t.archived_at === null && !shelved(t) && !(t.lineage?.relation === "subagent" && !isBusy(t.status) && t.status !== "error"));
   threads.sort((a, b) => b.updated_at - a.updated_at);
   for (const t of threads) {
     out.threads++;

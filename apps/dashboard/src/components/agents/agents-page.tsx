@@ -964,7 +964,7 @@ const CanvasCard = memo(function CanvasCard({ node: n, store }: { node: GraphNod
             { kind: "diff", id: n.id, label: "the diff" },
           ]}
         >
-          <ThreadCard thread={t} machine={machine} {...facts(t)} inside={inside.get(n.key)} />
+          <ThreadCard thread={t} machine={machine} {...facts(t)} inside={inside.get(n.key)} section={n.parent?.startsWith("g:") ? n.parent.split(":")[2] : null} />
         </PinTools>
       );
     }
@@ -1118,12 +1118,15 @@ function CanvasViewBody({
       return !!t && (isBusy(t.status) || t.status === "error" || t.pending_requests > 0 || id === docked || asked.has(id) || highlight.has(`t:${id}`));
     };
     const space = focused ? `p:${focused}` : null;
+    // A thread whose fork or subagent failed shows it on its card (`absorbChildren`), so it's grouped as failed.
+    const failedUnder = new Set<string>();
+    for (const r of data.threads.values()) if (r.value.status === "error" && r.value.lineage) failedUnder.add(r.value.lineage.parent);
     const grouped = space
       ? groupByStatus(narrowed, space, (id) => {
           const t = data.threads.get(id)!.value;
           if (t.pending_requests > 0) return "needs";
           if (isBusy(t.status)) return "running";
-          if (t.status === "error") return "failed";
+          if (t.status === "error" || failedUnder.has(id)) return "failed";
           return threadDone(t, newest.get(id)) ? "done" : "quiet";
         })
       : narrowed;

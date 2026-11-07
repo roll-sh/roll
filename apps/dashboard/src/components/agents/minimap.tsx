@@ -41,11 +41,15 @@ export function Minimap({
   // alone (attributes on an SVG rect repainted the page under every frame of a zoom).
   const edges = useRef<(HTMLSpanElement | null)[]>([]);
   const world = useMemo(() => bounds(positions, sizeOf), [positions, sizeOf]);
-  // World → map: the whole canvas fits, centred, with a little room.
+  // World → map: the whole canvas, filling the box (a tall canvas was a thin strip in it): each
+  // axis scaled on its own, never more than 2.5 times the other.
   const map = useMemo(() => {
     if (!world) return null;
-    const s = Math.min((W - 8) / world.w, (H - 8) / world.h);
-    return { s, x: (W - world.w * s) / 2 - world.x * s, y: (H - world.h * s) / 2 - world.y * s };
+    let sx = (W - 8) / world.w;
+    let sy = (H - 8) / world.h;
+    if (sx > sy * 2.5) sx = sy * 2.5;
+    if (sy > sx * 2.5) sy = sx * 2.5;
+    return { sx, sy, x: (W - world.w * sx) / 2 - world.x * sx, y: (H - world.h * sy) / 2 - world.y * sy };
   }, [world]);
   const last = useRef<View | null>(null);
   const draw = useCallback(
@@ -61,12 +65,12 @@ export function Minimap({
       const bigger = (world.w * v.k > w + 1 || world.h * v.k > h + 1) && w >= MIN_CANVAS_W;
       if (el.hidden === bigger) el.hidden = !bigger;
       if (!bigger) return;
-      const x0 = (-v.x / v.k) * map.s + map.x;
-      const y0 = (-v.y / v.k) * map.s + map.y;
+      const x0 = (-v.x / v.k) * map.sx + map.x;
+      const y0 = (-v.y / v.k) * map.sy + map.y;
       const x = Math.max(0, x0);
       const y = Math.max(0, y0);
-      const fw = Math.max(4, Math.min(W, x0 + (w / v.k) * map.s) - x);
-      const fh = Math.max(4, Math.min(H, y0 + (h / v.k) * map.s) - y);
+      const fw = Math.max(4, Math.min(W, x0 + (w / v.k) * map.sx) - x);
+      const fh = Math.max(4, Math.min(H, y0 + (h / v.k) * map.sy) - y);
       top.style.transform = `translate(${x}px, ${y}px) scale(${fw}, 1)`;
       bottom.style.transform = `translate(${x}px, ${y + fh - 1}px) scale(${fw}, 1)`;
       left.style.transform = `translate(${x}px, ${y}px) scale(1, ${fh})`;
@@ -86,8 +90,8 @@ export function Minimap({
     const e = engine.current;
     if (!e || !map) return;
     const r = root.current!.getBoundingClientRect();
-    const wx = (ev.clientX - r.left - map.x) / map.s;
-    const wy = (ev.clientY - r.top - map.y) / map.s;
+    const wx = (ev.clientX - r.left - map.x) / map.sx;
+    const wy = (ev.clientY - r.top - map.y) / map.sy;
     const { k } = e.view;
     e.setView({ k, x: e.viewport.w / 2 - wx * k, y: e.viewport.h / 2 - wy * k }, false);
   };
@@ -112,8 +116,8 @@ export function Minimap({
           const n = nodes.get(k);
           if (!n) return null;
           const s = sizeOf(k);
-          const tone = n.kind === "request" ? "var(--accent)" : n.busy ? "color-mix(in oklab, var(--accent) 60%, transparent)" : n.kind === "machine" || n.kind === "project" ? "var(--muted)" : "var(--line-3, var(--subtle))";
-          return <rect key={k} x={p.x * map.s + map.x} y={p.y * map.s + map.y} width={Math.max(1.5, s.w * map.s)} height={Math.max(1.5, s.h * map.s)} rx={1} fill={tone} opacity={n.kind === "group" ? 0.5 : 0.9} />;
+          const tone = n.kind === "request" ? "color-mix(in oklab, var(--accent) 55%, transparent)" : n.busy ? "color-mix(in oklab, var(--accent) 35%, transparent)" : n.kind === "machine" || n.kind === "project" ? "var(--muted)" : "var(--line-3, var(--subtle))";
+          return <rect key={k} x={p.x * map.sx + map.x} y={p.y * map.sy + map.y} width={Math.max(1.5, s.w * map.sx)} height={Math.max(1.5, s.h * map.sy)} rx={1} fill={tone} opacity={n.kind === "group" ? 0.5 : 0.9} />;
         })}
       </svg>
       {[0, 1, 2, 3].map((i) => (

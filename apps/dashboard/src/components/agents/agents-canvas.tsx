@@ -21,6 +21,7 @@ import {
   bounds,
   COMPACT_SPACING,
   dropIndex,
+  fitPlan,
   fitView,
   layoutCanvas,
   loadOrder,
@@ -226,6 +227,20 @@ export const AgentsCanvas = memo(forwardRef<
   const isSection = useCallback((k: string) => graph.nodes.get(k)?.kind === "group", [graph]);
   // The screen the layout is planned for (`planWraps`) and fitted to (`roomFor`), coarse.
   const [screen, setScreen] = useState<Size>({ w: 1440, h: 760 });
+  // Fit pressed again when the first didn't show everything: laid out and framed for all of it.
+  const [overview, setOverview] = useState(false);
+  const mattersRef = useRef(matters);
+  mattersRef.current = matters;
+  const selectedRef = useRef(selected);
+  selectedRef.current = selected;
+  // What Fit keeps in view: work going on, waiting on you or failed, and the open card.
+  const important = useCallback(
+    (k: string) => {
+      const n = graph.nodes.get(k);
+      return !!n && (n.busy || n.kind === "request" || k === selectedRef.current || !!mattersRef.current?.(k));
+    },
+    [graph],
+  );
   /** The layout: the cards' measured sizes, wrapped the way that shows them best on this screen (`planWraps`). */
   const shown = useMemo((): Placement & { size: (k: string) => Size } => {
     const size = (k: string): Size => {
@@ -234,10 +249,12 @@ export const AgentsCanvas = memo(forwardRef<
       // A section's header is a fixed row (drawn as wide as its cards, `--section-w`): measured, it would grow with them.
       return n.kind === "group" ? SECTION_HEAD : sizeOf(k);
     };
-    const shape: CanvasShape = { direction, level, section: isSection, spacing: (density === "compact" ? COMPACT_SPACING : SPACING)[direction] };
-    const wraps = wrap ? planWraps(arranged, size, shape, roomFor(screen.w, screen.h)) : NO_WRAPS;
+    const spacing = density === "compact" ? COMPACT_SPACING : SPACING;
+    // A phone is one list of cards as wide as each other: no indents (the trunk runs beside them).
+    const shape: CanvasShape = { direction, level, section: isSection, spacing: screen.w < 640 ? { horizontal: spacing.horizontal, vertical: { ...spacing.vertical, indent: 0 } } : spacing };
+    const wraps = wrap ? planWraps(arranged, size, shape, { ...roomFor(screen.w, screen.h), overview }, important) : NO_WRAPS;
     return { ...layoutCanvas(arranged, size, shape, wraps), size };
-  }, [graph, sizeOf, direction, density, level, isSection, wrap, arranged, screen]);
+  }, [graph, sizeOf, direction, density, level, isSection, wrap, arranged, screen, overview, important]);
   const { positions } = shown;
   const shownSize = shown.size;
   const across = useCallback((parent: string) => shown.across.get(parent) ?? false, [shown]);
@@ -270,17 +287,13 @@ export const AgentsCanvas = memo(forwardRef<
     return Math.max(0, Math.min(box.bottom - top, box.height / 2));
   }, [keepClear]);
 
-  const mattersRef = useRef(matters);
-  mattersRef.current = matters;
-  const selectedRef = useRef(selected);
-  selectedRef.current = selected;
   /**
    * Fit: everything, filling about 80 % of the room above the prompt bar, but never smaller than
    * the cards read (`READABLE`): then from the top (a phone: its first machine or status column).
    * `all` (the Fit button, `1`) frames what matters at a readable zoom; again from there, everything.
    */
   const fit = useCallback(
-    (animate = true, all = false) => {
+    (animate = true) => {
       const e = engine.current;
       if (!e) return;
       const { w } = e.viewport;
@@ -289,39 +302,16 @@ export const AgentsCanvas = memo(forwardRef<
       const phone = w < 640;
       // A phone's waiting request puts the zoom bar at the top (`data-waiting`): frame below it.
       const top = phone && container.current?.closest("[data-waiting]") ? PHONE_TOP_BAR : 0;
-      const room = roomFor(w, h - top);
+      const room = { ...roomFor(w, h - top), overview };
       const r = bounds(positions, shownSize);
       if (!r) return;
-      let column: string | undefined;
-      if (phone)
-        for (const [k, p] of positions)
-          if (graph.nodes.get(k)?.kind === "group" && (column === undefined || p.x < positions.get(column)!.x)) column = k;
-      const key = column ?? arranged.roots.find((k) => positions.has(k));
-      const lead = key ? (bounds(positions, shownSize, [key]) ?? undefined) : undefined;
-      // Asked for (the Fit button, `1`): follow the work again, so cards that grow or arrive stay framed.
-      if (all) following.current = true;
-      // Bigger than the screen at the floor: the minimap shows in the bottom right, so the frame
-      // keeps clear of its corner (the layout was planned so; `planWraps`).
-      const over = r.w * room.floor > room.w - room.pad * 2 + 0.5 || r.h * room.floor > room.h - room.pad * 2 + 0.5;
-      const wide = over ? room.w - (room.reserve ?? 0) : room.w;
-      let v = fitView(r, wide, room.h, room.pad, 1, all ? 0 : room.floor, lead);
-      if (all && v.k < room.floor) {
-        // Too much to read at once: at the floor (the columns the layout planned all show), framed
-        // on what matters (the structure, what's running, waiting on you or failed, the open card);
-        // Fit again from there shows everything.
-        const keys = [...positions.keys()].filter((k) => {
-          const n = graph.nodes.get(k);
-          return !!n && (FRAMED.has(n.kind) || n.busy || k === selectedRef.current || !!mattersRef.current?.(k));
-        });
-        const m = bounds(positions, shownSize, keys);
-        const framed = m && fitView(r, wide, room.h, room.pad, room.floor, room.floor, m);
-        const now = e.goal;
-        const there = framed && Math.abs(now.k - framed.k) < 0.01 && Math.abs(now.x - framed.x) < 2 && Math.abs(now.y - framed.y - top) < 2;
-        if (framed && !there) v = framed;
-      }
+      // Everything if that reads, else framed from the top, keeping what matters in view (`fitPlan`);
+      // bigger than the screen, clear of the minimap's corner on the right.
+      const plan = fitPlan(positions, shownSize, room, important);
+      const v = plan.all ? fitView(r, room.w, room.h, room.pad, 1, 0) : fitView(r, room.w - (room.reserve ?? 0), room.h, room.pad, plan.k, plan.k);
       e.setView({ ...v, y: v.y + top }, animate);
     },
-    [positions, shownSize, arranged, coveredBelow, graph],
+    [positions, shownSize, coveredBelow, overview, important],
   );
 
   // Fit once, when the first layout with measured cards is in; then keep everything in view as
@@ -344,6 +334,7 @@ export const AgentsCanvas = memo(forwardRef<
     if (fitFor.current === fitKey) return;
     fitFor.current = fitKey;
     following.current = true;
+    setOverview(false);
   }, [fitKey]);
   // The tree turned: everything moves, so frame it again (the cards ease there with the view).
   const shownDirection = useRef(direction);
@@ -353,6 +344,7 @@ export const AgentsCanvas = memo(forwardRef<
     if (shownDirection.current === direction) return;
     shownDirection.current = direction;
     following.current = true;
+    setOverview(false);
     frameRef.current(true);
   }, [direction]);
   // The canvas got narrower or wider (the side panel opened or closed, the window resized): frame
@@ -498,6 +490,33 @@ export const AgentsCanvas = memo(forwardRef<
   });
 
   useImperativeHandle(ref, () => ({ focus, reveal, fit: () => fit(true) }), [focus, reveal, fit]);
+
+  /**
+   * The Fit button and `1`: fit (following the work again, so cards that grow or arrive stay
+   * framed). If that couldn't show everything, pressing again lays the canvas out for everything
+   * at once and frames it (`overview`); again, back. When everything shows, it only refits.
+   */
+  const pressFit = useCallback(() => {
+    following.current = true;
+    const e = engine.current;
+    const r = bounds(positions, shownSize);
+    if (!e || !r) return;
+    const room = roomFor(e.viewport.w, e.viewport.h - coveredBelow());
+    const there = (v: View) => Math.abs(e.goal.k - v.k) < 0.01 && Math.abs(e.goal.x - v.x) < 2;
+    if (!overview && fitPlan(positions, shownSize, room, important).all) return fit(true);
+    // Not framed yet (moved by hand): the first press frames; only a second changes the layout.
+    const plan = fitPlan(positions, shownSize, { ...room, overview }, important);
+    const v = plan.all ? fitView(r, room.w, room.h, room.pad, 1, 0) : fitView(r, room.w - (room.reserve ?? 0), room.h, room.pad, plan.k, plan.k);
+    if (!there(v)) return fit(true);
+    setOverview((o) => !o);
+  }, [positions, shownSize, coveredBelow, overview, important, fit]);
+  // The overview turned on or off: frame the new layout.
+  const shownOverview = useRef(overview);
+  useEffect(() => {
+    if (shownOverview.current === overview) return;
+    shownOverview.current = overview;
+    frameRef.current(true);
+  });
 
   // A card's siblings in the order shown.
   const siblingsOf = useCallback(
@@ -796,7 +815,7 @@ export const AgentsCanvas = memo(forwardRef<
           break;
         case "1":
         case "!":
-          fit(true, true);
+          pressFit();
           break;
         case "ArrowLeft":
           e.panBy(step, 0, true);
@@ -824,7 +843,7 @@ export const AgentsCanvas = memo(forwardRef<
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [fit, onEscape, active, nudge, direction, onDirection, across, siblingsOf, cardAt, positions, shownSize, goTo, onOpen]);
+  }, [pressFit, onEscape, active, nudge, direction, onDirection, across, siblingsOf, cardAt, positions, shownSize, goTo, onOpen]);
 
   const arrangedByUser = Object.keys(order).length > 0;
 
@@ -888,6 +907,7 @@ export const AgentsCanvas = memo(forwardRef<
       role="application"
       data-direction={direction}
       data-density={density ?? "comfortable"}
+      data-phone={screen.w < 640 || undefined}
     >
       <canvas ref={canvas} aria-hidden className="pointer-events-none absolute inset-0" />
       <div
@@ -939,7 +959,7 @@ export const AgentsCanvas = memo(forwardRef<
             {waiting.length}
           </button>
         )}
-        <ToolButton label="Fit (1); again for everything" onClick={() => fit(true, true)}>
+        <ToolButton label="Fit (1); again for everything" onClick={pressFit}>
           <Maximize className="size-3.5" />
         </ToolButton>
         {onDirection && (

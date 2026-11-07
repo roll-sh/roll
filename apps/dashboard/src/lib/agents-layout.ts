@@ -75,14 +75,14 @@ export interface Spacing {
 }
 
 export const SPACING: Readonly<Record<Direction, Spacing>> = {
-  horizontal: { depth: 72, lane: 40, section: 80, root: 72, cellX: 28, cellY: 24, stack: 10, indent: 0, under: 16, head: 14 },
-  vertical: { depth: 64, lane: 48, section: 80, root: 80, cellX: 28, cellY: 24, stack: 10, indent: 32, under: 16, head: 14 },
+  horizontal: { depth: 72, lane: 40, section: 80, root: 72, cellX: 28, cellY: 24, stack: 24, indent: 0, under: 16, head: 14 },
+  vertical: { depth: 64, lane: 48, section: 80, root: 80, cellX: 28, cellY: 24, stack: 24, indent: 32, under: 16, head: 14 },
 };
 
 /** The compact density's room: about half, so more of the canvas fits on a screen. */
 export const COMPACT_SPACING: Readonly<Record<Direction, Spacing>> = {
-  horizontal: { depth: 44, lane: 24, section: 56, root: 40, cellX: 16, cellY: 14, stack: 8, indent: 0, under: 12, head: 10 },
-  vertical: { depth: 44, lane: 28, section: 56, root: 48, cellX: 16, cellY: 14, stack: 8, indent: 24, under: 12, head: 10 },
+  horizontal: { depth: 44, lane: 24, section: 56, root: 40, cellX: 16, cellY: 14, stack: 14, indent: 0, under: 12, head: 10 },
+  vertical: { depth: 44, lane: 28, section: 56, root: 48, cellX: 16, cellY: 14, stack: 14, indent: 24, under: 12, head: 10 },
 };
 
 /** How a tree is drawn: which way it grows, what each node's children are, and its spacing. */
@@ -91,7 +91,7 @@ export interface CanvasShape {
   level: (key: string) => Level | null;
   /** Lanes drawn as a section: a header row over its cards, with no edge to each of them. */
   section?: (key: string) => boolean;
-  spacing?: Spacing;
+  spacing?: Partial<Record<Direction, Spacing>>;
 }
 
 /**
@@ -106,6 +106,12 @@ export interface Wraps {
   lines: number;
   lanes: 0 | 1;
   roots: number;
+  /**
+   * Growing right, laid out as a list down the screen instead (a machine over its projects, a
+   * project over its grid, which gets the whole width): when the cards beside the grids would
+   * starve them (a panel beside the canvas, a phone).
+   */
+  turn?: boolean;
 }
 
 /** A plain column of threads under each project, one stack of machines. */
@@ -140,7 +146,7 @@ interface Block {
   lead: number;
 }
 
-/** Where a satellite's connector and a top-down drop run, in from the card's left (world px). */
+/** Where a top-down drop runs, in from the card's left (world px). */
 const RAIL = 16;
 
 /**
@@ -153,8 +159,10 @@ const RAIL = 16;
  * card's top, and a project's grid hangs off a trunk down its indent. No two cards overlap.
  */
 export function layoutCanvas(tree: TreeLike, size: (key: string) => Size, shape: CanvasShape, wraps: Wraps = NO_WRAPS): Placement {
-  const horizontal = shape.direction !== "vertical";
-  const g = shape.spacing ?? SPACING[shape.direction];
+  const direction: Direction = wraps.turn ? "vertical" : shape.direction;
+  const horizontal = direction !== "vertical";
+  const g = shape.spacing?.[direction] ?? SPACING[direction];
+  const listed = wraps.turn || wraps.lanes === 1;
   const claimed = new Set<string>();
   const claim = (k: string) => tree.nodes.has(k) && !claimed.has(k) && (claimed.add(k), true);
   const kids = (k: string) => tree.nodes.get(k)?.children ?? [];
@@ -167,16 +175,16 @@ export function layoutCanvas(tree: TreeLike, size: (key: string) => Size, shape:
     const routes: [string, Point[]][] = [];
     let y = 0;
     let w = 0;
-    const visit = (k: string, parent: string | null, from: number) => {
+    // Stacked right under the card they belong to, they read as attached: no line (10 px of one
+    // with its ports read as a tick).
+    const visit = (k: string) => {
       const s = size(k);
-      if (parent) routes.push([`${parent}>${k}`, [{ x: RAIL, y: from }, { x: RAIL, y }]]);
       at.push([k, { x: 0, y }]);
       w = Math.max(w, s.w);
-      const bottom = y + s.h;
-      y = bottom + g.stack;
-      for (const c of kids(k)) if (claim(c)) visit(c, k, bottom);
+      y += s.h + g.stack;
+      for (const c of kids(k)) if (claim(c)) visit(c);
     };
-    visit(key, null, 0);
+    visit(key);
     const lead = ANCHOR(size(key).h);
     return { w, h: y - g.stack, at, routes, heads: [{ key, x: 0, y: lead, top: 0 }], row: false, lead };
   };
@@ -233,7 +241,8 @@ export function layoutCanvas(tree: TreeLike, size: (key: string) => Size, shape:
   };
 
   // A lane (or a machine): its card with what it holds beside it (growing right) or under it.
-  const lane = (k: string): Block => {
+  // `top`: where its grid starts under it, so grids side by side share a top line.
+  const lane = (k: string, top?: number): Block => {
     const level = shape.level(k);
     if (!level) return stack(k);
     const child = level === "items" ? grid(k) : lanes(k);
@@ -272,8 +281,9 @@ export function layoutCanvas(tree: TreeLike, size: (key: string) => Size, shape:
       Object.assign(b, { w: Math.max(s.w, child.w), h: by + child.h, heads: [{ key: k, x: 0, y: a, top: 0 }], lead: a });
     } else {
       // A grid or list under it, indented: a trunk down the indent into each row's first card.
-      const by = s.h + g.under;
-      const tx = g.indent / 2;
+      const by = Math.max(s.h, top ?? 0) + g.under;
+      // With no indent (a phone's list), the trunk runs just left of the cards.
+      const tx = g.indent > 0 ? g.indent / 2 : -12;
       b.at.push([k, { x: 0, y: 0 }]);
       add(b, child, g.indent, by);
       for (const h of child.heads) b.routes.push([`${k}>${h.key}`, simplify([{ x: tx, y: s.h }, { x: tx, y: by + h.y }, { x: g.indent + h.x, y: by + h.y }])]);
@@ -284,11 +294,13 @@ export function layoutCanvas(tree: TreeLike, size: (key: string) => Size, shape:
 
   // A lanes parent's lanes: stacked growing right (or listed down a phone), side by side growing down.
   const lanes = (k: string): Block | null => {
+    const side = !horizontal && !listed;
+    // Side by side, every lane's grid starts at one line, under the tallest of their cards.
+    const top = side ? Math.max(0, ...kids(k).filter((c) => !claimed.has(c) && tree.nodes.has(c)).map((c) => size(c).h)) : undefined;
     const mine: [string, Block][] = [];
-    for (const c of kids(k)) if (claim(c)) mine.push([c, lane(c)]);
+    for (const c of kids(k)) if (claim(c)) mine.push([c, lane(c, top)]);
     if (!mine.length) return null;
     const gap = mine.some(([c]) => shape.section?.(c)) ? g.section : g.lane;
-    const side = !horizontal && wraps.lanes === 0;
     across.set(k, side);
     const b: Block = { w: 0, h: 0, at: [], routes: [], heads: [], row: side, lead: mine[0][1].lead };
     let along = 0;
@@ -348,57 +360,111 @@ export interface Room {
   h: number;
   /** Kept clear around what's fitted. */
   pad: number;
-  /** Fit never zooms out further than this (the cards stop reading). */
+  /** Fit never zooms out further than this to frame everything (the cards stop reading). */
   floor: number;
+  /** …but down to this to keep what matters in view (titles still read; details have gone). */
+  brief?: number;
   /** Kept clear down the right while the canvas is bigger than the screen (the minimap's corner). */
   reserve?: number;
+  /** Fit pressed again: everything, however small. */
+  overview?: boolean;
 }
 
 /** The zoom that shows all of `r` in `room`, at most 1. */
 export const fitZoom = (r: Size, room: Room) => Math.min(1, (room.w - room.pad * 2) / Math.max(1, r.w), (room.h - room.pad * 2) / Math.max(1, r.h));
 
+/**
+ * The zoom Fit uses: everything, if that reads (or it's the overview); else, framed from the top,
+ * small enough that everything `important` (running, waiting on you, failed) is in view, between
+ * `brief` and `floor`. `all`: everything shows.
+ */
+export function fitPlan(positions: ReadonlyMap<string, Point>, size: (key: string) => Size, room: Room, important?: (key: string) => boolean): { k: number; all: boolean } {
+  const r = bounds(positions, size);
+  if (!r) return { k: 1, all: true };
+  const all = fitZoom(r, room);
+  if (room.overview || all >= room.floor) return { k: Math.max(MIN_ZOOM, all), all: true };
+  let right = 0;
+  let bottom = 0;
+  for (const [key, p] of positions)
+    if (important?.(key)) {
+      const s = size(key);
+      right = Math.max(right, p.x + s.w - r.x);
+      bottom = Math.max(bottom, p.y + s.h - r.y);
+    }
+  const k = bottom ? Math.min(room.floor, Math.max(room.brief ?? room.floor, fitZoom({ w: right, h: bottom }, { ...room, w: room.w - (room.reserve ?? 0) }))) : room.floor;
+  return { k, all: false };
+}
+
 const LINES = [1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 16];
 
 /**
- * The wraps that show this tree best at the zoom Fit will use in `room`: every number of a grid's
- * columns or rows (and of machines to a line, and growing down whether projects sit side by side) is laid
- * out. Everything fitting, the biggest zoom wins; nothing fits at the floor, the arrangement as
- * wide as the screen takes at that zoom (whole columns, clear of the minimap) and as short as that
- * allows wins, so what doesn't fit runs on below and never off the right. A wrap must earn 2 %.
+ * The wraps that show this tree best at the zoom Fit will use in `room` (`fitPlan`): every number
+ * of a grid's columns or rows, of machines to a line, growing down whether projects sit side by
+ * side, and growing right whether it's turned into a list (a phone always is) is laid out.
+ * Everything reads: the biggest zoom wins. Else what's important showing whole, then how much
+ * shows, none of it cut off at the right (clear of the minimap). A wrap must earn 2 %, turning
+ * 10 %, and a grid that leaves one card alone on its last row loses 3 %.
  */
-export function planWraps(tree: TreeLike, size: (key: string) => Size, shape: CanvasShape, room: Room): Wraps {
+export function planWraps(tree: TreeLike, size: (key: string) => Size, shape: CanvasShape, room: Room, important?: (key: string) => boolean): Wraps {
   let most = 1;
   for (const [k, n] of tree.nodes) if (shape.level(k) === "items") most = Math.max(most, n.children.length);
-  // Simplest first (a plain column), so a wrap that doesn't earn its keep loses the tie.
-  const lines = [...new Set([...LINES.filter((c, i) => c <= most || LINES[i - 1] < most), ...(shape.direction === "vertical" ? [0] : [])])].sort((a, b) => (shape.direction === "vertical" ? (b || Infinity) - (a || Infinity) : a - b));
-  const lanes: (0 | 1)[] = shape.direction === "vertical" ? [0, 1] : [0];
+  const phone = room.w < 640;
   const machines = new Set(tree.roots).size;
   const roots = machines < 2 ? [0] : [0, 1, 2, 3].filter((r) => r < machines);
-  let best = NO_WRAPS;
+  const turns = phone ? [true] : shape.direction === "horizontal" ? [false, true] : [false];
+  let best: Wraps = phone ? { ...NO_WRAPS, turn: true } : NO_WRAPS;
   let bestScore = -Infinity;
-  for (const r of roots)
-    for (const l of lanes)
-      for (const c of lines) {
-        const wraps: Wraps = { lines: c, lanes: l, roots: r };
-        const box = bounds(layoutCanvas(tree, size, shape, wraps).positions, size);
-        if (!box) return best;
-        const score = scoreFor(box, room);
-        if (score > bestScore * 1.02) (bestScore = score), (best = wraps);
-      }
+  for (const turn of turns) {
+    const down = turn || shape.direction === "vertical";
+    // Simplest first (a plain column), so a wrap that doesn't earn its keep loses the tie.
+    const lines = [...new Set([...LINES.filter((c, i) => c <= most || LINES[i - 1] < most), ...(down ? [0] : [])])].sort((a, b) => (down ? (b || Infinity) - (a || Infinity) : a - b));
+    const lanes: (0 | 1)[] = turn ? [1] : shape.direction === "vertical" ? [0, 1] : [0];
+    for (const r of roots)
+      for (const l of lanes)
+        for (const c of lines) {
+          const wraps: Wraps = { lines: c, lanes: l, roots: r, turn: turn || undefined };
+          const p = layoutCanvas(tree, size, shape, wraps);
+          let score = scoreFor(p.positions, size, room, important);
+          if (turn && !phone) score *= 0.9;
+          if (lonely(tree, shape, wraps)) score *= 0.97;
+          if (score > bestScore * 1.02) (bestScore = score), (best = wraps);
+        }
+  }
   return best;
 }
 
-function scoreFor(r: Size, room: Room): number {
-  const k = fitZoom(r, room);
-  if (k >= room.floor) return k;
-  // Read at the floor, from the top: how much shows, and none of it cut off at the right.
+function scoreFor(positions: ReadonlyMap<string, Point>, size: (key: string) => Size, room: Room, important?: (key: string) => boolean): number {
+  const r = bounds(positions, size);
+  if (!r) return 0;
+  const { k, all } = fitPlan(positions, size, room, important);
+  if (all) return k;
+  // Framed from the top: what's important that shows whole, how much shows, none cut off at the right.
   const w = room.w - room.pad * 2 - (room.reserve ?? 0);
   const h = room.h - room.pad * 2;
-  const wide = r.w * room.floor;
-  const shown = Math.min(1, w / wide) * Math.min(1, h / (r.h * room.floor));
-  return room.floor * shown * (wide <= w ? 1 : 0.5);
+  let want = 0;
+  let seen = 0;
+  for (const [key, p] of positions)
+    if (important?.(key)) {
+      const s = size(key);
+      want++;
+      if ((p.x + s.w - r.x) * k <= w && (p.y + s.h - r.y) * k <= h) seen++;
+    }
+  const shown = Math.min(1, w / (r.w * k)) * Math.min(1, h / (r.h * k));
+  return k * (0.55 + 0.45 * (want ? seen / want : 1)) * shown * (r.w * k <= w ? 1 : 0.5);
 }
 
+/** Whether a grid of 3 or more to a row leaves one card alone on its last row. */
+function lonely(tree: TreeLike, shape: CanvasShape, wraps: Wraps): boolean {
+  if (wraps.lines <= 0) return false;
+  const down = wraps.turn || shape.direction === "vertical";
+  for (const [k, n] of tree.nodes) {
+    if (shape.level(k) !== "items") continue;
+    const m = n.children.length;
+    const cols = down ? Math.ceil(m / wraps.lines) : Math.min(wraps.lines, m);
+    if (cols >= 3 && m % cols === 1) return true;
+  }
+  return false;
+}
 
 // ── the user's arrangement ──
 
