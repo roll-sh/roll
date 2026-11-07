@@ -5811,6 +5811,108 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
       model for classes without sort support (agent 103's box case, 610 pages against
       1,011), and the SP-GiST quad NaN after a later split.
 
+- **Index access at index cost, round 6** (round 25, agent 163; BENCH.md "Index access,
+  round 6"):
+  - Index builds of the non-btree methods, on a table too big to model:
+    - Every built-in method's build measures the table in its own pass over the rows
+      (`Ddl::measures_in_build`; btree's alone did). A GIN, GiST, SP-GiST, BRIN or hash build
+      read the rows twice, the second time decoding all of each.
+    - The measure sizes a row from its stored bytes for jsonb, tsvector, fixed-size
+      geometric values and arrays of fixed-size elements too (`storage::row::
+      stored_tuple_len`), so only the index's columns are decoded; arrays and geometric
+      values are stepped over without being built (`skip_value`).
+    - A build of a table whose measure is kept (`txn::unchanged`: nothing written since a
+      VACUUM) takes the heap's live pages from it (`Ddl::kept_live`), and an index build's
+      linked runs of entries no longer drop the table's kept measure (`storage::Store`: a
+      run of one table's index entries leaves its rows alone).
+    - GIN and BRIN indexes store no per-row entries, nor GiST ones but an exclusion
+      constraint's whose first operator is `=`, nor SP-GiST ones but a point index's
+      (`exec::scan::stores_entries`): nothing read them. Their scans read the search
+      structures (`exec/search.rs`) and the rows; the size models read the rows.
+      Foreign-key and lookup scans by leading columns use btree and hash entries only.
+    - The GIN and GiST models' record of the rows a build read (`RelFiles::gin_built`, a
+      HashSet of every data key) is kept only for a modelled table: a table too big to model
+      is laid out afresh (`forget`) before it is modelled again. It was a quarter of a GiST
+      build's time and 60-80 MB at 1M rows.
+  - Exclusion checks after a TRUNCATE in the same transaction (booking_bulk: TRUNCATE and a
+    3,000-row INSERT in one query string): `Txn::written_since` gave up on any range deletion
+    since the position asked for, so `search::own_rows` re-read every own write for every
+    row (3.1 s). A range deletion journals the writes of ours it takes (`delete_range`), so
+    the journal is complete; the committed rows it hides aren't writes of ours. 37 ms against
+    PostgreSQL's 72. Golden `a163_excl_truncate`.
+  - A bitmap heap scan doesn't check again the conditions its bitmap index scans checked on
+    each row they kept (`bitmap_checked`: an index's quals, an AND's children's), outside row
+    marks and only under a statement snapshot (the rows are the same versions); only the
+    rest of the filter is checked and only its columns decoded. gin_tsvector_and and
+    gin_jsonb_exists use 28% fewer instructions a query.
+  - Index scans count their returned and fetched tuples and blocks in one pending run
+    (`pgstat::count_index_tuple`), and index-only scans decode no index column the query
+    doesn't read (`ScanNode::index_row`).
+  - Index row size errors (agent 146's finding), `exec/rowsize.rs`: index_form_tuple's
+    "index row requires N bytes, maximum size is 8191", btree's `_bt_check_third_page`
+    ("index row size N exceeds btree version 4 maximum 2704 for index", its DETAIL with the
+    heap tuple, HINT, table and constraint fields) after the unique check, GIN array_ops'
+    "index row size N exceeds maximum 2712 for index" (the first key in sorted order),
+    sized as `relsize::index_tuple` sizes entries (pglz over 512 bytes). On INSERT, COPY
+    (at the multi-insert buffer's flush, as a unique violation; a COPY line in a CONTEXT is
+    cut at 100 bytes and "...", limit_printout_length), UPDATE (non-HOT), CREATE INDEX (the first entry past the limit in
+    index order, after the unique check; the parallel build too). The heap tuple stays dead
+    as for a unique violation. Golden `a163_index_row_size`. Probed and not modelled: GiST
+    (btree_gist's text key fails with XX000 "failed to add item to index page" past about 4
+    kB, and 8191 past 8 kB), BRIN (a summary of its range's min and max past 8,152 bytes fails
+    the build: "index row size 19216 exceeds maximum 8152"). Hash (a hash code) and SP-GiST text_ops (long
+    values are split into prefixes) never fail, as in the engine.
+  - btree_gist KNN over time and interval columns reads nearest-first: the grid places them
+    (`search::ord_key`; an interval by its span as interval_cmp orders them, as a float's
+    key). Golden `a163_knn_time_interval`.
+  - `tools/bench/access.rs`: `access-builds-load` / `access-builds`, every method's CREATE
+    INDEX over one `--rows` table (wall, the server's CPU, peak memory, pages).
+  - `txn::unchanged::skips()` counts per thread: other tests' VACUUMs (more of them skip now)
+    made big_tables' `vacuum_skips_unchanged_tables` flaky.
+  - Verified, on `0b5b5ae4` (origin's `86b51940` with the batch and agent 163's review
+    follow-up, below): release build; crate tests release 453 and debug 453 passed, 0 failed
+    (deep_input, goldens embedded, wire and shuffled); clippy with no warning in the files
+    touched (18 lines, as on origin); difftest smoke; isolation with the roll-* specs 1,811 /
+    1,812 permutations (intra-grant-inplace, as before); a full regress run (debug, private
+    reference) 51,148 / 51,150, 0 units changed against results.tsv; pg_dump_tap 14,817 /
+    14,817; contrib btree_gist 613 / 616, pg_trgm 261, citext 544, bloom 58, pgvector 915 /
+    915 (the plain OPTFLAGS="" reference); the footprint gate unchanged (fresh data directory
+    3.03 MB, idle CPU 0.02 s over 5 minutes, 100 idle sessions 31.7 MB).
+  - Left after round 6 (agent 163):
+    - GiST KNN over 2-D grids (polygon 2.75x, circle 1.77x, point-in-circle 2.07x): the
+      walk (`search/near.rs`) sweeps the x order and bounds a block by its x gap alone, so a
+      LIMIT 5 pushes the ~800 entries of a vertical strip (hypot and the exact distance each).
+      Next: strips of the x order sorted by y within each, walked outward in y, bounded by
+      hypot(strip gap, y gap). Statement overhead is the rest: a quarter of the KNN query's
+      profile is `parallel_part::start` building EXPLAIN text (`total_and_gathers`) on each
+      execution (agent 145's).
+    - GIN with thousands of matches (gin_tsvector_and 2.4x): point gets of the candidate rows
+      (`get_sorted`, `Block::seek` 18%), the tsvector decoded and the tsquery evaluated for
+      each. The structure's selection is exact for AND / OR of plain lexemes: its rows need no
+      qual check (visibility still needs the fetch).
+    - Builds still trail on btree (3.3x), BRIN (8.5x: the measure's pass and btree_pages_of's
+      sort of every key for a BRIN index whose relpages comes out 2,745 anyway), GIN (2.8-6.8x:
+      extraction, sorting the keys for the measure) and jsonb_path_ops (6.8x). CPU is about
+      twice wall: the flush and compaction of the entries written.
+    - Index-only `count(*)` over lineitem: 0.63-0.79 s against 0.11 s (PostgreSQL with two
+      workers); per-entry executor work on one thread. Parallel index-only scans, or a count
+      answered per fill without a row per entry, are the next step (executor).
+    - Skip scans: over a modelled table (300k rows) they match PostgreSQL (0.2 ms) with and
+      without 161's dead-run walk (71486e55); over the suite's 1M-row table (not modelled)
+      they take 0.95-1.16 ms against 0.22-0.34.
+    - An index row size error in a multi-insert COPY (no BEFORE ROW trigger) names a TID the
+      held rows don't have yet (`CopyLoad` places them by batch); its CONTEXT is right (the
+      line number, at the buffer's flush, as a unique violation's).
+    - The size models for indexes of a table too big to model: BRIN, GIN and hash relpages
+      and pg_relation_size (BENCH round 6's last paragraph). No owner now: through the
+      coordinator.
+    - booking_loop (2.8x, CPU 5x: per-row INSERTs in a DO loop with an exclusion check each),
+      char_correlated (3x) and the job-queue fetches (oban 2.1x, graphile 2.3x): statement
+      and executor overhead more than the index's.
+    - Not reached this round: the GiST size model for classes without sort support
+      (agent 103's box case, 610 pages against 1,011) and the SP-GiST quad tree's NaN after a
+      later split (144's "Left").
+
 - **Stored scans** (round 24, agent 149):
   - Recovered `eb44c2c9` and `78f4186f` onto `251924c1`. String comparisons
     use stored bytes when the operator and collation permit bytewise comparison.
@@ -7647,3 +7749,47 @@ directory. Shared heavy slots and jobs remain 4 and 2. The full Docker recovery
 suite was not repeated under the user's instruction; its parent baseline remains
 twelve passes and four WAL HTTP timeout failures. Nothing was pushed and no PR
 was created.
+
+
+### Agent 163 bounded review follow-up (2026-11-04)
+
+Serial index builds pass decoded INCLUDE columns through both ordinary and measured
+callbacks. Btree tuple formation (8191 bytes) precedes the build's uniqueness error;
+the 2704-byte check remains after uniqueness. The size shortcut excludes bpchar padding
+and non-ASCII encoding conversions. The char(2800)/2650-byte reference fixture already
+matched the prior source; its presence does not establish a prior user-visible failure.
+A PG18.6 probe also confirmed that two oversized GIN heap rows report the first sorted
+key, not the first heap row. Builds retain the earliest oversized key and error, without
+retaining all extracted keys. This models a single accumulation batch; error priority
+across PostgreSQL maintenance_work_mem flush boundaries remains unmodelled.
+
+Two retained migration/performance limits: an unchanged VACUUM measure can conservatively
+retain may_toast=true indefinitely, losing its skip optimization. Previously stored entries
+for indexes now classified as nonstored are ignored by current readers but consume disk
+until REINDEX or DROP INDEX. No wrong returned rows have been demonstrated from those
+orphan entries; this batch does not rewrite existing databases to reclaim them.
+
+New reference fixtures: a163_review_sizes and roll-bitmap-recheck (row locks, concurrent
+changed versions/EPQ, BitmapOr and UPDATE). Their exact outcomes are recorded in the
+owner's review-followup evidence; source integration and performance remain parent gates.
+
+Concurrent index follow-up: `rowsize::BuildSizes` shares formation/page-size validation
+between serial construction and `index_build_error` preflight. A formation error after
+an earlier duplicate wins; CIC and invalid-index REINDEX CONCURRENTLY preserve their
+not-ready INVALID index/copy through the existing commit-on-error path. A retry chooses
+a free `_ccnew` name instead of duplicating a failed copy's catalog name. The PG18.6
+`a163_review_concurrent` fixture checks errors, catalog state and repaired retries.
+`measured_serial_include_size` asserts the unmodelled heap/no-model state with workers
+zero and checks the reference's INCLUDE 2704/8191 errors. Bitmap isolation also covers
+qualifying indexed updates, filter-only row updates and UPDATE of the changed version.
+
+GIN oversized-key order currently uses `Value::cmp_total`, as in the existing per-row
+check; reference coverage here establishes byte/C ordering. Collation-sensitive error
+precedence has not been validated, and accumulation-flush ordering remains unmodelled.
+
+The initial measured-INCLUDE fixture failed during its optional VACUUM setup, before
+CREATE INDEX, on the 8300-byte raw row: HeapPacker::push subtract overflow at relsize.rs591,
+called by measure_rows_with's heap_pages. This failure and a targeted backtrace remain
+sealed, with no baseline attribution yet. The fixture uses the bulk insert's asserted
+unmodelled heap state directly; both 2816/8320 index error expectations are unchanged.
+This avoids the unrelated setup operation, without fixing or accepting the VACUUM gap.

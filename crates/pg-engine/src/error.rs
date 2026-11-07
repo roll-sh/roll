@@ -124,7 +124,18 @@ impl Frame {
                 table,
                 line,
                 raw: Some(raw),
-            } => format!("COPY {table}, line {line}: \"{raw}\""),
+            } => {
+                // (limit_printout_length: at most MAX_COPY_DATA_DISPLAY (100) bytes, cut at a
+                // character, then "...".)
+                let shown = match raw.len() > 100 {
+                    true => {
+                        let cut = (0..=100).rev().find(|&i| raw.is_char_boundary(i)).unwrap_or(0);
+                        format!("{}...", &raw[..cut])
+                    }
+                    false => raw.to_string(),
+                };
+                format!("COPY {table}, line {line}: \"{shown}\"")
+            }
             Frame::Copy { table, line, raw: None } => format!("COPY {table}, line {line}"),
         }
     }

@@ -1,0 +1,105 @@
+> SET max_parallel_maintenance_workers = 0
+-- SET
+
+> CREATE FUNCTION a163_cic_text(n int) RETURNS text LANGUAGE sql IMMUTABLE
+> AS $$ SELECT left(string_agg(md5(g::text), ''), n) FROM generate_series(1, (n+31)/32) g $$
+-- CREATE FUNCTION
+
+> CREATE TABLE a163_cic (k int, payload text)
+-- CREATE TABLE
+
+> INSERT INTO a163_cic VALUES (1, a163_cic_text(8300))
+-- INSERT 0 1
+
+> CREATE INDEX CONCURRENTLY a163_cic_i ON a163_cic(k) INCLUDE(payload)
+ERROR 54000: index row requires 8320 bytes, maximum size is 8191
+
+> SELECT c.relname, i.indisvalid, i.indisready FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid WHERE i.indrelid='a163_cic'::regclass ORDER BY c.relname
+relname:name | indisvalid:bool | indisready:bool
+a163_cic_i | f | f
+-- SELECT 1
+
+> REINDEX INDEX CONCURRENTLY a163_cic_i
+ERROR 54000: index row requires 8320 bytes, maximum size is 8191
+
+> SELECT c.relname, i.indisvalid, i.indisready FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid WHERE i.indrelid='a163_cic'::regclass ORDER BY c.relname
+relname:name | indisvalid:bool | indisready:bool
+a163_cic_i | f | f
+a163_cic_i_ccnew | f | f
+-- SELECT 2
+
+> UPDATE a163_cic SET payload='small'
+-- UPDATE 1
+
+> REINDEX INDEX CONCURRENTLY a163_cic_i
+-- REINDEX
+
+> SELECT c.relname, i.indisvalid, i.indisready FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid WHERE i.indrelid='a163_cic'::regclass ORDER BY c.relname
+relname:name | indisvalid:bool | indisready:bool
+a163_cic_i | t | t
+a163_cic_i_ccnew | f | f
+-- SELECT 2
+
+> DROP TABLE a163_cic
+-- DROP TABLE
+
+> CREATE TABLE a163_cic (k int, payload text)
+-- CREATE TABLE
+
+> INSERT INTO a163_cic VALUES (1,'first'), (1,'second'), (2,a163_cic_text(8300))
+-- INSERT 0 3
+
+> CREATE UNIQUE INDEX CONCURRENTLY a163_cic_u ON a163_cic(k) INCLUDE(payload)
+ERROR 54000: index row requires 8320 bytes, maximum size is 8191
+
+> SELECT c.relname, i.indisvalid, i.indisready FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid WHERE i.indrelid='a163_cic'::regclass ORDER BY c.relname
+relname:name | indisvalid:bool | indisready:bool
+a163_cic_u | f | f
+-- SELECT 1
+
+> REINDEX INDEX CONCURRENTLY a163_cic_u
+ERROR 54000: index row requires 8320 bytes, maximum size is 8191
+
+> SELECT c.relname, i.indisvalid, i.indisready FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid WHERE i.indrelid='a163_cic'::regclass ORDER BY c.relname
+relname:name | indisvalid:bool | indisready:bool
+a163_cic_u | f | f
+a163_cic_u_ccnew | f | f
+-- SELECT 2
+
+> DELETE FROM a163_cic WHERE k=2
+-- DELETE 1
+
+> REINDEX INDEX CONCURRENTLY a163_cic_u
+ERROR 23505: could not create unique index "a163_cic_u_ccnew1"
+DETAIL: Key (k)=(1) is duplicated.
+OBJECTS: schema=public table=a163_cic constraint=a163_cic_u_ccnew1
+
+> SELECT c.relname, i.indisvalid, i.indisready FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid WHERE i.indrelid='a163_cic'::regclass ORDER BY c.relname
+relname:name | indisvalid:bool | indisready:bool
+a163_cic_u | f | f
+a163_cic_u_ccnew | f | f
+a163_cic_u_ccnew1 | f | f
+-- SELECT 3
+
+> DELETE FROM a163_cic WHERE payload='second'
+-- DELETE 1
+
+> REINDEX INDEX CONCURRENTLY a163_cic_u
+-- REINDEX
+
+> SELECT c.relname, i.indisvalid, i.indisready FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid WHERE i.indrelid='a163_cic'::regclass ORDER BY c.relname
+relname:name | indisvalid:bool | indisready:bool
+a163_cic_u | t | t
+a163_cic_u_ccnew | f | f
+a163_cic_u_ccnew1 | f | f
+-- SELECT 3
+
+> DROP TABLE a163_cic
+-- DROP TABLE
+
+> DROP FUNCTION a163_cic_text
+-- DROP FUNCTION
+
+> RESET max_parallel_maintenance_workers
+-- RESET
+
