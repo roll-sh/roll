@@ -1217,7 +1217,6 @@ fn work_partial(
 ) -> bool {
     use super::partial::{Partials, Seg};
     let mut pa = Partials::new(spec);
-    let pa = &mut pa;
     // (Rows read and not counted in a part yet.)
     let mut read = 0u64;
     let send_part = |pa: &mut Partials, read: &mut u64| {
@@ -1227,7 +1226,6 @@ fn work_partial(
             None => true,
         }
     };
-    let full = |pa: &Partials| pa.rows() >= PART_ROWS;
     let top = d.stages.len() as u8;
     // (Rows a part can't take: sent in their place, the part so far first.)
     let mut serial: Vec<(Row, u8, bool)> = Vec::new();
@@ -1247,7 +1245,7 @@ fn work_partial(
         if let Some(pre) = &mut pre {
             let run = match scan.next_run() {
                 Some(Ok(run)) => run,
-                Some(Err(e)) => return send_part(pa, &mut read) && out.send(Msg::Err(e)).is_ok(),
+                Some(Err(e)) => return send_part(&mut pa, &mut read) && out.send(Msg::Err(e)).is_ok(),
                 None => break,
             };
             n += run.len();
@@ -1272,15 +1270,15 @@ fn work_partial(
                     taken += 1;
                 } else {
                     let (k, v) = scan.batch.get(i);
-                    if let Err(e) = partial_row(d, pa, &mut serial, scratch, lazy, top, k, v) {
-                        return send_part(pa, &mut read) && out.send(Msg::Err(e)).is_ok();
+                    if let Err(e) = partial_row(d, &mut pa, &mut serial, scratch, lazy, top, k, v) {
+                        return send_part(&mut pa, &mut read) && out.send(Msg::Err(e)).is_ok();
                     }
                 }
                 if !serial.is_empty() {
-                    if !send_part(pa, &mut read) || out.send(Msg::Seg(Seg::Rows(std::mem::take(&mut serial)))).is_err() {
+                    if !send_part(&mut pa, &mut read) || out.send(Msg::Seg(Seg::Rows(std::mem::take(&mut serial)))).is_err() {
                         return false;
                     }
-                } else if full(pa) && !send_part(pa, &mut read) {
+                } else if pa.rows() >= PART_ROWS && !send_part(&mut pa, &mut read) {
                     return false;
                 }
             }
@@ -1297,21 +1295,21 @@ fn work_partial(
         read += 1;
         let (k, v) = match r {
             Ok(e) => e,
-            Err(e) => return send_part(pa, &mut read) && out.send(Msg::Err(e)).is_ok(),
+            Err(e) => return send_part(&mut pa, &mut read) && out.send(Msg::Err(e)).is_ok(),
         };
-        if let Err(e) = partial_row(d, pa, &mut serial, scratch, lazy, top, k, v) {
-            return send_part(pa, &mut read) && out.send(Msg::Err(e)).is_ok();
+        if let Err(e) = partial_row(d, &mut pa, &mut serial, scratch, lazy, top, k, v) {
+            return send_part(&mut pa, &mut read) && out.send(Msg::Err(e)).is_ok();
         }
         if !serial.is_empty() {
-            if !send_part(pa, &mut read) || out.send(Msg::Seg(Seg::Rows(std::mem::take(&mut serial)))).is_err() {
+            if !send_part(&mut pa, &mut read) || out.send(Msg::Seg(Seg::Rows(std::mem::take(&mut serial)))).is_err() {
                 return false;
             }
-        } else if full(pa) && !send_part(pa, &mut read) {
+        } else if pa.rows() >= PART_ROWS && !send_part(&mut pa, &mut read) {
             return false;
         }
     }
     scratch.flush(&d.stages);
-    send_part(pa, &mut read) && out.send(Msg::Done(0, 0)).is_ok()
+    send_part(&mut pa, &mut read) && out.send(Msg::Done(0, 0)).is_ok()
 }
 
 /// Whether aggregating scans read fills as column batches (`vector`; tests compare both).
@@ -1504,7 +1502,6 @@ impl ParScan {
         if let Some(tx) = &self.jobs {
             let _ = tx.send(Job { scan, out });
         }
-    }
     }
 
     /// The next row or part (None: the scan's end).
