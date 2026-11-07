@@ -45,7 +45,8 @@ function frameFor(c, overview) {
     const s = size(k);
     return { key: k, parent: parent.get(k) ?? null, important: important.has(k), x: p?.x ?? null, y: p?.y ?? null, w: s.w, h: s.h };
   });
-  const minimap = c.chrome.canvas.w >= 1200 && !fit.all ? (c.chrome.minimap ?? { x: c.chrome.canvas.w - 192, y: c.chrome.canvas.h - 52 - 120, w: 180, h: 120 }) : null;
+  // The minimap shows only once the view is moved by hand: never at Fit.
+  const minimap = null;
   return {
     wraps,
     ms,

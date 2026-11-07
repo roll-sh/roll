@@ -195,9 +195,9 @@ describe("agents layout", () => {
         const b = bounds(p, sz)!;
         const { k } = fitPlan(p, sz, r);
         expect(k, `${direction} ${r.w}`).toBeGreaterThanOrEqual(0.5);
-        expect(b.w * k, `${direction} ${r.w}`).toBeLessThanOrEqual(r.w - 48 - r.reserve!);
+        expect(b.w * k, `${direction} ${r.w}`).toBeLessThanOrEqual(r.w - 48);
         // …and it uses that width: another column wouldn't fit.
-        expect((b.w + 324) * k, `${direction} ${r.w}`).toBeGreaterThan(r.w - r.pad * 2 - r.reserve! - (direction === "vertical" ? 3 * 324 * k : 0));
+        expect((b.w + 324) * k, `${direction} ${r.w}`).toBeGreaterThan(r.w - r.pad * 2 - (direction === "vertical" ? 3 * 324 * k : 0));
       }
     }
   });

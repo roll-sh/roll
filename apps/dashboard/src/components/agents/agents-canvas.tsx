@@ -1011,7 +1011,7 @@ export const AgentsCanvas = memo(forwardRef<
       <div data-chrome-band data-fade={BAND_FADE} aria-hidden className="absolute inset-x-0 bottom-0 h-(--covered) bg-[linear-gradient(to_bottom,transparent,var(--canvas)_24px)]" />
       {overlay}
       {ghost && <LaunchGhost {...ghost} />}
-      <Minimap ref={minimap} positions={positions} sizeOf={shownSize} nodes={graph.nodes} engine={engine} />
+      <Minimap ref={minimap} positions={positions} sizeOf={shownSize} nodes={graph.nodes} engine={engine} framed={following} />
       {/* At the top while a phone's waiting request sits at the bottom (`data-waiting` above), so both can be reached. */}
       <div data-zoom-bar className="chrome-in absolute right-3 bottom-3 flex items-center gap-0.5 rounded-[10px] border border-line-2 p-0.5 text-muted shadow-pop inset-shadow-highlight glass [[data-waiting]_&]:top-3 [[data-waiting]_&]:bottom-auto">
         <ToolButton label="Zoom out (−)" onClick={() => engine.current?.zoomBy(0.8)}>

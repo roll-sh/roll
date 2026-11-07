@@ -556,8 +556,6 @@ export interface Room {
   stretch?: number;
   /** …but down to this to keep what matters in view (titles still read; details have gone). */
   brief?: number;
-  /** Kept clear down the right while the canvas is bigger than the screen (the minimap's corner). */
-  reserve?: number;
   /** Fit pressed again: everything, however small… */
   overview?: boolean;
   /** …but never below this (a phone: titles still read); what doesn't fit then is framed from the top. */
@@ -587,10 +585,10 @@ export function fitPlan(positions: ReadonlyMap<string, Point>, size: (key: strin
       right = Math.max(right, p.x + s.w - r.x);
       bottom = Math.max(bottom, p.y + s.h - r.y);
     }
-  const k = bottom ? Math.min(room.floor, Math.max(room.brief ?? room.floor, fitZoom({ w: right, h: bottom }, { ...room, w: room.w - (room.reserve ?? 0) }))) : room.floor;
+  const k = bottom ? Math.min(room.floor, Math.max(room.brief ?? room.floor, fitZoom({ w: right, h: bottom }, room))) : room.floor;
   // Never a column cut at the right: a few points less, still brief, shows it whole (not a phone:
   // its Fit is its list at 100 %; two columns far out are Fit again's).
-  const across = (room.w - (room.reserve ?? 0) - ACROSS_PAD * 2) / Math.max(1, r.w);
+  const across = (room.w - ACROSS_PAD * 2) / Math.max(1, r.w);
   return { k: across < k && room.floor < 1 ? Math.max(ACROSS_FLOOR, across) : k, all: false };
 }
 
@@ -609,10 +607,6 @@ export const PHONE_LEAST = 0.55;
 const PHONE_FLOOR = 0.45;
 /** What the prompt bar keeps clear above it: no card ends closer than this to its top. */
 const CLEAR = 16;
-/** The minimap's corner (its width and margin), kept clear while the canvas is bigger than the screen. */
-export const MINIMAP_RESERVE = 192;
-/** The narrowest canvas the minimap shows on (`minimap.tsx`): beside a panel it was clutter. */
-export const MINIMAP_MIN_W = 1200;
 
 /**
  * The room a canvas `w` × `h` (above the prompt bar) is planned and fitted for: about 80 % of it
@@ -620,7 +614,7 @@ export const MINIMAP_MIN_W = 1200;
  */
 export function roomFor(w: number, h: number): Room {
   const phone = w < 640;
-  return { w, h, pad: phone ? 24 : Math.max(40, Math.min(w, h) * 0.06), floor: phone ? 1 : READABLE, stretch: phone ? 1 : STRETCH, brief: phone ? 1 : BRIEF_ZOOM, least: phone ? PHONE_LEAST : undefined, reserve: w >= MINIMAP_MIN_W ? MINIMAP_RESERVE : 0 };
+  return { w, h, pad: phone ? 24 : Math.max(40, Math.min(w, h) * 0.06), floor: phone ? 1 : READABLE, stretch: phone ? 1 : STRETCH, brief: phone ? 1 : BRIEF_ZOOM, least: phone ? PHONE_LEAST : undefined };
 }
 
 /** The view Fit frames in `room` (`fitPlan`): everything centred, or from the top at its zoom. */
@@ -628,11 +622,10 @@ export function fitTo(positions: ReadonlyMap<string, Point>, size: (key: string)
   const r = bounds(positions, size);
   if (!r) return { x: 0, y: 0, k: 1, all: true };
   const plan = fitPlan(positions, size, room, important);
-  const v = plan.all ? fitView(r, room.w, room.h, room.pad, 1, 0) : fitView(r, room.w - (room.reserve ?? 0), room.h, room.pad, plan.k, plan.k);
+  const v = plan.all ? fitView(r, room.w, room.h, room.pad, 1, 0) : fitView(r, room.w, room.h, room.pad, plan.k, plan.k);
   if (!plan.all) {
     // Wider than the padded screen (zoomed out to show every column whole): centred across it.
-    const wide = room.w - (room.reserve ?? 0);
-    if (r.w * v.k > wide - room.pad * 2) v.x = (wide - r.w * v.k) / 2 - r.x * v.k;
+    if (r.w * v.k > room.w - room.pad * 2) v.x = (room.w - r.w * v.k) / 2 - r.x * v.k;
     // Framed from the top, the canvas runs on under the prompt bar: no card ends just above it
     // (it read as tucked under the bar), they end well clear or run on under it.
     let down = 0;
@@ -724,12 +717,12 @@ function judge(tree: TreeLike, shape: CanvasShape, positions: ReadonlyMap<string
   const r = bounds(positions, size);
   if (!r) return { bad: 0, score: 0 };
   const { k, all } = fitPlan(positions, size, room, important);
-  const w = room.w - room.pad * 2 - (all ? 0 : (room.reserve ?? 0));
+  const w = room.w - room.pad * 2;
   const h = room.h - room.pad * 2;
   let bad = 0;
   // Cut off at the right: never (the canvas reads down, not across; a partial column is the worst
   // there is, worse than what matters waiting below).
-  if (r.w * k > (all ? w : room.w - (room.reserve ?? 0) - ACROSS_PAD * 2) + 1) bad += 4;
+  if (r.w * k > (all ? w : room.w - ACROSS_PAD * 2) + 1) bad += 4;
   // What's framed: all of it, or from the top as far as the screen goes.
   const framed = { x: r.x, y: r.y, w: Math.min(r.w, w / k), h: Math.min(r.h, h / k) };
   const dead = emptiest(positions, size, framed, 36);

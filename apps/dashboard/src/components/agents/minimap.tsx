@@ -3,7 +3,8 @@
 /**
  * The canvas from above (docs/code/agents.md, "Canvas"): every card as a small block in its place,
  * what's working or waiting in the accent, and the part on screen outlined. It shows only while the
- * canvas is bigger than the screen; a press or a drag on it moves the view there. Figma's and
+ * canvas is bigger than the screen and the view was moved by hand (at Fit the canvas fading under
+ * the prompt bar says there's more, and Fit keeps the whole width for the cards); a press or a drag on it moves the view there. Figma's and
  * Miro's minimaps; one SVG, its rects redrawn when the layout changes and its frame moved by the
  * engine's view callback (no React render per frame).
  */
@@ -29,12 +30,15 @@ export function Minimap({
   sizeOf,
   nodes,
   engine,
+  framed,
 }: {
   ref: Ref<MinimapHandle>;
   positions: ReadonlyMap<string, Point>;
   sizeOf: (key: string) => Size;
   nodes: ReadonlyMap<string, GraphNode>;
   engine: React.RefObject<CanvasEngine | null>;
+  /** The view is Fit's (following the work): no map over its corner. */
+  framed: React.RefObject<boolean>;
 }) {
   const root = useRef<HTMLDivElement>(null);
   // The frame's four edges, 1px boxes stretched by their transforms: moving them is the compositor's
@@ -62,7 +66,7 @@ export function Minimap({
       const { w, h } = e.viewport;
       // Only when there's more canvas than screen, and room for it beside the prompt bar (a side
       // panel or a conversation open narrows the canvas, and the bar ran over it).
-      const bigger = (world.w * v.k > w + 1 || world.h * v.k > h + 1) && w >= MIN_CANVAS_W;
+      const bigger = (world.w * v.k > w + 1 || world.h * v.k > h + 1) && w >= MIN_CANVAS_W && !framed.current;
       if (el.hidden === bigger) el.hidden = !bigger;
       if (!bigger) return;
       const x0 = (-v.x / v.k) * map.sx + map.x;
