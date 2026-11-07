@@ -83,12 +83,18 @@ punch out the edge ports. `refreshColors()` reruns on a theme change (the canvas
 `prefers-color-scheme`).
 
 - **Dot field:** a 28px grid, readable at rest. The pointer swells it, a click ripples it, and
-  it sweeps while anything runs. Keep it: the user likes it.
-- **Edges:** 1.25px, with a ring port at each end. Left to right, beziers from a parent's right
-  edge to a child's left. Top-down, a bezier from the middle of a machine's bottom to the middle
-  of a project's top, and for a listed card a trunk 14px inside its parent's left edge that turns
-  (an 8px radius) into the card's left side. Busy edges use the accent at 50% with one
-  travelling dot. Forks are dashed.
+  it sweeps while anything runs, through the open canvas only: never within 56 px of the cards'
+  extent (between small cards far out it read as a blob of blue dots behind the work). Keep it:
+  the user likes it.
+- **Edges:** 1.25px, orthogonal, ending exactly at the card's side, corners rounded (8 px world,
+  14 px in the overview, at most half a leg). Left to right, out of the parent's right side at its
+  header's middle (a face's middle) to a trunk in the gap before the children, then into each
+  child's left side at the same height. Top-down, out of the parent's bottom 1/2 indent in: down
+  the indent into a listed child's left side, or along a bus above a row of lanes and down into
+  each. A grid's later columns hang off a bus over the block, through the gaps between columns.
+  A parent's lines are one path stroked once, so a shared trunk is one line. Ring ports only on
+  cards at 60 % and closer (smaller they read as ticks). Busy edges use the accent at 50% with
+  one travelling dot. Forks are dashed.
 - **Busy:** the card's own border breathes between accent at 40% and 18% over 1.6s (still under
   reduced motion). No ring or second outline around the card: a doubled border reads as decoration.
 
@@ -127,8 +133,18 @@ The rules are in agents.md, "Canvas" › "At scale". How it looks:
   Quiet), the name at 12.5 px weight 500, the count in mono. Not a card: no shadow, no highlight.
 - **Status strip** (project card): 4 px high, rounded, 1 px gaps, segments in proportion with a
   3 px minimum; information, not decoration, so no gradient and no glow.
-- **Far label** (`FarLabel`): the card's own panel over its details, a 16 px dot (24 px further
-  out) and the title at 28 px, weight 600, `-0.02em` (56 px further out), two lines at most.
+- **Overview faces** (`FaceView`, canvas-face.tsx; agents.md "At scale"): never bigger type in a
+  card's box. World px, drawn for about 40 %. A thread is a pill 80 high, radius 22, the card's
+  frame (`bg-panel`, 2 px `border-line-2` or its tone's, `shadow-card`, the highlight) with the
+  project's 7 px full-height left edge, a 16 px status dot, the title on one line at 32 px weight
+  560 (`-0.01em`), 260–760 wide to fit it. A project is a header 150 high, radius 28, its colour
+  at 5 % behind it: the name at 40 px weight 600 (`-0.02em`), the meta at 26 px `text-muted`, the
+  status strip 10 px flush along the bottom edge (clipped by the radius, part of the frame). A
+  machine is the same header, 132 high, with its online dot after the name. A fold is a pill in
+  `text-muted` with `CornerDownRight` and two sheets under it. A status group is a pill on
+  `bg-panel-2` with its count in mono. The border takes `--line-3` on hover; focus is a 4 px
+  accent outline 6 px out. Below 22 % the text is a bar its own length (`--fg` at 14 %, a third
+  of the line's height, fully rounded).
 - **Minimap**: 168 × 112, glass like the zoom bar, 12 px above it; blocks are `--muted` for
   machines and projects, the line colour for the rest, accent for requests and busy work; the
   frame is a 1 px `--fg` line at 55 %. Hidden when everything fits, and on a phone.

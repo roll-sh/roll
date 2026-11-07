@@ -189,10 +189,9 @@ export function MachineNode({ machine }: { machine: Machine }) {
     });
   return (
     <Card width={272} tone={state === "offline" ? "muted" : undefined} tint={machineColor(machine)} label={`Machine ${machine.name}`}>
-      <FarLabel title={machine.name} />
       <TintedHeader>
         <MachineIcon machine={machine} tile className="size-6" />
-        <span className="min-w-0 flex-1 truncate text-[13.5px] font-semibold tracking-[-0.015em]">{machine.name}</span>
+        <span data-title className="min-w-0 flex-1 truncate text-[13.5px] font-semibold tracking-[-0.015em]">{machine.name}</span>
         <span className="flex shrink-0 items-center gap-1.5 text-[11px] text-subtle">
           <StatusDot status={machine.online ? "online" : "offline"} />
           <span className={coming(state) ? "shimmer" : ""}>{state}</span>
@@ -329,11 +328,10 @@ export function ProjectNode({ project, machine }: { project: Project; machine: M
       title={enter ? `Open ${project.name}: its threads by status (F)` : undefined}
       className={enter ? "cursor-pointer" : undefined}
     >
-    <Card width={256} tint={projectColor(project)} label={`Project ${project.name}`}>
-      <FarLabel title={project.name} />
+    <Card width={272} tint={projectColor(project)} label={`Project ${project.name}`}>
       <TintedHeader>
         <ProjectIcon project={project} className="size-6" />
-        <span className="min-w-0 flex-1 truncate text-[13.5px] font-semibold tracking-[-0.015em]">{project.name}</span>
+        <span data-title className="min-w-0 flex-1 truncate text-[13.5px] font-semibold tracking-[-0.015em]">{project.name}</span>
         <HoverActions>
           {startNew && (
             <Tool label={runnable ? "New agent here (or drag onto the canvas)" : (notReadyReason(machine) ?? "New agent here")} launch={`p:${project.id}`} disabled={!runnable} onClick={() => startNew(project.id)}>
@@ -434,7 +432,8 @@ function StatsRows({ stats, providers }: { stats: ProjectStats; providers: reado
  * running in the accent, failed in red, done in green, the quiet rest in the line colour.
  */
 function StatusStrip({ stats }: { stats: ProjectStats }) {
-  if (stats.threads < 2) return null;
+  // Only quiet threads: nothing to say, and an empty track reads as a lip under the card.
+  if (stats.threads < 2 || stats.waiting + stats.running + stats.failed + stats.done === 0) return null;
   const quiet = Math.max(0, stats.threads - stats.waiting - stats.running - stats.failed - stats.done);
   const parts: [number, string][] = [
     [stats.waiting, "bg-accent"],
@@ -538,7 +537,6 @@ export const ThreadCard = memo(function ThreadCard({ thread, machine, project, l
   const tone = thread.status === "error" ? "error" : running ? "busy" : thread.archived_at ? "muted" : done ? "done" : undefined;
   return (
     <Card width={296} tone={tone} tint={project ? projectColor(project) : undefined} edge onClick={() => openThread(thread.id)} label={`Thread ${thread.title}`}>
-      <FarLabel title={thread.title} tone={tone} />
       <div className="px-3.5 pt-3 pb-3">
         <div className="flex min-w-0 items-center gap-1.5 text-[11px] text-subtle">
           {project && <ProjectIcon project={project} className="size-3.5" />}
@@ -552,7 +550,7 @@ export const ThreadCard = memo(function ThreadCard({ thread, machine, project, l
           <span className="ml-auto flex shrink-0 items-center gap-1.5">{pill ? <StatusPill pill={pill} /> : <span className="tabular-nums" title="Last activity">{ago(lastActive(thread, lastRun))}</span>}</span>
         </div>
         <div className="mt-1.5 flex items-start gap-2">
-          <p className="line-clamp-2 min-w-0 flex-1 text-[13.5px] leading-snug font-medium tracking-[-0.01em]">{thread.title}</p>
+          <p data-title className="line-clamp-2 min-w-0 flex-1 text-[13.5px] leading-snug font-medium tracking-[-0.01em]">{thread.title}</p>
           {forkable && (
             <HoverActions>
               <Tool label="Fork (or drag onto the canvas)" launch={`t:${thread.id}`} onClick={fork}>
@@ -566,7 +564,7 @@ export const ThreadCard = memo(function ThreadCard({ thread, machine, project, l
             </span>
           )}
         </div>
-        {!(quiet && lastRun?.prompt.trim() === thread.title.trim()) && (
+        {!(quiet && lastRun?.prompt.trim().toLowerCase() === thread.title.trim().toLowerCase()) && (
         <p className={`mt-1 truncate text-[12px] ${running || pending.length ? "" : "text-muted"}`}>
           {thread.error ? (
             <span className="flex items-center gap-1 text-danger">
@@ -638,20 +636,6 @@ function lastActive(thread: Thread, run: Run | undefined): number {
 }
 
 
-/**
- * Semantic zoom: far out (`[data-far]` on the canvas) a card shows its name big, over its details:
- * at 40 % a 13.5 px title is 5 px on screen, this one 11 px; further out (`data-far="2"`) bigger
- * still. The card keeps its size, so the layout doesn't move as the zoom crosses a step.
- */
-export function FarLabel({ title, tone }: { title: string; tone?: string }) {
-  const dot = tone === "busy" ? "bg-accent" : tone === "error" ? "bg-danger" : tone === "done" ? "bg-ok" : "bg-subtle/60";
-  return (
-    <div aria-hidden className="absolute inset-0 z-[5] hidden items-center gap-3 rounded-[inherit] bg-panel px-5 [[data-far]_&]:flex">
-      <span className={`size-4 shrink-0 rounded-full ${dot} [[data-far='2']_&]:size-6`} />
-      <span className="line-clamp-2 min-w-0 text-[28px] leading-[1.15] font-semibold tracking-[-0.02em] [[data-far='2']_&]:text-[56px] [[data-far='2']_&]:leading-[1.05]">{title}</span>
-    </div>
-  );
-}
 
 // ── provider subagent ──
 
