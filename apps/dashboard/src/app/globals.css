@@ -603,6 +603,15 @@ body {
   animation: none !important;
 }
 
+/* …and skips its contents' style, layout and paint (it keeps its last size). Measured at 1000
+   threads (perf/gaps13-ab-r2.txt): zoom ~50 -> ~56 fps with no long tasks, and a filter clear
+   drilled into 206 makes ~40% fewer long tasks. The engine never measures cards, so nothing reads
+   the skipped layout; `data-off` lifts before a card reaches the screen. */
+[data-card][data-off] {
+  content-visibility: hidden;
+  contain-intrinsic-size: auto 280px auto 120px;
+}
+
 /* While the canvas's view moves, what breathes on it holds still (the engine's `data-moving`): a
    frame with any repaint paints, layerizes and commits the whole page again. Named, so only these
    elements restyle as it starts and stops. */

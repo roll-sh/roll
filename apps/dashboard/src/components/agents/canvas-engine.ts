@@ -621,10 +621,13 @@ export class CanvasEngine {
         // cards at 1000 threads repainted every frame, most of them out of sight.
         const s = this.size.get(k);
         let off = this.offCards.has(el);
-        if (s && this.w > 0 && !shifting) {
+        if (s && this.w > 0) {
           const left = next.x * vk + vx;
           const top = next.y * vk + vy;
-          off = left + s.w * vk < -OFF_MARGIN || left > this.w + OFF_MARGIN || top + s.h * vk < -OFF_MARGIN || top > this.h + OFF_MARGIN;
+          const outside = left + s.w * vk < -OFF_MARGIN || left > this.w + OFF_MARGIN || top + s.h * vk < -OFF_MARGIN || top > this.h + OFF_MARGIN;
+          // While the view moves, a card only comes back (`data-off` skips its paint: it would show
+          // blank); it goes off once the view rests.
+          off = shifting ? off && outside : outside;
         }
         if (off !== this.offCards.has(el)) {
           el.toggleAttribute("data-off", off);
