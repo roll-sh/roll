@@ -8,14 +8,12 @@ import { cn, mergeClass } from "./cn";
 
 export const Combobox = ComboboxPrimitive.Root;
 
-/** The search row at the top of a list: an icon, an underline that lights on focus (T3's `ComboboxSearchInput`). */
+/** The search row at the top of a list: an icon and the field over a hairline that runs edge to edge (T3's `ComboboxSearchInput`). */
 export function ComboboxSearchInput({ className, ...props }: ComboboxPrimitive.Input.Props) {
   return (
-    <div className="min-w-0 shrink-0 px-3 pt-2.5">
-      <div className="relative -translate-y-px border-b border-line pb-1.5 transition-colors focus-within:border-subtle">
-        <Search aria-hidden className="pointer-events-none absolute top-1.5 left-0 size-3.5 text-subtle" />
-        <ComboboxPrimitive.Input className={mergeClass(cn("h-6.5 w-full bg-transparent ps-5 text-[13px] leading-6.5 text-fg outline-none placeholder:text-subtle"), className)} {...props} />
-      </div>
+    <div className="relative min-w-0 shrink-0 border-b border-line px-3 py-1.5">
+      <Search aria-hidden className="pointer-events-none absolute top-1/2 left-3 size-3.5 -translate-y-1/2 text-subtle" />
+      <ComboboxPrimitive.Input className={mergeClass(cn("h-7 w-full bg-transparent ps-5 text-[13px] leading-7 text-fg outline-none placeholder:text-subtle"), className)} {...props} />
     </div>
   );
 }

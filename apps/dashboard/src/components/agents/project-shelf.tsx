@@ -61,7 +61,7 @@ export function ShelfControl({ data, focused, phone }: { data: AgentsData; focus
         }
       >
         <Archive className="size-3.5" strokeWidth={1.75} />
-        <span className="max-sm:sr-only @max-[820px]/views:sr-only">Shelf</span>
+        <span className="max-sm:sr-only @max-[520px]/views:sr-only">Shelf</span>
         {scoped > 0 && <span className="font-mono text-[10.5px] tabular-nums @max-[520px]/views:hidden">{scoped}</span>}
       </PopoverTrigger>
       <PopoverPopup

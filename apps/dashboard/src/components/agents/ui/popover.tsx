@@ -30,7 +30,7 @@ export function PopoverPopup({
   const layer = useLayer();
   return (
     <PopoverPrimitive.Portal {...layer}>
-      <PopoverPrimitive.Positioner className="z-[130]" side={side} align={align} sideOffset={sideOffset} alignOffset={alignOffset} anchor={anchor}>
+      <PopoverPrimitive.Positioner className="z-[130]" side={side} align={align} sideOffset={sideOffset} alignOffset={alignOffset} anchor={anchor} collisionPadding={8}>
         <PopoverPrimitive.Popup
           className={mergeClass(cn("relative flex max-h-(--available-height) max-w-(--available-width) rounded-lg text-fg outline-none [-webkit-app-region:no-drag]", glass, popupMotion), className)}
           {...props}

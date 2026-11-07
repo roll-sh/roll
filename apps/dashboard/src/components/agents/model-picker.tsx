@@ -312,7 +312,8 @@ function PickerContent({
   const olderOf = (t: Tab) => (typeof t === "string" ? 0 : all.filter((m) => m.provider === t.provider && m.legacy).length);
   let legacyRow: { provider: string; count: number; open: boolean } | null = null;
   let shown: PickerModel[];
-  if (searching) shown = searchModels(all, query, favorites);
+  // A provider's own models before an endpoint's copies of the same names (ties keep this order).
+  if (searching) shown = searchModels([...all.filter((m) => !m.info.via), ...all.filter((m) => m.info.via)], query, favorites);
   else {
     shown = rowsOf(tab);
     const older = olderOf(tab);
@@ -538,6 +539,13 @@ function PickerContent({
       </Combobox>
       {active && hasOptions && (
         <div ref={footer} data-model-picker-options className="shrink-0 border-t border-line p-1" onKeyDownCapture={(e) => moveBetweenRows(e, search.current)}>
+          {/* Whose options these are, said only when the picked model isn't in sight (a search, another tab). */}
+          {activeKey && !shown.some((m) => m.key === activeKey) && (
+            <p className="truncate px-2 pt-1 text-[11px] text-subtle">
+              {active.short_name ?? active.name}
+              {activeInfo && ` · ${activeInfo.name}`}
+            </p>
+          )}
           <ModelOptionsRows model={active} value={value} onEffort={setEffort} onOption={setOption} />
         </div>
       )}
@@ -645,7 +653,7 @@ function ModelRow({
       value={model.key}
       disabled={!!why}
       data-model-key={model.key}
-      className={cn("group relative w-full min-w-0 data-disabled:cursor-not-allowed data-disabled:opacity-60", selected && "bg-fg/[0.05]")}
+      className="group relative w-full min-w-0 data-disabled:cursor-not-allowed data-disabled:opacity-60"
       aria-selected={selected}
       title={why ? `${provider.name}: ${why}` : limit === "Limit reached" ? (usageSummary(provider, Date.now()) ?? undefined) : undefined}
     >
@@ -663,21 +671,18 @@ function ModelRow({
           </span>
         )}
         {info.custom && <span className="shrink-0 rounded border border-line-2 px-1 text-[10px] leading-4 text-subtle">Custom</span>}
-        {mixed && (
-          <span aria-hidden className="max-w-24 min-w-0 shrink-0 truncate text-[11px] text-subtle">
-            {provider.name}
-          </span>
-        )}
         {info.images === false && <span className="shrink-0 text-[11px] text-subtle">Text only</span>}
-        {mixed && info.via && (
-          <span className="min-w-6 max-w-28 shrink truncate text-[11px] text-subtle" title={`Listed by the endpoint ${info.via}`}>
-            via {info.via}
+        {/* One line of where it comes from: the provider, then the endpoint that lists it. */}
+        {mixed && (
+          <span aria-hidden className="min-w-0 shrink truncate text-[11px] text-subtle" title={info.via ? `${provider.name}, listed by the endpoint ${info.via}` : undefined}>
+            {provider.name}
+            {info.via && ` · via ${info.via}`}
           </span>
         )}
       </span>
       {limit && <span className="shrink-0 text-[11px] text-subtle">{limit}</span>}
       <span className="flex shrink-0 items-center gap-1.5">
-        {jump && !limit && <kbd className="font-mono text-[10px] text-subtle opacity-0 group-hover:opacity-100 group-data-highlighted:opacity-100 max-sm:hidden [@media(hover:none)]:hidden">{jump}</kbd>}
+        {jump && !limit && !selected && <kbd className="font-mono text-[10px] text-subtle opacity-0 group-hover:opacity-100 group-data-highlighted:opacity-100 max-sm:hidden [@media(hover:none)]:hidden">{jump}</kbd>}
         <button
           type="button"
           aria-label={label}
@@ -742,7 +747,7 @@ function ModelOptionsRows({ model, value, onEffort, onOption }: { model: ModelIn
       {reasoning && <ChoiceRow option={reasoning} value={effortValue(model, value.effort)} onChange={onEffort} />}
       {speed &&
         (speed.type === "boolean" ? (
-          <SwitchRow option={speed} value={optionValue(speed, value.options) === true} onChange={(v) => onOption(speed.id, v)} fast />
+          <SwitchRow option={speed} value={optionValue(speed, value.options) === true} onChange={(v) => onOption(speed.id, v)} />
         ) : (
           <ChoiceRow option={speed} value={optionValue(speed, value.options) as string | undefined} onChange={(v) => onOption(speed.id, v)} fast />
         ))}
@@ -793,7 +798,7 @@ function ChoiceRow({ option, value, onChange, fast = false }: { option: SelectOp
               type="button"
               aria-label={`${option.label}: ${current}`}
               title={option.description}
-              className="-me-1 flex h-6 min-w-0 cursor-pointer items-center gap-1 rounded-md px-2 text-[12px] text-fg outline-none hover:bg-fg/[0.06] focus-visible:ring-2 focus-visible:ring-accent/60 data-popup-open:bg-fg/[0.06]"
+              className="flex h-6.5 min-w-0 cursor-pointer items-center gap-1 rounded-lg bg-fg/[0.06] px-2.5 text-[12px] text-fg outline-none hover:bg-fg/[0.09] focus-visible:ring-2 focus-visible:ring-accent/60 data-popup-open:bg-fg/[0.09]"
             />
           }
         >
@@ -820,14 +825,11 @@ function ChoiceRow({ option, value, onChange, fast = false }: { option: SelectOp
   );
 }
 
-/** On or off toggles in place (T3's `OptionSwitchRow`); a speed's says so with a bolt. */
-function SwitchRow({ option, value, onChange, fast = false }: { option: BooleanOption; value: boolean; onChange: (v: boolean) => void; fast?: boolean }) {
+/** On or off toggles in place (T3's `OptionSwitchRow`). */
+function SwitchRow({ option, value, onChange }: { option: BooleanOption; value: boolean; onChange: (v: boolean) => void }) {
   return (
     <label data-option-row className={cn(OPTION_ROW, "cursor-pointer hover:bg-fg/[0.04]")} title={option.description}>
-      <span className={cn(OPTION_LABEL, "flex items-center gap-1.5")}>
-        {fast && <Zap aria-hidden className={cn("size-3 shrink-0", value && "fill-current text-fg")} />}
-        {option.label}
-      </span>
+      <span className={OPTION_LABEL}>{option.label}</span>
       <Switch size="sm" checked={value} onCheckedChange={onChange} aria-label={option.label} />
     </label>
   );

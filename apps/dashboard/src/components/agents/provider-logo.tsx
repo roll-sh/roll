@@ -62,7 +62,7 @@ export function ProviderLogo({ provider, className = "size-4" }: { provider: Pic
   const Logo = LOGOS[provider.id];
   if (Logo) return <Logo className={cn("shrink-0", className)} aria-hidden />;
   return (
-    <span aria-hidden className={cn("grid shrink-0 place-items-center rounded-[4px] bg-fg/[0.08] font-mono text-[7.5px] leading-none font-semibold tracking-[-0.04em] text-muted uppercase", className)}>
+    <span aria-hidden className={cn("grid shrink-0 place-items-center rounded-[4px] bg-fg/[0.1] text-[8px] leading-none font-semibold tracking-[-0.02em] text-soft uppercase", className)}>
       {providerInitials(provider.name || provider.id.replace(/^acp:/, ""))}
     </span>
   );

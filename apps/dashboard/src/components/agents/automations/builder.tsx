@@ -377,7 +377,7 @@ function AddStepMenu({ catalog, onPick, trigger, label = "Add a step" }: { catal
                               {step.needs_setup && <span className="rounded-[4px] border border-line-2 px-1 text-[10px] leading-[15px] text-subtle">Connect</span>}
                               {query.trim() && <span className="ml-auto shrink-0 text-[10.5px] text-subtle">{group}</span>}
                             </span>
-                            <span className="line-clamp-2 text-[11.5px] leading-snug text-subtle">{step.description}</span>
+                            <span className="line-clamp-2 text-[11.5px] leading-snug text-subtle">{plainText(step.description)}</span>
                           </span>
                         </ComboboxItem>
                       </div>
@@ -438,7 +438,7 @@ function TriggerCard({
                       {x.title}
                       {x.needs_setup && <span className="rounded-[4px] border border-line-2 px-1 text-[10px] leading-[15px] text-subtle">Connect</span>}
                     </span>
-                    <span className="line-clamp-2 text-[11.5px] leading-snug text-subtle">{x.description}</span>
+                    <span className="line-clamp-2 text-[11.5px] leading-snug text-subtle">{plainText(x.description)}</span>
                   </span>
                   {x.source === triggerSource(t) && <Check className="mt-0.5 size-3.5" />}
                 </MenuItem>
@@ -504,6 +504,9 @@ function cronFor(preset: Preset, time: string, day: string, was: string): string
   }
 }
 
+/** A catalog description as a menu shows it: its `code` marks dropped (a one-line hint can't set them). */
+const plainText = (s: string) => s.replace(/`/g, "");
+
 function zones(current: string): string[] {
   let all: string[] = [];
   try {
@@ -515,14 +518,32 @@ function zones(current: string): string[] {
   return [...set];
 }
 
-/** The zones as a searchable list (400-odd): named by their city, grouped by region, the full id searchable. */
+/** The zones as a searchable list (400-odd): named by their city with its UTC offset now, grouped by region, the full id searchable. */
 function zoneOptions(current: string): PickerOption[] {
-  return zones(current)
+  zoneCache ??= new Map();
+  const cached = zoneCache.get(current);
+  if (cached) return cached;
+  const now = new Date();
+  const options = zones(current)
     .sort((a, b) => (a === "UTC" ? -1 : b === "UTC" ? 1 : a.localeCompare(b)))
-    .map((z) => {
+    .map((z): PickerOption => {
       const cut = z.indexOf("/");
-      return cut < 0 ? { id: z, label: z } : { id: z, label: z.slice(cut + 1).replace(/_/g, " ").replace(/\//g, " · "), key: z, group: z.slice(0, cut) };
+      const hint = offsetOf(z, now);
+      return cut < 0 ? { id: z, label: z, hint } : { id: z, label: z.slice(cut + 1).replace(/_/g, " ").replace(/\//g, " · "), key: z, hint, group: z.slice(0, cut) };
     });
+  zoneCache.set(current, options);
+  return options;
+}
+let zoneCache: Map<string, PickerOption[]> | undefined;
+
+/** "UTC+2", "UTC−3:30" for a zone right now; nothing if the browser can't say. */
+function offsetOf(zone: string, at: Date): string | undefined {
+  try {
+    const part = new Intl.DateTimeFormat("en-US", { timeZone: zone, timeZoneName: "shortOffset" }).formatToParts(at).find((p) => p.type === "timeZoneName")?.value;
+    return part?.replace(/^GMT/, "UTC").replace("-", "−").replace(/^UTC$/, "UTC±0");
+  } catch {
+    return undefined;
+  }
 }
 
 function TriggerBody({
