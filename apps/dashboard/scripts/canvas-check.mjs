@@ -224,7 +224,8 @@ async function setPanel(page, open) {
     });
   }
   void isOpen;
-  await page.waitForTimeout(500);
+  // The canvas reframes for its new width after a debounce (and the panel slides 260 ms).
+  await page.waitForTimeout(900);
 }
 
 async function runGroup(browser, g, ctxOpts) {
@@ -377,7 +378,8 @@ async function runGroup(browser, g, ctxOpts) {
         r.fails.push(...c1.fails, ...c2.fails, ...c3.fails);
         r.metrics = { auto: c1.metrics, fit: c2.metrics, fit2: c3.metrics, wraps: frames.fit1.snap.wraps };
         // h: everything fits → Fit again changes nothing.
-        if (frames.fit1.snap.plan?.all) {
+        // (Fit pressed on a canvas already framed goes to the overview: then the second press comes back.)
+        if (frames.fit1.snap.plan?.all && !frames.fit1.snap.overview) {
           const a = frames.fit1.snap.goal;
           const b = frames.fit2.snap.goal;
           const m = moved(frames.fit1, frames.fit2);
