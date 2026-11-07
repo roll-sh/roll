@@ -1395,7 +1395,7 @@ mod tests {
         let key = |i: u32| mvcc_key_for_test(format!("k{i:06}").as_bytes(), 5);
         let mut w = SstWriter::create(dir.path(), 1, true).unwrap();
         for i in 0..20_000 {
-            w.add(&key(i), Some(b"v")).unwrap();
+            w.add(&key(i), Some(&b"v"[..])).unwrap();
         }
         let meta = w.finish().unwrap();
         let r = SstReader::open(dir.path(), meta.clone(), cache.clone()).unwrap();
