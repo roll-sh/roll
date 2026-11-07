@@ -1769,17 +1769,19 @@ impl Session {
     }
 
     /// A custom plan: the statement's analysis with the parameters' values put in
-    /// (`litplan::values_custom`), or bound afresh with them as constants.
+    /// (`litplan::values_custom`; `reuse`: the custom plan before with its scan chosen again
+    /// when it can be), or bound afresh with them as constants.
     fn bound_custom(
         &mut self,
         p: &Prepared,
         stmt: &Node,
         params: &[Value],
+        reuse: bool,
     ) -> Result<Arc<BoundQuery>> {
         self.ensure_txn();
-        let b = match self.values_custom(p, stmt, params) {
+        let b = match self.values_custom(p, stmt, params, reuse) {
             Some(b) => b,
-            None => self.bound_custom_afresh(p, stmt, params)?,
+            None => Arc::new(self.bound_custom_afresh(p, stmt, params)?),
         };
         if let Some(fixed) = &p.plans.lock().fixed_result
             && *fixed != result_row(&b.cols)
@@ -1790,7 +1792,7 @@ impl Session {
             )
             .routine("RevalidateCachedQuery"));
         }
-        Ok(Arc::new(b))
+        Ok(b)
     }
 
     /// A custom plan bound afresh: the statement with the parameters' values as constants.
@@ -1897,7 +1899,7 @@ impl Session {
                 // (Debug builds: it is the custom plan, costing what that does.)
                 #[cfg(debug_assertions)]
                 {
-                    let own = self.bound_custom(p, stmt, params)?;
+                    let own = self.bound_custom(p, stmt, params, false)?;
                     assert!(litplan::same_plan(&own, &bq, &p.param_types, params), "custom plan of {:?}", p.sql);
                     let c = self.plan_cost(&own, params, true);
                     let cost = cost.unwrap_or_else(|| self.plan_cost(&bq, params, true));
@@ -1919,7 +1921,7 @@ impl Session {
                 }
                 return Ok((bq, true));
             }
-            let bq = self.bound_custom(p, stmt, params)?;
+            let bq = self.bound_custom(p, stmt, params, share)?;
             let version = self.txn.as_ref().map_or(0, |t| t.borrow().catalog().version);
             let first = p.plans.lock().first_custom.take();
             let learns = share && self.param_learns(p);

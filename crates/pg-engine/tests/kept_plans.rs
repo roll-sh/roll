@@ -327,3 +327,50 @@ fn generic_cost_uses_choice_context_after_parse() {
     println!("Parse seq_page_cost=500; six Binds after RESET: {row:?}");
     assert_eq!((row[0].clone(), row[1].clone()), (Value::Int8(1), Value::Int8(5)));
 }
+
+/// A custom plan of a lone scan is the one before with its scan's path chosen again for the
+/// new values (`Analyzed::rechosen` over the planner's `ScanChoice::rechoose`) while the same
+/// path wins and the sizes planning read hold: a range wide enough for another path, a table
+/// grown since, DDL and EXPLAIN EXECUTE plan afresh. Debug builds compare every such plan and
+/// its cost with planning the values.
+#[test]
+fn custom_plans_choose_the_scan_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = engine_session(open_store(dir.path()), "rechoose");
+    s.query("CREATE TABLE t (id int PRIMARY KEY, v int NOT NULL)").unwrap();
+    s.query("INSERT INTO t SELECT g, g % 13 FROM generate_series(1, 5000) g").unwrap();
+    s.query("ANALYZE t").unwrap();
+    let range = "SELECT id, v FROM t WHERE id BETWEEN $1 AND $2 ORDER BY id";
+    let first = |lo: i64| format!("{:?}", Value::Int4(lo.max(1) as i32));
+    let run = |s: &mut pg_engine::session::Session, lo: i64, hi: i64| {
+        ext(s, "rr", range, &[Some(&lo.to_string()), Some(&hi.to_string())]).unwrap()
+    };
+    let used = s.rechosen_custom_uses();
+    for (lo, hi) in [(1, 100), (17, 116), (400, 499), (4950, 5049), (30, 129)] {
+        assert_eq!(run(&mut s, lo, hi), first(lo));
+    }
+    // (The first is checked against binding afresh; the ones after are chosen again.)
+    assert!(s.rechosen_custom_uses() >= used + 3, "{}", s.rechosen_custom_uses() - used);
+    // Every range, a whole-table one (another path) among them, as planning gives it.
+    s.query("SET plan_cache_mode = force_custom_plan").unwrap();
+    for (lo, hi) in [(1, 5000), (2, 101), (-50, 3), (100, 99), (2500, 2600)] {
+        let want = if hi < lo.max(1) { "SELECT 0".to_string() } else { first(lo) };
+        assert_eq!(run(&mut s, lo, hi), want, "{lo} {hi}");
+    }
+    let counts = s.query("SELECT generic_plans, custom_plans FROM pg_prepared_statements WHERE name = 'rr'").unwrap();
+    assert_eq!(counts.last().unwrap().rows[0], vec![Value::Int8(0), Value::Int8(10)]);
+    // EXPLAIN EXECUTE plans afresh and shows the values.
+    s.query("PREPARE rx (int, int) AS SELECT id, v FROM t WHERE id BETWEEN $1 AND $2 ORDER BY id").unwrap();
+    for lo in [5, 50, 500] {
+        assert_eq!(one(&mut s, &format!("EXECUTE rx({lo}, {})", lo + 99)), Some(Value::Int4(lo)));
+    }
+    let plan = s.query("EXPLAIN (COSTS OFF) EXECUTE rx(7, 106)").unwrap();
+    let text: Vec<String> = plan.last().unwrap().rows.iter().map(|r| format!("{:?}", r[0])).collect();
+    assert!(text.iter().any(|l| l.contains("(id >= 7) AND (id <= 106)")), "{text:?}");
+    // A table grown since and DDL: planned again, the same rows.
+    s.query("INSERT INTO t SELECT g, g % 13 FROM generate_series(5001, 9000) g").unwrap();
+    assert_eq!(run(&mut s, 8990, 9089), first(8990));
+    s.query("CREATE INDEX ON t (v)").unwrap();
+    assert_eq!(run(&mut s, 3, 102), first(3));
+    assert_eq!(run(&mut s, 4, 103), first(4));
+}
