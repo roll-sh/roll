@@ -2022,7 +2022,8 @@ impl NameBounds {
 /// pg_class's rows, in that order), made alone as `rows` makes it (`exec/nodes.rs`
 /// `LazyRowsNode::peek`). None: past the last; Some(None): not shown (its schema dropped).
 pub fn class_builtin_row(ctx: &ExecCtx, at: usize) -> Result<Option<Option<Row>>> {
-    let Some(r) = super::static_rows::rows(SysTable::PgClass).get(at) else { return Ok(None) };
+    let all = super::static_rows::rows(SysTable::PgClass);
+    let Some(r) = all.get(at) else { return Ok(None) };
     let oid = super::static_rows::oid_at(r, 0);
     Ok(Some(rows_generated_for(SysTable::PgClass, ctx, Some(oid))?.into_iter().next()))
 }
