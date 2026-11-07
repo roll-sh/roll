@@ -728,8 +728,9 @@ function judge(tree: TreeLike, shape: CanvasShape, positions: ReadonlyMap<string
   const dead = emptiest(positions, size, framed, 36);
   if (dead.w * dead.h >= 0.15 * framed.w * framed.h && dead.w >= 0.3 * framed.w && dead.h >= 0.3 * framed.h) bad++;
   // A grid of two or more in one column where the screen has room for two from where it starts
-  // (whatever sits beside it: a tall single column beside another reads as badly).
-  if (k < 0.999)
+  // (whatever sits beside it: a tall single column beside another reads as badly), at 100 % too
+  // (a phone's list is one column by design).
+  if (room.floor < 1)
     for (const [key, n] of tree.nodes) {
       if (shape.level(key) !== "items" || n.children.length < 2) continue;
       const xs = new Set<number>();
@@ -748,11 +749,13 @@ function judge(tree: TreeLike, shape: CanvasShape, positions: ReadonlyMap<string
         break;
       }
     }
-  // Everything reads: the zoom (and a sliver for the layout that fills the room best, at 100 %);
+  // Everything reads: the zoom; at 100 %, where every arrangement ties, the one that fills the
+  // room best (enough to earn a wrap: a 2-wide grid in the middle of a wide window read as lost);
   // below 90 %, a layout that leaves most of the room empty breaks a constraint (a phone is one
   // column wide whatever it does).
   if (all && k < 0.9 && room.w >= 640 && (r.w * k * r.h * k) / (room.w * room.h) < 0.6) bad++;
-  if (all) return { bad, score: k + 0.01 * Math.min(1, (r.w * k) / w) * Math.min(1, (r.h * k) / h) };
+  const fill = Math.min(1, (r.w * k) / w) * Math.min(1, (r.h * k) / h);
+  if (all) return { bad, score: k + (k > 0.999 && room.floor < 1 ? 0.5 : 0.01) * fill };
   // Part of it, framed from the top: what's important showing whole, then how many cards do; always
   // under any layout that shows everything (that reads down to `stretch`).
   let want = 0;

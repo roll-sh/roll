@@ -126,7 +126,7 @@ export function checkFrame(f, label, { fit }) {
       const left = Math.min(...ks.map((n) => L.get(n.key).x));
       const cw = Math.max(...ks.map((n) => n.w));
       const need = (2 * cw + 28) * k;
-      if (k < 0.995 && free.w - reserve - CLEAR - left >= need) say("d", `${p}: ${ks.length} cards in one column, ${Math.round(free.w - reserve - left)}px free for ${Math.round(need)}`);
+      if (free.w - reserve - CLEAR - left >= need) say("d", `${p}: ${ks.length} cards in one column, ${Math.round(free.w - reserve - left)}px free for ${Math.round(need)}`);
     }
   }
   // l: not everything shown though all of it would read a few points smaller (≥ 65 %).
