@@ -466,7 +466,9 @@ After each wave of pushes (every 3-4 hours, or 4+ code commits) the full suite r
 head in one heavy job (HANDOFF, machine rules): the guard above, debug and release crate tests,
 `crash_random` seeds 1-30 x 4 rounds (release), full regress on a private reference (0 units
 changed against `tests/regress/results.tsv`), isolation, pg_dump_tap. A failure is bisected to
-its commit and sent to the coordinator.
+its commit and sent to the coordinator. `tools/verification-train.sh` is the suite's heavy job
+(started with `tools/heavy-bg.sh`; it checks out origin's head when its slot comes, and leaves the
+checkout detached there); its header names the containers and ports it needs.
 
 | train | head | guard | crate tests | crash_random | regress | isolation | pg_dump_tap |
 |---|---|---|---|---|---|---|---|
