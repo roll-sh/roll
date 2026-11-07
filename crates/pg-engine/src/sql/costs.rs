@@ -685,10 +685,10 @@ impl Est<'_> {
     /// input routine) evaluated as estimate_expression_value evaluates it.
     fn constant(&self, e: &Expr) -> Option<Option<Value>> {
         if let Expr::Cast(x, from, to, explicit) = strip(e)
-            && let Expr::Const(v, _) = strip(x)
+            && let Some(Some(v)) = self.constant(x)
             && !v.is_null()
         {
-            return Some(crate::types::cast::cast_value(v.clone(), from, to, self.fmt, *explicit).ok());
+            return Some(crate::types::cast::cast_value(v, from, to, self.fmt, *explicit).ok());
         }
         constant(e)
     }

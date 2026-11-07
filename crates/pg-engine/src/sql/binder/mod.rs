@@ -785,6 +785,9 @@ pub struct Binder<'b, 'a> {
     pub(crate) fmgr_call: bool,
     /// A custom plan: `$n` is its value.
     pub param_consts: bool,
+    /// A custom plan's value cast by a routine that isn't immutable was left to run
+    /// (`fold_cast`): `custom::estimate_casts` evaluates such casts as planning does.
+    pub kept_casts: bool,
     /// An analysis to be kept: where its SELECT's own level placed the WHERE is noted
     /// (`custom::WhereSite`), for custom plans made from it (`Analyzed::bind_values`).
     pub keep_site: bool,
@@ -948,6 +951,7 @@ impl<'b, 'a> Binder<'b, 'a> {
             insert_locs: Vec::new(),
             fmgr_call: false,
             param_consts: false,
+            kept_casts: false,
             keep_site: false,
             where_site: custom::Sites::None,
             unreachable: Vec::new(),
@@ -2447,6 +2451,7 @@ impl<'b, 'a> Binder<'b, 'a> {
             && !matches!(from, DataType::Unknown)
             && !crate::sql::expr::cast_immutable(&from, &to)
         {
+            self.kept_casts = true;
             return Ok(Expr::Cast(Box::new(e), from, to, explicit));
         }
         if let Expr::Const(v, _) = &e

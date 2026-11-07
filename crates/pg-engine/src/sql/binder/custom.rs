@@ -280,3 +280,42 @@ fn has_param(e: &Expr) -> bool {
     found
 }
 
+/// A custom plan's casts of its values left to run (`Binder::kept_casts`): PostgreSQL's
+/// selectivity estimates evaluate the operands of a scan's restriction clauses
+/// (estimate_expression_value in get_restriction_variable and scalararraysel), so a value
+/// a cast's input routine rejects fails the plan while it is made, a scan's clauses in
+/// the order they are written.
+pub fn estimate_casts(plan: &Plan, ctx: &ExecCtx) -> Result<()> {
+    fn stale(e: &Expr) -> bool {
+        let mut found = false;
+        e.walk(&mut |x| {
+            found |= matches!(x, Expr::Cast(c, from, to, _)
+                if matches!(**c, Expr::Const(ref v, _) if !v.is_null()) && !crate::sql::expr::cast_immutable(from, to));
+        });
+        found
+    }
+    fn reads_row(e: &Expr) -> bool {
+        let mut found = false;
+        e.walk(&mut |x| found |= matches!(x, Expr::Col(..)));
+        found
+    }
+    fn clause(e: &Expr, ctx: &ExecCtx) -> Result<()> {
+        let operands: Vec<&Expr> = match e {
+            Expr::And(v) | Expr::Or(v) => return v.iter().try_for_each(|x| clause(x, ctx)),
+            Expr::Not(x) => return clause(x, ctx),
+            Expr::ArrayOp { left, right, .. } => vec![&**left, &**right],
+            Expr::Call(_, args, _) if args.len() == 2 && args.iter().any(reads_row) => args.iter().collect(),
+            _ => return Ok(()),
+        };
+        for x in operands {
+            if !reads_row(x) && stale(x) {
+                eval(x, &[], ctx)?;
+            }
+        }
+        Ok(())
+    }
+    if let Plan::Scan(s) = plan {
+        s.written.iter().try_for_each(|w| clause(w, ctx))?;
+    }
+    crate::sql::explain::plan_inputs(plan).into_iter().try_for_each(|p| estimate_casts(p, ctx))
+}
