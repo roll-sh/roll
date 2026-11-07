@@ -244,6 +244,7 @@ export const AgentsCanvas = memo(forwardRef<
     },
     [graph],
   );
+  const planned = useRef<{ sig: string; wraps: Wraps } | null>(null);
   /** The layout: the cards' measured sizes, wrapped the way that shows them best on this screen (`planWraps`). */
   const shown = useMemo((): Placement & { size: (k: string) => Size; wraps: Wraps; shape: CanvasShape } => {
     const size = (k: string): Size => {
@@ -255,7 +256,19 @@ export const AgentsCanvas = memo(forwardRef<
     const spacing = density === "compact" ? COMPACT_SPACING : SPACING;
     // A phone is one list of cards as wide as each other: no indents (the trunk runs beside them).
     const shape: CanvasShape = { direction, level, section: isSection, spacing: screen.w < 640 ? { horizontal: spacing.horizontal, vertical: { ...spacing.vertical, indent: 0 } } : spacing };
-    const wraps = wrap ? planWraps(arranged, size, shape, { ...roomFor(screen.w, screen.h), overview }, important) : NO_WRAPS;
+    // Planning lays the canvas out many ways (~100 ms at 1000 threads): only again when something it
+    // reads changed (the tree, a card's size, what matters, the room), not for every streamed record.
+    let wraps = NO_WRAPS;
+    if (wrap) {
+      const parts = [direction, density ?? "", screen.w, screen.h, overview, arranged.roots.join(",")];
+      for (const [k, n] of arranged.nodes) {
+        const s = size(k);
+        parts.push(`${k} ${s.w}x${s.h}${important(k) ? "!" : ""}>${n.children.join(",")}`);
+      }
+      const sig = parts.join("|");
+      wraps = planned.current?.sig === sig ? planned.current.wraps : planWraps(arranged, size, shape, { ...roomFor(screen.w, screen.h), overview }, important);
+      planned.current = { sig, wraps };
+    }
     return { ...layoutCanvas(arranged, size, shape, wraps), size, wraps, shape };
   }, [graph, sizeOf, direction, density, level, isSection, wrap, arranged, screen, overview, important]);
   const { positions } = shown;
@@ -360,9 +373,16 @@ export const AgentsCanvas = memo(forwardRef<
       if (r.width && r.height) setScreen((s) => (s.w === step(r.width) && s.h === step(r.height - coveredBelow()) ? s : { w: step(r.width), h: step(r.height - coveredBelow()) }));
     };
     shape();
-    // The prompt bar mounts (and grows) after the canvas: the room above it changes with it.
+    // The prompt bar mounts (once there's a machine) and grows after the canvas: the room above it
+    // changes with it.
     const bar = new ResizeObserver(shape);
-    if (keepClear?.current) bar.observe(keepClear.current);
+    let find = 0;
+    const attach = () => {
+      const el = keepClear?.current;
+      if (el) bar.observe(el);
+      else find = requestAnimationFrame(attach);
+    };
+    attach();
     const ro = new ResizeObserver(() => {
       shape();
       const now = c.getBoundingClientRect().width;
@@ -375,6 +395,7 @@ export const AgentsCanvas = memo(forwardRef<
     return () => {
       ro.disconnect();
       bar.disconnect();
+      cancelAnimationFrame(find);
       clearTimeout(t);
     };
     // The prompt bar's element is there for the canvas's lifetime.

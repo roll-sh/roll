@@ -243,13 +243,27 @@ state, or draw a project's logo inline (only in an `<img>`).
 - **Canvas panel:** `mx-2 mb-2 rounded-xl border border-line bg-canvas`. On a phone it's full
   bleed.
 - **Zoom bar:** glass, `rounded-[10px]`, `shadow-pop`, highlight, 28px buttons, the zoom in
-  tabular mono. Fit (`fitPlan`) shows everything if that reads (75 % or more, a phone 100 %);
-  else, framed from the top, it zooms out as far as 55 % (titles still read) to keep everything
-  running, waiting on you or failed in view, clear of the prompt bar and the minimap's corner. The
-  layout is planned for that zoom (`planWraps`); growing right, when the machine and project cards
-  would starve the grids it lists down instead (each card over what it holds, the grids the
-  whole width), and a phone always does. Fit again, when the first couldn't show everything, lays
-  the canvas out for everything at once and frames it; when everything shows, it only refits.
+  tabular mono. Fit (`fitPlan`, `fitTo`) shows everything if that reads at 65 % or more (a phone
+  100 %); else, framed from the top, it zooms out as far as 55 % (titles still read) to keep
+  everything running, waiting on you or failed in view, clear of the prompt bar and the minimap's
+  corner, and no card ends just above the bar. The layout is planned for that zoom (`planWraps`)
+  with constraints first (see "The canvas at scale"). Fit again, when the first couldn't show
+  everything, lays the canvas out for everything at once and frames it (a phone stops at 55 %:
+  two columns of titles, never bars); when everything shows, it only refits. Zooming never lays
+  the canvas out again: cards keep the size they have at full detail while zoomed out.
+- **The layout-quality checker** (`apps/dashboard/scripts/canvas-check.mjs`): after any change to
+  the canvas's layout, Fit, cards' sizes or chrome over the canvas, run it. It loads a matrix of
+  owners (ada, bea, `?demo=busy`, `?demo=1000`, northwind) × window sizes (1440×900, 2000×1020,
+  1800×1960, a 390×844 phone) × direction × a side panel, plus the user's reported cases, in real
+  Chromium or WebKit, and checks hard constraints on Fit, Fit again and zoom steps: nothing under
+  the prompt bar, zoom bar or minimap or within 16 px of an edge; no overlaps; what matters in view
+  after Fit (waived, and said so, when it can't all read at 55 %); no grid one column wide with
+  room for two; the content filling 60 % of the room when everything fits below 100 %; no dead
+  area in what's framed; grid rows aligned and side-by-side grids on one top line; Fit again
+  changing nothing when everything fits; zooming never moving a card; drawn where laid out; text
+  never growing; Chromium and WebKit within 2 px (`--compare`). `canvas-replay.mjs` replays the
+  planner on the inputs a run saved, in node, in milliseconds. The script's header has the usage;
+  it needs owner token files (`CANVAS_CHECK_TOKENS`) and a playwright-core.
 - **Side panel:** a floating sheet, `rounded-xl border-line-2 bg-sheet shadow-sheet`, inset 8px
   from the window and level with the canvas panel's top. The resize grip is a 3px pill that
   appears in the gap on hover and turns accent while held. On a phone it covers the canvas.

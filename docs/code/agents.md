@@ -1688,15 +1688,21 @@ The surface has three views:
   - **Grids, planned for the screen** (`layoutCanvas`, `planWraps` in `lib/agents-layout.ts`).
     Nothing is ever one tall column. A project's (or a section's) threads fill a grid of cells,
     row by row, every grid sharing its column widths and each row as tall as its tallest cell, so
-    cards line up across projects. Thread cards have a fixed height. Growing right, projects stack
-    down the screen and each grid takes up to N to a row; growing down, projects sit side by side
-    and each grid takes up to N rows, as many columns as that needs, every grid in the row starting at one line (a phone lists projects down
-    instead). Machines wrap into columns (rows); machines with nothing open share one stack, last.
-    The canvas lays out every N (and 0–3 machines to a line) for its real room (above the prompt
-    bar, beside any panel) and scores each at the zoom Fit will use: if everything reads (at 75 %
-    or more), the biggest wins; if nothing does, the arrangement as wide as the screen takes at
-    75 % (whole columns, clear of the minimap's corner) and shortest wins, so the rest runs on
-    below and never off the right. A wrap must earn 2 %. A thread's requests, terminals and pins
+    cards line up across projects. Thread cards have a fixed height. One count of cards to a row
+    holds for every grid. Growing right, projects stack down the screen, each beside its grid, and
+    a machine sits either beside its projects or over them (in from it, a trunk down the indent),
+    so it doesn't take a column that's empty under it. Growing down, projects sit side by side,
+    every grid in a row starting at one line, or wrap into rows of 2–6 under the machine (a trunk
+    down the indent to a bus over each row). A machine with one project (or the one drilled into)
+    sits beside it as a band, the project's grid or sections under the band with the whole width.
+    A phone lists projects down. Machines wrap into columns (rows); machines with nothing open
+    share one stack, last. The canvas lays out every arrangement for its real room (above the
+    prompt bar, which it follows as it mounts and grows, beside any panel) and judges each at the
+    zoom Fit will use: constraints first, counted (cut off at the right; a grid of two or more one
+    column wide where the screen has room for two from where it starts; an empty rectangle a sixth
+    of what's framed and a third of it each way; below 100 %, less than 60 % of the room filled;
+    what matters out of view; only part of the canvas shown), then the biggest zoom. A wrap must
+    earn 2 %. A thread's requests, terminals and pins
     stack under it in its cell, a grid's gap apart; its forks and subagents are a chip on its card,
     a failed one marking the card and putting it under Failed (`absorbChildren`
     in `lib/agents-graph.ts`), so nothing hangs indented in the gutter, and revealing or opening
@@ -1718,9 +1724,9 @@ The surface has three views:
     bar per line, as long as its text, and the identity edges widen so they stay ~2 screen px.
     The card keeps its frame, colours and size; nothing moves. Readability comes from the layout,
     folding, drilling in and Fit.
-  - **Fit** (`fitPlan`) frames everything, filling about 80 % of the room above the prompt bar (a
-    tenth of it clear each side, at least 48 px), if that's 75 % or more (100 % on a phone), where
-    cards read. Else, from the top, it zooms out as far as 55 % (titles still read) to keep
+  - **Fit** (`fitPlan`, `fitTo`) frames everything, filling most of the room above the prompt bar
+    (6 % of it clear each side, at least 40 px), if that's 65 % or more (100 % on a phone): a few
+    points under where cards read best (75 %) beats a cut-off canvas. Else, from the top, it zooms out as far as 55 % (titles still read) to keep
     everything running, waiting on you or failed (and the open card) in view, clear of the minimap,
     and the minimap and panning reach the rest. The planner scores arrangements at that zoom, and
     growing right it may turn the canvas into a list down the screen (each card over what it holds,

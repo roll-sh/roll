@@ -113,11 +113,12 @@ export interface Wraps {
    */
   turn?: boolean;
   /**
-   * Growing right, a machine (or a drilled project) sits over its lanes instead of beside them, so
-   * it doesn't take a column of its own that's empty under it; either way, a machine with one
-   * project sits beside it as a band over the project's grid.
+   * Growing right, a machine sits over its projects instead of beside them, so it doesn't take a
+   * column of its own that's empty under it.
    */
   stack?: boolean;
+  /** A machine with one project (or the one drilled into) sits beside it as a band over its grid or sections. */
+  band?: boolean;
 }
 
 /** A plain column of threads under each project, one stack of machines. */
@@ -172,6 +173,7 @@ export function layoutCanvas(tree: TreeLike, size: (key: string) => Size, shape:
   const claimed = new Set<string>();
   const claim = (k: string) => tree.nodes.has(k) && !claimed.has(k) && (claimed.add(k), true);
   const kids = (k: string) => tree.nodes.get(k)?.children ?? [];
+  const roots = new Set(tree.roots);
   const widths = new Map<string, number>();
   const across = new Map<string, boolean | "grid">();
 
@@ -251,7 +253,7 @@ export function layoutCanvas(tree: TreeLike, size: (key: string) => Size, shape:
   const lane = (k: string, top?: number): Block => {
     const level = shape.level(k);
     if (!level) return stack(k);
-    const solo = wraps.stack && !listed && level === "lanes" ? kids(k).filter((c) => tree.nodes.has(c) && !claimed.has(c)) : [];
+    const solo = wraps.band && !listed && level === "lanes" ? kids(k).filter((c) => tree.nodes.has(c) && !claimed.has(c)) : [];
     if (solo.length === 1 && shape.level(solo[0]) && !shape.section?.(solo[0])) {
       const s = size(k);
       const a = ANCHOR(s.h);
@@ -300,7 +302,7 @@ export function layoutCanvas(tree: TreeLike, size: (key: string) => Size, shape:
     const a = ANCHOR(s.h);
     if (!child) return { w: s.w, h: s.h, at: [[k, { x: 0, y: 0 }]], routes: [], heads: [{ key: k, x: 0, y: a, top: 0 }], row: false, lead: a };
     const b: Block = { w: 0, h: 0, at: [], routes: [], heads: [], row: false, lead: 0 };
-    if (horizontal && wraps.stack && level === "lanes") {
+    if (horizontal && wraps.stack && level === "lanes" && roots.has(k)) {
       // Over its lanes, which sit in from it: a trunk down the indent into each lane's side.
       const ind = SPACING.vertical.indent;
       const by = s.h + g.lane;
@@ -348,6 +350,7 @@ export function layoutCanvas(tree: TreeLike, size: (key: string) => Size, shape:
   const lanes = (k: string): Block | null => {
     const side = !horizontal && !listed;
     if (side && wraps.lanes >= 2) return laneRows(k, wraps.lanes);
+    if (horizontal && !listed && lines >= 2 && kids(k).length > 1 && kids(k).every((c) => shape.section?.(c))) return sectionRows(k);
     // Side by side, every lane's grid starts at one line, under the tallest of their cards.
     const top = side ? Math.max(0, ...kids(k).filter((c) => !claimed.has(c) && tree.nodes.has(c)).map((c) => size(c).h)) : undefined;
     const mine: [string, Block][] = [];
@@ -365,6 +368,37 @@ export function layoutCanvas(tree: TreeLike, size: (key: string) => Size, shape:
       b.h = Math.max(b.h, y + l.h);
       along += (side ? l.w : l.h) + gap;
     }
+    return b;
+  };
+
+  // Growing right, a drilled project's sections flow into rows as wide as a grid of `lines`, side by
+  // side a column's gap apart (their cards stay on the grid's columns), so a section of one card
+  // doesn't leave a row empty. An edge meets each row's first label; the rest sit beside it.
+  const sectionRows = (k: string): Block | null => {
+    const all = kids(k).filter((c) => tree.nodes.has(c) && !claimed.has(c));
+    if (!all.length) return null;
+    const budget = (colX[lines - 1] ?? 0) + (colW[lines - 1] ?? 0);
+    across.set(k, false);
+    const b: Block = { w: 0, h: 0, at: [], routes: [], heads: [], row: false, lead: 0 };
+    let y = 0;
+    let x = 0;
+    let thick = 0;
+    for (const c of all) {
+      if (!claim(c)) continue;
+      const l = lane(c);
+      if (x > 0 && x + l.w > budget + 0.5) {
+        y += thick + g.section;
+        x = 0;
+        thick = 0;
+      }
+      add(b, l, x, y);
+      if (x === 0) b.heads.push({ key: c, x: 0, y: y + l.lead, top: y });
+      b.w = Math.max(b.w, x + l.w);
+      thick = Math.max(thick, l.h);
+      b.h = y + thick;
+      x += l.w + g.cellX;
+    }
+    b.lead = b.heads[0]?.y ?? 0;
     return b;
   };
 
@@ -539,12 +573,22 @@ const LINES = [1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 16];
  * must earn 2 %, turning 10 %, and a grid that leaves one card alone on its last row loses 3 %.
  */
 export function planWraps(tree: TreeLike, size: (key: string) => Size, shape: CanvasShape, room: Room, important?: (key: string) => boolean): Wraps {
+  // Fit again lays out for everything at its zoom; one that isn't any smaller than Fit's shows
+  // nothing more, so Fit's own layout stays (and nothing moves).
+  if (room.overview) {
+    const first = planWraps(tree, size, shape, { ...room, overview: false }, important);
+    const again = planWraps(tree, size, shape, { ...room, overview: false, stretch: 0 }, important);
+    const k = (w: Wraps) => fitPlan(layoutCanvas(tree, size, shape, w).positions, size, { ...room, overview: true }, important).k;
+    return k(again) > k(first) * 1.02 ? again : first;
+  }
   let most = 1;
   for (const [k, n] of tree.nodes) if (shape.level(k) === "items") most = Math.max(most, n.children.length);
   const phone = room.w < 640;
   const machines = new Set(tree.roots).size;
   const roots = machines < 2 ? [0] : [0, 1, 2, 3].filter((r) => r < machines);
   const turns = phone ? [true] : shape.direction === "horizontal" ? [false, true] : [false];
+  // A machine with one project (or one drilled into): the band is worth trying.
+  const chain = tree.roots.some((r) => tree.nodes.get(r)?.children.filter((c) => tree.nodes.has(c)).length === 1);
   let best: Wraps = phone ? { ...NO_WRAPS, turn: true } : NO_WRAPS;
   let bestBad = Infinity;
   let bestScore = -Infinity;
@@ -556,12 +600,14 @@ export function planWraps(tree: TreeLike, size: (key: string) => Size, shape: Ca
     let widest = 1;
     for (const [k, n] of tree.nodes) if (shape.level(k) === "lanes") widest = Math.max(widest, n.children.length);
     const lanes: number[] = turn ? [1] : shape.direction === "vertical" ? [0, 1, ...[2, 3, 4, 5, 6].filter((n) => n < widest)] : [0];
-    const stacks = turn ? [false] : [false, true];
+    const stacks = turn || down ? [false] : [false, true];
+    const bands = !turn && chain ? [false, true] : [false];
+    for (const bd of bands)
     for (const st of stacks)
     for (const r of roots)
       for (const l of lanes)
         for (const c of lines) {
-          const wraps: Wraps = { lines: c, lanes: l, roots: r, turn: turn || undefined, stack: st || undefined };
+          const wraps: Wraps = { lines: c, lanes: l, roots: r, turn: turn || undefined, stack: st || undefined, band: bd || undefined };
           const p = layoutCanvas(tree, size, shape, wraps);
           const q = judge(tree, shape, p.positions, size, room, important);
           let score = q.score;
@@ -613,8 +659,9 @@ function judge(tree: TreeLike, shape: CanvasShape, positions: ReadonlyMap<string
       }
     }
   // Everything reads: the zoom (and a sliver for the layout that fills the room best, at 100 %);
-  // below 100 %, a layout that leaves most of the room empty breaks a constraint.
-  if (all && k < 0.995 && (r.w * k * r.h * k) / (room.w * room.h) < 0.6) bad++;
+  // below 90 %, a layout that leaves most of the room empty breaks a constraint (a phone is one
+  // column wide whatever it does).
+  if (all && k < 0.9 && room.w >= 640 && (r.w * k * r.h * k) / (room.w * room.h) < 0.6) bad++;
   if (all) return { bad, score: k + 0.01 * Math.min(1, (r.w * k) / w) * Math.min(1, (r.h * k) / h) };
   // Part of it, framed from the top: what's important showing whole, then how many cards do; always
   // under any layout that shows everything (that reads down to `stretch`).
