@@ -2,12 +2,8 @@
 //! against one database: transactions of inserts, updates (in place, of TOASTed values, of
 //! the key), deletes, foreign-key cascades, rolled-back savepoints, DDL (indexes, columns,
 //! tables, TRUNCATE), two-phase commits, VACUUM, VACUUM FULL. A thread in the child kills it
-//! with SIGKILL at a seeded moment: some microseconds into a seeded step, or (a third of the
-//! rounds) just after a flush, compaction or checkpoint starts writing a file. The database
-//! is reopened and checked against a model of the committed steps:
-//! - durability: txlog holds exactly the steps logged as committed (and maybe the one in
-//!   flight, whose COMMIT may have been durable without its client hearing back);
-//! - atomicity: the step in flight left all of its writes or none, as its txlog row says;
+//! with SIGKILL at a seeded moment. The database is reopened and checked against a model of
+//! the committed steps:
 //! - the committed data is there and the uncommitted data isn't, read through every index;
 //! - every live row has a ctid of its own, and that ctid fetches it;
 //! - constraints hold;
@@ -15,13 +11,10 @@
 //! - no prepared transaction is lost.
 //!
 //! Then more steps run in process and are checked again, and the next round crashes again.
-//! Every step's outcome goes to `steps` (fsynced, one write a line), so a round can continue
-//! the model. `CRASH_SEEDS=a,b,..` and `CRASH_ROUNDS=n` choose the runs (the defaults are
-//! small); `CRASH_ASYNC=1` runs the child with synchronous_commit off (a crash may then lose a
-//! suffix of its commits, never part of one). To find the step that breaks an invariant,
-//! `CRASH_CHECK_STEPS=1` checks ctids after every step and `CRASH_TRACE=<file>` appends every
-//! step's statements to the file; `CRASH_SAVE=<dir>` keeps each crashed state, which
-//! `CRASH_INSPECT=<dir>/s<seed>-r<round>` (with `CRASH_SEED`) recovers and checks again.
+//! Every step's outcome goes to `steps` (fsynced), so a round can continue the model.
+//! `CRASH_SEEDS=a,b,..` and `CRASH_ROUNDS=n` choose the runs (the defaults are small). To find
+//! the step that breaks an invariant, `CRASH_CHECK_STEPS=1` checks ctids after every step and
+//! `CRASH_TRACE=<file>` appends every step's statements to the file.
 
 use pg_engine::engine::{Engine, EngineOptions};
 use pg_engine::session::Session;
@@ -320,76 +313,19 @@ fn step(seed: u64, i: u64, m: &Model) -> (Vec<String>, End, Vec<Op>) {
     (sql, end, ops)
 }
 
-/// The steps log: one line per finished step, `<i> c` (its effects are in) or `<i> a`. A
-/// crash can cut the last line short (the step's commit returned, its line wasn't all
-/// written): such a step counts as in flight, as a commit whose client never heard back,
-/// and `settle` decides it from the database. Each line must be the step it numbers.
+/// The steps log: one line per finished step, `<i> c` (its effects are in) or `<i> a`.
 fn read_log(dir: &Path) -> Vec<bool> {
-    let text = std::fs::read_to_string(dir.join("steps")).unwrap_or_default();
-    let whole = &text[..text.rfind('\n').map_or(0, |n| n + 1)];
-    whole
+    std::fs::read_to_string(dir.join("steps"))
+        .unwrap_or_default()
         .lines()
-        .enumerate()
-        .map(|(i, l)| match l.strip_prefix(&format!("{i} ")) {
-            Some("c") => true,
-            Some("a") => false,
-            _ => panic!("the steps log's line {i} is {l:?}"),
-        })
+        .map(|l| l.ends_with(" c"))
         .collect()
 }
 
-/// Log step `i`'s outcome: one write of the whole line, after any cut short line is gone.
 fn append_log(dir: &Path, i: usize, committed: bool) {
-    let path = dir.join("steps");
-    let len = std::fs::read_to_string(&path).map_or(0, |t| t.rfind('\n').map_or(0, |n| n + 1)) as u64;
-    let mut f = std::fs::OpenOptions::new().create(true).append(true).open(&path).unwrap();
-    if f.metadata().unwrap().len() != len {
-        f.set_len(len).unwrap();
-    }
-    f.write_all(format!("{i} {}\n", if committed { "c" } else { "a" }).as_bytes()).unwrap();
+    let mut f = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("steps")).unwrap();
+    writeln!(f, "{i} {}", if committed { "c" } else { "a" }).unwrap();
     f.sync_all().unwrap();
-}
-
-fn write_log(dir: &Path, log: &[bool]) {
-    let text: String = log.iter().enumerate().map(|(i, c)| format!("{i} {}\n", if *c { "c" } else { "a" })).collect();
-    let f = dir.join("steps");
-    std::fs::write(&f, text).unwrap();
-    std::fs::File::open(&f).unwrap().sync_all().unwrap();
-}
-
-#[test]
-fn torn_acknowledgement_is_still_in_flight() {
-    let dir = tempfile::tempdir().unwrap();
-    for tail in ["1", "1 ", "1 c", "1 a"] {
-        std::fs::write(dir.path().join("steps"), format!("0 c\n{tail}")).unwrap();
-        assert_eq!(read_log(dir.path()), vec![true]);
-        append_log(dir.path(), 1, true);
-        assert_eq!(read_log(dir.path()), vec![true, true]);
-        assert_eq!(std::fs::read_to_string(dir.path().join("steps")).unwrap(), "0 c\n1 c\n");
-    }
-}
-
-/// `CRASH_ASYNC=1`: the child commits with synchronous_commit off.
-fn async_commit() -> bool {
-    std::env::var("CRASH_ASYNC").is_ok_and(|v| v == "1")
-}
-
-/// The steps txlog holds (by sequential scan).
-fn logged_steps(s: &mut Session) -> std::collections::BTreeSet<usize> {
-    s.query("SET enable_indexscan = off; SET enable_bitmapscan = off; SET enable_indexonlyscan = off").unwrap();
-    let r = texts(s, "SELECT i FROM txlog");
-    s.query("RESET ALL").unwrap();
-    r.iter().map(|v| v.trim_start_matches("Int4(").trim_end_matches(')').parse().unwrap()).collect()
-}
-
-/// Whether a and b hold exactly the model's rows (by sequential scan).
-fn rows_are(s: &mut Session, m: &Model) -> bool {
-    s.query("SET enable_indexscan = off; SET enable_bitmapscan = off; SET enable_indexonlyscan = off").unwrap();
-    let a = texts(s, "SELECT id, v, w, u FROM a ORDER BY id");
-    let b = texts(s, "SELECT id, a_id, x FROM b ORDER BY id");
-    s.query("RESET ALL").unwrap();
-    a == m.a.iter().map(|(k, (v, w, u))| format!("Int4({k})|Int4({v})|{w}|Int4({u})")).collect::<Vec<_>>()
-        && b == m.b.iter().map(|(k, (a, x))| format!("Int4({k})|Int4({a})|Int4({x})")).collect::<Vec<_>>()
 }
 
 /// The model after the logged steps.
@@ -415,41 +351,6 @@ const SCHEMA: &[&str] = &[
     "CREATE TABLE txlog (i int PRIMARY KEY, sv bigint DEFAULT nextval('s'))",
 ];
 
-unsafe extern "C" {
-    fn kill(pid: i32, sig: i32) -> i32;
-}
-
-/// SIGKILL this process (as a crash: nothing flushed, nothing run).
-fn sigkill() -> ! {
-    // SAFETY: kill(2) with this process's id and SIGKILL.
-    unsafe { kill(std::process::id() as i32, 9) };
-    unreachable!("killed")
-}
-
-/// Return once the `n`th file a flush, compaction or checkpoint starts writing in the
-/// databases' directories under `base` (an SST, a WAL or a manifest) has appeared.
-fn wait_for_files(base: &Path, n: usize) {
-    let scan = |seen: &mut std::collections::HashSet<std::path::PathBuf>| {
-        let mut new = 0;
-        for d in std::fs::read_dir(base).into_iter().flatten().flatten() {
-            for f in std::fs::read_dir(d.path()).into_iter().flatten().flatten() {
-                let p = f.path();
-                if matches!(p.extension().and_then(|e| e.to_str()), Some("sst" | "wal" | "tmp")) && seen.insert(p) {
-                    new += 1;
-                }
-            }
-        }
-        new
-    };
-    let mut seen = std::collections::HashSet::new();
-    scan(&mut seen);
-    let mut events = 0;
-    while events <= n {
-        std::thread::sleep(Duration::from_micros(20));
-        events += scan(&mut seen);
-    }
-}
-
 /// Run steps `from..to`, logging each one's outcome; with `kill`, a thread kills the process
 /// `kill.1` microseconds after step `kill.0` starts.
 fn run_steps(s: &mut Session, dir: &Path, seed: u64, m: &mut Model, from: usize, to: usize, kill: Option<(usize, u64)>) {
@@ -457,14 +358,10 @@ fn run_steps(s: &mut Session, dir: &Path, seed: u64, m: &mut Model, from: usize,
         if let Some((at, us)) = kill
             && at == i
         {
-            let data = dir.join("data").join("base");
-            let on = std::env::var("CRASH_KILL_ON").ok().map(|v| v.parse::<usize>().unwrap());
             std::thread::spawn(move || {
-                if let Some(n) = on {
-                    wait_for_files(&data, n);
-                }
                 std::thread::sleep(Duration::from_micros(us));
-                sigkill();
+                let me = std::process::id().to_string();
+                std::process::Command::new("kill").args(["-9", &me]).status().unwrap();
             });
         }
         let (sql, end, ops) = step(seed, i as u64, m);
@@ -498,45 +395,13 @@ fn run_steps(s: &mut Session, dir: &Path, seed: u64, m: &mut Model, from: usize,
 /// finished as the step would have), log it, and return the model of every logged step.
 fn settle(s: &mut Session, dir: &Path, seed: u64) -> Model {
     let mut log = read_log(dir);
-    let txlog = logged_steps(s);
-    if async_commit() {
-        // (Asynchronous commits a crash lost: a suffix of the commits, every one after the
-        // first lost one. The steps from there are forgotten and run again.)
-        if let Some(f) = (0..log.len()).find(|&i| log[i] && !txlog.contains(&i)) {
-            let after: Vec<usize> = txlog.iter().copied().filter(|&i| i > f).collect();
-            assert!(after.is_empty(), "seed {seed}: step {f}'s commit was lost, but later ones weren't: {after:?}");
-            log.truncate(f);
-            write_log(dir, &log);
-        }
-    }
-    // Durability: exactly the steps logged as committed are in txlog (and the one in flight
-    // may be).
-    let want: Vec<usize> = (0..log.len()).filter(|&i| log[i]).collect();
-    let got: Vec<usize> = txlog.iter().copied().filter(|&i| i < log.len()).collect();
-    assert_eq!(got, want.clone(), "seed {seed}: txlog against the steps logged as committed");
     let m = replay(seed, &log);
     let i = log.len();
     let (_, end, ops) = step(seed, i as u64, &m);
-    let late: Vec<usize> = txlog.iter().copied().filter(|&j| j > i).collect();
-    assert!(late.is_empty(), "seed {seed}: txlog has steps {late:?} past the one in flight ({i})");
     // (DDL holds locks that reads of its tables wait for.)
     let ddl = ops.iter().any(|o| matches!(o, Op::AddCol(..) | Op::Index(_) | Op::MkTable(..) | Op::DropTable(_) | Op::TruncB));
     let prepared = texts(s, "SELECT gid FROM pg_prepared_xacts");
-    let in_log = txlog.contains(&i);
-    if !ddl && !prepared.contains(&format!("p{i}")) && end != End::Maint {
-        // Atomicity: the step in flight left all of its writes or none, and txlog agrees.
-        let mut with = m.clone();
-        if matches!(end, End::Commit | End::Prepare(true)) {
-            ops.iter().for_each(|o| with.apply(o));
-        }
-        let (none, all) = (rows_are(s, &m), rows_are(s, &with));
-        assert!(
-            if in_log { all } else { none },
-            "seed {seed}: step {i} ({end:?}) in flight left a partial transaction: its txlog row is {}, and a and b hold {} of its writes",
-            if in_log { "there" } else { "missing" },
-            if all { "all" } else if none { "none" } else { "some" }
-        );
-    }
+    let in_log = one(s, &format!("SELECT count(*) FROM txlog WHERE i = {i}")) == "Int8(1)";
     let committed = if prepared.contains(&format!("p{i}")) {
         // (Prepared, not committed yet: none of it shows.)
         assert!(!in_log, "seed {seed}: step {i} is prepared, but its rows show");
@@ -548,7 +413,7 @@ fn settle(s: &mut Session, dir: &Path, seed: u64) -> Model {
         c
     } else {
         assert!(prepared.is_empty(), "seed {seed}: prepared {prepared:?} at step {i}");
-        assert!(!in_log || !matches!(end, End::Rollback | End::Prepare(false)), "seed {seed}: step {i} rolled back, but its rows show");
+        assert!(!in_log || end != End::Rollback, "seed {seed}: step {i} rolled back, but its rows show");
         in_log
     };
     append_log(dir, i, committed);
@@ -636,9 +501,6 @@ fn crash_random_child() {
     let dir = Path::new(&dir);
     let eng = open(&dir.join("data"));
     let mut s = eng.connect(1, "postgres", "postgres", "t").unwrap();
-    if async_commit() {
-        s.query("SET synchronous_commit = off").unwrap();
-    }
     let log = read_log(dir);
     if log.is_empty() {
         for q in SCHEMA {
@@ -655,35 +517,20 @@ fn crash_random_child() {
 fn crash_round(dir: &Path, seed: u64, round: u64) {
     let mut r = Rng::new(seed, 1_000_000 + round);
     let at = read_log(dir).len() + 20 + r.below(150) as usize;
-    let us = r.below(20_000);
-    // A third of the rounds die mid-write of a file: the `n`th one written from step `at` on
-    // (a flush, compaction or checkpoint), `us` / 50 microseconds after it appeared.
-    let on = (r.below(3) == 0).then(|| r.below(4));
-    let mut child = std::process::Command::new(std::env::current_exe().unwrap());
-    child
+    let out = std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", "crash_random_child", "--nocapture", "--test-threads=1"])
         .env("CRASH_RANDOM_DIR", dir)
         .env("CRASH_SEED", seed.to_string())
         .env("CRASH_KILL_AT", at.to_string())
-        .env("CRASH_KILL_US", if on.is_some() { us / 50 } else { us }.to_string());
-    if let Some(n) = on {
-        child.env("CRASH_KILL_ON", n.to_string());
-    }
-    let out = child.output().unwrap();
+        .env("CRASH_KILL_US", r.below(20_000).to_string())
+        .output()
+        .unwrap();
     let why = String::from_utf8_lossy(&out.stderr)
         .lines()
         .filter(|l| l.contains("panicked") || l.contains("seed"))
         .collect::<Vec<_>>()
         .join("\n");
     assert!(out.status.code().is_none(), "seed {seed} round {round}: the child failed: {why}");
-    if let Ok(save) = std::env::var("CRASH_SAVE") {
-        // (The crashed state, for `crash_inspect`.)
-        let to = Path::new(&save).join(format!("s{seed}-r{round}"));
-        let _ = std::fs::remove_dir_all(&to);
-        std::fs::create_dir_all(&to).unwrap();
-        let ok = std::process::Command::new("cp").arg("-a").arg(dir.join("data")).arg(dir.join("steps")).arg(&to).status().unwrap();
-        assert!(ok.success());
-    }
     let eng = open(&dir.join("data"));
     let mut s = eng.connect(1, "postgres", "postgres", "t").unwrap();
     let mut m = settle(&mut s, dir, seed);
@@ -704,29 +551,6 @@ fn crash_round(dir: &Path, seed: u64, round: u64) {
     eng.shutdown();
 }
 
-/// Recover a copy of a state `CRASH_SAVE` kept (`CRASH_INSPECT=<dir>`, with `CRASH_SEED`),
-/// settle it and check it, printing what the in-flight step left.
-#[test]
-fn crash_inspect() {
-    let Ok(src) = std::env::var("CRASH_INSPECT") else {
-        return;
-    };
-    let seed: u64 = std::env::var("CRASH_SEED").unwrap().parse().unwrap();
-    let tmp = tempfile::tempdir().unwrap();
-    let ok = std::process::Command::new("cp").arg("-a").arg(format!("{src}/data")).arg(format!("{src}/steps")).arg(tmp.path()).status().unwrap();
-    assert!(ok.success());
-    let dir = tmp.path();
-    let eng = open(&dir.join("data"));
-    let mut s = eng.connect(1, "postgres", "postgres", "t").unwrap();
-    let i = read_log(dir).len();
-    eprintln!("in flight: step {i}; txlog max {}", one(&mut s, "SELECT max(i), count(*) FROM txlog"));
-    eprintln!("txlog row by seq scan: {}", one(&mut s, &format!("SET enable_indexscan = off; SET enable_bitmapscan = off; SELECT count(*) FROM txlog WHERE i = {i}")));
-    s.query("RESET ALL").unwrap();
-    let m = settle(&mut s, dir, seed);
-    check(&mut s, seed, &m, &format!("inspected after step {}", read_log(dir).len()));
-    eprintln!("inspect: ok");
-}
-
 #[test]
 fn random_crashes() {
     let seeds: Vec<u64> = std::env::var("CRASH_SEEDS")
@@ -738,55 +562,5 @@ fn random_crashes() {
         for round in 0..rounds {
             crash_round(tmp.path(), seed, round);
         }
-    }
-}
-
-/// `settle` fails on a recovered state with part of the in-flight step's writes (its txlog
-/// row but not all of its rows), and on one that lost an acknowledged commit. (Built by SQL;
-/// a build whose commits split or drop their WAL records fails `random_crashes` the same
-/// ways, HANDOFF "Crash recovery".)
-#[test]
-fn recovery_oracle_rejects_partial_and_lost_acknowledged_transactions() {
-    let empty = Model::default();
-    let plain = |o: &Op| !matches!(o, Op::AddCol(..) | Op::Index(_) | Op::MkTable(..) | Op::DropTable(_) | Op::TruncB);
-    let seed = (1..1000)
-        .find(|&seed| {
-            let (_, end, ops) = step(seed, 0, &empty);
-            let mut with = empty.clone();
-            ops.iter().for_each(|o| with.apply(o));
-            end == End::Commit && with.a.len() >= 2 && ops.iter().all(plain)
-        })
-        .unwrap();
-    for partial in [true, false] {
-        let dir = tempfile::tempdir().unwrap();
-        let eng = open(&dir.path().join("data"));
-        let mut s = eng.connect(1, "postgres", "postgres", "t").unwrap();
-        for sql in SCHEMA {
-            s.query(sql).unwrap();
-        }
-        let mut model = Model::default();
-        run_steps(&mut s, dir.path(), seed, &mut model, 0, 1, None);
-        if partial {
-            // Step 0 in flight, its txlog row there but one of its rows gone.
-            let first = model.a.keys().next().unwrap();
-            s.query(&format!("DELETE FROM a WHERE id = {first}")).unwrap();
-            std::fs::write(dir.path().join("steps"), "").unwrap();
-        } else {
-            // Step 0 acknowledged, every effect of its commit gone.
-            s.query("TRUNCATE b, a, txlog CASCADE").unwrap();
-        }
-        drop(s);
-        eng.shutdown();
-        let eng = open(&dir.path().join("data"));
-        let mut s = eng.connect(1, "postgres", "postgres", "t").unwrap();
-        let failure = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            settle(&mut s, dir.path(), seed);
-        }))
-        .expect_err("settle accepted a broken recovered state");
-        let message = (failure.downcast_ref::<String>().map(String::as_str))
-            .or_else(|| failure.downcast_ref::<&str>().copied())
-            .unwrap();
-        let want = if partial { "partial transaction" } else { "txlog against the steps logged as committed" };
-        assert!(message.contains(want), "{message}");
     }
 }

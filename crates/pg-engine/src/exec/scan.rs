@@ -4055,11 +4055,10 @@ impl ScanNode {
             || self.ios_entries.is_some()
             || !matches!(p.access, Access::Index { .. })
             || ix.method != "btree"
-            || !b.eq.is_empty()
+            // (One key range, bounded or not: its chunks cut where its keys are; the filter
+            // checks the conditions on each row as the serial scan's does.)
             || b.any.is_some()
             || b.skip.is_some()
-            || b.lower.is_some()
-            || b.upper.is_some()
             || !b.order.is_empty()
             || p.reverse
             || p.mark.is_some()

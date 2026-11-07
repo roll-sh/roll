@@ -4226,11 +4226,6 @@ impl Catalog {
         self.children.get(&oid).map_or(&[], Vec::as_slice)
     }
 
-    /// Every parent with its direct children (the inheritance index; pg_inherits' rows).
-    pub fn inheritance(&self) -> impl Iterator<Item = (&u32, &Vec<u32>)> {
-        self.children.iter()
-    }
-
     /// A table and all its descendants, breadth-first with each level in oid order (Postgres's
     /// find_all_inheritors), each once.
     /// A partitioned table's partitions in bound order.
