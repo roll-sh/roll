@@ -246,3 +246,66 @@ fn a_format_3_data_directory_opens_and_upgrades() {
     assert_eq!((read_all(&mut s), rows(&mut s, names)), after);
     engine.shutdown();
 }
+
+/// The one text value `sql` returns.
+fn text(s: &mut Session, sql: &str) -> String {
+    let r = s.query(sql).unwrap_or_else(|e| panic!("{sql}: {e:?}"));
+    let v = &r.last().unwrap().rows[0][0];
+    v.as_str().unwrap_or_else(|| panic!("{sql}: {v:?}")).to_string()
+}
+
+/// Catalog format 5 (round 26, agent 173): a data directory a format-4 build made and
+/// stopped (`tests/data/catalog_format4.tar.gz`, from `catalog_format4.sql`: every kind of
+/// relation, with the options, row security, replica identity, persistence, partitions,
+/// triggers and rules pg_class shows, and 300 more tables) opens; each relation's directory
+/// record is made once and stored, and pg_class and the statistics views read as the format-4
+/// build showed them (`catalog_format4.pgclass`), then alike through DDL and more opens.
+/// (Debug builds check every directory record read against its entry: `reldir::check`.)
+#[test]
+fn a_format_4_data_directory_opens_and_upgrades() {
+    let dir = tempfile::tempdir().unwrap();
+    let tgz = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/catalog_format4.tar.gz");
+    let st = std::process::Command::new("tar").arg("xzf").arg(tgz).arg("-C").arg(dir.path()).status().unwrap();
+    assert!(st.success());
+    let class = "SELECT string_agg(c::text, E'\\n' ORDER BY c.oid) FROM pg_class c WHERE c.oid >= 16384";
+    let stats = "SELECT string_agg(format('%s %s %s', relid, schemaname, relname), E'\\n' ORDER BY relid) FROM pg_stat_user_tables";
+    let dt = "SELECT string_agg(c.relname || ' ' || c.relkind, ',' ORDER BY c.relname) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.relkind IN ('r', 'p', 'v', 'm', 'S', 'i', 'I', 't') AND n.nspname = 's1'";
+    let want = include_str!("data/catalog_format4.pgclass");
+    let reads = |s: &mut Session| [text(s, class), text(s, stats), text(s, dt)];
+    let engine = open(dir.path());
+    let first = {
+        let mut s = engine.connect(1, "postgres", "postgres", "t").unwrap();
+        // (The statistics view first: its directory read comes before pg_class's rows.)
+        let st = text(&mut s, stats);
+        let mut r = reads(&mut s);
+        assert_eq!(r[1], st);
+        assert_eq!(format!("{}\n", r[0]), want);
+        r[0].clear();
+        r
+    };
+    engine.shutdown();
+    drop(engine);
+
+    // Opened in format 5: alike, then DDL over the stored records.
+    let engine = open(dir.path());
+    let mut s = engine.connect(2, "postgres", "postgres", "t").unwrap();
+    let mut again = reads(&mut s);
+    assert_eq!(format!("{}\n", again[0]), want);
+    again[0].clear();
+    assert_eq!(again, first);
+    run(
+        &mut s,
+        "CREATE TABLE s1.t301 (id int PRIMARY KEY, x text);\nDROP TABLE s1.t7;\nALTER TABLE s1.t8 RENAME TO t8r;\nALTER TABLE s1.t9 SET UNLOGGED;\nALTER TABLE s1.t10 ENABLE ROW LEVEL SECURITY;\nALTER TABLE s1.t11 ADD CONSTRAINT c11 CHECK (id > 0);\nALTER INDEX s1.ref_lower SET (fillfactor = 90);\nALTER VIEW s1.plain RENAME TO plain2;\nALTER MATERIALIZED VIEW s1.mv SET SCHEMA public;\nCREATE INDEX t12_a ON s1.t12 (a)",
+    );
+    let after = reads(&mut s);
+    assert!(after[2].contains("t8r r") && !after[2].contains(",t7 r,") && after[2].contains("t301_pkey i"), "{}", after[2]);
+    assert!(after[0].contains("plain2") && !after[1].contains(" s1 mv"), "{}", after[1]);
+    engine.shutdown();
+    drop(engine);
+    let engine = open(dir.path());
+    let mut s = engine.connect(3, "postgres", "postgres", "t").unwrap();
+    // (Its statistics view first again, then the rows: both from the stored records.)
+    assert_eq!(text(&mut s, stats), after[1]);
+    assert_eq!(reads(&mut s), after);
+    engine.shutdown();
+}

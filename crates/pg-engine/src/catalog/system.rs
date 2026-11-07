@@ -2577,7 +2577,10 @@ fn rows_generated_chunked(
     // the catalogs made from the relations and functions: a database's first read of
     // pg_namespace, which every statistics view reads, parsed every relation's entry, 130 ms
     // at 10,000 tables.)
-    if reads_relations(table) {
+    if table == SysTable::PgClass {
+        // (Its rows come from the directory records: no relation's entry is read.)
+        super::stored_ix::read_class(&ctx.catalog());
+    } else if reads_relations(table) {
         ctx.catalog().read_relations();
     }
     let mut out = Out::chunked(part);
