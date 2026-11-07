@@ -165,7 +165,36 @@ enum Bloom {
     Blocked(FastMod),
 }
 
+/// A blocked filter's hash of a user key: eight bytes at a time (`hash64` takes a multiply
+/// per byte, one after another: most of a compaction's bloom cost).
+fn hash_words(b: &[u8]) -> u64 {
+    let mut h: u64 = 0x9E37_79B9_7F4A_7C15 ^ b.len() as u64;
+    let mut words = b.chunks_exact(8);
+    let mix = |h: u64, w: u64| (h ^ w).wrapping_mul(0xff51_afd7_ed55_8ccd).rotate_left(29);
+    for w in &mut words {
+        h = mix(h, u64::from_le_bytes(w.try_into().unwrap()));
+    }
+    let rest = words.remainder();
+    if !rest.is_empty() {
+        let mut t = [0u8; 8];
+        t[..rest.len()].copy_from_slice(rest);
+        h = mix(h, u64::from_le_bytes(t));
+    }
+    h ^= h >> 33;
+    h = h.wrapping_mul(0xc4ce_b9fe_1a85_ec53);
+    h ^ (h >> 33)
+}
+
 impl Bloom {
+    /// The hash of user key `b` this scheme's bits are of.
+    #[inline]
+    fn hash(self, b: &[u8]) -> u64 {
+        match self {
+            Bloom::Flat(_) => hash64(b),
+            Bloom::Blocked(_) => hash_words(b),
+        }
+    }
+
     /// The scheme of a new filter of `bytes`, whole lines.
     fn blocked(bytes: usize) -> Bloom {
         Bloom::Blocked(FastMod::new((bytes as u64 * 8 / BLOOM_LINE_BITS).max(1)))
@@ -323,7 +352,7 @@ impl SstWriter {
         let ts = key_ts(key);
         self.min_ts = self.min_ts.min(ts);
         self.max_ts = self.max_ts.max(ts);
-        let h = hash64(user_key(key));
+        let h = hash_words(user_key(key));
         if self.last_user_hash != Some(h) {
             match &mut self.bloom {
                 Some((b, m)) => m.set(b, h),
@@ -1138,7 +1167,7 @@ impl SstReader {
         if self.bloom.is_empty() {
             return true;
         }
-        let h = hash64(user_key);
+        let h = self.bloom_mod.hash(user_key);
         self.bloom_mod.check(&self.bloom, h)
     }
 
