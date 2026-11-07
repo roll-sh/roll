@@ -3679,9 +3679,11 @@ pub struct InsertNode {
     /// ON CONFLICT DO UPDATE starting a row over: (its leaf, when routed; the row as
     /// prepared).
     retry: Option<(Option<usize>, Prepared)>,
-    /// A plain COPY: multi-insert, into a table without triggers, RLS, generated columns,
-    /// foreign storage, view checks or unique / exclusion indexes (`insert_plain`).
-    plain_copy: bool,
+    /// A plain COPY or INSERT … SELECT: multi-insert (or a source running nothing volatile),
+    /// into a table without triggers, RLS, generated columns, partitions, foreign storage,
+    /// view checks or unique / exclusion indexes, no ON CONFLICT or RETURNING
+    /// (`insert_plain`).
+    plain: bool,
     /// Its rows not counted in pg_stat yet (`flush_plain_counts`).
     plain_counts: std::cell::Cell<i64>,
 }
@@ -3744,7 +3746,13 @@ impl InsertNode {
             && rules.indexes.iter().all(|b| b.index.method == "btree" && !checks_rows(b))
             && !ctx.txn.borrow().sink_open();
         let sink = (bulk || select_bulk).then_some(false);
-        let plain_copy = copied.is_some_and(|c| c.multi)
+        // (And an INSERT … SELECT whose source runs nothing volatile: `model_deferrable`.)
+        let plain = (copied.is_some_and(|c| c.multi)
+            || plan.copy.is_none()
+                && !rules.view
+                && plan.route.is_none()
+                && rules.table.partkey.is_none()
+                && model_deferrable(&plan, ctx))
             && plan.on_conflict.is_none()
             && plan.returning.is_empty()
             && rules.triggers.is_empty()
@@ -3779,7 +3787,7 @@ impl InsertNode {
             virtual_slot: false,
             queue_mark: None,
             retry: None,
-            plain_copy,
+            plain,
             plain_counts: Default::default(),
         })
     }
@@ -3966,7 +3974,7 @@ impl InsertNode {
             f.len() - 1
         };
         let mut at_flush = false;
-        let r = if self.plain_copy { self.insert_plain(src, ctx) } else { self.insert(src, ctx) };
+        let r = if self.plain { self.insert_plain(src, ctx) } else { self.insert(src, ctx) };
         let r = r.map_err(|e| {
             // (And an index entry too big, `rowsize`: its index insertion is the flush's too.)
             if c.multi
@@ -4013,7 +4021,7 @@ impl InsertNode {
         r
     }
 
-    /// A plain COPY's row (`plain_copy`): what `insert_new` does for a table without
+    /// A plain COPY's or INSERT … SELECT's row (`plain`): what `insert_new` does for a table without
     /// triggers, RLS, generated columns, partitions, foreign storage, view checks or unique /
     /// exclusion indexes, in the same order (defaults, domains, NOT NULL and CHECK, the row
     /// id, SSI, the index values, the model, the write, the entries), without the general
@@ -4325,7 +4333,7 @@ impl Node for InsertNode {
                     }
                     None => None,
                 },
-                None => self.source.next(ctx)?,
+                None => self.source.next(ctx).inspect_err(|_| self.flush_plain_counts(ctx))?,
             };
             let Some(src) = next else {
                 self.flush_plain_counts(ctx);
@@ -4410,7 +4418,8 @@ impl Node for InsertNode {
                             txn.sink_runs_ok();
                         }
                     }
-                    self.insert(src, ctx)?
+                    let r = if self.plain { self.insert_plain(src, ctx) } else { self.insert(src, ctx) };
+                    r.inspect_err(|_| self.flush_plain_counts(ctx))?
                 }
             };
             let Some((mut row, key, old)) = inserted else {

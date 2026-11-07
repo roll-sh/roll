@@ -4193,6 +4193,26 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
   - COPY TO writes integers and floats without the escape pass only when the delimiter can't
     be in their text (not `-`, `+`, `I`, `N`): before, a `-` delimiter left negative integers
     unescaped (PostgreSQL writes `\-1`). Golden `a175_copy_plain`.
+  - **Batch 2.** INSERT … SELECT takes the plain insert path too, under `model_deferrable`'s
+    rule (its source runs nothing volatile and doesn't read the table) and the same table
+    conditions; its counts go in per row while the table has CHECK constraints, else a
+    batch at a time, before anything leaves `next`. A DELETE's row lock
+    (`LockManager::lock_row`) takes one probe of the compact set when the transaction's only
+    compact set is the locking (sub)transaction's own, as without savepoints (every set is
+    made with its holder's transaction lock held, and both go together), and the tuple lock's
+    key is made only for a wait. ANALYZE of a big table reads chosen pages next to each other
+    with one scan (`analyze_columns`): a 1M-row table, every page chosen, was one range scan
+    per page, a seek of every source each.
+  - Not done (round 8): DELETE's index-entry tombstones left for VACUUM (needs agent 163's
+    index readers to check the row; proposed through the coordinator, not started); the
+    source scan of DELETE (parallel workers, about half of its CPU: agents 149 / 169); COPY
+    out from stored bytes (the executor's decoded rows are most of what's left in the
+    connection thread; background compaction of the earlier steps' files is most of the
+    engine container's CPU during the step: agent 169); spilling parallel index builds past
+    `maintenance_work_mem`; writing index entries once (agent 169's store side). A parallel
+    build keeping its heap measure for the next (`txn::unchanged`, as VACUUM's is) would save
+    sizing the rows again (7% of a CREATE UNIQUE INDEX after a CREATE INDEX), but the build's
+    own linked run invalidates the table's watch when it commits; not done.
 - **Result rows stream** (round 19, agent 65): a top-level SELECT's rows go to the client as
   the executor returns them, as PostgreSQL's printtup sends a DataRow per row. A
   `session::RowSink` (`session/sink.rs`, PostgreSQL's DestReceiver) takes them in

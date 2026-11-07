@@ -5390,6 +5390,50 @@ COPY out step, `roll-flush`), which is storage work (agent 169), not COPY's. Pea
 458-476 batch 1: within the cgroup's page-cache noise; batch 2's runs record the engine's
 RSS too. Bytes written unchanged (66 → 62 MB for COPY in).
 
+### Batch 2 (INSERT … SELECT's plain path, DELETE's lock probe, ANALYZE's adjacent pages)
+
+The same method at a quieter hour (load 22-30), PostgreSQL, batch 1 and batch 2
+interleaved, medians of three; the whole table, since this is the round's standing against
+PostgreSQL on the branch with batches 1 and 2:
+
+| step | PostgreSQL wall / CPU (s) | batch 1 wall / CPU (s) | batch 2 wall / CPU (s) | CPU ratio, batch 2 | written MB (PG / engine) |
+|---|---|---|---|---|---|
+| COPY in | 1.31 / 1.20 | 1.92 / 1.81 | 1.90 / 1.77 | 1.47 | 93 / 62 |
+| CREATE INDEX | 0.61 / 1.02 | 1.15 / 2.33 | 1.23 / 2.46 | 2.40 | 16 / 52 |
+| CREATE UNIQUE INDEX | 0.39 / 0.54 | 0.69 / 1.80 | 0.67 / 1.70 | 3.16 | 39 / 60 |
+| COPY out | 0.72 / 0.63 | 0.83 / 1.56 | 0.90 / 1.70 | 2.69 | 0 / 20 |
+| INSERT … SELECT | 1.19 / 1.04 | 2.01 / 2.92 | 1.89 / 2.88 | 2.76 | 376 / 75 |
+| UPDATE half | 6.67 / 6.76 | 3.10 / 5.82 | 2.82 / 5.49 | **0.81** | 322 / 91 |
+| DELETE a quarter | 0.42 / 0.34 | 1.13 / 1.73 | 1.04 / 1.61 | 4.80 | 40 / 17 |
+| VACUUM | 0.46 / 0.47 | 0.65 / 0.55 | 0.67 / 0.57 | 1.21 | 15 / 1 |
+| ANALYZE | 0.23 / 0.16 | 0.58 / 0.48 | 0.61 / 0.50 | 3.21 | 0 / 0 |
+| count(*) after | 0.13 / 0.14 | 0.29 / 0.55 | 0.30 / 0.59 | 4.36 | 0 / 0 |
+| TRUNCATE (bulk2) | 0.12 / 0.03 | 0.10 / 0.01 | 0.11 / 0.01 | **0.29** | 0 / 1 |
+| DROP TABLE | 0.13 / 0.06 | 0.10 / 0.10 | 0.11 / 0.12 | 1.95 | 0 / 5 |
+
+Total CPU 12.4 s PostgreSQL, 19.7 s batch 1, 19.4 s batch 2 (1.56x; round 7's table, at
+lower load, 1.53x with COPY in at 1.87). Peak memory: PostgreSQL's container 969 MB; the
+engine's container 471-522 MB batch 1 and 458-486 batch 2, its process's peak RSS 333-342
+and 328-357 MB (the containers: 0.5x PostgreSQL's). Rows checked equal on both (counts and sums
+of every column; `sum(c)` differs in the last digits, a float sum in another order).
+
+- DELETE: -7% CPU (one probe of the compact lock set per row, no tuple-lock key made). The
+  rest: the source scan runs in three parallel workers, about half of the step's CPU (agent
+  149's); the deferred entry and tombstone run (sort and write) 17%; the row lock 10%.
+- INSERT … SELECT: -1.4%, within noise: the general path's per-row work it skips was small
+  next to the scan, the size model and the write.
+- ANALYZE: unchanged here: below 30,000 pages it reads the table with one scan already. On a
+  4M-row table (33,392 pages, 30,000 chosen) the first ANALYZE went 1.11 → 0.95 s of CPU and
+  the next two were within noise (0.48-0.55 s both); the statistics are identical.
+- The other steps differ by their noise (CREATE INDEX 2.33 / 2.46, COPY out 1.56 / 1.70 with
+  nothing changed in them).
+
+### Left
+
+COPY out and count(*) are the scan path (and background compaction during COPY out); the
+CREATE INDEX builds and ANALYZE spend their time in the store's scan positioning and the
+entries' runs; DELETE's index entries left for VACUUM need index access (agent 163).
+
 ## Native deparser (round 21, agent 93)
 
 `ast::deparse_expr` / `deparse_stmt` (views, rules, defaults, checks, index expressions,

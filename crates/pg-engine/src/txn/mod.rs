@@ -3276,7 +3276,8 @@ impl Txn {
     ) -> Result<bool> {
         let holder = self.holder();
         let xid = self.cur_xid();
-        let tuple = locks::tuple_key(self.db.oid, rel, key);
+        let db = self.db.oid;
+        let tuple = || locks::tuple_key(db, rel, key);
         // Past a few thousand row locks the next ones may go compact (`bulklocks`): released
         // with the (sub)transaction, not listed here.
         let mut compacted = false;
