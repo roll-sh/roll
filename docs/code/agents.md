@@ -1534,8 +1534,8 @@ The surface has three views:
   thread's `plan_ready`, T3's `hasActionableProposedPlan`, set when a run completes with a plan
   and cleared by the next run or a rollback), the
   title and what it's doing, the PR and work item it's attached to, its worktree and running
-  terminals, and what it cost; a run that finished since it was last opened turns its border
-  green (T3's completed tone) until it's opened; a project's card sums it up like T3's project view (threads, running and
+  terminals, and what it cost; a run that finished since it was last opened says "Completed" by a
+  green dot (T3's completed tone, said once: no green border) until it's opened; a project's card sums it up like T3's project view (threads, running and
   waiting, the PRs its threads made, the agents working in it); actions on machine and project
   cards show on hover (always on touch screens). The end of a thread card's footer and the
   conversation's composer footer show its context window as a small ring (T3's
@@ -1720,11 +1720,13 @@ The surface has three views:
     flush left; no edge from the header to each card, and an edge into it meets its label, never
     its rule. Sections are 80 px apart, at least twice a grid's gaps.
   - **Zooming out never enlarges text** (the user's rule): everything shrinks in proportion, as in
-    Figma. Below 55 % (`[data-brief]`) a card's text other than its title goes transparent (its
-    boxes, chips and dots keep their shape); below 40 % (`[data-greek]`) the title becomes one quiet
-    bar per line, as long as its text, and the identity edges widen so they stay ~2 screen px.
-    The card keeps its frame, colours and size; nothing moves. Readability comes from the layout,
-    folding, drilling in and Fit.
+    Figma. Below 55 % (`[data-brief]`) a card keeps its title; each other row becomes a bar as long
+    as its text in the row's colour, chips filled bars, and buttons, inputs, icons and lone dots go;
+    below 40 % (`[data-greek]`) the title becomes one quiet bar per line and the rows go, and the
+    identity edges widen so they stay ~2 screen px. What waits on you, works or failed keeps its
+    mark at every zoom: the card's border tone, drawn a step firmer as the zoom halves it, and a
+    section header's dot. The card keeps its frame, colours and size; nothing moves. Readability
+    comes from the layout, folding, drilling in and Fit.
   - **Fit** (`fitPlan`, `fitTo`) frames everything, filling most of the room above the prompt bar
     (6 % of it clear each side, at least 40 px), if that's 65 % or more (100 % on a phone): a few
     points under where cards read best (75 %) beats a cut-off canvas. Else, from the top, it zooms out as far as 55 % (titles still read) to keep

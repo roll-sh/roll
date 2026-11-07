@@ -153,7 +153,7 @@ export function SandboxPanel({ machine }: { machine: Machine }) {
       <div className="flex items-center gap-2 text-[12px]">
         <span className={`size-1.5 shrink-0 rounded-full ${moving ? "bg-accent" : status === "running" ? "bg-ok" : status === "failed" ? "bg-danger" : "bg-subtle"}`} aria-hidden />
         {/* Running is the machine's "online": then the line is what's rented. */}
-        <span className={`min-w-0 truncate ${moving || busy ? "shimmer" : ""} ${status === "running" && !busy ? "font-mono text-[11px] text-muted" : ""}`} title={[size && `${size.name}: ${size.cpu} vCPU, ${size.memory_gb} GB, ${size.disk_gb} GB disk`, used && `${used.running_hours.toFixed(1)} h this month, ${dollars(used.price_usd)}`].filter(Boolean).join(" · ") || undefined}>
+        <span data-line className={`min-w-0 truncate ${moving || busy ? "shimmer" : ""} ${status === "running" && !busy ? "font-mono text-[11px] text-muted" : ""}`} title={[size && `${size.name}: ${size.cpu} vCPU, ${size.memory_gb} GB, ${size.disk_gb} GB disk`, used && `${used.running_hours.toFixed(1)} h this month, ${dollars(used.price_usd)}`].filter(Boolean).join(" · ") || undefined}>
           {busy === "start"
             ? "Starting…"
             : busy === "stop"
@@ -187,17 +187,17 @@ export function SandboxPanel({ machine }: { machine: Machine }) {
       </div>
       {used && (
         // This month's use: a detail (compact density hides it; the size's tooltip keeps it).
-        <p data-detail className="text-[11.5px] text-subtle">
+        <p data-detail data-line className="text-[11.5px] text-subtle">
           <span className="font-mono text-muted">{used.running_hours.toFixed(1)} h</span> this month · <span className="font-mono text-muted">{dollars(used.price_usd)}</span>
         </p>
       )}
-      {status === "creating" && <p className="text-[11.5px] text-subtle">Booting. It connects on its own in a minute or so, and isn't billed until it does.</p>}
+      {status === "creating" && <p data-line className="text-[11.5px] text-subtle">Booting. It connects on its own in a minute or so, and isn't billed until it does.</p>}
       {/* Up, but its daemon never said hello: the server bills nothing until it does. */}
       {status === "running" && !machine.online && !machine.last_seen && (
-        <p className="text-[11.5px] text-subtle">Running, but it hasn't connected to roll yet, so it isn't billed. If that takes more than a few minutes, it can't reach this roll server (a network or firewall between them).</p>
+        <p data-line className="text-[11.5px] text-subtle">Running, but it hasn't connected to roll yet, so it isn't billed. If that takes more than a few minutes, it can't reach this roll server (a network or firewall between them).</p>
       )}
-      {asleep && <p className="text-[11.5px] text-subtle">Wakes when an agent needs it. Asleep, it isn't billed.</p>}
-      {sb?.error && <p className="text-[11.5px] text-danger">{sb.error}</p>}
+      {asleep && <p data-line className="text-[11.5px] text-subtle">Wakes when an agent needs it. Asleep, it isn't billed.</p>}
+      {sb?.error && <p data-line className="text-[11.5px] text-danger">{sb.error}</p>}
       {confirm && sb && services && (
         <div className="flex items-center gap-1 text-[11.5px]">
           <button disabled={busy !== null} onClick={() => act("delete", () => services.sandboxes.remove(owner, sb.id))} className="rounded-md px-1.5 py-0.5 text-danger hover:bg-danger/10">

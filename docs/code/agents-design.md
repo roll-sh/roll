@@ -105,8 +105,10 @@ punch out the edge ports. `refreshColors()` reruns on a theme change (the canvas
 - **Frame:** `rounded-xl border border-line-2 bg-panel shadow-card inset-shadow-highlight`.
   Clickable cards get `border-line-3` and `shadow-card-hover` on hover. Focus is a 2px accent
   outline offset by 2px.
-- **Tones (border):** busy `accent/40`, breathing, done `ok/40` (T3's green for a
-  finished run you haven't opened), error `danger/45`, muted at 60% opacity.
+- **Tones (border):** busy `accent/40`, breathing; waiting on you (a request here) `accent/45`,
+  still; error `danger/45`; offline (a machine) dashed `muted/50`, its name and remedy at full
+  strength; archived at 60% opacity. Done has no tone: the pill's green dot says it, once (a
+  green border too said it twice).
 - **Selected** (its conversation or settings are open): an accent hairline plus a 3px accent
   halo at 16% (`[data-card][data-selected]` in globals.css).
 - **Header:** an `IconTile` (24px, `bg-panel-2`, a hairline, the highlight, a 14px icon), then the
@@ -146,17 +148,27 @@ The rules are in agents.md, "Canvas" › "At scale". How it looks:
   doesn't fit drops out, never cut) and its usage. In a Done section the header says done: no
   green border or "Completed" on each, just when. Forks and subagents are never cards of their
   own: a chip on the card they came from (the one that matters most, its status dot, "+N"; a click
-  opens it), and what waited on them waits on that card. A request stacks under its thread, a
-  grid's gap apart. The fold card is a cell of the same size, its project's last: "15 more
+  opens it; a title over 22 characters gives way to "Fork" or "Subagent"), and what waited on them
+  waits on that card. Waiting on you means a request here (`waitingOnYou`): the header, the
+  views' tab, the zoom bar, the pill and a project's count agree. A waiting card's line is what it
+  asks; a failure that only says "failed" leaves the line to what it was asked; with no line the
+  title may take three lines. A request stacks under its thread, a grid's gap apart, framed as its
+  thread is (the project's edge, the waiting tone) and about two cells tall: one step before it
+  (none over a plan), a plan folded to three lines with "Show the whole plan", the buttons in reach. The fold card is a cell of the same size, its project's last: "15 more
   threads", its summary and the newest two titles, two sheets under it.
 - **Card tools** float above the card's top-right corner on the popover fill, never over its status.
-- **Far out**: never bigger type. Below 55 % (`[data-brief]`) a card's text other than its title
-  goes transparent (boxes, chips, dots and frames stay; identity tiles stay whole); below 40 %
-  (`[data-greek]`) a card is its frame, its identity (tile, edge, header tint, status strip) and
-  its title as one even bar per line, as long as the line (`--fg` at 22 %, 28 % in light mode, a
-  band 0.62 em high, cut per line in both engines); icons, dots, chips and buttons go. In light
-  mode the frames go to `--fg` 26 % below 55 %, and the done tone is `--ok` at 70 % at any zoom. The identity edge widens to 6 px
-  world below 40 % and 10 px below 30 %, so it stays about 2 screen px.
+- **Far out**: never bigger type. Below 55 % (`[data-brief]`) a card keeps its frame, identity
+  (tile whole, edge, header tint, status strip, a plan's box), title and status marks; each other
+  row is a bar as long as its text in the row's own colour at 42 % (`data-line`: a failed line is a
+  red bar, a waiting pill an accent one), a row of chips is filled bars, each whole (`data-chips`),
+  and buttons, inputs, radios, icons, lone dots and chip outlines go (hidden, so sizes hold). Below
+  40 % (`[data-greek]`) a card is its frame, its identity, its marks and its title as one even bar
+  per line, as long as the line (`--fg` at 22 %, 28 % in light mode, a band 0.62 em high, cut per
+  line in both engines). Waiting, busy and failed cards draw their tone 1 px inside the border below
+  55 %, 2 px below 40 % and 3 px below 30 % (about a screen pixel); a section header keeps its dot.
+  In light mode the frames go to `--fg` 26 % below 55 % and 38 % below 40 % (faint, an identity edge
+  alone read as a "["), and done text mixes `--ok` with `--fg` for contrast. The identity edge
+  widens to 6 px world below 40 % and 10 px below 30 %, so it stays about 2 screen px.
 - **Minimap**: 168 × 112, glass like the zoom bar, 12 px above it; blocks are `--muted` for
   machines and projects, the line colour for the rest, accent for requests and busy work; the
   frame is a 1 px `--fg` line at 55 %. Each axis is scaled on its own to fill the box (never more

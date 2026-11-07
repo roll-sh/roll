@@ -3,9 +3,9 @@
 import { ArrowUpRight, CircleAlert, CornerDownRight, FolderGit2, FolderPlus, GitBranch, GitFork, GitPullRequest, LogIn, MoreHorizontal, Plus, RefreshCw, Settings2, SquareTerminal } from "lucide-react";
 import { memo, useCallback, useMemo, useState, type ReactNode } from "react";
 import { useToolsArmed } from "./card-tools";
-import { coming, isRunning, machineState, reachable, type IdentityColor, type Machine, type Node, type Project, type ProviderInfo, type Request, type Run, type Thread } from "@/lib/agents-api";
+import { coming, isBusy, isRunning, machineState, reachable, type IdentityColor, type Machine, type Node, type Project, type ProviderInfo, type Request, type Run, type Thread } from "@/lib/agents-api";
 import { newestRuns, projectStats, type ProjectStats } from "@/lib/agents-graph";
-import { providersFor, type AgentsData } from "@/lib/agents-store";
+import { providersFor, waitingOnYou, type AgentsData } from "@/lib/agents-store";
 import { setAgentsView } from "@/lib/agents-surface";
 import { btn, primary } from "../ui";
 import { AutomationChip, useThreadOrigin } from "./automations/chip";
@@ -34,7 +34,8 @@ import { fitWords, unbroken } from "./fit-words";
  * `tint` is the colour of the project or machine it belongs to (docs/code/agents-design.md,
  * "Identity"): its children use it through `--tint`; `edge` paints the card's left edge in it, the
  * whole height and round with the corners. The tone keeps the rest of the border, so state always
- * reads over identity; a busy border breathes (globals.css).
+ * reads over identity; a busy border breathes, one waiting on you holds still (globals.css), and
+ * both, with a failed one's, stay a screen pixel at any zoom.
  */
 export function Card({
   width,
@@ -50,7 +51,7 @@ export function Card({
   width: number;
   /** A fixed height (a thread's card: every cell of a grid the same, rows aligned). */
   height?: number;
-  tone?: "busy" | "error" | "muted" | "done";
+  tone?: "busy" | "waiting" | "error" | "muted" | "offline";
   tint?: IdentityColor;
   edge?: boolean;
   children: ReactNode;
@@ -58,7 +59,8 @@ export function Card({
   onClick?: () => void;
   label?: string;
 }) {
-  const border = tone === "busy" ? "border-accent/40" : tone === "error" ? "border-danger/45" : tone === "done" ? "border-ok/40" : "border-line-2";
+  // Offline is a state of its own, not a dimmed card: the frame turns dashed, everything in it reads.
+  const border = tone === "busy" ? "border-accent/40" : tone === "waiting" ? "border-accent/45" : tone === "error" ? "border-danger/45" : tone === "offline" ? "border-dashed border-muted/50" : "border-line-2";
   return (
     <div
       data-drag
@@ -98,7 +100,7 @@ export function Card({
  * fading nothing; the body below stays the plain panel.
  */
 function TintedHeader({ children }: { children: ReactNode }) {
-  return <div data-keep className="flex items-center gap-2.5 rounded-t-[11px] border-b border-line bg-(--tint)/[0.06] px-3 py-2.5">{children}</div>;
+  return <div data-head className="flex items-center gap-2.5 rounded-t-[11px] border-b border-line bg-(--tint)/[0.06] px-3 py-2.5">{children}</div>;
 }
 
 /**
@@ -107,11 +109,12 @@ function TintedHeader({ children }: { children: ReactNode }) {
  * names never truncate for buttons that aren't showing. Its buttons mount once they're first
  * needed (`useToolsArmed`).
  */
-function HoverActions({ children, className = "" }: { children: ReactNode; className?: string }) {
+function HoverActions({ children, className = "", ...data }: { children: ReactNode; className?: string; "data-card-tools"?: boolean }) {
   const { armed, ref } = useToolsArmed();
   return (
     <div
       ref={ref}
+      {...data}
       className={`pointer-events-none absolute right-2 bottom-[calc(100%+6px)] z-10 flex translate-y-1 items-center gap-0.5 rounded-lg border border-line-2 bg-popover p-0.5 text-fg/80 opacity-0 shadow-pop inset-shadow-highlight transition-[opacity,translate] duration-150 ease-out starting:translate-y-1! starting:opacity-0! motion-reduce:transition-none group-hover/card:pointer-events-auto group-hover/card:translate-y-0 group-hover/card:opacity-100 focus-within:pointer-events-auto focus-within:translate-y-0 focus-within:opacity-100 ${armed ? "" : "hidden"} ${className}`}
       data-nodrag
       data-touch-tools
@@ -192,11 +195,11 @@ export function MachineNode({ machine }: { machine: Machine }) {
       focus(`x:${r.id}`);
     });
   return (
-    <Card width={272} tone={state === "offline" ? "muted" : undefined} tint={machineColor(machine)} label={`Machine ${machine.name}`}>
+    <Card width={272} tone={state === "offline" ? "offline" : undefined} tint={machineColor(machine)} label={`Machine ${machine.name}`}>
       <TintedHeader>
         <MachineIcon machine={machine} tile className="size-6" />
         <span data-title className="min-w-0 flex-1 truncate text-[13.5px] font-semibold tracking-[-0.015em]">{machine.name}</span>
-        <span className="flex shrink-0 items-center gap-1.5 text-[11px] text-subtle">
+        <span data-line className={`flex shrink-0 items-center gap-1.5 text-[11px] ${state === "offline" ? "text-muted" : "text-subtle"}`}>
           <StatusDot status={machine.online ? "online" : "offline"} />
           <span className={coming(state) ? "shimmer" : ""}>{state}</span>
         </span>
@@ -226,13 +229,13 @@ export function MachineNode({ machine }: { machine: Machine }) {
       </TintedHeader>
       <div className="space-y-2.5 px-3 pt-2.5 pb-3">
         {os && (
-          <p data-detail className="truncate font-mono text-[11px] text-subtle">
+          <p data-detail data-line className="truncate font-mono text-[11px] text-subtle">
             {os}
           </p>
         )}
         {!machine.online && !sandbox && (
-          <p className="text-[11.5px] text-subtle">
-            {machine.last_seen ? `Last seen ${ago(machine.last_seen)}.` : "Not connected yet."} <span className="whitespace-nowrap">Start it with <code className="font-mono text-muted">roll agent up</code>.</span>
+          <p data-line className="text-[11.5px] text-muted">
+            {machine.last_seen ? `Last seen ${ago(machine.last_seen)}.` : "Not connected yet."} <span className="whitespace-nowrap">Start it with <code className="font-mono text-fg">roll agent up</code>.</span>
           </p>
         )}
         {sandbox && <SandboxPanel machine={machine} />}
@@ -242,7 +245,7 @@ export function MachineNode({ machine }: { machine: Machine }) {
         ) : (
           listed.length > 0 && (
             // Wrapping, the "+3" went alone onto a line of its own: one line, names give way first.
-            <ul className={cn("flex gap-1", more.length > 0 ? "flex-nowrap" : "flex-wrap")} aria-label="Providers">
+            <ul data-chips className={cn("flex gap-1", more.length > 0 ? "flex-nowrap" : "flex-wrap")} aria-label="Providers">
               {chips.map((p) => (
                 <li key={p.id} className="flex min-w-0">
                   {p.checking ? (
@@ -295,7 +298,11 @@ export function MachineNode({ machine }: { machine: Machine }) {
             <FolderPlus className="size-3.5" /> Add a project
           </button>
         )}
-        {error && <p className="text-[12px] text-danger">{error}</p>}
+        {error && (
+          <p data-line className="text-[12px] text-danger">
+            {error}
+          </p>
+        )}
       </div>
     </Card>
   );
@@ -349,19 +356,19 @@ export function ProjectNode({ project, machine }: { project: Project; machine: M
           >
             <SquareTerminal />
           </Tool>
-          <Menu label="Project" className="[&>button]:size-6" trigger={<MoreHorizontal className="size-3.5" />} items={actions} />
+          <Menu label="More for this project" className="[&>button]:size-6" trigger={<MoreHorizontal className="size-3.5" />} items={actions} />
         </HoverActions>
       </TintedHeader>
       <div className="flex items-center gap-2 px-3 pt-2.5 pb-3 font-mono text-[11px] text-subtle">
         {project.git?.branch && (
-          <span className="flex shrink-0 items-center gap-1" title={project.git.dirty ? "Uncommitted changes" : undefined}>
+          <span data-line className="flex shrink-0 items-center gap-1" title={project.git.dirty ? "Uncommitted changes" : undefined}>
             <GitBranch className="size-3" />
             {project.git.branch}
             {project.git.dirty && <span className="size-1 rounded-full bg-muted" aria-label="dirty" />}
           </span>
         )}
         <span className="min-w-0 flex-1 truncate" title={project.path}>
-          {project.repo ? `${project.repo.owner}/${project.repo.repo}` : shortPath(project.path, machine?.info?.home)}
+          <span data-line>{project.repo ? `${project.repo.owner}/${project.repo.repo}` : shortPath(project.path, machine?.info?.home)}</span>
         </span>
         {project.repo && !demo && (
           <a data-nodrag href={`/${project.repo.owner}/${project.repo.repo}`} className="shrink-0 hover:text-fg" aria-label="Open the repo" title="Open the repo">
@@ -379,7 +386,7 @@ export function ProjectNode({ project, machine }: { project: Project; machine: M
             </button>
           ) : (
             // The machine can't run one yet: its card has the steps; this says where.
-            <p className="text-[11.5px] text-subtle">
+            <p data-line className="text-[11.5px] text-subtle">
               {notReadyReason(machine)}.{" "}
               <button type="button" data-nodrag onClick={() => openMachineSettings(machine!.id, "Providers")} className="text-muted underline-offset-2 hover:text-fg hover:underline">
                 Set one up
@@ -388,7 +395,11 @@ export function ProjectNode({ project, machine }: { project: Project; machine: M
           )}
         </div>
       )}
-      {error && <p className="px-3 pb-3 text-[12px] text-danger">{error}</p>}
+      {error && (
+        <p className="px-3 pb-3 text-[12px] text-danger">
+          <span data-line>{error}</span>
+        </p>
+      )}
     </Card>
     </div>
   );
@@ -402,7 +413,7 @@ function StatsRows({ stats, providers }: { stats: ProjectStats; providers: reado
     <div data-detail className="mx-3 mb-3 space-y-1 border-t border-line pt-2.5 text-[11px] text-subtle">
       <StatusStrip stats={stats} />
       <p className="flex items-center gap-1.5">
-        <span className="min-w-0 truncate">
+        <span data-line className="min-w-0 truncate">
           {plural(stats.threads, "thread", "threads")}
           {stats.waiting > 0 && <span className="text-accent"> · {stats.waiting} need you</span>}
           {stats.running > 0 && <span className="text-fg"> · {stats.running} running</span>}
@@ -410,14 +421,14 @@ function StatsRows({ stats, providers }: { stats: ProjectStats; providers: reado
           {stats.done > 0 && <span className="text-ok"> · {stats.done} done</span>}
         </span>
         {stats.changes.length > 0 && (
-          <span className="ml-auto flex shrink-0 items-center gap-1" title={stats.changes.map((c) => `#${c.number} ${changeStatusLabel[c.status]}`).join(" · ")}>
+          <span data-line className="ml-auto flex shrink-0 items-center gap-1" title={stats.changes.map((c) => `#${c.number} ${changeStatusLabel[c.status]}`).join(" · ")}>
             <GitPullRequest className="size-3" />
             {plural(stats.changes.length, "PR", "PRs")}
             {landed > 0 && <span className="text-ok">· {landed} landed</span>}
           </span>
         )}
       </p>
-      <p className="truncate text-muted" aria-label="Agents in this project" title={stats.agents.map((a) => `${providerName(providers, a.provider)}: ${plural(a.threads, "thread", "threads")}`).join(", ")}>
+      <p data-line className="truncate text-muted" aria-label="Agents in this project" title={stats.agents.map((a) => `${providerName(providers, a.provider)}: ${plural(a.threads, "thread", "threads")}`).join(", ")}>
         {fitWords([...stats.agents.map((a) => `${providerName(providers, a.provider)}${a.threads > 1 ? ` ×${a.threads}` : ""}`), ...(stats.cost_usd != null ? [`$${stats.cost_usd.toFixed(2)}`] : [])].join(" · "), 246, 11, /( · )/)}
       </p>
     </div>
@@ -545,63 +556,81 @@ export const ThreadCard = memo(function ThreadCard({ thread, machine, project, l
   if (childFailed && (!pill || pill.tone === "ok")) pill = { label: `${childFailed.kind === "fork" ? "Fork" : "Subagent"} failed`, tone: "danger", pulse: false };
   // In a Done section the header says it: the cards show when instead of a green each.
   if (section === "done" && pill?.tone === "ok") pill = null;
-  const done = threadDone(thread, lastRun) && section !== "done" && (!pill || pill.tone === "ok");
   const usage = usageLine(thread.usage);
   const model = modelName(providers, thread.provider, thread.model);
   // Started by an automation: its tag, opening the run.
   const origin = useThreadOrigin(thread.id);
-  // Idle with nothing to say but the last prompt: no line when that's the title again.
-  const quiet = !thread.error && !running && thread.status !== "waiting";
-  const tone = thread.status === "error" || childFailed ? "error" : running ? "busy" : thread.archived_at ? "muted" : done ? "done" : undefined;
+  // Its frame says what needs you, works or failed (and keeps saying it at any zoom); done is the
+  // pill's alone (a green frame and a green "Completed" said it twice).
+  const tone = thread.status === "error" || childFailed ? "error" : pending.length ? "waiting" : isBusy(thread.status) ? "busy" : thread.archived_at ? "muted" : undefined;
   // A fork on its own card (what it came from isn't on the canvas): it says so first.
   const forkOf = thread.lineage?.relation === "fork" ? (client.data.threads.get(thread.lineage.parent)?.value.title ?? "a settled thread") : null;
-  const line = thread.error ? null : running ? (thread.activity ?? threadStatusLabel[thread.status]) : thread.status === "waiting" ? (thread.activity ?? threadStatusLabel.waiting) : lastRun?.delivers?.length ? null : lastRun ? lastRun.prompt : null;
+  // Waiting on you: what it asks (the pill says that it waits). Failed: why, unless that only says
+  // "failed" again (the pill does), then what it was asked.
+  const asks = pending[0] ? requestAsks(pending[0]) : null;
+  const error = thread.error && !GENERIC_FAILURE.test(thread.error.trim()) ? thread.error : null;
+  const delivered = !!lastRun?.delivers?.length && thread.status !== "waiting" && !thread.error;
+  const line = error ? null : asks ? asks : running ? (thread.activity ?? threadStatusLabel[thread.status]) : thread.status === "waiting" ? (thread.activity ?? null) : delivered ? null : lastRun ? lastRun.prompt : null;
+  // Idle with nothing to say but the last prompt: no line when that's the title again.
+  const said = !!(error || delivered || (line && !(!asks && !running && line.trim().toLowerCase() === thread.title.trim().toLowerCase())) || !lastRun);
   // Where it sits says its project and machine (the tree, its colour): the card says what tells it apart.
   return (
     <Card width={296} height={THREAD_H} tone={tone} tint={project ? projectColor(project) : undefined} edge onClick={() => openThread(thread.id)} label={`Thread ${thread.title}`}>
       <div className="flex h-full flex-col px-3.5 pt-2.5 pb-2.5">
         <div className="flex h-4 min-w-0 items-center gap-1.5 text-[11px] text-subtle">
           {forkOf ? (
-            <span className="flex min-w-0 items-center gap-1 text-muted" title={`Fork of ${forkOf}`}>
+            <span data-line className="flex min-w-0 items-center gap-1 text-muted" title={`Fork of ${forkOf}`}>
               <GitFork className="size-3 shrink-0" aria-hidden />
               <span className="truncate">Fork of {forkOf}</span>
             </span>
           ) : (
-            <span className="min-w-0 truncate" title={machine ? `On ${machine.name}` : undefined}>
+            <span data-line className="min-w-0 truncate" title={machine ? `On ${machine.name}` : undefined}>
               {providerName(providers, thread.provider)}
               {model && ` · ${model}`}
               {thread.interaction_mode === "plan" && " · plan"}
               {thread.queued.length > 0 && ` · ${thread.queued.length} queued`}
             </span>
           )}
-          <span className="ml-auto flex shrink-0 items-center gap-1.5">{pill ? <StatusPill pill={pill} /> : <span className="tabular-nums" title="Last activity">{ago(lastActive(thread, lastRun))}</span>}</span>
+          <span className="ml-auto flex shrink-0 items-center gap-1.5">
+            {pill ? (
+              <StatusPill pill={pill} line />
+            ) : (
+              <span data-line className="tabular-nums" title="Last activity">
+                {ago(lastActive(thread, lastRun))}
+              </span>
+            )}
+          </span>
         </div>
         <div className="mt-1.5 flex items-start gap-2">
-          <p data-title className="line-clamp-2 min-w-0 flex-1 text-[13.5px] leading-snug font-medium tracking-[-0.01em]">
+          {/* With nothing more to say, the title has the room (no empty body under one line). */}
+          <p data-title className={`${said ? "line-clamp-2" : "line-clamp-3"} min-w-0 flex-1 text-[13.5px] leading-snug font-medium tracking-[-0.01em]`}>
             <span data-bar>{unbroken(thread.title).map((w, i) => (typeof w === "string" ? w : <span key={i} className="whitespace-nowrap">{w.nowrap}</span>))}</span>
           </p>
           {forkable && (
-            <HoverActions>
+            <HoverActions data-card-tools>
               <Tool label="Fork (or drag onto the canvas)" launch={`t:${thread.id}`} onClick={fork}>
                 <GitFork />
               </Tool>
             </HoverActions>
           )}
-          {thread.pending_requests > 0 && (
-            <span className="mt-px shrink-0 rounded-full bg-accent px-1.5 py-px font-mono text-[10.5px] font-semibold text-white tabular-nums" title={`${thread.pending_requests} waiting for you`}>
-              {thread.pending_requests}
+          {/* Several asks: how many (one is the pill and the line already). */}
+          {pending.length > 1 && (
+            <span className="mt-px shrink-0 rounded-full bg-accent px-1.5 py-px font-mono text-[10.5px] font-semibold text-white tabular-nums" title={`${pending.length} waiting for you`}>
+              {pending.length}
             </span>
           )}
         </div>
-        {!(quiet && lastRun?.prompt.trim().toLowerCase() === thread.title.trim().toLowerCase()) && (
-        <p className={`mt-1 truncate text-[12px] ${running || pending.length ? "" : "text-muted"}`}>
-          {thread.error ? (
-            <span className="flex items-center gap-1 text-danger">
-              <CircleAlert className="size-3 shrink-0" /> <span className="truncate">{fitWords(thread.error, LINE_W - 16)}</span>
+        {said && (
+        <p data-line className={`mt-1 truncate text-[12px] ${error ? "text-danger" : running || pending.length ? "" : "text-muted"}`}>
+          {error ? (
+            <span className="flex items-center gap-1">
+              <CircleAlert className="size-3 shrink-0" /> <span className="truncate">{fitWords(error, LINE_W - 16)}</span>
             </span>
+          ) : asks ? (
+            fitWords(asks, LINE_W)
           ) : running ? (
             <span className="shimmer">{fitWords(line ?? "", LINE_W)}</span>
-          ) : lastRun?.delivers?.length && thread.status !== "waiting" ? (
+          ) : delivered && lastRun ? (
             <DeliveredText run={lastRun} />
           ) : line ? (
             fitWords(line, LINE_W)
@@ -610,9 +639,11 @@ export const ThreadCard = memo(function ThreadCard({ thread, machine, project, l
           )}
         </p>
         )}
-        {/* Whole chips or none: a chip that doesn't fit wraps onto a hidden second line rather than losing its meaning. */}
+        {/* Whole chips or none: a chip that doesn't fit wraps onto a hidden second line rather than
+            losing its meaning. The empty first item keeps the first line from being empty, so even
+            one chip wider than the row goes there (a line's first item stays however wide it is). */}
         <div data-detail className="mt-auto flex min-w-0 items-end gap-2 pt-1.5 text-[11px] text-subtle">
-          <div className="flex h-[19px] min-w-0 flex-1 flex-wrap items-center gap-x-1.5 gap-y-2 overflow-hidden [&>*]:max-w-full">
+          <div data-chips className="flex h-[19px] min-w-0 flex-1 flex-wrap items-center gap-x-1.5 gap-y-2 overflow-hidden before:-mr-1.5 before:h-[19px] before:content-[''] [&>*]:max-w-none [&>*]:shrink-0">
             {inside?.length ? <InsideChip rows={inside} onOpen={openThread} /> : null}
             {orchestrated && <OrchestratorChip {...orchestrated} onOpen={openThread} />}
             {thread.change && <ChangeChip change={thread.change} />}
@@ -631,7 +662,7 @@ export const ThreadCard = memo(function ThreadCard({ thread, machine, project, l
               </span>
             )}
           </div>
-          <span className="flex h-[19px] shrink-0 items-center gap-1.5 font-mono text-[10.5px]">
+          <span data-line className="flex h-[19px] shrink-0 items-center gap-1.5 font-mono text-[10.5px]">
             {usage}
             <ThreadChanges thread={thread} last={lastRun} />
             {thread.context && <ContextMeter context={thread.context} size={12} label />}
@@ -652,13 +683,14 @@ export function insideRows(data: AgentsData, inside: ReadonlyMap<string, readonl
   const out = new Map<string, InsideRow[]>();
   if (!inside.size) return out;
   const newest = newestRuns(data);
+  const waiting = waitingOnYou(data);
   for (const [host, keys] of inside) {
     const rows: InsideRow[] = [];
     for (const k of keys) {
       if (k.startsWith("t:")) {
         const t = data.threads.get(k.slice(2))?.value;
         if (!t) continue;
-        const status = isRunning(t.status) ? "running" : t.status === "waiting" || t.pending_requests > 0 ? "waiting" : t.status === "error" ? "error" : threadDone(t, newest.get(t.id)) ? "done" : "idle";
+        const status = waiting.has(t.id) ? "waiting" : isBusy(t.status) ? "running" : t.status === "error" ? "error" : threadDone(t, newest.get(t.id)) ? "done" : "idle";
         rows.push({ key: k, thread: t.id, kind: t.lineage?.relation === "fork" ? "fork" : "subagent", title: t.title, status });
       } else if (k.startsWith("s:")) {
         const n = [...data.nodes.values()].map((m) => m.get(k.slice(2))).find(Boolean)?.value;
@@ -681,6 +713,8 @@ function InsideChip({ rows, onOpen }: { rows: readonly InsideRow[]; onOpen: (thr
   const forks = rows.filter((r) => r.kind === "fork").length;
   const label = `${forks ? `${forks} fork${forks === 1 ? "" : "s"}` : ""}${forks && forks < rows.length ? ", " : ""}${rows.length - forks ? `${rows.length - forks} subagent${rows.length - forks === 1 ? "" : "s"}` : ""}`;
   const dot = first.status === "error" ? "error" : first.status === "running" ? "running" : first.status === "waiting" ? "waiting" : "idle";
+  // A chip is whole or dropped (never "Try a compact ta…"): a long title gives way to its kind.
+  const name = first.title.length <= 22 ? first.title : first.kind === "fork" ? "Fork" : "Subagent";
   return (
     <button
       type="button"
@@ -695,7 +729,7 @@ function InsideChip({ rows, onOpen }: { rows: readonly InsideRow[]; onOpen: (thr
     >
       {first.kind === "fork" ? <GitFork className="size-3 shrink-0" aria-hidden /> : <CornerDownRight className="size-3 shrink-0" aria-hidden />}
       <StatusDot status={dot} />
-      <span className={`truncate ${first.status === "error" ? "text-danger" : ""}`}>{first.title}</span>
+      <span className={first.status === "error" ? "text-danger" : ""}>{name}</span>
       {rows.length > 1 && <span className="shrink-0 font-mono tabular-nums">+{rows.length - 1}</span>}
     </button>
   );
@@ -707,6 +741,14 @@ function InsideChip({ rows, onOpen }: { rows: readonly InsideRow[]; onOpen: (thr
  */
 function lastActive(thread: Thread, run: Run | undefined): number {
   return run ? Math.max(thread.created_at, run.requested_at, run.completed_at ?? 0) : thread.created_at;
+}
+
+/** An error that says no more than the "Failed" pill. */
+const GENERIC_FAILURE = /^(the )?(run )?failed\.?$/i;
+
+/** What a request asks, in a line: an approval's title, else its first question. */
+function requestAsks(r: Request): string {
+  return r.body.type === "approval" ? r.body.title : (r.body.questions[0]?.question ?? "Waiting for your answer");
 }
 
 
@@ -737,18 +779,22 @@ export function SubagentNode({ node }: { node: Node }) {
 
 /**
  * A request beside its thread, answered right on the card: approvals and plans with their buttons,
- * questions one at a time with their options (T3's user-input panel), and the last steps that led
- * to it above (`PendingRequest`). No need to open the conversation.
+ * questions one at a time with their options (T3's user-input panel), and the last step that led
+ * to it above (`PendingRequest`). No need to open the conversation. Framed as its thread is (the
+ * project's edge, the waiting tone), so it reads as that thread's, and bounded: a long plan folds.
  */
 export function RequestNode({ request }: { request: Request }) {
   const { client, openThread, readOnly } = useAgents();
-  const machine = client.data.threads.get(request.thread)?.machine;
+  const rec = client.data.threads.get(request.thread);
+  const machine = rec?.machine;
+  const project = rec ? client.data.projects.get(rec.value.project)?.value : undefined;
   return (
-    <Card width={296} label="Waiting for you">
+    <Card width={296} tone="waiting" tint={project ? projectColor(project) : undefined} edge label="Waiting for you">
       <div className="px-3.5 py-3" data-nodrag>
         <PendingRequest
           request={request}
           data={client.data}
+          compact
           onOpen={() => openThread(request.thread)}
           onRespond={readOnly ? undefined : (response) => client.run(machine!, { type: "request.respond", request: request.id, response })}
         />

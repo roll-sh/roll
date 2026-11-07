@@ -61,9 +61,10 @@ export function FoldedThreads({ container }: { container: string }) {
         label={expanded ? `Fold these ${threads.length} threads again` : group || !drill ? `${label}: show them here` : `${label}: open ${project.name}'s space`}
       >
         <div className="flex h-full flex-col px-3.5 pt-2.5 pb-2.5">
-          {/* Under its project already: when they last did something, not whose they are. */}
-          <div className="flex h-4 min-w-0 items-center gap-1.5 text-[11px] text-subtle">
-            {threads[0] && <span className="shrink-0 tabular-nums">{expanded ? plural(threads.length, "thread", "threads") : `last active ${ago(activity(threads[0], newest.get(threads[0].id)))}`}</span>}
+          {/* Under its project already: when they last did something, not whose they are (top
+              right, where a thread card has its time). */}
+          <div className="flex h-4 min-w-0 items-center justify-end gap-1.5 text-[11px] text-subtle">
+            {threads[0] && <span data-line className="shrink-0 tabular-nums">{expanded ? plural(threads.length, "thread", "threads") : `last active ${ago(activity(threads[0], newest.get(threads[0].id)))}`}</span>}
           </div>
           <div className="mt-1.5 flex items-center gap-2">
             <p data-title className="min-w-0 flex-1 text-[13.5px] leading-snug font-medium tracking-[-0.01em]">{label}</p>
@@ -74,7 +75,7 @@ export function FoldedThreads({ container }: { container: string }) {
           {!expanded && (
             <ul className="mt-auto space-y-0.5 text-[11.5px] text-subtle">
               {threads.slice(0, 2).map((t) => (
-                <li key={t.id} className="truncate">
+                <li key={t.id} data-line className="truncate">
                   {fitWords(t.title, 266, 11.5)}
                 </li>
               ))}
@@ -95,10 +96,12 @@ export function StatusHeader({ group, count }: { group: StatusGroup; count: numb
   const dot = group === "needs" || group === "running" ? "bg-accent" : group === "failed" ? "bg-danger" : group === "done" ? "bg-ok" : "bg-subtle/60";
   return (
     <div data-drag style={{ width: "var(--section-w, 296px)" }} className="relative flex h-10 items-center gap-2 border-b border-fg/15 pr-1 pl-3.5">
-      <span aria-hidden className={`size-2 shrink-0 rounded-full ${dot} ${group === "running" ? "motion-safe:animate-pulse" : ""}`} />
+      <span aria-hidden data-mark className={`size-2 shrink-0 rounded-full ${dot} ${group === "running" ? "motion-safe:animate-pulse" : ""}`} />
       {/* A card title's size: it names everything under it, and greeked it stays a bar. */}
       <span data-title className="text-[14px] font-semibold tracking-[-0.015em]">{statusGroupLabel[group]}</span>
-      <span className="font-mono text-[11.5px] text-subtle tabular-nums">{count}</span>
+      <span data-line className="font-mono text-[11.5px] text-subtle tabular-nums">
+        {count}
+      </span>
     </div>
   );
 }
@@ -129,7 +132,7 @@ function Peek({ threads, done, name }: { threads: readonly Thread[]; done: numbe
           />
         }
       >
-        <span className="min-w-0 flex-1 truncate">
+        <span data-line className="min-w-0 truncate">
           {done > 0 && (
             <>
               <span className="mr-1 inline-block size-1.5 rounded-full bg-ok align-middle" aria-hidden />

@@ -18,8 +18,9 @@ import { Collapse } from "./animated-height";
 import { RequestCard } from "./request-card";
 import { StepRow } from "./work-log";
 
-/** How many of the steps before a request show at first. */
+/** How many of the steps before a request show at first (on a canvas card, `compact`: one, none over a plan). */
 export const RECENT_STEPS = 3;
+const CARD_STEPS = 1;
 
 export function PendingRequest({
   request,
@@ -27,9 +28,12 @@ export function PendingRequest({
   onRespond,
   onOpen,
   extra,
+  compact = false,
 }: {
   request: Request;
   data: AgentsData;
+  /** On a canvas card: one step, and a long plan folded shorter (the card stays a card's size). */
+  compact?: boolean;
   /** Unset: read-only. */
   onRespond?: (r: RequestResponse) => Promise<unknown>;
   /** Open the conversation. */
@@ -40,20 +44,24 @@ export function PendingRequest({
   const [all, setAll] = useState(false);
   const thread = data.threads.get(request.thread)?.value;
   const { steps } = stepsBefore(nodeTree(data, request.thread, request.run), request.node, Infinity);
-  const shown = all ? steps : steps.slice(-RECENT_STEPS);
-  const earlier = steps.length - shown.length;
   const plan = planOf(request, data);
+  // A canvas card stays about two cells tall: over a plan (the context it needs), only the toggle.
+  const recent = compact ? (plan ? 0 : CARD_STEPS) : RECENT_STEPS;
+  const shown = all ? steps : recent ? steps.slice(-recent) : [];
+  const earlier = steps.length - shown.length;
   return (
     <div className="min-w-0 space-y-2">
       <button onClick={onOpen} title="Open the conversation" className="group/open flex max-w-full min-w-0 items-center gap-1.5 text-[11.5px] text-subtle hover:text-fg">
-        <span className="size-1.5 shrink-0 rounded-full bg-accent" aria-hidden />
-        <span className="truncate">{thread?.title ?? "Waiting for you"}</span>
+        <span data-mark className="size-1.5 shrink-0 rounded-full bg-accent" aria-hidden />
+        <span data-line className="truncate">
+          {thread?.title ?? "Waiting for you"}
+        </span>
         {extra}
         <ArrowUpRight className="size-3 shrink-0 opacity-0 transition-opacity group-hover/open:opacity-100" />
       </button>
       {steps.length > 0 && (
         <div aria-label="Steps that led here" className="-mx-0.5">
-          {steps.length > RECENT_STEPS && (
+          {steps.length > recent && (
             <button
               onClick={() => setAll((a) => !a)}
               aria-expanded={all}
@@ -72,7 +80,7 @@ export function PendingRequest({
           </Collapse>
         </div>
       )}
-      {plan && <PlanPreview text={plan} />}
+      {plan && <PlanPreview text={plan} lines={compact ? CARD_PLAN_LINES : PREVIEW_LINES} />}
       <RequestCard request={request} compact onRespond={onRespond} />
     </div>
   );
@@ -92,23 +100,26 @@ export function planOf(request: Request, data: AgentsData): string | null {
   return typeof input?.plan === "string" && input.plan.trim() ? input.plan : null;
 }
 
-/** How much of a plan shows on a card before "Show the whole plan". */
+/** How much of a plan shows before "Show the whole plan" (on a canvas card, less: its buttons stay in reach). */
 const PREVIEW_LINES = 6;
+const CARD_PLAN_LINES = 3;
 
-function PlanPreview({ text }: { text: string }) {
+function PlanPreview({ text, lines: keep }: { text: string; lines: number }) {
   const [open, setOpen] = useState(false);
   const title = planTitle(text);
   const body = title ? planBody(text) : text;
   const lines = body.split("\n");
-  const long = lines.length > PREVIEW_LINES || body.length > 480;
-  const shown = long && !open ? `${lines.slice(0, PREVIEW_LINES).join("\n").trimEnd()}\n\n…` : body;
+  const long = lines.length > keep || body.length > keep * 80;
+  const shown = long && !open ? `${lines.slice(0, keep).join("\n").trimEnd()}\n\n…` : body;
   return (
-    <section aria-label={title ? `Plan: ${title}` : "The plan"} className="rounded-lg border border-line bg-panel-2/60 px-3 py-2">
+    <section data-box aria-label={title ? `Plan: ${title}` : "The plan"} className="rounded-lg border border-line bg-panel-2/60 px-3 py-2">
       <p className="mb-1 flex min-w-0 items-center gap-1.5 text-[12px] font-medium">
         <ListChecks className="size-3.5 shrink-0 text-muted" strokeWidth={1.75} />
-        <span className="truncate">{title ?? "The plan"}</span>
+        <span data-line className="truncate">
+          {title ?? "The plan"}
+        </span>
       </p>
-      <div data-scroll data-nodrag className={open ? "max-h-80 overflow-auto" : long ? "[mask-image:linear-gradient(to_bottom,black_65%,transparent)]" : ""}>
+      <div data-scroll data-nodrag className={open ? "max-h-80 overflow-auto" : long ? `${keep < PREVIEW_LINES ? "max-h-16 overflow-hidden" : ""} [mask-image:linear-gradient(to_bottom,black_65%,transparent)]` : ""}>
         <Markdown source={shown} className="markdown-sm" />
       </div>
       {long && (

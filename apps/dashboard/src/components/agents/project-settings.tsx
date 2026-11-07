@@ -156,7 +156,7 @@ export function PullLine({ pull, className = "" }: { pull: PullResult | null; cl
   return (
     <p className={`flex min-w-0 items-center gap-1.5 text-[11.5px] text-subtle ${className}`} title={line.text}>
       {icon}
-      <span className="truncate">{line.text}</span>
+      <span data-line className="truncate">{line.text}</span>
     </p>
   );
 }

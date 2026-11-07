@@ -227,7 +227,12 @@ function ApprovalForm({
         <span className="grid h-6 w-6 shrink-0 place-items-center">
           <Icon className="size-4 text-accent" strokeWidth={1.5} />
         </span>
-        <span className="min-w-0 flex-1 pt-0.5 leading-snug font-medium">{approval.title}</span>
+        <span className="min-w-0 flex-1 pt-0.5 leading-snug font-medium">
+          {/* What it asks is the request card's title: it reads, then is a bar, as a thread's does. */}
+          <span data-title data-bar>
+            {approval.title}
+          </span>
+        </span>
       </p>
       {approval.command && <Command text={approval.command} />}
       <div className="ms-7 space-y-2 text-[12px]">
@@ -260,9 +265,12 @@ function ApprovalForm({
             {approval.tool} {JSON.stringify(approval.input, null, 2)}
           </pre>
         )}
-        <p className="flex items-center gap-1 text-accent">
-          <Shield className="size-3" /> {plan ? "Plan ready" : "Waiting for approval"}
-        </p>
+        {/* On a canvas card its frame and its thread's pill say it waits. */}
+        {!compact && (
+          <p className="flex items-center gap-1 text-accent">
+            <Shield className="size-3" /> {plan ? "Plan ready" : "Waiting for approval"}
+          </p>
+        )}
         {declining ? (
           <form
             className="space-y-2"
@@ -456,14 +464,20 @@ export function QuestionsPanel({ flow, context, children }: { flow: QuestionFlow
       {context && <div className="mb-1 min-w-0 truncate text-[11.5px] text-subtle">{context}</div>}
       <div className="flex items-center gap-2 text-[12px] text-muted">
         <MessageCircleQuestion className="size-3.5 shrink-0 text-accent" />
-        <span className="min-w-0 flex-1 truncate">{q.header}</span>
+        <span className="min-w-0 flex-1 truncate">
+          <span data-line>{q.header}</span>
+        </span>
         {flow.questions.length > 1 && (
           <span className="shrink-0 font-mono text-[11px] text-subtle tabular-nums">
             {flow.index + 1}/{flow.questions.length}
           </span>
         )}
       </div>
-      <p className="mt-1.5 text-[13.5px] leading-snug text-fg/85">{q.question}</p>
+      <p className="mt-1.5 text-[13.5px] leading-snug text-fg/85">
+        <span data-title data-bar>
+          {q.question}
+        </span>
+      </p>
       <div
         ref={options}
         role={q.multi ? "group" : "radiogroup"}
@@ -492,7 +506,9 @@ export function QuestionsPanel({ flow, context, children }: { flow: QuestionFlow
                 {on && (q.multi ? <Check className="size-3 text-white" strokeWidth={2.5} /> : <span className="size-1.5 rounded-full bg-white" />)}
               </span>
               <span className="min-w-0 flex-1">
-                <span className="block text-[13px] font-medium">{o.label}</span>
+                <span data-line className="block text-[13px] font-medium">
+                  {o.label}
+                </span>
                 {o.description && <span className="block text-[11.5px] text-muted">{o.description}</span>}
               </span>
               {k < 9 && <kbd className="grid h-5 min-w-5 shrink-0 place-items-center rounded bg-fg/[0.07] px-1 font-mono text-[11px] text-muted">{k + 1}</kbd>}

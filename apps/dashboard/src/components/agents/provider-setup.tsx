@@ -76,7 +76,7 @@ export function ProviderSetup({ machine, className = "" }: { machine: Machine; c
     <div data-nodrag role="group" aria-label={r.state === "none" ? "Set up a provider" : "Log in to a provider"} className={`space-y-2 rounded-lg border border-accent/35 px-3 py-2.5 ${className}`}>
       {r.state === "none" ? (
         <>
-          <p className="text-[12px]">No agent can run on {machine.name} yet: it has no provider.</p>
+          <p data-line className="text-[12px]">No agent can run on {machine.name} yet: it has no provider.</p>
           <div className="flex flex-wrap gap-1.5">
             <button type="button" onClick={() => openRegistry(machine.id)} className={primary}>
               <Plus className="size-3.5" /> Add from the ACP registry
@@ -95,7 +95,7 @@ export function ProviderSetup({ machine, className = "" }: { machine: Machine; c
         </>
       ) : (
         <>
-          <p className="text-[12px]">Log in to a provider to start working on {machine.name}.</p>
+          <p data-line className="text-[12px]">Log in to a provider to start working on {machine.name}.</p>
           <div className="flex flex-wrap gap-1.5">
             {r.missing.map((p) => (
               <button key={p.id} type="button" disabled={busy !== null || !machine.online} onClick={() => login(p)} className={primary}>

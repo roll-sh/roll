@@ -75,7 +75,9 @@ export function MoreProjects({ machine, onAdd }: { machine: Machine; onAdd?: () 
             </span>
           ))}
         </span>
-        <span className="min-w-0 flex-1 truncate">{label}</span>
+        <span className="min-w-0 flex-1 truncate">
+          <span data-line>{label}</span>
+        </span>
         <ChevronRight className="size-3 shrink-0" />
       </PopoverTrigger>
       <PopoverPopup side="right" align="start" sideOffset={10} aria-label={`Projects on ${machine.name}`} className="w-[300px] flex-col p-1 text-[12.5px]">

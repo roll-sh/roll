@@ -137,8 +137,8 @@ export function threadPill(thread: Thread, pending: readonly Request[], lastRun:
   if (approval && approval.body.type === "approval" && approval.body.action === "plan") return { label: "Plan ready", tone: "accent", pulse: false };
   if (approval) return { label: "Pending approval", tone: "accent", pulse: false };
   if (waiting.length > 0) return { label: "Awaiting input", tone: "accent", pulse: false };
-  // The record says it waits even before its request has arrived here: one status, the one that needs you.
-  if (thread.pending_requests > 0) return { label: "Needs you", tone: "accent", pulse: false };
+  // Waiting on you is a request here (`waitingOnYou`), never the record's `pending_requests` alone:
+  // the header, the tab and the zoom bar count requests, and a card must agree with them.
   if (thread.status === "running" || thread.status === "waiting") return { label: "Working", tone: "accent", pulse: true };
   if (thread.status === "starting") return { label: "Connecting", tone: "accent", pulse: true };
   if (thread.status === "error" || lastRun?.status === "failed") return { label: "Failed", tone: "danger", pulse: false };
@@ -161,13 +161,15 @@ export function threadDone(thread: Thread, lastRun: Run | undefined): boolean {
   return thread.status === "idle" && !thread.error && lastRun?.status === "completed" && thread.archived_at === null && unseen(thread, lastRun);
 }
 
-const toneText: Record<PillTone, string> = { accent: "text-accent", ok: "text-ok", danger: "text-danger", muted: "text-subtle" };
+// Done is said once, quietly: its dot is the green, its word the muted text (a pale green word failed
+// contrast on white, and beside a green frame it said done twice).
+const toneText: Record<PillTone, string> = { accent: "text-accent", ok: "text-muted", danger: "text-danger", muted: "text-subtle" };
 const toneDot: Record<PillTone, string> = { accent: "bg-accent", ok: "bg-ok", danger: "bg-danger", muted: "bg-subtle" };
 
 /** T3's `ThreadStatusLabel`: a dot and the label, in the pill's tone. */
-export function StatusPill({ pill, className = "" }: { pill: ThreadPill; className?: string }) {
+export function StatusPill({ pill, className = "", line = false }: { pill: ThreadPill; className?: string; line?: boolean }) {
   return (
-    <span role="img" aria-label={pill.label} title={pill.label} className={`inline-flex shrink-0 items-center gap-1 text-[10.5px] font-medium ${toneText[pill.tone]} ${className}`}>
+    <span role="img" aria-label={pill.label} title={pill.label} data-line={line || undefined} className={`inline-flex shrink-0 items-center gap-1 text-[10.5px] font-medium ${toneText[pill.tone]} ${className}`}>
       <span aria-hidden className={`size-1.5 rounded-full ${toneDot[pill.tone]} ${pill.pulse ? "pulse-dot" : ""}`} />
       <span aria-hidden>{pill.label}</span>
     </span>

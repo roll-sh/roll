@@ -11,12 +11,15 @@ vi.mock("./terminal", () => ({ TerminalView: ({ terminal }: { terminal: { title:
 
 describe("ThreadNode", () => {
   it("shows what the agent is doing, what waits for you, and what it cost", async () => {
-    const t = thread({ status: "waiting", pending_requests: 1, activity: "Waiting to run `cargo test`", run_count: 3, usage: { input_tokens: 12000, output_tokens: 3400, cached_tokens: 0, cost_usd: 0.42 }, queued: [{ id: "q1", text: "x", attachments: [], at: 0 }] });
-    const h = agentsHarness({ entities: [mirrored("thread", t, 1), mirrored("run", run({ stat: { files: 2, additions: 14, deletions: 3 } }), 2)] });
+    const t = thread({ status: "waiting", pending_requests: 2, activity: "Waiting to run `cargo test`", run_count: 3, usage: { input_tokens: 12000, output_tokens: 3400, cached_tokens: 0, cost_usd: 0.42 }, queued: [{ id: "q1", text: "x", attachments: [], at: 0 }] });
+    const asks = [mirrored("request", approval(), 3), mirrored("request", approval({ id: "req_2", node: "nod_8" }), 4)];
+    const h = agentsHarness({ entities: [mirrored("thread", t, 1), mirrored("run", run({ stat: { files: 2, additions: 14, deletions: 3 } }), 2), ...asks] });
     renderAgents(<ThreadNode thread={t} machine={machine()} />, h);
     const card = screen.getByRole("button", { name: "Thread Fix the flaky queue test" });
-    expect(within(card).getByText("Waiting to run `cargo test`")).toBeInTheDocument();
-    expect(within(card).getByTitle("1 waiting for you")).toHaveTextContent("1");
+    // Waiting on you is its requests here: the pill says so, the line says what's asked, and how many.
+    expect(within(card).getByRole("img", { name: "Pending approval" })).toBeInTheDocument();
+    expect(within(card).getByText("Run `cargo test -p code-control`")).toBeInTheDocument();
+    expect(within(card).getByTitle("2 waiting for you")).toHaveTextContent("2");
     expect(within(card).getByText(/15k tok · \$0\.42/)).toBeInTheDocument();
     await userEvent.click(card);
     expect(h.openThread).toHaveBeenCalledWith("thr_1");

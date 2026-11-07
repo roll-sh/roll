@@ -624,31 +624,60 @@ body {
   animation-play-state: paused !important;
 }
 
-/* Small (the canvas's `data-brief`, below 55 %): a card's details go and its titles stay. Text
-   goes transparent rather than hidden, so every box keeps its frame and fill (a chip's outline, a
-   status dot); identity tiles stay whole. Text is never enlarged to compensate: Fit stops at a
-   zoom where cards read. */
-[data-brief] [data-card] :is(p, span, a, code, kbd, button, li, label, small, time, strong, em):not([data-title], [data-title] *, [data-identity] *) {
-  color: transparent !important;
-}
-[data-brief] [data-card] :is(svg, img):not([data-identity] *) {
+/* Small (the canvas's `data-brief`, below 55 %): a card keeps its frame, its identity (tile, edge,
+   a header's tint, a project's status strip, a plan's box: `data-head`, `data-box`), its title and
+   its status marks (`data-mark`). Each other row is a bar as long as its text, in the row's own
+   colour (`data-line`: a failed line is a red bar), a row of chips is filled bars, each chip whole
+   (`data-chips`), and the rest goes whole:
+   buttons, inputs, radios, icons, lone dots, chip outlines. Hidden, never removed or resized: the
+   engine keeps the sizes measured at full detail. Text is never enlarged to compensate: Fit stops
+   at a zoom where cards read. */
+[data-brief] [data-card] [data-drag] * {
   visibility: hidden;
 }
-[data-brief] [data-card] ::placeholder {
-  color: transparent;
+[data-brief] [data-card] :is([data-title], [data-identity], [data-edge], [data-keep], [data-head], [data-box], [data-line], [data-mark], [data-chips] > *),
+[data-brief] [data-card] :is([data-title], [data-identity], [data-edge], [data-keep], [data-mark]) * {
+  visibility: visible;
 }
-[data-brief] [data-card] .shimmer:not([data-title] *) {
-  background: none;
+/* The card tools still come on hover; far out (below) they'd be specks, and come back with the details. */
+[data-brief]:not([data-greek]) [data-card] :is([data-touch-tools], [data-touch-tools] *) {
+  visibility: visible;
+}
+/* The text goes but its colour stays for the bar (`currentColor`). */
+[data-brief] [data-card] :is([data-line], [data-chips] > *) {
+  -webkit-text-fill-color: transparent;
+}
+[data-brief] [data-card] [data-line] {
+  --bar: color-mix(in oklab, currentColor 42%, transparent);
+  width: fit-content;
+  max-width: 100%;
+  background: linear-gradient(var(--bar), var(--bar)) 0 50% / 100% 0.62em no-repeat;
+  -webkit-background-clip: border-box;
+  background-clip: border-box;
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
+  border-radius: 999px;
+  animation: none;
+}
+/* A shimmering line's own colour is transparent (its gradient is the text). */
+[data-brief] [data-card] [data-line].shimmer {
+  --bar: color-mix(in oklab, var(--subtle) 60%, transparent);
 }
 
-/* Too small to read (`data-greek`, below 40 %): a card is its frame, its identity (tile and edge,
-   a header's tint, a project's status strip) and its title as one quiet bar per line, as long as
-   the line; everything else (chips, dots, icons, buttons) goes. Nothing moves. */
-[data-greek] [data-card] [data-drag] * {
+[data-brief] [data-card] :is([data-line], [data-chips] > *) * {
   visibility: hidden;
 }
-[data-greek] [data-card] :is([data-title], [data-title] *, [data-identity], [data-identity] *, [data-edge], [data-edge] *, [data-keep], [data-keep] *) {
-  visibility: visible;
+/* A chip: a filled bar its own width, a little heavier than a line's. */
+[data-brief] [data-card] [data-chips] > * {
+  border-color: transparent !important;
+  background: color-mix(in oklab, currentColor 30%, transparent) !important;
+  clip-path: inset(24% 0 round 3px);
+}
+
+/* Too small to read (`data-greek`, below 40 %): a card is its frame, its identity, its status marks
+   and its title as one quiet bar per line, as long as the line; rows and chips go too. */
+[data-greek] [data-card] :is([data-line], [data-chips] > *) {
+  visibility: hidden;
 }
 [data-greek] [data-card] :is([data-title], [data-title] *) {
   color: transparent !important;
@@ -679,16 +708,40 @@ body {
 [data-far] [data-card] [data-edge] > span {
   width: 10px;
 }
+/* What waits on you, works or failed keeps its mark at every zoom: the card's own border tone,
+   drawn inside it a step firmer each time the zoom halves it (no ring, no second outline, no
+   change of size), so it stays about a screen pixel. */
+[data-brief] [data-card] [data-drag]:is([data-tone="busy"], [data-tone="waiting"], [data-tone="error"]) {
+  --tone-w: 1px;
+  box-shadow: inset 0 0 0 var(--tone-w) var(--tone-c);
+}
+[data-greek] [data-card] [data-drag][data-tone] {
+  --tone-w: 2px;
+}
+[data-far] [data-card] [data-drag][data-tone] {
+  --tone-w: 3px;
+}
+[data-card] [data-drag]:is([data-tone="busy"], [data-tone="waiting"]) {
+  --tone-c: color-mix(in oklab, var(--accent) 45%, transparent);
+}
+[data-card] [data-drag][data-tone="error"] {
+  --tone-c: color-mix(in oklab, var(--danger) 50%, transparent);
+}
 @media (prefers-color-scheme: light) {
-  /* White on white: the frames carry the shape, so they're drawn firmer (and the done tone too). */
-  [data-card] [data-drag][data-tone="done"] {
-    border-color: color-mix(in oklab, var(--ok) 70%, transparent);
-  }
+  /* White on white: the frames carry the shape, so they're drawn firmer, more so further out
+     (faint, an identity edge alone read as a "["). */
   [data-brief] [data-card] [data-drag]:not([data-tone]) {
     border-color: color-mix(in oklab, var(--fg) 26%, transparent);
   }
+  [data-greek] [data-card] [data-drag]:not([data-tone]) {
+    border-color: color-mix(in oklab, var(--fg) 38%, transparent);
+  }
   [data-greek] [data-card] :is([data-title], [data-title] *) {
     --bar: color-mix(in oklab, var(--fg) 28%, transparent);
+  }
+  /* The done green as text on white (`--ok` alone is about 1.9:1). */
+  [data-card] .text-ok {
+    color: color-mix(in oklab, var(--ok) 55%, var(--fg));
   }
 }
 
