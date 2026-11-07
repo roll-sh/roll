@@ -2,6 +2,7 @@
 //!
 //! ```text
 //! [block 0] [block 1] … [index] [bloom] [footer: index off/len, bloom off/len, entries, magic]
+//! magic  = "rollsst1": a flat bloom filter; "rollsst2": a blocked one (written now)
 //! block  = compression byte (0 raw, 1 zstd) + entries
 //! entry  = shared varint | unshared varint | value_len+1 varint (0 = tombstone) | key suffix | value
 //! index  = per block: last key, offset, length
@@ -19,6 +20,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 const MAGIC: u64 = 0x726f_6c6c_7373_7431; // "rollsst1"
+/// A file whose bloom filter is blocked (`Bloom::Blocked`): every key's bits in one 64-byte
+/// line. Files with `MAGIC` have a flat one and are read as before.
+const MAGIC_BLOCKED: u64 = 0x726f_6c6c_7373_7432; // "rollsst2"
+/// The bits of a blocked bloom filter's line.
+const BLOOM_LINE_BITS: u64 = 512;
 pub(crate) const BLOCK_TARGET: usize = 16 * 1024;
 const FOOTER_LEN: usize = 48;
 const BLOOM_BITS_PER_KEY: usize = 10;
@@ -149,16 +155,80 @@ impl FastMod {
     }
 }
 
-/// The bloom filter bits of a key's hash `h` (`nbits` = the filter's bits).
-#[inline]
-fn bloom_bits(h: u64, nbits: FastMod) -> impl Iterator<Item = usize> {
-    let (h1, h2) = (h, (h >> 32) | 1);
-    (0..BLOOM_K as u64).map(move |i| nbits.rem(h1.wrapping_add(i.wrapping_mul(h2))) as usize)
+/// A file's bloom filter scheme: flat (`MAGIC` files: `BLOOM_K` bits anywhere in it, a cache
+/// miss each) or blocked (`MAGIC_BLOCKED`, what is written now: the bits in the one 64-byte
+/// line the hash picks, so a check or a write touches one line). Remainders by the bits, or
+/// by the lines.
+#[derive(Clone, Copy)]
+enum Bloom {
+    Flat(FastMod),
+    Blocked(FastMod),
 }
 
-fn bloom_set(bloom: &mut [u8], nbits: FastMod, h: u64) {
-    for bit in bloom_bits(h, nbits) {
-        bloom[bit / 8] |= 1 << (bit % 8);
+/// A blocked filter's hash of a user key: eight bytes at a time (`hash64` takes a multiply
+/// per byte, one after another: most of a compaction's bloom cost).
+fn hash_words(b: &[u8]) -> u64 {
+    let mut h: u64 = 0x9E37_79B9_7F4A_7C15 ^ b.len() as u64;
+    let mut words = b.chunks_exact(8);
+    let mix = |h: u64, w: u64| (h ^ w).wrapping_mul(0xff51_afd7_ed55_8ccd).rotate_left(29);
+    for w in &mut words {
+        h = mix(h, u64::from_le_bytes(w.try_into().unwrap()));
+    }
+    let rest = words.remainder();
+    if !rest.is_empty() {
+        let mut t = [0u8; 8];
+        t[..rest.len()].copy_from_slice(rest);
+        h = mix(h, u64::from_le_bytes(t));
+    }
+    h ^= h >> 33;
+    h = h.wrapping_mul(0xc4ce_b9fe_1a85_ec53);
+    h ^ (h >> 33)
+}
+
+impl Bloom {
+    /// The hash of user key `b` this scheme's bits are of.
+    #[inline]
+    fn hash(self, b: &[u8]) -> u64 {
+        match self {
+            Bloom::Flat(_) => hash64(b),
+            Bloom::Blocked(_) => hash_words(b),
+        }
+    }
+
+    /// The scheme of a new filter of `bytes`, whole lines.
+    fn blocked(bytes: usize) -> Bloom {
+        Bloom::Blocked(FastMod::new((bytes as u64 * 8 / BLOOM_LINE_BITS).max(1)))
+    }
+
+    /// The bytes a blocked filter of `nbits` takes (whole lines, one at least).
+    fn blocked_bytes(nbits: usize) -> usize {
+        (nbits as u64).div_ceil(BLOOM_LINE_BITS).max(1) as usize * (BLOOM_LINE_BITS as usize / 8)
+    }
+
+    /// Bit `i` of a key's hash `h`.
+    #[inline]
+    fn bit(self, h: u64, i: u64) -> usize {
+        match self {
+            Bloom::Flat(m) => m.rem(h.wrapping_add(i.wrapping_mul((h >> 32) | 1))) as usize,
+            Bloom::Blocked(lines) => {
+                let h2 = h.rotate_left(32).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+                lines.rem(h) as usize * BLOOM_LINE_BITS as usize + ((h2 >> (i * 9)) & (BLOOM_LINE_BITS - 1)) as usize
+            }
+        }
+    }
+
+    fn set(self, bloom: &mut [u8], h: u64) {
+        for i in 0..BLOOM_K as u64 {
+            let bit = self.bit(h, i);
+            bloom[bit / 8] |= 1 << (bit % 8);
+        }
+    }
+
+    fn check(self, bloom: &[u8], h: u64) -> bool {
+        (0..BLOOM_K as u64).all(|i| {
+            let bit = self.bit(h, i);
+            bloom[bit / 8] & (1 << (bit % 8)) != 0
+        })
     }
 }
 
@@ -187,7 +257,7 @@ pub struct SstWriter {
     sync: bool,
     /// The bloom filter, when sized up front (`expect_keys`): its bits are set as keys come
     /// instead of keeping every key's hash until `finish`.
-    bloom: Option<(Vec<u8>, FastMod)>,
+    bloom: Option<(Vec<u8>, Bloom)>,
 }
 
 impl SstWriter {
@@ -211,8 +281,8 @@ impl SstWriter {
     /// a key less to hold until the end).
     pub fn expect_keys(&mut self, n: usize) {
         if self.entries == 0 {
-            let b = vec![0u8; (n * BLOOM_BITS_PER_KEY).max(64).div_ceil(8)];
-            let m = FastMod::new(b.len() as u64 * 8);
+            let b = vec![0u8; Bloom::blocked_bytes(n * BLOOM_BITS_PER_KEY)];
+            let m = Bloom::blocked(b.len());
             self.bloom = Some((b, m));
         }
     }
@@ -282,10 +352,10 @@ impl SstWriter {
         let ts = key_ts(key);
         self.min_ts = self.min_ts.min(ts);
         self.max_ts = self.max_ts.max(ts);
-        let h = hash64(user_key(key));
+        let h = hash_words(user_key(key));
         if self.last_user_hash != Some(h) {
             match &mut self.bloom {
-                Some((b, m)) => bloom_set(b, *m, h),
+                Some((b, m)) => m.set(b, h),
                 None => self.hashes.push(h),
             }
             self.last_user_hash = Some(h);
@@ -345,11 +415,10 @@ impl SstWriter {
         let bloom = match self.bloom.take() {
             Some((b, _)) => b,
             None => {
-                let nbits = (self.hashes.len() * BLOOM_BITS_PER_KEY).max(64);
-                let mut bloom = vec![0u8; nbits.div_ceil(8)];
-                let m = FastMod::new(bloom.len() as u64 * 8);
+                let mut bloom = vec![0u8; Bloom::blocked_bytes(self.hashes.len() * BLOOM_BITS_PER_KEY)];
+                let m = Bloom::blocked(bloom.len());
                 for h in &self.hashes {
-                    bloom_set(&mut bloom, m, *h);
+                    m.set(&mut bloom, *h);
                 }
                 bloom
             }
@@ -365,7 +434,7 @@ impl SstWriter {
             bloom_off,
             bloom.len() as u64,
             self.entries,
-            MAGIC,
+            MAGIC_BLOCKED,
         ] {
             footer.extend_from_slice(&v.to_le_bytes());
         }
@@ -407,8 +476,7 @@ pub struct SstReader {
     path: PathBuf,
     index: BlockIndex,
     bloom: Vec<u8>,
-    /// Remainders by the bloom filter's bit count.
-    bloom_mod: FastMod,
+    bloom_mod: Bloom,
     cache: Arc<BlockCache>,
     cache_id: u64,
     obsolete: AtomicBool,
@@ -430,8 +498,10 @@ const RESTART: usize = 16;
 /// storage key the index key already ends with (`derived`: the table's prefix, then the
 /// key's last bytes before the version). TPC-H SF1's entries take 1.4 GB so, against 2.1 GB
 /// in the files' form. An entry is `shared | unshared << 2 | flags | value field | key
-/// suffix | value`: flag `F_TS` puts the block's version after the suffix, `F_DERIVED`
-/// makes the value field the length of the key's tail the value ends with.
+/// suffix`, the entries' values after all of them (in entry order): a seek walks the keys
+/// alone, a few cache lines, not the rows between them. Flag `F_TS` puts the block's
+/// version after the suffix, `F_DERIVED` makes the value field the length of the key's tail
+/// the value ends with.
 pub struct Block {
     data: Bytes,
     /// Every `RESTART`th entry: its key as a number in the high 32 bits (as
@@ -440,6 +510,8 @@ pub struct Block {
     /// entries: a point read's block is seldom in the CPU's cache, and every restart it
     /// compared was a miss (three quarters of `seek`).
     restarts: Vec<u64>,
+    /// Where each restart's entry's value is (each value follows the one before's).
+    rvals: Vec<u32>,
     common: usize,
     len: usize,
     last_key: Box<[u8]>,
@@ -457,6 +529,8 @@ const F_DERIVED: usize = 2;
 pub struct BlockPos {
     i: usize,
     next: u32,
+    /// Where the value of the entry after `i` starts (if it has one stored).
+    vnext: u32,
     /// `shared` of entry `i`.
     shared: u32,
     key: Vec<u8>,
@@ -527,6 +601,12 @@ fn head(b: &[u8], pos: &mut usize) -> (usize, usize, usize) {
     (shared, unshared, v(b, pos))
 }
 
+/// The length of the prefix `a` and `b` share.
+#[inline]
+fn lcp(a: &[u8], b: &[u8]) -> usize {
+    a.iter().zip(b).take_while(|(x, y)| x == y).count()
+}
+
 /// `a ++ b` compared with `key`.
 fn cmp_split(a: &[u8], b: &[u8], key: &[u8]) -> std::cmp::Ordering {
     use std::cmp::Ordering::*;
@@ -585,9 +665,9 @@ impl Block {
         } else if vf == 0 {
             pos.val_len = TOMBSTONE;
         } else {
-            pos.val_off = p as u32;
+            pos.val_off = pos.vnext;
             pos.val_len = (vf - 1) as u32;
-            p += vf - 1;
+            pos.vnext += pos.val_len;
         }
         pos.next = p as u32;
     }
@@ -600,6 +680,7 @@ impl Block {
         }
         let r = i / RESTART;
         pos.next = self.restarts[r] as u32;
+        pos.vnext = self.rvals[r];
         pos.key.clear();
         pos.i = r * RESTART;
         self.read(pos);
@@ -663,6 +744,7 @@ impl Block {
         // The keys from the restart's on, the entries' values left alone until the one
         // found.
         pos.next = self.restarts[r] as u32;
+        pos.vnext = self.rvals[r];
         pos.key.clear();
         pos.i = r * RESTART;
         self.read(pos);
@@ -671,9 +753,13 @@ impl Block {
         }
         let b = &self.data[..];
         let end = ((r + 1) * RESTART).min(self.len);
-        let mut p = pos.next as usize;
+        let (mut p, mut v) = (pos.next as usize, pos.vnext);
+        // (What the key so far shares with `key`: an entry sharing more of the key before it
+        // is below `key` as that one is, so it is passed with no comparison; one sharing
+        // less or as much is compared from there on.)
+        let mut m = lcp(&pos.key, key);
         for i in pos.i + 1..end {
-            let at = p;
+            let at = (p, v);
             let (shared, us, vf) = head(b, &mut p);
             let unshared = us >> 2;
             pos.key.truncate(shared);
@@ -681,21 +767,24 @@ impl Block {
             if us & F_TS != 0 {
                 pos.key.extend_from_slice(&self.ts);
             }
-            // (`read` makes this key again from the one it has: their first `shared` bytes
-            // are the same.)
-            if pos.key.as_slice() >= key {
-                pos.next = at as u32;
-                pos.i = i;
-                self.read(pos);
-                return;
+            if shared <= m {
+                m = shared + lcp(&pos.key[shared..], &key[shared.min(key.len())..]);
+                // (`read` makes this key again from the one it has: their first `shared`
+                // bytes are the same.)
+                if m == key.len() || m < pos.key.len() && pos.key[m] > key[m] {
+                    (pos.next, pos.vnext) = (at.0 as u32, at.1);
+                    pos.i = i;
+                    self.read(pos);
+                    return;
+                }
             }
             p += unshared;
             if us & F_DERIVED == 0 && vf > 0 {
-                p += vf - 1;
+                v += (vf - 1) as u32;
             }
         }
         // (The next restart's entry: its key is >= `key`, or the block ends.)
-        pos.next = p as u32;
+        (pos.next, pos.vnext) = (p as u32, v);
         pos.i = end - 1;
         self.step(pos);
     }
@@ -730,7 +819,7 @@ impl Block {
 
     /// The bytes it holds (what the block cache counts).
     pub fn mem_bytes(&self) -> usize {
-        self.data.len() + self.restarts.capacity() * 8 + self.last_key.len() + std::mem::size_of::<Block>()
+        self.data.len() + self.restarts.capacity() * 8 + self.rvals.capacity() * 4 + self.last_key.len() + std::mem::size_of::<Block>()
     }
 
     /// Every entry with its key whole, for readers that go backwards or read a block once.
@@ -780,6 +869,9 @@ impl Block {
         let bad = || internal("bad sst block");
         let mut restarts: Vec<u64> = Vec::with_capacity(raw.len() / 512 + 1);
         let mut out = Vec::with_capacity(raw.len());
+        // (The values, put after every key when the block is done.)
+        let mut vals = Vec::with_capacity(raw.len());
+        let mut rvals: Vec<u32> = Vec::with_capacity(raw.len() / 512 + 1);
         let mut key: Vec<u8> = Vec::new();
         // (The last restart's key.)
         // (Every restart's key, and how much of the first one is stored.)
@@ -836,6 +928,7 @@ impl Block {
             }
             let share = if n.is_multiple_of(RESTART) {
                 restarts.push(out.len() as u64);
+                rvals.push(vals.len() as u32);
                 rkeys.extend_from_slice(&key);
                 rends.push(rkeys.len());
                 if n == 0 {
@@ -850,12 +943,18 @@ impl Block {
             put_varint(&mut out, tail.unwrap_or(vl) as u64);
             out.extend_from_slice(&key[share..ukey]);
             if let (Some(v), None) = (value, tail) {
-                out.extend_from_slice(v);
+                vals.extend_from_slice(v);
             }
             n += 1;
         }
+        // (The values after every key: `vbase`.)
+        let vbase = out.len() as u32;
+        out.reserve_exact(vals.len());
+        out.extend_from_slice(&vals);
         out.shrink_to_fit();
         restarts.shrink_to_fit();
+        rvals.iter_mut().for_each(|v| *v += vbase);
+        rvals.shrink_to_fit();
         let rkey_at = |i: usize| &rkeys[if i == 0 { 0 } else { rends[i - 1] }..rends[i]];
         let common = match rends.len() {
             0 => 0,
@@ -870,6 +969,7 @@ impl Block {
         Ok(Block {
             data: Bytes::from(out),
             restarts,
+            rvals,
             common,
             len: n,
             last_key: key.as_slice().into(),
@@ -999,7 +1099,7 @@ impl SstReader {
         let mut footer = [0u8; FOOTER_LEN];
         file.read_exact_at(&mut footer, len - FOOTER_LEN as u64)?;
         let f = |i: usize| u64::from_le_bytes(footer[i * 8..i * 8 + 8].try_into().unwrap());
-        if f(5) != MAGIC {
+        if f(5) != MAGIC && f(5) != MAGIC_BLOCKED {
             return Err(internal(format!("sst {} has a bad footer", path.display())));
         }
         let mut index_buf = vec![0u8; f(1) as usize];
@@ -1038,7 +1138,10 @@ impl SstReader {
             file,
             path,
             index,
-            bloom_mod: FastMod::new(bloom.len() as u64 * 8),
+            bloom_mod: match f(5) {
+                MAGIC => Bloom::Flat(FastMod::new(bloom.len() as u64 * 8)),
+                _ => Bloom::blocked(bloom.len()),
+            },
             bloom,
             cache,
             cache_id,
@@ -1064,8 +1167,8 @@ impl SstReader {
         if self.bloom.is_empty() {
             return true;
         }
-        let h = hash64(user_key);
-        bloom_bits(h, self.bloom_mod).all(|bit| self.bloom[bit / 8] & (1 << (bit % 8)) != 0)
+        let h = self.bloom_mod.hash(user_key);
+        self.bloom_mod.check(&self.bloom, h)
     }
 
     /// Whether the file's first block is compressed (what the writer did with them all,
@@ -1280,6 +1383,46 @@ mod tests {
                 assert_eq!(ix.find(k), i);
             }
         }
+    }
+
+    /// Files written now have blocked bloom filters (no key missed, few false positives);
+    /// files with flat ones (`MAGIC`, written before) are read with the bits they were
+    /// written with.
+    #[test]
+    fn bloom_filters_old_and_new() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = BlockCache::new(1 << 20);
+        let key = |i: u32| mvcc_key_for_test(format!("k{i:06}").as_bytes(), 5);
+        let mut w = SstWriter::create(dir.path(), 1, true).unwrap();
+        for i in 0..20_000 {
+            w.add(&key(i), Some(&b"v"[..])).unwrap();
+        }
+        let meta = w.finish().unwrap();
+        let r = SstReader::open(dir.path(), meta.clone(), cache.clone()).unwrap();
+        assert!((0..20_000).all(|i| r.may_contain(user_key(&key(i)))));
+        let fp = (20_000..120_000).filter(|&i| r.may_contain(user_key(&key(i)))).count();
+        assert!(fp < 2_000, "{fp} false positives of 100,000");
+        drop(r);
+        // The same file with a flat filter and the old magic, as builds before wrote it.
+        let path = sst_path(dir.path(), 1);
+        let mut d = std::fs::read(&path).unwrap();
+        let n = d.len();
+        let f = |d: &[u8], i: usize| u64::from_le_bytes(d[n - 48 + i * 8..n - 40 + i * 8].try_into().unwrap()) as usize;
+        let (off, len) = (f(&d, 2), f(&d, 3));
+        let flat = Bloom::Flat(FastMod::new(len as u64 * 8));
+        d[off..off + len].fill(0);
+        for i in 0..20_000 {
+            flat.set(&mut d[off..off + len], hash64(user_key(&key(i))));
+        }
+        d[n - 8..].copy_from_slice(&MAGIC.to_le_bytes());
+        std::fs::write(&path, &d).unwrap();
+        let r = SstReader::open(dir.path(), meta, cache).unwrap();
+        assert!(matches!(r.bloom_mod, Bloom::Flat(_)));
+        assert!((0..20_000).all(|i| r.may_contain(user_key(&key(i)))));
+    }
+
+    fn mvcc_key_for_test(user: &[u8], ts: u64) -> Vec<u8> {
+        [user, &(!ts).to_be_bytes()].concat()
     }
 
     /// The bloom filter's bits must not change with how they are computed: files written
