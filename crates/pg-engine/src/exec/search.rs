@@ -235,6 +235,12 @@ fn ord_key(v: &Value) -> Option<u64> {
     }
 }
 
+/// The float an f64's `ord_key` is (None: a NaN's bits).
+fn key_f64(k: u64) -> Option<f64> {
+    let x = f64::from_bits(if k >> 63 == 1 { k & !(1 << 63) } else { !k });
+    (!x.is_nan()).then_some(x)
+}
+
 /// A geometric value's bounding box ((lx, hx), (ly, hy)), widened a little past
 /// PostgreSQL's fuzzy comparisons (EPSILON) when `fuzz`.
 fn geo_box(v: &Value, fuzz: bool) -> Option<((u64, u64), (u64, u64))> {
@@ -342,6 +348,17 @@ struct Query {
     empties: bool,
     /// Whether any condition narrowed it.
     narrowed: bool,
+    /// A circle the rows' values must come within (overlap or lie in), if any.
+    disc: Option<Disc>,
+}
+
+/// A circle's center and its radius widened past PostgreSQL's fuzzy comparisons
+/// (`Grid::meets_disc`).
+#[derive(Clone, Copy, Debug)]
+struct Disc {
+    x: f64,
+    y: f64,
+    reach: f64,
 }
 
 /// Narrows `q` by `op(row value, arg)` on the ordered column, of kind `kind`. (Bounds are
@@ -397,6 +414,15 @@ fn narrow(q: &mut Query, kind: Kind, op: &str, arg: &Value) {
         }
         Kind::Geo => {
             let Some((ax, ay)) = geo_box(arg, true) else { return };
+            if let (Value::Geo(g), "<@" | "@" | "&&") = (arg, op)
+                && let Geo::Circle(c) = &**g
+                && c.radius.is_finite()
+                && c.center.x.is_finite()
+                && c.center.y.is_finite()
+            {
+                let reach = c.radius + 1e-5 + (c.radius.abs() + c.center.x.abs() + c.center.y.abs()) * 1e-9;
+                q.disc = Some(Disc { x: c.center.x, y: c.center.y, reach });
+            }
             match op {
                 "&&" | "@>" | "~" => {
                     q.x.lo_max(ax.1);
@@ -436,7 +462,7 @@ fn narrow(q: &mut Query, kind: Kind, op: &str, arg: &Value) {
 /// The query of conditions `conds` (index column, operator, argument) on an index of
 /// shape `sh`.
 fn query(sh: &Shape, conds: &[(usize, &str, Value)]) -> Query {
-    let mut q = Query { part: None, x: ANY, y: ANY, empties: true, narrowed: false };
+    let mut q = Query { part: None, x: ANY, y: ANY, empties: true, narrowed: false, disc: None };
     let mut part = Vec::new();
     for &p in &sh.parts {
         match conds.iter().find(|(c, op, v)| *c == p && *op == "=" && fits(&sh.tys[p], v)) {
@@ -498,6 +524,22 @@ impl Quant {
         let lo = *keys.select_nth_unstable(n / 1000).1;
         let hi = *keys.select_nth_unstable(n - 1 - n / 1000).1;
         Quant { base: lo, shift: (64 - (hi - lo).leading_zeros()).saturating_sub(32) }
+    }
+
+    /// The least float whose key maps to `q` (an f64 key's, `ord_key`; -inf past the
+    /// keys of numbers).
+    fn low(self, q: u32) -> f64 {
+        let k = if q == 0 { 0 } else { self.base.saturating_add((q as u64) << self.shift) };
+        key_f64(k).unwrap_or(f64::NEG_INFINITY)
+    }
+
+    /// The greatest float whose key maps to `q` (+inf past the keys of numbers).
+    fn high(self, q: u32) -> f64 {
+        let k = match q {
+            u32::MAX => u64::MAX,
+            q => self.base.saturating_add(((q as u64 + 1) << self.shift) - 1),
+        };
+        key_f64(k).unwrap_or(f64::INFINITY)
     }
 
     fn span(self, s: &Span) -> QSpan {
@@ -730,27 +772,73 @@ impl Grid {
             None => (0..self.parts.len() as u32).collect(),
         };
         let (x, y) = (self.qx.span(&q.x), self.qy.span(&q.y));
+        let disc = q.disc.filter(|_| self.two_d());
+        let keep = |e: &Ent| self.ent_ok(&x, &y, e) && disc.is_none_or(|d| self.meets_disc(&d, e));
         for p in parts {
             let s = &self.sorted;
+            // (An interval's low end is at most its high end: bounded by both.)
             let a = s.partition_point(|e| (e.part, e.lo) < (p, x.lo.0));
-            let b = s.partition_point(|e| (e.part, e.lo) <= (p, x.lo.1));
-            let mut i = a;
-            while i < b {
-                let blk = i / BLOCK;
-                let end = ((blk + 1) * BLOCK).min(b);
-                let (mn, mx) = self.blocks[blk];
-                if mx >= x.hi.0 && mn <= x.hi.1 {
-                    out.extend(s[i..end].iter().filter(|e| self.ent_ok(&x, &y, e)).map(|e| e.row));
+            let b = s.partition_point(|e| (e.part, e.lo) <= (p, x.lo.1.min(x.hi.1)));
+            if self.two_d() && b - a > 2 * STRIP {
+                self.search_strips(p, a, b, &y, &keep, out);
+            } else {
+                let mut i = a;
+                while i < b {
+                    let blk = i / BLOCK;
+                    let end = ((blk + 1) * BLOCK).min(b);
+                    let (mn, mx) = self.blocks[blk];
+                    if mx >= x.hi.0 && mn <= x.hi.1 {
+                        out.extend(s[i..end].iter().filter(|e| keep(*e)).map(|e| e.row));
+                    }
+                    i = end;
                 }
-                i = end;
             }
             if q.empties {
                 out.extend(self.empties.iter().filter(|(ep, _)| *ep == p).map(|(_, r)| *r));
             }
         }
-        out.extend(self.delta.iter().filter(|e| part.is_none_or(|p| e.part == p) && self.ent_ok(&x, &y, e)).map(|e| e.row));
+        out.extend(self.delta.iter().filter(|e| part.is_none_or(|p| e.part == p) && keep(*e)).map(|e| e.row));
         out.extend(&self.always);
         out.extend(&self.nulls);
+    }
+
+    /// `search`'s entries of partition `p` at positions `a..b` of `sorted` in a
+    /// two-dimensional grid, read by strips (`Strip`): in each, only the run of its y order
+    /// whose low ends `y` admits, less its leading blocks whose high ends are all below it.
+    fn search_strips(&self, p: u32, a: usize, b: usize, y: &QSpan, keep: &dyn Fn(&Ent) -> bool, out: &mut Vec<u32>) {
+        let s = &self.sorted;
+        let ylo = |i: u32| self.ys[s[i as usize].row as usize].0;
+        let first = self.strips.partition_point(|st| st.end <= a);
+        for st in &self.strips[first..] {
+            if st.start >= b {
+                break;
+            }
+            if st.part != p {
+                continue;
+            }
+            let run = &self.yperm[st.start..st.end];
+            let blocks = &self.ypmax[st.yblock..st.yblock + run.len().div_ceil(BLOCK)];
+            let from = run.partition_point(|&i| ylo(i) < y.lo.0).max(blocks.partition_point(|&m| m < y.hi.0) * BLOCK);
+            let to = run.partition_point(|&i| ylo(i) <= y.lo.1.min(y.hi.1));
+            for &i in run.get(from..to).unwrap_or(&[]) {
+                let e = &s[i as usize];
+                if keep(e) {
+                    out.push(e.row);
+                }
+            }
+        }
+    }
+
+    /// Whether entry `e`'s cell (the box its mapped keys stand for) comes within disc `d`:
+    /// no value outside it overlaps or lies in the disc.
+    fn meets_disc(&self, d: &Disc, e: &Ent) -> bool {
+        let (ylo, yhi) = self.ys[e.row as usize];
+        let (x0, x1) = (self.qx.low(e.lo), self.qx.high(e.hi));
+        let (y0, y1) = (self.qy.low(ylo), self.qy.high(yhi));
+        let dx = (x0 - d.x).max(d.x - x1).max(0.0);
+        let dy = (y0 - d.y).max(d.y - y1).max(0.0);
+        // (Not NaN-safe comparisons: a NaN distance keeps the entry.)
+        !(dx.hypot(dy) > d.reach)
     }
 }
 
