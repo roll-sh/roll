@@ -86,7 +86,7 @@ export const AgentsCanvas = memo(forwardRef<
     density?: "compact";
     /** A busy project's threads wrap into a grid about the screen's shape (`planGrids`) instead of one long column. */
     wrap?: boolean;
-    /** Far out, cards show their name big (`FarLabel`, `[data-far]`) instead of shrunk details. */
+    /** Far out, cards show their name big (`FarLabel`, `[data-far]`) instead of shrunk details. Off by default: the user rejected text that grows as you zoom out. */
     semantic?: boolean;
     /** Enter on a focused card: open it, saying whether it did (else Enter goes into the card). */
     onOpen?: (key: string) => boolean;
@@ -113,7 +113,7 @@ export const AgentsCanvas = memo(forwardRef<
      */
     keepClear?: React.RefObject<HTMLElement | null>;
   }
->(function AgentsCanvas({ graph, storageKey, order: shownOrder, onOrder, fitKey, direction = "horizontal", onDirection, density, wrap = true, semantic = true, onOpen, render, defaultSize, onEscape, overlay, active = true, selected, highlighted, matters, onLaunch, keepClear }, ref) {
+>(function AgentsCanvas({ graph, storageKey, order: shownOrder, onOrder, fitKey, direction = "horizontal", onDirection, density, wrap = true, semantic = false, onOpen, render, defaultSize, onEscape, overlay, active = true, selected, highlighted, matters, onLaunch, keepClear }, ref) {
   const reduced = useReducedMotion();
   const container = useRef<HTMLDivElement>(null);
   const canvas = useRef<HTMLCanvasElement>(null);
