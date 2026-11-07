@@ -22,6 +22,7 @@ import {
   COMPACT_SPACING,
   dropIndex,
   fitPlan,
+  fitTo,
   fitView,
   layoutCanvas,
   loadOrder,
@@ -30,6 +31,7 @@ import {
   moveTo,
   NO_WRAPS,
   planWraps,
+  roomFor,
   ROOTS,
   saveOrder,
   saveView,
@@ -47,6 +49,7 @@ import {
   type Room,
   type Size,
   type View,
+  type Wraps,
 } from "@/lib/agents-layout";
 import { CanvasEngine, type SceneEdge, type SceneMeta } from "./canvas-engine";
 import { AnimatePresence, motion, useMotionValue, type Transition } from "motion/react";
@@ -242,7 +245,7 @@ export const AgentsCanvas = memo(forwardRef<
     [graph],
   );
   /** The layout: the cards' measured sizes, wrapped the way that shows them best on this screen (`planWraps`). */
-  const shown = useMemo((): Placement & { size: (k: string) => Size } => {
+  const shown = useMemo((): Placement & { size: (k: string) => Size; wraps: Wraps; shape: CanvasShape } => {
     const size = (k: string): Size => {
       const n = graph.nodes.get(k);
       if (!n) return ZERO;
@@ -253,7 +256,7 @@ export const AgentsCanvas = memo(forwardRef<
     // A phone is one list of cards as wide as each other: no indents (the trunk runs beside them).
     const shape: CanvasShape = { direction, level, section: isSection, spacing: screen.w < 640 ? { horizontal: spacing.horizontal, vertical: { ...spacing.vertical, indent: 0 } } : spacing };
     const wraps = wrap ? planWraps(arranged, size, shape, { ...roomFor(screen.w, screen.h), overview }, important) : NO_WRAPS;
-    return { ...layoutCanvas(arranged, size, shape, wraps), size };
+    return { ...layoutCanvas(arranged, size, shape, wraps), size, wraps, shape };
   }, [graph, sizeOf, direction, density, level, isSection, wrap, arranged, screen, overview, important]);
   const { positions } = shown;
   const shownSize = shown.size;
@@ -302,14 +305,10 @@ export const AgentsCanvas = memo(forwardRef<
       const phone = w < 640;
       // A phone's waiting request puts the zoom bar at the top (`data-waiting`): frame below it.
       const top = phone && container.current?.closest("[data-waiting]") ? PHONE_TOP_BAR : 0;
-      const room = { ...roomFor(w, h - top), overview };
-      const r = bounds(positions, shownSize);
-      if (!r) return;
-      // Everything if that reads, else framed from the top, keeping what matters in view (`fitPlan`);
+      // Everything if that reads, else framed from the top, keeping what matters in view (`fitTo`);
       // bigger than the screen, clear of the minimap's corner on the right.
-      const plan = fitPlan(positions, shownSize, room, important);
-      const v = plan.all ? fitView(r, room.w, room.h, room.pad, 1, 0) : fitView(r, room.w - (room.reserve ?? 0), room.h, room.pad, plan.k, plan.k);
-      e.setView({ ...v, y: v.y + top }, animate);
+      const v = fitTo(positions, shownSize, { ...roomFor(w, h - top), overview }, important);
+      e.setView({ x: v.x, y: v.y + top, k: v.k }, animate);
     },
     [positions, shownSize, coveredBelow, overview, important],
   );
@@ -361,6 +360,9 @@ export const AgentsCanvas = memo(forwardRef<
       if (r.width && r.height) setScreen((s) => (s.w === step(r.width) && s.h === step(r.height - coveredBelow()) ? s : { w: step(r.width), h: step(r.height - coveredBelow()) }));
     };
     shape();
+    // The prompt bar mounts (and grows) after the canvas: the room above it changes with it.
+    const bar = new ResizeObserver(shape);
+    if (keepClear?.current) bar.observe(keepClear.current);
     const ro = new ResizeObserver(() => {
       shape();
       const now = c.getBoundingClientRect().width;
@@ -372,8 +374,11 @@ export const AgentsCanvas = memo(forwardRef<
     ro.observe(c);
     return () => {
       ro.disconnect();
+      bar.disconnect();
       clearTimeout(t);
     };
+    // The prompt bar's element is there for the canvas's lifetime.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // The stream re-renders constantly; only a change in the overall extent refits.
@@ -505,9 +510,7 @@ export const AgentsCanvas = memo(forwardRef<
     const there = (v: View) => Math.abs(e.goal.k - v.k) < 0.01 && Math.abs(e.goal.x - v.x) < 2;
     if (!overview && fitPlan(positions, shownSize, room, important).all) return fit(true);
     // Not framed yet (moved by hand): the first press frames; only a second changes the layout.
-    const plan = fitPlan(positions, shownSize, { ...room, overview }, important);
-    const v = plan.all ? fitView(r, room.w, room.h, room.pad, 1, 0) : fitView(r, room.w - (room.reserve ?? 0), room.h, room.pad, plan.k, plan.k);
-    if (!there(v)) return fit(true);
+    if (!there(fitTo(positions, shownSize, { ...room, overview }, important))) return fit(true);
     setOverview((o) => !o);
   }, [positions, shownSize, coveredBelow, overview, important, fit]);
   // The overview turned on or off: frame the new layout.
@@ -516,6 +519,51 @@ export const AgentsCanvas = memo(forwardRef<
     if (shownOverview.current === overview) return;
     shownOverview.current = overview;
     frameRef.current(true);
+  });
+
+  // The layout-quality checker (`scripts/canvas-check.mjs`) reads the laid-out canvas through this,
+  // only when it asked for it before the page loaded: nothing is attached otherwise.
+  useEffect(() => {
+    const c = container.current as (HTMLDivElement & { __canvasCheck?: () => unknown }) | null;
+    if (!c || !(globalThis as { __ROLL_CANVAS_CHECK?: boolean }).__ROLL_CANVAS_CHECK) return;
+    c.__canvasCheck = () => {
+      const e = engine.current;
+      const covered = coveredBelow();
+      const room = e ? { ...roomFor(e.viewport.w, e.viewport.h - covered), overview } : null;
+      const levels: Record<string, Level> = {};
+      const sections: string[] = [];
+      const nodes = [...graph.nodes.values()].map((n) => {
+        const p = positions.get(n.key);
+        const s = shownSize(n.key);
+        const l = shown.shape.level(n.key);
+        if (l) levels[n.key] = l;
+        if (shown.shape.section?.(n.key)) sections.push(n.key);
+        return { key: n.key, kind: n.kind, parent: n.parent, busy: n.busy, important: important(n.key), x: p?.x ?? null, y: p?.y ?? null, w: s.w, h: s.h };
+      });
+      return {
+        view: e?.view,
+        goal: e?.goal,
+        viewport: e?.viewport,
+        covered,
+        room,
+        overview,
+        following: following.current,
+        wraps: shown.wraps,
+        plan: room ? fitPlan(positions, shownSize, room, important) : null,
+        nodes,
+        // What the planner was given, to replay it without a browser.
+        input: {
+          tree: { roots: arranged.roots, nodes: Object.fromEntries([...arranged.nodes].map(([k, n]) => [k, n.children])) },
+          sizes: Object.fromEntries(nodes.map((n) => [n.key, { w: n.w, h: n.h }])),
+          direction: shown.shape.direction,
+          levels,
+          sections,
+          spacing: shown.shape.spacing,
+          screen,
+          important: nodes.filter((n) => n.important).map((n) => n.key),
+        },
+      };
+    };
   });
 
   // A card's siblings in the order shown.
@@ -934,7 +982,7 @@ export const AgentsCanvas = memo(forwardRef<
       {ghost && <LaunchGhost {...ghost} />}
       <Minimap ref={minimap} positions={positions} sizeOf={shownSize} nodes={graph.nodes} engine={engine} />
       {/* At the top while a phone's waiting request sits at the bottom (`data-waiting` above), so both can be reached. */}
-      <div className="chrome-in absolute right-3 bottom-3 flex items-center gap-0.5 rounded-[10px] border border-line-2 p-0.5 text-muted shadow-pop inset-shadow-highlight glass [[data-waiting]_&]:top-3 [[data-waiting]_&]:bottom-auto">
+      <div data-zoom-bar className="chrome-in absolute right-3 bottom-3 flex items-center gap-0.5 rounded-[10px] border border-line-2 p-0.5 text-muted shadow-pop inset-shadow-highlight glass [[data-waiting]_&]:top-3 [[data-waiting]_&]:bottom-auto">
         <ToolButton label="Zoom out (−)" onClick={() => engine.current?.zoomBy(0.8)}>
           <Minus className="size-3.5" />
         </ToolButton>
@@ -1055,21 +1103,6 @@ function LaunchGhost({ source, from, to, over }: { source: string; from: Point; 
       </div>
     </>
   );
-}
-/** Fit doesn't zoom out further than cards read (titles ~10 px, meta ~8 px); `1` twice does. */
-const READABLE = 0.75;
-/** The minimap's corner (its width and margin), kept clear while the canvas is bigger than the screen. */
-const MINIMAP_RESERVE = 192;
-/** The narrowest canvas the minimap shows on (`minimap.tsx`): beside a panel it was clutter. */
-const MINIMAP_MIN_W = 1200;
-
-/**
- * The room a canvas `w` × `h` (above the prompt bar) is planned and fitted for: about 80 % of it
- * (a 10 % pad, at least 48 px), never below where cards read (a phone: 100 %).
- */
-function roomFor(w: number, h: number): Room {
-  const phone = w < 640;
-  return { w, h, pad: phone ? 24 : Math.max(48, Math.min(w, h) * 0.1), floor: phone ? 1 : READABLE, reserve: w >= MINIMAP_MIN_W ? MINIMAP_RESERVE : 0 };
 }
 /** Below this a card's details hide (`[data-brief]`), its titles stay. */
 const BRIEF = 0.55;
