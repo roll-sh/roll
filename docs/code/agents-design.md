@@ -401,7 +401,12 @@ thread or machine — is the shared picker, `Picker` in `components/agents/ui/pi
   platform lets roll make one, "Use a variable" in automation steps, "Load more" for the next page.
 - **Problems are a quiet footer** (a warning icon, the reason, "Connect" or "Reconnect" linking to
   the owner's settings). The field still takes a typed value.
-- The selected row is a quiet fill and a check (a box for lists); no accent bars or rings.
+- The selected row is a quiet fill and a check (a box for lists); no accent bars or rings. When some
+  rows lead with a picture or icon, the rest keep its room, so the names line up (a GitHub issue
+  and a pull request each have their icon).
+- Long lists are searchable and pin what matters on top: the time zone picker lists the picked
+  zone, this browser's own and UTC first, then the rest by region, each with its UTC offset now.
+- A `Select` with a width (`w-36`) keeps it; only an unsized one fills its row.
 - roll code's pages use the same picker (review requests, required checks, work-item labels),
   with their rows from the code API.
 
@@ -412,23 +417,27 @@ sized to what it holds. The user rejected the docked version (wave 9, "and whats
 for two models, a rail of identical "F" tiles, a floating bar, a bare clock, and a full reasoning
 column.
 
-- **Size:** 376px wide (the viewport less its gutter on a phone). The body is as tall as its
+- **Size:** 384px wide (the viewport less 8px each side on a phone). The body is as tall as its
   tallest tab (or its sidebar), so a tab or a search never resizes it. It grows up to 304px, then
   the list scrolls. It opens from its trigger and stays inside the viewport.
-- **Sidebar:** 152px of labelled tabs (28px rows at 12.5px): Favorites (star) and Recent (clock)
+- **Sidebar:** 160px of labelled tabs (28px rows at 12.5px): Favorites (star) and Recent (clock)
   when they have models, a hairline, then each provider with its logo and name. The shown tab is
   the row fill (`fg/7%`). A provider with no logo shows its initials on a 14px tile (T3's
   `providerInstanceInitials`: "Fake echo" is FE). A provider that isn't ready is subtle and says
   why in its title. A lone provider with nothing kept gets no sidebar.
-- **Rows:** 28px at 13px. The picked row has a quiet fill and a check. Where providers mix
-  (Favorites, Recent, a search), a row leads with its provider's logo and names the provider in
-  11px subtle. ⌘N shows on the highlighted row, and the star on hover. Older models fold under
-  "N older".
+- **Rows:** 28px at 13px. The picked row is its check (the fill is the keyboard's highlight). In a
+  provider's tab, an endpoint's models sit after the provider's own under one 11px "via …" label.
+  Where providers mix (Favorites, Recent, a search), a row leads with its provider's logo and says
+  where it comes from on one 11px subtle line ("Claude Code · via roll gateway"); a search ranks a
+  provider's own models before an endpoint's copies. ⌘N shows on the highlighted row (not the
+  picked one), and the star on hover. Older models fold under "N older". The search is a full-width
+  hairline row.
 - **Options:** only for a picked model that declares them, as 32px rows under the list, each a
   muted label with its control on the right: a `Segmented` for up to four short choices (Low |
-  High, Standard | Fast), a menu for more (Claude's seven levels), and a `Switch` for on or off
-  (Fast Mode, with a bolt). Labels come from the catalog (`ModelInfo.options`). Picking a model
-  with options moves focus to them. Picking a level closes the picker.
+  High, Standard | Fast), a menu on a track for more (Claude's seven levels), and a `Switch` for
+  on or off. Labels come from the catalog (`ModelInfo.options`). When the picked model isn't in
+  sight (a search, another tab), an 11px caption names it above them. Picking a model with options
+  moves focus to them. Picking a level closes the picker.
 - **Keyboard:** typing searches; ↑↓ and Enter pick; ⌘1–9 picks one of the first nine; ← or
   Shift+Tab goes to the sidebar; Tab goes to the options (↑ from the first goes back);
   ⌘⇧↑↓ switches tabs; Esc closes. It never closes on a blur.

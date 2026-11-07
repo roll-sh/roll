@@ -10,7 +10,7 @@ export function Switch({ className, size = "default", ...props }: SwitchPrimitiv
     <SwitchPrimitive.Root
       className={mergeClass(
         cn(
-          "inline-flex h-[calc(var(--thumb-size)+2px)] w-[calc(var(--thumb-size)*2-2px)] shrink-0 cursor-pointer items-center rounded-full p-[2px] outline-none transition-[background-color,box-shadow] duration-200 focus-visible:ring-2 focus-visible:ring-accent/60 data-checked:bg-accent data-unchecked:bg-line-2 data-disabled:cursor-not-allowed data-disabled:opacity-60 motion-reduce:transition-none",
+          "inline-flex h-[calc(var(--thumb-size)+2px)] w-[calc(var(--thumb-size)*2-2px)] shrink-0 cursor-pointer items-center rounded-full p-[2px] outline-none transition-[background-color,box-shadow] duration-200 focus-visible:ring-2 focus-visible:ring-accent/60 data-checked:bg-accent data-unchecked:bg-fg/[0.16] data-disabled:cursor-not-allowed data-disabled:opacity-60 motion-reduce:transition-none",
           size === "sm" ? "[--thumb-size:--spacing(3.5)]" : "[--thumb-size:--spacing(4)]",
         ),
         className,

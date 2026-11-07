@@ -671,12 +671,11 @@ function ModelRow({
           </span>
         )}
         {info.custom && <span className="shrink-0 rounded border border-line-2 px-1 text-[10px] leading-4 text-subtle">Custom</span>}
-        {info.images === false && <span className="shrink-0 text-[11px] text-subtle">Text only</span>}
-        {/* One line of where it comes from: the provider, then the endpoint that lists it. */}
+        {!mixed && info.images === false && <span className="shrink-0 text-[11px] text-subtle">Text only</span>}
+        {/* One line of where it comes from: the provider, what it can't take, then the endpoint that lists it. */}
         {mixed && (
           <span aria-hidden className="min-w-0 shrink truncate text-[11px] text-subtle" title={info.via ? `${provider.name}, listed by the endpoint ${info.via}` : undefined}>
-            {provider.name}
-            {info.via && ` · via ${info.via}`}
+            {[provider.name, info.images === false ? "Text only" : null, info.via ? `via ${info.via}` : null].filter(Boolean).join(" · ")}
           </span>
         )}
       </span>

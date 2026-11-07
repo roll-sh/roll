@@ -427,7 +427,7 @@ function TriggerCard({
           <MenuTrigger className="inline-flex h-7 items-center gap-1 rounded-md px-2 text-[12px] text-muted transition-colors hover:bg-fg/[0.06] hover:text-fg data-popup-open:bg-fg/[0.06]" aria-label="Change the trigger">
             Change <ChevronDown className="size-3" />
           </MenuTrigger>
-          <MenuPopup align="end" className="w-80">
+          <MenuPopup align="end" className="w-[26rem]">
             {catalog.triggers.map((x) => {
               const Icon = triggerIcon(x.source);
               return (
@@ -524,12 +524,15 @@ function zoneOptions(current: string): PickerOption[] {
   const cached = zoneCache.get(current);
   if (cached) return cached;
   const now = new Date();
-  const options = zones(current)
-    .sort((a, b) => (a === "UTC" ? -1 : b === "UTC" ? 1 : a.localeCompare(b)))
+  // The picked zone and this browser's own come first (the list opened on Africa with Berlin picked).
+  const local = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const lead = [...new Set([current, local, "UTC"].filter(Boolean))];
+  const options = [...lead, ...zones(current).filter((z) => !lead.includes(z)).sort((a, b) => a.localeCompare(b))]
     .map((z): PickerOption => {
       const cut = z.indexOf("/");
       const hint = offsetOf(z, now);
-      return cut < 0 ? { id: z, label: z, hint } : { id: z, label: z.slice(cut + 1).replace(/_/g, " ").replace(/\//g, " · "), key: z, hint, group: z.slice(0, cut) };
+      const label = cut < 0 ? z : z.slice(cut + 1).replace(/_/g, " ").replace(/\//g, " · ");
+      return lead.includes(z) || cut < 0 ? { id: z, label, key: z, hint } : { id: z, label, key: z, hint, group: z.slice(0, cut) };
     });
   zoneCache.set(current, options);
   return options;
