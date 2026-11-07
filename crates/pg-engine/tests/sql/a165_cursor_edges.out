@@ -1,0 +1,113 @@
+> create table a165_edge (id int primary key, v text)
+-- CREATE TABLE
+
+> insert into a165_edge values (1, 'one'), (2, 'two'), (3, 'three')
+-- INSERT 0 3
+
+> begin
+-- BEGIN
+
+> declare u cursor for select * from a165_edge
+-- DECLARE CURSOR
+
+> fetch 2 from u
+id:int4 | v:text
+1 | one
+2 | two
+-- FETCH 2
+
+> update a165_edge set v = 'changed' where current of u
+-- UPDATE 1
+
+> fetch prior from u
+id:int4 | v:text
+1 | one
+-- FETCH 1
+
+> fetch next from u
+id:int4 | v:text
+2 | two
+-- FETCH 1
+
+> rollback
+-- ROLLBACK
+
+> begin
+-- BEGIN
+
+> declare d cursor for select * from a165_edge
+-- DECLARE CURSOR
+
+> fetch 2 from d
+id:int4 | v:text
+1 | one
+2 | two
+-- FETCH 2
+
+> delete from a165_edge where current of d
+-- DELETE 1
+
+> fetch prior from d
+id:int4 | v:text
+1 | one
+-- FETCH 1
+
+> fetch next from d
+id:int4 | v:text
+2 | two
+-- FETCH 1
+
+> rollback
+-- ROLLBACK
+
+> begin
+-- BEGIN
+
+> declare m no scroll cursor for select a.id, b.id from a165_edge a join a165_edge b on a.id <> b.id for update of a, b
+-- DECLARE CURSOR
+
+> fetch next from m
+id:int4 | id:int4
+1 | 2
+-- FETCH 1
+
+> fetch next from m
+id:int4 | id:int4
+1 | 3
+-- FETCH 1
+
+> update a165_edge set v = 'invalid' where current of m
+ERROR 24000: cursor "m" has multiple FOR UPDATE/SHARE references to table "a165_edge"
+
+> rollback
+-- ROLLBACK
+
+> begin
+-- BEGIN
+
+> declare h no scroll cursor with hold for select * from a165_edge
+-- DECLARE CURSOR
+
+> fetch 2 from h
+id:int4 | v:text
+1 | one
+2 | two
+-- FETCH 2
+
+> commit
+-- COMMIT
+
+> fetch all from h
+id:int4 | v:text
+3 | three
+-- FETCH 1
+
+> update a165_edge set v = 'invalid' where current of h
+ERROR 24000: cursor "h" is held from a previous transaction
+
+> close h
+-- CLOSE CURSOR
+
+> drop table a165_edge
+-- DROP TABLE
+

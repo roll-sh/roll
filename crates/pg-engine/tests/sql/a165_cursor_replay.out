@@ -1,0 +1,237 @@
+> create function a165_notice() returns setof int stable language plpgsql as $$
+> begin
+>   raise notice 'stable function ran';
+>   return next 1;
+>   return next 2;
+> end $$
+-- CREATE FUNCTION
+
+> begin
+-- BEGIN
+
+> declare f scroll cursor for select * from a165_notice()
+-- DECLARE CURSOR
+
+> fetch all from f
+NOTICE 00000: stable function ran
+CONTEXT: PL/pgSQL function a165_notice() line 3 at RAISE
+a165_notice:int4
+1
+2
+-- FETCH 2
+
+> fetch backward all from f
+a165_notice:int4
+1
+2
+-- FETCH 2
+
+> fetch all from f
+a165_notice:int4
+1
+2
+-- FETCH 2
+
+> close f
+-- CLOSE CURSOR
+
+> declare d cursor for select * from a165_notice()
+-- DECLARE CURSOR
+
+> fetch all from d
+NOTICE 00000: stable function ran
+CONTEXT: PL/pgSQL function a165_notice() line 3 at RAISE
+a165_notice:int4
+1
+2
+-- FETCH 2
+
+> fetch backward all from d
+a165_notice:int4
+1
+2
+-- FETCH 2
+
+> rollback
+-- ROLLBACK
+
+> begin
+-- BEGIN
+
+> set local application_name = 'cursor opened'
+-- SET
+
+> declare s scroll cursor for select * from current_setting('application_name')
+-- DECLARE CURSOR
+
+> fetch all from s
+current_setting:text
+cursor opened
+-- FETCH 1
+
+> set local application_name = 'cursor rewound'
+-- SET
+
+> fetch backward all from s
+current_setting:text
+cursor opened
+-- FETCH 1
+
+> rollback
+-- ROLLBACK
+
+> begin
+-- BEGIN
+
+> set local application_name = 'sort opened'
+-- SET
+
+> declare s scroll cursor for select current_setting('application_name') as v from generate_series(1, 2) order by v
+-- DECLARE CURSOR
+
+> fetch all from s
+v:text
+sort opened
+sort opened
+-- FETCH 2
+
+> set local application_name = 'sort rewound'
+-- SET
+
+> fetch backward all from s
+v:text
+sort rewound
+sort rewound
+-- FETCH 2
+
+> rollback
+-- ROLLBACK
+
+> begin
+-- BEGIN
+
+> set local application_name = 'cte opened'
+-- SET
+
+> declare s scroll cursor for with x as materialized (select * from current_setting('application_name')) select * from x
+-- DECLARE CURSOR
+
+> fetch all from s
+current_setting:text
+cte opened
+-- FETCH 1
+
+> set local application_name = 'cte rewound'
+-- SET
+
+> fetch backward all from s
+current_setting:text
+cte opened
+-- FETCH 1
+
+> rollback
+-- ROLLBACK
+
+> create table a165_times (t timestamptz)
+-- CREATE TABLE
+
+> begin
+-- BEGIN
+
+> declare ts scroll cursor for select * from statement_timestamp()
+-- DECLARE CURSOR
+
+> do $$ declare c refcursor := 'ts'; a timestamptz; begin fetch next from c into a; insert into a165_times values (a); end $$
+-- DO
+
+> select pg_sleep(0.01)
+pg_sleep:void
+
+-- SELECT 1
+
+> do $$ declare c refcursor := 'ts'; b timestamptz; a timestamptz; begin
+>   fetch next from c into b;
+>   fetch prior from c into b;
+>   select t into a from a165_times;
+>   raise notice 'timestamp retained: %', a = b;
+> end $$
+NOTICE 00000: timestamp retained: t
+CONTEXT: PL/pgSQL function inline_code_block line 5 at RAISE
+-- DO
+
+> rollback
+-- ROLLBACK
+
+> drop table a165_times
+-- DROP TABLE
+
+> create role a165_cursor_role
+-- CREATE ROLE
+
+> create function a165_user() returns setof text stable language plpgsql as $$
+> begin return next current_user::text; end $$
+-- CREATE FUNCTION
+
+> begin
+-- BEGIN
+
+> declare u scroll cursor for select * from a165_user()
+-- DECLARE CURSOR
+
+> fetch all from u
+a165_user:text
+postgres
+-- FETCH 1
+
+> set role a165_cursor_role
+-- SET
+
+> fetch backward all from u
+a165_user:text
+postgres
+-- FETCH 1
+
+> reset role
+-- RESET
+
+> rollback
+-- ROLLBACK
+
+> drop function a165_user()
+-- DROP FUNCTION
+
+> drop role a165_cursor_role
+-- DROP ROLE
+
+> begin
+-- BEGIN
+
+> declare h scroll cursor with hold for select * from a165_notice()
+-- DECLARE CURSOR
+
+> fetch 1 from h
+NOTICE 00000: stable function ran
+CONTEXT: PL/pgSQL function a165_notice() line 3 at RAISE
+a165_notice:int4
+1
+-- FETCH 1
+
+> commit
+-- COMMIT
+
+> fetch backward all from h
+a165_notice:int4
+-- FETCH 0
+
+> fetch all from h
+a165_notice:int4
+1
+2
+-- FETCH 2
+
+> close h
+-- CLOSE CURSOR
+
+> drop function a165_notice()
+-- DROP FUNCTION
+
