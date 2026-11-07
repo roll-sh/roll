@@ -176,7 +176,8 @@ The rules are in agents.md, "Canvas" › "At scale". How it looks:
   machines and projects, the line colour for the rest, accent for requests and busy work; the
   frame is a 1 px `--fg` line at 55 %. Each axis is scaled on its own to fill the box (never more
   than 2.5 × the other), and the accent stays a signal (requests at 55 %, busy work at 35 %). Hidden
-  when everything fits, on a phone, and on a canvas under 1200 px (beside a panel).
+  when everything fits, on a phone, on a canvas under 1200 px (beside a panel), and while the view
+  is Fit's: it comes once the view is moved by hand, so Fit keeps the whole width for the cards.
 - **Next waiting**: an accent `CircleDot` and the count in mono in the zoom bar, only while
   something waits.
 - **Under the bars** (`data-chrome-band`): the canvas ends above the prompt bar. From 24 px above

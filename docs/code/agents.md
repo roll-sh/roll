@@ -1738,7 +1738,7 @@ The surface has three views:
     (6 % of it clear each side, at least 40 px), if that's 65 % or more (100 % on a phone): a few
     points under where cards read best (75 %) beats a cut-off canvas. Else, from the top, it zooms out as far as 55 % (titles still read) to keep
     everything running, waiting on you or failed (a conflicting change, a failed fork or subagent
-    on the card too; and the open card) in view, clear of the minimap, and as far as 50 % so no
+    on the card too; and the open card) in view, and as far as 50 % so no
     column is cut at the right (centred, 24 px in from each side); the minimap and panning reach
     the rest. The canvas ends above the prompt bar: under it, the zoom bar and a phone's waiting
     request it fades into its own colour over 24 px (`data-chrome-band`), so nothing reads in the
@@ -1750,7 +1750,8 @@ The surface has three views:
     screen, 45–55 %); when everything shows, it only refits. Fit follows the work again: cards that grow or arrive stay framed until the view is
     moved by hand. Off screen a card keeps its last real size (its contents are skipped there), so
     the layout settles.
-  - **Getting around.** While the canvas is bigger than the screen a minimap sits over the zoom bar:
+  - **Getting around.** While the canvas is bigger than the screen and the view has been moved by
+    hand (not at Fit, which keeps the whole width for the cards) a minimap sits over the zoom bar:
     every card as a block (requests and busy work in the accent) and the screen's frame; a press
     or a drag moves the view there. The zoom bar's accent "◉ 2" goes to the next request waiting
     on you in reading order (round again), its answer focused, as Space does from a card.

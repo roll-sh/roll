@@ -130,7 +130,7 @@ async function read(page) {
 }
 
 /** Wait until the view has arrived where it's going and nothing drawn moves. */
-async function settle(page, ms = 10000) {
+async function settle(page, ms = 10000, quiet = 2) {
   const t0 = Date.now();
   let last = "";
   let same = 0;
@@ -149,7 +149,7 @@ async function settle(page, ms = 10000) {
       return `${moving}|${h}|${s.nodes.length}`;
     });
     if (!sig.startsWith("true") && sig === last) {
-      if (++same >= 2) return true;
+      if (++same >= quiet) return true;
     } else same = 0;
     last = sig;
     await page.waitForTimeout(160);
@@ -321,7 +321,9 @@ async function runGroup(browser, g, ctxOpts) {
           panelOpen = v.panel;
         }
         await setDirection(page, v.dir);
-        await settle(page);
+        // After the panel or the direction changed the canvas re-plans and refits on debounces
+        // (WebKit under load took longer than two quiet samples): a second of rest.
+        await settle(page, 15000, 6);
         if (v.drill) {
           await pressFit(page);
           await settle(page);
