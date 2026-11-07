@@ -907,3 +907,77 @@ fn power_cut_keeps_commits_in_a_new_wal() {
         assert!(lost.is_empty(), "{} WAL file(s), acknowledged commits lost to a power cut: {} of {}, the first {:?}", rotations, lost.len(), acked + 1, &lost[..lost.len().min(5)]);
     }
 }
+
+/// The power cut at every point of a fixed store workload: before each write, fsync, create,
+/// rename and removal the store makes (`ROLL_POWERLOSS_AT`), through commits in rotating WAL
+/// files, flushes, a compaction, a commit big enough to go in as an SST of its own and a
+/// clean close. Each cut drops what no fsync covered (and, a second time, a seeded part of
+/// it is kept). The store must open, every acknowledged commit must be there whole, and
+/// nothing after the one in flight.
+#[cfg(feature = "powerloss")]
+#[test]
+fn power_cut_at_every_point() {
+    use pg_engine::storage::{Store, StoreOptions};
+    let opts = || StoreOptions { memtable_bytes: 16 << 10, background: false, ..Default::default() };
+    // Commit `i`'s keys: two small ones, or ten (an SST of its own) when i % 25 == 24.
+    let keys = |i: u64| -> Vec<Vec<u8>> { (0..if i % 25 == 24 { 10 } else { 2 }).map(|k| format!("{i:04}-{k}").into_bytes()).collect() };
+    if let Ok(dir) = std::env::var("POWER_EVERY_CHILD") {
+        let s = Store::open(&Path::new(&dir).join("db"), opts()).unwrap();
+        for i in 0..60u64 {
+            let w = keys(i).into_iter().map(|k| (k, Some(vec![i as u8; 1000].into()))).collect();
+            s.commit(w, |_| Ok(())).unwrap();
+            println!("acked {i}");
+            match i {
+                20 | 45 => s.flush_memtables().unwrap(),
+                30 => s.compact().unwrap(),
+                _ => {}
+            }
+        }
+        s.close().unwrap();
+        println!("ops {}", pg_engine::storage::powerloss::ops());
+        return;
+    }
+    let run = |at: Option<u64>, keep: Option<u64>| -> (String, Option<i32>) {
+        let tmp = tempfile::tempdir().unwrap();
+        let (data, shadow) = (tmp.path().join("data"), tmp.path().join("shadow"));
+        let mut c = std::process::Command::new(std::env::current_exe().unwrap());
+        c.args(["--exact", "power_cut_at_every_point", "--nocapture"])
+            .env("POWER_EVERY_CHILD", &data)
+            .env("ROLL_POWERLOSS", format!("{}:{}", data.display(), shadow.display()));
+        if let Some(n) = at {
+            c.env("ROLL_POWERLOSS_AT", n.to_string());
+        }
+        let out = c.output().unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+        if at.is_none() {
+            return (stdout, out.status.code());
+        }
+        assert!(out.status.code().is_none(), "cut at {at:?}: {}", String::from_utf8_lossy(&out.stderr));
+        let acked = stdout.lines().filter_map(|l| l.strip_prefix("acked ")?.parse::<u64>().ok()).max();
+        pg_engine::storage::powerloss::power_cut(&data, &shadow, keep).unwrap();
+        let what = format!("cut before operation {} (keeping {keep:?}), {acked:?} acknowledged", at.unwrap());
+        let s = Store::open(&data.join("db"), opts()).unwrap_or_else(|e| panic!("{what}: the store doesn't open: {e:?}"));
+        let ts = s.visible_ts();
+        let flight = acked.map_or(0, |a| a + 1);
+        for i in 0..60u64 {
+            let have: Vec<bool> = keys(i).iter().map(|k| s.get(k, ts).unwrap().is_some()).collect();
+            let all = have.iter().all(|&h| h);
+            let none = have.iter().all(|&h| !h);
+            assert!(all || none, "{what}: commit {i} is partly there: {have:?}");
+            if i < flight {
+                assert!(all, "{what}: acknowledged commit {i} is lost");
+            } else if i > flight {
+                assert!(none, "{what}: commit {i}, after the one in flight, is there");
+            }
+        }
+        (stdout, None)
+    };
+    let (out, code) = run(None, None);
+    assert_eq!(code, Some(0), "{out}");
+    let ops: u64 = out.lines().find_map(|l| l.strip_prefix("ops ")?.parse().ok()).unwrap();
+    assert!(ops > 100, "only {ops} operations recorded");
+    for at in 1..=ops {
+        run(Some(at), None);
+        run(Some(at), Some(at));
+    }
+}

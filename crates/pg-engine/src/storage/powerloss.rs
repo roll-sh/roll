@@ -33,6 +33,10 @@ struct State {
     writes: HashMap<u64, (u64, Option<File>)>,
     /// Per file id: the last write an fsync covered.
     applied: HashMap<u64, u64>,
+    /// Recorded operations so far, and the one the process dies just before
+    /// (`ROLL_POWERLOSS_AT`): a test can cut the power at each point of a fixed workload.
+    ops: u64,
+    die_at: Option<u64>,
 }
 
 static STATE: OnceLock<Option<Mutex<State>>> = OnceLock::new();
@@ -76,7 +80,8 @@ impl State {
         let _ = std::fs::remove_dir_all(&shadow);
         std::fs::create_dir_all(&shadow)?;
         std::fs::create_dir_all(&root)?;
-        let mut s = State { root: root.clone(), shadow, next: 1, dirs: HashMap::new(), writes: HashMap::new(), applied: HashMap::new() };
+        let die_at = std::env::var("ROLL_POWERLOSS_AT").ok().and_then(|v| v.parse().ok());
+        let mut s = State { root: root.clone(), shadow, next: 1, dirs: HashMap::new(), writes: HashMap::new(), applied: HashMap::new(), ops: 0, die_at };
         s.scan(&root, 0)?;
         Ok(s)
     }
@@ -122,6 +127,15 @@ impl State {
     fn changed(&self, dir: &Path) {
         if let Some((id, e)) = self.dirs.get(dir) {
             self.put(&format!("c{id}"), &listing(e)).expect("powerloss: record a directory");
+        }
+    }
+
+    /// One more recorded operation, about to happen: die here if it is `die_at`.
+    fn tick(&mut self) {
+        self.ops += 1;
+        if self.die_at == Some(self.ops) {
+            // SAFETY: kill(2) of this process.
+            unsafe { libc::kill(libc::getpid(), libc::SIGKILL) };
         }
     }
 
@@ -189,11 +203,17 @@ fn pending(b: &[u8]) -> Vec<(u64, u8, u64, &[u8])> {
     out
 }
 
+/// The operations recorded so far (`ROLL_POWERLOSS_AT` counts them).
+pub fn ops() -> u64 {
+    state().map_or(0, |s| s.ops)
+}
+
 /// `DFile::open`: the file's id (none when it isn't recorded).
 pub(super) fn open(path: &Path, truncate: bool, f: impl FnOnce() -> io::Result<File>) -> io::Result<(File, Option<u64>)> {
     let Some(mut s) = state() else { return Ok((f()?, None)) };
     let p = norm(path);
     let Some((parent, name)) = s.split(&p) else { return Ok((f()?, None)) };
+    s.tick();
     let file = f()?;
     let id = match s.dirs[&parent].1.get(&name) {
         Some(&(id, false)) => id,
@@ -219,13 +239,18 @@ pub(super) fn id_of(path: &Path) -> Option<u64> {
 
 pub(super) fn wrote(id: Option<u64>, off: u64, data: &[u8]) {
     if let (Some(id), Some(mut s)) = (id, id.and_then(|_| state())) {
+        s.tick();
         s.log(id, 0, off, data);
     }
 }
 
 /// An fsync of file `id` (`f`): it covers the writes made before it began.
 pub(super) fn synced(id: Option<u64>, f: impl FnOnce() -> io::Result<()>) -> io::Result<()> {
-    let upto = id.and_then(|id| Some(state()?.writes.get(&id).map_or(0, |w| w.0)));
+    let upto = id.and_then(|id| {
+        let mut s = state()?;
+        s.tick();
+        Some(s.writes.get(&id).map_or(0, |w| w.0))
+    });
     f()?;
     if let (Some(id), Some(upto)) = (id, upto) {
         state().unwrap().apply(id, upto)?;
@@ -237,6 +262,9 @@ pub(super) fn synced(id: Option<u64>, f: impl FnOnce() -> io::Result<()>) -> io:
 /// `durable` is adopted as it is now, as if fsynced (and named in `<shadow>/adopted`: the
 /// harness requires there be none it relies on); one removed outside it goes from the record.
 pub(super) fn dir_synced(dir: &Path, f: impl FnOnce() -> io::Result<()>) -> io::Result<()> {
+    if let Some(mut s) = state() {
+        s.tick();
+    }
     f()?;
     let Some(mut s) = state() else { return Ok(()) };
     let p = norm(dir);
@@ -281,6 +309,7 @@ pub(super) fn dir_synced(dir: &Path, f: impl FnOnce() -> io::Result<()>) -> io::
 /// A rename, removal or `create_dir_all` (`f`), made under the record's lock.
 pub(super) fn change<T>(what: Change<'_>, f: impl FnOnce() -> io::Result<T>) -> io::Result<T> {
     let Some(mut s) = state() else { return f() };
+    s.tick();
     match what {
         Change::Rename(from, to) => {
             let (from, to) = (norm(from), norm(to));

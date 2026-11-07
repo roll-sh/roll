@@ -2401,7 +2401,7 @@ impl Cluster for Engine {
             self.save(&r)?;
         }
         self.open.lock().kept.remove(&entry.oid);
-        let _ = std::fs::remove_dir_all(self.db_dir(entry.oid));
+        let _ = crate::storage::durable::remove_dir_all(&self.db_dir(entry.oid));
         drop(closed);
         // dropDatabaseDependencies, DeleteSharedComments: what refers to it goes too.
         self.publish(|s| {
