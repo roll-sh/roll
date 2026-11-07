@@ -66,6 +66,9 @@ zstd.workspace = true
 icu4x = ["dep:icu_casemap", "dep:icu_collator", "dep:icu_locale_core", "dep:icu_provider", "dep:icu_segmenter"]
 # roll-engine with a sampling heap profiler (`ROLL_HEAPPROF`, src/bin/roll-engine/heapprof.rs).
 heapprof = []
+# Tests only: record what each fsync made durable, to cut the power in the crash harnesses
+# (src/storage/powerloss.rs).
+powerloss = []
 
 [dev-dependencies]
 fallible-iterator.workspace = true

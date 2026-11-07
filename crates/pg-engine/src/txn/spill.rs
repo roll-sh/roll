@@ -122,7 +122,7 @@ impl Runs {
     /// from the slices (a bulk load's sink, `Txn::flush_sink`; a parallel index build's
     /// entries). Each value comes in two parts, put end to end.
     pub fn write_fresh<'a>(&mut self, items: &mut dyn Iterator<Item = (&'a [u8], [&'a [u8]; 2])>, cid: u32, ts: u64) -> Result<()> {
-        std::fs::create_dir_all(&self.dir)?;
+        crate::storage::durable::create_dir_all(&self.dir)?;
         let id = self.next_id;
         self.next_id += 1;
         let mut w = SstWriter::create_temp(&self.dir, id)?;
@@ -191,7 +191,7 @@ impl Runs {
         &mut self,
         versions: &mut dyn Iterator<Item = Result<(Vec<u8>, Ent)>>,
     ) -> Result<Option<Arc<SstReader>>> {
-        std::fs::create_dir_all(&self.dir)?;
+        crate::storage::durable::create_dir_all(&self.dir)?;
         let id = self.next_id;
         self.next_id += 1;
         let mut w = SstWriter::create_temp(&self.dir, id)?;
@@ -334,7 +334,7 @@ impl Drop for Runs {
     fn drop(&mut self) {
         self.files.clear();
         self.view = View::of_files(Vec::new());
-        let _ = std::fs::remove_dir_all(&self.dir);
+        let _ = crate::storage::durable::remove_dir_all(&self.dir);
     }
 }
 
