@@ -6391,6 +6391,10 @@ container name: pick your own).
   wait included, killing jobs that never ran. heavy-bg.sh runs the job through heavy.sh outside
   the session and ends its log with `HEAVY-EXIT <status>`; wait for that line (and restart the
   wait if it times out) instead of wrapping heavy.sh in `timeout`.
+- **Push with `tools/push.sh`, never a bare `git push`.** It fetches, requires HEAD to contain
+  origin's head, and refuses if HEAD takes back lines that origin's last 40 commits added: a commit
+  made from a stale working tree on top of a newer origin ref fast-forwards yet reverts other agents'
+  work (d0867471 reverted six commits that way; 25c0056b restored them). `PUSH_DRY=1` checks only.
 - **Never hold unpushed work.** Sessions end without warning and worktrees get cleaned up.
   Push each verified batch to the shared branch right away, and in between back up work in
   progress with `tools/wip-push.sh <agent>` (for example `a148`) after every meaningful step.
