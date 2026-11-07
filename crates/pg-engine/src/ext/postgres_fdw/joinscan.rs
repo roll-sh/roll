@@ -96,7 +96,7 @@ impl JoinScan {
 
     /// A base relation's whole row as the remote query returns it (NULL for a null-extended
     /// row): `CASE WHEN (rN.*)::text IS NOT NULL THEN ROW(...) END`.
-    fn whole_row_sql(&self, k: usize) -> String {
+    pub(super) fn whole_row_sql(&self, k: usize) -> String {
         let alias = format!("r{}", self.bases[k].scan.rtindex.0);
         let t = &self.bases[k].scan.table;
         let cols: Vec<String> = (0..t.columns.len())
@@ -107,12 +107,27 @@ impl JoinScan {
         format!("CASE WHEN ({alias}.*)::text IS NOT NULL THEN ROW({list}) END")
     }
 
+    /// The UPDATE / DELETE target joined remotely (`Planner::fdw_dml_target`): its scan
+    /// returns the row's key, `rN.ctid`.
+    fn is_target(&self, k: usize) -> bool {
+        let s = &self.bases[k].scan;
+        s.with_key && s.fdw.is_none() && s.mark.is_none()
+    }
+
+    /// The table whose row key join row column `g` is (the target's `rN.ctid`).
+    fn key_of(&self, g: usize) -> Option<u32> {
+        let k = (0..self.bases.len()).find(|&k| self.is_target(k))?;
+        let b = &self.bases[k];
+        (b.col(g) == Some(b.scan.table.columns.len())).then_some(b.scan.table.oid)
+    }
+
     /// deparseLockingClause (`FOR UPDATE OF rN` per locked relation, in range table order,
     /// not those of a lower subquery) and the marked relations' whole rows
     /// (`CASE WHEN (rN.*)::text IS NOT NULL THEN ROW(...) END`).
     fn row_marks(&self) -> (String, Vec<String>) {
         let marked = self.mark_bases();
-        if marked.is_empty() && self.marks.is_empty() {
+        let target = (0..self.bases.len()).find(|&k| self.is_target(k));
+        if marked.is_empty() && self.marks.is_empty() && target.is_none() {
             return Default::default();
         }
         let alias = |k: usize| format!("r{}", self.bases[k].scan.rtindex.0);
@@ -121,7 +136,12 @@ impl JoinScan {
         by_rti.sort_by_key(|&k| self.bases[k].scan.rtindex.0);
         let mut lock = String::new();
         for k in by_rti {
-            let Some((m, _)) = self.bases[k].scan.mark else { continue };
+            // (The result relation's rows: FOR UPDATE, all_result_relids.)
+            let m = match self.bases[k].scan.mark {
+                _ if target == Some(k) => crate::sql::plan::RowMark::Update,
+                Some((m, _)) => m,
+                None => continue,
+            };
             lock.push_str(match m {
                 crate::sql::plan::RowMark::Update | crate::sql::plan::RowMark::NoKeyUpdate => " FOR UPDATE",
                 crate::sql::plan::RowMark::Share | crate::sql::plan::RowMark::KeyShare => " FOR SHARE",
@@ -188,7 +208,14 @@ impl crate::ext::fdw::ForeignRelOps for JoinScan {
             }
         }
         let slot = |g: usize| slots.iter().position(|&x| x == g).unwrap_or(usize::MAX);
-        let mut types: Vec<Field> = self.tlist.iter().map(|&g| Field::Col(slot(g), self.col_type(g), self.col_context(g))).collect();
+        let mut types: Vec<Field> = self
+            .tlist
+            .iter()
+            .map(|&g| match self.key_of(g) {
+                Some(oid) => Field::Key(slot(g), oid),
+                None => Field::Col(slot(g), self.col_type(g), self.col_context(g)),
+            })
+            .collect();
         for (at, k, mark) in self.inserts() {
             let b = &self.bases[k];
             let t = &b.scan.table;
@@ -291,6 +318,8 @@ impl crate::ext::fdw::ForeignRelOps for JoinScan {
 /// or a base relation's whole row, its fields going to their columns' slots.
 enum Field {
     Col(usize, DataType, String),
+    /// The target's `rN.ctid` as the row's key (`modify::row_key` of table oid).
+    Key(usize, u32),
     Whole { slots: Vec<usize>, fields: Vec<(String, DataType)>, what: String },
     /// A base relation's whole row kept as its row mark's copy (`exec::scan::copy_key` of
     /// table `oid`'s `ncols` columns, the `live` ones fetched): NULL for a null-extended row.
@@ -315,6 +344,9 @@ impl Node for JoinNode {
                 match f {
                     Field::Col(g, ty, what) => {
                         row[*g] = crate::types::text::parse_value(&s, ty, ctx.fmt()).map_err(|e| e.context(what.clone()))?;
+                    }
+                    Field::Key(g, oid) => {
+                        row[*g] = Value::Bytea(Arc::from(super::modify::row_key(*oid, &s)));
                     }
                     Field::Mark { slot, oid, ncols, live, fields, what } => {
                         if let Value::Record(vals) = crate::types::text::parse_record(&s, fields, ctx.fmt()).map_err(|e| e.context(what.clone()))? {

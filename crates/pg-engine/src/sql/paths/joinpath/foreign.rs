@@ -23,7 +23,7 @@ impl Search<'_, '_, '_> {
         if leaf.sys.is_some()
             || leaf.lateral.is_some()
             || leaf.proj.is_some()
-            || s.with_key
+            || (s.with_key && !self.fdw_dml_target(s))
             || s.sys
             || s.rtindex.0 == 0
             || s.current_of.is_some()
@@ -69,6 +69,12 @@ impl Search<'_, '_, '_> {
         }
         self.fdw_list.borrow_mut().push(pj::Base::at(s.clone(), off, leaf.ncols, r.size.tuples));
         Some(info)
+    }
+
+    /// The UPDATE / DELETE target's scan (returning its rows' keys) when the wrapper may
+    /// join it remotely (`Planner::fdw_dml_target`): its key is the remote row's ctid.
+    fn fdw_dml_target(&self, s: &crate::sql::plan::ScanPlan) -> bool {
+        self.pl.fdw_dml_target.get() == Some(s.table.oid) && s.mark.is_none() && s.fdw.is_none()
     }
 
     /// A locking level whose every relation is a plain scan of a table postgres_fdw joins

@@ -60,6 +60,12 @@ def phases():
     yield "locked local join foreign", ["SELECT loc.id, ft.v FROM loc JOIN ft ON ft.id = loc.id WHERE loc.id < %d FOR UPDATE OF loc" % (300 + i) for i in range(20)]
     yield "locked local join of a foreign join", ["SELECT loc.id, ft.v, fs.w FROM loc, ft, fs WHERE ft.id = fs.id AND ft.id = loc.id AND fs.id < %d FOR UPDATE OF loc" % (300 + i) for i in range(20)]
 
+    # (Analyzed, so both push the joins below; its own phase, last, so the ones above keep
+    # their never-analyzed plans.)
+    yield "analyze foreign tables", ["ANALYZE ft, fs"]
+    yield "update from foreign join (10 rows)", ["UPDATE ft SET v = ft.v || 'u' FROM fs WHERE ft.id = fs.id AND fs.id BETWEEN %d AND %d" % (i * 20 + 1, i * 20 + 10) for i in range(50)]
+    yield "delete using foreign join (3 rows)", ["DELETE FROM ft USING fs WHERE ft.id = fs.id + 99999 AND fs.id BETWEEN %d AND %d" % (i * 3 + 1, i * 3 + 3) for i in range(100)]
+
 
 def gen():
     print("\\set QUIET on")
