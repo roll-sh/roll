@@ -2164,6 +2164,41 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
     - Sweep: seeds 1-30 × 4 rounds (release), clean after the fixes.
     - amcheck's functions check arguments only (`ext/amcheck.rs`), so the harness's own scan
       comparisons stand in for `bt_index_check(heapallindexed)`.
+  - **crash_random's flake was the harness, not the engine** (agent 168). The child logs a
+    step after its COMMIT returns, with `writeln!`, which writes the line in pieces. A kill
+    between them left `855 ` without its `c`. `read_log` counted the cut line as step 855
+    rolled back, and settle's next line was appended onto it (`804 805 a`). The model then
+    lacked a step the database had committed in full: agent 161's "writes of a step logged as
+    not committed" (seed 9: n = 805, all of step 804's writes). Found from a saved crashed
+    state (seed 3 round 3: 855 whole lines and the cut `855 `). PostgreSQL allows the same
+    state, a durable commit whose client never heard back, so the step counts as in flight.
+    - Fix (`tests/crash_random.rs`): a line goes in one write. `read_log` takes whole lines
+      only and checks each is the step it numbers. `append_log` cuts a partial last line off
+      first. `crash_async_commit.rs` reads only whole log lines too.
+    - Stronger checks after each crash: txlog holds exactly the steps logged as committed
+      (durability; the step in flight may be either way), and the step in flight left all of
+      its writes or none, as its txlog row says (atomicity).
+    - A third of the rounds die mid-write of a file: `us / 50` µs after the 0-3rd SST, WAL or
+      `.tmp` (manifest) file that a flush, compaction or checkpoint creates from the kill
+      step on. The kill is now kill(2) from the child itself, not a forked `kill -9`.
+    - `CRASH_ASYNC=1`: the child runs with synchronous_commit off. Lost commits must be a
+      suffix; the log is cut back to the first lost one and those steps run again.
+    - `CRASH_SAVE=<dir>` keeps every crashed state; `crash_inspect` (`CRASH_INSPECT=<dir>/
+      s<seed>-r<round>`, `CRASH_SEED`) recovers a copy and checks it. Use it to replay a failure.
+    - Proof that the harness still catches engine bugs. These were temporary builds, never
+      committed, with `Store::commit_grouped` patched:
+      - writing each commit as two WAL records 3 ms apart failed seed 1 at once: "step 77
+        (Commit) in flight left a partial transaction";
+      - skipping the WAL record of every fifth commit failed seed 1 at once: "txlog against
+        the steps logged as committed".
+
+      `recovery_oracle_rejects_partial_and_lost_acknowledged_transactions` keeps a quick SQL
+      version of both checks.
+    - SIGKILL leaves the page cache, so the harness tests process crashes. It does not test
+      power loss, where writes that weren't fsynced go too. Testing power loss needs a file
+      layer that can drop unsynced writes (not built). Until then, the fsync ordering in
+      `wait_durable` / `rotate_locked` has been reviewed but not crash-tested.
+    - Verified: see the "Verified (agent 168)" line below.
   - **UNLOGGED relations after a crash** (`tests/crash_unlogged.rs`). PostgreSQL empties them
     at the end of crash recovery: it copies each init fork over the relation's data, so
     unlogged sequences start over too. A clean shutdown keeps them. The engine used to keep
@@ -7520,6 +7555,7 @@ pg_dump_tap 14,817); `crash_random` failed intermittently there and on the commi
   seed 11 round 1 after step 345; seed 14 round 1 after step 407; seed 27 round 1 after step
   236). Every scan agrees with every other and ctids are distinct: storage / recovery or the
   harness's settle step, not the models. The harness now prints the rows that differ.
+  (Agent 168: the harness's cut log line, fixed; see "Crash recovery".)
 - **Verified**: the final code (13e620f2, the commits as pushed): release crate tests 444
   passed / 0 failed / 18 ignored (the golden included), full regress on a private reference
   51,148 / 51,150 with 0 units changed against results.tsv, the models' unit tests in debug.
