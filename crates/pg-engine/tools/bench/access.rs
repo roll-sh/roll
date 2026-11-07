@@ -227,3 +227,75 @@ pub fn run(cx: &Ctx) {
     }
 }
 
+/// Index builds of every access method over one `--rows` table (BENCH "Index access, round 6").
+const BUILD_LOAD: &str = "
+DROP TABLE IF EXISTS ib;
+CREATE TABLE ib (id int, t text, ts timestamptz, p point, b box, tags int[], j jsonb, tsv tsvector);
+INSERT INTO ib SELECT (g::int8 * 7919 % $ROWS)::int, md5(g::text), timestamptz '2026-01-01' + g * interval '1 s',
+  point((g * 37) % 1000 + (g % 7) / 10.0, (g * 91) % 1000), box(point((g * 37) % 1000, (g * 91) % 1000),
+  point((g * 37) % 1000 + 3, (g * 91) % 1000 + 3)), ARRAY[g % 100, g % 1000, 1000 + g % 7],
+  jsonb_build_object('user', g % 5000, 'kind', 'k' || (g % 20), 'p' || (g % 500), true),
+  to_tsvector('simple', 'w' || (g % 3000) || ' x' || (g % 40) || ' common')
+  FROM generate_series(1, $ROWS) g;
+VACUUM ANALYZE ib;
+";
+
+/// (case, what follows `CREATE INDEX ib_x ON ib`).
+const BUILDS: &[(&str, &str)] = &[
+    ("btree_int", "(id)"),
+    ("btree_text", "(t)"),
+    ("hash_int", "USING hash (id)"),
+    ("brin_ts", "USING brin (ts)"),
+    ("gist_box", "USING gist (b)"),
+    ("gist_point", "USING gist (p)"),
+    ("spgist_point", "USING spgist (p)"),
+    ("spgist_text", "USING spgist (t)"),
+    ("gin_int_array", "USING gin (tags)"),
+    ("gin_jsonb", "USING gin (j)"),
+    ("gin_jsonb_path", "USING gin (j jsonb_path_ops)"),
+    ("gin_tsvector", "USING gin (tsv)"),
+];
+
+pub fn builds_load(cx: &Ctx) {
+    let rows: u64 = cx.opt("rows", 1_000_000);
+    let mut c = cx.conn();
+    let (_, s) = timed(|| run_script(&mut *c, &BUILD_LOAD.replace("$ROWS", &rows.to_string())));
+    cx.report("access-builds-load", "all", &[("rows", rows.to_string()), ("secs", format!("{s:.2}"))]);
+}
+
+/// Each build `--n` times (`--only a,b`): wall and server CPU seconds, the server's peak memory
+/// and the index's pages; the index is dropped after each build.
+pub fn builds(cx: &Ctx) {
+    let n: usize = cx.opt("n", 1);
+    let only: String = cx.opt("only", String::new());
+    let mut c = cx.conn();
+    let _ = c.simple("DROP INDEX IF EXISTS ib_x");
+    for (name, def) in BUILDS {
+        if !only.is_empty() && !only.split(',').any(|o| o == *name) {
+            continue;
+        }
+        for _ in 0..n {
+            let sampler = MemSampler::start(&cx.mem);
+            let cpu0 = cpu_secs(&cx.mem);
+            let (r, s) = timed(|| c.simple(&format!("CREATE INDEX ib_x ON ib {def}")));
+            let cpu = cpu_secs(&cx.mem) - cpu0;
+            let peak = sampler.stop();
+            must(r, name);
+            // One row per page: Conn::simple returns row counts only.
+            let pages = "SELECT 1 FROM generate_series(1, pg_relation_size('ib_x') / 8192)";
+            let (pages, _) = must(c.simple(pages), "size");
+            must(c.simple("DROP INDEX ib_x"), "drop");
+            cx.report(
+                "access-builds",
+                name,
+                &[
+                    ("secs", format!("{s:.3}")),
+                    ("cpu_s", format!("{cpu:.3}")),
+                    ("peak_mem_mb", mb(peak)),
+                    ("pages", pages.to_string()),
+                ],
+            );
+        }
+    }
+}
+

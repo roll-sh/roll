@@ -161,7 +161,7 @@ fn ordered_scalar(ty: &DataType) -> bool {
     matches!(
         ty,
         DataType::Int2 | DataType::Int4 | DataType::Int8 | DataType::Date | DataType::Timestamp(_) | DataType::Timestamptz(_)
-            | DataType::Float4 | DataType::Float8
+            | DataType::Float4 | DataType::Float8 | DataType::Time(_) | DataType::Interval(_)
     )
 }
 
@@ -175,6 +175,8 @@ fn fits(ty: &DataType, v: &Value) -> bool {
             | (DataType::Date, Value::Date(_))
             | (DataType::Timestamp(_), Value::Timestamp(_))
             | (DataType::Timestamptz(_), Value::Timestamptz(_))
+            | (DataType::Time(_), Value::Time(_))
+            | (DataType::Interval(_), Value::Interval(_))
             | (DataType::Bool, Value::Bool(_))
             | (DataType::Uuid, Value::Uuid(_))
             | (DataType::Oid, Value::Oid(_))
@@ -224,9 +226,11 @@ fn ord_key(v: &Value) -> Option<u64> {
     match v {
         Value::Int2(x) => Some(i(*x as i64)),
         Value::Int4(x) | Value::Date(x) => Some(i(*x as i64)),
-        Value::Int8(x) | Value::Timestamp(x) | Value::Timestamptz(x) => Some(i(*x)),
+        Value::Int8(x) | Value::Timestamp(x) | Value::Timestamptz(x) | Value::Time(x) => Some(i(*x)),
         Value::Float4(x) => f(*x as f64),
         Value::Float8(x) => f(*x),
+        // (By its span, as interval_cmp orders intervals: a float's key, as near as an f64 is.)
+        Value::Interval(iv) => f(iv.cmp_key() as f64),
         _ => None,
     }
 }
@@ -1122,7 +1126,9 @@ pub fn nearest(
             (Kind::Scalar, v) if fits(&sh.tys[i], v) => match v {
                 Value::Int2(x) => ((*x as f64, 0.0), false),
                 Value::Int4(x) | Value::Date(x) => ((*x as f64, 0.0), false),
-                Value::Int8(x) | Value::Timestamp(x) | Value::Timestamptz(x) => ((*x as f64, 0.0), false),
+                Value::Int8(x) | Value::Timestamp(x) | Value::Timestamptz(x) | Value::Time(x) => ((*x as f64, 0.0), false),
+                // (An interval's distance is an interval: its span in microseconds.)
+                Value::Interval(iv) => ((iv.cmp_key() as f64, 0.0), true),
                 Value::Float4(x) => ((*x as f64, 0.0), true),
                 Value::Float8(x) => ((*x, 0.0), true),
                 _ => return Ok(None),

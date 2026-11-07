@@ -2442,10 +2442,8 @@ impl Txn {
         if from < self.journal_base || self.runs.is_some() {
             return None;
         }
-        // (A range it deleted since doesn't list the rows it took: `delete_range`.)
-        if self.rdels.iter().any(|r| r.ts as usize > from && r.overlaps(start, end)) {
-            return None;
-        }
+        // (A range it deleted since lists the writes of ours it took, `delete_range`; the
+        // committed rows it hid aren't writes of ours.)
         let at = (from - self.journal_base).min(self.journal.len());
         Some(
             self.journal[at..]

@@ -427,6 +427,13 @@ impl GinIndex {
             }
             lsize += t.size + ITEM_ID;
         }
+        // (Both pages get an item: a last item bigger than the rest together, which a key
+        // near GinMaxItemSize with its posting list can be, would leave the right one empty.)
+        if all.len() < 2 {
+            self.nodes[page].items = all;
+            return;
+        }
+        let split = split.clamp(1, all.len() - 1);
         let mut left = all;
         let right = left.split_off(split);
         let leaf = self.nodes[page].leaf;

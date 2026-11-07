@@ -465,7 +465,7 @@ fn deferred_entry_deletes() {
 /// table loaded the same way without the TRUNCATE is read, and gives the same.
 #[test]
 fn vacuum_skips_unchanged_tables() {
-    use pg_engine::txn::unchanged::SKIPS;
+    use pg_engine::txn::unchanged::skips as skipped;
     let dir = tempfile::tempdir().unwrap();
     let eng = open(dir.path());
     with_max_versions(500, || {
@@ -483,8 +483,8 @@ fn vacuum_skips_unchanged_tables() {
         let stats = |s: &mut Session, t: &str, x: &str| {
             rows(s, &format!("SELECT relpages, reltuples, relallvisible, relfrozenxid::text = '{x}' FROM pg_class WHERE relname = '{t}'"))
         };
-        let skips = |n| assert_eq!(SKIPS.load(Ordering::Relaxed), n);
-        let base = SKIPS.load(Ordering::Relaxed);
+        let skips = |n| assert_eq!(skipped(), n);
+        let base = skipped();
         run(&mut s, "VACUUM vu_a");
         skips(base + 1);
         run(&mut s, "VACUUM vu_b");
@@ -658,5 +658,34 @@ fn analyze_samples_pages_of_big_tables() {
         assert!(v[0] > 300.0, "{r:?}");
         assert!((v[1] - 30000.0).abs() < 3000.0, "{r:?}");
         assert_eq!(rows(&mut s, "SELECT n_distinct FROM pg_stats WHERE tablename = 'sa' AND attname = 'a'"), ["[Float4(10.0)]"]);
+    });
+}
+
+/// INCLUDE size checks on the measured serial callback, with its actual unmodelled
+/// heap state asserted. Error sizes are the PG18.6 a163_review_sizes fixture's.
+#[test]
+fn measured_serial_include_size() {
+    let dir = tempfile::tempdir().unwrap();
+    let eng = open(dir.path());
+    with_max_versions(500, || {
+        let mut s = eng.connect(1, "postgres", "postgres", "t").unwrap();
+        s.query("SET max_parallel_maintenance_workers=0").unwrap();
+        s.query("CREATE FUNCTION mi_text(n int) RETURNS text LANGUAGE sql IMMUTABLE AS $$ SELECT left(string_agg(md5(g::text), ''), n) FROM generate_series(1, (n+31)/32) g $$").unwrap();
+        for (len, expected) in [(2800, "index row size 2816 exceeds btree version 4 maximum 2704"), (8300, "index row requires 8320 bytes, maximum size is 8191")] {
+            s.query("CREATE TABLE mi (k int, payload text)").unwrap();
+            s.query(&format!("INSERT INTO mi SELECT g, CASE WHEN g=6000 THEN mi_text({len}) ELSE 'small' END FROM generate_series(1,6000) g")).unwrap();
+            // The bulk insert already leaves this heap unmodelled. VACUUM of the
+            // 8300-byte raw row hits a separately recorded HeapPacker overflow before
+            // CREATE INDEX; it is not needed to enter the measured build callback.
+            let result = s.query("SELECT oid FROM pg_class WHERE relname='mi'").unwrap();
+            let pg_engine::types::Value::Oid(oid) = result[0].rows[0][0] else { panic!("table oid") };
+            assert!(pg_engine::exec::sizing::is_estimated(oid, &s.state.db));
+            assert!(pg_engine::exec::sizing::heap_writes(oid, &s.state.db).is_none());
+            let e = s.query("CREATE INDEX mi_i ON mi(k) INCLUDE(payload)").unwrap_err();
+            assert_eq!(e.code, "54000");
+            assert!(e.message.starts_with(expected), "{e:?}");
+            eprintln!("measured serial INCLUDE: estimated=true heap_model=false workers=0: {}", e.message);
+            s.query("DROP TABLE mi").unwrap();
+        }
     });
 }
