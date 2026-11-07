@@ -6142,6 +6142,16 @@ container name: pick your own).
 
 ## Machine rules (learned the hard way)
 
+- **Verification train (since 2026-11-07).** With 12 agents on 4 heavy slots the queue reached
+  30 jobs, almost all full verifications of small batches. A batch is pushed after ONE heavy job
+  with: a release build, clippy (no new warnings), the crate test binaries that cover the files it
+  touches, the regress files of its area (`PGREGRESS_ONLY`), goldens it adds, and its benchmark.
+  The full suite (debug and release crate tests, `crash_random` 1-30, full regress with 0 units
+  changed, isolation, pg_dump_tap, the difftest pair) runs on origin's head after each wave of
+  pushes, by the difftest owner's guard (`tools/difftest-guard.sh` plus the suite). A failure there
+  is bisected to its commit, and its owner fixes it or reverts it first, before anything else.
+  Exceptions that still need the full suite before their push: storage, block or SST format, WAL,
+  flush, recovery and commit ordering, catalog format, and anything touching durability.
 - **Start long heavy jobs detached with `tools/heavy-bg.sh <log> <command...>`.** With the slots
   full, a job can wait hours for one, and a session's background command stops at 2 hours queue
   wait included, killing jobs that never ran. heavy-bg.sh runs the job through heavy.sh outside
