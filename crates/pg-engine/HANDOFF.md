@@ -2164,6 +2164,47 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
     - Sweep: seeds 1-30 × 4 rounds (release), clean after the fixes.
     - amcheck's functions check arguments only (`ext/amcheck.rs`), so the harness's own scan
       comparisons stand in for `bt_index_check(heapallindexed)`.
+  - **crash_random's flake was the harness, not the engine** (agent 168). The child logs a
+    step after its COMMIT returns, with `writeln!`, which writes the line in pieces. A kill
+    between them left `855 ` without its `c`. `read_log` counted the cut line as step 855
+    rolled back, and settle's next line was appended onto it (`804 805 a`). The model then
+    lacked a step the database had committed in full: agent 161's "writes of a step logged as
+    not committed" (seed 9: n = 805, all of step 804's writes). Found from a saved crashed
+    state (seed 3 round 3: 855 whole lines and the cut `855 `). PostgreSQL allows the same
+    state, a durable commit whose client never heard back, so the step counts as in flight.
+    - Fix (`tests/crash_random.rs`): a line goes in one write. `read_log` takes whole lines
+      only and checks each is the step it numbers. `append_log` cuts a partial last line off
+      first. `crash_async_commit.rs` reads only whole log lines too.
+    - Stronger checks after each crash: txlog holds exactly the steps logged as committed
+      (durability; the step in flight may be either way), and the step in flight left all of
+      its writes or none, as its txlog row says (atomicity).
+    - A third of the rounds die mid-write of a file: `us / 50` µs after the 0-3rd SST, WAL or
+      `.tmp` (manifest) file that a flush, compaction or checkpoint creates from the kill
+      step on. The kill is now kill(2) from the child itself, not a forked `kill -9`.
+    - `CRASH_ASYNC=1`: the child runs with synchronous_commit off. Lost commits must be a
+      suffix; the log is cut back to the first lost one and those steps run again.
+    - `CRASH_SAVE=<dir>` keeps every crashed state; `crash_inspect` (`CRASH_INSPECT=<dir>/
+      s<seed>-r<round>`, `CRASH_SEED`) recovers a copy and checks it. Use it to replay a failure.
+    - Proof that the harness still catches engine bugs. These were temporary builds, never
+      committed, with `Store::commit_grouped` patched:
+      - writing each commit as two WAL records 3 ms apart failed seed 1 at once: "step 77
+        (Commit) in flight left a partial transaction";
+      - skipping the WAL record of every fifth commit failed seed 1 at once: "txlog against
+        the steps logged as committed".
+
+      `recovery_oracle_rejects_partial_and_lost_acknowledged_transactions` keeps a quick SQL
+      version of both checks.
+    - SIGKILL leaves the page cache, so the harness tests process crashes. It does not test
+      power loss, where writes that weren't fsynced go too. Testing power loss needs a file
+      layer that can drop unsynced writes (not built). Until then, the fsync ordering in
+      `wait_durable` / `rotate_locked` has been reviewed but not crash-tested.
+    - Verified (agent 168, b626d5dd3 on 86b519409; the engine's source unchanged since
+      fe7b0023c): seeds 1-30 × 4 rounds ten times over (1,200 crashes, a third mid-file-write),
+      and twice with `CRASH_ASYNC=1` (240), none failed; crate tests in release and debug,
+      454 passed / 0 failed / 18 ignored each; clippy with no warning in the crash tests.
+      The resumed session's earlier evidence (the same 1,200 + 120 async on 00325dac7, the
+      saved cut log) is on origin `wip/resume-20261104-a168`. No engine code changed, so the
+      commit path, regress, isolation, pg_dump_tap and pgbench are origin's own.
   - **UNLOGGED relations after a crash** (`tests/crash_unlogged.rs`). PostgreSQL empties them
     at the end of crash recovery: it copies each init fork over the relation's data, so
     unlogged sequences start over too. A clean shutdown keeps them. The engine used to keep
@@ -3534,6 +3575,73 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
   where PostgreSQL hashes (the engine estimates 203 pg_class rows for `relnamespace = x`
   against PostgreSQL's 1,949: catalog column statistics, agent 155's ANALYZE of system
   catalogs); its execution is 33 ms against 35 with EXPLAIN ANALYZE's timing on both sides.
+- **Catalog round 10, first batch** (round 25, agent 166; BENCH.md "Catalog round 10"):
+  - pg_class's directory without its rows (`catalog/system.rs` `class_keys`, `ClassSel`,
+    `ClassKeep`): a relation's oid, relnamespace, relkind, relname and reltoastrelid read from
+    the relation maps (tables, views, sequences, indexes, TOAST relations, composite types,
+    Postgres's static rows), of every relation, of one oid, or of one name through the name
+    index (TOAST and composite names apart). `ClassKeep` limits it to some kinds and
+    namespaces: only the maps holding a kind kept are read whole first (on several threads),
+    and a name is made only once its relation is kept. Debug builds compare it with
+    pg_class's generated rows. None when a superuser's UPDATE moved oids (`rel_oid_edits`):
+    the callers use the generated rows then.
+  - The statistics views are made from that directory (`catalog/stat_views.rs` `rows_of`,
+    `StatSel`): pg_stat_{all,user,sys}_{tables,indexes} as before, and now the nine
+    pg_statio_* views natively (they ran their SQL definitions: a LATERAL sum over pg_index
+    per relation). A filter's leading `relid = ...` / `indexrelid = ...` pins the rows to one
+    relation (`exec/nodes.rs` `is_named_rows`, `stat_views::oid_columns`) as `relname =` /
+    `schemaname =` did, a name is found through the name index instead of every pg_class
+    row, a table's indexes are its own list (`Table::indexes`, the primary key's, TOAST
+    indexes; debug builds check them against every index entry), and only the columns the
+    query reads are made (`StatSel::reads` from the scan's `need` and filter, `stat_reads`:
+    `count(*)` fetches no statistics entry; the others are NULL). Rows in relation oid order
+    (the statio views' definitions have no ORDER BY: PostgreSQL's order isn't deterministic
+    there). Golden `a166_statio_views`.
+  - The planner's row count of a statistics view (`sql/explain.rs` `sys_tuples`) is an
+    estimate from the maps' sizes (`stat_views::row_estimate`): the executor's parallel check
+    (`paths::parallel::may_gather` → `syscat::sys_size`) made every row of a view a query read,
+    once per catalog version: 17 ms after each DDL statement at 10,000 tables.
+  - pg_class's first read in a catalog version (no statement generated its rows yet) makes
+    only the rows its filter or a hash join above it fixes (`system::class_rows_where`,
+    `ClassWhere`; `exec/nodes.rs` `class_where`, `LazyRowsNode`): `oid`, `relnamespace` and
+    `relkind` compared with values (`=`, `= ANY`, `IN`) in conjuncts after conjuncts that can't
+    raise anything, or the keys an inner or semi hash join hands its outer scan
+    (`restrict_keys` on oid or relnamespace: psql's `\dt` joins pg_namespace), when under a
+    quarter of pg_class's rows (and `WHERE_MAX`, 8,192), made relation by relation in
+    pg_class's order. pg_attribute the same way for a hash join's attrelid keys
+    (`system::attribute_rows_of`). `LazyRowsNode` replaced `CountedRowsNode` (filter-less
+    scans: `count(*)` without rows). It captures the catalog when opened and generates its
+    deferred rows from that version (`ExecCtx::reading_catalog`): nested volatile DDL between
+    the open and the first row read (an inner side built first) must not show (the resume
+    session after the 2026-11-04 stop found it; test `catalog_lazy_snapshot.rs`, goldens
+    `a166_lazy_snapshot`, `a166_lazy_keys_count`). Debug builds compare the rows with the
+    whole catalog's. Golden `a166_class_where`.
+  - A database's first read of pg_namespace parsed every relation's stored entry
+    (`rows_generated_chunked` read every map first, for every catalog): every statistics view
+    reads pg_namespace, so a named lookup's first run took 130-150 ms at 10,000 tables. Only
+    catalogs made from the relation maps read them first now (`reads_relations`).
+  - pg_inherits is made from the inheritance index (`Catalog::inheritance`) and
+    `IndexIx::attached` instead of every table and index (a millisecond a read at 10,000
+    tables; psql's `\d` reads it twice), a detach view's omitted partitions included.
+  - The system catalogs' index list (`sys_indexes.tsv`) is parsed once (`sql/explain.rs`
+    `sys_index_scan` split every line of it per catalog scan's estimate: 5% of psql's `\d`).
+  - Measured, not this batch's (reported to the planner and executor owners): psql's `\d` at
+    10,000 tables is about 2x PostgreSQL's in steady state, the same with or without DDL in
+    between; most of it is planning (`explain::estimate_in` builds EXPLAIN nodes to cost
+    plans: 0.7-2.8 ms a query against PostgreSQL's 0.1-0.3) and the referenced-by query
+    (`confrelid IN (SELECT pg_partition_ancestors(...))`): a bitmap scan on conparentid with
+    the hashed subplan's test before `contype = 'f'` (PostgreSQL: a seq scan, quals ordered by
+    cost), 10 ms against 3-6. pgjdbc's getColumns and Django's index and constraint queries
+    are planning bound too (the join search and estimates over 70% of their CPU). A plan's
+    OnceLock in `exec::parallel_part::start` was 6% of `\d`.
+  - Left: a query's first read of the catalog after an open parses every stored entry it
+    reads (`PMap::read_all`, serde_json, the store's reads): 50-230 ms at 10,000 tables against
+    PostgreSQL's 8-180; a directory of its own (oid, namespace, kind, name, TOAST oid per
+    relation, stored as index records like the name index) would answer the statistics views
+    and schema-filtered pg_class reads without parsing a table (a catalog format change, with
+    its downgrade). Catalog entries weren't shrunk: at 10,000 tables after reading pg_class,
+    pg_attribute, pg_type, pg_index, pg_constraint and pg_stat_user_tables whole the engine's
+    RSS is 166 MB against PostgreSQL's cgroup 134 MB (22 against 29 MB fresh).
 - **Client libraries** (round 17, agent 38; round 18, agent 51): drivers' and ORMs' own test
   suites against the engine and against PostgreSQL 18.6, test by test: `tests/clients/`
   (runner, per-suite scripts, `STATUS.md` with the per-suite counts and every difference
@@ -7477,6 +7585,7 @@ pg_dump_tap 14,817); `crash_random` failed intermittently there and on the commi
   seed 11 round 1 after step 345; seed 14 round 1 after step 407; seed 27 round 1 after step
   236). Every scan agrees with every other and ctids are distinct: storage / recovery or the
   harness's settle step, not the models. The harness now prints the rows that differ.
+  (Agent 168: the harness's cut log line, fixed; see "Crash recovery".)
 - **Verified**: the final code (13e620f2, the commits as pushed): release crate tests 444
   passed / 0 failed / 18 ignored (the golden included), full regress on a private reference
   51,148 / 51,150 with 0 units changed against results.tsv, the models' unit tests in debug.
