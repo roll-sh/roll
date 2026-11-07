@@ -313,9 +313,9 @@ fn measured_sizes_from_stored_rows() {
         run(&mut s, "INSERT INTO m2 SELECT g, g % 2 = 0, g % 100, g * 1000, g / 3.0, g / 7.0, date '2000-01-01' + g, timestamp '2000-01-01' + g * interval '1 hour', timestamptz '2000-01-01 00:00+00' + g * interval '1 minute', CASE WHEN g % 5 = 0 THEN NULL ELSE repeat('x', g % 300) END, CASE WHEN g % 3 = 0 THEN NULL ELSE 'v' || g END FROM generate_series(1, 1500) g");
         let sized = pg_engine::storage::row::STORED_SIZES.load(Ordering::Relaxed);
         run(&mut s, "CREATE INDEX m2_i ON m2 (i);\nCREATE UNIQUE INDEX m2_l ON m2 (l) INCLUDE (t);\nANALYZE m2;\nVACUUM m2");
-        // (The two builds and VACUUM measure the rows; ANALYZE of a table too big to model
-        // only samples them.)
-        assert!(pg_engine::storage::row::STORED_SIZES.load(Ordering::Relaxed) >= sized + 3 * 1500, "sized from the stored bytes");
+        // (VACUUM measures the rows; the builds take the heap's estimated pages and size only
+        // the rows at the table's start, and ANALYZE of a table too big to model samples them.)
+        assert!(pg_engine::storage::row::STORED_SIZES.load(Ordering::Relaxed) >= sized + 1500, "sized from the stored bytes");
         let pages = rows(&mut s, "SELECT relpages > 0, reltuples FROM pg_class WHERE relname = 'm2'");
         assert_eq!(pages, ["[Bool(true), Float4(1500.0)]"]);
     });
@@ -399,6 +399,35 @@ fn index_build_measures_as_analyze() {
         // A duplicate found by the build's pass still fails it.
         let e = s.query("CREATE UNIQUE INDEX ib_dup ON ib (a)").unwrap_err();
         assert!(format!("{e:?}").contains("is duplicated"), "{e:?}");
+    });
+}
+
+/// BRIN and GIN builds of a table too big to model measure the index as their access method
+/// lays it out (`am_measure`): PostgreSQL 18.6's relpages (and pg_relation_size) for the same
+/// table, after the build and after a VACUUM (whose kept measure the next build reads).
+#[test]
+fn brin_gin_builds_measure_as_postgres() {
+    let dir = tempfile::tempdir().unwrap();
+    let eng = open(dir.path());
+    with_max_versions(400, || {
+        let mut s = eng.connect(1, "postgres", "postgres", "t").unwrap();
+        run(&mut s, "CREATE TABLE am (id int NOT NULL, ts timestamptz, t text, tags int[], doc tsvector, j jsonb);
+             INSERT INTO am SELECT g, timestamptz '2026-01-01' + g * interval '1 min', CASE WHEN g % 11 = 0 THEN NULL ELSE md5(g::text) END,
+               ARRAY[g % 50, g % 300, 1000 + g % 3], to_tsvector('simple', 'w' || (g % 700) || ' x' || (g % 9) || ' common'),
+               jsonb_build_object('u', g % 400, 'k', 'k' || (g % 5)) FROM generate_series(1, 4000) g");
+        let build = "CREATE INDEX am_b ON am USING brin (ts) WITH (pages_per_range = 1);
+             CREATE INDEX am_bt ON am USING brin (t, id) WITH (pages_per_range = 2);
+             CREATE INDEX am_g ON am USING gin (tags);
+             CREATE INDEX am_d ON am USING gin (doc);
+             CREATE INDEX am_j ON am USING gin (j);
+             CREATE INDEX am_jp ON am USING gin (j jsonb_path_ops)";
+        let stats = "SELECT string_agg(relname || ' ' || relpages, ', ' ORDER BY relname) FROM pg_class WHERE relname LIKE 'am%' AND relpages = pg_relation_size(oid) / 8192";
+        let want = [r#"[Text("am 91, am_b 3, am_bt 3, am_d 11, am_g 8, am_j 10, am_jp 8")]"#];
+        run(&mut s, build);
+        assert_eq!(rows(&mut s, stats), want);
+        run(&mut s, "DROP INDEX am_b, am_bt, am_g, am_d, am_j, am_jp;\nVACUUM am");
+        run(&mut s, build);
+        assert_eq!(rows(&mut s, stats), want);
     });
 }
 

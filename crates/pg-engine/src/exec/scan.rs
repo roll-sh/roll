@@ -510,6 +510,8 @@ pub fn open_scan(s: &ScanPlan, shared: Option<&Arc<crate::sql::plan::Plan>>, nee
     // A bitmap heap scan: the rows the bitmap selects, in heap order. A TID scan: the rows
     // at its TIDs, when the heap model says which (`tid_keys`), their conditions checked
     // on each (the filter has them).
+    // (The bitmap index scans whose quals the heap side checks again: `bitmap_keys`.)
+    let mut unchecked: Vec<usize> = Vec::new();
     let keyed = match (&s.access, &s.current_of) {
         (Access::Bitmap(q, _), None) => {
             if let Some(node) = dense_bitmap_scan(s, q, raw_need, ctx)? {
@@ -520,7 +522,7 @@ pub fn open_scan(s: &ScanPlan, shared: Option<&Arc<crate::sql::plan::Plan>>, nee
             } else {
                 StatTarget::Off
             };
-            let (keys, rows) = bitmap_rows(s, q, ctx)?;
+            let (keys, rows) = bitmap_rows(s, q, &mut unchecked, ctx)?;
             // (Rows the bitmap index scans read already are taken as they are.)
             Some(match rows {
                 Some(rows) => (Vec::new(), keys.into_iter().zip(rows).map(|(k, r)| (Vec::<u8>::new(), k, Some(r))).collect(), stat),
@@ -544,7 +546,7 @@ pub fn open_scan(s: &ScanPlan, shared: Option<&Arc<crate::sql::plan::Plan>>, nee
             && s.mark.is_none()
         {
             let mut checked = Vec::new();
-            bitmap_checked(q, &mut checked);
+            bitmap_checked(q, &unchecked, &mut checked);
             let conj: Vec<&Expr> = match f {
                 Expr::And(a) => a.iter().collect(),
                 e => vec![e],
@@ -1445,7 +1447,7 @@ impl Node for Backward {
 
 /// The data keys of the rows a bitmap selects, each leaf's index conditions checked on
 /// the row; counted per bitmap node for EXPLAIN ANALYZE.
-fn bitmap_keys(t: &Table, q: &BitmapQual, kept: &mut Option<KeptRows>, ctx: &ExecCtx) -> Result<Vec<Vec<u8>>> {
+fn bitmap_keys(t: &Table, q: &BitmapQual, kept: &mut Option<KeptRows>, unchecked: &mut Vec<usize>, ctx: &ExecCtx) -> Result<Vec<Vec<u8>>> {
     let key = q as *const BitmapQual as usize;
     let out = match q {
         BitmapQual::Index {
@@ -1457,6 +1459,21 @@ fn bitmap_keys(t: &Table, q: &BitmapQual, kept: &mut Option<KeptRows>, ctx: &Exe
             let ranges = ranges(t, index, bounds, ctx)?;
             if index.id != 0 && predicate_locked(t, ctx) {
                 ssi_bitmap_index(t, index, bounds, quals, &ranges, ctx)?;
+            }
+            // (A point index's structure decides its quals on the points it placed, unread;
+            // the heap side checks them again on the rows it reads.)
+            if !reads_entries(index)
+                && !ctx.instrumented()
+                && let Some(out) = point_keys(t, index, quals, ctx)?
+            {
+                unchecked.push(key);
+                if super::pgstat::scan_counts(ctx) {
+                    super::pgstat::count_index_scan(ctx, index.oid);
+                    super::pgstat::count_returned(ctx, index.oid, out.len() as i64);
+                    super::pgstat::count_blocks(ctx, index.oid, 1);
+                }
+                ctx.count(key, |st| st.loops += 1);
+                return Ok(out);
             }
             let secondary = reads_entries(index);
             let mut out = Vec::new();
@@ -1624,7 +1641,7 @@ fn bitmap_keys(t: &Table, q: &BitmapQual, kept: &mut Option<KeptRows>, ctx: &Exe
         BitmapQual::And(list) => {
             let mut acc: Option<Vec<Vec<u8>>> = None;
             for x in list {
-                let ks = bitmap_keys(t, x, kept, ctx)?;
+                let ks = bitmap_keys(t, x, kept, unchecked, ctx)?;
                 acc = Some(match acc {
                     None => ks,
                     Some(a) => {
@@ -1638,7 +1655,7 @@ fn bitmap_keys(t: &Table, q: &BitmapQual, kept: &mut Option<KeptRows>, ctx: &Exe
         BitmapQual::Or(list) => {
             let mut all = Vec::new();
             for x in list {
-                all.extend(bitmap_keys(t, x, kept, ctx)?);
+                all.extend(bitmap_keys(t, x, kept, unchecked, ctx)?);
             }
             all.sort();
             all.dedup();
@@ -1909,12 +1926,16 @@ impl KeptRows {
 
 /// The conditions every row a bitmap selects passed (`bitmap_keys` checks an index's quals
 /// on each row it keeps; an AND's rows pass each child's, an OR's only one's).
-fn bitmap_checked<'a>(q: &'a BitmapQual, out: &mut Vec<&'a Expr>) {
+fn bitmap_checked<'a>(q: &'a BitmapQual, unchecked: &[usize], out: &mut Vec<&'a Expr>) {
     match q {
-        BitmapQual::Index { quals, .. } => out.extend(quals.iter().map(|c| &c.orig)),
+        BitmapQual::Index { quals, .. } => {
+            if !unchecked.contains(&(q as *const BitmapQual as usize)) {
+                out.extend(quals.iter().map(|c| &c.orig));
+            }
+        }
         BitmapQual::And(qs) => {
             for q in qs {
-                bitmap_checked(q, out);
+                bitmap_checked(q, unchecked, out);
             }
         }
         BitmapQual::Or(_) => {}
@@ -1925,9 +1946,9 @@ fn bitmap_checked<'a>(q: &'a BitmapQual, out: &mut Vec<&'a Expr>) {
 /// is modelled), the pages they are on counted; with their rows when the bitmap
 /// index scans read each of them (`KeptRows`; only under a snapshot, which the rows read
 /// later would be read at too).
-fn bitmap_rows(s: &ScanPlan, q: &BitmapQual, ctx: &ExecCtx) -> Result<(Vec<Vec<u8>>, Option<Vec<bytes::Bytes>>)> {
+fn bitmap_rows(s: &ScanPlan, q: &BitmapQual, unchecked: &mut Vec<usize>, ctx: &ExecCtx) -> Result<(Vec<Vec<u8>>, Option<Vec<bytes::Bytes>>)> {
     let mut kept = ctx.snapshot().is_some().then(|| KeptRows { rows: Default::default(), bytes: 0, over: false });
-    let mut keys = bitmap_keys(&s.table, q, &mut kept, ctx)?;
+    let mut keys = bitmap_keys(&s.table, q, &mut kept, unchecked, ctx)?;
     // (Rows stored in heap order are in it by key already, as the bitmap's keys come:
     // looking each one's TID up is for EXPLAIN ANALYZE's pages.)
     let in_order = !ctx.instrumented() && super::sizing::heap_in_key_order(&s.table, ctx);
@@ -5035,6 +5056,62 @@ fn search_keys(
     let Some(conds) = search_conds(quals, ctx) else { return Ok(None) };
     let snap = ctx.snapshot().map_or_else(|| ctx.txn.borrow().snapshot_ts(), |s| s.ts());
     super::search::candidates(&t, &bix, &conds, Some(snap), ctx)
+}
+
+/// `bitmap_keys`' rows of a point index's structure (`search::candidate_points`) when every
+/// qual is on the point column: decided on the point each row was placed with, the rows it
+/// has no point for read and checked. None: no such structure.
+fn point_keys(t: &Table, ix: &Index, quals: &[crate::sql::plan::IndexQual], ctx: &ExecCtx) -> Result<Option<Vec<Vec<u8>>>> {
+    if predicate_locked(t, ctx) {
+        return Ok(None);
+    }
+    let t = Arc::new(t.clone());
+    let Some(bix) = crate::sql::binder::bound_indexes(&t, ctx)?.into_iter().find(|b| b.index.oid == ix.oid) else {
+        return Ok(None);
+    };
+    let Some(conds) = search_conds(quals, ctx) else { return Ok(None) };
+    let snap = ctx.snapshot().map_or_else(|| ctx.txn.borrow().snapshot_ts(), |s| s.ts());
+    let Some((icol, col, cands)) = super::search::candidate_points(&t, &bix, &conds, Some(snap), ctx)? else {
+        return Ok(None);
+    };
+    if quals.iter().any(|q| q.col != icol) {
+        return Ok(None);
+    }
+    let mut row = vec![Value::Null; t.columns.len()];
+    let (mut out, mut read) = (Vec::new(), Vec::new());
+    'cand: for (k, p) in cands {
+        let Some(p) = p else {
+            read.push(k);
+            continue;
+        };
+        row[col] = Value::Geo(Arc::new(crate::types::geo::Geo::Point(p)));
+        for q in quals {
+            if !eval_bool(&q.orig, &row, ctx)? {
+                continue 'cand;
+            }
+        }
+        out.push(k);
+    }
+    ctx.check()?;
+    if !read.is_empty() {
+        let need = super::need::of(quals.iter().map(|q| &q.orig));
+        let rows = fetch_rows(&read, ctx)?;
+        'row: for (k, r) in read.into_iter().zip(rows) {
+            let Some(bytes) = r else { continue };
+            let row = match &need {
+                Some(n) => decode_table_row_need(&t, &bytes, n)?,
+                None => decode_table_row(&t, &bytes)?,
+            };
+            for q in quals {
+                if !eval_bool(&q.orig, &row, ctx)? {
+                    continue 'row;
+                }
+            }
+            out.push(k);
+        }
+        out.sort_unstable();
+    }
+    Ok(Some(out))
 }
 
 /// An index scan's conditions as the search structures take them: (index column,

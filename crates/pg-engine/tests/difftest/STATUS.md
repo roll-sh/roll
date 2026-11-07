@@ -466,11 +466,18 @@ After each wave of pushes (every 3-4 hours, or 4+ code commits) the full suite r
 head in one heavy job (HANDOFF, machine rules): the guard above, debug and release crate tests,
 `crash_random` seeds 1-30 x 4 rounds (release), full regress on a private reference (0 units
 changed against `tests/regress/results.tsv`), isolation, pg_dump_tap. A failure is bisected to
-its commit and sent to the coordinator.
+its commit and sent to the coordinator. `tools/verification-train.sh` is the suite's heavy job
+(started with `tools/heavy-bg.sh`; it checks out origin's head when its slot comes, and leaves the
+checkout detached there); its header names the containers and ports it needs.
 
 | train | head | guard | crate tests | crash_random | regress | isolation | pg_dump_tap |
 |---|---|---|---|---|---|---|---|
 | 1, 2026-11-07 | `fe7b0023c` (as `c59b15238`: + docs, tools) | 0 new (above) | release and debug pass; goldens and clippy (18 warnings, as before) also on this head, which settles a39990c5's skipped post-rebase check | 1-30 x 4 clean | 51,148 / 51,150, 0 changed | 121 / 122 specs, 1,647 / 1,648 | 14,817 / 14,817 |
+| 2, 2026-11-07 | `bf887b455`: agent 163's index builds (639a9be65, 25c0056b), push.sh (dcba895cc), agent 170's fast hasher and kept records (f75a60696, de1d7b3f6), agent 168's crash harness, 171's custom-plan costs, 165's OLTP round 6, 149's scan cost batches 3-4, catalog round 10 | rounds 6-9 against `fe7b0023c`: 0 new, 50 gone (engine_error 41 -> 3) | release and debug pass; clippy 18 warnings (as before) | 1-30 x 4 clean (agent 168's harness; `CRASH_POWER` not on the branch yet) | 51,148 / 51,150, 0 changed (run again after the idle timer had stopped the reference) | 121 / 122, 1,647 / 1,648 | 14,817 / 14,817 |
+
+Round 10's seeds on `bf887b455`: wrong_rows 309, plan_variance 2, missing_error 4, wrong_error 1,
+eval_error 25, error_detail 13: nothing new against `c59b15238`, 56 lines gone (the 49
+engine_errors: BETWEEN's parameter types, agent 178's).
 
 Round 10's seeds 10000-10149 on the same head: wrong_rows 314, plan_variance 2, engine_error 49,
 missing_error 4, wrong_error 3, eval_error 25, error_detail 13 (as on `75f83bc0` with eb450f4e9).

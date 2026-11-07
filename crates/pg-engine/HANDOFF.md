@@ -6231,6 +6231,87 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
       (agent 103's box case, 610 pages against 1,011) and the SP-GiST quad tree's NaN after a
       later split (144's "Left").
 
+- **Index access at index cost, round 7** (round 25, agent 176; BENCH.md "Index access,
+  round 7"):
+  - GIN and BRIN builds of a table too big to model measure the index the way its access
+    method lays it out (`session/ddl/am_measure.rs`), not by a btree-style sort of every key
+    (`btree_pages_of`):
+    - BRIN: brinbuild's one summary tuple per page range (minmax: the range's least and
+      greatest values; box_inclusion_ops: a fixed-size union), formed when the scan leaves the
+      range, placeholders for the ranges no row is in, packed after the metapage and the
+      range map. Inclusion classes other than box's, bloom and minmax-multi fall back to the
+      old measure.
+    - GIN: ginbuild's BuildAccumulator: per-key posting lists held until the memory it would
+      count passes maintenance_work_mem, then inserted in key order into `ginsim::GinIndex`.
+      jsonb_path_ops' keys are its path hashes (`sizing::gin_keys`, 10091; only for this
+      measure: `gin_model` still declines it, their order among themselves isn't
+      PostgreSQL's hash_numeric's).
+    - A row's TID is where `relsize::HeapPacker` puts it. A build takes the heap's pages from
+      the table's estimate (`estimated`, what index_update_stats reads from the file) and
+      sizes only its first `SIZED_SAMPLE` (256) rows; past them a row's TID is the sample's
+      density (a VACUUM or ANALYZE still sizes every row: they tell the reusable space).
+      Before, every build sized every row's tuple (a jsonb parsed for it: 60% of a BRIN
+      build), and `measured_live` raised the estimate to it anyway.
+    - pg_relation_size of a BRIN or GIN index of a table too big to model is its measured
+      relpages (`fork_blocks`), as a btree's is; it was the empty index's size.
+    - `tests/big_tables.rs` `brin_gin_builds_measure_as_postgres`: relpages and
+      pg_relation_size of BRIN (one and two columns), GIN int[], tsvector, jsonb_ops and
+      jsonb_path_ops as 18.6 has them, after a build and after a VACUUM.
+  - GiST and SP-GiST point indexes' bitmap scans decide their quals on the points the search
+    structure placed (`search::candidate_points`, `scan::point_keys`; `Grid::pts`, 16 bytes
+    a row of a point grid): no row is fetched to check `<@ circle` and the like. A row placed
+    more than once (written again since the build) or written by the transaction is read and
+    checked as before. The heap side checks those quals again on the rows it reads
+    (`bitmap_checked`'s `unchecked`): the structure's point is the newest committed one, which
+    an older snapshot may not see. Not under EXPLAIN ANALYZE or predicate locking.
+  - Two-dimensional grid searches (`Grid::search`) read a partition's x range by strips
+    (`search_strips`: each strip's y order cut to the query's y bounds, its leading blocks
+    below the y high bound skipped), and a circle's `<@` / `&&` drops entries whose cell lies
+    outside the circle widened past EPSILON (`Query::disc`, `meets_disc`, `Quant::low/high`).
+    Golden `a176_gist_circle` (index, index-only and bitmap scans; points on, just inside and
+    just past the edge; the transaction's rows; rows moved in and out after the build;
+    circles overlapping circles).
+  - Verified (targeted, per the verification train), on `fe78d36c` with the batch: release
+    build; clippy (no warning in the files touched); release lib, big_tables, parallel_scan,
+    deep_input and golden tests; regress files create_index, create_index_spgist, gist,
+    spgist, gin, brin, btree_index, hash_index, indexing, select_parallel, geometry, tsearch,
+    point, box, polygon, circle, create_misc, create_table, stats 4,116 / 4,116 (release,
+    private reference); contrib btree_gist 613 / 616, pg_trgm 261, citext 544, bloom 58,
+    pgvector 803 / 915 against `a89-pgvector` (its bench flags' INFO lines, as round 5).
+  - Left after round 7 (agent 176):
+    - GIN and BRIN builds trail 1.2-2.8x (BENCH round 7, dist; round 6 2.8-8.5x):
+      PostgreSQL 18 builds both with parallel workers. Next: a parallel build pass for their measures (`parbuild`; BRIN's
+      ranges and GIN's accumulators per worker, merged; PostgreSQL's parallel GIN build
+      inserts each key once with its merged TIDs, `_gin_parallel_merge`, which the engine's
+      measure must then follow for a parallel plan), and keys extracted from the stored
+      tsvector / jsonb bytes without building the value.
+    - hnsw build memory (added to this list by the coordinator after agent 149's round 3, not
+      started): the design in agent 149's "hnsw build memory: not started" notes (elements,
+      values and neighbor tuples paged through `AmStore` behind an LRU sized from
+      maintenance_work_mem, `Graph` keeping the meta page and a slot -> tid index). Gate:
+      build time within ~20%, search speed unchanged, `pgvector_equality` identical, build
+      time and recall measured against pgvector 0.8.x. It changes every reader of
+      `Graph::elems` (insert, search, scan, vacuum: about 1,900 lines of `ext/vector/hnsw/`),
+      so it wants a round of its own.
+    - gin_tsvector_and (2.0x): the candidates' point fetches (37% of the query) and their
+      decode and tsquery check (18%). The structure (`search::Elements`) keeps postings of
+      rows written again, so its selection isn't exact: an exact one (a row number per data
+      key, its old postings dropped) would let AND / OR of plain lexemes skip the check.
+    - Statement overhead in the short index queries: `parallel_part::start` builds EXPLAIN
+      text for the Gather check each execution (`total_and_gathers`, a quarter of skip_scan's
+      profile, 16%): agent 145's.
+    - The index-only lineitem counts (item 2 of the round's list), GiST and BRIN index row
+      size errors, the multi-row COPY's TID in an index row size error's DETAIL, the GiST box
+      size model (610 against 1,011 pages: needs gist_box_picksplit's insertion build in
+      `gistsim`) and the SP-GiST quad NaN: not reached.
+    - DELETE leaving index entries for VACUUM (agent 175's proposal), the reader side
+      proposed through the coordinator: index scans already fetch each entry's row by data
+      key and skip a missing one, and unique checks read the row; what doesn't are the
+      index-only paths answered from entries (`ROWS_FROM_INDEX_ENTRIES`, `parscan::IosRow`,
+      counts from entries). Those need a per-index "has dead entries" mark, set by a DELETE
+      that leaves its entries and cleared by VACUUM's index pass, under which they fetch the
+      row (PostgreSQL's VM check for a page not all-visible).
+
 - **Stored scans** (round 24, agent 149):
   - Recovered `eb44c2c9` and `78f4186f` onto `251924c1`. String comparisons
     use stored bytes when the operator and collation permit bytewise comparison.
