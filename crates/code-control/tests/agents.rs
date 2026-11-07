@@ -106,7 +106,12 @@ impl Events {
         }
         let resp = a.send(b.body(Body::empty()).unwrap()).await;
         assert_eq!(resp.status(), StatusCode::OK);
-        Events { body: resp.into_body().into_data_stream(), buf: String::new() }
+        let mut body = resp.into_body().into_data_stream();
+        // The stream says something at once (WebKit waits for the first bytes before it's open).
+        let first = tokio::time::timeout(Duration::from_secs(2), body.next()).await.expect("bytes at once").expect("stream open").unwrap();
+        let buf = String::from_utf8_lossy(&first).into_owned();
+        assert!(buf.starts_with(':'), "{buf:?}");
+        Events { body, buf }
     }
 
     async fn next(&mut self) -> Sse {

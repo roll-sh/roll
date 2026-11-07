@@ -23,8 +23,9 @@ describe("navigation policy", () => {
     expect(decideNavigation(origins, "mailto:hi@example.com", false).action).toBe("external");
   });
 
-  it("never opens new windows, even on the app's origin", () => {
-    expect(decideNavigation(origins, "https://roll.sh/dashboard", true)).toEqual({ action: "external", url: "https://roll.sh/dashboard" });
+  it("never opens new windows: the app's own pages show in the main window, the rest outside", () => {
+    expect(decideNavigation(origins, "https://roll.sh/dashboard/code/ada/site/changes/2", true)).toEqual({ action: "main", url: "https://roll.sh/dashboard/code/ada/site/changes/2" });
+    expect(decideNavigation(origins, "https://github.com/ada/site/pull/2", true)).toEqual({ action: "external", url: "https://github.com/ada/site/pull/2" });
   });
 
   it("drops anything that isn't a web link", () => {

@@ -75,7 +75,8 @@ function themeOf(el: HTMLElement) {
  * opens late), typing sent as `terminal.input`, the size as `terminal.resize`. `className` sizes
  * the screen (the canvas card's is fixed; a conversation's fills its panel).
  */
-export function TerminalView({ terminal, machine, className = "", bare = false }: { terminal: TerminalRec; machine: Machine | undefined; className?: string; bare?: boolean }) {
+/** `autoFocus`: it takes the keys once open (T3 focuses a terminal it opens), except on a phone, where that would raise the keyboard over it. */
+export function TerminalView({ terminal, machine, className = "", bare = false, autoFocus = false }: { terminal: TerminalRec; machine: Machine | undefined; className?: string; bare?: boolean; autoFocus?: boolean }) {
   const { client, phone } = useAgents();
   const host = useRef<HTMLDivElement>(null);
   const [error, setError] = useState<string | null>(null);
@@ -111,6 +112,7 @@ export function TerminalView({ terminal, machine, className = "", bare = false }
       const fit = new FitAddon();
       term.loadAddon(fit);
       term.open(el);
+      if (autoFocus && !phone) term.focus();
       try {
         fit.fit();
       } catch {}

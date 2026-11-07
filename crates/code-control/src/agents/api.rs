@@ -547,7 +547,10 @@ async fn events(State(code): S, caller: Caller, parts: Parts, Path(owner): Path<
         }
         Some((Ok::<_, std::convert::Infallible>(sse), s))
     });
-    Ok(Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15))).into_response())
+    // Something at once: an engine that resolves `fetch` only on the first body bytes (WebKit)
+    // otherwise showed "Reconnecting…" until the first record or keep-alive (up to 15 s).
+    let opened = futures::stream::once(async { Ok::<_, std::convert::Infallible>(SseEvent::default().comment("open")) });
+    Ok(Sse::new(futures::StreamExt::chain(opened, stream)).keep_alive(KeepAlive::new().interval(Duration::from_secs(15))).into_response())
 }
 
 // ── commands ──

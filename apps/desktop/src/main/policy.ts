@@ -40,11 +40,16 @@ export function externalUrl(raw: string): string | null {
   }
 }
 
-export type NavigationDecision = { action: "allow" } | { action: "external"; url: string } | { action: "deny" };
+export type NavigationDecision = { action: "allow" } | { action: "main"; url: string } | { action: "external"; url: string } | { action: "deny" };
 
-/** For `will-navigate`, `will-redirect` and `setWindowOpenHandler`. New windows are never opened. */
+/**
+ * For `will-navigate`, `will-redirect` and `setWindowOpenHandler`. New windows are never opened:
+ * one of the app's own pages asked for in a new window (a change's link in the Agents window)
+ * shows in the main window, anything else goes to the system browser.
+ */
 export function decideNavigation(origins: Origins, target: string, newWindow: boolean): NavigationDecision {
   if (!newWindow && isInApp(origins, target)) return { action: "allow" };
+  if (newWindow && httpOrigin(target) === origins.app) return { action: "main", url: new URL(target).href };
   const url = externalUrl(target);
   return url ? { action: "external", url } : { action: "deny" };
 }

@@ -414,7 +414,7 @@ function TerminalDrawer({
         </span>
       </div>
       <div className="min-h-0 flex-1">
-        <TerminalView key={current.id} terminal={current} machine={machine} className="h-full" bare />
+        <TerminalView key={current.id} terminal={current} machine={machine} className="h-full" bare autoFocus />
       </div>
     </section>
   );

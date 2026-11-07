@@ -27,8 +27,9 @@ export function appMenu(platform: NodeJS.Platform, m: TrayModel, a: MenuActions)
   const agents: MenuItemConstructorOptions = {
     label: "Agents",
     submenu: [
-      { label: "Open roll", accelerator: "CmdOrCtrl+1", click: a.openRoll },
-      { label: "Open agents", accelerator: "CmdOrCtrl+2", click: a.openAgents },
+      // ⇧: ⌘1–9 are the composer's model picks in the pages.
+      { label: "Open roll", accelerator: "CmdOrCtrl+Shift+1", click: a.openRoll },
+      { label: "Open agents", accelerator: "CmdOrCtrl+Shift+2", click: a.openAgents },
       { type: "separator" },
       { label: m.machine, enabled: false },
       m.paused
@@ -39,7 +40,8 @@ export function appMenu(platform: NodeJS.Platform, m: TrayModel, a: MenuActions)
       { label: "Show agent log", click: a.showLogs },
     ],
   };
-  const settingsItem: MenuItemConstructorOptions = { label: "Settings…", accelerator: "CmdOrCtrl+,", click: a.openSettings };
+  // No ⌘,: the pages take it for the agents' settings (T3's shortcut); this is the app's own file.
+  const settingsItem: MenuItemConstructorOptions = { label: "Desktop settings…", click: a.openSettings };
   const updates: MenuItemConstructorOptions[] = a.checkForUpdates
     ? [{ label: "Check for updates…", click: a.checkForUpdates }]
     : [];

@@ -139,8 +139,8 @@ describe("tray", () => {
     expect(file.find((i) => i.label === "Quit")?.accelerator).toBe("Ctrl+Q");
     const agents = linux.find((i) => i.label === "Agents")?.submenu as MenuItemConstructorOptions[];
     expect(agents.slice(0, 2).map((i) => [i.label, i.accelerator])).toEqual([
-      ["Open roll", "CmdOrCtrl+1"],
-      ["Open agents", "CmdOrCtrl+2"],
+      ["Open roll", "CmdOrCtrl+Shift+1"],
+      ["Open agents", "CmdOrCtrl+Shift+2"],
     ]);
     clicks.length = 0;
     click(agents, "Open agents");

@@ -112,7 +112,9 @@ async function main(): Promise<void> {
     contents.on("will-attach-webview", (e) => e.preventDefault());
     contents.setWindowOpenHandler(({ url }) => {
       const d = decideNavigation(origins, url, true);
-      if (d.action === "external") void shell.openExternal(d.url);
+      // A change's link in the Agents window: roll's own page, in roll's window, signed in.
+      if (d.action === "main") show(d.url);
+      else if (d.action === "external") void shell.openExternal(d.url);
       return { action: "deny" };
     });
     // Top-level navigations and redirects: in the app, to the system browser, or nowhere.

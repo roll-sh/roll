@@ -109,7 +109,12 @@ function ShelfPanel({ data, project, tab: asked, phone }: { data: AgentsData; pr
     const row = shown[at];
     if (e.key === "ArrowDown" || e.key === "ArrowUp") {
       e.preventDefault();
-      if (shown.length) setActive((at + (e.key === "ArrowDown" ? 1 : shown.length - 1)) % shown.length);
+      // Down from the last row shown shows the next page (it wrapped to the top at row 40, so
+      // "Show more" was only reachable by mouse); once everything shows, it goes round.
+      if (e.key === "ArrowDown" && at === shown.length - 1 && shown.length < list.rows.length) {
+        setCount((n) => n + SHELF_PAGE);
+        setActive(at + 1);
+      } else if (shown.length) setActive((at + (e.key === "ArrowDown" ? 1 : shown.length - 1)) % shown.length);
     } else if (e.key === "Enter" && row && !e.nativeEvent.isComposing) {
       e.preventDefault();
       if ((e.metaKey || e.ctrlKey) && !actions.readOnly) void actions.restore(row.thread);
