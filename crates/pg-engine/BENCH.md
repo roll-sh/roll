@@ -2492,6 +2492,50 @@ between rounds (select-only 42.6k / 33.9k base, 34.6k / 39.0k new).
   runs agree, statistics included. `big_tables` `deferred_entry_deletes`: inline over a
   table too big to model.
 
+## Executor, round 10 (round 26, agent 167)
+
+Step 1: batch kernels, column decoding, nested loops that stop (HANDOFF "Executor, round 10,
+step 1"). **base** is the branch at `fe78d36cd`; **new** is this step on top of it. Both are
+dist builds of their own checkouts.
+
+How it was run: as round 9 (each server in its own container on CPUs 4-7, system.slice; the
+client on 8-11 at nice 19; PostgreSQL 18.6 with the bench settings and host network; the
+engine with `--cache-mb 2048` through `run.sh ENGINE_DOCKER=1`; rounds interleaved
+PostgreSQL, new, base, base, new, PostgreSQL; a fresh engine, a warm-up pass, then the
+measured one; `perf stat` of user instructions and cycles from a privileged helper
+container). The machine ran at load 25-35 (other agents' builds on the other cores): wall
+times move more than in round 9, and instructions are the measure.
+
+### TPC-H SF1 (all 22 over the wire)
+
+| | PostgreSQL | base | new |
+|---|---|---|---|
+| wall, s (sum of the 22) | 13.24, 12.31 | 36.42, 34.92 | **29.01, 31.16** (-16%) |
+| CPU, s (cgroup) | 33.4, 29.8 | 73.1, 67.4 | **56.0, 60.7** (-17%) |
+| user instructions, 10^9 | | 316.1, 316.3 | **289.4, 293.0 (-8%)** |
+| user cycles, 10^9 | | 236.8, 220.4 | **174.7, 186.7 (-18%)** |
+| peak, MB | 1,650, 1,650 | 1,782, 1,792 | 1,782, 1,769 |
+
+All 22 result hashes equal PostgreSQL's in every run.
+
+Per query, seconds (medians of the two runs):
+
+| | q01 | q06 | q09 | q12 | q13 | q15 | q16 | q17 | q18 | q21 | q22 | q02 | q11 | q20 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| PostgreSQL | 1.97 | 0.43 | 1.28 | 0.57 | 0.68 | 0.32 | 0.29 | 0.90 | 2.56 | 0.61 | 0.13 | 0.21 | 0.10 | 0.11 |
+| base | 1.61 | 1.13 | 2.19 | 1.32 | 1.66 | 0.83 | 0.81 | 1.14 | 2.96 | 1.34 | 0.53 | 4.55 | 1.29 | 9.44 |
+| new | **1.22** | **0.89** | **1.78** | **1.00** | **1.18** | **0.51** | **0.51** | **0.79** | **1.99** | **0.87** | **0.39** | 4.56 | 1.14 | 9.19 |
+
+- q01, q17 and q18 are ahead of PostgreSQL.
+- q02, q11 and q20 regressed in the base itself (0.38 s for q20 at `fe7b0023c`): each run of
+  their SubPlans starts a parallel scan's threads. Without the three, new takes 15.3 s
+  against PostgreSQL's 12.5 s.
+- Earlier on this round's first base (`fe7b0023c`, before the rebase), the same step measured
+  275.6 -> 245.9 x 10^9 instructions (-10.8%).
+
+Footprint: the step adds no thread, timer or cache that outlives a statement (the
+`sort_elided` map is `presorted_keys`', weak and capped at 4,096 plans).
+
 ## Executor, round 9 (round 25, agent 160)
 
 Step 1: nested-loop rescan and wider batch kernels (HANDOFF "Executor, round 9, step 1").

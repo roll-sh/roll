@@ -3113,6 +3113,62 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
         against timestamps compared as values: an i64-instant fast path is next), `Pre::fate`
         1.1%;
       - `AggNode::run` 1.8%, most of it q13's grouping above its join.
+- **Executor, round 10, step 1: batch kernels, column decoding, nested loops that stop**
+  (round 26, agent 167; BENCH.md "Executor, round 10"):
+  - **Column decoding in one pass** (`storage/cols.rs` `decode_cols`): each value is decoded
+    into its typed slot as the row is walked (`push_typed` moves the position), not skipped
+    and then read again. Text and bytea point into the fill's block buffers (`ColBatch::bufs`,
+    each held once while consecutive rows share it), not copied. Numerics with a one-byte
+    scale and length (nearly all) are read in place; `skip` steps over them in place too.
+  - **Kernels a column at a time** (`exec/vector.rs`): `VN::eval` computes an exact number
+    for every selected row, an operand at a time (it replaces the recursive per-row
+    `VN::at`); `VB::NumCmp` and the aggregates' arguments (`Pre::nums`, computed over the rows
+    the filter passed) use it. Dates against dates or timestamps are compared as integers
+    (`VB::Instant`, `ops::dt_cmp`, `ops::date_instant`), no `Value` made per row.
+  - **Batch plans compiled once per scan** (`parscan::Decode::vplan`), not per chunk.
+  - **Reordered heaps through batches**: a modelled heap whose rows were put in heap order on
+    the statement's thread hands them to the workers as fills (`parscan::ListFill`), so the
+    batch kernels take them (they went row by row). Test `reordered_heaps_through_batches`.
+  - **Groupings that need no presort** (`exec/agg.rs` `shows_alike`, `key_equal_apart`,
+    `datetime::extracts_whole`): a key of char(n) (always padded to n) or of EXTRACT over a
+    date (whole numbers) shows its group the same value whichever row comes first, looked up
+    through a projection below, so the grouping's input isn't sorted first (q09's grouping
+    by `n_name` and `extract(year ...)`).
+  - Tried and dropped: a worker's partial aggregation carried across its chunks for groupings
+    the rows' order doesn't matter to (q13). It cut q13's merge on the executor's thread but
+    lost the overlap of workers and merge: q13 and q18 got slower.
+  - **Behaviour (difftest round 10):**
+    - A parameterized nested loop streams any inner side (`NestLoopNode::streams`; opened
+      again per outer row when it can't rescan, a bitmap heap scan among them), so a semi or
+      anti join stops at its first match as ExecNestLoop does: an inner row PostgreSQL never
+      reads raises no error.
+    - A GroupAggregate under a LIMIT streams over a nested loop (`NestLoopNode::key_order`:
+      the outer side's order for inner, left, semi and anti joins) and over backward index
+      scans (`ScanNode::key_order` reversed).
+    - A Sort PostgreSQL's plan doesn't have, over a grouping that streams in the sort's order
+      (`pghash::sort_elided`, decided once per plan; `Node::output_order`), isn't run: the
+      groups go up as they're made, so a LIMIT stops the grouping (before, every group was
+      computed and sorted).
+    - EXPLAIN ANALYZE of a nested loop's cached inner side counts the inner input's actual
+      reuses (`Instr::rescan_delta` / `repeat_rescan`, `rescan_snapshot`; the resumed session
+      of 2026-11-04), not outer rows times the runs.
+    - Goldens `a167_nestloop_stops`, `a167_subplan_nestloop`, `a167_subplan_owned`,
+      `a167_subplan_varied`, `a167_subplan_weighted` (recorded from PostgreSQL 18.6).
+  - Measured (BENCH.md "Executor, round 10"): TPC-H SF1 user instructions -8%, cycles -18%,
+    wall -16%, CPU -17%, peak unchanged, all 22 hashes equal; q01, q17 and q18 ahead of
+    PostgreSQL.
+  - Found, not this step's:
+    - q20 (0.4 -> 9 s), q02 (1.0 -> 4.5 s) and q11 regressed between fe7b0023c and fe78d36cd,
+      in base and new alike: each SubPlan run starts a parallel scan's threads
+      (`ParScan::start`'s spawns under `__clone` in q20's profile). Routed through the
+      coordinator.
+    - `GROUP BY id ORDER BY id DESC LIMIT n`: PostgreSQL reads the index backward under the
+      GroupAggregate; the engine plans a Sort above it (planner).
+  - Verified (the targeted train): release build, clippy (no new warnings), crate tests
+    (lib, parallel_scan, golden, deep_input, big_tables, heap_order_scan, kept_plans), regress
+    files join, aggregates, subselect, select_parallel, partition_aggregate, groupingsets,
+    window, union, select_distinct, limit, with, collate (4,428 / 4,441, the same units as
+    the base build's).
 - **Deep input** (round 19, agent 63; `src/stack.rs`, `tests/deep_input.rs`): the engine no
   longer overflows the stack of the thread that runs it, however deep the input nests. A
   host's 2 MB thread or a test harness thread is safe. Before, 400 `+` terms aborted the

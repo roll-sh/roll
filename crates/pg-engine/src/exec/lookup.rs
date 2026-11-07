@@ -207,6 +207,7 @@ impl Lookup {
                 need_raw: None,
                 topk: None,
                 toast: None,
+                vplan: Default::default(),
             },
             filter,
             cond: cond_k,

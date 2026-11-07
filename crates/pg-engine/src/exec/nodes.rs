@@ -421,6 +421,36 @@ fn open_node(plan: &Arc<Plan>, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<B
         }
         Plan::Sort { input, keys } => {
             let bound = ctx.sort_bound.take();
+            // (A grouping's rows in the sort's order already, as they're made: PostgreSQL's
+            // plan has no Sort, and its rows go up as the grouping makes them.)
+            if super::pghash::sort_elided(plan, ctx) {
+                let node = open_need(input, need.map(<[bool]>::to_vec), ctx)?;
+                let in_order = node.output_order(ctx).is_some_and(|o| {
+                    keys.len() <= o.len()
+                        && keys.iter().zip(&o).all(|(k, &(c, desc, nf))| {
+                            k.using.is_none() && matches!(k.expr, Expr::Col(i, _) if i == c) && k.desc == desc && k.nulls_first == nf
+                        })
+                });
+                if in_order {
+                    return Ok(node);
+                }
+                let need = nd::add(need.map(<[bool]>::to_vec), nd::keys(keys));
+                return Ok(Box::new(SortNode {
+                    presorted: super::pghash::presorted_keys(plan, ctx).min(keys.len()),
+                    key: Arc::as_ptr(plan) as usize,
+                    input: Some(node),
+                    keys: keys.clone(),
+                    out: Default::default(),
+                    types: crate::sql::paths::analyzejoins::col_types(input),
+                    mask: {
+                        let logical = ctx.logical_need.take();
+                        need.clone().or_else(|| nd::add(logical.as_deref().map(<[bool]>::to_vec), nd::keys(keys)))
+                    },
+                    bound,
+                    need: need.map(Box::from),
+                    narrow: None,
+                }));
+            }
             if let Some(d) = distinct_presort(plan, ctx) {
                 return Ok(Box::new(SortNode {
                     presorted: 0,
@@ -573,6 +603,7 @@ fn open_node(plan: &Arc<Plan>, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<B
                     *nright,
                 );
                 nl.key = Arc::as_ptr(plan) as usize;
+                nl.report_rescans = !meta.material && !matches!(kind, JoinKind::Right | JoinKind::Full);
                 nl.keep = join_keep(need, cond.as_ref(), *nleft + *nright);
                 if let Some(m) = meta.memoize.as_ref().filter(|_| !params.is_empty()) {
                     nl.memo = Some(Memoize {
@@ -4243,6 +4274,9 @@ struct NestLoopNode {
     nleft: usize,
     nright: usize,
     right: Option<Rc<Vec<Row>>>,
+    /// Without a displayed Materialize, report each actual reuse of this run's input.
+    report_rescans: bool,
+    right_stats: Vec<(usize, super::NodeStats)>,
     right_matched: Vec<bool>,
     /// The outer row, its inner rows (with the next one's place) and whether one matched.
     cur: Option<(Row, InnerRows, bool)>,
@@ -4273,11 +4307,102 @@ enum InnerRows {
     Stream(Rc<Row>),
 }
 
+/// Snapshot only work owned by this inner input. Lazy InitPlans and enclosing CTE
+/// producers can run during collection, but are not rescanned with the input.
+fn rescan_snapshot(plan: &Arc<Plan>, instr: &super::Instr, enclosing: bool) -> HashMap<usize, super::NodeStats> {
+    use crate::sql::expr::SubqueryKind;
+    use crate::sql::plan::{Access, BitmapQual, IndexBounds};
+
+    fn bounds<'a>(b: &'a IndexBounds, exprs: &mut Vec<&'a Expr>) {
+        exprs.extend(b.eq.iter().chain(&b.any));
+        exprs.extend(b.lower.iter().chain(&b.upper).map(|v| &v.0));
+        exprs.extend(b.order.iter().map(|k| &k.expr));
+        if let Some(skip) = &b.skip {
+            bounds(&skip.bounds, exprs);
+        }
+    }
+    fn bitmap<'a>(q: &'a BitmapQual, exprs: &mut Vec<&'a Expr>, instr: &super::Instr, before: &mut HashMap<usize, super::NodeStats>) {
+        let key = q as *const BitmapQual as usize;
+        before.insert(key, instr.get(key).unwrap_or_default());
+        match q {
+            BitmapQual::Index { quals, pred, bounds: b, .. } => {
+                exprs.extend(quals.iter().flat_map(|q| [&q.expr, &q.orig]));
+                exprs.extend(pred);
+                bounds(b, exprs);
+            }
+            BitmapQual::And(inputs) | BitmapQual::Or(inputs) => {
+                for q in inputs {
+                    bitmap(q, exprs, instr, before);
+                }
+            }
+        }
+    }
+    fn visit(p: &Arc<Plan>, instr: &super::Instr, enclosing: bool, before: &mut HashMap<usize, super::NodeStats>) {
+        let key = Arc::as_ptr(p) as usize;
+        if before.contains_key(&key) {
+            return;
+        }
+        before.insert(key, instr.get(key).unwrap_or_default());
+        let mut exprs = Vec::new();
+        crate::sql::explain::node_exprs(p, &mut exprs);
+        if let Plan::Scan(s) = p.as_ref() {
+            let key = &**s as *const crate::sql::plan::ScanPlan as usize;
+            before.insert(key, instr.get(key).unwrap_or_default());
+            exprs.extend(s.current_of.as_ref());
+            if let Some((_, b)) = &s.index {
+                bounds(b, &mut exprs);
+            }
+            match &s.access {
+                Access::Index { quals, .. } => exprs.extend(quals.iter().flat_map(|q| [&q.expr, &q.orig])),
+                Access::Bitmap(q, _) => bitmap(q, &mut exprs, instr, before),
+                Access::Tid { quals, .. } | Access::TidRange(quals) => exprs.extend(quals),
+                _ => {}
+            }
+        }
+        if let Plan::Join { meta, .. } = p.as_ref()
+            && meta.memoize.is_some()
+        {
+            before.insert(key + 1, instr.get(key + 1).unwrap_or_default());
+        }
+        for e in exprs {
+            e.walk(&mut |e| {
+                if let Expr::Subquery(s) = e {
+                    // Enclosing-only parameters are cached per outer frame. ANY/ALL
+                    // with parameters are SubPlans, rescanned at every call.
+                    let mut rescanned = !enclosing || matches!(s.kind, SubqueryKind::Any | SubqueryKind::All);
+                    for param in &s.params {
+                        param.walk(&mut |e| match e {
+                            Expr::Col(..) | Expr::Subquery(_) => rescanned = true,
+                            Expr::Call(d, ..) if d.volatility == 'v' => rescanned = true,
+                            _ => {}
+                        });
+                    }
+                    if !s.params.is_empty() && rescanned {
+                        visit(&s.plan, instr, true, before);
+                    }
+                }
+            });
+        }
+        // CTEs defined here are owned here; a CteScan alone does not own its producer.
+        if let Plan::With { ctes, .. } = p.as_ref() {
+            for (_, p) in ctes {
+                visit(p, instr, enclosing, before);
+            }
+        }
+        for child in crate::sql::explain::plan_inputs(p) {
+            visit(child, instr, enclosing, before);
+        }
+    }
+    let mut before = HashMap::default();
+    visit(plan, instr, enclosing, &mut before);
+    before
+}
+
 impl NestLoopNode {
     /// Whether the inner side is read as ExecNestLoop reads it: rescanned per outer row
     /// (ExecReScan with the new parameters) and its rows taken as the join asks, not
-    /// collected first. A parameterized side without a memo (Memoize collects) whose plan
-    /// can rescan; not under EXPLAIN ANALYZE (each open counts a loop) or outside a
+    /// collected first (a plan that can't rescan is opened again for each outer row). A
+    /// parameterized side without a memo (Memoize collects); not under EXPLAIN ANALYZE (each open counts a loop) or outside a
     /// running statement (collecting runs it as one).
     fn streams(&self, ctx: &ExecCtx) -> bool {
         !self.params.is_empty()
@@ -4286,7 +4411,6 @@ impl NestLoopNode {
             && !ctx.instrumented()
             && ctx.snapshot().is_some()
             && ctx.temp_cleanup.active()
-            && super::scan::rescans(&self.right_plan)
     }
 
     /// The inner node read again for the outer row whose parameters are `p`: rescanned,
@@ -4326,6 +4450,8 @@ impl NestLoopNode {
             nleft,
             nright,
             right: None,
+            report_rescans: false,
+            right_stats: Vec::new(),
             right_matched: Vec::new(),
             cur: None,
             inner: None,
@@ -4459,10 +4585,17 @@ impl NestLoopNode {
             return Ok(rows);
         }
         if self.right.is_none() {
+            let instr = ctx.instr.borrow().clone().filter(|_| self.report_rescans);
+            let before = instr.as_ref().map(|i| rescan_snapshot(&self.right_plan, i, !ctx.outer.borrow().is_empty()));
             let rows = self.collect_right(ctx)?;
+            if let (Some(instr), Some(before)) = (instr, before) {
+                self.right_stats = instr.rescan_delta(&before);
+            }
             self.material_stats(&rows, ctx);
             self.right_matched = vec![false; rows.len()];
             self.right = Some(Rc::new(rows));
+        } else if let Some(instr) = ctx.instr.borrow().as_ref() {
+            instr.repeat_rescan(&self.right_stats);
         }
         Ok(self.right.clone().unwrap())
     }
@@ -4634,6 +4767,16 @@ impl NestLoopNode {
 }
 
 impl Node for NestLoopNode {
+    /// The outer side's order: each outer row's joined rows come together, in the outer
+    /// rows' order, the outer columns first (a right or full join's unmatched inner rows
+    /// come last: none).
+    fn key_order(&self) -> Option<Vec<(usize, bool, bool)>> {
+        match self.kind {
+            JoinKind::Inner | JoinKind::Left | JoinKind::Semi | JoinKind::Anti if self.cur.is_none() => self.left.key_order(),
+            _ => None,
+        }
+    }
+
     fn next(&mut self, ctx: &ExecCtx) -> Result<Option<Row>> {
         match self.step(ctx)? {
             None => Ok(None),
