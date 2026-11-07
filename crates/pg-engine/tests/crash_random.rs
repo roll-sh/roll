@@ -981,3 +981,69 @@ fn power_cut_at_every_point() {
         run(Some(at), Some(at));
     }
 }
+
+/// Group commit keeps a prefix through a power cut: 8 threads commit at once, each commit
+/// taking the next number of a sequence under the commit lock (so in commit order), with rotations
+/// and flushes on the way; the power goes at a seeded moment. The numbers that survive must be
+/// exactly 0..k, with no gap (a later commit never durable without an earlier one), and k past
+/// every acknowledged one. Releasing locks before the fsync (pipelined commits) relies on this.
+#[cfg(feature = "powerloss")]
+#[test]
+fn power_cut_keeps_a_prefix_of_concurrent_commits() {
+    use pg_engine::storage::{Store, StoreOptions};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    let opts = || StoreOptions { memtable_bytes: 64 << 10, ..Default::default() };
+    if let Ok(dir) = std::env::var("POWER_PREFIX_CHILD") {
+        let us: u64 = std::env::var("POWER_PREFIX_US").unwrap().parse().unwrap();
+        let s = Store::open(&Path::new(&dir).join("db"), opts()).unwrap();
+        let seq = std::sync::Arc::new(AtomicU64::new(0));
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_micros(us));
+            sigkill();
+        });
+        let threads: Vec<_> = (0..8)
+            .map(|_| {
+                let (s, seq) = (s.clone(), seq.clone());
+                std::thread::spawn(move || {
+                    loop {
+                        let mut n = 0;
+                        s.commit_grouped(Vec::new(), |_, w| {
+                            n = seq.fetch_add(1, Ordering::Relaxed);
+                            w.push((format!("seq{n:08}").into_bytes(), Some(vec![7u8; 300].into())));
+                            Ok(())
+                        }, |_| {}, |_| {}).unwrap();
+                        println!("acked {n}");
+                    }
+                })
+            })
+            .collect();
+        threads.into_iter().for_each(|t| t.join().unwrap());
+    }
+    for (i, us) in [20_000u64, 60_000, 150_000, 400_000, 900_000].into_iter().enumerate() {
+        for keep in [None, Some(i as u64 + 1)] {
+            let tmp = tempfile::tempdir().unwrap();
+            let (data, shadow) = (tmp.path().join("data"), tmp.path().join("shadow"));
+            let out = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "power_cut_keeps_a_prefix_of_concurrent_commits", "--nocapture"])
+                .env("POWER_PREFIX_CHILD", &data)
+                .env("POWER_PREFIX_US", us.to_string())
+                .env("ROLL_POWERLOSS", format!("{}:{}", data.display(), shadow.display()))
+                .output()
+                .unwrap();
+            assert!(out.status.code().is_none(), "{}", String::from_utf8_lossy(&out.stderr));
+            // (A line cut by the kill isn't an acknowledgement.)
+            let text = String::from_utf8_lossy(&out.stdout);
+            let whole = &text[..text.rfind('\n').map_or(0, |n| n + 1)];
+            let acked = whole.lines().filter_map(|l| l.strip_prefix("acked ")?.parse::<u64>().ok()).max();
+            pg_engine::storage::powerloss::power_cut(&data, &shadow, keep).unwrap();
+            let s = Store::open(&data.join("db"), opts()).unwrap();
+            let have: Vec<u64> = s
+                .scan(b"seq", b"seq~", s.visible_ts())
+                .map(|r| String::from_utf8_lossy(&r.unwrap().0)[3..].parse::<u64>().unwrap())
+                .collect();
+            let what = format!("cut after {us} us (keeping {keep:?}): {} commits there, {acked:?} the last acknowledged", have.len());
+            assert!(have.iter().enumerate().all(|(i, &n)| i as u64 == n), "{what}: not a prefix: {:?}", have.iter().enumerate().find(|(i, n)| *i as u64 != **n));
+            assert!(acked.is_none_or(|a| (have.len() as u64) > a), "{what}: an acknowledged commit is lost");
+        }
+    }
+}
