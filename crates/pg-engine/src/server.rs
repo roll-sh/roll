@@ -299,15 +299,18 @@ impl Conn {
 
     /// A regular message: (type, body).
     fn read_message(&mut self) -> std::io::Result<Option<(u8, Vec<u8>)>> {
-        self.read_message_by(None)
+        let mut body = Vec::new();
+        Ok(self.read_message_into(None, &mut body)?.map(|t| (t, body)))
     }
 
-    /// `read_message`, its first byte awaited no later than `deadline` (an idle timeout:
-    /// the read fails with `IdleTimeout`).
-    fn read_message_by(
+    /// `read_message`, its body read into `body` (the message loop's, its allocation reused
+    /// from message to message), its first byte awaited no later than `deadline` (an idle
+    /// timeout: the read fails with `IdleTimeout`). The message's type.
+    fn read_message_into(
         &mut self,
         deadline: Option<std::time::Instant>,
-    ) -> std::io::Result<Option<(u8, Vec<u8>)>> {
+        body: &mut Vec<u8>,
+    ) -> std::io::Result<Option<u8>> {
         let mut t = [0u8; 1];
         self.rd.get_mut().deadline = deadline;
         let first = self.rd.read(&mut t);
@@ -319,9 +322,14 @@ impl Conn {
         if first? == 0 {
             return Ok(None);
         }
-        let len = self.read_i32()?;
-        let body = self.read_body(len, 4)?;
-        Ok(Some((t[0], body)))
+        let len = self.read_i32()? as usize;
+        if !(4..=MAX_MESSAGE).contains(&len) {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid message length"));
+        }
+        body.clear();
+        body.resize(len - 4, 0);
+        self.rd.read_exact(body)?;
+        Ok(Some(t[0]))
     }
 
     fn msg(&mut self, t: u8, body: impl FnOnce(&mut BytesMut)) {
@@ -1489,6 +1497,8 @@ fn message_loop(
 ) -> std::io::Result<()> {
     // After an error in extended protocol, messages are skipped until Sync.
     let mut skipping = false;
+    // (Each message's body, read into the one allocation.)
+    let mut raw: Vec<u8> = Vec::new();
     // The query of the last Parse, for what the server log says of errors after it.
     let mut last_stmt: Option<String> = None;
     let act = engine.activity_slot(pid);
@@ -1502,7 +1512,11 @@ fn message_loop(
         }
         // (Whether this read waits for the client: nothing of the message is buffered.)
         let waits = c.rd.buffer().is_empty();
-        let msg = match c.read_message_by(idle.as_ref().map(|i| i.0)) {
+        // (An idle session keeps a small body allocation at most.)
+        if raw.capacity() > 8192 {
+            raw = Vec::new();
+        }
+        let msg = match c.read_message_into(idle.as_ref().map(|i| i.0), &mut raw) {
             Ok(m) => m,
             Err(e) if e.get_ref().is_some_and(|e| e.is::<IdleTimeout>()) => {
                 // The timeout's FATAL, then the session ends (its transaction rolls back).
@@ -1511,7 +1525,7 @@ fn message_loop(
             }
             Err(e) => return Err(e),
         };
-        let Some((t, body)) = msg else {
+        let Some(t) = msg else {
             return Ok(());
         };
         s.notifications_busy();
@@ -1532,9 +1546,13 @@ fn message_loop(
         sync_client_encoding(s);
         s.poll_config();
         // Query text arrives in the client's encoding.
-        let body = match t {
-            b'Q' | b'P' => match convert_cstrings(&body, 2) {
-                Ok(b) => b,
+        let converted;
+        let body: &[u8] = match t {
+            b'Q' | b'P' if !plain_utf8() => match convert_cstrings(&raw, 2) {
+                Ok(b) => {
+                    converted = b;
+                    &converted
+                }
                 Err(e) => {
                     c.error(&e);
                     if t == b'Q' {
@@ -1545,11 +1563,11 @@ fn message_loop(
                     continue;
                 }
             },
-            _ => body,
+            _ => &raw,
         };
         let r: Result<()> = match t {
             b'Q' => {
-                let sql = match Body::new(&body).cstr() {
+                let sql = match Body::new(body).cstr() {
                     Ok(q) => q.to_string(),
                     Err(e) => {
                         c.error(&e);
@@ -1597,27 +1615,27 @@ fn message_loop(
                 continue;
             }
             b'P' => {
-                let mut b = Body::new(&body);
+                let mut b = Body::new(body);
                 last_stmt = b.cstr().ok().and_then(|_| b.cstr().ok()).map(str::to_string);
-                extended_activity(&act, s, t, &body);
+                extended_activity(&act, s, t, body);
                 s.start_xact_command();
-                guard(c, s, |c, s| parse_msg(c, s, &body))
+                guard(c, s, |c, s| parse_msg(c, s, body))
             }
             b'B' => {
-                extended_activity(&act, s, t, &body);
+                extended_activity(&act, s, t, body);
                 s.start_xact_command();
-                guard(c, s, |c, s| bind_msg(c, s, &body))
+                guard(c, s, |c, s| bind_msg(c, s, body))
             }
             b'D' => {
                 s.start_xact_command();
-                guard(c, s, |c, s| describe_msg(c, s, &body))
+                guard(c, s, |c, s| describe_msg(c, s, body))
             }
             b'E' => {
-                extended_activity(&act, s, t, &body);
+                extended_activity(&act, s, t, body);
                 s.start_xact_command();
-                guard(c, s, |c, s| execute_msg(c, s, &body))
+                guard(c, s, |c, s| execute_msg(c, s, body))
             }
-            b'C' => guard(c, s, |c, s| close_msg(c, s, &body)),
+            b'C' => guard(c, s, |c, s| close_msg(c, s, body)),
             b'S' => {
                 skipping = false;
                 if let Err(e) = guard(c, s, |_, s| s.sync()) {
@@ -1640,7 +1658,7 @@ fn message_loop(
             b'd' | b'c' | b'f' => continue,
             b'F' => {
                 start_activity(&act, s, "fastpath function call", None);
-                let r = guard(c, s, |c, s| fastpath_msg(c, s, &body));
+                let r = guard(c, s, |c, s| fastpath_msg(c, s, body));
                 send_notices(c, s);
                 if let Err(e) = r {
                     c.error(&e);
