@@ -61,7 +61,7 @@ const FUZZ: f64 = 1.01;
 const RANGE_INEQ_SEL: f64 = 0.005;
 
 /// The planner settings that matter here.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Gucs {
     pub seqscan: bool,
     pub indexscan: bool,
@@ -3656,33 +3656,16 @@ impl Planner<'_, '_> {
         s.fdw.as_ref().is_some_and(|f| f.copy_mark)
     }
 
+    /// What a relation's restriction clauses decide: its rows and their evaluation cost.
+    fn estimate_quals(&self, rel: &mut Rel) {
+        rel.rows = costs::clamp_rows(rel.size.tuples * self.sel(rel, &rel.quals));
+        (rel.qual_startup, rel.qual_cost) = self.rel_quals_cost(rel, &rel.quals);
+    }
+
     fn rel(&self, s: &ScanPlan, needed: &[bool]) -> Option<Rel> {
         let t = s.table.clone();
         let (size, allvisfrac) = rel_size(&t, self.ctx);
-        let mut quals = Vec::new();
-        if let Some(f) = &s.filter {
-            let mut parts = Vec::new();
-            conjuncts(f.clone(), &mut parts);
-            // (A clause over a PlaceHolderVar whose expression is an AND: one clause.)
-            for q in s.phv_quals.iter().filter(|q| matches!(q, Expr::And(_))) {
-                let mut sub = Vec::new();
-                conjuncts(q.clone(), &mut sub);
-                if let Some(first) = parts.iter().position(|p| sub.first().is_some_and(|x| x.same_as(p)))
-                    && sub.iter().all(|x| parts.iter().any(|p| p.same_as(x)))
-                {
-                    parts.retain(|p| !sub.iter().any(|x| x.same_as(p)));
-                    parts.insert(first.min(parts.len()), q.clone());
-                }
-            }
-            // (A clause over a PlaceHolderVar is the relation's, whatever it reads: pull_varnos
-            // counts the PlaceHolderVar's ph_eval_at.)
-            quals = parts
-                .into_iter()
-                .filter(|e| {
-                    !e.columns().is_empty() || expr_volatile_deep(e) || s.phv_quals.iter().any(|q| q.same_as(e))
-                })
-                .collect();
-        }
+        let quals = scan_quals(s);
         let ncols = t.columns.len();
         let mut need = vec![false; ncols];
         let mut other =
@@ -3867,8 +3850,7 @@ impl Planner<'_, '_> {
                 }
             }
         }
-        rel.rows = costs::clamp_rows(size.tuples * self.sel(&rel, &rel.quals));
-        (rel.qual_startup, rel.qual_cost) = self.rel_quals_cost(&rel, &rel.quals);
+        self.estimate_quals(&mut rel);
         // (Not with use_remote_estimate: its estimate is the remote EXPLAIN's, made where
         // the join search plans the relation, `fdw_base`.)
         let o = crate::ext::fdw::wrapper_of(&self.cat, &rel.table).map(|_| crate::ext::postgres_fdw::join::opts(&self.cat, &rel.table));
@@ -3880,6 +3862,30 @@ impl Planner<'_, '_> {
         }
         Some(rel)
     }
+}
+
+/// A scan's restriction clauses (`Rel::quals`): its filter's conjuncts that read the row.
+fn scan_quals(s: &ScanPlan) -> Vec<Expr> {
+    let Some(f) = &s.filter else { return Vec::new() };
+    let mut parts = Vec::new();
+    conjuncts(f.clone(), &mut parts);
+    // (A clause over a PlaceHolderVar whose expression is an AND: one clause.)
+    for q in s.phv_quals.iter().filter(|q| matches!(q, Expr::And(_))) {
+        let mut sub = Vec::new();
+        conjuncts(q.clone(), &mut sub);
+        if let Some(first) = parts.iter().position(|p| sub.first().is_some_and(|x| x.same_as(p)))
+            && sub.iter().all(|x| parts.iter().any(|p| p.same_as(x)))
+        {
+            parts.retain(|p| !sub.iter().any(|x| x.same_as(p)));
+            parts.insert(first.min(parts.len()), q.clone());
+        }
+    }
+    // (A clause over a PlaceHolderVar is the relation's, whatever it reads: pull_varnos
+    // counts the PlaceHolderVar's ph_eval_at.)
+    parts
+        .into_iter()
+        .filter(|e| !e.columns().is_empty() || expr_volatile_deep(e) || s.phv_quals.iter().any(|q| q.same_as(e)))
+        .collect()
 }
 
 /// The key range an index scan reads for `quals` (the rest is checked on each row).
@@ -6160,11 +6166,23 @@ impl Planner<'_, '_> {
         {
             rel.loop_count = loops;
         }
-        if rel.indexes.is_empty()
-            && want.keys.is_empty()
-            && tid_quals(&rel).is_none()
-            && tid_range_quals(&rel).is_empty()
-        {
+        let sorted = self.scan_path_applied(&rel, s, want, width);
+        if CHOICES.with(|c| c.borrow().is_some()) {
+            let keep = rel.loop_count == 1.0
+                && rel.params.is_empty()
+                && s.phv_quals.is_empty()
+                && FINAL_FRACTION.get().is_none();
+            let choice = keep.then(|| {
+                Arc::new(ScanChoice { rel: rel.shallow(), want: want.clone(), width, gucs: self.g.clone(), sorted })
+            });
+            CHOICES.with(|c| c.borrow_mut().as_mut().map(|v| v.push(choice)));
+        }
+        sorted
+    }
+
+    /// Choose `rel`'s path for `want` and record it in `s`; whether it delivers the order.
+    fn scan_path_applied(&self, rel: &Rel, s: &mut ScanPlan, want: &Want, width: u32) -> bool {
+        if rel.indexes.is_empty() && want.keys.is_empty() && tid_quals(rel).is_none() && tid_range_quals(rel).is_empty() {
             s.access = Access::Seq;
             s.index = None;
             // (cost_seqscan, as `paths` costs it.)
@@ -6174,8 +6192,8 @@ impl Planner<'_, '_> {
             s.est = crate::sql::plan::ScanEst(Some((rel.qual_startup, total)));
             return false;
         }
-        let path = self.choose(&rel, want, width);
-        apply(&rel, s, &path);
+        let path = self.choose(rel, want, width);
+        apply(rel, s, &path);
         !want.keys.is_empty() && !matches!(path.kind, PathKind::Sort(..))
     }
 
@@ -6638,17 +6656,142 @@ pub fn planned_total(plan: &Plan, ctx: &ExecCtx, built: bool) -> Option<f64> {
 }
 
 /// Debug builds: the cost of the path the planner chose for a lone scan (`planned_total`
-/// of a plan just made) is the one EXPLAIN shows, and no Gather goes over it.
+/// of a plan just made) is the one EXPLAIN shows, and no Gather goes over it, unless what
+/// planning read changed since (`settled`: `literals::unchanged_since`, checked after).
 #[cfg(debug_assertions)]
-pub fn check_planned_total(plan: &Arc<Plan>, ctx: &ExecCtx) {
+pub fn check_planned_total(plan: &Arc<Plan>, ctx: &ExecCtx, settled: &dyn Fn() -> bool) {
     if let Some(t) = planned_total(plan, ctx, true) {
         let (e, g) = crate::sql::explain::total_and_gathers(plan, ctx);
         assert!(
-            g.is_empty() && (e - t).abs() <= 1e-9 * e.abs().max(1.0),
+            (g.is_empty() && (e - t).abs() <= 1e-9 * e.abs().max(1.0)) || !settled(),
             "the planner's cost {t} of a lone scan isn't EXPLAIN's {e} ({} Gathers): {plan:?}",
             g.len()
         );
     }
+}
+
+// ── Choosing a kept custom plan's scan again (plan reuse) ──
+
+thread_local! {
+    /// The scans planned while `keeping_choice` runs (None: a scan nothing may reuse).
+    static CHOICES: std::cell::RefCell<Option<Vec<Option<Arc<ScanChoice>>>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// What a scan's path choice read besides its restriction clauses: the relation as path
+/// generation saw it (sizes, indexes and their statistics, permissions), what the scan was
+/// asked for and the settings. A custom plan of a lone scan keeps it, so another
+/// execution's values choose the scan's path again without binding or planning the
+/// statement (`ScanChoice::rechoose`).
+pub struct ScanChoice {
+    /// Without its clauses (`Rel::shallow`): `rechoose` puts the new ones in.
+    rel: Rel,
+    want: Want,
+    width: u32,
+    gucs: Gucs,
+    /// The path delivers the order asked for (the Sort above the scan was removed).
+    sorted: bool,
+}
+
+/// `f`, and the choice of the one scan it planned (None: no scan, more than one, or one
+/// planned for other scans' rows, a PlaceHolderVar or a cursor's fraction). The caller
+/// reuses it only for a plan `planned_total` takes (a lone scan under column projections,
+/// no Gather), where the scan's path is all the planner chose.
+pub fn keeping_choice<T>(f: impl FnOnce() -> T) -> (T, Option<Arc<ScanChoice>>) {
+    let outer = CHOICES.with(|c| c.borrow_mut().replace(Vec::new()));
+    let r = f();
+    let mine = CHOICES.with(|c| std::mem::replace(&mut *c.borrow_mut(), outer)).unwrap_or_default();
+    // (An enclosing keeping_choice sees them too.)
+    CHOICES.with(|c| c.borrow_mut().as_mut().map(|v| v.extend(mine.iter().cloned())));
+    let one = match mine.as_slice() {
+        [Some(c)] => Some(c.clone()),
+        _ => None,
+    };
+    (r, one)
+}
+
+impl ScanChoice {
+    /// The scan planned again for other values: `kept` is the kept plan's scan, `placed`
+    /// the statement's WHERE placed again with the new values in (`optimize::add_filter`
+    /// over the analysis's scan, as `Analyzed::bind_values` places it). The relation's
+    /// rows and clause costs are estimated from the new clauses and the path chosen again
+    /// by the same code as planning, so the scan (its access, index conditions and cost,
+    /// `ScanPlan::est`) is what planning the statement with these values gives. None:
+    /// plan the statement again: the settings changed, or the new path reads another
+    /// index, another kind of access, or no longer delivers the order the plan relies on.
+    ///
+    /// The caller checks what the choice doesn't: the catalog and role (the plan's
+    /// environment), the relation sizes planning read (`literals::SizeRead`, as kept plans
+    /// are checked), and that the new plan still takes no Gather (`planned_total` of it).
+    pub fn rechoose(&self, kept: &ScanPlan, placed: &ScanPlan, ctx: &ExecCtx) -> Option<Box<ScanPlan>> {
+        if !placed.phv_quals.is_empty() || placed.table.oid != self.rel.table.oid || FINAL_FRACTION.get().is_some() {
+            return None;
+        }
+        let p = Planner::new(ctx);
+        if p.g != self.gucs {
+            return None;
+        }
+        let mut rel = self.rel.shallow();
+        rel.quals = scan_quals(placed);
+        rel.written = Arc::new(placed.written.clone());
+        p.estimate_quals(&mut rel);
+        let mut s = Box::new(kept.clone());
+        s.filter = placed.filter.clone();
+        s.written = placed.written.clone();
+        if p.scan_path_applied(&rel, &mut s, &self.want, self.width) != self.sorted {
+            return None;
+        }
+        let same = std::mem::discriminant(&s.access) == std::mem::discriminant(&kept.access)
+            && indexes_read(&s) == indexes_read(kept);
+        if !same {
+            return None;
+        }
+        if let (Access::Index { ordered, .. }, Access::Index { ordered: was, .. }) = (&mut s.access, &kept.access) {
+            *ordered = *was;
+        }
+        Some(s)
+    }
+}
+
+/// The indexes a scan reads, by oid.
+fn indexes_read(s: &ScanPlan) -> Vec<u32> {
+    fn bitmap(b: &crate::sql::plan::BitmapQual, out: &mut Vec<u32>) {
+        match b {
+            crate::sql::plan::BitmapQual::Index { index, .. } => out.push(index.oid),
+            crate::sql::plan::BitmapQual::And(l) | crate::sql::plan::BitmapQual::Or(l) => {
+                l.iter().for_each(|x| bitmap(x, out))
+            }
+        }
+    }
+    let mut out: Vec<u32> = s.index.iter().map(|(ix, _)| ix.oid).collect();
+    if let Access::Bitmap(b, _) = &s.access {
+        bitmap(b, &mut out);
+    }
+    out
+}
+
+/// Debug builds: a plan's scan chosen again for its own values (`ScanChoice::rechoose`)
+/// is the scan planning made.
+#[cfg(debug_assertions)]
+pub fn check_rechoose(plan: &Plan, choice: Option<Arc<ScanChoice>>, ctx: &ExecCtx, settled: &dyn Fn() -> bool) {
+    let Some(choice) = choice else { return };
+    if planned_total(plan, ctx, true).is_none() {
+        return;
+    }
+    let mut p = plan;
+    while let Plan::Project { input, .. } = p {
+        p = input;
+    }
+    let Plan::Scan(s) = p else { return };
+    let Some(again) = choice.rechoose(s, s, ctx) else {
+        assert!(!settled(), "no scan chosen again for its own values: {s:?}");
+        return;
+    };
+    assert!(
+        (format!("{again:?}") == format!("{s:?}") && again.est.0 == s.est.0) || !settled(),
+        "a scan chosen again isn't the one planned:\n{again:?} {:?}\n{s:?} {:?}",
+        again.est.0,
+        s.est.0
+    );
 }
 
 /// A locked relation of the level on the nullable side of an outer join, as planning
