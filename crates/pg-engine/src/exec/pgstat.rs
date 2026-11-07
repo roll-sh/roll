@@ -303,6 +303,9 @@ pub struct XactStats {
     done: HashMap<u32, TabCounts>,
     /// The WAL records its row changes logged.
     wal_records: i64,
+    /// A multi-insert COPY's rows stored since its buffer was last flushed, per table
+    /// (`hold_inserts`): counted at the flush, or never if the buffer is lost.
+    held: Option<Vec<(u32, i64)>>,
 }
 
 impl XactStats {
@@ -927,6 +930,43 @@ pub fn flush_io(sess: &crate::session::state::SessionState) {
     let run = sess.pgstat.borrow_mut().io_run.take();
     if let Some((k, c)) = run {
         add_io(sess, k, c);
+    }
+}
+
+/// A multi-insert COPY's stored rows wait to be counted until its buffer is flushed
+/// (`count_held`), as heap_multi_insert counts them: `count_stored` holds them until
+/// `take_held`.
+pub fn hold_inserts(ctx: &ExecCtx) {
+    ctx.txn.borrow_mut().pgstat.held.get_or_insert_with(Vec::new);
+}
+
+/// A stored row's pg_stat counts (`store_inserted`): held while a multi-insert COPY holds
+/// them (not a temporary table's, whose I/O follows its model row by row).
+pub fn count_stored(ctx: &ExecCtx, t: &crate::catalog::Table) {
+    if !t.temporary {
+        let mut txn = ctx.txn.borrow_mut();
+        if let Some(h) = txn.pgstat.held.as_mut() {
+            match h.iter_mut().find(|e| e.0 == t.oid) {
+                Some(e) => e.1 += 1,
+                None => h.push((t.oid, 1)),
+            }
+            return;
+        }
+    }
+    count_insert(ctx, t.oid, 1);
+    io_insert(ctx, t, 1, "normal");
+}
+
+/// The rows `count_stored` held since `hold_inserts`, per table; holding stops.
+pub fn take_held(ctx: &ExecCtx) -> Vec<(u32, i64)> {
+    ctx.txn.borrow_mut().pgstat.held.take().unwrap_or_default()
+}
+
+/// Held rows' counts go in (their multi-insert buffer was flushed).
+pub fn count_held(ctx: &ExecCtx, held: Vec<(u32, i64)>) {
+    for (rel, n) in held {
+        count_insert(ctx, rel, n);
+        count_io(ctx, "relation", "normal", "extends", n);
     }
 }
 
