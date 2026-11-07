@@ -1,0 +1,101 @@
+PostgreSQL 18.6 on x86_64-pc-linux-musl, compiled by gcc (Alpine 15.2.0) 15.2.0, 64-bit
+eng-1	cont	copy_in	wall 1.605	cpu 1.490	instr 12.034	wrote 66
+eng-1	cont	create_index	wall 0.825	cpu 1.320	instr 9.042	wrote 39
+eng-1	cont	create_unique_index	wall 0.473	cpu 0.800	instr 9.360	wrote 47
+eng-1	cont	copy_out	wall 0.785	cpu 1.130	instr 12.810	wrote 12
+eng-1	cont	insert_select	wall 1.512	cpu 1.340	instr 10.365	wrote 66
+eng-1	cont	update_half	wall 2.050	cpu 3.360	instr 24.311	wrote 71
+eng-1	cont	delete_quarter	wall 0.674	cpu 1.270	instr 7.439	wrote 17
+eng-1	cont	vacuum	wall 0.464	cpu 0.350	instr 3.523	wrote 1
+eng-1	autovac|0|1|f
+eng-1	cont	analyze	wall 0.362	cpu 0.270	instr 2.478	wrote 0
+eng-1	cont	count_after	wall 0.258	cpu 0.370	instr 3.082	wrote 0
+eng-1	CHECK_ROWS	bulk|750000|375000750000|37499250000|54035714.28571466
+eng-1	CHECK_ROWS	bulk2|1000000|500000500000|49999500000|71357142.85714257
+eng-1	cont	truncate	wall 0.119	cpu 0.010	instr 0.531	wrote 0
+eng-1	cont	drop_table	wall 0.111	cpu 0.120	instr 4.810	wrote 2
+eng-1	cont	peak_mb 338	disk_before_drop 0	disk_end 0
+eng-1	cgroup memory.peak MB 449
+pg-1	pg	copy_in	wall 0.906	cpu 0.775	instr -	wrote 189
+pg-1	pg	create_index	wall 0.409	cpu 0.607	instr -	wrote 49
+pg-1	pg	create_unique_index	wall 0.355	cpu 0.443	instr -	wrote 70
+pg-1	pg	copy_out	wall 0.495	cpu 0.384	instr -	wrote 0
+pg-1	pg	insert_select	wall 0.871	cpu 0.700	instr -	wrote 376
+pg-1	pg	update_half	wall 4.161	cpu 4.241	instr -	wrote 642
+pg-1	pg	delete_quarter	wall 0.316	cpu 0.210	instr -	wrote 61
+pg-1	pg	vacuum	wall 0.376	cpu 0.364	instr -	wrote 15
+pg-1	autovac|0|1|f
+pg-1	pg	analyze	wall 0.223	cpu 0.118	instr -	wrote 0
+pg-1	pg	count_after	wall 0.133	cpu 0.124	instr -	wrote 0
+pg-1	CHECK_ROWS	bulk2|1000000|500000500000|49999500000|71357142.85714257
+pg-1	CHECK_ROWS	bulk|750000|375000750000|37499250000|54035714.285715684
+pg-1	pg	truncate	wall 0.097	cpu 0.028	instr -	wrote 0
+pg-1	pg	drop_table	wall 0.149	cpu 0.060	instr -	wrote 0
+pg-1	pg	peak_mb 956	disk_before_drop 617	disk_end 394
+eng-2	cont	copy_in	wall 1.593	cpu 1.470	instr 12.078	wrote 66
+eng-2	cont	create_index	wall 0.834	cpu 1.280	instr 9.137	wrote 39
+eng-2	cont	create_unique_index	wall 0.426	cpu 0.750	instr 9.184	wrote 48
+eng-2	cont	copy_out	wall 0.775	cpu 1.070	instr 13.113	wrote 11
+eng-2	cont	insert_select	wall 1.339	cpu 1.230	instr 10.446	wrote 66
+eng-2	cont	update_half	wall 1.924	cpu 3.230	instr 24.368	wrote 71
+eng-2	cont	delete_quarter	wall 0.783	cpu 1.300	instr 7.442	wrote 17
+eng-2	cont	vacuum	wall 0.435	cpu 0.360	instr 3.524	wrote 1
+eng-2	autovac|0|1|f
+eng-2	cont	analyze	wall 0.380	cpu 0.260	instr 2.478	wrote 0
+eng-2	cont	count_after	wall 0.235	cpu 0.340	instr 3.082	wrote 0
+eng-2	CHECK_ROWS	bulk|750000|375000750000|37499250000|54035714.28571466
+eng-2	CHECK_ROWS	bulk2|1000000|500000500000|49999500000|71357142.85714257
+eng-2	cont	truncate	wall 0.110	cpu 0.010	instr 0.527	wrote 0
+eng-2	cont	drop_table	wall 0.115	cpu 0.130	instr 4.647	wrote 2
+eng-2	cont	peak_mb 324	disk_before_drop 0	disk_end 0
+eng-2	cgroup memory.peak MB 455
+pg-2	pg	copy_in	wall 0.862	cpu 0.828	instr -	wrote 94
+pg-2	pg	create_index	wall 0.387	cpu 0.583	instr -	wrote 16
+pg-2	pg	create_unique_index	wall 0.336	cpu 0.397	instr -	wrote 39
+pg-2	pg	copy_out	wall 0.487	cpu 0.371	instr -	wrote 0
+pg-2	pg	insert_select	wall 0.780	cpu 0.652	instr -	wrote 184
+pg-2	pg	update_half	wall 4.282	cpu 4.257	instr -	wrote 321
+pg-2	pg	delete_quarter	wall 0.322	cpu 0.234	instr -	wrote 30
+pg-2	pg	vacuum	wall 0.341	cpu 0.337	instr -	wrote 14
+pg-2	autovac|0|1|f
+pg-2	pg	analyze	wall 0.217	cpu 0.131	instr -	wrote 0
+pg-2	pg	count_after	wall 0.119	cpu 0.097	instr -	wrote 0
+pg-2	CHECK_ROWS	bulk2|1000000|500000500000|49999500000|71357142.85714257
+pg-2	CHECK_ROWS	bulk|750000|375000750000|37499250000|54035714.285715684
+pg-2	pg	truncate	wall 0.094	cpu 0.022	instr -	wrote 0
+pg-2	pg	drop_table	wall 0.116	cpu 0.043	instr -	wrote 0
+pg-2	pg	peak_mb 956	disk_before_drop 617	disk_end 394
+eng-3	cont	copy_in	wall 1.588	cpu 1.430	instr 11.911	wrote 66
+eng-3	cont	create_index	wall 0.887	cpu 1.390	instr 9.357	wrote 39
+eng-3	cont	create_unique_index	wall 0.444	cpu 0.840	instr 9.380	wrote 48
+eng-3	cont	copy_out	wall 0.823	cpu 1.230	instr 13.122	wrote 13
+eng-3	cont	insert_select	wall 1.467	cpu 1.350	instr 10.322	wrote 66
+eng-3	cont	update_half	wall 1.965	cpu 3.210	instr 24.436	wrote 71
+eng-3	cont	delete_quarter	wall 0.690	cpu 1.250	instr 7.435	wrote 17
+eng-3	cont	vacuum	wall 0.413	cpu 0.360	instr 3.520	wrote 1
+eng-3	autovac|0|1|f
+eng-3	cont	analyze	wall 0.386	cpu 0.280	instr 2.478	wrote 0
+eng-3	cont	count_after	wall 0.228	cpu 0.350	instr 3.082	wrote 0
+eng-3	CHECK_ROWS	bulk|750000|375000750000|37499250000|54035714.28571466
+eng-3	CHECK_ROWS	bulk2|1000000|500000500000|49999500000|71357142.85714257
+eng-3	cont	truncate	wall 0.104	cpu 0.010	instr 0.710	wrote 0
+eng-3	cont	drop_table	wall 0.110	cpu 0.110	instr 4.624	wrote 2
+eng-3	cont	peak_mb 328	disk_before_drop 0	disk_end 0
+eng-3	cgroup memory.peak MB 457
+pg-3	pg	copy_in	wall 0.870	cpu 0.755	instr -	wrote 93
+pg-3	pg	create_index	wall 0.384	cpu 0.595	instr -	wrote 16
+pg-3	pg	create_unique_index	wall 0.329	cpu 0.359	instr -	wrote 39
+pg-3	pg	copy_out	wall 0.431	cpu 0.366	instr -	wrote 0
+pg-3	pg	insert_select	wall 0.783	cpu 0.647	instr -	wrote 184
+pg-3	pg	update_half	wall 4.081	cpu 4.068	instr -	wrote 322
+pg-3	pg	delete_quarter	wall 0.291	cpu 0.223	instr -	wrote 29
+pg-3	pg	vacuum	wall 0.332	cpu 0.312	instr -	wrote 14
+pg-3	autovac|0|1|f
+pg-3	pg	analyze	wall 0.229	cpu 0.148	instr -	wrote 0
+pg-3	pg	count_after	wall 0.135	cpu 0.131	instr -	wrote 0
+pg-3	CHECK_ROWS	bulk2|1000000|500000500000|49999500000|71357142.85714257
+pg-3	CHECK_ROWS	bulk|750000|375000750000|37499250000|54035714.285715684
+pg-3	pg	truncate	wall 0.121	cpu 0.034	instr -	wrote 0
+pg-3	pg	drop_table	wall 0.152	cpu 0.056	instr -	wrote 1
+pg-3	pg	peak_mb 957	disk_before_drop 617	disk_end 394
+done

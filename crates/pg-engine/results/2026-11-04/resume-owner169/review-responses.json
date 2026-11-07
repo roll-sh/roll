@@ -1,0 +1,49 @@
+{
+  "source_head": "fadf2751",
+  "pinned_job": {
+    "pid": 2823726,
+    "log": "/home/meszmate/.cache/pg-engine-resume-20261104/storage_correctness/a169-reviewed.log"
+  },
+  "responses": [
+    {
+      "finding": "clean-close linked L1 compatibility",
+      "change": "close-only stage linked L1 into ordered L0 under bg/manifest/view locks, persist move then existing compact",
+      "test": "clean_close_rewrites_direct_linked_l1_for_prelinked_readers, both compression policies",
+      "status": "implemented; exact source tests queued"
+    },
+    {
+      "finding": "direct-L1 coverage missing",
+      "change": "test explicitly requires empty L0 and linked L1 above flushed_ts; WALbefore elsewhere,after inside run; reads before/cts/after/latest;pin/overlapGC/crash+clean reopen",
+      "test": "direct_l1_replay_barrier_preserves_tombstones_snapshots_and_wal_order",
+      "status": "implemented; exact source tests queued"
+    },
+    {
+      "finding": "L1 replay barriers",
+      "change": "include linkedL1 max_ts>flushed_ts;sort+dedup",
+      "status": "implemented"
+    },
+    {
+      "finding": "scratch examples and unused public API",
+      "change": "removed a169_blocks,a169_points,Txn::get_snap_with;realStorePointReader remains",
+      "status": "implemented"
+    },
+    {
+      "finding": "compression policy and performance",
+      "change": "threadStoreOptions.compress throughRuns->create_run;falsepolicy allows uncompressed directL1;freshTxn sink regression both policies",
+      "status": "policy implemented; COPY/pgbenchinit/CREATEINDEX comparison,footprint HELD;no newnumbers"
+    },
+    {
+      "finding": "HANDOFF decoder/L1/tombstone policy and global testcounter",
+      "change": "HANDOFF corrected;globalLINKED_TO_L1 removed;test inspects per-store manifest/view",
+      "status": "implemented"
+    },
+    {
+      "finding": "optional hotchain debugassert",
+      "change": "not added: asserting against later unlocked View after hot lookup could race a concurrent rdel commit;keep_hot overlap gate and commit clear retained",
+      "status": "documented limitation"
+    }
+  ],
+  "integration": "not ready until exact-source gates,freshreview,perf/footprint",
+  "prior_failures_preserved": true,
+  "updated_utc": "2026-11-04T12:09:19.167115+00:00"
+}

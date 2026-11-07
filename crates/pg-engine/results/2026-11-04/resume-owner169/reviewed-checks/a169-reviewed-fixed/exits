@@ -1,0 +1,5 @@
+proof-debug EXIT 0
+proof-debug-summary EXIT 0
+storage-debug EXIT 0
+storage-debug-summary EXIT 0
+integrations-debug EXIT 0

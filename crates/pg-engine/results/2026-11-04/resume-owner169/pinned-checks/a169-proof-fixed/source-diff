@@ -1,0 +1,26 @@
+diff --git a/crates/pg-engine/tests/storage_linked_gc.rs b/crates/pg-engine/tests/storage_linked_gc.rs
+index f41f5e70..15587e9c 100644
+--- a/crates/pg-engine/tests/storage_linked_gc.rs
++++ b/crates/pg-engine/tests/storage_linked_gc.rs
+@@ -1,6 +1,6 @@
+ use bytes::Bytes;
+-use pg_engine::storage::sst::{SstReader, SstWriter, mvcc_key};
+-use pg_engine::storage::{Store, StoreOptions};
++use pg_engine::storage::sst::{SstReader, SstWriter};
++use pg_engine::storage::{Store, StoreOptions, mvcc_key};
+ use std::sync::Arc;
+ 
+ #[test]
+diff --git a/crates/pg-engine/tests/storage_read_once.rs b/crates/pg-engine/tests/storage_read_once.rs
+index 722a788a..df724d77 100644
+--- a/crates/pg-engine/tests/storage_read_once.rs
++++ b/crates/pg-engine/tests/storage_read_once.rs
+@@ -1,6 +1,6 @@
+ use pg_engine::storage::cache::BlockCache;
+-use pg_engine::storage::read_once;
+-use pg_engine::storage::sst::{SstReader, SstWriter, mvcc_key};
++use pg_engine::storage::{mvcc_key, read_once};
++use pg_engine::storage::sst::{SstReader, SstWriter};
+ use std::sync::Arc;
+ 
+ #[test]

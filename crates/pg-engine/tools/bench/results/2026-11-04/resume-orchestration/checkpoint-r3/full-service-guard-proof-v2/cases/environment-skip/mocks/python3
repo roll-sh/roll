@@ -1,0 +1,3 @@
+#!/bin/sh
+printf "synthetic network control\n"
+exit 0

@@ -1,0 +1,11 @@
+    Finished `release` profile [optimized] target(s) in 0.11s
+     Running unittests src/lib.rs (/home/meszmate/.cache/a169/target/release/deps/pg_engine-2ee33b49d98c4a1b)
+
+running 4 tests
+test storage::sst::tests::block_index_find ... ok
+test storage::sst::tests::block_positions ... ok
+test storage::sst::tests::linked_blocks_decode_as_relinked ... ok
+test storage::sst::tests::fast_mod_is_rem ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 188 filtered out; finished in 0.02s
+

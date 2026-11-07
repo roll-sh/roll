@@ -1,0 +1,6 @@
+proof-release EXIT 0
+focused-debug EXIT 0
+proof-debug EXIT 0
+crash-release EXIT 0
+repl-release EXIT 0
+clippy EXIT 0

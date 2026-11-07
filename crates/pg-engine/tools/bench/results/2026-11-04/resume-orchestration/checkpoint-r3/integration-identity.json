@@ -1,0 +1,21 @@
+{
+  "observed_at": "2026-11-04T13:53:42.561948+00:00",
+  "shared_head": "eb450f4e9aff7c36137241f2e7a719650ae57254",
+  "tested_head": "3997cf00a2a301fed65f00469625ff14f223f227",
+  "production_candidate": "6493cf49a1e29a1914270c530956504faa6bb0e4",
+  "scoped_diff_paths": [
+    "crates/pg-engine/tests/difftest/STATUS.md"
+  ],
+  "source_equivalent_in_scope": true,
+  "scope": [
+    "pg-engine/src",
+    "pg-engine/tests excluding STATUS.md",
+    "pg-engine/Cargo.toml",
+    "Cargo.toml",
+    "Cargo.lock"
+  ],
+  "remote": "eb450f4e9aff7c36137241f2e7a719650ae57254\trefs/heads/docs/postgres-architecture-strategy",
+  "full_product_acceptance": false,
+  "full_service": "HELD until intended combined source",
+  "new_service_or_source_suite_run_by_this_checkpoint": false
+}

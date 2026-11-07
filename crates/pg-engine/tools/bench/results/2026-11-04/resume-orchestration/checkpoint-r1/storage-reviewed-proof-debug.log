@@ -1,0 +1,35 @@
+   Compiling pg-engine v0.1.0 (/home/meszmate/roll/.claude/worktrees/agent-a76932e8127f6d35b/crates/pg-engine)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 03s
+     Running tests/storage_linked_gc.rs (/home/meszmate/.cache/a169/target/debug/deps/storage_linked_gc-cc17f010b275031f)
+
+running 4 tests
+test direct_l1_replay_barrier_preserves_tombstones_snapshots_and_wal_order ... FAILED
+test clean_close_rewrites_direct_linked_l1_for_prelinked_readers ... ok
+test fresh_transaction_sink_honors_store_compression_policy ... FAILED
+test linked_tombstones_preserve_snapshots_and_conflicts_until_gc ... ok
+
+failures:
+
+---- direct_l1_replay_barrier_preserves_tombstones_snapshots_and_wal_order stdout ----
+
+thread 'direct_l1_replay_barrier_preserves_tombstones_snapshots_and_wal_order' (2972601) panicked at crates/pg-engine/tests/storage_linked_gc.rs:129:13:
+assertion `left == right` failed
+  left: None
+ right: Some((2, None))
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- fresh_transaction_sink_honors_store_compression_policy stdout ----
+
+thread 'fresh_transaction_sink_honors_store_compression_policy' (2972604) panicked at crates/pg-engine/tests/storage_linked_gc.rs:190:13:
+assertion `left == right` failed
+  left: false
+ right: true
+
+
+failures:
+    direct_l1_replay_barrier_preserves_tombstones_snapshots_and_wal_order
+    fresh_transaction_sink_honors_store_compression_policy
+
+test result: FAILED. 2 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+
+error: test failed, to rerun pass `-p pg-engine --test storage_linked_gc`

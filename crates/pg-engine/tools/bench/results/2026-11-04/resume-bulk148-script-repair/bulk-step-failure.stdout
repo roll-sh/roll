@@ -1,0 +1,2 @@
+pg-1	FAILED copy_in exit 23
+pg-1	ERROR: deliberate fake SQL failure

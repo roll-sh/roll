@@ -1,0 +1,4 @@
+storage-release EXIT 101
+storage-release EXIT 0
+sst-release EXIT 0
+integrations-release EXIT 0

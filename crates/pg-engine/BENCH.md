@@ -237,6 +237,79 @@ The cost is spread thinly:
   `partial_scans`).
 No single function takes more than 5%. HANDOFF has the next steps.
 
+## postgres_fdw, round 7 (2026-11-03, agent 157)
+
+What changed: HANDOFF.md's postgres_fdw "Round 26 (agent 157)". PostgreSQL's estimates for
+never-analyzed foreign tables and one-group aggregations sent whole (so the engine now picks
+PostgreSQL's plans: it no longer pushes the joins PostgreSQL doesn't push), a cursor's scan
+decoding only the columns read, numeric text without allocations, and common values written
+straight into DataRow messages.
+
+How it was measured: `tools/fdwtraffic/compare.sh` (new), the fdw_traffic workload with both
+servers in containers on cores 4-7 at the same CPU weight, host network, psql on cores 8-9.
+Each server's CPU (`cpu.stat` usage_usec: both ends of its loopback) and peak memory
+(`memory.peak`) come from its container's cgroup. Engines are `--profile dist` builds: base
+`847fbdba`, new = this round. The runs were interleaved (base, new, PostgreSQL, new, base) on a
+loaded machine (load 13-15); the engine columns are the mean of 2 runs, PostgreSQL's is 1 run.
+
+| phase (statements) | PG writes / stmt | engine | PG ms | base ms | new ms | new / PG time | PG CPU ms | base CPU | new CPU | new / PG CPU |
+|---|---|---|---|---|---|---|---|---|---|---|
+| point lookups (500) | 5.00 | **2.00** | 1,213 | 851 | **765** | 0.63 | 402 | 381 | **341** | 0.85 |
+| lookups in one txn (302) | 2.99 | **1.00** | 482 | 308 | **315** | 0.65 | **161** | 162 | 169 | 1.05 |
+| full scans, 20k rows (10) | 205 | **202** | 1,508 | 1,647 | **1,453** | 0.96 | **574** | 769 | 633 | 1.10 |
+| range scans, ~31 rows (200) | 5.00 | **2.00** | 732 | 450 | **452** | 0.62 | **215** | 245 | 232 | 1.08 |
+| foreign joins (100) | 208 | 203 | **11,144** | 1,080 * | 13,966 | 1.25 | **4,387** | 928 * | 6,084 | 1.39 |
+| remote aggregates (100) | 5.00 | **2.00** | 778 | 669 | **613** | 0.79 | 502 | 532 | **483** | 0.96 |
+| local join foreign (5) | 205 | **202** | **440** | 667 | 637 | 1.45 | **162** | 293 | 264 | 1.63 |
+| single-row inserts (300) | 5.00 | **2.00** | 690 | 351 | **398** | 0.58 | 208 | 133 | **150** | 0.72 |
+| direct updates (100) | 3.00 | **2.00** | 217 | 157 | **178** | 0.82 | **81** | 72 | 82 | 1.02 |
+| inherited updates, row trigger (20 x 50) | 56.95 | **51.95** | **408** | 912 | 987 | 2.42 | **141** | 459 | 487 | 3.46 |
+| inherited updates, sent whole (20 x 50) | 3.00 | **2.00** | **33** | 81 | 97 | 2.95 | **16** | 59 | 71 | 4.37 |
+| locked local join foreign (20) | 208 | **205** | **2,568** | 3,341 | 3,080 | 1.20 | **1,086** | 1,566 | 1,431 | 1.32 |
+| locked local join of a foreign join (20) | 214 | 209 | **2,488** | 516 * | 3,458 | 1.39 | **1,034** | 431 * | 1,487 | 1.44 |
+
+\* The base engine pushed these joins down where PostgreSQL doesn't (its never-analyzed
+foreign table estimate, round 6's note), so those cells measured another plan. With
+PostgreSQL's estimates the new engine runs PostgreSQL's plans there (Hash Joins of the
+whole remote tables: 61 MB and 17 MB fetched a phase on both).
+
+Bytes in are the same or fewer on the engine in every phase (point lookups 94 against 120 kB,
+range scans 272 against 282 kB, aggregates 16 against 22 kB). Peak memory over the whole run:
+engine 66-70 MB (new), 68-123 MB (base), PostgreSQL 147 MB.
+
+What moved: the full scans' CPU fell 18% against base (769 -> 633 ms; time 1,647 -> 1,453 ms,
+now ahead of PostgreSQL's 1,508), local join foreign 10% (293 -> 264), aggregates 9%
+(532 -> 483 ms, ahead of PostgreSQL in time and CPU), point lookups 10%. The profile of the
+full scans before: numeric formatting and parsing 11% of the server's CPU (four allocations
+per value out, a digit String in), the remote cursor decoding every column of rows it then
+projected (`full_row`, 13%), vectors grown per row.
+
+Still behind, with where the time goes (perf, dist build, DWARF stacks):
+
+- Remote scans of whole tables (local join foreign 1.45x, foreign joins 1.25x, locked local
+  join 1.20x): the remote server's cursor keeps every row it returns (backward FETCH), about
+  15% of the CPU of a 20k-row scan (`Cursor::visit` re-evaluating the target list per row
+  2-4%, `push_row`, and the rows' drop at commit 6%); `exec::scan` decodes each row into a
+  vector then grows it for the key (`scan_row_rest`, 5%). Both are outside postgres_fdw.
+- Inherited updates (2.4x, 3.0x): per-statement planning of the inheritance tree and the
+  per-row remote UPDATEs' execution on the remote server (the same engine), not the wrapper's
+  traffic (fewer round trips and bytes than PostgreSQL).
+
+pgbench (scale 1, 8 clients, `-M prepared`, 20 s, the engine in a container on cores 4-7,
+four interleaved rounds, both orders, load 13-21): select-only server CPU per transaction base
+46 / 48 / 58 / 58 us, new 44 / 52 / 53 / 60 us (medians 53 and 52.5); TPC-B-like base
+419 / 443 / 443 / 471 us, new 445 / 464 / 493 / 568 us (the 568 at load 21; medians 443 and
+478). Single runs moved 25% at this load, so neither difference is resolved: the only changed
+code these statements run is int4 text output (written into the message, no String) and the
+planner's foreign-table checks (a field test for plain tables). TPC-B-like's higher median
+needs a quieter rerun before it is trusted either way. Peak memory 128-137 MB new, 130-157 MB
+base.
+
+```sh
+tools/heavy.sh cargo build --profile dist -p pg-engine --bin roll-engine   # copy it aside
+SERVER_CPUS=4-7 CLIENT_CPUS=8-9 tools/fdwtraffic/compare.sh <roll-engine> <scratch> <prefix> <port> [pg] [engine]
+```
+
 ## postgres_fdw, round 6 (2026-11-03, agent 153)
 
 What changed: HANDOFF.md's postgres_fdw "Round 25 (agent 153)". A level locking local relations
