@@ -610,7 +610,7 @@ body {
    the skipped layout; `data-off` lifts before a card reaches the screen. */
 [data-card][data-off] {
   content-visibility: hidden;
-  contain-intrinsic-size: auto 280px auto 120px;
+  contain-intrinsic-size: auto 296px auto 128px;
 }
 
 /* While the canvas's view moves, what breathes on it holds still (the engine's `data-moving`): a

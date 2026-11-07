@@ -197,6 +197,9 @@ export class CanvasEngine {
         const s = { w: el.offsetWidth, h: el.offsetHeight };
         // Hidden (the canvas is under a conversation): keep the last real size.
         if (s.w === 0 && s.h === 0) continue;
+        // Off screen its contents are skipped and it measures as the placeholder: keep its real
+        // size (taken, the layout moved cards on and off screen and never settled).
+        if (el.hasAttribute("data-off") && this.size.has(key)) continue;
         if (!el.hasAttribute("data-off")) this.measured.add(key);
         const prev = this.size.get(key);
         if (prev && prev.w === s.w && prev.h === s.h) continue;
