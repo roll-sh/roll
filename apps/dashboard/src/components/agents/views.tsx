@@ -364,7 +364,7 @@ export function ViewsBar({
               key={view.id}
               data-tab
               data-selected={selected || undefined}
-              className={`group/tab relative flex shrink-0 items-center rounded-md border border-transparent transition-colors duration-150 ${selected ? "text-fg" : "text-muted hover:bg-fg/[0.04] hover:text-fg @max-[520px]/views:hidden"} ${dragging === view.id ? "opacity-50" : ""}`}
+              className={`group/tab relative flex shrink-0 items-center rounded-md border border-transparent transition-colors duration-150 ${selected ? "text-fg" : `text-muted hover:bg-fg/[0.04] hover:text-fg ${waiting && count ? "" : "@max-[520px]/views:hidden"}`} ${dragging === view.id ? "opacity-50" : ""}`}
               draggable={view.id !== ALL}
               onDragStart={(e) => {
                 setDragging(view.id);
@@ -426,14 +426,20 @@ export function ViewsBar({
             </div>
           );
         })}
-        {/* Short of room (a conversation open beside a narrow canvas), only the shown view's tab
-            stays, and the others are one menu away: tabs cut mid-word read as broken. */}
+        {/* Short of room (a phone, a conversation open beside a narrow canvas), only the shown view's
+            tab stays, with a waiting view that has threads (what a check-in is for); the others are
+            one menu away: tabs cut mid-word read as broken. */}
         <span className="hidden shrink-0 @max-[520px]/views:flex">
           <Menu
             label="Other views"
             align="start"
             trigger={<ChevronDown className="size-3.5" />}
-            items={views.filter((x) => x.id !== currentId).map((x) => ({ label: x.name, onSelect: () => select(x.id) }))}
+            items={views
+              .filter((x) => x.id !== currentId)
+              .map((x) => {
+                const n = x.id === ALL || !threadFilter(x.filter) ? 0 : countView(data, x.filter, now);
+                return { label: n ? `${x.name} · ${n}` : x.name, onSelect: () => select(x.id) };
+              })}
           />
         </span>
         {/* Stuck at the strip's end, so it stays in reach however many views scroll under it. */}

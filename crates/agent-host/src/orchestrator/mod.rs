@@ -32,6 +32,7 @@ mod settle;
 mod tasks;
 mod terminals;
 mod threads;
+mod whole_diff;
 
 pub(crate) use tasks::{Delegation, TaskError};
 
@@ -98,6 +99,8 @@ pub struct Host {
     gateway_health: crate::gateway::Health,
     /// Each thread's idle compaction timer (`idle.rs`).
     idle_timers: std::sync::Mutex<HashMap<ThreadId, tokio::task::AbortHandle>>,
+    /// Threads whose files changed outside a run, waiting to be counted (`whole_diff.rs`).
+    whole_diff: whole_diff::Pending,
 }
 
 /// Why a command failed; becomes `Reply::Error`.
@@ -312,6 +315,7 @@ impl Host {
             gateway: gateway::Hosting::default(),
             gateway_health: crate::gateway::Health::default(),
             idle_timers: std::sync::Mutex::new(HashMap::new()),
+            whole_diff: whole_diff::Pending::default(),
         });
         host.configure_providers();
         // Hello goes out with what's known; each provider's status follows as its probe answers.
@@ -324,6 +328,7 @@ impl Host {
         tasks::spawn_worker(Arc::downgrade(&host), task_work);
         projects::spawn_puller(Arc::downgrade(&host));
         settle::spawn_sweeper(Arc::downgrade(&host));
+        whole_diff::spawn_counting(Arc::downgrade(&host));
         Ok(host)
     }
 

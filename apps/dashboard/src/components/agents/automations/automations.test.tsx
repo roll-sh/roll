@@ -59,8 +59,11 @@ describe("Automation builder", () => {
     renderAgents(<AutomationPanel view={{ kind: "automations", open: "new" }} />, harness(api));
     await userEvent.type(screen.getByRole("textbox", { name: "Name" }), "Say hi");
 
+    // The step list filters as you type and ↵ adds the first match.
     await userEvent.click(screen.getByRole("button", { name: "Add a step" }));
-    await userEvent.click(await screen.findByRole("menuitem", { name: /Notify me/ }));
+    await userEvent.type(await screen.findByRole("combobox", { name: "Search steps" }), "notif");
+    expect(screen.getAllByRole("option")[0]).toHaveTextContent("Notify me");
+    await userEvent.keyboard("{Enter}");
     const card = screen.getByRole("region", { name: "Step 1: Notify me" });
     // The form comes from the step's schema: a template title, a level, a link.
     expect(within(card).getByRole("combobox", { name: "Level" })).toBeInTheDocument();

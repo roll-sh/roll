@@ -208,7 +208,8 @@ export function cantPublish(t: Thread, last: Run | undefined): string | null {
   if (isBusy(t.status)) return "It's still running";
   if (t.change?.status === "landed") return "Its change landed";
   if (t.change && t.change.status !== "conflict" && t.change.status !== "failing") return "It's published already";
-  if (!t.change && last?.stat && last.stat.additions + last.stat.deletions === 0) return "It has no changes";
+  const changes = t.diff ?? last?.stat;
+  if (!t.change && changes && changes.files === 0) return "It has no changes";
   return null;
 }
 

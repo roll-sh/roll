@@ -475,6 +475,11 @@ const DIFF_NEXT = `@@ -1,6 +1,6 @@
 
 const fc = (path: string, change: FileChange["change"], diff: string): FileChange => ({ path, change, diff });
 
+/** The demo's whole-thread count: the lines so far plus a run's. */
+function addStat(a: DiffStat | null | undefined, b: DiffStat): DiffStat {
+  return { files: (a?.files ?? 0) + b.files, additions: (a?.additions ?? 0) + b.additions, deletions: (a?.deletions ?? 0) + b.deletions };
+}
+
 function stat(files: FileChange[]): DiffStat {
   let additions = 0;
   let deletions = 0;
@@ -1420,6 +1425,7 @@ export class DemoOwner implements AgentsTransport {
       queued: [],
       run_count: 0,
       pending_requests: 0,
+      diff: null,
       plan_ready: false,
       activity: null,
       usage: { input_tokens: 0, output_tokens: 0, cached_tokens: 0, cost_usd: null },
@@ -1617,7 +1623,8 @@ export class DemoOwner implements AgentsTransport {
     node({ type: "message", text: answer });
     this.put("checkpoint", { id: `chk_demo_json0`, thread: tid, run: null, ordinal: 0, commit: "f35f34cf", stat: { files: 0, additions: 0, deletions: 0 }, created_at: at }, MBP);
     this.put("checkpoint", { id: cid, thread: tid, run: rid, ordinal, commit: "9fceb02d0ae598e9", stat: s, created_at: at + 52_000 }, MBP);
-    this.patchThread(tid, { run_count: ordinal, usage, context, activity: null, updated_at: at + 52_000 });
+    const whole = this.thread(tid)?.diff;
+    this.patchThread(tid, { run_count: ordinal, usage, context, activity: null, updated_at: at + 52_000, diff: addStat(whole, s) });
   }
 
   // ── running a script ──
@@ -1841,6 +1848,7 @@ export class DemoOwner implements AgentsTransport {
             queued: [],
             run_count: 0,
             pending_requests: 0,
+            diff: null,
             plan_ready: false,
             activity: null,
             usage: { input_tokens: 0, output_tokens: 0, cached_tokens: 0, cost_usd: null },
@@ -1926,7 +1934,8 @@ export class DemoOwner implements AgentsTransport {
     const [next, ...rest] = t.queued;
     // T3's actionable proposed plan: the run completed with one.
     const planned = [...this.records.values()].some((m) => m.entity.kind === "node" && m.entity.run === sim.run && m.entity.body.type === "plan" && m.entity.body.text.trim() !== "");
-    this.patchThread(sim.thread, { status: "idle", active_run: null, activity: null, usage: total, queued: rest, plan_ready: planned });
+    // The whole thread (the daemon diffs its base against the new checkpoint; the demo adds the run's lines).
+    this.patchThread(sim.thread, { status: "idle", active_run: null, activity: null, usage: total, queued: rest, plan_ready: planned, diff: addStat(t.diff, s) });
     this.taskDone(sim.thread, sim.run);
     const woken = this.wakes.get(sim.thread);
     if (woken) {
@@ -2094,6 +2103,7 @@ export class DemoOwner implements AgentsTransport {
             queued: [],
             run_count: 0,
             pending_requests: 0,
+            diff: null,
             plan_ready: false,
             activity: null,
             usage: { input_tokens: 0, output_tokens: 0, cached_tokens: 0, cost_usd: null },
@@ -2133,6 +2143,7 @@ export class DemoOwner implements AgentsTransport {
             active_run: null,
             queued: [],
             pending_requests: 0,
+            diff: null,
             plan_ready: false,
             activity: null,
             run_count: 0,

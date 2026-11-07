@@ -1036,6 +1036,8 @@ impl Host {
                     run.checkpoint = Some(checkpoint.id.clone());
                     run.stat = Some(checkpoint.stat);
                     run.files = files;
+                    // The whole thread is the base checkpoint to this one.
+                    self.count_whole(rt, &checkpoint.commit).await;
                     batch.push(Entity::Checkpoint(checkpoint));
                 }
                 Err(e) => tracing::warn!("checkpoint of {}: {e:#}", run.id),

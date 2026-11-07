@@ -108,6 +108,24 @@ async fn machines(ctx: &StepContext) -> Step<Vec<Machine>> {
     serde_json::from_value(a.body).map_err(|e| StepOutcome::Retry(format!("reading the machines: {e}")))
 }
 
+/// A machine's name for a message (its id if the list can't be read).
+async fn machine_name(ctx: &StepContext, id: &str) -> String {
+    match machines(ctx).await {
+        Ok(all) => all.into_iter().find(|m| m.id.as_str() == id).map_or_else(|| id.to_string(), |m| m.name),
+        Err(_) => id.to_string(),
+    }
+}
+
+/// A thread's title (or prompt) for a message: its first line, quoted, at most 60 characters.
+fn quoted(text: &str) -> String {
+    let line = text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("a thread");
+    let mut short: String = line.chars().take(60).collect();
+    if line.chars().count() > 60 {
+        short.push('…');
+    }
+    format!("“{short}”")
+}
+
 /// The owner's projects as the relay mirrors them: (machine, project).
 fn projects(code: &Code, owner_id: &str) -> Vec<(String, Project)> {
     let rows: Vec<(String, String)> =
@@ -143,7 +161,7 @@ fn thread_of(ctx: &StepContext, configured: Option<&str>) -> Step<(String, Threa
     };
     match crate::agents::store::thread_of(ctx.code.db.sql(), &ctx.owner().id, id.trim()) {
         Ok(Some(t)) => Ok(t),
-        Ok(None) => fail(format!("no thread {id}")),
+        Ok(None) => fail(format!("no thread {id}: it was deleted, or isn't the owner's")),
         Err(e) => Err(StepOutcome::Retry(format!("reading the thread: {e}"))),
     }
 }
@@ -210,7 +228,7 @@ impl StartAgent {
                     let id = rendered(ctx, id)?;
                     match mirrored.iter().find(|(_, p)| p.id.as_str() == id) {
                         Some((m, _)) => m.clone(),
-                        None => return fail(format!("no project {id}")),
+                        None => return fail(format!("no machine has the project {id}")),
                     }
                 }
                 _ => return fail("project_machine needs a project by id"),
@@ -254,7 +272,7 @@ impl StartAgent {
                     }
                 };
                 let (Some(sbx), Some(m)) = (made["id"].as_str(), made["machine"].as_str()) else { return fail("the sandbox route answered without an id") };
-                ctx.set_state(json!({ "machine": m, "sandbox": sbx, "keep": keep }));
+                ctx.set_state(json!({ "machine": m, "sandbox": sbx, "sandbox_name": name, "keep": keep }));
                 return Ok(Some(m.to_string()));
             }
         };
@@ -321,11 +339,12 @@ impl StepKind for StartAgent {
         if keep {
             return;
         }
+        let name = ctx.state()["sandbox_name"].as_str().map_or_else(|| sbx.clone(), str::to_string);
         let a = ctx.api(Method::DELETE, &format!("{}/sandboxes/{sbx}", agents_path(ctx)), None).await;
         if a.ok() || a.status == axum::http::StatusCode::NOT_FOUND {
-            ctx.log(LogLevel::Info, format!("deleted the sandbox {sbx}"));
+            ctx.log(LogLevel::Info, format!("deleted the sandbox {name}"));
         } else {
-            ctx.log(LogLevel::Warn, format!("deleting the sandbox {sbx}: {}", a.error()));
+            ctx.log(LogLevel::Warn, format!("deleting the sandbox {name}: {}", a.error()));
         }
     }
 }
@@ -361,7 +380,10 @@ impl StartAgent {
                 let id = rendered(ctx, id)?;
                 match mirrored.iter().find(|(m, p)| m == &machine && p.id.as_str() == id) {
                     Some((_, p)) => p.clone(),
-                    None => return fail(format!("the project {id} isn't on that machine")),
+                    None => {
+                        let project = mirrored.iter().find(|(_, p)| p.id.as_str() == id).map_or(id.clone(), |(_, p)| p.name.clone());
+                        return fail(format!("the project {project} isn't on {}", machine_name(ctx, &machine).await));
+                    }
                 }
             }
             Some(ProjectRef::Repo { repo, path }) => {
@@ -418,7 +440,8 @@ impl StartAgent {
         st["project"] = json!(p.id);
         st["thread"] = json!(thread);
         ctx.set_state(st);
-        ctx.log(LogLevel::Info, format!("started {thread}"));
+        let named = c.title.as_deref().map(|t| rendered(ctx, t)).transpose()?.filter(|t| !t.trim().is_empty()).unwrap_or_else(|| rendered(ctx, &c.prompt).unwrap_or_default());
+        ctx.log(LogLevel::Info, format!("started {} in {} on {}", quoted(&named), p.name, machine_name(ctx, &machine).await));
         Ok(StepOutcome::Done(self.output(ctx, &thread)))
     }
 
@@ -506,7 +529,7 @@ impl StepKind for WaitAgent {
         if code_sql::now_ms() - ctx.started_at() >= timeout {
             return match c.on_timeout {
                 OnError::Continue => StepOutcome::Done(out("timeout", runs_of(&ctx.code, &machine, t.id.as_str()).last())),
-                OnError::Fail => StepOutcome::Fail(format!("{} didn't get there within {} s", t.id, timeout / 1000)),
+                OnError::Fail => StepOutcome::Fail(format!("{} didn't get there within {} s", quoted(&t.title), timeout / 1000)),
             };
         }
         // Its records wake the run sooner (automation_threads); this is the safety net.

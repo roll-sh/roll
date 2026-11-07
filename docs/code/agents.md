@@ -116,6 +116,10 @@ Machine            a daemon (hostname, os, providers and their auth state, onlin
   private index (`GIT_INDEX_FILE`), never touching the user's index or HEAD. The diff of run N is
   checkpoint N-1 → N; the run records its stat and, per file, `Run.files` (at most 200), which its
   changed-files card shows, so the card, Open diff and the footer agree (T3's turn diff summary).
+  The thread keeps its whole stat too (`Thread.diff`, the "Whole thread" diff's numbers: the base
+  to its files now), which the list, the board and the cards show: each run's end and rollback set
+  it from the checkpoint, and a thread terminal's output or exit and `fs.write` recount the working
+  tree (private index) once the thread has been quiet 800 ms (`orchestrator/whole_diff.rs`).
   `checkpoint.rollback` restores the tree of a checkpoint and marks later
   runs `rolled_back` (and rolls back the provider thread where the provider can). A project in a
   subdirectory of a repository owns only that directory: its diffs, `git.status` and rollbacks

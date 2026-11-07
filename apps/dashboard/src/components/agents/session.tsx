@@ -424,10 +424,12 @@ function TerminalDrawer({
  * The plain row under the composer (T3's `ComposerSurface.ContextStrip`): where the thread runs
  * (the machine, its worktree's branch) and what it has cost and changed so far.
  */
-function ContextStrip({ thread, machine, runs, onDiff }: { thread: Thread; machine: Machine | undefined; runs: Run[]; onDiff?: (run: string) => void }) {
+function ContextStrip({ thread, machine, runs, onDiff }: { thread: Thread; machine: Machine | undefined; runs: Run[]; onDiff?: (run: string | null) => void }) {
   const usage = usageLine(thread.usage);
   const last = runs.findLast((r) => r.status !== "rolled_back");
   const stat = last?.stat ?? null;
+  // The whole thread's lines, when they say more than the last run's (earlier runs, a terminal).
+  const whole = thread.diff && (thread.diff.additions > 0 || thread.diff.deletions > 0) && (thread.diff.additions !== stat?.additions || thread.diff.deletions !== stat?.deletions) ? thread.diff : null;
   if (!machine && !thread.worktree && !usage) return null;
   return (
     <div className="flex min-w-0 items-center gap-3 overflow-hidden px-2 pt-2 text-[11.5px] whitespace-nowrap text-subtle">
@@ -445,6 +447,19 @@ function ContextStrip({ thread, machine, runs, onDiff }: { thread: Thread; machi
       )}
       <span className="ml-auto flex shrink-0 items-center gap-2 font-mono tabular-nums">
         {usage}
+        {whole && (
+          <button
+            type="button"
+            onClick={onDiff && (() => onDiff(null))}
+            disabled={!onDiff}
+            aria-label={`Whole thread: ${whole.additions} added, ${whole.deletions} removed${onDiff ? ". Open its diff" : ""}`}
+            title="The whole thread's changes"
+            className="flex items-center gap-1 rounded px-0.5 transition-colors enabled:hover:bg-fg/[0.06] enabled:hover:text-fg"
+          >
+            <span className="font-sans">Thread</span>
+            <Stat stat={whole} />
+          </button>
+        )}
         {/* The last run's lines, the same numbers as its diff (the whole thread's are in the diff's "Whole thread"). */}
         {stat && last && (stat.additions > 0 || stat.deletions > 0) && (
           <button
@@ -453,8 +468,9 @@ function ContextStrip({ thread, machine, runs, onDiff }: { thread: Thread; machi
             disabled={!onDiff}
             aria-label={`Last run: ${stat.additions} added, ${stat.deletions} removed${onDiff ? ". Open its diff" : ""}`}
             title={`Run ${last.ordinal}'s changes`}
-            className="rounded px-0.5 transition-colors enabled:hover:bg-fg/[0.06] enabled:hover:text-fg"
+            className="flex items-center gap-1 rounded px-0.5 transition-colors enabled:hover:bg-fg/[0.06] enabled:hover:text-fg"
           >
+            {whole && <span className="font-sans">Run {last.ordinal}</span>}
             <Stat stat={stat} />
           </button>
         )}

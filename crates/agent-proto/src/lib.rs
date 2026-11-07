@@ -475,6 +475,12 @@ pub struct Thread {
     pub queued: Vec<QueuedMessage>,
     pub run_count: u32,
     pub pending_requests: u32,
+    /// The whole thread's changes: its base checkpoint to its files now, the numbers of its
+    /// "Whole thread" diff (a run's `stat` counts only that run). Each run's end sets it; edits
+    /// between runs (a terminal, `fs.write`) refresh it once the thread goes quiet. Absent before
+    /// the daemon first counts it, and from daemons before it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff: Option<DiffStat>,
     /// The newest run completed with a proposed plan (T3's `hasActionableProposedPlan`): in a
     /// thread still in plan mode with nothing pending, the canvas says "Plan ready" without
     /// loading the run. A new run, or rolling the run back, clears it.

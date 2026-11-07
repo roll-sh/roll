@@ -21,7 +21,7 @@ import { selectFromClick, selection, useSelected, useSelection } from "@/lib/age
 import type { AgentsData } from "@/lib/agents-store";
 import { groupByOf, sortOf, subGroupByOf, type Display, type GroupBy, type Layout, type SortKey, type ViewFilter } from "@/lib/agents-views";
 import { tint } from "./identity";
-import { compact, providerName, Stat } from "./shared";
+import { compact, providerName, ThreadChanges } from "./shared";
 import { StatusPill, threadPill } from "./thread-status";
 import { ThreadBoard } from "./thread-board";
 import { useAgents } from "./use-agents";
@@ -373,6 +373,8 @@ interface ColDef {
   width: number;
   min: number;
   right?: boolean;
+  /** What the column counts, after "Sort by …" in its title. */
+  hint?: string;
 }
 
 const COLS: readonly ColDef[] = [
@@ -383,7 +385,7 @@ const COLS: readonly ColDef[] = [
   { id: "agent", label: "Agent", sort: "agent", width: 150, min: 72 },
   { id: "waiting", label: "Waiting", width: 84, min: 56 },
   { id: "activity", label: "Activity", sort: "activity", width: 84, min: 56, right: true },
-  { id: "changes", label: "Changes", sort: "changes", width: 84, min: 56, right: true },
+  { id: "changes", label: "Changes", sort: "changes", width: 84, min: 56, right: true, hint: "The whole thread's lines, terminal edits too" },
   { id: "pr", label: "PR", width: 104, min: 56 },
   { id: "cost", label: "Cost", sort: "cost", width: 80, min: 52, right: true },
 ];
@@ -605,7 +607,7 @@ function HeaderCell({ col, sort, onSort, onResize, width }: { col: ColDef; sort:
   return (
     <span role="columnheader" aria-sort={sorted ? (sort.dir === "asc" ? "ascending" : "descending") : undefined} className={`relative flex h-full min-w-0 items-center px-2 ${col.right ? "justify-end" : ""}`}>
       {col.sort ? (
-        <button type="button" onClick={() => onSort(col.sort!)} title={`Sort by ${col.label.toLowerCase()}`} className={`flex min-w-0 items-center gap-1 rounded transition-colors hover:text-fg ${sorted ? "text-fg" : ""}`}>
+        <button type="button" onClick={() => onSort(col.sort!)} title={`Sort by ${col.label.toLowerCase()}${col.hint ? `. ${col.hint}` : ""}`} className={`flex min-w-0 items-center gap-1 rounded transition-colors hover:text-fg ${sorted ? "text-fg" : ""}`}>
           <span className="truncate">{col.label}</span>
           {sorted && <Arrow className="size-3 shrink-0" />}
         </button>
@@ -775,7 +777,7 @@ function RowBody({ row, y, template, cols, c, any, order, cursor, open, onCursor
       )}
       {has("changes") && (
         <span role="gridcell" className="truncate px-2 text-right text-[11.5px]">
-          <Stat stat={row.last?.status === "rolled_back" ? null : row.last?.stat} />
+          <ThreadChanges thread={row.thread} last={row.last} />
         </span>
       )}
       {has("pr") && (
@@ -836,7 +838,7 @@ function PhoneRow({ row, y, c, order, cursor }: { row: ThreadRow; y: number; c: 
             {c.names.project(t.project)} · {c.names.machine(row.machine)}
           </span>
           <span className="ml-auto shrink-0 text-[11.5px]">
-            <Stat stat={row.last?.stat} />
+            <ThreadChanges thread={row.thread} last={row.last} />
           </span>
         </span>
       </span>

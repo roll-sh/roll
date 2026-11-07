@@ -1,5 +1,6 @@
-//! Queries: they read, never change anything (`diff.get`, `fs.list`, `fs.read`, `git.status`);
-//! and `fs.write`, the one command here, which writes a file in a thread's workspace.
+//! Queries: they read, never change anything (`diff.get`, `fs.list`, `fs.read`, `git.status`;
+//! a whole-thread `diff.get` only keeps its count on the thread, `whole_diff.rs`); and
+//! `fs.write`, the one command here, which writes a file in a thread's workspace.
 
 use super::{Fail, Host, Res};
 use crate::fs::{self, FsError};
@@ -28,6 +29,7 @@ impl Host {
         }
         let cwd = self.git_dir(&rt.thread);
         let cleaned = rt.thread.worktree.as_ref().is_some_and(|w| w.removed_at.is_some());
+        let whole = run.is_none();
         let (from, to) = match run {
             Some(run_id) => {
                 let run = match self.store.get(EntityKind::Run, run_id.as_str())? {
@@ -52,13 +54,8 @@ impl Host {
                 }
             }
             None => {
-                let base = self.checkpoints_of(thread)?.into_iter().find(|c| c.ordinal == 0).map(|c| c.commit);
-                let base = match base {
-                    Some(base) => base,
-                    None => match git::head(&cwd).await? {
-                        Some(head) => head,
-                        None => return Ok(Reply::Diff(Diff { stat: DiffStat::default(), files: Vec::new(), truncated: false })),
-                    },
+                let Some(base) = self.diff_base(thread, &cwd).await? else {
+                    return Ok(Reply::Diff(Diff { stat: DiffStat::default(), files: Vec::new(), truncated: false }));
                 };
                 match (&rt.private.head, cleaned) {
                     (Some(head), true) => (base, head.clone()),
@@ -67,7 +64,12 @@ impl Host {
             }
         };
         drop(rt);
-        Ok(Reply::Diff(git::diff(&cwd, &from, &to, git::DIFF_CAP).await?))
+        let diff = git::diff(&cwd, &from, &to, git::DIFF_CAP).await?;
+        if whole {
+            // What the person sees is what the list counts.
+            self.keep_diff(thread, diff.stat).await;
+        }
+        Ok(Reply::Diff(diff))
     }
 
     pub(crate) async fn fs_list(&self, project: Option<&ProjectId>, path: &str) -> Res<Reply> {
@@ -103,6 +105,7 @@ impl Host {
             FsError::Escapes => Fail::Invalid("the path leaves the workspace".into()),
             other => other.into(),
         })?;
+        self.touch_diff(thread);
         Ok(Reply::Written { path })
     }
 

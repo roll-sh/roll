@@ -314,11 +314,17 @@ export function AgentsSurface({
     const before = wasShown.current;
     wasShown.current = shown;
     if (shown.kind !== "canvas" || before.kind === "canvas") return;
+    // A touch screen shows the tapped card's finger-sized tools (globals.css, `data-tapped`): the
+    // tap that opened what just closed (Escape, ×, Back) did its job, so the canvas comes back clear.
+    const touch = window.matchMedia("(hover: none)").matches;
+    if (touch) for (const el of document.querySelectorAll("[data-card][data-tapped]")) el.removeAttribute("data-tapped");
     const key = before.kind === "thread" ? `t:${before.thread}` : before.kind === "settings" && before.target !== "owner" ? before.target : null;
     const t = setTimeout(() => {
       const a = document.activeElement;
       // Focus left in a panel that is sliding out is lost too (it goes with the panel).
       if ((a && a !== document.body && a.isConnected && !a.closest("[data-panel][data-state=closing]")) || !lastInputWasKeyboard()) return;
+      // A focused card shows its tools there too: focus goes back only where they don't cover the canvas.
+      if (touch) return;
       const card = key ? root.current?.querySelector<HTMLElement>(`[data-card][data-key="${CSS.escape(key)}"]`) : null;
       const opener = lastCanvasFocus.current?.isConnected ? lastCanvasFocus.current : null;
       // Settings go back to what opened them (a card's ⋯, the sidebar's project menu), a conversation to its card.

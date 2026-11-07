@@ -23,8 +23,9 @@ import {
   TriangleAlert,
   X,
 } from "lucide-react";
-import { useMemo, useRef, useState, type ReactNode } from "react";
-import type { Automation, AutomationSpec, Catalog, Filter, FilterOp, Step, TestResult, Trigger } from "@/lib/automations-api";
+import { Popover as PopoverPrimitive } from "@base-ui/react/popover";
+import { useId, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
+import type { Automation, AutomationSpec, Catalog, Filter, FilterOp, Step, StepInfo, TestResult, Trigger } from "@/lib/automations-api";
 import {
   AGENT_EVENTS,
   CODE_EVENTS,
@@ -46,7 +47,8 @@ import {
   type Variable,
 } from "@/lib/automations-ui";
 import { field as fieldClass, openSettings } from "../settings-ui";
-import { cn, Menu, MenuGroup, MenuGroupLabel, MenuItem, MenuPopup, MenuSeparator, MenuTrigger, Segmented, Select } from "../ui";
+import { cn, Combobox, ComboboxItem, ComboboxList, ComboboxSearchInput, Menu, MenuGroup, MenuGroupLabel, MenuItem, MenuPopup, MenuSeparator, MenuTrigger, popupMotion, Segmented, Select } from "../ui";
+import { useLayer } from "../ui/layer";
 import { LookupPicker } from "../lookup-picker";
 import { useDismiss } from "../dismiss";
 import { Pop } from "../pop";
@@ -265,52 +267,129 @@ const GROUPS: { label: string; kinds: string[] }[] = [
   { label: "Send and wait", kinds: ["notify", "webhook", "delay"] },
 ];
 
-function AddStepMenu({ catalog, onPick, trigger, label = "Add a step" }: { catalog: Catalog; onPick: (kind: string) => void; trigger: ReactNode; label?: string }) {
-  const integrations = catalog.steps.filter((s) => !GROUPS.some((g) => g.kinds.includes(s.kind)));
-  const byIntegration = new Map<string, typeof integrations>();
-  for (const s of integrations) {
+/** The catalog's steps in the menu's order: agents, send and wait, then each integration. */
+function stepSections(catalog: Catalog): { label: string; steps: StepInfo[] }[] {
+  const known = (kinds: string[]) => kinds.map((k) => stepInfo(catalog, k)).filter((s): s is StepInfo => !!s);
+  const sections = GROUPS.map((g) => ({ label: g.label, steps: known(g.kinds) }));
+  const byIntegration = new Map<string, StepInfo[]>();
+  for (const s of catalog.steps) {
+    if (GROUPS.some((g) => g.kinds.includes(s.kind))) continue;
     const k = s.integration ?? "Other";
     byIntegration.set(k, [...(byIntegration.get(k) ?? []), s]);
   }
-  const item = (kind: string) => {
-    const info = stepInfo(catalog, kind);
-    if (!info) return null;
-    const Icon = stepIcon(kind);
-    return (
-      <MenuItem key={kind} onClick={() => onPick(kind)} className="items-start py-1.5">
-        <Icon className="mt-0.5 size-3.5" strokeWidth={1.75} />
-        <span className="min-w-0 flex-1">
-          <span className="flex items-center gap-1.5">
-            {info.title}
-            {info.needs_setup && <span className="rounded-[4px] border border-line-2 px-1 text-[10px] leading-[15px] text-subtle">Connect</span>}
-          </span>
-          <span className="block truncate text-[11.5px] text-subtle">{info.description}</span>
-        </span>
-      </MenuItem>
-    );
+  for (const [name, steps] of byIntegration) sections.push({ label: name[0].toUpperCase() + name.slice(1), steps });
+  return sections.filter((s) => s.steps.length > 0);
+}
+
+/** Steps matching every word typed (title, description, kind, integration); titles that start with it first. */
+function matchSteps(sections: { label: string; steps: StepInfo[] }[], query: string): { group: string; step: StepInfo }[] {
+  const all = sections.flatMap((g) => g.steps.map((step) => ({ group: g.label, step })));
+  const words = query.toLowerCase().split(/\s+/).filter(Boolean);
+  if (!words.length) return all;
+  const rank = ({ group, step }: { group: string; step: StepInfo }) => {
+    const title = step.title.toLowerCase();
+    const hay = `${title} ${step.description} ${step.kind} ${group}`.toLowerCase();
+    if (!words.every((w) => hay.includes(w))) return -1;
+    return title.startsWith(words[0]) ? 0 : words.every((w) => title.includes(w)) ? 1 : 2;
+  };
+  return all
+    .map((r) => ({ r, rank: rank(r) }))
+    .filter((x) => x.rank >= 0)
+    .sort((a, b) => a.rank - b.rank)
+    .map((x) => x.r);
+}
+
+/**
+ * "Add a step": a searchable list of the catalog's steps, like ⌘K (type to filter, ↑↓ to move, ↵ to add). It closes on a
+ * pick, Escape or a press outside, never on a blur alone (Safari doesn't focus a clicked row).
+ */
+function AddStepMenu({ catalog, onPick, trigger, label = "Add a step" }: { catalog: Catalog; onPick: (kind: string) => void; trigger: ReactNode; label?: string }) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const search = useRef<HTMLInputElement>(null);
+  const highlighted = useRef<string | null>(null);
+  const sections = useMemo(() => stepSections(catalog), [catalog]);
+  const rows = useMemo(() => matchSteps(sections, query), [sections, query]);
+  const keys = rows.map((r) => r.step.kind);
+  const listId = useId();
+  const layer = useLayer();
+  const pick = (kind: string) => {
+    setOpen(false);
+    setQuery("");
+    onPick(kind);
+  };
+  const onSearchKey = (e: KeyboardEvent<HTMLInputElement>) => {
+    if (e.key !== "Enter" || e.nativeEvent.isComposing) return;
+    const kind = highlighted.current && keys.includes(highlighted.current) ? highlighted.current : keys[0];
+    if (!kind) return;
+    (e as typeof e & { preventBaseUIHandler?: () => void }).preventBaseUIHandler?.();
+    e.preventDefault();
+    pick(kind);
   };
   return (
-    <Menu>
-      <MenuTrigger aria-label={label} title={label} className="outline-none focus-visible:ring-2 focus-visible:ring-accent/60 rounded-lg">
+    <PopoverPrimitive.Root
+      open={open}
+      onOpenChange={(next) => {
+        setOpen(next);
+        if (!next) setQuery("");
+      }}
+    >
+      <PopoverPrimitive.Trigger aria-label={label} title={label} className="rounded-lg outline-none focus-visible:ring-2 focus-visible:ring-accent/60">
         {trigger}
-      </MenuTrigger>
-      <MenuPopup align="center" className="w-80">
-        {GROUPS.map((g, i) => (
-          <MenuGroup key={g.label}>
-            {i > 0 && <MenuSeparator />}
-            <MenuGroupLabel>{g.label}</MenuGroupLabel>
-            {g.kinds.map(item)}
-          </MenuGroup>
-        ))}
-        {[...byIntegration].map(([name, steps]) => (
-          <MenuGroup key={name}>
-            <MenuSeparator />
-            <MenuGroupLabel>{name[0].toUpperCase() + name.slice(1)}</MenuGroupLabel>
-            {steps.map((s) => item(s.kind))}
-          </MenuGroup>
-        ))}
-      </MenuPopup>
-    </Menu>
+      </PopoverPrimitive.Trigger>
+      <PopoverPrimitive.Portal {...layer}>
+        <PopoverPrimitive.Positioner className="z-[130]" side="bottom" align="center" sideOffset={4}>
+          <PopoverPrimitive.Popup
+            aria-label={label}
+            // Opened by touch, the popup takes focus so a phone's keyboard stays down until the search is tapped.
+            initialFocus={(type) => (type === "touch" ? true : search.current)}
+            className={cn("rounded-lg text-fg outline-none", popupMotion)}
+          >
+            <div className="flex max-h-[min(28rem,var(--available-height))] w-80 max-w-(--available-width) flex-col rounded-lg border border-outline bg-popover shadow-pop inset-shadow-highlight">
+              <Combobox<string>
+                inline
+                open
+                items={keys}
+                filteredItems={keys}
+                filter={null}
+                autoHighlight
+                value={null}
+                onItemHighlighted={(k) => (highlighted.current = typeof k === "string" ? k : null)}
+                onValueChange={(k) => {
+                  if (typeof k === "string") pick(k);
+                }}
+              >
+                <ComboboxSearchInput ref={search} aria-label="Search steps" aria-controls={listId} placeholder="Search steps…" value={query} onChange={(e) => setQuery(e.target.value)} onKeyDown={onSearchKey} />
+                <ComboboxList id={listId} aria-label="Steps" className="max-h-96">
+                  {rows.map(({ group, step }, i) => {
+                    const Icon = stepIcon(step.kind);
+                    // Headings only while the list is in its own order; a search is ranked, so its rows say their group.
+                    const heading = !query.trim() && (i === 0 || rows[i - 1].group !== group) ? group : null;
+                    return (
+                      <div key={step.kind} role="presentation">
+                        {heading && <div className={cn("px-2 pb-1 text-[11px] font-medium text-subtle", i > 0 ? "mt-1 border-t border-line pt-2" : "pt-1")}>{heading}</div>}
+                        <ComboboxItem value={step.kind} className="w-full items-start py-1.5">
+                          <Icon className="mt-0.5 size-3.5" strokeWidth={1.75} />
+                          <span className="min-w-0 flex-1">
+                            <span className="flex items-center gap-1.5">
+                              {step.title}
+                              {step.needs_setup && <span className="rounded-[4px] border border-line-2 px-1 text-[10px] leading-[15px] text-subtle">Connect</span>}
+                              {query.trim() && <span className="ml-auto shrink-0 text-[10.5px] text-subtle">{group}</span>}
+                            </span>
+                            <span className="block truncate text-[11.5px] text-subtle">{step.description}</span>
+                          </span>
+                        </ComboboxItem>
+                      </div>
+                    );
+                  })}
+                </ComboboxList>
+                {rows.length === 0 && <p className="px-3 py-5 text-center text-[12.5px] text-subtle">No step matches “{query.trim()}”</p>}
+              </Combobox>
+            </div>
+          </PopoverPrimitive.Popup>
+        </PopoverPrimitive.Positioner>
+      </PopoverPrimitive.Portal>
+    </PopoverPrimitive.Root>
   );
 }
 

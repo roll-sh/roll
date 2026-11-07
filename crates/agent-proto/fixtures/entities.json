@@ -122,6 +122,11 @@
     ],
     "run_count": 3,
     "pending_requests": 1,
+    "diff": {
+      "files": 4,
+      "additions": 120,
+      "deletions": 18
+    },
     "plan_ready": true,
     "activity": "Waiting to run `cargo test`",
     "usage": {
@@ -182,6 +187,11 @@
     "orchestrator": true,
     "run_count": 3,
     "pending_requests": 0,
+    "diff": {
+      "files": 4,
+      "additions": 120,
+      "deletions": 18
+    },
     "plan_ready": false,
     "usage": {
       "input_tokens": 12000,
@@ -233,6 +243,11 @@
     "orchestrator": true,
     "run_count": 3,
     "pending_requests": 0,
+    "diff": {
+      "files": 4,
+      "additions": 120,
+      "deletions": 18
+    },
     "plan_ready": false,
     "usage": {
       "input_tokens": 12000,

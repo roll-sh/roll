@@ -77,6 +77,7 @@ impl Host {
             queued: Vec::new(),
             run_count: 0,
             pending_requests: 0,
+            diff: None,
             plan_ready: false,
             activity: None,
             usage: Usage::default(),
@@ -267,6 +268,7 @@ impl Host {
             queued: Vec::new(),
             run_count: 0,
             pending_requests: 0,
+            diff: None,
             plan_ready: false,
             activity: None,
             usage: Usage::default(),
@@ -469,6 +471,7 @@ impl Host {
         rt.private.refs.retain(|ordinal, _| *ordinal <= target.ordinal);
         self.rollback_providers(&mut rt, &rolled, target.ordinal).await?;
         rt.thread.context = self.conversation_context(&rt, target.ordinal)?;
+        self.count_whole(&mut rt, &target.commit).await;
         if !rolled.is_empty() {
             rt.thread.plan_ready = false;
         }

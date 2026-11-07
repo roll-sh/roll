@@ -16,7 +16,7 @@ import { openProjectDialog } from "@/lib/agents-project-dialogs";
 import { PullLine } from "./project-settings";
 import { PendingRequest } from "./pending-request";
 import { SandboxPanel } from "./sandbox";
-import { ago, DeliveredText, loginCommand, modelName, providerName, shortPath, Stat, StatusDot, threadStatusLabel, usageLine } from "./shared";
+import { ago, DeliveredText, loginCommand, modelName, providerName, shortPath, StatusDot, ThreadChanges, threadStatusLabel, usageLine } from "./shared";
 import { orchestration, OrchestratorChip, StatusPill, threadDone, threadPill } from "./thread-status";
 import { useCanvasFolds } from "./canvas-folds";
 import { MachineIcon, ProjectIcon, tint as tintStyle } from "./identity";
@@ -615,11 +615,7 @@ export const ThreadCard = memo(function ThreadCard({ thread, machine, project, l
           </span>
           <span className="ml-auto flex shrink-0 items-center gap-1.5 font-mono text-[10.5px]">
             {usage}
-            {lastRun?.stat && lastRun.status !== "rolled_back" && (lastRun.stat.additions > 0 || lastRun.stat.deletions > 0) && (
-              <span title={`Run ${lastRun.ordinal}'s changes`}>
-                <Stat stat={lastRun.stat} />
-              </span>
-            )}
+            <ThreadChanges thread={thread} last={lastRun} />
             {thread.context && <ContextMeter context={thread.context} size={12} label />}
           </span>
         </p>

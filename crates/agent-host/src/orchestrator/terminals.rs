@@ -94,6 +94,8 @@ impl Host {
             created_at: now(),
         };
         let id = record.id.clone();
+        // What a thread's terminal does to its files counts in its changes.
+        let owner = record.thread.clone();
         self.put(vec![Entity::Terminal(record)])?;
 
         let ring = Arc::new(Mutex::new(Ring::default()));
@@ -103,11 +105,15 @@ impl Host {
         let mut output = spawned.output;
         let host = self.me.clone();
         let out_id = id.clone();
+        let out_owner = owner.clone();
         let pump = tokio::spawn(async move {
             while let Some(chunk) = output.recv().await {
                 ring.lock().unwrap().push(&chunk);
                 let Some(host) = host.upgrade() else { return };
                 host.delta(Delta::Terminal { terminal: out_id.clone(), data: B64.encode(&chunk) });
+                if let Some(thread) = &out_owner {
+                    host.touch_diff(thread);
+                }
             }
         });
         let host = self.me.clone();
@@ -120,6 +126,9 @@ impl Host {
             let _ = tokio::time::timeout(Duration::from_secs(1), pump).await;
             let Some(host) = host.upgrade() else { return };
             host.terminals.lock().unwrap().remove(&exit_id);
+            if let Some(thread) = &owner {
+                host.touch_diff(thread);
+            }
             let code = status.ok().and_then(|s| s.code().or_else(|| s.signal().map(|n| 128 + n)));
             if let Ok(mut record) = host.terminal_record(&exit_id) {
                 record.status = TerminalStatus::Exited;

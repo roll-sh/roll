@@ -20,7 +20,7 @@ import { shortAgo } from "@/lib/agents-inbox";
 import { projectColor } from "@/lib/agents-identity";
 import { selectFromClick, selection, useSelected, useSelection } from "@/lib/agents-selection";
 import { tint } from "./identity";
-import { Stat } from "./shared";
+import { ThreadChanges } from "./shared";
 import { costOf, GroupPick, listKey, Pick, PrChip, RowStatus, useLongPress, type Collection } from "./thread-list";
 import { useAgents } from "./use-agents";
 
@@ -426,7 +426,7 @@ function BoardCardBody({ row, c, column, y, order, any, cursor, setCursor }: Car
         </span>
         <span className="ml-auto flex shrink-0 items-center gap-2">
           <PrChip row={row} />
-          <Stat stat={row.last?.status === "rolled_back" ? null : row.last?.stat} className="text-[11px]" />
+          <ThreadChanges thread={row.thread} last={row.last} className="text-[11px]" />
           <span className="font-mono text-[10.5px] text-subtle">{costOf(row)}</span>
         </span>
       </span>

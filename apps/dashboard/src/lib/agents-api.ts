@@ -294,6 +294,8 @@ export interface Thread {
   queued: QueuedMessage[];
   run_count: number;
   pending_requests: number;
+  /** The whole thread's changes (its base checkpoint to its files now: the "Whole thread" diff's numbers, terminal edits included); a run's `stat` is only that run's. Null until the daemon first counts it, and from daemons before it. */
+  diff: DiffStat | null;
   /** The newest run completed with a proposed plan (T3's `hasActionableProposedPlan`): "Plan ready" on the canvas while in plan mode. */
   plan_ready: boolean;
   /** One line about what the agent is doing right now. */
@@ -1813,6 +1815,8 @@ const settleD = tagged("state", {
 } satisfies Record<Settle["state"], Decoder<object>>);
 const snoozeD = obj<Snooze>({ until: int, at: int });
 
+const diffStatD = obj<DiffStat>({ files: int, additions: int, deletions: int });
+
 const threadD = obj<Thread>({
   id: str,
   project: str,
@@ -1832,6 +1836,7 @@ const threadD = obj<Thread>({
   queued: vec(obj<QueuedMessage>({ id: str, text: str, attachments: vec(attachmentD), at: int, delivers: withDefault(vec(str), () => []) })),
   run_count: int,
   pending_requests: int,
+  diff: opt(diffStatD),
   plan_ready: withDefault(bool, () => false),
   activity: opt(str),
   usage: usageD,
@@ -1861,7 +1866,6 @@ const threadD = obj<Thread>({
     () => ({ ...EMPTY_INBOX }),
   ),
 });
-const diffStatD = obj<DiffStat>({ files: int, additions: int, deletions: int });
 const changeKindD = literal("add", "modify", "delete", "rename");
 const fileStatD = obj<FileStat>({ path: str, change: changeKindD, additions: int, deletions: int });
 const runD = obj<Run>({

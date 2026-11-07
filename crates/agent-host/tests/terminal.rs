@@ -1,5 +1,5 @@
 //! Terminals: real PTYs through the daemon (input, output deltas, scrollback, resize, exit,
-//! close, thread terminals).
+//! close, thread terminals and the changes they make).
 
 mod common;
 
@@ -126,7 +126,7 @@ async fn thread_terminals_run_in_the_thread_and_go_with_it() {
         .run(Command::TerminalOpen {
             project: None,
             thread: Some(thread.clone()),
-            command: Some("pwd; read x".into()),
+            command: Some("pwd; read x; printf 'one\\ntwo\\n' > made.txt; echo written; read y".into()),
             script: None,
             cols: 80,
             rows: 24,
@@ -139,6 +139,11 @@ async fn thread_terminals_run_in_the_thread_and_go_with_it() {
     assert_eq!((t.thread.as_ref(), t.project.as_ref()), (Some(&thread), Some(&w.project)));
     let mut seen = String::new();
     read_until(&mut rx, &id, &mut seen, &cwd).await;
+    // A file made in the thread's terminal counts in the thread's changes once it goes quiet.
+    assert_eq!(w.run(input(&id, "\n")).await, Reply::Ok);
+    read_until(&mut rx, &id, &mut seen, "written").await;
+    let t = w.wait_thread(&thread, |t| t.diff.is_some()).await;
+    assert_eq!(t.diff, Some(DiffStat { files: 1, additions: 2, deletions: 0 }));
     assert_eq!(w.run(Command::ThreadDelete { thread: thread.clone() }).await, Reply::Ok);
     assert!(terminal(&w.state().await, &id).is_none());
     let unknown = w.run(Command::TerminalScrollback { terminal: TerminalId("trm_nope".into()) }).await;

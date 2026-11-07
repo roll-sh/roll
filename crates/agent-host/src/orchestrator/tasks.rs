@@ -528,6 +528,7 @@ impl Host {
             queued: Vec::new(),
             run_count: 0,
             pending_requests: 0,
+            diff: None,
             plan_ready: false,
             activity: None,
             usage: Usage::default(),

@@ -6,7 +6,7 @@
  * the same view filter and focus, so a filter applies the same way in every layout. Pure.
  */
 
-import { isBusy, type MachineId, type Run, type Thread, type ThreadId } from "./agents-api";
+import { isBusy, type DiffStat, type MachineId, type Run, type Thread, type ThreadId } from "./agents-api";
 import { shelved } from "./agents-graph";
 import { providerLabel } from "./agents-replay";
 import type { AgentsData } from "./agents-store";
@@ -116,7 +116,29 @@ export function namesOf(data: AgentsData): Names {
   };
 }
 
-const changesOf = (r: ThreadRow) => (r.last?.stat && r.last.status !== "rolled_back" ? r.last.stat.additions + r.last.stat.deletions : 0);
+/**
+ * What a thread changed, for the list, the board and the cards: the whole thread (`thread.diff`: its base to its files now,
+ * terminal edits too), or, from a daemon that doesn't count it, the newest run's (`whole: false`, labelled "Last run").
+ */
+export function threadChanges(t: Thread, last: Run | null | undefined): { stat: DiffStat; whole: boolean } | null {
+  if (t.diff) return { stat: t.diff, whole: true };
+  if (last?.stat && last.status !== "rolled_back") return { stat: last.stat, whole: false };
+  return null;
+}
+
+/** "Whole thread: 3 files, +12 −4" / "Last run (run 2): …", the title over a changes number. */
+export function changesTitle(changes: { stat: DiffStat; whole: boolean }, last: Run | null | undefined): string {
+  const { files, additions, deletions } = changes.stat;
+  const numbers = `${files} file${files === 1 ? "" : "s"}, +${additions} −${deletions}`;
+  if (!changes.whole) return `Last run${last ? ` (run ${last.ordinal})` : ""}: ${numbers}`;
+  const run = last?.stat && last.status !== "rolled_back" ? ` · last run +${last.stat.additions} −${last.stat.deletions}` : "";
+  return `Whole thread: ${numbers}${run}`;
+}
+
+const changesOf = (r: ThreadRow) => {
+  const c = threadChanges(r.thread, r.last);
+  return c ? c.stat.additions + c.stat.deletions : 0;
+};
 const bucketRank = (r: ThreadRow) => BUCKETS.indexOf(r.bucket) * 2 + (r.bucket === "done" && readyToLand(r.thread) ? 0 : 1);
 
 /** Rows in the order a sort asks for; ties fall back to the newest activity, then the id, so the order never flickers. */

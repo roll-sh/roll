@@ -1,6 +1,7 @@
 "use client";
 
-import type { DiffStat, ProviderInfo, Run, RunStatus, ThreadStatus, Usage } from "@/lib/agents-api";
+import type { DiffStat, ProviderInfo, Run, RunStatus, Thread, ThreadStatus, Usage } from "@/lib/agents-api";
+import { changesTitle, threadChanges } from "@/lib/agents-collection";
 import { delegatedTasks } from "@/lib/agents-worklog";
 
 /** `deliveredLabel` with what didn't complete in red: "2 delegated tasks finished · Build, Docs failed". */
@@ -38,6 +39,18 @@ export function Stat({ stat, className = "" }: { stat: DiffStat | null | undefin
   return (
     <span className={`font-mono tabular-nums ${className}`}>
       <span className="text-ok">+{stat.additions}</span> <span className="text-danger">−{stat.deletions}</span>
+    </span>
+  );
+}
+
+/** A thread's changes in the list, the board and on its card: the whole thread's, or the last run's where the daemon doesn't count the whole (the title says which). */
+export function ThreadChanges({ thread, last, className = "" }: { thread: Thread; last: Run | null | undefined; className?: string }) {
+  const changes = threadChanges(thread, last);
+  if (!changes || (!changes.stat.additions && !changes.stat.deletions)) return null;
+  const title = changesTitle(changes, last);
+  return (
+    <span role="img" aria-label={title} title={title} className="inline-flex">
+      <Stat stat={changes.stat} className={className} />
     </span>
   );
 }

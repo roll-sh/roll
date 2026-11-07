@@ -106,6 +106,7 @@ fn thread() -> Thread {
         ],
         run_count: 3,
         pending_requests: 1,
+        diff: Some(DiffStat { files: 4, additions: 120, deletions: 18 }),
         plan_ready: true,
         activity: Some("Waiting to run `cargo test`".into()),
         usage: Usage { input_tokens: 12_000, output_tokens: 3_400, cached_tokens: 9_000, cost_usd: Some(0.42) },

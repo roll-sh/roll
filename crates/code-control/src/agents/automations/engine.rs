@@ -17,7 +17,7 @@ use crate::Code;
 use agent_proto::StreamEvent;
 use agent_proto::automation::{
     AutomationEvent, AutomationEventId, AutomationId, AutomationRun, AutomationRunId, AutomationSpec, Concurrency, EventBrief, LogLevel, LogLine, OnError, RunBrief,
-    RunState, StepRun, StepState, Trigger, limits,
+    RunState, Step, StepRun, StepState, Trigger, limits,
 };
 use code_sql::{Conn, OptionalExtension, Row, params};
 use serde::{Deserialize, Serialize};
@@ -697,7 +697,7 @@ impl Code {
                 continue;
             }
             let Some(kind) = self.automations.registry.step(&def.kind) else {
-                self.fail_step(&mut r, i, format!("this server has no step kind {:?}", def.kind), def.on_error);
+                self.fail_step(&mut r, i, format!("this server has no step kind {:?}", def.kind), &def);
                 if r.run.status.is_final() {
                     return self.end(r, claim).await;
                 }
@@ -709,7 +709,7 @@ impl Code {
             let started = s.started_at.map(|t| t as i64).unwrap_or(now);
             if s.started_at.is_some() && now - started > timeout.as_millis() as i64 {
                 let msg = format!("timed out after {} s", timeout.as_secs());
-                self.fail_step(&mut r, i, msg, def.on_error);
+                self.fail_step(&mut r, i, msg, &def);
                 if r.run.status.is_final() {
                     return self.end(r, claim).await;
                 }
@@ -812,9 +812,9 @@ impl Code {
                         return Ok(());
                     }
                     let msg = format!("{why} (after {} attempts)", s.attempt);
-                    self.fail_step(&mut r, i, msg, def.on_error);
+                    self.fail_step(&mut r, i, msg, &def);
                 }
-                StepOutcome::Fail(why) => self.fail_step(&mut r, i, why, def.on_error),
+                StepOutcome::Fail(why) => self.fail_step(&mut r, i, why, &def),
             }
             if r.run.status.is_final() {
                 return self.end(r, claim).await;
@@ -826,7 +826,7 @@ impl Code {
     }
 
     /// A step failed for good: the run fails, unless the step goes on on error.
-    fn fail_step(&self, r: &mut RunRow, i: usize, why: String, on_error: OnError) {
+    fn fail_step(&self, r: &mut RunRow, i: usize, why: String, def: &Step) {
         let now = ms_now().max(0) as u64;
         let s = &mut r.run.steps[i];
         push_log(s, [line(LogLevel::Error, why.clone())]);
@@ -834,9 +834,10 @@ impl Code {
         s.error = Some(why.clone());
         s.next_at = None;
         s.finished_at = Some(now);
-        let id = s.id.clone();
-        if on_error == OnError::Fail {
-            finish(r, RunState::Failed, Some(format!("step {id} failed: {why}")));
+        // The step as the builder names it.
+        let step = if def.name.trim().is_empty() { def.id.clone() } else { format!("“{}”", def.name.trim()) };
+        if def.on_error == OnError::Fail {
+            finish(r, RunState::Failed, Some(format!("step {step} failed: {why}")));
         }
     }
 
