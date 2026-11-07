@@ -5,6 +5,7 @@
 
 use clap::Parser;
 use pg_engine::engine::{Engine, EngineOptions};
+use pg_engine::mode::{Mode, Profile};
 use pg_engine::server::{AuthMethod, ServerOptions};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -50,21 +51,31 @@ struct Args {
     /// (default: scram-sha-256 with --password, else trust).
     #[arg(long, value_parser = |s: &str| AuthMethod::parse(s).ok_or("trust, password, md5 or scram-sha-256"))]
     auth: Option<AuthMethod>,
-    /// Block cache shared by all databases, in MiB (default 64, or three quarters of
-    /// --memory-budget-mb).
+    /// Where the server leans when footprint and speed pull apart: `efficient` (the default:
+    /// small caches, idle sessions give their memory back, idle databases close; for test,
+    /// development and many-branch serverless use) or `performance` (caches from a quarter of
+    /// the memory the server may use, its container's limit or the machine's; sessions and
+    /// databases kept warm; for production). Results, errors and durability are the same in
+    /// both. Also `-c roll.engine_mode=...` or postgresql.auto.conf's (ALTER SYSTEM), read at
+    /// start. The flags below override single parts of the mode's profile.
+    #[arg(long, value_parser = |s: &str| Mode::parse(s).ok_or("efficient or performance"))]
+    mode: Option<Mode>,
+    /// Block cache shared by all databases, in MiB (default: the mode's, 64 in efficient mode;
+    /// or three quarters of --memory-budget-mb).
     #[arg(long)]
     cache_mb: Option<usize>,
-    /// Parse trees, statement templates and PL/pgSQL compiles shared by all sessions, in MiB (default 36, or a
-    /// quarter of --memory-budget-mb).
+    /// Parse trees, statement templates and PL/pgSQL compiles shared by all sessions, in MiB
+    /// (default: the mode's, 36 in efficient mode; or a quarter of --memory-budget-mb).
     #[arg(long)]
     plan_cache_mb: Option<usize>,
     /// What the caches shared by all sessions may hold together, in MiB: the block cache and
     /// the plan caches, 3 : 1 (--cache-mb or --plan-cache-mb, when given, set that part).
     #[arg(long)]
     memory_budget_mb: Option<usize>,
-    /// Close a database this many seconds after its last session ends.
-    #[arg(long, default_value_t = 60)]
-    idle_close_secs: u64,
+    /// Close a database this many seconds after its last session ends (default: the mode's,
+    /// 60 in efficient mode; performance mode keeps databases open).
+    #[arg(long)]
+    idle_close_secs: Option<u64>,
     /// Don't fsync the WAL on commit (faster, loses the last commits on a crash).
     #[arg(long)]
     no_sync: bool,
@@ -120,6 +131,64 @@ struct Args {
     /// User name maps in pg_ident.conf's format (pg_ident_file_mappings).
     #[arg(long, value_name = "FILE")]
     ident_file: Option<PathBuf>,
+}
+
+/// The custom parameter (`-c`, postgresql.auto.conf) naming the mode, as `--mode` does.
+const MODE_SETTING: &str = "roll.engine_mode";
+
+/// The server's profile (`pg_engine::mode`): the mode's, from --mode, else `-c
+/// roll.engine_mode`, else postgresql.auto.conf's, else efficient; then the explicit size and
+/// idle flags in place of its parts. A mode given by --mode is also set as the custom
+/// parameter, so `SHOW roll.engine_mode` reads it.
+fn profile(a: &mut Args) -> anyhow::Result<Profile> {
+    let parse = |v: &str, from: &str| {
+        Mode::parse(v).ok_or_else(|| anyhow::anyhow!("invalid {MODE_SETTING} \"{v}\" ({from}): efficient or performance"))
+    };
+    let argv = a.settings.iter().rev().find(|(k, _)| k.eq_ignore_ascii_case(MODE_SETTING));
+    let argv = argv.map(|(_, v)| parse(v, "command line")).transpose()?;
+    let mode = match (a.mode, argv) {
+        (Some(m), Some(c)) if m != c => anyhow::bail!("--mode {} and -c {MODE_SETTING}={} disagree", m.name(), c.name()),
+        (Some(m), None) => {
+            a.settings.push((MODE_SETTING.into(), m.name().into()));
+            m
+        }
+        (m, c) => match m.or(c) {
+            Some(m) => m,
+            None => {
+                let auto = std::fs::read_to_string(a.data.join(pg_engine::sysconf::AUTO_NAME)).unwrap_or_default();
+                let items = pg_engine::sysconf::parse(&auto, pg_engine::sysconf::AUTO_FILE);
+                match items.iter().rev().find(|i| i.name.as_deref().is_some_and(|n| n.eq_ignore_ascii_case(MODE_SETTING))) {
+                    Some(i) => parse(i.value.as_deref().unwrap_or(""), pg_engine::sysconf::AUTO_NAME)?,
+                    None => Mode::default(),
+                }
+            }
+        },
+    };
+    let mut p = Profile::new(mode, pg_engine::mode::server_memory());
+    if let Some(b) = a.memory_budget_mb {
+        p.cache_bytes = (b * 3 / 4) << 20;
+        p.plan_cache_bytes = (b / 4) << 20;
+    }
+    if let Some(mb) = a.cache_mb {
+        p.cache_bytes = mb << 20;
+    }
+    if let Some(mb) = a.plan_cache_mb {
+        p.plan_cache_bytes = mb << 20;
+    }
+    if let Some(s) = a.idle_close_secs {
+        p.idle_close = Duration::from_secs(s);
+    }
+    // EXPERIMENT (a180, remove before commit): single knobs by environment.
+    if let Ok(v) = std::env::var("ROLL_EXP_THP") {
+        p.huge_pages = v == "1";
+    }
+    if let Ok(v) = std::env::var("ROLL_EXP_TRIM") {
+        p.idle_trim = v == "1";
+    }
+    if let Some(us) = std::env::var("ROLL_EXP_SPIN_US").ok().and_then(|v| v.parse::<u64>().ok()) {
+        pg_engine::server::set_wait_spin(Duration::from_micros(us));
+    }
+    Ok(p)
 }
 
 fn parse_setting(s: &str) -> Result<(String, String), String> {
@@ -182,7 +251,6 @@ impl InitdbArgs {
 fn main() -> anyhow::Result<()> {
     #[cfg(feature = "heapprof")]
     heapprof::start();
-    idle::setup();
     raise_open_files();
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -191,7 +259,9 @@ fn main() -> anyhow::Result<()> {
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn".into()),
         )
         .init();
-    let a = Args::parse();
+    let mut a = Args::parse();
+    let profile = profile(&mut a)?;
+    idle::setup(&profile);
     // --listen is `postgres -h host -p port`: listen_addresses is the host as given (the port
     // is the one bound, which sessions read from the listener).
     if a.settings.iter().any(|(k, _)| k == "port" || k == "listen_addresses") {
@@ -208,13 +278,12 @@ fn main() -> anyhow::Result<()> {
         AuthMethod::Trust
     });
     let data_dir = a.data.clone();
-    let plan_mb = a.plan_cache_mb.unwrap_or(a.memory_budget_mb.map_or(pg_engine::lru::PLAN_CACHE_BYTES >> 20, |b| b / 4));
-    pg_engine::lru::set_plan_cache_bytes(plan_mb << 20);
+    pg_engine::lru::set_plan_cache_bytes(profile.plan_cache_bytes);
     let engine = Engine::open(EngineOptions {
         data_dir: a.data,
-        cache_bytes: a.cache_mb.unwrap_or(a.memory_budget_mb.map_or(64, |b| b * 3 / 4)) << 20,
+        cache_bytes: profile.cache_bytes,
         sync: !a.no_sync,
-        idle_close: Duration::from_secs(a.idle_close_secs),
+        idle_close: profile.idle_close,
         superuser: a.user,
         password: a.password,
         server_files: a.allow_server_files,
@@ -379,9 +448,14 @@ mod idle {
     const PR_SET_THP_DISABLE: c_int = 41;
     const MADV_DONTNEED: c_int = 4;
 
-    pub fn setup() {
-        // SAFETY: prctl with PR_SET_THP_DISABLE only sets a flag of this process.
-        unsafe { prctl(PR_SET_THP_DISABLE, 1 as c_ulong, 0 as c_ulong, 0 as c_ulong, 0 as c_ulong) };
+    pub fn setup(p: &pg_engine::mode::Profile) {
+        if !p.huge_pages {
+            // SAFETY: prctl with PR_SET_THP_DISABLE only sets a flag of this process.
+            unsafe { prctl(PR_SET_THP_DISABLE, 1 as c_ulong, 0 as c_ulong, 0 as c_ulong, 0 as c_ulong) };
+        }
+        if !p.idle_trim {
+            return;
+        }
         pg_engine::server::set_idle_hook(trim);
         // Memory freed by busy threads, or by threads that ended, goes back to the system
         // only when some thread runs the allocator's collection: after a burst of sessions
@@ -412,7 +486,7 @@ mod idle {
 
 #[cfg(not(target_os = "linux"))]
 mod idle {
-    pub fn setup() {}
+    pub fn setup(_: &pg_engine::mode::Profile) {}
 }
 
 /// The open-file limit up to its hard limit. One process holds every connection's socket and
