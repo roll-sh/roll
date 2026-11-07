@@ -79,6 +79,9 @@ struct Gathered {
     /// The measure's (sort key, key bytes, index tuple size) of each entry.
     keys: Vec<(u128, Vec<u8>, usize)>,
     parts: Vec<(usize, Part)>,
+    /// The first entry in index order past a btree's third of a page (`rowsize`): its key,
+    /// size and row's data key.
+    oversized: Option<(Vec<u8>, usize, Vec<u8>)>,
 }
 
 /// What every participant needs, shared.
@@ -116,7 +119,14 @@ impl Plan<'_> {
         if sort.len() <= 16 {
             sort = Vec::new();
         }
-        g.keys.push((prefix, sort, relsize::index_tuple(&self.ix_types, &vals, &text)));
+        let size = relsize::index_tuple(&self.ix_types, &vals, &text);
+        if size > crate::exec::rowsize::INDEX_SIZE_MASK {
+            return Err(crate::exec::rowsize::form_error(size));
+        }
+        if size > crate::exec::rowsize::BT_MAX_ITEM && g.oversized.as_ref().is_none_or(|o| k < o.0) {
+            g.oversized = Some((k.clone(), size, dkey.to_vec()));
+        }
+        g.keys.push((prefix, sort, size));
         match stored {
             Some(len) => part.sizes.push(relsize::heap_tuple_of_len(len)),
             None => {
@@ -325,14 +335,24 @@ impl Ddl<'_, '_> {
         let mut parts: Vec<(usize, Part)> = Vec::new();
         let mut keys = Vec::new();
         let mut sorted = Vec::new();
+        let mut oversized: Option<(Vec<u8>, usize, Vec<u8>)> = None;
         for g in gathered {
             let g = g?;
+            if let Some(o) = g.oversized
+                && oversized.as_ref().is_none_or(|m| o.0 < m.0)
+            {
+                oversized = Some(o);
+            }
             parts.extend(g.parts);
             keys.push(g.keys);
             sorted.push(g.entries);
         }
         if ix.unique {
             self.unique_check(t, bix, ix, &sorted)?;
+        }
+        if let Some((_, n, dkey)) = oversized {
+            let tid = crate::exec::dml::row_tid(t, &dkey, self.ctx);
+            return Err(crate::exec::rowsize::btree_error(t, bix, n, tid, self.ctx));
         }
         parts.sort_by_key(|p| p.0);
         let rows = parts.iter().map(|p| p.1.rows).sum();

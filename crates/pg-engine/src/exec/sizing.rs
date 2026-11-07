@@ -3600,6 +3600,10 @@ pub fn gin_vacuumed(t: &Table, ctx: &ExecCtx) -> Result<()> {
 
 /// The pending lists of `t`'s GIN indexes (or just `only`) were cleaned up.
 fn gin_cleaned(t: &Table, only: Option<u32>, ctx: &ExecCtx) -> Result<()> {
+    // (A table too big to model keeps no record of them: `index_built`.)
+    if is_estimated(t.oid, &ctx.sess.db) {
+        return Ok(());
+    }
     let has = {
         let rf = ctx.sess.db.relfiles.of(t.oid).read();
         t.indexes
@@ -4018,8 +4022,10 @@ pub fn index_built(t: &Table, index: u32, build: bool, prebuilt: Option<(Btree, 
     // A hash index's buckets come from estimate_rel_size's tuples at build time (kept
     // for any index: the new one may not be in the catalog yet).
     let est = crate::sql::costs::rel_size(t, ctx).tuples;
-    // A GIN or GiST index's build reads the rows there now.
-    if build {
+    // A GIN or GiST index's build reads the rows there now. (Only a modelled table's models
+    // ask which: a table too big to model is laid out afresh, `forget`, before it is
+    // modelled again.)
+    if build && !is_estimated(t.oid, &ctx.sess.db) {
         let start = index_prefix(t.oid, 0);
         let end = prefix_end(&start);
         let keys: HashSet<Vec<u8>> = ctx
@@ -4032,7 +4038,11 @@ pub fn index_built(t: &Table, index: u32, build: bool, prebuilt: Option<(Btree, 
         rf.gin_built.insert(index, vec![keys]);
         rf.gist_logs.remove(&index);
     } else {
-        ctx.sess.db.relfiles.of(t.oid).write().gin_built.remove(&index);
+        let mut rf = ctx.sess.db.relfiles.of(t.oid).write();
+        rf.gin_built.remove(&index);
+        if build {
+            rf.gist_logs.remove(&index);
+        }
     }
     {
         let mut rf = ctx.sess.db.relfiles.of(t.oid).write();

@@ -28,6 +28,7 @@ pub mod sizing;
 pub mod skipcount;
 pub mod spill;
 pub mod replication;
+pub mod rowsize;
 pub mod toast;
 pub mod trigger;
 pub mod tuplestore;
@@ -333,6 +334,8 @@ pub fn has_notice_sink() -> bool {
 pub struct ExecCtx<'a> {
     pub txn: &'a RefCell<Txn>,
     pub sess: &'a SessionState,
+    /// A catalog scan's opened version, only while its deferred rows are generated.
+    catalog_snapshot: Option<Arc<Catalog>>,
     pub(crate) temp_cleanup: Rc<spill::TempCleanup>,
     fmt: FormatCtx,
     pub params: &'a [Value],
@@ -765,6 +768,7 @@ impl<'a> ExecCtx<'a> {
         ExecCtx {
             txn,
             sess,
+            catalog_snapshot: None,
             temp_cleanup: Rc::default(),
             fmt,
             params,
@@ -895,6 +899,7 @@ impl<'a> ExecCtx<'a> {
         ExecCtx {
             txn: self.txn,
             sess: self.sess,
+            catalog_snapshot: self.catalog_snapshot.clone(),
             temp_cleanup: self.temp_cleanup.clone(),
             fmt,
             params,
@@ -950,6 +955,18 @@ impl<'a> ExecCtx<'a> {
         c
     }
 
+    /// Generate an opened catalog scan's rows after a nested statement changed the
+    /// transaction's catalog. The transaction and the caller's context keep that change.
+    pub(crate) fn reading_catalog(&self, cat: Arc<Catalog>) -> ExecCtx<'_> {
+        let mut c = self.child(self.params);
+        c.fmt.names = Some(Arc::new(CatalogNames::new(
+            cat.clone(),
+            self.search_path.clone(),
+        )));
+        c.catalog_snapshot = Some(cat);
+        c
+    }
+
     /// A child context (as `child`) that resolves names through `search_path`.
     pub fn child_with_path<'b>(&'b self, params: &'b [Value], search_path: Vec<String>) -> ExecCtx<'b> {
         let mut c = self.child(params);
@@ -978,9 +995,12 @@ impl<'a> ExecCtx<'a> {
         c
     }
 
-    /// The catalog as this transaction sees it (including its own DDL).
+    /// The catalog as this transaction sees it (including its own DDL), or an opened
+    /// catalog scan's version while its deferred rows are generated.
     pub fn catalog(&self) -> Arc<Catalog> {
-        self.txn.borrow().catalog()
+        self.catalog_snapshot
+            .clone()
+            .unwrap_or_else(|| self.txn.borrow().catalog())
     }
 
     /// current_user's oid.
