@@ -344,6 +344,32 @@ fn lazy_tags_are_the_listed_maps() {
     assert_eq!(LISTED, &LAZY_TAGS[..]);
 }
 
+/// What pg_class's whole generation reads, read now: the relation maps' directory records
+/// (`reldir`) and TOAST indexes, and the small per-relation maps, not the relations' entries
+/// (`read_all` parsed every table's: most of a database's first `\dt`).
+pub fn read_class(c: &Catalog) {
+    let (t, v) = (c.tables.ix(), c.views.ix());
+    std::thread::scope(|s| {
+        s.spawn(|| Part::read_all(&t.dir));
+        s.spawn(|| {
+            Part::read_all(&c.indexes.ix().dir);
+            Part::read_all(&c.sequences.ix().dir);
+            Part::read_all(&v.dir);
+        });
+        s.spawn(|| {
+            Part::read_all(&t.toast);
+            Part::read_all(&v.toast);
+            Part::read_all(&c.children);
+            c.relstats.read_all();
+        });
+        for m in [&c.rel_am, &c.rel_tablespace, &c.filenodes] {
+            s.spawn(move || m.read_all());
+        }
+        s.spawn(|| c.frozen_xids.read_all());
+        s.spawn(|| c.class_order.read_all());
+    });
+}
+
 /// A `PHash` entry's record key: the tag, the key's bucket, its bytes.
 fn hash_key<K: Key>(tag: u8, k: &K) -> Vec<u8> {
     let mut out = record_key(tag, 0);
