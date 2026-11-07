@@ -137,12 +137,20 @@ impl Analyzed {
 
     /// Plan the statement (again).
     pub fn plan(&self, ctx: &ExecCtx) -> Result<BoundQuery> {
+        #[cfg(debug_assertions)]
+        let (planned, choice) = crate::sql::paths::keeping_choice(|| self.planned(self.plan.clone(), ctx));
+        #[cfg(debug_assertions)]
+        let (plan, hidden_rtes) = planned?;
+        #[cfg(not(debug_assertions))]
         let (plan, hidden_rtes) = self.planned(self.plan.clone(), ctx)?;
         let mut perms = self.perms.clone();
         perms.add_plan_locks(&plan, &self.cat);
         let plan = Arc::new(plan);
         #[cfg(debug_assertions)]
-        crate::sql::paths::check_planned_total(&plan, ctx);
+        {
+            crate::sql::paths::check_planned_total(&plan, ctx);
+            crate::sql::paths::check_rechoose(&plan, choice, ctx);
+        }
         Ok(BoundQuery {
             plan,
             cols: self.cols.clone(),
@@ -158,11 +166,19 @@ impl Analyzed {
     /// `plan`, once.
     pub fn into_bound(mut self, ctx: &ExecCtx) -> Result<BoundQuery> {
         let plan = std::mem::replace(&mut self.plan, Plan::One);
+        #[cfg(debug_assertions)]
+        let (planned, choice) = crate::sql::paths::keeping_choice(|| self.planned(plan, ctx));
+        #[cfg(debug_assertions)]
+        let (plan, hidden_rtes) = planned?;
+        #[cfg(not(debug_assertions))]
         let (plan, hidden_rtes) = self.planned(plan, ctx)?;
         self.perms.add_plan_locks(&plan, &self.cat);
         let plan = Arc::new(plan);
         #[cfg(debug_assertions)]
-        crate::sql::paths::check_planned_total(&plan, ctx);
+        {
+            crate::sql::paths::check_planned_total(&plan, ctx);
+            crate::sql::paths::check_rechoose(&plan, choice, ctx);
+        }
         Ok(BoundQuery {
             plan,
             cols: self.cols,
