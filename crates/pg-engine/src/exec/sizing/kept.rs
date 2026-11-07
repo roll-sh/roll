@@ -653,7 +653,7 @@ mod tests {
         assert!(!s.state.db.relfiles.of(t.oid).read().heaps.contains_key(&t.oid));
         s.apply_step(|ctx| {
             assert!(heap_blocks(&t, ctx)?.is_some());
-            assert!(ctx.sess.db.relfiles.of(t.oid).read().kept_sizes.get(&t.oid).is_none());
+            assert!(!ctx.sess.db.relfiles.of(t.oid).read().kept_sizes.contains_key(&t.oid));
             assert_eq!(btree_blocks(t.oid, ix, &ctx.sess.db), Some(pages));
             Ok(())
         }).unwrap();
@@ -669,7 +669,7 @@ mod tests {
         reopen_models(&s.state.db);
         s.apply_step(|ctx| {
             assert!(planned_heap_blocks(&t, ctx)?.is_some());
-            assert!(ctx.sess.db.relfiles.of(t.oid).read().kept_sizes.get(&t.oid).is_some());
+            assert!(ctx.sess.db.relfiles.of(t.oid).read().kept_sizes.contains_key(&t.oid));
             let indexes = crate::sql::binder::bound_indexes(&t, ctx)?;
             let need: Vec<_> = indexes.iter().collect();
             assert!(matches!(take(&t, &need, ctx), Take::None));
@@ -677,7 +677,7 @@ mod tests {
             assert!(sizes_read(&ctx.sess.db.relfiles.of(t.oid).read(), t.oid).is_none());
             assert!(ensure(&t, &indexes, ctx)?);
             let rf = ctx.sess.db.relfiles.of(t.oid).read();
-            assert!(rf.kept_sizes.get(&t.oid).is_none());
+            assert!(!rf.kept_sizes.contains_key(&t.oid));
             assert!(rf.btrees.contains_key(&missing));
             Ok(())
         }).unwrap();
