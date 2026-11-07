@@ -1472,7 +1472,7 @@ thread_local! {
     /// Tables this thread found modelled (by database instance and table), with a watch on
     /// the heap's model and each btree's: `ensure`'s fast path, no shard lock while they are
     /// alive (a model dropped, replaced or detached retires its watch).
-    static MODELLED: std::cell::RefCell<HashMap<(u64, u32), (heapsim::SizeWatch, Vec<(u32, heapsim::SizeWatch)>)>> =
+    static MODELLED: std::cell::RefCell<FastMap<(u64, u32), (heapsim::SizeWatch, Vec<(u32, heapsim::SizeWatch)>)>> =
         Default::default();
 }
 
