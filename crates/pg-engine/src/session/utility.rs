@@ -871,7 +871,7 @@ impl Session {
                     == Some("force_generic_plan");
             self.infer_params = o.generic_plan;
             let bq = if !generic && !values.is_empty() && !p.param_types.is_empty() {
-                self.bound_custom(&p, &q, &values)
+                self.bound_custom(&p, &q, &values, false)
             } else {
                 self.bound_as(&p, &q, &values, declare)
             };
