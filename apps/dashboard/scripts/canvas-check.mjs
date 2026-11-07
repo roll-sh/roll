@@ -453,7 +453,7 @@ async function runGroup(browser, g, ctxOpts) {
 
 // ── reporting ──
 function report(results) {
-  const codes = "abcdefghiklmnopq!".split("");
+  const codes = "abcdefghiklmnopqrs!".split("");
   const lines = [];
   let pass = 0;
   for (const r of results.sort((a, b) => a.case.localeCompare(b.case))) {

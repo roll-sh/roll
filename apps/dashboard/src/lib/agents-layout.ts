@@ -588,9 +588,10 @@ export function fitPlan(positions: ReadonlyMap<string, Point>, size: (key: strin
       bottom = Math.max(bottom, p.y + s.h - r.y);
     }
   const k = bottom ? Math.min(room.floor, Math.max(room.brief ?? room.floor, fitZoom({ w: right, h: bottom }, { ...room, w: room.w - (room.reserve ?? 0) }))) : room.floor;
-  // Never a column cut at the right: a few points less, still brief, shows it whole.
+  // Never a column cut at the right: a few points less, still brief, shows it whole (not a phone:
+  // its Fit is its list at 100 %; two columns far out are Fit again's).
   const across = (room.w - (room.reserve ?? 0) - ACROSS_PAD * 2) / Math.max(1, r.w);
-  return { k: across < k ? Math.max(ACROSS_FLOOR, across) : k, all: false };
+  return { k: across < k && room.floor < 1 ? Math.max(ACROSS_FLOOR, across) : k, all: false };
 }
 
 /** Fit doesn't frame part of the canvas smaller than cards read (titles ~10 px, meta ~8 px)… */

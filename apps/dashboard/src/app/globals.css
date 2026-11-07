@@ -771,6 +771,16 @@ body {
     0 0 0 3px color-mix(in oklab, var(--accent) 16%, transparent),
     var(--card-shadow-hover);
 }
+/* Open and failed: its frame still says failed (an accent border over it hid the red, and far out
+   read as two outlines); the halo says it's open. */
+[data-card][data-selected] [data-drag][data-tone="error"] {
+  border-color: color-mix(in oklab, var(--danger) 60%, transparent);
+}
+[data-brief] [data-card][data-selected] [data-drag][data-tone] {
+  box-shadow:
+    inset 0 0 0 var(--tone-w) var(--tone-c),
+    0 0 0 3px color-mix(in oklab, var(--accent) 16%, transparent);
+}
 
 /* The canvas's compact density: cards keep their name, status and what they're doing, and fold
    the rest (`data-detail` in nodes.tsx). */

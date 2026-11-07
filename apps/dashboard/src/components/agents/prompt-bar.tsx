@@ -193,7 +193,7 @@ export function PromptBar({ ref, above }: { ref?: Ref<HTMLDivElement>; above?: R
           e.preventDefault();
           area.current?.focus();
         }}
-        className={`palette-glass pointer-events-auto w-full ${above ? "mb-[max(0.75rem,env(safe-area-inset-bottom))]" : "mb-[max(3.5rem,calc(env(safe-area-inset-bottom)+3rem))]"} cursor-text overflow-hidden transition-[border-radius] ${EASE} @min-[55rem]/bar:mb-4 @min-[55rem]/bar:w-[min(640px,calc(100%-25rem))] ${open ? "rounded-2xl" : "rounded-[22px]"}`}
+        className={`palette-glass pointer-events-auto w-full ${above ? "mb-[max(0.75rem,env(safe-area-inset-bottom))]" : "mb-[max(3.5rem,calc(env(safe-area-inset-bottom)+3rem))]"} cursor-text overflow-hidden transition-[border-radius] ${EASE} @min-[55rem]/bar:mb-4 @min-[55rem]/bar:w-[min(640px,calc(100%-31rem))] ${open ? "rounded-2xl" : "rounded-[22px]"}`}
       >
         {/* The same line open or closed: the text and caret never move. */}
         <div className="flex items-start gap-2.5 pr-3 pl-4">

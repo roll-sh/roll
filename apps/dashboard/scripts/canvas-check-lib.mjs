@@ -233,6 +233,19 @@ export function checkFrame(f, label, { fit }) {
       if (bad.length) say("q", `phone Fit again: ${bad.length} grids one column wide (${bad.slice(0, 3).join(", ")}) at ${Math.round(k * 100)} %`);
     }
   }
+  if (fit) {
+    // r: a phone's Fit (not Fit again) is its list at 100 %: two columns far out is Fit again's.
+    if (f.canvas.w < 640 && !s.overview && k < 0.95) say("r", `phone Fit at ${Math.round(k * 100)} % (its list reads at 100 %)`);
+    // s: the chrome never overlaps (the prompt bar's pieces, the zoom bar, the minimap): they never touch.
+    const parts = [...f.prompt.map((r, i) => [`prompt bar ${i}`, r]), ...(f.zoom ? [["zoom bar", f.zoom]] : []), ...(f.minimap ? [["minimap", f.minimap]] : [])];
+    const bad = [];
+    for (let i = 0; i < parts.length; i++)
+      for (let j = i + 1; j < parts.length; j++) {
+        if (parts[i][0].startsWith("prompt") && parts[j][0].startsWith("prompt")) continue;
+        if (meets(inflate(parts[i][1], 2), inflate(parts[j][1], 2))) bad.push(`${parts[i][0]} ${fmt(parts[i][1])} × ${parts[j][0]} ${fmt(parts[j][1])}`);
+      }
+    if (bad.length) say("s", `chrome overlaps: ${bad.join("; ")}`);
+  }
   // o: a gap between every two cards as drawn (8 world px at least; a request or pin stacks a gap under its card).
   {
     const G = 8 * k;
