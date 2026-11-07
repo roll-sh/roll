@@ -365,7 +365,14 @@ const LOOKUP_QUERIES: &[&str] = &[
     // Full index scans read by the workers (an index-only count, a grouping along an index).
     "SELECT count(*) FROM big2",
     "SELECT k, count(*), sum(id) FROM big2 WHERE id > 10 GROUP BY k HAVING sum(id) > 1000000",
+    // Bounded index ranges read by the workers: index-only counts and sums of the key.
+    "SELECT count(*) FROM big2 WHERE k < 70000",
+    "SELECT count(*), sum(k), min(k), max(k) FROM big2 WHERE k >= 1000 AND k < 90000",
+    "SELECT k, count(*) FROM big2 WHERE k BETWEEN 5 AND 140000 GROUP BY k HAVING count(*) > 2 ORDER BY k LIMIT 50",
 ];
+
+/// The last of `LOOKUP_QUERIES` that run as index scans (sequential and bitmap scans off).
+const LOOKUP_INDEXED: usize = 5;
 
 #[test]
 fn parallel_lookups_match_serial() {
@@ -408,7 +415,7 @@ fn parallel_lookups_match_serial_inner() {
             .enumerate()
             .filter(|(i, _)| which.contains(i))
             .map(|(i, q)| {
-                let off = i + 2 >= LOOKUP_QUERIES.len();
+                let off = i + LOOKUP_INDEXED >= LOOKUP_QUERIES.len();
                 if off {
                     s.query("SET enable_seqscan = off; SET enable_hashagg = off; SET enable_bitmapscan = off").unwrap();
                 }

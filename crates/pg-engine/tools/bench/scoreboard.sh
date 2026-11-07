@@ -47,6 +47,10 @@ export BENCH_DATA=${SB_DATA:-$HOME/.cache/scoreboard}
 export SERVER_CPUS=${SERVER_CPUS:-20-23} CLIENT_CPUS=${CLIENT_CPUS:-8-11}
 export PG_PORT=${PG_PORT:-55370} ENGINE_PORT=${ENGINE_PORT:-55371} PG_NAME=${PG_NAME:-sb-pg}
 export PG_NETWORK=host PG_CPU_SHARES=2
+# pgrust (github.com/malisper/pgrust), a third server (SB_PGRUST= empty leaves it out): run.sh's
+# pgrust-start, in a container as PostgreSQL's (same cpuset, CPU weight, slice, network).
+export PGRUST_PORT=${PGRUST_PORT:-55372} PGRUST_NAME=${PGRUST_NAME:-$PG_NAME-pgrust}
+SERVERS="pg engine"; [ -n "${SB_PGRUST-1}" ] && SERVERS="pg engine pgrust"
 # The engine runs in a container of its own, as PostgreSQL does (run.sh's ENGINE_DOCKER): the
 # same slice, cpuset and CPU weight. ENGINE_DOCKER= (empty) runs it on the host as before.
 export ENGINE_DOCKER=${ENGINE_DOCKER-1} ENGINE_NAME=${ENGINE_NAME:-$PG_NAME-engine}
@@ -63,28 +67,28 @@ else
 fi
 ONLY=${SB_ONLY:-pgbench,oltp,analytic,tpch,bulk,ddl,connect}
 has() { case ",$ONLY," in *",$1,"*) return 0 ;; esac; return 1; }
-for p in "$PG_PORT" "$ENGINE_PORT"; do
+for p in "$PG_PORT" "$ENGINE_PORT" "$PGRUST_PORT"; do
   if ss -ltn | grep -q ":$p "; then echo "port $p busy: pick PG_PORT / ENGINE_PORT" >&2; exit 1; fi
 done
 
 # ---- probes: CPU seconds, bytes written, memory bytes of the server `t` (pg | engine)
-PG_CG=; EN_CG=
+PG_CG=; EN_CG=; PR_CG=
 cg() { echo "/sys/fs/cgroup/system.slice/docker-$(docker inspect -f '{{.Id}}' "$1").scope"; }
 epid() { cat "$BENCH_DATA/engine.pid"; }
 # (A container's probes are its cgroup's, whichever server it holds: CPU of every process in
 # it, bytes written, anon + shmem memory.)
-cgof() { if [ "$1" = pg ]; then echo "$PG_CG"; else echo "$EN_CG"; fi; }
+cgof() { case $1 in pg) echo "$PG_CG" ;; pgrust) echo "$PR_CG" ;; *) echo "$EN_CG" ;; esac; }
 cpu() {
-  if [ "$1" = pg ] || [ -n "$ENGINE_DOCKER" ]; then awk '/^usage_usec/ {printf "%.3f", $2 / 1e6}' "$(cgof "$1")/cpu.stat"
+  if [ "$1" != engine ] || [ -n "$ENGINE_DOCKER" ]; then awk '/^usage_usec/ {printf "%.3f", $2 / 1e6}' "$(cgof "$1")/cpu.stat"
   else awk -v hz="$(getconf CLK_TCK)" '{sub(/.*\) /, ""); printf "%.3f", ($12 + $13) / hz}' "/proc/$(epid)/stat"; fi
 }
 wbytes() {
-  if [ "$1" = pg ] || [ -n "$ENGINE_DOCKER" ]; then
+  if [ "$1" != engine ] || [ -n "$ENGINE_DOCKER" ]; then
     awk '{for (i = 2; i <= NF; i++) if ($i ~ /^wbytes=/) {sub(/wbytes=/, "", $i); s += $i}} END {print s + 0}' "$(cgof "$1")/io.stat"
   else awk '/^write_bytes/ {print $2}' "/proc/$(epid)/io"; fi
 }
 mem() {
-  if [ "$1" = pg ] || [ -n "$ENGINE_DOCKER" ]; then awk '$1 == "anon" || $1 == "shmem" {s += $2} END {print s + 0}' "$(cgof "$1")/memory.stat"
+  if [ "$1" != engine ] || [ -n "$ENGINE_DOCKER" ]; then awk '$1 == "anon" || $1 == "shmem" {s += $2} END {print s + 0}' "$(cgof "$1")/memory.stat"
   else awk '/^VmRSS/ {print $2 * 1024}' "/proc/$(epid)/status"; fi
 }
 sampler() { # sampler <t> <file>: the peak of mem() until <file>.stop exists
@@ -109,31 +113,47 @@ phase() {
   touch "$f.stop"; wait "$sp"
   printf '%s\n' "$out" | sed "s/^/[$r $t $w] /" >>"$LOG"
   if echo "$out" | grep -qE $'\terror=|\terrors=[1-9]|^ERROR|FATAL|failed transactions: [1-9]'; then ok=0; fi
+  # (A failed phase's first error line, for the table's n/a.)
+  local err=""
+  if [ "$ok" = 0 ]; then
+    err=$(echo "$out" | grep -m1 -E 'error|ERROR|FATAL|failed' | tr '\t' ' ' | cut -c1-160)
+  fi
   # (Fixed-time phases: pgbench's tps and transactions; the bench client's tps and ops.)
   tps=$(echo "$out" | sed -n -e 's/^tps = \([0-9.]*\).*/\1/p' -e 's/.*\ttps=\([0-9.]*\).*/\1/p' | head -1)
   ops=$(echo "$out" | sed -n -e 's/^number of transactions actually processed: \([0-9]*\).*/\1/p' -e 's/.*\tops=\([0-9]*\).*/\1/p' | head -1)
-  printf 'SCORE\t%s\t%s\t%s\tkind=%s\tsecs=%s\ttps=%s\tops=%s\tcpu_s=%s\twrite_mb=%s\tpeak_mb=%s\tok=%s\n' \
+  printf 'SCORE\t%s\t%s\t%s\tkind=%s\tsecs=%s\ttps=%s\tops=%s\tcpu_s=%s\twrite_mb=%s\tpeak_mb=%s\tok=%s\terr=%s\n' \
     "$r" "$t" "$w" "$kind" "$(calc "$s1 - $s0")" "${tps:-}" "${ops:-}" "$(calc "$c1 - $c0")" \
-    "$(calc "($w1 - $w0) / 1048576")" "$(calc "$(cat "$f") / 1048576")" "$ok" | tee -a "$OUT"
+    "$(calc "($w1 - $w0) / 1048576")" "$(calc "$(cat "$f") / 1048576")" "$ok" "$err" | tee -a "$OUT"
   rm -f "$f" "$f.stop"
 }
 
 start() { # a fresh server
-  if [ "$1" = pg ]; then "$RUN" pg-stop; "$RUN" pg-start >>"$LOG" 2>&1; PG_CG=$(cg "$PG_NAME")
-  else
-    "$RUN" engine-stop; rm -rf "$BENCH_DATA/engine"; "$RUN" engine-start >>"$LOG" 2>&1
-    if [ -n "$ENGINE_DOCKER" ]; then EN_CG=$(cg "$ENGINE_NAME"); fi
-  fi
+  # (The ports sit in Linux's ephemeral range: a client's socket can hold one for a moment, and
+  # PostgreSQL then exits "Address in use". Start again then, up to 5 times.)
+  local try ok
+  for try in 1 2 3 4 5; do
+    ok=1
+    if [ "$1" = pg ]; then "$RUN" pg-stop; "$RUN" pg-start >>"$LOG" 2>&1; PG_CG=$(cg "$PG_NAME")
+      [ "$(docker inspect -f '{{.State.Running}}' "$PG_NAME" 2>/dev/null)" = true ] || ok=0
+    elif [ "$1" = pgrust ]; then "$RUN" pgrust-stop; "$RUN" pgrust-start >>"$LOG" 2>&1 || ok=0; PR_CG=$(cg "$PGRUST_NAME")
+      [ "$(docker inspect -f '{{.State.Running}}' "$PGRUST_NAME" 2>/dev/null)" = true ] || ok=0
+    else
+      "$RUN" engine-stop; rm -rf "$BENCH_DATA/engine"; "$RUN" engine-start >>"$LOG" 2>&1 || ok=0
+      if [ -n "$ENGINE_DOCKER" ]; then EN_CG=$(cg "$ENGINE_NAME"); fi
+    fi
+    [ "$ok" = 1 ] && return 0
+    echo "start $1: not up (try $try), again" >>"$LOG"; sleep 5
+  done
 }
-stop() { if [ "$1" = pg ]; then "$RUN" pg-stop; else "$RUN" engine-stop; fi; }
-trap 'stop pg; stop engine' EXIT
+stop() { case $1 in pg) "$RUN" pg-stop ;; pgrust) "$RUN" pgrust-stop ;; *) "$RUN" engine-stop ;; esac; }
+trap 'for t in $SERVERS; do stop "$t"; done' EXIT
 
 # ---- the footprint gate, one fresh server at a time
 printf 'SELECT 1;\n\\sleep 40 s\n' >"$BENCH_DATA/idle-session.sql"
-for t in pg engine; do
+for t in $SERVERS; do
   start "$t"
-  if [ "$t" = pg ]; then
-    kb=$(docker exec "$PG_NAME" sh -c 'du -sk "$PGDATA"' | awk '{print $1}')
+  if [ "$t" != engine ]; then
+    kb=$(docker exec "$([ "$t" = pg ] && echo "$PG_NAME" || echo "$PGRUST_NAME")" sh -c 'du -sk "$PGDATA"' | awk '{print $1}')
   else
     kb=$(du -sk "$BENCH_DATA/engine" | awk '{print $1}')
   fi
@@ -141,7 +161,7 @@ for t in pg engine; do
   sleep 10
   c0=$(cpu "$t"); sleep "$IDLE_SECS"; c1=$(cpu "$t")
   printf 'GATE\t%s\tidle_cpu_s_5min\t%s\n' "$t" "$(calc "($c1 - $c0) * 300 / $IDLE_SECS")" | tee -a "$OUT"
-  port=$PG_PORT; [ "$t" = engine ] && port=$ENGINE_PORT
+  port=$PG_PORT; [ "$t" = engine ] && port=$ENGINE_PORT; [ "$t" = pgrust ] && port=$PGRUST_PORT
   docker run --rm --network host --cpuset-cpus "$CLIENT_CPUS" -e PGPASSWORD=pw -v "$BENCH_DATA:$BENCH_DATA" "$IMG" \
     pgbench -h 127.0.0.1 -p "$port" -U postgres -n -c 100 -j 4 -t 1 -f "$BENCH_DATA/idle-session.sql" postgres >>"$LOG" 2>&1 &
   bp=$!
@@ -152,9 +172,9 @@ for t in pg engine; do
 done
 
 # ---- the workloads, both servers up, rounds interleaved
-start pg; start engine
-for t in pg engine; do "$RUN" bench "$t" --label sb createdb --db bench >>"$LOG" 2>&1; done
-if has tpch; then for t in pg engine; do "$RUN" bench "$t" --label sb createdb --db tpch >>"$LOG" 2>&1; done; fi
+for t in $SERVERS; do start "$t"; done
+for t in $SERVERS; do "$RUN" bench "$t" --label sb createdb --db bench >>"$LOG" 2>&1; done
+if has tpch; then for t in $SERVERS; do "$RUN" bench "$t" --label sb createdb --db tpch >>"$LOG" 2>&1; done; fi
 if [ "$MODE" = quick ]; then
   PGB_SCALES="1"; PGB_CLIENTS="1 8 32"; OLTP_ROWS=100000; OLTP_SECS=5; OLTP_CLIENTS="8"
   OLTP_CASES="point_select range_scan_100 insert update_indexed"; OLTP_C32="update_indexed"; AN_ROWS="200000"; AN_REPS=1
@@ -168,7 +188,11 @@ else
 fi
 both() { # both <round> <workload> <kind> <command, @T@ standing for the server>...
   local r=$1 w=$2 kind=$3 t; shift 3
+  # (Rounds rotate which server goes first: with pgrust, each takes each place in turn.)
   local order="pg engine"; [ $((r % 2)) -eq 0 ] && order="engine pg"
+  case "$SERVERS:$((r % 3))" in
+    *pgrust:1) order="pg engine pgrust" ;; *pgrust:2) order="engine pgrust pg" ;; *pgrust:0) order="pgrust pg engine" ;;
+  esac
   for t in $order; do phase "$r" "$t" "$w" "$kind" "${@//@T@/$t}"; done
 }
 for r in $(seq 1 "$ROUNDS"); do
@@ -220,5 +244,5 @@ for r in $(seq 1 "$ROUNDS"); do
     both "$r" "connect 100 sessions" work "$RUN" bench @T@ --label sb idle --sessions 100 --dbs 10
   fi
 done
-stop pg; stop engine; trap - EXIT
+for t in $SERVERS; do stop "$t"; done; trap - EXIT
 python3 "$HERE/scoreboard.py" "$OUT" "$MODE" "$ROUNDS" "$IDLE_SECS" ${UPDATE:+"$UPDATE"}

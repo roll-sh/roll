@@ -90,15 +90,6 @@ pub fn update(up: &UpdatePlan, cat: &Catalog, fmt: &crate::types::text::FormatCt
     let t = &up.rules.table;
     let Some(s) = target_scan(&up.source, t.oid) else { return super::directjoin::join_update(up, cat, fmt) };
     let spec = super::scan::spec(s, None, cat, fmt);
-        || !is_postgres_fdw(cat, t)
-        || up.inh
-        || !up.members.is_empty()
-        || up.route.is_some()
-        || up.rules.view
-        || up.old_new.is_some()
-        || !up.rules.rls_checks.is_empty()
-        || !up.rules.view_checks.is_empty()
-        || has_row_triggers(&up.rules.triggers, tt::UPDATE)
     if !spec.local.is_empty() || !spec.params.is_empty() {
         return None;
     }

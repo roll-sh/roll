@@ -3,7 +3,8 @@
 # pinned to the same CPUs. See BENCH.md.
 #
 #   tools/bench/run.sh pg-start | pg-stop | engine-start [--no-sync] | engine-stop
-#   tools/bench/run.sh pgbench <pg|engine> <pgbench args...>
+#   tools/bench/run.sh pgrust-start | pgrust-stop
+#   tools/bench/run.sh pgbench <pg|engine|pgrust> <pgbench args...>
 #   tools/bench/run.sh bench <pg|engine> <workload> [--opt value...]
 #   tools/bench/run.sh inproc <workload> [--opt value...]   (the engine server stopped)
 #   tools/bench/run.sh psql <pg|engine> <sql>
@@ -38,10 +39,15 @@ BIN=${BENCH_BIN:-$ROOT/target/release}
 BENCH=${BENCH_CLIENT:-$BIN/examples/bench}; [ -x "$BENCH" ] || BENCH=$BIN/bench
 mkdir -p "$DATA/logs"
 
-port() { if [ "$1" = pg ]; then echo "$PG_PORT"; else echo "$ENGINE_PORT"; fi; }
+# pgrust (github.com/malisper/pgrust, AGPL: benchmarked only), a third server for the
+# scoreboard: its image, run as PostgreSQL's is, on PGRUST_PORT.
+PGRUST_NAME=${PGRUST_NAME:-$PG_NAME-pgrust}
+PGRUST_PORT=${PGRUST_PORT:-55362}
+PGRUST_IMAGE=${PGRUST_IMAGE:-malisper/pgrust@sha256:9ec8cbd68b422729ef3d5f6062e8ac501607357a0a5832bd1c6e0b69670360a9}
+port() { case $1 in pg) echo "$PG_PORT" ;; pgrust) echo "$PGRUST_PORT" ;; *) echo "$ENGINE_PORT" ;; esac; }
 memopt() {
-  if [ "$1" = pg ]; then
-    id=$(docker inspect -f '{{.Id}}' "$PG_NAME")
+  if [ "$1" = pg ] || [ "$1" = pgrust ]; then
+    id=$(docker inspect -f '{{.Id}}' "$([ "$1" = pg ] && echo "$PG_NAME" || echo "$PGRUST_NAME")")
     echo "--mem-cgroup /sys/fs/cgroup/system.slice/docker-$id.scope"
   elif [ -n "${ENGINE_DOCKER:-}" ]; then
     id=$(docker inspect -f '{{.Id}}' "$ENGINE_NAME")
@@ -76,6 +82,35 @@ pg-start)
 pg-stop)
   docker rm -f "$PG_NAME" >/dev/null 2>&1 || true
   docker volume rm "$PG_NAME-data" >/dev/null 2>&1 || true
+  ;;
+pgrust-start)
+  # Its defaults, plus what its README asks of a server (a 64 MB stack, RUST_MIN_STACK,
+  # max_stack_depth, io_method=sync) and max_connections for the footprint gate's 100 idle
+  # sessions (its default 100 leaves 97). The entrypoint is the official image's: the port is
+  # PGPORT's (a `-c port` would hide the entrypoint's temporary server from it).
+  docker rm -f "$PGRUST_NAME" >/dev/null 2>&1 || true
+  docker volume rm "$PGRUST_NAME-data" >/dev/null 2>&1 || true
+  # shellcheck disable=SC2086
+  docker run -d --name "$PGRUST_NAME" --cpuset-cpus "$SERVER_CPUS" --shm-size=1g \
+    ${PG_CPU_SHARES:+--cpu-shares "$PG_CPU_SHARES"} --network host --ulimit stack=67108864 \
+    -e RUST_MIN_STACK=33554432 -e PGPORT="$PGRUST_PORT" -v "$PGRUST_NAME-data":/var/lib/postgresql \
+    -e POSTGRES_PASSWORD=pw -e POSTGRES_INITDB_ARGS="--locale=C --encoding=UTF8" \
+    "$PGRUST_IMAGE" -c listen_addresses=127.0.0.1 -c max_stack_depth=60000 -c io_method=sync \
+    -c max_connections=300 >/dev/null
+  i=0
+  until docker exec "$PGRUST_NAME" psql -U postgres -h 127.0.0.1 -p "$PGRUST_PORT" -Atc "select 1" >/dev/null 2>&1; do
+    sleep 1; i=$((i+1)); [ $i -lt 180 ] || exit 1
+  done
+  # (The entrypoint's temporary server answers too: wait for the one that stays.)
+  sleep 5
+  until docker exec "$PGRUST_NAME" psql -U postgres -h 127.0.0.1 -p "$PGRUST_PORT" -Atc "select 1" >/dev/null 2>&1; do
+    sleep 1; i=$((i+1)); [ $i -lt 180 ] || exit 1
+  done
+  docker exec "$PGRUST_NAME" psql -U postgres -h 127.0.0.1 -p "$PGRUST_PORT" -Atc "select version()"
+  ;;
+pgrust-stop)
+  docker rm -f "$PGRUST_NAME" >/dev/null 2>&1 || true
+  docker volume rm "$PGRUST_NAME-data" >/dev/null 2>&1 || true
   ;;
 engine-start)
   if ss -ltn | grep -q ":$ENGINE_PORT "; then echo "port $ENGINE_PORT busy" >&2; exit 1; fi

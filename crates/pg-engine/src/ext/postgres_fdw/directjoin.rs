@@ -82,7 +82,7 @@ impl Source<'_> {
         for e in list {
             e.walk(&mut |x| target_whole |= matches!(x, Expr::Row(items, _) if crate::sql::binder::is_whole_row(x) && items.iter().all(|c| matches!(c, Expr::Col(i, _) if *i < n))));
         }
-        let mut push_col = |i: usize, items: &mut Vec<Back>, sql: &mut Vec<String>, seen: &mut Vec<usize>| -> bool {
+        let push_col = |i: usize, items: &mut Vec<Back>, sql: &mut Vec<String>, seen: &mut Vec<usize>| -> bool {
             if seen.contains(&i) {
                 return true;
             }

@@ -214,8 +214,8 @@ impl<'a> Sql<'a> {
                         ignore_conds.extend(joinclauses.iter().cloned());
                         joinclauses = &[];
                     }
-                    outer_is_target = is(outer, t);
-                    inner_is_target = !outer_is_target && is(inner, t);
+                    outer_is_target = is(&**outer, t);
+                    inner_is_target = !outer_is_target && is(&**inner, t);
                 }
                 let mut add_o = Vec::new();
                 let mut add_i = Vec::new();
