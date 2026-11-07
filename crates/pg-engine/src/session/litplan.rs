@@ -1136,7 +1136,7 @@ fn value_free_column(cat: &Cat, table: &crate::catalog::Table, name: &str) -> Op
         all.iter()
             .filter(|s| s.attnum as usize == col + 1)
             .any(|s| s.slots.iter().any(|sl| sl.kind == 1))
-    });
+    }) || crate::sql::costs::col_stats(cat, table.oid, col).is_some_and(|s| s.slots.iter().any(|sl| sl.kind == 1));
     (!mcv).then_some(())
 }
 

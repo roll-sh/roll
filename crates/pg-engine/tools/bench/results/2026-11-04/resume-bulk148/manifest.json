@@ -1,0 +1,7 @@
+{
+  "head": "19ad085cf6402024e13b5ba79cee674dbaa31a52",
+  "binary": "/home/meszmate/.cache/a148/t-dist/dist/roll-engine",
+  "binary_sha256": "7c13b9470aedcfb433ff968c551e8a2a2319deeeed7de2fbc5086ca41d13df21",
+  "rounds": 3,
+  "note": "Original pending crun3 measurement and timing boundaries; diagnostic copies preserve outputs and post-step row checks. Three rounds do not satisfy five-run comparative claim gate."
+}

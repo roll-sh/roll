@@ -520,6 +520,37 @@ impl DecInt {
     }
 
     /// The magnitude's ASCII decimal digits ("0" for zero).
+    /// The magnitude's decimal digits, written at the end of `buf` (None: they don't fit).
+    pub fn magnitude_digits<'a>(&self, buf: &'a mut [u8]) -> Option<&'a str> {
+        let n = buf.len();
+        let Some((&top, rest)) = self.mag.split_last() else {
+            buf[n - 1] = b'0';
+            return std::str::from_utf8(&buf[n - 1..]).ok();
+        };
+        if self.mag.len() * LIMB_DIGITS > n {
+            return None;
+        }
+        let mut at = n;
+        for &l in rest {
+            let mut v = l;
+            for _ in 0..LIMB_DIGITS {
+                at -= 1;
+                buf[at] = b'0' + (v % 10) as u8;
+                v /= 10;
+            }
+        }
+        let mut v = top;
+        loop {
+            at -= 1;
+            buf[at] = b'0' + (v % 10) as u8;
+            v /= 10;
+            if v == 0 {
+                break;
+            }
+        }
+        std::str::from_utf8(&buf[at..]).ok()
+    }
+
     pub fn magnitude_string(&self) -> String {
         let Some((&top, rest)) = self.mag.split_last() else {
             return "0".to_string();

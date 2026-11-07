@@ -406,7 +406,7 @@ impl Exec<'_> {
             return Ok(None);
         }
         if self.node.is_none() {
-            *self.node = Some(crate::exec::nodes::open(self.plan, ctx)?);
+            *self.node = Some(crate::exec::nodes::open_need(self.plan, self.scan_need(), ctx)?);
         }
         ctx.check()?;
         let node = self.node.as_mut().expect("opened");
@@ -417,6 +417,14 @@ impl Exec<'_> {
                 Ok(None)
             }
         }
+    }
+
+    /// The columns of a plain scan's rows something reads, when the target list (and a
+    /// qual) run apart over it: the rest needn't be decoded. None: all of them.
+    fn scan_need(&self) -> Option<Vec<bool>> {
+        let Plan::Scan(_) = &**self.plan else { return None };
+        let top = self.project.or(self.coerce)?;
+        crate::exec::need::of(top.iter().chain(self.qual))
     }
 
     /// Casts to the cursor's columns.

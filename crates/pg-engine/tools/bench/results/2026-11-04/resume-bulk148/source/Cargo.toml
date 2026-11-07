@@ -1,0 +1,90 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "UNLICENSED"
+publish = false
+
+[workspace.dependencies]
+anyhow = "1"
+axum = "0.8"
+bytes = "1"
+clap = { version = "4", features = ["derive", "env"] }
+getrandom = "0.4"
+reqwest = { version = "0.13", default-features = false, features = ["json"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ryu = "1"
+itoa = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+tokio-postgres = "0.7"
+tower-http = { version = "0.7", features = ["cors", "trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+object_store = { version = "0.14", features = ["aws"] }
+postgres-protocol = "0.6"
+fallible-iterator = "0.2"
+zstd = "0.14"
+unicode-normalization = "0.1"
+humantime = "2"
+futures = "0.3"
+pg-control = { path = "crates/pg-control" }
+pg-storage = { path = "crates/pg-storage" }
+pg-proxy = { path = "crates/pg-proxy" }
+pg-engine = { path = "crates/pg-engine" }
+pg-snowball = { path = "crates/pg-snowball" }
+pg-icu = { path = "crates/pg-icu" }
+
+pg_query = { git = "https://github.com/pganalyze/pg_query.rs", rev = "ad0c87ed59c84ec6b42c970bb42d7985b7b5878b" }
+prost = { version = "0.13", features = ["no-recursion-limit"] }
+# On-demand stack growth at recursion points (pg-engine: deep input never overflows a host thread).
+stacker = "0.1"
+psm = "0.1"
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+chrono-tz = "0.10"
+bigdecimal = "0.4"
+num-bigint = "0.4"
+num-traits = "0.2"
+smallvec = { version = "1.16", features = ["union", "const_generics"] }
+uuid = "1"
+sha1 = "0.10"
+# pgcrypto (crates/pg-engine/src/ext/pgcrypto)
+aes = "0.8"
+des = "0.8"
+sha3 = "0.10"
+ripemd = "0.1"
+sm3 = "0.4"
+blake2 = "0.10"
+flate2 = "1"
+sha2 = "0.10"
+hmac = "0.12"
+md-5 = "0.10"
+base64 = "0.22"
+crc32fast = "1"
+parking_lot = "0.12"
+crossbeam-skiplist = "0.1"
+hashbrown = "0.17"
+# The roll-engine server's allocator (pg-engine allocates per row and per value).
+mimalloc = { version = "0.1", default-features = false }
+# roll-engine raises its open-file limit at startup (getrlimit / setrlimit).
+libc = "0.2"
+tempfile = "3"
+# ICU4X: pg-engine's `icu4x` fallback where ICU4C 78.1 (crates/pg-icu) can't be built
+icu_collator = "2.3"
+icu_casemap = "2.3"
+icu_locale_core = "2.3"
+icu_provider = "2.3"
+icu_segmenter = "2.3"
+
+# Shipping and benchmark build: whole-program optimisation. Slow to build, so tests and
+# day-to-day work use `release`.
+[profile.dist]
+inherits = "release"
+lto = "fat"
+codegen-units = 1

@@ -1,0 +1,46 @@
+{
+  "status": "PASS",
+  "scope": "offline parent replay; no services",
+  "cases": [
+    {
+      "case": "real-prefixed-pass",
+      "exit": 0
+    },
+    {
+      "case": "injected-failure",
+      "exit": 1
+    },
+    {
+      "case": "missing-case",
+      "exit": 1
+    },
+    {
+      "case": "duplicate-case",
+      "exit": 1
+    },
+    {
+      "case": "truncated-tail",
+      "exit": 1
+    },
+    {
+      "case": "real-baseline-failure",
+      "exit": 1
+    },
+    {
+      "case": "original-regex-real",
+      "exit": 1
+    },
+    {
+      "case": "literal-real",
+      "exit": 0
+    },
+    {
+      "case": "literal-wrong-version",
+      "exit": 1
+    },
+    {
+      "case": "literal-missing-client",
+      "exit": 1
+    }
+  ]
+}

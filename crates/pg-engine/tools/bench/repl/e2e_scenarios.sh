@@ -82,6 +82,11 @@ sc_via_root() {
   check $d rows "$(rowsums p q ph0 ph1)" || rows_ok=0
   check $d sync "SELECT count(*), count(DISTINCT srrelid), bool_and(srsubstate = 'r') FROM pg_subscription_rel;
     SELECT sync_error_count FROM pg_stat_subscription_stats WHERE subid IN (SELECT oid FROM pg_subscription WHERE subdbid = $MYDB)" || rows_ok=0
+  # (No table synchronization slot left on either publisher.)
+  for pp in $P_RPUB $P_EPUB; do
+    n=$(q $pp "$d" "SELECT count(*) FROM pg_replication_slots WHERE slot_name LIKE 'pg\_%\_sync\_%'")
+    [ "$n" = 0 ] || { log "$d: publisher $pp has $n synchronization slots left"; rows_ok=0; FAIL=1; }
+  done
   on_pubs $d "TRUNCATE p" >/dev/null
   caught_up $d
   check $d truncate "$(rowsums p)"
@@ -138,7 +143,8 @@ sc_on_error() {
   for x in "$P_RSUB r $A-xrsub" "$P_RSUB e $A-xrsub" "$P_ESUB r $A-xesub" "$P_ESUB e $A-xesub"; do
     set -- $x
     sub=$(q $1 ${d}_$2 "SELECT subname FROM pg_subscription WHERE subdbid = $MYDB")
-    if [ "$3" = "$A-xrsub" ]; then lines=$(docker logs "$3" 2>&1); else lines=$(cat "$WORK/$3.log"); fi
+    # (A container's server log, an engine run in one too: ENGINE_DOCKER.)
+    if [ "$3" = "$A-xrsub" ] || [ -n "${ENGINE_DOCKER:-}" ]; then lines=$(docker logs "$3" 2>&1); else lines=$(cat "$WORK/$3.log"); fi
     lsn=$(echo "$lines" | grep "replication origin \"pg_$(q $1 ${d}_$2 "SELECT oid FROM pg_subscription WHERE subdbid = $MYDB")\"" | grep -o 'finished at [0-9A-F/]*' | tail -1 | cut -d' ' -f3)
     q $1 ${d}_$2 "ALTER SUBSCRIPTION $sub SKIP (lsn = '$lsn'); ALTER SUBSCRIPTION $sub ENABLE" >/dev/null
   done

@@ -1016,10 +1016,11 @@ fn reordered_heaps_through_batches_inner() {
     let started = pg_engine::exec::parscan::started();
     let before = VECTOR_ROWS.load(std::sync::atomic::Ordering::Relaxed);
     let list_before = LIST_FILL_ROWS.load(std::sync::atomic::Ordering::Relaxed);
-    let parallel = run(&mut s);
+    assert_eq!(out(&mut s, REORDERED_QUERIES[0]), serial[0]);
     assert!(pg_engine::exec::parscan::started() > started, "reordered heap ran in workers");
     assert!(LIST_FILL_ROWS.load(std::sync::atomic::Ordering::Relaxed) > list_before, "reordered ListFill source supplied rows");
     assert!(VECTOR_ROWS.load(std::sync::atomic::Ordering::Relaxed) > before, "rows went through column batches");
+    let parallel = run(&mut s);
     let rows = without_vectors(|| run(&mut s));
     for (((q, a), b), c) in REORDERED_QUERIES.iter().zip(&serial).zip(&parallel).zip(&rows) {
         assert_eq!(a, b, "{q}");

@@ -1833,7 +1833,7 @@ fn put_data_row(b: &mut BytesMut, row: &[crate::types::Value], cols: &[OutCol], 
 
 /// The text output of the commonest values written straight into the message (what
 /// `format_value` would make, without a String per value): text, integers, booleans and
-/// plain oids, for a UTF-8 client. False: not one of those.
+/// plain oids for a UTF-8 client, numerics for any. False: not one of those.
 fn put_text_fast(b: &mut BytesMut, v: &crate::types::Value, ty: &crate::types::DataType) -> bool {
     use crate::types::{DataType as T, Value as V};
     let n = match (v, ty) {
@@ -1852,6 +1852,11 @@ fn put_text_fast(b: &mut BytesMut, v: &crate::types::Value, ty: &crate::types::D
         (V::Int4(i), T::Int4) => *i as i64,
         (V::Int8(i), T::Int8) => *i,
         (V::Oid(o), T::Oid) => *o as i64,
+        // (Numeric's digits are written without allocating: `Numeric`'s Display.)
+        (V::Numeric(x), T::Numeric(_)) => {
+            use std::fmt::Write;
+            return write!(b, "{x}").is_ok();
+        }
         _ => return false,
     };
     // (Digits into a stack buffer from the end; the client's encoding keeps ASCII as is.)

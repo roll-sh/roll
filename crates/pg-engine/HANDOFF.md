@@ -1002,14 +1002,50 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
   DECLARE when that was being sent. Still open there: 2037 (`CLOSE c` sends CLOSE, an
   EndForeignScan the engine's nodes don't have: the remote cursor is closed with the next
   command or the transaction).
-  Found and left: a never-analyzed foreign table's size (postgresGetForeignRelSize: 10 pages of
-  rows of the reltarget's width) uses all its columns' widths in `costs::rel_size`, and a lone
+  Found and left (fixed in round 26): a never-analyzed foreign table's size
+  (postgresGetForeignRelSize: 10 pages of rows of the reltarget's width) used all its
+  columns' widths in `costs::rel_size`, and a lone
   foreign table's scan is costed as a 10-page seq scan (`SELECT * FROM ft`: engine
   `0.00..18.53 rows=853`, PostgreSQL `100.00..305.80 rows=890`); in joins the wrapper's
   estimate is used, but with rows from the wider width. So the engine pushes joins
   PostgreSQL doesn't over never-analyzed tables (BENCH.md "postgres_fdw, round 6").
   Traffic against PostgreSQL's postgres_fdw: BENCH.md "postgres_fdw, round 6" (a counting proxy,
   `tools/fdwtraffic/`; fewer round trips and bytes in every phase).
+  Round 26 (agent 157, postgres_fdw round 7): estimates and per-row costs. A never-analyzed
+  postgres_fdw table is sized as postgresGetForeignRelSize does, 10 pages of rows as wide as
+  the columns the scan returns plus a 24-byte header, not maxaligned and not all its columns
+  (`costs::fdw_unanalyzed_size`, from `Planner::rel`'s reltarget mask; not with
+  use_remote_estimate, whose remote EXPLAIN sizes it); a lone foreign scan is costed by
+  estimate_path_cost_size (`ext::postgres_fdw::join::base_path_cost`, `Rel::fdw`: the seq-scan
+  cost plus fdw_startup_cost and (fdw_tuple_cost + cpu_tuple_cost) per retrieved row, the
+  local conditions' selectivity taken out; with use_remote_estimate still the seq-scan cost
+  outside the join search, whose `fdw_base` asks the server), and enable_seqscan doesn't
+  disable a foreign scan. `SELECT *
+  FROM ft` is `100.00..305.80 rows=890` as PostgreSQL's (was `0.00..18.53 rows=853`), and the
+  engine no longer pushes the joins PostgreSQL doesn't (fdw_traffic's foreign joins and locked
+  join of a foreign join now run as PostgreSQL runs them). A one-group aggregation sent whole
+  is costed as estimate_path_cost_size's upper relation (`upperpath::upper_estimate`: its
+  input's bare cost, `agg_clause_costs`, a tuple, the transfer costs): `SELECT count(*) FROM
+  ft` `108.53..152.88 rows=1` (was `0.00..0.00 rows=0`); grouped ones keep their input's.
+  Per row: a cursor's scan decodes only the columns its target list and qual read when they run
+  apart over a plain scan (`session/cursor.rs` `Exec::scan_need`; every remote cursor of
+  postgres_fdw's is such a query: the remote side decoded whole rows); numeric output and input
+  without allocations (`DecInt::magnitude_digits`, `numeric::plain_decimal`); int, numeric and
+  UTF-8 text values written into DataRow messages directly (`server::put_text_fast`);
+  `make_row` and the client's DataRow vectors sized once. Still open (left as found):
+  whole-row and row-identity widths in the reltarget (PostgreSQL adds `24 + data width` for a
+  ROW_MARK_COPY or an UPDATE target's whole row, 6 for its ctid: `FOR UPDATE OF loc` over
+  `ft` is `rows=538 width=128` there, `rows=1365` here, and one 3-way locked join picks
+  another join order); `UPDATE ... FROM` / `DELETE ... USING` sent whole (598-636) first needs
+  the join search to join the result relation remotely (`fdw_base` refuses a `with_key` scan:
+  the join must fetch `r1.ctid` as the row's key, as a `Field::Key` beside `Field::Mark`), then
+  deparseDirectUpdateSql's FROM list without the target (deparseFromExprForRel with an
+  ignore_rel: the inner joins' clauses into the WHERE, `ON (TRUE)`); the remote server's
+  cursor keeps every row it returned (backward FETCH), about 15% of the CPU of a 20k-row scan
+  (`Cursor::visit`'s re-evaluation, the rows dropped at commit) and its memory. Numbers:
+  BENCH.md "postgres_fdw, round 7" (`tools/fdwtraffic/compare.sh`: both servers in
+  containers, each one's CPU and peak memory from its cgroup, phases picked by `PGT_PHASES`
+  for profiles).
 - **file_fdw** (round 19, agent 66): native (`src/ext/file_fdw.rs`), 187 / 187 of its
   contrib test. Foreign scans of a file_fdw table read the file with COPY FROM's parser
   (`session/copy.rs` `parse_copy_data`, shared with COPY) a chunk at a time; the file is a
@@ -1900,6 +1936,62 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
       `--cache-mb 8` gives +28-32 MB); and the size models' share of apply (agent 151's
       next pushes: a cached last leaf in `btsim` insert, one row lookup per UPDATE).
     - Verified: see BENCH.md "Replication, round 6".
+  - **Round 7 (agent 158): the change stream's removal, one-pass decoding, COPY's
+    multi-insert in decoding's accounting.** BENCH.md "Replication, round 7" has the numbers.
+    - **What every slot confirmed is discarded, not deleted** (`repl/log.rs` `DbLog::confirmed`,
+      `discard_below`; `storage/discard.rs`). `gc_writes` read every confirmed record back
+      and committed a tombstone for each (a third of a walsender's CPU, and the block cache
+      filled with the records: about 15 MB of its memory). Now each sealed commit is noted in
+      `DbLog::unconfirmed` (position, end, xid; a subscriber far behind merges neighbours past
+      4,096 entries, conservatively), and when the slots' confirmed position moves
+      (`Repl::slots_changed`) two floors follow: change records of xids below the oldest of
+      (the oldest running xid, the xids of commits not confirmed) and commit records below
+      the first unconfirmed one. `Store::discard(start, end)` raises a range of keys nobody
+      reads again; flushes and compactions leave its entries out (records confirmed while in
+      the memtable never reach a file), a file wholly inside one goes unread
+      (`collect_ranges`), and reads never consult the list (unlike `rdel`'s range deletions,
+      which every read checks: this was the design question for storage, agent 149). A
+      keyspace with a discarded range is never kept as a hot range (`hot`: the change
+      stream's prefix looks like a relation's, and its version chains would keep what was
+      discarded; before, the tombstones trimmed them). Not
+      persisted: after a restart `Repl::opened` (after the prepared transactions are
+      recovered, so their xids hold the floor) rebuilds the queue from the commit records
+      and names the floors again. A slot made while floors are computed keeps them from
+      applying (the slot set is checked again). A running transaction holds the change
+      records from its xid on, as it holds PostgreSQL's restart_lsn. Also fixed: once the
+      last slot of a database was dropped (`gc_upto` = u64::MAX) nothing was ever removed
+      again for that database's later slots. Test `repl::log::tests::
+      confirmed_records_are_discarded` (prepared transactions, a restart, no slot),
+      `storage::tests::discarded_ranges_leave_flushes_and_compactions`.
+    - **One pass over a run of transactions' records** (`repl/decode.rs` `Prefetched`,
+      `Decoder::prefetch`, the walsender's loop): a store scan per transaction (a seek in
+      every file, the merge set up again) was most of the rest of a walsender's work. The
+      walsender takes the commit records in runs (256 kB of WAL, 4,096 at most) and reads
+      the change records of the run's transactions (none past 32 kB) in one scan of their
+      xid range, copying out only theirs, its blocks not kept in the block cache
+      (`storage::read_once`: PostgreSQL's walsender reads the WAL through the kernel's page
+      cache, not its buffers). Only for a decoder alone: two or more share each transaction
+      through `decode::Shared` (each reading it again would cost N passes), where the cache
+      helps.
+    - **COPY's multi-insert in decoding's accounting** (`log::multi_insert`, `Txn::copy_batch`,
+      `MULTI` records, `Change::batch`, `plugin.rs` `run`): a COPY's rows in a multi-insert
+      batch (CopyFrom's CIM_MULTI; `sizing::CopyLoad::row_done` says where a batch ends; the
+      batch is the transaction's, set before it has an id) are logged as such, and
+      the decoder counts the TOAST chunks of all of a batch's rows before its first row
+      (heap_multi_insert TOASTs the batch first), the transaction having a partial change
+      until the batch's last row (RBTXN_HAS_PARTIAL_CHANGE): over the limit meanwhile it
+      spills (statistics), at the last row it streams if it spilled
+      (ReorderBufferProcessPartialChange), then the memory check. A single row's chunks now
+      count one by one before it too (spills and streams where PostgreSQL's do, not only at
+      the row). test_decoding 1,044 / 1,047 (stream.sql whole).
+    - **Left**: apply (BENCH.md: 1.35-1.4x PostgreSQL's CPU after agent 151's models; the
+      profile is the size models' (still about a quarter: `sizing::updated`,
+      `sizing::index_insert`, `inserted_with`), the commit (memtable inserts, WAL append),
+      the unique check's scan per INSERT (`dml::committed_conflict`) and row location; the
+      per-change statement wrapper is down to about 3%); the test_decoding stats units (a
+      plan choice: three slot-creating function scans in one FROM are joined with s3
+      outside, PostgreSQL's nests s1, s2 then s3, reproducer in BENCH.md, sent to the
+      planner's owner, agent 155).
 - **TPC-H plans and analytic speed** (round 20, agent 64; BENCH.md "Round 20", STATUS.md):
   the engine's plans at SF1 compared with PostgreSQL 18.6's on the same data, both analyzed,
   and the causes of the differences fixed in statistics and estimates: ANALYZE samples pages
@@ -6820,8 +6912,8 @@ them all with the "Fixed in round N" sections describing what was already tried.
      join order differs (PostgreSQL drives from pg_attribute; the engine from pg_class with a
      Materialize over pg_namespace). Gather paths at intermediate join relations (q21) and the
      job-queue planning CPU are as above. Agent 133 (application CPU, BENCH.md "Application
-     CPU"): Liquibase's column-exists check (Keycloak, Metabase) is never made a semi join (a
-     sub-select per pg_attribute row, 74-110 ms a call against 1 ms; its EXPLAIN shows a wrong
+     CPU"): Liquibase's column-exists check (Keycloak, Metabase) is never made a semi join (done
+     in round 9, agent 155: "Planner round 9"; a sub-select per pg_attribute row, 74-110 ms a call against 1 ms; its EXPLAIN shows a wrong
      `Recheck Cond: (oid = ns.oid)`, the rows right); planning at Parse and Bind is 25-50% of
      those applications' CPU; pgjdbc's metadata queries cost 5-40x PostgreSQL's a call. Agent
      139 (char(n) keys, EF Core Northwind, high priority): `probe_ok` (binder/optimize.rs) has
@@ -6851,7 +6943,8 @@ them all with the "Fixed in round N" sections describing what was already tried.
      at 10,000 tables `pg_class WHERE relkind = 'r'` is estimated at 201 rows where PostgreSQL
      estimates 10,075 (catalog statistics: pg_class's reltuples / relkind MCVs, or a default
      selectivity on catalog columns), so pgwatch's table_stats_approx takes a plan that runs
-     past its 30 s timeout. Measured (agent 140, 2,000 tables, 8,415 pg_class rows, 2,068 of
+     past its 30 s timeout (done in round 9, agent 155, as designed below: "Planner round
+     9"; autovacuum's analyze of catalogs is still open). Measured (agent 140, 2,000 tables, 8,415 pg_class rows, 2,068 of
      kind 'r'): PostgreSQL estimates 937 before ANALYZE (initdb's pg_statistic of pg_class,
      scaled) and 2,068 after `ANALYZE pg_class` (autovacuum does it after mass DDL); the engine
      42 (1/200: no statistics for a catalog column), and `ANALYZE pg_class` neither stores
@@ -7252,6 +7345,138 @@ pg_dump_tap 14,817); `crash_random` failed intermittently there and on the commi
   lookups (1.5% of lifted simple-update: three a transaction); the 300k empty-leaf
   difference above; lifting, once the lift table's rows are all at or below the 400k column;
   index-only `count(*)` over lineitem needs the table modelled first.
+
+## Planner round 9 (agent 155)
+
+BENCH.md "Planner, round 9" has the measurements. What changed in batch 1:
+
+- **Liquibase's column check is a semi join** (`binder/sublink.rs` `unparameterized`). An
+  EXISTS whose sub-select is planned as a parameterized nested loop (a qual on the
+  namespace side makes pg_class the inner side, `Index Cond: (oid = ns.oid)`) was left a
+  SubPlan for three reasons:
+  - the inner side was a catalog scan (`Plan::SysScan`), which `strip` had no arm for;
+  - its clauses read the outer query one frame further out (`Outer(2, ..)`,
+    `Rel::shallow_param`), which `reads_param` refused;
+  - those clauses, one level nearer once the frame is gone, looked like parameters to
+    `reads_any`.
+  Now `strip` takes catalog scans, with their paths chosen again. The inner side is
+  stripped twice: first as written, to prove no parameter is left, then with the levels
+  around one level nearer. Keycloak's and Metabase's check is PostgreSQL's plan now
+  (HashAggregate of pg_namespace ⋈ pg_class, then pg_attribute's index): 92-112 ms a call
+  before, 3.2-4.2 ms now, PostgreSQL 2.0-2.2 ms (psql's timing, warm, 1,640 relations).
+- **Catalog statistics** (HANDOFF item 11's pg_class estimate; placement agreed with agent
+  146).
+  - Before any ANALYZE of a catalog, the planner reads initdb's statistics, PostgreSQL
+    18.6's pg_statistic of a fresh cluster. They were already in `data/pg_statistic.tsv`
+    for pg_stats (`system::initdb_colstats`, read by `costs::col_stats` for oids below
+    FIRST_USER_OID). Nothing is stored, so the fresh data directory is unchanged.
+  - ANALYZE of a named catalog, and a database-wide ANALYZE (all of `SysTable::all()` that
+    aren't views), computes the catalog's column statistics from the rows it shows
+    (`Ddl::analyze_catalog`, `analyze_columns`' stand-in branch). They are stored in
+    `Catalog::colstats` under the catalog's oid like a table's, with its pg_class counts in
+    `relstats`.
+  - pg_statistic and pg_stats show the catalog's own rows in place of initdb's
+    (`system::catalog_statistic_rows`). `prune_colstats` keeps them.
+  - EXPLAIN's estimate of a catalog's plain scan filter reads them (`explain.rs`, the
+    `SysScan` arm's `vars`).
+  - At 2,000 tables, `pg_class WHERE relkind = 'r'` estimates 1,379 rows before ANALYZE
+    (PostgreSQL 1,132; before: 42) and 2,068 after, which is PostgreSQL's (before: 42).
+  - Column lists are checked as PostgreSQL does (`ANALYZE pg_class (nosuch)`: 42703;
+    repeated: 42701).
+- **Planning CPU:**
+  - `syscat::sys_indexes` is a lock-free static slice per catalog. Before, it took a global
+    mutex and cloned a Vec for every estimate on a catalog column.
+  - `Clause::name_text` is computed once, not per `ec_name_text` call (two `DataType`
+    clones per clause each time).
+  - `side_ec` compares only expression sides.
+  - `same_shape` compares casts, relabelings and constants of the plain kinds structurally,
+    so most clauses no longer go through Debug text.
+  - `eqjoinsel_inner` matches MCV lists by binary search when both are long and of one
+    value kind. It takes the same matches as PostgreSQL's nested loop, summed in the same
+    order; debug builds assert each one. Each list's sorted order is cached per thread with
+    a `Weak` (`joins::sorted_order`). With catalog statistics, MCV matching was half of
+    pgjdbc's getColumns planning.
+  - At Parse, EXPLAIN / CREATE TABLE AS / DECLARE no longer bind their query when it reads
+    no `$n`. `param_numbers` skips its Debug scan of the tree for a text without a `$`.
+- **Tools:**
+  - `tools/bench/plancpu.py`: planning per statement, engine against PostgreSQL. It reports
+    `--summary` (each server's own EXPLAIN (SUMMARY) Planning Time, `\bind \g` for the
+    extended protocol) or EXPLAIN CPU through pgbench (`-M simple` / `-M extended`).
+  - `tools/bench/plans/apps.sql` (+ `apps.setup.sql`): Liquibase's check, pgjdbc's metadata
+    queries, Kysely's introspection, pgwatch's table_stats_approx, the job-queue fetches and
+    pgbench's statements, also usable with plancmp.py.
+- Golden `a155_planner_batch1` (recorded from PostgreSQL 18.6).
+
+Left, for the planner. Item 11 still holds the round 23-24 queue: q21's Gather at
+intermediate join levels, q18's partial merge joins, the FULL JOIN error decisions,
+width_bucket('NaN') folding, the domain relabel, and hash vs btree on char(n).
+- **Top item (from agent 145, by the coordinator; agent 159, OLTP, implements step 1 from
+  155's design, CoerceViaIO folding included): move constness decisions out of
+  binding.** `param_consts` makes `$n` a Const while analysis binds. Everything constness
+  drives runs inline as each level binds:
+  - folding (binder/fold.rs);
+  - `optimize::fixed_columns` and `pseudo_constant`;
+  - `add_filter` placement;
+  - `fill_bounds` index bounds;
+  - partition pruning;
+  - the `= ANY(const array)` and LIKE-prefix rewrites.
+  So a custom plan re-binds the whole statement on every Execute (`bound_custom`, 21% of
+  the 8-client range read's CPU). PostgreSQL plans custom plans from the analyzed tree with
+  its boundParams.
+  - The plan: move these decisions into a post-analysis pass that `Analyzed::plan` runs
+    level by level. A custom plan is then substitute, fold (with PostgreSQL's rules, which
+    is the CoerceViaIO item below too), plan.
+  - Do it one construct at a time, starting with the single-level SELECT path the range
+    read takes (index bounds, filter placement, fixed columns). Push each step on its own,
+    with a full regress run (0 units changed), the 150-seed difftest pair and goldens.
+    Agent 145 reviews from the custom-plan side.
+  - This is the same deferral as "defer the inner levels too" in item 11.
+- **Planning is still 2-4x PostgreSQL's** (BENCH.md). The profiles, in order of weight:
+  - path list clones in `add_paths_u` (`Vec<JP>` cloned per join pair; `JRel.paths` as
+    `Rc<JP>` would make them cheap);
+  - `Expr` / `Vec<Expr>` / `IClause` clones in path building;
+  - EXPLAIN's builder re-planning scans for estimates during planning (`estimate_in`,
+    `describe_need`, `partial_scans`);
+  - `Expr::same_as`'s Debug fallback for the remaining node kinds.
+  Agent 149 measured `core::fmt::write` at 3.5% of a range read's CPU (match_quals,
+  index_path_ob, describe_need).
+- **The chosen path's cost handed over with the plan** (155's next planning-CPU item, from
+  agents 145 / 159). `Session::plan_cost`, the EXPLAIN-builder tree built only for a custom
+  plan's cost, is about 20% of the 8-client range read's CPU after 363366c2; execution is
+  41%. One-shot plans would also skip their `presorted_keys` / Gathers estimates, 8.4% of
+  agent 150's 200-session burst. Each `plan_level` returns its chosen path's total and
+  BoundQuery keeps the sum over the levels (None when any level wasn't costed). Then:
+  - `plan_cost` reads it where the top node is the path's own; check_cost_estimate's
+    assert stays;
+  - parallel_part::start skips the tree when the sum is below parallel_setup_cost / 1.02.
+  The later `bind_values` steps (DML, joins, sub-select levels, pruning, the `= ANY` /
+  LIKE rewrites) are agent 165's, agreed through the coordinator.
+- **A wrong index condition** in a catalog's parameterized bitmap path: `Recheck Cond: (oid =
+  ns.oid)` for the clause `relnamespace = ns.oid`. The clause looks mapped onto the wrong
+  index column; the rows stay right.
+- Autovacuum doesn't analyze catalogs: it needs pgstat change counts for them (DDL counts
+  as pg_class changes). PostgreSQL's autovacuum analyzes pg_class after mass DDL. pg_stats
+  doesn't show a catalog's ANALYZE rows for columns initdb had no statistics for.
+- **LIMIT over a grouping of a join in hash order** (item 11): 155's now (agreed with 154).
+- From difftest round 9 (agent 156; reproducers in tests/difftest/STATUS.md):
+  - partitioned top-N: Merge Append of Sorts where PostgreSQL sorts an Append (15 cases);
+  - `max(id), min(id), max(v)` gets MinMax InitPlans where PostgreSQL aggregates a scan;
+  - enable_seqscan=off with `a = ANY(...)` over partitions;
+  - `arr @> '{2}'` estimated at 15 rows against 1,000 (element statistics unused);
+  - an expression ndistinct statistics object unused for `DISTINCT g, u % 10`;
+  - hash against sort under a small work_mem (seeds 8018, 8023, 8026, 8035, 8049, 8130);
+  - COLLATE in sort keys shown as PostgreSQL's RelabelType (`((u)::text) COLLATE ...`).
+- From agents 145 / 154:
+  - `$1::int[]` from a text parameter is folded where PostgreSQL leaves an unfolded I/O
+    coercion (array_in is STABLE), so the generic plan never wins (~/.cache/a145/sql/r9.sql;
+    agent 159, with the constness pass);
+  - untyped `BETWEEN $1 AND $1 + $2` fails with 42725 (the parameter's type should come
+    from its first use);
+  - `DELETE FROM t1 x USING v0 u` over a view folds the view's unread output while building
+    its row mark (22023; PostgreSQL marks the pulled-up base relation,
+    ~/.cache/a154/s5069.sql). UPDATE ... FROM likely has the same issue.
+- Agent 157 (postgres_fdw) will send foreign-join choices from postgres_fdw units 266, 268,
+  272 and 275.
 
 ## Starting prompt for the next agent
 

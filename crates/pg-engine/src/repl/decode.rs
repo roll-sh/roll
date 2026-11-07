@@ -4,6 +4,7 @@
 use super::log::{self, Marker, Rec, RelDesc};
 use crate::error::Result;
 use crate::storage::Store;
+use crate::storage::batch::RowBatch;
 use parking_lot::Mutex;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
@@ -27,6 +28,8 @@ pub struct Change {
     /// The aborted subtransaction it belongs to (`log::rolled_back_to`; 0: one that
     /// commits with the transaction).
     pub sub: u64,
+    /// The multi-insert batch a row belongs to (`log::multi_insert`; 0: none).
+    pub batch: u32,
 }
 
 /// Transaction `m`'s change records, in order, with the positions they took after its
@@ -43,6 +46,85 @@ pub fn changes<'a>(store: &Arc<Store>, shared: &'a Shared, m: &Marker) -> impl I
         at += log::record_size(v.len());
         shared.change(lsn, &v)
     })
+}
+
+/// The change records of a run of transactions, read in one pass over their key range
+/// (`Prefetched::read`): a scan of the store per transaction (a seek in every file) was
+/// most of a walsender's store work. Bounded: the run's records, copied (`PREFETCH_BYTES`
+/// of WAL at most, none of a transaction past `PREFETCH_ONE`).
+#[derive(Default)]
+pub struct Prefetched {
+    rows: RowBatch,
+    /// By xid: its records' places in `rows`.
+    at: HashMap<u64, std::ops::Range<usize>>,
+    /// A read's rows as the scan gives them.
+    chunk: RowBatch,
+}
+
+/// How much WAL a run of transactions read in one pass takes at most, and a transaction
+/// in it (a bigger one is read as it's decoded): hundreds of small transactions a pass.
+pub const PREFETCH_BYTES: u64 = 256 << 10;
+pub const PREFETCH_ONE: u64 = 32 << 10;
+
+impl Prefetched {
+    /// The records of transactions `xids` (sorted, distinct), read at the store's visible
+    /// state, in place of what it held (its buffers kept: a walsender reads a run after
+    /// another).
+    pub fn read(&mut self, store: &Arc<Store>, xids: &[u64]) -> Result<()> {
+        self.clear();
+        let (Some(&lo), Some(&hi)) = (xids.first(), xids.last()) else { return Ok(()) };
+        let (a, _) = log::changes_range(lo);
+        let (_, b) = log::changes_range(hi);
+        // (One pass, each block once: not kept in the block cache, as PostgreSQL's walsender
+        // reads the WAL through the kernel's page cache rather than its buffers.)
+        crate::storage::read_once(|| self.read_in(store, &a, &b, xids))
+    }
+
+    /// Empty (its buffers kept).
+    pub fn clear(&mut self) {
+        self.rows.clear();
+        self.chunk.clear();
+        self.at.clear();
+    }
+
+    fn read_in(&mut self, store: &Arc<Store>, a: &[u8], b: &[u8], xids: &[u64]) -> Result<()> {
+        let mut scan = store.scan(a, b, store.visible_ts());
+        let mut want = xids.iter().copied().peekable();
+        loop {
+            self.chunk.clear();
+            scan.fill_batch(&mut self.chunk, 512)?;
+            if self.chunk.is_empty() {
+                break;
+            }
+            for i in 0..self.chunk.len() {
+                let (k, v) = self.chunk.get(i);
+                let x = log::xid_of(k);
+                while want.next_if(|w| *w < x).is_some() {}
+                if want.peek() != Some(&x) {
+                    continue;
+                }
+                let n = self.rows.len();
+                self.at.entry(x).or_insert(n..n).end = n + 1;
+                self.rows.push_copy(k, v);
+            }
+        }
+        Ok(())
+    }
+
+    pub fn has(&self, xid: u64) -> bool {
+        self.at.contains_key(&xid)
+    }
+
+    /// Transaction `m`'s changes, as `changes` reads them (None: not read here).
+    pub fn changes<'a>(&'a self, shared: &'a Shared, m: &Marker) -> Option<impl Iterator<Item = Result<Change>> + 'a> {
+        let r = self.at.get(&m.xid)?.clone();
+        let mut at = m.first_lsn;
+        Some(r.map(move |i| self.rows.get(i).1).map(move |v| {
+            let lsn = at;
+            at += log::record_size(v.len());
+            shared.change(lsn, v)
+        }))
+    }
 }
 
 /// What a database's decoders (walsenders, the SQL functions) share: relation descriptions,
@@ -99,6 +181,11 @@ impl Drop for Reader {
 }
 
 impl Shared {
+    /// Whether two or more decoders run (each transaction decoded once for all: `txn`).
+    pub fn shared(&self) -> bool {
+        self.readers.load(Ordering::Acquire) >= 2
+    }
+
     pub fn reader(db: &Arc<crate::txn::Database>) -> Reader {
         db.log.decoded.readers.fetch_add(1, Ordering::AcqRel);
         Reader(db.clone())
@@ -108,7 +195,7 @@ impl Shared {
     pub fn change(&self, lsn: u64, v: &[u8]) -> Result<Change> {
         let (sub, v) = log::aborted_of(v)?;
         let rec = if v.first() == Some(&b'R') { Rec::Rel(self.rel(v)?) } else { log::decode_rec(v)? };
-        Ok(Change { lsn, rewrite: v.first() == Some(&b'W'), rec, sub })
+        Ok(Change { lsn, rewrite: v.first() == Some(&b'W'), rec, sub, batch: log::batch_of(v) })
     }
 
     /// Relation description record `b`, decoded: its relation's last one when equal.
@@ -139,12 +226,11 @@ impl Shared {
         if let Some((c, _)) = self.txns.lock().map.get(&key) {
             return Ok(Some(c.clone()));
         }
-        let ts = store.visible_ts();
-        let (a, b) = log::changes_range(m.xid);
-        let mut at = m.first_lsn;
         let mut out = Vec::new();
         let mut bytes = 0;
-        for r in store.scan(&a, &b, ts) {
+        let (a, b) = log::changes_range(m.xid);
+        let mut at = m.first_lsn;
+        for r in store.scan(&a, &b, store.visible_ts()) {
             let (_, v) = r?;
             let c = self.change(at, &v)?;
             at += log::record_size(v.len());

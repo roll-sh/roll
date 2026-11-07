@@ -146,10 +146,19 @@ pub fn col_stats(cat: &Catalog, table: u32, col: usize) -> Option<&ColStats> {
             .as_ref();
     }
     // (A partitioned table has only its inherited statistics: those, for its Append.)
-    let all = cat.colstats.get(&table)?;
+    // A system catalog's column has initdb's until an ANALYZE of the catalog.
+    let initdb = || {
+        (table < crate::catalog::FIRST_USER_OID)
+            .then(|| crate::catalog::system::initdb_colstats(table, col as i16 + 1))
+            .flatten()
+    };
+    let Some(all) = cat.colstats.get(&table) else {
+        return initdb();
+    };
     all.iter()
         .find(|s| s.attnum as usize == col + 1 && !s.inherit)
         .or_else(|| all.iter().find(|s| s.attnum as usize == col + 1 && s.inherit))
+        .or_else(initdb)
 }
 
 /// The statistics of a variable (a column, or an index expression).
@@ -172,6 +181,19 @@ pub struct RelSize {
     pub tuples: f64,
 }
 
+/// postgresGetForeignRelSize of a never-analyzed table: 10 pages of rows of `width` (its
+/// reltarget's) plus a tuple header.
+fn unanalyzed_size(width: u32) -> RelSize {
+    RelSize { pages: 10.0, tuples: ((10 * BLCKSZ as u32) / (width + 24)) as f64 }
+}
+
+/// A never-analyzed foreign table's size by the width of the columns its scan returns
+/// (None: it has statistics).
+pub fn fdw_unanalyzed_size(t: &Table, width: u32, ctx: &ExecCtx) -> Option<RelSize> {
+    let cat = ctx.catalog();
+    cat.relstats.get(&t.oid).is_none_or(|s| s.tuples < 0.0).then(|| unanalyzed_size(width))
+}
+
 /// estimate_rel_size (table_block_relation_estimate_size): the current page count, with
 /// the tuple density pg_class gives (or, never analyzed, the one the row width suggests).
 pub fn rel_size(t: &Table, ctx: &ExecCtx) -> RelSize {
@@ -192,8 +214,7 @@ pub fn rel_size(t: &Table, ctx: &ExecCtx) -> RelSize {
         if let Some(s) = cat.relstats.get(&t.oid).filter(|s| s.tuples >= 0.0) {
             return RelSize { pages: s.pages.max(0) as f64, tuples: s.tuples };
         }
-        let maxalign = |w: u32| w.div_ceil(8) * 8;
-        return RelSize { pages: 10.0, tuples: ((10 * BLCKSZ as u32) / (maxalign(width) + 24)) as f64 };
+        return unanalyzed_size(width);
     }
     let curpages = crate::exec::sizing::heap_blocks(t, ctx)
         .ok()

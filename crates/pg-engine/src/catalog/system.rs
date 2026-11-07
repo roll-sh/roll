@@ -507,6 +507,89 @@ fn statistic_row(rel: u32, st: &super::ColStats) -> Row {
     row
 }
 
+/// initdb's statistics of system catalog `rel`'s column `attnum` (PostgreSQL 18.6's
+/// pg_statistic of a fresh cluster, `data/pg_statistic.tsv`), which the planner reads until
+/// an ANALYZE of the catalog stores its own in `Catalog::colstats`.
+pub fn initdb_colstats(rel: u32, attnum: i16) -> Option<&'static super::ColStats> {
+    static STATS: std::sync::OnceLock<std::collections::HashMap<(u32, i16), super::ColStats>> = std::sync::OnceLock::new();
+    STATS
+        .get_or_init(|| {
+            super::static_rows::rows(SysTable::PgStatistic)
+                .iter()
+                .filter(|s| s[2] == Value::Bool(false))
+                .map(|s| {
+                    let st = colstats_of_row(s);
+                    ((super::static_rows::oid_at(s, 0), st.attnum), st)
+                })
+                .collect()
+        })
+        .get(&(rel, attnum))
+}
+
+/// A pg_statistic row as `ColStats` (`statistic_row`'s inverse).
+fn colstats_of_row(s: &[Value]) -> super::ColStats {
+    let fmt = crate::types::text::FormatCtx::default();
+    let f4 = |v: &Value| match v {
+        Value::Float4(f) => *f,
+        _ => 0.0,
+    };
+    let slots = (0..5)
+        .filter_map(|i| {
+            let Value::Int2(kind) = s[6 + i] else { return None };
+            if kind == 0 {
+                return None;
+            }
+            let numbers = match &s[21 + i] {
+                Value::Array(a) => Some(a.items.iter().map(f4).collect()),
+                _ => None,
+            };
+            let values = match &s[26 + i] {
+                Value::Array(a) => Some((
+                    a.elem.clone(),
+                    a.items.iter().map(|v| crate::types::text::format_value(v, &a.elem, &fmt)).collect(),
+                )),
+                _ => None,
+            };
+            Some(super::StatSlot {
+                kind,
+                op: super::static_rows::oid_at(s, 11 + i),
+                coll: super::static_rows::oid_at(s, 16 + i),
+                numbers,
+                values,
+                parsed: Default::default(),
+            })
+        })
+        .collect();
+    super::ColStats {
+        attnum: match s[1] {
+            Value::Int2(a) => a,
+            _ => 0,
+        },
+        inherit: s[2] == Value::Bool(true),
+        nullfrac: f4(&s[3]),
+        width: match s[4] {
+            Value::Int4(w) => w,
+            _ => 0,
+        },
+        distinct: f4(&s[5]),
+        slots,
+    }
+}
+
+/// pg_statistic's rows of system catalogs: initdb's, each replaced by the catalog's own
+/// ANALYZE's (`Catalog::colstats`) where it has one for the column.
+fn catalog_statistic_rows(cat: &Catalog) -> Vec<Row> {
+    let mut out = Vec::new();
+    for s in super::static_rows::rows(SysTable::PgStatistic).iter() {
+        let rel = super::static_rows::oid_at(s, 0);
+        let own = cat
+            .colstats
+            .get(&rel)
+            .and_then(|all| all.iter().find(|st| Value::Int2(st.attnum) == s[1] && Value::Bool(st.inherit) == s[2]));
+        out.push(own.map_or_else(|| s.clone(), |st| statistic_row(rel, st)));
+    }
+    out
+}
 fn opt_bytes(b: &Option<Vec<u8>>) -> Value {
     b.as_ref().map_or(N, |b| Value::Bytea(b.as_slice().into()))
 }
@@ -2399,6 +2482,11 @@ fn generate_raw(table: SysTable, ctx: &ExecCtx, only: Option<u32>, out: &mut Out
                 {
                     r[7] = o(*n);
                 }
+                // An ANALYZE of the catalog counted it.
+                if let Some(st) = cat.relstats.get(&super::static_rows::oid_at(&r, 0)) {
+                    r[9] = i4(st.pages as i64);
+                    r[10] = Value::Float4(st.tuples as f32);
+                }
                 out.push(r);
             }
             for r in relations_of(cat, only)
@@ -3376,9 +3464,10 @@ fn generate_raw(table: SysTable, ctx: &ExecCtx, only: Option<u32>, out: &mut Out
             }
         }
         PgStatistic => {
-            out.extend(super::static_rows::rows(table).iter().cloned());
+            // (initdb's rows, a catalog's ANALYZE replacing them, then every other.)
+            out.extend(catalog_statistic_rows(cat));
             for (rel, rows) in &cat.colstats {
-                for st in rows {
+                for st in rows.iter().filter(|st| st.inherit || initdb_colstats(*rel, st.attnum).is_none()) {
                     out.push(statistic_row(*rel, st));
                 }
             }
@@ -3553,7 +3642,7 @@ fn generate_raw(table: SysTable, ctx: &ExecCtx, only: Option<u32>, out: &mut Out
             let classes = super::static_rows::rows(PgClass);
             let attrs = super::static_rows::rows(PgAttribute);
             let at = super::static_rows::oid_at;
-            for s in super::static_rows::rows(PgStatistic).iter() {
+            for s in catalog_statistic_rows(cat).iter() {
                 let Some(class) = classes.iter().find(|c| at(c, 0) == at(s, 0)) else {
                     continue;
                 };
