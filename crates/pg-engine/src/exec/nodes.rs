@@ -965,8 +965,10 @@ pub struct SysRescan {
     rows: Option<Arc<crate::catalog::system::SysRows>>,
 }
 
-/// The first `column = value` among `f`'s conjuncts (only the first conjunct with
-/// `first_only`) that a hash on the column can serve: a built-in `=` over an integer, oid or
+/// The `column = value` among `f`'s conjuncts (only the first conjunct with `first_only`)
+/// that a hash on the column can serve and picks the fewest rows (pg_depend's
+/// `refclassid = 1259 AND refobjid = x` picked every relation's rows by its first conjunct,
+/// and the rest was evaluated on each: Django's sequences query, 150 ms at 10,000 tables): a built-in `=` over an integer, oid or
 /// "char" column, or a name / text column under a deterministic collation (whose equality is
 /// the bytes'), with a value (constant, or of outer references) of the column's own type.
 /// Its column, and the rows whose value equals it, in row order (None: the value is NULL, and
@@ -991,43 +993,87 @@ fn sys_equality(
         let quiet = conj.iter().take_while(|c| quiet_filter(c)).count();
         conj.truncate((quiet + 1).min(conj.len()));
     }
+    let mut best: Option<(usize, Vec<u32>)> = None;
     for c in conj {
-        let Expr::Call(d, args, _) = c else { continue };
-        if d.name != "=" || args.len() != 2 || d.oid >= crate::catalog::FIRST_USER_OID {
-            continue;
-        }
-        if d.coll.as_ref().is_some_and(|c| !c.deterministic) {
-            continue;
-        }
-        let (k, other) = match (&args[0], &args[1]) {
-            (Expr::Col(k, _), o) | (o, Expr::Col(k, _)) => (*k, o),
-            _ => continue,
-        };
-        let mut sub = false;
-        other.walk(&mut |e| sub |= matches!(e, Expr::Subquery(_)));
-        if sub || !other.columns().is_empty() || other.is_volatile() {
-            continue;
-        }
-        let v = crate::sql::expr::eval(other, &[], ctx)?;
-        if v.is_null() {
+        let Some((k, vals)) = sys_eq_values(c, ctx)? else { continue };
+        // (`=` NULL: true for no row.)
+        if matches!(c, Expr::Call(..)) && vals.first().is_some_and(Value::is_null) {
             return Ok(Some((k, None)));
         }
-        let same = |x: &Value| {
-            matches!(
-                (x, &v),
-                (Value::Oid(_), Value::Oid(_))
-                    | (Value::Int2(_), Value::Int2(_))
-                    | (Value::Int4(_), Value::Int4(_))
-                    | (Value::Int8(_), Value::Int8(_))
-                    | (Value::Char(_), Value::Char(_))
-                    | (Value::Text(_), Value::Text(_))
-            )
-        };
-        if let Some(ix) = rows.lookup(k, &v, &same) {
-            return Ok(Some((k, Some(ix))));
+        let mut picked: Vec<u32> = Vec::new();
+        let mut served = true;
+        for v in vals.iter().filter(|v| !v.is_null()) {
+            let same = |x: &Value| {
+                matches!(
+                    (x, v),
+                    (Value::Oid(_), Value::Oid(_))
+                        | (Value::Int2(_), Value::Int2(_))
+                        | (Value::Int4(_), Value::Int4(_))
+                        | (Value::Int8(_), Value::Int8(_))
+                        | (Value::Char(_), Value::Char(_))
+                        | (Value::Text(_), Value::Text(_))
+                )
+            };
+            match rows.lookup(k, v, &same) {
+                Some(ix) => picked.extend(ix),
+                None => {
+                    served = false;
+                    break;
+                }
+            }
+        }
+        if !served {
+            continue;
+        }
+        if vals.len() > 1 {
+            picked.sort_unstable();
+            picked.dedup();
+        }
+        if best.as_ref().is_none_or(|b| picked.len() < b.1.len()) {
+            best = Some((k, picked));
         }
     }
-    Ok(None)
+    Ok(best.map(|(k, ix)| (k, Some(ix))))
+}
+
+/// The column and the values conjunct `c` compares it with for equality: a built-in `=`
+/// (one value), `= ANY (array)` or `IN (...)` (ORMs' `relname IN ('t')`, which read every
+/// row), deterministic collations only, values that read no column of the row and run no
+/// subquery. None: another kind of conjunct.
+fn sys_eq_values(c: &Expr, ctx: &ExecCtx) -> Result<Option<(usize, Vec<Value>)>> {
+    let plain = |e: &Expr| {
+        let mut sub = false;
+        e.walk(&mut |x| sub |= matches!(x, Expr::Subquery(_)));
+        !sub && e.columns().is_empty() && !e.is_volatile()
+    };
+    let builtin_eq = |d: &crate::sql::func::FuncDef| {
+        d.name == "=" && d.oid < crate::catalog::FIRST_USER_OID && d.coll.as_ref().is_none_or(|c| c.deterministic)
+    };
+    Ok(match c {
+        Expr::Call(d, args, _) if args.len() == 2 && builtin_eq(d) => {
+            let (k, other) = match (&args[0], &args[1]) {
+                (Expr::Col(k, _), o) | (o, Expr::Col(k, _)) => (*k, o),
+                _ => return Ok(None),
+            };
+            if !plain(other) {
+                return Ok(None);
+            }
+            Some((k, vec![crate::sql::expr::eval(other, &[], ctx)?]))
+        }
+        Expr::ArrayOp { left, right, op, all: false } if builtin_eq(op) && plain(right) => {
+            let Expr::Col(k, _) = **left else { return Ok(None) };
+            match crate::sql::expr::eval(right, &[], ctx)? {
+                Value::Array(a) => Some((k, a.items.clone())),
+                _ => None,
+            }
+        }
+        Expr::InList(x, items, false) if items.iter().all(|(e, d)| builtin_eq(d) && plain(e)) => {
+            let Expr::Col(k, _) = **x else { return Ok(None) };
+            let vals = items.iter().map(|(e, _)| crate::sql::expr::eval(e, &[], ctx)).collect::<Result<Vec<_>>>()?;
+            Some((k, vals))
+        }
+        _ => None,
+    })
 }
 
 /// How many rescans of a catalog per statement read one relation's rows alone
