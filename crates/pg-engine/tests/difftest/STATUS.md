@@ -348,7 +348,7 @@ plan_variance 2, engine_error 49, missing_error 4, wrong_error 32, eval_error 25
 error_detail 13. The queue tables agreed throughout, and so did the statistics views but for
 the two counts fixed below. Found:
 
-- **Executor (agent 160): a semi- or anti-join's nested loop reads its whole inner side per
+- **Executor (agent 167, routed 2026-11-07; agent 160's before): a semi- or anti-join's nested loop reads its whole inner side per
   outer row** (`NestLoopNode::right_rows` collects every inner row before the join looks at
   one), where ExecNestLoop stops at the first match. Errors come from inner rows PostgreSQL
   never reads, and EXPLAIN ANALYZE's rows differ (`Index Scan ... (actual rows=42.90 loops=49)`
@@ -358,13 +358,13 @@ the two counts fixed below. Found:
   r10i SELECT i, i % 50, i % 7 FROM generate_series(1, 5000) i; CREATE INDEX r10i_k ON r10i (k);
   ANALYZE r10o; ANALYZE r10i; SELECT count(*) FROM r10o o WHERE EXISTS (SELECT 1 FROM r10i i
   WHERE i.k = o.k AND 1 / (i.id - 1601) > -5) AND o.id < 3` fails 22012, PostgreSQL returns 2.
-- **Executor (agent 160): a GroupAggregate under a LIMIT computes every group**: over the same
+- **Executor (agent 167, routed 2026-11-07): a GroupAggregate under a LIMIT computes every group**: over the same
   tables, `SET enable_hashjoin = off; SET enable_mergejoin = off; SELECT o.id, count(i.id),
   sum(i.v / (o.id - 30)) FROM r10o o JOIN r10i i ON i.k = o.k WHERE o.id < 40 GROUP BY o.id
   ORDER BY o.id LIMIT 5` fails 22012, PostgreSQL returns five rows (its GroupAggregate shows
   `actual rows=5`, its outer Index Scan 6 rows; the engine's 39 and 39).
   Both still so on `75f83bc0`, after agent 160's nested-loop rescans (0bb7ddd1).
-- **Plan cache (agent 159, with the planner's custom-plan design, agent 171): STABLE casts of text
+- **Plan cache (agent 178, OLTP and custom plans, routed 2026-11-07; with the planner, agent 177): STABLE casts of text
   parameters.** PostgreSQL's custom plan reduces `$1::int[]` (a CoerceViaIO) to the output
   function's constant and the STABLE input function, shown `('{1}'::cstring)::integer[]`; the
   engine folds it whole (`'{1}'::integer[]`) or, when folding fails, keeps `('x'::text)::date`.
@@ -377,7 +377,7 @@ the two counts fixed below. Found:
   generic plan never chosen, round 9's item). A plain query folds it too: `SELECT relname FROM
   pg_class WHERE oid = 'pg_class'::text::regclass` shows `Index Cond: (oid = '1259'::oid)`,
   PostgreSQL `(oid = (('pg_class'::text)::regclass)::oid)`.
-- **Planner (agent 171, who took the planner over from agent 155)**: a group key a custom plan makes constant (`SELECT coalesce($1, k),
+- **Planner (agent 177, after agents 155 and 171)**: a group key a custom plan makes constant (`SELECT coalesce($1, k),
   count(*) FROM r10o WHERE id < 50 GROUP BY 1 ORDER BY 1` with 1000) keeps `Sort Key: (1000)`
   above the GroupAggregate; PostgreSQL drops the constant pathkey. EXPLAIN of a merge join of
   `x.tc = y.t` (C against the database collation): the engine `Merge Cond: (x.tc = y.t)` /
@@ -482,7 +482,7 @@ wrong_error 17, missing_error 4, eval_error 1, error_message 3, error_detail 40.
 below reproduces on `251924c1` too: the grammar found them, no recent push caused them.
 Routed through the coordinator 2026-11-03.
 
-- **Plan cache (now agent 159, OLTP, with agent 155's custom-plan design; the CoerceViaIO
+- **Plan cache (agent 178 since 2026-11-07, after agent 159; OLTP, with agent 155's custom-plan design; the CoerceViaIO
   folding rule is part of it).** A generic plan is never chosen:
   `CREATE TABLE r9s (id int PRIMARY KEY, g int, v int, t text, x numeric)`, 2,885 rows
   (`SELECT i, 1, NULL, (ARRAY['a', 'a b'])[i % 8 + 1] || 1 FROM generate_series(1, 2885) i`),
@@ -490,7 +490,7 @@ Routed through the coordinator 2026-11-03.
   executed with `'{50,100,NULL}'`, `'{2999,1}'`, `'{}'`, `'{1,2,3}'`, `'{50,100,NULL}'` twice:
   pg_prepared_statements' generic / custom plans 0 / 6, PostgreSQL 1 / 5 (EXPLAIN EXECUTE shows
   the literal where PostgreSQL shows `$1`); over SQL and the extended protocol, 12 of 150 seeds.
-- **Parameter types (now agent 159, with the plan cache item).** `PREPARE p AS SELECT id FROM r9s WHERE id BETWEEN $1 AND
+- **Parameter types (agent 178 since 2026-11-07, with the plan cache item).** `PREPARE p AS SELECT id FROM r9s WHERE id BETWEEN $1 AND
   $1 + $2` fails 42725 "operator is not unique: unknown + unknown"; PostgreSQL types `$1` from
   BETWEEN first. Also over the protocol (an untyped Parse).
 - **Result type (agent 145; fixed by `1f676b8a`, gone from seeds 9060, 9061, 9067, 9090).**
@@ -535,7 +535,7 @@ Routed through the coordinator 2026-11-03.
   under a join (`a.t`) and over a UNION ALL; with a LIMIT.
 - Round 8's small-work_mem hash-or-sort choice again (r8big, HashSetOp vs SetOp).
 - Re-probed on `31066020` (agent 162, 2026-11-03, reproducers above): still open, with the
-  same owners (the planner's now agent 171's): the plan cache (0 / 6 against 1 / 5; EXPLAIN EXECUTE's literal), BETWEEN's
+  same owners (as of 2026-11-07: the planner agent 177, plan cache and OLTP agent 178, the executor agent 167): the plan cache (0 / 6 against 1 / 5; EXPLAIN EXECUTE's literal), BETWEEN's
   parameter types (42725), `arr @> '{2}'` (15 rows against 1,000), the sort keys under
   COLLATE, the partitioned top-N, seed 5069's `DELETE ... USING v0` (22023), round 6's domain
   comparison in EXPLAIN; all still so on `75f83bc0` (after agent 159's custom plans from the
@@ -1360,7 +1360,8 @@ in round 4, as were the other two leftovers here (int4range @> d, array_agg of a
   2026-11-03, all re-probed on `ed0c85fe`, reproducers below). Owners as of 2026-11-03's end:
   executor agent 160, OLTP and protocol agent 159, planner agent 155, catalog agent 146, index
   access agent 144, bulk writes agent 148, size models agent 161 (still so on 2026-11-04,
-  agent 162, but the planner: agent 171 since 2026-11-04, agent 155 having finished; also
+  agent 162, but, as of 2026-11-07: the planner agent 177 (after 155 and 171), the executor agent 167
+  (after 160), OLTP, the protocol and custom plans agent 178 (after 159); also
   storage scans agent 149, query memory agent 150, postgres_fdw agent 157, replication agent
   158):
   - Planner (agent 155), under a small work_mem (seeds 8018, 8023, 8026, 8035, 8049, 8130):
