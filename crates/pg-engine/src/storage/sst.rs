@@ -169,12 +169,11 @@ enum Bloom {
 /// per byte, one after another: most of a compaction's bloom cost).
 fn hash_words(b: &[u8]) -> u64 {
     let mut h: u64 = 0x9E37_79B9_7F4A_7C15 ^ b.len() as u64;
-    let mut words = b.chunks_exact(8);
+    let (words, rest) = b.as_chunks::<8>();
     let mix = |h: u64, w: u64| (h ^ w).wrapping_mul(0xff51_afd7_ed55_8ccd).rotate_left(29);
-    for w in &mut words {
-        h = mix(h, u64::from_le_bytes(w.try_into().unwrap()));
+    for w in words {
+        h = mix(h, u64::from_le_bytes(*w));
     }
-    let rest = words.remainder();
     if !rest.is_empty() {
         let mut t = [0u8; 8];
         t[..rest.len()].copy_from_slice(rest);
@@ -880,7 +879,7 @@ impl Block {
         let mut derived = false;
         let (mut pos, mut n) = (0, 0usize);
         while pos < raw.len() {
-            let (shared, unshared, vl) = entry_head(&raw, &mut pos)?;
+            let (shared, unshared, vl) = entry_head(raw, &mut pos)?;
             let end = pos + unshared + vl.saturating_sub(1);
             if shared > key.len() || end > raw.len() {
                 return Err(bad());

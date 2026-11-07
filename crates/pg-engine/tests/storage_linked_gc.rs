@@ -73,7 +73,7 @@ fn direct_run(s: &Store, compress: bool) -> Arc<SstReader> {
     std::fs::create_dir_all(&spill).unwrap();
     let mut w = SstWriter::create_run(&spill, 1000, compress).unwrap();
     for i in 0..2000 {
-        let value = if i == 4 || i == 6 { vec![0] } else { [&[1][..], &vec![b'v'; 80]].concat() };
+        let value = if i == 4 || i == 6 { vec![0] } else { [&[1][..], &[b'v'; 80]].concat() };
         w.add(&mvcc_key(format!("b{i:04}").as_bytes(), 1), Some(&value)).unwrap();
     }
     Arc::new(SstReader::open(&spill, w.finish().unwrap(), StoreOptions::default().cache).unwrap())
