@@ -137,7 +137,8 @@ export function checkFrame(f, label, { fit }) {
   if (content && free.w > 0 && free.h > 0) {
     const cover = area(clip(content, free)) / area(free);
     metrics.cover = +cover.toFixed(2);
-    if (fit && all && k < 0.995 && cover < 0.6) say("e", `content covers ${Math.round(cover * 100)} % of the free area (box ${fmt(content)}, free ${fmt(free)}, zoom ${Math.round(k * 100)} %)`);
+    // Near full size (≥ 90 %) the content isn't too small whatever its shape; a phone is one column wide.
+    if (fit && all && k < 0.9 && f.canvas.w >= 640 && cover < 0.6) say("e", `content covers ${Math.round(cover * 100)} % of the free area (box ${fmt(content)}, free ${fmt(free)}, zoom ${Math.round(k * 100)} %)`);
     if (fit) {
       // Seen part of the content only: off screen isn't dead, it's the rest.
       const seen = clip(content, free);

@@ -360,7 +360,11 @@ async function runGroup(browser, g, ctxOpts) {
           const a = frames.fit1.snap.goal;
           const b = frames.fit2.snap.goal;
           const m = moved(frames.fit1, frames.fit2);
-          if (Math.abs(a.k - b.k) > 0.002 || Math.abs(a.x - b.x) > 1 || Math.abs(a.y - b.y) > 1 || m.length) r.fails.push(`h fit2: everything fit, yet Fit again moved the view (${(a.k * 100).toFixed(1)}→${(b.k * 100).toFixed(1)} %) or ${m.length} cards`);
+          if (Math.abs(a.k - b.k) > 0.002 || Math.abs(a.x - b.x) > 1 || Math.abs(a.y - b.y) > 1 || m.length) {
+            const was = new Map(frames.fit1.snap.nodes.map((n) => [n.key, n]));
+            const why = frames.fit2.snap.nodes.filter((n) => { const o = was.get(n.key); return !o || o.w !== n.w || o.h !== n.h || o.important !== n.important; }).map((n) => { const o = was.get(n.key); return o ? `${n.key} ${o.w}×${o.h}→${n.w}×${n.h}` : `${n.key} new`; });
+            r.fails.push(`h fit2: everything fit, yet Fit again moved the view (${(a.k * 100).toFixed(1)}→${(b.k * 100).toFixed(1)} %) or ${m.length} cards; changed: ${why.slice(0, 3).join(", ") || "none"}; wraps ${JSON.stringify(frames.fit1.snap.wraps)}→${JSON.stringify(frames.fit2.snap.wraps)} overview ${frames.fit1.snap.overview}→${frames.fit2.snap.overview}`);
+          }
         }
         // i: zoom steps keep every card's world position; k: text never grows as the zoom drops.
         let lastTitle = base.title;
