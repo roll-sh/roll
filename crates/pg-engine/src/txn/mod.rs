@@ -612,8 +612,13 @@ impl Database {
                 return Ok(st.last);
             }
         }
-        let seq = seq();
+        let mut seq = seq();
         debug_assert!(seq.increment == 1 && seq.cache == ROWID_CACHE && seq.max == i64::MAX);
+        // Each chunk logged is a store commit: a big table's ids are logged further ahead, a
+        // 16th of those handed out so far (at most 65,536), so a 1M-row load commits ~40
+        // times instead of ~1,000. (Ids are hidden; a crash only skips the rest of a chunk.)
+        let last = self.seqs.lock().get(&oid).map_or(0, |s| s.last);
+        seq.cache = (last / 16).clamp(ROWID_CACHE, 1 << 16);
         self.nextval(&seq)
     }
 

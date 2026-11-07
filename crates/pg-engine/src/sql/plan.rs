@@ -1078,6 +1078,15 @@ pub struct InsertPlan {
     pub alias: Option<String>,
 }
 
+/// A COPY FROM row as read: a plain COPY's values (no WHERE, DEFAULT markers or domain input
+/// checks: `session::copy`'s `CopyInParsed::plain`), or the columns' expressions, a DEFAULT
+/// marker's default evaluated as the row goes in.
+#[derive(Debug)]
+pub enum CopyRow {
+    Values(Vec<crate::types::Value>),
+    Exprs(Vec<Expr>),
+}
+
 /// COPY FROM's input: the table, and its rows as they are read (`CopyFromErrorCallback`).
 #[derive(Debug)]
 pub struct CopyLines {
@@ -1098,7 +1107,7 @@ pub struct CopyLines {
 #[derive(Debug, Default)]
 pub struct CopyFeed {
     /// Each row with its line number and text.
-    pub rows: std::collections::VecDeque<(Vec<Expr>, usize, String)>,
+    pub rows: std::collections::VecDeque<(CopyRow, usize, String)>,
     /// The data has all been read.
     pub done: bool,
     /// Rows read so far.

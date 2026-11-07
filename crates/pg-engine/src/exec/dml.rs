@@ -1015,10 +1015,14 @@ pub const NEED_COPY_ROWS: &str = "XXCPY";
 /// COPY FROM's next row (its values, line number and text); None: the data has all been
 /// read and inserted.
 fn next_copied(c: &CopyLines, ctx: &ExecCtx) -> Result<Option<(Row, (usize, String))>> {
-    let next = c.feed.lock().unwrap().rows.pop_front();
+    let mut feed = c.feed.lock().unwrap();
+    let next = feed.rows.pop_front();
+    let done = feed.done;
+    drop(feed);
     match next {
+        Some((crate::sql::plan::CopyRow::Values(row), line, raw)) => Ok(Some((row, (line, raw)))),
         // (The values read are constants, taken as they are; defaults are evaluated.)
-        Some((exprs, line, raw)) => {
+        Some((crate::sql::plan::CopyRow::Exprs(exprs), line, raw)) => {
             let mut row = Vec::with_capacity(exprs.len());
             for e in exprs {
                 row.push(match e {
@@ -1028,7 +1032,7 @@ fn next_copied(c: &CopyLines, ctx: &ExecCtx) -> Result<Option<(Row, (usize, Stri
             }
             Ok(Some((row, (line, raw))))
         }
-        None if c.feed.lock().unwrap().done => Ok(None),
+        None if done => Ok(None),
         None => Err(Error::new(NEED_COPY_ROWS, "COPY FROM needs its next rows")),
     }
 }
@@ -3675,6 +3679,11 @@ pub struct InsertNode {
     /// ON CONFLICT DO UPDATE starting a row over: (its leaf, when routed; the row as
     /// prepared).
     retry: Option<(Option<usize>, Prepared)>,
+    /// A plain COPY: multi-insert, into a table without triggers, RLS, generated columns,
+    /// foreign storage, view checks or unique / exclusion indexes (`insert_plain`).
+    plain_copy: bool,
+    /// Its rows not counted in pg_stat yet (`flush_plain_counts`).
+    plain_counts: std::cell::Cell<i64>,
 }
 
 impl InsertNode {
@@ -3735,6 +3744,16 @@ impl InsertNode {
             && rules.indexes.iter().all(|b| b.index.method == "btree" && !checks_rows(b))
             && !ctx.txn.borrow().sink_open();
         let sink = (bulk || select_bulk).then_some(false);
+        let plain_copy = copied.is_some_and(|c| c.multi)
+            && plan.on_conflict.is_none()
+            && plan.returning.is_empty()
+            && rules.triggers.is_empty()
+            && rules.rls_checks.is_empty()
+            && rules.view_checks.is_empty()
+            && rules.part_check.is_none()
+            && rules.table.foreign.is_none()
+            && rules.generated.iter().all(Option::is_none)
+            && rules.indexes.iter().all(|b| !checks_rows(b));
         // Such a COPY into a table this transaction emptied (TRUNCATE, then COPY, as pgbench
         // -i and COPY FREEZE do) measures its rows as they go in: VACUUM finds them as it
         // left them without reading them (`txn::unchanged`).
@@ -3760,6 +3779,8 @@ impl InsertNode {
             virtual_slot: false,
             queue_mark: None,
             retry: None,
+            plain_copy,
+            plain_counts: Default::default(),
         })
     }
 
@@ -3945,7 +3966,8 @@ impl InsertNode {
             f.len() - 1
         };
         let mut at_flush = false;
-        let r = self.insert(src, ctx).map_err(|e| {
+        let r = if self.plain_copy { self.insert_plain(src, ctx) } else { self.insert(src, ctx) };
+        let r = r.map_err(|e| {
             // (And an index entry too big, `rowsize`: its index insertion is the flush's too.)
             if c.multi
                 && !e.stacked
@@ -3987,6 +4009,57 @@ impl InsertNode {
             }
         }
         r
+    }
+
+    /// A plain COPY's row (`plain_copy`): what `insert_new` does for a table without
+    /// triggers, RLS, generated columns, partitions, foreign storage, view checks or unique /
+    /// exclusion indexes, in the same order (defaults, domains, NOT NULL and CHECK, the row
+    /// id, SSI, the index values, the model, the write, the entries), without the general
+    /// path's per-row checks. Without CHECK constraints (nothing the row runs can read the
+    /// counts) its pg_stat counts go in a batch at a time (`flush_plain_counts`).
+    fn insert_plain(&mut self, src: Row, ctx: &ExecCtx) -> Result<Option<(Row, Vec<u8>, Option<Row>)>> {
+        let rules = &self.plan.rules;
+        let t = &rules.table;
+        let row = new_row(rules, &self.plan.target, src, ctx)?;
+        check_row_rls(rules, &[], &row, ctx)?;
+        let rowid = if t.has_rowid() {
+            Some(ctx.sess.db.nextval_by_one(t.oid, || crate::session::ddl::rowid_sequence(t))?)
+        } else {
+            None
+        };
+        let dkey = data_key(t, &row, rowid);
+        let p = Prepared { row, dkey };
+        ssi_insert(t, &rules.indexes, &p.dkey, &p.row, ctx)?;
+        let vals = index_entries_checked(rules, &p, None, None, ctx)?;
+        let Prepared { row, dkey } = p;
+        let tid = super::sizing::inserted_with(t, &rules.indexes, &dkey, &row, Some(&vals.vals), ctx)?;
+        if rules.checks.is_empty() && !t.temporary {
+            self.plain_counts.set(self.plain_counts.get() + 1);
+        } else {
+            super::pgstat::count_insert(ctx, t.oid, 1);
+            super::pgstat::io_insert(ctx, t, 1, "normal");
+        }
+        let xid = ctx.txn.borrow_mut().cur_xid();
+        let fresh = t.has_rowid();
+        if fresh {
+            super::toast::put_new_row(t, dkey.clone(), &row, xid, tid, &mut ctx.txn.borrow_mut())?;
+        } else {
+            super::toast::put_row(t, dkey.clone(), &row, xid, tid, &mut ctx.txn.borrow_mut())?;
+        }
+        crate::repl::log::insert(t, &row, ctx)?;
+        put_index_entries_with(t, &rules.indexes, &vals.vals, &dkey, fresh, ctx)?;
+        Ok(Some((row, dkey, None)))
+    }
+
+    /// The pg_stat counts of a plain COPY's rows since the last flush (`insert_plain`), as
+    /// `store_inserted` counts each: before the statement returns, raises or reads its next
+    /// batch.
+    fn flush_plain_counts(&self, ctx: &ExecCtx) {
+        let n = self.plain_counts.take();
+        if n > 0 {
+            super::pgstat::count_insert(ctx, self.plan.rules.table.oid, n);
+            super::pgstat::io_insert(ctx, &self.plan.rules.table, n, "normal");
+        }
     }
 
     /// ON CONFLICT for a row colliding in the target, or in a leaf partition (`leaf`) when
@@ -4224,9 +4297,14 @@ impl Node for InsertNode {
             self.queue_mark = Some(ctx.after_queue.borrow().len());
         }
         loop {
-            ctx.check()?;
+            // (A plain COPY's pending counts go in before anything leaves: its next batch,
+            // an error, the end.)
+            if let Err(e) = ctx.check() {
+                self.flush_plain_counts(ctx);
+                return Err(e);
+            }
             let next = match &self.plan.copy {
-                Some(c) => match next_copied(c, ctx)? {
+                Some(c) => match next_copied(c, ctx).inspect_err(|_| self.flush_plain_counts(ctx))? {
                     Some((row, line)) => {
                         self.copy_line = line;
                         Some(row)
@@ -4236,6 +4314,7 @@ impl Node for InsertNode {
                 None => self.source.next(ctx)?,
             };
             let Some(src) = next else {
+                self.flush_plain_counts(ctx);
                 // (The last buffer's flush.)
                 if let Some(e) = self.copy_err.take() {
                     return Err(e);
@@ -4306,7 +4385,7 @@ impl Node for InsertNode {
                 return Ok(None);
             };
             let inserted = match self.plan.copy.clone() {
-                Some(c) => self.insert_copied(&c, src, ctx)?,
+                Some(c) => self.insert_copied(&c, src, ctx).inspect_err(|_| self.flush_plain_counts(ctx))?,
                 None => {
                     // (Its rows are stored as they go, final: the sink takes them once there
                     // are enough to be worth its room.)
