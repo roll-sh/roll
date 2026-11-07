@@ -59,9 +59,9 @@ export function GatewaySection() {
   return (
     <SettingsSection title="Gateway" ids={GATEWAY_SETTING_IDS}>
       {g.unavailable ? (
-        <SettingRow s={{ ...GATEWAY_SETTINGS.gateway, description: "Sign in to roll to set up a gateway." }} />
+        <SettingRow s={{ ...GATEWAY_SETTINGS.gateway, description: "Sign in to roll to set up a gateway." }} shownFor={GATEWAY_SETTING_IDS} />
       ) : plan === undefined ? (
-        <SettingRow s={GATEWAY_SETTINGS.gateway}>
+        <SettingRow s={GATEWAY_SETTINGS.gateway} shownFor={GATEWAY_SETTING_IDS}>
           <p className="mt-2 text-[12.5px] text-subtle">
             <span className="shimmer">Loading…</span>
           </p>
@@ -69,6 +69,7 @@ export function GatewaySection() {
       ) : plan === null ? (
         <SettingRow
           s={GATEWAY_SETTINGS.gateway}
+          shownFor={GATEWAY_SETTING_IDS}
           note={<Network className="size-3 text-subtle" aria-hidden />}
           control={
             <button type="button" onClick={() => setSetup(true)} className={smallBtn}>

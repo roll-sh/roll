@@ -54,6 +54,7 @@ import { threadDone } from "./thread-status";
 import { SidebarToggle, ThreadsSidebar, useSidebarOpen } from "./threads-sidebar";
 import { AgentsContext, useAgents, useAgentsSnapshot, useHold, useMarkDriver, type AgentsCtx } from "./use-agents";
 import { useAgentsConnection } from "./use-connection";
+import { ADD_MACHINE_EVENT } from "./settings-ui";
 import { OwnerSwitcher } from "./owner-switcher";
 import { NoOwner } from "./no-owner";
 import { PinTools, useCanvasViews, ViewsBar, type CanvasViews } from "./views";
@@ -363,12 +364,19 @@ export function AgentsSurface({
     (project: string | null) => {
       setFocusedBy((all) => setFocusedIn(client.owner, all, viewId, project));
       if (project) setAgentsView({ kind: "canvas" });
+      // The tap that drilled in did its job: its card's finger-sized tools would cover the next view.
+      for (const el of document.querySelectorAll("[data-card][data-tapped]")) el.removeAttribute("data-tapped");
     },
     [client.owner, viewId],
   );
   // Stable, for the memoised sidebar.
   const showAll = useCallback(() => focusProject(null), [focusProject]);
   const openAddMachine = useCallback(() => setAdding(true), []);
+  // Settings' search points here ("sandbox", "add machine").
+  useEffect(() => {
+    window.addEventListener(ADD_MACHINE_EVENT, openAddMachine);
+    return () => window.removeEventListener(ADD_MACHINE_EVENT, openAddMachine);
+  }, [openAddMachine]);
   const focusedGone = focused !== null && data.projects.size > 0 && !data.projects.has(focused);
   useEffect(() => {
     if (focusedGone) focusProject(null);
@@ -683,7 +691,7 @@ export function AgentsSurface({
             {/* The working area: an inset panel one step up from the chrome (Linear's inverted L). It
                 folds to nothing (still mounted) under a maximized builder, as the sheet grows over it. */}
             <div
-              data-waiting={(phone && shown.kind === "canvas" && requests.length > 0) || undefined}
+              data-waiting={(phone && shown.kind === "canvas" && layoutOf(display) === "canvas" && requests.length > 0) || undefined}
               data-folded={wide || undefined}
               inert={wide}
               aria-hidden={wide || undefined}
@@ -718,7 +726,8 @@ export function AgentsSurface({
               )}
               <AnimatePresence initial={false}>{launchError && <LaunchError key={launchError} text={launchError} />}</AnimatePresence>
               {/* Beside an open conversation too (the canvas narrows; the draft stays); on a phone, under what's waiting. */}
-              {data.machines.size > 0 && <PromptBar ref={dock} above={phone && shown.kind === "canvas" && requests.length > 0 && <PhoneWaiting client={client} />} />}
+              {/* A phone's "Waiting for you" rides over the canvas; a list or board has them under Needs you (it covered 40% of them). */}
+              {data.machines.size > 0 && <PromptBar ref={dock} above={phone && shown.kind === "canvas" && layoutOf(display) === "canvas" && requests.length > 0 && <PhoneWaiting client={client} />} />}
             </div>
             <RightDock
               phone={phone}

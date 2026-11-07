@@ -494,8 +494,11 @@ function ThreadsSidebarBody({
   const shown = openThread ? data.threads.get(openThread) : undefined;
   const lastEnded = useMemo(() => (openThread ? runsOf(data, openThread).reduce((at, r) => Math.max(at, r.completed_at ?? 0), 0) : 0), [data, openThread]);
   const sent = useRef("");
+  // An offline machine would only answer 503: it's told once it's back.
+  const machineRecord = shown ? data.machines.get(shown.machine)?.value : undefined;
+  const online = !!machineRecord && reachable(machineRecord);
   useEffect(() => {
-    if (!shown || readOnly) return;
+    if (!shown || readOnly || !online) return;
     const t = shown.value;
     const key = `${t.id}:${lastEnded}:${t.inbox.woke_at ?? 0}`;
     if (sent.current.startsWith(`${t.id}:`) && sent.current === key) return;
@@ -503,7 +506,7 @@ function ThreadsSidebarBody({
     const seen = t.inbox.visited_at ?? 0;
     sent.current = key;
     if (fresh || seen < lastEnded || seen < (t.inbox.woke_at ?? 0)) client.run(shown.machine, { type: "thread.visit", thread: t.id }).catch(() => {});
-  }, [client, shown, lastEnded, readOnly]);
+  }, [client, shown, lastEnded, readOnly, online]);
 
   // ⌘⇧S settles the open thread and advances (un-settles a settled one); ⌘B shows or hides this.
   useEffect(() => {

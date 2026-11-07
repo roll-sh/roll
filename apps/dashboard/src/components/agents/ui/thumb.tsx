@@ -51,7 +51,7 @@ export function SlidingThumb({ selector, className }: { selector: string; classN
     ro?.observe(c);
     for (const child of c.children) ro?.observe(child);
     const mo = new MutationObserver(() => measure());
-    mo.observe(c, { subtree: true, attributes: true, attributeFilter: ["aria-selected", "aria-pressed", "data-pressed", "data-selected"], childList: true });
+    mo.observe(c, { subtree: true, attributes: true, attributeFilter: ["aria-selected", "aria-pressed", "aria-checked", "data-pressed", "data-selected", "data-state"], childList: true });
     return () => {
       ro?.disconnect();
       mo.disconnect();

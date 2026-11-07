@@ -24,6 +24,25 @@ export interface Setting extends SettingItem {
 
 const SearchCtx = createContext<{ query: string; matches: Set<string> | null }>({ query: "", matches: null });
 
+/** The surface opens "Add a machine" on this (settings has no handle on its state). */
+export const ADD_MACHINE_EVENT = "roll:agents:add-machine";
+
+/** Places a settings search can't find as settings: "automation" found nothing, "sandbox" no way to rent one. */
+const PLACES: { item: SettingItem; title: string; hint: string; open: () => void }[] = [
+  {
+    item: { id: "place.automations", title: "Automations", section: "", terms: ["automation", "workflow", "trigger", "schedule", "cron", "slack", "discord", "notice", "run"] },
+    title: "Automations",
+    hint: "Workflows that start agents, on a schedule or an event (A)",
+    open: () => setAgentsView({ kind: "automations" }),
+  },
+  {
+    item: { id: "place.machine", title: "Add a machine", section: "", terms: ["sandbox", "rent", "cloud", "new machine", "connect", "computer", "server"] },
+    title: "Add a machine",
+    hint: "Connect a computer, or rent a sandbox",
+    open: () => window.dispatchEvent(new Event(ADD_MACHINE_EVENT)),
+  },
+];
+
 /** Whether a row (or any of `ids`) shows with the current search. */
 export function useShown(ids: readonly string[]): boolean {
   const { matches } = useContext(SearchCtx);
@@ -93,6 +112,8 @@ export function SettingsPage({
     () => (query.trim() && elsewhere ? elsewhere.map((e) => ({ ...e, hits: searchSettings(query, e.items) })).filter((e) => e.hits.length > 0) : []),
     [query, elsewhere],
   );
+  // Things people look for in settings that live elsewhere (only on the agents' own pages).
+  const places = useMemo(() => (query.trim() && elsewhere ? PLACES.filter((p) => searchSettings(query, [p.item]).length > 0) : []), [query, elsewhere]);
   // T3: `/` or ⌘/Ctrl+F searches the settings.
   useEffect(() => {
     if (!search) return;
@@ -147,7 +168,28 @@ export function SettingsPage({
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto px-4 pt-3 pb-8" data-scroll>
         <SearchCtx.Provider value={{ query, matches }}>
-          {matches && matches.size === 0 ? others.length === 0 && <p className="py-10 text-center text-[13px] text-subtle">No settings found</p> : children}
+          {matches && matches.size === 0 ? others.length === 0 && places.length === 0 && <p className="py-10 text-center text-[13px] text-subtle">No settings found</p> : children}
+          {places.length > 0 && (
+            <section className="mb-6" aria-label="Not a setting">
+              <h3 className="mb-2 px-0.5 text-[12px] font-medium text-soft">Not in settings</h3>
+              <div className="divide-y divide-line overflow-hidden rounded-xl border border-line-2 bg-raised shadow-card inset-shadow-highlight">
+                {places.map((p) => (
+                  <button
+                    key={p.title}
+                    type="button"
+                    onClick={p.open}
+                    className="flex w-full items-center gap-3 px-4 py-3 text-left transition-colors hover:bg-fg/[0.03] focus-visible:bg-fg/[0.04] focus-visible:outline-none"
+                  >
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-[13px] font-[510] text-fg">{p.title}</span>
+                      <span className="block truncate text-[12px] text-muted">{p.hint}</span>
+                    </span>
+                    <ChevronRight className="size-4 shrink-0 text-subtle" strokeWidth={1.5} aria-hidden />
+                  </button>
+                ))}
+              </div>
+            </section>
+          )}
           {others.length > 0 && (
             <section className="mb-6" aria-label="In other settings">
               <h3 className="mb-2 px-0.5 text-[12px] font-medium text-soft">{matches?.size === 0 ? "Not here, but in" : "Also in"}</h3>
@@ -161,7 +203,7 @@ export function SettingsPage({
                   >
                     <span className="min-w-0 flex-1">
                       <span className="block truncate text-[13px] font-[510] text-fg">{o.title}</span>
-                      <span className="block truncate text-[12px] text-muted">{o.hits.map((h) => h.title).join(", ")}</span>
+                      <span className="block truncate text-[12px] text-muted">{[...new Set(o.hits.map((h) => h.title))].join(", ")}</span>
                     </span>
                     <ChevronRight className="size-4 shrink-0 text-subtle" strokeWidth={1.5} aria-hidden />
                   </button>
@@ -201,6 +243,7 @@ export function SettingRow({
   note,
   children,
   className,
+  shownFor,
 }: {
   s: Setting;
   control?: ReactNode;
@@ -210,8 +253,10 @@ export function SettingRow({
   note?: ReactNode;
   children?: ReactNode;
   className?: string;
+  /** Other settings a search for which shows this row (it stands in for them: the gateway's rows before there's one). */
+  shownFor?: readonly string[];
 }) {
-  if (!useShown([s.id])) return null;
+  if (!useShown(shownFor ? [s.id, ...shownFor] : [s.id])) return null;
   return (
     <div className={cn("px-3.5 py-3 text-[13px]", className)} data-setting={s.id}>
       <div className="flex flex-wrap items-center gap-x-4 gap-y-2">

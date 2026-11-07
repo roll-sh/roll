@@ -518,6 +518,8 @@ export class CanvasEngine {
     this.canvas.height = Math.round(this.h * this.dpr);
     this.canvas.style.width = `${this.w}px`;
     this.canvas.style.height = `${this.h}px`;
+    // What hangs off the view's size (the minimap shows only on a wide canvas) follows.
+    this.opts.onView?.(this.view);
     this.kick();
   }
 

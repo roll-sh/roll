@@ -194,6 +194,8 @@ function BulkStrip({ data, ids, bulk, phone, hidden }: { data: AgentsData; ids: 
   const run = (spec: BulkSpec) => bulk.run(spec, ids);
   const count = (n: number) => (n > 0 && n < ids.length ? n : null);
   const models = useMemo(() => modelsFor(data, ids), [data, ids]);
+  // What Snooze leaves out and why ("2 · running"), said before picking a time.
+  const snoozeSkips = useMemo(() => skipSummary(planBulk(data, ids, { kind: "snooze", until: now + 3_600_000 }, now).skipped), [data, ids, now]);
   const busy = !!bulk.running;
   if (writing) return <FollowUp n={can.followup} onCancel={() => setWriting(false)} onSend={(text) => (setWriting(false), run({ kind: "followup", text }))} />;
   const actions: { key: string; node: ReactNode; primary?: boolean }[] = [
@@ -201,9 +203,12 @@ function BulkStrip({ data, ids, bulk, phone, hidden }: { data: AgentsData; ids: 
     {
       key: "snooze",
       node: (
-        <Drop icon={<AlarmClock />} label="Snooze" disabled={busy || !can.snooze}>
+        <Drop icon={<AlarmClock />} label="Snooze" n={count(can.snooze)} disabled={busy || !can.snooze}>
           <MenuGroup>
-            <MenuGroupLabel>Snooze {can.snooze} until</MenuGroupLabel>
+            <MenuGroupLabel>
+              Snooze {can.snooze === ids.length ? can.snooze : `${can.snooze} of ${ids.length}`} until
+              {snoozeSkips && <span className="mt-0.5 block font-normal text-subtle">Skips {snoozeSkips}</span>}
+            </MenuGroupLabel>
             {snoozePresets(Date.now()).map((p) => (
               <MenuItem key={p.label} onClick={() => run({ kind: "snooze", until: p.until })}>
                 <span className="min-w-0 flex-1">{p.label}</span>
@@ -318,7 +323,7 @@ function Act({ icon, label, n, disabled, onClick, title }: { icon: ReactNode; la
   );
 }
 
-function Drop({ icon, label, disabled, children }: { icon: ReactNode; label: string; disabled?: boolean; children: ReactNode }) {
+function Drop({ icon, label, n, disabled, children }: { icon: ReactNode; label: string; n?: number | null; disabled?: boolean; children: ReactNode }) {
   return (
     <MenuRoot>
       <MenuTrigger
@@ -327,6 +332,7 @@ function Drop({ icon, label, disabled, children }: { icon: ReactNode; label: str
       >
         {icon}
         <span className="max-sm:sr-only">{label}</span>
+        {n != null && <span className="font-mono text-[10.5px] text-subtle tabular-nums">{n}</span>}
         <ChevronDown className="!size-3 text-subtle" />
       </MenuTrigger>
       <MenuPopup align="start" sideOffset={6} className="max-h-80 min-w-52 overflow-y-auto">

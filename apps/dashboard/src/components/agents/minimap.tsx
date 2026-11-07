@@ -15,6 +15,8 @@ import type { CanvasEngine } from "./canvas-engine";
 
 const W = 168;
 const H = 112;
+/** The narrowest canvas it shows on. */
+const MIN_CANVAS_W = 900;
 
 export interface MinimapHandle {
   /** The view moved: move the frame (and show or hide the map). */
@@ -54,8 +56,9 @@ export function Minimap({
       const [top, right, bottom, left] = edges.current;
       if (!e || !el || !top || !right || !bottom || !left || !world || !map) return;
       const { w, h } = e.viewport;
-      // Only when there's more canvas than screen.
-      const bigger = world.w * v.k > w + 1 || world.h * v.k > h + 1;
+      // Only when there's more canvas than screen, and room for it beside the prompt bar (a side
+      // panel or a conversation open narrows the canvas, and the bar ran over it).
+      const bigger = (world.w * v.k > w + 1 || world.h * v.k > h + 1) && w >= MIN_CANVAS_W;
       if (el.hidden === bigger) el.hidden = !bigger;
       if (!bigger) return;
       const x0 = (-v.x / v.k) * map.s + map.x;

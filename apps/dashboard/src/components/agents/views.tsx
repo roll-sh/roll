@@ -268,7 +268,25 @@ export function ViewsBar({
   const currentId = v.current.id;
   const { setDisplay } = v;
   const shownDisplay = v.current.display;
-  const setLayout = useCallback((l: Layout) => setDisplay(withLayout(shownDisplay, l)), [setDisplay, shownDisplay]);
+  const setLayout = useCallback(
+    (l: Layout) => {
+      setDisplay(withLayout(shownDisplay, l));
+      // The list or board takes the keys at once (j/k, x, Enter): focused as soon as it's in (it
+      // renders deferred), unless something else took focus meanwhile.
+      if (l !== "canvas") {
+        let tries = 30;
+        const take = () => {
+          const a = document.activeElement;
+          if (a && a !== document.body && !a.closest('[aria-label="Show as"]')) return;
+          const el = document.querySelector<HTMLElement>("[data-thread-list], [data-thread-board]");
+          if (el) el.focus({ preventScroll: true });
+          else if (tries-- > 0) requestAnimationFrame(take);
+        };
+        requestAnimationFrame(take);
+      }
+    },
+    [setDisplay, shownDisplay],
+  );
   useEffect(() => {
     const on = (r: ViewRequest) => {
       if (r === "new") setEditor({ mode: "new" });
@@ -322,7 +340,7 @@ export function ViewsBar({
 
   return (
     <div ref={bar} className="chrome-in relative z-10 flex h-11 shrink-0 items-center gap-2 border-b border-line px-2" data-nodrag>
-      <div ref={tabs} role="tablist" aria-label="Canvas views" className="relative flex min-w-0 flex-1 items-center gap-0.5 overflow-x-auto [scrollbar-width:none]">
+      <div ref={tabs} role="tablist" aria-label="Canvas views" className="relative flex min-w-36 flex-1 items-center gap-0.5 overflow-x-auto [scrollbar-width:none]">
         {/* The selected tab's raised look slides from tab to tab (it scrolls with them). */}
         <SlidingThumb selector="[data-tab][data-selected]" className="rounded-md border border-line-2 bg-panel-2 shadow-card inset-shadow-highlight" />
         {views.map((view, i) => {
@@ -408,13 +426,15 @@ export function ViewsBar({
             </div>
           );
         })}
+        {/* Stuck at the strip's end, so it stays in reach however many views scroll under it. */}
         {saved.length < MAX_VIEWS && (
-          <button onClick={() => setEditor({ mode: "new" })} title="New view (⌥S)" aria-label="New view" className="grid size-7 shrink-0 place-items-center rounded-md text-subtle transition-colors duration-150 hover:bg-fg/[0.05] hover:text-fg">
+          <button onClick={() => setEditor({ mode: "new" })} title="New view (⌥S)" aria-label="New view" className="sticky right-0 grid size-7 shrink-0 place-items-center rounded-md bg-canvas text-subtle transition-colors duration-150 hover:bg-panel-2 hover:text-fg">
             <Plus className="size-3.5" strokeWidth={1.75} />
           </button>
         )}
       </div>
-      <div className="flex shrink-0 items-center gap-1">
+      {/* Short of room (a conversation open beside it), the filter gives way before the tabs and their +. */}
+      <div className="flex min-w-0 shrink items-center gap-1">
         {focused && (
           // Inside a project's space: the way back out, as a breadcrumb.
           <nav aria-label="Where the canvas is" className="fade-in flex h-7 max-w-64 items-center gap-1 rounded-md border border-line-2 bg-panel-2 pr-0.5 pl-1 text-[12px] text-fg inset-shadow-highlight">
@@ -444,7 +464,7 @@ export function ViewsBar({
           </>
         )}
         {!phone && (
-          <label className="flex h-7 w-56 items-center gap-1.5 rounded-md border border-line bg-fg/[0.03] px-2 text-subtle inset-shadow-highlight transition-colors duration-150 hover:border-line-2 focus-within:border-accent/50 focus-within:text-fg">
+          <label className="flex h-7 w-56 min-w-28 shrink items-center gap-1.5 rounded-md border border-line bg-fg/[0.03] px-2 text-subtle inset-shadow-highlight transition-colors duration-150 hover:border-line-2 focus-within:border-accent/50 focus-within:text-fg">
             <Search className="size-3.5 shrink-0" strokeWidth={1.75} />
             <input
               ref={field}
@@ -983,7 +1003,7 @@ export function PinTools({
       {children}
       <div
         ref={ref}
-        className={`pointer-events-none absolute -top-3.5 right-2.5 z-10 flex translate-y-1 items-center gap-0.5 rounded-lg border border-line-2 p-0.5 text-muted opacity-0 shadow-pop inset-shadow-highlight glass transition-[opacity,translate] duration-150 ease-out starting:translate-y-1 starting:opacity-0 group-hover/slot:pointer-events-auto group-hover/slot:translate-y-0 group-hover/slot:opacity-100 focus-within:pointer-events-auto focus-within:translate-y-0 focus-within:opacity-100 motion-reduce:transition-none ${armed ? "" : "hidden"}`}
+        className={`pointer-events-none absolute -top-3.5 right-2.5 z-10 flex translate-y-1 items-center gap-0.5 rounded-lg border border-line-2 p-0.5 text-muted opacity-0 shadow-pop inset-shadow-highlight glass transition-[opacity,translate] duration-150 ease-out starting:translate-y-1! starting:opacity-0! group-hover/slot:pointer-events-auto group-hover/slot:translate-y-0 group-hover/slot:opacity-100 focus-within:pointer-events-auto focus-within:translate-y-0 focus-within:opacity-100 motion-reduce:transition-none ${armed ? "" : "hidden"}`}
         data-nodrag
         data-touch-tools
       >

@@ -149,7 +149,30 @@ function saveCollapsed(key: string, set: ReadonlySet<string>) {
 /** The list or the board for the view showing. */
 export function ThreadCollection({ layout, collection }: { layout: Exclude<Layout, "canvas">; collection: Collection }) {
   if (!collection.rows.length) return <Nothing />;
-  return layout === "board" ? <ThreadBoard c={collection} /> : <ThreadList c={collection} />;
+  const shown = layout === "board" ? <ThreadBoard c={collection} /> : <ThreadList c={collection} />;
+  if (!collection.phone) return shown;
+  // A phone has no ⌘ or Shift: Select (as a long press does) makes taps pick threads.
+  const { editing, setEditing } = collection;
+  return (
+    <div className="flex h-full flex-col">
+      <div className="flex h-9 shrink-0 items-center justify-between px-3 text-[12.5px] text-muted">
+        <span className="font-mono text-[11.5px] tabular-nums">
+          {collection.rows.length} thread{collection.rows.length === 1 ? "" : "s"}
+        </span>
+        <button
+          type="button"
+          onClick={() => {
+            if (editing) selection.clear();
+            setEditing(!editing);
+          }}
+          className="-mr-1.5 h-8 rounded-md px-2 font-medium text-fg active:bg-fg/[0.06]"
+        >
+          {editing ? "Cancel" : "Select"}
+        </button>
+      </div>
+      <div className="min-h-0 flex-1">{shown}</div>
+    </div>
+  );
 }
 
 function Nothing() {
@@ -239,6 +262,22 @@ export function GroupPick({ group }: { group: Group }) {
 }
 
 /** Press and hold (450 ms, barely moving) on a touch screen: `fn`. */
+/**
+ * The click that ends a long press goes nowhere: the press selected something, the bulk bar came
+ * in above the list and moved the rows, and the finger lifted over another row (it collapsed a
+ * group, or selected a second thread).
+ */
+function swallowRelease() {
+  const swallow = (ev: MouseEvent) => {
+    ev.preventDefault();
+    ev.stopPropagation();
+  };
+  window.addEventListener("click", swallow, true);
+  const done = () => setTimeout(() => window.removeEventListener("click", swallow, true), 0);
+  window.addEventListener("pointerup", done, { capture: true, once: true });
+  window.addEventListener("pointercancel", done, { capture: true, once: true });
+}
+
 export function useLongPress(fn: () => void) {
   const t = useRef<{ timer: ReturnType<typeof setTimeout>; x: number; y: number; fired: boolean } | null>(null);
   const cancel = () => {
@@ -248,7 +287,13 @@ export function useLongPress(fn: () => void) {
     onPointerDown: (e: React.PointerEvent) => {
       if (e.pointerType === "mouse") return;
       cancel();
-      const s = { timer: setTimeout(() => ((s.fired = true), fn(), navigator.vibrate?.(10)), 450), x: e.clientX, y: e.clientY, fired: false };
+      const fire = () => {
+        s.fired = true;
+        fn();
+        navigator.vibrate?.(10);
+        swallowRelease();
+      };
+      const s = { timer: setTimeout(fire, 450), x: e.clientX, y: e.clientY, fired: false };
       t.current = s;
     },
     onPointerMove: (e: React.PointerEvent) => {

@@ -31,7 +31,9 @@ const COL_W = 284;
 /** The narrowest a column with cards gets before the board scrolls sideways (four of them and a strip beside a conversation). */
 const MIN_W = 168;
 /** An empty column stays (columns never come and go) but is only its header: the room goes to the others. */
-const EMPTY_W = 104;
+const EMPTY_W = 112;
+/** The widest a column with cards grows into spare room (wider, a card reads as a strip). */
+const MAX_W = 420;
 /** Short of room (a conversation open beside the board), an empty column is a strip with its name down it. */
 const SLIM_W = 36;
 const COL_GAP = 12;
@@ -41,8 +43,8 @@ const CELL_FIRST = 12;
 type Widths = ReadonlyMap<string, { w: number; slim: boolean }>;
 
 /**
- * Each column's width in a board `width` wide: columns with cards at their full width while
- * everything fits, then sharing the room down to `MIN_W`, then with the empty columns folded to
+ * Each column's width in a board `width` wide: columns with cards share the room, from `MAX_W`
+ * down to `COL_W` while everything fits, then down to `MIN_W`, then with the empty columns folded to
  * strips; only past that does the board scroll sideways. A phone shows a column at a time (snap).
  */
 function columnWidths(columns: readonly Group[], width: number, phone: boolean): Widths {
@@ -52,8 +54,14 @@ function columnWidths(columns: readonly Group[], width: number, phone: boolean):
   const empty = columns.length - n;
   const room = width - 24 - COL_GAP * Math.max(0, columns.length - 1);
   const fits = (emptyW: number, w: number) => n * w + empty * emptyW <= room;
-  if (phone || !width || n === 0 || fits(EMPTY_W, COL_W)) {
+  if (phone || !width || n === 0) {
     for (const g of columns) out.set(g.key, { w: full(g), slim: false });
+    return out;
+  }
+  if (fits(EMPTY_W, COL_W)) {
+    // Room to spare (bea: Done alone beside four empty columns left 650 px blank): the columns with cards take it.
+    const w = Math.floor(Math.min(MAX_W, (room - empty * EMPTY_W) / n));
+    for (const g of columns) out.set(g.key, { w: g.count ? w : EMPTY_W, slim: false });
     return out;
   }
   const slim = !fits(EMPTY_W, MIN_W);
@@ -166,7 +174,7 @@ function SlimColumn({ group }: { group: Group }) {
 function ColumnHead({ group, drop }: { group: Group; drop: boolean }) {
   return (
     <div className="group/group flex h-8 shrink-0 items-center gap-2 px-1.5 text-[12.5px]">
-      <GroupPick group={group} />
+      {group.count > 0 && <GroupPick group={group} />}
       <span className="truncate font-[560] text-fg">{group.label}</span>
       <span className="font-mono text-[11px] text-subtle tabular-nums">{group.count}</span>
       {drop && <span className="ml-auto text-[11px] text-subtle">Drop to settle</span>}
