@@ -22,6 +22,7 @@ import { cn, Segmented } from "../ui";
 import { useAgents } from "../use-agents";
 import type { ListFilter as Filter } from "@/lib/automations-list";
 import { AutomationList, FilterButton } from "./list";
+import { Named } from "./named";
 import { NoticeList } from "./notices";
 import { unseenNotices } from "@/lib/automations-store";
 import { SheetHeader } from "./sheet";
@@ -204,6 +205,7 @@ export function Places({ automation }: { automation: Automation }) {
 const FILTERS: { value: "all" | RunState; label: string }[] = [
   { value: "all", label: "All" },
   { value: "failed", label: "Failed" },
+  { value: "waiting", label: "Waiting" },
   { value: "running", label: "Running" },
 ];
 
@@ -230,7 +232,7 @@ export function RunRows({ runs, selected, showName, onOpen, now }: { runs: Autom
               </span>
               <span className="min-w-0 flex-1">
                 {showName && <span className="block truncate text-[13px] font-[510] tracking-[-0.01em]">{r.name}</span>}
-                <span className={cn("block truncate text-[12px]", showName ? "text-subtle" : "text-soft")}>{r.reason && r.status !== "succeeded" ? r.reason : r.event.summary}</span>
+                <span className={cn("block truncate text-[12px]", showName ? "text-subtle" : "text-soft")}>{r.reason && r.status !== "succeeded" ? <Named text={r.reason} /> : r.event.summary}</span>
               </span>
               <span className="hidden shrink-0 items-center gap-0.5 @md:flex" aria-label={`${done} of ${r.steps.length} steps done`}>
                 {r.steps.map((s) => {
@@ -257,7 +259,7 @@ function AllRuns({ runs, automations, selected }: { runs: ReadonlyMap<string, Au
   const [more, setMore] = useState<"idle" | "loading" | "end">("idle");
   const [now] = useState(() => Date.now());
   const all = useMemo(() => [...runs.values()].sort((a, b) => b.created_at - a.created_at), [runs]);
-  const shown = all.filter((r) => filter === "all" || r.status === filter || (filter === "running" && (r.status === "waiting" || r.status === "queued")));
+  const shown = all.filter((r) => filter === "all" || r.status === filter || (filter === "running" && r.status === "queued"));
   return (
     <>
       <div className="mb-3 flex items-center gap-2">

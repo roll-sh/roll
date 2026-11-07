@@ -13,7 +13,7 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { Automation, AutomationSpec, Concurrency, RunNow, TestEvent, TestResult } from "@/lib/automations-api";
 import { TEMPLATES } from "@/lib/automation-templates";
 import { setAgentsView, type AutomationsView } from "@/lib/agents-surface";
-import { blankSpec, sameSpec, sampleEvent, specOf, triggerSource, triggerSummary, validate, type Problems, type Schema } from "@/lib/automations-ui";
+import { blankSpec, sameSpec, sampleEvent, specOf, triggerInfo, triggerSource, triggerSummary, validate, type Problems, type Schema } from "@/lib/automations-ui";
 import { ApiError } from "@/lib/code-api";
 import { LookupPicker } from "../lookup-picker";
 import { Menu } from "../menu";
@@ -83,6 +83,8 @@ export function AutomationPanel({ view }: { view: AutomationsView & { open: stri
     if (!tried) {
       delete p.name;
       delete p.steps;
+      // A trigger whose integration isn't connected says so in its own note; it's an error once saving is tried.
+      if (draft.trigger.type === "integration" && triggerInfo(catalog, draft.trigger)?.needs_setup) delete p.trigger;
     }
     return p;
   }, [draft, catalog, serverProblems, tried, taken]);

@@ -112,14 +112,18 @@ export function ReviewStatusView({
   summary,
   status,
   requests = [],
+  ended,
 }: {
   summary: ReviewSummary | undefined;
   status: ReviewStatus | null;
   requests?: ReviewRequest[];
+  /** The change landed or closed: a review still pending isn't awaited any more. */
+  ended?: "landed" | "closed";
 }) {
   const s = status ?? summary;
   if (!s) return <p className="text-[12px] text-subtle">No review information.</p>;
-  const head = reviewHeadline({ state: s.state, approvals: status ? status.approvals.filter((a) => a.counted).length : (summary?.approvals ?? 0), required: s.required });
+  const counted = reviewHeadline({ state: s.state, approvals: status ? status.approvals.filter((a) => a.counted).length : (summary?.approvals ?? 0), required: s.required });
+  const head = ended && s.state === "pending" ? { label: ended === "landed" ? "Landed without a review" : "Closed without a review", detail: counted.detail, tone: "muted" as const } : counted;
   const owners = status ? codeownerRows(status) : [];
   const pending = requests.filter((r) => r.current && r.done_at == null);
   return (

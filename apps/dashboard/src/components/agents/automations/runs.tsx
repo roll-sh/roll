@@ -18,6 +18,7 @@ import { cn } from "../ui";
 import { useAgents } from "../use-agents";
 import { RunRows } from "./automations-view";
 import { SheetHeader } from "./sheet";
+import { Named } from "./named";
 import { QuietButton, RunStatus, StepGlyph, stepIcon, Tile, triggerIcon, useAutomations } from "./shared";
 import { triggerSource } from "@/lib/automations-ui";
 
@@ -168,7 +169,10 @@ export function RunDetail({ run: id, onThread }: { run: string; onThread?: (thre
         {showEvent && <Json value={fetched?.event.data ?? null} className="mt-2.5" />}
         {run.reason && run.status !== "succeeded" && (
           <p className={cn("mt-2.5 flex items-start gap-1.5 text-[12px]", run.status === "failed" ? "text-danger" : "text-muted")}>
-            <CircleAlert className="mt-0.5 size-3.5 shrink-0" /> {run.reason}
+            <CircleAlert className="mt-0.5 size-3.5 shrink-0" />{" "}
+            <span>
+              <Named text={run.reason} onThread={openOnCanvas} />
+            </span>
           </p>
         )}
         {error && <p className="mt-2 text-[12px] text-danger">{error}</p>}
@@ -219,7 +223,11 @@ export function RunDetail({ run: id, onThread }: { run: string; onThread?: (thre
               )}
               {open && (
                 <div className="rise mb-3 space-y-2 pl-[22px]">
-                  {s.error && <p className="text-[12px] text-danger">{s.error}</p>}
+                  {s.error && (
+                    <p className="text-[12px] text-danger">
+                      <Named text={s.error} onThread={openOnCanvas} />
+                    </p>
+                  )}
                   {s.status === "retrying" && s.next_at && <p className="text-[12px] text-muted">Trying again {Math.max(0, Math.round((s.next_at - now) / 1000))}s from now</p>}
                   {s.log.length > 0 ? (
                     <div className="max-h-96 overflow-y-auto rounded-lg border border-line bg-bg/60 px-2.5 py-2 font-mono text-[11.5px] leading-[18px]" aria-label="Log">
@@ -227,7 +235,7 @@ export function RunDetail({ run: id, onThread }: { run: string; onThread?: (thre
                         <div key={j} className={cn("flex gap-3", l.level === "error" ? "text-danger" : l.level === "warn" ? "text-soft" : "text-muted")}>
                           <span className="shrink-0 text-faint tabular-nums">{logTime(l.at, s.started_at)}</span>
                           <span className="min-w-0 break-words whitespace-pre-wrap">
-                            <LogText text={l.text} onThread={openOnCanvas} />
+                            <Named text={l.text} onThread={openOnCanvas} />
                           </span>
                         </div>
                       ))}
@@ -253,25 +261,6 @@ export function RunDetail({ run: id, onThread }: { run: string; onThread?: (thre
   );
 }
 
-/** A log line, its thread ids (`thr_…`) as the threads' titles, each opening its conversation. */
-function LogText({ text, onThread }: { text: string; onThread: (thread: string) => void }) {
-  const { client } = useAgents();
-  const parts = text.split(/\b(thr_[A-Za-z0-9]+)\b/);
-  if (parts.length === 1) return <>{text}</>;
-  return (
-    <>
-      {parts.map((p, i) => {
-        if (i % 2 === 0) return p;
-        const title = client.data.threads.get(p)?.value.title;
-        return (
-          <button key={i} type="button" onClick={() => onThread(p)} title={title ? p : "Open the conversation"} className="text-soft underline decoration-line-3 underline-offset-2 hover:text-fg">
-            {title ?? p}
-          </button>
-        );
-      })}
-    </>
-  );
-}
 
 function Json({ value, className }: { value: unknown; className?: string }) {
   return <pre className={cn("max-h-72 overflow-auto rounded-lg border border-line bg-bg/60 px-2.5 py-2 font-mono text-[11.5px] leading-[18px] text-soft", className)}>{JSON.stringify(value, null, 2)}</pre>;

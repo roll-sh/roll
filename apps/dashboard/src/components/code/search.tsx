@@ -63,7 +63,7 @@ export function SearchForm({
       }}
       className="flex flex-wrap items-center gap-2"
     >
-      <div className={`flex min-w-0 flex-1 items-center gap-2 rounded-lg border bg-panel px-2.5 transition focus-within:border-line-2 ${bad ? "border-danger/60" : "border-line"}`}>
+      <div className={`flex min-w-48 flex-1 items-center gap-2 rounded-lg border bg-panel px-2.5 transition focus-within:border-line-2 ${bad ? "border-danger/60" : "border-line"}`}>
         <Search className="size-3.5 shrink-0 text-subtle" />
         <input
           ref={ref}
@@ -102,7 +102,7 @@ export function SearchForm({
         onChange={(e) => setPath(e.target.value)}
         placeholder="path glob"
         spellCheck={false}
-        className={`${input} w-40 font-mono text-[12px]`}
+        className={`${input} w-40 grow font-mono text-[12px]`}
       />
       {/* GET submits carry the toggles as fields. */}
       {regex && <input type="hidden" name="regex" value="1" />}

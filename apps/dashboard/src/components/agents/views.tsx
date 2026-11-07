@@ -339,8 +339,8 @@ export function ViewsBar({
   const filters = filterCount(v.filter);
 
   return (
-    <div ref={bar} className="chrome-in relative z-10 flex h-11 shrink-0 items-center gap-2 border-b border-line px-2" data-nodrag>
-      <div ref={tabs} role="tablist" aria-label="Canvas views" className="relative flex min-w-36 flex-1 items-center gap-0.5 overflow-x-auto [scrollbar-width:none]">
+    <div ref={bar} className="@container/views chrome-in relative z-10 flex h-11 shrink-0 items-center gap-2 border-b border-line px-2" data-nodrag>
+      <div ref={tabs} role="tablist" aria-label="Canvas views" className="relative flex min-w-36 flex-[1_1_auto] items-center @max-[520px]/views:min-w-0 gap-0.5 overflow-x-auto [scrollbar-width:none]">
         {/* The selected tab's raised look slides from tab to tab (it scrolls with them). */}
         <SlidingThumb selector="[data-tab][data-selected]" className="rounded-md border border-line-2 bg-panel-2 shadow-card inset-shadow-highlight" />
         {views.map((view, i) => {
@@ -364,7 +364,7 @@ export function ViewsBar({
               key={view.id}
               data-tab
               data-selected={selected || undefined}
-              className={`group/tab relative flex shrink-0 items-center rounded-md border border-transparent transition-colors duration-150 ${selected ? "text-fg" : "text-muted hover:bg-fg/[0.04] hover:text-fg"} ${dragging === view.id ? "opacity-50" : ""}`}
+              className={`group/tab relative flex shrink-0 items-center rounded-md border border-transparent transition-colors duration-150 ${selected ? "text-fg" : "text-muted hover:bg-fg/[0.04] hover:text-fg @max-[520px]/views:hidden"} ${dragging === view.id ? "opacity-50" : ""}`}
               draggable={view.id !== ALL}
               onDragStart={(e) => {
                 setDragging(view.id);
@@ -426,6 +426,16 @@ export function ViewsBar({
             </div>
           );
         })}
+        {/* Short of room (a conversation open beside a narrow canvas), only the shown view's tab
+            stays, and the others are one menu away: tabs cut mid-word read as broken. */}
+        <span className="hidden shrink-0 @max-[520px]/views:flex">
+          <Menu
+            label="Other views"
+            align="start"
+            trigger={<ChevronDown className="size-3.5" />}
+            items={views.filter((x) => x.id !== currentId).map((x) => ({ label: x.name, onSelect: () => select(x.id) }))}
+          />
+        </span>
         {/* Stuck at the strip's end, so it stays in reach however many views scroll under it. */}
         {saved.length < MAX_VIEWS && (
           <button onClick={() => setEditor({ mode: "new" })} title="New view (⌥S)" aria-label="New view" className="sticky right-0 grid size-7 shrink-0 place-items-center rounded-md bg-canvas text-subtle transition-colors duration-150 hover:bg-panel-2 hover:text-fg">
@@ -434,7 +444,7 @@ export function ViewsBar({
         )}
       </div>
       {/* Short of room (a conversation open beside it), the filter gives way before the tabs and their +. */}
-      <div className="flex min-w-0 shrink items-center gap-1">
+      <div className="flex min-w-0 shrink-[12] items-center gap-1">
         {focused && (
           // Inside a project's space: the way back out, as a breadcrumb.
           <nav aria-label="Where the canvas is" className="fade-in flex h-7 max-w-64 items-center gap-1 rounded-md border border-line-2 bg-panel-2 pr-0.5 pl-1 text-[12px] text-fg inset-shadow-highlight">
@@ -464,7 +474,7 @@ export function ViewsBar({
           </>
         )}
         {!phone && (
-          <label className="flex h-7 w-56 min-w-28 shrink items-center gap-1.5 rounded-md border border-line bg-fg/[0.03] px-2 text-subtle inset-shadow-highlight transition-colors duration-150 hover:border-line-2 focus-within:border-accent/50 focus-within:text-fg">
+          <label className="flex h-7 w-56 min-w-28 shrink items-center @max-[520px]/views:w-7 @max-[520px]/views:min-w-7 @max-[520px]/views:focus-within:w-40 @max-[520px]/views:focus-within:min-w-40 gap-1.5 rounded-md border border-line bg-fg/[0.03] px-2 text-subtle inset-shadow-highlight transition-colors duration-150 hover:border-line-2 focus-within:border-accent/50 focus-within:text-fg">
             <Search className="size-3.5 shrink-0" strokeWidth={1.75} />
             <input
               ref={field}
@@ -558,7 +568,7 @@ function DisplayMenu({ display, phone, onChange }: { display: Display; phone: bo
         }
       >
         <SlidersHorizontal className="size-3.5" strokeWidth={1.75} />
-        <span className="max-sm:sr-only">Display</span>
+        <span className="max-sm:sr-only @max-[820px]/views:sr-only">Display</span>
       </PopoverTrigger>
       <PopoverPopup side="bottom" align="end" sideOffset={6} aria-label="Display options" className="w-[300px] flex-col gap-3 p-3 text-[12.5px]">
         {layoutOf(display) !== "canvas" ? (

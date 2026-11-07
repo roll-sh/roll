@@ -2,13 +2,13 @@
 
 import { Switch } from "./ui";
 import { ArrowUpRight, ClipboardList, GitPullRequest, X } from "lucide-react";
-import { useRef, useState } from "react";
+import { useContext, useRef, useState } from "react";
 import type { ChangeStatus, Landing, Machine, Project, Published, Run, Thread, ThreadChange, WorkRef } from "@/lib/agents-api";
 import type { AgentsClient } from "@/lib/agents-client";
 import { runsOf } from "@/lib/agents-store";
 import { parseWorkRef } from "@/lib/agents-services";
 import { btn, input, primary } from "../ui";
-import { useAgents } from "./use-agents";
+import { AgentsContext, useAgents } from "./use-agents";
 
 export const changeStatusLabel: Record<ChangeStatus, string> = {
   checking: "checking",
@@ -60,15 +60,23 @@ export function changePageHref(repo: string, number: number): string {
   return `/dashboard/code/${repo.split("/").map(encodeURIComponent).join("/")}/changes/${number}`;
 }
 
-/** The thread's roll code change: `#42 ready`, linking to the change page (a tab of its own, so the agents stay open); `detail` in the title. */
+/**
+ * Where a link to roll's own pages opens: a tab of its own, so the agents stay open; on a phone the
+ * same tab (a new one there has no Back to the agents).
+ */
+function useOwnTab(): { target?: "_blank"; rel?: string } {
+  return useContext(AgentsContext)?.phone ? {} : { target: "_blank", rel: "noreferrer" };
+}
+
+/** The thread's roll code change: `#42 ready`, linking to the change page (see `useOwnTab`); `detail` in the title. */
 export function ChangeChip({ change, className = "" }: { change: ThreadChange; className?: string }) {
   const tone = changeTone(change.status);
+  const tab = useOwnTab();
   return (
     <a
       data-nodrag
       href={changePageHref(change.repo, change.number)}
-      target="_blank"
-      rel="noreferrer"
+      {...tab}
       onClick={(e) => e.stopPropagation()}
       title={`${change.repo}#${change.number}${change.detail ? ` · ${change.detail}` : ""}`}
       aria-label={`Change ${change.number}, ${changeStatusLabel[change.status]}`}
@@ -173,10 +181,11 @@ export function RebaseActions({
 /** The work item the thread took: `#38 title`, with a release button when it can be let go. */
 export function WorkChip({ work, onRelease, className = "" }: { work: WorkRef; onRelease?: () => void; className?: string }) {
   const [owner, repo] = work.repo.split("/");
+  const tab = useOwnTab();
   return (
     <span className={`inline-flex min-w-0 items-center gap-1 text-[11px] text-muted ${className}`} title={`${work.repo}#${work.number}: ${work.title}`}>
       <ClipboardList className="size-3 shrink-0 text-subtle" />
-      <a data-nodrag href={`/dashboard/code/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}#work`} target="_blank" rel="noreferrer" onClick={(e) => e.stopPropagation()} className="min-w-0 truncate hover:text-fg">
+      <a data-nodrag href={`/dashboard/code/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}#work`} {...tab} onClick={(e) => e.stopPropagation()} className="min-w-0 truncate hover:text-fg">
         <span className="font-mono text-subtle">#{work.number}</span> {work.title}
       </a>
       {onRelease && (
@@ -218,6 +227,7 @@ export function landingNote(l: Landing): { tone: "ok" | "busy" | "quiet" | "bad"
  */
 export function PublishForm({ thread, project, machine, onDone }: { thread: Thread; project?: Project; machine: Machine; onDone: () => void }) {
   const { client, openThread } = useAgents();
+  const tab = useOwnTab();
   // A title cut short ends in "…": not in a commit message.
   const [message, setMessage] = useState(thread.title.replace(/\s*(…|\.\.\.)$/u, ""));
   const [land, setLand] = useState(false);
@@ -265,7 +275,7 @@ export function PublishForm({ thread, project, machine, onDone }: { thread: Thre
           Published <span className="font-mono text-muted">{done.branch}</span>
           <span className="font-mono text-[11px] text-subtle">{done.commit.slice(0, 8)}</span>
           {done.change !== null && (done.url || project?.repo) && (
-            <a href={project?.repo ? changePageHref(`${project.repo.owner}/${project.repo.repo}`, done.change) : done.url!} target="_blank" rel="noreferrer" className="inline-flex items-center gap-0.5 text-accent hover:underline">
+            <a href={project?.repo ? changePageHref(`${project.repo.owner}/${project.repo.repo}`, done.change) : done.url!} {...(project?.repo ? tab : { target: "_blank", rel: "noreferrer" })} className="inline-flex items-center gap-0.5 text-accent hover:underline">
               change #{done.change} <ArrowUpRight className="size-3" />
             </a>
           )}

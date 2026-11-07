@@ -22,6 +22,7 @@ import { setAgentsView, viewFromHash } from "@/lib/agents-surface";
 import { ago } from "../shared";
 import { cn } from "../ui";
 import { useAgents } from "../use-agents";
+import { Named } from "./named";
 import { QuietButton, useAutomations, useAutomationsStore } from "./shared";
 
 /** What a notice opens: its link, the thread its run started (the newest), its run. */
@@ -66,7 +67,7 @@ export function NoticeList() {
               <Icon className={cn("mt-px size-4 shrink-0", tones[n.level])} strokeWidth={1.75} aria-hidden />
               <div className="min-w-0 flex-1">
                 <p className="text-[13px] leading-snug font-[510] tracking-[-0.01em]">{n.title}</p>
-                {n.body && <p className="mt-0.5 line-clamp-2 text-[12px] leading-snug text-muted">{n.body}</p>}
+                {n.body && <p className="mt-0.5 line-clamp-2 text-[12px] leading-snug text-muted"><Named text={n.body} /></p>}
                 <p className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[12px]">
                   <span className="text-subtle tabular-nums" title={new Date(n.at).toLocaleString()}>
                     {ago(n.at, now)}
@@ -148,7 +149,7 @@ const Toast = forwardRef<HTMLLIElement, { notice: Notice; onDismiss: () => void 
         <Icon className={cn("mt-px size-4 shrink-0", tones[n.level])} strokeWidth={1.75} aria-hidden />
         <div className="min-w-0 flex-1">
           <p className="text-[13px] leading-snug font-[510] tracking-[-0.01em]">{n.title}</p>
-          {n.body && <p className="mt-0.5 line-clamp-3 text-[12px] leading-snug text-muted">{n.body}</p>}
+          {n.body && <p className="mt-0.5 line-clamp-3 text-[12px] leading-snug text-muted"><Named text={n.body} /></p>}
           {actions.length > 0 && (
             <p className="mt-1.5 flex flex-wrap gap-x-3 text-[12px]">
               {actions.map((x) => (

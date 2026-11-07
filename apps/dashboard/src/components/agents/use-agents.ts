@@ -1,7 +1,8 @@
 "use client";
 
 import { createContext, useContext, useEffect, useRef, useSyncExternalStore } from "react";
-import type { MachineId, Thread } from "@/lib/agents-api";
+import type { MachineId, Thread, ThreadId } from "@/lib/agents-api";
+import type { BulkSpec } from "@/lib/agents-bulk";
 import type { AgentsClient, AgentsSnapshot } from "@/lib/agents-client";
 import type { AgentsServices } from "@/lib/agents-services";
 import { DEFAULT_OWNER_SETTINGS, type OwnerSettings, type OwnerSettingsState } from "@/lib/owner-settings";
@@ -52,6 +53,8 @@ export interface AgentsCtx {
   phone?: boolean;
   /** The owner's agents settings (`lib/owner-settings.ts`); unset: the defaults (a share, tests). */
   prefs?: OwnerPrefs;
+  /** Runs a bulk action through the page's bulk bar (progress, notice, Undo); unset in a share. */
+  bulk?: (spec: BulkSpec, ids: readonly ThreadId[]) => void;
 }
 
 /** The owner's settings and how to change them. */

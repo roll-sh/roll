@@ -504,7 +504,7 @@ export function CodeChange({ fullName, id }: { fullName: string; id: string }) {
               <div className="min-w-0 space-y-4">
                 <Panel title="Review">
                   <div className="space-y-4 px-5 py-4">
-                    <ReviewStatusView summary={c.review} status={review.status} requests={review.requests} />
+                    <ReviewStatusView summary={c.review} status={review.status} requests={review.requests} ended={c.state === "landed" || c.state === "closed" ? c.state : undefined} />
                     {writer && reviewable && <RequestReview change={c} busy={busy} run={run} />}
                   </div>
                 </Panel>

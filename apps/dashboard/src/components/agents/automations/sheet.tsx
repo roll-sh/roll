@@ -127,7 +127,7 @@ function labelOf(v: AutomationsView): string {
   const l = levelOf(v);
   switch (l.kind) {
     case "list":
-      return v.list === "runs" ? "Runs" : v.list === "templates" ? "Templates" : "Automations";
+      return v.list === "runs" ? "Runs" : v.list === "templates" ? "Templates" : v.list === "notices" ? "Notices" : "Automations";
     case "automation":
       return "Overview";
     case "builder":

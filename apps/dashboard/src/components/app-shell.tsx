@@ -112,10 +112,11 @@ export function AppShell({ crumb, actions, bleed = false, children }: { crumb: R
             </span>
             <button
               onClick={() => setPaletteOpen(true)}
-              className="ml-auto flex w-full max-w-xs min-w-0 items-center gap-2 rounded-lg border border-line bg-panel px-3 py-1.5 text-[13px] text-subtle hover:border-line-2"
+              aria-label="Ask roll"
+              className="ml-auto flex w-full max-w-xs min-w-0 items-center gap-2 rounded-lg border border-line bg-panel px-3 py-1.5 text-[13px] text-subtle hover:border-line-2 max-sm:w-auto max-sm:shrink-0 max-sm:px-2"
             >
               <Search className="size-3.5 shrink-0" />
-              <span className="flex-1 truncate text-left">Ask roll…</span>
+              <span className="flex-1 truncate text-left max-sm:hidden">Ask roll…</span>
               <kbd className="rounded border border-line px-1.5 font-mono text-[10px] max-sm:hidden">⌘K</kbd>
             </button>
             <AgentsControl />

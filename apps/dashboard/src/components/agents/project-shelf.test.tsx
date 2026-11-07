@@ -1,10 +1,14 @@
 import { screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import type { ReactNode } from "react";
 import { afterEach, describe, expect, it } from "vitest";
 import { EMPTY_INBOX, type Thread } from "@/lib/agents-api";
+import { resetSelection } from "@/lib/agents-selection";
 import { resetShelves, shelfList } from "@/lib/agents-shelf";
+import { useBulk } from "./bulk-bar";
 import { ShelfControl } from "./project-shelf";
 import { InboxToast, showInboxToast } from "./threads-sidebar";
+import { AgentsContext } from "./use-agents";
 import { mirrored, project, thread } from "@/test/agents";
 import { agentsHarness, renderAgents, type AgentsHarness } from "@/test/agents-render";
 
@@ -30,12 +34,17 @@ function world(extra: Thread[] = []) {
   });
 }
 
+function WithBulk({ h, children }: { h: AgentsHarness; children: ReactNode }) {
+  const bulk = useBulk(h.client);
+  return <AgentsContext.Provider value={{ ...h.ctx, bulk: bulk.run }}>{children}</AgentsContext.Provider>;
+}
+
 function toolbar(h: AgentsHarness, focused: string | null = null) {
   return renderAgents(
-    <>
+    <WithBulk h={h}>
       <ShelfControl data={h.client.data} focused={focused} phone={false} />
       <InboxToast />
-    </>,
+    </WithBulk>,
     h,
   );
 }
@@ -44,6 +53,7 @@ const sent = (h: AgentsHarness) => h.command.mock.calls.map(([, , c]) => c);
 
 afterEach(() => {
   resetShelves();
+  resetSelection();
   showInboxToast(null);
   localStorage.clear();
 });
@@ -64,6 +74,20 @@ describe("the shelf (the canvas toolbar's Shelf)", () => {
     expect(sent(h).at(-1)).toEqual({ type: "thread.unsnooze", thread: "thr_z" });
     await userEvent.click(within(await screen.findByRole("status")).getByRole("button", { name: "Undo" }));
     expect(sent(h).at(-1)).toEqual({ type: "thread.snooze", thread: "thr_z", until: NOW + 3 * H });
+    // Several at once: pick them, restore them in one go, and one Undo puts them all back.
+    if (!screen.queryByRole("button", { name: /^Settled/ })) await userEvent.click(screen.getByRole("button", { name: /^Shelf/ }));
+    await userEvent.click(await screen.findByRole("button", { name: /^Settled/ }));
+    await userEvent.click(screen.getByRole("button", { name: "Select" }));
+    await userEvent.click(screen.getByRole("checkbox", { name: "Pick Bump tokio" }));
+    await userEvent.click(screen.getByRole("checkbox", { name: "Pick Document the queue" }));
+    await userEvent.click(screen.getByRole("button", { name: /^Un-settle\s*2/ }));
+    await screen.findByText("2 restored");
+    const unsettled = sent(h).slice(-2);
+    expect(unsettled).toContainEqual({ type: "thread.unsettle", thread: "thr_s1" });
+    expect(unsettled).toContainEqual({ type: "thread.unsettle", thread: "thr_s2" });
+    await userEvent.click(within(await screen.findByRole("status")).getByRole("button", { name: "Undo" }));
+    await screen.findByText(/^Undone: 2 put back/);
+    expect(sent(h).slice(-2)).toContainEqual({ type: "thread.settle", thread: "thr_s1" });
   });
 
   it("shelfList: a tab with nothing falls to the first with something; search matches every word in title or project", () => {

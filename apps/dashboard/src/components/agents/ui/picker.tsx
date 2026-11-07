@@ -169,18 +169,28 @@ function useSourceRows(source: PickerSource | undefined, q: string, active: bool
 /** Rows for stored values nobody has listed yet. */
 function useResolved(source: PickerSource | undefined, values: readonly string[], known: (v: string) => boolean) {
   const [found, setFound] = useState<Map<string, PickerOption>>(new Map());
+  // Asked and answered (found or not): until then a value isn't shown as typed.
+  const [settled, setSettled] = useState<ReadonlySet<string>>(new Set());
   const asked = useRef(new Set<string>());
+  // Answers are kept until the picker goes away: marking values asked changes `want`, and a
+  // cleanup tied to it dropped every answer (a typed value never settled, a real one never resolved).
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
   const missing = values.filter((v) => !isTemplate(v) && !known(v) && !found.has(v) && !asked.current.has(`${source?.key}\u0000${v}`));
   const want = missing.join("\u0000");
   useEffect(() => {
     if (!source || !want) return;
     const ids = want.split("\u0000");
     for (const v of ids) asked.current.add(`${source.key}\u0000${v}`);
-    let live = true;
     source
       .load({ q: "", ids })
       .then((p) => {
-        if (!live) return;
+        if (!mounted.current) return;
         setFound((f) => {
           const next = new Map(f);
           for (const v of ids) {
@@ -190,12 +200,10 @@ function useResolved(source: PickerSource | undefined, values: readonly string[]
           return next;
         });
       })
-      .catch(() => {});
-    return () => {
-      live = false;
-    };
+      .catch(() => {})
+      .finally(() => mounted.current && setSettled((s) => new Set([...s, ...ids])));
   }, [source, want]);
-  return found;
+  return { found, pending: (v: string) => !!source && !isTemplate(v) && !known(v) && !found.has(v) && !settled.has(v) };
 }
 
 // ── the picker ──
@@ -234,7 +242,7 @@ export function Picker(props: PickerProps) {
   const local = useMemo(() => [...extras, ...(options ?? [])], [extras, options]);
   const lookupKnown = useCallback((v: string) => local.some((o) => answers(o, v)) || [...seen.values()].some((o) => answers(o, v)), [local, seen]);
   const resolved = useResolved(source, values, lookupKnown);
-  const optionFor = (v: string): PickerOption | null => local.find((o) => answers(o, v)) ?? [...seen.values()].find((o) => answers(o, v)) ?? resolved.get(v) ?? null;
+  const optionFor = (v: string): PickerOption | null => local.find((o) => answers(o, v)) ?? [...seen.values()].find((o) => answers(o, v)) ?? resolved.found.get(v) ?? null;
 
   const isPicked = (o: PickerOption) => values.some((v) => answers(o, v));
 
@@ -367,7 +375,7 @@ export function Picker(props: PickerProps) {
         {props.multiple ? (
           <div className={cn(field, "flex min-h-8 flex-wrap items-center gap-1 py-1 ps-1", error && "border-danger/50", disabled && "opacity-60")}>
             {props.value.map((v, i) => (
-              <ValueChip key={`${v}:${i}`} value={v} option={optionFor(v)} mono={mono} onRemove={disabled ? undefined : () => props.onChange(props.value.filter((_, j) => j !== i))} />
+              <ValueChip key={`${v}:${i}`} value={v} option={optionFor(v)} pending={resolved.pending(v)} mono={mono} onRemove={disabled ? undefined : () => props.onChange(props.value.filter((_, j) => j !== i))} />
             ))}
             <PopoverPrimitive.Trigger
               disabled={disabled}
@@ -384,7 +392,7 @@ export function Picker(props: PickerProps) {
             aria-label={label}
             className={cn(field, "flex min-h-8 w-full cursor-pointer items-center gap-2 pe-7 text-left outline-none data-disabled:opacity-60", error && "border-danger/50", props.clearable && props.value && "pe-12")}
           >
-            {props.value ? <OneValue value={props.value} option={optionFor(props.value)} mono={mono} /> : <span className="truncate text-subtle">{placeholder ?? `Pick ${label.toLowerCase()}`}</span>}
+            {props.value ? <OneValue value={props.value} option={optionFor(props.value)} pending={resolved.pending(props.value)} mono={mono} /> : <span className="truncate text-subtle">{placeholder ?? `Pick ${label.toLowerCase()}`}</span>}
             <ChevronDown aria-hidden className="pointer-events-none absolute end-2.5 size-3.5 text-subtle" />
           </PopoverPrimitive.Trigger>
         )}
@@ -400,7 +408,8 @@ export function Picker(props: PickerProps) {
           <PopoverPrimitive.Popup
             data-picker-popup
             aria-label={label}
-            initialFocus={search}
+            // Opened by touch, the popup takes focus (Base UI's default) so a phone's keyboard stays down until the search is tapped.
+            initialFocus={(type) => (type === "touch" ? true : search.current)}
             className={cn("rounded-lg text-fg outline-none", popupMotion)}
           >
             {/* Solid, not glass: a list of names must read over a busy form (glass lets the fields behind show through where a browser doesn't blur). */}
@@ -509,8 +518,9 @@ function RowView({ row, picked, multiple, noun, creating, mono }: { row: Row; pi
         <ComboboxItem value={row.key} className="w-full text-muted data-highlighted:text-fg">
           <TextCursorInput aria-hidden className="size-3.5" />
           <span className="min-w-0 flex-1 truncate">
-            Use <span className="font-mono text-[12px] text-fg">{row.text}</span>
+            Use <span className="font-mono text-[12px] text-fg">{row.text}</span> as typed
           </span>
+          <span className="shrink-0 text-[11px] text-subtle">not in the list</span>
         </ComboboxItem>
       );
     case "create":
@@ -607,9 +617,17 @@ const initials = (s: string) =>
     .join("");
 
 /** The trigger's picked value: its row's lead and label, a variable, or the stored text as itself. */
-function OneValue({ value, option, mono }: { value: string; option: PickerOption | null; mono?: boolean }) {
+function OneValue({ value, option, pending, mono }: { value: string; option: PickerOption | null; pending?: boolean; mono?: boolean }) {
   if (isTemplate(value)) return <span className="min-w-0 truncate font-mono text-[12px] text-accent">{value}</span>;
-  if (!option) return <span className={cn("min-w-0 truncate", mono && "font-mono text-[12px]")}>{value}</span>;
+  // Typed, not picked: its own look (a cursor, mono, dimmer), so it never passes for a real entry.
+  if (!option && pending) return <span className={cn("min-w-0 truncate", mono && "font-mono text-[12px]")}>{value}</span>;
+  if (!option)
+    return (
+      <span className="flex min-w-0 items-center gap-1.5 text-soft" title="Typed, not picked from the list">
+        <TextCursorInput aria-hidden className="size-3.5 shrink-0 text-subtle" />
+        <span className="min-w-0 truncate font-mono text-[12px]">{value}</span>
+      </span>
+    );
   return (
     <span className="flex min-w-0 flex-1 items-center gap-2">
       <Lead option={option} />
@@ -620,12 +638,22 @@ function OneValue({ value, option, mono }: { value: string; option: PickerOption
   );
 }
 
-function ValueChip({ value, option, mono, onRemove }: { value: string; option: PickerOption | null; mono?: boolean; onRemove?: () => void }) {
+function ValueChip({ value, option, pending, mono, onRemove }: { value: string; option: PickerOption | null; pending?: boolean; mono?: boolean; onRemove?: () => void }) {
   const text = option?.label ?? value;
+  const typed = !option && !pending && !isTemplate(value);
   return (
-    <span data-picker-chip className="inline-flex h-6 max-w-full items-center gap-1.5 rounded-md bg-fg/[0.06] ps-1.5 pe-0.5 text-[12px] text-fg">
-      {option ? <Lead option={option} size="size-3.5" /> : null}
-      <span className={cn("min-w-0 truncate", (isTemplate(value) || (!option && mono)) && "font-mono text-[11.5px]", isTemplate(value) && "text-accent")}>{text}</span>
+    <span
+      data-picker-chip
+      data-typed={typed || undefined}
+      title={typed ? "Typed, not picked from the list" : undefined}
+      className={cn(
+        "inline-flex h-6 max-w-full items-center gap-1.5 rounded-md ps-1.5 pe-0.5 text-[12px]",
+        // A typed value: an outline, no fill, a cursor: it's text, not one of the list's entries.
+        typed ? "border border-dashed border-line-3 text-soft" : "bg-fg/[0.06] text-fg",
+      )}
+    >
+      {option ? <Lead option={option} size="size-3.5" /> : typed ? <TextCursorInput aria-hidden className="size-3 shrink-0 text-subtle" /> : null}
+      <span className={cn("min-w-0 truncate", (isTemplate(value) || typed || (!option && mono)) && "font-mono text-[11.5px]", isTemplate(value) && "text-accent")}>{text}</span>
       {onRemove && (
         <button type="button" aria-label={`Remove ${text}`} onClick={onRemove} className="grid size-5 place-items-center rounded text-subtle hover:bg-fg/[0.08] hover:text-fg">
           <X className="size-3" />

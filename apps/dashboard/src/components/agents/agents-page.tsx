@@ -384,14 +384,18 @@ export function AgentsSurface({
   const prefs = useOwnerSettings(services?.settings, client.owner, data.settings?.revision ?? 0);
   // The model picker's favourites and recent models follow the owner (a share's replay has no services).
   useModelPrefsSync(prefs, services ? prefs.save : null);
-  const ctx: AgentsCtx = useMemo(
-    () => ({ client, owner: client.owner, demo, openThread, close, startNew, focus, focusProject, services, sandboxes, phone, prefs }),
-    [client, demo, openThread, close, startNew, focus, focusProject, services, sandboxes, phone, prefs],
-  );
-
   // Many threads at once: the bulk actions, and "Next that needs me" (N, ⌘K) in every layout:
   // the longest-waiting thread's conversation, then the next, round to the first.
   const bulk = useBulk(client);
+  // For surfaces off the page's bar (the Shelf): stable, so the context doesn't change with progress.
+  const bulkNow = useRef(bulk);
+  bulkNow.current = bulk;
+  const runBulk = useCallback<NonNullable<AgentsCtx["bulk"]>>((spec, ids) => bulkNow.current.run(spec, ids), []);
+  const ctx: AgentsCtx = useMemo(
+    () => ({ client, owner: client.owner, demo, openThread, close, startNew, focus, focusProject, services, sandboxes, phone, prefs, bulk: runBulk }),
+    [client, demo, openThread, close, startNew, focus, focusProject, services, sandboxes, phone, prefs, runBulk],
+  );
+
   const nextNeedsMe = useCallback(() => {
     const d = client.data;
     const order = needsMe(d, rowsOf(d, { now: Date.now(), showArchived: false, filter: {}, focused }));

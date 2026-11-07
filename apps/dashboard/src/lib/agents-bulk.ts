@@ -10,14 +10,14 @@
 
 import { commandId, isBusy, type Command, type Decision, type MachineId, type Reply, type Request, type Run, type Thread, type ThreadId } from "./agents-api";
 import { lastRuns } from "./agents-collection";
-import { cantPark } from "./agents-inbox";
+import { cantPark, restoreOf, shelfOf } from "./agents-inbox";
 import type { AgentsData } from "./agents-store";
 
-export type BulkKind = "settle" | "archive" | "snooze" | "approve" | "deny" | "stop" | "retry" | "model" | "followup" | "publish";
+export type BulkKind = "settle" | "archive" | "snooze" | "approve" | "deny" | "stop" | "retry" | "model" | "followup" | "publish" | "restore";
 
 /** What a bulk action needs beyond the threads. */
 export type BulkSpec =
-  | { kind: "settle" | "archive" | "approve" | "deny" | "stop" | "retry" | "publish" }
+  | { kind: "settle" | "archive" | "approve" | "deny" | "stop" | "retry" | "publish" | "restore" }
   | { kind: "snooze"; until: number }
   | { kind: "model"; provider: string; model: string; effort?: string }
   | { kind: "followup"; text: string };
@@ -54,6 +54,7 @@ export const bulkDone: Record<BulkKind, string> = {
   model: "switched",
   followup: "sent",
   publish: "published",
+  restore: "restored",
 };
 
 /** The action's name in the bar and ⌘K. */
@@ -68,6 +69,7 @@ export const bulkLabel: Record<BulkKind, string> = {
   model: "Set model",
   followup: "Send a follow-up",
   publish: "Publish",
+  restore: "Restore",
 };
 
 /** What the retry of a failed thread says to its agent. */
@@ -180,6 +182,19 @@ export function planBulk(data: AgentsData, ids: Iterable<ThreadId>, spec: BulkSp
           const repo = !!data.projects.get(t.project)?.value.repo;
           step({ type: "thread.publish", thread: id, message: t.title, land: t.change === null && repo });
         }
+        break;
+      }
+      case "restore": {
+        // Off its shelf as the single Restore does it: un-settle, wake or unarchive; Undo puts it back.
+        const r = restoreOf(shelfOf(t, now));
+        if (!r) {
+          skip(id, "It isn't on the shelf");
+          break;
+        }
+        const until = t.inbox.snooze?.until;
+        const undo: Command | undefined =
+          r.undo === "thread.snooze" ? (until && until > now ? { type: "thread.snooze", thread: id, until } : undefined) : { type: r.undo, thread: id };
+        step({ type: r.command, thread: id }, undo);
         break;
       }
     }
@@ -327,6 +342,7 @@ export function applicable(data: AgentsData, ids: readonly ThreadId[], now = Dat
     stop: count({ kind: "stop" }),
     retry: count({ kind: "retry" }),
     publish: count({ kind: "publish" }),
+    restore: count({ kind: "restore" }),
     followup: count({ kind: "followup", text: "x" }),
   };
 }

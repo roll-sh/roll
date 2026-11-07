@@ -10,7 +10,7 @@
  * failed stay selected, with Retry.
  */
 
-import { AlarmClock, Archive, Check, ChevronDown, CircleStop, Cpu, GitPullRequestArrow, MessageSquarePlus, RotateCcw, Send, ThumbsDown, ThumbsUp, X } from "lucide-react";
+import { AlarmClock, Archive, ArchiveRestore, Check, ChevronDown, CircleStop, Cpu, GitPullRequestArrow, MessageSquarePlus, RotateCcw, Send, ThumbsDown, ThumbsUp, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { MachineId, ProviderInfo, ThreadId } from "@/lib/agents-api";
 import type { AgentsClient } from "@/lib/agents-client";
@@ -246,6 +246,13 @@ function BulkStrip({ data, ids, bulk, phone, hidden }: { data: AgentsData; ids: 
     { key: "followup", node: <Act icon={<MessageSquarePlus />} label="Follow-up" disabled={busy || !can.followup} onClick={() => setWriting(true)} title="Send one message to every selected thread" /> },
     { key: "publish", node: <Act icon={<GitPullRequestArrow />} label="Publish" n={count(can.publish)} disabled={busy || !can.publish} onClick={() => run({ kind: "publish" })} title="Publish each thread's work as a change" /> },
   ];
+  // Restore only when something selected is on a shelf (picked in the Shelf, or archived rows shown).
+  if (can.restore)
+    actions.unshift({
+      key: "restore",
+      primary: true,
+      node: <Act icon={<ArchiveRestore />} label="Restore" n={count(can.restore)} disabled={busy} onClick={() => run({ kind: "restore" })} title="Take each off its shelf: un-settle, wake or unarchive" />,
+    });
   return (
     <div role="toolbar" aria-label={`${ids.length} selected`} className="relative z-[3] flex h-10 items-center gap-1 border-b border-line bg-[color-mix(in_oklab,var(--accent)_5%,var(--canvas))] px-2 text-[12.5px]" data-nodrag>
       <span className="flex shrink-0 items-center gap-1.5 pr-1.5 pl-1 font-medium text-fg">

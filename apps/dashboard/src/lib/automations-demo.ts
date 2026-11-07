@@ -309,7 +309,7 @@ export class DemoAutomations {
     past(publish, t - 1 * DAY - 2 * HOUR, "succeeded", "Thread done: Tidy the README's quick start");
     past(publish, t - 3 * DAY, "skipped", "Thread done: Spike: edge middleware", { skipped: "a filter didn't match: event.data.project is prj_demo_web" });
     past(run, t - 26 * HOUR, "succeeded", "Run by ada", { threads: [{ thread: "thr_demo_next", machine: mbp?.id ?? "", step: "start" }] });
-    for (let i = 0; i < 9; i++) past(approve, t - i * 7 * HOUR - 20 * MIN, i === 4 ? "failed" : "succeeded", i % 2 ? "Request: cargo test -p roll-cli code" : "Request: pnpm test --filter dashboard", i === 4 ? { failAt: 0, error: "the request was answered before the rule ran" } : {});
+    for (let i = 0; i < 9; i++) past(approve, t - i * 7 * HOUR - 20 * MIN, "succeeded", i % 2 ? "Request: cargo test -p roll-cli code" : "Request: pnpm test --filter dashboard");
 
     // One going right now: main broke a few minutes ago and an agent is on it.
     const live = this.putRun({
