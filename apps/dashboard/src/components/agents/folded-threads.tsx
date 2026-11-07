@@ -18,7 +18,7 @@ import { newestRuns, statusGroupLabel, type StatusGroup } from "@/lib/agents-gra
 import { useCanvasFolds } from "./canvas-folds";
 import { projectColor } from "@/lib/agents-identity";
 import { ProjectIcon } from "./identity";
-import { Card, FarLabel } from "./nodes";
+import { Card } from "./nodes";
 import { ago } from "./shared";
 import { threadDone } from "./thread-status";
 import { Popover, PopoverPopup, PopoverTrigger } from "./ui";
@@ -59,7 +59,6 @@ export function FoldedThreads({ container }: { container: string }) {
         onClick={open}
         label={expanded ? `Fold these ${threads.length} threads again` : group || !drill ? `${label}: show them here` : `${label}: open ${project.name}'s space`}
       >
-        <FarLabel title={label} />
         <div className="px-3.5 pt-3 pb-3">
           <div className="flex min-w-0 items-center gap-1.5 text-[11px] text-subtle">
             <ProjectIcon project={project} className="size-3.5" />
@@ -67,7 +66,7 @@ export function FoldedThreads({ container }: { container: string }) {
             {threads[0] && <span className="ml-auto shrink-0 tabular-nums">{expanded ? plural(threads.length, "thread", "threads") : `last ${ago(activity(threads[0], newest.get(threads[0].id)))}`}</span>}
           </div>
           <div className="mt-1.5 flex items-center gap-2">
-            <p className="min-w-0 flex-1 text-[13.5px] leading-snug font-medium tracking-[-0.01em]">{label}</p>
+            <p data-title className="min-w-0 flex-1 text-[13.5px] leading-snug font-medium tracking-[-0.01em]">{label}</p>
             {expanded ? <ChevronUp className="size-4 shrink-0 text-subtle" /> : group || !drill ? <ChevronDown className="size-4 shrink-0 text-subtle" /> : <CornerDownRight className="size-4 shrink-0 text-subtle" />}
           </div>
           {!expanded && <Peek threads={threads} done={group ? 0 : done} name={project.name} />}
@@ -77,14 +76,17 @@ export function FoldedThreads({ container }: { container: string }) {
   );
 }
 
-/** A status group's header in a project's space: its dot, its name, how many. */
+/**
+ * A status group's header in a project's space: a section's header row (its dot, its name, how
+ * many) over a hairline as wide as its cards (`--section-w`, set by the canvas). Not a card: no
+ * frame, no fill, no edge to each card under it.
+ */
 export function StatusHeader({ group, count }: { group: StatusGroup; count: number }) {
   const dot = group === "needs" || group === "running" ? "bg-accent" : group === "failed" ? "bg-danger" : group === "done" ? "bg-ok" : "bg-subtle/60";
   return (
-    <div data-drag style={{ width: 296 }} className="relative flex h-10 items-center gap-2 rounded-lg border border-line bg-panel-2/60 px-3 text-[12.5px]">
-      <FarLabel title={`${statusGroupLabel[group]} · ${count}`} />
+    <div data-drag style={{ width: "var(--section-w, 296px)" }} className="relative flex h-10 items-center gap-2 border-b border-line-2 px-1 text-[12.5px]">
       <span aria-hidden className={`size-2 shrink-0 rounded-full ${dot} ${group === "running" ? "motion-safe:animate-pulse" : ""}`} />
-      <span className="font-medium tracking-[-0.01em]">{statusGroupLabel[group]}</span>
+      <span data-title className="font-medium tracking-[-0.01em]">{statusGroupLabel[group]}</span>
       <span className="font-mono text-[11px] text-subtle tabular-nums">{count}</span>
     </div>
   );

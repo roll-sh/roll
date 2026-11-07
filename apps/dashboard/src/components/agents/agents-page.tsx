@@ -1386,7 +1386,7 @@ function defaultSize(n: GraphNode): Size {
     case "machine":
       return { w: 272, h: 120 };
     case "project":
-      return { w: 256, h: 64 };
+      return { w: 272, h: 64 };
     case "thread":
       return { w: 296, h: 96 };
     case "subagent":

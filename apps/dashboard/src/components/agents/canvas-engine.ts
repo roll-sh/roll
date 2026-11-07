@@ -23,23 +23,16 @@ export interface SceneMeta {
   parent: string | null;
 }
 
-/**
- * How an edge runs: `right` from a parent's right edge into its child's left (the tree growing
- * right); `down` from the middle of a parent's bottom into the middle of its child's top (children
- * side by side under it); `list` down a trunk inside the parent's left edge and into the child's
- * left (children listed under it, indented); `trunk` growing right to many children: out of the
- * parent to a shared upright just before the children, then a short branch into each, so dozens of
- * edges read as one line of structure instead of a fan.
- */
-export type EdgeRoute = "right" | "down" | "list" | "trunk";
-
 export interface SceneEdge {
   from: string;
   to: string;
   busy: boolean;
   dashed: boolean;
-  /** `right` when absent. */
-  route?: EdgeRoute;
+  /**
+   * The line as the layout routed it (world px, parent side first: `routeEdges`); its ends follow
+   * the cards while they ease.
+   */
+  points?: readonly Point[];
   /** A colour token (`--id-teal`): the project's or machine's colour it's drawn in when it isn't busy. */
   tint?: string;
 }
@@ -72,6 +65,8 @@ const SWEEP_WAVE = 220;
 const SWEEP_SPEED = 1.6;
 /** Below this the sweep doesn't change a dot (its boost would be under 0.002). */
 const SWEEP_FLOOR = 0.004;
+/** How far (screen px) the sweep keeps from the cards' extent. */
+const SWEEP_CLEAR = 56;
 
 /** How much the busy sweep lifts a dot at screen (x, y): 0–`mix`. */
 const sweepAt = (x: number, y: number, t: number, mix: number) => Math.max(0, Math.cos((x + y * 0.6) / SWEEP_WAVE - t * SWEEP_SPEED)) ** 12 * mix;
@@ -133,6 +128,7 @@ export class CanvasEngine {
   /** The layout's targets, before a drag holds one card. */
   private slots: ReadonlyMap<string, Point> = new Map();
   private size = new Map<string, Size>();
+  private shownSize = new Map<string, Size>();
   private meta = new Map<string, SceneMeta>();
   private edges: SceneEdge[] = [];
   /**
@@ -191,6 +187,10 @@ export class CanvasEngine {
         const s = { w: el.offsetWidth, h: el.offsetHeight };
         // Hidden (the canvas is under a conversation): keep the last real size.
         if (s.w === 0 && s.h === 0) continue;
+        // Off screen its contents are skipped (`data-off`, content-visibility): what it reports is
+        // the placeholder size, not its own (WebKit laid a phone's first view out with every card
+        // 280 × 120, overlapping). Its real size comes when it nears the screen.
+        if (el.hasAttribute("data-off")) continue;
         const prev = this.size.get(key);
         if (prev && prev.w === s.w && prev.h === s.h) continue;
         this.size.set(key, s);
@@ -319,6 +319,8 @@ export class CanvasEngine {
   /** The layout's targets; nodes ease there. New nodes grow out of their parent. */
   setScene(targets: ReadonlyMap<string, Point>, meta: ReadonlyMap<string, SceneMeta>, edges: SceneEdge[], sizes: ReadonlyMap<string, Size>) {
     for (const [k, s] of sizes) if (!this.size.has(k)) this.size.set(k, s);
+    // What the layout sized each card as (a section's header is a fixed row): edges meet those edges.
+    this.shownSize = new Map(sizes);
     if (!this.opts.reducedMotion) {
       const now = performance.now();
       for (const e of this.edges) {
@@ -435,7 +437,9 @@ export class CanvasEngine {
     const p = this.local(e);
     this.pointer.x = p.x;
     this.pointer.y = p.y;
-    this.pointer.active = true;
+    // The dots answer the pointer on open canvas only: not under a card or the canvas's own controls.
+    const t = e.target as HTMLElement | null;
+    this.pointer.active = !t?.closest?.("[data-card], button, [role=toolbar], [data-chrome]");
     if (this.pinch && this.touches.has(e.pointerId)) {
       this.touches.set(e.pointerId, p);
       const [a, b] = [...this.touches.values()];
@@ -730,6 +734,9 @@ export class CanvasEngine {
     const ps = this.pointer;
     const pointer = ps.s > 0.01 ? ps : null;
     const mix = reduced ? 0 : this.busyMix;
+    // The sweep keeps off the cards and the space around them: between small cards far out it read
+    // as a blob of blue dots behind the work. It runs through the open canvas only.
+    const mask = mix > 0.01 || pointer || this.ripples.length ? this.contentBox(vx, vy, k, SWEEP_CLEAR) : null;
     const xEnd = this.w + s;
     const yEnd = this.h + s;
     const bands = mix > 0.01 ? sweepBands(t, mix, x0 + 0.6 * y0, xEnd + 0.6 * yEnd) : [];
@@ -742,11 +749,13 @@ export class CanvasEngine {
     // Lifted dots by how much (boost and light, in twentieths): one fill per step, not per dot.
     const lifted = new Map<number, Path2D>();
     const dot = (x: number, y: number) => {
+      // Behind the work (and 56 px around it) the field stays still: no swell, ripple or sweep.
+      const quiet = !!mask && x > mask.x0 && x < mask.x1 && y > mask.y0 && y < mask.y1;
       let boost = 0;
       let lit = 0;
       let px = x;
       let py = y;
-      if (pointer) {
+      if (pointer && !quiet) {
         const dx = x - pointer.x;
         const dy = y - pointer.y;
         const d2 = dx * dx + dy * dy;
@@ -759,14 +768,14 @@ export class CanvasEngine {
           py += (dy / d) * f * 5;
         }
       }
-      for (const r of this.ripples) {
+      for (const r of quiet ? [] : this.ripples) {
         const age = t - r.t0;
         const d = Math.hypot(x - r.x, y - r.y);
         const rw = Math.exp(-((d - age * 520) ** 2) / 1800) * Math.exp(-age * 1.4);
         boost += rw;
         lit = Math.max(lit, rw * 0.7);
       }
-      if (mix > 0.01) {
+      if (mix > 0.01 && !quiet) {
         // The DotField "thinking" sweep, quieter: work is happening somewhere on the canvas.
         const wave = sweepAt(x, y, t, mix);
         boost += wave * 0.5;
@@ -824,203 +833,152 @@ export class CanvasEngine {
     const scr = (p: Point) => ({ x: p.x * k + vx, y: p.y * k + vy });
     const phase = (t / PULSE_S) % 1;
 
-    // Edges, routed as the layout placed the child (`EdgeRoute`).
+    // Edges, as the layout routed them (`routeEdges`). A parent's lines are one path stroked once, so
+    // a trunk its children share is one line, not a stack of translucent ones; a busy child's last
+    // leg goes over it in the accent with a dot travelling along it.
     ctx.lineCap = "round";
     ctx.lineJoin = "round";
     const at = (key: string) => this.cur.get(key) ?? this.gone.get(key);
+    const sized = (key: string) => this.shownSize.get(key) ?? this.size.get(key);
+    const radius = 8 * k;
+    // A port is a ring where a line meets a card; small, it's a tick: only where it reads as a ring.
+    const ports = k >= 0.6;
+    const pr = 2.75 * Math.min(1, k);
     const drawn = [...this.edges.map((edge) => ({ edge, alpha: 1 })), ...this.fading.map((f) => ({ edge: f.edge, alpha: 1 - Math.min(1, Math.max(0, (this.frameMs - f.t0) / EDGE_OUT_MS)) ** 2 }))];
-    // Trunks drawn after their branches: one stem and upright per parent, however many children.
-    const trunks = new Map<string, { p0: Point; x: number; lo: number; hi: number; stroke: string; alpha: number }>();
+    const groups = new Map<string, { path: Path2D; stroke: string; alpha: number; dashed: boolean; ends: Point[] }>();
+    const busy: Point[][] = [];
     for (const { edge: e, alpha } of drawn) {
-      const a = at(e.from);
-      const b = at(e.to);
-      const sa = this.size.get(e.from);
-      const sb = this.size.get(e.to);
-      if (!a || !b || !sa || !sb || alpha <= 0) continue;
+      const pts = this.edgePoints(e, at, sized, scr);
+      if (!pts || alpha <= 0) continue;
       // Off screen (most of 200 threads' edges): nothing to stroke.
-      const left = Math.min(a.x, b.x) * k + vx;
-      const top = Math.min(a.y, b.y) * k + vy;
-      const right = Math.max(a.x + sa.w, b.x + sb.w) * k + vx;
-      const bottom = Math.max(a.y + sa.h, b.y + sb.h) * k + vy;
-      if (right < -8 || bottom < -8 || left > this.w + 8 || top > this.h + 8) continue;
-      ctx.globalAlpha = alpha;
-      const path = edgePath(e.route ?? "right", { ...a, ...sa }, { ...b, ...sb }, scr, k);
-      const p0 = path.start;
-      const p3 = path.end;
-      // Busy is the accent; otherwise the edge carries its project's (or machine's) colour, quietly.
-      const stroke = e.busy ? rgba(this.accent, 0.5) : e.tint ? rgba(this.tint(e.tint), 0.42) : rgba(this.line, 1);
-      ctx.setLineDash(e.dashed ? [3, 4] : []);
-      ctx.lineWidth = 1.25;
-      ctx.strokeStyle = stroke;
-      ctx.beginPath();
-      const x = path.upright;
-      if (x !== undefined) {
-        const t = trunks.get(e.from);
-        if (t) (t.lo = Math.min(t.lo, p3.y)), (t.hi = Math.max(t.hi, p3.y)), (t.alpha = Math.max(t.alpha, alpha));
-        else trunks.set(e.from, { p0, x, lo: Math.min(p0.y, p3.y), hi: Math.max(p0.y, p3.y), stroke: e.tint ? rgba(this.tint(e.tint), 0.42) : rgba(this.line, 1), alpha });
-      }
-      // A busy child's edge runs whole, in the accent, over the trunk.
-      if (x !== undefined && !e.busy) {
-        ctx.moveTo(x, p3.y);
-        ctx.lineTo(p3.x, p3.y);
-      } else path.trace(ctx);
-      ctx.stroke();
-      ctx.setLineDash([]);
-      // Ports: a small ring where the edge leaves its parent and meets its child.
-      const pr = Math.max(1.6, 2.75 * Math.min(1, k));
-      for (const q of x !== undefined ? [p3] : [p0, p3]) {
-        ctx.beginPath();
-        ctx.arc(q.x, q.y, pr, 0, Math.PI * 2);
-        ctx.fillStyle = rgba(this.ground, 1);
-        ctx.fill();
-        ctx.lineWidth = 1.25;
-        ctx.strokeStyle = stroke;
-        ctx.stroke();
-      }
-      if (e.busy && !reduced) {
-        // A dot travelling down the edge with a short tail.
-        for (let i = 0; i < 4; i++) {
-          const u = phase - i * 0.035;
-          if (u < 0) continue;
-          const q = path.at(easeInOut(u));
-          ctx.fillStyle = rgba(this.accent, (1 - i / 4) * 0.9);
-          ctx.beginPath();
-          ctx.arc(q.x, q.y, Math.max(1.2, 2.4 * Math.min(1, k)) * (1 - i * 0.18), 0, Math.PI * 2);
-          ctx.fill();
-        }
-      }
+      let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+      for (const p of pts) (x0 = Math.min(x0, p.x)), (y0 = Math.min(y0, p.y)), (x1 = Math.max(x1, p.x)), (y1 = Math.max(y1, p.y));
+      if (x1 < -8 || y1 < -8 || x0 > this.w + 8 || y0 > this.h + 8) continue;
+      // A busy child's line is part of its parent's like any other; only its last leg (into the
+      // child) is the accent, so a shared trunk or bus never lights up.
+      if (e.busy) busy.push(pts.slice(-2));
+      const id = `${e.from}|${e.dashed ? 1 : 0}|${alpha.toFixed(2)}`;
+      let g = groups.get(id);
+      if (!g) groups.set(id, (g = { path: new Path2D(), stroke: e.tint ? rgba(this.tint(e.tint), 0.42) : rgba(this.line, 1), alpha, dashed: e.dashed, ends: [pts[0]] }));
+      tracePolyline(g.path, pts, radius);
+      g.ends.push(pts[pts.length - 1]);
     }
-    for (const t of trunks.values()) {
-      ctx.globalAlpha = t.alpha;
-      ctx.lineWidth = 1.25;
-      ctx.strokeStyle = t.stroke;
-      ctx.beginPath();
-      ctx.moveTo(t.p0.x, t.p0.y);
-      ctx.lineTo(t.x, t.p0.y);
-      ctx.moveTo(t.x, t.lo);
-      ctx.lineTo(t.x, t.hi);
-      ctx.stroke();
-      ctx.beginPath();
-      ctx.arc(t.p0.x, t.p0.y, Math.max(1.6, 2.75 * Math.min(1, k)), 0, Math.PI * 2);
-      ctx.fillStyle = rgba(this.ground, 1);
-      ctx.fill();
-      ctx.stroke();
+    ctx.lineWidth = 1.25;
+    for (const g of groups.values()) {
+      ctx.globalAlpha = g.alpha;
+      ctx.setLineDash(g.dashed ? [3, 4] : []);
+      ctx.strokeStyle = g.stroke;
+      ctx.stroke(g.path);
+      ctx.setLineDash([]);
+      if (ports)
+        for (const q of g.ends) {
+          ctx.beginPath();
+          ctx.arc(q.x, q.y, pr, 0, Math.PI * 2);
+          ctx.fillStyle = rgba(this.ground, 1);
+          ctx.fill();
+          ctx.stroke();
+        }
     }
     ctx.globalAlpha = 1;
+    for (const pts of busy) {
+      ctx.strokeStyle = rgba(this.accent, 0.5);
+      ctx.beginPath();
+      tracePolyline(ctx, pts, radius);
+      ctx.stroke();
+      if (reduced) continue;
+      // A dot travelling down the line with a short tail.
+      const along = polylineAt(pts);
+      for (let i = 0; i < 4; i++) {
+        const u = phase - i * 0.035;
+        if (u < 0) continue;
+        const q = along(easeInOut(u));
+        ctx.fillStyle = rgba(this.accent, (1 - i / 4) * 0.9);
+        ctx.beginPath();
+        ctx.arc(q.x, q.y, Math.max(1.2, 2.4 * Math.min(1, k)) * (1 - i * 0.18), 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+  }
+
+  /** The cards' extent on screen, `margin` px bigger each way. */
+  private contentBox(vx: number, vy: number, k: number, margin: number) {
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (const [key, p] of this.cur) {
+      const s = this.shownSize.get(key) ?? this.size.get(key);
+      if (!s) continue;
+      x0 = Math.min(x0, p.x);
+      y0 = Math.min(y0, p.y);
+      x1 = Math.max(x1, p.x + s.w);
+      y1 = Math.max(y1, p.y + s.h);
+    }
+    if (x0 === Infinity) return null;
+    return { x0: x0 * k + vx - margin, y0: y0 * k + vy - margin, x1: x1 * k + vx + margin, y1: y1 * k + vy + margin };
+  }
+
+  /**
+   * An edge's line on screen. Its route was planned from where the cards are going; while they ease
+   * there, its first leg follows the parent and its last leg the child, so it stays attached.
+   */
+  private edgePoints(e: SceneEdge, at: (k: string) => Point | undefined, sized: (k: string) => Size | undefined, scr: (p: Point) => Point): Point[] | null {
+    const a = at(e.from);
+    const b = at(e.to);
+    const sa = sized(e.from);
+    const sb = sized(e.to);
+    if (!a || !b || !sa || !sb) return null;
+    const route = e.points;
+    if (!route || route.length < 2) return [scr({ x: a.x + sa.w, y: a.y + sa.h / 2 }), scr({ x: b.x, y: b.y + sb.h / 2 })];
+    const ta = this.tgt.get(e.from) ?? a;
+    const tb = this.tgt.get(e.to) ?? b;
+    const da = { x: a.x - ta.x, y: a.y - ta.y };
+    const db = { x: b.x - tb.x, y: b.y - tb.y };
+    const pts = route.map((p) => ({ ...p }));
+    const n = pts.length;
+    const flat = (i: number, j: number) => Math.abs(route[i].y - route[j].y) < 0.5;
+    pts[0].x += da.x;
+    pts[0].y += da.y;
+    if (n > 2) {
+      if (flat(0, 1)) pts[1].y += da.y;
+      else pts[1].x += da.x;
+    }
+    pts[n - 1].x += db.x;
+    pts[n - 1].y += db.y;
+    if (n > 2) {
+      if (flat(n - 1, n - 2)) pts[n - 2].y += db.y;
+      else pts[n - 2].x += db.x;
+    }
+    return pts.map(scr);
   }
 }
 
-/** An edge on screen: where it starts and ends, how to draw it, and the point `u` (0–1) along it. */
-export interface EdgePath {
-  start: Point;
-  end: Point;
-  trace: (ctx: Pick<CanvasRenderingContext2D, "moveTo" | "lineTo" | "bezierCurveTo" | "arcTo">) => void;
-  at: (u: number) => Point;
-  /** A trunk edge's upright (screen x): the stem and upright are drawn once for all its siblings. */
-  upright?: number;
-}
-
-/** An edge between two cards (world rects) on screen (`scr` maps world to screen, `k` the zoom). */
-export function edgePath(route: EdgeRoute, a: Rect, b: Rect, scr: (p: Point) => Point, k: number): EdgePath {
-  if (route === "list") return edgeList(scr({ x: a.x + (b.x - a.x) / 2, y: a.y + a.h }), scr({ x: b.x, y: b.y + Math.min(b.h / 2, 22) }), k);
-  if (route === "trunk") {
-    const from = { x: a.x + a.w, y: a.y + Math.min(a.h / 2, 28) };
-    return edgeTrunk(scr(from), scr({ x: Math.max(from.x + 12, b.x - TRUNK_BEFORE), y: 0 }).x, scr({ x: b.x, y: b.y + Math.min(b.h / 2, 28) }), k);
+/** An orthogonal line through `pts`, its corners rounded to `r` (at most half of either leg). */
+function tracePolyline(ctx: Pick<CanvasRenderingContext2D, "moveTo" | "lineTo" | "arcTo">, pts: readonly Point[], r: number) {
+  ctx.moveTo(pts[0].x, pts[0].y);
+  for (let i = 1; i < pts.length - 1; i++) {
+    const o = pts[i - 1];
+    const p = pts[i];
+    const q = pts[i + 1];
+    const rr = Math.min(r, Math.hypot(p.x - o.x, p.y - o.y) / 2, Math.hypot(q.x - p.x, q.y - p.y) / 2);
+    if (rr > 0.5) ctx.arcTo(p.x, p.y, q.x, q.y, rr);
+    else ctx.lineTo(p.x, p.y);
   }
-  const [p0, p1, p2, p3] =
-    route === "down"
-      ? edgeDown(scr({ x: a.x + a.w / 2, y: a.y + a.h }), scr({ x: b.x + b.w / 2, y: b.y }), k)
-      : edgeRight(scr({ x: a.x + a.w, y: a.y + Math.min(a.h / 2, 28) }), scr({ x: b.x, y: b.y + Math.min(b.h / 2, 28) }), k);
-  return {
-    start: p0,
-    end: p3,
-    trace: (ctx) => {
-      ctx.moveTo(p0.x, p0.y);
-      ctx.bezierCurveTo(p1.x, p1.y, p2.x, p2.y, p3.x, p3.y);
-    },
-    at: (u) => bez(p0, p1, p2, p3, u),
+  ctx.lineTo(pts[pts.length - 1].x, pts[pts.length - 1].y);
+}
+
+/** The point `u` (0–1) of the way along a polyline. */
+function polylineAt(pts: readonly Point[]): (u: number) => Point {
+  const legs = pts.slice(1).map((p, i) => Math.hypot(p.x - pts[i].x, p.y - pts[i].y));
+  const total = legs.reduce((s, l) => s + l, 0) || 1;
+  return (u) => {
+    let d = Math.min(1, Math.max(0, u)) * total;
+    for (let i = 0; i < legs.length; i++) {
+      if (d <= legs[i] || i === legs.length - 1) {
+        const f = legs[i] ? Math.min(1, d / legs[i]) : 0;
+        return { x: pts[i].x + (pts[i + 1].x - pts[i].x) * f, y: pts[i].y + (pts[i + 1].y - pts[i].y) * f };
+      }
+      d -= legs[i];
+    }
+    return pts[pts.length - 1];
   };
-}
-
-/**
- * A listed child's edge (screen space): straight down the trunk from `p0` (under the parent,
- * inside its left edge), a rounded corner, then right into the child at `p3`.
- */
-export function edgeList(p0: Point, p3: Point, k: number): EdgePath {
-  const corner = { x: p0.x, y: p3.y };
-  const down = Math.max(0, corner.y - p0.y);
-  const across = Math.max(0, p3.x - corner.x);
-  const r = Math.min(8 * k, down, across);
-  const total = down + across || 1;
-  return {
-    start: p0,
-    end: p3,
-    trace: (ctx) => {
-      ctx.moveTo(p0.x, p0.y);
-      if (r > 0.5) ctx.arcTo(corner.x, corner.y, p3.x, p3.y, r);
-      else ctx.lineTo(corner.x, corner.y);
-      ctx.lineTo(p3.x, p3.y);
-    },
-    at: (u) => {
-      const d = Math.min(1, Math.max(0, u)) * total;
-      return d <= down ? { x: p0.x, y: p0.y + d } : { x: corner.x + (d - down), y: corner.y };
-    },
-  };
-}
-
-/** How far before its children (world px) a trunk's upright runs. */
-const TRUNK_BEFORE = 18;
-
-/**
- * A trunk edge (screen space): right from `p0` to the upright at `x`, along it (rounded corners) to
- * the child's level, then right into the child at `p3`. Siblings share the stem and the upright.
- */
-export function edgeTrunk(p0: Point, x: number, p3: Point, k: number): EdgePath {
-  const c1 = { x, y: p0.y };
-  const c2 = { x, y: p3.y };
-  const legs = [Math.max(0, x - p0.x), Math.abs(p3.y - p0.y), Math.max(0, p3.x - x)];
-  const r = Math.min(8 * k, legs[0], legs[1] / 2, legs[2]);
-  const total = legs[0] + legs[1] + legs[2] || 1;
-  return {
-    upright: x,
-    start: p0,
-    end: p3,
-    trace: (ctx) => {
-      ctx.moveTo(p0.x, p0.y);
-      if (r > 0.5 && legs[1] > 1) {
-        ctx.arcTo(c1.x, c1.y, c2.x, c2.y, r);
-        ctx.arcTo(c2.x, c2.y, p3.x, p3.y, r);
-      } else ctx.lineTo(c1.x, c1.y), ctx.lineTo(c2.x, c2.y);
-      ctx.lineTo(p3.x, p3.y);
-    },
-    at: (u) => {
-      const d = Math.min(1, Math.max(0, u)) * total;
-      if (d <= legs[0]) return { x: p0.x + d, y: p0.y };
-      if (d <= legs[0] + legs[1]) return { x, y: p0.y + Math.sign(p3.y - p0.y) * (d - legs[0]) };
-      return { x: x + (d - legs[0] - legs[1]), y: p3.y };
-    },
-  };
-}
-
-/** A bezier leaving `p0` to the right and arriving at `p3` from the left (screen space). */
-export function edgeRight(p0: Point, p3: Point, k: number): [Point, Point, Point, Point] {
-  const dx = Math.max(24 * k, (p3.x - p0.x) / 2);
-  return [p0, { x: p0.x + dx, y: p0.y }, { x: p3.x - dx, y: p3.y }, p3];
-}
-
-/** A bezier leaving `p0` downwards and arriving at `p3` from above (screen space). */
-export function edgeDown(p0: Point, p3: Point, k: number): [Point, Point, Point, Point] {
-  const dy = Math.max(24 * k, (p3.y - p0.y) / 2);
-  return [p0, { x: p0.x, y: p0.y + dy }, { x: p3.x, y: p3.y - dy }, p3];
 }
 
 const easeInOut = (u: number) => (u < 0.5 ? 2 * u * u : 1 - (-2 * u + 2) ** 2 / 2);
-
-function bez(p0: Point, p1: Point, p2: Point, p3: Point, u: number): Point {
-  const v = 1 - u;
-  const a = v * v * v;
-  const b = 3 * v * v * u;
-  const c = 3 * v * u * u;
-  const d = u * u * u;
-  return { x: a * p0.x + b * p1.x + c * p2.x + d * p3.x, y: a * p0.y + b * p1.y + c * p2.y + d * p3.y };
-}

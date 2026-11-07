@@ -61,20 +61,39 @@ export interface LayoutOptions {
   grids?: ReadonlyMap<string, Grid>;
   /** Growing right: nodes that don't widen their column (a grid block). */
   overflows?: (key: string) => boolean;
+  /** Children that stay out of their parent's grid and follow it (a fold card). */
+  tail?: (key: string) => boolean;
+  /** Where an edge meets a card of height h, from its top (the header's middle). */
+  anchor?: (h: number) => number;
+  /** From the top of a node's band to the line its edge meets, when that isn't its card's anchor (a grid block's first card). */
+  lead?: (key: string) => number | undefined;
+  /** Nodes laid out as sections: a header over its cards, as one block (`withSections`). */
+  sections?: (key: string) => boolean;
+  /** Roots (machines) to a column growing right, to a row growing down (`wrapRoots`); absent, one stack (row). */
+  rootsPer?: number;
 }
 
-export type Gaps = Required<Omit<LayoutOptions, "direction" | "spreads" | "grids" | "overflows">>;
+export type Gaps = Required<Omit<LayoutOptions, "direction" | "spreads" | "grids" | "overflows" | "tail" | "anchor" | "lead" | "rootsPer" | "sections">>;
+
+/** Where an edge meets a full card: its header's middle. */
+export const ANCHOR = (h: number) => Math.min(h / 2, 28);
 
 /** The gaps a direction lays out with by default (the canvas's comfortable density). */
 export const GAPS: Readonly<Record<Direction, Gaps>> = {
   horizontal: { depthGap: 72, siblingGap: 20, rootGap: 64, indent: 0, listGap: 0 },
-  vertical: { depthGap: 56, siblingGap: 32, rootGap: 72, indent: 28, listGap: 14 },
+  vertical: { depthGap: 56, siblingGap: 32, rootGap: 72, indent: 40, listGap: 14 },
 };
 
 /** The compact density's gaps: about half, so more of the canvas fits on a screen. */
 export const COMPACT_GAPS: Readonly<Record<Direction, Gaps>> = {
   horizontal: { depthGap: 44, siblingGap: 10, rootGap: 36, indent: 0, listGap: 0 },
-  vertical: { depthGap: 32, siblingGap: 16, rootGap: 40, indent: 20, listGap: 8 },
+  vertical: { depthGap: 32, siblingGap: 16, rootGap: 40, indent: 28, listGap: 8 },
+};
+
+/** The overview's gaps (canvas-face.tsx): faces are drawn for about 40 %, so their gaps are too. */
+export const OVERVIEW_GAPS: Readonly<Record<Direction, Gaps>> = {
+  horizontal: { depthGap: 128, siblingGap: 28, rootGap: 160, indent: 0, listGap: 0 },
+  vertical: { depthGap: 96, siblingGap: 64, rootGap: 160, indent: 88, listGap: 28 },
 };
 
 /**
@@ -91,6 +110,11 @@ export const COMPACT_GAPS: Readonly<Record<Direction, Gaps>> = {
  * bottom like Linear's board, a column per project.
  */
 export function tidyLayout(tree: TreeLike, size: (key: string) => Size, opts: LayoutOptions = {}): Map<string, Point> {
+  if (opts.rootsPer && new Set(tree.roots).size > opts.rootsPer) return wrapRoots(tree, size, opts);
+  if (opts.sections) {
+    const keys = [...tree.nodes.keys()].filter((k) => opts.sections!(k) && tree.nodes.get(k)!.children.length > 0);
+    if (keys.length) return withSections(tree, size, opts, keys);
+  }
   const grids = opts.grids;
   if (!grids?.size) return opts.direction === "vertical" ? boardLayout(tree, size, opts) : treeLayout(tree, size, opts);
   // Each grid is one block in its parent's place for the first of its cards; the cards go in it after.
@@ -114,9 +138,21 @@ export function tidyLayout(tree: TreeLike, size: (key: string) => Size, opts: La
   }
   for (const key of block.keys()) nodes.set(key, { children: [] });
   const sized = (k: string) => block.get(k)?.size ?? size(k);
+  const anchor = opts.anchor ?? ANCHOR;
   // A block's band is its own (siblings never share one), so growing right it may reach past its
-  // column: the columns after it stay where the cards' widths put them.
-  const inner: LayoutOptions = { ...opts, grids: undefined, overflows: (k) => block.has(k) };
+  // column: the columns after it stay where the cards' widths put them. Its parent lines up with
+  // its first card, and growing down a parent with a grid lists it (its trunk runs down the left of
+  // the block) rather than spreading it.
+  const inner: LayoutOptions = {
+    ...opts,
+    grids: undefined,
+    overflows: (k) => block.has(k),
+    lead: (k) => {
+      const g = block.get(k);
+      return g ? g.cells[0].y + anchor(size(g.members[0]).h) : opts.lead?.(k);
+    },
+    spreads: (k) => !grids.has(k) && (opts.spreads?.(k) ?? true),
+  };
   const out = opts.direction === "vertical" ? boardLayout({ roots: tree.roots, nodes }, sized, inner) : treeLayout({ roots: tree.roots, nodes }, sized, inner);
   for (const [key, g] of block) {
     const at = out.get(key);
@@ -130,10 +166,76 @@ export function tidyLayout(tree: TreeLike, size: (key: string) => Size, opts: La
 const GRID = "#grid:";
 
 /**
- * A parent's cards wrapped into a grid (a busy project's threads), placed as one block: in columns
- * of `rows` growing right, or rows of `cols` growing down, whichever way the tree grows, so the
- * block keeps near the screen's shape instead of one long column. A card with something under it
- * (requests, subagents, a fork) takes its whole subtree into its cell, laid out as the tree would.
+ * Sections (a drilled project's status groups): the header with its cards under it, flush left,
+ * as one block, whichever way the tree grows; the block takes the section's place in the tree.
+ * A section reads as a header row over its cards, not as a parent wired to each of them.
+ */
+function withSections(tree: TreeLike, size: (key: string) => Size, opts: LayoutOptions, keys: readonly string[]): Map<string, Point> {
+  const anchor = opts.anchor ?? ANCHOR;
+  const block = new Map<string, { placed: Map<string, Point>; size: Size }>();
+  for (const s of keys) {
+    const p = tidyLayout({ roots: [s], nodes: tree.nodes }, size, { ...opts, direction: "vertical", spreads: () => false, indent: 0, listGap: Math.max(12, opts.listGap ?? 0), sections: undefined, rootsPer: undefined });
+    const r = bounds(p, size);
+    if (!r) continue;
+    const placed = new Map<string, Point>();
+    for (const [k, q] of p) placed.set(k, { x: q.x - r.x, y: q.y - r.y });
+    block.set(s, { placed, size: { w: r.w, h: r.h } });
+  }
+  const nodes = new Map(tree.nodes);
+  for (const s of block.keys()) nodes.set(s, { children: [] });
+  const out = tidyLayout({ roots: tree.roots, nodes }, (k) => block.get(k)?.size ?? size(k), {
+    ...opts,
+    sections: undefined,
+    lead: (k) => (block.has(k) ? anchor(size(k).h) : opts.lead?.(k)),
+  });
+  for (const [s, b] of block) {
+    const at = out.get(s);
+    if (!at) continue;
+    for (const [k, p] of b.placed) out.set(k, { x: at.x + p.x, y: at.y + p.y });
+  }
+  return out;
+}
+/** How far a thread's requests, subagents and forks sit in from it inside a grid's cell (world px). */
+const CELL_INDENT = 64;
+
+/**
+ * Many machines on a wide screen: each machine's tree laid out on its own, `rootsPer` to a column
+ * (growing right) or a row (growing down), the columns (rows) side by side, so machines use the
+ * screen's width instead of one tall stack.
+ */
+function wrapRoots(tree: TreeLike, size: (key: string) => Size, opts: LayoutOptions): Map<string, Point> {
+  const per = opts.rootsPer!;
+  const horizontal = opts.direction !== "vertical";
+  const gap = opts.rootGap ?? GAPS[horizontal ? "horizontal" : "vertical"].rootGap;
+  const out = new Map<string, Point>();
+  let x = 0;
+  let y = 0;
+  let line = 0;
+  let count = 0;
+  for (const r of new Set(tree.roots)) {
+    if (out.has(r)) continue;
+    const p = tidyLayout({ roots: [r], nodes: tree.nodes }, size, { ...opts, rootsPer: undefined });
+    const b = bounds(p, size);
+    if (!b) continue;
+    if (count === per) {
+      if (horizontal) (x += line + gap), (y = 0);
+      else (y += line + gap), (x = 0);
+      line = 0;
+      count = 0;
+    }
+    for (const [k, q] of p) if (!out.has(k)) out.set(k, { x: x + q.x - b.x, y: y + q.y - b.y });
+    if (horizontal) (y += b.h + gap), (line = Math.max(line, b.w));
+    else (x += b.w + gap), (line = Math.max(line, b.h));
+    count++;
+  }
+  return out;
+}
+
+/**
+ * A parent's cards wrapped into a grid (a busy project's threads, a machine's many projects), placed
+ * as one block: in columns of `per` growing right, or rows of `per` growing down, whichever way the
+ * tree grows. A card with something under it (requests, subagents, a fork; a project's own grid)
+ * takes its whole subtree into its cell, laid out as the tree would.
  */
 export interface Grid {
   members: readonly string[];
@@ -142,109 +244,194 @@ export interface Grid {
   /** Every card in the block (members and what's under them), from the block's top-left. */
   placed: ReadonlyMap<string, Point>;
   size: Size;
-  /** Members in the block's first column (the ones its parent's edges go into). */
+  /** Members in the block's first column (the ones its parent's trunk reaches directly). */
   first: ReadonlySet<string>;
   /** How many go down a column before the next (growing right), or across a row (growing down). */
   per: number;
+  /** Each member's column, and each column's width. */
+  column: ReadonlyMap<string, number>;
+  colW: readonly number[];
 }
 
-/** Fewer cards than this stay one column. */
-export const WRAP_AT: Readonly<Record<Direction, number>> = { horizontal: 5, vertical: 9 };
-
 /**
- * The grids for the parents `wraps` picks, sized for a screen `aspect` (width ÷ height) wide: a
- * block of n cards gets the number of rows that makes it about that shape (at least 3, growing
- * right; columns are as wide as their widest cell, rows as tall as their tallest). Siblings wrap
- * alike: once one of them wraps, every sibling longer than its side wraps to the same side (a
- * project's Done beside its Quiet), so no group stays one long column beside a grid.
+ * The grids for the parents `per` names a count for (cards per column growing right, per row growing
+ * down): a parent with more members than that wraps. Members `tail` picks (a fold card) stay out of
+ * the block and follow it in the parent's flow. Inner grids are planned first, so a machine's grid of
+ * projects holds each project's own grid of threads.
  */
 export function planGrids(
   tree: TreeLike,
   size: (key: string) => Size,
-  opts: { direction: Direction; aspect: number; wraps: (key: string) => boolean; gap?: Point; layout?: LayoutOptions },
+  opts: {
+    direction: Direction;
+    per: (key: string) => number | undefined;
+    tail?: (key: string) => boolean;
+    /** Parents whose members keep what's under them compact: listed under them, indented, inside their cell. */
+    compact?: (key: string) => boolean;
+    gap?: Point;
+    /** Room (world px) over a block of more than one column, for the bus its later columns hang off. */
+    bus?: number;
+    layout?: LayoutOptions;
+  },
 ): Map<string, Grid> {
   const out = new Map<string, Grid>();
   const horizontal = opts.direction === "horizontal";
-  const gx = opts.gap?.x ?? 20;
+  const gx = opts.gap?.x ?? 40;
   const gy = opts.gap?.y ?? (horizontal ? 20 : 14);
-  const parentOf = new Map<string, string>();
-  for (const [k, n] of tree.nodes) for (const c of n.children) if (!parentOf.has(c)) parentOf.set(c, k);
   type Cell = { placed: Map<string, Point>; size: Size };
-  // A member's subtree laid out on its own, from its top-left.
-  const cell = (key: string): Cell => {
+  // A member's subtree laid out on its own (with the grids inside it), from its top-left. A thread's
+  // requests, subagents and forks go under it, indented, so its cell stays a card wide: beside it, a
+  // fork made a whole column wide and the next sat far off.
+  const cell = (key: string, compact: boolean): Cell => {
     if (!tree.nodes.get(key)?.children.length) return { placed: new Map([[key, { x: 0, y: 0 }]]), size: size(key) };
-    const p = tidyLayout({ roots: [key], nodes: tree.nodes }, size, { ...opts.layout, direction: opts.direction, grids: undefined });
+    const layout: LayoutOptions = compact
+      ? { ...opts.layout, direction: "vertical", spreads: () => false, indent: CELL_INDENT, listGap: Math.max(8, gy / 2), grids: out, tail: opts.tail }
+      : { ...opts.layout, direction: opts.direction, grids: out, tail: opts.tail };
+    const p = tidyLayout({ roots: [key], nodes: tree.nodes }, size, layout);
     const r = bounds(p, size)!;
     const placed = new Map<string, Point>();
     for (const [k, q] of p) placed.set(k, { x: q.x - r.x, y: q.y - r.y });
     return { placed, size: { w: r.w, h: r.h } };
   };
-  type Plan = { members: readonly string[]; cells: Cell[]; per: number };
-  const candidates = new Map<string, Omit<Plan, "per">>();
-  for (const [k, n] of tree.nodes) if (opts.wraps(k) && n.children.length > 1) candidates.set(k, { members: n.children, cells: n.children.map(cell) });
-  // The side (rows growing right, columns growing down) a block of these would take on its own.
-  const side = ({ members, cells }: Omit<Plan, "per">) => {
-    const w = Math.max(...cells.map((s) => s.size.w)) + gx;
-    const h = cells.reduce((sum, s) => sum + s.size.h, 0) / cells.length + gy;
-    const rows = Math.max(horizontal ? 3 : 1, Math.min(members.length, Math.round(Math.sqrt((members.length * w) / (h * Math.max(0.3, opts.aspect))))));
-    return horizontal ? rows : Math.ceil(members.length / rows);
+  // Deepest first: a parent's cells are laid out with its descendants' grids in them.
+  const order: string[] = [];
+  const seen = new Set<string>();
+  const walk = (k: string) => {
+    if (seen.has(k)) return;
+    seen.add(k);
+    for (const c of tree.nodes.get(k)?.children ?? []) walk(c);
+    order.push(k);
   };
-  const plans = new Map<string, Plan>();
-  const shared = new Map<string, number>();
-  for (const [k, c] of candidates) {
-    if (c.members.length < WRAP_AT[opts.direction]) continue;
-    const per = side(c);
-    plans.set(k, { ...c, per });
-    const up = parentOf.get(k) ?? ROOTS;
-    shared.set(up, Math.max(shared.get(up) ?? 0, per));
+  for (const r of tree.roots) walk(r);
+  // Items grids (a lane's threads) share one column width, so a drilled project's Done lines up
+  // with its Quiet and every pill in them is as wide as the widest.
+  const plans = new Map<string, { per: number; members: string[]; cells: Cell[] }>();
+  for (const k of order) {
+    const per = opts.per(k);
+    const members = (tree.nodes.get(k)?.children ?? []).filter((c) => !opts.tail?.(c));
+    if (!per || members.length <= per || !opts.compact?.(k)) continue;
+    plans.set(k, { per, members, cells: members.map((m) => cell(m, true)) });
   }
-  for (const [k, c] of candidates) {
-    const per = shared.get(parentOf.get(k) ?? ROOTS);
-    if (per !== undefined && (plans.has(k) || c.members.length > per)) plans.set(k, { ...c, per });
-  }
-  for (const [k, { members, cells, per }] of plans) {
-    const rows = horizontal ? Math.min(per, members.length) : Math.ceil(members.length / per);
-    const cols = horizontal ? Math.ceil(members.length / per) : Math.min(per, members.length);
+  let uniform = 0;
+  for (const p of plans.values()) for (const c of p.cells) uniform = Math.max(uniform, c.size.w);
+  for (const k of order) {
+    const per = opts.per(k);
+    const members = (tree.nodes.get(k)?.children ?? []).filter((c) => !opts.tail?.(c));
+    if (!per || members.length <= per) continue;
+    const cells = plans.get(k)?.cells ?? members.map((m) => cell(m, false));
+    const cols = horizontal ? Math.ceil(members.length / per) : per;
     // Growing right, columns fill first (newest down the first column); growing down, rows do.
-    const at = (i: number) => (horizontal ? { c: Math.floor(i / per), r: i % per } : { c: i % per, r: Math.floor(i / per) });
-    const colW = new Array<number>(cols).fill(0);
-    const rowH = new Array<number>(rows).fill(0);
-    cells.forEach((s, i) => {
-      const { c, r } = at(i);
-      colW[c] = Math.max(colW[c], s.size.w);
-      rowH[r] = Math.max(rowH[r], s.size.h);
-    });
+    const col = (i: number) => (horizontal ? Math.floor(i / per) : i % per);
+    const colW = new Array<number>(cols).fill(plans.has(k) ? uniform : 0);
+    cells.forEach((s, i) => (colW[col(i)] = Math.max(colW[col(i)], s.size.w)));
     const colX = colW.map((_, c) => colW.slice(0, c).reduce((s, x) => s + x + gx, 0));
-    const rowY = rowH.map((_, r) => rowH.slice(0, r).reduce((s, y) => s + y + gy, 0));
+    // Each column stacks its own cells (a card with something under it makes only its column
+    // longer, never an empty row beside it), under room for the bus the later columns hang off.
+    const room = cols > 1 ? (opts.bus ?? 0) : 0;
+    const colY = new Array<number>(cols).fill(room);
     const placed = new Map<string, Point>();
     cells.forEach((s, i) => {
-      const { c, r } = at(i);
-      for (const [key, q] of s.placed) placed.set(key, { x: colX[c] + q.x, y: rowY[r] + q.y });
+      const c = col(i);
+      for (const [key, q] of s.placed) placed.set(key, { x: colX[c] + q.x, y: colY[c] + q.y });
+      colY[c] += s.size.h + gy;
     });
     out.set(k, {
       members,
       cells: members.map((m) => placed.get(m)!),
       placed,
-      size: { w: colX[cols - 1] + colW[cols - 1], h: rowY[rows - 1] + rowH[rows - 1] },
-      first: new Set(members.filter((_, i) => at(i).c === 0)),
+      size: { w: colX[cols - 1] + colW[cols - 1], h: Math.max(...colY) - gy },
+      first: new Set(members.filter((_, i) => col(i) === 0)),
       per,
+      column: new Map(members.map((m, i) => [m, col(i)])),
+      colW,
     });
   }
   return out;
 }
 
-/**
- * How far below the top of its children a parent may sit, growing right (world px): a few children
- * still centre it; a long column keeps it beside the first ones.
- */
-const MAX_DROP = 160;
+/** What a wrapping parent holds: lanes (a machine's projects, a project's status groups) or items (threads). */
+export type WrapLevel = "lanes" | "items";
 
+/**
+ * How many go per column (growing right) or per row (growing down), tried for each level: 0 never
+ * wraps. Lanes keep their own column growing right and their own row growing down (a project
+ * beside another's threads misread the tree), except that a narrow screen may stack them (1).
+ * Items fill columns growing right, rows growing down.
+ */
+const PER: Readonly<Record<Direction, Record<WrapLevel, readonly number[]>>> = {
+  horizontal: { lanes: [0], items: [0, 3, 4, 6, 8, 12] },
+  vertical: { lanes: [0, 1], items: [0, 2, 3, 4, 6] },
+};
+
+export interface Wraps {
+  lanes: number;
+  items: number;
+  /** Machines to a column (row); 0: one stack. */
+  roots?: number;
+}
+
+/**
+ * The best way to wrap this tree for a screen `aspect` (width ÷ height) wide: every combination of
+ * machines per column, lanes per stack and items per column is laid out, and the one that shows
+ * everything biggest wins (a wrap must earn its keep: ties go to fewer). One rule for every shape
+ * of data: one machine or five, a machine with one project or ten, a project with 2 threads or
+ * 200, a wide screen or a narrow one beside a panel. Big trees try fewer combinations.
+ */
+export function planWraps(
+  tree: TreeLike,
+  size: (key: string) => Size,
+  opts: { direction: Direction; aspect: number; level: (key: string) => WrapLevel | null; tail?: (key: string) => boolean; gap?: Point; bus?: number; layout?: LayoutOptions },
+): Wraps {
+  const per = PER[opts.direction];
+  const big = tree.nodes.size > 400;
+  const lanes = per.lanes;
+  const items = big ? per.items.filter((p) => p === 0 || p === 6 || p === 12 || (opts.direction === "vertical" && p === 4)) : per.items;
+  const many = new Set(tree.roots).size;
+  const roots = many < 2 ? [0] : big ? [0, 2] : [0, 1, 2, 3].filter((r) => r < many);
+  let best: Wraps = { lanes: 0, items: 0, roots: 0 };
+  let bestScore = -Infinity;
+  for (const o of roots)
+    for (const l of lanes)
+      for (const i of items) {
+        const wraps = { lanes: l, items: i, roots: o };
+        const grids = gridsFor(tree, size, { ...opts, wraps });
+        const r = bounds(tidyLayout(tree, size, { ...opts.layout, direction: opts.direction, grids, tail: opts.tail, rootsPer: o || undefined }), size);
+        if (!r) return best;
+        // The zoom that fits it on a screen 1 high and `aspect` wide; each kind of wrap costs 3 %.
+        const fit = Math.min(opts.aspect / Math.max(1, r.w), 1 / Math.max(1, r.h));
+        const score = fit * (1 - 0.03 * ((l ? 1 : 0) + (i ? 1 : 0) + (o ? 1 : 0)));
+        if (score > bestScore * 1.0001) (bestScore = score), (best = wraps);
+      }
+  return best;
+}
+
+/** The grids `wraps` makes. */
+export function gridsFor(
+  tree: TreeLike,
+  size: (key: string) => Size,
+  opts: { direction: Direction; wraps: Wraps; level: (key: string) => WrapLevel | null; tail?: (key: string) => boolean; gap?: Point; bus?: number; layout?: LayoutOptions },
+): Map<string, Grid> {
+  const per = (k: string) => {
+    const l = opts.level(k);
+    return (l === "lanes" ? opts.wraps.lanes : l === "items" ? opts.wraps.items : 0) || undefined;
+  };
+  return planGrids(tree, size, { direction: opts.direction, per, tail: opts.tail, compact: (k) => opts.level(k) === "items", gap: opts.gap, bus: opts.bus, layout: opts.layout });
+}
+
+/**
+ * Growing right, a parent lines up with its first child (their edge is straight) instead of sitting
+ * centred on all of them: centred on a long column it sat far from the projects it led to, its edges
+ * converging across half the screen.
+ */
 function treeLayout(tree: TreeLike, size: (key: string) => Size, opts: LayoutOptions): Map<string, Point> {
   const depthGap = opts.depthGap ?? GAPS.horizontal.depthGap;
   const siblingGap = opts.siblingGap ?? GAPS.horizontal.siblingGap;
   const rootGap = opts.rootGap ?? GAPS.horizontal.rootGap;
+  const anchor = opts.anchor ?? ANCHOR;
   const span = new Map<string, number>();
   const childBlock = new Map<string, number>();
+  // Where the card and its children start in its band, and the line its edge meets (from the band's top).
+  const offset = new Map<string, { card: number; kids: number; lead: number }>();
   const depth = new Map<string, number>();
   const colW: number[] = [];
 
@@ -258,7 +445,12 @@ function treeLayout(tree: TreeLike, size: (key: string) => Size, opts: LayoutOpt
     const kids = (tree.nodes.get(key)?.children ?? []).filter((c) => !depth.has(c));
     let block = 0;
     kids.forEach((c, i) => (block += measure(c, d + 1) + (i ? siblingGap : 0)));
-    const s = Math.max(h, block);
+    const own = opts.lead?.(key) ?? anchor(h);
+    const first = kids.length ? offset.get(kids[0])!.lead : own;
+    const card = kids.length ? Math.max(0, first - own) : 0;
+    const under = kids.length ? Math.max(0, own - first) : 0;
+    offset.set(key, { card, kids: under, lead: card + own });
+    const s = Math.max(card + h, under + block);
     childBlock.set(key, block);
     span.set(key, s);
     return s;
@@ -270,12 +462,10 @@ function treeLayout(tree: TreeLike, size: (key: string) => Size, opts: LayoutOpt
   const out = new Map<string, Point>();
   const place = (key: string, top: number) => {
     if (out.has(key)) return;
-    const s = span.get(key)!;
     const d = depth.get(key)!;
-    // Centred on its children, but never further down than MAX_DROP: a project with 200 threads
-    // would put itself (and its machine) thousands of pixels below the top, off every first view.
-    out.set(key, { x: colX[d], y: top + Math.min((s - size(key).h) / 2, MAX_DROP) });
-    let y = top + (s - (childBlock.get(key) ?? 0)) / 2;
+    const o = offset.get(key)!;
+    out.set(key, { x: colX[d], y: top + o.card });
+    let y = top + o.kids;
     for (const c of tree.nodes.get(key)?.children ?? []) {
       if (depth.get(c) !== d + 1 || out.has(c)) continue;
       place(c, y);
@@ -283,32 +473,18 @@ function treeLayout(tree: TreeLike, size: (key: string) => Size, opts: LayoutOpt
     }
   };
 
-  // Roots with nothing under them (a machine with nothing open) share rows, side by side within the
-  // width the work already takes, so they don't make the canvas taller than its work. With no work
-  // anywhere that's one card wide: the machines stay a column.
-  const idle = (r: string) => !childBlock.get(r);
-  const width = colX[colX.length - 1] + (colW[colW.length - 1] ?? 0);
-  // Each root once, unless something placed it already.
+  // Roots with nothing under them (a machine with nothing open) stack in the machines' column, so
+  // they never sit among another machine's projects.
   const roots = [...new Set(tree.roots)].filter((r) => depth.get(r) === 0);
   let top = 0;
-  for (let i = 0; i < roots.length; ) {
-    const r = roots[i];
-    if (!idle(r)) {
-      place(r, top);
-      top += span.get(r)! + rootGap;
-      i++;
+  for (const r of roots) {
+    if (!childBlock.get(r)) {
+      out.set(r, { x: 0, y: top });
+      top += size(r).h + rootGap / 2;
       continue;
     }
-    let x = 0;
-    let tallest = 0;
-    for (; i < roots.length && idle(roots[i]); i++) {
-      const s = size(roots[i]);
-      if (x > 0 && x + s.w > width) break;
-      out.set(roots[i], { x, y: top });
-      x += s.w + rootGap / 2;
-      tallest = Math.max(tallest, s.h);
-    }
-    top += tallest + rootGap;
+    place(r, top);
+    top += span.get(r)! + rootGap;
   }
   return out;
 }
@@ -371,12 +547,10 @@ function boardLayout(tree: TreeLike, size: (key: string) => Size, opts: LayoutOp
     const b = box.get(key)!;
     const mine = kids.get(key)!;
     if (spreads(key)) {
-      // Centred over its row, but never further in than MAX_DROP (as growing right): a project
-      // drilled into on a phone sat over the middle of its status columns, off the screen that
-      // shows the first one.
-      out.set(key, { x: x + Math.min((b.w - s.w) / 2, MAX_DROP), y });
-      const row = mine.reduce((sum, c, i) => sum + box.get(c)!.w + (i ? siblingGap : 0), 0);
-      let cx = x + (b.w - row) / 2;
+      // At the start of its row (its first child under it), as growing right: centred over a wide
+      // row it sat far from the first column, off a phone's screen.
+      out.set(key, { x, y });
+      let cx = x;
       for (const c of mine) {
         place(c, cx, y + head(key) + depthGap);
         cx += box.get(c)!.w + siblingGap;
@@ -517,6 +691,89 @@ export function nextCard(rects: ReadonlyMap<string, Rect>, from: string, arrow: 
     }
   }
   return best;
+}
+
+/**
+ * Every edge as an orthogonal line (world px, from the parent's side to the child's), the way the
+ * layout placed them: growing right, out of the parent's right side to a trunk in the gap before its
+ * children, along it, and into each child's left side; growing down, out of the parent's bottom near
+ * its left (a list's trunk runs down the indent) or, for a row of lanes, along a bus above them and
+ * down into each. A grid's later columns hang off a bus over the block, through the gaps between
+ * columns, so no line crosses a card. Siblings share their trunk and bus: drawn as one path.
+ */
+export function routeEdges(
+  pos: ReadonlyMap<string, Point>,
+  size: (key: string) => Size,
+  edges: readonly { from: string; to: string }[],
+  opts: { direction: Direction; grids: ReadonlyMap<string, Grid>; spreads: (key: string) => boolean; anchor: (h: number) => number; gaps: Gaps; gridGap: Point; bus?: number; sections?: (key: string) => boolean },
+): Map<string, Point[]> {
+  const out = new Map<string, Point[]>();
+  // A section's header doesn't wire itself to each of its cards: they sit under it.
+  edges = edges.filter((e) => !opts.sections?.(e.from));
+  const rect = (k: string): Rect | null => {
+    const p = pos.get(k);
+    return p ? { ...p, ...size(k) } : null;
+  };
+  // Per parent: its first column's left (the trunk goes just before it) and its grid's top.
+  const firstX = new Map<string, number>();
+  const gridTop = new Map<string, number>();
+  for (const e of edges) {
+    const b = rect(e.to);
+    if (!b) continue;
+    const g = opts.grids.get(e.from);
+    if (!g?.column.get(e.to)) firstX.set(e.from, Math.min(firstX.get(e.from) ?? Infinity, b.x));
+    if (g?.column.has(e.to)) gridTop.set(e.from, Math.min(gridTop.get(e.from) ?? Infinity, b.y));
+  }
+  const { depthGap, indent, listGap } = opts.gaps;
+  for (const e of edges) {
+    const a = rect(e.from);
+    const b = rect(e.to);
+    if (!a || !b) continue;
+    const col = opts.grids.get(e.from)?.column.get(e.to) ?? 0;
+    const by = b.y + opts.anchor(b.h);
+    let pts: Point[];
+    // Beside its parent (the tree growing right), or under it (top-down, or kept compact in a grid's cell).
+    const under = b.y >= a.y + a.h - 0.5 && b.x < a.x + a.w;
+    if (!under) {
+      const ay = a.y + opts.anchor(a.h);
+      const x0 = Math.max(a.x + a.w + 6, (firstX.get(e.from) ?? b.x) - depthGap / 2);
+      if (!col) pts = [{ x: a.x + a.w, y: ay }, { x: x0, y: ay }, { x: x0, y: by }, { x: b.x, y: by }];
+      else {
+        const bus = (gridTop.get(e.from) ?? b.y) - (opts.bus ?? opts.gridGap.y) / 2;
+        const ux = b.x - opts.gridGap.x / 2;
+        pts = [{ x: a.x + a.w, y: ay }, { x: x0, y: ay }, { x: x0, y: bus }, { x: ux, y: bus }, { x: ux, y: by }, { x: b.x, y: by }];
+      }
+    } else if (opts.direction === "vertical" && opts.spreads(e.from)) {
+      const sx = a.x + indent / 2;
+      const bus = b.y - depthGap / 2;
+      const cx = b.x + indent / 2;
+      pts = [{ x: sx, y: a.y + a.h }, { x: sx, y: bus }, { x: cx, y: bus }, { x: cx, y: b.y }];
+    } else {
+      // Down the indent, halfway between the parent's side and the child's.
+      const tx = a.x + Math.max(6, (b.x - a.x) / 2);
+      if (!col) pts = [{ x: tx, y: a.y + a.h }, { x: tx, y: by }, { x: b.x, y: by }];
+      else {
+        const bus = (gridTop.get(e.from) ?? b.y) - (opts.bus ?? Math.max(listGap, opts.gridGap.y)) / 2;
+        const ux = b.x - opts.gridGap.x / 2;
+        pts = [{ x: tx, y: a.y + a.h }, { x: tx, y: bus }, { x: ux, y: bus }, { x: ux, y: by }, { x: b.x, y: by }];
+      }
+    }
+    out.set(`${e.from}>${e.to}`, simplify(pts));
+  }
+  return out;
+}
+
+/** Without repeated points or points in the middle of a straight run. */
+function simplify(pts: Point[]): Point[] {
+  const out: Point[] = [];
+  for (const p of pts) {
+    const q = out[out.length - 1];
+    if (q && Math.abs(q.x - p.x) < 0.5 && Math.abs(q.y - p.y) < 0.5) continue;
+    const o = out[out.length - 2];
+    if (o && q && ((Math.abs(o.x - q.x) < 0.5 && Math.abs(q.x - p.x) < 0.5) || (Math.abs(o.y - q.y) < 0.5 && Math.abs(q.y - p.y) < 0.5))) out[out.length - 1] = p;
+    else out.push(p);
+  }
+  return out;
 }
 
 export function bounds(pos: ReadonlyMap<string, Point>, size: (key: string) => Size, only?: Iterable<string>): Rect | null {

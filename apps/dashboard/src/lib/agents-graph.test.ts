@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { collapseUnused, deriveGraph, foldQuiet, groupByStatus, keyOf, rolling, SHOWN_THREADS } from "./agents-graph";
-import { arrange, bounds, dropIndex, fitView, mergeOrder, moveTo, nextCard, planGrids, ROOTS, tidyLayout, withOrder, zoomAt, type LayoutOptions, type Point, type Rect, type Size } from "./agents-layout";
+import { arrange, bounds, dropIndex, fitView, gridsFor, mergeOrder, moveTo, nextCard, planWraps, ROOTS, tidyLayout, withOrder, zoomAt, type LayoutOptions, type Point, type Rect, type Size } from "./agents-layout";
 import { applyEvents, emptyData, follow } from "./agents-store";
 import { approval, ev, machine, node, project, run, terminal, thread } from "@/test/agents";
 import { EMPTY_INBOX, type Thread } from "./agents-api";
@@ -126,10 +126,11 @@ describe("agents layout", () => {
     };
     add("m1", { w: 272, h: 120 }, ["p1", "p2", "x1"]);
     add("m2", { w: 272, h: 180 }, ["p3"]);
-    // p1 is busy: enough plain threads that they wrap into a grid (`planGrids`).
+    // p1 is busy: enough plain threads that they wrap into a grid (`gridsFor`), its fold card after it.
     const many = Array.from({ length: 9 }, (_, i) => `q${i}`);
-    add("p1", { w: 256, h: 64 }, ["t1", "t2", "t3", ...many]);
+    add("p1", { w: 256, h: 64 }, ["t1", "t2", "t3", ...many, "f1"]);
     for (const [i, q] of many.entries()) add(q, { w: 296, h: 96 + (i % 3) * 22 });
+    add("f1", { w: 296, h: 96 });
     add("p2", { w: 256, h: 110 }, []);
     add("p3", { w: 256, h: 64 }, ["t4"]);
     add("x1", { w: 620, h: 380 });
@@ -149,9 +150,12 @@ describe("agents layout", () => {
       for (const wrap of [false, true])
       for (const order of orders) {
         const tree = arrange({ roots: ["m1", "m2"], nodes }, order);
-        const grids = wrap ? planGrids(tree, sz, { direction: plain.direction!, aspect: 1.6, wraps: (k) => k.startsWith("p") }) : undefined;
+        // Wrapped: p1's threads 4 to a column (row), m1's projects 2 to a stack (row).
+        const tail = (k: string) => k === "f1";
+        const level = (k: string) => (k.startsWith("m") ? "lanes" : k.startsWith("p") ? "items" : null);
+        const grids = wrap ? gridsFor(tree, sz, { direction: plain.direction!, wraps: { lanes: 2, items: 4 }, level, tail, layout: plain }) : undefined;
         if (wrap) expect(grids!.get("p1")!.members.length).toBe(12);
-        const opts = { ...plain, grids };
+        const opts = { ...plain, grids, tail };
         const direction = `${opts.spreads ? "board" : opts.direction}${wrap ? " wrapped" : ""}`;
         const p = tidyLayout(tree, sz, opts);
         expect(p.size).toBe(nodes.size);
@@ -163,13 +167,42 @@ describe("agents layout", () => {
             const apart = pa.x + sa.w <= pb.x || pb.x + sb.w <= pa.x || pa.y + sa.h <= pb.y || pb.y + sb.h <= pa.y;
             expect(apart, `${direction}: ${a} and ${b} overlap`).toBe(true);
           }
-        // Children are past their parent in the direction the tree grows.
+        // Children are past their parent in the direction the tree grows, or (kept compact in a
+        // grid's cell) under it, indented.
         for (const [k, n] of nodes)
           for (const c of n.children) {
+            const under = p.get(c)!.y > p.get(k)!.y + sz(k).h && p.get(c)!.x > p.get(k)!.x;
             if (!direction.startsWith("horizontal")) expect(p.get(c)!.y).toBeGreaterThan(p.get(k)!.y + sz(k).h);
-            else expect(p.get(c)!.x).toBeGreaterThan(p.get(k)!.x + sz(k).w);
+            else expect(p.get(c)!.x > p.get(k)!.x + sz(k).w || under, `${direction}: ${c} beside or under ${k}`).toBe(true);
           }
+        // The fold card follows its project's threads, in their first column, below the last of them
+        // (where they're listed or wrapped; a plain top-down tree has it last in their row).
+        if (wrap || plain.direction === "horizontal" || plain.spreads) {
+          const threads = nodes.get("p1")!.children.filter((c) => c !== "f1");
+          expect(p.get("f1")!.x, direction).toBe(Math.min(...threads.map((t) => p.get(t)!.x)));
+          expect(p.get("f1")!.y, direction).toBeGreaterThanOrEqual(Math.max(...threads.map((t) => p.get(t)!.y + sz(t).h)));
+        }
       }
+  });
+
+  it("wraps to the screen's shape: a narrow screen gets a taller arrangement than a wide one", () => {
+    const nodes = new Map<string, { children: string[] }>([["m", { children: ["p0", "p1", "p2", "p3", "p4", "p5"] }]]);
+    for (let p = 0; p < 6; p++) {
+      const kids = Array.from({ length: p === 0 ? 24 : 3 }, (_, i) => `t${p}.${i}`);
+      nodes.set(`p${p}`, { children: kids });
+      for (const k of kids) nodes.set(k, { children: [] });
+    }
+    const tree = { roots: ["m"], nodes };
+    const sz = (k: string) => (k.startsWith("t") ? { w: 296, h: 96 } : { w: 256, h: 110 });
+    const level = (k: string) => (k === "m" ? "lanes" : k.startsWith("p") ? "items" : null);
+    const shape = (aspect: number) => {
+      const wraps = planWraps(tree, sz, { direction: "horizontal", aspect, level });
+      const r = bounds(tidyLayout(tree, sz, { grids: gridsFor(tree, sz, { direction: "horizontal", wraps, level }) }), sz)!;
+      return r.w / r.h;
+    };
+    // Unwrapped it's 1 : 4 (24 threads down one column): both wrap, each towards its screen.
+    expect(shape(2)).toBeGreaterThan(1);
+    expect(shape(0.7)).toBeLessThan(shape(2));
   });
 
   it("moves between cards with the arrows along the tree, either way it grows", () => {

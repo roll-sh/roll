@@ -621,6 +621,22 @@ body {
   animation-play-state: paused !important;
 }
 
+/* Too small to read (the canvas's `data-greek`, below 40 %): a card keeps its frame, colours and
+   size (nothing moves); its title is a quiet bar its own length and everything else in it goes.
+   Text is never enlarged to compensate: Fit stops at a zoom where cards read. */
+[data-greek] [data-card] :is(p, span, a, code, kbd, svg, img, button):not([data-title]):not(:has([data-title])) {
+  visibility: hidden;
+}
+[data-greek] [data-card] [data-title] {
+  width: fit-content;
+  max-width: 100%;
+  color: transparent;
+  background: color-mix(in oklab, var(--fg) 16%, transparent);
+  background-clip: content-box;
+  padding-block: 0.3em;
+  border-radius: 999px;
+}
+
 
 @media (prefers-reduced-motion: reduce) {
   [data-card] [data-drag][data-tone="busy"]::after {

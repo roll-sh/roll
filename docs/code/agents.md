@@ -1666,8 +1666,8 @@ The surface has three views:
   (a deep link, a palette pick) frames its machine. Linear folds empty groups the same way; T3's
   sidebar shows every project but only those with threads take room.
 
-  **At scale** (`foldQuiet`, `groupByStatus` in `lib/agents-graph.ts`; `planGrids` in
-  `lib/agents-layout.ts`; `folded-threads.tsx`, `minimap.tsx`). One busy project (25 threads, or
+  **At scale** (`foldQuiet`, `groupByStatus` in `lib/agents-graph.ts`; `planWraps` in
+  `lib/agents-layout.ts`; `canvas-face.tsx`, `folded-threads.tsx`, `minimap.tsx`). One busy project (25 threads, or
   200) must not turn the canvas into one unreadable column, either way it grows. The structure is
   an overview you drill into:
   - **The overview** shows, per project, every thread that matters now (working, waiting on you,
@@ -1685,15 +1685,33 @@ The surface has three views:
     order: rows growing right, columns growing down (Linear's board). Done and Quiet show their 12
     most recent and fold the rest into a card that expands the group in place (and folds it
     back). The views bar's breadcrumb, "All projects › site", or Escape goes back out.
-  - **Wrapping.** A project's or group's plain threads (nothing under them) wrap into a grid about
-    the canvas's shape once there are five of them growing right (at least three rows), nine
-    growing down; a thread with requests or subagents keeps its place in the tree with them. Edges
-    go into a grid's first column only (the rest would cross the cards before them), and a grid
-    reaches past its column without pushing the next depth over.
-  - **Semantic zoom.** Below 50 % a card shows its name big over its details (`FarLabel`: a
-    status dot and the title at 28 px world size), below 30 % bigger still; the card keeps its
-    size, so nothing moves as the zoom crosses a step (6 % of margin each way so a resting zoom
-    doesn't flicker).
+  - **Wrapping, planned for the screen** (`planWraps`, `gridsFor`, `routeEdges` in
+    `lib/agents-layout.ts`). Nothing is ever one tall column. Three things can wrap: machines (to
+    a column growing right, a row growing down), a machine's projects (or a drilled project's
+    status groups: "lanes", stacked growing right, side by side growing down) and a lane's
+    threads ("items", in columns growing right, rows growing down). The canvas lays out every
+    combination of how many go per column (0, 2, 3, 4, 6 lanes; 0, 3, 4, 6, 8, 12 items; 0–3
+    machines) for the room it has (its width ÷ its height above the prompt bar, so a panel beside
+    it or a phone gets a taller arrangement) and keeps the one that shows everything biggest; each
+    kind of wrap must earn 3 %. Over 400 cards it tries fewer. A thread with requests, subagents
+    or a fork takes its whole subtree into its cell. Fold cards stay out of the grid and follow it
+    in the project's flow. A parent lines up with its first child (their edge is straight), never
+    centred over a long column. Edges are orthogonal: a trunk in the gap before the children,
+    and a grid's later columns hang off a bus over the block through the gaps between columns, so
+    no line crosses a card; siblings share theirs.
+  - **The overview** (`canvas-face.tsx`). Below 45 % zoom every card turns into its face, and the
+    canvas lays the faces out again with their own sizes and gaps: a thread is a one-line pill
+    sized to its title (status dot, the project's edge, an ellipsis only past 760 px world); a
+    project a header with "38 threads · 1 needs you · 1 failed" and its status strip along the
+    bottom edge; a machine a compact header with its online dot; a fold card a pill on a small
+    pile. Sizes come from the text, measured on a canvas, so Fit plans the overview before it
+    shows and cards off screen size like the rest. The cards come back from 60 % (the gap keeps a
+    resting zoom from flickering, and lets Fit frame the overview up to 58 %). The switch
+    crossfades (200 ms) while the cards ease to their new places around the card under the
+    pointer, which stays put. Below 22 % a face's text is a quiet bar its own length.
+  - **Fit** shows the cards when they fit at 50 % or closer, else the faces up to 58 %, filling
+    about 80 % of the room above the prompt bar; never below 30 % (readable faces), framed from the
+    top. `1` there frames what matters, again everything.
   - **Getting around.** While the canvas is bigger than the screen a minimap sits over the zoom bar:
     every card as a block (requests and busy work in the accent) and the screen's frame; a press
     or a drag moves the view there. The zoom bar's accent "◉ 2" goes to the next request waiting
