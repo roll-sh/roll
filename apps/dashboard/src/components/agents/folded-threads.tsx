@@ -18,7 +18,7 @@ import { newestRuns, statusGroupLabel, type StatusGroup } from "@/lib/agents-gra
 import { useCanvasFolds } from "./canvas-folds";
 import { projectColor } from "@/lib/agents-identity";
 import { ProjectIcon } from "./identity";
-import { Card } from "./nodes";
+import { Card, THREAD_H } from "./nodes";
 import { ago } from "./shared";
 import { threadDone } from "./thread-status";
 import { Popover, PopoverPopup, PopoverTrigger } from "./ui";
@@ -54,6 +54,7 @@ export function FoldedThreads({ container }: { container: string }) {
       )}
       <Card
         width={296}
+        height={THREAD_H}
         tint={projectColor(project)}
         edge
         onClick={open}
@@ -84,10 +85,11 @@ export function FoldedThreads({ container }: { container: string }) {
 export function StatusHeader({ group, count }: { group: StatusGroup; count: number }) {
   const dot = group === "needs" || group === "running" ? "bg-accent" : group === "failed" ? "bg-danger" : group === "done" ? "bg-ok" : "bg-subtle/60";
   return (
-    <div data-drag style={{ width: "var(--section-w, 296px)" }} className="relative flex h-10 items-center gap-2 border-b border-line-2 px-1 text-[12.5px]">
+    <div data-drag style={{ width: "var(--section-w, 296px)" }} className="relative flex h-10 items-center gap-2 border-b border-line-2 px-1">
       <span aria-hidden className={`size-2 shrink-0 rounded-full ${dot} ${group === "running" ? "motion-safe:animate-pulse" : ""}`} />
-      <span data-title className="font-medium tracking-[-0.01em]">{statusGroupLabel[group]}</span>
-      <span className="font-mono text-[11px] text-subtle tabular-nums">{count}</span>
+      {/* A card title's size: it names everything under it, and greeked it stays a bar. */}
+      <span data-title className="text-[14px] font-semibold tracking-[-0.015em]">{statusGroupLabel[group]}</span>
+      <span className="font-mono text-[11.5px] text-subtle tabular-nums">{count}</span>
     </div>
   );
 }

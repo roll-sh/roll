@@ -1,6 +1,6 @@
 "use client";
 
-import { ArrowUpRight, CircleAlert, FolderGit2, FolderPlus, GitBranch, GitFork, GitPullRequest, LogIn, MoreHorizontal, Plus, RefreshCw, Settings2, SquareTerminal } from "lucide-react";
+import { ArrowUpRight, CircleAlert, CornerDownRight, FolderGit2, FolderPlus, GitBranch, GitFork, GitPullRequest, LogIn, MoreHorizontal, Plus, RefreshCw, Settings2, SquareTerminal } from "lucide-react";
 import { memo, useCallback, useMemo, useState, type ReactNode } from "react";
 import { useToolsArmed } from "./card-tools";
 import { coming, isRunning, machineState, reachable, type IdentityColor, type Machine, type Node, type Project, type ProviderInfo, type Request, type Run, type Thread } from "@/lib/agents-api";
@@ -27,6 +27,7 @@ import { useProjectActions } from "./project-actions";
 import { openMachineSettings, ProviderSetup } from "./provider-setup";
 import { canRunAgents, notReadyReason, readiness } from "@/lib/agents-setup";
 import { cn } from "./ui/cn";
+import { fitWords, unbroken } from "./fit-words";
 
 /**
  * The frame every canvas card shares: flat panel, hairline border, the whole card a drag handle.
@@ -37,6 +38,7 @@ import { cn } from "./ui/cn";
  */
 export function Card({
   width,
+  height,
   tone,
   tint,
   edge = false,
@@ -46,6 +48,8 @@ export function Card({
   label,
 }: {
   width: number;
+  /** A fixed height (a thread's card: every cell of a grid the same, rows aligned). */
+  height?: number;
   tone?: "busy" | "error" | "muted" | "done";
   tint?: IdentityColor;
   edge?: boolean;
@@ -74,7 +78,7 @@ export function Card({
           : undefined
       }
       data-tint={tint}
-      style={{ width, ...(tint ? tintStyle(tint) : null) }}
+      style={{ width, height, ...(tint ? tintStyle(tint) : null) }}
       className={`group/card relative rounded-xl border bg-panel text-[13px] shadow-card inset-shadow-highlight transition-[border-color,box-shadow,opacity] duration-150 ease-out ${border} ${tone === "muted" ? "opacity-60" : ""} ${
         onClick ? "cursor-pointer hover:shadow-card-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent/70" : "cursor-default"
       } ${onClick && !tone ? "hover:border-line-3" : ""} ${className}`}
@@ -287,7 +291,7 @@ export function MachineNode({ machine }: { machine: Machine }) {
         )}
         <MoreProjects machine={machine} onAdd={add} />
         {machine.online && projects === 0 && (
-          <button data-nodrag onClick={add} className={`${setup ? btn : primary} w-full justify-center`}>
+          <button data-nodrag onClick={add} className={`${btn} w-full justify-center`}>
             <FolderPlus className="size-3.5" /> Add a project
           </button>
         )}
@@ -513,7 +517,23 @@ export function useThreadFacts(data: AgentsData): (thread: Thread) => ThreadFact
 }
 
 /** A thread's card from its facts alone, so it renders again only when they change. */
-export const ThreadCard = memo(function ThreadCard({ thread, machine, project, lastRun, pending, terminals, orchestrated }: { thread: Thread; machine: Machine | undefined } & ThreadFacts) {
+/** A thread card's height on the canvas: fixed, so a grid's rows line up and its cells match. */
+export const THREAD_H = 152;
+/** The width a thread card's lines have (its 296 less its padding). */
+const LINE_W = 268;
+
+/** A fork or subagent shown inside the thread it came from (`absorbChildren`): a row on its card. */
+export interface InsideRow {
+  key: string;
+  /** The thread to open (a provider's subagent opens its thread). */
+  thread: string;
+  kind: "fork" | "subagent";
+  title: string;
+  status: "running" | "waiting" | "error" | "done" | "idle";
+}
+
+/** A thread's card from its facts alone, so it renders again only when they change. */
+export const ThreadCard = memo(function ThreadCard({ thread, machine, project, lastRun, pending, terminals, orchestrated, inside }: { thread: Thread; machine: Machine | undefined; inside?: readonly InsideRow[] } & ThreadFacts) {
   const { client, openThread, startNew, readOnly } = useAgents();
   const providers = machine?.info?.providers ?? NO_PROVIDERS;
   const { run: runFork, error: forkError } = useRun();
@@ -535,22 +555,37 @@ export const ThreadCard = memo(function ThreadCard({ thread, machine, project, l
   // Idle with nothing to say but the last prompt: no line when that's the title again.
   const quiet = !thread.error && !running && thread.status !== "waiting";
   const tone = thread.status === "error" ? "error" : running ? "busy" : thread.archived_at ? "muted" : done ? "done" : undefined;
+  // A fork on its own card (what it came from isn't on the canvas): it says so where the project would.
+  const forkOf = thread.lineage?.relation === "fork" ? (client.data.threads.get(thread.lineage.parent)?.value.title ?? "a settled thread") : null;
+  const line = thread.error ? null : running ? (thread.activity ?? threadStatusLabel[thread.status]) : thread.status === "waiting" ? (thread.activity ?? threadStatusLabel.waiting) : lastRun?.delivers?.length ? null : lastRun ? lastRun.prompt : null;
+  const extras = !!(inside?.length || thread.orchestrator || thread.change || thread.work || thread.worktree || terminals > 0 || origin);
   return (
-    <Card width={296} tone={tone} tint={project ? projectColor(project) : undefined} edge onClick={() => openThread(thread.id)} label={`Thread ${thread.title}`}>
-      <div className="px-3.5 pt-3 pb-3">
-        <div className="flex min-w-0 items-center gap-1.5 text-[11px] text-subtle">
+    <Card width={296} height={THREAD_H} tone={tone} tint={project ? projectColor(project) : undefined} edge onClick={() => openThread(thread.id)} label={`Thread ${thread.title}`}>
+      <div className="flex h-full flex-col px-3.5 pt-2.5 pb-2">
+        <div className="flex h-4 min-w-0 items-center gap-1.5 text-[11px] text-subtle">
           {project && <ProjectIcon project={project} className="size-3.5" />}
-          {project && <span className="min-w-0 truncate text-muted">{project.name}</span>}
-          {machine && (
-            <span className="flex min-w-0 shrink items-center gap-1" title={`On ${machine.name}`} aria-label={`On ${machine.name}`}>
-              <MachineIcon machine={machine} className="size-3" />
-              <span className="truncate">{machine.name}</span>
+          {forkOf ? (
+            <span className="flex min-w-0 items-center gap-1 text-muted" title={`Fork of ${forkOf}`}>
+              <GitFork className="size-3 shrink-0" aria-hidden />
+              <span className="truncate">Fork of {forkOf}</span>
             </span>
+          ) : (
+            <>
+              {project && <span className="min-w-0 truncate text-muted">{project.name}</span>}
+              {machine && (
+                <span className="flex min-w-0 shrink items-center gap-1" title={`On ${machine.name}`} aria-label={`On ${machine.name}`}>
+                  <MachineIcon machine={machine} className="size-3" />
+                  <span className="truncate">{machine.name}</span>
+                </span>
+              )}
+            </>
           )}
           <span className="ml-auto flex shrink-0 items-center gap-1.5">{pill ? <StatusPill pill={pill} /> : <span className="tabular-nums" title="Last activity">{ago(lastActive(thread, lastRun))}</span>}</span>
         </div>
         <div className="mt-1.5 flex items-start gap-2">
-          <p data-title className="line-clamp-2 min-w-0 flex-1 text-[13.5px] leading-snug font-medium tracking-[-0.01em]">{thread.title}</p>
+          <p data-title className="line-clamp-2 min-w-0 flex-1 text-[13.5px] leading-snug font-medium tracking-[-0.01em]">
+            {unbroken(thread.title).map((w, i) => (typeof w === "string" ? w : <span key={i} className="whitespace-nowrap">{w.nowrap}</span>))}
+          </p>
           {forkable && (
             <HoverActions>
               <Tool label="Fork (or drag onto the canvas)" launch={`t:${thread.id}`} onClick={fork}>
@@ -568,23 +603,22 @@ export const ThreadCard = memo(function ThreadCard({ thread, machine, project, l
         <p className={`mt-1 truncate text-[12px] ${running || pending.length ? "" : "text-muted"}`}>
           {thread.error ? (
             <span className="flex items-center gap-1 text-danger">
-              <CircleAlert className="size-3 shrink-0" /> <span className="truncate">{thread.error}</span>
+              <CircleAlert className="size-3 shrink-0" /> <span className="truncate">{fitWords(thread.error, LINE_W - 16)}</span>
             </span>
           ) : running ? (
-            <span className="shimmer">{thread.activity ?? threadStatusLabel[thread.status]}</span>
-          ) : thread.status === "waiting" ? (
-            (thread.activity ?? threadStatusLabel.waiting)
-          ) : lastRun?.delivers?.length ? (
+            <span className="shimmer">{fitWords(line ?? "", LINE_W)}</span>
+          ) : lastRun?.delivers?.length && thread.status !== "waiting" ? (
             <DeliveredText run={lastRun} />
-          ) : lastRun ? (
-            lastRun.prompt
+          ) : line ? (
+            fitWords(line, LINE_W)
           ) : (
             <span className="text-subtle">No runs yet</span>
           )}
         </p>
         )}
-        {(thread.orchestrator || thread.change || thread.work || thread.worktree || terminals > 0 || origin) && (
-          <div data-detail className="mt-2 flex min-w-0 items-center gap-2 text-[11px] text-subtle">
+        {extras && (
+          <div data-detail className="mt-1.5 flex min-w-0 items-center gap-2 text-[11px] text-subtle">
+            {inside?.length ? <InsideChip rows={inside} onOpen={openThread} /> : null}
             {origin && <AutomationChip origin={origin} />}
             {orchestrated && <OrchestratorChip {...orchestrated} onOpen={openThread} />}
             {thread.change && <ChangeChip change={thread.change} />}
@@ -603,8 +637,7 @@ export const ThreadCard = memo(function ThreadCard({ thread, machine, project, l
             )}
           </div>
         )}
-        <p data-detail className="mt-2 flex items-center gap-1.5 border-t border-line pt-2 text-[11px] text-subtle">
-          {thread.lineage && <GitFork className="size-3 shrink-0" aria-label={thread.lineage.relation === "fork" ? "Fork" : "Delegated"} />}
+        <p data-detail className="mt-auto flex items-center gap-1.5 border-t border-line pt-1.5 text-[11px] text-subtle">
           <span className="min-w-0 truncate">
             {providerName(providers, thread.provider)}
             {model && ` · ${model}`}
@@ -618,7 +651,7 @@ export const ThreadCard = memo(function ThreadCard({ thread, machine, project, l
           </span>
         </p>
         {forkError && (
-          <p role="alert" className="mt-1.5 text-[11.5px] text-danger">
+          <p role="alert" className="absolute inset-x-3.5 -bottom-6 truncate text-[11.5px] text-danger">
             Couldn&apos;t fork: {forkError}
           </p>
         )}
@@ -626,6 +659,60 @@ export const ThreadCard = memo(function ThreadCard({ thread, machine, project, l
     </Card>
   );
 });
+
+/** Each host card's inside rows (`absorbChildren`'s `inside`), from the records. */
+export function insideRows(data: AgentsData, inside: ReadonlyMap<string, readonly string[]>): Map<string, InsideRow[]> {
+  const out = new Map<string, InsideRow[]>();
+  if (!inside.size) return out;
+  const newest = newestRuns(data);
+  for (const [host, keys] of inside) {
+    const rows: InsideRow[] = [];
+    for (const k of keys) {
+      if (k.startsWith("t:")) {
+        const t = data.threads.get(k.slice(2))?.value;
+        if (!t) continue;
+        const status = isRunning(t.status) ? "running" : t.status === "waiting" || t.pending_requests > 0 ? "waiting" : t.status === "error" ? "error" : threadDone(t, newest.get(t.id)) ? "done" : "idle";
+        rows.push({ key: k, thread: t.id, kind: t.lineage?.relation === "fork" ? "fork" : "subagent", title: t.title, status });
+      } else if (k.startsWith("s:")) {
+        const n = [...data.nodes.values()].map((m) => m.get(k.slice(2))).find(Boolean)?.value;
+        if (!n || n.body.type !== "subagent") continue;
+        rows.push({ key: k, thread: n.thread, kind: "subagent", title: n.body.agent, status: n.status === "running" ? "running" : n.status === "failed" ? "error" : "done" });
+      }
+    }
+    if (rows.length) out.set(host, rows);
+  }
+  return out;
+}
+
+/**
+ * The forks and subagents shown inside a thread's card: the one that matters most (failing,
+ * working, waiting), with how many more; a click opens it.
+ */
+function InsideChip({ rows, onOpen }: { rows: readonly InsideRow[]; onOpen: (thread: string) => void }) {
+  const rank = { error: 0, waiting: 1, running: 2, idle: 3, done: 4 } as const;
+  const first = [...rows].sort((a, b) => rank[a.status] - rank[b.status])[0];
+  const forks = rows.filter((r) => r.kind === "fork").length;
+  const label = `${forks ? `${forks} fork${forks === 1 ? "" : "s"}` : ""}${forks && forks < rows.length ? ", " : ""}${rows.length - forks ? `${rows.length - forks} subagent${rows.length - forks === 1 ? "" : "s"}` : ""}`;
+  const dot = first.status === "error" ? "error" : first.status === "running" ? "running" : first.status === "waiting" ? "waiting" : "idle";
+  return (
+    <button
+      type="button"
+      data-nodrag
+      onClick={(e) => {
+        e.stopPropagation();
+        onOpen(first.thread);
+      }}
+      title={`${label}: ${rows.map((r) => r.title).join(", ")}`}
+      aria-label={`${label}. Open ${first.title}`}
+      className="flex min-w-0 shrink items-center gap-1 rounded-md border border-line px-1.5 py-0.5 text-muted transition-colors duration-150 hover:border-line-2 hover:text-fg"
+    >
+      {first.kind === "fork" ? <GitFork className="size-3 shrink-0" aria-hidden /> : <CornerDownRight className="size-3 shrink-0" aria-hidden />}
+      <StatusDot status={dot} />
+      <span className={`truncate ${first.status === "error" ? "text-danger" : ""}`}>{first.title}</span>
+      {rows.length > 1 && <span className="shrink-0 font-mono tabular-nums">+{rows.length - 1}</span>}
+    </button>
+  );
+}
 
 /**
  * When the thread last did something: made, its newest run asked for or ended. Not `updated_at`,
@@ -670,7 +757,7 @@ export function RequestNode({ request }: { request: Request }) {
   const { client, openThread, readOnly } = useAgents();
   const machine = client.data.threads.get(request.thread)?.machine;
   return (
-    <Card width={352} label="Waiting for you">
+    <Card width={296} label="Waiting for you">
       <div className="px-3.5 py-3" data-nodrag>
         <PendingRequest
           request={request}

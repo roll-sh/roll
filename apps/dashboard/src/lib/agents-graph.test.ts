@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { collapseUnused, deriveGraph, foldQuiet, groupByStatus, keyOf, rolling, SHOWN_THREADS } from "./agents-graph";
-import { arrange, bounds, dropIndex, fitView, gridsFor, mergeOrder, moveTo, nextCard, planWraps, ROOTS, tidyLayout, withOrder, zoomAt, type LayoutOptions, type Point, type Rect, type Size } from "./agents-layout";
+import { arrange, bounds, dropIndex, fitView, fitZoom, layoutCanvas, mergeOrder, moveTo, nextCard, NO_WRAPS, planWraps, ROOTS, withOrder, zoomAt, type Level, type Point, type Rect, type Room, type Size, type Wraps } from "./agents-layout";
 import { applyEvents, emptyData, follow } from "./agents-store";
 import { approval, ev, machine, node, project, run, terminal, thread } from "@/test/agents";
 import { EMPTY_INBOX, type Thread } from "./agents-api";
@@ -104,20 +104,11 @@ describe("agents graph", () => {
 });
 
 describe("agents layout", () => {
-  const tree = {
-    roots: ["a", "b"],
-    nodes: new Map([
-      ["a", { children: ["a1", "a2"] }],
-      ["a1", { children: [] }],
-      ["a2", { children: ["a2x"] }],
-      ["a2x", { children: [] }],
-      ["b", { children: [] }],
-    ]),
-  };
-  const size = (k: string) => (k === "a2" ? { w: 300, h: 200 } : { w: 100, h: 40 });
+  // Machines lay out lanes (projects), projects items (threads); anything under a thread stacks in its cell.
+  const level = (k: string): Level | null => (k.startsWith("m") ? "lanes" : k.startsWith("p") ? "items" : null);
 
-  it("never overlaps cards of any size, either way, whatever the order", () => {
-    // A machine with projects, threads of all sizes, satellites and a pinned card.
+  it("never overlaps; a thread's requests stay in its cell; a fold card is its project's last", () => {
+    // Two machines with projects, threads of all sizes, requests, a pinned card and a terminal.
     const nodes = new Map<string, { children: string[] }>();
     const sizes = new Map<string, Size>();
     const add = (k: string, s: Size, kids: string[] = []) => {
@@ -126,83 +117,86 @@ describe("agents layout", () => {
     };
     add("m1", { w: 272, h: 120 }, ["p1", "p2", "x1"]);
     add("m2", { w: 272, h: 180 }, ["p3"]);
-    // p1 is busy: enough plain threads that they wrap into a grid (`gridsFor`), its fold card after it.
+    add("m3", { w: 272, h: 90 });
+    // p1 is busy: enough threads that they wrap into a grid, its fold card after them.
     const many = Array.from({ length: 9 }, (_, i) => `q${i}`);
-    add("p1", { w: 256, h: 64 }, ["t1", "t2", "t3", ...many, "f1"]);
-    for (const [i, q] of many.entries()) add(q, { w: 296, h: 96 + (i % 3) * 22 });
-    add("f1", { w: 296, h: 96 });
-    add("p2", { w: 256, h: 110 }, []);
-    add("p3", { w: 256, h: 64 }, ["t4"]);
+    add("p1", { w: 272, h: 64 }, ["t1", "t2", "t3", ...many, "f1"]);
+    for (const q of many) add(q, { w: 296, h: 152 });
+    add("f1", { w: 296, h: 152 });
+    add("p2", { w: 272, h: 110 }, []);
+    add("p3", { w: 272, h: 64 }, ["t4"]);
     add("x1", { w: 620, h: 380 });
-    add("t1", { w: 296, h: 96 }, ["pc1", "r1", "s1"]);
-    add("t2", { w: 296, h: 140 }, ["t2f"]);
-    add("t3", { w: 296, h: 96 });
-    add("t4", { w: 296, h: 120 }, ["r2"]);
-    add("t2f", { w: 296, h: 96 });
+    add("t1", { w: 296, h: 152 }, ["pc1", "r1"]);
+    add("t2", { w: 296, h: 152 });
+    add("t3", { w: 296, h: 152 });
+    add("t4", { w: 296, h: 152 }, ["r2"]);
     add("pc1", { w: 520, h: 600 });
-    add("r1", { w: 352, h: 150 });
-    add("r2", { w: 352, h: 210 });
-    add("s1", { w: 240, h: 72 });
+    add("r1", { w: 296, h: 150 });
+    add("r2", { w: 296, h: 210 });
     const sz = (k: string) => sizes.get(k)!;
-    const orders = [{}, withOrder(withOrder({}, ROOTS, ["m2", "m1"]), "t1", ["s1", "r1", "pc1"])];
-    const layouts: LayoutOptions[] = [{ direction: "horizontal" }, { direction: "vertical" }, { direction: "vertical", spreads: (k) => k.startsWith("m") }];
-    for (const plain of layouts)
-      for (const wrap of [false, true])
-      for (const order of orders) {
-        const tree = arrange({ roots: ["m1", "m2"], nodes }, order);
-        // Wrapped: p1's threads 4 to a column (row), m1's projects 2 to a stack (row).
-        const tail = (k: string) => k === "f1";
-        const level = (k: string) => (k.startsWith("m") ? "lanes" : k.startsWith("p") ? "items" : null);
-        const grids = wrap ? gridsFor(tree, sz, { direction: plain.direction!, wraps: { lanes: 2, items: 4 }, level, tail, layout: plain }) : undefined;
-        if (wrap) expect(grids!.get("p1")!.members.length).toBe(12);
-        const opts = { ...plain, grids, tail };
-        const direction = `${opts.spreads ? "board" : opts.direction}${wrap ? " wrapped" : ""}`;
-        const p = tidyLayout(tree, sz, opts);
-        expect(p.size).toBe(nodes.size);
-        const keys = [...p.keys()];
-        for (const a of keys)
-          for (const b of keys) {
-            if (a >= b) continue;
-            const [pa, pb, sa, sb] = [p.get(a)!, p.get(b)!, sz(a), sz(b)];
-            const apart = pa.x + sa.w <= pb.x || pb.x + sb.w <= pa.x || pa.y + sa.h <= pb.y || pb.y + sb.h <= pa.y;
-            expect(apart, `${direction}: ${a} and ${b} overlap`).toBe(true);
+    const orders = [{}, withOrder(withOrder({}, ROOTS, ["m2", "m1"]), "p1", ["q3", "t1"])];
+    const wrapsAll: Wraps[] = [NO_WRAPS, { lines: 4, lanes: 0, roots: 0 }, { lines: 2, lanes: 1, roots: 1 }];
+    for (const direction of ["horizontal", "vertical"] as const)
+      for (const wraps of wrapsAll)
+        for (const order of orders) {
+          const tree = arrange({ roots: ["m1", "m2", "m3"], nodes }, order);
+          const at = `${direction} ${JSON.stringify(wraps)}`;
+          const { positions: p } = layoutCanvas(tree, sz, { direction, level }, wraps);
+          expect(p.size, at).toBe(nodes.size);
+          const keys = [...p.keys()];
+          for (const a of keys)
+            for (const b of keys) {
+              if (a >= b) continue;
+              const [pa, pb, sa, sb] = [p.get(a)!, p.get(b)!, sz(a), sz(b)];
+              const apart = pa.x + sa.w <= pb.x || pb.x + sb.w <= pa.x || pa.y + sa.h <= pb.y || pb.y + sb.h <= pa.y;
+              expect(apart, `${at}: ${a} and ${b} overlap`).toBe(true);
+            }
+          // A thread's request and pinned card sit under it, in its cell (its column, before the next row).
+          for (const [t, kid] of [["t1", "r1"], ["t1", "pc1"], ["t4", "r2"]]) {
+            expect(p.get(kid)!.x, `${at}: ${kid} in ${t}'s cell`).toBe(p.get(t)!.x);
+            expect(p.get(kid)!.y, `${at}: ${kid} under ${t}`).toBeGreaterThan(p.get(t)!.y + sz(t).h);
           }
-        // Children are past their parent in the direction the tree grows, or (kept compact in a
-        // grid's cell) under it, indented.
-        for (const [k, n] of nodes)
-          for (const c of n.children) {
-            const under = p.get(c)!.y > p.get(k)!.y + sz(k).h && p.get(c)!.x > p.get(k)!.x;
-            if (!direction.startsWith("horizontal")) expect(p.get(c)!.y).toBeGreaterThan(p.get(k)!.y + sz(k).h);
-            else expect(p.get(c)!.x > p.get(k)!.x + sz(k).w || under, `${direction}: ${c} beside or under ${k}`).toBe(true);
-          }
-        // The fold card follows its project's threads, in their first column, below the last of them
-        // (where they're listed or wrapped; a plain top-down tree has it last in their row).
-        if (wrap || plain.direction === "horizontal" || plain.spreads) {
-          const threads = nodes.get("p1")!.children.filter((c) => c !== "f1");
-          expect(p.get("f1")!.x, direction).toBe(Math.min(...threads.map((t) => p.get(t)!.x)));
-          expect(p.get("f1")!.y, direction).toBeGreaterThanOrEqual(Math.max(...threads.map((t) => p.get(t)!.y + sz(t).h)));
+          // Projects are past their machine the way the tree grows.
+          for (const [m, kid] of [["m1", "p1"], ["m2", "p3"]])
+            if (direction === "horizontal") expect(p.get(kid)!.x, at).toBeGreaterThan(p.get(m)!.x + sz(m).w);
+            else expect(p.get(kid)!.y, at).toBeGreaterThan(p.get(m)!.y + sz(m).h);
+          // The fold card is the last cell, in reading order.
+          const members = tree.nodes.get("p1")!.children.filter((c) => c !== "f1");
+          const last = Math.max(...members.map((t) => p.get(t)!.y));
+          const f = p.get("f1")!;
+          expect(f.y, at).toBeGreaterThanOrEqual(last);
+          if (f.y === last) expect(f.x, at).toBeGreaterThan(Math.max(...members.filter((t) => p.get(t)!.y === last).map((t) => p.get(t)!.x)));
         }
-      }
   });
 
-  it("wraps to the screen's shape: a narrow screen gets a taller arrangement than a wide one", () => {
-    const nodes = new Map<string, { children: string[] }>([["m", { children: ["p0", "p1", "p2", "p3", "p4", "p5"] }]]);
-    for (let p = 0; p < 6; p++) {
-      const kids = Array.from({ length: p === 0 ? 24 : 3 }, (_, i) => `t${p}.${i}`);
-      nodes.set(`p${p}`, { children: kids });
-      for (const k of kids) nodes.set(k, { children: [] });
-    }
-    const tree = { roots: ["m"], nodes };
-    const sz = (k: string) => (k.startsWith("t") ? { w: 296, h: 96 } : { w: 256, h: 110 });
-    const level = (k: string) => (k === "m" ? "lanes" : k.startsWith("p") ? "items" : null);
-    const shape = (aspect: number) => {
-      const wraps = planWraps(tree, sz, { direction: "horizontal", aspect, level });
-      const r = bounds(tidyLayout(tree, sz, { grids: gridsFor(tree, sz, { direction: "horizontal", wraps, level }) }), sz)!;
-      return r.w / r.h;
+  it("plans for the screen at the zoom Fit uses: everything if it reads, else whole columns", () => {
+    const tree = (threads: number[]) => {
+      const nodes = new Map<string, { children: string[] }>([["m", { children: threads.map((_, p) => `p${p}`) }]]);
+      threads.forEach((n, p) => {
+        const kids = Array.from({ length: n }, (_, i) => `t${p}.${i}`);
+        nodes.set(`p${p}`, { children: kids });
+        for (const k of kids) nodes.set(k, { children: [] });
+      });
+      return { roots: ["m"], nodes };
     };
-    // Unwrapped it's 1 : 4 (24 threads down one column): both wrap, each towards its screen.
-    expect(shape(2)).toBeGreaterThan(1);
-    expect(shape(0.7)).toBeLessThan(shape(2));
+    const sz = (k: string) => (k.startsWith("t") ? { w: 296, h: 152 } : { w: 272, h: 120 });
+    const room = (w: number, h: number): Room => ({ w, h, pad: Math.max(48, Math.min(w, h) * 0.1), floor: 0.75, reserve: 192 });
+    for (const direction of ["horizontal", "vertical"] as const) {
+      const shape = { direction, level };
+      // A wide screen, a project with 7 threads among smaller ones: wrapped, it reads whole (a column it was 1 : 3).
+      const small = tree([2, 2, 2, 7]);
+      const wide = room(1980, 860);
+      const box = bounds(layoutCanvas(small, sz, shape, planWraps(small, sz, shape, wide)).positions, sz)!;
+      expect(fitZoom(box, wide), direction).toBeGreaterThanOrEqual(wide.floor);
+      // Far too much for any screen: as wide as the screen takes at the floor, clear of the minimap, never cut off at the right.
+      const big = tree([90, 80, 70]);
+      for (const r of [wide, room(1440, 780), room(1800, 1900)]) {
+        const b = bounds(layoutCanvas(big, sz, shape, planWraps(big, sz, shape, r)).positions, sz)!;
+        expect(b.w * r.floor, `${direction} ${r.w}`).toBeLessThanOrEqual(r.w - r.pad * 2 - r.reserve!);
+        // …and it uses that width: another column wouldn't fit.
+        expect((b.w + 324) * r.floor, `${direction} ${r.w}`).toBeGreaterThan(r.w - r.pad * 2 - r.reserve! - (direction === "vertical" ? 3 * 324 * r.floor : 0));
+      }
+    }
   });
 
   it("moves between cards with the arrows along the tree, either way it grows", () => {
@@ -219,19 +213,20 @@ describe("agents layout", () => {
         ["r1", { children: [] }],
       ]),
     };
-    const sz = (k: string) => (k.startsWith("r") ? { w: 352, h: 150 } : k.startsWith("t") ? { w: 296, h: 96 } : { w: 256, h: 64 });
+    const sz = (k: string) => (k.startsWith("r") ? { w: 296, h: 150 } : k.startsWith("t") ? { w: 296, h: 152 } : { w: 272, h: 64 });
     const rectsOf = (p: Map<string, Point>) => new Map<string, Rect>([...p].map(([k, q]) => [k, { ...q, ...sz(k) }]));
-    // Left to right: ← parent, → child, ↑ / ↓ along the column (across parents).
-    const h = rectsOf(tidyLayout(t, sz));
+    // Left to right: ← parent, → its threads, ↑ / ↓ down a project's column (a thread, its request, the next thread).
+    const h = rectsOf(layoutCanvas(t, sz, { direction: "horizontal", level }).positions);
     expect(nextCard(h, "t1", "left")).toBe("p1");
-    expect(nextCard(h, "t1", "right")).toBe("r1");
-    expect(nextCard(h, "t1", "down")).toBe("t2");
+    expect(nextCard(h, "p1", "right")).toBe("t1");
+    expect(nextCard(h, "t1", "down")).toBe("r1");
+    expect(nextCard(h, "r1", "down")).toBe("t2");
     expect(nextCard(h, "t2", "down")).toBe("t3");
     expect(nextCard(h, "t3", "up")).toBe("t2");
     expect(nextCard(h, "p1", "left")).toBe("m");
     expect(nextCard(h, "m", "left")).toBeNull();
-    // The board: ↑ / ↓ walk a project's column (a thread, its request, the next thread), ← / → go to the next column.
-    const v = rectsOf(tidyLayout(t, sz, { direction: "vertical", spreads: (k) => k === "m" }));
+    // The board: ↑ / ↓ walk a project's column, ← / → go to the next column.
+    const v = rectsOf(layoutCanvas(t, sz, { direction: "vertical", level }).positions);
     expect(nextCard(v, "m", "down")).toBe("p1");
     expect(nextCard(v, "p1", "down")).toBe("t1");
     expect(nextCard(v, "t1", "down")).toBe("r1");
@@ -248,12 +243,21 @@ describe("agents layout", () => {
     expect(mergeOrder(["n", "a", "b", "c"], ["c", "b", "a"])).toEqual(["n", "c", "b", "a"]);
     expect(mergeOrder(["a", "b"], ["gone", "b", "a"])).toEqual(["b", "a"]);
     expect(mergeOrder(["a", "b"], undefined)).toEqual(["a", "b"]);
-    const o = withOrder(withOrder({}, ROOTS, ["b", "a"]), "a", ["a2", "a1"]);
-    const t = arrange(tree, o);
-    expect(t.roots).toEqual(["b", "a"]);
-    expect(t.nodes.get("a")!.children).toEqual(["a2", "a1"]);
-    const p = tidyLayout(t, size, { depthGap: 50, siblingGap: 10, rootGap: 30 });
-    expect(p.get("b")!.y).toBeLessThan(p.get("a")!.y);
+    const tree = {
+      roots: ["ma", "mb"],
+      nodes: new Map([
+        ["ma", { children: ["pa"] }],
+        ["pa", { children: ["a1", "a2"] }],
+        ["a1", { children: [] }],
+        ["a2", { children: [] }],
+        ["mb", { children: ["pb"] }],
+        ["pb", { children: [] }],
+      ]),
+    };
+    const t = arrange(tree, withOrder(withOrder({}, ROOTS, ["mb", "ma"]), "pa", ["a2", "a1"]));
+    expect(t.roots).toEqual(["mb", "ma"]);
+    const p = layoutCanvas(t, () => ({ w: 100, h: 40 }), { direction: "horizontal", level: (k) => (k.startsWith("m") ? "lanes" : k.startsWith("p") ? "items" : null) }).positions;
+    expect(p.get("mb")!.y).toBeLessThan(p.get("ma")!.y);
     expect(p.get("a2")!.y).toBeLessThan(p.get("a1")!.y);
   });
 
@@ -271,6 +275,8 @@ describe("agents layout", () => {
     const v = fitView(r, 1100, 700, 50);
     expect(v.k).toBe(1);
     expect(v).toEqual({ k: 1, x: 50, y: 50 });
+    // Never below the floor: too big for it, framed from the top left.
+    expect(fitView({ x: 0, y: 0, w: 4000, h: 3000 }, 1100, 700, 50, 1, 0.75)).toEqual({ k: 0.75, x: 50, y: 50 });
     const z = zoomAt(v, 2, 550, 350);
     // The world point under the cursor stays put.
     expect((550 - z.x) / z.k).toBeCloseTo((550 - v.x) / v.k);

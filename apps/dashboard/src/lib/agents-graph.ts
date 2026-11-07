@@ -253,6 +253,50 @@ export function sameGraph(prev: Graph | null, next: Graph): Graph {
   return { ...next, nodes };
 }
 
+/**
+ * Forks, delegated subagents and a provider's own subagents shown inside the thread they came
+ * from (a row on its card), not as cards of their own: as cards beside or under it they broke a
+ * project's grid and read as more of its threads. What hung off them (a request waiting on a
+ * subagent, its terminal) goes on the host's card instead, so it still waits in plain sight.
+ */
+export interface Absorbed {
+  graph: Graph;
+  /** Per host thread's key, the children shown inside its card (oldest first). */
+  inside: ReadonlyMap<string, readonly string[]>;
+  /** Per absorbed key, the card it shows in. */
+  host: ReadonlyMap<string, string>;
+}
+
+const NOTHING_INSIDE: ReadonlyMap<string, readonly string[]> = new Map();
+
+export function absorbChildren(graph: Graph): Absorbed {
+  const into = (n: GraphNode) => (n.kind === "subagent" || (n.kind === "thread" && graph.nodes.get(n.parent ?? "")?.kind === "thread") || (n.kind === "thread" && graph.nodes.get(n.parent ?? "")?.kind === "subagent"));
+  const host = new Map<string, string>();
+  const hostOf = (n: GraphNode): string => {
+    const known = host.get(n.key);
+    if (known) return known;
+    let p = graph.nodes.get(n.parent ?? "");
+    for (let i = 0; p && into(p) && i < 64; i++) p = graph.nodes.get(p.parent ?? "");
+    return p?.key ?? n.key;
+  };
+  for (const n of graph.nodes.values()) if (into(n)) host.set(n.key, hostOf(n));
+  if (!host.size) return { graph, inside: NOTHING_INSIDE, host };
+  const inside = new Map<string, string[]>();
+  for (const [k, h] of host) inside.set(h, [...(inside.get(h) ?? []), k]);
+  const nodes = new Map<string, GraphNode>();
+  for (const n of graph.nodes.values()) {
+    if (host.has(n.key)) continue;
+    const parent = n.parent && host.has(n.parent) ? host.get(n.parent)! : n.parent;
+    const mine = inside.get(n.key);
+    const busy = n.busy || !!mine?.some((k) => graph.nodes.get(k)?.busy);
+    nodes.set(n.key, parent === n.parent && busy === n.busy ? { ...n, children: [] } : { ...n, parent, busy, relation: parent === n.parent ? n.relation : null, children: [] });
+  }
+  for (const n of nodes.values()) if (n.parent) nodes.get(n.parent)?.children.push(n.key);
+  const edges: GraphEdge[] = [];
+  for (const n of nodes.values()) if (n.parent && nodes.has(n.parent)) edges.push({ from: n.parent, to: n.key, busy: n.busy, dashed: false, tint: n.tint });
+  return { graph: { roots: graph.roots.filter((r) => nodes.has(r)), nodes, edges }, inside, host };
+}
+
 /** Settled, or snoozed (the daemon wakes it): off the canvas, on the sidebar's shelves. */
 export function shelved(t: Thread): boolean {
   return t.inbox.settle?.state === "settled" || t.inbox.snooze !== null;

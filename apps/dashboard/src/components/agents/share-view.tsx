@@ -15,7 +15,7 @@ import { ChevronLeft, ChevronRight, Folder, MessageSquare, Network, Pause, Play,
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AgentsClient, type AgentsTransport } from "@/lib/agents-client";
-import { deriveGraph, foldQuiet, newestRuns, SHOWN_THREADS, type GraphNode } from "@/lib/agents-graph";
+import { absorbChildren, deriveGraph, foldQuiet, newestRuns, SHOWN_THREADS, type GraphNode } from "@/lib/agents-graph";
 import { isBusy, type Share } from "@/lib/agents-api";
 import { CanvasFoldsProvider, type CanvasFolds } from "./canvas-folds";
 import { FoldedThreads } from "./folded-threads";
@@ -23,7 +23,7 @@ import type { Size } from "@/lib/agents-layout";
 import { frameAt, realAt, replayAt, shareStats, step, timeline } from "@/lib/agents-replay";
 import { useMarkState } from "../mark-state";
 import { AgentsCanvas, type CanvasHandle } from "./agents-canvas";
-import { Card, RequestNode, SubagentNode, ThreadCard, useThreadFacts } from "./nodes";
+import { Card, insideRows, RequestNode, SubagentNode, THREAD_H, ThreadCard, useThreadFacts } from "./nodes";
 import { Conversation, IconButton } from "./session";
 import { Select } from "./ui";
 import { AgentsContext, useMarkDriver, type AgentsCtx } from "./use-agents";
@@ -133,7 +133,9 @@ export function ShareView({ share }: { share: Share }) {
       expanded: expandedFolds,
     });
   }, [data, share.thread, open, expandedFolds]);
-  const graph = folds.graph;
+  const absorbed = useMemo(() => absorbChildren(folds.graph), [folds.graph]);
+  const graph = absorbed.graph;
+  const inside = useMemo(() => insideRows(data, absorbed.inside), [data, absorbed.inside]);
   const foldsCtx: CanvasFolds = useMemo(
     () => ({
       folded: folds.folded,
@@ -159,7 +161,7 @@ export function ShareView({ share }: { share: Share }) {
       case "thread": {
         const t = data.threads.get(n.id)!.value;
         const m = data.machines.get(n.machine)?.value;
-        return <ThreadCard thread={t} machine={m} {...facts(t)} />;
+        return <ThreadCard thread={t} machine={m} {...facts(t)} inside={inside.get(n.key)} />;
       }
       case "subagent": {
         const node = [...data.nodes.values()].map((x) => x.get(n.id)).find(Boolean)?.value;
@@ -183,13 +185,13 @@ export function ShareView({ share }: { share: Share }) {
         case "project":
           return { w: 260, h: 72 };
         case "thread":
-          return { w: 296, h: 96 };
+          return { w: 296, h: THREAD_H };
         case "subagent":
           return { w: 248, h: 84 };
         case "request":
-          return { w: 340, h: 160 };
+          return { w: 296, h: 170 };
         case "fold":
-          return { w: 296, h: 96 };
+          return { w: 296, h: THREAD_H };
         case "terminal":
         case "pin":
         case "group":

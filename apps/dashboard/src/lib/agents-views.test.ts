@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { MAX_CANVAS } from "./agents-api";
 import { deriveGraph, type Graph } from "./agents-graph";
-import { arrange, tidyLayout, type Size } from "./agents-layout";
+import { arrange, layoutCanvas, type Size } from "./agents-layout";
 import { applyEvents, emptyData, follow } from "./agents-store";
 import { addView, ALL, applyDisplay, applyView, countView, DEFAULT_VIEWS, deleteView, encodeDoc, focusOn, parseDisplay, defaultDisplay, isDefaultDisplay, MAX_KEPT, MAX_PINS, MAX_VIEWS, moveView, parseDoc, pin, PIN_MIN, projectOf, renameView, resizePin, setViewFilter, setViewOrder, unpin, viewById, viewsOf, type CanvasDoc } from "./agents-views";
 import { approval, ev, machine, project, run, T0, terminal, thread } from "@/test/agents";
@@ -183,7 +183,7 @@ describe("what a view shows", () => {
       return p ? { w: p.w, h: p.h } : k.startsWith("t:") ? { w: 296, h: 96 } : { w: 260, h: 80 };
     };
     for (const graph of [v, applyView(g(), sample(), { filter: {}, pins }, NOW)]) {
-      const pos = tidyLayout(arrange(graph, {}), size);
+      const pos = layoutCanvas(arrange(graph, {}), size, { direction: "horizontal", level: (k) => (k.startsWith("m:") ? "lanes" : k.startsWith("p:") ? "items" : null) }).positions;
       const rects = [...pos].map(([k, p]) => ({ k, ...p, ...size(k) }));
       expect(rects.length).toBe(graph.nodes.size);
       for (const a of rects)

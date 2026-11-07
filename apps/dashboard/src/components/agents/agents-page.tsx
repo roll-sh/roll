@@ -8,7 +8,7 @@ import { memo, useCallback, useDeferredValue, useEffect, useLayoutEffect, useMem
 import { isBusy, reachable, type Thread } from "@/lib/agents-api";
 import { POP_IN, POP_OUT } from "@/lib/agents-motion";
 import { setActiveClient, type AgentsClient } from "@/lib/agents-client";
-import { collapseUnused, deriveGraph, foldQuiet, groupByStatus, newestRuns, rolling, sameGraph, SHOWN_IN_GROUP, SHOWN_THREADS, type Graph, type GraphNode } from "@/lib/agents-graph";
+import { absorbChildren, collapseUnused, deriveGraph, foldQuiet, groupByStatus, newestRuns, rolling, sameGraph, SHOWN_IN_GROUP, SHOWN_THREADS, type Graph, type GraphNode } from "@/lib/agents-graph";
 import { emptyData, runsOf, type AgentsData } from "@/lib/agents-store";
 import type { Direction, Size } from "@/lib/agents-layout";
 import { closePalette, noteThreadOpen, openPalette, togglePalette } from "@/lib/agents-palette";
@@ -34,7 +34,7 @@ import { Launcher } from "./new-agent";
 import { useKept } from "./ui/dialog";
 import { AgentsLayer } from "./ui/layer";
 import { PinnedConversation, PinnedDiff, PinnedTerminal } from "./pinned";
-import { MachineNode, ProjectNode, RequestNode, SubagentNode, ThreadCard, useThreadFacts, type ThreadFacts } from "./nodes";
+import { insideRows, MachineNode, ProjectNode, RequestNode, SubagentNode, THREAD_H, ThreadCard, useThreadFacts, type InsideRow, type ThreadFacts } from "./nodes";
 import { CanvasProjectsProvider, type CanvasProjects } from "./machine-projects";
 import { CanvasFoldsProvider, type CanvasFolds } from "./canvas-folds";
 import { FoldedThreads, StatusHeader } from "./folded-threads";
@@ -881,6 +881,8 @@ interface CardInputs {
   toggle: (kind: PinRec["kind"], id: string) => void;
   resize: CanvasViews["resize"];
   folded: CanvasFolds["folded"];
+  /** Forks and subagents on their thread's card (`absorbChildren`). */
+  inside: ReadonlyMap<string, InsideRow[]>;
 }
 
 /** The newest `CardInputs`, and who to tell when they change. */
@@ -912,7 +914,7 @@ function cardDeps(i: CardInputs, n: GraphNode): readonly unknown[] {
     case "thread": {
       const t = data.threads.get(n.id)?.value;
       const f = t && i.facts(t);
-      return [t, machine, f?.project, f?.lastRun, f?.pending, f?.terminals, f?.orchestrated, i.view, i.toggle];
+      return [t, machine, f?.project, f?.lastRun, f?.pending, f?.terminals, f?.orchestrated, i.view, i.toggle, i.inside.get(n.key)];
     }
     case "subagent":
       return [data.nodes, data.threads, data.projects];
@@ -939,7 +941,7 @@ const CanvasCard = memo(function CanvasCard({ node: n, store }: { node: GraphNod
     return next;
   };
   useSyncExternalStore(store.subscribe, snapshot, snapshot);
-  const { data, facts, view, toggle, resize, folded } = store.current;
+  const { data, facts, view, toggle, resize, folded, inside } = store.current;
   const machine = data.machines.get(n.machine)?.value;
   switch (n.kind) {
     case "machine": {
@@ -962,7 +964,7 @@ const CanvasCard = memo(function CanvasCard({ node: n, store }: { node: GraphNod
             { kind: "diff", id: n.id, label: "the diff" },
           ]}
         >
-          <ThreadCard thread={t} machine={machine} {...facts(t)} />
+          <ThreadCard thread={t} machine={machine} {...facts(t)} inside={inside.get(n.key)} />
         </PinTools>
       );
     }
@@ -1171,7 +1173,10 @@ function CanvasViewBody({
   }, [folded, display.projects, display.keep, filter.projects, focused]);
   // Kept while its shape is (`sameGraph`): the canvas renders again only when that changes.
   const shaped = useRef<Graph | null>(null);
-  const graph = useMemo(() => (shaped.current = sameGraph(shaped.current, collapsed.graph)), [collapsed.graph]);
+  // Forks and subagents show on their thread's card, not as cards of their own.
+  const absorbed = useMemo(() => absorbChildren(collapsed.graph), [collapsed.graph]);
+  const graph = useMemo(() => (shaped.current = sameGraph(shaped.current, absorbed.graph)), [absorbed.graph]);
+  const inside = useMemo(() => insideRows(data, absorbed.inside), [data, absorbed.inside]);
   const { setDisplay } = views;
   const projects: CanvasProjects = useMemo(
     () => ({
@@ -1270,7 +1275,7 @@ function CanvasViewBody({
   // record renders its own card, and the canvas renders again only when the graph's shape changed:
   // rendering every card's slot on each batch was ~1,700 components (tasks of 20–40 ms at 1000 threads).
   const { resize } = views;
-  const inputs = useMemo<CardInputs>(() => ({ data, facts, view, toggle, resize, folded: folds.folded }), [data, facts, view, toggle, resize, folds.folded]);
+  const inputs = useMemo<CardInputs>(() => ({ data, facts, view, toggle, resize, folded: folds.folded, inside }), [data, facts, view, toggle, resize, folds.folded, inside]);
   const [cardStore] = useState(() => new CardStore(inputs));
   // Set while rendering, so cards rendering in this pass read it; the others hear of it below.
   cardStore.current = inputs;
@@ -1319,6 +1324,7 @@ function CanvasViewBody({
             matters={matters}
             onLaunch={onLaunch}
             keepClear={keepClear}
+            host={absorbed.host}
             overlay={empty && <EmptyView name={view.id === ALL ? null : view.name} waitingOnly={filter.status?.length === 1 && filter.status[0] === "waiting"} onAll={() => (view.id === ALL ? views.setFilter({}) : views.select(ALL))} />}
           />
           </CanvasFoldsProvider>
@@ -1388,17 +1394,17 @@ function defaultSize(n: GraphNode): Size {
     case "project":
       return { w: 272, h: 64 };
     case "thread":
-      return { w: 296, h: 96 };
+      return { w: 296, h: THREAD_H };
     case "subagent":
       return { w: 240, h: 72 };
     case "request":
-      return { w: 352, h: 150 };
+      return { w: 296, h: 170 };
     case "terminal":
       return { w: 620, h: 380 };
     case "pin":
       return { w: 520, h: 600 };
     case "fold":
-      return { w: 296, h: 96 };
+      return { w: 296, h: THREAD_H };
     case "group":
       return { w: 296, h: 40 };
   }
