@@ -3544,8 +3544,7 @@ fn store_inserted(
     let t = &rules.table;
     let Prepared { row, dkey } = p;
     let tid = super::sizing::inserted_with(t, &rules.indexes, &dkey, &row, Some(&vals.vals), ctx)?;
-    super::pgstat::count_insert(ctx, t.oid, 1);
-    super::pgstat::io_insert(ctx, t, 1, "normal");
+    super::pgstat::count_stored(ctx, t);
     let xid = ctx.txn.borrow_mut().cur_xid();
     // (A row of a table keyed by row ids has a key never used before.)
     let fresh = t.has_rowid();
@@ -3716,6 +3715,9 @@ pub struct InsertNode {
     plain: bool,
     /// Its rows not counted in pg_stat yet (`flush_plain_counts`).
     plain_counts: std::cell::Cell<i64>,
+    /// A multi-insert COPY on the general path: its rows not counted yet, per table
+    /// (`pgstat::count_stored`, `flush_plain_counts`).
+    held_counts: std::cell::RefCell<Vec<(u32, i64)>>,
 }
 
 impl InsertNode {
@@ -3819,6 +3821,7 @@ impl InsertNode {
             retry: None,
             plain,
             plain_counts: Default::default(),
+            held_counts: Default::default(),
         })
     }
 
@@ -4004,7 +4007,20 @@ impl InsertNode {
             f.len() - 1
         };
         let mut at_flush = false;
+        let hold = c.multi && !self.plain;
+        if hold {
+            super::pgstat::hold_inserts(ctx);
+        }
         let r = if self.plain { self.insert_plain(src, ctx) } else { self.insert(src, ctx) };
+        if hold {
+            let mut h = self.held_counts.borrow_mut();
+            for (rel, n) in super::pgstat::take_held(ctx) {
+                match h.iter_mut().find(|e| e.0 == rel) {
+                    Some(e) => e.1 += n,
+                    None => h.push((rel, n)),
+                }
+            }
+        }
         let r = r.map_err(|e| {
             // (And an index entry too big, `rowsize`: its index insertion is the flush's too.)
             if c.multi
@@ -4064,16 +4080,7 @@ impl InsertNode {
         let t = &rules.table;
         // (A COPY row's defaults and constraints fail it before it is buffered, as
         // ExecConstraints does in CopyFrom: the buffer's rows before it never go in.)
-        let formed = new_row(rules, &self.plan.target, src, ctx).and_then(|row| check_row_rls(rules, &[], &row, ctx).map(|()| row));
-        let row = match formed {
-            Ok(row) => row,
-            Err(e) => {
-                if self.plan.copy.is_some() {
-                    self.plain_counts.set(0);
-                }
-                return Err(e);
-            }
-        };
+        let row = new_row(rules, &self.plan.target, src, ctx).and_then(|row| check_row_rls(rules, &[], &row, ctx).map(|()| row))?;
         let rowid = if t.has_rowid() {
             Some(ctx.sess.db.nextval_by_one(t.oid, || crate::session::ddl::rowid_sequence(t))?)
         } else {
@@ -4111,6 +4118,20 @@ impl InsertNode {
         if n > 0 {
             super::pgstat::count_insert(ctx, self.plan.rules.table.oid, n);
             super::pgstat::io_insert(ctx, &self.plan.rules.table, n, "normal");
+        }
+        super::pgstat::count_held(ctx, self.held_counts.take());
+    }
+
+    /// The counts of rows not counted yet as an error leaves: an INSERT … SELECT's rows went
+    /// in one by one (counted), a multi-insert COPY's buffer is lost before its flush
+    /// (CopyMultiInsertBufferFlush never runs: dropped). A unique violation the flush finds
+    /// (`copy_err`) is raised after the flush's counts.
+    fn counts_on_error(&self, ctx: &ExecCtx) {
+        if self.plan.copy.as_ref().is_some_and(|c| c.multi) {
+            self.plain_counts.set(0);
+            self.held_counts.take();
+        } else {
+            self.flush_plain_counts(ctx);
         }
     }
 
@@ -4349,14 +4370,14 @@ impl Node for InsertNode {
             self.queue_mark = Some(ctx.after_queue.borrow().len());
         }
         loop {
-            // (A plain COPY's pending counts go in before anything leaves: its next batch,
-            // an error, the end.)
+            // (Pending counts go in before anything leaves: the next batch, the end; an
+            // error drops a multi-insert COPY's, `counts_on_error`.)
             if let Err(e) = ctx.check() {
-                self.flush_plain_counts(ctx);
+                self.counts_on_error(ctx);
                 return Err(e);
             }
             let next = match &self.plan.copy {
-                Some(c) => match next_copied(c, ctx).inspect_err(|_| self.flush_plain_counts(ctx))? {
+                Some(c) => match next_copied(c, ctx).inspect_err(|_| self.counts_on_error(ctx))? {
                     Some((row, line)) => {
                         self.copy_line = line;
                         Some(row)
@@ -4437,7 +4458,7 @@ impl Node for InsertNode {
                 return Ok(None);
             };
             let inserted = match self.plan.copy.clone() {
-                Some(c) => self.insert_copied(&c, src, ctx).inspect_err(|_| self.flush_plain_counts(ctx))?,
+                Some(c) => self.insert_copied(&c, src, ctx).inspect_err(|_| self.counts_on_error(ctx))?,
                 None => {
                     // (Its rows are stored as they go, final: the sink takes them once there
                     // are enough to be worth its room.)

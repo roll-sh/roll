@@ -1340,10 +1340,13 @@ impl CopyReader<'_> {
                 ctx.notice(n);
             }
             if let Err(e) = parsed {
-                // (Rows read earlier in this batch are still to go in first; buffered, a row
-                // of them NOT NULL refuses still fails first: ExecConstraints checks each row
-                // as it is read, before the next.)
-                if self.st.rows.is_empty() || copy.multi && self.null_violation(before).is_none() {
+                // (Rows read earlier in this batch are still to go in first, buffered or not:
+                // CopyFrom evaluates each row's defaults and checks it as its line is read,
+                // and flushes its multi-insert buffer when it fills, before reading the next
+                // line. Those of a buffer the error comes before are never flushed: their
+                // sequences moved, their counts are dropped, a unique violation among them
+                // isn't found.)
+                if self.st.rows.is_empty() {
                     return Err(e);
                 }
                 self.failed = Some(e);
@@ -1352,16 +1355,12 @@ impl CopyReader<'_> {
             }
             self.batch_bytes += self.st.lines[before..].iter().map(|l| l.1.len()).sum::<usize>();
             // A row a NOT NULL column refuses fails the COPY as it is read: the rows up to it
-            // go in, and its own error is the one inserting them raises.
+            // go in (their defaults evaluated; buffered, their counts dropped as the error
+            // comes before the buffer is flushed), and its own error is the one inserting
+            // them raises.
             if let Some(k) = self.null_violation(before) {
                 self.st.rows.truncate(k + 1);
                 self.st.lines.truncate(k + 1);
-                // (Buffered, the rows before it never go in: ExecConstraints refuses it
-                // before CopyMultiInsertBufferFlush inserts them, so it is the error.)
-                if copy.multi {
-                    self.st.rows.drain(..k);
-                    self.st.lines.drain(..k);
-                }
                 self.null_stop = true;
             }
         }
