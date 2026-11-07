@@ -61,6 +61,7 @@ import { PinTools, useCanvasViews, ViewsBar, type CanvasViews } from "./views";
 import { BulkBar, SelectionHost, useBulk, type Bulk } from "./bulk-bar";
 import { ThreadCollection, useCollection } from "./thread-list";
 import { needsMe, nextOf, rowsOf } from "@/lib/agents-collection";
+import { selection } from "@/lib/agents-selection";
 import { layoutOf } from "@/lib/agents-views";
 import { agentsSurface } from "@/lib/agents-surface";
 import { showInboxToast } from "./threads-sidebar";
@@ -1063,6 +1064,21 @@ function CanvasViewBody({
     storageKey: viewStorageKey(owner, view.id),
     settle,
   });
+  // ⌘A picks every thread the view shows, whatever its layout (the list and the board take it
+  // themselves while they have focus): on the canvas, or just after picking a view's tab, it
+  // selected the page's text instead.
+  useEffect(() => {
+    if (!visible || readOnly) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.defaultPrevented || !(e.metaKey || e.ctrlKey) || e.altKey || e.shiftKey || e.key.toLowerCase() !== "a") return;
+      const el = e.target as HTMLElement | null;
+      if (el && (el.isContentEditable || /^(INPUT|SELECT|TEXTAREA)$/.test(el.tagName) || el.closest(".xterm, [data-panel], [role=dialog]:not([data-surface]), [role=menu], [role=listbox]"))) return;
+      e.preventDefault();
+      selection.toggleAll(rowsOf(data, { now: Date.now(), showArchived, filter, focused }).map((r) => r.id));
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [visible, readOnly, data, showArchived, filter, focused]);
   // A pinned conversation answers its thread's requests itself.
   const expanded = useMemo(() => pinnedConversations(view), [view]);
   // The open conversation's terminals are in its drawer: not a second time on the canvas.

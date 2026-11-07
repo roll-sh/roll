@@ -96,6 +96,7 @@ impl Host {
         let id = record.id.clone();
         // What a thread's terminal does to its files counts in its changes.
         let owner = record.thread.clone();
+        let in_project = record.project.clone();
         self.put(vec![Entity::Terminal(record)])?;
 
         let ring = Arc::new(Mutex::new(Ring::default()));
@@ -128,6 +129,10 @@ impl Host {
             host.terminals.lock().unwrap().remove(&exit_id);
             if let Some(thread) = &owner {
                 host.touch_diff(thread);
+            }
+            // What was done in it (`git remote add`, a commit, a checkout) shows on the project.
+            if let Some(project) = &in_project {
+                host.refresh_git(project).await;
             }
             let code = status.ok().and_then(|s| s.code().or_else(|| s.signal().map(|n| 128 + n)));
             if let Ok(mut record) = host.terminal_record(&exit_id) {

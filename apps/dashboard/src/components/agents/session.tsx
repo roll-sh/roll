@@ -615,7 +615,8 @@ function TitleBar({
                 { label: "Rename", icon: <Pencil />, onSelect: () => setRenaming(thread.title) },
                 phone && { label: "Terminal", icon: <SquareTerminal />, onSelect: openTerminal, disabled: !online },
                 { label: "Fork", icon: <Split />, onSelect: fork, disabled: !online },
-                !!project?.repo && { label: publishLabel(thread, project), icon: <Upload />, onSelect: () => setPanel("publish"), disabled: !online || busy },
+                // A roll code repo publishes a change; another checkout commits and pushes to its remote (none: said, not hidden).
+                !!project && (!!project.repo || !!project.git) && { label: publishLabel(thread, project), icon: <Upload />, onSelect: () => setPanel("publish"), disabled: !online || busy || (!project.repo && !project.git?.remote) },
                 !!services && !thread.work && { label: "Take a work item", icon: <ClipboardList />, onSelect: () => setPanel("work") },
                 ...inboxMenu.items,
                 {

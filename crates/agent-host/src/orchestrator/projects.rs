@@ -151,7 +151,19 @@ impl Host {
         }))
     }
 
-    /// Reads the project's checkout's git info again (after a commit roll made in it).
+    /// Every project's git info, read again one at a time.
+    async fn refresh_all_git(&self) {
+        let ids: Vec<ProjectId> = match self.store.list(EntityKind::Project) {
+            Ok(all) => all.into_iter().filter_map(|e| if let Entity::Project(p) = e { Some(p.id) } else { None }).collect(),
+            Err(_) => return,
+        };
+        for id in ids {
+            self.refresh_git(&id).await;
+        }
+    }
+
+    /// Reads the project's checkout's git info again (after a commit roll made in it, a terminal
+    /// in it ending, or the puller's round).
     pub(super) async fn refresh_git(&self, id: &ProjectId) {
         let _guard = self.projects.lock().await;
         let Ok(mut p) = self.project(id) else { return };
@@ -224,6 +236,9 @@ pub(crate) fn spawn_puller(host: Weak<Host>) {
             let every = h.pull_every();
             // Logos first, since a round of pulls may take a while. The first round is the startup's.
             h.refresh_logos().await;
+            // A remote added, a branch switched or files changed outside roll (Pull and Publish
+            // read the remote): the startup's round and every round after see them.
+            h.refresh_all_git().await;
             if every.is_some() {
                 h.pull_round().await;
             }

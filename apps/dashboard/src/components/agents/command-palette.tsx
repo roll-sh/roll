@@ -323,7 +323,7 @@ function PaletteDialog({ session, intent, host }: { session: number; intent: Pal
       requests.length > 0 && { kind: "action", value: "action:waiting", title: `Answer what's waiting (${requests.length})`, searchTerms: ["approval", "question", "request", "waiting"], icon: <Bell className="size-4 text-accent" />, run: () => openThread(requests[0].thread) },
       ...(host.scale ? scaleItems(host.scale, data) : []),
       // The open conversation's publish form (it was only in its More menu).
-      !!open && !ctx.readOnly && !!data.projects.get(open.project)?.value.repo && {
+      !!open && !ctx.readOnly && (!!data.projects.get(open.project)?.value.repo || !!data.projects.get(open.project)?.value.git?.remote) && {
         kind: "action",
         value: "action:publish",
         title: publishLabel(open, data.projects.get(open.project)?.value),

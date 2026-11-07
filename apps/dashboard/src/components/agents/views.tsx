@@ -1,6 +1,6 @@
 "use client";
 
-import { ArrowDownFromLine, ArrowDownWideNarrow, ArrowRightFromLine, ArrowUpNarrowWide, Bookmark, ChevronDown, ChevronRight, Columns3, Focus as FocusIcon, ListFilter, Network, Pencil, Pin as PinIcon, PinOff, Plus, Rows3, Search, SlidersHorizontal, Trash2, X, ArrowLeft, ArrowRight, FileDiff as DiffIcon } from "lucide-react";
+import { ArrowDownFromLine, ArrowDownWideNarrow, BellRing, ArrowRightFromLine, ArrowUpNarrowWide, Bookmark, ChevronDown, ChevronRight, Columns3, Focus as FocusIcon, ListFilter, Network, Pencil, Pin as PinIcon, PinOff, Plus, Rows3, Search, SlidersHorizontal, Trash2, X, ArrowLeft, ArrowRight, FileDiff as DiffIcon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { AgentsServices } from "@/lib/agents-services";
 import type { AgentsData } from "@/lib/agents-store";
@@ -392,7 +392,9 @@ export function ViewsBar({
               >
                 {/* A view saved as a list or a board says so. */}
                 {view.display.layout === "list" ? <Rows3 className="size-3 text-subtle" aria-hidden /> : view.display.layout === "board" ? <Columns3 className="size-3 text-subtle" aria-hidden /> : null}
-                {view.name}
+                {/* Kept beside the shown tab on a narrow strip, a waiting view is its bell and count (its name is the title). */}
+                {!selected && waiting && <BellRing aria-hidden className="hidden size-3.5 text-accent @max-[520px]/views:block" />}
+                <span className={!selected && waiting ? "@max-[520px]/views:sr-only" : undefined}>{view.name}</span>
                 {count !== null && count > 0 && (
                   <span className={`grid h-4 min-w-4 place-items-center rounded-full px-1 font-mono text-[10px] tabular-nums ${waiting ? "bg-accent/15 text-accent" : "bg-fg/[0.07] text-muted"}`} aria-label={`${count} thread${count === 1 ? "" : "s"}`}>
                     {count}
@@ -470,11 +472,11 @@ export function ViewsBar({
         {/* Left of the field, so the field stays where it is as they appear. */}
         {draftActive && (
           <>
-            <button onClick={() => setEditor({ mode: "new" })} title="Save as a view (⌥S)" className="flex h-7 items-center gap-1 rounded-md bg-fg px-2 text-[12px] font-medium text-bg transition hover:opacity-85">
+            <button onClick={() => setEditor({ mode: "new" })} title="Save as a view (⌥S)" className="flex h-7 shrink-0 items-center gap-1 rounded-md bg-fg px-2 text-[12px] font-medium whitespace-nowrap text-bg transition hover:opacity-85">
               <Bookmark className="size-3.5" />
               <span className="max-sm:sr-only">Save view</span>
             </button>
-            <button onClick={() => v.setFilter({})} title="Clear the filter" aria-label="Clear the filter" className="grid size-7 place-items-center rounded-md text-subtle hover:bg-panel-2 hover:text-fg">
+            <button onClick={() => v.setFilter({})} title="Clear the filter" aria-label="Clear the filter" className="grid size-7 shrink-0 place-items-center rounded-md text-subtle hover:bg-panel-2 hover:text-fg">
               <X className="size-3.5" />
             </button>
           </>

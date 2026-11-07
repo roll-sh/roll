@@ -184,7 +184,12 @@ async fn login_up_status_and_logout() {
     let mut up = e.cmd(&["agent", "up"]).spawn().unwrap();
     let log = lines(&mut up);
     let deadline = Instant::now() + Duration::from_secs(20);
-    while !e.machines().await[0]["online"].as_bool().unwrap_or(false) {
+    // Online, and its hello (the providers) stored: the link can come up a beat before it.
+    loop {
+        let m = &e.machines().await[0];
+        if m["online"].as_bool().unwrap_or(false) && m["info"]["providers"].is_array() {
+            break;
+        }
         assert!(Instant::now() < deadline, "never online");
         tokio::time::sleep(Duration::from_millis(50)).await;
     }

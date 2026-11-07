@@ -281,14 +281,14 @@ function stepSections(catalog: Catalog): { label: string; steps: StepInfo[] }[] 
   return sections.filter((s) => s.steps.length > 0);
 }
 
-/** Steps matching every word typed (title, description, kind, integration); titles that start with it first. */
+/** Steps matching every word typed (title, description, kind, integration: not a group label like "Send and wait"); titles that start with it first. */
 function matchSteps(sections: { label: string; steps: StepInfo[] }[], query: string): { group: string; step: StepInfo }[] {
   const all = sections.flatMap((g) => g.steps.map((step) => ({ group: g.label, step })));
   const words = query.toLowerCase().split(/\s+/).filter(Boolean);
   if (!words.length) return all;
-  const rank = ({ group, step }: { group: string; step: StepInfo }) => {
+  const rank = ({ step }: { step: StepInfo }) => {
     const title = step.title.toLowerCase();
-    const hay = `${title} ${step.description} ${step.kind} ${group}`.toLowerCase();
+    const hay = `${title} ${step.description} ${step.kind} ${step.integration ?? ""}`.toLowerCase();
     if (!words.every((w) => hay.includes(w))) return -1;
     return title.startsWith(words[0]) ? 0 : words.every((w) => title.includes(w)) ? 1 : 2;
   };

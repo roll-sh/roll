@@ -39,6 +39,21 @@ describe("roll code on a thread", () => {
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 
+  it("a checkout that isn't a roll repo commits and pushes to its origin, without landing", async () => {
+    const t: Thread = thread({ worktree });
+    const reply = (c: Command): Reply => (c.type === "thread.publish" ? { type: "published", branch: "roll/fix-the-flaky-test", commit: "4b825dc642cb", change: null, url: null, landing: null } : { type: "ok" });
+    const github = project({ git: { branch: "main", head: "f35f34cf", remote: "https://github.com/acme/app.git", dirty: false } });
+    const h = agentsHarness({ reply, entities: [mirrored("project", github, 1), mirrored("thread", t, 2)], follow: ["thr_1"] });
+    renderAgents(<Conversation thread={t} machine={machine()} />, h);
+    await userEvent.click(screen.getByRole("button", { name: "More" }));
+    await userEvent.click(await screen.findByRole("menuitem", { name: "Commit and push to origin" }));
+    const form = screen.getByRole("form", { name: "Publish" });
+    expect(within(form).queryByRole("switch", { name: "and land" })).not.toBeInTheDocument();
+    await userEvent.click(within(form).getByRole("button", { name: "Commit and push" }));
+    await screen.findByRole("status", { name: "Published" });
+    expect(h.command).toHaveBeenLastCalledWith("mch_1", expect.any(String), { type: "thread.publish", thread: "thr_1", message: "Fix the flaky queue test", land: false });
+  });
+
   it("claims the next work item of the project's repo, or the one named", async () => {
     const t = thread();
     const takeWork = vi.fn().mockResolvedValueOnce(null).mockResolvedValueOnce(work);

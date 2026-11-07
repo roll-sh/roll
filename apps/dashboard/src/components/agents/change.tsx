@@ -47,6 +47,8 @@ export function firstCommit(thread: Thread, project: Project | undefined): boole
 /** What More's publish item says: the first commit, a new change, or more work on its open change. */
 export function publishLabel(thread: Thread, project: Project | undefined): string {
   if (firstCommit(thread, project)) return "Publish the first commit";
+  // Not a roll code repo: the daemon commits on the thread's branch and pushes it to `origin`.
+  if (!project?.repo) return project?.git?.remote ? "Commit and push to origin" : "Publish (no remote to push to)";
   const open = thread.change && thread.change.status !== "landed" && thread.change.status !== "closed";
   return open ? `Publish again (#${thread.change!.number})` : "Publish as a change";
 }
@@ -329,13 +331,13 @@ export function PublishForm({ thread, project, machine, onDone }: { thread: Thre
         </p>
       )}
       <input value={message} onChange={(e) => setMessage(e.target.value)} aria-label="Commit message" autoFocus className={`${input} min-w-0 flex-1 basis-48`} />
-      {!first && (
+      {!first && project?.repo && (
         <label className="flex items-center gap-1.5 text-[12px] text-muted" title="Through the landing rules (the merge queue on a queue repo)">
           <Switch checked={land} onCheckedChange={setLand} aria-label="and land" /> and land
         </label>
       )}
       <button type="submit" disabled={busy || !message.trim()} className={primary}>
-        {busy ? <span className="shimmer">Publishing…</span> : first ? "Publish the first commit" : "Publish"}
+        {busy ? <span className="shimmer">Publishing…</span> : first ? "Publish the first commit" : project?.repo ? "Publish" : "Commit and push"}
       </button>
       {/* Escape closes it too; a phone has no Escape. */}
       <button type="button" onClick={onDone} className="text-subtle hover:text-fg" aria-label="Close">
