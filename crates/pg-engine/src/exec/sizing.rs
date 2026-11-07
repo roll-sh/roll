@@ -2947,7 +2947,7 @@ pub fn indexes_emptied(t: &Table, ctx: &ExecCtx) {
 
 /// A GIN index's entries for one value (ginExtractEntries) under its operator class: None
 /// for one this model doesn't know.
-fn gin_keys(v: &Value, ty: &DataType, opclass: u32) -> Option<Vec<crate::catalog::ginsim::GinKey>> {
+pub(crate) fn gin_keys(v: &Value, ty: &DataType, opclass: u32) -> Option<Vec<crate::catalog::ginsim::GinKey>> {
     use crate::catalog::ginsim::GinKey;
     let text_key = |b: Vec<u8>| {
         let n = b.len();
@@ -3067,6 +3067,33 @@ fn gin_keys(v: &Value, ty: &DataType, opclass: u32) -> Option<Vec<crate::catalog
         keys.push(null(2));
     }
     Some(keys)
+}
+
+/// Whether `gin_keys` knows every value of type `ty` under operator class `opclass`.
+pub(crate) fn gin_keys_known(ty: &DataType, opclass: u32) -> bool {
+    match ty {
+        DataType::TsVector => true,
+        DataType::Jsonb => matches!(opclass, 0 | 10090),
+        DataType::Array(e) => {
+            matches!(opclass, 0 | 10064)
+                && matches!(
+                    **e,
+                    DataType::Int2
+                        | DataType::Int4
+                        | DataType::Oid
+                        | DataType::Date
+                        | DataType::Float4
+                        | DataType::Int8
+                        | DataType::Float8
+                        | DataType::Timestamp(_)
+                        | DataType::Timestamptz(_)
+                        | DataType::Bool
+                        | DataType::Char
+                        | DataType::Text
+                )
+        }
+        _ => false,
+    }
 }
 
 /// A GIN index's pages: its build over the rows there when it was made, the rows written

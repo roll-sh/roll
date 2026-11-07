@@ -1476,8 +1476,16 @@ impl Ddl<'_, '_> {
             /// A btree's keys as its model has them, when its pages aren't modelled: sized
             /// by the model's sorted build (`sizing::btree_build_blocks`).
             btree_keys: Option<Vec<(crate::catalog::btsim::Key, Vec<u8>)>>,
+            /// A BRIN or GIN index's pages measured as its build lays them out, when its pages
+            /// and the heap's aren't modelled (`am_measure`).
+            own: Option<super::am_measure::AmMeasure>,
         }
+        let mwm_kb = {
+            let s = self.ctx.sess.settings.borrow();
+            s.get_str("maintenance_work_mem").and_then(|v| v.trim().parse::<usize>().ok()).unwrap_or(65536)
+        };
         let mut ixs: Vec<Ix> = Vec::new();
+        let heap_modelled = modelled.is_some();
         if let Some(only) = indexes {
             for bix in self.binder().bound_indexes(&Arc::new(t.clone()))? {
                 if only.is_some_and(|o| o != bix.index.oid) {
@@ -1500,6 +1508,9 @@ impl Ddl<'_, '_> {
                     && bix.index.method == "btree"
                     && crate::exec::sizing::within_model(t.oid, db))
                     .then(Vec::new);
+                let own = (modelled.is_none() && !heap_modelled)
+                    .then(|| super::am_measure::AmMeasure::of(&bix, &types, mwm_kb))
+                    .flatten();
                 ixs.push(Ix {
                     bix,
                     types,
@@ -1507,6 +1518,7 @@ impl Ddl<'_, '_> {
                     tuples: 0,
                     keys: Vec::new(),
                     btree_keys,
+                    own,
                 });
             }
         }
@@ -1514,7 +1526,9 @@ impl Ddl<'_, '_> {
             return Ok(None);
         }
         let mut rows = 0usize;
-        let mut sizes: Vec<usize> = Vec::new();
+        // (The heap's pages packed afresh, a tuple at a time: where each row goes is its TID
+        // for an index measured as its access method lays it out.)
+        let mut packer = relsize::HeapPacker::default();
         // (Indexes of plain columns read only theirs: the other values aren't decoded, and
         // the heap's tuples are sized from the stored bytes where they can be.)
         let need: Option<Vec<bool>> = ixs
@@ -1615,6 +1629,52 @@ impl Ddl<'_, '_> {
                 }
                 _ => crate::exec::scan::decode_table_row(t, &bytes)?,
             };
+            // The row's heap tuple, packed (its TID: where it went), or with the heap's kept
+            // measure, a TID as if its rows were spread evenly over its pages.
+            let mut tid = (0, 0);
+            if modelled.is_none() {
+                match kept_live {
+                    Some((live, kept_rows)) => {
+                        let per = kept_rows.div_ceil(live.max(1) as usize).max(1);
+                        tid = (((rows - 1) / per) as u32, ((rows - 1) % per + 1) as u16);
+                    }
+                    None => {
+                        let size = match stored {
+                            Some(len) => {
+                                // (Debug builds check it against the size of the row decoded.)
+                                #[cfg(debug_assertions)]
+                                {
+                                    let mut full = crate::exec::scan::decode_table_row(t, &bytes)?;
+                                    for &i in &virt {
+                                        if i < full.len() {
+                                            full[i] = Value::Null;
+                                        }
+                                    }
+                                    debug_assert_eq!(relsize::heap_tuple_of_len(len), relsize::heap_tuple(&types, &full, &text));
+                                }
+                                relsize::heap_tuple_of_len(len)
+                            }
+                            None => {
+                                // (Sized with its virtual columns null, as stored; put back for
+                                // the indexes.)
+                                let n = row.len();
+                                let held: Vec<(usize, Value)> = virt
+                                    .iter()
+                                    .filter(|&&i| i < n)
+                                    .map(|&i| (i, std::mem::replace(&mut row[i], Value::Null)))
+                                    .collect();
+                                let size = relsize::heap_tuple(&types, &row, &text);
+                                for (i, v) in held {
+                                    row[i] = v;
+                                }
+                                size
+                            }
+                        };
+                        packer.push(size);
+                        tid = packer.last();
+                    }
+                }
+            }
             for ix in &mut ixs {
                 let Some(mut vals) = super::table::index_values(&ix.bix, &row, self)? else {
                     continue;
@@ -1623,7 +1683,9 @@ impl Ddl<'_, '_> {
                     f(&dkey, &vals, &row)?;
                 }
                 ix.tuples += 1;
-                if let Some(keys) = &mut ix.btree_keys {
+                if let Some(own) = &mut ix.own {
+                    own.row(&vals, tid);
+                } else if let Some(keys) = &mut ix.btree_keys {
                     keys.push((crate::exec::sizing::btree_key(t, &ix.bix, vals, &row, self.ctx), dkey.clone()));
                 } else if ix.modelled.is_none() {
                     let mut sort = super::table::key_bytes(&vals);
@@ -1637,36 +1699,13 @@ impl Ddl<'_, '_> {
                     ix.keys.push((prefix, sort, relsize::index_tuple(&ix.types, &vals, &text)));
                 }
             }
-            if modelled.is_none() && kept_live.is_none() {
-                if let Some(len) = stored {
-                    // (Debug builds check it against the size of the row decoded.)
-                    #[cfg(debug_assertions)]
-                    {
-                        let mut full = crate::exec::scan::decode_table_row(t, &bytes)?;
-                        for &i in &virt {
-                            if i < full.len() {
-                                full[i] = Value::Null;
-                            }
-                        }
-                        debug_assert_eq!(relsize::heap_tuple_of_len(len), relsize::heap_tuple(&types, &full, &text));
-                    }
-                    sizes.push(relsize::heap_tuple_of_len(len));
-                    continue;
-                }
-                for &i in &virt {
-                    if i < row.len() {
-                        row[i] = Value::Null;
-                    }
-                }
-                sizes.push(relsize::heap_tuple(&types, &row, &text));
-            }
         }
         if let Some(old) = frozen {
             self.measured_xmin.set(Some((t.oid, old, oldest_xmin, toast_frozen.map(|f| (f, oldest_toast)))));
         }
         let (modelled, live) = match modelled {
             Some(n) => (Some(n), n),
-            None => (None, kept_live.unwrap_or_else(|| relsize::heap_pages(sizes.into_iter()))),
+            None => (None, kept_live.map_or_else(|| packer.pages(), |k| k.0)),
         };
         if whole {
             let m = crate::txn::unchanged::Measured { ts: snap, armed: 0, layout, rows, live, xmin: xmins, may_toast };
@@ -1679,9 +1718,10 @@ impl Ddl<'_, '_> {
                 .btree_keys
                 .take()
                 .and_then(|keys| crate::exec::sizing::btree_build_blocks(t, &ix.bix, keys, db));
-            let pages = match ix.modelled.or(built) {
-                Some(n) => n as i32,
-                None => btree_pages_of(&ix.bix, &ix.types, std::mem::take(&mut ix.keys)),
+            let pages = match (ix.modelled.or(built), ix.own.take()) {
+                (Some(n), _) => n as i32,
+                (None, Some(own)) => own.pages(live as u32),
+                (None, None) => btree_pages_of(&ix.bix, &ix.types, std::mem::take(&mut ix.keys)),
             };
             measured.push((ix.bix.index.oid, pages, ix.tuples as f64));
         }
@@ -1711,10 +1751,10 @@ impl Ddl<'_, '_> {
         Some(RowMeasure::new(m.rows, m.live, Vec::new()))
     }
 
-    /// The live heap pages of `t`'s measure kept from its last (`txn::unchanged`), while
+    /// The live heap pages (and rows) of `t`'s measure kept from its last (`txn::unchanged`), while
     /// nothing changed in it since, its rows are sized alike, the snapshot `snap` sees what
     /// the measure did and the transaction wrote none of its rows.
-    fn kept_live(&self, t: &Table, layout: u64, snap: u64) -> Option<i32> {
+    fn kept_live(&self, t: &Table, layout: u64, snap: u64) -> Option<(i32, usize)> {
         let db = &self.ctx.sess.db;
         let m = db.unchanged.valid(&db.store, t.oid)?;
         if m.layout != layout || snap < m.ts {
@@ -1725,7 +1765,7 @@ impl Ddl<'_, '_> {
         if !self.ctx.txn.borrow().writes_in(&start, &end).ok()?.is_empty() {
             return None;
         }
-        Some(m.live)
+        Some((m.live, m.rows))
     }
 
     /// pg_class stats of indexes measured (`measure_rows`).

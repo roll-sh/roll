@@ -596,6 +596,12 @@ impl HeapPacker {
     pub fn pages(&self) -> i32 {
         self.pages.len() as i32
     }
+
+    /// The TID of the last tuple pushed: its page and line pointer.
+    pub fn last(&self) -> (u32, u16) {
+        let b = self.current.unwrap_or(0);
+        (b as u32, self.pages.get(b).map_or(0, |p| p.1) as u16)
+    }
 }
 
 const FSM_NODES: usize = BLCKSZ - PAGE_HEADER - 4;
