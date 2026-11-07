@@ -72,7 +72,7 @@ describe("Composer", () => {
     renderAgents(<Composer mode={{ kind: "new", project: project(), machine: m }} onSubmit={onSubmit} />, h);
     // The logged-in provider is picked, not the first one.
     await userEvent.click(screen.getByRole("button", { name: /^Model: Opus 5.5/ }));
-    await userEvent.click(await screen.findByRole("radio", { name: "Max" }));
+    await userEvent.click(within(await screen.findByRole("group", { name: "Reasoning" })).getByRole("button", { name: "Max" }));
     expect(screen.getByRole("button", { name: "Model: Opus 5.5 · Max" })).toBeInTheDocument();
     await userEvent.click(screen.getByRole("switch", { name: "Worktree" }));
     await userEvent.type(screen.getByRole("textbox", { name: "Message" }), "Add a --json flag{Enter}");

@@ -1815,18 +1815,20 @@ The surface has three views:
   launch handles are buttons, so the two never mix. The line has no animation, so reduced
   motion changes nothing.
 - **The model picker** (`model-picker.tsx`, T3's `ProviderModelPicker`, `ModelPickerContent`,
-  `ModelListRow`, `ModelPickerSidebar` and the docked effort column of `ComposerModelEffort`).
-  The trigger names the provider, the model and its effort. The popup has a sidebar (Favorites,
-  Recent, then one button per installed provider of the machine), a search across every provider
-  (T3's ranking: exact name, prefix, word start, substring, fuzzy from three letters; favourites
-  boosted), the list (favourites first in a provider; a star on each row, a check on the picked
-  one) and the picked model's effort levels in a column beside it. It opens on Favorites when
-  there are some, else on the provider in use. Keyboard as T3's: type to search, arrows and Enter,
-  ← or Shift+Tab to the providers, → to the effort levels, ⌘/Ctrl+Shift+↑/↓ to switch providers.
-  Picking a model with effort levels moves to them; picking a level closes it. Permissions are a
-  menu beside it (T3's `PermissionsMenu`). Favourites and the last five picked models are kept in
-  this browser (`lib/agents-models.ts`, `modelPrefs`); T3 keeps favourites in its server
-  settings, and moving them to an owner-level record is the one seam to change.
+  `ModelListRow`, `ModelPickerSidebar` and the option rows of `ComposerModelEffort`; its look is
+  in agents-design.md, "The model picker").
+  The trigger names the provider, the model and its effort. The popup has a search across every
+  provider on top (T3's ranking: exact name, prefix, word start, substring, fuzzy from three
+  letters; favourites boosted), a labelled sidebar (Favorites, Recent, then each provider of the
+  machine by logo and name), the list (favourites first in a provider; a star on each row, a check
+  on the picked one) and, under it, the picked model's options, only those it declares. It opens on
+  Favorites when there are some, else on the provider in use. Keyboard as T3's: type to search,
+  arrows and Enter, ← or Shift+Tab to the providers, Tab to the options, ⌘/Ctrl+Shift+↑/↓ to switch
+  providers. Picking a model with options moves to them; picking a level closes it. Unlike T3's
+  docked picker, the options aren't a column (the user's call: it doubled the popup's size).
+  Permissions are a menu beside it (T3's `PermissionsMenu`). Favourites and the last five picked
+  models are kept in this browser (`lib/agents-models.ts`, `modelPrefs`); T3 keeps favourites in
+  its server settings, and moving them to an owner-level record is the one seam to change.
 - **Controls.** The agents surface uses T3's own controls, never native `<select>`s or
   checkboxes: `components/agents/ui/` ports T3's `components/ui` (Base UI) to roll's colours —
   `Select`, `Menu`, `Popover`, `Combobox`, `Switch` and `Segmented`. The small action menus (`menu.tsx`: a
