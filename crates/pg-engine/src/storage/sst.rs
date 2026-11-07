@@ -169,7 +169,7 @@ pub fn sst_path(dir: &Path, id: u64) -> PathBuf {
 pub struct SstWriter {
     path: PathBuf,
     id: u64,
-    out: BufWriter<File>,
+    out: BufWriter<super::durable::DFile>,
     block: Vec<u8>,
     block_entries: usize,
     prev_key: Vec<u8>,
@@ -211,7 +211,7 @@ impl SstWriter {
     pub fn create(dir: &Path, id: u64, compress: bool) -> Result<Self> {
         let path = sst_path(dir, id);
         let tmp = path.with_extension("tmp");
-        let out = BufWriter::with_capacity(256 * 1024, File::create(&tmp)?);
+        let out = BufWriter::with_capacity(256 * 1024, super::durable::DFile::create(&tmp)?);
         Ok(SstWriter {
             path,
             id,
@@ -370,7 +370,7 @@ impl SstWriter {
             super::fileio::sync(|| file.sync_all())?;
         }
         super::fileio::wrote_sst(self.offset);
-        std::fs::rename(self.path.with_extension("tmp"), &self.path)?;
+        super::durable::rename(&self.path.with_extension("tmp"), &self.path)?;
         Ok(SstMeta {
             id: self.id,
             size: self.offset,
@@ -388,7 +388,7 @@ impl SstWriter {
     }
 
     pub fn abandon(self) {
-        let _ = std::fs::remove_file(self.path.with_extension("tmp"));
+        let _ = super::durable::remove_file(&self.path.with_extension("tmp"));
     }
 }
 
@@ -1185,7 +1185,7 @@ impl Drop for SstReader {
     fn drop(&mut self) {
         self.cache.forget_file(self.cache_id);
         if self.obsolete.load(Ordering::Acquire) {
-            let _ = std::fs::remove_file(&self.path);
+            let _ = super::durable::remove_file(&self.path);
         }
     }
 }
