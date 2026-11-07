@@ -8298,7 +8298,9 @@ ends with the publisher's md5 of every row; pages: acc / acc_pkey / hist / hist_
 base subscriber never pruned the pages it updated (HANDOFF). Head's apply thread (host
 profile, LBR): models ~28%, of which pruning on the identity lookups 15% (`Heap::prune`
 1% self, its line-pointer copies and per-page vectors), `inserted_with` 9%, `updated` 3%
-(HOT again); base's were `updated` 18%, `index_insert` 15%, `inserted_with` 10%.
+(HOT again); base's were `updated` 18%, `index_insert` 15%, `inserted_with` 10%. With
+`Heap::prune_page` (no second pass, reused vectors) the identity lookups are 12% (prune 1.5%
+of all samples against 2.3%).
 
 **pgbench** (scale 10, `-M prepared`, 20 s, 2 rounds, the 400k limit; CPU ms per transaction):
 

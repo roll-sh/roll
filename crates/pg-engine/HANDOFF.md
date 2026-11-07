@@ -7820,9 +7820,17 @@ index row size checks, merged into the parallel model mode below).
   e8c545d1), clippy without new warnings (three in kept.rs's tests, fixed after), difftest
   smoke, isolation 121 / 122 (intra-grant-inplace, as on origin), full regress on a private
   reference 51,148 / 51,150 with 0 units changed, pg_dump_tap 14,817.
-- **Left**: COPY's and DELETE's per-row upkeep lifted (DELETE's profile: the models 4%,
-  KeySet / lock table / executor the rest); `Heap::prune` allocates seven vectors per page
-  (10% of apply's thread: scratch buffers); a TID-level kill bound for apply's lookups; the
+- **Pruning without VACUUM's summary** (`Heap::prune_page`): heap_page_prune_opt's path no
+  longer runs `prune`'s second pass over the page (the status of every tuple, for VACUUM's
+  `hastup` / `live` / all-visible, which it threw away), and the pruning's per-page vectors
+  are a thread's (`PruneScratch`). Apply's identity lookups: 15% -> 12% of its thread.
+  `ensure`'s per-thread map of tables found modelled uses the fast hasher (2% of a lifted
+  COPY in SipHash).
+- **Left**: COPY's and DELETE's per-row upkeep lifted (a lifted COPY of 1M rows: 3.16 s of
+  host CPU against 2.27 at 400k; its per-row `inserted_with` is 12% of the samples: the
+  tuple's length, compression tracking, `vis_for`'s catalog lookups, the shard lock; then
+  `multi_insert` 5%. DELETE's profile: the models 4%, KeySet / lock table / executor the
+  rest); a TID-level kill bound for apply's lookups; the
   3M rows' mw1_k cost; memory (the engine's peak is above PostgreSQL's at 400k too: not the
   models); lineitem's index-only `count(*)` (needs lineitem modelled: not lifted).
 
