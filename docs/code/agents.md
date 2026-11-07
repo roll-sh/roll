@@ -1024,7 +1024,8 @@ there), with roll's own palette. Types: `agent-proto/src/identity.rs`; the dashb
 
 - **A colour each** (`IdentityColor`: slate, violet, purple, pink, rose, teal, cyan, green). T3's
   palette has orange, amber and yellow, which roll never uses, and blue, which on roll means busy:
-  none of those is in it. Unset, a project's colour is T3's hash of its repo (`owner/repo`), else
+  none of those is in it, nor anything that reads as a status (`green` is stored under its old
+  name but drawn as stone, a warm grey: a green edge on a failed card read as done). Unset, a project's colour is T3's hash of its repo (`owner/repo`), else
   its name, so the same repo checked out on a laptop and in a sandbox (two projects) looks like one
   on every device; a machine's is the hash of its id, so a rename keeps it.
 - **A project's icon** (`ProjectSettings.icon`): `auto` (its own logo, else its monogram on its

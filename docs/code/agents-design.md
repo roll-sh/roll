@@ -186,10 +186,11 @@ colours:
 | `--id-rose` | `oklch(0.73 0.12 12)` | `oklch(0.54 0.15 12)` | 12 |
 | `--id-teal` | `oklch(0.76 0.10 180)` | `oklch(0.54 0.09 180)` | 180 |
 | `--id-cyan` | `oklch(0.76 0.10 218)` | `oklch(0.54 0.10 218)` | 218 |
-| `--id-green` | `oklch(0.76 0.11 148)` | `oklch(0.54 0.11 148)` | 148 |
+| `--id-green` (shown as "Stone") | `oklch(0.74 0.035 70)` | `oklch(0.52 0.035 70)` | warm neutral |
 
 No orange, amber or yellow (hues 35–115), and nothing within 30° of the accent's 259, so a
-project's colour never reads as running. Green and rose are softer than `--ok` and `--danger`.
+project's colour never reads as running. No green either (done): the token stored as `green` is
+stone, a warm grey. Rose is dusty, softer than `--danger`.
 `agents-identity.test.ts` reads globals.css and fails on any of that.
 
 **Where it shows.** Components set `--tint` (`tint(color)`) and use `text-(--tint)` and

@@ -159,8 +159,10 @@
 /*
  * Identity (docs/code/agents-design.md, "Identity"): the categorical colours projects and machines
  * carry, so they're recognisable at a glance. One hue each at the same lightness and a calm chroma:
- * light enough on the dark ladder, dark enough on white. None is blue (the accent: busy), orange,
- * amber or yellow; green and rose sit soft, away from `--ok` and `--danger`. Used through `--tint`
+ * light enough on the dark ladder, dark enough on white. None reads as a status: no blue (the
+ * accent: busy), no green (done), rose dusty and away from `--danger`, and no orange, amber or
+ * yellow. `green` is the stored name of what is now stone, a warm grey (a project's green edge on
+ * a failed card read as done). Used through `--tint`
  * (`components/agents/identity.tsx`): letters and glyphs in the colour, tiles at 16-18%, a card's
  * header at 6%, edges at 55%. On :root, because popups portal to <body>.
  */
@@ -173,7 +175,7 @@
   --id-rose: oklch(0.74 0.075 2);
   --id-teal: oklch(0.76 0.1 180);
   --id-cyan: oklch(0.76 0.1 218);
-  --id-green: oklch(0.76 0.11 148);
+  --id-green: oklch(0.74 0.035 70);
 }
 
 @media (prefers-color-scheme: light) {
@@ -185,7 +187,7 @@
     --id-rose: oklch(0.55 0.09 2);
     --id-teal: oklch(0.54 0.09 180);
     --id-cyan: oklch(0.54 0.1 218);
-    --id-green: oklch(0.54 0.11 148);
+    --id-green: oklch(0.52 0.035 70);
   }
 }
 

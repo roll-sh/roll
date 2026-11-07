@@ -18,7 +18,8 @@ export const COLOR_LABEL: Record<IdentityColor, string> = {
   rose: "Rose",
   teal: "Teal",
   cyan: "Cyan",
-  green: "Green",
+  // The stored name is older than the colour: green read as done (`--id-green` in globals.css).
+  green: "Stone",
 };
 
 /** The colour as CSS (the `--id-<name>` token: light and dark). */
