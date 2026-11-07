@@ -19,9 +19,9 @@
 use super::bulklocks::{BulkLocks, row_tag, untag};
 use crate::error::{Error, Result, code};
 use parking_lot::{Condvar, Mutex};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 /// A heavyweight lock mode (lockdefs.h), in Postgres's order.
@@ -267,9 +267,15 @@ pub struct KeyHolder {
 
 /// The lock on relation `rel` of database `db` (LOCKTAG_RELATION).
 pub fn relation_key(db: u32, rel: u32) -> Vec<u8> {
-    let mut k = prefixed(RELATION);
-    k.extend_from_slice(&db.to_be_bytes());
-    k.extend_from_slice(&rel.to_be_bytes());
+    relation_key_bytes(db, rel).to_vec()
+}
+
+/// `relation_key`, on the stack.
+pub fn relation_key_bytes(db: u32, rel: u32) -> [u8; 16] {
+    let mut k = [0u8; 16];
+    k[7] = RELATION;
+    k[8..12].copy_from_slice(&db.to_be_bytes());
+    k[12..].copy_from_slice(&rel.to_be_bytes());
     k
 }
 
@@ -287,6 +293,11 @@ pub fn xact_key(id: u64) -> Vec<u8> {
     let mut k = prefixed(TRANSACTION);
     k.extend_from_slice(&id.to_be_bytes());
     k
+}
+
+/// The transaction whose lock `key` is (an `xact_key`), if it is one.
+fn xact_key_owner(key: &[u8]) -> Option<u64> {
+    (key.len() == 16 && key[..8] == [0, 0, 0, 0, 0, 0, 0, TRANSACTION]).then(|| u64::from_be_bytes(key[8..].try_into().unwrap()))
 }
 
 /// A lock on a database object (LOCKTAG_OBJECT).
@@ -438,7 +449,18 @@ impl Hold {
 /// fast-path locks.
 pub struct FastSlot {
     proc: u64,
-    holds: Mutex<Vec<FastHold>>,
+    holds: Mutex<FastHolds>,
+    /// The transaction whose own lock is held here (`hold_xact_fast`), 0 for none: a request
+    /// for that lock moves it to the main table first (VirtualXactLock's transfer).
+    xact: AtomicU64,
+}
+
+#[derive(Default)]
+struct FastHolds {
+    holds: Vec<FastHold>,
+    /// Owners with holds transferred to the main table, protected by the same mutex as
+    /// transfer and release so another transaction on this backend cannot clear them.
+    moved: HashSet<u64>,
 }
 
 struct FastHold {
@@ -854,13 +876,20 @@ impl LockManager {
             return Some(s.clone());
         }
         let mut slots = self.fast.slots.write();
-        Some(slots.entry(proc).or_insert_with(|| Arc::new(FastSlot { proc, holds: Mutex::new(Vec::new()) })).clone())
+        Some(
+            slots
+                .entry(proc)
+                .or_insert_with(|| {
+                    Arc::new(FastSlot { proc, holds: Mutex::new(FastHolds::default()), xact: AtomicU64::new(0) })
+                })
+                .clone(),
+        )
     }
 
     /// Backend `proc` is gone: its slot too.
     pub fn end_proc(&self, proc: u64) {
         let Some(slot) = self.fast.slots.write().remove(&proc) else { return };
-        if !slot.holds.lock().is_empty() {
+        if !slot.holds.lock().holds.is_empty() {
             // (Not expected: what it still held goes to the main table.)
             let mut s = self.state.lock();
             Self::move_slot(&mut s, &slot, None);
@@ -873,7 +902,8 @@ impl LockManager {
         if mode > LockMode::RowExclusive || !is_local_relation(key) {
             return false;
         }
-        let mut holds = slot.holds.lock();
+        let mut fast = slot.holds.lock();
+        let holds = &mut fast.holds;
         if self.fast.strong[fast_partition(key)].load(Ordering::SeqCst) != 0 {
             return false;
         }
@@ -887,7 +917,8 @@ impl LockManager {
     /// Release one of `owner`'s fast-path holds of `key` in `mode`; false when it has none
     /// there (it is in the main table).
     pub fn release_fast(&self, slot: &FastSlot, key: &[u8], owner: u64, mode: LockMode) -> bool {
-        let mut holds = slot.holds.lock();
+        let mut fast = slot.holds.lock();
+        let holds = &mut fast.holds;
         let Some(i) = holds.iter().position(|h| h.owner == owner && h.mode == mode && h.key == key) else {
             return false;
         };
@@ -898,9 +929,36 @@ impl LockManager {
         true
     }
 
-    /// Release every fast-path hold of `owner`.
-    pub fn release_fast_owner(&self, slot: &FastSlot, owner: u64) {
-        slot.holds.lock().retain(|h| h.owner != owner);
+    /// Release every fast-path hold of `owner`; true when any of this owner's holds moved
+    /// to the main table meanwhile (they are released there).
+    pub fn release_fast_owner(&self, slot: &FastSlot, owner: u64) -> bool {
+        let mut fast = slot.holds.lock();
+        let holds = &mut fast.holds;
+        holds.retain(|h| h.owner != owner);
+        if slot.xact.load(Ordering::Relaxed) == owner {
+            slot.xact.store(0, Ordering::Relaxed);
+        }
+        fast.moved.remove(&owner)
+    }
+
+    /// Hold transaction `owner`'s own lock (`hold_xact_lock` in Exclusive mode, before its
+    /// first snapshot is registered) on backend `slot`'s fast path, as PostgreSQL's
+    /// VirtualXactLockTableInsert does: nothing of the main table is locked until another
+    /// backend asks for it (`acquire` moves it there first).
+    pub fn hold_xact_fast(&self, slot: &FastSlot, owner: u64) {
+        let mut fast = slot.holds.lock();
+        let holds = &mut fast.holds;
+        holds.push(FastHold { key: xact_key(owner), owner, mode: LockMode::Exclusive, count: 1, seq: next_seq() });
+        slot.xact.store(owner, Ordering::Release);
+    }
+
+    /// Move transaction `owner`'s own lock (`key`) from the fast path of the backend holding
+    /// it, if one does, into the main table.
+    fn move_fast_xact(&self, s: &mut State, key: &[u8], owner: u64) {
+        let slots = self.fast.slots.read();
+        for slot in slots.values().filter(|sl| sl.xact.load(Ordering::Acquire) == owner) {
+            Self::move_slot(s, slot, Some(key));
+        }
     }
 
     /// Move the fast-path holds of relation `key` (every relation: None) into the main table,
@@ -913,20 +971,22 @@ impl LockManager {
     }
 
     fn move_slot(s: &mut State, slot: &FastSlot, key: Option<&[u8]>) {
-        let mut holds = slot.holds.lock();
+        let mut fast = slot.holds.lock();
+        let holds = &mut fast.holds;
         if holds.is_empty() {
             return;
         }
         let moved: Vec<FastHold> = match key {
             Some(k) if holds.iter().any(|h| h.key == k) => {
-                let (m, kept) = std::mem::take(&mut *holds).into_iter().partition(|h| h.key == k);
+                let (m, kept) = std::mem::take(holds).into_iter().partition(|h| h.key == k);
                 *holds = kept;
                 m
             }
             Some(_) => return,
-            None => std::mem::take(&mut *holds),
+            None => std::mem::take(holds),
         };
         for h in moved {
+            fast.moved.insert(h.owner);
             let e = s.locks.entry(h.key).or_default();
             if let Some(x) = e.holds.iter_mut().find(|x| x.owner == h.owner && x.proc == slot.proc && x.mode == h.mode) {
                 x.count += h.count;
@@ -960,6 +1020,10 @@ impl LockManager {
         if strong_relation_lock(key, mode) {
             s.mark_strong(key);
             self.move_fast(&mut s, Some(key));
+        }
+        // A transaction's own lock may be on its backend's fast path.
+        if let Some(id) = xact_key_owner(key) {
+            self.move_fast_xact(&mut s, key, id);
         }
         if let Some(pid) = pid_of(proc) {
             s.pids.insert(proc, pid);
@@ -1317,8 +1381,10 @@ impl LockManager {
         if xid != 0 {
             e.xid = xid;
         }
-        if !e.holds.iter().any(|h| h.owner == owner) {
-            e.holds.push(Hold::new(owner, proc, LockMode::Exclusive, false));
+        // (One moved from the fast path is the transaction id's lock now: not fast-path.)
+        match e.holds.iter_mut().find(|h| h.owner == owner) {
+            Some(h) => h.fastpath = false,
+            None => e.holds.push(Hold::new(owner, proc, LockMode::Exclusive, false)),
         }
     }
 
@@ -1817,6 +1883,9 @@ impl LockManager {
         if let Some(b) = s.bulk.get_mut(&owner) {
             b.proc = proc;
         }
+        for slot in self.fast.slots.read().values() {
+            slot.holds.lock().moved.remove(&owner);
+        }
     }
 
     /// A prepared transaction's dummy backend is gone (COMMIT / ROLLBACK PREPARED).
@@ -1896,7 +1965,7 @@ impl LockManager {
     /// Whether anyone holds a lock (for idle detection and tests).
     pub fn held_count(&self) -> usize {
         let s = self.state.lock();
-        let fast: usize = self.fast.slots.read().values().map(|f| f.holds.lock().len()).sum();
+        let fast: usize = self.fast.slots.read().values().map(|f| f.holds.lock().holds.len()).sum();
         fast + s.locks.len() + s.rows.len() + s.bulk.values().map(BulkLocks::len).sum::<usize>()
     }
 
