@@ -41,13 +41,19 @@ afterEach(() => {
 
 describe("the agents in the header", () => {
   it("counts what runs (a thread waiting on you is waiting, not running) and opens the conversation that waits", async () => {
-    setup();
+    const h = setup();
     const pill = screen.getByRole("button", { name: "Agents: 1 running, 1 waiting" });
     expect(pill).toHaveTextContent("1 running");
     await userEvent.click(pill);
     const popup = screen.getByRole("dialog", { name: "Agents" });
     expect(within(popup).getByRole("region", { name: "Thread Upgrade to Next 16.4" })).toBeInTheDocument();
     expect(window.location.hash).toBe("#agents/thr_2");
+    // A record that changes what a card says, not the canvas's shape, still reaches the card (each
+    // card follows its own inputs; the canvas keeps its graph).
+    const card = () => document.querySelector('[data-card][data-key="t:thr_1"]');
+    expect(card()).toHaveTextContent("Running `cargo test`");
+    act(() => h.client.enqueue({ type: "entity", ...mirrored("thread", { ...busy, activity: "Running `pnpm lint`" }, 6) }));
+    expect(card()).toHaveTextContent("Running `pnpm lint`");
   });
 
   it("opens a conversation whose record comes after the reply (a fork), and leaves one that's deleted", async () => {

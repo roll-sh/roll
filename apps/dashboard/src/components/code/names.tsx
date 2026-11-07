@@ -4,6 +4,7 @@ import { Check, LoaderCircle, Plus, X } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { codeApi, isNotFound, validOwnerName, validRepoName, type Owner, type OwnerKind } from "@/lib/code-api";
 import { btn, input } from "../ui";
+import { shownOwner } from "../agents/use-connection";
 import { Field, Segmented } from "./shared";
 
 export type NameState = "idle" | "checking" | "available" | "taken" | "reserved" | "invalid" | "unknown";
@@ -119,9 +120,10 @@ export function OwnerPicker({ value, onChange }: { value: string; onChange: (own
   }, []);
 
   useEffect(() => {
-    load().then((list) => {
+    // The owner the dashboard shows first (an admin who picked bea makes bea's), else theirs.
+    Promise.all([load(), shownOwner()]).then(([list, shown]) => {
       if (!list.length) setCreating(true);
-      else if (!value) onChange((list.find((o) => o.kind === "user") ?? list[0]).name);
+      else if (!value) onChange((list.find((o) => o.name === shown) ?? list.find((o) => o.kind === "user") ?? list[0]).name);
     });
   }, [load]);
 

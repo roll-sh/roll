@@ -5,11 +5,11 @@ import { AnimatePresence, motion, useIsPresent } from "motion/react";
 import { Archive, ArrowLeft, ChevronDown, ChevronUp, MoreHorizontal, PanelRightClose, Pin, PinOff, Plus, Search, Server, Settings, Share2, X, Zap } from "lucide-react";
 import Link from "next/link";
 import { memo, useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
-import { isBusy, reachable } from "@/lib/agents-api";
+import { isBusy, reachable, type Thread } from "@/lib/agents-api";
 import { POP_IN, POP_OUT } from "@/lib/agents-motion";
 import { setActiveClient, type AgentsClient } from "@/lib/agents-client";
-import { collapseUnused, deriveGraph, foldQuiet, groupByStatus, newestRuns, rolling, SHOWN_IN_GROUP, SHOWN_THREADS, type GraphNode } from "@/lib/agents-graph";
-import { emptyData, runsOf } from "@/lib/agents-store";
+import { collapseUnused, deriveGraph, foldQuiet, groupByStatus, newestRuns, rolling, sameGraph, SHOWN_IN_GROUP, SHOWN_THREADS, type Graph, type GraphNode } from "@/lib/agents-graph";
+import { emptyData, runsOf, type AgentsData } from "@/lib/agents-store";
 import type { Direction, Size } from "@/lib/agents-layout";
 import { closePalette, noteThreadOpen, openPalette, togglePalette } from "@/lib/agents-palette";
 import { useKeyboard } from "@/lib/keyboard-inset";
@@ -34,7 +34,7 @@ import { Launcher } from "./new-agent";
 import { useKept } from "./ui/dialog";
 import { AgentsLayer } from "./ui/layer";
 import { PinnedConversation, PinnedDiff, PinnedTerminal } from "./pinned";
-import { MachineNode, ProjectNode, RequestNode, SubagentNode, ThreadCard, useThreadFacts } from "./nodes";
+import { MachineNode, ProjectNode, RequestNode, SubagentNode, ThreadCard, useThreadFacts, type ThreadFacts } from "./nodes";
 import { CanvasProjectsProvider, type CanvasProjects } from "./machine-projects";
 import { CanvasFoldsProvider, type CanvasFolds } from "./canvas-folds";
 import { FoldedThreads, StatusHeader } from "./folded-threads";
@@ -862,6 +862,137 @@ function WindowHome() {
  */
 const CanvasView = memo(CanvasViewBody);
 
+/** What the canvas's cards read (`CanvasCard`), from the canvas view. */
+interface CardInputs {
+  data: AgentsData;
+  facts: (t: Thread) => ThreadFacts;
+  view: CanvasViews["current"];
+  toggle: (kind: PinRec["kind"], id: string) => void;
+  resize: CanvasViews["resize"];
+  folded: CanvasFolds["folded"];
+}
+
+/** The newest `CardInputs`, and who to tell when they change. */
+class CardStore {
+  private subs = new Set<() => void>();
+  constructor(public current: CardInputs) {}
+  subscribe = (fn: () => void) => {
+    this.subs.add(fn);
+    return () => void this.subs.delete(fn);
+  };
+  notify() {
+    for (const fn of this.subs) fn();
+  }
+}
+
+/**
+ * Everything a card shows, from its inputs: it renders again only when one of these changed.
+ * Cards that read the whole store while rendering (folds, requests, pins: a few) take `data`.
+ */
+function cardDeps(i: CardInputs, n: GraphNode): readonly unknown[] {
+  const { data } = i;
+  const machine = data.machines.get(n.machine)?.value;
+  switch (n.kind) {
+    case "machine":
+      return [data.machines.get(n.id)?.value, data.projects];
+    case "project":
+      // Its stats count its threads and their runs; its providers are its machine's.
+      return [data.projects.get(n.id)?.value, machine, data.threads, data.runs];
+    case "thread": {
+      const t = data.threads.get(n.id)?.value;
+      const f = t && i.facts(t);
+      return [t, machine, f?.project, f?.lastRun, f?.pending, f?.terminals, f?.orchestrated, i.view, i.toggle];
+    }
+    case "subagent":
+      return [data.nodes, data.threads, data.projects];
+    case "terminal":
+      return [data.terminals.get(n.id)?.value, machine, i.view, i.toggle];
+    case "group":
+      return [n.children.filter((c) => c.startsWith("t:")).length, i.folded.get(n.key)];
+    case "fold":
+    case "request":
+    case "pin":
+      return [data, i.view, i.toggle, i.resize];
+  }
+}
+
+const sameDeps = (a: readonly unknown[], b: readonly unknown[]) => a.length === b.length && a.every((x, k) => Object.is(x, b[k]));
+
+/** One card on the canvas, rendering from the store when its own inputs change (`cardDeps`). */
+const CanvasCard = memo(function CanvasCard({ node: n, store }: { node: GraphNode; store: CardStore }) {
+  const last = useRef<readonly unknown[] | null>(null);
+  const snapshot = () => {
+    const next = cardDeps(store.current, n);
+    if (last.current && sameDeps(last.current, next)) return last.current;
+    last.current = next;
+    return next;
+  };
+  useSyncExternalStore(store.subscribe, snapshot, snapshot);
+  const { data, facts, view, toggle, resize, folded } = store.current;
+  const machine = data.machines.get(n.machine)?.value;
+  switch (n.kind) {
+    case "machine": {
+      const m = data.machines.get(n.id)?.value;
+      return m ? <MachineNode machine={m} /> : null;
+    }
+    case "project": {
+      const p = data.projects.get(n.id)?.value;
+      return p ? <ProjectNode project={p} machine={machine} /> : null;
+    }
+    case "thread": {
+      const t = data.threads.get(n.id)?.value;
+      if (!t) return null;
+      return (
+        <PinTools
+          view={view}
+          onToggle={toggle}
+          items={[
+            { kind: "conversation", id: n.id, label: "the conversation" },
+            { kind: "diff", id: n.id, label: "the diff" },
+          ]}
+        >
+          <ThreadCard thread={t} machine={machine} {...facts(t)} />
+        </PinTools>
+      );
+    }
+    case "subagent": {
+      const node = [...data.nodes.values()].map((m) => m.get(n.id)).find(Boolean)?.value;
+      return node ? <SubagentNode node={node} /> : null;
+    }
+    case "request": {
+      const r = data.requests.get(n.id)?.value;
+      return r ? <RequestNode request={r} /> : null;
+    }
+    case "terminal": {
+      const t = data.terminals.get(n.id)?.value;
+      if (!t) return null;
+      return (
+        <PinTools view={view} onToggle={toggle} items={[{ kind: "terminal", id: n.id, label: "the terminal" }]} extra={<CloseTerminal terminal={t} machine={machine} />}>
+          <TerminalNode terminal={t} machine={machine} />
+        </PinTools>
+      );
+    }
+    case "fold":
+      return <FoldedThreads container={n.id} />;
+    case "group": {
+      const fold = folded.get(n.key);
+      return <StatusHeader group={n.id as StatusGroup} count={n.children.filter((c) => c.startsWith("t:")).length + (fold?.expanded === false ? fold.threads.length : 0)} />;
+    }
+    case "pin": {
+      const p = pinOf(view, n.key);
+      if (!p) return null;
+      const props = { pin: p, onUnpin: () => toggle(p.kind, p.id), onResize: (w: number, h: number) => resize(p, w, h) };
+      if (p.kind === "terminal") {
+        const t = data.terminals.get(p.id)?.value;
+        return t ? <PinnedTerminal {...props} terminal={t} machine={machine} /> : null;
+      }
+      const t = data.threads.get(p.id)?.value;
+      if (!t) return null;
+      return p.kind === "conversation" ? <PinnedConversation {...props} thread={t} machine={machine} /> : <PinnedDiff {...props} thread={t} machine={machine} />;
+    }
+  }
+});
+
 function CanvasViewBody({
   canvasRef,
   data,
@@ -995,14 +1126,16 @@ function CanvasViewBody({
   );
   const folded = folds.graph;
   // What Fit frames when everything is too much to read: work going on, waiting on you or failed.
-  const matters = useCallback(
-    (key: string) => {
-      if (!key.startsWith("t:")) return false;
-      const t = data.threads.get(key.slice(2))?.value;
-      return !!t && (isBusy(t.status) || t.status === "error" || t.pending_requests > 0);
-    },
-    [data],
-  );
+  // Read when used, so the canvas and the cards' tools keep one callback while records stream.
+  const latest = useRef(data);
+  useLayoutEffect(() => {
+    latest.current = data;
+  });
+  const matters = useCallback((key: string) => {
+    if (!key.startsWith("t:")) return false;
+    const t = latest.current.threads.get(key.slice(2))?.value;
+    return !!t && (isBusy(t.status) || t.status === "error" || t.pending_requests > 0);
+  }, []);
   // Projects with nothing on the canvas fold into their machine's "3 more projects", unless pinned
   // onto the view, focused, or named by its filter.
   const collapsed = useMemo(() => {
@@ -1010,7 +1143,9 @@ function CanvasViewBody({
     const keep = new Set([...(display.keep ?? []), ...(filter.projects ?? []), ...(focused ? [focused] : [])]);
     return collapseUnused(folded, (p) => keep.has(p));
   }, [folded, display.projects, display.keep, filter.projects, focused]);
-  const graph = collapsed.graph;
+  // Kept while its shape is (`sameGraph`): the canvas renders again only when that changes.
+  const shaped = useRef<Graph | null>(null);
+  const graph = useMemo(() => (shaped.current = sameGraph(shaped.current, collapsed.graph)), [collapsed.graph]);
   const { setDisplay } = views;
   const projects: CanvasProjects = useMemo(
     () => ({
@@ -1099,59 +1234,22 @@ function CanvasViewBody({
     pendingFocus.current = null;
     for (const ms of [60, 420]) setTimeout(() => canvasRef.current?.focus(k), ms);
   });
-  const exists = (p: PinRec) => (p.kind === "terminal" ? data.terminals.has(p.id) : data.threads.has(p.id));
-  const toggle = (kind: PinRec["kind"], id: string) => views.togglePin(kind, id, exists);
-  const machineOf = (n: GraphNode) => data.machines.get(n.machine)?.value;
+  const { togglePin } = views;
+  const toggle = useCallback(
+    (kind: PinRec["kind"], id: string) => togglePin(kind, id, (p: PinRec) => (p.kind === "terminal" ? latest.current.terminals.has(p.id) : latest.current.threads.has(p.id))),
+    [togglePin],
+  );
   const facts = useThreadFacts(data);
-  const render = (n: GraphNode) => {
-    switch (n.kind) {
-      case "machine":
-        return <MachineNode machine={data.machines.get(n.id)!.value} />;
-      case "project":
-        return <ProjectNode project={data.projects.get(n.id)!.value} machine={machineOf(n)} />;
-      case "thread":
-        return (
-          <PinTools
-            view={view}
-            onToggle={toggle}
-            items={[
-              { kind: "conversation", id: n.id, label: "the conversation" },
-              { kind: "diff", id: n.id, label: "the diff" },
-            ]}
-          >
-            <ThreadCard thread={data.threads.get(n.id)!.value} machine={machineOf(n)} {...facts(data.threads.get(n.id)!.value)} />
-          </PinTools>
-        );
-      case "subagent": {
-        const node = [...data.nodes.values()].map((m) => m.get(n.id)).find(Boolean)?.value;
-        return node ? <SubagentNode node={node} /> : null;
-      }
-      case "request":
-        return <RequestNode request={data.requests.get(n.id)!.value} />;
-      case "terminal":
-        return (
-          <PinTools view={view} onToggle={toggle} items={[{ kind: "terminal", id: n.id, label: "the terminal" }]} extra={<CloseTerminal terminal={data.terminals.get(n.id)!.value} machine={machineOf(n)} />}>
-            <TerminalNode terminal={data.terminals.get(n.id)!.value} machine={machineOf(n)} />
-          </PinTools>
-        );
-      case "fold":
-        return <FoldedThreads container={n.id} />;
-      case "group":
-        return <StatusHeader group={n.id as StatusGroup} count={n.children.filter((c) => c.startsWith("t:")).length + (folds.folded.get(n.key)?.expanded === false ? folds.folded.get(n.key)!.threads.length : 0)} />;
-      case "pin": {
-        const p = pinOf(view, n.key);
-        if (!p) return null;
-        const props = { pin: p, onUnpin: () => toggle(p.kind, p.id), onResize: (w: number, h: number) => views.resize(p, w, h) };
-        if (p.kind === "terminal") {
-          const t = data.terminals.get(p.id)?.value;
-          return t ? <PinnedTerminal {...props} terminal={t} machine={machineOf(n)} /> : null;
-        }
-        const t = data.threads.get(p.id)?.value;
-        if (!t) return null;
-        return p.kind === "conversation" ? <PinnedConversation {...props} thread={t} machine={machineOf(n)} /> : <PinnedDiff {...props} thread={t} machine={machineOf(n)} />;
-      }
-    }
-  };
+  // What the cards read. Each card picks its own inputs from it (`CanvasCard`), so a streamed
+  // record renders its own card, and the canvas renders again only when the graph's shape changed:
+  // rendering every card's slot on each batch was ~1,700 components (tasks of 20–40 ms at 1000 threads).
+  const { resize } = views;
+  const inputs = useMemo<CardInputs>(() => ({ data, facts, view, toggle, resize, folded: folds.folded }), [data, facts, view, toggle, resize, folds.folded]);
+  const [cardStore] = useState(() => new CardStore(inputs));
+  // Set while rendering, so cards rendering in this pass read it; the others hear of it below.
+  cardStore.current = inputs;
+  useLayoutEffect(() => cardStore.notify(), [cardStore, inputs]);
+  const render = useCallback((n: GraphNode) => <CanvasCard node={n} store={cardStore} />, [cardStore]);
   const sizeOf = useCallback(
     (n: GraphNode): Size => {
       if (n.kind !== "pin") return defaultSize(n);

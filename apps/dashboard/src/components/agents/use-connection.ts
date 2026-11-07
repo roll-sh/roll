@@ -55,6 +55,14 @@ function resolved(): Promise<Resolved> {
   return resolving.p;
 }
 
+/** The owner the dashboard shows now (`null`: none yet, or signed out). */
+export function shownOwner(): Promise<string | null> {
+  return resolved().then(
+    (r) => ("owner" in r ? r.owner : null),
+    () => null,
+  );
+}
+
 const CHOSEN = "roll:agents:owner-chosen";
 
 /** Show `owner` from now on (an admin's pick, a new owner): the agents and the header follow. */

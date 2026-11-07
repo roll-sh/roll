@@ -3,6 +3,7 @@
 import { ArrowDownFromLine, ArrowRightFromLine, CircleDot, ListRestart, Maximize, Minus, Plus } from "lucide-react";
 import {
   forwardRef,
+  memo,
   useCallback,
   useEffect,
   useImperativeHandle,
@@ -66,7 +67,7 @@ export interface CanvasHandle {
  * is 100 %, 1 fits, arrows pan, ⌥↑ / ⌥↓ move the focused card among its siblings (⌥← / ⌥→ where
  * they sit side by side), ⇧D switches the direction, Escape calls `onEscape`.
  */
-export const AgentsCanvas = forwardRef<
+export const AgentsCanvas = memo(forwardRef<
   CanvasHandle,
   {
     graph: Graph;
@@ -637,22 +638,32 @@ export const AgentsCanvas = forwardRef<
   useLayoutEffect(() => {
     const root = world.current;
     if (!root) return;
-    const apply = () => {
-      for (const slot of root.querySelectorAll<HTMLElement>("[data-card]")) rove(slot, slot.dataset.key === entry && !slot.hasAttribute("data-leaving"));
+    const apply = (slots: Iterable<HTMLElement>) => {
+      for (const slot of slots) rove(slot, slot.dataset.key === entry && !slot.hasAttribute("data-leaving"));
     };
-    apply();
-    // Cards render their insides on their own (a request's answers, a terminal): keep up.
+    apply(root.querySelectorAll<HTMLElement>("[data-card]"));
+    // Cards come and go and render their insides on their own (a request's answers, a terminal,
+    // streamed text): keep up with the ones that changed, not every card on each mutation.
     let frame = 0;
-    const seen = new MutationObserver(() => {
+    const dirty = new Set<HTMLElement>();
+    const seen = new MutationObserver((records) => {
+      for (const r of records) {
+        const slot = (r.target as Element).closest?.<HTMLElement>("[data-card]");
+        if (slot) dirty.add(slot);
+        else for (const n of r.addedNodes) if (n instanceof HTMLElement && n.matches("[data-card]")) dirty.add(n);
+      }
       cancelAnimationFrame(frame);
-      frame = requestAnimationFrame(apply);
+      frame = requestAnimationFrame(() => {
+        apply(dirty);
+        dirty.clear();
+      });
     });
     seen.observe(root, { childList: true, subtree: true });
     return () => {
       seen.disconnect();
       cancelAnimationFrame(frame);
     };
-  }, [entry, graph]);
+  }, [entry]);
   /** The card a focused element is the card itself of (not a control inside it). */
   const cardAt = useCallback((el: HTMLElement | null) => {
     const slot = el?.closest<HTMLElement>("[data-card]");
@@ -820,6 +831,12 @@ export const AgentsCanvas = forwardRef<
   massExit.current = leaving > STAGE;
   let fresh = 0;
   const staged = all.filter((n) => mounted.current.has(n.key) || fresh++ < STAGE);
+  // One element per node (the graph keeps a node that didn't change): its slot doesn't render again.
+  const cards = useMemo(() => new WeakMap<GraphNode, ReactNode>(), [render]);
+  const cardOf = (n: GraphNode) => {
+    if (!cards.has(n)) cards.set(n, render(n));
+    return cards.get(n);
+  };
   if (arriving > STAGE || staging.current) for (const n of staged) if (!mounted.current.has(n.key)) still.current.add(n.key);
   useLayoutEffect(() => {
     mounted.current = new Set(staged.map((n) => n.key));
@@ -854,11 +871,13 @@ export const AgentsCanvas = forwardRef<
           if (k && k !== current) setCurrent(k);
         }}
       >
-        {/* A card that leaves the graph fades and shrinks where it was before it unmounts (it was gone in a frame). */}
-        <AnimatePresence initial={false}>
+        {/* A card that leaves the graph fades and shrinks where it was before it unmounts (it was gone in a frame).
+            The engine places cards, not motion's layout: with `presenceAffectsLayout` (the default) every
+            render gave every card a new presence context, so each streamed record rendered all of them. */}
+        <AnimatePresence initial={false} presenceAffectsLayout={false}>
           {staged.map((n) => (
-            <CardSlot key={n.key} node={n} engine={engine} still={still.current.has(n.key)} massExit={massExit} selected={n.key === selected || !!highlighted?.includes(n.key)}>
-              {render(n)}
+            <CardSlot key={n.key} nodeKey={n.key} kind={n.kind} engine={engine} still={still.current.has(n.key)} massExit={massExit} selected={n.key === selected || !!highlighted?.includes(n.key)}>
+              {cardOf(n)}
             </CardSlot>
           ))}
         </AnimatePresence>
@@ -912,7 +931,7 @@ export const AgentsCanvas = forwardRef<
       </div>
     </div>
   );
-});
+}));
 
 const ARROWS: Partial<Record<string, Arrow>> = { ArrowLeft: "left", ArrowRight: "right", ArrowUp: "up", ArrowDown: "down" };
 /** What a card's answer is: a question's options, else its primary button (Approve, Implement). */
@@ -1036,8 +1055,13 @@ function ToolButton({ label, onClick, pressed, children }: { label: string; onCl
  * graph, it stays where it was, inert and out of the pointer's way, fading and shrinking to 0.96
  * over 160 ms, then unmounts; back while it goes, it turns around.
  */
-/** `still`: it arrived with many others, so it mounts in place without its entrance (it still leaves as one). */
-function CardSlot({ node, engine, selected, still, massExit, children }: { node: GraphNode; engine: React.RefObject<CanvasEngine | null>; selected: boolean; still: boolean; massExit: React.RefObject<boolean>; children: ReactNode }) {
+/**
+ * `still`: it arrived with many others, so it mounts in place without its entrance (it still leaves as one).
+ * Memoised on its key and its card (the page's `render` makes a card again only when what it shows
+ * changed): a record arriving renders its own card, not every slot's wrappers (~1,700 components a
+ * batch at 1000 threads).
+ */
+const CardSlot = memo(function CardSlot({ nodeKey, kind, engine, selected, still, massExit, children }: { nodeKey: string; kind: GraphNode["kind"]; engine: React.RefObject<CanvasEngine | null>; selected: boolean; still: boolean; massExit: React.RefObject<boolean>; children: ReactNode }) {
   const el = useRef<HTMLDivElement>(null);
   const reduced = useReducedMotion();
   const fade = useMotionValue(1);
@@ -1054,15 +1078,15 @@ function CardSlot({ node, engine, selected, still, massExit, children }: { node:
     const e = engine.current;
     const d = el.current;
     if (!e || !d) return;
-    e.register(node.key, d);
-    return () => e.unregister(node.key, d);
-  }, [engine, node.key]);
+    e.register(nodeKey, d);
+    return () => e.unregister(nodeKey, d);
+  }, [engine, nodeKey]);
   return (
     <div
       ref={el}
       data-card
-      data-key={node.key}
-      data-kind={node.kind}
+      data-key={nodeKey}
+      data-kind={kind}
       data-selected={(present && selected) || undefined}
       data-leaving={!present || undefined}
       inert={!present}
@@ -1083,4 +1107,4 @@ function CardSlot({ node, engine, selected, still, massExit, children }: { node:
       </motion.div>
     </div>
   );
-}
+});

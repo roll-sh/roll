@@ -541,13 +541,15 @@ export class CanvasEngine {
   // canvas repainting under it (Safari repaints otherwise); at rest it's plain (translate), so 200
   // cards aren't 200 layers to commit every frame (Chromium). A crowd moving together (a filter
   // cleared, a group unfolded) stays plain: 200 layers made and dropped in one frame repainted
-  // every card (a 70 ms frame at 206 threads).
+  // every card (a 70 ms frame at 206 threads). It stays plain until all of it rests: its last
+  // dozen settling as layers of their own, one fewer each frame, had the page layerized again every
+  // frame for a second (15–30 ms each).
   private place(el: HTMLElement, p: Point, moving = false) {
-    const own = moving && this.movingCards <= OWN_LAYERS_MOVING;
+    const own = moving && !this.crowd;
     this.setTransform(el, own ? `translate3d(${p.x}px, ${p.y}px, 0)` : `translate(${p.x}px, ${p.y}px)`);
   }
-  /** How many cards moved last frame. */
-  private movingCards = 0;
+  /** Cards are moving together (more than `OWN_LAYERS_MOVING` at once), until they all rest. */
+  private crowd = false;
 
   private frame = (ms: number) => {
     this.raf = 0;
@@ -610,7 +612,7 @@ export class CanvasEngine {
       if (goes) movers++;
       steps.push([k, next, goes]);
     }
-    this.movingCards = movers;
+    this.crowd = movers > OWN_LAYERS_MOVING || (this.crowd && movers > 0);
     for (const [k, next, goes] of steps) {
       const el = this.els.get(k);
       if (el) {

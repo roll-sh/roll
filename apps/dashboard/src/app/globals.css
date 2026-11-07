@@ -572,34 +572,49 @@ body {
   animation: chrome-in 0.3s cubic-bezier(0.32, 0.72, 0, 1) 0.05s backwards;
 }
 
-/* A busy card's border breathes with the accent (1.6 s, calm); the open card keeps its own. */
+/* A busy card's border breathes with the accent (1.6 s, calm); the open card keeps its own. The
+   dimmer border is a layer over the border fading in and out, not the border's colour: a colour
+   animation restyles and repaints each busy card every frame (20 busy cards at 1000 threads cost
+   ~7 fps idle), opacity runs on the compositor. Opaque over the panel, so at its peak it is what
+   the old keyframe showed (18% accent). */
 @keyframes busy-border {
   50% {
-    border-color: color-mix(in oklab, var(--accent) 18%, transparent);
+    opacity: 1;
   }
 }
 
-[data-card]:not([data-selected]) [data-drag][data-tone="busy"] {
+[data-card]:not([data-selected]) [data-drag][data-tone="busy"]::after {
+  content: "";
+  position: absolute;
+  inset: -1px;
+  border: 1px solid color-mix(in oklab, var(--accent) 18%, var(--panel));
+  border-radius: inherit;
+  pointer-events: none;
+  opacity: 0;
   animation: busy-border 1.6s ease-in-out infinite;
 }
 
 /* A card well off screen (the engine's `data-off`) drops its animations: nothing out of sight repaints,
-   and a paused animation still keeps its element a composited layer. They start again as it comes back. */
-[data-card][data-off] * {
+   and a paused animation still keeps its element a composited layer. They start again as it comes back.
+   Named rather than `*`: a `*` made each card that crossed the line restyle all of itself (a fit after
+   clearing a filter at 206 threads spent 25 ms in style alone). */
+[data-card][data-off] :is(.pulse-dot, .shimmer, .rise, .caret, .animate-spin, .animate-pulse),
+[data-card][data-off] [data-tone="busy"]::after {
   animation: none !important;
 }
 
 /* While the canvas's view moves, what breathes on it holds still (the engine's `data-moving`): a
    frame with any repaint paints, layerizes and commits the whole page again. Named, so only these
    elements restyle as it starts and stops. */
-[data-moving] :is(.pulse-dot, .shimmer, [data-tone="busy"]) {
+[data-moving] :is(.pulse-dot, .shimmer),
+[data-moving] [data-tone="busy"]::after {
   /* Over each animation's own (more specific) shorthand. */
   animation-play-state: paused !important;
 }
 
 
 @media (prefers-reduced-motion: reduce) {
-  [data-card] [data-drag][data-tone="busy"] {
+  [data-card] [data-drag][data-tone="busy"]::after {
     animation: none;
   }
 }

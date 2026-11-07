@@ -226,6 +226,33 @@ export function deriveGraph(data: AgentsData, opts: GraphOptions = {}): Graph {
   return { roots, nodes, edges };
 }
 
+const sameList = <T>(a: readonly T[], b: readonly T[], eq: (x: T, y: T) => boolean = Object.is) => a.length === b.length && a.every((x, i) => eq(x, b[i]));
+const sameNode = (a: GraphNode, b: GraphNode) =>
+  a.key === b.key && a.kind === b.kind && a.id === b.id && a.machine === b.machine && a.parent === b.parent && a.busy === b.busy && a.relation === b.relation && a.tint === b.tint && sameList(a.children, b.children);
+const sameEdge = (a: GraphEdge, b: GraphEdge) => a.from === b.from && a.to === b.to && a.busy === b.busy && a.dashed === b.dashed && a.tint === b.tint;
+
+/**
+ * `prev` when `next` has the same shape (nodes, children, edges, what pulses), else `next` with
+ * `prev`'s node for each node that didn't change. Most streamed records change what a card says,
+ * not the graph: kept, the canvas's layout and its slots don't render again for them (each card
+ * follows its own record), and when one thread starts or stops only its card renders.
+ */
+export function sameGraph(prev: Graph | null, next: Graph): Graph {
+  if (!prev || prev === next) return next;
+  let kept = prev.nodes.size === next.nodes.size;
+  const nodes = new Map<string, GraphNode>();
+  for (const [k, n] of next.nodes) {
+    const p = prev.nodes.get(k);
+    if (p && sameNode(p, n)) nodes.set(k, p);
+    else {
+      nodes.set(k, n);
+      kept = false;
+    }
+  }
+  if (kept && sameList(prev.roots, next.roots) && sameList(prev.edges, next.edges, sameEdge)) return prev;
+  return { ...next, nodes };
+}
+
 /** Settled, or snoozed (the daemon wakes it): off the canvas, on the sidebar's shelves. */
 export function shelved(t: Thread): boolean {
   return t.inbox.settle?.state === "settled" || t.inbox.snooze !== null;

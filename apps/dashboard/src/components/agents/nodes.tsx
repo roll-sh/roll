@@ -316,7 +316,16 @@ export function ProjectNode({ project, machine }: { project: Project; machine: M
   const enter = drill && drilled !== project.id && stats.threads > 0 ? () => drill(project.id) : undefined;
   return (
     <div
-      onClick={enter && ((e) => !(e.target as HTMLElement).closest("button, a, input, [role=menu], [role=menuitem], [data-nodrag]") && enter())}
+      onClick={
+        enter &&
+        ((e) => {
+          if ((e.target as HTMLElement).closest("button, a, input, [role=menu], [role=menuitem], [data-nodrag]")) return;
+          // The tap focused the card: on a touch screen its tools would stay over the next view.
+          const slot = e.currentTarget.closest("[data-card]");
+          if (slot?.contains(document.activeElement)) (document.activeElement as HTMLElement).blur();
+          enter();
+        })
+      }
       title={enter ? `Open ${project.name}: its threads by status (F)` : undefined}
       className={enter ? "cursor-pointer" : undefined}
     >

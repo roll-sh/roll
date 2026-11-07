@@ -371,7 +371,10 @@ function boardLayout(tree: TreeLike, size: (key: string) => Size, opts: LayoutOp
     const b = box.get(key)!;
     const mine = kids.get(key)!;
     if (spreads(key)) {
-      out.set(key, { x: x + (b.w - s.w) / 2, y });
+      // Centred over its row, but never further in than MAX_DROP (as growing right): a project
+      // drilled into on a phone sat over the middle of its status columns, off the screen that
+      // shows the first one.
+      out.set(key, { x: x + Math.min((b.w - s.w) / 2, MAX_DROP), y });
       const row = mine.reduce((sum, c, i) => sum + box.get(c)!.w + (i ? siblingGap : 0), 0);
       let cx = x + (b.w - row) / 2;
       for (const c of mine) {
