@@ -1,0 +1,17 @@
+{
+  "observed_utc": "2026-11-04T13:01:16.770464+00:00",
+  "prior_checkpoint": "58ddbac7bfe632b75542bd2a9fa821f787e64581",
+  "review": "pg-resume-20261104-trail-review-r3",
+  "reviewer": "claude-opus-5-5",
+  "review_returned_after_prior_checkpoint_landed": true,
+  "raw_log_omissions_resolved": true,
+  "independently_verified_payloads": 228,
+  "previously_omitted_payloads": 95,
+  "source_acceptance": false,
+  "full_service_acceptance": false,
+  "performance_acceptance": false,
+  "trail_source_lines": [
+    181,
+    190
+  ]
+}

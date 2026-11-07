@@ -1,0 +1,57 @@
+{
+  "status": "PASS",
+  "commit": "25d8cd077c6fa658a578f3434ff896798577b0e3",
+  "remote": "25d8cd077c6fa658a578f3434ff896798577b0e3\trefs/heads/wip/resume-20261104-a169-raw-seal2",
+  "payload_blobs": 102,
+  "manifest_blob": 1,
+  "closed_set": true,
+  "source": "79746f3174996b8047c4c0c30db87f345418b162",
+  "source_manifest_entries": 2367,
+  "source_bytes_match_commit": true,
+  "command_exits": [
+    "proof-debug EXIT 0",
+    "proof-debug-summary EXIT 0",
+    "storage-debug EXIT 0",
+    "storage-debug-summary EXIT 0",
+    "integrations-debug EXIT 0",
+    "integrations-debug-summary EXIT 0",
+    "proof-release EXIT 0",
+    "proof-release-summary EXIT 0",
+    "crash-release EXIT 0",
+    "crash-release-summary EXIT 0",
+    "storage-release EXIT 0",
+    "storage-release-summary EXIT 0",
+    "clippy EXIT 0",
+    "build EXIT 0"
+  ],
+  "test_summaries": {
+    "proof-debug": [
+      4,
+      1
+    ],
+    "storage-debug": [
+      29
+    ],
+    "integrations-debug": [
+      15,
+      2,
+      1,
+      4,
+      1
+    ],
+    "proof-release": [
+      4,
+      1,
+      1
+    ],
+    "crash-release": [
+      2
+    ],
+    "storage-release": [
+      29
+    ]
+  },
+  "scope": "committed raw blobs, source hashes, command exits, expected test totals, build/clippy evidence; no new suite or timing",
+  "performance": "HELD",
+  "combined_service": "HELD"
+}

@@ -1,0 +1,85 @@
+{
+  "status": "PASS",
+  "old_anchored_validator_count": 7,
+  "actual_executed_cases": 8,
+  "cases": [
+    {
+      "case": "real-prefixed-pass",
+      "command": [
+        "/usr/bin/python3",
+        "/home/meszmate/.cache/pg-engine-resume-20261104/verification/parity-v4/audit-array.py",
+        "/home/meszmate/.cache/pg-engine-resume-20261104/verification/parity-v4/array-validator-proof/real-prefixed-pass.log",
+        "/home/meszmate/.cache/pg-engine-resume-20261104/verification/parity-v4/array-validator-proof/array-header.sql"
+      ],
+      "exit": 0,
+      "expected_exit": 0,
+      "sha256": "1875cde619bbbfe1747a70ca5136d872905fbb2731f3d6cca3febebb89834813",
+      "contains_true_failure_marker": false
+    },
+    {
+      "case": "injected-failure",
+      "command": [
+        "/usr/bin/python3",
+        "/home/meszmate/.cache/pg-engine-resume-20261104/verification/parity-v4/audit-array.py",
+        "/home/meszmate/.cache/pg-engine-resume-20261104/verification/parity-v4/array-validator-proof/injected-failure.log",
+        "/home/meszmate/.cache/pg-engine-resume-20261104/verification/parity-v4/array-validator-proof/array-header.sql"
+      ],
+      "exit": 1,
+      "expected_exit": 1,
+      "sha256": "b27883a464066126cb9fd2a9ffdc8377175c33c95dbe68795aa038d9541471bc",
+      "contains_true_failure_marker": true
+    },
+    {
+      "case": "missing-case",
+      "command": [
+        "/usr/bin/python3",
+        "/home/meszmate/.cache/pg-engine-resume-20261104/verification/parity-v4/audit-array.py",
+        "/home/meszmate/.cache/pg-engine-resume-20261104/verification/parity-v4/array-validator-proof/missing-case.log",
+        "/home/meszmate/.cache/pg-engine-resume-20261104/verification/parity-v4/array-validator-proof/array-header.sql"
+      ],
+      "exit": 1,
+      "expected_exit": 1,
+      "sha256": "26561a6626e6e1a32306af7084df3ebd696f7fd48694377577e79100e2c17f06",
+      "contains_true_failure_marker": false
+    },
+    {
+      "case": "duplicate-case",
+      "command": [
+        "/usr/bin/python3",
+        "/home/meszmate/.cache/pg-engine-resume-20261104/verification/parity-v4/audit-array.py",
+        "/home/meszmate/.cache/pg-engine-resume-20261104/verification/parity-v4/array-validator-proof/duplicate-case.log",
+        "/home/meszmate/.cache/pg-engine-resume-20261104/verification/parity-v4/array-validator-proof/array-header.sql"
+      ],
+      "exit": 1,
+      "expected_exit": 1,
+      "sha256": "5507dcfdf88223863ffb9d6265a905b2e212235b2fd756b0594a121f0a0bd5d1",
+      "contains_true_failure_marker": false
+    },
+    {
+      "case": "truncated-tail",
+      "command": [
+        "/usr/bin/python3",
+        "/home/meszmate/.cache/pg-engine-resume-20261104/verification/parity-v4/audit-array.py",
+        "/home/meszmate/.cache/pg-engine-resume-20261104/verification/parity-v4/array-validator-proof/truncated-tail.log",
+        "/home/meszmate/.cache/pg-engine-resume-20261104/verification/parity-v4/array-validator-proof/array-header.sql"
+      ],
+      "exit": 1,
+      "expected_exit": 1,
+      "sha256": "c733a0ae08d6772804c67fe11e3776f71cac2b726bc955a36a9a90c6b8746ccc",
+      "contains_true_failure_marker": false
+    },
+    {
+      "case": "real-baseline-failure",
+      "command": [
+        "/usr/bin/python3",
+        "/home/meszmate/.cache/pg-engine-resume-20261104/verification/parity-v4/audit-array.py",
+        "/home/meszmate/.cache/pg-engine-resume-20261104/verification/parity-v4/array-validator-proof/real-baseline-failure.log",
+        "/home/meszmate/.cache/pg-engine-resume-20261104/verification/parity-v4/array-validator-proof/array-header.sql"
+      ],
+      "exit": 1,
+      "expected_exit": 1,
+      "sha256": "e04bc4887e9d096cec0a8d6e1a0808682ead09a5e47ecf8577290ff908f55e88",
+      "contains_true_failure_marker": true
+    }
+  ]
+}

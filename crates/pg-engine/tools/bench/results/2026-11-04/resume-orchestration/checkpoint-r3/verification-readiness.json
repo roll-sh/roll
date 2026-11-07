@@ -1,0 +1,35 @@
+{
+  "production_candidate": "6493cf49a1e29a1914270c530956504faa6bb0e4",
+  "tested_head": "3997cf00a2a301fed65f00469625ff14f223f227",
+  "candidate_to_tested_head_docs_only": [
+    "crates/pg-engine/HANDOFF.md",
+    "crates/pg-engine/tests/difftest/STATUS.md"
+  ],
+  "source_gates": {
+    "release_build": 0,
+    "debug_tests": "451passed/18ignored/0failed",
+    "release_tests": "451passed/18ignored/0failed",
+    "clippy": "exit0; existing warnings preserved",
+    "pnpm_test_pg_unit": "PASS; separate from fullservice"
+  },
+  "parity": {
+    "array_cases": "8matchingPG18.6",
+    "seed_pair": "150seeds9000-9149;0new/10gone mismatches",
+    "regression": "51148/51150; everybaseline per-file row and both differing hunks byteidentical",
+    "isolation": "121/122specs;1647/1648permutations;12234/12238steps; declared knownbaseline difference",
+    "dump": "14817/0; complete canonical96/14609/4/108plans/results"
+  },
+  "production_integration_ready": true,
+  "full_service": "HELD until intended combined source; ONE final combined pnpm test:pg --force with CIbind env",
+  "full_product_acceptance": false,
+  "failed_attempts_preserved": [
+    "v3 setup failure:49868/51150 rejected",
+    "v4 literal-version regexfalse-negative overall1"
+  ],
+  "fdw_performance": "INCONCLUSIVE; no timingrun",
+  "global_postgres_superiority": false,
+  "references": {
+    "prior_evidence": "d24435baae158fba268b4da804c0bd5adbc34a88",
+    "setup_regress_isolation": "5229a68d2c17bbb7e1dc629d35f45130974b91ae"
+  }
+}

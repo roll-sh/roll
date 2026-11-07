@@ -1,0 +1,30 @@
+{
+  "full_product_acceptance": false,
+  "combined_pg_engine": {
+    "status": "NOT RUN on final intended integrated source",
+    "required": [
+      "exact final source and binary provenance",
+      "cargo build -p pg-engine --bin roll-engine",
+      "cargo test -p pg-engine in debug and release with expected summaries and ignored-test disposition",
+      "cargo clippy -p pg-engine --all-targets with baseline diagnostics accounted for",
+      "focused integrated regression/golden/parity checks required by combined changes"
+    ],
+    "coverage": "pg-engine runtime and integration behavior; separate from pg-control service stack"
+  },
+  "postgres_service_stack": {
+    "status": "HELD",
+    "command": "pnpm test:pg --force",
+    "crates": [
+      "pg-proxy",
+      "pg-storage",
+      "pg-control",
+      "rolld",
+      "roll-cli"
+    ],
+    "does_not_exercise_pg_engine": true,
+    "purpose": "required repository service-stack compatibility gate; not evidence of pg-engine runtime acceptance"
+  },
+  "performance_and_footprint": {
+    "status": "HELD or active as recorded by owner; no accepted timing"
+  }
+}
