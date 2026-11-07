@@ -7504,7 +7504,12 @@ impl Builder<'_, '_> {
                         }
                         // (A key under a written COLLATE: the sort's collation, not a value
                         // computed below it.)
-                        if let (Expr::Col(i, _), Plan::Project { exprs: pe, input: pin }) = (&k.expr, &**input)
+                        // (Over a DISTINCT, the key is its projection's entry.)
+                        let keyed = match &**input {
+                            Plan::Distinct { input: di, on: None, .. } => &**di,
+                            p => p,
+                        };
+                        if let (Expr::Col(i, _), Plan::Project { exprs: pe, input: pin }) = (&k.expr, keyed)
                             && let Some(Expr::Collate(inner, coll, loc)) = pe.get(*i)
                             && *loc >= 0
                             && let Some(dirs) = direction_suffix(k)
@@ -8222,6 +8227,19 @@ impl Builder<'_, '_> {
                             .is_some_and(|e| exprs[..i].iter().any(|x| x.same_as(e))),
                         _ => false,
                     };
+                    // (A written COLLATE over a column of another collation: a RelabelType,
+                    // shown as a cast, `(t)::text`.)
+                    let relabel = |i: usize| match &**input {
+                        Plan::Project { exprs, input: pin } => match exprs.get(i) {
+                            Some(Expr::Collate(x, coll, loc)) if *loc >= 0 && matches!(**x, Expr::Col(..)) => {
+                                let own = derived_collation(pin, x)
+                                    .unwrap_or_else(|| if x.ty() == DataType::Name { "C".into() } else { "default".into() });
+                                (own != *coll).then(|| x.ty().typname())
+                            }
+                            _ => None,
+                        },
+                        _ => None,
+                    };
                     let keys = c
                         .exported
                         .iter()
@@ -8229,6 +8247,10 @@ impl Builder<'_, '_> {
                         .filter(|(i, _)| !constant(*i) && !dup(*i))
                         .map(|(i, k)| {
                             let s = self.pick(k, Cx::Upper);
+                            if let Some(ty) = relabel(i) {
+                                let bare = s.strip_prefix('(').and_then(|x| x.strip_suffix(')')).unwrap_or(&s);
+                                return format!("({bare})::{ty}");
+                            }
                             // (An InitPlan's value is a Param: shown bare.)
                             let param = s.starts_with("((InitPlan ") && s.ends_with(".col1)");
                             match s.strip_prefix('(').and_then(|x| x.strip_suffix(')')) {
