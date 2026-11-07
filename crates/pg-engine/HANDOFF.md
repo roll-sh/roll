@@ -7606,6 +7606,87 @@ pg_dump_tap 14,817); `crash_random` failed intermittently there and on the commi
   difference above; lifting, once the lift table's rows are all at or below the 400k column;
   index-only `count(*)` over lineitem needs the table modelled first.
 
+## Size models, round 6 (agent 170)
+
+BENCH.md "Size models, round 6" has the numbers. A resume session (2026-11-04) continued this
+round's work in its worktree while agent 170 was stopped: the kept-header fixes, the TOAST
+fixes in VACUUM and `unchanged::Load`, the worker count from heap-only pages and the
+`a170_btree_empty_leaf` recording are its; everything was rebased onto 639a9be6 (agent 163's
+index row size checks, merged into the parallel model mode below).
+
+- **The fast hasher collapsed integer keys** (`exec/fasthash.rs`). Its multiply-rotate step
+  carried a word's high bytes' differences only into the state's high bits, so a million
+  encoded int8 keys (`[INT tag][8 bytes]`: a primary-key table's data keys, GROUP BY / hash
+  join / DISTINCT / lock-table keys) hashed to 32,768 values, and a million `key-N` texts
+  repeated 24,000. Every `FastState` table keyed by them probed chains of ~30 keys: the
+  heap models' KeyMap of primary-key tables, the build's `UniqueKeys` (the lifted primary
+  key's 2.6 s: its "collisions" re-read the first row of every key from the store, the
+  "point reads" round 5 couldn't explain, in release and dist alike), the lock table,
+  bulklocks' `KeySet`. Now a folded multiply (128-bit product, halves xored) per word; test
+  `encoded_values_hash_apart`. Other agents' hash tables benefit too (sent to the coordinator).
+- **Apply prunes and marks as PostgreSQL's does** (`exec/replication.rs` `find`,
+  `sizing::identity_fetched`). RelationFindReplTupleByIndex fetches the row through the
+  replica identity's index, so heap_page_prune_opt runs on its page; the engine's apply
+  located rows by key and never touched the heap model, so a subscriber's updated pages were
+  never pruned: `acc` was 1,077 pages against PostgreSQL's 162 after apply.sh's 60,000
+  transactions, `acc_pkey` 57 against 30, every update past a page non-HOT. Now the lookup
+  prunes the row's page and marks the primary key's dead entries (`Kills`, as an executor
+  point lookup: the whole run of the key, where PostgreSQL's scan stops at the live entry;
+  a TID-level bound would be exact). Every page count apply.sh prints now matches. CPU is
+  about the same as before (the pruning is PostgreSQL's work too), memory +30-35 MB against
+  +46-49.
+- **Planning a kept table doesn't wait for its layout** (`exec/sizing/kept.rs` `Sizes`,
+  `sizes`, `sizes_read`, `laid_out`; `main_blocks_known`, `btree_level`, `btree_blocks`,
+  `modelled_blocks`, `planned_heap_blocks` in `sql/costs.rs` and `sql/literals.rs`). A kept
+  record whose heap is all-visible with no prunable page starts with a header (`SIZED`
+  0xf2: relfilenode, token, heap pages, each btree's pages and root level); while the table
+  is kept and not laid out, the planner's sizes come from it. Reads that would change the
+  models change nothing on such a heap (Fetcher / Kills skip all-visible heaps), and every
+  reader that needs the models themselves (writes, row places, SSI page locks: `scan.rs`
+  lays them out first) still waits. A rejected header (record invalid, or a btree missing:
+  the table laid out from its rows) is dropped (`Building`'s Drop); debug builds check a
+  restored layout's sizes against the header. Older builds don't know the tag and lay the
+  table out from its rows. **Record format change**: agent 168 (crash recovery) to check
+  that nothing kept outlives a crash any differently (the header is part of the record,
+  under the same marker). Lifted, the first statement after a restart is 10-18 ms (240 ms
+  before; 11-15 at 400k; PostgreSQL 2-3).
+- **A modelled table's btree builds in the parallel workers** (`session/ddl/parbuild.rs`
+  `ParBuilt`, `Plan::model`; `session/ddl/table.rs`; `sizing::index_key_of`). The workers
+  take each row's model key with its data key (and 163's row size checks); the leader
+  lays the model out from them (`btree_from_build`). The worker count comes from the heap's
+  pages alone (`heap_blocks_for_build`: binding the index being built evaluated its
+  expressions early, a golden's notices). With the hasher fix the lifted primary key is
+  0.74-0.76 s (2.62 s; 400k 0.77-0.87; PostgreSQL 0.55-0.56).
+- **Heap model rows ascending aren't hashed** (`catalog/keymap.rs`). Rows added in key order
+  (a load, a layout from a record) are found by halving instead of the hash table, which
+  now holds only the rows after them: about 11-13 bytes a row less (3M rows: RSS 179 / 291
+  MB against 211 / 330), and no hashing at a load or layout. Random lookups of such rows
+  halve the ascending rows (`asc_row`, 0.75% of apply's samples).
+- **btree model fidelity**: posting list splits (`Btree::posting_split`: a heap TID inside an
+  equal key's posting list goes into it and the list's last TID in as the new entry,
+  `_bt_swap_posting`; an LP_DEAD list goes first by simple deletion, `simple_delete`);
+  pgstatindex counts a leaf without items as a leaf page (its empty_pages are half-dead
+  pages; round 5's 300k "one empty leaf"); pgstattuple of a btree reads leaves only (data
+  items, LP_DEAD ones dead, tuple lengths without line pointers, the leaves' and deleted
+  pages' free space). Goldens `a170_btree_empty_leaf`, `a170_btree_posting_split`.
+- **Smaller**: HOT checks compare common values directly (`sizing::same`); a non-HOT
+  update's old index values only when its columns changed; the models' table maps use the
+  fast hasher; `tools/bench/repl/apply.sh` prints each subscriber's page counts;
+  `mw.py` takes `ENGINE_ARGS`.
+- **Page counts** (`mw.py`, STATS=1, both servers with autovacuum off, lifted): 60,000 and
+  300,000 rows match everywhere; 3,000,000 rows match but one EXPLAIN cost of
+  `Bitmap Index Scan on mw1_k` (197.59 against 197.60, and its parent's startup). Before the
+  posting split, mw2_ref had 2,485 pages against 2,564 there.
+- **The limit stays at 400,000.** Lifted, the primary key, CREATE INDEX, VACUUM, the first
+  statement and tpcb-like are at the 400k numbers; COPY (2.2 against 2.0 s), DELETE of 10%
+  (0.87-0.94 against 0.60-0.64), VACUUM after it, simple-update (+15-20%) and every peak
+  (select-only 480-525 MB against 407-454; PostgreSQL 246) are not.
+- **Left**: COPY's and DELETE's per-row upkeep lifted (DELETE's profile: the models 4%,
+  KeySet / lock table / executor the rest); `Heap::prune` allocates seven vectors per page
+  (10% of apply's thread: scratch buffers); a TID-level kill bound for apply's lookups; the
+  3M rows' mw1_k cost; memory (the engine's peak is above PostgreSQL's at 400k too: not the
+  models); lineitem's index-only `count(*)` (needs lineitem modelled: not lifted).
+
 ## Planner round 9 (agent 155)
 
 BENCH.md "Planner, round 9" has the measurements. What changed in batch 1:
