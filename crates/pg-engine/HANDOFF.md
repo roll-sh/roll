@@ -5088,6 +5088,41 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
     durable, so releasing locks at the commit record alone loses updates); cheaper
     `bind_values` (precomputed substitution sites, no tree clone: 20.5% of the range read)
     and reusing the previous custom plan, with agent 171; the message body buffer.
+- **OLTP round 7** (round 27, agent 178; BENCH.md "OLTP, round 7"): custom plans keep STABLE
+  casts of their values, the message body buffer (6f532e7b5, df6853e22).
+  - *STABLE casts of values in custom plans* (difftest rounds 9 and 10, r9p): PostgreSQL's
+    custom plan folds a value's cast only when it is immutable (eval_const_expressions), so
+    `$1::int[]` of a text value stays a CoerceViaIO over the folded output routine, shown
+    `('{1,2}'::cstring)::integer[]`. `Binder::fold_cast` under `param_consts` leaves a cast of
+    a typed constant that isn't `cast_immutable` as a cast (`Binder::kept_casts`); EXPLAIN
+    (`ruleutils`, planned expressions only) shows its value as a cstring when the cast is an
+    I/O conversion (`costs::io_cast`); selectivity evaluates such casts as
+    estimate_expression_value does (`costs::Est::constant`, every operator clause and
+    `= ANY`), while estimate_array_length still counts 10 elements and the qual cost the
+    cast's routines, so r9p's custom plans cost PostgreSQL's 21.19 and its generic plan is
+    chosen after five (generic / custom 1 / 5, was 0 / 6). Planning evaluates them as
+    PostgreSQL's estimates do (`custom::estimate_casts`: each scan's restriction clauses in
+    written order, the operands that read no column), so a bad value fails the custom plan
+    while it is made: 22P02 / 22008 / 42P01 at Bind, before its result-format check (08P01),
+    and a failed custom plan isn't counted. A cast in the select list runs when executed, as
+    PostgreSQL's. Plain (non-custom) queries still fold `'x'::text::date` at bind time where
+    PostgreSQL keeps `('x'::cstring)::date`: the same rule would apply there (and fix a
+    kept plan freezing `'now'::text::timestamptz`), but it changes estimates of plain
+    queries; left for the planner (agent 177) with a full regress run. Golden
+    a178_custom_casts (recorded from PostgreSQL 18.6), wire
+    `custom_plan_stable_casts_fail_at_bind`.
+  - *Custom plans from the analysis put values only where the WHERE goes*
+    (`custom::WhereSite::alone`): when no `$n` is read outside the WHERE (the range read), the
+    nodes over the scan are the analysis's (`with_base`), not a copy walked for parameters.
+  - *The message loop's body buffer* (`server.rs` `read_message_into`): each message's body is
+    read into one buffer kept for the next (at most 8 KB kept while idle), where every message
+    allocated and zeroed a `Vec`; a Parse or Query in UTF-8 is no longer copied.
+  - Verified (on 822b59dde, the batch before its rebase onto 2192a1010, which touched none of
+    its files): release dist build, clippy (14 warnings, none in the files touched), debug
+    crate tests kept_plans, wire, golden (engine, wire and shuffled), memory_load, twophase,
+    backend_lifecycle, the regress subset create_misc, create_table, create_index, select,
+    subselect, prepare, plancache, plpgsql, arrays on a default-settings reference: 3,256 /
+    3,256 units, none changed against `results.tsv`.
 - The full crate test suite (`cargo test -p pg-engine`) passes: unit tests, 350+ golden
   files in engine and wire mode, the wire tests (including a concurrency stress test), the
   storage-format and layout tests.
