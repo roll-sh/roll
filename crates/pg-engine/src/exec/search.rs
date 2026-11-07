@@ -621,6 +621,9 @@ struct Grid {
     ypmax: Vec<u32>,
     /// Rows when it was built: past twice that (rows written again, deleted) it is rebuilt.
     built: usize,
+    /// A point column's grid: each row's point as placed (NaN: not placed), which decides a
+    /// condition on it without reading the row (`candidate_points`).
+    pts: Option<Vec<(f64, f64)>>,
 }
 
 impl Grid {
@@ -647,6 +650,7 @@ impl Grid {
             yperm: Vec::new(),
             ypmax: Vec::new(),
             built: 0,
+            pts: None,
         }
     }
 
@@ -663,6 +667,18 @@ impl Grid {
     /// (None: they couldn't be computed).
     fn add(&mut self, suffix: &[u8], vals: Option<&[Value]>) {
         let row = self.rows.push(suffix);
+        if let Some((i, Kind::Geo)) = self.shape.dim
+            && matches!(self.shape.tys[i], DataType::Point)
+        {
+            let p = match vals.map(|v| &v[i]) {
+                Some(Value::Geo(g)) => match &**g {
+                    Geo::Point(p) => (p.x, p.y),
+                    _ => (f64::NAN, f64::NAN),
+                },
+                _ => (f64::NAN, f64::NAN),
+            };
+            self.pts.get_or_insert_with(Vec::new).push(p);
+        }
         let place = vals.map_or(Place::Always, |v| place(&self.shape, v));
         let mut y = (0, u64::MAX);
         match place {
@@ -983,6 +999,9 @@ impl Placing for Grid {
         self.sorted.shrink_to_fit();
         self.delta = Vec::new();
         self.ys.shrink_to_fit();
+        if let Some(p) = &mut self.pts {
+            p.shrink_to_fit();
+        }
     }
     fn fingerprint(&self) -> &str {
         &self.fingerprint
@@ -1002,6 +1021,7 @@ impl Placing for Grid {
             + self.strips.capacity() * size_of::<Strip>()
             + (self.always.capacity() + self.nulls.capacity()) * 4
             + self.empties.capacity() * 8
+            + self.pts.as_ref().map_or(0, |p| p.capacity() * size_of::<(f64, f64)>())
     }
     fn full(&self) -> bool {
         self.rows.full()
@@ -1222,6 +1242,70 @@ pub fn candidates(
         }
     }
     Ok(Some(found))
+}
+
+/// `candidates` of a GiST or SP-GiST index on a point column (index column `.0`, table column
+/// `.1`), each with
+/// its point as the structure placed it, on which a condition on the column is decided
+/// without reading the row; None: the row is read to decide (the transaction's own rows,
+/// rows not placed). The point is that of the newest version committed, which the scan's
+/// snapshot may not see: the rows taken by it are checked again against the version the
+/// heap side reads (`scan::bitmap_keys`). None: not a point index with a structure.
+#[allow(clippy::type_complexity)]
+pub fn candidate_points(
+    t: &Table,
+    bix: &BoundIndex,
+    conds: &[(usize, &str, Value)],
+    snapshot: Option<u64>,
+    ctx: &ExecCtx,
+) -> Result<Option<(usize, usize, Vec<(Vec<u8>, Option<crate::types::geo::Point>)>)>> {
+    if !matches!(bix.index.method.as_str(), "gist" | "spgist") || trigram_index(bix, ctx) {
+        return Ok(None);
+    }
+    let Some(sh) = shape(bix) else { return Ok(None) };
+    let Some((i, Kind::Geo)) = sh.dim else { return Ok(None) };
+    let (DataType::Point, Some(crate::sql::expr::Expr::Col(col, _))) = (&sh.tys[i], bix.keys.get(i)) else {
+        return Ok(None);
+    };
+    let q = query(&sh, conds);
+    if !q.narrowed {
+        return Ok(None);
+    }
+    let Some(st) = structure::<Grid>(t, bix, &sh, ctx)? else { return Ok(None) };
+    let prefix = index_prefix(t.oid, 0);
+    let mut out: Vec<(Vec<u8>, Option<crate::types::geo::Point>)> = {
+        let g = st.lock();
+        let Some(grid) = g.downcast_ref::<Grid>().filter(|g| snapshot.is_none_or(|s| s >= g.ts)) else {
+            return Ok(None);
+        };
+        let Some(pts) = &grid.pts else { return Ok(None) };
+        let mut rows = Vec::new();
+        grid.search(&q, &mut rows);
+        rows.into_iter()
+            .map(|r| {
+                let (x, y) = pts[r as usize];
+                let p = (!x.is_nan() && !y.is_nan()).then_some(crate::types::geo::Point { x, y });
+                (grid.rows.key(&prefix, r), p)
+            })
+            .collect()
+    };
+    let end = prefix_end(&prefix);
+    let own = match own_rows(t, bix, &sh, &q, ctx)? {
+        Some(rows) => rows,
+        None => ctx.txn.borrow().writes_in(&prefix, &end)?.into_iter().filter(|(_, v)| v.is_some()).map(|(k, _)| k).collect(),
+    };
+    out.extend(own.into_iter().map(|k| (k, None)));
+    // (A row placed more than once (written again since the structure was built) or written
+    // by the transaction: read.)
+    out.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+    let mut merged: Vec<(Vec<u8>, Option<crate::types::geo::Point>)> = Vec::with_capacity(out.len());
+    for (k, p) in out {
+        match merged.last_mut() {
+            Some(last) if last.0 == k => last.1 = None,
+            _ => merged.push((k, p)),
+        }
+    }
+    Ok(Some((i, *col, merged)))
 }
 
 /// A nearest-first walk of index `bix`'s structure for a KNN scan, `ORDER BY` index column
