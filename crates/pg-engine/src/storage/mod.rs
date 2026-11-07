@@ -10,9 +10,12 @@ pub mod cache;
 pub mod cols;
 mod dead;
 pub mod discard;
+pub mod durable;
 pub mod fileio;
 mod hot;
 pub mod keys;
+#[cfg(feature = "powerloss")]
+pub mod powerloss;
 pub mod rdel;
 pub mod row;
 pub mod sst;
@@ -330,23 +333,14 @@ impl Drop for SnapshotPin {
 }
 
 fn write_manifest(dir: &Path, m: &Manifest) -> Result<()> {
-    let tmp = dir.join("MANIFEST.tmp");
     let data = serde_json::to_vec(m).map_err(|e| internal(e.to_string()))?;
-    {
-        let mut f = std::fs::File::create(&tmp)?;
-        std::io::Write::write_all(&mut f, &data)?;
-        fileio::sync(|| f.sync_all())?;
-    }
-    std::fs::rename(&tmp, dir.join("MANIFEST"))?;
-    if let Ok(d) = std::fs::File::open(dir) {
-        let _ = fileio::sync(|| d.sync_all());
-    }
+    fileio::sync(|| durable::replace(&dir.join("MANIFEST"), &data, true))?;
     Ok(())
 }
 
 impl Store {
     pub fn open(dir: &Path, opts: StoreOptions) -> Result<Arc<Store>> {
-        std::fs::create_dir_all(dir)?;
+        durable::create_dir_all_synced(dir)?;
         let manifest: Manifest = match std::fs::read(dir.join("MANIFEST")) {
             Ok(b) => {
                 serde_json::from_slice(&b).map_err(|e| internal(format!("bad MANIFEST: {e}")))?
@@ -359,11 +353,11 @@ impl Store {
         };
         // Leftovers from an interrupted flush or compaction, and spilled writes of
         // transactions a crash ended.
-        let _ = std::fs::remove_dir_all(dir.join(SPILL_DIR));
+        let _ = durable::remove_dir_all(&dir.join(SPILL_DIR));
         for e in std::fs::read_dir(dir)? {
             let p = e?.path();
             if p.extension().is_some_and(|x| x == "tmp") {
-                let _ = std::fs::remove_file(&p);
+                let _ = durable::remove_file(&p);
             }
         }
         let live: std::collections::HashSet<u64> = manifest
@@ -380,7 +374,7 @@ impl Store {
                     .and_then(|s| u64::from_str_radix(&s.to_string_lossy(), 16).ok())
                 && !live.contains(&id)
             {
-                let _ = std::fs::remove_file(&p);
+                let _ = durable::remove_file(&p);
             }
         }
         let l0 = manifest
@@ -436,7 +430,7 @@ impl Store {
             .filter(|g| !g.is_empty())
             .map(|g| Frozen::Mem(Arc::new(g)))
             .collect();
-        let wal = WalWriter::create(dir, replay_seq, if opts.sync { wal::PREALLOC } else { 0 })?;
+        let wal = WalWriter::create(dir, replay_seq, opts.sync)?;
         let store = Arc::new(Store {
             dir: dir.to_path_buf(),
             opts,
@@ -477,7 +471,7 @@ impl Store {
         // Older WAL files are fully covered now.
         for seq in wal_seqs {
             if seq != replay_seq {
-                let _ = std::fs::remove_file(wal::wal_path(dir, seq));
+                let _ = durable::remove_file(&wal::wal_path(dir, seq));
             }
         }
         Ok(store)
@@ -1391,7 +1385,7 @@ impl Store {
             match SstReader::open(&self.dir, meta, self.opts.cache.clone()) {
                 Ok(r) => files.push(Arc::new(r)),
                 Err(e) => {
-                    let _ = std::fs::remove_file(sst::sst_path(&self.dir, id));
+                    let _ = durable::remove_file(&sst::sst_path(&self.dir, id));
                     return Err(e);
                 }
             }
@@ -1442,10 +1436,10 @@ impl Store {
     /// into the store's directory under a new id and fsynced (runs aren't), read as
     /// versions at `ts` (`SstMeta::commit_ts`) once the manifest lists it.
     fn link_run(&self, run: &SstReader, ts: u64) -> Result<Arc<SstReader>> {
-        std::fs::File::open(run.path())?.sync_all()?;
+        durable::sync_path(run.path())?;
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let path = sst::sst_path(&self.dir, id);
-        std::fs::rename(run.path(), &path)?;
+        durable::rename(run.path(), &path)?;
         let mut meta = run.meta.clone();
         meta.id = id;
         sst::set_ts(&mut meta.first_key, ts);
@@ -1459,7 +1453,7 @@ impl Store {
                 Ok(Arc::new(r))
             }
             Err(e) => {
-                let _ = std::fs::remove_file(&path);
+                let _ = durable::remove_file(&path);
                 Err(e)
             }
         }
@@ -1533,11 +1527,7 @@ impl Store {
     /// `rotate` under the commit lock.
     fn rotate_locked(&self, c: &mut CommitState) -> Result<()> {
         let seq = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let new_wal = WalWriter::create(
-            &self.dir,
-            seq,
-            if self.opts.sync { wal::PREALLOC } else { 0 },
-        )?;
+        let new_wal = WalWriter::create(&self.dir, seq, self.opts.sync)?;
         fileio::wal_added();
         // The memtable frozen here holds only durable commits (group commits waiting for an
         // fsync of the old file get it now).
@@ -1683,7 +1673,7 @@ impl Store {
                     rdels: v.rdels.clone(),
                 });
             }
-            if std::fs::remove_file(wal::wal_path(&self.dir, mem.wal_seq)).is_ok() {
+            if durable::remove_file(&wal::wal_path(&self.dir, mem.wal_seq)).is_ok() {
                 fileio::wal_removed();
             }
             debug!(dir = %self.dir.display(), id, "flushed memtable");
