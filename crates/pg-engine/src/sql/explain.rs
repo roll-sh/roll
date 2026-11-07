@@ -12086,7 +12086,7 @@ impl Builder<'_, '_> {
         match crate::ext::postgres_fdw::direct::update(up, &self.ctx.catalog(), self.ctx.fmt()) {
             Some(d) => {
                 n.details.retain(|x| !matches!(x, Detail::Text("Remote SQL", _)));
-                let f = self.foreign_modify("Update", &up.rules.table, refname, d.sql, &child);
+                let f = self.foreign_modify("Update", (d.join.is_none()).then_some(&*up.rules.table), refname, d.sql, &child);
                 n.children.push(f.child("Outer"));
             }
             None => {
@@ -12112,7 +12112,7 @@ impl Builder<'_, '_> {
         match crate::ext::postgres_fdw::direct::delete(dp, &cat, self.ctx.fmt()) {
             Some(d) => {
                 n.details.retain(|x| !matches!(x, Detail::Text("Remote SQL", _)));
-                let f = self.foreign_modify("Delete", &dp.table, refname, d.sql, &child);
+                let f = self.foreign_modify("Delete", (d.join.is_none()).then_some(&*dp.table), refname, d.sql, &child);
                 n.children.push(f.child("Outer"));
             }
             None => {
@@ -12230,10 +12230,13 @@ impl Builder<'_, '_> {
     }
 
     /// A postgres_fdw direct modification's node (Foreign Update / Foreign Delete).
-    fn foreign_modify(&self, op: &str, t: &crate::catalog::Table, refname: &str, sql: String, child: &ExNode) -> ExNode {
+    /// (`t`: the table a statement of it alone changes; a join's names none.)
+    fn foreign_modify(&self, op: &str, t: Option<&crate::catalog::Table>, refname: &str, sql: String, child: &ExNode) -> ExNode {
         let mut f = ExNode::new(if op == "Update" { "Foreign Update" } else { "Foreign Delete" });
-        let schema = self.ctx.catalog().schema_name(t.schema).to_string();
-        self.target(&mut f, Some("Relation Name"), Some(&t.name), Some(&schema), refname);
+        if let Some(t) = t {
+            let schema = self.ctx.catalog().schema_name(t.schema).to_string();
+            self.target(&mut f, Some("Relation Name"), Some(&t.name), Some(&schema), refname);
+        }
         f.startup_cost = child.startup_cost;
         f.total_cost = child.total_cost;
         f.rows = child.rows;

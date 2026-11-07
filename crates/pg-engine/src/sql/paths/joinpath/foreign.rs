@@ -20,10 +20,11 @@ impl Search<'_, '_, '_> {
         }
         let leaf = &self.leaves[l];
         let (s, r) = leaf.scan.as_ref()?;
+        if std::env::var_os("A172_DEBUG").is_some() && s.with_key { eprintln!("A172 fdw_base oid={} dml={:?} mark={} fdw={} rtindex={} sys={:?} lat={} proj={}", s.table.oid, self.pl.fdw_dml_target.get(), s.mark.is_some(), s.fdw.is_some(), s.rtindex.0, leaf.sys.is_some(), leaf.lateral.is_some(), leaf.proj.is_some()); }
         if leaf.sys.is_some()
             || leaf.lateral.is_some()
             || leaf.proj.is_some()
-            || s.with_key
+            || (s.with_key && !self.fdw_dml_target(s))
             || s.sys
             || s.rtindex.0 == 0
             || s.current_of.is_some()
@@ -69,6 +70,12 @@ impl Search<'_, '_, '_> {
         }
         self.fdw_list.borrow_mut().push(pj::Base::at(s.clone(), off, leaf.ncols, r.size.tuples));
         Some(info)
+    }
+
+    /// The UPDATE / DELETE target's scan (returning its rows' keys) when the wrapper may
+    /// join it remotely (`Planner::fdw_dml_target`): its key is the remote row's ctid.
+    fn fdw_dml_target(&self, s: &crate::sql::plan::ScanPlan) -> bool {
+        self.pl.fdw_dml_target.get() == Some(s.table.oid) && s.mark.is_none() && s.fdw.is_none()
     }
 
     /// A locking level whose every relation is a plain scan of a table postgres_fdw joins
@@ -206,6 +213,7 @@ impl Search<'_, '_, '_> {
             };
             pj::join_ok(&jin)
         };
+        if std::env::var_os("A172_DEBUG").is_some() { eprintln!("A172 join set={set:b} ok={}", info.is_some()); }
         let Some(mut info) = info else { return };
         // (A row-marked join returns its bases' whole rows by their `rN` aliases.)
         if epq.is_some() && info.lower_subquery != 0 {
@@ -241,6 +249,7 @@ impl Search<'_, '_, '_> {
             pj::remote_estimate(self.pl.ctx, &mut info, &bases, &tlist, cin.local_sel, cin.local_cost);
             self.rels[ri].rows = info.rows;
         }
+        if std::env::var_os("A172_DEBUG").is_some() { eprintln!("A172 join set={set:b} rows={} cost={}..{}", info.rows, info.startup, info.total); }
         let info = SArc::new(info);
         self.fdw_rels.push((set, info.clone()));
         let jp = JP {
