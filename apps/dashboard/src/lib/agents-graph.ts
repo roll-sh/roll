@@ -6,7 +6,7 @@
  */
 
 import { isBusy, isRunning, type MachineId, type Node, type ProjectId, type ProviderId, type Request, type Run, type Thread, type ThreadChange } from "./agents-api";
-import { pendingRequests, runsOf, type AgentsData } from "./agents-store";
+import { pendingRequests, runsOf, waitingOnYou, type AgentsData } from "./agents-store";
 import { colorToken, machineColor, projectColor } from "./agents-identity";
 
 /**
@@ -523,10 +523,11 @@ export function projectStats(data: AgentsData, project: ProjectId): ProjectStats
     .map((r) => r.value)
     .filter((t) => t.project === project && t.archived_at === null && !shelved(t) && !(t.lineage?.relation === "subagent" && !isBusy(t.status) && t.status !== "error"));
   threads.sort((a, b) => b.updated_at - a.updated_at);
+  const waiting = waitingOnYou(data);
   for (const t of threads) {
     out.threads++;
-    if (isRunning(t.status)) out.running++;
-    else if (t.status === "waiting" || t.pending_requests > 0) out.waiting++;
+    if (waiting.has(t.id)) out.waiting++;
+    else if (isBusy(t.status)) out.running++;
     else if (t.status === "error") out.failed++;
     else if (unseenDone(t, newest.get(t.id))) out.done++;
     if (t.change) out.changes.push(t.change);

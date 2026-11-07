@@ -17,7 +17,7 @@
 import { isRunning, MAX_CANVAS, type Thread } from "./agents-api";
 import { keyOf, type Graph, type GraphNode } from "./agents-graph";
 import { DIRECTIONS, parseOrder, withOrder, type Direction, type Order } from "./agents-layout";
-import type { AgentsData } from "./agents-store";
+import { waitingOnYou, type AgentsData } from "./agents-store";
 
 export type StatusFilter = "running" | "waiting" | "error" | "recent";
 export const STATUS_FILTERS: readonly StatusFilter[] = ["running", "waiting", "error", "recent"];
@@ -516,12 +516,12 @@ const threadFiltered = (f: ViewFilter) => !!(f.status?.length || f.providers?.le
 
 const DAY = 24 * 60 * 60 * 1000;
 
-function statusMatches(t: Thread, s: StatusFilter, now: number): boolean {
+function statusMatches(data: AgentsData, t: Thread, s: StatusFilter, now: number): boolean {
   switch (s) {
     case "running":
       return isRunning(t.status);
     case "waiting":
-      return t.status === "waiting" || t.pending_requests > 0;
+      return waitingOnYou(data).has(t.id);
     case "error":
       return t.status === "error";
     case "recent":
@@ -533,7 +533,7 @@ function statusMatches(t: Thread, s: StatusFilter, now: number): boolean {
 export function threadMatches(data: AgentsData, t: Thread, machine: string, f: ViewFilter, now: number): boolean {
   if (f.machines?.length && !f.machines.includes(machine)) return false;
   if (f.projects?.length && !f.projects.includes(t.project)) return false;
-  if (f.status?.length && !f.status.some((s) => statusMatches(t, s, now))) return false;
+  if (f.status?.length && !f.status.some((s) => statusMatches(data, t, s, now))) return false;
   if (f.providers?.length && !f.providers.includes(t.provider)) return false;
   const q = f.text?.trim().toLowerCase();
   if (q) {

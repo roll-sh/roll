@@ -713,7 +713,7 @@ function RowBody({ row, y, template, cols, c, any, order, cursor, open, onCursor
   const t = row.thread;
   const project = client.data.projects.get(t.project)?.value;
   const providers = client.data.machines.get(row.machine)?.value.info?.providers ?? [];
-  const waiting = c.pending.get(row.id)?.length ?? t.pending_requests;
+  const waiting = c.pending.get(row.id)?.length ?? 0;
   const info = t.model ? providers.find((p) => p.id === t.provider)?.models.find((m) => m.id === t.model) : undefined;
   const model = t.model ? (info?.short_name ?? info?.name ?? t.model) : null;
   return (

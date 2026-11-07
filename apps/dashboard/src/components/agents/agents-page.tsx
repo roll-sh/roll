@@ -9,7 +9,7 @@ import { isBusy, reachable, type Thread } from "@/lib/agents-api";
 import { POP_IN, POP_OUT } from "@/lib/agents-motion";
 import { setActiveClient, type AgentsClient } from "@/lib/agents-client";
 import { absorbChildren, collapseUnused, deriveGraph, foldQuiet, groupByStatus, newestRuns, rolling, sameGraph, SHOWN_IN_GROUP, SHOWN_THREADS, type Graph, type GraphNode } from "@/lib/agents-graph";
-import { emptyData, runsOf, type AgentsData } from "@/lib/agents-store";
+import { emptyData, runsOf, waitingOnYou, type AgentsData } from "@/lib/agents-store";
 import type { Direction, Size } from "@/lib/agents-layout";
 import { closePalette, noteThreadOpen, openPalette, togglePalette } from "@/lib/agents-palette";
 import { useKeyboard } from "@/lib/keyboard-inset";
@@ -1124,7 +1124,7 @@ function CanvasViewBody({
     const grouped = space
       ? groupByStatus(narrowed, space, (id) => {
           const t = data.threads.get(id)!.value;
-          if (t.pending_requests > 0) return "needs";
+          if (waitingOnYou(data).has(id)) return "needs";
           if (isBusy(t.status)) return "running";
           if (t.status === "error" || failedUnder.has(id)) return "failed";
           return threadDone(t, newest.get(id)) ? "done" : "quiet";

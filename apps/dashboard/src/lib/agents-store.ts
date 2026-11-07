@@ -419,6 +419,22 @@ export function pendingRequests(data: AgentsData, thread?: ThreadId): Request[] 
   return out.sort((a, b) => a.created_at - b.created_at);
 }
 
+/**
+ * The threads waiting on you: the ones with a request here waiting for an answer. The one
+ * definition of "waiting" (the header, the views' tab, the zoom bar's next waiting, the cards and
+ * a project's counts agree): not the thread record's `pending_requests`, which says so before its
+ * request has arrived (and, in a demo, without one). Kept per requests map: every card asks.
+ */
+export function waitingOnYou(data: Pick<AgentsData, "requests">): ReadonlySet<ThreadId> {
+  const had = waitingCache.get(data.requests);
+  if (had) return had;
+  const out = new Set<ThreadId>();
+  for (const r of data.requests.values()) if (r.value.status === "pending") out.add(r.value.thread);
+  waitingCache.set(data.requests, out);
+  return out;
+}
+const waitingCache = new WeakMap<AgentsData["requests"], ReadonlySet<ThreadId>>();
+
 export function busyThreads(data: AgentsData): Thread[] {
   const out: Thread[] = [];
   for (const r of data.threads.values()) if (isBusy(r.value.status) && r.value.archived_at === null) out.push(r.value);
