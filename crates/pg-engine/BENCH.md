@@ -5491,7 +5491,12 @@ of every column; `sum(c)` differs in the last digits, a float sum in another ord
 
 ### Left
 
-COPY out and count(*) are the scan path (and background compaction during COPY out); the
+COPY out and count(*) are the scan path, and COPY out mostly background compaction: three
+COPY outs in a row after a COPY in, batch 2, took 1.32-1.43 s of the container's CPU the
+first time and 0.71-0.99 s the next two (PostgreSQL 0.63 s), the first one sharing the cores
+with compacting the load's files. (Formatting each row into one reused buffer instead of a
+`String` per row was measured with them, nine runs each, and made no difference: not
+landed.) The
 CREATE INDEX builds and ANALYZE spend their time in the store's scan positioning and the
 entries' runs; DELETE's index entries left for VACUUM need index access (agent 163).
 
