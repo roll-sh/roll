@@ -1430,6 +1430,7 @@ fn sys_shared_scan(
             filter: None,
             need: need.map(Rc::from),
             rows: None,
+            peeked: None,
         })));
     }
     let rows = match sys_rel_rows(table, filter, path, ctx)? {
@@ -1454,6 +1455,7 @@ fn sys_shared_scan(
                         filter: filter.cloned(),
                         need: need.map(Rc::from),
                         rows: None,
+                        peeked: None,
                     })));
                 }
                 None => crate::catalog::system::rows_shared(table, ctx)?,
@@ -1471,6 +1473,7 @@ fn sys_shared_scan(
                 filter: filter.cloned(),
                 need: need.map(Rc::from),
                 rows: None,
+                peeked: None,
             })));
         }
         None => crate::catalog::system::rows_shared(table, ctx)?,
@@ -1832,14 +1835,25 @@ impl Node for SharedRowsNode {
     }
 
     fn restrict_keys(&mut self, col: usize, keys: &[u32], _ctx: &ExecCtx) -> Result<()> {
-        // (Only before the first row, and when the filter can't raise anything or call
-        // anything for the rows left out: a Seq Scan's filter runs on every row.)
-        if self.i != 0 || self.chunk != (0, 0) || !self.filter.as_ref().is_none_or(|f| quiet_filter(f)) {
+        // (Only when the filter can't raise anything or call anything for the rows left out:
+        // a Seq Scan's filter runs on every row. The rows already read stay read: a hash join
+        // that read its first outer row before building, as ExecHashJoin does when the outer
+        // side starts cheaper, restricts the rest.)
+        if !self.filter.as_ref().is_none_or(|f| quiet_filter(f)) {
             return Ok(());
         }
+        // The rows not read yet, by their number in row order.
+        let rest: Option<&[u32]> = self.picked.as_ref().map(|p| &p[self.i.min(p.len())..]);
+        let next = match rest {
+            Some(_) => 0,
+            None => {
+                let chunks = self.rows.chunks();
+                chunks.iter().take(self.chunk.0).map(|c| c.len()).sum::<usize>() + self.chunk.1
+            }
+        };
+        let left = rest.map_or_else(|| self.rows.len().saturating_sub(next), |r| r.len());
         // (Past a quarter of the rows, reading them all costs about as much.)
-        let total = self.picked.as_ref().map_or_else(|| self.rows.len(), |p| p.len());
-        if keys.len().saturating_mul(4) > total {
+        if keys.len().saturating_mul(4) > left {
             return Ok(());
         }
         let same = |x: &Value| matches!(x, Value::Oid(_));
@@ -1852,11 +1866,15 @@ impl Node for SharedRowsNode {
         }
         all.sort_unstable();
         all.dedup();
-        if let Some(p) = &self.picked {
-            let had: std::collections::HashSet<u32> = p.iter().copied().collect();
-            all.retain(|i| had.contains(i));
+        match rest {
+            Some(r) => {
+                let had: std::collections::HashSet<u32> = r.iter().copied().collect();
+                all.retain(|i| had.contains(i));
+            }
+            None => all.retain(|&i| i as usize >= next),
         }
         self.picked = Some(all);
+        self.i = 0;
         Ok(())
     }
 }
@@ -1873,6 +1891,8 @@ struct LazyRowsNode {
     filter: Option<Expr>,
     need: Option<Rc<[bool]>>,
     rows: Option<SharedRowsNode>,
+    /// pg_class's first row, made alone before its rows were (`peek`): its oid, read already.
+    peeked: Option<u32>,
 }
 
 impl LazyRowsNode {
@@ -1882,25 +1902,78 @@ impl LazyRowsNode {
                 .then(|| ctx.reading_catalog(self.catalog.clone()));
             let generation = held.as_ref().unwrap_or(ctx);
             let rows = crate::catalog::system::rows_shared(self.table, generation)?;
-            let picked = match &self.filter {
+            let mut picked = match &self.filter {
                 Some(f) => equality_picked(f, &rows, generation)?,
                 None => None,
             };
-            self.rows = Some(SharedRowsNode::new(rows, picked, self.filter.as_ref(), self.need.clone()));
+            // (Past the row `peek` read: the rows up to it were checked then.)
+            let mut start = (0, 0);
+            if let Some(o) = self.peeked
+                && let Some(ix) = rows.lookup(0, &Value::Oid(o), &|x| matches!(x, Value::Oid(_)))
+                && let Some(&n) = ix.first()
+            {
+                match &mut picked {
+                    Some(p) => p.retain(|&i| i > n),
+                    None => {
+                        let mut at = n as usize + 1;
+                        let chunks = rows.chunks();
+                        while start.0 < chunks.len() && at >= chunks[start.0].len() {
+                            at -= chunks[start.0].len();
+                            start.0 += 1;
+                        }
+                        start.1 = at;
+                    }
+                }
+            }
+            let mut node = SharedRowsNode::new(rows, picked, self.filter.as_ref(), self.need.clone());
+            node.chunk = start;
+            self.rows = Some(node);
         }
         Ok(self.rows.as_mut().unwrap())
+    }
+
+    /// pg_class's first row that passes the filter among Postgres's own relations' (which
+    /// lead its rows), made alone: a hash join reads its outer side's first row before it
+    /// builds (ExecHashJoin, when the outer side starts cheaper), and making every row for it
+    /// came before the join's keys could restrict them (`restrict_keys`: psql's `\dt`, whose
+    /// first run after a start made pg_class's 40,000 rows at 10,000 tables for 1,000).
+    fn peek(&mut self, ctx: &ExecCtx) -> Result<Option<Row>> {
+        use crate::catalog::system::SysTable;
+        if self.table != SysTable::PgClass || self.peeked.is_some() || !self.catalog.rel_oid_edits.is_empty() {
+            return Ok(None);
+        }
+        let held = (!Arc::ptr_eq(&self.catalog, &ctx.catalog()))
+            .then(|| ctx.reading_catalog(self.catalog.clone()));
+        let generation = held.as_ref().unwrap_or(ctx);
+        let mut at = 0;
+        while let Some(row) = crate::catalog::system::class_builtin_row(generation, at)? {
+            at += 1;
+            let Some(row) = row else { continue };
+            if self.filter.as_ref().map_or(Ok(true), |f| eval_bool(f, &row, generation))? {
+                let Value::Oid(o) = row[0] else { return Ok(None) };
+                self.peeked = Some(o);
+                return Ok(Some(row));
+            }
+        }
+        Ok(None)
     }
 }
 
 impl Node for LazyRowsNode {
     fn next(&mut self, ctx: &ExecCtx) -> Result<Option<Row>> {
+        if self.rows.is_none()
+            && self.peeked.is_none()
+            && let Some(r) = self.peek(ctx)?
+        {
+            return Ok(Some(r));
+        }
         self.rows(ctx)?.next(ctx)
     }
 
     fn count_rest(&mut self, ctx: &ExecCtx) -> Result<Option<u64>> {
         match &mut self.rows {
             Some(r) => r.count_rest(ctx),
-            None if self.filter.is_none() => {
+            None if self.filter.is_none() && self.peeked.is_none() => {
                 let held = (!Arc::ptr_eq(&self.catalog, &ctx.catalog()))
                     .then(|| ctx.reading_catalog(self.catalog.clone()));
                 let n = crate::catalog::system::row_count(self.table, held.as_ref().unwrap_or(ctx));
@@ -1937,7 +2010,11 @@ impl Node for LazyRowsNode {
             (SysTable::PgAttribute, 0) => crate::catalog::system::attribute_rows_of(generation, keys)?,
             _ => None,
         };
-        if let Some(rows) = subset {
+        if let Some(mut rows) = subset {
+            // (`peek`'s row was read already.)
+            if let Some(o) = self.peeked {
+                rows.retain(|r| r[0] != Value::Oid(o));
+            }
             let rows = Arc::new(crate::catalog::system::SysRows::new(rows));
             self.rows = Some(SharedRowsNode::new(rows, None, self.filter.as_ref(), self.need.clone()));
             return Ok(());

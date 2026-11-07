@@ -2018,6 +2018,15 @@ impl NameBounds {
     }
 }
 
+/// pg_class's row of the built-in relation at place `at` of its static rows (which lead
+/// pg_class's rows, in that order), made alone as `rows` makes it (`exec/nodes.rs`
+/// `LazyRowsNode::peek`). None: past the last; Some(None): not shown (its schema dropped).
+pub fn class_builtin_row(ctx: &ExecCtx, at: usize) -> Result<Option<Option<Row>>> {
+    let Some(r) = super::static_rows::rows(SysTable::PgClass).get(at) else { return Ok(None) };
+    let oid = super::static_rows::oid_at(r, 0);
+    Ok(Some(rows_generated_for(SysTable::PgClass, ctx, Some(oid))?.into_iter().next()))
+}
+
 /// Where a relation's pg_class rows lie in the order `rows` generates them (Postgres's own
 /// relations, then tables, views, sequences, indexes, TOAST tables, composite types' rows,
 /// each by oid; `relations_of`'s order).
