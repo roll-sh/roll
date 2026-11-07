@@ -128,12 +128,22 @@ phase() {
 }
 
 start() { # a fresh server
-  if [ "$1" = pg ]; then "$RUN" pg-stop; "$RUN" pg-start >>"$LOG" 2>&1; PG_CG=$(cg "$PG_NAME")
-  elif [ "$1" = pgrust ]; then "$RUN" pgrust-stop; "$RUN" pgrust-start >>"$LOG" 2>&1; PR_CG=$(cg "$PGRUST_NAME")
-  else
-    "$RUN" engine-stop; rm -rf "$BENCH_DATA/engine"; "$RUN" engine-start >>"$LOG" 2>&1
-    if [ -n "$ENGINE_DOCKER" ]; then EN_CG=$(cg "$ENGINE_NAME"); fi
-  fi
+  # (The ports sit in Linux's ephemeral range: a client's socket can hold one for a moment, and
+  # PostgreSQL then exits "Address in use". Start again then, up to 5 times.)
+  local try ok
+  for try in 1 2 3 4 5; do
+    ok=1
+    if [ "$1" = pg ]; then "$RUN" pg-stop; "$RUN" pg-start >>"$LOG" 2>&1; PG_CG=$(cg "$PG_NAME")
+      [ "$(docker inspect -f '{{.State.Running}}' "$PG_NAME" 2>/dev/null)" = true ] || ok=0
+    elif [ "$1" = pgrust ]; then "$RUN" pgrust-stop; "$RUN" pgrust-start >>"$LOG" 2>&1 || ok=0; PR_CG=$(cg "$PGRUST_NAME")
+      [ "$(docker inspect -f '{{.State.Running}}' "$PGRUST_NAME" 2>/dev/null)" = true ] || ok=0
+    else
+      "$RUN" engine-stop; rm -rf "$BENCH_DATA/engine"; "$RUN" engine-start >>"$LOG" 2>&1 || ok=0
+      if [ -n "$ENGINE_DOCKER" ]; then EN_CG=$(cg "$ENGINE_NAME"); fi
+    fi
+    [ "$ok" = 1 ] && return 0
+    echo "start $1: not up (try $try), again" >>"$LOG"; sleep 5
+  done
 }
 stop() { case $1 in pg) "$RUN" pg-stop ;; pgrust) "$RUN" pgrust-stop ;; *) "$RUN" engine-stop ;; esac; }
 trap 'for t in $SERVERS; do stop "$t"; done' EXIT
