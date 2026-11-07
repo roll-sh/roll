@@ -251,7 +251,7 @@ async function runGroup(browser, g, ctxOpts) {
   // The canvas document (direction, order) stays in this page: never written to the owner's.
   let doc = null;
   let rev = 1;
-  await ctx.route(/\/agents\/canvas(\?|$)/, async (route) => {
+  await ctx.route(/\/agents\/[^/]+\/canvas(\?|$)/, async (route) => {
     const req = route.request();
     if (req.method() === "PUT") {
       const body = JSON.parse(req.postData() || "{}");
@@ -272,6 +272,10 @@ async function runGroup(browser, g, ctxOpts) {
   await page.clock.setFixedTime(new Date("2026-11-07T12:00:00Z"));
   const errors = [];
   page.on("pageerror", (e) => errors.push(e.message.slice(0, 200)));
+  // Nothing this run does may change the owner's data: any write that reaches roll is reported.
+  page.on("request", (q) => {
+    if (q.method() !== "GET" && q.method() !== "OPTIONS" && /\/v1\//.test(q.url()) && !/\/agents\/[^/]+\/canvas(\?|$)/.test(q.url())) errors.push(`wrote to roll: ${q.method()} ${new URL(q.url()).pathname}`);
+  });
   try {
     await page.goto(`${ctxOpts.base}/dashboard/agents${g.owner.url}`, { waitUntil: "domcontentloaded", timeout: 120000 });
     // A view saved as a list or board: show it as the canvas (only in this page).
