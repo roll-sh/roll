@@ -339,7 +339,7 @@ function AddStepMenu({ catalog, onPick, trigger, label = "Add a step" }: { catal
         {trigger}
       </PopoverPrimitive.Trigger>
       <PopoverPrimitive.Portal {...layer}>
-        <PopoverPrimitive.Positioner className="z-[130]" side="bottom" align="start" sideOffset={4} collisionPadding={{ top: 56, right: 8, bottom: 8, left: 8 }}>
+        <PopoverPrimitive.Positioner className="z-[130]" side="bottom" align="start" sideOffset={4} collisionPadding={{ top: 56, right: 8, bottom: 8, left: 8 }} collisionAvoidance={{ side: "flip", align: "shift", fallbackAxisSide: "none" }}>
           <PopoverPrimitive.Popup
             aria-label={label}
             // Opened by touch, the popup takes focus so a phone's keyboard stays down until the search is tapped.
