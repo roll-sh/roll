@@ -22,6 +22,8 @@
 //! `CRASH_CHECK_STEPS=1` checks ctids after every step and `CRASH_TRACE=<file>` appends every
 //! step's statements to the file; `CRASH_SAVE=<dir>` keeps each crashed state, which
 //! `CRASH_INSPECT=<dir>/s<seed>-r<round>` (with `CRASH_SEED`) recovers and checks again.
+//! `CRASH_POWER=1` (with `--features powerloss`) makes every crash a power cut: what no fsync
+//! covered is lost too.
 
 use pg_engine::engine::{Engine, EngineOptions};
 use pg_engine::session::Session;
@@ -374,6 +376,28 @@ fn async_commit() -> bool {
     std::env::var("CRASH_ASYNC").is_ok_and(|v| v == "1")
 }
 
+/// `CRASH_POWER=1`: each crash is a power cut, not only a process kill. The child records
+/// its file changes (the `powerloss` feature, `storage::powerloss`); then every write and
+/// directory entry no fsync covered is dropped (half the rounds: a seeded part of them is
+/// kept, as a disk may have written them anyway).
+fn power_loss() -> bool {
+    std::env::var("CRASH_POWER").is_ok_and(|v| v == "1")
+}
+
+#[cfg(feature = "powerloss")]
+fn cut_power(dir: &Path, shadow: &Path, keep: Option<u64>, seed: u64, round: u64) {
+    pg_engine::storage::powerloss::power_cut(&dir.join("data"), shadow, keep).unwrap();
+    // (Files changed outside `storage::durable` and taken as fsynced: none of the databases'.)
+    let adopted = std::fs::read_to_string(shadow.join("adopted")).unwrap_or_default();
+    let ours: Vec<&str> = adopted.lines().filter(|l| l.contains("/base/") || l.ends_with("databases.json")).collect();
+    assert!(ours.is_empty(), "seed {seed} round {round}: written outside storage::durable: {ours:?}");
+}
+
+#[cfg(not(feature = "powerloss"))]
+fn cut_power(_: &Path, _: &Path, _: Option<u64>, _: u64, _: u64) {
+    panic!("CRASH_POWER=1 needs the powerloss feature (cargo test --features powerloss)");
+}
+
 /// The steps txlog holds (by sequential scan).
 fn logged_steps(s: &mut Session) -> std::collections::BTreeSet<usize> {
     s.query("SET enable_indexscan = off; SET enable_bitmapscan = off; SET enable_indexonlyscan = off").unwrap();
@@ -669,6 +693,10 @@ fn crash_round(dir: &Path, seed: u64, round: u64) {
     if let Some(n) = on {
         child.env("CRASH_KILL_ON", n.to_string());
     }
+    let shadow = dir.join("shadow");
+    if power_loss() {
+        child.env("ROLL_POWERLOSS", format!("{}:{}", dir.join("data").display(), shadow.display()));
+    }
     let out = child.output().unwrap();
     let why = String::from_utf8_lossy(&out.stderr)
         .lines()
@@ -676,6 +704,9 @@ fn crash_round(dir: &Path, seed: u64, round: u64) {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(out.status.code().is_none(), "seed {seed} round {round}: the child failed: {why}");
+    if power_loss() {
+        cut_power(dir, &shadow, (r.below(2) == 0).then(|| r.below(1 << 30)), seed, round);
+    }
     if let Ok(save) = std::env::var("CRASH_SAVE") {
         // (The crashed state, for `crash_inspect`.)
         let to = Path::new(&save).join(format!("s{seed}-r{round}"));
@@ -789,4 +820,45 @@ fn recovery_oracle_rejects_partial_and_lost_acknowledged_transactions() {
         let want = if partial { "partial transaction" } else { "txlog against the steps logged as committed" };
         assert!(message.contains(want), "{message}");
     }
+}
+
+/// The power-loss layer itself (`storage::powerloss`): a child writes through
+/// `storage::durable`, then the power is cut. What an fsync covered stays (a file's writes, a
+/// directory's entries); what none did goes: unsynced writes, a create or rename whose
+/// directory wasn't fsynced.
+#[cfg(feature = "powerloss")]
+#[test]
+fn power_cut_keeps_only_what_was_fsynced() {
+    use pg_engine::storage::durable::{self, DFile};
+    if let Ok(dir) = std::env::var("POWER_CUT_CHILD") {
+        let d = Path::new(&dir);
+        let a = DFile::create(&d.join("a")).unwrap();
+        a.write_all_at(b"synced", 0).unwrap();
+        durable::sync_dir(d).unwrap();
+        a.sync_data().unwrap();
+        a.write_all_at(b"-lost", 6).unwrap();
+        // (Created and fsynced, but never in a fsynced directory.)
+        DFile::create(&d.join("b")).unwrap().sync_all().unwrap();
+        // (Renamed over an old file without a directory fsync: the old one comes back.)
+        durable::replace(&d.join("c"), b"new", false).unwrap();
+        durable::replace(&d.join("e"), b"durable", true).unwrap();
+        sigkill();
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let (data, shadow) = (tmp.path().join("data"), tmp.path().join("shadow"));
+    std::fs::create_dir_all(&data).unwrap();
+    std::fs::write(data.join("c"), "old").unwrap();
+    let out = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "power_cut_keeps_only_what_was_fsynced", "--nocapture"])
+        .env("POWER_CUT_CHILD", &data)
+        .env("ROLL_POWERLOSS", format!("{}:{}", data.display(), shadow.display()))
+        .output()
+        .unwrap();
+    assert!(out.status.code().is_none(), "{}", String::from_utf8_lossy(&out.stderr));
+    pg_engine::storage::powerloss::power_cut(&data, &shadow, None).unwrap();
+    let read = |n: &str| std::fs::read_to_string(data.join(n)).ok();
+    assert_eq!(read("a").as_deref(), Some("synced"));
+    assert_eq!(read("b"), None);
+    assert_eq!(read("c").as_deref(), Some("old"));
+    assert_eq!(read("e").as_deref(), Some("durable"));
 }

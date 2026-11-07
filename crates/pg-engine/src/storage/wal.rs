@@ -5,9 +5,9 @@
 use super::sst::{get_varint, put_varint};
 use crate::error::{Result, internal};
 use bytes::Bytes;
-use std::fs::{File, OpenOptions};
+use super::durable::DFile;
+use std::fs::File;
 use std::io::Read;
-use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use tracing::warn;
 
@@ -16,7 +16,7 @@ pub fn wal_path(dir: &Path, seq: u64) -> PathBuf {
 }
 
 pub struct WalWriter {
-    file: std::sync::Arc<File>,
+    file: std::sync::Arc<DFile>,
     pub seq: u64,
     pub max_ts: u64,
     pub bytes: u64,
@@ -37,11 +37,7 @@ pub type Entry = (Vec<u8>, Option<Bytes>);
 impl WalWriter {
     /// A new WAL file, zero-filled `prealloc` bytes at a time ahead of its records.
     pub fn create(dir: &Path, seq: u64, prealloc: u64) -> Result<WalWriter> {
-        let file = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(false)
-            .open(wal_path(dir, seq))?;
+        let file = DFile::open_write(&wal_path(dir, seq))?;
         let bytes = file.metadata()?.len();
         Ok(WalWriter {
             file: std::sync::Arc::new(file),
@@ -95,7 +91,7 @@ impl WalWriter {
     }
 
     /// The file, to fsync without holding the writer (group commit).
-    pub fn handle(&self) -> std::sync::Arc<File> {
+    pub fn handle(&self) -> std::sync::Arc<DFile> {
         self.file.clone()
     }
 }
