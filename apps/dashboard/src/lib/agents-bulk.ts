@@ -8,7 +8,7 @@
  * a time per page. Pure apart from `runBulk`'s sends.
  */
 
-import { commandId, isBusy, type Command, type Decision, type MachineId, type Reply, type Request, type Run, type Thread, type ThreadId } from "./agents-api";
+import { commandId, isBusy, type Command, type Decision, type MachineId, type Project, type Reply, type Request, type Run, type Thread, type ThreadId } from "./agents-api";
 import { lastRuns } from "./agents-collection";
 import { cantPark, restoreOf, shelfOf } from "./agents-inbox";
 import type { AgentsData } from "./agents-store";
@@ -176,10 +176,11 @@ export function planBulk(data: AgentsData, ids: Iterable<ThreadId>, spec: BulkSp
         break;
       }
       case "publish": {
-        const why = cantPublish(t, last!.get(id));
+        const project = data.projects.get(t.project)?.value;
+        const why = cantPublish(t, last!.get(id), project);
         if (why) skip(id, why);
         else {
-          const repo = !!data.projects.get(t.project)?.value.repo;
+          const repo = !!project?.repo;
           step({ type: "thread.publish", thread: id, message: t.title, land: t.change === null && repo });
         }
         break;
@@ -203,8 +204,10 @@ export function planBulk(data: AgentsData, ids: Iterable<ThreadId>, spec: BulkSp
 }
 
 /** Why a thread has nothing to publish (`null`: it has). */
-export function cantPublish(t: Thread, last: Run | undefined): string | null {
+export function cantPublish(t: Thread, last: Run | undefined, project?: Project): string | null {
   if (!t.worktree) return "It works outside a worktree";
+  // Not a roll code repo: it pushes to `origin`, so it needs one.
+  if (project?.git && !project.repo && !project.git.remote) return "Its project has no remote to push to";
   if (isBusy(t.status)) return "It's still running";
   if (t.change?.status === "landed") return "Its change landed";
   if (t.change && t.change.status !== "conflict" && t.change.status !== "failing") return "It's published already";
