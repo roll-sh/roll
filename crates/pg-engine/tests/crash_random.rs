@@ -866,7 +866,8 @@ fn power_cut_keeps_only_what_was_fsynced() {
 
 /// Commits acknowledged into a WAL file the store just made (at open, and after a memtable
 /// filled and the WAL rotated) survive a power cut: the file's directory entry is durable
-/// before they are. The child commits key `k<i>` until `ROTATIONS` rotations have happened
+/// before they are. The child commits key `k<i>` (fixed width: the store's user keys are
+/// prefix-free) until `ROTATIONS` rotations have happened
 /// and then 5 more, printing each acknowledged `i`, and dies.
 #[cfg(feature = "powerloss")]
 #[test]
@@ -879,7 +880,7 @@ fn power_cut_keeps_commits_in_a_new_wal() {
         let s = Store::open(&d.join("db"), opts()).unwrap();
         let (mut i, mut after) = (0u64, 0);
         while after < 5 {
-            s.commit(vec![(format!("k{i}").into_bytes(), Some(vec![b'x'; 1000].into()))], |_| Ok(())).unwrap();
+            s.commit(vec![(format!("k{i:06}").into_bytes(), Some(vec![b'x'; 1000].into()))], |_| Ok(())).unwrap();
             println!("acked {i}");
             i += 1;
             if wals(&d.join("db")) > rotations {
@@ -903,7 +904,7 @@ fn power_cut_keeps_commits_in_a_new_wal() {
         pg_engine::storage::powerloss::power_cut(&data, &shadow, None).unwrap();
         let s = Store::open(&data.join("db"), opts()).unwrap();
         let ts = s.visible_ts();
-        let lost: Vec<u64> = (0..=acked).filter(|i| s.get(format!("k{i}").as_bytes(), ts).unwrap().is_none()).collect();
+        let lost: Vec<u64> = (0..=acked).filter(|i| s.get(format!("k{i:06}").as_bytes(), ts).unwrap().is_none()).collect();
         assert!(lost.is_empty(), "{} WAL file(s), acknowledged commits lost to a power cut: {} of {}, the first {:?}", rotations, lost.len(), acked + 1, &lost[..lost.len().min(5)]);
     }
 }

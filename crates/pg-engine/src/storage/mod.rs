@@ -332,8 +332,12 @@ impl Drop for SnapshotPin {
     }
 }
 
+/// Replace the manifest durably. The directory is fsynced first: the SSTs it names were
+/// renamed into it, and a power cut may otherwise keep the manifest's rename without theirs
+/// (renames are only ordered by a directory fsync between them; PostgreSQL's durable_rename).
 fn write_manifest(dir: &Path, m: &Manifest) -> Result<()> {
     let data = serde_json::to_vec(m).map_err(|e| internal(e.to_string()))?;
+    fileio::sync(|| durable::sync_dir(dir))?;
     fileio::sync(|| durable::replace(&dir.join("MANIFEST"), &data, true))?;
     Ok(())
 }
