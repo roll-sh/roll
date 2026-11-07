@@ -12,7 +12,8 @@
 
 use std::sync::Arc;
 
-use super::Analyzed;
+use super::{Analyzed, BoundQuery};
+use crate::sql::paths::ScanChoice;
 use crate::error::Result;
 use crate::exec::ExecCtx;
 use crate::sql::expr::{Expr, eval};
@@ -93,6 +94,15 @@ fn with_base(p: &Plan, s: Box<ScanPlan>) -> Option<Plan> {
     })
 }
 
+/// `p`, a scan under projections, with the scan `f` makes of its own.
+fn scan_swapped(p: &Plan, f: &dyn Fn(&ScanPlan) -> Option<Box<ScanPlan>>) -> Option<Plan> {
+    match p {
+        Plan::Scan(s) => Some(Plan::Scan(f(s)?)),
+        Plan::Project { input, exprs } => Some(Plan::Project { input: Arc::new(scan_swapped(input, f)?), exprs: exprs.clone() }),
+        _ => None,
+    }
+}
+
 /// The one scan under a chain of the nodes a single-level SELECT puts over it.
 fn base_scan(p: &Plan) -> Option<&ScanPlan> {
     match p {
@@ -149,7 +159,9 @@ impl Analyzed {
         }
     }
 
-    fn values_in(&self, vals: &[Value], ctx: &ExecCtx) -> Put<Analyzed> {
+    /// Whether values may be put in at all (else whether binding them is needed for these
+    /// values or for any), and where the WHERE goes.
+    fn site_for(&self, vals: &[Value]) -> Put<&WhereSite> {
         let Some(site) = self.site.as_deref() else { return Err(Bail::Never) };
         if !self.replannable()
             || !matches!(self.step, super::Step::Select(_))
@@ -165,13 +177,53 @@ impl Analyzed {
         if vals.iter().any(Value::is_null) {
             return Err(Bail::Rebind);
         }
-        let sub = Subst { vals, ctx };
+        Ok(site)
+    }
+
+    /// The scan with the WHERE placed again, the values in.
+    fn placed(&self, site: &WhereSite, sub: &Subst) -> Put<Box<ScanPlan>> {
         let pred = sub.expr(&site.pred, true)?;
         let mut scan = site.scan.clone();
         if !site.alone {
             sub.plan(&mut scan)?;
         }
-        let Plan::Scan(placed) = super::optimize::add_filter(&self.cat, scan, pred) else { return Err(Bail::Rebind) };
+        match super::optimize::add_filter(&self.cat, scan, pred) {
+            Plan::Scan(placed) => Ok(placed),
+            _ => Err(Bail::Rebind),
+        }
+    }
+
+    /// Whether a custom plan of this analysis may be another's with its scan chosen again
+    /// (`rechosen`): no value is read but in the WHERE.
+    pub fn rechoosable(&self) -> bool {
+        self.site.as_deref().is_some_and(|s| s.alone)
+    }
+
+    /// The custom plan for `vals` made from `kept`, a custom plan of this analysis for other
+    /// values, with its scan's path chosen again for them (`ScanChoice::rechoose`): what
+    /// planning the analysis with them gives when the same path wins. None: plan it.
+    pub fn rechosen(&self, kept: &BoundQuery, choice: &ScanChoice, vals: &[Value], ctx: &ExecCtx) -> Option<BoundQuery> {
+        let site = self.site_for(vals).ok().filter(|s| s.alone)?;
+        let placed = self.placed(site, &Subst { vals, ctx }).ok()?;
+        let plan = Arc::new(scan_swapped(&kept.plan, &|old| choice.rechoose(old, &placed, ctx))?);
+        // (Still costed by its scan's path alone, no Gather over it.)
+        crate::sql::paths::planned_total(&plan, ctx, true)?;
+        Some(BoundQuery {
+            plan,
+            cols: kept.cols.clone(),
+            params: kept.params.clone(),
+            perms: kept.perms.clone(),
+            hidden_rtes: kept.hidden_rtes,
+            param_domains: Vec::new(),
+            gathers: Default::default(),
+            cost: Default::default(),
+        })
+    }
+
+    fn values_in(&self, vals: &[Value], ctx: &ExecCtx) -> Put<Analyzed> {
+        let site = self.site_for(vals)?;
+        let sub = Subst { vals, ctx };
+        let placed = self.placed(site, &sub)?;
         // (With no `$n` outside the WHERE, the nodes over the scan are the analysis's.)
         let plan = if site.alone {
             with_base(&self.plan, placed).ok_or(Bail::Never)?
