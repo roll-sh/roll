@@ -245,16 +245,19 @@ pub struct Cursor {
     params: Vec<Expr>,
     /// A FETCH sent and not read yet (fetch_more_data_begin).
     inflight: bool,
+    /// A declared cursor's (its number at DECLARE): `Conns::declared` tracks it.
+    declared: Option<u32>,
 }
 
 impl Cursor {
     pub fn new(key: u32, fetch: usize, sql: String, params: Vec<Expr>) -> Cursor {
-        Cursor { key, name: String::new(), fetch, batch: VecDeque::new(), eof: false, sql, params, inflight: false, number: None }
+        Cursor { key, name: String::new(), fetch, batch: VecDeque::new(), eof: false, sql, params, inflight: false, number: None, declared: None }
     }
 
     /// The cursor number its scan took when it began (a declared cursor's: at DECLARE).
     pub fn numbered(mut self, n: Option<u32>) -> Cursor {
         self.number = n;
+        self.declared = n;
         self
     }
 
@@ -379,6 +382,24 @@ pub fn begin_scans(p: &Arc<crate::sql::plan::Plan>, ctx: &ExecCtx) -> Result<()>
     Ok(())
 }
 
+/// EndForeignScan of a declared cursor's scans at its CLOSE: each remote cursor still open
+/// is closed (close_cursor), the first failure reported.
+pub fn end_scans(p: &Arc<crate::sql::plan::Plan>, ctx: &ExecCtx) -> Result<()> {
+    use crate::sql::plan::Plan;
+    if ctx.sess.remote.borrow().fdw.declared.is_empty() {
+        return Ok(());
+    }
+    match &**p {
+        Plan::Scan(s) => return connection::close_declared(ctx, &**s as *const ScanPlan as usize),
+        Plan::Foreign(f) => return connection::close_declared(ctx, &**f as *const crate::sql::plan::ForeignRel as usize),
+        _ => {}
+    }
+    for c in crate::sql::explain::plan_inputs(p) {
+        end_scans(c, ctx)?;
+    }
+    Ok(())
+}
+
 /// Open a foreign scan (BeginForeignScan + create_cursor).
 pub fn open(s: &ScanPlan, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<BoxNode> {
     if s.current_of.is_some() {
@@ -480,6 +501,13 @@ impl Cursor {
         };
         self.eof = r.rows.len() < self.fetch;
         self.batch.extend(r.rows);
+        // (A declared cursor's: open remotely until its end, closed at the cursor's CLOSE
+        // before that, `end_scans`.)
+        if let Some(n) = self.declared
+            && (declaring || self.eof)
+        {
+            connection::note_declared(ctx, self.key, n, !self.eof);
+        }
         // (close_cursor, sent with the connection's next command; the transaction's end
         // closes it when that is the next.)
         if self.eof {

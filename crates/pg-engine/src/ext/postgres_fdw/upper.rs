@@ -74,7 +74,7 @@ impl crate::ext::fdw::ForeignRelOps for UpperScan {
 
     fn explain(&self, _fr: &ForeignRel, refname: &dyn Fn(usize) -> String, ctx: &ExecCtx, verbose: bool) -> Vec<(&'static str, String)> {
         let cat = ctx.catalog();
-        let rels = self.input.relations(&self.input.info, refname, &cat);
+        let rels = self.input.relations(&self.input.info, refname, &cat, verbose);
         let mut v = vec![("Relations", format!("Aggregate on ({rels})"))];
         if verbose {
             v.push(("Remote SQL", self.sql(ctx).0));

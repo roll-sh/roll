@@ -2823,6 +2823,36 @@ pub fn delete_row(
     delete_row_with(t, indexes, dkey, old, false, ctx)
 }
 
+/// A postgres_fdw row's DELETE: what its remote statement returns (store_returning_result)
+/// goes into the source row's columns RETURNING reads (the named table's columns for a
+/// member, by `map`), as the source needn't have fetched them (a join sent the target's
+/// ctid only).
+#[inline(never)]
+fn foreign_delete_returning(
+    t: &Table,
+    dkey: &[u8],
+    back: crate::ext::postgres_fdw::modify::Back,
+    map: Option<&[Option<usize>]>,
+    src: &mut [Value],
+    ctx: &ExecCtx,
+) -> Result<()> {
+    let cols = back.cols.clone();
+    let _back = crate::ext::postgres_fdw::modify::with_back(back);
+    let Some(row) = crate::ext::postgres_fdw::modify::delete(t, dkey, ctx)? else { return Ok(()) };
+    for c in cols {
+        let at = match map {
+            Some(m) => m.iter().position(|x| *x == Some(c)),
+            None => Some(c),
+        };
+        if let (Some(at), Some(v)) = (at, row.get(c))
+            && let Some(s) = src.get_mut(at)
+        {
+            *s = v.clone();
+        }
+    }
+    Ok(())
+}
+
 /// `delete_row`; its index entries deferred to the statement's end when `defer`
 /// (`Txn::defer_entry_delete`, `DeleteNode::defers_entries`).
 fn delete_row_with(
@@ -5548,14 +5578,21 @@ impl Node for DeleteNode {
             {
                 // (A postgres_fdw table's statement returns what RETURNING and AFTER ROW
                 // triggers read.)
-                let _back = t.foreign.is_some().then(|| {
+                let back = t.foreign.is_some().then(|| {
                     let exprs: Vec<&Expr> = self.plan.returning.iter().collect();
                     let n = self.plan.table.columns.len();
-                    let back = crate::ext::postgres_fdw::modify::Back::of(&t, &crate::ext::postgres_fdw::modify::tgtypes(triggers), tt::DELETE, &exprs, self.plan.sys.then_some(n + 1))
-                        .with_old_new(&t, self.plan.old_new.as_ref(), &exprs);
-                    crate::ext::postgres_fdw::modify::with_back(back)
+                    crate::ext::postgres_fdw::modify::Back::of(&t, &crate::ext::postgres_fdw::modify::tgtypes(triggers), tt::DELETE, &exprs, self.plan.sys.then_some(n + 1))
+                        .with_old_new(&t, self.plan.old_new.as_ref(), &exprs)
                 });
-                delete_row_with(&t, indexes, &dkey, &old, self.defer_entries, ctx)?;
+                match back {
+                    Some(back) if crate::ext::postgres_fdw::scan::is_postgres_fdw(&ctx.catalog(), &t) => {
+                        foreign_delete_returning(&t, &dkey, back, map, &mut src, ctx)?
+                    }
+                    back => {
+                        let _back = back.and_then(crate::ext::postgres_fdw::modify::with_back);
+                        delete_row_with(&t, indexes, &dkey, &old, self.defer_entries, ctx)?;
+                    }
+                }
             }
             if self.plan.inh {
                 if trigger::any(triggers, true, false, tt::DELETE, ctx) {

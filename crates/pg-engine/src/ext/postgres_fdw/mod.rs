@@ -5,6 +5,7 @@
 pub mod connection;
 pub mod deparse;
 pub mod direct;
+pub mod directjoin;
 pub mod import;
 pub mod join;
 pub mod joinscan;

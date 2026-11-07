@@ -1972,6 +1972,13 @@ struct Planner<'c, 'a> {
     /// The range table indexes of the level's sources of no table's rows with a whole-row
     /// mark (ROW_MARK_COPY, `rowmarks::copied`): their whole row's width is in the paths'.
     copy_marks: std::cell::RefCell<std::collections::HashSet<usize>>,
+    /// The level's UPDATE / DELETE target, a postgres_fdw table its wrapper may join
+    /// remotely with the statement's other foreign relations (`postgres_fdw::direct::join_target`):
+    /// its scan returning the row's key goes into foreign joins, the key as `rN.ctid`.
+    fdw_dml_target: std::cell::Cell<Option<u32>>,
+    /// The level's UPDATE target that is a foreign table (or DELETE target with row
+    /// triggers of it), whose whole row goes up (add_row_identity_columns' wholerow).
+    fdw_wholerow_target: std::cell::Cell<Option<u32>>,
     /// Partitionwise joins made, by their first child's address: as FROM items of joins
     /// above (`joinpath::PwJoin`).
     /// Partitionwise joins' Appends (by their `pw` id) and how they are partitioned.
@@ -2043,6 +2050,8 @@ impl<'c, 'a> Planner<'c, 'a> {
             whole_rows: Default::default(),
             ref_marks: Default::default(),
             copy_marks: Default::default(),
+            fdw_dml_target: Default::default(),
+            fdw_wholerow_target: Default::default(),
             pw_joins: Default::default(),
             absorbed: Default::default(),
             post_cost: Default::default(),
@@ -3624,6 +3633,29 @@ fn limit_costs(p: &Path, count: f64, offset: f64) -> (f64, f64) {
 // ── building the relation from a scan ──
 
 impl Planner<'_, '_> {
+    /// set_rel_width's whole-row Var of a foreign table's scan: 24 bytes of tuple header and
+    /// its columns' widths (get_relation_data_width) when its row mark copies the row
+    /// (ROW_MARK_COPY: locked, or another relation of a locking level or of an UPDATE /
+    /// DELETE) or it is the target whose whole row goes up (`Planner::fdw_wholerow_target`).
+    pub(super) fn fdw_whole_row_width(&self, s: &ScanPlan) -> u32 {
+        let t = &s.table;
+        if !t.is_foreign() {
+            return 0;
+        }
+        let copy = Self::fdw_copy_marked(s) || (!s.with_key && (s.mark.is_some() || (s.rti.0 != 0 && self.ref_marks.borrow().contains(&s.rti.0))));
+        let target = s.with_key && !copy && self.fdw_wholerow_target.get() == Some(t.oid);
+        if !copy && !target {
+            return 0;
+        }
+        24 + (0..t.columns.len()).filter(|&i| !t.columns[i].dropped).map(|i| costs::col_width(&self.cat, t, i)).sum::<u32>()
+    }
+
+    /// A foreign scan keyed by its row mark's copy (`rowmarks::key`: its key the whole row,
+    /// not a ctid).
+    fn fdw_copy_marked(s: &ScanPlan) -> bool {
+        s.fdw.as_ref().is_some_and(|f| f.copy_mark)
+    }
+
     fn rel(&self, s: &ScanPlan, needed: &[bool]) -> Option<Rel> {
         let t = s.table.clone();
         let (size, allvisfrac) = rel_size(&t, self.ctx);
@@ -3676,12 +3708,15 @@ impl Planner<'_, '_> {
         // columns the scan returns (estimate_size's reltarget width).
         let size = match t.is_foreign() {
             true => {
+                // (set_rel_width's reltarget: a target's ctid and a whole-row Var too.)
                 let width = need
                     .iter()
                     .enumerate()
                     .filter(|(_, n)| **n)
                     .map(|(i, _)| costs::col_width(&self.cat, &t, i))
-                    .sum();
+                    .sum::<u32>()
+                    + if s.with_key && !Self::fdw_copy_marked(s) { 6 } else { 0 }
+                    + self.fdw_whole_row_width(s);
                 // (With use_remote_estimate the remote EXPLAIN sizes it: no 10-page guess.)
                 let remote = crate::ext::fdw::wrapper_of(&self.cat, &t).is_some()
                     && crate::ext::postgres_fdw::join::opts(&self.cat, &t).use_remote_estimate;
@@ -6646,6 +6681,11 @@ fn plan_level_ordered(
     sublinkcopy::copy_into_merge(plan);
     p.ref_marks.replace(rowmarks::referenced(plan));
     p.copy_marks.replace(rowmarks::copied(plan));
+    if matches!(plan, Plan::Update(_) | Plan::Delete(_)) {
+        let cat = ctx.catalog();
+        p.fdw_dml_target.set(crate::ext::postgres_fdw::direct::join_target(&cat, plan));
+        p.fdw_wholerow_target.set(crate::ext::postgres_fdw::direct::wholerow_target(plan));
+    }
     p.pull_up_consts(plan);
     p.reduce_outer_joins(plan);
     p.remove_result_semijoins(plan);

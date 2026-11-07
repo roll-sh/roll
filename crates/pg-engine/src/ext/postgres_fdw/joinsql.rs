@@ -185,6 +185,17 @@ impl<'a> Sql<'a> {
 
     /// deparseFromExprForRel.
     fn rel_from_sql(&self, rel: &RelInfo, use_alias: bool, additional: &mut Vec<String>) -> String {
+        self.deparse_from(rel, use_alias, None, &mut Vec::new(), additional)
+    }
+
+    /// deparseFromExprForRel with an ignore_rel: the FROM / USING list of a direct UPDATE /
+    /// DELETE of base `target` (deparseDirectUpdateSql), without it; the clauses of the
+    /// inner joins it is in go to `ignore_conds`, for the WHERE (its joins are all inner).
+    pub fn rels_without(&self, rel: &RelInfo, target: usize, ignore_conds: &mut Vec<Expr>, additional: &mut Vec<String>) -> String {
+        self.deparse_from(rel, true, Some(target), ignore_conds, additional)
+    }
+
+    fn deparse_from(&self, rel: &RelInfo, use_alias: bool, ignore: Option<usize>, ignore_conds: &mut Vec<Expr>, additional: &mut Vec<String>) -> String {
         match &rel.kind {
             Kind::Base(k) => {
                 let b = &self.bases[*k];
@@ -195,16 +206,41 @@ impl<'a> Sql<'a> {
                 s
             }
             Kind::Join { jt, outer, inner, joinclauses, make_outer_subquery, make_inner_subquery } => {
+                let mut joinclauses: &[Expr] = joinclauses;
+                let is = |r: &RelInfo, t: usize| matches!(r.kind, Kind::Base(k) if k == t);
+                let (mut outer_is_target, mut inner_is_target) = (false, false);
+                if let Some(t) = ignore.filter(|t| rel.relids >> t & 1 == 1) {
+                    if *jt == JoinKind::Inner {
+                        ignore_conds.extend(joinclauses.iter().cloned());
+                        joinclauses = &[];
+                    }
+                    outer_is_target = is(outer, t);
+                    inner_is_target = !outer_is_target && is(inner, t);
+                }
                 let mut add_o = Vec::new();
                 let mut add_i = Vec::new();
-                let o = self.range_tbl_ref(outer, *make_outer_subquery, &mut add_o);
-                let i = self.range_tbl_ref(inner, *make_inner_subquery, &mut add_i);
-                let out = if *jt == JoinKind::Semi {
+                let o = if outer_is_target {
+                    String::new()
+                } else {
+                    self.range_tbl_ref(outer, *make_outer_subquery, ignore, ignore_conds, &mut add_o)
+                };
+                if inner_is_target {
+                    additional.extend(add_o);
+                    return o;
+                }
+                let i = self.range_tbl_ref(inner, *make_inner_subquery, ignore, ignore_conds, &mut add_i);
+                if *jt == JoinKind::Semi {
                     let mut e = format!("EXISTS (SELECT NULL FROM {i}");
                     self.where_clause(&mut e, rel, joinclauses, &add_i);
                     add_i.clear();
                     e.push(')');
                     additional.push(e);
+                }
+                if outer_is_target {
+                    additional.extend(add_i);
+                    return i;
+                }
+                let out = if *jt == JoinKind::Semi {
                     o
                 } else {
                     let on = if joinclauses.is_empty() { "(TRUE)".to_string() } else { format!("({})", self.conditions(rel, joinclauses)) };
@@ -218,9 +254,9 @@ impl<'a> Sql<'a> {
     }
 
     /// deparseRangeTblRef: a relation of a join, as a subquery when it must be one.
-    fn range_tbl_ref(&self, rel: &RelInfo, make_subquery: bool, additional: &mut Vec<String>) -> String {
+    fn range_tbl_ref(&self, rel: &RelInfo, make_subquery: bool, ignore: Option<usize>, ignore_conds: &mut Vec<Expr>, additional: &mut Vec<String>) -> String {
         if !make_subquery {
-            return self.rel_from_sql(rel, true, additional);
+            return self.deparse_from(rel, true, ignore, ignore_conds, additional);
         }
         let sub = self.select(rel, None, &rel.remote_conds, &Tail::default());
         let mut s = format!("({sub}) s{}", rel.relation_index);
@@ -229,6 +265,11 @@ impl<'a> Sql<'a> {
             s.push_str(&format!("({})", cols.join(", ")));
         }
         s
+    }
+
+    /// appendWhereClause, for a direct modification's WHERE.
+    pub fn where_of(&self, sql: &mut String, scope: &RelInfo, conds: &[Expr], additional: &[String]) {
+        self.where_clause(sql, scope, conds, additional)
     }
 }
 

@@ -126,6 +126,11 @@ pub struct Lazy {
 }
 
 impl Lazy {
+    /// EndForeignScan of its foreign scans at the cursor's CLOSE (their remote cursors).
+    pub(crate) fn end_foreign_scans(&self, ctx: &ExecCtx) -> Result<()> {
+        crate::ext::postgres_fdw::scan::end_scans(&self.plan, ctx)
+    }
+
     pub(crate) fn close(&mut self) -> Result<()> {
         self.node.take();
         self.kept = Default::default();

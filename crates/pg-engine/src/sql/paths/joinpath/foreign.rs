@@ -23,7 +23,7 @@ impl Search<'_, '_, '_> {
         if leaf.sys.is_some()
             || leaf.lateral.is_some()
             || leaf.proj.is_some()
-            || s.with_key
+            || (s.with_key && !self.fdw_dml_target(s))
             || s.sys
             || s.rtindex.0 == 0
             || s.current_of.is_some()
@@ -69,6 +69,12 @@ impl Search<'_, '_, '_> {
         }
         self.fdw_list.borrow_mut().push(pj::Base::at(s.clone(), off, leaf.ncols, r.size.tuples));
         Some(info)
+    }
+
+    /// The UPDATE / DELETE target's scan (returning its rows' keys) when the wrapper may
+    /// join it remotely (`Planner::fdw_dml_target`): its key is the remote row's ctid.
+    fn fdw_dml_target(&self, s: &crate::sql::plan::ScanPlan) -> bool {
+        self.pl.fdw_dml_target.get() == Some(s.table.oid) && s.mark.is_none() && s.fdw.is_none()
     }
 
     /// A locking level whose every relation is a plain scan of a table postgres_fdw joins
@@ -225,7 +231,8 @@ impl Search<'_, '_, '_> {
             }
             _ => return,
         };
-        let cost = |es: &[Expr]| (0.0, es.iter().map(costs::qual_cost).sum::<f64>() * costs::CPU_OPERATOR_COST);
+        // (cost_qual_eval: `qual_cost` is per tuple already, cpu_operator_cost per operator.)
+        let cost = |es: &[Expr]| (0.0, es.iter().map(costs::qual_cost).sum::<f64>());
         let cin = pj::JoinCostIn {
             rows,
             width,
@@ -283,6 +290,10 @@ impl Search<'_, '_, '_> {
     pub(super) fn fdw_param_paths(&self, l: usize, r: &Rc<Rel>, width: u32) -> Vec<JP> {
         let leaf = &self.leaves[l];
         let Some((s, _)) = leaf.scan.as_ref() else { return Vec::new() };
+        // (Not the UPDATE / DELETE target's own scan: its pushdown is the target's.)
+        if s.with_key {
+            return Vec::new();
+        }
         let (set, off) = (1u32 << l, leaf.off);
         let lat = if self.has_lat(l) { self.lateral_closure(l) } else { 0 };
         let cat = self.pl.cat.clone();
@@ -390,6 +401,10 @@ impl Search<'_, '_, '_> {
     pub(super) fn fdw_sorted_paths(&self, l: usize, r: &Rc<Rel>, width: u32, f: &pj::RelInfo, want: &Want, base: &Path) -> Vec<JP> {
         let leaf = &self.leaves[l];
         let Some((s, _)) = leaf.scan.as_ref() else { return Vec::new() };
+        // (Not the UPDATE / DELETE target's own scan: its pushdown is the target's.)
+        if s.with_key {
+            return Vec::new();
+        }
         let (set, off) = (1u32 << l, leaf.off);
         let cat = self.pl.cat.clone();
         let fmt = self.pl.ctx.fmt().clone();
