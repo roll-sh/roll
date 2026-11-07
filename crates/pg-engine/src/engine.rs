@@ -357,7 +357,7 @@ impl Engine {
         } else {
             Some(crate::remote::outbound::Outbound::parse(&opts.outbound).map_err(internal)?)
         };
-        std::fs::create_dir_all(opts.data_dir.join("base"))?;
+        crate::storage::durable::create_dir_all_synced(&opts.data_dir.join("base"))?;
         let path = opts.data_dir.join(REGISTRY_FILE);
         let mut registry: Registry = match std::fs::read(&path) {
             Ok(b) => serde_json::from_slice(&b)
@@ -396,7 +396,7 @@ impl Engine {
                     time: crate::types::datetime::Clock::system().now,
                     ..Registry::default()
                 };
-                write_registry(&opts.data_dir, &r)?;
+                write_registry(&opts.data_dir, &r, opts.sync)?;
                 r
             }
             Err(e) => return Err(e.into()),
@@ -413,11 +413,8 @@ impl Engine {
         let (last_time, redo_start) = (registry.time, registry.wal_lsn);
         registry.running = true;
         registry.time = crate::types::datetime::Clock::system().now;
-        write_registry(&opts.data_dir, &registry)?;
         // (Durable before anything is written: a crash from here on must be seen as one.)
-        if opts.sync {
-            std::fs::File::open(opts.data_dir.join(REGISTRY_FILE))?.sync_all()?;
-        }
+        write_registry(&opts.data_dir, &registry, opts.sync)?;
         let unlogged_reset = if crashed { registry.databases.iter().map(|d| d.oid).collect() } else { Default::default() };
         // The configuration files; the postmaster parameters the engine uses take their values
         // from them unless the command line gave one.
@@ -2005,7 +2002,7 @@ impl Engine {
     }
 
     fn save(&self, r: &Registry) -> Result<()> {
-        write_registry(&self.opts.data_dir, r)
+        write_registry(&self.opts.data_dir, r, self.opts.sync)
     }
 }
 
@@ -2018,28 +2015,34 @@ fn duplicate_role(s: &SharedCatalog) -> Option<String> {
         .map(|r| r.name.clone())
 }
 
-fn write_registry(dir: &Path, r: &Registry) -> Result<()> {
-    let tmp = dir.join(format!("{REGISTRY_FILE}.tmp"));
-    std::fs::write(
-        &tmp,
-        serde_json::to_vec_pretty(r).map_err(|e| internal(e.to_string()))?,
-    )?;
-    std::fs::rename(&tmp, dir.join(REGISTRY_FILE))?;
+/// Replace the registry; with `sync`, durably (fsynced, renamed, its directory fsynced): it
+/// holds the databases and the cluster-wide catalogs, which a change acknowledged to its
+/// client must not lose.
+fn write_registry(dir: &Path, r: &Registry, sync: bool) -> Result<()> {
+    let data = serde_json::to_vec_pretty(r).map_err(|e| internal(e.to_string()))?;
+    crate::storage::durable::replace(&dir.join(REGISTRY_FILE), &data, sync)?;
     Ok(())
 }
 
-fn copy_dir(from: &Path, to: &Path) -> std::io::Result<()> {
-    std::fs::create_dir_all(to)?;
+/// Copy a database's directory (CREATE DATABASE from a template); with `sync`, every file and
+/// directory of the copy is fsynced before the registry names it.
+fn copy_dir(from: &Path, to: &Path, sync: bool) -> std::io::Result<()> {
+    use crate::storage::durable;
+    durable::create_dir_all_synced(to)?;
     for e in std::fs::read_dir(from)? {
         let e = e?;
         let target = to.join(e.file_name());
         if e.file_type()?.is_dir() {
-            copy_dir(&e.path(), &target)?;
+            copy_dir(&e.path(), &target, sync)?;
         } else {
-            std::fs::copy(e.path(), target)?;
+            let mut f = durable::DFile::create(&target)?;
+            std::io::Write::write_all(&mut f, &std::fs::read(e.path())?)?;
+            if sync {
+                f.sync_all()?;
+            }
         }
     }
-    Ok(())
+    if sync { durable::sync_dir(to) } else { Ok(()) }
 }
 
 fn dir_size(p: &Path) -> u64 {
@@ -2298,7 +2301,7 @@ impl Cluster for Engine {
             // so while it is kept closed).
             let t = template.unwrap_or_default();
             let _closed = self.close_now(src.oid, |n| Self::source_busy(t, n))?;
-            copy_dir(&self.db_dir(src.oid), &dir)?;
+            copy_dir(&self.db_dir(src.oid), &dir, self.opts.sync)?;
         } else {
             // Bootstrap now; it gets the cluster-wide catalogs when it's first opened.
             let store = Store::open(&dir, self.store_options())?;
@@ -2398,7 +2401,7 @@ impl Cluster for Engine {
             self.save(&r)?;
         }
         self.open.lock().kept.remove(&entry.oid);
-        let _ = std::fs::remove_dir_all(self.db_dir(entry.oid));
+        let _ = crate::storage::durable::remove_dir_all(&self.db_dir(entry.oid));
         drop(closed);
         // dropDatabaseDependencies, DeleteSharedComments: what refers to it goes too.
         self.publish(|s| {
