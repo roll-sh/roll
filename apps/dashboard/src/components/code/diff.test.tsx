@@ -65,8 +65,16 @@ describe("DiffViewer: threads in a unified diff", () => {
     expect(screen.queryByText("line 0")).toBeNull();
     expect(screen.getByText("Binary file")).toBeInTheDocument();
     expect(screen.getByText("Diff too large to show")).toBeInTheDocument();
-    render(<DiffViewer files={[fileDiff(big)]} review={{ threads: [thread({ path: "big.txt", line: 3, start_line: 3 })] }} />);
+    render(
+      <DiffViewer
+        files={[fileDiff(big)]}
+        review={{ threads: [thread({ path: "big.txt", line: 3, start_line: 3 }), thread({ id: "far", path: "big.txt", line: 481, start_line: 481, body: "far down" })] }}
+      />,
+    );
     expect(screen.getByText("line 2")).toBeInTheDocument();
+    // Only rows near the viewport are rendered, but a thread's rows always are.
+    expect(screen.queryByText("line 300")).toBeNull();
+    expect(rowAbove("far")).toBe(row("line 480"));
   });
 });
 

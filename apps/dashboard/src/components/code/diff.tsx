@@ -1,7 +1,7 @@
 "use client";
 
 import { ChevronDown, ChevronRight, MessageSquare } from "lucide-react";
-import { Fragment, useEffect, useMemo, useState, type ReactNode } from "react";
+import { Fragment, memo, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { FileDiff, Thread, ThreadSide } from "@/lib/code-api";
 import { parsePatch, splitRows, type Line, type Side } from "@/lib/diff";
 import {
@@ -21,6 +21,7 @@ import {
   type PendingReview,
   type Placement,
 } from "@/lib/review";
+import { BLOCK, codeOf, useHighlight, useRowWindow } from "./diff-window";
 import { ThreadCard, type ThreadActions } from "./thread";
 
 /** Files over this many diff lines start collapsed (unless they have threads). */
@@ -114,40 +115,138 @@ function rowExtras(ctx: FileCtx, threads: Thread[], l: Line | null, side?: Threa
   return out;
 }
 
-function Unified({ ctx, placement }: { ctx: FileCtx; placement: Placement | null }) {
+/** The blocks that stay rendered wherever they scroll: threads, drafts and the composer live in them. */
+function useForced(ctx: FileCtx, inline: Map<number, Thread[]> | undefined, rows: number, hasExtra: (i: number) => boolean) {
+  const compose = ctx.review?.compose;
+  const path = ctx.file.path;
+  const busy = !!compose && (compose.selection?.path === path || compose.pending.comments.some((c) => c.path === path));
+  const extra = useRef(hasExtra);
+  extra.current = hasExtra;
+  return useMemo(() => {
+    const s = new Set<number>();
+    for (const i of inline?.keys() ?? []) s.add(Math.floor(i / BLOCK));
+    if (busy) for (let i = 0; i < rows; i++) if (extra.current(i)) s.add(Math.floor(i / BLOCK));
+    return s;
+  }, [inline, busy, compose?.selection, compose?.pending, rows, ctx.lines]);
+}
+
+/** A line's code, highlighted once its block's tokens are in. */
+function Code({ l }: { l: Line }) {
+  const t = codeOf(l);
+  if (!t) return <>{l.text}</>;
+  return <>{t.map((k, i) => (k.c ? <span key={i} className={k.c}>{k.t}</span> : k.t))}</>;
+}
+
+interface BlockProps {
+  ctx: FileCtx;
+  start: number;
+  end: number;
+  live: boolean;
+  seen: boolean;
+  height: number;
+  tbody: (el: HTMLTableSectionElement | null) => void;
+}
+
+/** A block that isn't near the viewport: one row of its height. */
+const Spacer = ({ tbody, height }: Pick<BlockProps, "tbody" | "height">) => (
+  <tbody ref={tbody} aria-hidden>
+    <tr style={{ height }}>
+      <td colSpan={4} />
+    </tr>
+  </tbody>
+);
+
+const UnifiedBlock = memo(function UnifiedBlock({ ctx, start, end, live, seen, height, tbody, placement }: BlockProps & { placement: Placement | null }) {
+  const slice = useMemo(() => ctx.lines.slice(start, end), [ctx.lines, start, end]);
+  useHighlight(ctx.file.path, slice, live && seen);
+  if (!live) return <Spacer tbody={tbody} height={height} />;
   const sel = ctx.review?.compose?.selection ?? null;
   return (
-    <table className="w-full border-collapse font-mono text-[12px] leading-5">
-      <tbody>
-        {ctx.lines.map((l, i) => {
-          const extras = rowExtras(ctx, placement?.inline.get(i) ?? [], l);
-          const isSel = rowSpots(l).some((s) => inSelection(sel, ctx.file.path, s.side, s.line) && s.side === sel?.side);
-          return (
-            <Fragment key={i}>
-              <tr className={isSel ? selected : rowCls[l.kind]}>
-                <NumCell n={l.kind === "hunk" || l.kind === "note" ? null : l.old} side="old" ctx={ctx} />
-                <NumCell n={l.kind === "hunk" || l.kind === "note" ? null : l.new} side="new" ctx={ctx} />
-                <td className={`w-4 select-none pl-2 ${signCls(l.kind)}`}>{sign[l.kind]}</td>
-                <td className="pr-4 pl-1 whitespace-pre">{l.text}</td>
+    <tbody ref={tbody} data-live="">
+      {slice.map((l, k) => {
+        const i = start + k;
+        const extras = rowExtras(ctx, placement?.inline.get(i) ?? [], l);
+        const isSel = rowSpots(l).some((s) => inSelection(sel, ctx.file.path, s.side, s.line) && s.side === sel?.side);
+        return (
+          <Fragment key={i}>
+            <tr className={isSel ? selected : rowCls[l.kind]}>
+              <NumCell n={l.kind === "hunk" || l.kind === "note" ? null : l.old} side="old" ctx={ctx} />
+              <NumCell n={l.kind === "hunk" || l.kind === "note" ? null : l.new} side="new" ctx={ctx} />
+              <td className={`w-4 select-none pl-2 ${signCls(l.kind)}`}>{sign[l.kind]}</td>
+              <td className="pr-4 pl-1 whitespace-pre">
+                <Code l={l} />
+              </td>
+            </tr>
+            {extras.length > 0 && (
+              <tr>
+                <td colSpan={4} className="border-y border-line bg-bg px-3 py-3">
+                  <div className="max-w-3xl space-y-2 whitespace-normal">{extras}</div>
+                </td>
               </tr>
-              {extras.length > 0 && (
-                <tr>
-                  <td colSpan={4} className="border-y border-line bg-bg px-3 py-3">
-                    <div className="max-w-3xl space-y-2 whitespace-normal">{extras}</div>
-                  </td>
-                </tr>
-              )}
-            </Fragment>
+            )}
+          </Fragment>
+        );
+      })}
+    </tbody>
+  );
+});
+
+function Unified({ ctx, placement }: { ctx: FileCtx; placement: Placement | null }) {
+  const compose = ctx.review?.compose;
+  const forced = useForced(
+    ctx,
+    placement?.inline,
+    ctx.lines.length,
+    (i) => !!compose && (draftsOnRow(compose.pending, ctx.file.path, ctx.lines[i]).length > 0 || endsSelection(compose.selection, ctx.file.path, ctx.lines[i])),
+  );
+  const win = useRowWindow(forced);
+  const n = ctx.lines.length;
+  return (
+    <div ref={win.frame} className="overflow-x-auto">
+      <table className="w-full border-collapse font-mono text-[12px] leading-5">
+        {Array.from({ length: Math.ceil(n / BLOCK) }, (_, b) => {
+          const start = b * BLOCK;
+          const end = Math.min(start + BLOCK, n);
+          return (
+            <UnifiedBlock
+              key={b}
+              ctx={ctx}
+              placement={placement}
+              start={start}
+              end={end}
+              live={win.live(b)}
+              seen={win.seen(b)}
+              height={win.height(b, end - start)}
+              tbody={win.block(b)}
+            />
           );
         })}
-      </tbody>
-    </table>
+      </table>
+    </div>
   );
 }
 
-function Split({ ctx, threads }: { ctx: FileCtx; threads: Thread[] }) {
-  const rows = useMemo(() => splitRows(ctx.lines), [ctx.lines]);
-  const placement = useMemo(() => placeSplit(rows, threads), [rows, threads]);
+const SplitBlock = memo(function SplitBlock({
+  ctx,
+  start,
+  end,
+  live,
+  seen,
+  height,
+  tbody,
+  rows,
+  placement,
+}: BlockProps & { rows: [Side, Side][]; placement: Placement }) {
+  const slice = useMemo(() => {
+    const here = new Set<Line>();
+    for (const [a, b] of rows.slice(start, end)) {
+      if (a) here.add(a);
+      if (b) here.add(b);
+    }
+    return [...here];
+  }, [rows, start, end]);
+  useHighlight(ctx.file.path, slice, live && seen);
+  if (!live) return <Spacer tbody={tbody} height={height} />;
   const sel = ctx.review?.compose?.selection ?? null;
   const cell = (l: Side, side: "old" | "new") => {
     if (!l) return <td colSpan={2} className="border-r border-line bg-panel-2/40 last:border-r-0" />;
@@ -166,46 +265,95 @@ function Split({ ctx, threads }: { ctx: FileCtx; threads: Thread[] }) {
         <NumCell n={on ? n : null} side={side} ctx={ctx} className={cls} />
         <td className={`w-1/2 border-r border-line pr-3 pl-2 whitespace-pre-wrap break-all last:border-r-0 ${cls}`}>
           <span className={`mr-2 select-none ${signCls(l.kind)}`}>{sign[l.kind] || " "}</span>
-          {l.text}
+          <Code l={l} />
         </td>
       </>
     );
   };
   return (
-    <table className="w-full table-fixed border-collapse font-mono text-[12px] leading-5">
-      <colgroup>
-        <col className="w-10" />
-        <col />
-        <col className="w-10" />
-        <col />
-      </colgroup>
-      <tbody>
-        {rows.map(([a, b], i) => {
-          const here = placement.inline.get(i) ?? [];
-          const left = rowExtras(ctx, here.filter((t) => t.side === "old"), a, "old");
-          const right = rowExtras(ctx, here.filter((t) => t.side === "new"), b, "new");
-          return (
-            <Fragment key={i}>
+    <tbody ref={tbody} data-live="">
+      {rows.slice(start, end).map(([a, b], k) => {
+        const i = start + k;
+        const here = placement.inline.get(i) ?? [];
+        const left = rowExtras(ctx, here.filter((t) => t.side === "old"), a, "old");
+        const right = rowExtras(ctx, here.filter((t) => t.side === "new"), b, "new");
+        return (
+          <Fragment key={i}>
+            <tr>
+              {cell(a, "old")}
+              {cell(b, "new")}
+            </tr>
+            {(left.length > 0 || right.length > 0) && (
               <tr>
-                {cell(a, "old")}
-                {cell(b, "new")}
+                <td colSpan={2} className="border-y border-r border-line bg-bg px-3 py-3 align-top">
+                  <div className="space-y-2 whitespace-normal">{left}</div>
+                </td>
+                <td colSpan={2} className="border-y border-line bg-bg px-3 py-3 align-top">
+                  <div className="space-y-2 whitespace-normal">{right}</div>
+                </td>
               </tr>
-              {(left.length > 0 || right.length > 0) && (
-                <tr>
-                  <td colSpan={2} className="border-y border-r border-line bg-bg px-3 py-3 align-top">
-                    <div className="space-y-2 whitespace-normal">{left}</div>
-                  </td>
-                  <td colSpan={2} className="border-y border-line bg-bg px-3 py-3 align-top">
-                    <div className="space-y-2 whitespace-normal">{right}</div>
-                  </td>
-                </tr>
-              )}
-            </Fragment>
+            )}
+          </Fragment>
+        );
+      })}
+    </tbody>
+  );
+});
+
+function Split({ ctx, threads }: { ctx: FileCtx; threads: Thread[] }) {
+  const rows = useMemo(() => splitRows(ctx.lines), [ctx.lines]);
+  const placement = useMemo(() => placeSplit(rows, threads), [rows, threads]);
+  const compose = ctx.review?.compose;
+  const forced = useForced(ctx, placement.inline, rows.length, (i) => {
+    if (!compose) return false;
+    const [a, b] = rows[i];
+    const p = ctx.file.path;
+    return (
+      draftsOnRow(compose.pending, p, a, "old").length > 0 ||
+      draftsOnRow(compose.pending, p, b, "new").length > 0 ||
+      endsSelection(compose.selection, p, a, "old") ||
+      endsSelection(compose.selection, p, b, "new")
+    );
+  });
+  const win = useRowWindow(forced);
+  const n = rows.length;
+  return (
+    <div ref={win.frame} className="overflow-x-auto">
+      <table className="w-full table-fixed border-collapse font-mono text-[12px] leading-5">
+        <colgroup>
+          <col className="w-10" />
+          <col />
+          <col className="w-10" />
+          <col />
+        </colgroup>
+        {Array.from({ length: Math.ceil(n / BLOCK) }, (_, b) => {
+          const start = b * BLOCK;
+          const end = Math.min(start + BLOCK, n);
+          return (
+            <SplitBlock
+              key={b}
+              ctx={ctx}
+              rows={rows}
+              placement={placement}
+              start={start}
+              end={end}
+              live={win.live(b)}
+              seen={win.seen(b)}
+              height={win.height(b, end - start)}
+              tbody={win.block(b)}
+            />
           );
         })}
-      </tbody>
-    </table>
+      </table>
+    </div>
   );
+}
+
+/** A patch's row count without parsing it (a collapsed file never parses). */
+function patchRows(patch: string) {
+  let n = 1;
+  for (let i = patch.indexOf("\n"); i !== -1; i = patch.indexOf("\n", i + 1)) n++;
+  return n;
 }
 
 export function FileDiffView({
@@ -219,10 +367,10 @@ export function FileDiffView({
   review?: DiffReview;
   focused?: string | null;
 }) {
-  const lines = useMemo(() => (file.patch ? parsePatch(file.patch) : []), [file.patch]);
   const threads = useMemo(() => (review ? threadsForFile(file, review.threads) : []), [file, review]);
+  const [open, setOpen] = useState(() => !file.patch || patchRows(file.patch) <= COLLAPSE_LINES || threads.length > 0);
+  const lines = useMemo(() => (open && file.patch ? parsePatch(file.patch) : []), [open, file.patch]);
   const placement = useMemo(() => (review ? placeUnified(lines, threads) : null), [lines, threads, review]);
-  const [open, setOpen] = useState(lines.length <= COLLAPSE_LINES || threads.length > 0);
   const [showOutdated, setShowOutdated] = useState(false);
   const focusedHere = focused != null && threads.some((t) => t.id === focused);
   const focusedOutdated = focused != null && (placement?.outdated.some((t) => t.id === focused) ?? false);
@@ -232,7 +380,7 @@ export function FileDiffView({
     if (focusedOutdated) setShowOutdated(true);
   }, [focusedHere, focusedOutdated]);
 
-  const ctx: FileCtx = { file, lines, review, focused };
+  const ctx: FileCtx = useMemo(() => ({ file, lines, review, focused }), [file, lines, review, focused]);
   const kind = file.change === "added" ? "A" : file.change === "deleted" ? "D" : "M";
   const unresolved = threads.filter((t) => !t.resolved).length;
   const offDiff = placement?.offDiff ?? [];
@@ -276,7 +424,7 @@ export function FileDiffView({
         ) : !file.patch ? (
           <p className="px-4 py-3 text-[12px] text-subtle">Diff too large to show</p>
         ) : (
-          <div className="overflow-x-auto">{mode === "split" ? <Split ctx={ctx} threads={threads} /> : <Unified ctx={ctx} placement={placement} />}</div>
+          mode === "split" ? <Split ctx={ctx} threads={threads} /> : <Unified ctx={ctx} placement={placement} />
         ))}
       {open && (offDiff.length > 0 || outdated.length > 0) && (
         <div className="space-y-2 border-t border-line bg-bg px-3 py-3">
