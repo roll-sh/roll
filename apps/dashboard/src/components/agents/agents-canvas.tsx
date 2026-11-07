@@ -970,7 +970,7 @@ export const AgentsCanvas = memo(forwardRef<
   return (
     <div
       ref={container}
-      className="relative h-full w-full touch-none overflow-hidden overscroll-none bg-canvas text-fg select-none"
+      className="relative h-full w-full touch-none overflow-clip overscroll-none bg-canvas text-fg select-none"
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
