@@ -1040,6 +1040,8 @@ function LaunchGhost({ source, from, to, over }: { source: string; from: Point; 
 const READABLE = 0.75;
 /** The minimap's corner (its width and margin), kept clear while the canvas is bigger than the screen. */
 const MINIMAP_RESERVE = 192;
+/** The narrowest canvas the minimap shows on (`minimap.tsx`): beside a panel it was clutter. */
+const MINIMAP_MIN_W = 1200;
 
 /**
  * The room a canvas `w` × `h` (above the prompt bar) is planned and fitted for: about 80 % of it
@@ -1047,7 +1049,7 @@ const MINIMAP_RESERVE = 192;
  */
 function roomFor(w: number, h: number): Room {
   const phone = w < 640;
-  return { w, h, pad: phone ? 24 : Math.max(48, Math.min(w, h) * 0.1), floor: phone ? 1 : READABLE, reserve: w >= 900 ? MINIMAP_RESERVE : 0 };
+  return { w, h, pad: phone ? 24 : Math.max(48, Math.min(w, h) * 0.1), floor: phone ? 1 : READABLE, reserve: w >= MINIMAP_MIN_W ? MINIMAP_RESERVE : 0 };
 }
 /** Below this a card's details hide (`[data-brief]`), its titles stay. */
 const BRIEF = 0.55;

@@ -16,7 +16,7 @@ import type { CanvasEngine } from "./canvas-engine";
 const W = 168;
 const H = 112;
 /** The narrowest canvas it shows on. */
-const MIN_CANVAS_W = 900;
+const MIN_CANVAS_W = 1200;
 
 export interface MinimapHandle {
   /** The view moved: move the frame (and show or hide the map). */
