@@ -67,6 +67,8 @@ const SWEEP_SPEED = 1.6;
 const SWEEP_FLOOR = 0.004;
 /** How far (screen px) the sweep keeps from the cards' extent. */
 const SWEEP_CLEAR = 56;
+/** Over how far past that (screen px) the sweep fades in. */
+const SWEEP_FADE = 220;
 
 /** How much the busy sweep lifts a dot at screen (x, y): 0–`mix`. */
 const sweepAt = (x: number, y: number, t: number, mix: number) => Math.max(0, Math.cos((x + y * 0.6) / SWEEP_WAVE - t * SWEEP_SPEED)) ** 12 * mix;
@@ -779,10 +781,14 @@ export class CanvasEngine {
         lit = Math.max(lit, rw * 0.7);
       }
       if (mix > 0.01 && !quiet) {
-        // The DotField "thinking" sweep, quieter: work is happening somewhere on the canvas.
-        const wave = sweepAt(x, y, t, mix);
-        boost += wave * 0.5;
-        lit = Math.max(lit, wave * 0.35);
+        // The DotField "thinking" sweep, quieter: work is happening somewhere on the canvas. It
+        // fades out as it nears the work (over SWEEP_FADE), so no still frame shows a bright crest
+        // cut off square at the cards' box.
+        const out = mask ? Math.hypot(Math.max(mask.x0 - x, 0, x - mask.x1), Math.max(mask.y0 - y, 0, y - mask.y1)) : SWEEP_FADE;
+        const near = Math.min(1, out / SWEEP_FADE);
+        const wave = sweepAt(x, y, t, mix) * near * near * (3 - 2 * near);
+        boost += wave * 0.3;
+        lit = Math.max(lit, wave * 0.22);
       }
       if (boost < 0.002 && lit <= 0.01) {
         plain.moveTo(px + 0.9, py);

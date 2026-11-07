@@ -17,39 +17,35 @@ import {
 import { useReducedMotion } from "@roll/brand";
 import type { Graph, GraphNode } from "@/lib/agents-graph";
 import {
-  ANCHOR,
   arrange,
   bounds,
-  COMPACT_GAPS,
+  COMPACT_SPACING,
   dropIndex,
   fitView,
-  GAPS,
-  gridsFor,
+  layoutCanvas,
   loadOrder,
   nextCard,
   loadView,
   moveTo,
-  OVERVIEW_GAPS,
+  NO_WRAPS,
   planWraps,
   ROOTS,
-  routeEdges,
   saveOrder,
   saveView,
-  sideBySide,
-  tidyLayout,
+  SPACING,
   toWorld,
   withOrder,
   type Arrow,
+  type CanvasShape,
   type Direction,
-  type Gaps,
-  type Grid,
+  type Level,
   type Order,
+  type Placement,
   type Point,
   type Rect,
+  type Room,
   type Size,
   type View,
-  type WrapLevel,
-  type Wraps,
 } from "@/lib/agents-layout";
 import { CanvasEngine, type SceneEdge, type SceneMeta } from "./canvas-engine";
 import { AnimatePresence, motion, useMotionValue, type Transition } from "motion/react";
@@ -118,8 +114,12 @@ export const AgentsCanvas = memo(forwardRef<
      * cards above its top edge, wherever it is at that moment.
      */
     keepClear?: React.RefObject<HTMLElement | null>;
+    /** Keys shown inside another card (a fork or subagent on its thread's card, `absorbChildren`): that card is what's revealed, focused and marked. */
+    host?: ReadonlyMap<string, string>;
   }
->(function AgentsCanvas({ graph, storageKey, order: shownOrder, onOrder, fitKey, direction = "horizontal", onDirection, density, wrap = true, onOpen, render, defaultSize, onEscape, overlay, active = true, selected, highlighted, matters, onLaunch, keepClear }, ref) {
+>(function AgentsCanvas({ graph, storageKey, order: shownOrder, onOrder, fitKey, direction = "horizontal", onDirection, density, wrap = true, onOpen, render, defaultSize, onEscape, overlay, active = true, selected: selectedKey, highlighted, matters, onLaunch, keepClear, host }, ref) {
+  // A card shown inside another stands for that one.
+  const selected = selectedKey && (host?.get(selectedKey) ?? selectedKey);
   const reduced = useReducedMotion();
   const container = useRef<HTMLDivElement>(null);
   const canvas = useRef<HTMLCanvasElement>(null);
@@ -163,6 +163,8 @@ export const AgentsCanvas = memo(forwardRef<
         if (c && v.k < GREEK !== c.hasAttribute("data-greek")) c.toggleAttribute("data-greek", v.k < GREEK);
         // A step before: details (meta lines, chips) go while titles still read (`[data-brief]`).
         if (c && v.k < BRIEF !== c.hasAttribute("data-brief")) c.toggleAttribute("data-brief", v.k < BRIEF);
+        // Further still, the identity edges thicken again (they stay 2 screen px).
+        if (c && v.k < FAR !== c.hasAttribute("data-far")) c.toggleAttribute("data-far", v.k < FAR);
         minimap.current?.view(v);
         // The zoom's readout: new text repaints the page, so while it changes, at most every
         // ZOOM_TEXT_MS, and where it rests.
@@ -209,19 +211,10 @@ export const AgentsCanvas = memo(forwardRef<
   );
 
   const arranged = useMemo(() => arrange(graph, preview ? withOrder(order, preview.parent, preview.list) : order), [graph, order, preview]);
-  // Growing down, a machine spreads its projects side by side; everything under a project is a
-  // list down its column.
-  // Inside a project's space its status groups sit side by side too, a column each (Linear's board).
-  const spreads = useCallback((k: string) => {
-    const n = graph.nodes.get(k);
-    return n?.kind === "machine" || (n?.kind === "project" && n.children.some((c) => graph.nodes.get(c)?.kind === "group"));
-  }, [graph]);
-  const across = useCallback((parent: string) => sideBySide(direction, parent, spreads), [direction, spreads]);
-  // The room the canvas has (width ÷ height, above the prompt bar), coarse: wraps are planned for it.
-  const [aspect, setAspect] = useState(1.6);
-  // What wraps, and as what: a machine's projects and a drilled project's status groups are lanes, a project's or a group's threads items.
+  // What each node's children are to the layout: a machine's projects and a drilled project's
+  // status sections are lanes, a project's or a section's threads the items of a grid.
   const level = useCallback(
-    (k: string): WrapLevel | null => {
+    (k: string): Level | null => {
       const n = graph.nodes.get(k);
       if (n?.kind === "machine") return "lanes";
       if (n?.kind === "project") return n.children.some((c) => graph.nodes.get(c)?.kind === "group") ? "lanes" : "items";
@@ -229,27 +222,25 @@ export const AgentsCanvas = memo(forwardRef<
     },
     [graph],
   );
-  // A drilled project's status groups are sections: a header row over their cards (`withSections`).
+  // A drilled project's status groups are sections: a header row over their cards.
   const isSection = useCallback((k: string) => graph.nodes.get(k)?.kind === "group", [graph]);
-  /** The layout: the cards' measured sizes, wrapped the way that fits the screen best (`planWraps`), fold cards after their grid. */
-  const shown = useMemo((): Layout => {
+  // The screen the layout is planned for (`planWraps`) and fitted to (`roomFor`), coarse.
+  const [screen, setScreen] = useState<Size>({ w: 1440, h: 760 });
+  /** The layout: the cards' measured sizes, wrapped the way that shows them best on this screen (`planWraps`). */
+  const shown = useMemo((): Placement & { size: (k: string) => Size } => {
     const size = (k: string): Size => {
       const n = graph.nodes.get(k);
       if (!n) return ZERO;
       // A section's header is a fixed row (drawn as wide as its cards, `--section-w`): measured, it would grow with them.
       return n.kind === "group" ? SECTION_HEAD : sizeOf(k);
     };
-    const gaps = density === "compact" ? COMPACT_GAPS[direction] : GAPS[direction];
-    const gap = density === "compact" ? { x: 40, y: 12 } : { x: 48, y: direction === "vertical" ? 16 : 20 };
-    const opts = { spreads, anchor: ANCHOR, sections: isSection, ...gaps };
-    const tail = (k: string) => graph.nodes.get(k)?.kind === "fold";
-    const base = { direction, level, tail, gap, bus: BUS_ROOM, layout: opts };
-    const wraps: Wraps = wrap ? planWraps(arranged, size, { ...base, aspect }) : { lanes: 0, items: 0 };
-    const grids = gridsFor(arranged, size, { ...base, wraps });
-    return { positions: tidyLayout(arranged, size, { ...opts, direction, grids, tail, rootsPer: wraps.roots || undefined }), size, grids, gaps, gap, anchor: ANCHOR };
-  }, [graph, sizeOf, direction, density, spreads, level, isSection, wrap, arranged, aspect]);
-  const { positions, grids } = shown;
+    const shape: CanvasShape = { direction, level, section: isSection, spacing: (density === "compact" ? COMPACT_SPACING : SPACING)[direction] };
+    const wraps = wrap ? planWraps(arranged, size, shape, roomFor(screen.w, screen.h)) : NO_WRAPS;
+    return { ...layoutCanvas(arranged, size, shape, wraps), size };
+  }, [graph, sizeOf, direction, density, level, isSection, wrap, arranged, screen]);
+  const { positions } = shown;
   const shownSize = shown.size;
+  const across = useCallback((parent: string) => shown.across.get(parent) ?? false, [shown]);
 
   useEffect(() => {
     const e = engine.current;
@@ -260,11 +251,14 @@ export const AgentsCanvas = memo(forwardRef<
       meta.set(n.key, { busy: n.busy, parent: n.parent });
       sz.set(n.key, shownSize(n.key));
     }
-    const routes = routeEdges(positions, shownSize, graph.edges, { direction, grids, spreads: (k) => spreads(k) && !grids.has(k), anchor: shown.anchor, gaps: shown.gaps, gridGap: shown.gap, bus: BUS_ROOM, sections: isSection });
-    // A section's cards sit under its header: no edge to each.
-    const edges: SceneEdge[] = graph.edges.filter((x) => !isSection(x.from)).map((x) => ({ ...x, points: routes.get(`${x.from}>${x.to}`) }));
+    // Only the edges the layout drew: a section's cards sit under its header, a grid row's later cards beside its first.
+    const edges: SceneEdge[] = [];
+    for (const x of graph.edges) {
+      const points = shown.routes.get(`${x.from}>${x.to}`);
+      if (points) edges.push({ ...x, dashed: false, points });
+    }
     e.setScene(positions, meta, edges, sz);
-  }, [positions, graph, shownSize, direction, spreads, grids, shown, isSection]);
+  }, [positions, graph, shownSize, shown]);
 
   // How much of the canvas's bottom `keepClear` covers now (at most half of it).
   const coveredBelow = useCallback(() => {
@@ -295,8 +289,7 @@ export const AgentsCanvas = memo(forwardRef<
       const phone = w < 640;
       // A phone's waiting request puts the zoom bar at the top (`data-waiting`): frame below it.
       const top = phone && container.current?.closest("[data-waiting]") ? PHONE_TOP_BAR : 0;
-      const room = h - top;
-      const pad = phone ? 24 : Math.max(48, Math.min(w, room) * 0.1);
+      const room = roomFor(w, h - top);
       const r = bounds(positions, shownSize);
       if (!r) return;
       let column: string | undefined;
@@ -307,18 +300,21 @@ export const AgentsCanvas = memo(forwardRef<
       const lead = key ? (bounds(positions, shownSize, [key]) ?? undefined) : undefined;
       // Asked for (the Fit button, `1`): follow the work again, so cards that grow or arrive stay framed.
       if (all) following.current = true;
-      const floor = phone ? 1 : READABLE;
-      let v = fitView(r, w, room, pad, 1, all ? 0 : floor, lead);
-      if (all && v.k < floor) {
-        // Too much to read at once: what matters (the structure, what's running, waiting on you or
-        // failed, the open card), readable; Fit again from there shows everything.
+      // Bigger than the screen at the floor: the minimap shows in the bottom right, so the frame
+      // keeps clear of its corner (the layout was planned so; `planWraps`).
+      const over = r.w * room.floor > room.w - room.pad * 2 + 0.5 || r.h * room.floor > room.h - room.pad * 2 + 0.5;
+      const wide = over ? room.w - (room.reserve ?? 0) : room.w;
+      let v = fitView(r, wide, room.h, room.pad, 1, all ? 0 : room.floor, lead);
+      if (all && v.k < room.floor) {
+        // Too much to read at once: at the floor (the columns the layout planned all show), framed
+        // on what matters (the structure, what's running, waiting on you or failed, the open card);
+        // Fit again from there shows everything.
         const keys = [...positions.keys()].filter((k) => {
           const n = graph.nodes.get(k);
           return !!n && (FRAMED.has(n.kind) || n.busy || k === selectedRef.current || !!mattersRef.current?.(k));
         });
         const m = bounds(positions, shownSize, keys);
-        const k = m && fitView(m, w, room, pad, 1, floor).k;
-        const framed = m && fitView(r, w, room, pad, k!, k!, m);
+        const framed = m && fitView(r, wide, room.h, room.pad, room.floor, room.floor, m);
         const now = e.goal;
         const there = framed && Math.abs(now.k - framed.k) < 0.01 && Math.abs(now.x - framed.x) < 2 && Math.abs(now.y - framed.y - top) < 2;
         if (framed && !there) v = framed;
@@ -368,7 +364,9 @@ export const AgentsCanvas = memo(forwardRef<
     let t: ReturnType<typeof setTimeout> | undefined;
     const shape = () => {
       const r = c.getBoundingClientRect();
-      if (r.width && r.height) setAspect(Math.round((r.width / Math.max(1, r.height - coveredBelow())) * 4) / 4);
+      // In steps of 32 px, so a few pixels of the prompt bar growing don't lay everything out again.
+      const step = (v: number) => Math.max(32, Math.round(v / 32) * 32);
+      if (r.width && r.height) setScreen((s) => (s.w === step(r.width) && s.h === step(r.height - coveredBelow()) ? s : { w: step(r.width), h: step(r.height - coveredBelow()) }));
     };
     shape();
     const ro = new ResizeObserver(() => {
@@ -396,7 +394,7 @@ export const AgentsCanvas = memo(forwardRef<
     if (!fitted.current) {
       const e = engine.current;
       // Nothing to frame into yet (a phone's canvas can have no size as the first cards land): the
-      // canvas taking its shape (`aspect`) comes back here.
+      // canvas taking its shape (`screen`) comes back here.
       if (sizes.size === 0 || !e?.viewport.w || !e.viewport.h) return;
       fitted.current = true;
       // Back where it was left on this device, if that still shows some of the canvas.
@@ -415,7 +413,7 @@ export const AgentsCanvas = memo(forwardRef<
     return () => clearTimeout(t);
     // `fit` changes with every layout; the extent is what matters.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [extent, sizes.size > 0, storageKey, fitKey, aspect]);
+  }, [extent, sizes.size > 0, storageKey, fitKey, screen]);
   useEffect(() => {
     const c = container.current;
     if (!c) return;
@@ -449,8 +447,9 @@ export const AgentsCanvas = memo(forwardRef<
   }, [storageKey]);
 
   const focus = useCallback(
-    (key: string, k?: number, auto = false) => {
+    (asked: string, k?: number, auto = false) => {
       const e = engine.current;
+      const key = host?.get(asked) ?? asked;
       if (!e) return;
       const nk = k ?? Math.max(e.view.k, 0.85);
       const p = positions.get(key);
@@ -465,12 +464,13 @@ export const AgentsCanvas = memo(forwardRef<
       const cy = s.h * nk > h - 96 ? p.y + (h / 2 - 64) / nk : p.y + s.h / 2;
       e.setView({ k: nk, x: w / 2 - (p.x + s.w / 2) * nk, y: h / 2 - cy * nk }, true);
     },
-    [positions, shownSize, coveredBelow],
+    [positions, shownSize, coveredBelow, host],
   );
 
   const reveal = useCallback(
-    (key: string) => {
+    (asked: string) => {
       const e = engine.current;
+      const key = host?.get(asked) ?? asked;
       const p = positions.get(key);
       if (!e || !p) return;
       // Where the view is going, not where an easing has got to: a reveal right after a refit
@@ -483,7 +483,7 @@ export const AgentsCanvas = memo(forwardRef<
       const inView = r.x * k + x >= 0 && r.y * k + y >= 0 && (r.x + r.w) * k + x <= w && (r.y + r.h) * k + y <= h;
       if (!inView) focus(key, k, true);
     },
-    [positions, shownSize, focus, coveredBelow, graph],
+    [positions, shownSize, focus, coveredBelow, graph, host],
   );
 
   // Framing by itself (following new work, the panel changing the canvas's width) keeps the open
@@ -559,7 +559,7 @@ export const AgentsCanvas = memo(forwardRef<
     const { parent, list } = siblingsOf(key);
     // Where the siblings are as the drag starts: the gap moves, what it's measured against doesn't.
     const rects = new Map(list.map((k) => [k, { ...(positions.get(k) ?? { x: 0, y: 0 }), ...shownSize(k) }]));
-    drag.current = { key, id: ev.pointerId, start: toWorld(e.view, ev.clientX - r.left, ev.clientY - r.top), from, moved: false, el: card!, parent, list, rects, across: grids.has(parent) ? "grid" : across(parent) };
+    drag.current = { key, id: ev.pointerId, start: toWorld(e.view, ev.clientX - r.left, ev.clientY - r.top), from, moved: false, el: card!, parent, list, rects, across: across(parent) };
   };
   const onPointerMove = (ev: React.PointerEvent) => {
     const l = launch.current;
@@ -754,7 +754,7 @@ export const AgentsCanvas = memo(forwardRef<
       if (ev.altKey) {
         const key = el?.closest<HTMLElement>("[data-card]")?.dataset.key;
         // Along the axis its siblings are laid out on.
-        const [back, on] = key && across(siblingsOf(key).parent) ? ["ArrowLeft", "ArrowRight"] : ["ArrowUp", "ArrowDown"];
+        const [back, on] = key && across(siblingsOf(key).parent) === true ? ["ArrowLeft", "ArrowRight"] : ["ArrowUp", "ArrowDown"];
         if (key && (ev.key === back || ev.key === on)) {
           ev.preventDefault();
           nudge(key, ev.key === back ? -1 : 1);
@@ -867,34 +867,14 @@ export const AgentsCanvas = memo(forwardRef<
   useLayoutEffect(() => {
     const root = world.current;
     if (!root) return;
-    const widths = new Map<string, [string, number][]>();
-    const put = (k: string, name: string, v: number) => widths.set(k, [...(widths.get(k) ?? []), [name, v]]);
-    for (const n of graph.nodes.values()) {
-      const p = positions.get(n.key);
-      if (n.kind !== "group" || !p) continue;
-      let right = p.x + shownSize(n.key).w;
-      const walk = (k: string) => {
-        for (const c of graph.nodes.get(k)?.children ?? []) {
-          const q = positions.get(c);
-          if (q) right = Math.max(right, q.x + shownSize(c).w);
-          walk(c);
-        }
-      };
-      walk(n.key);
-      put(n.key, "--section-w", right - p.x);
-    }
     for (const slot of root.querySelectorAll<HTMLElement>("[data-card]")) {
-      const want = new Map(widths.get(slot.dataset.key!) ?? []);
-      for (const name of ["--section-w"]) {
-        const v = want.get(name);
-        const text = v === undefined ? "" : `${Math.round(v)}px`;
-        if (slot.style.getPropertyValue(name) !== text) {
-          if (text) slot.style.setProperty(name, text);
-          else slot.style.removeProperty(name);
-        }
-      }
+      const v = shown.widths.get(slot.dataset.key!);
+      const text = v === undefined ? "" : `${Math.round(v)}px`;
+      if (slot.style.getPropertyValue("--section-w") === text) continue;
+      if (text) slot.style.setProperty("--section-w", text);
+      else slot.style.removeProperty("--section-w");
     }
-  }, [positions, shownSize, graph, staged.length]);
+  }, [shown, staged.length]);
 
   return (
     <div
@@ -1056,28 +1036,29 @@ function LaunchGhost({ source, from, to, over }: { source: string; from: Point; 
     </>
   );
 }
-/** Fit doesn't zoom the overview out further than this (its titles are ~10 px there); `1` twice does. */
 /** Fit doesn't zoom out further than cards read (titles ~10 px, meta ~8 px); `1` twice does. */
 const READABLE = 0.75;
+/** The minimap's corner (its width and margin), kept clear while the canvas is bigger than the screen. */
+const MINIMAP_RESERVE = 192;
+
+/**
+ * The room a canvas `w` × `h` (above the prompt bar) is planned and fitted for: about 80 % of it
+ * (a 10 % pad, at least 48 px), never below where cards read (a phone: 100 %).
+ */
+function roomFor(w: number, h: number): Room {
+  const phone = w < 640;
+  return { w, h, pad: phone ? 24 : Math.max(48, Math.min(w, h) * 0.1), floor: phone ? 1 : READABLE, reserve: w >= 900 ? MINIMAP_RESERVE : 0 };
+}
 /** Below this a card's details hide (`[data-brief]`), its titles stay. */
 const BRIEF = 0.55;
 /** Below this a card's text is a bar (`[data-greek]`). */
 const GREEK = 0.4;
-/** Room over a wrapped block for the bus its later columns hang off (world px). */
-const BUS_ROOM = 56;
+/** Below this the identity edges thicken again (`[data-far]`). */
+const FAR = 0.3;
 const ZERO: Size = { w: 0, h: 0 };
 /** A status group's header row in the cards' layout (StatusHeader). */
 const SECTION_HEAD: Size = { w: 296, h: 40 };
 
-/** A level's layout: where each card goes, at what size, wrapped how, with what gaps and edge anchors. */
-interface Layout {
-  positions: Map<string, Point>;
-  size: (key: string) => Size;
-  grids: Map<string, Grid>;
-  gaps: Gaps;
-  gap: Point;
-  anchor: (h: number) => number;
-}
 
 /** How many new cards mount in one frame (more wait for the next). */
 const STAGE = 48;

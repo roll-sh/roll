@@ -169,7 +169,8 @@
   --id-violet: oklch(0.74 0.12 296);
   --id-purple: oklch(0.74 0.13 322);
   --id-pink: oklch(0.75 0.12 350);
-  --id-rose: oklch(0.73 0.12 12);
+  /* Dusty, at low chroma: a rose read as the danger red beside it. */
+  --id-rose: oklch(0.74 0.075 2);
   --id-teal: oklch(0.76 0.1 180);
   --id-cyan: oklch(0.76 0.1 218);
   --id-green: oklch(0.76 0.11 148);
@@ -181,7 +182,7 @@
     --id-violet: oklch(0.52 0.15 296);
     --id-purple: oklch(0.52 0.16 322);
     --id-pink: oklch(0.55 0.16 350);
-    --id-rose: oklch(0.54 0.15 12);
+    --id-rose: oklch(0.55 0.09 2);
     --id-teal: oklch(0.54 0.09 180);
     --id-cyan: oklch(0.54 0.1 218);
     --id-green: oklch(0.54 0.11 148);
@@ -621,23 +622,49 @@ body {
   animation-play-state: paused !important;
 }
 
-/* Too small to read (the canvas's `data-greek`, below 40 %): a card keeps its frame, colours and
-   size (nothing moves); its title is a quiet bar its own length and everything else in it goes.
-   Text is never enlarged to compensate: Fit stops at a zoom where cards read. */
-[data-brief] [data-card] :is(p, span, a, code, kbd, svg, img, button):not([data-title]):not(:has([data-title])),
-[data-greek] [data-card] :is(p, span, a, code, kbd, svg, img, button):not([data-title]):not(:has([data-title])) {
+/* Small (the canvas's `data-brief`, below 55 %): a card's details go and its titles stay. The
+   text goes transparent rather than hidden, so every box keeps its frame and fill (a chip's
+   outline, the sandbox's stats box, a status dot). Text is never enlarged to compensate: Fit
+   stops at a zoom where cards read. */
+[data-brief] [data-card] :not([data-title], [data-title] *) {
+  color: transparent !important;
+}
+[data-brief] [data-card] :is(svg, img) {
   visibility: hidden;
 }
-[data-greek] [data-card] [data-title] {
-  width: fit-content;
-  max-width: 100%;
+[data-brief] [data-card] ::placeholder {
   color: transparent;
-  background: color-mix(in oklab, var(--fg) 16%, transparent);
-  background-clip: content-box;
-  padding-block: 0.3em;
-  border-radius: 999px;
+}
+[data-brief] [data-card] .shimmer {
+  background: none;
 }
 
+/* Too small to read (`data-greek`, below 40 %): a title is a quiet bar per line, each as long as
+   its text (a line-through as thick as the letters), in a card that keeps its size, so nothing
+   moves. */
+[data-greek] [data-card] :is([data-title], [data-title] *) {
+  color: transparent !important;
+  text-decoration-line: line-through;
+  text-decoration-thickness: 0.62em;
+  text-decoration-skip-ink: none;
+  text-decoration-color: color-mix(in oklab, var(--fg) 24%, transparent);
+}
+/* The identity edge stays at least 2 screen px (3 world px at 100 %). */
+[data-greek] [data-card] [data-edge] > span {
+  width: 6px;
+}
+[data-far] [data-card] [data-edge] > span {
+  width: 10px;
+}
+@media (prefers-color-scheme: light) {
+  /* White on white: the frames carry the shape, so they're drawn firmer. */
+  [data-brief] [data-card] [data-drag]:not([data-tone]) {
+    border-color: color-mix(in oklab, var(--fg) 24%, transparent);
+  }
+  [data-greek] [data-card] :is([data-title], [data-title] *) {
+    text-decoration-color: color-mix(in oklab, var(--fg) 30%, transparent);
+  }
+}
 
 @media (prefers-reduced-motion: reduce) {
   [data-card] [data-drag][data-tone="busy"]::after {
