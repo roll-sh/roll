@@ -37,14 +37,33 @@ const LOGOS: Record<string, Glyph> = {
 
 export const providerLogo = (id: string): Glyph | undefined => LOGOS[id];
 
-/** The provider's mark, `size-4` by default; a monogram for one without. */
+/**
+ * Two letters for a provider without a mark (T3's `providerInstanceInitials`): the first two words'
+ * initials, or a lone word's first two letters, so "Fake echo" and "Fake fake" read FE and FF, not F
+ * and F. Punctuation splits words ("Codex (hub)" is CH).
+ */
+export function providerInitials(label: string): string {
+  const words = label
+    .replace(/[^\p{L}\p{N}'’]+/gu, " ")
+    .split(/\s+/u)
+    .map((w) => w.replace(/^['’]+|['’]+$/gu, ""))
+    .filter(Boolean);
+  if (words.length === 0) return "";
+  if (words.length === 1) return Array.from(words[0]).slice(0, 2).join("").toUpperCase();
+  return words
+    .slice(0, 2)
+    .map((w) => Array.from(w)[0])
+    .join("")
+    .toUpperCase();
+}
+
+/** The provider's mark, `size-4` by default; its initials on a tile for one without. */
 export function ProviderLogo({ provider, className = "size-4" }: { provider: Pick<ProviderInfo, "id" | "name">; className?: string }) {
   const Logo = LOGOS[provider.id];
   if (Logo) return <Logo className={cn("shrink-0", className)} aria-hidden />;
-  const name = provider.name || provider.id.replace(/^acp:/, "");
   return (
-    <span aria-hidden className={cn("grid shrink-0 place-items-center rounded-[4px] bg-fg/[0.08] font-mono text-[9px] leading-none font-semibold text-muted uppercase", className)}>
-      {name.slice(0, 1)}
+    <span aria-hidden className={cn("grid shrink-0 place-items-center rounded-[4px] bg-fg/[0.08] font-mono text-[7.5px] leading-none font-semibold tracking-[-0.04em] text-muted uppercase", className)}>
+      {providerInitials(provider.name || provider.id.replace(/^acp:/, ""))}
     </span>
   );
 }

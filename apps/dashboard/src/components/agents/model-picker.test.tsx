@@ -94,6 +94,25 @@ describe("the model picker", () => {
     await closed();
   });
 
+  it("picks from the keyboard, and shows a model's options only when it has them", async () => {
+    const onChange = vi.fn();
+    renderAgents(<Picker onChange={onChange} initial={choiceOf("codex", "gpt-6-mini")} />, agentsHarness());
+    const popup = await open();
+    // GPT-6 mini declares nothing: no reasoning, no speed.
+    expect(within(popup).queryByRole("group", { name: "Reasoning" })).toBeNull();
+    expect(within(popup).queryByRole("switch")).toBeNull();
+    await userEvent.keyboard("opus");
+    await userEvent.keyboard("{Enter}");
+    expect(onChange).toHaveBeenLastCalledWith({ provider: "claude", model: "claude-opus-5-5", effort: null, options: {} });
+    // Opus has levels and Fast Mode: they show, and focus is on the level it runs with.
+    const levels = await within(popup).findByRole("group", { name: "Reasoning" });
+    await waitFor(() => expect(within(levels).getByRole("button", { name: "Medium" })).toHaveFocus());
+    expect(within(popup).getByRole("switch", { name: "Fast Mode" })).toBeInTheDocument();
+    await userEvent.click(within(levels).getByRole("button", { name: "High" }));
+    expect(onChange).toHaveBeenLastCalledWith({ provider: "claude", model: "claude-opus-5-5", effort: "high", options: {} });
+    await closed();
+  });
+
   it("says what a provider needs: installing (its models can't be picked), logging in, an update for newer models", async () => {
     const loggedOut = provider({ ...codex, auth: "missing", detail: "Run `codex login`" });
     renderAgents(<Picker list={[claude, loggedOut, grok]} />, agentsHarness());
