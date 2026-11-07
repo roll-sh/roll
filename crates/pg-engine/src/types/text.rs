@@ -393,10 +393,86 @@ fn trim_frac_zeros(s: &str) -> &str {
 }
 
 pub fn format_float8(v: f64, extra: i32) -> String {
-    if extra > 0 {
-        format_float_shortest(v, false)
+    let mut s = String::with_capacity(24);
+    push_float8(&mut s, v, extra);
+    s
+}
+
+/// `format_float8(v, extra)` appended to `out`. The shortest digits of a float that can't be
+/// on a midpoint (`is_midpoint`'s quick rule: a binary exponent under 2 and a last digit other
+/// than 5, nearly every float) go straight from Ryu's text into `out`; the rest as before.
+pub fn push_float8(out: &mut String, v: f64, extra: i32) {
+    if extra <= 0 || !v.is_finite() || v == 0.0 {
+        out.push_str(&if extra > 0 { format_float_shortest(v, false) } else { format_g(v, (15 + extra).max(1) as usize) });
+        return;
+    }
+    let mut buf = ryu::Buffer::new();
+    let s = buf.format_finite(v.abs()).as_bytes();
+    let (mut d, mut n, mut point, mut e10) = ([0u8; 32], 0usize, None, 0i32);
+    for (i, &b) in s.iter().enumerate() {
+        match b {
+            b'0'..=b'9' => {
+                d[n] = b;
+                n += 1;
+            }
+            b'.' => point = Some(n),
+            b'e' => {
+                e10 = std::str::from_utf8(&s[i + 1..]).ok().and_then(|x| x.parse().ok()).unwrap_or(0);
+                break;
+            }
+            _ => {}
+        }
+    }
+    let point = point.unwrap_or(n) as i32;
+    let z = d[..n].iter().position(|&b| b != b'0').unwrap_or(0);
+    let mut end = n;
+    while end > z + 1 && d[end - 1] == b'0' {
+        end -= 1;
+    }
+    let digits = &d[z..end];
+    let eb = ((v.to_bits() >> 52) & 0x7ff) as i32;
+    let e2 = if eb == 0 { -1074 } else { eb - 1075 };
+    if e2 >= 2 || digits.last() == Some(&b'5') {
+        out.push_str(&format_float_shortest(v, false));
+        return;
+    }
+    let exp = point - 1 - z as i32 + e10;
+    // (ASCII digits.)
+    let digits = std::str::from_utf8(digits).unwrap_or("0");
+    if v < 0.0 {
+        out.push('-');
+    }
+    if !(-4..15).contains(&exp) {
+        out.push_str(&digits[..1]);
+        if digits.len() > 1 {
+            out.push('.');
+            out.push_str(&digits[1..]);
+        }
+        out.push('e');
+        out.push(if exp < 0 { '-' } else { '+' });
+        let a = exp.unsigned_abs();
+        if a < 10 {
+            out.push('0');
+        }
+        out.push_str(itoa::Buffer::new().format(a));
+    } else if exp < 0 {
+        out.push_str("0.");
+        for _ in 0..(-exp - 1) {
+            out.push('0');
+        }
+        out.push_str(digits);
     } else {
-        format_g(v, (15 + extra).max(1) as usize)
+        let int_len = exp as usize + 1;
+        if digits.len() <= int_len {
+            out.push_str(digits);
+            for _ in 0..int_len - digits.len() {
+                out.push('0');
+            }
+        } else {
+            out.push_str(&digits[..int_len]);
+            out.push('.');
+            out.push_str(&digits[int_len..]);
+        }
     }
 }
 
@@ -2457,6 +2533,12 @@ mod tests {
                 }
                 let (d, e) = super::ryu_digits(v, single);
                 assert_eq!(super::is_midpoint_with(v, single, &d, e, true), super::is_midpoint_with(v, single, &d, e, false), "{v:e} {single}");
+                // (And `push_float8`'s fast path writes what the general one does.)
+                for v in [v, -v] {
+                    let mut s = String::new();
+                    super::push_float8(&mut s, v, 1);
+                    assert_eq!(s, super::format_float_shortest(v, false), "{v:e}");
+                }
             }
         }
     }

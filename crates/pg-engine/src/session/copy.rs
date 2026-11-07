@@ -9,7 +9,7 @@ use crate::exec::ExecCtx;
 use crate::sql::binder::ast::{const_str, inner, names, with_pos};
 use crate::sql::binder::{Binder, table_rules};
 use crate::sql::expr::Expr;
-use crate::sql::plan::{InsertPlan, Plan};
+use crate::sql::plan::{CopyRow, InsertPlan, Plan};
 use crate::types::{DataType, Value};
 use crate::types::text::{format_value, parse_value};
 use pg_query::NodeEnum;
@@ -447,7 +447,9 @@ pub struct CopyIn {
 /// COPY FROM data read so far, a batch at a time (`Session::copy_in_run`).
 #[derive(Default)]
 pub struct CopyInParsed {
-    rows: Vec<Vec<Expr>>,
+    rows: Vec<CopyRow>,
+    /// A plain COPY (`CopyReader::plain`): records are parsed straight into values.
+    plain: bool,
     /// Each row's line number and text.
     lines: Vec<(usize, String)>,
     /// Rows ON_ERROR ignore skipped.
@@ -1084,6 +1086,11 @@ impl Session {
             };
             let rules = table_rules(&t, ctx)?;
             rd.st.not_null = Some(rd.not_null_columns(&rules, ctx));
+            // A plain COPY (no WHERE, DEFAULT markers or domain input checks) parses its
+            // records straight into the values that go in.
+            rd.st.plain = c.filter.is_none()
+                && f.default.is_none()
+                && c.target.iter().all(|&col| rules.domain_checks.get(col).is_none_or(|d| d.is_none()));
             let target = rd.target();
             let ncols = target.len();
             // CopyFrom buffers rows unless BEFORE ROW triggers or volatile defaults
@@ -1271,8 +1278,10 @@ impl CopyReader<'_> {
         }
         let cols = st.not_null.as_ref()?;
         (from..st.rows.len()).find(|&r| {
-            cols.iter()
-                .any(|&k| matches!(st.rows[r].get(k), Some(Expr::Const(Value::Null, _))))
+            cols.iter().any(|&k| match &st.rows[r] {
+                CopyRow::Values(v) => matches!(v.get(k), Some(Value::Null)),
+                CopyRow::Exprs(e) => matches!(e.get(k), Some(Expr::Const(Value::Null, _))),
+            })
         })
     }
 
@@ -1359,7 +1368,20 @@ impl CopyReader<'_> {
         let rows = std::mem::take(&mut self.st.rows);
         let lines = std::mem::take(&mut self.st.lines);
         self.batch_bytes = 0;
-        let (rows, lines) = self.prepare(rows, lines, rules, ctx)?;
+        // (A plain COPY's rows need none of `prepare`'s work.)
+        let (rows, lines) = if self.st.plain {
+            (rows, lines)
+        } else {
+            let exprs = rows
+                .into_iter()
+                .map(|r| match r {
+                    CopyRow::Exprs(e) => e,
+                    CopyRow::Values(v) => v.into_iter().zip(&self.c.target).map(|(v, &col)| Expr::Const(v, self.c.table.columns[col].ty.clone())).collect(),
+                })
+                .collect();
+            let (rows, lines) = self.prepare(exprs, lines, rules, ctx)?;
+            (rows.into_iter().map(CopyRow::Exprs).collect(), lines)
+        };
         if let Some(p) = ctx.sess.copy_progress.borrow_mut().as_mut() {
             p.bytes_processed = self.st.bytes as i64;
             p.tuples_excluded = self.excluded;
@@ -1525,7 +1547,7 @@ pub(crate) fn parse_copy_data(
         let r = binary_copy_in(data, c, fmt, st, last, &mut rows);
         for row in rows {
             st.records += 1;
-            st.rows.push(row);
+            st.rows.push(CopyRow::Exprs(row));
             st.lines.push((st.records, String::new()));
         }
         let (took, ended) = r?;
@@ -1585,8 +1607,10 @@ pub(crate) fn parse_copy_data(
         rows,
         lines,
         skipped,
+        plain,
         ..
     } = st;
+    let plain = *plain;
     let ctx_line = |line: usize, raw: &str| format!("COPY {}, line {line}: \"{raw}\"", t.name);
     'records: for (lineno, (raw, rec)) in records.into_iter().enumerate() {
         let lineno = first + lineno;
@@ -1638,7 +1662,9 @@ pub(crate) fn parse_copy_data(
         }
         // (A missing field is found after the ones before it converted: NextCopyFrom.)
         let missing = (rec.len() < c.ncols).then_some(rec.len());
-        let mut row = Vec::with_capacity(c.ncols);
+        // (A plain COPY's values as they are; otherwise expressions, DEFAULT markers too.)
+        let mut row = Vec::with_capacity(if plain { 0 } else { c.ncols });
+        let mut vals = Vec::with_capacity(if plain { c.ncols } else { 0 });
         for (field, &col) in rec.into_iter().zip(&c.target) {
             let colname = &t.columns[col].name;
             let ty = &t.columns[col].ty;
@@ -1686,7 +1712,11 @@ pub(crate) fn parse_copy_data(
                     }
                 },
             };
-            row.push(Expr::Const(v, ty.clone()));
+            if plain {
+                vals.push(v);
+            } else {
+                row.push(Expr::Const(v, ty.clone()));
+            }
         }
         if let Some(n) = missing {
             let col = &t.columns[c.target[n]].name;
@@ -1696,7 +1726,7 @@ pub(crate) fn parse_copy_data(
             )
             .context(ctx_line(line, &raw)));
         }
-        rows.push(row);
+        rows.push(if plain { CopyRow::Values(vals) } else { CopyRow::Exprs(row) });
         lines.push((line, raw));
     }
     // (Its line: the physical line the data ended on, the record's text with its newlines.)
@@ -1747,7 +1777,15 @@ impl CopyInParsed {
     /// DEFAULT marker), taken; ON_ERROR ignore's count of rows skipped.
     pub(crate) fn take_rows(&mut self) -> (Vec<Vec<Expr>>, usize) {
         self.lines.clear();
-        (std::mem::take(&mut self.rows), self.skipped)
+        let rows = std::mem::take(&mut self.rows)
+            .into_iter()
+            .map(|r| match r {
+                CopyRow::Exprs(e) => e,
+                // (Only `CopyReader` reads plain.)
+                CopyRow::Values(_) => unreachable!("file_fdw's rows are never plain"),
+            })
+            .collect();
+        (rows, self.skipped)
     }
 }
 
@@ -2250,13 +2288,17 @@ impl<'a> CopyLines<'a> {
             if i > 0 {
                 line.push(f.delimiter);
             }
-            // (Integers and plain text written straight into the line: no escapes in an
-            // integer's text, none needed in most text.)
+            // (Integers, floats and plain text written straight into the line: no escapes in
+            // their text, none needed in most text; but a delimiter their text can hold.)
+            let numeric_ok = !f.csv && !matches!(f.delimiter, '-' | '+' | 'I' | 'N');
             match (v, &c.ty) {
                 (Value::Null, _) => line.push_str(&f.null),
-                (Value::Int4(n), DataType::Int4) if !f.csv => push_int(&mut line, *n as i64),
-                (Value::Int8(n), DataType::Int8) if !f.csv => push_int(&mut line, *n),
-                (Value::Int2(n), DataType::Int2) if !f.csv => push_int(&mut line, *n as i64),
+                (Value::Int4(n), DataType::Int4) if numeric_ok => push_int(&mut line, *n as i64),
+                (Value::Int8(n), DataType::Int8) if numeric_ok => push_int(&mut line, *n),
+                (Value::Int2(n), DataType::Int2) if numeric_ok => push_int(&mut line, *n as i64),
+                (Value::Float8(x), DataType::Float8) if numeric_ok => {
+                    crate::types::text::push_float8(&mut line, *x, self.fmt.extra_float_digits)
+                }
                 (Value::Text(s), DataType::Text | DataType::Varchar(_)) if !f.csv => {
                     text_escape_into(&mut line, s, f.delimiter)
                 }
