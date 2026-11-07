@@ -558,6 +558,7 @@ pub fn open_scan(s: &ScanPlan, shared: Option<&Arc<crate::sql::plan::Plan>>, nee
             erb: Default::default(),
             spare: None,
             fscan: None,
+            fetch_calls: 0,
             run: Default::default(),
             pending: None,
             one_run: false,
@@ -650,6 +651,7 @@ pub fn open_scan(s: &ScanPlan, shared: Option<&Arc<crate::sql::plan::Plan>>, nee
             erb: Default::default(),
             spare: None,
             fscan: None,
+            fetch_calls: 0,
             run: Default::default(),
             pending: None,
             one_run: false,
@@ -732,6 +734,7 @@ pub fn open_scan(s: &ScanPlan, shared: Option<&Arc<crate::sql::plan::Plan>>, nee
             erb: Default::default(),
             spare: None,
             fscan: None,
+            fetch_calls: 0,
             run: Default::default(),
             pending: None,
             one_run: false,
@@ -881,6 +884,7 @@ fn open_scan_as(
         erb: Default::default(),
         spare: None,
         fscan: None,
+        fetch_calls: 0,
         run: Default::default(),
         pending: None,
         blocks: Default::default(),
@@ -1742,6 +1746,7 @@ fn dense_bitmap_scan(
         erb: Default::default(),
         spare: None,
         fscan: None,
+        fetch_calls: 0,
         run: Default::default(),
         pending: None,
         one_run: false,
@@ -2173,6 +2178,9 @@ struct ScanNode {
     /// The table's rows read for a few keys at a time (`fetch_kept`): one scan kept and
     /// sought from key to key, its sources staying in their blocks.
     fscan: Option<Box<TxnScan>>,
+    /// Calls of `fetch_kept` so far: the first fetch is a lookup; a kept scan only pays once
+    /// the scan fetches again (a rescan, more entries).
+    fetch_calls: u32,
     /// Such a scan read by worker threads (`parscan`), once decided (`par_tried`).
     par: Option<super::parscan::ParScan>,
     par_tried: bool,
@@ -3420,11 +3428,16 @@ impl ScanNode {
     /// to call (`fscan`), sought to each key (`Txn::reseek_snap`): the next of ascending
     /// lookups (a nested loop's inner rows, an index's entries in its table's order) reads on
     /// in the blocks the last one read, instead of a lookup from the top each. Values are put
-    /// back as `fetch_rows` puts them. None: no statement snapshot.
+    /// back as `fetch_rows` puts them. None: no statement snapshot, or the scan's first fetch.
     fn fetch_kept(&mut self, keys: &[Vec<u8>], ctx: &ExecCtx) -> Result<Option<Vec<Option<bytes::Bytes>>>> {
         let Some(snap) = ctx.snapshot() else {
             return Ok(None);
         };
+        // (A single lookup costs less than setting up a scan to keep: pgbench's point reads.)
+        self.fetch_calls += 1;
+        if self.fetch_calls == 1 {
+            return Ok(None);
+        }
         let txn = ctx.txn.borrow();
         let mut out = Vec::with_capacity(keys.len());
         for k in keys {
@@ -5338,6 +5351,7 @@ fn keyed_scan(s: &ScanPlan, plan: ScanPlan, ix: &Index, keys: Keys, ctx: &ExecCt
         erb: Default::default(),
         spare: None,
         fscan: None,
+        fetch_calls: 0,
         run: Default::default(),
         pending: None,
         one_run: false,
