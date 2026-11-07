@@ -3,6 +3,7 @@
 //! statements over a new catalog version) asked by scanning every relation.
 
 use super::pmap::{Counts, MapIndex, PHash, PMap};
+use super::reldir::{DirMap, RelDir};
 use super::{Index, Sequence, Table, ViewDef};
 use crate::types::DataType;
 use std::sync::Arc;
@@ -118,6 +119,8 @@ pub struct TableIx {
     /// Partitions pending detach (DETACH PARTITION ... CONCURRENTLY) → their parent
     /// (`Catalog::has_detach_pending`, which every statement after DDL asked of every table).
     pub detach_pending: PMap<u32>,
+    /// Each table's directory record (`reldir`: what pg_class reads of it).
+    pub dir: DirMap,
 }
 
 /// The words `ddl::mentions` matches a name against: each maximal run of identifier
@@ -443,19 +446,22 @@ fn no_parts() -> TableParts {
 }
 
 impl MapIndex<Arc<Table>> for TableIx {
-    fn add(&mut self, _: u32, t: &Arc<Table>) {
+    fn add(&mut self, k: u32, t: &Arc<Table>) {
         self.apply(&TableParts::of(t), true, &no_parts());
+        self.dir.set(k, RelDir::of_table(t));
     }
-    fn remove(&mut self, _: u32, t: &Arc<Table>) {
+    fn remove(&mut self, k: u32, t: &Arc<Table>) {
         self.apply(&TableParts::of(t), false, &no_parts());
+        self.dir.unset(k);
     }
-    fn replace(&mut self, _: u32, old: &Arc<Table>, new: &Arc<Table>) {
+    fn replace(&mut self, k: u32, old: &Arc<Table>, new: &Arc<Table>) {
         if Arc::ptr_eq(old, new) {
             return;
         }
         let (a, b) = (TableParts::of(old), TableParts::of(new));
         self.apply(&a, false, &b);
         self.apply(&b, true, &a);
+        self.dir.set(k, RelDir::of_table(new));
     }
 }
 
@@ -478,6 +484,8 @@ pub struct ViewIx {
     /// A view's `_RETURN` rule (`ViewDef::rule_oid`) → the view.
     pub rules: PMap<u32>,
     pub rows: RelRows,
+    /// Each view's directory record (`reldir`).
+    pub dir: DirMap,
 }
 
 impl ViewIx {
@@ -552,11 +560,18 @@ impl ViewIx {
 }
 
 impl MapIndex<Arc<ViewDef>> for ViewIx {
-    fn add(&mut self, _: u32, v: &Arc<ViewDef>) {
+    fn add(&mut self, k: u32, v: &Arc<ViewDef>) {
         self.apply(v, true);
+        self.dir.set(k, RelDir::of_view(v));
     }
-    fn remove(&mut self, _: u32, v: &Arc<ViewDef>) {
+    fn remove(&mut self, k: u32, v: &Arc<ViewDef>) {
         self.apply(v, false);
+        self.dir.unset(k);
+    }
+    fn replace(&mut self, k: u32, old: &Arc<ViewDef>, new: &Arc<ViewDef>) {
+        self.apply(old, false);
+        self.apply(new, true);
+        self.dir.set(k, RelDir::of_view(new));
     }
 }
 
@@ -571,6 +586,8 @@ pub struct IndexIx {
     /// The words of the indexes' expressions and predicates (`words_in`) → the indexes.
     pub words: PHash<String, Counts>,
     pub rows: RelRows,
+    /// Each index's directory record (`reldir`).
+    pub dir: DirMap,
 }
 
 impl IndexIx {
@@ -607,9 +624,16 @@ impl IndexIx {
 impl MapIndex<Arc<Index>> for IndexIx {
     fn add(&mut self, oid: u32, ix: &Arc<Index>) {
         self.apply(oid, ix, true);
+        self.dir.set(oid, RelDir::of_index(ix));
     }
     fn remove(&mut self, oid: u32, ix: &Arc<Index>) {
         self.apply(oid, ix, false);
+        self.dir.unset(oid);
+    }
+    fn replace(&mut self, oid: u32, old: &Arc<Index>, new: &Arc<Index>) {
+        self.apply(oid, old, false);
+        self.apply(oid, new, true);
+        self.dir.set(oid, RelDir::of_index(new));
     }
 }
 
@@ -618,6 +642,8 @@ pub struct SeqIx {
     /// A table → the sequences it owns (by a column), in oid order.
     pub owned: PMap<Arc<Vec<u32>>>,
     pub rows: RelRows,
+    /// Each sequence's directory record (`reldir`).
+    pub dir: DirMap,
 }
 
 /// A sequence's rows: its pg_class row, its three columns and the system columns.
@@ -641,9 +667,11 @@ impl MapIndex<Arc<Sequence>> for SeqIx {
             }
             self.owned.insert(t, Arc::new(v));
         }
+        self.dir.set(oid, RelDir::of_sequence(s));
     }
     fn remove(&mut self, oid: u32, s: &Arc<Sequence>) {
         self.rows.apply(SEQUENCE_ROWS, false);
+        self.dir.unset(oid);
         if let Some((t, _)) = s.owned_by
             && let Some(v) = self.owned.get(&t)
         {

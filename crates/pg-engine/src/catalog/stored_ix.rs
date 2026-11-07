@@ -19,7 +19,7 @@ use serde::de::DeserializeOwned;
 use std::collections::BTreeMap;
 
 /// A map with fewer entries is read whole when the catalog opens (one scan).
-const LAZY_MIN: usize = 256;
+pub const LAZY_MIN: usize = 256;
 
 /// The maps read on demand (their tags in `persist`'s `stored_fields!`).
 pub const LAZY_TAGS: [u8; 12] = [2, 3, 4, 5, 13, 18, 26, 35, 44, 45, 46, 50];
@@ -32,7 +32,7 @@ const CHILDREN: u8 = 129;
 /// Each stored map's (entry count, last key), by tag: the header's `stored`.
 pub type Shapes = BTreeMap<u8, (usize, u32)>;
 
-fn tag_range(tag: u8) -> (Vec<u8>, Vec<u8>) {
+pub fn tag_range(tag: u8) -> (Vec<u8>, Vec<u8>) {
     let mut from = RECORD_PREFIX.to_vec();
     from.push(tag);
     let mut to = RECORD_PREFIX.to_vec();
@@ -188,18 +188,19 @@ stored_ix!(TableIx {
         ri_checks = 138,
         words = 139,
         detach_pending = 140,
+        dir = 152,
     ],
     head: [trigger_marks, rows],
 });
 
 stored_ix!(ViewIx {
-    parts: [toast = 141, rowtypes = 142, barriers = 143, words = 144, row_users = 145, rowtype_rels = 146, rules = 147],
+    parts: [toast = 141, rowtypes = 142, barriers = 143, words = 144, row_users = 145, rowtype_rels = 146, rules = 147, dir = 153],
     head: [rows],
 });
 
-stored_ix!(IndexIx { parts: [attached = 148, words = 149], head: [expr_tables, parents, rows] });
+stored_ix!(IndexIx { parts: [attached = 148, words = 149, dir = 154], head: [expr_tables, parents, rows] });
 
-stored_ix!(SeqIx { parts: [owned = 150], head: [rows] });
+stored_ix!(SeqIx { parts: [owned = 150, dir = 155], head: [rows] });
 
 stored_ix!(FuncIx { parts: [named = 151], head: [] });
 

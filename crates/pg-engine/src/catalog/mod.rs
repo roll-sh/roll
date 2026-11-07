@@ -19,6 +19,7 @@ pub mod stored_ix;
 pub mod stat_views;
 pub mod pmap;
 pub mod relindex;
+pub mod reldir;
 pub mod pglz;
 pub mod identify;
 pub mod names;
