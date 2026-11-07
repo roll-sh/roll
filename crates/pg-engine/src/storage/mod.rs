@@ -2038,6 +2038,54 @@ impl Cursor {
         }
     }
 
+    /// The same source over [start, end) instead: a memtable's read again from `start`; a
+    /// level's kept in its block when `start` falls in it past its first entry (the next of
+    /// ascending lookups), else positioned afresh.
+    fn reseek(&mut self, start: &[u8], end: &[u8]) {
+        match self {
+            Cursor::Mem { buf, from, end: e, done, batch, .. } => {
+                buf.clear();
+                *from = Bound::Included(start.to_vec());
+                e.clear();
+                e.extend_from_slice(end);
+                *done = false;
+                *batch = MIN_BATCH;
+            }
+            Cursor::Level { ssts, file, block, block_idx, pos, end: e, start: s, started, whole, .. } => {
+                e.clear();
+                e.extend_from_slice(end);
+                // (`start` in the block, past its first entry: the first entry at or past it
+                // is here, not in the block before. At the block's first entry the one before
+                // could hold it: positioned afresh.)
+                if *started
+                    && *file < ssts.len()
+                    && let Some(b) = block.as_ref()
+                    && b.last_key().is_some_and(|k| k >= start)
+                {
+                    b.seek(start, pos);
+                    if pos.index() > 0 {
+                        *whole = end.is_empty() || b.last_key().is_none_or(|k| k < end);
+                        return;
+                    }
+                }
+                s.clear();
+                s.extend_from_slice(start);
+                *started = false;
+                *block = None;
+                *file = 0;
+                *block_idx = 0;
+            }
+        }
+    }
+
+    /// The files a level cursor reads (None: a memtable's).
+    fn files(&self) -> Option<&[Arc<SstReader>]> {
+        match self {
+            Cursor::Level { ssts, .. } => Some(ssts),
+            Cursor::Mem { .. } => None,
+        }
+    }
+
     /// `level` over every key, its blocks kept out of the cache (compaction's inputs).
     fn level_uncached(ssts: Vec<Arc<SstReader>>) -> Cursor {
         let mut c = Cursor::level(ssts, &[], &[]);
@@ -2457,6 +2505,50 @@ fn sources(view: &View, start: &[u8], end: &[u8]) -> Vec<Cursor> {
     sources
 }
 
+/// Whether `cursors` are the sources `sources(view, start, end)` would make, in its order:
+/// the same memtables and files (a reseek then moves them in place, nothing made).
+fn same_sources(view: &View, cursors: &[Cursor], start: &[u8], end: &[u8]) -> bool {
+    let overlaps = |s: &Arc<SstReader>| s.overlaps(start, end);
+    let mut c = cursors.iter();
+    let mem = |c: Option<&Cursor>, m: &Arc<Memtable>| matches!(c, Some(Cursor::Mem { mem, .. }) if Arc::ptr_eq(mem, m));
+    let file = |c: Option<&Cursor>, s: &Arc<SstReader>| c.and_then(Cursor::files).is_some_and(|f| f.len() == 1 && Arc::ptr_eq(&f[0], s));
+    if !mem(c.next(), &view.mem) {
+        return false;
+    }
+    for f in &view.imm {
+        let ok = match f {
+            Frozen::Mem(m) => mem(c.next(), m),
+            Frozen::Sst(s) if overlaps(s) => file(c.next(), s),
+            Frozen::Sst(_) => true,
+        };
+        if !ok {
+            return false;
+        }
+    }
+    for s in view.l0.iter().filter(|s| overlaps(s)) {
+        if !file(c.next(), s) {
+            return false;
+        }
+    }
+    let mut l1 = view.l1.iter().filter(|s| overlaps(s)).peekable();
+    if l1.peek().is_some() {
+        let Some(files) = c.next().and_then(Cursor::files) else {
+            return false;
+        };
+        let mut n = 0;
+        for s in l1 {
+            if files.get(n).is_none_or(|f| !Arc::ptr_eq(f, s)) {
+                return false;
+            }
+            n += 1;
+        }
+        if n != files.len() {
+            return false;
+        }
+    }
+    c.next().is_none()
+}
+
 impl Scan {
     fn of_rows(view: Arc<View>, rows: Vec<(Vec<u8>, Bytes)>, ts: u64) -> Scan {
         Scan {
@@ -2510,6 +2602,58 @@ impl Scan {
         }));
         self.rdels = l.into_boxed_slice();
         self
+    }
+
+    /// The scan over [start, end) instead, at its snapshot `ts` (false: it can't be, a hot
+    /// range's rows or another snapshot: make a new one). The sources the range needs are
+    /// the ones a new scan would have; each it had already keeps its place (`Cursor::reseek`),
+    /// so ascending lookups (a nested loop's inner index scan, keyset pages) read the next key
+    /// in the block they are in. Range deletions are the new range's; dead-range hints aren't
+    /// looked up again.
+    pub fn reseek(&mut self, start: &[u8], end: &[u8], ts: u64) -> bool {
+        if self.rows.is_some() || ts != self.ts || self.rdels.iter().any(|r| r.ts == rdel::ALL) {
+            return false;
+        }
+        let mut old = std::mem::take(&mut self.merge.sources);
+        let sources = if same_sources(&self._view, &old, start, end) {
+            // (The same sources: moved in place, none made.)
+            for c in &mut old {
+                c.reseek(start, end);
+            }
+            old
+        } else {
+            let fresh = sources(&self._view, start, end);
+            let same = |a: &Cursor, b: &Cursor| match (a, b) {
+                (Cursor::Mem { mem: x, .. }, Cursor::Mem { mem: y, .. }) => Arc::ptr_eq(x, y),
+                _ => match (a.files(), b.files()) {
+                    (Some(x), Some(y)) => x.len() == y.len() && x.iter().zip(y).all(|(p, q)| Arc::ptr_eq(p, q)),
+                    _ => false,
+                },
+            };
+            fresh
+                .into_iter()
+                .map(|f| match old.iter().position(|o| same(o, &f)) {
+                    Some(i) => {
+                        let mut c = old.swap_remove(i);
+                        c.reseek(start, end);
+                        c
+                    }
+                    None => f,
+                })
+                .collect()
+        };
+        let mut e = std::mem::take(&mut self.merge.end);
+        e.clear();
+        e.extend_from_slice(end);
+        self.merge = Merge::new(sources, e);
+        self.rdels = rdel::relevant(&self._view.rdels, start, end, ts).into_boxed_slice();
+        self.decided = None;
+        self.decided_ts = 0;
+        self.skipped = 0;
+        self.newer = None;
+        self.dead = None;
+        self.dead_run = 0;
+        true
     }
 
     /// Drop the memtables' versions of `uk` older than the decided one, when that one is
@@ -3265,6 +3409,78 @@ mod tests {
             |_| Ok(()),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn point_fetch_ranges_include_mvcc_versions_cold_and_hot() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = Store::open(dir.path(), StoreOptions { sync: false, ..Default::default() }).unwrap();
+        let prefix = keys::index_prefix(7, 0);
+        let mut key = prefix.clone();
+        key.extend_from_slice(&1u64.to_be_bytes());
+        let value = Bytes::from_static(b"account-balance");
+        let ts = s.commit(vec![(key.clone(), Some(value.clone()))], |_| Ok(())).unwrap();
+        let _pin = s.pin(ts);
+        assert_eq!(s.get_version_raw(&key, ts).unwrap(), Some((ts, Some(value.clone()))));
+        let expected = vec![(key.clone(), value)];
+        let mut narrow_end = key.clone();
+        narrow_end.push(0);
+        let mut narrow = s.scan_raw(&key, &narrow_end, ts);
+        assert!(narrow.rows.is_none(), "cold scan must use merging cursors");
+        let cold: Vec<_> = narrow.by_ref().map(Result::unwrap).collect();
+        let mut correct = s.scan_raw(&key, &keys::prefix_end(&key), ts);
+        assert!(correct.rows.is_none(), "correct cold scan must use merging cursors");
+        assert_eq!(correct.by_ref().map(Result::unwrap).collect::<Vec<_>>(), expected);
+        let whole_end = keys::prefix_end(&prefix);
+        for _ in 0..8 {
+            assert_eq!(s.scan_raw(&prefix, &whole_end, ts).map(Result::unwrap).collect::<Vec<_>>(), expected);
+        }
+        let mut promoted = s.scan_raw(&key, &narrow_end, ts);
+        assert!(promoted.rows.is_some(), "promoted scan must use hot version chains");
+        let hot: Vec<_> = promoted.by_ref().map(Result::unwrap).collect();
+        assert_eq!(hot, expected);
+        let mut correct = s.scan_raw(&key, &keys::prefix_end(&key), ts);
+        assert!(correct.rows.is_some(), "correct promoted scan must use hot version chains");
+        assert_eq!(correct.by_ref().map(Result::unwrap).collect::<Vec<_>>(), expected);
+        assert_eq!(s.get_version_raw(&key, ts).unwrap().map(|r| r.0), Some(ts));
+        eprintln!("endpoint proof ts={ts} cold={cold:?} hot={hot:?} merging_before=true hot_after=true");
+        // User-key bounds with an appended zero exclude physical timestamp suffixes.
+        // prefix_end must work on both paths; the narrower range is a negative control.
+        assert!(cold.is_empty());
+    }
+
+    /// A scan sought to other ranges (`Scan::reseek`), forward, backward, across files and
+    /// memtables, over deletions and newer versions, gives what a new scan of each gives.
+    #[test]
+    fn reseek_reads_as_a_new_scan() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = Store::open(dir.path(), StoreOptions { memtable_bytes: 1 << 20, sync: false, ..Default::default() }).unwrap();
+        let key = |i: u32| format!("r{i:05}").into_bytes();
+        let rows = |from: u32, to: u32, step: u32, v: Option<&'static str>| -> Vec<(Vec<u8>, Option<Bytes>)> {
+            (from..to).step_by(step as usize).map(|i| (key(i), v.map(|s| Bytes::from_static(s.as_bytes())))).collect()
+        };
+        s.commit(rows(0, 6000, 1, Some("a")), |_| Ok(())).unwrap();
+        s.flush_memtables().unwrap();
+        s.compact().unwrap();
+        s.commit(rows(1000, 3000, 3, None), |_| Ok(())).unwrap();
+        s.flush_memtables().unwrap();
+        s.commit(rows(2000, 5000, 7, Some("b")), |_| Ok(())).unwrap();
+        let ts = s.visible_ts();
+        // (Written after the snapshot: not seen.)
+        s.commit(rows(0, 6000, 11, Some("c")), |_| Ok(())).unwrap();
+        let read = |it: &mut Scan| it.map(|r| r.unwrap()).map(|(k, v)| (k, v.to_vec())).collect::<Vec<_>>();
+        let ranges: &[(u32, u32)] = &[(10, 20), (20, 25), (900, 1200), (1199, 1300), (2995, 3100), (500, 520), (4990, 6100), (0, 3), (5999, 7000), (3000, 2999)];
+        let mut it = s.scan_raw(&key(0), &key(1), ts);
+        read(&mut it);
+        for &(a, b) in ranges {
+            let want = read(&mut s.scan_raw(&key(a), &key(b), ts));
+            assert!(it.reseek(&key(a), &key(b), ts));
+            assert_eq!(read(&mut it), want, "[{a}, {b})");
+            // (A range half read, then another.)
+            assert!(it.reseek(&key(a), &key(b), ts));
+            it.next();
+        }
+        assert!(!it.reseek(&key(0), &key(9), ts + 1), "another snapshot");
     }
 
     #[test]

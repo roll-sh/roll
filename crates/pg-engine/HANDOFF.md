@@ -4902,6 +4902,92 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
     (`describe_here`, 1.7%); `bind_values` for DML, sub-select levels, partition pruning
     and the `= ANY` / LIKE rewrites (155's later steps), and removing the serial cost tree
     once the planner hands over its chosen cost (155's item).
+- **OLTP round 6** (round 26, agent 165; BENCH.md "OLTP, round 6"): per-statement session
+  work, per-backend activity and statistics slots, one socket per connection, the
+  transaction's own lock on the fast path (fe78d36c, batch 1).
+  - *The search path is shared* (`catalog::names::SearchPath`, an `Arc<[String]>`): the
+    session's memo (`Settings::session_search_path`) hands out the same one while settings,
+    user and role hold; statements, their contexts (`ExecCtx::search_path`,
+    `CatalogNames`) and kept-plan checks compare and copy a pointer. `SessionState::search_path`
+    still returns a `Vec` for DDL; the hot paths take `shared_search_path`. The path less the
+    schemas a non-superuser may not use is worked out once per catalog version, role, database
+    owner and path (`SessionState::usable_path_memo`, `exec::usable_path`): it was 2.2% of a
+    non-superuser's select-only CPU.
+  - *pg_stat_activity per backend* (`engine::ActivitySlot`, PostgreSQL's PgBackendStatus): the
+    server loop updates its backend's entry under the entry's own lock, found once per
+    connection; readers take the backends table, then each entry (that order). The xmin is
+    looked up only when the entry has none (once per statement, was per message); the
+    statement text is copied only when it changed.
+  - *Statistics kept between flushes per backend* (`pgstat::UnflushedSlot`): a backend's
+    counts kept unflushed live in its own slot, registered in `Shared::unflushed` once; the
+    per-statement busy mark (`pgstat::busy`, which spun on the database's statistics mutex at
+    32 clients: 2.8% of the context switches) and the per-transaction report lock only the
+    slot; autovacuum is told once per idle timeout (`Pending::noted_due`). Readers flush idle
+    backends' slots as before (statistics, then slot); a session's end removes only its own
+    slot (`Arc::ptr_eq`).
+  - *One socket per connection*: the reader, writer, notices, notifications and the backend
+    table share one `Arc<TcpStream>` (it was cloned six times: 7 descriptors per connection,
+    and ~150 connections exhausted a container's 1,024 open files: agent 164's burst). 1,000
+    sessions under a 1,024 limit: 1,013 descriptors, all connect (base fails at ~640).
+  - *Relation locks held already* are found without copying the key (`txn::HeldKey`, hashbrown
+    `Equivalent`, `locks::relation_key_bytes`).
+  - *The transaction's own lock on the fast path* (`LockManager::hold_xact_fast`,
+    VirtualXactLockTableInsert): a transaction's virtual transaction lock goes in its backend's
+    fast-path slot (`FastSlot::xact`); `acquire` of an xact key moves it to the main table
+    first (`move_fast_xact`, only the slot holding it). `Txn::table_used` marks anything that
+    went to the main table (a lock off the fast path, row locks, key holders, exclusion
+    entries, the xid's lock); a transaction with none ends without the lock table's mutex,
+    unless a hold of its moved meanwhile (`FastHolds::moved`, per owner). PREPARE detaches
+    the fast slot and clears the moved marks of the transferred owner. pg_locks shows a moved
+    vxid hold with fastpath true, as PostgreSQL does.
+  - Smaller: the database owner is looked up only when a privilege check needs it;
+    system-view column tracking only for oids below 16384; the temporary schema's name is
+    made once per thread (`catalog::set_session_temp_schema_of`); transaction_timeout read
+    by value.
+  - Tests: `tests/backend_lifecycle.rs` (activity and statistics slots across backends and
+    their ends), `tests/twophase.rs` (prepared transactions' lock ownership with the
+    fast-path transaction lock).
+  - Verified on the batch (c8618834 before its rebase): crate tests debug and release (455 /
+    455 each), clippy (the ten baseline warnings, none in the files touched), difftest smoke,
+    isolation with the roll-* specs 1,805 / 1,806 permutations (intra-grant-inplace, as
+    before), pg_dump_tap 14,817 / 14,817, the full regression suite on a private reference
+    whose `pg_stat_statements` preload made 419 units differ: every one is the reference's
+    Query Identifier line in EXPLAIN VERBOSE or prepared_xacts run with
+    max_prepared_transactions on the reference only (classified unit by unit); after the
+    rebase onto c1800df3: release build, clippy, --lib, wire, kept_plans, backend_lifecycle,
+    twophase, memory_load, golden, session_state, deep_input (288 / 288). A regress reference
+    must be set up as the baseline's (default settings) to compare against `results.tsv`.
+  - Where the time is now (frame-pointer release, 8 clients): tpcb-like prepared's session
+    work in `run_query` is ~7% (begin_statement 1.1%, perms 0.9%, relation locks 0.6%,
+    ExecCtx 0.3%, search path 0.2%); execution 46% (the UPDATEs' seq scans of hot tellers /
+    branches 31%: storage and executor), send 14% and receive 6% (one each per Sync, as
+    PostgreSQL), commit 8% (the store's part: wait_durable 2.7%, apply_hot 1.1%, memtable
+    0.9%, WAL append 0.85%; the session's under 1%). The allocator is 13.5% as leaf, its
+    biggest callers the scans' row decode (`scan_row_need` 1.5%, the hot ranges 0.8%) and
+    message bodies (`read_body`'s zeroed `Vec` per message, 0.9%). select-only prepared:
+    the read-only commit 4.6% (release_locks 1.8% before the fast-path change), Bind's
+    `ensure_txn` 2.2% (PostgreSQL starts the transaction there too).
+  - *Cursors stream their rows* (batch 2, `session/cursor.rs`; agent 157's postgres_fdw item):
+    a cursor kept every row it returned so FETCH could go back (15% of a 20k-row foreign
+    scan's CPU, and the memory). As PostgreSQL's portal, a NO SCROLL cursor (the default when
+    the plan can't run backward) keeps none it has passed (`Cursor::streams`, `base`: `rows[0]`
+    is row `base + 1`); a SCROLL cursor over a replayable plan (plain stored-row scans,
+    filters, projections, limits, appends whose expressions are all immutable built-ins:
+    `replayable`, `replayable_expr`) streams too and, the first time it is moved back past what
+    it let go, runs its query again from the start up to the row (`rerun_to`, ExecutorRewind)
+    and then keeps rows. Every other SCROLL cursor, a holdable cursor at commit, and a query
+    whose target list or qual is evaluated as rows are passed keep their rows as before.
+    WHERE CURRENT OF keeps the current row's key (`current_key`) and the first multi-scan key
+    (`multi_reference`); `Lazy::for_cursor` splits the target list and qual only for SCROLL
+    cursors. Goldens a165_cursor_stream, _edges, _embedded, _replay, _scalar (recorded from
+    PostgreSQL 18.6); memory_load: a streamed cursor's memory stays bounded. The 20k-row FETCH
+    100 loop: 0.75-0.85x batch 1's CPU and 0.45x its peak memory (BENCH).
+  - Left: pipelined fsync (agent
+    174's conditions: an appended watermark, observed_ts snapshots, a durability barrier on
+    every output path, power-loss proof first; the engine makes a commit visible only when
+    durable, so releasing locks at the commit record alone loses updates); cheaper
+    `bind_values` (precomputed substitution sites, no tree clone: 20.5% of the range read)
+    and reusing the previous custom plan, with agent 171; the message body buffer.
 - The full crate test suite (`cargo test -p pg-engine`) passes: unit tests, 350+ golden
   files in engine and wire mode, the wire tests (including a concurrency stress test), the
   storage-format and layout tests.
@@ -5986,14 +6072,37 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
     14,817; contrib btree_gist 613 / 616, pg_trgm 261, citext 544, bloom 58, pgvector 915 /
     915 (the plain OPTFLAGS="" reference); the footprint gate unchanged (fresh data directory
     3.03 MB, idle CPU 0.02 s over 5 minutes, 100 idle sessions 31.7 MB).
+  - Batch 2 (agent 163):
+    - GiST KNN over two-dimensional grids walks strips (`search::Strip`, `Grid::strips`,
+      `yperm`, `ypmax`; `search/near.rs` Step::Strip / Up / Down): runs of 512 of a
+      partition's entries in x order, each in its entries' y order with the greatest y high
+      end per block, bounded by hypot(the strip's x gap, the y gap). A LIMIT 5 reads the
+      blocks about the origin instead of every entry of a vertical strip. Instructions per
+      query: box KNN -33%, circle -40%, polygon -23% (point_ops' own path unchanged). Golden
+      `a163_knn_strips` (points, boxes, circles, polygons, a btree_gist partition column,
+      rows added after the build and the transaction's own).
+    - Parallel index-only and index scans take a bounded key range too
+      (`ScanNode::start_parallel_index`: eq, lower and upper bounds; ANY, skip scans and
+      ordered classes still serial); the workers' index-only rows are read in place
+      (`parscan::IosRow`): only the columns read are decoded and a row is made only when
+      the part can't take it. lineitem `count(*) WHERE l_shipdate < '1995-01-01'` 1.10 s ->
+      0.22 s (PostgreSQL 0.05-0.08), 8.9 -> 6.3 G instructions; `count(*)` 15.3 -> 12.3 G.
+      tests/parallel_scan.rs's lookups compare bounded index-only counts, sums and
+      groupings with the serial runs.
+    - Planner difference found (agent 155's): with gist (p) and gist (cat, p) on a table,
+      `ORDER BY p <-> point LIMIT 5` plans on the two-column index where PostgreSQL takes
+      gist (p) (`a163_knn_strips` makes the two-column index after those queries).
+    - Verified (targeted, per the verification train): release build; clippy with no new
+      warning; release lib, golden, parallel_scan, big_tables and deep_input tests;
+      regress files create_index, create_index_spgist, gist, spgist, gin, brin,
+      btree_index, hash_index, indexing, select_parallel, geometry, tsearch, point, box,
+      polygon, circle 3,198 / 3,198 (release); contrib btree_gist 613 / 616, pg_trgm 261.
   - Left after round 6 (agent 163):
-    - GiST KNN over 2-D grids (polygon 2.75x, circle 1.77x, point-in-circle 2.07x): the
-      walk (`search/near.rs`) sweeps the x order and bounds a block by its x gap alone, so a
-      LIMIT 5 pushes the ~800 entries of a vertical strip (hypot and the exact distance each).
-      Next: strips of the x order sorted by y within each, walked outward in y, bounded by
-      hypot(strip gap, y gap). Statement overhead is the rest: a quarter of the KNN query's
-      profile is `parallel_part::start` building EXPLAIN text (`total_and_gathers`) on each
-      execution (agent 145's).
+    - GiST KNN after batch 2's strips: what is left is statement overhead (a quarter of the
+      KNN query's profile was `parallel_part::start` building EXPLAIN text,
+      `total_and_gathers`, on each execution: agent 145's), the exact distance of each
+      candidate, and point_ops' own walk. point-in-circle (`<@ circle`, 2-4x) reads every
+      candidate of the circle's box.
     - GIN with thousands of matches (gin_tsvector_and 2.4x): point gets of the candidate rows
       (`get_sorted`, `Block::seek` 18%), the tsvector decoded and the tsquery evaluated for
       each. The structure's selection is exact for AND / OR of plain lexemes: its rows need no
@@ -6002,9 +6111,10 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
       sort of every key for a BRIN index whose relpages comes out 2,745 anyway), GIN (2.8-6.8x:
       extraction, sorting the keys for the measure) and jsonb_path_ops (6.8x). CPU is about
       twice wall: the flush and compaction of the entries written.
-    - Index-only `count(*)` over lineitem: 0.63-0.79 s against 0.11 s (PostgreSQL with two
-      workers); per-entry executor work on one thread. Parallel index-only scans, or a count
-      answered per fill without a row per entry, are the next step (executor).
+    - Index-only `count(*)` over lineitem after batch 2: 0.41-0.49 s against 0.11 s, a
+      bounded one 0.22 s against 0.05-0.08, parallel; about 2,000 instructions an entry
+      remain (the pipeline's per-entry calls and the partial aggregate's row step). A count
+      answered per fill of entries without a row step each is the next step.
     - Skip scans: over a modelled table (300k rows) they match PostgreSQL (0.2 ms) with and
       without 161's dead-run walk (71486e55); over the suite's 1M-row table (not modelled)
       they take 0.95-1.16 ms against 0.22-0.34.
@@ -6107,6 +6217,52 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
     613 / 616, cube 316, pgvector 915 / 915 (own reference, `OPTFLAGS=""`), pgvector_equality
     480 / 480, every TPC-H SF1 hash equal to PostgreSQL's, pgbench unchanged
     (BENCH.md).
+- **Scan cost, round 3, batch 3: cursors kept across ranges and rescans, kept point fetches,
+  dense fetches as stored, filters over stored bytes before decoding** (round 24, agent 149;
+  BENCH.md "Scan cost, round 3"):
+  - Kept cursors: `storage::Scan::reseek(start, end, ts)` moves a merging scan to another
+    range at the same snapshot. When its sources are the ones the new range needs
+    (`same_sources`: the same memtables and files, nothing made) each moves in place, else
+    each it had keeps its place among a new list (`Cursor::reseek`: a memtable's read again
+    from `start`; a file's stays in its block when `start` falls in it past the block's first
+    entry, else is positioned afresh); range deletions are the new range's. False (make a new
+    scan): a hot range's rows, another snapshot, the transaction's own range deletions.
+    `Txn::reseek_snap(&mut TxnScan, start, end, snap)` does it for a forward `scan_snap` (the
+    own-write overlay rebuilt; the toast source kept without writes of ours; false with
+    spilled writes). The scan node keeps an ended range's iterator in `spare`, and `seek`
+    reads on with it: the next range of a multi-range index scan, a skip scan's seek, a
+    nested loop's rescan (`rescan_index` keeps the iterator and `toast`; the Fetcher
+    restarts). Test `storage::tests::reseek_reads_as_a_new_scan`.
+  - Kept point fetches (`ScanNode::fetch_kept`): fewer than 4 rows of an untracked table at
+    the statement's snapshot are read through one kept `TxnScan` sought to each key over
+    `[key, prefix_end(key))`. The bound must cover the key's version suffixes (a resumed
+    session caught `key ++ 0`, which reads no version at all: test
+    `storage::tests::point_fetch_ranges_include_mvcc_versions_cold_and_hot`,
+    `app_concurrency::secondary_index_update_cold_and_hot`).
+  - Dense fetches as stored: `fetch_dense(keys, raw = true)` reads keys close together a batch
+    at a time by reference (from 4 keys) where the table isn't tracked; a row with values out
+    of line makes it give up, and `fetch_rows` puts them back as before.
+  - Filters before decoding: `filter_kernel(bytes, row)` decides over the stored values
+    (`StoredCmps`) before the prefilter decodes its probe (a filter over a few columns of a
+    row with a wide column: tpcb's teller and branch scans), then the kernel over the probe,
+    then `eval`. Decoded rows are sized for the key and system columns `scan_row_rest` adds
+    (`rest_len`, `decode_row_need_spare` with room for columns added since; agent 157's
+    per-row reallocation).
+  - The heap model's fetches go through a per-scan `sizing::Fetcher` with the row's stored TID
+    (`fetched_at`), made at the first fetch; `Fetcher::restart` on rescan.
+  - Measured (dist engine and PostgreSQL 18.6 in containers on the same 4 CPUs, BENCH.md):
+    8-client 100-row range reads 250-269 µs CPU per op against 109-138 (2.0-2.3x); 200k
+    nested-loop lookups 445-505 ms CPU against 289-351 (1.4-1.7x); memory 68-74 MB against
+    167 MB.
+  - Left: planning is still the largest share of the range read (agents 145 / 155); the store's
+    point-lookup cost (`find_block`, `Block::seek`, decompression) is agent 169's; the
+    nested loop's inner tree (agent 167).
+  - Verified at a9e01ff0 (debug engine): crate tests debug and release 60 / 60, crash_random
+    seeds 1-30, spill tests with `ROLL_TXN_SPILL_BYTES=4096`, clippy (none in these files),
+    difftest smoke, isolation 138 / 139 specs with roll-*, 1,805 / 1,806 permutations, a full
+    regress run on a private reference 51,148 / 51,150 with 0 units changed against
+    results.tsv, pg_dump_tap 14,817 / 14,817, contrib pgvector 915 / 915, bloom 58, pg_trgm
+    261, btree_gist 613 / 616, cube 316, pgvector_equality 480 / 480.
 
 ## Repository layout
 
@@ -6367,6 +6523,10 @@ container name: pick your own).
   wait included, killing jobs that never ran. heavy-bg.sh runs the job through heavy.sh outside
   the session and ends its log with `HEAVY-EXIT <status>`; wait for that line (and restart the
   wait if it times out) instead of wrapping heavy.sh in `timeout`.
+- **Push with `tools/push.sh`, never a bare `git push`.** It fetches, requires HEAD to contain
+  origin's head, and refuses if HEAD takes back lines that origin's last 40 commits added: a commit
+  made from a stale working tree on top of a newer origin ref fast-forwards yet reverts other agents'
+  work (d0867471 reverted six commits that way; 25c0056b restored them). `PUSH_DRY=1` checks only.
 - **Never hold unpushed work.** Sessions end without warning and worktrees get cleaned up.
   Push each verified batch to the shared branch right away, and in between back up work in
   progress with `tools/wip-push.sh <agent>` (for example `a148`) after every meaningful step.
@@ -7578,6 +7738,102 @@ pg_dump_tap 14,817); `crash_random` failed intermittently there and on the commi
   difference above; lifting, once the lift table's rows are all at or below the 400k column;
   index-only `count(*)` over lineitem needs the table modelled first.
 
+## Size models, round 6 (agent 170)
+
+BENCH.md "Size models, round 6" has the numbers. A resume session (2026-11-04) continued this
+round's work in its worktree while agent 170 was stopped: the kept-header fixes, the TOAST
+fixes in VACUUM and `unchanged::Load`, the worker count from heap-only pages and the
+`a170_btree_empty_leaf` recording are its; everything was rebased onto 639a9be6 (agent 163's
+index row size checks, merged into the parallel model mode below).
+
+- **The fast hasher collapsed integer keys** (`exec/fasthash.rs`). Its multiply-rotate step
+  carried a word's high bytes' differences only into the state's high bits, so a million
+  encoded int8 keys (`[INT tag][8 bytes]`: a primary-key table's data keys, GROUP BY / hash
+  join / DISTINCT / lock-table keys) hashed to 32,768 values, and a million `key-N` texts
+  repeated 24,000. Every `FastState` table keyed by them probed chains of ~30 keys: the
+  heap models' KeyMap of primary-key tables, the build's `UniqueKeys` (the lifted primary
+  key's 2.6 s: its "collisions" re-read the first row of every key from the store, the
+  "point reads" round 5 couldn't explain, in release and dist alike), the lock table,
+  bulklocks' `KeySet`. Now a folded multiply (128-bit product, halves xored) per word; test
+  `encoded_values_hash_apart`. Other agents' hash tables benefit too (sent to the coordinator).
+- **Apply prunes and marks as PostgreSQL's does** (`exec/replication.rs` `find`,
+  `sizing::identity_fetched`). RelationFindReplTupleByIndex fetches the row through the
+  replica identity's index, so heap_page_prune_opt runs on its page; the engine's apply
+  located rows by key and never touched the heap model, so a subscriber's updated pages were
+  never pruned: `acc` was 1,077 pages against PostgreSQL's 162 after apply.sh's 60,000
+  transactions, `acc_pkey` 57 against 30, every update past a page non-HOT. Now the lookup
+  prunes the row's page and marks the primary key's dead entries (`Kills`, as an executor
+  point lookup: the whole run of the key, where PostgreSQL's scan stops at the live entry;
+  a TID-level bound would be exact). Every page count apply.sh prints now matches. CPU is
+  about the same as before (the pruning is PostgreSQL's work too), memory +30-35 MB against
+  +46-49.
+- **Planning a kept table doesn't wait for its layout** (`exec/sizing/kept.rs` `Sizes`,
+  `sizes`, `sizes_read`, `laid_out`; `main_blocks_known`, `btree_level`, `btree_blocks`,
+  `modelled_blocks`, `planned_heap_blocks` in `sql/costs.rs` and `sql/literals.rs`). A kept
+  record whose heap is all-visible with no prunable page starts with a header (`SIZED`
+  0xf2: relfilenode, token, heap pages, each btree's pages and root level); while the table
+  is kept and not laid out, the planner's sizes come from it. Reads that would change the
+  models change nothing on such a heap (Fetcher / Kills skip all-visible heaps), and every
+  reader that needs the models themselves (writes, row places, SSI page locks: `scan.rs`
+  lays them out first) still waits. A rejected header (record invalid, or a btree missing:
+  the table laid out from its rows) is dropped (`Building`'s Drop); debug builds check a
+  restored layout's sizes against the header. Older builds don't know the tag and lay the
+  table out from its rows. **Record format change**: agent 168 (crash recovery) to check
+  that nothing kept outlives a crash any differently (the header is part of the record,
+  under the same marker). Lifted, the first statement after a restart is 10-18 ms (240 ms
+  before; 11-15 at 400k; PostgreSQL 2-3).
+- **A modelled table's btree builds in the parallel workers** (`session/ddl/parbuild.rs`
+  `ParBuilt`, `Plan::model`; `session/ddl/table.rs`; `sizing::index_key_of`). The workers
+  take each row's model key with its data key (and 163's row size checks); the leader
+  lays the model out from them (`btree_from_build`). The worker count comes from the heap's
+  pages alone (`heap_blocks_for_build`: binding the index being built evaluated its
+  expressions early, a golden's notices). With the hasher fix the lifted primary key is
+  0.74-0.76 s (2.62 s; 400k 0.77-0.87; PostgreSQL 0.55-0.56).
+- **Heap model rows ascending aren't hashed** (`catalog/keymap.rs`). Rows added in key order
+  (a load, a layout from a record) are found by halving instead of the hash table, which
+  now holds only the rows after them: about 11-13 bytes a row less (3M rows: RSS 179 / 291
+  MB against 211 / 330), and no hashing at a load or layout. Random lookups of such rows
+  halve the ascending rows (`asc_row`, 0.75% of apply's samples).
+- **btree model fidelity**: posting list splits (`Btree::posting_split`: a heap TID inside an
+  equal key's posting list goes into it and the list's last TID in as the new entry,
+  `_bt_swap_posting`; an LP_DEAD list goes first by simple deletion, `simple_delete`);
+  pgstatindex counts a leaf without items as a leaf page (its empty_pages are half-dead
+  pages; round 5's 300k "one empty leaf"); pgstattuple of a btree reads leaves only (data
+  items, LP_DEAD ones dead, tuple lengths without line pointers, the leaves' and deleted
+  pages' free space). Goldens `a170_btree_empty_leaf`, `a170_btree_posting_split`.
+- **Smaller**: HOT checks compare common values directly (`sizing::same`); a non-HOT
+  update's old index values only when its columns changed; the models' table maps use the
+  fast hasher; `tools/bench/repl/apply.sh` prints each subscriber's page counts;
+  `mw.py` takes `ENGINE_ARGS`.
+- **Page counts** (`mw.py`, STATS=1, both servers with autovacuum off, lifted): 60,000 and
+  300,000 rows match everywhere; 3,000,000 rows match but one EXPLAIN cost of
+  `Bitmap Index Scan on mw1_k` (197.59 against 197.60, and its parent's startup). Before the
+  posting split, mw2_ref had 2,485 pages against 2,564 there.
+- **The limit stays at 400,000.** Lifted, the primary key, CREATE INDEX, VACUUM, the first
+  statement and tpcb-like are at the 400k numbers; COPY (2.2 against 2.0 s), DELETE of 10%
+  (0.87-0.94 against 0.60-0.64), VACUUM after it, simple-update (+15-20%) and every peak
+  (select-only 480-525 MB against 407-454; PostgreSQL 246) are not.
+- **Verified** (one full-suite job, as a record format change needs, on 2cb90eee; then
+  rebased onto dcba895c, whose commits touch none of these files' code but scan.rs
+  elsewhere): release crate tests 463 / 0 / 18 and debug 463 / 0 / 18 (goldens included),
+  `crash_random` seeds 1-30 x 4 rounds all pass (with the harness before 168's fix
+  e8c545d1), clippy without new warnings (three in kept.rs's tests, fixed after), difftest
+  smoke, isolation 121 / 122 (intra-grant-inplace, as on origin), full regress on a private
+  reference 51,148 / 51,150 with 0 units changed, pg_dump_tap 14,817.
+- **Pruning without VACUUM's summary** (`Heap::prune_page`): heap_page_prune_opt's path no
+  longer runs `prune`'s second pass over the page (the status of every tuple, for VACUUM's
+  `hastup` / `live` / all-visible, which it threw away), and the pruning's per-page vectors
+  are a thread's (`PruneScratch`). Apply's identity lookups: 15% -> 12% of its thread.
+  `ensure`'s per-thread map of tables found modelled uses the fast hasher (2% of a lifted
+  COPY in SipHash).
+- **Left**: COPY's and DELETE's per-row upkeep lifted (a lifted COPY of 1M rows: 3.16 s of
+  host CPU against 2.27 at 400k; its per-row `inserted_with` is 12% of the samples: the
+  tuple's length, compression tracking, `vis_for`'s catalog lookups, the shard lock; then
+  `multi_insert` 5%. DELETE's profile: the models 4%, KeySet / lock table / executor the
+  rest); a TID-level kill bound for apply's lookups; the
+  3M rows' mw1_k cost; memory (the engine's peak is above PostgreSQL's at 400k too: not the
+  models); lineitem's index-only `count(*)` (needs lineitem modelled: not lifted).
+
 ## Planner round 9 (agent 155)
 
 BENCH.md "Planner, round 9" has the measurements. What changed in batch 1:
@@ -7709,6 +7965,99 @@ width_bucket('NaN') folding, the domain relabel, and hash vs btree on char(n).
     ~/.cache/a154/s5069.sql). UPDATE ... FROM likely has the same issue.
 - Agent 157 (postgres_fdw) will send foreign-join choices from postgres_fdw units 266, 268,
   272 and 275.
+
+## Planner round 10 (agent 171)
+
+BENCH.md "Planner, round 10" has the measurements. What changed:
+
+- **A custom plan of a lone scan is costed by its access path** (item 1; agreed with agent
+  165 through the coordinator: the planner hands over the cost, `Session::plan_cost` reads
+  it; 165 doesn't touch `plan_cost` or `BoundQuery::cost` this round).
+  - `ScanPlan::est` (`ScanEst`, not part of the Debug text): the (startup, total) of the path
+    `paths::apply` chose, and of the sequential scan when a scan has no other path.
+  - `paths::planned_total(plan, ctx, built)`: a lone scan of a table under projections of its
+    columns (no sub-select in its expressions; not foreign, sampled, marked, CURRENT OF,
+    limited or partitioned) over which EXPLAIN places no Gather (no workers, or its total
+    with add_path's fuzz below parallel_setup_cost, and not debug_parallel_query). `built`
+    (a custom plan, costed as GetCachedPlan costs it, when it is made): the planner's own
+    cost. Otherwise `describe`'s, read when the plan choice first needs it.
+  - `Session::plan_cost` takes it before `explain::total_and_gathers` and records no Gathers
+    for such a plan, so neither the custom plan's costing nor its execution builds an
+    EXPLAIN tree.
+  - The resumed session of 2026-11-04 found why the first version (eager: the cost and an
+    empty Gather list filled in `Analyzed::plan`) was wrong: a generic plan made at Parse
+    was costed under Parse's settings (generic / custom 0 / 6 where PostgreSQL has 1 / 5
+    after a `RESET seq_page_cost`), and a Gather list fixed at Parse launched no workers
+    after `SET max_parallel_workers_per_gather` / `RESET parallel_setup_cost`. PostgreSQL
+    builds and costs plans at execution. Tests: kept_plans
+    `generic_cost_uses_choice_context_after_parse`, parallel_scan
+    `parallel_workers_use_execution_context_after_parse`.
+  - Debug builds check the planner's cost against EXPLAIN's as each plan is made
+    (`paths::check_planned_total`, from `Analyzed::plan` / `into_bound`), and the lazily
+    read one in `plan_cost`. Every golden file passes them.
+  - The 8-client range read: 389 -> 238 us of server CPU per operation (medians of five
+    alternating rounds, both servers in containers; PostgreSQL 125).
+- **BETWEEN binds as transformAExprBetween does** (`binder/expr.rs`): `x >= lo`, then `hi`,
+  then `x <= hi`. An untyped `BETWEEN $1 AND $1 + $2` (42725 "operator is not unique"
+  before) types `$1` from its first use; an error comparing with the lower bound comes
+  before the upper bound's binding errors.
+- **Function scans' rows** (`costs::returns_set`, `costs::call_rows`, `ProcSig::rows`):
+  - a built-in whose implementation is set-returning but whose pg_proc row says it returns
+    one row (proretset false: `pg_create_logical_replication_slot` and the like) is planned
+    as one row. Three of them in one FROM now nest s1, s2, then s3, as PostgreSQL does, so
+    test_decoding's stats units create their slots a, b, c (BENCH "Replication, round 7");
+  - other built-ins use pg_proc's prorows, where every set-returning built-in had 1,000:
+    `pg_partition_ancestors` 10, `json_each` 100, `regexp_matches` 1, `pg_get_keywords` 500.
+    generate_series and unnest keep their support functions' estimates;
+  - a row-returning call's Function Scan is as wide as its columns used above (`width=0`
+    where it was 32).
+- **Sort keys under a written COLLATE** (difftest round 9's rule set; `Builder::collated_key`
+  in `explain.rs`): eval_const_expressions makes the CollateExpr a RelabelType unless the
+  collation is the expression's own, and the key is the first select-list entry that is
+  the key's expression with relabelings stripped (find_ec_member_matching_expr). A column
+  there shows as itself (`t COLLATE "en-x-icu"`, `a.t COLLATE ...`), a computed entry in
+  parentheses (`(lower(t)) COLLATE ...`), a relabeling as a cast (`((u)::text) COLLATE
+  ...`, `(((t || 'x'::text))::text) COLLATE "C"`). The COLLATE shows when it isn't the
+  type's default ("C" for name).
+- **An uncorrelated IN over a set-returning sub-select that isn't simple is a semi join**
+  (`sublink::plan_clean_with`): convert_ANY_sublink_to_join takes any uncorrelated
+  sub-select as a subquery of its own. psql `\d`'s "Referenced by" query (`confrelid IN
+  (SELECT pg_partition_ancestors(...) UNION ALL VALUES (...))`) was a hashed SubPlan checked
+  before `contype = 'f'`; it is PostgreSQL's Nested Loop Semi Join now, 21.3 -> 1.7 ms of
+  CPU at 10,000 tables (PostgreSQL 6.2). Its pg_constraint side is an Index Scan on
+  pg_constraint_conparentid_index where PostgreSQL seq-scans (the catalog stand-in's costs,
+  below).
+- Golden `a171_planner_r10` (recorded from PostgreSQL 18.6).
+
+Left, for the planner:
+- **psql `\d` at 10,000 tables** (agent 166's measurement, BENCH): its name lookup (`relname
+  ~ '^(t)$' AND pg_table_is_visible(oid)`) is 90 ms of CPU against PostgreSQL's 0.7. The
+  plan is PostgreSQL's (an Index Scan on pg_class_relname_nsp_index), but a catalog's scan
+  generates all of the catalog's rows and filters them (`syscat`: 11 ms for `relname =
+  'x'`, 42 ms with the regex filter), and EXPLAIN costs it at 1,727 where PostgreSQL has
+  8.46. Catalog keyed lookups (oid, relname) would take \d from 77 ms to near
+  PostgreSQL's 10-11. Routed to the catalog / scan owners.
+- One-shot plans still build an EXPLAIN tree for their Gathers (`parallel_part::gathers`,
+  when `may_gather`) and for an Incremental Sort's presorted keys. No cheap exact bound was
+  found for the Gathers: a Gather may go over a join whose partial outer side is a small
+  index scan. The planner keeping every node's chosen cost (joins' `JP` totals, upper
+  nodes) would give one.
+- `= ANY ($1::int[])` from a text parameter (difftest round 9, r9p): a custom plan folds the
+  I/O coercion (array_in is STABLE) where PostgreSQL keeps `('{...}'::cstring)::integer[]`,
+  costing it 12.6 against 21.18, so the generic plan never wins (0 / 6, PostgreSQL 1 / 5).
+  It is the `= ANY` rewrite in custom planning: agent 165's.
+- Seed 5069: `DELETE FROM t1 x USING (SELECT id, pg_size_bytes('bad') z FROM t0) u WHERE
+  x.id = u.id` (or over a view) fails on the unread `z` (22023); PostgreSQL pulls the
+  subquery up and marks its base relation (ROW_MARK_REFERENCE), so nothing evaluates `z`.
+  With `OFFSET 0` PostgreSQL fails (ROW_MARK_COPY reads the whole row) and the engine
+  doesn't. SELECT ... FOR UPDATE over the same shapes agrees with PostgreSQL; only DML.
+  Reproducers in this section's BENCH entry.
+- `SELECT DISTINCT t COLLATE "en-x-icu"`: Group Key `t` where PostgreSQL shows `(t)::text`.
+- Untouched this round: planning CPU (item 2), q21 / q18 (item 4), and the rest of item 3
+  (partitioned top-N, min / max InitPlans, ANY over partitions, element and expression
+  ndistinct estimates, FULL JOIN errors, `width_bucket('NaN')`, the domain relabel, hash vs
+  btree on char(n), LIMIT over a hashed grouping, autovacuum of catalogs, the catalog
+  bitmap scan's index condition).
 
 ## Starting prompt for the next agent
 

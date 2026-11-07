@@ -126,8 +126,8 @@ pub struct Load {
     pages: crate::catalog::relsize::HeapPacker,
     xmin: (u64, u64),
     may_toast: bool,
-    /// Every row's size was known from its stored bytes (else the measure sizes it from
-    /// its values: none is kept).
+    /// Every row's on-page size was known without TOAST (else a later measure sizes it
+    /// from its values: none is kept).
     sized: bool,
 }
 
@@ -144,7 +144,11 @@ impl Load {
         match stored {
             Some(len) => {
                 self.may_toast |= len > crate::exec::sizing::TOAST_THRESHOLD;
-                self.pages.push(crate::catalog::relsize::heap_tuple_of_len(len));
+                if len <= crate::exec::sizing::TOAST_THRESHOLD {
+                    self.pages.push(crate::catalog::relsize::heap_tuple_of_len(len));
+                } else {
+                    self.sized = false;
+                }
             }
             None => self.sized = false,
         }

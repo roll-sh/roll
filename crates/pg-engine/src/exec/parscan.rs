@@ -574,10 +574,11 @@ impl Decode {
     /// The row with the columns `need` marks decoded (None: all).
     fn row_with(&self, key: &[u8], bytes: &[u8], need: Option<&Arc<[bool]>>) -> Result<Row> {
         if let Some(cols) = &self.ios {
-            // (The index entry: past the table and index ids, its key columns.)
+            // (The index entry: past the table and index ids, its key columns, up to the last
+            // one read.)
             let mut row = vec![Value::Null; self.missing.len()];
             let mut pos = 8;
-            for (col, ty, desc) in cols {
+            for (col, ty, desc) in &cols[..ios_read(cols, need)] {
                 match crate::storage::keys::decode_index_value(bytes, &mut pos, ty, *desc) {
                     Some(v) => row[*col] = v,
                     None => return Err(internal("an index entry that doesn't decode")),
@@ -608,6 +609,21 @@ impl Decode {
             row.push(Value::Bytea(Arc::from(key)));
         }
         Ok(row)
+    }
+
+    /// An index-only scan's row read from its entry in place (`IosRow`): the columns the scan
+    /// reads, without the row's other columns.
+    fn ios_row(&self, bytes: &[u8]) -> Result<IosRow> {
+        let cols = self.ios.as_deref().unwrap_or(&[]);
+        let mut vals = Vec::new();
+        let mut pos = 8;
+        for (col, ty, desc) in &cols[..ios_read(cols, self.need.as_ref())] {
+            match crate::storage::keys::decode_index_value(bytes, &mut pos, ty, *desc) {
+                Some(v) => vals.push((*col, v)),
+                None => return Err(internal("an index entry that doesn't decode")),
+            }
+        }
+        Ok(IosRow { width: self.missing.len(), vals })
     }
 
     /// One inline stored column (the caller excludes external and index-only rows).
@@ -1292,6 +1308,40 @@ pub fn without_vectors<R>(f: impl FnOnce() -> R) -> R {
     f()
 }
 
+/// How many of an index-only scan's columns are decoded: up to the last one `need` marks
+/// (a count's none; the entry's values come in their order).
+fn ios_read(cols: &[(usize, crate::types::DataType, bool)], need: Option<&Arc<[bool]>>) -> usize {
+    match need {
+        Some(n) => cols.iter().rposition(|c| n.get(c.0).copied().unwrap_or(true)).map_or(0, |i| i + 1),
+        None => cols.len(),
+    }
+}
+
+static NULL: Value = Value::Null;
+
+/// An index-only scan's row as its entry gives it (`Decode::ios_row`): the columns decoded,
+/// every other one NULL, made into a row only when the part can't take it.
+struct IosRow {
+    width: usize,
+    vals: Vec<(usize, Value)>,
+}
+
+impl super::kernel::Cols for IosRow {
+    fn col(&self, i: usize) -> Option<&Value> {
+        (i < self.width).then(|| self.vals.iter().find(|v| v.0 == i).map_or(&NULL, |v| &v.1))
+    }
+}
+
+impl IosRow {
+    fn into_row(self) -> Row {
+        let mut row = vec![Value::Null; self.width];
+        for (i, v) in self.vals {
+            row[i] = v;
+        }
+        row
+    }
+}
+
 /// Rows aggregated through column batches (`vector`; tests: which path ran).
 pub static VECTOR_ROWS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
@@ -1318,18 +1368,29 @@ fn partial_row(
                 _ => lazy.into_row().map(|row| Some((row, pass))),
             }
         }),
+        // (An index entry read in place likewise, without the key column a row can carry.)
+        Some(_) if !d.with_key => d.ios_row(v).map(|ios| {
+            let pass = filter_pass(d, &ios);
+            match pass {
+                Some(false) => None,
+                Some(true) if d.stages.is_empty() && pa.row(&ios) => None,
+                _ => Some((ios.into_row(), pass)),
+            }
+        }),
         Some(_) => d.row(k, v).map(|row| {
             let pass = filter_pass(d, &row);
             Some((row, pass))
         }),
     };
+    // (Whether the part was offered the row read in place already.)
+    let offered = d.ios.is_none() || !d.with_key;
     let Some((row, pass)) = row? else { return Ok(()) };
     match pass {
         Some(false) => {}
         None => serial.push((row, 0, false)),
         Some(true) if d.stages.is_empty() => {
             // (One read in place was offered to the part already.)
-            if d.ios.is_none() || !pa.row(&row) {
+            if offered || !pa.row(&row) {
                 serial.push((row, 0, true));
             }
         }

@@ -37,9 +37,13 @@ fn procs_by_name() -> &'static HashMap<&'static str, Vec<(u32, &'static [u32])>>
     })
 }
 
+/// A search path as a statement holds it: shared, since every statement and context of a
+/// session copies it (`SessionState::shared_search_path`).
+pub type SearchPath = Arc<[String]>;
+
 pub struct CatalogNames {
     pub catalog: Arc<Catalog>,
-    pub search_path: Vec<String>,
+    pub search_path: SearchPath,
 }
 
 impl CatalogNames {
@@ -68,10 +72,10 @@ impl CatalogNames {
             .map(|(_, n, _)| n.to_string())
     }
 
-    pub fn new(catalog: Arc<Catalog>, search_path: Vec<String>) -> Self {
+    pub fn new(catalog: Arc<Catalog>, search_path: impl Into<SearchPath>) -> Self {
         CatalogNames {
             catalog,
-            search_path,
+            search_path: search_path.into(),
         }
     }
 

@@ -395,7 +395,7 @@ pub fn depends_in(ctx: &ExecCtx, cat: &Arc<Catalog>, scope: &Scope) -> Vec<Depen
 fn depends_scoped(ctx: &ExecCtx, cat: &Arc<Catalog>, scope: Option<&Scope>) -> Vec<Depend> {
     // Stored expressions are read with the session's search_path (a system view's query
     // runs with pg_catalog's alone).
-    let session_path = ctx.sess.search_path();
+    let session_path = ctx.sess.shared_search_path();
     let mut rows = if ctx.search_path == session_path {
         derived_depends(ctx, cat, scope)
     } else {

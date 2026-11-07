@@ -1729,7 +1729,7 @@ impl Heap {
     /// heap_page_prune_opt: what a scan reading the page does.
     pub fn prune_opt(&mut self, blk: u32, v: &Vis) {
         if self.prune_wanted(blk, v) {
-            self.prune(blk, v, false);
+            self.prune_page(blk, v, false);
         } else if let Some(p) = self.pages.get_mut(blk as usize) {
             p.settle(v);
         }
@@ -1786,16 +1786,68 @@ impl Heap {
     /// the chain's first live member. Returns (normal-or-redirect items kept, dead line
     /// pointers left, live tuples, all visible).
     fn prune(&mut self, blk: u32, v: &Vis, unused_now: bool) -> (bool, Vec<u16>, usize, bool) {
+        self.prune_page(blk, v, unused_now);
+        // What VACUUM needs to know about the page now.
+        let p = &self.pages[blk as usize];
+        let mut hastup = false;
+        let mut dead = Vec::new();
+        let mut live = 0;
+        let mut all_visible = true;
+        for (i, lp) in p.lps.iter().enumerate() {
+            match lp {
+                Lp::Unused => {}
+                Lp::Dead => dead.push(i as u16 + 1),
+                Lp::Redirect(_) => hastup = true,
+                Lp::Normal(t) => {
+                    hastup = true;
+                    match t.status(v) {
+                        Htsv::Live => {
+                            live += 1;
+                            all_visible &= visible_to_all(&t, v);
+                        }
+                        Htsv::DeleteInProgress => {
+                            live += 1;
+                            all_visible = false;
+                        }
+                        _ => all_visible = false,
+                    }
+                }
+            }
+        }
+        let all_visible = all_visible && dead.is_empty();
+        (hastup, dead, live, all_visible)
+    }
+
+    /// heap_page_prune_and_freeze's pruning of page `blk` (`prune` with what VACUUM reads of
+    /// the page after it; heap_page_prune_opt needs only this). The per-page vectors are a
+    /// thread's, reused.
+    fn prune_page(&mut self, blk: u32, v: &Vis, unused_now: bool) {
+        thread_local! {
+            static SCRATCH: std::cell::RefCell<PruneScratch> = Default::default();
+        }
+        SCRATCH.with(|sc| match sc.try_borrow_mut() {
+            Ok(mut sc) => self.prune_with(blk, v, unused_now, &mut sc),
+            Err(_) => self.prune_with(blk, v, unused_now, &mut PruneScratch::default()),
+        })
+    }
+
+    fn prune_with(&mut self, blk: u32, v: &Vis, unused_now: bool, sc: &mut PruneScratch) {
         self.settle(v);
+        let PruneScratch { lps, htsv, processed, new, roots, heaponly, chain, freed } = sc;
         // (A copy of the line pointers: the page keeps most of them packed.)
-        let lps: Vec<Lp> = self.pages[blk as usize].lps.iter().collect();
+        lps.clear();
+        lps.extend(self.pages[blk as usize].lps.iter());
         let n = lps.len();
-        let mut htsv: Vec<Option<Htsv>> = vec![None; n + 1];
-        let mut processed = vec![false; n + 1];
+        htsv.clear();
+        htsv.resize(n + 1, None);
+        processed.clear();
+        processed.resize(n + 1, false);
         // New states: None = unchanged.
-        let mut new: Vec<Option<Lp>> = vec![None; n + 1];
-        let mut roots = Vec::new();
-        let mut heaponly = Vec::new();
+        new.clear();
+        new.resize(n + 1, None);
+        roots.clear();
+        heaponly.clear();
+        freed.clear();
         for off in 1..=n {
             match &lps[off - 1] {
                 Lp::Unused => processed[off] = true,
@@ -1823,11 +1875,11 @@ impl Heap {
             }
         };
         let dead_or_unused = if unused_now { Lp::Unused } else { Lp::Dead };
-        for &root in &roots {
+        for &root in roots.iter() {
             if processed[root] {
                 continue;
             }
-            let mut chain: Vec<usize> = Vec::new();
+            chain.clear();
             let mut ndead = 0;
             let mut off = root;
             let mut prior_xmax = 0u64;
@@ -1864,7 +1916,7 @@ impl Heap {
                     _ => break,
                 }
             }
-            for &c in &chain {
+            for &c in chain.iter() {
                 processed[c] = true;
             }
             if is_redirect && chain.len() < 2 {
@@ -1879,7 +1931,7 @@ impl Heap {
                 }
             };
             if ndead == 0 {
-                for &c in &chain {
+                for &c in chain.iter() {
                     unchanged(c, &mut prunable);
                 }
             } else if ndead == chain.len() {
@@ -1897,7 +1949,7 @@ impl Heap {
                 }
             }
         }
-        for &off in &heaponly {
+        for &off in heaponly.iter() {
             if processed[off] {
                 continue;
             }
@@ -1916,10 +1968,9 @@ impl Heap {
             p.prune_xid = prune_xid;
             p.full = false;
         }
-        let mut freed = Vec::new();
         if do_prune {
-            for (off, st) in new.into_iter().enumerate().skip(1) {
-                if let Some(st) = st {
+            for off in 1..new.len() {
+                if let Some(st) = new[off].take() {
                     if let Lp::Normal(t) = lps[off - 1] {
                         p.used -= maxalign(t.len as usize);
                         self.versions -= 1;
@@ -1932,38 +1983,10 @@ impl Heap {
             }
             p.repair();
         }
-        self.forget_deleted(&freed);
+        self.forget_deleted(freed);
         let p = &mut self.pages[blk as usize];
         p.settle(v);
-        // What VACUUM needs to know about the page now.
-        let mut hastup = false;
-        let mut dead = Vec::new();
-        let mut live = 0;
-        let mut all_visible = true;
-        for (i, lp) in p.lps.iter().enumerate() {
-            match lp {
-                Lp::Unused => {}
-                Lp::Dead => dead.push(i as u16 + 1),
-                Lp::Redirect(_) => hastup = true,
-                Lp::Normal(t) => {
-                    hastup = true;
-                    match t.status(v) {
-                        Htsv::Live => {
-                            live += 1;
-                            all_visible &= visible_to_all(&t, v);
-                        }
-                        Htsv::DeleteInProgress => {
-                            live += 1;
-                            all_visible = false;
-                        }
-                        _ => all_visible = false,
-                    }
-                }
-            }
-        }
-        let all_visible = all_visible && dead.is_empty();
         self.publish_page(blk);
-        (hastup, dead, live, all_visible)
     }
 
     /// Lazy VACUUM: prune every page, then (when there were dead tuples and `nindexes`
@@ -2495,6 +2518,19 @@ pub fn restored_from<'k>(
         tids[i] = tid;
     }
     (h, moved, tids)
+}
+
+/// `Heap::prune_page`'s per-page vectors, kept by each thread between pages.
+#[derive(Default)]
+struct PruneScratch {
+    lps: Vec<Lp>,
+    htsv: Vec<Option<Htsv>>,
+    processed: Vec<bool>,
+    new: Vec<Option<Lp>>,
+    roots: Vec<usize>,
+    heaponly: Vec<usize>,
+    chain: Vec<usize>,
+    freed: Vec<Tid>,
 }
 
 impl Heap {

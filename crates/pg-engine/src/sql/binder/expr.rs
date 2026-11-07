@@ -1951,8 +1951,6 @@ impl Binder<'_, '_> {
                 let Some(NodeEnum::List(list)) = inner_box(&a.rexpr) else {
                     return Err(crate::error::internal("BETWEEN without bounds"));
                 };
-                let lo = self.bind_expr(&list.items[0])?;
-                let hi = self.bind_expr(&list.items[1])?;
                 let not = matches!(
                     kind,
                     pb::AExprKind::AexprNotBetween | pb::AExprKind::AexprNotBetweenSym
@@ -1970,7 +1968,14 @@ impl Binder<'_, '_> {
                         Ok(b.simplify_bool(true, parts))
                     }
                 };
-                let e1 = between(self, lo.clone(), hi.clone())?;
+                // (transformAExprBetween: `x >= lo AND x <= hi`, transformed in that order,
+                // so a parameter `lo` reads is typed before `hi` is bound.)
+                let (op_lo, op_hi) = if not { ("<", ">") } else { (">=", "<=") };
+                let lo = self.bind_expr(&list.items[0])?;
+                let c_lo = self.binop(op_lo, x.clone(), lo.clone(), loc)?;
+                let hi = self.bind_expr(&list.items[1])?;
+                let c_hi = self.binop(op_hi, x.clone(), hi.clone(), loc)?;
+                let e1 = self.simplify_bool(!not, vec![c_lo, c_hi]);
                 if !sym {
                     return Ok(e1);
                 }

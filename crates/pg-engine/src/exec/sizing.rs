@@ -20,6 +20,7 @@ use crate::storage::keys::{encode_value, index_prefix, prefix_end};
 use crate::txn::Database;
 use crate::txn::xids::Xids;
 use crate::types::{DataType, Value};
+use crate::exec::fasthash::{HashMap as FastMap, HashSet as FastSet};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -169,19 +170,20 @@ impl Models {
 /// One shard of a database's models (`Models`): the tables whose oids fall in it.
 #[derive(Default)]
 pub struct RelFiles {
-    heaps: HashMap<u32, Heap>,
-    btrees: HashMap<u32, Btree>,
+    // (The maps every model read and write looks a table up in: the fast hasher.)
+    heaps: FastMap<u32, Heap>,
+    btrees: FastMap<u32, Btree>,
     /// Out-of-line values of each table's rows, by table.
-    toast: HashMap<u32, Toast>,
+    toast: FastMap<u32, Toast>,
     /// Tables too big to model.
-    untracked: HashSet<u32>,
+    untracked: FastSet<u32>,
     /// Tables whose models this process dropped (a model built for one of the others is
     /// the first since the database was opened).
     dropped: HashSet<u32>,
     /// Their heaps' estimated sizes.
     estimated: HashMap<u32, EstHeap>,
     /// Bulk loads (COPY) in progress, by (table, transaction).
-    bulk: HashMap<(u32, u64), Bulk>,
+    bulk: FastMap<(u32, u64), Bulk>,
     /// Hash indexes: the heap's estimated tuples when each was built (its initial
     /// buckets).
     hash_est: HashMap<u32, f64>,
@@ -189,7 +191,7 @@ pub struct RelFiles {
     /// pending list.
     gin_built: HashMap<u32, Vec<HashSet<Vec<u8>>>>,
     /// GiST point_ops / range_ops indexes' histories (`gistlog`), by index.
-    gist_logs: HashMap<u32, Arc<gistlog::GistLog>>,
+    gist_logs: FastMap<u32, Arc<gistlog::GistLog>>,
     /// BRIN indexes: which page ranges have a summary.
     brin: HashMap<u32, BrinRanges>,
     /// The dead tuples the last VACUUM of each table had to keep (what it reports as the
@@ -203,6 +205,9 @@ pub struct RelFiles {
     kept_stored: HashSet<u32>,
     /// The kept records loaded, by table (a hash: what the close needn't write again).
     kept_hash: HashMap<u32, u64>,
+    /// Kept tables' sizes as their records' headers have them (`kept::sizes`; None: the
+    /// record has none), read before their models are laid out.
+    kept_sizes: HashMap<u32, Option<kept::Sizes>>,
 }
 
 /// A BRIN index's summarized page ranges: those its build covered (the heap's pages then,
@@ -375,7 +380,7 @@ impl Ext {
 #[derive(Default)]
 struct Toast {
     next_id: u64,
-    rows: HashMap<Vec<u8>, Vec<Ext>>,
+    rows: FastMap<Vec<u8>, Vec<Ext>>,
 }
 
 /// TOAST_TUPLE_THRESHOLD and TOAST_TUPLE_TARGET.
@@ -1219,8 +1224,8 @@ pub fn stored_datum(
 
 /// toast_save_datum: a value's chunks go into the TOAST table and its index.
 fn save_toast(
-    heaps: &mut HashMap<u32, Heap>,
-    btrees: &mut HashMap<u32, Btree>,
+    heaps: &mut FastMap<u32, Heap>,
+    btrees: &mut FastMap<u32, Btree>,
     toast: &mut Toast,
     v: &Vis,
     toast_oid: u32,
@@ -1263,7 +1268,7 @@ fn save_toast(
 }
 
 /// toast_delete_datum: a value's chunks are deleted.
-fn delete_toast(heaps: &mut HashMap<u32, Heap>, toast_oid: u32, exts: &[Ext], xid: u64, v: &Vis) {
+fn delete_toast(heaps: &mut FastMap<u32, Heap>, toast_oid: u32, exts: &[Ext], xid: u64, v: &Vis) {
     let Some(heap) = heaps.get_mut(&toast_oid) else {
         return;
     };
@@ -1322,31 +1327,45 @@ fn index_key(
     row: &[Value],
     ctx: &ExecCtx,
 ) -> Key {
+    let ty = |n: usize| bix.keys.get(n).map(|k| k.ty());
+    index_key_of(t, &bix.index, &ty, &bix.colls, vals, row, ctx.fmt())
+}
+
+/// `index_key` from the index's parts: its key columns' types (`key_ty`), collations, and
+/// the session's formatting (a parallel build's workers, which have no `ExecCtx`).
+pub fn index_key_of(
+    t: &Table,
+    index: &crate::catalog::Index,
+    key_ty: &dyn Fn(usize) -> Option<DataType>,
+    colls: &[Option<crate::storage::keys::KeyColl>],
+    vals: Vec<Value>,
+    row: &[Value],
+    fmt: &crate::types::text::FormatCtx,
+) -> Key {
     thread_local! {
         static BUF: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
     }
     let nkey = vals.len();
-    let natts = nkey + bix.index.include.len();
-    let fmt = ctx.fmt();
+    let natts = nkey + index.include.len();
     let text = |v: &Value, ty: &DataType| crate::types::text::format_value(v, ty, fmt);
     let mut size = relsize::IndexTupleSize::default();
     let null = Value::Null;
     let mut att = |n: usize, out: &mut Vec<u8>| {
         // (name_ops keeps a name key as a cstring: opckeytype.)
         let (v, ty) = match n.checked_sub(nkey) {
-            None => (&vals[n], match bix.keys.get(n).map(|k| k.ty()) {
+            None => (&vals[n], match key_ty(n) {
                 Some(DataType::Name) => DataType::Cstring,
                 Some(t) => t,
                 None => DataType::Text,
             }),
             Some(i) => {
-                let c = bix.index.include[i];
+                let c = index.include[i];
                 (row.get(c).unwrap_or(&null), t.columns.get(c).map_or(DataType::Text, |c| c.ty.clone()))
             }
         };
-        let desc = bix.index.columns.get(n).is_some_and(|c| c.desc);
-        let nulls_first = bix.index.columns.get(n).is_some_and(|c| c.nulls_first);
-        crate::storage::keys::encode_index_value(out, v, desc, nulls_first, bix.colls.get(n).and_then(Option::as_ref));
+        let desc = index.columns.get(n).is_some_and(|c| c.desc);
+        let nulls_first = index.columns.get(n).is_some_and(|c| c.nulls_first);
+        crate::storage::keys::encode_index_value(out, v, desc, nulls_first, colls.get(n).and_then(Option::as_ref));
         size.push(v, &ty, &text);
         size.size()
     };
@@ -1453,7 +1472,7 @@ thread_local! {
     /// Tables this thread found modelled (by database instance and table), with a watch on
     /// the heap's model and each btree's: `ensure`'s fast path, no shard lock while they are
     /// alive (a model dropped, replaced or detached retires its watch).
-    static MODELLED: std::cell::RefCell<HashMap<(u64, u32), (heapsim::SizeWatch, Vec<(u32, heapsim::SizeWatch)>)>> =
+    static MODELLED: std::cell::RefCell<FastMap<(u64, u32), (heapsim::SizeWatch, Vec<(u32, heapsim::SizeWatch)>)>> =
         Default::default();
 }
 
@@ -1679,6 +1698,7 @@ fn ensure(t: &Table, indexes: &[BoundIndex], ctx: &ExecCtx) -> Result<bool> {
     }
     // Each row's TID in the heap laid out here (None: modelled already, by keys).
     let mut placed: Option<Vec<Tid>> = None;
+    let mut restored_shape = false;
     if heap_missing && !rf.heaps.contains_key(&t.oid) {
         // (Every row where its stored TID says: rows never move when a database reopens, nor
         // when a rolled-back TRUNCATE or rewrite gives the table its old storage back.)
@@ -1707,6 +1727,7 @@ fn ensure(t: &Table, indexes: &[BoundIndex], ctx: &ExecCtx) -> Result<bool> {
         // Otherwise, the first model of the table since the database was opened: the pages
         // its last VACUUM left all-visible stay so, as Postgres's visibility map keeps them.)
         if shape.as_ref().is_some_and(|s| h.read_shape(s).is_some()) {
+            restored_shape = true;
         } else if !rf.dropped.contains(&t.oid)
             && let Some(st) = ctx.catalog().relstats.get(&t.oid)
         {
@@ -1736,6 +1757,7 @@ fn ensure(t: &Table, indexes: &[BoundIndex], ctx: &ExecCtx) -> Result<bool> {
             .collect();
         rf.btrees.insert(oid, Btree::build(opts, ents));
     }
+    kept::laid_out(rf, t.oid, restored_shape);
     Ok(true)
 }
 
@@ -1866,7 +1888,7 @@ fn vis_for<'a>(xids: &'a Xids, table: u32, ctx: &ExecCtx) -> Vis<'a> {
 
 /// Add a btree entry for a new heap tuple at `tid`.
 fn index_insert(
-    btrees: &mut HashMap<u32, Btree>,
+    btrees: &mut FastMap<u32, Btree>,
     heap: &Heap,
     v: &Vis,
     entries: Vec<(u32, Key, bool)>,
@@ -1983,7 +2005,7 @@ fn gist_entries(
 }
 
 /// `entries` (`gist_entries`) went into their indexes for the heap tuple at `tid`.
-fn gist_log(logs: &mut HashMap<u32, Arc<gistlog::GistLog>>, entries: &[(u32, Option<crate::catalog::gistsim::Key>)], tid: Tid) {
+fn gist_log(logs: &mut FastMap<u32, Arc<gistlog::GistLog>>, entries: &[(u32, Option<crate::catalog::gistsim::Key>)], tid: Tid) {
     for (ix, k) in entries {
         if let Some(l) = logs.get_mut(ix)
             && !Arc::make_mut(l).insert(tid, *k)
@@ -2159,6 +2181,20 @@ fn columns_unchanged(bix: &BoundIndex, old: &[Value], new: &[Value]) -> bool {
 }
 
 fn same(a: Option<&Value>, b: Option<&Value>) -> bool {
+    // (The common kinds compared as they are: their encodings are equal exactly when they are.)
+    let null = &Value::Null;
+    match (a.unwrap_or(null), b.unwrap_or(null)) {
+        (Value::Null, Value::Null) => return true,
+        (Value::Bool(x), Value::Bool(y)) => return x == y,
+        (Value::Int2(x), Value::Int2(y)) => return x == y,
+        (Value::Int4(x), Value::Int4(y)) => return x == y,
+        (Value::Int8(x), Value::Int8(y)) => return x == y,
+        (Value::Oid(x), Value::Oid(y)) => return x == y,
+        (Value::Date(x), Value::Date(y)) => return x == y,
+        (Value::Timestamp(x), Value::Timestamp(y)) | (Value::Timestamptz(x), Value::Timestamptz(y)) => return x == y,
+        (Value::Text(x), Value::Text(y)) => return x == y,
+        _ => {}
+    }
     let enc = |v: Option<&Value>| {
         let mut out = Vec::new();
         encode_value(&mut out, v.unwrap_or(&Value::Null), false);
@@ -2283,7 +2319,9 @@ pub fn updated(
             let Some(nv) = index_values(bix, new, ctx)? else {
                 continue;
             };
-            let unchanged = index_values(bix, old, ctx)?.is_some_and(|ov| same_vals(&ov, &nv));
+            // (Columns unchanged: values unchanged, without computing the old ones.)
+            let unchanged = columns_unchanged(bix, old, new)
+                || index_values(bix, old, ctx)?.is_some_and(|ov| same_vals(&ov, &nv));
             ents.push((bix.index.oid, index_key(t, bix, nv, new, ctx), unchanged));
         }
         let gist = gist_entries(t.oid, indexes, new, None, ctx)?;
@@ -2431,6 +2469,11 @@ impl Fetcher {
         }
     }
 
+    /// The scan starts over (a nested loop's rescan): the next fetch reaches its page anew.
+    pub fn restart(&mut self) {
+        self.last = None;
+    }
+
     /// The row under `key` was fetched (heap_page_prune_opt on reaching another page).
     pub fn fetched(&mut self, key: &[u8]) {
         self.last = self.fetch(key);
@@ -2514,6 +2557,23 @@ impl Fetcher {
         }
         Some(blk)
     }
+}
+
+/// Logical apply found the row stored under `key` through its replica identity index `bix`
+/// (RelationFindReplTupleByIndex): that index scan's upkeep, as an executor's point lookup
+/// has it. The dead entries passed before the row's are marked (_bt_killitems at
+/// index_endscan; the primary key's, whose entries the data key names) and the row's page
+/// is pruned (heap_page_prune_opt at the heap fetch). Without it a subscriber's updated
+/// pages were never pruned: every update past a page's free space went to another page,
+/// non-HOT, with new index entries PostgreSQL's subscriber doesn't make.
+pub fn identity_fetched(t: &Table, bix: &BoundIndex, key: &[u8], ctx: &ExecCtx) {
+    if bix.index.id == 0 && bix.index.method == "btree" {
+        let prefix = index_prefix(t.oid, 0);
+        if let Some(mut k) = Kills::new(t.oid, bix.index.oid, &prefix, &[(key.to_vec(), prefix_end(key))], false, ctx) {
+            k.passed(key);
+        }
+    }
+    fetched(t.oid, key, None, ctx);
 }
 
 /// An index or bitmap heap fetch: prune when reaching a different heap page.
@@ -2917,7 +2977,9 @@ pub fn toast_chunks(t: &Table, ctx: &ExecCtx) -> Result<Vec<(u32, i32, Vec<u8>)>
 
 /// The table's size in pages as modelled (None: not modelled).
 pub fn modelled_blocks(table: u32, ctx: &ExecCtx) -> Option<u32> {
-    ctx.sess.db.relfiles.of(table).read().heaps.get(&table).map(Heap::nblocks)
+    let rf = ctx.sess.db.relfiles.of(table).read();
+    // (A kept table planned from its record's sizes: those, until it is laid out.)
+    rf.heaps.get(&table).map(Heap::nblocks).or_else(|| kept::sizes_read(&rf, table).map(|s| s.heap))
 }
 
 /// The table was emptied (TRUNCATE): new, empty files.
@@ -3962,7 +4024,7 @@ pub fn reattach(t: &Table, d: Detached, rekey: &[(Vec<u8>, Vec<u8>)], db: &Datab
         }
     }
     if let Some(mut tt) = d.toast {
-        let mut rows = HashMap::with_capacity(tt.rows.len());
+        let mut rows = FastMap::with_capacity_and_hasher(tt.rows.len(), Default::default());
         for (old, new) in rekey {
             if let Some(e) = tt.rows.remove(old) {
                 rows.insert(new.clone(), e);
@@ -4326,8 +4388,15 @@ pub fn btree_height(table: u32, index: u32, db: &Database) -> Option<u32> {
 /// index too big to model, the levels a sorted build stacks over its `pages` (inner pages
 /// 70% full of downlinks to keys `key_width` bytes wide: TPC-H's lineitem_pkey has 2).
 pub fn btree_level(table: u32, index: u32, pages: f64, key_width: u32, db: &Database) -> u32 {
-    if let Some(h) = btree_height(table, index, db) {
-        return h;
+    {
+        let rf = db.relfiles.of(table).read();
+        if let Some(bt) = rf.btrees.get(&index) {
+            return bt.height();
+        }
+        // (A kept table not laid out yet: its record's, as its pages were read: `main_blocks_known`.)
+        if let Some(b) = kept::sizes_read(&rf, table).and_then(|s| s.btrees.iter().find(|b| b.0 == index)) {
+            return b.2;
+        }
     }
     let downlink = (8 + key_width as usize).div_ceil(8) * 8 + heapsim::ITEM_ID;
     let fanout = ((heapsim::BLCKSZ - 24 - 16) * 70 / 100 / downlink).max(2) as f64;
@@ -4443,7 +4512,10 @@ pub fn model_bytes(db: &Database) -> usize {
 }
 
 pub fn btree_blocks(table: u32, index: u32, db: &Database) -> Option<u32> {
-    db.relfiles.of(table).read().btrees.get(&index).map(Btree::nblocks)
+    let rf = db.relfiles.of(table).read();
+    rf.btrees.get(&index).map(Btree::nblocks).or_else(|| {
+        kept::sizes_read(&rf, table).and_then(|s| s.btrees.iter().find(|b| b.0 == index).map(|b| b.1))
+    })
 }
 
 /// Where each row (by data key) is in the table's heap, and whether the visibility map
@@ -4563,6 +4635,17 @@ fn modelled(rf: &RelFiles, cat: &Catalog, t: &Table) -> bool {
         && rf.heaps.contains_key(&t.oid)
         && t.indexes.iter().all(index_done)
         && t.pkey_index.as_ref().is_none_or(index_done)
+}
+
+/// `heap_blocks` for the planner (estimate_rel_size's RelationGetNumberOfBlocks): a kept
+/// table's pages as its record has them while its models aren't laid out yet (`kept::sizes`),
+/// so planning doesn't wait for the layout. (Readers that need the model itself, its rows'
+/// places or pruning, still lay it out or wait for it: `heap_blocks`.)
+pub fn planned_heap_blocks(t: &Table, ctx: &ExecCtx) -> Result<Option<u32>> {
+    if let Some(n) = main_blocks_known(t.oid, &ctx.catalog(), &ctx.sess.db) {
+        return Ok(Some(n as u32));
+    }
+    heap_blocks(t, ctx)
 }
 
 /// The table's current size in pages (None: not modelled).
@@ -5036,7 +5119,8 @@ pub fn main_blocks_known(oid: u32, cat: &Catalog, db: &Database) -> Option<u64> 
             } else if modelled(&rf, cat, &t) {
                 rf.heaps.get(&t.oid).map(|h| h.nblocks() as u64)
             } else {
-                None
+                drop(rf);
+                kept::sizes(db, cat, &t).map(|s| s.heap as u64)
             }
         }
         Rel::Index(t, _) => {
@@ -5050,7 +5134,9 @@ pub fn main_blocks_known(oid: u32, cat: &Catalog, db: &Database) -> Option<u64> 
             } else if modelled(&rf, cat, &t) {
                 rf.btrees.get(&oid).map(|b| b.nblocks() as u64)
             } else {
-                None
+                drop(rf);
+                let s = kept::sizes(db, cat, &t)?;
+                s.btrees.iter().find(|b| b.0 == oid).map(|b| b.1 as u64)
             }
         }
         _ => None,

@@ -1,0 +1,63 @@
+> CREATE EXTENSION IF NOT EXISTS pgstattuple
+-- CREATE EXTENSION
+
+> CREATE TABLE ps (id bigserial PRIMARY KEY, ref int, note text) WITH (autovacuum_enabled = false)
+-- CREATE TABLE
+
+> CREATE INDEX ps_ref ON ps (ref)
+-- CREATE INDEX
+
+> INSERT INTO ps (ref, note) SELECT g % 150, repeat('n', g % 40) FROM generate_series(1, 60000) g
+-- INSERT 0 60000
+
+> DELETE FROM ps WHERE id % 3 = 0
+-- DELETE 20000
+
+> VACUUM ps
+-- VACUUM
+
+> SELECT * FROM pgstattuple('ps_ref')
+table_len:int8 | tuple_count:int8 | tuple_len:int8 | tuple_percent:float8 | dead_tuple_count:int8 | dead_tuple_len:int8 | dead_tuple_percent:float8 | free_space:int8 | free_percent:float8
+606208 | 6140 | 303176 | 50.01 | 0 | 0 | 0 | 257788 | 42.52
+-- SELECT 1
+
+> INSERT INTO ps (ref, note) SELECT g % 21, 'again' FROM generate_series(1, 12000) g
+-- INSERT 0 12000
+
+> SELECT leaf_pages, avg_leaf_density, leaf_fragmentation FROM pgstatindex('ps_ref')
+leaf_pages:int8 | avg_leaf_density:float8 | leaf_fragmentation:float8
+82 | 63.01 | 48.78
+-- SELECT 1
+
+> SELECT tuple_count, tuple_len, dead_tuple_count, free_space FROM pgstattuple('ps_ref')
+tuple_count:int8 | tuple_len:int8 | dead_tuple_count:int8 | free_space:int8
+7518 | 389520 | 0 | 247252
+-- SELECT 1
+
+> UPDATE ps SET note = note || '!' WHERE ref % 9 = 0
+-- UPDATE 1714
+
+> SELECT leaf_pages, avg_leaf_density, leaf_fragmentation FROM pgstatindex('ps_ref')
+leaf_pages:int8 | avg_leaf_density:float8 | leaf_fragmentation:float8
+82 | 63.99 | 48.78
+-- SELECT 1
+
+> SELECT tuple_count, tuple_len, dead_tuple_count, free_space FROM pgstattuple('ps_ref')
+tuple_count:int8 | tuple_len:int8 | dead_tuple_count:int8 | free_space:int8
+7246 | 397168 | 0 | 240692
+-- SELECT 1
+
+> SELECT pg_relation_size('ps_ref') / 8192 AS pages, pg_relation_size('ps') / 8192 AS heap
+pages:int8 | heap:int8
+84 | 472
+-- SELECT 1
+
+> SELECT ctid, id FROM ps WHERE id IN (3, 60001, 72000) ORDER BY id
+ctid:27 | id:int8
+(0,3) | 60001
+(262,76) | 72000
+-- SELECT 2
+
+> DROP TABLE ps
+-- DROP TABLE
+

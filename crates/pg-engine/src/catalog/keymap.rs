@@ -46,10 +46,11 @@ impl Row {
 
 #[derive(Default)]
 pub struct KeyMap {
-    /// The rows of the keys present, by their keys' hashes: each slot the row and the top
-    /// half of its key's hash (`slot`), so growing the table (a load's, a batch at a time)
+    /// The rows of the keys present past the ascending ones (`asc`), by their keys' hashes:
+    /// each slot the row and the top half of its key's hash (`slot`), so growing the table
     /// rehashes from the slots alone, and a probe compares a key only when its hash's half
-    /// matches.
+    /// matches. The ascending rows are found by searching them (`asc_row`): a table loaded or
+    /// laid out in key order (most big ones) has no hash table at all, 18 bytes a row less.
     table: hashbrown::HashTable<u64>,
     rows: Vec<Row>,
     arena: Vec<u8>,
@@ -60,13 +61,16 @@ pub struct KeyMap {
     /// The greatest key ever added: a key past it is new, added without a probe.
     max_key: Vec<u8>,
     /// Rows `..asc` have ascending keys (rows added in key order: a load, a model laid out
-    /// from rows in key order): a lookup past the cursor's key searches forward from it.
+    /// from rows in key order): a lookup past the cursor's key searches forward from it, any
+    /// other halves them. None of them is in `table`.
     asc: u32,
+    /// The ascending rows whose keys are present.
+    asc_present: u32,
 }
 
 impl std::fmt::Debug for KeyMap {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "KeyMap({} keys, {} rows)", self.table.len(), self.rows.len())
+        write!(f, "KeyMap({} keys, {} rows)", self.len(), self.rows.len())
     }
 }
 
@@ -98,11 +102,32 @@ impl KeyMap {
 
     /// Keys present.
     pub fn len(&self) -> usize {
-        self.table.len()
+        self.table.len() + self.asc_present as usize
     }
 
     pub fn is_empty(&self) -> bool {
-        self.table.is_empty()
+        self.len() == 0
+    }
+
+    /// The ascending row whose key is `key`, present or not.
+    fn asc_row(&self, key: &[u8]) -> Option<u32> {
+        let asc = &self.rows[..self.asc as usize];
+        let last = asc.last()?;
+        if key > key_at(&self.arena, last) {
+            return None;
+        }
+        let at = asc.partition_point(|r| key_at(&self.arena, r) < key);
+        (key_at(&self.arena, &asc[at]) == key).then_some(at as u32)
+    }
+
+    /// The row of present key `key` in the hash table.
+    fn table_row(&self, key: &[u8]) -> Option<u32> {
+        if self.table.is_empty() {
+            return None;
+        }
+        let (rows, arena) = (&self.rows, &self.arena);
+        let h = self.hash(key);
+        self.table.find(table_hash(h), |&s| same_half(s, h) && key_at(arena, &rows[s as u32 as usize]) == key).map(|&s| s as u32)
     }
 
     /// Rows numbered, keys present or not.
@@ -110,9 +135,12 @@ impl KeyMap {
         self.rows.len()
     }
 
-    /// Room for `n` more keys of about `bytes` bytes in all.
+    /// Room for `n` more keys of about `bytes` bytes in all (in the hash table only once rows
+    /// stopped ascending: a load in key order needs none).
     pub fn reserve(&mut self, n: usize, bytes: usize) {
-        self.table.reserve(n, |&s| table_hash(s));
+        if (self.asc as usize) < self.rows.len() {
+            self.table.reserve(n, |&s| table_hash(s));
+        }
         self.rows.reserve(n);
         self.arena.reserve(bytes + n);
     }
@@ -134,8 +162,11 @@ impl KeyMap {
             self.cursor.store(r, Relaxed);
             return Some(r);
         }
-        let h = self.hash(key);
-        let found = self.table.find(table_hash(h), |&s| same_half(s, h) && key_at(arena, &rows[s as u32 as usize]) == key).map(|&s| s as u32);
+        if let Some(r) = self.asc_row(key).filter(|&r| rows[r as usize].present()) {
+            self.cursor.store(r, Relaxed);
+            return Some(r);
+        }
+        let found = self.table_row(key);
         if let Some(r) = found {
             self.cursor.store(r, Relaxed);
         }
@@ -190,13 +221,23 @@ impl KeyMap {
     /// The row under `key` now has its current version at `tid` (a new row if no row is
     /// under it). Returns the row.
     pub fn insert(&mut self, key: &[u8], tid: Tid) -> u32 {
-        let h = self.hash(key);
-        // (A key past every key added so far is new: no probe for it, only its slot.)
+        // (A key past every key added so far is new: no probe for it; an ascending row's is in
+        // no hash table, a later one's has only its slot added.)
         if self.rows.is_empty() || key > self.max_key.as_slice() {
             let row = self.push_row(key, tid);
-            self.table.insert_unique(table_hash(h), slot(row, h), |&s| table_hash(s));
+            if row >= self.asc {
+                let h = self.hash(key);
+                self.table.insert_unique(table_hash(h), slot(row, h), |&s| table_hash(s));
+            }
             return row;
         }
+        if let Some(row) = self.asc_row(key).filter(|&r| self.rows[r as usize].present()) {
+            let r = &mut self.rows[row as usize];
+            (r.blk, r.off) = tid;
+            self.cursor.store(row, std::sync::atomic::Ordering::Relaxed);
+            return row;
+        }
+        let h = self.hash(key);
         let (rows, arena) = (&self.rows, &self.arena);
         let entry = self.table.entry(
             table_hash(h),
@@ -228,6 +269,7 @@ impl KeyMap {
         if key > self.max_key.as_slice() || row == 0 {
             if self.asc == row {
                 self.asc = row + 1;
+                self.asc_present += 1;
             }
             self.max_key.clear();
             self.max_key.extend_from_slice(key);
@@ -246,6 +288,14 @@ impl KeyMap {
 
     /// No row is under `key` any more (its row keeps the key's bytes). Returns its row.
     pub fn remove(&mut self, key: &[u8]) -> Option<u32> {
+        if let Some(row) = self.asc_row(key).filter(|&r| self.rows[r as usize].present()) {
+            self.rows[row as usize].part &= !PRESENT;
+            self.asc_present -= 1;
+            return Some(row);
+        }
+        if self.table.is_empty() {
+            return None;
+        }
         let h = self.hash(key);
         let (rows, arena) = (&self.rows, &self.arena);
         let (s, _) = self.table.find_entry(table_hash(h), |&s| same_half(s, h) && key_at(arena, &rows[s as u32 as usize]) == key).ok()?.remove();
@@ -261,6 +311,14 @@ impl KeyMap {
         if (r.blk, r.off) != tid {
             return false;
         }
+        if row < self.asc {
+            if !r.present() {
+                return false;
+            }
+            self.rows[row as usize].part &= !PRESENT;
+            self.asc_present -= 1;
+            return true;
+        }
         let h = self.hash(key_at(&self.arena, r));
         match self.table.find_entry(table_hash(h), |&s| s as u32 == row) {
             Ok(e) => {
@@ -274,6 +332,12 @@ impl KeyMap {
 
     /// Keep the keys whose current versions' TIDs `keep` accepts.
     pub fn retain(&mut self, mut keep: impl FnMut(Tid) -> bool) {
+        for row in &mut self.rows[..self.asc as usize] {
+            if row.present() && !keep((row.blk, row.off)) {
+                row.part &= !PRESENT;
+                self.asc_present -= 1;
+            }
+        }
         let rows = &mut self.rows;
         self.table.retain(|&mut s| {
             let row = &mut rows[s as u32 as usize];
@@ -287,17 +351,18 @@ impl KeyMap {
 
     /// Every key present, its row and its current version's TID, in no particular order.
     pub fn iter(&self) -> impl Iterator<Item = (&[u8], u32, Tid)> {
-        self.table.iter().map(|&s| {
-            let row = &self.rows[s as u32 as usize];
-            (key_at(&self.arena, row), s as u32, (row.blk, row.off))
+        let asc = (0..self.asc).filter(|&i| self.rows[i as usize].present());
+        asc.chain(self.table.iter().map(|&s| s as u32)).map(|i| {
+            let row = &self.rows[i as usize];
+            (key_at(&self.arena, row), i, (row.blk, row.off))
         })
     }
 
     /// Whether removed keys' rows are so many that compacting them is worth a pass over the
     /// heap's versions.
     pub fn wasteful(&self) -> bool {
-        let dead = self.rows.len() - self.table.len();
-        dead >= 1 << 16 && dead >= self.table.len()
+        let dead = self.rows.len() - self.len();
+        dead >= 1 << 16 && dead >= self.len()
     }
 
     /// Keep only the rows `keep` marks (by row number; the keys present are always kept),
@@ -307,7 +372,12 @@ impl KeyMap {
         for &s in self.table.iter() {
             map[s as u32 as usize] = 0;
         }
-        let mut rows = Vec::with_capacity(self.table.len());
+        for (i, r) in self.rows[..self.asc as usize].iter().enumerate() {
+            if r.present() {
+                map[i] = 0;
+            }
+        }
+        let mut rows = Vec::with_capacity(self.len());
         let mut arena = Vec::new();
         let mut asc = 0;
         for (i, r) in self.rows.iter().enumerate() {
@@ -402,6 +472,8 @@ mod tests {
             r.insert(key(i), (i, 1));
         }
         assert_eq!(m.asc, 50_000);
+        // (Searched, not hashed: no hash table for them.)
+        assert_eq!((m.table.len(), m.table.capacity(), m.len()), (0, 0, 50_000));
         for i in (0..50_000).step_by(10) {
             assert_eq!(m.remove(&key(i)).is_some(), r.remove(&key(i)).is_some());
         }

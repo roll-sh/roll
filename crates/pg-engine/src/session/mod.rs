@@ -108,7 +108,7 @@ pub struct Prepared {
     pub param_types: Vec<DataType>,
     /// Cached binding, valid for a catalog version, search_path, and the role and row_security
     /// setting (row-level security policies are bound into the plan).
-    bound: Mutex<Option<(u64, Vec<String>, (u32, bool), Arc<BoundQuery>)>>,
+    bound: Mutex<Option<(u64, crate::catalog::names::SearchPath, (u32, bool), Arc<BoundQuery>)>>,
     /// The plans it ran (plan cache choices, pg_prepared_statements).
     plans: Mutex<PlanUses>,
     /// A simple query's literals and template (`litplan`): its plan may be one kept for the
@@ -690,7 +690,7 @@ impl Session {
             txn.lock_timeout = Some(std::time::Duration::from_millis(lt as u64));
         }
         // StartTransaction: transaction_timeout runs from here.
-        let tt = self.state.settings.borrow().int("transaction_timeout");
+        let tt = self.state.settings.borrow().hot().transaction_timeout;
         if tt > 0 {
             txn.txn_deadline =
                 Some(std::time::Instant::now() + std::time::Duration::from_millis(tt as u64));
@@ -1022,7 +1022,7 @@ impl Session {
     fn with_ctx_path<T>(
         &mut self,
         params: &[Value],
-        search_path: Option<Vec<String>>,
+        search_path: Option<crate::catalog::names::SearchPath>,
         f: impl FnOnce(&ExecCtx) -> Result<T>,
     ) -> Result<T> {
         self.ensure_txn();
@@ -1043,7 +1043,7 @@ impl Session {
         }
         // (The catalog the statement reads, which `begin_statement` took.)
         crate::sql::binder::note_catalog(&txn.borrow().catalog());
-        let search_path = search_path.unwrap_or_else(|| self.state.search_path());
+        let search_path = search_path.unwrap_or_else(|| self.state.shared_search_path());
         let ctx = ExecCtx::with_search_path(
             txn,
             &self.state,
@@ -1095,7 +1095,7 @@ impl Session {
     pub fn parse(&mut self, sql: &str) -> Result<Vec<Arc<Prepared>>> {
         // (`pg_temp` is this session's while it binds, on a thread another session may
         // have run on: an embedder's Parse / Describe before any execute.)
-        crate::catalog::set_session_temp_schema(&self.state.temp_schema());
+        crate::catalog::set_session_temp_schema_of(self.state.proc.number());
         self.sync_lex();
         let parsed = crate::sql::parse::parse_live_lazy(sql);
         self.take_lex_warnings();
@@ -1296,7 +1296,7 @@ impl Session {
         max_rows: usize,
     ) -> Result<Outcome> {
         let before = self.notices.len();
-        crate::catalog::set_session_temp_schema(&self.state.temp_schema());
+        crate::catalog::set_session_temp_schema_of(self.state.proc.number());
         // pg_stat_statements (when preloaded): what runs inside is one level down.
         let tracked = self.pgss_begin(p);
         let mine = tracked.is_some();
@@ -1668,7 +1668,7 @@ impl Session {
             .as_ref()
             .map(|t| t.borrow().catalog().version)
             .unwrap_or(0);
-        let path = self.state.search_path();
+        let path = self.state.shared_search_path();
         let who = {
             let cat = self.txn.as_ref().unwrap().borrow().catalog();
             (self.state.current_role(&cat), self.state.settings.borrow().hot().row_security)
@@ -1945,7 +1945,20 @@ impl Session {
             let total = match bq.cost.get() {
                 Some((p, t)) if Arc::ptr_eq(p, &bq.plan) => *t,
                 _ => {
-                    let (t, found) = crate::sql::explain::total_and_gathers(&bq.plan, ctx);
+                    // (A lone scan's cost is its access path's, with no Gather: no tree.)
+                    let (t, found) = match crate::sql::paths::planned_total(&bq.plan, ctx, planning) {
+                        Some(t) => {
+                            // (Debug builds: it is EXPLAIN's, when read now; the planner's
+                            // own is checked as the plan is made, `paths::check_planned_total`.)
+                            #[cfg(debug_assertions)]
+                            if !planning {
+                                let (e, g) = crate::sql::explain::total_and_gathers(&bq.plan, ctx);
+                                assert!(g.is_empty() && e == t, "a lone scan's cost {t} isn't EXPLAIN's {e} ({g:?})");
+                            }
+                            (t, Vec::new())
+                        }
+                        None => crate::sql::explain::total_and_gathers(&bq.plan, ctx),
+                    };
                     let gathers = crate::exec::parallel_part::of_explain(&bq.plan, found);
                     let _ = bq.gathers.set((bq.plan.clone(), gathers.into()));
                     let _ = bq.cost.set((bq.plan.clone(), t));
@@ -2155,7 +2168,7 @@ impl Session {
     ) -> Result<Arc<Prepared>> {
         // (`pg_temp` is this session's while it binds, on a thread another session may
         // have run on: an embedder's Parse / Describe before any execute.)
-        crate::catalog::set_session_temp_schema(&self.state.temp_schema());
+        crate::catalog::set_session_temp_schema_of(self.state.proc.number());
         self.waits_armed = false;
         if !name.is_empty() && self.prepared.contains_key(name) {
             return Err(Error::new(
@@ -2443,7 +2456,7 @@ impl Session {
     fn describe_here(&mut self, p: &Arc<Prepared>) -> Result<Option<Vec<OutCol>>> {
         // (`pg_temp` is this session's while it binds, on a thread another session may
         // have run on: an embedder's Parse / Describe before any execute.)
-        crate::catalog::set_session_temp_schema(&self.state.temp_schema());
+        crate::catalog::set_session_temp_schema_of(self.state.proc.number());
         let Some(stmt) = p.stmt.as_ref() else {
             return Ok(None);
         };

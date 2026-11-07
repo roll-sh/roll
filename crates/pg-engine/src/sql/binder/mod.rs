@@ -140,8 +140,11 @@ impl Analyzed {
         let (plan, hidden_rtes) = self.planned(self.plan.clone(), ctx)?;
         let mut perms = self.perms.clone();
         perms.add_plan_locks(&plan, &self.cat);
+        let plan = Arc::new(plan);
+        #[cfg(debug_assertions)]
+        crate::sql::paths::check_planned_total(&plan, ctx);
         Ok(BoundQuery {
-            plan: Arc::new(plan),
+            plan,
             cols: self.cols.clone(),
             params: self.params.clone(),
             perms: Arc::new(perms),
@@ -157,8 +160,11 @@ impl Analyzed {
         let plan = std::mem::replace(&mut self.plan, Plan::One);
         let (plan, hidden_rtes) = self.planned(plan, ctx)?;
         self.perms.add_plan_locks(&plan, &self.cat);
+        let plan = Arc::new(plan);
+        #[cfg(debug_assertions)]
+        crate::sql::paths::check_planned_total(&plan, ctx);
         Ok(BoundQuery {
-            plan: Arc::new(plan),
+            plan,
             cols: self.cols,
             params: self.params,
             perms: Arc::new(self.perms),

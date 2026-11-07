@@ -1,0 +1,238 @@
+> CREATE EXTENSION IF NOT EXISTS btree_gist
+-- CREATE EXTENSION
+
+> CREATE TABLE a163_ks (id int, cat int, p point, b box, c circle, g polygon)
+-- CREATE TABLE
+
+> INSERT INTO a163_ks SELECT i, i % 7,
+>   point((i * 7919) % 2003 / 2.0, (i * 104729) % 1999 / 2.0),
+>   box(point((i * 7919) % 2003 / 2.0, (i * 104729) % 1999 / 2.0), point((i * 7919) % 2003 / 2.0 + i % 5, (i * 104729) % 1999 / 2.0 + i % 3)),
+>   circle(point((i * 6007) % 2011 / 2.0, (i * 3001) % 1993 / 2.0), 0.5 + i % 4),
+>   polygon(box(point((i * 4001) % 2017 / 2.0, (i * 2003) % 1987 / 2.0), point((i * 4001) % 2017 / 2.0 + 1.5, (i * 2003) % 1987 / 2.0 + 0.75)))
+>   FROM generate_series(1, 6000) i
+-- INSERT 0 6000
+
+> INSERT INTO a163_ks VALUES (6001, 1, NULL, NULL, NULL, NULL), (6002, 2, point(500, 500), box(point(500, 500), point(500, 500)), circle(point(500, 500), 0), NULL)
+-- INSERT 0 2
+
+> CREATE INDEX a163_ks_p ON a163_ks USING gist (p)
+-- CREATE INDEX
+
+> CREATE INDEX a163_ks_b ON a163_ks USING gist (b)
+-- CREATE INDEX
+
+> CREATE INDEX a163_ks_c ON a163_ks USING gist (c)
+-- CREATE INDEX
+
+> CREATE INDEX a163_ks_g ON a163_ks USING gist (g)
+-- CREATE INDEX
+
+> ANALYZE a163_ks
+-- ANALYZE
+
+> SET enable_seqscan = off
+-- SET
+
+> SET enable_bitmapscan = off
+-- SET
+
+> EXPLAIN (COSTS OFF) SELECT id FROM a163_ks ORDER BY p <-> point(250, 250) LIMIT 5
+QUERY PLAN:text
+Limit
+  ->  Index Scan using a163_ks_p on a163_ks
+        Order By: (p <-> '(250,250)'::point)
+-- EXPLAIN
+
+> SELECT id, round((p <-> point(250, 250))::numeric, 6) FROM a163_ks ORDER BY p <-> point(250, 250) LIMIT 8
+id:int4 | round:numeric
+167 | 5.315073
+16 | 7.566373
+533 | 9.962429
+382 | 14.705441
+684 | 16.560495
+318 | 17.066048
+899 | 17.755281
+1050 | 20.056171
+-- SELECT 8
+
+> SELECT id FROM a163_ks ORDER BY p <-> point(0, 0) LIMIT 6
+id:int4
+64
+279
+128
+494
+343
+709
+-- SELECT 6
+
+> SELECT id FROM a163_ks ORDER BY p <-> point(1001.3, 999.7) LIMIT 6
+id:int4
+517
+151
+668
+1034
+302
+1400
+-- SELECT 6
+
+> SELECT id FROM a163_ks ORDER BY p <-> point(-5000, 300) LIMIT 4
+id:int4
+5729
+3446
+1163
+1723
+-- SELECT 4
+
+> SELECT id FROM a163_ks ORDER BY p <-> point(500, 1e6) LIMIT 4
+id:int4
+4213
+2214
+215
+4428
+-- SELECT 4
+
+> SELECT id FROM a163_ks WHERE id % 5 = 0 ORDER BY p <-> point(731, 222) LIMIT 7
+id:int4
+5455
+5670
+5240
+5885
+4055
+5025
+4270
+-- SELECT 7
+
+> SELECT count(*) FROM (SELECT id FROM a163_ks ORDER BY p <-> point(400, 400) LIMIT 3000) s
+count:int8
+3000
+-- SELECT 1
+
+> SELECT id, round((b <-> point(321.5, 654.25))::numeric, 6) FROM a163_ks ORDER BY b <-> point(321.5, 654.25) LIMIT 8
+id:int4 | round:numeric
+424 | 3.508917
+790 | 4.366062
+273 | 6.309715
+639 | 10.003125
+1156 | 11.194307
+58 | 12.412192
+941 | 13.750000
+1307 | 14.188464
+-- SELECT 8
+
+> SELECT id, round((c <-> point(10, 990))::numeric, 6) FROM a163_ks ORDER BY c <-> point(10, 990) LIMIT 8
+id:int4 | round:numeric
+2165 | 0.000000
+4330 | 9.172618
+1469 | 15.682840
+3634 | 22.847584
+2859 | 23.230133
+2163 | 24.450850
+773 | 31.741540
+5799 | 32.056293
+-- SELECT 8
+
+> SELECT id, round((g <-> point(612, 88))::numeric, 6) FROM a163_ks ORDER BY g <-> point(612, 88) LIMIT 8
+id:int4 | round:numeric
+880 | 3.473111
+4730 | 6.005206
+757 | 10.630146
+4853 | 10.957304
+4731 | 11.401754
+879 | 15.461646
+758 | 16.552945
+4608 | 16.620770
+-- SELECT 8
+
+> CREATE INDEX a163_ks_cp ON a163_ks USING gist (cat, p)
+-- CREATE INDEX
+
+> EXPLAIN (COSTS OFF) SELECT id FROM a163_ks WHERE cat = 3 ORDER BY p <-> point(250, 250) LIMIT 5
+QUERY PLAN:text
+Limit
+  ->  Index Scan using a163_ks_cp on a163_ks
+        Index Cond: (cat = 3)
+        Order By: (p <-> '(250,250)'::point)
+-- EXPLAIN
+
+> SELECT id FROM a163_ks WHERE cat = 3 ORDER BY p <-> point(250, 250) LIMIT 6
+id:int4
+318
+899
+80
+1718
+1480
+2299
+-- SELECT 6
+
+> SELECT id FROM a163_ks WHERE cat = 6 ORDER BY p <-> point(999, 0) LIMIT 6
+id:int4
+5557
+5795
+4976
+4157
+5214
+4395
+-- SELECT 6
+
+> INSERT INTO a163_ks SELECT 7000 + i, i % 7, point(250 + i / 1000.0, 250 - i / 1000.0), NULL, NULL, NULL FROM generate_series(1, 50) i
+-- INSERT 0 50
+
+> SELECT id FROM a163_ks ORDER BY p <-> point(250, 250) LIMIT 6
+id:int4
+7001
+7002
+7003
+7004
+7005
+7006
+-- SELECT 6
+
+> BEGIN
+-- BEGIN
+
+> INSERT INTO a163_ks VALUES (8000, 3, point(250.0001, 250.0001), NULL, NULL, NULL)
+-- INSERT 0 1
+
+> DELETE FROM a163_ks WHERE id = 7001
+-- DELETE 1
+
+> SELECT id FROM a163_ks ORDER BY p <-> point(250, 250) LIMIT 4
+id:int4
+8000
+7002
+7003
+7004
+-- SELECT 4
+
+> SELECT id FROM a163_ks WHERE cat = 3 ORDER BY p <-> point(250, 250) LIMIT 3
+id:int4
+8000
+7003
+7010
+-- SELECT 3
+
+> ROLLBACK
+-- ROLLBACK
+
+> DELETE FROM a163_ks WHERE id BETWEEN 7001 AND 7040
+-- DELETE 40
+
+> SELECT id FROM a163_ks ORDER BY p <-> point(250, 250) LIMIT 6
+id:int4
+7041
+7042
+7043
+7044
+7045
+7046
+-- SELECT 6
+
+> RESET enable_seqscan
+-- RESET
+
+> RESET enable_bitmapscan
+-- RESET
+
+> DROP TABLE a163_ks
+-- DROP TABLE
+

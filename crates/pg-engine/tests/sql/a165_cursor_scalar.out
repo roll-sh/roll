@@ -1,0 +1,42 @@
+> create function a165_scalar() returns int stable language plpgsql as $$
+> begin raise notice 'scalar from'; return 7; end $$
+-- CREATE FUNCTION
+
+> explain (costs off) declare s cursor for select * from a165_scalar()
+QUERY PLAN:text
+Function Scan on a165_scalar
+-- EXPLAIN
+
+> begin
+-- BEGIN
+
+> declare s cursor for select * from a165_scalar()
+-- DECLARE CURSOR
+
+> select name, is_scrollable from pg_cursors where name = 's'
+name:text | is_scrollable:bool
+s | t
+-- SELECT 1
+
+> fetch all from s
+NOTICE 00000: scalar from
+CONTEXT: PL/pgSQL function a165_scalar() line 2 at RAISE
+a165_scalar:int4
+7
+-- FETCH 1
+
+> fetch prior from s
+a165_scalar:int4
+7
+-- FETCH 1
+
+> fetch backward all from s
+a165_scalar:int4
+-- FETCH 0
+
+> rollback
+-- ROLLBACK
+
+> drop function a165_scalar()
+-- DROP FUNCTION
+

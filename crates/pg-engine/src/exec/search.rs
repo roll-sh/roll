@@ -524,6 +524,22 @@ type RawEnt = (u32, (u64, u64), (u64, u64), u32);
 /// Entries per block of `Grid::sorted`, whose high ends' range skips it.
 const BLOCK: usize = 64;
 
+/// Entries per strip of a two-dimensional `Grid` (`Grid::strips`).
+const STRIP: usize = 512;
+
+/// A run of a partition's entries in `Grid::sorted` (x order), walked in their y order:
+/// `Grid::yperm[start..end]` (positions in `sorted`), the run's least x low end and greatest x
+/// high end, and where its blocks' entries start in `Grid::ypmax`.
+#[derive(Clone, Copy)]
+struct Strip {
+    part: u32,
+    start: usize,
+    end: usize,
+    xmin: u32,
+    xmax: u32,
+    yblock: usize,
+}
+
 /// The rows of a table placed for an index of shape `shape`.
 struct Grid {
     shape: Shape,
@@ -555,6 +571,12 @@ struct Grid {
     /// valid while this does), and the largest high end up to each block.
     merges: u64,
     pmax: Vec<u32>,
+    /// A two-dimensional grid's strips (`Strip`) for nearest-first walks: runs of `sorted`
+    /// within a partition, each with its entries' positions in their y order (`yperm`, the
+    /// strips' runs in turn) and the greatest y high end up to each block of them (`ypmax`).
+    strips: Vec<Strip>,
+    yperm: Vec<u32>,
+    ypmax: Vec<u32>,
     /// Rows when it was built: past twice that (rows written again, deleted) it is rebuilt.
     built: usize,
 }
@@ -579,6 +601,9 @@ impl Grid {
             empties: Vec::new(),
             merges: 0,
             pmax: Vec::new(),
+            strips: Vec::new(),
+            yperm: Vec::new(),
+            ypmax: Vec::new(),
             built: 0,
         }
     }
@@ -652,6 +677,34 @@ impl Grid {
             .collect();
         self.pmax = self.blocks.iter().scan(0, |m, b| { *m = b.1.max(*m); Some(*m) }).collect();
         self.merges += 1;
+        if self.two_d() {
+            self.make_strips();
+        }
+    }
+
+    /// `strips`, `yperm` and `ypmax` for the entries just sorted: runs of up to `STRIP` of a
+    /// partition's entries, each in its entries' y order.
+    fn make_strips(&mut self) {
+        let (mut strips, mut yperm, mut ypmax) = (Vec::new(), Vec::with_capacity(self.sorted.len()), Vec::new());
+        let s = &self.sorted;
+        let mut start = 0;
+        while start < s.len() {
+            let part = s[start].part;
+            let end = (start + STRIP).min(start + s[start..].partition_point(|e| e.part == part));
+            let at = yperm.len();
+            yperm.extend(start as u32..end as u32);
+            let ys = &self.ys;
+            yperm[at..].sort_unstable_by_key(|&i| ys[s[i as usize].row as usize].0);
+            let xmax = s[start..end].iter().map(|e| e.hi).max().unwrap_or(0);
+            let mut m = 0;
+            for c in yperm[at..].chunks(BLOCK) {
+                m = c.iter().map(|&i| ys[s[i as usize].row as usize].1).fold(m, u32::max);
+                ypmax.push(m);
+            }
+            strips.push(Strip { part, start: at, end: yperm.len(), xmin: s[start].lo, xmax, yblock: ypmax.len() - yperm[at..].len().div_ceil(BLOCK) });
+            start = end;
+        }
+        (self.strips, self.yperm, self.ypmax) = (strips, yperm, ypmax);
     }
 
     fn ent_ok(&self, x: &QSpan, y: &QSpan, e: &Ent) -> bool {
@@ -857,6 +910,8 @@ impl Placing for Grid {
             + self.raw.as_ref().map_or(0, |r| r.capacity() * size_of::<RawEnt>())
             + (self.sorted.capacity() + self.delta.capacity()) * size_of::<Ent>()
             + (self.blocks.capacity() + self.pmax.capacity() / 2) * size_of::<(u32, u32)>()
+            + (self.yperm.capacity() + self.ypmax.capacity()) * size_of::<u32>()
+            + self.strips.capacity() * size_of::<Strip>()
             + (self.always.capacity() + self.nulls.capacity()) * 4
             + self.empties.capacity() * 8
     }

@@ -4714,6 +4714,7 @@ impl<'c, 'a> Interp<'c, 'a> {
         let now = crate::session::Session::now();
         let c = match rows {
             Ok(lazy) => {
+                let lazy = lazy.for_cursor(&self.cx(), scroll)?;
                 crate::session::cursor::Cursor::new_lazy(cols, lazy, keyed, false, scroll, text, now)
             }
             Err(rows) => {
@@ -4829,8 +4830,7 @@ impl<'c, 'a> Interp<'c, 'a> {
                 coerce,
                 self.cx().child(&[]).keep(),
             )
-            .with_params(vals.clone())
-            .for_cursor(&self.cx())?;
+            .with_params(vals.clone());
             Ok((Ok(lazy), cols, table, sql.clone(), backward))
         })();
         self.cx()
@@ -4901,8 +4901,7 @@ impl<'c, 'a> Interp<'c, 'a> {
             Rc::new(values),
             coerce.clone(),
             self.cx().child(&[]).keep(),
-        )
-        .for_cursor(&self.cx())?;
+        );
         Ok((Ok(lazy), cols, table, q.text.clone(), backward))
     }
 
@@ -5301,7 +5300,7 @@ pub fn system_query(ctx: &ExecCtx, sql: &str) -> Result<(Vec<Row>, Vec<OutCol>)>
         return Err(crate::error::internal("empty system view"));
     };
     let mut child = ctx.child(&[]);
-    child.search_path = vec!["pg_catalog".into()];
+    child.search_path = ["pg_catalog".to_string()].into();
     let r = (|| {
         let mut b = Binder::new(&child, Vec::new());
         let bq = b.bind_statement(&node)?;

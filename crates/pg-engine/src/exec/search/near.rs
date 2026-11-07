@@ -5,7 +5,7 @@
 //! (`Quant` is monotone, so the box holds the value); `Trigrams` bounds a row by the query
 //! trigrams it shares.
 
-use super::{BLOCK, Ent, Grid, Quant, Query, State, Trigrams};
+use super::{BLOCK, Ent, Grid, Quant, Query, State, Strip, Trigrams};
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 
@@ -23,6 +23,11 @@ enum Step {
     /// entries `[start, j)` (before it).
     Right(usize, usize),
     Left(usize, usize),
+    /// A two-dimensional `Grid`'s strip (`Grid::strips[i]`), whole; then its entries in y
+    /// order `Grid::yperm[i..end]` (low ends at or past the origin's y) and `[start..j)`.
+    Strip(usize),
+    Up(usize, usize, usize),
+    Down(usize, usize, usize),
     /// `Trigrams`' rows from this one on that share no trigram with the query.
     Tail(u32),
 }
@@ -49,6 +54,12 @@ impl PartialEq for Item {
     }
 }
 impl Eq for Item {}
+
+/// `search::ord_key` of a float (not NaN): a y as the grid keys it.
+fn ord_y(y: f64) -> u64 {
+    let b = if y == 0.0 { 0.0f64 } else { y }.to_bits();
+    if b >> 63 == 1 { !b } else { b | (1 << 63) }
+}
 
 /// The value of an `ord_key` (of a float, or else an integer).
 fn key_value(k: u64, float: bool) -> f64 {
@@ -110,6 +121,16 @@ impl GridNear {
         let s = &g.sorted;
         let qx = g.qx.q(self.at_key);
         let mut items = Vec::new();
+        // (Two dimensions: strips bounded by their x span, then walked out in y from the
+        // origin, so a near point's neighbours come from the strips about it alone.)
+        if g.two_d() && !g.strips.is_empty() {
+            for (i, st) in g.strips.iter().enumerate() {
+                if only.is_none_or(|p| p == Some(st.part)) {
+                    items.push(Item { bound: self.strip_bound(g, st, f64::NEG_INFINITY, f64::INFINITY), step: Step::Strip(i) });
+                }
+            }
+        }
+        let parts = if g.two_d() && !g.strips.is_empty() { Vec::new() } else { parts };
         for p in parts {
             let a = s.partition_point(|e| e.part < p);
             let b = s.partition_point(|e| e.part <= p);
@@ -154,7 +175,73 @@ impl GridNear {
         under(d, self.at.0.abs() + s)
     }
 
+    /// The bound of a strip's entries whose y spans lie within `[ylo, yhi]`.
+    fn strip_bound(&self, g: &Grid, st: &Strip, ylo: f64, yhi: f64) -> f64 {
+        let (dx, sx) = gap(self.at.0, (values(g.qx, st.xmin, self.float).0, values(g.qx, st.xmax, self.float).1));
+        let (dy, sy) = gap(self.at.1, (ylo, yhi));
+        under(dx.hypot(dy), self.at.0.abs() + self.at.1.abs() + sx + sy)
+    }
+
+    /// The y order's entries `[i, end)` of strip `k` (low ends from `yperm[i]`'s on).
+    fn up(&self, g: &Grid, k: usize, i: usize) -> f64 {
+        let ylo = g.ys[g.sorted[g.yperm[i] as usize].row as usize].0;
+        self.strip_bound(g, &g.strips[k], values(g.qy, ylo, true).0, f64::INFINITY)
+    }
+
+    /// The y order's entries `[start, j)` of strip `k` (high ends at most the greatest up to
+    /// `j - 1`'s block).
+    fn down(&self, g: &Grid, k: usize, j: usize) -> f64 {
+        let st = &g.strips[k];
+        let m = g.ypmax[st.yblock + (j - 1 - st.start) / BLOCK];
+        self.strip_bound(g, st, f64::NEG_INFINITY, values(g.qy, m, true).1)
+    }
+
+    fn expand_strip(&mut self, g: &Grid, step: Step) {
+        let (x, y) = (g.qx.span(&self.q.x), g.qy.span(&self.q.y));
+        let (from, to) = match step {
+            Step::Strip(k) => {
+                let st = g.strips[k];
+                let ys = |i: u32| g.ys[g.sorted[i as usize].row as usize].0;
+                let qy = g.qy.q(ord_y(self.at.1));
+                let m = st.start + g.yperm[st.start..st.end].partition_point(|&i| ys(i) < qy);
+                if m < st.end {
+                    self.heap.push(Item { bound: self.up(g, k, m), step: Step::Up(k, m, st.end) });
+                }
+                if st.start < m {
+                    self.heap.push(Item { bound: self.down(g, k, m), step: Step::Down(k, st.start, m) });
+                }
+                return;
+            }
+            Step::Up(k, i, end) => {
+                let st = g.strips[k];
+                let to = (st.start + ((i - st.start) / BLOCK + 1) * BLOCK).min(end);
+                if to < end {
+                    self.heap.push(Item { bound: self.up(g, k, to), step: Step::Up(k, to, end) });
+                }
+                (i, to)
+            }
+            Step::Down(k, start, j) => {
+                let st = g.strips[k];
+                let from = (st.start + (j - 1 - st.start) / BLOCK * BLOCK).max(start);
+                if from > start {
+                    self.heap.push(Item { bound: self.down(g, k, from), step: Step::Down(k, start, from) });
+                }
+                (from, j)
+            }
+            _ => return,
+        };
+        for &i in &g.yperm[from..to] {
+            let e = &g.sorted[i as usize];
+            if g.ent_ok(&x, &y, e) {
+                self.heap.push(Item { bound: self.ent(g, e), step: Step::Row(e.row) });
+            }
+        }
+    }
+
     fn expand(&mut self, g: &Grid, step: Step) {
+        if matches!(step, Step::Strip(_) | Step::Up(..) | Step::Down(..)) {
+            return self.expand_strip(g, step);
+        }
         let (x, y) = (g.qx.span(&self.q.x), g.qy.span(&self.q.y));
         let (from, to) = match step {
             Step::Right(i, end) => {
@@ -171,7 +258,7 @@ impl GridNear {
                 }
                 (from, j)
             }
-            Step::Row(_) | Step::Tail(_) => return,
+            Step::Row(_) | Step::Tail(_) | Step::Strip(_) | Step::Up(..) | Step::Down(..) => return,
         };
         for e in &g.sorted[from..to] {
             if g.ent_ok(&x, &y, e) {
@@ -279,7 +366,7 @@ impl TrgmNear {
                         self.heap.push(Item { bound: 1.0, step: Step::Tail(to) });
                     }
                 }
-                Step::Right(..) | Step::Left(..) => {}
+                Step::Right(..) | Step::Left(..) | Step::Strip(_) | Step::Up(..) | Step::Down(..) => {}
             }
         }
         None
