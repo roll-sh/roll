@@ -3009,7 +3009,7 @@ pub fn indexes_emptied(t: &Table, ctx: &ExecCtx) {
 
 /// A GIN index's entries for one value (ginExtractEntries) under its operator class: None
 /// for one this model doesn't know.
-fn gin_keys(v: &Value, ty: &DataType, opclass: u32) -> Option<Vec<crate::catalog::ginsim::GinKey>> {
+pub(crate) fn gin_keys(v: &Value, ty: &DataType, opclass: u32) -> Option<Vec<crate::catalog::ginsim::GinKey>> {
     use crate::catalog::ginsim::GinKey;
     let text_key = |b: Vec<u8>| {
         let n = b.len();
@@ -3086,6 +3086,52 @@ fn gin_keys(v: &Value, ty: &DataType, opclass: u32) -> Option<Vec<crate::catalog
                 })
                 .collect()
         }
+        (Value::Jsonb(j), 10091) => {
+            // gin_extract_jsonb_path: per scalar, its path's keys and its value folded into a
+            // 32-bit hash (JsonbHashScalarValue), keyed as an int4. (A number's hash here
+            // isn't hash_numeric's: the keys' count and sizes are, their order among
+            // themselves may differ.)
+            use crate::catalog::hashidx::hash_bytes;
+            use crate::types::json::Jsonb as J;
+            fn fold(h: u32, j: &J) -> u32 {
+                let tmp = match j {
+                    J::Null => 0x01,
+                    J::Bool(b) => if *b { 0x02 } else { 0x04 },
+                    J::String(s) => hash_bytes(s.as_bytes()),
+                    J::Number(n) => hash_bytes(n.normalize().to_string().as_bytes()),
+                    _ => 0,
+                };
+                h.rotate_left(1) ^ tmp
+            }
+            fn walk(j: &J, h: u32, out: &mut Vec<u32>) {
+                match j {
+                    J::Object(pairs) => {
+                        for (k, v) in pairs {
+                            let kh = h.rotate_left(1) ^ hash_bytes(k.as_bytes());
+                            match v {
+                                J::Object(_) | J::Array(_) => walk(v, kh, out),
+                                v => out.push(fold(kh, v)),
+                            }
+                        }
+                    }
+                    J::Array(items) => {
+                        for v in items {
+                            match v {
+                                J::Object(_) | J::Array(_) => walk(v, h, out),
+                                v => out.push(fold(h, v)),
+                            }
+                        }
+                    }
+                    v => out.push(fold(h, v)),
+                }
+            }
+            let mut hashes = Vec::new();
+            walk(j, 0, &mut hashes);
+            hashes
+                .into_iter()
+                .map(|h| GinKey { category: 0, sort: ((h as i32 as u32) ^ (1 << 31)).to_be_bytes().to_vec(), datum: 4 })
+                .collect()
+        }
         (Value::Array(a), 0 | 10064) => {
             let mut out = Vec::new();
             let mut has_null = false;
@@ -3129,6 +3175,33 @@ fn gin_keys(v: &Value, ty: &DataType, opclass: u32) -> Option<Vec<crate::catalog
         keys.push(null(2));
     }
     Some(keys)
+}
+
+/// Whether `gin_keys` knows every value of type `ty` under operator class `opclass`.
+pub(crate) fn gin_keys_known(ty: &DataType, opclass: u32) -> bool {
+    match ty {
+        DataType::TsVector => true,
+        DataType::Jsonb => matches!(opclass, 0 | 10090 | 10091),
+        DataType::Array(e) => {
+            matches!(opclass, 0 | 10064)
+                && matches!(
+                    **e,
+                    DataType::Int2
+                        | DataType::Int4
+                        | DataType::Oid
+                        | DataType::Date
+                        | DataType::Float4
+                        | DataType::Int8
+                        | DataType::Float8
+                        | DataType::Timestamp(_)
+                        | DataType::Timestamptz(_)
+                        | DataType::Bool
+                        | DataType::Char
+                        | DataType::Text
+                )
+        }
+        _ => false,
+    }
 }
 
 /// A GIN index's pages: its build over the rows there when it was made, the rows written
@@ -3219,6 +3292,11 @@ fn gin_model(
     let fastupdate = option(&bix.index.options, "fastupdate")
         .is_none_or(|v| !matches!(v.to_ascii_lowercase().as_str(), "off" | "false" | "0"));
     let opclass = bix.index.columns.first().map_or(0, |c| c.opclass);
+    // (jsonb_path_ops' keys are only sized for a table too big to model, `am_measure`: their
+    // order among themselves isn't PostgreSQL's, which SSI's page locks would show.)
+    if opclass == 10091 {
+        return Ok(None);
+    }
     let ty = bix.keys[0].ty();
     let start = index_prefix(t.oid, 0);
     let end = prefix_end(&start);

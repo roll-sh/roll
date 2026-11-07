@@ -546,6 +546,10 @@ pub fn heap_pages(tuples: impl Iterator<Item = usize>) -> i32 {
     p.pages()
 }
 
+/// A heap page's room for tuples and line pointers, and MaxHeapTuplesPerPage.
+pub const HEAP_PAGE_ROOM: usize = BLCKSZ - PAGE_HEADER;
+pub const MAX_HEAP_TUPLES: usize = 291;
+
 /// `heap_pages` a tuple at a time (a load counting its pages as it goes).
 #[derive(Default)]
 pub struct HeapPacker {
@@ -557,7 +561,7 @@ pub struct HeapPacker {
 
 impl HeapPacker {
     pub fn push(&mut self, t: usize) {
-        const MAX_TUPLES: usize = 291;
+        const MAX_TUPLES: usize = MAX_HEAP_TUPLES;
         let heap_free = |p: (usize, usize)| {
             if p.1 >= MAX_TUPLES {
                 0
@@ -595,6 +599,12 @@ impl HeapPacker {
 
     pub fn pages(&self) -> i32 {
         self.pages.len() as i32
+    }
+
+    /// The TID of the last tuple pushed: its page and line pointer.
+    pub fn last(&self) -> (u32, u16) {
+        let b = self.current.unwrap_or(0);
+        (b as u32, self.pages.get(b).map_or(0, |p| p.1) as u16)
     }
 }
 

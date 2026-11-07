@@ -402,6 +402,35 @@ fn index_build_measures_as_analyze() {
     });
 }
 
+/// BRIN and GIN builds of a table too big to model measure the index as their access method
+/// lays it out (`am_measure`): PostgreSQL 18.6's relpages for the same table, after the build
+/// and after a VACUUM (whose kept measure the next build reads).
+#[test]
+fn brin_gin_builds_measure_as_postgres() {
+    let dir = tempfile::tempdir().unwrap();
+    let eng = open(dir.path());
+    with_max_versions(400, || {
+        let mut s = eng.connect(1, "postgres", "postgres", "t").unwrap();
+        run(&mut s, "CREATE TABLE am (id int NOT NULL, ts timestamptz, t text, tags int[], doc tsvector, j jsonb);
+             INSERT INTO am SELECT g, timestamptz '2026-01-01' + g * interval '1 min', CASE WHEN g % 11 = 0 THEN NULL ELSE md5(g::text) END,
+               ARRAY[g % 50, g % 300, 1000 + g % 3], to_tsvector('simple', 'w' || (g % 700) || ' x' || (g % 9) || ' common'),
+               jsonb_build_object('u', g % 400, 'k', 'k' || (g % 5)) FROM generate_series(1, 4000) g");
+        let build = "CREATE INDEX am_b ON am USING brin (ts) WITH (pages_per_range = 1);
+             CREATE INDEX am_bt ON am USING brin (t, id) WITH (pages_per_range = 2);
+             CREATE INDEX am_g ON am USING gin (tags);
+             CREATE INDEX am_d ON am USING gin (doc);
+             CREATE INDEX am_j ON am USING gin (j);
+             CREATE INDEX am_jp ON am USING gin (j jsonb_path_ops)";
+        let stats = "SELECT string_agg(relname || ' ' || relpages, ', ' ORDER BY relname) FROM pg_class WHERE relname LIKE 'am%'";
+        let want = [r#"[Text("am 91, am_b 3, am_bt 3, am_d 11, am_g 8, am_j 10, am_jp 8")]"#];
+        run(&mut s, build);
+        assert_eq!(rows(&mut s, stats), want);
+        run(&mut s, "DROP INDEX am_b, am_bt, am_g, am_d, am_j, am_jp;\nVACUUM am");
+        run(&mut s, build);
+        assert_eq!(rows(&mut s, stats), want);
+    });
+}
+
 /// A DELETE's index entries go in together at its end (`Txn::defer_entry_delete`): within
 /// its transaction, index scans, index-only scans from the entries, unique keys inserted
 /// again and savepoints see what deleting them one at a time gives; so do DELETEs of rows
