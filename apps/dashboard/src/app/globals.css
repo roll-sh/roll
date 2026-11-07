@@ -789,7 +789,9 @@ body {
 /* The prompt bar floats over the canvas, not over a scrim: its fill covers what's behind it on its
    own. WebKit doesn't always blur a backdrop (headless WebKit never does, over the canvas's layers
    or not), and a 90% fill without the blur left the cards' text readable through it. */
-[data-prompt-bar] .palette-glass {
+[data-prompt-bar] .palette-glass,
+[data-zoom-bar],
+[data-minimap] {
   background: color-mix(in srgb, var(--popover) 97%, transparent);
 }
 

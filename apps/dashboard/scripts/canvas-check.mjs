@@ -261,6 +261,15 @@ async function runGroup(browser, g, ctxOpts) {
     },
     [ctxOpts.key, ctxOpts.tokens[g.owner.token] ?? ""],
   );
+  // Nothing this run does may change the owner's data: every other write to roll (opening a
+  // conversation sends `thread.visit`) is refused here and noted, never sent.
+  const blocked = [];
+  await ctx.route(/\/v1\//, (route) => {
+    const q = route.request();
+    if (["GET", "HEAD", "OPTIONS"].includes(q.method())) return route.continue();
+    blocked.push(`${q.method()} ${new URL(q.url()).pathname} ${/"type":"([^"]+)"/.exec(q.postData() ?? "")?.[1] ?? ""}`.trim());
+    return route.fulfill({ status: 409, contentType: "application/json", body: JSON.stringify({ error: "canvas-check: read-only" }) });
+  });
   // The canvas document (direction, order) stays in this page: never written to the owner's.
   let doc = null;
   let rev = 1;
@@ -285,9 +294,11 @@ async function runGroup(browser, g, ctxOpts) {
   await page.clock.setFixedTime(new Date("2026-11-07T12:00:00Z"));
   const errors = [];
   page.on("pageerror", (e) => errors.push(e.message.slice(0, 200)));
-  // Nothing this run does may change the owner's data: any write that reaches roll is reported.
-  page.on("request", (q) => {
-    if (q.method() !== "GET" && q.method() !== "OPTIONS" && /\/v1\//.test(q.url()) && !/\/agents\/[^/]+\/canvas(\?|$)/.test(q.url())) errors.push(`wrote to roll: ${q.method()} ${new URL(q.url()).pathname}`);
+  // A write that got past the block above (it would have reached roll) is an error.
+  page.on("response", (res) => {
+    const q = res.request();
+    if (["GET", "HEAD", "OPTIONS"].includes(q.method()) || !/\/v1\//.test(q.url()) || /\/agents\/[^/]+\/canvas(\?|$)/.test(q.url())) return;
+    if (res.status() !== 409) errors.push(`wrote to roll: ${q.method()} ${new URL(q.url()).pathname} (${res.status()})`);
   });
   try {
     await page.goto(`${ctxOpts.base}/dashboard/agents${g.owner.url}`, { waitUntil: "domcontentloaded", timeout: 120000 });
@@ -426,7 +437,9 @@ async function runGroup(browser, g, ctxOpts) {
       } catch (e) {
         r.fails.push(`! ${e.message.split("\n")[0]}`);
       }
+      for (const e of errors) if (e.startsWith("wrote to roll")) r.fails.push(`! ${e}`);
       if (errors.length) r.notes.push(`page errors: ${errors.splice(0).join(" | ")}`);
+      if (blocked.length) r.notes.push(`writes refused (never sent): ${blocked.splice(0).join(" | ")}`);
       results.push(r);
       process.stderr.write(`${r.fails.length ? "✗" : "✓"} ${ctxOpts.engine} ${name} ${r.fails.length ? `(${r.fails.length})` : ""}\n`);
     }
