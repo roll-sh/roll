@@ -4041,6 +4041,7 @@ fn to_bitmap(rel: &Rel, b: &BPath) -> BitmapQual {
 /// Record path `p` in the scan.
 fn apply(rel: &Rel, s: &mut ScanPlan, p: &Path) {
     s.params = crate::sql::plan::ScanParams(rel.params.clone());
+    s.est = crate::sql::plan::ScanEst(Some((p.startup, p.total)));
     match &p.kind {
         PathKind::Seq => {
             s.index = None;
@@ -6131,6 +6132,11 @@ impl Planner<'_, '_> {
         {
             s.access = Access::Seq;
             s.index = None;
+            // (cost_seqscan, as `paths` costs it.)
+            let total = rel.qual_startup
+                + self.g.seq_page_cost * rel.size.pages
+                + (seq_cpu_tuple_cost(&self.cat, &rel.table) + rel.qual_cost) * rel.size.tuples;
+            s.est = crate::sql::plan::ScanEst(Some((rel.qual_startup, total)));
             return false;
         }
         let path = self.choose(&rel, want, width);
@@ -6542,6 +6548,72 @@ pub fn plan_query(ctx: &ExecCtx, plan: &mut Plan) -> usize {
 pub fn plan_query_limited(ctx: &ExecCtx, plan: &mut Plan, lim: Option<(f64, f64)>) -> usize {
     let w = crate::sql::binder::plan_width(plan);
     plan_level(ctx, plan, &vec![true; w], lim)
+}
+
+/// The total cost of a lone scan under column-only projections, where EXPLAIN places no
+/// Gather. Other shapes keep the full EXPLAIN costing path. `built`: the plan was just
+/// planned (a custom plan, costed as it is made: GetCachedPlan's cached_plan_cost), so the
+/// cost of the path the planner chose (`ScanPlan::est`) is it; otherwise it is read when a
+/// prepared plan choice first needs it, under that call's settings and estimates.
+pub fn planned_total(plan: &Plan, ctx: &ExecCtx, built: bool) -> Option<f64> {
+    let mut p = plan;
+    while let Plan::Project { input, exprs } = p {
+        if !exprs.iter().all(|e| matches!(e, Expr::Col(..))) {
+            return None;
+        }
+        p = input;
+    }
+    let Plan::Scan(s) = p else {
+        return None;
+    };
+    if !matches!(s.access, Access::Seq | Access::Index { .. })
+        || s.table.is_foreign()
+        || s.sample.is_some()
+        || s.mark.is_some()
+        || s.current_of.is_some()
+        || s.limit.is_some()
+        || s.fdw.is_some()
+        || s.part.is_some()
+        || s.part_excl.is_some()
+        || !s.phv_quals.is_empty()
+    {
+        return None;
+    }
+    let mut sub = false;
+    let mut look = |e: &Expr| e.walk(&mut |x| sub |= matches!(x, Expr::Subquery(_)));
+    s.filter.iter().for_each(&mut look);
+    if let Access::Index { quals, .. } = &s.access {
+        quals.iter().for_each(|q| look(&q.expr));
+    }
+    if let Some((_, b)) = &s.index {
+        b.eq.iter().chain(&b.any).chain(b.lower.as_ref().map(|l| &l.0)).chain(b.upper.as_ref().map(|u| &u.0)).for_each(&mut look);
+    }
+    if sub {
+        return None;
+    }
+    let total = match s.est.0 {
+        Some((_, t)) if built => t,
+        _ => describe(ctx, s)?.total,
+    };
+    let cfg = parallel::ParCfg::read(ctx);
+    if cfg.max_workers > 0 && (parallel::debug_parallel_query(ctx) || total * 1.02 >= cfg.setup_cost) {
+        return None;
+    }
+    Some(total)
+}
+
+/// Debug builds: the cost of the path the planner chose for a lone scan (`planned_total`
+/// of a plan just made) is the one EXPLAIN shows, and no Gather goes over it.
+#[cfg(debug_assertions)]
+pub fn check_planned_total(plan: &Arc<Plan>, ctx: &ExecCtx) {
+    if let Some(t) = planned_total(plan, ctx, true) {
+        let (e, g) = crate::sql::explain::total_and_gathers(plan, ctx);
+        assert!(
+            g.is_empty() && (e - t).abs() <= 1e-9 * e.abs().max(1.0),
+            "the planner's cost {t} of a lone scan isn't EXPLAIN's {e} ({} Gathers): {plan:?}",
+            g.len()
+        );
+    }
 }
 
 /// A locked relation of the level on the nullable side of an outer join, as planning

@@ -1945,7 +1945,20 @@ impl Session {
             let total = match bq.cost.get() {
                 Some((p, t)) if Arc::ptr_eq(p, &bq.plan) => *t,
                 _ => {
-                    let (t, found) = crate::sql::explain::total_and_gathers(&bq.plan, ctx);
+                    // (A lone scan's cost is its access path's, with no Gather: no tree.)
+                    let (t, found) = match crate::sql::paths::planned_total(&bq.plan, ctx, planning) {
+                        Some(t) => {
+                            // (Debug builds: it is EXPLAIN's, when read now; the planner's
+                            // own is checked as the plan is made, `paths::check_planned_total`.)
+                            #[cfg(debug_assertions)]
+                            if !planning {
+                                let (e, g) = crate::sql::explain::total_and_gathers(&bq.plan, ctx);
+                                assert!(g.is_empty() && e == t, "a lone scan's cost {t} isn't EXPLAIN's {e} ({g:?})");
+                            }
+                            (t, Vec::new())
+                        }
+                        None => crate::sql::explain::total_and_gathers(&bq.plan, ctx),
+                    };
                     let gathers = crate::exec::parallel_part::of_explain(&bq.plan, found);
                     let _ = bq.gathers.set((bq.plan.clone(), gathers.into()));
                     let _ = bq.cost.set((bq.plan.clone(), t));

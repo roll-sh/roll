@@ -308,3 +308,22 @@ fn custom_plans_from_the_analysis() {
     let e = s.query("SELECT sum(v) FROM t WHERE id BETWEEN 1 AND 2147483600 + 99").unwrap_err();
     assert!(e.message.contains("integer out of range"), "{}", e.message);
 }
+
+
+#[test]
+fn generic_cost_uses_choice_context_after_parse() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = engine_session(open_store(dir.path()), "choice_context");
+    s.query("CREATE TABLE t (a int, b text); INSERT INTO t SELECT g, g::text FROM generate_series(1,100) g; ANALYZE t").unwrap();
+    s.query("SET seq_page_cost = 500").unwrap();
+    s.parse_message("choice_context", "SELECT b FROM t WHERE a = $1", &[]).unwrap();
+    s.sync().unwrap();
+    s.query("RESET seq_page_cost").unwrap();
+    for _ in 0..6 {
+        assert_eq!(ext(&mut s, "choice_context", "SELECT b FROM t WHERE a = $1", &[Some("1")]).unwrap(), format!("{:?}", Value::Text("1".into())));
+    }
+    let counts = s.query("SELECT generic_plans, custom_plans FROM pg_prepared_statements WHERE name = 'choice_context'").unwrap();
+    let row = &counts.last().unwrap().rows[0];
+    println!("Parse seq_page_cost=500; six Binds after RESET: {row:?}");
+    assert_eq!((row[0].clone(), row[1].clone()), (Value::Int8(1), Value::Int8(5)));
+}

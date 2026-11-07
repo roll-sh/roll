@@ -154,6 +154,62 @@ The current checked measurements compare release engine builds and PostgreSQL 18
 the wire. Older rounds below are historical records, with their original methods and
 limits. Their results have not been reverified on the current source.
 
+## Planner, round 10 (2026-11-07, agent 171)
+
+HANDOFF.md, "Planner round 10", has what changed. Both servers ran in containers (`run.sh
+ENGINE_DOCKER=1`, the engine's dist build bind-mounted, `--cpu-shares 2`, host network) on
+cores 28-31, the clients on 32-35, PostgreSQL 18.6 the pinned image. Base is `fe7b0023c`
+(origin's head at the start, code `63f7c0b4`), head this round's commit, both dist builds of
+the same targets (`--bin roll-engine --example bench`). The machine was shared (load 6-45
+from other agents' builds and tests), so single runs move a lot; rounds alternate base,
+head, PostgreSQL. Head was `11fa4797` (the cost handover, BETWEEN, the one-row built-ins and
+COLLATE keys) for the range read, pgbench, the footprint gate and TPC-H, and `342cb7dc` (with
+prorows and the semi join) for `\d`; the later commits change only Function Scan costs and
+EXPLAIN text.
+
+**The 8-client range read** (`bench oltp --only range_scan_100`, 200,000 accounts, `id
+BETWEEN $1 AND $1 + 99 ORDER BY id`, named prepared statements, custom plans every
+execution), five 10-second rounds, server CPU from each container's cgroup:
+
+| | base | head | PostgreSQL |
+|---|---:|---:|---:|
+| CPU per operation, median (range) | 389 us (283-456) | **238 us** (226-292) | 125 us (117-128) |
+| throughput, median | 6,811 tps | **13,603 tps** | 25,184 tps |
+
+Point reads (generic plans after five executions) didn't move: 58.7 / 54.7 us per operation
+(base / head medians), PostgreSQL 49.1. An earlier three-round run without cgroup CPU had the
+same order (base 8,302-11,785 tps, head 11,981-15,746).
+
+**pgbench** (scoreboard quick, `SB_ONLY=pgbench`, engine / PostgreSQL CPU per transaction,
+base then head, run after one another): select-only 1 client 0.75x / 0.90x, 8 clients
+0.89x / 0.86x, 32 clients 0.88x / 0.86x; TPC-B-like 1 client 0.72x / 0.72x, 8 clients
+0.83x / 0.94x, 32 clients 1.25x / 1.26x. Prepared pgbench statements take generic plans, so
+the change barely runs there; the cells move within the runs' spread.
+
+**Footprint gate** (scoreboard, head): idle CPU over 5 minutes 0.025 s (PostgreSQL 0.7),
+100 idle sessions 31.7 MB (211), fresh data directory 3.03 MB (38.9): pass.
+
+**TPC-H SF1**: all 22 result hashes equal PostgreSQL's. plancmp is 78 / 89 at the defaults and
+82 / 89 serial for both base and head, query by query the same.
+
+**psql `\d` and pgjdbc's getColumns at 10,000 tables** (agent 166's item; 10,000 tables of four
+columns with keys, the statements psql 18's `\d a171_t5` sends, as a pgbench script over the
+simple protocol, server CPU per run of the 12 statements):
+
+| | base | head | PostgreSQL |
+|---|---:|---:|---:|
+| `\d` (12 statements) | 92.0 ms | **76.7 ms** | 9.7-11.0 ms |
+| getColumns | 23.1 ms | 20.6 ms | 9.4-10.4 ms |
+
+(One run each, head then base on the same data; a first base run measured 97.1 / 32.0.) Per
+statement, the "Referenced by" query went from 21.3 ms to **1.7 ms** (PostgreSQL 6.2): it is
+PostgreSQL's Nested Loop Semi Join now, where base ran a hashed SubPlan. The name lookup
+(`relname OPERATOR(pg_catalog.~) '^(a171_t5)$' AND pg_table_is_visible(oid)`) is 79-90 ms
+against 0.67; the other ten are 0.8-5.6 ms against 0.6-1.5. The lookup's plan is PostgreSQL's, but the
+catalog scan generates all of pg_class (20,001 rows) and filters (EXPLAIN ANALYZE: 11 ms for
+`relname = 'a171_t5'`, 42 ms with the regex; PostgreSQL 0.03 ms), and EXPLAIN costs it at
+1,727 against 8.46: HANDOFF's "Left".
+
 ## Planner, round 9 (2026-11-03, agent 155)
 
 HANDOFF.md, "Planner round 9", has what changed. Setup:

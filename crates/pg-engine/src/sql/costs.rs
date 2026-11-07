@@ -2090,6 +2090,50 @@ pub fn material_cost(startup: f64, total: f64, rows: f64, width: u32) -> (f64, f
     (startup, startup + run)
 }
 
+/// A built-in function's proretset, prorows and procost, as pg_proc has them (None: not one
+/// of PostgreSQL's).
+fn builtin_proc(oid: u32) -> Option<(bool, f64, f64)> {
+    static PROCS: std::sync::OnceLock<std::collections::HashMap<u32, (bool, f64, f64)>> = std::sync::OnceLock::new();
+    PROCS
+        .get_or_init(|| {
+            crate::catalog::system::builtin_proc_sigs()
+                .iter()
+                .map(|s| (s.oid, (s.retset, s.rows as f64, s.cost as f64)))
+                .collect()
+        })
+        .get(&oid)
+        .copied()
+}
+
+fn builtin_rows(oid: u32) -> Option<(bool, f64)> {
+    builtin_proc(oid).map(|(set, rows, _)| (set, rows))
+}
+
+/// What calling `def` once costs (its procost: a built-in's as pg_proc has it, else one
+/// cpu_operator_cost): a Function Scan's call (cost_functionscan).
+pub fn call_cost(def: &crate::sql::func::FuncDef) -> f64 {
+    builtin_proc(def.oid).map_or(1.0, |(_, _, cost)| cost) * CPU_OPERATOR_COST
+}
+
+/// Whether function `def` returns a set as pg_proc has it (proretset): a built-in returning
+/// one composite row (`pg_create_logical_replication_slot`) runs as a set-returning one
+/// (`FuncDef::srf`) but is planned as giving one row.
+pub fn returns_set(def: &crate::sql::func::FuncDef) -> bool {
+    def.srf.is_some() && builtin_rows(def.oid).is_none_or(|(set, _)| set)
+}
+
+/// The rows a call of `def` in FROM gives (`function_rows`): a built-in's own estimate where
+/// its support function has one, else its prorows; one for a function returning no set.
+pub fn call_rows(def: &crate::sql::func::FuncDef, args: &[Expr]) -> f64 {
+    if !returns_set(def) {
+        return function_rows(def.name, args, false);
+    }
+    match builtin_rows(def.oid) {
+        Some((_, rows)) if rows > 0.0 && !matches!(def.name, "generate_series" | "unnest") => rows,
+        _ => function_rows(def.name, args, true),
+    }
+}
+
 /// The rows a set-returning function in FROM gives: generate_series and unnest over
 /// constants say exactly (their support functions), others their prorows.
 pub fn function_rows(name: &str, args: &[Expr], srf: bool) -> f64 {

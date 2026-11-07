@@ -4520,6 +4520,46 @@ fn sort_suffix(k: &SortKey) -> String {
     s
 }
 
+/// `sort_suffix`'s direction and nulls order alone, for a key sorted by the type's own `<` /
+/// `>` (None: by another operator).
+fn direction_suffix(k: &SortKey) -> Option<String> {
+    if k.using.as_ref().is_some_and(|op| !matches!(op.name, "<" | ">")) {
+        return None;
+    }
+    let mut s = String::new();
+    if k.desc {
+        s.push_str(" DESC");
+    }
+    if k.nulls_first && !k.desc {
+        s.push_str(" NULLS FIRST");
+    } else if !k.nulls_first && k.desc {
+        s.push_str(" NULLS LAST");
+    }
+    Some(s)
+}
+
+/// The collation an expression over `input`'s columns derives (None: the default).
+fn derived_collation(input: &Plan, e: &Expr) -> Option<String> {
+    match e {
+        Expr::Collate(_, n, _) => Some(n.clone()),
+        Expr::Col(j, _) => crate::sql::binder::optimize::output_collation(input, *j),
+        Expr::Relabel(x, _) => derived_collation(input, x),
+        _ => {
+            let mut found = None;
+            e.walk(&mut |x| {
+                if found.is_none() {
+                    found = match x {
+                        Expr::Collate(_, n, _) => Some(n.clone()),
+                        Expr::Col(j, _) if x.ty().collatable() => crate::sql::binder::optimize::output_collation(input, *j),
+                        _ => None,
+                    };
+                }
+            });
+            found
+        }
+    }
+}
+
 fn win_name(k: WinKind) -> &'static str {
     match k {
         WinKind::RowNumber => "row_number",
@@ -4602,6 +4642,35 @@ impl Builder<'_, '_> {
             Cx::Upper => self.prefix || self.o.verbose,
             Cx::Output => self.prefix,
         }
+    }
+
+    /// A sort key under a written COLLATE, `pe[i]` (`inner COLLATE ...`) of the level's target
+    /// list `pe` over `input` (named `names`), as PostgreSQL shows it: eval_const_expressions
+    /// makes the CollateExpr a RelabelType (none when the collation is the expression's own),
+    /// and prepare_sort_from_pathkeys sorts by the first target list entry that is the key's
+    /// expression, relabelings stripped (find_ec_member_matching_expr). A column there shows
+    /// as itself, a relabeling as a cast (`((u)::text)`).
+    fn collated_key(&self, pe: &[Expr], input: &Plan, i: usize, inner: &Expr, names: &[Name]) -> Option<String> {
+        let base = strip_relabel(inner);
+        let j = pe.iter().position(|e| strip_relabel(e).same_as(base)).unwrap_or(i);
+        let name = self.pick(names.get(j)?, Cx::Upper);
+        let (x, relabel) = match &pe[j] {
+            Expr::Collate(x, coll, loc) if *loc >= 0 => {
+                let own = derived_collation(input, x)
+                    .unwrap_or_else(|| if x.ty() == DataType::Name { "C".into() } else { "default".into() });
+                (&**x, own != *coll)
+            }
+            e => (e, false),
+        };
+        // (A reference to the Sort input's computed entry is parenthesized; a coercion's
+        // argument too, get_coercion_expr.)
+        Some(if relabel {
+            format!("(({name})::{})", x.ty().typname())
+        } else if matches!(strip_relabel(x), Expr::Col(..)) {
+            name
+        } else {
+            format!("({name})")
+        })
     }
 
     fn pick(&self, n: &Name, cx: Cx) -> String {
@@ -6244,11 +6313,11 @@ impl Builder<'_, '_> {
                 // rte->functions: a LATERAL call's `t.x::integer % 10` too.)
                 n.rows = calls
                     .iter()
-                    .map(|c| costs::function_rows(c.func.name, &c.args, c.func.srf.is_some()))
+                    .map(|c| costs::call_rows(&c.func, &c.args))
                     .fold(1.0, f64::max);
                 n.startup_cost = calls
                     .iter()
-                    .map(|c| costs::CPU_OPERATOR_COST + c.args.iter().map(costs::qual_cost).sum::<f64>())
+                    .map(|c| costs::call_cost(&c.func) + c.args.iter().map(costs::qual_cost).sum::<f64>())
                     .sum();
                 n.total_cost = n.startup_cost + n.rows * costs::CPU_TUPLE_COST;
                 n.width = calls.iter().map(|c| type_width(&c.ty)).sum();
@@ -6263,6 +6332,13 @@ impl Builder<'_, '_> {
                         .filter(|(_, x)| **x)
                         .map(|(c, _)| type_width(&c.ty))
                         .sum();
+                } else if let [c] = &calls[..]
+                    && c.func.out_cols.len() == cols.len()
+                    && let Some(m) = self.needed.get(&key)
+                    && m.len() == cols.len()
+                {
+                    // (A call returning a row: the columns of it used above.)
+                    n.width = c.func.out_cols.iter().zip(m).filter(|(_, x)| **x).map(|((_, t), _)| type_width(t)).sum();
                 }
                 // (A worker can run it when its calls are parallel safe:
                 // set_rel_consider_parallel.)
@@ -7058,7 +7134,7 @@ impl Builder<'_, '_> {
                     .iter()
                     .map(|s| match user(s) {
                         Some(f) => f.prorows() as f64,
-                        None => costs::function_rows(s.func.name, &s.args, s.func.srf.is_some()),
+                        None => costs::call_rows(&s.func, &s.args),
                     })
                     .fold(1.0f64, f64::max);
                 // (Each call's own cost, its arguments' and a CREATE FUNCTION function's
@@ -7426,16 +7502,22 @@ impl Builder<'_, '_> {
                         if let Some(cst) = constant {
                             return self.show(&cst, &[], Cx::Upper) + &sort_suffix(k);
                         }
-                        // (A key under an explicit COLLATE: the sort's collation, not a value
+                        // (A key under a written COLLATE: the sort's collation, not a value
                         // computed below it.)
-                        if let (Expr::Col(i, _), Plan::Project { exprs: pe, .. }) = (&k.expr, &**input)
+                        if let (Expr::Col(i, _), Plan::Project { exprs: pe, input: pin }) = (&k.expr, &**input)
                             && let Some(Expr::Collate(inner, coll, loc)) = pe.get(*i)
                             && *loc >= 0
-                            && matches!(&**inner, Expr::Col(..))
-                            && k.using.is_none()
-                            && let Some(name) = c.internal.get(*i)
+                            && let Some(dirs) = direction_suffix(k)
+                            && let Some(t) = self.collated_key(pe, pin, *i, inner, &c.internal)
                         {
-                            return format!("{} COLLATE {}", self.pick(name, Cx::Upper), quote_ident(coll)) + &sort_suffix(k);
+                            // (show_sortorder_options: a collation other than the type's
+                            // default.)
+                            let shown = match inner.ty() {
+                                DataType::Name => coll != "C",
+                                _ => coll != "default",
+                            };
+                            let coll = if shown { format!(" COLLATE {}", quote_ident(coll)) } else { String::new() };
+                            return t + &coll + &dirs;
                         }
                         // (A member's sort over a scan computing a UNION ALL arm's values:
                         // the scan computes the key too, over its own columns.)

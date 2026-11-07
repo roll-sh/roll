@@ -7872,6 +7872,99 @@ width_bucket('NaN') folding, the domain relabel, and hash vs btree on char(n).
 - Agent 157 (postgres_fdw) will send foreign-join choices from postgres_fdw units 266, 268,
   272 and 275.
 
+## Planner round 10 (agent 171)
+
+BENCH.md "Planner, round 10" has the measurements. What changed:
+
+- **A custom plan of a lone scan is costed by its access path** (item 1; agreed with agent
+  165 through the coordinator: the planner hands over the cost, `Session::plan_cost` reads
+  it; 165 doesn't touch `plan_cost` or `BoundQuery::cost` this round).
+  - `ScanPlan::est` (`ScanEst`, not part of the Debug text): the (startup, total) of the path
+    `paths::apply` chose, and of the sequential scan when a scan has no other path.
+  - `paths::planned_total(plan, ctx, built)`: a lone scan of a table under projections of its
+    columns (no sub-select in its expressions; not foreign, sampled, marked, CURRENT OF,
+    limited or partitioned) over which EXPLAIN places no Gather (no workers, or its total
+    with add_path's fuzz below parallel_setup_cost, and not debug_parallel_query). `built`
+    (a custom plan, costed as GetCachedPlan costs it, when it is made): the planner's own
+    cost. Otherwise `describe`'s, read when the plan choice first needs it.
+  - `Session::plan_cost` takes it before `explain::total_and_gathers` and records no Gathers
+    for such a plan, so neither the custom plan's costing nor its execution builds an
+    EXPLAIN tree.
+  - The resumed session of 2026-11-04 found why the first version (eager: the cost and an
+    empty Gather list filled in `Analyzed::plan`) was wrong: a generic plan made at Parse
+    was costed under Parse's settings (generic / custom 0 / 6 where PostgreSQL has 1 / 5
+    after a `RESET seq_page_cost`), and a Gather list fixed at Parse launched no workers
+    after `SET max_parallel_workers_per_gather` / `RESET parallel_setup_cost`. PostgreSQL
+    builds and costs plans at execution. Tests: kept_plans
+    `generic_cost_uses_choice_context_after_parse`, parallel_scan
+    `parallel_workers_use_execution_context_after_parse`.
+  - Debug builds check the planner's cost against EXPLAIN's as each plan is made
+    (`paths::check_planned_total`, from `Analyzed::plan` / `into_bound`), and the lazily
+    read one in `plan_cost`. Every golden file passes them.
+  - The 8-client range read: 389 -> 238 us of server CPU per operation (medians of five
+    alternating rounds, both servers in containers; PostgreSQL 125).
+- **BETWEEN binds as transformAExprBetween does** (`binder/expr.rs`): `x >= lo`, then `hi`,
+  then `x <= hi`. An untyped `BETWEEN $1 AND $1 + $2` (42725 "operator is not unique"
+  before) types `$1` from its first use; an error comparing with the lower bound comes
+  before the upper bound's binding errors.
+- **Function scans' rows** (`costs::returns_set`, `costs::call_rows`, `ProcSig::rows`):
+  - a built-in whose implementation is set-returning but whose pg_proc row says it returns
+    one row (proretset false: `pg_create_logical_replication_slot` and the like) is planned
+    as one row. Three of them in one FROM now nest s1, s2, then s3, as PostgreSQL does, so
+    test_decoding's stats units create their slots a, b, c (BENCH "Replication, round 7");
+  - other built-ins use pg_proc's prorows, where every set-returning built-in had 1,000:
+    `pg_partition_ancestors` 10, `json_each` 100, `regexp_matches` 1, `pg_get_keywords` 500.
+    generate_series and unnest keep their support functions' estimates;
+  - a row-returning call's Function Scan is as wide as its columns used above (`width=0`
+    where it was 32).
+- **Sort keys under a written COLLATE** (difftest round 9's rule set; `Builder::collated_key`
+  in `explain.rs`): eval_const_expressions makes the CollateExpr a RelabelType unless the
+  collation is the expression's own, and the key is the first select-list entry that is
+  the key's expression with relabelings stripped (find_ec_member_matching_expr). A column
+  there shows as itself (`t COLLATE "en-x-icu"`, `a.t COLLATE ...`), a computed entry in
+  parentheses (`(lower(t)) COLLATE ...`), a relabeling as a cast (`((u)::text) COLLATE
+  ...`, `(((t || 'x'::text))::text) COLLATE "C"`). The COLLATE shows when it isn't the
+  type's default ("C" for name).
+- **An uncorrelated IN over a set-returning sub-select that isn't simple is a semi join**
+  (`sublink::plan_clean_with`): convert_ANY_sublink_to_join takes any uncorrelated
+  sub-select as a subquery of its own. psql `\d`'s "Referenced by" query (`confrelid IN
+  (SELECT pg_partition_ancestors(...) UNION ALL VALUES (...))`) was a hashed SubPlan checked
+  before `contype = 'f'`; it is PostgreSQL's Nested Loop Semi Join now, 21.3 -> 1.7 ms of
+  CPU at 10,000 tables (PostgreSQL 6.2). Its pg_constraint side is an Index Scan on
+  pg_constraint_conparentid_index where PostgreSQL seq-scans (the catalog stand-in's costs,
+  below).
+- Golden `a171_planner_r10` (recorded from PostgreSQL 18.6).
+
+Left, for the planner:
+- **psql `\d` at 10,000 tables** (agent 166's measurement, BENCH): its name lookup (`relname
+  ~ '^(t)$' AND pg_table_is_visible(oid)`) is 90 ms of CPU against PostgreSQL's 0.7. The
+  plan is PostgreSQL's (an Index Scan on pg_class_relname_nsp_index), but a catalog's scan
+  generates all of the catalog's rows and filters them (`syscat`: 11 ms for `relname =
+  'x'`, 42 ms with the regex filter), and EXPLAIN costs it at 1,727 where PostgreSQL has
+  8.46. Catalog keyed lookups (oid, relname) would take \d from 77 ms to near
+  PostgreSQL's 10-11. Routed to the catalog / scan owners.
+- One-shot plans still build an EXPLAIN tree for their Gathers (`parallel_part::gathers`,
+  when `may_gather`) and for an Incremental Sort's presorted keys. No cheap exact bound was
+  found for the Gathers: a Gather may go over a join whose partial outer side is a small
+  index scan. The planner keeping every node's chosen cost (joins' `JP` totals, upper
+  nodes) would give one.
+- `= ANY ($1::int[])` from a text parameter (difftest round 9, r9p): a custom plan folds the
+  I/O coercion (array_in is STABLE) where PostgreSQL keeps `('{...}'::cstring)::integer[]`,
+  costing it 12.6 against 21.18, so the generic plan never wins (0 / 6, PostgreSQL 1 / 5).
+  It is the `= ANY` rewrite in custom planning: agent 165's.
+- Seed 5069: `DELETE FROM t1 x USING (SELECT id, pg_size_bytes('bad') z FROM t0) u WHERE
+  x.id = u.id` (or over a view) fails on the unread `z` (22023); PostgreSQL pulls the
+  subquery up and marks its base relation (ROW_MARK_REFERENCE), so nothing evaluates `z`.
+  With `OFFSET 0` PostgreSQL fails (ROW_MARK_COPY reads the whole row) and the engine
+  doesn't. SELECT ... FOR UPDATE over the same shapes agrees with PostgreSQL; only DML.
+  Reproducers in this section's BENCH entry.
+- `SELECT DISTINCT t COLLATE "en-x-icu"`: Group Key `t` where PostgreSQL shows `(t)::text`.
+- Untouched this round: planning CPU (item 2), q21 / q18 (item 4), and the rest of item 3
+  (partitioned top-N, min / max InitPlans, ANY over partitions, element and expression
+  ndistinct estimates, FULL JOIN errors, `width_bucket('NaN')`, the domain relabel, hash vs
+  btree on char(n), LIMIT over a hashed grouping, autovacuum of catalogs, the catalog
+  bitmap scan's index condition).
+
 ## Starting prompt for the next agent
 
 Paste this into the new agent, from the repository root on branch

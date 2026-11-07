@@ -906,6 +906,13 @@ fn locked_clean(p: &Plan) -> bool {
 
 /// A plan of plain relational nodes reading nothing of an outer query.
 fn plan_clean(p: &Plan) -> bool {
+    plan_clean_with(p, false)
+}
+
+/// `plan_clean`; with `srf`, set-returning select lists too (a subquery of its own, which
+/// convert_ANY_sublink_to_join takes whatever its select list: `IN (SELECT srf() UNION ALL
+/// VALUES (...))`).
+fn plan_clean_with(p: &Plan, srf: bool) -> bool {
     if !matches!(
         p,
         Plan::Scan(_)
@@ -923,7 +930,8 @@ fn plan_clean(p: &Plan) -> bool {
             | Plan::Values { .. }
             | Plan::Empty { .. }
             | Plan::One
-    ) {
+    ) && !(srf && matches!(p, Plan::ProjectSet { .. }))
+    {
         return false;
     }
     let mut exprs = Vec::new();
@@ -931,13 +939,13 @@ fn plan_clean(p: &Plan) -> bool {
     let clean = exprs.iter().all(|e| {
         let mut ok = true;
         e.walk(&mut |x| {
-            if matches!(x, Expr::Outer(..) | Expr::Subquery(_) | Expr::Srf(..)) {
+            if matches!(x, Expr::Outer(..) | Expr::Subquery(_)) || (!srf && matches!(x, Expr::Srf(..))) {
                 ok = false
             }
         });
         ok
     });
-    clean && crate::sql::explain::plan_inputs(p).iter().all(|c| plan_clean(c))
+    clean && crate::sql::explain::plan_inputs(p).iter().all(|c| plan_clean_with(c, srf))
 }
 
 /// A VALUES list reading nothing of an outer query: its sub-selects (SubPlans of its
@@ -1684,7 +1692,7 @@ fn any_join(cat: &Catalog, plan: &Plan, sub: &Subquery, unplanned: &Unplanned) -
         // Any other uncorrelated subquery joins as it is: a VALUES list pulled up
         // (pull_up_simple_values), else a subquery of its own ("ANY_subquery").
         None if sub.params.is_empty()
-            && (plan_clean(p) || locked_clean(p) || values_clean(p))
+            && (plan_clean_with(p, true) || locked_clean(p) || values_clean(p))
             && !matches!(p, Plan::Empty { .. } | Plan::One) =>
         {
             let n = width(p);

@@ -7065,6 +7065,10 @@ pub struct ProcSig {
     pub ret: u32,
     pub strict: bool,
     pub retset: bool,
+    /// prorows: the rows a set-returning function is estimated to return.
+    pub rows: f32,
+    /// procost, in units of cpu_operator_cost.
+    pub cost: f32,
     pub volatility: char,
     pub nargdefaults: usize,
     /// OUT / TABLE columns: (name, type).
@@ -7108,6 +7112,8 @@ pub fn builtin_proc_sigs() -> &'static [ProcSig] {
                     ret: num(17),
                     strict: f[11] == "t",
                     retset: f[12] == "t",
+                    rows: f[5].parse().unwrap_or(0.0),
+                    cost: f[4].parse().unwrap_or(1.0),
                     volatility: f[13].chars().next().unwrap_or('v'),
                     nargdefaults: num(16) as usize,
                     out,
