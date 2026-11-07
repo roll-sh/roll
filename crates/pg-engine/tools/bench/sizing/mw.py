@@ -12,7 +12,8 @@ and an UPDATE of every 97th row with their ctids, the report again. Run it again
 
 HELPER is a container of the pinned PostgreSQL image on the host network (`--entrypoint sleep
 <image> infinity`) whose psql reaches both. STATS=1 adds pgstatindex and reltuples to the
-report (the reference needs pgstattuple). The engine's log goes to DIR.log.
+report (the reference needs pgstattuple). The engine's log goes to DIR.log. ENGINE_ARGS adds
+engine arguments, e.g. "-c autovacuum=off" for a reference started with it.
 """
 import argparse, atexit, hashlib, os, shutil, signal, subprocess, sys, time
 
@@ -58,7 +59,8 @@ def start_engine(fresh):
         shutil.rmtree(a.data, ignore_errors=True)
     log = open(a.data + ".log", "a")
     eng = subprocess.Popen(["nice", "-n", "19", a.bin, "--data", a.data, "--listen", f"127.0.0.1:{a.port}",
-                            "--password", "pw", "--idle-close-secs", "600"], stdout=log, stderr=log)
+                            "--password", "pw", "--idle-close-secs", "600"] + os.environ.get("ENGINE_ARGS", "").split(),
+                           stdout=log, stderr=log)
     wait_up()
 
 

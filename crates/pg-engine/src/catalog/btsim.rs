@@ -524,8 +524,12 @@ pub struct BtPageStats {
     pub fragments: u64,
     /// Pages VACUUM deleted (`delete_empty_pages`).
     pub deleted: u64,
+    /// pgstattuple's: the leaves' live and LP_DEAD items and their tuples' bytes, and the
+    /// free bytes of the leaves and deleted pages.
     pub items: u64,
     pub item_bytes: u64,
+    pub dead_items: u64,
+    pub dead_bytes: u64,
     pub free: u64,
 }
 
@@ -641,8 +645,8 @@ impl Btree {
 
     /// pgstatindex's walk over the pages after the metapage: (root block, internal pages,
     /// leaf pages, half-dead pages, leaf free bytes (PageGetExactFreeSpace), leaf
-    /// fragments: leaves whose right sibling comes before them) and pgstattuple's over all
-    /// of them: (items, their bytes, free bytes).
+    /// fragments: leaves whose right sibling comes before them) and pgstattuple's over the
+    /// leaves and deleted pages: (items, their bytes, dead items, their bytes, free bytes).
     pub fn page_stats(&self) -> BtPageStats {
         let mut s = BtPageStats { root: self.root.unwrap_or(0), ..Default::default() };
         for (b, p) in self.pages.iter().enumerate().skip(1) {
@@ -652,10 +656,22 @@ impl Btree {
                 s.free += BLCKSZ as u64;
                 continue;
             };
+            // (pgstattuple's pgstat_btree_page reads leaf pages only: their exact free space
+            // and data items, the high key not among them, LP_DEAD ones counted dead, each by
+            // its tuple's length.)
             let free = p.free() + ITEM_ID;
-            s.free += free as u64;
-            s.items += p.nitems() as u64;
-            s.item_bytes += (p.used + ITEM_ID * p.nitems()) as u64;
+            if p.leaf {
+                s.free += free as u64;
+                for it in p.items.iter() {
+                    if it.dead {
+                        s.dead_items += 1;
+                        s.dead_bytes += it.size() as u64;
+                    } else {
+                        s.items += 1;
+                        s.item_bytes += it.size() as u64;
+                    }
+                }
+            }
             // (A leaf without items is a leaf page to pgstatindex too: its empty_pages are the
             // half-dead pages, P_IGNORE and not deleted, which a VACUUM of the model never
             // leaves, deleting a page in one step.)
@@ -821,6 +837,7 @@ impl Btree {
             let p = self.pages[blk as usize].as_ref().expect("btree page");
             pos = Self::insert_pos(&p.items, &new.key, tid, nkey);
         }
+        let (new, pos) = self.posting_split(blk, new, tid, pos, hint);
         let p = self.pages[blk as usize].as_ref().expect("btree page");
         if p.free() >= itemsz {
             let p = self.page(blk);
@@ -877,6 +894,35 @@ impl Btree {
         (after_first && below_high).then_some(self.last_leaf)
     }
 
+    /// _bt_binsrch_posting and _bt_swap_posting: a heap TID inside the TID range of an equal
+    /// key's posting list (the item before `pos`, which orders items by their first TIDs) goes
+    /// into it, and the list's last TID goes in as the new item, right after it: the list keeps
+    /// its size, and the page gets one item more. A posting list marked LP_DEAD goes first
+    /// (simple deletion: a split would clear its mark), and the new item goes where it falls.
+    fn posting_split(&mut self, blk: u32, new: Item, tid: Tid, pos: usize, hint: &InsertHint) -> (Item, usize) {
+        let nkey = self.opts.nkey;
+        let p = self.pages[blk as usize].as_ref().expect("btree page");
+        let Some(at) = pos.checked_sub(1) else { return (new, pos) };
+        let it = p.items.get(at);
+        if it.tids.len() < 2 || !(it.tids.first() < tid && tid < it.tids.last()) || it.key.cmp_keys(&new.key, nkey) != Ordering::Equal {
+            return (new, pos);
+        }
+        if it.dead {
+            self.simple_delete(blk, hint);
+            let p = self.pages[blk as usize].as_ref().expect("btree page");
+            let pos = Self::insert_pos(&p.items, &new.key, tid, nkey);
+            return (new, pos);
+        }
+        let mut items = self.page(blk).items.take();
+        let mut tids = items[at].tids.to_vec();
+        let last = tids.pop().expect("a posting list");
+        let i = tids.partition_point(|&t| t < tid);
+        tids.insert(i, tid);
+        items[at] = Item::posting(items[at].key.clone(), tids);
+        self.page(blk).items.put(&items);
+        (Item::plain(new.key, last), pos)
+    }
+
     /// Where (`key`, `tid`) goes among a leaf's items: by the key attributes' encodings
     /// (self-delimiting: they compare as the attributes do), then heap TID.
     fn insert_pos(items: &Leaf, key: &Key, tid: Tid, nkey: usize) -> usize {
@@ -929,6 +975,27 @@ impl Btree {
         // Simple deletion of the LP_DEAD items first (_bt_simpledel_pass), and of the
         // entries pointing into the same heap blocks that are dead too.
         let mut uniquedup = uniquedup;
+        if self.simple_delete(blk, hint) {
+            if self.pages[blk as usize].as_ref().expect("btree page").free() >= itemsz {
+                return;
+            }
+            uniquedup = true;
+        }
+        if checking && !uniquedup {
+            return;
+        }
+        let bottomup = hint.unchanged || uniquedup;
+        if bottomup && self.bottomup_pass(blk, itemsz + ITEM_ID, hint.dead) {
+            return;
+        }
+        if self.opts.dedup {
+            self.dedup_pass(blk, key, itemsz, bottomup);
+        }
+    }
+
+    /// _bt_simpledel_pass: the LP_DEAD items go, and the entries pointing into the same heap
+    /// blocks that are dead too. False when the leaf has no LP_DEAD item.
+    fn simple_delete(&mut self, blk: u32, hint: &InsertHint) -> bool {
         let p = self.page(blk);
         if p.items.iter().any(|it| it.dead) {
             let blocks: std::collections::HashSet<u32> = p
@@ -955,21 +1022,9 @@ impl Btree {
             }
             p.items.put(&kept);
             p.used = kept.iter().map(|i| i.size()).sum();
-            if p.free() >= itemsz {
-                return;
-            }
-            uniquedup = true;
+            return true;
         }
-        if checking && !uniquedup {
-            return;
-        }
-        let bottomup = hint.unchanged || uniquedup;
-        if bottomup && self.bottomup_pass(blk, itemsz + ITEM_ID, hint.dead) {
-            return;
-        }
-        if self.opts.dedup {
-            self.dedup_pass(blk, key, itemsz, bottomup);
-        }
+        false
     }
 
     /// _bt_bottomupdel_pass, with heap_index_delete_tuples' bottom-up choice of heap blocks
