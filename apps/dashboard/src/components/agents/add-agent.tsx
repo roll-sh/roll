@@ -159,8 +159,9 @@ function AgentRow({ agent, installing, busy, error, onInstall }: { agent: Regist
           {agent.description && <p className="truncate text-[12px] text-subtle">{agent.description}</p>}
         </div>
         {about && (
-          <a href={about} target="_blank" rel="noreferrer" aria-label={`About ${agent.name}`} title={`About ${agent.name}`} className="grid size-7 shrink-0 place-items-center rounded-md text-subtle hover:bg-fg/[0.06] hover:text-fg">
-            <ExternalLink className="size-3.5" />
+          <a href={about} target="_blank" rel="noreferrer" aria-label={`About ${agent.name}`} title={`About ${agent.name}`} className="flex h-7 shrink-0 items-center gap-1 rounded-md px-1.5 text-[11.5px] text-subtle hover:bg-fg/[0.06] hover:text-fg">
+            About
+            <ExternalLink aria-hidden className="size-3" />
           </a>
         )}
         <button

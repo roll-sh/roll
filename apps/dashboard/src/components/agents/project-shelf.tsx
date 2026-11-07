@@ -10,7 +10,7 @@
  * and its archive in settings (`ArchivedThreadsPanel.tsx`); the canvas keeps them off its cards.
  */
 
-import { AlarmClock, AlarmClockOff, Archive, ArchiveRestore, Check, Eraser, Search, Undo2, X } from "lucide-react";
+import { AlarmClock, AlarmClockOff, Archive, ArchiveRestore, Check, Search, Undo2, X } from "lucide-react";
 import { AnimatePresence } from "motion/react";
 import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 import { inbox, restoreOf, shortAgo, snoozeLeft, type InboxRow } from "@/lib/agents-inbox";
@@ -433,9 +433,9 @@ function ShelfRow({
       ) : (
         <Icon className="size-3.5 shrink-0 text-subtle" strokeWidth={1.5} aria-hidden />
       )}
-      <span className="min-w-0 flex-1 truncate text-[12.5px]">{t.title}</span>
-      {t.worktree?.removed_at && <Eraser className="size-3 shrink-0 text-subtle" strokeWidth={1.5} aria-label="Worktree cleaned up" />}
-      <span className={`shrink-0 pr-1 font-mono text-[10.5px] text-subtle ${actions.readOnly || boxes ? "" : "group-hover/s:hidden group-aria-selected/s:hidden [@media(hover:none)]:hidden"}`}>
+      <span className="min-w-0 flex-1 truncate text-[13px]">{t.title}</span>
+      {t.worktree?.removed_at && <span className="shrink-0 text-[11px] text-subtle" title="Its worktree was cleaned up; restoring it makes a new one">cleaned up</span>}
+      <span className={`shrink-0 pr-1 font-mono text-[11px] text-subtle ${actions.readOnly || boxes ? "" : "group-hover/s:hidden group-aria-selected/s:hidden [@media(hover:none)]:hidden"}`}>
         {shelf === "snoozed" ? snoozeLeft(row.at, now) : shortAgo(row.at, now)}
       </span>
       {!actions.readOnly && !boxes && (
@@ -448,7 +448,7 @@ function ShelfRow({
             e.stopPropagation();
             void actions.restore(t);
           }}
-          className="hidden h-6 shrink-0 items-center gap-1 rounded-md px-1.5 text-[11.5px] text-subtle transition group-hover/s:flex group-aria-selected/s:flex hover:bg-fg/[0.07] hover:text-fg [@media(hover:none)]:flex"
+          className="hidden h-6 shrink-0 items-center gap-1 rounded-md px-1.5 text-[12px] text-subtle transition group-hover/s:flex group-aria-selected/s:flex hover:bg-fg/[0.07] hover:text-fg [@media(hover:none)]:flex"
         >
           <Restore className="size-3.5" strokeWidth={1.5} />
           {r.label}

@@ -270,6 +270,7 @@ export function Picker(props: PickerProps) {
     if (variables?.length && !q) out.push({ kind: "variables", key: "variables" });
     return out;
   }, [mode, variables, q, recent, extras, extrasGroup, source, remote.items, remote.next, options, onCreate, custom, query, props.clearable, props.multiple, props.value]);
+  const leads = rows.some((r) => r.kind === "option" && hasLead(r.option));
 
   const reset = () => {
     setQuery("");
@@ -447,7 +448,7 @@ export function Picker(props: PickerProps) {
                   return (
                     <div key={r.key} role="presentation">
                       {heading && <div className="px-2 pt-2 pb-1 text-[11px] font-medium text-subtle">{heading}</div>}
-                      <RowView row={r} picked={r.kind === "option" && isPicked(r.option)} multiple={!!props.multiple} noun={noun} creating={creating} mono={mono} />
+                      <RowView row={r} picked={r.kind === "option" && isPicked(r.option)} multiple={!!props.multiple} noun={noun} creating={creating} mono={mono} pad={leads} />
                     </div>
                   );
                 })}
@@ -494,13 +495,14 @@ export function Picker(props: PickerProps) {
 
 const field = "relative rounded-lg border border-line-2 bg-panel-2 px-2.5 text-[13px] text-fg transition-colors hover:border-line-3 focus-within:border-line-3";
 
-function RowView({ row, picked, multiple, noun, creating, mono }: { row: Row; picked: boolean; multiple: boolean; noun?: string; creating: boolean; mono?: boolean }) {
+function RowView({ row, picked, multiple, noun, creating, mono, pad }: { row: Row; picked: boolean; multiple: boolean; noun?: string; creating: boolean; mono?: boolean; pad: boolean }) {
   switch (row.kind) {
     case "option": {
       const o = row.option;
       return (
         <ComboboxItem value={row.key} data-picked={picked || undefined} className={cn("w-full", picked && "bg-fg/[0.04]")}>
-          <Lead option={o} />
+          {/* Where some rows lead with a picture or icon, the rest keep its room, so the names line up. */}
+          {hasLead(o) ? <Lead option={o} /> : pad && <span aria-hidden className="size-4 shrink-0" />}
           <span className={cn("min-w-0 flex-1 truncate", mono && o.label === o.id && "font-mono text-[12px]")}>{o.label}</span>
           {o.hint && <span className="max-w-[45%] shrink-0 truncate text-[11.5px] text-subtle">{o.hint}</span>}
           {multiple ? (
@@ -584,9 +586,13 @@ const KIND_ICONS: Record<string, typeof Circle> = {
   workflow: Workflow,
   environment: Server,
   pull: GitPullRequest,
+  issue: CircleDot,
 };
 
 /** What leads a row: a picture, a kind's icon in the thing's colour, or its colour as a dot. */
+/** Whether a row shows something before its name. */
+const hasLead = (o: PickerOption) => !!(o.icon || o.avatar || o.color);
+
 function Lead({ option: o, size = "size-4" }: { option: PickerOption; size?: string }) {
   if (o.icon && typeof o.icon === "object") return <span className={cn("grid shrink-0 place-items-center", size)}>{o.icon}</span>;
   const kind = typeof o.icon === "string" ? o.icon : undefined;

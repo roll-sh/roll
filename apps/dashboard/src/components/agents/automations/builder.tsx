@@ -50,6 +50,7 @@ import { field as fieldClass, openSettings } from "../settings-ui";
 import { cn, Combobox, ComboboxItem, ComboboxList, ComboboxSearchInput, Menu, MenuGroup, MenuGroupLabel, MenuItem, MenuPopup, MenuSeparator, MenuTrigger, popupMotion, Segmented, Select } from "../ui";
 import { useLayer } from "../ui/layer";
 import { LookupPicker } from "../lookup-picker";
+import { Picker, type PickerOption } from "../ui/picker";
 import { useDismiss } from "../dismiss";
 import { Pop } from "../pop";
 import { useAgents } from "../use-agents";
@@ -338,7 +339,7 @@ function AddStepMenu({ catalog, onPick, trigger, label = "Add a step" }: { catal
         {trigger}
       </PopoverPrimitive.Trigger>
       <PopoverPrimitive.Portal {...layer}>
-        <PopoverPrimitive.Positioner className="z-[130]" side="bottom" align="center" sideOffset={4}>
+        <PopoverPrimitive.Positioner className="z-[130]" side="bottom" align="center" sideOffset={4} collisionPadding={{ top: 56, right: 8, bottom: 8, left: 8 }}>
           <PopoverPrimitive.Popup
             aria-label={label}
             // Opened by touch, the popup takes focus so a phone's keyboard stays down until the search is tapped.
@@ -376,7 +377,7 @@ function AddStepMenu({ catalog, onPick, trigger, label = "Add a step" }: { catal
                               {step.needs_setup && <span className="rounded-[4px] border border-line-2 px-1 text-[10px] leading-[15px] text-subtle">Connect</span>}
                               {query.trim() && <span className="ml-auto shrink-0 text-[10.5px] text-subtle">{group}</span>}
                             </span>
-                            <span className="block truncate text-[11.5px] text-subtle">{step.description}</span>
+                            <span className="line-clamp-2 text-[11.5px] leading-snug text-subtle">{step.description}</span>
                           </span>
                         </ComboboxItem>
                       </div>
@@ -437,7 +438,7 @@ function TriggerCard({
                       {x.title}
                       {x.needs_setup && <span className="rounded-[4px] border border-line-2 px-1 text-[10px] leading-[15px] text-subtle">Connect</span>}
                     </span>
-                    <span className="block truncate text-[11.5px] text-subtle">{x.description}</span>
+                    <span className="line-clamp-2 text-[11.5px] leading-snug text-subtle">{x.description}</span>
                   </span>
                   {x.source === triggerSource(t) && <Check className="mt-0.5 size-3.5" />}
                 </MenuItem>
@@ -514,6 +515,16 @@ function zones(current: string): string[] {
   return [...set];
 }
 
+/** The zones as a searchable list (400-odd): named by their city, grouped by region, the full id searchable. */
+function zoneOptions(current: string): PickerOption[] {
+  return zones(current)
+    .sort((a, b) => (a === "UTC" ? -1 : b === "UTC" ? 1 : a.localeCompare(b)))
+    .map((z) => {
+      const cut = z.indexOf("/");
+      return cut < 0 ? { id: z, label: z } : { id: z, label: z.slice(cut + 1).replace(/_/g, " ").replace(/\//g, " · "), key: z, group: z.slice(0, cut) };
+    });
+}
+
 function TriggerBody({
   trigger: t,
   onChange,
@@ -571,7 +582,7 @@ function TriggerBody({
               </label>
             )}
             {preset === "custom" && <input aria-label="Cron" value={t.cron} onChange={(e) => onChange({ ...t, cron: e.target.value })} placeholder="*/30 9-17 * * 1-5" className={cn(fieldClass, "w-52 font-mono text-[12.5px]", err && "border-danger/50")} />}
-            <SizedSelect width="w-56" label="Time zone" value={t.timezone} onChange={(timezone) => onChange({ ...t, timezone })} options={zones(t.timezone).map((z) => ({ value: z, label: z.replace(/_/g, " ") }))} />
+            <Picker label="Time zone" searchPlaceholder="Find a city or zone…" recents="timezones" className="w-56" value={t.timezone} onChange={(timezone) => timezone && onChange({ ...t, timezone })} options={zoneOptions(t.timezone)} />
           </div>
           {err ? <p className="text-[11.5px] text-danger">{err}</p> : <p className="text-[11.5px] text-subtle">{words ? `${words}, ${t.timezone.replace(/_/g, " ")}` : <span className="font-mono">{t.cron}</span>}</p>}
         </div>

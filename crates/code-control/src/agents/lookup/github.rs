@@ -263,7 +263,7 @@ fn number(s: &str) -> Option<u64> {
 
 fn issue_row(i: code_github::model::Issue) -> Item {
     let pr = i.is_pull_request();
-    Item::new(i.number.to_string(), i.title).key(Some(format!("#{}", i.number))).hint(Some(format!("#{}", i.number))).icon(pr.then_some("pull"))
+    Item::new(i.number.to_string(), i.title).key(Some(format!("#{}", i.number))).hint(Some(format!("#{}", i.number))).icon(Some(if pr { "pull" } else { "issue" }))
 }
 
 /// Open issues and pull requests; a number is looked up directly (open or not).

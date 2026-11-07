@@ -1993,7 +1993,8 @@ async fn pickers_look_up_github_through_the_owners_repos() {
         issues.push(pr);
     }
     let (_, v) = get(format!("{base}/issues?parent=app&q=safari")).await;
-    assert_eq!(v["items"], json!([{ "id": "21", "label": "Login 500s on Safari", "key": "#21", "hint": "#21" }]));
+    // Issues and pull requests each say which they are (the picker lines their titles up).
+    assert_eq!(v["items"], json!([{ "id": "21", "label": "Login 500s on Safari", "key": "#21", "hint": "#21", "icon": "issue" }]));
     let (_, v) = get(format!("{base}/issues?parent=app&q=%2322")).await;
     assert_eq!((v["items"][0]["label"].as_str(), v["items"][0]["icon"].as_str()), (Some("Cache sessions"), Some("pull")));
     let (_, v) = get(format!("{base}/issues?parent=app&ids=21,%23999")).await;

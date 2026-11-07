@@ -122,7 +122,7 @@ function LauncherBody({ project: wanted, machine: wantedMachine, onClose }: { pr
                   const first = projects.find((p) => p.machine === id);
                   if (first) choose(first);
                 }}
-                options={machines.map((m) => ({ value: m.id, label: m.name, hint: m.online ? undefined : "offline", icon: <MachineIcon machine={m} className="size-3.5" /> }))}
+                options={machines.map((m) => ({ value: m.id, label: m.name, hint: m.online ? "online" : m.sandbox ? "asleep" : "offline", icon: <MachineIcon machine={m} className="size-3.5" /> }))}
               />
               <span aria-hidden>/</span>
               <Select

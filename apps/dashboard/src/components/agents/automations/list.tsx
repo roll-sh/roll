@@ -322,7 +322,7 @@ function Row({ automation: x, runs, now, list }: { automation: Automation; runs:
             <RowAction label="Edit" onClick={edit}>
               <Pencil />
             </RowAction>
-            <Menu label={`More for ${x.name}`} trigger={<MoreHorizontal className="size-4" />} items={more.slice(4)} />
+            <Menu label={`More for ${x.name}`} trigger={<MoreHorizontal className="size-4" />} items={more} />
           </span>
         </span>
         <span className="flex shrink-0 items-center gap-1" onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}>

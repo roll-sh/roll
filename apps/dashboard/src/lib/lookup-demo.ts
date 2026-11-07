@@ -197,11 +197,11 @@ const GITHUB_LOOKUPS: LookupRows = {
   ],
   "github/issues": perRepo({
     roll: [
-      { id: "128", key: "#128", hint: "#128", label: "Login 500s on Safari" },
+      { id: "128", key: "#128", hint: "#128", label: "Login 500s on Safari", icon: "issue" },
       { id: "131", key: "#131", hint: "#131", label: "Cache sessions", icon: "pull" },
-      { id: "133", key: "#133", hint: "#133", label: "Flaky checkout test on CI" },
+      { id: "133", key: "#133", hint: "#133", label: "Flaky checkout test on CI", icon: "issue" },
     ],
-    web: [{ id: "42", key: "#42", hint: "#42", label: "Dark mode for settings" }],
+    web: [{ id: "42", key: "#42", hint: "#42", label: "Dark mode for settings", icon: "issue" }],
   }),
 };
 

@@ -24,12 +24,15 @@ const triggers = {
 export type SelectVariant = keyof typeof triggers;
 
 export function SelectTrigger({ className, variant = "default", children, ...props }: SelectPrimitive.Trigger.Props & { variant?: SelectVariant }) {
+  // A caller's width wins over the field's full width (`cn` doesn't merge classes, and `w-full`
+  // came later in the CSS: a `w-36` Select spanned its whole row).
+  const sized = typeof className === "string" && /(^|\s)(w|max-w)-/.test(className);
   return (
     <SelectPrimitive.Trigger
       className={mergeClass(
         cn(
           "relative inline-flex cursor-pointer items-center justify-between gap-2 text-left outline-none transition-colors select-none data-disabled:pointer-events-none data-disabled:opacity-60 [&_svg]:shrink-0",
-          triggers[variant],
+          sized ? triggers[variant].replace(/(^|\s)w-full(?=\s|$)/, " ") : triggers[variant],
         ),
         className,
       )}

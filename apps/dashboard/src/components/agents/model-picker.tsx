@@ -29,7 +29,7 @@
  */
 
 import { Check, ChevronDown, ChevronRight, Clock, PencilLine, ShieldCheck, ShieldOff, Star, Zap } from "lucide-react";
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import type { ModelInfo, ModelOption, ModelOptions, OptionValue, ProviderInfo, RuntimeMode } from "@/lib/agents-api";
 import { modelKey, modelPrefs, searchModels, sortModels, useModelPrefs, type ModelKey, type PickerModel } from "@/lib/agents-models";
 import { acceptedOptions, effortValue, isFast, nextEffort, optionValue, otherOptions, reasoningOf, speedOf, traits, type BooleanOption, type SelectOption } from "@/lib/agents-model-options";
@@ -304,7 +304,10 @@ function PickerContent({
     if (t === "favorites") return favoritesHere;
     if (t === "recent") return recentHere.map((k) => byKey.get(k)!);
     const here = all.filter((m) => m.provider === t.provider);
-    return sortModels(expanded.has(t.provider) ? here : here.filter((m) => !m.legacy), favorites);
+    const sorted = sortModels(expanded.has(t.provider) ? here : here.filter((m) => !m.legacy), favorites);
+    // The provider's own models first, then each endpoint's together (under its label).
+    const vias = [...new Set(sorted.map((m) => byKey.get(m.key)!.info.via ?? ""))].sort((a, b) => (a === "" ? -1 : b === "" ? 1 : 0));
+    return vias.flatMap((v) => sorted.filter((m) => (byKey.get(m.key)!.info.via ?? "") === v));
   };
   const olderOf = (t: Tab) => (typeof t === "string" ? 0 : all.filter((m) => m.provider === t.provider && m.legacy).length);
   let legacyRow: { provider: string; count: number; open: boolean } | null = null;
@@ -429,7 +432,7 @@ function PickerContent({
   const updates = (searching ? providers : tabProvider ? [tabProvider] : []).map((p) => updateNotice(p, searching ? query : "")).filter((n): n is string => !!n);
 
   return (
-    <div data-model-picker className="flex max-h-[min(var(--available-height),26rem)] w-[min(23.5rem,var(--available-width))] flex-col">
+    <div data-model-picker className="flex max-h-[min(var(--available-height),26rem)] w-[min(24rem,var(--available-width))] flex-col">
       <Combobox<string>
         inline
         open
@@ -483,21 +486,30 @@ function PickerContent({
                 }
               }}
             >
-              {shown.map((m) => {
+              {shown.map((m, i) => {
                 const p = providerOf(m.provider)!;
                 const jump = jumps.indexOf(m.key);
+                const via = byKey.get(m.key)!.info.via;
+                // In a provider's tab, an endpoint's models sit under one label, not a tag on each row.
+                const label = !mixed && via && via !== byKey.get(shown[i - 1]?.key ?? "")?.info.via;
                 return (
-                  <ModelRow
-                    key={m.key}
-                    model={m}
-                    info={byKey.get(m.key)!.info}
-                    provider={p}
-                    mixed={mixed}
-                    favorite={favorites.has(m.key)}
-                    selected={multi?.selected && multi.selected.length > 1 ? multi.selected.some((c) => modelKey(c.provider, c.model ?? "") === m.key) : m.key === activeKey}
-                    starOnHover={tab === "favorites" && !searching}
-                    jump={jump >= 0 ? jumpLabel(jump) : null}
-                  />
+                  <Fragment key={m.key}>
+                    {label && (
+                      <div aria-hidden className="truncate px-2 pt-2 pb-1 text-[11px] text-subtle" title={`Listed by the endpoint ${via}`}>
+                        via {via}
+                      </div>
+                    )}
+                    <ModelRow
+                      model={m}
+                      info={byKey.get(m.key)!.info}
+                      provider={p}
+                      mixed={mixed}
+                      favorite={favorites.has(m.key)}
+                      selected={multi?.selected && multi.selected.length > 1 ? multi.selected.some((c) => modelKey(c.provider, c.model ?? "") === m.key) : m.key === activeKey}
+                      starOnHover={tab === "favorites" && !searching}
+                      jump={jump >= 0 ? jumpLabel(jump) : null}
+                    />
+                  </Fragment>
                 );
               })}
               {legacyRow && (
@@ -585,7 +597,7 @@ function Sidebar({ tabs, tab, providers, onSelect, onFocusSearch }: { tabs: Tab[
       role="toolbar"
       aria-orientation="vertical"
       aria-label="Providers"
-      className="flex w-38 shrink-0 flex-col gap-px overflow-y-auto overscroll-contain border-e border-line p-1 [scrollbar-width:none]"
+      className="flex w-40 shrink-0 flex-col gap-px overflow-y-auto overscroll-contain border-e border-line p-1 [scrollbar-width:none]"
       onKeyDown={(e) => {
         if (e.altKey || e.ctrlKey || e.metaKey) return;
         if (e.key === "ArrowDown" || e.key === "ArrowUp") {
@@ -657,7 +669,7 @@ function ModelRow({
           </span>
         )}
         {info.images === false && <span className="shrink-0 text-[11px] text-subtle">Text only</span>}
-        {info.via && (
+        {mixed && info.via && (
           <span className="min-w-6 max-w-28 shrink truncate text-[11px] text-subtle" title={`Listed by the endpoint ${info.via}`}>
             via {info.via}
           </span>

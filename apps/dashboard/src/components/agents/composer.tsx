@@ -791,9 +791,9 @@ export function Composer({
                 <button
                   type="button"
                   onClick={togglePlan}
-                  aria-pressed={plan === "plan"}
-                  aria-label="Plan mode"
-                  title={plan === "plan" ? "Plan mode: plans first and changes nothing until you approve (Shift+Tab)" : "Build mode (Shift+Tab for plan mode)"}
+                  // Named for what it shows (it read "Build" while it was named "Plan mode"); the title says what a press does.
+                  aria-label={plan === "plan" ? "Plan mode" : "Build mode"}
+                  title={plan === "plan" ? "Plan mode: plans first and changes nothing until you approve. Switch to build (Shift+Tab)" : "Build mode: works on the change. Switch to plan (Shift+Tab)"}
                   className={`inline-flex h-7 shrink-0 items-center gap-1.5 rounded-lg px-2 text-[12px] font-medium transition-colors hover:bg-fg/[0.06] ${plan === "plan" ? "text-accent" : "text-soft"}`}
                 >
                   {plan === "plan" ? <PencilRuler className="size-4" /> : <Bot className="size-4" />}

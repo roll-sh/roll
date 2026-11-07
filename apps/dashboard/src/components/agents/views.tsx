@@ -1,6 +1,6 @@
 "use client";
 
-import { ArrowDownFromLine, ArrowDownWideNarrow, BellRing, ArrowRightFromLine, ArrowUpNarrowWide, Bookmark, ChevronDown, ChevronRight, Columns3, Focus as FocusIcon, ListFilter, Network, Pencil, Pin as PinIcon, PinOff, Plus, Rows3, Search, SlidersHorizontal, Trash2, X, ArrowLeft, ArrowRight, FileDiff as DiffIcon } from "lucide-react";
+import { Funnel, ArrowDownFromLine, ArrowDownWideNarrow, BellRing, ArrowRightFromLine, ArrowUpNarrowWide, Bookmark, ChevronDown, ChevronRight, Columns3, Focus as FocusIcon, Network, Pencil, Pin as PinIcon, PinOff, Plus, Rows3, Search, SlidersHorizontal, Trash2, X, ArrowLeft, ArrowRight, FileDiff as DiffIcon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { AgentsServices } from "@/lib/agents-services";
 import type { AgentsData } from "@/lib/agents-store";
@@ -517,7 +517,8 @@ export function ViewsBar({
           title="Filters"
           className={`flex h-7 items-center gap-1 rounded-md px-2 text-[12px] transition-colors duration-150 hover:bg-fg/[0.05] hover:text-fg ${filters ? "text-fg" : "text-subtle"} ${editor ? "bg-fg/[0.07]" : ""}`}
         >
-          <ListFilter className="size-3.5" strokeWidth={1.75} />
+          <Funnel className="size-3.5" strokeWidth={1.75} />
+          <span className="max-sm:sr-only @max-[520px]/views:sr-only">Filter</span>
           {filters > 0 && <span className="font-mono text-[10.5px] text-accent tabular-nums">{filters}</span>}
         </button>
       </div>
@@ -576,7 +577,7 @@ function DisplayMenu({ display, phone, onChange }: { display: Display; phone: bo
         }
       >
         <SlidersHorizontal className="size-3.5" strokeWidth={1.75} />
-        <span className="max-sm:sr-only @max-[820px]/views:sr-only">Display</span>
+        <span className="max-sm:sr-only @max-[520px]/views:sr-only">Display</span>
       </PopoverTrigger>
       <PopoverPopup side="bottom" align="end" sideOffset={6} aria-label="Display options" className="w-[300px] flex-col gap-3 p-3 text-[12.5px]">
         {layoutOf(display) !== "canvas" ? (
@@ -804,7 +805,7 @@ function FilterEditor({
           className="mb-3 h-8 w-full rounded-md border border-line bg-bg px-2.5 text-[13px] outline-none focus:border-line-2"
         />
       ) : (
-        <p className="mb-3 text-[13px] font-medium tracking-[-0.01em]">{mode === "draft" ? "Filter All" : `${initialName}: what it shows`}</p>
+        <p className="mb-3 text-[13px] font-medium tracking-[-0.01em]">{mode === "draft" ? "Filter threads" : `${initialName}: what it shows`}</p>
       )}
       <Section label="Status">
         {STATUS_FILTERS.map((s) => (
@@ -861,9 +862,8 @@ function FilterEditor({
             Done
           </button>
         ) : mode === "draft" ? (
-          <button onClick={onClose} className="h-7 rounded-md px-3 text-[12px] text-muted hover:bg-panel-2 hover:text-fg">
-            Done
-          </button>
+          // One footer: what's filtered here can be kept as a view; a press outside or Escape closes it.
+          <SaveDraft onSave={(n) => onSave(n, f)} disabled={isEmptyFilter(f)} />
         ) : (
           <>
             <button onClick={onClose} className="h-7 rounded-md px-3 text-[12px] text-muted hover:bg-panel-2 hover:text-fg">
@@ -880,12 +880,6 @@ function FilterEditor({
           </>
         )}
       </div>
-      {mode === "draft" && (
-        <SaveDraft
-          onSave={(n) => onSave(n, f)}
-          disabled={isEmptyFilter(f)}
-        />
-      )}
     </>
   );
 }
@@ -949,7 +943,7 @@ function SaveDraft({ onSave, disabled }: { onSave: (name: string) => void; disab
   const [name, setName] = useState("");
   return (
     <form
-      className="mt-2 flex items-center gap-1.5"
+      className="flex min-w-0 flex-1 items-center gap-1.5"
       onSubmit={(e) => {
         e.preventDefault();
         if (name.trim()) onSave(name);
