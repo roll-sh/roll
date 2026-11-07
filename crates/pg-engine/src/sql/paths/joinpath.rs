@@ -9631,6 +9631,9 @@ impl Planner<'_, '_> {
                 }
                 _ => 0,
             };
+            // (A foreign table's whole row under a ROW_MARK_COPY mark or as an UPDATE's
+            // wholerow.)
+            let whole = whole + scan.as_ref().map_or(0, |(sp, _)| self.fdw_whole_row_width(sp));
             // (cost_subqueryscan: a subquery's scan whose reltarget isn't the subquery's
             // whole select list, an output nothing above reads, is no trivial one either
             // (set_subquery_pathlist's trivial_pathtarget), though setrefs.c may still remove

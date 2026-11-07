@@ -342,3 +342,65 @@ fn unanalyzed_foreign_table_estimates() {
     let p = run(&mut s, "EXPLAIN SELECT id FROM ft").join("\n");
     assert!(!p.contains("Disabled"), "{p}");
 }
+
+/// UPDATE ... FROM and DELETE ... USING over foreign tables of one server are sent as one
+/// remote statement (postgresPlanDirectModify of a pushed join), RETURNING the other
+/// relations' columns; a SET the remote side can't run updates per row over the pushed join
+/// by `r1.ctid`. Plans and rows are PostgreSQL 18.6's.
+#[test]
+fn update_from_join_sent_whole() {
+    let (_data, engine) = loopback();
+    let mut s = engine.connect(1, "postgres", "postgres", "t").unwrap();
+    for q in [
+        "CREATE TABLE t1 (i int PRIMARY KEY, v text)",
+        "CREATE TABLE t2 (i int PRIMARY KEY, w text)",
+        "INSERT INTO t1 SELECT i, 'v' || i FROM generate_series(1, 100) i",
+        "INSERT INTO t2 SELECT i, 'w' || i FROM generate_series(1, 50) i",
+        "CREATE FOREIGN TABLE ft1 (i int, v text) SERVER loopback OPTIONS (table_name 't1')",
+        "CREATE FOREIGN TABLE ft2 (i int, w text) SERVER loopback OPTIONS (table_name 't2')",
+        "ANALYZE t1, t2, ft1, ft2",
+    ] {
+        run(&mut s, q);
+    }
+    let up = "UPDATE ft1 SET v = ft1.v || ft2.w FROM ft2 WHERE ft1.i = ft2.i AND ft2.i % 10 = 3 RETURNING ft1.i, ft1.v, ft2";
+    let plan = run(&mut s, &format!("EXPLAIN (VERBOSE, COSTS OFF) {up}")).join("\n");
+    assert!(plan.contains("->  Foreign Update\""), "{plan}");
+    assert!(
+        plan.contains("Remote SQL: UPDATE public.t1 r1 SET v = (r1.v || r2.w) FROM public.t2 r2 WHERE ((r1.i = r2.i)) AND (((r2.i % 10) = 3)) RETURNING r1.i, r1.v, CASE WHEN (r2.*)::text IS NOT NULL THEN ROW(r2.i, r2.w) END"),
+        "{plan}"
+    );
+    let rows = run(&mut s, up);
+    assert_eq!(rows.len(), 5, "{rows:#?}");
+    assert!(rows[0].contains(r#"Int4(3), Text("v3w3")"#) && rows[0].contains("w3"), "{rows:#?}");
+    let del = "DELETE FROM ft1 USING ft2 WHERE ft1.i = ft2.i + 50 AND ft2.i < 4 RETURNING ft1.*";
+    let plan = run(&mut s, &format!("EXPLAIN (VERBOSE, COSTS OFF) {del}")).join("\n");
+    assert!(
+        plan.contains("Remote SQL: DELETE FROM public.t1 r1 USING public.t2 r2 WHERE ((r1.i = (r2.i + 50))) AND ((r2.i < 4)) RETURNING r1.i, r1.v"),
+        "{plan}"
+    );
+    assert_eq!(run(&mut s, del).len(), 3);
+    let per_row = "UPDATE ft1 SET v = CASE WHEN random() >= 0 THEN ft2.w ELSE '' END FROM ft2 WHERE ft1.i = ft2.i AND ft2.i < 3";
+    let plan = run(&mut s, &format!("EXPLAIN (VERBOSE, COSTS OFF) {per_row}")).join("\n");
+    assert!(plan.contains("Remote SQL: UPDATE public.t1 SET v = $2 WHERE ctid = $1"), "{plan}");
+    assert!(plan.contains("Relations: (public.ft1) INNER JOIN (public.ft2)"), "{plan}");
+    run(&mut s, per_row);
+    let rows = run(&mut s, "SELECT * FROM t1 WHERE i < 5 OR i % 10 = 3 OR i BETWEEN 50 AND 54 ORDER BY i");
+    let want = [
+        (1, "w1"),
+        (2, "w2"),
+        (3, "v3w3"),
+        (4, "v4"),
+        (13, "v13w13"),
+        (23, "v23w23"),
+        (33, "v33w33"),
+        (43, "v43w43"),
+        (50, "v50"),
+        (54, "v54"),
+        (63, "v63"),
+        (73, "v73"),
+        (83, "v83"),
+        (93, "v93"),
+    ];
+    let want: Vec<String> = want.iter().map(|(i, v)| format!(r#"[Int4({i}), Text("{v}")]"#)).collect();
+    assert_eq!(rows, want);
+}

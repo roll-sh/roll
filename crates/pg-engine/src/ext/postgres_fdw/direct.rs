@@ -19,6 +19,23 @@ pub struct Direct {
     pub sql: String,
     pub returned: Vec<usize>,
     pub params: Vec<Expr>,
+    /// A join's statement (the target joined remotely, `UPDATE ... FROM` / `DELETE ...
+    /// USING`): where its RETURNING columns go in the source row (deparseExplicitTargetList).
+    pub join: Option<JoinBack>,
+}
+
+/// `Direct::join`: the width of the source row RETURNING reads, and per remote RETURNING
+/// column where it goes.
+pub struct JoinBack {
+    pub width: usize,
+    pub items: Vec<Back>,
+}
+
+/// A remote RETURNING column of a join's statement: one source row column (its type), or a
+/// non-target relation's whole row, its fields going to their source row columns.
+pub enum Back {
+    Col(usize, crate::types::DataType),
+    Whole(Vec<Option<usize>>, Vec<(String, crate::types::DataType)>),
 }
 
 /// The scan of the target a plain UPDATE / DELETE reads (no join, no projection).
@@ -67,8 +84,12 @@ fn returning(t: &Table, list: &[Expr], d: &Deparser) -> Option<(String, Vec<usiz
 
 /// An UPDATE sent whole: its remote statement, when PostgreSQL would send it so.
 pub fn update(up: &UpdatePlan, cat: &Catalog, fmt: &crate::types::text::FormatCtx) -> Option<Direct> {
+    if !update_ok(up, cat) {
+        return None;
+    }
     let t = &up.rules.table;
-    if t.foreign.is_none()
+    let Some(s) = target_scan(&up.source, t.oid) else { return super::directjoin::join_update(up, cat, fmt) };
+    let spec = super::scan::spec(s, None, cat, fmt);
         || !is_postgres_fdw(cat, t)
         || up.inh
         || !up.members.is_empty()
@@ -78,12 +99,6 @@ pub fn update(up: &UpdatePlan, cat: &Catalog, fmt: &crate::types::text::FormatCt
         || !up.rules.rls_checks.is_empty()
         || !up.rules.view_checks.is_empty()
         || has_row_triggers(&up.rules.triggers, tt::UPDATE)
-        || t.columns.iter().any(|c| c.generated.is_some() && !c.virtual_gen && !c.dropped)
-    {
-        return None;
-    }
-    let s = target_scan(&up.source, t.oid)?;
-    let spec = super::scan::spec(s, None, cat, fmt);
     if !spec.local.is_empty() || !spec.params.is_empty() {
         return None;
     }
@@ -109,23 +124,65 @@ pub fn update(up: &UpdatePlan, cat: &Catalog, fmt: &crate::types::text::FormatCt
     if !params.is_empty() {
         return None;
     }
-    Some(Direct { sql, returned, params })
+    Some(Direct { sql, returned, params, join: None })
 }
 
-/// A DELETE sent whole.
-pub fn delete(dp: &DeletePlan, cat: &Catalog, fmt: &crate::types::text::FormatCtx) -> Option<Direct> {
+/// postgresPlanDirectModify's checks of an UPDATE apart from its source.
+fn update_ok(up: &UpdatePlan, cat: &Catalog) -> bool {
+    let t = &up.rules.table;
+    !(t.foreign.is_none()
+        || !is_postgres_fdw(cat, t)
+        || up.inh
+        || !up.members.is_empty()
+        || up.route.is_some()
+        || up.rules.view
+        || up.old_new.is_some()
+        || !up.rules.rls_checks.is_empty()
+        || !up.rules.view_checks.is_empty()
+        || has_row_triggers(&up.rules.triggers, tt::UPDATE)
+        || t.columns.iter().any(|c| c.generated.is_some() && !c.virtual_gen && !c.dropped))
+}
+
+/// postgresPlanDirectModify's checks of a DELETE apart from its source.
+fn delete_ok(dp: &DeletePlan, cat: &Catalog) -> bool {
     let t = &dp.table;
-    if t.foreign.is_none()
+    !(t.foreign.is_none()
         || !is_postgres_fdw(cat, t)
         || dp.inh
         || !dp.members.is_empty()
         || dp.view
         || dp.old_new.is_some()
-        || has_row_triggers(&dp.triggers, tt::DELETE)
-    {
+        || has_row_triggers(&dp.triggers, tt::DELETE))
+}
+
+/// An UPDATE's foreign target, or a DELETE's with row triggers of it: its whole row goes up
+/// (add_row_identity_columns), part of its scan's width.
+pub fn wholerow_target(p: &Plan) -> Option<u32> {
+    match p {
+        Plan::Update(up) if up.rules.table.foreign.is_some() && !up.inh => Some(up.rules.table.oid),
+        Plan::Delete(dp) if dp.table.foreign.is_some() && !dp.inh && has_row_triggers(&dp.triggers, tt::DELETE) => Some(dp.table.oid),
+        _ => None,
+    }
+}
+
+/// The target of a query level's UPDATE / DELETE that may be joined remotely with the
+/// statement's other postgres_fdw relations (its scan returning `rN.ctid` as the row's key):
+/// one the statement could be sent whole for (`Planner::fdw_dml_target`).
+pub fn join_target(cat: &Catalog, p: &Plan) -> Option<u32> {
+    match p {
+        Plan::Update(up) if up.rules.table.foreign.is_some() => update_ok(up, cat).then_some(up.rules.table.oid),
+        Plan::Delete(dp) if dp.table.foreign.is_some() => delete_ok(dp, cat).then_some(dp.table.oid),
+        _ => None,
+    }
+}
+
+/// A DELETE sent whole.
+pub fn delete(dp: &DeletePlan, cat: &Catalog, fmt: &crate::types::text::FormatCtx) -> Option<Direct> {
+    if !delete_ok(dp, cat) {
         return None;
     }
-    let s = target_scan(&dp.source, t.oid)?;
+    let t = &dp.table;
+    let Some(s) = target_scan(&dp.source, t.oid) else { return super::directjoin::join_delete(dp, cat, fmt) };
     let spec = super::scan::spec(s, None, cat, fmt);
     if !spec.local.is_empty() || !spec.params.is_empty() {
         return None;
@@ -138,7 +195,32 @@ pub fn delete(dp: &DeletePlan, cat: &Catalog, fmt: &crate::types::text::FormatCt
         sql.push_str(&d.conditions(&spec.remote));
     }
     sql.push_str(&ret);
-    Some(Direct { sql, returned, params: Vec::new() })
+    Some(Direct { sql, returned, params: Vec::new(), join: None })
+}
+
+/// A join's RETURNING row (`JoinBack`) as the source row RETURNING reads.
+fn join_row(jb: &JoinBack, vals: Vec<Option<String>>, ctx: &ExecCtx) -> Result<Row> {
+    let mut row = vec![Value::Null; jb.width];
+    for (item, v) in jb.items.iter().zip(vals) {
+        let Some(s) = v else { continue };
+        match item {
+            Back::Col(i, ty) => {
+                if let Some(x) = row.get_mut(*i) {
+                    *x = crate::types::text::parse_value(&s, ty, ctx.fmt())?;
+                }
+            }
+            Back::Whole(slots, fields) => {
+                if let Value::Record(vals) = crate::types::text::parse_record(&s, fields, ctx.fmt())? {
+                    for (slot, v) in slots.iter().zip(vals.iter()) {
+                        if let Some(x) = slot.and_then(|i| row.get_mut(i)) {
+                            *x = v.clone();
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(row)
 }
 
 /// The running statement: sent at the first row asked for, then its RETURNING rows.
@@ -224,6 +306,16 @@ impl Node for DirectNode {
             if !self.returning.is_empty() {
                 // (Nothing returned remotely: a row of NULLs per row changed,
                 // get_returning_data without has_returning.)
+                if let Some(jb) = &self.direct.join {
+                    let rows = if jb.items.is_empty() { vec![Vec::new(); r.cmd_tuples() as usize] } else { r.rows };
+                    for vals in rows {
+                        let row = join_row(jb, vals, ctx)?;
+                        let vals: Result<Row> = self.returning.iter().map(|e| crate::sql::expr::eval(e, &row, ctx)).collect();
+                        out.push(vals?);
+                    }
+                    self.rows = Some(out.into_iter());
+                    return self.next(ctx);
+                }
                 let rows: Vec<Vec<Option<String>>> = if self.direct.returned.is_empty() {
                     vec![Vec::new(); r.cmd_tuples() as usize]
                 } else {
