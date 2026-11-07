@@ -4033,6 +4033,33 @@ select-only base 0.151 / 0.165, new 0.151 / 0.161 (peak 309-361 / 307-308); tpcb
 engine CPU base 122 / 116 s, new 111 s, PostgreSQL 46 s (**2.4x**); peak RSS base 4,298 /
 4,330 MB, new 4,058 MB.
 
+### Batch 3: dense fetches as stored, the heap model's per-scan Fetcher (against batch 2's head `4e89b2ff`)
+
+The range read on head (the planner's and the size models' rounds since, 145 / 151): 1,126-1,128k
+instructions per op at batch 2's head, 1,086-1,090k with batch 3 (-3.5%; three interleaved
+rounds, release), server CPU 300-321 against 290-303 µs per op, ops/s 11.7-12.6k against
+12.8-13.3k, peak RSS unchanged (103-108 MB). PostgreSQL 396k instructions per op: **2.75x**.
+Where it goes now (frame pointers, head + batch 3): planning a custom plan 46.5% (agent 145),
+the scan 27% (entries 3.5%, the rows' fetch 8.9%, decode 4%), the wire and the rest.
+pgbench select-only 0.052 / 0.049 against 0.049 / 0.049 ms CPU per transaction, tpcb-like
+0.542 / 0.546 against 0.573 / 0.524 (unchanged); TPC-H SF1 57 / 57 s CPU, peak RSS 2,501 /
+2,491 MB, every hash equal to PostgreSQL's (46 s: **1.24x**).
+
+### Batch 3 against PostgreSQL in containers (dist engine `a9e01ff0`, `tools/bench/run.sh` with `ENGINE_DOCKER=1`)
+
+Both servers in system.slice on CPUs 20-23, the client on 28-31, durable, CPU and memory
+(anon + shmem) from each container's cgroup; three alternating rounds.
+
+| workload | engine | PostgreSQL 18.6 | engine / PG |
+|---|---|---|---|
+| 8-client 100-row PK range reads, server CPU µs per op | 250-269 | 109-138 | 2.0-2.3x |
+| same, ops/s | 13.5-14.5k | 22.7-31.2k | |
+| 200k nested-loop PK lookups (`generate_series` join, hash and merge joins off), server CPU ms | 445-505 | 289-351 | 1.4-1.7x |
+| memory after the runs, MB | 68-74 | 167 | 0.41-0.44x |
+
+The kept cursors and point fetches took the nested loop's in-process time from 637-677 ms
+(batch 2's head with agent 160's rescan) to 448-498 ms.
+
 ## Scan cost, round 2 (round 23, agent 130)
 
 What changed (HANDOFF "Scan cost, round 2"): storage hands rows to the scan node a batch at a

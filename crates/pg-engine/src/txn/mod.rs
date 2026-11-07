@@ -2673,6 +2673,43 @@ impl Txn {
         TxnScan::new(own.into_iter().collect(), self.lower(start, end, st.ts, mark), src)
     }
 
+    /// `it` (a forward `scan_snap` at snapshot `s`) over [start, end) instead, its store
+    /// sources keeping their places (`storage::Scan::reseek`): the next of ascending lookups
+    /// reads on in the blocks the last one read. False: not such a scan (spilled writes, range
+    /// deletions of ours, another snapshot): make a new one. `it` keeps reading rows as stored
+    /// if it did.
+    pub fn reseek_snap(&self, it: &mut TxnScan, start: &[u8], end: &[u8], s: &Snap) -> bool {
+        self.catch_up(s);
+        let st = s.st.borrow();
+        if st.mark < self.journal_base || !st.prev.is_empty() || self.runs.is_some() {
+            return false;
+        }
+        let mark = st.mark as u64;
+        if !self.own_excluded(start, end, mark).is_empty() {
+            return false;
+        }
+        let Lower::Store(store) = &mut it.inner.lower else {
+            return false;
+        };
+        if !store.reseek(start, end, st.ts) {
+            return false;
+        }
+        let o = &mut it.inner;
+        o.upper = self.mem_in(start, end).collect::<Vec<_>>().into_iter().map(Ok as BufFn);
+        o.upper_head = None;
+        o.upper_done = false;
+        o.lower_head = None;
+        o.lower_done = false;
+        // (Without writes of ours the values' source is the store's, whatever the range: the
+        // one it had stays.)
+        let keep = self.writes.is_empty() && it.src.is_some() == crate::storage::toast::may_hold_rows(start, end);
+        if !keep {
+            it.src = self.toast_source(start, end, st.ts, mark, OwnVals::Now);
+            it.reader = None;
+        }
+        true
+    }
+
     /// Scan [start, end) in descending key order, as of the snapshot `s` (None: the
     /// transaction's current one, with all its writes).
     pub fn scan_rev(&self, start: &[u8], end: &[u8], s: Option<&Snap>) -> TxnRevScan {

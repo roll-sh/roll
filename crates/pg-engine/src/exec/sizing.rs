@@ -2469,6 +2469,11 @@ impl Fetcher {
         }
     }
 
+    /// The scan starts over (a nested loop's rescan): the next fetch reaches its page anew.
+    pub fn restart(&mut self) {
+        self.last = None;
+    }
+
     /// The row under `key` was fetched (heap_page_prune_opt on reaching another page).
     pub fn fetched(&mut self, key: &[u8]) {
         self.last = self.fetch(key);

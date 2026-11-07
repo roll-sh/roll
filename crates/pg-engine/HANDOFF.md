@@ -6131,6 +6131,52 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
     613 / 616, cube 316, pgvector 915 / 915 (own reference, `OPTFLAGS=""`), pgvector_equality
     480 / 480, every TPC-H SF1 hash equal to PostgreSQL's, pgbench unchanged
     (BENCH.md).
+- **Scan cost, round 3, batch 3: cursors kept across ranges and rescans, kept point fetches,
+  dense fetches as stored, filters over stored bytes before decoding** (round 24, agent 149;
+  BENCH.md "Scan cost, round 3"):
+  - Kept cursors: `storage::Scan::reseek(start, end, ts)` moves a merging scan to another
+    range at the same snapshot. When its sources are the ones the new range needs
+    (`same_sources`: the same memtables and files, nothing made) each moves in place, else
+    each it had keeps its place among a new list (`Cursor::reseek`: a memtable's read again
+    from `start`; a file's stays in its block when `start` falls in it past the block's first
+    entry, else is positioned afresh); range deletions are the new range's. False (make a new
+    scan): a hot range's rows, another snapshot, the transaction's own range deletions.
+    `Txn::reseek_snap(&mut TxnScan, start, end, snap)` does it for a forward `scan_snap` (the
+    own-write overlay rebuilt; the toast source kept without writes of ours; false with
+    spilled writes). The scan node keeps an ended range's iterator in `spare`, and `seek`
+    reads on with it: the next range of a multi-range index scan, a skip scan's seek, a
+    nested loop's rescan (`rescan_index` keeps the iterator and `toast`; the Fetcher
+    restarts). Test `storage::tests::reseek_reads_as_a_new_scan`.
+  - Kept point fetches (`ScanNode::fetch_kept`): fewer than 4 rows of an untracked table at
+    the statement's snapshot are read through one kept `TxnScan` sought to each key over
+    `[key, prefix_end(key))`. The bound must cover the key's version suffixes (a resumed
+    session caught `key ++ 0`, which reads no version at all: test
+    `storage::tests::point_fetch_ranges_include_mvcc_versions_cold_and_hot`,
+    `app_concurrency::secondary_index_update_cold_and_hot`).
+  - Dense fetches as stored: `fetch_dense(keys, raw = true)` reads keys close together a batch
+    at a time by reference (from 4 keys) where the table isn't tracked; a row with values out
+    of line makes it give up, and `fetch_rows` puts them back as before.
+  - Filters before decoding: `filter_kernel(bytes, row)` decides over the stored values
+    (`StoredCmps`) before the prefilter decodes its probe (a filter over a few columns of a
+    row with a wide column: tpcb's teller and branch scans), then the kernel over the probe,
+    then `eval`. Decoded rows are sized for the key and system columns `scan_row_rest` adds
+    (`rest_len`, `decode_row_need_spare` with room for columns added since; agent 157's
+    per-row reallocation).
+  - The heap model's fetches go through a per-scan `sizing::Fetcher` with the row's stored TID
+    (`fetched_at`), made at the first fetch; `Fetcher::restart` on rescan.
+  - Measured (dist engine and PostgreSQL 18.6 in containers on the same 4 CPUs, BENCH.md):
+    8-client 100-row range reads 250-269 µs CPU per op against 109-138 (2.0-2.3x); 200k
+    nested-loop lookups 445-505 ms CPU against 289-351 (1.4-1.7x); memory 68-74 MB against
+    167 MB.
+  - Left: planning is still the largest share of the range read (agents 145 / 155); the store's
+    point-lookup cost (`find_block`, `Block::seek`, decompression) is agent 169's; the
+    nested loop's inner tree (agent 167).
+  - Verified at a9e01ff0 (debug engine): crate tests debug and release 60 / 60, crash_random
+    seeds 1-30, spill tests with `ROLL_TXN_SPILL_BYTES=4096`, clippy (none in these files),
+    difftest smoke, isolation 138 / 139 specs with roll-*, 1,805 / 1,806 permutations, a full
+    regress run on a private reference 51,148 / 51,150 with 0 units changed against
+    results.tsv, pg_dump_tap 14,817 / 14,817, contrib pgvector 915 / 915, bloom 58, pg_trgm
+    261, btree_gist 613 / 616, cube 316, pgvector_equality 480 / 480.
 
 ## Repository layout
 
