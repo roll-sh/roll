@@ -2288,10 +2288,126 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
 
       `recovery_oracle_rejects_partial_and_lost_acknowledged_transactions` keeps a quick SQL
       version of both checks.
-    - SIGKILL leaves the page cache, so the harness tests process crashes. It does not test
-      power loss, where writes that weren't fsynced go too. Testing power loss needs a file
-      layer that can drop unsynced writes (not built). Until then, the fsync ordering in
-      `wait_durable` / `rotate_locked` has been reviewed but not crash-tested.
+    - SIGKILL leaves the page cache, so these rounds test process crashes only. Agent 174's
+      power-loss layer (next item) tests power loss too.
+  - **Power loss** (agent 174; `storage/durable.rs`, `storage/powerloss.rs`, the `powerloss`
+    feature, `tests/crash_random.rs`).
+    - Every file a crash must neither lose nor tear goes through `storage::durable`: WAL, SSTs,
+      manifests, the registry, database directories and the spill directory. It wraps
+      `std::fs` (`DFile`, `rename`, `remove_file`, `sync_dir`, `replace`, ...). Without the
+      feature it compiles to the plain calls, so release builds pay nothing.
+    - With `--features powerloss` and `ROLL_POWERLOSS=<root>:<shadow>`, every write, fsync,
+      create, rename and removal under `<root>` is recorded in `<shadow>`.
+      `powerloss::power_cut` then rebuilds `<root>` keeping only what an fsync covered: a
+      file's writes made before its fsync began, and a directory's entries as of its last
+      fsync. With a seed, it keeps a random part of the rest, as a disk may have written some
+      of its cache. Renames then become durable in any order unless a directory fsync
+      separates them, which is stricter than ext4's journal. `ROLL_POWERLOSS_AT=n` kills the
+      process just before its n-th recorded operation.
+    - `CRASH_POWER=1` (crash_random, with the feature) makes every crash a power cut, half the
+      rounds keeping a seeded part of the unsynced work. The child's file changes are recorded,
+      and anything under `base/` or `databases.json` changed outside `durable` fails the round.
+      **It is part of the full-suite train from now on:** seeds 1-30 × 4 with `CRASH_POWER=1`,
+      and again with `CRASH_ASYNC=1` as well.
+    - Directed tests, all in the train's power stage (`cargo test --release --features
+      powerloss --test crash_random -- power_cut`):
+      - `power_cut_keeps_only_what_was_fsynced` checks the layer itself.
+      - `power_cut_keeps_commits_in_a_new_wal` covers WAL rotation.
+      - `power_cut_at_every_point` cuts before each of the 324 operations of a store
+        workload: commits across rotations, flushes, a compaction, an ingested commit and the
+        close. Each point is cut twice, keeping nothing and then a seeded part. The store must
+        open with every acknowledged commit whole and nothing after the one in flight.
+      - `power_cut_keeps_a_prefix_of_concurrent_commits` runs 8 threads of group commits and
+        checks that the commits surviving a cut are a gapless prefix in commit order, covering
+        every acknowledged one. Releasing locks before the fsync relies on this.
+    - **Found: an acknowledged commit lost to a power cut.** A WAL file's directory entry was
+      never fsynced. `fdatasync` of the file doesn't cover its name, so a cut took the WAL
+      file made at open or at the last rotation, and with it every commit acknowledged in it.
+      Unfixed, crash_random `CRASH_POWER=1` failed seed 17 with acknowledged steps 569-592
+      missing from txlog. Fix: `WalWriter::create` fsyncs the directory before any commit
+      goes in. That is once per memtable (32 MB of WAL), under the commit lock with the old
+      file's fsync, and never per commit.
+    - **Found: a store that wouldn't open.** A flush or compaction renames its SSTs into place
+      and then the manifest. Without a directory fsync between the two renames, a cut can keep
+      the manifest's rename and not the SST's, and the store then fails to open with ENOENT
+      (`power_cut_at_every_point`). Fix: `write_manifest` fsyncs the directory before its
+      rename, as PostgreSQL's durable_rename does. That is one more directory fsync per flush
+      or compaction.
+    - **Found: the registry was never durable.** `databases.json` holds databases, roles and
+      the cluster-wide catalogs. It was written and renamed without an fsync, so a power cut
+      could lose an acknowledged CREATE ROLE or CREATE DATABASE, or restore a dropped
+      database's entry. It is now replaced durably (`durable::replace`: fsync, rename,
+      directory fsync). CREATE DATABASE also fsyncs its copy of the template, each file and
+      directory, before the registry names it.
+    - Checked and fine: `wait_durable` takes the WAL handle and `upto` together under the
+      commit lock, so its fsync covers every commit up to `upto`. `rotate_locked` fsyncs the
+      old file before switching. An ingested commit fsyncs the WAL before its SST and
+      manifest. A linked run is fsynced before its rename, which the manifest's directory
+      fsync covers. Flushes remove a WAL file only after the manifest is durable, and a WAL
+      file that comes back is skipped by `flushed_ts`. Kept models are store records written
+      in one commit with their marker (see agent 170's format), so they share the WAL's
+      prefix order.
+    - The commit path's cost (dist engine and PostgreSQL 18.6 in containers on the same 4
+      cores, pgbench -M prepared, scale 10, 30 s per run, interleaved rounds, server CPU from
+      the cgroups; the machine was loaded, at a load average of 30-45, so the ranges are wide).
+      These are the ranges per variant, tps and then CPU ms per transaction:
+
+      | workload | clients | base | new | new, no fsync | pg | pg, sync off |
+      |---|---|---|---|---|---|---|
+      | tpcb-like | 8 | 4,419-4,717 / 0.58-0.66 | 4,224-4,703 / 0.61-0.68 | 3,659-5,752 / 0.55-0.72 | 6,299-6,728 / 0.41 | 8,396-9,400 / 0.32-0.37 |
+      | tpcb-like | 32 | 3,314-3,536 / 0.81-0.82 | 3,471-4,611 / 0.70-0.90 | 3,897-5,614 / 0.64-0.81 | 5,483-7,223 / 0.52-0.57 | 8,001-8,230 / 0.47-0.49 |
+      | simple-update | 8 | 8,449-8,958 / 0.32-0.37 | 7,109-10,087 / 0.31-0.39 | 10,305-10,972 / 0.31 | 11,435-11,613 / 0.23-0.24 | 15,182-15,512 / 0.21 |
+      | simple-update | 32 | 9,495-10,154 / 0.36-0.39 | 5,746-10,147 / 0.37-0.48 | 7,334-11,855 / 0.34-0.43 | 13,537-14,283 / 0.27-0.28 | 15,980-16,689 / 0.24-0.25 |
+
+      - The fixes didn't move the commit path: base and new overlap everywhere. The new
+        directory fsyncs come once per 32 MB of WAL and once per flush.
+      - Durability costs the engine less than PostgreSQL. Turning fsync off gains the engine
+        about 0.05 ms of CPU per transaction and up to ~20% tps. Turning synchronous_commit
+        off gains PostgreSQL 0.05-0.09 ms and 25-50% tps.
+      - Group commit already does one fdatasync per group, into zero-filled preallocated WAL,
+        as PostgreSQL does with wal_sync_method fdatasync. No cheaper safe ordering is left
+        that is worth its complexity.
+      - The gap to PostgreSQL is CPU outside the commit: with fsync off the engine spends
+        0.55-0.81 ms on a tpcb-like transaction, where PostgreSQL with synchronous_commit off
+        spends 0.32-0.49. That is the OLTP owner's area, and pipelined commits, below, are
+        the commit-side lever.
+    - Pipelined commits (releasing row locks at the commit record; agent 165's proposal,
+      agent 178's batch): safe only with three things.
+      - An "appended" watermark set after the memtable insert. Lock-wait rechecks read at or
+        past it.
+      - Snapshots at the durable watermark, raised per session to the newest commit it has
+        observed.
+      - A durability barrier (`wait_durable` of that commit) before anything derived from it
+        leaves the process: rows, CommandComplete, errors, NOTIFY, COPY TO, PREPARE
+        TRANSACTION's acknowledgement, FDW pushes.
+
+      Writers need nothing new: a dependent commit appends after its predecessor, so its own
+      fsync covers it. `power_cut_keeps_a_prefix_of_concurrent_commits` proves the prefix
+      that relies on.
+    - Verified (agent 174). The full suite ran on ee13a6a5c, origin's 6f532e7b5^ plus the
+      batch:
+      - crate tests: release 479 passed / 0 failed / 18 ignored; debug 479 / 2 / 18;
+      - power_cut tests;
+      - clippy with and without `powerloss`, with no warning in the files touched (18, as on
+        origin);
+      - difftest smoke;
+      - isolation 121 / 122 (intra-grant-inplace, as before);
+      - full regress 51,148 / 51,150 with 0 units changed;
+      - pg_dump_tap 14,817 / 14,817;
+      - crash_random seeds 1-30 × 4 in each of sync, `CRASH_ASYNC=1`, `CRASH_POWER=1`, and
+        `CRASH_POWER=1 CRASH_ASYNC=1`: 480 crashes, none failed. Of the 240 power cuts, 193
+        dropped unsynced writes or entries.
+      - pgbench and the footprint gate, base against new: unchanged. The fresh data directory
+        is 3.03 MB, idle CPU 0.02-0.03 s per 5 minutes, 100 idle sessions 31-32 MB.
+
+      The 2 debug failures are agent 171's flaky debug-only cost assertion
+      (`check_planned_total` / the serial bound in `explain.rs`) in two logical_apply tests:
+      they passed on reruns, and the planner owner has them. After rebasing onto 178's OLTP
+      round 7, which touches none of these files, the release crate tests ran again (482 / 0 /
+      18) and clippy again had no warning here.
+    - Left: replication origins' progress (`repl/origin.rs`) is a side file renamed without
+      an fsync. PostgreSQL carries it in the commit record. After a power cut a subscription
+      may apply changes again. Replication slots fsync theirs.
     - Verified (agent 168, b626d5dd3 on 86b519409; the engine's source unchanged since
       fe7b0023c): seeds 1-30 × 4 rounds ten times over (1,200 crashes, a third mid-file-write),
       and twice with `CRASH_ASYNC=1` (240), none failed; crate tests in release and debug,
@@ -6823,7 +6939,8 @@ container name: pick your own).
   30 jobs, almost all full verifications of small batches. A batch is pushed after ONE heavy job
   with: a release build, clippy (no new warnings), the crate test binaries that cover the files it
   touches, the regress files of its area (`PGREGRESS_ONLY`), goldens it adds, and its benchmark.
-  The full suite (debug and release crate tests, `crash_random` 1-30, full regress with 0 units
+  The full suite (debug and release crate tests, `crash_random` 1-30, the same with
+  `CRASH_POWER=1` and `--features powerloss` plus its `power_cut` tests, full regress with 0 units
   changed, isolation, pg_dump_tap, the difftest pair) runs on origin's head after each wave of
   pushes, by the difftest owner's guard (`tools/difftest-guard.sh` plus the suite). A failure there
   is bisected to its commit, and its owner fixes it or reverts it first, before anything else.
