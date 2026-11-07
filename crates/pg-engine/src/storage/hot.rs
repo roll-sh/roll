@@ -44,7 +44,8 @@ const MAX_RANGES: usize = 64;
 /// Versions written to a kept range with no scan of it since: it is dropped.
 const IDLE_WRITES: u32 = 8192;
 
-/// A kept range: each key's versions (commit ts, value; None a deletion), newest first.
+/// A kept range: each key's versions (commit ts, value; None a deletion), oldest first: a
+/// write appends (no shift of the chain under the commit lock), a read looks from the end.
 #[derive(Default)]
 struct Chains {
     keys: BTreeMap<Bytes, Vec<(u64, Option<Bytes>)>>,
@@ -74,15 +75,18 @@ impl Chains {
             }
         };
         // (A commit writing a key twice: its last write is the version, as in the memtable.)
-        match chain.first_mut() {
-            Some(first) if first.0 == ts => {
-                self.bytes -= first.1.as_ref().map_or(0, Bytes::len) + 16;
-                first.1 = v;
+        match chain.last_mut() {
+            Some(last) if last.0 == ts => {
+                self.bytes -= last.1.as_ref().map_or(0, Bytes::len) + 16;
+                last.1 = v;
             }
-            _ => chain.insert(0, (ts, v)),
+            _ => chain.push((ts, v)),
         }
-        if let Some(keep) = chain.iter().position(|(t, _)| *t <= horizon) {
-            for (t, v) in chain.drain(keep + 1..) {
+        // (The newest version at or before the horizon, and those after it, are kept.)
+        if let Some(keep) = chain.iter().rposition(|(t, _)| *t <= horizon)
+            && keep > 0
+        {
+            for (t, v) in chain.drain(..keep) {
                 self.bytes -= v.as_ref().map_or(0, Bytes::len) + 16;
                 dropped(key, t);
             }
@@ -102,7 +106,7 @@ impl Chains {
         self.keys
             .range::<[u8], _>(range)
             .filter_map(|(k, chain)| {
-                let (_, v) = chain.iter().find(|(t, _)| *t <= ts)?;
+                let (_, v) = newest(chain, ts)?;
                 Some((k.clone(), v.clone()?))
             })
             .collect()
@@ -111,6 +115,12 @@ impl Chains {
     fn too_big(&self) -> bool {
         self.keys.len() > MAX_KEYS || self.bytes > MAX_BYTES
     }
+}
+
+/// A chain's newest version at or before `ts`.
+#[inline]
+fn newest(chain: &[(u64, Option<Bytes>)], ts: u64) -> Option<&(u64, Option<Bytes>)> {
+    chain.iter().rev().find(|(t, _)| *t <= ts)
 }
 
 #[derive(Default)]
@@ -177,7 +187,7 @@ impl Hot {
         let ranges = self.ranges.read();
         let mut c = ranges.get(&p)?.lock();
         c.idle = 0;
-        c.keys.get(key).and_then(|chain| chain.iter().find(|(t, _)| *t <= ts)).map(|v| Some(v.clone()))
+        c.keys.get(key).and_then(|chain| newest(chain, ts)).map(|v| Some(v.clone()))
     }
 
     /// Keep `p`'s range, built from `entries`: every stored version in it, in storage order
