@@ -1497,6 +1497,8 @@ fn message_loop(
 ) -> std::io::Result<()> {
     // After an error in extended protocol, messages are skipped until Sync.
     let mut skipping = false;
+    // (Each message's body, read into the one allocation.)
+    let mut raw: Vec<u8> = Vec::new();
     // The query of the last Parse, for what the server log says of errors after it.
     let mut last_stmt: Option<String> = None;
     let act = engine.activity_slot(pid);

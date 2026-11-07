@@ -4163,6 +4163,36 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
   - **Index builds' table read** decodes only the columns the index's keys, predicate and
     INCLUDE columns read (`Ddl::scan_rows_need`), for every built-in method (agent 144's BRIN
     profile: decoding every column was 15%).
+- **Write path, round 8** (round 24, agent 175; BENCH.md "Bulk writes, round 8"): a plain
+  COPY path, row ids logged further ahead, float8 text written in place.
+  - **Plain COPY** (`CopyInParsed::plain`, `sql::plan::CopyRow`): a COPY FROM without WHERE,
+    a DEFAULT option or domain input checks on its columns parses each record straight into
+    the values that go in (`CopyRow::Values`), not into `Expr`s turned back into values per
+    row (`next_copied`); `prepare` (WHERE, domain checks, DEFAULT markers) is skipped. The
+    general path (`CopyRow::Exprs`) is unchanged; binary COPY still uses it.
+  - **Plain inserts** (`InsertNode::plain`, `insert_plain`): a multi-insert COPY into a table
+    without triggers (foreign keys included), RLS, generated columns, partitions, foreign
+    storage, view checks or unique / exclusion indexes, with no ON CONFLICT or RETURNING,
+    inserts each row with `insert_new`'s steps in their order (defaults, domains, NOT NULL
+    and CHECK, the row id, SSI, index values, the model, the write, the entries) and none of
+    the general path's per-row checks. Its pg_stat counts (`count_insert`, `io_insert`; not a
+    temporary table's) go in as its multi-insert buffer is flushed, as heap_multi_insert
+    counts them (`flush_plain_counts`, also before `next` returns or raises), and a row whose
+    defaults or constraints fail drops the buffer's earlier rows uncounted: PostgreSQL's
+    ExecConstraints fails it before the buffer is flushed, so they never go in (the general
+    path still counts them: `n_tup_ins` one per row too many after such a failure). Anything
+    new that a plain insert's row can run must keep to that or leave the path.
+  - **Row ids** (`Database::nextval_by_one`): each chunk of a table's hidden row ids logged
+    is a store commit; the chunk is now a 16th of the ids handed out (1,024 to 65,536), so a
+    1M-row load commits about 40 times instead of about 1,000. A crash skips the rest of a
+    chunk, as before (ids are hidden).
+  - **float8 text** (`types::text::push_float8`, used by `format_float8` and COPY TO): a
+    float `is_midpoint`'s quick rule rules out (a binary exponent under 2 and a last digit
+    other than 5: nearly all) goes from Ryu's digits straight into the output; the rest as
+    before. `midpoint_quick_check_agrees` compares the two over its 100,000 values.
+  - COPY TO writes integers and floats without the escape pass only when the delimiter can't
+    be in their text (not `-`, `+`, `I`, `N`): before, a `-` delimiter left negative integers
+    unescaped (PostgreSQL writes `\-1`). Golden `a175_copy_plain`.
 - **Result rows stream** (round 19, agent 65): a top-level SELECT's rows go to the client as
   the executor returns them, as PostgreSQL's printtup sends a DataRow per row. A
   `session::RowSink` (`session/sink.rs`, PostgreSQL's DestReceiver) takes them in
@@ -7820,9 +7850,17 @@ index row size checks, merged into the parallel model mode below).
   e8c545d1), clippy without new warnings (three in kept.rs's tests, fixed after), difftest
   smoke, isolation 121 / 122 (intra-grant-inplace, as on origin), full regress on a private
   reference 51,148 / 51,150 with 0 units changed, pg_dump_tap 14,817.
-- **Left**: COPY's and DELETE's per-row upkeep lifted (DELETE's profile: the models 4%,
-  KeySet / lock table / executor the rest); `Heap::prune` allocates seven vectors per page
-  (10% of apply's thread: scratch buffers); a TID-level kill bound for apply's lookups; the
+- **Pruning without VACUUM's summary** (`Heap::prune_page`): heap_page_prune_opt's path no
+  longer runs `prune`'s second pass over the page (the status of every tuple, for VACUUM's
+  `hastup` / `live` / all-visible, which it threw away), and the pruning's per-page vectors
+  are a thread's (`PruneScratch`). Apply's identity lookups: 15% -> 12% of its thread.
+  `ensure`'s per-thread map of tables found modelled uses the fast hasher (2% of a lifted
+  COPY in SipHash).
+- **Left**: COPY's and DELETE's per-row upkeep lifted (a lifted COPY of 1M rows: 3.16 s of
+  host CPU against 2.27 at 400k; its per-row `inserted_with` is 12% of the samples: the
+  tuple's length, compression tracking, `vis_for`'s catalog lookups, the shard lock; then
+  `multi_insert` 5%. DELETE's profile: the models 4%, KeySet / lock table / executor the
+  rest); a TID-level kill bound for apply's lookups; the
   3M rows' mw1_k cost; memory (the engine's peak is above PostgreSQL's at 400k too: not the
   models); lineitem's index-only `count(*)` (needs lineitem modelled: not lifted).
 

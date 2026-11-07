@@ -5362,6 +5362,34 @@ sort and write; PostgreSQL leaves its index entries for VACUUM), COPY in and INS
 (the InsertNode frame per row, parsing, the per-row size model), COPY out and count(*) (the
 scan path), CREATE INDEX (the entries' sort and run, the measure), ANALYZE.
 
+## Bulk writes, round 8 (round 24, agent 175)
+
+HANDOFF.md's "Write path, round 8" has what changed. Method as round 7's: `--profile dist`,
+both servers in containers on the same four cores (8-11) with the same CPU weight and slice,
+psql in a third container on four others; CPU from each container's cgroup, bytes written
+from the cgroup (PostgreSQL) or the process (engine); 1M rows, autovacuum off for both
+tables; rounds interleaved (PostgreSQL, base, new), medians of three. The machine ran at
+load 20-30 throughout, so every number here is about 20% above round 7's quieter ones, on
+both sides alike. "base" is a dist build of the branch just before this round (agent 162's
+dist build of 10:58 today: the branch a few hours before this round's base `dcba895c`).
+
+### Batch 1 (plain COPY, row ids, float8 text)
+
+| step | PostgreSQL wall / CPU (s) | base wall / CPU (s) | batch 1 wall / CPU (s) | CPU ratio base → batch 1 |
+|---|---|---|---|---|
+| COPY in | 1.52 / 1.40 | 4.07 / 3.39 | 3.51 / 2.74 | 2.42 → **1.95** |
+| COPY out | 0.91 / 0.74 | 1.61 / 2.78 | 1.36 / 2.40 | 3.78 → **3.26** |
+| the other ten steps | 11.9 (CPU) | 21.4 (CPU) | 21.4 (CPU) | unchanged within noise |
+
+COPY in: -19% CPU (the rows parsed into values, the plain insert path, row ids logged 64
+times further ahead: 1,000 store commits for 1M rows became 40). COPY out: -14% CPU, of
+which the float formatting is about 8 points; the rest of COPY out's CPU in the engine
+container is background compaction of the earlier steps' files (55% of the samples of the
+COPY out step, `roll-flush`), which is storage work (agent 169), not COPY's. Peak memory
+(the containers' memory.peak, page cache included) 932-947 MB PostgreSQL, 441-451 base,
+458-476 batch 1: within the cgroup's page-cache noise; batch 2's runs record the engine's
+RSS too. Bytes written unchanged (66 → 62 MB for COPY in).
+
 ## Native deparser (round 21, agent 93)
 
 `ast::deparse_expr` / `deparse_stmt` (views, rules, defaults, checks, index expressions,
@@ -8298,7 +8326,9 @@ ends with the publisher's md5 of every row; pages: acc / acc_pkey / hist / hist_
 base subscriber never pruned the pages it updated (HANDOFF). Head's apply thread (host
 profile, LBR): models ~28%, of which pruning on the identity lookups 15% (`Heap::prune`
 1% self, its line-pointer copies and per-page vectors), `inserted_with` 9%, `updated` 3%
-(HOT again); base's were `updated` 18%, `index_insert` 15%, `inserted_with` 10%.
+(HOT again); base's were `updated` 18%, `index_insert` 15%, `inserted_with` 10%. With
+`Heap::prune_page` (no second pass, reused vectors) the identity lookups are 12% (prune 1.5%
+of all samples against 2.3%).
 
 **pgbench** (scale 10, `-M prepared`, 20 s, 2 rounds, the 400k limit; CPU ms per transaction):
 

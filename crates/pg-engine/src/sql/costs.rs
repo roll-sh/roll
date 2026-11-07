@@ -881,7 +881,7 @@ impl Est<'_> {
                     Expr::Cast(..) => self.constant(right).flatten().map(|v| Expr::Const(v, right.ty())),
                     _ => None,
                 };
-                let items: Vec<Expr> = match strip(folded.as_ref().unwrap_or(right)) {
+                let items: Vec<Expr> = match strip(folded.as_ref().unwrap_or(&**right)) {
                     Expr::Array(items, _) => items.clone(),
                     Expr::Const(Value::Array(a), ty) => {
                         let et = ty.elem().cloned().unwrap_or(DataType::Unknown);
