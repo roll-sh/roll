@@ -24,6 +24,9 @@ use crate::types::{DataType, Value};
 pub(crate) struct WhereSite {
     scan: Plan,
     pred: Expr,
+    /// No `$n` but in `pred`: the scan and the nodes over it read none, so a custom plan
+    /// puts its values only where the WHERE is placed.
+    alone: bool,
 }
 
 /// The site as `Binder` notes it: the scan after the WHERE was placed, to check nothing
@@ -47,7 +50,7 @@ impl Sites {
     pub(crate) fn note(&mut self, scan: Plan, pred: Expr, after: &Plan) {
         *self = match self {
             Sites::None if matches!(after, Plan::Scan(_)) => {
-                Sites::One(Box::new(Noted { site: WhereSite { scan, pred }, after: after.clone() }))
+                Sites::One(Box::new(Noted { site: WhereSite { scan, pred, alone: false }, after: after.clone() }))
             }
             _ => Sites::Many,
         };
@@ -58,9 +61,36 @@ impl Sites {
         let Sites::One(n) = self else { return None };
         let n = *n;
         let (Plan::Scan(after), Some(now)) = (&n.after, base_scan(plan)) else { return None };
-        let same = format!("{after:?}") == format!("{now:?}");
-        same.then(|| Arc::new(n.site))
+        if format!("{after:?}") != format!("{now:?}") {
+            return None;
+        }
+        let mut site = n.site;
+        site.alone = match &site.scan {
+            Plan::Scan(s) => with_base(plan, s.clone()).is_some_and(|mut p| {
+                let mut found = false;
+                crate::sql::paths::sublinkcopy::plan_exprs_mut(&mut p, &mut |e| found |= has_param(e));
+                !found
+            }),
+            _ => false,
+        };
+        Some(Arc::new(site))
     }
+}
+
+/// `p` with `s` as its base scan: the nodes over it copied, what they read besides shared.
+fn with_base(p: &Plan, s: Box<ScanPlan>) -> Option<Plan> {
+    Some(match p {
+        Plan::Scan(_) => Plan::Scan(s),
+        Plan::Project { input, .. } | Plan::Agg { input, .. } | Plan::Sort { input, .. } | Plan::Limit { input, .. } => {
+            let below = Arc::new(with_base(input, s)?);
+            let mut n = p.clone();
+            if let Plan::Project { input, .. } | Plan::Agg { input, .. } | Plan::Sort { input, .. } | Plan::Limit { input, .. } = &mut n {
+                *input = below;
+            }
+            n
+        }
+        _ => return None,
+    })
 }
 
 /// The one scan under a chain of the nodes a single-level SELECT puts over it.
@@ -138,11 +168,19 @@ impl Analyzed {
         let sub = Subst { vals, ctx };
         let pred = sub.expr(&site.pred, true)?;
         let mut scan = site.scan.clone();
-        sub.plan(&mut scan)?;
+        if !site.alone {
+            sub.plan(&mut scan)?;
+        }
         let Plan::Scan(placed) = super::optimize::add_filter(&self.cat, scan, pred) else { return Err(Bail::Rebind) };
-        let mut plan = self.plan.clone();
-        sub.plan(&mut plan)?;
-        *base_scan_mut(&mut plan).ok_or(Bail::Never)? = placed;
+        // (With no `$n` outside the WHERE, the nodes over the scan are the analysis's.)
+        let plan = if site.alone {
+            with_base(&self.plan, placed).ok_or(Bail::Never)?
+        } else {
+            let mut plan = self.plan.clone();
+            sub.plan(&mut plan)?;
+            *base_scan_mut(&mut plan).ok_or(Bail::Never)? = placed;
+            plan
+        };
         Ok(Analyzed {
             plan,
             cols: self.cols.clone(),

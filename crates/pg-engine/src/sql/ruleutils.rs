@@ -1021,8 +1021,19 @@ impl Deparser<'_, '_> {
                 if !*explicit && (!showimplicit || from.same_base(to)) {
                     return self.paren(inner, false, Parent::Cast);
                 }
-                // `get_coercion_expr`.
-                if let Expr::Const(v, t) = &**inner
+                // (A planned CoerceViaIO left unfolded, its input routine not immutable: the
+                // value's output routine folded, a cstring, as eval_const_expressions leaves it.)
+                if self.subplans.is_some()
+                    && let Expr::Const(v, t) = &**inner
+                    && !v.is_null()
+                    && matches!(t, DataType::Text | DataType::Varchar(_) | DataType::Bpchar(_))
+                    && crate::sql::costs::io_cast(from, to)
+                    && !crate::sql::expr::cast_immutable(from, to)
+                {
+                    self.open();
+                    self.constant(v, &DataType::Cstring, 0);
+                    self.close();
+                } else if let Expr::Const(v, t) = &**inner
                     && t.same_base(to)
                     && t.typmod() < 0
                 {

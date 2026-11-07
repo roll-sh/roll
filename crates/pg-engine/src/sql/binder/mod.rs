@@ -2438,6 +2438,17 @@ impl<'b, 'a> Binder<'b, 'a> {
                 self.note_builtin_call(func);
             }
         }
+        // (A custom plan folds a typed value's cast only when the cast is immutable, as
+        // eval_const_expressions does: `$1::int[]` of a text value stays a call of the
+        // stable array_in, which EXPLAIN shows over the value as a cstring. A literal of
+        // unknown type takes its type as it is parsed.)
+        if self.param_consts
+            && matches!(e, Expr::Const(ref v, _) if !v.is_null())
+            && !matches!(from, DataType::Unknown)
+            && !crate::sql::expr::cast_immutable(&from, &to)
+        {
+            return Ok(Expr::Cast(Box::new(e), from, to, explicit));
+        }
         if let Expr::Const(v, _) = &e
             && !self.deparse
         {

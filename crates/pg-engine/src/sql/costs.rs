@@ -641,7 +641,7 @@ pub(crate) fn strip(e: &Expr) -> &Expr {
 }
 
 /// A cast to or from a string type that pg_cast has no function for: CoerceViaIO.
-fn io_cast(from: &DataType, to: &DataType) -> bool {
+pub(crate) fn io_cast(from: &DataType, to: &DataType) -> bool {
     use DataType as T;
     let string = |t: &DataType| matches!(t, T::Text | T::Varchar(_) | T::Bpchar(_));
     let with_function = |t: &DataType| {
@@ -681,6 +681,18 @@ fn constant(e: &Expr) -> Option<Option<Value>> {
 }
 
 impl Est<'_> {
+    /// `constant`, a cast of a constant left to run (a custom plan's value through a stable
+    /// input routine) evaluated as estimate_expression_value evaluates it.
+    fn constant(&self, e: &Expr) -> Option<Option<Value>> {
+        if let Expr::Cast(x, from, to, explicit) = strip(e)
+            && let Expr::Const(v, _) = strip(x)
+            && !v.is_null()
+        {
+            return Some(crate::types::cast::cast_value(v.clone(), from, to, self.fmt, *explicit).ok());
+        }
+        constant(e)
+    }
+
     fn var(&self, e: &Expr) -> Option<VarRef> {
         match strip(e) {
             Expr::Col(i, _) => (self.vars)(*i),
@@ -865,7 +877,11 @@ impl Est<'_> {
                     return s;
                 }
                 // scalararraysel: equality ANY of disjoint values sums, else combine.
-                let items: Vec<Expr> = match strip(right) {
+                let folded = match strip(right) {
+                    Expr::Cast(..) => self.constant(right).flatten().map(|v| Expr::Const(v, right.ty())),
+                    _ => None,
+                };
+                let items: Vec<Expr> = match strip(folded.as_ref().unwrap_or(right)) {
                     Expr::Array(items, _) => items.clone(),
                     Expr::Const(Value::Array(a), ty) => {
                         let et = ty.elem().cloned().unwrap_or(DataType::Unknown);
@@ -1132,9 +1148,9 @@ impl Est<'_> {
 
     fn binary_op(&self, op: &str, l: &Expr, r: &Expr) -> f64 {
         let mut varonleft = true;
-        let (var, c, op) = match (self.var(l), constant(r)) {
+        let (var, c, op) = match (self.var(l), self.constant(r)) {
             (Some(v), Some(c)) => (v, c, op),
-            _ => match (constant(l), self.var(r)) {
+            _ => match (self.constant(l), self.var(r)) {
                 (Some(c), Some(v)) => {
                     varonleft = false;
                     (v, c, commute(op))
