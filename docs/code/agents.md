@@ -1695,15 +1695,18 @@ The surface has three views:
     so it doesn't take a column that's empty under it. Growing down, projects sit side by side,
     every grid in a row starting at one line, or wrap into rows of 2–6 under the machine (a trunk
     down the indent to a bus over each row). A machine with one project (or the one drilled into)
-    sits beside it as a band, the project's grid or sections under the band with the whole width.
+    sits beside it as a band, the project's grid or sections under the band with the whole width;
+    listed down the screen, a machine with more projects sits beside its first one too, the others
+    listed under it (its grid a step further in, the machine's trunk left of it).
     A phone lists projects down. Machines wrap into columns (rows); machines with nothing open
-    share one stack, last. The canvas lays out every arrangement for its real room (above the
+    share one stack, placed where the canvas grows least (often under a short machine beside a
+    tall one). The canvas lays out every arrangement for its real room (above the
     prompt bar, which it follows as it mounts and grows, beside any panel) and judges each at the
     zoom Fit will use: constraints first, counted (cut off at the right; a grid of two or more one
     column wide where the screen has room for two from where it starts; an empty rectangle a sixth
     of what's framed and a third of it each way; below 100 %, less than 60 % of the room filled;
-    what matters out of view; only part of the canvas shown), then the biggest zoom. A wrap must
-    earn 2 %. A thread's requests, terminals and pins
+    what matters out of view; only part of the canvas shown; a cut column weighs four), then the
+    biggest zoom. A wrap must earn 2 %. A thread's requests, terminals and pins
     stack under it in its cell, a grid's gap apart; its forks and subagents are a chip on its card,
     a failed one marking the card and putting it under Failed (`absorbChildren`
     in `lib/agents-graph.ts`), so nothing hangs indented in the gutter, and revealing or opening
@@ -1718,7 +1721,11 @@ The surface has three views:
   - **Sections.** In a project's space each status group is a section: its header row (dot, name
     at a title's size, count, a hairline as wide as its cards) with its cards in a grid under it,
     flush left; no edge from the header to each card, and an edge into it meets its label, never
-    its rule. Sections are 80 px apart, at least twice a grid's gaps.
+    its rule. Sections are 80 px apart, at least twice a grid's gaps. Growing right they share a
+    row while they fit in the grid's width (a one-card Failed left a row of empty cells), a section
+    narrowing its grid to fit beside the one before it when that's no taller than a row of its
+    own; each has its own edge (the first in a row from the trunk, the rest along a bus above the
+    row and down the gap before them).
   - **Zooming out never enlarges text** (the user's rule): everything shrinks in proportion, as in
     Figma. Below 55 % (`[data-brief]`) a card keeps its title; each other row becomes a bar as long
     as its text in the row's colour, chips filled bars, and buttons, inputs, icons and lone dots go;
@@ -1730,13 +1737,17 @@ The surface has three views:
   - **Fit** (`fitPlan`, `fitTo`) frames everything, filling most of the room above the prompt bar
     (6 % of it clear each side, at least 40 px), if that's 65 % or more (100 % on a phone): a few
     points under where cards read best (75 %) beats a cut-off canvas. Else, from the top, it zooms out as far as 55 % (titles still read) to keep
-    everything running, waiting on you or failed (and the open card) in view, clear of the minimap,
-    and the minimap and panning reach the rest. The planner scores arrangements at that zoom, and
+    everything running, waiting on you or failed (a conflicting change, a failed fork or subagent
+    on the card too; and the open card) in view, clear of the minimap, and as far as 50 % so no
+    column is cut at the right (centred, 24 px in from each side); the minimap and panning reach
+    the rest. The canvas ends above the prompt bar: under it, the zoom bar and a phone's waiting
+    request it fades into its own colour over 24 px (`data-chrome-band`), so nothing reads in the
+    gaps between them, and Fit plans for the room above the fade. The planner scores arrangements at that zoom, and
     growing right it may turn the canvas into a list down the screen (each card over what it holds,
     so the grids get the whole width) when the cards beside them would starve them; a phone is
     always that list, every card one width. Pressing Fit again, when it couldn't show everything,
-    lays the canvas out for everything at once and frames it; when everything shows, it only
-    refits. Fit follows the work again: cards that grow or arrive stay framed until the view is
+    lays the canvas out for everything at once and frames it (a phone: two columns, as wide as the
+    screen, 45–55 %); when everything shows, it only refits. Fit follows the work again: cards that grow or arrive stay framed until the view is
     moved by hand. Off screen a card keeps its last real size (its contents are skipped there), so
     the layout settles.
   - **Getting around.** While the canvas is bigger than the screen a minimap sits over the zoom bar:

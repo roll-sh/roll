@@ -394,8 +394,21 @@ export class CanvasEngine {
     this.kick();
   }
 
-  zoomBy(f: number, sx = this.w / 2, sy = this.h / 2, animate = true) {
-    this.setView(zoomAt(this.viewTo ?? this.view, (this.viewTo ?? this.view).k * f, sx, sy), animate);
+  /**
+   * Zoom about a point; without one (the zoom keys and buttons), about the middle, unless the
+   * canvas's top-left is on screen: then about it, so zooming in from Fit keeps the machines and
+   * projects on the left in view (about the middle pushed them off).
+   */
+  zoomBy(f: number, sx?: number, sy?: number, animate = true) {
+    const v = this.viewTo ?? this.view;
+    let x0 = Infinity;
+    let y0 = Infinity;
+    for (const p of this.tgt.values()) (x0 = Math.min(x0, p.x)), (y0 = Math.min(y0, p.y));
+    const left = x0 * v.k + v.x;
+    const top = y0 * v.k + v.y;
+    const ax = sx ?? (left >= 0 && left < this.w / 2 ? left : this.w / 2);
+    const ay = sy ?? (top >= 0 && top < this.h / 2 ? top : this.h / 2);
+    this.setView(zoomAt(v, v.k * f, ax, ay), animate);
   }
 
   panBy(dx: number, dy: number, animate = false) {

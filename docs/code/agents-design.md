@@ -138,7 +138,8 @@ The rules are in agents.md, "Canvas" › "At scale". How it looks:
   and Running, which pulses calmly; red Failed; green Done; subtle Quiet), the name at a card
   title's size (14 px, weight 600), the count in mono, over a `--line-2` hairline as wide as the
   section's cards (`--section-w`). No fill, no frame, no edges to its cards. Sections are 80 px
-  apart (at least twice a grid's gaps), so each reads as one.
+  apart (at least twice a grid's gaps), side by side as well as one under another, so each reads
+  as one, and each has its own edge into its label.
 - **Thread cards** are 296 × 128 on the canvas whatever they say (`THREAD_H`), so a grid's rows
   line up. They say what tells them apart, not where they sit (the tree and the identity edge say
   that): provider · model (or "⑂ Fork of …" for a fork on its own card) and one status (the one
@@ -165,7 +166,9 @@ The rules are in agents.md, "Canvas" › "At scale". How it looks:
   40 % (`[data-greek]`) a card is its frame, its identity, its marks and its title as one even bar
   per line, as long as the line (`--fg` at 22 %, 28 % in light mode, a band 0.62 em high, cut per
   line in both engines). Waiting, busy and failed cards draw their tone 1 px inside the border below
-  55 %, 2 px below 40 % and 3 px below 30 % (about a screen pixel); a section header keeps its dot.
+  55 %, 2 px below 40 % and 3 px below 30 % (about a screen pixel); below 40 % only waiting and
+  failed keep it (80 running cards far out read as a sea of blue; running still shows in its
+  section's dot and the minimap); a section header keeps its dot.
   In light mode the frames go to `--fg` 26 % below 55 % and 38 % below 40 % (faint, an identity edge
   alone read as a "["), and done text mixes `--ok` with `--fg` for contrast. The identity edge
   widens to 6 px world below 40 % and 10 px below 30 %, so it stays about 2 screen px.
@@ -176,6 +179,12 @@ The rules are in agents.md, "Canvas" › "At scale". How it looks:
   when everything fits, on a phone, and on a canvas under 1200 px (beside a panel).
 - **Next waiting**: an accent `CircleDot` and the count in mono in the zoom bar, only while
   something waits.
+- **Under the bars** (`data-chrome-band`): the canvas ends above the prompt bar. From 24 px above
+  the dock (the prompt bar, and a phone's waiting request over it) to the canvas's bottom it fades
+  into `--canvas` and takes presses, so no card reads in the gaps between the prompt bar, the zoom
+  bar and a docked sheet, and a hidden card can't be opened (a drag there still pans). It's the
+  scroll fade T3 puts under its top bar, not a bar of its own: no fill of another colour, no line.
+  The zoom bar and minimap fill at 97 % like the prompt bar (WebKit doesn't always blur behind them).
 - **Breadcrumb**: the views bar's chip reads "All projects › site ×"; "All projects" is a button.
 
 ## Identity

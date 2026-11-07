@@ -435,6 +435,8 @@ export function layoutCanvas(tree: TreeLike, size: (key: string) => Size, shape:
         // Narrower beside the one before it, if that's no taller than a row of its own.
         let fit = cell.cols - 1;
         while (fit > 0 && sized(c, fit).w > room + 0.5) fit--;
+        // Not one card alone on its last row (5 in 3 + 2, not 4 + 1).
+        if (fit > 2 && cell.mine.length % fit === 1 && cell.mine.length > fit) fit--;
         if (fit > 0 && sized(c, fit).h <= thick + g.section + sized(c, cell.cols).h) cell.cols = fit;
       }
       const l = lane(c);

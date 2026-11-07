@@ -727,6 +727,15 @@ body {
 [data-card] [data-drag][data-tone="error"] {
   --tone-c: color-mix(in oklab, var(--danger) 50%, transparent);
 }
+/* Far out only what needs you keeps its tone (waiting, failed): 80 running cards read as a sea of
+   blue. Running still shows in its section's dot and the minimap. */
+[data-greek] [data-card] [data-drag][data-tone="busy"] {
+  --tone-c: transparent;
+  border-color: var(--line-2);
+}
+[data-greek] [data-card] [data-drag][data-tone="busy"]::after {
+  display: none;
+}
 /* An offline machine's dashed frame thins away first: under it, the same calm line in its grey. */
 [data-card] [data-drag][data-tone="offline"] {
   --tone-c: color-mix(in oklab, var(--muted) 45%, transparent);
@@ -737,7 +746,7 @@ body {
   [data-brief] [data-card] [data-drag]:not([data-tone]) {
     border-color: color-mix(in oklab, var(--fg) 26%, transparent);
   }
-  [data-greek] [data-card] [data-drag]:not([data-tone]) {
+  [data-greek] [data-card] [data-drag]:is(:not([data-tone]), [data-tone="busy"]) {
     border-color: color-mix(in oklab, var(--fg) 38%, transparent);
   }
   [data-greek] [data-card] :is([data-title], [data-title] *) {
