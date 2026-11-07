@@ -9535,7 +9535,10 @@ impl Planner<'_, '_> {
                                 } else {
                                     tableoid.then_some(1.0)
                                 };
-                                (6, None, d)
+                                // (A foreign row mark's copy: its width is the leaf's
+                                // whole row, `fdw_whole_row_width`.)
+                                let copy = sp.with_key && k == ncols && sp.fdw.as_ref().is_some_and(|f| f.copy_mark);
+                                (if copy { 0 } else { 6 }, None, d)
                             }
                         })
                         .collect();
@@ -9631,6 +9634,9 @@ impl Planner<'_, '_> {
                 }
                 _ => 0,
             };
+            // (A foreign table's whole row under a ROW_MARK_COPY mark or as an UPDATE's
+            // wholerow.)
+            let whole = whole + scan.as_ref().map_or(0, |(sp, _)| self.fdw_whole_row_width(sp));
             // (cost_subqueryscan: a subquery's scan whose reltarget isn't the subquery's
             // whole select list, an output nothing above reads, is no trivial one either
             // (set_subquery_pathlist's trivial_pathtarget), though setrefs.c may still remove

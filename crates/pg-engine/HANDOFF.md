@@ -1046,6 +1046,56 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
   BENCH.md "postgres_fdw, round 7" (`tools/fdwtraffic/compare.sh`: both servers in
   containers, each one's CPU and peak memory from its cgroup, phases picked by `PGT_PHASES`
   for profiles).
+  Round 27 (agent 172, postgres_fdw round 8): `UPDATE ... FROM` / `DELETE ... USING` sent as
+  one remote statement. The level's UPDATE / DELETE target joins remotely: `plan_level` sets
+  `Planner::fdw_dml_target` (`direct::join_target`: a postgres_fdw target the statement could
+  be sent whole for: no row triggers, RLS, check options, stored generated columns or
+  inheritance), so `fdw_base` takes its `with_key` scan (not its sorted or parameterized
+  paths, whose pushdown would replace the target's). The binder gives the target range
+  table index 1 (`add_rte` before the FROM items: PostgreSQL's `r1`). A Foreign Scan of a
+  join holding it fetches `r1.ctid` as the row's key (`JoinScan::key_of`, `Field::Key`,
+  `modify::row_key`) and locks it (`FOR UPDATE OF r1`), so a statement that can't be sent
+  whole (a SET or condition that doesn't ship) updates per row over the pushed join.
+  `direct::update` / `delete` fall to `directjoin::join_update` / `join_delete` when the source
+  is such a join with nothing checked locally: deparseDirectUpdateSql's `UPDATE t r1 SET ...
+  FROM <the others> WHERE ...` (`Sql::rels_without`, deparseFromExprForRel with an
+  ignore_rel: the inner joins' clauses holding the target go to the WHERE after the join's
+  remote conditions), RETURNING what build_remote_returning returns (the target's columns,
+  others' columns, another relation's whole row as its `CASE WHEN (rN.*)::text ...`;
+  `JoinBack` puts them into the source row RETURNING reads). EXPLAIN: the Foreign Update /
+  Delete of a join names no relation and has its scan path's width. A per-row DELETE takes
+  RETURNING's values from the remote DELETE (`exec/dml.rs` `foreign_delete_returning`,
+  store_returning_result): the pushed join fetches only the ctid. Widths: a foreign scan's
+  reltarget has its whole row (24 + data width) when its row mark copies it (locked, or
+  another relation of a locking level / UPDATE / DELETE: `Planner::fdw_whole_row_width`,
+  `rowmarks::key`'s `copy_mark`) or it is an UPDATE's target (`fdw_wholerow_target`), and 6
+  for a target's ctid: in the never-analyzed 10-page size and in the join search's widths
+  (`FOR UPDATE OF loc` over `ft`: `rows=538 width=128` as PostgreSQL's). Relations: lines
+  are schema-qualified only under VERBOSE (postgresExplainForeignScan). A foreign join's
+  cost charged its clauses' cpu_operator_cost twice (`costs::qual_cost` is per tuple
+  already): a join of two 20k / 2k-row tables cost 1,134 against PostgreSQL's 100,884, so
+  the engine pushed joins PostgreSQL runs locally (with analyzed tables, or under a locking
+  level with the copy widths above); now its estimates are PostgreSQL's. `fdw_loopback`'s
+  two pushed-join recheck tests set `fdw_tuple_cost '10'`, under which PostgreSQL pushes
+  those joins too (without it neither does). A declared cursor's CLOSE closes its scans'
+  remote cursors (EndForeignScan: `scan::end_scans` from `session/utility.rs`
+  `close_cursor` through `cursor::Lazy::end_foreign_scans`; `Conns::declared`, by the scan's
+  plan address, set when the DECLARE goes out and dropped at the scan's end): the CLOSE goes
+  with the connection's next command, and on a lost connection fails now as libpq's send,
+  "no connection to the server" with `remote SQL command: CLOSE c1` (2037).
+  Contrib postgres_fdw 1,950 / 2,053 (598, 606, 616, 622, 2037 gained, none lost against a
+  base run), dblink 218, file_fdw 187. Verified with the targeted train (clippy, release
+  `fdw_loopback`, the three contrib suites, fdw traffic in containers); the full suite is
+  162's train.
+  Still open: a per-row UPDATE / DELETE over a pushed join shows PostgreSQL's
+  `ft.ctid, ft.*, ft2.*` junk and EPQ outer plan there (628, 636: the target's whole row and
+  the others' copies in the remote SELECT, `with_copy_marks` for a DML level); 1071 / 1074 /
+  1126. A pushed join's width counts a text column at its type's 32 where PostgreSQL has the
+  foreign table's ANALYZE width (`SELECT ft.v FROM ft JOIN fs ...`: 32 against 11), and an
+  ANALYZE of a foreign table fetches every row (1.7 MB in against PostgreSQL's 0.9 MB:
+  analyze_sampling). The remote statement itself is the engine's UPDATE ... FROM, about 3x
+  PostgreSQL's per statement on the remote side (1.3 against 0.4 ms for 10 rows by a nested
+  loop of index scans; routed to 165 / 167). Numbers: BENCH.md "postgres_fdw, round 8".
 - **file_fdw** (round 19, agent 66): native (`src/ext/file_fdw.rs`), 187 / 187 of its
   contrib test. Foreign scans of a file_fdw table read the file with COPY FROM's parser
   (`session/copy.rs` `parse_copy_data`, shared with COPY) a chunk at a time; the file is a
@@ -4193,6 +4243,26 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
   - COPY TO writes integers and floats without the escape pass only when the delimiter can't
     be in their text (not `-`, `+`, `I`, `N`): before, a `-` delimiter left negative integers
     unescaped (PostgreSQL writes `\-1`). Golden `a175_copy_plain`.
+  - **Batch 2.** INSERT … SELECT takes the plain insert path too, under `model_deferrable`'s
+    rule (its source runs nothing volatile and doesn't read the table) and the same table
+    conditions; its counts go in per row while the table has CHECK constraints, else a
+    batch at a time, before anything leaves `next`. A DELETE's row lock
+    (`LockManager::lock_row`) takes one probe of the compact set when the transaction's only
+    compact set is the locking (sub)transaction's own, as without savepoints (every set is
+    made with its holder's transaction lock held, and both go together), and the tuple lock's
+    key is made only for a wait. ANALYZE of a big table reads chosen pages next to each other
+    with one scan (`analyze_columns`): a 1M-row table, every page chosen, was one range scan
+    per page, a seek of every source each.
+  - Not done (round 8): DELETE's index-entry tombstones left for VACUUM (needs agent 163's
+    index readers to check the row; proposed through the coordinator, not started); the
+    source scan of DELETE (parallel workers, about half of its CPU: agents 149 / 169); COPY
+    out from stored bytes (the executor's decoded rows are most of what's left in the
+    connection thread; background compaction of the earlier steps' files is most of the
+    engine container's CPU during the step: agent 169); spilling parallel index builds past
+    `maintenance_work_mem`; writing index entries once (agent 169's store side). A parallel
+    build keeping its heap measure for the next (`txn::unchanged`, as VACUUM's is) would save
+    sizing the rows again (7% of a CREATE UNIQUE INDEX after a CREATE INDEX), but the build's
+    own linked run invalidates the table's watch when it commits; not done.
 - **Result rows stream** (round 19, agent 65): a top-level SELECT's rows go to the client as
   the executor returns them, as PostgreSQL's printtup sends a DataRow per row. A
   `session::RowSink` (`session/sink.rs`, PostgreSQL's DestReceiver) takes them in

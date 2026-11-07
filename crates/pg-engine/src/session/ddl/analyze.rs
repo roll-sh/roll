@@ -229,17 +229,38 @@ impl Ddl<'_, '_> {
             };
             if let Some(ranges) = ranges {
                 let mut seen = 0usize;
-                for (a, z) in &ranges {
-                    self.ctx.check()?;
-                    blocks_done += 1;
-                    progress.set(2, blocks_done);
-                    self.vacuum_delay_point(1)?;
-                    let scan = self.ctx.txn.borrow().scan(a, z);
+                // (Chosen pages next to each other are read by one scan, each page's rows
+                // those before its range's end: a seek per page was most of a big table's
+                // ANALYZE when it reads every page.)
+                let mut i = 0;
+                while i < ranges.len() {
+                    let mut j = i + 1;
+                    while j < ranges.len() && ranges[j].0 == ranges[j - 1].1 {
+                        j += 1;
+                    }
+                    let mut at = i;
+                    let mut page = || -> Result<()> {
+                        self.ctx.check()?;
+                        blocks_done += 1;
+                        progress.set(2, blocks_done);
+                        self.vacuum_delay_point(1)
+                    };
+                    page()?;
+                    let scan = self.ctx.txn.borrow().scan(&ranges[i].0, &ranges[j - 1].1);
                     for r in scan {
-                        let (_, bytes) = r?;
+                        let (k, bytes) = r?;
+                        while k >= ranges[at].1 {
+                            at += 1;
+                            page()?;
+                        }
                         seen += 1;
                         offer(&mut || Err(bytes.to_vec()));
                     }
+                    // (The run's last pages without rows.)
+                    for _ in at + 1..j {
+                        page()?;
+                    }
+                    i = j;
                 }
                 // (totalrows = floor(liverows / blocks read * total blocks + 0.5).)
                 all_rows = (seen as f64 / ranges.len().max(1) as f64 * pages as f64 + 0.5) as usize;

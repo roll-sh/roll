@@ -137,8 +137,13 @@ impl Analyzed {
 
     /// Plan the statement (again).
     pub fn plan(&self, ctx: &ExecCtx) -> Result<BoundQuery> {
+        // (Debug builds: the choice of a lone scan, the catalog and the sizes planning read,
+        // for the checks below.)
         #[cfg(debug_assertions)]
-        let (planned, choice) = crate::sql::paths::keeping_choice(|| self.planned(self.plan.clone(), ctx));
+        let cat0 = ctx.catalog();
+        #[cfg(debug_assertions)]
+        let ((planned, reads), choice) =
+            crate::sql::paths::keeping_choice(|| crate::sql::literals::observing(|| self.planned(self.plan.clone(), ctx)));
         #[cfg(debug_assertions)]
         let (plan, hidden_rtes) = planned?;
         #[cfg(not(debug_assertions))]
@@ -148,8 +153,9 @@ impl Analyzed {
         let plan = Arc::new(plan);
         #[cfg(debug_assertions)]
         {
-            crate::sql::paths::check_planned_total(&plan, ctx);
-            crate::sql::paths::check_rechoose(&plan, choice, ctx);
+            let settled = || crate::sql::literals::unchanged_since(ctx, &cat0, &reads);
+            crate::sql::paths::check_planned_total(&plan, ctx, &settled);
+            crate::sql::paths::check_rechoose(&plan, choice, ctx, &settled);
         }
         Ok(BoundQuery {
             plan,
@@ -166,8 +172,13 @@ impl Analyzed {
     /// `plan`, once.
     pub fn into_bound(mut self, ctx: &ExecCtx) -> Result<BoundQuery> {
         let plan = std::mem::replace(&mut self.plan, Plan::One);
+        // (Debug builds: the choice of a lone scan, the catalog and the sizes planning read,
+        // for the checks below.)
         #[cfg(debug_assertions)]
-        let (planned, choice) = crate::sql::paths::keeping_choice(|| self.planned(plan, ctx));
+        let cat0 = ctx.catalog();
+        #[cfg(debug_assertions)]
+        let ((planned, reads), choice) =
+            crate::sql::paths::keeping_choice(|| crate::sql::literals::observing(|| self.planned(plan, ctx)));
         #[cfg(debug_assertions)]
         let (plan, hidden_rtes) = planned?;
         #[cfg(not(debug_assertions))]
@@ -176,8 +187,9 @@ impl Analyzed {
         let plan = Arc::new(plan);
         #[cfg(debug_assertions)]
         {
-            crate::sql::paths::check_planned_total(&plan, ctx);
-            crate::sql::paths::check_rechoose(&plan, choice, ctx);
+            let settled = || crate::sql::literals::unchanged_since(ctx, &cat0, &reads);
+            crate::sql::paths::check_planned_total(&plan, ctx, &settled);
+            crate::sql::paths::check_rechoose(&plan, choice, ctx, &settled);
         }
         Ok(BoundQuery {
             plan,

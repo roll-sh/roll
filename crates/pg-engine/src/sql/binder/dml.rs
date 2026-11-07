@@ -2421,7 +2421,9 @@ impl Binder<'_, '_> {
                     params: Default::default(),
                     reltarget: Default::default(),
                     fdw: None,
-                    rtindex: Default::default(),
+                    // (The result relation is the level's first range table entry, before
+                    // the FROM / USING items: a foreign join names it `r1`.)
+                    rtindex: crate::sql::plan::RtIndex(self.add_rte()),
                     est: Default::default(),
                 };
                 let mut scan = scan;

@@ -1972,6 +1972,13 @@ struct Planner<'c, 'a> {
     /// The range table indexes of the level's sources of no table's rows with a whole-row
     /// mark (ROW_MARK_COPY, `rowmarks::copied`): their whole row's width is in the paths'.
     copy_marks: std::cell::RefCell<std::collections::HashSet<usize>>,
+    /// The level's UPDATE / DELETE target, a postgres_fdw table its wrapper may join
+    /// remotely with the statement's other foreign relations (`postgres_fdw::direct::join_target`):
+    /// its scan returning the row's key goes into foreign joins, the key as `rN.ctid`.
+    fdw_dml_target: std::cell::Cell<Option<u32>>,
+    /// The level's UPDATE target that is a foreign table (or DELETE target with row
+    /// triggers of it), whose whole row goes up (add_row_identity_columns' wholerow).
+    fdw_wholerow_target: std::cell::Cell<Option<u32>>,
     /// Partitionwise joins made, by their first child's address: as FROM items of joins
     /// above (`joinpath::PwJoin`).
     /// Partitionwise joins' Appends (by their `pw` id) and how they are partitioned.
@@ -2043,6 +2050,8 @@ impl<'c, 'a> Planner<'c, 'a> {
             whole_rows: Default::default(),
             ref_marks: Default::default(),
             copy_marks: Default::default(),
+            fdw_dml_target: Default::default(),
+            fdw_wholerow_target: Default::default(),
             pw_joins: Default::default(),
             absorbed: Default::default(),
             post_cost: Default::default(),
@@ -3624,6 +3633,29 @@ fn limit_costs(p: &Path, count: f64, offset: f64) -> (f64, f64) {
 // ── building the relation from a scan ──
 
 impl Planner<'_, '_> {
+    /// set_rel_width's whole-row Var of a foreign table's scan: 24 bytes of tuple header and
+    /// its columns' widths (get_relation_data_width) when its row mark copies the row
+    /// (ROW_MARK_COPY: locked, or another relation of a locking level or of an UPDATE /
+    /// DELETE) or it is the target whose whole row goes up (`Planner::fdw_wholerow_target`).
+    pub(super) fn fdw_whole_row_width(&self, s: &ScanPlan) -> u32 {
+        let t = &s.table;
+        if !t.is_foreign() {
+            return 0;
+        }
+        let copy = Self::fdw_copy_marked(s) || (!s.with_key && (s.mark.is_some() || (s.rti.0 != 0 && self.ref_marks.borrow().contains(&s.rti.0))));
+        let target = s.with_key && !copy && self.fdw_wholerow_target.get() == Some(t.oid);
+        if !copy && !target {
+            return 0;
+        }
+        24 + (0..t.columns.len()).filter(|&i| !t.columns[i].dropped).map(|i| costs::col_width(&self.cat, t, i)).sum::<u32>()
+    }
+
+    /// A foreign scan keyed by its row mark's copy (`rowmarks::key`: its key the whole row,
+    /// not a ctid).
+    fn fdw_copy_marked(s: &ScanPlan) -> bool {
+        s.fdw.as_ref().is_some_and(|f| f.copy_mark)
+    }
+
     /// What a relation's restriction clauses decide: its rows and their evaluation cost.
     fn estimate_quals(&self, rel: &mut Rel) {
         rel.rows = costs::clamp_rows(rel.size.tuples * self.sel(rel, &rel.quals));
@@ -3659,12 +3691,15 @@ impl Planner<'_, '_> {
         // columns the scan returns (estimate_size's reltarget width).
         let size = match t.is_foreign() {
             true => {
+                // (set_rel_width's reltarget: a target's ctid and a whole-row Var too.)
                 let width = need
                     .iter()
                     .enumerate()
                     .filter(|(_, n)| **n)
                     .map(|(i, _)| costs::col_width(&self.cat, &t, i))
-                    .sum();
+                    .sum::<u32>()
+                    + if s.with_key && !Self::fdw_copy_marked(s) { 6 } else { 0 }
+                    + self.fdw_whole_row_width(s);
                 // (With use_remote_estimate the remote EXPLAIN sizes it: no 10-page guess.)
                 let remote = crate::ext::fdw::wrapper_of(&self.cat, &t).is_some()
                     && crate::ext::postgres_fdw::join::opts(&self.cat, &t).use_remote_estimate;
@@ -6621,13 +6656,14 @@ pub fn planned_total(plan: &Plan, ctx: &ExecCtx, built: bool) -> Option<f64> {
 }
 
 /// Debug builds: the cost of the path the planner chose for a lone scan (`planned_total`
-/// of a plan just made) is the one EXPLAIN shows, and no Gather goes over it.
+/// of a plan just made) is the one EXPLAIN shows, and no Gather goes over it, unless what
+/// planning read changed since (`settled`: `literals::unchanged_since`, checked after).
 #[cfg(debug_assertions)]
-pub fn check_planned_total(plan: &Arc<Plan>, ctx: &ExecCtx) {
+pub fn check_planned_total(plan: &Arc<Plan>, ctx: &ExecCtx, settled: &dyn Fn() -> bool) {
     if let Some(t) = planned_total(plan, ctx, true) {
         let (e, g) = crate::sql::explain::total_and_gathers(plan, ctx);
         assert!(
-            g.is_empty() && (e - t).abs() <= 1e-9 * e.abs().max(1.0),
+            (g.is_empty() && (e - t).abs() <= 1e-9 * e.abs().max(1.0)) || !settled(),
             "the planner's cost {t} of a lone scan isn't EXPLAIN's {e} ({} Gathers): {plan:?}",
             g.len()
         );
@@ -6736,7 +6772,7 @@ fn indexes_read(s: &ScanPlan) -> Vec<u32> {
 /// Debug builds: a plan's scan chosen again for its own values (`ScanChoice::rechoose`)
 /// is the scan planning made.
 #[cfg(debug_assertions)]
-pub fn check_rechoose(plan: &Plan, choice: Option<Arc<ScanChoice>>, ctx: &ExecCtx) {
+pub fn check_rechoose(plan: &Plan, choice: Option<Arc<ScanChoice>>, ctx: &ExecCtx, settled: &dyn Fn() -> bool) {
     let Some(choice) = choice else { return };
     if planned_total(plan, ctx, true).is_none() {
         return;
@@ -6746,9 +6782,12 @@ pub fn check_rechoose(plan: &Plan, choice: Option<Arc<ScanChoice>>, ctx: &ExecCt
         p = input;
     }
     let Plan::Scan(s) = p else { return };
-    let again = choice.rechoose(s, s, ctx).expect("a scan chosen again for its own values");
+    let Some(again) = choice.rechoose(s, s, ctx) else {
+        assert!(!settled(), "no scan chosen again for its own values: {s:?}");
+        return;
+    };
     assert!(
-        format!("{again:?}") == format!("{s:?}") && again.est.0 == s.est.0,
+        (format!("{again:?}") == format!("{s:?}") && again.est.0 == s.est.0) || !settled(),
         "a scan chosen again isn't the one planned:\n{again:?} {:?}\n{s:?} {:?}",
         again.est.0,
         s.est.0
@@ -6785,6 +6824,11 @@ fn plan_level_ordered(
     sublinkcopy::copy_into_merge(plan);
     p.ref_marks.replace(rowmarks::referenced(plan));
     p.copy_marks.replace(rowmarks::copied(plan));
+    if matches!(plan, Plan::Update(_) | Plan::Delete(_)) {
+        let cat = ctx.catalog();
+        p.fdw_dml_target.set(crate::ext::postgres_fdw::direct::join_target(&cat, plan));
+        p.fdw_wholerow_target.set(crate::ext::postgres_fdw::direct::wholerow_target(plan));
+    }
     p.pull_up_consts(plan);
     p.reduce_outer_joins(plan);
     p.remove_result_semijoins(plan);
