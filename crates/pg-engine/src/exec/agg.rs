@@ -2831,23 +2831,7 @@ impl AggNode {
             };
             aggs.push((arg, a.def.skip_nulls, empty));
         }
-        // (Groups that come out sorted on all their keys, which only equal values make
-        // equal, of aggregates that don't see their rows' order: the rows can come in any.
-        // A redundant key's value is its group's row's, whichever row comes first.)
-        let red = self.redundant_keys(ctx);
-        let free = !seq
-            && self.aggs.iter().all(order_insensitive)
-            && self
-                .groups
-                .iter()
-                .enumerate()
-                .all(|(i, g)| red[i] || shows_alike(g, colls.get(i).and_then(Option::as_ref), proj.as_deref()))
-            && (self.groups.is_empty()
-                || self.plan.as_ref().is_some_and(|p| {
-                    let e = super::pghash::agg_estimate(p, ctx);
-                    e.sorted.as_ref().is_some_and(|s| (0..self.groups.len()).all(|i| red[i] || s.iter().any(|k| k.0 == i)))
-                }));
-        let spec = Arc::new(super::partial::Spec { keys, trim, aggs, seq, free });
+        let spec = Arc::new(super::partial::Spec { keys, trim, aggs, seq });
         Ok(match proj {
             Some(_) => input.pipeline_projected(spec, ctx)?,
             None => input.pipeline(Vec::new(), Some(spec), ctx)?,
@@ -3708,7 +3692,13 @@ fn shows_alike(g: &crate::sql::expr::Expr, coll: Option<&KeyNorm>, proj: Option<
     match coll {
         None => !key_equal_apart(g, proj),
         // (A char(n) value is always padded to n: equal ones are the same string.)
-        Some(KeyNorm::Bpchar(None)) => matches!(g.ty(), crate::types::DataType::Bpchar(n) if n > 0),
+        Some(KeyNorm::Bpchar(None)) => {
+            let ty = match (g, proj) {
+                (crate::sql::expr::Expr::Col(i, _), Some(p)) => p.get(*i).map_or_else(|| g.ty(), |e| e.ty()),
+                _ => g.ty(),
+            };
+            matches!(ty, crate::types::DataType::Bpchar(n) if n > 0)
+        }
         Some(_) => false,
     }
 }
