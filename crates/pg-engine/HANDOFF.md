@@ -7681,6 +7681,13 @@ index row size checks, merged into the parallel model mode below).
   statement and tpcb-like are at the 400k numbers; COPY (2.2 against 2.0 s), DELETE of 10%
   (0.87-0.94 against 0.60-0.64), VACUUM after it, simple-update (+15-20%) and every peak
   (select-only 480-525 MB against 407-454; PostgreSQL 246) are not.
+- **Verified** (one full-suite job, as a record format change needs, on 2cb90eee; then
+  rebased onto dcba895c, whose commits touch none of these files' code but scan.rs
+  elsewhere): release crate tests 463 / 0 / 18 and debug 463 / 0 / 18 (goldens included),
+  `crash_random` seeds 1-30 x 4 rounds all pass (with the harness before 168's fix
+  e8c545d1), clippy without new warnings (three in kept.rs's tests, fixed after), difftest
+  smoke, isolation 121 / 122 (intra-grant-inplace, as on origin), full regress on a private
+  reference 51,148 / 51,150 with 0 units changed, pg_dump_tap 14,817.
 - **Left**: COPY's and DELETE's per-row upkeep lifted (DELETE's profile: the models 4%,
   KeySet / lock table / executor the rest); `Heap::prune` allocates seven vectors per page
   (10% of apply's thread: scratch buffers); a TID-level kill bound for apply's lookups; the
