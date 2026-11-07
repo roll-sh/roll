@@ -20,6 +20,8 @@
 //   o  a gap (8 world px) between every two cards as drawn
 //   p  sections ≥ 80 % of the section gap apart, each with its own edge
 //   q  a phone's Fit again keeps two columns
+//   t  no hard line just outside a card (pixels: WebKit drew a scaled-down shadow as one)
+//   u  an open card has one outline, its own frame: no ring or halo around it
 //   j  (--compare) Chromium and WebKit agree within 2 px
 //
 // Usage:
@@ -110,7 +112,18 @@ async function read(page) {
       const s = parseFloat(getComputedStyle(el).fontSize);
       if (s > title) title = s;
     }
+    // u: an open card's frame is its one outline: no ring around it (a shadow outside with no
+    // offset and no blur is a second outline, a halo).
+    const rings = [];
+    for (const el of c.querySelectorAll("[data-card][data-selected] [data-drag]")) {
+      for (const p of getComputedStyle(el).boxShadow.split(/,(?![^(]*\))/).map((s) => s.trim())) {
+        if (p === "none" || /\binset\b/.test(p)) continue;
+        const [x = 0, y = 0, blur = 0, spread = 0] = (p.replace(/[a-z-]+\([^()]*(\([^()]*\)[^()]*)*\)/g, "").match(/-?[\d.]+px/g) ?? []).map(parseFloat);
+        if (!x && !y && !blur && spread > 0) rings.push(`${el.closest("[data-card]").dataset.key}: ${p}`);
+      }
+    }
     return {
+      rings,
       canvas: { x: 0, y: 0, w: box.width, h: box.height },
       prompt,
       zoom: visible(c.querySelector("[data-zoom-bar]")),
@@ -127,6 +140,72 @@ async function read(page) {
       snap,
     };
   });
+}
+
+/**
+ * t: hard lines just outside a card, from the pixels. Per card, the column average over the middle
+ * half of its height in the 1–6 px right of it, against the background 10–12 px out; a step over
+ * 12 (of 255) is a line. A card's own shadow falls off softly (≤ 7); WebKit drew a small blurred
+ * shadow scaled far down as a hard line there (light mode, ~4 px out, 16–36). Skips a card with
+ * another card or chrome in that strip. The connectors and the dot grid (the canvas's own
+ * `<canvas>`, behind the cards) are hidden for the shot: a trunk beside a card is no defect.
+ */
+async function hairlines(page) {
+  const hide = (on) =>
+    page.evaluate(
+      (on) =>
+        new Promise((done) => {
+          for (const el of document.querySelectorAll('[aria-label="Agents canvas"] canvas')) if (!el.closest("[data-card]")) el.style.visibility = on ? "hidden" : "";
+          requestAnimationFrame(() => requestAnimationFrame(done));
+        }),
+      on,
+    );
+  await hide(true);
+  const png = await page.screenshot().finally(() => hide(false));
+  return page.evaluate(async (data) => {
+    const c = document.querySelector('[aria-label="Agents canvas"]');
+    const cb = c.getBoundingClientRect();
+    const cards = [...c.querySelectorAll("[data-card]:not([data-off]):not([data-leaving]) [data-drag]")].map((el) => ({ key: el.closest("[data-card]").dataset.key, r: el.getBoundingClientRect() }));
+    const img = new Image();
+    img.src = `data:image/png;base64,${data}`;
+    await img.decode();
+    const cv = document.createElement("canvas");
+    cv.width = img.naturalWidth;
+    cv.height = img.naturalHeight;
+    const g = cv.getContext("2d", { willReadFrequently: true });
+    g.drawImage(img, 0, 0);
+    const d = g.getImageData(0, 0, cv.width, cv.height).data;
+    const lum = (x, y) => {
+      const i = (y * cv.width + x) * 4;
+      return 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+    };
+    const open = (x, y) => {
+      const el = document.elementFromPoint(x, y);
+      return el && !el.closest("[data-card], [data-zoom-bar], [data-prompt-bar], [data-minimap], [data-chrome-band], [data-sheet], [role=dialog]") && c.contains(el);
+    };
+    const hits = [];
+    for (const { key, r } of cards) {
+      const x0 = Math.floor(r.right);
+      const y0 = Math.ceil(r.top + r.height / 4);
+      const y1 = Math.floor(r.bottom - r.height / 4);
+      if (y1 - y0 < 4 || x0 + 13 > Math.min(cv.width, cb.right) || r.top < cb.top || r.bottom > cb.bottom) continue;
+      if (cards.some((o) => o.r !== r && o.r.left < x0 + 14 && o.r.right > x0 && o.r.top < r.bottom && o.r.bottom > r.top)) continue;
+      if (![1, 6, 12].every((dx) => [y0, (y0 + y1) >> 1, y1 - 1].every((y) => open(x0 + dx + 0.5, y + 0.5)))) continue;
+      const col = (x) => {
+        let s = 0;
+        for (let y = y0; y < y1; y++) s += lum(x, y);
+        return s / (y1 - y0);
+      };
+      const bg = (col(x0 + 10) + col(x0 + 11) + col(x0 + 12)) / 3;
+      let worst = { dx: 0, step: 0 };
+      for (let dx = 1; dx <= 6; dx++) {
+        const step = Math.abs(bg - col(x0 + dx));
+        if (step > worst.step) worst = { dx, step };
+      }
+      if (worst.step > 12) hits.push(`${key} (${worst.dx} px out, step ${worst.step.toFixed(0)})`);
+    }
+    return hits;
+  }, png.toString("base64"));
 }
 
 /** Wait until the view has arrived where it's going and nothing drawn moves. */
@@ -313,6 +392,7 @@ async function runGroup(browser, g, ctxOpts) {
     for (const v of g.variants) {
       const name = `${g.name}-${v.dir[0]}${v.panel ? "-panel" : ""}`;
       const frames = {};
+      const lines = {};
       const r = { case: name, engine: ctxOpts.engine, fails: [], metrics: {}, notes: [] };
       const restless = settleTimeouts;
       try {
@@ -373,10 +453,12 @@ async function runGroup(browser, g, ctxOpts) {
         await pressFit(page);
         await settle(page);
         frames.fit1 = await read(page);
+        lines.fit = await hairlines(page);
         await shot("fit");
         await pressFit(page);
         await settle(page);
         frames.fit2 = await read(page);
+        lines.fit2 = await hairlines(page);
         await shot("fit2");
         if (frames.fit2.snap.overview) {
           await pressFit(page);
@@ -387,6 +469,7 @@ async function runGroup(browser, g, ctxOpts) {
           await zoomTo(page, z, phone);
           await settle(page);
           frames[`z${Math.round(z * 100)}`] = await read(page);
+          lines[`z${Math.round(z * 100)}`] = await hairlines(page);
           await shot(`z${Math.round(z * 100)}`);
         }
         // Back to Fit for the next variant.
@@ -401,6 +484,8 @@ async function runGroup(browser, g, ctxOpts) {
         const c2 = checkFrame(frames.fit1, "fit", { fit: true });
         const c3 = checkFrame(frames.fit2, "fit2", { fit: true });
         r.fails.push(...c1.fails, ...c2.fails, ...c3.fails);
+        for (const [tag, hits] of Object.entries(lines)) if (hits.length) r.fails.push(`t ${tag}: a hard line just right of ${hits.length} cards: ${hits.slice(0, 3).join(", ")}`);
+        for (const [tag, f] of Object.entries(frames)) if (f.rings?.length) r.fails.push(`u ${tag}: an open card has a ring around its frame: ${f.rings[0]}`);
         r.metrics = { auto: c1.metrics, fit: c2.metrics, fit2: c3.metrics, wraps: frames.fit1.snap.wraps };
         // h: everything fits → Fit again changes nothing.
         // (Fit pressed on a canvas already framed goes to the overview: then the second press comes back.)
@@ -455,7 +540,7 @@ async function runGroup(browser, g, ctxOpts) {
 
 // ── reporting ──
 function report(results) {
-  const codes = "abcdefghiklmnopqrs!".split("");
+  const codes = "abcdefghiklmnopqrstu!".split("");
   const lines = [];
   let pass = 0;
   for (const r of results.sort((a, b) => a.case.localeCompare(b.case))) {

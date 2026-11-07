@@ -697,6 +697,13 @@ body {
   background: linear-gradient(var(--bar), var(--bar)) 0 50% / 100% 0.62em no-repeat;
   border-radius: 999px;
 }
+/* Far out a card drops its shadow. Scaled this far down, WebKit draws a card's small blurred
+   shadow as a hard 1 px line a few px beside its straight right side (dark on white in light
+   mode; the shadow itself is a 1–4 px blur at 5–8 %, nothing you'd see at this size anyway). */
+[data-greek] [data-card] {
+  --card-shadow: 0 0 #0000;
+  --card-shadow-hover: 0 0 #0000;
+}
 /* A phone lists every card at one width (the list has no indents). */
 [data-phone] [data-card] [data-drag] {
   width: 296px !important;
@@ -711,7 +718,7 @@ body {
 /* What waits on you, works or failed keeps its mark at every zoom: the card's own border tone,
    drawn inside it a step firmer each time the zoom halves it (no ring, no second outline, no
    change of size), so it stays about a screen pixel. */
-[data-brief] [data-card] [data-drag]:is([data-tone="busy"], [data-tone="waiting"], [data-tone="error"], [data-tone="offline"]) {
+[data-brief] [data-card]:not([data-selected]) [data-drag]:is([data-tone="busy"], [data-tone="waiting"], [data-tone="error"], [data-tone="offline"]) {
   --tone-w: 1px;
   box-shadow: inset 0 0 0 var(--tone-w) var(--tone-c);
 }
@@ -729,7 +736,7 @@ body {
 }
 /* Far out only what needs you keeps its tone (waiting, failed): 80 running cards read as a sea of
    blue. Running still shows in its section's dot and the minimap. */
-[data-greek] [data-card] [data-drag][data-tone="busy"] {
+[data-greek] [data-card]:not([data-selected]) [data-drag][data-tone="busy"] {
   --tone-c: transparent;
   border-color: var(--line-2);
 }
@@ -743,10 +750,10 @@ body {
 @media (prefers-color-scheme: light) {
   /* White on white: the frames carry the shape, so they're drawn firmer, more so further out
      (faint, an identity edge alone read as a "["). */
-  [data-brief] [data-card] [data-drag]:not([data-tone]) {
+  [data-brief] [data-card]:not([data-selected]) [data-drag]:not([data-tone]) {
     border-color: color-mix(in oklab, var(--fg) 26%, transparent);
   }
-  [data-greek] [data-card] [data-drag]:is(:not([data-tone]), [data-tone="busy"]) {
+  [data-greek] [data-card]:not([data-selected]) [data-drag]:is(:not([data-tone]), [data-tone="busy"]) {
     border-color: color-mix(in oklab, var(--fg) 38%, transparent);
   }
   [data-greek] [data-card] :is([data-title], [data-title] *) {
@@ -764,22 +771,36 @@ body {
   }
 }
 
-/* The card whose conversation or settings are open beside the canvas: an accent hairline and halo. */
+/* The card whose conversation or settings are open beside the canvas: one outline, its own frame a
+   step firmer (the border and a line inside it, so nothing moves). Never a ring, halo or second
+   outline. A toned card keeps its tone's colour (failed stays red, waiting and running the accent);
+   a card with no tone takes the accent. Each zoom level draws it a step wider than the tone's frame
+   there, so it still reads as the firmer one far out. */
 [data-card][data-selected] [data-drag] {
-  border-color: color-mix(in oklab, var(--accent) 70%, transparent);
+  --open-c: color-mix(in oklab, var(--accent) 80%, transparent);
+  --open-w: 1px;
+  border-color: var(--open-c);
   box-shadow:
-    0 0 0 3px color-mix(in oklab, var(--accent) 16%, transparent),
+    inset 0 0 0 var(--open-w) var(--open-c),
     var(--card-shadow-hover);
 }
-/* Open and failed: its frame still says failed (an accent border over it hid the red, and far out
-   read as two outlines); the halo says it's open. */
 [data-card][data-selected] [data-drag][data-tone="error"] {
-  border-color: color-mix(in oklab, var(--danger) 60%, transparent);
+  --open-c: color-mix(in oklab, var(--danger) 80%, transparent);
 }
-[data-brief] [data-card][data-selected] [data-drag][data-tone] {
-  box-shadow:
-    inset 0 0 0 var(--tone-w) var(--tone-c),
-    0 0 0 3px color-mix(in oklab, var(--accent) 16%, transparent);
+[data-brief] [data-card][data-selected] [data-drag] {
+  --open-w: 2px;
+}
+[data-greek] [data-card][data-selected] [data-drag] {
+  --open-w: 3px;
+}
+[data-far] [data-card][data-selected] [data-drag] {
+  --open-w: 4px;
+}
+/* An offline machine's dashed frame: a line inside the dashes would read as a second outline, so
+   open it is the same dashes, firmer. */
+[data-card][data-selected] [data-drag][data-tone="offline"] {
+  border-color: color-mix(in oklab, var(--muted) 85%, transparent);
+  box-shadow: var(--card-shadow-hover);
 }
 
 /* The canvas's compact density: cards keep their name, status and what they're doing, and fold

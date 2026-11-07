@@ -109,8 +109,14 @@ punch out the edge ports. `refreshColors()` reruns on a theme change (the canvas
   still; error `danger/45`; offline (a machine) dashed `muted/50`, its name and remedy at full
   strength; archived at 60% opacity. Done has no tone: the pill's green dot says it, once (a
   green border too said it twice).
-- **Selected** (its conversation or settings are open): an accent hairline plus a 3px accent
-  halo at 16% (`[data-card][data-selected]` in globals.css).
+- **Selected** (its conversation or settings are open): one outline, the card's own frame a step
+  firmer: the border plus a line of the same colour inside it (2px at 100 %, a step wider than the
+  tone's frame at each zoom level), so nothing moves. A toned card keeps its tone's colour (failed
+  stays red, waiting and running the accent), a card with no tone takes the accent, an offline
+  machine keeps its dashes, firmer. Never a halo, ring or second outline
+  (`[data-card][data-selected]` in globals.css).
+- **Far out** (below 40 %, `data-greek`): no card shadow. WebKit draws a small blur scaled that
+  far down as a hard 1px line beside the card.
 - **Header:** an `IconTile` (24px, `bg-panel-2`, a hairline, the highlight, a 14px icon), then the
   name in 13.5px at weight 590, then the status. Body text is 12–13px. Meta is 11px, with
   `font-mono tabular-nums` for numbers.
