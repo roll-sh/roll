@@ -40,7 +40,11 @@ export function fitWords(text: string, width: number, px = 12, sep: RegExp = /(\
       if (next.trim() && c.measureText(`${next.trimEnd()}…`).width > room) break;
       kept = next;
     }
-    const cut = kept.trimEnd().replace(/[\s,;:·–—-]+$/, "");
+    // Nor on an aside just opened ("the default branch (in…"): its word goes with it.
+    const cut = kept
+      .trimEnd()
+      .replace(/\s+[([{"“‘][^\s)\]}"”’]*$/, "")
+      .replace(/[\s,;:·–—-]+$/, "");
     // One word longer than the line: let CSS cut it.
     out = cut ? `${cut}…` : text;
   }

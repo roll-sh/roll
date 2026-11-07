@@ -572,7 +572,7 @@ export const ThreadCard = memo(function ThreadCard({ thread, machine, project, l
   const delivered = !!lastRun?.delivers?.length && thread.status !== "waiting" && !thread.error;
   const line = error ? null : asks ? asks : running ? (thread.activity ?? threadStatusLabel[thread.status]) : thread.status === "waiting" ? (thread.activity ?? null) : delivered ? null : lastRun ? lastRun.prompt : null;
   // Idle with nothing to say but the last prompt: no line when that's the title again.
-  const said = !!(error || delivered || (line && !(!asks && !running && line.trim().toLowerCase() === thread.title.trim().toLowerCase())) || !lastRun);
+  const said = !!(error || delivered || (line && !(!asks && !running && line.trim().toLowerCase() === thread.title.trim().toLowerCase())) || (!lastRun && thread.status === "idle" && !thread.error));
   // Where it sits says its project and machine (the tree, its colour): the card says what tells it apart.
   return (
     <Card width={296} height={THREAD_H} tone={tone} tint={project ? projectColor(project) : undefined} edge onClick={() => openThread(thread.id)} label={`Thread ${thread.title}`}>

@@ -711,7 +711,7 @@ body {
 /* What waits on you, works or failed keeps its mark at every zoom: the card's own border tone,
    drawn inside it a step firmer each time the zoom halves it (no ring, no second outline, no
    change of size), so it stays about a screen pixel. */
-[data-brief] [data-card] [data-drag]:is([data-tone="busy"], [data-tone="waiting"], [data-tone="error"]) {
+[data-brief] [data-card] [data-drag]:is([data-tone="busy"], [data-tone="waiting"], [data-tone="error"], [data-tone="offline"]) {
   --tone-w: 1px;
   box-shadow: inset 0 0 0 var(--tone-w) var(--tone-c);
 }
@@ -726,6 +726,10 @@ body {
 }
 [data-card] [data-drag][data-tone="error"] {
   --tone-c: color-mix(in oklab, var(--danger) 50%, transparent);
+}
+/* An offline machine's dashed frame thins away first: under it, the same calm line in its grey. */
+[data-card] [data-drag][data-tone="offline"] {
+  --tone-c: color-mix(in oklab, var(--muted) 45%, transparent);
 }
 @media (prefers-color-scheme: light) {
   /* White on white: the frames carry the shape, so they're drawn firmer, more so further out
