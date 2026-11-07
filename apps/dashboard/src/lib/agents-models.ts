@@ -177,13 +177,13 @@ const normalize = (s: string) => s.toLowerCase().trim().replace(/\s+/g, " ");
 const escape = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 /** Lower is better; null when `token` isn't in `field` (T3's `scoreQueryMatch` with `ignorePosition`). */
-function scoreToken(field: string, token: string, base: number): number | null {
+function scoreToken(field: string, token: string, base: number, fuzzy: boolean): number | null {
   if (!field) return null;
   if (field === token) return base;
   if (field.startsWith(token)) return base + 2;
   if (new RegExp(`[\\s._/:-]${escape(token)}`).test(field)) return base + 4;
   if (field.includes(token)) return base + 6;
-  if (token.length >= 3 && subsequence(field, token)) return base + 100;
+  if (fuzzy && token.length >= 3 && subsequence(field, token)) return base + 100;
   return null;
 }
 
@@ -203,7 +203,9 @@ export function scoreModel(m: PickerModel, query: string, favorite: boolean): nu
   for (const t of tokens) {
     let best: number | null = null;
     for (let i = 0; i < fields.length; i++) {
-      const s = scoreToken(fields[i], t, i * 10);
+      // Letters scattered through a field count only in the model's name: in an id, the provider or the
+      // joined fields, "gpt" found Gemini 3.1 Pro (High) by its id, gemini-pro-agent.
+      const s = scoreToken(fields[i], t, i * 10, i === 0);
       if (s !== null && (best === null || s < best)) best = s;
     }
     if (best === null) return null;

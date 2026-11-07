@@ -510,7 +510,8 @@ function RowView({ row, picked, multiple, noun, creating, mono, pad }: { row: Ro
               {picked && <Check className="size-2.5" strokeWidth={3} />}
             </span>
           ) : (
-            picked && <Check aria-hidden className="size-3.5 text-fg" />
+            // The check keeps its room on every row, so hints stay flush right.
+            <Check aria-hidden className={cn("size-3.5 shrink-0 text-fg", !picked && "invisible")} />
           )}
         </ComboboxItem>
       );

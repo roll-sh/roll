@@ -339,7 +339,7 @@ function AddStepMenu({ catalog, onPick, trigger, label = "Add a step" }: { catal
         {trigger}
       </PopoverPrimitive.Trigger>
       <PopoverPrimitive.Portal {...layer}>
-        <PopoverPrimitive.Positioner className="z-[130]" side="bottom" align="center" sideOffset={4} collisionPadding={{ top: 56, right: 8, bottom: 8, left: 8 }}>
+        <PopoverPrimitive.Positioner className="z-[130]" side="bottom" align="start" sideOffset={4} collisionPadding={{ top: 56, right: 8, bottom: 8, left: 8 }}>
           <PopoverPrimitive.Popup
             aria-label={label}
             // Opened by touch, the popup takes focus so a phone's keyboard stays down until the search is tapped.
@@ -377,7 +377,7 @@ function AddStepMenu({ catalog, onPick, trigger, label = "Add a step" }: { catal
                               {step.needs_setup && <span className="rounded-[4px] border border-line-2 px-1 text-[10px] leading-[15px] text-subtle">Connect</span>}
                               {query.trim() && <span className="ml-auto shrink-0 text-[10.5px] text-subtle">{group}</span>}
                             </span>
-                            <span className="line-clamp-2 text-[11.5px] leading-snug text-subtle">{plainText(step.description)}</span>
+                            <span className="line-clamp-2 text-[11.5px] leading-snug text-pretty text-subtle">{plainText(step.description)}</span>
                           </span>
                         </ComboboxItem>
                       </div>
@@ -438,7 +438,7 @@ function TriggerCard({
                       {x.title}
                       {x.needs_setup && <span className="rounded-[4px] border border-line-2 px-1 text-[10px] leading-[15px] text-subtle">Connect</span>}
                     </span>
-                    <span className="line-clamp-2 text-[11.5px] leading-snug text-subtle">{plainText(x.description)}</span>
+                    <span className="line-clamp-2 text-[11.5px] leading-snug text-pretty text-subtle">{plainText(x.description)}</span>
                   </span>
                   {x.source === triggerSource(t) && <Check className="mt-0.5 size-3.5" />}
                 </MenuItem>
