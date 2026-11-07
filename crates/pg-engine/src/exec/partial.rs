@@ -217,6 +217,10 @@ pub struct Spec {
     pub aggs: Vec<(Option<K>, bool, Partial)>,
     /// Whether the executor's thread reads `Part::seq` (the hash table's order model).
     pub seq: bool,
+    /// The rows' order changes nothing (groups that come out sorted on all their keys, keys
+    /// equal only when alike, exact aggregates whose results don't depend on their rows'
+    /// order): a worker's part may take the rows of several of its chunks.
+    pub free: bool,
 }
 
 /// A bpchar key's value as its groups compare it.
@@ -557,18 +561,29 @@ impl<'a> Partials<'a> {
         self.part.rows
     }
 
+    /// The groups in the part so far.
+    pub fn groups(&self) -> usize {
+        self.part.groups.len()
+    }
+
     /// Row `r` of the column batch `b` (one that passed the filter, not odd) aggregated by
     /// `plan` (`vector::AggPlan`, compiled from this spec), as `row` would aggregate it
     /// (true), or nothing changed (false: the caller hands the row to `row`, in its place).
-    pub fn batch_row(&mut self, plan: &super::vector::AggPlan, b: &crate::storage::cols::ColBatch, r: usize) -> bool {
+    pub fn batch_row(
+        &mut self,
+        plan: &super::vector::AggPlan,
+        b: &crate::storage::cols::ColBatch,
+        nums: &[Vec<super::vector::Num>],
+        r: usize,
+    ) -> bool {
         use super::vector::AggArg;
         self.vals.clear();
-        for (arg, (_, skip, _)) in plan.args.iter().zip(&self.spec.aggs) {
+        for (i, (arg, (_, skip, _))) in plan.args.iter().zip(&self.spec.aggs).enumerate() {
             let v = match arg {
                 // (count(*)'s: a non-NULL stand-in.)
                 AggArg::Star => Some((1, 0)),
                 AggArg::Count(c) => (!b.cols[*c].as_ref().is_none_or(|c| c.nulls[r])).then_some((1, 0)),
-                AggArg::Num(n) => match n.at(b, r) {
+                AggArg::Num(_) => match nums[i][r] {
                     Some(v) => v,
                     None => return false,
                 },

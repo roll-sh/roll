@@ -123,6 +123,9 @@ pub struct Decode {
     /// The rows come as stored (`TxnScan::raw`): the out-of-line values of the columns
     /// read come from here, read by each worker for the rows it keeps (`LazyBuf::reader`).
     pub toast: Option<Arc<crate::txn::toast::Source>>,
+    /// The batch kernels (`Pre`), compiled by the first chunk for all of them (None
+    /// inside: none fit).
+    pub vplan: std::sync::OnceLock<Option<Arc<super::vector::AggPlan>>>,
 }
 
 /// A chunk's bounded heap of a bounded sort's keys (`Decode::topk`). A row its heap
@@ -222,6 +225,24 @@ impl From<Chunk> for Source {
     }
 }
 
+/// Rows in a list (a modelled heap's rows put in heap order, `ScanNode`) a fill at a time:
+/// the batch kernels take them as they take a table's.
+pub struct ListFill(pub std::vec::IntoIter<(Vec<u8>, bytes::Bytes)>);
+
+/// Reordered heap rows actually filled into batches (tests distinguish this source).
+pub static LIST_FILL_ROWS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+impl FillRows for ListFill {
+    fn fill(&mut self, b: &mut RowBatch, max: usize) -> Result<()> {
+        let before = b.len();
+        for (k, v) in self.0.by_ref().take(max) {
+            b.push(&k, v);
+        }
+        LIST_FILL_ROWS.fetch_add((b.len() - before) as u64, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
+    }
+}
+
 /// A table's rows in [range) through `FillRows`, as a bulk read when `bulk`.
 pub fn fill_source<F: FillRows + 'static>(f: F, bulk: bool) -> Source {
     Source::Fill(if bulk { Box::new(crate::storage::batch::BulkFill(f)) } else { Box::new(f) })
@@ -235,7 +256,7 @@ const FILL: usize = 256;
 /// (`pipe::Probe::int_key_col`). A row they can't decide (`odd`: a value its column's
 /// vector can't hold, one out of line; or a filter outcome `Out`) goes through the row path.
 struct Pre<'a> {
-    plan: super::vector::AggPlan,
+    plan: Arc<super::vector::AggPlan>,
     probe: Option<&'a super::pipe::Probe>,
     types: &'a [crate::types::DataType],
     missing: Vec<Value>,
@@ -243,6 +264,9 @@ struct Pre<'a> {
     odd: Vec<bool>,
     sel: Vec<u32>,
     tri: Vec<super::vector::Tri>,
+    /// Per aggregate argument (`AggPlan::args`), each row's exact number (by row; the
+    /// rows the filter passes), computed a column at a time.
+    nums: Vec<Vec<super::vector::Num>>,
     /// Rows decoded, and of them the ones the batch did (dropped or aggregated): the rest
     /// are decoded again by the row path, so a chunk where the batch does too few stops
     /// using it (`worth`).
@@ -266,26 +290,14 @@ impl<'a> Pre<'a> {
     /// a scan whose rows are made (None: when a filter or a probe can drop rows). None:
     /// nothing a batch kernel does.
     fn new(d: &'a Decode, spec: Option<&super::partial::Spec>) -> Option<Pre<'a>> {
-        if !vectors()
-            || d.ios.is_some()
-            || !d.raw.is_empty()
-            || d.topk.is_some()
-            || (spec.is_some() && !d.extra.is_empty())
-            || (d.filtered && d.filter.is_none())
-        {
+        if !vectors() {
             return None;
         }
         let probe = match d.stages.first().map(|s| &**s) {
             Some(super::pipe::Stage::Hash(p)) => p.int_key_col().map(|c| (c, p)),
             _ => None,
         };
-        if !d.stages.is_empty() && probe.is_none() && (spec.is_some() || d.filter.is_none()) {
-            return None;
-        }
-        if spec.is_none() && probe.is_none() && d.filter.is_none() {
-            return None;
-        }
-        let plan = super::vector::AggPlan::compile(&d.types, d.filter.as_ref(), d.filtered, spec, probe.map(|p| p.0))?;
+        let plan = d.vplan.get_or_init(|| Pre::compile(d, spec, probe.map(|p| p.0)).map(Arc::new)).clone()?;
         Some(Pre {
             plan,
             probe: probe.map(|p| p.1),
@@ -295,10 +307,30 @@ impl<'a> Pre<'a> {
             odd: Vec::new(),
             sel: Vec::new(),
             tri: Vec::new(),
+            nums: Vec::new(),
             seen: 0,
             done: 0,
             off: false,
         })
+    }
+
+    /// `new`'s kernels (the same for every chunk of the scan: `Decode::vplan` keeps them).
+    fn compile(d: &Decode, spec: Option<&super::partial::Spec>, probe: Option<usize>) -> Option<super::vector::AggPlan> {
+        if d.ios.is_some()
+            || !d.raw.is_empty()
+            || d.topk.is_some()
+            || (spec.is_some() && !d.extra.is_empty())
+            || (d.filtered && d.filter.is_none())
+        {
+            return None;
+        }
+        if !d.stages.is_empty() && probe.is_none() && (spec.is_some() || d.filter.is_none()) {
+            return None;
+        }
+        if spec.is_none() && probe.is_none() && d.filter.is_none() {
+            return None;
+        }
+        super::vector::AggPlan::compile(&d.types, d.filter.as_ref(), d.filtered, spec, probe)
     }
 
     /// Rows `rows` of `b` decoded, `odd` and `tri` (by row of the run) filled.
@@ -326,6 +358,18 @@ impl<'a> Pre<'a> {
         self.tri.resize(n, Tri::T);
         if let Some(f) = &self.plan.filter {
             f.eval(&self.cols, &self.sel, &mut self.tri);
+        }
+        // (The aggregates' arguments over the rows the filter passes.)
+        if self.plan.args.iter().any(|a| matches!(a, super::vector::AggArg::Num(_))) {
+            let live: Vec<u32> = self.sel.iter().copied().filter(|r| self.tri[*r as usize] == Tri::T).collect();
+            self.nums.resize_with(self.plan.args.len(), Vec::new);
+            for (a, v) in self.plan.args.iter().zip(&mut self.nums) {
+                if let super::vector::AggArg::Num(k) = a {
+                    v.clear();
+                    v.resize(n, None);
+                    k.eval(&self.cols, &live, v);
+                }
+            }
         }
     }
 
@@ -834,12 +878,15 @@ type Item = (Row, u8, bool, u32);
 pub enum Piece {
     Row(Row, u8, bool, u32),
     Part(super::partial::Part),
+    /// Rows read in chunk order, independently of carried aggregate states.
+    Read(u64),
 }
 
 enum Msg {
     Rows(Vec<Item>),
     Seg(super::partial::Seg),
     Err(Error),
+    Read(u64),
     /// The chunk's end, after this many dropped rows.
     Done(u32, u32),
 }
@@ -868,6 +915,9 @@ pub struct ParScan {
     /// A scan whose chunks run on the executor's thread, one when its rows are asked for
     /// (`start_inline`): no workers.
     inline: Option<Box<Inline>>,
+    /// The parts workers carried across their chunks (`Spec::free`), sent as they run out
+    /// of chunks: read once every chunk is done.
+    late: Option<Receiver<Msg>>,
 }
 
 /// What an inline scan's chunks run with (a worker's own state, `work`).
@@ -911,23 +961,58 @@ pub fn inline_started() -> u64 {
     INLINE.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-fn work(jobs: Arc<Mutex<Receiver<Job>>>, d: Arc<Decode>, stop: Arc<std::sync::atomic::AtomicBool>) {
+fn work(jobs: Arc<Mutex<Receiver<Job>>>, d: Arc<Decode>, stop: Arc<std::sync::atomic::AtomicBool>, late: Option<Sender<Msg>>) {
     let stopped = || stop.load(std::sync::atomic::Ordering::Relaxed);
     // (One for the worker's chunks: its lookups' cache lasts.)
     let mut scratch = super::pipe::Scratch::default();
     let mut lazy = LazyBuf::new(&d);
     let mut batch = RowBatch::default();
+    // An aggregation the rows' order doesn't matter to (`Spec::free`): the worker's part
+    // takes the rows of all its chunks, sent with a chunk once it holds `CARRY_GROUPS`
+    // groups, and on the scan's `late` channel once no chunk is left.
+    let mut carry = late.as_ref().and(d.spec.as_deref()).map(super::partial::Partials::new);
     loop {
         let job = match jobs.lock() {
             Ok(rx) => rx.recv(),
             Err(_) => return,
         };
-        let Ok(job) = job else { return };
-        if stopped() || !run_job(job, &d, &stopped, &mut scratch, &mut lazy, &mut batch) {
+        let Ok(job) = job else {
+            if let (Some(pa), Some(late)) = (&mut carry, &late)
+                && let Some(p) = pa.take()
+            {
+                let _ = late.send(Msg::Seg(super::partial::Seg::Part(p)));
+            }
             return;
+        };
+        if stopped() {
+            return;
+        }
+        match (&mut carry, &d.spec) {
+            (Some(pa), Some(spec)) => {
+                let Job { mut scan, out } = job;
+                batch.clear();
+                let mut rd = Reader::new(&mut scan, &mut batch, usize::MAX);
+                if !work_partial(&mut rd, &out, &d, spec, &stopped, &mut scratch, &mut lazy, Some(pa))
+                    || out.send(Msg::Done(0, 0)).is_err()
+                {
+                    return;
+                }
+                CARRIED_CHUNKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            _ => {
+                if !run_job(job, &d, &stopped, &mut scratch, &mut lazy, &mut batch) {
+                    return;
+                }
+            }
         }
     }
 }
+
+/// The groups a worker's carried part (`Spec::free`) holds before it is sent.
+const CARRY_GROUPS: usize = 1 << 16;
+
+/// Chunks whose rows went to a worker's carried part (`Spec::free`; tests: which path ran).
+pub static CARRIED_CHUNKS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// One chunk of a scan: its rows (or an aggregating scan's parts) sent to the job's `out`,
 /// on a worker or (`ParScan::inline`) the executor's thread. False: nothing reads them
@@ -955,7 +1040,7 @@ fn run_rows(
 ) -> bool {
     {
         if let Some(spec) = &d.spec {
-            return work_partial(scan, &out, d, spec, stopped, scratch, lazy);
+            return work_partial(scan, &out, d, spec, stopped, scratch, lazy, None);
         }
         let mut batch = Vec::with_capacity(BATCH);
         // (Rows read since the last item sent.)
@@ -1162,26 +1247,46 @@ fn filter_pass<R: super::kernel::Cols + ?Sized>(d: &Decode, row: &R) -> Option<b
 const PART_ROWS: usize = 1 << 16;
 
 /// A chunk aggregated (`partial`): false when nothing receives any more.
-fn work_partial(
+/// `carry`: the worker's part, kept across its chunks (`work`): sent only once it is large,
+/// and the chunk's end is the caller's to send.
+#[allow(clippy::too_many_arguments)]
+fn work_partial<'s>(
     scan: &mut Reader<'_>,
     out: &Sender<Msg>,
     d: &Decode,
-    spec: &super::partial::Spec,
+    spec: &'s super::partial::Spec,
     stopped: &dyn Fn() -> bool,
     scratch: &mut super::pipe::Scratch,
     lazy: &mut LazyBuf,
+    carry: Option<&mut super::partial::Partials<'s>>,
 ) -> bool {
     use super::partial::{Partials, Seg};
-    let mut pa = Partials::new(spec);
+    let carried = carry.is_some();
+    let mut own = None;
+    let pa = match carry {
+        Some(c) => c,
+        None => own.insert(Partials::new(spec)),
+    };
     // (Rows read and not counted in a part yet.)
     let mut read = 0u64;
     let send_part = |pa: &mut Partials, read: &mut u64| {
-        pa.read(std::mem::take(read));
+        let read = std::mem::take(read);
+        if carried {
+            // Aggregate states may span chunks; their statistics must still reach the
+            // coordinator in chunk order, before a later chunk's error stops the scan.
+            if read != 0 && out.send(Msg::Read(read)).is_err() {
+                return false;
+            }
+        } else {
+            pa.read(read);
+        }
         match pa.take() {
             Some(p) => out.send(Msg::Seg(Seg::Part(p))).is_ok(),
             None => true,
         }
     };
+    // (A part is sent past `PART_ROWS` rows; a carried one past `CARRY_GROUPS` groups.)
+    let full = |pa: &Partials| if carried { pa.groups() >= CARRY_GROUPS } else { pa.rows() >= PART_ROWS };
     let top = d.stages.len() as u8;
     // (Rows a part can't take: sent in their place, the part so far first.)
     let mut serial: Vec<(Row, u8, bool)> = Vec::new();
@@ -1201,7 +1306,7 @@ fn work_partial(
         if let Some(pre) = &mut pre {
             let run = match scan.next_run() {
                 Some(Ok(run)) => run,
-                Some(Err(e)) => return send_part(&mut pa, &mut read) && out.send(Msg::Err(e)).is_ok(),
+                Some(Err(e)) => return send_part(pa, &mut read) && out.send(Msg::Err(e)).is_ok(),
                 None => break,
             };
             n += run.len();
@@ -1221,20 +1326,20 @@ fn work_partial(
                 let aggregated = !pre.odd[r]
                     && pre.tri[r] == Tri::T
                     && pre.plan.probe.is_none()
-                    && pa.batch_row(&pre.plan, &pre.cols, r);
+                    && pa.batch_row(&pre.plan, &pre.cols, &pre.nums, r);
                 if aggregated {
                     taken += 1;
                 } else {
                     let (k, v) = scan.batch.get(i);
-                    if let Err(e) = partial_row(d, &mut pa, &mut serial, scratch, lazy, top, k, v) {
-                        return send_part(&mut pa, &mut read) && out.send(Msg::Err(e)).is_ok();
+                    if let Err(e) = partial_row(d, pa, &mut serial, scratch, lazy, top, k, v) {
+                        return send_part(pa, &mut read) && out.send(Msg::Err(e)).is_ok();
                     }
                 }
                 if !serial.is_empty() {
-                    if !send_part(&mut pa, &mut read) || out.send(Msg::Seg(Seg::Rows(std::mem::take(&mut serial)))).is_err() {
+                    if !send_part(pa, &mut read) || out.send(Msg::Seg(Seg::Rows(std::mem::take(&mut serial)))).is_err() {
                         return false;
                     }
-                } else if pa.rows() >= PART_ROWS && !send_part(&mut pa, &mut read) {
+                } else if full(pa) && !send_part(pa, &mut read) {
                     return false;
                 }
             }
@@ -1251,21 +1356,24 @@ fn work_partial(
         read += 1;
         let (k, v) = match r {
             Ok(e) => e,
-            Err(e) => return send_part(&mut pa, &mut read) && out.send(Msg::Err(e)).is_ok(),
+            Err(e) => return send_part(pa, &mut read) && out.send(Msg::Err(e)).is_ok(),
         };
-        if let Err(e) = partial_row(d, &mut pa, &mut serial, scratch, lazy, top, k, v) {
-            return send_part(&mut pa, &mut read) && out.send(Msg::Err(e)).is_ok();
+        if let Err(e) = partial_row(d, pa, &mut serial, scratch, lazy, top, k, v) {
+            return send_part(pa, &mut read) && out.send(Msg::Err(e)).is_ok();
         }
         if !serial.is_empty() {
-            if !send_part(&mut pa, &mut read) || out.send(Msg::Seg(Seg::Rows(std::mem::take(&mut serial)))).is_err() {
+            if !send_part(pa, &mut read) || out.send(Msg::Seg(Seg::Rows(std::mem::take(&mut serial)))).is_err() {
                 return false;
             }
-        } else if pa.rows() >= PART_ROWS && !send_part(&mut pa, &mut read) {
+        } else if full(pa) && !send_part(pa, &mut read) {
             return false;
         }
     }
     scratch.flush(&d.stages);
-    send_part(&mut pa, &mut read) && out.send(Msg::Done(0, 0)).is_ok()
+    if carried {
+        return read == 0 || out.send(Msg::Read(read)).is_ok();
+    }
+    send_part(pa, &mut read) && out.send(Msg::Done(0, 0)).is_ok()
 }
 
 /// Whether aggregating scans read fills as column batches (`vector`; tests compare both).
@@ -1383,15 +1491,23 @@ impl ParScan {
         let rx = Arc::new(Mutex::new(rx));
         let d = Arc::new(d);
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (late_tx, late) = match d.spec.as_ref().is_some_and(|s| s.free) {
+            true => {
+                let (tx, rx) = channel();
+                (Some(tx), Some(rx))
+            }
+            false => (None, None),
+        };
         let workers = (0..workers)
             .filter_map(|i| {
-                let (rx, d, stop) = (rx.clone(), d.clone(), stop.clone());
+                let (rx, d, stop, late) = (rx.clone(), d.clone(), stop.clone(), late_tx.clone());
                 std::thread::Builder::new()
                     .name(format!("roll-scan-{i}"))
-                    .spawn(move || work(rx, d, stop))
+                    .spawn(move || work(rx, d, stop, late))
                     .ok()
             })
             .collect::<Vec<_>>();
+        drop(late_tx);
         // (Threads that didn't start go back to the pool.)
         ACTIVE.fetch_sub(reserved - workers.len(), std::sync::atomic::Ordering::AcqRel);
         if workers.is_empty() {
@@ -1412,6 +1528,7 @@ impl ParScan {
             skipped: 0,
             stop,
             inline: None,
+            late,
         };
         let ahead = workers.len() * AHEAD + 1;
         p.workers = workers;
@@ -1438,6 +1555,7 @@ impl ParScan {
             skipped: 0,
             stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             inline: Some(Box::new(Inline { cur: None, d: Arc::new(d), scratch: Default::default(), lazy, batch: RowBatch::default() })),
+            late: None,
         }
     }
 
@@ -1457,6 +1575,11 @@ impl ParScan {
         // (A send fails only once every worker is gone: `next` reports it.)
         if let Some(tx) = &self.jobs {
             let _ = tx.send(Job { scan, out });
+        }
+        // (The last chunk handed out: workers end once the chunks are taken, sending the
+        // parts they carried.)
+        if self.pending.is_empty() && self.late.is_some() {
+            self.jobs = None;
         }
     }
 
@@ -1491,15 +1614,25 @@ impl ParScan {
                 }
             }
             let Some(rx) = self.results.front() else {
+                // (Every chunk done: the parts the workers carried, until all have ended.)
+                if let Some(late) = &self.late {
+                    match late.recv() {
+                        Ok(Msg::Seg(Seg::Part(p))) => return Ok(Some(Piece::Part(p))),
+                        Ok(_) => return Err(internal("a parallel scan's late message")),
+                        Err(_) => self.late = None,
+                    }
+                }
                 return Ok(None);
             };
             match rx.recv() {
+                Ok(Msg::Read(read)) => return Ok(Some(Piece::Read(read))),
                 Ok(Msg::Rows(rows)) => self.batch = rows.into_iter(),
                 Ok(Msg::Seg(Seg::Part(p))) => return Ok(Some(Piece::Part(p))),
                 Ok(Msg::Seg(Seg::Rows(rows))) => self.seg = rows.into_iter(),
                 Ok(Msg::Err(e)) => {
                     self.results.clear();
                     self.pending.clear();
+                    self.late = None;
                     if let Some(i) = &mut self.inline {
                         i.cur = None;
                     }
