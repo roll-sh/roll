@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { collapseUnused, deriveGraph, foldQuiet, groupByStatus, keyOf, rolling, SHOWN_THREADS } from "./agents-graph";
-import { arrange, bounds, dropIndex, fitView, fitZoom, layoutCanvas, mergeOrder, moveTo, nextCard, NO_WRAPS, planWraps, ROOTS, withOrder, zoomAt, type Level, type Point, type Rect, type Room, type Size, type Wraps } from "./agents-layout";
+import { arrange, bounds, dropIndex, fitView, fitZoom, layoutCanvas, mergeOrder, moveTo, nextCard, NO_WRAPS, planWraps, roomFor, ROOTS, withOrder, zoomAt, type Level, type Point, type Rect, type Room, type Size, type Wraps } from "./agents-layout";
 import { applyEvents, emptyData, follow } from "./agents-store";
 import { approval, ev, machine, node, project, run, terminal, thread } from "@/test/agents";
 import { EMPTY_INBOX, type Thread } from "./agents-api";
@@ -180,14 +180,14 @@ describe("agents layout", () => {
       return { roots: ["m"], nodes };
     };
     const sz = (k: string) => (k.startsWith("t") ? { w: 296, h: 152 } : { w: 272, h: 120 });
-    const room = (w: number, h: number): Room => ({ w, h, pad: Math.max(48, Math.min(w, h) * 0.1), floor: 0.75, reserve: 192 });
+    const room = (w: number, h: number): Room => roomFor(w, h);
     for (const direction of ["horizontal", "vertical"] as const) {
       const shape = { direction, level };
       // A wide screen, a project with 7 threads among smaller ones: wrapped, it reads whole (a column it was 1 : 3).
       const small = tree([2, 2, 2, 7]);
       const wide = room(1980, 860);
       const box = bounds(layoutCanvas(small, sz, shape, planWraps(small, sz, shape, wide)).positions, sz)!;
-      expect(fitZoom(box, wide), direction).toBeGreaterThanOrEqual(wide.floor);
+      expect(fitZoom(box, wide), direction).toBeGreaterThanOrEqual(wide.stretch!);
       // Far too much for any screen: as wide as the screen takes at the floor, clear of the minimap, never cut off at the right.
       const big = tree([90, 80, 70]);
       for (const r of [wide, room(1440, 780), room(1800, 1900)]) {
