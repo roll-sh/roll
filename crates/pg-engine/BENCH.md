@@ -6085,6 +6085,86 @@ PostgreSQL's (an accepted internal difference, for the size models): BRIN relpag
 against 3 (pg_relation_size 3 / 3), GIN 7,211 against 1,474 (pg_relation_size 2 against
 1,474), hash 2,745 against 4,098 (pg_relation_size 10 against 4,098).
 
+## Index access, round 7 (round 25, agent 176)
+
+HANDOFF.md's "Index access at index cost, round 7" has what changed. Engine against PostgreSQL
+18.6 in containers on both sides (`tools/bench/run.sh` with `ENGINE_DOCKER=1`, cores 28-31, the
+host network, `--cache-mb 2048` and `shared_buffers=2GB`), at a machine load of 40-55 (every
+agent's builds). Engine built with `--profile dist` on the pushed batch (`bf887b45` / `126464e9`
+with it). Pairs of runs in the order PostgreSQL, engine, engine, PostgreSQL, a fresh engine
+process for each engine run (its store read cold at the first build).
+
+Index builds (`access-builds`, CREATE INDEX over 1M rows then DROP INDEX; s, the server's CPU s,
+peak memory MB, pages):
+
+| index | PostgreSQL s (cpu) | engine s (cpu) | engine / PostgreSQL | round 6 | peak MB PostgreSQL / engine | pages PostgreSQL / engine |
+|---|---:|---:|---:|---:|---:|---:|
+| BRIN timestamptz | 0.111 (0.30) | 0.284 (0.54) | **2.57** | 8.47 | 415 / 543 | 3 / 3 |
+| GIN int[] | 0.351 (0.83) | 0.905 (1.77) | **2.58** | 4.08 | 468 / 562 | 1,474 / 1,474 |
+| GIN jsonb | 1.175 (3.07) | 2.218 (4.35) | **1.89** | 3.13 | 508 / 450 | 1,866 / 1,866 |
+| GIN jsonb_path_ops | 0.609 (1.50) | 1.700 (1.69) | **2.79** | 6.82 | 483 / 450 | 1,459 / 1,459 |
+| GIN tsvector | 0.660 (1.36) | 0.782 (0.78) | **1.18** | 2.83 | 471 / 385 | 1,059 / 1,059 |
+| GiST box | 5.455 (5.17) | 0.933 (1.85) | 0.17 | 0.26 | 435 / 558 | 10,536 / 1 |
+| SP-GiST text | 3.365 (3.34) | 0.742 (1.47) | 0.22 | 0.35 | 435 / 552 | 7,282 / 3 |
+| SP-GiST point | 3.704 (3.69) | 1.414 (2.77) | 0.38 | 0.57 | 435 / 544 | 7,091 / 3 |
+| hash int | 1.959 (1.78) | 0.942 (1.86) | 0.48 | 1.03 | 412 / 565 | 4,098 / 10 |
+| GiST point | 1.127 (1.11) | 0.855 (1.68) | 0.76 | 1.04 | 498 / 554 | 7,557 / 1 |
+| btree int | 1.220 (1.16) | 1.063 (1.92) | 0.87 | 3.29 | 435 / 445 | 2,745 / 2,745 |
+| btree text | 0.638 (0.97) | 1.176 (2.91) | 1.84 | 2.20 | 468 / 579 | 7,210 / 7,211 |
+
+(btree int: PostgreSQL's first build of each run read its table cold, 1.2 s here against 0.43 s
+in a warm run of the release comparison; the btree and hash rows moved with agents 170 and 175's
+work, not this round's.) The engine's peak is the whole process's RSS, which carries what the
+earlier builds of the run left; PostgreSQL's is its cgroup's anon + shmem. GIN tsvector now uses
+less CPU than PostgreSQL's parallel build (0.78 against 1.36 s) and jsonb_path_ops about as much.
+Each GIN and BRIN build alone in a fresh engine process (22 MB idle, the store read cold): peak
+RSS 323 MB (BRIN), 353-380 MB (GIN), most of it the block cache the table's scan fills; the
+measure itself holds the accumulator (bounded by maintenance_work_mem as ginbuild's is) and the
+entry tree's posting lists.
+
+Before the round, on a `release` build with frame pointers and the same data (one process, the
+store warm): BRIN 1.95 s, GIN int[] 2.66, jsonb 3.55, jsonb_path_ops 5.04, tsvector 2.25;
+after: 0.32, 1.11, 2.38, 2.12, 1.00. The GIN and BRIN builds' relpages and pg_relation_size are
+now PostgreSQL's (round 6: BRIN 2,745 against 3, GIN 7,211 and 2 against 1,474; PostgreSQL's
+int[] index is 1,474 or 1,475 pages from run to run, its parallel build's merge). GiST, SP-GiST
+and hash pages of a table too big to model are still not modelled.
+
+Where the GIN and BRIN builds go now (perf, a warm store): the store scan 25% (decompression
+7%), decoding the indexed column 25% (a tsvector built as a value), the measure 21% (the
+accumulator's hash map). PostgreSQL 18 builds GIN and BRIN with parallel workers (its CPU is
+twice its wall time); the engine's build pass is serial for every method but btree. A parallel
+build pass (`parbuild`) for GIN and BRIN measures is the next step to get ahead.
+
+Queries (`access`, the dist engine, 300 a case after 5 warm-ups, ms: the median, cpu: the
+server's CPU ms per query; the mean of the two rounds):
+
+| case | PostgreSQL ms (cpu) | engine ms (cpu) | engine / PostgreSQL | round 6 |
+|---|---:|---:|---:|---:|
+| skip_scan | 0.423 (0.29) | 0.370 (0.40) | **0.88** | 1.72 |
+| gist_point_box | 0.153 (0.13) | 0.205 (0.19) | 1.34 | 0.75 |
+| gist_point_circle | 0.274 (0.26) | 0.378 (0.37) | 1.38 | 2.07 |
+| gist_box | 0.118 (0.12) | 0.268 (0.50) | 2.27 | 1.30 |
+| gist_point_knn | 0.199 (0.20) | 0.400 (0.37) | 2.01 | 1.36 |
+| gist_box_knn | 0.187 (0.18) | 0.418 (0.44) | 2.24 | 1.33 |
+| gist_circle_knn | 0.233 (0.21) | 0.426 (0.42) | 1.83 | 1.77 |
+| gist_polygon_knn | 0.198 (0.18) | 0.502 (0.59) | 2.54 | 2.75 |
+| brin_range | 2.050 (2.77) | 3.139 (3.33) | 1.53 | 1.52 |
+| gin_array | 0.243 (0.41) | 0.660 (0.83) | 2.72 | 2.32 |
+| gin_jsonb_exists | 0.442 (0.47) | 0.984 (0.98) | 2.23 | 2.29 |
+| gin_tsvector_and | 3.292 (3.51) | 6.481 (6.58) | 1.97 | 2.42 |
+
+The short cases' spread under this load is wide: a release pair an hour earlier had PostgreSQL's
+KNN cases at 0.34-0.62 ms and the engine's at 0.29-0.52 (gist_point_knn 0.73, polygon 0.83
+times PostgreSQL's); their profiles are mostly binding and planning (45% of gist_point_box's,
+the scan 21%). gist_point_circle in one process before the round's change and after it: 2.23 ->
+0.52 ms (engine CPU 2.00 -> 0.53 ms a query): its bitmap index scan decides `<@ circle` on the
+structure's points instead of fetching each candidate of the circle's box. A first version of
+the strip search read every strip left of a box query (`Grid::search` 36% of gist_box's
+profile); the pushed batch skips strips whose x high ends are below the query's. skip_scan's
+1M-row table gained from agent 149's kept cursors (round 6: 0.95-1.16 ms); a quarter of its
+profile and of gin_tsvector_and's is statement overhead (EXPLAIN text built for each
+execution's Gather check, `total_and_gathers`, and planning).
+
 ## XML: the tree, input checks and building (round 21, agent 107)
 
 `tools/bench/xml.sh` measures every XML entry point against the reference on one document
