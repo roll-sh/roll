@@ -5340,6 +5340,15 @@ fn fork_blocks_bound(oid: u32, fork: Fork, ctx: &ExecCtx) -> Result<Option<u64>>
                 }));
             }
             if bix.index.method != "btree" {
+                // A BRIN or GIN index of a table too big to model: as its build measured it
+                // (`am_measure`), as a btree's is.
+                if matches!(bix.index.method.as_str(), "brin" | "gin")
+                    && fork == Fork::Main
+                    && is_estimated(t.oid, &ctx.sess.db)
+                    && let Some(s) = ctx.catalog().relstats.get(&ix).filter(|s| s.pages > 0)
+                {
+                    return Ok(Some(s.pages as u64));
+                }
                 // Other access methods aren't modelled: the size they have empty.
                 let empty = match bix.index.method.as_str() {
                     "hash" => 10,
