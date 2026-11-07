@@ -1014,9 +1014,11 @@ export function PinTools({
   return (
     <div className="group/slot relative">
       {children}
+      {/* Above the card, as its own tools are (never over its time or status); beside them when it has some (globals.css); level with them (they sit in its border). */}
       <div
         ref={ref}
-        className={`pointer-events-none absolute -top-3.5 right-2.5 z-10 flex translate-y-1 items-center gap-0.5 rounded-lg border border-line-2 p-0.5 text-muted opacity-0 shadow-pop inset-shadow-highlight glass transition-[opacity,translate] duration-150 ease-out starting:translate-y-1! starting:opacity-0! group-hover/slot:pointer-events-auto group-hover/slot:translate-y-0 group-hover/slot:opacity-100 focus-within:pointer-events-auto focus-within:translate-y-0 focus-within:opacity-100 motion-reduce:transition-none ${armed ? "" : "hidden"}`}
+        data-pin-tools
+        className={`pointer-events-none absolute right-2 bottom-[calc(100%+5px)] z-10 flex translate-y-1 items-center gap-0.5 rounded-lg border border-line-2 p-0.5 text-muted opacity-0 shadow-pop inset-shadow-highlight glass transition-[opacity,translate] duration-150 ease-out starting:translate-y-1! starting:opacity-0! group-hover/slot:pointer-events-auto group-hover/slot:translate-y-0 group-hover/slot:opacity-100 focus-within:pointer-events-auto focus-within:translate-y-0 focus-within:opacity-100 motion-reduce:transition-none ${armed ? "" : "hidden"}`}
         data-nodrag
         data-touch-tools
       >

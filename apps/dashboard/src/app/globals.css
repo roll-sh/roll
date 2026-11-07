@@ -771,6 +771,12 @@ body {
   -webkit-app-region: no-drag;
 }
 
+/* A thread card's pins sit left of its own tools (one button: 30 px, and a 4 px gap), both above
+   the card, never over its time or status. */
+[data-card]:has([data-card-tools]) [data-pin-tools] {
+  right: 42px;
+}
+
 /* A card's floating tools blur what's under them only while they show: a backdrop filter makes a
    composited layer even at opacity 0, and every card has its tools (200 cards: 200 more layers). */
 [data-card] [data-touch-tools] {
