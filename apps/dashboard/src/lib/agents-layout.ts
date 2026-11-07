@@ -114,7 +114,8 @@ export interface Wraps {
   turn?: boolean;
   /**
    * Growing right, a machine (or a drilled project) sits over its lanes instead of beside them, so
-   * it doesn't take a column of its own that's empty under it.
+   * it doesn't take a column of its own that's empty under it; either way, a machine with one
+   * project sits beside it as a band over the project's grid.
    */
   stack?: boolean;
 }
@@ -250,6 +251,39 @@ export function layoutCanvas(tree: TreeLike, size: (key: string) => Size, shape:
   const lane = (k: string, top?: number): Block => {
     const level = shape.level(k);
     if (!level) return stack(k);
+    const solo = wraps.stack && !listed && level === "lanes" ? kids(k).filter((c) => tree.nodes.has(c) && !claimed.has(c)) : [];
+    if (solo.length === 1 && shape.level(solo[0]) && !shape.section?.(solo[0])) {
+      const s = size(k);
+      const a = ANCHOR(s.h);
+      const b: Block = { w: 0, h: 0, at: [], routes: [], heads: [], row: false, lead: 0 };
+      // A chain (a machine with one project, or the one drilled into): the two side by side as a band,
+      // their edge straight, and the project's grid or sections under the band, with the whole width.
+      const c = solo[0];
+      claim(c);
+      const cs = size(c);
+      const ca = ANCHOR(cs.h);
+      const ky = Math.max(0, ca - a);
+      const cy = Math.max(0, a - ca);
+      const cx = s.w + g.depth;
+      b.at.push([k, { x: 0, y: ky }], [c, { x: cx, y: cy }]);
+      b.routes.push([`${k}>${c}`, [{ x: s.w, y: ky + a }, { x: cx, y: cy + ca }]]);
+      const band = Math.max(ky + s.h, cy + cs.h);
+      const sub = shape.level(c) === "items" ? grid(c) : lanes(c);
+      let w = cx + cs.w;
+      let h = band;
+      if (sub) {
+        const ind = SPACING.vertical.indent;
+        const by = band + g.lane;
+        const bus = band + g.lane / 2;
+        add(b, sub, ind, by);
+        // Down from the project to a line under the band, back along it, and down the indent into each lane.
+        for (const hd of sub.heads) b.routes.push([`${c}>${hd.key}`, simplify([{ x: cx + RAIL, y: cy + cs.h }, { x: cx + RAIL, y: bus }, { x: ind / 2, y: bus }, { x: ind / 2, y: by + hd.y }, { x: ind + hd.x, y: by + hd.y }])]);
+        w = Math.max(w, ind + sub.w);
+        h = by + sub.h;
+      }
+      Object.assign(b, { w, h, heads: [{ key: k, x: 0, y: ky + a, top: ky }], lead: ky + a });
+      return b;
+    }
     const child = level === "items" ? grid(k) : lanes(k);
     const s = size(k);
     if (shape.section?.(k)) {
@@ -418,8 +452,10 @@ export interface Room {
   brief?: number;
   /** Kept clear down the right while the canvas is bigger than the screen (the minimap's corner). */
   reserve?: number;
-  /** Fit pressed again: everything, however small. */
+  /** Fit pressed again: everything, however small… */
   overview?: boolean;
+  /** …but never below this (a phone: titles still read); what doesn't fit then is framed from the top. */
+  least?: number;
 }
 
 /** The zoom that shows all of `r` in `room`, at most 1. */
@@ -434,6 +470,7 @@ export function fitPlan(positions: ReadonlyMap<string, Point>, size: (key: strin
   const r = bounds(positions, size);
   if (!r) return { k: 1, all: true };
   const all = fitZoom(r, room);
+  if (room.overview && room.least && all < room.least) return { k: room.least, all: false };
   if (room.overview || all >= (room.stretch ?? room.floor)) return { k: Math.max(MIN_ZOOM, all), all: true };
   let right = 0;
   let bottom = 0;
@@ -451,6 +488,12 @@ export function fitPlan(positions: ReadonlyMap<string, Point>, size: (key: strin
 export const READABLE = 0.75;
 /** …and frames all of it down to this rather than cut it off. */
 export const STRETCH = 0.65;
+/** …and frames part of it down to this to keep what matters in view (titles read, details hide). */
+export const BRIEF_ZOOM = 0.55;
+/** A phone's Fit pressed again stops here: two columns of titles, never bars. */
+export const PHONE_LEAST = 0.55;
+/** What the prompt bar keeps clear above it: no card ends closer than this to its top. */
+const CLEAR = 16;
 /** The minimap's corner (its width and margin), kept clear while the canvas is bigger than the screen. */
 export const MINIMAP_RESERVE = 192;
 /** The narrowest canvas the minimap shows on (`minimap.tsx`): beside a panel it was clutter. */
@@ -462,7 +505,7 @@ export const MINIMAP_MIN_W = 1200;
  */
 export function roomFor(w: number, h: number): Room {
   const phone = w < 640;
-  return { w, h, pad: phone ? 24 : Math.max(40, Math.min(w, h) * 0.06), floor: phone ? 1 : READABLE, stretch: phone ? 1 : STRETCH, reserve: w >= MINIMAP_MIN_W ? MINIMAP_RESERVE : 0 };
+  return { w, h, pad: phone ? 24 : Math.max(40, Math.min(w, h) * 0.06), floor: phone ? 1 : READABLE, stretch: phone ? 1 : STRETCH, brief: phone ? 1 : BRIEF_ZOOM, least: phone ? PHONE_LEAST : undefined, reserve: w >= MINIMAP_MIN_W ? MINIMAP_RESERVE : 0 };
 }
 
 /** The view Fit frames in `room` (`fitPlan`): everything centred, or from the top at its zoom. */
@@ -471,6 +514,16 @@ export function fitTo(positions: ReadonlyMap<string, Point>, size: (key: string)
   if (!r) return { x: 0, y: 0, k: 1, all: true };
   const plan = fitPlan(positions, size, room, important);
   const v = plan.all ? fitView(r, room.w, room.h, room.pad, 1, 0) : fitView(r, room.w - (room.reserve ?? 0), room.h, room.pad, plan.k, plan.k);
+  if (!plan.all) {
+    // Framed from the top, the canvas runs on under the prompt bar: no card ends just above it
+    // (it read as tucked under the bar), they end well clear or run on under it.
+    let down = 0;
+    for (const [key, p] of positions) {
+      const bottom = (p.y + size(key).h) * v.k + v.y;
+      if (bottom > room.h - CLEAR && bottom <= room.h) down = Math.max(down, room.h + 1 - bottom);
+    }
+    v.y += down;
+  }
   return { ...v, all: plan.all };
 }
 
@@ -503,7 +556,7 @@ export function planWraps(tree: TreeLike, size: (key: string) => Size, shape: Ca
     let widest = 1;
     for (const [k, n] of tree.nodes) if (shape.level(k) === "lanes") widest = Math.max(widest, n.children.length);
     const lanes: number[] = turn ? [1] : shape.direction === "vertical" ? [0, 1, ...[2, 3, 4, 5, 6].filter((n) => n < widest)] : [0];
-    const stacks = down ? [false] : [false, true];
+    const stacks = turn ? [false] : [false, true];
     for (const st of stacks)
     for (const r of roots)
       for (const l of lanes)
@@ -559,7 +612,9 @@ function judge(tree: TreeLike, shape: CanvasShape, positions: ReadonlyMap<string
         break;
       }
     }
-  // Everything reads: the zoom (and a sliver for the layout that fills the room best, at 100 %).
+  // Everything reads: the zoom (and a sliver for the layout that fills the room best, at 100 %);
+  // below 100 %, a layout that leaves most of the room empty breaks a constraint.
+  if (all && k < 0.995 && (r.w * k * r.h * k) / (room.w * room.h) < 0.6) bad++;
   if (all) return { bad, score: k + 0.01 * Math.min(1, (r.w * k) / w) * Math.min(1, (r.h * k) / h) };
   // Part of it, framed from the top: what's important showing whole, then how many cards do; always
   // under any layout that shows everything (that reads down to `stretch`).
@@ -577,6 +632,10 @@ function judge(tree: TreeLike, shape: CanvasShape, positions: ReadonlyMap<string
       if (inView) seen++;
     }
   }
+  // What matters out of view breaks a constraint too (Fit's whole point is to show it), and so does
+  // showing part of the canvas at all: a layout that shows everything wins over one that doesn't.
+  if (seen < want) bad++;
+  bad++;
   return { bad, score: 0.5 * k * (0.5 + 0.5 * (want ? seen / want : 1)) * (0.3 + 0.7 * (whole / Math.max(1, cards))) };
 }
 

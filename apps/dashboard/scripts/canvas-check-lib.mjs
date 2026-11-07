@@ -104,8 +104,10 @@ export function checkFrame(f, label, { fit }) {
       const r = rectOf(n.key);
       return !inside(r, view) || chrome.some(([, c]) => meets(r, c));
     });
-    // More of it than fits at 55 % (where titles still read) even packed edge to edge: not required.
-    const need = nodes.filter((n) => n.important).reduce((a, n) => a + (n.w + 28) * (n.h + 24), 0) * 0.55 * 0.55;
+    // Not required when it can't be done: the canvas's cells (everything is interleaved with what
+    // matters) at 55 %, where titles still read, packed at about half (parents beside grids, requests
+    // stacked under their thread), more than the view. Reported as waived, not passed.
+    const need = (nodes.reduce((a, n) => a + (n.w + 28) * (n.h + 24), 0) * 0.55 * 0.55) / 0.5;
     if (bad.length && need > area(view)) metrics.cWaived = `${bad.length} of ${nodes.filter((n) => n.important).length} important out of view (they can't all read at once)`;
     else if (bad.length) say("c", `${bad.length}/${nodes.filter((n) => n.important).length} important out of view: ${bad.slice(0, 3).map((n) => n.key).join(", ")}`);
   }

@@ -372,7 +372,7 @@ async function runGroup(browser, g, ctxOpts) {
             const was = new Map(base.snap.nodes.map((n) => [n.key, n]));
             const why = f.snap.nodes.filter((n) => { const o = was.get(n.key); return !o || o.w !== n.w || o.h !== n.h || o.important !== n.important; }).map((n) => { const o = was.get(n.key); return o ? `${n.key} ${o.w}×${o.h}${o.important ? "!" : ""}→${n.w}×${n.h}${n.important ? "!" : ""}` : `${n.key} new`; });
             const gone = base.snap.nodes.length - f.snap.nodes.length;
-            r.fails.push(`i z${Math.round(z * 100)}: ${m.length} cards moved on zoom (${m.slice(0, 3).join(", ")}); changed: ${why.slice(0, 3).join(", ") || "none"}${gone ? `, ${gone} fewer cards` : ""}`);
+            r.fails.push(`i z${Math.round(z * 100)}: ${m.length} cards moved on zoom (${m.slice(0, 3).join(", ")}); changed: ${why.slice(0, 3).join(", ") || "none"}${gone ? `, ${gone} fewer cards` : ""}; wraps ${JSON.stringify(base.snap.wraps)}→${JSON.stringify(f.snap.wraps)} screen ${JSON.stringify(base.snap.input.screen)}→${JSON.stringify(f.snap.input.screen)} overview ${base.snap.overview}→${f.snap.overview}`);
           }
           const cz = checkFrame(f, `z${Math.round(z * 100)}`, { fit: false });
           r.fails.push(...cz.fails.filter((x) => /^[bgk]/.test(x)));
