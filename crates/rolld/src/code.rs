@@ -69,8 +69,8 @@ impl CodeArgs {
         };
         anyhow::ensure!(config.database.is_some(), "a roll code cluster (--code-cluster-secret) needs --code-database");
         let url = self.code_advertise_url.clone().unwrap_or_else(|| format!("http://{public_host}:{}", api.port()));
-        let id = self.code_node_id.clone().unwrap_or_else(code_cluster::ClusterConfig::random_node_id);
-        let cluster = code_cluster::ClusterConfig::new(id, url.trim_end_matches('/'), secret.as_bytes().to_vec());
+        let id = self.code_node_id.clone().unwrap_or_else(roll_cluster::ClusterConfig::random_node_id);
+        let cluster = roll_cluster::ClusterConfig::new(id, url.trim_end_matches('/'), secret.as_bytes().to_vec());
         cluster.validate()?;
         config.cluster = Some(cluster);
         Ok(())

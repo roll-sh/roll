@@ -518,7 +518,7 @@ impl CodeNode {
     fn router(&self, router: axum::Router) -> axum::Router {
         let router = router.layer(axum::middleware::from_fn_with_state(self.previews.clone(), code_preview::route));
         match self.code.cluster() {
-            Some(c) => router.layer(axum::middleware::from_fn_with_state(c.clone(), code_cluster::accept_forwarded)),
+            Some(c) => router.layer(axum::middleware::from_fn_with_state(c.clone(), roll_cluster::accept_forwarded)),
             None => router,
         }
     }

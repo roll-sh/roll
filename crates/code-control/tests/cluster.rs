@@ -2,7 +2,10 @@
 //! its own HTTP server on a random port, sharing one database pair and one object directory.
 //! With `ROLL_CODE_TEST_DATABASE` the databases are two fresh Postgres schemas and every node
 //! has pools of its own, as separate processes would; without it, one SQLite pair shared by
-//! every node. Cluster timings are `ClusterConfig::for_tests` (twice as long on Postgres).
+//! every node. Leases and membership are in code's database, or with
+//! `ROLL_CODE_TEST_CLUSTER_BACKEND=dynamodb` in a fresh table on DynamoDB Local at
+//! `ROLL_CLUSTER_TEST_DYNAMODB` (`pnpm test:code --docker` runs the file both ways). Cluster
+//! timings are `ClusterConfig::for_tests` (twice as long on Postgres or DynamoDB).
 //!
 //! Covered: every kind of repo request through every node runs on the repo's owner (API, git
 //! push and clone, event streams, MCP); concurrent landings through every node land exactly
@@ -17,9 +20,9 @@ use async_trait::async_trait;
 use axum::body::Bytes;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
-use code_cluster::ClusterConfig;
 use code_control::model::{Change, Check, CheckStatus, RepoRow};
-use code_control::{Code, Config, DatabaseConfig, Databases, Runner};
+use code_control::{ClusterBackend, Code, Config, DatabaseConfig, Databases, Runner};
+use roll_cluster::{ClusterConfig, DynamoDbConfig};
 use common::{git, git_raw, write};
 use parking_lot::Mutex;
 use pg_storage::{Objects, StorageConfig};
@@ -43,13 +46,15 @@ enum Backend {
 struct Env {
     dir: tempfile::TempDir,
     db: Backend,
+    /// Leases on DynamoDB (this table) instead of code's database.
+    dynamodb: Option<DynamoDbConfig>,
 }
 
 impl Env {
     fn new(name: &str) -> Env {
         // Warnings (slow renewals, fenced leases, failed forwards) show up for failing tests.
         let _ = tracing_subscriber::fmt()
-            .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "code_cluster=info,code_control=warn".into()))
+            .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "roll_cluster=info,code_control=warn".into()))
             .with_test_writer()
             .try_init();
         let dir = tempfile::tempdir().unwrap();
@@ -63,12 +68,24 @@ impl Env {
                 Backend::Sqlite { store: open("code.db"), control: open("control.db") }
             }
         };
-        Env { dir, db }
+        let dynamodb = match std::env::var("ROLL_CODE_TEST_CLUSTER_BACKEND").as_deref() {
+            Ok("dynamodb") => {
+                let endpoint = std::env::var("ROLL_CLUSTER_TEST_DYNAMODB").expect("ROLL_CLUSTER_TEST_DYNAMODB: DynamoDB Local's endpoint");
+                let mut c = DynamoDbConfig::new(format!("t-{name}-{:x}", rand::random::<u64>()));
+                c.endpoint = Some(endpoint);
+                c.create_table = true;
+                Some(c)
+            }
+            Ok("") | Ok("database") | Err(_) => None,
+            Ok(other) => panic!("ROLL_CODE_TEST_CLUSTER_BACKEND={other}: database or dynamodb"),
+        };
+        Env { dir, db, dynamodb }
     }
 
-    /// Statements on a shared Postgres can take a good part of a second: twice the timings there.
+    /// Statements on a shared Postgres (or DynamoDB Local) can take a good part of a second:
+    /// twice the timings there.
     fn scale(&self) -> u32 {
-        if matches!(self.db, Backend::Postgres { .. }) { 2 } else { 1 }
+        if matches!(self.db, Backend::Postgres { .. }) || self.dynamodb.is_some() { 2 } else { 1 }
     }
 
     fn cluster_config(&self, id: &str, url: &str) -> ClusterConfig {
@@ -107,7 +124,7 @@ struct Node {
 }
 
 impl Node {
-    fn cluster(&self) -> &Arc<code_cluster::Cluster> {
+    fn cluster(&self) -> &Arc<roll_cluster::Cluster> {
         self.code.cluster().expect("a cluster node")
     }
 
@@ -138,6 +155,9 @@ async fn start_node(env: &Env, id: &str, f: &(dyn Fn(&mut Config) + Send + Sync)
     let home = tempfile::tempdir().unwrap();
     let mut config = Config::local(home.path().to_path_buf());
     config.cluster = Some(env.cluster_config(id, &url));
+    if let Some(d) = &env.dynamodb {
+        config.cluster_backend = ClusterBackend::DynamoDb(d.clone());
+    }
     config.cluster_single_host = true;
     config.review.index = false;
     f(&mut config);
@@ -879,10 +899,9 @@ async fn landings_on_one_node_wake_the_forwarder_on_another() {
 
 // ── leases and indexes ──
 
-/// The lease row of a repo (from any node's control database).
+/// The node a repo's lease record names, as `n` reads it from the backend.
 fn lease_row(n: &Node, repo_id: &str) -> Option<String> {
-    use code_sql::OptionalExtension;
-    n.code.db.sql().query_row("SELECT node_id FROM code_leases WHERE key = ?", [repo_id], |r| r.get(0)).optional().unwrap()
+    n.cluster().lease_record(repo_id).unwrap().map(|(node, _)| node)
 }
 
 fn index_file(n: &Node, repo_id: &str) -> std::path::PathBuf {
@@ -1132,7 +1151,7 @@ async fn a_joining_node_takes_repos_over_without_failing_requests() {
     let mut net = net("join", 2).await;
     let mut repos = Vec::new();
     // Enough repos that the joining node is the preferred one for at least three.
-    let joining = |id: &str| code_cluster::placement::rendezvous(id, IDS[..3].iter().copied()) == Some(IDS[2]);
+    let joining = |id: &str| roll_cluster::placement::rendezvous(id, IDS[..3].iter().copied()) == Some(IDS[2]);
     while repos.len() < 12 || repos.iter().filter(|(_, id): &&(String, String)| joining(id)).count() < 3 {
         let i = repos.len();
         repos.push((format!("r{i}"), net.repo(i % 2, &format!("r{i}")).await));
@@ -1175,7 +1194,7 @@ async fn a_joining_node_takes_repos_over_without_failing_requests() {
     // Rebalancing moves every repo to its preferred node while the load goes on.
     until("every repo is on its preferred node", Duration::from_secs(30), || {
         repos.iter().all(|(_, id)| {
-            let want = code_cluster::placement::rendezvous(id, IDS[..3].iter().copied()).unwrap();
+            let want = roll_cluster::placement::rendezvous(id, IDS[..3].iter().copied()).unwrap();
             net.nodes.iter().any(|n| n.id == want && n.owns(id))
         })
     })
@@ -1300,7 +1319,7 @@ async fn an_event_stream_ends_when_its_repo_moves() {
 }
 
 /// `GET /v1/code/health` on every node: 200 with the node's id while it holds its leases; 503
-/// once it can't reach the database long enough to trust them, and 200 again after.
+/// once it can't reach the cluster backend long enough to trust them, and 200 again after.
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn health_follows_each_node() {
     let net = net("health", 3).await;

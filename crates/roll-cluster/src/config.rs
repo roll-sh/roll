@@ -15,14 +15,19 @@ pub struct ClusterConfig {
     pub advertise_url: String,
     /// The shared cluster secret for signing internal requests (at least 16 bytes).
     pub secret: Vec<u8>,
+    /// Where this node runs (an availability zone): recorded with its membership, and used to
+    /// spread standbys ([`crate::Cluster::standby`]). Nothing about leases depends on it.
+    pub zone: Option<String>,
     /// How often the node's row is touched (1 s).
     pub heartbeat: Duration,
-    /// A node is live while its heartbeat is younger than this, on the database's clock (5 s).
+    /// A node is live while it heartbeated within this (5 s): on the database's clock on
+    /// Postgres, as seen by each node on its own clock on DynamoDB.
     pub node_ttl: Duration,
-    /// How long a lease lasts on the database's clock after it's taken or renewed (10 s).
+    /// How long a lease outlives its holder's last renewal before another node may take it
+    /// (10 s).
     pub lease_ttl: Duration,
-    /// How often this node's leases are renewed, all in one statement (2 s). Retried sooner
-    /// after a failure.
+    /// How often this node's leases are renewed, all in one write (2 s). Retried sooner after a
+    /// failure. On DynamoDB this is the node's heartbeat too.
     pub renew_every: Duration,
     /// A lease is used only until `sent + lease_ttl - lease_margin` on this node's clock, where
     /// `sent` is when the renewal (or acquisition) that succeeded was sent (3 s).
@@ -54,6 +59,7 @@ impl std::fmt::Debug for ClusterConfig {
             .field("node_id", &self.node_id)
             .field("advertise_url", &self.advertise_url)
             .field("secret", &"<redacted>")
+            .field("zone", &self.zone)
             .field("heartbeat", &self.heartbeat)
             .field("node_ttl", &self.node_ttl)
             .field("lease_ttl", &self.lease_ttl)
@@ -83,6 +89,7 @@ impl ClusterConfig {
             node_id: node_id.into(),
             advertise_url: advertise_url.into(),
             secret: secret.into(),
+            zone: None,
             heartbeat: ms(1000),
             node_ttl: ms(5000),
             lease_ttl: ms(10_000),
