@@ -21,3 +21,5 @@
 .env*
 **/*.pem
 **/*.key
+# Public CA certificates the code bundles (include_str!), not secrets.
+!crates/roll-edge/src/cloudflare-origin-pull-ca.pem
