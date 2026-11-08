@@ -543,7 +543,11 @@ impl Conn {
                 let mut row = Vec::with_capacity(self.cur.as_ref().map_or(0, |c| c.fields.len()));
                 let mut it = d.ranges();
                 while let Ok(Some(r)) = fallible_iterator::FallibleIterator::next(&mut it) {
-                    row.push(r.map(|r| String::from_utf8_lossy(&buf[r]).into_owned()));
+                    // (Valid UTF-8, as a server's text is, checked once and copied once.)
+                    row.push(r.map(|r| match std::str::from_utf8(&buf[r.clone()]) {
+                        Ok(s) => s.to_owned(),
+                        Err(_) => String::from_utf8_lossy(&buf[r]).into_owned(),
+                    }));
                 }
                 if let Some(c) = self.cur.as_mut() {
                     c.rows.push(row);

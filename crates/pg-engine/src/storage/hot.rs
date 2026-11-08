@@ -20,7 +20,10 @@ use super::sst::{key_ts, user_key};
 use crate::error::Result;
 use bytes::Bytes;
 use parking_lot::{Mutex, RwLock};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
+// (foldhash, not SipHash: `note_scan` hashes a prefix on every scan of a relation range not
+// kept, an index lookup's included.)
+use hashbrown::HashMap;
 use std::ops::Bound;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -44,10 +47,11 @@ const MAX_RANGES: usize = 64;
 /// Versions written to a kept range with no scan of it since: it is dropped.
 const IDLE_WRITES: u32 = 8192;
 
-/// A kept range: each key's versions (commit ts, value; None a deletion), newest first.
+/// A kept range: each key's versions (commit ts, value; None a deletion), oldest first: a
+/// write appends (no shift of the chain under the commit lock), a read looks from the end.
 #[derive(Default)]
 struct Chains {
-    keys: BTreeMap<Vec<u8>, Vec<(u64, Option<Bytes>)>>,
+    keys: BTreeMap<Bytes, Vec<(u64, Option<Bytes>)>>,
     bytes: usize,
     /// Versions written since the last scan.
     idle: u32,
@@ -70,19 +74,22 @@ impl Chains {
             Some(c) => c,
             None => {
                 self.bytes += key.len() + 32;
-                self.keys.entry(key.to_vec()).or_default()
+                self.keys.entry(Bytes::copy_from_slice(key)).or_default()
             }
         };
         // (A commit writing a key twice: its last write is the version, as in the memtable.)
-        match chain.first_mut() {
-            Some(first) if first.0 == ts => {
-                self.bytes -= first.1.as_ref().map_or(0, Bytes::len) + 16;
-                first.1 = v;
+        match chain.last_mut() {
+            Some(last) if last.0 == ts => {
+                self.bytes -= last.1.as_ref().map_or(0, Bytes::len) + 16;
+                last.1 = v;
             }
-            _ => chain.insert(0, (ts, v)),
+            _ => chain.push((ts, v)),
         }
-        if let Some(keep) = chain.iter().position(|(t, _)| *t <= horizon) {
-            for (t, v) in chain.drain(keep + 1..) {
+        // (The newest version at or before the horizon, and those after it, are kept.)
+        if let Some(keep) = chain.iter().rposition(|(t, _)| *t <= horizon)
+            && keep > 0
+        {
+            for (t, v) in chain.drain(..keep) {
                 self.bytes -= v.as_ref().map_or(0, Bytes::len) + 16;
                 dropped(key, t);
             }
@@ -96,13 +103,13 @@ impl Chains {
         }
     }
 
-    /// The rows visible at `ts` among keys in [start, end).
-    fn visible(&self, start: &[u8], end: &[u8], ts: u64) -> Vec<(Vec<u8>, Bytes)> {
+    /// The rows visible at `ts` among keys in [start, end) (the keys shared, not copied).
+    fn visible(&self, start: &[u8], end: &[u8], ts: u64) -> Vec<(Bytes, Bytes)> {
         let range = (Bound::Included(start), Bound::Excluded(end));
         self.keys
             .range::<[u8], _>(range)
             .filter_map(|(k, chain)| {
-                let (_, v) = chain.iter().find(|(t, _)| *t <= ts)?;
+                let (_, v) = newest(chain, ts)?;
                 Some((k.clone(), v.clone()?))
             })
             .collect()
@@ -111,6 +118,12 @@ impl Chains {
     fn too_big(&self) -> bool {
         self.keys.len() > MAX_KEYS || self.bytes > MAX_BYTES
     }
+}
+
+/// A chain's newest version at or before `ts`.
+#[inline]
+fn newest(chain: &[(u64, Option<Bytes>)], ts: u64) -> Option<&(u64, Option<Bytes>)> {
+    chain.iter().rev().find(|(t, _)| *t <= ts)
 }
 
 #[derive(Default)]
@@ -139,7 +152,7 @@ pub(super) fn covering(start: &[u8], end: &[u8]) -> Option<Prefix> {
 
 impl Hot {
     /// The rows of [start, end) visible at `ts`, when a kept range holds them.
-    pub(super) fn scan(&self, start: &[u8], end: &[u8], ts: u64) -> Option<Vec<(Vec<u8>, Bytes)>> {
+    pub(super) fn scan(&self, start: &[u8], end: &[u8], ts: u64) -> Option<Vec<(Bytes, Bytes)>> {
         if !self.any.load(Ordering::Acquire) {
             return None;
         }
@@ -166,35 +179,18 @@ impl Hot {
         false
     }
 
-    /// `get_version` of each of `keys` (ascending) at `ts` that a kept range holds: Some(the
-    /// answer) for those, None for the others.
-    #[allow(clippy::type_complexity)]
-    pub(super) fn get_many(&self, keys: &[&[u8]], ts: u64) -> Option<Vec<Option<Option<(u64, Option<Bytes>)>>>> {
+    /// `get_version` of `key` at `ts` when a kept range holds a version of it (Some: the
+    /// answer); None: the store answers (a key the range holds no version of at `ts` may
+    /// be a deletion every snapshot sees that the chain dropped).
+    pub(super) fn get(&self, key: &[u8], ts: u64) -> Option<Option<(u64, Option<Bytes>)>> {
         if !self.any.load(Ordering::Acquire) {
             return None;
         }
+        let p: Prefix = key.get(..PREFIX)?.try_into().ok()?;
         let ranges = self.ranges.read();
-        let mut out = Vec::with_capacity(keys.len());
-        let mut cur: Option<(Prefix, Option<parking_lot::MutexGuard<'_, Chains>>)> = None;
-        for k in keys {
-            let Some(p) = k.get(..PREFIX).and_then(|p| Prefix::try_from(p).ok()) else {
-                out.push(None);
-                continue;
-            };
-            if cur.as_ref().is_none_or(|(q, _)| *q != p) {
-                cur = Some((p, ranges.get(&p).map(|r| r.lock())));
-            }
-            out.push(match &mut cur {
-                Some((_, Some(c))) => {
-                    c.idle = 0;
-                    // (A key the range holds no version of at `ts`: the store answers, with
-                    // the deletion every snapshot sees that the chain dropped.)
-                    c.keys.get(*k).and_then(|chain| chain.iter().find(|(t, _)| *t <= ts)).map(|v| Some(v.clone()))
-                }
-                _ => None,
-            });
-        }
-        Some(out)
+        let mut c = ranges.get(&p)?.lock();
+        c.idle = 0;
+        c.keys.get(key).and_then(|chain| newest(chain, ts)).map(|v| Some(v.clone()))
     }
 
     /// Keep `p`'s range, built from `entries`: every stored version in it, in storage order

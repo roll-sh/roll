@@ -1127,9 +1127,19 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
   Contrib postgres_fdw 1,950 / 2,053 (no unit changed against a base run: 628 and 636 now
   differ only in the lines below), dblink 218, file_fdw 187; `fdw_loopback`
   `analyzed_foreign_table_estimates` (PostgreSQL's estimates and ANALYZE's counts under each
-  sampling method). Still open: 636's outer plan scans don't show their copies (`ft4.*`:
-  the level's whole-row pass that adds them is kept off the laid-out plan); 628 differs
-  also in the outer plan's choice (PostgreSQL's epq path is a hash
+  sampling method). Second batch (1,951: 636 gained, none lost): the outer plan's scans
+  return their copies (`ft4.*`) themselves (`epq_layout`), ANALYZE fetches 1,000 rows a
+  round trip unless fetch_size is set (every row goes into the sample; a scan, which may stop
+  early, keeps PostgreSQL's 100: round 9's ANALYZE took 230 round trips, 216 ms against
+  base's 80), and the client side decodes a little less per value (a remote row of every
+  column in order is the row without a NULL row filled first, `ScanNode::dense`; each text
+  value's UTF-8 checked once, `remote::conn` DataRow). Its traffic numbers weren't measured
+  yet (the bench job was stopped to free the heavy slot; measured since: BENCH.md "postgres_fdw,
+  round 9", second batch). Third batch (1,952: 628 gained, none lost): the target scan the
+  wrapper joins remotely (`fdw_dml_target`) gets `fdw_sorted_paths` too, its ordering kept
+  by `mark_target` (`ORDER BY ... FOR UPDATE`): with remote estimates the sorted path costs
+  the plain one's and add_path keeps it, so the epq path's hash join reads it. Before it: 628
+  differed only in the outer plan's choice (PostgreSQL's epq path is a hash
   join whose outer side is the sorted remote scan, `ORDER BY "C 1"`: the join search's,
   agent 177); the remote SELECT list puts a SET expression's columns first only when they
   are the target's (`UPDATE f4 SET c3 = f5.c3 || ...`: PostgreSQL has `r2.c3` first); a
@@ -4380,7 +4390,7 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
     (a model of every version through flushes, compactions, collection, retirement and
     crashes, pinned snapshots read at every step), `tests/txn_spill.rs` (TRUNCATE / DROP with
     savepoints and spills).
-  - **Linked runs** (format 2: `SstMeta::commit_ts`, read by `sst::relink` when a block is
+  - **Linked runs** (format 2: `SstMeta::commit_ts`, read by `Block::decode_linked` when a block is
     loaded and by the index at open; files without it read as before): a spilled run whose
     every write was fresh (`Txn::put_fresh`: a new row's key, a fresh row id, and its index
     entries; an index build's sorted runs; a DELETE's deferred entry deletes) becomes a file
@@ -4391,8 +4401,21 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
     (`Runs::segs`: a run's whole range spans every table between its first and last key, so
     pgbench -i's TRUNCATE and COPYs of three tables in one transaction linked nothing).
     Linked runs merge in tiers of 16, not 4.
-    `Store::close` compacts linked files away. COPY's 64 MB runs are linked; its last
-    buffer still goes into the commit's file.
+    Fresh sink runs use `StoreOptions::compress`; other temporary runs stay uncompressed.
+    A linked run can enter L1 directly when its key range overlaps no memtable, frozen
+    source, L0/L1 file or sibling run, its size fits the bottom-level target, and its
+    encoding meets the store's compression policy. Linked L1 commit timestamps, as well
+    as L0 timestamps, split WAL replay into ordered memtables. After normal pending L0
+    compaction and range collection, `Store::close` rewrites each remaining linked L1
+    file individually into an ordinary L1 file, preserving unrelated file identities
+    and clean-close compatibility with pre-linked builds without expanding hot compaction.
+    Clean-close compatibility assumes writers have drained; the pre-existing race with
+    a writer adding linked L0 after the compatibility pass is not redesigned here.
+    Bottom-level compaction can reclaim a tombstone and all older versions only past
+    the snapshot horizon; its timestamp remains available to conflict checks while a
+    snapshot can still need it. Tests `storage_linked_gc` cover overlapping L0/L1 and
+    direct-L1 snapshots, replay barriers, compression policy and crash/clean reopen.
+    COPY's 64 MB runs are linked; its last buffer still goes into the commit's file.
   - **ANALYZE of a table too big to model** doesn't measure it: its pages are the estimate kept
     as it grew (`sizing::heap_blocks`), its tuples the rows the sample's pass counts, and its
     indexes' tuples and pages follow (`Ddl::sampled_counts`; an index's pages grow with its
@@ -6751,6 +6774,94 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
       that leaves its entries and cleared by VACUUM's index pass, under which they fetch the
       row (PostgreSQL's VM check for a page not all-visible).
 
+- **Index access at index cost, round 8** (round 25, agent 183; BENCH.md "Index access,
+  round 8"):
+  - Round 7's GiST "regressions" aren't its strip search's. The same dist build with and
+    without e5f0da9ac's exec/search.rs and exec/scan.rs, interleaved with PostgreSQL in
+    containers: gist_box 0.229 ms without it, 0.196 with it; gist_point_box 0.197 and 0.191
+    (PostgreSQL 0.117 and 0.129 in those rounds; 0.12-0.20 from run to run). Round 6's
+    ratios (1.30 / 0.75) came from a PostgreSQL that measured 0.170 / 0.283 ms that day; the
+    engine's own times are round 6's or better. The CPU above wall time on gist_box (0.45 ms
+    a query) is the first case after the engine starts paying its background work: after
+    another case it is 0.20 ms (BENCH round 8 runs `max_id` first for that).
+  - A bitmap scan of an index not read by its entries binds the index once (`scan::Searched`):
+    round 7's point path bound the table's indexes and evaluated the quals for
+    `search::candidate_points`, then the old path did both again, for every GIN, BRIN and
+    non-point GiST bitmap scan; and the table isn't cloned for it.
+  - GIN and BRIN builds of a table too big to model run in parallel as PostgreSQL 18's do
+    (`parbuild::measure_am_parallel`; `am_measure::AmPlan`, `AmPart`, `merged_pages`): the
+    leader and max_parallel_maintenance_workers' workers (plan_create_index_workers' count:
+    by heap pages, 32 MB of maintenance_work_mem a participant) read key-range chunks of the
+    rows (`build_chunks`, btree's). A row is known by (chunk, place) until every chunk's rows
+    are counted; then its TID is the serial measure's (`Places`: the kept measure's density,
+    or the first `SIZED_SAMPLE` rows sized and packed and the rest at their density).
+    - GIN: each participant accumulates posting lists up to its share of
+      maintenance_work_mem, then keeps them as a compressed sorted run (ginBuildCallbackParallel's
+      flushes into its tuplesort); the runs are merged by key and each key's list inserted once
+      (`_gin_parallel_merge`). array_ops' index row size error: each participant's first in
+      key order, the earliest reported (`rowsize::gin_form_error_with`).
+    - BRIN of fixed-size summaries (minmax of fixed-size types, box_inclusion_ops): the
+      participants note each row's nulls; a range's summary is formed from its columns seen
+      null and seen with a value, the same as the serial measure's. Text minmax summaries and
+      the other classes build serially.
+    - relpages and pg_relation_size are the serial measure's, which PostgreSQL's parallel
+      builds also give: `brin_gin_builds_measure_as_postgres` builds in parallel too (PostgreSQL
+      with min_parallel_table_scan_size 0 gives the same pages for that table).
+    - The block cache: a build's scan of a table over a quarter of the cache is a bulk read
+      (it evicts nothing), as PostgreSQL's ring is for one over NBuffers / 4; below that both
+      cache the table. The engine's peak over a run of builds is 320-525 MB against
+      PostgreSQL's 430-750, so there was nothing to take back there.
+  - GIN bitmap scans whose structure's selection is exact over a table nothing was written to
+    since the structure read it give `search::Found::Exact`: the bitmap reads and checks no
+    row, the heap side reads each once without a recheck, and a `count(*)` over it counts the
+    keys (`scan::Keys::Visible`, `ScanNode::count_rest`; tuples fetched counted as the fetches
+    would count them). Exact (`gin::Elements::exact`): a tsquery of AND / OR over lexemes
+    without weights (prefixes too); an array's `@>` / `&&` of elements it keys, none null;
+    jsonb's `?`, `?|`, `?&` of strings (the structure keys the top level's object keys and
+    array strings apart, `K` / `E`, so `?` also selects fewer rows when not exact); built-in
+    classes only (intarray's `@>` errors on a row's NULL element); no partial index (the
+    structure ignores predicates). Nothing written: `Placing::written`, set by every write
+    the structure's log passes on, deletions too, until it is rebuilt; the snapshot not older
+    than the structure; no own writes in the table. Golden `a183_gin_exact`.
+  - `tools/bench/access.rs` `access-builds` sets maintenance_work_mem on both servers (`--mwm`,
+    default the reference's 256 MB server setting): it decides the parallel workers.
+  - Verified (targeted, per the verification train), rebased on d79d9b4e8: release
+    build; clippy (no warning in the files touched); release lib, golden, parallel_scan,
+    deep_input and big_tables tests (big_tables 17 / 18 after the rebase: the race below);
+    regress files create_index, create_index_spgist, gist, spgist, gin, brin, btree_index,
+    hash_index, indexing, select_parallel, geometry,
+    tsearch, tsdicts, point, box, polygon, circle, create_misc, create_table, stats, arrays,
+    jsonb 5,856 / 5,856, 0 units changed; contrib btree_gist 613 / 616, pg_trgm 261, citext
+    544, bloom 58, pgvector 803 / 915 against `a89-pgvector` (its bench flags' INFO lines, as
+    round 7).
+  - Left after round 8 (agent 183):
+    - GiST short queries (gist_box 1.3-1.8x, gist_point_box 1.45-1.5x, the KNN cases
+      1.45-1.9x): the search itself is under a tenth of gist_box's profile; binding and
+      planning and the row fetches are the rest. gist_point_circle is 1.8-2.0x.
+    - GIN jsonb_path_ops `@>` (2.9-3.2x): the structure's tokens aren't paths, so its selection
+      is a superset and every candidate is read and checked. Path-aware tokens would make it
+      exact. gin_jsonb_exists is now 1.06x, gin_tsvector_and 0.28x.
+    - Builds: BRIN 1.0-1.2x, GIN int[] 1.0-1.3x and jsonb_path_ops 1.0x PostgreSQL's (two
+      workers each side; jsonb 0.7-0.8x, tsvector 0.8-0.9x). What is left in the participants
+      is the per-row decode (a `Vec<Value>`, the array or document) and `gin_keys`'
+      allocations; the merge is serial. btree int is 2.3-2.6x. One run had the serial GiST
+      point build at 0.709 s for fix2 against head's 0.633; four more rounds give head 0.702,
+      fix1 0.677, fix2 0.725 (ranges overlapping), and three after a BRIN build 0.731 / 0.683
+      / 0.709: the spread, not the batch (nothing in it is on that path).
+    - The first build in a fresh engine process reads the table cold: BRIN first takes 0.26 s
+      (fix2) against 0.13 after another build, while PostgreSQL's cluster keeps the table in
+      its buffers from run to run (0.12). The runs restart the engine and not PostgreSQL.
+    - hnsw build memory (item 4): not started this round, 149's design stands.
+    - `tests/big_tables.rs` `deferred_entry_deletes` failed once after the rebase (the DELETE
+      didn't go in as runs): it and `copy_through_the_sink` both set the process-wide default
+      spill size around their engine's open and reset it to 0, so one can open with the
+      other's reset (a race between the two tests, there since 856b8009d). It passed in the
+      two runs before the rebase, and three more after it (18 / 18), and the two tests alone.
+    - 176's items 2, 6 and 7 (lineitem index-only counts, GiST / BRIN index row size errors,
+      the multi-row COPY's TID, the GiST box size model, the SP-GiST quad NaN): not reached.
+      Probed: BRIN's text minmax summary of a 9,600-byte value builds (compressed), and a
+      btree_gist text key fails "index row requires 9616 bytes, maximum size is 8191".
+
 - **Stored scans** (round 24, agent 149):
   - Recovered `eb44c2c9` and `78f4186f` onto `251924c1`. String comparisons
     use stored bytes when the operator and collation permit bytewise comparison.
@@ -8898,6 +9009,96 @@ Left, for the planner:
 - Untouched: item 2 (every node's cost, so one-shot plans stop building EXPLAIN trees for
   Gathers and Incremental Sort keys), planning CPU over plans/apps.sql and the ORM queries,
   TPC-H q21 / q18, and the rest of round 10's list.
+## Storage engine, round 1 (agent 169)
+
+Agent 169 owns the store's internals (block format and cache, point lookups inside the store,
+memtable / SST / compaction CPU and write amplification, hot-row chains, and since agent 149
+finished, the scan side's storage cost). BENCH.md "Storage engine, round 1" has the numbers.
+
+- **Point reads** (`storage/point.rs`, new): every single-key read goes through `point::newest`
+  (memtables, frozen sources, L0 newest first, then L1); range deletions are applied after it
+  (`deleted_by_range`). `sst_get` / `ssts_get` are gone.
+  - A `PointReader` (`Store::point_reader(ts, bloom_last)`) keeps one view and, per file source,
+    the block it read last and the seek key that found it. A key at or past that seek key and
+    at or before the block's last key is read in that block, with no file search, bloom check,
+    block index search or block cache lookup. `Store::get_versions` (row fetches) reads its
+    keys through one. Slots are per source in `newest`'s order (every frozen source has one).
+  - `Store::get_with(r, key, resolve)`: one key through a reader, the hot ranges first.
+  - `Store::first_with(r, start, end, resolve)`: the first visible row in [start, end) without
+    a merging scan: the smallest user key any source holds there, then its visible version.
+    After four keys without one it answers `First::Unknown` (scan instead). A key that `start`
+    extends (its versions sort after `start`) is stepped over. This is the point-lookup API for
+    the scan side, not wired in yet: a unique equality range, through `Txn::store_reader(snap)`
+    (the transaction wrote nothing), with one reader kept for the statement and made again
+    when the snapshot's ts changes.
+- **Range deletions sorted** (`rdel::RangeDels`): the view's list is sorted by start with a
+  running maximum of ends, so `covering` and `relevant` are binary searches, not a pass over
+  every deletion (every row fetch and scan asks). It derefs to the slice. The free functions
+  `rdel::covering` / `relevant` are gone.
+- **Linked runs written once** (agent 148's proposal): a commit's linked run that no other
+  source holds keys of (no memtable, frozen file, L0 or L1 file, nor another of its runs), not
+  over twice `target_file_bytes`, and compressed when the store compresses, goes straight into
+  L1 (`Store::alone_at_bottom`, under `bg` taken with `try_lock`; when busy, L0 as before), so
+  compaction never rewrites it: a new index's entries, a table loaded right after TRUNCATE.
+  Fresh runs (`Runs::write_fresh`, `SstWriter::create_run`) follow `StoreOptions::compress`.
+  WAL replay splits memtables at linked L1 files' commit ts as at L0's. A clean close rewrites
+  each linked L1 file into an ordinary one (`rewrite_linked_l1_for_close`), so builds before
+  linked runs still read a cleanly closed store. `LINKED_TO_L1` counts them (tests).
+  - Cost: the runs are compressed as they are written, in the COPY or index build, so COPY's
+    wall time goes up (TPC-H's load copy +9%) while the load's CPU stays and its bytes written
+    drop (BENCH).
+  - A linked run's block is decoded in one pass (`Block::decode_linked`: versions set, the run's
+    value tags stripped), not relinked and then decoded.
+- **Cached blocks keep their keys before their values** (`Block::decode`, `BlockPos::vnext`,
+  `Block::rvals`): a seek walks the keys of one restart interval (a few cache lines) instead of
+  the rows between them. The file format is unchanged.
+  - Tried and dropped: passing entries that share more of the key before than the probe does
+    without a comparison (a byte loop from the shared prefix on). It took more instructions
+    than the memcmp it saved (nl +2.6%).
+- **No bloom filter for files of index entries alone** (`sst::index_entry`): their keys are
+  scanned, not looked up alone; an empty filter passes every key (builds before this one read it
+  the same way). Compaction outputs of an index's range build none.
+  - Tried and dropped: blocked bloom filters (a key's bits in one 64-byte line, a word-at-a-time
+    hash). They need a footer magic that builds before this one refuse, which breaks the
+    downgrade after a clean shutdown, and most point reads skip L1's filters anyway.
+- **Hot ranges** (`hot.rs`; agent 149's patch, finished here): chains are keyed by `Bytes`
+  shared with readers (a hot range's scan copies no key per row; `Scan::fill_batch` pushes its
+  rows straight from them), kept oldest first (a write appends instead of shifting the chain),
+  and the maps hash with foldhash.
+- Reviewed agent 158's `storage/discard.rs` (e4214aa4): no conflict. Flushes and compactions
+  filter ascending keys; a file wholly inside a discarded range goes unread; reads never look
+  (the owner never reads there). Linked runs can't fall in a discarded range.
+- Tests: `storage::rdel::tests::sorted_lookups_match_a_linear_search`,
+  `storage::tests::lone_linked_runs_go_to_l1`, `point_reads_over_every_source`, `check_at`'s
+  `first_with` over ranges of every shape, `sst::tests::linked_blocks_decode_as_relinked`,
+  `index_entry_files_have_no_bloom_filter`, `tests/storage_linked_gc.rs`,
+  `tests/storage_read_once.rs`.
+- Found, not storage:
+  - **q20 is 15x slower on origin since fe7b0023c** (0.5 s -> 6-9 s warm, PostgreSQL 0.11 s),
+    while its EXPLAIN ANALYZE in the same engine takes 0.4 s. Instrumented runs skip
+    `ScanNode::start_parallel_index`; plain runs reach its range-end probe (a forward scan and a
+    `TxnRevScan`, which expands a whole block) at every SubPlan run. pgbench select-only shows
+    the same probe (RevScan and `Block::expand` about 5% of its samples) where fe7b0023c has
+    none. The commits between touch `exec/scan.rs` (agent 149's batch 3) and the size models'
+    kept records; not bisected.
+  - `tests/logical_apply.rs` `aborted_subtransactions_stream` fails one debug run in two on the
+    planner's debug check that a scan's serial bound equals its full estimate
+    (`sql/explain.rs` "serial bound of"): two estimates of a table the apply worker is writing.
+- Left:
+  - Wire `first_with` into `ScanNode`'s unique equality lookups and keep a `PointReader` per
+    statement for row fetches; the unique check (`dml::committed_conflict`'s secondary index
+    path) can use it too.
+  - TPC-H's peak: the cache's decoded blocks are about PostgreSQL's heap and index bytes
+    (lineitem's rows 789 MB of values, 131 bytes a row). Getting under PostgreSQL needs a more
+    compact row encoding (char(n)'s padding, ints and dates as varints, one tag byte per value),
+    a stored format change for the row owners.
+  - Zone maps (per-block min / max of leading columns, for scans to skip blocks): bytes after the
+    index's entries, which older readers ignore, so no format break.
+  - Agent 175's findings: compaction of a fresh load overlapping the next query (the L1 placement
+    removes it for a table or index loaded alone), and `count(*)` after updates spending its time
+    in `Scan::position` (an updated row's two versions sit in two sources, so the merge goes a
+    row at a time). Agent 178's: `scan_row_rest`'s key `Arc` per UPDATE row, `Hot::scan`'s
+    collected rows, two copies per index entry in `next_indexed`.
 
 ## Starting prompt for the next agent
 
