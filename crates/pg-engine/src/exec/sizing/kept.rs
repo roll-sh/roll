@@ -410,7 +410,8 @@ fn encode(rf: &RelFiles, cat: &Catalog, t: &Table, h: &Heap, node: u32, v: &Vis,
     put(&mut out, rows.len() as u64);
     let toast = rf.toast.get(&t.oid);
     let (mut pk, mut pb): (&[u8], u32) = (&[], 0);
-    for &(tid, k, len) in &rows {
+    for (tid, k, len) in &rows {
+        let (tid, k, len) = (*tid, &k[..], *len);
         put(&mut out, zigzag(tid.0 as i64 - pb as i64));
         put(&mut out, tid.1 as u64);
         put(&mut out, len as u64);

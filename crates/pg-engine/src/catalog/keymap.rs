@@ -8,6 +8,9 @@
 //! Rows added in key order (a load, a model laid out from a record: most of a big table's)
 //! are the ascending rows `..asc`: found by searching them, not hashed; their keys back to
 //! back (all of one length: no length or place kept per row) and their TIDs in 6 bytes each.
+//! Keys that step evenly (a serial's, a dense integer key's: one length, the same bytes but
+//! for the last 8, which go up by the same amount each row) keep no bytes at all: row i's key
+//! is computed (`AscKeys::Arith`), so the map lends a row's key as a `RowKey`, not a slice.
 //! The rows after them keep each key's place in an arena (a varint length, then the bytes),
 //! their TID, and a slot in the hash table.
 //!
@@ -84,6 +87,97 @@ enum AscKeys {
     Fixed(usize),
     /// Each where its entry says: a varint length, then the bytes (keys of other lengths).
     Var(Vec<u32>),
+    /// None kept: row i's key is the first's with its last 8 bytes (big-endian) plus
+    /// `i * step` (`step` 0 while there is one row). The first key of another shape lays
+    /// them out as `Fixed` (`unarith`).
+    Arith(Arith),
+}
+
+/// `AscKeys::Arith`'s first key (`len` bytes, at most `ARITH_MAX`) and step.
+#[derive(Clone, Copy, Debug)]
+struct Arith {
+    first: [u8; ARITH_MAX],
+    len: u8,
+    step: u64,
+}
+
+/// The longest key `AscKeys::Arith` computes (a `RowKey` holds it inline).
+const ARITH_MAX: usize = 22;
+
+impl Arith {
+    fn new(key: &[u8]) -> Option<Arith> {
+        (8..=ARITH_MAX).contains(&key.len()).then(|| {
+            let mut first = [0; ARITH_MAX];
+            first[..key.len()].copy_from_slice(key);
+            Arith { first, len: key.len() as u8, step: 0 }
+        })
+    }
+
+    fn first(&self) -> &[u8] {
+        &self.first[..self.len as usize]
+    }
+
+    /// The last 8 bytes of a key of this shape (the rest the first's), as a number.
+    fn num(&self, key: &[u8]) -> Option<u64> {
+        let n = self.len as usize;
+        (key.len() == n && key[..n - 8] == self.first[..n - 8]).then(|| u64::from_be_bytes(key[n - 8..].try_into().unwrap()))
+    }
+
+    /// Row i's key.
+    fn key(&self, i: usize) -> RowKey<'static> {
+        let n = self.len as usize;
+        let mut buf = self.first;
+        let v = self.num(self.first()).unwrap_or(0).wrapping_add((i as u64).wrapping_mul(self.step));
+        buf[n - 8..n].copy_from_slice(&v.to_be_bytes());
+        RowKey::Built(buf, self.len)
+    }
+
+    /// The row among `asc` whose key is `key`.
+    fn find(&self, asc: usize, key: &[u8]) -> Option<usize> {
+        let (a, v) = (self.num(self.first())?, self.num(key)?);
+        let d = v.checked_sub(a)?;
+        if self.step == 0 {
+            return (d == 0 && asc > 0).then_some(0);
+        }
+        let i = usize::try_from(d / self.step).ok()?;
+        (d % self.step == 0 && i < asc).then_some(i)
+    }
+
+    /// Whether `key` is row `asc`'s (the next) key, setting the step at the second row.
+    fn next(&mut self, asc: usize, key: &[u8]) -> bool {
+        let (Some(a), Some(v)) = (self.num(self.first()), self.num(key)) else { return false };
+        if asc == 1 && self.step == 0 {
+            if v <= a {
+                return false;
+            }
+            self.step = v - a;
+            return true;
+        }
+        self.step as u128 * asc as u128 + a as u128 == v as u128
+    }
+}
+
+/// A row's key: the map's bytes, or (an `AscKeys::Arith` row's) computed. Derefs to them.
+#[derive(Clone, Copy)]
+pub enum RowKey<'a> {
+    Kept(&'a [u8]),
+    Built([u8; ARITH_MAX], u8),
+}
+
+impl std::ops::Deref for RowKey<'_> {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        match self {
+            RowKey::Kept(k) => k,
+            RowKey::Built(b, n) => &b[..*n as usize],
+        }
+    }
+}
+
+impl std::fmt::Debug for RowKey<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", &self[..])
+    }
 }
 
 impl Default for AscKeys {
@@ -173,20 +267,32 @@ impl KeyMap {
     }
 
     /// Ascending row `i`'s key.
-    fn asc_key(&self, i: usize) -> &[u8] {
+    fn asc_key(&self, i: usize) -> RowKey<'_> {
         match &self.asc_keys {
-            AscKeys::Fixed(n) => &self.asc_bytes[i * n..(i + 1) * n],
+            AscKeys::Fixed(n) => RowKey::Kept(&self.asc_bytes[i * n..(i + 1) * n]),
             AscKeys::Var(at) => {
                 let mut b = &self.asc_bytes[at[i] as usize..];
                 let n = get_varint(&mut b).unwrap_or(0) as usize;
-                &b[..n]
+                RowKey::Kept(&b[..n])
             }
+            AscKeys::Arith(a) => a.key(i),
         }
     }
 
     /// Row `row`'s key (present or removed).
-    fn key_of(&self, row: u32) -> &[u8] {
-        if row < self.asc { self.asc_key(row as usize) } else { hashed_key(&self.rows, &self.arena, self.asc, row) }
+    fn key_of(&self, row: u32) -> RowKey<'_> {
+        if row < self.asc { self.asc_key(row as usize) } else { RowKey::Kept(hashed_key(&self.rows, &self.arena, self.asc, row)) }
+    }
+
+    /// The ascending rows' keys laid out back to back (`Fixed`), from computed ones: at the
+    /// first key that doesn't step as they do.
+    fn unarith(&mut self) {
+        let AscKeys::Arith(a) = self.asc_keys else { return };
+        let mut bytes = Vec::with_capacity(self.asc as usize * a.len as usize);
+        for i in 0..self.asc as usize {
+            bytes.extend_from_slice(&a.key(i));
+        }
+        (self.asc_bytes, self.asc_keys) = (bytes, AscKeys::Fixed(a.len as usize));
     }
 
     fn present(&self, row: u32) -> bool {
@@ -226,7 +332,7 @@ impl KeyMap {
     fn asc_search(&self, mut lo: usize, mut hi: usize, key: &[u8]) -> usize {
         while lo < hi {
             let mid = lo + (hi - lo) / 2;
-            if self.asc_key(mid) < key {
+            if *self.asc_key(mid) < *key {
                 lo = mid + 1;
             } else {
                 hi = mid;
@@ -238,12 +344,15 @@ impl KeyMap {
     /// The ascending row whose key is `key`, present or not.
     fn asc_row(&self, key: &[u8]) -> Option<u32> {
         let n = self.asc as usize;
-        if n == 0 || key > self.asc_key(n - 1) {
+        if let AscKeys::Arith(a) = &self.asc_keys {
+            return a.find(n, key).map(|i| i as u32);
+        }
+        if n == 0 || key > &*self.asc_key(n - 1) {
             return None;
         }
         let (lo, hi) = self.asc_guess(n, key).unwrap_or((0, n));
         let at = self.asc_search(lo, hi, key);
-        (at < n && self.asc_key(at) == key).then_some(at as u32)
+        (at < n && *self.asc_key(at) == *key).then_some(at as u32)
     }
 
     /// Where among `n` ascending keys of one length `key` (of that length, within them) is,
@@ -257,6 +366,7 @@ impl KeyMap {
             return None;
         }
         let (first, last) = (self.asc_key(0), self.asc_key(n - 1));
+        let (first, last) = (&*first, &*last);
         let p = first.iter().zip(last).take_while(|(a, b)| a == b).count();
         let num = |k: &[u8]| {
             let mut b = [0u8; 8];
@@ -271,12 +381,12 @@ impl KeyMap {
         let guess = (((k - a) as u128 * (n - 1) as u128) / (z - a) as u128) as usize;
         // (Out from the guess, doubling, until the key is between the bounds.)
         let (mut lo, mut hi, mut step) = (guess, guess + 1, 1);
-        while lo > 0 && self.asc_key(lo) > key {
+        while lo > 0 && *self.asc_key(lo) > *key {
             hi = lo + 1;
             lo = lo.saturating_sub(step);
             step *= 2;
         }
-        while hi < n && self.asc_key(hi - 1) < key {
+        while hi < n && *self.asc_key(hi - 1) < *key {
             lo = hi - 1;
             hi = (hi + step).min(n);
             step *= 2;
@@ -299,7 +409,11 @@ impl KeyMap {
     pub fn reserve(&mut self, n: usize, bytes: usize) {
         if self.rows.is_empty() {
             self.asc_tids.reserve(n);
-            self.asc_bytes.reserve(bytes);
+            // (Keys that step evenly take no bytes: from the second row on, the rows so far
+            // say whether they do.)
+            if self.asc < 2 || !matches!(self.asc_keys, AscKeys::Arith(_)) {
+                self.asc_bytes.reserve(bytes);
+            }
             if let AscKeys::Var(at) = &mut self.asc_keys {
                 at.reserve(n);
             }
@@ -314,7 +428,7 @@ impl KeyMap {
     pub fn find(&self, key: &[u8]) -> Option<u32> {
         let cur = self.cursor.load(Relaxed);
         let c = cur.wrapping_add(1);
-        if (c as usize) < self.rows() && self.present(c) && self.key_of(c) == key {
+        if (c as usize) < self.rows() && self.present(c) && *self.key_of(c) == *key {
             self.cursor.store(c, Relaxed);
             return Some(c);
         }
@@ -339,15 +453,18 @@ impl KeyMap {
     fn forward(&self, cur: u32, key: &[u8]) -> Option<u32> {
         let end = self.asc as usize;
         let cur = cur as usize;
-        if cur >= end || self.asc_key(cur) >= key {
+        if cur >= end || *self.asc_key(cur) >= *key {
             return None;
+        }
+        if let AscKeys::Arith(a) = &self.asc_keys {
+            return a.find(end, key).filter(|&at| self.asc_tids[at].present()).map(|at| at as u32);
         }
         // (Rows cur+1..; the first whose key is at least `key`. Only near the cursor: a key
         // further on is a random lookup, which the hash table answers in a probe or two
         // where a search of the rows' keys would miss the cache at every step.)
         let (mut lo, mut step) = (cur + 1, 1);
         let mut hi = lo;
-        while hi < end && self.asc_key(hi) < key {
+        while hi < end && *self.asc_key(hi) < *key {
             if step > FORWARD_MAX {
                 return None;
             }
@@ -357,7 +474,7 @@ impl KeyMap {
         }
         let hi = hi.min(end);
         let at = self.asc_search(lo, hi, key);
-        (at < end && self.asc_tids[at].present() && self.asc_key(at) == key).then_some(at as u32)
+        (at < end && self.asc_tids[at].present() && *self.asc_key(at) == *key).then_some(at as u32)
     }
 
     /// The TID of the current version of the row under `key`.
@@ -366,7 +483,7 @@ impl KeyMap {
     }
 
     /// Row `row`'s key (present or removed).
-    pub fn key(&self, row: u32) -> Option<&[u8]> {
+    pub fn key(&self, row: u32) -> Option<RowKey<'_>> {
         ((row as usize) < self.rows()).then(|| self.key_of(row))
     }
 
@@ -430,7 +547,15 @@ impl KeyMap {
     /// `key` laid out as the next ascending row (false: it can't be, its keys past 4 GB).
     fn push_asc(&mut self, key: &[u8], tid: Tid) -> bool {
         if self.asc == 0 {
-            self.asc_keys = if key.is_empty() { AscKeys::Var(Vec::new()) } else { AscKeys::Fixed(key.len()) };
+            self.asc_keys = match Arith::new(key) {
+                Some(a) => AscKeys::Arith(a),
+                None if key.is_empty() => AscKeys::Var(Vec::new()),
+                None => AscKeys::Fixed(key.len()),
+            };
+        } else if let AscKeys::Arith(a) = &mut self.asc_keys
+            && !a.next(self.asc as usize, key)
+        {
+            self.unarith();
         }
         if let AscKeys::Fixed(n) = self.asc_keys
             && n != key.len()
@@ -446,6 +571,7 @@ impl KeyMap {
             self.asc_keys = AscKeys::Var(at);
         }
         match &mut self.asc_keys {
+            AscKeys::Arith(_) => {}
             AscKeys::Fixed(_) => self.asc_bytes.extend_from_slice(key),
             AscKeys::Var(at) => {
                 let Ok(pos) = u32::try_from(self.asc_bytes.len() + key.len() + 10) else { return false };
@@ -498,7 +624,7 @@ impl KeyMap {
             self.unpresent(row);
             return true;
         }
-        let h = self.hash(self.key_of(row));
+        let h = self.hash(&self.key_of(row));
         match self.table.find_entry(table_hash(h), |&s| s as u32 == row) {
             Ok(e) => {
                 e.remove();
@@ -529,7 +655,7 @@ impl KeyMap {
     }
 
     /// Every key present, its row and its current version's TID, in no particular order.
-    pub fn iter(&self) -> impl Iterator<Item = (&[u8], u32, Tid)> {
+    pub fn iter(&self) -> impl Iterator<Item = (RowKey<'_>, u32, Tid)> {
         let asc = (0..self.asc).filter(move |&i| self.asc_tids[i as usize].present());
         asc.chain(self.table.iter().map(|&s| s as u32)).map(move |i| (self.key_of(i), i, self.tid(i)))
     }
@@ -544,6 +670,8 @@ impl KeyMap {
     /// Keep only the rows `keep` marks (by row number; the keys present are always kept),
     /// renumbered in order. Returns each old row's new number (`NO_ROW`: dropped).
     pub fn compact(&mut self, keep: &[bool]) -> Vec<u32> {
+        // (The rows kept needn't step evenly: laid out first.)
+        self.unarith();
         let total = self.rows();
         let mut map = vec![NO_ROW; total];
         for &s in self.table.iter() {
@@ -570,13 +698,13 @@ impl KeyMap {
                     at.push(asc_bytes.len() as u32);
                     put_varint(&mut asc_bytes, k.len() as u64);
                 }
-                asc_bytes.extend_from_slice(k);
+                asc_bytes.extend_from_slice(&k);
                 asc_tids.push(self.asc_tids[i]);
             } else {
                 let r = self.rows[i - self.asc as usize];
                 let pos = arena.len();
                 put_varint(&mut arena, k.len() as u64);
-                arena.extend_from_slice(k);
+                arena.extend_from_slice(&k);
                 rows.push(Row { at: (pos % PART) as u32, part: (pos / PART) as u16 | (r.part & PRESENT), ..r });
             }
             *m = n;
@@ -598,7 +726,7 @@ impl KeyMap {
     pub fn bytes(&self) -> usize {
         let at = match &self.asc_keys {
             AscKeys::Var(at) => at.capacity() * 4,
-            AscKeys::Fixed(_) => 0,
+            AscKeys::Fixed(_) | AscKeys::Arith(_) => 0,
         };
         self.table.capacity() * (size_of::<u64>() + 1)
             + self.rows.capacity() * size_of::<Row>()
@@ -719,6 +847,49 @@ mod tests {
         }
         assert_eq!(m.insert(b"c", (9, 9)), 2999);
         assert_eq!((m.asc, m.get(b"c")), (3000, Some((9, 9))));
+    }
+
+    /// Keys stepping evenly (an integer key's encoding: a tag, then 8 bytes) keep no bytes,
+    /// and answer as a `HashMap` does through lookups between and past them, removals, a key
+    /// that breaks the step (laid out from then on), and a compaction.
+    #[test]
+    fn ascending_rows_stepping_evenly_keep_no_bytes() {
+        let key = |v: i64| {
+            let mut k = vec![3u8];
+            k.extend_from_slice(&((v as u64) ^ (1 << 63)).to_be_bytes());
+            k
+        };
+        let mut m = KeyMap::default();
+        let mut r = std::collections::HashMap::new();
+        m.reserve(20_000, 9 * 20_000);
+        for i in 0..20_000i64 {
+            m.insert(&key(i * 3 - 30_000), (i as u32, 1));
+            r.insert(key(i * 3 - 30_000), (i as u32, 1));
+        }
+        assert!(matches!(m.asc_keys, AscKeys::Arith(_)) && m.asc_bytes.capacity() == 0, "{:?}", m.asc_keys);
+        let check = |m: &KeyMap, r: &std::collections::HashMap<Vec<u8>, Tid>| {
+            for v in -30_010..30_010i64 {
+                assert_eq!(m.get(&key(v)), r.get(&key(v)).copied(), "key {v}");
+            }
+            assert_eq!(m.get(&key(-30_000)[..8]), None);
+            for (k, row, tid) in m.iter() {
+                assert_eq!((r.get(&k[..]), m.key(row).as_deref()), (Some(&tid), Some(&k[..])));
+            }
+            assert_eq!(m.len(), r.len());
+        };
+        check(&m, &r);
+        for v in (-30_000..30_000i64).step_by(21) {
+            assert_eq!(m.remove(&key(v)).is_some(), r.remove(&key(v)).is_some());
+        }
+        check(&m, &r);
+        assert!(matches!(m.asc_keys, AscKeys::Arith(_)));
+        // (Past the last key but off the step: the keys laid out, this one ascending too.)
+        m.insert(&key(40_001), (7, 7));
+        r.insert(key(40_001), (7, 7));
+        assert!(matches!(m.asc_keys, AscKeys::Fixed(9)) && m.asc == 20_001);
+        check(&m, &r);
+        let _ = m.compact(&[]);
+        check(&m, &r);
     }
 
     /// Random lookups of ascending keys of one length spread unevenly (squares, a common

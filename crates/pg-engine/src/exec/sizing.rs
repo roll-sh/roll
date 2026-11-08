@@ -1412,6 +1412,28 @@ pub fn btree_from_build(t: &Table, bix: &BoundIndex, keys: Vec<(Key, Vec<u8>)>, 
     Some((Btree::build(opts, entries), writes))
 }
 
+/// `btree_from_build` from entries at their rows' TIDs (a parallel build's participants
+/// found them, `tids_of`): None when the heap was written since the pass began.
+pub fn btree_from_entries(t: &Table, bix: &BoundIndex, entries: Vec<(Key, Tid)>, writes: u64, db: &Database) -> Option<(Btree, u64)> {
+    let opts = btree_opts(bix)?;
+    db.relfiles.of(t.oid).read().heaps.get(&t.oid).filter(|h| h.writes() == writes)?;
+    Some((Btree::build(opts, entries), writes))
+}
+
+/// The TIDs of the rows under `keys` in table `t`'s heap model, appended to `out`, while the
+/// heap is as an index build's pass found it (its write count `writes`, `heap_writes`): a
+/// parallel build's participants, a batch of rows under one lock. False when it isn't, or a
+/// row has none.
+pub fn tids_of<'k>(t: u32, writes: u64, keys: impl Iterator<Item = &'k [u8]>, out: &mut Vec<Tid>, db: &Database) -> bool {
+    let rf = db.relfiles.of(t).read();
+    let Some(h) = rf.heaps.get(&t).filter(|h| h.writes() == writes) else { return false };
+    for k in keys {
+        let Some(tid) = h.tid_of(k) else { return false };
+        out.push(tid);
+    }
+    true
+}
+
 /// `row`'s key in btree index `bix` as the model holds it (`index_key`), for measuring an
 /// index the model doesn't hold (`btree_build_blocks`).
 pub fn btree_key(t: &Table, bix: &BoundIndex, vals: Vec<Value>, row: &[Value], ctx: &ExecCtx) -> Key {

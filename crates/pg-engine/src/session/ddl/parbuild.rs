@@ -9,6 +9,7 @@
 use super::Ddl;
 use super::vacuum::RowMeasure;
 use crate::catalog::btsim::Key;
+use crate::catalog::heapsim::Tid;
 use crate::catalog::{Index, Table, relsize};
 use crate::error::Result;
 use crate::sql::expr::Expr;
@@ -83,9 +84,21 @@ struct Gathered {
     /// The first entry in index order past a btree's third of a page (`rowsize`): its key,
     /// size and row's data key.
     oversized: Option<(Vec<u8>, usize, Vec<u8>)>,
-    /// A modelled table's: each row's key in the index's model, with its data key.
-    model: Vec<(Key, Vec<u8>)>,
+    /// A modelled table's: each row's key in the index's model at its row's TID, found
+    /// a batch of rows at a time (`resolve`) from the rows' data keys pending meanwhile
+    /// (back to back, each one's end).
+    model: Vec<(Key, Tid)>,
+    pending: Vec<Key>,
+    pending_dkeys: Vec<u8>,
+    pending_ends: Vec<u32>,
+    /// Rows with a key in the model (`model`'s, and the pending ones).
+    model_rows: usize,
+    /// The heap model changed since the pass began, or lacks a row: no model from the build.
+    model_lost: bool,
 }
+
+/// Rows whose TIDs a participant looks up in the heap model under one lock.
+const RESOLVE_BATCH: usize = 1024;
 
 /// What every participant needs, shared.
 struct Plan<'a> {
@@ -100,9 +113,11 @@ struct Plan<'a> {
     need: Vec<bool>,
     fmt: crate::types::text::FormatCtx,
     check_nulls: bool,
-    /// The table is modelled: each row's key in the index's model is taken (`sizing::
-    /// btree_from_build` lays the model out from them) in place of the measure.
-    model: bool,
+    /// The table is modelled (the heap model's write count when the pass began): each row's
+    /// key in the index's model is taken at its row's TID (`sizing::btree_from_entries` lays
+    /// the model out from them) in place of the measure.
+    model: Option<u64>,
+    db: &'a crate::txn::Database,
 }
 
 impl Plan<'_> {
@@ -110,7 +125,7 @@ impl Plan<'_> {
     fn row(&self, g: &mut Gathered, part: &mut Part, dkey: &[u8], bytes: &[u8]) -> Result<()> {
         let text = |v: &Value, ty: &DataType| crate::types::text::format_value(v, ty, &self.fmt);
         part.rows += 1;
-        if self.model {
+        if self.model.is_some() {
             let row = crate::exec::scan::decode_table_row_need(self.t, bytes, &self.need)?;
             let mut vals: Vec<Value> = self.cols.iter().map(|&i| row[i].clone()).collect();
             let k = crate::exec::scan::index_entry_key(self.t, self.ix, &vals, dkey, self.colls);
@@ -128,7 +143,15 @@ impl Plan<'_> {
             vals.truncate(self.cols.len());
             let ty = |n: usize| self.ix_types.get(n).cloned();
             let key = crate::exec::sizing::index_key_of(self.t, self.ix, &ty, self.colls, vals, &row, &self.fmt);
-            g.model.push((key, dkey.to_vec()));
+            g.model_rows += 1;
+            if !g.model_lost {
+                g.pending.push(key);
+                g.pending_dkeys.extend_from_slice(dkey);
+                g.pending_ends.push(g.pending_dkeys.len() as u32);
+                if g.pending.len() >= RESOLVE_BATCH {
+                    self.resolve(g);
+                }
+            }
             return Ok(());
         }
         let stored = crate::storage::row::stored_tuple_len(crate::exec::scan::row_data(bytes)?, &self.types, &self.virt_mask);
@@ -168,6 +191,32 @@ impl Plan<'_> {
         Ok(())
     }
 
+    /// The pending rows' keys in the model at their rows' TIDs (`sizing::tids_of`), or the
+    /// model lost.
+    fn resolve(&self, g: &mut Gathered) {
+        let Some(writes) = self.model else { return };
+        let mut keys = std::mem::take(&mut g.pending);
+        if !g.model_lost {
+            let mut tids = Vec::with_capacity(keys.len());
+            let mut at = 0;
+            let dkeys = g.pending_ends.iter().map(|&end| {
+                let k = &g.pending_dkeys[at..end as usize];
+                at = end as usize;
+                k
+            });
+            if crate::exec::sizing::tids_of(self.t.oid, writes, dkeys, &mut tids, self.db) {
+                g.model.extend(keys.drain(..).zip(tids));
+            } else {
+                g.model_lost = true;
+                g.model = Vec::new();
+            }
+        }
+        keys.clear();
+        g.pending = keys;
+        g.pending_dkeys.clear();
+        g.pending_ends.clear();
+    }
+
     /// Take chunks until none are left, then sort the entries: `check` every so many rows
     /// (the leader's cancel checks), stopping early once `stop` is set (another failed).
     fn run(
@@ -197,6 +246,7 @@ impl Plan<'_> {
             }
             g.parts.push((n, part));
         }
+        self.resolve(&mut g);
         g.entries.sort();
         // (Each participant's keys sorted here, merged by the leader: `btree_pages_sorted`.)
         g.keys.sort_unstable();
@@ -262,7 +312,8 @@ pub(super) fn index_workers(d: &Ddl, t: &Table, pages: u32) -> usize {
 /// (`sizing::btree_from_build`).
 pub(super) enum ParBuilt {
     Measured(RowMeasure),
-    Modelled { rows: usize, tuples: usize, keys: Vec<(Key, Vec<u8>)> },
+    /// (`entries` None: the heap model changed meanwhile, or lacks a row.)
+    Modelled { rows: usize, tuples: usize, entries: Option<Vec<(Key, Tid)>> },
 }
 
 /// Gives the reserved workers back to the pool when the build ends.
@@ -285,7 +336,7 @@ impl Ddl<'_, '_> {
         bix: &BoundIndex,
         workers: usize,
         progress: &IndexProgress,
-        model: bool,
+        model: Option<u64>,
     ) -> Result<Option<ParBuilt>> {
         let cols: Option<Vec<usize>> = bix.keys.iter().map(|k| if let Expr::Col(i, _) = k { Some(*i) } else { None }).collect();
         let (Some(cols), None) = (cols, &bix.predicate) else {
@@ -341,6 +392,7 @@ impl Ddl<'_, '_> {
             fmt: self.ctx.fmt().clone(),
             check_nulls: ix.unique && !ix.nulls_not_distinct,
             model,
+            db: &self.ctx.sess.db,
         };
         let chunks = Mutex::new(chunks);
         let stop = AtomicBool::new(false);
@@ -374,9 +426,14 @@ impl Ddl<'_, '_> {
         let mut keys = Vec::new();
         let mut sorted = Vec::new();
         let mut oversized: Option<(Vec<u8>, usize, Vec<u8>)> = None;
-        let mut model_keys = Vec::new();
+        let gathered = gathered.into_iter().collect::<Result<Vec<Gathered>>>()?;
+        let (mut tuples, mut lost) = (0, false);
+        for g in &gathered {
+            tuples += g.model_rows;
+            lost |= g.model_lost;
+        }
+        let mut model_keys = Vec::with_capacity(if lost || model.is_none() { 0 } else { tuples });
         for g in gathered {
-            let g = g?;
             if let Some(o) = g.oversized
                 && oversized.as_ref().is_none_or(|m| o.0 < m.0)
             {
@@ -385,7 +442,9 @@ impl Ddl<'_, '_> {
             parts.extend(g.parts);
             keys.push(g.keys);
             sorted.push(g.entries);
-            model_keys.extend(g.model);
+            if !lost {
+                model_keys.extend(g.model);
+            }
         }
         if ix.unique {
             self.unique_check(t, bix, ix, &sorted)?;
@@ -396,14 +455,14 @@ impl Ddl<'_, '_> {
         }
         parts.sort_by_key(|p| p.0);
         let rows = parts.iter().map(|p| p.1.rows).sum();
-        if model {
-            let tuples = model_keys.len();
+        if model.is_some() {
             // (The serial build's count of the rows it read, as heap_getnext's.)
             crate::exec::pgstat::count_returned(self.ctx, t.oid, tuples as i64);
             progress.scanned_all(tuples as u64);
             self.put_runs(&start, sorted)?;
             progress.loaded(tuples as u64);
-            return Ok(Some(ParBuilt::Modelled { rows, tuples, keys: model_keys }));
+            let entries = (!lost).then_some(model_keys);
+            return Ok(Some(ParBuilt::Modelled { rows, tuples, entries }));
         }
         let live = relsize::heap_pages(parts.into_iter().flat_map(|p| p.1.sizes));
         let tuples = keys.iter().map(Vec::len).sum::<usize>();
