@@ -8289,6 +8289,10 @@ impl Builder<'_, '_> {
                     n.details.push(Detail::HashAggInfo(0));
                     n
                 };
+                // A DISTINCT of a parallel-safe input can run whole in each worker
+                // (a semi join's unique inner side); it needs no partial aggregation.
+                n.par_safe = super::paths::parallel::plan_hazard(input, &self.ctx.catalog()) == 's'
+                    && on.iter().flatten().all(|e| super::paths::parallel::hazard(e, &self.ctx.catalog()) == 's');
                 let cols = if c.node.cols.len() == c.exported.len() {
                     c.node.cols.clone()
                 } else {

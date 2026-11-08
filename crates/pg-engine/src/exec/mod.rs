@@ -387,9 +387,8 @@ pub struct ExecCtx<'a> {
     pub enrs: RefCell<Vec<Rc<Enr>>>,
     /// EXPLAIN ANALYZE: per-node counters (nested statements aren't instrumented).
     pub instr: RefCell<Option<Rc<Instr>>>,
-    /// The plan nodes PostgreSQL's parallel workers alone would run (`parallel_part`; set
-    /// for a top-level statement with such a Gather, else empty).
-    pub worker_parts: RefCell<Vec<usize>>,
+    /// Gather parts' startup work and worker-only lock ownership for this execution.
+    pub worker_parts: RefCell<Vec<parallel_part::Part>>,
     /// EXPLAIN ANALYZE of a utility statement (CREATE TABLE AS): the plan it ran, with its
     /// hidden range-table count.
     pub explained: RefCell<Option<(Arc<Plan>, usize)>>,
