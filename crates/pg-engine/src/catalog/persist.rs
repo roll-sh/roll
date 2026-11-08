@@ -25,9 +25,11 @@ use std::sync::Arc;
 /// stored object's fields at their default values out of its record (`catalog::compact`:
 /// a table's record was 1.9 kB of JSON, most of it defaults, read and parsed at every open);
 /// format 4 stores the indexes over the relation maps as records too, and the header the
-/// stored maps' shapes, so an open reads neither (`stored_ix`). A database stored in an
-/// older format is rewritten when first opened.
-pub const CATALOG_FORMAT: u32 = 4;
+/// stored maps' shapes, so an open reads neither (`stored_ix`); format 5 stores each
+/// relation's directory record (`reldir`), so pg_class and the statistics views read no
+/// relation's entry. A database stored in an older format is rewritten when first opened
+/// (format 4 gains its directory records alone).
+pub const CATALOG_FORMAT: u32 = 5;
 
 /// Where the per-object records lie: after `CATALOG_KEY` and the sequences' keys, in the
 /// reserved keyspace of table oid 0.

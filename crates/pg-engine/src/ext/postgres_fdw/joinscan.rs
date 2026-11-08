@@ -114,6 +114,66 @@ impl JoinScan {
         s.with_key && s.fdw.is_none() && s.mark.is_none()
     }
 
+    /// The join as the source of a per-row UPDATE / DELETE whose target it holds: after the
+    /// target's `rN.ctid` its whole row (`wholerow`: an UPDATE's, add_row_identity_columns)
+    /// and the other relations' whole rows as their row marks' copies (ROW_MARK_COPY, in
+    /// range table order), as postgres_fdw's fdw_scan_tlist has them; nothing reads them
+    /// here. None: no such join.
+    pub fn with_dml_marks(&self, wholerow: bool) -> Option<JoinScan> {
+        if !self.marks.is_empty() || !self.order.is_empty() || self.limit.is_some() || self.info.lower_subquery != 0 || !self.info.is_join() {
+            return None;
+        }
+        let t = (0..self.bases.len()).find(|&k| self.is_target(k))?;
+        let key = self.bases[t].cols.get(self.bases[t].scan.table.columns.len()).copied().flatten()?;
+        let at = self.tlist.iter().position(|&g| g == key)? + 1;
+        let mut order: Vec<usize> = (0..self.bases.len()).filter(|&k| k != t).collect();
+        order.sort_by_key(|&k| self.bases[k].scan.rtindex.0);
+        if wholerow {
+            order.insert(0, t);
+        }
+        let mut js = self.clone();
+        for k in order {
+            // (A whole row read above already: fetched once, where its mark goes.)
+            match js.whole.iter_mut().find(|w| w.1 == k) {
+                Some(w) => w.0 = at,
+                None => js.marks.push((at, k)),
+            }
+        }
+        js.whole.sort_by_key(|w| w.0);
+        Some(js)
+    }
+
+    /// `with_dml_marks`' whole rows of the relations other than the target, in range table
+    /// order (EXPLAIN's `t.*` after the target's ctid and whole row).
+    pub fn dml_copies(&self) -> Vec<usize> {
+        let Some(t) = (0..self.bases.len()).find(|&k| self.is_target(k)).filter(|_| !self.marks.is_empty()) else { return Vec::new() };
+        let Some(at) = self.bases[t].cols.get(self.bases[t].scan.table.columns.len()).copied().flatten().and_then(|key| self.tlist.iter().position(|&g| g == key)) else {
+            return Vec::new();
+        };
+        let mut v: Vec<usize> = self.marks.iter().chain(&self.whole).filter(|w| w.0 == at + 1 && w.1 != t).map(|w| w.1).collect();
+        v.sort_by_key(|&k| self.bases[k].scan.rtindex.0);
+        v
+    }
+
+    /// The remote SELECT list (fdw_scan_tlist) as EXPLAIN names its Vars, by the bases'
+    /// reference names: `t.c`, the target's `t.ctid`, whole rows `t.*`.
+    pub fn tlist_names(&self, refname: &dyn Fn(usize) -> String) -> Vec<String> {
+        let mut v: Vec<String> = self
+            .tlist
+            .iter()
+            .map(|&g| {
+                let Some((k, i)) = self.bases.iter().enumerate().find_map(|(k, b)| b.col(g).map(|i| (k, i))) else { return "?".to_string() };
+                let t = &self.bases[k].scan.table;
+                let col = if i < t.columns.len() { quote_ident(&t.columns[i].name) } else { "ctid".to_string() };
+                format!("{}.{col}", quote_ident(&refname(k)))
+            })
+            .collect();
+        for (at, k, _) in self.inserts() {
+            v.insert(at.min(v.len()), format!("{}.*", quote_ident(&refname(k))));
+        }
+        v
+    }
+
     /// The table whose row key join row column `g` is (the target's `rN.ctid`).
     fn key_of(&self, g: usize) -> Option<u32> {
         let k = (0..self.bases.len()).find(|&k| self.is_target(k))?;
@@ -228,7 +288,10 @@ impl crate::ext::fdw::ForeignRelOps for JoinScan {
             let rname = b.scan.alias.clone().unwrap_or_else(|| t.name.clone());
             let fields = live.iter().map(|&i| (t.columns[i].name.clone(), t.columns[i].ty.clone())).collect();
             let what = format!("whole-row reference to foreign table \"{rname}\"");
-            let field = if mark {
+            let field = if mark && slot(crate::sql::plan::FDW_MARK_COL + k) == usize::MAX {
+                // (A copy nothing here reads: an UPDATE's / DELETE's source's.)
+                Field::Skip
+            } else if mark {
                 Field::Mark { slot: slot(crate::sql::plan::FDW_MARK_COL + k), oid: t.oid, ncols: t.columns.len(), live, fields, what }
             } else {
                 Field::Whole { slots: live.iter().map(|&i| b.cols.get(i).copied().flatten().map_or(usize::MAX, slot)).collect(), fields, what }
@@ -329,6 +392,8 @@ enum Field {
     /// A base relation's whole row kept as its row mark's copy (`exec::scan::copy_key` of
     /// table `oid`'s `ncols` columns, the `live` ones fetched): NULL for a null-extended row.
     Mark { slot: usize, oid: u32, ncols: usize, live: Vec<usize>, fields: Vec<(String, DataType)>, what: String },
+    /// A column fetched that nothing reads.
+    Skip,
 }
 
 struct JoinNode {
@@ -350,6 +415,7 @@ impl Node for JoinNode {
                     Field::Col(g, ty, what) => {
                         row[*g] = crate::types::text::parse_value(&s, ty, ctx.fmt()).map_err(|e| e.context(what.clone()))?;
                     }
+                    Field::Skip => {}
                     Field::Key(g, oid) => {
                         row[*g] = Value::Bytea(Arc::from(super::modify::row_key(*oid, &s)));
                     }

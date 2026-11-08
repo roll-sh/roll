@@ -194,14 +194,9 @@ impl Ddl<'_, '_> {
                     if let Some(e) = self.cat.fdw_routine_error(&t) {
                         return Err(e);
                     }
-                    // postgres_fdw samples the remote table.
+                    // postgres_fdw samples the remote table (and sets its pg_class counts).
                     if crate::ext::postgres_fdw::scan::is_postgres_fdw(&self.cat, &t) {
-                        let (rows, pages) = crate::ext::postgres_fdw::scan::remote_rows(&t, self.ctx)?;
                         self.analyze_columns(&t, &[], false)?;
-                        self.cat.relstats.insert(
-                            t.oid,
-                            RelStats { pages, tuples: rows.len() as f64, allvisible: 0, allfrozen: 0 },
-                        );
                         self.save()?;
                     }
                     // file_fdw's AnalyzeForeignTable runs with the relations below.
@@ -1479,6 +1474,9 @@ impl Ddl<'_, '_> {
             /// A BRIN or GIN index's pages measured as its build lays them out, when its pages
             /// and the heap's aren't modelled (`am_measure`).
             own: Option<super::am_measure::AmMeasure>,
+            /// A hash index's measure, when its pages and the heap's aren't modelled
+            /// (`sizing::BigIndex`).
+            big: Option<crate::exec::sizing::BigIndex>,
         }
         let mwm_kb = {
             let s = self.ctx.sess.settings.borrow();
@@ -1487,7 +1485,9 @@ impl Ddl<'_, '_> {
         let mut ixs: Vec<Ix> = Vec::new();
         let heap_modelled = modelled.is_some();
         if let Some(only) = indexes {
-            for bix in self.binder().bound_indexes(&Arc::new(t.clone()))? {
+            let table = Arc::new(t.clone());
+            let all = self.binder().bound_indexes(&table)?;
+            for bix in all.iter().cloned() {
                 if only.is_some_and(|o| o != bix.index.oid) {
                     continue;
                 }
@@ -1499,6 +1499,9 @@ impl Ddl<'_, '_> {
                     let a = crate::ext::index_am::AmIndex::of(&self.cat, t, &bix.index, &bix.keys, self.ctx);
                     let r = crate::ext::index_am::routine_by_name(&self.cat, &bix.index.method).expect("routine");
                     Some(r.am.blocks(&a, self.ctx)? as u32)
+                } else if let Some(n) = crate::exec::sizing::modelled_index_pages(&table, &bix, &all, self.ctx)? {
+                    // (A modelled table's hash or GIN index: its model's pages, as its size.)
+                    Some(n.min(u32::MAX as u64) as u32)
                 } else {
                     crate::exec::sizing::btree_blocks(t.oid, bix.index.oid, db)
                 };
@@ -1511,6 +1514,9 @@ impl Ddl<'_, '_> {
                 let own = (modelled.is_none() && !heap_modelled)
                     .then(|| super::am_measure::AmMeasure::of(&bix, &types, mwm_kb))
                     .flatten();
+                let big = (modelled.is_none() && own.is_none() && crate::exec::sizing::is_estimated(t.oid, db))
+                    .then(|| crate::exec::sizing::BigIndex::new(&bix))
+                    .flatten();
                 ixs.push(Ix {
                     bix,
                     types,
@@ -1519,6 +1525,7 @@ impl Ddl<'_, '_> {
                     keys: Vec::new(),
                     btree_keys,
                     own,
+                    big,
                 });
             }
         }
@@ -1715,6 +1722,8 @@ impl Ddl<'_, '_> {
                     own.row(&vals, tid);
                 } else if let Some(keys) = &mut ix.btree_keys {
                     keys.push((crate::exec::sizing::btree_key(t, &ix.bix, vals, &row, self.ctx), dkey.clone()));
+                } else if let Some(big) = &mut ix.big {
+                    big.add(&vals);
                 } else if ix.modelled.is_none() {
                     let mut sort = super::table::key_bytes(&vals);
                     vals.extend(ix.bix.index.include.iter().map(|&i| row[i].clone()));
@@ -1749,7 +1758,10 @@ impl Ddl<'_, '_> {
             let pages = match (ix.modelled.or(built), ix.own.take()) {
                 (Some(n), _) => n as i32,
                 (None, Some(own)) => own.pages(live as u32),
-                (None, None) => btree_pages_of(&ix.bix, &ix.types, std::mem::take(&mut ix.keys)),
+                (None, None) => match ix.big.take().map(|b| b.pages(t, &ix.bix, self.ctx)) {
+                    Some(n) => n.min(i32::MAX as u64) as i32,
+                    None => btree_pages_of(&ix.bix, &ix.types, std::mem::take(&mut ix.keys)),
+                },
             };
             measured.push((ix.bix.index.oid, pages, ix.tuples as f64));
         }

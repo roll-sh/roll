@@ -1792,7 +1792,11 @@ impl Session {
             let mut b = Binder::new(ctx, types);
             b.param_consts = true;
             b.param_domains = domains;
-            b.bind_statement(stmt)
+            let bq = b.bind_statement(stmt)?;
+            if b.kept_casts {
+                crate::sql::binder::custom::estimate_casts(&bq.plan, ctx)?;
+            }
+            Ok(bq)
         })
     }
 

@@ -123,6 +123,9 @@ pub struct Decode {
     /// The rows come as stored (`TxnScan::raw`): the out-of-line values of the columns
     /// read come from here, read by each worker for the rows it keeps (`LazyBuf::reader`).
     pub toast: Option<Arc<crate::txn::toast::Source>>,
+    /// The batch kernels (`Pre`), compiled by the first chunk for all of them (None
+    /// inside: none fit).
+    pub vplan: std::sync::OnceLock<Option<Arc<super::vector::AggPlan>>>,
 }
 
 /// A chunk's bounded heap of a bounded sort's keys (`Decode::topk`). A row its heap
@@ -222,6 +225,24 @@ impl From<Chunk> for Source {
     }
 }
 
+/// Rows in a list (a modelled heap's rows put in heap order, `ScanNode`) a fill at a time:
+/// the batch kernels take them as they take a table's.
+pub struct ListFill(pub std::vec::IntoIter<(Vec<u8>, bytes::Bytes)>);
+
+/// Reordered heap rows actually filled into batches (tests distinguish this source).
+pub static LIST_FILL_ROWS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+impl FillRows for ListFill {
+    fn fill(&mut self, b: &mut RowBatch, max: usize) -> Result<()> {
+        let before = b.len();
+        for (k, v) in self.0.by_ref().take(max) {
+            b.push(&k, v);
+        }
+        LIST_FILL_ROWS.fetch_add((b.len() - before) as u64, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
+    }
+}
+
 /// A table's rows in [range) through `FillRows`, as a bulk read when `bulk`.
 pub fn fill_source<F: FillRows + 'static>(f: F, bulk: bool) -> Source {
     Source::Fill(if bulk { Box::new(crate::storage::batch::BulkFill(f)) } else { Box::new(f) })
@@ -235,7 +256,7 @@ const FILL: usize = 256;
 /// (`pipe::Probe::int_key_col`). A row they can't decide (`odd`: a value its column's
 /// vector can't hold, one out of line; or a filter outcome `Out`) goes through the row path.
 struct Pre<'a> {
-    plan: super::vector::AggPlan,
+    plan: Arc<super::vector::AggPlan>,
     probe: Option<&'a super::pipe::Probe>,
     types: &'a [crate::types::DataType],
     missing: Vec<Value>,
@@ -243,6 +264,9 @@ struct Pre<'a> {
     odd: Vec<bool>,
     sel: Vec<u32>,
     tri: Vec<super::vector::Tri>,
+    /// Per aggregate argument (`AggPlan::args`), each row's exact number (by row; the
+    /// rows the filter passes), computed a column at a time.
+    nums: Vec<Vec<super::vector::Num>>,
     /// Rows decoded, and of them the ones the batch did (dropped or aggregated): the rest
     /// are decoded again by the row path, so a chunk where the batch does too few stops
     /// using it (`worth`).
@@ -266,26 +290,14 @@ impl<'a> Pre<'a> {
     /// a scan whose rows are made (None: when a filter or a probe can drop rows). None:
     /// nothing a batch kernel does.
     fn new(d: &'a Decode, spec: Option<&super::partial::Spec>) -> Option<Pre<'a>> {
-        if !vectors()
-            || d.ios.is_some()
-            || !d.raw.is_empty()
-            || d.topk.is_some()
-            || (spec.is_some() && !d.extra.is_empty())
-            || (d.filtered && d.filter.is_none())
-        {
+        if !vectors() {
             return None;
         }
         let probe = match d.stages.first().map(|s| &**s) {
             Some(super::pipe::Stage::Hash(p)) => p.int_key_col().map(|c| (c, p)),
             _ => None,
         };
-        if !d.stages.is_empty() && probe.is_none() && (spec.is_some() || d.filter.is_none()) {
-            return None;
-        }
-        if spec.is_none() && probe.is_none() && d.filter.is_none() {
-            return None;
-        }
-        let plan = super::vector::AggPlan::compile(&d.types, d.filter.as_ref(), d.filtered, spec, probe.map(|p| p.0))?;
+        let plan = d.vplan.get_or_init(|| Pre::compile(d, spec, probe.map(|p| p.0)).map(Arc::new)).clone()?;
         Some(Pre {
             plan,
             probe: probe.map(|p| p.1),
@@ -295,10 +307,30 @@ impl<'a> Pre<'a> {
             odd: Vec::new(),
             sel: Vec::new(),
             tri: Vec::new(),
+            nums: Vec::new(),
             seen: 0,
             done: 0,
             off: false,
         })
+    }
+
+    /// `new`'s kernels (the same for every chunk of the scan: `Decode::vplan` keeps them).
+    fn compile(d: &Decode, spec: Option<&super::partial::Spec>, probe: Option<usize>) -> Option<super::vector::AggPlan> {
+        if d.ios.is_some()
+            || !d.raw.is_empty()
+            || d.topk.is_some()
+            || (spec.is_some() && !d.extra.is_empty())
+            || (d.filtered && d.filter.is_none())
+        {
+            return None;
+        }
+        if !d.stages.is_empty() && probe.is_none() && (spec.is_some() || d.filter.is_none()) {
+            return None;
+        }
+        if spec.is_none() && probe.is_none() && d.filter.is_none() {
+            return None;
+        }
+        super::vector::AggPlan::compile(&d.types, d.filter.as_ref(), d.filtered, spec, probe)
     }
 
     /// Rows `rows` of `b` decoded, `odd` and `tri` (by row of the run) filled.
@@ -326,6 +358,18 @@ impl<'a> Pre<'a> {
         self.tri.resize(n, Tri::T);
         if let Some(f) = &self.plan.filter {
             f.eval(&self.cols, &self.sel, &mut self.tri);
+        }
+        // (The aggregates' arguments over the rows the filter passes.)
+        if self.plan.args.iter().any(|a| matches!(a, super::vector::AggArg::Num(_))) {
+            let live: Vec<u32> = self.sel.iter().copied().filter(|r| self.tri[*r as usize] == Tri::T).collect();
+            self.nums.resize_with(self.plan.args.len(), Vec::new);
+            for (a, v) in self.plan.args.iter().zip(&mut self.nums) {
+                if let super::vector::AggArg::Num(k) = a {
+                    v.clear();
+                    v.resize(n, None);
+                    k.eval(&self.cols, &live, v);
+                }
+            }
         }
     }
 
@@ -1237,7 +1281,7 @@ fn work_partial(
                 let aggregated = !pre.odd[r]
                     && pre.tri[r] == Tri::T
                     && pre.plan.probe.is_none()
-                    && pa.batch_row(&pre.plan, &pre.cols, r);
+                    && pa.batch_row(&pre.plan, &pre.cols, &pre.nums, r);
                 if aggregated {
                     taken += 1;
                 } else {
