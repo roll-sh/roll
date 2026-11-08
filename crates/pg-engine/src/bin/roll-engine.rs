@@ -257,6 +257,8 @@ fn main() -> anyhow::Result<()> {
         anyhow::bail!("port and listen_addresses are set by --listen");
     }
     let mut settings = a.settings;
+    settings.retain(|(k, _)| !k.eq_ignore_ascii_case(MODE_SETTING));
+    settings.push((MODE_SETTING.into(), profile.mode.name().into()));
     if let Some((host, _)) = a.listen.rsplit_once(':') {
         let host = host.trim_start_matches('[').trim_end_matches(']');
         settings.push(("listen_addresses".into(), host.to_string()));
@@ -493,5 +495,29 @@ fn raise_open_files() {
             l.rlim_cur = l.rlim_max;
             libc::setrlimit(libc::RLIMIT_NOFILE, &l);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mode_selection_and_overrides() {
+        let dir = tempfile::tempdir().unwrap();
+        let args = |extra: &[&str]| {
+            let mut argv = vec!["roll-engine", "--data", dir.path().to_str().unwrap()];
+            argv.extend_from_slice(extra);
+            Args::try_parse_from(argv).unwrap()
+        };
+        assert_eq!(profile(&args(&[])).unwrap().mode, Mode::Efficient);
+        std::fs::write(dir.path().join(pg_engine::sysconf::AUTO_NAME), "roll.engine_mode = 'performance'\n").unwrap();
+        assert_eq!(profile(&args(&[])).unwrap().mode, Mode::Performance);
+        assert_eq!(profile(&args(&["--mode", "efficient"])).unwrap().mode, Mode::Efficient);
+        assert_eq!(profile(&args(&["-c", "ROLL.engine_mode=efficient"])).unwrap().mode, Mode::Efficient);
+        assert!(profile(&args(&["--mode", "performance", "-c", "roll.engine_mode=efficient"])).is_err());
+        assert!(profile(&args(&["-c", "roll.engine_mode=fast"])).is_err());
+        let p = profile(&args(&["--memory-budget-mb", "128", "--cache-mb", "8", "--plan-cache-mb", "4", "--idle-close-secs", "7"])).unwrap();
+        assert_eq!((p.cache_bytes, p.plan_cache_bytes, p.idle_close), (8 << 20, 4 << 20, Duration::from_secs(7)));
     }
 }
