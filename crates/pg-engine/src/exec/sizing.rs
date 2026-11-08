@@ -362,7 +362,7 @@ struct Pending {
     exts: Vec<NewExt>,
     entries: Vec<(u32, Key)>,
     /// Its GiST indexes' entries (`gist_entries`).
-    gist: Vec<(u32, Option<crate::catalog::gistsim::Key>)>,
+    gist: Vec<(u32, gistlog::EntryKeys)>,
 }
 
 /// A value a row's tuple stores out of line: its column, the bytes saved in TOAST chunks
@@ -2020,7 +2020,7 @@ fn gist_entries(
     row: &[Value],
     vals: Option<&[Option<Vec<Value>>]>,
     ctx: &ExecCtx,
-) -> Result<Vec<(u32, Option<crate::catalog::gistsim::Key>)>> {
+) -> Result<Vec<(u32, gistlog::EntryKeys)>> {
     // (Only GiST indexes have logs: no shard lock for a table without one.)
     if !indexes.iter().any(|b| b.index.method == "gist") {
         return Ok(Vec::new());
@@ -2041,7 +2041,7 @@ fn gist_entries(
         };
         // (A row a partial index leaves out has no entry.)
         if let Some(v) = v
-            && let Some(k) = gist_entry_key(bix, v.first())?
+            && let Some(k) = gist_entry_key(bix, &v)?
         {
             out.push((bix.index.oid, k));
         }
@@ -2050,7 +2050,7 @@ fn gist_entries(
 }
 
 /// `entries` (`gist_entries`) went into their indexes for the heap tuple at `tid`.
-fn gist_log(logs: &mut FastMap<u32, Arc<gistlog::GistLog>>, entries: &[(u32, Option<crate::catalog::gistsim::Key>)], tid: Tid) {
+fn gist_log(logs: &mut FastMap<u32, Arc<gistlog::GistLog>>, entries: &[(u32, gistlog::EntryKeys)], tid: Tid) {
     for (ix, k) in entries {
         if let Some(l) = logs.get_mut(ix)
             && !Arc::make_mut(l).insert(tid, *k)
@@ -3506,10 +3506,10 @@ pub fn gin_clean_pending(t: &Arc<Table>, index: u32, ctx: &ExecCtx) -> Result<i6
     Ok(pages as i64)
 }
 
-/// A GiST point_ops or range_ops index's pages (ranges of int4, int8, date and
-/// timestamps): the sorted build over the live rows it read, then gistdoinsert of those
-/// written since, in heap order. (Postgres breaks ties between equally good subtrees
-/// randomly; the model keeps the first.)
+/// A modelled GiST index's pages (point_ops, range_ops over int4, int8, date and timestamps,
+/// btree_gist's integers, two columns of those): the sorted build over the live rows it read,
+/// then gistdoinsert of those written since, in heap order. (Postgres breaks ties between
+/// equally good subtrees randomly; the model keeps the first.)
 fn gist_index_pages(
     t: &Arc<Table>,
     bix: &BoundIndex,
@@ -3631,28 +3631,32 @@ pub fn gist_insert_page(
     if !gist_searched(bix) {
         return Ok(None);
     }
-    let Some(key) = gist_entry_key(bix, vals.first())? else {
+    let Some(key) = gist_entry_key(bix, vals)? else {
         return Ok(None);
     };
     let model = gist_model_shared(t, bix, indexes, ctx)?;
     let Some((g, _)) = model.as_ref() else {
         return Ok(None);
     };
-    Ok(Some(g.leaf_for(key)))
+    Ok(Some(g.leaf_for(key[0])))
 }
 
-/// A GiST point_ops / range_ops entry's key for an indexed value (outer None: an index the
-/// model doesn't cover).
-fn gist_entry_key(
-    bix: &BoundIndex,
-    v: Option<&Value>,
-) -> Result<Option<Option<crate::catalog::gistsim::Key>>> {
-    // (Logged for single-column indexes only: a two-column index's model is built from its
-    // rows, `gist_model`.)
-    if bix.keys.len() != 1 {
+/// A modelled GiST index's entry keys for a row's index values (None: an index the model
+/// doesn't cover).
+fn gist_entry_key(bix: &BoundIndex, vals: &[Value]) -> Result<Option<gistlog::EntryKeys>> {
+    let (ncols, natts) = (bix.keys.len(), bix.keys.len() + bix.index.include.len());
+    // (A two-column index's tuples are sized from its two keys: none with INCLUDE columns.)
+    if !(1..=2).contains(&ncols) || (ncols == 2 && natts > 2) {
         return Ok(None);
     }
-    Ok(gist_col_key(&bix.keys[0].ty(), v, 1 + bix.index.include.len()).ok())
+    let mut keys = [None; 2];
+    for (c, key) in keys.iter_mut().enumerate().take(ncols) {
+        match gist_col_key(&bix.keys[c].ty(), vals.get(c), natts) {
+            Ok(k) => *key = k,
+            Err(()) => return Ok(None),
+        }
+    }
+    Ok(Some(keys))
 }
 
 /// A GiST index column's key for `v` (None: a null), when the model knows its operator class:
@@ -3733,7 +3737,7 @@ fn gist_model(
     indexes: &[BoundIndex],
     ctx: &ExecCtx,
 ) -> Result<Option<(crate::catalog::gistsim::Gist, Vec<Vec<u8>>)>> {
-    use crate::catalog::gistsim::{Key, sorted_build_rows, sorted_build_rows2};
+    use crate::catalog::gistsim::{sorted_build_rows, sorted_build_rows2};
     let (ncols, natts) = (bix.keys.len(), bix.keys.len() + bix.index.include.len());
     // (A two-column index's tuples are sized from its two keys: none with INCLUDE columns.)
     if !(1..=2).contains(&ncols)
@@ -3742,6 +3746,7 @@ fn gist_model(
     {
         return Ok(None);
     }
+    let two = ncols == 2;
     if !ensure(t, indexes, ctx)? {
         return Ok(None);
     }
@@ -3750,7 +3755,7 @@ fn gist_model(
     let raw: Vec<(Vec<u8>, bytes::Bytes)> =
         ctx.txn.borrow().scan(&start, &end).collect::<Result<_>>()?;
     // (TID, data key, keys, the TID index entries name: its HOT chain's root.)
-    let mut rows: Vec<((u32, u16), Vec<u8>, [Option<Key>; 2], Tid)> = Vec::new();
+    let mut rows: Vec<((u32, u16), Vec<u8>, gistlog::EntryKeys, Tid)> = Vec::new();
     {
         let xids = ctx.sess.db.xids();
         let v = Vis::new(&xids);
@@ -3778,55 +3783,42 @@ fn gist_model(
     }
     // (In the order of the TIDs index entries name, as the build reads its rows.)
     rows.sort_by_key(|r| r.3);
-    let built = ctx.sess.db.relfiles.of(t.oid).read().gin_built.get(&bix.index.oid).and_then(|h| h.first().cloned());
-    if ncols == 2 {
-        // The rows the build read (all of them when it wasn't seen), then the rest.
-        let (first, later): (Vec<_>, Vec<_>) =
-            rows.into_iter().partition(|r| built.as_ref().is_none_or(|b| b.contains(&r.1)));
-        let mut keys: Vec<Vec<u8>> = Vec::new();
-        let mut g = sorted_build_rows2(
-            first
-                .into_iter()
-                .map(|r| {
-                    keys.push(r.1);
-                    (r.2, (keys.len() - 1) as u32)
-                })
-                .collect(),
-        );
-        for r in later {
-            keys.push(r.1);
-            g.insert_row2(r.2, (keys.len() - 1) as u32);
-        }
-        return Ok(Some((g, keys)));
-    }
     // The index as its history built it, while that accounts for every row.
     let log = ctx.sess.db.relfiles.of(t.oid).read().gist_logs.get(&bix.index.oid).cloned();
-    let roots: Vec<(Tid, Vec<u8>, Option<Key>)> = rows.iter().map(|r| (r.3, r.1.clone(), r.2[0])).collect();
+    let roots: Vec<(Tid, Vec<u8>, gistlog::EntryKeys)> = rows.iter().map(|r| (r.3, r.1.clone(), r.2)).collect();
     if let Some(m) = log.and_then(|l| l.replay(&roots)) {
         return Ok(Some(m));
     }
     // The rows the build read (all of them when it wasn't seen), then the rest.
+    let built = ctx.sess.db.relfiles.of(t.oid).read().gin_built.get(&bix.index.oid).and_then(|h| h.first().cloned());
     let (first, later): (Vec<_>, Vec<_>) =
         rows.into_iter().partition(|r| built.as_ref().is_none_or(|b| b.contains(&r.1)));
     // (Its history starts again from here.)
     if roots.len() <= gistlog::MAX_ENTRIES {
-        let build: Vec<(Tid, Option<Key>)> = first.iter().map(|r| (r.3, r.2[0])).collect();
-        let log = gistlog::GistLog::new(build, later.iter().map(|r| (r.3, r.2[0])).collect());
+        let build: Vec<(Tid, gistlog::EntryKeys)> = first.iter().map(|r| (r.3, r.2)).collect();
+        let log = gistlog::GistLog::new(build, later.iter().map(|r| (r.3, r.2)).collect(), two);
         ctx.sess.db.relfiles.of(t.oid).write().gist_logs.insert(bix.index.oid, Arc::new(log));
     }
     let mut keys: Vec<Vec<u8>> = Vec::new();
-    let mut g = sorted_build_rows(
-        first
-            .into_iter()
-            .map(|r| {
-                keys.push(r.1);
-                (r.2[0], (keys.len() - 1) as u32)
-            })
-            .collect(),
-    );
+    let firsts: Vec<(gistlog::EntryKeys, u32)> = first
+        .into_iter()
+        .map(|r| {
+            keys.push(r.1);
+            (r.2, (keys.len() - 1) as u32)
+        })
+        .collect();
+    let mut g = if two {
+        sorted_build_rows2(firsts)
+    } else {
+        sorted_build_rows(firsts.into_iter().map(|(k, row)| (k[0], row)).collect())
+    };
     for r in later {
         keys.push(r.1);
-        g.insert_row(r.2[0], (keys.len() - 1) as u32);
+        if two {
+            g.insert_row2(r.2, (keys.len() - 1) as u32);
+        } else {
+            g.insert_row(r.2[0], (keys.len() - 1) as u32);
+        }
     }
     Ok(Some((g, keys)))
 }
@@ -5716,6 +5708,7 @@ pub fn modelled_index_pages(t: &Arc<Table>, bix: &BoundIndex, indexes: &[BoundIn
     match bix.index.method.as_str() {
         "hash" => hash_index_pages(t, bix, indexes, ctx),
         "gin" => gin_index_pages(t, bix, indexes, ctx),
+        "gist" => gist_index_pages(t, bix, indexes, ctx),
         "brin" => Ok(Some(3)),
         _ => Ok(None),
     }
