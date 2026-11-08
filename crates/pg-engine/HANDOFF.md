@@ -9238,6 +9238,9 @@ and speed pull apart. BENCH.md "Modes" has the measurements behind every value.
   Scoreboard shell syntax and the five-server renderer fixture pass. The saved efficient
   footprint gate (job E) passed before this SQL visibility fix; final dist footprint and
   loaded comparisons await the serialized verification train. No new benchmark claim.
+  Release/runtime receipts cover pre-rebase `2546a4e37`; rebasing onto bulk batch
+  `140b4c531` preserved all nine lane source/script blobs exactly. The combined tree passes
+  all-target Clippy (`jobH.log`, 18 warnings); full combined runtime checks remain with the train.
 
 ## Starting prompt for the next agent
 
