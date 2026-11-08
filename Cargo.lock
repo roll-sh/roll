@@ -6213,6 +6213,7 @@ dependencies = [
  "code-chat",
  "code-control",
  "code-sql",
+ "getrandom 0.4.3",
  "libc",
  "model-gateway",
  "nosql-control",
@@ -6236,6 +6237,7 @@ dependencies = [
  "tokio-rustls 0.26.6",
  "tokio-util",
  "unicode-width",
+ "url",
  "urlencoding",
 ]
 
