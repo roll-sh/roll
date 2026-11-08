@@ -43,23 +43,23 @@ pub struct EdgeArgs {
     #[arg(long = "edge-proxy-protocol", env = "ROLL_EDGE_PROXY_PROTOCOL", value_parser = clap::builder::BoolishValueParser::new(), default_value_t = false, num_args = 0..=1, default_missing_value = "true")]
     pub proxy_protocol: bool,
     #[arg(long = "edge-https", env = "ROLL_EDGE_HTTPS", default_value = "0.0.0.0:8443")]
-    pub https: SocketAddr,
+    pub https_listen: SocketAddr,
     #[arg(long = "edge-pg", env = "ROLL_EDGE_PG", default_value = "0.0.0.0:5432")]
-    pub pg: SocketAddr,
+    pub pg_listen: SocketAddr,
     #[arg(long = "edge-redis", env = "ROLL_EDGE_REDIS", default_value = "0.0.0.0:6379")]
-    pub redis: SocketAddr,
+    pub redis_listen: SocketAddr,
     #[arg(long = "edge-kafka", env = "ROLL_EDGE_KAFKA", default_value = "0.0.0.0:9092")]
-    pub kafka: SocketAddr,
+    pub kafka_listen: SocketAddr,
     #[arg(long = "edge-nosql", env = "ROLL_EDGE_NOSQL", default_value = "0.0.0.0:9042")]
-    pub nosql: SocketAddr,
+    pub nosql_listen: SocketAddr,
     #[arg(long = "edge-amqps", env = "ROLL_EDGE_AMQPS", default_value = "0.0.0.0:5671")]
-    pub amqps: SocketAddr,
+    pub amqps_listen: SocketAddr,
     #[arg(long = "edge-mqtts", env = "ROLL_EDGE_MQTTS", default_value = "0.0.0.0:8883")]
-    pub mqtts: SocketAddr,
+    pub mqtts_listen: SocketAddr,
     #[arg(long = "edge-stomps", env = "ROLL_EDGE_STOMPS", default_value = "0.0.0.0:61614")]
-    pub stomps: SocketAddr,
+    pub stomps_listen: SocketAddr,
     #[arg(long = "edge-mq-stream", env = "ROLL_EDGE_MQ_STREAM", default_value = "0.0.0.0:5551")]
-    pub mq_stream: SocketAddr,
+    pub mq_stream_listen: SocketAddr,
     /// Dev mode: serve the `<name>.crt`/`<name>.key` pairs in this directory (a self-signed
     /// certificate for every edge hostname is written when it has none) instead of ACME's.
     #[arg(long = "edge-cert-dir", env = "ROLL_EDGE_CERT_DIR")]
@@ -132,7 +132,7 @@ pub fn configure(args: &mut Args) {
     if !env_set("ROLL_WEB_URL") {
         args.web_url = format!("https://{}", hosts.domain);
     }
-    if args.kafka.port() == args.edge.kafka.port() {
+    if args.kafka.port() == args.edge.kafka_listen.port() {
         let moved = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 19092);
         info!(from = %args.kafka, to = %moved, "edge: rolld's own Kafka listener moves off the edge's port");
         args.kafka = moved;
@@ -217,15 +217,15 @@ impl Edge {
             origin_pull,
         };
         let routes = HttpRoutes::new(args, &p)?;
-        let l = bind(e.https).await?;
+        let l = bind(e.https_listen).await?;
         let tls = roll_edge::tls::server_config(store.clone(), roll_edge::http::ALPN);
         served.push(io(roll_edge::http::serve(l, tls, Arc::new(https), Arc::new(routes), drain.clone())));
         // Postgres.
-        let l = bind(e.pg).await?;
+        let l = bind(e.pg_listen).await?;
         let tls = roll_edge::tls::server_config(store.clone(), &[roll_edge::pg::ALPN]);
         served.push(io(roll_edge::pg::serve(l, tls, opts, hosts.clone(), p.pg.clone())));
         // Redis: the server name picks the database.
-        let l = bind(e.redis).await?;
+        let l = bind(e.redis_listen).await?;
         let dir = p.redis.clone();
         served.push(io(listener::serve_tls(l, plain.clone(), opts, move |tls, a| {
             let dir = dir.clone();
@@ -233,7 +233,7 @@ impl Edge {
             redis_server::conn::serve_with(tls, a.peer, a.local, dir, a.sni, fd)
         })));
         // Kafka: one virtual broker per hostname: clients are told the name they connected with.
-        let l = bind(e.kafka).await?;
+        let l = bind(e.kafka_listen).await?;
         let b = p.streams.clone();
         served.push(io(listener::serve_tls(l, plain.clone(), opts, move |tls, a| {
             let advertised = a.sni.clone().map(|s| (s, a.local.port()));
@@ -241,7 +241,7 @@ impl Edge {
         })));
         // nosql (CQL): the server name picks the database.
         if let Some(n) = p.nosql {
-            let l = bind(e.nosql).await?;
+            let l = bind(e.nosql_listen).await?;
             let dir: Arc<dyn nosql_server::Directory> = n.control.node.clone();
             served.push(io(listener::serve_tls(l, plain.clone(), opts, move |tls, a| {
                 let details = nosql_server::net::tls_details(tls.get_ref().1);
@@ -252,7 +252,7 @@ impl Edge {
         if let Some(q) = p.queues {
             served.extend(queue_listeners(e, q, &plain, opts).await?);
         }
-        info!(https = %e.https, pg = %e.pg, redis = %e.redis, kafka = %e.kafka, nosql = %e.nosql, domain = %hosts.domain, site = %hosts.site_domain, proxy_protocol = e.proxy_protocol, "edge listening");
+        info!(https = %e.https_listen, pg = %e.pg_listen, redis = %e.redis_listen, kafka = %e.kafka_listen, nosql = %e.nosql_listen, domain = %hosts.domain, site = %hosts.site_domain, proxy_protocol = e.proxy_protocol, "edge listening");
 
         // Healthy once there's a certificate to serve; draining from SIGTERM on.
         let (d, s) = (drain.clone(), store.clone());
@@ -359,9 +359,9 @@ fn load_certificates(e: &EdgeArgs, hosts: &Hostnames, storage: &StorageConfig, s
 
 async fn queue_listeners(e: &EdgeArgs, q: &crate::queues::Queues, plain: &Arc<tokio_rustls::rustls::ServerConfig>, opts: ListenOptions) -> anyhow::Result<Vec<Served>> {
     let mut out: Vec<Served> = vec![];
-    let l = bind(e.amqps).await?;
+    let l = bind(e.amqps_listen).await?;
     let b = q.broker.clone();
-    let amqp10 = mq_amqp10::handoff(mq_amqp10::Config { listen: e.amqps, ..Default::default() });
+    let amqp10 = mq_amqp10::handoff(mq_amqp10::Config { listen: e.amqps_listen, ..Default::default() });
     out.push(io(listener::serve_tls(l, plain.clone(), opts, move |tls, a| {
         let (b, amqp10) = (b.clone(), amqp10.clone());
         async move {
@@ -370,8 +370,8 @@ async fn queue_listeners(e: &EdgeArgs, q: &crate::queues::Queues, plain: &Arc<to
             }
         }
     })));
-    let l = bind(e.mqtts).await?;
-    let (b, cfg) = (q.broker.clone(), Arc::new(mq_mqtt::Config { listen: e.mqtts, ..Default::default() }));
+    let l = bind(e.mqtts_listen).await?;
+    let (b, cfg) = (q.broker.clone(), Arc::new(mq_mqtt::Config { listen: e.mqtts_listen, ..Default::default() }));
     out.push(io(listener::serve_tls(l, plain.clone(), opts, move |tls, a| {
         let (b, cfg) = (b.clone(), cfg.clone());
         async move {
@@ -380,8 +380,8 @@ async fn queue_listeners(e: &EdgeArgs, q: &crate::queues::Queues, plain: &Arc<to
             }
         }
     })));
-    let l = bind(e.stomps).await?;
-    let (b, cfg) = (q.broker.clone(), Arc::new(mq_stomp::Config { listen: e.stomps, ..Default::default() }));
+    let l = bind(e.stomps_listen).await?;
+    let (b, cfg) = (q.broker.clone(), Arc::new(mq_stomp::Config { listen: e.stomps_listen, ..Default::default() }));
     out.push(io(listener::serve_tls(l, plain.clone(), opts, move |tls, a| {
         let (b, cfg) = (b.clone(), cfg.clone());
         async move {
@@ -390,7 +390,7 @@ async fn queue_listeners(e: &EdgeArgs, q: &crate::queues::Queues, plain: &Arc<to
             }
         }
     })));
-    let l = bind(e.mq_stream).await?;
+    let l = bind(e.mq_stream_listen).await?;
     let stream = q.stream.clone();
     out.push(io(listener::serve_tls(l, plain.clone(), opts, move |tls, a| {
         let stream = stream.clone();

@@ -101,7 +101,7 @@ async fn edge_routes_by_host_and_sni_and_drains_on_sigterm() {
     let (s, body) = https(https_port, &roots, "api.roll.test", "/v1/redis").await;
     assert_eq!(s, 200, "{body}");
     assert_eq!(https(https_port, &roots, "tasks.r1.roll.test", "/v1/redis").await.0, 404, "tasks has no Redis API");
-    assert_eq!(https(https_port, &roots, "tasks.r1.roll.test", "/queues").await.0, 200);
+    assert_eq!(https(https_port, &roots, "tasks.r1.roll.test", "/v1/tasks/queues").await.0, 200);
     assert_eq!(https(https_port, &roots, "roll.test", "/dashboard").await.1, "dashboard");
     let (s, body) = https(https_port, &roots, "roll.test", "/acme/app.git/info/refs?service=git-upload-pack").await;
     assert!(s == 404 && body != "dashboard", "git paths go to code: {s} {body}");
