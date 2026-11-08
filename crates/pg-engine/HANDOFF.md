@@ -9034,9 +9034,18 @@ DELETE RETURNING scan width, two semi-join gating plans, DISTINCT order propagat
 a catalog join plan. They are not passing golden coverage. The original complete probe
 and both outputs are retained under `~/.cache/a190/` and in the WIP history.
 
-Validation and final source identity are recorded below after the focused checks finish.
-No performance comparison was run for this batch. The verification train owns the full
-suite. The lane's worktree and cache remain available to the coordinator.
+Verification on base `5ead496c2` with the lane's production patch: release build passed,
+focused release Clippy completed with 10 warnings and no errors, and 19 planner plus 14
+cursor golden files matched in-process, over the wire, and in shuffled order. The new
+`a190_planner_r12` golden has 99 statements, recorded from PostgreSQL 18.6. The first full
+probe had seven EXPLAIN differences, preserved above. Logs and the source patch are in
+`~/.cache/a190/resume-logs/`; `resume-recheck.log` ends with `HEAVY-EXIT 0`.
+
+Origin advanced during these checks. The final batch includes those bulk-write changes
+through a rebase, and receives a focused Clippy check of the combined source before push.
+The goldens above describe the pre-rebase build. The verification train owns the full suite.
+No performance comparison was run for this batch. The lane's worktree and cache remain
+available to the coordinator.
 
 ## Storage engine, round 1 (agent 169)
 
