@@ -173,7 +173,14 @@ impl LogStore for S3ExpressStore {
     }
 
     fn describe(&self) -> String {
-        format!("S3 Express One Zone ({}/{})", self.ctx.cfg.store, self.ctx.cfg.prefix)
+        format!("object log ({}/{})", self.ctx.cfg.store, self.ctx.cfg.prefix)
+    }
+
+    async fn released(&self, key: &str) {
+        let closing = self.shared.lock().get(key).and_then(Weak::upgrade);
+        if let Some(sh) = closing {
+            sh.released().await;
+        }
     }
 }
 
