@@ -131,7 +131,7 @@ DROP TABLE a182_domain;
 DROP DOMAIN a182_pos;
 
 -- A skipped row's default can itself fail, retaining the failing input's context.
-CREATE SEQUENCE a182_limited MAXVALUE 1;
+CREATE SEQUENCE a182_limited MINVALUE 0 MAXVALUE 1 START 1;
 CREATE TABLE a182_limit (a bigint DEFAULT nextval('a182_limited'), b int);
 COPY a182_limit (b) FROM STDIN (ON_ERROR ignore);
 1

@@ -1508,7 +1508,7 @@ impl CopyReader<'_> {
                 }
             }
             if let Some(filter) = &c.filter {
-                let full = (|| {
+                let full: Result<Vec<Value>> = (|| {
                     let mut values = row
                         .iter()
                         .map(|e| crate::sql::expr::eval(e, &[], ctx))
