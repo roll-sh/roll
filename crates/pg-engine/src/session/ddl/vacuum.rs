@@ -1683,26 +1683,7 @@ impl Ddl<'_, '_> {
                             }
                             size = relsize::heap_tuple_of_len(len);
                         } else {
-                            // (The virtual columns' values are put back for the indexes.)
-                            let held: Vec<(usize, Value)> = virt.iter().filter_map(|&i| row.get(i).map(|v| (i, v.clone()))).collect();
-                            // DROP does not rewrite old tuples: their stored values still occupy
-                            // space. Virtual columns, in contrast, have no stored representation.
-                            for &i in &virt {
-                                if let Some(value) = row.get_mut(i) {
-                                    *value = Value::Null;
-                                }
-                            }
-                            let raw = relsize::heap_tuple_len(&types, &row, &text);
-                            // Large scan values are detoasted, so use their on-page layout.
-                            let len = if raw <= crate::exec::sizing::TOAST_THRESHOLD {
-                                raw
-                            } else {
-                                crate::exec::sizing::layout(t, &row, self.ctx, &unpinned).0
-                            };
-                            for (i, v) in held {
-                                row[i] = v;
-                            }
-                            size = relsize::heap_tuple_of_len(len);
+                            size = self.row_tuple_size(t, &types, &virt, &mut row);
                         }
                         packer.push(size);
                         sample_bytes += size;
@@ -1792,10 +1773,47 @@ impl Ddl<'_, '_> {
         Some(RowMeasure::new(m.rows, m.live, Vec::new()))
     }
 
+    /// The heap tuple of decoded row `row` of `t` (columns of `types`, virtual generated
+    /// columns `virt`), as `measure_rows_with` sizes a row it can't size from its stored bytes.
+    fn row_tuple_size(&self, t: &Table, types: &[DataType], virt: &[usize], row: &mut [Value]) -> usize {
+        let fmt = self.ctx.fmt();
+        let text = |v: &Value, ty: &DataType| crate::types::text::format_value(v, ty, fmt);
+        // (The virtual columns' values are put back for the indexes.)
+        let held: Vec<(usize, Value)> = virt.iter().filter_map(|&i| row.get(i).map(|v| (i, v.clone()))).collect();
+        // DROP does not rewrite old tuples: their stored values still occupy
+        // space. Virtual columns, in contrast, have no stored representation.
+        for &i in virt {
+            if let Some(value) = row.get_mut(i) {
+                *value = Value::Null;
+            }
+        }
+        let raw = relsize::heap_tuple_len(types, row, &text);
+        // Large scan values are detoasted, so use their on-page layout.
+        let len = if raw <= crate::exec::sizing::TOAST_THRESHOLD {
+            raw
+        } else {
+            crate::exec::sizing::layout(t, row, self.ctx, &std::collections::HashSet::new()).0
+        };
+        for (i, v) in held {
+            row[i] = v;
+        }
+        relsize::heap_tuple_of_len(len)
+    }
+
+    /// The heap tuple of stored row `bytes` of `t`, as `measure_rows_with` sizes it (from
+    /// its stored bytes where it can).
+    pub(super) fn stored_tuple_size(&self, t: &Table, types: &[DataType], virt: &[usize], virt_mask: &[bool], bytes: &[u8]) -> Result<usize> {
+        let stored = crate::storage::row::stored_tuple_len(crate::exec::scan::row_data(bytes)?, types, virt_mask);
+        Ok(match stored.filter(|&len| len <= crate::exec::sizing::TOAST_THRESHOLD) {
+            Some(len) => relsize::heap_tuple_of_len(len),
+            None => self.row_tuple_size(t, types, virt, &mut crate::exec::scan::decode_table_row(t, bytes)?),
+        })
+    }
+
     /// The live heap pages (and rows) of `t`'s measure kept from its last (`txn::unchanged`), while
     /// nothing changed in it since, its rows are sized alike, the snapshot `snap` sees what
     /// the measure did and the transaction wrote none of its rows.
-    fn kept_live(&self, t: &Table, layout: u64, snap: u64) -> Option<(i32, usize)> {
+    pub(super) fn kept_live(&self, t: &Table, layout: u64, snap: u64) -> Option<(i32, usize)> {
         let db = &self.ctx.sess.db;
         let m = db.unchanged.valid(&db.store, t.oid)?;
         if m.layout != layout || snap < m.ts {
@@ -1827,7 +1845,7 @@ impl Ddl<'_, '_> {
 
 /// The rows at the start of a table too big to model an index build sizes
 /// (`measure_rows_with`).
-const SIZED_SAMPLE: usize = 256;
+pub(super) const SIZED_SAMPLE: usize = 256;
 
 /// What `measure_rows` found.
 pub(super) struct RowMeasure {
@@ -1853,6 +1871,11 @@ impl RowMeasure {
             estimated: false,
             indexes,
         }
+    }
+
+    /// `new`, its heap's pages the estimate when `estimated` (`measure_rows_with`'s).
+    pub(super) fn with_estimate(rows: usize, live: i32, estimated: bool, indexes: Vec<(u32, i32, f64)>) -> RowMeasure {
+        RowMeasure { estimated, ..RowMeasure::new(rows, live, indexes) }
     }
 }
 
