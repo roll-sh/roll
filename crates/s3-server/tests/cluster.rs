@@ -216,7 +216,7 @@ async fn events_recorded_before_a_crash_reach_their_destination_from_the_next_ow
     let refuse = Arc::new(Mutex::new(None::<String>));
     let got = Arc::new(Mutex::new(Vec::new()));
     let (r, g) = (refuse.clone(), got.clone());
-    let sinks: Arc<dyn Fn(&str, Arc<s3_server::Server>) + Send + Sync> =
+    let sinks: OnOwner =
         Arc::new(move |node, server| server.notifier.set_sink(Arc::new(Sink { node: node.to_string(), refuse: r.clone(), got: g.clone() })));
     let Some(f) = Fleet::start_with(kind, "events", 3, |_| {}, Some(sinks)).await else { return };
     let old = f.wait_owner().await;

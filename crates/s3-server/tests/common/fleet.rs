@@ -49,12 +49,15 @@ impl Node {
     }
 }
 
+/// Called with each new owner's node id and server (to set an event sink, say).
+pub type OnOwner = Arc<dyn Fn(&str, Arc<Server>) + Send + Sync>;
+
 pub struct Fleet {
     pub nodes: Vec<Node>,
     pub backend: Arc<dyn s3_store::Backend>,
     leases: Leases,
     tweak: Arc<dyn Fn(&mut Config) + Send + Sync>,
-    deliver: Option<Arc<dyn Fn(&str, Arc<Server>) + Send + Sync>>,
+    deliver: Option<OnOwner>,
     pub dir: tempfile::TempDir,
 }
 
@@ -79,7 +82,7 @@ impl Fleet {
         name: &str,
         n: usize,
         tweak: impl Fn(&mut Config) + Send + Sync + 'static,
-        deliver: Option<Arc<dyn Fn(&str, Arc<Server>) + Send + Sync>>,
+        deliver: Option<OnOwner>,
     ) -> Option<Fleet> {
         let _ = tracing_subscriber::fmt()
             .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "s3_server=info,s3_store=info,roll_cluster=info".into()))
