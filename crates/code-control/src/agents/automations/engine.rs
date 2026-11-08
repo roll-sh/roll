@@ -198,9 +198,21 @@ fn finish(r: &mut RunRow, status: RunState, reason: Option<String>) {
     r.next_at = r.private.cleanup.then(ms_now);
 }
 
-/// Write a run back (one write, checking `claim` when given, taking a cursor); when it ends, the
-/// next queued run of its automation is let go. The runs to publish.
-fn save_on(c: &Conn<'_>, r: &RunRow, claim: Option<&str>, keep_claim: bool) -> code_sql::Result<Option<Vec<AutomationRun>>> {
+/// What a save under a claim does with it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Hold {
+    /// Keeps it: this node goes on with the run.
+    Keep,
+    /// Lets it go.
+    Release,
+    /// Lets it go with the run parked until its `next_at`, or until now if something woke it
+    /// while the step ran (the step may have read just before what it's waiting for came in).
+    Wait,
+}
+
+/// Write a run back (one write, checking the claim when given, taking a cursor); when it ends,
+/// the next queued run of its automation is let go. The runs to publish.
+fn save_on(c: &Conn<'_>, r: &RunRow, claim: Option<(&str, Hold)>) -> code_sql::Result<Option<Vec<AutomationRun>>> {
     let now = ms_now();
     let cursor = crate::agents::store::take_cursors(c, &r.owner_id, 1)?;
     let mut run = r.run.clone();
@@ -209,12 +221,15 @@ fn save_on(c: &Conn<'_>, r: &RunRow, claim: Option<&str>, keep_claim: bool) -> c
     let private = serde_json::to_string(&r.private).unwrap_or_default();
     let status = state_str(run.status);
     let n = match claim {
-        Some(cl) => c.execute(
-            "UPDATE automation_runs SET status = ?, json = ?, private = ?, cursor = ?, updated_at = ?, next_at = ?, \
-             claim = CASE WHEN ? THEN claim ELSE NULL END, claimed_until = CASE WHEN ? THEN claimed_until ELSE NULL END \
-             WHERE id = ? AND claim = ?",
-            params![status, json, private, cursor as i64, now, r.next_at, keep_claim, keep_claim, run.id.as_str(), cl],
-        )?,
+        Some((cl, hold)) => {
+            let keep = hold == Hold::Keep;
+            c.execute(
+                "UPDATE automation_runs SET status = ?, json = ?, private = ?, cursor = ?, updated_at = ?, next_at = ?, \
+                 claim = CASE WHEN ? THEN claim ELSE NULL END, claimed_until = CASE WHEN ? THEN claimed_until ELSE NULL END \
+                 WHERE id = ? AND claim = ?",
+                params![status, json, private, cursor as i64, now, r.next_at, keep, keep, run.id.as_str(), cl],
+            )?
+        }
         None => c.execute(
             "UPDATE automation_runs SET status = ?, json = ?, private = ?, cursor = ?, updated_at = ?, next_at = ?, claim = NULL, claimed_until = NULL WHERE id = ?",
             params![status, json, private, cursor as i64, now, r.next_at, run.id.as_str()],
@@ -222,6 +237,9 @@ fn save_on(c: &Conn<'_>, r: &RunRow, claim: Option<&str>, keep_claim: bool) -> c
     };
     if n == 0 {
         return Ok(None);
+    }
+    if matches!(claim, Some((_, Hold::Wait))) {
+        c.execute("UPDATE automation_runs SET next_at = ? WHERE id = ? AND woken = 1", params![now, run.id.as_str()])?;
     }
     for t in &run.threads {
         c.execute(
@@ -257,7 +275,7 @@ fn promote(c: &Conn<'_>, automation: &str) -> code_sql::Result<Vec<AutomationRun
         let Some(mut q) = run_on(c, &id)? else { continue };
         q.run.status = RunState::Running;
         q.next_at = Some(ms_now());
-        if let Some(v) = save_on(c, &q, None, false)? {
+        if let Some(v) = save_on(c, &q, None)? {
             out.extend(v.into_iter().take(1));
         }
     }
@@ -272,7 +290,7 @@ pub(crate) fn cancel_runs_of(c: &Conn<'_>, _owner_id: &str, automation: &str, wh
     for id in ids {
         if let Some(mut r) = run_on(c, &id)? {
             finish(&mut r, RunState::Cancelled, Some(why.to_string()));
-            if let Some(v) = save_on(c, &r, None, false)? {
+            if let Some(v) = save_on(c, &r, None)? {
                 out.push(v[0].clone());
             }
         }
@@ -352,7 +370,7 @@ fn new_run(c: &Conn<'_>, a: &AutomationRow, e: &AutomationEvent, summary: &str, 
         return Ok(None);
     }
     let row = RunRow { owner_id: a.owner_id.clone(), event_id: e.id.0.clone(), run, private, next_at };
-    let mut out = save_on(c, &row, None, false)?.unwrap_or_default();
+    let mut out = save_on(c, &row, None)?.unwrap_or_default();
     // The new run's last-run brief replaces whatever was there.
     let brief = RunBrief { id: id.clone(), status, at: now.max(0) as u64 };
     c.execute("UPDATE automations SET last_run = ? WHERE id = ?", params![serde_json::to_string(&brief).unwrap_or_default(), &a.id])?;
@@ -597,7 +615,7 @@ impl Code {
         let now = ms_now();
         let until = now + CLAIM.as_millis() as i64;
         let claimed = self.db.sql().execute(
-            "UPDATE automation_runs SET claim = ?, claimed_until = ? WHERE id = ? AND next_at IS NOT NULL AND next_at <= ? AND (claimed_until IS NULL OR claimed_until < ?)",
+            "UPDATE automation_runs SET claim = ?, claimed_until = ?, woken = 0 WHERE id = ? AND next_at IS NOT NULL AND next_at <= ? AND (claimed_until IS NULL OR claimed_until < ?)",
             params![&claim, until, id, now, now],
         );
         match claimed {
@@ -619,10 +637,10 @@ impl Code {
 
     /// Save a run under its claim and publish it (and any run its end let go). `false`: the
     /// claim was lost (cancelled, or another node took over): stop.
-    async fn save_run(&self, r: &RunRow, claim: &str, keep_claim: bool) -> crate::Result<bool> {
+    async fn save_run(&self, r: &RunRow, claim: &str, hold: Hold) -> crate::Result<bool> {
         let hub = self.agents.hub(&r.owner_id);
         let _order = hub.order.lock().await;
-        let Some(runs) = self.db.sql().write(|c| save_on(c, r, Some(claim), keep_claim))? else { return Ok(false) };
+        let Some(runs) = self.db.sql().write(|c| save_on(c, r, Some((claim, hold))))? else { return Ok(false) };
         for run in runs {
             let _ = hub.events.send(Arc::new(StreamEvent::AutomationRun { cursor: run.cursor, run: Box::new(run) }));
         }
@@ -666,7 +684,7 @@ impl Code {
             self.clean_up(&mut r).await;
             r.private.cleanup = false;
             r.next_at = None;
-            self.save_run(&r, claim, false).await?;
+            self.save_run(&r, claim, Hold::Release).await?;
             return Ok(());
         }
         if r.run.started_at.is_none() {
@@ -676,14 +694,14 @@ impl Code {
         loop {
             let Some(i) = r.run.steps.iter().position(|s| !s.status.is_final()) else {
                 finish(&mut r, RunState::Succeeded, None);
-                self.save_run(&r, claim, true).await?;
+                self.save_run(&r, claim, Hold::Keep).await?;
                 // Clean up at once if there's anything to (the claim is still ours).
                 if r.private.cleanup {
                     self.clean_up(&mut r).await;
                     r.private.cleanup = false;
                     r.next_at = None;
                 }
-                self.save_run(&r, claim, false).await?;
+                self.save_run(&r, claim, Hold::Release).await?;
                 return Ok(());
             };
             let def = spec.steps.get(i).cloned().ok_or_else(|| crate::Error::Invalid("the run's steps don't match its definition".into()))?;
@@ -727,7 +745,7 @@ impl Code {
                 s.status = StepState::Running;
                 s.next_at = None;
                 r.run.status = RunState::Running;
-                if !self.save_run(&r, claim, true).await? {
+                if !self.save_run(&r, claim, Hold::Keep).await? {
                     return Ok(());
                 }
             }
@@ -794,7 +812,7 @@ impl Code {
                     s.next_at = Some(wake.max(0) as u64);
                     r.run.status = RunState::Waiting;
                     r.next_at = Some(wake);
-                    self.save_run(&r, claim, false).await?;
+                    self.save_run(&r, claim, Hold::Wait).await?;
                     return Ok(());
                 }
                 StepOutcome::Retry(why) => {
@@ -808,7 +826,7 @@ impl Code {
                         s.next_at = Some(wake as u64);
                         r.run.status = RunState::Waiting;
                         r.next_at = Some(wake);
-                        self.save_run(&r, claim, false).await?;
+                        self.save_run(&r, claim, Hold::Release).await?;
                         return Ok(());
                     }
                     let msg = format!("{why} (after {} attempts)", s.attempt);
@@ -819,7 +837,7 @@ impl Code {
             if r.run.status.is_final() {
                 return self.end(r, claim).await;
             }
-            if !self.save_run(&r, claim, true).await? {
+            if !self.save_run(&r, claim, Hold::Keep).await? {
                 return Ok(());
             }
         }
@@ -843,14 +861,14 @@ impl Code {
 
     /// The run ended: save it, clean up after its steps, save again.
     async fn end(self: &Arc<Self>, mut r: RunRow, claim: &str) -> crate::Result<()> {
-        if !self.save_run(&r, claim, true).await? {
+        if !self.save_run(&r, claim, Hold::Keep).await? {
             return Ok(());
         }
         if r.private.cleanup {
             self.clean_up(&mut r).await;
             r.private.cleanup = false;
             r.next_at = None;
-            self.save_run(&r, claim, false).await?;
+            self.save_run(&r, claim, Hold::Release).await?;
         }
         Ok(())
     }
@@ -884,7 +902,7 @@ impl Code {
                 return Ok(Some(vec![r.run]));
             }
             finish(&mut r, RunState::Cancelled, Some("cancelled".into()));
-            save_on(c, &r, None, false)
+            save_on(c, &r, None)
         })?;
         let Some(runs) = runs else { return Ok(None) };
         let first = runs.first().cloned();
@@ -934,7 +952,7 @@ impl Code {
             r.run.retried_at = Some(now);
             r.private.cleanup = false;
             r.next_at = Some(ms_now());
-            Ok(Ok(Some(save_on(c, &r, None, false)?)))
+            Ok(Ok(Some(save_on(c, &r, None)?)))
         })?;
         let runs = match runs {
             Ok(Some(Some(r))) => r,
@@ -949,12 +967,16 @@ impl Code {
         Ok(first)
     }
 
-    /// A thread a run started changed: look at the run now (inside the mirror's write).
+    /// A thread a run started changed: look at the run now (inside the mirror's write). A run
+    /// whose step is running now is marked woken, so the step doesn't wait out a record it didn't
+    /// see. Once marked, more records don't write the run again.
     pub(crate) fn nudge_runs_of_thread(c: &Conn<'_>, machine_id: &str, thread: &str) -> code_sql::Result<usize> {
+        let now = ms_now();
         c.execute(
-            "UPDATE automation_runs SET next_at = ? WHERE status = 'waiting' AND (next_at IS NULL OR next_at > ?) \
+            "UPDATE automation_runs SET next_at = CASE WHEN next_at IS NULL OR next_at > ? THEN ? ELSE next_at END, woken = 1 \
+             WHERE status IN ('running', 'waiting') AND (woken = 0 OR next_at IS NULL OR next_at > ?) \
              AND id IN (SELECT run_id FROM automation_threads WHERE machine_id = ? AND thread = ?)",
-            params![ms_now(), ms_now(), machine_id, thread],
+            params![now, now, now, machine_id, thread],
         )
     }
 }

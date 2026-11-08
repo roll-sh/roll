@@ -86,6 +86,9 @@ CREATE TABLE IF NOT EXISTS automation_runs (
     -- Who is working on it (a random claim per attempt) and until when (unix ms).
     claim TEXT,
     claimed_until INTEGER,
+    -- 1 once something woke it (a record of a thread it follows, a reply) since it was claimed:
+    -- a step that waits after such a wake is looked at again at once.
+    woken INTEGER NOT NULL DEFAULT 0,
     -- One run per automation and event.
     UNIQUE (automation_id, event_id)
 );

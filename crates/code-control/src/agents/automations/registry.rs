@@ -208,10 +208,7 @@ pub fn record_event(c: &Conn<'_>, owner_id: &str, e: &NewEvent) -> code_sql::Res
 /// Have a run looked at now (inside an integration's write: a reply that the run's waiting step
 /// handles). Call [`Code::wake_automations`] after the commit. Whether the run is going.
 pub fn wake_run(c: &Conn<'_>, run_id: &str) -> code_sql::Result<bool> {
-    let n = c.execute(
-        "UPDATE automation_runs SET next_at = ? WHERE id = ? AND status IN ('queued', 'running', 'waiting') AND status <> 'queued'",
-        code_sql::params![code_sql::now_ms(), run_id],
-    )?;
+    let n = c.execute("UPDATE automation_runs SET next_at = ?, woken = 1 WHERE id = ? AND status IN ('running', 'waiting')", code_sql::params![code_sql::now_ms(), run_id])?;
     Ok(n > 0)
 }
 

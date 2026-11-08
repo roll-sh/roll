@@ -59,6 +59,8 @@ touches the database; nothing that must not miss an event is driven by a broadca
 - **Waiting** doesn't hold a task: a step that waits (an agent working, a delay, a retry's backoff)
   stores its state, sets the run's `next_at` and lets go of the claim. Events about a thread a run
   started (`automation_threads`) move the run's `next_at` to now in the mirror's own transaction.
+  A wake that comes while a step runs (a record, a reply) marks the run `woken`; a step that then
+  waits is looked at again at once, since it may have read just before the wake's data came in.
 - **Placement.** An owner's runs are worked on by the node holding the owner's agents lease
   (`agents:<owner id>`, docs/code/cluster.md), where its daemons' links and event streams are, so
   commands go out locally and run events reach live streams at once; claims keep it correct
