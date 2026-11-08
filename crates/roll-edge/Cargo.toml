@@ -1,0 +1,38 @@
+[package]
+name = "roll-edge"
+description = "roll cloud's edge: PROXY protocol, TLS with SNI certificates, Postgres TLS negotiation, Host routing, ACME DNS-01 certificates, internal splices and drain"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+aes-gcm.workspace = true
+anyhow.workspace = true
+axum.workspace = true
+base64.workspace = true
+bytes.workspace = true
+futures.workspace = true
+getrandom.workspace = true
+hex.workspace = true
+http-body-util.workspace = true
+hyper = { workspace = true, features = ["server", "client", "http1"] }
+hyper-util = { workspace = true, features = ["client-legacy", "http1", "tokio", "server"] }
+instant-acme.workspace = true
+ipnet.workspace = true
+pg-storage.workspace = true
+rcgen.workspace = true
+reqwest = { workspace = true, features = ["rustls"] }
+ring.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tokio.workspace = true
+tokio-rustls.workspace = true
+tower.workspace = true
+tracing.workspace = true
+x509-parser.workspace = true
+
+[dev-dependencies]
+futures-util.workspace = true
+tokio-tungstenite.workspace = true
