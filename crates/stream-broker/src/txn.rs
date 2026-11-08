@@ -44,9 +44,22 @@ impl Txns {
         self.by_pid.lock().unwrap().retain(|(s, _), _| s != stream);
     }
 
-    /// Load persisted transactions and finish any that were mid-commit/abort.
+    /// Load persisted transactions and finish any that were mid-commit/abort. On the fleet
+    /// nothing is loaded at startup: each stream's are, by its owner ([`Txns::recover_stream`]).
     pub async fn recover(&self, b: &Broker) -> anyhow::Result<()> {
-        let rows = b.store.txns()?;
+        if b.fleet.is_some() {
+            return Ok(());
+        }
+        self.load(b, b.store.txns()?).await
+    }
+
+    /// Taking a stream over: its transactions, finishing any the last owner left mid-commit/abort.
+    pub async fn recover_stream(&self, b: &Broker, stream: &str) -> anyhow::Result<()> {
+        self.drop_stream(stream);
+        self.load(b, b.store.txns_of(stream)?).await
+    }
+
+    async fn load(&self, b: &Broker, rows: Vec<TxnRow>) -> anyhow::Result<()> {
         let mut unfinished = Vec::new();
         for row in rows {
             let key = (row.stream_id.clone(), row.txn_id.clone());
@@ -285,16 +298,16 @@ impl Txns {
                     .append_marker(t.producer_id, t.epoch, commit, 0, now_ms())
                     .map_err(|e| anyhow::anyhow!("marker on {topic_name}-{i}: {e}"))?;
                 if let Some(a) = aborted {
-                    b.store.insert_aborted(&topic.id, i, &a)?;
+                    b.store.insert_aborted(&stream.id, &topic.id, i, &a)?;
                 }
-                b.request_flush(&p, &log);
+                b.request_flush(&p, &log, 0);
                 waits.push((log.subscribe(), offset + 1));
             }
         }
         for g in &t.groups {
             b.groups.end_txn_offsets(b, &t.stream_id, g, t.producer_id, commit)?;
         }
-        if b.config.fsync {
+        if b.acks_wait() {
             for (mut rx, target) in waits {
                 let _ = tokio::time::timeout(Duration::from_secs(30), rx.wait_for(|hw| *hw >= target)).await;
             }

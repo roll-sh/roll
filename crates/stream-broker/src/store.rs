@@ -1,9 +1,18 @@
-//! Stream catalog in SQLite (`stream.db`): streams, API keys, topics, the object-storage chunk
-//! index, committed offsets, transactions and usage. Partition data itself is in the logs.
+//! The stream catalog: streams, API keys, topics, the object-storage chunk index, committed
+//! offsets, group and transaction coordinator state, the write-ahead log's index, owners and
+//! usage. Partition data itself is in the logs and object storage.
+//!
+//! It goes through `code-sql`: SQLite (`stream.db`) on one node, the system database
+//! (Postgres, schema `streams`) on the fleet, with SQL written once in SQLite's dialect. On the
+//! fleet every write that belongs to a stream is **fenced**: it runs in one transaction with a
+//! check that this node's tenure (`stream_owners.generation`, bumped by every new owner in
+//! [`Store::claim`]) is still the stream's, so an owner that lost its lease can't change
+//! anything once another node took over (docs/cloud/README.md, "Correctness never depends on
+//! leases").
 
-use rusqlite::{Connection, OptionalExtension, Row, params};
+use code_sql::{Conn, Db, OptionalExtension, Row, params};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::sync::Mutex;
 use stream_log::{AbortedTxn, Chunk};
@@ -124,80 +133,133 @@ pub struct StorageSample {
     pub remote_bytes: i64,
 }
 
-pub struct Store {
-    conn: Mutex<Connection>,
+/// One write-ahead log object of a stream: which partitions it holds, and which offsets.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WalRow {
+    pub seq: i64,
+    pub key: String,
+    /// `(topic, partition, first offset, end offset)` of each partition in the object.
+    pub ends: Vec<(Uuid, i32, i64, i64)>,
+    pub bytes: i64,
+    pub created_at: i64,
 }
 
-const MIGRATIONS: &[&str] = &[r#"
-CREATE TABLE streams (
+/// A write for a stream this node doesn't own any more (or never claimed): another node took
+/// it over, and nothing was written.
+#[derive(Debug, thiserror::Error)]
+#[error("stream {0} is owned by another node")]
+pub struct Fenced(pub String);
+
+/// Whether a catalog error is [`Fenced`].
+pub fn is_fenced(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<Fenced>().is_some()
+}
+
+/// A unique constraint failed (a stream name taken by a concurrent create).
+pub fn is_duplicate(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<code_sql::Error>().is_some_and(|e| e.is_unique_violation())
+}
+
+enum WriteError {
+    Db(code_sql::Error),
+    Fenced,
+}
+
+impl From<code_sql::Error> for WriteError {
+    fn from(e: code_sql::Error) -> Self {
+        WriteError::Db(e)
+    }
+}
+
+pub struct Store {
+    db: Db,
+    /// The fleet: writes for a stream are fenced on this node's tenure.
+    fencing: bool,
+    /// `stream id → generation` of the streams this node has claimed.
+    tenures: Mutex<HashMap<String, i64>>,
+}
+
+/// Every table, in SQLite's dialect (`code-sql` translates it for Postgres). Created if missing,
+/// so a `stream.db` from before keeps its data. Rows that belong together are deleted together
+/// in one write (no foreign keys: the same code on both backends).
+const SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS streams (
   id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, region TEXT NOT NULL, created_at INTEGER NOT NULL,
   settings TEXT NOT NULL
-);
-CREATE TABLE credentials (
-  username TEXT PRIMARY KEY, stream_id TEXT NOT NULL REFERENCES streams(id) ON DELETE CASCADE,
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS credentials (
+  username TEXT PRIMARY KEY, stream_id TEXT NOT NULL,
   label TEXT NOT NULL, created_at INTEGER NOT NULL, salt BLOB NOT NULL, iterations INTEGER NOT NULL,
   stored_256 BLOB NOT NULL, server_256 BLOB NOT NULL, stored_512 BLOB NOT NULL, server_512 BLOB NOT NULL
-);
-CREATE TABLE topics (
-  id TEXT PRIMARY KEY, stream_id TEXT NOT NULL REFERENCES streams(id) ON DELETE CASCADE,
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS topics (
+  id TEXT PRIMARY KEY, stream_id TEXT NOT NULL,
   name TEXT NOT NULL, partitions INTEGER NOT NULL, configs TEXT NOT NULL, created_at INTEGER NOT NULL,
   UNIQUE (stream_id, name)
-);
-CREATE TABLE partitions (
-  topic_id TEXT NOT NULL REFERENCES topics(id) ON DELETE CASCADE, partition INTEGER NOT NULL,
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS partitions (
+  topic_id TEXT NOT NULL, partition INTEGER NOT NULL,
   log_start INTEGER NOT NULL, PRIMARY KEY (topic_id, partition)
-);
-CREATE TABLE chunks (
-  topic_id TEXT NOT NULL REFERENCES topics(id) ON DELETE CASCADE, partition INTEGER NOT NULL,
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS chunks (
+  topic_id TEXT NOT NULL, partition INTEGER NOT NULL,
   first INTEGER NOT NULL, last INTEGER NOT NULL, max_ts INTEGER NOT NULL, bytes INTEGER NOT NULL,
   key TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY (topic_id, partition, first)
-);
-CREATE TABLE aborted_txns (
-  topic_id TEXT NOT NULL REFERENCES topics(id) ON DELETE CASCADE, partition INTEGER NOT NULL,
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS aborted_txns (
+  topic_id TEXT NOT NULL, partition INTEGER NOT NULL,
   producer_id INTEGER NOT NULL, first INTEGER NOT NULL, last INTEGER NOT NULL
 );
-CREATE INDEX aborted_txns_partition ON aborted_txns (topic_id, partition, last);
-CREATE TABLE offsets (
-  stream_id TEXT NOT NULL REFERENCES streams(id) ON DELETE CASCADE, group_id TEXT NOT NULL,
+CREATE INDEX IF NOT EXISTS aborted_txns_partition ON aborted_txns (topic_id, partition, last);
+CREATE TABLE IF NOT EXISTS offsets (
+  stream_id TEXT NOT NULL, group_id TEXT NOT NULL,
   topic TEXT NOT NULL, partition INTEGER NOT NULL, "offset" INTEGER NOT NULL, leader_epoch INTEGER NOT NULL,
   metadata TEXT, committed_at INTEGER NOT NULL, PRIMARY KEY (stream_id, group_id, topic, partition)
-);
-CREATE TABLE groups (
-  stream_id TEXT NOT NULL REFERENCES streams(id) ON DELETE CASCADE, group_id TEXT NOT NULL,
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS groups (
+  stream_id TEXT NOT NULL, group_id TEXT NOT NULL,
   protocol_type TEXT NOT NULL, generation INTEGER NOT NULL, updated_at INTEGER NOT NULL,
   PRIMARY KEY (stream_id, group_id)
-);
-CREATE TABLE txns (
-  stream_id TEXT NOT NULL REFERENCES streams(id) ON DELETE CASCADE, txn_id TEXT NOT NULL,
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS txns (
+  stream_id TEXT NOT NULL, txn_id TEXT NOT NULL,
   producer_id INTEGER NOT NULL, epoch INTEGER NOT NULL, state TEXT NOT NULL, timeout_ms INTEGER NOT NULL,
   partitions TEXT NOT NULL, groups TEXT NOT NULL, started_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
   PRIMARY KEY (stream_id, txn_id)
-);
-CREATE TABLE meta (key TEXT PRIMARY KEY, value INTEGER NOT NULL);
-CREATE TABLE usage (
-  stream_id TEXT NOT NULL REFERENCES streams(id) ON DELETE CASCADE, hour INTEGER NOT NULL,
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value INTEGER NOT NULL) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS usage (
+  stream_id TEXT NOT NULL, hour INTEGER NOT NULL,
   bytes_in INTEGER NOT NULL, bytes_out INTEGER NOT NULL, records_in INTEGER NOT NULL,
   requests INTEGER NOT NULL, puts INTEGER NOT NULL, gets INTEGER NOT NULL, PRIMARY KEY (stream_id, hour)
-);
-CREATE TABLE storage_samples (
-  stream_id TEXT NOT NULL REFERENCES streams(id) ON DELETE CASCADE, at INTEGER NOT NULL,
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS storage_samples (
+  stream_id TEXT NOT NULL, at INTEGER NOT NULL,
   local_bytes INTEGER NOT NULL, remote_bytes INTEGER NOT NULL
 );
-CREATE INDEX storage_samples_stream ON storage_samples (stream_id, at);
-"#];
+CREATE INDEX IF NOT EXISTS storage_samples_stream ON storage_samples (stream_id, at);
+CREATE TABLE IF NOT EXISTS stream_owners (
+  stream_id TEXT PRIMARY KEY, generation INTEGER NOT NULL, node TEXT NOT NULL, claimed_at INTEGER NOT NULL
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS wal (
+  stream_id TEXT NOT NULL, seq INTEGER NOT NULL, key TEXT NOT NULL, ends TEXT NOT NULL,
+  bytes INTEGER NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY (stream_id, seq)
+) WITHOUT ROWID;
+"#;
 
-fn stream_row(r: &Row) -> rusqlite::Result<StreamRow> {
+/// The tables keyed by `stream_id` that a stream's deletion empties.
+const STREAM_TABLES: &[&str] = &["topics", "credentials", "offsets", "groups", "txns", "usage", "storage_samples", "wal", "stream_owners"];
+/// The tables keyed by `topic_id`.
+const TOPIC_TABLES: &[&str] = &["partitions", "chunks", "aborted_txns"];
+
+type Res<T> = code_sql::Result<T>;
+
+fn stream_row(r: &Row) -> Res<StreamRow> {
     let settings: String = r.get(4)?;
-    Ok(StreamRow {
-        id: r.get(0)?,
-        name: r.get(1)?,
-        region: r.get(2)?,
-        created_at: r.get(3)?,
-        settings: serde_json::from_str(&settings).unwrap_or_default(),
-    })
+    Ok(StreamRow { id: r.get(0)?, name: r.get(1)?, region: r.get(2)?, created_at: r.get(3)?, settings: serde_json::from_str(&settings).unwrap_or_default() })
 }
 
-fn credential_row(r: &Row) -> rusqlite::Result<Credential> {
+fn credential_row(r: &Row) -> Res<Credential> {
     Ok(Credential {
         username: r.get(0)?,
         stream_id: r.get(1)?,
@@ -209,12 +271,12 @@ fn credential_row(r: &Row) -> rusqlite::Result<Credential> {
     })
 }
 
-fn uuid_col(r: &Row, i: usize) -> rusqlite::Result<Uuid> {
+fn uuid_col(r: &Row, i: usize) -> Res<Uuid> {
     let s: String = r.get(i)?;
-    Uuid::parse_str(&s).map_err(|e| rusqlite::Error::FromSqlConversionFailure(i, rusqlite::types::Type::Text, Box::new(e)))
+    Uuid::parse_str(&s).map_err(|e| code_sql::Error::Conversion(format!("column {i}: {e}")))
 }
 
-fn topic_row(r: &Row) -> rusqlite::Result<TopicRow> {
+fn topic_row(r: &Row) -> Res<TopicRow> {
     let configs: String = r.get(4)?;
     Ok(TopicRow {
         id: uuid_col(r, 0)?,
@@ -226,7 +288,7 @@ fn topic_row(r: &Row) -> rusqlite::Result<TopicRow> {
     })
 }
 
-fn txn_row(r: &Row) -> rusqlite::Result<TxnRow> {
+fn txn_row(r: &Row) -> Res<TxnRow> {
     let partitions: String = r.get(6)?;
     let groups: String = r.get(7)?;
     Ok(TxnRow {
@@ -243,114 +305,194 @@ fn txn_row(r: &Row) -> rusqlite::Result<TxnRow> {
     })
 }
 
+fn offset_row(r: &Row, at: usize) -> Res<OffsetRow> {
+    Ok(OffsetRow {
+        topic: r.get(at)?,
+        partition: r.get(at + 1)?,
+        offset: r.get(at + 2)?,
+        leader_epoch: r.get(at + 3)?,
+        metadata: r.get(at + 4)?,
+        committed_at: r.get(at + 5)?,
+    })
+}
+
+type WalEnds = Vec<(String, i32, i64, i64)>;
+
+fn wal_row(r: &Row) -> Res<WalRow> {
+    let ends: String = r.get(2)?;
+    let ends: WalEnds = serde_json::from_str(&ends).map_err(|e| code_sql::Error::Conversion(format!("wal ends: {e}")))?;
+    let ends = ends
+        .into_iter()
+        .map(|(t, p, f, e)| Uuid::parse_str(&t).map(|t| (t, p, f, e)).map_err(|e| code_sql::Error::Conversion(format!("wal topic: {e}"))))
+        .collect::<Res<_>>()?;
+    Ok(WalRow { seq: r.get(0)?, key: r.get(1)?, ends, bytes: r.get(3)?, created_at: r.get(4)? })
+}
+
+fn chunk_of(r: &Row) -> Res<Chunk> {
+    Ok(Chunk { first: r.get(0)?, last: r.get(1)?, max_timestamp: r.get(2)?, bytes: r.get::<_, i64>(3)? as u64, key: r.get(4)? })
+}
+
 const STREAM_COLS: &str = "id, name, region, created_at, settings";
-const CREDENTIAL_COLS: &str =
-    "username, stream_id, label, created_at, salt, iterations, stored_256, server_256, stored_512, server_512";
+const CREDENTIAL_COLS: &str = "username, stream_id, label, created_at, salt, iterations, stored_256, server_256, stored_512, server_512";
 const TOPIC_COLS: &str = "id, stream_id, name, partitions, configs, created_at";
-const TXN_COLS: &str =
-    "stream_id, txn_id, producer_id, epoch, state, timeout_ms, partitions, groups, started_at, updated_at";
+const TXN_COLS: &str = "stream_id, txn_id, producer_id, epoch, state, timeout_ms, partitions, groups, started_at, updated_at";
+const OFFSET_COLS: &str = r#"topic, partition, "offset", leader_epoch, metadata, committed_at"#;
+const UPSERT_CHUNK: &str = "INSERT INTO chunks (topic_id, partition, first, last, max_ts, bytes, key, created_at)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+     ON CONFLICT (topic_id, partition, first) DO UPDATE SET last = excluded.last, max_ts = excluded.max_ts,
+       bytes = excluded.bytes, key = excluded.key, created_at = excluded.created_at";
+const DELETE_CHUNK: &str = "DELETE FROM chunks WHERE topic_id = ?1 AND partition = ?2 AND first = ?3";
 
 fn json<T: Serialize>(v: &T) -> String {
     serde_json::to_string(v).expect("serialisable")
 }
 
 impl Store {
+    /// The catalog of one node: SQLite at `path` (a `stream.db` from before keeps its data). In
+    /// tests with `ROLL_CODE_TEST_DATABASE` set, a fresh Postgres schema instead.
     pub fn open(path: &Path) -> anyhow::Result<Self> {
-        let mut conn = Connection::open(path)?;
-        conn.execute_batch(
-            "PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;",
-        )?;
-        let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        for (i, sql) in MIGRATIONS.iter().enumerate().skip(version as usize) {
-            let tx = conn.transaction()?;
-            tx.execute_batch(sql)?;
-            tx.execute_batch(&format!("PRAGMA user_version = {}", i + 1))?;
-            tx.commit()?;
-        }
-        Ok(Self { conn: Mutex::new(conn) })
+        let db = Db::open_or_test(&code_sql::Target::Sqlite(path.to_path_buf()), "streams")?;
+        Self::on(db, false)
     }
 
-    fn with<T>(&self, f: impl FnOnce(&mut Connection) -> rusqlite::Result<T>) -> anyhow::Result<T> {
-        let mut c = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        Ok(f(&mut c)?)
+    /// The catalog on `db`. `fencing`: the fleet, where writes for a stream check this node's
+    /// tenure ([`Store::claim`]).
+    pub fn on(db: Db, fencing: bool) -> anyhow::Result<Self> {
+        db.ensure_schema(SCHEMA)?;
+        Ok(Self { db, fencing, tenures: Mutex::new(HashMap::new()) })
+    }
+
+    /// Unfenced write.
+    fn write<T>(&self, mut f: impl FnMut(&Conn<'_>) -> Res<T>) -> anyhow::Result<T> {
+        Ok(self.db.write(|c| f(c))?)
+    }
+
+    /// A write that belongs to `stream`: on the fleet, one transaction that first checks this
+    /// node's tenure is still the stream's ([`Fenced`] otherwise, and the tenure ends).
+    fn fenced<T>(&self, stream: &str, mut f: impl FnMut(&Conn<'_>) -> Res<T>) -> anyhow::Result<T> {
+        let tenure = match self.fencing {
+            true => Some(self.tenure(stream).ok_or_else(|| Fenced(stream.to_string()))?),
+            false => None,
+        };
+        let r = self.db.write(|c| -> Result<T, WriteError> {
+            if let Some(g) = tenure {
+                let current: Option<i64> = c.query_row("SELECT generation FROM stream_owners WHERE stream_id = ?1", [stream], |r| r.get(0)).optional()?;
+                if current != Some(g) {
+                    return Err(WriteError::Fenced);
+                }
+            }
+            Ok(f(c)?)
+        });
+        match r {
+            Ok(v) => Ok(v),
+            Err(WriteError::Fenced) => {
+                self.tenures.lock().unwrap().remove(stream);
+                Err(Fenced(stream.to_string()).into())
+            }
+            Err(WriteError::Db(e)) => Err(e.into()),
+        }
+    }
+
+    fn read<T>(&self, mut f: impl FnMut(&Conn<'_>) -> Res<T>) -> anyhow::Result<T> {
+        Ok(self.db.read(|c| f(c))?)
+    }
+
+    // ── owners ──
+
+    /// Become `stream`'s owner: bump its generation, which fences every write of the previous
+    /// owner from now on. Returns this tenure's generation.
+    pub fn claim(&self, stream: &str, node: &str) -> anyhow::Result<i64> {
+        let g: i64 = self.write(|c| {
+            c.query_row(
+                "INSERT INTO stream_owners (stream_id, generation, node, claimed_at) VALUES (?1, 1, ?2, ?3)
+                 ON CONFLICT (stream_id) DO UPDATE SET generation = stream_owners.generation + 1, node = excluded.node,
+                   claimed_at = excluded.claimed_at
+                 RETURNING generation",
+                params![stream, node, code_sql::now_ms()],
+                |r| r.get(0),
+            )
+        })?;
+        self.tenures.lock().unwrap().insert(stream.to_string(), g);
+        Ok(g)
+    }
+
+    /// This node's tenure of `stream`, if it holds one.
+    pub fn tenure(&self, stream: &str) -> Option<i64> {
+        self.tenures.lock().unwrap().get(stream).copied()
+    }
+
+    /// Stop writing for `stream` (its lease is gone).
+    pub fn end_tenure(&self, stream: &str) {
+        self.tenures.lock().unwrap().remove(stream);
     }
 
     // ── streams ──
 
     pub fn insert_stream(&self, s: &StreamRow) -> anyhow::Result<()> {
-        self.with(|c| {
-            c.execute(
-                &format!("INSERT INTO streams ({STREAM_COLS}) VALUES (?1, ?2, ?3, ?4, ?5)"),
-                params![s.id, s.name, s.region, s.created_at, json(&s.settings)],
-            )
-            .map(drop)
+        self.write(|c| {
+            c.execute(&format!("INSERT INTO streams ({STREAM_COLS}) VALUES (?1, ?2, ?3, ?4, ?5)"), params![s.id, s.name, s.region, s.created_at, json(&s.settings)])
+                .map(drop)
         })
     }
 
     pub fn streams(&self) -> anyhow::Result<Vec<StreamRow>> {
-        self.with(|c| {
-            let mut s = c.prepare(&format!("SELECT {STREAM_COLS} FROM streams ORDER BY created_at"))?;
-            s.query_map([], stream_row)?.collect()
-        })
+        self.read(|c| c.query(&format!("SELECT {STREAM_COLS} FROM streams ORDER BY created_at"), (), stream_row))
+    }
+
+    /// A stream by id or name.
+    pub fn stream(&self, key: &str) -> anyhow::Result<Option<StreamRow>> {
+        self.read(|c| c.query_row(&format!("SELECT {STREAM_COLS} FROM streams WHERE id = ?1 OR name = ?1"), [key], stream_row).optional())
     }
 
     pub fn update_settings(&self, id: &str, settings: &Settings) -> anyhow::Result<()> {
-        self.with(|c| c.execute("UPDATE streams SET settings = ?2 WHERE id = ?1", params![id, json(settings)]).map(drop))
+        self.fenced(id, |c| c.execute("UPDATE streams SET settings = ?2 WHERE id = ?1", params![id, json(settings)]).map(drop))
     }
 
+    /// Delete a stream and everything that belongs to it.
     pub fn delete_stream(&self, id: &str) -> anyhow::Result<()> {
-        self.with(|c| c.execute("DELETE FROM streams WHERE id = ?1", [id]).map(drop))
+        self.fenced(id, |c| {
+            for t in c.query("SELECT id FROM topics WHERE stream_id = ?1", [id], |r| r.get::<_, String>(0))? {
+                for table in TOPIC_TABLES {
+                    c.execute(&format!("DELETE FROM {table} WHERE topic_id = ?1"), [&t])?;
+                }
+            }
+            for table in STREAM_TABLES {
+                c.execute(&format!("DELETE FROM {table} WHERE stream_id = ?1"), [id])?;
+            }
+            c.execute("DELETE FROM streams WHERE id = ?1", [id]).map(drop)
+        })?;
+        self.end_tenure(id);
+        Ok(())
     }
 
     // ── credentials ──
 
     pub fn insert_credential(&self, k: &Credential) -> anyhow::Result<()> {
-        self.with(|c| {
+        self.write(|c| {
             c.execute(
                 &format!("INSERT INTO credentials ({CREDENTIAL_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)"),
-                params![
-                    k.username,
-                    k.stream_id,
-                    k.label,
-                    k.created_at,
-                    k.salt,
-                    k.iterations,
-                    k.keys.stored_256,
-                    k.keys.server_256,
-                    k.keys.stored_512,
-                    k.keys.server_512
-                ],
+                params![k.username, k.stream_id, k.label, k.created_at, k.salt, k.iterations, k.keys.stored_256, k.keys.server_256, k.keys.stored_512, k.keys.server_512],
             )
             .map(drop)
         })
     }
 
     pub fn credential(&self, username: &str) -> anyhow::Result<Option<Credential>> {
-        self.with(|c| {
-            c.query_row(&format!("SELECT {CREDENTIAL_COLS} FROM credentials WHERE username = ?1"), [username], credential_row)
-                .optional()
-        })
+        self.read(|c| c.query_row(&format!("SELECT {CREDENTIAL_COLS} FROM credentials WHERE username = ?1"), [username], credential_row).optional())
     }
 
     pub fn credentials(&self, stream_id: &str) -> anyhow::Result<Vec<Credential>> {
-        self.with(|c| {
-            let mut s = c.prepare(&format!(
-                "SELECT {CREDENTIAL_COLS} FROM credentials WHERE stream_id = ?1 ORDER BY created_at"
-            ))?;
-            s.query_map([stream_id], credential_row)?.collect()
-        })
+        self.read(|c| c.query(&format!("SELECT {CREDENTIAL_COLS} FROM credentials WHERE stream_id = ?1 ORDER BY created_at"), [stream_id], credential_row))
     }
 
     pub fn delete_credential(&self, stream_id: &str, username: &str) -> anyhow::Result<bool> {
-        self.with(|c| {
-            c.execute("DELETE FROM credentials WHERE stream_id = ?1 AND username = ?2", [stream_id, username]).map(|n| n > 0)
-        })
+        self.write(|c| c.execute("DELETE FROM credentials WHERE stream_id = ?1 AND username = ?2", [stream_id, username]).map(|n| n > 0))
     }
 
     // ── topics ──
 
     pub fn insert_topic(&self, t: &TopicRow) -> anyhow::Result<()> {
-        self.with(|c| {
+        self.fenced(&t.stream_id, |c| {
             c.execute(
                 &format!("INSERT INTO topics ({TOPIC_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6)"),
                 params![t.id.to_string(), t.stream_id, t.name, t.partitions, json(&t.configs), t.created_at],
@@ -360,265 +502,199 @@ impl Store {
     }
 
     pub fn topics(&self) -> anyhow::Result<Vec<TopicRow>> {
-        self.with(|c| {
-            let mut s = c.prepare(&format!("SELECT {TOPIC_COLS} FROM topics ORDER BY created_at, name"))?;
-            s.query_map([], topic_row)?.collect()
-        })
+        self.read(|c| c.query(&format!("SELECT {TOPIC_COLS} FROM topics ORDER BY created_at, name"), (), topic_row))
     }
 
-    pub fn set_partitions(&self, topic: &Uuid, partitions: i32) -> anyhow::Result<()> {
-        self.with(|c| {
-            c.execute("UPDATE topics SET partitions = ?2 WHERE id = ?1", params![topic.to_string(), partitions]).map(drop)
-        })
+    pub fn topics_of(&self, stream: &str) -> anyhow::Result<Vec<TopicRow>> {
+        self.read(|c| c.query(&format!("SELECT {TOPIC_COLS} FROM topics WHERE stream_id = ?1 ORDER BY created_at, name"), [stream], topic_row))
     }
 
-    pub fn set_configs(&self, topic: &Uuid, configs: &BTreeMap<String, String>) -> anyhow::Result<()> {
-        self.with(|c| {
-            c.execute("UPDATE topics SET configs = ?2 WHERE id = ?1", params![topic.to_string(), json(configs)]).map(drop)
-        })
+    pub fn set_partitions(&self, stream: &str, topic: &Uuid, partitions: i32) -> anyhow::Result<()> {
+        self.fenced(stream, |c| c.execute("UPDATE topics SET partitions = ?2 WHERE id = ?1", params![topic.to_string(), partitions]).map(drop))
     }
 
-    pub fn delete_topic(&self, topic: &Uuid) -> anyhow::Result<()> {
-        self.with(|c| c.execute("DELETE FROM topics WHERE id = ?1", [topic.to_string()]).map(drop))
+    pub fn set_configs(&self, stream: &str, topic: &Uuid, configs: &BTreeMap<String, String>) -> anyhow::Result<()> {
+        self.fenced(stream, |c| c.execute("UPDATE topics SET configs = ?2 WHERE id = ?1", params![topic.to_string(), json(configs)]).map(drop))
+    }
+
+    /// Delete a topic, its partitions' state and its committed offsets.
+    pub fn delete_topic(&self, stream: &str, topic: &Uuid, name: &str) -> anyhow::Result<()> {
+        let id = topic.to_string();
+        self.fenced(stream, |c| {
+            for table in TOPIC_TABLES {
+                c.execute(&format!("DELETE FROM {table} WHERE topic_id = ?1"), [&id])?;
+            }
+            c.execute("DELETE FROM offsets WHERE stream_id = ?1 AND topic = ?2", [stream, name])?;
+            c.execute("DELETE FROM topics WHERE id = ?1", [&id]).map(drop)
+        })
     }
 
     // ── partition state ──
 
     pub fn log_start(&self, topic: &Uuid, partition: i32) -> anyhow::Result<i64> {
-        self.with(|c| {
-            c.query_row(
-                "SELECT log_start FROM partitions WHERE topic_id = ?1 AND partition = ?2",
-                params![topic.to_string(), partition],
-                |r| r.get(0),
-            )
-            .optional()
-            .map(|v| v.unwrap_or(0))
+        self.read(|c| {
+            c.query_row("SELECT log_start FROM partitions WHERE topic_id = ?1 AND partition = ?2", params![topic.to_string(), partition], |r| r.get(0))
+                .optional()
+                .map(|v| v.unwrap_or(0))
         })
     }
 
-    pub fn set_log_start(&self, topic: &Uuid, partition: i32, log_start: i64) -> anyhow::Result<()> {
-        self.with(|c| {
-            let tx = c.transaction()?;
-            tx.execute(
+    pub fn set_log_start(&self, stream: &str, topic: &Uuid, partition: i32, log_start: i64) -> anyhow::Result<()> {
+        let id = topic.to_string();
+        self.fenced(stream, |c| {
+            c.execute(
                 "INSERT INTO partitions (topic_id, partition, log_start) VALUES (?1, ?2, ?3)
-                 ON CONFLICT (topic_id, partition) DO UPDATE SET log_start = MAX(log_start, excluded.log_start)",
-                params![topic.to_string(), partition, log_start],
+                 ON CONFLICT (topic_id, partition) DO UPDATE SET log_start =
+                   CASE WHEN excluded.log_start > partitions.log_start THEN excluded.log_start ELSE partitions.log_start END",
+                params![id, partition, log_start],
             )?;
-            tx.execute(
-                "DELETE FROM aborted_txns WHERE topic_id = ?1 AND partition = ?2 AND last < ?3",
-                params![topic.to_string(), partition, log_start],
-            )?;
-            tx.commit()
+            c.execute("DELETE FROM aborted_txns WHERE topic_id = ?1 AND partition = ?2 AND last < ?3", params![id, partition, log_start]).map(drop)
         })
     }
 
     pub fn chunks(&self, topic: &Uuid, partition: i32) -> anyhow::Result<Vec<Chunk>> {
-        self.with(|c| {
-            let mut s = c.prepare(
-                "SELECT first, last, max_ts, bytes, key FROM chunks WHERE topic_id = ?1 AND partition = ?2 ORDER BY first",
-            )?;
-            s.query_map(params![topic.to_string(), partition], |r| {
-                Ok(Chunk { first: r.get(0)?, last: r.get(1)?, max_timestamp: r.get(2)?, bytes: r.get::<_, i64>(3)? as u64, key: r.get(4)? })
-            })?
-            .collect()
+        self.read(|c| c.query("SELECT first, last, max_ts, bytes, key FROM chunks WHERE topic_id = ?1 AND partition = ?2 ORDER BY first", params![topic.to_string(), partition], chunk_of))
+    }
+
+    /// One past the last offset object storage has of a partition, if it has any.
+    pub fn uploaded_end(&self, topic: &Uuid, partition: i32) -> anyhow::Result<Option<i64>> {
+        let last: Option<i64> =
+            self.read(|c| c.query_row("SELECT MAX(last) FROM chunks WHERE topic_id = ?1 AND partition = ?2", params![topic.to_string(), partition], |r| r.get(0)))?;
+        Ok(last.map(|l| l + 1))
+    }
+
+    /// The partitions of `stream` that have data in object storage.
+    pub fn partitions_with_chunks(&self, stream: &str) -> anyhow::Result<Vec<(Uuid, i32)>> {
+        self.read(|c| {
+            c.query("SELECT DISTINCT c.topic_id, c.partition FROM chunks c JOIN topics t ON t.id = c.topic_id WHERE t.stream_id = ?1", [stream], |r| {
+                Ok((uuid_col(r, 0)?, r.get(1)?))
+            })
         })
     }
 
-    pub fn insert_chunk(&self, topic: &Uuid, partition: i32, ch: &Chunk, now: i64) -> anyhow::Result<()> {
-        self.with(|c| {
-            c.execute(
-                "INSERT OR REPLACE INTO chunks (topic_id, partition, first, last, max_ts, bytes, key, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                params![topic.to_string(), partition, ch.first, ch.last, ch.max_timestamp, ch.bytes as i64, ch.key, now],
-            )
-            .map(drop)
-        })
+    pub fn insert_chunk(&self, stream: &str, topic: &Uuid, partition: i32, ch: &Chunk, now: i64) -> anyhow::Result<()> {
+        let id = topic.to_string();
+        self.fenced(stream, |c| c.execute(UPSERT_CHUNK, params![id, partition, ch.first, ch.last, ch.max_timestamp, ch.bytes as i64, ch.key, now]).map(drop))
     }
 
     /// Replace the chunks starting at `firsts` with `added`, atomically (compaction).
-    pub fn replace_chunks(&self, topic: &Uuid, partition: i32, firsts: &[i64], added: &[Chunk], now: i64) -> anyhow::Result<()> {
-        self.with(|c| {
-            let tx = c.transaction()?;
+    pub fn replace_chunks(&self, stream: &str, topic: &Uuid, partition: i32, firsts: &[i64], added: &[Chunk], now: i64) -> anyhow::Result<()> {
+        let id = topic.to_string();
+        self.fenced(stream, |c| {
             for f in firsts {
-                tx.execute(
-                    "DELETE FROM chunks WHERE topic_id = ?1 AND partition = ?2 AND first = ?3",
-                    params![topic.to_string(), partition, f],
-                )?;
+                c.execute(DELETE_CHUNK, params![id, partition, f])?;
             }
             for ch in added {
-                tx.execute(
-                    "INSERT OR REPLACE INTO chunks (topic_id, partition, first, last, max_ts, bytes, key, created_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                    params![topic.to_string(), partition, ch.first, ch.last, ch.max_timestamp, ch.bytes as i64, ch.key, now],
-                )?;
+                c.execute(UPSERT_CHUNK, params![id, partition, ch.first, ch.last, ch.max_timestamp, ch.bytes as i64, ch.key, now])?;
             }
-            tx.commit()
+            Ok(())
         })
     }
 
-    pub fn delete_chunks(&self, topic: &Uuid, partition: i32, firsts: &[i64]) -> anyhow::Result<()> {
-        self.with(|c| {
-            let tx = c.transaction()?;
+    pub fn delete_chunks(&self, stream: &str, topic: &Uuid, partition: i32, firsts: &[i64]) -> anyhow::Result<()> {
+        let id = topic.to_string();
+        self.fenced(stream, |c| {
             for f in firsts {
-                tx.execute(
-                    "DELETE FROM chunks WHERE topic_id = ?1 AND partition = ?2 AND first = ?3",
-                    params![topic.to_string(), partition, f],
-                )?;
+                c.execute(DELETE_CHUNK, params![id, partition, f])?;
             }
-            tx.commit()
+            Ok(())
         })
     }
 
     /// Bytes in object storage per stream.
     pub fn remote_bytes(&self) -> anyhow::Result<BTreeMap<String, i64>> {
-        self.with(|c| {
-            let mut s = c.prepare(
-                "SELECT t.stream_id, COALESCE(SUM(c.bytes), 0) FROM chunks c JOIN topics t ON t.id = c.topic_id GROUP BY t.stream_id",
-            )?;
-            s.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect()
-        })
+        let rows: Vec<(String, i64)> = self.read(|c| {
+            c.query(
+                "SELECT t.stream_id, CAST(COALESCE(SUM(c.bytes), 0) AS BIGINT) FROM chunks c JOIN topics t ON t.id = c.topic_id GROUP BY t.stream_id",
+                (),
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+        })?;
+        Ok(rows.into_iter().collect())
     }
 
     pub fn aborted(&self, topic: &Uuid, partition: i32) -> anyhow::Result<Vec<AbortedTxn>> {
-        self.with(|c| {
-            let mut s = c.prepare(
+        self.read(|c| {
+            c.query(
                 "SELECT producer_id, first, last FROM aborted_txns WHERE topic_id = ?1 AND partition = ?2 ORDER BY first",
-            )?;
-            s.query_map(params![topic.to_string(), partition], |r| {
-                Ok(AbortedTxn { producer_id: r.get(0)?, first_offset: r.get(1)?, last_offset: r.get(2)? })
-            })?
-            .collect()
+                params![topic.to_string(), partition],
+                |r| Ok(AbortedTxn { producer_id: r.get(0)?, first_offset: r.get(1)?, last_offset: r.get(2)? }),
+            )
         })
     }
 
-    pub fn insert_aborted(&self, topic: &Uuid, partition: i32, a: &AbortedTxn) -> anyhow::Result<()> {
-        self.with(|c| {
-            c.execute(
-                "INSERT INTO aborted_txns (topic_id, partition, producer_id, first, last) VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![topic.to_string(), partition, a.producer_id, a.first_offset, a.last_offset],
-            )
-            .map(drop)
+    pub fn insert_aborted(&self, stream: &str, topic: &Uuid, partition: i32, a: &AbortedTxn) -> anyhow::Result<()> {
+        let id = topic.to_string();
+        self.fenced(stream, |c| {
+            c.execute("INSERT INTO aborted_txns (topic_id, partition, producer_id, first, last) VALUES (?1, ?2, ?3, ?4, ?5)", params![id, partition, a.producer_id, a.first_offset, a.last_offset])
+                .map(drop)
         })
     }
 
     // ── offsets ──
 
     pub fn commit_offsets(&self, stream: &str, group: &str, rows: &[OffsetRow]) -> anyhow::Result<()> {
-        self.with(|c| {
-            let tx = c.transaction()?;
-            {
-                let mut s = tx.prepare_cached(
+        self.fenced(stream, |c| {
+            for r in rows {
+                c.execute(
                     r#"INSERT INTO offsets (stream_id, group_id, topic, partition, "offset", leader_epoch, metadata, committed_at)
                        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
                        ON CONFLICT (stream_id, group_id, topic, partition) DO UPDATE SET
                          "offset" = excluded."offset", leader_epoch = excluded.leader_epoch,
                          metadata = excluded.metadata, committed_at = excluded.committed_at"#,
+                    params![stream, group, r.topic, r.partition, r.offset, r.leader_epoch, r.metadata, r.committed_at],
                 )?;
-                for r in rows {
-                    s.execute(params![stream, group, r.topic, r.partition, r.offset, r.leader_epoch, r.metadata, r.committed_at])?;
-                }
             }
-            tx.commit()
+            Ok(())
         })
     }
 
     pub fn offsets(&self, stream: &str, group: &str) -> anyhow::Result<Vec<OffsetRow>> {
-        self.with(|c| {
-            let mut s = c.prepare_cached(
-                r#"SELECT topic, partition, "offset", leader_epoch, metadata, committed_at FROM offsets
-                   WHERE stream_id = ?1 AND group_id = ?2 ORDER BY topic, partition"#,
-            )?;
-            s.query_map([stream, group], |r| {
-                Ok(OffsetRow {
-                    topic: r.get(0)?,
-                    partition: r.get(1)?,
-                    offset: r.get(2)?,
-                    leader_epoch: r.get(3)?,
-                    metadata: r.get(4)?,
-                    committed_at: r.get(5)?,
-                })
-            })?
-            .collect()
-        })
+        self.read(|c| c.query(&format!("SELECT {OFFSET_COLS} FROM offsets WHERE stream_id = ?1 AND group_id = ?2 ORDER BY topic, partition"), [stream, group], |r| offset_row(r, 0)))
     }
 
     /// All offsets of a stream as `(group, row)`.
     pub fn all_offsets(&self, stream: &str) -> anyhow::Result<Vec<(String, OffsetRow)>> {
-        self.with(|c| {
-            let mut s = c.prepare(
-                r#"SELECT group_id, topic, partition, "offset", leader_epoch, metadata, committed_at FROM offsets
-                   WHERE stream_id = ?1 ORDER BY group_id, topic, partition"#,
-            )?;
-            s.query_map([stream], |r| {
-                Ok((
-                    r.get(0)?,
-                    OffsetRow {
-                        topic: r.get(1)?,
-                        partition: r.get(2)?,
-                        offset: r.get(3)?,
-                        leader_epoch: r.get(4)?,
-                        metadata: r.get(5)?,
-                        committed_at: r.get(6)?,
-                    },
-                ))
-            })?
-            .collect()
+        self.read(|c| {
+            c.query(&format!("SELECT group_id, {OFFSET_COLS} FROM offsets WHERE stream_id = ?1 ORDER BY group_id, topic, partition"), [stream], |r| Ok((r.get(0)?, offset_row(r, 1)?)))
         })
     }
 
     pub fn offset_groups(&self, stream: &str) -> anyhow::Result<Vec<String>> {
-        self.with(|c| {
-            let mut s = c.prepare(
-                "SELECT group_id FROM offsets WHERE stream_id = ?1 UNION SELECT group_id FROM groups WHERE stream_id = ?1 ORDER BY 1",
-            )?;
-            s.query_map([stream], |r| r.get(0))?.collect()
-        })
+        self.read(|c| c.query("SELECT group_id FROM offsets WHERE stream_id = ?1 UNION SELECT group_id FROM groups WHERE stream_id = ?1 ORDER BY 1", [stream], |r| r.get(0)))
     }
 
     /// Delete a group's offsets: all of them, or only the given partitions.
     pub fn delete_offsets(&self, stream: &str, group: &str, partitions: Option<&[(String, i32)]>) -> anyhow::Result<()> {
-        self.with(|c| {
-            let tx = c.transaction()?;
+        self.fenced(stream, |c| {
             match partitions {
                 None => {
-                    tx.execute("DELETE FROM offsets WHERE stream_id = ?1 AND group_id = ?2", [stream, group])?;
-                    tx.execute("DELETE FROM groups WHERE stream_id = ?1 AND group_id = ?2", [stream, group])?;
+                    c.execute("DELETE FROM offsets WHERE stream_id = ?1 AND group_id = ?2", [stream, group])?;
+                    c.execute("DELETE FROM groups WHERE stream_id = ?1 AND group_id = ?2", [stream, group])?;
                 }
                 Some(ps) => {
                     for (t, p) in ps {
-                        tx.execute(
-                            "DELETE FROM offsets WHERE stream_id = ?1 AND group_id = ?2 AND topic = ?3 AND partition = ?4",
-                            params![stream, group, t, p],
-                        )?;
+                        c.execute("DELETE FROM offsets WHERE stream_id = ?1 AND group_id = ?2 AND topic = ?3 AND partition = ?4", params![stream, group, t, p])?;
                     }
                 }
             }
-            tx.commit()
+            Ok(())
         })
-    }
-
-    pub fn delete_topic_offsets(&self, stream: &str, topic: &str) -> anyhow::Result<()> {
-        self.with(|c| c.execute("DELETE FROM offsets WHERE stream_id = ?1 AND topic = ?2", [stream, topic]).map(drop))
     }
 
     /// Delete offsets committed before `cutoff` for the given (empty) groups.
     pub fn expire_offsets(&self, stream: &str, groups: &[String], cutoff: i64) -> anyhow::Result<usize> {
-        self.with(|c| {
-            let tx = c.transaction()?;
+        self.fenced(stream, |c| {
             let mut n = 0;
             for g in groups {
-                n += tx.execute(
-                    "DELETE FROM offsets WHERE stream_id = ?1 AND group_id = ?2 AND committed_at < ?3",
-                    params![stream, g, cutoff],
-                )?;
+                n += c.execute("DELETE FROM offsets WHERE stream_id = ?1 AND group_id = ?2 AND committed_at < ?3", params![stream, g, cutoff])?;
             }
-            tx.commit()?;
             Ok(n)
         })
     }
 
     pub fn save_group(&self, stream: &str, group: &str, protocol_type: &str, generation: i32, now: i64) -> anyhow::Result<()> {
-        self.with(|c| {
+        self.fenced(stream, |c| {
             c.execute(
                 "INSERT INTO groups (stream_id, group_id, protocol_type, generation, updated_at) VALUES (?1, ?2, ?3, ?4, ?5)
                  ON CONFLICT (stream_id, group_id) DO UPDATE SET protocol_type = excluded.protocol_type,
@@ -631,123 +707,112 @@ impl Store {
 
     /// `(protocol type, generation)` of a persisted group.
     pub fn group(&self, stream: &str, group: &str) -> anyhow::Result<Option<(String, i32)>> {
-        self.with(|c| {
-            c.query_row(
-                "SELECT protocol_type, generation FROM groups WHERE stream_id = ?1 AND group_id = ?2",
-                [stream, group],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .optional()
-        })
+        self.read(|c| c.query_row("SELECT protocol_type, generation FROM groups WHERE stream_id = ?1 AND group_id = ?2", [stream, group], |r| Ok((r.get(0)?, r.get(1)?))).optional())
     }
 
     // ── transactions ──
 
     pub fn save_txn(&self, t: &TxnRow) -> anyhow::Result<()> {
-        self.with(|c| {
+        self.fenced(&t.stream_id, |c| {
             c.execute(
-                &format!("INSERT OR REPLACE INTO txns ({TXN_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)"),
-                params![
-                    t.stream_id,
-                    t.txn_id,
-                    t.producer_id,
-                    t.epoch,
-                    t.state,
-                    t.timeout_ms,
-                    json(&t.partitions),
-                    json(&t.groups),
-                    t.started_at,
-                    t.updated_at
-                ],
+                &format!(
+                    "INSERT INTO txns ({TXN_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                     ON CONFLICT (stream_id, txn_id) DO UPDATE SET producer_id = excluded.producer_id, epoch = excluded.epoch,
+                       state = excluded.state, timeout_ms = excluded.timeout_ms, partitions = excluded.partitions,
+                       groups = excluded.groups, started_at = excluded.started_at, updated_at = excluded.updated_at"
+                ),
+                params![t.stream_id, t.txn_id, t.producer_id, t.epoch, t.state, t.timeout_ms, json(&t.partitions), json(&t.groups), t.started_at, t.updated_at],
             )
             .map(drop)
         })
     }
 
     pub fn txns(&self) -> anyhow::Result<Vec<TxnRow>> {
-        self.with(|c| {
-            let mut s = c.prepare(&format!("SELECT {TXN_COLS} FROM txns"))?;
-            s.query_map([], txn_row)?.collect()
-        })
+        self.read(|c| c.query(&format!("SELECT {TXN_COLS} FROM txns"), (), txn_row))
+    }
+
+    pub fn txns_of(&self, stream: &str) -> anyhow::Result<Vec<TxnRow>> {
+        self.read(|c| c.query(&format!("SELECT {TXN_COLS} FROM txns WHERE stream_id = ?1"), [stream], txn_row))
     }
 
     pub fn delete_txn(&self, stream: &str, txn_id: &str) -> anyhow::Result<()> {
-        self.with(|c| c.execute("DELETE FROM txns WHERE stream_id = ?1 AND txn_id = ?2", [stream, txn_id]).map(drop))
+        self.fenced(stream, |c| c.execute("DELETE FROM txns WHERE stream_id = ?1 AND txn_id = ?2", [stream, txn_id]).map(drop))
     }
 
-    /// Reserve `n` producer ids; returns the first.
+    /// Reserve `n` producer ids; returns the first. Unique across every node on the catalog.
     pub fn allocate_producer_ids(&self, n: i64) -> anyhow::Result<i64> {
-        self.with(|c| {
-            let tx = c.transaction()?;
-            let next: i64 = tx
-                .query_row("SELECT value FROM meta WHERE key = 'next_producer_id'", [], |r| r.get(0))
-                .optional()?
-                .unwrap_or(1000);
-            tx.execute(
-                "INSERT INTO meta (key, value) VALUES ('next_producer_id', ?1) ON CONFLICT (key) DO UPDATE SET value = ?1",
-                [next + n],
-            )?;
-            tx.commit()?;
+        self.write(|c| {
+            let next: i64 = c.query_row("SELECT value FROM meta WHERE key = 'next_producer_id'", (), |r| r.get(0)).optional()?.unwrap_or(1000);
+            c.execute("INSERT INTO meta (key, value) VALUES ('next_producer_id', ?1) ON CONFLICT (key) DO UPDATE SET value = excluded.value", [next + n])?;
             Ok(next)
+        })
+    }
+
+    // ── write-ahead log ──
+
+    /// Record a write-ahead log object: from here on the records in it are acknowledged.
+    pub fn insert_wal(&self, stream: &str, w: &WalRow) -> anyhow::Result<()> {
+        let ends: WalEnds = w.ends.iter().map(|(t, p, f, e)| (t.to_string(), *p, *f, *e)).collect();
+        let ends = json(&ends);
+        self.fenced(stream, |c| {
+            c.execute("INSERT INTO wal (stream_id, seq, key, ends, bytes, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)", params![stream, w.seq, w.key, ends, w.bytes, w.created_at])
+                .map(drop)
+        })
+    }
+
+    /// A stream's write-ahead log, oldest first.
+    pub fn wal(&self, stream: &str) -> anyhow::Result<Vec<WalRow>> {
+        self.read(|c| c.query("SELECT seq, key, ends, bytes, created_at FROM wal WHERE stream_id = ?1 ORDER BY seq", [stream], wal_row))
+    }
+
+    pub fn delete_wal(&self, stream: &str, seqs: &[i64]) -> anyhow::Result<()> {
+        self.fenced(stream, |c| {
+            for s in seqs {
+                c.execute("DELETE FROM wal WHERE stream_id = ?1 AND seq = ?2", params![stream, s])?;
+            }
+            Ok(())
         })
     }
 
     // ── usage ──
 
     pub fn add_usage(&self, stream: &str, u: &UsageRow) -> anyhow::Result<()> {
-        self.with(|c| {
+        // Metering: no fsync of its own (the next durable write carries it).
+        Ok(self.db.write_unsynced(|c| {
             c.execute(
                 "INSERT INTO usage (stream_id, hour, bytes_in, bytes_out, records_in, requests, puts, gets)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-                 ON CONFLICT (stream_id, hour) DO UPDATE SET bytes_in = bytes_in + excluded.bytes_in,
-                   bytes_out = bytes_out + excluded.bytes_out, records_in = records_in + excluded.records_in,
-                   requests = requests + excluded.requests, puts = puts + excluded.puts, gets = gets + excluded.gets",
+                 ON CONFLICT (stream_id, hour) DO UPDATE SET bytes_in = usage.bytes_in + excluded.bytes_in,
+                   bytes_out = usage.bytes_out + excluded.bytes_out, records_in = usage.records_in + excluded.records_in,
+                   requests = usage.requests + excluded.requests, puts = usage.puts + excluded.puts, gets = usage.gets + excluded.gets",
                 params![stream, u.hour, u.bytes_in, u.bytes_out, u.records_in, u.requests, u.puts, u.gets],
             )
             .map(drop)
-        })
+        })?)
     }
 
     pub fn usage_since(&self, stream: &str, since: i64) -> anyhow::Result<Vec<UsageRow>> {
-        self.with(|c| {
-            let mut s = c.prepare(
-                "SELECT hour, bytes_in, bytes_out, records_in, requests, puts, gets FROM usage
-                 WHERE stream_id = ?1 AND hour >= ?2 ORDER BY hour",
-            )?;
-            s.query_map(params![stream, since], |r| {
-                Ok(UsageRow {
-                    hour: r.get(0)?,
-                    bytes_in: r.get(1)?,
-                    bytes_out: r.get(2)?,
-                    records_in: r.get(3)?,
-                    requests: r.get(4)?,
-                    puts: r.get(5)?,
-                    gets: r.get(6)?,
-                })
-            })?
-            .collect()
+        self.read(|c| {
+            c.query(
+                "SELECT hour, bytes_in, bytes_out, records_in, requests, puts, gets FROM usage WHERE stream_id = ?1 AND hour >= ?2 ORDER BY hour",
+                params![stream, since],
+                |r| Ok(UsageRow { hour: r.get(0)?, bytes_in: r.get(1)?, bytes_out: r.get(2)?, records_in: r.get(3)?, requests: r.get(4)?, puts: r.get(5)?, gets: r.get(6)? }),
+            )
         })
     }
 
     pub fn add_storage_sample(&self, stream: &str, s: &StorageSample) -> anyhow::Result<()> {
-        self.with(|c| {
-            c.execute(
-                "INSERT INTO storage_samples (stream_id, at, local_bytes, remote_bytes) VALUES (?1, ?2, ?3, ?4)",
-                params![stream, s.at, s.local_bytes, s.remote_bytes],
-            )
-            .map(drop)
-        })
+        Ok(self.db.write_unsynced(|c| {
+            c.execute("INSERT INTO storage_samples (stream_id, at, local_bytes, remote_bytes) VALUES (?1, ?2, ?3, ?4)", params![stream, s.at, s.local_bytes, s.remote_bytes])
+                .map(drop)
+        })?)
     }
 
     pub fn storage_since(&self, stream: &str, since: i64) -> anyhow::Result<Vec<StorageSample>> {
-        self.with(|c| {
-            let mut s = c.prepare(
-                "SELECT at, local_bytes, remote_bytes FROM storage_samples WHERE stream_id = ?1 AND at >= ?2 ORDER BY at",
-            )?;
-            s.query_map(params![stream, since], |r| {
+        self.read(|c| {
+            c.query("SELECT at, local_bytes, remote_bytes FROM storage_samples WHERE stream_id = ?1 AND at >= ?2 ORDER BY at", params![stream, since], |r| {
                 Ok(StorageSample { at: r.get(0)?, local_bytes: r.get(1)?, remote_bytes: r.get(2)? })
-            })?
-            .collect()
+            })
         })
     }
 }
@@ -756,41 +821,43 @@ impl Store {
 mod tests {
     use super::*;
 
-    fn store() -> Store {
-        Store::open(Path::new(":memory:")).unwrap()
+    fn store() -> (Store, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        (Store::open(&dir.path().join("stream.db")).unwrap(), dir)
     }
 
     fn stream(s: &Store, id: &str) {
-        s.insert_stream(&StreamRow { id: id.into(), name: id.into(), region: "local".into(), created_at: 0, settings: Settings::default() })
-            .unwrap();
+        s.insert_stream(&StreamRow { id: id.into(), name: id.into(), region: "local".into(), created_at: 0, settings: Settings::default() }).unwrap();
     }
 
     #[test]
-    fn streams_topics_and_cascade() {
-        let s = store();
+    fn streams_topics_and_deletes() {
+        let (s, _d) = store();
         stream(&s, "st_a");
         let id = Uuid::from_u128(7);
         let mut configs = BTreeMap::new();
         configs.insert("retention.ms".to_string(), "1000".to_string());
         s.insert_topic(&TopicRow { id, stream_id: "st_a".into(), name: "orders".into(), partitions: 3, configs, created_at: 1 }).unwrap();
-        s.set_partitions(&id, 6).unwrap();
+        s.set_partitions("st_a", &id, 6).unwrap();
         let t = &s.topics().unwrap()[0];
         assert_eq!((t.partitions, t.configs["retention.ms"].as_str()), (6, "1000"));
         let ch = Chunk { first: 0, last: 9, max_timestamp: 5, bytes: 100, key: "k".into() };
-        s.insert_chunk(&id, 0, &ch, 0).unwrap();
+        s.insert_chunk("st_a", &id, 0, &ch, 0).unwrap();
         assert_eq!(s.chunks(&id, 0).unwrap(), vec![ch]);
+        assert_eq!(s.uploaded_end(&id, 0).unwrap(), Some(10));
         assert_eq!(s.remote_bytes().unwrap()["st_a"], 100);
-        s.set_log_start(&id, 0, 5).unwrap();
-        s.set_log_start(&id, 0, 3).unwrap(); // never moves back
+        s.set_log_start("st_a", &id, 0, 5).unwrap();
+        s.set_log_start("st_a", &id, 0, 3).unwrap(); // never moves back
         assert_eq!(s.log_start(&id, 0).unwrap(), 5);
         s.delete_stream("st_a").unwrap();
         assert!(s.topics().unwrap().is_empty());
         assert!(s.chunks(&id, 0).unwrap().is_empty());
+        assert!(s.stream("st_a").unwrap().is_none());
     }
 
     #[test]
     fn offsets_roundtrip_and_expiry() {
-        let s = store();
+        let (s, _d) = store();
         stream(&s, "st_a");
         let row = |p, o, at| OffsetRow { topic: "t".into(), partition: p, offset: o, leader_epoch: 0, metadata: Some("m".into()), committed_at: at };
         s.commit_offsets("st_a", "g", &[row(0, 10, 100), row(1, 20, 200)]).unwrap();
@@ -804,9 +871,29 @@ mod tests {
 
     #[test]
     fn producer_ids_are_unique() {
-        let s = store();
+        let (s, _d) = store();
         let a = s.allocate_producer_ids(100).unwrap();
         let b = s.allocate_producer_ids(100).unwrap();
         assert_eq!(b, a + 100);
+    }
+
+    /// Two nodes on one catalog: the later claim fences every write of the earlier owner.
+    #[test]
+    fn a_new_owner_fences_the_old_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open_or_test(&code_sql::Target::Sqlite(dir.path().join("stream.db")), "streams").unwrap();
+        let (a, b) = (Store::on(db.clone(), true).unwrap(), Store::on(db, true).unwrap());
+        stream(&a, "st_a");
+        let id = Uuid::from_u128(1);
+        let ch = |first| Chunk { first, last: first, max_timestamp: 0, bytes: 1, key: format!("k{first}") };
+        assert!(is_fenced(&a.insert_chunk("st_a", &id, 0, &ch(0), 0).unwrap_err()), "nothing is written before a claim");
+        let ga = a.claim("st_a", "a").unwrap();
+        a.insert_chunk("st_a", &id, 0, &ch(0), 0).unwrap();
+        let gb = b.claim("st_a", "b").unwrap();
+        assert!(gb > ga);
+        assert!(is_fenced(&a.insert_chunk("st_a", &id, 0, &ch(1), 0).unwrap_err()));
+        assert!(a.tenure("st_a").is_none(), "a fenced write ends the tenure");
+        b.insert_chunk("st_a", &id, 0, &ch(1), 0).unwrap();
+        assert_eq!(b.chunks(&id, 0).unwrap().len(), 2);
     }
 }

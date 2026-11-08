@@ -251,7 +251,7 @@ impl Broker {
             return Ok(None);
         }
         let firsts: Vec<i64> = plan.chunks.iter().map(|c| c.first).collect();
-        if let Err(err) = self.store.replace_chunks(&topic.id, p.index, &firsts, &written, now()) {
+        if let Err(err) = self.store.replace_chunks(&stream.id, &topic.id, p.index, &firsts, &written, now()) {
             // The catalog still points at the old chunks, which are intact; the in-memory log
             // serves the new ones until the partition is reopened.
             warn!(topic = %topic.name, partition = p.index, error = %err, "recording compacted chunks");
@@ -287,7 +287,7 @@ impl Broker {
         for (_, b) in &batches {
             data.extend_from_slice(b);
         }
-        let key = config::compacted_chunk_key(&s.id, &t.id, p.index, first, last, generation);
+        let key = config::compacted_chunk_key(&s.id, &t.id, p.index, first, last, generation, self.tenure_of(s)?);
         let chunk = Chunk { first, last, max_timestamp, bytes: data.len() as u64, key };
         self.objects.put(&chunk.key, data.freeze()).await?;
         s.usage.puts.fetch_add(1, Ordering::Relaxed);
@@ -413,7 +413,7 @@ mod tests {
             last,
             max_timestamp: 0,
             bytes: 1,
-            key: if compacted { config::compacted_chunk_key("s", &id, 0, first, last, 1) } else { config::chunk_key("s", &id, 0, first, last) },
+            key: if compacted { config::compacted_chunk_key("s", &id, 0, first, last, 1, None) } else { config::chunk_key("s", &id, 0, first, last, None) },
         };
         assert_eq!(cleaned_to(&[c(0, 9, true), c(10, 19, true), c(20, 29, false), c(30, 39, true)], 0), 20);
         assert_eq!(cleaned_to(&[c(0, 9, false)], 5), 5);

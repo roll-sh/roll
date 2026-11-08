@@ -188,15 +188,21 @@ impl Config {
 }
 
 /// Object key of a chunk: `streams/<stream>/<topic id>/<partition>/<first>-<last>.kb`. The offsets
-/// in the name let the catalog be rebuilt from a listing.
-pub fn chunk_key(stream: &str, topic_id: &uuid::Uuid, partition: i32, first: i64, last: i64) -> String {
-    format!("streams/{stream}/{}/{partition}/{first:020}-{last:020}.kb", topic_id.simple())
+/// in the name let the catalog be rebuilt from a listing. On the fleet the owner's tenure is in
+/// it too (`.t<tenure>`), so an owner that lost the stream can't overwrite the next one's chunk
+/// of the same offsets.
+pub fn chunk_key(stream: &str, topic_id: &uuid::Uuid, partition: i32, first: i64, last: i64, tenure: Option<i64>) -> String {
+    format!("streams/{stream}/{}/{partition}/{first:020}-{last:020}{}.kb", topic_id.simple(), tenured(tenure))
 }
 
 /// Key of a chunk written by compaction (a new object, so the one it replaces stays readable
 /// until it's deleted).
-pub fn compacted_chunk_key(stream: &str, topic_id: &uuid::Uuid, partition: i32, first: i64, last: i64, generation: i64) -> String {
-    format!("streams/{stream}/{}/{partition}/{first:020}-{last:020}.c{generation}.kb", topic_id.simple())
+pub fn compacted_chunk_key(stream: &str, topic_id: &uuid::Uuid, partition: i32, first: i64, last: i64, generation: i64, tenure: Option<i64>) -> String {
+    format!("streams/{stream}/{}/{partition}/{first:020}-{last:020}{}.c{generation}.kb", topic_id.simple(), tenured(tenure))
+}
+
+fn tenured(tenure: Option<i64>) -> String {
+    tenure.map(|t| format!(".t{t}")).unwrap_or_default()
 }
 
 pub fn is_compacted_key(key: &str) -> bool {

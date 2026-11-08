@@ -197,12 +197,14 @@ pub fn offset_commit(ctx: &Ctx, req: OffsetCommitRequest) -> OffsetCommitRespons
         topics.push(OffsetCommitResponseTopic::default().with_name(t.name).with_topic_id(t.topic_id).with_partitions(partitions));
     }
     if !rows.is_empty()
-        && ctx.b.store.commit_offsets(&ctx.stream.id, &req.group_id, &rows).is_err()
+        && let Err(e) = ctx.b.store.commit_offsets(&ctx.stream.id, &req.group_id, &rows)
     {
+        // Fenced: the stream (and its coordinator) moved to another node.
+        let code = if crate::store::is_fenced(&e) { ResponseError::NotCoordinator } else { ResponseError::KafkaStorageError };
         for t in &mut topics {
             for p in &mut t.partitions {
                 if p.error_code == 0 {
-                    p.error_code = ResponseError::KafkaStorageError.code();
+                    p.error_code = code.code();
                 }
             }
         }
