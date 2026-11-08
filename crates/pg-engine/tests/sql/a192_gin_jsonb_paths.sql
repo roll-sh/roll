@@ -146,6 +146,21 @@ BEGIN
   RETURN coalesce(r1, '-') || ' | ' || (r1 IS NOT DISTINCT FROM r2) || ' ' || (r1 IS NOT DISTINCT FROM r3);
 END $$;
 SELECT id, jm_check(plain) FROM jm ORDER BY id;
+-- Compare lax/strict jsonpath matching id sets under both classes and the evaluator.
+CREATE FUNCTION jm_path_check(q jsonpath) RETURNS text LANGUAGE plpgsql AS $$
+DECLARE r1 text; r2 text; r3 text;
+BEGIN
+  SELECT string_agg(id::text, ',' ORDER BY id) INTO r1 FROM jm WHERE j @@ q;
+  SELECT string_agg(id::text, ',' ORDER BY id) INTO r2 FROM jm WHERE k @@ q;
+  SELECT string_agg(id::text, ',' ORDER BY id) INTO r3 FROM jm WHERE plain @@ q;
+  RETURN coalesce(r1, '-') || ' | ' || (r1 IS NOT DISTINCT FROM r2) || ' ' || (r1 IS NOT DISTINCT FROM r3);
+END $$;
+SELECT q, jm_path_check(q::jsonpath) FROM (VALUES
+ ('$.a == 1'), ('strict $.a == 1'), ('$.a.b == 1'), ('strict $.a.b == 1'),
+ ('$.a[*].b == 1'), ('strict $.a[*].b == 1'), ('$.a == null'), ('strict $.a == null'),
+ ('$.a.b == 1 && $.a.c == 2'), ('strict $.a.b == 1 && $.a.c == 2'),
+ ('$.a.b == 1 || $.ab == 1'), ('$.** == 1'), ('$[*] == 1'), ('strict $[*] == 1'),
+ ('$ == "x"'), ('strict $ == "x"')) v(q) ORDER BY q;
 -- The two-leaf object must come from one array element. Empty siblings require recheck.
 SELECT jm_check('{"a":[{"b":1,"c":2}]}'), jm_check('[{"a":1,"b":2}]'), jm_check('{"a":[{"b":1},{}]}');
 BEGIN;
@@ -166,5 +181,5 @@ CREATE INDEX jm_path ON jm USING gin (k jsonb_path_ops) WHERE id > 25;
 SELECT string_agg(id::text, ',' ORDER BY id) FROM jm WHERE j @> '{"a":[{"b":1}]}' AND id > 25;
 SELECT string_agg(id::text, ',' ORDER BY id) FROM jm WHERE k @> '{"a":[{"b":1}]}' AND id > 25;
 RESET enable_seqscan;
-DROP FUNCTION jm_check(jsonb);
+DROP FUNCTION jm_check(jsonb), jm_path_check(jsonpath);
 DROP TABLE jm;

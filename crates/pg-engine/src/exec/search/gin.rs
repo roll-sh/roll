@@ -742,6 +742,7 @@ mod tests {
         // The same behavioral corpus is recorded against PG18.6 by the SQL golden.
         let sql = include_str!("../../../tests/sql/a192_gin_jsonb_paths.sql");
         let mut docs = parse_jsonb(sql.split("$matrix$").nth(1).unwrap()).unwrap().into_array().unwrap();
+        let tz = crate::types::datetime::TimeZone::gmt();
         let base = docs.clone();
         for j in base {
             docs.push(parse_jsonb(&format!("[{}]", j)).unwrap());
@@ -778,13 +779,13 @@ mod tests {
             }
             assert!(exact_queries > 20, "exercise exact selections");
             for path in ["$.a == 1", "$.a.b == 1", "$.a[*].b == 1", "$.a == null", "$.a == \"x\"",
-                "$.a.b == 1 && $.a.c == 2", "$.a.b == 1 || $.ab == 1", "$.** == 1", "$[*] == 1"] {
+                "$.a.b == 1 && $.a.c == 2", "$.a.b == 1 || $.ab == 1", "$.** == 1", "$[*] == 1", "$ == \"x\""] {
                 for mode in ["lax", "strict"] {
                     let path = format!("{mode} {path}");
                     let parsed = jsonpath::parse(&path).unwrap();
                     let sel = el.jsonpath(0, false, &path);
                     for (i, j) in docs.iter().enumerate() {
-                        let holds = jsonpath::matches(j, &parsed, None, true, false, &crate::types::datetime::TimeZone::Utc).unwrap() == Some(true);
+                        let holds = jsonpath::matches(j, &parsed, None, true, false, &tz).unwrap() == Some(true);
                         assert!(!holds || selected(&sel, i), "jsonpath false negative: path_ops={path_ops}, {j} @@ {path}");
                     }
                 }
