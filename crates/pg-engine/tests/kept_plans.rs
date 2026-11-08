@@ -362,7 +362,7 @@ fn custom_plans_choose_the_scan_again() {
     // EXPLAIN EXECUTE plans afresh and shows the values.
     s.query("PREPARE rx (int, int) AS SELECT id, v FROM t WHERE id BETWEEN $1 AND $2 ORDER BY id").unwrap();
     for lo in [5, 50, 500] {
-        assert_eq!(one(&mut s, &format!("EXECUTE rx({lo}, {})", lo + 99)), Some(Value::Int4(lo as i32)));
+        assert_eq!(one(&mut s, &format!("EXECUTE rx({lo}, {})", lo + 99)), Some(Value::Int4(lo)));
     }
     let plan = s.query("EXPLAIN (COSTS OFF) EXECUTE rx(7, 106)").unwrap();
     let text: Vec<String> = plan.last().unwrap().rows.iter().map(|r| format!("{:?}", r[0])).collect();

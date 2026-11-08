@@ -168,6 +168,51 @@ The current checked measurements compare release engine builds and PostgreSQL 18
 the wire. Older rounds below are historical records, with their original methods and
 limits. Their results have not been reverified on the current source.
 
+## OLTP, round 7 (2026-11-08, agent 178)
+
+HANDOFF.md, "OLTP round 7", has what changed. Both servers in containers (`run.sh
+ENGINE_DOCKER=1`, dist builds with line tables bind-mounted, `--cpu-shares 2`, host network)
+on cores 8-11, the clients on 0-3, PostgreSQL 18.6 the pinned image (shared_buffers 2 GB).
+**base** is origin's `8500c0bb9`, **b1** batch 1 (`822b59dde`: STABLE casts, body buffer);
+server CPU from each container's cgroup, rounds alternating PostgreSQL, base, b1; the
+machine was shared (load 10-25).
+
+| workload | PostgreSQL | base | b1 |
+|---|---:|---:|---:|
+| 8-client range read (`bench oltp --only range_scan_100`, 200,000 rows), us CPU / op | 104.8-112.0 | 174.3-182.6 | 164.0-172.6 |
+| tpcb-like prepared, 8 clients, ms CPU / tx | 0.273-0.275 | 0.354-0.379 | 0.363-0.366 |
+| simple-update prepared, 8 clients, ms CPU / tx | 0.184-0.187 | 0.228-0.232 | 0.224-0.241 |
+
+Custom-plan reuse (item 1, `c50d2563f`: batch 1, the reuse and agent 177's WIP ScanChoice),
+three more rounds alternating PostgreSQL, base, b1, reuse on a busier machine: the range read
+**193.3-200.1** us CPU / op against base 220.4-238.1, b1 217.1-230.9 and PostgreSQL
+137.6-141.1 (1.42x PostgreSQL's, base 1.64x); 18,184-19,033 tps against 15,558-16,747 (base)
+and 25,156-26,393 (PostgreSQL).
+
+Footprint: 100 idle sessions (`bench idle --sessions 100 --dbs 10`, a fresh data directory
+per run, three alternated runs each): 293-314 KB per session either side (base 303-313, b1
+293-314); a session keeps at most 8 KB of body buffer while idle.
+
+**Where the range read's CPU goes** (origin's head before this round, LBR call stacks: DWARF
+unwinding through the container's libc stops at the first frame, `perf record --call-graph
+lbr` from a privileged container works on this Xeon): execution 50% (the index scan 41%: per
+entry `to_vec` of key and value in `next_indexed`, `fetch_dense`, row decode), `planned_as`
+29%, of which `bind_values` 25.5% (planning, `into_bound`, 19.8%; the substitution 5.7%);
+`finish_txn` 1.9%, `plan_cost` 1.2%, Bind 1.2%, Describe at Bind 0.8%, privilege checks 1%.
+The allocator's free-list pop (`_mi_page_malloc_zero`, 97% on the load of the next free
+block: cache misses on memory freed earlier) is 8-12% of samples in both the range read and
+tpcb-like; its callers there: `scan_row_rest`'s per-row key `Arc` for UPDATE (1.9%), the hot
+ranges' version chains collected per scan (`Hot::scan`, 1.4%), `next_indexed`'s per-entry
+vectors (3.6% of the range read) (agents 149 and 169).
+
+**Off-CPU at 32 clients** (tpcb-like prepared, `sched:sched_switch` with stacks): 49.7% of
+the switches wait for the client, 21.6% on futexes (11.3% condition variables: row-lock
+waits on the hot rows and `wait_durable`; 10.3% parked on a mutex), 14.7% `sched_yield` in
+parking_lot's mutex spin, 6.5% preemption. The mutexes' slow paths come from the lock
+manager's state (`Txn::lock_row` 0.78% of CPU samples, `release_locks` 0.59%,
+`LockManager::acquire` 0.34%, `Txn::xid` 0.29%) and `wait_durable` (0.36%): every row lock
+goes through the lock table's one mutex, where PostgreSQL keeps tuple locks in the tuple.
+
 ## Planner, round 10 (2026-11-07, agent 171)
 
 HANDOFF.md, "Planner round 10", has what changed. Both servers ran in containers (`run.sh
