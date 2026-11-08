@@ -2032,6 +2032,36 @@ fn copy_errors_encodings_and_transaction_defaults() {
     s.engine.shutdown();
 }
 
+/// Missing unnamed and named statements have distinct errors in Bind and Describe.
+#[test]
+fn missing_unnamed_statement() {
+    let s = server(AuthMethod::Trust);
+    let mut c = raw::Raw::connect(&s.addr, "postgres");
+    let errors = |c: &mut raw::Raw| {
+        c.send(b'S', b"");
+        let mut out = Vec::new();
+        while let Some((t, b)) = c.next_within(Duration::from_secs(10)) {
+            match t {
+                b'E' => out.extend(
+                    b.split(|c| *c == 0)
+                        .filter(|f| matches!(f.first(), Some(b'C' | b'M')))
+                        .map(|f| String::from_utf8_lossy(&f[1..]).into_owned()),
+                ),
+                b'Z' => break,
+                _ => {}
+            }
+        }
+        out
+    };
+    c.bind("", "");
+    assert_eq!(errors(&mut c), ["26000", "unnamed prepared statement does not exist"]);
+    c.describe(b'S', "");
+    assert_eq!(errors(&mut c), ["26000", "unnamed prepared statement does not exist"]);
+    c.bind("", "nope");
+    assert_eq!(errors(&mut c), ["26000", "prepared statement \"nope\" does not exist"]);
+    s.engine.shutdown();
+}
+
 /// Sessions changing unrelated catalog objects at once all commit (each session's CREATE
 /// TEMP TABLE, tables of their own), as in Postgres, where only the objects' locks
 /// serialize DDL (txn/catmerge.rs), and none loses what the other committed meanwhile; two

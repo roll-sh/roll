@@ -160,6 +160,15 @@ fn is_result_change(e: &Error) -> bool {
     e.code == code::FEATURE_NOT_SUPPORTED && e.message == "cached plan must not change result type"
 }
 
+/// Bind and Describe distinguish the unnamed statement in their missing-statement errors.
+pub(crate) fn missing_statement(name: &str) -> Error {
+    let msg = match name {
+        "" => "unnamed prepared statement does not exist".to_string(),
+        n => format!("prepared statement \"{n}\" does not exist"),
+    };
+    Error::new(code::INVALID_SQL_STATEMENT_NAME, msg)
+}
+
 impl Prepared {
     /// What pg_prepared_statements shows of it besides its name and text: parameter types,
     /// result types (when known), generic and custom plans made.
@@ -2576,10 +2585,7 @@ impl Session {
         result_formats: Vec<i16>,
     ) -> Result<()> {
         let Some(p) = self.prepared.get(stmt).cloned() else {
-            return Err(Error::new(
-                code::INVALID_SQL_STATEMENT_NAME,
-                format!("prepared statement \"{stmt}\" does not exist"),
-            ));
+            return Err(missing_statement(stmt));
         };
         if self.status == TxnStatus::Failed && !ends_failed_txn(p.stmt.as_ref().and_then(inner)) {
             return Err(Error::new(
