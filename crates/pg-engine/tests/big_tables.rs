@@ -404,9 +404,7 @@ fn index_build_measures_as_analyze() {
 
 /// BRIN and GIN builds of a table too big to model measure the index as their access method
 /// lays it out (`am_measure`): PostgreSQL 18.6's relpages (and pg_relation_size) for the same
-/// table, after the build and after a VACUUM (whose kept measure the next build reads); built
-/// in parallel too (`parbuild::measure_am_parallel`; PostgreSQL's parallel builds of this table,
-/// with min_parallel_table_scan_size 0, give the same pages), first and after the VACUUM.
+/// table, after the build and after a VACUUM (whose kept measure the next build reads).
 #[test]
 fn brin_gin_builds_measure_as_postgres() {
     let dir = tempfile::tempdir().unwrap();
@@ -425,25 +423,11 @@ fn brin_gin_builds_measure_as_postgres() {
              CREATE INDEX am_jp ON am USING gin (j jsonb_path_ops)";
         let stats = "SELECT string_agg(relname || ' ' || relpages, ', ' ORDER BY relname) FROM pg_class WHERE relname LIKE 'am%' AND relpages = pg_relation_size(oid) / 8192";
         let want = [r#"[Text("am 91, am_b 3, am_bt 3, am_d 11, am_g 8, am_j 10, am_jp 8")]"#];
-        let drop = "DROP INDEX am_b, am_bt, am_g, am_d, am_j, am_jp";
-        // (Workers for a table this small, two as PostgreSQL's 256 MB allows; am_bt's text
-        // summaries are measured serially.)
-        let parallel = |s: &mut Session| {
-            run(s, "SET min_parallel_table_scan_size = 0;\nSET maintenance_work_mem = '256MB'");
-            let before = pg_engine::exec::parscan::index_builds();
-            run(s, build);
-            assert!(pg_engine::exec::parscan::index_builds() - before >= 5, "parallel builds");
-            assert_eq!(rows(s, stats), want);
-            run(s, &format!("{drop};\nRESET min_parallel_table_scan_size;\nRESET maintenance_work_mem"));
-        };
-        parallel(&mut s);
         run(&mut s, build);
         assert_eq!(rows(&mut s, stats), want);
-        run(&mut s, &format!("{drop};\nVACUUM am"));
+        run(&mut s, "DROP INDEX am_b, am_bt, am_g, am_d, am_j, am_jp;\nVACUUM am");
         run(&mut s, build);
         assert_eq!(rows(&mut s, stats), want);
-        run(&mut s, drop);
-        parallel(&mut s);
     });
 }
 

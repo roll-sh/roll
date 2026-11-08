@@ -983,9 +983,6 @@ trait Placing: Send + Sized + 'static {
     fn full(&self) -> bool {
         false
     }
-    /// A commit wrote a row of the table since it was built (`structure` passes its writes
-    /// on as they are logged; a deletion is passed on only so).
-    fn written(&mut self) {}
 }
 
 impl Placing for Grid {
@@ -1098,7 +1095,6 @@ fn structure<P: Placing>(t: &Table, bix: &BoundIndex, sh: &Shape, ctx: &ExecCtx)
         {
             let nopred = unpredicated(bix);
             for (k, v) in writes {
-                p.written();
                 if let Some(v) = v {
                     let v = spliced(db, &k, v);
                     p.add(&k[8..], v.and_then(|v| row_values(t, &nopred, &v, ctx)).as_deref());
@@ -1180,11 +1176,6 @@ pub enum Found {
     /// Data key ranges [start, end), ascending, and data keys (the transaction's own
     /// writes) besides.
     Ranges(Vec<(Vec<u8>, Vec<u8>)>, Vec<Vec<u8>>),
-    /// Data keys, ascending: exactly the rows the snapshot sees that every condition holds
-    /// for (the structure's selection is exact and nothing was written to the table since
-    /// it read the rows: `element_candidates`). Reading them finds them all, each as the
-    /// structure read it.
-    Exact(Vec<Vec<u8>>),
 }
 
 pub fn candidates(
@@ -1251,7 +1242,6 @@ pub fn candidates(
         Found::Ranges(_, keys) => {
             *keys = ctx.txn.borrow().writes_in(&prefix, &end)?.into_iter().filter(|(_, v)| v.is_some()).map(|(k, _)| k).collect();
         }
-        Found::Exact(_) => {}
     }
     Ok(Some(found))
 }
@@ -1623,7 +1613,7 @@ fn trigram_candidates(t: &Table, bix: &BoundIndex, conds: &[(usize, &str, Value)
     }
     let by_gin = bix.index.method == "gin";
     let sel = conds.iter().fold(gin::Sel::All, |acc, (_, op, v)| acc.and(tg.select(op, v, by_gin, ctx)));
-    selected(t, &tg.rows, sel, &tg.always, false, ctx)
+    selected(t, &tg.rows, sel, &tg.always, ctx)
 }
 
 /// `candidates` for a GIN index over arrays, jsonb or tsvector (`gin::Elements`).
@@ -1648,37 +1638,19 @@ fn element_candidates(t: &Table, bix: &BoundIndex, conds: &[(usize, &str, Value)
             _ => el.select(*c, op, v),
         })
     });
-    // (Exact: a selection exact for every condition, of the table as the structure read it,
-    // which the snapshot sees as it is: nothing written to it since, by others or by the
-    // transaction (`selected`).)
-    // (The built-in classes' operators only: intarray's `@>` raises an error on a row's NULL
-    // element, which only reading the row finds.)
-    let builtin = |c: usize| {
-        bix.index.columns.get(c).is_some_and(|ic| {
-            ic.opclass == 0 || matches!(crate::catalog::system::opclass_name(ic.opclass).map(|(n, _)| n), Some("array_ops" | "tsvector_ops" | "jsonb_ops"))
-        })
-    };
-    let exact = snapshot.is_some_and(|s| s >= el.ts)
-        && !el.written
-        && bix.predicate.is_none()
-        && conds.iter().all(|(c, op, v)| builtin(*c) && el.exact(*c, op, v));
-    selected(t, &el.rows, sel, &el.always, exact, ctx)
+    selected(t, &el.rows, sel, &el.always, ctx)
 }
 
 /// The data keys of the rows `sel` selects of `rows`, those always read and the
 /// transaction's own writes (every one: not in the structure). None: `sel` narrows nothing.
-/// `Found::Exact` when `exact` (the selection is exactly the rows the conditions hold for, as
-/// the snapshot sees them) and the transaction wrote none of the table's rows.
-fn selected(t: &Table, rows: &RowKeys, sel: gin::Sel, always: &[u32], exact: bool, ctx: &ExecCtx) -> Result<Option<Found>> {
+fn selected(t: &Table, rows: &RowKeys, sel: gin::Sel, always: &[u32], ctx: &ExecCtx) -> Result<Option<Found>> {
     let gin::Sel::Rows(mut sel) = sel else { return Ok(None) };
     sel.extend_from_slice(always);
     let prefix = index_prefix(t.oid, 0);
     let mut keys: Vec<Vec<u8>> = sel.into_iter().map(|r| rows.key(&prefix, r)).collect();
-    let own = ctx.txn.borrow().writes_in(&prefix, &prefix_end(&prefix))?;
-    let exact = exact && own.is_empty();
-    keys.extend(own.into_iter().filter(|(_, v)| v.is_some()).map(|(k, _)| k));
+    keys.extend(ctx.txn.borrow().writes_in(&prefix, &prefix_end(&prefix))?.into_iter().filter(|(_, v)| v.is_some()).map(|(k, _)| k));
     keys.sort_unstable();
     keys.dedup();
-    Ok(Some(if exact { Found::Exact(keys) } else { Found::Keys(keys) }))
+    Ok(Some(Found::Keys(keys)))
 }
 

@@ -162,13 +162,6 @@ fn bloom_set(bloom: &mut [u8], nbits: FastMod, h: u64) {
     }
 }
 
-/// Whether a user key is a secondary index's entry (a relation's prefix whose index id isn't
-/// 0, `keys::index_prefix`): read by scans of its index's ranges, never looked up alone by
-/// a reader that a bloom filter would spare a block.
-fn index_entry(uk: &[u8]) -> bool {
-    uk.len() >= 8 && uk[..4] != [0; 4] && uk[4..8] != [0; 4]
-}
-
 pub fn sst_path(dir: &Path, id: u64) -> PathBuf {
     dir.join(format!("{id:016x}.sst"))
 }
@@ -183,9 +176,6 @@ pub struct SstWriter {
     index: Vec<(Vec<u8>, u64, u32)>,
     hashes: Vec<u64>,
     last_user_hash: Option<u64>,
-    /// A key not an index entry was added: the file gets a bloom filter (one of index
-    /// entries alone gets none, `index_entry`).
-    rows: bool,
     offset: u64,
     entries: u64,
     first_key: Option<Vec<u8>>,
@@ -204,15 +194,6 @@ impl SstWriter {
     /// A file of a transaction's spilled writes (`txn::spill`): uncompressed, not fsynced.
     pub fn create_temp(dir: &Path, id: u64) -> Result<Self> {
         let mut w = Self::create(dir, id, false)?;
-        w.sync = false;
-        Ok(w)
-    }
-
-    /// A linkable run (`Store::commit_sorted`'s `linked`): compressed as the store's files
-    /// are, not fsynced (linking does). One that no other source holds keys of goes to L1
-    /// as it is when its commit links it, so its entries are written once.
-    pub fn create_run(dir: &Path, id: u64, compress: bool) -> Result<Self> {
-        let mut w = Self::create(dir, id, compress)?;
         w.sync = false;
         Ok(w)
     }
@@ -241,7 +222,6 @@ impl SstWriter {
             index: Vec::new(),
             hashes: Vec::new(),
             last_user_hash: None,
-            rows: false,
             offset: 0,
             entries: 0,
             first_key: None,
@@ -294,7 +274,6 @@ impl SstWriter {
         self.min_ts = self.min_ts.min(ts);
         self.max_ts = self.max_ts.max(ts);
         let h = hash64(user_key(key));
-        self.rows |= !index_entry(user_key(key));
         if self.last_user_hash != Some(h) {
             match &mut self.bloom {
                 Some((b, m)) => bloom_set(b, *m, h),
@@ -355,10 +334,6 @@ impl SstWriter {
         self.offset += index.len() as u64;
 
         let bloom = match self.bloom.take() {
-            // (Index entries are scanned, not read by key: no filter, so no time building one
-            // and no memory holding it. An empty filter passes every key, in builds before
-            // this one too.)
-            _ if !self.rows => Vec::new(),
             Some((b, _)) => b,
             None => {
                 let nbits = (self.hashes.len() * BLOOM_BITS_PER_KEY).max(64);
@@ -446,10 +421,8 @@ const RESTART: usize = 16;
 /// storage key the index key already ends with (`derived`: the table's prefix, then the
 /// key's last bytes before the version). TPC-H SF1's entries take 1.4 GB so, against 2.1 GB
 /// in the files' form. An entry is `shared | unshared << 2 | flags | value field | key
-/// suffix`, the entries' values after all of them (in entry order): a seek walks the keys
-/// alone, a few cache lines, not the rows between them. Flag `F_TS` puts the block's
-/// version after the suffix, `F_DERIVED` makes the value field the length of the key's tail
-/// the value ends with.
+/// suffix | value`: flag `F_TS` puts the block's version after the suffix, `F_DERIVED`
+/// makes the value field the length of the key's tail the value ends with.
 pub struct Block {
     data: Bytes,
     /// Every `RESTART`th entry: its key as a number in the high 32 bits (as
@@ -458,8 +431,6 @@ pub struct Block {
     /// entries: a point read's block is seldom in the CPU's cache, and every restart it
     /// compared was a miss (three quarters of `seek`).
     restarts: Vec<u64>,
-    /// Where each restart's entry's value is (each value follows the one before's).
-    rvals: Vec<u32>,
     common: usize,
     len: usize,
     last_key: Box<[u8]>,
@@ -477,8 +448,6 @@ const F_DERIVED: usize = 2;
 pub struct BlockPos {
     i: usize,
     next: u32,
-    /// Where the value of the entry after `i` starts (if it has one stored).
-    vnext: u32,
     /// `shared` of entry `i`.
     shared: u32,
     key: Vec<u8>,
@@ -607,9 +576,9 @@ impl Block {
         } else if vf == 0 {
             pos.val_len = TOMBSTONE;
         } else {
-            pos.val_off = pos.vnext;
+            pos.val_off = p as u32;
             pos.val_len = (vf - 1) as u32;
-            pos.vnext += pos.val_len;
+            p += vf - 1;
         }
         pos.next = p as u32;
     }
@@ -622,7 +591,6 @@ impl Block {
         }
         let r = i / RESTART;
         pos.next = self.restarts[r] as u32;
-        pos.vnext = self.rvals[r];
         pos.key.clear();
         pos.i = r * RESTART;
         self.read(pos);
@@ -686,7 +654,6 @@ impl Block {
         // The keys from the restart's on, the entries' values left alone until the one
         // found.
         pos.next = self.restarts[r] as u32;
-        pos.vnext = self.rvals[r];
         pos.key.clear();
         pos.i = r * RESTART;
         self.read(pos);
@@ -695,9 +662,9 @@ impl Block {
         }
         let b = &self.data[..];
         let end = ((r + 1) * RESTART).min(self.len);
-        let (mut p, mut v) = (pos.next as usize, pos.vnext);
+        let mut p = pos.next as usize;
         for i in pos.i + 1..end {
-            let at = (p, v);
+            let at = p;
             let (shared, us, vf) = head(b, &mut p);
             let unshared = us >> 2;
             pos.key.truncate(shared);
@@ -706,21 +673,20 @@ impl Block {
                 pos.key.extend_from_slice(&self.ts);
             }
             // (`read` makes this key again from the one it has: their first `shared` bytes
-            // are the same. A whole comparison: a byte loop from the shared prefix on took more
-            // instructions than memcmp saved.)
+            // are the same.)
             if pos.key.as_slice() >= key {
-                (pos.next, pos.vnext) = (at.0 as u32, at.1);
+                pos.next = at as u32;
                 pos.i = i;
                 self.read(pos);
                 return;
             }
             p += unshared;
             if us & F_DERIVED == 0 && vf > 0 {
-                v += (vf - 1) as u32;
+                p += vf - 1;
             }
         }
         // (The next restart's entry: its key is >= `key`, or the block ends.)
-        (pos.next, pos.vnext) = (p as u32, v);
+        pos.next = p as u32;
         pos.i = end - 1;
         self.step(pos);
     }
@@ -755,7 +721,7 @@ impl Block {
 
     /// The bytes it holds (what the block cache counts).
     pub fn mem_bytes(&self) -> usize {
-        self.data.len() + self.restarts.capacity() * 8 + self.rvals.capacity() * 4 + self.last_key.len() + std::mem::size_of::<Block>()
+        self.data.len() + self.restarts.capacity() * 8 + self.last_key.len() + std::mem::size_of::<Block>()
     }
 
     /// Every entry with its key whole, for readers that go backwards or read a block once.
@@ -792,22 +758,9 @@ impl Block {
     /// with a whole key at every `RESTART`th entry (files written before restarts were
     /// share a prefix there).
     fn decode(raw: Bytes) -> Result<Block> {
-        Block::decode_with(&raw, None)
-    }
-
-    /// `decode` of a block of a linked run (`SstMeta::commit_ts`) in the same pass as what
-    /// `relink` makes of it: every key's version the commit's, the run's values plain ones.
-    fn decode_linked(raw: &[u8], ts: u64) -> Result<Block> {
-        Block::decode_with(raw, Some((!ts).to_be_bytes()))
-    }
-
-    fn decode_with(raw: &[u8], link: Option<[u8; 8]>) -> Result<Block> {
         let bad = || internal("bad sst block");
         let mut restarts: Vec<u64> = Vec::with_capacity(raw.len() / 512 + 1);
         let mut out = Vec::with_capacity(raw.len());
-        // (The values, put after every key when the block is done.)
-        let mut vals = Vec::with_capacity(raw.len());
-        let mut rvals: Vec<u32> = Vec::with_capacity(raw.len() / 512 + 1);
         let mut key: Vec<u8> = Vec::new();
         // (The last restart's key.)
         // (Every restart's key, and how much of the first one is stored.)
@@ -816,7 +769,7 @@ impl Block {
         let mut derived = false;
         let (mut pos, mut n) = (0, 0usize);
         while pos < raw.len() {
-            let (shared, unshared, vl) = entry_head(raw, &mut pos)?;
+            let (shared, unshared, vl) = entry_head(&raw, &mut pos)?;
             let end = pos + unshared + vl.saturating_sub(1);
             if shared > key.len() || end > raw.len() {
                 return Err(bad());
@@ -827,27 +780,9 @@ impl Block {
             let common = shared + key[shared..].iter().zip(suffix).take_while(|(a, b)| a == b).count();
             key.truncate(shared);
             key.extend_from_slice(suffix);
-            let mut value = (vl > 0).then(|| &raw[pos + unshared..end]);
+            let value = (vl > 0).then(|| &raw[pos + unshared..end]);
             pos = end;
             let klen = key.len();
-            if let Some(v) = link {
-                // (User keys are prefix-free: what two keys share ends before either's
-                // version, so no later key's shared bytes reach the version set here.)
-                if klen < 8 || common > klen - 8 {
-                    return Err(bad());
-                }
-                key[klen - 8..].copy_from_slice(&v);
-                // (A run's value: a tag (1: present, 2: a command id follows), then it.)
-                value = match value {
-                    Some([tag, rest @ ..]) if tag & 1 != 0 => Some(match tag & 2 {
-                        0 => rest,
-                        _ => rest.get(4..).unwrap_or_default(),
-                    }),
-                    _ => None,
-                };
-            }
-            // (The value field of the value kept: a linked run's has lost its tag.)
-            let vl = value.map_or(0, |v| v.len() + 1);
             let ts = *ts.get_or_insert_with(|| {
                 <[u8; 8]>::try_from(&key[klen.saturating_sub(8)..]).unwrap_or([0xFF; 8])
             });
@@ -864,7 +799,6 @@ impl Block {
             }
             let share = if n.is_multiple_of(RESTART) {
                 restarts.push(out.len() as u64);
-                rvals.push(vals.len() as u32);
                 rkeys.extend_from_slice(&key);
                 rends.push(rkeys.len());
                 if n == 0 {
@@ -879,18 +813,12 @@ impl Block {
             put_varint(&mut out, tail.unwrap_or(vl) as u64);
             out.extend_from_slice(&key[share..ukey]);
             if let (Some(v), None) = (value, tail) {
-                vals.extend_from_slice(v);
+                out.extend_from_slice(v);
             }
             n += 1;
         }
-        // (The values after every key: `vbase`.)
-        let vbase = out.len() as u32;
-        out.reserve_exact(vals.len());
-        out.extend_from_slice(&vals);
         out.shrink_to_fit();
         restarts.shrink_to_fit();
-        rvals.iter_mut().for_each(|v| *v += vbase);
-        rvals.shrink_to_fit();
         let rkey_at = |i: usize| &rkeys[if i == 0 { 0 } else { rends[i - 1] }..rends[i]];
         let common = match rends.len() {
             0 => 0,
@@ -905,7 +833,6 @@ impl Block {
         Ok(Block {
             data: Bytes::from(out),
             restarts,
-            rvals,
             common,
             len: n,
             last_key: key.as_slice().into(),
@@ -981,11 +908,9 @@ pub fn set_ts(key: &mut [u8], ts: u64) {
     }
 }
 
-/// A block of a linked run (`SstMeta::commit_ts`) in the store's format (the reference
-/// `Block::decode_linked` is tested against): every key's version
+/// A block of a linked run (`SstMeta::commit_ts`) in the store's format: every key's version
 /// is the commit's, and the run's values (a tag, the command id, the value: `txn::spill`)
 /// are plain ones, a delete a tombstone. (A linked run has one version of each key.)
-#[cfg(test)]
 fn relink(raw: &[u8], ts: u64) -> Result<Bytes> {
     let mut out = Vec::with_capacity(raw.len());
     let (mut key, mut prev) = (Vec::new(), Vec::new());
@@ -1104,15 +1029,6 @@ impl SstReader {
         bloom_bits(h, self.bloom_mod).all(|bit| self.bloom[bit / 8] & (1 << (bit % 8)) != 0)
     }
 
-    /// Whether the file's first block is compressed (what the writer did with them all,
-    /// but for blocks compression didn't shrink).
-    pub fn first_block_compressed(&self) -> Result<bool> {
-        let Some((off, _)) = self.index.at.first() else { return Ok(false) };
-        let mut b = [0u8; 1];
-        self.file.read_exact_at(&mut b, *off)?;
-        Ok(b[0] == 1)
-    }
-
     pub fn block_count(&self) -> usize {
         self.index.at.len()
     }
@@ -1158,10 +1074,11 @@ impl SstReader {
             }
             _ => return Err(internal("unknown block compression")),
         };
-        let block = Arc::new(match self.meta.commit_ts {
-            Some(ts) => Block::decode_linked(&raw, ts)?,
-            None => Block::decode(raw)?,
-        });
+        let raw = match self.meta.commit_ts {
+            Some(ts) => relink(&raw, ts)?,
+            None => raw,
+        };
+        let block = Arc::new(Block::decode(raw)?);
         if fill && !super::in_read_once() {
             let size = block.mem_bytes();
             // (A bulk read's block takes only room the cache has free: it evicts nothing.)
@@ -1318,31 +1235,6 @@ mod tests {
         }
     }
 
-    /// A file of index entries alone has no bloom filter (every key passes); one with rows
-    /// has one that passes every key it holds.
-    #[test]
-    fn index_entry_files_have_no_bloom_filter() {
-        let dir = tempfile::tempdir().unwrap();
-        let cache = BlockCache::new(1 << 20);
-        let key = |index: u8, i: u32| {
-            let mut k = vec![0, 0, 0x40, 0x41, 0, 0, 0, index];
-            k.extend_from_slice(&i.to_be_bytes());
-            k.extend_from_slice(&(!5u64).to_be_bytes());
-            k
-        };
-        for (id, index) in [(1, 3u8), (2, 0)] {
-            let mut w = SstWriter::create(dir.path(), id, true).unwrap();
-            for i in 0..5000 {
-                w.add(&key(index, i), Some(&b"v"[..])).unwrap();
-            }
-            let r = SstReader::open(dir.path(), w.finish().unwrap(), cache.clone()).unwrap();
-            assert_eq!(r.bloom.is_empty(), index != 0);
-            assert!((0..5000).all(|i| r.may_contain(user_key(&key(index, i)))));
-            let passed = (5000..15000).filter(|&i| r.may_contain(user_key(&key(index, i)))).count();
-            assert!(if index != 0 { passed == 10000 } else { passed < 500 }, "{passed}");
-        }
-    }
-
     /// The bloom filter's bits must not change with how they are computed: files written
     /// before are read with the same bits.
     #[test]
@@ -1474,41 +1366,6 @@ mod tests {
             assert_eq!(pos.index(), 0);
             b.seek(&[0xFF], &mut pos);
             assert_eq!(pos.index(), b.len());
-        }
-    }
-
-    /// A linked run's block decoded in one pass reads as the relinked block does.
-    #[test]
-    fn linked_blocks_decode_as_relinked() {
-        let ents: Vec<(Vec<u8>, Option<Vec<u8>>)> = (0..200u32)
-            .map(|i| {
-                let mut k = vec![0, 0, 0x40, 0x41, 0, 0, 0, 0, 0x20, (i / 40) as u8, (i % 40) as u8];
-                k.extend_from_slice(&(!5u64).to_be_bytes());
-                let v = match i % 5 {
-                    0 => Some(vec![1, b'a', (i % 256) as u8]),
-                    1 => Some([&[3u8, 0, 0, 0, 9][..], b"row", &[i as u8]].concat()),
-                    2 => Some(vec![0]),
-                    3 => None,
-                    _ => Some(vec![3, 0, 0, 0, 1]),
-                };
-                (k, v)
-            })
-            .collect();
-        for restart in [RESTART, 3] {
-            let raw = block_bytes(&ents, restart);
-            let one = Block::decode_linked(&raw, 77).unwrap();
-            let two = Block::decode(relink(&raw, 77).unwrap()).unwrap();
-            assert_eq!(one.len(), two.len());
-            let (mut a, mut b) = (BlockPos::default(), BlockPos::default());
-            one.at(0, &mut a);
-            two.at(0, &mut b);
-            while a.index() < one.len() {
-                assert_eq!(a.key(), b.key());
-                assert_eq!(key_ts(a.key()), 77);
-                assert_eq!(one.value_ref(&a), two.value_ref(&b));
-                one.step(&mut a);
-                two.step(&mut b);
-            }
         }
     }
 }

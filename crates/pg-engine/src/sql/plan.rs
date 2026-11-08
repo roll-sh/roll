@@ -1098,6 +1098,9 @@ pub struct InsertPlan {
 pub enum CopyRow {
     Values(Vec<crate::types::Value>),
     Exprs(Vec<Expr>),
+    /// A line ON_ERROR ignore skipped: its defaults are evaluated as its place in the data
+    /// comes (NextCopyFrom computes them before CopyFrom drops the row), nothing goes in.
+    Skipped(Vec<Expr>),
 }
 
 /// COPY FROM's input: the table, and its rows as they are read (`CopyFromErrorCallback`).

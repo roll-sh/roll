@@ -270,10 +270,6 @@ pub fn builds(cx: &Ctx) {
     let only: String = cx.opt("only", String::new());
     let mut c = cx.conn();
     let _ = c.simple("DROP INDEX IF EXISTS ib_x");
-    // (Both servers build with the reference's server setting, `run.sh pg-start`'s 256 MB:
-    // it decides how many workers a parallel build gets.)
-    let mwm: String = cx.opt("mwm", "256MB".to_string());
-    must(c.simple(&format!("SET maintenance_work_mem = '{mwm}'")), "set maintenance_work_mem");
     for (name, def) in BUILDS {
         if !only.is_empty() && !only.split(',').any(|o| o == *name) {
             continue;

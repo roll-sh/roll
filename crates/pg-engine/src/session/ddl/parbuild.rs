@@ -5,9 +5,6 @@
 //! index's duplicates are found merging them, the one reported the serial build's (the key
 //! whose second row comes first in the table's order). Only for an index of plain columns
 //! without a predicate on a table too big to model (`Ddl::measures_in_build`).
-//!
-//! BRIN and GIN builds of such a table measure it the same way (`Ddl::measure_am_parallel`:
-//! no entries to write, each participant's part of the access method's measure merged).
 
 use super::Ddl;
 use super::vacuum::RowMeasure;
@@ -268,31 +265,6 @@ pub(super) enum ParBuilt {
     Modelled { rows: usize, tuples: usize, keys: Vec<(Key, Vec<u8>)> },
 }
 
-/// Where a parallel measure's rows go in the heap, as the serial measure places them
-/// (`measure_rows_with`): by the heap's kept measure, `per` rows a page; or the first rows as
-/// sized and packed (`sample`) and the rest from page `first` on at their density, up to the
-/// estimate's last page.
-enum Places {
-    Kept { per: u64 },
-    Sampled { sample: Vec<(u32, u16)>, first: u32, per: u64, last: u32 },
-}
-
-impl Places {
-    /// The TID of the table's row `i` (from 0, in the table's order).
-    fn tid(&self, i: u64) -> (u32, u16) {
-        match self {
-            Places::Kept { per } => ((i / per) as u32, (i % per + 1) as u16),
-            Places::Sampled { sample, first, per, last } => match sample.get(i as usize) {
-                Some(&t) => t,
-                None => {
-                    let j = i - sample.len() as u64;
-                    ((first + (j / per) as u32).min(*last), (j % per + 1) as u16)
-                }
-            },
-        }
-    }
-}
-
 /// Gives the reserved workers back to the pool when the build ends.
 struct Release(usize);
 
@@ -320,6 +292,7 @@ impl Ddl<'_, '_> {
             return Ok(None);
         };
         let start = crate::storage::keys::index_prefix(t.oid, 0);
+        let end = crate::storage::keys::prefix_end(&start);
         let range_start = crate::storage::keys::index_prefix(t.oid, ix.id);
         let range_end = crate::storage::keys::prefix_end(&range_start);
         if !self.ctx.txn.borrow().index_runs_direct(&range_start, &range_end)? {
@@ -329,8 +302,26 @@ impl Ddl<'_, '_> {
         let release = Release(crate::exec::parscan::reserve_workers(workers, pool));
         crate::exec::parscan::count_index_build();
         let got = release.0;
-        let Some(chunks) = self.build_chunks(t, got)? else {
-            return Ok(None);
+        let chunks = {
+            let txn = self.ctx.txn.borrow();
+            let snap = txn.snap();
+            let lo = txn.scan_snap(&start, &end, &snap).raw().next().transpose()?.map(|(k, _)| k);
+            let hi = txn.scan_rev(&start, &end, Some(&snap)).next().transpose()?.map(|(k, _)| k);
+            let (Some(lo), Some(hi)) = (lo, hi) else {
+                return Ok(None);
+            };
+            let fixed = (t.has_rowid() && lo.len() == hi.len()).then_some(lo.len());
+            let cuts = crate::exec::parscan::split_keys(&lo, &hi, (got + 1) * 8);
+            let cuts = crate::exec::scan::keyed_cuts(&txn, cuts, &start, &end, &snap, fixed)?;
+            let mut bounds = vec![start.clone()];
+            bounds.extend(cuts);
+            bounds.push(end.clone());
+            let bulk = self.ctx.sess.db.store.bulk_range(&start, &end);
+            bounds
+                .windows(2)
+                .enumerate()
+                .map(|(i, w)| (i, crate::exec::parscan::chunk(txn.scan_snap(&w[0], &w[1], &snap), bulk)))
+                .collect::<VecDeque<_>>()
         };
         let virt: Vec<usize> = t.columns.iter().enumerate().filter(|(_, c)| c.virtual_gen).map(|(i, _)| i).collect();
         let mut needed = std::collections::HashSet::new();
@@ -421,210 +412,6 @@ impl Ddl<'_, '_> {
         self.put_runs(&start, sorted)?;
         progress.loaded(tuples as u64);
         Ok(Some(ParBuilt::Measured(RowMeasure::new(rows, live, vec![(ix.oid, pages, tuples as f64)]))))
-    }
-
-    /// `t`'s rows cut by key into chunks for `got` workers and the leader, in the table's
-    /// order, read at the transaction's view now (None: no rows).
-    fn build_chunks(&self, t: &Table, got: usize) -> Result<Option<VecDeque<(usize, crate::exec::parscan::Chunk)>>> {
-        let start = crate::storage::keys::index_prefix(t.oid, 0);
-        let end = crate::storage::keys::prefix_end(&start);
-        let txn = self.ctx.txn.borrow();
-        let snap = txn.snap();
-        let lo = txn.scan_snap(&start, &end, &snap).raw().next().transpose()?.map(|(k, _)| k);
-        let hi = txn.scan_rev(&start, &end, Some(&snap)).next().transpose()?.map(|(k, _)| k);
-        let (Some(lo), Some(hi)) = (lo, hi) else {
-            return Ok(None);
-        };
-        let fixed = (t.has_rowid() && lo.len() == hi.len()).then_some(lo.len());
-        let cuts = crate::exec::parscan::split_keys(&lo, &hi, (got + 1) * 8);
-        let cuts = crate::exec::scan::keyed_cuts(&txn, cuts, &start, &end, &snap, fixed)?;
-        let mut bounds = vec![start.clone()];
-        bounds.extend(cuts);
-        bounds.push(end.clone());
-        let bulk = self.ctx.sess.db.store.bulk_range(&start, &end);
-        Ok(Some(
-            bounds
-                .windows(2)
-                .enumerate()
-                .map(|(i, w)| (i, crate::exec::parscan::chunk(txn.scan_snap(&w[0], &w[1], &snap), bulk)))
-                .collect(),
-        ))
-    }
-
-    /// The parallel build of a BRIN or GIN index `ix` over `t`, a table too big to model, with
-    /// up to `workers` workers (PostgreSQL 18's `_brin_parallel_*` / `_gin_parallel_*`): the
-    /// leader and the workers read chunks of the rows, each measuring its part
-    /// (`am_measure::AmPlan`), merged once every chunk's rows are counted (a row's TID is the
-    /// serial measure's for its place in the table: `measure_rows_with`). None: not for this
-    /// index or table (the serial build runs).
-    pub(super) fn measure_am_parallel(
-        &self,
-        t: &Table,
-        ix: &Index,
-        bix: &BoundIndex,
-        workers: usize,
-        progress: &IndexProgress,
-    ) -> Result<Option<ParBuilt>> {
-        use super::am_measure::{AmPart, AmPlan, merged_pages};
-        let types: Vec<DataType> = bix.keys.iter().map(|k| k.ty()).collect();
-        let mwm_kb = {
-            let s = self.ctx.sess.settings.borrow();
-            s.get_str("maintenance_work_mem").and_then(|v| v.trim().parse::<usize>().ok()).unwrap_or(65536)
-        };
-        let db = &self.ctx.sess.db;
-        let Ok(Some(blocks)) = crate::exec::sizing::heap_blocks(t, self.ctx) else {
-            return Ok(None);
-        };
-        if !crate::exec::sizing::is_estimated(t.oid, db) {
-            return Ok(None);
-        }
-        let Some(plan) = AmPlan::of(bix, &types, mwm_kb, workers + 1) else {
-            return Ok(None);
-        };
-        // (Where each row goes in the heap, as the serial measure places it: by the measure
-        // kept while nothing changed, else the first rows sized and packed and the rest spread
-        // at their density over the heap's estimated pages.)
-        let all_types: Vec<DataType> = t.columns.iter().map(|c| c.ty.clone()).collect();
-        let virt: Vec<usize> = t.columns.iter().enumerate().filter(|(_, c)| c.virtual_gen).map(|(i, _)| i).collect();
-        let virt_mask: Vec<bool> = (0..t.columns.len()).map(|i| virt.contains(&i)).collect();
-        let layout = crate::txn::unchanged::layout_of(&all_types, &virt_mask);
-        let kept = self.kept_live(t, layout, self.ctx.txn.borrow().snapshot_ts());
-        let start = crate::storage::keys::index_prefix(t.oid, 0);
-        let end = crate::storage::keys::prefix_end(&start);
-        let places = match kept {
-            Some((live, rows)) => Places::Kept { per: rows.div_ceil(live.max(1) as usize).max(1) as u64 },
-            None => {
-                let mut packer = relsize::HeapPacker::default();
-                let (mut sample, mut bytes) = (Vec::with_capacity(super::vacuum::SIZED_SAMPLE), 0usize);
-                let scan = self.ctx.txn.borrow().scan(&start, &end);
-                for r in scan.take(super::vacuum::SIZED_SAMPLE) {
-                    let (_, row) = r?;
-                    let size = self.stored_tuple_size(t, &all_types, &virt, &virt_mask, &row)?;
-                    packer.push(size);
-                    bytes += size;
-                    sample.push(packer.last());
-                }
-                if sample.len() < super::vacuum::SIZED_SAMPLE {
-                    return Ok(None);
-                }
-                let mean = (bytes / super::vacuum::SIZED_SAMPLE).max(1);
-                Places::Sampled {
-                    sample,
-                    first: packer.pages() as u32,
-                    per: (relsize::HEAP_PAGE_ROOM / mean).clamp(1, relsize::MAX_HEAP_TUPLES) as u64,
-                    last: blocks.max(1) - 1,
-                }
-            }
-        };
-        let pool = self.ctx.sess.settings.borrow().get_str("max_parallel_workers").and_then(|v| v.trim().parse().ok()).unwrap_or(8);
-        let release = Release(crate::exec::parscan::reserve_workers(workers, pool));
-        let got = release.0;
-        let Some(chunks) = self.build_chunks(t, got)? else {
-            return Ok(None);
-        };
-        crate::exec::parscan::count_index_build();
-        let mut needed = std::collections::HashSet::new();
-        crate::exec::sizing::index_columns(bix, &mut needed);
-        let need: Vec<bool> = (0..t.columns.len()).map(|i| needed.contains(&i)).collect();
-        let cols = plan.columns();
-        // (GIN array_ops' index row size check of an array of a variable-size type, on each
-        // row's keys: `rowsize::BuildSizes`.)
-        let form = ix.method == "gin" && matches!(&types[0], DataType::Array(e) if relsize::type_layout(e).0 <= 0);
-        let fmt = self.ctx.fmt().clone();
-        let chunks = std::sync::Mutex::new(chunks);
-        let stop = AtomicBool::new(false);
-        let done = AtomicU64::new(0);
-        // A participant's part: its measure, (chunk, rows) of the chunks it read, and the
-        // first oversized GIN key it met.
-        type Took = (AmPart, Vec<(usize, u64)>, Option<crate::exec::rowsize::GinFormError>);
-        let run = |check: &dyn Fn() -> Result<()>| -> Result<Took> {
-            let (mut part, mut counts, mut oversized) = (AmPart::default(), Vec::new(), None);
-            loop {
-                let next = chunks.lock().unwrap().pop_front();
-                let Some((c, chunk)) = next else { break };
-                let mut n = 0u32;
-                for r in chunk {
-                    if n.is_multiple_of(1024) {
-                        if stop.load(Ordering::Relaxed) {
-                            return Ok((part, counts, oversized));
-                        }
-                        check()?;
-                        if n > 0 {
-                            progress.scanned_now(done.fetch_add(1024, Ordering::Relaxed) + 1024);
-                        }
-                    }
-                    let (_, bytes) = r?;
-                    let row = crate::exec::scan::decode_table_row_need(t, &bytes, &need)?;
-                    if form
-                        && let Some(e) = crate::exec::rowsize::gin_form_error_with(ix, true, std::slice::from_ref(&row[cols[0]]), &fmt)
-                        && oversized.as_ref().is_none_or(|o: &crate::exec::rowsize::GinFormError| e.precedes(o))
-                    {
-                        oversized = Some(e);
-                    }
-                    part.row(&plan, c, n, &row);
-                    n += 1;
-                }
-                counts.push((c, n as u64));
-            }
-            Ok((part, counts, oversized))
-        };
-        let took: Vec<Result<Took>> = std::thread::scope(|s| {
-            let (run, stop) = (&run, &stop);
-            let handles: Vec<_> = (0..got)
-                .filter_map(|i| {
-                    std::thread::Builder::new()
-                        .name(format!("roll-build-{i}"))
-                        .spawn_scoped(s, move || {
-                            let r = run(&|| Ok(()));
-                            if r.is_err() {
-                                stop.store(true, Ordering::Relaxed);
-                            }
-                            r
-                        })
-                        .ok()
-                })
-                .collect();
-            let lead = run(&|| self.ctx.check());
-            if lead.is_err() {
-                stop.store(true, Ordering::Relaxed);
-            }
-            let mut all = vec![lead];
-            all.extend(handles.into_iter().map(|h| h.join().unwrap_or_else(|_| Err(crate::error::internal("index build worker panicked")))));
-            all
-        });
-        drop(release);
-        let (mut parts, mut counts, mut oversized) = (Vec::new(), Vec::new(), None);
-        for r in took {
-            let (p, c, o) = r?;
-            if let Some(o) = o
-                && oversized.as_ref().is_none_or(|m| o.precedes(m))
-            {
-                oversized = Some(o);
-            }
-            parts.push(p);
-            counts.extend(c);
-        }
-        if let Some(e) = oversized {
-            return Err(e.error);
-        }
-        counts.sort_unstable();
-        // (Each chunk's first row's place in the table.)
-        let mut starts = vec![0u64; counts.last().map_or(0, |c| c.0 + 1)];
-        let mut rows = 0u64;
-        for (c, n) in counts {
-            starts[c] = rows;
-            rows += n;
-        }
-        crate::exec::pgstat::count_returned(self.ctx, t.oid, rows as i64);
-        progress.scanned_all(rows);
-        let live = match kept {
-            Some((live, _)) => live,
-            None => blocks as i32,
-        };
-        let pages = merged_pages(plan, bix, &types, parts, &starts, &|i| places.tid(i), live as u32);
-        progress.loaded(rows);
-        let measure = super::vacuum::RowMeasure::with_estimate(rows as usize, live, kept.is_none(), vec![(ix.oid, pages, rows as f64)]);
-        Ok(Some(ParBuilt::Measured(measure)))
     }
 
     /// The participants' sorted entries in as linked runs (`Txn::put_index_runs`).

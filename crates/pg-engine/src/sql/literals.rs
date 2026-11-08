@@ -418,28 +418,6 @@ pub fn recording<T>(f: impl FnOnce() -> T) -> (T, Vec<SizeRead>) {
     (r, reads)
 }
 
-/// `f`, and what it read, which an enclosing `recording` sees too.
-#[cfg(debug_assertions)]
-pub fn observing<T>(f: impl FnOnce() -> T) -> (T, Vec<SizeRead>) {
-    let (r, reads) = recording(f);
-    READS.with(|x| {
-        if let Some(v) = x.borrow_mut().as_mut() {
-            v.extend(reads.iter().cloned());
-        }
-    });
-    (r, reads)
-}
-
-/// Debug builds' checks that compute a cost twice: whether the second computation saw what
-/// the first did, the catalog (`cat`, its statistics) and the relation sizes it read
-/// (`reads`). A concurrent writer (a logical apply worker, autovacuum's ANALYZE) may change
-/// them in between, and then the two costs may differ; so may a column's current minimum or
-/// maximum read from its rows (`Data`), which can't be read again to compare.
-#[cfg(debug_assertions)]
-pub fn unchanged_since(ctx: &crate::exec::ExecCtx, cat: &std::sync::Arc<crate::catalog::Catalog>, reads: &[SizeRead]) -> bool {
-    std::sync::Arc::ptr_eq(cat, &ctx.catalog()) && reads.iter().all(|r| r.holds(ctx))
-}
-
 impl SizeRead {
     /// Whether reading it again gives what it gave.
     pub fn holds(&self, ctx: &crate::exec::ExecCtx) -> bool {

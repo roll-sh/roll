@@ -940,8 +940,9 @@ pub fn hold_inserts(ctx: &ExecCtx) {
     ctx.txn.borrow_mut().pgstat.held.get_or_insert_with(Vec::new);
 }
 
-/// Hold a COPY heap insertion until its buffer flushes. Temporary tables count at once.
-fn hold_insert(ctx: &ExecCtx, t: &crate::catalog::Table) -> bool {
+/// A stored row's pg_stat counts (`store_inserted`): held while a multi-insert COPY holds
+/// them (not a temporary table's, whose I/O follows its model row by row).
+pub fn count_stored(ctx: &ExecCtx, t: &crate::catalog::Table) {
     if !t.temporary {
         let mut txn = ctx.txn.borrow_mut();
         if let Some(h) = txn.pgstat.held.as_mut() {
@@ -949,25 +950,11 @@ fn hold_insert(ctx: &ExecCtx, t: &crate::catalog::Table) -> bool {
                 Some(e) => e.1 += 1,
                 None => h.push((t.oid, 1)),
             }
-            return true;
+            return;
         }
     }
-    false
-}
-
-/// An index violation's heap insertion waits for the COPY buffer's flush too.
-pub fn count_failed_insert(ctx: &ExecCtx, t: &crate::catalog::Table) {
-    if !hold_insert(ctx, t) {
-        count_insert(ctx, t.oid, 1);
-    }
-}
-
-/// A stored row's counts and I/O (`store_inserted`), held until the COPY buffer flushes.
-pub fn count_stored(ctx: &ExecCtx, t: &crate::catalog::Table) {
-    if !hold_insert(ctx, t) {
-        count_insert(ctx, t.oid, 1);
-        io_insert(ctx, t, 1, "normal");
-    }
+    count_insert(ctx, t.oid, 1);
+    io_insert(ctx, t, 1, "normal");
 }
 
 /// The rows `count_stored` held since `hold_inserts`, per table; holding stops.

@@ -1952,17 +1952,12 @@ impl Session {
                     // (A lone scan's cost is its access path's, with no Gather: no tree.)
                     let (t, found) = match crate::sql::paths::planned_total(&bq.plan, ctx, planning) {
                         Some(t) => {
-                            // (Debug builds: it is EXPLAIN's, when read now, unless a concurrent
-                            // writer changed the sizes or statistics in between: then reading it
-                            // once more gives another cost. The planner's own is checked as the
-                            // plan is made, `paths::check_planned_total`.)
+                            // (Debug builds: it is EXPLAIN's, when read now; the planner's
+                            // own is checked as the plan is made, `paths::check_planned_total`.)
                             #[cfg(debug_assertions)]
                             if !planning {
                                 let (e, g) = crate::sql::explain::total_and_gathers(&bq.plan, ctx);
-                                assert!(
-                                    (g.is_empty() && e == t) || crate::sql::paths::planned_total(&bq.plan, ctx, false) != Some(t),
-                                    "a lone scan's cost {t} isn't EXPLAIN's {e} ({g:?})"
-                                );
+                                assert!(g.is_empty() && e == t, "a lone scan's cost {t} isn't EXPLAIN's {e} ({g:?})");
                             }
                             (t, Vec::new())
                         }
