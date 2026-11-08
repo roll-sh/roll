@@ -2715,6 +2715,146 @@ between rounds (select-only 42.6k / 33.9k base, 34.6k / 39.0k new).
   runs agree, statistics included. `big_tables` `deferred_entry_deletes`: inline over a
   table too big to model.
 
+## Executor, round 11 (agent 189)
+
+Historical records only. The recovery audit below limits these observations; they are not
+a current-source performance claim.
+
+HANDOFF "Executor, round 11". **base** is origin's head `19df462eb` (167's step 2 included);
+**new** is this round on top of it. Both are dist builds (fat LTO, line tables) of the same
+checkout, one after the other into one target directory, copied aside before the next.
+
+How it was run: as round 10 (each server in its own container on CPUs 4-7, the client on
+12-13 and 18-19 at nice 19; PostgreSQL 18.6 with the bench settings and host network; the
+engine with `--cache-mb 2048` through `run.sh ENGINE_DOCKER=1`; TPC-H SF1 from
+`bench tpch-load --sf 1` on both). A round is a fresh engine, a warm-up pass, then 3 measured
+passes per query (their median); rounds interleaved PostgreSQL, new, base, then base, new,
+PostgreSQL; the table is the median of 3 rounds. The machine ran at load 14-32.
+
+### TPC-H SF1 baseline on origin's head (base only: PostgreSQL, base, three rounds)
+
+| | q01 | q02 | q03 | q04 | q05 | q06 | q07 | q08 | q09 | q10 | q11 | q12 | q13 | q14 | q15 | q16 | q17 | q18 | q19 | q20 | q21 | q22 | sum |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| PostgreSQL, s | 1.76 | 0.19 | 0.36 | 0.16 | 0.29 | 0.36 | 0.35 | 0.16 | 1.23 | 0.63 | 0.09 | 0.49 | 0.67 | 0.17 | 0.30 | 0.23 | 0.84 | 2.50 | 0.06 | 0.11 | 0.51 | 0.10 | 11.55 |
+| engine, s | 0.94 | 0.91 | 0.59 | 0.32 | 0.49 | 0.71 | 0.60 | 0.34 | 1.79 | 0.70 | 0.23 | 0.85 | 1.29 | 0.45 | 0.45 | 0.51 | 0.88 | 1.92 | 0.13 | 0.40 | 0.75 | 0.37 | 15.65 |
+| gap, s | -0.82 | +0.72 | +0.22 | +0.17 | +0.20 | +0.35 | +0.25 | +0.18 | +0.56 | +0.07 | +0.15 | +0.36 | +0.62 | +0.28 | +0.16 | +0.28 | +0.05 | -0.58 | +0.07 | +0.29 | +0.24 | +0.28 | +4.10 |
+| PostgreSQL CPU, s | 5.14 | 0.30 | 1.03 | 0.43 | 0.85 | 1.01 | 1.02 | 0.48 | 3.13 | 1.68 | 0.09 | 1.49 | 1.75 | 0.42 | 0.83 | 0.53 | 0.90 | 6.41 | 0.16 | 0.10 | 1.42 | 0.26 | 29.43 |
+| engine CPU, s | 2.77 | 0.91 | 1.49 | 0.88 | 1.03 | 1.39 | 1.65 | 0.64 | 5.19 | 1.74 | 0.24 | 2.73 | 3.62 | 0.62 | 1.25 | 0.80 | 1.96 | 6.40 | 0.24 | 0.40 | 2.13 | 0.50 | 38.58 |
+
+- Engine/PostgreSQL: wall 1.35x (15.65 s against 11.55 s; round 10 measured 29-31 s before 167's
+  step 2), CPU 1.31x, peak 1,776-1,795 MB against PostgreSQL's 1,650 MB (round 10's figure).
+- q01 and q18 are ahead of PostgreSQL, q10 and q17 within 10%. All 22 result hashes equal
+  PostgreSQL's.
+- The five largest gaps: q02, q13, q09, q12, q06.
+
+### Where the five largest gaps went (LBR call stacks, `perf record --call-graph lbr`)
+
+DWARF unwinding in the perf helper container leaves the callers of the dist binary as raw
+addresses (the PIE relocation error `tools/bench/results/2026-11-02-planning-cpu` documents);
+this CPU (Xeon W-2295) records call stacks in its last-branch records instead, 32 frames deep
+and without inlined frames.
+
+- **q02** (serial in both): the Hash's inner nested loop, 1,984 index scans of partsupp by
+  `partsupp_ps_suppkey_idx` of 80 rows each, 57% (0.39 ms a loop against PostgreSQL's 0.057
+  under EXPLAIN ANALYZE): `Scan::position` / `Merge::min` / `Cursor::fill` 22%, `Block::seek`
+  13%. The hash join's 8 batches (work_mem 4 MB, as PostgreSQL's) 23%: the spilled rows
+  decoded again (`spill::RowReader`, `decode_row`) and each batch's `Built::new` (its two-key
+  map of boxed values, numeric keys hashed) and drop. The correlated SubPlan 8%.
+- **q13**: the executor's thread merging the workers' parts was the busiest thread (36% of the
+  samples against 21% for each worker): a part per chunk of 7,800 orders holds ~7,600 groups
+  of the 150,000 customers, so 1.4M group merges, each a key hashed and compared through the
+  group's vector, its states' vector and the boxed accumulator; then the 150,000 groups sorted
+  through `compare_values`.
+- **q09**: the executor's thread made every joined row twice through two projections that only
+  reorder the joins' 50 columns, then the grouping's keys and amount (25% of the samples): the
+  grouping presorted its input, as its `EXTRACT(year FROM o_orderdate)` key, written in SQL
+  syntax, was not seen as a whole number; the workers' lookups (orders and supplier by key,
+  320,000 each) are point fetches (`Block::seek` 18%).
+- **q12**: the engine's plan is a merge join over a full `orders_pkey` index scan (1.5M heap
+  fetches, `get_versions_with` 23% of the samples) where PostgreSQL's (and EXPLAIN's) is a
+  Parallel Hash Join over two Parallel Seq Scans (planner).
+- **q06**: the bitmap scan run as a sequential scan (`dense_bitmap_scan`) counts the bitmap's
+  973,000 index entries on the executor's thread before the workers start (28% of the
+  samples, 0.39 s of 0.70): each entry made a row of 16 values and evaluated the conditions
+  through `eval`.
+
+### TPC-H SF1, base against new (three interleaved rounds)
+
+| | q01 | q02 | q03 | q04 | q05 | q06 | q07 | q08 | q09 | q10 | q11 | q12 | q13 | q14 | q15 | q16 | q17 | q18 | q19 | q20 | q21 | q22 | sum |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| PostgreSQL, s | 1.76 | 0.22 | 0.43 | 0.21 | 0.33 | 0.37 | 0.37 | 0.20 | 1.36 | 0.70 | 0.08 | 0.58 | 0.79 | 0.15 | 0.33 | 0.24 | 0.83 | 2.33 | 0.08 | 0.11 | 0.52 | 0.11 | 12.10 |
+| base, s | 1.01 | 0.97 | 0.65 | 0.33 | 0.53 | 0.78 | 0.71 | 0.43 | 1.92 | 0.73 | 0.24 | 0.89 | 1.36 | 0.46 | 0.50 | 0.50 | 0.89 | 2.21 | 0.11 | 0.43 | 0.79 | 0.40 | 16.85 |
+| new, s | 0.99 | 0.92 | 0.62 | 0.34 | 0.49 | **0.54** | **0.65** | **0.39** | **1.41** | 0.70 | 0.23 | 1.00 | **0.95** | **0.40** | **0.43** | **0.41** | 0.85 | 2.09 | 0.12 | 0.39 | 0.81 | **0.30** | **15.01** |
+| PostgreSQL CPU, s | 5.38 | 0.31 | 1.17 | 0.45 | 0.91 | 0.98 | 1.08 | 0.51 | 3.26 | 1.76 | 0.08 | 1.60 | 1.91 | 0.41 | 0.83 | 0.55 | 0.90 | 6.18 | 0.17 | 0.11 | 1.42 | 0.30 | 30.27 |
+| base CPU, s | 3.01 | 1.05 | 1.68 | 0.92 | 1.12 | 1.56 | 2.03 | 0.74 | 5.67 | 1.73 | 0.25 | 2.91 | 3.62 | 0.62 | 1.33 | 0.89 | 1.96 | 7.18 | 0.22 | 0.42 | 2.30 | 0.51 | 41.72 |
+| new CPU, s | 2.95 | 0.92 | 1.61 | 0.91 | 1.00 | 1.26 | 1.67 | 0.69 | 3.85 | 1.72 | 0.24 | 3.09 | 2.72 | 0.57 | 1.22 | 0.76 | 1.75 | 6.83 | 0.22 | 0.41 | 2.28 | 0.72 | 37.39 |
+
+- Wall 16.85 -> 15.01 s (-11%), CPU 41.7 -> 37.4 s (-10%); engine/PostgreSQL 1.39x -> 1.24x
+  (wall), 1.38x -> 1.24x (CPU). Peak 1,759-1,775 MB against base's 1,779-1,789.
+- All 22 result hashes equal PostgreSQL's in every round of both builds.
+- q09 1.92 -> 1.41 s (CPU 5.67 -> 3.85: aggregated in the workers), q13 1.36 -> 0.95 s,
+  q06 0.78 -> 0.54 s, q22 0.40 -> 0.30 s (CPU 0.51 -> 0.72: both of its customer scans now
+  run in the workers), q16 0.50 -> 0.41 s, q07 0.71 -> 0.65 s, q08 0.43 -> 0.39 s. q14 -12%
+  and q15 -14% read lineitem through l_shipdate bitmap scans, whose entries a kernel checks
+  now (not profiled).
+- Threads (LBR samples of one query): q09's and q07's executor's thread 4-5% of the samples
+  (25% before: the workers aggregate in parts); q13's 30% (36%); q16's 42%, the part table's
+  hash build (a serial filtered scan) and its count(DISTINCT) grouping.
+- q12 measured +12% (0.89 -> 1.00 s) in both comparisons, but its user instructions are the
+  base's (23.56 / 23.61 x 10^9 a run against 23.56 / 23.62, `perf stat`, two alternating
+  pairs) and its cycles went either way (13.99 / 13.91 against 12.68 / 14.34 x 10^9): no
+  change reaches its plan (a merge join, a sorted lineitem scan, a hash-free grouping).
+  Code placement remained a hypothesis, not an established explanation.
+- The first build of this round (without the EXTRACT key fix, the IN lists and the flat
+  counts) measured q09 2.16 against 2.08 s: merging the projections alone left the grouping
+  presorting its input, so its rows still came to the executor's thread. The fix of the key
+  check made the difference.
+
+Source review found no new thread, timer or cache that outlives a statement. This is not
+a footprint or OLTP regression measurement.
+
+### Recovery audit, 2026-11-08
+
+The tables above are saved historical observations. They do not establish a performance
+change for the recovered batch on current origin. No benchmark or profile ran during this
+recovery because other lanes were active.
+
+The read-only audit `~/.cache/a189/scripts/audit-saved.py` validates all 22 query names,
+complete round blocks, row counts, result hashes, timing bounds, error fields, and frozen
+binary hashes. Its output is `~/.cache/a189/logs/audit-saved.json`.
+
+- `bench/a2-vs-base.tsv` contains 198 result records, three rounds each of PostgreSQL,
+  base and a2. All saved query rows and hashes agree, with zero reported errors. The saved
+  runner checks rows and hashes between repetitions. Warm-up output was discarded.
+- The base build log names `19df462eb5fb967202d4a244b92aa38d2e0bca09`.
+  The frozen binary SHA-256 is
+  `ef476177342b4365921ac87920a17e002c3aa6a586ac0a86fd88f1e60bda2917`.
+- The a2 build log names `62ddbd462c9d6e847d409780d82a7cc40e84d2b4`, with only the two
+  golden files untracked. The frozen binary SHA-256 is
+  `0632e0f117956c1ba96e69c6eea60cd6a3e1583f855bd8ca58c5f9e6a45c6659`.
+  Later integration changed other executor and storage code. The recovered batch also
+  restricts initplan substitution after a PostgreSQL differential exposed wrong rows.
+- `bench/r1-rounds.tsv` contains 88 records, two rounds each of PostgreSQL and r1, all
+  saved query rows and hashes equal and zero reported errors. Its build log names
+  `36c70d5158ed4d24db1e835c5db12603bdf23333`, with frozen binary SHA-256
+  `b5db714171827601f81412a87d8bf2d030f9f4fd54b2b9d3cd28014590692404`.
+  That campaign has no paired base engine and cannot show a before/after gain.
+
+The old build logs name HEAD and print git status but lack before/after source manifests
+and frozen compiler environments. The benchmark scripts pipe the client through `sed`
+without preserving its exit code. Complete error-free result blocks support the saved
+query observations, but `HEAVY-EXIT 0` alone does not prove command success. Three paired
+rounds under shared load also fall short of the five alternating pairs in the benchmark
+checklist. The historical q12 timing increase remains unexplained by the saved instruction
+counts. Code placement was a hypothesis, not an established cause.
+
+Engine `PEAK` records read host VmHWM in KiB and convert it to MiB. Per-query
+`peak_mem_mb` samples cgroup anonymous and shared memory. Neither establishes unchanged
+idle footprint or memory under other workloads. No new OLTP regression measurement or
+matched comparison of efficient and performance modes exists for this recovery.
+A serialized comparison on the integrated head is still required before a current speed,
+CPU or memory claim. The planner, storage and pg_stat findings above remain owner handoffs.
+
 ## Executor, round 10 (round 26, agent 167)
 
 Step 1: batch kernels, column decoding, nested loops that stop (HANDOFF "Executor, round 10,
