@@ -199,7 +199,7 @@ node alone (the memory backend) none of this changes anything.
   idempotent), expired branches deleted by their owner, garbage collection on one node per
   bucket (`singleton:nosql-gc`). Metering is per node: each records what it served.
 - **Not on a fleet:** ScyllaDB's REST API (`nodetool`) and the local plain CQL and Alternator
-  listeners serve what this node owns; `--nosql-only` and `--nosql-single` are single-node modes.
+  listeners serve what this node owns; `--nosql-single` is a single-node mode.
 
 **Memory budgets** (`nosql_storage::memory`) keep a node's memory bounded whatever its tenants
 do. Every one of them is reported by `GET /v1/nosql` (`memory`):

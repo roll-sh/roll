@@ -1,8 +1,9 @@
 //! The node's cluster settings and handle (docs/cloud/README.md, "Node settings"; docs/code/cluster.md).
 //!
 //! Every product takes its leases from one `roll_cluster::Cluster`: the one roll code joined when
-//! the node is part of a cluster, else a node alone on the in-process backend, which owns
-//! whatever it asks for. The roll code flags (`--code-cluster-secret`, `--code-node-id`,
+//! the node is part of a cluster, one joined here when roll code is off (`ROLL_PRODUCTS`; the
+//! dynamodb backend only, since postgres keeps leases in code's database), else a node alone on
+//! the in-process backend, which owns whatever it asks for. The roll code flags (`--code-cluster-secret`, `--code-node-id`,
 //! `--code-advertise-url`, `--code-drain-timeout`) stay as aliases of these, so deploy/code keeps
 //! working.
 
@@ -52,6 +53,10 @@ pub struct ClusterArgs {
     /// `--code-drain-timeout` is an alias.
     #[arg(id = "roll_cluster_drain_timeout", long = "drain-timeout", env = "ROLL_DRAIN_TIMEOUT")]
     pub drain_timeout_s: Option<u64>,
+    /// The system database every node shares (a Postgres URL): catalogs and accounts for every
+    /// product. roll code keeps its data there unless `--code-database` names another.
+    #[arg(id = "roll_system_database", long = "system-database", env = "ROLL_SYSTEM_DATABASE", hide_env_values = true)]
+    pub system_database: Option<String>,
 }
 
 /// How long a stopping cluster node keeps serving after its health check starts failing, so the
@@ -104,15 +109,29 @@ impl ClusterArgs {
 }
 
 /// The cluster every product on this node takes its leases from: roll code's when the node is
-/// part of a cluster, else a node alone in memory.
-pub fn handle(code: &code_control::Code, args: &ClusterArgs, advertise_url: &str) -> anyhow::Result<Arc<Cluster>> {
-    if let Some(c) = code.cluster() {
+/// part of a cluster, one of its own when roll code is off, else a node alone in memory.
+pub fn handle(code: Option<&code_control::Code>, args: &crate::code::CodeArgs, default_url: &str) -> anyhow::Result<Arc<Cluster>> {
+    if let Some(c) = code.and_then(|c| c.cluster()) {
         return Ok(c.clone());
     }
-    let id = args.node_id.clone().filter(|s| !s.is_empty()).unwrap_or_else(ClusterConfig::random_node_id);
+    let r = args.cluster.resolve(args.code_cluster_secret.as_deref(), args.code_node_id.as_deref(), args.code_advertise_url.as_deref())?;
+    if let (None, Some(secret)) = (code, r.secret) {
+        anyhow::ensure!(
+            r.backend == BackendKind::Dynamodb,
+            "ROLL_CLUSTER_BACKEND={:?} keeps leases in roll code's database: with code off (ROLL_PRODUCTS), use dynamodb",
+            r.backend
+        );
+        let url = r.advertise_url.unwrap_or_else(|| default_url.to_string());
+        let mut cfg = ClusterConfig::new(r.node_id.unwrap_or_else(ClusterConfig::random_node_id), url.trim_end_matches('/'), secret.into_bytes());
+        cfg.zone = args.cluster.zone();
+        let code_control::ClusterBackend::DynamoDb(d) = args.cluster.code_backend(r.backend) else { unreachable!("dynamodb") };
+        // Joining blocks on the backend.
+        return Ok(tokio::task::block_in_place(|| Cluster::join(Box::new(roll_cluster::DynamoDb::connect(d)?), cfg))?);
+    }
+    let id = r.node_id.unwrap_or_else(ClusterConfig::random_node_id);
     // Nothing is forwarded on one node; the secret only has to be valid.
-    let mut cfg = ClusterConfig::new(id, advertise_url.trim_end_matches('/'), ClusterConfig::random_node_id().into_bytes());
-    cfg.zone = args.zone();
+    let mut cfg = ClusterConfig::new(id, default_url.trim_end_matches('/'), ClusterConfig::random_node_id().into_bytes());
+    cfg.zone = args.cluster.zone();
     Ok(Cluster::join(Box::new(Memory::solo()), cfg)?)
 }
 

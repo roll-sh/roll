@@ -151,10 +151,6 @@ pub struct NosqlArgs {
     /// Compactions running at once (Cassandra's `concurrent_compactors`).
     #[arg(long = "nosql-compaction-concurrency", env = "ROLL_NOSQL_COMPACTION_CONCURRENCY", default_value_t = 2)]
     pub nosql_compaction_concurrency: usize,
-    /// The system database (Postgres URL) the catalog lives in, shared by every node of a
-    /// cluster (schema `nosql_control`). Default: a SQLite file under `--home` (one node).
-    #[arg(id = "nosql_system_database", long = "nosql-system-database", env = "ROLL_SYSTEM_DATABASE", hide_env_values = true)]
-    pub nosql_system_database: Option<String>,
 }
 
 /// A size: bytes, or a number with a unit (`512MiB`, `512M`, `1GiB`, `1G`, `64KiB`).
@@ -205,9 +201,19 @@ fn shared(cluster: Option<&Arc<roll_cluster::Cluster>>) -> Option<&Arc<roll_clus
 }
 
 impl Nosql {
-    pub async fn start(home: &Path, args: NosqlArgs, public_host: &str, node: &str, storage: &StorageConfig, cluster: Option<&Arc<roll_cluster::Cluster>>) -> anyhow::Result<Self> {
+    /// `system_database` (`ROLL_SYSTEM_DATABASE`) holds the catalog in a cluster (schema
+    /// `nosql_control`); a node alone keeps it in a SQLite file under `--home`.
+    pub async fn start(
+        home: &Path,
+        args: NosqlArgs,
+        public_host: &str,
+        node: &str,
+        storage: &StorageConfig,
+        cluster: Option<&Arc<roll_cluster::Cluster>>,
+        system_database: Option<&str>,
+    ) -> anyhow::Result<Self> {
         let cluster = shared(cluster);
-        let database = args.nosql_system_database.clone().filter(|d| !d.is_empty());
+        let database = system_database.filter(|d| !d.is_empty() && cluster.is_some()).map(str::to_string);
         if cluster.is_some() {
             anyhow::ensure!(database.is_some(), "roll nosql in a cluster needs ROLL_SYSTEM_DATABASE (its catalog is shared by every node)");
             anyhow::ensure!(matches!(storage, StorageConfig::S3 { .. }), "roll nosql in a cluster needs S3 storage (a local directory isn't shared)");

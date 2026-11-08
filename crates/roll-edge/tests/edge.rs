@@ -136,7 +136,7 @@ async fn https_routes_by_host_and_tells_handlers_the_client() {
     };
     let (pull_ca, pull_client) = origin_pull_ca();
     let origin_pull = Some(roll_edge::tls::server_config_verifying_clients(store.clone(), roll_edge::http::ALPN, &[pull_ca]).unwrap());
-    let cfg = HttpsConfig { hosts, cloudflare: TrustedProxies::parse("198.51.100.0/24").unwrap(), listen: ListenOptions { proxy_protocol: true, ..Default::default() }, origin_pull };
+    let cfg = HttpsConfig { hosts, cloudflare: TrustedProxies::parse("198.51.100.0/24").unwrap(), listen: ListenOptions { proxy_protocol: true, ..Default::default() }, origin_pull, observe: None };
     let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = l.local_addr().unwrap();
     let tls = roll_edge::tls::server_config(store, roll_edge::http::ALPN);

@@ -70,6 +70,10 @@ pub struct Member {
 pub struct Confirmed {
     pub leases: Vec<(String, i64)>,
     pub basis: Duration,
+    /// How many of `leases` this answer took from another holder that never released them (it
+    /// died, was cut off, or left with requests in flight): takeovers, not planned handoffs.
+    /// Always 0 for a renewal.
+    pub taken_over: usize,
 }
 
 /// Who holds a key, for routing.

@@ -113,6 +113,36 @@ struct Flags {
     superseded: AtomicBool,
 }
 
+/// What happened to this node's leases since it joined: counters only go up. The node's
+/// process reports them (rolld publishes them as metrics); this crate does no I/O for them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Stats {
+    /// Keys this node handed to another node (drain, rebalancing, an idle or retired key).
+    pub handoffs: u64,
+    /// Handoffs that didn't go cleanly: they timed out with requests still in flight, their
+    /// release didn't reach the backend (the lease lapses instead, so the key is unavailable
+    /// for up to a lease length), or a drain ended with the key still held.
+    pub handoff_failures: u64,
+    /// Leases this node took from a holder that never released them (it died, was cut off,
+    /// or left with requests in flight). Planned handoffs don't count.
+    pub takeovers: u64,
+    /// Leases this node stopped using because it couldn't renew them in time (self-fencing),
+    /// or because a renewal found them gone.
+    pub fenced: u64,
+}
+
+#[derive(Default)]
+struct Counters {
+    handoffs: AtomicU64,
+    handoff_failures: AtomicU64,
+    takeovers: AtomicU64,
+    fenced: AtomicU64,
+}
+
+fn bump(c: &AtomicU64, n: usize) {
+    c.fetch_add(n as u64, Ordering::Relaxed);
+}
+
 #[derive(Default)]
 pub(crate) struct Faults {
     pub freeze: AtomicBool,
@@ -136,6 +166,7 @@ pub(crate) struct Inner {
     ops: Mutex<()>,
     flags: Flags,
     pub(crate) faults: Faults,
+    counters: Counters,
     health: Mutex<Health>,
     tick: OnceLock<Thread>,
     watchdog: OnceLock<Thread>,
@@ -285,6 +316,7 @@ impl Inner {
             return Some(e);
         }
         let expired: Vec<String> = st.held.iter().filter(|(_, h)| h.deadline <= now).map(|(k, _)| k.clone()).collect();
+        bump(&self.counters.fenced, expired.len());
         for k in expired {
             self.drop_held(&mut st, &k, "its lease passed its local deadline without a renewal");
         }
@@ -373,6 +405,7 @@ impl Inner {
             // Everything held was acquired before this renewal was sent (both happen under
             // `ops`), so a held key the renewal didn't extend is no longer ours.
             let gone: Vec<String> = st.held.iter().filter(|(k, h)| returned.get(*k) != Some(&h.epoch)).map(|(k, _)| k.clone()).collect();
+            bump(&self.counters.fenced, gone.len());
             for k in gone {
                 self.drop_held(&mut st, &k, "the renewal found it expired or held by another node");
             }
@@ -411,6 +444,7 @@ impl Inner {
             }
             Err(e) => {
                 tracing::warn!(node = %self.me(), error = %e, keys = rows.len(), "releasing leases failed; they'll be released again or expire");
+                bump(&self.counters.handoff_failures, rows.len());
                 for (k, _) in rows {
                     st.release.insert(k.clone());
                 }
@@ -440,6 +474,7 @@ impl Inner {
         }
         let todo: Vec<String> = todo.into_iter().cloned().collect();
         let confirmed = self.backend()?.acquire(&todo)?;
+        bump(&self.counters.takeovers, confirmed.taken_over);
         let (won, deadline) = (confirmed.leases, confirmed.basis + self.validity);
         let mut st = self.state.lock();
         // Too slow to act on, or we started leaving meanwhile: leave them to the renewal, which
@@ -570,8 +605,10 @@ impl Inner {
             let mut retired = Vec::new();
             for (k, _) in &rows {
                 let inflight = st.held.get(k).map_or(0, |h| h.tenure.inflight.load(Ordering::Acquire));
+                bump(&self.counters.handoffs, 1);
                 if inflight > 0 {
                     tracing::warn!(node = %self.me(), key = %k, inflight, "handoff timed out waiting for requests in flight");
+                    bump(&self.counters.handoff_failures, 1);
                 }
                 if let Some(h) = self.drop_held(&mut st, k, "handed off")
                     && h.retire
@@ -874,6 +911,7 @@ impl Cluster {
             ops: Mutex::new(()),
             flags: Flags::default(),
             faults: Faults::default(),
+            counters: Counters::default(),
             health: Mutex::new(Health { heartbeat_ok: Some(now), renew_ok_sent: Some(now) }),
             tick: OnceLock::new(),
             watchdog: OnceLock::new(),
@@ -1161,6 +1199,13 @@ impl Cluster {
         }
     }
 
+    /// This node's lease counters since it joined.
+    pub fn stats(&self) -> Stats {
+        let c = &self.inner.counters;
+        let get = |a: &AtomicU64| a.load(Ordering::Relaxed);
+        Stats { handoffs: get(&c.handoffs), handoff_failures: get(&c.handoff_failures), takeovers: get(&c.takeovers), fenced: get(&c.fenced) }
+    }
+
     /// For the load balancer's health check: this node is a member, its heartbeat is recent,
     /// and its last successful renewal is still within the lease's local validity.
     pub fn is_healthy(&self) -> bool {
@@ -1202,6 +1247,11 @@ impl Cluster {
         let deadline = Instant::now() + timeout;
         while Instant::now() < deadline && !inner.state.lock().held.is_empty() {
             tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let left = inner.state.lock().held.len();
+        if left > 0 {
+            tracing::warn!(node = %inner.me(), keys = left, timeout_s = timeout.as_secs(), "drain timed out with keys still held");
+            bump(&inner.counters.handoff_failures, left);
         }
         let me = self.inner.clone();
         let threads = std::mem::take(&mut *self.threads.lock());
