@@ -3671,7 +3671,7 @@ fn projection_read_always<'a>(proj: &[crate::sql::expr::Expr], exprs: impl Itera
 
 /// `e` over a projection's input row: its columns replaced by the projection's expressions
 /// (None: a column it doesn't have).
-fn through_projection(e: &crate::sql::expr::Expr, proj: &[crate::sql::expr::Expr]) -> Option<crate::sql::expr::Expr> {
+pub(super) fn through_projection(e: &crate::sql::expr::Expr, proj: &[crate::sql::expr::Expr]) -> Option<crate::sql::expr::Expr> {
     use crate::sql::expr::Expr;
     let mut ok = true;
     let out = e

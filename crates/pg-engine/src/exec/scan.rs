@@ -1526,19 +1526,29 @@ fn bitmap_keys(t: &Table, q: &BitmapQual, kept: &mut Option<KeptRows>, unchecked
                 };
                 if let Some(cols) = &ecols {
                     let mut left = Vec::new();
+                    // (One row the entries' values are put in, checked by a kernel; what it
+                    // leaves to `eval` is evaluated.)
+                    let kernel = super::kernel::compile(&crate::sql::expr::Expr::And(quals.iter().map(|q| q.orig.clone()).collect()));
+                    let mut row = vec![Value::Null; t.columns.len()];
                     for (k, v) in entries {
                         ctx.check()?;
-                        let Some(row) = entry_row(t.columns.len(), cols, &k) else {
+                        if !entry_into(&mut row, cols, &k) {
                             left.push((k, v));
                             continue;
-                        };
-                        let mut ok = true;
-                        for c in quals {
-                            if !eval_bool(&c.orig, &row, ctx)? {
-                                ok = false;
-                                break;
-                            }
                         }
+                        let ok = match kernel.as_ref().and_then(|f| f.passes(&row[..])) {
+                            Some(pass) => pass,
+                            None => {
+                                let mut ok = true;
+                                for c in quals {
+                                    if !eval_bool(&c.orig, &row, ctx)? {
+                                        ok = false;
+                                        break;
+                                    }
+                                }
+                                ok
+                            }
+                        };
                         if ok {
                             out.push(v.to_vec());
                         }
@@ -1695,8 +1705,12 @@ fn dense_bitmap_scan(
                 }
                 let mut n = 0i64;
                 // (The range can be wider than the quals, as for a date column's bound by a
-                // timestamp: entries whose values fail them aren't the bitmap's.)
+                // timestamp: entries whose values fail them aren't the bitmap's. They are
+                // checked by a kernel over one row the entries' values are put in; what it
+                // leaves to `eval` is evaluated.)
                 let ecols = entry_columns(t, index, bounds, quals, ctx);
+                let kernel = ecols.as_ref().and_then(|_| super::kernel::compile(&Expr::And(quals.iter().map(|q| q.orig.clone()).collect())));
+                let mut row = vec![Value::Null; t.columns.len()];
                 for (start, end) in ranges(t, index, bounds, ctx)? {
                     let txn = ctx.txn.borrow();
                     let it = match ctx.snapshot().as_deref() {
@@ -1706,8 +1720,10 @@ fn dense_bitmap_scan(
                     for r in it {
                         let (k, _) = r?;
                         if let Some(cols) = &ecols
-                            && let Some(row) = entry_row(t.columns.len(), cols, &k)
-                            && !quals.iter().all(|c| eval_bool(&c.orig, &row, ctx).unwrap_or(true))
+                            && entry_into(&mut row, cols, &k)
+                            && !kernel.as_ref().and_then(|f| f.passes(&row[..])).unwrap_or_else(|| {
+                                quals.iter().all(|c| eval_bool(&c.orig, &row, ctx).unwrap_or(true))
+                            })
                         {
                             continue;
                         }
@@ -2345,16 +2361,19 @@ fn entry_columns(
     ok.then_some(cols)
 }
 
-/// A row of `width` columns with the values of index entry `entry` (`entry_columns`), the
-/// others NULL; None when one doesn't decode.
-fn entry_row(width: usize, cols: &[(usize, crate::types::DataType, bool)], entry: &[u8]) -> Option<Row> {
-    let mut row = vec![Value::Null; width];
+/// The values of index entry `entry` (`entry_columns`) put in their columns of `row` (a
+/// row of the table's width; its other columns left as they are, NULL where nothing else
+/// is put); false when one doesn't decode.
+fn entry_into(row: &mut [Value], cols: &[(usize, crate::types::DataType, bool)], entry: &[u8]) -> bool {
     // (Past the table and index ids.)
     let mut pos = 8;
     for (col, ty, desc) in cols {
-        row[*col] = crate::storage::keys::decode_index_value(entry, &mut pos, ty, *desc)?;
+        match crate::storage::keys::decode_index_value(entry, &mut pos, ty, *desc) {
+            Some(v) => row[*col] = v,
+            None => return false,
+        }
     }
-    Some(row)
+    true
 }
 
 /// An index-only scan whose rows can come from the index entries alone: a btree's over
