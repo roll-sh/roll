@@ -186,6 +186,33 @@ never on a fleet node or through a Docker socket.
 - Every control-plane API requires a token; nothing is open by default and CORS is limited to the
   dashboard's origin. Data planes keep their own credentials (Postgres passwords, Redis users,
   S3 keys, SASL).
+- **The operator token.** `ROLL_ADMIN_TOKEN` (`Authorization: Bearer`, 32 characters or more) opens
+  every route rolld's API serves. One check (`crates/roll-auth`) sits in front of all the merged
+  routers, and `crates/rolld/src/auth.rs` (`RULES`) is the one list of routes that don't need it:
+  - public: the health endpoints and storage's console sign-in;
+  - the product decides: roll code (`/v1/code`, `/git`: owners, tokens, public repos, signed
+    webhooks, device login), signed internal hops (`/internal`);
+  - the token or the product's own credential: storage (console sessions), tasks (its token
+    and API keys), streams' HTTP data plane and Confluent REST (stream API keys).
+
+  Every other route, and any route a product adds later, is the operator's. The token is
+  compared in constant time and never logged; products get only an `Operator` marker on the
+  request. `RUST_LOG=rolld::auth=debug` lists every route with its access at startup, and
+  `crates/rolld/tests/auth.rs` walks that list.
+- **Secure by default.** rolld refuses to start when it listens on any non-loopback address, or
+  with `ROLL_EDGE=1`, without `ROLL_ADMIN_TOKEN`. On loopback it starts open, as before, and says
+  so. With a token, tasks requires a token or API key and streams' HTTP data plane requires an
+  API key (`ROLL_STREAM_REQUIRE_AUTH`); queues refuse the default `guest`/`guest` login off
+  loopback.
+- **CORS.** One policy for every control-plane API: the origins in `ROLL_DASHBOARD_ORIGIN`
+  (comma separated, `https://roll.sh` in the cloud); on loopback, by default, the local
+  dashboard (any port on localhost, 127.0.0.1 or [::1]). Off loopback without the setting, no
+  browser origin is allowed. No cookies are involved: the dashboard sends tokens.
+- **The dashboard** signs in with the operator token (or a roll code owner token) in the header
+  of every page; it stays in the browser's localStorage and goes to every product's API only
+  when roll code says it's the operator's (`GET /v1/code` `auth.operator`). Nothing is built
+  into the bundle. Its server functions call rolld anonymously (public pages). `roll` sends
+  `ROLL_ADMIN_TOKEN` too.
 - Secrets live in Secrets Manager and are sealed with KMS; nodes get them through their task
   role. Internal hops are signed with the cluster secret and stay on the VPC.
 - Security groups admit the NLB and the other nodes only; Cloudflare's proxied hostnames reach
@@ -252,7 +279,7 @@ isn't draining.
 | code + agents on the cluster layer | built (Postgres leases); DynamoDB backend in progress |
 | AWS stack, image, pipeline, Cloudflare | in progress |
 | edge | in progress |
-| control-plane auth lockdown | in progress |
+| control-plane auth lockdown | built (`ROLL_ADMIN_TOKEN`, `crates/roll-auth`); customer accounts next |
 | GitHub resilience | in progress |
 | tasks, queues, storage, redis, streams, nosql on the cluster layer | next, one product per change |
 | postgres on the fleet and the system database | with the pg-engine branch |

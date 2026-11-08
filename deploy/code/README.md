@@ -30,9 +30,9 @@ How it works is in [docs/code/cluster.md](../../docs/code/cluster.md).
 docker build -f deploy/code/Dockerfile -t roll-code .
 docker compose -f deploy/code/docker-compose.yml up -d
 curl -s localhost:7070/v1/code/health                      # through the load balancer
-export ROLL_API=http://localhost:7070 ROLL_TOKEN=dev-admin-token-change-me
+export ROLL_API_URL=http://localhost:7070 ROLL_ADMIN_TOKEN=dev-operator-token-change-me-0123456789
 roll code owners create acme --org && roll code create acme/web
-git clone http://git:$ROLL_TOKEN@localhost:7070/git/acme/web.git
+git clone http://git:$ROLL_ADMIN_TOKEN@localhost:7070/git/acme/web.git
 docker compose -f deploy/code/docker-compose.yml kill node2   # keeps working
 docker compose -f deploy/code/docker-compose.yml down -v
 ```
@@ -51,7 +51,8 @@ you pin one).
 | `ROLL_S3_BUCKET`, `AWS_REGION` | The bucket for file contents. Credentials come from the instance or task role (or `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`). `ROLL_S3_PREFIX` keeps roll code under a prefix; `ROLL_S3_ENDPOINT` points at another S3-compatible store. |
 | `ROLL_CODE_CLUSTER_SECRET` | At least 16 bytes, the same on every node. Nodes sign every request between them with it. Without it, the node runs alone. |
 | `ROLL_CODE_ADVERTISE_URL` | `http://<this node's private address>:7070`: where the other nodes reach this one. Each node's own. |
-| `ROLL_CODE_TOKEN` | The admin token, the same on every node. Without one the API is open: never run a reachable node without it. |
+| `ROLL_ADMIN_TOKEN` | The operator token (32 characters or more), the same on every node: roll code's admin. rolld won't listen off loopback without it. |
+| `ROLL_CODE_TOKEN` | Optional: a second admin token for roll code only, the same on every node. |
 | `ROLL_SECRET_KEY` | At least 32 characters, the same on every node: it seals owners' own model API keys. Losing it makes those keys unreadable (owners enter them again). |
 | `ROLL_CODE_PUBLIC_URL` | The load balancer's URL (`https://code.example.com`), for links and clone URLs. `ROLL_CODE_GIT_URL` overrides the clone URL base. |
 | `ROLL_CODE_NODE_ID` | Optional. A stable id per node (a StatefulSet ordinal, an instance id). Without it each process gets a random one. A restarted process with a pinned id waits until its previous incarnation looks dead (about 5 s). |
@@ -163,7 +164,7 @@ during a Postgres failover every node is unhealthy until it reconnects, by itsel
   versions to the same time or later; newer objects than the database are harmless), and start
   the nodes on the restored database. Local disk (`/data`) is a cache: work trees and the code
   index are rebuilt.
-- Keep `ROLL_SECRET_KEY` and `ROLL_CODE_TOKEN` in your secret manager with the backups.
+- Keep `ROLL_SECRET_KEY`, `ROLL_ADMIN_TOKEN` and `ROLL_CODE_TOKEN` in your secret manager with the backups.
 
 ## Checks and previews
 

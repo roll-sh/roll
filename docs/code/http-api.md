@@ -1102,12 +1102,16 @@ owner token could otherwise import another account's repositories.
 
 ## CORS
 
-The browser calls `/v1/code/*` directly: reads, SSE and raw blob links. Allow any origin, plus
-`Authorization` and `Content-Type`, and set `Access-Control-Expose-Headers: x-roll-changeset`.
+The browser calls `/v1/code/*` directly: reads, SSE and raw blob links. rolld answers CORS for
+every API at once: the dashboard's origins (`ROLL_DASHBOARD_ORIGIN`, by default any localhost
+port on loopback), any requested header (`Authorization`, `Content-Type`), every response header
+exposed (`x-roll-changeset`).
 
 ## Auth
 
-- The local daemon is open, like the rest of the local API, unless `ROLL_CODE_TOKEN` is set.
+- The local daemon is open, like the rest of the local API, unless `ROLL_CODE_TOKEN` or
+  `ROLL_ADMIN_TOKEN` (rolld's operator token) is set. Both are admin tokens and work side by side;
+  `GET /v1/code` says `auth.operator` for the operator's.
 - Owner tokens are created with `POST /v1/code/owners/{owner}/tokens {name}` →
   `{token /* rlc_…, shown once */, id /* tok_… */, prefix /* the token's first 8 characters */, name, owner, created_at}`
   (the owner or admin; 401 anonymous, 403 another owner).

@@ -146,9 +146,11 @@ async fn every_control_plane_route_needs_the_operator_token() {
     assert!(wrong.is_empty(), "{} routes misbehave:\n{}", wrong.len(), wrong.join("\n"));
     assert!(protected > 100 && public > 0, "protected {protected}, public {public}");
     let code: serde_json::Value = http.get(format!("{api}/v1/code")).header("authorization", &operator).send().await.unwrap().json().await.unwrap();
-    assert_eq!(code["auth"]["caller"]["kind"], "admin", "roll code takes the operator's token as its admin: {code}");
+    // roll code takes the operator's token as its admin, and says it's the operator's (the
+    // dashboard's sign-in then sends it to every product).
+    assert_eq!((code["auth"]["caller"]["kind"].as_str(), code["auth"]["operator"].as_bool()), (Some("admin"), Some(true)), "{code}");
     let code: serde_json::Value = http.get(format!("{api}/v1/code")).send().await.unwrap().json().await.unwrap();
-    assert_eq!((code["auth"]["required"].as_bool(), code["auth"]["caller"]["kind"].as_str()), (Some(true), Some("anonymous")), "{code}");
+    assert_eq!((code["auth"]["required"].as_bool(), code["auth"]["operator"].as_bool(), code["auth"]["caller"]["kind"].as_str()), (Some(true), Some(false), Some("anonymous")), "{code}");
 
     // CORS: the dashboard's origin, nobody else's.
     let preflight = |origin: &'static str| {

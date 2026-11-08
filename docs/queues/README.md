@@ -43,8 +43,9 @@ variable (see `crates/rolld/src/queues.rs`).
 
 - The first start creates `guest` / `guest` (an administrator) on vhost `/`. Change it with
   `--queues-user` / `--queues-password` (`ROLL_QUEUES_USER` / `ROLL_QUEUES_PASSWORD`).
-  roll doesn't restrict `guest` to localhost, so set a real password before you expose a port.
-- The roll API on `:7070` has no authentication. Keep it private.
+  rolld refuses to start with `guest` / `guest` when a queues listener is off loopback.
+- The roll API on `:7070` is open on loopback; off loopback it needs `ROLL_ADMIN_TOKEN`
+  (`Authorization: Bearer`, docs/cloud/README.md "Security").
 - `roll queues url` prints the AMQP URL for a vhost.
 
 ## A vhost per app
