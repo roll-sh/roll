@@ -3,6 +3,11 @@
 //! DynamoDB API, over HTTP and optionally HTTPS, routed by `Host` or by the SigV4 access key
 //! `role@db`) and ScyllaDB's REST API. Databases live in the shared object storage under
 //! `nosql/`.
+//!
+//! On a cluster (a cluster backend other than memory), every database is served by the holder
+//! of its lease `nosql:db:<id>` (`nosql_control::cluster`): the catalog is in the system
+//! database (`ROLL_SYSTEM_DATABASE`), commit log segments go under the cluster node id, and a
+//! CQL connection reaching another node is spliced to the owner through the edge's hop.
 
 use clap::Args;
 use nosql_control::{Control, NosqlConfig};
@@ -146,6 +151,10 @@ pub struct NosqlArgs {
     /// Compactions running at once (Cassandra's `concurrent_compactors`).
     #[arg(long = "nosql-compaction-concurrency", env = "ROLL_NOSQL_COMPACTION_CONCURRENCY", default_value_t = 2)]
     pub nosql_compaction_concurrency: usize,
+    /// The system database (Postgres URL) the catalog lives in, shared by every node of a
+    /// cluster (schema `nosql_control`). Default: a SQLite file under `--home` (one node).
+    #[arg(id = "nosql_system_database", long = "nosql-system-database", env = "ROLL_SYSTEM_DATABASE", hide_env_values = true)]
+    pub nosql_system_database: Option<String>,
 }
 
 /// A size: bytes, or a number with a unit (`512MiB`, `512M`, `1GiB`, `1G`, `64KiB`).
@@ -190,8 +199,22 @@ pub struct Nosql {
     cql_tls: Option<tokio_rustls::TlsAcceptor>,
 }
 
+/// The cluster nosql serves databases with, when it isn't a node alone.
+fn shared(cluster: Option<&Arc<roll_cluster::Cluster>>) -> Option<&Arc<roll_cluster::Cluster>> {
+    cluster.filter(|c| c.backend_name() != "memory")
+}
+
 impl Nosql {
-    pub async fn start(home: &Path, args: NosqlArgs, public_host: &str, node: &str, storage: &StorageConfig) -> anyhow::Result<Self> {
+    pub async fn start(home: &Path, args: NosqlArgs, public_host: &str, node: &str, storage: &StorageConfig, cluster: Option<&Arc<roll_cluster::Cluster>>) -> anyhow::Result<Self> {
+        let cluster = shared(cluster);
+        let database = args.nosql_system_database.clone().filter(|d| !d.is_empty());
+        if cluster.is_some() {
+            anyhow::ensure!(database.is_some(), "roll nosql in a cluster needs ROLL_SYSTEM_DATABASE (its catalog is shared by every node)");
+            anyhow::ensure!(matches!(storage, StorageConfig::S3 { .. }), "roll nosql in a cluster needs S3 storage (a local directory isn't shared)");
+            anyhow::ensure!(args.nosql_single.as_deref().is_none_or(str::is_empty), "--nosql-single serves one database on one node; it can't run in a cluster");
+        }
+        // Commit log segments are per node: in a cluster, the cluster's node id.
+        let node = cluster.map_or(node.to_string(), |c| c.node_id().to_string());
         let client_auth = nosql_server::net::ClientAuth::parse(&args.nosql_tls_client_auth).unwrap_or_default();
         anyhow::ensure!(
             client_auth == nosql_server::net::ClientAuth::None || (args.nosql_tls_cert.is_some() && args.nosql_tls_client_ca.is_some()),
@@ -209,8 +232,9 @@ impl Nosql {
         };
         let dedicated = args.nosql_cql_tls.is_some() || args.nosql_cql_shard_aware_tls.is_some();
         let mut cfg = NosqlConfig::local(home.join("nosql"));
+        cfg.database = database;
         cfg.storage = storage_config(&args, home, storage);
-        cfg.node_name = node.to_string();
+        cfg.node_name = node.clone();
         cfg.public_host = public_host.to_string();
         cfg.cql_port = args.nosql_cql.port();
         cfg.cql_shard_aware_port = Some(args.nosql_cql_shard_aware.port());
@@ -240,15 +264,30 @@ impl Nosql {
             anyhow::ensure!(WriteIsolation::parse(w).is_some(), "unknown Alternator write isolation {w:?} (always_use_lwt, only_rmw_uses_lwt, forbid_rmw or unsafe_rmw)");
         }
         let control = Control::new(cfg, pg_storage::Objects::new(storage)?).await?;
-        info!(storage = %control.objects().description, single = ?control.single_id, "roll nosql started");
+        if let Some(c) = cluster {
+            control.join(c.clone(), connector(c)?);
+        }
+        info!(storage = %control.objects().description, single = ?control.single_id, clustered = cluster.is_some(), "roll nosql started");
         if let (Some(id), Some(from)) = (control.single_id.clone(), args.nosql_from.as_deref().filter(|f| !f.is_empty())) {
             seed(&control, &id, from, args.nosql_from_token.as_deref(), &args.nosql_from_keyspaces).await?;
         }
         Ok(Nosql { control, args, tls, cql_tls })
     }
 
+    /// `/v1/nosql`, and in a cluster the internal route forwarded Alternator requests come in on.
     pub fn router(&self) -> axum::Router {
-        nosql_control::api::router(self.control.clone())
+        nosql_control::api::router(self.control.clone()).merge(nosql_control::cluster::internal_routes(self.control.clone(), self.alternator_options()))
+    }
+
+    /// Alternator for the edge's HTTPS: requests run on their database's owner.
+    pub fn alternator_router(&self) -> axum::Router {
+        nosql_control::cluster::alternator(self.control.clone(), self.alternator_options())
+    }
+
+    /// The owner's side of a CQL connection another node spliced here.
+    pub fn splice_handler(&self) -> roll_edge::splice::Handler {
+        let node = self.control.node.clone();
+        Arc::new(move |io, hop| nosql_control::cluster::serve_spliced(node.clone(), Box::new(io), hop.client, hop.sni))
     }
 
     /// Alternator's settings from the flags (its listeners and the edge's HTTPS share them).
@@ -431,6 +470,20 @@ async fn source_url(from: &str, token: Option<&str>) -> anyhow::Result<String> {
     let password = v["credentials"]["password"].as_str().unwrap_or_default();
     let tls = if v["tls"] == true { "?tls=1" } else { "" };
     Ok(format!("cql://{}:{}@{host}:{port}{tls}", urlencoding::encode(user), urlencoding::encode(password)))
+}
+
+/// Opens the edge's signed hop to a database's owner for a CQL client.
+fn connector(cluster: &Arc<roll_cluster::Cluster>) -> anyhow::Result<nosql_control::cluster::Connector> {
+    let secret = String::from_utf8_lossy(&cluster.config().secret).into_owned();
+    let signer = roll_edge::splice::Signer::new(&secret)?;
+    Ok(Arc::new(move |to: nosql_control::cluster::HopTo| {
+        let signer = signer.clone();
+        Box::pin(async move {
+            let hop = roll_edge::splice::Hop { product: "cql".into(), tenant: to.db, client: to.client, sni: to.sni };
+            let io = roll_edge::splice::connect(&to.node, &signer, &hop).await?;
+            Ok(Box::new(io) as Box<dyn nosql_server::conn::Io>)
+        })
+    }))
 }
 
 async fn bind(addr: SocketAddr) -> anyhow::Result<TcpListener> {

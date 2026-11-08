@@ -348,6 +348,13 @@ impl Control {
             // are taken over by their database's owner instead.)
             store.fail_running_imports(now())?;
         }
+        Self::with_catalog(cfg, objects, store).await
+    }
+
+    /// A control plane on a catalog that's already open (the nodes of a cluster in one process,
+    /// in tests, share one).
+    pub async fn with_catalog(cfg: NosqlConfig, objects: Objects, store: Arc<Store>) -> anyhow::Result<Arc<Self>> {
+        std::fs::create_dir_all(&cfg.home)?;
         let storage_cfg = StoreConfig { node: cfg.node_name.clone(), tmp_dir: Some(cfg.home.join("tmp")), ..cfg.storage.clone() };
         let storage = Storage::start(objects, storage_cfg).await?;
         let single_id = match &cfg.single {

@@ -293,6 +293,10 @@ impl Edge {
                     })
                 }),
             );
+            // A CQL connection whose database this node serves.
+            if let Some(n) = p.nosql {
+                handlers.register("cql", n.splice_handler());
+            }
             internal = internal.merge(roll_edge::splice::router(roll_edge::splice::Signer::new(&secret)?, handlers));
         }
         let serve = Box::pin(async move { futures::future::select_all(served).await.0 });
@@ -446,7 +450,7 @@ impl HttpRoutes {
             kafka: stream_broker::http::router(p.streams.clone()),
             tasks: tasks::api::router(p.tasks.clone()),
             s3: p.storage.clone().map(s3_server::router),
-            alternator: p.nosql.map(|n| nosql_server::alternator::router(n.control.node.clone(), n.alternator_options())),
+            alternator: p.nosql.map(|n| n.alternator_router()),
             mq,
         })
     }

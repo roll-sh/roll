@@ -329,7 +329,7 @@ async fn run() -> anyhow::Result<()> {
 
     if args.nosql.nosql_only {
         anyhow::ensure!(!args.nosql.nosql_disabled, "--nosql-only with --no-nosql leaves nothing to run");
-        let n = nosql::Nosql::start(&home, args.nosql.clone(), &args.public_host, &args.node, &storage).await?;
+        let n = nosql::Nosql::start(&home, args.nosql.clone(), &args.public_host, &args.node, &storage, None).await?;
         let listener = tokio::net::TcpListener::bind(args.api).await?;
         info!(addr = %args.api, "nosql control API listening");
         tokio::select! {
@@ -415,9 +415,6 @@ async fn run() -> anyhow::Result<()> {
         let (st, l) = start_storage(&storage_opts, &home_abs, &storage).await?;
         (Some(st), Some(l))
     };
-    // roll nosql: same object storage, its own node.
-    let nosql = if args.nosql.nosql_disabled { None } else { Some(nosql::Nosql::start(&home, args.nosql.clone(), &args.public_host, &args.node, &storage).await?) };
-
     let broker = stream_broker::Broker::new(stream_config).await?;
     if let Some(name) = &broker.config.default_stream
         && broker.find_stream(name).is_none()
@@ -436,6 +433,8 @@ async fn run() -> anyhow::Result<()> {
     // roll code: same object storage; previews branch roll Postgres and Redis.
     let data: std::sync::Arc<dyn code_preview::DataBranches> = std::sync::Arc::new(code_preview::RollData { postgres: control.clone(), redis: redis.clone() });
     let node = start_code(&args, &home, &storage, Some(data)).await?;
+    // roll nosql: same object storage; in a cluster its databases follow their leases.
+    let nosql = if args.nosql.nosql_disabled { None } else { Some(nosql::Nosql::start(&home, args.nosql.clone(), &args.public_host, &args.node, &storage, Some(&node.cluster)).await?) };
 
     let listener = tokio::net::TcpListener::bind(args.api).await?;
     info!(addr = %args.api, "control API listening");
