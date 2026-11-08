@@ -3321,10 +3321,8 @@ impl Txn {
             compact,
             xact_ctx,
         )?;
-        if got {
-            if !compacted {
-                self.row_locks.push((key.to_vec(), self.savepoints.len()));
-            }
+        if got && !compacted {
+            self.row_locks.push((key.to_vec(), self.savepoints.len()));
         }
         // (A row lock may have waited for a transaction that committed DDL: a catalog row's
         // updater.)
