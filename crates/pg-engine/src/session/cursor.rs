@@ -1871,6 +1871,7 @@ pub fn spi_cursor_stmt(
                     "DECLARE CURSOR must not contain data-modifying statements in WITH",
                 ));
             }
+            check_read_only(s)?;
             if hold && ctx.sess.security_restricted() {
                 return Err(Error::new(
                     code::INSUFFICIENT_PRIVILEGE,
@@ -1945,8 +1946,81 @@ pub fn spi_cursor_stmt(
     })
 }
 
-/// Whether a query locks the rows it reads (FOR UPDATE / SHARE): a LockRows node, or a
-/// scan with a row mark.
+/// transformDeclareCursorStmt: a cursor whose query has a locking clause (FOR UPDATE ...) can't
+/// be WITH HOLD, SCROLL or INSENSITIVE: those must be READ ONLY.
+pub fn check_read_only(s: &pb::DeclareCursorStmt) -> Result<()> {
+    use crate::sql::binder::ast::inner;
+    const SCROLL: i32 = 0x0002;
+    const INSENSITIVE: i32 = 0x0008;
+    const HOLD: i32 = 0x0020;
+    if s.options & (SCROLL | INSENSITIVE | HOLD) == 0 {
+        return Ok(());
+    }
+    let Some(pg_query::NodeEnum::SelectStmt(sel)) = s.query.as_deref().and_then(inner) else {
+        return Ok(());
+    };
+    let clauses: Vec<&pb::LockingClause> = sel
+        .locking_clause
+        .iter()
+        .filter_map(|n| -> Option<&pb::LockingClause> {
+            match inner(n) {
+                Some(pg_query::NodeEnum::LockingClause(l)) => Some(l),
+                _ => None,
+            }
+        })
+        .collect();
+    let Some(first) = clauses.first() else {
+        return Ok(());
+    };
+    // The first row mark is the first relation the first clause locks (its first OF name, else
+    // the first FROM item); clauses locking it again make it the strongest of theirs
+    // (applyLockingClause).
+    let name_of = |n: &pg_query::protobuf::Node| match inner(n) {
+        Some(pg_query::NodeEnum::RangeVar(r)) => Some(r.alias.as_ref().map_or(r.relname.clone(), |a| a.aliasname.clone())),
+        _ => None,
+    };
+    let ctes: Vec<&str> = sel.with_clause.iter().flat_map(|w| &w.ctes).filter_map(|n| match inner(n) {
+        Some(pg_query::NodeEnum::CommonTableExpr(c)) => Some(c.ctename.as_str()),
+        _ => None,
+    }).collect();
+    fn first_from(n: &pb::Node, ctes: &[&str]) -> Option<String> {
+        match inner(n) {
+            Some(pg_query::NodeEnum::RangeVar(r)) if !r.schemaname.is_empty() || !ctes.contains(&r.relname.as_str()) => Some(r.alias.as_ref().map_or_else(|| r.relname.clone(), |a| a.aliasname.clone())),
+            Some(pg_query::NodeEnum::RangeSubselect(r)) => Some(r.alias.as_ref().map(|a| a.aliasname.clone()).unwrap_or_default()),
+            Some(pg_query::NodeEnum::JoinExpr(j)) => j.larg.as_deref().and_then(|n| first_from(n, ctes)).or_else(|| j.rarg.as_deref().and_then(|n| first_from(n, ctes))),
+            _ => None,
+        }
+    }
+    let target = match first.locked_rels.first() {
+        Some(n) => name_of(n),
+        None => sel.from_clause.iter().find_map(|n| first_from(n, &ctes)),
+    };
+    // A clause without a lockable FROM item adds no row mark (SELECT 1 FOR UPDATE).
+    let Some(target) = target else { return Ok(()) };
+    let covers = |l: &pb::LockingClause| {
+        l.locked_rels.is_empty() || l.locked_rels.iter().any(|n| name_of(n).as_ref() == Some(&target))
+    };
+    let strength = clauses.iter().filter(|l| covers(l)).map(|l| l.strength).max().unwrap_or(first.strength);
+    // (LCS_asString.)
+    let lcs = match pb::LockClauseStrength::try_from(strength) {
+        Ok(pb::LockClauseStrength::LcsForkeyshare) => "FOR KEY SHARE",
+        Ok(pb::LockClauseStrength::LcsForshare) => "FOR SHARE",
+        Ok(pb::LockClauseStrength::LcsFornokeyupdate) => "FOR NO KEY UPDATE",
+        _ => "FOR UPDATE",
+    };
+    let (code, msg, detail) = if s.options & HOLD != 0 {
+        (code::FEATURE_NOT_SUPPORTED, format!("DECLARE CURSOR WITH HOLD ... {lcs} is not supported"), "Holdable")
+    } else if s.options & SCROLL != 0 {
+        (code::FEATURE_NOT_SUPPORTED, format!("DECLARE SCROLL CURSOR ... {lcs} is not supported"), "Scrollable")
+    } else if s.options & INSENSITIVE != 0 {
+        (code::INVALID_CURSOR_DEFINITION, format!("DECLARE INSENSITIVE CURSOR ... {lcs} is not valid"), "Insensitive")
+    } else {
+        return Ok(());
+    };
+    Err(Error::new(code, msg).detail(format!("{detail} cursors must be READ ONLY.")))
+}
+
+/// Whether a query locks the rows it reads: a LockRows node or a scan with a row mark.
 pub fn has_row_marks(plan: &Plan) -> bool {
     match plan {
         Plan::LockRows { .. } => true,
