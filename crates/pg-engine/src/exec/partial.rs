@@ -560,15 +560,21 @@ impl<'a> Partials<'a> {
     /// Row `r` of the column batch `b` (one that passed the filter, not odd) aggregated by
     /// `plan` (`vector::AggPlan`, compiled from this spec), as `row` would aggregate it
     /// (true), or nothing changed (false: the caller hands the row to `row`, in its place).
-    pub fn batch_row(&mut self, plan: &super::vector::AggPlan, b: &crate::storage::cols::ColBatch, r: usize) -> bool {
+    pub fn batch_row(
+        &mut self,
+        plan: &super::vector::AggPlan,
+        b: &crate::storage::cols::ColBatch,
+        nums: &[Vec<super::vector::Num>],
+        r: usize,
+    ) -> bool {
         use super::vector::AggArg;
         self.vals.clear();
-        for (arg, (_, skip, _)) in plan.args.iter().zip(&self.spec.aggs) {
+        for (i, (arg, (_, skip, _))) in plan.args.iter().zip(&self.spec.aggs).enumerate() {
             let v = match arg {
                 // (count(*)'s: a non-NULL stand-in.)
                 AggArg::Star => Some((1, 0)),
                 AggArg::Count(c) => (!b.cols[*c].as_ref().is_none_or(|c| c.nulls[r])).then_some((1, 0)),
-                AggArg::Num(n) => match n.at(b, r) {
+                AggArg::Num(_) => match nums[i][r] {
                     Some(v) => v,
                     None => return false,
                 },

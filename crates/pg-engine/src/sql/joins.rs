@@ -5,7 +5,7 @@
 //! shows the same numbers.
 
 use crate::catalog::Catalog;
-use crate::sql::costs::{self, CPU_OPERATOR_COST, CPU_TUPLE_COST, VarRef};
+use crate::sql::costs::{self, CPU_OPERATOR_COST, CPU_TUPLE_COST, PgMulAdd, VarRef};
 use crate::types::Value;
 use crate::types::text::FormatCtx;
 
@@ -282,7 +282,7 @@ pub fn memo_ndistinct_keyed(
 /// cost_material: a Materialize over `p`.
 pub fn material(p: &In, g: &JoinGucs) -> In {
     let mut run = p.total - p.startup;
-    run = (2.0 * CPU_OPERATOR_COST).mul_add(p.rows, run);
+    run = (2.0 * CPU_OPERATOR_COST).pg_mul_add(p.rows, run);
     let nbytes = relation_byte_size(p.rows, p.width);
     if nbytes > g.work_mem_bytes() {
         run += g.seq_page_cost * (nbytes / BLCKSZ).ceil();
@@ -324,7 +324,7 @@ pub fn nestloop(
     let mut startup = outer.startup + inner.startup;
     let mut run = outer.total - outer.startup;
     if outer_rows > 1.0 {
-        run = (outer_rows - 1.0).mul_add(rescan_start, run);
+        run = (outer_rows - 1.0).pg_mul_add(rescan_start, run);
     }
     let inner_run = inner.total - inner.startup;
     let inner_rescan_run = rescan_total - rescan_start;
@@ -332,7 +332,7 @@ pub fn nestloop(
     if !stops {
         run += inner_run;
         if outer_rows > 1.0 {
-            run = (outer_rows - 1.0).mul_add(inner_rescan_run, run);
+            run = (outer_rows - 1.0).pg_mul_add(inner_rescan_run, run);
         }
     }
     if outer_rows <= 0.0 {
@@ -349,13 +349,13 @@ pub fn nestloop(
         let frac = 2.0 / (sf.match_count + 1.0);
         let mut nt = matched * inner_rows * frac;
         if inner.kind == InKind::IndexedJoin {
-            run = inner_run.mul_add(frac, run);
+            run = inner_run.pg_mul_add(frac, run);
             if matched > 1.0 {
-                run = ((matched - 1.0) * inner_rescan_run).mul_add(frac, run);
+                run = ((matched - 1.0) * inner_rescan_run).pg_mul_add(frac, run);
             }
             run += unmatched * inner_rescan_run / inner_rows;
         } else {
-            nt = unmatched.mul_add(inner_rows, nt);
+            nt = unmatched.pg_mul_add(inner_rows, nt);
             run += inner_run;
             if unmatched >= 1.0 {
                 unmatched -= 1.0;
@@ -363,10 +363,10 @@ pub fn nestloop(
                 matched -= 1.0;
             }
             if matched > 0.0 {
-                run = (matched * inner_rescan_run).mul_add(frac, run);
+                run = (matched * inner_rescan_run).pg_mul_add(frac, run);
             }
             if unmatched > 0.0 {
-                run = unmatched.mul_add(inner_rescan_run, run);
+                run = unmatched.pg_mul_add(inner_rescan_run, run);
             }
         }
         nt
@@ -375,7 +375,7 @@ pub fn nestloop(
     };
     startup += quals.startup;
     let cpu_per_tuple = CPU_TUPLE_COST + quals.per_tuple;
-    run = cpu_per_tuple.mul_add(ntuples, run);
+    run = cpu_per_tuple.pg_mul_add(ntuples, run);
     let _ = rows;
     Cost {
         disabled,
@@ -547,8 +547,8 @@ pub fn hashjoin(
     let mut startup = outer.startup;
     let mut run = outer.total - outer.startup;
     startup += inner.total;
-    startup = CPU_OPERATOR_COST.mul_add(n, CPU_TUPLE_COST).mul_add(inner_rows, startup);
-    run = (CPU_OPERATOR_COST * n).mul_add(outer_rows, run);
+    startup = CPU_OPERATOR_COST.pg_mul_add(n, CPU_TUPLE_COST).pg_mul_add(inner_rows, startup);
+    run = (CPU_OPERATOR_COST * n).pg_mul_add(outer_rows, run);
     let (nbuckets, nbatch) = match h.parallel {
         Some((rows_total, workers)) => parallel_hash_table_size(rows_total, inner.width, g, workers),
         None => hash_table_size(inner_rows, inner.width, g),
@@ -556,8 +556,8 @@ pub fn hashjoin(
     if nbatch > 1 {
         let outerpages = page_size(outer_rows, outer.width);
         let innerpages = page_size(inner_rows, inner.width);
-        startup = g.seq_page_cost.mul_add(innerpages, startup);
-        run = g.seq_page_cost.mul_add(innerpages + 2.0 * outerpages, run);
+        startup = g.seq_page_cost.pg_mul_add(innerpages, startup);
+        run = g.seq_page_cost.pg_mul_add(innerpages + 2.0 * outerpages, run);
     }
     let virtualbuckets = nbuckets as f64 * nbatch as f64;
     let (bucketsize, mcvfreq) = match h.bucket {
@@ -583,11 +583,11 @@ pub fn hashjoin(
         run = (h.hash_quals.per_tuple
             * matched
             * costs::clamp_rows(inner_rows * bucketsize * frac))
-        .mul_add(0.5, run);
+        .pg_mul_add(0.5, run);
         run = (h.hash_quals.per_tuple
             * (outer_rows - matched)
             * costs::clamp_rows(inner_rows / virtualbuckets))
-        .mul_add(0.05, run);
+        .pg_mul_add(0.05, run);
         hashjointuples = if jt == Jt::Anti {
             outer_rows - matched
         } else {
@@ -596,12 +596,12 @@ pub fn hashjoin(
     } else {
         startup += h.hash_quals.startup;
         run = (h.hash_quals.per_tuple * outer_rows * costs::clamp_rows(inner_rows * bucketsize))
-            .mul_add(0.5, run);
+            .pg_mul_add(0.5, run);
         hashjointuples = h.hash_tuples;
     }
     startup += h.other_quals.startup;
     let cpu_per_tuple = CPU_TUPLE_COST + h.other_quals.per_tuple;
-    run = cpu_per_tuple.mul_add(hashjointuples, run);
+    run = cpu_per_tuple.pg_mul_add(hashjointuples, run);
     (
         Cost {
             disabled,
@@ -716,8 +716,8 @@ pub fn mergejoin(
         }
     };
     startup += ost;
-    startup = (otot - ost).mul_add(os, startup);
-    run = (otot - ost).mul_add(oe - os, run);
+    startup = (otot - ost).pg_mul_add(os, startup);
+    run = (otot - ost).pg_mul_add(oe - os, run);
     let (ist, itot) = if m.inner_sort {
         disabled += (!g.sort) as u32;
         let c = costs::sort_cost(inner.total, inner.rows, inner.width, None);
@@ -728,7 +728,7 @@ pub fn mergejoin(
     };
     disabled += inner.disabled;
     startup += ist;
-    startup = (itot - ist).mul_add(is, startup);
+    startup = (itot - ist).pg_mul_add(is, startup);
     let inner_run = (itot - ist) * (ie - is);
     // final_cost_mergejoin.
     let skip_mark = (matches!(jt, Jt::Semi | Jt::Anti) || inner_unique) && m.all_merge;
@@ -739,7 +739,7 @@ pub fn mergejoin(
     };
     let ratio = 1.0 + rescanned / inner_rows;
     let bare = inner_run * ratio;
-    let mat = (CPU_OPERATOR_COST * inner_rows).mul_add(ratio, inner_run);
+    let mat = (CPU_OPERATOR_COST * inner_rows).pg_mul_add(ratio, inner_run);
     let materialize = if let Some(m) = m.material {
         m
     } else if skip_mark {
@@ -759,14 +759,14 @@ pub fn mergejoin(
     startup = m
         .merge_quals
         .per_tuple
-        .mul_add(inner_skip.mul_add(ratio, outer_skip), startup);
-    run = m.merge_quals.per_tuple.mul_add(
-        (inner_rows - inner_skip).mul_add(ratio, outer_rows - outer_skip),
+        .pg_mul_add(inner_skip.pg_mul_add(ratio, outer_skip), startup);
+    run = m.merge_quals.per_tuple.pg_mul_add(
+        (inner_rows - inner_skip).pg_mul_add(ratio, outer_rows - outer_skip),
         run,
     );
     startup += m.other_quals.startup;
     let cpu_per_tuple = CPU_TUPLE_COST + m.other_quals.per_tuple;
-    run = cpu_per_tuple.mul_add(m.merge_tuples, run);
+    run = cpu_per_tuple.pg_mul_add(m.merge_tuples, run);
     (
         Cost {
             disabled,
@@ -894,7 +894,7 @@ pub fn eqjoinsel_inner(cat: &Catalog, fmt: &FormatCtx, a: &JoinVar, b: &JoinVar)
                     debug_assert_eq!(Some(j), (0..v2.len()).find(|&k| !has2[k] && eq(&v1[i], &v2[k])), "eqjoinsel's MCV match");
                     has1[i] = true;
                     has2[j] = true;
-                    matchprodfreq = f1[i].mul_add(f2[j], matchprodfreq);
+                    matchprodfreq = f1[i].pg_mul_add(f2[j], matchprodfreq);
                     nmatches += 1.0;
                 }
             }
@@ -1012,7 +1012,7 @@ pub fn eqjoinsel_semi(
                 0.5
             };
             let uncertain = (1.0 - mf1 - nf1).clamp(0.0, 1.0);
-            uncertainfrac.mul_add(uncertain, mf1)
+            uncertainfrac.pg_mul_add(uncertain, mf1)
         }
         _ => {
             if !default1 && !default2 {

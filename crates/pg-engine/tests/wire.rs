@@ -3928,6 +3928,23 @@ fn bound_parameters_of_domains_and_explain() {
     s.engine.shutdown();
 }
 
+/// Difftest round 10 (agent 162), checked against PostgreSQL 18.6: a custom plan keeps a text
+/// parameter's cast through a STABLE input routine and its selectivity estimate evaluates it,
+/// so a bad value fails the Bind while planning, before the result formats are checked.
+#[test]
+fn custom_plan_stable_casts_fail_at_bind() {
+    let s = server(AuthMethod::Trust);
+    let mut c = raw::Raw::connect(&s.addr, "postgres");
+    c.query("CREATE TABLE wcast (id int PRIMARY KEY, d timestamptz)");
+    for (value, want) in [("2026-02-30", vec!["E 22008"]), ("2026-01-30", vec!["E 08P01"])] {
+        c.parse("", "SELECT id FROM wcast WHERE d > $1::text::timestamptz");
+        bind_text(&mut c, &[Some(value)], &[0, 0]);
+        c.execute("", 0);
+        assert_eq!(c.sync(), want, "{value}");
+    }
+    s.engine.shutdown();
+}
+
 /// Virtual transaction ids as PostgreSQL 18.6 numbers them (checked against it): a proc
 /// array slot per backend, taken from the head of a free list its backend returns it to the
 /// tail of, and local ids the slot counts on (the startup transaction 1, then one per

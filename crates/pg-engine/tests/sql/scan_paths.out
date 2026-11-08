@@ -93,7 +93,7 @@ Bitmap Heap Scan on sp_b  (cost=39.77..110.71 rows=29 width=16)
   ->  BitmapAnd  (cost=39.77..39.77 rows=29 width=0)
         ->  Bitmap Index Scan on sp_b_b  (cost=0.00..5.79 rows=200 width=0)
               Index Cond: (b = 5)
-        ->  Bitmap Index Scan on sp_b_c  (cost=0.00..33.72 rows=2857 width=0)
+        ->  Bitmap Index Scan on sp_b_c  (cost=0.00..33.71 rows=2857 width=0)
               Index Cond: (c = 3)
 -- EXPLAIN
 
@@ -104,7 +104,7 @@ Bitmap Heap Scan on sp_b  (cost=41.02..212.87 rows=3028 width=16)
   ->  BitmapOr  (cost=41.02..41.02 rows=3057 width=0)
         ->  Bitmap Index Scan on sp_b_b  (cost=0.00..5.79 rows=200 width=0)
               Index Cond: (b = 5)
-        ->  Bitmap Index Scan on sp_b_c  (cost=0.00..33.72 rows=2857 width=0)
+        ->  Bitmap Index Scan on sp_b_c  (cost=0.00..33.71 rows=2857 width=0)
               Index Cond: (c = 3)
 -- EXPLAIN
 
@@ -305,7 +305,7 @@ Sort  (cost=360.14..367.28 rows=2857 width=4)
   Sort Key: b
   ->  Bitmap Heap Scan on sp_b  (cost=34.43..196.14 rows=2857 width=4)
         Recheck Cond: (c = 4)
-        ->  Bitmap Index Scan on sp_b_c  (cost=0.00..33.72 rows=2857 width=0)
+        ->  Bitmap Index Scan on sp_b_c  (cost=0.00..33.71 rows=2857 width=0)
               Index Cond: (c = 4)
 -- EXPLAIN
 
@@ -357,7 +357,7 @@ QUERY PLAN:json
               "Async Capable": false,
               "Index Name": "sp_b_c",
               "Startup Cost": 0.00,
-              "Total Cost": 33.72,
+              "Total Cost": 33.71,
               "Plan Rows": 2857,
               "Plan Width": 0,
               "Disabled": false,

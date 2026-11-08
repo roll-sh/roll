@@ -93,6 +93,19 @@ pub fn rows(table: SysTable) -> Arc<Vec<Row>> {
     rows_of(table)
 }
 
+/// The oid each of `table`'s own rows begins with, in row order, read without parsing the
+/// rows (what counting pg_attribute's rows per relation needs: parsing its 3,000 rows was a
+/// fifth of a server's first catalog query).
+pub fn first_oids(table: SysTable) -> Vec<u32> {
+    match source(table) {
+        Some(text) => text
+            .lines()
+            .map(|l| l.split('\t').next().and_then(|f| f.parse().ok()).expect("catalog oid"))
+            .collect(),
+        None => Vec::new(),
+    }
+}
+
 static CACHE: OnceLock<Mutex<HashMap<u32, Arc<Vec<Row>>>>> = OnceLock::new();
 
 /// The cache's lock. A panic while another thread held it (poisoning) leaves its map whole:
@@ -109,6 +122,63 @@ pub fn poison_cache_for_test() {
         panic!("test panic holding the static rows cache");
     })
     .join();
+}
+
+fn parse_line(table: SysTable, cols: &[(String, DataType)], l: &str, fmt: &FormatCtx) -> Row {
+    let f: Vec<&str> = l.split('\t').collect();
+    assert_eq!(f.len(), cols.len(), "{} row {l:?}", table.name());
+    f.iter().zip(cols.iter()).map(|(x, (_, ty))| field(x, ty, fmt)).collect()
+}
+
+/// `table`'s own rows of relation `rel` (those whose first column is `rel`), in row order,
+/// parsed alone: the planner's first look at a system catalog's column statistics parsed
+/// pg_statistic's, pg_attribute's and pg_type's 4,000 rows (`statistic_rows_of`).
+pub fn rel_rows(table: SysTable, rel: u32) -> Vec<Row> {
+    type Index = HashMap<u32, Vec<&'static str>>;
+    static LINES: OnceLock<Mutex<HashMap<u32, Arc<Index>>>> = OnceLock::new();
+    let index = {
+        let mut m = LINES.get_or_init(Default::default).lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        m.entry(table.oid())
+            .or_insert_with(|| {
+                let mut ix = Index::new();
+                if let Some(std::borrow::Cow::Borrowed(text)) = source(table) {
+                    for l in text.lines() {
+                        let rel = l.split('\t').next().and_then(|f| f.parse().ok()).expect("catalog oid");
+                        ix.entry(rel).or_default().push(l);
+                    }
+                }
+                Arc::new(ix)
+            })
+            .clone()
+    };
+    let cols = table.columns();
+    let fmt = FormatCtx::default();
+    let rows: Vec<Row> = match index.get(&rel) {
+        Some(lines) => lines.iter().map(|l| parse_line(table, &cols, l, &fmt)).collect(),
+        None => Vec::new(),
+    };
+    debug_assert!(
+        rows == (rows_of(table).iter()).filter(|r| oid_at(r, 0) == rel).cloned().collect::<Vec<_>>()
+            || table == SysTable::PgStatistic,
+        "{}'s rows of {rel}",
+        table.name()
+    );
+    rows
+}
+
+/// pg_statistic's own rows of relation `rel`, their values typed as `rows` types them.
+pub fn statistic_rows_of(rel: u32) -> Vec<Row> {
+    let mut rows = rel_rows(SysTable::PgStatistic, rel);
+    let atttype: HashMap<(u32, Value), u32> = (rel_rows(SysTable::PgAttribute, rel).iter())
+        .map(|a| ((oid_at(a, 0), a[4].clone()), oid_at(a, 2)))
+        .collect();
+    type_stat_values_by(&mut rows, &atttype);
+    #[cfg(debug_assertions)]
+    {
+        let all: Vec<Row> = rows_of(SysTable::PgStatistic).iter().filter(|r| oid_at(r, 0) == rel).cloned().collect();
+        debug_assert!(all == rows, "pg_statistic's rows of {rel}");
+    }
+    rows
 }
 
 fn rows_of(table: SysTable) -> Arc<Vec<Row>> {
@@ -160,16 +230,31 @@ pub fn text_at(r: &[Value], i: usize) -> &str {
 /// elements); text where the engine has no such scalar type.
 fn type_stat_values(rows: &mut [Row]) {
     let attrs = rows_of(SysTable::PgAttribute);
-    let types = rows_of(SysTable::PgType);
     let atttype: HashMap<(u32, Value), u32> = attrs
         .iter()
         .map(|a| ((oid_at(a, 0), a[4].clone()), oid_at(a, 2)))
         .collect();
-    let base: HashMap<u32, u32> = types
-        .iter()
-        .filter(|t| t[6] == Value::Char(b'd'))
-        .map(|t| (oid_at(t, 0), oid_at(t, 25)))
-        .collect();
+    type_stat_values_by(rows, &atttype);
+}
+
+/// The domains among Postgres's own types, with their base types (parsed alone: a few of
+/// pg_type's 600 rows).
+fn domain_bases() -> &'static HashMap<u32, u32> {
+    static BASES: OnceLock<HashMap<u32, u32>> = OnceLock::new();
+    BASES.get_or_init(|| {
+        let text = source(SysTable::PgType).expect("pg_type data");
+        let cols = SysTable::PgType.columns();
+        let fmt = FormatCtx::default();
+        (text.lines())
+            .filter(|l| l.split('\t').nth(6) == Some("d"))
+            .map(|l| parse_line(SysTable::PgType, &cols, l, &fmt))
+            .map(|t| (oid_at(&t, 0), oid_at(&t, 25)))
+            .collect()
+    })
+}
+
+fn type_stat_values_by(rows: &mut [Row], atttype: &HashMap<(u32, Value), u32>) {
+    let base = domain_bases();
     let fmt = FormatCtx::default();
     for r in rows.iter_mut() {
         let Some(&typ) = atttype.get(&(oid_at(r, 0), r[1].clone())) else {

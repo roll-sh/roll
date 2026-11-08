@@ -11,6 +11,7 @@ pub use parallel::analyzed_plan;
 pub(crate) mod pwagg;
 
 use super::binder::ast::{const_str, inner, with_pos};
+use super::costs::PgMulAdd;
 use super::expr::{Expr, Subquery, SubqueryKind};
 use super::plan::{
     AggCall, ConflictAction, Frame, FrameBound, FrameExclude, FrameUnit, JoinKind, MergeCmd, Plan,
@@ -512,9 +513,6 @@ struct ExNode {
     cte_id: Option<usize>,
     /// An Append member's columns as a node above names them (a set operation's sort).
     out_names: Vec<String>,
-    /// A nested loop whose inner side the executor reads once and keeps (no Materialize
-    /// shown, not parameterized): Postgres rescans it for every outer row.
-    inner_cached: bool,
     node_type: &'static str,
     strategy: Option<&'static str>,
     partial_mode: Option<&'static str>,
@@ -588,6 +586,9 @@ struct ExNode {
     /// Its target list is in the order built (a sort's input target): `tlist_layout`
     /// leaves it, and the nodes below it, as they are.
     fixed_tlist: bool,
+    /// An EvalPlanQual outer plan's node laid out by `epq_layout`: the level's whole-row
+    /// passes leave its target list as it is.
+    epq_laid: bool,
     /// A scan under a pulled-up subquery's selection of its columns (a projection of
     /// plain columns, no node of Postgres's): the scan's physical target list, which it
     /// returns where its consumer takes any (`physical_input`).
@@ -2981,6 +2982,9 @@ fn tree_rels(n: &ExNode, out: &mut Vec<String>) {
 /// the node reading it (`i.f1, i.*` under a nested loop whose inner side reads `i.*`).
 /// `added`: the relations whose scans had no `r.*` before (a row mark's), collected.
 fn whole_row_outputs(n: &mut ExNode, added: &mut Vec<String>) {
+    if n.epq_laid {
+        return;
+    }
     let kids: Vec<usize> = (0..n.children.len())
         .filter(|&k| matches!(n.children[k].relationship, Some("Outer" | "Inner")))
         .collect();
@@ -3017,7 +3021,7 @@ fn whole_row_outputs(n: &mut ExNode, added: &mut Vec<String>) {
         }
         for (i, r) in wants {
             let c = &mut n.children[kids[i]];
-            if can_return_whole(c, &r) && return_whole(c, &r) && !added.contains(&r) {
+            if !c.epq_laid && can_return_whole(c, &r) && return_whole(c, &r) && !added.contains(&r) {
                 added.push(r);
             }
         }
@@ -9635,8 +9639,9 @@ impl Builder<'_, '_> {
                     }
                     c.node.width = w;
                 }
-                // A scan computes the new values, then the row's ctid.
-                if c.node.is_scan() {
+                // A scan computes the new values, then the row's ctid. (So does a Foreign
+                // Scan of a join with its outer plan for EvalPlanQual.)
+                if c.node.is_scan() || (c.node.node_type == "Foreign Scan" && c.node.children.iter().all(|x| x.relationship == Some("Outer"))) {
                     let cat = self.ctx.catalog();
                     let w: u32 = up
                         .sets
@@ -12183,6 +12188,7 @@ impl Builder<'_, '_> {
                 let mut child = child;
                 if self.o.verbose && crate::ext::postgres_fdw::scan::is_postgres_fdw(&self.ctx.catalog(), &up.rules.table) {
                     wholerow_after_ctid(&mut child, refname);
+                    self.dml_join_copies(&mut child, &up.source, refname, true);
                 }
                 n.children.push(child.child("Outer"))
             }
@@ -12211,8 +12217,52 @@ impl Builder<'_, '_> {
                 if self.o.verbose && row_trigs {
                     wholerow_after_ctid(&mut child, refname);
                 }
+                if self.o.verbose {
+                    self.dml_join_copies(&mut child, &dp.source, refname, row_trigs);
+                }
                 n.children.push(child)
             }
+        }
+    }
+
+    /// A per-row UPDATE's / DELETE's source that is a join run remotely holding the target
+    /// (`JoinScan::with_dml_marks`): the other relations' whole rows (`t.*`) after the
+    /// target's ctid (and whole row) in its Foreign Scan's output.
+    fn dml_join_copies(&self, child: &mut ExNode, source: &Plan, refname: &str, wholerow: bool) {
+        let mut p = source;
+        while let Plan::Project { input, .. } = p {
+            p = input;
+        }
+        let Plan::Foreign(f) = p else { return };
+        let Some(js) = f.private.0.as_any().downcast_ref::<crate::ext::postgres_fdw::joinscan::JoinScan>() else { return };
+        let names: Vec<String> = js.dml_copies().into_iter().map(|k| format!("{}.*", quote_ident(&self.refname(&f.scans[k])))).collect();
+        let node = if child.node_type == "Foreign Scan" { child } else { return };
+        let q = quote_ident(refname);
+        let Some(mut i) = node.output.iter().position(|o| *o == format!("{q}.ctid")) else { return };
+        if wholerow && node.output.get(i + 1) == Some(&format!("{q}.*")) {
+            i += 1;
+        }
+        for (j, nm) in names.into_iter().enumerate() {
+            node.output.insert(i + 1 + j, nm);
+        }
+        // (Its outer plan returns the remote SELECT list, its local conditions not checked
+        // again there (postgresGetForeignPlan); each node below it what is read above it.)
+        let tl = js.tlist_names(&|k| self.refname(&f.scans[k]));
+        let filter = node.details.iter().find_map(|d| match d {
+            Detail::Text("Filter", s) => Some(s.clone()),
+            _ => None,
+        });
+        if let Some(o) = node.children.iter_mut().find(|c| c.relationship == Some("Outer")) {
+            if let Some(f) = &filter {
+                let had = o.details.len();
+                o.details.retain(|d| !matches!(d, Detail::Text("Join Filter", s) if s == f));
+                if o.details.len() < had {
+                    o.details.retain(|d| !matches!(d, Detail::Removed("Rows Removed by Join Filter", _)));
+                }
+            }
+            o.output = tl.clone();
+            epq_layout(o, &tl);
+            o.epq_laid = true;
         }
     }
 
@@ -12258,6 +12308,46 @@ impl Builder<'_, '_> {
         (n.rows, n.startup_cost, n.total_cost, n.width) = f.est;
         n.key = Some(addr(p));
         n.fixed_tlist = true;
+        // (A join's columns are its relations' Vars: their widths and distinct counts are
+        // the foreign tables' statistics, as for a projection over it; a grouped relation's
+        // columns its target list's, a Var as wide as its statistics say.)
+        {
+            let cat = self.ctx.catalog();
+            let col = |g: usize, grouped: bool| -> ColInfo {
+                let base = f.scans.iter().zip(&f.cols).find_map(|(sp, map)| match &**sp {
+                    Plan::Scan(s) => map.iter().position(|x| *x == Some(g)).map(|i| (s, i)),
+                    _ => None,
+                });
+                match base {
+                    Some((s, i)) if i < s.table.columns.len() => ColInfo {
+                        width: costs::col_width(&cat, &s.table, i),
+                        var: (!grouped).then(|| costs::VarRef {
+                            table: s.table.clone(),
+                            col: i,
+                            tuples: cat.relstats.get(&s.table.oid).map_or(0.0, |r| r.tuples.max(0.0)),
+                            expr: None,
+                            rows: 0.0,
+                            inh: false,
+                        }),
+                        distinct: None,
+                        groups: None,
+                    },
+                    // (Its ctid as an UPDATE / DELETE target's key.)
+                    Some(_) => ColInfo { width: 6, var: None, distinct: None, groups: None },
+                    None => ColInfo { width: 0, var: None, distinct: None, groups: None },
+                }
+            };
+            n.cols = match f.private.0.output(f) {
+                Some((exprs, _)) => exprs
+                    .iter()
+                    .map(|e| match e {
+                        Expr::Col(g, _) => col(*g, true),
+                        e => ColInfo { width: type_width(&e.ty()), var: None, distinct: None, groups: None },
+                    })
+                    .collect(),
+                None => f.out.iter().map(|&g| col(g, false)).collect(),
+            };
+        }
         let out: Vec<Name> = match f.private.0.output(f) {
             // (A plain column as it is, a value computed remotely parenthesized.)
             Some((exprs, aggs)) => exprs
@@ -16776,11 +16866,6 @@ impl Builder<'_, '_> {
             r.node = mn;
         }
         n.subplans.append(&mut self.pending);
-        n.inner_cached = method == JoinMethod::NestLoop
-            && !lateral
-            && !material
-            && meta.memoize.is_none()
-            && !matches!(kind, JoinKind::Right | JoinKind::Full);
         // The rows' order: a nested loop's or merge join's outer side's (an inner merge
         // join's keys are equal on both sides: either names it).
         if method != JoinMethod::Hash && !matches!(kind, JoinKind::Full) && (kind != JoinKind::Right || swapped) {
@@ -17339,6 +17424,60 @@ fn wholerow_after_ctid(n: &mut ExNode, refname: &str) {
     }
     for c in &mut n.children {
         wholerow_after_ctid(c, refname);
+    }
+}
+
+/// A foreign join's outer plan under a per-row UPDATE / DELETE (`dml_join_copies`): each
+/// node below `n` returns what is read above it, `needed` (the remote SELECT list's Vars,
+/// then those its ancestors' conditions read) in that order: a scan its relation's, a join
+/// its outer side's then its inner side's, a Hash or Materialize its input's.
+fn epq_layout(n: &mut ExNode, needed: &[String]) {
+    let mentions = |text: &str, name: &str| {
+        text.match_indices(name).any(|(i, _)| {
+            let next = text[i + name.len()..].chars().next();
+            let prev = text[..i].chars().next_back();
+            !next.is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '"')
+                && !prev.is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '.' || c == '"')
+        })
+    };
+    let conds: Vec<String> = n
+        .details
+        .iter()
+        .filter_map(|d| match d {
+            Detail::Text("Hash Cond" | "Join Filter" | "Merge Cond", s) => Some(s.clone()),
+            _ => None,
+        })
+        .collect();
+    fn leaves(n: &ExNode, out: &mut Vec<String>) {
+        if n.children.is_empty() {
+            out.extend(n.output.iter().cloned());
+        }
+        n.children.iter().for_each(|c| leaves(c, out));
+    }
+    for c in &mut n.children {
+        c.epq_laid = true;
+        let mut need = needed.to_vec();
+        let mut below = Vec::new();
+        leaves(c, &mut below);
+        for o in below {
+            if !need.contains(&o) && conds.iter().any(|t| mentions(t, &o)) {
+                need.push(o);
+            }
+        }
+        if c.children.is_empty() {
+            let mut out: Vec<String> = need.iter().filter(|x| c.output.contains(x)).cloned().collect();
+            if out.is_empty() {
+                out = c.output.clone();
+            }
+            c.output = out;
+        } else {
+            epq_layout(c, &need);
+            c.output = if matches!(c.node_type, "Hash" | "Materialize") {
+                c.children[0].output.clone()
+            } else {
+                c.children.iter().flat_map(|x| x.output.iter()).filter(|x| need.contains(x)).cloned().collect()
+            };
+        }
     }
 }
 
@@ -18364,9 +18503,6 @@ struct Render<'r> {
     /// and the leader when it participates).
     procs: u64,
     leader: bool,
-    /// Inside a nested loop's inner side the executor ran once for all the outer rows:
-    /// the scans Postgres makes of it.
-    rescans: u64,
     /// A nested loop's inner Materialize about to be shown: the outer rows, each a rescan
     /// of it (its input read once).
     mat_loops: Option<u64>,
@@ -18379,12 +18515,7 @@ struct Render<'r> {
 impl Render<'_> {
     fn stats(&self, key: Option<usize>) -> Option<NodeStats> {
         let mut s = self.instr?.get(key?)?;
-        s.loops *= self.procs * self.rescans;
-        s.rows *= self.rescans;
-        s.removed *= self.rescans;
-        s.searches *= self.rescans;
-        s.fetches *= self.rescans;
-        s.pages *= self.rescans;
+        s.loops = s.loops.saturating_mul(self.procs);
         (s.loops > 0).then_some(s)
     }
 
@@ -18424,23 +18555,14 @@ impl Render<'_> {
         }
     }
 
-    /// Render a node's children, the inner side of a nested loop the executor read once
-    /// as the outer rows' many scans of it.
     fn children_of(&mut self, n: &ExNode, f: &mut dyn FnMut(&mut Self, &ExNode)) {
-        let saved = self.rescans;
         for (i, c) in n.initplans.iter().chain(&n.children).chain(&n.subplans).enumerate() {
-            let inner = n.inner_cached && i == n.initplans.len() + 1;
-            if inner {
-                let outer_rows = n.children.first().and_then(|o| self.stats(o.key)).map_or(0, |s| s.rows);
-                self.rescans = saved * outer_rows;
-            }
             if n.node_type == "Nested Loop" && i == n.initplans.len() + 1 && c.node_type == "Materialize" {
                 let outer_rows = n.children.first().and_then(|o| self.stats(o.key)).map_or(0, |s| s.rows);
                 self.mat_loops = Some(outer_rows);
             }
             f(self, c);
             self.mat_loops = None;
-            self.rescans = saved;
         }
     }
 
@@ -18463,11 +18585,11 @@ impl Render<'_> {
                 Removed::Scan(k) => self
                     .instr
                     .and_then(|i| i.get(*k))
-                    .map_or(0, |s| s.removed * self.rescans),
+                    .map_or(0, |s| s.removed),
                 Removed::Diff(k) => self
                     .instr
                     .and_then(|i| i.get(*k))
-                    .map_or(0, |s| (s.rows * self.rescans).saturating_sub(st.rows)),
+                    .map_or(0, |s| s.rows.saturating_sub(st.rows)),
             })
             .sum();
         (total as f64 / st.loops as f64).round()
@@ -19214,7 +19336,7 @@ pub(crate) fn subplan_costs(exprs: &[Expr], ctx: &ExecCtx) -> (f64, f64) {
             let ops = s.ops.len() as f64 * costs::CPU_OPERATOR_COST;
             if hashed {
                 let est = estimate_subquery(&s.plan, ctx);
-                startup += costs::CPU_OPERATOR_COST.mul_add(est.rows, est.total);
+                startup += costs::CPU_OPERATOR_COST.pg_mul_add(est.rows, est.total);
                 per += ops;
             } else if correlated {
                 let est = estimate_subquery(&s.plan, ctx);
@@ -20997,7 +21119,6 @@ pub fn explain(
         instr,
         w: Writer::new(o.format),
         procs: 1,
-        rescans: 1,
         mat_loops: None,
         leader: crate::sql::paths::parallel::ParCfg::read(ctx).leader,
         jg: super::joins::JoinGucs::read(ctx),

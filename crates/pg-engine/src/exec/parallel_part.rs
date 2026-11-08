@@ -100,6 +100,10 @@ impl Node for WorkerPart {
     fn key_order(&self) -> Option<Vec<(usize, bool, bool)>> {
         self.inner.key_order()
     }
+
+    fn output_order(&self, ctx: &ExecCtx) -> Option<Vec<(usize, bool, bool)>> {
+        self.inner.output_order(ctx)
+    }
 }
 
 /// The plan nodes the workers run (each Gather's child), when only they run them: none

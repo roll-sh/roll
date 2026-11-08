@@ -1529,6 +1529,35 @@ impl Btree {
         }
     }
 
+    /// The entries `kill` would mark that a scan of [lo, hi) passes before the one pointing
+    /// at heap TID `live`, where it stops (RelationFindReplTupleByIndex returns that row):
+    /// (leaf, item) each, for `set_dead`; only the first with `first`.
+    pub fn dead_before(&self, lo: Option<&[u8]>, hi: Option<&[u8]>, all_dead: &dyn Fn(Tid) -> bool, live: Tid, first: bool) -> Vec<(u32, usize)> {
+        let mut marks: Vec<(u32, usize)> = Vec::new();
+        self.kill_walk(lo, hi, &mut |blk, i, tids| {
+            if tids.iter().any(|t| t == live) {
+                return Pass::Mark;
+            }
+            if tids.iter().all(all_dead) {
+                marks.push((blk, i));
+                if first {
+                    return Pass::Mark;
+                }
+            }
+            Pass::Go
+        });
+        marks
+    }
+
+    /// These entries (`dead_before`'s) marked LP_DEAD.
+    pub fn set_dead(&mut self, marks: &[(u32, usize)]) {
+        for &(blk, i) in marks {
+            if let Some(p) = self.pages.get_mut(blk as usize).and_then(|p| p.as_mut()) {
+                p.items.set_dead(i);
+            }
+        }
+    }
+
     /// `kill`'s and `kill_needed`'s walk: down to the leaf where `lo` starts, then right
     /// along the leaves until past `hi`, calling `each(leaf, item, its TIDs)` for every
     /// entry in range not LP_DEAD already, in index order, until it says `Mark` (an entry
@@ -2407,6 +2436,7 @@ impl Builder {
             *self.tree.page_slot(blk) = Some(page);
             i += 1;
         }
+        self.tree.plain_leaves();
         self.tree
     }
 }
@@ -2606,7 +2636,17 @@ impl Btree {
             f.vacuum_all();
         }
         t.pending_delpages = deleted - free.len() as u32;
+        t.plain_leaves();
         Some(t)
+    }
+
+    /// Every leaf kept plain that can be (`leaf::Leaf::plain`): a build's, a layout's.
+    fn plain_leaves(&mut self) {
+        for p in self.pages.iter_mut().flatten() {
+            if p.leaf {
+                p.items.plain();
+            }
+        }
     }
 }
 
@@ -2646,6 +2686,11 @@ mod tests {
         let hint = InsertHint { unchanged: false, dead: &|_| false };
         for i in 0..800 {
             b.insert(Key::new(&vec![vec![0]; 32], &[16; 32]), (i / 226, (i % 226 + 1) as u16), &hint);
+        }
+        // (Laid out item by item, as a page with an LP_DEAD item or a posting list is: its
+        // items' places past 64 KiB. A plain page has none.)
+        for p in b.pages.iter_mut().flatten() {
+            p.items.unplain();
         }
         assert!(b.pages.iter().flatten().any(|p| p.items.bytes() > u16::MAX as usize));
         let mut image = Vec::new();

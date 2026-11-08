@@ -22,6 +22,8 @@
 //! `CRASH_CHECK_STEPS=1` checks ctids after every step and `CRASH_TRACE=<file>` appends every
 //! step's statements to the file; `CRASH_SAVE=<dir>` keeps each crashed state, which
 //! `CRASH_INSPECT=<dir>/s<seed>-r<round>` (with `CRASH_SEED`) recovers and checks again.
+//! `CRASH_POWER=1` (with `--features powerloss`) makes every crash a power cut: what no fsync
+//! covered is lost too.
 
 use pg_engine::engine::{Engine, EngineOptions};
 use pg_engine::session::Session;
@@ -383,6 +385,29 @@ fn async_commit() -> bool {
     std::env::var("CRASH_ASYNC").is_ok_and(|v| v == "1")
 }
 
+/// `CRASH_POWER=1`: each crash is a power cut, not only a process kill. The child records
+/// its file changes (the `powerloss` feature, `storage::powerloss`); then every write and
+/// directory entry no fsync covered is dropped (half the rounds: a seeded part of them is
+/// kept, as a disk may have written them anyway).
+fn power_loss() -> bool {
+    std::env::var("CRASH_POWER").is_ok_and(|v| v == "1")
+}
+
+#[cfg(feature = "powerloss")]
+fn cut_power(dir: &Path, shadow: &Path, keep: Option<u64>, seed: u64, round: u64) {
+    let cut = pg_engine::storage::powerloss::power_cut(&dir.join("data"), shadow, keep).unwrap();
+    eprintln!("seed {seed} round {round}: the power cut took {} writes and {} directory entries (kept some: {})", cut.writes, cut.entries, keep.is_some());
+    // (Files changed outside `storage::durable` and taken as fsynced: none of the databases'.)
+    let adopted = std::fs::read_to_string(shadow.join("adopted")).unwrap_or_default();
+    let ours: Vec<&str> = adopted.lines().filter(|l| l.contains("/base/") || l.ends_with("databases.json")).collect();
+    assert!(ours.is_empty(), "seed {seed} round {round}: written outside storage::durable: {ours:?}");
+}
+
+#[cfg(not(feature = "powerloss"))]
+fn cut_power(_: &Path, _: &Path, _: Option<u64>, _: u64, _: u64) {
+    panic!("CRASH_POWER=1 needs the powerloss feature (cargo test --features powerloss)");
+}
+
 /// The steps txlog holds (by sequential scan).
 fn logged_steps(s: &mut Session) -> std::collections::BTreeSet<usize> {
     s.query("SET enable_indexscan = off; SET enable_bitmapscan = off; SET enable_indexonlyscan = off").unwrap();
@@ -678,6 +703,10 @@ fn crash_round(dir: &Path, seed: u64, round: u64) {
     if let Some(n) = on {
         child.env("CRASH_KILL_ON", n.to_string());
     }
+    let shadow = dir.join("shadow");
+    if power_loss() {
+        child.env("ROLL_POWERLOSS", format!("{}:{}", dir.join("data").display(), shadow.display()));
+    }
     let out = child.output().unwrap();
     let why = String::from_utf8_lossy(&out.stderr)
         .lines()
@@ -685,6 +714,9 @@ fn crash_round(dir: &Path, seed: u64, round: u64) {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(out.status.code().is_none(), "seed {seed} round {round}: the child failed: {why}");
+    if power_loss() {
+        cut_power(dir, &shadow, (r.below(2) == 0).then(|| r.below(1 << 30)), seed, round);
+    }
     if let Ok(save) = std::env::var("CRASH_SAVE") {
         // (The crashed state, for `crash_inspect`.)
         let to = Path::new(&save).join(format!("s{seed}-r{round}"));
@@ -797,5 +829,231 @@ fn recovery_oracle_rejects_partial_and_lost_acknowledged_transactions() {
             .unwrap();
         let want = if partial { "partial transaction" } else { "txlog against the steps logged as committed" };
         assert!(message.contains(want), "{message}");
+    }
+}
+
+/// The power-loss layer itself (`storage::powerloss`): a child writes through
+/// `storage::durable`, then the power is cut. What an fsync covered stays (a file's writes, a
+/// directory's entries); what none did goes: unsynced writes, a create or rename whose
+/// directory wasn't fsynced.
+#[cfg(feature = "powerloss")]
+#[test]
+fn power_cut_keeps_only_what_was_fsynced() {
+    use pg_engine::storage::durable::{self, DFile};
+    if let Ok(dir) = std::env::var("POWER_CUT_CHILD") {
+        let d = Path::new(&dir);
+        let a = DFile::create(&d.join("a")).unwrap();
+        a.write_all_at(b"synced", 0).unwrap();
+        durable::sync_dir(d).unwrap();
+        a.sync_data().unwrap();
+        durable::replace(&d.join("e"), b"durable", true).unwrap();
+        a.write_all_at(b"-lost", 6).unwrap();
+        // (Created and fsynced, but never in a fsynced directory.)
+        DFile::create(&d.join("b")).unwrap().sync_all().unwrap();
+        // (Renamed over an old file without a directory fsync: the old one comes back.)
+        durable::replace(&d.join("c"), b"new", false).unwrap();
+        sigkill();
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let (data, shadow) = (tmp.path().join("data"), tmp.path().join("shadow"));
+    std::fs::create_dir_all(&data).unwrap();
+    std::fs::write(data.join("c"), "old").unwrap();
+    let out = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "power_cut_keeps_only_what_was_fsynced", "--nocapture"])
+        .env("POWER_CUT_CHILD", &data)
+        .env("ROLL_POWERLOSS", format!("{}:{}", data.display(), shadow.display()))
+        .output()
+        .unwrap();
+    assert!(out.status.code().is_none(), "{}", String::from_utf8_lossy(&out.stderr));
+    pg_engine::storage::powerloss::power_cut(&data, &shadow, None).unwrap();
+    let read = |n: &str| std::fs::read_to_string(data.join(n)).ok();
+    assert_eq!(read("a").as_deref(), Some("synced"));
+    assert_eq!(read("b"), None);
+    assert_eq!(read("c").as_deref(), Some("old"));
+    assert_eq!(read("e").as_deref(), Some("durable"));
+}
+
+/// Commits acknowledged into a WAL file the store just made (at open, and after a memtable
+/// filled and the WAL rotated) survive a power cut: the file's directory entry is durable
+/// before they are. The child commits key `k<i>` (fixed width: the store's user keys are
+/// prefix-free) until `ROTATIONS` rotations have happened
+/// and then 5 more, printing each acknowledged `i`, and dies.
+#[cfg(feature = "powerloss")]
+#[test]
+fn power_cut_keeps_commits_in_a_new_wal() {
+    use pg_engine::storage::{Store, StoreOptions};
+    let opts = || StoreOptions { memtable_bytes: 64 << 10, background: false, ..Default::default() };
+    let wals = |d: &Path| std::fs::read_dir(d).unwrap().flatten().filter(|e| e.path().extension().is_some_and(|x| x == "wal")).count();
+    if let Ok(dir) = std::env::var("POWER_WAL_CHILD") {
+        let (d, rotations) = (Path::new(&dir), std::env::var("ROTATIONS").unwrap().parse::<usize>().unwrap());
+        let s = Store::open(&d.join("db"), opts()).unwrap();
+        let (mut i, mut after) = (0u64, 0);
+        while after < 5 {
+            s.commit(vec![(format!("k{i:06}").into_bytes(), Some(vec![b'x'; 1000].into()))], |_| Ok(())).unwrap();
+            println!("acked {i}");
+            i += 1;
+            if wals(&d.join("db")) > rotations {
+                after += 1;
+            }
+        }
+        sigkill();
+    }
+    for rotations in [0, 1, 3] {
+        let tmp = tempfile::tempdir().unwrap();
+        let (data, shadow) = (tmp.path().join("data"), tmp.path().join("shadow"));
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "power_cut_keeps_commits_in_a_new_wal", "--nocapture"])
+            .env("POWER_WAL_CHILD", &data)
+            .env("ROTATIONS", rotations.to_string())
+            .env("ROLL_POWERLOSS", format!("{}:{}", data.display(), shadow.display()))
+            .output()
+            .unwrap();
+        assert!(out.status.code().is_none(), "{}", String::from_utf8_lossy(&out.stderr));
+        let acked = String::from_utf8_lossy(&out.stdout).lines().filter_map(|l| l.strip_prefix("acked ")?.parse::<u64>().ok()).max().unwrap();
+        pg_engine::storage::powerloss::power_cut(&data, &shadow, None).unwrap();
+        let s = Store::open(&data.join("db"), opts()).unwrap();
+        let ts = s.visible_ts();
+        let lost: Vec<u64> = (0..=acked).filter(|i| s.get(format!("k{i:06}").as_bytes(), ts).unwrap().is_none()).collect();
+        assert!(lost.is_empty(), "{} WAL file(s), acknowledged commits lost to a power cut: {} of {}, the first {:?}", rotations, lost.len(), acked + 1, &lost[..lost.len().min(5)]);
+    }
+}
+
+/// The power cut at every point of a fixed store workload: before each write, fsync, create,
+/// rename and removal the store makes (`ROLL_POWERLOSS_AT`), through commits in rotating WAL
+/// files, flushes, a compaction, a commit big enough to go in as an SST of its own and a
+/// clean close. Each cut drops what no fsync covered (and, a second time, a seeded part of
+/// it is kept). The store must open, every acknowledged commit must be there whole, and
+/// nothing after the one in flight.
+#[cfg(feature = "powerloss")]
+#[test]
+fn power_cut_at_every_point() {
+    use pg_engine::storage::{Store, StoreOptions};
+    let opts = || StoreOptions { memtable_bytes: 16 << 10, background: false, ..Default::default() };
+    // Commit `i`'s keys: two small ones, or ten (an SST of its own) when i % 25 == 24.
+    let keys = |i: u64| -> Vec<Vec<u8>> { (0..if i % 25 == 24 { 10 } else { 2 }).map(|k| format!("{i:04}-{k}").into_bytes()).collect() };
+    if let Ok(dir) = std::env::var("POWER_EVERY_CHILD") {
+        let s = Store::open(&Path::new(&dir).join("db"), opts()).unwrap();
+        for i in 0..60u64 {
+            let w = keys(i).into_iter().map(|k| (k, Some(vec![i as u8; 1000].into()))).collect();
+            s.commit(w, |_| Ok(())).unwrap();
+            println!("acked {i}");
+            match i {
+                20 | 45 => s.flush_memtables().unwrap(),
+                30 => s.compact().unwrap(),
+                _ => {}
+            }
+        }
+        s.close().unwrap();
+        println!("ops {}", pg_engine::storage::powerloss::ops());
+        return;
+    }
+    let run = |at: Option<u64>, keep: Option<u64>| -> (String, Option<i32>) {
+        let tmp = tempfile::tempdir().unwrap();
+        let (data, shadow) = (tmp.path().join("data"), tmp.path().join("shadow"));
+        let mut c = std::process::Command::new(std::env::current_exe().unwrap());
+        c.args(["--exact", "power_cut_at_every_point", "--nocapture"])
+            .env("POWER_EVERY_CHILD", &data)
+            .env("ROLL_POWERLOSS", format!("{}:{}", data.display(), shadow.display()));
+        if let Some(n) = at {
+            c.env("ROLL_POWERLOSS_AT", n.to_string());
+        }
+        let out = c.output().unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+        if at.is_none() {
+            return (stdout, out.status.code());
+        }
+        assert!(out.status.code().is_none(), "cut at {at:?}: {}", String::from_utf8_lossy(&out.stderr));
+        let acked = stdout.lines().filter_map(|l| l.strip_prefix("acked ")?.parse::<u64>().ok()).max();
+        pg_engine::storage::powerloss::power_cut(&data, &shadow, keep).unwrap();
+        let what = format!("cut before operation {} (keeping {keep:?}), {acked:?} acknowledged", at.unwrap());
+        let s = Store::open(&data.join("db"), opts()).unwrap_or_else(|e| panic!("{what}: the store doesn't open: {e:?}"));
+        let ts = s.visible_ts();
+        let flight = acked.map_or(0, |a| a + 1);
+        for i in 0..60u64 {
+            let have: Vec<bool> = keys(i).iter().map(|k| s.get(k, ts).unwrap().is_some()).collect();
+            let all = have.iter().all(|&h| h);
+            let none = have.iter().all(|&h| !h);
+            assert!(all || none, "{what}: commit {i} is partly there: {have:?}");
+            if i < flight {
+                assert!(all, "{what}: acknowledged commit {i} is lost");
+            } else if i > flight {
+                assert!(none, "{what}: commit {i}, after the one in flight, is there");
+            }
+        }
+        (stdout, None)
+    };
+    let (out, code) = run(None, None);
+    assert_eq!(code, Some(0), "{out}");
+    let ops: u64 = out.lines().find_map(|l| l.strip_prefix("ops ")?.parse().ok()).unwrap();
+    assert!(ops > 100, "only {ops} operations recorded");
+    for at in 1..=ops {
+        run(Some(at), None);
+        run(Some(at), Some(at));
+    }
+}
+
+/// Group commit keeps a prefix through a power cut: 8 threads commit at once, each commit
+/// taking the next number of a sequence under the commit lock (so in commit order), with rotations
+/// and flushes on the way; the power goes at a seeded moment. The numbers that survive must be
+/// exactly 0..k, with no gap (a later commit never durable without an earlier one), and k past
+/// every acknowledged one. Releasing locks before the fsync (pipelined commits) relies on this.
+#[cfg(feature = "powerloss")]
+#[test]
+fn power_cut_keeps_a_prefix_of_concurrent_commits() {
+    use pg_engine::storage::{Store, StoreOptions};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    let opts = || StoreOptions { memtable_bytes: 64 << 10, ..Default::default() };
+    if let Ok(dir) = std::env::var("POWER_PREFIX_CHILD") {
+        let us: u64 = std::env::var("POWER_PREFIX_US").unwrap().parse().unwrap();
+        let s = Store::open(&Path::new(&dir).join("db"), opts()).unwrap();
+        let seq = std::sync::Arc::new(AtomicU64::new(0));
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_micros(us));
+            sigkill();
+        });
+        let threads: Vec<_> = (0..8)
+            .map(|_| {
+                let (s, seq) = (s.clone(), seq.clone());
+                std::thread::spawn(move || {
+                    loop {
+                        let mut n = 0;
+                        s.commit_grouped(Vec::new(), |_, w| {
+                            n = seq.fetch_add(1, Ordering::Relaxed);
+                            w.push((format!("seq{n:08}").into_bytes(), Some(vec![7u8; 300].into())));
+                            Ok(())
+                        }, |_| {}, |_| {}).unwrap();
+                        println!("acked {n}");
+                    }
+                })
+            })
+            .collect();
+        threads.into_iter().for_each(|t| t.join().unwrap());
+    }
+    for (i, us) in [20_000u64, 60_000, 150_000, 400_000, 900_000].into_iter().enumerate() {
+        for keep in [None, Some(i as u64 + 1)] {
+            let tmp = tempfile::tempdir().unwrap();
+            let (data, shadow) = (tmp.path().join("data"), tmp.path().join("shadow"));
+            let out = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "power_cut_keeps_a_prefix_of_concurrent_commits", "--nocapture"])
+                .env("POWER_PREFIX_CHILD", &data)
+                .env("POWER_PREFIX_US", us.to_string())
+                .env("ROLL_POWERLOSS", format!("{}:{}", data.display(), shadow.display()))
+                .output()
+                .unwrap();
+            assert!(out.status.code().is_none(), "{}", String::from_utf8_lossy(&out.stderr));
+            // (A line cut by the kill isn't an acknowledgement.)
+            let text = String::from_utf8_lossy(&out.stdout);
+            let whole = &text[..text.rfind('\n').map_or(0, |n| n + 1)];
+            let acked = whole.lines().filter_map(|l| l.strip_prefix("acked ")?.parse::<u64>().ok()).max();
+            pg_engine::storage::powerloss::power_cut(&data, &shadow, keep).unwrap();
+            let s = Store::open(&data.join("db"), opts()).unwrap();
+            let have: Vec<u64> = s
+                .scan(b"seq", b"seq~", s.visible_ts())
+                .map(|r| String::from_utf8_lossy(&r.unwrap().0)[3..].parse::<u64>().unwrap())
+                .collect();
+            let what = format!("cut after {us} us (keeping {keep:?}): {} commits there, {acked:?} the last acknowledged", have.len());
+            assert!(have.iter().enumerate().all(|(i, &n)| i as u64 == n), "{what}: not a prefix: {:?}", have.iter().enumerate().find(|(i, n)| *i as u64 != **n));
+            assert!(acked.is_none_or(|a| (have.len() as u64) > a), "{what}: an acknowledged commit is lost");
+        }
     }
 }

@@ -413,3 +413,61 @@ fn update_from_join_sent_whole() {
     let rows = run(&mut s, "DELETE FROM ft1 USING ft2 WHERE ft1.i = ft2.i AND ft2.i === 2 RETURNING ft1.i, ft1.v");
     assert_eq!(rows, vec![r#"[Int4(2), Text("w2")]"#.to_string()]);
 }
+
+/// An analyzed foreign table: ANALYZE samples the remote table remotely (analyze_sampling:
+/// TABLESAMPLE or random() at the sample's share of the remote reltuples) and takes its
+/// rows from the remote side; aggregations sent whole are costed as estimate_path_cost_size
+/// costs a grouped relation (its groups, HAVING, target list), and a pushed join's width is
+/// its columns' statistics' (PostgreSQL 18.6's numbers).
+#[test]
+fn analyzed_foreign_table_estimates() {
+    let (_data, engine) = loopback();
+    let mut s = engine.connect(1, "postgres", "postgres", "t").unwrap();
+    for q in [
+        "CREATE TABLE tb (id int PRIMARY KEY, v text)",
+        "CREATE TABLE ts (id int PRIMARY KEY, w text)",
+        "CREATE TABLE tg (id int PRIMARY KEY, a text, b bigint)",
+        "INSERT INTO tb SELECT i, 'v' || i FROM generate_series(1, 2000) i",
+        "INSERT INTO ts SELECT i, 'w' || i FROM generate_series(1, 200) i",
+        "INSERT INTO tg SELECT i, md5(i::text), i % 97 FROM generate_series(1, 6000) i",
+        "ANALYZE tb, ts, tg",
+        "CREATE FOREIGN TABLE fb (id int, v text) SERVER loopback OPTIONS (table_name 'tb')",
+        "CREATE FOREIGN TABLE fsd (id int, w text) SERVER loopback OPTIONS (table_name 'ts')",
+        "CREATE FOREIGN TABLE fg (id int, a text, b bigint) SERVER loopback OPTIONS (table_name 'tg')",
+        "SET default_statistics_target = 10",
+        "ANALYZE fb, fsd, fg",
+    ] {
+        run(&mut s, q);
+    }
+    let counts = "SELECT relname::text, reltuples FROM pg_class WHERE relname IN ('fb', 'fsd', 'fg') ORDER BY 1";
+    let want = [r#"[Text("fb"), Float4(2000.0)]"#, r#"[Text("fg"), Float4(6000.0)]"#, r#"[Text("fsd"), Float4(200.0)]"#];
+    assert_eq!(run(&mut s, counts), want);
+    // (Each method; the table's option over the server's.)
+    for q in [
+        "ALTER SERVER loopback OPTIONS (ADD analyze_sampling 'system')",
+        "ANALYZE fg",
+        "ALTER SERVER loopback OPTIONS (SET analyze_sampling 'random')",
+        "ANALYZE fg",
+        "ALTER FOREIGN TABLE fg OPTIONS (ADD analyze_sampling 'bernoulli')",
+        "ANALYZE fg",
+    ] {
+        run(&mut s, q);
+    }
+    assert_eq!(run(&mut s, counts), want);
+    assert_eq!(run(&mut s, "SELECT count(*) FROM pg_stats WHERE tablename = 'fg'"), ["[Int8(3)]"]);
+    for (q, want) in [
+        ("SELECT b, count(*) FROM fg GROUP BY b", "Foreign Scan  (cost=130.00..268.34 rows=97 width=16)"),
+        ("SELECT b, count(*), sum(id) FROM fg GROUP BY b HAVING sum(id) > 10", "Foreign Scan  (cost=145.00..269.93 rows=32 width=24)"),
+        ("SELECT id % 10, avg(b) FROM fg WHERE id % 2 = 0 GROUP BY 1", "Foreign Scan  (cost=100.15..253.97 rows=30 width=36)"),
+        ("SET enable_hashjoin = off; SET enable_mergejoin = off; SET enable_nestloop = off", ""),
+        ("SELECT fb.v FROM fb JOIN fsd ON fb.id = fsd.id", "Foreign Scan  (cost=100.00..1176.00 rows=200 width=5)"),
+        ("SELECT fsd.w, count(*) FROM fb JOIN fsd ON fb.id = fsd.id GROUP BY fsd.w", "Foreign Scan  (cost=101.00..1179.00 rows=200 width=12)"),
+    ] {
+        if want.is_empty() {
+            run(&mut s, q);
+            continue;
+        }
+        let p = run(&mut s, &format!("EXPLAIN {q}")).join("\n");
+        assert!(p.contains(want), "{q}: {p}");
+    }
+}
