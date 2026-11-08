@@ -101,6 +101,7 @@ The product should feel alive: dots react to the cursor and the marks "think". E
   - Produce and fetch never decode records: batches go to disk and back to clients as received. Only compaction, timestamp lookups, compacted-topic key checks and the HTTP API decode them, through `records.rs`.
   - Compaction rewrites uploaded chunks into new objects with `.c<generation>.kb` keys and swaps them in atomically, keeping offsets. Never reuse a chunk key.
   - Local disk is a cache: closed partitions drop their local copies (`evict_on_unload`), and `local_disk_bytes` caps open ones. Never drop a segment that isn't fully uploaded or that holds an open transaction (`keep_local_from`): transaction state is rebuilt from local segments.
+  - On the fleet (`fleet.rs`, the broker README's "On the fleet") a stream has one owner (lease `stream:cluster:<id>`) and only it opens the stream's partitions; connections are spliced to it after SASL and HTTP is forwarded. Every catalog write that belongs to a stream is fenced (`Store::fenced`: the stream's generation checked in the same transaction), and object keys written there carry the tenure. Acknowledgements wait for the owner's write-ahead log object in object storage (`LogConfig::remote`): never move a high watermark past what object storage has, and never trust a node's local copy of a stream it just took over.
   - Encoding fails if a response sets a field outside its version range. Gate every field on `ctx.version`. `tests/protocol.rs` encodes every API at every version.
   - Never size an allocation from a count or length a peer sent; bound it by the bytes actually present. `kafka-protocol` is vendored with bounded decoders (`vendor/kafka-protocol/ROLL.md`), and the broker tests fail any allocation over 1 GiB (`tests/common`).
   - After touching anything stream-related, run `pnpm test:stream`. It skips itself when nothing relevant changed and runs the Java tool tests in Docker (`apache/kafka:4.1.0`).
@@ -111,6 +112,7 @@ The product should feel alive: dots react to the cursor and the marks "think". E
     - HTTP: `tests/http.rs`
     - storage: `tests/storage.rs`
     - compaction: `tests/compaction.rs`
+    - the fleet (ownership, takeover, handoff, fencing): `tests/cluster.rs`
   - Set `ROLL_E2E_S3_BUCKET` (plus `ROLL_E2E_S3_ENDPOINT` and AWS credentials) to run the broker tests against S3.
   - `roll stream …` in `crates/roll-cli` and `/dashboard/streams` both use the HTTP API.
 - **Code (source control, "keep the code rolling"):**
