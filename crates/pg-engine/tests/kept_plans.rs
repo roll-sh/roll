@@ -328,49 +328,105 @@ fn generic_cost_uses_choice_context_after_parse() {
     assert_eq!((row[0].clone(), row[1].clone()), (Value::Int8(1), Value::Int8(5)));
 }
 
-/// A custom plan of a lone scan is the one before with its scan's path chosen again for the
-/// new values (`Analyzed::rechosen` over the planner's `ScanChoice::rechoose`) while the same
-/// path wins and the sizes planning read hold: a range wide enough for another path, a table
-/// grown since, DDL and EXPLAIN EXECUTE plan afresh. Debug builds compare every such plan and
-/// its cost with planning the values.
+/// Rechosen custom scans return every ordered row and value, including after parameter,
+/// data, snapshot and planning-environment changes. Counters only establish reuse coverage.
 #[test]
 fn custom_plans_choose_the_scan_again() {
+    use pg_engine::session::{Outcome, QueryResult, Session, state::SessionState};
+    use std::collections::BTreeMap;
+
     let dir = tempfile::tempdir().unwrap();
     let mut s = engine_session(open_store(dir.path()), "rechoose");
     s.query("CREATE TABLE t (id int PRIMARY KEY, v int NOT NULL)").unwrap();
     s.query("INSERT INTO t SELECT g, g % 13 FROM generate_series(1, 5000) g").unwrap();
     s.query("ANALYZE t").unwrap();
+    let mut data: BTreeMap<i32, i32> = (1..=5000).map(|id| (id, id % 13)).collect();
     let range = "SELECT id, v FROM t WHERE id BETWEEN $1 AND $2 ORDER BY id";
-    let first = |lo: i64| format!("{:?}", Value::Int4(lo.max(1) as i32));
-    let run = |s: &mut pg_engine::session::Session, lo: i64, hi: i64| {
-        ext(s, "rr", range, &[Some(&lo.to_string()), Some(&hi.to_string())]).unwrap()
+    let check = |q: QueryResult, data: &BTreeMap<i32, i32>, lo: Option<i32>, hi: Option<i32>| {
+        let want: Vec<Vec<Value>> = data.iter().filter(|&(&id, _)| {
+            lo.is_some_and(|lo| id >= lo) && hi.is_some_and(|hi| id <= hi)
+        }).map(|(&id, &v)| vec![Value::Int4(id), Value::Int4(v)]).collect();
+        assert_eq!(q.rows, want, "complete ordered result for {lo:?}..={hi:?}");
+        assert_eq!(q.tag, format!("SELECT {}", want.len()));
+    };
+    // Parse once; every later call binds new values to the same named statement.
+    s.parse_message("rr", range, &[]).unwrap();
+    s.sync().unwrap();
+    let run = |s: &mut Session, data: &BTreeMap<i32, i32>, lo: Option<i32>, hi: Option<i32>| {
+        let params = [lo, hi].into_iter().map(|v| v.map(|v| v.to_string().into_bytes())).collect();
+        s.bind_message("", "rr", params, &[], Vec::new()).unwrap();
+        let Outcome::Done(q) = s.execute_portal("", 0).unwrap().0 else { panic!("expected SELECT") };
+        s.sync().unwrap();
+        check(q, data, lo, hi);
     };
     let used = s.rechosen_custom_uses();
     for (lo, hi) in [(1, 100), (17, 116), (400, 499), (4950, 5049), (30, 129)] {
-        assert_eq!(run(&mut s, lo, hi), first(lo));
+        run(&mut s, &data, Some(lo), Some(hi));
     }
-    // (The first is checked against binding afresh; the ones after are chosen again.)
     assert!(s.rechosen_custom_uses() >= used + 3, "{}", s.rechosen_custom_uses() - used);
-    // Every range, a whole-table one (another path) among them, as planning gives it.
     s.query("SET plan_cache_mode = force_custom_plan").unwrap();
+    // A whole-table path, clipped/negative bounds, reversed bounds, then nonempty again.
     for (lo, hi) in [(1, 5000), (2, 101), (-50, 3), (100, 99), (2500, 2600)] {
-        let want = if hi < lo.max(1) { "SELECT 0".to_string() } else { first(lo) };
-        assert_eq!(run(&mut s, lo, hi), want, "{lo} {hi}");
+        run(&mut s, &data, Some(lo), Some(hi));
     }
     let counts = s.query("SELECT generic_plans, custom_plans FROM pg_prepared_statements WHERE name = 'rr'").unwrap();
     assert_eq!(counts.last().unwrap().rows[0], vec![Value::Int8(0), Value::Int8(10)]);
-    // EXPLAIN EXECUTE plans afresh and shows the values.
+    for (lo, hi) in [(None, Some(100)), (Some(1), None), (None, None), (Some(5001), Some(5100)), (Some(45), Some(145))] {
+        run(&mut s, &data, lo, hi);
+    }
     s.query("PREPARE rx (int, int) AS SELECT id, v FROM t WHERE id BETWEEN $1 AND $2 ORDER BY id").unwrap();
-    for lo in [5, 50, 500] {
-        assert_eq!(one(&mut s, &format!("EXECUTE rx({lo}, {})", lo + 99)), Some(Value::Int4(lo)));
+    for (lo, hi) in [(5, 104), (50, 149), (500, 599), (100, 99), (4998, 5100), (1, 5000)] {
+        let q = s.query(&format!("EXECUTE rx({lo}, {hi})")).unwrap().pop().unwrap();
+        check(q, &data, Some(lo), Some(hi));
     }
     let plan = s.query("EXPLAIN (COSTS OFF) EXECUTE rx(7, 106)").unwrap();
     let text: Vec<String> = plan.last().unwrap().rows.iter().map(|r| format!("{:?}", r[0])).collect();
     assert!(text.iter().any(|l| l.contains("(id >= 7) AND (id <= 106)")), "{text:?}");
-    // A table grown since and DDL: planned again, the same rows.
+    run(&mut s, &data, Some(7), Some(106));
+    // Size, statistics, DDL and settings invalidate retained planning assumptions.
     s.query("INSERT INTO t SELECT g, g % 13 FROM generate_series(5001, 9000) g").unwrap();
-    assert_eq!(run(&mut s, 8990, 9089), first(8990));
-    s.query("CREATE INDEX ON t (v)").unwrap();
-    assert_eq!(run(&mut s, 3, 102), first(3));
-    assert_eq!(run(&mut s, 4, 103), first(4));
+    data.extend((5001..=9000).map(|id| (id, id % 13)));
+    run(&mut s, &data, Some(8990), Some(9089));
+    for sql in ["ANALYZE t", "CREATE INDEX ON t (v)", "SET enable_indexscan = off", "RESET enable_indexscan", "ALTER TABLE t DROP CONSTRAINT t_pkey"] {
+        s.query(sql).unwrap();
+        run(&mut s, &data, Some(3), Some(102));
+        run(&mut s, &data, Some(4), Some(103));
+    }
+    let q = s.query("EXECUTE rx(8990, 9089)").unwrap().pop().unwrap();
+    check(q, &data, Some(8990), Some(9089));
+
+    let mut writer = Session::new(SessionState::new(s.state.db.clone(), s.state.cluster.clone(), "postgres", 4243));
+    for level in ["READ COMMITTED", "REPEATABLE READ"] {
+        s.query(&format!("BEGIN ISOLATION LEVEL {level}")).unwrap();
+        run(&mut s, &data, Some(40), Some(45)); // establish the transaction snapshot
+        run(&mut s, &data, Some(9001), Some(9003)); // empty before the writer's insert
+        writer.query("BEGIN; UPDATE t SET v = -4200 WHERE id = 42; DELETE FROM t WHERE id = 43; INSERT INTO t VALUES (9002, -9002)").unwrap();
+        // Neither isolation level sees another transaction's uncommitted changes.
+        run(&mut s, &data, Some(40), Some(45));
+        run(&mut s, &data, Some(9001), Some(9003));
+        writer.query("COMMIT").unwrap();
+        let mut committed = data.clone();
+        committed.insert(42, -4200);
+        committed.remove(&43);
+        committed.insert(9002, -9002);
+        let visible = if level == "READ COMMITTED" { &committed } else { &data };
+        run(&mut s, visible, Some(40), Some(45));
+        run(&mut s, visible, Some(9001), Some(9003));
+        s.query("COMMIT").unwrap();
+        run(&mut s, &committed, Some(40), Some(45));
+        run(&mut s, &committed, Some(9001), Some(9003));
+        // Own writes are visible to reuse, and rollback restores complete results.
+        s.query("BEGIN; UPDATE t SET v = -4400 WHERE id = 44; DELETE FROM t WHERE id = 9002").unwrap();
+        let mut own = committed.clone();
+        own.insert(44, -4400);
+        own.remove(&9002);
+        run(&mut s, &own, Some(40), Some(45));
+        run(&mut s, &own, Some(9001), Some(9003));
+        s.query("ROLLBACK").unwrap();
+        run(&mut s, &committed, Some(40), Some(45));
+        run(&mut s, &committed, Some(9001), Some(9003));
+        writer.query("UPDATE t SET v = 3 WHERE id = 42; INSERT INTO t VALUES (43, 4); DELETE FROM t WHERE id = 9002").unwrap();
+        run(&mut s, &data, Some(40), Some(45));
+        run(&mut s, &data, Some(9001), Some(9003));
+    }
 }
