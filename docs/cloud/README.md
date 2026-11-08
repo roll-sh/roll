@@ -150,7 +150,9 @@ written once in SQLite's dialect), as roll code's did.
 - **Pipeline** (`.github/workflows/deploy.yml`): every merge to `main` builds one arm64 image
   (rolld plus the dashboard), pushes it to ECR through GitHub OIDC (no stored AWS keys), then:
   1. **canary**: one node of the new version joins the fleet and takes its share; it bakes for
-     10 minutes while alarms watch errors, latency, restarts and handoff failures;
+     10 minutes while alarms watch errors (HTTP 5xx), TCP resets, crashed or unhealthy nodes and
+     the healthy-node count (latency and handoff-failure alarms come with the metrics rolld will
+     publish under `RollCloud`);
   2. **roll**: the rest are replaced one at a time, each new node healthy before the next old one
      stops;
   3. **rollback**: any alarm, failed health check or ECS circuit breaker puts the previous image
@@ -233,11 +235,31 @@ The contract between the stack, the image and rolld. Each setting is a flag with
 | `ROLL_ACME_DIRECTORY`, `ROLL_ACME_EMAIL` | Let's Encrypt production, ops address | |
 | `ROLL_CLOUDFLARE_API_TOKEN` | from Secrets Manager | DNS edit on both zones, for DNS-01 only |
 | `ROLL_DASHBOARD_UPSTREAM` | `http://127.0.0.1:3000` | the dashboard container in the same task |
+| `ROLL_DRAIN_TIMEOUT` | `90` | seconds a stopping node waits for its leases to move; `ROLL_CODE_DRAIN_TIMEOUT` stays an alias |
+| `ROLL_LOG_FORMAT` | `json` | one JSON object per line (see "Logs") |
+| `ROLL_CODE_PREVIEW_DOMAIN` | `roll.site` | previews answer on `chg-<id>.roll.site` |
 
 Public ports (NLB listener → node port): 443 → 8443 (HTTPS: dashboard, API, git, S3, REST data
 planes, WebSockets), 5432, 6379, 9092, 9042, 5671, 8883, 61614 and 5551, each to the same port on
 the node. The NLB's health check is `GET http://<node>:7070/healthz`: 200 while the node serves and
-isn't draining.
+isn't draining. It runs every 5 s and takes a node out after 2 failures, so a stopping node keeps
+serving for at least 15 s after `/healthz` starts failing before it closes listeners. The ECS stop
+timeout is 120 s (drain 90 + NLB 10–15 + margin), which also fits inside Spot's two-minute notice.
+
+The instances are the NLB's targets (an ECS service attaches at most five target groups; there are
+nine ports), registered by the instance group. Client IP preservation is off: client addresses
+come only from PROXY protocol v2, on every public port. Health checks on 7070 carry no PROXY
+header.
+
+### Logs
+
+rolld writes one JSON object per line on stdout (`ROLL_LOG_FORMAT=json`; tracing-subscriber's
+JSON format with the event's fields flattened into the object). The stack's metric filters
+assume two fields:
+
+- `level`: `"ERROR"`, `"WARN"`, `"INFO"`, …; `{ $.level = "ERROR" }` counts `ErrorLogs`.
+- `status`: a number on the line logged when an HTTP request is answered (any listener);
+  `{ $.status >= 500 }` counts `Http5xx`, which the `errors` alarm watches.
 
 ## Where everything lives
 
@@ -255,7 +277,7 @@ isn't draining.
 | part | state |
 | --- | --- |
 | code + agents on the cluster layer | built (Postgres leases); DynamoDB backend in progress |
-| AWS stack, image, pipeline, Cloudflare | in progress |
+| AWS stack, image, pipeline, Cloudflare | built (`deploy/cloud/README.md`); not yet run against AWS |
 | edge | in progress |
 | control-plane auth lockdown | in progress |
 | GitHub resilience | in progress |
