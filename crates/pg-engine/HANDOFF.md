@@ -5123,6 +5123,35 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
     backend_lifecycle, the regress subset create_misc, create_table, create_index, select,
     subselect, prepare, plancache, plpgsql, arrays on a default-settings reference: 3,256 /
     3,256 units, none changed against `results.tsv`.
+  - *Custom-plan reuse* (item 1; ready on `wip/a178`, commit "custom-plan reuse", waiting for
+    agent 177's `paths::ScanChoice` to land: push it rebased over 177's commit, the `TMP`
+    commit dropped). The interface agreed with 177 through the coordinator: the planner keeps
+    a lone scan's path choice (`paths::keeping_choice(f) -> (T, Option<Arc<ScanChoice>>)`,
+    the Rel without its clauses, what it was planned for, the settings), and
+    `ScanChoice::rechoose(kept, placed, ctx)` estimates the new clauses and chooses the path
+    again, giving the scan when the same path kind and indexes win, else None. The session
+    side (`litplan::ParamEntry::kept`, `KeptCustom`): a Parse entry keeps its last custom plan
+    made from the analysis with its choice and the sizes its planning read (`literals::
+    recording`, data endpoint reads left out: the estimate reads them again); on the next
+    custom plan, while the entry's environment and those sizes hold (`reads_hold`) and no
+    `$n` is read outside the WHERE (`Analyzed::rechoosable`), `Analyzed::rechosen` places the
+    WHERE with the new values (`placed`), asks `rechoose` for the scan, swaps it under the
+    kept projections (`scan_swapped`) and checks the plan still costs by its scan alone
+    (`planned_total`). Counted as custom; EXPLAIN EXECUTE and the debug check bind afresh
+    (`bound_custom(.., reuse = false)`); debug builds compare every reused plan and its cost
+    with planning the values. Test kept_plans `custom_plans_choose_the_scan_again`. Verified
+    over 177's WIP (87169297c): debug crate tests, regress subset 2,381 / 2,381, clippy.
+    8-client range read: 193-200 us of CPU per operation against base's 220-238 and
+    PostgreSQL's 138-141 (1.42x, was 1.64x). What is left of its planning is
+    `rechoose` (14.5% of samples, of which `scan_path_applied` 9.5%: every path costed again)
+    and placing the WHERE (3.3%): the planner's.
+  - Left: the plain-query STABLE-cast rule above (planner); `bind_values` for DML, joins,
+    sub-selects and pruning; Bind's result-description copies (a `Vec<OutCol>` per Bind and
+    per Execute, ~1-2%); the row-lock table's one mutex (BENCH, off-CPU at 32 clients);
+    pipelined fsync (174's conditions, its power-loss work still in `wip/a174`); the +0.8 MB
+    at 100 idle sessions from round 5 (not reproduced as a difference here: 293-314 KB per
+    session for base and this round alike). postgres_fdw's inherited updates (agent 172:
+    binding 4.7%, allocation 15%) are DML on the remote side, which the reuse doesn't cover.
 - The full crate test suite (`cargo test -p pg-engine`) passes: unit tests, 350+ golden
   files in engine and wire mode, the wire tests (including a concurrency stress test), the
   storage-format and layout tests.

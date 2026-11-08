@@ -183,6 +183,12 @@ machine was shared (load 10-25).
 | tpcb-like prepared, 8 clients, ms CPU / tx | 0.273-0.275 | 0.354-0.379 | 0.363-0.366 |
 | simple-update prepared, 8 clients, ms CPU / tx | 0.184-0.187 | 0.228-0.232 | 0.224-0.241 |
 
+Custom-plan reuse (item 1, `c50d2563f`: batch 1, the reuse and agent 177's WIP ScanChoice),
+three more rounds alternating PostgreSQL, base, b1, reuse on a busier machine: the range read
+**193.3-200.1** us CPU / op against base 220.4-238.1, b1 217.1-230.9 and PostgreSQL
+137.6-141.1 (1.42x PostgreSQL's, base 1.64x); 18,184-19,033 tps against 15,558-16,747 (base)
+and 25,156-26,393 (PostgreSQL).
+
 Footprint: 100 idle sessions (`bench idle --sessions 100 --dbs 10`, a fresh data directory
 per run, three alternated runs each): 293-314 KB per session either side (base 303-313, b1
 293-314); a session keeps at most 8 KB of body buffer while idle.
