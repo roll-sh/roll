@@ -217,6 +217,9 @@ impl Drop for Lease {
     }
 }
 
+/// A stream taken over: its tenure's generation, and its transactions to finish.
+type TakenOver = (Arc<Stream>, i64, Vec<(String, String)>);
+
 /// Where a connection or request for a stream runs.
 pub enum Routed {
     Local(Lease),
@@ -315,12 +318,15 @@ impl Broker {
                 return;
             }
             match self.try_take_over(id, lease).await {
-                Ok(Some((s, generation))) => {
+                Ok(Some((s, generation, unfinished))) => {
                     info!(stream = id, generation, "serving the stream here");
                     tokio::spawn(self.clone().wal_writer(s.clone(), generation));
                     if let Some(guard) = self.fleet().cluster.guard(&k) {
                         tokio::spawn(self.clone().hold(s, guard, generation));
                     }
+                    // Their markers go through the write-ahead log, which runs now.
+                    let b = self.clone();
+                    tokio::spawn(async move { b.txns.finish(&b, unfinished).await });
                     return;
                 }
                 Ok(None) => return,
@@ -337,7 +343,7 @@ impl Broker {
         }
     }
 
-    async fn try_take_over(self: &Arc<Self>, id: &str, lease: i64) -> anyhow::Result<Option<(Arc<Stream>, i64)>> {
+    async fn try_take_over(self: &Arc<Self>, id: &str, lease: i64) -> anyhow::Result<Option<TakenOver>> {
         let k = key(id);
         let (me, sid) = (self.clone(), id.to_string());
         let (row, topics, generation, rows, remote) = blocking(move || {
@@ -376,14 +382,15 @@ impl Broker {
                 p.remote_data.store(true, Ordering::Relaxed);
             }
         }
-        self.txns.recover_stream(self, &s.id).await?;
+        let (me, sid) = (self.clone(), s.id.clone());
+        let unfinished = blocking(move || me.txns.recover_stream(&me, &sid)).await?;
         *s.tenure.seq.lock().await = rows.last().map_or(1, |r| r.seq + 1);
         if self.fleet().cluster.epoch(&k) != Some(lease) {
             anyhow::bail!("the lease moved during the takeover");
         }
         s.tenure.set(Serving::Yes { lease, generation });
         debug!(stream = %s.id, objects = rows.len(), batches = replayed, "replayed the write-ahead log");
-        Ok(Some((s, generation)))
+        Ok(Some((s, generation, unfinished)))
     }
 
     /// Stop serving `id`: its lease is gone. Partitions close (waiting requests get

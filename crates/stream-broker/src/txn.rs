@@ -50,16 +50,20 @@ impl Txns {
         if b.fleet.is_some() {
             return Ok(());
         }
-        self.load(b, b.store.txns()?).await
+        let unfinished = self.load(b.store.txns()?);
+        self.finish(b, unfinished).await;
+        Ok(())
     }
 
-    /// Taking a stream over: its transactions, finishing any the last owner left mid-commit/abort.
-    pub async fn recover_stream(&self, b: &Broker, stream: &str) -> anyhow::Result<()> {
+    /// Taking a stream over: load its transactions. Returns those the last owner left
+    /// mid-commit/abort, for [`Txns::finish`] once the stream is served (their markers need its
+    /// write-ahead log). Until then requests for them wait.
+    pub fn recover_stream(&self, b: &Broker, stream: &str) -> anyhow::Result<Vec<(String, String)>> {
         self.drop_stream(stream);
-        self.load(b, b.store.txns_of(stream)?).await
+        Ok(self.load(b.store.txns_of(stream)?))
     }
 
-    async fn load(&self, b: &Broker, rows: Vec<TxnRow>) -> anyhow::Result<()> {
+    fn load(&self, rows: Vec<TxnRow>) -> Vec<Key> {
         let mut unfinished = Vec::new();
         for row in rows {
             let key = (row.stream_id.clone(), row.txn_id.clone());
@@ -69,6 +73,11 @@ impl Txns {
             }
             self.map.lock().unwrap().insert(key, Arc::new(tokio::sync::Mutex::new(row)));
         }
+        unfinished
+    }
+
+    /// Write the markers of transactions left mid-commit/abort, and complete them.
+    pub async fn finish(&self, b: &Broker, unfinished: Vec<Key>) {
         for (stream, id) in unfinished {
             if let Some(e) = self.entry(&stream, &id) {
                 let mut t = e.lock().await;
@@ -79,7 +88,6 @@ impl Txns {
                 }
             }
         }
-        Ok(())
     }
 
     /// InitProducerId. Without a transactional id this just allocates (or bumps) an idempotent
