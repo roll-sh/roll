@@ -607,8 +607,8 @@ pub fn open_scan(s: &ScanPlan, shared: Option<&Arc<crate::sql::plan::Plan>>, nee
             erb: Default::default(),
             erows: Vec::new(),
             eheld: false,
-        erows: Vec::new(),
-        eheld: false,
+            point: None,
+            preader: None,
             spare: None,
             fscan: None,
             fetch_calls: 0,
@@ -704,8 +704,8 @@ pub fn open_scan(s: &ScanPlan, shared: Option<&Arc<crate::sql::plan::Plan>>, nee
             erb: Default::default(),
             erows: Vec::new(),
             eheld: false,
-        erows: Vec::new(),
-        eheld: false,
+            point: None,
+            preader: None,
             spare: None,
             fscan: None,
             fetch_calls: 0,
@@ -791,8 +791,8 @@ pub fn open_scan(s: &ScanPlan, shared: Option<&Arc<crate::sql::plan::Plan>>, nee
             erb: Default::default(),
             erows: Vec::new(),
             eheld: false,
-        erows: Vec::new(),
-        eheld: false,
+            point: None,
+            preader: None,
             spare: None,
             fscan: None,
             fetch_calls: 0,
@@ -945,6 +945,8 @@ fn open_scan_as(
         erb: Default::default(),
         erows: Vec::new(),
         eheld: false,
+        point: None,
+        preader: None,
         spare: None,
         fscan: None,
         fetch_calls: 0,
@@ -1833,6 +1835,8 @@ fn dense_bitmap_scan(
         erb: Default::default(),
         erows: Vec::new(),
         eheld: false,
+        point: None,
+        preader: None,
         spare: None,
         fscan: None,
         fetch_calls: 0,
@@ -2302,6 +2306,10 @@ struct ScanNode {
     /// `erb`'s entry at its cursor was handed out by reference (`next_raw_ref`): passed at
     /// the next call.
     eheld: bool,
+    /// A unique index's equality ranges read through a point reader (`point_entry`), once
+    /// decided; the reader, kept for the statement's snapshot (from rescan to rescan).
+    point: Option<bool>,
+    preader: Option<(Arc<crate::storage::Store>, crate::storage::point::PointReader)>,
     /// The last range's store iterator once it ended, for the next range to read on with
     /// (`Txn::reseek_snap`) instead of a new one.
     spare: Option<StoreIter>,
@@ -2358,6 +2366,12 @@ pub static ROWS_FROM_INDEX_ENTRIES: std::sync::atomic::AtomicU64 = std::sync::at
 pub static HEAP_ORDER_STREAMED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 #[doc(hidden)]
 pub static HEAP_ORDER_HELD: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Whether a deferrable constraint of `t` is enforced by index `ix` (its keys may repeat
+/// until the transaction that wrote them commits).
+fn deferrable_index(t: &Table, ix: u32) -> bool {
+    t.constraints.iter().any(|c| c.deferrable && c.kind.index() == Some(ix))
+}
 
 /// Entry `i` of a secondary index scan's `erb`: its key columns' part of the entry key (the
 /// entry key is the key columns then the data key's suffix; the value is the data key).
@@ -2496,6 +2510,9 @@ const FETCH_BATCH_MAX: usize = 128;
 /// `RB_MAX` as the scan goes on (a LIMIT may want one).
 const RB_MIN: usize = 16;
 const RB_MAX: usize = 256;
+
+/// Index entries a range must hold past for a parallel index scan (`start_parallel_index`).
+const PAR_MIN_ENTRIES: usize = 256;
 
 /// The rows stored under `keys` (None: none visible), as the statement's snapshot sees
 /// them, read together (`Txn::get_many_snap`). Without a statement snapshot, one at a time
@@ -3162,7 +3179,7 @@ impl ScanNode {
         let mut j = off;
         loop {
             let i = self.erb.pos() + j;
-            if i < self.erb.len() {
+            if i < self.erows.len() {
                 if self.erows[i].is_some() {
                     return Ok(Some(j));
                 }
@@ -3175,19 +3192,31 @@ impl ScanNode {
         }
     }
 
-    /// More index entries into `erb` after those from its cursor on (the ones before it
-    /// dropped; false: none left), their rows fetched together into `erows` (secondary index
-    /// scans). The entries are read a batch ahead; nothing a client sees happens on fetching
-    /// (the scan's counts, pruning and locks are taken as rows are returned), and the rows
-    /// are read at the statement's snapshot, so reading ahead reads what reading one at a
-    /// time would. The entries stay where the store keeps them where it can (`fill_batch`):
-    /// nothing is copied per entry.
+    /// The rows of the next batch of index entries fetched together into `erows`, the
+    /// entries read into `erb` first when it holds none not fetched yet (the ones before its
+    /// cursor dropped; false: none left; secondary index scans). The entries are read a batch
+    /// ahead; nothing a client sees happens on fetching (the scan's counts, pruning and locks
+    /// are taken as rows are returned), and the rows are read at the statement's snapshot,
+    /// so reading ahead reads what reading one at a time would. The entries stay where the
+    /// store keeps them where it can (`fill_batch`): nothing is copied per entry.
     fn fill_entries(&mut self, ctx: &ExecCtx) -> Result<bool> {
-        self.erows.drain(..self.erb.pos());
+        let at = self.erb.pos().min(self.erows.len());
+        self.erows.drain(..at);
         self.erb.drain_front();
-        let from = self.erb.len();
+        let from = self.erows.len();
         let want = if ctx.snapshot().is_some() { self.batch } else { 1 };
-        while self.erb.len() - from < want {
+        // (Entries read already, `start_parallel_index`'s, are fetched first.)
+        let read = self.erb.len() > from;
+        if !read {
+            while self.iter.is_none() {
+                match self.point_entry(ctx)? {
+                    Some(true) => return Ok(true),
+                    Some(false) => {}
+                    None => break,
+                }
+            }
+        }
+        while !read && self.erb.len() - from < want {
             if self.iter.is_none() && !self.open_range(ctx) {
                 break;
             }
@@ -3213,14 +3242,15 @@ impl ScanNode {
         if self.erb.len() == from {
             return Ok(false);
         }
+        let to = self.erb.len().min(from + want);
         self.batch = (self.batch * 2).min(FETCH_BATCH_MAX);
         if self.ios_cols.is_some() {
             // (The entry key stands in for the row: `index_ref`.)
-            self.erows.resize(self.erb.len(), Some(bytes::Bytes::new()));
+            self.erows.resize(to, Some(bytes::Bytes::new()));
             return Ok(true);
         }
         let erb = std::mem::take(&mut self.erb);
-        let dkeys: Vec<&[u8]> = (from..erb.len()).map(|i| erb.get(i).1).collect();
+        let dkeys: Vec<&[u8]> = (from..to).map(|i| erb.get(i).1).collect();
         let rows = self.fetch_stored(&dkeys, ctx);
         drop(dkeys);
         self.erb = erb;
@@ -3233,6 +3263,63 @@ impl ScanNode {
             }
         }
         Ok(true)
+    }
+
+    /// The next range read as a point lookup when it is a unique index's equality (every key
+    /// column; not a deferrable one's, whose duplicates a transaction may hold until it
+    /// commits) at the statement's snapshot, by a transaction that wrote nothing: its one
+    /// visible entry found without a merging scan (`Store::first_with`), and its row read,
+    /// through one point reader kept for the snapshot, pushed into `erb` / `erows` (Some(true);
+    /// Some(false): the range holds no visible entry). None: not such a range (or the
+    /// reader couldn't tell), read by a scan as any other.
+    fn point_entry(&mut self, ctx: &ExecCtx) -> Result<Option<bool>> {
+        if self.point.is_none() {
+            let p = &self.plan;
+            let ok = p.index.as_ref().is_some_and(|(ix, b)| {
+                ix.method == "btree"
+                    && ix.unique
+                    && b.eq.len() == ix.columns.len()
+                    && b.any.is_none()
+                    && b.skip.is_none()
+                    && b.order.is_empty()
+                    && !deferrable_index(&p.table, ix.oid)
+            });
+            self.point = Some(ok && !self.rev && !self.one_run && self.skip.is_none());
+        }
+        if self.point != Some(true) || self.cur_range >= self.ranges.len() {
+            return Ok(None);
+        }
+        // (A table that has stored values out of line has its rows read as stored, its scan
+        // reading the values (`fetch_stored`): left to it.)
+        let raw = self.plan.mark.is_none() && !self.plan.sys && super::sizing::tracked(self.plan.table.oid);
+        if raw && self.ios_cols.is_none() {
+            return Ok(None);
+        }
+        let Some(snap) = ctx.snapshot() else { return Ok(None) };
+        let Some((store, ts)) = ctx.txn.borrow().store_reader(&snap) else { return Ok(None) };
+        if self.preader.as_ref().is_none_or(|(s, r)| r.ts() != ts || !Arc::ptr_eq(s, &store)) {
+            self.preader = Some((store.clone(), store.point_reader(ts, false)));
+        }
+        let (store, r) = self.preader.as_mut().expect("a point reader");
+        let (start, end) = &self.ranges[self.cur_range];
+        let (ekey, dkey) = match store.first_with(r, start, end, false)? {
+            crate::storage::point::First::Unknown => return Ok(None),
+            crate::storage::point::First::None => {
+                self.cur_range += 1;
+                return Ok(Some(false));
+            }
+            crate::storage::point::First::Row(k, v) => (k, v),
+        };
+        self.cur_range += 1;
+        let row = match self.ios_cols {
+            // (The entry key stands in for the row: `index_ref`.)
+            Some(_) => Some(bytes::Bytes::new()),
+            // (With every value put back, as `fetch_rows` reads it.)
+            None => store.get_with(r, &dkey, true)?.and_then(|(_, v)| v),
+        };
+        self.erb.push(&ekey, dkey);
+        self.erows.push(row);
+        Ok(Some(true))
     }
 
     /// Next (data key, stored row bytes) in storage order.
@@ -4360,6 +4447,8 @@ impl ScanNode {
             || p.sys
             || p.limit.is_some()
             || self.ranges.len() != 1
+            // (Not once the serial scan has started.)
+            || self.cur_range > 0
             || ctx.instrumented()
             || super::sizing::tracked(p.table.oid)
             || predicate_locked(&p.table, ctx)
@@ -4379,18 +4468,36 @@ impl ScanNode {
         if workers == 0 || !ctx.outer.borrow().is_empty() || super::sizing::heap_modelled_or_kept(&p.table, ctx) {
             return Ok(None);
         }
-        let txn = ctx.txn.borrow();
         let fetch = match &self.ios_cols {
             Some(_) => None,
-            None => match txn.store_reader(&snap) {
+            None => match ctx.txn.borrow().store_reader(&snap) {
                 Some(r) => Some(r),
                 None => return Ok(None),
             },
         };
+        // A range of a few entries (an equality on a unique index, a short BETWEEN) isn't
+        // worth threads: its first entries are read as the serial scan reads them and left
+        // to it, which then reads on from them. Past them, the range is cut where its keys
+        // are, and read again by the workers.
+        self.open_range(ctx);
+        while self.erb.len() < PAR_MIN_ENTRIES {
+            let Some(StoreIter::Fwd(it)) = self.iter.as_mut() else { return Ok(None) };
+            let n = self.erb.len();
+            it.fill_batch(&mut self.erb, PAR_MIN_ENTRIES - n)?;
+            if self.erb.len() == n {
+                return Ok(None);
+            }
+        }
+        let lo = self.erb.get(0).0.to_vec();
+        // (The serial scan, should no thread start, reads the range from its start.)
+        self.erb.clear();
+        self.spare = self.iter.take();
+        self.cur_range = 0;
+        let p = &self.plan;
+        let txn = ctx.txn.borrow();
         let (start, end) = self.ranges[0].clone();
-        let lo = txn.scan_snap(&start, &end, &snap).next().transpose()?.map(|(k, _)| k);
         let hi = txn.scan_rev(&start, &end, Some(&*snap)).next().transpose()?.map(|(k, _)| k);
-        let (Some(lo), Some(hi)) = (lo, hi) else {
+        let Some(hi) = hi else {
             return Ok(None);
         };
         let cuts = keyed_cuts(&txn, split_keys(&lo, &hi, ParScan::chunks(workers)), &start, &end, &snap, None)?;
@@ -5668,6 +5775,8 @@ fn keyed_scan(s: &ScanPlan, plan: ScanPlan, ix: &Index, keys: Keys, ctx: &ExecCt
         erb: Default::default(),
         erows: Vec::new(),
         eheld: false,
+        point: None,
+        preader: None,
         spare: None,
         fscan: None,
         fetch_calls: 0,
