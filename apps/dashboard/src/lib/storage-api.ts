@@ -728,7 +728,8 @@ export function uploadObject(
   });
 }
 
-const RESERVED_PREFIXES = ["xn--", "sthree-", "amzn-s3-demo-"];
+// `chg-`: code previews' hostnames on the user-content domain, which serves buckets as `<bucket>.roll.site`.
+const RESERVED_PREFIXES = ["xn--", "sthree-", "amzn-s3-demo-", "chg-"];
 const RESERVED_SUFFIXES = ["-s3alias", "--ol-s3", ".mrap", "--x-s3", "--table-s3"];
 
 /** A dotted-quad IPv4 address, as Rust's `Ipv4Addr` parses it: 0–255, no leading zeros. */

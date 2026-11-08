@@ -497,6 +497,7 @@ impl Store {
     pub async fn create_bucket_in(&self, account: &str, name: &str, opts: BucketOptions) -> Result<Bucket> {
         // A directory bucket (S3 Express) by its name: no versioning, so no Object Lock.
         let directory = crate::express::is_directory_bucket(name);
+        validate::new_bucket_name(name)?;
         if directory {
             crate::express::validate_name(name)?;
             if opts.object_lock == Some(true) {
@@ -613,6 +614,7 @@ impl Store {
 
     /// A new bucket that sees `parent`'s objects as of now (copy-on-write; nothing is copied).
     pub async fn branch_bucket(&self, parent: &str, name: &str) -> Result<Bucket> {
+        validate::new_bucket_name(name)?;
         // A branch of a directory bucket is a directory bucket, and only theirs are.
         match (crate::express::is_directory_bucket(parent), crate::express::is_directory_bucket(name)) {
             (true, true) => crate::express::validate_name(name)?,
