@@ -2,6 +2,8 @@
 //! receivers, and a mock SDK app that speaks the workflow step protocol.
 #![allow(dead_code)]
 
+pub mod crashy;
+
 use axum::Router;
 use axum::body::Bytes;
 use axum::extract::{Query, State};

@@ -46,10 +46,30 @@ pub async fn run(s: Arc<dyn Store>) {
     groups(&*s, &suffix).await;
     listing(&*s, &suffix).await;
     kv(&*s, &suffix).await;
+    groups_of_writes(&*s, &suffix).await;
     docs(&*s, &suffix).await;
     runs(&*s, &suffix).await;
     events_and_waits(&*s, &suffix).await;
     usage(&*s).await;
+}
+
+/// `write_all`: a claim and what it guards land together, or nothing does.
+async fn groups_of_writes(s: &dyn Store, sfx: &str) {
+    let key = format!("dedup:{sfx}");
+    let (a, b) = (message(&format!("w{sfx}"), now_ms()), message(&format!("w{sfx}"), now_ms()));
+    let group = |m: &Message| vec![Write::claim(key.clone(), json!([m.id]), Some(now_ms() + 60_000)), Write::Msg { message: m.clone(), body: b"hello".to_vec() }];
+    assert!(s.write_all(&group(&a)).await.unwrap());
+    assert!(s.msg_get(&a.id).await.unwrap().is_some());
+    assert_eq!(s.msg_body(&a.id).await.unwrap().unwrap(), b"hello");
+    // The claim is taken: the second group writes nothing, its message included.
+    assert!(!s.write_all(&group(&b)).await.unwrap());
+    assert!(s.msg_get(&b.id).await.unwrap().is_none(), "a failed group left its message");
+    assert_eq!(s.kv_get(&key).await.unwrap().unwrap().value, json!([a.id]));
+    // A message that exists fails the group too, and the claim before it isn't kept.
+    let other = format!("dedup2:{sfx}");
+    let again = vec![Write::claim(other.clone(), json!(1), None), Write::Msg { message: a.clone(), body: vec![] }];
+    assert!(!s.write_all(&again).await.unwrap());
+    assert!(s.kv_get(&other).await.unwrap().is_none(), "a failed group left its claim");
 }
 
 async fn messages(s: &dyn Store, sfx: &str) {
@@ -263,6 +283,7 @@ async fn runs(s: &dyn Store, sfx: &str) {
             invocations: 0,
             version: 0,
             expires_at: None,
+            followups: false,
         };
         assert!(s.run_put(&run, Expect::Absent).await.unwrap());
         assert!(!s.run_put(&run, Expect::Absent).await.unwrap());
@@ -332,6 +353,7 @@ async fn events_and_waits(s: &dyn Store, sfx: &str) {
             ts: now_ms(),
             runs: vec![],
             expires_at: None,
+            undispatched: false,
         };
         s.event_put(&e).await.unwrap();
         ids.push(e.id);

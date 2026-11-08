@@ -116,12 +116,32 @@ impl Tasks {
             created_at: now,
             updated_at: now,
         };
+        let mut s = s;
         spec(&s)?;
         self.check_target(&s.target).await?;
-        if !store::put_doc(&*self.store, KIND_SCHEDULE, &id, &s, Expect::Absent).await? {
+        // Created armed: the schedule and its first tick land together, so a schedule never
+        // exists without the tick that fires it.
+        let mut tick = None;
+        if !s.paused {
+            let next = spec(&s)?.next_after(now, s.created_at).ok_or_else(|| TaskError::Invalid("schedule never fires".into()))?;
+            let m = self
+                .prepare(NewMessage { schedule_id: Some(id.clone()), ..NewMessage::internal(Target::Tick { schedule_id: id.clone(), at: next }, next) })
+                .await?;
+            s.next_at = Some(next);
+            s.tick_id = Some(m.id.clone());
+            tick = Some(m);
+        }
+        let mut writes = vec![store::Write::Doc { kind: KIND_SCHEDULE.into(), id: id.clone(), value: serde_json::to_value(&s).map_err(anyhow::Error::from)?, expect: Expect::Absent }];
+        if let Some(m) = &tick {
+            writes.push(store::Write::Msg { message: m.clone(), body: vec![] });
+        }
+        if !self.store.write_all(&writes).await? {
             return Err(TaskError::Conflict(format!("schedule {id} exists")));
         }
-        self.arm(&id).await
+        if let Some(m) = &tick {
+            self.nudge_lane(&m.lane, m.due_at);
+        }
+        Ok(s)
     }
 
     /// Create or replace a schedule with a known id (used for function cron triggers).

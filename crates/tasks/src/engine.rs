@@ -320,6 +320,9 @@ pub struct Tasks {
     pub(crate) pull_wake: Notify,
     /// Set when this engine's node stops serving it: long waits hand their requests back.
     pub(crate) waits_cut: std::sync::atomic::AtomicBool,
+    /// Events this engine is running the waits and triggers of right now: a retry of one isn't
+    /// a crashed dispatch to redo.
+    pub(crate) dispatching: Mutex<std::collections::HashSet<String>>,
     last_refresh: AtomicI64,
     last_flush: AtomicI64,
     /// Storage writes taken from the store, waiting for other usage to be recorded with.
@@ -388,6 +391,7 @@ impl Tasks {
             inflight: Mutex::new(HashMap::new()),
             pull_wake: Notify::new(),
             waits_cut: Default::default(),
+            dispatching: Default::default(),
             last_refresh: AtomicI64::new(0),
             last_flush: AtomicI64::new(0),
             storage_writes: Default::default(),
@@ -564,20 +568,15 @@ impl Tasks {
             _ => None,
         };
         let ids: Vec<String> = destinations.iter().map(|_| new_id("msg")).collect();
-        if let Some(d) = &dedup_id {
-            let key = format!("dedup:{d}");
-            let claimed = self
-                .store
-                .kv_put(&key, &json!(ids), Expect::Absent, Some(now + self.config.dedup_window_ms))
-                .await?;
-            if !claimed {
-                let existing = self.store.kv_get(&key).await?.map(|v| v.value).unwrap_or(json!([]));
-                let existing: Vec<String> = serde_json::from_value(existing).unwrap_or_default();
-                return Ok(existing
-                    .into_iter()
-                    .map(|id| Published { message_id: id, url: None, deduplicated: true })
-                    .collect());
-            }
+        let dedup_key = dedup_id.as_ref().map(|d| format!("dedup:{d}"));
+        let deduplicated = |existing: Option<Value>| -> Vec<Published> {
+            let existing: Vec<String> = serde_json::from_value(existing.unwrap_or(json!([]))).unwrap_or_default();
+            existing.into_iter().map(|id| Published { message_id: id, url: None, deduplicated: true }).collect()
+        };
+        if let Some(key) = &dedup_key
+            && let Some(v) = self.store.kv_get(key).await?
+        {
+            return Ok(deduplicated(Some(v.value)));
         }
 
         let delay = req.delay.map(|d| d.0).unwrap_or(0).max(0);
@@ -615,7 +614,14 @@ impl Tasks {
         let backoff = req.backoff.clone().unwrap_or_else(|| self.config.backoff.clone());
         backoff.validate().map_err(TaskError::Invalid)?;
 
+        // The claim and every message become durable together (`write_all`): a claim never
+        // outlives messages that were lost, so a retry never answers "deduplicated" for nothing.
+        let mut writes = Vec::new();
+        if let Some(key) = &dedup_key {
+            writes.push(store::Write::claim(key.clone(), json!(ids), Some(now + self.config.dedup_window_ms)));
+        }
         let mut out = Vec::new();
+        let mut made = Vec::new();
         for (id, dest) in ids.into_iter().zip(destinations) {
             let target = match &dest {
                 Some(url) => Target::Http { url: url.clone(), method: method.clone(), headers: headers.clone() },
@@ -644,12 +650,21 @@ impl Tasks {
             m.topic = req.topic.clone();
             m.content_type = content_type.clone();
             m.body_size = body.len();
-            self.insert(&m, &body).await?;
+            out.push(Published { message_id: m.id.clone(), url: dest, deduplicated: false });
+            writes.push(store::Write::Msg { message: m.clone(), body: body.clone() });
+            made.push(m);
+        }
+        if !self.store.write_all(&writes).await? {
+            // Another publish with this key got there first.
+            let key = dedup_key.as_ref().ok_or_else(|| TaskError::Internal(anyhow::anyhow!("a new message id was taken")))?;
+            return Ok(deduplicated(self.store.kv_get(key).await?.map(|v| v.value)));
+        }
+        for m in &made {
+            self.nudge_lane(&m.lane, m.due_at);
             self.count(|u| {
                 u.published += 1;
                 u.bytes_in += body.len() as u64;
             });
-            out.push(Published { message_id: m.id, url: dest, deduplicated: false });
         }
         Ok(out)
     }
@@ -706,13 +721,19 @@ impl Tasks {
 
     /// Insert an internal message (timer, tick, run invocation…).
     pub(crate) async fn enqueue(&self, n: NewMessage, body: &[u8]) -> Result<Message> {
+        let m = self.prepare(n).await?;
+        self.insert(&m, body).await?;
+        Ok(m)
+    }
+
+    /// An internal message ready to insert (in a group of writes: `Store::write_all`); nudge
+    /// its lane once it's written.
+    pub(crate) async fn prepare(&self, n: NewMessage) -> Result<Message> {
         let queue = match &n.queue {
             Some(name) => Some(self.ensure_queue(name).await?),
             None => None,
         };
-        let m = self.build_message(new_id("msg"), n, queue.as_ref());
-        self.insert(&m, body).await?;
-        Ok(m)
+        Ok(self.build_message(new_id("msg"), n, queue.as_ref()))
     }
 
     // --- messages ---

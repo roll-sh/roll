@@ -591,6 +591,10 @@ pub struct Run {
     pub version: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<Ms>,
+    /// The run ended, but what follows its end (its parent's step, its lifecycle event, its
+    /// waits and singleton) may not all have happened: whoever sees the run next finishes them.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub followups: bool,
 }
 
 /// A memoised step result.
@@ -626,6 +630,9 @@ pub struct Event {
     pub runs: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<Ms>,
+    /// Stored, but waits and triggers may not have run yet: a retry with the same id runs them.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub undispatched: bool,
 }
 
 impl Event {
