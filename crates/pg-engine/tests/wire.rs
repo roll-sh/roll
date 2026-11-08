@@ -2032,8 +2032,7 @@ fn copy_errors_encodings_and_transaction_defaults() {
     s.engine.shutdown();
 }
 
-/// Bind and Describe of a statement there is none of: the unnamed one is named apart
-/// (exec_bind_message, exec_describe_statement_message).
+/// Missing unnamed and named statements have distinct errors in Bind and Describe.
 #[test]
 fn missing_unnamed_statement() {
     let s = server(AuthMethod::Trust);

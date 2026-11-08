@@ -160,9 +160,8 @@ fn is_result_change(e: &Error) -> bool {
     e.code == code::FEATURE_NOT_SUPPORTED && e.message == "cached plan must not change result type"
 }
 
-/// A Bind or Describe of a prepared statement there is none of (exec_bind_message,
-/// exec_describe_statement_message: the unnamed statement is named apart).
-pub fn missing_statement(name: &str) -> Error {
+/// Bind and Describe distinguish the unnamed statement in their missing-statement errors.
+pub(crate) fn missing_statement(name: &str) -> Error {
     let msg = match name {
         "" => "unnamed prepared statement does not exist".to_string(),
         n => format!("prepared statement \"{n}\" does not exist"),

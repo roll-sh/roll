@@ -1979,17 +1979,21 @@ pub fn check_read_only(s: &pb::DeclareCursorStmt) -> Result<()> {
         Some(pg_query::NodeEnum::RangeVar(r)) => Some(r.alias.as_ref().map_or(r.relname.clone(), |a| a.aliasname.clone())),
         _ => None,
     };
-    fn first_from(n: &pb::Node) -> Option<String> {
+    let ctes: Vec<&str> = sel.with_clause.iter().flat_map(|w| &w.ctes).filter_map(|n| match inner(n) {
+        Some(pg_query::NodeEnum::CommonTableExpr(c)) => Some(c.ctename.as_str()),
+        _ => None,
+    }).collect();
+    fn first_from(n: &pb::Node, ctes: &[&str]) -> Option<String> {
         match inner(n) {
-            Some(pg_query::NodeEnum::RangeVar(r)) => Some(r.alias.as_ref().map_or_else(|| r.relname.clone(), |a| a.aliasname.clone())),
-            Some(pg_query::NodeEnum::RangeSubselect(r)) => r.alias.as_ref().map(|a| a.aliasname.clone()),
-            Some(pg_query::NodeEnum::JoinExpr(j)) => j.larg.as_deref().and_then(first_from).or_else(|| j.rarg.as_deref().and_then(first_from)),
+            Some(pg_query::NodeEnum::RangeVar(r)) if !r.schemaname.is_empty() || !ctes.contains(&r.relname.as_str()) => Some(r.alias.as_ref().map_or_else(|| r.relname.clone(), |a| a.aliasname.clone())),
+            Some(pg_query::NodeEnum::RangeSubselect(r)) => Some(r.alias.as_ref().map(|a| a.aliasname.clone()).unwrap_or_default()),
+            Some(pg_query::NodeEnum::JoinExpr(j)) => j.larg.as_deref().and_then(|n| first_from(n, ctes)).or_else(|| j.rarg.as_deref().and_then(|n| first_from(n, ctes))),
             _ => None,
         }
     }
     let target = match first.locked_rels.first() {
         Some(n) => name_of(n),
-        None => sel.from_clause.iter().find_map(first_from),
+        None => sel.from_clause.iter().find_map(|n| first_from(n, &ctes)),
     };
     // A clause without a lockable FROM item adds no row mark (SELECT 1 FOR UPDATE).
     let Some(target) = target else { return Ok(()) };
