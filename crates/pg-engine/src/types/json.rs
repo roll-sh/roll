@@ -168,7 +168,7 @@ impl Jsonb {
             (Jsonb::Object(a), Jsonb::Object(b)) => {
                 b.iter().all(|(k, bv)| match self.get(k) {
                     Some(av) => match (av, bv) {
-                        (Jsonb::Array(_) | Jsonb::Object(_), _) => av.contains(bv),
+                        (Jsonb::Array(_), Jsonb::Array(_)) | (Jsonb::Object(_), Jsonb::Object(_)) => av.contains(bv),
                         _ => av == bv,
                     },
                     None => false,
