@@ -18,6 +18,9 @@ dynamo = ["dep:aws-config", "dep:aws-sdk-dynamodb"]
 lambda = ["dep:lambda_http"]
 # `roll-tasks restore`: point-in-time restore of a log store from S3 object versions.
 restore = ["dep:aws-config", "dep:aws-sdk-s3"]
+# `tasks::fleet`: the cell on a roll-cluster fleet (rolld turns it on; the standalone binary and
+# the Lambda proxy don't carry the cluster layer).
+fleet = ["dep:roll-cluster"]
 
 [dependencies]
 anyhow.workspace = true
@@ -34,7 +37,7 @@ getrandom.workspace = true
 hmac.workspace = true
 humantime.workspace = true
 reqwest = { workspace = true, features = ["rustls", "stream", "http2"] }
-roll-cluster.workspace = true
+roll-cluster = { workspace = true, optional = true }
 object_store.workspace = true
 roll-auth.workspace = true
 rusqlite = { workspace = true, features = ["session", "backup"] }
@@ -57,3 +60,7 @@ lambda_http = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile = "3"
+
+[[test]]
+name = "fleet"
+required-features = ["fleet"]

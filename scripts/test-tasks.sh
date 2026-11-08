@@ -52,8 +52,11 @@ if [[ $e2e_only == 0 ]]; then
   cargo build -p tasks -p roll-cli
   cargo build -p tasks --features lambda
   cargo clippy -p tasks -p roll-cli --all-targets --features lambda -- -D warnings
+  cargo clippy -p tasks --all-targets --features fleet -- -D warnings
   cargo test -p tasks ${args[@]+"${args[@]}"}
   ROLL_TASKS_E2E_LOG=memory:// cargo test -p tasks --tests ${args[@]+"${args[@]}"}
+  # The cell on a roll-cluster fleet (leases in memory, and in DynamoDB Local when it's up).
+  cargo test -p tasks --features fleet --test fleet ${args[@]+"${args[@]}"}
 fi
 
 if [[ $unit_only == 0 ]]; then
@@ -81,6 +84,9 @@ if [[ $unit_only == 0 ]]; then
   AWS_ENDPOINT_URL="http://127.0.0.1:$minio_port" ROLL_TASKS_E2E_LOG=s3://roll-tasks-log/e2e \
   ROLL_TASKS_E2E_VERSIONED=s3://roll-tasks-log/e2e \
     cargo test -p tasks --tests ${args[@]+"${args[@]}"}
+  AWS_ACCESS_KEY_ID=roll AWS_SECRET_ACCESS_KEY=roll-tasks-test AWS_REGION=us-east-1 \
+  AWS_ENDPOINT_URL="http://127.0.0.1:$minio_port" ROLL_TASKS_E2E_LOG=s3://roll-tasks-log/e2e \
+    cargo test -p tasks --features fleet --test fleet ${args[@]+"${args[@]}"}
   docker rm -f "$minio" >/dev/null 2>&1 || true
 
   # DynamoDB.
