@@ -456,6 +456,8 @@ async fn a_stream_claimed_elsewhere_has_one_writer(kind: Kind) {
 // ── DynamoDB Local ──
 
 const CONTAINER: &str = "roll-cloud-streams-ddb";
+/// DynamoDB Local, pinned by digest (the multi-arch index), as every suite pins its images.
+const DYNAMODB_IMAGE: &str = "amazon/dynamodb-local:3.3.2@sha256:6ada631ec7aa5fc83446855eb17233e3dad184fec47477e8140c6c569cfe0c86";
 
 fn random() -> u64 {
     use std::hash::{BuildHasher, Hasher};
@@ -498,7 +500,7 @@ fn dynamodb_endpoint() -> Option<String> {
         let p = match docker(&["port", CONTAINER, "8000/tcp"]).ok().and_then(|s| port(&s)) {
             Some(p) => p,
             None => {
-                if let Err(e) = docker(&["run", "-d", "--rm", "--name", CONTAINER, "-p", "127.0.0.1::8000", "amazon/dynamodb-local"]) {
+                if let Err(e) = docker(&["run", "-d", "--rm", "--name", CONTAINER, "-p", "127.0.0.1::8000", DYNAMODB_IMAGE]) {
                     eprintln!("skipping the DynamoDB tests: Docker can't start amazon/dynamodb-local ({e})");
                     return None;
                 }

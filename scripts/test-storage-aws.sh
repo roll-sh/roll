@@ -13,7 +13,7 @@ cd "$(dirname "$0")/.."
 PATHS=(crates/s3-proto crates/s3-store crates/s3-server crates/s3-control crates/pg-storage
        Cargo.toml Cargo.lock scripts/test-storage-aws.sh)
 STAMP=target/.test-storage-aws.hash
-IMAGE=localstack/localstack:4.9
+IMAGE=localstack/localstack:4.9@sha256:59373b4a27dba3ec15c4db0b7455f0cb68c8a42300e2cbbe362b440f9a131697
 
 force=0
 for a in "$@"; do

@@ -6376,6 +6376,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-rustls 0.26.6",
+ "tower",
  "tracing",
  "tracing-subscriber",
  "urlencoding",

@@ -368,7 +368,7 @@ async fn run() -> anyhow::Result<()> {
     }
     // roll nosql: same object storage; in a cluster its databases follow their leases.
     let nosql = match on.on(Product::Nosql) {
-        true => Some(nosql::Nosql::start(&home, args.nosql.clone(), &args.public_host, &args.node, &storage, Some(&cluster), args.code.cluster.system_database.as_deref()).await?),
+        true => Some(nosql::Nosql::start(&home, args.nosql.clone(), &args.public_host, &args.node, &storage, Some(&cluster), args.code.cluster.system_database.as_deref(), edge::Public::of(&args).as_ref()).await?),
         false => None,
     };
     // roll queues on the node's cluster: each queue runs on its lease's holder.
@@ -437,12 +437,16 @@ async fn run() -> anyhow::Result<()> {
         queues: queues.as_ref(),
         auth: &auth,
     };
+    // Connections other nodes splice here, on every cluster node (the edge or not).
+    let splice = edge::splice_routes(&cluster, &products)?;
     let edge = edge::Edge::start(&args, &storage, products, std::sync::Arc::new(edge::ClusterSingleton(cluster.clone()))).await?;
-    let router = edge::internal(router, edge.as_ref());
-    let router = match &redis {
-        Some(r) => r.internal(router, args.edge.enabled)?,
-        None => router,
-    };
+    let mut router = edge::internal(router, edge.as_ref());
+    if let Some(s) = splice {
+        router = router.merge(s);
+    }
+    if let Some(r) = &redis {
+        router = r.internal(router);
+    }
 
     // Everything that serves until it fails; any of them ending ends the process.
     type Serving<'a> = std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + 'a>>;
@@ -544,6 +548,10 @@ async fn start_postgres(args: &Args, home: &std::path::Path, storage: &StorageCo
     config.evict_after_s = args.evict_after;
     config.internal_url = args.internal_url.clone().unwrap_or_else(|| format!("http://host.docker.internal:{}", args.api.port()));
     config.storage = storage.clone();
+    // Behind the edge, connection strings name the endpoint's public hostname.
+    if let Some(p) = edge::Public::of(args) {
+        p.postgres(&mut config);
+    }
     let control = Control::new(config).await?;
     info!(storage = %control.objects.description, "durable storage");
     reconciler::recover(&control).await?;
@@ -566,15 +574,19 @@ impl CodeNode {
 }
 
 /// Wait for Ctrl-C or SIGTERM; then, in a cluster, hand everything this node owns to the others
-/// (the API keeps serving meanwhile) before the process exits. Returns how long the API may then
-/// take to finish the requests it still has in flight: what's left of the drain timeout, between
-/// 5 and 10 s (an open event stream holds the API until then).
+/// (the API keeps serving meanwhile) before the process exits. With the edge, that runs once the
+/// load balancer has let go and the public listeners stopped accepting (`edge::stopping`).
+/// Returns how long the API may then take to finish the requests it still has in flight: what's
+/// left of the drain timeout, between 5 and 10 s (an open event stream holds the API until then).
 async fn stop(code: Option<&CodeNode>, cluster: &roll_cluster::Cluster, args: &Args) -> std::time::Duration {
     shutdown_signal().await;
     let started = std::time::Instant::now();
     let timeout = args.code.drain_timeout();
     let clustered = cluster.backend_name() != "memory";
-    if clustered {
+    let products = async {
+        if !clustered {
+            return;
+        }
         match code {
             // roll code stops its own duties too.
             Some(c) if c.code.cluster().is_some() => {
@@ -588,8 +600,11 @@ async fn stop(code: Option<&CodeNode>, cluster: &roll_cluster::Cluster, args: &A
                 info!("drained");
             }
         }
-        // A cluster node fails its health check at once but keeps serving until the load
-        // balancer has stopped sending to it (docs/cloud/README.md, "Node settings").
+    };
+    let edge = edge::stopping(products).await;
+    if clustered && !edge {
+        // Without the edge, a cluster node fails its health check when its drain starts and keeps
+        // serving until the load balancer has stopped sending to it (docs/code/cluster.md).
         tokio::time::sleep(cluster::DEREGISTER.saturating_sub(started.elapsed())).await;
     }
     timeout.saturating_sub(started.elapsed()).clamp(std::time::Duration::from_secs(5), std::time::Duration::from_secs(10))
@@ -705,8 +720,6 @@ async fn shutdown_signal() {
     }
     #[cfg(not(unix))]
     let _ = tokio::signal::ctrl_c().await;
-    // With the edge: out of the load balancer before anything stops.
-    edge::stopping().await;
 }
 
 #[cfg(test)]

@@ -202,7 +202,9 @@ fn shared(cluster: Option<&Arc<roll_cluster::Cluster>>) -> Option<&Arc<roll_clus
 
 impl Nosql {
     /// `system_database` (`ROLL_SYSTEM_DATABASE`) holds the catalog in a cluster (schema
-    /// `nosql_control`); a node alone keeps it in a SQLite file under `--home`.
+    /// `nosql_control`); a node alone keeps it in a SQLite file under `--home`. `public`: the
+    /// edge's names, which the API hands out instead of this node's addresses.
+    #[allow(clippy::too_many_arguments)]
     pub async fn start(
         home: &Path,
         args: NosqlArgs,
@@ -211,6 +213,7 @@ impl Nosql {
         storage: &StorageConfig,
         cluster: Option<&Arc<roll_cluster::Cluster>>,
         system_database: Option<&str>,
+        public: Option<&crate::edge::Public>,
     ) -> anyhow::Result<Self> {
         let cluster = shared(cluster);
         let database = system_database.filter(|d| !d.is_empty() && cluster.is_some()).map(str::to_string);
@@ -252,6 +255,10 @@ impl Nosql {
         cfg.tls = tls.is_some() && !dedicated;
         cfg.cql_shard_aware_port_ssl = args.nosql_cql_shard_aware_tls.map(|a| a.port());
         cfg.domain = args.nosql_domain.clone().filter(|d| !d.is_empty());
+        // Behind the edge, the API hands out the database's public hostname (TLS on 9042).
+        if let Some(p) = public {
+            p.nosql(&mut cfg);
+        }
         cfg.single = args.nosql_single.clone().filter(|s| !s.is_empty());
         cfg.defaults.dialect = args.nosql_dialect.clone();
         cfg.defaults.datacenter = args.nosql_datacenter.clone();

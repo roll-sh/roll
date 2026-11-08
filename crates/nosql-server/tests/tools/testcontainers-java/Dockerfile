@@ -1,4 +1,4 @@
-FROM maven:3-eclipse-temurin-21
+FROM maven:3-eclipse-temurin-21@sha256:9673eef9ed503146591667ffb92eaaa22f1b8899ed60d9df0df4da3f3a1214a6
 WORKDIR /tc
 COPY pom.xml .
 RUN mvn -q -B dependency:go-offline

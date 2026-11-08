@@ -139,6 +139,7 @@ fn random() -> u64 {
 }
 
 const CONTAINER: &str = "roll-cloud-cluster-ddb";
+const DYNAMODB_IMAGE: &str = "amazon/dynamodb-local:3.3.2@sha256:6ada631ec7aa5fc83446855eb17233e3dad184fec47477e8140c6c569cfe0c86";
 
 fn docker(args: &[&str]) -> Result<String, String> {
     let out = Command::new("docker").args(args).output().map_err(|e| e.to_string())?;
@@ -174,7 +175,7 @@ pub fn dynamodb_endpoint() -> Option<String> {
         let p = match existing {
             Some(p) => p,
             None => {
-                if let Err(e) = docker(&["run", "-d", "--rm", "--name", CONTAINER, "-p", "127.0.0.1::8000", "amazon/dynamodb-local"]) {
+                if let Err(e) = docker(&["run", "-d", "--rm", "--name", CONTAINER, "-p", "127.0.0.1::8000", DYNAMODB_IMAGE]) {
                     eprintln!("skipping the DynamoDB backend's tests: Docker can't start amazon/dynamodb-local ({e})");
                     return None;
                 }

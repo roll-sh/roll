@@ -16,6 +16,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const IMAGE: &str = "roll-queues:e2e";
+const DYNAMODB_IMAGE: &str = "amazon/dynamodb-local:3.3.2@sha256:6ada631ec7aa5fc83446855eb17233e3dad184fec47477e8140c6c569cfe0c86";
+const MINIO_IMAGE: &str = "cgr.dev/chainguard/minio:latest@sha256:a1ac4589a5f8136b616e667b48a0bea9719bb10bd45799ea946f24bbedfafde4";
+const MC_IMAGE: &str = "cgr.dev/chainguard/minio-client:latest@sha256:10388d580a724f356b94c9b2631b5a179039cabe8c76e9b37d86ed007d569b05";
+const POSTGRES_IMAGE: &str = "postgres:18-alpine@sha256:123b17998ccaf47e53b502e8c6a1e79afd8f579c6f3eec83c563da026f957395";
 const QUEUES: usize = 6;
 const S3_USER: &str = "rolle2e";
 const S3_PASS: &str = "rolle2e-secret";
@@ -123,11 +127,10 @@ impl Env {
         }
     }
 
-    /// MinIO (`minio/minio` when it can be pulled, else `cgr.dev/chainguard/minio`, or
-    /// `ROLL_MINIO_IMAGE`) with the bucket `roll`, made with the MinIO client next to it.
+    /// MinIO (pinned, or `ROLL_MINIO_IMAGE`) with the bucket `roll`, made with the MinIO client
+    /// next to it.
     async fn start_s3(&self) {
-        let image = std::env::var("ROLL_MINIO_IMAGE")
-            .unwrap_or_else(|_| if docker_ok(&["pull", "-q", "minio/minio"]) { "minio/minio".into() } else { "cgr.dev/chainguard/minio".into() });
+        let image = std::env::var("ROLL_MINIO_IMAGE").unwrap_or_else(|_| MINIO_IMAGE.into());
         let (user, pass) = (format!("MINIO_ROOT_USER={S3_USER}"), format!("MINIO_ROOT_PASSWORD={S3_PASS}"));
         let (name, net) = (self.name("s3"), self.net());
         let mut args = vec!["run", "-d", "--name", &name, "--network", &net, "-e", &user, "-e", &pass];
@@ -137,7 +140,7 @@ impl Env {
             args.extend(["--entrypoint", "minio", image.as_str(), "server", "/data"]);
         }
         docker(&args);
-        let mc = std::env::var("ROLL_MC_IMAGE").unwrap_or_else(|_| "cgr.dev/chainguard/minio-client".into());
+        let mc = std::env::var("ROLL_MC_IMAGE").unwrap_or_else(|_| MC_IMAGE.into());
         let host = format!("MC_HOST_local=http://{S3_USER}:{S3_PASS}@127.0.0.1:9000");
         let beside = format!("container:{name}");
         let t = Instant::now();
@@ -150,7 +153,7 @@ impl Env {
     /// DynamoDB Local, one database whatever the credentials (`-sharedDb`), with the lease table.
     async fn start_dynamodb(&mut self) {
         let (name, net) = (self.name("ddb"), self.net());
-        docker(&["run", "-d", "--name", &name, "--network", &net, "-p", "127.0.0.1::8000", "amazon/dynamodb-local", "-jar", "DynamoDBLocal.jar", "-sharedDb", "-inMemory"]);
+        docker(&["run", "-d", "--name", &name, "--network", &net, "-p", "127.0.0.1::8000", DYNAMODB_IMAGE, "-jar", "DynamoDBLocal.jar", "-sharedDb", "-inMemory"]);
         let endpoint = format!("http://{}", published(&name, "8000/tcp"));
         let t = Instant::now();
         loop {
@@ -247,7 +250,7 @@ async fn cluster_survives_kill_and_rolling_restart_under_load() {
     docker(&["build", "-q", "--build-arg", "PROFILE=dev", "-f", &dockerfile, "-t", IMAGE, root]);
     let mut env = Env { tag: format!("{:x}", std::process::id()), leases: None };
     docker(&["network", "create", &env.net()]);
-    docker(&["run", "-d", "--name", &env.name("pg"), "--network", &env.net(), "-e", "POSTGRES_PASSWORD=roll", "postgres:18-alpine"]);
+    docker(&["run", "-d", "--name", &env.name("pg"), "--network", &env.net(), "-e", "POSTGRES_PASSWORD=roll", POSTGRES_IMAGE]);
     env.start_s3().await;
     env.start_dynamodb().await;
     let t = Instant::now();

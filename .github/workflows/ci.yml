@@ -73,7 +73,7 @@ jobs:
             tar -xzf actionlint.tar.gz actionlint
             ./actionlint -shellcheck=
           else
-            docker run --rm -v "$PWD:/repo" -w /repo "rhysd/actionlint:$version" -shellcheck=
+            docker run --rm -v "$PWD:/repo" -w /repo "rhysd/actionlint:$version@sha256:887a259a5a534f3c4f36cb02dca341673c6089431057242cdc931e9f133147e9" -shellcheck=
           fi
 
   ci:

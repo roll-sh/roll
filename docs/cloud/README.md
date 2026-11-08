@@ -184,17 +184,25 @@ when `ROLL_EDGE=1` (without it rolld is unchanged).
   holding the `acme` singleton orders what's missing or within 30 days of expiry (backing off an
   hour after a failed order). `roll_edge::certs::Singleton` is the seam for roll-cluster's
   `singleton(name)`; rolld passes `LocalSingleton` until the merge.
-- **Healthy** (`/healthz` 200) once a certificate is loaded and until SIGTERM. Then `/healthz`
-  fails at once, the public listeners keep accepting and serving for `ROLL_EDGE_DRAIN_DELAY`
-  (15 s) while the NLB takes the node out, keep-alive HTTP connections are closed after their
-  request in flight, and only then do the products start their own drains.
+- **Healthy** (`/healthz` 200) once a certificate is loaded and until SIGTERM. Then, in this
+  order (`roll_edge::drain`), so a client moves once: `/healthz` fails at once; the public
+  listeners keep accepting and serving for `ROLL_EDGE_DRAIN_DELAY` (15 s) while the NLB takes the
+  node out; they stop accepting (a late connection is refused and goes to another node) and
+  keep-alive HTTP connections close after their request in flight; the products drain, each
+  closing its own tenants' connections gradually as it hands them off (Redis over 2 s, CQL over
+  a second); only then does the edge close the TCP connections still open, the ones no product
+  here owns (spliced on to another node, or never past their first message). Tested with real
+  clients by `redis-control/tests/cluster.rs::a_drain_hands_a_busy_database_over_losing_nothing`
+  and `nosql-control/tests/cluster.rs::a_drain_hands_databases_over_with_nothing_lost`.
 - **Forwarding TCP** to a tenant's owner: `roll_edge::splice::splice(client, owner_url, signer,
   hop, first_bytes)` opens an HTTP upgrade to the owner's `/internal/edge/splice` (HMAC-SHA256
   over the hop and the time under the cluster secret, 60 s skew), writes the bytes already read,
   then copies both ways. The owner hands the stream to the handler its product registered:
-  Postgres's (the proxy, with the endpoint as named) and Kafka's (`kafka`: spliced after SASL,
-  the tenant is the stream the connection authenticated as, the server name carries the
-  `host:port` the client was told).
+  Postgres's (the proxy, with the endpoint as named), Redis's, CQL's and Kafka's (`kafka`:
+  spliced after SASL, the tenant is the stream the connection authenticated as, the server name
+  carries the `host:port` the client was told). The route is on every cluster node's internal
+  API, with the edge or without (rolld's own Redis, CQL and Kafka ports splice too;
+  `rolld/src/edge.rs`, `splice_routes`).
 - **Dev mode**: `ROLL_EDGE_CERT_DIR` serves its `<name>.crt`/`<name>.key` pairs (reloaded when
   they change) and writes a self-signed certificate for every edge name when it has none; origin
   pulls are off unless `ROLL_EDGE_ORIGIN_PULL=1`. Every listener's address is a setting
@@ -202,9 +210,18 @@ when `ROLL_EDGE=1` (without it rolld is unchanged).
   `ROLL_EDGE_AMQPS`, `ROLL_EDGE_MQTTS`, `ROLL_EDGE_STOMPS`, `ROLL_EDGE_MQ_STREAM`; `0.0.0.0` and
   the public port by default), so a laptop can run it next to a local Postgres.
 - With the edge on, rolld points the products' own names at the edge's unless they're set:
-  `ROLL_S3_DOMAIN`, Alternator's domain, `ROLL_CODE_PREVIEW_DOMAIN` (`roll.site`), roll code's
+  `ROLL_S3_DOMAIN`, `ROLL_S3_PUBLIC_ENDPOINT` (`https://s3.<region>.<site domain>`, the endpoint
+  storage shows), Alternator's domain, `ROLL_CODE_PREVIEW_DOMAIN` (`roll.site`), roll code's
   public, git and web URLs; its own plain Kafka listener moves to `127.0.0.1:19092` if it would
   take the edge's port.
+- Connection details name the public hostnames over TLS (`rolld/src/edge.rs`, `Public`), never a
+  node's own listeners: nosql `<id>.nosql.<region>.<domain>:9042` with `tls: true` and the
+  server name, Alternator `https://<id>.nosql.<region>.<domain>`, no shard-aware or REST port;
+  streams `<stream id>.kafka.<region>.<domain>:9092` with `SASL_SSL` and
+  `https://<stream id>.kafka.<region>.<domain>/v1/streams/<id>`; Postgres
+  `<endpoint>.pg.<region>.<domain>:5432` with `sslmode=require`; Redis
+  `rediss://…@<id>.redis.<region>.<domain>:6379` ("Redis on the fleet"). Tested by
+  `rolld/tests/edge.rs`.
 
 ## Deploys, scaling and failure
 
@@ -513,8 +530,18 @@ pushes take as long as the pack); `handoff-failures` and `lease-takeovers` on an
   a node's own address back, which they can't reach from outside. It needs the fix Kafka has:
   advertise the hostname the client used (`<id>.mq.<region>.roll.sh:5551`) and let the edge reach
   the owner.
-- **Flaky tests seen on GitHub** (each passed on a plain re-run, and on main): redis
-  `compat_debug_with_redis` (`search_hnsw.txt`, `FT.INFO` while the vector index is still
-  building), nosql conformance `test_compaction.py::test_tombstone_gc_with_conflict_in_memtable`,
-  code-control `automations::a_run_starts_an_agent_waits_for_it_and_notifies` (under load). Each
-  should wait for the state it checks instead of racing it.
+- **code-control `automations::a_run_starts_an_agent_waits_for_it_and_notifies`** failed once on
+  GitHub under load and never locally; its helpers now wait up to 60 s for the state they check
+  (they had 5–20 s), and reading the engine, relay and event stream found no race. If it fails
+  again, keep the panic message: it names the helper that gave up.
+- **Per-table tombstone GC switches** (`/column_family/tombstone_gc/<ks>:<cf>`,
+  `/storage_service/tombstone_gc/<ks>`) are answered without doing anything in roll nosql, as the
+  per-table autocompaction switch was until it broke a conformance test.
+- **Queues' connection details behind the edge** still name the node's own AMQP, MQTT, STOMP and
+  stream ports (`amqp://<public host>:55672/…`). They should name `<id>.mq.<region>.<domain>`
+  (AMQPS 5671, MQTTS 8883, STOMP 61614, streams 5551), but what `<id>` is (a vhost, a tenant)
+  comes with queues on the fleet (lane `cloud/queues`). Tasks hand out no connection strings.
+- **Images not pinned by digest**: the Postgres compute images (`postgres:{16,17,18}-alpine`, one
+  `{v}` template in `pg-control`'s config that the gates' pre-pulls must match) and the bases of
+  the `deploy/` Dockerfiles that end-to-end gates build (`deploy/code`, `deploy/queues`,
+  `deploy/nosql`). Every other image a suite or gate pulls is `tag@sha256:<multi-arch index>`.

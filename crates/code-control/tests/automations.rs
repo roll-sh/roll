@@ -19,6 +19,9 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
 const ADMIN: &str = "admin-secret";
 const SECRET_KEY: &str = "0123456789abcdef0123456789abcdef";
+/// How long a helper waits for the state it checks (a run ending, a machine online, the next
+/// event): long, since a loaded runner is slow; each returns as soon as the state is there.
+const PATIENCE: Duration = Duration::from_secs(60);
 
 fn config(c: &mut code_control::Config) {
     c.admin_token = Some(ADMIN.into());
@@ -82,8 +85,8 @@ impl World {
 
     /// Poll a run until it's final (20 s at most).
     async fn finished(&self, run: &str) -> Value {
-        let mut last = Value::Null;
-        for _ in 0..400 {
+        let (mut last, deadline) = (Value::Null, tokio::time::Instant::now() + PATIENCE);
+        while tokio::time::Instant::now() < deadline {
             last = self.ok("GET", &format!("/v1/code/agents/acme/automations/runs/{run}"), None).await;
             if matches!(last["run"]["status"].as_str(), Some("succeeded" | "failed" | "cancelled" | "skipped")) {
                 return last;
@@ -95,8 +98,8 @@ impl World {
 
     /// Poll until `f` holds of the owner's runs.
     async fn runs_until(&self, f: impl Fn(&[Value]) -> bool) -> Vec<Value> {
-        let mut last = vec![];
-        for _ in 0..400 {
+        let (mut last, deadline) = (vec![], tokio::time::Instant::now() + PATIENCE);
+        while tokio::time::Instant::now() < deadline {
             last = self.ok("GET", "/v1/code/agents/acme/automations/runs?limit=200", None).await.as_array().unwrap().clone();
             if f(&last) {
                 return last;
@@ -238,7 +241,8 @@ fn answer(out: &mpsc::UnboundedSender<DaemonFrame>, seq: &Arc<AtomicU64>, c: &Co
 }
 
 async fn wait_online(w: &World, machine: &str) {
-    for _ in 0..200 {
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    while tokio::time::Instant::now() < deadline {
         let (_, v) = w.req("GET", "/v1/code/agents/acme/machines", None, &w.owner).await;
         if v.as_array().unwrap().iter().any(|m| m["id"] == machine && m["online"] == true) {
             return;
@@ -880,7 +884,7 @@ impl Events {
                 }
                 continue;
             }
-            let chunk = tokio::time::timeout(Duration::from_secs(20), self.body.next()).await.expect("an event within 20 s").expect("open").unwrap();
+            let chunk = tokio::time::timeout(PATIENCE, self.body.next()).await.expect("an event in time").expect("open").unwrap();
             self.buf.push_str(&String::from_utf8_lossy(&chunk));
         }
     }

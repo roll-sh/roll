@@ -28,8 +28,10 @@ THREADS=${THREADS:-64}
 REF_MEMORY=${REF_MEMORY:-4g}
 TARGETS=${TARGETS:-"roll-scylla roll-cassandra scylla cassandra"}
 WORKLOADS=${WORKLOADS:-"write read unprepared mixed lwt batch wide"}
-SCYLLA_IMAGE=scylladb/scylla:2026.3.3
-CASSANDRA_IMAGE=cassandra:5.0.9
+SCYLLA_IMAGE=scylladb/scylla:2026.3.3@sha256:f96119dbbfa8bad4abe6161f11ac4f6d5a5c34fdc297fd23cf32626791ed2e59
+CASSANDRA_IMAGE=cassandra:5.0.9@sha256:7e2afd76d5afb991f64c5d9be7d1f8abf749e7ab0e9daaccfd6e865efcece7cc
+LATTE_IMAGE=scylladb/latte:0.55.0-scylladb@sha256:6a5769039fe5388923d5e05f4f15c0960ad34aa92bda2a6a4ff7dbac03741ce0
+SB_IMAGE=scylladb/scylla-bench:1.3.3@sha256:aa7483655c3561d35cb224b64c599389db3d24f2aa0c90bf4db9ebf9692705f7
 PORT_ROLL=49042 PORT_SCYLLA=49142 PORT_CASSANDRA=49242
 API=127.0.0.1:47070
 mkdir -p "$OUT"
@@ -60,8 +62,8 @@ port_of() {
 # Load generators: host network, pinned away from the server CPUs, memory-capped.
 load() { wait_mem 6; docker run --rm --name "bench-nosql-load-$$" --network host --cpuset-cpus "$LOAD_CPUS" --memory 2g "$@"; }
 cs() { load -v "$HERE:/bench:ro" --entrypoint /opt/cassandra/tools/bin/cassandra-stress $CASSANDRA_IMAGE "$@"; }
-latte() { load -v "$HERE:/bench:ro" -w /tmp --entrypoint latte scylladb/latte:latest "$@"; }
-sb() { load scylladb/scylla-bench:latest "$@"; }
+latte() { load -v "$HERE:/bench:ro" -w /tmp --entrypoint latte $LATTE_IMAGE "$@"; }
+sb() { load $SB_IMAGE "$@"; }
 cql() { # cql <port> <statement>
     load --entrypoint cqlsh $CASSANDRA_IMAGE 127.0.0.1 "$1" --request-timeout 120 -e "$2"
 }
@@ -267,7 +269,7 @@ print("roll '$size' live sstable bytes:", sum(t.get("stats",{}).get("live_bytes"
 profile() {
     local t=roll-scylla w
     mkdir -p "$OUT/profile" "$OUT/$t"
-    docker image inspect roll-nosql-bench-perf >/dev/null 2>&1 || printf 'FROM debian:trixie-slim\nRUN apt-get update && apt-get install -y --no-install-recommends linux-perf && rm -rf /var/lib/apt/lists/*\nENTRYPOINT ["perf"]\n' |
+    docker image inspect roll-nosql-bench-perf >/dev/null 2>&1 || printf 'FROM debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2\nRUN apt-get update && apt-get install -y --no-install-recommends linux-perf && rm -rf /var/lib/apt/lists/*\nENTRYPOINT ["perf"]\n' |
         docker build -q -t roll-nosql-bench-perf - >/dev/null
     perf() { docker run --rm --pid=host --cap-add PERFMON --cap-add SYS_PTRACE --cap-add SYS_ADMIN --security-opt seccomp=unconfined \
         -v "$OUT/profile:/out" -v "$(dirname "$ROLLD"):$(dirname "$ROLLD"):ro" roll-nosql-bench-perf "$@"; }

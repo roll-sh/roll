@@ -14,6 +14,8 @@ env:
   CARGO_PROFILE_DEV_DEBUG: line-tables-only
   CARGO_PROFILE_TEST_DEBUG: line-tables-only
   CARGO_INCREMENTAL: '0'
+  # Images pinned by digest (tag@multi-arch index digest), the same refs the scripts and tests use.
+  SEAWEEDFS_IMAGE: chrislusf/seaweedfs:4.50@sha256:c2658820e763294a9e9de7b36c81e59b879e3459148351aee4e31a126ca64860
 
 jobs:
   unit:
@@ -56,7 +58,7 @@ jobs:
           ROLL_E2E_S3_BUCKET: roll-e2e
           ROLL_E2E_S3_ENDPOINT: http://127.0.0.1:8333
         run: |
-          docker run -d --name seaweed -p 8333:8333 chrislusf/seaweedfs server -s3
+          docker run -d --name seaweed -p 8333:8333 "$SEAWEEDFS_IMAGE" server -s3
           for i in $(seq 60); do curl -s -o /dev/null http://127.0.0.1:8333 && break; sleep 1; done
           docker exec seaweed sh -c 'echo "s3.bucket.create -name roll-e2e" | weed shell'
           ROLL_E2E=1 cargo test -p pg-control --test e2e -- --test-threads=4 \

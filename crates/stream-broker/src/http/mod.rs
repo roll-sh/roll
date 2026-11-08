@@ -327,12 +327,30 @@ fn topic_of(stream: &Stream, name: &str) -> ApiResult<Arc<Topic>> {
 
 // ── views ──
 
+/// Where clients of `stream` connect (`None`: the node's listener): its hostname behind the
+/// edge, else the advertised address.
+fn bootstrap_of(b: &Broker, stream: Option<&str>) -> String {
+    match (&b.config.public_domain, stream) {
+        (Some(domain), Some(id)) => format!("{id}.{domain}:{}", b.config.advertised_port),
+        (Some(domain), None) => format!("<stream>.{domain}:{}", b.config.advertised_port),
+        (None, _) => format!("{}:{}", b.config.advertised_host, b.config.advertised_port),
+    }
+}
+
 fn bootstrap(b: &Broker) -> String {
-    format!("{}:{}", b.config.advertised_host, b.config.advertised_port)
+    bootstrap_of(b, None)
 }
 
 fn security_protocol(b: &Broker) -> &'static str {
-    if b.config.tls.is_some() { "SASL_SSL" } else { "SASL_PLAINTEXT" }
+    if b.config.tls.is_some() || b.config.public_domain.is_some() { "SASL_SSL" } else { "SASL_PLAINTEXT" }
+}
+
+/// The HTTP API's base URL for `stream`'s clients: `https://<stream id>.<domain>` behind the edge.
+fn http_base(b: &Broker, stream: &str) -> String {
+    match &b.config.public_domain {
+        Some(domain) => format!("https://{stream}.{domain}"),
+        None => b.config.http_url.clone(),
+    }
 }
 
 fn stream_view(api: &Api, s: &Stream) -> Value {
@@ -345,8 +363,9 @@ fn stream_view(api: &Api, s: &Stream) -> Value {
         "created_at": row.created_at,
         "cluster_id": s.cluster_id,
         "settings": row.settings,
-        "bootstrap": bootstrap(&api.b),
-        "http": format!("{}/v1/streams/{}", api.b.config.http_url, row.id),
+        "bootstrap": bootstrap_of(&api.b, Some(&row.id)),
+        "security_protocol": security_protocol(&api.b),
+        "http": format!("{}/v1/streams/{}", http_base(&api.b, &row.id), row.id),
         "topics": topics.len(),
         "partitions": topics.iter().map(|t| t.partition_count()).sum::<i32>(),
         "throughput": {
@@ -359,7 +378,7 @@ fn stream_view(api: &Api, s: &Stream) -> Value {
 /// Client settings for a key: Kafka properties plus the HTTP endpoints.
 fn connect_view(api: &Api, s: &Stream, username: &str, secret: &str) -> Value {
     let b = &api.b;
-    let boot = bootstrap(b);
+    let boot = bootstrap_of(b, Some(&s.id));
     let proto = security_protocol(b);
     json!({
         "bootstrap": boot,
@@ -378,7 +397,7 @@ fn connect_view(api: &Api, s: &Stream, username: &str, secret: &str) -> Value {
             "sasl.password": secret,
         },
         "http": {
-            "produce": format!("{}/v1/streams/{}/topics/{{topic}}/records", b.config.http_url, s.id),
+            "produce": format!("{}/v1/streams/{}/topics/{{topic}}/records", http_base(b, &s.id), s.id),
             "authorization": format!("Bearer {username}:{secret}"),
         },
     })

@@ -11,7 +11,7 @@ shift 2
 HERE=$(cd "$(dirname "$0")" && pwd)
 
 PIKA_TAG=1.4.4
-IMAGE=python:3.13-slim
+IMAGE=python:3.13-slim@sha256:e48f59cdba69a3cbd9ed2cf0f348d90d45a8d350d98134cf1070bc106ee9ed90
 DEPS="pytest==9.1.1 pytest-timeout==2.4.0 gevent==26.9.0 tornado==6.5.10 twisted==26.4.0"
 
 docker volume create roll-qtest-pika-src >/dev/null

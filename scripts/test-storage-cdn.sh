@@ -19,7 +19,7 @@ cd "$(dirname "$0")/.."
 PATHS=(crates/s3-proto crates/s3-store crates/s3-server crates/s3-control crates/s3-api crates/s3-image apps/cdn-worker/src apps/cdn-worker/test
        apps/cdn-worker/package.json apps/cdn-worker/wrangler.toml Cargo.toml Cargo.lock pnpm-lock.yaml scripts/test-storage-cdn.sh)
 STAMP=target/.test-storage-cdn.hash
-IMAGE=node:22-bookworm-slim
+IMAGE=node:22-bookworm-slim@sha256:5ec23b7c622b00547753bc6ffd78085dd868a68aeb41c8e0a1418f033e13d96d
 
 force=0
 for a in "$@"; do

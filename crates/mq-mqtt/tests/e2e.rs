@@ -56,7 +56,7 @@ async fn paho_python_roundtrip() {
     let h = Harness::start_with(mq_mqtt::Config::default(), BrokerConfig::default(), "0.0.0.0:0").await;
     let port = h.port().to_string();
     let out = tokio::process::Command::new("docker")
-        .args(["run", "--rm", "--add-host=host.docker.internal:host-gateway", "python:3.13-alpine", "sh", "-c"])
+        .args(["run", "--rm", "--add-host=host.docker.internal:host-gateway", "python:3.13-alpine@sha256:1e1f6334529d1fb26a2ef619d7cffb30a7c7d7cc1cc7338ebee283a58d1aeaca", "sh", "-c"])
         .arg(format!("pip install -q --disable-pip-version-check --root-user-action=ignore paho-mqtt >/dev/null && python -c '{SCRIPT}' host.docker.internal {port}"))
         .output()
         .await

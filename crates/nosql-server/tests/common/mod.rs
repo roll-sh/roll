@@ -43,8 +43,8 @@ pub fn init_tracing() {
 }
 
 /// Reference images (bump with docs/nosql/compatibility.md and the CI workflow).
-pub const SCYLLA_IMAGE: &str = "scylladb/scylla:2026.3.3";
-pub const CASSANDRA_IMAGE: &str = "cassandra:5.0.9";
+pub const SCYLLA_IMAGE: &str = "scylladb/scylla:2026.3.3@sha256:f96119dbbfa8bad4abe6161f11ac4f6d5a5c34fdc297fd23cf32626791ed2e59";
+pub const CASSANDRA_IMAGE: &str = "cassandra:5.0.9@sha256:7e2afd76d5afb991f64c5d9be7d1f8abf749e7ab0e9daaccfd6e865efcece7cc";
 
 /// A node's storage on a fresh temp directory (or S3 with `ROLL_E2E_S3_BUCKET`).
 pub async fn store(name: &str) -> Arc<Store> {
