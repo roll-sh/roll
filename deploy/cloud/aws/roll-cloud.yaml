@@ -294,6 +294,12 @@ Resources:
           - Id: expired-delete-markers
             Status: Enabled
             ExpiredObjectDeleteMarker: true
+          # roll queues' logs churn (stream objects go once moved, batches once compacted):
+          # nothing reads an old version, so they don't wait 35 days.
+          - Id: queue-logs-noncurrent-1-day
+            Status: Enabled
+            Prefix: queues/logs/
+            NoncurrentVersionExpiration: { NoncurrentDays: 1 }
       OwnershipControls:
         Rules: [{ ObjectOwnership: BucketOwnerEnforced }]
       PublicAccessBlockConfiguration:

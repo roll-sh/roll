@@ -49,6 +49,10 @@ log store is the object log below on S3 Standard, in the deployment's data bucke
 - **Conditional writes** need S3 (since 2024), MinIO, R2 or another store with `If-None-Match` on
   PUT. A concurrent conditional write to the same key (S3's 409) is treated as "already exists",
   which is what it means for a fence.
+- **A versioned bucket** (roll cloud's data bucket is one) works: a key whose current version is a
+  delete marker counts as absent, and nothing is ever written again at a deleted key (writers only
+  move forward, and fence markers are never deleted). Deleted log objects would linger as
+  noncurrent versions, so the stack expires those under `queues/logs/` after a day.
 
 ## Quorum log
 
