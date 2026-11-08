@@ -2807,24 +2807,25 @@ impl Txn {
 
     /// `get_snap` of each of `keys` (any order), the store's reads made together
     /// (`Store::get_versions`).
-    pub fn get_many_snap(&self, keys: &[Vec<u8>], s: &Snap) -> Result<Vec<Option<Bytes>>> {
+    pub fn get_many_snap<K: AsRef<[u8]>>(&self, keys: &[K], s: &Snap) -> Result<Vec<Option<Bytes>>> {
         self.get_many_snap_with(keys, s, true)
     }
 
     /// `get_many_snap` with rows as they are stored (their out-of-line values' pointers: a
     /// reader decoding some columns reads their values itself, from the source of a scan at
     /// `s`, `TxnScan::source`).
-    pub fn get_many_snap_raw(&self, keys: &[Vec<u8>], s: &Snap) -> Result<Vec<Option<Bytes>>> {
+    pub fn get_many_snap_raw<K: AsRef<[u8]>>(&self, keys: &[K], s: &Snap) -> Result<Vec<Option<Bytes>>> {
         self.get_many_snap_with(keys, s, false)
     }
 
-    fn get_many_snap_with(&self, keys: &[Vec<u8>], s: &Snap, resolve: bool) -> Result<Vec<Option<Bytes>>> {
+    fn get_many_snap_with<K: AsRef<[u8]>>(&self, keys: &[K], s: &Snap, resolve: bool) -> Result<Vec<Option<Bytes>>> {
         self.catch_up(s);
         let st = s.st.borrow();
         let mut out: Vec<Option<Bytes>> = vec![None; keys.len()];
         // The keys the store answers: (key, its place in `keys`).
         let mut reads: Vec<(&[u8], usize)> = Vec::new();
         for (i, key) in keys.iter().enumerate() {
+            let key = key.as_ref();
             match self.snap_get(key, &st)? {
                 Some(v) if resolve => out[i] = self.resolve_own(key, v, Some(&st), st.ts)?,
                 Some(v) => out[i] = v,
@@ -2855,12 +2856,12 @@ impl Txn {
     /// rows found pushed into `out` in their order: from the store by reference, a sorted
     /// batch of reads (`Store::get_sorted_into`), when none of the keys is one of this
     /// transaction's writes; else as `get_many_snap_with` reads them, owned.
-    pub fn get_sorted_snap_into(&self, keys: &[Vec<u8>], s: &Snap, resolve: bool, out: &mut crate::storage::batch::RowBatch) -> Result<()> {
-        debug_assert!(keys.windows(2).all(|w| w[0] < w[1]), "keys strictly ascending");
+    pub fn get_sorted_snap_into<K: AsRef<[u8]>>(&self, keys: &[K], s: &Snap, resolve: bool, out: &mut crate::storage::batch::RowBatch) -> Result<()> {
+        debug_assert!(keys.windows(2).all(|w| w[0].as_ref() < w[1].as_ref()), "keys strictly ascending");
         self.catch_up(s);
         let own = {
             let st = s.st.borrow();
-            keys.iter().map(|k| self.snap_get(k, &st)).find_map(|r| r.transpose()).transpose()?.is_some()
+            keys.iter().map(|k| self.snap_get(k.as_ref(), &st)).find_map(|r| r.transpose()).transpose()?.is_some()
         };
         if !own {
             let ts = s.st.borrow().ts;
@@ -2868,7 +2869,7 @@ impl Txn {
         }
         for (k, v) in keys.iter().zip(self.get_many_snap_with(keys, s, resolve)?) {
             if let Some(v) = v {
-                out.push(k, v);
+                out.push(k.as_ref(), v);
             }
         }
         Ok(())
