@@ -2907,6 +2907,10 @@ impl AggNode {
             // them: a cache of `index`'s lookups, of the groups any integer key equal to the
             // number belongs to.)
             let mut ints: super::fasthash::HashMap<i64, u32> = Default::default();
+            // (Parts' counts by group and aggregate, added here and merged into the groups'
+            // states once, after the input: `Count`'s merge adds.)
+            let mut counts: Vec<i64> = Vec::new();
+            let naggs = self.aggs.len();
             let mut hkeys: Vec<Vec<Value>> = Vec::new();
             let mut groups: Vec<(Vec<Value>, Vec<AggState>)> = Vec::new();
             // (Keys that group nothing more aren't in the hash table's key.)
@@ -3141,8 +3145,16 @@ impl AggNode {
                                         gi
                                     }
                                 };
-                                for (s, x) in groups[gi].1.iter_mut().zip(st) {
-                                    s.acc.merge(x)?;
+                                for (a, x) in st.into_iter().enumerate() {
+                                    match x {
+                                        super::partial::Partial::Count(n) => {
+                                            if counts.len() < groups.len() * naggs {
+                                                counts.resize(groups.len() * naggs, 0);
+                                            }
+                                            counts[gi * naggs + a] += n;
+                                        }
+                                        x => groups[gi].1[a].acc.merge(x)?,
+                                    }
                                 }
                                 if hash_order {
                                     map.push(gi);
@@ -3210,6 +3222,11 @@ impl AggNode {
                     if sh.is_none() {
                         feed(a, st, &row, ctx)?;
                     }
+                }
+            }
+            for (i, n) in std::mem::take(&mut counts).into_iter().enumerate() {
+                if n != 0 {
+                    groups[i / naggs].1[i % naggs].acc.merge(super::partial::Partial::Count(n))?;
                 }
             }
             if groups.is_empty() && self.groups.is_empty() {
