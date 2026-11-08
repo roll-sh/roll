@@ -104,3 +104,42 @@ WHERE cls.relkind IN ('r', 'v', 'm', 'f', 'p')
   AND cls.relname IN ('a190_t1')
 ORDER BY 2;
 DROP SCHEMA a190_ic CASCADE;
+-- A cursor's startup cost can favor an ordered grouping; the resulting plan determines
+-- whether a backward FETCH is allowed and whether its transaction can commit.
+CREATE TABLE a190_cursor (id int PRIMARY KEY, v int, w text) WITH (autovacuum_enabled = off);
+CREATE INDEX a190_cursor_v ON a190_cursor (v);
+INSERT INTO a190_cursor SELECT i, (i * 7) % 31, 'w' || i FROM generate_series(1, 6) i;
+CREATE TABLE a190_cursor_effects (id int);
+EXPLAIN (COSTS OFF) SELECT v, count(*), min(id) FROM a190_cursor GROUP BY v ORDER BY v;
+EXPLAIN (COSTS OFF) DECLARE c CURSOR FOR SELECT v, count(*), min(id) FROM a190_cursor GROUP BY v ORDER BY v;
+EXPLAIN (COSTS OFF) DECLARE c SCROLL CURSOR FOR SELECT v, count(*), min(id) FROM a190_cursor GROUP BY v ORDER BY v;
+BEGIN;
+INSERT INTO a190_cursor_effects VALUES (1);
+DECLARE c CURSOR FOR SELECT v, count(*), min(id) FROM a190_cursor GROUP BY v ORDER BY v;
+SELECT name, is_scrollable FROM pg_cursors ORDER BY name;
+FETCH ABSOLUTE -1 FROM c;
+SELECT 1;
+COMMIT;
+SELECT * FROM a190_cursor_effects;
+BEGIN;
+DECLARE c SCROLL CURSOR FOR SELECT v, count(*), min(id) FROM a190_cursor GROUP BY v ORDER BY v;
+SELECT name, is_scrollable FROM pg_cursors ORDER BY name;
+FETCH ABSOLUTE -1 FROM c;
+ROLLBACK;
+SET cursor_tuple_fraction = 1;
+EXPLAIN (COSTS OFF) DECLARE c CURSOR FOR SELECT v, count(*), min(id) FROM a190_cursor GROUP BY v ORDER BY v;
+EXPLAIN (COSTS OFF) DECLARE c SCROLL CURSOR FOR SELECT v, count(*), min(id) FROM a190_cursor GROUP BY v ORDER BY v;
+BEGIN;
+DECLARE c CURSOR FOR SELECT v, count(*), min(id) FROM a190_cursor GROUP BY v ORDER BY v;
+SELECT name, is_scrollable FROM pg_cursors ORDER BY name;
+FETCH ABSOLUTE -1 FROM c;
+ROLLBACK;
+SET cursor_tuple_fraction = 0;
+EXPLAIN (COSTS OFF) DECLARE c CURSOR FOR SELECT v, count(*), min(id) FROM a190_cursor GROUP BY v ORDER BY v;
+BEGIN;
+DECLARE c CURSOR FOR SELECT v, count(*), min(id) FROM a190_cursor GROUP BY v ORDER BY v;
+SELECT name, is_scrollable FROM pg_cursors ORDER BY name;
+FETCH ABSOLUTE -1 FROM c;
+ROLLBACK;
+RESET cursor_tuple_fraction;
+EXPLAIN (COSTS OFF) SELECT v, count(*), min(id) FROM a190_cursor GROUP BY v ORDER BY v;
