@@ -15,6 +15,7 @@ import {
   parsePath,
   parseRange,
   parseRoutes,
+  passesThrough,
   presignSignature,
   privateKey,
   sha256Hex,
@@ -246,4 +247,15 @@ test("ranges", () => {
   assert.equal(parseRange("bytes=-0", 100), "unsatisfiable");
   assert.equal(parseRange("bytes=0-1,5-6", 100), null, "multiple ranges: the whole object");
   assert.equal(parseRange(null, 100), null);
+});
+
+test("pass-through hosts: one label per *, ports ignored, nothing else", () => {
+  const p = "chg-*.roll.site, other.example";
+  assert.ok(passesThrough("chg-abc123.roll.site", p));
+  assert.ok(passesThrough("CHG-x.roll.site:443", p));
+  assert.ok(passesThrough("other.example", p));
+  assert.ok(!passesThrough("media.roll.site", p));
+  assert.ok(!passesThrough("a.chg-x.roll.site", p));
+  assert.ok(!passesThrough("chg-x.roll.site.evil.example", p));
+  assert.ok(!passesThrough("chg-x.roll.site", undefined));
 });
