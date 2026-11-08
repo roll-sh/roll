@@ -65,7 +65,11 @@ impl Redis {
         };
         // Spliced connections show the edge's address (or rolld's own port).
         let public = if args.edge.enabled { args.edge.redis_listen } else { args.redis };
-        let secret = cluster_secret().unwrap_or_else(|| roll_cluster::ClusterConfig::random_node_id() + "-redis-local-only");
+        // Hops are signed with the cluster's secret, from the flag or the environment (the
+        // owners check them with it).
+        let c = &args.code;
+        let secret = c.cluster.resolve(c.code_cluster_secret.as_deref(), None, None).ok().and_then(|r| r.secret);
+        let secret = secret.unwrap_or_else(|| roll_cluster::ClusterConfig::random_node_id() + "-redis-local-only");
         let front = Front::new(control.clone(), &secret, public)?;
         let listeners = (TcpListener::bind(args.redis).await?, TcpListener::bind(args.redis_http).await?);
         tracing::info!(resp = %args.redis, http = %args.redis_http, tls = tls.is_some(), "redis listening");
@@ -122,8 +126,4 @@ impl Redis {
         self.control.shipper.flush().await?;
         self.control.shipper.write_manifests(true).await
     }
-}
-
-fn cluster_secret() -> Option<String> {
-    ["ROLL_CLUSTER_SECRET", "ROLL_CODE_CLUSTER_SECRET"].iter().find_map(|k| std::env::var(k).ok().filter(|v| !v.is_empty()))
 }

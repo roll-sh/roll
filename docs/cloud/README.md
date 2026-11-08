@@ -508,8 +508,14 @@ pushes take as long as the pack); `handoff-failures` and `lease-takeovers` on an
   `ROLL_BUCKET_DOMAIN`) and by path on the zone (`roll.site/<bucket>/<key>`); set the deployment's
   CDN `base_url` to `https://roll.site` so purges reach both. Bucket names starting `chg-` are
   reserved for previews.
-- **Flaky tests seen on GitHub** (each passed on a plain re-run, and on main): redis
-  `compat_debug_with_redis` (`search_hnsw.txt`, `FT.INFO` while the vector index is still
-  building), nosql conformance `test_compaction.py::test_tombstone_gc_with_conflict_in_memtable`,
-  code-control `automations::a_run_starts_an_agent_waits_for_it_and_notifies` (under load). Each
-  should wait for the state it checks instead of racing it.
+- **code-control `automations::a_run_starts_an_agent_waits_for_it_and_notifies`** failed once on
+  GitHub under load and never locally; its helpers now wait up to 60 s for the state they check
+  (they had 5–20 s), and reading the engine, relay and event stream found no race. If it fails
+  again, keep the panic message: it names the helper that gave up.
+- **Per-table tombstone GC switches** (`/column_family/tombstone_gc/<ks>:<cf>`,
+  `/storage_service/tombstone_gc/<ks>`) are answered without doing anything in roll nosql, as the
+  per-table autocompaction switch was until it broke a conformance test.
+- **Images not pinned by digest**: the Postgres compute images (`postgres:{16,17,18}-alpine`, one
+  `{v}` template in `pg-control`'s config that the gates' pre-pulls must match) and the bases of
+  the `deploy/` Dockerfiles that end-to-end gates build (`deploy/code`, `deploy/queues`,
+  `deploy/nosql`). Every other image a suite or gate pulls is `tag@sha256:<multi-arch index>`.
