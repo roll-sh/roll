@@ -118,16 +118,16 @@ written once in SQLite's dialect), as roll code's did.
 | `roll.sh/<owner>/<repo>.git` | git smart HTTP; the edge sends `.git` paths straight to code, not through the dashboard | proxied |
 | `git.roll.sh/<owner>/<repo>.git` | the same, without Cloudflare's 100 MB request limit (big first pushes) | DNS only |
 | `api.roll.sh` | every product's HTTP API, MCP, agents' WebSocket | proxied |
-| `<id>.pg.roll.sh:5432` | Postgres endpoints | DNS only |
-| `<id>.redis.roll.sh:6379` (TLS), `https://<id>.redis.roll.sh` (REST) | Redis | DNS only |
-| `<id>.kafka.roll.sh:9092` (TLS + SASL), HTTPS REST on 443 | streams | DNS only |
-| `<id>.nosql.roll.sh:9042` (TLS), HTTPS Alternator on 443 | nosql (the name the nosql docs already use) | DNS only |
-| `<id>.mq.roll.sh` 5671 AMQPS, 8883 MQTTS, 61614 STOMP TLS, 5551 streams, 443 web | queues | DNS only |
-| `tasks.roll.sh` | tasks API | DNS only |
-| `s3.roll.site`, `<bucket>.s3.roll.site` | S3 API (path and virtual-host style) | DNS only |
+| `<id>.pg.us-east-1.roll.sh:5432` | Postgres endpoints | DNS only |
+| `<id>.redis.us-east-1.roll.sh:6379` (TLS), `https://<id>.redis.us-east-1.roll.sh` (REST) | Redis | DNS only |
+| `<id>.kafka.us-east-1.roll.sh:9092` (TLS + SASL), HTTPS REST on 443 | streams | DNS only |
+| `<id>.nosql.us-east-1.roll.sh:9042` (TLS), HTTPS Alternator on 443 | nosql | DNS only |
+| `<id>.mq.us-east-1.roll.sh` 5671 AMQPS, 8883 MQTTS, 61614 STOMP TLS, 5551 streams, 443 web | queues | DNS only |
+| `tasks.us-east-1.roll.sh` | tasks API | DNS only |
+| `s3.us-east-1.roll.site`, `<bucket>.s3.us-east-1.roll.site` | S3 API (path and virtual-host style) | DNS only |
 | `<bucket>.roll.site`, custom domains | public buckets and sites (the CDN Worker) | proxied |
 | `chg-<id>.roll.site` | code previews | proxied |
-| `origin.roll.sh` | the NLB, the target of every DNS-only record above | DNS only |
+| `origin.us-east-1.roll.sh` | the region's NLB, the target of every DNS-only record above | DNS only |
 
 - **roll.sh** is the product; **roll.site** serves only user content: anything a user uploaded
   or built that a browser could render (objects, presigned S3 URLs, previews, sites). Nothing
@@ -135,9 +135,14 @@ written once in SQLite's dialect), as roll code's did.
   amazonaws.com rather than amazon.com. roll.site goes on the Public Suffix List.
 - Raw file content from the API (`api.roll.sh`, e.g. a repo's raw files) is served as
   `text/plain` or an attachment with `X-Content-Type-Options: nosniff`, never as HTML.
-- Wildcards are one record each (`*.pg.roll.sh` and so on) pointing at the NLB. The first
-  region uses the short names; a second region adds `<id>.<product>.<region>.roll.sh` and
-  existing hostnames keep working.
+- **Hostnames customers connect to directly carry the AWS region** (`us-east-1`). Connection
+  strings live in customers' code and can never be renamed, the region tells them where to run
+  their apps for low latency and no cross-region transfer, and it's the region S3 clients sign
+  with. Each region is one wildcard record per product (`*.pg.us-east-1.roll.sh` and so on)
+  pointing at that region's NLB: no per-tenant DNS records and no global router.
+- Global or Cloudflare-proxied names carry no region (`roll.sh`, `api.roll.sh`, `git.roll.sh`,
+  `<bucket>.roll.site`, `chg-<id>.roll.site`): the API routes to a resource's region, and
+  Cloudflare can send a proxied request to the right region when there is more than one.
 - roll.cloud isn't needed. If it's bought, it only redirects to roll.sh.
 
 ## Deploys, scaling and failure
@@ -225,7 +230,7 @@ The contract between the stack, the image and rolld. Each setting is a flag with
 | `ROLL_ADMIN_TOKEN` | from Secrets Manager | the operator token every control-plane API accepts |
 | `ROLL_DASHBOARD_ORIGIN` | `https://roll.sh` | the only origin CORS allows |
 | `ROLL_EDGE` | `1` | public listeners with TLS, SNI routing and PROXY protocol |
-| `ROLL_EDGE_DOMAIN`, `ROLL_EDGE_SITE_DOMAIN`, `ROLL_EDGE_REGION` | `roll.sh`, `roll.site`, `us-east-1` | hostnames are built from these (the region appears in names only outside the first region) |
+| `ROLL_EDGE_DOMAIN`, `ROLL_EDGE_SITE_DOMAIN`, `ROLL_EDGE_REGION` | `roll.sh`, `roll.site`, `us-east-1` | hostnames are built from these |
 | `ROLL_EDGE_PROXY_PROTOCOL` | `1` | expect PROXY protocol v2 from the NLB |
 | `ROLL_ACME_DIRECTORY`, `ROLL_ACME_EMAIL` | Let's Encrypt production, ops address | |
 | `ROLL_CLOUDFLARE_API_TOKEN` | from Secrets Manager | DNS edit on both zones, for DNS-01 only |
