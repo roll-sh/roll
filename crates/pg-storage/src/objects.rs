@@ -15,7 +15,7 @@ use object_store::aws::AmazonS3Builder;
 use object_store::local::LocalFileSystem;
 use object_store::path::Path as ObjPath;
 use object_store::prefix::PrefixStore;
-use object_store::{ObjectStore, ObjectStoreExt, PutPayload, WriteMultipart};
+use object_store::{ObjectStore, ObjectStoreExt, PutMode, PutPayload, UpdateVersion, WriteMultipart};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -27,6 +27,13 @@ pub enum StorageConfig {
     /// S3 or an S3-compatible endpoint (MinIO, R2, …). Credentials come from the usual AWS env vars
     /// or the instance role.
     S3 { bucket: String, region: Option<String>, endpoint: Option<String>, prefix: Option<String> },
+}
+
+/// Which write of an object a reader saw: what [`Objects::put_if`] compares against.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Version {
+    e_tag: Option<String>,
+    version: Option<String>,
 }
 
 #[derive(Clone)]
@@ -146,6 +153,62 @@ impl Objects {
             }
         }
         Ok(out)
+    }
+
+    /// Write `key` only if it doesn't exist (S3 `If-None-Match: *`). False: something is there
+    /// already (perhaps this very write, if an earlier attempt's answer was lost: read it to
+    /// tell).
+    pub async fn put_new(&self, key: &str, data: Bytes) -> anyhow::Result<bool> {
+        match self.store.put_opts(&ObjPath::from(key), PutPayload::from_bytes(data), PutMode::Create.into()).await {
+            Ok(_) => Ok(true),
+            Err(object_store::Error::AlreadyExists { .. } | object_store::Error::Precondition { .. }) => Ok(false),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// An object with the version a [`Objects::put_if`] compares against.
+    pub async fn get_versioned(&self, key: &str) -> anyhow::Result<Option<(Bytes, Version)>> {
+        match self.store.get_opts(&ObjPath::from(key), Default::default()).await {
+            Ok(r) => {
+                let v = Version { e_tag: r.meta.e_tag.clone(), version: r.meta.version.clone() };
+                Ok(Some((r.bytes().await?, v)))
+            }
+            Err(object_store::Error::NotFound { .. }) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Compare-and-swap: write `key` if it is still at `expected` (S3 `If-Match`), or doesn't
+    /// exist when `expected` is `None`. `None` back: it changed (or appeared) meanwhile.
+    ///
+    /// A local directory can't compare and swap by itself; it serves one host, so the check
+    /// and the write are made atomic within this process instead.
+    pub async fn put_if(&self, key: &str, data: Bytes, expected: Option<&Version>) -> anyhow::Result<Option<Version>> {
+        let path = ObjPath::from(key);
+        let Some(want) = expected else {
+            return match self.store.put_opts(&path, PutPayload::from_bytes(data), PutMode::Create.into()).await {
+                Ok(r) => Ok(Some(Version { e_tag: r.e_tag, version: r.version })),
+                Err(object_store::Error::AlreadyExists { .. } | object_store::Error::Precondition { .. }) => Ok(None),
+                Err(e) => Err(e.into()),
+            };
+        };
+        let update = UpdateVersion { e_tag: want.e_tag.clone(), version: want.version.clone() };
+        match self.store.put_opts(&path, PutPayload::from_bytes(data.clone()), PutMode::Update(update).into()).await {
+            Ok(r) => Ok(Some(Version { e_tag: r.e_tag, version: r.version })),
+            Err(object_store::Error::Precondition { .. } | object_store::Error::NotFound { .. }) => Ok(None),
+            Err(object_store::Error::NotImplemented { .. }) => {
+                static LOCAL_CAS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+                let _one = LOCAL_CAS.lock().await;
+                match self.store.head(&path).await {
+                    Ok(m) if m.e_tag == want.e_tag => {}
+                    Ok(_) | Err(object_store::Error::NotFound { .. }) => return Ok(None),
+                    Err(e) => return Err(e.into()),
+                }
+                let r = self.store.put(&path, PutPayload::from_bytes(data)).await?;
+                Ok(Some(Version { e_tag: r.e_tag, version: r.version }))
+            }
+            Err(e) => Err(e.into()),
+        }
     }
 
     pub async fn delete_prefix(&self, prefix: &str) -> anyhow::Result<usize> {

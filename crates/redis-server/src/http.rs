@@ -81,7 +81,7 @@ async fn handle(
         return cors(StatusCode::NO_CONTENT.into_response());
     }
     let query = parse_query(uri.query().unwrap_or(""));
-    let token = bearer(&headers).or_else(|| query.iter().find(|(k, _)| k == b"_token").and_then(|(_, v)| v.as_ref()).map(|v| String::from_utf8_lossy(v).into_owned()));
+    let token = token(&headers, &uri);
     let session = match authenticate(st.dir.as_ref(), token.as_deref()).await {
         Ok(s) => s,
         Err(r) => return cors(*r),
@@ -149,6 +149,14 @@ async fn authenticate(dir: &dyn Directory, token: Option<&str>) -> Result<Sessio
         Some(t) => dir.authenticate(AuthRequest { user: None, password: t.as_bytes(), sni: None, client: None, command: b"auth" }).await.map_err(|_| unauthorized()),
         None => dir.anonymous().await.ok_or_else(unauthorized),
     }
+}
+
+/// A request's token: `Authorization` (Bearer, or Basic's password) or `?_token=`.
+pub fn token(headers: &HeaderMap, uri: &Uri) -> Option<String> {
+    bearer(headers).or_else(|| {
+        let query = parse_query(uri.query().unwrap_or(""));
+        query.into_iter().find(|(k, _)| k == b"_token").and_then(|(_, v)| v).map(|v| String::from_utf8_lossy(&v).into_owned())
+    })
 }
 
 fn bearer(h: &HeaderMap) -> Option<String> {

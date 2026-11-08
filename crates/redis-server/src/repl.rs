@@ -641,14 +641,7 @@ impl Follower {
         // Listed segments that end before what's applied hold nothing new.
         let mut segs: Vec<(String, u64)> = m.segments.iter().filter(|s| s.end > applied).map(|s| (s.node.clone(), s.seq)).collect();
         if let Some(node) = &m.node {
-            let mut later: Vec<u64> = objects
-                .list(&format!("redis/seg/{node}/"))
-                .await?
-                .iter()
-                .filter_map(|(k, _)| k.rsplit('/').next()?.strip_suffix(".zst")?.parse().ok())
-                .filter(|s| *s > m.after_seq)
-                .collect();
-            later.sort_unstable();
+            let later = persist::later_segments(objects, node, m.after_seq, None).await?;
             segs.extend(later.into_iter().map(|s| (node.clone(), s)));
         }
         for seg in segs {

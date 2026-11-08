@@ -339,7 +339,7 @@ async fn a_spliced_connection_reaches_the_owner_with_its_first_bytes() {
         }),
     );
     let owner = format!("http://{}", spawn_router(roll_edge::splice::router(signer.clone(), handlers)).await);
-    let hop = Hop { product: "echo".into(), tenant: "t1".into(), client: "203.0.113.9:5000".parse().unwrap(), sni: Some("t1.redis.r1.roll.test".into()) };
+    let hop = Hop { product: "echo".into(), tenant: "t1".into(), client: "203.0.113.9:5000".parse().unwrap(), sni: Some("t1.redis.r1.roll.test".into()), hops: 0 };
 
     let (mut client, here) = tokio::io::duplex(1 << 16);
     let (o, s, h) = (owner.clone(), signer.clone(), hop.clone());
