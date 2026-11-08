@@ -197,6 +197,36 @@ never on a fleet node or through a Docker socket.
 Production is a parameter change: bigger instances with local NVMe, more nodes, and a separate
 NLB per protocol family if connection counts need it.
 
+## Node settings
+
+The contract between the stack, the image and rolld. Each setting is a flag with this env name.
+
+| env | value in the cloud | |
+| --- | --- | --- |
+| `ROLL_CLUSTER_BACKEND` | `dynamodb` | `memory` (one node, the default), `postgres`, `dynamodb` |
+| `ROLL_CLUSTER_TABLE` | `roll-cluster` | the DynamoDB table |
+| `ROLL_CLUSTER_SECRET` | from Secrets Manager | signs internal hops; `ROLL_CODE_CLUSTER_SECRET` stays an alias |
+| `ROLL_NODE_ID` | the EC2 instance id | |
+| `ROLL_ZONE` | the instance's availability zone | placement spreads standbys across zones |
+| `ROLL_ADVERTISE_URL` | `http://<private ip>:7070` | where other nodes reach this one |
+| `ROLL_API` | `0.0.0.0:7070` | internal HTTP: node-to-node hops and `GET /healthz`; never public |
+| `ROLL_SYSTEM_DATABASE` | the system database's URL | catalogs and accounts for every product |
+| `ROLL_S3_BUCKET`, `AWS_REGION` | `roll-cloud-data-<account>`, `us-east-1` | all product data, under per-product prefixes |
+| `ROLL_SECRET_KEY` | from Secrets Manager | seals owners' keys and the stored certificates |
+| `ROLL_ADMIN_TOKEN` | from Secrets Manager | the operator token every control-plane API accepts |
+| `ROLL_DASHBOARD_ORIGIN` | `https://roll.cloud` | the only origin CORS allows |
+| `ROLL_EDGE` | `1` | public listeners with TLS, SNI routing and PROXY protocol |
+| `ROLL_EDGE_DOMAIN`, `ROLL_EDGE_SITE_DOMAIN`, `ROLL_EDGE_REGION` | `roll.cloud`, `roll.site`, `us-east-1` | hostnames are built from these |
+| `ROLL_EDGE_PROXY_PROTOCOL` | `1` | expect PROXY protocol v2 from the NLB |
+| `ROLL_ACME_DIRECTORY`, `ROLL_ACME_EMAIL` | Let's Encrypt production, ops address | |
+| `ROLL_CLOUDFLARE_API_TOKEN` | from Secrets Manager | DNS edit on both zones, for DNS-01 only |
+| `ROLL_DASHBOARD_UPSTREAM` | `http://127.0.0.1:3000` | the dashboard container in the same task |
+
+Public ports (NLB listener → node port): 443 → 8443 (HTTPS: dashboard, API, git, S3, REST data
+planes, WebSockets), 5432, 6379, 9092, 9042, 5671, 8883, 61614 and 5551, each to the same port on
+the node. The NLB's health check is `GET http://<node>:7070/healthz`: 200 while the node serves and
+isn't draining.
+
 ## Where everything lives
 
 | part | path |
