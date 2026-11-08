@@ -200,7 +200,7 @@ pub fn engine_query(s: &mut Session, stmt: &str) -> Vec<Event> {
                             .iter()
                             .map(|r| {
                                 r.iter()
-                                    .zip(cols)
+                                    .zip(cols.iter())
                                     .map(|(v, c)| {
                                         if v.is_null() {
                                             None
