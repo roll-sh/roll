@@ -145,9 +145,9 @@ impl Session {
             }
             let mut writes = vec![(twophase::record_key(gid), None)];
             // (And with the rollback record: a session origin's position.)
-            let origin = crate::repl::origin::rollback_progress(&self.state);
-            if let Some((id, lsn)) = origin {
-                writes.push((crate::repl::origin::progress_key(id), Some(bytes::Bytes::copy_from_slice(&lsn.to_be_bytes()))));
+            let (origin, progress) = crate::repl::origin::rollback_progress(&self.state).unzip();
+            if let (Some((id, _)), Some(v)) = (origin, progress) {
+                writes.push((crate::repl::origin::progress_key(id), Some(v.into())));
             }
             let r = crate::repl::log::rollback_prepared(&self.state.db, &t, writes);
             t.rollback();

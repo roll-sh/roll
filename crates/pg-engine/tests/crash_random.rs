@@ -1048,3 +1048,163 @@ fn power_cut_keeps_a_prefix_of_concurrent_commits() {
         }
     }
 }
+
+/// Replication origins through a power cut. A subscriber applies `REPL_TXNS` transactions
+/// from a publisher with synchronous_commit off (a subscription's default: its commits are
+/// acknowledged, and move the origin, before their fsync), and the power is cut before each
+/// operation its files see, keeping nothing and then a seeded part of what wasn't fsynced
+/// (the origin file renamed ahead of the commits it reports, say). After recovery the
+/// subscription catches up and each remote transaction is applied exactly once: the origin's
+/// progress is durable with the commit that applied it, as PostgreSQL's commit record carries
+/// it, and nothing else may move it past or behind that. The publisher runs in the same
+/// child outside the cut (it only crashes). The table has no key, so an applied-again insert
+/// shows as a second row.
+#[cfg(feature = "powerloss")]
+#[test]
+fn power_cut_applies_each_replicated_transaction_once() {
+    const REPL_TXNS: i64 = 12;
+    let publisher = |dir: &Path| {
+        let e = Engine::open(EngineOptions {
+            data_dir: dir.to_path_buf(),
+            cache_bytes: 4 << 20,
+            memtable_bytes: 256 << 10,
+            sync: true,
+            idle_close: Duration::from_secs(600),
+            superuser: "postgres".into(),
+            settings: [("wal_level", "logical")].iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+            ..Default::default()
+        })
+        .unwrap();
+        let opts = pg_engine::server::ServerOptions { auth: pg_engine::server::AuthMethod::Trust };
+        let port = pg_engine::server::spawn(e.clone(), "127.0.0.1:0", opts).unwrap().port();
+        (e, port)
+    };
+    let subscriber = |dir: &Path| {
+        Engine::open(EngineOptions {
+            data_dir: dir.to_path_buf(),
+            cache_bytes: 4 << 20,
+            memtable_bytes: 256 << 10,
+            sync: true,
+            idle_close: Duration::from_secs(600),
+            superuser: "postgres".into(),
+            outbound: vec!["127.0.0.1".into()],
+            ..Default::default()
+        })
+        .unwrap()
+    };
+    let wait = |s: &mut Session, sql: &str, want: &str| {
+        let start = std::time::Instant::now();
+        loop {
+            let got = texts(s, sql).join(",");
+            if got == want {
+                return;
+            }
+            assert!(start.elapsed() < Duration::from_secs(60), "{sql}: {got}, want {want}");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    };
+    let connect = |s: &mut Session, port: u16| {
+        texts(s, &format!("ALTER SUBSCRIPTION s CONNECTION 'host=127.0.0.1 port={port} user=postgres dbname=postgres'"));
+        texts(s, "ALTER SUBSCRIPTION s ENABLE");
+    };
+    let all = (REPL_TXNS + 1).to_string();
+    if let Ok(dir) = std::env::var("POWER_REPL_CHILD") {
+        let dir = Path::new(&dir);
+        let (p, port) = publisher(&dir.join("pub"));
+        let sub = subscriber(&dir.join("data"));
+        let mut s = sub.connect(1, "postgres", "postgres", "t").unwrap();
+        connect(&mut s, port);
+        if std::env::var("POWER_REPL_PHASE").as_deref() == Ok("check") {
+            // Every transaction applied and confirmed (so nothing is still on its way) ...
+            wait(&mut s, "SELECT count(DISTINCT i)::text FROM t", &all);
+            let mut ps = p.connect(1, "postgres", "postgres", "t").unwrap();
+            let confirmed = "SELECT (confirmed_flush_lsn >= pg_current_wal_lsn())::text FROM pg_replication_slots WHERE slot_name = 's'";
+            wait(&mut ps, confirmed, "true");
+            // ... once.
+            let again = texts(&mut s, "SELECT i, count(*) FROM t GROUP BY i HAVING count(*) <> 1 ORDER BY i");
+            assert!(again.is_empty(), "applied more than once (i|times): {again:?}");
+            return;
+        }
+        wait(&mut s, "SELECT count(*)::text FROM t", &all);
+        drop(s);
+        sub.shutdown();
+        println!("ops {}", pg_engine::storage::powerloss::ops());
+        return;
+    }
+    // The state every run starts from: a subscription that has applied one transaction and is
+    // disabled, and REPL_TXNS more transactions waiting on the publisher.
+    let tmp = tempfile::tempdir().unwrap();
+    let base = tmp.path().join("base");
+    {
+        let (p, port) = publisher(&base.join("pub"));
+        let sub = subscriber(&base.join("data"));
+        let mut ps = p.connect(1, "postgres", "postgres", "t").unwrap();
+        let mut s = sub.connect(1, "postgres", "postgres", "t").unwrap();
+        texts(&mut ps, "CREATE TABLE t (i int, pad text)");
+        texts(&mut s, "CREATE TABLE t (i int, pad text)");
+        texts(&mut ps, "CREATE PUBLICATION p FOR TABLE t");
+        let conn = format!("host=127.0.0.1 port={port} user=postgres dbname=postgres");
+        texts(&mut s, &format!("CREATE SUBSCRIPTION s CONNECTION '{conn}' PUBLICATION p WITH (copy_data = false)"));
+        texts(&mut ps, "INSERT INTO t VALUES (0, 'warm-up')");
+        wait(&mut s, "SELECT count(*)::text FROM t", "1");
+        texts(&mut s, "ALTER SUBSCRIPTION s DISABLE");
+        wait(&mut s, "SELECT count(*)::text FROM pg_stat_subscription WHERE pid IS NOT NULL", "0");
+        for i in 1..=REPL_TXNS {
+            texts(&mut ps, &format!("INSERT INTO t VALUES ({i}, repeat('x', 300))"));
+        }
+        drop((ps, s));
+        sub.shutdown();
+        p.shutdown();
+    }
+    fn copy_dir(from: &Path, to: &Path) {
+        std::fs::create_dir_all(to).unwrap();
+        for e in std::fs::read_dir(from).unwrap().flatten() {
+            if e.file_type().unwrap().is_dir() {
+                copy_dir(&e.path(), &to.join(e.file_name()));
+            } else {
+                std::fs::copy(e.path(), to.join(e.file_name())).unwrap();
+            }
+        }
+    }
+    let child = |run: &Path, phase: &str, at: Option<u64>| {
+        let mut c = std::process::Command::new(std::env::current_exe().unwrap());
+        c.args(["--exact", "power_cut_applies_each_replicated_transaction_once", "--nocapture"])
+            .env("POWER_REPL_CHILD", run)
+            .env("POWER_REPL_PHASE", phase);
+        if phase == "apply" {
+            c.env("ROLL_POWERLOSS", format!("{}:{}", run.join("data").display(), run.join("shadow").display()));
+        }
+        if let Some(n) = at {
+            c.env("ROLL_POWERLOSS_AT", n.to_string());
+        }
+        c.output().unwrap()
+    };
+    let ops = {
+        let run = tmp.path().join("full");
+        copy_dir(&base, &run);
+        let out = child(&run, "apply", None);
+        let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+        assert_eq!(out.status.code(), Some(0), "{stdout}{}", String::from_utf8_lossy(&out.stderr));
+        std::fs::remove_dir_all(&run).unwrap();
+        stdout.lines().find_map(|l| l.strip_prefix("ops ")?.parse::<u64>().ok()).unwrap()
+    };
+    assert!(ops > 20, "only {ops} operations recorded");
+    // (A run's operations vary a little with timing: the WAL writer's, the origin file's.)
+    for at in 1..=ops + 5 {
+        for keep in [None, Some(at)] {
+            let run = tmp.path().join(format!("r{at}"));
+            copy_dir(&base, &run);
+            let out = child(&run, "apply", Some(at));
+            let what = format!("cut before operation {at} of {ops} (keeping {keep:?})");
+            if out.status.code().is_none() {
+                pg_engine::storage::powerloss::power_cut(&run.join("data"), &run.join("shadow"), keep).unwrap();
+            } else {
+                assert_eq!(out.status.code(), Some(0), "{what}: {}", String::from_utf8_lossy(&out.stderr));
+            }
+            let out = child(&run, "check", None);
+            let (o, e) = (String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+            assert_eq!(out.status.code(), Some(0), "{what}: {o}{e}");
+            std::fs::remove_dir_all(&run).unwrap();
+        }
+    }
+}
