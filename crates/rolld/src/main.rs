@@ -480,7 +480,7 @@ async fn run() -> anyhow::Result<()> {
         nosql: nosql.as_ref(),
         queues: queues.as_ref(),
     };
-    let edge = edge::Edge::start(&args, &storage, products, std::sync::Arc::new(roll_edge::certs::LocalSingleton)).await?;
+    let edge = edge::Edge::start(&args, &storage, products, std::sync::Arc::new(edge::ClusterSingleton(node.cluster.clone()))).await?;
     let router = edge::internal(router, edge.as_ref());
     let queues_serve = async {
         match &queues {

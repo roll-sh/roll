@@ -178,6 +178,19 @@ fn io<F: std::future::Future<Output = std::io::Result<()>> + Send + 'static>(f: 
     Box::pin(async move { f.await.map_err(anyhow::Error::from) })
 }
 
+
+/// The fleet's one-node-at-a-time lock for the edge's jobs (certificate issuance): the cluster
+/// layer's singleton, or always held on a node on its own (the memory backend owns everything).
+pub struct ClusterSingleton(pub Arc<roll_cluster::Cluster>);
+
+impl Singleton for ClusterSingleton {
+    fn holds<'a>(&'a self, name: &'a str) -> futures::future::BoxFuture<'a, bool> {
+        let (cluster, name) = (self.0.clone(), name.to_string());
+        // `singleton` may wait on the backend: keep it off the async workers.
+        Box::pin(async move { tokio::task::spawn_blocking(move || cluster.singleton(&name)).await.unwrap_or(false) })
+    }
+}
+
 impl Edge {
     /// Bind every public listener and start loading certificates. `None` without `ROLL_EDGE`.
     pub async fn start(args: &Args, storage: &StorageConfig, p: Products<'_>, singleton: Arc<dyn Singleton>) -> anyhow::Result<Option<Edge>> {
