@@ -35,5 +35,6 @@ tracing.workspace = true
 x509-parser.workspace = true
 
 [dev-dependencies]
+axum = { workspace = true, features = ["ws"] }
 futures-util.workspace = true
 tokio-tungstenite.workspace = true
