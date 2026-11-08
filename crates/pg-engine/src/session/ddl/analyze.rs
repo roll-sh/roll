@@ -186,10 +186,15 @@ impl Ddl<'_, '_> {
                 offer(&mut || Ok(row.take().unwrap()));
             }
         } else if t.foreign.is_some() && crate::ext::postgres_fdw::scan::is_postgres_fdw(&self.cat, t) {
-            // postgresAcquireSampleRowsFunc: the remote table's rows.
-            for row in crate::ext::postgres_fdw::scan::remote_rows(t, self.ctx)?.0 {
+            // postgresAcquireSampleRowsFunc: the remote table's rows, sampled remotely when
+            // it has more than the sample takes; its pages and rows are pg_class's.
+            let s = crate::ext::postgres_fdw::scan::remote_sample(t, self.ctx, want, &mut |row| {
                 let mut row = Some(row);
                 offer(&mut || Ok(row.take().unwrap()));
+            })?;
+            self.cat.relstats.insert(t.oid, RelStats { pages: s.pages, tuples: s.total, allvisible: 0, allfrozen: 0 });
+            if s.sampled {
+                (all_rows, sampled) = (s.total as usize, true);
             }
         } else if crate::ext::file_fdw::is_file_table(&self.cat, t) {
             // file_fdw's file_acquire_sample_rows.

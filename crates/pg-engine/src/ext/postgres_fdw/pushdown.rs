@@ -168,6 +168,12 @@ fn mark_target(cat: &Catalog, source: &mut Arc<Plan>, oid: u32, update: bool) {
         }
         return;
     }
+    // (A foreign join's outer plan reads the target as the level does.)
+    if let Plan::Foreign(f) = p
+        && let Some(o) = &mut f.outer
+    {
+        mark_target(cat, o, oid, update);
+    }
     for c in crate::sql::explain::plan_inputs_mut(p) {
         mark_target(cat, c, oid, update);
     }
@@ -177,7 +183,7 @@ fn mark_target(cat: &Catalog, source: &mut Arc<Plan>, oid: u32, update: bool) {
 /// copy whole rows (ROW_MARK_COPY, preprocess_rowmarks; EXPLAIN's `t.*`), so their scans
 /// read every column (`FdwPushdown::copy_mark`).
 fn dml_copies(p: &mut Plan) {
-    fn level(source: &mut Arc<Plan>) {
+    fn level(source: &mut Arc<Plan>, update: bool) {
         if !has_foreign(source) {
             return;
         }
@@ -189,15 +195,28 @@ fn dml_copies(p: &mut Plan) {
                     s.fdw = Some(Arc::new(f));
                 }
             }
+            // (A join holding the target, run remotely: its remote query returns the
+            // target's and the others' whole rows after the target's ctid; its outer plan's
+            // relations are marked as the level's.)
+            Plan::Foreign(f) => {
+                if let Some(js) = f.private.0.as_any().downcast_ref::<super::joinscan::JoinScan>()
+                    && let Some(js) = js.with_dml_marks(update)
+                {
+                    f.private = crate::sql::plan::FdwPrivate(Arc::new(js));
+                }
+                if let Some(o) = &mut f.outer {
+                    level(o, update);
+                }
+            }
             // (Sources planned apart: a subquery's, a CTE's relations have no row marks.)
             Plan::Barrier { .. } | Plan::With { .. } | Plan::CteScan { .. } | Plan::LockRows { .. } => {}
-            p => crate::sql::explain::plan_inputs_mut(p).into_iter().for_each(level),
+            p => crate::sql::explain::plan_inputs_mut(p).into_iter().for_each(|c| level(c, update)),
         }
     }
     match p {
-        Plan::Update(up) => level(&mut up.source),
-        Plan::Delete(dp) => level(&mut dp.source),
-        Plan::Merge(mp) => level(&mut mp.source),
+        Plan::Update(up) => level(&mut up.source, true),
+        Plan::Delete(dp) => level(&mut dp.source, false),
+        Plan::Merge(mp) => level(&mut mp.source, false),
         p => {
             for c in crate::sql::explain::plan_inputs_mut(p) {
                 if has_foreign(c) {

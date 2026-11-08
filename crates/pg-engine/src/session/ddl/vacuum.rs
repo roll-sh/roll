@@ -194,14 +194,9 @@ impl Ddl<'_, '_> {
                     if let Some(e) = self.cat.fdw_routine_error(&t) {
                         return Err(e);
                     }
-                    // postgres_fdw samples the remote table.
+                    // postgres_fdw samples the remote table (and sets its pg_class counts).
                     if crate::ext::postgres_fdw::scan::is_postgres_fdw(&self.cat, &t) {
-                        let (rows, pages) = crate::ext::postgres_fdw::scan::remote_rows(&t, self.ctx)?;
                         self.analyze_columns(&t, &[], false)?;
-                        self.cat.relstats.insert(
-                            t.oid,
-                            RelStats { pages, tuples: rows.len() as f64, allvisible: 0, allfrozen: 0 },
-                        );
                         self.save()?;
                     }
                     // file_fdw's AnalyzeForeignTable runs with the relations below.

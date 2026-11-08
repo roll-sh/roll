@@ -1979,6 +1979,9 @@ struct Planner<'c, 'a> {
     /// The level's UPDATE target that is a foreign table (or DELETE target with row
     /// triggers of it), whose whole row goes up (add_row_identity_columns' wholerow).
     fdw_wholerow_target: std::cell::Cell<Option<u32>>,
+    /// The level is an UPDATE's or DELETE's: a foreign join in it needs a local join path
+    /// for EvalPlanQual (postgresGetForeignJoinPaths' epq_path), its outer plan.
+    fdw_dml_level: std::cell::Cell<bool>,
     /// Partitionwise joins made, by their first child's address: as FROM items of joins
     /// above (`joinpath::PwJoin`).
     /// Partitionwise joins' Appends (by their `pw` id) and how they are partitioned.
@@ -2052,6 +2055,7 @@ impl<'c, 'a> Planner<'c, 'a> {
             copy_marks: Default::default(),
             fdw_dml_target: Default::default(),
             fdw_wholerow_target: Default::default(),
+            fdw_dml_level: Default::default(),
             pw_joins: Default::default(),
             absorbed: Default::default(),
             post_cost: Default::default(),
@@ -6685,6 +6689,7 @@ fn plan_level_ordered(
         let cat = ctx.catalog();
         p.fdw_dml_target.set(crate::ext::postgres_fdw::direct::join_target(&cat, plan));
         p.fdw_wholerow_target.set(crate::ext::postgres_fdw::direct::wholerow_target(plan));
+        p.fdw_dml_level.set(true);
     }
     p.pull_up_consts(plan);
     p.reduce_outer_joins(plan);

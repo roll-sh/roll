@@ -377,6 +377,60 @@ The cost is spread thinly:
   `partial_scans`).
 No single function takes more than 5%. HANDOFF has the next steps.
 
+## postgres_fdw, round 9 (2026-11-08, agent 181)
+
+What changed: HANDOFF.md's postgres_fdw "Round 28 (agent 181)". ANALYZE of a foreign table
+reads the remote table once (it read it twice) and samples remotely when it has more rows than
+the sample; grouped relations and pushed joins are estimated as PostgreSQL estimates them; an
+UPDATE's / DELETE's foreign join returns its relations' whole rows as PostgreSQL's does.
+
+How it was measured: `tools/fdwtraffic/compare.sh` as in rounds 7 and 8 (both servers in
+containers on cores 4-7 at the same CPU weight, host network, psql on cores 8-9, each server's
+CPU and peak memory from its cgroup). Engines are `--profile dist` with line tables: base
+`8500c0bb` (round 8), new = this round. Runs interleaved base, new, PostgreSQL, new, base on a
+loaded machine (load 25-45); engine columns are the mean of 2 runs, PostgreSQL's 1 run. Phases
+this round didn't touch moved by up to 30% between runs of one build (base's direct updates
+79 / 107 ms CPU), so only ANALYZE's difference is resolved.
+
+| phase (statements) | PG writes / stmt | new | PG ms | base ms | new ms | new / PG time | PG CPU ms | base CPU | new CPU | new / PG CPU |
+|---|---|---|---|---|---|---|---|---|---|---|
+| point lookups (500) | 5.00 | **2.00** | 1,269 | 869 | **871** | 0.69 | 417 | 359 | **361** | 0.87 |
+| lookups in one txn (302) | 2.99 | **1.00** | 567 | 301 | **326** | 0.58 | 202 | 153 | **164** | 0.81 |
+| full scans, 20k rows (10) | 205 | **202** | **1,452** | 1,605 | 1,528 | 1.05 | **597** | 664 | 640 | 1.07 |
+| range scans, ~31 rows (200) | 5.00 | **2.00** | 563 | 438 | **411** | 0.73 | **173** | 226 | 210 | 1.21 |
+| foreign joins (100) | 208 | **203** | **12,610** | 15,292 | 15,309 | 1.21 | **4,982** | 6,419 | 6,443 | 1.29 |
+| remote aggregates (100) | 5.00 | **2.00** | 724 | 620 | **649** | 0.90 | **461** | 457 | 480 | 1.04 |
+| local join foreign (5) | 205 | **202** | **504** | 732 | 730 | 1.45 | **180** | 296 | 271 | 1.51 |
+| single-row inserts (300) | 5.00 | **2.00** | 743 | 417 | **396** | 0.53 | 246 | 157 | **152** | 0.62 |
+| direct updates (100) | 3.00 | **2.00** | 213 | 194 | **152** | 0.71 | 76 | 89 | **72** | 0.94 |
+| inherited updates, row trigger (20 x 50) | 56.95 | **51.95** | **504** | 1,040 | 940 | 1.86 | **179** | 509 | 482 | 2.69 |
+| inherited updates, sent whole (20 x 50) | 3.00 | **2.00** | **71** | 67 | 94 | 1.33 | **34** | 49 | 68 | 1.99 |
+| locked local join foreign (20) | 208 | **205** | **2,971** | 3,353 | 3,262 | 1.10 | **1,283** | 1,482 | 1,472 | 1.15 |
+| locked local join of a foreign join (20) | 214 | **209** | **3,251** | 3,682 | 3,430 | 1.06 | **1,339** | 1,659 | 1,524 | 1.14 |
+| ANALYZE ft, fs (1) | 237 | **230** | 212 | 80 | 216 | 1.02 | 103 | 82 | 109 | 1.06 |
+| update from foreign join, 10 rows (50) | 3.00 | **2.00** | 223 | 146 | **192** | 0.86 | **90** | 93 | 127 | 1.41 |
+| delete using foreign join, 3 rows (100) | 3.00 | **2.00** | **216** | 254 | 256 | 1.19 | **134** | 155 | 154 | 1.15 |
+
+What moved: ANALYZE's bytes in fell from 1,729,177 to 884,303 (PostgreSQL's 884,398): the
+table is read once, through a cursor (the fdw_traffic tables are smaller than the 30,000-row
+sample, so neither server samples remotely here). Read `fetch_size` rows at a time as
+PostgreSQL reads them, it took 230 round trips where base's two plain queries took 9, so its
+time went from 80 to 216 ms (PostgreSQL 212). Peak memory: engine 63.6-65.1 MB (base
+67.5-68.1), PostgreSQL 153.1 MB.
+
+Where the CPU of the foreign-join and full-scan phases goes (perf on the new engine's process,
+both ends of its loopback, 7k samples): allocation and frees 13% (mimalloc), `Value` drops 4.9%
+and clones 2.1%; the remote side's cursor (`Cursor::visit` 2.4%, `put_data_row` 2.4%, the scan
+and row decoding about 10%; round 7's routed item); the local hash join 2%; the wrapper's
+client side about 10%: `make_row` 1.8%, its row's NULL fill (`Vec::extend_with`) 1.2%, the client's
+DataRow parsing (`Conn::process` 1.0%, `Message::parse` 1.0%, `BytesMut` split / drop 1.8%),
+a `String` per value (`from_utf8_lossy` 1.7% plus its allocation) then parsed into a `Value`
+(`parse_value_ex` 0.9%).
+
+```sh
+SERVER_CPUS=4-7 CLIENT_CPUS=8-9 tools/fdwtraffic/compare.sh <roll-engine> <scratch> <prefix> <port> [pg] [engine]
+```
+
 ## postgres_fdw, round 8 (2026-11-07, agent 172)
 
 What changed: HANDOFF.md's postgres_fdw "Round 27 (agent 172)". `UPDATE ... FROM` and

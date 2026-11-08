@@ -562,37 +562,92 @@ fn unsupported(what: &str) -> Error {
     Error::new(code::FEATURE_NOT_SUPPORTED, what.to_string())
 }
 
-/// postgresAcquireSampleRowsFunc / postgresAnalyzeForeignTable: every remote row (as the
-/// table's rows) and the remote relation's size in pages.
-pub fn remote_rows(t: &Table, ctx: &ExecCtx) -> Result<(Vec<Row>, i32)> {
+/// What an ANALYZE of a postgres_fdw table learned besides its sample rows.
+pub struct RemoteSample {
+    /// The remote relation's size in pages (postgresAnalyzeForeignTable).
+    pub pages: i32,
+    /// Its rows: those read, or the remote reltuples when the remote side sampled them.
+    pub total: f64,
+    pub sampled: bool,
+}
+
+/// analyze_sampling: how the remote side samples the rows ANALYZE reads.
+#[derive(Clone, Copy, PartialEq)]
+enum Sampling {
+    Off,
+    Auto,
+    Random,
+    System,
+    Bernoulli,
+}
+
+/// One remote query's first row (the ANALYZE size and info queries).
+fn first_row(ctx: &ExecCtx, key: u32, sql: &str) -> Result<Vec<Option<String>>> {
+    let intr = crate::remote::interrupts(ctx);
+    connection::with_conn(ctx, key, |c| {
+        let r = c.exec(sql, &intr)?;
+        if r.status != Status::TuplesOk {
+            return Err(connection::report(&r, c, Some(sql)));
+        }
+        Ok(r.rows.into_iter().next().unwrap_or_default())
+    })
+}
+
+/// postgresAnalyzeForeignTable / postgresAcquireSampleRowsFunc: the remote relation's
+/// pages, then its rows offered one at a time, sampled remotely (analyze_sampling: by
+/// TABLESAMPLE or random() at `targrows` / the remote reltuples) when the remote table has
+/// more rows than that, all of them otherwise; read through a cursor `fetch_size` rows at a
+/// time, so only the caller's sample is held.
+pub fn remote_sample(t: &Table, ctx: &ExecCtx, targrows: usize, offer: &mut dyn FnMut(Row)) -> Result<RemoteSample> {
     let cat = ctx.catalog();
     let m = mapping_for(t, None, ctx)?;
     let key = connection::get_connection(ctx, &m, false)?;
+    let rel = relation_name(&cat, t);
+    let lit = super::deparse::string_literal(&rel);
+    let size = first_row(ctx, key, &format!("SELECT pg_catalog.pg_relation_size({lit}::pg_catalog.regclass) / 8192"))?;
+    let pages = size.first().cloned().flatten().and_then(|v| v.parse().ok()).unwrap_or(0);
+    // (The table's option, else the server's.)
+    let f = t.foreign.as_ref();
+    let srv = f.and_then(|f| cat.servers.get(&f.server));
+    let mut method = match option::get(f.and_then(|f| f.options.as_ref()), "analyze_sampling")
+        .or_else(|| srv.and_then(|s| option::get(s.options.as_ref(), "analyze_sampling")))
+    {
+        Some("off") => Sampling::Off,
+        Some("random") => Sampling::Random,
+        Some("system") => Sampling::System,
+        Some("bernoulli") => Sampling::Bernoulli,
+        _ => Sampling::Auto,
+    };
+    let mut reltuples = -1.0;
+    let mut frac = -1.0;
+    if method != Sampling::Off {
+        let info = first_row(ctx, key, &format!("SELECT reltuples, relkind FROM pg_catalog.pg_class WHERE oid = {lit}::pg_catalog.regclass"))?;
+        reltuples = info.first().cloned().flatten().and_then(|v| v.parse::<f64>().ok()).unwrap_or(-1.0);
+        let relkind = info.get(1).cloned().flatten().unwrap_or_default();
+        // (TABLESAMPLE only of tables and materialized views; asked for explicitly, it fails.)
+        if !matches!(relkind.as_str(), "r" | "m" | "p") && method == Sampling::Auto {
+            method = Sampling::Random;
+        }
+        // (A remote table never analyzed, or no bigger than the sample: every row.)
+        if reltuples <= 0.0 || targrows as f64 >= reltuples {
+            method = Sampling::Off;
+        } else {
+            frac = targrows as f64 / reltuples;
+        }
+    }
     let d = Deparser::new(&cat, t, ctx.fmt());
     let cols: Vec<usize> = (0..t.columns.len()).filter(|i| !t.columns[*i].dropped).collect();
-    let rel = relation_name(&cat, t);
     let list: Vec<String> = cols.iter().map(|i| d.column(*i)).collect();
-    let sql = format!("SELECT {} FROM {rel}", if list.is_empty() { "NULL".to_string() } else { list.join(", ") });
-    let size_sql = format!(
-        "SELECT pg_catalog.pg_relation_size({}::pg_catalog.regclass) / 8192",
-        super::deparse::string_literal(&rel)
-    );
-    let intr = crate::remote::interrupts(ctx);
-    let (res, pages) = connection::with_conn(ctx, key, |c| {
-        let p = c.exec(&size_sql, &intr)?;
-        if p.status != Status::TuplesOk {
-            return Err(connection::report(&p, c, Some(&size_sql)));
-        }
-        let r = c.exec(&sql, &intr)?;
-        if r.status != Status::TuplesOk {
-            return Err(connection::report(&r, c, Some(&sql)));
-        }
-        let pages = p.rows.first().and_then(|r| r.first().cloned().flatten()).and_then(|v| v.parse().ok()).unwrap_or(0);
-        Ok((r, pages))
-    })?;
-    let node = ScanNode {
+    let mut sql = format!("SELECT {} FROM {rel}", if list.is_empty() { "NULL".to_string() } else { list.join(", ") });
+    match method {
+        Sampling::Off => {}
+        Sampling::Random => sql.push_str(&format!(" WHERE pg_catalog.random() < {frac:.6}")),
+        Sampling::System => sql.push_str(&format!(" TABLESAMPLE SYSTEM({:.6})", 100.0 * frac)),
+        Sampling::Auto | Sampling::Bernoulli => sql.push_str(&format!(" TABLESAMPLE BERNOULLI({:.6})", 100.0 * frac)),
+    }
+    let mut node = ScanNode {
         table: Arc::new(t.clone()),
-        cur: Cursor::new(key, 0, String::new(), Vec::new()),
+        cur: Cursor::new(key, fetch_size(&cat, t), sql, Vec::new()),
         retrieved: cols,
         ctid: false,
         with_key: false,
@@ -603,6 +658,12 @@ pub fn remote_rows(t: &Table, ctx: &ExecCtx) -> Result<(Vec<Row>, i32)> {
         col_aliases: None,
         member: false,
     };
-    let rows = res.rows.into_iter().map(|v| make_row(&node, v, ctx)).collect::<Result<Vec<_>>>()?;
-    Ok((rows, pages))
+    drop(cat);
+    let mut read = 0usize;
+    while let Some(vals) = node.cur.next(ctx)? {
+        offer(make_row(&node, vals, ctx)?);
+        read += 1;
+    }
+    let sampled = method != Sampling::Off;
+    Ok(RemoteSample { pages, total: if sampled { reltuples } else { read as f64 }, sampled })
 }

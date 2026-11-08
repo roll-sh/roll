@@ -1096,6 +1096,50 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
   analyze_sampling). The remote statement itself is the engine's UPDATE ... FROM, about 3x
   PostgreSQL's per statement on the remote side (1.3 against 0.4 ms for 10 rows by a nested
   loop of index scans; routed to 165 / 167). Numbers: BENCH.md "postgres_fdw, round 8".
+  Round 28 (agent 181, postgres_fdw round 9): ANALYZE samples remotely and reads the table
+  once; estimates of analyzed tables and grouped relations; the per-row UPDATE / DELETE over
+  a pushed join returns PostgreSQL's junk and has its outer plan. ANALYZE of a postgres_fdw
+  table (`scan::remote_sample`) is postgresAnalyzeForeignTable then
+  postgresAcquireSampleRowsFunc: the size query, then (analyze_sampling not `off`) `SELECT
+  reltuples, relkind FROM pg_class`, and when the remote table has more rows than the sample
+  (300 x the largest statistics target) a sample taken remotely (`TABLESAMPLE BERNOULLI` for
+  auto, SYSTEM, or `random() < frac`; auto falls to random for a view or foreign table),
+  reltuples then counted as the table's rows; the rows stream through a cursor `fetch_size`
+  at a time into the reservoir, so only the sample is held. It used to read the whole table
+  twice (`vacuum.rs` read it for pg_class, then `analyze_columns` again): bytes in for
+  `ANALYZE ft, fs` 1.73 MB -> 0.88 MB, PostgreSQL's (BENCH.md "postgres_fdw, round 9"). A
+  grouped relation sent
+  whole is costed as estimate_path_cost_size costs an upper relation (`upperpath::
+  upper_estimate`: groups as the local Agg estimates them, HAVING's selectivity and costs,
+  the grouping columns' comparisons, the grouping and target expressions, its target list's
+  width), and the aggregation is sent only when that is cheaper than the local Agg's
+  estimate (add_path between them). A Foreign Scan's columns are its relations' Vars in
+  EXPLAIN (`foreign_rel`'s `cols`: the foreign tables' statistics' widths and distinct
+  counts), so a projection over a pushed join counts `ft.v` at its ANALYZE width (6, not
+  32). An UPDATE's / DELETE's level requires a local join path for a foreign join
+  (postgresGetForeignJoinPaths' epq_path: `Planner::fdw_dml_level`), the Foreign Scan
+  carrying it as its outer plan; a join holding the target returns, after `r1.ctid`, the
+  target's whole row (UPDATE) and the other relations' as their marks' copies
+  (`JoinScan::with_dml_marks`, fetched and skipped: nothing here reads them), EXPLAIN shows
+  them after the ctid (`dml_join_copies`) and lays the outer plan out as setrefs leaves it
+  (`epq_layout`: its top returns the remote SELECT list, the local conditions dropped from
+  its join, each node below what is read above it).
+  Contrib postgres_fdw 1,950 / 2,053 (no unit changed against a base run: 628 and 636 now
+  differ only in the lines below), dblink 218, file_fdw 187; `fdw_loopback`
+  `analyzed_foreign_table_estimates` (PostgreSQL's estimates and ANALYZE's counts under each
+  sampling method). Still open: 636's outer plan scans don't show their copies (`ft4.*`:
+  the level's whole-row pass that adds them is kept off the laid-out plan); 628 differs
+  also in the outer plan's choice (PostgreSQL's epq path is a hash
+  join whose outer side is the sorted remote scan, `ORDER BY "C 1"`: the join search's,
+  agent 177); the remote SELECT list puts a SET expression's columns first only when they
+  are the target's (`UPDATE f4 SET c3 = f5.c3 || ...`: PostgreSQL has `r2.c3` first); a
+  foreign join not holding the target under an UPDATE / DELETE doesn't return its
+  relations' copies yet (PostgreSQL's ROW_MARK_COPY marks: so a 3-way UPDATE ... FROM
+  whose SET can't be sent joins two of them remotely here and all three there); 1071 / 1074
+  / 1126 and 1058-1068 (an inheritance tree's members under UPDATE ... FROM / LockRows:
+  members' columns in reltarget order, the tree's `foo.ctid, foo.*, foo.tableoid` marks,
+  RETURNING's other relations' Vars) are EXPLAIN's inherited-join layout
+  (`inherited_modify`'s one-member case only).
 - **file_fdw** (round 19, agent 66): native (`src/ext/file_fdw.rs`), 187 / 187 of its
   contrib test. Foreign scans of a file_fdw table read the file with COPY FROM's parser
   (`session/copy.rs` `parse_copy_data`, shared with COPY) a chunk at a time; the file is a
