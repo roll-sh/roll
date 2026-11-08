@@ -1210,8 +1210,13 @@ impl Heap {
 
     /// The key of the row whose version is at `tid` (any version: an older one's row is the
     /// key it had then).
-    pub fn key_at(&self, tid: Tid) -> Option<&[u8]> {
+    pub fn key_at(&self, tid: Tid) -> Option<super::keymap::RowKey<'_>> {
         self.keys.key(self.tuple(tid)?.row)
+    }
+
+    /// Row `row`'s key (a row `committed_rows` gave).
+    pub fn row_key(&self, row: u32) -> super::keymap::RowKey<'_> {
+        self.keys.key(row).unwrap_or(super::keymap::RowKey::Kept(&[]))
     }
 
     pub fn locate(&self, key: &[u8], v: &Vis) -> Option<Tid> {
@@ -1249,10 +1254,10 @@ impl Heap {
     }
 
     /// The rows a scan of the stored data finds (inserted by a committed transaction, not
-    /// deleted by one): (TID, key, tuple length), in TID order.
-    pub fn committed_rows(&self, v: &Vis) -> Vec<(Tid, &[u8], u32)> {
+    /// deleted by one): (TID, row, tuple length), in TID order (the row's key: `row_key`).
+    pub fn committed_rows(&self, v: &Vis) -> Vec<(Tid, u32, u32)> {
         let mut out = Vec::with_capacity(self.keys.len());
-        for (k, _, latest) in self.keys.iter() {
+        for (_, row, latest) in self.keys.iter() {
             // (`locate` from the latest version: past versions aborted to the one they replaced.)
             let mut tid = Some(latest);
             while let Some(at) = tid
@@ -1265,7 +1270,7 @@ impl Heap {
                 && let Some(t) = self.tuple(tid)
                 && matches!(t.status(v), Htsv::Live | Htsv::DeleteInProgress)
             {
-                out.push((tid, k, t.len as u32));
+                out.push((tid, row, t.len as u32));
             }
         }
         out.sort_unstable_by_key(|x| x.0);
@@ -1704,14 +1709,14 @@ impl Heap {
             if v.state(x) == Xs::Aborted {
                 for &(row, tid, moved) in list.iter().rev() {
                     // (Rare: the keys are copied out of the map they go back into.)
-                    let Some(key) = self.keys.key(row).map(<[u8]>::to_vec) else { continue };
+                    let Some(key) = self.keys.key(row).map(|k| k.to_vec()) else { continue };
                     if self.keys.get(&key) != Some(tid) {
                         continue;
                     }
                     let back = self.locate(&key, v);
                     if let Some(old) = moved {
                         self.keys.remove(&key);
-                        if let (Some(b), Some(k)) = (back, self.keys.key(old).map(<[u8]>::to_vec)) {
+                        if let (Some(b), Some(k)) = (back, self.keys.key(old).map(|k| k.to_vec())) {
                             self.keyed(&k, b);
                         }
                     } else if let Some(b) = back {
@@ -2220,9 +2225,9 @@ impl Heap {
     /// old key.
     pub fn live_rows(&mut self, v: &Vis) -> Vec<(Vec<u8>, usize)> {
         self.settle(v);
-        let mut out: Vec<(Tid, &[u8], usize)> = Vec::new();
+        let mut out: Vec<(Tid, super::keymap::RowKey<'_>, usize)> = Vec::new();
         for (k, _, _) in self.keys.iter() {
-            if let Some(tid) = self.locate(k, v)
+            if let Some(tid) = self.locate(&k, v)
                 && let Some(t) = self.tuple(tid)
                 && matches!(t.status(v), Htsv::Live | Htsv::DeleteInProgress | Htsv::InsertInProgress)
             {
@@ -2868,21 +2873,21 @@ mod tests {
         assert!(hot);
         let (c, _) = h.update(b"b", b"c", 100, 2, false, &v);
         h.delete(b"a", 2, &v);
-        assert_eq!(h.key_at(a), Some(&b"a"[..]));
-        assert_eq!(h.key_at(a2), Some(&b"a"[..]));
-        assert_eq!(h.key_at(b), Some(&b"b"[..]));
-        assert_eq!(h.key_at(c), Some(&b"c"[..]));
-        assert_eq!(h.key_at((7, 1)), None);
-        assert_eq!(h.key_at((0, 0)), None, "offset 0 is no line pointer's");
+        assert_eq!(h.key_at(a).as_deref(), Some(&b"a"[..]));
+        assert_eq!(h.key_at(a2).as_deref(), Some(&b"a"[..]));
+        assert_eq!(h.key_at(b).as_deref(), Some(&b"b"[..]));
+        assert_eq!(h.key_at(c).as_deref(), Some(&b"c"[..]));
+        assert_eq!(h.key_at((7, 1)).as_deref(), None);
+        assert_eq!(h.key_at((0, 0)).as_deref(), None, "offset 0 is no line pointer's");
         assert_eq!(h.tid_of(b"b"), None);
         assert_eq!(h.tid_of(b"c"), Some(c));
         let got = h.keys_at(&[a, (7, 1), c]);
         assert_eq!(got, vec![(a, b"a".to_vec()), (c, b"c".to_vec())]);
         // Rows stored under new keys: every version follows its row.
         h.rekey(&[(b"a".to_vec(), b"x".to_vec()), (b"c".to_vec(), b"y".to_vec())]);
-        assert_eq!(h.key_at(a), Some(&b"x"[..]));
-        assert_eq!(h.key_at(c), Some(&b"y"[..]));
-        assert_eq!(h.key_at(b), None, "a row not listed is forgotten");
+        assert_eq!(h.key_at(a).as_deref(), Some(&b"x"[..]));
+        assert_eq!(h.key_at(c).as_deref(), Some(&b"y"[..]));
+        assert_eq!(h.key_at(b).as_deref(), None, "a row not listed is forgotten");
     }
 
     /// A heap's size watch holds while inserts fit its pages and fails once one extends the

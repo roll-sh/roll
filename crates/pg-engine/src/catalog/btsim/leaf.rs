@@ -6,9 +6,10 @@
 //! The model encoding can exceed 64 KiB on a legal page with many NULL attributes.
 //! Readers get `ItemRef`s; the passes that rework a page (deduplication, deletion, splits)
 //! take the items out as owned `Item`s and put them back (`take`, `put`).
-//! A page whose items each have one TID, no LP_DEAD mark and a key of one length (a unique
-//! index's, most of a primary key's pages) is kept plain: each item its TID and key, back to
-//! back, no flags, count or place (`Leaf::stride`); a change lays it out again first.
+//! A page whose items each have one TID and a key of one length (a unique index's, most of a
+//! primary key's pages) is kept plain: each item its TID and key, back to back, no flags,
+//! count or place (`Leaf::stride`), its LP_DEAD items listed apart; an item of another shape
+//! lays it out again first.
 
 use super::{Item, KeyBytes, Tid, maxalign};
 
@@ -79,8 +80,8 @@ pub(super) struct Leaf {
     /// Items not LP_DEAD: a page of none is passed whole by a scan's marking
     /// (`Btree::kill`), without stepping over its items.
     live: u32,
-    /// A plain page's bytes per item (6 of TID, then the key), `at` and `garbage` unused;
-    /// 0 for a page laid out item by item.
+    /// A plain page's bytes per item (6 of TID, then the key), its LP_DEAD items' numbers
+    /// in `at` (ascending), `garbage` unused; 0 for a page laid out item by item.
     stride: u32,
 }
 
@@ -98,7 +99,7 @@ impl Leaf {
 
     /// Plain if it can be (`stride`).
     pub(super) fn plain(&mut self) {
-        if self.stride != 0 || self.at.is_empty() || self.live as usize != self.at.len() {
+        if self.stride != 0 || self.at.is_empty() {
             return;
         }
         let first = self.get(0);
@@ -107,11 +108,15 @@ impl Leaf {
             return;
         }
         let mut buf = Vec::with_capacity(n * self.len());
-        for it in self.iter() {
+        let mut dead = Vec::new();
+        for (i, it) in self.iter().enumerate() {
             buf.extend_from_slice(it.tids.0);
             buf.extend_from_slice(it.key.as_bytes());
+            if it.dead {
+                dead.push(i as u32);
+            }
         }
-        *self = Leaf { buf, at: Vec::new(), garbage: 0, live: self.live, stride: n as u32 };
+        *self = Leaf { buf, at: dead, garbage: 0, live: self.live, stride: n as u32 };
     }
 
     /// Laid out item by item again, for a change.
@@ -121,12 +126,13 @@ impl Leaf {
             return;
         }
         let old = std::mem::take(&mut self.buf);
+        let dead = std::mem::take(&mut self.at);
         self.stride = 0;
         self.buf = Vec::with_capacity(old.len() + old.len() / n * HEAD + 64);
         self.at = Vec::with_capacity(old.len() / n);
-        for item in old.chunks_exact(n) {
+        for (i, item) in old.chunks_exact(n).enumerate() {
             self.at.push(self.buf.len() as u32);
-            self.buf.push(0);
+            self.buf.push(dead.binary_search(&(i as u32)).is_ok() as u8);
             self.buf.extend_from_slice(&1u16.to_le_bytes());
             self.buf.extend_from_slice(item);
         }
@@ -147,7 +153,8 @@ impl Leaf {
     pub fn get(&self, i: usize) -> ItemRef<'_> {
         if self.stride != 0 {
             let b = &self.buf[i * self.stride as usize..(i + 1) * self.stride as usize];
-            return ItemRef { key: KeyBytes::of(&b[6..]), tids: Tids(&b[..6]), dead: false };
+            let dead = !self.at.is_empty() && self.at.binary_search(&(i as u32)).is_ok();
+            return ItemRef { key: KeyBytes::of(&b[6..]), tids: Tids(&b[..6]), dead };
         }
         let a = self.at[i] as usize;
         let b = &self.buf[a..];
@@ -183,7 +190,13 @@ impl Leaf {
     }
 
     pub fn set_dead(&mut self, i: usize) {
-        self.unplain();
+        if self.stride != 0 {
+            if let Err(at) = self.at.binary_search(&(i as u32)) {
+                self.at.insert(at, i as u32);
+                self.live -= 1;
+            }
+            return;
+        }
         let a = self.at[i] as usize;
         if self.buf[a] & 1 == 0 {
             self.live -= 1;
@@ -215,23 +228,67 @@ impl Leaf {
         a as u32
     }
 
+    /// Item `i` of a plain page is now one of these parts, if it can be without laying the
+    /// page out again (one TID, not LP_DEAD, a key of the page's length): an insertion into
+    /// a primary key's page (a non-HOT update's new entry) keeps it plain.
+    fn insert_plain(&mut self, i: usize, dead: bool, tids: &[Tid], k: &[u8]) -> bool {
+        let n = self.stride as usize;
+        let ([(b, o)], false) = (tids, dead) else { return false };
+        if n == 0 || 6 + k.len() != n {
+            return false;
+        }
+        let len = self.buf.len();
+        if self.buf.capacity() < len + n {
+            // (As `encode`'s: an eighth more.)
+            self.buf.reserve_exact(n.max(len / 8).max(64));
+        }
+        let mut item = [0u8; 6];
+        item[..4].copy_from_slice(&b.to_le_bytes());
+        item[4..].copy_from_slice(&o.to_le_bytes());
+        self.buf.splice(i * n..i * n, item.iter().chain(k).copied());
+        for d in self.at.iter_mut().rev().take_while(|d| **d as usize >= i) {
+            *d += 1;
+        }
+        self.live += 1;
+        true
+    }
+
     /// Append an item given by its parts (`k`: a well-formed key encoding).
     pub fn push_parts(&mut self, dead: bool, tids: &[Tid], k: &[u8]) {
+        if self.insert_plain(self.len(), dead, tids, k) {
+            return;
+        }
         let a = self.encode(dead, tids, k);
         self.at.push(a);
     }
 
     pub fn insert(&mut self, i: usize, it: &Item) {
+        if self.insert_plain(i, it.dead, &it.tids, it.key.as_bytes()) {
+            return;
+        }
         let a = self.encode(it.dead, &it.tids, it.key.as_bytes());
         self.at.insert(i, a);
     }
 
     pub fn push(&mut self, it: &Item) {
+        if self.insert_plain(self.len(), it.dead, &it.tids, it.key.as_bytes()) {
+            return;
+        }
         let a = self.encode(it.dead, &it.tids, it.key.as_bytes());
         self.at.push(a);
     }
 
     pub fn pop(&mut self) -> Option<Item> {
+        if self.stride != 0 {
+            let it = self.last()?.to_item();
+            self.buf.truncate(self.buf.len() - self.stride as usize);
+            if it.dead {
+                self.at.pop();
+            } else {
+                self.live -= 1;
+            }
+            return Some(it);
+        }
         self.unplain();
         let i = self.len().checked_sub(1)?;
         let it = self.get(i).to_item();
@@ -364,6 +421,24 @@ mod tests {
                     }
                     l.put(&want);
                     assert!(l.stride != 0 && l.at.is_empty());
+                }
+                4 if l.stride != 0 => {
+                    // (LP_DEAD marks keep it plain too.)
+                    if !want.is_empty() && x & 2 == 0 {
+                        let d = (x >> 24) as usize % want.len();
+                        l.set_dead(d);
+                        want[d].dead = true;
+                    }
+                    // (Items of the plain page's shape go in, and pops come out, plain.)
+                    let i = (x >> 20) as usize % (want.len() + 1);
+                    let it = Item::posting(Key::new(&[vec![(x >> 8) as u8; 9]], &[17]), vec![(n, 9)]);
+                    l.insert(i, &it);
+                    want.insert(i, it);
+                    if x & 1 == 0 {
+                        l.pop();
+                        want.pop();
+                    }
+                    assert!(l.stride != 0);
                 }
                 _ => {
                     let i = (x >> 20) as usize % (want.len() + 1);

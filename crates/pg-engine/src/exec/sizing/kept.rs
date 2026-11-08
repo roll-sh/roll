@@ -409,14 +409,17 @@ fn encode(rf: &RelFiles, cat: &Catalog, t: &Table, h: &Heap, node: u32, v: &Vis,
     put(&mut out, heap_fillfactor(t) as u64);
     put(&mut out, rows.len() as u64);
     let toast = rf.toast.get(&t.oid);
-    let (mut pk, mut pb): (&[u8], u32) = (&[], 0);
-    for &(tid, k, len) in &rows {
+    let (mut pk, mut pb): (Vec<u8>, u32) = (Vec::new(), 0);
+    for &(tid, row, len) in &rows {
+        let k = h.row_key(row);
         put(&mut out, zigzag(tid.0 as i64 - pb as i64));
         put(&mut out, tid.1 as u64);
         put(&mut out, len as u64);
-        put_suffix(&mut out, pk, k);
-        (pk, pb) = (k, tid.0);
-        let exts = toast.and_then(|x| x.rows.get(k)).map_or(&[][..], |e| &e[..]);
+        put_suffix(&mut out, &pk, &k);
+        pk.clear();
+        pk.extend_from_slice(&k);
+        pb = tid.0;
+        let exts = toast.and_then(|x| x.rows.get(&k[..])).map_or(&[][..], |e| &e[..]);
         put(&mut out, exts.len() as u64);
         for e in exts {
             put(&mut out, e.col as u64);

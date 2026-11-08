@@ -3782,7 +3782,7 @@ impl Ddl<'_, '_> {
         let parallel = match ((measures && ix.method == "btree") || (writes.is_some() && ix.id != 0)) && !quad {
             true => match super::parbuild::index_workers(self, t, blocks.unwrap_or(0)) {
                 0 => None,
-                w => self.build_index_parallel(t, ix, &bix, w, &progress, !measures)?,
+                w => self.build_index_parallel(t, ix, &bix, w, &progress, writes.filter(|_| !measures))?,
             },
             false => None,
         };
@@ -3797,12 +3797,14 @@ impl Ddl<'_, '_> {
         // (A parallel build reports its own scan's end and its load.)
         let serial = parallel.is_none();
         let mut model_keys = writes.map(|w| (w, Vec::new()));
+        let mut par_entries = None;
         let mut par_counted = None;
         let measured = match parallel {
             Some(super::parbuild::ParBuilt::Measured(m)) => Some(m),
-            Some(super::parbuild::ParBuilt::Modelled { rows, tuples, keys }) => {
+            Some(super::parbuild::ParBuilt::Modelled { rows, tuples, entries }) => {
                 par_counted = Some((rows, tuples));
-                model_keys = model_keys.map(|(w, _)| (w, keys));
+                par_entries = writes.zip(entries);
+                model_keys = None;
                 None
             }
             None if measures => self.measure_rows_with(t, Some(Some(ix.oid)), Some(&mut step))?,
@@ -3855,7 +3857,10 @@ impl Ddl<'_, '_> {
             progress.loaded(entries);
         }
         let counted = par_counted.or_else(|| measured.is_none().then_some((rows, entries as usize)));
-        let prebuilt = model_keys.and_then(|(w, keys)| crate::exec::sizing::btree_from_build(t, &bix, keys, w, &ctx.sess.db));
+        let prebuilt = match par_entries {
+            Some((w, entries)) => crate::exec::sizing::btree_from_entries(t, &bix, entries, w, &ctx.sess.db),
+            None => model_keys.and_then(|(w, keys)| crate::exec::sizing::btree_from_build(t, &bix, keys, w, &ctx.sess.db)),
+        };
         self.index_built_from(t, ix, measured, counted, prebuilt)
     }
 
