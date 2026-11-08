@@ -410,7 +410,7 @@ impl KeyMap {
         if self.rows.is_empty() {
             self.asc_tids.reserve(n);
             // (Keys that step evenly take no bytes: from the second row on, the rows so far
-            // say whether they do.)
+            // say whether they do; before, the room goes once they do, `push_asc`.)
             if self.asc < 2 || !matches!(self.asc_keys, AscKeys::Arith(_)) {
                 self.asc_bytes.reserve(bytes);
             }
@@ -571,7 +571,12 @@ impl KeyMap {
             self.asc_keys = AscKeys::Var(at);
         }
         match &mut self.asc_keys {
-            AscKeys::Arith(_) => {}
+            AscKeys::Arith(_) => {
+                // (The room `reserve` made before the second key showed they step evenly.)
+                if self.asc > 0 && self.asc_bytes.capacity() != 0 {
+                    self.asc_bytes = Vec::new();
+                }
+            }
             AscKeys::Fixed(_) => self.asc_bytes.extend_from_slice(key),
             AscKeys::Var(at) => {
                 let Ok(pos) = u32::try_from(self.asc_bytes.len() + key.len() + 10) else { return false };
