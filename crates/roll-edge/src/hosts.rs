@@ -1,8 +1,8 @@
 //! The Hostnames table (docs/cloud/README.md): what a TLS server name or `Host` header names.
 //!
-//! The first region's names have no region in them (`<id>.pg.roll.sh`); later regions add it
-//! (`<id>.pg.eu-west-1.roll.sh`). Both forms are understood everywhere; which one this node's
-//! certificates and advertised names use is [`Hostnames::regional`].
+//! Names customers connect to directly carry the region (`<id>.pg.us-east-1.roll.sh`,
+//! `s3.us-east-1.roll.site`), and a node routes only its own region's. Global and
+//! Cloudflare-proxied names don't (`roll.sh`, `api.roll.sh`, `git.roll.sh`, `chg-<id>.roll.site`).
 
 /// The zones and region every hostname is built from (`ROLL_EDGE_DOMAIN`,
 /// `ROLL_EDGE_SITE_DOMAIN`, `ROLL_EDGE_REGION`).
@@ -14,8 +14,6 @@ pub struct Hostnames {
     pub site_domain: String,
     /// `us-east-1`
     pub region: String,
-    /// This region's names carry the region (every region but the first).
-    pub regional: bool,
 }
 
 /// What a hostname names.
@@ -27,21 +25,21 @@ pub enum Host {
     Api,
     /// `git.roll.sh`
     Git,
-    /// `<id>.pg.roll.sh`
+    /// `<id>.pg.<region>.roll.sh`
     Pg(String),
-    /// `<id>.redis.roll.sh`
+    /// `<id>.redis.<region>.roll.sh`
     Redis(String),
-    /// `<id>.kafka.roll.sh`
+    /// `<id>.kafka.<region>.roll.sh`
     Kafka(String),
-    /// `<id>.nosql.roll.sh`
+    /// `<id>.nosql.<region>.roll.sh`
     Nosql(String),
-    /// `<id>.mq.roll.sh`
+    /// `<id>.mq.<region>.roll.sh`
     Mq(String),
-    /// `tasks.roll.sh`
+    /// `tasks.<region>.roll.sh`
     Tasks,
-    /// `origin.roll.sh`: the NLB itself.
+    /// `origin.<region>.roll.sh`: the region's NLB itself.
     Origin,
-    /// `s3.roll.site` (path style), `<bucket>.s3.roll.site` (virtual host).
+    /// `s3.<region>.roll.site` (path style), `<bucket>.s3.<region>.roll.site` (virtual host).
     S3 { bucket: Option<String> },
     /// `chg-<id>.roll.site`: a code preview (the whole label).
     Preview(String),
@@ -91,33 +89,22 @@ pub fn normalize(host: &str) -> String {
 impl Hostnames {
     pub fn new(domain: &str, site_domain: &str, region: &str) -> Self {
         let clean = |s: &str| s.trim().trim_matches('.').to_ascii_lowercase();
-        Self { domain: clean(domain), site_domain: clean(site_domain), region: clean(region), regional: false }
+        Self { domain: clean(domain), site_domain: clean(site_domain), region: clean(region) }
     }
 
-    /// `<sub>.<domain>`, with the region in between when this region's names carry it.
+    /// `<sub>.<region>.<domain>`: `product_domain("pg")` is `pg.us-east-1.roll.sh`.
     pub fn product_domain(&self, sub: &str) -> String {
-        match self.regional {
-            true => format!("{sub}.{}.{}", self.region, self.domain),
-            false => format!("{sub}.{}", self.domain),
-        }
+        format!("{sub}.{}.{}", self.region, self.domain)
     }
 
-    /// The S3 API's domain: `s3.roll.site` (`s3.<region>.roll.site` outside the first region).
+    /// The S3 API's domain: `s3.us-east-1.roll.site`.
     pub fn s3_domain(&self) -> String {
-        match self.regional {
-            true => format!("s3.{}.{}", self.region, self.site_domain),
-            false => format!("s3.{}", self.site_domain),
-        }
+        format!("s3.{}.{}", self.region, self.site_domain)
     }
 
-    /// A tenant's hostname: `tenant("pg", "ep1")` is `ep1.pg.roll.sh`.
+    /// A tenant's hostname: `tenant("pg", "ep1")` is `ep1.pg.us-east-1.roll.sh`.
     pub fn tenant(&self, product: &str, id: &str) -> String {
         format!("{id}.{}", self.product_domain(product))
-    }
-
-    /// `sub` with the region taken off its end, when it's there.
-    fn unregion<'a>(&self, sub: &'a str) -> &'a str {
-        sub.strip_suffix(self.region.as_str()).and_then(|s| s.strip_suffix('.')).unwrap_or(sub)
     }
 
     /// What `host` names. Accepts a `Host` header's form: any case, a port, a trailing dot.
@@ -126,14 +113,16 @@ impl Hostnames {
         if host == self.domain {
             return Host::Dashboard;
         }
+        let region = |sub: &str| sub.strip_suffix(self.region.as_str()).and_then(|s| s.strip_suffix('.')).map(str::to_string);
         if let Some(sub) = host.strip_suffix(&self.domain).and_then(|s| s.strip_suffix('.')) {
-            if sub == self.region {
-                return Host::Unknown;
+            match sub {
+                "www" => return Host::Dashboard,
+                "api" => return Host::Api,
+                "git" => return Host::Git,
+                _ => {}
             }
-            return match self.unregion(sub) {
-                "www" => Host::Dashboard,
-                "api" => Host::Api,
-                "git" => Host::Git,
+            let Some(sub) = region(sub) else { return Host::Unknown };
+            return match sub.as_str() {
                 "tasks" => Host::Tasks,
                 "origin" => Host::Origin,
                 sub => match sub.split_once('.') {
@@ -150,13 +139,15 @@ impl Hostnames {
             };
         }
         if let Some(sub) = host.strip_suffix(&self.site_domain).and_then(|s| s.strip_suffix('.')) {
-            let sub = self.unregion(sub);
-            if sub == "s3" {
-                return Host::S3 { bucket: None };
-            }
-            // Bucket names may hold dots: everything before `.s3`.
-            if let Some(bucket) = sub.strip_suffix(".s3").filter(|b| !b.is_empty()) {
-                return Host::S3 { bucket: Some(bucket.to_string()) };
+            if let Some(sub) = region(sub) {
+                if sub == "s3" {
+                    return Host::S3 { bucket: None };
+                }
+                // Bucket names may hold dots: everything before `.s3`.
+                return match sub.strip_suffix(".s3").filter(|b| !b.is_empty()) {
+                    Some(bucket) => Host::S3 { bucket: Some(bucket.to_string()) },
+                    None => Host::Unknown,
+                };
             }
             return match label(sub) {
                 Some(l) if l.starts_with("chg-") => Host::Preview(l),
@@ -172,17 +163,10 @@ impl Hostnames {
     /// except bucket names with dots in them (as on S3, those use path style over HTTPS).
     pub fn cert_sets(&self) -> Vec<CertSet> {
         let d = &self.domain;
-        let mut product = vec![d.clone(), format!("*.{d}")];
-        if self.regional {
-            product.push(format!("*.{}.{d}", self.region));
-        }
+        let mut product = vec![d.clone(), format!("api.{d}"), format!("git.{d}"), self.product_domain("tasks")];
         product.extend(TENANT_PRODUCTS.iter().map(|p| format!("*.{}", self.product_domain(p))));
-        let s = &self.site_domain;
-        let mut site = vec![s.clone(), format!("*.{s}")];
-        if self.regional {
-            site.push(format!("*.{}.{s}", self.region));
-        }
-        site.push(format!("*.{}", self.s3_domain()));
+        let s3 = self.s3_domain();
+        let site = vec![format!("*.{}", self.site_domain), s3.clone(), format!("*.{s3}")];
         vec![CertSet { name: "product".into(), names: product }, CertSet { name: "site".into(), names: site }]
     }
 
@@ -212,22 +196,24 @@ mod tests {
             ("www.roll.sh", Host::Dashboard),
             ("api.roll.sh", Host::Api),
             ("git.roll.sh", Host::Git),
-            ("ep_1.pg.roll.sh", Host::Pg("ep_1".into())),
             ("ep_1.pg.us-east-1.roll.sh", Host::Pg("ep_1".into())),
-            ("db1.redis.roll.sh:6379", Host::Redis("db1".into())),
-            ("k1.kafka.roll.sh", Host::Kafka("k1".into())),
+            ("db1.redis.us-east-1.roll.sh:6379", Host::Redis("db1".into())),
+            ("k1.kafka.us-east-1.roll.sh", Host::Kafka("k1".into())),
             ("n1.nosql.us-east-1.roll.sh", Host::Nosql("n1".into())),
-            ("q1.mq.roll.sh", Host::Mq("q1".into())),
-            ("tasks.roll.sh", Host::Tasks),
+            ("q1.mq.us-east-1.roll.sh", Host::Mq("q1".into())),
             ("tasks.us-east-1.roll.sh", Host::Tasks),
-            ("origin.roll.sh", Host::Origin),
-            ("s3.roll.site", Host::S3 { bucket: None }),
-            ("my.bucket.s3.roll.site", Host::S3 { bucket: Some("my.bucket".into()) }),
+            ("origin.us-east-1.roll.sh", Host::Origin),
+            ("s3.us-east-1.roll.site", Host::S3 { bucket: None }),
+            ("my.bucket.s3.us-east-1.roll.site", Host::S3 { bucket: Some("my.bucket".into()) }),
             ("chg-abc.roll.site", Host::Preview("chg-abc".into())),
             ("photos.roll.site", Host::Site("photos".into())),
-            ("a.b.pg.roll.sh", Host::Unknown),
+            // Region-less endpoints, other regions, and names that aren't in the table.
+            ("ep1.pg.roll.sh", Host::Unknown),
+            ("tasks.roll.sh", Host::Unknown),
+            ("x.s3.roll.site", Host::Unknown),
             ("ep1.pg.eu-west-1.roll.sh", Host::Unknown),
-            ("ep1.nope.roll.sh", Host::Unknown),
+            ("a.b.pg.us-east-1.roll.sh", Host::Unknown),
+            ("ep1.nope.us-east-1.roll.sh", Host::Unknown),
             ("us-east-1.roll.sh", Host::Unknown),
             ("evilroll.sh", Host::Unknown),
             ("example.com", Host::Unknown),
@@ -236,14 +222,10 @@ mod tests {
             assert_eq!(h.classify(host), want, "{host}");
         }
         let names = h.all_cert_names();
-        for n in ["roll.sh", "*.roll.sh", "*.pg.roll.sh", "*.nosql.roll.sh", "*.mq.roll.sh", "roll.site", "*.roll.site", "*.s3.roll.site"] {
+        for n in ["roll.sh", "api.roll.sh", "git.roll.sh", "tasks.us-east-1.roll.sh", "*.pg.us-east-1.roll.sh", "*.nosql.us-east-1.roll.sh", "*.mq.us-east-1.roll.sh", "*.roll.site", "s3.us-east-1.roll.site", "*.s3.us-east-1.roll.site"] {
             assert!(names.contains(&n.to_string()), "{n}");
         }
-        assert_eq!(h.tenant("kafka", "k1"), "k1.kafka.roll.sh");
-        let later = Hostnames { regional: true, ..Hostnames::new("roll.sh", "roll.site", "eu-west-1") };
-        assert_eq!(later.tenant("pg", "ep1"), "ep1.pg.eu-west-1.roll.sh");
-        assert!(later.all_cert_names().contains(&"*.pg.eu-west-1.roll.sh".to_string()));
-        assert_eq!(later.classify("ep1.pg.eu-west-1.roll.sh"), Host::Pg("ep1".into()));
+        assert_eq!(h.tenant("kafka", "k1"), "k1.kafka.us-east-1.roll.sh");
 
         assert!(is_git_path("/o/r.git/info/refs") && is_git_path("/o/r.git") && is_git_path("/o/R.GIT/git-upload-pack"));
         assert!(!is_git_path("/o/r") && !is_git_path("/dashboard") && !is_git_path("/o/.git") && !is_git_path("//r.git"));

@@ -35,12 +35,10 @@ pub struct EdgeArgs {
     /// The user-content domain: the S3 API, public buckets, previews.
     #[arg(long = "edge-site-domain", env = "ROLL_EDGE_SITE_DOMAIN", default_value = "roll.site")]
     pub site_domain: String,
+    /// This node's region: directly connected names carry it (`<id>.pg.<region>.<domain>`), and
+    /// only this region's are routed.
     #[arg(long = "edge-region", env = "ROLL_EDGE_REGION", default_value = "us-east-1")]
     pub region: String,
-    /// This region's hostnames carry the region (`<id>.pg.<region>.<domain>`): every region but
-    /// the first.
-    #[arg(long = "edge-regional-names", env = "ROLL_EDGE_REGIONAL_NAMES", value_parser = clap::builder::BoolishValueParser::new(), default_value_t = false, num_args = 0..=1, default_missing_value = "true")]
-    pub regional_names: bool,
     /// Every connection starts with a PROXY protocol header (behind the NLB).
     #[arg(long = "edge-proxy-protocol", env = "ROLL_EDGE_PROXY_PROTOCOL", value_parser = clap::builder::BoolishValueParser::new(), default_value_t = false, num_args = 0..=1, default_missing_value = "true")]
     pub proxy_protocol: bool,
@@ -96,7 +94,7 @@ pub struct EdgeArgs {
 
 impl EdgeArgs {
     pub fn hostnames(&self) -> Hostnames {
-        Hostnames { regional: self.regional_names, ..Hostnames::new(&self.domain, &self.site_domain, &self.region) }
+        Hostnames::new(&self.domain, &self.site_domain, &self.region)
     }
 }
 
@@ -210,11 +208,11 @@ impl Edge {
             let fd = { use std::os::fd::AsRawFd; tls.get_ref().0.as_raw_fd() as i64 };
             redis_server::conn::serve_with(tls, a.peer, a.local, dir, a.sni, fd)
         })));
-        // Kafka: one virtual broker per tenant hostname.
+        // Kafka: one virtual broker per hostname: clients are told the name they connected with.
         let l = bind(e.kafka).await?;
-        let (b, h) = (p.streams.clone(), hosts.clone());
+        let b = p.streams.clone();
         served.push(io(listener::serve_tls(l, plain.clone(), opts, move |tls, a| {
-            let advertised = a.sni.clone().filter(|s| matches!(h.classify(s), Host::Kafka(_))).map(|s| (s, a.local.port()));
+            let advertised = a.sni.clone().map(|s| (s, a.local.port()));
             stream_broker::server::serve_connection(b.clone(), tls, a.peer, true, advertised)
         })));
         // nosql (CQL): the server name picks the database.
