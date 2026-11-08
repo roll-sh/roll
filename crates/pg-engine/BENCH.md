@@ -7658,6 +7658,73 @@ On `912559c`: `cargo test -p pg-engine` debug and release (every binary; goldens
 (debug, private reference): 51,148 / 51,150, no unit changed against `results.tsv`.
 pg_dump_tap was queued and cancelled under the verification train (agent 162's full suite).
 
+## Catalog round 12 (agent 188)
+
+HANDOFF.md "Catalog round 12, first batch" has what changed. The objects are round 11's
+(`bench scale`'s 10,000 tables of three columns with a primary key and a default in 10
+schemas, a partitioned table of 1,000 partitions, `public.t`; loaded with psql). Dist builds
+of `6a1e9067` (base) and `770e23d2` (this batch) in their container (`run.sh`
+`ENGINE_DOCKER=1`), each started from a copy of one data directory; PostgreSQL 18.6 in its
+container on the host network; all on cores 8-11, psql from a client container; three rounds,
+every server restarted before each file. Other agents' builds ran throughout (load 15-25).
+
+First query after a start, then once more (ms; each round's server freshly started):
+
+| query | PostgreSQL | base | this batch |
+|---|---|---|---|
+| psql `\dt` of a schema | 12-23 / 7.8-13 | 52-86 / 7.5-11 | 50-73 / 7.4-13 |
+| `count(*)` of pg_class | 6.0-8.6 / 3.7-4.5 | 6.3-13 / 0.33-0.49 | 4.6-6.4 / 0.24-0.31 |
+| pg_class × pg_attribute of a schema | 20-28 / 13-16 | 121-167 / 29-35 | 146-169 / 28-46 |
+| `count(*)` of pg_stat_user_tables | 32-45 / 20-30 | 22-36 / 5.9-8.6 | 27-34 / 6.6-8.3 |
+
+On the host (release builds, nice 19, six alternating restarts each), psql's first `\dt`:
+base 48, 62, 66, 78, 80, 87 ms; this batch 40, 47, 48, 55, 68, 70 (the profile no longer
+has `PMap<Table>::contains_key` reading table entries from storage under `class_position`).
+
+In one session after a start (the first statement included), three rounds:
+
+| query | PostgreSQL | base | this batch |
+|---|---|---|---|
+| EF Core's tables query of one table (`relname IN ('t5000')`), the session's first | 4.7-8.3 | 437-472 | 239-283 |
+| the same, the next four | 1.2-3.0 | 129-211 | 2.3-3.6 |
+| psql's unqualified `\d t5000` lookup (5 times) | 0.28-1.8 | 27-62 | 0.54-3.7 |
+| psql `\d sc0.t5000`'s 11 queries, first time | 30-36 | 93-102 | 67-99 |
+| the same, the next two times | 11-17 | 13-24 | 13-25 |
+
+The EF Core query no longer runs its `NOT EXISTS` subplan on each of pg_class's 41,416 rows,
+and its pg_depend rescan derives the one relation's rows. Its first run in a process (or after
+any DDL) is still 213 ms of planning: `explain::sys_tuples` generates pg_depend's 116,000
+rows to count them (HANDOFF's "Left"). `\d sc0.t5000`'s first time is pg_attribute's and
+pg_constraint's first reads (columns 42-49 ms, indexes 36-41 ms).
+
+Memory after a start and reading pg_class, pg_attribute, pg_type, pg_index, pg_constraint
+and pg_stat_user_tables whole in one session (the session held open while measured), from
+each container's cgroup (`memory.current`; `memory.stat`'s anon, shmem), MB:
+
+| | memory.current | anon | shmem | process RSS |
+|---|---|---|---|---|
+| PostgreSQL | 200 | 12 | 137 | |
+| base | 116 | 114 | 0 | 141 |
+| this batch | 112 | 110 | 0 | 138 |
+
+The method: the cgroup's `memory.current` on both sides (each side's private memory, shared
+memory and page cache, measured the same way), or anon + shmem without the reclaimable page
+cache (PostgreSQL 149, the engine 110). The engine's RSS counts the mapped binary's resident
+pages (its 70 MB text), which PostgreSQL's anon doesn't: round 11's 143 MB was RSS, and
+PostgreSQL's 134 / 177 were its cgroup with and without a page cache drop.
+
+### Verification (agent 188, first batch)
+
+One heavy job on the rebased head `770e23d2`: the release library tests, `golden` (677
+files; `a188_catalog_index_conds` and `a188_depend_rows` new, recorded from PostgreSQL 18.6,
+also run in a debug build for the debug comparisons), `catalog_format`,
+`catalog_lazy_snapshot`, `catalog_storage`, `session_state`: all pass; clippy: no new
+warning (18, as before); the regression files psql, psql_crosstab, psql_pipeline, sysviews,
+oidjoins, rules, misc_sanity, opr_sanity, type_sanity, regproc, subselect, alter_table,
+create_index, inherit, privileges, rowsecurity, dependency, namespace, object_address,
+misc_functions, stats (private reference): 9,906 / 9,906, 0 units newly differing against
+`results.tsv`; pg_dump_tap 14,817 / 14,817.
+
 ## Catalog round 11 (round 26, agent 173)
 
 HANDOFF.md "Catalog round 11, first batch" has what changed (catalog format 5: each

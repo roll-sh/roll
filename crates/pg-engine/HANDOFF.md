@@ -3993,6 +3993,80 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
     in BENCH's section); the regex filter compiles its pattern per row (`types/regex`
     `compile` in the profile of `\d t`); per-table ORM queries are planning bound (agent
     171); catalog entries weren't shrunk (`Column` 240 bytes, `Table` 440).
+- **Catalog round 12, first batch** (agent 188; BENCH.md "Catalog round 12"):
+  - Why 173's `class_name_bounds` change didn't help `\d t5000`, and why EF Core's pg_class
+    scan ran its subplan on every row: both scans have no planned path. The planner sets a
+    catalog scan's `SysPath` only under a Sort (`paths::syscat::sys_ordered_scan`) or as a
+    join group's relation with an index access or parameters (`joinpath`); otherwise
+    `Plan::SysScan`'s `path` is None and the "Index Scan ... Index Cond" EXPLAIN prints is
+    EXPLAIN's own derivation (`explain::sys_index_scan`), which the executor never saw. Its
+    filter ran in written order: `sys_equality`'s first-conjunct rule stops at the first
+    conjunct that can raise (`quiet_filter`), and EF Core writes `NOT EXISTS (SELECT ... FROM
+    pg_depend WHERE classid = (SELECT ...) AND objid = cls.oid AND deptype IN ('e', 'x'))`
+    before `cls.relname IN ('t')` (one value: `relname = 't'`). (HANDOFF's "with `relname =`
+    or without `deptype` it is one row" didn't reproduce: with the InitPlan every variant ran
+    the subplan 41,420 times; without it the planner makes an anti join.)
+  - Such a scan now runs as the index scan its EXPLAIN shows (`exec/nodes.rs` `sys_derived`,
+    for cacheable catalogs, `sys_shared_scan`): the conditions the index uses whole first, then
+    the rest of the filter, so the filter runs only on the rows they select, as PostgreSQL's
+    index scan checks its filter (a subplan failing on another row raised `division by zero`
+    where PostgreSQL returns the row: `a188_catalog_index_conds`). The index conditions
+    bound pg_class's `relname` (`class_name_bounds` → `derived_name_bounds`), a pattern's
+    fixed prefix among them (`SysCond::Bound`: `=` for `^(t5000)$`, a range for `^(t.*)$`,
+    LIKE's too; `like_prefix_quals`, the one case handled before, is gone); an exact name is
+    looked up through the rows' hash (`sys_named`). `explain::SysCond` / `sys_index_scan` are
+    `pub(crate)` for it.
+  - pg_depend's rows of one dependent object (`system::depend_rows_of`): derived alone by the
+    scoped derivation a DROP's walk runs (`depend::scope_of` → `depends_in`), for a rescan
+    whose conjuncts pin `classid` (an InitPlan's value too: `oid_pin`) and `objid`, while
+    pg_depend's rows aren't generated (`sys_depend_rows`; past `depend_rescans` of them in a
+    statement, the whole catalog, once). Debug builds compare each with the whole derivation
+    (`a188_depend_rows`: every kind of object, run in debug). Objects Postgres made, and those
+    whose rows only the whole derivation makes (internal triggers, composite types' relations),
+    still generate the whole catalog.
+  - `system::class_position` reads the directory records: the stored maps' `contains_key`
+    read each group's raw table entries from storage (about 1,000 tables' JSON a group), for
+    every relation a first `\dt` made a row of.
+  - `class_rows_named` finds renamed TOAST tables and indexes (`Catalog::renamed_toasts`,
+    hashed once per frozen catalog): the name index doesn't hold them, so a planned index scan
+    on `relname = '<renamed>'` missed them (`a56_toast_relations` showed it once path-less scans
+    used the bounds).
+  - Numbers (BENCH, dist builds in containers): EF Core's tables query after its first in a
+    session 129-211 → 2.3-3.6 ms (PostgreSQL 1.2-3.0), its first 437-472 → 239-283 (4.7-8.3);
+    psql's unqualified `\d t5000` lookup 27-62 → 0.54-3.7 ms (0.28-1.8); a first `count(*)` of
+    pg_class 6.3-13 → 4.6-6.4 (6.0-8.6); psql's first `\dt` 52-86 → 50-73 (12-23; on the host,
+    median of six restarts, 72 → 51). Memory after the big catalogs, measured the same way on
+    both sides (each container's cgroup `memory.current`): 116 → 112 MB, PostgreSQL 200 (anon
+    + shmem: 110 against 149); round 11's 143 MB was the process RSS, which counts the
+    binary's resident text.
+  - Left, with what limits each (measured):
+    - EF Core's first query in a process, or after any DDL: 213 ms of planning, because
+      `explain::sys_tuples(PgDepend)` generates pg_depend's rows (116,000 at 10,000 tables,
+      parsing every table entry: `stored_ix::read_all`) to count them for the subplan's
+      cost; `system::row_count` has no pg_depend count. For the planner's owner: an estimate
+      from the relation maps' sizes, or a count kept with the catalog (an estimate changes
+      cost numbers; make it independent of whether the rows are cached, or plans differ
+      between a first and a later run).
+    - `NOT EXISTS (SELECT ... WHERE x = (SELECT ...) ...)`: PostgreSQL pulls it up into an
+      anti join with the inner sub-select as an InitPlan above it (Nested Loop Anti Join);
+      the engine keeps a SubPlan (EXPLAIN differs; planner).
+    - A process's first planning (20-30 ms of a first `\dt` after a start; LBR profile of the
+      first `EXPLAIN` of `\dt`): the function registry's initialization (`func::Registry::
+      from_pg`, `assign_pg_oids`, `pg_proc_oids`: 40% of its samples), `paths::syscat::
+      read_sys_indexes` splitting the whole index list once per catalog (14%), `paths::
+      parallel::func_parallel`'s map (10%), `system::initdb_colstats` (6%). One-time costs
+      that a warm-up at server start, or parsing once, would take off the first query.
+    - psql's per-table `\d` queries execute in 0.1-1.8 ms; the rest is planning, and
+      EXPLAIN's Builder used for estimates (`bind_set_op` → `estimate_in`, SetOp's
+      `hashed_distinct` → `agg_estimate`, `distinct_order`) is 46% of the publications query's
+      CPU (planner, executor).
+    - A first pg_attribute read over a schema's relations (`rows_of_rel` per relation, a nested
+      loop): `rel_columns` reads each table through `PMap::get`, which parses its whole chunk
+      (64 oids, about 8 tables of the bench's round-robin schemas), so every table entry is
+      parsed (121 ms against PostgreSQL's 42). Column directory records (a format step) or
+      parsing one entry of a chunk.
+    - A namespace index of the directory records (a format step) would take
+      `class_keys_checked`'s share of the first `\dt` (10% of its samples, 4-5 ms); not done.
 - **Client libraries** (round 17, agent 38; round 18, agent 51): drivers' and ORMs' own test
   suites against the engine and against PostgreSQL 18.6, test by test: `tests/clients/`
   (runner, per-suite scripts, `STATUS.md` with the per-suite counts and every difference
