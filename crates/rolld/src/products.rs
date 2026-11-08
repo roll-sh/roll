@@ -46,7 +46,7 @@ impl Product {
         match self {
             Product::Postgres => &["/v1/projects", "/v1/endpoints", "/v1/health", "/internal/wal"],
             Product::Redis => &["/v1/redis"],
-            Product::Streams => &["/v1/streams", "/v1/kafka", "/kafka/v3"],
+            Product::Streams => &["/v1/streams", "/v1/kafka", "/kafka/v3", "/internal/streams"],
             Product::Tasks => &["/v1/tasks"],
             Product::Storage => &["/v1/storage"],
             Product::Nosql => &["/v1/nosql"],

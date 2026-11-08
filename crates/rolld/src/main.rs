@@ -4,8 +4,6 @@ use pg_proxy::{Proxy, ProxyConfig};
 use pg_storage::StorageConfig;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use stream_broker::config::TlsFiles;
-use stream_broker::store::Settings;
 use tracing::info;
 
 /// mimalloc hands freed memory back to the OS; the system allocator on macOS keeps it.
@@ -23,6 +21,7 @@ mod nosql;
 mod products;
 mod queues;
 mod storage_events;
+mod streams;
 
 use products::{Product, Products};
 
@@ -266,6 +265,8 @@ struct Args {
     nosql: nosql::NosqlArgs,
     #[command(flatten)]
     edge: edge::EdgeArgs,
+    #[command(flatten)]
+    streams: streams::StreamArgs,
     /// Products this node runs, comma-separated: postgres, redis, streams, tasks, storage, nosql,
     /// queues, code (default: all). `--no-<product>` and `--<product>-only` narrow it.
     #[arg(long, env = "ROLL_PRODUCTS", value_enum, value_delimiter = ',')]
@@ -338,10 +339,6 @@ async fn run() -> anyhow::Result<()> {
         true => Some(start_tasks(&args, &home).await?),
         false => None,
     };
-    let mut streams = match on.on(Product::Streams) {
-        true => Some(start_streams(&args, &home, &storage).await?),
-        false => None,
-    };
     let postgres = match on.on(Product::Postgres) {
         true => Some(start_postgres(&args, &home, &storage).await?),
         false => None,
@@ -362,12 +359,6 @@ async fn run() -> anyhow::Result<()> {
         true => Some(nosql::Nosql::start(&home, args.nosql.clone(), &args.public_host, &args.node, &storage).await?),
         false => None,
     };
-    // Storage event notifications into roll queues and streams, in process.
-    if let Some(st) = &storage_svc {
-        let sink = storage_events::RollSink { queues: queues.as_ref().map(|q| q.broker.clone()), streams: streams.as_ref().map(|s| s.broker.clone()) };
-        st.server.notifier.set_sink(std::sync::Arc::new(sink));
-        st.control.set_server(st.server.clone());
-    }
     // roll code: same object storage; previews branch roll Postgres and Redis.
     let code = match on.on(Product::Code) {
         true => {
@@ -378,6 +369,17 @@ async fn run() -> anyhow::Result<()> {
     };
     let cluster = cluster::handle(code.as_ref().map(|c| &*c.code), &args.code, &args.code.default_url(&args.public_host, args.api))?;
     let metrics = logs::ClusterMetrics::start(cluster.clone());
+    // roll streams: one owner per stream in a cluster, so it starts once the cluster is joined.
+    let mut streams = match on.on(Product::Streams) {
+        true => Some(streams::start(&args, &home, &storage, &cluster).await?),
+        false => None,
+    };
+    // Storage event notifications into roll queues and streams, in process.
+    if let Some(st) = &storage_svc {
+        let sink = storage_events::RollSink { queues: queues.as_ref().map(|q| q.broker.clone()), streams: streams.as_ref().map(|s| s.broker.clone()) };
+        st.server.notifier.set_sink(std::sync::Arc::new(sink));
+        st.control.set_server(st.server.clone());
+    }
 
     // The internal API: every product's routes, and a clear 404 for the ones that are off.
     let mut router = on.info_route(cluster.node_id().to_string()).merge(on.off_routes());
@@ -520,35 +522,6 @@ async fn start_tasks(args: &Args, home: &std::path::Path) -> anyhow::Result<Task
     let tasks = tasks::Tasks::new(tasks::Config { token: args.tasks_token.clone().filter(|t| !t.is_empty()), ..tasks::Config::default() }, store).await?;
     let worker = tasks::start(tasks.clone());
     Ok(Tasks { tasks, worker })
-}
-
-/// roll streams: the broker, and its Kafka listener until it's served.
-struct Streams {
-    broker: std::sync::Arc<stream_broker::Broker>,
-    kafka: Option<tokio::net::TcpListener>,
-}
-
-async fn start_streams(args: &Args, home: &std::path::Path, storage: &StorageConfig) -> anyhow::Result<Streams> {
-    let mut c = stream_broker::Config::local(home.to_path_buf());
-    c.listen = args.kafka;
-    c.advertised_host = args.kafka_advertised_host.clone().unwrap_or_else(|| args.public_host.clone());
-    c.advertised_port = args.kafka_advertised_port.unwrap_or(args.kafka.port());
-    c.default_stream = Some(args.default_stream.clone()).filter(|s| !s.is_empty());
-    c.tls = args.kafka_tls_cert.clone().zip(args.kafka_tls_key.clone()).map(|(cert, key)| TlsFiles { cert, key });
-    c.http_url = format!("http://{}:{}", args.public_host, args.api.port());
-    c.http_require_auth = args.stream_require_auth;
-    c.local_disk_bytes = args.stream_disk_mb << 20;
-    c.evict_on_unload = !args.stream_keep_local;
-    c.storage = storage.clone();
-    let broker = stream_broker::Broker::new(c).await?;
-    if let Some(name) = &broker.config.default_stream
-        && broker.find_stream(name).is_none()
-    {
-        broker.create_stream(name, Settings::default())?;
-    }
-    broker.txns.recover(&broker).await?;
-    let kafka = tokio::net::TcpListener::bind(args.kafka).await?;
-    Ok(Streams { broker, kafka: Some(kafka) })
 }
 
 /// roll postgres: the control plane (computes in Docker) and the proxy.
