@@ -13,7 +13,8 @@
 //! [`Guard`], or [`Route::Forward`] to the owner) and [`Cluster::dispatch`] to run or forward a
 //! request; [`Cluster::lease`] / [`Cluster::acquire`] to take a key for background work;
 //! [`Cluster::owns`], [`Cluster::while_owner`] and [`Cluster::subscribe_ownership`] to start and
-//! stop that work as ownership moves; [`Cluster::singleton`]; [`Cluster::drain`] on SIGTERM.
+//! stop that work as ownership moves; [`Cluster::singleton`]; [`Cluster::drain`] on SIGTERM;
+//! [`Cluster::stats`] for the node's metrics (handoffs, failed handoffs, takeovers, fencing).
 //!
 //! # Pieces
 //!
@@ -139,7 +140,7 @@ pub mod placement;
 pub mod sign;
 
 pub use backend::{Backend, DynamoDb, DynamoDbConfig, Memory, MemoryStore, Postgres};
-pub use cluster::{Cluster, Guard, Node, Ownership, Route};
+pub use cluster::{Cluster, Guard, Node, Ownership, Route, Stats};
 pub use config::ClusterConfig;
 pub use forward::{ClientAddr, Forwarded, MAX_HOPS, accept_forwarded, client_addr, hops, is_upgrade, require_signed, unavailable};
 pub use sign::VerifyError;

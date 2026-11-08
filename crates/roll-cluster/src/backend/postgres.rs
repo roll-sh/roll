@@ -103,9 +103,11 @@ impl Sql {
                  RETURNING epoch"
             ),
             // Expire a lease now so its preferred node takes it at its next sweep. Only the
-            // tenure we held (same node and epoch).
+            // tenure we held (same node and epoch). `expires_at = 0` marks it released, so the
+            // node that takes it counts a handoff, not a takeover (a lapsed lease keeps its real
+            // expiry). Nodes from before this marker wrote `now - 1`: counted as takeovers.
             // ?1 key, ?2 id, ?3 epoch
-            release: format!("UPDATE code_leases SET expires_at = {now} - 1 WHERE key = ?1 AND node_id = ?2 AND epoch = CAST(?3 AS BIGINT)"),
+            release: "UPDATE code_leases SET expires_at = 0 WHERE key = ?1 AND node_id = ?2 AND epoch = CAST(?3 AS BIGINT)".into(),
             // Give a lease up for good (an idle key, a deleted repo): no sweep takes it back; the
             // next request acquires it again. Only the tenure we held.
             // ?1 key, ?2 id, ?3 epoch
@@ -257,24 +259,27 @@ impl Backend for Postgres {
         let leases = self.write(Isolation::ReadCommitted, |c| {
             c.query(&self.sql.renew, params![Self::ms(me.timing.lease_ttl), self.id(), me.started_at], |r| Ok((r.get(0)?, r.get(1)?)))
         })?;
-        Ok(Confirmed { leases, basis })
+        Ok(Confirmed { leases, basis, taken_over: 0 })
     }
 
     fn acquire(&self, keys: &[String]) -> Result<Confirmed> {
         let me = self.me();
         let basis = clock::now();
         let ttl = Self::ms(me.timing.lease_ttl);
-        let leases = self.write(Isolation::Serializable, |c| {
-            let mut won = Vec::new();
+        let (leases, taken_over) = self.write(Isolation::Serializable, |c| {
+            let (mut won, mut taken_over) = (Vec::new(), 0);
             for k in keys {
+                // Who held it, and whether they released it (see `release`).
+                let prev = c.query_row("SELECT node_id, expires_at FROM code_leases WHERE key = ?1", [k.as_str()], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))).optional()?;
                 let e = c.query_row(&self.sql.acquire, params![k.as_str(), self.id(), ttl, me.started_at], |r| r.get::<_, i64>(0)).optional()?;
                 if let Some(e) = e {
+                    taken_over += usize::from(prev.is_some_and(|(node, expires_at)| node != self.id() && expires_at != 0));
                     won.push((k.clone(), e));
                 }
             }
-            Ok(won)
+            Ok((won, taken_over))
         })?;
-        Ok(Confirmed { leases, basis })
+        Ok(Confirmed { leases, basis, taken_over })
     }
 
     fn release(&self, leases: &[(String, i64)]) -> Result<()> {

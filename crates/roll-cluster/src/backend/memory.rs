@@ -23,6 +23,8 @@ struct MemLease {
     node: String,
     epoch: i64,
     expires_at: Duration,
+    /// Its holder released it (a handoff), rather than letting it lapse.
+    released: bool,
 }
 
 #[derive(Default)]
@@ -153,7 +155,7 @@ impl Backend for Memory {
         let basis = clock::now();
         let mut tb = self.store.0.lock();
         if tb.nodes.get(&id).is_none_or(|n| n.incarnation != inc) {
-            return Ok(Confirmed { leases: Vec::new(), basis });
+            return Ok(Confirmed { leases: Vec::new(), basis, taken_over: 0 });
         }
         let now = clock::now();
         let mut leases = Vec::new();
@@ -161,7 +163,7 @@ impl Backend for Memory {
             l.expires_at = now + t.lease_ttl;
             leases.push((k.clone(), l.epoch));
         }
-        Ok(Confirmed { leases, basis })
+        Ok(Confirmed { leases, basis, taken_over: 0 })
     }
 
     fn acquire(&self, keys: &[String]) -> Result<Confirmed> {
@@ -169,28 +171,30 @@ impl Backend for Memory {
         let basis = clock::now();
         let mut tb = self.store.0.lock();
         if tb.nodes.get(&id).is_none_or(|n| n.incarnation != inc) {
-            return Ok(Confirmed { leases: Vec::new(), basis });
+            return Ok(Confirmed { leases: Vec::new(), basis, taken_over: 0 });
         }
         let now = clock::now();
-        let mut leases = Vec::new();
+        let (mut leases, mut taken_over) = (Vec::new(), 0);
         for k in keys {
             match tb.leases.get_mut(k) {
                 None => {
-                    tb.leases.insert(k.clone(), MemLease { node: id.clone(), epoch: 1, expires_at: now + t.lease_ttl });
+                    tb.leases.insert(k.clone(), MemLease { node: id.clone(), epoch: 1, expires_at: now + t.lease_ttl, released: false });
                     leases.push((k.clone(), 1));
                 }
                 Some(l) if l.node == id || l.expires_at <= now => {
                     if l.node != id {
+                        taken_over += usize::from(!l.released);
                         l.epoch += 1;
                         l.node = id.clone();
                     }
                     l.expires_at = now + t.lease_ttl;
+                    l.released = false;
                     leases.push((k.clone(), l.epoch));
                 }
                 Some(_) => {}
             }
         }
-        Ok(Confirmed { leases, basis })
+        Ok(Confirmed { leases, basis, taken_over })
     }
 
     fn release(&self, leases: &[(String, i64)]) -> Result<()> {
@@ -200,6 +204,7 @@ impl Backend for Memory {
         for (k, e) in leases {
             if let Some(l) = tb.leases.get_mut(k).filter(|l| l.node == id && l.epoch == *e) {
                 l.expires_at = now.saturating_sub(Duration::from_millis(1));
+                l.released = true;
             }
         }
         Ok(())

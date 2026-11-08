@@ -111,7 +111,8 @@ fn exactly_one_contender_wins(kind: Kind) {
 }
 
 /// A node that dies without cleaning up loses its keys to their preferred live nodes, with a
-/// new epoch, and never while it could still have been acting on them.
+/// new epoch, and never while it could still have been acting on them. The nodes that take
+/// them count takeovers; the frozen one counts what it fenced.
 fn a_dead_nodes_keys_move_to_their_preferred_live_node(kind: Kind) {
     let Some(env) = Env::new(kind, "dead") else { return };
     let (a, b, c) = (env.join("a"), env.join("b"), env.join("c"));
@@ -136,6 +137,8 @@ fn a_dead_nodes_keys_move_to_their_preferred_live_node(kind: Kind) {
         let want = placement::rendezvous(k, ["b", "c"]).unwrap();
         assert_eq!(record(&b, k), Some((want.to_string(), 2)), "{k} went to its preferred live node");
     }
+    assert_eq!(b.stats().takeovers + c.stats().takeovers, keys.len() as u64, "{:?} {:?}", b.stats(), c.stats());
+    assert!(a.stats().fenced >= 1, "{:?}", a.stats());
 }
 
 /// A node that can't reach the backend stops acting as owner (Lost, unhealthy) before any other
@@ -175,7 +178,8 @@ fn a_node_cut_off_from_the_backend_fences_itself_first_and_recovers(kind: Kind) 
 }
 
 /// Draining hands every key to the remaining nodes, each taken by its new preferred node soon
-/// after it was released (not after a lease's length), and the node then leaves.
+/// after it was released (not after a lease's length), and the node then leaves. Handoffs count
+/// as handoffs, never as takeovers or failures.
 fn draining_hands_everything_over(kind: Kind) {
     let Some(env) = Env::new(kind, "drain") else { return };
     let nodes: HashMap<&str, Arc<Cluster>> = [("a", env.join("a")), ("b", env.join("b")), ("c", env.join("c"))].into_iter().collect();
@@ -203,6 +207,9 @@ fn draining_hands_everything_over(kind: Kind) {
     for k in keys.iter().filter(|k| !a_keys.contains(k)) {
         assert_eq!(record(&nodes["b"], k).unwrap().1, 1, "{k} didn't move");
     }
+    let s = a.stats();
+    assert_eq!((s.handoffs, s.handoff_failures), (a_keys.len() as u64, 0), "{s:?}");
+    assert_eq!(nodes["b"].stats().takeovers + nodes["c"].stats().takeovers, 0);
     assert!(eventually(Duration::from_secs(5), || nodes["b"].nodes().iter().all(|n| n.id != "a")));
 }
 
