@@ -307,6 +307,10 @@ impl Edge {
             if let Some(r) = p.redis {
                 handlers.register(redis_control::cluster::PRODUCT, r.front.handler());
             }
+            // A CQL connection whose database this node serves.
+            if let Some(n) = p.nosql {
+                handlers.register("cql", n.splice_handler());
+            }
             internal = internal.merge(roll_edge::splice::router(roll_edge::splice::Signer::new(&secret)?, handlers));
         }
         let serve = Box::pin(async move { futures::future::select_all(served).await.0 });
@@ -462,7 +466,7 @@ impl HttpRoutes {
             kafka: p.streams.clone().map(|b| logged(stream_broker::http::router(b))),
             tasks: p.tasks.clone().map(|t| logged(tasks::api::router(t))),
             s3: p.storage.clone().map(logged),
-            alternator: p.nosql.map(|n| logged(nosql_server::alternator::router(n.control.node.clone(), n.alternator_options()))),
+            alternator: p.nosql.map(|n| logged(n.alternator_router())),
             mq,
         })
     }

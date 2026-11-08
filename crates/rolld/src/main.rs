@@ -352,11 +352,6 @@ async fn run() -> anyhow::Result<()> {
         true => Some(redis::Redis::start(&args, &storage, redis::Redis::clustered(&args)).await?),
         false => None,
     };
-    // roll nosql: same object storage, its own node.
-    let nosql = match on.on(Product::Nosql) {
-        true => Some(nosql::Nosql::start(&home, args.nosql.clone(), &args.public_host, &args.node, &storage).await?),
-        false => None,
-    };
     // roll code: same object storage; previews branch roll Postgres and Redis.
     let code = match on.on(Product::Code) {
         true => {
@@ -370,6 +365,11 @@ async fn run() -> anyhow::Result<()> {
     if let Some(r) = &redis {
         r.join(&cluster);
     }
+    // roll nosql: same object storage; in a cluster its databases follow their leases.
+    let nosql = match on.on(Product::Nosql) {
+        true => Some(nosql::Nosql::start(&home, args.nosql.clone(), &args.public_host, &args.node, &storage, Some(&cluster), args.code.cluster.system_database.as_deref()).await?),
+        false => None,
+    };
 
     // roll storage on the node's cluster: every node serves it, the metadata's owner runs it, with
     // its event notifications into roll queues and streams, in process.

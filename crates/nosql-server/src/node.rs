@@ -14,6 +14,10 @@
 //!   and then unloads: for deletes, in-place restores and moves.
 //! - **Catalog.** Which databases exist and their settings come from a [`Catalog`]: the control
 //!   plane in production, a [`StaticCatalog`] locally.
+//! - **Fleet.** With [`Node::set_fleet`], a database is loaded only on its owner, kept while
+//!   the owner holds it, and released (clients disconnected over a second, log shipped, memtables
+//!   flushed) when it moves ([`crate::fleet`]). A database another node opened since is dropped
+//!   without writing anything.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -26,7 +30,11 @@ use nosql_storage::store::Store;
 use parking_lot::Mutex;
 use tokio::sync::OnceCell;
 
+use crate::conn::{Accepted, Io};
 use crate::directory::{Directory, Lease, Loaded, Metrics, MetricsSnapshot, OpenError, ServerSettings, ct_eq};
+use crate::fleet::{Fleet, Located, Placement};
+use bytes::Bytes;
+use std::sync::{OnceLock, Weak};
 
 /// A credential the platform manages (the initial superuser, rotated by the control plane).
 /// [`DbSpec::with_password`] also makes it the engine's `DbConfig::superuser`, so the engine's
@@ -172,7 +180,25 @@ pub struct Node {
     transitions: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// Idle timeouts set while loaded ([`Node::set_idle_timeout`]; reset from the spec at load).
     idle_timeouts: Mutex<HashMap<String, Option<Duration>>>,
+    /// The other nodes serving the same databases, if any ([`Node::set_fleet`]).
+    fleet: OnceLock<Arc<dyn Fleet>>,
+    me: Weak<Node>,
 }
+
+/// Over how long the connections of a database that moves to another node are closed.
+pub const MOVE_SPREAD: Duration = Duration::from_secs(1);
+
+/// The database is served by another node (or is moving): open it there.
+#[derive(Debug)]
+pub struct NotHere;
+
+impl std::fmt::Display for NotHere {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the database is served by another node right now; retry")
+    }
+}
+
+impl std::error::Error for NotHere {}
 
 /// The database label of a TLS server name: `<db>.<domain>` (any first label without a domain).
 pub fn sni_label<'a>(sni: &'a str, domain: Option<&str>) -> Option<&'a str> {
@@ -185,7 +211,7 @@ pub fn sni_label<'a>(sni: &'a str, domain: Option<&str>) -> Option<&'a str> {
 
 impl Node {
     pub fn new(catalog: Arc<dyn Catalog>, store: Arc<Store>, cfg: NodeConfig) -> Arc<Self> {
-        let node = Arc::new(Node {
+        let node = Arc::new_cyclic(|me| Node {
             catalog,
             store,
             cfg,
@@ -193,6 +219,8 @@ impl Node {
             metrics: Mutex::new(HashMap::new()),
             transitions: Mutex::new(HashMap::new()),
             idle_timeouts: Mutex::new(HashMap::new()),
+            fleet: OnceLock::new(),
+            me: me.clone(),
         });
         let weak = Arc::downgrade(&node);
         let tick = node.cfg.idle_timeout.map_or(Duration::from_secs(1), |i| (i / 4).clamp(Duration::from_millis(50), Duration::from_secs(15)));
@@ -205,9 +233,114 @@ impl Node {
                         tracing::warn!(db = id, error = %e, "nosql unload failed");
                     }
                 }
+                node.drop_fenced().await;
             }
         });
         node
+    }
+
+    /// Share databases with other nodes: from now on a database is loaded only while this node
+    /// owns it ([`crate::fleet`]). Set once, before serving.
+    pub fn set_fleet(&self, fleet: Arc<dyn Fleet>) {
+        let _ = self.fleet.set(fleet);
+    }
+
+    pub fn fleet(&self) -> Option<&Arc<dyn Fleet>> {
+        self.fleet.get()
+    }
+
+    /// Databases another node opened since this one did: dropped without writing anything
+    /// (their state is the other node's).
+    async fn drop_fenced(&self) {
+        for l in self.loaded().into_iter().filter(|l| l.db.store().is_fenced()) {
+            let id = l.spec.id.clone();
+            let lock = self.transition_lock(&id);
+            let _g = lock.lock().await;
+            l.kick();
+            self.store.abandon(&id).await;
+            self.dbs.lock().remove(&id);
+            self.idle_timeouts.lock().remove(&id);
+            l.end_residence();
+        }
+    }
+
+    /// The database leaves this node (it moved, or the lease was lost): registered clients get
+    /// `STATUS_CHANGE DOWN` and every client is disconnected within [`MOVE_SPREAD`]; then the
+    /// log is shipped and the manifest written, so every acknowledged write is in object storage
+    /// even if the handoff stops waiting; then the memtables are flushed (as many databases at
+    /// once as the flush concurrency allows) and the database dropped. Its residence goes last,
+    /// which lets the handoff complete. Every database starts at once: one waiting its turn
+    /// would keep taking writes past the handoff's timeout.
+    pub async fn release(&self, id: &str) {
+        let lock = self.transition_lock(id);
+        let _g = lock.lock().await;
+        let Some(l) = self.get_loaded(id) else { return };
+        tracing::info!(db = id, "nosql database moving to another node");
+        l.announce(eng::Event::StatusChange { change: "DOWN", address: l.address() });
+        tokio::task::yield_now().await;
+        l.kick_within(MOVE_SPREAD);
+        let deadline = tokio::time::Instant::now() + MOVE_SPREAD + Duration::from_secs(5);
+        while l.users() > 0 && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        if l.users() > 0 {
+            tracing::warn!(db = id, users = l.users(), "nosql database moving with requests still running");
+        }
+        let storage = l.db.store().clone();
+        if let Err(e) = storage.checkpoint().await {
+            tracing::warn!(db = id, error = %format!("{e:#}"), "shipping the log of a moving nosql database failed");
+        }
+        let mut unloaded = false;
+        for attempt in 0..3 {
+            match self.store.unload(id).await {
+                Ok(_) => {
+                    unloaded = true;
+                    break;
+                }
+                Err(e) => {
+                    tracing::warn!(db = id, attempt, error = %format!("{e:#}"), "flushing a moving nosql database failed");
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                }
+            }
+        }
+        if !unloaded {
+            // Whatever the log holds is replayed by the next owner.
+            self.store.abandon(id).await;
+        }
+        self.dbs.lock().remove(id);
+        self.idle_timeouts.lock().remove(id);
+        l.end_residence();
+        drop(l);
+        nosql_storage::memory::release_to_os();
+        tracing::info!(db = id, "nosql database released");
+    }
+
+    /// Releases the database when its residence ends (while it stays loaded under it).
+    fn watch_residence(&self, l: &Arc<Loaded>, ending: BoxFuture<'static, ()>) {
+        let (node, loaded, id) = (self.me.clone(), Arc::downgrade(l), l.spec.id.clone());
+        tokio::spawn(async move {
+            let mut ending = ending;
+            loop {
+                tokio::select! {
+                    _ = &mut ending => break,
+                    _ = tokio::time::sleep(Duration::from_secs(5)) => {
+                        if loaded.strong_count() == 0 {
+                            return;
+                        }
+                    }
+                }
+            }
+            // A residence can end while its load finishes: wait for the database to be in place.
+            for _ in 0..250 {
+                let (Some(node), Some(l)) = (node.upgrade(), loaded.upgrade()) else { return };
+                if node.get_loaded(&id).is_some_and(|c| Arc::ptr_eq(&c, &l)) {
+                    drop(l);
+                    return node.release(&id).await;
+                }
+                drop((node, l));
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        });
     }
 
     fn transition_lock(&self, id: &str) -> Arc<tokio::sync::Mutex<()>> {
@@ -283,6 +416,13 @@ impl Node {
                 .get_or_try_init(|| async {
                     let lock = self.transition_lock(&spec.id);
                     let _g = lock.lock().await;
+                    let residence = match self.fleet() {
+                        None => None,
+                        Some(f) => match f.locate(&spec.id).await {
+                            Located::Here(r) => Some(r),
+                            Located::Elsewhere(_) | Located::Unavailable => return Err(NotHere.into()),
+                        },
+                    };
                     let started = std::time::Instant::now();
                     let storage = self.store.open(&spec.id, spec.storage_config()).await?;
                     let db = match eng::Database::open(spec.config.clone(), storage).await {
@@ -297,7 +437,12 @@ impl Node {
                     let metrics = self.metrics_of(&spec.id);
                     Metrics::add(&metrics.loads, 1);
                     tracing::info!(db = spec.id, ms = started.elapsed().as_millis() as u64, "nosql database ready");
-                    anyhow::Ok(Loaded::new(spec.clone(), db, metrics))
+                    let loaded = Loaded::new(spec.clone(), db, metrics);
+                    if let Some(r) = residence {
+                        self.watch_residence(&loaded, r.ending());
+                        loaded.set_residence(r);
+                    }
+                    anyhow::Ok(loaded)
                 })
                 .await?
                 .clone();
@@ -355,6 +500,7 @@ impl Node {
         }
         self.dbs.lock().remove(id);
         self.idle_timeouts.lock().remove(id);
+        l.end_residence();
         // The engine's database (schema, caches, the storage tables' indexes) goes with the
         // last reference; then freed memory goes back to the OS.
         drop(l);
@@ -454,7 +600,7 @@ impl Directory for Node {
     fn open<'a>(&'a self, spec: &'a Arc<DbSpec>) -> BoxFuture<'a, Result<Lease, OpenError>> {
         Box::pin(async move {
             for _ in 0..100 {
-                let l = Node::open(self, spec).await.map_err(|e| OpenError::Unavailable(e.to_string()))?;
+                let l = Node::open(self, spec).await.map_err(|e| if e.is::<NotHere>() { OpenError::Closing } else { OpenError::Unavailable(e.to_string()) })?;
                 if let Some(lease) = Lease::acquire(&l) {
                     return Ok(lease);
                 }
@@ -462,6 +608,30 @@ impl Directory for Node {
             }
             Err(OpenError::Closing)
         })
+    }
+
+    fn placement<'a>(&'a self, spec: &'a Arc<DbSpec>) -> BoxFuture<'a, Placement> {
+        Box::pin(async move {
+            match self.fleet() {
+                None => Placement::Here,
+                Some(f) => match f.locate(&spec.id).await {
+                    Located::Here(_) => Placement::Here,
+                    Located::Elsewhere(node) => Placement::Owner(node),
+                    Located::Unavailable => Placement::Moving,
+                },
+            }
+        })
+    }
+
+    fn hands_over(&self) -> bool {
+        self.fleet().is_some()
+    }
+
+    fn hand_over(&self, owner: String, spec: Arc<DbSpec>, io: Box<dyn Io>, accepted: &Accepted, first: Bytes, skip: usize) -> BoxFuture<'static, ()> {
+        match self.fleet() {
+            Some(f) => f.hand_over(owner, spec.id.clone(), io, accepted.peer, accepted.sni.clone(), first, skip),
+            None => Box::pin(async {}),
+        }
     }
 }
 

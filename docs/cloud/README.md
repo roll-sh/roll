@@ -89,7 +89,7 @@ written once in SQLite's dialect), as roll code's did.
 | code | `<repo id>`, `agents:<owner id>` | built (roll-cluster); repo leases keep their bare ids so a running Postgres cluster upgrades in place |
 | postgres | `pg:endpoint:<id>`, `system:pg` | the engine runs in-process; compute moves with the lease |
 | redis | `redis:db:<id>`, `redis:db:<primary>#<replica>` | built: the owner serves RESP and REST; others splice connections to it; a replica is placed as a standby of its primary ("Redis on the fleet") |
-| nosql | `nosql:db:<id>` | replaces the manifest's owner field; fences opens |
+| nosql | `nosql:db:<id>` | the database's owner loads it; opens and manifest writes are fenced by compare-and-swap in S3 |
 | streams | `stream:cluster:<id>` | a tenant's cluster on one owner at first; per partition later |
 | storage | `storage:meta` | built: one metadata log for the deployment, a hot standby following it (docs/storage/architecture.md, "Many nodes"); `storage:account:<id>` (a log per account) is designed there, not built |
 | queues | `mq:<vhost>/<queue>` | mq-cluster's owner records move onto the shared layer |
@@ -450,7 +450,8 @@ pushes take as long as the pack); `handoff-failures` and `lease-takeovers` on an
 | GitHub resilience | done |
 | storage on the cluster layer | built (`storage:meta`, `s3-server/src/cluster.rs`); per-account logs designed |
 | redis on the cluster layer | built ("Redis on the fleet"); not yet run against AWS |
-| tasks, queues, streams, nosql on the cluster layer | in progress, one product per change |
+| nosql on the cluster layer | built: lease `nosql:db:<id>`, catalog on the system database, CQL spliced to the owner (SNI or SASL user), fenced manifests (docs/nosql/architecture.md, "On a fleet") |
+| tasks, queues, streams on the cluster layer | in progress, one product per change |
 | postgres on the fleet and the system database | with the pg-engine branch |
 | isolated work on Fargate | next |
 

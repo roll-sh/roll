@@ -6,4 +6,4 @@ pub mod receiver;
 pub mod repl;
 
 pub use lsn::Lsn;
-pub use objects::{Objects, StorageConfig, Version};
+pub use objects::{ObjectVersion, Objects, StorageConfig};
