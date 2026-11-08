@@ -36,8 +36,8 @@ pub fn open(plan: &Arc<Plan>, ctx: &ExecCtx) -> Result<BoxNode> {
         need = ctx.logical_need.take();
     }
     let mut node = crate::stack::guard(|| open_node(plan, need.as_deref(), ctx))?;
-    if !ctx.worker_parts.borrow().is_empty() && ctx.worker_parts.borrow().contains(&(Arc::as_ptr(plan) as usize)) {
-        node = super::parallel_part::WorkerPart::wrap(node);
+    if let Some(part) = ctx.worker_parts.borrow().iter().find(|p| p.key == Arc::as_ptr(plan) as usize) {
+        node = super::parallel_part::WorkerPart::wrap(node, part.initplans.clone(), part.alone);
     }
     Ok(match &*ctx.instr.borrow() {
         Some(i) => super::InstrNode::wrap(node, Arc::as_ptr(plan) as usize, i.clone()),

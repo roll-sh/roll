@@ -26,6 +26,7 @@ pub(super) fn safe_tree(n: &ExNode) -> bool {
         "Hash" | "Materialize" | "Sort" | "Incremental Sort" | "Memoize" | "Result" | "Limit" => {
             n.subplans.is_empty() && n.children.iter().all(safe_tree)
         }
+        "Aggregate" if n.par_safe => n.subplans.is_empty() && n.children.iter().all(safe_tree),
         "Hash Join" | "Nested Loop" | "Merge Join" | "Append" => {
             n.par_safe && n.subplans.is_empty()
         }

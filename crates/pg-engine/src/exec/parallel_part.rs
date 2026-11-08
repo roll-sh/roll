@@ -4,13 +4,17 @@
 //! lock a PARALLEL SAFE function takes, at transaction or session level) go once it has
 //! returned its last row, as the workers' go when they exit at the Gather's end.
 //!
-//! Only when the workers alone run the part (parallel_leader_participation off, workers
+//! Gather startup evaluates the independent initplan outputs the part reads before any
+//! of its rows run, as ExecInitParallelPlan prepares parameters sent to workers.
+//!
+//! Lock release applies only when the workers alone run the part (parallel_leader_participation off, workers
 //! launched): with the leader taking part, which rows it runs itself is up to timing, and
 //! it running every one (keeping their locks) is one of PostgreSQL's schedules.
 
 use super::{BoxNode, ExecCtx, Node, Row, trigger};
 use crate::error::Result;
 use crate::sql::plan::{Access, Plan};
+use crate::sql::expr::{Expr, SubqueryKind, eval};
 use std::cell::RefCell;
 use std::sync::Arc;
 
@@ -30,9 +34,18 @@ pub fn note_session_advisory(key: &[u8]) {
     });
 }
 
-/// A node running a Gather's part in the "workers".
+/// Work owned by one Gather boundary in this execution.
+pub struct Part {
+    pub key: usize,
+    pub initplans: Arc<[Expr]>,
+    pub alone: bool,
+}
+
+/// A Gather part's startup work and, when exclusive, its worker lock ownership.
 pub struct WorkerPart {
     inner: BoxNode,
+    initplans: Option<Arc<[Expr]>>,
+    alone: bool,
     /// The transaction-level locks it took (the transaction's lock keys).
     taken: Vec<crate::txn::HeldLock>,
     advisory: Vec<Vec<u8>>,
@@ -40,8 +53,17 @@ pub struct WorkerPart {
 }
 
 impl WorkerPart {
-    pub fn wrap(inner: BoxNode) -> BoxNode {
-        Box::new(WorkerPart { inner, taken: Vec::new(), advisory: Vec::new(), done: false })
+    pub fn wrap(inner: BoxNode, initplans: Arc<[Expr]>, alone: bool) -> BoxNode {
+        Box::new(WorkerPart { inner, initplans: Some(initplans), alone, taken: Vec::new(), advisory: Vec::new(), done: false })
+    }
+
+    fn start(&mut self, ctx: &ExecCtx) -> Result<()> {
+        if let Some(initplans) = self.initplans.take() {
+            for e in initplans.iter() {
+                eval(e, &[], ctx)?;
+            }
+        }
+        Ok(())
     }
 
     /// The workers exit: their locks go.
@@ -61,6 +83,10 @@ impl Node for WorkerPart {
     fn next(&mut self, ctx: &ExecCtx) -> Result<Option<Row>> {
         if self.done {
             return Ok(None);
+        }
+        self.start(ctx)?;
+        if !self.alone {
+            return self.inner.next(ctx);
         }
         let mark = ctx.txn.borrow().lock_mark();
         let outer = ADVISORY.with(|a| a.replace(Some(Vec::new())));
@@ -97,6 +123,44 @@ impl Node for WorkerPart {
         self.inner.add_captured(rows)
     }
 
+    fn next_item(&mut self, ctx: &ExecCtx) -> Result<Option<super::pipe::Item>> {
+        if self.alone {
+            return Ok(self.next(ctx)?.map(|r| super::pipe::Item::Row(r, super::pipe::ALL)));
+        }
+        self.start(ctx)?;
+        self.inner.next_item(ctx)
+    }
+
+    fn pipeline(&mut self, above: Vec<Arc<super::pipe::Stage>>, spec: Option<Arc<super::partial::Spec>>, ctx: &ExecCtx) -> Result<Option<u8>> {
+        if self.alone {
+            return Ok(None);
+        }
+        self.start(ctx)?;
+        self.inner.pipeline(above, spec, ctx)
+    }
+
+    fn pipeline_projected(&mut self, spec: Arc<super::partial::Spec>, ctx: &ExecCtx) -> Result<Option<u8>> {
+        if self.alone {
+            return Ok(None);
+        }
+        self.start(ctx)?;
+        self.inner.pipeline_projected(spec, ctx)
+    }
+
+    fn compute_in_workers(&mut self, c: super::Computed, ctx: &ExecCtx) -> Result<Option<usize>> {
+        if self.alone {
+            return Ok(None);
+        }
+        self.start(ctx)?;
+        self.inner.compute_in_workers(c, ctx)
+    }
+
+    fn projection(&self) -> Option<&[Expr]> { self.inner.projection() }
+    fn topk_below(&mut self, t: super::TopK) -> bool { self.inner.topk_below(t) }
+    fn take_skipped(&mut self) -> usize { self.inner.take_skipped() }
+    fn restrict_keys(&mut self, col: usize, keys: &[u32], ctx: &ExecCtx) -> Result<()> { self.inner.restrict_keys(col, keys, ctx) }
+    fn prefetch(&mut self, ctx: &ExecCtx) -> Result<()> { self.start(ctx)?; self.inner.prefetch(ctx) }
+
     fn key_order(&self) -> Option<Vec<(usize, bool, bool)>> {
         self.inner.key_order()
     }
@@ -122,6 +186,7 @@ pub struct Gather {
     pub part: Option<usize>,
     pub workers: usize,
     pub rels: Arc<[u32]>,
+    pub initplans: Arc<[Expr]>,
 }
 
 /// The statement's Gathers (none for a plan no Gather can be part of: `may_gather`'s
@@ -142,7 +207,11 @@ pub fn of_explain(plan: &Arc<Plan>, found: Vec<(Option<usize>, usize)>) -> Vec<G
             if let Some(p) = part.and_then(|k| find(plan, k)) {
                 part_rels(p, &mut rels);
             }
-            Gather { part, workers, rels: rels.into() }
+            let mut initplans = Vec::new();
+            if let Some(p) = part.and_then(|k| find(plan, k)) {
+                part_initplans(p, &mut initplans);
+            }
+            Gather { part, workers, rels: rels.into(), initplans: initplans.into() }
         })
         .collect()
 }
@@ -174,6 +243,30 @@ fn find(p: &Arc<Plan>, key: usize) -> Option<&Arc<Plan>> {
         return Some(p);
     }
     inputs(p).into_iter().find_map(|c| find(c, key))
+}
+
+/// Independent initplan outputs the Gather must send to its workers. Do not evaluate
+/// the row expressions containing them, or descend into another query level's plans.
+fn part_initplans(p: &Plan, out: &mut Vec<Expr>) {
+    let mut exprs = Vec::new();
+    crate::sql::explain::node_exprs(p, &mut exprs);
+    for e in exprs {
+        e.walk(&mut |x| {
+            if let Expr::Subquery(s) = x
+                && s.params.is_empty() && s.func.is_none()
+                && matches!(s.kind, SubqueryKind::Scalar | SubqueryKind::Exists | SubqueryKind::Array)
+                && !super::reads_enclosing(&s.plan, 0)
+                && !out.iter().any(|e| matches!(e, Expr::Subquery(t) if t.id == s.id))
+            {
+                out.push(x.clone());
+            }
+        });
+    }
+    if !matches!(p, Plan::Context { .. } | Plan::Barrier { .. } | Plan::With { .. }) {
+        for c in inputs(p) {
+            part_initplans(c, out);
+        }
+    }
 }
 
 /// The relations (tables, and the indexes they're read through) a part opens.
@@ -216,10 +309,19 @@ pub fn start(
         *counted = gathers.iter().map(|g| g.workers as i64).sum();
     }
     let launched = launch(gathers, ctx);
-    if alone && !plan.writes() {
-        *ctx.worker_parts.borrow_mut() = worker_parts(gathers, launched.as_ref(), ctx);
-    }
+    let exclusive = if alone && !plan.writes() { worker_parts(gathers, launched.as_ref(), ctx) } else { Vec::new() };
+    prepare(gathers, &exclusive, ctx);
     launched
+}
+
+/// Attach each concrete Gather boundary's startup work to this execution. EXPLAIN
+/// ANALYZE uses it too, without changing its separate worker instrumentation.
+pub fn prepare(gathers: &[Gather], exclusive: &[usize], ctx: &ExecCtx) {
+    *ctx.worker_parts.borrow_mut() = gathers.iter().filter(|g| g.workers > 0).filter_map(|g| {
+        let key = g.part?;
+        let alone = exclusive.contains(&key);
+        (alone || !g.initplans.is_empty()).then(|| Part { key, initplans: g.initplans.clone(), alone })
+    }).collect();
 }
 
 /// The workers a statement's Gathers launch as other backends see them (pg_stat_activity's
