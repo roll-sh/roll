@@ -2396,46 +2396,71 @@ impl Merge {
         Ok(Some(i))
     }
 
-    /// After a run of rows from `cur` up to `bound` ending with user key `last`: when the
-    /// source at `bound` holds older versions of `last` (a row updated since that source was
-    /// written: its version before), they are passed, and `bound` is the other sources'
-    /// smallest head again, so the run goes on without a merge per row. False: none passed.
-    fn pass_older(&mut self, last: &[u8]) -> Result<bool> {
-        let Some(i) = self.cur.filter(|_| self.bounded) else { return Ok(false) };
+    /// After a run of `cur`'s rows up to `bound`: the rows of `cur` and of the source at
+    /// `bound` (`second`) merged here while both lie below every other source's head (an
+    /// updated table: its newer source's rows and the older source's, interleaved), a run of
+    /// one at a time (`Cursor::run_into`) below the other's head, older versions of the row
+    /// pushed last passed: a key comparison or two a row instead of a merge over every
+    /// source. Stops at anything else (a deletion, a version past `ts`, a value to put back,
+    /// another source's head), which `Scan::position` takes. How many rows it pushed, and the
+    /// last one's version.
+    fn two_way(&mut self, ts: u64, resolve: bool, batch: &mut batch::RowBatch, max: usize) -> Result<(usize, u64)> {
+        let (Some(i), true) = (self.cur, self.bounded) else { return Ok((0, 0)) };
         let j = self.second;
-        let mut passed = false;
-        loop {
-            let c = &mut self.sources[j];
-            c.fill()?;
-            match c.head() {
-                Some((k, _)) if k.len() >= 8 && user_key(k) == last => {
-                    c.advance();
-                    passed = true;
-                }
-                _ => break,
+        // (The other sources' smallest head: none of them moves here.)
+        let third = (0..self.sources.len())
+            .filter(|&t| t != i && t != j)
+            .filter_map(|t| self.sources[t].head().map(|(k, _)| (t, k)))
+            .min_by(|a, b| a.1.cmp(b.1))
+            .map(|(t, _)| t);
+        self.cur = None;
+        let (mut n, mut last) = (0, 0);
+        while n < max {
+            self.sources[i].fill()?;
+            self.sources[j].fill()?;
+            let (s, o) = match (self.sources[i].head(), self.sources[j].head()) {
+                (Some(a), Some(b)) if a.0 < b.0 => (i, Some(j)),
+                (Some(_), Some(_)) => (j, Some(i)),
+                (Some(_), None) => (i, None),
+                (None, Some(_)) => (j, None),
+                (None, None) => break,
+            };
+            let (k, v) = self.sources[s].head().expect("a head entry");
+            let t = third.and_then(|t| self.sources[t].head()).map(|(h, _)| h);
+            if t.is_some_and(|t| k >= t) || k.len() < 8 {
+                break;
             }
-        }
-        if !passed {
-            return Ok(false);
-        }
-        let mut second: Option<(usize, &[u8])> = None;
-        for (n, c) in self.sources.iter().enumerate() {
-            if n == i {
+            if batch.last_key() == Some(user_key(k)) {
+                // (An older version of the row pushed last.)
+                self.sources[s].advance();
                 continue;
             }
-            if let Some((k, _)) = c.head()
-                && second.is_none_or(|(_, s)| k < s)
-            {
-                second = Some((n, k));
+            let Some(v) = v else { break };
+            if key_ts(k) > ts || resolve && toast::has_external(v) {
+                break;
             }
+            // (Its rows below the other's head and the third's: a run.)
+            self.bound.clear();
+            match (o.and_then(|o| self.sources[o].head()).map(|(h, _)| h), t) {
+                (Some(h), Some(t)) => self.bound.extend_from_slice(h.min(t)),
+                (Some(h), None) | (None, Some(h)) => self.bound.extend_from_slice(h),
+                (None, None) => {}
+            }
+            let bound = (!self.bound.is_empty()).then_some(self.bound.as_slice());
+            let (m, l) = self.sources[s].run_into(ts, bound, resolve, batch, max - n);
+            if m > 0 {
+                (n, last) = (n + m, l);
+                continue;
+            }
+            // (A memtable's row, or one `run_into` leaves: pushed alone.)
+            let c = &self.sources[s];
+            let (k, _) = c.head().expect("a head entry");
+            last = key_ts(k);
+            c.push_head(k.len() - 8, batch);
+            self.sources[s].advance();
+            n += 1;
         }
-        self.bound.clear();
-        if let Some((n, s)) = second {
-            self.bound.extend_from_slice(s);
-            self.second = n;
-        }
-        self.bounded = second.is_some();
-        Ok(true)
+        Ok((n, last))
     }
 
     /// Every source on to its first entry >= `target`.
@@ -2798,21 +2823,21 @@ impl Scan {
             if !self.rdels.is_empty() {
                 continue;
             }
-            loop {
-                let bound = self.merge.bounded.then_some(self.merge.bound.as_slice());
-                let c = &mut self.merge.sources[i];
-                let (n, last) = c.run_into(self.ts, bound, self.resolve, batch, target - batch.len());
-                if n > 0 {
-                    let d = self.decided.get_or_insert_with(Vec::new);
-                    d.clear();
-                    d.extend_from_slice(batch.last_key().expect("a row"));
-                    self.decided_ts = last;
+            let bound = self.merge.bounded.then_some(self.merge.bound.as_slice());
+            let c = &mut self.merge.sources[i];
+            let (mut n, mut last) = c.run_into(self.ts, bound, self.resolve, batch, target - batch.len());
+            // (Then this source's rows and the next one's, interleaved, a pair at a time.)
+            if batch.len() < target {
+                let (m, l) = self.merge.two_way(self.ts, self.resolve, batch, target - batch.len())?;
+                if m > 0 {
+                    (n, last) = (n + m, l);
                 }
-                // (The next source's older versions of the row pushed last passed: the run
-                // goes on.)
-                if batch.len() >= target || !self.merge.pass_older(batch.last_key().expect("a row"))? {
-                    break;
-                }
+            }
+            if n > 0 {
+                let d = self.decided.get_or_insert_with(Vec::new);
+                d.clear();
+                d.extend_from_slice(batch.last_key().expect("a row"));
+                self.decided_ts = last;
             }
         }
         Ok(())

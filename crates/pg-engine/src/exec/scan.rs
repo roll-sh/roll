@@ -613,6 +613,7 @@ pub fn open_scan(s: &ScanPlan, shared: Option<&Arc<crate::sql::plan::Plan>>, nee
             fscan: None,
             fetch_calls: 0,
             dscan: None,
+            dbatch: Default::default(),
             run: Default::default(),
             one_run: false,
             blocks: Default::default(),
@@ -710,6 +711,7 @@ pub fn open_scan(s: &ScanPlan, shared: Option<&Arc<crate::sql::plan::Plan>>, nee
             fscan: None,
             fetch_calls: 0,
             dscan: None,
+            dbatch: Default::default(),
             run: Default::default(),
             one_run: false,
             blocks: Default::default(),
@@ -797,6 +799,7 @@ pub fn open_scan(s: &ScanPlan, shared: Option<&Arc<crate::sql::plan::Plan>>, nee
             fscan: None,
             fetch_calls: 0,
             dscan: None,
+            dbatch: Default::default(),
             run: Default::default(),
             one_run: false,
             blocks: Default::default(),
@@ -951,6 +954,7 @@ fn open_scan_as(
         fscan: None,
         fetch_calls: 0,
         dscan: None,
+        dbatch: Default::default(),
         run: Default::default(),
         blocks: Default::default(),
         prune_next: 0,
@@ -1841,6 +1845,7 @@ fn dense_bitmap_scan(
         fscan: None,
         fetch_calls: 0,
         dscan: None,
+        dbatch: Default::default(),
         run: Default::default(),
         one_run: false,
         blocks: Default::default(),
@@ -2323,6 +2328,8 @@ struct ScanNode {
     fetch_calls: u32,
     /// Dense fetches' raw scan of the table's rows, kept from batch to batch (`fetch_dense`).
     dscan: Option<Box<TxnScan>>,
+    /// The batch dense fetches read into (`fetch_dense`), kept too.
+    dbatch: crate::storage::batch::RowBatch,
     /// Such a scan read by worker threads (`parscan`), once decided (`par_tried`).
     par: Option<super::parscan::ParScan>,
     par_tried: bool,
@@ -2554,7 +2561,7 @@ const PAR_MIN_ENTRIES: usize = 256;
 /// them, read together (`Txn::get_many_snap`). Without a statement snapshot, one at a time
 /// through the transaction's writes as they are now.
 pub(super) fn fetch_rows<K: AsRef<[u8]>>(keys: &[K], ctx: &ExecCtx) -> Result<Vec<Option<bytes::Bytes>>> {
-    if let Some(rows) = fetch_dense(keys, false, None, ctx)? {
+    if let Some(rows) = fetch_dense(keys, false, None, None, ctx)? {
         return Ok(rows);
     }
     let txn = ctx.txn.borrow();
@@ -2591,8 +2598,14 @@ fn get_sorted<K: AsRef<[u8]>>(txn: &crate::txn::Txn, keys: &[K], s: &crate::txn:
 /// to the keys, instead of a lookup each. None: not such keys. `raw`: read as stored, a batch
 /// at a time; None also when a row has values stored out of line (`fetch_rows` puts them
 /// back). `kept`: a raw read's scan, kept from call to call (`ScanNode::dscan`) and sought on
-/// to each call's range.
-fn fetch_dense<K: AsRef<[u8]>>(keys: &[K], raw: bool, kept: Option<&mut Option<Box<TxnScan>>>, ctx: &ExecCtx) -> Result<Option<Vec<Option<bytes::Bytes>>>> {
+/// to each call's range; `scratch`: the batch it reads into, kept too.
+fn fetch_dense<K: AsRef<[u8]>>(
+    keys: &[K],
+    raw: bool,
+    kept: Option<&mut Option<Box<TxnScan>>>,
+    scratch: Option<&mut crate::storage::batch::RowBatch>,
+    ctx: &ExecCtx,
+) -> Result<Option<Vec<Option<bytes::Bytes>>>> {
     let id = |k: &[u8]| -> Option<i64> {
         let mut pos = 8;
         match crate::storage::keys::decode_index_value(k, &mut pos, &crate::types::DataType::Int8, false)? {
@@ -2630,11 +2643,12 @@ fn fetch_dense<K: AsRef<[u8]>>(keys: &[K], raw: bool, kept: Option<&mut Option<B
                 None => txn.scan(first, &end),
             }.raw()),
         };
-        let mut b = crate::storage::batch::RowBatch::default();
+        let mut own = crate::storage::batch::RowBatch::default();
+        let b = scratch.unwrap_or(&mut own);
         let mut external = false;
         'fill: while want.peek().is_some() {
             b.clear();
-            it.fill_batch(&mut b, keys.len() - out.len())?;
+            it.fill_batch(b, keys.len() - out.len())?;
             if b.is_empty() {
                 break;
             }
@@ -3066,56 +3080,55 @@ impl ScanNode {
             }
             return Ok(r);
         }
-        if !self.secondary {
-            self.heap_mode(ctx);
-            if self.streamed {
-                return self.next_stored(ctx);
-            }
-            // Rows stored in heap order already (a table only inserted into, in key order)
-            // are read as they're asked for, each page pruned as the scan reaches it. A row
-            // without its TID puts the rest in heap order as below: the rows read before it
-            // come before all of them there too.
-            let mut first = None;
-            if self.in_order == Some(true) {
-                match self.next_stored(ctx)? {
-                    Some(r) => match stored_tid(&r.1) {
-                        Some((b, _)) => {
-                            debug_assert!(b + 1 >= self.prune_next, "rows out of heap order");
-                            self.prune_to(Some(b + 1), ctx);
-                            return Ok(Some(r));
-                        }
-                        None => {
-                            self.in_order = Some(false);
-                            first = Some(r);
-                        }
-                    },
-                    None => {
-                        self.prune_to(self.nblocks, ctx);
-                        return Ok(None);
-                    }
-                }
-            }
-            if self.sorted.is_none() {
-                let mut rows: Vec<_> = first.into_iter().collect();
-                while let Some(r) = self.next_stored(ctx)? {
-                    ctx.check()?;
-                    rows.push(r);
-                }
-                if let Some(b) = heap_order(&self.plan.table, &mut rows, false, ctx) {
-                    self.blocks = b.into();
-                }
-                self.sorted = Some(rows.into_iter());
-            }
-            let r = self.sorted.as_mut().unwrap().next();
-            // Pages are pruned as the scan reaches them (heapgetpage).
-            match (&r, self.blocks.pop_front()) {
-                (Some(_), Some(Some(b))) => self.prune_to(Some(b + 1), ctx),
-                (None, _) => self.prune_to(self.nblocks, ctx),
-                _ => {}
-            }
-            return Ok(r);
+        // (A secondary index scan's rows come from `next_index_ref`.)
+        debug_assert!(!self.secondary);
+        self.heap_mode(ctx);
+        if self.streamed {
+            return self.next_stored(ctx);
         }
-        unreachable!("a secondary index scan's rows come from `next_index_ref`")
+        // Rows stored in heap order already (a table only inserted into, in key order)
+        // are read as they're asked for, each page pruned as the scan reaches it. A row
+        // without its TID puts the rest in heap order as below: the rows read before it
+        // come before all of them there too.
+        let mut first = None;
+        if self.in_order == Some(true) {
+            match self.next_stored(ctx)? {
+                Some(r) => match stored_tid(&r.1) {
+                    Some((b, _)) => {
+                        debug_assert!(b + 1 >= self.prune_next, "rows out of heap order");
+                        self.prune_to(Some(b + 1), ctx);
+                        return Ok(Some(r));
+                    }
+                    None => {
+                        self.in_order = Some(false);
+                        first = Some(r);
+                    }
+                },
+                None => {
+                    self.prune_to(self.nblocks, ctx);
+                    return Ok(None);
+                }
+            }
+        }
+        if self.sorted.is_none() {
+            let mut rows: Vec<_> = first.into_iter().collect();
+            while let Some(r) = self.next_stored(ctx)? {
+                ctx.check()?;
+                rows.push(r);
+            }
+            if let Some(b) = heap_order(&self.plan.table, &mut rows, false, ctx) {
+                self.blocks = b.into();
+            }
+            self.sorted = Some(rows.into_iter());
+        }
+        let r = self.sorted.as_mut().unwrap().next();
+        // Pages are pruned as the scan reaches them (heapgetpage).
+        match (&r, self.blocks.pop_front()) {
+            (Some(_), Some(Some(b))) => self.prune_to(Some(b + 1), ctx),
+            (None, _) => self.prune_to(self.nblocks, ctx),
+            _ => {}
+        }
+        Ok(r)
     }
 
     /// A sequential scan has read the pages before `to` (None: all of them).
@@ -3309,20 +3322,7 @@ impl ScanNode {
     /// Some(false): the range holds no visible entry). None: not such a range (or the
     /// reader couldn't tell), read by a scan as any other.
     fn point_entry(&mut self, ctx: &ExecCtx) -> Result<Option<bool>> {
-        if self.point.is_none() {
-            let p = &self.plan;
-            let ok = p.index.as_ref().is_some_and(|(ix, b)| {
-                ix.method == "btree"
-                    && ix.unique
-                    && b.eq.len() == ix.columns.len()
-                    && b.any.is_none()
-                    && b.skip.is_none()
-                    && b.order.is_empty()
-                    && !deferrable_index(&p.table, ix.oid)
-            });
-            self.point = Some(ok && !self.rev && !self.one_run && self.skip.is_none());
-        }
-        if self.point != Some(true) || self.cur_range >= self.ranges.len() {
+        if !self.point_ranges() || self.cur_range >= self.ranges.len() {
             return Ok(None);
         }
         // (A table that has stored values out of line has its rows read as stored, its scan
@@ -3357,6 +3357,25 @@ impl ScanNode {
         self.erb.push(&ekey, dkey);
         self.erows.push(row);
         Ok(Some(true))
+    }
+
+    /// Whether each of the scan's ranges is a unique index's equality on every key column, so
+    /// holds one visible entry at most (decided once: `point`).
+    fn point_ranges(&mut self) -> bool {
+        if self.point.is_none() {
+            let p = &self.plan;
+            let ok = p.index.as_ref().is_some_and(|(ix, b)| {
+                ix.method == "btree"
+                    && ix.unique
+                    && b.eq.len() == ix.columns.len()
+                    && b.any.is_none()
+                    && b.skip.is_none()
+                    && b.order.is_empty()
+                    && !deferrable_index(&p.table, ix.oid)
+            });
+            self.point = Some(ok && !self.rev && !self.one_run && self.skip.is_none());
+        }
+        self.point == Some(true)
     }
 
     /// Next (data key, stored row bytes) in storage order.
@@ -3729,7 +3748,7 @@ impl ScanNode {
             // (Keys close together: one range read a batch at a time, the rows as stored when
             // none has values out of line.)
             if ctx.snapshot().is_some()
-                && let Some(rows) = fetch_dense(keys, true, Some(&mut self.dscan), ctx)?
+                && let Some(rows) = fetch_dense(keys, true, Some(&mut self.dscan), Some(&mut self.dbatch), ctx)?
             {
                 return Ok(rows);
             }
@@ -4507,6 +4526,10 @@ impl ScanNode {
         if workers == 0 || !ctx.outer.borrow().is_empty() || super::sizing::heap_modelled_or_kept(&p.table, ctx) {
             return Ok(None);
         }
+        // (A unique index's equality: one row at most.)
+        if self.point_ranges() {
+            return Ok(None);
+        }
         let fetch = match &self.ios_cols {
             Some(_) => None,
             None => match ctx.txn.borrow().store_reader(&snap) {
@@ -4554,7 +4577,7 @@ impl ScanNode {
         };
         let scans = bounds
             .windows(2)
-            .map(|w| super::parscan::chunk(IndexChunk::new(txn.scan_snap(&w[0], &w[1], &snap), fetch.clone()), bulk).into())
+            .map(|w| super::parscan::fill_source(IndexChunk::new(txn.scan_snap(&w[0], &w[1], &snap), fetch.clone()), bulk))
             .collect();
         drop(txn);
         let d = Decode {
@@ -4627,7 +4650,7 @@ impl ScanNode {
         let per = keys.len().div_ceil(ParScan::chunks(workers)).max(1);
         let scans = (0..keys.len())
             .step_by(per)
-            .map(|i| super::parscan::Source::Rows(Box::new(IndexChunk::keyed(keys.clone(), i..(i + per).min(keys.len()), fetch.clone()))))
+            .map(|i| super::parscan::Source::Fill(Box::new(IndexChunk::keyed(keys.clone(), i..(i + per).min(keys.len()), fetch.clone()))))
             .collect();
         let d = Decode {
             need: self.need.as_deref().map(Arc::from),
@@ -5820,6 +5843,7 @@ fn keyed_scan(s: &ScanPlan, plan: ScanPlan, ix: &Index, keys: Keys, ctx: &ExecCt
         fscan: None,
         fetch_calls: 0,
         dscan: None,
+        dbatch: Default::default(),
         run: Default::default(),
         one_run: false,
         blocks: Default::default(),
