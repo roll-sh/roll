@@ -1585,6 +1585,20 @@ mod tests {
                     b.seek(&probe, &mut pos);
                     assert_eq!(pos.index(), want, "{restart} {probe:?}");
                     assert_eq!(e.seek(&probe), want);
+                    // (`seek_on` from places before, at and after it finds the same entry.)
+                    for j in [0, want.saturating_sub(5), want.saturating_sub(1), want, want + 1, want + 17] {
+                        if j >= ents.len() {
+                            continue;
+                        }
+                        let mut from = BlockPos::default();
+                        b.at(j, &mut from);
+                        b.seek_on(&probe, &mut from);
+                        assert_eq!(from.index(), want, "seek_on from {j}: {restart} {probe:?}");
+                        if want < ents.len() {
+                            assert_eq!(from.key(), ents[want].0.as_slice());
+                            assert_eq!(b.value_ref(&from), ents[want].1.as_deref());
+                        }
+                    }
                     if want < ents.len() {
                         assert_eq!(pos.key(), ents[want].0.as_slice());
                         assert_eq!(b.value_ref(&pos), ents[want].1.as_deref());
@@ -1602,6 +1616,32 @@ mod tests {
             b.seek(&[0xFF], &mut pos);
             assert_eq!(pos.index(), b.len());
         }
+    }
+
+    /// A run whose blocks a thread compresses (`create_run`) is the file its writer would have
+    /// written compressing them itself.
+    #[test]
+    fn piped_runs_are_written_as_compressed_in_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let write = |mut w: SstWriter| {
+            for i in 0..20_000u32 {
+                let mut k = vec![0, 0, 0x40, 0x41, 0, 0, 0, 0];
+                k.extend_from_slice(&i.to_be_bytes());
+                k.extend_from_slice(&(!9u64).to_be_bytes());
+                let v = format!("{}{}", "value ".repeat((i % 9) as usize), i * 7919);
+                w.add(&k, (i % 13 != 0).then_some(v.as_bytes())).unwrap();
+            }
+            w.finish().unwrap()
+        };
+        let piped = SstWriter::create_run(dir.path(), 1, true).unwrap();
+        assert!(piped.pipe.is_some());
+        let mut inline = SstWriter::create(dir.path(), 2, true).unwrap();
+        inline.sync = false;
+        let (a, b) = (write(piped), write(inline));
+        assert!(a.size > 64 * BLOCK_TARGET as u64 / 8, "blocks to pipe: {}", a.size);
+        assert_eq!((a.size, a.entries, &a.first_key, &a.last_key), (b.size, b.entries, &b.first_key, &b.last_key));
+        let bytes = |id| std::fs::read(sst_path(dir.path(), id)).unwrap();
+        assert!(bytes(1) == bytes(2), "the same file");
     }
 
     /// A linked run's block decoded in one pass reads as the relinked block does.

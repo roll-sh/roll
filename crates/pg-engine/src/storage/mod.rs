@@ -3830,6 +3830,43 @@ mod tests {
         );
     }
 
+    /// Rows updated after their source was written have their versions in two sources (and
+    /// deleted ones a tombstone): batched scans read each once, at every snapshot, the
+    /// newer source's rows and the older's interleaved, in memtables and files.
+    #[test]
+    fn updated_rows_read_once_across_sources() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = Store::open(dir.path(), StoreOptions { background: false, ..opts() }).unwrap();
+        let mut model = Model::new();
+        let write = |s: &Arc<Store>, model: &mut Model, i: u32, v: Option<String>| {
+            let k = format!("row{i:05}");
+            let ts = put(s, &k, v.as_deref());
+            model.entry(k.into_bytes()).or_default().push((ts, v.map(Bytes::from)));
+            ts
+        };
+        for i in 0..400 {
+            write(&s, &mut model, i, Some(format!("v0-{i}")));
+        }
+        s.rotate().unwrap();
+        s.flush_all().unwrap();
+        let t0 = s.visible_ts();
+        // Every other row updated (one in seven deleted), into a second file, then every third
+        // in the memtable.
+        for i in (0..400).step_by(2) {
+            write(&s, &mut model, i, (i % 7 != 0).then(|| format!("v1-{i}")));
+        }
+        s.rotate().unwrap();
+        s.flush_all().unwrap();
+        let t1 = s.visible_ts();
+        for i in (0..400).step_by(3) {
+            write(&s, &mut model, i, Some(format!("v2-{i}")));
+        }
+        let t2 = s.visible_ts();
+        for (ts, what) in [(t0, "first file"), (t1, "two files"), (t2, "files and memtable")] {
+            check_at(&s, &model, ts, what);
+        }
+    }
+
     /// Every version written: key -> [(ts, value)].
     type Model = BTreeMap<Vec<u8>, Vec<(u64, Option<Bytes>)>>;
 
@@ -3853,6 +3890,21 @@ mod tests {
         let mut rev: Vec<_> = s.scan_rev(b"", b"", ts).map(|r| r.unwrap()).collect();
         rev.reverse();
         assert_eq!(rev, expect, "{what}: reverse scan at {ts}");
+        // Batched (`fill_batch`: runs of a source's block, older versions in the next source
+        // passed in the run).
+        for max in [1, 3, 64] {
+            let mut sc = s.scan(b"", b"", ts);
+            let (mut b, mut got) = (batch::RowBatch::default(), Vec::new());
+            loop {
+                b.clear();
+                sc.fill_batch(&mut b, max).unwrap();
+                if b.is_empty() {
+                    break;
+                }
+                got.extend((0..b.len()).map(|i| (b.get(i).0.to_vec(), b.value_bytes(i))));
+            }
+            assert_eq!(got, expect, "{what}: batches of {max} at {ts}");
+        }
         let keys: Vec<&[u8]> = model.keys().map(|k| k.as_slice()).collect();
         let got = s.get_versions(&keys, ts).unwrap();
         for (k, g) in keys.iter().zip(got) {
