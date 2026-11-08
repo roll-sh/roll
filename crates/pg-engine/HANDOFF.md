@@ -4713,7 +4713,8 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
   - *Memory back to the system*: `roll-engine` runs mimalloc's collection once a second on a
     thread of its own (`roll-trim`): memory freed by busy threads or by threads that ended
     went back only when a thread ran the collection, so a quiet process kept its peak.
-  - *Operator settings* (engine options, not PostgreSQL settings): `--cache-mb` (block cache,
+  - *Operator settings* (engine options, not PostgreSQL settings; since agent 180 the defaults
+    are `--mode`'s, "Modes" below, efficient's here): `--cache-mb` (block cache,
     64), `--plan-cache-mb` (parse trees, statement templates and PL/pgSQL compiles, 36, split
     6 : 2 : 1 since round 24's agent 145: `lru::set_plan_cache_bytes`; the templates were a
     fixed 16 MB outside it; `memory_load`'s `statement_templates_hold_what_they_count`
@@ -9085,6 +9086,66 @@ finished, the scan side's storage cost). BENCH.md "Storage engine, round 1" has 
     in `Scan::position` (an updated row's two versions sit in two sources, so the merge goes a
     row at a time). Agent 178's: `scan_row_rest`'s key `Arc` per UPDATE row, `Hot::scan`'s
     collected rows, two copies per index entry in `next_indexed`.
+
+## Modes: efficient and performance (agent 180, 2026-11-07)
+
+`roll-engine --mode efficient|performance` picks which way the server leans where footprint
+and speed pull apart. BENCH.md "Modes" has the measurements behind every value.
+
+- **Efficient** (the default, exactly the behaviour before the switch): a 64 MB block cache and
+  36 MB of plan caches, a connection idle for 2 s gives its thread's free memory back
+  (`server::set_idle_hook`), a database closes 60 s after its last session. For test and
+  development environments and many-branch serverless use, where most servers and sessions
+  sit idle.
+- **Performance** (production): the shared caches take a quarter of the memory the server may
+  use (its cgroup's `memory.max`, the tightest of its own and its ancestors', else MemTotal:
+  `mode::server_memory`), 3 : 1 between blocks and plans as `--memory-budget-mb` splits them,
+  never below efficient mode's, the plan caches at most 1 GB (an 8 GB container: 1.5 GB of
+  blocks, 512 MB of plans); idle sessions keep their memory (no trim, no wake-ups while idle);
+  databases stay open (no `roll-idle` thread); a connection waiting for its client polls its
+  socket for up to 50 µs before it sleeps, if its client's last message came within that
+  (`IdleRead::spin`) and while the connections at work and polling fit in a quarter of the
+  cores the process may run on (on 4 cores: only while no other connection works;
+  `server::set_wait_spin`). An idle server spins never: at most 50 µs after a client's last
+  message, then the thread sleeps in its read.
+- **Where the knobs live.** `src/mode.rs`: `Mode` and `Profile::new(mode, memory)`, the only
+  place a knob's per-mode value is decided. `roll-engine`'s `profile()` picks the mode
+  (`--mode`, else `-c roll.engine_mode=...`, else `roll.engine_mode` in postgresql.auto.conf,
+  i.e. `ALTER SYSTEM SET roll.engine_mode = 'performance'` and a restart, else efficient; a
+  `--mode` and a `-c` that disagree refuse to start), then the explicit flags replace single
+  parts: `--memory-budget-mb`, `--cache-mb`, `--plan-cache-mb`, `--idle-close-secs`. Read at
+  start only. `roll.engine_mode` is a custom (placeholder) parameter: from postgresql.auto.conf
+  `SHOW roll.engine_mode` reads it (as PostgreSQL would); a `SET` of it changes nothing but its
+  own value. From `-c` it picks the mode but SHOW doesn't see it: the engine drops every custom
+  `-c x.y=...` it has no definition for (`Settings::set_command_line`), where PostgreSQL makes a
+  placeholder (an open difference, not the modes'). `--mode` isn't visible to SQL. A new knob
+  goes into `Profile` with both values, never as an `if performance` at its use.
+- **The same in both modes**: query results, errors, notices, plans, catalog contents,
+  everything SQL sees apart from `roll.engine_mode` itself; durability (fsync on commit, crash
+  safety: performance mode is not `--no-sync`); transparent huge pages stay off.
+- **Measured and left out** (BENCH.md "Modes"): transparent huge pages (no workload faster in
+  either direction beyond the noise, 17-20 MB more memory, TPC-H and analytic a little slower);
+  memtables of 32 / 64 MB instead of 8 (bulk loads 5-15% slower, reads unchanged); never
+  purging mimalloc's free pages (`MIMALLOC_PURGE_DELAY=-1`: no faster, 80 MB more); a spin
+  capped at half the cores without counting the working threads (32 clients -15%), or allowed
+  while working and polling threads fit in all the cores (8 clients -8%) or in half (8
+  clients' range reads -9%) or in a quarter for every client (range reads -7%: the
+  per-connection rule took it to -4%, within the noise). Not mode
+  knobs: the per-row executor and storage costs behind range reads, TPC-H, bulk loads (the
+  executor, planner, OLTP, storage, bulk-write and index owners' areas); more parallel workers
+  per Gather on bigger machines (the executor's `parallel_workers`, unmeasurable on the
+  scoreboard's 4 cores).
+- **Efficient mode, free improvements kept in both modes**: idle connections park after their
+  trim (d7e454cc5, from `perf/pg-engine-idle-park-20261105`): before, an idle session woke
+  every 2 s for nothing.
+- **Scoreboard**: `tools/bench/scoreboard.sh` runs both modes (`engine` efficient with
+  `--cache-mb 2048` as always, `engperf` performance sizing itself from `SERVER_MEM`, 8g, the
+  memory limit every server container gets), PostgreSQL tuned (`run.sh pg-start`'s
+  `shared_buffers=2GB`: a quarter of 8 GB, the same rule) and with its stock settings
+  (`pgdef`, `SB_PG_DEFAULT=` leaves it out), and pgrust; a table per mode. The gate's
+  baselines and status are efficient mode's; performance mode's gate values are shown.
+  `run.sh engperf-start` / `pgdef-start` start them by hand; `CACHE_MB=` (set empty) starts the
+  engine without `--cache-mb`.
 
 ## Starting prompt for the next agent
 

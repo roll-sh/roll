@@ -120,6 +120,12 @@ How it is measured (`tools/bench/scoreboard.sh`, `scoreboard.py`):
   dist binary bind-mounted (`run.sh`'s `ENGINE_DOCKER=1`; empty runs it on the host). PostgreSQL is the pinned image with
   `tools/bench/run.sh pg-start`'s settings; the engine is `roll-engine --cache-mb 2048` built
   with `--profile dist` (fat LTO, what users run: "Build profile: dist" below).
+- Since agent 180 ("Modes" below) a run has up to five servers: the engine in efficient mode
+  (`engine`, `--cache-mb 2048` as always) and in performance mode (`engperf`, `--mode
+  performance`, its caches sized from its container's memory), PostgreSQL tuned (`pg`, the
+  settings above: `shared_buffers=2GB` is a quarter of the 8 GB every server container gets,
+  `SERVER_MEM`) and with its stock settings (`pgdef`, `SB_PG_DEFAULT=` leaves it out), and
+  pgrust; a table per engine mode against the others. `SB_PERF=` leaves performance mode out.
 - Every workload of `tools/bench` (pgbench select-only and TPC-B-like, the OLTP cases, the
   analytic set, TPC-H, bulk loads, DDL, connection churn) runs on PostgreSQL and on the engine
   in turn, in interleaved rounds (each round swaps which goes first); a cell is the median of
@@ -161,6 +167,95 @@ SB_DATA=~/.cache/<you>/scoreboard SERVER_CPUS=20-23 CLIENT_CPUS=8-11 PG_PORT=<po
 Pick cores no other benchmark pins at the time (`docker inspect` the running containers'
 cpusets), ports in your range, and a container name of your own. A run's raw lines are in
 `$SB_DATA/score-<mode>.tsv`, every client's output in `$SB_DATA/logs/`.
+
+## Modes (2026-11-08, agent 180)
+
+`roll-engine --mode efficient|performance` (HANDOFF "Modes"): efficient, the default, is the
+engine as it was; performance takes memory and a little CPU for speed. Results, errors, plans,
+everything SQL sees (but `roll.engine_mode` itself) and durability (fsync on commit) are the same
+in both.
+
+**How it was measured.** Dist builds in containers as the scoreboard runs them (`run.sh`'s
+`ENGINE_DOCKER=1`: pinned `debian:trixie-slim`, cores 0-3, `--cpu-shares 2`, host network), the
+clients on cores 32-35; each variant a server of its own, all up at once, 10 s phases in
+interleaved rounds (each round rotates the order), a cell the median of the rounds' own ratios
+(the per-round ratios in brackets). CPU per operation and memory (anon + shmem) from each
+container's cgroup. The machine ran other agents' builds at load 20-40, so a single round
+moves by up to ±15%; a knob counts only when its rounds agree. pgbench `-M prepared`, scale 1
+unless said; `oltp` cases on 100k rows, 8 clients.
+
+**Each knob** (performance against efficient unless said):
+
+| knob | efficient | performance | measured | kept |
+|---|---|---|---|---|
+| shared caches | 64 MB blocks, 36 MB plans | a quarter of the memory the server may use (cgroup limit, else the machine's), 3 : 1, plans at most 1 GB: in 8 GB, 1.5 GB + 512 MB | pgbench scale 10 select-only 1 client **2.21x** [2.21, 2.26, 1.81], CPU per transaction 119 -> 75 µs; 8 clients **1.29x** [1.19, 1.50, 1.29], 79 -> 62 µs; TPC-H SF 0.05 **1.24x** [1.25, 1.24, 1.23], CPU 5.30 -> 4.26 s; analytic 200k 1.02x (noise); memory 275 -> 433 MB | yes |
+| wait spin | none | a waiting connection polls its socket up to 50 µs, when its client's last message came within that and while working + polling connections fit in a quarter of the cores | select-only 1 client **1.38x** [1.36, 1.38, 1.37], latency 0.082 -> 0.060 ms, CPU per transaction 52 -> 58 µs; TPC-B-like 1 client **1.22x** [1.21, 1.22, 1.28], CPU 372 -> 430 µs (the polls between its statements); 8 clients: select-only 1.02x, point reads 1.05x, range reads 0.96x [1.02, 0.94, 0.96] with 5% more CPU per read; 32 clients 1.02x (the half-cores rule's run) | yes |
+| databases closed when idle | 60 s after the last session | never | the first statement on a database closed for idleness: +5.0 to +15.7 ms over the connection (6 tries, `--idle-close-secs 3` standing in for 60), on an open one +0.6 to +1.1 ms | yes |
+| idle trim | a connection idle 2 s gives its thread's free memory back | sessions keep it | CPU per statement after a 3 s pause (32 clients, 3 rounds): 341-478 µs with the trim, 290-301 without (after a 0.5 s pause, no trim either way: 202-253); latency within the noise; 100 idle sessions 31.9 -> 34.7 MB | yes |
+| transparent huge pages | off | (tried on) | select-only, TPC-B-like, point and range reads: no direction beyond the noise; analytic 0.98x, TPC-H 0.98x; +17-20 MB | no |
+| memtable size | 8 MB | (tried 32 / 64 MB) | bulk 100k 0.95x / 0.85x, pgbench init scale 10 1.01x / 1.02x, inserts 1.06x / 0.94x, reads 0.89-0.98x | no |
+| allocator purging | mimalloc's 10 ms | (tried never: `MIMALLOC_PURGE_DELAY=-1`) | no workload faster beyond the noise; +80 MB | no |
+
+What limits each gain:
+
+- **Caches.** Scale 10 (a million accounts) and TPC-H SF 0.05 don't fit in 64 MB of decoded
+  blocks (performance mode's cache held about 160 MB more: 275 -> 433 MB): a miss reads the
+  block from the page cache, checks its CRC, decompresses it (zstd) and decodes it again. With
+  1.5 GB every block stays decoded and what is left per statement is the executor's. The
+  analytic set's 200k rows fit either way. The scoreboard always gave the engine `--cache-mb
+  2048` (and PostgreSQL `shared_buffers=2GB`), so its efficient column doesn't show this; its
+  performance column sizes itself from the 8 GB container to the same scale.
+- **Spin.** At one client a transaction is the server's work (50-60 µs a select) plus the round
+  trip, and the round trip was a sleep and a wake-up on each side (futex, scheduler, a cold
+  core). A thread polling for its client's next message keeps its core and skips the server's
+  half of that; the client's half remains. The polls cost CPU: a few µs a select, 58 µs a
+  TPC-B-like transaction (seven statements, each followed by a poll while the client sends the
+  next). Polling where it can't pay only takes cores and CPU, so it is gated three ways, each
+  from a run that lost without it: a fixed cap of two pollers on 4 cores cost 32 clients 15%;
+  polling while working + polling threads fit all 4 cores cost 8 clients 8%, in half of them 8
+  clients' range reads 9% ([1.07, 0.93, 0.83, 0.89]), in a quarter (on 4 cores: only while no
+  other connection works) still 7% with 11% more CPU per read, because the benchmark client,
+  checking 100 rows a read, is slower than the server and leaves every server thread waiting
+  at once. Polling only for a client whose last message came within the 50 µs took that to
+  0.96x and 5% (and select-only at 8 clients 1.02x, point reads 1.05x). Range reads at 8
+  clients are the one case it may still cost a little; at 32 clients nothing polls.
+- **Idle close.** Reopening a database opens its store (manifest, every SST's index), reads its
+  catalog and rebuilds the per-database state: 5-15 ms on the first statement. Kept open, the
+  store costs its memtable (up to 8 MB) and open files.
+- **Idle trim.** The trim (`mi_collect(true)`, the unused stack `madvise`d away) and then the
+  next statement faulting the heap and stack pages in again: 50-190 µs of CPU per statement
+  after a pause.
+
+**Footprint per mode** (dist builds, containers, 45 s windows scaled to 5 minutes, two runs each;
+"before" is origin's head `d3f493e51`, this work's base, built the same way):
+
+| | before | efficient | performance |
+|---|---|---|---|
+| idle CPU, no session (s / 5 min) | 0.009-0.010 | 0.008-0.009 | 0.009-0.011 |
+| CPU with 100 idle sessions (s / 5 min) | 0.126-0.133 | 0.008-0.009 | 0.007-0.009 |
+| memory with 100 idle sessions (MB) | 31.3-32.2 | 31.3-31.4 | 32.1-32.6 |
+
+The scoreboard's gate on the final build (`scoreboard.sh quick`, `SB_ONLY=none`): efficient mode
+idle CPU 0.03 s, 100 idle sessions 30.0 MB and 0.015 s of CPU, fresh directory 3.03 MB, all
+pass (PostgreSQL 0.625 s, 211 MB, 0.30 s, 38.9 MB); performance mode (measured on the build that still
+disabled huge pages late, below) 0.010 s, 34.3 MB, 0.015 s, 3.03 MB. A build that disabled transparent huge
+pages after parsing its arguments instead of first thing measured 32-34 MB with 100 idle sessions
+(the gate's 33.9 failed it): the pages faulted before the prctl kept their huge pages.
+
+The 100 idle sessions' CPU fell 15x in efficient mode too: a connection idle past its trim
+parks (d7e454cc5) where it woke every 2 s. Performance mode never wakes an idle session (no
+trim to wait for), and a connection polls at most 50 µs after its client's last message, so an
+idle server polls nothing.
+
+**What the modes can't close.** Range reads (`oltp range_scan_100`), TPC-H, the analytic set,
+bulk loads (COPY, INSERT ... SELECT, pgbench init) and select-only or point reads at 8 clients
+and more are behind PostgreSQL by the engine's CPU per row and per statement in the executor
+and storage, not by anything a mode trades: at 8 and 32 clients the four cores are busy either
+way, so performance mode measures 0.96-1.05x of efficient there, and on data that fits the
+cache both modes do the same work per row. Those gaps belong to the executor, planner, OLTP,
+storage, bulk-write and index owners (agents 167, 177, 178, 169, 175, 176). Performance mode
+helps where the engine waits rather than computes: one or two clients (spin), data bigger than
+efficient mode's caches, intermittent traffic (open databases, warm sessions).
 
 ## Other measurements
 
