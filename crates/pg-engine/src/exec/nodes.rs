@@ -2545,6 +2545,15 @@ impl Node for ProjectNode {
         Ok(Some(eval_all(&self.exprs, &r, ctx)?))
     }
 
+    /// (Only when the projection is the input's columns as they are.)
+    fn each_stored(&mut self, f: &mut dyn FnMut(super::Stored<'_>) -> Result<bool>, ctx: &ExecCtx) -> Result<Option<()>> {
+        let identity = self.exprs.iter().enumerate().all(|(i, e)| matches!(e, Expr::Col(c, _) if *c == i));
+        if self.tried || !identity {
+            return Ok(None);
+        }
+        self.input.each_stored(f, ctx)
+    }
+
     fn projection(&self) -> Option<&[Expr]> {
         (!self.tried).then_some(&self.exprs[..])
     }
