@@ -993,7 +993,9 @@ Parsing (`code-github/tests`) and the effect in roll against a mock GitHub
 
 Three nodes in one process, each a `Code` with its own server, sharing one database pair (two
 fresh Postgres schemas with `ROLL_CODE_TEST_DATABASE`, else one SQLite pair) and one object
-directory, with `ClusterConfig::for_tests` timings (docs/code/cluster.md).
+directory, with `ClusterConfig::for_tests` timings (docs/code/cluster.md). Leases are in code's
+database, or on DynamoDB Local with `ROLL_CODE_TEST_CLUSTER_BACKEND=dynamodb`: `pnpm test:code
+--docker` runs the whole file both ways (data on Postgres).
 
 | Behaviour | Tests |
 | --- | --- |
@@ -1013,10 +1015,32 @@ directory, with `ClusterConfig::for_tests` timings (docs/code/cluster.md).
 | health: 200 with the node's id while it holds its leases, 503 while it can't reach the database, 200 again after | `cluster.rs::health_follows_each_node` |
 | a landing on one node reaches a webhook within well under the 5 s poll when the forwarder runs on another node (Postgres `NOTIFY` in the landing's transaction; in-process on SQLite) | `cluster.rs::landings_on_one_node_wake_the_forwarder_on_another`, `code-sql/tests/backends.rs::listen_wakes_on_notify`, `code-sql/tests/backends.rs::listen_wakes_on_notify_after_commit_in_one_process` |
 | losing a repo drops its code index; deleting one (through a non-owner) removes the owner's index and deletes its lease row, which nobody takes back; a 404 takes no lease | `cluster.rs::moving_or_deleting_a_repo_leaves_no_index_or_lease_behind` |
-| an idle repo (no request, stream or work for `repo_idle_release`, no work waiting) is given up and its row deleted; an open stream or waiting work keeps it; the next request takes it again | `cluster.rs::idle_repos_are_released_and_taken_again_on_demand`, `code-cluster/tests/handoff.rs::idle_keys_are_released_and_reacquired_on_demand`, `code-cluster/tests/handoff.rs::a_retired_key_loses_its_lease_row_and_comes_back_only_on_demand` |
+| an idle repo (no request, stream or work for `repo_idle_release`, no work waiting) is given up and its row deleted; an open stream or waiting work keeps it; the next request takes it again | `cluster.rs::idle_repos_are_released_and_taken_again_on_demand`, `roll-cluster/tests/core.rs::idle_keys_are_released_and_reacquired_on_demand`, `roll-cluster/tests/core.rs::a_retired_key_loses_its_lease_row_and_comes_back_only_on_demand` |
 | indexes left on disk: a single node removes those of deleted repos at startup, a cluster node all of them | `cluster.rs::leftover_indexes_are_removed_at_startup` |
 | GitHub deliveries for a repo another node owns are recorded before GitHub is answered: the owner dying mid-delivery, or unreachable when one arrives, gets 202 and the next owner handles each part once; redeliveries don't run twice | `cluster.rs::github_deliveries_survive_their_owner_dying` |
-| WebSocket-style upgrades through a non-owner reach the owner and stream both ways (3 MiB echoed); reads whose connection drops before an answer are sent again, writes never | `code-cluster/tests/forward.rs::upgrades_are_forwarded_and_stream_both_ways`, `code-cluster/tests/forward.rs::reads_are_sent_again_when_the_connection_drops_before_an_answer` |
+| WebSocket-style upgrades through a non-owner reach the owner and stream both ways (3 MiB echoed); reads whose connection drops before an answer are sent again, writes never | `roll-cluster/tests/forward.rs::upgrades_are_forwarded_and_stream_both_ways`, `roll-cluster/tests/forward.rs::reads_are_sent_again_when_the_connection_drops_before_an_answer` |
+
+### The cluster layer (`roll-cluster`)
+
+`roll-cluster/tests/suite.rs` runs on every backend: in-process (`memory::`), `code_nodes`/
+`code_leases` on SQLite or, with `ROLL_CODE_TEST_DATABASE`, Postgres (`postgres::`), and a fresh
+table on DynamoDB Local in Docker (`dynamodb::`, container `roll-cloud-cluster-ddb`; skipped with
+a message without Docker). The rest is backend-independent and runs in-process.
+
+| Behaviour | Tests |
+| --- | --- |
+| every node routes a key to one owner, its preferred node, which takes it on first use; nothing moves while membership is stable | `roll-cluster/tests/suite.rs::every_node_routes_a_key_to_the_same_owner` |
+| contenders racing for one lease: exactly one wins, the epoch rises by one per new holder | `roll-cluster/tests/suite.rs::exactly_one_contender_wins` |
+| a dead node's keys move to their preferred live nodes with a new epoch, never while it could still act on them | `roll-cluster/tests/suite.rs::a_dead_nodes_keys_move_to_their_preferred_live_node` |
+| self-fencing: a node cut off from the backend emits `Lost` and fails health before anyone takes its key, and gets it back after | `roll-cluster/tests/suite.rs::a_node_cut_off_from_the_backend_fences_itself_first_and_recovers` |
+| draining hands every key to its new preferred node at once (not after a lease's length) | `roll-cluster/tests/suite.rs::draining_hands_everything_over` |
+| a pinned node id waits for its previous incarnation; the replaced process owns nothing | `roll-cluster/tests/suite.rs::a_pinned_node_id_waits_for_its_previous_incarnation` |
+| a joining node gets its keys by handoff; a guard holds a handoff back until dropped, or until the handoff timeout | `roll-cluster/tests/core.rs::a_joining_node_gets_its_keys_by_handoff_and_a_guard_holds_one_back`, `roll-cluster/tests/core.rs::a_handoff_goes_ahead_after_its_timeout` |
+| a singleton has one holder at a time and moves when it dies | `roll-cluster/tests/core.rs::a_singleton_has_one_holder_and_moves_when_it_dies` |
+| leaving releases everything at once; an outage shorter than the margin loses nothing | `roll-cluster/tests/core.rs::leaving_releases_everything`, `roll-cluster/tests/core.rs::a_blip_shorter_than_the_lease_margin_loses_nothing` |
+| forwarding: methods, headers, queries, big bodies and streamed answers both ways, one retry after Unavailable, the hop limit, signatures | `roll-cluster/tests/forward.rs::forwards_methods_headers_and_queries_to_the_owner`, `roll-cluster/tests/forward.rs::streams_large_bodies_both_ways`, `roll-cluster/tests/forward.rs::streams_responses_incrementally`, `roll-cluster/tests/forward.rs::retries_once_after_the_owner_answers_unavailable`, `roll-cluster/tests/forward.rs::refuses_to_forward_past_the_hop_limit`, `roll-cluster/tests/forward.rs::rejects_unsigned_and_tampered_internal_requests` |
+| rendezvous placement spreads keys and moves about 1/N when a node joins | `roll-cluster/tests/placement.rs::rendezvous_spreads_keys_and_moves_about_one_in_n` |
+| rolld's cluster settings: the backend follows the secret, roll code's flags are aliases, a cluster needs a secret | `rolld/src/cluster.rs::secrets_pick_the_backend_and_code_flags_are_aliases` |
 
 ### Cluster in Docker (`rolld/tests/code_cluster_e2e.rs`)
 

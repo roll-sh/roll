@@ -15,6 +15,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 /// `mi_option_purge_delay` (libmimalloc-sys doesn't export the constant).
 const MI_OPTION_PURGE_DELAY: libmimalloc_sys::mi_option_t = 15;
 
+mod cluster;
 mod code;
 mod nosql;
 mod queues;
@@ -508,6 +509,8 @@ async fn run() -> anyhow::Result<()> {
 /// roll code, running: the control plane and its previews.
 struct CodeNode {
     code: std::sync::Arc<code_control::Code>,
+    /// The cluster every product takes its leases from (crate::cluster::handle).
+    cluster: std::sync::Arc<roll_cluster::Cluster>,
     previews: std::sync::Arc<code_preview::Previews>,
     _checks: tokio::task::JoinHandle<()>,
 }
@@ -518,7 +521,7 @@ impl CodeNode {
     fn router(&self, router: axum::Router) -> axum::Router {
         let router = router.layer(axum::middleware::from_fn_with_state(self.previews.clone(), code_preview::route));
         match self.code.cluster() {
-            Some(c) => router.layer(axum::middleware::from_fn_with_state(c.clone(), code_cluster::accept_forwarded)),
+            Some(c) => router.layer(axum::middleware::from_fn_with_state(c.clone(), roll_cluster::accept_forwarded)),
             None => router,
         }
     }
@@ -531,9 +534,14 @@ impl CodeNode {
         shutdown_signal().await;
         let started = std::time::Instant::now();
         if self.code.cluster().is_some() {
-            info!(timeout_s = args.code.code_drain_timeout_s, "roll code: draining this node");
+            info!(timeout_s = args.code.drain_timeout().as_secs(), "roll code: draining this node");
             self.code.drain(args.code.drain_timeout()).await;
             info!("roll code: drained");
+        }
+        // A cluster node fails its health check at once but keeps serving until the load
+        // balancer has stopped sending to it (docs/cloud/README.md, "Node settings").
+        if self.cluster.backend_name() != "memory" {
+            tokio::time::sleep(cluster::DEREGISTER.saturating_sub(started.elapsed())).await;
         }
         let left = args.code.drain_timeout().saturating_sub(started.elapsed());
         left.clamp(std::time::Duration::from_secs(5), std::time::Duration::from_secs(10))
@@ -665,7 +673,7 @@ async fn start_code(
     args.code.apply(&mut code_config, &args.public_host, args.api)?;
     let code = code_control::Code::open(code_config, objects)?;
     match (&code.config.database, code.cluster()) {
-        (_, Some(c)) => info!(node = %c.node_id(), url = %c.config().advertise_url, "roll code: cluster node (Postgres)"),
+        (_, Some(c)) => info!(node = %c.node_id(), url = %c.config().advertise_url, backend = c.backend_name(), "roll code: cluster node (data on Postgres)"),
         (Some(_), None) => info!("roll code: one node on Postgres"),
         (None, None) => info!("roll code: one node on SQLite"),
     }
@@ -707,7 +715,8 @@ async fn start_code(
         data,
     );
     let checks = code_preview::start(&code, std::sync::Arc::new(code_preview::DockerRunner::new(args.code_runner_concurrency)), previews.clone());
-    Ok(CodeNode { code, previews, _checks: checks })
+    let cluster = cluster::handle(&code, &args.code.cluster, &args.code.default_url(&args.public_host, args.api))?;
+    Ok(CodeNode { code, cluster, previews, _checks: checks })
 }
 
 async fn start_storage(args: &StorageOpts, home: &std::path::Path, storage: &StorageConfig) -> anyhow::Result<(Storage, (tokio::net::TcpListener, tokio::net::TcpListener))> {

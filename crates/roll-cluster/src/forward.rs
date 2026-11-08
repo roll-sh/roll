@@ -202,7 +202,7 @@ impl Cluster {
                     }
                     retry_after
                 }
-                Route::Remote(node) => {
+                Route::Forward(node) => {
                     if hops >= MAX_HOPS {
                         return loop_detected();
                     }

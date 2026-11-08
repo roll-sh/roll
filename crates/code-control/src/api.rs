@@ -173,7 +173,7 @@ pub fn router(code: Arc<Code>) -> Router {
             .merge(crate::cluster::internal_routes(code.clone(), cluster.clone()))
             .merge(cluster.router())
             // Requests from other nodes are verified (and their client address kept).
-            .layer(axum::middleware::from_fn_with_state(cluster.clone(), code_cluster::accept_forwarded));
+            .layer(axum::middleware::from_fn_with_state(cluster.clone(), roll_cluster::accept_forwarded));
     }
     out
 }
@@ -852,7 +852,7 @@ impl Code {
 /// Who an event stream counts against ([`crate::streams::key`]). A stream forwarded by another
 /// node counts against the client that node saw (verified).
 pub(crate) fn stream_key(code: &Code, caller: &Caller, parts: &Parts) -> String {
-    let peer = match parts.extensions.get::<code_cluster::Forwarded>() {
+    let peer = match parts.extensions.get::<roll_cluster::Forwarded>() {
         Some(f) => f.client.as_deref().and_then(|c| c.parse::<std::net::IpAddr>().ok()).map(|ip| std::net::SocketAddr::new(ip, 0)),
         None => parts.extensions.get::<axum::extract::ConnectInfo<std::net::SocketAddr>>().map(|c| c.0),
     };

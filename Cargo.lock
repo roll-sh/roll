@@ -1557,30 +1557,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "code-cluster"
-version = "0.1.0"
-dependencies = [
- "axum",
- "bytes",
- "code-sql",
- "futures",
- "hex",
- "hmac 0.12.1",
- "http-body-util",
- "hyper 1.12.0",
- "hyper-util",
- "libc",
- "parking_lot",
- "reqwest",
- "sha2 0.10.9",
- "tempfile",
- "thiserror",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "code-control"
 version = "0.1.0"
 dependencies = [
@@ -1595,7 +1571,6 @@ dependencies = [
  "chrono",
  "chrono-tz",
  "code-chat",
- "code-cluster",
  "code-git",
  "code-github",
  "code-index",
@@ -1617,6 +1592,7 @@ dependencies = [
  "pg-storage",
  "rand 0.8.8",
  "reqwest",
+ "roll-cluster",
  "rsa",
  "serde",
  "serde_json",
@@ -6244,6 +6220,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "roll-cluster"
+version = "0.1.0"
+dependencies = [
+ "aws-config",
+ "aws-sdk-dynamodb",
+ "axum",
+ "bytes",
+ "code-sql",
+ "futures",
+ "hex",
+ "hmac 0.12.1",
+ "http-body-util",
+ "hyper 1.12.0",
+ "hyper-util",
+ "libc",
+ "parking_lot",
+ "reqwest",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "rolld"
 version = "0.1.0"
 dependencies = [
@@ -6252,7 +6254,6 @@ dependencies = [
  "axum",
  "bytes",
  "clap",
- "code-cluster",
  "code-control",
  "code-preview",
  "futures",
@@ -6287,6 +6288,7 @@ dependencies = [
  "redis-control",
  "redis-server",
  "reqwest",
+ "roll-cluster",
  "s3-api",
  "s3-control",
  "s3-server",

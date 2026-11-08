@@ -2,16 +2,19 @@
 # roll code's local gate (docs/code/test-coverage.md maps features to tests).
 #
 # Default (about a minute warm): clippy and the tests of the code crates on SQLite (code-sql,
-# code-cluster, code-store, code-git, code-github, code-index, code-review, code-chat,
+# roll-cluster, code-store, code-git, code-github, code-index, code-review, code-chat,
 # code-control, code-preview's fake runner: git CLI round trips, the HTTP API and its auth matrix,
 # GitHub against a mock, the merge queue with a small throughput run, the cluster in one process),
 # `roll code` against a live API, then typecheck and the dashboard's and desktop's tests. One
-# cargo build for everything (scripts/lib/gate.sh); the test binaries run side by side.
+# cargo build for everything (scripts/lib/gate.sh); the test binaries run side by side. The
+# cluster layer's suite also runs on DynamoDB Local (`amazon/dynamodb-local` as
+# `roll-cloud-cluster-ddb`, removed afterwards) when Docker is there, and skips it otherwise.
 #
 # Opt in (AGENTS.md says when each must run):
 #   --docker  the stores again on Postgres 18 (ROLL_CODE_TEST_DATABASE), checks and previews in real
-#             Docker, and a three-node cluster of real `rolld` containers through a kill, a rolling
-#             restart and a Postgres restart (crates/rolld/tests/code_cluster_e2e.rs).
+#             Docker, roll code's in-process cluster again with its leases on DynamoDB Local, and a
+#             three-node cluster of real `rolld` containers through a kill, a rolling restart and a
+#             Postgres restart (crates/rolld/tests/code_cluster_e2e.rs).
 #   --stress  40,000 merges through the lander in release (prints merges/s; on Postgres too with
 #             --docker) and 2,000 changes through the merge queue.
 # Each part runs only when something it covers changed since its last green run; `--force` runs
@@ -20,7 +23,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 source scripts/lib/gate.sh
 
-CODE_CRATES=(code-sql code-cluster code-store code-git code-github code-index code-review code-chat code-control code-preview)
+CODE_CRATES=(code-sql roll-cluster code-store code-git code-github code-index code-review code-chat code-control code-preview)
 RUST_PATHS=("${CODE_CRATES[@]/#/crates/}" crates/agent-proto/src crates/roll-cli/src/code crates/roll-cli/src/code.rs crates/roll-cli/src/main.rs
             crates/roll-cli/tests/code.rs crates/roll-cli/tests/common crates/roll-cli/Cargo.toml
             docs/code/test-coverage.md Cargo.toml Cargo.lock scripts/test-code.sh scripts/lib/gate.sh)
@@ -61,8 +64,25 @@ default_args() {
 }
 mapfile -t targets < <(default_targets)
 
+# DynamoDB Local for the cluster layer's DynamoDB backend, shared by every test binary of the run.
+ddb=roll-cloud-cluster-ddb
+cleanup=()
+trap 'for c in "${cleanup[@]}"; do docker rm -f "$c" >/dev/null 2>&1 || true; done' EXIT
+start_dynamodb() {
+  [[ -n ${ROLL_CLUSTER_TEST_DYNAMODB:-} ]] && return 0
+  docker info >/dev/null 2>&1 || return 1
+  docker run -d --rm --name "$ddb" -p 127.0.0.1::8000 amazon/dynamodb-local >/dev/null || return 1
+  cleanup+=("$ddb")
+  local port
+  port=$(docker port "$ddb" 8000/tcp | head -1 | sed 's/.*://')
+  # Docker accepts connections before DynamoDB Local listens: wait for an HTTP answer.
+  for _ in $(seq 120); do curl -s -o /dev/null "http://127.0.0.1:$port" && break; sleep 0.5; done
+  export ROLL_CLUSTER_TEST_DYNAMODB="http://127.0.0.1:$port"
+}
+
 rust_hash=$(hash_of "${RUST_PATHS[@]}")
 if stale "$TARGET/.test-code-rust.hash" "$rust_hash"; then
+  start_dynamodb || echo "code: no Docker; the cluster layer's DynamoDB tests skip themselves"
   test_args() { default_args "$@"; }
   rust_tests code "${targets[@]}"
   echo "$rust_hash" > "$TARGET/.test-code-rust.hash"
@@ -84,14 +104,18 @@ if [[ $docker == 1 ]]; then
     pg=roll-code-test-pg-$$
     docker run -d --rm --name "$pg" --shm-size=1g -p 127.0.0.1::5432 -e POSTGRES_USER=roll -e POSTGRES_PASSWORD=roll -e POSTGRES_DB=roll \
       postgres:18-alpine -c max_connections=3000 -c fsync=off -c synchronous_commit=off -c full_page_writes=off >/dev/null
-    trap 'docker stop "$pg" >/dev/null 2>&1 || true' EXIT
+    cleanup+=("$pg")
     port=$(docker port "$pg" 5432/tcp | head -1 | sed 's/.*://')
     for _ in $(seq 60); do docker exec "$pg" pg_isready -U roll -h 127.0.0.1 >/dev/null 2>&1 && break; sleep 1; done
     pg_url="postgres://roll:roll@127.0.0.1:$port/roll?sslmode=disable"
     test_args() {
-      case "$1" in code-sql | code-cluster | code-store | code-control | roll-cli) default_args "$@" ;; *) return 1 ;; esac
+      case "$1" in code-sql | roll-cluster | code-store | code-control | roll-cli) default_args "$@" ;; *) return 1 ;; esac
     }
+    start_dynamodb
     ROLL_CODE_TEST_DATABASE=$pg_url RUST_CLIPPY=0 rust_tests code-pg "${targets[@]}"
+    # roll code's cluster with its leases on DynamoDB (data on Postgres).
+    test_args() { [[ $1:$2 == code-control:cluster ]]; }
+    ROLL_CODE_TEST_CLUSTER_BACKEND=dynamodb ROLL_CLUSTER_DYNAMODB_REQUIRED=1 ROLL_CODE_TEST_DATABASE=$pg_url RUST_CLIPPY=0 rust_tests code-ddb --test cluster
     # Checks and previews in real containers, and the cluster as real rolld containers
     # (deploy/code/Dockerfile): a kill, a rolling restart and a Postgres restart under load.
     test_args() { [[ $1:$2 == code-preview:docker || $1:$2 == rolld:code_cluster_e2e ]] && ARGS=(--nocapture); }
