@@ -143,10 +143,6 @@ fn listeners(a: &Args) -> Vec<SocketAddr> {
     let (q, n) = (&a.queues, &a.nosql);
     let mut l = vec![a.api, a.proxy, a.redis, a.redis_http, a.kafka, a.s3, a.storage_api];
     l.extend([q.amqp, q.management, q.stomp, q.web_stomp, q.mqtt, q.web_mqtt, q.stream, q.http]);
-    // The broker-to-broker RPC listener only runs in a queues cluster.
-    if q.cluster_meta.is_some() {
-        l.push(q.rpc);
-    }
     l.extend([n.nosql_cql, n.nosql_cql_shard_aware, n.nosql_alternator, n.nosql_rest]);
     l.extend([n.nosql_alternator_https, n.nosql_cql_tls, n.nosql_cql_shard_aware_tls, n.nosql_metrics].into_iter().flatten());
     l

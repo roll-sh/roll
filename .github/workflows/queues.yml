@@ -16,13 +16,6 @@ env:
   CARGO_INCREMENTAL: '0'
 
 jobs:
-  deploy-template:
-    runs-on: ubuntu-24.04-arm
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v5
-      - run: pipx run cfn-lint deploy/queues/aws/roll-queues.yaml
-
   unit:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 30

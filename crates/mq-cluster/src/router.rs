@@ -1,31 +1,34 @@
 //! A router is what channels on every node hold for a clustered queue. It forwards commands to
-//! the queue's actor, wherever it runs: in this process (the node owns the queue) or on another
-//! node over RPC. When ownership moves (rebalance, drain, failover) the router retargets and
-//! re-registers its consumers, so client connections never notice.
+//! the queue's actor, wherever it runs: in this process (the node holds the queue's lease) or on
+//! another node over RPC. When ownership moves (rebalance, drain, failover) the router retargets
+//! and re-registers its consumers, so client connections never notice.
 
 use crate::rpc::{Peer, Push, PushHandler, Reply, Req};
-use crate::{Cluster, OwnedQueue, outcome_code};
+use crate::{Cluster, Decision, OwnedQueue, outcome_code};
 use bytes::{Bytes, BytesMut};
 use mq_core::cluster::QueueStart;
 use mq_core::queue::engine::QueueHost;
 use mq_core::queue::*;
 use mq_core::{AmqpError, FieldTable, Message};
 use parking_lot::Mutex;
+use roll_cluster::Guard;
 use serde_json::Value;
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 pub(crate) enum Ctl {
     /// Ownership may have changed: find the owner again.
     Retarget,
-    /// Move the queue to `to` (rebalance or drain).
-    Handoff { to: String, reply: oneshot::Sender<bool> },
-    /// The queue is gone cluster-wide.
-    Forget,
+    /// The lease of the tenure `epoch` is moving (a handoff, a drain) or was lost: stop the
+    /// actor, then let go of it.
+    Release { epoch: i64 },
+    /// The router is no longer needed: the queue was deleted cluster-wide (`deleted`, so its
+    /// lease goes too), or a new router replaced it.
+    Forget { deleted: bool },
     /// The owner's connection dropped or the queue moved: re-subscribe consumers.
     Resubscribe,
 }
@@ -42,7 +45,21 @@ pub(crate) struct RouterRef {
     pub key: String,
     pub handle: Weak<QueueHandle>,
     pub ctl: mpsc::UnboundedSender<Ctl>,
-    pub remote_node: Mutex<Option<String>>,
+    /// The owner's node, while the queue runs elsewhere.
+    pub remote: Mutex<Option<Arc<Peer>>>,
+}
+
+/// This node's tenure as the queue's owner: the lease's guard (a handoff waits for it), and the
+/// task that tells the router when the lease starts moving.
+struct Tenure {
+    guard: Guard,
+    watcher: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for Tenure {
+    fn drop(&mut self) {
+        self.watcher.abort();
+    }
 }
 
 /// One consumer registered through this router.
@@ -159,6 +176,7 @@ pub(crate) struct Router {
     me: Weak<QueueHandle>,
     shared: Arc<QueueShared>,
     target: Target,
+    tenure: Option<Tenure>,
     regs: HashMap<(ChannelId, Arc<str>), Arc<Reg>>,
     ctl_tx: mpsc::UnboundedSender<Ctl>,
     rref: Arc<RouterRef>,
@@ -178,12 +196,12 @@ fn table_bytes(t: &FieldTable) -> Bytes {
 
 impl Router {
     /// Create the router and find (or claim) the owner before returning.
-    pub(crate) async fn spawn(cluster: &Arc<Cluster>, key: String, start: QueueStart) -> mq_core::Result<(QueueRef, Arc<RouterRef>)> {
+    pub(crate) async fn spawn(cluster: &Arc<Cluster>, key: String, start: QueueStart) -> mq_core::Result<QueueRef> {
         let (tx, rx) = mpsc::channel(4096);
         let (ctl_tx, ctl_rx) = mpsc::unbounded_channel();
         let shared = Arc::new(QueueShared::default());
         let handle = Arc::new(QueueHandle::new(start.meta.clone(), start.kind, shared.clone(), tx));
-        let rref = Arc::new(RouterRef { key: key.clone(), handle: Arc::downgrade(&handle), ctl: ctl_tx.clone(), remote_node: Mutex::new(None) });
+        let rref = Arc::new(RouterRef { key: key.clone(), handle: Arc::downgrade(&handle), ctl: ctl_tx.clone(), remote: Mutex::new(None) });
         let host = start.host.clone();
         let mut r = Router {
             key,
@@ -193,66 +211,83 @@ impl Router {
             me: Arc::downgrade(&handle),
             shared,
             target: Target::None,
+            tenure: None,
             regs: HashMap::new(),
             ctl_tx,
             rref: rref.clone(),
         };
-        r.resolve(true).await?;
+        // Registered before it routes: taking the lease announces it (`Acquired`), and the
+        // cluster must find the router starting rather than a queue it doesn't know.
+        cluster.routers.write().insert(r.key.clone(), rref.clone());
+        if let Err(e) = r.resolve(true).await {
+            let mut routers = cluster.routers.write();
+            if routers.get(&r.key).is_some_and(|x| Arc::ptr_eq(x, &rref)) {
+                routers.remove(&r.key);
+            }
+            return Err(e);
+        }
         tokio::spawn(r.run(rx, ctl_rx));
-        Ok((handle, rref))
+        Ok(handle)
     }
 
     fn cluster(&self) -> Option<Arc<Cluster>> {
         self.cluster.upgrade()
     }
 
-    /// Find the owner, claiming the queue if nobody (alive) has it. With `first`, errors from
-    /// starting the actor are returned (declare fails like it would on one node).
+    /// Find the owner, taking the queue's lease if placement gives it to this node. With
+    /// `first`, errors from starting the actor are returned (declare fails like it would on one
+    /// node).
     async fn resolve(&mut self, first: bool) -> mq_core::Result<()> {
         let Some(c) = self.cluster() else { return Err(AmqpError::internal("cluster stopped")) };
-        let started = std::time::Instant::now();
         loop {
-            match c.owner_decision(&self.key, started.elapsed()).await {
-                Ok(crate::Decision::Local(epoch)) => {
-                    let paused = Arc::new(AtomicBool::new(false));
-                    let mut s = self.start.clone();
-                    s.host = Arc::new(RouterHost { inner: self.host.clone(), shared: self.shared.clone() });
-                    match s.spawn_local(c.broker_logs().as_ref(), epoch).await {
-                        Ok(inner) => {
-                            let owned = Arc::new(OwnedQueue { inner, paused, epoch });
-                            c.owned.write().insert(self.key.clone(), owned.clone());
-                            *self.rref.remote_node.lock() = None;
-                            self.target = Target::Local(owned);
-                            debug!(queue = %self.key, epoch, "queue owned here");
-                            self.resubscribe().await;
-                            return Ok(());
-                        }
-                        Err(e) => {
-                            c.release(&self.key).await;
-                            if first {
-                                return Err(e);
-                            }
-                            warn!(queue = %self.key, error = %e, "failed to start queue; retrying");
-                        }
-                    }
-                }
-                Ok(crate::Decision::Remote(node)) => match c.peer(&node).await {
-                    Some(peer) => {
-                        *self.rref.remote_node.lock() = Some(node);
-                        self.target = Target::Remote(peer);
+            match c.decide(&self.key).await {
+                Decision::Local(guard) => match self.start_local(&c, guard).await {
+                    Ok(()) => {
                         self.resubscribe().await;
                         return Ok(());
                     }
-                    None => debug!(queue = %self.key, %node, "owner unreachable"),
+                    // The lease stays held (the guard is gone): routing finds it here again.
+                    Err(e) if first => return Err(e),
+                    Err(e) => warn!(queue = %self.key, error = %e, "failed to start queue; retrying"),
                 },
-                Ok(crate::Decision::Wait) => {}
-                Err(e) => warn!(queue = %self.key, error = %e, "ownership lookup failed"),
+                Decision::Remote(peer) => {
+                    *self.rref.remote.lock() = Some(peer.clone());
+                    self.target = Target::Remote(peer);
+                    self.resubscribe().await;
+                    return Ok(());
+                }
+                Decision::Wait => {}
             }
             if c.stopped() {
                 return Err(AmqpError::internal("cluster stopped"));
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
+    }
+
+    /// Run the actor here under `guard`, opening the log with the lease's epoch: that fences
+    /// every earlier owner out of the log store.
+    async fn start_local(&mut self, c: &Arc<Cluster>, guard: Guard) -> mq_core::Result<()> {
+        let epoch = guard.epoch();
+        let mut s = self.start.clone();
+        s.host = Arc::new(RouterHost { inner: self.host.clone(), shared: self.shared.clone() });
+        let inner = s.spawn_local(c.broker_logs().as_ref(), epoch.max(0) as u64).await?;
+        if !guard.is_valid() {
+            inner.stop().await;
+            return Err(AmqpError::internal(format!("queue '{}' moved while it started", self.start.meta.name)));
+        }
+        let owned = Arc::new(OwnedQueue { inner, paused: Arc::new(AtomicBool::new(false)) });
+        c.owned.write().insert(self.key.clone(), owned.clone());
+        *self.rref.remote.lock() = None;
+        let (ending, ctl) = (guard.ending(), self.ctl_tx.clone());
+        let watcher = tokio::spawn(async move {
+            ending.await;
+            let _ = ctl.send(Ctl::Release { epoch });
+        });
+        self.tenure = Some(Tenure { guard, watcher });
+        self.target = Target::Local(owned);
+        debug!(queue = %self.key, epoch, "queue owned here");
+        Ok(())
     }
 
     /// Register every consumer with the current target (after a move or failover).
@@ -345,7 +380,11 @@ impl Router {
             tokio::select! {
                 biased;
                 c = ctl.recv() => match c {
-                    Some(Ctl::Forget) | None => break,
+                    Some(Ctl::Forget { deleted }) => {
+                        self.shutdown(deleted).await;
+                        return;
+                    }
+                    None => break,
                     Some(Ctl::Retarget) => self.retarget().await,
                     Some(Ctl::Resubscribe) => {
                         // The owner we talked to is gone or no longer has the queue: ask the
@@ -356,9 +395,10 @@ impl Router {
                             let _ = self.resolve(false).await;
                         }
                     }
-                    Some(Ctl::Handoff { to, reply }) => {
-                        let ok = self.handoff(&to).await;
-                        let _ = reply.send(ok);
+                    Some(Ctl::Release { epoch }) => {
+                        if self.tenure.as_ref().is_some_and(|t| t.guard.epoch() == epoch) {
+                            self.release().await;
+                        }
                     }
                 },
                 cmd = rx.recv() => match cmd {
@@ -371,10 +411,10 @@ impl Router {
                 },
             }
         }
-        self.shutdown().await;
+        self.shutdown(false).await;
     }
 
-    async fn shutdown(&mut self) {
+    async fn shutdown(&mut self, deleted: bool) {
         for reg in self.regs.values() {
             if let Some((sub, peer)) = reg.sub.lock().take()
                 && let Some(p) = peer.upgrade()
@@ -393,38 +433,59 @@ impl Router {
                 c.owned.write().remove(&self.key);
                 o.inner.stop().await;
             }
+            // Only a deleted queue gives its lease up for good: the log of a queue that still
+            // exists refuses lease epochs older than its last owner's, and a deleted lease starts
+            // over at 1. (A new queue of the same name has a new log.)
+            let deleted = deleted || self.shared.deleted.load(Ordering::Acquire);
+            if self.tenure.take().is_some() && deleted {
+                c.nodes.retire(&self.key);
+            }
         }
+        self.target = Target::None;
         self.shared.deleted.store(true, Ordering::Release);
     }
 
-    /// Re-check ownership; switch target if it changed.
+    /// Route again; switch target if the owner changed.
     async fn retarget(&mut self) {
         let Some(c) = self.cluster() else { return };
-        let want = c.owner_cached(&self.key);
-        let unchanged = match (&self.target, &want) {
-            (Target::Local(_), Some(o)) => o.node == c.node_id,
-            (Target::Remote(p), Some(o)) => o.node == p.node && !p.is_closed() && c.alive(&o.node),
-            _ => false,
-        };
-        if unchanged {
-            return;
+        match &self.target {
+            // Still ours (a handoff ends the guard and comes as `Release`).
+            Target::Local(_) if self.tenure.as_ref().is_some_and(|t| t.guard.is_valid()) => return,
+            Target::Local(o) => {
+                // Lost without a handoff (fenced: the backend was out of reach for too long):
+                // stop serving at once. The log store fences whatever this actor still writes.
+                warn!(queue = %self.key, "lost the queue's lease; stopping its actor");
+                o.paused.store(true, Ordering::Release);
+                c.owned.write().remove(&self.key);
+                o.inner.stop().await;
+                self.tenure = None;
+            }
+            Target::Remote(p) if !p.is_closed() => match c.decide(&self.key).await {
+                Decision::Remote(q) if q.node == p.node => return,
+                Decision::Local(g) => {
+                    if self.start_local(&c, g).await.is_ok() {
+                        self.resubscribe().await;
+                        return;
+                    }
+                }
+                _ => {}
+            },
+            _ => {}
         }
-        if let Target::Local(o) = &self.target {
-            // Someone else took it (we were presumed dead): stop serving at once.
-            warn!(queue = %self.key, "lost ownership; stopping local actor");
-            o.paused.store(true, Ordering::Release);
-            c.owned.write().remove(&self.key);
-            o.inner.stop().await;
-        }
+        *self.rref.remote.lock() = None;
         self.target = Target::None;
         let _ = self.resolve(false).await;
     }
 
-    /// Hand the queue to another node: pause deliveries, let in-flight acks land, stop, and
-    /// pass ownership with a higher epoch.
-    async fn handoff(&mut self, to: &str) -> bool {
-        let Some(c) = self.cluster() else { return false };
-        let Target::Local(o) = self.target.clone() else { return false };
+    /// The lease is moving: pause deliveries, let in-flight acks land, stop the actor (its log
+    /// flushed and closed), then let go of the lease, so the next owner starts from everything
+    /// this one confirmed. Consumers on other nodes are told to subscribe again.
+    async fn release(&mut self) {
+        let Some(c) = self.cluster() else { return };
+        let Target::Local(o) = self.target.clone() else {
+            self.tenure = None;
+            return;
+        };
         o.paused.store(true, Ordering::Release);
         let deadline = std::time::Instant::now() + Duration::from_millis(1500);
         while o.inner.shared.unacked.load(Ordering::Relaxed) > 0 && std::time::Instant::now() < deadline {
@@ -433,28 +494,13 @@ impl Router {
         c.owned.write().remove(&self.key);
         c.notify_moved(&self.key);
         o.inner.stop().await;
-        if !c.transfer(&self.key, to).await {
-            // Couldn't pass it on: keep serving.
-            if let Ok(inner) = self.start_local_again(&c).await {
-                self.target = Target::Local(inner);
-                self.resubscribe().await;
-            }
-            return false;
+        if self.start.durable {
+            let _ = tokio::time::timeout(Duration::from_secs(10), c.broker_logs().released(&self.start.log_key)).await;
         }
-        info!(queue = %self.key, to, "queue handed off");
+        self.tenure = None;
+        info!(queue = %self.key, "queue handed off");
         self.target = Target::None;
         let _ = self.resolve(false).await;
-        true
-    }
-
-    async fn start_local_again(&self, c: &Arc<Cluster>) -> mq_core::Result<Arc<OwnedQueue>> {
-        let mut s = self.start.clone();
-        s.host = Arc::new(RouterHost { inner: self.host.clone(), shared: self.shared.clone() });
-        let epoch = c.owner_cached(&self.key).map(|o| o.epoch).unwrap_or(1);
-        let inner = s.spawn_local(c.broker_logs().as_ref(), epoch).await?;
-        let owned = Arc::new(OwnedQueue { inner, paused: Arc::new(AtomicBool::new(false)), epoch });
-        c.owned.write().insert(self.key.clone(), owned.clone());
-        Ok(owned)
     }
 
     /// Ask the owner, retrying through the router mailbox if the queue moved.
@@ -555,6 +601,7 @@ impl Router {
             (Target::Local(o), QueueCmd::Stop { reply }) => {
                 c.owned.write().remove(&self.key);
                 o.inner.stop().await;
+                self.tenure = None;
                 let _ = reply.send(());
                 return true;
             }
@@ -878,8 +925,6 @@ pub(crate) struct RemoteSink {
     pub tx: mpsc::Sender<crate::rpc::Frame>,
     pub credit: AtomicU32,
     pub paused: Arc<AtomicBool>,
-    /// Deliveries to that node's AZ (AZ affinity).
-    pub ops: Option<Arc<std::sync::atomic::AtomicU64>>,
 }
 
 impl RemoteSink {
@@ -895,9 +940,6 @@ impl ConsumerSink for RemoteSink {
     }
     fn deliver(&self, d: Delivery) {
         let _ = self.credit.try_update(Ordering::AcqRel, Ordering::Acquire, |c| c.checked_sub(1));
-        if let Some(n) = &self.ops {
-            n.fetch_add(1, Ordering::Relaxed);
-        }
         let ev = Push::Deliver { sub: self.sub, seq: d.seq, redelivered: d.redelivered, delivery_count: d.delivery_count, remaining: d.remaining };
         self.push(ev, vec![encode_msg(&d.msg)]);
     }

@@ -335,10 +335,6 @@ async fn run() -> anyhow::Result<()> {
     };
 
     // Each product on starts here (ROLL_PRODUCTS); one that's off binds nothing and runs nothing.
-    let queues = match on.on(Product::Queues) {
-        true => Some(queues::Queues::start(&home, args.queues.clone(), &args.public_host).await?),
-        false => None,
-    };
     let postgres = match on.on(Product::Postgres) {
         true => Some(start_postgres(&args, &home, &storage).await?),
         false => None,
@@ -373,6 +369,11 @@ async fn run() -> anyhow::Result<()> {
     // roll nosql: same object storage; in a cluster its databases follow their leases.
     let nosql = match on.on(Product::Nosql) {
         true => Some(nosql::Nosql::start(&home, args.nosql.clone(), &args.public_host, &args.node, &storage, Some(&cluster), args.code.cluster.system_database.as_deref()).await?),
+        false => None,
+    };
+    // roll queues on the node's cluster: each queue runs on its lease's holder.
+    let queues = match on.on(Product::Queues) {
+        true => Some(queues::Queues::start(&home, args.queues.clone(), &args.public_host, cluster.clone(), args.code.cluster.system_database.as_deref().filter(|u| !u.is_empty()), &storage).await?),
         false => None,
     };
 
@@ -492,7 +493,16 @@ async fn run() -> anyhow::Result<()> {
         (r, ..) = futures::future::select_all(serving) => r?,
         grace = stop(code.as_ref(), &cluster, &args) => {
             metrics.flush();
-            finish_requests(api, close, grace).await?;
+            // Queue clients go while the API finishes its requests: gradually, so they don't
+            // all reconnect at once (a node alone closes them quickly, as it always did).
+            let clustered = cluster.backend_name() != "memory";
+            let close_clients = async {
+                if let Some(q) = &queues {
+                    q.close_clients(if clustered { grace } else { std::time::Duration::from_secs(2) }).await;
+                }
+            };
+            let (finished, ()) = tokio::join!(finish_requests(api, close, grace), close_clients);
+            finished?;
             if postgres.is_some() {
                 info!("computes keep running and are adopted on next start");
             }

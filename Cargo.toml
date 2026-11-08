@@ -88,7 +88,6 @@ mq-core = { path = "crates/mq-core" }
 mq-amqp = { path = "crates/mq-amqp" }
 mq-storage = { path = "crates/mq-storage" }
 mq-control = { path = "crates/mq-control" }
-mq-proxy = { path = "crates/mq-proxy" }
 mq-cluster = { path = "crates/mq-cluster" }
 mq-mqtt = { path = "crates/mq-mqtt" }
 mq-stomp = { path = "crates/mq-stomp" }

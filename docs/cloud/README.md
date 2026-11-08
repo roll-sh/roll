@@ -92,7 +92,7 @@ written once in SQLite's dialect), as roll code's did.
 | nosql | `nosql:db:<id>` | the database's owner loads it; opens and manifest writes are fenced by compare-and-swap in S3 |
 | streams | `stream:cluster:<id>` | a tenant's whole Kafka cluster on one owner (the stream SASL maps a key to); acknowledged once in the owner's write-ahead log in S3; per partition later (`crates/stream-broker/README.md`, "On the fleet") |
 | storage | `storage:meta` | built: one metadata log for the deployment, a hot standby following it (docs/storage/architecture.md, "Many nodes"); `storage:account:<id>` (a log per account) is designed there, not built |
-| queues | `mq:<vhost>/<queue>` | mq-cluster's owner records move onto the shared layer |
+| queues | `mq:<vhost>/<queue>` (`#<n>` per partition after the first) | built: every node serves every client and forwards to each queue's owner over the internal RPC (no splice); logs in S3 Standard, fenced by put-if-absent (docs/queues/architecture.md, "Many nodes") |
 | tasks | `tasks:cell:default` | built: the log store cell's leader (replaces the cell's own S3 lease; fencing stays in the log), hot standbys following the log (deploy/aws/README.md, "On the roll cloud fleet"); `tasks:tenant:<id>` needs more cells and a tenant catalog, designed there, not built |
 
 ## The edge
@@ -112,7 +112,9 @@ written once in SQLite's dialect), as roll code's did.
   reloaded by every node without a restart. Renewal starts 30 days before expiry.
 - **Forwarding** to the owner is a signed internal hop on the private network: HTTP requests are
   forwarded as in roll-cluster (`Cluster::dispatch`); TCP connections are spliced after the first message that names
-  the tenant (startup packet, AUTH/HELLO, SASL, CQL STARTUP/AUTH, AMQP vhost).
+  the tenant (startup packet, AUTH/HELLO, SASL, CQL STARTUP/AUTH). Queues' connections aren't
+  spliced: a connection's queues can each have a different owner, so the node serves the
+  connection itself and forwards each queue's operations to its owner.
 
 ### Hostnames
 
@@ -487,7 +489,7 @@ pushes take as long as the pack); `handoff-failures` and `lease-takeovers` on an
 | redis on the cluster layer | built ("Redis on the fleet"); not yet run against AWS |
 | nosql on the cluster layer | built: lease `nosql:db:<id>`, catalog on the system database, CQL spliced to the owner (SNI or SASL user), fenced manifests (docs/nosql/architecture.md, "On a fleet") |
 | streams on the cluster layer | built (`stream:cluster:<id>`, catalog on the system database, acknowledgements from a write-ahead log in S3, kafka splices); not yet run against AWS |
-| queues on the cluster layer | in progress |
+| queues on the cluster layer | built: lease `mq:<vhost>/<queue>`, metadata on the system database (schema `mq`), logs in S3 Standard with group commit (no keepers, no proxies), drain = roll-cluster's (docs/queues/deploy-aws.md) |
 | postgres on the fleet and the system database | with the pg-engine branch |
 | isolated work on Fargate | next |
 

@@ -1,6 +1,10 @@
 //! Internal RPC between brokers: length-prefixed frames carrying a JSON header plus raw blobs
-//! (messages, field tables), multiplexed over one TCP connection per node pair. Requests are
-//! applied in the order they arrive, so publishes to a queue keep their order across nodes.
+//! (messages, field tables), multiplexed over one connection per node pair. Requests are applied
+//! in the order they arrive, so publishes to a queue keep their order across nodes.
+//!
+//! The connection is an HTTP/1.1 upgrade of `GET /internal/queues/rpc` on the other node's
+//! internal API (its roll-cluster advertise URL: 7070 on the fleet), signed with the cluster
+//! secret like every internal hop. The answer (101) names the node's client listeners.
 //!
 //! Frame: `u32 len | u8 kind | u64 id | u32 head_len | head (JSON) | u16 blobs | (u32 len | bytes)*`.
 
@@ -9,13 +13,20 @@ use mq_core::AmqpError;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader};
-use mq_core::transport::Transport;
 use tokio::sync::{mpsc, oneshot};
+
+/// The internal route other nodes open the RPC connection on.
+pub const PATH: &str = "/internal/queues/rpc";
+/// The `Upgrade` protocol of [`PATH`].
+pub const PROTOCOL: &str = "roll-queues-rpc";
+/// The 101's header naming the answering node's client listeners (JSON: protocol → address).
+pub const LISTENERS_HEADER: &str = "x-roll-queues-listeners";
 
 pub const REQ: u8 = 1;
 pub const RESP: u8 = 2;
@@ -87,7 +98,6 @@ impl Frame {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Req {
-    Hello { node: String, num: u16 },
     /// blob 0: the message.
     Publish { q: String, wait: bool, confirm: bool },
     /// blob 0: consumer arguments (field table).
@@ -110,8 +120,6 @@ pub enum Req {
     Touch { q: String },
     Consumers { q: String },
     Stats { qs: Vec<String> },
-    /// You own `q` now (handoff): take it over.
-    Adopt { q: String },
 }
 
 /// Events the owner pushes to a subscribed consumer's node.
@@ -169,6 +177,8 @@ pub trait PushHandler: Send + Sync {
 /// A connection to another node.
 pub struct Peer {
     pub node: String,
+    /// The node's client listeners (`amqp`, `stream`, …), from its answer to the upgrade.
+    pub listeners: BTreeMap<String, SocketAddr>,
     tx: mpsc::Sender<Frame>,
     next: AtomicU64,
     pending: Mutex<HashMap<u64, oneshot::Sender<Frame>>>,
@@ -177,12 +187,14 @@ pub struct Peer {
 }
 
 impl Peer {
-    pub async fn connect(node: &str, addr: SocketAddr, transport: &Transport, me: &str, num: u16) -> anyhow::Result<Arc<Peer>> {
-        let stream = transport.connect(addr, std::time::Duration::from_secs(3)).await?;
-        let (r, mut w) = stream.into_split();
+    /// Open the RPC connection to `node`, signed by `cluster`.
+    pub async fn connect(node: &roll_cluster::Node, cluster: &roll_cluster::Cluster) -> anyhow::Result<Arc<Peer>> {
+        let (io, listeners) = tokio::time::timeout(Duration::from_secs(3), upgrade(node, cluster)).await.map_err(|_| anyhow::anyhow!("connecting to {} timed out", node.id))??;
+        let (r, mut w) = tokio::io::split(io);
         let (tx, mut rx) = mpsc::channel::<Frame>(8192);
         let peer = Arc::new(Peer {
-            node: node.into(),
+            node: node.id.clone(),
+            listeners,
             tx,
             next: AtomicU64::new(1),
             pending: Mutex::new(HashMap::new()),
@@ -231,7 +243,6 @@ impl Peer {
             }
             p.close();
         });
-        peer.call(&Req::Hello { node: me.into(), num }, vec![]).await;
         Ok(peer)
     }
 
@@ -302,4 +313,28 @@ impl Peer {
     pub fn unsubscribe(&self, sub: u64) {
         self.subs.lock().remove(&sub);
     }
+}
+
+/// The HTTP/1.1 upgrade behind [`Peer::connect`]: the stream, and the node's listeners.
+async fn upgrade(node: &roll_cluster::Node, cluster: &roll_cluster::Cluster) -> anyhow::Result<(hyper_util::rt::TokioIo<hyper::upgrade::Upgraded>, BTreeMap<String, SocketAddr>)> {
+    use axum::http::{Method, StatusCode, header};
+    let authority = node.url.strip_prefix("http://").unwrap_or(&node.url).split('/').next().unwrap_or_default().to_string();
+    let tcp = tokio::net::TcpStream::connect(&authority).await?;
+    let _ = tcp.set_nodelay(true);
+    let (mut sender, conn) = hyper::client::conn::http1::handshake(hyper_util::rt::TokioIo::new(tcp)).await?;
+    tokio::spawn(async move {
+        let _ = conn.with_upgrades().await;
+    });
+    let mut req = axum::http::Request::get(PATH)
+        .header(header::HOST, &authority)
+        .header(header::CONNECTION, "upgrade")
+        .header(header::UPGRADE, PROTOCOL)
+        .body(http_body_util::Empty::<Bytes>::new())?;
+    req.headers_mut().extend(cluster.sign(&Method::GET, PATH));
+    let resp = sender.send_request(req).await?;
+    if resp.status() != StatusCode::SWITCHING_PROTOCOLS {
+        anyhow::bail!("{} refused the cluster RPC connection: {}", node.id, resp.status());
+    }
+    let listeners = resp.headers().get(LISTENERS_HEADER).and_then(|v| serde_json::from_slice(v.as_bytes()).ok()).unwrap_or_default();
+    Ok((hyper_util::rt::TokioIo::new(hyper::upgrade::on(resp).await?), listeners))
 }
