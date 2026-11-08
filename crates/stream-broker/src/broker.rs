@@ -5,6 +5,7 @@
 use crate::auth::{self, PlainCache};
 use crate::config::{self, Config};
 use crate::error::KafkaError;
+use crate::fleet::{Fleet, Tenure};
 use crate::groups::Groups;
 use crate::ids::{new_id, new_uuid, now, now_ms};
 use crate::store::{Credential, Settings, StorageSample, Store, StreamRow, TopicRow, UsageRow};
@@ -38,6 +39,8 @@ pub struct Broker {
     flush_rx: Mutex<Option<mpsc::UnboundedReceiver<FlushJob>>>,
     producer_ids: Mutex<(i64, i64)>,
     pub started: Instant,
+    /// On the fleet: one owner per stream (`fleet.rs`). `None` on one node, which owns everything.
+    pub fleet: Option<Fleet>,
 }
 
 /// A tenant: what a Confluent cluster or MSK cluster is, minus the brokers.
@@ -49,6 +52,8 @@ pub struct Stream {
     pub usage: Usage,
     pub ingress: Bucket,
     pub egress: Bucket,
+    /// This node's tenure of the stream (the fleet).
+    pub tenure: Tenure,
 }
 
 #[derive(Default)]
@@ -80,6 +85,11 @@ pub struct Partition {
     /// While closed, the partition is left alone until this time (ms): nothing can expire or
     /// become compactable before it.
     next_clean_ms: AtomicI64,
+    /// The fleet: queued for the next write-ahead log object.
+    pub(crate) wal_dirty: AtomicBool,
+    /// The fleet: object storage has data of it (so retention runs while it's closed, though
+    /// this node has no local files of it).
+    pub(crate) remote_data: AtomicBool,
 }
 
 #[derive(Default)]
@@ -173,12 +183,21 @@ impl Partition {
             uploading: AtomicBool::new(false),
             compacting: AtomicBool::new(false),
             next_clean_ms: AtomicI64::new(0),
+            wal_dirty: AtomicBool::new(false),
+            remote_data: AtomicBool::new(false),
         })
     }
 
     /// The log, if it's open.
     pub fn loaded(&self) -> Option<Arc<Log>> {
         self.log.lock().unwrap().clone()
+    }
+
+    /// Close the log without anything else (its stream moved away).
+    pub(crate) fn close(&self) {
+        self.log.lock().unwrap().take();
+        self.remote_data.store(false, Ordering::Relaxed);
+        self.next_clean_ms.store(0, Ordering::Relaxed);
     }
 }
 
@@ -281,9 +300,26 @@ type Loaded = (Arc<Stream>, Arc<Topic>, Arc<Partition>, Arc<Log>);
 pub type Result<T> = std::result::Result<T, KafkaError>;
 
 impl Broker {
+    /// A broker on its own: the catalog in SQLite under `home`.
     pub async fn new(config: Config) -> anyhow::Result<Arc<Self>> {
         std::fs::create_dir_all(config.home.join("data"))?;
         let store = Store::open(&config.home.join("stream.db"))?;
+        Self::build(config, store, None)
+    }
+
+    /// A broker on the fleet: the catalog on `db` (the system database), streams owned through
+    /// `fleet`'s cluster, data acknowledged once it's in object storage (`fleet.rs`).
+    pub async fn on_fleet(config: Config, db: code_sql::Db, fleet: Fleet) -> anyhow::Result<Arc<Self>> {
+        std::fs::create_dir_all(config.home.join("data"))?;
+        // Nothing local is trusted on a fleet node: its streams are taken over afresh.
+        let data = config.home.join("data");
+        let _ = std::fs::remove_dir_all(&data);
+        std::fs::create_dir_all(&data)?;
+        let store = Store::on(db, true)?;
+        Self::build(config, store, Some(fleet))
+    }
+
+    fn build(config: Config, store: Store, fleet: Option<Fleet>) -> anyhow::Result<Arc<Self>> {
         let objects = Objects::new(&config.storage)?;
         let (flush_tx, flush_rx) = mpsc::unbounded_channel();
         let broker = Arc::new(Self {
@@ -300,6 +336,7 @@ impl Broker {
             config,
             store,
             objects,
+            fleet,
         });
         broker.load()?;
         Ok(broker)
@@ -332,7 +369,90 @@ impl Broker {
             usage: Usage::default(),
             ingress: Bucket::default(),
             egress: Bucket::default(),
+            tenure: Tenure::default(),
         }
+    }
+
+    fn topic_map(&self, rows: Vec<TopicRow>) -> TopicMap {
+        let mut m = TopicMap::default();
+        for t in rows {
+            let topic = self.topic_from(t);
+            m.by_id.insert(topic.id, topic.clone());
+            m.by_name.insert(topic.name.clone(), topic);
+        }
+        m
+    }
+
+    /// The fleet: the stream as the catalog has it now (taking it over), its topics fresh.
+    pub(crate) fn adopt(&self, row: StreamRow, topics: Vec<TopicRow>) -> Arc<Stream> {
+        let s = match self.stream_cached(&row.id) {
+            Some(s) => {
+                *s.row.write().unwrap() = row;
+                s
+            }
+            None => {
+                let s = Arc::new(self.stream_from(row));
+                self.streams.write().unwrap().entry(s.id.clone()).or_insert(s).clone()
+            }
+        };
+        let topics = self.topic_map(topics);
+        let old = std::mem::replace(&mut *s.topics.write().unwrap(), topics);
+        for t in old.by_name.values() {
+            for p in t.partitions() {
+                p.close();
+            }
+        }
+        s
+    }
+
+    /// Drop a stream this node only had cached (it was deleted elsewhere).
+    pub(crate) fn forget_stream(&self, id: &str) {
+        self.streams.write().unwrap().remove(id);
+    }
+
+    /// A stream from memory only.
+    pub(crate) fn stream_cached(&self, id: &str) -> Option<Arc<Stream>> {
+        self.streams.read().unwrap().get(id).cloned()
+    }
+
+    /// The fleet: a stream another node created, from the catalog.
+    fn stream_from_catalog(&self, key: &str) -> Option<Arc<Stream>> {
+        let row = self.store.stream(key).ok().flatten()?;
+        let topics = self.store.topics_of(&row.id).unwrap_or_default();
+        let s = Arc::new(self.stream_from(row));
+        *s.topics.write().unwrap() = self.topic_map(topics);
+        Some(self.streams.write().unwrap().entry(s.id.clone()).or_insert(s).clone())
+    }
+
+    /// The fleet: bring the streams list in line with the catalog (streams created or deleted on
+    /// other nodes). Streams this node serves keep their state; the others are reloaded.
+    pub fn refresh_streams(&self) -> anyhow::Result<()> {
+        if self.fleet.is_none() {
+            return Ok(());
+        }
+        let rows = self.store.streams()?;
+        let mut topics: HashMap<String, Vec<TopicRow>> = HashMap::new();
+        for t in self.store.topics()? {
+            topics.entry(t.stream_id.clone()).or_default().push(t);
+        }
+        let ids: std::collections::HashSet<String> = rows.iter().map(|r| r.id.clone()).collect();
+        for row in rows {
+            let ts = topics.remove(&row.id).unwrap_or_default();
+            match self.stream_cached(&row.id) {
+                Some(s) if self.serves(&s) => {}
+                Some(s) => {
+                    *s.row.write().unwrap() = row;
+                    *s.topics.write().unwrap() = self.topic_map(ts);
+                }
+                None => {
+                    let s = Arc::new(self.stream_from(row));
+                    *s.topics.write().unwrap() = self.topic_map(ts);
+                    self.streams.write().unwrap().entry(s.id.clone()).or_insert(s);
+                }
+            }
+        }
+        self.streams.write().unwrap().retain(|id, s| ids.contains(id) || self.serves(s));
+        Ok(())
     }
 
     fn topic_from(&self, t: TopicRow) -> Arc<Topic> {
@@ -360,13 +480,15 @@ impl Broker {
         v
     }
 
+    /// By id. On the fleet, a stream another node created is read from the catalog.
     pub fn stream(&self, id: &str) -> Option<Arc<Stream>> {
-        self.streams.read().unwrap().get(id).cloned()
+        self.stream_cached(id).or_else(|| self.fleet.as_ref().and_then(|_| self.stream_from_catalog(id)))
     }
 
     /// By id or name.
     pub fn find_stream(&self, key: &str) -> Option<Arc<Stream>> {
-        self.stream(key).or_else(|| self.streams.read().unwrap().values().find(|s| s.name() == key).cloned())
+        let cached = self.stream_cached(key).or_else(|| self.streams.read().unwrap().values().find(|s| s.name() == key).cloned());
+        cached.or_else(|| self.fleet.as_ref().and_then(|_| self.stream_from_catalog(key)))
     }
 
     /// Create a stream and its first API key: `(stream, credential, secret)`.
@@ -379,7 +501,11 @@ impl Broker {
             return Err(KafkaError::new(ResponseError::DuplicateResource, format!("stream {name} already exists")));
         }
         let row = StreamRow { id: new_id("st"), name: name.into(), region: "local".into(), created_at: now(), settings };
-        self.store.insert_stream(&row).map_err(KafkaError::internal)?;
+        self.store.insert_stream(&row).map_err(|e| match crate::store::is_duplicate(&e) {
+            // Another node created it at the same moment.
+            true => KafkaError::new(ResponseError::DuplicateResource, format!("stream {name} already exists")),
+            false => KafkaError::internal(e),
+        })?;
         let (cred, secret) = auth::new_credential(&row.id, "default");
         self.store.insert_credential(&cred).map_err(KafkaError::internal)?;
         let stream = Arc::new(self.stream_from(row));
@@ -405,10 +531,15 @@ impl Broker {
         for t in stream.topics() {
             self.delete_topic(&stream, &t).await?;
         }
+        self.store.delete_stream(&stream.id).map_err(KafkaError::internal)?;
         self.groups.drop_stream(&stream.id);
         self.txns.drop_stream(&stream.id);
-        self.store.delete_stream(&stream.id).map_err(KafkaError::internal)?;
         self.streams.write().unwrap().remove(&stream.id);
+        if let Some(f) = &self.fleet {
+            // Nobody owns a deleted stream (the lease goes once this request is done).
+            stream.tenure.set_gone();
+            f.cluster.retire(&crate::fleet::key(&stream.id));
+        }
         let objects = self.objects.clone();
         let prefix = config::stream_prefix(&stream.id);
         tokio::spawn(async move {
@@ -507,6 +638,10 @@ impl Broker {
     }
 
     pub async fn delete_topic(&self, stream: &Stream, topic: &Arc<Topic>) -> Result<()> {
+        if topic.deleted.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        self.store.delete_topic(&stream.id, &topic.id, &topic.name).map_err(KafkaError::internal)?;
         if topic.deleted.swap(true, Ordering::SeqCst) {
             return Ok(());
         }
@@ -515,8 +650,6 @@ impl Broker {
             m.by_name.remove(&topic.name);
             m.by_id.remove(&topic.id);
         }
-        self.store.delete_topic(&topic.id).map_err(KafkaError::internal)?;
-        self.store.delete_topic_offsets(&stream.id, &topic.name).map_err(KafkaError::internal)?;
         self.groups.topic_deleted(&stream.id, &topic.name);
         for p in topic.partitions() {
             p.log.lock().unwrap().take();
@@ -549,7 +682,7 @@ impl Broker {
         if validate_only {
             return Ok(());
         }
-        self.store.set_partitions(&topic.id, count).map_err(KafkaError::internal)?;
+        self.store.set_partitions(&stream.id, &topic.id, count).map_err(KafkaError::internal)?;
         let mut parts = topic.partitions.write().unwrap();
         for i in current..count {
             parts.push(Partition::new(topic, i));
@@ -563,7 +696,7 @@ impl Broker {
         if validate_only {
             return Ok(());
         }
-        self.store.set_configs(&topic.id, &configs).map_err(KafkaError::internal)?;
+        self.store.set_configs(&topic.stream_id, &topic.id, &configs).map_err(KafkaError::internal)?;
         let effective = topic_config::effective(&configs, &self.config.topics);
         let log_config = self.log_config(&effective);
         *topic.configs.write().unwrap() = configs;
@@ -589,6 +722,7 @@ impl Broker {
             tail_cache_bytes: self.config.tail_cache_bytes,
             tail_budget: Some(self.tail_budget.clone()),
             leader_epoch: 0,
+            remote: self.fleet.is_some(),
         }
     }
 
@@ -605,6 +739,11 @@ impl Broker {
         }
         if topic.deleted.load(Ordering::SeqCst) {
             return Err(KafkaError::code(ResponseError::UnknownTopicOrPartition));
+        }
+        // The fleet: only the stream's owner opens its partitions (another node's copy would be
+        // stale), and only while it serves it.
+        if self.fleet.is_some() && !self.stream_cached(&topic.stream_id).is_some_and(|s| self.serves(&s)) {
+            return Err(KafkaError::code(ResponseError::NotLeaderOrFollower));
         }
         let recovered = (|| -> anyhow::Result<Recovered> {
             Ok(Recovered {
@@ -623,11 +762,23 @@ impl Broker {
         Ok(log)
     }
 
-    /// Queue a group-commit fsync for a log.
-    pub fn request_flush(&self, p: &Arc<Partition>, log: &Arc<Log>) {
+    /// Make what was just appended (`bytes` of it) durable: queue a group-commit fsync, or on the
+    /// fleet the next write-ahead log object.
+    pub fn request_flush(&self, p: &Arc<Partition>, log: &Arc<Log>, bytes: usize) {
+        if self.fleet.is_some() {
+            if let Some(s) = self.stream_cached(&p.stream_id) {
+                s.tenure.appended(p, bytes);
+            }
+            return;
+        }
         if self.config.fsync && !p.flush_queued.swap(true, Ordering::AcqRel) {
             let _ = self.flush_tx.send((p.clone(), log.clone()));
         }
+    }
+
+    /// Whether acknowledgements wait for durability (fsync, or object storage on the fleet).
+    pub fn acks_wait(&self) -> bool {
+        self.config.fsync || self.fleet.is_some()
     }
 
     /// Bytes of a chunk, from the cache or object storage.
@@ -679,11 +830,11 @@ impl Broker {
         let policy = self.retention(&topic.effective());
         let cleaned = log.clean(now_ms(), policy, truncate_to);
         if cleaned.start_moved {
-            self.store.set_log_start(&topic.id, p.index, cleaned.log_start).map_err(KafkaError::storage)?;
+            self.store.set_log_start(&stream.id, &topic.id, p.index, cleaned.log_start).map_err(KafkaError::storage)?;
         }
         if !cleaned.removed_chunks.is_empty() {
             let firsts: Vec<i64> = cleaned.removed_chunks.iter().map(|c| c.first).collect();
-            self.store.delete_chunks(&topic.id, p.index, &firsts).map_err(KafkaError::storage)?;
+            self.store.delete_chunks(&stream.id, &topic.id, p.index, &firsts).map_err(KafkaError::storage)?;
             for c in &cleaned.removed_chunks {
                 self.remote.remove(&c.key);
                 if let Err(e) = self.objects.delete(&c.key).await {
@@ -700,6 +851,11 @@ impl Broker {
     /// Run the background loops forever.
     pub async fn run(self: Arc<Self>) {
         let rx = self.flush_rx.lock().unwrap().take().expect("run once");
+        let ownership = async {
+            if self.fleet.is_some() {
+                self.clone().follow_ownership().await;
+            }
+        };
         tokio::join!(
             self.clone().flusher(rx),
             self.clone().uploader(),
@@ -707,6 +863,7 @@ impl Broker {
             self.clone().meter(),
             crate::groups::run(self.clone()),
             crate::txn::run(self.clone()),
+            ownership,
         );
     }
 
@@ -753,8 +910,18 @@ impl Broker {
 
     /// Upload everything that's due (or everything durable, with `force`). Returns chunks written.
     pub async fn upload_once(&self, force: bool) -> usize {
+        self.upload_partitions(self.loaded_partitions(), force).await
+    }
+
+    /// Upload everything one stream's open partitions hold (a handoff).
+    pub async fn upload_stream(&self, s: &Arc<Stream>) -> usize {
+        let jobs = self.loaded_partitions().into_iter().filter(|(st, _, _, _)| Arc::ptr_eq(st, s)).collect();
+        self.upload_partitions(jobs, true).await
+    }
+
+    async fn upload_partitions(&self, jobs: Vec<Loaded>, force: bool) -> usize {
         let cfg = &self.config.upload;
-        let jobs = self.loaded_partitions().into_iter().filter(|(_, _, p, _)| !p.uploading.load(Ordering::Acquire));
+        let jobs = jobs.into_iter().filter(|(_, _, p, _)| !p.uploading.load(Ordering::Acquire));
         let (min, age) = if force { (1, 0) } else { (cfg.min_bytes, cfg.max_age_ms) };
         let futs = jobs.map(|(s, t, p, log)| async move {
             p.uploading.store(true, Ordering::Release);
@@ -778,14 +945,14 @@ impl Broker {
         let plan_c = plan.clone();
         let data = tokio::task::spawn_blocking(move || Log::read_upload(&plan_c)).await??;
         let span = batch::summarize(&data).ok_or_else(|| anyhow::anyhow!("nothing to upload"))?;
-        let key = config::chunk_key(&s.id, &t.id, p.index, span.first, span.last);
+        let key = config::chunk_key(&s.id, &t.id, p.index, span.first, span.last, self.tenure_of(s)?);
         let chunk = Chunk { first: span.first, last: span.last, max_timestamp: span.max_timestamp, bytes: data.len() as u64, key };
         self.objects.put(&chunk.key, data).await?;
         s.usage.puts.fetch_add(1, Ordering::Relaxed);
         if t.deleted.load(Ordering::SeqCst) {
             return Ok(());
         }
-        self.store.insert_chunk(&t.id, p.index, &chunk, now())?;
+        self.store.insert_chunk(&s.id, &t.id, p.index, &chunk, now())?;
         log.uploaded(plan, chunk, now_ms());
         Ok(())
     }
@@ -802,18 +969,23 @@ impl Broker {
     /// Retention and compaction for every partition with data, then unload idle partitions.
     /// Closed partitions are skipped until something in them can be due, so an idle broker
     /// touches neither disk nor object storage.
-    pub async fn clean_once(&self) {
+    pub async fn clean_once(self: &Arc<Self>) {
         let now = now_ms();
         let cutoff = now - self.config.idle_unload_ms;
         let producer_cutoff = now_ms() - self.config.txn.producer_id_expiration_ms;
-        for s in self.streams() {
+        for s in self.served_streams() {
+            if self.fleet.is_some()
+                && let Err(e) = self.gc_wal(&s).await
+            {
+                debug!(stream = %s.id, error = %e, "deleting write-ahead log objects");
+            }
             for t in s.topics() {
                 for p in t.partitions() {
                     let had = p.loaded().is_some();
                     if !had && now < p.next_clean_ms.load(Ordering::Relaxed) {
                         continue;
                     }
-                    let has_data = had || self.config.partition_dir(&t.id, p.index).exists();
+                    let has_data = had || p.remote_data.load(Ordering::Relaxed) || self.config.partition_dir(&t.id, p.index).exists();
                     if !has_data {
                         continue;
                     }
@@ -879,6 +1051,9 @@ impl Broker {
             && !log.needs_flush()
             && log.stats().pending_upload_bytes == 0
             && !p.uploading.load(Ordering::Acquire)
+            // The fleet: a new owner rebuilds an open transaction from the write-ahead log,
+            // which is kept only while the partition is open.
+            && (self.fleet.is_none() || log.open_txns().is_empty())
         {
             let e = t.effective();
             let compaction = e.compact.then_some(CompactionPolicy {
@@ -929,7 +1104,7 @@ impl Broker {
 
     pub async fn sample_storage(&self) {
         let remote = self.store.remote_bytes().unwrap_or_default();
-        for s in self.streams() {
+        for s in self.served_streams() {
             let dirs: Vec<_> = s.topics().iter().map(|t| self.config.topic_dir(&t.id)).collect();
             let local = tokio::task::spawn_blocking(move || dirs.iter().map(|d| dir_size(d)).sum::<u64>()).await.unwrap_or(0);
             let sample =
@@ -940,8 +1115,24 @@ impl Broker {
         }
     }
 
+    /// The fleet: this node's tenure of `s` (`None` on one node), for object keys an owner that
+    /// lost the stream can never write again.
+    pub(crate) fn tenure_of(&self, s: &Stream) -> anyhow::Result<Option<i64>> {
+        match self.fleet {
+            None => Ok(None),
+            Some(_) => self.store.tenure(&s.id).map(Some).ok_or_else(|| crate::store::Fenced(s.id.clone()).into()),
+        }
+    }
+
     /// Make everything durable and uploaded (shutdown, tests).
-    pub async fn sync_all(&self) {
+    pub async fn sync_all(self: &Arc<Self>) {
+        if self.fleet.is_some() {
+            for s in self.served_streams() {
+                if let crate::fleet::Serving::Yes { generation, .. } = s.tenure.serving() {
+                    let _ = self.flush_wal(&s, generation).await;
+                }
+            }
+        }
         for (_, _, _, log) in self.loaded_partitions() {
             let _ = tokio::task::spawn_blocking(move || {
                 log.flush()?;

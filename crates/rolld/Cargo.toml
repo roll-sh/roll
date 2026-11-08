@@ -17,6 +17,7 @@ code-control.workspace = true
 code-preview.workspace = true
 futures.workspace = true
 http-body.workspace = true
+kafka-protocol.workspace = true
 libc.workspace = true
 libmimalloc-sys.workspace = true
 mimalloc.workspace = true
