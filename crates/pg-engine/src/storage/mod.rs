@@ -2011,7 +2011,7 @@ impl Cursor {
                     && let Some(b) = block.as_ref()
                     && b.last_key().is_some_and(|k| k >= start)
                 {
-                    b.seek(start, pos);
+                    b.seek_on(start, pos);
                     if pos.index() > 0 {
                         *whole = end.is_empty() || b.last_key().is_none_or(|k| k < end);
                         return;
@@ -2311,7 +2311,7 @@ impl Cursor {
                         return;
                     }
                     if b.last_key().is_some_and(|k| k >= target) {
-                        b.seek(target, pos);
+                        b.seek_on(target, pos);
                         return;
                     }
                 }

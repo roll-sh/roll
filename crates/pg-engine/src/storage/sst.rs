@@ -822,6 +822,36 @@ impl Block {
         self.step(pos);
     }
 
+    /// `seek` from `pos`, an entry of this block: ascending lookups find the next key where
+    /// they are or a few entries on (a nested loop's inner rows, an index's fetches), without
+    /// a search. `pos` is at the first entry >= `key` when its key is >= `key` and the entry
+    /// before is below it: it shares less with this one than `key` does (`shared` is what
+    /// they share where it stops before the version; not at a restart, which shares nothing).
+    pub fn seek_on(&self, key: &[u8], pos: &mut BlockPos) {
+        if pos.i < self.len {
+            let k = pos.key.as_slice();
+            if k >= key {
+                let shared = pos.shared as usize;
+                let below = pos.i == 0
+                    || (!pos.i.is_multiple_of(RESTART)
+                        && shared + 8 < k.len()
+                        && key.len() > shared
+                        && key[..shared + 1] == k[..shared + 1]);
+                if below {
+                    return;
+                }
+            } else {
+                for _ in 0..4 {
+                    self.step(pos);
+                    if pos.i >= self.len || pos.key.as_slice() >= key {
+                        return;
+                    }
+                }
+            }
+        }
+        self.seek(key, pos)
+    }
+
     /// The value at `pos` (None: a tombstone).
     pub fn value(&self, pos: &BlockPos) -> Option<Bytes> {
         match pos.val_len {
