@@ -4129,10 +4129,11 @@ fn by_prefix(order: &mut Vec<(u128, usize)>) {
             continue;
         }
         last = Some(p);
-        match prefixes.iter_mut().find(|e| e.0 == p) {
-            Some(_) => {}
-            None if prefixes.len() < 16 => prefixes.push((p, 0)),
-            None => return,
+        if !prefixes.iter().any(|e| e.0 == p) {
+            if prefixes.len() == 16 {
+                return;
+            }
+            prefixes.push((p, 0));
         }
     }
     if prefixes.len() < 2 {
