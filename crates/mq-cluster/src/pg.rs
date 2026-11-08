@@ -62,20 +62,13 @@ impl PgMeta {
             _ => Some(MakeRustlsConnect::new(tls_config(ca)?)),
         };
         let client = open(&config, tls.as_ref()).await?;
-        // Nodes starting together race to create the schema; the loser's error is harmless.
-        if let Err(e) = client.batch_execute("CREATE SCHEMA IF NOT EXISTS mq").await
-            && client.query_opt("SELECT 1 FROM pg_namespace WHERE nspname = 'mq'", &[]).await?.is_none()
-        {
-            return Err(e.into());
-        }
-        client.batch_execute(MIGRATE).await?;
-        // One statement per transaction. As one batch (a single transaction) the index's table
-        // lock (taken even when the index exists) would be held while the version row waits for
-        // another node's running write, and that write's insert into the table would deadlock
-        // with it.
-        for statement in SCHEMA.split(';').map(str::trim).filter(|s| !s.is_empty()) {
-            client.batch_execute(statement).await?;
-        }
+        // Nodes starting together would race their `IF NOT EXISTS` statements (Postgres fails the
+        // loser on a catalog unique index): they take turns on a session advisory lock. Writers
+        // never take it, so it can't deadlock with them.
+        client.batch_execute(&format!("SELECT pg_advisory_lock({SCHEMA_LOCK})")).await?;
+        let created = create_schema(&client).await;
+        client.batch_execute(&format!("SELECT pg_advisory_unlock({SCHEMA_LOCK})")).await?;
+        created?;
         Ok(Arc::new(PgMeta { client: Mutex::new(client), config, tls, url: redact(url) }))
     }
 
@@ -127,6 +120,21 @@ impl PgMeta {
         tx.commit().await?;
         Ok(Some(v))
     }
+}
+
+/// The advisory lock nodes take turns on while they create the schema ("mq" in ASCII).
+const SCHEMA_LOCK: i64 = 0x6d71_5f73_6368;
+
+async fn create_schema(client: &Client) -> anyhow::Result<()> {
+    client.batch_execute("CREATE SCHEMA IF NOT EXISTS mq").await?;
+    client.batch_execute(MIGRATE).await?;
+    // One statement per transaction. As one batch (a single transaction) the index's table lock
+    // (taken even when the index exists) would be held while the version row waits for another
+    // node's running write, and that write's insert into the table would deadlock with it.
+    for statement in SCHEMA.split(';').map(str::trim).filter(|s| !s.is_empty()) {
+        client.batch_execute(statement).await?;
+    }
+    Ok(())
 }
 
 async fn open(config: &tokio_postgres::Config, tls: Option<&MakeRustlsConnect>) -> anyhow::Result<Client> {

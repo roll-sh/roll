@@ -502,6 +502,17 @@ pushes take as long as the pack); `handoff-failures` and `lease-takeovers` on an
   `ROLL_BUCKET_DOMAIN`) and by path on the zone (`roll.site/<bucket>/<key>`); set the deployment's
   CDN `base_url` to `https://roll.site` so purges reach both. Bucket names starting `chg-` are
   reserved for previews.
+- **Queues' confirm latency.** Queue logs are S3 Standard objects, group-committed per node: a
+  publisher confirm waits about 73 ms p50 (240 ms p99) with S3's latency modelled at 25 ± 10 ms per
+  request (docs/benchmarks/queues-fleet.md), so one queue's throughput is its confirm window over
+  that. Keepers embedded in the nodes (a 2-of-3 quorum across zones on local disks) would confirm
+  in about 2 ms, but need dynamic quorum membership and re-replication as nodes come and go
+  (docs/queues/storage.md, "On roll cloud"). Pipelining the object log's appends would bring S3
+  towards one PUT per confirm. Not yet measured against real S3.
+- **RabbitMQ Streams behind the edge.** Stream clients ask `Metadata` for a stream's leader and get
+  a node's own address back, which they can't reach from outside. It needs the fix Kafka has:
+  advertise the hostname the client used (`<id>.mq.<region>.roll.sh:5551`) and let the edge reach
+  the owner.
 - **Flaky tests seen on GitHub** (each passed on a plain re-run, and on main): redis
   `compat_debug_with_redis` (`search_hnsw.txt`, `FT.INFO` while the vector index is still
   building), nosql conformance `test_compaction.py::test_tombstone_gc_with_conflict_in_memtable`,

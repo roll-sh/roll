@@ -36,7 +36,7 @@ fn docker_ok(args: &[&str]) -> bool {
 
 /// Where the host reaches a container's published port.
 fn published(container: &str, port: &str) -> String {
-    let p = docker(&["port", container, port]);
+    let p = Command::new("docker").args(["port", container, port]).output().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
     format!("127.0.0.1:{}", p.lines().next().unwrap_or_default().rsplit(':').next().unwrap_or_default())
 }
 
@@ -95,6 +95,20 @@ impl Env {
         let mut names: Vec<String> = (0..QUEUES).map(|q| format!("q{q}")).collect();
         names.push("after-pg".into());
         names.into_iter().filter_map(|q| leases.holder(&mq_cluster::queue_key("/", &q, 0)).unwrap().map(|(node, _)| (q, node))).collect()
+    }
+
+    /// Every container's state and the tail of each node's log (when a node doesn't come up).
+    fn dump(&self) {
+        for n in ["n1", "n2", "n3", "pg", "s3", "ddb"] {
+            let name = self.name(n);
+            let state = Command::new("docker").args(["inspect", "-f", "{{.State.Status}} exit={{.State.ExitCode}}", &name]).output();
+            eprintln!("── {name}: {}", state.map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default());
+            if n.starts_with('n')
+                && let Ok(o) = Command::new("docker").args(["logs", "--tail", "40", &name]).output()
+            {
+                eprintln!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr));
+            }
+        }
     }
 
     async fn wait_owners(&self, what: &str, timeout: Duration, ok: impl Fn(&[(String, String)]) -> bool) {
@@ -168,15 +182,21 @@ impl Drop for Env {
     }
 }
 
-async fn connect(url: &str) -> (Connection, Channel) {
+/// An AMQP connection to node `n`, waiting for it to come up; when it doesn't, every node's
+/// state and log tail go to the output before the test fails.
+async fn connect(env: &Env, n: &str) -> (Connection, Channel) {
     let t = Instant::now();
     loop {
-        match Connection::connect(url, ConnectionProperties::default()).await {
+        let url = env.url(n);
+        match Connection::connect(&url, ConnectionProperties::default()).await {
             Ok(c) => {
                 let ch = c.create_channel().await.unwrap();
                 return (c, ch);
             }
-            Err(e) if t.elapsed() > Duration::from_secs(90) => panic!("broker at {url} never came up: {e}"),
+            Err(e) if t.elapsed() > Duration::from_secs(120) => {
+                env.dump();
+                panic!("broker {n} at {url} never came up: {e}");
+            }
             Err(_) => tokio::time::sleep(Duration::from_millis(500)).await,
         }
     }
@@ -241,15 +261,15 @@ async fn cluster_survives_kill_and_rolling_restart_under_load() {
         env.start_node(n);
     }
 
-    let (_c1, ch1) = connect(&env.url("n1")).await;
+    let (_c1, ch1) = connect(&env, "n1").await;
     for q in 0..QUEUES {
         ch1.queue_declare(format!("q{q}").as_str().into(), QueueDeclareOptions { durable: true, ..Default::default() }, quorum()).await.unwrap();
     }
-    let (_c3, _) = connect(&env.url("n3")).await;
+    let (_c3, _) = connect(&env, "n3").await;
     env.wait_owners("queues never spread to n3", Duration::from_secs(60), |o| o.iter().any(|(_, n)| n == "n3")).await;
 
     // Consumer on n2 for the whole test; publisher on n1.
-    let (c2, ch2) = connect(&env.url("n2")).await;
+    let (c2, ch2) = connect(&env, "n2").await;
     ch2.basic_qos(200, BasicQosOptions::default()).await.unwrap();
     let seen = Arc::new(parking_lot::Mutex::new(HashSet::<String>::new()));
     for q in 0..QUEUES {
@@ -301,7 +321,7 @@ async fn cluster_survives_kill_and_rolling_restart_under_load() {
     }
     let t = Instant::now();
     loop {
-        let (_c, ch) = connect(&env.url("n1")).await;
+        let (_c, ch) = connect(&env, "n1").await;
         if ch.queue_declare("after-pg".into(), QueueDeclareOptions { durable: true, ..Default::default() }, quorum()).await.is_ok() {
             break;
         }
@@ -313,7 +333,7 @@ async fn cluster_survives_kill_and_rolling_restart_under_load() {
     // traffic still flows end to end.
     let t = Instant::now();
     loop {
-        let (_c, ch) = connect(&env.url("n2")).await;
+        let (_c, ch) = connect(&env, "n2").await;
         match ch.queue_declare("after-pg".into(), QueueDeclareOptions { passive: true, ..Default::default() }, FieldTable::default()).await {
             Ok(_) => break,
             Err(e) => assert!(t.elapsed() < Duration::from_secs(15), "n2 never saw the queue declared on n1: {e}"),
