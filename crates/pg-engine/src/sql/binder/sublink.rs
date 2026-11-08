@@ -226,6 +226,20 @@ fn reads_outer(e: &Expr) -> bool {
     found
 }
 
+/// A correlated sublink's quals as the join's (`corr`) and its right side's (`local`): for
+/// an anti join a variable-free one (an InitPlan's value) is the join's too, a join filter,
+/// as distribute_qual_to_rels places a pseudoconstant qual of an outer join's ON clause at
+/// its scope, not as a gating qual of the right side.
+fn joined_quals((mut corr, local): (Vec<Expr>, Vec<Expr>), anti: bool) -> (Vec<Expr>, Vec<Expr>) {
+    if corr.is_empty() || !anti {
+        return (corr, local);
+    }
+    let (free, local): (Vec<Expr>, Vec<Expr>) =
+        local.into_iter().partition(|e| e.columns().is_empty() && !e.has_outer_refs() && !crate::sql::explain::expr_volatile_deep(e));
+    corr.extend(free);
+    (corr, local)
+}
+
 /// The scan as the right side of the join: its own quals only, its path chosen again.
 fn rhs_scan(s: &ScanPlan, filter: Option<Expr>) -> Plan {
     let mut s = s.clone();
@@ -243,13 +257,13 @@ fn rhs_scan(s: &ScanPlan, filter: Option<Expr>) -> Plan {
 /// Its quals that read the outer query (over its row: the same for every member), the
 /// right side with its own quals only, its column types, and whether a member scan has a
 /// LIMIT pushed into it.
-fn sub_rel(p: &Plan) -> Option<(Vec<Expr>, Plan, Vec<crate::types::DataType>, bool)> {
+fn sub_rel(p: &Plan, anti: bool) -> Option<(Vec<Expr>, Plan, Vec<crate::types::DataType>, bool)> {
     let split = |s: &ScanPlan| {
         let mut parts = Vec::new();
         if let Some(f) = &s.filter {
             conjuncts(f.clone(), &mut parts);
         }
-        parts.into_iter().partition::<Vec<Expr>, _>(reads_outer)
+        joined_quals(parts.into_iter().partition::<Vec<Expr>, _>(reads_outer), anti)
     };
     if let Some(s) = plain_scan(p) {
         let (corr, local) = split(s);
@@ -258,14 +272,19 @@ fn sub_rel(p: &Plan) -> Option<(Vec<Expr>, Plan, Vec<crate::types::DataType>, bo
     }
     // A system catalog: the same.
     if let Plan::SysScan { table, filter, alias, mark, .. } = p {
-        if filter.as_ref().is_some_and(|f| has_sublink(f) || deep_outer(f)) {
+        // (Its sub-selects go along as a table's do: an EF Core NOT EXISTS over pg_depend
+        // with an InitPlan for the classid.)
+        let subs = EXISTS_SUBLINKS.with(|c| c.get());
+        if filter.as_ref().is_some_and(|f| {
+            deep_outer(f) || if subs { has_aggregates(f) || !shallow_sublinks(f) } else { has_sublink(f) }
+        }) {
             return None;
         }
         let mut parts = Vec::new();
         if let Some(f) = filter {
             conjuncts(f.clone(), &mut parts);
         }
-        let (corr, local): (Vec<Expr>, Vec<Expr>) = parts.into_iter().partition(reads_outer);
+        let (corr, local) = joined_quals(parts.into_iter().partition(reads_outer), anti);
         let types = table.columns().iter().map(|(_, t)| t.clone()).collect();
         return Some((
             corr,
@@ -607,7 +626,7 @@ fn sub_join(p: &Plan) -> Option<(Vec<Expr>, Plan)> {
             // An inheritance / partition tree's member scans (`sub_rel`): its clauses
             // reading the outer query move up with the rest.
             Plan::Append { inh: Some(_), .. } => {
-                let (c, rhs, _, limited) = sub_rel(p)?;
+                let (c, rhs, _, limited) = sub_rel(p, false)?;
                 if limited || (!c.is_empty() && !pull) {
                     return None;
                 }
@@ -1097,7 +1116,7 @@ fn exists_join(
     }
     let rel = {
         let _g = crate::scoped::set(&EXISTS_SUBLINKS, true, "sublink::EXISTS_SUBLINKS");
-        sub_rel(p)
+        sub_rel(p, anti)
     };
     let (corr, rhs, _, scan_limited) = match rel {
         Some(x) => x,
@@ -1678,7 +1697,7 @@ fn any_join(cat: &Catalog, plan: &Plan, sub: &Subquery, unplanned: &Unplanned) -
     };
     let rel = {
         let _g = crate::scoped::set(&EXISTS_SUBLINKS, true, "sublink::EXISTS_SUBLINKS");
-        sub_rel(p)
+        sub_rel(p, false)
     };
     let (corr, rhs, types, scan_limited) = match rel {
         Some(x) => x,
