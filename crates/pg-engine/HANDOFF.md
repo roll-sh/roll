@@ -3264,6 +3264,45 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
     and `pnpm test:pg` verification remains pending for the verification train. No storage
     format, durability or mode-default setting changed in this batch. No benchmark ran.
     The owned a189 runtimes are stopped; checkout, cache and WIP remain for the coordinator.
+  - **Initplan startup follow-up, 2026-11-08 (a189)**: the saved empty-ANY probe also
+    returned zero on clean `61afb498b`. PostgreSQL 18.6's default plan has a Gather
+    above the join and raises `22012`; forcing serial hash joins returns zero. This
+    is a plan/startup boundary discrepancy, not permission to evaluate ANY's left
+    operand eagerly. The pre-round-11 binary from `19df462eb` reproduces it too.
+    PostgreSQL's `ExecInitParallelPlan` forces the initplan outputs sent to workers.
+    Two engine boundaries were missing: EXPLAIN's `safe_tree` rejected the pure
+    distinct HashAggregate used by the semi join, and Gather parts never initialized
+    the independent subquery values they read before running their children.
+    The correction admits parallel-safe DISTINCT inputs in `safe_tree`, records each
+    Gather part's referenced independent initplans, and runs that startup work through
+    the existing `WorkerPart` before its first execution or worker pipeline. The
+    statement's existing `subq_cache` owns the values. Serial plans, unstarted parts,
+    ordinary row expressions and initplans used only above the Gather remain lazy.
+    No scan eligibility, ANY evaluator, storage format, durability or mode setting
+    changed. The previous `nextval` ordering golden remains the control.
+    Golden `a189_initplan_startup` is recorded from PostgreSQL 18.6. It covers the
+    original error, empty input and right side, NULL semantics, LIMIT 0, unused target
+    initplans, serial controls, generic/custom executions and error transaction state.
+    The same boundary also fixes the documented false-first filter under a Gather.
+    Final focused receipts are for `87b34c64bc17e8ec55b39238f925957d370f4271`, tree
+    `b15e5a8ec920d97aa81da9d031fbefa4f5a617d5`, rebased over storage191's `72007ce57`.
+    The release build, seven goldens in embedded/wire/shuffled execution, all eleven
+    `parallel_scan` tests and all-target release Clippy pass. Clippy retains the existing
+    benchmark-example warning. The old golden binary fails the new fixture with exit
+    101 on the actual zero-versus-22012 difference. Efficient and performance standalone
+    servers match the complete PostgreSQL behavioral transcript. Direct and SPI
+    EXPLAIN ANALYZE return the same error too. Before/after source manifests agree:
+    `11e71c9b96e2c1bd73b158d15418575210fb6d0b45ee8566b7c906c83cd1c848`.
+    Logs, binary hashes and actual command exits are in `~/.cache/a189/logs/gap-*`;
+    `~/.cache/a189/scripts/audit-gap.py` regenerates `logs/audit-gap.json`. Earlier
+    preliminary receipts are retained under `logs/gap-preintegration/`.
+    Scope remains the Gather parts registered by a top-level query execution with a
+    concrete executor plan node. This does not redesign Gather placement, synthetic
+    parts without a plan key, separate function/subquery query levels, or the parallel
+    worker lifecycle. EXPLAIN ANALYZE, directly and through SPI, registers the same
+    startup work. Other function, CTAS and SPI query execution paths are not covered
+    by this change. The earlier regress receipt's one `join:1479` EXPLAIN difference is
+    outside this focused run. Full combined verification remains pending.
   - Found, for other owners:
     - A separate exploratory probe of the saved release binary found an aggregate/initplan
       gap: over the golden's nonempty `a189_t` and empty `a189_e`,
