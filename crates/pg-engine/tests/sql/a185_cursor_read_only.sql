@@ -1,0 +1,56 @@
+-- A cursor whose query locks rows can't be WITH HOLD, SCROLL or INSENSITIVE
+-- (transformDeclareCursorStmt): its error names the first locking clause's strength.
+CREATE TABLE a185_c (id int PRIMARY KEY, v int);
+INSERT INTO a185_c SELECT g, g % 3 FROM generate_series(1, 6) g;
+BEGIN;
+DECLARE c1 SCROLL CURSOR FOR SELECT * FROM a185_c FOR UPDATE;
+ROLLBACK;
+BEGIN;
+DECLARE c2 CURSOR WITH HOLD FOR SELECT * FROM a185_c FOR SHARE;
+ROLLBACK;
+-- (Outside a transaction block too: checked when the query is analyzed.)
+DECLARE c3 CURSOR WITH HOLD FOR SELECT * FROM a185_c FOR KEY SHARE;
+BEGIN;
+DECLARE c4 INSENSITIVE CURSOR FOR SELECT * FROM a185_c FOR NO KEY UPDATE;
+ROLLBACK;
+BEGIN;
+DECLARE c5 SCROLL CURSOR WITH HOLD FOR SELECT * FROM a185_c FOR UPDATE;
+ROLLBACK;
+BEGIN;
+DECLARE c6 SCROLL CURSOR FOR SELECT * FROM a185_c FOR SHARE OF a185_c FOR UPDATE OF a185_c;
+ROLLBACK;
+-- The first FROM relation of an untargeted clause can be nested inside a join.
+BEGIN;
+DECLARE cj SCROLL CURSOR FOR SELECT a.id FROM a185_c a JOIN a185_c b USING (id) FOR SHARE FOR UPDATE OF a;
+ROLLBACK;
+-- Explicit OF order determines the first row mark.
+BEGIN;
+DECLARE co SCROLL CURSOR FOR SELECT a.id FROM a185_c a JOIN a185_c b USING (id) FOR SHARE OF b,a FOR UPDATE OF a;
+ROLLBACK;
+-- A clause with no lockable relation adds no row mark.
+BEGIN;
+DECLARE cc SCROLL CURSOR FOR SELECT 1 FOR UPDATE;
+FETCH cc;
+ROLLBACK;
+BEGIN;
+DECLARE cq SCROLL CURSOR FOR WITH q AS (SELECT 1 AS id) SELECT * FROM q FOR UPDATE;
+FETCH cq;
+ROLLBACK;
+-- An anonymous FROM subquery still has a row mark of its own.
+BEGIN;
+DECLARE ca SCROLL CURSOR FOR SELECT * FROM (SELECT 1 AS id) FOR UPDATE;
+ROLLBACK;
+-- A locking clause in a subquery isn't the cursor's own.
+BEGIN;
+DECLARE c7 SCROLL CURSOR FOR SELECT * FROM (SELECT * FROM a185_c FOR UPDATE) s;
+FETCH LAST FROM c7;
+ROLLBACK;
+BEGIN;
+DECLARE c8 NO SCROLL CURSOR FOR SELECT * FROM a185_c WHERE id = 2 FOR UPDATE;
+FETCH c8;
+ROLLBACK;
+-- Through SPI.
+BEGIN;
+DO $$ BEGIN EXECUTE 'DECLARE c9 SCROLL CURSOR FOR SELECT * FROM a185_c FOR UPDATE'; END $$;
+ROLLBACK;
+DROP TABLE a185_c;
