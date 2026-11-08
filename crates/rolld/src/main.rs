@@ -948,5 +948,14 @@ mod tests {
         let mut config = code_control::Config::local(PathBuf::from("/tmp/x"));
         single.code.apply(&mut config, "h", "0.0.0.0:1".parse().unwrap()).unwrap();
         assert!(config.database.is_some() && config.cluster.is_none());
+        // The stack sets only the system database: code's data goes there, unless named.
+        let system = Args::parse_from(["rolld", "--system-database", "postgres://sys/roll", "--cluster-secret", "0123456789abcdef0123"]);
+        let mut config = code_control::Config::local(PathBuf::from("/tmp/x"));
+        system.code.apply(&mut config, "h", "0.0.0.0:1".parse().unwrap()).unwrap();
+        assert_eq!(config.database.unwrap().url, "postgres://sys/roll");
+        let both = Args::parse_from(["rolld", "--system-database", "postgres://sys/roll", "--code-database", "postgres://code/roll"]);
+        let mut config = code_control::Config::local(PathBuf::from("/tmp/x"));
+        both.code.apply(&mut config, "h", "0.0.0.0:1".parse().unwrap()).unwrap();
+        assert_eq!(config.database.unwrap().url, "postgres://code/roll");
     }
 }

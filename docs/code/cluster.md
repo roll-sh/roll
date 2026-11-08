@@ -32,8 +32,8 @@ releases or deletes leases, each as one atomic step.
 | Postgres | `postgres` (the default with a cluster secret) | `code_nodes` and `code_leases` in code's database (`code_control`) | heartbeats and `expires_at` on the database's clock |
 | DynamoDB | `dynamodb` | one table (`ROLL_CLUSTER_TABLE`, `roll-cluster`) | no clocks compared: a token each node rewrites, watched by the others (below) |
 
-Only leases and membership move to DynamoDB: code's data stays in Postgres (`--code-database`),
-so a DynamoDB cluster still needs it.
+Only leases and membership move to DynamoDB: code's data stays in Postgres, so a DynamoDB
+cluster still needs one (see "Code's database" below).
 
 ### DynamoDB
 
@@ -86,6 +86,14 @@ number scheme, with one record per node instead of one per lock:
 | file contents | object storage | S3 (required: a local directory isn't shared) |
 | code index (search, symbols) | `code/index/` | each repo's owner, rebuilt by a new owner |
 | work trees, check and preview containers | local | the repo's owner |
+
+### Code's database
+
+Code's Postgres is `--code-database` (`ROLL_CODE_DATABASE`) when it's set, else the system
+database every product shares (`--system-database`, `ROLL_SYSTEM_DATABASE`; docs/cloud/README.md,
+"Shared state"), else SQLite under `--home`. Code's two schemas (`code_store`, `code_control`)
+sit next to the other products' there. roll cloud's stack sets only `ROLL_SYSTEM_DATABASE`; set
+`ROLL_CODE_DATABASE` to keep code's data in a Postgres of its own.
 
 Both databases go through `crates/code-sql`: SQL is written once in SQLite's dialect and
 translated for Postgres. A write is one transaction (serializable on Postgres, re-run on
@@ -364,11 +372,12 @@ Add `--cluster-backend dynamodb --cluster-table roll-cluster` (with AWS credenti
 
 | flag (env) | default | |
 | --- | --- | --- |
-| `--code-only` (`ROLL_CODE_ONLY`) | off | run only roll code: no Postgres control plane or proxy, Redis, streams, tasks or queues |
-| `--code-database` (`ROLL_CODE_DATABASE`) | SQLite under `--home` | Postgres for both databases (schemas `code_store`, `code_control`) |
+| `--code-only` (`ROLL_CODE_ONLY`) | off | run only roll code (the same as `ROLL_PRODUCTS=code`): no Postgres control plane or proxy, Redis, streams, tasks or queues |
+| `--code-database` (`ROLL_CODE_DATABASE`) | the system database, else SQLite under `--home` | Postgres for both databases (schemas `code_store`, `code_control`) |
+| `--system-database` (`ROLL_SYSTEM_DATABASE`) | none | the database every product shares; code's when `--code-database` isn't set |
 | `--code-db-connections` (`ROLL_CODE_DB_CONNECTIONS`) | 16 | connections per database per node (plus 4 for leases in a cluster on Postgres) |
 | `--code-db-ca` (`ROLL_CODE_DB_CA`) | system roots | more CA certificates (PEM) for Postgres; TLS follows the URL's `sslmode` |
-| `--cluster-secret` (`ROLL_CLUSTER_SECRET`; alias `--code-cluster-secret`, `ROLL_CODE_CLUSTER_SECRET`) | none: one node | join a cluster; at least 16 bytes, the same on every node; needs `--code-database` and S3 |
+| `--cluster-secret` (`ROLL_CLUSTER_SECRET`; alias `--code-cluster-secret`, `ROLL_CODE_CLUSTER_SECRET`) | none: one node | join a cluster; at least 16 bytes, the same on every node; needs code's Postgres (`--code-database` or `--system-database`) and S3 |
 | `--cluster-backend` (`ROLL_CLUSTER_BACKEND`) | `postgres` with a secret, else `memory` | where leases and membership live (see "Backends") |
 | `--cluster-table` (`ROLL_CLUSTER_TABLE`) | `roll-cluster` | the DynamoDB table; region and credentials from the environment (`AWS_REGION`, the task role) |
 | `--cluster-dynamodb-endpoint` (`ROLL_CLUSTER_DYNAMODB_ENDPOINT`) | AWS | another endpoint (DynamoDB Local) |
