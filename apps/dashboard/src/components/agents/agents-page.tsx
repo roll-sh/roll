@@ -2,7 +2,7 @@
 
 import { DotField, HorizonMark, RollMark, useReducedMotion } from "@roll/brand";
 import { AnimatePresence, motion, useIsPresent } from "motion/react";
-import { Archive, ArrowLeft, ChevronDown, ChevronUp, MoreHorizontal, PanelRightClose, Pin, PinOff, Plus, Search, Server, Settings, Share2, X, Zap } from "lucide-react";
+import { Archive, ArrowLeft, ChevronDown, ChevronUp, MoreHorizontal, PanelRightClose, Pin, PinOff, Plus, RotateCw, Search, Server, Settings, Share2, X, Zap } from "lucide-react";
 import Link from "next/link";
 import { memo, useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { isBusy, reachable, type Thread } from "@/lib/agents-api";
@@ -22,7 +22,8 @@ import { desktop, onDesktopDeepLink, useDesktop } from "@/lib/desktop";
 import { LINK_PARAMS, type IntegrationsLink } from "@/lib/integrations-api";
 import { useModelPrefsSync, useOwnerSettings } from "@/lib/owner-settings";
 import { useMarkState, useMarkStateValue } from "../mark-state";
-import { SignIn } from "../code/sign-in";
+import { SignIn, TokenButton } from "../code/sign-in";
+import { btn } from "../ui";
 import { AddMachineDialog, AddMachinePaths } from "./add-machine";
 import { AgentsCanvas, type CanvasHandle } from "./agents-canvas";
 import { AutomationsSheet } from "./automations/sheet";
@@ -55,6 +56,7 @@ import { threadDone } from "./thread-status";
 import { SidebarToggle, ThreadsSidebar, useSidebarOpen } from "./threads-sidebar";
 import { AgentsContext, useAgents, useAgentsSnapshot, useHold, useMarkDriver, type AgentsCtx } from "./use-agents";
 import { useAgentsConnection } from "./use-connection";
+import { apiHost, STUCK_MS } from "@/lib/agents-load";
 import { ADD_MACHINE_EVENT } from "./settings-ui";
 import { OwnerSwitcher } from "./owner-switcher";
 import { NoOwner } from "./no-owner";
@@ -113,7 +115,7 @@ export function AgentsPage({
   /** Back from installing Slack or Discord (`?settings=integrations&…`): the settings, on the integrations. */
   integrations?: IntegrationsLink | null;
 }) {
-  const { client, services, error, need, admin } = useAgentsConnection({ owner, demo });
+  const { client, services, error, need, admin, retry } = useAgentsConnection({ owner, demo });
   // The link it opened with, read once: the URL below follows the view, so by a second run of the
   // effect (React's strict mode runs it twice) it already says the canvas, and a link to the
   // automations sheet fell back to it.
@@ -163,7 +165,7 @@ export function AgentsPage({
       {client && services ? (
         <AgentsSurface client={client} services={services} demo={demo} admin={admin} chrome="window" focus={focus && !focus.startsWith("t:") ? focus : undefined} />
       ) : (
-        <CenterNote shimmer={!error} action={need === "owner" ? <NoOwner /> : error ? <SignIn /> : undefined}>
+        <CenterNote shimmer={!error} action={need === "owner" ? <NoOwner /> : retry ? <Trouble onRetry={retry} /> : error ? <SignIn /> : undefined}>
           {error ?? "Connecting…"}
         </CenterNote>
       )}
@@ -177,10 +179,62 @@ export function CenterNote({ children, shimmer = false, action }: { children: Re
     <div className="fade-in grid h-full place-items-center px-6 text-center">
       <div className="flex flex-col items-center gap-4 text-fg">
         <HorizonMark size={40} state={shimmer ? "thinking" : "error"} label="" />
-        <span className={`text-[13px] ${shimmer ? "shimmer" : "text-muted"}`}>{children}</span>
+        <span className={`max-w-md text-[13px] ${shimmer ? "shimmer" : "text-muted"}`}>{children}</span>
         {action}
+        {/* Without JavaScript (it never loaded, or never started) nothing replaces "Connecting…": a
+            plain reload link shows after a while, by CSS alone. Running, the page says more by then. */}
+        {shimmer && !action && (
+          <a href="" className="late-hint text-[12.5px] text-subtle underline-offset-2 hover:text-fg hover:underline">
+            Taking a while? Reload
+          </a>
+        )}
       </div>
     </div>
+  );
+}
+
+/** What to do when loading failed or hangs: ask again, or paste another token (it may be stale, or another owner's). */
+export function Trouble({ onRetry }: { onRetry: () => void }) {
+  return (
+    <div className="flex flex-wrap items-center justify-center gap-2">
+      <button onClick={onRetry} className={btn}>
+        <RotateCw className="size-3.5" />
+        Retry
+      </button>
+      <TokenButton />
+    </div>
+  );
+}
+
+/**
+ * The owner's agents until their first state is in: "Loading…", then, if it fails or hasn't come in
+ * STUCK_MS, what it's waiting on and what to do (not an empty canvas, or the first-run screen as if
+ * there were no machines).
+ */
+function FirstLoad({ client, error, status, failed }: { client: AgentsClient; error: string | null; status?: number; failed: boolean }) {
+  const [attempt, setAttempt] = useState(0);
+  const [late, setLate] = useState(false);
+  useEffect(() => {
+    setLate(false);
+    const t = setTimeout(() => setLate(true), STUCK_MS);
+    return () => clearTimeout(t);
+  }, [attempt]);
+  if (!failed && !late) return <CenterNote shimmer>Loading {client.owner}&apos;s agents…</CenterNote>;
+  const retry = () => {
+    client.retry();
+    setAttempt((n) => n + 1);
+  };
+  const text = !failed
+    ? `Still waiting for ${client.owner}'s agents from roll's API at ${apiHost()}. The network may be down, or the server.`
+    : status === 401 || status === 403
+      ? `roll didn't let the saved token see ${client.owner}'s agents (${status}): it may have been revoked, or be for another owner.`
+      : status == null
+        ? `Can't reach roll's API at ${apiHost()}${error ? ` (${error})` : ""}. It tries again by itself.`
+        : `Couldn't load ${client.owner}'s agents: ${error}`;
+  return (
+    <CenterNote action={<Trouble onRetry={retry} />}>
+      {text}
+    </CenterNote>
   );
 }
 
@@ -624,7 +678,7 @@ export function AgentsSurface({
                 const anyOnline = [...data.machines.values()].some((r) => reachable(r.value));
                 const [dot, label] =
                   snap.conn === "error"
-                    ? ["bg-danger", snap.error ?? "Can't reach roll"]
+                    ? ["bg-danger", snap.loaded === false ? "Not loaded" : (snap.error ?? "Can't reach roll")]
                     : snap.conn !== "live"
                       ? ["bg-subtle", "Reconnecting…"]
                       : running
@@ -710,7 +764,7 @@ export function AgentsSurface({
               aria-hidden={wide || undefined}
               className={`relative min-h-0 min-w-0 flex-1 overflow-hidden bg-canvas ${phone ? "" : `mb-2 rounded-xl border-line transition-[margin,border-width,opacity] duration-[260ms] ease-(--ease-drawer) motion-reduce:transition-none ${wide ? "mx-0 border-0 opacity-0" : "mx-2 border"}`}`}
             >
-              {data.machines.size === 0 && snap.conn !== "connecting" ? (
+              {snap.loaded !== false && data.machines.size === 0 && snap.conn !== "connecting" ? (
                 <Empty demo={demo} onCreated={onSandbox} />
               ) : (
                 <>
@@ -736,6 +790,11 @@ export function AgentsSurface({
                     />
                   </div>
                 </>
+              )}
+              {snap.loaded === false && (
+                <div className="absolute inset-0 z-10 bg-canvas">
+                  <FirstLoad client={client} error={snap.error} status={snap.errorStatus} failed={snap.conn === "error"} />
+                </div>
               )}
               <AnimatePresence initial={false}>{launchError && <LaunchError key={launchError} text={launchError} />}</AnimatePresence>
               {/* Beside an open conversation too (the canvas narrows; the draft stays); on a phone, under what's waiting. */}

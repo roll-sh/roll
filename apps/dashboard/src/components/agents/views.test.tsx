@@ -2,6 +2,7 @@ import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { setActiveClient } from "@/lib/agents-client";
+import { ApiError } from "@/lib/code-api";
 import { agentsSurface, resetAgentsSurface } from "@/lib/agents-surface";
 import { loadCurrentView, loadDoc } from "@/lib/agents-views";
 import { approval, mirrored, node, project, run, thread } from "@/test/agents";
@@ -148,5 +149,23 @@ describe("the display menu", () => {
     expect(card("Fix the flaky queue test")).toBeInTheDocument();
     expect(card("Upgrade to Next 16.4")).toBeInTheDocument();
     await waitFor(() => expect(lastSaved(services)).toMatchObject({ display: { density: "compact", hide: ["idle"] } }));
+  });
+});
+
+describe("loading the agents", () => {
+  it("says why they didn't load (the token can't see them) instead of an empty canvas, and Retry loads them", async () => {
+    let refuse = true;
+    const h = agentsHarness({
+      state: async () => {
+        if (refuse) throw new ApiError("forbidden", 403, null);
+        return { cursor: 0, machines: [], entities: [] };
+      },
+    });
+    renderAgents(<AgentsSurface client={h.client} services={fakeServices()} demo={false} chrome="popup" />, h);
+    expect(await screen.findByText(/didn't let the saved token see acme's agents \(403\)/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Use another token" })).toBeInTheDocument();
+    refuse = false;
+    await userEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(screen.queryByText(/didn't let the saved token/)).toBeNull());
   });
 });

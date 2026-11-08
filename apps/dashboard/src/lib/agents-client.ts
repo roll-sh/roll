@@ -71,13 +71,17 @@ export interface AgentsSnapshot {
   data: AgentsData;
   conn: ConnState;
   error: string | null;
+  /** The HTTP status of the last failed load (401/403: the token can't see this owner). */
+  errorStatus?: number;
+  /** False until the first state is in: before it, empty data means "not loaded", not "nothing yet". */
+  loaded?: boolean;
 }
 
 /** Terminal output kept per terminal for a view that opens late (base64 chunks, ~256 KiB). */
 const TERMINAL_KEEP = 256 * 1024;
 
 export class AgentsClient {
-  private snap: AgentsSnapshot = { data: emptyData(), conn: "connecting", error: null };
+  private snap: AgentsSnapshot = { data: emptyData(), conn: "connecting", error: null, loaded: false };
   private listeners = new Set<() => void>();
   private queue: StreamEvent[] = [];
   private flushing = false;
@@ -109,7 +113,7 @@ export class AgentsClient {
 
   private set(patch: Partial<AgentsSnapshot>) {
     const next = { ...this.snap, ...patch };
-    if (next.data === this.snap.data && next.conn === this.snap.conn && next.error === this.snap.error) return;
+    if (next.data === this.snap.data && next.conn === this.snap.conn && next.error === this.snap.error && next.loaded === this.snap.loaded) return;
     this.snap = next;
     for (const l of this.listeners) l();
   }
@@ -120,7 +124,7 @@ export class AgentsClient {
 
   /** Show `data` as is, with no connection (a share's replay sets each frame). */
   show(data: AgentsData) {
-    this.set({ data, conn: "live", error: null });
+    this.set({ data, conn: "live", error: null, loaded: true });
   }
 
   // ── lifecycle ──
@@ -149,17 +153,26 @@ export class AgentsClient {
     try {
       const state = await this.transport.state([...threads].sort());
       if (gen !== this.generation) return;
-      this.set({ data: applySnapshot(this.snap.data, state, threads), error: null });
+      this.set({ data: applySnapshot(this.snap.data, state, threads), error: null, errorStatus: undefined, loaded: true });
       this.resume = state.cursor;
       this.openStream(threads, gen);
     } catch (e) {
       if (gen !== this.generation) return;
-      this.set({ conn: "error", error: e instanceof Error ? e.message : String(e) });
+      const status = (e as { status?: unknown })?.status;
+      this.set({ conn: "error", error: e instanceof Error ? e.message : String(e), errorStatus: typeof status === "number" ? status : undefined });
       // Try again shortly; the page keeps showing the last state it had.
       setTimeout(() => {
         if (gen === this.generation && this.holds > 0) void this.connect();
       }, 4000);
     }
+  }
+
+  /** Ask again now (Retry on a load that failed or hangs); a load still in flight is dropped. */
+  retry() {
+    if (this.holds === 0) return;
+    this.disconnect();
+    this.set({ conn: "connecting", error: null });
+    void this.connect();
   }
 
   private openStream(threads: ReadonlySet<ThreadId>, gen: number) {

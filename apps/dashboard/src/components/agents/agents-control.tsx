@@ -14,7 +14,7 @@ import { useAgentNotifications } from "@/lib/agents-notify";
 import type { AgentsServices } from "@/lib/agents-services";
 import { desktop, useDesktop } from "@/lib/desktop";
 import { useOwnerSettings } from "@/lib/owner-settings";
-import { AgentsSurface, CenterNote } from "./agents-page";
+import { AgentsSurface, CenterNote, Trouble } from "./agents-page";
 import { NoOwner } from "./no-owner";
 import { SignIn } from "../code/sign-in";
 import { useAgentsSnapshot, useHold, useMarkDriver } from "./use-agents";
@@ -73,7 +73,7 @@ export function AgentsControl() {
   return (
     <>
       {client ? <Counts client={client} services={conn.services ?? undefined} /> : <Pill count={0} waiting={0} />}
-      <Popup client={conn.client} services={conn.services} error={conn.error} need={conn.need} admin={conn.admin} demo={demo} />
+      <Popup client={conn.client} services={conn.services} error={conn.error} need={conn.need} admin={conn.admin} retry={conn.retry} demo={demo} />
     </>
   );
 }
@@ -130,7 +130,7 @@ function Pill({ count, waiting, first }: { count: number; waiting: number; first
 }
 
 /** The agents over the page: the whole window, like an app of its own. */
-function Popup({ client, services, error, need, admin, demo }: Pick<ReturnType<typeof useAgentsConnection>, "client" | "services" | "error" | "need" | "admin"> & { demo: boolean }) {
+function Popup({ client, services, error, need, admin, retry, demo }: Pick<ReturnType<typeof useAgentsConnection>, "client" | "services" | "error" | "need" | "admin" | "retry"> & { demo: boolean }) {
   const { open, view } = useAgentsSurface();
 
   // The URL says what's open, so a reload (or a copied link) comes back to it; opening the popup is
@@ -168,7 +168,7 @@ function Popup({ client, services, error, need, admin, demo }: Pick<ReturnType<t
           {client && services ? (
             <AgentsSurface client={client} services={services} demo={demo} admin={admin} chrome="popup" onClose={hideAgents} />
           ) : (
-            <CenterNote shimmer={!error} action={need === "owner" ? <NoOwner /> : need === "sign-in" ? <SignIn /> : undefined}>
+            <CenterNote shimmer={!error} action={need === "owner" ? <NoOwner /> : retry ? <Trouble onRetry={retry} /> : need === "sign-in" ? <SignIn /> : undefined}>
               {error ?? "Connecting…"}
             </CenterNote>
           )}

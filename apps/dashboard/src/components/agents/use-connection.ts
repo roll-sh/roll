@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { codeApi } from "@/lib/code-api";
+import { apiHost, loadError, STUCK_MS } from "@/lib/agents-load";
 import { getToken, subscribeToken } from "@/lib/code-token";
 import { clientFor, DEMO_OWNER, type AgentsClient } from "@/lib/agents-client";
 import { httpServices, type AgentsServices } from "@/lib/agents-services";
@@ -115,6 +116,8 @@ export interface AgentsConnection {
   need?: "sign-in" | "owner";
   /** Signed in as admin: any owner can be shown (the owner switcher). */
   admin?: boolean;
+  /** The lookup failed or hasn't answered: ask again (the note's Retry). */
+  retry?: () => void;
 }
 
 let http: AgentsServices | null = null;
@@ -123,8 +126,22 @@ let http: AgentsServices | null = null;
 export function useAgentsConnection({ owner: param, demo: isDemo = false }: { owner?: string; demo?: boolean }): AgentsConnection {
   const [conn, setConn] = useState<AgentsConnection>({ client: null, services: null, error: null });
   const token = useResolveVersion();
+  const [attempt, setAttempt] = useState(0);
   useEffect(() => {
     let live = true;
+    let settled = false;
+    const retry = () => {
+      resolving = null;
+      setConn({ client: null, services: null, error: null });
+      setAttempt((n) => n + 1);
+    };
+    // A lookup that never answers (a hung request, a captive network) says so instead of spinning.
+    const stuck =
+      isDemo || param
+        ? null
+        : setTimeout(() => {
+            if (live && !settled) setConn({ client: null, services: null, error: `Still waiting for roll's API at ${apiHost()} to answer. The network may be down, or the server.`, retry });
+          }, STUCK_MS);
     (async () => {
       try {
         if (isDemo) {
@@ -133,6 +150,7 @@ export function useAgentsConnection({ owner: param, demo: isDemo = false }: { ow
           return;
         }
         const r: Resolved = param ? { owner: param, admin: false } : await resolved();
+        settled = true;
         if (!live) return;
         if (!("owner" in r))
           return setConn({
@@ -145,13 +163,15 @@ export function useAgentsConnection({ owner: param, demo: isDemo = false }: { ow
         localStorage.setItem(LAST_OWNER, o);
         setConn({ client: clientFor(o), services: (http ??= httpServices()), error: null, admin: r.admin });
       } catch (e) {
-        if (live) setConn({ client: null, services: null, error: e instanceof Error ? e.message : String(e) });
+        settled = true;
+        if (live) setConn({ client: null, services: null, ...loadError(e), retry });
       }
     })();
     return () => {
       live = false;
+      if (stuck) clearTimeout(stuck);
     };
-  }, [param, isDemo, token]);
+  }, [param, isDemo, token, attempt]);
   return conn;
 }
 

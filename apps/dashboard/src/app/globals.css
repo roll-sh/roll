@@ -562,6 +562,25 @@ body {
   animation: fade-in 0.2s ease-out both;
 }
 
+/* A hint that waits (agents-page.tsx CenterNote's reload link): hidden, then in after 12 s, by CSS
+   alone, so it shows on a page whose JavaScript never ran. */
+@keyframes late-hint {
+  to {
+    opacity: 1;
+    visibility: visible;
+  }
+}
+.late-hint {
+  opacity: 0;
+  visibility: hidden;
+  animation: late-hint 0.2s ease-out 12s forwards;
+}
+@media (prefers-reduced-motion: reduce) {
+  .late-hint {
+    animation-duration: 0s;
+  }
+}
+
 /* The chrome settles in a beat after the sheet (header, views bar, toolbar). Filled backwards only:
    its end is the element's own style, and an animation held at its end keeps its element a layer. */
 @keyframes chrome-in {

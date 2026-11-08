@@ -32,6 +32,8 @@ export function agentsHarness(
     /** A `created` reply to thread.create/fork comes after its thread's record, as the daemon's
      * does (else the dashboard waits up to 2 s for it). false: the test sends the record itself. */
     records?: boolean;
+    /** The state load (default: an empty state at once). */
+    state?: AgentsTransport["state"];
   } = {},
 ): AgentsHarness {
   let cursor = 10_000;
@@ -45,7 +47,7 @@ export function agentsHarness(
     return r;
   });
   const transport: AgentsTransport = {
-    state: async () => ({ cursor: 0, machines: [], entities: [] }),
+    state: opts.state ?? (async () => ({ cursor: 0, machines: [], entities: [] })),
     stream: () => () => {},
     command,
   };

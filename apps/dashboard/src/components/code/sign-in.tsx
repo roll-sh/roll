@@ -57,9 +57,23 @@ export function SignIn() {
   );
 }
 
-function SignInDialog({ current, onClose }: { current: Caller; onClose: () => void }) {
+/** Paste a token now, whatever the server said or didn't (the agents' "Connecting…" that went wrong). */
+export function TokenButton({ label = "Use another token" }: { label?: string }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <>
+      <button onClick={() => setOpen(true)} className={btn}>
+        <KeyRound className="size-3.5" />
+        {label}
+      </button>
+      {open && <SignInDialog current={null} onClose={() => setOpen(false)} />}
+    </>
+  );
+}
+
+function SignInDialog({ current, onClose }: { current: Caller | null; onClose: () => void }) {
   const [value, setValue] = useState(getToken() ?? "");
-  const [error, setError] = useState<string | null>(current.kind === "invalid" ? "The saved token isn't valid on this server." : null);
+  const [error, setError] = useState<string | null>(current?.kind === "invalid" ? "The saved token isn't valid on this server." : null);
   const [busy, setBusy] = useState(false);
   const field = useRef<HTMLInputElement>(null);
 
