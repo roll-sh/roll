@@ -41,7 +41,8 @@ impl Redis {
     pub async fn start(args: &crate::Args, storage: &StorageConfig, clustered: bool) -> anyhow::Result<Redis> {
         let home = std::path::absolute(&args.home)?.join("redis");
         let mut rcfg = redis_control::RedisConfig::local(home.clone());
-        rcfg.node_name = args.node.clone();
+        // Logs are `<node>.<random>`: the cluster's node id names them when it's pinned.
+        rcfg.node_name = args.code.cluster.node_id.clone().filter(|n| !n.is_empty()).unwrap_or_else(|| args.node.clone());
         rcfg.public_host = args.public_host.clone();
         rcfg.resp_port = args.redis.port();
         rcfg.http_port = args.redis_http.port();

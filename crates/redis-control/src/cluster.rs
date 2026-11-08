@@ -133,7 +133,7 @@ impl Control {
     }
 
     /// The lease key of the database or replica `id`, if it exists.
-    fn key_of(&self, id: &str) -> Option<String> {
+    pub(crate) fn key_of(&self, id: &str) -> Option<String> {
         let spec = spec_for(&self.store, id).ok().flatten()?;
         Some(db_key(&spec.id, spec.replica_of.as_deref()))
     }

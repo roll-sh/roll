@@ -282,10 +282,20 @@ pub struct LogStats {
 const MANIFEST_LAG: u64 = 600;
 
 /// A log of this process: `<node>.<random>`. Each process writes its own, and a node whose log
-/// was fenced moves to a new one, so a log only ever has one writer.
+/// was fenced moves to a new one, so a log only ever has one writer (were two to pick the same
+/// name, create-only segments would fence one of them).
 fn new_log(node: &str) -> String {
-    format!("{node}.{:012x}", redis_engine::util::Rng::new().next_u64() & 0xffff_ffff_ffff)
+    use std::hash::{BuildHasher, Hasher};
+    static N: AtomicU64 = AtomicU64::new(0);
+    // Seeded by the OS per process.
+    let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+    h.write_u64(redis_engine::util::now_us() as u64);
+    h.write_u64(N.fetch_add(1, Ordering::Relaxed));
+    format!("{node}.{:012x}", h.finish() & 0xffff_ffff_ffff)
 }
+
+/// What a [`Shipper`] calls with a database another node took over.
+type FencedHook = Box<dyn Fn(&str) + Send + Sync>;
 
 /// The node's durability pipeline (one per node).
 ///
@@ -311,7 +321,7 @@ pub struct Shipper {
     flush_lock: tokio::sync::Mutex<()>,
     /// Serializes manifest writes (each compares against the version the last one left).
     manifest_lock: tokio::sync::Mutex<()>,
-    fenced: std::sync::OnceLock<Box<dyn Fn(&str) + Send + Sync>>,
+    fenced: std::sync::OnceLock<FencedHook>,
     /// Bytes and objects written (metering / tests).
     pub bytes_put: AtomicU64,
     pub objects_put: AtomicU64,

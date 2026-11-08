@@ -8,6 +8,7 @@ use redis_engine::Config as EngineConfig;
 use redis_engine::config::Policy;
 use redis_server::node::{Catalog, DbSpec, Node, NodeConfig, Secret};
 use redis_server::persist::{self, Objects, Shipper, ShipperConfig, Until};
+use axum::response::IntoResponse;
 use serde::Serialize;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -452,7 +453,7 @@ impl Control {
     pub async fn delete(&self, id: &str) -> Result<()> {
         let d = self.get(id)?;
         for r in self.store.replicas(&d.id)? {
-            self.node.evict(&r.id).await?;
+            self.evict_replica(&r.id).await?;
         }
         self.node.evict(&d.id).await?;
         self.store.delete_db(&d.id)?;
@@ -510,10 +511,35 @@ impl Control {
     pub async fn restore(&self, id: &str, at: i64) -> Result<String> {
         let d = self.get(id)?;
         self.check_window(&d, at)?;
+        let archive = self.node.restore_in_place(&d.id, Until::time(at * 1000)).await?;
+        // Replicas, wherever they're served, load the restored history afresh.
         for r in self.store.replicas(&d.id)? {
-            self.node.evict(&r.id).await?;
+            self.evict_replica(&r.id).await?;
         }
-        Ok(self.node.restore_in_place(&d.id, Until::time(at * 1000)).await?)
+        Ok(archive)
+    }
+
+    /// Unload replica `id` on the node that serves it (here, or its owner in a cluster).
+    async fn evict_replica(&self, id: &str) -> Result<()> {
+        let (Some(cluster), Some(key)) = (self.cluster(), self.key_of(id)) else {
+            self.node.evict(id).await?;
+            return Ok(());
+        };
+        let req = axum::http::Request::post(format!("/v1/redis/replicas/{id}/unload")).body(axum::body::Body::empty()).map_err(anyhow::Error::from)?;
+        let resp = cluster
+            .dispatch(&key, req, |_, guard| async move {
+                let r = self.node.evict(id).await;
+                drop(guard);
+                match r {
+                    Ok(_) => axum::http::StatusCode::OK.into_response(),
+                    Err(e) => (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+                }
+            })
+            .await;
+        if !resp.status().is_success() {
+            return Err(ControlError::Internal(anyhow::anyhow!("unloading replica {id}: {}", resp.status())));
+        }
+        Ok(())
     }
 
     pub fn replicas(&self, id: &str) -> Result<Vec<Replica>> {

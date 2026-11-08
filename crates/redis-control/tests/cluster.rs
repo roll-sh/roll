@@ -233,6 +233,16 @@ async fn requests_through_any_node_reach_the_owner(kind: Kind) {
     let r: serde_json::Value = http.get(format!("{}/v1/redis/databases/{id}", other.url)).send().await.unwrap().json().await.unwrap();
     assert_eq!(r["status"]["state"], "active", "{r}");
     assert!(nodes.iter().filter(|n| n.id != owner.id).all(|n| !n.loaded(&id)));
+    // A read replica is served by another node than its primary, and follows it there.
+    let replica = owner.control.create_replica(&id).unwrap();
+    let mut c = client(owner.resp, &format!("{}_{}", replica.id, replica.password)).await;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while c.cmd(["GET", "hits"]).await.unwrap() != bulk("4") {
+        assert!(Instant::now() < deadline, "the replica never caught up");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let at: Vec<&str> = nodes.iter().filter(|n| n.loaded(&replica.id)).map(|n| n.id.as_str()).collect();
+    assert!(at.len() == 1 && at[0] != owner.id, "replica on {at:?}, primary on {}", owner.id);
 }
 
 async fn a_killed_owners_databases_move_with_every_acknowledged_write(kind: Kind) {

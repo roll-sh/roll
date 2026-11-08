@@ -88,7 +88,7 @@ written once in SQLite's dialect), as roll code's did.
 | --- | --- | --- |
 | code | `<repo id>`, `agents:<owner id>` | built (roll-cluster); repo leases keep their bare ids so a running Postgres cluster upgrades in place |
 | postgres | `pg:endpoint:<id>`, `system:pg` | the engine runs in-process; compute moves with the lease |
-| redis | `redis:db:<id>` | the owner serves RESP and REST; others splice connections to it |
+| redis | `redis:db:<id>`, `redis:db:<primary>#<replica>` | built: the owner serves RESP and REST; others splice connections to it; a replica is placed as a standby of its primary ("Redis on the fleet") |
 | nosql | `nosql:db:<id>` | replaces the manifest's owner field; fences opens |
 | streams | `stream:cluster:<id>` | a tenant's cluster on one owner at first; per partition later |
 | storage | `storage:account:<id>` | metadata log per account instead of one per deployment |
@@ -158,7 +158,7 @@ when `ROLL_EDGE=1` (without it rolld is unchanged).
 | --- | --- |
 | 8443 (HTTPS) | HTTP/1.1, routed by `Host`: `roll.sh` → `ROLL_DASHBOARD_UPSTREAM` (streamed, WebSockets included) except `/<owner>/<repo>.git/…` → code's git routes; `git.roll.sh` → code's git routes; `api.roll.sh` → rolld's API router; `<id>.redis.…` → Redis REST; `<id>.kafka.…` → the streams HTTP API; `<id>.nosql.…` → Alternator; `<id>.mq.…` → web-STOMP or web-MQTT by `Sec-WebSocket-Protocol`, else the queues HTTP API; `tasks.…` → tasks (`/v1/tasks/…`); `s3.…`, `<bucket>.s3.…` → the S3 server; `chg-<id>.roll.site` → code previews. `<bucket>.roll.site` answers 404 at the origin: it is served by the CDN Worker. |
 | 5432 | `SSLRequest` → `S` → TLS, or TLS straight away (`sslnegotiation=direct`, ALPN `postgresql`); `GSSENCRequest` → `N`; a startup packet in the clear is refused (`08P01`); cancel requests may come in the clear. The endpoint is the server name's `<id>`, else `options=endpoint=<id>`; naming two different ones is an error. |
-| 6379 | TLS, then Redis with the server name (the database is its first label). |
+| 6379 | TLS, then Redis: the server name's first label is the database, and the connection is spliced to its owner right after the handshake (without a server name, from its first AUTH or HELLO … AUTH on). |
 | 9092 | TLS, then Kafka; metadata names the server name the client used (one virtual broker per hostname), never a node address. |
 | 9042 | TLS, then CQL with the server name (the database is its first label). |
 | 5671, 8883, 61614, 5551 | TLS, then AMQP (0-9-1 and 1.0), MQTT, STOMP and the RabbitMQ stream protocol. |
@@ -375,6 +375,58 @@ Alarms (`deploy/cloud/README.md`, "Alarms"): `errors` on `Http5xx`; `latency` on
 p99 of code, postgres, redis, storage, nosql and tasks (streams and queues long-poll, and git
 pushes take as long as the pack); `handoff-failures` and `lease-takeovers` on any.
 
+## Redis on the fleet
+
+`crates/redis-control/src/cluster.rs` on top of `redis-server` (`node.rs`, `persist.rs`,
+`preauth.rs`); rolld's part is `crates/rolld/src/redis.rs`. On the memory backend none of it runs.
+
+- **Ownership.** A database is served by the holder of `redis:db:<id>`, a read replica by the
+  holder of `redis:db:<primary>#<replica>`, which roll-cluster places as a standby of the primary
+  (another node, another zone when one is live), so replicas serve reads away from it. The owner
+  holds a guard while the database is loaded; a lease for a database that isn't loaded is given
+  back after 30 s.
+- **Routing.** Any node takes any connection. With a server name (the edge's 6379) the database
+  is its first label, and the connection is spliced (`roll_edge::splice`) to the owner right after
+  the TLS handshake. Without one, what comes before the first AUTH (or HELLO … AUTH) is answered as
+  an unauthenticated server answers it (`-NOAUTH`), and the connection is spliced from that AUTH
+  on. A database that is moving is waited for (a lease and its margin, 13 s); a connection that
+  reaches a node the database just left is passed on (three splices at most). REST
+  (`https://<id>.redis.…`, rolld's REST port) and the control routes
+  (`/v1/redis/databases/{id}/…`, `/v1/redis/replicas/{id}`) are forwarded to the owner by
+  `Cluster::dispatch`; forwarded REST arrives under `/internal/redis/rest`.
+- **Catalog.** Databases, replicas, credentials and metering are in the system database
+  (`ROLL_SYSTEM_DATABASE`, else `ROLL_CODE_DATABASE`; schema `redis`, through code-sql). A node
+  that kept a `redis.db` of its own copies it in at start (what's there stays) and renames it
+  `redis.db.imported`. One node keeps SQLite (`redis.db`) as before. Behind the edge, connection
+  strings are `rediss://default:<id>_<secret>@<id>.redis.<region>.<domain>:6379` and
+  `https://<id>.redis.<region>.<domain>`.
+- **Fencing: storage decides, not the lease.** Each process writes a log of its own
+  (`redis/seg/<node>.<random>/`), segment by segment, create-only. A node taking a database over
+  first puts an empty object at the next segment number of the log the database's manifest names,
+  then replays everything below it. The old owner's next segment write fails; it moves to a new
+  log, and before a database's frames go into a log, its manifest is compare-and-swapped to name
+  that log. A database whose manifest someone else wrote is dropped at once: its clients are
+  disconnected, and a `sync` write waiting for durability is never acknowledged. Snapshot keys
+  carry the writer's log. A manifest written on a clean unload names no log (nothing to fence).
+- **Handoff** (a drain, rebalancing): the owner closes the database's connections over 2 s, each
+  at its own moment, after answering the commands it already read; flushes everything and writes
+  the final manifest; only then lets the lease go. Nothing acknowledged is lost, `async`
+  durability included.
+- **What a client sees on a handoff.** Its connection closes between two commands, without an
+  error reply; a reconnect through any node reaches the new owner within about a second (one that
+  lands on the old node in the instant it lets go is closed once more, without an answer). As in
+  a Redis failover: a command already read is run and answered before the close; a MULTI not yet
+  EXEC'd is discarded with the connection, never half run; a WATCH ends with the connection (the
+  client runs its transaction again); a blocking command (BLPOP, XREAD BLOCK, WAIT) ends with the
+  connection unserved; pub/sub subscriptions end, and the client subscribes again on reconnect
+  (messages published meanwhile are missed, as on any Redis reconnect). No `-MOVED`: clients
+  needn't speak Redis Cluster. `-LOADING` only if a database is still moving after 13 s. A REST
+  request in flight finishes; new ones wait for the new owner.
+- **On a crash** connections drop; reconnects wait while the dead owner's lease runs out (10–15 s),
+  then find every write acknowledged under `sync` durability, and under `async` every write the
+  owner had flushed (all but its last second at most).
+- Garbage collection runs on one node at a time (singleton `redis-gc`).
+
 ## Where everything lives
 
 | part | path |
@@ -396,7 +448,8 @@ pushes take as long as the pack); `handoff-failures` and `lease-takeovers` on an
 | control-plane auth lockdown | in progress |
 | product switches, JSON logs, metrics and their alarms | built (`ROLL_PRODUCTS`, `ROLL_LOG_FORMAT`, `GET /v1/info`); not yet run against AWS |
 | GitHub resilience | done |
-| tasks, queues, storage, redis, streams, nosql on the cluster layer | next, one product per change |
+| redis on the cluster layer | built ("Redis on the fleet"); not yet run against AWS |
+| tasks, queues, storage, streams, nosql on the cluster layer | next, one product per change |
 | postgres on the fleet and the system database | with the pg-engine branch |
 | isolated work on Fargate | next |
 

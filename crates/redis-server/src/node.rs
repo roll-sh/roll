@@ -12,6 +12,11 @@
 //!   parent's history.
 //! - **Catalog.** Which databases exist and their credentials come from a [`Catalog`]: the
 //!   control plane in production, a static map for local use.
+//! - **Owners.** In a cluster an [`Owner`] says which databases are this node's: a database is
+//!   loaded only under a [`Tenure`], and when the tenure ends (a handoff, a lapsed lease) it moves
+//!   away: connections close over `handoff_spread`, everything is flushed, the final manifest is
+//!   written, and only then is the tenure let go. A database another node took over regardless
+//!   (storage fenced this node, see [`persist`]) is dropped at once.
 
 use crate::database::Database;
 use crate::directory::{AuthError, AuthRequest, Directory, Session};
