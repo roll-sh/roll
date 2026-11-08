@@ -1,6 +1,8 @@
 //! An in-process roll storage server and clients for it.
 #![allow(dead_code)]
 
+pub mod fleet;
+
 use aws_sdk_s3::Client;
 use aws_sdk_s3::config::{BehaviorVersion, Credentials, Region};
 use s3_server::{Config, Server};
