@@ -90,7 +90,7 @@ written once in SQLite's dialect), as roll code's did.
 | postgres | `pg:endpoint:<id>`, `system:pg` | the engine runs in-process; compute moves with the lease |
 | redis | `redis:db:<id>`, `redis:db:<primary>#<replica>` | built: the owner serves RESP and REST; others splice connections to it; a replica is placed as a standby of its primary ("Redis on the fleet") |
 | nosql | `nosql:db:<id>` | the database's owner loads it; opens and manifest writes are fenced by compare-and-swap in S3 |
-| streams | `stream:cluster:<id>` | a tenant's cluster on one owner at first; per partition later |
+| streams | `stream:cluster:<id>` | a tenant's whole Kafka cluster on one owner (the stream SASL maps a key to); acknowledged once in the owner's write-ahead log in S3; per partition later (`crates/stream-broker/README.md`, "On the fleet") |
 | storage | `storage:meta` | built: one metadata log for the deployment, a hot standby following it (docs/storage/architecture.md, "Many nodes"); `storage:account:<id>` (a log per account) is designed there, not built |
 | queues | `mq:<vhost>/<queue>` | mq-cluster's owner records move onto the shared layer |
 | tasks | `tasks:tenant:<id>` | replaces the tasks cell's own lease |
@@ -189,8 +189,10 @@ when `ROLL_EDGE=1` (without it rolld is unchanged).
 - **Forwarding TCP** to a tenant's owner: `roll_edge::splice::splice(client, owner_url, signer,
   hop, first_bytes)` opens an HTTP upgrade to the owner's `/internal/edge/splice` (HMAC-SHA256
   over the hop and the time under the cluster secret, 60 s skew), writes the bytes already read,
-  then copies both ways. The owner hands the stream to the handler its product registered;
-  Postgres's is registered (the proxy, with the endpoint as named).
+  then copies both ways. The owner hands the stream to the handler its product registered:
+  Postgres's (the proxy, with the endpoint as named) and Kafka's (`kafka`: spliced after SASL,
+  the tenant is the stream the connection authenticated as, the server name carries the
+  `host:port` the client was told).
 - **Dev mode**: `ROLL_EDGE_CERT_DIR` serves its `<name>.crt`/`<name>.key` pairs (reloaded when
   they change) and writes a self-signed certificate for every edge name when it has none; origin
   pulls are off unless `ROLL_EDGE_ORIGIN_PULL=1`. Every listener's address is a setting
@@ -311,7 +313,8 @@ The contract between the stack, the image and rolld. Each setting is a flag with
 | `ROLL_ZONE` | the instance's availability zone | placement spreads standbys across zones |
 | `ROLL_ADVERTISE_URL` | `http://<private ip>:7070` | where other nodes reach this one |
 | `ROLL_API` | `0.0.0.0:7070` | internal HTTP: node-to-node hops and `GET /healthz`; never public |
-| `ROLL_SYSTEM_DATABASE` | the system database's URL | catalogs and accounts for every product; roll code's data unless `ROLL_CODE_DATABASE` is set |
+| `ROLL_SYSTEM_DATABASE` | the system database's URL | catalogs and accounts for every product; roll code's data unless `ROLL_CODE_DATABASE` is set; roll streams' catalog (schema `streams`) |
+| `ROLL_STREAM_ACK_LINGER_MS` | `50` | how long a stream's owner gathers appends before writing its write-ahead log object: `acks=all` latency against S3 PUTs (at most one per busy stream per round) |
 | `ROLL_PRODUCTS` | `redis,streams,tasks,storage,nosql,queues,code` | the products the node runs (see "Products"); Postgres is off until its engine runs in process |
 | `ROLL_S3_BUCKET`, `AWS_REGION` | `roll-cloud-data-<account>`, `us-east-1` | all product data, under per-product prefixes |
 | `ROLL_SECRET_KEY` | from Secrets Manager | seals owners' keys and the stored certificates |
@@ -482,7 +485,8 @@ pushes take as long as the pack); `handoff-failures` and `lease-takeovers` on an
 | storage on the cluster layer | built (`storage:meta`, `s3-server/src/cluster.rs`); per-account logs designed |
 | redis on the cluster layer | built ("Redis on the fleet"); not yet run against AWS |
 | nosql on the cluster layer | built: lease `nosql:db:<id>`, catalog on the system database, CQL spliced to the owner (SNI or SASL user), fenced manifests (docs/nosql/architecture.md, "On a fleet") |
-| tasks, queues, streams on the cluster layer | in progress, one product per change |
+| streams on the cluster layer | built (`stream:cluster:<id>`, catalog on the system database, acknowledgements from a write-ahead log in S3, kafka splices); not yet run against AWS |
+| tasks, queues on the cluster layer | in progress, one product per change |
 | postgres on the fleet and the system database | with the pg-engine branch |
 | isolated work on Fargate | next |
 

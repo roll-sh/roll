@@ -313,6 +313,10 @@ impl Edge {
             if let Some(n) = p.nosql {
                 handlers.register("cql", n.splice_handler());
             }
+            // A Kafka connection another node authenticated, for a stream this node owns.
+            if let Some(b) = &p.streams {
+                handlers.register("kafka", crate::streams::splice_handler(b.clone()));
+            }
             internal = internal.merge(roll_edge::splice::router(roll_edge::splice::Signer::new(&secret)?, handlers));
         }
         let serve = Box::pin(async move { futures::future::select_all(served).await.0 });

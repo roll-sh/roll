@@ -36,7 +36,7 @@ the idempotent sequence, the size, the timestamps and, for compacted topics, tha
 key. The only change is patching the base offset into the batch header; records are never decoded.
 Appends from every connection on a partition are group-committed into one fsync. `acks=all` returns
 after that fsync, and the high watermark only moves to durable data. So consumers never see a record a
-crash could take back.
+crash could take back. (On the fleet, durable means in object storage; see "On the fleet".)
 
 **Read path.** Fetch returns stored bytes as they are. Recent batches come from a per-partition tail
 cache in memory, so tailing consumers don't touch the disk. Older ones are read from segment files
@@ -93,8 +93,94 @@ Every stream is its own isolated cluster with its own topics, groups, transactio
 - Confluent REST v3 and the control plane (streams, keys, topics, configs, usage) are under the same
   router.
 
-**Catalog.** `stream.db` (SQLite) holds streams, API keys, topics, the chunk index, committed offsets,
-transaction state and usage. Partition data lives only in the logs and in object storage.
+**Catalog.** Streams, API keys, topics, the chunk index, committed offsets, group and transaction
+coordinator state, the write-ahead log's index, owners and usage, through `code-sql`: `stream.db`
+(SQLite) on one node, the system database (Postgres, schema `streams`) on the fleet. Partition data
+lives only in the logs and in object storage.
+
+## On the fleet
+
+On roll cloud every node runs the broker (docs/cloud/README.md). `Broker::on_fleet` (rolld does it
+in a cluster) puts the catalog on the system database and gives each stream one owner node; on one
+node (`Broker::new`) none of this applies and nothing changes. The code is `src/fleet.rs` and
+`src/wal.rs`.
+
+**Ownership.** A stream is a tenant's whole Kafka cluster (what SASL tenancy maps a key to). It has
+one owner, held through the roll-cluster lease `stream:cluster:<stream id>`. Its partitions, its
+group and transaction coordinators, its uploads, retention and compaction, its write-ahead log and
+all its connections and HTTP requests run there; another node never opens its partitions.
+
+- **Kafka connections** reach any node (the edge advertises the hostname the client used: one
+  virtual broker per tenant hostname, `<id>.kafka.<region>.roll.sh`). SASL runs where the
+  connection landed; the first request that needs the stream picks where the connection runs. If
+  another node owns it, the rest of the connection is spliced there (the edge's signed internal
+  hop, product `kafka`), with the bytes already read first. While the stream moves, the connection
+  waits (up to 15 s) instead of failing.
+- **HTTP** requests about a stream (`/v1/streams/{s}/…`, `/kafka/v3/clusters/{id}/…`) are forwarded
+  to the owner through roll-cluster, and wait out a move the same way. Listing and creating streams
+  run anywhere. roll storage's notifications into a stream go to its owner too.
+- **Background work** (uploads, retention, compaction, group offset expiry, transaction timeouts,
+  storage samples) runs only for the streams a node serves. A stream keeps its owner while it's
+  idle (its partitions still close and cost nothing): retention needs one.
+
+**Acknowledgements.** A node's disk is a cache there: anything acknowledged must survive losing the
+node. So durability is object storage's (`LogConfig::remote`): nothing is fsynced, and the high
+watermark moves only when what's below it is in object storage. Every
+`--stream-ack-linger-ms` (50 ms) while there are appends, the owner writes one write-ahead log
+object with what all of the stream's partitions appended since the last one (records not decoded:
+the batches as written, framed by partition), `streams/<stream>/wal/<generation>-<seq>.wal`,
+records it in the catalog, and only then moves the high watermarks. Chunks are uploaded as on one
+node (8 MB / 10 s) and also move the watermark; a log object is deleted once chunks cover it, a
+minute has passed and no open transaction needs it.
+
+| `acks` | answered | survives losing the owner |
+| --- | --- | --- |
+| `all` (`-1`), and the HTTP API's default | once the write-ahead log object with the records is in object storage and recorded | yes |
+| `1` | once appended on the owner, before object storage has it | not if the owner dies within about `linger` + one PUT (Kafka's `acks=1` loses records to a leader failure the same way); a planned handoff flushes everything first, so a drain loses nothing |
+| `0` | not at all | as `1` |
+
+Consumers only see records below the high watermark, so a record a consumer saw is never taken
+back, and no offset is ever given out twice. Expect `acks=all` latency of the linger plus an S3
+PUT and a catalog write (tens of ms on S3 Standard), and up to one PUT per busy stream per round
+(at most ~20/s at 50 ms) whatever its number of partitions. An owner that can't write to object
+storage holds at most 256 MB of unacknowledged appends per stream, then answers produce with
+`NOT_ENOUGH_REPLICAS` (retriable).
+
+**Fencing.** Correctness never depends on the lease. A new owner bumps the stream's generation in
+the catalog (`Store::claim`); every catalog write that belongs to the stream (the write-ahead log's
+index, chunks, log start, aborted transactions, topics, settings, committed offsets, groups,
+transactions) checks the generation in the same transaction, and object keys carry it (`.t<n>` in
+chunk keys, the log objects' names), so an owner that lost the stream can't acknowledge, index,
+delete or overwrite anything. When a write finds itself fenced, the node gives the stream up and
+hands its lease on.
+
+**Takeover** (after a crash, or a handoff): the new owner claims the stream, drops whatever it has
+of it locally (a stale cache), reads the stream's topics and the chunk index, replays the
+write-ahead log after what the chunks hold (this also rebuilds idempotent-producer and open
+transaction state, so a producer's retry of a batch whose acknowledgement the move cut off is
+recognised as a duplicate), loads the transaction coordinator's state, and serves; transactions
+the last owner left mid-commit get their markers right after. Taking over costs a few catalog
+reads and a GET per log object, whatever the size of the stream.
+
+**Handoff** (a drain, rebalancing): the stream's connections close at random moments over up to a
+second (so its clients don't all reconnect at once) while the owner keeps serving; requests in
+flight finish; the owner writes the last write-ahead log object and uploads its partitions; only
+then is the lease released. A client sees its connection close and reconnects to the same
+hostname, which reaches the new owner (librdkafka and the Java client do this on their own; an
+idempotent producer neither loses nor duplicates anything). If the stream is lost rather than
+handed off (the owner was fenced), connections close at once, a produce waiting for its
+acknowledgement gets `NOT_LEADER_OR_FOLLOWER`, a fetch parked on the partition gets
+`NOT_LEADER_OR_FOLLOWER`, and a group request waiting for a rebalance or committing offsets gets
+`NOT_COORDINATOR`, as Kafka answers when leadership moves; clients refresh their metadata and retry
+on the new owner. Group membership isn't carried over: consumers rejoin, from their committed
+offsets.
+
+**Per-partition ownership** (a later step) would need: a lease per partition (and per coordinator)
+instead of per stream; metadata naming a different (virtual) broker per partition, which means a
+hostname per partition owner and certificates for them, or advertising node addresses; a
+write-ahead log per partition owner (today's is one per stream, which is what makes it one PUT per
+stream); the group and transaction coordinators on their own keys, writing markers to partitions
+other nodes own over an internal call; and `acks` semantics unchanged.
 
 ## Cold start
 
@@ -192,7 +278,9 @@ Object storage is the system of record; local disk is only a write buffer and a 
 
 - data not yet uploaded: at most 10 s or 8 MB per busy partition;
 - open partitions' recent segments, up to each topic's `local.retention.*` (1 h / 256 MB);
-- `stream.db`, the catalog: small, but it has to persist (see Limits).
+- on one node, `stream.db`, the catalog: small, but it has to persist (see Limits). On the fleet
+  the catalog is in the system database and acknowledged data is in object storage, so a node's
+  disk holds nothing that can't be lost.
 
 Closed partitions keep nothing. That leaves open partitions as the only part that grows with data,
 and `--stream-disk-mb` (`ROLL_STREAM_DISK_MB`) caps it across all of them. Over the cap, the cleaner
@@ -256,16 +344,21 @@ vmmap --summary $(pgrep -f examples/serve) | grep 'Physical footprint'
 
 These are planned work, not design limits:
 
-- **One broker per cluster.** One process serves every partition. There's no leadership across
-  brokers or replication yet.
-- **Durability on host loss.** Acknowledged data is fsynced locally and reaches object storage within
-  10 s or 8 MB per partition. Losing the host's disk loses what wasn't uploaded yet.
-- **The catalog is local.** `stream.db` has to survive with the host (a persistent volume), or the
-  chunk index and offsets are gone. Replicating it to object storage is next.
+- **One owner per stream.** On the fleet a stream's partitions all run on one node (see "On the
+  fleet"); a stream bigger than a node needs per-partition ownership. On one node there's no
+  leadership or replication at all.
+- **Durability on host loss, on one node.** Acknowledged data is fsynced locally and reaches object
+  storage within 10 s or 8 MB per partition, and `stream.db` has to survive with the host (a
+  persistent volume). Losing the host's disk loses what wasn't uploaded yet, or everything with the
+  catalog. The fleet has neither limit.
 - **Producer state across a close.** Idempotent-producer state is rebuilt from local segments when a
-  partition opens. So a retry of a batch sent before the partition closed (after 10 idle minutes)
-  isn't recognised as a duplicate. Open transactions keep their segments local, so their state is
+  partition opens (on the fleet, also from the write-ahead log on a takeover). So a retry of a batch
+  sent before the partition closed (after 10 idle minutes) isn't recognised as a duplicate. Open
+  transactions keep their segments local (and their write-ahead log objects), so their state is
   always rebuilt. Snapshotting producer state to object storage would close this gap.
+- **Orphaned objects.** An owner fenced in the middle of an upload leaves a chunk object nothing
+  points at (its key carries its tenure, so it's never mistaken for data); nothing deletes those
+  yet.
 - **Not yet supported:** the KIP-848 consumer protocol and share groups (classic groups only), fetch
   sessions (KIP-227; clients fall back to full fetches) and ACLs (keys scope a whole stream).
 
@@ -280,7 +373,9 @@ These are planned work, not design limits:
 | `src/groups.rs`, `src/txn.rs` | group and transaction coordinators |
 | `src/auth.rs`, `src/tls.rs` | SASL and per-stream keys, TLS |
 | `src/records.rs` | record decoding for the few places that need it (compaction, timestamps, HTTP, key checks) |
-| `src/store.rs` | the SQLite catalog |
+| `src/store.rs` | the catalog (`code-sql`: SQLite or the system database), fenced writes |
+| `src/fleet.rs` | the fleet: ownership, routing and splicing, takeover, handoff, the write-ahead log |
+| `src/wal.rs` | write-ahead log objects |
 | `src/http/` | the control plane, the HTTP data plane, managed groups, Confluent REST v3 |
 | `../stream-log` | the partition log: segments, indexes, group commit, producer state, tiering hooks |
 
@@ -296,6 +391,10 @@ the curl and SASL headers (`apt-get install cmake libcurl4-openssl-dev libsasl2-
   exactly-once, all in Docker.
 - `tests/storage.rs`: tiered reads, retention, torn writes, unclean stops, scale to zero, closed
   partitions keeping nothing on disk, the local disk budget.
+- `tests/cluster.rs`: the fleet, several brokers in one process with leases on the memory backend and
+  on DynamoDB Local (`ROLL_CLUSTER_TEST_DYNAMODB`, else `amazon/dynamodb-local` in Docker; skipped
+  without either): connections and HTTP through any node, the owner dying with acknowledged records
+  only in the write-ahead log, a drain under librdkafka traffic, and fencing.
 - `tests/compaction.rs`: latest value per key, tombstones, reading across gaps.
 - `tests/http.rs`: the HTTP API and how it interoperates with Kafka clients.
 

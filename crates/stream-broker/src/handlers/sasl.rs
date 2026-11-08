@@ -38,6 +38,11 @@ fn step(b: &Broker, session: &mut Session, token: &[u8]) -> Outcome {
         Step::Done { username, response } => {
             let stream = b.credential(&username).and_then(|c| b.stream(&c.stream_id));
             let Some(stream) = stream else { return Outcome::Fail("Authentication failed: the stream no longer exists".into()) };
+            if session.pinned && session.stream.as_ref().is_some_and(|s| s.id != stream.id) {
+                // A re-authentication can't move a connection to another stream (whose owner may
+                // be another node).
+                return Outcome::Fail("Authentication failed: this key belongs to another stream than the connection's".into());
+            }
             session.stream = Some(stream);
             session.principal = Some(username);
             session.sasl = None;

@@ -149,11 +149,16 @@ pub async fn produce_records(api: &Api, stream: &Arc<Stream>, topic: &Arc<Topic>
         }
     }
     let results = futures::future::join_all(waits.into_iter().map(|(idx, d)| async move { (idx, d.wait(timeout).await) })).await;
-    for (idx, ok) in results {
-        if !ok {
-            for i in idx {
-                out[i] = Some(Err(ApiError::new(StatusCode::GATEWAY_TIMEOUT, "request_timed_out", "timed out waiting for the write to become durable")));
+    for (idx, r) in results {
+        let err = match r {
+            Ok(()) => continue,
+            Err(kafka_protocol::ResponseError::NotLeaderOrFollower) => {
+                ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "not_leader_or_follower", "the stream moved to another node before the write became durable; retry")
             }
+            Err(_) => ApiError::new(StatusCode::GATEWAY_TIMEOUT, "request_timed_out", "timed out waiting for the write to become durable"),
+        };
+        for i in idx {
+            out[i] = Some(Err(ApiError { status: err.status, code: err.code.clone(), message: err.message.clone(), extra: None }));
         }
     }
     out.into_iter().map(|r| r.expect("every record has a result")).collect()

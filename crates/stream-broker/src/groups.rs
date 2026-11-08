@@ -280,7 +280,8 @@ impl Groups {
             Ok(r) => return r,
             Err(rx) => rx,
         };
-        rx.await.unwrap_or_else(|_| JoinResult::error(ResponseError::RebalanceInProgress, ""))
+        // The sender goes when the group does: its stream moved to another node.
+        rx.await.unwrap_or_else(|_| JoinResult::error(if b.stream_cached(stream).is_some_and(|s| b.serves(&s)) { ResponseError::RebalanceInProgress } else { ResponseError::NotCoordinator }, ""))
     }
 
     fn join_now(&self, b: &Broker, stream: &str, req: JoinRequest) -> Result<JoinResult, oneshot::Receiver<JoinResult>> {
@@ -845,7 +846,7 @@ impl Groups {
     /// Expire offsets of empty groups.
     fn expire_offsets(&self, b: &Broker) {
         let cutoff = now() - b.config.groups.offsets_retention_ms / 1000;
-        for s in b.streams() {
+        for s in b.served_streams() {
             let idle: Vec<String> = b.store.offset_groups(&s.id).unwrap_or_default().into_iter().filter(|g| !self.is_active(&s.id, g)).collect();
             if let Ok(n) = b.store.expire_offsets(&s.id, &idle, cutoff)
                 && n > 0
