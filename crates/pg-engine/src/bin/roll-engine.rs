@@ -241,6 +241,7 @@ impl InitdbArgs {
 fn main() -> anyhow::Result<()> {
     #[cfg(feature = "heapprof")]
     heapprof::start();
+    idle::setup();
     raise_open_files();
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -251,7 +252,9 @@ fn main() -> anyhow::Result<()> {
         .init();
     let mut a = Args::parse();
     let profile = profile(&mut a)?;
-    idle::setup(&profile);
+    if profile.idle_trim {
+        idle::trim_idle_sessions();
+    }
     pg_engine::server::set_wait_spin(profile.wait_spin);
     // --listen is `postgres -h host -p port`: listen_addresses is the host as given (the port
     // is the one bound, which sessions read from the listener).
@@ -440,12 +443,10 @@ mod idle {
     const PR_SET_THP_DISABLE: c_int = 41;
     const MADV_DONTNEED: c_int = 4;
 
-    pub fn setup(p: &pg_engine::mode::Profile) {
+    /// First thing in `main`, both modes: pages faulted before the prctl keep their huge pages.
+    pub fn setup() {
         // SAFETY: prctl with PR_SET_THP_DISABLE only sets a flag of this process.
         unsafe { prctl(PR_SET_THP_DISABLE, 1 as c_ulong, 0 as c_ulong, 0 as c_ulong, 0 as c_ulong) };
-        if p.idle_trim {
-            pg_engine::server::set_idle_hook(trim);
-        }
         // Memory freed by busy threads, or by threads that ended, goes back to the system
         // only when some thread runs the allocator's collection: after a burst of sessions
         // nothing would, and the process would keep its peak (BENCH.md "Memory under
@@ -462,6 +463,11 @@ mod idle {
             });
     }
 
+    /// Efficient mode's: a connection idle for a while trims its thread's memory.
+    pub fn trim_idle_sessions() {
+        pg_engine::server::set_idle_hook(trim);
+    }
+
     fn trim() {
         // SAFETY: mi_collect only returns free memory of the global allocator (mimalloc).
         unsafe { mi_collect(true) };
@@ -475,7 +481,8 @@ mod idle {
 
 #[cfg(not(target_os = "linux"))]
 mod idle {
-    pub fn setup(_: &pg_engine::mode::Profile) {}
+    pub fn setup() {}
+    pub fn trim_idle_sessions() {}
 }
 
 /// The open-file limit up to its hard limit. One process holds every connection's socket and
