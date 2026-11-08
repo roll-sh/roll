@@ -333,10 +333,12 @@ struct Answer {
 }
 
 fn transport(e: &reqwest::Error) -> String {
-    if e.is_timeout() {
-        "timeout".into()
-    } else if e.is_connect() {
+    // A connect that timed out (the load balancer still sending to a node that just died, as an
+    // NLB does until its health check notices) is a connect error: nothing was sent.
+    if e.is_connect() {
         "connect".into()
+    } else if e.is_timeout() {
+        "timeout".into()
     } else {
         "closed".into()
     }
@@ -1331,10 +1333,10 @@ fn s3_kind<E: std::fmt::Debug>(e: &aws_sdk_s3::error::SdkError<E, aws_smithy_run
         SdkError::TimeoutError(_) => ("timeout".into(), None, true),
         SdkError::DispatchFailure(d) => {
             let text = format!("{d:?}");
-            let kind = if d.is_timeout() {
-                "timeout"
-            } else if text.contains("Error(Connect") || text.contains("ConnectError") {
+            let kind = if text.contains("Error(Connect") || text.contains("ConnectError") {
                 "connect"
+            } else if d.is_timeout() {
+                "timeout"
             } else {
                 "closed"
             };
