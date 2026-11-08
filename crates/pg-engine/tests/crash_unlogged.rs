@@ -159,3 +159,48 @@ fn prepared_writes_to_unlogged_tables_lost_in_a_crash() {
     drop(s);
     eng.shutdown();
 }
+
+/// The child of `drop_in_flight_keeps_row_ids_after_a_crash`: a DROP of a table and of a
+/// sequence in a transaction still open, then SIGKILL.
+#[test]
+fn crash_drop_child() {
+    let Ok(dir) = std::env::var("CRASH_DROP_DIR") else {
+        return;
+    };
+    let dir = Path::new(&dir);
+    let eng = open(dir);
+    let mut s = eng.connect(1, "postgres", "postgres", "t").unwrap();
+    s.query(
+        "CREATE TABLE r (id serial, a int);
+         INSERT INTO r (a) SELECT generate_series(1, 5);
+         CREATE SEQUENCE q;
+         SELECT nextval('q') FROM generate_series(1, 3)",
+    )
+    .unwrap();
+    s.query("BEGIN; DROP TABLE r; DROP SEQUENCE q").unwrap();
+    std::fs::write(dir.join("ready"), "").unwrap();
+    let me = std::process::id().to_string();
+    std::process::Command::new("kill").args(["-9", &me]).status().unwrap();
+    unreachable!("still alive after SIGKILL");
+}
+
+/// A DROP that never committed leaves the table's hidden row ids, its serial column's
+/// sequence and a dropped sequence as they were: rows inserted after the crash don't take the
+/// ids of rows already there (they replaced them while a DROP reset the ids at once).
+#[test]
+fn drop_in_flight_keeps_row_ids_after_a_crash() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "crash_drop_child", "--nocapture", "--test-threads=1"])
+        .env("CRASH_DROP_DIR", tmp.path())
+        .output()
+        .unwrap();
+    assert!(tmp.path().join("ready").exists(), "{}", String::from_utf8_lossy(&out.stderr));
+    let eng = open(tmp.path());
+    let mut s = eng.connect(1, "postgres", "postgres", "t").unwrap();
+    s.query("INSERT INTO r (a) VALUES (100)").unwrap();
+    assert_eq!(one(&mut s, "SELECT count(*), sum(a), max(id) > 5 FROM r"), "[[Int8(6), Int8(115), Bool(true)]]");
+    assert_eq!(one(&mut s, "SELECT nextval('q') > 3"), "[[Bool(true)]]");
+    drop(s);
+    eng.shutdown();
+}

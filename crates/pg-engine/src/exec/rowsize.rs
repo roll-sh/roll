@@ -118,7 +118,7 @@ pub fn btree_error(t: &Table, bix: &BoundIndex, size: usize, (b, o): (u32, u16),
 
 /// The first oversized GIN key, retained across a build's heap rows without retaining
 /// all extracted keys. INSERT reports it immediately; a build reports it in key order.
-struct GinFormError {
+pub(crate) struct GinFormError {
     column: usize,
     key: Value,
     pub error: Error,
@@ -133,9 +133,13 @@ impl GinFormError {
 /// GinFormTuple of each key array_ops extracts from `vals` (in the keys' order, as
 /// ginExtractEntries sorts them), without a posting list (a build's posting tree's case).
 fn gin_form_error(bix: &BoundIndex, vals: &[Value], ctx: &ExecCtx) -> Option<GinFormError> {
-    let one = bix.keys.len() == 1;
+    gin_form_error_with(&bix.index, bix.keys.len() == 1, vals, ctx.fmt())
+}
+
+/// `gin_form_error` of index `ix` (of one key column: `one`), values formatted by `fmt`.
+pub(crate) fn gin_form_error_with(ix: &crate::catalog::Index, one: bool, vals: &[Value], fmt: &crate::types::text::FormatCtx) -> Option<GinFormError> {
     for (i, v) in vals.iter().enumerate() {
-        let (Value::Array(a), Some(c)) = (v, bix.index.columns.get(i)) else { continue };
+        let (Value::Array(a), Some(c)) = (v, ix.columns.get(i)) else { continue };
         // (0: the type's default, array_ops for an array.)
         if !matches!(c.opclass, 0 | GIN_ARRAY_OPS) || type_layout(&a.elem).0 > 0 {
             continue;
@@ -147,7 +151,6 @@ fn gin_form_error(bix: &BoundIndex, vals: &[Value], ctx: &ExecCtx) -> Option<Gin
             continue;
         }
         big.sort_by(|x, y| x.cmp_total(y));
-        let fmt = ctx.fmt();
         let text = |v: &Value, ty: &DataType| crate::types::text::format_value(v, ty, fmt);
         for e in big {
             let n = match one {
@@ -163,7 +166,7 @@ fn gin_form_error(bix: &BoundIndex, vals: &[Value], ctx: &ExecCtx) -> Option<Gin
                     key: e.clone(),
                     error: Error::new(
                         code::PROGRAM_LIMIT_EXCEEDED,
-                        format!("index row size {n} exceeds maximum {GIN_MAX_ITEM} for index \"{}\"", bix.index.name),
+                        format!("index row size {n} exceeds maximum {GIN_MAX_ITEM} for index \"{}\"", ix.name),
                     ),
                 });
             }

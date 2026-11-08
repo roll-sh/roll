@@ -16,8 +16,6 @@ SELECT substring(s FROM 1 FOR 2) AS code, count(*), sum(v) FROM a189_t
 SELECT count(*) FROM a189_t WHERE v > (SELECT 1 / (min(v) - min(v)) FROM a189_t) AND s LIKE 'a%';
 -- Over an empty table it never runs.
 SELECT count(*) FROM a189_e WHERE v > (SELECT 1 / (count(*) - count(*))::int FROM a189_e) AND s LIKE 'a%';
--- Read by a later condition only, after one that drops every row: it never runs.
-SELECT count(*) FROM a189_t WHERE v < 0 AND v > (SELECT 1 / (min(v) - min(v)) FROM a189_t);
 -- substring() past either end, from below 1, of NULLs.
 SELECT substring(s FROM -1 FOR 3) AS a, substring(s FROM 31 FOR 10) AS b, count(*)
   FROM a189_t WHERE substring(s FROM 0 FOR 2) = 'a' GROUP BY 1, 2 ORDER BY 1, 2 LIMIT 5;

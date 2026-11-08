@@ -510,8 +510,9 @@ pub fn open_scan(s: &ScanPlan, shared: Option<&Arc<crate::sql::plan::Plan>>, nee
     // A bitmap heap scan: the rows the bitmap selects, in heap order. A TID scan: the rows
     // at its TIDs, when the heap model says which (`tid_keys`), their conditions checked
     // on each (the filter has them).
-    // (The bitmap index scans whose quals the heap side checks again: `bitmap_keys`.)
-    let mut unchecked: Vec<usize> = Vec::new();
+    // (What the bitmap index scans found: `BitmapNotes`.)
+    let mut notes = BitmapNotes::default();
+    let mut visible = false;
     let keyed = match (&s.access, &s.current_of) {
         (Access::Bitmap(q, _), None) => {
             if let Some(node) = dense_bitmap_scan(s, q, raw_need, ctx)? {
@@ -522,7 +523,8 @@ pub fn open_scan(s: &ScanPlan, shared: Option<&Arc<crate::sql::plan::Plan>>, nee
             } else {
                 StatTarget::Off
             };
-            let (keys, rows) = bitmap_rows(s, q, &mut unchecked, ctx)?;
+            let (keys, rows) = bitmap_rows(s, q, &mut notes, ctx)?;
+            visible = notes.exact() && rows.is_none();
             // (Rows the bitmap index scans read already are taken as they are.)
             Some(match rows {
                 Some(rows) => (Vec::new(), keys.into_iter().zip(rows).map(|(k, r)| (Vec::<u8>::new(), k, Some(r))).collect(), stat),
@@ -546,7 +548,7 @@ pub fn open_scan(s: &ScanPlan, shared: Option<&Arc<crate::sql::plan::Plan>>, nee
             && s.mark.is_none()
         {
             let mut checked = Vec::new();
-            bitmap_checked(q, &unchecked, &mut checked);
+            bitmap_checked(q, &notes.unchecked, &mut checked);
             let conj: Vec<&Expr> = match f {
                 Expr::And(a) => a.iter().collect(),
                 e => vec![e],
@@ -582,7 +584,13 @@ pub fn open_scan(s: &ScanPlan, shared: Option<&Arc<crate::sql::plan::Plan>>, nee
             kills: None,
             secondary: false,
             emitted: 0,
-            keys: Some(Keys::List(keys.into_iter())),
+            // (Keys that are exactly the rows the scan returns, as the snapshot sees them: a
+            // count of them needs no row read, `count_rest`.)
+            keys: Some(if visible {
+                Keys::Visible(keys.into_iter())
+            } else {
+                Keys::List(keys.into_iter())
+            }),
             ios: false,
             ios_entries: None,
             tid_order: false,
@@ -1434,7 +1442,7 @@ impl Node for Backward {
 
 /// The data keys of the rows a bitmap selects, each leaf's index conditions checked on
 /// the row; counted per bitmap node for EXPLAIN ANALYZE.
-fn bitmap_keys(t: &Table, q: &BitmapQual, kept: &mut Option<KeptRows>, unchecked: &mut Vec<usize>, ctx: &ExecCtx) -> Result<Vec<Vec<u8>>> {
+fn bitmap_keys(t: &Arc<Table>, q: &BitmapQual, kept: &mut Option<KeptRows>, notes: &mut BitmapNotes, ctx: &ExecCtx) -> Result<Vec<Vec<u8>>> {
     let key = q as *const BitmapQual as usize;
     let out = match q {
         BitmapQual::Index {
@@ -1447,13 +1455,17 @@ fn bitmap_keys(t: &Table, q: &BitmapQual, kept: &mut Option<KeptRows>, unchecked
             if index.id != 0 && predicate_locked(t, ctx) {
                 ssi_bitmap_index(t, index, bounds, quals, &ranges, ctx)?;
             }
+            // (An index not read by its entries (GIN, GiST, SP-GiST, BRIN): its search
+            // structure's, the index bound once.)
+            let search = if reads_entries(index) { None } else { searched(t, index, quals, ctx)? };
             // (A point index's structure decides its quals on the points it placed, unread;
             // the heap side checks them again on the rows it reads.)
-            if !reads_entries(index)
+            if let Some(s) = &search
                 && !ctx.instrumented()
-                && let Some(out) = point_keys(t, index, quals, ctx)?
+                && let Some(out) = point_keys(s, quals, ctx)?
             {
-                unchecked.push(key);
+                notes.unchecked.push(key);
+                notes.inexact = true;
                 if super::pgstat::scan_counts(ctx) {
                     super::pgstat::count_index_scan(ctx, index.oid);
                     super::pgstat::count_returned(ctx, index.oid, out.len() as i64);
@@ -1474,7 +1486,22 @@ fn bitmap_keys(t: &Table, q: &BitmapQual, kept: &mut Option<KeptRows>, unchecked
             let mut sorted_keys: Vec<Vec<u8>> = Vec::new();
             // An index not read by its entries (GIN, GiST, SP-GiST, BRIN): the rows its
             // search structure places near the conditions, else every row.
-            let searched = if !reads_entries(index) { search_keys(t, index, quals, ctx)? } else { None };
+            let searched = match &search {
+                Some(s) => s.keys(ctx)?,
+                None => None,
+            };
+            // (Exactly the rows the quals hold for, as the snapshot sees them: neither read nor
+            // checked here, the heap side reading them as they are.)
+            let exact = match &searched {
+                Some(super::search::Found::Exact(keys)) => {
+                    out.extend(keys.iter().cloned());
+                    true
+                }
+                _ => {
+                    notes.inexact = true;
+                    false
+                }
+            };
             // (Rows fetched to check the quals are read as stored, the quals' columns'
             // out-of-line values read for them: `qual_row`.)
             let qneed = super::need::of(quals.iter().map(|c| &c.orig));
@@ -1485,9 +1512,9 @@ fn bitmap_keys(t: &Table, q: &BitmapQual, kept: &mut Option<KeptRows>, unchecked
                 }
                 _ => None,
             };
-            for (start, end) in &ranges {
+            for (start, end) in ranges.iter().filter(|_| !exact) {
                 let entries: Vec<(Vec<u8>, bytes::Bytes)> = match &searched {
-                    Some(super::search::Found::Keys(keys)) => {
+                    Some(super::search::Found::Keys(keys) | super::search::Found::Exact(keys)) => {
                         let rows = fetch_rows(keys, ctx)?;
                         keys.iter().zip(rows).filter_map(|(k, r)| Some((k.clone(), r?))).collect()
                     }
@@ -1638,7 +1665,7 @@ fn bitmap_keys(t: &Table, q: &BitmapQual, kept: &mut Option<KeptRows>, unchecked
         BitmapQual::And(list) => {
             let mut acc: Option<Vec<Vec<u8>>> = None;
             for x in list {
-                let ks = bitmap_keys(t, x, kept, unchecked, ctx)?;
+                let ks = bitmap_keys(t, x, kept, notes, ctx)?;
                 acc = Some(match acc {
                     None => ks,
                     Some(a) => {
@@ -1652,7 +1679,7 @@ fn bitmap_keys(t: &Table, q: &BitmapQual, kept: &mut Option<KeptRows>, unchecked
         BitmapQual::Or(list) => {
             let mut all = Vec::new();
             for x in list {
-                all.extend(bitmap_keys(t, x, kept, unchecked, ctx)?);
+                all.extend(bitmap_keys(t, x, kept, notes, ctx)?);
             }
             all.sort();
             all.dedup();
@@ -1691,7 +1718,7 @@ fn dense_bitmap_scan(
         return Ok(None);
     }
     // The bitmap's entries (index keys only, no rows read) and its condition.
-    fn entries(t: &Table, q: &BitmapQual, ctx: &ExecCtx, counted: &mut Vec<(u32, i64)>) -> Result<Option<(f64, crate::sql::expr::Expr)>> {
+    fn entries(t: &Arc<Table>, q: &BitmapQual, ctx: &ExecCtx, counted: &mut Vec<(u32, i64)>) -> Result<Option<(f64, crate::sql::expr::Expr)>> {
         use crate::sql::expr::Expr;
         Ok(match q {
             BitmapQual::Index { index, quals, bounds, .. } => {
@@ -1927,6 +1954,23 @@ impl KeptRows {
     }
 }
 
+/// What a bitmap's index scans found besides their keys (`bitmap_keys`).
+#[derive(Default)]
+struct BitmapNotes {
+    /// The index scans (by address) whose quals the heap side checks again.
+    unchecked: Vec<usize>,
+    /// Whether one gave keys that aren't exactly the rows it selects as the snapshot sees
+    /// them (`search::Found::Exact`).
+    inexact: bool,
+}
+
+impl BitmapNotes {
+    /// Whether the bitmap's keys are exactly its rows, as the snapshot sees them.
+    fn exact(&self) -> bool {
+        !self.inexact
+    }
+}
+
 /// The conditions every row a bitmap selects passed (`bitmap_keys` checks an index's quals
 /// on each row it keeps; an AND's rows pass each child's, an OR's only one's).
 fn bitmap_checked<'a>(q: &'a BitmapQual, unchecked: &[usize], out: &mut Vec<&'a Expr>) {
@@ -1949,9 +1993,9 @@ fn bitmap_checked<'a>(q: &'a BitmapQual, unchecked: &[usize], out: &mut Vec<&'a 
 /// is modelled), the pages they are on counted; with their rows when the bitmap
 /// index scans read each of them (`KeptRows`; only under a snapshot, which the rows read
 /// later would be read at too).
-fn bitmap_rows(s: &ScanPlan, q: &BitmapQual, unchecked: &mut Vec<usize>, ctx: &ExecCtx) -> Result<(Vec<Vec<u8>>, Option<Vec<bytes::Bytes>>)> {
+fn bitmap_rows(s: &ScanPlan, q: &BitmapQual, notes: &mut BitmapNotes, ctx: &ExecCtx) -> Result<(Vec<Vec<u8>>, Option<Vec<bytes::Bytes>>)> {
     let mut kept = ctx.snapshot().is_some().then(|| KeptRows { rows: Default::default(), bytes: 0, over: false });
-    let mut keys = bitmap_keys(&s.table, q, &mut kept, unchecked, ctx)?;
+    let mut keys = bitmap_keys(&s.table, q, &mut kept, notes, ctx)?;
     // (Rows stored in heap order are in it by key already, as the bitmap's keys come:
     // looking each one's TID up is for EXPLAIN ANALYZE's pages.)
     let in_order = !ctx.instrumented() && super::sizing::heap_in_key_order(&s.table, ctx);
@@ -4130,6 +4174,12 @@ impl ScanNode {
         ctx: &ExecCtx,
     ) -> Result<Option<super::parscan::ParScan>> {
         use super::parscan::{Decode, ParScan, split_keys};
+        // (A scan returning its rows' keys is an UPDATE's, DELETE's, MERGE's or a locking
+        // level's: PostgreSQL plans no parallel workers under a ModifyTable or a row mark,
+        // and these rows go to this thread one by one anyway.)
+        if self.plan.with_key {
+            return Ok(None);
+        }
         if self.secondary {
             return self.start_parallel_index(spec, stages, ctx);
         }
@@ -4470,7 +4520,7 @@ impl ScanNode {
             return Ok(None);
         };
         let keys: Arc<[Vec<u8>]> = match self.keys.take() {
-            Some(Keys::List(l)) => l.collect(),
+            Some(Keys::List(l) | Keys::Visible(l)) => l.collect(),
             _ => Arc::new([]),
         };
         let per = keys.len().div_ceil(ParScan::chunks(workers)).max(1);
@@ -4561,6 +4611,23 @@ impl Node for ScanNode {
     /// count(*) over a plain sequential scan: its rows counted as `next` would return them
     /// (pruned, counted in the statistics, filtered as `LazyScan` filters them), none made.
     fn count_rest(&mut self, ctx: &ExecCtx) -> Result<Option<u64>> {
+        // (A bitmap's rows known to be exactly those it returns: counted without reading
+        // them, as the heap side would count their fetches.)
+        if let Some(Keys::Visible(keys)) = &mut self.keys
+            && self.fetched.is_empty()
+            && self.plan.filter.is_none()
+            && self.plan.mark.is_none()
+            && self.plan.limit.is_none()
+            && self.only.is_none()
+            && self.sample.is_none()
+            && !ctx.instrumented()
+        {
+            let n = keys.len() as u64;
+            keys.by_ref().for_each(drop);
+            self.count_read(n as i64, ctx);
+            self.emitted += n as usize;
+            return Ok(Some(n));
+        }
         let p = &self.plan;
         // (A scan the aggregation's partial counts can take, `partial_run`, is left to them:
         // in workers, PostgreSQL's parallel plan in its time, or inline, the workers' code on
@@ -5144,48 +5211,67 @@ pub fn lock_row_with(
     }
 }
 
-/// A condition of a GiST point_ops scan, as gist_point_consistent tests it.
-/// The data keys an index scan of `ix` (one not read by its entries) with
-/// conditions `quals` may return, from its search structure (`search`): more than it
-/// returns, never fewer. None: every row is to be read (no structure, or a condition's
-/// argument fails to evaluate: reading the rows raises that as it did).
-fn search_keys(
-    t: &Table,
-    ix: &Index,
-    quals: &[crate::sql::plan::IndexQual],
-    ctx: &ExecCtx,
-) -> Result<Option<super::search::Found>> {
+/// What the search structures (`search`) take for a scan of index `ix` (one not read by its
+/// entries) with conditions `quals`: the index bound, its conditions and the snapshot. None:
+/// every row is to be read (under predicate locking, or a condition's argument fails to
+/// evaluate: reading the rows raises that as it did).
+struct Searched {
+    t: Arc<Table>,
+    bix: crate::sql::plan::BoundIndex,
+    conds: Vec<(usize, &'static str, Value)>,
+    snap: u64,
+}
+
+fn searched(t: &Arc<Table>, ix: &Index, quals: &[crate::sql::plan::IndexQual], ctx: &ExecCtx) -> Result<Option<Searched>> {
     if predicate_locked(t, ctx) {
         return Ok(None);
     }
-    let t = Arc::new(t.clone());
-    let Some(bix) = crate::sql::binder::bound_indexes(&t, ctx)?.into_iter().find(|b| b.index.oid == ix.oid) else {
+    let Some(bix) = crate::sql::binder::bound_indexes(t, ctx)?.into_iter().find(|b| b.index.oid == ix.oid) else {
         return Ok(None);
     };
     let Some(conds) = search_conds(quals, ctx) else { return Ok(None) };
     let snap = ctx.snapshot().map_or_else(|| ctx.txn.borrow().snapshot_ts(), |s| s.ts());
-    super::search::candidates(&t, &bix, &conds, Some(snap), ctx)
+    Ok(Some(Searched { t: t.clone(), bix, conds, snap }))
+}
+
+impl Searched {
+    /// The data keys the scan may return, from its search structure: more than it returns,
+    /// never fewer. None: no structure (every row is to be read).
+    fn keys(&self, ctx: &ExecCtx) -> Result<Option<super::search::Found>> {
+        super::search::candidates(&self.t, &self.bix, &self.conds, Some(self.snap), ctx)
+    }
+}
+
+/// `Searched::keys` of a scan of `ix` with conditions `quals` (None: every row is to be read).
+fn search_keys(
+    t: &Arc<Table>,
+    ix: &Index,
+    quals: &[crate::sql::plan::IndexQual],
+    ctx: &ExecCtx,
+) -> Result<Option<super::search::Found>> {
+    match searched(t, ix, quals, ctx)? {
+        Some(s) => s.keys(ctx),
+        None => Ok(None),
+    }
 }
 
 /// `bitmap_keys`' rows of a point index's structure (`search::candidate_points`) when every
 /// qual is on the point column: decided on the point each row was placed with, the rows it
 /// has no point for read and checked. None: no such structure.
-fn point_keys(t: &Table, ix: &Index, quals: &[crate::sql::plan::IndexQual], ctx: &ExecCtx) -> Result<Option<Vec<Vec<u8>>>> {
-    if predicate_locked(t, ctx) {
+fn point_keys(s: &Searched, quals: &[crate::sql::plan::IndexQual], ctx: &ExecCtx) -> Result<Option<Vec<Vec<u8>>>> {
+    // (Only a GiST or SP-GiST index with every qual on a point column has one.)
+    if !matches!(s.bix.index.method.as_str(), "gist" | "spgist")
+        || quals.iter().any(|q| !matches!(s.bix.keys.get(q.col).map(|k| k.ty()), Some(crate::types::DataType::Point)))
+    {
         return Ok(None);
     }
-    let t = Arc::new(t.clone());
-    let Some(bix) = crate::sql::binder::bound_indexes(&t, ctx)?.into_iter().find(|b| b.index.oid == ix.oid) else {
-        return Ok(None);
-    };
-    let Some(conds) = search_conds(quals, ctx) else { return Ok(None) };
-    let snap = ctx.snapshot().map_or_else(|| ctx.txn.borrow().snapshot_ts(), |s| s.ts());
-    let Some((icol, col, cands)) = super::search::candidate_points(&t, &bix, &conds, Some(snap), ctx)? else {
+    let Some((icol, col, cands)) = super::search::candidate_points(&s.t, &s.bix, &s.conds, Some(s.snap), ctx)? else {
         return Ok(None);
     };
     if quals.iter().any(|q| q.col != icol) {
         return Ok(None);
     }
+    let t = &s.t;
     let mut row = vec![Value::Null; t.columns.len()];
     let (mut out, mut read) = (Vec::new(), Vec::new());
     'cand: for (k, p) in cands {
@@ -5208,8 +5294,8 @@ fn point_keys(t: &Table, ix: &Index, quals: &[crate::sql::plan::IndexQual], ctx:
         'row: for (k, r) in read.into_iter().zip(rows) {
             let Some(bytes) = r else { continue };
             let row = match &need {
-                Some(n) => decode_table_row_need(&t, &bytes, n)?,
-                None => decode_table_row(&t, &bytes)?,
+                Some(n) => decode_table_row_need(t, &bytes, n)?,
+                None => decode_table_row(t, &bytes)?,
             };
             for q in quals {
                 if !eval_bool(&q.orig, &row, ctx)? {
@@ -5244,7 +5330,7 @@ fn search_conds(quals: &[crate::sql::plan::IndexQual], ctx: &ExecCtx) -> Option<
 
 /// `search_keys`' rows that `quals` hold for, in heap order (None: every row is to be read).
 fn searched_rows(
-    t: &Table,
+    t: &Arc<Table>,
     ix: &Index,
     quals: &[crate::sql::plan::IndexQual],
     ctx: &ExecCtx,
@@ -5450,6 +5536,9 @@ impl GistKeys {
 /// structure's), or a GiST scan's as it goes.
 enum Keys {
     List(std::vec::IntoIter<Vec<u8>>),
+    /// `List`'s, each a row the snapshot sees that the scan's conditions hold for (a bitmap
+    /// of exact selections: `BitmapNotes::exact`).
+    Visible(std::vec::IntoIter<Vec<u8>>),
     Gist(Box<GistKeys>),
     /// A KNN scan's rows, read already (`ScanNode::next_keyed` takes them as they are).
     Near(Box<super::nearest::NearestRows>),
@@ -5459,7 +5548,7 @@ impl Keys {
     /// How many are left (a GiST scan's: not known, 0).
     fn len(&self) -> usize {
         match self {
-            Keys::List(l) => l.len(),
+            Keys::List(l) | Keys::Visible(l) => l.len(),
             Keys::Gist(_) | Keys::Near(_) => 0,
         }
     }
@@ -5467,7 +5556,7 @@ impl Keys {
     /// Up to `n` more (a KNN scan's rows aren't taken as keys: `ScanNode::next_keyed`).
     fn take(&mut self, n: usize, ctx: &ExecCtx) -> Result<Vec<Vec<u8>>> {
         match self {
-            Keys::List(l) => Ok(l.by_ref().take(n).collect()),
+            Keys::List(l) | Keys::Visible(l) => Ok(l.by_ref().take(n).collect()),
             Keys::Gist(g) => g.take(n, ctx),
             Keys::Near(_) => Ok(Vec::new()),
         }

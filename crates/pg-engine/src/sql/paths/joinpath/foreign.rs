@@ -403,8 +403,9 @@ impl Search<'_, '_, '_> {
     pub(super) fn fdw_sorted_paths(&self, l: usize, r: &Rc<Rel>, width: u32, f: &pj::RelInfo, want: &Want, base: &Path) -> Vec<JP> {
         let leaf = &self.leaves[l];
         let Some((s, _)) = leaf.scan.as_ref() else { return Vec::new() };
-        // (Not the UPDATE / DELETE target's own scan: its pushdown is the target's.)
-        if s.with_key {
+        // (Not an UPDATE / DELETE target's own scan, unless the wrapper reads it as the
+        // target (`fdw_dml_target`: its remote query sorts and locks it).)
+        if s.with_key && !self.fdw_dml_target(s) {
             return Vec::new();
         }
         let (set, off) = (1u32 << l, leaf.off);

@@ -2007,13 +2007,27 @@ pub struct NameBounds {
 }
 
 impl NameBounds {
+    /// Narrowed by a lower and an upper bound, (bound, inclusive) each.
+    pub fn narrow(&mut self, lo: Option<(String, bool)>, hi: Option<(String, bool)>) {
+        if let Some(l) = lo
+            && self.lo.as_ref().is_none_or(|(x, inc)| l.0 > *x || (l.0 == *x && *inc && !l.1))
+        {
+            self.lo = Some(l);
+        }
+        if let Some(h) = hi
+            && self.hi.as_ref().is_none_or(|(x, inc)| h.0 < *x || (h.0 == *x && *inc && !h.1))
+        {
+            self.hi = Some(h);
+        }
+    }
+
     pub fn admits(&self, n: &str) -> bool {
         self.lo.as_ref().is_none_or(|(b, inc)| if *inc { n >= b.as_str() } else { n > b.as_str() })
             && self.hi.as_ref().is_none_or(|(b, inc)| if *inc { n <= b.as_str() } else { n < b.as_str() })
     }
 
     /// The one name admitted, when the bounds are an equality.
-    fn exact(&self) -> Option<&str> {
+    pub fn exact(&self) -> Option<&str> {
         match (&self.lo, &self.hi) {
             (Some((a, true)), Some((b, true))) if a == b => Some(a),
             _ => None,
@@ -2068,6 +2082,42 @@ pub fn rows_of_object(table: SysTable, ctx: &ExecCtx, oid: u32) -> Result<Option
     Ok(Some(rows))
 }
 
+/// pg_depend's rows of object (`class`, `oid`) as its dependent (`classid`, `objid`), in the
+/// order `rows` gives them, derived alone (`depend::scope_of`: the derivation a DROP's walk
+/// runs per object) instead of every object's: EF Core's tables query runs `NOT EXISTS
+/// (SELECT ... FROM pg_depend WHERE classid = ... AND objid = cls.oid ...)` per relation, and
+/// its first run after a start or any DDL derived all 116,000 rows of 10,000 tables (190
+/// ms). None: an object Postgres made, or one whose rows only the whole derivation makes.
+pub fn depend_rows_of(ctx: &ExecCtx, class: u32, oid: u32) -> Result<Option<Vec<Row>>> {
+    if oid < super::FIRST_USER_OID {
+        return Ok(None);
+    }
+    let cat = ctx.catalog();
+    let Some(scope) = super::depend::scope_of(&cat, (class, oid, 0)) else { return Ok(None) };
+    let rows: Vec<Row> = (super::depend::depends_in(ctx, &cat, &scope).into_iter())
+        .filter(|d| d.obj.0 == class && d.obj.1 == oid)
+        .map(|d| {
+            vec![
+                o(d.obj.0),
+                o(d.obj.1),
+                i4(d.obj.2 as i64),
+                o(d.refobj.0),
+                o(d.refobj.1),
+                i4(d.refobj.2 as i64),
+                c(d.kind),
+            ]
+        })
+        .collect();
+    #[cfg(debug_assertions)]
+    {
+        let all: Vec<Row> = (rows_generated_for(SysTable::PgDepend, ctx, None)?.into_iter())
+            .filter(|r| r[0] == Value::Oid(class) && r[1] == Value::Oid(oid))
+            .collect();
+        debug_assert!(all == rows, "pg_depend's rows of object ({class}, {oid})");
+    }
+    Ok(Some(rows))
+}
+
 /// Where a relation's pg_class rows lie in the order `rows` generates them (Postgres's own
 /// relations, then tables, views, sequences, indexes, TOAST tables, composite types' rows,
 /// each by oid; `relations_of`'s order).
@@ -2078,16 +2128,19 @@ pub(super) fn class_position(cat: &Catalog, oid: u32) -> Option<(u8, u64)> {
             .position(|r| super::static_rows::oid_at(r, 0) == oid)?;
         return Some((0, at as u64));
     }
-    Some(if cat.tables.contains_key(&oid) {
+    // (By the directory records, which every entry has: a stored map's `contains_key` reads
+    // its group's entries, the JSON of 1,000 tables or so, from storage: half of psql's first
+    // `\dt` after a start at 10,000 tables.)
+    Some(if cat.tables.ix().dir.contains_key(&oid) {
         (1, oid as u64)
-    } else if cat.views.contains_key(&oid) {
+    } else if cat.views.ix().dir.contains_key(&oid) {
         (2, oid as u64)
-    } else if cat.sequences.contains_key(&oid) {
+    } else if cat.sequences.ix().dir.contains_key(&oid) {
         (3, oid as u64)
-    } else if cat.indexes.contains_key(&oid) {
+    } else if cat.indexes.ix().dir.contains_key(&oid) {
         (4, oid as u64)
     } else if let Some((rel, index, _)) = cat.toast_dir(oid) {
-        let view = !cat.tables.contains_key(&rel);
+        let view = !cat.tables.ix().dir.contains_key(&rel);
         (5, ((view as u64) << 40) | ((rel as u64) << 1) | index as u64)
     } else {
         (6, cat.composite_of_rel(oid)?.oid as u64)
@@ -2122,6 +2175,8 @@ pub fn class_rows_named(ctx: &ExecCtx, bounds: &NameBounds) -> Result<Option<Vec
     let cat = ctx.catalog();
     let mut rels: Vec<u32> = cat.relations_named(bounds.exact(), |n| bounds.admits(n));
     rels.extend(cat.composites.values().filter(|c| bounds.admits(&c.name)).map(|c| c.relid));
+    // (A TOAST table or index renamed: not in the name index either.)
+    rels.extend(cat.renamed_toasts().into_iter().filter(|(n, _)| bounds.admits(n)).map(|(_, o)| o));
     rels.extend(
         (super::static_rows::rows(SysTable::PgClass).iter())
             .filter(|r| r[1].as_str().is_some_and(|n| bounds.admits(n)))
