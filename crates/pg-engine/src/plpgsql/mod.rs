@@ -5220,7 +5220,7 @@ fn bind_node(b: &mut Binder, node: Node, targets: Option<&[DataType]>) -> Result
             };
             Ok(Compiled::Query {
                 plan: bq.plan.clone(),
-                cols: bq.cols.clone(),
+                cols: bq.cols.to_vec(),
                 simple,
                 coerce,
                 select,
@@ -5284,7 +5284,7 @@ pub fn spi_query(ctx: &ExecCtx, sql: &str) -> Result<(Vec<Row>, Vec<OutCol>)> {
         let mut b = Binder::new(&child, Vec::new());
         let bq = b.bind_statement(&node)?;
         crate::sql::binder::perms::check(&bq.perms, &child)?;
-        Ok((collect(&bq.plan, &child, None)?, bq.cols.clone()))
+        Ok((collect(&bq.plan, &child, None)?, bq.cols.to_vec()))
     })();
     ctx.notices
         .borrow_mut()
@@ -5304,7 +5304,7 @@ pub fn system_query(ctx: &ExecCtx, sql: &str) -> Result<(Vec<Row>, Vec<OutCol>)>
     let r = (|| {
         let mut b = Binder::new(&child, Vec::new());
         let bq = b.bind_statement(&node)?;
-        Ok((collect(&bq.plan, &child, None)?, bq.cols.clone()))
+        Ok((collect(&bq.plan, &child, None)?, bq.cols.to_vec()))
     })();
     ctx.notices
         .borrow_mut()

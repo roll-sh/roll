@@ -979,7 +979,7 @@ impl Session {
                     f.out_cols
                         .iter()
                         .map(|(n, t)| OutCol::new(n.clone(), t.clone()))
-                        .collect(),
+                        .collect::<Vec<_>>(),
                     vec![row],
                     "CALL",
                 )),
@@ -1069,7 +1069,7 @@ impl Session {
             .with_params(params.to_vec())
             .for_cursor(ctx, scroll)?;
             Ok(Cursor::new_lazy(
-                bq.cols.clone(),
+                bq.cols.to_vec(),
                 lazy,
                 keyed.map(|k| k.1),
                 hold,
