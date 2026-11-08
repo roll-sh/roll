@@ -379,7 +379,8 @@ The product should feel alive: dots react to the cursor and the marks "think". E
   - You may read Apache Cassandra's source (Apache-2.0) and port it, naming the Cassandra class in the module doc. Never read ScyllaDB's source; learn its behaviour from its docs and the image.
   - ScyllaDB's `test/cqlpy` and `test/alternator` suites are downloaded at test time by `scripts/nosql-conformance.sh`. Never commit their content; only test ids go in the baselines.
   - After touching anything nosql-related, run `pnpm test:nosql`. A conformance test that passes on the reference must pass on roll, and the baseline may only shrink.
-  - Put new tests in the matching file: differential scripts in `crates/nosql-server/tests/compat/*.cql`, drivers in `tests/drivers.rs`, persistence in `tests/storage.rs`, `branches.rs` and `restore.rs`.
+  - Put new tests in the matching file: differential scripts in `crates/nosql-server/tests/compat/*.cql`, drivers in `tests/drivers.rs`, persistence in `tests/storage.rs`, `branches.rs` and `restore.rs`, several nodes sharing databases in `crates/nosql-control/tests/cluster.rs`.
+  - On a fleet a database is loaded only on the holder of its lease `nosql:db:<id>`, and every manifest write is a compare-and-swap (`nosql_storage::manifest::swap_manifest`): never `put` a manifest. The design is "On a fleet" in `docs/nosql/architecture.md`.
   - SSTable backup imports: format parsers are unit-tested in `crates/nosql-sstable-import`, imports end to end in `crates/nosql-control/tests/import_sstables.rs`. Its fixtures are made by `tests/fixtures/generate.sh` on the references (`imp_` keyspaces; `cleanup.sh` drops them and their snapshots).
 - **Local state:**
   - `.roll/` holds SQLite and branch data. Never commit it.

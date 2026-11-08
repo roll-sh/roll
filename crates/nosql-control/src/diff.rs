@@ -500,7 +500,7 @@ impl Control {
         let read = async {
             let storage = self.storage.open(&tmp, Default::default()).await?;
             let spec = self.spec(p)?;
-            let db = eng::Database::open(eng::DbConfig { id: tmp.clone(), ..spec.config }, storage).await.map_err(|e| ControlError::Internal(e.into()))?;
+            let db = eng::Database::open(eng::DbConfig { id: tmp.clone(), ..spec.config }, storage).await.map_err(ControlError::Internal)?;
             let schema = db.schema();
             let desc = Described::from_elements(&eng::describe::schema(&db, &schema, false, eng::describe::Options::default()));
             Ok::<_, ControlError>((schema, desc, db.dialect()))

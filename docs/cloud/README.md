@@ -87,7 +87,7 @@ written once in SQLite's dialect), as roll code's did.
 | code | `<repo id>`, `agents:<owner id>` | built (roll-cluster); repo leases keep their bare ids so a running Postgres cluster upgrades in place |
 | postgres | `pg:endpoint:<id>`, `system:pg` | the engine runs in-process; compute moves with the lease |
 | redis | `redis:db:<id>` | the owner serves RESP and REST; others splice connections to it |
-| nosql | `nosql:db:<id>` | replaces the manifest's owner field; fences opens |
+| nosql | `nosql:db:<id>` | the database's owner loads it; opens and manifest writes are fenced by compare-and-swap in S3 |
 | streams | `stream:cluster:<id>` | a tenant's cluster on one owner at first; per partition later |
 | storage | `storage:account:<id>` | metadata log per account instead of one per deployment |
 | queues | `mq:<vhost>/<queue>` | mq-cluster's owner records move onto the shared layer |
@@ -338,7 +338,8 @@ assume two fields:
 | edge | built (`crates/roll-edge`, `rolld/src/edge.rs`); not yet run against AWS |
 | control-plane auth lockdown | in progress |
 | GitHub resilience | done |
-| tasks, queues, storage, redis, streams, nosql on the cluster layer | next, one product per change |
+| nosql on the cluster layer | built: lease `nosql:db:<id>`, catalog on the system database, CQL spliced to the owner (SNI or SASL user), fenced manifests (docs/nosql/architecture.md, "On a fleet") |
+| tasks, queues, storage, redis, streams on the cluster layer | next, one product per change |
 | postgres on the fleet and the system database | with the pg-engine branch |
 | isolated work on Fargate | next |
 
