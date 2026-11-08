@@ -192,12 +192,11 @@ function Unauthorized() {
         <HorizonMark state="error" size={40} />
         <h2 className="text-[15px] font-medium">The tasks API wants a token</h2>
         <p className="max-w-md text-[13px] text-muted">
-          rolld was started with <code className="font-mono text-fg">ROLL_TASKS_TOKEN</code>. Give the dashboard the
-          same token (or an API key) and restart it:
+          The dashboard signs in with rolld&apos;s operator token. Start rolld with{" "}
+          <code className="font-mono text-fg">ROLL_ADMIN_TOKEN</code> (it takes the place of{" "}
+          <code className="font-mono text-fg">ROLL_TASKS_TOKEN</code> here, which keeps working for API clients) and sign in
+          with it from the header.
         </p>
-        <pre className="rounded-lg border border-line bg-bg px-3 py-2 font-mono text-[12px]">
-          VITE_ROLL_TASKS_TOKEN=… pnpm dev
-        </pre>
       </div>
     </section>
   );

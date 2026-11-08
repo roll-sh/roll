@@ -89,7 +89,7 @@ written once in SQLite's dialect), as roll code's did.
 | code | `<repo id>`, `agents:<owner id>` | built (roll-cluster); repo leases keep their bare ids so a running Postgres cluster upgrades in place |
 | postgres | `pg:endpoint:<id>`, `system:pg` | the engine runs in-process; compute moves with the lease |
 | redis | `redis:db:<id>`, `redis:db:<primary>#<replica>` | built: the owner serves RESP and REST; others splice connections to it; a replica is placed as a standby of its primary ("Redis on the fleet") |
-| nosql | `nosql:db:<id>` | replaces the manifest's owner field; fences opens |
+| nosql | `nosql:db:<id>` | the database's owner loads it; opens and manifest writes are fenced by compare-and-swap in S3 |
 | streams | `stream:cluster:<id>` | a tenant's whole Kafka cluster on one owner (the stream SASL maps a key to); acknowledged once in the owner's write-ahead log in S3; per partition later (`crates/stream-broker/README.md`, "On the fleet") |
 | storage | `storage:meta` | built: one metadata log for the deployment, a hot standby following it (docs/storage/architecture.md, "Many nodes"); `storage:account:<id>` (a log per account) is designed there, not built |
 | queues | `mq:<vhost>/<queue>` | mq-cluster's owner records move onto the shared layer |
@@ -251,6 +251,37 @@ never on a fleet node or through a Docker socket.
 - Every control-plane API requires a token; nothing is open by default and CORS is limited to the
   dashboard's origin. Data planes keep their own credentials (Postgres passwords, Redis users,
   S3 keys, SASL).
+- **The operator token.** `ROLL_ADMIN_TOKEN` (`Authorization: Bearer`, 32 characters or more) opens
+  every route rolld's API serves. One check (`crates/roll-auth`) sits in front of all the merged
+  routers, and `crates/rolld/src/auth.rs` (`RULES`) is the one list of routes that don't need it:
+  - public: the health endpoints (`/healthz` and each product's), `GET /v1/info` (the dashboard's
+    sidebar reads it before sign-in) and storage's console sign-in; a product that's off
+    answers 404 before the check;
+  - the product decides: roll code (`/v1/code`, `/git`: owners, tokens, public repos, signed
+    webhooks, device login), signed internal hops (`/internal`);
+  - the token or the product's own credential: storage (console sessions), tasks (its token
+    and API keys), streams' HTTP data plane and Confluent REST (stream API keys).
+
+  Every other route, and any route a product adds later, is the operator's, on the internal API
+  and through the edge (the API host, and the Kafka HTTP and tasks hosts, which carry control-plane
+  routes too; Redis REST, S3 and Alternator are data planes with their own credentials). The token is
+  compared in constant time and never logged; products get only an `Operator` marker on the
+  request. `RUST_LOG=rolld::auth=debug` lists every route with its access at startup, and
+  `crates/rolld/tests/auth.rs` walks that list.
+- **Secure by default.** rolld refuses to start when it listens on any non-loopback address, or
+  with `ROLL_EDGE=1`, without `ROLL_ADMIN_TOKEN`. On loopback it starts open, as before, and says
+  so. With a token, tasks requires a token or API key and streams' HTTP data plane requires an
+  API key (`ROLL_STREAM_REQUIRE_AUTH`); queues refuse the default `guest`/`guest` login off
+  loopback.
+- **CORS.** One policy for every control-plane API: the origins in `ROLL_DASHBOARD_ORIGIN`
+  (comma separated, `https://roll.sh` in the cloud); on loopback, by default, the local
+  dashboard (any port on localhost, 127.0.0.1 or [::1]). Off loopback without the setting, no
+  browser origin is allowed. No cookies are involved: the dashboard sends tokens.
+- **The dashboard** signs in with the operator token (or a roll code owner token) in the header
+  of every page; it stays in the browser's localStorage and goes to every product's API only
+  when roll code says it's the operator's (`GET /v1/code` `auth.operator`). Nothing is built
+  into the bundle. Its server functions call rolld anonymously (public pages). `roll` sends
+  `ROLL_ADMIN_TOKEN` too.
 - Secrets live in Secrets Manager and are sealed with KMS; nodes get them through their task
   role. Internal hops are signed with the cluster secret and stay on the VPC.
 - Security groups admit the NLB and the other nodes only; Cloudflare's proxied hostnames reach
@@ -448,13 +479,14 @@ pushes take as long as the pack); `handoff-failures` and `lease-takeovers` on an
 | code + agents on the cluster layer | built: `crates/roll-cluster` with Memory, Postgres and DynamoDB backends; `ROLL_CLUSTER_*`, `ROLL_NODE_ID`, `ROLL_ZONE`, `ROLL_ADVERTISE_URL`, `ROLL_DRAIN_TIMEOUT` in rolld |
 | AWS stack, image, pipeline, Cloudflare | built (`deploy/cloud/README.md`); not yet run against AWS |
 | edge | built (`crates/roll-edge`, `rolld/src/edge.rs`); not yet run against AWS |
-| control-plane auth lockdown | in progress |
+| control-plane auth lockdown | built (`ROLL_ADMIN_TOKEN`, `crates/roll-auth`, `rolld/src/auth.rs`); customer accounts next |
 | product switches, JSON logs, metrics and their alarms | built (`ROLL_PRODUCTS`, `ROLL_LOG_FORMAT`, `GET /v1/info`); not yet run against AWS |
 | GitHub resilience | done |
 | storage on the cluster layer | built (`storage:meta`, `s3-server/src/cluster.rs`); per-account logs designed |
 | redis on the cluster layer | built ("Redis on the fleet"); not yet run against AWS |
+| nosql on the cluster layer | built: lease `nosql:db:<id>`, catalog on the system database, CQL spliced to the owner (SNI or SASL user), fenced manifests (docs/nosql/architecture.md, "On a fleet") |
 | streams on the cluster layer | built (`stream:cluster:<id>`, catalog on the system database, acknowledgements from a write-ahead log in S3, kafka splices); not yet run against AWS |
-| tasks, queues, nosql on the cluster layer | in progress, one product per change |
+| tasks, queues on the cluster layer | in progress, one product per change |
 | postgres on the fleet and the system database | with the pg-engine branch |
 | isolated work on Fargate | next |
 

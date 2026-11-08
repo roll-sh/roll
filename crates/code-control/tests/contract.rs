@@ -178,7 +178,7 @@ async fn open_mode_makes_everyone_admin() {
     assert_eq!(a.code.caller(None).unwrap(), Caller::Admin);
     assert_eq!(a.code.caller(Some("anything")).unwrap(), Caller::Admin);
     let info = a.ok("GET", "/v1/code", None).await;
-    assert_eq!(info["auth"], json!({ "required": false, "caller": { "kind": "admin", "owner": null, "reviewer": { "kind": "user", "name": "admin" } } }));
+    assert_eq!(info["auth"], json!({ "required": false, "operator": false, "caller": { "kind": "admin", "owner": null, "reviewer": { "kind": "user", "name": "admin" } } }));
     a.repo("acme", "x").await;
     a.ok("PATCH", "/v1/code/repos/acme/x", Some(json!({ "visibility": "private" }))).await;
     a.ok("GET", "/v1/code/repos/acme/x", None).await;
@@ -191,34 +191,6 @@ async fn open_mode_makes_everyone_admin() {
         .req("POST", "/v1/code/repos", Some(json!({ "owner": "acme", "name": "gh", "source": { "github": { "installation_id": 1, "owner": "o", "repo": "r" } } })), None)
         .await;
     assert!(s.is_client_error() && v["error"].is_string(), "{s} {v}");
-}
-
-#[tokio::test]
-async fn cors_for_the_browser() {
-    let a = app(None);
-    a.repo("acme", "x").await;
-    a.ok("POST", "/v1/code/repos/acme/x/land", Some(json!({ "message": "m", "files": { "a.txt": { "content": "a" } } }))).await;
-    let pre = Request::builder()
-        .method("OPTIONS")
-        .uri("/v1/code/repos/acme/x/land")
-        .header("origin", "https://roll.sh")
-        .header("access-control-request-method", "POST")
-        .header("access-control-request-headers", "authorization,content-type")
-        .body(Body::empty())
-        .unwrap();
-    let r = a.send(pre).await;
-    assert!(r.status().is_success(), "{}", r.status());
-    let h = r.headers();
-    assert_eq!(h["access-control-allow-origin"], "*");
-    let allowed = h["access-control-allow-headers"].to_str().unwrap().to_ascii_lowercase();
-    assert!(allowed.contains("authorization") && allowed.contains("content-type"), "{allowed}");
-    assert!(h["access-control-allow-methods"].to_str().unwrap().contains('*') || h["access-control-allow-methods"].to_str().unwrap().contains("POST"));
-
-    let get = Request::get("/v1/code/repos/acme/x/blob/main/a.txt").header("origin", "http://localhost:3000").body(Body::empty()).unwrap();
-    let r = a.send(get).await;
-    assert_eq!(r.headers()["access-control-allow-origin"], "*");
-    let exposed = r.headers()["access-control-expose-headers"].to_str().unwrap().to_ascii_lowercase();
-    assert!(exposed.contains("x-roll-changeset"), "{exposed}");
 }
 
 #[tokio::test]

@@ -15,7 +15,7 @@ use object_store::aws::AmazonS3Builder;
 use object_store::local::LocalFileSystem;
 use object_store::path::Path as ObjPath;
 use object_store::prefix::PrefixStore;
-use object_store::{ObjectStore, ObjectStoreExt, PutMode, PutPayload, UpdateVersion, WriteMultipart};
+use object_store::{ObjectStore, ObjectStoreExt, PutPayload, WriteMultipart};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -29,18 +29,37 @@ pub enum StorageConfig {
     S3 { bucket: String, region: Option<String>, endpoint: Option<String>, prefix: Option<String> },
 }
 
-/// Which write of an object a reader saw: what [`Objects::put_if`] compares against.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Version {
-    e_tag: Option<String>,
-    version: Option<String>,
-}
-
 #[derive(Clone)]
 pub struct Objects {
     store: Arc<dyn ObjectStore>,
     pub description: String,
     durable: bool,
+    /// A local directory: conditional replaces are emulated ([`Objects::put_if`]).
+    local: bool,
+}
+
+/// Which version of an object a conditional write expects to replace (its ETag, and its version
+/// id on a versioned bucket).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ObjectVersion {
+    pub e_tag: Option<String>,
+    pub version: Option<String>,
+}
+
+impl ObjectVersion {
+    fn of_put(r: object_store::PutResult) -> Self {
+        Self { e_tag: r.e_tag, version: r.version }
+    }
+
+    fn update(&self) -> object_store::UpdateVersion {
+        object_store::UpdateVersion { e_tag: self.e_tag.clone(), version: self.version.clone() }
+    }
+}
+
+/// Serialises a local directory's emulated compare-and-swap: as strong as one process.
+fn local_cas_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
 }
 
 const PART_SIZE: usize = 8 * 1024 * 1024;
@@ -70,7 +89,7 @@ impl Objects {
             StorageConfig::Local(dir) => {
                 std::fs::create_dir_all(dir)?;
                 let store = LocalFileSystem::new_with_prefix(dir)?.with_automatic_cleanup(true).with_fsync(fsync);
-                Self { store: Arc::new(store), description: format!("file://{}", dir.display()), durable: fsync }
+                Self { store: Arc::new(store), description: format!("file://{}", dir.display()), durable: fsync, local: true }
             }
             StorageConfig::S3 { bucket, region, endpoint, prefix } => {
                 let mut b = AmazonS3Builder::from_env().with_bucket_name(bucket);
@@ -89,7 +108,7 @@ impl Objects {
                     Some(p) => Arc::new(PrefixStore::new(s3, p.as_str())),
                     None => Arc::new(s3),
                 };
-                Self { store, description, durable: true }
+                Self { store, description, durable: true, local: false }
             }
         })
     }
@@ -97,6 +116,69 @@ impl Objects {
     pub async fn put(&self, key: &str, data: Bytes) -> anyhow::Result<()> {
         self.store.put(&ObjPath::from(key), PutPayload::from_bytes(data)).await?;
         Ok(())
+    }
+
+    /// An object and its version (for [`Objects::put_if`]).
+    pub async fn get_versioned(&self, key: &str) -> anyhow::Result<Option<(Bytes, ObjectVersion)>> {
+        match self.store.get(&ObjPath::from(key)).await {
+            Ok(r) => {
+                let v = ObjectVersion { e_tag: r.meta.e_tag.clone(), version: r.meta.version.clone() };
+                Ok(Some((r.bytes().await?, v)))
+            }
+            Err(object_store::Error::NotFound { .. }) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// The current version of an object (one HEAD), `None` when it doesn't exist.
+    pub async fn version(&self, key: &str) -> anyhow::Result<Option<ObjectVersion>> {
+        match self.store.head(&ObjPath::from(key)).await {
+            Ok(m) => Ok(Some(ObjectVersion { e_tag: m.e_tag, version: m.version })),
+            Err(object_store::Error::NotFound { .. }) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Create `key` only if no object is there (S3 `If-None-Match: *`). `None` when another
+    /// object is there. A retried request that finds its own earlier attempt stored (same bytes)
+    /// counts as created.
+    pub async fn put_new(&self, key: &str, data: Bytes) -> anyhow::Result<Option<ObjectVersion>> {
+        let opts = object_store::PutOptions { mode: object_store::PutMode::Create, ..Default::default() };
+        match self.store.put_opts(&ObjPath::from(key), PutPayload::from_bytes(data.clone()), opts).await {
+            Ok(r) => Ok(Some(ObjectVersion::of_put(r))),
+            Err(object_store::Error::AlreadyExists { .. }) => self.same_bytes(key, &data).await,
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Compare-and-swap: replace `key` only if it's still at version `expected` (S3 `If-Match`),
+    /// or, with `None`, create it only where nothing is (as [`Objects::put_new`]). `None` back
+    /// when it changed, is gone or appeared meanwhile. A retried request whose earlier attempt
+    /// went through (the object holds these bytes) counts as written.
+    ///
+    /// A local directory has no conditional replace; it's emulated under a lock, which makes it a
+    /// compare-and-swap between the writers of one process only.
+    pub async fn put_if(&self, key: &str, data: Bytes, expected: Option<&ObjectVersion>) -> anyhow::Result<Option<ObjectVersion>> {
+        let Some(expected) = expected else { return self.put_new(key, data).await };
+        if self.local {
+            let _cas = local_cas_lock().lock().await;
+            if self.version(key).await?.is_none_or(|v| v.e_tag != expected.e_tag) {
+                return Ok(None);
+            }
+            let r = self.store.put(&ObjPath::from(key), PutPayload::from_bytes(data)).await?;
+            return Ok(Some(ObjectVersion::of_put(r)));
+        }
+        let opts = object_store::PutOptions { mode: object_store::PutMode::Update(expected.update()), ..Default::default() };
+        match self.store.put_opts(&ObjPath::from(key), PutPayload::from_bytes(data.clone()), opts).await {
+            Ok(r) => Ok(Some(ObjectVersion::of_put(r))),
+            Err(object_store::Error::Precondition { .. } | object_store::Error::NotFound { .. }) => self.same_bytes(key, &data).await,
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// The object's version if it holds exactly `data` (an earlier attempt of this write).
+    async fn same_bytes(&self, key: &str, data: &Bytes) -> anyhow::Result<Option<ObjectVersion>> {
+        Ok(self.get_versioned(key).await?.filter(|(b, _)| b == data).map(|(_, v)| v))
     }
 
     pub async fn get(&self, key: &str) -> anyhow::Result<Option<Bytes>> {
@@ -153,62 +235,6 @@ impl Objects {
             }
         }
         Ok(out)
-    }
-
-    /// Write `key` only if it doesn't exist (S3 `If-None-Match: *`). False: something is there
-    /// already (perhaps this very write, if an earlier attempt's answer was lost: read it to
-    /// tell).
-    pub async fn put_new(&self, key: &str, data: Bytes) -> anyhow::Result<bool> {
-        match self.store.put_opts(&ObjPath::from(key), PutPayload::from_bytes(data), PutMode::Create.into()).await {
-            Ok(_) => Ok(true),
-            Err(object_store::Error::AlreadyExists { .. } | object_store::Error::Precondition { .. }) => Ok(false),
-            Err(e) => Err(e.into()),
-        }
-    }
-
-    /// An object with the version a [`Objects::put_if`] compares against.
-    pub async fn get_versioned(&self, key: &str) -> anyhow::Result<Option<(Bytes, Version)>> {
-        match self.store.get_opts(&ObjPath::from(key), Default::default()).await {
-            Ok(r) => {
-                let v = Version { e_tag: r.meta.e_tag.clone(), version: r.meta.version.clone() };
-                Ok(Some((r.bytes().await?, v)))
-            }
-            Err(object_store::Error::NotFound { .. }) => Ok(None),
-            Err(e) => Err(e.into()),
-        }
-    }
-
-    /// Compare-and-swap: write `key` if it is still at `expected` (S3 `If-Match`), or doesn't
-    /// exist when `expected` is `None`. `None` back: it changed (or appeared) meanwhile.
-    ///
-    /// A local directory can't compare and swap by itself; it serves one host, so the check
-    /// and the write are made atomic within this process instead.
-    pub async fn put_if(&self, key: &str, data: Bytes, expected: Option<&Version>) -> anyhow::Result<Option<Version>> {
-        let path = ObjPath::from(key);
-        let Some(want) = expected else {
-            return match self.store.put_opts(&path, PutPayload::from_bytes(data), PutMode::Create.into()).await {
-                Ok(r) => Ok(Some(Version { e_tag: r.e_tag, version: r.version })),
-                Err(object_store::Error::AlreadyExists { .. } | object_store::Error::Precondition { .. }) => Ok(None),
-                Err(e) => Err(e.into()),
-            };
-        };
-        let update = UpdateVersion { e_tag: want.e_tag.clone(), version: want.version.clone() };
-        match self.store.put_opts(&path, PutPayload::from_bytes(data.clone()), PutMode::Update(update).into()).await {
-            Ok(r) => Ok(Some(Version { e_tag: r.e_tag, version: r.version })),
-            Err(object_store::Error::Precondition { .. } | object_store::Error::NotFound { .. }) => Ok(None),
-            Err(object_store::Error::NotImplemented { .. }) => {
-                static LOCAL_CAS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-                let _one = LOCAL_CAS.lock().await;
-                match self.store.head(&path).await {
-                    Ok(m) if m.e_tag == want.e_tag => {}
-                    Ok(_) | Err(object_store::Error::NotFound { .. }) => return Ok(None),
-                    Err(e) => return Err(e.into()),
-                }
-                let r = self.store.put(&path, PutPayload::from_bytes(data)).await?;
-                Ok(Some(Version { e_tag: r.e_tag, version: r.version }))
-            }
-            Err(e) => Err(e.into()),
-        }
     }
 
     pub async fn delete_prefix(&self, prefix: &str) -> anyhow::Result<usize> {
@@ -341,6 +367,20 @@ pub(crate) mod tests {
         assert!(o.get("a/b").await.unwrap().is_none());
         assert!(o.get("z").await.unwrap().is_some());
         o.delete("never-existed").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn conditional_writes() {
+        let (o, _) = temp_objects("cas");
+        let v1 = o.put_new("m", Bytes::from_static(b"one")).await.unwrap().expect("created");
+        assert!(o.put_new("m", Bytes::from_static(b"other")).await.unwrap().is_none(), "create-only");
+        assert_eq!(o.put_new("m", Bytes::from_static(b"one")).await.unwrap(), Some(v1.clone()), "a retry of the same create");
+        let v2 = o.put_if("m", Bytes::from_static(b"two"), Some(&v1)).await.unwrap().expect("swapped");
+        assert!(o.put_if("m", Bytes::from_static(b"three"), Some(&v1)).await.unwrap().is_none(), "stale version");
+        assert_eq!(o.get_versioned("m").await.unwrap().unwrap(), (Bytes::from_static(b"two"), v2.clone()));
+        assert_eq!(o.version("m").await.unwrap(), Some(v2.clone()));
+        o.delete("m").await.unwrap();
+        assert!(o.put_if("m", Bytes::from_static(b"four"), Some(&v2)).await.unwrap().is_none(), "gone");
     }
 
     #[tokio::test]

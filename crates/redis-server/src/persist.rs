@@ -40,7 +40,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::sync::{Notify, watch};
 
-pub use pg_storage::{Objects, StorageConfig, Version};
+pub use pg_storage::{ObjectVersion, Objects, StorageConfig};
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct SnapRef {
@@ -93,7 +93,7 @@ pub struct Manifest {
     pub after_seq: u64,
     /// The stored object's version when it was read (what replacing it compares against).
     #[serde(skip)]
-    pub version: Option<Version>,
+    pub version: Option<ObjectVersion>,
 }
 
 /// Object storage for tests: S3 under a unique prefix when `ROLL_E2E_S3_BUCKET` is set (with
@@ -594,12 +594,8 @@ impl Shipper {
     async fn put_segment(&self, key: &str, data: &Bytes) -> bool {
         let mut backoff = Duration::from_millis(50);
         loop {
-            let r = match self.objects.put_new(key, data.clone()).await {
-                Ok(true) => Ok(true),
-                // Ours, if an earlier attempt's answer was lost.
-                Ok(false) => self.objects.get(key).await.map(|got| got.as_ref() == Some(data)),
-                Err(e) => Err(e),
-            };
+            // Ours too if an earlier attempt's answer was lost (`put_new` checks the bytes).
+            let r = self.objects.put_new(key, data.clone()).await.map(|v| v.is_some());
             match r {
                 Ok(ours) => return ours,
                 Err(e) => {
@@ -612,17 +608,11 @@ impl Shipper {
     }
 
     /// Compare-and-swap `id`'s manifest from the version in `m`. `None`: someone else wrote it.
-    async fn cas_manifest(&self, id: &str, m: &Manifest) -> anyhow::Result<Option<Version>> {
+    async fn cas_manifest(&self, id: &str, m: &Manifest) -> anyhow::Result<Option<ObjectVersion>> {
         let raw = Bytes::from(serde_json::to_vec(m)?);
         let key = manifest_key(id);
-        if let Some(v) = self.objects.put_if(&key, raw.clone(), m.version.as_ref()).await? {
-            return Ok(Some(v));
-        }
-        // This very write, if an earlier attempt's answer was lost.
-        Ok(match self.objects.get_versioned(&key).await? {
-            Some((got, v)) if got == raw => Some(v),
-            _ => None,
-        })
+        // This very write counts too, if an earlier attempt's answer was lost (`put_if` checks).
+        self.objects.put_if(&key, raw, m.version.as_ref()).await
     }
 
     /// Store `id`'s manifest as this node knows it (after `edit`), naming the current log. False
@@ -820,7 +810,7 @@ pub async fn fence_log(objects: &Objects, log: &str, after_seq: u64) -> anyhow::
             return Ok(fence);
         }
         let next = listed.iter().map(|(s, _)| *s).max().unwrap_or(0).max(after_seq) + 1;
-        if objects.put_new(&segment_key(log, next), Bytes::new()).await? {
+        if objects.put_new(&segment_key(log, next), Bytes::new()).await?.is_some() {
             return Ok(next);
         }
         // The writer got there first (or this very fence, its answer lost): look again.

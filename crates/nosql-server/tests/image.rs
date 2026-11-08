@@ -88,6 +88,15 @@ fn env(e: &[(&'static str, &str)]) -> RunOpts<'static> {
     RunOpts { env: e.iter().map(|(k, v)| (*k, v.to_string())).collect(), ..Default::default() }
 }
 
+/// The container's roll API (`:7070`) with the operator token its entrypoint made.
+fn api_get(c: &Container, path: &str) -> String {
+    reqwest::blocking_get_with(&format!("http://{}:7070{path}", c.ip()), &admin_token(c))
+}
+
+fn admin_token(c: &Container) -> String {
+    String::from_utf8_lossy(&c.exec(&["cat", "/var/lib/roll/admin-token"]).stdout).trim().to_string()
+}
+
 fn tcp_open(ip: &str, port: u16) -> bool {
     std::net::TcpStream::connect_timeout(&format!("{ip}:{port}").parse().unwrap(), Duration::from_millis(500)).is_ok()
 }
@@ -141,7 +150,7 @@ fn defaults_ports_logs_and_startup() {
     assert!(metrics.contains("scylla_transport_cql_errors_total"), "{metrics}");
     let rest = reqwest::blocking_get(&format!("http://{ip}:10000/storage_service/host_id"));
     assert!(rest.contains('-'), "{rest}");
-    let api = reqwest::blocking_get(&format!("http://{ip}:7070/v1/nosql"));
+    let api = api_get(&c, "/v1/nosql");
     assert!(api.contains("\"single\""), "{api}");
     // Health check, user, data directory, in-container cqlsh (Testcontainers' readiness probes).
     let end = Instant::now() + Duration::from_secs(20);
@@ -425,7 +434,8 @@ fn seed_from_branch() {
     for from in [format!("http://{sip}:7070/default"), format!("cql://{sip}:9042")] {
         let vol = docker::unique("roll-nosql-test-vol");
         let _cleanup = VolumeGuard(vol.clone());
-        let c = start(&image, RunOpts { volume: Some(vol.clone()), env: vec![("ROLL_NOSQL_FROM", from.clone()), ("ROLL_NOSQL_FROM_KEYSPACES", "app".into())], ..Default::default() });
+        let env = vec![("ROLL_NOSQL_FROM", from.clone()), ("ROLL_NOSQL_FROM_KEYSPACES", "app".into()), ("ROLL_NOSQL_FROM_TOKEN", admin_token(&src))];
+        let c = start(&image, RunOpts { volume: Some(vol.clone()), env, ..Default::default() });
         rt.block_on(async {
             let cl = connect(&c.ip(), None).await.unwrap();
             let r = row(&cl, "SELECT count(*), max(ttl(name)) FROM app.users").await;
@@ -460,7 +470,7 @@ fn memory_budgets() {
     let rt = rt();
     let memory = |c: &Container| -> serde_json::Value {
         c.wait_cql(Duration::from_secs(30));
-        let v: serde_json::Value = serde_json::from_str(&reqwest::blocking_get(&format!("http://{}:7070/v1/nosql", c.ip()))).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&api_get(c, "/v1/nosql")).unwrap();
         v["memory"].clone()
     };
     let budgets = |m: &serde_json::Value| (m["memtable_budget_bytes"].as_u64().unwrap() >> 20, m["cache_memory_budget_bytes"].as_u64().unwrap() >> 20);
@@ -489,6 +499,10 @@ mod reqwest {
     //! Tiny blocking HTTP helpers over reqwest's async client.
     pub fn blocking_get(url: &str) -> String {
         super::rt().block_on(async { ::reqwest::get(url).await.unwrap().text().await.unwrap() })
+    }
+
+    pub fn blocking_get_with(url: &str, token: &str) -> String {
+        super::rt().block_on(async { ::reqwest::Client::new().get(url).bearer_auth(token).send().await.unwrap().text().await.unwrap() })
     }
 
     pub fn blocking_post(url: &str, headers: &[(&str, &str)], body: &str) -> (u16, String) {

@@ -5,7 +5,7 @@
  */
 
 import { ROLL_API } from "./roll-api";
-import { accountQuery, assertSessionLive, clearSession, storageCall as call, storageHeaders, StorageError } from "./storage-session";
+import { accountQuery, assertSessionLive, clearSession, getSession, storageCall as call, storageHeaders, StorageError } from "./storage-session";
 
 export interface StoragePricing {
   usd_per_gb_month: number;
@@ -698,6 +698,7 @@ export function uploadObject(
     xhr.open("PUT", `${ROLL_API}${bucket(name)}/upload${q({ key })}`);
     if (file.type) xhr.setRequestHeader("content-type", file.type);
     let auth: Record<string, string>;
+    const signedIn = Boolean(getSession());
     try {
       assertSessionLive();
       auth = storageHeaders();
@@ -716,7 +717,7 @@ export function uploadObject(
       }
       if (xhr.status >= 200 && xhr.status < 300) resolve(data as ObjectInfo);
       else {
-        if (xhr.status === 401 && "authorization" in auth) clearSession(true);
+        if (xhr.status === 401 && signedIn) clearSession(true);
         const code = (data as { code?: string } | null)?.code ?? null;
         reject(new StorageError(data?.error ?? `${xhr.status} ${xhr.statusText}`, xhr.status, code));
       }

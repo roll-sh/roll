@@ -34,7 +34,7 @@ pub struct Streams {
     pub kafka: Option<tokio::net::TcpListener>,
 }
 
-pub async fn start(args: &Args, home: &std::path::Path, storage: &StorageConfig, cluster: &Arc<Cluster>) -> anyhow::Result<Streams> {
+pub async fn start(args: &Args, auth: &crate::auth::Auth, home: &std::path::Path, storage: &StorageConfig, cluster: &Arc<Cluster>) -> anyhow::Result<Streams> {
     let mut c = stream_broker::Config::local(home.to_path_buf());
     c.listen = args.kafka;
     c.advertised_host = args.kafka_advertised_host.clone().unwrap_or_else(|| args.public_host.clone());
@@ -42,7 +42,7 @@ pub async fn start(args: &Args, home: &std::path::Path, storage: &StorageConfig,
     c.default_stream = Some(args.default_stream.clone()).filter(|s| !s.is_empty());
     c.tls = args.kafka_tls_cert.clone().zip(args.kafka_tls_key.clone()).map(|(cert, key)| TlsFiles { cert, key });
     c.http_url = format!("http://{}:{}", args.public_host, args.api.port());
-    c.http_require_auth = args.stream_require_auth;
+    c.http_require_auth = args.stream_require_auth || auth.enforcing();
     c.local_disk_bytes = args.stream_disk_mb << 20;
     c.evict_on_unload = !args.stream_keep_local;
     c.storage = storage.clone();

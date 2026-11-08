@@ -14,6 +14,10 @@
 //! With `durability = async` a write is acknowledged once it is in the memtable; with `sync`
 //! once its segment is stored ([`Shipper::wait_stored`]). Follows the Redis product's
 //! `redis_server::persist::Shipper`.
+//!
+//! Segments are created, never replaced (`If-None-Match: *`): if another process with the same
+//! node id took a sequence number (a pinned id restarted while the old process still ran), the
+//! shipper skips past what's there instead of overwriting a log another owner may replay.
 
 use crate::codec::{Reader, put_bytes, put_uvarint};
 use crate::manifest::{SegRef, TableId, segment_key, segment_seq};
@@ -210,6 +214,11 @@ impl Shipper {
         self.next_seq.load(Ordering::SeqCst) - 1
     }
 
+    /// The newest generation whose frames are stored.
+    pub fn stored_generation(&self) -> u64 {
+        *self.stored.borrow()
+    }
+
     /// Every segment up to this one is stored and reported to its databases' manifests: a
     /// manifest's `after_seq`.
     pub fn completed_seq(&self) -> u64 {
@@ -301,7 +310,7 @@ impl Shipper {
             self.stored.send_replace(p.generation);
             return Ok(());
         }
-        let seq = self.next_seq.fetch_add(1, Ordering::SeqCst);
+        let mut seq = self.next_seq.fetch_add(1, Ordering::SeqCst);
         let level = self.cfg.zstd_level;
         let raw = p.data;
         let data = if raw.len() > 64 << 10 {
@@ -309,16 +318,25 @@ impl Shipper {
         } else {
             zstd::bulk::compress(&raw, level)?
         };
-        let key = segment_key(&self.node, seq);
+        let mut key = segment_key(&self.node, seq);
         let data = Bytes::from(data);
         let mut backoff = Duration::from_millis(20);
         loop {
             #[cfg(test)]
-            let r = if self.fail.load(Ordering::SeqCst) { Err(anyhow::anyhow!("injected failure")) } else { self.objects.put(&key, data.clone()).await };
+            let r = if self.fail.load(Ordering::SeqCst) { Err(anyhow::anyhow!("injected failure")) } else { self.objects.put_new(&key, data.clone()).await };
             #[cfg(not(test))]
-            let r = self.objects.put(&key, data.clone()).await;
+            let r = self.objects.put_new(&key, data.clone()).await;
             match r {
-                Ok(()) => break,
+                Ok(Some(_)) => break,
+                Ok(None) => {
+                    // Taken by another process running as this node: continue after its segments.
+                    let existing = self.objects.list(&format!("nosql/log/{}/", self.node)).await.unwrap_or_default();
+                    let next = existing.iter().filter_map(|(k, _)| segment_seq(k)).max().unwrap_or(seq).max(seq) + 1;
+                    self.next_seq.fetch_max(next + 1, Ordering::SeqCst);
+                    tracing::warn!(key, next, "nosql log segment number already taken by another process with this node id; skipping past it");
+                    seq = next;
+                    key = segment_key(&self.node, seq);
+                }
                 Err(e) => {
                     tracing::warn!(error = %e, key, "nosql log segment upload failed, retrying");
                     tokio::time::sleep(backoff).await;

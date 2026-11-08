@@ -49,4 +49,16 @@ describe("code token", () => {
     expect(changed).toHaveBeenCalledTimes(2);
   });
 
+  it("sends the token to the products' APIs only while it's the operator's", async () => {
+    const t = await import("./code-token");
+    t.setToken("rlc_owner");
+    expect(t.operatorHeaders()).toEqual({});
+    t.setToken("operator-token", true);
+    expect(t.operatorHeaders()).toEqual({ authorization: "Bearer operator-token" });
+    t.markOperator(false);
+    expect(t.operatorHeaders()).toEqual({});
+    t.setToken("operator-token", true);
+    t.setToken(null);
+    expect(t.operatorHeaders()).toEqual({});
+  });
 });

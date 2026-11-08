@@ -25,10 +25,13 @@ docker exec -it nosql cqlsh                                            # cqlsh i
 | 8000 | Alternator, the DynamoDB API (always on; ScyllaDB enables it only with `--alternator-port`) |
 | 10000 | ScyllaDB's REST API (`nodetool`), bound to `0.0.0.0` (ScyllaDB binds `127.0.0.1` unless `--api-address`) |
 | 9180 | Prometheus metrics, under ScyllaDB's names |
-| 7070 | the roll API (`/v1/nosql`), for `roll nosql …` and the dashboard |
+| 7070 | the roll API (`/v1/nosql`), for `roll nosql …` and the dashboard; it needs the operator token (`Authorization: Bearer`, see below) |
 
 - **Data** lives in the volume `/var/lib/roll`. It survives restarts and new containers on the
   same volume.
+- **The roll API's token.** Set `ROLL_ADMIN_TOKEN` (32 characters or more), or the image makes
+  one per volume and keeps it in `/var/lib/roll/admin-token` (`docker exec <c> cat
+  /var/lib/roll/admin-token`; it's never logged). CQL, Alternator and the REST API don't use it.
 - **S3.** By default, object storage is a directory in that volume. Set `ROLL_S3_BUCKET` (plus
   `ROLL_S3_PREFIX`, `ROLL_S3_ENDPOINT` for MinIO, R2 and the like, `AWS_REGION` and the usual
   `AWS_*` credentials) to keep the data on S3 instead. The volume is then only a cache.
@@ -225,6 +228,7 @@ and have `LOGIN`. With `PasswordAuthenticator`, a client certificate is only che
 | `ROLL_NOSQL_CACHE_DISK` | `4GiB` | Stored SSTable blocks on local disk (with S3 storage only) |
 | `ROLL_NOSQL_FLUSH_CONCURRENCY`, `ROLL_NOSQL_COMPACTION_CONCURRENCY` | `2`, `2` | Flushes and compactions running at once |
 | `ROLL_NOSQL_CQL`, `ROLL_NOSQL_CQL_SHARD_AWARE`, `ROLL_NOSQL_ALTERNATOR`, `ROLL_NOSQL_REST`, `ROLL_NOSQL_METRICS`, `ROLL_API` | see the ports table | Listener addresses |
+| `ROLL_ADMIN_TOKEN` | made once per volume, in `/var/lib/roll/admin-token` | The roll API's operator token |
 | `RUST_LOG` | `info` | Log filter |
 
 ## Start from a branch
