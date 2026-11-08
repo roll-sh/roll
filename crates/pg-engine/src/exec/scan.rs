@@ -3309,20 +3309,7 @@ impl ScanNode {
     /// Some(false): the range holds no visible entry). None: not such a range (or the
     /// reader couldn't tell), read by a scan as any other.
     fn point_entry(&mut self, ctx: &ExecCtx) -> Result<Option<bool>> {
-        if self.point.is_none() {
-            let p = &self.plan;
-            let ok = p.index.as_ref().is_some_and(|(ix, b)| {
-                ix.method == "btree"
-                    && ix.unique
-                    && b.eq.len() == ix.columns.len()
-                    && b.any.is_none()
-                    && b.skip.is_none()
-                    && b.order.is_empty()
-                    && !deferrable_index(&p.table, ix.oid)
-            });
-            self.point = Some(ok && !self.rev && !self.one_run && self.skip.is_none());
-        }
-        if self.point != Some(true) || self.cur_range >= self.ranges.len() {
+        if !self.point_ranges() || self.cur_range >= self.ranges.len() {
             return Ok(None);
         }
         // (A table that has stored values out of line has its rows read as stored, its scan
@@ -3357,6 +3344,25 @@ impl ScanNode {
         self.erb.push(&ekey, dkey);
         self.erows.push(row);
         Ok(Some(true))
+    }
+
+    /// Whether each of the scan's ranges is a unique index's equality on every key column, so
+    /// holds one visible entry at most (decided once: `point`).
+    fn point_ranges(&mut self) -> bool {
+        if self.point.is_none() {
+            let p = &self.plan;
+            let ok = p.index.as_ref().is_some_and(|(ix, b)| {
+                ix.method == "btree"
+                    && ix.unique
+                    && b.eq.len() == ix.columns.len()
+                    && b.any.is_none()
+                    && b.skip.is_none()
+                    && b.order.is_empty()
+                    && !deferrable_index(&p.table, ix.oid)
+            });
+            self.point = Some(ok && !self.rev && !self.one_run && self.skip.is_none());
+        }
+        self.point == Some(true)
     }
 
     /// Next (data key, stored row bytes) in storage order.
@@ -4505,6 +4511,10 @@ impl ScanNode {
         // or a nested loop's inner side: PostgreSQL puts no Gather there, and threads started
         // per run cost more than its few rows. TPC-H q20's 8,332 runs took 9 s.)
         if workers == 0 || !ctx.outer.borrow().is_empty() || super::sizing::heap_modelled_or_kept(&p.table, ctx) {
+            return Ok(None);
+        }
+        // (A unique index's equality: one row at most.)
+        if self.point_ranges() {
             return Ok(None);
         }
         let fetch = match &self.ios_cols {
