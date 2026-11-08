@@ -1074,6 +1074,9 @@ pub struct InsertPlan {
     /// Rows from here have one value per `target` column.
     pub source: Arc<Plan>,
     pub target: Vec<usize>,
+    /// A written multirow VALUES list coerces its inputs before omitted defaults.
+    /// Keep this through optimization: SELECT from a Values plan uses column order.
+    pub values_domains_first: bool,
     pub on_conflict: Option<OnConflict>,
     /// Over the new row.
     pub returning: Vec<Expr>,
@@ -1098,6 +1101,9 @@ pub struct InsertPlan {
 pub enum CopyRow {
     Values(Vec<crate::types::Value>),
     Exprs(Vec<Expr>),
+    /// A line ON_ERROR ignore skipped: its defaults are evaluated as its place in the data
+    /// comes (NextCopyFrom computes them before CopyFrom drops the row), nothing goes in.
+    Skipped(Vec<Expr>, String),
 }
 
 /// COPY FROM's input: the table, and its rows as they are read (`CopyFromErrorCallback`).
