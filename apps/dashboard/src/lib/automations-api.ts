@@ -372,7 +372,15 @@ export interface Notice {
   link: string | null;
   automation: AutomationId | null;
   run: AutomationRunId | null;
+  /** The agent event its run started from: says when what it told (waiting on you) is over. */
+  about?: NoticeAbout | null;
   at: Millis;
+}
+
+export interface NoticeAbout {
+  event: AgentEvent;
+  thread: ThreadId;
+  request: string | null;
 }
 
 // ── the catalog and dry runs ──
@@ -703,6 +711,7 @@ export const noticeD = obj<Notice>({
   link: opt(str),
   automation: opt(str),
   run: opt(str),
+  about: optional(obj<NoticeAbout>({ event: literal(...AGENT_EVENTS), thread: str as Decoder<ThreadId>, request: opt(str) })),
   at: int,
 });
 

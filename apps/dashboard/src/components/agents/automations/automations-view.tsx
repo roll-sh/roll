@@ -24,7 +24,7 @@ import type { ListFilter as Filter } from "@/lib/automations-list";
 import { AutomationList, FilterButton } from "./list";
 import { Named } from "./named";
 import { NoticeList } from "./notices";
-import { unseenNotices } from "@/lib/automations-store";
+import { noticesOver, unseenNotices } from "@/lib/automations-store";
 import { SheetHeader } from "./sheet";
 import { PrimaryButton, QuietButton, RunDot, RunStatus, stepIcon, Tile, triggerIcon, useAutomations } from "./shared";
 
@@ -39,7 +39,8 @@ export function AutomationsView({ view, phone }: { view: View; phone: boolean })
   const setSearch = (q: string) => setQuery((kept.query = q));
   const setFilter = (f: Filter) => setFilterState((kept.filter = f));
   const empty = a.loaded && !a.error && automations.length === 0;
-  const unseen = unseenNotices(a);
+  const { client } = useAgents();
+  const unseen = unseenNotices(a, noticesOver(client.data));
 
   if (!a.store)
     return (

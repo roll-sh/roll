@@ -832,7 +832,20 @@ pub struct Notice {
     pub automation: Option<AutomationId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run: Option<AutomationRunId>,
+    /// The agent event its run started from, when one did: a dashboard says when what it told
+    /// (a thread waiting on you) is over, rather than showing it as news.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub about: Option<NoticeAbout>,
     pub at: Millis,
+}
+
+/// A notice's agent event: its kind, its thread and, for `request.opened`, its request.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NoticeAbout {
+    pub event: AgentEvent,
+    pub thread: ThreadId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request: Option<crate::RequestId>,
 }
 
 // ---------------------------------------------------------------------------------------------

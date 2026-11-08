@@ -9,7 +9,7 @@ use super::registry::{OwnerRef, StepKind, StepOutcome, props};
 use crate::Code;
 use crate::review::pattern::Pattern;
 use agent_proto::automation::{
-    AgentDefaults, AgentMessage, AgentPublish, AgentRespond, AgentScript, AgentSettle, AgentStart, AgentWait, DelayConfig, LogLevel, Notice, NotifyConfig, OnError, ProjectRef,
+    AgentDefaults, AgentMessage, AgentPublish, AgentRespond, AgentScript, AgentSettle, AgentStart, AgentWait, DelayConfig, LogLevel, Notice, NoticeAbout, NotifyConfig, OnError, ProjectRef,
     RespondRule, Retry, RunState, SettleAction, StepInfo, Target, WaitFor, WebhookCall, step_kinds,
 };
 use agent_proto::{Command, Entity, Machine, MachineId, Project, ProjectId, RepoRef, Reply, RequestBody, RequestStatus, Response, RunStatus, Settle, Thread, ThreadId, ThreadStatus};
@@ -891,6 +891,18 @@ impl StepKind for CallWebhook {
 
 struct Notify;
 
+/// The agent event a run started from (its kind, thread and request), for its notices.
+fn notice_about(event: &Value) -> Option<NoticeAbout> {
+    if event["source"] != "agent" {
+        return None;
+    }
+    Some(NoticeAbout {
+        event: serde_json::from_value(event["kind"].clone()).ok()?,
+        thread: serde_json::from_value(event["data"]["thread"]["id"].clone()).ok()?,
+        request: serde_json::from_value(event["data"]["request"]["id"].clone()).ok(),
+    })
+}
+
 #[async_trait::async_trait]
 impl StepKind for Notify {
     fn info(&self) -> StepInfo {
@@ -919,6 +931,7 @@ impl StepKind for Notify {
                 link: c.link.as_deref().map(|l| rendered(ctx, l)).transpose()?.filter(|l| l.starts_with("https://") || l.starts_with("http://") || l.starts_with('/')),
                 automation: Some(ctx.automation().clone()),
                 run: Some(ctx.run().clone()),
+                about: notice_about(&ctx.context()["event"]),
                 at: code_sql::now_ms().max(0) as u64,
             };
             let id = notice.id.clone();

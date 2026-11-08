@@ -292,12 +292,13 @@ pub fn notice() -> Notice {
         link: Some("https://roll.sh/acme/app/changes/12".into()),
         automation: Some(aut(1)),
         run: Some(arn()),
+        about: Some(NoticeAbout { event: AgentEvent::ThreadWaiting, thread: ThreadId::from_suffix("a1b2c3d4e5f60718"), request: Some(agent_proto::RequestId::from_suffix("0123456789abcdef")) }),
         at: T,
     }
 }
 
 pub fn notices() -> Vec<Notice> {
-    let plain = |level| Notice { id: "ntc_1".into(), title: "Hi".into(), body: String::new(), level, link: None, automation: None, run: None, at: T };
+    let plain = |level| Notice { id: "ntc_1".into(), title: "Hi".into(), body: String::new(), level, link: None, automation: None, run: None, about: None, at: T };
     vec![notice(), plain(NoticeLevel::Info), plain(NoticeLevel::Warning), plain(NoticeLevel::Error)]
 }
 

@@ -10,6 +10,7 @@
 import { useEffect, useSyncExternalStore } from "react";
 import type { StreamEvent, ThreadId } from "./agents-api";
 import type { AgentsClient } from "./agents-client";
+import type { AgentsData } from "./agents-store";
 import type { Automation, AutomationId, AutomationRun, AutomationRunId, AutomationsApi, Catalog, Notice } from "./automations-api";
 
 export type AutomationEvent = Extract<StreamEvent, { type: "automation" | "automation_removed" | "automation_run" | "notice" }>;
@@ -53,7 +54,34 @@ function readSeen(owner: string): number {
 }
 
 /** Notices newer than what this device has seen. */
-export const unseenNotices = (s: Pick<AutomationsState, "notices" | "noticesSeen">) => s.notices.filter((n) => n.at > s.noticesSeen).length;
+export const unseenNotices = (s: Pick<AutomationsState, "notices" | "noticesSeen">, over?: (n: Notice) => boolean) => s.notices.filter((n) => n.at > s.noticesSeen && !over?.(n)).length;
+
+/**
+ * Whether what a notice told is over: the request it was about was answered, or the thread it said
+ * waits on you has no request left from then (a newer one is another wait). Only for the waiting
+ * events, and only when the thread's records are here: otherwise it isn't known, and isn't over.
+ */
+export function noticesOver(data: Pick<AgentsData, "threads" | "requests">): (n: Notice) => boolean {
+  // Each thread's oldest pending request, worked out once for all the notices.
+  let oldest: Map<ThreadId, number> | null = null;
+  const pendingSince = (thread: ThreadId) => {
+    if (!oldest) {
+      oldest = new Map();
+      for (const { value: r } of data.requests.values()) if (r.status === "pending" && !(oldest.get(r.thread)! <= r.created_at)) oldest.set(r.thread, r.created_at);
+    }
+    return oldest.get(thread);
+  };
+  return (n) => {
+    const about = n.about;
+    if (!about || (about.event !== "thread.waiting" && about.event !== "request.opened")) return false;
+    const req = about.request ? data.requests.get(about.request)?.value : undefined;
+    if (req) return req.status !== "pending";
+    if (!data.threads.has(about.thread)) return false;
+    // A few seconds' grace: the notice is made after the request that set it off.
+    const since = pendingSince(about.thread);
+    return since === undefined || since > n.at + 5_000;
+  };
+}
 
 /** Runs kept in memory; the oldest finished ones go first. */
 const MAX_RUNS = 600;

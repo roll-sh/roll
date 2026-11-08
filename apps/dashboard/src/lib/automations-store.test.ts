@@ -2,7 +2,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentsClient } from "./agents-client";
 import { DemoOwner } from "./agents-demo";
 import type { Automation, AutomationRun, AutomationsApi } from "./automations-api";
-import { AutomationsStore, automationsFor, unseenNotices } from "./automations-store";
+import { AutomationsStore, automationsFor, noticesOver, unseenNotices } from "./automations-store";
+import type { ThreadId } from "./agents-api";
 
 const auto = (id: string, cursor: number, name = id): Automation => ({
   id,
@@ -115,6 +116,15 @@ describe("automations store", () => {
     expect(unseenNotices(again.getSnapshot())).toBe(0);
     again.apply({ type: "notice", notice: note("n4", 40) });
     expect(unseenNotices(again.getSnapshot())).toBe(1);
+    // "… waits on you", answered since: not news (a phone check-in read it as current).
+    const waits = { ...note("n5", 50_000), about: { event: "thread.waiting" as const, thread: "thr_w" as ThreadId, request: null } };
+    again.apply({ type: "notice", notice: waits });
+    const pending = (created_at: number) => new Map([["req_1", { value: { thread: "thr_w", status: "pending", created_at } }]]);
+    const data = (requests: Map<string, unknown>) => ({ threads: new Map([["thr_w", {}]]), requests }) as unknown as Parameters<typeof noticesOver>[0];
+    expect(unseenNotices(again.getSnapshot(), noticesOver(data(pending(49_000))))).toBe(2);
+    expect(unseenNotices(again.getSnapshot(), noticesOver(data(new Map())))).toBe(1);
+    // A newer request is another wait: this one's was answered.
+    expect(noticesOver(data(pending(90_000)))(waits)).toBe(true);
     // A server from before notices were kept: none listed, nothing breaks.
     const old = new AutomationsStore("acme", api([auto("aut_1", 1)]));
     await old.ensure();

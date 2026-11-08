@@ -234,6 +234,7 @@ mod tests {
             link: None,
             automation: None,
             run: None,
+            about: None,
             at: 1000 + i,
         };
         let over = NOTICES_KEPT as u64 + 5;

@@ -17,7 +17,7 @@ import { forwardRef, useEffect, useMemo, useRef, useState } from "react";
 import { DRAWER, POP_OUT, TOAST_IN } from "@/lib/agents-motion";
 import type { AgentsClient } from "@/lib/agents-client";
 import type { AutomationRun, AutomationsApi, Notice } from "@/lib/automations-api";
-import { automationsFor, unseenNotices, useAutomationsState } from "@/lib/automations-store";
+import { automationsFor, noticesOver, unseenNotices, useAutomationsState } from "@/lib/automations-store";
 import { setAgentsView, viewFromHash } from "@/lib/agents-surface";
 import { ago } from "../shared";
 import { cn } from "../ui";
@@ -33,7 +33,8 @@ export function noticeActions(n: Notice, run: AutomationRun | undefined, openThr
     if (v) out.push({ label: "Open", go: () => setAgentsView(v) });
     else if (/^https?:\/\//.test(n.link)) out.push({ label: "Open", go: () => window.open(n.link!, "_blank", "noopener,noreferrer") });
   }
-  const thread = run?.threads.at(-1)?.thread;
+  // The thread its run started, else the one it's about (the thread waiting on you).
+  const thread = run?.threads.at(-1)?.thread ?? n.about?.thread;
   if (thread) out.push({ label: "Open the thread", go: () => openThread(thread) });
   if (n.automation && n.run) out.push({ label: "View the run", go: () => setAgentsView({ kind: "automations", open: n.automation!, tab: "runs", run: n.run! }) });
   return out;
@@ -42,13 +43,15 @@ export function noticeActions(n: Notice, run: AutomationRun | undefined, openThr
 /** Notices this device hasn't seen in the list yet (outside the agents context: its store given). */
 export function useUnseenNotices(client: AgentsClient, api: AutomationsApi | undefined): number {
   const store = useMemo(() => (api ? automationsFor(client, api) : null), [client, api]);
-  return unseenNotices(useAutomationsState(store));
+  // A thread that waited on you and was answered since isn't news any more.
+  return unseenNotices(useAutomationsState(store), noticesOver(client.data));
 }
 
 /** Every notice kept, newest first: what a person missed while nothing was open. */
 export function NoticeList() {
   const { store, notices, noticesSeen, runs } = useAutomations();
-  const { openThread } = useAgents();
+  const { openThread, client } = useAgents();
+  const over = noticesOver(client.data);
   const [now] = useState(() => Date.now());
   // What was new when the list opened stays marked while it's open; seeing it is seeing them.
   const [seenAt] = useState(noticesSeen);
@@ -60,18 +63,21 @@ export function NoticeList() {
     <>
       <ol className="overflow-hidden rounded-xl border border-line-2 bg-panel shadow-card inset-shadow-highlight" aria-label="Notices">
         {notices.map((n) => {
-          const Icon = icons[n.level];
-          const fresh = n.at > seenAt;
+          // Waited on you and was answered since: said so, quiet, not new.
+          const done = over(n);
+          const Icon = done ? CircleCheck : icons[n.level];
+          const fresh = n.at > seenAt && !done;
           return (
-            <li key={n.id} className="flex items-start gap-2.5 border-line px-3.5 py-2.5 [&+&]:border-t" aria-label={fresh ? `New: ${n.title}` : n.title}>
-              <Icon className={cn("mt-px size-4 shrink-0", tones[n.level])} strokeWidth={1.75} aria-hidden />
+            <li key={n.id} className="flex items-start gap-2.5 border-line px-3.5 py-2.5 [&+&]:border-t" aria-label={`${fresh ? "New: " : ""}${n.title}${done ? " (answered)" : ""}`}>
+              <Icon className={cn("mt-px size-4 shrink-0", done ? "text-subtle" : tones[n.level])} strokeWidth={1.75} aria-hidden />
               <div className="min-w-0 flex-1">
-                <p className="text-[13px] leading-snug font-[510] tracking-[-0.01em]">{n.title}</p>
+                <p className={cn("text-[13px] leading-snug font-[510] tracking-[-0.01em]", done && "text-muted")}>{n.title}</p>
                 {n.body && <p className="mt-0.5 line-clamp-2 text-[12px] leading-snug text-muted"><Named text={n.body} /></p>}
                 <p className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[12px]">
                   <span className="text-subtle tabular-nums" title={new Date(n.at).toLocaleString()}>
                     {ago(n.at, now)}
                   </span>
+                  {done && <span className="text-subtle">Answered</span>}
                   {noticeActions(n, n.run ? runs.get(n.run) : undefined, openThread).map((x) => (
                     <button key={x.label} type="button" onClick={x.go} className="font-medium text-accent hover:underline">
                       {x.label}
@@ -121,12 +127,17 @@ const Toast = forwardRef<HTMLLIElement, { notice: Notice; onDismiss: () => void 
   const reduced = useReducedMotion();
   const present = useIsPresent();
   const { runs } = useAutomations();
-  const { openThread } = useAgents();
+  const { openThread, client } = useAgents();
+  const over = noticesOver(client.data)(n);
   const hover = useRef(false);
   useEffect(() => {
     const t = setInterval(() => !hover.current && Date.now() - n.at > STAY_MS && onDismiss(), 1000);
     return () => clearInterval(t);
   }, [n.at, onDismiss]);
+  // Answered (here or on another device) while it showed: it says nothing current any more.
+  useEffect(() => {
+    if (over) onDismiss();
+  }, [over, onDismiss]);
   const Icon = icons[n.level];
   const actions = noticeActions(n, n.run ? runs.get(n.run) : undefined, openThread);
   return (

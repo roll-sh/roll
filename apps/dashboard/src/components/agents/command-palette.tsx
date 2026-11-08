@@ -73,7 +73,7 @@ import {
 import { targetLabel, type Target as GoalTarget } from "./new-thread";
 import { useGoalTargets, useLaunchGoal, type GoalKind } from "./orchestrate";
 import { useAutomations } from "./automations/shared";
-import { unseenNotices } from "@/lib/automations-store";
+import { noticesOver, unseenNotices } from "@/lib/automations-store";
 import { openProjectDialog } from "@/lib/agents-project-dialogs";
 import { StatusDot } from "./shared";
 import { MachineIcon, ProjectIcon } from "./identity";
@@ -426,7 +426,7 @@ function PaletteDialog({ session, intent, host }: { session: number; intent: Pal
       !!auto.store && {
         kind: "action",
         value: "action:notices",
-        title: unseenNotices(auto) > 0 ? `Notices (${unseenNotices(auto)} new)` : "Notices",
+        title: unseenNotices(auto, noticesOver(data)) > 0 ? `Notices (${unseenNotices(auto, noticesOver(data))} new)` : "Notices",
         searchTerms: ["notifications", "inbox", "missed", "alerts", "notify"],
         icon: <Inbox className={ICON} />,
         run: () => setAgentsView({ kind: "automations", list: "notices" }),
