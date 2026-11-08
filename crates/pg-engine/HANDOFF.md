@@ -1127,9 +1127,15 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
   Contrib postgres_fdw 1,950 / 2,053 (no unit changed against a base run: 628 and 636 now
   differ only in the lines below), dblink 218, file_fdw 187; `fdw_loopback`
   `analyzed_foreign_table_estimates` (PostgreSQL's estimates and ANALYZE's counts under each
-  sampling method). Still open: 636's outer plan scans don't show their copies (`ft4.*`:
-  the level's whole-row pass that adds them is kept off the laid-out plan); 628 differs
-  also in the outer plan's choice (PostgreSQL's epq path is a hash
+  sampling method). Second batch (1,951: 636 gained, none lost): the outer plan's scans
+  return their copies (`ft4.*`) themselves (`epq_layout`), ANALYZE fetches 1,000 rows a
+  round trip unless fetch_size is set (every row goes into the sample; a scan, which may stop
+  early, keeps PostgreSQL's 100: round 9's ANALYZE took 230 round trips, 216 ms against
+  base's 80), and the client side decodes a little less per value (a remote row of every
+  column in order is the row without a NULL row filled first, `ScanNode::dense`; each text
+  value's UTF-8 checked once, `remote::conn` DataRow). Its traffic numbers weren't measured
+  yet (the bench job was stopped to free the heavy slot). Still open: 628 differs only in
+  the outer plan's choice (PostgreSQL's epq path is a hash
   join whose outer side is the sorted remote scan, `ORDER BY "C 1"`: the join search's,
   agent 177); the remote SELECT list puts a SET expression's columns first only when they
   are the target's (`UPDATE f4 SET c3 = f5.c3 || ...`: PostgreSQL has `r2.c3` first); a

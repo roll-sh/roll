@@ -17509,7 +17509,9 @@ fn epq_layout(n: &mut ExNode, needed: &[String]) {
             }
         }
         if c.children.is_empty() {
-            let mut out: Vec<String> = need.iter().filter(|x| c.output.contains(x)).cloned().collect();
+            // (Its whole row read above: the row mark's copy, `t.*`, it returns too.)
+            let whole = node_alias(c).map(|a| format!("{a}.*"));
+            let mut out: Vec<String> = need.iter().filter(|x| c.output.contains(x) || whole.as_ref() == Some(*x)).cloned().collect();
             if out.is_empty() {
                 out = c.output.clone();
             }
