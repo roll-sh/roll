@@ -29,4 +29,5 @@ tracing.workspace = true
 [dev-dependencies]
 pg-storage.workspace = true
 tempfile.workspace = true
+tracing-subscriber.workspace = true
 reqwest.workspace = true

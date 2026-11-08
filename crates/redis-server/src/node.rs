@@ -127,9 +127,30 @@ impl Default for SnapshotPolicy {
 /// without one serves every database it's asked for.
 pub trait Owner: Send + Sync + 'static {
     /// Hold `db` (a replica: of `primary`) on this node for as long as the tenure lives, waiting
-    /// out a move in progress. `Err`: another node serves it (or it's still moving).
-    fn claim<'a>(&'a self, db: &'a str, primary: Option<&'a str>) -> BoxFuture<'a, Result<Box<dyn Tenure>, String>>;
+    /// out a move in progress.
+    fn claim<'a>(&'a self, db: &'a str, primary: Option<&'a str>) -> BoxFuture<'a, Result<Box<dyn Tenure>, Refused>>;
 }
+
+/// Why a database isn't served here.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Refused {
+    /// Another node serves it (this node, say, just handed it over): a connection closes so its
+    /// client reconnects there.
+    Elsewhere(String),
+    /// It's still moving between nodes after waiting a lease's length.
+    Moving(String),
+}
+
+impl std::fmt::Display for Refused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Refused::Elsewhere(node) => write!(f, "the database is served by node {node}"),
+            Refused::Moving(db) => write!(f, "database {db} is moving between nodes; retry"),
+        }
+    }
+}
+
+impl std::error::Error for Refused {}
 
 /// A database's stay on this node.
 pub trait Tenure: Send + Sync + 'static {
@@ -331,7 +352,7 @@ impl Node {
                     let lock = self.transition_lock(&spec.id);
                     let _g = lock.lock().await;
                     if let Some(o) = self.owner.get() {
-                        let t = o.claim(&spec.id, spec.replica_of.as_deref()).await.map_err(|e| anyhow::anyhow!(e))?;
+                        let t = o.claim(&spec.id, spec.replica_of.as_deref()).await.map_err(anyhow::Error::from)?;
                         *fresh.lock() = Some(t);
                     }
                     self.load(spec).await
@@ -619,7 +640,10 @@ impl Directory for Node {
             // Only known databases are loaded: a wrong token for an existing database still
             // wakes it, but that is needed to check tenant-defined ACL users anyway.
             loop {
-                let db = self.open(&spec).await.map_err(|e| AuthError::Unavailable(e.to_string()))?;
+                let db = self.open(&spec).await.map_err(|e| match e.downcast_ref::<Refused>() {
+                    Some(Refused::Elsewhere(_)) => AuthError::Moved,
+                    _ => AuthError::Unavailable(e.to_string()),
+                })?;
                 let user = {
                     let acl = db.acl.read();
                     if platform && is_default {

@@ -2,7 +2,7 @@
 //! lock acquisition per batch, write replies, and deliver pushes (pub/sub, unblocked replies).
 
 use crate::database::Database;
-use crate::directory::{AuthRequest, Directory, Session};
+use crate::directory::{AuthError, AuthRequest, Directory, Session};
 use crate::repl::psync;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use redis_engine::client::{ConnStats, ReplyBuf, ReplyMode};
@@ -689,6 +689,8 @@ impl Conn {
         if let Some(db) = &db {
             db.hub.obuf_disconnections.fetch_add(1, Ordering::Relaxed);
         }
+        self.pending.clear();
+        self.pending_bytes = 0;
         self.drop_output();
     }
 
@@ -696,8 +698,6 @@ impl Conn {
     fn drop_output(&mut self) {
         self.obuf_closed = true;
         self.close_after = true;
-        self.pending.clear();
-        self.pending_bytes = 0;
         self.out.clear();
         self.rbuf.clear();
         self.rbuf.publish(&self.stats);
@@ -1559,6 +1559,11 @@ impl Conn {
                 register(&s.db, &self.client);
                 self.session = Some(s);
                 Reply::Ok
+            }
+            Err(AuthError::Moved) => {
+                // As a failover would: the connection drops, the client reconnects.
+                self.drop_output();
+                Reply::Nil
             }
             Err(e) => Reply::Error(e.to_string()),
         }

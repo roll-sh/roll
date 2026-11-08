@@ -32,17 +32,21 @@ use bytes::BytesMut;
 use futures::future::BoxFuture;
 use redis_server::conn::{Fixed, Portable};
 use redis_server::directory::{AuthRequest, Directory};
-use redis_server::node::{Owner, Tenure};
+use redis_server::node::{Owner, Refused, Tenure};
 use redis_server::preauth::{self, FirstAuth};
 use roll_cluster::{Cluster, Guard, Node, Route};
 use roll_edge::splice::{Hop, Signer};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 
 /// The product name spliced connections carry (`roll_edge::splice::Hop::product`).
 pub const PRODUCT: &str = "redis";
 const KEY_PREFIX: &str = "redis:db:";
+/// Splices a connection may take from the node it reached to its database (a move under way
+/// can need a second).
+pub const MAX_SPLICES: u8 = 3;
 /// How long a connection may take to name its database.
 const FIRST_AUTH_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -92,12 +96,15 @@ async fn locate(cluster: &Cluster, key: &str, wait: Duration) -> Result<Route, S
 }
 
 impl Owner for ClusterOwner {
-    fn claim<'a>(&'a self, db: &'a str, primary: Option<&'a str>) -> BoxFuture<'a, Result<Box<dyn Tenure>, String>> {
+    /// A database that is moving is waited for (a lease's length). One another node serves (this
+    /// node just handed it over, while a connection for it was on its way here) is refused: the
+    /// connection closes, and the client's reconnect finds the owner.
+    fn claim<'a>(&'a self, db: &'a str, primary: Option<&'a str>) -> BoxFuture<'a, Result<Box<dyn Tenure>, Refused>> {
         Box::pin(async move {
-            match locate(&self.0, &db_key(db, primary), ride_out(&self.0)).await? {
-                Route::Local(g) => Ok(Box::new(Held(g)) as Box<dyn Tenure>),
-                Route::Forward(n) => Err(format!("database {db} is served by node {}; reconnect", n.id)),
-                Route::Unavailable { .. } => Err(format!("database {db} is moving between nodes; retry")),
+            match locate(&self.0, &db_key(db, primary), ride_out(&self.0)).await {
+                Ok(Route::Local(g)) => Ok(Box::new(Held(g)) as Box<dyn Tenure>),
+                Ok(Route::Forward(n)) => Err(Refused::Elsewhere(n.id)),
+                Ok(Route::Unavailable { .. }) | Err(_) => Err(Refused::Moving(db.to_string())),
             }
         })
     }
@@ -181,34 +188,74 @@ impl Front {
                 FirstAuth::Closed => return,
             },
         };
-        let owner = match db.as_deref().and_then(|db| Some((db, self.control.key_of(db)?))) {
-            Some((db, key)) => match locate(&cluster, &key, ride_out(&cluster)).await {
-                Ok(Route::Forward(node)) => Some((db.to_string(), node)),
-                _ => None,
-            },
-            // Unknown databases are answered here (WRONGPASS).
+        // Unknown databases are answered here (WRONGPASS), and so is one that is still moving
+        // after a lease's length (LOADING).
+        let hop = match db.as_deref().and_then(|db| Some((db, self.control.key_of(db)?))) {
+            Some((db, key)) => self.hop_to_owner(&cluster, &key, Hop { product: PRODUCT.into(), tenant: db.to_string(), client: peer, sni: sni.clone(), hops: 0 }).await,
             None => None,
         };
-        match owner {
-            Some((db, node)) => self.splice(stream, &node, Hop { product: PRODUCT.into(), tenant: db, client: peer, sni }, &first).await,
+        match hop {
+            Some(mut owner) => {
+                let r = async {
+                    owner.write_all(&first).await?;
+                    tokio::io::copy_bidirectional(&mut stream, &mut owner).await
+                };
+                if let Err(e) = r.await {
+                    tracing::debug!(error = %e, "redis: spliced connection ended");
+                }
+            }
             None if first.is_empty() => redis_server::conn::serve_with(stream, peer, local, self.dir(), sni, fd).await,
             None => redis_server::conn::serve_with(Fixed(roll_edge::stream::Prefixed::new(first.freeze(), stream)), peer, local, self.dir(), sni, fd).await,
         }
     }
 
-    async fn splice<S: Portable>(&self, stream: S, node: &Node, hop: Hop, first: &[u8]) {
-        if let Err(e) = roll_edge::splice::splice(stream, &node.url, &self.signer, &hop, first).await {
-            tracing::debug!(db = hop.tenant, node = node.id, error = %e, "redis: spliced connection ended");
+    /// A stream to the owner of `key`, routing again (up to a lease's length) when the node it
+    /// was routed to can't be reached (it just died). `None`: serve it here (this node owns it,
+    /// or nobody does yet).
+    async fn hop_to_owner(&self, cluster: &Cluster, key: &str, hop: Hop) -> Option<impl AsyncRead + AsyncWrite + Unpin + use<>> {
+        let deadline = Instant::now() + ride_out(cluster);
+        loop {
+            let node: Node = match locate(cluster, key, deadline.saturating_duration_since(Instant::now())).await {
+                Ok(Route::Forward(node)) => node,
+                r => {
+                    tracing::debug!(key, route = ?r, "redis: serving the connection here");
+                    return None;
+                }
+            };
+            match roll_edge::splice::connect(&node.url, &self.signer, &hop).await {
+                Ok(owner) => return Some(owner),
+                Err(e) if Instant::now() < deadline => {
+                    tracing::debug!(key, node = node.id, error = %e, "redis: owner unreachable; routing again");
+                    cluster.forget(key);
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                Err(_) => return None,
+            }
         }
     }
 
-    /// The owner's side of a splice: serve the stream as if the client had connected here.
+    /// The owner's side of a splice: serve the stream as if the client had connected here. If the
+    /// database moved on while the connection was on its way (this node just handed it over),
+    /// pass it on to the new owner, at most [`MAX_SPLICES`] times in all.
     pub fn handler(self: &Arc<Self>) -> roll_edge::splice::Handler {
         let me = self.clone();
-        Arc::new(move |io, hop| {
-            let me = me.clone();
-            Box::pin(async move { redis_server::conn::serve_with(Fixed(io), hop.client, me.public, me.dir(), hop.sni, -1).await })
-        })
+        Arc::new(move |io, hop| Box::pin(me.clone().serve_spliced(io, hop)))
+    }
+
+    async fn serve_spliced(self: Arc<Self>, mut io: Box<dyn roll_edge::Io>, hop: Hop) {
+        if let (Some(cluster), Some(key)) = (self.control.cluster().cloned(), self.control.key_of(&hop.tenant))
+            && hop.hops + 1 < MAX_SPLICES
+        {
+            let next = Hop { hops: hop.hops + 1, ..hop.clone() };
+            if let Some(mut owner) = self.hop_to_owner(&cluster, &key, next).await {
+                // What the first node read is still unread here: it flows on with the rest.
+                if let Err(e) = tokio::io::copy_bidirectional(&mut io, &mut owner).await {
+                    tracing::debug!(error = %e, "redis: spliced connection ended");
+                }
+                return;
+            }
+        }
+        redis_server::conn::serve_with(Fixed(io), hop.client, self.public, self.dir(), hop.sni, -1).await
     }
 
     /// Accept RESP connections forever (TLS and the PROXY protocol as `opts` says), each through
@@ -246,17 +293,46 @@ fn raw_fd(sock: &tokio::net::TcpStream) -> i64 {
     sock.as_raw_fd() as i64
 }
 
+/// Where REST requests forwarded from another node arrive on the owner's internal API (the
+/// original path follows).
+pub const REST_FORWARDED: &str = "/internal/redis/rest";
+
 /// The REST data plane (`redis_server::http`, Upstash's protocol): a request runs on the owner
 /// of the database its token (`<db>_<secret>`) names.
 pub fn rest_router(control: Arc<Control>) -> axum::Router {
     redis_server::http::router(control.node.clone()).layer(axum::middleware::from_fn_with_state(control, rest_routes))
 }
 
-async fn rest_routes(State(control): State<Arc<Control>>, req: Request, next: Next) -> Response {
+/// The internal API's part: REST requests other nodes forwarded here ([`REST_FORWARDED`]),
+/// checked as signed by a node of the cluster.
+pub fn internal_router(control: Arc<Control>) -> axum::Router {
+    let r = axum::Router::new().nest_service(REST_FORWARDED, rest_router(control.clone()));
+    match control.cluster() {
+        Some(c) => r.layer(axum::middleware::from_fn_with_state(c.clone(), roll_cluster::accept_forwarded)),
+        None => r,
+    }
+}
+
+async fn rest_routes(State(control): State<Arc<Control>>, mut req: Request, next: Next) -> Response {
+    let Some(cluster) = control.cluster().cloned() else { return next.run(req).await };
     let token = redis_server::http::token(req.headers(), req.uri()).unwrap_or_default();
     let auth = AuthRequest { user: None, password: token.as_bytes(), sni: None, client: None, command: b"auth" };
-    let key = redis_server::node::route(&auth, None).and_then(|(db, _, _)| control.key_of(&db));
-    dispatch(&control, key, req, next).await
+    let Some(key) = redis_server::node::route(&auth, None).and_then(|(db, _, _)| control.key_of(&db)) else { return next.run(req).await };
+    // Sent on, it lands on the owner's internal API, under REST_FORWARDED.
+    let original = req.uri().clone();
+    let pq = original.path_and_query().map_or("/", |p| p.as_str());
+    let Ok(forwarded) = format!("{REST_FORWARDED}{pq}").parse::<axum::http::Uri>() else { return next.run(req).await };
+    *req.uri_mut() = forwarded.clone();
+    req.extensions_mut().insert(axum::extract::OriginalUri(forwarded));
+    cluster
+        .dispatch(&key, req, |mut req, guard| async move {
+            *req.uri_mut() = original.clone();
+            req.extensions_mut().insert(axum::extract::OriginalUri(original));
+            let r = next.run(req).await;
+            drop(guard);
+            r
+        })
+        .await
 }
 
 /// Middleware for the control API: `/v1/redis/databases/{id or name}/…` and
