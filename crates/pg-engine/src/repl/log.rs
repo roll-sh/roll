@@ -666,6 +666,11 @@ fn put(ctx: &ExecCtx, rel: Option<&Table>, body: Vec<u8>) -> Result<()> {
     r
 }
 
+/// Whether an insert into `t` goes into the change stream (`insert` logs its row).
+pub fn logs_inserts(t: &Table, ctx: &ExecCtx) -> bool {
+    capturing(ctx) && logged(t)
+}
+
 fn capturing(ctx: &ExecCtx) -> bool {
     ctx.txn.borrow().log.is_some()
 }
