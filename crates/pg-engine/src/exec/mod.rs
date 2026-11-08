@@ -97,6 +97,14 @@ impl TopK {
     }
 }
 
+/// A row as `Node::each_stored` hands it out.
+pub enum Stored<'a> {
+    /// As stored (header and values, `storage::row`).
+    Bytes(&'a [u8]),
+    /// Decoded, as `next` makes it.
+    Row(Row),
+}
+
 /// A running plan node.
 pub trait Node {
     fn next(&mut self, ctx: &ExecCtx) -> Result<Option<Row>>;
@@ -105,6 +113,15 @@ pub trait Node {
     /// can (its filter evaluated on each as `next` would; None: it can't, and nothing was
     /// read). What `count(*)` over a catalog scan reads.
     fn count_rest(&mut self, _ctx: &ExecCtx) -> Result<Option<u64>> {
+        Ok(None)
+    }
+
+    /// The rows `next` would return, in its order, handed to `f` as their stored bytes
+    /// (`Stored::Bytes`) by a node that can (a plain sequential scan with nothing to evaluate,
+    /// lock or count per row but the scan's own counts: COPY TO's of a table); a row `f`
+    /// doesn't take (false) comes again decoded (`Stored::Row`). None: this node can't, and
+    /// nothing was read.
+    fn each_stored(&mut self, _f: &mut dyn FnMut(Stored<'_>) -> Result<bool>, _ctx: &ExecCtx) -> Result<Option<()>> {
         Ok(None)
     }
 
@@ -1716,6 +1733,21 @@ pub fn run_each(plan: &Arc<Plan>, ctx: &ExecCtx, mut f: impl FnMut(Row) -> Resul
         let mut node = nodes::open(plan, ctx)?;
         while let Some(r) = node.next(ctx)? {
             f(r)?;
+        }
+        Ok(())
+    }))
+}
+
+/// `run_each`, the root's rows offered to `f` as stored first (`Node::each_stored`), else
+/// each as `next` makes it (`f`'s answer to a decoded row is ignored).
+pub fn run_each_stored(plan: &Arc<Plan>, ctx: &ExecCtx, f: &mut dyn FnMut(Stored<'_>) -> Result<bool>) -> Result<()> {
+    ctx.temp_cleanup.run(|| ctx.statement(|| {
+        let mut node = nodes::open(plan, ctx)?;
+        if node.each_stored(f, ctx)?.is_some() {
+            return Ok(());
+        }
+        while let Some(r) = node.next(ctx)? {
+            f(Stored::Row(r))?;
         }
         Ok(())
     }))
