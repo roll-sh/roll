@@ -767,8 +767,15 @@ pub fn stored_tuple_len(b: &[u8], types: &[DataType], null: &[bool]) -> Option<u
     if n < types.len() {
         return None;
     }
+    // (The values laid out after a header without a null bitmap, in one pass: a bitmap moves
+    // them all by a multiple of MAXALIGN, which leaves every value's alignment as it is.)
+    let mut off = tuple_header(types.len(), false);
+    let mut has_null = false;
     // Each value: None a null, Some(None) fixed-length, Some(Some(payload)) text.
-    let mut vals: Vec<Option<Option<usize>>> = Vec::with_capacity(types.len());
+    let mut put = |v: Option<Option<usize>>, ty: &DataType| match v {
+        Some(payload) => off += datum_len_at(off, ty, payload),
+        None => has_null = true,
+    };
     for (i, ty) in types.iter().enumerate() {
         let t = *b.get(pos)?;
         pos += 1;
@@ -795,7 +802,7 @@ pub fn stored_tuple_len(b: &[u8], types: &[DataType], null: &[bool]) -> Option<u
                     DataType::Bpchar(m) if *m > 4 => len.max((*m - 4) as usize),
                     _ => len,
                 };
-                vals.push((!null.get(i).copied().unwrap_or(false)).then_some(Some(payload)));
+                put((!null.get(i).copied().unwrap_or(false)).then_some(Some(payload)), ty);
                 continue;
             }
             // (Varlenas sized from their stored form: jsonb's text, tsvector's send format,
@@ -817,7 +824,7 @@ pub fn stored_tuple_len(b: &[u8], types: &[DataType], null: &[bool]) -> Option<u
                     (DataType::Array(e), tag::ARRAY) => stored_array_payload(b, &mut pos, e)?,
                     _ => return None,
                 };
-                vals.push((!null.get(i).copied().unwrap_or(false)).then_some(Some(payload)));
+                put((!null.get(i).copied().unwrap_or(false)).then_some(Some(payload)), ty);
                 continue;
             }
             // (A fixed-size geometric value: its kind, then its floats.)
@@ -829,13 +836,10 @@ pub fn stored_tuple_len(b: &[u8], types: &[DataType], null: &[bool]) -> Option<u
         };
         pos += skip;
         let stored = t != tag::NULL && !null.get(i).copied().unwrap_or(false);
-        vals.push(stored.then_some(None));
+        put(stored.then_some(None), ty);
     }
-    let mut off = tuple_header(types.len(), vals.iter().any(Option::is_none));
-    for (v, ty) in vals.iter().zip(types) {
-        if let Some(payload) = v {
-            off += datum_len_at(off, ty, *payload);
-        }
+    if has_null {
+        off += tuple_header(types.len(), true) - tuple_header(types.len(), false);
     }
     STORED_SIZES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     Some(off)

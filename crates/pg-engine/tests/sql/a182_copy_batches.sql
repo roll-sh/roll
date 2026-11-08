@@ -4356,4 +4356,7 @@ x1	bad
 ROLLBACK TO s;
 SELECT relname, n_tup_ins FROM pg_stat_xact_user_tables WHERE relname LIKE 'a182_cp%' ORDER BY 1;
 COMMIT;
+-- The rows counted are the ones the aborted COPYs left dead.
+SELECT pg_stat_force_next_flush();
+SELECT relname, n_tup_ins, n_dead_tup FROM pg_stat_user_tables WHERE relname LIKE 'a182_c%' ORDER BY 1;
 DROP TABLE a182_sa, a182_su, a182_sn, a182_cs, a182_cw, a182_cu, a182_cp;

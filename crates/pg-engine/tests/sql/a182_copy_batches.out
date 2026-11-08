@@ -4438,6 +4438,21 @@ a182_cp2 | 487
 > COMMIT
 -- COMMIT
 
+> SELECT pg_stat_force_next_flush()
+pg_stat_force_next_flush:void
+
+-- SELECT 1
+
+> SELECT relname, n_tup_ins, n_dead_tup FROM pg_stat_user_tables WHERE relname LIKE 'a182_c%' ORDER BY 1
+relname:name | n_tup_ins:int8 | n_dead_tup:int8
+a182_cp | 0 | 0
+a182_cp1 | 513 | 513
+a182_cp2 | 487 | 487
+a182_cs | 1000 | 1000
+a182_cu | 2000 | 2000
+a182_cw | 66 | 66
+-- SELECT 6
+
 > DROP TABLE a182_sa, a182_su, a182_sn, a182_cs, a182_cw, a182_cu, a182_cp
 -- DROP TABLE
 

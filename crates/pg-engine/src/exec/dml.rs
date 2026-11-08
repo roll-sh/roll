@@ -3735,6 +3735,8 @@ pub static STORED_INSERTS: std::sync::atomic::AtomicU64 = std::sync::atomic::Ato
 /// change stream, past its size model: each row's stored values go in as they are under a
 /// new header, without being decoded and encoded again (`insert`).
 struct StoredInsert {
+    /// The target is past its model now (`sizing::is_estimated`): it stays so.
+    estimated: std::cell::Cell<bool>,
     types: Vec<DataType>,
     /// No column is virtual or dropped (`stored_tuple_len`'s mask).
     none: Vec<bool>,
@@ -3758,6 +3760,7 @@ impl StoredInsert {
             && !ctx.txn.borrow().serializable_tracked()
             && !crate::repl::log::logs_inserts(t, ctx);
         plain.then(|| StoredInsert {
+            estimated: std::cell::Cell::new(false),
             types: t.columns.iter().map(|c| c.ty.clone()).collect(),
             none: vec![false; n],
             not_null: t.columns.iter().map(|c| c.not_null).collect(),
@@ -3770,7 +3773,12 @@ impl StoredInsert {
     /// the caller to insert decoded.
     fn insert(&self, plan: &InsertPlan, bytes: &[u8], plain_counts: &std::cell::Cell<i64>, ctx: &ExecCtx) -> Result<bool> {
         use crate::storage::row::{read_stored, StoredValue};
-        if crate::storage::toast::has_external(bytes) {
+        let t = &plan.rules.table;
+        // (A modelled target places each row in its model: decoded.)
+        if !self.estimated.get() {
+            self.estimated.set(super::sizing::is_estimated(t.oid, &ctx.sess.db));
+        }
+        if !self.estimated.get() || crate::storage::toast::has_external(bytes) {
             return Ok(false);
         }
         let data = super::scan::row_data(bytes)?;
@@ -3789,8 +3797,7 @@ impl StoredInsert {
         let Some(len) = crate::storage::row::stored_tuple_len(data, &self.types, &self.none) else {
             return Ok(false);
         };
-        let t = &plan.rules.table;
-        if !super::sizing::inserted_stored(t, &plan.rules.indexes, len, ctx)? {
+        if !super::sizing::inserted_stored(t, len, ctx) {
             return Ok(false);
         }
         let rowid = ctx.sess.db.nextval_by_one(t.oid, || crate::session::ddl::rowid_sequence(t))?;
