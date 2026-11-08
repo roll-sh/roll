@@ -1,9 +1,11 @@
 //! GiST indexes' sizes (access/gist) for the sorted build CREATE INDEX does when the
-//! operator class has sort support, as point_ops and range_ops do (gist_indexsortbuild):
-//! the tuples sorted (points by z-order, gist_bbox_zorder_cmp; ranges as range_cmp; ties
-//! by heap TID), packed into pages, and every four pages of a level split again with the
-//! operator class's picksplit (gistSplit with gist_box_picksplit or range_gist_picksplit)
-//! when the fourth fills.
+//! operator class has sort support, as point_ops, range_ops and btree_gist's integer classes
+//! do (gist_indexsortbuild): the tuples sorted (points by z-order, gist_bbox_zorder_cmp;
+//! ranges as range_cmp; integers by their lower bound; a second column's after the first's;
+//! ties by heap TID), packed into pages, and every four pages of a level split again with the
+//! operator classes' picksplits (gistSplit with gist_box_picksplit, range_gist_picksplit or
+//! gbt_num_picksplit; for two columns gistSplitByKey's don't-care tuples, split again by the
+//! second column) when the fourth fills.
 
 use crate::exec::pgsort::{Cmp, pg_qsort};
 use std::cmp::Ordering;
@@ -119,18 +121,60 @@ fn zorder(b: &GBox) -> u64 {
     spread(bits(b.lx as f32)) | (spread(bits(b.ly as f32)) << 1)
 }
 
-/// A key: a point_ops box or a range.
+/// A key: a point_ops box, a range, or a btree_gist integer.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Key {
     Box(GBox),
     Range(RKey),
+    Num(GNum),
 }
 
-/// A tuple: its key (None for a null), size, the child block an inner tuple links, the row
-/// a leaf tuple points to (NO_ROW when not tracked), and whether a scan marked it LP_DEAD.
+/// A btree_gist integer key (gbtreekey4 / 8 / 16: int2, int4, int8): its bounds (equal in a
+/// leaf), each bound's bytes, and the index's attributes, which gbt_num's penalty scales by.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GNum {
+    pub lo: i64,
+    pub hi: i64,
+    pub width: u8,
+    pub natts: u8,
+}
+
+/// penalty_num_impl.
+fn num_penalty(o: &GNum, n: &GNum) -> f32 {
+    let (olower, oupper, nlower, nupper) = (o.lo as f64, o.hi as f64, n.lo as f64, n.hi as f64);
+    let mut result = 0.0f32;
+    let mut tmp = 0.0f64;
+    if nupper > oupper {
+        tmp += nupper - oupper;
+    }
+    if olower > nlower {
+        tmp += olower - nlower;
+    }
+    if tmp > 0.0 {
+        result += f32::MIN_POSITIVE;
+        result += (tmp / (tmp + (oupper - olower))) as f32;
+        result *= f32::MAX / (o.natts as f32 + 1.0);
+    }
+    result
+}
+
+/// gbt_num_picksplit: the keys sorted by (lower, upper) with qsort, the first half left.
+fn num_picksplit(ks: &[GNum]) -> (Vec<usize>, Vec<usize>) {
+    let mut arr: Vec<(GNum, usize)> = ks.iter().copied().zip(0..).collect();
+    let mut f = |a: &(GNum, usize), b: &(GNum, usize)| Ok(a.0.lo.cmp(&b.0.lo).then(a.0.hi.cmp(&b.0.hi)));
+    pg_qsort(&mut arr, &mut Cmp::new(&mut f));
+    let half = ks.len() / 2;
+    (arr[..half].iter().map(|a| a.1).collect(), arr[half..].iter().map(|a| a.1).collect())
+}
+
+/// A tuple: its key (None for a null; a two-column index's first column's) and a two-column
+/// index's second key (`ncols` 2), size, the child block an inner tuple links, the row a leaf
+/// tuple points to (NO_ROW when not tracked), and whether a scan marked it LP_DEAD.
 #[derive(Clone, Copy, Debug)]
 struct Tup {
     key: Option<Key>,
+    key2: Option<Key>,
+    ncols: u8,
     size: usize,
     child: u32,
     row: u32,
@@ -146,13 +190,48 @@ impl Tup {
             None => NULL_TUPLE,
             Some(Key::Box(_)) => BOX_TUPLE,
             Some(Key::Range(r)) => r.tuple_size(),
+            Some(Key::Num(_)) => tuple_size(&[key]),
         };
-        Tup { key, size, child: 0, row: NO_ROW, dead: false }
+        Tup { key, key2: None, ncols: 1, size, child: 0, row: NO_ROW, dead: false }
+    }
+
+    /// A two-column index's tuple.
+    fn of2(key: Option<Key>, key2: Option<Key>) -> Tup {
+        Tup { key, key2, ncols: 2, size: tuple_size(&[key, key2]), child: 0, row: NO_ROW, dead: false }
     }
 
     fn linking(key: Option<Key>, child: u32) -> Tup {
         Tup { child, ..Tup::of(key) }
     }
+
+    /// The downlink to page `child` holding `page` (gistunion: each column's union).
+    fn link_of(page: &[Tup], child: u32) -> Tup {
+        match page.first().map_or(1, |t| t.ncols) {
+            2 => Tup { child, ..Tup::of2(union_col(page, 0), union_col(page, 1)) },
+            _ => Tup::linking(union_of(page), child),
+        }
+    }
+
+    /// Column `c`'s key.
+    fn col(&self, c: usize) -> Option<&Key> {
+        if c == 0 { self.key.as_ref() } else { self.key2.as_ref() }
+    }
+}
+
+/// index_form_tuple's size for these keys: the header (with a null bitmap when one is null),
+/// each key aligned as its storage type is (gbtreekey: int; box: double; a range is a short
+/// varlena, unaligned), MAXALIGNed.
+fn tuple_size(keys: &[Option<Key>]) -> usize {
+    let align = |n: usize, a: usize| n.div_ceil(a) * a;
+    let mut off = if keys.iter().any(Option::is_none) { 16 } else { 8 };
+    for k in keys.iter().flatten() {
+        off = match k {
+            Key::Box(_) => align(off, 8) + 32,
+            Key::Num(n) => align(off, 4) + 2 * n.width as usize,
+            Key::Range(r) => off + r.varlena() - 3,
+        };
+    }
+    align(off, 8)
 }
 
 /// The opclass's `same` (gist_box_same, range_gist_same).
@@ -168,8 +247,29 @@ fn same(a: &Key, b: &Key) -> bool {
                 && x.lower_inc == y.lower_inc
                 && x.upper_inc == y.upper_inc
         }
+        (Key::Num(x), Key::Num(y)) => x.lo == y.lo && x.hi == y.hi,
         _ => false,
     }
+}
+
+/// gistgetadjusted for a two-column index: the downlink covering `add` too, when it changes.
+fn adjusted2(old: &Tup, add: &Tup) -> Option<Tup> {
+    let mut need = false;
+    let mut u = [None; 2];
+    for (c, uc) in u.iter_mut().enumerate() {
+        let (o, a) = (old.col(c).copied(), add.col(c).copied());
+        *uc = match (o, a) {
+            (Some(x), Some(y)) => union_keys([&x, &y]),
+            (x, y) => x.or(y),
+        };
+        if !need
+            && a.is_some()
+            && let Some(un) = *uc
+        {
+            need = o.is_none_or(|o| !same(&o, &un));
+        }
+    }
+    need.then(|| Tup { child: old.child, ..Tup::of2(u[0], u[1]) })
 }
 
 /// gistgetadjusted: the downlink key covering `add` too, when it changes.
@@ -190,6 +290,7 @@ fn gist_penalty(orig: Option<&Key>, add: Option<&Key>) -> f32 {
         (None, _) | (_, None) => return f32::INFINITY,
         (Some(Key::Box(o)), Some(Key::Box(n))) => penalty(o, n) as f32,
         (Some(Key::Range(o)), Some(Key::Range(n))) => range_penalty(o, n),
+        (Some(Key::Num(o)), Some(Key::Num(n))) => num_penalty(o, n),
         _ => 0.0,
     };
     if p.is_nan() || p < 0.0 { 0.0 } else { p }
@@ -266,11 +367,25 @@ fn range_penalty(orig: &RKey, new: &RKey) -> f32 {
 }
 
 fn union_of(tups: &[Tup]) -> Option<Key> {
+    union_col(tups, 0)
+}
+
+/// Column `c`'s union over the tuples (None when every one is null).
+fn union_col(tups: &[Tup], c: usize) -> Option<Key> {
+    union_keys(tups.iter().filter_map(|t| t.col(c)))
+}
+
+/// The opclass's union (gist_box_union, range_gist_union, gbt_num_union).
+fn union_keys<'a>(keys: impl IntoIterator<Item = &'a Key>) -> Option<Key> {
     let mut out: Option<Key> = None;
-    for k in tups.iter().filter_map(|t| t.key.as_ref()) {
+    for k in keys {
         match (&mut out, k) {
             (Some(Key::Box(u)), Key::Box(b)) => adjust(u, b),
             (Some(Key::Range(u)), Key::Range(r)) => *u = super_union(u, r),
+            (Some(Key::Num(u)), Key::Num(n)) => {
+                u.lo = u.lo.min(n.lo);
+                u.hi = u.hi.max(n.hi);
+            }
             (_, k) => out = Some(*k),
         }
     }
@@ -311,13 +426,17 @@ impl RKey {
     /// The index tuple: range_serialize's varlena (header, finite bounds, flags), with a
     /// 1-byte header in the tuple.
     fn tuple_size(&self) -> usize {
+        (8 + self.varlena() - 3).div_ceil(8) * 8
+    }
+
+    /// range_serialize's varlena's bytes (header, finite bounds, flags).
+    fn varlena(&self) -> usize {
         let finite = if self.empty {
             0
         } else {
             self.lower.is_some() as usize + self.upper.is_some() as usize
         };
-        let varlena = 8 + finite * self.width as usize + 1;
-        (8 + varlena - 3).div_ceil(8) * 8
+        8 + finite * self.width as usize + 1
     }
 
     /// get_gist_range_class.
@@ -751,11 +870,175 @@ fn picksplit(boxes: &[GBox]) -> (Vec<usize>, Vec<usize>) {
     (left, right)
 }
 
+/// A column's picksplit over keys of one kind (gist_box_picksplit, range_gist_picksplit,
+/// gbt_num_picksplit): the 0-based positions going left and right.
+fn col_picksplit(keys: &[Key]) -> (Vec<usize>, Vec<usize>) {
+    match keys[0] {
+        Key::Box(_) => picksplit(&keys.iter().map(|k| if let Key::Box(b) = k { *b } else { unreachable!("mixed GiST keys") }).collect::<Vec<_>>()),
+        Key::Range(_) => range_picksplit(&keys.iter().map(|k| if let Key::Range(r) = k { *r } else { unreachable!("mixed GiST keys") }).collect::<Vec<_>>()),
+        Key::Num(_) => num_picksplit(&keys.iter().map(|k| if let Key::Num(n) = k { *n } else { unreachable!("mixed GiST keys") }).collect::<Vec<_>>()),
+    }
+}
+
+/// GistSplitVector for a two-column index: positions left and right, each side's union per
+/// column (None: null), and the don't-care tuples of a split to redo by the next column.
+#[derive(Default)]
+struct SplitVec {
+    left: Vec<usize>,
+    right: Vec<usize>,
+    lattr: [Option<Key>; 2],
+    rattr: [Option<Key>; 2],
+    dontcare: Option<Vec<bool>>,
+}
+
+/// gistunionsubkey: each side's unions of every column, leaving out the don't-cares.
+fn union_sides(tups: &[Tup], v: &mut SplitVec, dontcare: Option<&[bool]>) {
+    let keep = |i: &&usize| dontcare.is_none_or(|d| !d[**i]);
+    for c in 0..2 {
+        v.lattr[c] = union_keys(v.left.iter().filter(keep).filter_map(|&i| tups[i].col(c)));
+        v.rattr[c] = union_keys(v.right.iter().filter(keep).filter_map(|&i| tups[i].col(c)));
+    }
+}
+
+/// supportSecondarySplit: a picksplit of the don't-care tuples swapped when its sides go
+/// better the other way into the unions already made (`old`), then merged with them.
+fn secondary(sides: &mut (Vec<usize>, Vec<usize>, Key, Key), old: (Option<Key>, Option<Key>)) {
+    let pen = |o: &Key, n: &Key| gist_penalty(Some(o), Some(n));
+    let leave = match old {
+        (Some(l), Some(r)) => pen(&l, &sides.2) + pen(&r, &sides.3) <= pen(&l, &sides.3) + pen(&r, &sides.2),
+        (Some(e), None) | (None, Some(e)) => {
+            if pen(&e, &sides.2) < pen(&e, &sides.3) { old.0.is_some() } else { old.1.is_some() }
+        }
+        (None, None) => true,
+    };
+    if !leave {
+        std::mem::swap(&mut sides.0, &mut sides.1);
+        std::mem::swap(&mut sides.2, &mut sides.3);
+    }
+    if let Some(l) = old.0 {
+        sides.2 = union_keys([&l, &sides.2]).unwrap_or(sides.2);
+    }
+    if let Some(r) = old.1 {
+        sides.3 = union_keys([&r, &sides.3]).unwrap_or(sides.3);
+    }
+}
+
+/// gistUserPicksplit for column `attno` of a two-column index (no null keys in it): true when
+/// the split should be redone by the next column, wholly (`dontcare` None) or for the
+/// don't-care tuples.
+fn user_picksplit(tups: &[Tup], attno: usize, v: &mut SplitVec) -> bool {
+    let keys: Vec<Key> = tups.iter().map(|t| *t.col(attno).expect("null key in a picksplit")).collect();
+    let n = keys.len();
+    let (mut left, mut right) = col_picksplit(&keys);
+    if left.is_empty() || right.is_empty() {
+        // genericPickSplit.
+        (left, right) = ((0..n / 2).collect(), (n / 2..n).collect());
+    }
+    let lu = union_keys(left.iter().map(|&i| &keys[i])).expect("keys");
+    let ru = union_keys(right.iter().map(|&i| &keys[i])).expect("keys");
+    let mut sides = (left, right, lu, ru);
+    let old = (v.lattr[attno], v.rattr[attno]);
+    if old.0.is_some() || old.1.is_some() {
+        secondary(&mut sides, old);
+    }
+    let (left, right, lu, ru) = sides;
+    (v.left, v.right, v.lattr[attno], v.rattr[attno]) = (left, right, Some(lu), Some(ru));
+    v.dontcare = None;
+    if attno + 1 >= 2 {
+        return false;
+    }
+    if same(&lu, &ru) {
+        return true;
+    }
+    let mut dc = vec![false; n];
+    for &i in &v.left {
+        dc[i] = gist_penalty(Some(&ru), Some(&keys[i])) == 0.0;
+    }
+    for &i in &v.right {
+        dc[i] = gist_penalty(Some(&lu), Some(&keys[i])) == 0.0;
+    }
+    let ndc = dc.iter().filter(|&&d| d).count();
+    if ndc == 0 {
+        return false;
+    }
+    v.left.retain(|&i| !dc[i]);
+    v.right.retain(|&i| !dc[i]);
+    if v.left.is_empty() || v.right.is_empty() {
+        return true;
+    }
+    union_sides(tups, v, Some(&dc[..]));
+    if ndc == 1 {
+        // placeOne: by the next columns' penalties against the unions.
+        let i = dc.iter().position(|&d| d).expect("a don't-care");
+        let mut to_left = true;
+        for c in attno + 1..2 {
+            let (lp, rp) = (gist_penalty(v.lattr[c].as_ref(), tups[i].col(c)), gist_penalty(v.rattr[c].as_ref(), tups[i].col(c)));
+            if lp != rp {
+                to_left = lp < rp;
+                break;
+            }
+        }
+        if to_left { v.left.push(i) } else { v.right.push(i) }
+        return false;
+    }
+    v.dontcare = Some(dc);
+    true
+}
+
+/// gistSplitByKey for column `attno` of a two-column index.
+fn split_by_key(tups: &[Tup], v: &mut SplitVec, attno: usize) {
+    let len = tups.len();
+    let nulls: Vec<usize> = (0..len).filter(|&i| tups[i].col(attno).is_none()).collect();
+    if nulls.len() == len {
+        (v.lattr[attno], v.rattr[attno]) = (None, None);
+        if attno + 1 < 2 {
+            split_by_key(tups, v, attno + 1);
+        } else {
+            // gistSplitHalf: the first (len / 2 - 1) right.
+            let r = (len / 2).saturating_sub(1);
+            (v.left, v.right) = ((r..len).collect(), (0..r).collect());
+        }
+    } else if !nulls.is_empty() {
+        // Nulls right, the rest left.
+        v.left = (0..len).filter(|&i| tups[i].col(attno).is_some()).collect();
+        v.right = nulls;
+        v.rattr[attno] = None;
+    } else if user_picksplit(tups, attno, v) {
+        match v.dontcare.take() {
+            None => split_by_key(tups, v, attno + 1),
+            Some(dc) => {
+                let map: Vec<usize> = (0..len).filter(|&i| dc[i]).collect();
+                let sub: Vec<Tup> = map.iter().map(|&i| tups[i]).collect();
+                let (mut left, mut right) = (std::mem::take(&mut v.left), std::mem::take(&mut v.right));
+                split_by_key(&sub, v, attno + 1);
+                left.extend(v.left.iter().map(|&i| map[i]));
+                right.extend(v.right.iter().map(|&i| map[i]));
+                (v.left, v.right) = (left, right);
+            }
+        }
+    }
+    if attno == 0 {
+        v.dontcare = None;
+        union_sides(tups, v, None);
+    }
+}
+
 /// gistSplit: the pages the tuples split into, left parts first.
 fn split(tups: &[Tup]) -> Vec<Vec<Tup>> {
     let len = tups.len();
     if len <= 1 {
         return vec![tups.to_vec()];
+    }
+    if tups[0].ncols == 2 {
+        let mut v = SplitVec::default();
+        split_by_key(tups, &mut v, 0);
+        let side = |ix: &[usize]| -> Vec<Vec<Tup>> {
+            let v: Vec<Tup> = ix.iter().map(|&i| tups[i]).collect();
+            if fits(&v) { vec![v] } else { split(&v) }
+        };
+        let mut out = side(&v.left);
+        out.extend(side(&v.right));
+        return out;
     }
     let nulls: Vec<usize> = (0..len).filter(|&i| tups[i].key.is_none()).collect();
     let (left, right): (Vec<usize>, Vec<usize>) = if nulls.len() == len {
@@ -764,24 +1047,8 @@ fn split(tups: &[Tup]) -> Vec<Vec<Tup>> {
         ((r..len).collect(), (0..r).collect())
     } else if !nulls.is_empty() {
         ((0..len).filter(|i| tups[*i].key.is_some()).collect(), nulls)
-    } else if let Some(Key::Range(_)) = tups[0].key {
-        let rs: Vec<RKey> = tups
-            .iter()
-            .map(|t| match t.key {
-                Some(Key::Range(r)) => r,
-                _ => unreachable!("mixed GiST keys"),
-            })
-            .collect();
-        range_picksplit(&rs)
     } else {
-        let boxes: Vec<GBox> = tups
-            .iter()
-            .map(|t| match t.key {
-                Some(Key::Box(b)) => b,
-                _ => unreachable!("mixed GiST keys"),
-            })
-            .collect();
-        picksplit(&boxes)
+        col_picksplit(&tups.iter().map(|t| t.key.expect("a key")).collect::<Vec<_>>())
     };
     // gistUserPicksplit: a picksplit that put everything on one side is replaced by
     // genericPickSplit's halves.
@@ -907,9 +1174,9 @@ impl Gist {
         let pages = std::mem::replace(&mut self.levels[l].pages, vec![Vec::new()]);
         let dist = if pages.len() > 1 { split(&pages.concat()) } else { pages };
         for page in dist {
-            let u = union_of(&page);
+            let link = Tup::link_of(&page, 0);
             let blk = self.alloc(l == 0, page);
-            self.add(l + 1, Tup::linking(u, blk));
+            self.add(l + 1, Tup { child: blk, ..link });
         }
     }
 
@@ -918,17 +1185,30 @@ impl Gist {
         self.pages.len() as u64
     }
 
-    /// gistchoose, keeping the current best on ties (Postgres flips a coin).
+    /// gistchoose, keeping the current best on ties (Postgres flips a coin): an earlier
+    /// column's penalty counts before a later one's.
     fn choose(&self, blk: u32, t: &Tup) -> usize {
-        let mut best = -1.0f32;
+        let mut best = [-1.0f32; 2];
         let mut result = 0;
         for (i, it) in self.pages[blk as usize].tups.iter().enumerate() {
-            let p = gist_penalty(it.key.as_ref(), t.key.as_ref());
-            if best < 0.0 || p < best {
-                result = i;
-                best = p;
+            let mut zero = true;
+            for j in 0..t.ncols as usize {
+                let p = gist_penalty(it.col(j), t.col(j));
+                if p > 0.0 {
+                    zero = false;
+                }
+                if best[j] < 0.0 || p < best[j] {
+                    result = i;
+                    best[j] = p;
+                    if j + 1 < best.len() {
+                        best[j + 1] = -1.0;
+                    }
+                } else if best[j] != p {
+                    zero = false;
+                    break;
+                }
             }
-            if p == 0.0 {
+            if zero {
                 break;
             }
         }
@@ -999,23 +1279,23 @@ impl Gist {
         if blk == 0 {
             let mut downs = Vec::new();
             for d in dist {
-                let u = union_of(&d);
+                let link = Tup::link_of(&d, 0);
                 let b = self.alloc(leaf, d);
-                downs.push(Tup::linking(u, b));
+                downs.push(Tup { child: b, ..link });
             }
             self.pages[0] = Page { leaf: false, tups: downs, nsn: 0 };
             return true;
         }
         let mut info = Vec::new();
         for (i, d) in dist.into_iter().enumerate() {
-            let u = union_of(&d);
+            let link = Tup::link_of(&d, 0);
             let b = if i == 0 {
                 self.pages[blk].tups = d;
                 blk as u32
             } else {
                 self.alloc(leaf, d)
             };
-            info.push(Tup::linking(u, b));
+            info.push(Tup { child: b, ..link });
         }
         self.pages[blk].nsn = self.clock;
         // gistfinishsplit: the downlinks right to left, then the first two in place of
@@ -1049,7 +1329,15 @@ impl Gist {
 
     /// gistdoinsert of a tuple with this key, pointing to row `row`.
     pub fn insert_row(&mut self, key: Option<Key>, row: u32) {
-        let t = Tup { row, ..Tup::of(key) };
+        self.insert_tup(Tup { row, ..Tup::of(key) });
+    }
+
+    /// gistdoinsert of a two-column index's tuple with these keys, pointing to row `row`.
+    pub fn insert_row2(&mut self, keys: [Option<Key>; 2], row: u32) {
+        self.insert_tup(Tup { row, ..Tup::of2(keys[0], keys[1]) });
+    }
+
+    fn insert_tup(&mut self, t: Tup) {
         let mut stack = vec![Step { blk: 0, lsn: self.clock, off: None }];
         loop {
             // Back up past pages split since their parent was read.
@@ -1071,8 +1359,12 @@ impl Gist {
             }
             let off = self.choose(blk, &t);
             let down = self.pages[blk as usize].tups[off];
-            if let Some(newkey) = adjusted(down.key, t.key)
-                && self.place(&stack, vec![Tup::linking(newkey, down.child)], Some(off))
+            let newdown = match t.ncols {
+                2 => adjusted2(&down, &t),
+                _ => adjusted(down.key, t.key).map(|k| Tup::linking(k, down.child)),
+            };
+            if let Some(newdown) = newdown
+                && self.place(&stack, vec![newdown], Some(off))
             {
                 if blk != 0 {
                     stack.pop();
@@ -1108,6 +1400,7 @@ pub fn sorted_build_rows(keys: Vec<(Option<Key>, u32)>) -> Gist {
         match (&a.1, &b.1) {
             (Some(Key::Box(_)), Some(Key::Box(_))) => a.2.cmp(&b.2),
             (Some(Key::Range(x)), Some(Key::Range(y))) => range_cmp(x, y),
+            (Some(Key::Num(x)), Some(Key::Num(y))) => x.lo.cmp(&y.lo),
             (None, None) => Ordering::Equal,
             (None, _) => Ordering::Greater,
             (_, None) => Ordering::Less,
@@ -1115,6 +1408,30 @@ pub fn sorted_build_rows(keys: Vec<(Option<Key>, u32)>) -> Gist {
         }
         .then(a.0.cmp(&b.0))
     });
+    build_from(keyed.into_iter().map(|(_, k, _, row)| Tup { row, ..Tup::of(k) }))
+}
+
+/// A sorted build of a two-column index's keys (in heap TID order), each leaf tuple pointing
+/// to its row: sorted by the first column, then the second (each as `sorted_build_rows`).
+pub fn sorted_build_rows2(keys: Vec<([Option<Key>; 2], u32)>) -> Gist {
+    let cmp = |a: Option<&Key>, b: Option<&Key>| match (a, b) {
+        (Some(Key::Box(x)), Some(Key::Box(y))) => zorder(x).cmp(&zorder(y)),
+        (Some(Key::Range(x)), Some(Key::Range(y))) => range_cmp(x, y),
+        (Some(Key::Num(x)), Some(Key::Num(y))) => x.lo.cmp(&y.lo),
+        (None, None) => Ordering::Equal,
+        (None, _) => Ordering::Greater,
+        (_, None) => Ordering::Less,
+        _ => Ordering::Equal,
+    };
+    let mut keyed: Vec<(usize, [Option<Key>; 2], u32)> = keys.into_iter().enumerate().map(|(i, (k, row))| (i, k, row)).collect();
+    keyed.sort_by(|a, b| {
+        cmp(a.1[0].as_ref(), b.1[0].as_ref()).then_with(|| cmp(a.1[1].as_ref(), b.1[1].as_ref())).then(a.0.cmp(&b.0))
+    });
+    build_from(keyed.into_iter().map(|(_, k, row)| Tup { row, ..Tup::of2(k[0], k[1]) }))
+}
+
+/// gist_indexsortbuild over leaf tuples in their sorted order.
+fn build_from(tups: impl IntoIterator<Item = Tup>) -> Gist {
     // Block 0 is the root's.
     let mut g = Gist {
         pages: vec![Page::default()],
@@ -1123,8 +1440,8 @@ pub fn sorted_build_rows(keys: Vec<(Option<Key>, u32)>) -> Gist {
         deleted: Vec::new(),
         free: Default::default(),
     };
-    for (_, k, _, row) in keyed {
-        g.add(0, Tup { row, ..Tup::of(k) });
+    for t in tups {
+        g.add(0, t);
     }
     let mut l = 0;
     while l + 1 < g.levels.len() || g.levels[l].pages.len() > 1 {
@@ -1363,7 +1680,7 @@ impl Gist {
     pub fn key_box(key: &Key) -> Option<GBox> {
         match key {
             Key::Box(b) => Some(*b),
-            Key::Range(_) => None,
+            Key::Range(_) | Key::Num(_) => None,
         }
     }
 }

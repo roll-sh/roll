@@ -859,7 +859,39 @@ pub fn presorted_keys(plan: &std::sync::Arc<crate::sql::plan::Plan>, ctx: &super
     r
 }
 
+/// Whether Sort node `plan` right over a grouping isn't one of
+/// PostgreSQL's: the grouping's output comes in its order already (a sorted grouping by the
+/// sort's keys), so its plan has no Sort and the grouping's rows go up as they're made (a
+/// LIMIT above stops it). Decided once for a plan, as `presorted_keys`.
+pub fn sort_elided(plan: &std::sync::Arc<crate::sql::plan::Plan>, ctx: &super::ExecCtx) -> bool {
+    use crate::sql::plan::Plan;
+    let Plan::Sort { input, .. } = &**plan else {
+        return false;
+    };
+    if !matches!(&**input, Plan::Agg { groups, sets: None, .. } if !groups.is_empty()) {
+        return false;
+    }
+    let key = std::sync::Arc::as_ptr(plan) as usize;
+    if let Some(r) = ELIDED.with_borrow(|m| m.get(&key).map(|e| e.1)) {
+        return r;
+    }
+    let r = !matches!(crate::sql::explain::estimate(plan, ctx).node_type, "Sort" | "Incremental Sort");
+    ELIDED.with_borrow_mut(|m| {
+        if m.len() >= PRESORTED_MAX {
+            m.retain(|_, (w, _)| w.strong_count() > 0);
+            if m.len() >= PRESORTED_MAX {
+                m.clear();
+            }
+        }
+        m.insert(key, (std::sync::Arc::downgrade(plan), r));
+    });
+    r
+}
+
 thread_local! {
+    /// `sort_elided` by Sort node (held weakly, as in `PRESORTED`).
+    static ELIDED: std::cell::RefCell<std::collections::HashMap<usize, (std::sync::Weak<crate::sql::plan::Plan>, bool)>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
     /// `presorted_keys` by Sort node, decided once for a plan, as the planner decides it:
     /// a kept plan's executions built an EXPLAIN tree each (3-9% of some applications'
     /// CPU). The node is held weakly, which keeps its memory: no other node is made at

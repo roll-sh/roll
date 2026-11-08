@@ -6,6 +6,7 @@ use super::{
     Catalog, ConstraintKind, FkAction, INFORMATION_SCHEMA_OID, IndexKey, PG_CATALOG_OID, Table,
     quote_ident,
 };
+use super::reldir::RelDir;
 use crate::error::Result;
 use crate::exec::{ExecCtx, Row};
 use crate::sql::func::system::index_def;
@@ -511,19 +512,22 @@ fn statistic_row(rel: u32, st: &super::ColStats) -> Row {
 /// pg_statistic of a fresh cluster, `data/pg_statistic.tsv`), which the planner reads until
 /// an ANALYZE of the catalog stores its own in `Catalog::colstats`.
 pub fn initdb_colstats(rel: u32, attnum: i16) -> Option<&'static super::ColStats> {
-    static STATS: std::sync::OnceLock<std::collections::HashMap<(u32, i16), super::ColStats>> = std::sync::OnceLock::new();
-    STATS
-        .get_or_init(|| {
-            super::static_rows::rows(SysTable::PgStatistic)
-                .iter()
-                .filter(|s| s[2] == Value::Bool(false))
-                .map(|s| {
-                    let st = colstats_of_row(s);
-                    ((super::static_rows::oid_at(s, 0), st.attnum), st)
-                })
-                .collect()
-        })
-        .get(&(rel, attnum))
+    // (A relation's own statistics parsed on its first use, `static_rows::statistic_rows_of`:
+    // the first plan reading a system catalog's statistics parsed every catalog's, with
+    // pg_attribute's and pg_type's rows to type them. Each relation's are kept for the
+    // process, as the whole map was.)
+    type ByRel = std::collections::HashMap<u32, &'static [super::ColStats]>;
+    static STATS: OnceLock<parking_lot::Mutex<ByRel>> = OnceLock::new();
+    let mut m = STATS.get_or_init(Default::default).lock();
+    let stats = *m.entry(rel).or_insert_with(|| {
+        let v: Vec<super::ColStats> = (super::static_rows::statistic_rows_of(rel).iter())
+            .filter(|s| s[2] == Value::Bool(false))
+            .map(|s| colstats_of_row(s))
+            .collect();
+        Box::leak(v.into_boxed_slice())
+    });
+    drop(m);
+    stats.iter().find(|s| s.attnum == attnum)
 }
 
 /// A pg_statistic row as `ColStats` (`statistic_row`'s inverse).
@@ -1092,7 +1096,7 @@ pub fn index_att_names(t: &super::Table, ix: &super::Index) -> Vec<String> {
 }
 
 /// Every relation visible in pg_class: (oid, name, namespace, kind, natts, has index, …).
-struct RelInfo {
+struct RelInfo<'a> {
     oid: u32,
     name: String,
     schema: u32,
@@ -1103,160 +1107,127 @@ struct RelInfo {
     am: u32,
     persistence: char,
     owner: u32,
+    /// The relation's own directory record (a table's, view's, sequence's or index's; None
+    /// for TOAST relations, composite types and system views).
+    dir: Option<&'a RelDir>,
 }
 
-/// A map's values, or only the one under `only`.
-fn pick<V>(m: &super::pmap::PMap<V>, only: Option<u32>) -> Box<dyn Iterator<Item = &V> + '_> {
+/// A directory map's records, or only the one under `only`.
+fn pick_dir(m: &super::reldir::DirMap, only: Option<u32>) -> Box<dyn Iterator<Item = (u32, &RelDir)> + '_> {
     match only {
-        None => Box::new(m.values()),
-        Some(o) => Box::new(m.get(&o).into_iter()),
+        None => Box::new(m.iter().map(|(k, d)| (*k, &**d))),
+        Some(o) => Box::new(m.get(&o).map(|d| (o, &**d)).into_iter()),
     }
 }
 
-/// `relations`, or (`only`) the entries of one relation, as `relations` has them.
-fn relations_of(cat: &Catalog, only: Option<u32>) -> Vec<RelInfo> {
+/// `relations`, or (`only`) the entries of one relation, as `relations` has them: from the
+/// relation maps' directory records (`reldir`), no relation's entry read.
+fn relations_of(cat: &Catalog, only: Option<u32>) -> Vec<RelInfo<'_>> {
+    #[cfg(debug_assertions)]
+    super::reldir::check(cat, only);
     let mut out = Vec::new();
-    for t in pick(&cat.tables, only) {
+    let temp_schema = |s: u32| cat.schema_name(s).starts_with("pg_temp");
+    for (oid, d) in pick_dir(&cat.tables.ix().dir, only) {
         out.push(RelInfo {
-            oid: t.oid,
-            name: t.name.clone(),
-            schema: t.schema,
-            kind: t.relkind(),
-            natts: t.live_columns().count(),
-            hasindex: !t.indexes.is_empty() || t.pkey_index.is_some(),
-            checks: t.checks().count(),
-            am: cat
-                .rel_am
-                .get(&t.oid)
-                .copied()
-                .unwrap_or(if t.partkey.is_some() || t.foreign.is_some() { 0 } else { 2 }),
-            persistence: if t.temporary {
+            oid,
+            name: d.name.to_string(),
+            schema: d.schema,
+            kind: d.kind as char,
+            natts: d.natts as usize,
+            hasindex: d.has(super::reldir::HASINDEX),
+            checks: d.checks as usize,
+            am: cat.rel_am.get(&oid).copied().unwrap_or(d.am),
+            persistence: d.persistence(),
+            owner: d.owner,
+            dir: Some(d),
+        });
+    }
+    for (oid, d) in pick_dir(&cat.views.ix().dir, only) {
+        let mat = d.kind == b'm';
+        out.push(RelInfo {
+            oid,
+            name: d.name.to_string(),
+            schema: d.schema,
+            kind: d.kind as char,
+            natts: d.natts as usize,
+            hasindex: d.has(super::reldir::HASINDEX),
+            checks: 0,
+            am: if mat { cat.rel_am.get(&oid).copied().unwrap_or(2) } else { 0 },
+            persistence: if temp_schema(d.schema) {
                 't'
-            } else if t.unlogged {
+            } else if d.has(super::reldir::UNLOGGED) {
                 'u'
             } else {
                 'p'
             },
-            owner: t.owner,
+            owner: d.owner,
+            dir: Some(d),
         });
     }
-    for v in pick(&cat.views, only) {
+    for (oid, d) in pick_dir(&cat.sequences.ix().dir, only) {
+        let given = d.has(super::reldir::SEQ_PERSISTENCE);
         out.push(RelInfo {
-            oid: v.oid,
-            name: v.name.clone(),
-            schema: v.schema,
-            kind: if v.materialized { 'm' } else { 'v' },
-            natts: v.columns.len(),
-            hasindex: v.storage.as_ref().is_some_and(|t| !t.indexes.is_empty()),
-            checks: 0,
-            am: if v.materialized {
-                cat.rel_am.get(&v.oid).copied().unwrap_or(2)
-            } else {
-                0
-            },
-            persistence: if cat.schema_name(v.schema).starts_with("pg_temp") {
-                't'
-            } else {
-                v.storage
-                    .as_ref()
-                    .map_or('p', |t| if t.unlogged { 'u' } else { 'p' })
-            },
-            owner: v.owner,
-        });
-    }
-    for s in pick(&cat.sequences, only) {
-        out.push(RelInfo {
-            oid: s.oid,
-            name: s.name.clone(),
-            schema: s.schema,
+            oid,
+            name: d.name.to_string(),
+            schema: d.schema,
             kind: 'S',
             natts: 3,
             hasindex: false,
             checks: 0,
             am: 0,
-            persistence: if cat.schema_name(s.schema).starts_with("pg_temp") {
+            persistence: if temp_schema(d.schema) {
                 't'
-            } else if let Some(u) = s.unlogged {
-                if u { 'u' } else { 'p' }
-            } else if s
-                .owned_by
-                .and_then(|(t, _)| cat.tables.get(&t))
-                .is_some_and(|t| t.unlogged)
-            {
+            } else if given {
+                if d.has(super::reldir::UNLOGGED) { 'u' } else { 'p' }
+            } else if (cat.tables.ix().dir.get(&d.link)).is_some_and(|t| t.has(super::reldir::UNLOGGED)) {
                 // A serial or identity column's sequence is as persistent as its table.
                 'u'
             } else {
                 'p'
             },
-            owner: s.owner,
+            owner: d.owner,
+            dir: Some(d),
         });
     }
-    for i in pick(&cat.indexes, only) {
-        let schema = cat
-            .index_table(i.table)
-            .map(|t| t.schema)
-            .unwrap_or(super::PUBLIC_OID);
+    for (oid, d) in pick_dir(&cat.indexes.ix().dir, only) {
+        let t = cat.storage_dir(d.link);
         out.push(RelInfo {
-            oid: i.oid,
-            name: i.name.clone(),
-            schema,
-            kind: if cat
-                .index_table(i.table)
-                .is_some_and(|t| t.partkey.is_some())
-            {
-                'I'
-            } else {
-                'i'
-            },
-            natts: i.columns.len() + i.include.len(),
+            oid,
+            name: d.name.to_string(),
+            schema: t.map_or(super::PUBLIC_OID, |t| t.schema),
+            kind: if t.is_some_and(|t| t.kind == b'p') { 'I' } else { 'i' },
+            natts: d.natts as usize,
             hasindex: false,
             checks: 0,
-            am: cat
-                .rel_am
-                .get(&i.oid)
-                .copied()
-                .unwrap_or_else(|| access_method_oid(&i.method)),
+            am: cat.rel_am.get(&oid).copied().unwrap_or(d.am),
             // An index is as persistent as its table.
-            persistence: match cat.index_table(i.table) {
-                Some(t) if t.temporary => 't',
-                Some(t) if t.unlogged => 'u',
-                _ => 'p',
-            },
-            owner: cat.index_table(i.table).map_or(OWNER, |t| t.owner),
+            persistence: t.map_or('p', |t| t.persistence()),
+            owner: t.map_or(OWNER, |t| t.owner),
+            dir: Some(d),
         });
     }
-    let toasted: Box<dyn Iterator<Item = &Arc<super::Table>>> = match only {
-        None => Box::new(cat.toasted()),
-        Some(o) => Box::new(cat.toast_owner(o).map(|(t, _)| t).into_iter()),
+    let toasted: Box<dyn Iterator<Item = (u32, &RelDir)>> = match only {
+        None => Box::new(cat.toasted_dirs()),
+        Some(o) => Box::new(cat.toast_dir(o).map(|(rel, _, d)| (rel, d)).into_iter()),
     };
-    for t in toasted {
-        let persistence = if t.temporary {
-            't'
-        } else if t.unlogged {
-            'u'
-        } else {
-            'p'
-        };
+    for (rel, t) in toasted {
         for index in [false, true] {
             if only.is_some_and(|o| o != t.toast + index as u32) {
                 continue;
             }
             out.push(RelInfo {
                 oid: t.toast + index as u32,
-                name: t.toast_relname(index),
-                schema: cat.toast_schema(t),
+                name: t.toast_relname(rel, index),
+                schema: cat.toast_schema_of(t),
                 kind: if index { 'i' } else { 't' },
                 natts: if index { 2 } else { 3 },
                 hasindex: !index,
                 checks: 0,
                 // A TOAST table has its table's access method.
-                am: if index {
-                    403
-                } else {
-                    cat.rel_am.get(&t.oid).copied().unwrap_or(2)
-                },
-                persistence,
+                am: if index { 403 } else { cat.rel_am.get(&rel).copied().unwrap_or(2) },
+                persistence: t.persistence(),
                 owner: t.owner,
+                dir: None,
             });
         }
     }
@@ -1272,6 +1243,7 @@ fn relations_of(cat: &Catalog, only: Option<u32>) -> Vec<RelInfo> {
             am: 0,
             persistence: 'p',
             owner: ct.owner,
+            dir: None,
         });
     }
     for st in SysTable::all().filter(|s| only.is_none_or(|o| s.oid() == o)) {
@@ -1286,9 +1258,18 @@ fn relations_of(cat: &Catalog, only: Option<u32>) -> Vec<RelInfo> {
             am: if st.is_view() { 0 } else { 2 },
             persistence: 'p',
             owner: OWNER,
+            dir: None,
         });
     }
     out
+}
+
+/// A map's values, or only the one under `only`.
+fn pick<V>(m: &super::pmap::PMap<V>, only: Option<u32>) -> Box<dyn Iterator<Item = &V> + '_> {
+    match only {
+        None => Box::new(m.values()),
+        Some(o) => Box::new(m.get(&o).into_iter()),
+    }
 }
 
 /// All columns of a relation as (attnum, name, type oid, typmod, not null, has default, column).
@@ -1798,8 +1779,8 @@ pub fn row_count(table: SysTable, ctx: &ExecCtx) -> Option<usize> {
             ns_of.insert(super::static_rows::oid_at(r, 0), ns);
             per.entry(ns).or_default().0 += 1;
         }
-        for r in super::static_rows::rows(PgAttribute).iter() {
-            if let Some(ns) = ns_of.get(&super::static_rows::oid_at(r, 0)) {
+        for rel in super::static_rows::first_oids(PgAttribute) {
+            if let Some(ns) = ns_of.get(&rel) {
                 per.entry(*ns).or_default().1 += 1;
             }
         }
@@ -2026,18 +2007,115 @@ pub struct NameBounds {
 }
 
 impl NameBounds {
+    /// Narrowed by a lower and an upper bound, (bound, inclusive) each.
+    pub fn narrow(&mut self, lo: Option<(String, bool)>, hi: Option<(String, bool)>) {
+        if let Some(l) = lo
+            && self.lo.as_ref().is_none_or(|(x, inc)| l.0 > *x || (l.0 == *x && *inc && !l.1))
+        {
+            self.lo = Some(l);
+        }
+        if let Some(h) = hi
+            && self.hi.as_ref().is_none_or(|(x, inc)| h.0 < *x || (h.0 == *x && *inc && !h.1))
+        {
+            self.hi = Some(h);
+        }
+    }
+
     pub fn admits(&self, n: &str) -> bool {
         self.lo.as_ref().is_none_or(|(b, inc)| if *inc { n >= b.as_str() } else { n > b.as_str() })
             && self.hi.as_ref().is_none_or(|(b, inc)| if *inc { n <= b.as_str() } else { n < b.as_str() })
     }
 
     /// The one name admitted, when the bounds are an equality.
-    fn exact(&self) -> Option<&str> {
+    pub fn exact(&self) -> Option<&str> {
         match (&self.lo, &self.hi) {
             (Some((a, true)), Some((b, true))) if a == b => Some(a),
             _ => None,
         }
     }
+}
+
+/// pg_class's row of the built-in relation at place `at` of its static rows (which lead
+/// pg_class's rows, in that order), made alone as `rows` makes it (`exec/nodes.rs`
+/// `LazyRowsNode::peek`). None: past the last; Some(None): not shown (its schema dropped).
+pub fn class_builtin_row(ctx: &ExecCtx, at: usize) -> Result<Option<Option<Row>>> {
+    let all = super::static_rows::rows(SysTable::PgClass);
+    let Some(r) = all.get(at) else { return Ok(None) };
+    let oid = super::static_rows::oid_at(r, 0);
+    Ok(Some(rows_generated_for(SysTable::PgClass, ctx, Some(oid))?.into_iter().next()))
+}
+
+/// The column of a catalog's rows naming the object they describe, for catalogs whose rows
+/// of one object `rows_of_object` makes alone (pg_description's objoid).
+pub fn obj_column(table: SysTable) -> Option<usize> {
+    (table == SysTable::PgDescription).then_some(0)
+}
+
+/// The places of object `oid`'s rows among pg_description's static rows.
+fn description_places(oid: u32) -> &'static [usize] {
+    static BY_OID: OnceLock<std::collections::HashMap<u32, Vec<usize>>> = OnceLock::new();
+    let m = BY_OID.get_or_init(|| {
+        let mut m: std::collections::HashMap<u32, Vec<usize>> = std::collections::HashMap::new();
+        for (i, r) in super::static_rows::rows(SysTable::PgDescription).iter().enumerate() {
+            m.entry(super::static_rows::oid_at(r, 0)).or_default().push(i);
+        }
+        m
+    });
+    m.get(&oid).map_or(&[], |v| v.as_slice())
+}
+
+/// The rows of object `oid` (`obj_column`) of a catalog generated for each scan, made alone and
+/// in the order `rows` gives them: an index scan's `objoid = x` (pgjdbc's getColumns, EF Core's
+/// and psql's `\d+` descriptions) generated every row of pg_description (Postgres's 5,000
+/// descriptions) per statement and filtered them. None: not such a catalog.
+pub fn rows_of_object(table: SysTable, ctx: &ExecCtx, oid: u32) -> Result<Option<Vec<Row>>> {
+    let Some(k) = obj_column(table) else { return Ok(None) };
+    let rows = rows_generated_for(table, ctx, Some(oid))?;
+    #[cfg(debug_assertions)]
+    {
+        let all: Vec<Row> = (rows_generated_for(table, ctx, None)?.into_iter())
+            .filter(|r| r[k] == Value::Oid(oid))
+            .collect();
+        debug_assert!(all == rows, "{}'s rows of object {oid}", table.name());
+    }
+    let _ = k;
+    Ok(Some(rows))
+}
+
+/// pg_depend's rows of object (`class`, `oid`) as its dependent (`classid`, `objid`), in the
+/// order `rows` gives them, derived alone (`depend::scope_of`: the derivation a DROP's walk
+/// runs per object) instead of every object's: EF Core's tables query runs `NOT EXISTS
+/// (SELECT ... FROM pg_depend WHERE classid = ... AND objid = cls.oid ...)` per relation, and
+/// its first run after a start or any DDL derived all 116,000 rows of 10,000 tables (190
+/// ms). None: an object Postgres made, or one whose rows only the whole derivation makes.
+pub fn depend_rows_of(ctx: &ExecCtx, class: u32, oid: u32) -> Result<Option<Vec<Row>>> {
+    if oid < super::FIRST_USER_OID {
+        return Ok(None);
+    }
+    let cat = ctx.catalog();
+    let Some(scope) = super::depend::scope_of(&cat, (class, oid, 0)) else { return Ok(None) };
+    let rows: Vec<Row> = (super::depend::depends_in(ctx, &cat, &scope).into_iter())
+        .filter(|d| d.obj.0 == class && d.obj.1 == oid)
+        .map(|d| {
+            vec![
+                o(d.obj.0),
+                o(d.obj.1),
+                i4(d.obj.2 as i64),
+                o(d.refobj.0),
+                o(d.refobj.1),
+                i4(d.refobj.2 as i64),
+                c(d.kind),
+            ]
+        })
+        .collect();
+    #[cfg(debug_assertions)]
+    {
+        let all: Vec<Row> = (rows_generated_for(SysTable::PgDepend, ctx, None)?.into_iter())
+            .filter(|r| r[0] == Value::Oid(class) && r[1] == Value::Oid(oid))
+            .collect();
+        debug_assert!(all == rows, "pg_depend's rows of object ({class}, {oid})");
+    }
+    Ok(Some(rows))
 }
 
 /// Where a relation's pg_class rows lie in the order `rows` generates them (Postgres's own
@@ -2050,17 +2128,20 @@ pub(super) fn class_position(cat: &Catalog, oid: u32) -> Option<(u8, u64)> {
             .position(|r| super::static_rows::oid_at(r, 0) == oid)?;
         return Some((0, at as u64));
     }
-    Some(if cat.tables.contains_key(&oid) {
+    // (By the directory records, which every entry has: a stored map's `contains_key` reads
+    // its group's entries, the JSON of 1,000 tables or so, from storage: half of psql's first
+    // `\dt` after a start at 10,000 tables.)
+    Some(if cat.tables.ix().dir.contains_key(&oid) {
         (1, oid as u64)
-    } else if cat.views.contains_key(&oid) {
+    } else if cat.views.ix().dir.contains_key(&oid) {
         (2, oid as u64)
-    } else if cat.sequences.contains_key(&oid) {
+    } else if cat.sequences.ix().dir.contains_key(&oid) {
         (3, oid as u64)
-    } else if cat.indexes.contains_key(&oid) {
+    } else if cat.indexes.ix().dir.contains_key(&oid) {
         (4, oid as u64)
-    } else if let Some((t, index)) = cat.toast_owner(oid) {
-        let view = !cat.tables.contains_key(&t.oid);
-        (5, ((view as u64) << 40) | ((t.oid as u64) << 1) | index as u64)
+    } else if let Some((rel, index, _)) = cat.toast_dir(oid) {
+        let view = !cat.tables.ix().dir.contains_key(&rel);
+        (5, ((view as u64) << 40) | ((rel as u64) << 1) | index as u64)
     } else {
         (6, cat.composite_of_rel(oid)?.oid as u64)
     })
@@ -2094,6 +2175,8 @@ pub fn class_rows_named(ctx: &ExecCtx, bounds: &NameBounds) -> Result<Option<Vec
     let cat = ctx.catalog();
     let mut rels: Vec<u32> = cat.relations_named(bounds.exact(), |n| bounds.admits(n));
     rels.extend(cat.composites.values().filter(|c| bounds.admits(&c.name)).map(|c| c.relid));
+    // (A TOAST table or index renamed: not in the name index either.)
+    rels.extend(cat.renamed_toasts().into_iter().filter(|(n, _)| bounds.admits(n)).map(|(_, o)| o));
     rels.extend(
         (super::static_rows::rows(SysTable::PgClass).iter())
             .filter(|r| r[1].as_str().is_some_and(|n| bounds.admits(n)))
@@ -2194,16 +2277,16 @@ fn class_keys_checked(ctx: &ExecCtx, sel: ClassSel, keep: ClassKeep, check: bool
     if matches!(sel, ClassSel::All) {
         let any = |ks: &[u8]| ks.iter().any(|&k| keep.kind(k));
         if any(b"rpftiI") {
-            cat.tables.read_all();
+            cat.tables.ix().dir.read_all();
         }
         if any(b"vmti") {
-            cat.views.read_all();
+            cat.views.ix().dir.read_all();
         }
         if any(b"S") {
-            cat.sequences.read_all();
+            cat.sequences.ix().dir.read_all();
         }
         if any(b"iI") {
-            cat.indexes.read_all();
+            cat.indexes.ix().dir.read_all();
         }
     }
     let mut out = Vec::new();
@@ -2233,9 +2316,9 @@ fn class_keys_checked(ctx: &ExecCtx, sel: ClassSel, keep: ClassKeep, check: bool
                 class_keys_of(&cat, Some(ct.relid), keep, &mut out);
             }
             if n.starts_with("pg_toast") {
-                for t in cat.toasted() {
+                for (rel, t) in cat.toasted_dirs() {
                     for index in [false, true] {
-                        if t.toast_relname(index) == n {
+                        if t.toast_relname(rel, index) == n {
                             class_keys_of(&cat, Some(t.toast + index as u32), keep, &mut out);
                         }
                     }
@@ -2279,40 +2362,39 @@ fn class_keys_of(cat: &Catalog, only: Option<u32>, keep: ClassKeep, out: &mut Ve
         }
     };
     if any(b"rpf") {
-        for t in pick(&cat.tables, only) {
-            push(t.oid, t.schema, t.relkind(), t.toast, &|| t.name.clone());
+        for (oid, t) in pick_dir(&cat.tables.ix().dir, only) {
+            push(oid, t.schema, t.kind as char, t.toast, &|| t.name.to_string());
         }
     }
     if any(b"vm") {
-        for v in pick(&cat.views, only) {
-            let toast = v.storage.as_ref().map_or(0, |t| t.toast);
-            push(v.oid, v.schema, if v.materialized { 'm' } else { 'v' }, toast, &|| v.name.clone());
+        for (oid, v) in pick_dir(&cat.views.ix().dir, only) {
+            push(oid, v.schema, v.kind as char, v.toast, &|| v.name.to_string());
         }
     }
     if any(b"S") {
-        for s in pick(&cat.sequences, only) {
-            push(s.oid, s.schema, 'S', 0, &|| s.name.clone());
+        for (oid, q) in pick_dir(&cat.sequences.ix().dir, only) {
+            push(oid, q.schema, 'S', 0, &|| q.name.to_string());
         }
     }
     if any(b"iI") {
-        for i in pick(&cat.indexes, only) {
-            let t = cat.index_table(i.table);
-            let schema = t.as_ref().map_or(super::PUBLIC_OID, |t| t.schema);
-            let kind = if t.is_some_and(|t| t.partkey.is_some()) { 'I' } else { 'i' };
-            push(i.oid, schema, kind, 0, &|| i.name.clone());
+        for (oid, i) in pick_dir(&cat.indexes.ix().dir, only) {
+            let t = cat.storage_dir(i.link);
+            let schema = t.map_or(super::PUBLIC_OID, |t| t.schema);
+            let kind = if t.is_some_and(|t| t.kind == b'p') { 'I' } else { 'i' };
+            push(oid, schema, kind, 0, &|| i.name.to_string());
         }
     }
     if any(b"ti") {
-        let toasted: Box<dyn Iterator<Item = &Arc<super::Table>>> = match only {
-            None => Box::new(cat.toasted()),
-            Some(o) => Box::new(cat.toast_owner(o).map(|(t, _)| t).into_iter()),
+        let toasted: Box<dyn Iterator<Item = (u32, &RelDir)>> = match only {
+            None => Box::new(cat.toasted_dirs()),
+            Some(o) => Box::new(cat.toast_dir(o).map(|(rel, _, d)| (rel, d)).into_iter()),
         };
-        for t in toasted {
+        for (rel, t) in toasted {
             for index in [false, true] {
                 let oid = t.toast + index as u32;
                 if only.is_none_or(|o| o == oid) {
                     let kind = if index { 'i' } else { 't' };
-                    push(oid, cat.toast_schema(t), kind, 0, &|| t.toast_relname(index));
+                    push(oid, cat.toast_schema_of(t), kind, 0, &|| t.toast_relname(rel, index));
                 }
             }
         }
@@ -2361,6 +2443,30 @@ pub fn class_rows_where(ctx: &ExecCtx, w: &ClassWhere) -> Result<Option<Vec<Row>
     // (No kind can match: no row.)
     if w.kinds.as_ref().is_some_and(|k| k.is_empty()) {
         return Ok(Some(Vec::new()));
+    }
+    // (Kinds alone: when the maps holding them are too large, nothing is read. Every
+    // relation's directory and a name for each kept one were made to find that out: a psql
+    // `\dt`'s scan is opened that way before its hash join names the schema.)
+    if w.oids.is_none() && w.schemas.is_none() {
+        let cat = ctx.catalog();
+        let kinds = w.kinds.as_deref().unwrap_or(&[]);
+        let any = |ks: &[u8]| ks.iter().any(|k| kinds.contains(k));
+        let mut most = super::static_rows::rows(SysTable::PgClass).len() + cat.composites.len();
+        for (ks, n) in [
+            (&b"rpf"[..], cat.tables.len()),
+            (b"vm", cat.views.len()),
+            (b"S", cat.sequences.len()),
+            (b"iI", cat.indexes.len()),
+            (b"ti", 2 * (cat.tables.len() + cat.views.len())),
+        ] {
+            if any(ks) {
+                most += n;
+            }
+        }
+        let total = row_count(SysTable::PgClass, ctx).unwrap_or(most);
+        if most > WHERE_MAX || most.saturating_mul(4) > total {
+            return Ok(None);
+        }
     }
     let set = |v: &Option<Vec<u32>>| v.as_ref().map(|v| v.iter().copied().collect::<std::collections::HashSet<u32>>());
     let (oids, schemas) = (set(&w.oids), set(&w.schemas));
@@ -2600,7 +2706,10 @@ fn rows_generated_chunked(
     // the catalogs made from the relations and functions: a database's first read of
     // pg_namespace, which every statistics view reads, parsed every relation's entry, 130 ms
     // at 10,000 tables.)
-    if reads_relations(table) {
+    if table == SysTable::PgClass {
+        // (Its rows come from the directory records: no relation's entry is read.)
+        super::stored_ix::read_class(&ctx.catalog());
+    } else if reads_relations(table) {
         ctx.catalog().read_relations();
     }
     let mut out = Out::chunked(part);
@@ -2841,23 +2950,27 @@ fn generate_raw(table: SysTable, ctx: &ExecCtx, only: Option<u32>, out: &mut Out
                 .into_iter()
                 .filter(|r| r.oid >= super::FIRST_USER_OID)
             {
+                use super::reldir::{PARTITION, POPULATED, RLS, RLS_FORCE};
+                let d = r.dir;
+                let has = |f: u16| d.is_some_and(|d| d.has(f));
                 let reltype = match r.kind {
-                    _ if r.oid < super::FIRST_USER_OID => super::sys_rels::SYS_RELS
-                        .iter()
-                        .find(|x| x.2 == r.oid)
-                        .map_or(0, |x| x.3),
                     'c' => cat.composite_of_rel(r.oid).map_or(0, |c| c.oid),
-                    'r' | 'p' | 'f' => cat.tables.get(&r.oid).map_or(0, |t| t.rowtype),
-                    'v' | 'm' => cat.views.get(&r.oid).map_or(0, |v| v.rowtype),
+                    'r' | 'p' | 'f' | 'v' | 'm' => d.map_or(0, |d| d.rowtype),
                     _ => 0,
                 };
                 let st = cat.rel_stats(r.oid, r.kind);
+                let toast = cat.toast_dir(r.oid);
+                let text_array = |opts: &mut dyn Iterator<Item = Value>| {
+                    let v: Vec<Value> = opts.collect();
+                    if v.is_empty() { N } else { arr(DataType::Text, v) }
+                };
+                let opts = d.map_or(&[][..], |d| d.options());
                 out.push(vec![
                     o(r.oid),
                     nm(&r.name),
                     o(r.schema),
                     o(reltype),
-                    o(cat.tables.get(&r.oid).map_or(0, |t| t.of_type)),
+                    o(d.map_or(0, |d| d.of_type)),
                     o(r.owner),
                     o(r.am),
                     o(if matches!(r.kind, 'v' | 'c' | 'p' | 'I' | 'f') {
@@ -2866,15 +2979,12 @@ fn generate_raw(table: SysTable, ctx: &ExecCtx, only: Option<u32>, out: &mut Out
                         cat.filenodes.get(&r.oid).copied().unwrap_or(r.oid)
                     }),
                     // A TOAST table and its index lie with their table.
-                    o(cat.toast_owner(r.oid).map_or_else(
-                        || cat.rel_tablespace(r.oid),
-                        |(t, _)| cat.rel_tablespace(t.oid),
-                    )),
+                    o(toast.map_or_else(|| cat.rel_tablespace(r.oid), |(rel, _, _)| cat.rel_tablespace(rel))),
                     i4(st.pages as i64),
                     Value::Float4(st.tuples as f32),
                     i4(st.allvisible as i64),
                     i4(st.allfrozen as i64),
-                    o(cat.index_table(r.oid).map_or(0, |t| t.toast)),
+                    o(cat.storage_dir(r.oid).map_or(0, |t| t.toast)),
                     b(r.hasindex),
                     b(false),
                     c(r.persistence),
@@ -2888,24 +2998,16 @@ fn generate_raw(table: SysTable, ctx: &ExecCtx, only: Option<u32>, out: &mut Out
                     b(!cat.children(r.oid).is_empty()
                         || cat.class_has_subclass.contains(&r.oid)
                         || index_parents.contains(r.oid)),
-                    b(cat.tables.get(&r.oid).is_some_and(|t| t.rls)),
-                    b(cat.tables.get(&r.oid).is_some_and(|t| t.rls_force)),
-                    b(r.kind != 'm' || cat.views.get(&r.oid).is_none_or(|v| v.populated)),
+                    b(matches!(r.kind, 'r' | 'p' | 'f') && has(RLS)),
+                    b(matches!(r.kind, 'r' | 'p' | 'f') && has(RLS_FORCE)),
+                    b(r.kind != 'm' || d.is_none_or(|d| d.has(POPULATED))),
                     c(match r.kind {
-                        'r' | 'p' => cat
-                            .tables
-                            .get(&r.oid)
-                            .and_then(|t| t.replident)
-                            .unwrap_or('d'),
+                        'r' | 'p' => d.map_or('d', |d| if d.replident == 0 { 'd' } else { d.replident as char }),
                         'm' => 'd',
                         _ => 'n',
                     }),
                     // A partition, or an index attached to a partitioned index.
-                    b(cat
-                        .tables
-                        .get(&r.oid)
-                        .is_some_and(|t| t.partbound.is_some())
-                        || cat.indexes.get(&r.oid).is_some_and(|i| i.parent != 0)),
+                    b(matches!(r.kind, 'r' | 'p' | 'f' | 'i' | 'I') && has(PARTITION)),
                     o(0),
                     // Relations with storage of their own have a frozen xid and multixact id.
                     Value::Oid(if matches!(r.kind, 'r' | 'm' | 't') {
@@ -2940,60 +3042,25 @@ fn generate_raw(table: SysTable, ctx: &ExecCtx, only: Option<u32>, out: &mut Out
                         )
                     },
                     match r.kind {
-                        'v' => cat
-                            .views
-                            .get(&r.oid)
-                            .filter(|v| !v.options.is_empty() || v.check_option.is_some())
-                            .map_or(N, |v| {
-                                let mut opts: Vec<Value> =
-                                    v.options.iter().map(|o| nm(o.as_str())).collect();
-                                if let Some(co) = &v.check_option {
-                                    opts.push(nm(format!("check_option={co}")));
-                                }
-                                arr(DataType::Text, opts)
-                            }),
-                        'i' | 'I' => cat
-                            .indexes
-                            .get(&r.oid)
-                            .filter(|i| !i.options.is_empty())
-                            .map_or(N, |i| {
-                                arr(
-                                    DataType::Text,
-                                    i.options.iter().map(|o| nm(o.as_str())).collect(),
-                                )
-                            }),
+                        'v' => {
+                            let co = d.and_then(|d| d.extra.as_ref()?.check_option.as_ref());
+                            let co = co.map(|co| nm(format!("check_option={co}")));
+                            text_array(&mut opts.iter().map(|o| nm(o.as_str())).chain(co))
+                        }
+                        'i' | 'I' => text_array(&mut opts.iter().map(|o| nm(o.as_str()))),
                         // (A table's `toast.` options are its TOAST table's.)
-                        'r' | 'p' | 'm' => cat
-                            .index_table(r.oid)
-                            .filter(|t| t.options.iter().any(|o| !o.starts_with("toast.")))
-                            .map_or(N, |t| {
-                                arr(
-                                    DataType::Text,
-                                    t.options
-                                        .iter()
-                                        .filter(|o| !o.starts_with("toast."))
-                                        .map(|o| nm(o.as_str()))
-                                        .collect(),
-                                )
-                            }),
-                        't' => cat
-                            .toast_owner(r.oid)
-                            .filter(|(t, index)| {
-                                !*index && t.options.iter().any(|o| o.starts_with("toast."))
-                            })
-                            .map_or(N, |(t, _)| {
-                                arr(
-                                    DataType::Text,
-                                    t.options
-                                        .iter()
-                                        .filter_map(|o| o.strip_prefix("toast."))
-                                        .map(nm)
-                                        .collect(),
-                                )
-                            }),
+                        'r' | 'p' | 'm' => text_array(&mut opts.iter().filter(|o| !o.starts_with("toast.")).map(|o| nm(o.as_str()))),
+                        't' => match toast {
+                            Some((_, false, t)) => text_array(&mut t.options().iter().filter_map(|o| o.strip_prefix("toast.")).map(nm)),
+                            _ => N,
+                        },
                         _ => N,
                     },
-                    partition_bound_text(cat, r.oid, ctx.fmt()).map_or(N, nm),
+                    if has(PARTITION) && matches!(r.kind, 'r' | 'p' | 'f') {
+                        partition_bound_text(cat, r.oid, ctx.fmt()).map_or(N, nm)
+                    } else {
+                        N
+                    },
                 ]);
             }
         }
@@ -5272,8 +5339,14 @@ fn generate_raw(table: SysTable, ctx: &ExecCtx, only: Option<u32>, out: &mut Out
             }
         }
         PgDescription => {
+            // (`only`: one object's rows, `rows_of_object`.)
             let dbs: Vec<u32> = ctx.sess.cluster.databases().iter().map(|d| d.0).collect();
-            for r in super::static_rows::rows(table).iter() {
+            let statics = super::static_rows::rows(table);
+            let builtin: Box<dyn Iterator<Item = &Row>> = match only {
+                None => Box::new(statics.iter()),
+                Some(o) => Box::new(description_places(o).iter().map(|&i| &statics[i])),
+            };
+            for r in builtin {
                 let (oid, class) = (
                     super::static_rows::oid_at(r, 0),
                     super::static_rows::oid_at(r, 1),
@@ -5284,7 +5357,17 @@ fn generate_raw(table: SysTable, ctx: &ExecCtx, only: Option<u32>, out: &mut Out
                     out.push(r.clone());
                 }
             }
-            for (oid, sub, text) in cat.comments_in_order().into_iter().filter(|c| !c.2.is_empty()) {
+            let mine: Vec<(u32, i32, &str)> = match only {
+                None => cat.comments_in_order(),
+                Some(o) => {
+                    let mut c: Vec<(u64, i32, &str)> = (cat.comments.get(&o).into_iter())
+                        .flat_map(|c| c.0.iter().map(|(s, t, x)| (*t, *s, x.as_str())))
+                        .collect();
+                    c.sort_unstable_by_key(|c| (c.0, c.1));
+                    c.into_iter().map(|(_, s, x)| (o, s, x)).collect()
+                }
+            };
+            for (oid, sub, text) in mine.into_iter().filter(|c| !c.2.is_empty()) {
                 if cat.shared_class_of(oid, &dbs).is_some() {
                     continue;
                 }
@@ -5293,15 +5376,15 @@ fn generate_raw(table: SysTable, ctx: &ExecCtx, only: Option<u32>, out: &mut Out
                     .unwrap_or(crate::catalog::depend::CONSTRAINT);
                 out.push(vec![o(oid), o(class), i4(sub as i64), nm(text)]);
             }
-            for (oid, class, sub, text) in &cat.class_comments {
+            for (oid, class, sub, text) in cat.class_comments.iter().filter(|c| only.is_none_or(|o| c.0 == o)) {
                 out.push(vec![o(*oid), o(*class), i4(*sub as i64), nm(text)]);
             }
-            for (oid, m) in crate::largeobj::all(&ctx.txn.borrow())? {
+            for (oid, m) in crate::largeobj::all(&ctx.txn.borrow())?.into_iter().filter(|l| only.is_none_or(|o| l.0 == o)) {
                 if let Some(text) = &m.comment {
                     out.push(vec![o(oid), o(crate::largeobj::CLASS_OID), i4(0), nm(text)]);
                 }
             }
-            for (oid, class, text) in extension_descriptions(cat) {
+            for (oid, class, text) in extension_descriptions(cat).into_iter().filter(|e| only.is_none_or(|o| e.0 == o)) {
                 if cat.comment(oid, 0).is_none() {
                     out.push(vec![o(oid), o(class), i4(0), nm(text)]);
                 }

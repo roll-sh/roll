@@ -19,7 +19,7 @@ use serde::de::DeserializeOwned;
 use std::collections::BTreeMap;
 
 /// A map with fewer entries is read whole when the catalog opens (one scan).
-const LAZY_MIN: usize = 256;
+pub const LAZY_MIN: usize = 256;
 
 /// The maps read on demand (their tags in `persist`'s `stored_fields!`).
 pub const LAZY_TAGS: [u8; 12] = [2, 3, 4, 5, 13, 18, 26, 35, 44, 45, 46, 50];
@@ -32,7 +32,7 @@ const CHILDREN: u8 = 129;
 /// Each stored map's (entry count, last key), by tag: the header's `stored`.
 pub type Shapes = BTreeMap<u8, (usize, u32)>;
 
-fn tag_range(tag: u8) -> (Vec<u8>, Vec<u8>) {
+pub fn tag_range(tag: u8) -> (Vec<u8>, Vec<u8>) {
     let mut from = RECORD_PREFIX.to_vec();
     from.push(tag);
     let mut to = RECORD_PREFIX.to_vec();
@@ -188,18 +188,19 @@ stored_ix!(TableIx {
         ri_checks = 138,
         words = 139,
         detach_pending = 140,
+        dir = 152,
     ],
     head: [trigger_marks, rows],
 });
 
 stored_ix!(ViewIx {
-    parts: [toast = 141, rowtypes = 142, barriers = 143, words = 144, row_users = 145, rowtype_rels = 146, rules = 147],
+    parts: [toast = 141, rowtypes = 142, barriers = 143, words = 144, row_users = 145, rowtype_rels = 146, rules = 147, dir = 153],
     head: [rows],
 });
 
-stored_ix!(IndexIx { parts: [attached = 148, words = 149], head: [expr_tables, parents, rows] });
+stored_ix!(IndexIx { parts: [attached = 148, words = 149, dir = 154], head: [expr_tables, parents, rows] });
 
-stored_ix!(SeqIx { parts: [owned = 150], head: [rows] });
+stored_ix!(SeqIx { parts: [owned = 150, dir = 155], head: [rows] });
 
 stored_ix!(FuncIx { parts: [named = 151], head: [] });
 
@@ -341,6 +342,32 @@ lazy_maps! {
 #[test]
 fn lazy_tags_are_the_listed_maps() {
     assert_eq!(LISTED, &LAZY_TAGS[..]);
+}
+
+/// What pg_class's whole generation reads, read now: the relation maps' directory records
+/// (`reldir`) and TOAST indexes, and the small per-relation maps, not the relations' entries
+/// (`read_all` parsed every table's: most of a database's first `\dt`).
+pub fn read_class(c: &Catalog) {
+    let (t, v) = (c.tables.ix(), c.views.ix());
+    std::thread::scope(|s| {
+        s.spawn(|| Part::read_all(&t.dir));
+        s.spawn(|| {
+            Part::read_all(&c.indexes.ix().dir);
+            Part::read_all(&c.sequences.ix().dir);
+            Part::read_all(&v.dir);
+        });
+        s.spawn(|| {
+            Part::read_all(&t.toast);
+            Part::read_all(&v.toast);
+            Part::read_all(&c.children);
+            c.relstats.read_all();
+        });
+        for m in [&c.rel_am, &c.rel_tablespace, &c.filenodes] {
+            s.spawn(move || m.read_all());
+        }
+        s.spawn(|| c.frozen_xids.read_all());
+        s.spawn(|| c.class_order.read_all());
+    });
 }
 
 /// A `PHash` entry's record key: the tag, the key's bucket, its bytes.

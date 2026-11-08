@@ -180,7 +180,7 @@ impl Database {
                 };
                 let stored = persist::load(&b, read)?;
                 let mut c = stored.clone();
-                if c.catalog_format < persist::CATALOG_FORMAT {
+                if c.catalog_format < 4 {
                     // Stored in an older format (a single value before format 1; before
                     // format 4 without its indexes): every record rewritten, in one commit,
                     // after the upgrades of objects stored before their oids.
@@ -188,6 +188,13 @@ impl Database {
                     c.catalog_format = persist::CATALOG_FORMAT;
                     store.commit(persist::writes_new(&c)?, |_| Ok(()))?;
                 } else {
+                    // Format 4 had no relation directory records: made from every relation
+                    // entry once, and stored with the header in the commit below (one WAL
+                    // record: a crash leaves format 4 whole or format 5 whole).
+                    if c.catalog_format == 4 {
+                        crate::catalog::reldir::fill(&mut c);
+                        c.catalog_format = persist::CATALOG_FORMAT;
+                    }
                     // What `open_upgrades` brought up to date is stored now: later commits
                     // write only what they change.
                     c.open_upgrades();
@@ -478,6 +485,7 @@ impl Database {
             deferrable: false,
             moved_out: Vec::new(),
             seq_undo: Vec::new(),
+            seq_drops: Vec::new(),
             pgstat: Default::default(),
             db_owner_undo: Vec::new(),
             db_options_undo: Vec::new(),
@@ -815,6 +823,7 @@ struct Savepoint {
     /// Ids of subtransactions released into this one (they end as it does).
     committed: Vec<u64>,
     seq_undo_len: usize,
+    seq_drops_len: usize,
     /// The change stream's next record number when it was made (`repl::log::rolled_back_to`).
     log_seq: u32,
 }
@@ -1009,6 +1018,10 @@ pub struct Txn {
     /// Sequences given a new file here (TRUNCATE ... RESTART IDENTITY), with the state of
     /// the old one, which a rollback makes current again.
     pub seq_undo: Vec<(u32, (i64, bool, i64, i64))>,
+    /// Sequences dropped here, a table's hidden row ids' too: their state goes once the
+    /// transaction commits (a rollback keeps it: a table whose DROP rolled back must not
+    /// hand out its row ids again).
+    pub seq_drops: Vec<u32>,
     /// The transactional statistics counts (`exec::pgstat`).
     pub pgstat: crate::exec::pgstat::XactStats,
     /// Databases whose owner this transaction changed: (name, the previous owner), put
@@ -1557,7 +1570,7 @@ impl Txn {
         older.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(b.1.ts.cmp(&a.1.ts)));
         let no_older = older.is_empty();
         let dir = self.db.store.spill_dir().join(self.id.to_string());
-        let runs = Self::runs_in(&mut self.runs, dir, &self.rdels);
+        let runs = Self::runs_in(&mut self.runs, dir, &self.rdels, self.db.store.compress());
         // Each key's newest version (the buffer's) before its older ones (the journal's).
         let mut cur = self.writes.iter().peekable();
         let mut old = older.into_iter().peekable();
@@ -1598,9 +1611,10 @@ impl Txn {
         runs: &'a mut Option<Box<Runs>>,
         dir: std::path::PathBuf,
         rdels: &[crate::storage::rdel::RangeDel],
+        compress: bool,
     ) -> &'a mut Runs {
         runs.get_or_insert_with(|| {
-            let mut r = Box::new(Runs::new(dir));
+            let mut r = Box::new(Runs::new(dir, compress));
             r.set_rdels(rdels);
             r
         })
@@ -1818,6 +1832,12 @@ impl Txn {
         self.report_subxacts();
         let undo = std::mem::take(&mut self.seq_undo);
         let renewed = std::mem::take(&mut self.new_storage);
+        let dropped = std::mem::take(&mut self.seq_drops);
+        if committed {
+            for oid in dropped {
+                let _ = self.db.reset_seq(oid, None);
+            }
+        }
         if !committed {
             for (oid, st) in undo.into_iter().rev() {
                 self.db.restore_seq(oid, st);
@@ -2119,7 +2139,7 @@ impl Txn {
                 self.journal.push((Vec::new(), None));
                 self.derived.clear();
                 let dir = self.db.store.spill_dir().join(self.id.to_string());
-                let runs = Self::runs_in(&mut self.runs, dir, &self.rdels);
+                let runs = Self::runs_in(&mut self.runs, dir, &self.rdels, self.db.store.compress());
                 let mut items = order.iter().map(|&(_, i)| {
                     let e = s.ents[i as usize];
                     let k = (e.0 + e.1) as usize;
@@ -2240,7 +2260,7 @@ impl Txn {
         sort_by_key_after(&mut entries, start.len(), |e| e.0.as_slice());
         let (cid, ts) = (Some(self.write_cid), self.position() as u64);
         let dir = self.db.store.spill_dir().join(self.id.to_string());
-        let runs = Self::runs_in(&mut self.runs, dir, &self.rdels);
+        let runs = Self::runs_in(&mut self.runs, dir, &self.rdels, self.db.store.compress());
         // (Keys of a new index, none written before: linked at commit as they are.)
         runs.write(&mut entries.into_iter().map(|(k, v)| {
             let v = Some(Bytes::from(v));
@@ -2273,7 +2293,7 @@ impl Txn {
     pub fn put_index_runs(&mut self, table: &[u8], runs: Vec<(Vec<u8>, Vec<(u32, u32, u32)>)>) -> Result<()> {
         let (cid, ts) = (self.write_cid, self.position() as u64);
         let dir = self.db.store.spill_dir().join(self.id.to_string());
-        let r = Self::runs_in(&mut self.runs, dir, &self.rdels);
+        let r = Self::runs_in(&mut self.runs, dir, &self.rdels, self.db.store.compress());
         for (data, ents) in &runs {
             let mut items = ents.iter().map(|e| {
                 let k = &data[e.0 as usize..(e.0 + e.1) as usize];
@@ -2359,7 +2379,7 @@ impl Txn {
         self.journal.push((Vec::new(), None));
         self.derived.clear();
         let dir = self.db.store.spill_dir().join(self.id.to_string());
-        let runs = Self::runs_in(&mut self.runs, dir, &self.rdels);
+        let runs = Self::runs_in(&mut self.runs, dir, &self.rdels, self.db.store.compress());
         runs.write(&mut keys.into_iter().map(|k| (k, Ent { v: None, cid, ts })), true)?;
         DELETE_RUNS.fetch_add(1, Ordering::Relaxed);
         self.wrote = true;
@@ -3358,6 +3378,7 @@ impl Txn {
             xid: 0,
             committed: Vec::new(),
             seq_undo_len: self.seq_undo.len(),
+            seq_drops_len: self.seq_drops.len(),
             log_seq: self.log.as_ref().map_or(0, |l| l.seq),
         });
     }
@@ -3413,6 +3434,7 @@ impl Txn {
         self.deferred_triggers.truncate(sp.deferred_triggers_len);
         self.notifies.truncate(sp.notifies_len);
         (self.constraint_modes, self.all_deferred) = sp.modes.clone();
+        self.seq_drops.truncate(sp.seq_drops_len);
         let seq_undo_len = sp.seq_undo_len;
         while self.seq_undo.len() > seq_undo_len {
             let (oid, st) = self.seq_undo.pop().unwrap();

@@ -513,9 +513,6 @@ struct ExNode {
     cte_id: Option<usize>,
     /// An Append member's columns as a node above names them (a set operation's sort).
     out_names: Vec<String>,
-    /// A nested loop whose inner side the executor reads once and keeps (no Materialize
-    /// shown, not parameterized): Postgres rescans it for every outer row.
-    inner_cached: bool,
     node_type: &'static str,
     strategy: Option<&'static str>,
     partial_mode: Option<&'static str>,
@@ -4546,6 +4543,22 @@ fn direction_suffix(k: &SortKey) -> Option<String> {
 }
 
 /// The collation an expression over `input`'s columns derives (None: the default).
+/// Whether `s`'s parentheses pair up from left to right (`a) + (b` doesn't).
+fn balanced(s: &str) -> bool {
+    let mut depth = 0i32;
+    for ch in s.chars() {
+        match ch {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            _ => {}
+        }
+        if depth < 0 {
+            return false;
+        }
+    }
+    depth == 0
+}
+
 fn derived_collation(input: &Plan, e: &Expr) -> Option<String> {
     match e {
         Expr::Collate(_, n, _) => Some(n.clone()),
@@ -4672,7 +4685,13 @@ impl Builder<'_, '_> {
         // (A reference to the Sort input's computed entry is parenthesized; a coercion's
         // argument too, get_coercion_expr.)
         Some(if relabel {
-            format!("(({name})::{})", x.ty().typname())
+            // (A column's entry the level above computes is named in parentheses: the
+            // column is the cast's argument.)
+            let bare = match strip_relabel(x) {
+                Expr::Col(..) => name.strip_prefix('(').and_then(|n| n.strip_suffix(')')).filter(|n| balanced(n)).unwrap_or(&name),
+                _ => &name,
+            };
+            format!("(({bare})::{})", self.ctx.catalog().format_type(&x.ty(), None, &self.ctx.search_path))
         } else if matches!(strip_relabel(x), Expr::Col(..)) {
             name
         } else {
@@ -7511,7 +7530,12 @@ impl Builder<'_, '_> {
                         }
                         // (A key under a written COLLATE: the sort's collation, not a value
                         // computed below it.)
-                        if let (Expr::Col(i, _), Plan::Project { exprs: pe, input: pin }) = (&k.expr, &**input)
+                        // (Over a DISTINCT, the key is its projection's entry.)
+                        let keyed = match &**input {
+                            Plan::Distinct { input: di, on: None, .. } => &**di,
+                            p => p,
+                        };
+                        if let (Expr::Col(i, _), Plan::Project { exprs: pe, input: pin }) = (&k.expr, keyed)
                             && let Some(Expr::Collate(inner, coll, loc)) = pe.get(*i)
                             && *loc >= 0
                             && let Some(dirs) = direction_suffix(k)
@@ -8229,6 +8253,19 @@ impl Builder<'_, '_> {
                             .is_some_and(|e| exprs[..i].iter().any(|x| x.same_as(e))),
                         _ => false,
                     };
+                    // (A written COLLATE over a column of another collation: a RelabelType,
+                    // shown as a cast, `(t)::text`.)
+                    let relabel = |i: usize| match &**input {
+                        Plan::Project { exprs, input: pin } => match exprs.get(i) {
+                            Some(Expr::Collate(x, coll, loc)) if *loc >= 0 && matches!(**x, Expr::Col(..)) => {
+                                let own = derived_collation(pin, x)
+                                    .unwrap_or_else(|| if x.ty() == DataType::Name { "C".into() } else { "default".into() });
+                                (own != *coll).then(|| self.ctx.catalog().format_type(&x.ty(), None, &self.ctx.search_path))
+                            }
+                            _ => None,
+                        },
+                        _ => None,
+                    };
                     let keys = c
                         .exported
                         .iter()
@@ -8236,6 +8273,10 @@ impl Builder<'_, '_> {
                         .filter(|(i, _)| !constant(*i) && !dup(*i))
                         .map(|(i, k)| {
                             let s = self.pick(k, Cx::Upper);
+                            if let Some(ty) = relabel(i) {
+                                let bare = s.strip_prefix('(').and_then(|x| x.strip_suffix(')')).filter(|x| balanced(x)).unwrap_or(&s);
+                                return format!("({bare})::{ty}");
+                            }
                             // (An InitPlan's value is a Param: shown bare.)
                             let param = s.starts_with("((InitPlan ") && s.ends_with(".col1)");
                             match s.strip_prefix('(').and_then(|x| x.strip_suffix(')')) {
@@ -13639,7 +13680,7 @@ impl Builder<'_, '_> {
                 return None;
             }
             let n = b.name(x, &c.exported, &[]);
-            let ty = x.ty().typname();
+            let ty = b.ctx.catalog().format_type(&x.ty(), None, &b.ctx.search_path);
             Some(Name {
                 plain: format!("({})::{ty}", n.plain),
                 full: format!("({})::{ty}", n.full),
@@ -16869,11 +16910,6 @@ impl Builder<'_, '_> {
             r.node = mn;
         }
         n.subplans.append(&mut self.pending);
-        n.inner_cached = method == JoinMethod::NestLoop
-            && !lateral
-            && !material
-            && meta.memoize.is_none()
-            && !matches!(kind, JoinKind::Right | JoinKind::Full);
         // The rows' order: a nested loop's or merge join's outer side's (an inner merge
         // join's keys are equal on both sides: either names it).
         if method != JoinMethod::Hash && !matches!(kind, JoinKind::Full) && (kind != JoinKind::Right || swapped) {
@@ -18511,9 +18547,6 @@ struct Render<'r> {
     /// and the leader when it participates).
     procs: u64,
     leader: bool,
-    /// Inside a nested loop's inner side the executor ran once for all the outer rows:
-    /// the scans Postgres makes of it.
-    rescans: u64,
     /// A nested loop's inner Materialize about to be shown: the outer rows, each a rescan
     /// of it (its input read once).
     mat_loops: Option<u64>,
@@ -18526,12 +18559,7 @@ struct Render<'r> {
 impl Render<'_> {
     fn stats(&self, key: Option<usize>) -> Option<NodeStats> {
         let mut s = self.instr?.get(key?)?;
-        s.loops *= self.procs * self.rescans;
-        s.rows *= self.rescans;
-        s.removed *= self.rescans;
-        s.searches *= self.rescans;
-        s.fetches *= self.rescans;
-        s.pages *= self.rescans;
+        s.loops = s.loops.saturating_mul(self.procs);
         (s.loops > 0).then_some(s)
     }
 
@@ -18571,23 +18599,14 @@ impl Render<'_> {
         }
     }
 
-    /// Render a node's children, the inner side of a nested loop the executor read once
-    /// as the outer rows' many scans of it.
     fn children_of(&mut self, n: &ExNode, f: &mut dyn FnMut(&mut Self, &ExNode)) {
-        let saved = self.rescans;
         for (i, c) in n.initplans.iter().chain(&n.children).chain(&n.subplans).enumerate() {
-            let inner = n.inner_cached && i == n.initplans.len() + 1;
-            if inner {
-                let outer_rows = n.children.first().and_then(|o| self.stats(o.key)).map_or(0, |s| s.rows);
-                self.rescans = saved * outer_rows;
-            }
             if n.node_type == "Nested Loop" && i == n.initplans.len() + 1 && c.node_type == "Materialize" {
                 let outer_rows = n.children.first().and_then(|o| self.stats(o.key)).map_or(0, |s| s.rows);
                 self.mat_loops = Some(outer_rows);
             }
             f(self, c);
             self.mat_loops = None;
-            self.rescans = saved;
         }
     }
 
@@ -18610,11 +18629,11 @@ impl Render<'_> {
                 Removed::Scan(k) => self
                     .instr
                     .and_then(|i| i.get(*k))
-                    .map_or(0, |s| s.removed * self.rescans),
+                    .map_or(0, |s| s.removed),
                 Removed::Diff(k) => self
                     .instr
                     .and_then(|i| i.get(*k))
-                    .map_or(0, |s| (s.rows * self.rescans).saturating_sub(st.rows)),
+                    .map_or(0, |s| s.rows.saturating_sub(st.rows)),
             })
             .sum();
         (total as f64 / st.loops as f64).round()
@@ -19381,7 +19400,7 @@ pub(crate) fn subplan_costs(exprs: &[Expr], ctx: &ExecCtx) -> (f64, f64) {
 
 /// An index condition of a system catalog scan: a clause as it is, or a pattern's prefix
 /// bound on a column (`col op 'value'::text`).
-enum SysCond {
+pub(crate) enum SysCond {
     Expr(Expr),
     Bound(usize, &'static str, String),
 }
@@ -19393,7 +19412,7 @@ fn quote_literal(v: &str) -> String {
 /// The catalog index a system catalog scan's quals can use (the most leading key columns
 /// matched; a prefix pattern bounds its column, lossily): its name, the index
 /// conditions, and the quals left to filter.
-fn sys_index_scan(
+pub(crate) fn sys_index_scan(
     table: &str,
     filter: &Expr,
     cols: &[(String, DataType)],
@@ -20433,16 +20452,24 @@ pub fn total_and_gathers(plan: &Arc<Plan>, ctx: &ExecCtx) -> (f64, Vec<(Option<u
         && !crate::sql::paths::parallel::debug_parallel_query(ctx)
     {
         b.par = None;
+        #[cfg(debug_assertions)]
+        let (cat0, (n, reads)) = (ctx.catalog(), crate::sql::literals::observing(|| b.level(plan)));
+        #[cfg(not(debug_assertions))]
         let n = b.level(plan);
         if max_node_cost(&n) * 1.02 < setup {
-            // (Debug builds: the tree with partial paths considered is the same plan.)
+            // (Debug builds: the tree with partial paths considered is the same plan, unless a
+            // concurrent writer changed the sizes or statistics it was costed from.)
             #[cfg(debug_assertions)]
             {
                 let mut full = estimate_builder(plan, ctx, &o);
                 let f = full.level(plan);
                 let mut found = Vec::new();
                 gather_nodes(&f, &mut found);
-                assert!(found.is_empty() && f.total_cost == n.total_cost, "serial bound of {plan:?}");
+                assert!(
+                    (found.is_empty() && f.total_cost == n.total_cost)
+                        || !crate::sql::literals::unchanged_since(ctx, &cat0, &reads),
+                    "serial bound of {plan:?}"
+                );
             }
             return (n.total_cost, Vec::new());
         }
@@ -21144,7 +21171,6 @@ pub fn explain(
         instr,
         w: Writer::new(o.format),
         procs: 1,
-        rescans: 1,
         mat_loops: None,
         leader: crate::sql::paths::parallel::ParCfg::read(ctx).leader,
         jg: super::joins::JoinGucs::read(ctx),

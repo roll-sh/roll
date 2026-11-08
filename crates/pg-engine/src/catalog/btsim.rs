@@ -764,18 +764,19 @@ impl Btree {
             return Self::build(opts, runs.into_iter().flatten().collect());
         }
         let n = runs.iter().map(Vec::len).sum();
-        let mut its: Vec<std::iter::Peekable<std::vec::IntoIter<(Key, Tid)>>> =
-            runs.into_iter().filter(|r| !r.is_empty()).map(|r| r.into_iter().peekable()).collect();
+        let mut its: Vec<std::vec::IntoIter<(Key, Tid)>> = runs.into_iter().map(Vec::into_iter).collect();
+        let mut heads: Vec<Option<(Key, Tid)>> = its.iter_mut().map(Iterator::next).collect();
         let merged = std::iter::from_fn(move || {
             let mut min: Option<usize> = None;
-            for i in 0..its.len() {
-                if let Some(x) = its[i].peek()
-                    && min.is_none_or(|m| its[m].peek().is_some_and(|y| !le(y, x)))
+            for (i, h) in heads.iter().enumerate() {
+                if let Some(x) = h
+                    && min.is_none_or(|m| heads[m].as_ref().is_some_and(|y| !le(y, x)))
                 {
                     min = Some(i);
                 }
             }
-            its[min?].next()
+            let m = min?;
+            std::mem::replace(&mut heads[m], its[m].next())
         });
         Self::build_sorted(opts, n, merged)
     }
@@ -2725,7 +2726,7 @@ mod tests {
         for i in 0..800 {
             b.insert(Key::new(&vec![vec![0]; 32], &[16; 32]), (i / 226, (i % 226 + 1) as u16), &hint);
         }
-        // (Laid out item by item, as a page with an LP_DEAD item or a posting list is: its
+        // (Laid out item by item, as a page with a posting list or keys of other lengths is: its
         // items' places past 64 KiB. A plain page has none.)
         for p in b.pages.iter_mut().flatten() {
             p.items.unplain();

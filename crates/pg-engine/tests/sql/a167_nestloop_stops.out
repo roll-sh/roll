@@ -1,0 +1,115 @@
+> CREATE TABLE a167_lo (id int PRIMARY KEY, k int)
+-- CREATE TABLE
+
+> INSERT INTO a167_lo SELECT i, i % 40 FROM generate_series(1, 1000) i
+-- INSERT 0 1000
+
+> CREATE TABLE a167_li (id int PRIMARY KEY, k int, v int)
+-- CREATE TABLE
+
+> INSERT INTO a167_li SELECT i, i % 50, i % 7 FROM generate_series(1, 5000) i
+-- INSERT 0 5000
+
+> CREATE INDEX a167_li_k ON a167_li (k)
+-- CREATE INDEX
+
+> ANALYZE a167_lo, a167_li
+-- ANALYZE
+
+> SET enable_hashjoin = off
+-- SET
+
+> SET enable_mergejoin = off
+-- SET
+
+> SELECT count(*) FROM a167_lo o WHERE EXISTS (SELECT 1 FROM a167_li i WHERE i.k = o.k AND 1 / (i.id - 1601) > -5) AND o.id < 3
+count:int8
+2
+-- SELECT 1
+
+> SET enable_indexscan = off
+-- SET
+
+> SELECT count(*) FROM a167_lo o WHERE EXISTS (SELECT 1 FROM a167_li i WHERE i.k = o.k AND 1 / (i.id - 1601) > -5) AND o.id < 3
+count:int8
+2
+-- SELECT 1
+
+> SELECT count(*) FROM a167_lo o WHERE NOT EXISTS (SELECT 1 FROM a167_li i WHERE i.k = o.k AND 1 / (i.id - 1601) > -5) AND o.id < 3
+count:int8
+0
+-- SELECT 1
+
+> RESET enable_indexscan
+-- RESET
+
+> EXPLAIN (COSTS OFF)
+> SELECT o.id, count(i.id), sum(i.v / (o.id - 30)) FROM a167_lo o JOIN a167_li i ON i.k = o.k WHERE o.id < 40 GROUP BY o.id ORDER BY o.id LIMIT 5
+QUERY PLAN:text
+Limit
+  ->  GroupAggregate
+        Group Key: o.id
+        ->  Nested Loop
+              ->  Index Scan using a167_lo_pkey on a167_lo o
+                    Index Cond: (id < 40)
+              ->  Memoize
+                    Cache Key: o.k
+                    Cache Mode: logical
+                    ->  Index Scan using a167_li_k on a167_li i
+                          Index Cond: (k = o.k)
+-- EXPLAIN
+
+> SELECT o.id, count(i.id), sum(i.v / (o.id - 30)) FROM a167_lo o JOIN a167_li i ON i.k = o.k WHERE o.id < 40 GROUP BY o.id ORDER BY o.id LIMIT 5
+id:int4 | count:int8 | sum:int8
+1 | 100 | 0
+2 | 100 | 0
+3 | 100 | 0
+4 | 100 | 0
+5 | 100 | 0
+-- SELECT 5
+
+> SELECT o.id, count(i.id), sum(i.v / (o.id - 8)) FROM a167_lo o LEFT JOIN a167_li i ON i.k = o.k + 45 WHERE o.id < 40 GROUP BY o.id ORDER BY o.id LIMIT 6
+id:int4 | count:int8 | sum:int8
+1 | 100 | 0
+2 | 100 | -15
+3 | 100 | -29
+4 | 100 | -42
+5 | 0 | NULL
+6 | 0 | NULL
+-- SELECT 6
+
+> SELECT o.id, count(i.id), sum(i.v / (o.id - 4)) FROM a167_lo o JOIN a167_li i ON i.k = o.k WHERE o.id < 40 GROUP BY o.id ORDER BY o.id LIMIT 5
+ERROR 22012: division by zero
+
+> SET enable_hashagg = off
+-- SET
+
+> EXPLAIN (COSTS OFF)
+> SELECT id, sum(1 / (id - 30)) FROM a167_lo WHERE id < 40 GROUP BY id ORDER BY id LIMIT 3
+QUERY PLAN:text
+Limit
+  ->  GroupAggregate
+        Group Key: id
+        ->  Index Only Scan using a167_lo_pkey on a167_lo
+              Index Cond: (id < 40)
+-- EXPLAIN
+
+> SELECT id, sum(1 / (id - 30)) FROM a167_lo WHERE id < 40 GROUP BY id ORDER BY id LIMIT 3
+id:int4 | sum:int8
+1 | 0
+2 | 0
+3 | 0
+-- SELECT 3
+
+> RESET enable_hashagg
+-- RESET
+
+> RESET enable_hashjoin
+-- RESET
+
+> RESET enable_mergejoin
+-- RESET
+
+> DROP TABLE a167_lo, a167_li
+-- DROP TABLE
+
