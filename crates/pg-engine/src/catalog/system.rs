@@ -1812,6 +1812,34 @@ pub fn row_count(table: SysTable, ctx: &ExecCtx) -> Option<usize> {
     Some(n)
 }
 
+/// pg_depend's rows for planning, estimated from counts the catalog keeps (the relation
+/// maps' `RelRows` and indexes, the other maps' sizes): counting them means deriving every
+/// object's dependencies, binding its stored expressions (213 ms on a 116,000-row catalog,
+/// EF Core's first query after DDL), where PostgreSQL's estimate is its reltuples, itself an
+/// estimate. Postgres's own objects' rows exactly, then per object of a kind what it
+/// usually has: a relation's pg_class row one (its schema, table, column or constraint), a
+/// row type and its array type one each, a default one (its column), a constraint one (a
+/// column) and a foreign key six more (the referenced column and key, its four triggers'),
+/// a view's rule two, a function, trigger, policy, statistics object or type one or two.
+pub fn depend_estimate(cat: &super::Catalog) -> usize {
+    let (t, v, s, i) = (cat.tables.ix(), cat.views.ix(), cat.sequences.ix(), cat.indexes.ix());
+    let class = t.rows.class + v.rows.class + s.rows.class + i.rows.class;
+    let user = class as usize
+        + t.rowtypes.len()
+        + 2 * v.rows.listed as usize
+        + (t.rows.attrdef + v.rows.attrdef) as usize
+        + t.con_owner.len()
+        + 6 * t.ri_checks.len()
+        + 2 * v.rules.len()
+        + cat.functions.len()
+        + cat.triggers.len()
+        + cat.policies.len()
+        + cat.statistics.len()
+        + 2 * (cat.enums.len() + cat.composites.len() + cat.domains.len() + cat.ranges.len());
+    let edits = &cat.depend_edits;
+    (super::static_rows::rows(SysTable::PgDepend).len() + user + edits.added.len()).saturating_sub(edits.removed.len())
+}
+
 /// `rows_shared`'s rows when they are generated already (for this catalog and the
 /// session's roles, path and settings), without generating them.
 pub fn rows_cached(table: SysTable, ctx: &ExecCtx) -> Option<Arc<SysRows>> {

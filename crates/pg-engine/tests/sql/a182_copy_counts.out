@@ -1,0 +1,228 @@
+> CREATE TABLE a182_u (id int NOT NULL, a int CHECK (a >= 0))
+-- CREATE TABLE
+
+> CREATE UNIQUE INDEX a182_u_id ON a182_u (id)
+-- CREATE INDEX
+
+> CREATE TABLE a182_t (id int NOT NULL, a int CHECK (a >= 0))
+-- CREATE TABLE
+
+> CREATE FUNCTION a182_noop() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NULL; END $$
+-- CREATE FUNCTION
+
+> CREATE TRIGGER a182_t_after AFTER INSERT ON a182_t FOR EACH ROW EXECUTE FUNCTION a182_noop()
+-- CREATE TRIGGER
+
+> CREATE TABLE a182_p (id int NOT NULL, a int CHECK (a >= 0)) PARTITION BY RANGE (id)
+-- CREATE TABLE
+
+> CREATE TABLE a182_p1 PARTITION OF a182_p FOR VALUES FROM (0) TO (100)
+-- CREATE TABLE
+
+> CREATE TABLE a182_p2 PARTITION OF a182_p FOR VALUES FROM (100) TO (200)
+-- CREATE TABLE
+
+> CREATE TABLE a182_b (id int NOT NULL, a int CHECK (a >= 0))
+-- CREATE TABLE
+
+> CREATE FUNCTION a182_keep() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$
+-- CREATE FUNCTION
+
+> CREATE TRIGGER a182_b_before BEFORE INSERT ON a182_b FOR EACH ROW EXECUTE FUNCTION a182_keep()
+-- CREATE TRIGGER
+
+> BEGIN
+-- BEGIN
+
+> COPY a182_u FROM STDIN
+>> 1	1
+>> 2	2
+-- COPY 2
+
+> SAVEPOINT s
+-- SAVEPOINT
+
+> COPY a182_u FROM STDIN
+>> 3	3
+>> 4	4
+>> 5	-1
+ERROR 23514: new row for relation "a182_u" violates check constraint "a182_u_a_check"
+DETAIL: Failing row contains (5, -1).
+CONTEXT: COPY a182_u, line 3: "5	-1"
+OBJECTS: schema=public table=a182_u constraint=a182_u_a_check
+
+> ROLLBACK TO s
+-- ROLLBACK
+
+> SELECT n_tup_ins FROM pg_stat_xact_user_tables WHERE relname = 'a182_u'
+n_tup_ins:int8
+2
+-- SELECT 1
+
+> COPY a182_u FROM STDIN
+>> 6	6
+>> \N	7
+ERROR 23502: null value in column "id" of relation "a182_u" violates not-null constraint
+DETAIL: Failing row contains (null, 7).
+CONTEXT: COPY a182_u, line 2: "\N	7"
+OBJECTS: schema=public table=a182_u column=id
+
+> ROLLBACK TO s
+-- ROLLBACK
+
+> SELECT n_tup_ins FROM pg_stat_xact_user_tables WHERE relname = 'a182_u'
+n_tup_ins:int8
+2
+-- SELECT 1
+
+> COPY a182_u FROM STDIN
+>> 8	8
+>> x	9
+ERROR 22P02: invalid input syntax for type integer: "x"
+CONTEXT: COPY a182_u, line 2, column id: "x"
+
+> ROLLBACK TO s
+-- ROLLBACK
+
+> SELECT n_tup_ins FROM pg_stat_xact_user_tables WHERE relname = 'a182_u'
+n_tup_ins:int8
+2
+-- SELECT 1
+
+> COPY a182_u FROM STDIN
+>> 10	10
+>> 1	11
+>> 12	12
+ERROR 23505: duplicate key value violates unique constraint "a182_u_id"
+DETAIL: Key (id)=(1) already exists.
+CONTEXT: COPY a182_u, line 2
+OBJECTS: schema=public table=a182_u constraint=a182_u_id
+
+> ROLLBACK TO s
+-- ROLLBACK
+
+> SELECT n_tup_ins FROM pg_stat_xact_user_tables WHERE relname = 'a182_u'
+n_tup_ins:int8
+5
+-- SELECT 1
+
+> COPY a182_t FROM STDIN
+>> 1	1
+>> 2	-2
+ERROR 23514: new row for relation "a182_t" violates check constraint "a182_t_a_check"
+DETAIL: Failing row contains (2, -2).
+CONTEXT: COPY a182_t, line 2: "2	-2"
+OBJECTS: schema=public table=a182_t constraint=a182_t_a_check
+
+> ROLLBACK TO s
+-- ROLLBACK
+
+> SELECT n_tup_ins FROM pg_stat_xact_user_tables WHERE relname = 'a182_t'
+n_tup_ins:int8
+0
+-- SELECT 1
+
+> COPY a182_t FROM STDIN
+>> 1	1
+>> 2	2
+-- COPY 2
+
+> SELECT n_tup_ins FROM pg_stat_xact_user_tables WHERE relname = 'a182_t'
+n_tup_ins:int8
+2
+-- SELECT 1
+
+> SAVEPOINT s2
+-- SAVEPOINT
+
+> COPY a182_p FROM STDIN
+>> 1	1
+>> 150	2
+>> 300	3
+ERROR 23514: no partition of relation "a182_p" found for row
+DETAIL: Partition key of the failing row contains (id) = (300).
+CONTEXT: COPY a182_p, line 3: "300	3"
+OBJECTS: schema=public table=a182_p
+
+> ROLLBACK TO s2
+-- ROLLBACK
+
+> SELECT relname, n_tup_ins FROM pg_stat_xact_user_tables WHERE relname LIKE 'a182_p%' ORDER BY 1
+relname:name | n_tup_ins:int8
+a182_p | 0
+a182_p1 | 0
+a182_p2 | 0
+-- SELECT 3
+
+> COPY a182_p FROM STDIN
+>> 2	1
+>> 151	2
+>> 3	-3
+ERROR 23514: new row for relation "a182_p1" violates check constraint "a182_p_a_check"
+DETAIL: Failing row contains (3, -3).
+CONTEXT: COPY a182_p, line 3: "3	-3"
+OBJECTS: schema=public table=a182_p1 constraint=a182_p_a_check
+
+> ROLLBACK TO s2
+-- ROLLBACK
+
+> SELECT relname, n_tup_ins FROM pg_stat_xact_user_tables WHERE relname LIKE 'a182_p%' ORDER BY 1
+relname:name | n_tup_ins:int8
+a182_p | 0
+a182_p1 | 0
+a182_p2 | 0
+-- SELECT 3
+
+> COPY a182_p FROM STDIN
+>> 4	1
+>> 152	2
+-- COPY 2
+
+> SELECT relname, n_tup_ins FROM pg_stat_xact_user_tables WHERE relname LIKE 'a182_p%' ORDER BY 1
+relname:name | n_tup_ins:int8
+a182_p | 0
+a182_p1 | 1
+a182_p2 | 1
+-- SELECT 3
+
+> SAVEPOINT s3
+-- SAVEPOINT
+
+> COPY a182_b FROM STDIN
+>> 1	1
+>> 2	2
+>> 3	-3
+ERROR 23514: new row for relation "a182_b" violates check constraint "a182_b_a_check"
+DETAIL: Failing row contains (3, -3).
+CONTEXT: COPY a182_b, line 3: "3	-3"
+OBJECTS: schema=public table=a182_b constraint=a182_b_a_check
+
+> ROLLBACK TO s3
+-- ROLLBACK
+
+> SELECT n_tup_ins FROM pg_stat_xact_user_tables WHERE relname = 'a182_b'
+n_tup_ins:int8
+2
+-- SELECT 1
+
+> COMMIT
+-- COMMIT
+
+> SELECT * FROM a182_u ORDER BY id
+id:int4 | a:int4
+1 | 1
+2 | 2
+-- SELECT 2
+
+> SELECT * FROM a182_p ORDER BY id
+id:int4 | a:int4
+4 | 1
+152 | 2
+-- SELECT 2
+
+> DROP TABLE a182_u, a182_t, a182_p, a182_b
+-- DROP TABLE
+
+> DROP FUNCTION a182_noop(), a182_keep()
+-- DROP FUNCTION
+
