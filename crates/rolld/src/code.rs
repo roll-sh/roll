@@ -2,8 +2,10 @@
 //!
 //! Alone, roll code keeps both of its databases in SQLite under `--home`. With
 //! `--code-database postgres://…` they live in Postgres (schemas `code_store` and
-//! `code_control`), and with `--code-cluster-secret` too the node joins a cluster of identical
-//! nodes that share that database and S3 (docs/code/cluster.md).
+//! `code_control`), and with a cluster secret (`ROLL_CLUSTER_SECRET`, or
+//! `--code-cluster-secret`) too the node joins a cluster of identical nodes that share that
+//! database and S3 (docs/code/cluster.md). Leases and membership are in that database, or in
+//! DynamoDB with `ROLL_CLUSTER_BACKEND=dynamodb` (crate::cluster); code's data stays in Postgres.
 
 use clap::Args;
 use std::net::SocketAddr;
@@ -23,20 +25,20 @@ pub struct CodeArgs {
     /// (e.g. the RDS bundle). TLS itself follows the URL's `sslmode`.
     #[arg(long = "code-db-ca", env = "ROLL_CODE_DB_CA")]
     pub code_db_ca: Option<PathBuf>,
-    /// Run roll code as one node of a cluster: the secret every node signs internal requests
-    /// with (at least 16 bytes). Needs --code-database and --s3-bucket.
+    /// Alias of `--cluster-secret` (`ROLL_CLUSTER_SECRET`). Needs --code-database and --s3-bucket.
     #[arg(long = "code-cluster-secret", env = "ROLL_CODE_CLUSTER_SECRET", hide_env_values = true)]
     pub code_cluster_secret: Option<String>,
-    /// The URL other nodes reach this one's API at (default: http://<public host>:<API port>).
+    /// Alias of `--advertise-url` (default: http://<public host>:<API port>).
     #[arg(long = "code-advertise-url", env = "ROLL_CODE_ADVERTISE_URL")]
     pub code_advertise_url: Option<String>,
-    /// This node's id in the cluster (default: random per process).
+    /// Alias of `--node-id` (default: random per process).
     #[arg(long = "code-node-id", env = "ROLL_CODE_NODE_ID")]
     pub code_node_id: Option<String>,
-    /// How long a node shutting down (SIGTERM) waits for its repos to move to other nodes, in
-    /// seconds.
-    #[arg(long = "code-drain-timeout", env = "ROLL_CODE_DRAIN_TIMEOUT", default_value_t = 30)]
-    pub code_drain_timeout_s: u64,
+    /// Alias of `--drain-timeout` (default 30 s).
+    #[arg(long = "code-drain-timeout", env = "ROLL_CODE_DRAIN_TIMEOUT")]
+    pub code_drain_timeout_s: Option<u64>,
+    #[command(flatten)]
+    pub cluster: crate::cluster::ClusterArgs,
     /// Memory every git request together may hold, in MiB.
     #[arg(long = "code-git-memory-budget", env = "ROLL_CODE_GIT_MEMORY_BUDGET", default_value_t = 1024)]
     pub code_git_memory_budget_mb: u64,
@@ -60,23 +62,32 @@ impl CodeArgs {
             d.ca = self.code_db_ca.clone();
             config.database = Some(d);
         }
-        let Some(secret) = self.code_cluster_secret.as_deref().filter(|s| !s.is_empty()) else {
+        let r = self.cluster.resolve(self.code_cluster_secret.as_deref(), self.code_node_id.as_deref(), self.code_advertise_url.as_deref())?;
+        let Some(secret) = r.secret else {
             anyhow::ensure!(
                 self.code_advertise_url.is_none() && self.code_node_id.is_none(),
-                "--code-advertise-url and --code-node-id need --code-cluster-secret"
+                "--code-advertise-url and --code-node-id need a cluster secret"
             );
             return Ok(());
         };
-        anyhow::ensure!(config.database.is_some(), "a roll code cluster (--code-cluster-secret) needs --code-database");
-        let url = self.code_advertise_url.clone().unwrap_or_else(|| format!("http://{public_host}:{}", api.port()));
-        let id = self.code_node_id.clone().unwrap_or_else(roll_cluster::ClusterConfig::random_node_id);
-        let cluster = roll_cluster::ClusterConfig::new(id, url.trim_end_matches('/'), secret.as_bytes().to_vec());
+        anyhow::ensure!(config.database.is_some(), "a roll code cluster needs --code-database (ROLL_CODE_DATABASE): code's data is in Postgres");
+        let url = r.advertise_url.unwrap_or_else(|| self.default_url(public_host, api));
+        let id = r.node_id.unwrap_or_else(roll_cluster::ClusterConfig::random_node_id);
+        let mut cluster = roll_cluster::ClusterConfig::new(id, url.trim_end_matches('/'), secret.into_bytes());
+        cluster.zone = self.cluster.zone();
         cluster.validate()?;
         config.cluster = Some(cluster);
+        config.cluster_backend = self.cluster.code_backend(r.backend);
         Ok(())
     }
 
+    /// Where other nodes reach this one unless told: the API on the public host.
+    pub fn default_url(&self, public_host: &str, api: SocketAddr) -> String {
+        format!("http://{public_host}:{}", api.port())
+    }
+
+    /// `ROLL_DRAIN_TIMEOUT` (or its alias `ROLL_CODE_DRAIN_TIMEOUT`), 30 s by default.
     pub fn drain_timeout(&self) -> Duration {
-        Duration::from_secs(self.code_drain_timeout_s)
+        Duration::from_secs(self.cluster.drain_timeout_s.or(self.code_drain_timeout_s).unwrap_or(30))
     }
 }

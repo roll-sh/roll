@@ -125,8 +125,10 @@ The product should feel alive: dots react to the cursor and the marks "think". E
     after `write` returns. Never ignore a failed statement inside a write (it ends a Postgres
     transaction): use `ON CONFLICT`, or check first.
   - `crates/code-preview` runs `roll.toml` checks and previews in containers.
-  - `crates/code-cluster` is membership, repo leases and forwarding; `code-control/src/cluster.rs`
-    wires it in (docs/code/cluster.md). In a cluster every request naming a repo, change, thread
+  - `crates/roll-cluster` is membership, leases and forwarding for every product, on a backend
+    (Memory, Postgres on the database's clock, or DynamoDB with no clocks compared);
+    `code-control/src/cluster.rs` wires roll code in (docs/code/cluster.md). New products take
+    leases from rolld's handle (`crates/rolld/src/cluster.rs`). In a cluster every request naming a repo, change, thread
     or work item runs on the repo's owner: put new such routes under a routed prefix
     (`cluster::classify`). A repo's background work runs only on its owner: check
     `Code::owns_repo` before side effects, run long work under `Code::while_owner`, and resume it
@@ -227,7 +229,7 @@ The product should feel alive: dots react to the cursor and the marks "think". E
     subsystem they cover:
     - `--docker`: the stores on Postgres (after touching SQL, `code-sql` or the cluster), checks
       and previews in real Docker (after touching `code-preview`), and the cluster as real
-      `rolld` containers (after touching `code-cluster` or `cluster.rs`)
+      `rolld` containers (after touching `roll-cluster` or `cluster.rs`)
     - `--stress`: 40,000 merges in release and 2,000 changes through the merge queue (after
       touching the lander, `Store::advance` or the queue)
   - Local gates share one cargo package set (`scripts/lib/gate.sh`) so nothing builds twice. A

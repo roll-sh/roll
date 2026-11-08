@@ -47,8 +47,8 @@ zones by AWS:
 
 | item | pk / sk | what |
 | --- | --- | --- |
-| node | `node` / `<node id>` | advertise URL, version, zone, draining flag, heartbeat counter |
-| lease | `lease` / `<key>` | holder node, epoch, record version |
+| node | `node` / `<node id>` | advertise URL, version, zone, draining flag, incarnation, heartbeat token (`hb`), takeover generation (`gen`), release counter |
+| lease | `lease` / `<key>` | holder node and its incarnation, epoch, free flag, record version |
 | singleton | `lease` / `singleton:<name>` | one-per-fleet jobs (ACME, GC per bucket, the land forwarder) |
 
 - **No clocks are compared.** DynamoDB has no server clock, so liveness works like the AWS
@@ -56,14 +56,16 @@ zones by AWS:
   heartbeat; a contender that watches a record and sees the same version for a full lease
   duration, on its own monotonic clock, may take it with a conditional write on that version and
   a bumped epoch. Holders stop acting at lease minus a safety margin since their last successful
-  renewal, on their own monotonic clock (self-fencing), exactly as in code-cluster.
+  renewal, on their own monotonic clock (self-fencing), as on Postgres. The takeover is a
+  transaction that also checks the holder's node item still carries the watched token and bumps
+  its `gen`, so a renewal that lands after it fails and the holder re-reads its leases.
 - **Renewals are per node, not per lease.** A node heartbeats its `node` item; a lease is valid
   while its holder's node item is live and the epoch is unchanged, so the table's write rate is
   nodes × heartbeat rate, not leases × rate. Placement is rendezvous hashing over live nodes.
 - Cost at test scale: a few million writes a month, about $1–3.
 - Single-node and local development keep using the in-process (or Postgres) backend:
-  `roll-cluster` has a backend trait with `Memory`, `Postgres` (today's code-cluster) and
-  `DynamoDb` implementations.
+  `roll-cluster` has a backend trait with `Memory`, `Postgres` (roll code's original tables, on
+  the database's clock) and `DynamoDb` implementations (docs/code/cluster.md, "Backends").
 
 ## Shared state: the system database
 
@@ -82,7 +84,7 @@ written once in SQLite's dialect), as roll code's did.
 
 | product | key | notes |
 | --- | --- | --- |
-| code | `code:repo:<id>`, `agents:<owner id>` | already built (code-cluster) |
+| code | `<repo id>`, `agents:<owner id>` | built (roll-cluster); repo leases keep their bare ids so a running Postgres cluster upgrades in place |
 | postgres | `pg:endpoint:<id>`, `system:pg` | the engine runs in-process; compute moves with the lease |
 | redis | `redis:db:<id>` | the owner serves RESP and REST; others splice connections to it |
 | nosql | `nosql:db:<id>` | replaces the manifest's owner field; fences opens |
@@ -107,7 +109,7 @@ written once in SQLite's dialect), as roll code's did.
   API, by one node at a time (singleton `acme`), stored sealed in S3 (`system/certs/`) and
   reloaded by every node without a restart. Renewal starts 30 days before expiry.
 - **Forwarding** to the owner is a signed internal hop on the private network: HTTP requests are
-  forwarded as in code-cluster; TCP connections are spliced after the first message that names
+  forwarded as in roll-cluster (`Cluster::dispatch`); TCP connections are spliced after the first message that names
   the tenant (startup packet, AUTH/HELLO, SASL, CQL STARTUP/AUTH, AMQP vhost).
 
 ### Hostnames
@@ -269,14 +271,14 @@ assume two fields:
 | Cloudflare zones and records | `deploy/cloud/cloudflare/` |
 | fleet image | `deploy/cloud/Dockerfile` |
 | deploy pipeline | `.github/workflows/deploy.yml` |
-| cluster layer | `crates/roll-cluster` (from `crates/code-cluster`) |
+| cluster layer | `crates/roll-cluster`; rolld's settings and handle in `crates/rolld/src/cluster.rs` |
 | edge (TLS, SNI, ACME, PROXY protocol, routing) | `crates/roll-edge` |
 
 ## Status
 
 | part | state |
 | --- | --- |
-| code + agents on the cluster layer | built (Postgres leases); DynamoDB backend in progress |
+| code + agents on the cluster layer | built: `crates/roll-cluster` with Memory, Postgres and DynamoDB backends; `ROLL_CLUSTER_*`, `ROLL_NODE_ID`, `ROLL_ZONE`, `ROLL_ADVERTISE_URL`, `ROLL_DRAIN_TIMEOUT` in rolld |
 | AWS stack, image, pipeline, Cloudflare | built (`deploy/cloud/README.md`); not yet run against AWS |
 | edge | in progress |
 | control-plane auth lockdown | in progress |
@@ -294,6 +296,9 @@ assume two fields:
 - **Structured logs.** The stack's error alarms read JSON logs with `level` and a numeric `status`
   (`ROLL_LOG_FORMAT=json`); rolld doesn't emit them yet.
 - **Metrics** for request latency and failed handoffs, so the canary's bake can alarm on them.
+- **Code's data on the system database.** With `ROLL_CLUSTER_BACKEND=dynamodb` only leases and
+  membership leave Postgres: roll code still needs `ROLL_CODE_DATABASE` for its data, which the
+  stack doesn't set yet. It moves to `ROLL_SYSTEM_DATABASE` with the system database.
 - **Buckets on roll.site.** The CDN Worker serves path-style only, so `<bucket>.roll.site` needs
   virtual-host support, and bucket names starting `chg-` must be reserved (they'd collide with
   previews).

@@ -441,7 +441,7 @@ impl DynamoDb {
 
     /// Taking a lease: holder, incarnation and epoch, on the `rvn` that was read (or on there
     /// being no item).
-    fn take(&self, k: &str, rvn: Option<&str>, inc: &str, epoch: i64) -> (String, String, Item) {
+    fn take(&self, rvn: Option<&str>, inc: &str, epoch: i64) -> (String, String, Item) {
         let mut vals = values(vec![(":h", s(self.id())), (":i", s(inc)), (":e", n(epoch)), (":f", AttributeValue::Bool(false)), (":r", s(token()))]);
         let cond = match rvn {
             Some(r) => {
@@ -450,7 +450,6 @@ impl DynamoDb {
             }
             None => "attribute_not_exists(pk)",
         };
-        let _ = k;
         ("SET holder = :h, inc = :i, epoch = :e, #f = :f, rvn = :r".into(), cond.into(), vals)
     }
 
@@ -494,7 +493,7 @@ impl DynamoDb {
                 }
             }
         };
-        let (set, cond, vals) = self.take(k, rvn.as_deref(), &inc, epoch);
+        let (set, cond, vals) = self.take(rvn.as_deref(), &inc, epoch);
         let r = match silent {
             None => self.update("lease", k, &set, &cond, vals, &[("#f", "free")]),
             Some((holder, hinc, hb)) => {
