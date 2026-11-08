@@ -221,6 +221,11 @@ async fn watch_drain(api: Weak<HttpApi>) {
 /// The `/v1` routes with state applied (CORS included).
 pub fn router(api: Arc<HttpApi>) -> Router {
     let body_limit = (api.broker.config.max_message_size as usize).saturating_mul(2).max(32 << 20);
+    // Open to every origin on purpose, unlike the control plane (roll-auth's dashboard allow-list):
+    // this is a data plane for tenants' own browser apps, on their own origins, holding a scoped
+    // token (docs/queues/http-api.md). Credentials are only ever explicit (an Authorization
+    // header, or a token in the query for EventSource and WebSocket), never cookies, and
+    // credentialed CORS stays off, so another origin gains nothing a caller didn't hand it.
     let cors = CorsLayer::new().allow_origin(Any).allow_methods(Any).allow_headers(AllowHeaders::mirror_request()).expose_headers(Any).max_age(Duration::from_secs(3600));
     let vq = "/v1/vhosts/{vhost}/queues/{queue}";
     Router::new()

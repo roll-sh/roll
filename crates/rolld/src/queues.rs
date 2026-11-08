@@ -58,6 +58,10 @@ pub struct QueuesArgs {
     pub user: String,
     #[arg(long = "queues-password", env = "ROLL_QUEUES_PASSWORD", default_value = "guest")]
     pub password: String,
+    /// Allow the default guest/guest login on listeners off loopback (RabbitMQ's
+    /// `loopback_users = none`, as its Docker image sets): client test matrices in containers only.
+    #[arg(long = "queues-remote-guest", env = "ROLL_QUEUES_REMOTE_GUEST", value_parser = clap::builder::BoolishValueParser::new(), default_value_t = false, num_args = 0..=1, default_missing_value = "true")]
+    pub remote_guest: bool,
     /// Default queue type for new vhosts (classic, quorum or stream).
     #[arg(long = "queues-default-type", env = "ROLL_QUEUES_DEFAULT_QUEUE_TYPE", default_value = "classic")]
     pub default_queue_type: String,
@@ -135,8 +139,11 @@ impl Queues {
     pub async fn start(home: &Path, args: QueuesArgs, public_host: &str, nodes: Arc<roll_cluster::Cluster>, system_database: Option<&str>, objects: &StorageConfig) -> anyhow::Result<Self> {
         let dir = home.join("queues");
         let clustered = nodes.backend_name() != "memory";
-        if args.user == "guest" && args.password == "guest" && !args.amqp.ip().is_loopback() {
-            tracing::warn!("queues listen on {} with the default guest/guest login; set ROLL_QUEUES_USER and ROLL_QUEUES_PASSWORD", args.amqp.ip());
+        // RabbitMQ's rule: guest/guest only from this machine (behind the edge, nothing is).
+        let listeners = [args.amqp, args.management, args.stomp, args.web_stomp, args.mqtt, args.web_mqtt, args.stream, args.http];
+        let open = listeners.iter().find(|a| !a.ip().is_loopback()).map(|a| a.to_string()).or_else(|| crate::auth::edge().then(|| "the edge".to_string()));
+        if args.user == "guest" && args.password == "guest" && !args.remote_guest && let Some(open) = open {
+            anyhow::bail!("queues listen on {open} with the default guest/guest login: set ROLL_QUEUES_USER and ROLL_QUEUES_PASSWORD");
         }
         let logs = open_storage(&args, &dir, objects, clustered).await?;
         let meta: Arc<dyn MetaStore> = match system_database {

@@ -31,9 +31,44 @@ where
     nodes.into_iter().map(|n| (weight(key, n), n)).max().map(|(_, n)| n)
 }
 
+/// The node `key` belongs on among `nodes`, whose zones `zone` tells: [`rendezvous`], except
+/// that a key `<anchor>#<name>` (a replica of `<anchor>`, say) goes where a standby of `<anchor>`
+/// goes ([`standby`]), so it never shares a node with `<anchor>` while another node is live.
+pub fn place<'a>(key: &str, nodes: &'a [String], zone: impl Fn(&str) -> Option<String>) -> Option<&'a str> {
+    match key.split_once('#') {
+        Some((anchor, _)) => standby(anchor, key, nodes, zone).or_else(|| rendezvous(key, nodes.iter().map(String::as_str))),
+        None => rendezvous(key, nodes.iter().map(String::as_str)),
+    }
+}
+
+/// Where `key`, a standby of `anchor` (itself, for a standby proper), goes: not on `anchor`'s
+/// node, in another zone than it when one is live, the rest by rendezvous weight of `key` (so the
+/// replicas of one key spread out). `None` when `anchor`'s node is the only one.
+pub fn standby<'a>(anchor: &str, key: &str, nodes: &'a [String], zone: impl Fn(&str) -> Option<String>) -> Option<&'a str> {
+    let first = rendezvous(anchor, nodes.iter().map(String::as_str))?;
+    let home = zone(first);
+    let mut rest: Vec<&'a String> = nodes.iter().filter(|id| id.as_str() != first).collect();
+    rest.sort_by_key(|id| std::cmp::Reverse((weight(key, id), id.as_str())));
+    rest.iter().find(|id| home.is_some() && zone(id) != home).or(rest.first()).map(|id| id.as_str())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_replica_key_never_shares_its_anchors_node() {
+        let nodes: Vec<String> = ["n1", "n2", "n3"].map(String::from).to_vec();
+        let zone = |id: &str| Some(if id == "n3" { "b" } else { "a" }.to_string());
+        for i in 0..50 {
+            let anchor = format!("db{i}");
+            let primary = place(&anchor, &nodes, zone).unwrap();
+            let replica = place(&format!("{anchor}#r"), &nodes, zone).unwrap();
+            assert_ne!(primary, replica);
+            assert_ne!(zone(primary), zone(replica), "another zone while one is live");
+        }
+        assert_eq!(place("db#r", &nodes[..1], zone), Some("n1"), "alone, it shares");
+    }
 
     #[test]
     fn weights_are_stable() {

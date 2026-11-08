@@ -145,13 +145,15 @@ pub struct Products<'a> {
     /// The API router (every product's HTTP API, roll code, previews).
     pub api: axum::Router,
     pub pg: Option<Arc<pg_proxy::Proxy<pg_control::control::ProxyRouter>>>,
-    pub redis: Option<Arc<dyn redis_server::Directory>>,
+    pub redis: Option<&'a crate::redis::Redis>,
     pub streams: Option<Arc<stream_broker::Broker>>,
     pub tasks: Option<Arc<tasks::Tasks>>,
     /// The S3 API (requests run on the metadata's owner).
     pub storage: Option<axum::Router>,
     pub nosql: Option<&'a crate::nosql::Nosql>,
     pub queues: Option<&'a crate::queues::Queues>,
+    /// The operator-token gate: the Kafka HTTP and tasks hosts carry control-plane routes too.
+    pub auth: &'a crate::auth::Auth,
 }
 
 /// The edge, its listeners bound.
@@ -242,14 +244,14 @@ impl Edge {
             let tls = roll_edge::tls::server_config(store.clone(), &[roll_edge::pg::ALPN]);
             served.push(io(roll_edge::pg::serve(l, tls, opts, hosts.clone(), pg.clone())));
         }
-        // Redis: the server name picks the database.
-        if let Some(dir) = &p.redis {
+        // Redis: the server name picks the database (in a cluster, spliced to its owner right
+        // after the handshake).
+        if let Some(r) = p.redis {
             let l = bind(e.redis_listen).await?;
-            let dir = dir.clone();
+            let front = r.front.clone();
             served.push(io(listener::serve_tls(l, plain.clone(), opts, move |tls, a| {
-                let dir = dir.clone();
                 let fd = { use std::os::fd::AsRawFd; tls.get_ref().0.as_raw_fd() as i64 };
-                redis_server::conn::serve_with(tls, a.peer, a.local, dir, a.sni, fd)
+                front.clone().serve(tls, a.peer, a.local, a.sni, fd)
             })));
         }
         // Kafka: one virtual broker per hostname: clients are told the name they connected with.
@@ -302,6 +304,14 @@ impl Edge {
                         })
                     }),
                 );
+            }
+            // A Redis connection another node read the TLS handshake (or the first AUTH) of.
+            if let Some(r) = p.redis {
+                handlers.register(redis_control::cluster::PRODUCT, r.front.handler());
+            }
+            // A CQL connection whose database this node serves.
+            if let Some(n) = p.nosql {
+                handlers.register("cql", n.splice_handler());
             }
             internal = internal.merge(roll_edge::splice::router(roll_edge::splice::Signer::new(&secret)?, handlers));
         }
@@ -454,11 +464,11 @@ impl HttpRoutes {
         Ok(Self {
             api: p.api.clone(),
             dashboard: e.dashboard_upstream.as_deref().filter(|u| !u.is_empty()).map(Upstream::new).transpose()?,
-            redis: p.redis.clone().map(|d| logged(redis_server::http::router(d))),
-            kafka: p.streams.clone().map(|b| logged(stream_broker::http::router(b))),
-            tasks: p.tasks.clone().map(|t| logged(tasks::api::router(t))),
+            redis: p.redis.map(|r| logged(r.rest_router())),
+            kafka: p.streams.clone().map(|b| logged(p.auth.gate("kafka", stream_broker::http::router(b)))),
+            tasks: p.tasks.clone().map(|t| logged(p.auth.gate("tasks", tasks::api::router(t)))),
             s3: p.storage.clone().map(logged),
-            alternator: p.nosql.map(|n| logged(nosql_server::alternator::router(n.control.node.clone(), n.alternator_options()))),
+            alternator: p.nosql.map(|n| logged(n.alternator_router())),
             mq,
         })
     }

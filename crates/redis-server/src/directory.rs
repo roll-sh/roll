@@ -62,6 +62,9 @@ pub enum AuthError {
     WrongPass,
     /// The database exists but couldn't be started (e.g. restore failure).
     Unavailable(String),
+    /// Another node serves the database now (it moved while the connection came here): the
+    /// connection closes without an answer, and the client's reconnect finds the new owner.
+    Moved,
     /// Any other error, with its full text (`ERR …`).
     Other(String),
 }
@@ -71,6 +74,7 @@ impl std::fmt::Display for AuthError {
         match self {
             AuthError::WrongPass => f.write_str("WRONGPASS invalid username-password pair or user is disabled."),
             AuthError::Unavailable(e) => write!(f, "LOADING {e}"),
+            AuthError::Moved => f.write_str("LOADING the database is moving to another node; reconnect"),
             AuthError::Other(e) => f.write_str(e),
         }
     }
@@ -98,6 +102,7 @@ pub trait Directory: Send + Sync + 'static {
 
 /// Disconnect every client of `db` and let new ones in again.
 pub async fn kick_all(db: &Database) {
+    db.kick_spread_ms.store(0, Ordering::SeqCst);
     db.evicting.store(true, Ordering::SeqCst);
     db.kicked.notify_waiters();
     for _ in 0..500 {

@@ -10,7 +10,9 @@
 //!   error as `{error, code}` with IAM's status. Without a session it acts as the account's root
 //!   user (the operator); with one, as the signed-in user.
 //! - **The guard**: a request with `Authorization: Bearer <token>` acts as the token's IAM user,
-//!   in its account (`x-roll-account` is ignored). Each control-plane operation is checked as
+//!   in its account (`x-roll-account` is ignored); any other `Authorization` is a `401`. rolld's
+//!   gate lets only the operator's token (`ROLL_ADMIN_TOKEN`) or an `Authorization` through, so on
+//!   a daemon with that token every request is either the operator's or a session's. Each control-plane operation is checked as
 //!   the S3 request it stands for ([`checks`]), with the S3 API's evaluator; operations with no
 //!   S3 equivalent (accounts, keys, roles, replication targets, session keys, every account's
 //!   usage) are the operator's only (`403 OperatorOnly`). A bad or expired token is `401`.
@@ -255,7 +257,18 @@ fn needs_body(method: &Method, route: &str) -> bool {
 
 /// Make a request with a bearer token act as its IAM user (see the module's documentation).
 pub(crate) async fn guard(State(c): State<AppState>, req: Request, next: Next) -> Response {
-    let Some(token) = bearer(req.headers()).map(str::to_string) else { return next.run(req).await };
+    // rolld's gate found the operator's token (`roll_auth`): the operator's request, as without a
+    // session.
+    if roll_auth::Operator::on(req.extensions()) {
+        return next.run(req).await;
+    }
+    let Some(token) = bearer(req.headers()).map(str::to_string) else {
+        // Any other `Authorization` is nobody's session (and never the operator's).
+        if req.headers().contains_key(axum::http::header::AUTHORIZATION) {
+            return err(401, "InvalidToken", "The session isn't valid: sign in again.");
+        }
+        return next.run(req).await;
+    };
     let Some(s) = c.server.get().cloned() else { return unavailable() };
     let signed = match s3_server::console::session(&s, &token) {
         Ok(x) => Arc::new(x),

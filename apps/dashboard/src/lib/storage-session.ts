@@ -2,7 +2,8 @@
  * Who the storage dashboard acts as. Two modes:
  *
  * - **Operator** (no sign-in): rolld's control plane, acting in the default account, or in the
- *   account picked here (`x-roll-account`, kept in localStorage).
+ *   account picked here (`x-roll-account`, kept in localStorage), with the operator token when
+ *   rolld wants one (`code-token.ts`).
  * - **Console session**: an IAM user signed in with their password (`/v1/storage/console/signin`).
  *   Every `/v1/storage/...` request then carries `Authorization: Bearer <token>` and acts as that
  *   user with their IAM permissions; operator-only routes answer 403 `OperatorOnly`, and a 401 means
@@ -11,6 +12,7 @@
  * `storageCall` is `roll-api`'s `call` with those headers; other products keep using `call`.
  */
 
+import { operatorHeaders, requestSignIn } from "./code-token";
 import { ROLL_API } from "./roll-api";
 
 // --- Errors ------------------------------------------------------------------------------------
@@ -203,17 +205,21 @@ export function assertSessionLive(now = Date.now()) {
   }
 }
 
-/** The headers every storage request carries: the session's bearer token, else the selected account. */
+/**
+ * The headers every storage request carries: the session's bearer token, else the operator token
+ * (when one is saved) and the selected account.
+ */
 export function storageHeaders(): Record<string, string> {
   const s = getSession();
   if (s) return { authorization: `Bearer ${s.token}` };
   const a = getAccount();
-  return a ? { "x-roll-account": a } : {};
+  return { ...operatorHeaders(), ...(a ? { "x-roll-account": a } : {}) };
 }
 
-/** A storage API answer: 401 ends a session that was sent. */
+/** A storage API answer: 401 ends a session that was sent; without one, rolld wants the operator token. */
 function onStatus(status: number, sentSession: boolean) {
   if (status === 401 && sentSession) clearSession(true);
+  else if (status === 401) requestSignIn();
 }
 
 // --- Requests ----------------------------------------------------------------------------------
@@ -225,7 +231,7 @@ function onStatus(status: number, sentSession: boolean) {
 export async function storageCall<T>(method: string, path: string, body?: unknown, opts: { anonymous?: boolean } = {}): Promise<T> {
   if (!opts.anonymous) assertSessionLive();
   const auth = opts.anonymous ? {} : storageHeaders();
-  const sentSession = "authorization" in auth;
+  const sentSession = Boolean(getSession()) && "authorization" in auth;
   const headers: Record<string, string> = { ...auth };
   if (body !== undefined) headers["content-type"] = "application/json";
   const res = await fetch(`${ROLL_API}${path}`, {
@@ -258,19 +264,20 @@ export function accountQuery(): Record<string, string> {
 }
 
 /**
- * Links can't send `Authorization`: while signed in, fetch the file with the session and save it.
- * Returns a click handler for an `<a href={downloadUrl}>`; without a session the link works as is.
+ * Links can't send `Authorization`: with a session or the operator token, fetch the file with it
+ * and save it. Returns a click handler for an `<a href={downloadUrl}>`; without either the link
+ * works as is.
  */
 export function sessionDownload(url: string, filename: string, onError?: (message: string) => void) {
   return (e: { preventDefault(): void }) => {
-    if (!getSession()) return;
+    if (!getSession() && !("authorization" in operatorHeaders())) return;
     e.preventDefault();
     (async () => {
       assertSessionLive();
       const auth = storageHeaders();
       const res = await fetch(url, { headers: auth, cache: "no-store" });
       if (!res.ok) {
-        onStatus(res.status, "authorization" in auth);
+        onStatus(res.status, Boolean(getSession()));
         let msg = `${res.status} ${res.statusText}`.trim();
         try {
           msg = ((await res.json()) as { error?: string }).error ?? msg;

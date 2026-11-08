@@ -34,6 +34,10 @@ struct Cli {
     /// API key (`username:secret`) for streams that require one.
     #[arg(long, env = "ROLL_API_KEY", global = true, hide_env_values = true)]
     api_key: Option<String>,
+    /// The operator token of a daemon that requires one (`ROLL_ADMIN_TOKEN`): every API takes it,
+    /// and it's the default for `roll code` and `roll tasks`.
+    #[arg(long, env = "ROLL_ADMIN_TOKEN", global = true, hide_env_values = true)]
+    admin_token: Option<String>,
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -349,7 +353,8 @@ async fn main() -> anyhow::Result<()> {
     };
     let token_flag = matches.value_source("token") == Some(ValueSource::CommandLine);
     let cli = Cli::from_arg_matches(&matches)?;
-    let api = Api { base: cli.api.trim_end_matches('/').to_string(), http: reqwest::Client::new(), key: cli.api_key, headers: Vec::new() };
+    let admin = cli.admin_token.filter(|t| !t.trim().is_empty());
+    let api = Api { base: cli.api.trim_end_matches('/').to_string(), http: reqwest::Client::new(), key: admin.clone().or(cli.api_key), headers: Vec::new() };
     let cmd = match cli.cmd {
         Cmd::Db(cmd) => cmd,
         Cmd::Agent(cmd) => return agent::run(&api.base, cli.json, cmd).await,
@@ -357,7 +362,7 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Code(cmd) => {
             // `--token` on the command line wins; otherwise ROLL_CODE_TOKEN (not the tasks token).
             let token = if token_flag { cli.token } else { std::env::var("ROLL_CODE_TOKEN").ok() };
-            let code_api = Api { base: api.base.clone(), http: api.http.clone(), key: token.filter(|t| !t.is_empty()), headers: api.headers.clone() };
+            let code_api = Api { base: api.base.clone(), http: api.http.clone(), key: token.filter(|t| !t.is_empty()).or(admin), headers: api.headers.clone() };
             return code::run(&code_api, cli.json, cmd).await;
         }
         Cmd::Redis(cmd) => return redis::run(&api, cli.json, cmd).await,
@@ -369,7 +374,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Cmd::Tasks(cmd) => {
             let base = cli.tasks_url.map(|u| u.trim_end_matches('/').to_string()).unwrap_or(format!("{}/v1/tasks", api.base));
-            let tasks_api = Api { base, http: api.http.clone(), key: cli.token.filter(|t| !t.is_empty()), headers: Vec::new() };
+            let tasks_api = Api { base, http: api.http.clone(), key: cli.token.filter(|t| !t.is_empty()).or(admin), headers: Vec::new() };
             return tasks::run(&tasks_api, *cmd, cli.json).await;
         }
         Cmd::Queues(q) => return queues::run(&api, cli.json, q).await,

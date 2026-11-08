@@ -9,10 +9,19 @@
 //! A write takes the next log position, appends its frame to the node's shipper, applies to
 //! the memtable and, with `durability = sync`, waits for its segment. Positions in flight are
 //! tracked so a flush knows exactly which frames its SSTable covers (`flushed_lsn`).
+//!
+//! **Fencing.** Opening claims the database with a compare-and-swap of its manifest
+//! ([`crate::manifest::swap_manifest`]) *before* looking for the last owner's unlisted
+//! segments, and every later manifest write swaps over the version this node wrote last. Once
+//! another node opens the database, this one's next manifest write fails ([`Fenced`]): the
+//! database closes here and accepts no more writes. A `sync` write is acknowledged only after
+//! its segment is stored *and* the manifest is still this node's (one HEAD per shipped
+//! generation, under the manifest lock): a node that opened the database after that check
+//! lists the segment and replays it, so no acknowledged `sync` write is lost to a takeover.
 
 use crate::codec::{decode_update, encode_update};
 use crate::log::{Durability, SegmentSink, Shipper, decode_payload, read_segment};
-use crate::manifest::{self, Manifest, SegRef, TableEntry, TableId};
+use crate::manifest::{self, Fenced, Manifest, SegRef, TableEntry, TableId};
 use crate::memory::{DbMemory, DbMemoryStats};
 use crate::model::PartitionUpdate;
 use crate::options::TableOptions;
@@ -24,7 +33,8 @@ use futures::future::BoxFuture;
 use futures::{StreamExt, TryStreamExt};
 use parking_lot::{Mutex, RwLock};
 use std::collections::{BTreeSet, HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, Ordering};
+use pg_storage::ObjectVersion;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -77,6 +87,12 @@ pub struct Database {
     memory: Arc<DbMemory>,
     /// The node's per-database cap, for a config without one.
     default_memtable_space: u64,
+    /// The version of `manifest.json` this node wrote last (what the next write swaps over).
+    etag: Mutex<Option<ObjectVersion>>,
+    /// Another node opened the database since: nothing more is written here.
+    fenced: AtomicBool,
+    /// Shipped generations up to this one were confirmed to be this node's ([`Database::confirm_owner`]).
+    confirmed: AtomicU64,
 }
 
 impl std::fmt::Debug for Database {
@@ -192,9 +208,18 @@ impl Database {
     /// find the empty state).
     pub(crate) async fn open(env: Arc<Env>, shipper: Arc<Shipper>, id: &str, cfg: DbConfig, default_memtable_space: u64) -> Result<Arc<Self>> {
         let objects = env.objects.clone();
-        let stored = manifest::read_manifest(&objects, id).await?;
+        let stored = manifest::read_manifest_versioned(&objects, id).await?;
         let first = stored.is_none();
-        let mut m = stored.unwrap_or_else(|| Manifest::new(id));
+        let (mut m, read) = match stored {
+            Some((m, v)) => (m, Some(v)),
+            None => (Manifest::new(id), None),
+        };
+        // Claim it first: from here on the last owner can't write its manifest, so the segments
+        // it shipped are all listed below (and a `sync` write it acknowledged among them). The
+        // last owner stays in `node` until the replay is recorded, so a failed open loses
+        // nothing for the next one.
+        m.fence += 1;
+        let claimed = manifest::swap_manifest(&objects, id, &m, false, read.as_ref()).await?;
         let replay = load_replay(&objects, &m).await?;
         m.segments.extend(replay.found);
         m.segments = dedupe(std::mem::take(&mut m.segments));
@@ -219,6 +244,9 @@ impl Database {
             weak: weak.clone(),
             memory,
             default_memtable_space,
+            etag: Mutex::new(Some(claimed)),
+            fenced: AtomicBool::new(false),
+            confirmed: AtomicU64::new(0),
         });
         let sink: Weak<dyn SegmentSink> = db.weak.clone();
         shipper.register(id, sink);
@@ -357,7 +385,47 @@ impl Database {
         result?;
         if self.config().durability == Durability::Sync {
             self.shipper.wait_stored(generation).await?;
+            self.confirm_owner(generation).await?;
         }
+        Ok(())
+    }
+
+    /// Whether another node opened the database since this one did (it's closed here).
+    pub fn is_fenced(&self) -> bool {
+        self.fenced.load(Ordering::SeqCst)
+    }
+
+    fn fence_off(&self) {
+        if !self.fenced.swap(true, Ordering::SeqCst) {
+            tracing::warn!(db = self.id, "nosql database opened by another node; this node stops writing it");
+        }
+        self.closed.store(true, Ordering::SeqCst);
+    }
+
+    /// Make sure frames of `generation` (stored) are in a log the database's current owner
+    /// replays: the manifest is still the one this node wrote, so whoever opens the database next
+    /// claims it after these segments were stored and lists them. One HEAD covers every
+    /// generation stored before it.
+    async fn confirm_owner(&self, generation: u64) -> Result<()> {
+        if self.confirmed.load(Ordering::SeqCst) >= generation {
+            return Ok(());
+        }
+        // No manifest write of this node's in flight: the version can only be ours or another's.
+        let _w = self.write_lock.lock().await;
+        if self.confirmed.load(Ordering::SeqCst) >= generation {
+            return Ok(());
+        }
+        if self.is_fenced() {
+            return Err(Fenced { db: self.id.clone() }.into());
+        }
+        let covered = self.shipper.stored_generation();
+        let current = self.env.objects.version(&manifest::manifest_key(&self.id)).await?;
+        let mine = self.etag.lock().clone();
+        if current.as_ref().map(|v| &v.e_tag) != mine.as_ref().map(|v| &v.e_tag) {
+            self.fence_off();
+            return Err(Fenced { db: self.id.clone() }.into());
+        }
+        self.confirmed.fetch_max(covered, Ordering::SeqCst);
         Ok(())
     }
 
@@ -418,9 +486,20 @@ impl Database {
         log.in_flight.first().copied().unwrap_or(log.next_lsn)
     }
 
-    /// Write the manifest (with `history`, also as a numbered version).
+    /// Ship the log and write the manifest: every acknowledged write is then in object storage,
+    /// replayable by whichever node opens the database next (a handoff's first step).
+    pub async fn checkpoint(&self) -> Result<()> {
+        self.shipper.flush().await?;
+        self.write_manifest(false).await
+    }
+
+    /// Write the manifest (with `history`, also as a numbered version): a compare-and-swap over
+    /// the version this node wrote last, [`Fenced`] once another node opened the database.
     pub async fn write_manifest(&self, history: bool) -> Result<()> {
         let _w = self.write_lock.lock().await;
+        if self.is_fenced() {
+            return Err(Fenced { db: self.id.clone() }.into());
+        }
         let w = self.low_watermark_now();
         let next_lsn = self.log.lock().next_lsn;
         let tables = self.tables();
@@ -447,22 +526,39 @@ impl Database {
             meta.dirty = false;
             meta.m.clone()
         };
-        let r = manifest::write_manifest(&self.env.objects, &self.id, &m, history).await;
-        if r.is_err() {
-            // Not stored: the lazy manifest writer must retry it (a dropped or truncated table
-            // would otherwise come back after a crash).
-            self.meta.lock().dirty = true;
+        let expected = self.etag.lock().clone();
+        match manifest::swap_manifest(&self.env.objects, &self.id, &m, history, expected.as_ref()).await {
+            Ok(v) => {
+                *self.etag.lock() = Some(v);
+                Ok(())
+            }
+            Err(e) => {
+                if manifest::is_fenced(&e) {
+                    self.fence_off();
+                } else {
+                    // Not stored: the lazy manifest writer must retry it (a dropped or truncated
+                    // table would otherwise come back after a crash).
+                    self.meta.lock().dirty = true;
+                }
+                Err(e)
+            }
         }
-        r
     }
 
     pub(crate) fn is_dirty(&self) -> bool {
+        if self.is_fenced() {
+            return false;
+        }
         let meta = self.meta.lock();
         meta.dirty || self.shipper.completed_seq().saturating_sub(meta.m.after_seq) >= 600
     }
 
     /// Unload: flush everything, record a clean manifest, release memory.
     pub(crate) async fn close(&self) -> Result<()> {
+        if self.is_fenced() {
+            self.forget();
+            return Ok(());
+        }
         self.closed.store(true, Ordering::SeqCst);
         // No compaction may record a manifest once another node could own the database.
         for t in self.tables() {
@@ -475,6 +571,11 @@ impl Database {
         }
         .await;
         if let Err(e) = done {
+            if manifest::is_fenced(&e) {
+                // Another node owns it now: there's nothing left to write here.
+                self.forget();
+                return Ok(());
+            }
             self.meta.lock().m.node = Some(self.shipper.node.clone());
             for t in self.tables() {
                 t.resume_compactions();
@@ -482,13 +583,19 @@ impl Database {
             self.closed.store(false, Ordering::SeqCst);
             return Err(e);
         }
+        self.forget();
+        Ok(())
+    }
+
+    /// Let go of the database without writing anything (closed, or fenced).
+    pub(crate) fn forget(&self) {
+        self.closed.store(true, Ordering::SeqCst);
         self.shipper.unregister(&self.id);
         for t in self.tables() {
             for s in &t.state().sstables {
                 self.env.cache.forget(s.uid);
             }
         }
-        Ok(())
     }
 
     /// Drop manifest versions older than the retention (keeping the newest one before it, so
@@ -598,7 +705,10 @@ impl TableHost for Database {
     }
 
     fn wait_durable(&self, generation: u64) -> BoxFuture<'_, Result<()>> {
-        Box::pin(self.shipper.wait_stored(generation))
+        Box::pin(async move {
+            self.shipper.wait_stored(generation).await?;
+            self.confirm_owner(generation).await
+        })
     }
 
     fn sync_durability(&self) -> bool {

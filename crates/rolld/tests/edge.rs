@@ -13,6 +13,9 @@ use tokio_rustls::rustls::pki_types::pem::PemObject;
 use tokio_rustls::rustls::pki_types::{CertificateDer, ServerName};
 use tokio_rustls::rustls::{self, ClientConfig, RootCertStore};
 
+/// The operator token: the edge listens for the internet, so rolld wants one.
+const TOKEN: &str = "edge-test-operator-token-0123456789";
+
 fn free_port() -> u16 {
     static GIVEN: std::sync::Mutex<Vec<u16>> = std::sync::Mutex::new(Vec::new());
     loop {
@@ -34,13 +37,13 @@ impl Drop for Rolld {
     }
 }
 
-/// One HTTPS request through the edge: (status, body).
+/// One HTTPS request through the edge, with the operator token: (status, body).
 async fn https(port: u16, roots: &RootCertStore, host: &str, path: &str) -> (u16, String) {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let cfg = ClientConfig::builder_with_provider(provider).with_safe_default_protocol_versions().unwrap().with_root_certificates(roots.clone()).with_no_client_auth();
     let tcp = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
     let mut tls = tokio_rustls::TlsConnector::from(Arc::new(cfg)).connect(ServerName::try_from(host.to_string()).unwrap(), tcp).await.unwrap();
-    tls.write_all(format!("GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n").as_bytes()).await.unwrap();
+    tls.write_all(format!("GET {path} HTTP/1.1\r\nHost: {host}\r\nAuthorization: Bearer {TOKEN}\r\nConnection: close\r\n\r\n").as_bytes()).await.unwrap();
     let mut out = Vec::new();
     let _ = tls.read_to_end(&mut out).await;
     let text = String::from_utf8_lossy(&out).to_string();
@@ -68,6 +71,7 @@ async fn edge_routes_by_host_and_sni_and_drains_on_sigterm() {
         .env("PATH", std::env::var("PATH").unwrap_or_default())
         .env("RUST_LOG", "warn")
         .env("ROLL_EDGE", "1")
+        .env("ROLL_ADMIN_TOKEN", TOKEN)
         .env("ROLL_EDGE_DOMAIN", "roll.test")
         .env("ROLL_EDGE_SITE_DOMAIN", "rollsite.test")
         .env("ROLL_EDGE_REGION", "r1")
@@ -109,7 +113,7 @@ async fn edge_routes_by_host_and_sni_and_drains_on_sigterm() {
     // redis-cli over TLS: the server name picks the database.
     let docker = Command::new("docker").arg("info").output().is_ok_and(|o| o.status.success());
     if docker {
-        let db: Value = http.post(format!("{api}/v1/redis/databases")).json(&json!({ "name": "cache" })).send().await.unwrap().json().await.unwrap();
+        let db: Value = http.post(format!("{api}/v1/redis/databases")).bearer_auth(TOKEN).json(&json!({ "name": "cache" })).send().await.unwrap().json().await.unwrap();
         let (id, password) = db["rest_token"].as_str().unwrap().rsplit_once('_').unwrap();
         let sni = format!("{id}.redis.r1.roll.test");
         let cli = |args: &[&str]| {

@@ -736,21 +736,6 @@ async fn a_closed_store_answers_503() {
 }
 
 #[tokio::test]
-async fn cors_allows_the_dashboard() {
-    let t = start().await;
-    let r = t
-        .http
-        .request(reqwest::Method::OPTIONS, t.url("/v1/storage/buckets"))
-        .header("origin", "http://localhost:3000")
-        .header("access-control-request-method", "POST")
-        .send()
-        .await
-        .unwrap();
-    assert!(r.status().is_success());
-    assert!(r.headers().contains_key("access-control-allow-origin"));
-}
-
-#[tokio::test]
 async fn usage_all_sums_buckets_per_day() {
     let t0 = 20_100 * DAY + DAY / 2;
     let (clock, now) = manual_clock(t0);

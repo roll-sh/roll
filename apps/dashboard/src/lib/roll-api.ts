@@ -1,5 +1,7 @@
 /** Client for the rolld control-plane API (Postgres: crates/pg-control/src/api.rs; streams: crates/stream-broker/src/http; Redis: redis-api.ts). */
 
+import { operatorHeaders, requestSignIn } from "./code-token";
+
 /** The API as browsers reach it (`VITE_ROLL_API`, built in), and the server's default. */
 export const ROLL_API = import.meta.env?.VITE_ROLL_API ?? "http://127.0.0.1:7070";
 
@@ -79,13 +81,26 @@ export interface QueryResult {
   affected: number;
 }
 
+/** Headers for a product's API: the operator token, plus a JSON content type when there's a body. */
+export function apiHeaders(body?: unknown): Record<string, string> | undefined {
+  const headers: Record<string, string> = { ...operatorHeaders() };
+  if (body !== undefined) headers["content-type"] = "application/json";
+  return Object.keys(headers).length ? headers : undefined;
+}
+
+/** A product's API said 401: rolld wants the operator token. */
+export function onApiStatus(status: number) {
+  if (status === 401) requestSignIn();
+}
+
 export async function call<T>(method: string, path: string, body?: unknown): Promise<T> {
   const res = await fetch(`${ROLL_API}${path}`, {
     method,
-    headers: body === undefined ? undefined : { "content-type": "application/json" },
+    headers: apiHeaders(body),
     body: body === undefined ? undefined : JSON.stringify(body),
     cache: "no-store",
   });
+  onApiStatus(res.status);
   const text = await res.text();
   let data = null;
   try {

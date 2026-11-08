@@ -15,6 +15,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 /// `mi_option_purge_delay` (libmimalloc-sys doesn't export the constant).
 const MI_OPTION_PURGE_DELAY: libmimalloc_sys::mi_option_t = 15;
 
+mod auth;
 mod cluster;
 mod code;
 mod edge;
@@ -23,6 +24,7 @@ mod nosql;
 mod products;
 mod queues;
 mod storage;
+mod redis;
 mod storage_events;
 
 use products::{Product, Products};
@@ -103,7 +105,7 @@ struct Args {
     kafka_tls_cert: Option<PathBuf>,
     #[arg(long, env = "ROLL_KAFKA_TLS_KEY", requires = "kafka_tls_cert")]
     kafka_tls_key: Option<PathBuf>,
-    /// Require an API key on the HTTP stream data plane.
+    /// Require an API key on the HTTP stream data plane (always on with ROLL_ADMIN_TOKEN).
     #[arg(long, env = "ROLL_STREAM_REQUIRE_AUTH")]
     stream_require_auth: bool,
     /// Local disk target for stream data across open partitions, in MiB (0 = only per-topic
@@ -316,6 +318,7 @@ async fn run() -> anyhow::Result<()> {
     let mut args = Args::parse();
     logs::init(args.log_format);
     edge::configure(&mut args);
+    let auth = auth::Auth::new(&args)?;
     let on = args.products()?;
     info!(products = %on, "starting");
     let home = std::path::absolute(&args.home)?;
@@ -332,11 +335,11 @@ async fn run() -> anyhow::Result<()> {
 
     // Each product on starts here (ROLL_PRODUCTS); one that's off binds nothing and runs nothing.
     let tasks = match on.on(Product::Tasks) {
-        true => Some(start_tasks(&args, &home).await?),
+        true => Some(start_tasks(&args, &auth, &home).await?),
         false => None,
     };
     let mut streams = match on.on(Product::Streams) {
-        true => Some(start_streams(&args, &home, &storage).await?),
+        true => Some(start_streams(&args, &auth, &home, &storage).await?),
         false => None,
     };
     let postgres = match on.on(Product::Postgres) {
@@ -344,24 +347,27 @@ async fn run() -> anyhow::Result<()> {
         false => None,
     };
     let mut redis = match on.on(Product::Redis) {
-        true => Some(start_redis(&args, &home, &storage).await?),
-        false => None,
-    };
-    // roll nosql: same object storage, its own node.
-    let nosql = match on.on(Product::Nosql) {
-        true => Some(nosql::Nosql::start(&home, args.nosql.clone(), &args.public_host, &args.node, &storage).await?),
+        true => Some(redis::Redis::start(&args, &storage, redis::Redis::clustered(&args)).await?),
         false => None,
     };
     // roll code: same object storage; previews branch roll Postgres and Redis.
     let code = match on.on(Product::Code) {
         true => {
             let data = code_preview::RollData { postgres: postgres.as_ref().map(|p| p.control.clone()), redis: redis.as_ref().map(|r| r.control.clone()) };
-            Some(start_code(&args, &home, &storage, std::sync::Arc::new(data)).await?)
+            Some(start_code(&args, &auth, &home, &storage, std::sync::Arc::new(data)).await?)
         }
         false => None,
     };
     let cluster = cluster::handle(code.as_ref().map(|c| &*c.code), &args.code, &args.code.default_url(&args.public_host, args.api))?;
     let metrics = logs::ClusterMetrics::start(cluster.clone());
+    if let Some(r) = &redis {
+        r.join(&cluster);
+    }
+    // roll nosql: same object storage; in a cluster its databases follow their leases.
+    let nosql = match on.on(Product::Nosql) {
+        true => Some(nosql::Nosql::start(&home, args.nosql.clone(), &args.public_host, &args.node, &storage, Some(&cluster), args.code.cluster.system_database.as_deref()).await?),
+        false => None,
+    };
     // roll queues on the node's cluster: each queue runs on its lease's holder.
     let queues = match on.on(Product::Queues) {
         true => Some(queues::Queues::start(&home, args.queues.clone(), &args.public_host, cluster.clone(), args.code.cluster.system_database.as_deref().filter(|u| !u.is_empty()), &storage).await?),
@@ -379,7 +385,7 @@ async fn run() -> anyhow::Result<()> {
     };
 
     // The internal API: every product's routes, and a clear 404 for the ones that are off.
-    let mut router = on.info_route(cluster.node_id().to_string()).merge(on.off_routes());
+    let mut router = axum::Router::new();
     if let Some(p) = &postgres {
         router = router.merge(api::router(p.control.clone()));
     }
@@ -404,7 +410,11 @@ async fn run() -> anyhow::Result<()> {
     if let Some(n) = &nosql {
         router = router.merge(n.router());
     }
-    let mut router = router.layer(axum::middleware::from_fn(logs::access));
+    // The operator token in front of every product's routes (auth.rs); `/v1/info` and the 404s of
+    // products that are off answer before it. The gated router merges last so its fallback (401
+    // without the token) stays the fallback.
+    let router = on.info_route(cluster.node_id().to_string()).merge(on.off_routes()).merge(auth.gate("api", router));
+    let mut router = auth.cors(router).layer(axum::middleware::from_fn(logs::access));
     if let Some(c) = &code {
         router = c.router(router);
     }
@@ -416,15 +426,20 @@ async fn run() -> anyhow::Result<()> {
     let products = edge::Products {
         api: router.clone(),
         pg: postgres.as_ref().map(|p| p.proxy.clone()),
-        redis: redis.as_ref().map(|r| r.dir.clone()),
+        redis: redis.as_ref(),
         streams: streams.as_ref().map(|s| s.broker.clone()),
         tasks: tasks.as_ref().map(|t| t.tasks.clone()),
         storage: storage_svc.as_ref().map(|s| s.s3_router()),
         nosql: nosql.as_ref(),
         queues: queues.as_ref(),
+        auth: &auth,
     };
     let edge = edge::Edge::start(&args, &storage, products, std::sync::Arc::new(edge::ClusterSingleton(cluster.clone()))).await?;
     let router = edge::internal(router, edge.as_ref());
+    let router = match &redis {
+        Some(r) => r.internal(router, args.edge.enabled)?,
+        None => router,
+    };
 
     // Everything that serves until it fails; any of them ending ends the process.
     type Serving<'a> = std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + 'a>>;
@@ -436,12 +451,10 @@ async fn run() -> anyhow::Result<()> {
             Ok(())
         }));
     }
-    if let Some(r) = redis.as_mut() {
-        let (resp, http, opts) = r.listeners.take().expect("redis listeners");
-        let dir = r.dir.clone();
-        serving.push(Box::pin(redis_server::net::serve(resp, dir, opts)));
-        let dir = r.dir.clone();
-        serving.push(Box::pin(redis_server::http::serve_http(http, dir)));
+    let redis_listeners = redis.as_mut().and_then(|r| r.listeners.take());
+    if let (Some(r), Some((resp, http))) = (&redis, redis_listeners) {
+        serving.push(Box::pin(r.serve_resp(resp)));
+        serving.push(Box::pin(r.serve_rest(http)));
     }
     let kafka = streams.as_mut().and_then(|s| s.kafka.take());
     if let (Some(s), Some(kafka)) = (&streams, kafka) {
@@ -491,9 +504,7 @@ async fn run() -> anyhow::Result<()> {
                 info!("computes keep running and are adopted on next start");
             }
             if let Some(r) = &redis {
-                // Make every acknowledged Redis write durable before exiting.
-                r.control.shipper.flush().await?;
-                r.control.shipper.write_manifests(true).await?;
+                r.shutdown().await?;
             }
         }
     }
@@ -522,9 +533,10 @@ struct Tasks {
     worker: tasks::Worker,
 }
 
-async fn start_tasks(args: &Args, home: &std::path::Path) -> anyhow::Result<Tasks> {
+async fn start_tasks(args: &Args, auth: &auth::Auth, home: &std::path::Path) -> anyhow::Result<Tasks> {
     let store = std::sync::Arc::new(tasks::store::sqlite::SqliteStore::open(&home.join("tasks.db"), 4)?);
-    let tasks = tasks::Tasks::new(tasks::Config { token: args.tasks_token.clone().filter(|t| !t.is_empty()), ..tasks::Config::default() }, store).await?;
+    let config = tasks::Config { token: args.tasks_token.clone().filter(|t| !t.is_empty()), require_auth: auth.enforcing(), ..tasks::Config::default() };
+    let tasks = tasks::Tasks::new(config, store).await?;
     let worker = tasks::start(tasks.clone());
     Ok(Tasks { tasks, worker })
 }
@@ -535,7 +547,7 @@ struct Streams {
     kafka: Option<tokio::net::TcpListener>,
 }
 
-async fn start_streams(args: &Args, home: &std::path::Path, storage: &StorageConfig) -> anyhow::Result<Streams> {
+async fn start_streams(args: &Args, auth: &auth::Auth, home: &std::path::Path, storage: &StorageConfig) -> anyhow::Result<Streams> {
     let mut c = stream_broker::Config::local(home.to_path_buf());
     c.listen = args.kafka;
     c.advertised_host = args.kafka_advertised_host.clone().unwrap_or_else(|| args.public_host.clone());
@@ -543,7 +555,7 @@ async fn start_streams(args: &Args, home: &std::path::Path, storage: &StorageCon
     c.default_stream = Some(args.default_stream.clone()).filter(|s| !s.is_empty());
     c.tls = args.kafka_tls_cert.clone().zip(args.kafka_tls_key.clone()).map(|(cert, key)| TlsFiles { cert, key });
     c.http_url = format!("http://{}:{}", args.public_host, args.api.port());
-    c.http_require_auth = args.stream_require_auth;
+    c.http_require_auth = args.stream_require_auth || auth.enforcing();
     c.local_disk_bytes = args.stream_disk_mb << 20;
     c.evict_on_unload = !args.stream_keep_local;
     c.storage = storage.clone();
@@ -577,33 +589,6 @@ async fn start_postgres(args: &Args, home: &std::path::Path, storage: &StorageCo
     reconciler::recover(&control).await?;
     let proxy = std::sync::Arc::new(Proxy::new(api::proxy_router(control.clone()), ProxyConfig { listen: args.proxy, default_endpoint: args.default_endpoint.clone() }));
     Ok(Postgres { control, proxy })
-}
-
-/// roll redis: same object storage, its own node; its listeners until they're served.
-struct Redis {
-    control: std::sync::Arc<redis_control::Control>,
-    dir: std::sync::Arc<dyn redis_server::Directory>,
-    listeners: Option<(tokio::net::TcpListener, tokio::net::TcpListener, redis_server::net::ListenOptions)>,
-}
-
-async fn start_redis(args: &Args, home: &std::path::Path, storage: &StorageConfig) -> anyhow::Result<Redis> {
-    let mut rcfg = redis_control::RedisConfig::local(home.join("redis"));
-    rcfg.node_name = args.node.clone();
-    rcfg.public_host = args.public_host.clone();
-    rcfg.resp_port = args.redis.port();
-    rcfg.http_port = args.redis_http.port();
-    let tls = match (&args.redis_tls_cert, &args.redis_tls_key) {
-        (Some(c), Some(k)) => Some(redis_server::net::tls_acceptor(&std::fs::read(c)?, &std::fs::read(k)?)?),
-        _ => None,
-    };
-    rcfg.tls = tls.is_some();
-    let control = redis_control::Control::new(rcfg, redis_server::persist::Objects::new(storage)?).await?;
-    let dir: std::sync::Arc<dyn redis_server::Directory> = control.node.clone();
-    let resp = tokio::net::TcpListener::bind(args.redis).await?;
-    let http = tokio::net::TcpListener::bind(args.redis_http).await?;
-    info!(resp = %args.redis, http = %args.redis_http, tls = tls.is_some(), "redis listening");
-    let opts = redis_server::net::ListenOptions { tls, proxy_protocol: args.redis_proxy_protocol };
-    Ok(Redis { control, dir, listeners: Some((resp, http, opts)) })
 }
 
 /// roll code, running: the control plane and its previews.
@@ -673,6 +658,7 @@ where
 /// checks and previews (`data`: what previews branch).
 async fn start_code(
     args: &Args,
+    auth: &auth::Auth,
     home: &std::path::Path,
     storage: &StorageConfig,
     data: std::sync::Arc<dyn code_preview::DataBranches>,
@@ -682,6 +668,7 @@ async fn start_code(
     let code_public = args.code_public_url.clone().unwrap_or_else(|| format!("http://{}:{}", args.public_host, args.api.port()));
     let mut code_config = code_control::Config {
         admin_token: args.code_token.clone().filter(|t| !t.is_empty()),
+        operator_token: auth.token(),
         git_url: args.code_git_url.clone().unwrap_or_else(|| format!("{}/git", code_public.trim_end_matches('/'))),
         api_url: code_public,
         web_url: args.web_url.clone(),

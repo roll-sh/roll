@@ -1,16 +1,17 @@
 import { KeyRound, LogOut, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { codeApi, createCodeApi, type CodeInfo } from "@/lib/code-api";
-import { getToken, onSignInRequest, setToken, subscribeToken } from "@/lib/code-token";
+import { getToken, markOperator, onSignInRequest, setToken, subscribeToken } from "@/lib/code-token";
 import { ROLL_API } from "@/lib/roll-api";
 import { btn, input, primary } from "../ui";
 
 type Caller = CodeInfo["auth"]["caller"];
 
 /**
- * Sign in to roll code when the server runs with `ROLL_CODE_TOKEN`: paste an owner token (or the
- * admin token), checked against `GET /v1/code` before it's kept. Opens by itself when a request
- * comes back 401. Renders nothing on an open server.
+ * Sign in when rolld wants a token (`ROLL_ADMIN_TOKEN`, or roll code's `ROLL_CODE_TOKEN`): paste
+ * the operator token (every product) or a roll code owner token, checked against `GET /v1/code`
+ * before it's kept, with whether it's the operator's. Opens by itself when a request comes back
+ * 401. Renders nothing on an open server.
  */
 export function SignIn() {
   const [auth, setAuth] = useState<CodeInfo["auth"] | null>(null);
@@ -19,7 +20,11 @@ export function SignIn() {
   const load = useCallback(() => {
     codeApi
       .info()
-      .then((i) => setAuth(i.auth ?? null))
+      .then((i) => {
+        setAuth(i.auth ?? null);
+        // Kept in step with the server: a token that stopped being the operator's stops going to the products.
+        markOperator(Boolean(i.auth?.operator));
+      })
       .catch(() => setAuth(null));
   }, []);
 
@@ -39,9 +44,9 @@ export function SignIn() {
   return (
     <>
       {signedIn ? (
-        <button onClick={() => setToken(null)} className={btn} title="Sign out of roll code in this browser">
+        <button onClick={() => setToken(null)} className={btn} title="Sign out of roll in this browser">
           <span className="size-1.5 rounded-full bg-accent" aria-hidden />
-          <span className="font-mono">{who.kind === "admin" ? "admin" : who.owner}</span>
+          <span className="font-mono">{auth.operator ? "operator" : who.kind === "admin" ? "admin" : who.owner}</span>
           <LogOut className="size-3.5" />
         </button>
       ) : (
@@ -92,7 +97,7 @@ function SignInDialog({ current, onClose }: { current: Caller | null; onClose: (
       const info = await createCodeApi(ROLL_API, token).info();
       const kind = info.auth?.caller.kind;
       if (kind === "admin" || kind === "owner") {
-        setToken(token);
+        setToken(token, Boolean(info.auth?.operator));
         onClose();
         window.location.reload();
         return;
@@ -114,9 +119,10 @@ function SignInDialog({ current, onClose }: { current: Caller | null; onClose: (
         <button type="button" onClick={onClose} aria-label="Close" className="absolute top-4 right-4 text-subtle hover:text-fg">
           <X className="size-4" />
         </button>
-        <h2 className="text-[15px] font-semibold tracking-[-0.02em]">Sign in to roll code</h2>
+        <h2 className="text-[15px] font-semibold tracking-[-0.02em]">Sign in to roll</h2>
         <p className="mt-1.5 text-[13px] leading-relaxed text-muted">
-          Paste an owner token (<span className="font-mono text-[12px]">rlc_…</span>) or the admin token. It stays in this browser.
+          Paste the operator token (<span className="font-mono text-[12px]">ROLL_ADMIN_TOKEN</span>, every product) or a roll code owner
+          token (<span className="font-mono text-[12px]">rlc_…</span>). It stays in this browser.
         </p>
         <input
           ref={field}

@@ -79,7 +79,8 @@ Use `mq_core::AmqpError` codes and RabbitMQ's exact texts where clients or tests
 
 ## roll API (`/v1/queues`, served by `mq-control` on the rolld API port)
 
-No auth (like the rest of the local rolld API). JSON. Errors: `{"error": "..."}` with 4xx/5xx.
+The operator token (`Authorization: Bearer $ROLL_ADMIN_TOKEN`) when rolld has one; open on a
+loopback daemon without one (docs/cloud/README.md "Security"). JSON. Errors: `{"error": "..."}` with 4xx/5xx.
 `{vhost}` is URL-encoded (`%2F` for `/`).
 
 ```

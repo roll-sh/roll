@@ -159,7 +159,7 @@ function FileView({ repo, rev, path, size }: { repo: Repo; rev: string; path: st
     let alive = true;
     setText(null);
     setBinary(false);
-    fetch(url, { cache: "no-store" })
+    fetch(url, { headers: codeApi.authHeaders(), cache: "no-store" })
       .then(async (res) => {
         if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
         const buf = new Uint8Array(await res.arrayBuffer());

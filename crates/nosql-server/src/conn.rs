@@ -54,7 +54,8 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, watch};
 use tokio_util::codec::{FramedRead, FramedWrite};
 
 use crate::convert::{self, MetadataRule};
-use crate::directory::{Directory, Lease, Metrics, Presented, ServerSettings};
+use crate::directory::{Directory, Lease, Loaded, Metrics, Presented, ServerSettings};
+use crate::fleet::Placement;
 use crate::node::DbSpec;
 
 /// The authenticator AUTHENTICATE names (both references report Cassandra's class).
@@ -83,11 +84,29 @@ pub struct Accepted {
 }
 
 /// Serves one connection until it closes.
+///
+/// When nodes share databases ([`crate::fleet`]) and another node serves the connection's
+/// database, the connection is handed to it: at once when the TLS server name named the
+/// database; when the SASL user did, once its AUTH_RESPONSE arrives (this node answered OPTIONS
+/// and STARTUP, and the owner gets everything the client sent).
 pub async fn serve(io: Box<dyn Io>, accepted: Accepted, dir: Arc<dyn Directory>) {
     let settings = dir.settings().clone();
     let target = dir.route_sni(accepted.sni.as_deref()).await;
+    if let Some(t) = &target
+        && dir.hands_over()
+    {
+        match dir.placement(t).await {
+            Placement::Here => {}
+            Placement::Owner(node) => return dir.hand_over(node, t.clone(), io, &accepted, Bytes::new(), 0).await,
+            // The driver reconnects (to whichever node; the move will have finished).
+            Placement::Moving => return,
+        }
+    }
     let presented = target.as_deref().map(Presented::of).unwrap_or_else(|| Presented::unrouted(settings.dialect));
     let counters = Arc::new(IoCounters::default());
+    if target.is_none() && dir.hands_over() {
+        *counters.recording.lock() = Some(Vec::new());
+    }
     let (r, w) = tokio::io::split(Counted { inner: io, counters: counters.clone() });
     let limits = Limits::of(presented.dialect);
     let reader = FramedRead::new(r, ServerDecoder::with_limits(presented.dialect, limits));
@@ -111,16 +130,34 @@ pub async fn serve(io: Box<dyn Io>, accepted: Accepted, dir: Arc<dyn Directory>)
         shared: None,
         kicked: None,
         transport: None,
-        events: None,
+        events: Events::default(),
         registered: Arc::new(Mutex::new(Vec::new())),
         permits: Arc::new(Semaphore::new(settings.max_in_flight.max(1))),
         pending_auth: None,
+        answered: 0,
+        answered_at_startup: None,
+        handover: None,
         settings,
     };
     let kicked = c.run().await;
+    if let Some((node, spec)) = c.handover.take() {
+        let skip = c.answered;
+        let Connection { reader, tx, dir, accepted, counters, .. } = c;
+        // The writer sends what it has (STARTUP's answer) and gives the stream back.
+        let _ = tx.send(Out::Detach).await;
+        drop(tx);
+        let Ok(Some(w)) = writer.await else { return };
+        let first = counters.recording.lock().take().map(Bytes::from).unwrap_or_default();
+        let io = reader.into_inner().unsplit(w.into_inner());
+        return dir.hand_over(node, spec, io.inner, &accepted, first, skip).await;
+    }
     drop(c);
     if kicked {
-        writer.abort();
+        // Answers already running get a moment to go out (a database moving away waits for
+        // its requests); then the connection closes.
+        if tokio::time::timeout(std::time::Duration::from_secs(1), &mut writer).await.is_err() {
+            writer.abort();
+        }
         return;
     }
     // Let in-flight requests answer and the queue drain (bounded: a client that stopped
@@ -146,9 +183,12 @@ enum Out {
     Compression(Option<Compression>),
     Segments(bool),
     Close,
+    /// Flush and hand the stream back (the connection is handed to another node).
+    Detach,
 }
 
-async fn write_loop(mut w: FrameWriter, mut rx: mpsc::Receiver<Out>) {
+/// Writes until the connection ends; the writer comes back after [`Out::Detach`].
+async fn write_loop(mut w: FrameWriter, mut rx: mpsc::Receiver<Out>) -> Option<FrameWriter> {
     // Returns false to stop.
     async fn apply(w: &mut FrameWriter, o: Out) -> bool {
         match o {
@@ -162,11 +202,14 @@ async fn write_loop(mut w: FrameWriter, mut rx: mpsc::Receiver<Out>) {
                 w.encoder_mut().start_segments(lz4);
                 true
             }
-            Out::Close => false,
+            Out::Close | Out::Detach => false,
         }
     }
     const BATCH_BYTES: usize = 1 << 20;
     'outer: while let Some(o) = rx.recv().await {
+        if matches!(o, Out::Detach) {
+            return SinkExt::<Frame>::flush(&mut w).await.is_ok().then_some(w);
+        }
         if !apply(&mut w, o).await {
             break;
         }
@@ -194,11 +237,12 @@ async fn write_loop(mut w: FrameWriter, mut rx: mpsc::Receiver<Out>) {
             tokio::task::yield_now().await;
         }
         if SinkExt::<Frame>::flush(&mut w).await.is_err() {
-            return;
+            return None;
         }
     }
     let _ = SinkExt::<Frame>::flush(&mut w).await;
     let _ = w.get_mut().shutdown().await;
+    None
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -261,22 +305,40 @@ struct Connection {
     segments: bool,
     client: eng::ClientInfo,
     shared: Option<Arc<Shared>>,
-    kicked: Option<watch::Receiver<bool>>,
+    kicked: Option<Kick>,
     /// The database's native transport switch (REST `storage_service/native_transport`).
     transport: Option<watch::Receiver<bool>>,
-    events: Option<tokio::task::JoinHandle<()>>,
+    events: Events,
     registered: Arc<Mutex<Vec<EventType>>>,
     permits: Arc<Semaphore>,
     /// A SASL negotiation in progress (after an AUTH_CHALLENGE).
     pending_auth: Option<(Lease, eng::Session, Arc<DbSpec>)>,
+    /// Response frames sent so far, and how many when STARTUP was answered.
+    answered: usize,
+    answered_at_startup: Option<usize>,
+    /// The node serving the database the SASL user named, and the database: the connection is
+    /// handed to it ([`crate::fleet`]).
+    handover: Option<(String, Arc<DbSpec>)>,
 }
 
-impl Drop for Connection {
+/// The task pushing events to the connection; stopped with it.
+#[derive(Default)]
+struct Events(Option<tokio::task::JoinHandle<()>>);
+
+impl Drop for Events {
     fn drop(&mut self) {
-        if let Some(e) = self.events.take() {
+        if let Some(e) = self.0.take() {
             e.abort();
         }
     }
+}
+
+/// The database's signal to disconnect, and when this connection leaves after it (connections
+/// of a database that moves leave at different moments within a second).
+struct Kick {
+    rx: watch::Receiver<bool>,
+    loaded: Arc<Loaded>,
+    at: Option<tokio::time::Instant>,
 }
 
 /// Resolves when the database's native transport is turned off.
@@ -289,12 +351,14 @@ async fn wait_transport_off(t: &mut Option<watch::Receiver<bool>>) {
     std::future::pending().await
 }
 
-async fn wait_kicked(k: &mut Option<watch::Receiver<bool>>) {
-    match k {
-        Some(rx) => {
-            let _ = rx.wait_for(|k| *k).await;
-        }
-        None => std::future::pending().await,
+async fn wait_kicked(k: &mut Option<Kick>) {
+    let Some(k) = k else { return std::future::pending().await };
+    if k.at.is_none() {
+        let _ = k.rx.wait_for(|k| *k).await;
+        k.at = Some(tokio::time::Instant::now() + k.loaded.kick_delay());
+    }
+    if let Some(at) = k.at {
+        tokio::time::sleep_until(at).await;
     }
 }
 
@@ -332,7 +396,7 @@ impl Connection {
                 }
                 Inbound::Frame(f) => {
                     if !self.frame(f).await {
-                        return self.kicked.as_ref().is_some_and(|k| *k.borrow());
+                        return self.kicked.as_ref().is_some_and(|k| *k.rx.borrow());
                     }
                 }
             }
@@ -351,6 +415,9 @@ impl Connection {
 
     /// Queues output; false when the connection is gone or being kicked.
     async fn send(&mut self, out: Out) -> bool {
+        if matches!(out, Out::Frame(_) | Out::Reject(_)) {
+            self.answered += 1;
+        }
         let tx = self.tx.clone();
         tokio::select! {
             r = tx.send(out) => r.is_ok(),
@@ -399,6 +466,10 @@ impl Connection {
             }
             (Stage::Authenticating, Request::AuthResponse(token)) => {
                 let r = self.auth_response(token).await;
+                if self.handover.is_some() {
+                    // The owner answers it.
+                    return false;
+                }
                 self.reply(stream, r).await
             }
             (Stage::Authenticating, _) => {
@@ -524,6 +595,7 @@ impl Connection {
             }
         };
         let ok = self.reply(stream, answer).await;
+        self.answered_at_startup = Some(self.answered);
         if v5 && !self.segments {
             self.segments = true;
             if !self.send(Out::Segments(lz4)).await {
@@ -544,8 +616,10 @@ impl Connection {
                 self.shard = shard_for(&self.accepted, p.shards);
             }
         }
-        self.kicked = Some(lease.kicked());
+        self.kicked = Some(Kick { rx: lease.kicked(), loaded: lease.loaded().clone(), at: None });
         self.transport = Some(lease.db().native_transport_watch());
+        // Routed: nothing to hand over any more.
+        self.counters.recording.lock().take();
         let guard = ConnGuard::new(lease.metrics.clone());
         let client = lease.db().register_client(self.client.clone());
         if lease.spec.requires_auth() {
@@ -628,6 +702,19 @@ impl Connection {
                 None => return Response::Error(bad_credentials(self.dialect(), &plain.user)),
             },
         };
+        if self.target.is_none() && self.dir.hands_over() {
+            match self.dir.placement(&spec).await {
+                Placement::Here => {}
+                // Only the answers to OPTIONS and STARTUP went out (legacy frames the owner's
+                // copies of can be told apart), and the client's bytes so far were kept.
+                Placement::Owner(node) if Some(self.answered) == self.answered_at_startup && self.counters.recording.lock().is_some() => {
+                    self.handover = Some((node, spec));
+                    return Response::Ready;
+                }
+                Placement::Owner(_) => return Response::Error(ErrorBody::server("the database is served by another node: connect with its host name")),
+                Placement::Moving => return Response::Error(ErrorBody::server(crate::directory::OpenError::Closing.to_string())),
+            }
+        }
         let lease = match self.dir.open(&spec).await {
             Ok(l) => l,
             Err(e) => return Response::Error(ErrorBody::server(e.to_string())),
@@ -718,14 +805,14 @@ impl Connection {
 
     /// Starts forwarding the database's events to this connection (once).
     fn ensure_events(&mut self) {
-        if self.events.is_some() {
+        if self.events.0.is_some() {
             return;
         }
         let Some(sh) = self.shared.clone() else { return };
         let registered = self.registered.clone();
         let dialect = sh.lease.db().dialect();
         let mut from_db = sh.lease.db().events();
-        self.events = Some(tokio::spawn(async move {
+        self.events.0 = Some(tokio::spawn(async move {
             use tokio::sync::broadcast::error::RecvError;
             loop {
                 let e = match from_db.recv().await {
@@ -1015,7 +1102,13 @@ struct IoCounters {
     metrics: OnceLock<Arc<Metrics>>,
     pending_in: AtomicU64,
     pending_out: AtomicU64,
+    /// What the client sent while the connection is unrouted and may be handed to another
+    /// node ([`crate::fleet`]); dropped once routed, or if it grows past [`MAX_RECORDED`].
+    recording: Mutex<Option<Vec<u8>>>,
 }
+
+/// More than any handshake sends before its AUTH_RESPONSE.
+const MAX_RECORDED: usize = 64 << 10;
 
 impl IoCounters {
     fn add(&self, n: usize, inbound: bool) {
@@ -1048,6 +1141,14 @@ impl<T: AsyncRead + Unpin> AsyncRead for Counted<T> {
         let n = buf.filled().len().saturating_sub(before);
         if n > 0 {
             self.counters.add(n, true);
+            let mut rec = self.counters.recording.lock();
+            if let Some(v) = rec.as_mut() {
+                if v.len() + n > MAX_RECORDED {
+                    *rec = None;
+                } else {
+                    v.extend_from_slice(&buf.filled()[before..]);
+                }
+            }
         }
         r
     }

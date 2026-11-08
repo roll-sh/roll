@@ -385,5 +385,18 @@ for s in "${final[@]}"; do
   esac
 done
 
+# The roll API (:7070) listens off loopback, so rolld needs an operator token: the one given, or
+# one made once per data directory (never printed; `docker exec <c> cat $ROLL_HOME/admin-token`).
+if [[ -z ${ROLL_ADMIN_TOKEN:-} ]]; then
+  token_file=$ROLL_HOME/admin-token
+  if [[ ! -s $token_file ]]; then
+    mkdir -p "$ROLL_HOME"
+    (umask 077 && head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$token_file")
+  fi
+  ROLL_ADMIN_TOKEN=$(<"$token_file")
+  export ROLL_ADMIN_TOKEN
+  log "roll API token in $token_file (set ROLL_ADMIN_TOKEN to choose one)"
+fi
+
 log "dialect $dialect, cluster '$cluster_name', datacenter $ROLL_NOSQL_DATACENTER, rack $ROLL_NOSQL_RACK, address $ROLL_PUBLIC_HOST, settings ${final[*]}"
 exec rolld --nosql-only "--nosql-cluster-name=$cluster_name" "${setting_args[@]}"

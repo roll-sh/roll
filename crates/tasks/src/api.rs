@@ -106,7 +106,7 @@ pub fn router(tasks: Arc<Tasks>) -> Router {
         .layer(middleware::map_response(json_errors))
         .with_state(tasks);
     // Bearer tokens, no cookies: any origin may call it (the dashboard does).
-    Router::new().nest("/v1/tasks", api).layer(tower_http::cors::CorsLayer::permissive())
+    Router::new().nest("/v1/tasks", api)
 }
 
 /// Extractor rejections (malformed JSON, oversized bodies …) are plain text; make every error
@@ -126,7 +126,8 @@ async fn auth(State(t): S, req: Request, next: Next) -> Response {
     if let Err(e) = t.refresh_if_older(t.config.refresh_ms).await {
         tracing::warn!(error = format!("{e:#}"), "refreshing config");
     }
-    if t.auth_required() {
+    // rolld's gate already checked the operator's token (`roll_auth`).
+    if t.auth_required() && !roll_auth::Operator::on(req.extensions()) {
         let bearer = req
             .headers()
             .get(header::AUTHORIZATION)

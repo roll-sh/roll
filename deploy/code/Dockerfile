@@ -37,7 +37,8 @@ COPY --chmod=755 deploy/code/health.sh /usr/local/bin/roll-code-health
 USER roll
 WORKDIR /data
 # The API (and git) port. Set ROLL_CODE_DATABASE, ROLL_S3_BUCKET (+ AWS_REGION, credentials or
-# the instance role), ROLL_CODE_TOKEN, ROLL_SECRET_KEY and, for a cluster,
+# the instance role), ROLL_ADMIN_TOKEN (the operator token, 32+ characters; rolld won't listen
+# off loopback without it), ROLL_CODE_TOKEN if you want a second admin token, ROLL_SECRET_KEY and, for a cluster,
 # ROLL_CODE_CLUSTER_SECRET and ROLL_CODE_ADVERTISE_URL.
 ENV ROLL_HOME=/data \
     ROLL_CODE_ONLY=1 \

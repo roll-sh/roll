@@ -79,7 +79,9 @@ Other settings:
   (`https://storage.example.com/storage/v1`), for resumable upload URLs and the dashboard.
 - `--no-storage` / `ROLL_NO_STORAGE`: don't run roll storage.
 
-The roll API on `:7070` has no authentication. Keep it private.
+The roll API on `:7070` is open on loopback. Off loopback rolld needs `ROLL_ADMIN_TOKEN`, the
+operator token every control-plane API takes; `/v1/storage` also takes a dashboard console session
+(docs/cloud/README.md, "Security").
 
 ## Quickstart
 
