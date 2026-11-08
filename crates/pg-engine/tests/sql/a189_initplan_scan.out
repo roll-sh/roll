@@ -42,6 +42,63 @@ count:int8
 0
 -- SELECT 1
 
+> SELECT count(*) FROM a189_t WHERE (CASE WHEN id % 2 = 0 THEN NULL ELSE v END) NOT IN (SELECT id FROM (VALUES (1), (NULL::int)) x(id))
+count:int8
+0
+-- SELECT 1
+
+> SELECT id FROM a189_t WHERE v NOT IN (SELECT id FROM a189_e) AND id < 5
+id:int4
+1
+2
+3
+4
+-- SELECT 4
+
+> SELECT id FROM a189_t WHERE v IN (SELECT id FROM (VALUES (1), (NULL::int)) x(id)) AND id < 5
+id:int4
+1
+-- SELECT 1
+
+> SELECT id FROM a189_t WHERE v > (SELECT NULL::int)
+id:int4
+-- SELECT 0
+
+> CREATE SEQUENCE a189_seq
+-- CREATE SEQUENCE
+
+> SELECT id FROM a189_t WHERE nextval('a189_seq') < (SELECT nextval('a189_seq'))
+id:int4
+1
+-- SELECT 1
+
+> ALTER SEQUENCE a189_seq RESTART
+-- ALTER SEQUENCE
+
+> PREPARE a189_p(int) AS SELECT count(*) FROM a189_t WHERE v < (SELECT nextval('a189_seq') + $1)
+-- PREPARE
+
+> EXECUTE a189_p(0)
+count:int8
+2000
+-- SELECT 1
+
+> EXECUTE a189_p(10)
+count:int8
+24000
+-- SELECT 1
+
+> SELECT last_value FROM a189_seq
+last_value:int8
+2
+-- SELECT 1
+
+> DEALLOCATE a189_p
+-- DEALLOCATE
+
+> DROP SEQUENCE a189_seq
+-- DROP SEQUENCE
+
 > SELECT substring(s FROM -1 FOR 3) AS a, substring(s FROM 31 FOR 10) AS b, count(*)
 >   FROM a189_t WHERE substring(s FROM 0 FOR 2) = 'a' GROUP BY 1, 2 ORDER BY 1, 2 LIMIT 5
 a:text | b:text | count:int8
