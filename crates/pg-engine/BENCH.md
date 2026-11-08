@@ -2529,7 +2529,8 @@ Per query, seconds (medians of the two runs):
 - q01, q17 and q18 are ahead of PostgreSQL.
 - q02, q11 and q20 regressed in the base itself (0.38 s for q20 at `fe7b0023c`): each run of
   their SubPlans starts a parallel scan's threads. Without the three, new takes 15.3 s
-  against PostgreSQL's 12.5 s.
+  against PostgreSQL's 12.5 s. Step 2 fixes them: q20 9.2 -> 0.57 s, q02 4.5 -> 1.2 s, q11
+  1.14 -> 0.31 s (one pass each, measured while a build ran on other cores).
 - Earlier on this round's first base (`fe7b0023c`, before the rebase), the same step measured
   275.6 -> 245.9 x 10^9 instructions (-10.8%).
 

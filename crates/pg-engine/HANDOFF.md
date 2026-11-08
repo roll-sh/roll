@@ -3158,10 +3158,9 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
     wall -16%, CPU -17%, peak unchanged, all 22 hashes equal; q01, q17 and q18 ahead of
     PostgreSQL.
   - Found, not this step's:
-    - q20 (0.4 -> 9 s), q02 (1.0 -> 4.5 s) and q11 regressed between fe7b0023c and fe78d36cd,
-      in base and new alike: each SubPlan run starts a parallel scan's threads
-      (`ParScan::start`'s spawns under `__clone` in q20's profile). Routed through the
-      coordinator.
+    - q20 (0.4 -> 9 s), q02 (1.0 -> 4.5 s) and q11 (0.27 -> 1.3 s) regressed in d08674719
+      (bounded parallel index scans): each SubPlan run, and each nested-loop inner scan,
+      started a parallel scan's threads for its few rows. Fixed in step 2.
     - `GROUP BY id ORDER BY id DESC LIMIT n`: PostgreSQL reads the index backward under the
       GroupAggregate; the engine plans a Sort above it (planner).
   - Verified (the targeted train): release build, clippy (no new warnings), crate tests
@@ -3169,6 +3168,16 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
     files join, aggregates, subselect, select_parallel, partition_aggregate, groupingsets,
     window, union, select_distinct, limit, with, collate (4,428 / 4,441, the same units as
     the base build's).
+- **Executor, round 10, step 2: no parallel index scan per outer row** (round 26, agent 167;
+  `exec/scan.rs` `start_parallel_index`): a bounded index scan run under an outer row's values
+  (a correlated SubPlan's, a nested loop's inner side: `ExecCtx::outer` not empty) reads on the
+  statement's thread. PostgreSQL puts no Gather there (the parameters make it
+  parallel-restricted), and threads started per run cost more than the run's few rows.
+  TPC-H q20 9.2 -> 0.57 s, q02 4.5 -> 1.2 s, q11 1.14 -> 0.31 s (dist, containers, a loaded
+  machine), hashes equal. Verified: release build, clippy, crate tests (big_tables'
+  `deferred_entry_deletes` failed once on "the deletes went in as runs", a DELETE storage path
+  this step doesn't reach: for agent 162's train), regress select_parallel, join, subselect,
+  aggregates, btree_index, create_index, partition_join, partition_prune unchanged.
 - **Deep input** (round 19, agent 63; `src/stack.rs`, `tests/deep_input.rs`): the engine no
   longer overflows the stack of the thread that runs it, however deep the input nests. A
   host's 2 MB thread or a test harness thread is safe. Before, 400 `+` terms aborted the
