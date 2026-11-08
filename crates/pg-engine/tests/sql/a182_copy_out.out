@@ -1,0 +1,131 @@
+> CREATE TABLE a182_o (i int2, j int4, k int8, f float8, t text, v varchar(10), n numeric, d date)
+-- CREATE TABLE
+
+> INSERT INTO a182_o VALUES
+>   (1, -2, 9223372036854775807, 0.1, 'plain', 'v', 1.5, '2024-01-02'),
+>   (-32768, 2147483647, -9223372036854775808, -1e300, E'tab\there', E'nl\nx', NULL, NULL),
+>   (NULL, NULL, NULL, 'NaN', E'back\\slash', '', -0.0, 'infinity'),
+>   (0, 0, 0, '-Infinity', 'ünï ✓', NULL, 1e-20, '1999-12-31'),
+>   (7, 7, 7, 1.5e-7, E'del|im', 'a|b', 7, '2000-02-29')
+-- INSERT 0 5
+
+> COPY a182_o TO STDOUT
+copy:text
+-32768	2147483647	-9223372036854775808	-1e+300	tab\there	nl\nx	\N	\N
+0	0	0	-Infinity	ünï ✓	\N	0.00000000000000000001	1999-12-31
+1	-2	9223372036854775807	0.1	plain	v	1.5	2024-01-02
+7	7	7	1.5e-07	del|im	a|b	7	2000-02-29
+\N	\N	\N	NaN	back\\slash		0.0	infinity
+-- COPY 5
+
+> COPY a182_o TO STDOUT (DELIMITER '|')
+copy:text
+-32768|2147483647|-9223372036854775808|-1e+300|tab\there|nl\nx|\N|\N
+0|0|0|-Infinity|ünï ✓|\N|0.00000000000000000001|1999-12-31
+1|-2|9223372036854775807|0.1|plain|v|1.5|2024-01-02
+7|7|7|1.5e-07|del\|im|a\|b|7|2000-02-29
+\N|\N|\N|NaN|back\\slash||0.0|infinity
+-- COPY 5
+
+> COPY a182_o TO STDOUT (DELIMITER '-')
+copy:text
+0-0-0-\-Infinity-ünï ✓-\N-0.00000000000000000001-1999\-12\-31
+1-\-2-9223372036854775807-0.1-plain-v-1.5-2024\-01\-02
+7-7-7-1.5e\-07-del|im-a|b-7-2000\-02\-29
+\-32768-2147483647-\-9223372036854775808-\-1e+300-tab\there-nl\nx-\N-\N
+\N-\N-\N-NaN-back\\slash--0.0-infinity
+-- COPY 5
+
+> COPY a182_o TO STDOUT (NULL 'NUL')
+copy:text
+-32768	2147483647	-9223372036854775808	-1e+300	tab\there	nl\nx	NUL	NUL
+0	0	0	-Infinity	ünï ✓	NUL	0.00000000000000000001	1999-12-31
+1	-2	9223372036854775807	0.1	plain	v	1.5	2024-01-02
+7	7	7	1.5e-07	del|im	a|b	7	2000-02-29
+NUL	NUL	NUL	NaN	back\\slash		0.0	infinity
+-- COPY 5
+
+> COPY a182_o TO STDOUT (FORMAT csv)
+copy:text
+,,,NaN,back\slash,"",0.0,infinity
+-32768,2147483647,-9223372036854775808,-1e+300,tab	here,"nl
+x",,
+0,0,0,-Infinity,ünï ✓,,0.00000000000000000001,1999-12-31
+1,-2,9223372036854775807,0.1,plain,v,1.5,2024-01-02
+7,7,7,1.5e-07,del|im,a|b,7,2000-02-29
+-- COPY 5
+
+> COPY a182_o (t, j) TO STDOUT
+copy:text
+back\\slash	\N
+del|im	7
+plain	-2
+tab\there	2147483647
+ünï ✓	0
+-- COPY 5
+
+> SET extra_float_digits = 0
+-- SET
+
+> COPY a182_o (f) TO STDOUT
+copy:text
+-1e+300
+-Infinity
+0.1
+1.5e-07
+NaN
+-- COPY 5
+
+> RESET extra_float_digits
+-- RESET
+
+> ALTER TABLE a182_o ADD COLUMN z int DEFAULT 42
+-- ALTER TABLE
+
+> INSERT INTO a182_o (i, z) VALUES (8, 8)
+-- INSERT 0 1
+
+> COPY a182_o (i, z) TO STDOUT
+copy:text
+-32768	42
+0	42
+1	42
+7	42
+8	8
+\N	42
+-- COPY 6
+
+> ALTER TABLE a182_o DROP COLUMN n
+-- ALTER TABLE
+
+> COPY a182_o TO STDOUT
+copy:text
+-32768	2147483647	-9223372036854775808	-1e+300	tab\there	nl\nx	\N	42
+0	0	0	-Infinity	ünï ✓	\N	1999-12-31	42
+1	-2	9223372036854775807	0.1	plain	v	2024-01-02	42
+7	7	7	1.5e-07	del|im	a|b	2000-02-29	42
+8	\N	\N	\N	\N	\N	\N	8
+\N	\N	\N	NaN	back\\slash		infinity	42
+-- COPY 6
+
+> CREATE TABLE a182_g (a int, b int GENERATED ALWAYS AS (a * 2) VIRTUAL, c text)
+-- CREATE TABLE
+
+> INSERT INTO a182_g (a, c) VALUES (1, 'x'), (2, NULL)
+-- INSERT 0 2
+
+> COPY a182_g TO STDOUT
+copy:text
+1	x
+2	\N
+-- COPY 2
+
+> COPY (SELECT * FROM a182_g) TO STDOUT
+copy:text
+1	2	x
+2	4	\N
+-- COPY 2
+
+> DROP TABLE a182_o, a182_g
+-- DROP TABLE
+
