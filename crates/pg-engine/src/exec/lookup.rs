@@ -157,7 +157,7 @@ impl Lookup {
         };
         // (Equal index keys' rows in the model's heap order: only a unique index's single
         // row, or a table not modelled, whose entries are in storage order.)
-        let modelled = super::sizing::heap_modelled(&s.table, ctx);
+        let modelled = super::sizing::heap_modelled_or_kept(&s.table, ctx);
         if modelled && !(ix.unique && b.eq.len() == ix.columns.len()) {
             return Ok(None);
         }

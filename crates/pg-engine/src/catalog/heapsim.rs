@@ -1203,7 +1203,7 @@ impl Heap {
     fn keyed(&mut self, key: &[u8], tid: Tid) -> u32 {
         let row = self.keys.insert(key, tid);
         if let Some(p) = self.pages.get_mut(tid.0 as usize) {
-            p.update_tup(tid.1, |t| t.row = row);
+            p.lps.set_row((tid.1 as usize).wrapping_sub(1), row);
         }
         row
     }
@@ -1285,13 +1285,6 @@ impl Heap {
     /// The tuple at `tid`, if it is a normal one.
     pub fn tuple(&self, tid: Tid) -> Option<Tup> {
         self.pages.get(tid.0 as usize)?.tup(tid.1)
-    }
-
-    /// Set the raw command id (t_cid) of the tuple at `tid`.
-    pub fn set_raw_cid(&mut self, tid: Tid, cid: u32) {
-        if let Some(p) = self.pages.get_mut(tid.0 as usize) {
-            p.update_tup(tid.1, |t| t.cid = cid);
-        }
     }
 
     fn vm_pin(&mut self, blk: u32) {
@@ -1438,6 +1431,15 @@ impl Heap {
 
     /// Place a new tuple version on page `blk`.
     fn put(&mut self, blk: u32, t: Tup, frozen: bool) -> Tid {
+        let tid = self.put_quiet(blk, t, frozen);
+        self.visible_pages.changed();
+        self.publish_page(blk);
+        tid
+    }
+
+    /// `put`, its page's prune hint and the visibility watches left for the caller to
+    /// publish (once for a multi-insert's run of tuples on the page).
+    fn put_quiet(&mut self, blk: u32, t: Tup, frozen: bool) -> Tid {
         let p = &mut self.pages[blk as usize];
         if frozen && p.lps.is_empty() {
             p.set_all_visible(true, &mut self.visible_pages);
@@ -1445,12 +1447,10 @@ impl Heap {
             p.set_all_visible(false, &mut self.visible_pages);
         }
         let off = p.add(t);
-        self.visible_pages.changed();
         if p.settle_at != u64::MAX && !p.queued {
             p.queued = true;
             self.left.push_back(blk);
         }
-        self.publish_page(blk);
         if frozen {
             self.vm_pin(blk);
         }
@@ -1473,30 +1473,26 @@ impl Heap {
         }
     }
 
-    /// heap_insert.
-    pub fn insert(&mut self, key: Vec<u8>, len: usize, xmin: u64, mode: &mut InsertMode) -> Tid {
+    /// heap_insert, by command `cid`.
+    pub fn insert(&mut self, key: &[u8], len: usize, xmin: u64, cid: u32, mode: &mut InsertMode) -> Tid {
         let blk = self.get_buffer(len, None, mode.use_fsm, mode.bistate.as_mut(), 1);
         let xmin = if mode.frozen { 0 } else { xmin };
-        let tid = self.put(blk, Self::new_tup(len, xmin), mode.frozen);
-        self.placed(&key, tid);
-        self.keyed(&key, tid);
+        let tid = self.put(blk, Tup { cid, ..Self::new_tup(len, xmin) }, mode.frozen);
+        self.placed(key, tid);
+        self.keyed(key, tid);
         tid
     }
 
-    /// heap_multi_insert (a COPY batch).
-    pub fn multi_insert(
-        &mut self,
-        rows: Vec<(Vec<u8>, usize)>,
-        xmin: u64,
-        mode: &mut InsertMode,
-    ) -> Vec<Tid> {
+    /// heap_multi_insert (a COPY batch), by command `cid`: rows of these keys and tuple
+    /// lengths.
+    pub fn multi_insert(&mut self, rows: &[(&[u8], usize)], xmin: u64, cid: u32, mode: &mut InsertMode) -> Vec<Tid> {
         let lens: Vec<usize> = rows.iter().map(|r| r.1).collect();
         // (Room for the batch's keys at once: a load's map grows a batch at a time.)
         self.keys.reserve(rows.len(), rows.iter().map(|r| r.0.len()).sum());
-        let out = self.multi_place(&lens, xmin, mode);
-        for ((k, _), tid) in rows.into_iter().zip(&out) {
-            self.placed(&k, *tid);
-            self.keyed(&k, *tid);
+        let out = self.multi_place_cid(&lens, xmin, cid, mode);
+        for (&(k, _), &tid) in rows.iter().zip(&out) {
+            self.placed(k, tid);
+            self.keyed(k, tid);
         }
         out
     }
@@ -1512,6 +1508,10 @@ impl Heap {
     /// `multi_insert` of rows of these lengths onto their pages, without their keys (as
     /// `insert_unkeyed`; the pages are the same).
     pub fn multi_place(&mut self, lens: &[usize], xmin: u64, mode: &mut InsertMode) -> Vec<Tid> {
+        self.multi_place_cid(lens, xmin, 0, mode)
+    }
+
+    fn multi_place_cid(&mut self, lens: &[usize], xmin: u64, cid: u32, mode: &mut InsertMode) -> Vec<Tid> {
         let save = self.save_free();
         let pages_needed = |from: usize| {
             let mut avail = BLCKSZ - PAGE_HEADER - save;
@@ -1552,9 +1552,12 @@ impl Heap {
                 }
                 // (HEAP_INSERT_FROZEN: the tuple is frozen as it goes in.)
                 let x = if mode.frozen { 0 } else { xmin };
-                out.push(self.put(blk, Self::new_tup(len, x), mode.frozen));
+                out.push(self.put_quiet(blk, Tup { cid, ..Self::new_tup(len, x) }, mode.frozen));
                 n += 1;
             }
+            // (The page's tuples went in under its buffer lock: published once.)
+            self.visible_pages.changed();
+            self.publish_page(blk);
             done += n;
         }
         out
@@ -1633,9 +1636,7 @@ impl Heap {
         cmax: &mut dyn FnMut(&Tup) -> u32,
     ) -> (Tid, bool) {
         let Some((krow, (ob, ooff))) = self.locate_row(old_key, v) else {
-            let tid = self.insert(new_key.to_vec(), len, xid, &mut InsertMode::single());
-            self.set_raw_cid(tid, cid);
-            return (tid, false);
+            return (self.insert(new_key, len, xid, cid, &mut InsertMode::single()), false);
         };
         // (No pruning here: heap_update leaves that to the scans that read the page.)
         let free = self.pages[ob as usize].heap_free();
@@ -2469,7 +2470,16 @@ impl Heap {
         self.fsm = Fsm { blocks: fsm_blocks, pages: fsm };
         self.publish_pages();
         self.note_size();
+        self.freeze_pages();
         Some(())
+    }
+
+    /// Every page's line pointers as one run where they can be (`lps::Lps::freeze`): a
+    /// layout's pages.
+    fn freeze_pages(&mut self) {
+        for p in &mut self.pages {
+            p.lps.freeze();
+        }
     }
 }
 
@@ -2517,6 +2527,7 @@ pub fn restored_from<'k>(
         h.keyed(&k, tid);
         tids[i] = tid;
     }
+    h.freeze_pages();
     (h, moved, tids)
 }
 
@@ -2621,6 +2632,7 @@ pub fn rewritten(fillfactor: usize, rows: Vec<(Vec<u8>, usize)>) -> (Heap, Vec<T
         h.keyed(&k, tid);
         tids.push(tid);
     }
+    h.freeze_pages();
     (h, tids)
 }
 
@@ -2675,7 +2687,7 @@ mod tests {
             match (x >> 33) % 10 {
                 0..=3 => {
                     let k = i.to_be_bytes().to_vec();
-                    h.insert(k.clone(), 40 + (x >> 50) as usize % 400, 2, &mut mode);
+                    h.insert(&k, 40 + (x >> 50) as usize % 400, 2, 0, &mut mode);
                     keys.push(k);
                 }
                 4..=6 if !keys.is_empty() => {
@@ -2714,7 +2726,9 @@ mod tests {
         assert_visible_count(&h, 0);
 
         let mut frozen = InsertMode { frozen: true, ..InsertMode::bulk() };
-        let tids = h.multi_insert((0..20).map(|i| (vec![i], 2000)).collect(), 2, &mut frozen);
+        let keys: Vec<[u8; 1]> = (0..20).map(|i| [i]).collect();
+        let rows: Vec<(&[u8], usize)> = keys.iter().map(|k| (&k[..], 2000)).collect();
+        let tids = h.multi_insert(&rows, 2, 0, &mut frozen);
         assert_eq!(h.nblocks(), 5);
         assert_visible_count(&h, 5);
         h.seed_all_visible(u32::MAX);
@@ -2722,9 +2736,9 @@ mod tests {
         assert_visible_count(&h, 5);
 
         let mut mode = InsertMode::single();
-        h.insert(vec![100], 100, 2, &mut mode);
+        h.insert(&[100], 100, 2, 0, &mut mode);
         assert_visible_count(&h, 4);
-        h.insert(vec![101], 8, 2, &mut mode);
+        h.insert(&[101], 8, 2, 0, &mut mode);
         assert_visible_count(&h, 4);
         let (_, hot) = h.update(&[0], &[0], 100, 2, true, &v);
         assert!(hot);
@@ -2848,8 +2862,8 @@ mod tests {
         let v = Vis::new(&xids);
         let mut h = Heap::new(100);
         let mut mode = InsertMode::single();
-        let a = h.insert(b"a".to_vec(), 100, 2, &mut mode);
-        let b = h.insert(b"b".to_vec(), 100, 2, &mut mode);
+        let a = h.insert(b"a", 100, 2, 0, &mut mode);
+        let b = h.insert(b"b", 100, 2, 0, &mut mode);
         let (a2, hot) = h.update(b"a", b"a", 100, 2, true, &v);
         assert!(hot);
         let (c, _) = h.update(b"b", b"c", 100, 2, false, &v);
@@ -2878,17 +2892,17 @@ mod tests {
         let mut h = Heap::new(100);
         // (Frozen inserts: the vm fork exists.)
         let mut mode = InsertMode { frozen: true, ..InsertMode::single() };
-        h.insert(vec![0], 100, 2, &mut mode);
+        h.insert(&[0], 100, 2, 0, &mut mode);
         let w = h.sizes.watch();
         let mut i = 1u32;
         while h.nblocks() == 1 {
             assert!(w.holds(), "no page added yet ({i} rows)");
-            h.insert(i.to_be_bytes().to_vec(), 100, 2, &mut mode);
+            h.insert(&i.to_be_bytes(), 100, 2, 0, &mut mode);
             i += 1;
         }
         assert!(!w.holds());
         let w = h.sizes.watch();
-        h.insert(vec![9; 9], 100, 2, &mut mode);
+        h.insert(&[9; 9], 100, 2, 0, &mut mode);
         assert!(w.holds());
         h.truncate_vm();
         assert!(!w.holds(), "the vm fork went");

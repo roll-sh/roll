@@ -718,3 +718,35 @@ fn measured_serial_include_size() {
         }
     });
 }
+
+/// Hash, GIN and BRIN indexes of a table too big to model have the relpages and
+/// pg_relation_size PostgreSQL 18.6's build gives them (its numbers below), as those of a
+/// modelled table do: a build's pass over the rows lays them out (hash: `sizing::BigIndex`;
+/// GIN and BRIN: `am_measure`), and a modelled table's relpages are its models' sizes.
+#[test]
+fn hash_gin_brin_sizes_past_the_model() {
+    let want = [
+        "[Text(\"bx_b\"), Int4(3), Int8(3)]",
+        "[Text(\"bx_g\"), Int4(44), Int8(44)]",
+        "[Text(\"bx_h\"), Int4(136), Int8(136)]",
+        "[Text(\"bx_hid\"), Int4(130), Int8(130)]",
+    ];
+    let sizes = "SELECT c.relname::text, c.relpages, pg_relation_size(c.oid) / 8192 FROM pg_class c WHERE relname LIKE 'bx_%' ORDER BY 1";
+    for big in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let eng = open(dir.path());
+        let go = || {
+            let mut s = eng.connect(1, "postgres", "postgres", "t").unwrap();
+            run(&mut s, "CREATE TABLE bx (id int, a int, tags int[], doc text);
+                 INSERT INTO bx SELECT g, g % 997, ARRAY[g % 50, g % 7, g % 1000], 'w' || (g % 300) || ' x' || (g % 11) FROM generate_series(1, 30000) g;
+                 CREATE INDEX bx_h ON bx USING hash (a);
+                 CREATE INDEX bx_hid ON bx USING hash (id);
+                 CREATE INDEX bx_g ON bx USING gin (tags);
+                 CREATE INDEX bx_b ON bx USING brin (id)");
+            assert_eq!(rows(&mut s, sizes), want, "built, too big to model: {big}");
+            run(&mut s, "VACUUM bx");
+            assert_eq!(rows(&mut s, sizes), want, "vacuumed, too big to model: {big}");
+        };
+        if big { with_max_versions(5000, go) } else { go() }
+    }
+}

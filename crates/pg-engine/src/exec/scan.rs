@@ -4105,7 +4105,7 @@ impl ScanNode {
         // read here and put in heap order, as the serial scan puts them (`heap_order`), and
         // the workers take runs of them (filters, probes and lookups above in parallel).
         let mut reordered = false;
-        if super::sizing::heap_modelled(&p.table, ctx) {
+        if super::sizing::heap_modelled_or_kept(&p.table, ctx) {
             // A modelled heap's rows are read so only when no page would be pruned as the
             // scan reaches it, and not by the scan that found it unmodelled (its pages unknown
             // when it began, `nblocks`: serial). Rows stored in heap order are read in chunks
@@ -4264,7 +4264,7 @@ impl ScanNode {
         let Some(snap) = ctx.snapshot() else {
             return Ok(None);
         };
-        if workers == 0 || super::sizing::heap_modelled(&p.table, ctx) {
+        if workers == 0 || super::sizing::heap_modelled_or_kept(&p.table, ctx) {
             return Ok(None);
         }
         let txn = ctx.txn.borrow();
@@ -4355,7 +4355,7 @@ impl ScanNode {
         let Some(snap) = ctx.snapshot() else {
             return Ok(None);
         };
-        if workers == 0 || super::sizing::heap_modelled(&p.table, ctx) {
+        if workers == 0 || super::sizing::heap_modelled_or_kept(&p.table, ctx) {
             return Ok(None);
         }
         let Some(fetch) = ctx.txn.borrow().store_reader(&snap) else {
