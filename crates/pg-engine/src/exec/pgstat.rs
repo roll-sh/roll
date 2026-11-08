@@ -940,8 +940,7 @@ pub fn hold_inserts(ctx: &ExecCtx) {
     ctx.txn.borrow_mut().pgstat.held.get_or_insert_with(Vec::new);
 }
 
-/// A stored row's pg_stat counts (`store_inserted`): held while a multi-insert COPY holds
-/// them (not a temporary table's, whose I/O follows its model row by row).
+/// Hold a COPY heap insertion until its buffer flushes. Temporary tables count at once.
 fn hold_insert(ctx: &ExecCtx, t: &crate::catalog::Table) -> bool {
     if !t.temporary {
         let mut txn = ctx.txn.borrow_mut();
@@ -963,6 +962,7 @@ pub fn count_failed_insert(ctx: &ExecCtx, t: &crate::catalog::Table) {
     }
 }
 
+/// A stored row's counts and I/O (`store_inserted`), held until the COPY buffer flushes.
 pub fn count_stored(ctx: &ExecCtx, t: &crate::catalog::Table) {
     if !hold_insert(ctx, t) {
         count_insert(ctx, t.oid, 1);
