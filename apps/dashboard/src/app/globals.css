@@ -697,10 +697,11 @@ body {
   background: linear-gradient(var(--bar), var(--bar)) 0 50% / 100% 0.62em no-repeat;
   border-radius: 999px;
 }
-/* Far out a card drops its shadow. Scaled this far down, WebKit draws a card's small blurred
-   shadow as a hard 1 px line a few px beside its straight right side (dark on white in light
-   mode; the shadow itself is a 1–4 px blur at 5–8 %, nothing you'd see at this size anyway). */
-[data-greek] [data-card] {
+/* Small, a card is flat: no shadow (a toned one's frame already replaces it). Scaled this far
+   down, WebKit draws a card's small blurred shadow as a hard 1 px line a few px beside its
+   straight right side (dark on white in light mode; seen at 43 % and below), and the shadow itself,
+   a few px of blur at 5–8 %, is nothing you'd see at this size. */
+[data-brief] [data-card] {
   --card-shadow: 0 0 #0000;
   --card-shadow-hover: 0 0 #0000;
 }

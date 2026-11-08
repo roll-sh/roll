@@ -145,7 +145,7 @@ async function read(page) {
 /**
  * t: hard lines just outside a card, from the pixels. Per card, the column average over the middle
  * half of its height in the 1–6 px right of it, against the background 10–12 px out; a step over
- * 12 (of 255) is a line. A card's own shadow falls off softly (≤ 7); WebKit drew a small blurred
+ * 12 (of 255; 20 in the first column) is a line. A card's own shadow falls off softly (≤ 7); WebKit drew a small blurred
  * shadow scaled far down as a hard line there (light mode, ~4 px out, 16–36). Skips a card with
  * another card or chrome in that strip. The connectors and the dot grid (the canvas's own
  * `<canvas>`, behind the cards) are hidden for the shot: a trunk beside a card is no defect.
@@ -197,12 +197,14 @@ async function hairlines(page) {
         return s / (y1 - y0);
       };
       const bg = (col(x0 + 10) + col(x0 + 11) + col(x0 + 12)) / 3;
+      // The first column out can hold the card's own border, anti-aliased off a fractional edge
+      // (≤ 15); the line WebKit drew there was 26–47.
       let worst = { dx: 0, step: 0 };
       for (let dx = 1; dx <= 6; dx++) {
-        const step = Math.abs(bg - col(x0 + dx));
+        const step = Math.abs(bg - col(x0 + dx)) - (dx === 1 ? 8 : 0);
         if (step > worst.step) worst = { dx, step };
       }
-      if (worst.step > 12) hits.push(`${key} (${worst.dx} px out, step ${worst.step.toFixed(0)})`);
+      if (worst.step > 12) hits.push(`${key} (${worst.dx} px out, step ${(worst.step + (worst.dx === 1 ? 8 : 0)).toFixed(0)})`);
     }
     return hits;
   }, png.toString("base64"));

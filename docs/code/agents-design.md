@@ -115,8 +115,8 @@ punch out the edge ports. `refreshColors()` reruns on a theme change (the canvas
   stays red, waiting and running the accent), a card with no tone takes the accent, an offline
   machine keeps its dashes, firmer. Never a halo, ring or second outline
   (`[data-card][data-selected]` in globals.css).
-- **Far out** (below 40 %, `data-greek`): no card shadow. WebKit draws a small blur scaled that
-  far down as a hard 1px line beside the card.
+- **Small** (below 55 %, `data-brief`): no card shadow, every card flat. WebKit draws a small
+  blur scaled that far down as a hard 1px line beside the card (checker `t`).
 - **Header:** an `IconTile` (24px, `bg-panel-2`, a hairline, the highlight, a 14px icon), then the
   name in 13.5px at weight 590, then the status. Body text is 12–13px. Meta is 11px, with
   `font-mono tabular-nums` for numbers.
