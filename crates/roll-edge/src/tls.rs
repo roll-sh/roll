@@ -154,6 +154,26 @@ pub fn server_config(store: Arc<CertStore>, alpn: &[&[u8]]) -> Arc<ServerConfig>
     Arc::new(cfg)
 }
 
+/// [`server_config`], requiring a client certificate that chains to one of `client_roots`.
+pub fn server_config_verifying_clients(store: Arc<CertStore>, alpn: &[&[u8]], client_roots: &[CertificateDer<'static>]) -> anyhow::Result<Arc<ServerConfig>> {
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let mut roots = rustls::RootCertStore::empty();
+    for r in client_roots {
+        roots.add(r.clone())?;
+    }
+    let verifier = rustls::server::WebPkiClientVerifier::builder_with_provider(Arc::new(roots), provider.clone()).build()?;
+    let mut cfg = ServerConfig::builder_with_provider(provider).with_safe_default_protocol_versions()?.with_client_cert_verifier(verifier).with_cert_resolver(store);
+    cfg.alpn_protocols = alpn.iter().map(|p| p.to_vec()).collect();
+    Ok(Arc::new(cfg))
+}
+
+/// The certificates in a PEM bundle.
+pub fn pem_certificates(pem: &str) -> anyhow::Result<Vec<CertificateDer<'static>>> {
+    let certs = CertificateDer::pem_slice_iter(pem.as_bytes()).collect::<Result<Vec<_>, _>>().context("PEM certificates")?;
+    anyhow::ensure!(!certs.is_empty(), "no certificate in the PEM bundle");
+    Ok(certs)
+}
+
 /// A directory of `<name>.crt` + `<name>.key` pairs (PEM): the dev mode's certificates, or
 /// certificates an operator provides. Pairs are reloaded when their files change.
 pub struct CertDir {

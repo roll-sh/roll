@@ -54,19 +54,34 @@ pub struct HttpsConfig {
     /// Whose `CF-Connecting-IP` to believe.
     pub cloudflare: TrustedProxies,
     pub listen: ListenOptions,
+    /// Authenticated origin pulls: the TLS config (requiring Cloudflare's client certificate)
+    /// for the hostnames Cloudflare proxies. Requests for those hostnames on a connection
+    /// without that certificate are refused, whatever its server name was.
+    pub origin_pull: Option<Arc<ServerConfig>>,
 }
 
 /// The ALPN the HTTPS listener offers.
 pub const ALPN: &[&[u8]] = &[b"http/1.1"];
 
-/// Serve HTTPS on `listener` forever. When draining starts, keep-alive connections are closed
-/// after their request in flight, so clients reconnect (through a node that isn't stopping).
+/// Serve HTTPS on `listener` forever. When the drain closes listeners, keep-alive connections
+/// are closed after their request in flight, so clients reconnect through another node.
 pub async fn serve(listener: TcpListener, tls: Arc<ServerConfig>, cfg: Arc<HttpsConfig>, routes: Arc<dyn Routes>, drain: Drain) -> std::io::Result<()> {
     let opts = cfg.listen;
-    listener::serve_tls(listener, tls, opts, move |stream, accepted| {
-        let (cfg, routes, drain) = (cfg.clone(), routes.clone(), drain.clone());
+    let pick = {
+        let cfg = cfg.clone();
+        Arc::new(move |sni: Option<&str>| match (&cfg.origin_pull, sni) {
+            (Some(pull), Some(name)) if cfg.hosts.classify(name).proxied() => pull.clone(),
+            _ => tls.clone(),
+        })
+    };
+    listener::serve_tcp(listener, opts, move |sock, peer| {
+        let (cfg, routes, drain, pick) = (cfg.clone(), routes.clone(), drain.clone(), pick.clone());
         async move {
-            let peer = accepted.peer;
+            let (stream, accepted) = match tokio::time::timeout(opts.handshake_timeout, listener::handshake_by_name(sock, peer, pick.as_ref())).await {
+                Ok(Ok(x)) => x,
+                Ok(Err(e)) => return debug!(%peer, error = %e, "edge: TLS handshake failed"),
+                Err(_) => return debug!(%peer, "edge: TLS handshake timed out"),
+            };
             let svc = hyper::service::service_fn(move |req| {
                 let (cfg, routes, accepted) = (cfg.clone(), routes.clone(), accepted.clone());
                 async move { Ok::<_, Infallible>(handle(req, &accepted, &cfg, routes.as_ref()).await) }
@@ -79,7 +94,7 @@ pub async fn serve(listener: TcpListener, tls: Arc<ServerConfig>, cfg: Arc<Https
             tokio::pin!(conn);
             let result = tokio::select! {
                 r = conn.as_mut() => r,
-                _ = drain.draining() => {
+                _ = drain.closing() => {
                     conn.as_mut().graceful_shutdown();
                     conn.await
                 }
@@ -115,6 +130,9 @@ async fn handle(mut req: Request<Incoming>, accepted: &Accepted, cfg: &HttpsConf
     let host = req.headers().get(header::HOST).and_then(|h| h.to_str().ok()).map(str::to_string).or_else(|| req.uri().authority().map(|a| a.to_string()));
     let Some(host_name) = host else { return text(StatusCode::BAD_REQUEST, "no Host header\n") };
     let host = cfg.hosts.classify(&host_name);
+    if cfg.origin_pull.is_some() && host.proxied() && !accepted.client_verified {
+        return text(StatusCode::FORBIDDEN, "this hostname is served only through Cloudflare\n");
+    }
     let client = client_addr(accepted, &host, req.headers(), &cfg.cloudflare);
     let headers = req.headers_mut();
     for h in FORWARDING_HEADERS {

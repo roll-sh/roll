@@ -29,15 +29,36 @@ fn hosts() -> Hostnames {
     Hostnames::new("roll.test", "rollsite.test", "r1")
 }
 
-/// A client that trusts exactly `roots`.
-fn connector(roots: &[CertificateDer<'static>]) -> TlsConnector {
+/// A client that trusts exactly `roots`, with a client certificate to show when asked.
+fn connector(roots: &[CertificateDer<'static>], client: Option<&CertPem>) -> TlsConnector {
+    use rustls::pki_types::PrivateKeyDer;
+    use rustls::pki_types::pem::PemObject;
     let mut store = RootCertStore::empty();
     for r in roots {
         store.add(r.clone()).unwrap();
     }
     let provider = Arc::new(rustls::crypto::ring::default_provider());
-    let cfg = ClientConfig::builder_with_provider(provider).with_safe_default_protocol_versions().unwrap().with_root_certificates(store).with_no_client_auth();
+    let builder = ClientConfig::builder_with_provider(provider).with_safe_default_protocol_versions().unwrap().with_root_certificates(store);
+    let cfg = match client {
+        Some(c) => builder.with_client_auth_cert(vec![leaf(c)], PrivateKeyDer::from_pem_slice(c.key.as_bytes()).unwrap()).unwrap(),
+        None => builder.with_no_client_auth(),
+    };
     TlsConnector::from(Arc::new(cfg))
+}
+
+/// A CA standing in for Cloudflare's origin-pull CA, and a client certificate it issued.
+fn origin_pull_ca() -> (CertificateDer<'static>, CertPem) {
+    let ca_key = rcgen::KeyPair::generate().unwrap();
+    let mut ca = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+    ca.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+    ca.distinguished_name.push(rcgen::DnType::CommonName, "origin-pull.test");
+    let ca_cert = ca.self_signed(&ca_key).unwrap();
+    let issuer = rcgen::Issuer::new(ca, ca_key);
+    let key = rcgen::KeyPair::generate().unwrap();
+    let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+    params.extended_key_usages = vec![rcgen::ExtendedKeyUsagePurpose::ClientAuth];
+    let cert = params.signed_by(&key, &issuer).unwrap();
+    (ca_cert.der().clone(), CertPem { chain: cert.pem(), key: key.serialize_pem() })
 }
 
 fn leaf(pem: &CertPem) -> CertificateDer<'static> {
@@ -113,18 +134,39 @@ async fn https_routes_by_host_and_tells_handlers_the_client() {
         Host::Tasks => Target::Router(tasks.clone()),
         _ => Target::NotFound,
     };
-    let cfg = HttpsConfig { hosts, cloudflare: TrustedProxies::parse("198.51.100.0/24").unwrap(), listen: ListenOptions { proxy_protocol: true, ..Default::default() } };
+    let (pull_ca, pull_client) = origin_pull_ca();
+    let origin_pull = Some(roll_edge::tls::server_config_verifying_clients(store.clone(), roll_edge::http::ALPN, &[pull_ca]).unwrap());
+    let cfg = HttpsConfig { hosts, cloudflare: TrustedProxies::parse("198.51.100.0/24").unwrap(), listen: ListenOptions { proxy_protocol: true, ..Default::default() }, origin_pull };
     let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = l.local_addr().unwrap();
     let tls = roll_edge::tls::server_config(store, roll_edge::http::ALPN);
     tokio::spawn(roll_edge::http::serve(l, tls, Arc::new(cfg), Arc::new(routes), Drain::new()));
-    let c = connector(&[leaf(&cert)]);
+    // Cloudflare shows its origin-pull certificate; anyone else has none to show.
+    let c = connector(&[leaf(&cert)], Some(&pull_client));
+    let direct = connector(&[leaf(&cert)], None);
 
     // The PROXY header's source is the client; what the client says about itself isn't.
     let (s, body) = request(addr, "203.0.113.7:4242", "api.roll.test", "/whoami", &[("X-Forwarded-For", "10.9.9.9")], &c).await;
     assert_eq!((s, body.as_str()), (200, "api 203.0.113.7:4242 203.0.113.7"));
-    let (s, body) = request(addr, "203.0.113.7:4242", "tasks.r1.roll.test", "/", &[], &c).await;
-    assert_eq!((s, body.as_str()), (200, "tasks"));
+    let (s, body) = request(addr, "203.0.113.7:4242", "tasks.r1.roll.test", "/", &[], &direct).await;
+    assert_eq!((s, body.as_str()), (200, "tasks"), "DNS-only hostnames need no client certificate");
+    // Proxied hostnames only through Cloudflare: no handshake without its certificate, and no
+    // proxied Host on a connection that came in under a DNS-only name.
+    let mut tcp = TcpStream::connect(addr).await.unwrap();
+    tcp.write_all(&proxy_protocol::encode_v2("203.0.113.7:1".parse().unwrap(), addr)).await.unwrap();
+    let refused = async {
+        let mut tls = direct.connect(ServerName::try_from("api.roll.test").unwrap(), tcp).await?;
+        tls.write_all(b"GET /whoami HTTP/1.1\r\nHost: api.roll.test\r\nConnection: close\r\n\r\n").await?;
+        let mut out = Vec::new();
+        tls.read_to_end(&mut out).await?;
+        Ok::<_, std::io::Error>(out)
+    };
+    assert!(refused.await.is_err_or_empty(), "no handshake without the origin-pull certificate");
+    let mut tls = tls_connect(addr, "203.0.113.7:1".parse().unwrap(), "git.roll.test", &direct).await;
+    tls.write_all(b"GET /whoami HTTP/1.1\r\nHost: api.roll.test\r\nConnection: close\r\n\r\n").await.unwrap();
+    let mut out = String::new();
+    let _ = tls.read_to_string(&mut out).await;
+    assert!(out.starts_with("HTTP/1.1 403"), "{out}");
     // `.git` paths on the dashboard's host go to code, the rest to the dashboard.
     let (_, body) = request(addr, "203.0.113.7:1", "roll.test", "/o/r.git/info/refs", &[], &c).await;
     assert_eq!(body, "git /git/o/r.git/info/refs 203.0.113.7");
@@ -133,7 +175,7 @@ async fn https_routes_by_host_and_tells_handlers_the_client() {
     assert_eq!(body, "dashboard /dashboard 192.0.2.44");
     let (_, body) = request(addr, "203.0.113.7:1", "roll.test", "/dashboard", &[("CF-Connecting-IP", "192.0.2.44")], &c).await;
     assert_eq!(body, "dashboard /dashboard 203.0.113.7", "not from anyone else");
-    let (_, body) = request(addr, "198.51.100.7:1", "git.roll.test", "/o/r.git/info/refs", &[("CF-Connecting-IP", "192.0.2.44")], &c).await;
+    let (_, body) = request(addr, "198.51.100.7:1", "git.roll.test", "/o/r.git/info/refs", &[("CF-Connecting-IP", "192.0.2.44")], &direct).await;
     assert_eq!(body, "git /git/o/r.git/info/refs 198.51.100.7", "nor on a DNS-only hostname");
     let (s, _) = request(addr, "203.0.113.7:1", "ep1.pg.r1.roll.test", "/", &[], &c).await;
     assert_eq!(s, 404);
@@ -163,6 +205,17 @@ impl Issuer for ShortLived {
             let cert = params.self_signed(&key)?;
             Ok(CertPem { chain: cert.pem(), key: key.serialize_pem() })
         })
+    }
+}
+
+/// A failed handshake reads as an error, or as the connection closing with nothing said.
+trait ErrOrEmpty {
+    fn is_err_or_empty(&self) -> bool;
+}
+
+impl ErrOrEmpty for std::io::Result<Vec<u8>> {
+    fn is_err_or_empty(&self) -> bool {
+        self.as_ref().map_or(true, |v| v.is_empty())
     }
 }
 

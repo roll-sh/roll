@@ -3,6 +3,11 @@
 //!
 //! The list is Cloudflare's published ranges (https://www.cloudflare.com/ips/). It changes
 //! rarely; `ROLL_EDGE_CLOUDFLARE_IPS` (comma-separated CIDRs) replaces it without a release.
+//!
+//! Proxied hostnames also prove they came through Cloudflare with authenticated origin pulls:
+//! Cloudflare presents a client certificate from its origin-pull CA ([`CLOUDFLARE_ORIGIN_PULL_CA`],
+//! https://developers.cloudflare.com/ssl/static/authenticated_origin_pull_ca.pem, valid to
+//! 2029-11-01). `ROLL_EDGE_ORIGIN_PULL_CA` (a PEM file) replaces it without a release.
 
 use ipnet::IpNet;
 use std::net::IpAddr;
@@ -32,6 +37,9 @@ pub const CLOUDFLARE_RANGES: &[&str] = &[
     "2a06:98c0::/29",
     "2c0f:f248::/32",
 ];
+
+/// Cloudflare's origin-pull CA (global authenticated origin pulls).
+pub const CLOUDFLARE_ORIGIN_PULL_CA: &str = include_str!("cloudflare-origin-pull-ca.pem");
 
 #[derive(Clone, Debug)]
 pub struct TrustedProxies {

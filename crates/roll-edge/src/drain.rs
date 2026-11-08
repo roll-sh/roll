@@ -1,6 +1,8 @@
 //! Whether this node should get new connections: `GET /healthz` (the NLB's health check) says 200
-//! while it serves and isn't draining. A stopping node starts draining (SIGTERM), fails the check,
-//! and waits for the NLB to stop sending before it hands its work to the others.
+//! while it serves and isn't draining. A stopping node starts draining (SIGTERM) and fails the
+//! check at once, keeps accepting and serving while the NLB takes it out (its health check every
+//! 5 s, out after 2 failures, then deregistration: at least 15 s), then closes its listeners'
+//! connections ([`Drain::close`]) and hands its work to the others.
 
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
@@ -11,6 +13,7 @@ use tokio::sync::watch;
 struct State {
     serving: bool,
     draining: bool,
+    closing: bool,
 }
 
 /// Shared by everything that needs to know: the health check, the listeners (which close
@@ -34,7 +37,7 @@ impl std::fmt::Debug for Drain {
 impl Drain {
     /// Not serving yet, not draining.
     pub fn new() -> Self {
-        Self(Arc::new(watch::channel(State { serving: false, draining: false }).0))
+        Self(Arc::new(watch::channel(State { serving: false, draining: false, closing: false }).0))
     }
 
     /// The listeners are up (or, `false`, down).
@@ -45,6 +48,21 @@ impl Drain {
     /// Start draining. It doesn't stop.
     pub fn start(&self) {
         self.0.send_modify(|s| s.draining = true);
+    }
+
+    /// Close the listeners' connections (after the load balancer has stopped sending new ones):
+    /// keep-alive connections end after their request in flight. Draining too.
+    pub fn close(&self) {
+        self.0.send_modify(|s| {
+            s.draining = true;
+            s.closing = true;
+        });
+    }
+
+    /// Resolves once [`Drain::close`] was called.
+    pub async fn closing(&self) {
+        let mut rx = self.0.subscribe();
+        let _ = rx.wait_for(|s| s.closing).await;
     }
 
     pub fn is_draining(&self) -> bool {

@@ -9,7 +9,7 @@ use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_rustls::rustls::ServerConfig;
 use tokio_rustls::server::TlsStream;
-use tokio_rustls::TlsAcceptor;
+use tokio_rustls::{LazyConfigAcceptor, TlsAcceptor};
 use tracing::{debug, warn};
 
 /// How a connection arrived.
@@ -23,6 +23,9 @@ pub struct Accepted {
     pub sni: Option<String>,
     /// The protocol ALPN settled on.
     pub alpn: Option<Vec<u8>>,
+    /// The client presented a certificate the config's verifier accepted (only configs with a
+    /// client verifier ask for one).
+    pub client_verified: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -52,8 +55,31 @@ pub async fn client_addr(sock: &mut TcpStream, peer: SocketAddr, proxy_protocol:
 pub async fn handshake(sock: TcpStream, peer: SocketAddr, tls: &TlsAcceptor) -> std::io::Result<(TlsStream<TcpStream>, Accepted)> {
     let local = sock.local_addr()?;
     let stream = tls.accept(sock).await?;
+    let accepted = accepted(&stream, peer, local);
+    Ok((stream, accepted))
+}
+
+fn accepted(stream: &TlsStream<TcpStream>, peer: SocketAddr, local: SocketAddr) -> Accepted {
     let conn = stream.get_ref().1;
-    let accepted = Accepted { peer, local, sni: conn.server_name().map(str::to_ascii_lowercase), alpn: conn.alpn_protocol().map(<[u8]>::to_vec) };
+    Accepted {
+        peer,
+        local,
+        sni: conn.server_name().map(str::to_ascii_lowercase),
+        alpn: conn.alpn_protocol().map(<[u8]>::to_vec),
+        client_verified: conn.peer_certificates().is_some_and(|c| !c.is_empty()),
+    }
+}
+
+/// Finish a TLS handshake with the config `pick` chooses for the ClientHello's server name.
+pub async fn handshake_by_name<P>(sock: TcpStream, peer: SocketAddr, pick: &P) -> std::io::Result<(TlsStream<TcpStream>, Accepted)>
+where
+    P: Fn(Option<&str>) -> Arc<ServerConfig>,
+{
+    let local = sock.local_addr()?;
+    let start = LazyConfigAcceptor::new(Default::default(), sock).await?;
+    let config = pick(start.client_hello().server_name());
+    let stream = start.into_stream(config).await?;
+    let accepted = accepted(&stream, peer, local);
     Ok((stream, accepted))
 }
 

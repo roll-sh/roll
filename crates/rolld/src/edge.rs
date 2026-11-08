@@ -87,6 +87,18 @@ pub struct EdgeArgs {
     /// Replaces Cloudflare's published ranges (whose `CF-Connecting-IP` is believed).
     #[arg(long = "edge-cloudflare-ips", env = "ROLL_EDGE_CLOUDFLARE_IPS")]
     pub cloudflare_ips: Option<String>,
+    /// Authenticated origin pulls: Cloudflare-proxied hostnames (`roll.sh`, `api.roll.sh`,
+    /// `*.roll.site`) are served only to Cloudflare's origin-pull client certificate. Default:
+    /// on, except in dev mode (`ROLL_EDGE_CERT_DIR`).
+    #[arg(long = "edge-origin-pull", env = "ROLL_EDGE_ORIGIN_PULL", value_parser = clap::builder::BoolishValueParser::new(), num_args = 0..=1, default_missing_value = "true")]
+    pub origin_pull: Option<bool>,
+    /// A PEM bundle replacing the origin-pull CA built in (Cloudflare's).
+    #[arg(long = "edge-origin-pull-ca", env = "ROLL_EDGE_ORIGIN_PULL_CA")]
+    pub origin_pull_ca: Option<PathBuf>,
+    /// Seconds a stopping node keeps its public listeners serving after `/healthz` starts failing,
+    /// so the NLB takes it out first (health check every 5 s, 2 failures, deregistration).
+    #[arg(long = "edge-drain-delay", env = "ROLL_EDGE_DRAIN_DELAY", default_value_t = 15)]
+    pub drain_delay_s: u64,
     /// The dashboard (`roll.sh`), proxied with WebSockets: `http://127.0.0.1:3000` in the task.
     #[arg(long = "dashboard-upstream", env = "ROLL_DASHBOARD_UPSTREAM")]
     pub dashboard_upstream: Option<String>,
@@ -184,6 +196,17 @@ impl Edge {
 
         let mut served: Vec<Served> = vec![];
         // HTTPS.
+        let origin_pull = match e.origin_pull.unwrap_or(e.cert_dir.is_none()) {
+            true => {
+                let pem = match &e.origin_pull_ca {
+                    Some(f) => std::fs::read_to_string(f).map_err(|err| anyhow::anyhow!("ROLL_EDGE_ORIGIN_PULL_CA {}: {err}", f.display()))?,
+                    None => roll_edge::trusted::CLOUDFLARE_ORIGIN_PULL_CA.to_string(),
+                };
+                let roots = roll_edge::tls::pem_certificates(&pem)?;
+                Some(roll_edge::tls::server_config_verifying_clients(store.clone(), roll_edge::http::ALPN, &roots)?)
+            }
+            false => None,
+        };
         let https = HttpsConfig {
             hosts: hosts.clone(),
             cloudflare: match &e.cloudflare_ips {
@@ -191,6 +214,7 @@ impl Edge {
                 None => roll_edge::trusted::TrustedProxies::cloudflare(),
             },
             listen: opts,
+            origin_pull,
         };
         let routes = HttpRoutes::new(args, &p)?;
         let l = bind(e.https).await?;
@@ -238,12 +262,7 @@ impl Edge {
             }
             d.set_serving(true);
         });
-        let d = drain.clone();
-        tokio::spawn(async move {
-            crate::shutdown_signal().await;
-            info!("edge: draining (health checks fail from now on)");
-            d.start();
-        });
+        let _ = STOPPING.set((drain.clone(), Duration::from_secs(e.drain_delay_s)));
 
         let mut internal = drain.router();
         if let Some(secret) = ["ROLL_CLUSTER_SECRET", "ROLL_CODE_CLUSTER_SECRET"].iter().find_map(|k| std::env::var(k).ok().filter(|v| !v.is_empty())) {
@@ -272,6 +291,21 @@ impl Edge {
     pub fn drain(&self) -> Drain {
         self.drain.clone()
     }
+}
+
+/// The edge's drain and how long it keeps serving once health checks fail.
+static STOPPING: std::sync::OnceLock<(Drain, Duration)> = std::sync::OnceLock::new();
+
+/// After the stop signal, before anything else stops: fail `/healthz` at once, keep the public
+/// listeners serving while the NLB takes this node out, then close their connections. Returns
+/// right away without the edge.
+pub async fn stopping() {
+    let Some((drain, delay)) = STOPPING.get() else { return };
+    drain.start();
+    info!(delay_s = delay.as_secs(), "edge: draining; health checks fail, listeners keep serving until the NLB lets go");
+    tokio::time::sleep(*delay).await;
+    drain.close();
+    info!("edge: listeners closing");
 }
 
 /// The internal API's extra routes (`/healthz`, the splice hop) on top of `api`.

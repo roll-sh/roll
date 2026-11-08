@@ -814,6 +814,8 @@ async fn shutdown_signal() {
     }
     #[cfg(not(unix))]
     let _ = tokio::signal::ctrl_c().await;
+    // With the edge: out of the load balancer before anything stops.
+    edge::stopping().await;
 }
 
 #[cfg(test)]
