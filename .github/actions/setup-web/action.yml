@@ -16,12 +16,12 @@ runs:
       run: |
         version=$(jq -r '.packageManager | sub("^pnpm@"; "")' package.json)
         mkdir -p "$RUNNER_TEMP/pnpm"
-        if curl -fsSL --retry 3 --retry-all-errors -o "$RUNNER_TEMP/pnpm.tar.gz" "https://github.com/pnpm/pnpm/releases/download/v$version/pnpm-linux-x64.tar.gz"; then
+        if curl -fsSL --max-time 20 --retry 1 --retry-all-errors -o "$RUNNER_TEMP/pnpm.tar.gz" "https://github.com/pnpm/pnpm/releases/download/v$version/pnpm-linux-x64.tar.gz"; then
           tar -xzf "$RUNNER_TEMP/pnpm.tar.gz" -C "$RUNNER_TEMP/pnpm"
           echo "$RUNNER_TEMP/pnpm" >> "$GITHUB_PATH"
           pnpm="$RUNNER_TEMP/pnpm/pnpm"
         else
-          # GitHub's release downloads can 504 for minutes at a time; npm has the same version.
+          # GitHub's release downloads can 503/504 or hang for minutes at a time; npm has the same version.
           npm install -g --no-fund --no-audit "pnpm@$version"
           pnpm=pnpm
         fi
