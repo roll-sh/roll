@@ -28,6 +28,9 @@ import { openMachineSettings, ProviderSetup } from "./provider-setup";
 import { canRunAgents, notReadyReason, readiness } from "@/lib/agents-setup";
 import { cn } from "./ui/cn";
 import { fitWords, unbroken } from "./fit-words";
+import { onThreadContextMenu, ThreadMenuButton } from "./thread-menu";
+import type { MenuItem as MenuEntry } from "./menu";
+import { Tip } from "./ui/tooltip";
 
 /**
  * The frame every canvas card shares: flat panel, hairline border, the whole card a drag handle.
@@ -46,6 +49,7 @@ export function Card({
   children,
   className = "",
   onClick,
+  onContextMenu,
   label,
 }: {
   width: number;
@@ -57,6 +61,8 @@ export function Card({
   children: ReactNode;
   className?: string;
   onClick?: () => void;
+  /** Its menu on a right-click (a thread's: thread-menu.tsx). */
+  onContextMenu?: (e: React.MouseEvent) => void;
   label?: string;
 }) {
   // Offline is a state of its own, not a dimmed card: the frame turns dashed, everything in it reads.
@@ -69,6 +75,7 @@ export function Card({
       tabIndex={onClick ? 0 : undefined}
       aria-label={label}
       onClick={onClick}
+      onContextMenu={onContextMenu}
       onKeyDown={
         onClick
           ? (e) => {
@@ -127,19 +134,20 @@ function HoverActions({ children, className = "", ...data }: { children: ReactNo
 /** A card's button; `launch` also makes it a handle to drag onto the canvas (`p:…`, `m:…`, `t:…`). */
 function Tool({ label, onClick, disabled, launch, children }: { label: string; onClick: () => void; disabled?: boolean; launch?: string; children: ReactNode }) {
   return (
+    <Tip label={label}>
     <button
       onClick={(e) => {
         e.stopPropagation();
         onClick();
       }}
       disabled={disabled}
-      title={label}
       aria-label={label}
       data-launch={disabled ? undefined : launch}
       className={`grid size-6 place-items-center rounded-md transition-colors duration-150 hover:bg-panel-3 hover:text-fg disabled:opacity-30 [&>svg]:size-3.5 [&>svg]:stroke-[1.75] ${launch && !disabled ? "cursor-grab active:cursor-grabbing" : ""}`}
     >
       {children}
     </button>
+    </Tip>
   );
 }
 
@@ -537,7 +545,28 @@ export interface InsideRow {
 }
 
 /** A thread's card from its facts alone, so it renders again only when they change. */
-export const ThreadCard = memo(function ThreadCard({ thread, machine, project, lastRun, pending, terminals, orchestrated, inside, section }: { thread: Thread; machine: Machine | undefined; inside?: readonly InsideRow[]; section?: string | null } & ThreadFacts) {
+export const ThreadCard = memo(function ThreadCard({
+  thread,
+  machine,
+  project,
+  lastRun,
+  pending,
+  terminals,
+  orchestrated,
+  inside,
+  section,
+  tools,
+  menu,
+}: {
+  thread: Thread;
+  machine: Machine | undefined;
+  inside?: readonly InsideRow[];
+  section?: string | null;
+  /** The place's own tools, first in the card's (the canvas's pins). */
+  tools?: ReactNode;
+  /** The place's own items in the thread's menu (pin and unpin on the canvas). */
+  menu?: () => MenuEntry[];
+} & ThreadFacts) {
   const { client, openThread, startNew, readOnly } = useAgents();
   const providers = machine?.info?.providers ?? NO_PROVIDERS;
   const { run: runFork, error: forkError } = useRun();
@@ -575,7 +604,16 @@ export const ThreadCard = memo(function ThreadCard({ thread, machine, project, l
   const said = !!(error || delivered || (line && !(!asks && !running && line.trim().toLowerCase() === thread.title.trim().toLowerCase())) || (!lastRun && thread.status === "idle" && !thread.error));
   // Where it sits says its project and machine (the tree, its colour): the card says what tells it apart.
   return (
-    <Card width={296} height={THREAD_H} tone={tone} tint={project ? projectColor(project) : undefined} edge onClick={() => openThread(thread.id)} label={`Thread ${thread.title}`}>
+    <Card
+      width={296}
+      height={THREAD_H}
+      tone={tone}
+      tint={project ? projectColor(project) : undefined}
+      edge
+      onClick={() => openThread(thread.id)}
+      onContextMenu={readOnly ? undefined : (e) => onThreadContextMenu(e, thread.id, menu)}
+      label={`Thread ${thread.title}`}
+    >
       <div className="flex h-full flex-col px-3.5 pt-2.5 pb-2.5">
         <div className="flex h-4 min-w-0 items-center gap-1.5 text-[11px] text-subtle">
           {forkOf ? (
@@ -606,11 +644,16 @@ export const ThreadCard = memo(function ThreadCard({ thread, machine, project, l
           <p data-title className={`${said ? "line-clamp-2" : "line-clamp-3"} min-w-0 flex-1 text-[13.5px] leading-snug font-medium tracking-[-0.01em]`}>
             <span data-bar>{unbroken(thread.title).map((w, i) => (typeof w === "string" ? w : <span key={i} className="whitespace-nowrap">{w.nowrap}</span>))}</span>
           </p>
-          {forkable && (
+          {/* One toolbar: the place's own (pins), Fork, then everything else in ⋯ (T3's thread menu). */}
+          {!readOnly && (
             <HoverActions data-card-tools>
-              <Tool label="Fork (or drag onto the canvas)" launch={`t:${thread.id}`} onClick={fork}>
-                <GitFork />
-              </Tool>
+              {tools}
+              {forkable && (
+                <Tool label="Fork (or drag onto the canvas)" launch={`t:${thread.id}`} onClick={fork}>
+                  <GitFork />
+                </Tool>
+              )}
+              <ThreadMenuButton thread={thread.id} extra={menu} />
             </HoverActions>
           )}
           {/* Several asks: how many (one is the pill and the line already). */}

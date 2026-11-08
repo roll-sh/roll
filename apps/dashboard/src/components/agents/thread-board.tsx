@@ -21,6 +21,7 @@ import { projectColor } from "@/lib/agents-identity";
 import { selectFromClick, selection, useSelected, useSelection } from "@/lib/agents-selection";
 import { tint } from "./identity";
 import { ThreadChanges } from "./shared";
+import { onThreadContextMenu, ThreadMenuButton } from "./thread-menu";
 import { costOf, GroupPick, listKey, Pick, PrChip, RowStatus, useLongPress, type Collection } from "./thread-list";
 import { useAgents } from "./use-agents";
 
@@ -397,6 +398,11 @@ function BoardCardBody({ row, c, column, y, order, any, cursor, setCursor }: Car
         e.dataTransfer.effectAllowed = "move";
       }}
       {...touch}
+      onContextMenu={(e) => {
+        touch.onContextMenu(e);
+        setCursor(row.id);
+        onThreadContextMenu(e, row.id);
+      }}
       onClick={(e) => {
         setCursor(row.id);
         if (consumed()) return;
@@ -415,6 +421,8 @@ function BoardCardBody({ row, c, column, y, order, any, cursor, setCursor }: Car
         <RowStatus row={row} c={c} />
         <span className="ml-auto flex items-center gap-2">
           <span className="font-mono text-[10.5px] text-subtle">{shortAgo(row.activity, c.now)}</span>
+          {/* Its menu: while the pointer is on the card (always on a touch screen), not while picking. */}
+          {!c.editing && <ThreadMenuButton thread={row.id} className="-my-1 size-6 text-muted opacity-0 hover:bg-panel-3 hover:text-fg group-hover/row:opacity-100 focus-visible:opacity-100 aria-expanded:opacity-100 [@media(hover:none)]:opacity-100" />}
           <Pick id={row.id} order={order} any={any || c.editing} />
         </span>
       </span>

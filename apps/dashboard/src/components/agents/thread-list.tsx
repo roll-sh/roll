@@ -25,6 +25,7 @@ import { compact, providerName, ThreadChanges } from "./shared";
 import { StatusPill, threadPill } from "./thread-status";
 import { ThreadBoard } from "./thread-board";
 import { useAgents } from "./use-agents";
+import { onThreadContextMenu, openThreadMenu, ThreadMenuButton } from "./thread-menu";
 
 // ── the host ──
 
@@ -560,6 +561,11 @@ function ThreadList({ c }: { c: Collection }) {
       aria-multiselectable
       tabIndex={0}
       onKeyDown={onKey}
+      // The menu key or ⇧F10 on the list: the cursor row's menu.
+      onContextMenu={(e) => {
+        const el = cursor && !cursor.startsWith("g:") ? document.getElementById(`row-${cursor}`) : null;
+        if (e.target === e.currentTarget && el) openThreadMenu(cursor!, el, e);
+      }}
       onFocus={(e) => e.target === e.currentTarget && !cursor && items.length > 0 && setCursor(keyOfItem(items[0]))}
       aria-activedescendant={cursor && index.has(cursor) ? `row-${cursor}` : undefined}
       className="relative h-full overflow-auto outline-none [overflow-anchor:none]"
@@ -727,6 +733,10 @@ function RowBody({ row, y, template, cols, c, any, order, cursor, open, onCursor
         if (selectFromClick(e, row.id, order)) return;
         c.openThread(row.id);
       }}
+      onContextMenu={(e) => {
+        onCursor(row.id);
+        onThreadContextMenu(e, row.id);
+      }}
       style={{ ...place(y, reduced), height: ROW_H, gridTemplateColumns: template, ...(project ? tint(projectColor(project)) : null) }}
       className={`group/row absolute inset-x-0 top-0 grid cursor-pointer items-center border-b border-line/60 text-[13px] select-none ${
         on ? "bg-[color-mix(in_oklab,var(--accent)_8%,var(--canvas))]" : open ? "bg-[color-mix(in_oklab,var(--fg)_6%,var(--canvas))]" : cursor ? "bg-[color-mix(in_oklab,var(--fg)_4%,var(--canvas))]" : "bg-canvas hover:bg-[color-mix(in_oklab,var(--fg)_3%,var(--canvas))]"
@@ -790,6 +800,10 @@ function RowBody({ row, y, template, cols, c, any, order, cursor, open, onCursor
           {costOf(row)}
         </span>
       )}
+      {/* Its menu (T3's thread menu): over the row's right end while the pointer is on it. */}
+      <span className="pointer-events-none absolute top-1/2 right-1.5 -translate-y-1/2 rounded-lg border border-line-2 bg-popover p-0.5 text-muted opacity-0 shadow-pop inset-shadow-highlight transition-opacity duration-150 group-hover/row:pointer-events-auto group-hover/row:opacity-100 has-[[aria-expanded=true]]:pointer-events-auto has-[[aria-expanded=true]]:opacity-100">
+        <ThreadMenuButton thread={row.id} />
+      </span>
     </div>
   );
 }

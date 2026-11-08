@@ -11,7 +11,7 @@
  * `lib/agents-inbox.ts`; the daemon keeps the state.
  */
 
-import { AlarmClock, AlarmClockOff, Archive, ArchiveRestore, Check, ChevronDown, Eraser, ChevronRight, MoreHorizontal, PanelLeft, PanelLeftClose, Plus, Trash2, Undo2, X } from "lucide-react";
+import { AlarmClock, AlarmClockOff, Archive, ArchiveRestore, Check, ChevronDown, Eraser, ChevronRight, MoreHorizontal, PanelLeft, PanelLeftClose, Plus, Undo2, X } from "lucide-react";
 import { memo, startTransition, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { reachable, type Command, type Machine, type MachineId, type Project, type Thread } from "@/lib/agents-api";
@@ -45,8 +45,10 @@ import { useProjectActions } from "./project-actions";
 import { Dialog, useKept } from "./ui/dialog";
 import { Collapse } from "./animated-height";
 import { useFlip, useFold } from "./list-motion";
-import { Menu, MenuItem, MenuPopup, MenuRadioGroup, MenuRadioItem, MenuSeparator, MenuShortcut, MenuSub, MenuSubPopup, MenuSubTrigger, MenuTrigger, Segmented } from "./ui";
-import { useAgents, usePrefs } from "./use-agents";
+import { Segmented } from "./ui";
+import { useAgents } from "./use-agents";
+import { onThreadContextMenu, ThreadMenuButton, useThreadMenuOpen } from "./thread-menu";
+import { Tip } from "./ui/tooltip";
 import { selectFromClick, useSelected } from "@/lib/agents-selection";
 import { MachineIcon, ProjectIcon } from "./identity";
 
@@ -595,7 +597,6 @@ function ThreadsSidebarBody({
   return (
     <>
       <InboxToast />
-      <SnoozeHost />
       {/* Slides in and out with the canvas moving over in step (edge-sheet.tsx); not on the frame it opens because it was left open. */}
       <AnimatePresence initial={false}>
         {open && (
@@ -832,7 +833,7 @@ const ThreadRow = memo(
 
 function ThreadRowBody({ row, selected, onPick, now, actions, arrive = true }: RowProps) {
   const t = row.thread;
-  const [menu, setMenu] = useState(false);
+  const menu = useThreadMenuOpen(t.id);
   const fold = useFold<HTMLLIElement>(arrive);
   const quiet = row.status === null || row.shelf !== "active";
   const pill = row.status === "waiting" || row.status === "failed" || row.status === "woke" ? row.status : null;
@@ -863,6 +864,7 @@ function ThreadRowBody({ row, selected, onPick, now, actions, arrive = true }: R
       data-thread={t.id}
       aria-selected={picked || undefined}
       inert={fold.leaving}
+      onContextMenu={(e) => onThreadContextMenu(e, t.id)}
       className={`group/r relative flex h-[30px] items-center [contain-intrinsic-size:auto_30px] [content-visibility:auto] pointer-coarse:h-10 pointer-coarse:[contain-intrinsic-size:auto_40px] rounded-md transition-colors duration-150 ${picked ? "bg-accent/[0.1] text-fg" : selected ? "bg-fg/[0.07] text-fg inset-shadow-highlight" : "hover:bg-fg/[0.04]"} ${menu ? "bg-fg/[0.04]" : ""}`}
     >
       <button
@@ -900,152 +902,17 @@ function ThreadRowBody({ row, selected, onPick, now, actions, arrive = true }: R
           data-row-actions
           className={`flex shrink-0 items-center pointer-coarse:gap-1.5 ${menu ? "pr-1" : "w-0 overflow-hidden opacity-0 group-hover/r:w-auto group-hover/r:overflow-visible group-hover/r:pr-1 group-hover/r:opacity-100 focus-within:w-auto focus-within:overflow-visible focus-within:pr-1 focus-within:opacity-100 [@media(hover:none)]:w-auto [@media(hover:none)]:pr-1 [@media(hover:none)]:opacity-100"}`}
         >
-          <button type="button" title={quick.label} aria-label={quick.label} disabled={quick.disabled} onClick={() => void quick.run()} className="grid size-6 place-items-center rounded-md text-subtle transition hover:bg-panel hover:text-fg pointer-coarse:size-9 disabled:opacity-30">
-            {quick.icon}
-          </button>
-          {/* The snooze dialog: Custom…, or on a phone the presets too (no submenu over the menu). */}
-          <RowMenu thread={t} row={row} open={menu} setOpen={setMenu} actions={actions} onPick={() => onPick(t.id)} onCustom={(presets) => openRowSnooze({ thread: t, presets: !!presets })} now={now} />
+          <Tip label={quick.label}>
+            <button type="button" aria-label={quick.label} disabled={quick.disabled} onClick={() => void quick.run()} className="grid size-6 place-items-center rounded-md text-subtle transition hover:bg-panel hover:text-fg pointer-coarse:size-9 disabled:opacity-30">
+              {quick.icon}
+            </button>
+          </Tip>
+          {/* The thread's menu, the same as its card's and its list row's (thread-menu.tsx). */}
+          <ThreadMenuButton thread={t.id} className="size-6 text-subtle hover:bg-panel hover:text-fg pointer-coarse:size-9" />
         </span>
       )}
     </li>
   );
-}
-
-/** A row's menu: T3's thread action menu, with its Snooze and Auto-settle behavior submenus. */
-function RowMenu({
-  thread,
-  row,
-  open,
-  setOpen,
-  actions,
-  onPick,
-  onCustom,
-  now,
-}: {
-  thread: Thread;
-  row: InboxRow;
-  open: boolean;
-  setOpen: (open: boolean) => void;
-  actions: Actions;
-  onPick: () => void;
-  /** The snooze dialog; `presets`: with the presets (a phone's, in place of the submenu). */
-  onCustom: (presets?: boolean) => void;
-  now: number;
-}) {
-  const settleBlocked = actions.cant(thread, "settle");
-  const snoozeBlocked = actions.cant(thread, "snooze");
-  const { phone = false } = useAgents();
-  const [deleting, setDeleting] = useState(false);
-  const prefs = usePrefs();
-  const del = () => {
-    if (prefs.confirm_delete && !deleting) return setDeleting(true);
-    setOpen(false);
-    void actions.remove(thread);
-  };
-  if (row.shelf === "archived")
-    return (
-      <Menu open={open} onOpenChange={(o) => (setOpen(o), o || setDeleting(false))}>
-        <MenuTrigger
-          aria-label="Thread actions"
-          title="Thread actions"
-          className={`grid size-6 place-items-center rounded-md text-subtle transition hover:bg-panel hover:text-fg pointer-coarse:size-9 ${open ? "bg-panel text-fg" : ""}`}
-        >
-          <MoreHorizontal className="size-3.5" strokeWidth={1.5} />
-        </MenuTrigger>
-        <MenuPopup align="end" className="w-64">
-          <MenuItem onClick={onPick}>Open</MenuItem>
-          <MenuItem onClick={() => void actions.restore(thread)}>
-            <ArchiveRestore />
-            Unarchive
-          </MenuItem>
-          <MenuSeparator />
-          <MenuItem closeOnClick={false} className="text-danger" onClick={del}>
-            <Trash2 />
-            {deleting ? "Delete for good?" : "Delete…"}
-          </MenuItem>
-          {deleting && <p className="px-2 pb-1.5 text-[11.5px] leading-snug text-subtle">{deleteConfirm(thread)}</p>}
-        </MenuPopup>
-      </Menu>
-    );
-  return (
-    <Menu open={open} onOpenChange={setOpen}>
-      <MenuTrigger
-        aria-label="Thread actions"
-        title="Thread actions"
-        className={`grid size-6 place-items-center rounded-md text-subtle transition hover:bg-panel hover:text-fg pointer-coarse:size-9 ${open ? "bg-panel text-fg" : ""}`}
-      >
-        <MoreHorizontal className="size-3.5" strokeWidth={1.5} />
-      </MenuTrigger>
-      <MenuPopup align="end" className="w-56">
-        <MenuItem onClick={onPick}>Open</MenuItem>
-        {row.shelf === "settled" ? (
-          <MenuItem onClick={() => void actions.unsettle(thread)}>
-            <Undo2 />
-            Un-settle thread
-          </MenuItem>
-        ) : (
-          <MenuItem disabled={!!settleBlocked} title={settleBlocked ?? undefined} onClick={() => void actions.settle(thread)}>
-            <Check />
-            Settle thread
-            <MenuShortcut>⌘⇧S</MenuShortcut>
-          </MenuItem>
-        )}
-        {row.shelf === "snoozed" ? (
-          <MenuItem onClick={() => void actions.wake(thread)}>
-            <AlarmClockOff />
-            Wake thread now
-          </MenuItem>
-        ) : snoozeBlocked ? (
-          <MenuItem disabled title={snoozeBlocked}>
-            <AlarmClock />
-            Snooze
-          </MenuItem>
-        ) : phone ? (
-          // A phone has no room beside the menu: the submenu covered it. The presets dialog instead.
-          <MenuItem onClick={() => onCustom(true)}>
-            <AlarmClock />
-            Snooze…
-          </MenuItem>
-        ) : (
-          <MenuSub>
-            <MenuSubTrigger>
-              <AlarmClock />
-              Snooze
-            </MenuSubTrigger>
-            <MenuSubPopup className="w-60">
-              <SnoozePresetItems now={now} onSnooze={(until) => void actions.snooze(thread, until)} />
-              <MenuSeparator />
-              <MenuItem onClick={() => onCustom()}>Custom…</MenuItem>
-            </MenuSubPopup>
-          </MenuSub>
-        )}
-        <MenuItem disabled={thread.status === "running" || thread.status === "starting"} onClick={() => void actions.archive(thread)}>
-          <Archive />
-          Archive
-        </MenuItem>
-        <MenuSeparator />
-        <MenuSub>
-          <MenuSubTrigger>Auto-settle behavior</MenuSubTrigger>
-          <MenuSubPopup>
-            <MenuRadioGroup value={thread.inbox.manual ? "disabled" : "enabled"} onValueChange={(v) => void actions.autoSettle(thread, v === "enabled")}>
-              <MenuRadioItem value="enabled">Enabled</MenuRadioItem>
-              <MenuRadioItem value="disabled">Disabled</MenuRadioItem>
-            </MenuRadioGroup>
-          </MenuSubPopup>
-        </MenuSub>
-      </MenuPopup>
-    </Menu>
-  );
-}
-
-/** The presets, worked out only while the submenu is open (dates in words cost ~0.5 ms a row). */
-function SnoozePresetItems({ now, onSnooze }: { now: number; onSnooze: (until: number) => void }) {
-  return snoozePresets(now).map((p) => (
-    <MenuItem key={p.label} onClick={() => onSnooze(p.until)}>
-      {p.label}
-      <span className="ms-auto text-[11px] text-subtle">{p.when}</span>
-    </MenuItem>
-  ));
 }
 
 // ── custom snooze ──
@@ -1060,33 +927,6 @@ const UNITS: { id: SnoozeUnit; label: string }[] = [
 function localInput(ms: number): string {
   const d = new Date(ms - new Date(ms).getTimezoneOffset() * 60_000);
   return d.toISOString().slice(0, 16);
-}
-
-/**
- * A row's snooze dialog (Custom…; on a phone, with the presets), shown by one host beside the
- * sidebar: the row it was opened from leaves its list as the thread snoozes, which unmounted the
- * dialog mid-way instead of letting it close.
- */
-type RowSnooze = { thread: Thread; presets: boolean };
-let snoozeNow: RowSnooze | null = null;
-const snoozeSubs = new Set<() => void>();
-function openRowSnooze(open: RowSnooze | null) {
-  snoozeNow = open;
-  for (const f of snoozeSubs) f();
-}
-const subscribeSnooze = (f: () => void) => {
-  snoozeSubs.add(f);
-  return () => {
-    snoozeSubs.delete(f);
-  };
-};
-
-function SnoozeHost() {
-  const actions = useInboxActions();
-  const kept = useKept(useSyncExternalStore(subscribeSnooze, () => snoozeNow, () => null));
-  const open = kept.value;
-  if (!open) return null;
-  return <SnoozeDialog key={kept.key} open={kept.open} onExited={kept.onExited} presets={open.presets} onClose={() => openRowSnooze(null)} onSnooze={(until) => void actions.snooze(open.thread, until)} />;
 }
 
 /**

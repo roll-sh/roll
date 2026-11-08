@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { ThreadNode } from "./nodes";
 import { Conversation } from "./session";
+import { ThreadMenuHost } from "./thread-menu";
 import { approval, M1, machine, mirrored, node, project, run, terminal, thread } from "@/test/agents";
 import { agentsHarness, renderAgents } from "@/test/agents-render";
 
@@ -14,7 +15,13 @@ describe("ThreadNode", () => {
     const t = thread({ status: "waiting", pending_requests: 2, activity: "Waiting to run `cargo test`", run_count: 3, usage: { input_tokens: 12000, output_tokens: 3400, cached_tokens: 0, cost_usd: 0.42 }, queued: [{ id: "q1", text: "x", attachments: [], at: 0 }] });
     const asks = [mirrored("request", approval(), 3), mirrored("request", approval({ id: "req_2", node: "nod_8" }), 4)];
     const h = agentsHarness({ entities: [mirrored("thread", t, 1), mirrored("run", run({ stat: { files: 2, additions: 14, deletions: 3 } }), 2), ...asks] });
-    renderAgents(<ThreadNode thread={t} machine={machine()} />, h);
+    renderAgents(
+      <>
+        <ThreadNode thread={t} machine={machine()} />
+        <ThreadMenuHost />
+      </>,
+      h,
+    );
     const card = screen.getByRole("button", { name: "Thread Fix the flaky queue test" });
     // Waiting on you is its requests here: the pill says so, the line says what's asked, and how many.
     expect(within(card).getByRole("img", { name: "Pending approval" })).toBeInTheDocument();
@@ -23,6 +30,14 @@ describe("ThreadNode", () => {
     expect(within(card).getByText(/15k tok · \$0\.42/)).toBeInTheDocument();
     await userEvent.click(card);
     expect(h.openThread).toHaveBeenCalledWith("thr_1");
+    // Its menu on a right-click (T3's thread menu): rename it without opening it.
+    await userEvent.pointer({ keys: "[MouseRight]", target: card });
+    await userEvent.click(await screen.findByRole("menuitem", { name: "Rename…" }));
+    const title = await screen.findByRole("textbox", { name: "Title" });
+    await userEvent.clear(title);
+    await userEvent.paste("Fix the queue test");
+    await userEvent.click(screen.getByRole("button", { name: "Rename" }));
+    expect(h.command.mock.calls.map(([, , c]) => c)).toContainEqual({ type: "thread.configure", thread: "thr_1", title: "Fix the queue test" });
   });
 });
 

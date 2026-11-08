@@ -58,7 +58,8 @@ import { useAgentsConnection } from "./use-connection";
 import { ADD_MACHINE_EVENT } from "./settings-ui";
 import { OwnerSwitcher } from "./owner-switcher";
 import { NoOwner } from "./no-owner";
-import { PinTools, useCanvasViews, ViewsBar, type CanvasViews } from "./views";
+import { PinButtons, pinEntries, PinTools, useCanvasViews, ViewsBar, type CanvasViews } from "./views";
+import { ThreadMenuHost } from "./thread-menu";
 import { BulkBar, SelectionHost, useBulk, type Bulk } from "./bulk-bar";
 import { ThreadCollection, useCollection } from "./thread-list";
 import { needsMe, nextOf, rowsOf } from "@/lib/agents-collection";
@@ -793,6 +794,7 @@ export function AgentsSurface({
           />
         )}
         <CommandPalette host={host} />
+        <ThreadMenuHost />
       </div>
     </AgentsContext.Provider></AgentsLayer>
   );
@@ -956,17 +958,21 @@ const CanvasCard = memo(function CanvasCard({ node: n, store }: { node: GraphNod
     case "thread": {
       const t = data.threads.get(n.id)?.value;
       if (!t) return null;
+      // Its pins lead the card's own tools (one toolbar) and its menu.
+      const pins = [
+        { kind: "conversation" as const, id: n.id, label: "the conversation" },
+        { kind: "diff" as const, id: n.id, label: "the diff" },
+      ];
       return (
-        <PinTools
-          view={view}
-          onToggle={toggle}
-          items={[
-            { kind: "conversation", id: n.id, label: "the conversation" },
-            { kind: "diff", id: n.id, label: "the diff" },
-          ]}
-        >
-          <ThreadCard thread={t} machine={machine} {...facts(t)} inside={inside.get(n.key)} section={n.parent?.startsWith("g:") ? n.parent.split(":")[2] : null} />
-        </PinTools>
+        <ThreadCard
+          thread={t}
+          machine={machine}
+          {...facts(t)}
+          inside={inside.get(n.key)}
+          section={n.parent?.startsWith("g:") ? n.parent.split(":")[2] : null}
+          tools={<PinButtons view={view} items={pins} onToggle={toggle} />}
+          menu={() => pinEntries(view, pins, toggle)}
+        />
       );
     }
     case "subagent": {

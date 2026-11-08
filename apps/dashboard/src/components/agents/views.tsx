@@ -57,7 +57,8 @@ import {
 } from "@/lib/agents-views";
 import { firstDir, groupLabel, sortLabel } from "@/lib/agents-collection";
 import type { Order } from "@/lib/agents-layout";
-import { Menu } from "./menu";
+import { Menu, type MenuItem as MenuEntry } from "./menu";
+import { Tip } from "./ui/tooltip";
 import { ShelfControl } from "./project-shelf";
 import { openShelf } from "@/lib/agents-shelf";
 import { openPalette } from "@/lib/agents-palette";
@@ -1022,30 +1023,43 @@ export function PinTools({
         data-nodrag
         data-touch-tools
       >
-        {armed &&
-          items.map((i) => {
-          const pinned = isPinned(view, i.kind, i.id);
-          const label = `${pinned ? "Unpin" : "Pin"} ${i.label}${view.id === ALL ? "" : ` on ${view.name}`}`;
-          return (
-            <button
-              key={i.kind}
-              type="button"
-              data-pin={i.kind}
-              aria-label={label}
-              title={label}
-              aria-pressed={pinned}
-              onClick={(e) => {
-                e.stopPropagation();
-                onToggle(i.kind, i.id);
-              }}
-              className={`grid size-6 place-items-center rounded-md transition-colors duration-150 hover:bg-panel-3 hover:text-fg [&>svg]:size-3.5 [&>svg]:stroke-[1.75] ${pinned ? "text-accent" : ""}`}
-            >
-              {i.kind === "diff" ? <DiffIcon /> : pinned ? <PinOff /> : <PinIcon />}
-            </button>
-          );
-        })}
+        {armed && <PinButtons view={view} items={items} onToggle={onToggle} />}
         {armed && extra}
       </div>
     </div>
   );
+}
+
+type PinItem = { kind: PinKind; id: string; label: string };
+const pinLabel = (view: ViewLike, i: PinItem) => `${isPinned(view, i.kind, i.id) ? "Unpin" : "Pin"} ${i.label}${view.id === ALL ? "" : ` on ${view.name}`}`;
+const pinIcon = (i: PinItem, pinned: boolean) => (i.kind === "diff" ? <DiffIcon /> : pinned ? <PinOff /> : <PinIcon />);
+
+/** A card's pin buttons ("Pin the conversation", "Unpin the diff on Review"), each with its tooltip. */
+export function PinButtons({ view, items, onToggle }: { view: ViewLike; items: PinItem[]; onToggle: (kind: PinKind, id: string) => void }) {
+  return items.map((i) => {
+    const pinned = isPinned(view, i.kind, i.id);
+    const label = pinLabel(view, i);
+    return (
+      <Tip key={i.kind} label={label}>
+        <button
+          type="button"
+          data-pin={i.kind}
+          aria-label={label}
+          aria-pressed={pinned}
+          onClick={(e) => {
+            e.stopPropagation();
+            onToggle(i.kind, i.id);
+          }}
+          className={`grid size-6 place-items-center rounded-md transition-colors duration-150 hover:bg-panel-3 hover:text-fg [&>svg]:size-3.5 [&>svg]:stroke-[1.75] ${pinned ? "text-accent" : ""}`}
+        >
+          {pinIcon(i, pinned)}
+        </button>
+      </Tip>
+    );
+  });
+}
+
+/** The same pins as a thread menu's items (thread-menu.tsx). */
+export function pinEntries(view: ViewLike, items: PinItem[], onToggle: (kind: PinKind, id: string) => void): MenuEntry[] {
+  return items.map((i) => ({ label: pinLabel(view, i), icon: pinIcon(i, isPinned(view, i.kind, i.id)), onSelect: () => onToggle(i.kind, i.id) }));
 }

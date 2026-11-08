@@ -17,10 +17,7 @@ import { showAgents } from "@/lib/agents-surface";
 /** Opens the conversation over the page and its publish form, once the conversation is there. */
 function publishAgain(thread: string) {
   showAgents({ kind: "thread", thread });
-  let tries = 0;
-  const t = setInterval(() => {
-    if (requestPublish(thread) || ++tries > 20) clearInterval(t);
-  }, 150);
+  requestPublish(thread);
 }
 
 export function ChangeAgent({ repo, number, conflict }: { repo: string; number: number; conflict: boolean }) {

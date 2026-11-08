@@ -505,8 +505,14 @@ function TitleBar({
   useEscapeLayer(panel !== null, () => setPanel(null));
   useEffect(() => setPanel(null), [thread.id]);
   // ⌘K "Publish …" on the open conversation opens the same form as More's item.
+  // A thread's menu elsewhere (thread-menu.tsx) opens the conversation and asks before it's mounted.
   useEffect(() => {
-    const on = (id: string) => id === thread.id && setPanel("publish");
+    const on = (id: string) => {
+      if (id !== thread.id) return;
+      publishWaiting = null;
+      setPanel("publish");
+    };
+    if (publishWaiting === thread.id) on(thread.id);
     publishRequests.add(on);
     return () => void publishRequests.delete(on);
   }, [thread.id]);
@@ -901,9 +907,13 @@ export function DiffPane({
 }
 
 const publishRequests = new Set<(thread: string) => void>();
+/** Asked for while its conversation wasn't open yet: the form opens as it mounts. */
+let publishWaiting: string | null = null;
 
-/** Opens the publish form of `thread`'s open conversation (⌘K's "Publish …"); false when it isn't open. */
-export function requestPublish(thread: string): boolean {
+/** Opens the publish form of `thread`'s conversation (⌘K's "Publish …", a thread's menu), now or once it opens. */
+export function requestPublish(thread: string) {
+  publishWaiting = thread;
   for (const f of publishRequests) f(thread);
-  return publishRequests.size > 0;
+  // Not a standing order: a conversation opened later on its own doesn't open the form.
+  setTimeout(() => publishWaiting === thread && (publishWaiting = null), 3000);
 }

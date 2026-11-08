@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { EMPTY_INBOX, type Command, type Thread } from "@/lib/agents-api";
 import { agentsSurface, resetAgentsSurface, setAgentsView } from "@/lib/agents-surface";
 import { ThreadsSidebar } from "./threads-sidebar";
+import { ThreadMenuHost } from "./thread-menu";
 import { mirrored, project, thread } from "@/test/agents";
 import { agentsHarness, renderAgents, type AgentsHarness } from "@/test/agents-render";
 
@@ -24,7 +25,13 @@ function world(extra: Thread[] = []) {
 }
 
 function sidebar(h: AgentsHarness, openThread: string | null = null) {
-  return renderAgents(<ThreadsSidebar data={h.client.data} open setOpen={() => {}} phone={false} openThread={openThread} />, h);
+  return renderAgents(
+    <>
+      <ThreadsSidebar data={h.client.data} open setOpen={() => {}} phone={false} openThread={openThread} />
+      <ThreadMenuHost />
+    </>,
+    h,
+  );
 }
 
 const sent = (h: AgentsHarness) => h.command.mock.calls.map(([, , c]) => c);
