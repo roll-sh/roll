@@ -265,6 +265,9 @@ const JOIN_QUERIES: &[&str] = &[
     "SELECT n, count(*) FROM (SELECT CASE WHEN b.id % 9 = 0 THEN NULL ELSE b.id % 120000 END AS k, count(*) AS n FROM big b JOIN dim d ON b.g = d.k GROUP BY 1) t GROUP BY n ORDER BY n",
     // A char(n) key (padded alike: no presort) among many groups.
     "SELECT c, count(*), sum(n), sum(s) FROM (SELECT b.c, b.id % 60000 AS k, count(*) AS n, sum(b.x) AS s FROM big b JOIN dim d ON b.g = d.k GROUP BY 1, 2) t GROUP BY c ORDER BY c",
+    // Computed keys and arguments over two joins (TPC-H q07 / q09's shape: the joins'
+    // column reorderings, projections over projections, read through by the grouping).
+    "SELECT d.name, extract(year FROM date '2000-01-01' + b.g * 40) AS y, count(*), sum(b.x * (1 - d.w)) FROM big b JOIN dim d ON b.g = d.k JOIN multi m ON m.k = d.w GROUP BY 1, 2 ORDER BY 1, 2",
 ];
 
 #[test]
