@@ -6505,6 +6505,13 @@ build's (GIN jsonb 3.0 s, PostgreSQL 3.0; tsvector 1.3, PostgreSQL 1.5; int[] 1.
 1.269 / 0.544, tsvector 0.504 / 1.165 / 0.424, GiST point 1.163 / 0.593 / 0.591, btree int
 0.303 / 0.706 / 0.737.
 
+The serial GiST point and btree builds aren't the batch's: four more rounds of them alone,
+head / fix1 / fix2 s, GiST point 0.702 / 0.677 / 0.725 (fix2 0.655-0.918), btree int 0.863 /
+0.879 / 0.853 (PostgreSQL 1.221, 0.392); three after a BRIN build, GiST point 0.731 / 0.683
+/ 0.709. That BRIN build, first in a fresh engine process, reads the table cold: head 0.692,
+fix1 0.298, fix2 0.262 s against PostgreSQL's 0.116, whose cluster keeps it in its buffers
+from run to run.
+
 ## XML: the tree, input checks and building (round 21, agent 107)
 
 `tools/bench/xml.sh` measures every XML entry point against the reference on one document

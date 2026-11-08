@@ -6841,14 +6841,18 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
       workers each side; jsonb 0.7-0.8x, tsvector 0.8-0.9x). What is left in the participants
       is the per-row decode (a `Vec<Value>`, the array or document) and `gin_keys`'
       allocations; the merge is serial. btree int is 2.3-2.6x. One run had the serial GiST
-      point build at 0.709 s for fix2 against head's 0.633 (fix1's 0.591 against 0.593 in the
-      other run); nothing in the batch is on that path.
+      point build at 0.709 s for fix2 against head's 0.633; four more rounds give head 0.702,
+      fix1 0.677, fix2 0.725 (ranges overlapping), and three after a BRIN build 0.731 / 0.683
+      / 0.709: the spread, not the batch (nothing in it is on that path).
+    - The first build in a fresh engine process reads the table cold: BRIN first takes 0.26 s
+      (fix2) against 0.13 after another build, while PostgreSQL's cluster keeps the table in
+      its buffers from run to run (0.12). The runs restart the engine and not PostgreSQL.
     - hnsw build memory (item 4): not started this round, 149's design stands.
     - `tests/big_tables.rs` `deferred_entry_deletes` failed once after the rebase (the DELETE
       didn't go in as runs): it and `copy_through_the_sink` both set the process-wide default
       spill size around their engine's open and reset it to 0, so one can open with the
       other's reset (a race between the two tests, there since 856b8009d). It passed in the
-      two runs before the rebase.
+      two runs before the rebase, and three more after it (18 / 18), and the two tests alone.
     - 176's items 2, 6 and 7 (lineitem index-only counts, GiST / BRIN index row size errors,
       the multi-row COPY's TID, the GiST box size model, the SP-GiST quad NaN): not reached.
       Probed: BRIN's text minmax summary of a 9,600-byte value builds (compressed), and a
