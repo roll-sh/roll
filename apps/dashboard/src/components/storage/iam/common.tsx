@@ -1,5 +1,3 @@
-"use client";
-
 import { Pencil, Plus, Trash2, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { agoMs, formatDate } from "@/lib/storage-api";

@@ -1,5 +1,3 @@
-"use client";
-
 /**
  * The model picker, T3 Code's (MIT) on roll: `ProviderModelPicker`, `ModelPickerContent`,
  * `ModelListRow`, `ModelPickerSidebar`, and the effort column and footer of `ComposerModelEffort`

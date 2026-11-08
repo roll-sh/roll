@@ -1,5 +1,3 @@
-"use client";
-
 /**
  * The automations list in the sheet (docs/code/automations-ui.md, "The list"): dense two-line rows,
  * Linear's issue rows in spirit. Each row has:

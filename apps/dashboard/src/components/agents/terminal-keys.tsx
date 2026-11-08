@@ -1,5 +1,3 @@
-"use client";
-
 /**
  * A phone's keyboard has no Esc, Ctrl, Tab or arrows: the row of them a terminal shows under
  * itself there (like Termius's and Blink's). Ctrl is sticky: it applies to the next key typed (or

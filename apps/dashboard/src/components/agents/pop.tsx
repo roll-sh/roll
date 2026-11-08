@@ -1,5 +1,3 @@
-"use client";
-
 /**
  * A small hand-built popup (a field's suggestions, the composer's commands, the filter editor) that
  * comes and goes as Base UI's popups do (`popupMotion`): in from 0.98 and 2px toward its anchor with

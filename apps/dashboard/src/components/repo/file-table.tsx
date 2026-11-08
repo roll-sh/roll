@@ -1,6 +1,6 @@
 import { File, FileSymlink, Folder, FolderGit2 } from "lucide-react";
-import Link from "next/link";
 import type { ReactNode } from "react";
+import { Link } from "@/components/link";
 import { firstLine, shortId, type Tree, type TreeEntry } from "@/lib/code-api";
 import { ago } from "@/lib/time";
 import { blobHref, changesetHref, treeHref } from "./paths";

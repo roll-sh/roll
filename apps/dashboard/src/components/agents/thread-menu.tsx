@@ -1,5 +1,3 @@
-"use client";
-
 /**
  * A thread's menu wherever the thread shows outside its conversation: its canvas card, the list's
  * rows and the board's cards, on a right-click or the ⋯ in their tools. T3 Code's thread context

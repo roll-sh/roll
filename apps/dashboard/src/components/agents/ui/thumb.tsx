@@ -1,5 +1,3 @@
-"use client";
-
 /**
  * The pressed look of a segmented control or a tab bar as one thing that slides from the old
  * choice to the new (Linear's and Vercel's tabs; T3's segmented controls only swap colours). Put it

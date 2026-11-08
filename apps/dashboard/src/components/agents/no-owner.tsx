@@ -1,5 +1,3 @@
-"use client";
-
 import { useState, type FormEvent } from "react";
 import { codeApi } from "@/lib/code-api";
 import { btn, input, primary } from "../ui";

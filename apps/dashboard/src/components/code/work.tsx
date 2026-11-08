@@ -1,8 +1,6 @@
-"use client";
-
 import { Bot, GitPullRequest, Plus, X } from "lucide-react";
-import Link from "next/link";
 import { useEffect, useState } from "react";
+import { Link } from "@/components/link";
 import { codeApi, type Repo, type WorkItem, type WorkState } from "@/lib/code-api";
 import { Picker } from "../agents/ui/picker";
 import { ago, btn, input, panel, primary } from "../ui";

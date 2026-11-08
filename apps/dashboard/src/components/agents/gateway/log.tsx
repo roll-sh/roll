@@ -1,5 +1,3 @@
-"use client";
-
 /**
  * The request log (docs/code/gateway.md, "Usage and cost"): a live tail of `gateway.log {after}`,
  * polled every 2 s while it's on screen and the page is in front, newest first, at most

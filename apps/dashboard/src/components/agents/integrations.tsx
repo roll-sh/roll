@@ -1,5 +1,3 @@
-"use client";
-
 /**
  * Chat ops in the owner's agents settings: one card each for Slack, Discord and GitHub
  * (`lib/integrations-api.ts`, `code-control/src/chatops/`). Slack and Discord say whether the

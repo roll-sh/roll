@@ -1,5 +1,3 @@
-"use client";
-
 /**
  * Rows that come, go and move in a list (a conversation's queue, the threads sidebar): a row
  * arriving folds open (height from 0 and a fade, 200 ms), one leaving folds shut (160 ms) before it

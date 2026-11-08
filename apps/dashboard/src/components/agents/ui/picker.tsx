@@ -1,5 +1,3 @@
-"use client";
-
 /**
  * The picker every field that names a thing uses (docs/code/agents-design.md, "Pickers"): never
  * type an id. A field-shaped trigger shows what's picked by name (a chip each when it holds a
@@ -599,7 +597,6 @@ function Lead({ option: o, size = "size-4" }: { option: PickerOption; size?: str
   const kind = typeof o.icon === "string" ? o.icon : undefined;
   if (o.avatar || kind === "user")
     return o.avatar ? (
-      // eslint-disable-next-line @next/next/no-img-element -- pictures from the integration, any host
       <img src={o.avatar} alt="" referrerPolicy="no-referrer" loading="lazy" className={cn("shrink-0 rounded-full bg-fg/[0.08] object-cover", size)} />
     ) : (
       <span aria-hidden className={cn("grid shrink-0 place-items-center rounded-full bg-fg/[0.08] text-[9px] font-medium text-muted uppercase", size)}>

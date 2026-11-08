@@ -1,5 +1,3 @@
-"use client";
-
 /**
  * T3 Code's settings layout (`settingsLayout.tsx`, `SettingsPanels.tsx` there, MIT) for the side
  * panel: a search box over sections; a section is a title over a grouped card; a row is its title

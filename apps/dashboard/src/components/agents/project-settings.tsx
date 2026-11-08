@@ -1,5 +1,3 @@
-"use client";
-
 import { ArrowDownToLine, Bug, Check, CircleAlert, Eraser, FlaskConical, Hammer, ListChecks, Pause, Play, Plus, Settings2, Trash2 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {

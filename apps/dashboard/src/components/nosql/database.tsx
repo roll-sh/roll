@@ -1,10 +1,8 @@
-"use client";
-
 import { HorizonMark } from "@roll/brand";
 import { ArrowLeft, GitBranch, Moon } from "lucide-react";
-import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useNavigate } from "@tanstack/react-router";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { Link } from "@/components/link";
 import { nosqlApi, type NosqlDb, type NosqlInfo, type NosqlSchema } from "@/lib/nosql-api";
 import { AppShell } from "../app-shell";
 import { ago, btn, Connecting, EmptyPanel, ErrorNote, Offline } from "../ui";
@@ -99,7 +97,7 @@ export function NosqlDatabaseLoading() {
 }
 
 export function NosqlDatabase({ id }: { id: string }) {
-  const router = useRouter();
+  const navigate = useNavigate();
   const { info, all, db, offline, refresh } = useDatabase(id);
   const { busy, error, setError, run } = useAction(refresh);
   const [tab, setTabRaw] = useState<Tab>("overview");
@@ -252,7 +250,7 @@ export function NosqlDatabase({ id }: { id: string }) {
             info={info}
             busy={busy}
             run={run}
-            onDeleted={() => router.push("/dashboard/nosql")}
+            onDeleted={() => navigate({ href: "/dashboard/nosql" })}
           />
         )}
         {tab === "branches" && <BranchesTab key={db.id} db={db} all={all} busy={busy} run={run} />}

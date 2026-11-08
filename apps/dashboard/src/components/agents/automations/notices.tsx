@@ -1,5 +1,3 @@
-"use client";
-
 /**
  * A `notify` step's notices (the `notice` stream event) as calm toasts (T3's toasts: 360px, glass,
  * sliding in from the edge) in the surface's bottom-right corner, so they never cover the side

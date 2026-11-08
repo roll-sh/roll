@@ -1,5 +1,3 @@
-"use client";
-
 import { ChevronDown, ChevronRight, MessageSquare, Search } from "lucide-react";
 import { Fragment, memo, useDeferredValue, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { FileDiff, Thread, ThreadSide } from "@/lib/code-api";

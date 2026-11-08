@@ -1,5 +1,3 @@
-"use client";
-
 import { DotField, HorizonMark } from "@roll/brand";
 import { useCallback, useEffect, useState } from "react";
 import { tasks, TASKS_API, TasksApiError, type TasksHealth } from "@/lib/tasks-api";
@@ -179,7 +177,7 @@ function Offline() {
         <pre className="rounded-lg border border-line bg-bg px-3 py-2 font-mono text-[12px]">cargo run -p rolld</pre>
         <p className="max-w-md text-[12px] text-subtle">
           Or run tasks on its own with <code className="font-mono">cargo run -p tasks --bin roll-tasks</code> and point{" "}
-          <code className="font-mono">NEXT_PUBLIC_ROLL_API</code> at it.
+          <code className="font-mono">VITE_ROLL_API</code> at it.
         </p>
       </div>
     </section>
@@ -198,7 +196,7 @@ function Unauthorized() {
           same token (or an API key) and restart it:
         </p>
         <pre className="rounded-lg border border-line bg-bg px-3 py-2 font-mono text-[12px]">
-          NEXT_PUBLIC_ROLL_TASKS_TOKEN=… pnpm dev
+          VITE_ROLL_TASKS_TOKEN=… pnpm dev
         </pre>
       </div>
     </section>

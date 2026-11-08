@@ -1,10 +1,8 @@
-"use client";
-
 import { HorizonMark } from "@roll/brand";
 import { ArrowLeft, GitBranch, KeyRound, Moon, Plus, RotateCcw, Trash2 } from "lucide-react";
-import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useNavigate } from "@tanstack/react-router";
 import { useCallback, useEffect, useState } from "react";
+import { Link } from "@/components/link";
 import { formatBytes, formatUsd } from "@/lib/roll-api";
 
 import {
@@ -101,7 +99,7 @@ export function RedisDatabaseLoading() {
 }
 
 export function RedisDatabase({ id }: { id: string }) {
-  const router = useRouter();
+  const navigate = useNavigate();
   const { info, all, db, offline, refresh } = useDatabase(id);
   const { busy, error, setError, run } = useAction(refresh);
   const [tab, setTabRaw] = useState<Tab>("overview");
@@ -240,7 +238,7 @@ export function RedisDatabase({ id }: { id: string }) {
             db={db}
             busy={busy}
             run={run}
-            onDeleted={() => router.push("/dashboard/redis")}
+            onDeleted={() => navigate({ href: "/dashboard/redis" })}
           />
         )}
       </div>
@@ -541,7 +539,7 @@ function PointInTime({ db, value, onChange }: { db: RedisDb; value: number; onCh
 }
 
 function BranchesTab({ db, all, busy, run }: { db: RedisDb; all: RedisDb[]; busy: string | null; run: Run }) {
-  const router = useRouter();
+  const navigate = useNavigate();
   const children = all.filter((d) => d.parent_id === db.id);
   const [name, setName] = useState(`${db.name}-branch`.slice(0, 63));
   const [mode, setMode] = useState<"now" | "past">("now");
@@ -587,7 +585,7 @@ function BranchesTab({ db, all, busy, run }: { db: RedisDb; all: RedisDb[]; busy
             e.preventDefault();
             if (!valid) return;
             const b = await run("branch", () => redisApi.branch(db.id, name, mode === "past" ? at : undefined));
-            if (b) router.push(`/dashboard/redis/${b.id}`);
+            if (b) navigate({ href: `/dashboard/redis/${b.id}` });
           }}
         >
           <label className="block space-y-1">

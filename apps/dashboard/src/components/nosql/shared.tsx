@@ -1,5 +1,3 @@
-"use client";
-
 import { Clock, Lock } from "lucide-react";
 import { useEffect, useState } from "react";
 import {

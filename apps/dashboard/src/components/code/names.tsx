@@ -1,5 +1,3 @@
-"use client";
-
 import { Check, LoaderCircle, Plus, X } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { codeApi, isNotFound, validOwnerName, validRepoName, type Owner, type OwnerKind } from "@/lib/code-api";

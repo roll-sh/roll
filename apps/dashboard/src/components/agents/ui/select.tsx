@@ -1,5 +1,3 @@
-"use client";
-
 /**
  * Ported from T3 Code's `components/ui/select.tsx` (MIT), in roll's colours: a button that opens
  * a list, in place of a native `<select>`. `Select` is the one-line form most fields want.

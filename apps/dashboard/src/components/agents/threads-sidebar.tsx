@@ -1,5 +1,3 @@
-"use client";
-
 /**
  * The threads sidebar left of the canvas (docs/code/agents.md, "Settling"), T3 Code's sidebar:
  * each project's threads, active first with their status, then the snoozed, settled and archived

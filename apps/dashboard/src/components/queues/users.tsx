@@ -1,5 +1,3 @@
-"use client";
-
 import { Plus, Trash2, UserRound } from "lucide-react";
 import { useMemo, useState } from "react";
 import { type Permission, qapi, type User } from "@/lib/queues-api";

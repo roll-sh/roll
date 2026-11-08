@@ -1,5 +1,3 @@
-"use client";
-
 /**
  * What the canvas folded and how to get at it (`foldQuiet` in lib/agents-graph.ts): the fold cards
  * (`folded-threads.tsx`) and the project cards (`nodes.tsx`) read it.

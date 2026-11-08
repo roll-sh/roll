@@ -1,5 +1,3 @@
-"use client";
-
 import { ExternalLink } from "lucide-react";
 import { useState } from "react";
 import { indexDocumentError, storageApi, websiteUrlFor, type Bucket, type StorageInfo } from "@/lib/storage-api";

@@ -1,5 +1,3 @@
-"use client";
-
 /**
  * Pieces the Gateway UI shares (docs/code/gateway.md): the owner's plan as a hook, the upstream
  * kinds' icons (lucide only: no provider art), the run state, buttons and fields in the agents

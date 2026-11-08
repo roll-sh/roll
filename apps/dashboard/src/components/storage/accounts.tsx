@@ -1,8 +1,6 @@
-"use client";
-
 import { Building2, Pencil, Plus, Trash2 } from "lucide-react";
-import Link from "next/link";
 import { useState } from "react";
+import { Link } from "@/components/link";
 import { agoMs, formatDate } from "@/lib/storage-api";
 import { accountsApi, setAccount, type CreatedAccount, type StorageAccount } from "@/lib/storage-session";
 import { AppShell } from "../app-shell";

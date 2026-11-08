@@ -3,17 +3,18 @@
  * (`roll.sh/<owner>`), so none of these can be a user or organisation name. The Rust side mirrors
  * this list in `code_control::names::RESERVED`; change both together.
  *
- * Everything is lowercase. Entries that can't be valid owner names anyway (`_next`, `icon.svg`)
+ * Everything is lowercase. Entries that can't be valid owner names anyway (`_serverfn`, `icon.svg`)
  * are listed so the two lists also cover every path the app answers at the top level.
  */
 export const RESERVED_NAMES = [
-  // Routes and files that exist in src/app today.
+  // Routes and files in src/routes and public/ today, and the app's own paths.
   "dashboard",
   "icon.svg",
   "favicon.ico",
   "_next",
+  "_serverfn",
   "install.sh",
-  // Next.js and web conventions.
+  // Web conventions.
   "api",
   "robots.txt",
   "sitemap.xml",

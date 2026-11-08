@@ -1,5 +1,3 @@
-"use client";
-
 /**
  * Adding a project (docs/code/agents.md, "Projects"): one dialog wherever it starts (a machine
  * card's +, a machine's folded projects, ⌘K, the launcher, the empty states), T3's add-project

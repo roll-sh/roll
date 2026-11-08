@@ -1,5 +1,3 @@
-"use client";
-
 import { HorizonMark } from "@roll/brand";
 import { ChevronLeft, ChevronRight, KeyRound, RefreshCw, X } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";

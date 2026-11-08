@@ -1,5 +1,3 @@
-"use client";
-
 import { HorizonMark, type MarkState } from "@roll/brand";
 import { Check, Copy, X } from "lucide-react";
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from "react";

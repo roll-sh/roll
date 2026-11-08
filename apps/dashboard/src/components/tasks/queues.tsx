@@ -1,5 +1,3 @@
-"use client";
-
 import { Pause, Pencil, Play, Plus, Trash2 } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import { formatDuration, formatRate, rel, tasks, TasksApiError, type Queue, type QueueUpdate } from "@/lib/tasks-api";

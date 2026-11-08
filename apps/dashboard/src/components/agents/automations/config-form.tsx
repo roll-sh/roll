@@ -1,5 +1,3 @@
-"use client";
-
 /**
  * A step's (or an integration trigger's) config form, made from its JSON Schema in the catalog
  * (`Schema` in automations-ui.ts): strings are template fields, enums T3's selects or segmented

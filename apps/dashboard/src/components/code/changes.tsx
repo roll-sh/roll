@@ -1,9 +1,7 @@
-"use client";
-
 import { HorizonMark } from "@roll/brand";
 import { ArrowLeft, Database, ExternalLink, GitMergeConflict, ListOrdered, MemoryStick, MessageSquare, Trash2, X } from "lucide-react";
-import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { Link } from "@/components/link";
 import {
   codeApi,
   shortId,

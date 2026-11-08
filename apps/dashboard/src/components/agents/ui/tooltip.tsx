@@ -1,5 +1,3 @@
-"use client";
-
 /**
  * A small label over an icon button (T3's `components/ui/tooltip.tsx`, MIT, on Base UI, without its
  * scroll tracker): it shows after a short hover, at once on keyboard focus, and never on touch (a

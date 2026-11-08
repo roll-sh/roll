@@ -1,10 +1,8 @@
-"use client";
-
 import { HorizonMark } from "@roll/brand";
 import { ArrowLeft, LogIn, LogOut, ShieldCheck, UserRound } from "lucide-react";
-import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useNavigate, useRouter } from "@tanstack/react-router";
 import { useEffect, useState, useSyncExternalStore, type ReactNode } from "react";
+import { Link } from "@/components/link";
 import { cleanCode, passwordProblems } from "@/lib/storage-iam";
 import { inMs } from "@/lib/storage-api";
 import {
@@ -54,11 +52,11 @@ export function useScope() {
 
 /** When the session ends (a 401, or its expiry passes), go to the sign-in page. */
 function useSessionEndedRedirect(session: ConsoleSession | null) {
-  const router = useRouter();
+  const navigate = useNavigate();
   const ended = useSyncExternalStore(subscribe, sessionEnded, () => false);
   useEffect(() => {
-    if (ended) router.replace(SIGNIN_HREF);
-  }, [ended, router]);
+    if (ended) navigate({ href: SIGNIN_HREF, replace: true });
+  }, [ended, navigate]);
   useEffect(() => {
     if (!session) return;
     // setTimeout's limit is ~24.8 days; sessions are hours.
@@ -110,7 +108,7 @@ export function StorageIdentity({ switcher = true }: { switcher?: boolean }) {
   useSessionEndedRedirect(session);
   const acting = useActingAccount();
   const { accounts } = useAccounts(!session && switcher);
-  const router = useRouter();
+  const navigate = useNavigate();
 
   if (session) {
     return (
@@ -134,7 +132,7 @@ export function StorageIdentity({ switcher = true }: { switcher?: boolean }) {
           type="button"
           onClick={() => {
             consoleApi.signout();
-            router.push(SIGNIN_HREF);
+            navigate({ href: SIGNIN_HREF });
           }}
           className="ml-1 inline-flex items-center gap-1 text-subtle transition hover:text-fg"
         >
@@ -191,7 +189,7 @@ export function OperatorOnlyNote({ what }: { what: string }) {
         type="button"
         onClick={() => {
           consoleApi.signout();
-          router.refresh();
+          router.invalidate();
         }}
         className={btn}
       >
@@ -205,7 +203,7 @@ export function OperatorOnlyNote({ what }: { what: string }) {
 
 /** The IAM user sign-in page: account (id or alias), user and password; then an MFA code or a new password when asked. */
 export function StorageSignIn() {
-  const router = useRouter();
+  const navigate = useNavigate();
   const session = useConsoleSession();
   const ended = useSyncExternalStore(subscribe, sessionEnded, () => false);
   const { setState, play } = useMarkState();
@@ -252,7 +250,7 @@ export function StorageSignIn() {
       });
       acknowledgeEnded();
       play([["success", 1200]]);
-      router.push("/dashboard/storage");
+      navigate({ href: "/dashboard/storage" });
     } catch (e) {
       const next = signinStepFor(errorCode(e));
       if (next && next !== step) {

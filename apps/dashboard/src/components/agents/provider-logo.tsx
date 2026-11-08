@@ -1,5 +1,3 @@
-"use client";
-
 /**
  * A provider's logo (T3 Code's `ProviderInstanceIcon`, MIT): its mark from `provider-logos.tsx`, or
  * its initial when it has none (T3's initials badge). One colour, the text's, so it reads on every

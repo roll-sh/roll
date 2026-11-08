@@ -59,7 +59,7 @@ async function freePort() {
 /** Clean environment for the children: nothing from the developer's roll setup leaks in. */
 function env(extra = {}) {
   const e = { ...process.env };
-  for (const k of Object.keys(e)) if (k.startsWith("ROLL_") || k === "NEXT_PUBLIC_ROLL_API") delete e[k];
+  for (const k of Object.keys(e)) if (k.startsWith("ROLL_") || k.startsWith("VITE_ROLL_")) delete e[k];
   return { ...e, NO_COLOR: "1", RUST_LOG: "warn", ...extra };
 }
 
@@ -337,15 +337,15 @@ async function main() {
   // ── the dashboard, production build, against this rolld ──
   if (withDashboard) {
     const dash = join(ROOT, "apps/dashboard");
-    log("building the dashboard (next build)…");
-    // Into `.next` (`next dev` keeps its own `.next/dev`), with this rolld's address built in.
-    // Next's own type check is skipped: the gate runs `pnpm typecheck` (24 s of a 36 s build).
-    const webEnv = env({ NEXT_PUBLIC_ROLL_API: API, ROLL_API_URL: API, NEXT_TELEMETRY_DISABLED: "1", ROLL_NEXT_SKIP_TYPECHECK: "1" });
-    // next's own CLI under node, not `pnpm exec`: a signal to pnpm's launcher left the server running
-    // (every e2e run leaked a `next start`).
-    const nextBin = join(dash, "node_modules/next/dist/bin/next");
-    execFileSync(process.execPath, [nextBin, "build"], { cwd: dash, env: webEnv, stdio: ["ignore", "inherit", "inherit"] });
-    start("next start", process.execPath, [nextBin, "start", "-H", "127.0.0.1", "-p", String(webPort)], { cwd: dash, env: webEnv });
+    log("building the dashboard (vite build)…");
+    // Into `dist/` with this rolld's address built into the client; the server reads ROLL_API_URL.
+    // Vite's build doesn't type check; the gate runs `pnpm typecheck`.
+    const webEnv = env({ VITE_ROLL_API: API, ROLL_API_URL: API });
+    // Vite's CLI and the server straight under node, not `pnpm exec`: a signal to pnpm's launcher
+    // left the server running (every e2e run leaked one).
+    const viteBin = join(dash, "node_modules/vite/bin/vite.js");
+    execFileSync(process.execPath, [viteBin, "build"], { cwd: dash, env: webEnv, stdio: ["ignore", "inherit", "inherit"] });
+    start("dashboard", process.execPath, ["server.mjs", "-H", "127.0.0.1", "-p", String(webPort)], { cwd: dash, env: webEnv });
     const page = async (path) => {
       const r = await fetch(`${WEB}${path}`, { redirect: "manual" });
       return { status: r.status, text: await r.text(), type: r.headers.get("content-type") };

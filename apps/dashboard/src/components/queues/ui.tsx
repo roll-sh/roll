@@ -1,5 +1,3 @@
-"use client";
-
 import { HorizonMark } from "@roll/brand";
 import { Check, Copy, X } from "lucide-react";
 import type { ReactNode } from "react";

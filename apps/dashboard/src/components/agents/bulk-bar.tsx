@@ -1,5 +1,3 @@
-"use client";
-
 /**
  * Working on many threads at once (docs/code/agents.md, "Working at scale"): the bulk bar, a strip
  * of the frame under the views bar while threads are selected (Linear's and T3's bulk actions,

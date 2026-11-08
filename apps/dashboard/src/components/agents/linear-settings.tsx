@@ -1,5 +1,3 @@
-"use client";
-
 /**
  * The owner's Linear workspace in the agents settings (docs/code/http-api.md, "Linear"): connect
  * it (roll's app, as an agent, or a personal API key), see its webhook and what Linear delivered,

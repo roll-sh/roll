@@ -1,5 +1,3 @@
-"use client";
-
 /**
  * A request answered without opening its conversation (on its card on the canvas, at the bottom of
  * a phone's canvas): which thread asks, the last steps that led to it in T3's work-log rows (the

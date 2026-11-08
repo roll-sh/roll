@@ -37,7 +37,7 @@ sidebar app.
   machine tokens, device login, sandboxes and shares.
 - **`apps/dashboard`**: the agents in the header of every page (running, waiting, "New agent"),
   opening as a popup over the page; the same surface fills the window at `/dashboard/agents`;
-  public shares at `/agents/s/<id>` (listed, to copy or revoke, in the agents settings' "Shared links") (`src/app/agents/s/[id]`, replayed by `lib/agents-replay.ts`).
+  public shares at `/agents/s/<id>` (listed, to copy or revoke, in the agents settings' "Shared links") (`src/routes/agents/s/$id`, replayed by `lib/agents-replay.ts`).
 - **`apps/desktop`**: the desktop app (Electron): roll in a main window and the canvas in its own
   Agents window, plus this machine's daemon, a tray and notifications (see "Desktop app").
 

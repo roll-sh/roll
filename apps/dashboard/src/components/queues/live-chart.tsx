@@ -1,5 +1,3 @@
-"use client";
-
 import { resolveColor, useReducedMotion } from "@roll/brand";
 import { useEffect, useRef, useState, type PointerEvent } from "react";
 import { formatRate } from "@/lib/queues-api";

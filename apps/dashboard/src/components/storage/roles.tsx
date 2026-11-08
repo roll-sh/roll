@@ -1,5 +1,3 @@
-"use client";
-
 import { Ban, KeyRound, Pencil, Plus, ShieldCheck, Trash2, X } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import {

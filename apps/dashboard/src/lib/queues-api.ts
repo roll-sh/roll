@@ -482,17 +482,6 @@ export function queueHref(vhost: string, name: string) {
   return `/dashboard/queues/queues/${e(vhost)}/${e(name)}`;
 }
 
-/** Route params may or may not arrive percent-decoded; decode once if they still look encoded. */
-export function decodeParam(v: string | string[] | undefined) {
-  const s = Array.isArray(v) ? v.join("/") : (v ?? "");
-  if (!/%[0-9a-f]{2}/i.test(s)) return s;
-  try {
-    return decodeURIComponent(s);
-  } catch {
-    return s;
-  }
-}
-
 export function errorMessage(err: unknown) {
   return err instanceof Error ? err.message : String(err);
 }

@@ -1,5 +1,3 @@
-"use client";
-
 /**
  * The automations list, the root of the automations sheet (docs/code/automations-ui.md). Three
  * lists under one bar: the automations (two-line rows: trigger, name, when it runs, its last run,

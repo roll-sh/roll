@@ -1,5 +1,3 @@
-"use client";
-
 /**
  * An admin's owner switcher (roll code dashboard: an admin sees every owner's repos; here, whose
  * agents and settings show). The shared picker over the server's owners: searchable, keyboard

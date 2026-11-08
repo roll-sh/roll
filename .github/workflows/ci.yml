@@ -69,7 +69,7 @@ jobs:
       - name: Validate workflows
         run: |
           version=1.7.7
-          if curl -fsSL --retry 3 --retry-all-errors -o actionlint.tar.gz "https://github.com/rhysd/actionlint/releases/download/v$version/actionlint_${version}_linux_amd64.tar.gz"; then
+          if curl -fsSL --max-time 20 --retry 1 --retry-all-errors -o actionlint.tar.gz "https://github.com/rhysd/actionlint/releases/download/v$version/actionlint_${version}_linux_amd64.tar.gz"; then
             tar -xzf actionlint.tar.gz actionlint
             ./actionlint -shellcheck=
           else

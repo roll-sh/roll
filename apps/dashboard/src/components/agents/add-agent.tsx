@@ -1,5 +1,3 @@
-"use client";
-
 /**
  * Adding an agent from the ACP registry to a machine, in its settings' Providers section: T3
  * Code's registry step (`AcpRegistrySearchStep.tsx`, its `AcpRegistryAgentRow`, and

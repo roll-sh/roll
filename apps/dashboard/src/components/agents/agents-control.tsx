@@ -1,5 +1,3 @@
-"use client";
-
 import { Plus } from "lucide-react";
 import { useReducedMotion } from "@roll/brand";
 import { AnimatePresence, motion, type Transition } from "motion/react";

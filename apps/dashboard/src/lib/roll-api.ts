@@ -1,6 +1,10 @@
 /** Client for the rolld control-plane API (Postgres: crates/pg-control/src/api.rs; streams: crates/stream-broker/src/http; Redis: redis-api.ts). */
 
-export const ROLL_API = process.env.NEXT_PUBLIC_ROLL_API ?? "http://127.0.0.1:7070";
+/** The API as browsers reach it (`VITE_ROLL_API`, built in), and the server's default. */
+export const ROLL_API = import.meta.env?.VITE_ROLL_API ?? "http://127.0.0.1:7070";
+
+/** rolld as the server reaches it: `ROLL_API_URL` at runtime, else the public address. Server code only. */
+export const serverApi = () => process.env.ROLL_API_URL ?? ROLL_API;
 
 export type EndpointState = "starting" | "running" | "suspended";
 

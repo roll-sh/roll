@@ -1,12 +1,11 @@
 /**
  * Git smart HTTP on roll.sh: `git clone https://roll.sh/owner/repo(.git)` is passed straight
  * through to rolld's `/git/owner/repo.git/…`. Bodies stream both ways — packs can be large — so
- * this is a route handler rather than a `next.config` rewrite (external rewrites buffer request
- * bodies in memory, capped at `proxyClientMaxBodySize`). In production, route `*.git/*` at the
- * load balancer straight to rolld and this never runs.
+ * these are server routes that pipe the bodies, never buffering them. In production, route
+ * `*.git/*` at the load balancer straight to rolld and this never runs.
  */
 
-const ROLL_API_URL = process.env.ROLL_API_URL ?? process.env.NEXT_PUBLIC_ROLL_API ?? "http://127.0.0.1:7070";
+import { serverApi } from "./roll-api";
 
 const REQUEST_HEADERS = ["authorization", "content-type", "content-encoding", "accept", "accept-encoding", "git-protocol", "user-agent"];
 /** Hop-by-hop, plus what undici rewrites when it decodes the body for us. */
@@ -15,7 +14,7 @@ const DROP_RESPONSE_HEADERS = new Set(["connection", "keep-alive", "transfer-enc
 export async function proxyGit(request: Request, owner: string, repo: string, tail: string) {
   const name = repo.replace(/\.git$/i, "");
   const url = new URL(request.url);
-  const target = `${ROLL_API_URL}/git/${encodeURIComponent(owner)}/${encodeURIComponent(name)}.git/${tail}${url.search}`;
+  const target = `${serverApi()}/git/${encodeURIComponent(owner)}/${encodeURIComponent(name)}.git/${tail}${url.search}`;
 
   const headers = new Headers();
   for (const h of REQUEST_HEADERS) {
@@ -49,3 +48,6 @@ export async function proxyGit(request: Request, owner: string, repo: string, ta
   });
   return new Response(upstream.body, { status: upstream.status, statusText: upstream.statusText, headers: out });
 }
+
+/** What a git route answers to a method it doesn't serve. */
+export const methodNotAllowed = (allow: string) => () => new Response(null, { status: 405, headers: { allow } });

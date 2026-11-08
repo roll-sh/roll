@@ -1,20 +1,21 @@
-import type { Metadata } from "next";
-import { getRepoMeta } from "./code-server";
+import type { Repo } from "./code-api";
+import { pageHead } from "./head";
 
 /**
- * Metadata for a public repo page: "<title> · owner/repo · roll" (the root layout adds "· roll"),
- * the repo description for previews, and noindex for anything that isn't public.
+ * The head of a public repo page: "<title> · owner/repo · roll", the repo description for
+ * previews, and noindex for anything that isn't public. Nothing (the root's head) when the page is
+ * a 404 and there's no repo.
  */
-export async function repoMetadata(owner: string, repo: string, title?: string): Promise<Metadata> {
-  const r = await getRepoMeta(owner, repo);
-  const full = r?.full_name ?? `${owner}/${repo}`;
-  const description = r?.description ?? `${full} on roll — keep the code rolling.`;
+export function repoHead(r: Repo | undefined, title?: string) {
+  if (!r) return {};
+  const full = r.full_name;
+  const description = r.description ?? `${full} on roll — keep the code rolling.`;
   const fullTitle = title ? `${title} · ${full}` : full;
-  return {
+  return pageHead({
     title: fullTitle,
     description,
-    openGraph: { title: fullTitle, description, url: r?.web_url, siteName: "roll", type: "website" },
+    og: { title: fullTitle, description, url: r.web_url, type: "website" },
     twitter: { card: "summary", title: fullTitle, description },
-    robots: r?.visibility === "public" ? undefined : { index: false },
-  };
+    noindex: r.visibility !== "public",
+  });
 }

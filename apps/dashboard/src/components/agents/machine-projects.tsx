@@ -1,5 +1,3 @@
-"use client";
-
 /**
  * Projects without a card (docs/code/agents.md, "Canvas"): a project with nothing on the canvas
  * isn't drawn (`collapseUnused`); its machine says "3 more projects" in one line, their tiles

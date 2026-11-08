@@ -1,5 +1,3 @@
-"use client";
-
 /**
  * Sharing a thread (docs/code/agents.md, "Shares"): the Share button in a session's header makes a
  * read-only link to a frozen copy of the thread, and `/dashboard/agents/shares` lists an owner's

@@ -1,5 +1,3 @@
-"use client";
-
 /** Ported from T3 Code's `components/ui/popover.tsx` (MIT), in roll's colours. */
 
 import { Popover as PopoverPrimitive } from "@base-ui/react/popover";

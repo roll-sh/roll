@@ -1,9 +1,7 @@
-"use client";
-
 import { DotField, HorizonMark } from "@roll/brand";
-import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { useLocation } from "@tanstack/react-router";
 import type { ReactNode } from "react";
+import { Link } from "@/components/link";
 import { ROLL_API } from "@/lib/queues-api";
 import { AppShell } from "../app-shell";
 import { useMarkState } from "../mark-state";
@@ -23,7 +21,7 @@ const tabs = [
 ];
 
 function Tabs() {
-  const pathname = usePathname();
+  const pathname = useLocation({ select: (l) => l.pathname });
   return (
     <nav className="-mx-1 mt-5 flex gap-1 overflow-x-auto border-b border-line" aria-label="Queues sections">
       {tabs.map((t) => {
@@ -115,7 +113,7 @@ export function QueuesOffline() {
         <pre className="rounded-lg border border-line bg-bg px-3 py-2 font-mono text-[12px]">cargo run -p rolld</pre>
         <p className="max-w-lg text-[12px] text-subtle">
           Running it elsewhere? Set <code className="font-mono">ROLL_API=host:port</code> for rolld and{" "}
-          <code className="font-mono">NEXT_PUBLIC_ROLL_API=http://host:port</code> for the dashboard. Make sure
+          <code className="font-mono">VITE_ROLL_API=http://host:port</code> for the dashboard. Make sure
           queues aren&apos;t turned off with <code className="font-mono">--no-queues</code> or{" "}
           <code className="font-mono">ROLL_QUEUES_DISABLED</code>.
         </p>
