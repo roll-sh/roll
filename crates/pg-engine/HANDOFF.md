@@ -9584,3 +9584,80 @@ called by measure_rows_with's heap_pages. This failure and a targeted backtrace 
 sealed, with no baseline attribution yet. The fixture uses the bulk insert's asserted
 unmodelled heap state directly; both 2816/8320 index error expectations are unchanged.
 This avoids the unrelated setup operation, without fixing or accepting the VACUUM gap.
+
+### Agent 192 resumed GIN path batch (2026-11-08)
+
+GIN jsonb containment selects by full key paths, scalar values, and array depth at
+each key. A query is exact only when no empty subtree occurs and each array element
+contributes one scalar leaf. Multi-leaf elements retain heap recheck, so separate
+array elements cannot satisfy a correlated object. Raw scalar queries also search
+top-level array elements. Both jsonb classes use these containment tokens;
+jsonb_path_ops keeps only path tokens and searches jsonpath scalars by path prefix.
+Jsonpath still rechecks. Partial and custom-class eligibility, snapshot checks,
+own writes, and commits after the structure read retain their existing guards.
+The normal evaluator now rejects an object member's array containing a scalar:
+`{"a":[1]} @> {"a":1}` is false, while `[1] @> 1` remains true, as in PG18.6.
+
+Release verification passes the 144-by-144 bounded selection matrix under both
+classes, four GIN goldens in embedded, wire, and shuffled execution, and Clippy.
+The focused PG18.6 comparison matches 2,064/2,064 units across test_setup, gin,
+jsonb, and jsonb_jsonpath, with no panics or failed engine invocation. An initial
+fixture symlink escaped the engine's allowed file root and caused COPY failures;
+copying the fixtures inside the lane cache restored the comparison without a
+source change. Those failed outputs remain preserved. After rebasing onto a182's
+input-default batch, all five changed source and fixture files are byte-identical
+to the verified versions, and Clippy passes again with ten unrelated warnings.
+The combined runtime suite remains verification-train work.
+
+The new golden preserves a PG18.6 inconsistency already recorded by a127:
+jsonb_ops misses a raw string for `@@ 'strict $ == "x"'`, while jsonb_path_ops
+and the evaluator return it. The candidate-completeness matrix does not claim
+that case. No benchmark, profile, idle-footprint measurement, or memory advantage
+is established. Matched dist builds, useful-work checks, and serialized timing,
+CPU, peak memory, and idle comparisons remain required. No persistent format,
+WAL, durability, session API, or vector source changed. Receipts and the rerunnable
+`audit-gin.py` are in `~/.cache/a192/`.
+
+The saved vector probe now matches all 1,150 result rows and three headers in
+`vprobe.ref`. The existing `four_row_kernels_match` test also passes its bitwise
+serial/four-row comparisons. Ordinary joined SQL does not prove that the ANN
+four-row kernels ran; the direct kernel test supplies that check. Vector source
+and test hashes match the recorded build, and neither `vprobe.sql` nor its saved
+reference changed. This reuses the saved reference rather than recording a new
+reference build. No FMA mismatch was established and no vector code changed.
+The probe engine shut down cleanly, and both temporary labeled containers were
+removed. The existing stopped a192 containers, worktree, cache, and WIP remain.
+
+## a185 compatibility recovery, 2026-11-08
+
+The cursor and missing-statement fixes are verified at `8e1a80f95` on top of
+`628c8d94b`. DECLARE SCROLL and WITH HOLD reject row-locking queries with PostgreSQL
+18.6's 0A000 message and DETAIL. INSENSITIVE keeps its distinct 42P11 error. The
+first row mark's final strength determines the message. CTE references and SELECT
+without a lockable relation remain valid. Top-level and SPI declarations use the
+same check. Bind and Describe name a missing unnamed prepared statement explicitly.
+
+The final compatibility job ends with HEAVY-EXIT 0. Release wire tests pass 69/69.
+The a185 cursor and a190 planner goldens each pass embedded, wire, and shuffled
+execution. The regression subset matches 3,610/3,610 units with no newly differing
+units. Clippy passes with 14 distinct diagnostics: ten library warnings, two
+additional library-test warnings, one example warning, and one difftest warning.
+No warning points at the compatibility changes. The source manifest stays unchanged
+through the job. Evidence is in `~/.cache/a185/logs/resume-compat-run.log`,
+`resume-compat.status`, `resume-compat.source.json`, and `compat-*.log`.
+
+The earlier integrated candidate job also ends with HEAVY-EXIT 0. It passes the
+release build, nine kept-plan tests, 69 wire tests, six two-phase tests, three lock
+tests in each of release and debug, both selected goldens, Clippy, and the same
+3,610 regression units. Its source is `ecffa8ab3` plus the saved dirty changes in
+`logs/resume-focused.patch` and `resume-focused.source.json`. That run precedes the
+final CTE correction and the later upstream bulk and GIN additions. The original
+job5 validates the separate reusesrc tree, not the column-sharing or lock rewrite.
+
+Custom-plan reuse, shared result columns, and partitioned locks remain candidates
+in `work-a185`, backed up to `wip/a185`. They are not part of this compatibility
+push. Serial performance comparisons and the integrated efficient-mode footprint
+gate remain open. The old new-src footprint run predates custom-plan reuse. The
+reuse range test checks its first row, so complete ordered-result validation also
+remains open. No speedup or blanket performance acceptance is claimed. The full
+verification train remains an integrated-origin gate before candidate acceptance.
