@@ -152,8 +152,8 @@ async fn handle(mut req: Request<Incoming>, accepted: &Accepted, cfg: &HttpsConf
 /// A reverse proxy to an HTTP/1.1 server (`http://127.0.0.1:3000`), WebSockets included.
 #[derive(Clone)]
 pub struct Upstream {
-    base: String,
-    client: Client<HttpConnector, Body>,
+    base: Arc<str>,
+    client: Arc<Client<HttpConnector, Body>>,
 }
 
 impl std::fmt::Debug for Upstream {
@@ -187,7 +187,7 @@ impl Upstream {
         let uri: Uri = base.parse().map_err(|_| anyhow::anyhow!("{base} isn't a URL"))?;
         anyhow::ensure!(uri.scheme_str() == Some("http") && uri.host().is_some(), "{base}: an upstream is http://host:port");
         let client = Client::builder(TokioExecutor::new()).pool_idle_timeout(Duration::from_secs(30)).build_http();
-        Ok(Self { base, client })
+        Ok(Self { base: base.into(), client: Arc::new(client) })
     }
 
     pub async fn forward(&self, mut req: Request<Body>) -> Response<Body> {

@@ -20,6 +20,7 @@ hyper = { workspace = true, features = ["server", "client", "http1"] }
 hyper-util = { workspace = true, features = ["client-legacy", "http1", "tokio", "server"] }
 instant-acme.workspace = true
 ipnet.workspace = true
+pg-proxy.workspace = true
 pg-storage.workspace = true
 rcgen.workspace = true
 reqwest = { workspace = true, features = ["rustls"] }
