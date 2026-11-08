@@ -3508,7 +3508,7 @@ fn index_entries_checked(
                             }
                             // heap_insert counted it (pgstat_count_heap_insert); the abort
                             // makes it a dead tuple.
-                            super::pgstat::count_insert(ctx, t.oid, 1);
+                            super::pgstat::count_failed_insert(ctx, t);
                             return Err(index_violation(t, bix, v, other.as_deref(), ctx));
                         }
                     }

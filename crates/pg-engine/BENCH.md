@@ -5786,6 +5786,47 @@ landed.) The
 CREATE INDEX builds and ANALYZE spend their time in the store's scan positioning and the
 entries' runs; DELETE's index entries left for VACUUM need index access (agent 163).
 
+## Bulk writes, round 9 (agent 182)
+
+HANDOFF.md's "Write path, round 9" has what changed. Method as round 8's (`--profile dist`
+with line tables, both servers in containers on the same four cores, 20-23, the same CPU weight
+and slice, psql in a third container; CPU and bytes written from the containers' cgroups;
+1M rows, autovacuum off for both tables; PostgreSQL, base and new interleaved, medians of
+three), at a quieter hour than round 8's (load 10-20), so every number is lower on both
+sides. Base: origin `4d48ff398` (round 8 plus the DROP fix, which costs nothing here).
+
+### DELETE leaving its index entries for VACUUM: measured, not built
+
+Profiled on the base (`perf record -g dwarf`, the 1M-row sequence up to DELETE a quarter):
+the DELETE's connection thread is 58.6% of its CPU (the source scan's three workers the
+rest: agent 177's); in it, the deferred run of entry and row tombstones is about 35% (the
+sort `sort_by_key_after` 10%, `SstWriter::add` and bloom 8.6%, `put_entry_deletes` 6.3%,
+copying into `mvcc_key` and the run about 10%), the index values and entry keys about 4.5%.
+Entry keys are two of the three tombstones per row, the longer ones: about 27% of the thread.
+The index-only scan right after the DELETE took 0.47 s (bulk_a) and 0.50 s (bulk_id), of
+which the store's merge (`Cursor::head/fill/take`, `Merge::min`, `Block::read`,
+`Scan::position`) is about 34%: 0.16 s per 1M-entry index.
+
+| | CPU |
+|---|---|
+| DELETE: no entry keys, sort or run for them | -0.25 s |
+| VACUUM: a raw scan of each of the two indexes | +0.32 s |
+| VACUUM: a sorted run of 500k entry tombstones | about +0.1 s |
+| the next index scan: no tombstone run to merge, a bitmap probe | about -0.03 s |
+| total | about +0.15 s |
+
+PostgreSQL's VACUUM scans its indexes too; the engine's raw entry scan costs more than the
+sorted run at delete time. It would pay with a raw entry scan near PostgreSQL's cost (the
+merge path: agent 191) or a VACUUM that finds dead entries without the old values.
+
+### DELETE's run sorted by runs: measured, dropped
+
+`sort_by_key_after` grouping each 8-byte prefix's keys (the table's rows, each index's
+entries) in arrival order, then a stable sort that merges the runs they arrive in: DELETE
+1.07 -> 1.07 s, the sort 9.9% -> about 9% of the connection thread. The source's three
+workers interleave their rows in short runs, and the random third (bulk_a's entries)
+dominates. Not landed.
+
 ## Native deparser (round 21, agent 93)
 
 `ast::deparse_expr` / `deparse_stmt` (views, rules, defaults, checks, index expressions,
