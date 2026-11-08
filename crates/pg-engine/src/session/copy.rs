@@ -1450,6 +1450,14 @@ impl CopyReader<'_> {
                         if let Some(limit) = f.reject_limit
                             && self.st.skipped as i64 > limit
                         {
+                            let mut prefix = row[..k].to_vec();
+                            for (e, &col) in prefix.iter_mut().zip(target) {
+                                if let Expr::Default(ty) = e {
+                                    *e = rules.defaults[col].clone().unwrap_or_else(|| Expr::null(ty.clone()));
+                                }
+                            }
+                            kept.push(CopyRow::Skipped(prefix));
+                            kept_lines.push(line);
                             return Ok((kept, kept_lines, Some(Error::new(code::INVALID_TEXT_REPRESENTATION, format!("skipped more than REJECT_LIMIT ({limit}) rows due to data type incompatibility")).context(context))));
                         }
                         if f.log_verbosity >= 2 {

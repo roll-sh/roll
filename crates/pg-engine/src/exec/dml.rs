@@ -3200,7 +3200,7 @@ pub fn new_row(rules: &TableRules, target: &[usize], src: Row, ctx: &ExecCtx) ->
 
 /// Where an INSERT's given values have their domains checked (`new_row_checked`).
 #[derive(Clone, Copy, PartialEq)]
-pub enum Given {
+enum Given {
     /// A multi-row VALUES list: coerced as its rows are made, before any default.
     First,
     /// Any other source: in column order, among the defaults the rewriter adds to the same
@@ -3213,7 +3213,7 @@ pub enum Given {
 }
 
 impl Given {
-    pub fn of(plan: &InsertPlan) -> Given {
+    fn of(plan: &InsertPlan) -> Given {
         use crate::sql::plan::Plan;
         let values = |p: &Plan| matches!(p, Plan::Values { rows, .. } if rows.len() > 1);
         match &*plan.source {
@@ -3228,7 +3228,7 @@ impl Given {
 /// `new_row` with the given values' domains checked where PostgreSQL's target list checks
 /// them (`given`). True: those of the given columns are checked (`check_row_except` leaves
 /// them).
-pub fn new_row_checked(rules: &TableRules, target: &[usize], src: Row, given: Given, ctx: &ExecCtx) -> Result<(Row, bool)> {
+fn new_row_checked(rules: &TableRules, target: &[usize], src: Row, given: Given, ctx: &ExecCtx) -> Result<(Row, bool)> {
     let t = &rules.table;
     let all = src.len() == t.columns.len() && target.len() == src.len() && target.iter().enumerate().all(|(i, c)| i == *c);
     if all || given == Given::Later || rules.domain_checks.iter().all(Option::is_none) {
