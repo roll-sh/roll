@@ -1346,6 +1346,12 @@ Resources:
                 Effect: Allow
                 Action: [ecs:RegisterTaskDefinition, ecs:DescribeTaskDefinition]
                 Resource: "*"
+              # A revision keeps its predecessor's tags, if it has any.
+              - Sid: TagRevisions
+                Effect: Allow
+                Action: ecs:TagResource
+                Resource: "*"
+                Condition: { StringEquals: { ecs:CreateAction: RegisterTaskDefinition } }
               - Sid: Services
                 Effect: Allow
                 Action: [ecs:UpdateService, ecs:DescribeServices]
