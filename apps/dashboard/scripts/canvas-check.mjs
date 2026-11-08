@@ -221,11 +221,17 @@ async function settle(page, ms = 10000, quiet = 2) {
       const s = c?.__canvasCheck?.();
       if (!s) return "none";
       const v = s.view, g = s.goal;
-      const moving = !v || !g || Math.abs(v.k - g.k) > 1e-4 || Math.abs(v.x - g.x) > 0.5 || Math.abs(v.y - g.y) > 0.5;
+      let moving = !v || !g || Math.abs(v.k - g.k) > 1e-4 || Math.abs(v.x - g.x) > 0.5 || Math.abs(v.y - g.y) > 0.5;
+      // Not at rest while a card is drawn at another size than the layout planned for (live data
+      // grew a request card: the re-plan follows a render later). One that never catches up times
+      // out, and that's reported.
+      const planned = new Map(s.nodes.map((n) => [n.key, n]));
       let h = 0;
       for (const el of c.querySelectorAll("[data-card]:not([data-leaving])")) {
         const r = el.getBoundingClientRect();
         h = (h * 31 + Math.round(r.left) * 7 + Math.round(r.top) * 13 + Math.round(r.width)) | 0;
+        const n = planned.get(el.dataset.key);
+        if (v && n && n.w > 0 && !el.hasAttribute("data-off") && Math.abs(r.height / v.k - n.h) > 2) moving = true;
       }
       return `${moving}|${h}|${s.nodes.length}`;
     });
