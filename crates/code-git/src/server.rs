@@ -417,7 +417,7 @@ async fn post_handler(State(s): State<Arc<Server>>, Path(path): Path<String>, he
                 Ok(p) => p,
                 Err(e) => return error_response(e),
             };
-            receive_pack(&s, &repo, &headers, body, pusher).await
+            receive_pack(&s, &repo, &headers, body, pusher, creds).await
         }
     }
 }
@@ -947,7 +947,7 @@ where
     }
 }
 
-async fn receive_pack(s: &Arc<Server>, repo: &str, headers: &HeaderMap, body: Body, pusher: Option<String>) -> Response {
+async fn receive_pack(s: &Arc<Server>, repo: &str, headers: &HeaderMap, body: Body, pusher: Option<String>, credentials: Option<Credentials>) -> Response {
     let lease = Arc::new(s.budget.lease());
     // If this request is dropped (the client went away), unpacking stops waiting for memory.
     let _cancel = CancelOnDrop(lease.clone());
@@ -1072,7 +1072,7 @@ async fn receive_pack(s: &Arc<Server>, repo: &str, headers: &HeaderMap, body: Bo
         Vec::new()
     } else {
         let names: Vec<String> = updates.iter().map(|u| u.name.clone()).collect();
-        match s.backend.receive(repo, ReceiveRequest { updates, objects, atomic, options, pusher }).await {
+        match s.backend.receive(repo, ReceiveRequest { updates, objects, atomic, options, pusher, credentials }).await {
             Ok(o) => {
                 outcome.messages = o.messages;
                 let mut by_name: HashMap<String, Result<(), String>> = o.refs.into_iter().map(|r| (r.name, r.result)).collect();

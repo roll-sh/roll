@@ -1,0 +1,480 @@
+[
+  {
+    "machine": {
+      "id": "mch_fedcba0987654321",
+      "name": "ada-mbp",
+      "online": true,
+      "info": {
+        "hostname": "ada-mbp",
+        "os": "macos",
+        "arch": "aarch64",
+        "version": "0.1.0",
+        "home": "/Users/ada",
+        "providers": [
+          {
+            "id": "claude",
+            "name": "Claude Code",
+            "installed": true,
+            "version": "2.1.310",
+            "auth": "ready",
+            "models": [
+              {
+                "id": "claude-opus-5-5",
+                "name": "Claude Opus 5.5",
+                "short_name": "Opus 5.5",
+                "default": true,
+                "options": [
+                  {
+                    "type": "select",
+                    "id": "effort",
+                    "label": "Reasoning",
+                    "choices": [
+                      {
+                        "id": "low",
+                        "label": "Low"
+                      },
+                      {
+                        "id": "medium",
+                        "label": "Medium"
+                      },
+                      {
+                        "id": "high",
+                        "label": "High"
+                      },
+                      {
+                        "id": "ultracode",
+                        "label": "Ultracode",
+                        "description": "xhigh effort plus multi-agent workflow orchestration"
+                      }
+                    ],
+                    "default": "medium",
+                    "role": "reasoning"
+                  },
+                  {
+                    "type": "boolean",
+                    "id": "fastMode",
+                    "label": "Fast Mode",
+                    "default": false,
+                    "role": "speed"
+                  }
+                ],
+                "badge": "new"
+              },
+              {
+                "id": "claude-sonnet-4-6",
+                "name": "Claude Sonnet 4.6",
+                "default": false,
+                "options": [
+                  {
+                    "type": "select",
+                    "id": "contextWindow",
+                    "label": "Context Window",
+                    "choices": [
+                      {
+                        "id": "200k",
+                        "label": "200k"
+                      },
+                      {
+                        "id": "1m",
+                        "label": "1M"
+                      }
+                    ],
+                    "default": "200k",
+                    "role": "context_window"
+                  },
+                  {
+                    "type": "boolean",
+                    "id": "thinking",
+                    "label": "Thinking",
+                    "description": "Thinks before answering",
+                    "default": true
+                  }
+                ],
+                "legacy": true,
+                "images": false
+              },
+              {
+                "id": "claude-opus-5-5-20261101",
+                "name": "Opus 5.5 (pinned)",
+                "default": false,
+                "custom": true
+              },
+              {
+                "id": "gemini-2.5-pro",
+                "name": "gemini-2.5-pro",
+                "default": false,
+                "via": "CLIProxyAPI"
+              }
+            ],
+            "update_required": [
+              {
+                "id": "claude-haiku-5-5",
+                "name": "Claude Haiku 5.5",
+                "min_version": "2.1.293"
+              }
+            ],
+            "capabilities": {
+              "steer": true,
+              "fork": true,
+              "rollback": false,
+              "plan_mode": true,
+              "images": true,
+              "subagents": true,
+              "mode_switch": true,
+              "compact": true
+            }
+          },
+          {
+            "id": "codex",
+            "name": "Codex",
+            "installed": true,
+            "version": "0.164.0",
+            "auth": "missing",
+            "detail": "Run `codex login`",
+            "capabilities": {
+              "steer": true,
+              "fork": true,
+              "rollback": true,
+              "plan_mode": true,
+              "images": true,
+              "subagents": true,
+              "mode_switch": false,
+              "compact": true
+            },
+            "usage_limits": {
+              "checked_at": 1780000000000,
+              "windows": [
+                {
+                  "id": "primary",
+                  "kind": "session",
+                  "label": "Session",
+                  "used_percent": 42.5,
+                  "resets_at": 1780010000000,
+                  "window_minutes": 300
+                },
+                {
+                  "id": "secondary",
+                  "kind": "weekly",
+                  "label": "Weekly",
+                  "used_percent": 100.0,
+                  "window_minutes": 10080
+                }
+              ],
+              "plan": "plus"
+            }
+          },
+          {
+            "id": "acp:grok",
+            "name": "Grok Build",
+            "installed": false,
+            "auth": "unknown",
+            "capabilities": {
+              "steer": false,
+              "fork": false,
+              "rollback": false,
+              "plan_mode": true,
+              "images": true,
+              "subagents": false,
+              "mode_switch": true,
+              "compact": false
+            },
+            "checking": true
+          }
+        ],
+        "settings": {
+          "set": {
+            "providers": {
+              "claude": {
+                "binary": "/opt/claude/bin/claude",
+                "args": [
+                  "--verbose"
+                ],
+                "env": {
+                  "CLAUDE_CONFIG_DIR": "/Users/ada/.claude-work"
+                },
+                "models": [
+                  {
+                    "id": "claude-opus-5-5[1m]",
+                    "name": "Opus 5.5 (1M)"
+                  },
+                  {
+                    "id": "claude-opus-5-5-preview",
+                    "options": [
+                      {
+                        "type": "select",
+                        "id": "effort",
+                        "label": "Reasoning",
+                        "choices": [
+                          {
+                            "id": "low",
+                            "label": "Low"
+                          },
+                          {
+                            "id": "high",
+                            "label": "High"
+                          }
+                        ],
+                        "default": "high",
+                        "role": "reasoning"
+                      }
+                    ]
+                  }
+                ],
+                "auto_compact_window": 300000,
+                "idle_compaction": "before_cache_expires"
+              },
+              "codex": {
+                "enabled": false
+              }
+            },
+            "defaults": {
+              "provider": "claude",
+              "runtime_mode": "auto_edit",
+              "worktree": true
+            },
+            "worktree_dir": "~/worktrees",
+            "branch_prefix": "ada",
+            "pull_every": 300,
+            "max_depth": 2,
+            "git_name": "Ada Lovelace",
+            "git_email": "ada@example.com",
+            "idle_compaction": "off"
+          },
+          "base": {
+            "worktree_dir": "/Users/ada/.local/share/roll/agent/worktrees",
+            "branch_prefix": "roll",
+            "clone_dir": "/Users/ada/roll",
+            "pull_every": 60,
+            "max_depth": 3,
+            "max_children": 6,
+            "git_name": "Ada"
+          },
+          "providers": [
+            {
+              "id": "claude",
+              "name": "Claude Code",
+              "args": 0,
+              "env": [
+                "ANTHROPIC_API_KEY"
+              ]
+            },
+            {
+              "id": "codex",
+              "name": "Codex",
+              "binary": "/opt/homebrew/bin/codex",
+              "args": 1
+            }
+          ],
+          "config_path": "/Users/ada/.local/share/roll/agent/config.toml",
+          "endpoints": [
+            {
+              "id": "cliproxy",
+              "name": "CLIProxyAPI",
+              "kind": "cliproxy",
+              "base_url": "http://100.64.0.7:8317",
+              "providers": [
+                "claude",
+                "codex"
+              ],
+              "key": "sealed",
+              "models": [
+                {
+                  "id": "gemini-2.5-pro"
+                },
+                {
+                  "id": "gpt-5.5",
+                  "name": "GPT-5.5"
+                }
+              ],
+              "checked_at": 1762000000000
+            },
+            {
+              "id": "gemini",
+              "name": "Gemini key",
+              "kind": "custom",
+              "base_url": "https://generativelanguage.googleapis.com",
+              "providers": [
+                "acp:gemini"
+              ],
+              "key_env": "GEMINI_API_KEY",
+              "key_ref": "op://Dev/Gemini/credential",
+              "key": "reference",
+              "error": "1Password: the op CLI isn't signed in"
+            },
+            {
+              "id": "roll-gateway",
+              "name": "roll gateway on ai-server",
+              "kind": "gateway",
+              "base_url": "http://ai-server.tail1234.ts.net:8790",
+              "providers": [
+                "claude",
+                "codex"
+              ],
+              "fallback": true,
+              "key": "sealed",
+              "models": [
+                {
+                  "id": "fast"
+                }
+              ],
+              "checked_at": 1762000000000
+            }
+          ],
+          "gateway": {
+            "settings": {
+              "enabled": true,
+              "port": 8790,
+              "listen": [
+                "100.64.0.10"
+              ],
+              "upstreams": [
+                {
+                  "id": "anthropic",
+                  "name": "Anthropic",
+                  "kind": "anthropic"
+                },
+                {
+                  "id": "bedrock",
+                  "name": "Amazon Bedrock",
+                  "kind": "bedrock",
+                  "region": "us-east-1",
+                  "models": [
+                    "anthropic.claude-*"
+                  ],
+                  "key_ref": "op://Dev/Bedrock/credential"
+                },
+                {
+                  "id": "vertex",
+                  "name": "Google Vertex AI",
+                  "kind": "vertex",
+                  "region": "us-east5",
+                  "project": "acme-ai",
+                  "disabled": true
+                },
+                {
+                  "id": "openrouter",
+                  "name": "OpenRouter",
+                  "kind": "openrouter",
+                  "headers": [
+                    [
+                      "http-referer",
+                      "https://roll.sh"
+                    ]
+                  ]
+                },
+                {
+                  "id": "azure",
+                  "name": "Azure OpenAI",
+                  "kind": "azure_openai",
+                  "base_url": "https://acme.openai.azure.com"
+                },
+                {
+                  "id": "compat",
+                  "name": "Anthropic-compatible",
+                  "kind": "anthropic_compatible",
+                  "base_url": "https://gw.example.com"
+                },
+                {
+                  "id": "openai",
+                  "name": "OpenAI",
+                  "kind": "openai",
+                  "base_url": "https://api.openai.com/v1"
+                },
+                {
+                  "id": "local",
+                  "name": "OpenAI-compatible",
+                  "kind": "openai_compatible",
+                  "base_url": "http://127.0.0.1:11434/v1",
+                  "models": [
+                    "qwen3-coder*"
+                  ],
+                  "responses": true,
+                  "allow_private": true
+                }
+              ],
+              "routes": [
+                {
+                  "model": "fast",
+                  "targets": [
+                    {
+                      "upstream": "anthropic",
+                      "model": "claude-haiku-4-5"
+                    },
+                    {
+                      "upstream": "bedrock",
+                      "model": "anthropic.claude-haiku-4-5"
+                    }
+                  ]
+                }
+              ],
+              "prices": [
+                {
+                  "model": "qwen3-coder*",
+                  "input": 0,
+                  "output": 0,
+                  "cache_read": 0,
+                  "cache_write": 0
+                }
+              ],
+              "log_bodies": true,
+              "affinity": false,
+              "retention_days": 90
+            },
+            "keys": [
+              {
+                "upstream": "anthropic",
+                "key": "sealed"
+              },
+              {
+                "upstream": "bedrock",
+                "key": "reference"
+              },
+              {
+                "upstream": "local",
+                "key": "none"
+              }
+            ],
+            "clients": [
+              {
+                "id": "gwc_5f1d2c3b4a596877",
+                "name": "Ada's sandbox",
+                "machine": "mch_fedcba0987654321",
+                "created_at": 1762000000000
+              }
+            ],
+            "run": {
+              "state": "failed",
+              "error": "100.64.0.10:8790 is in use",
+              "addresses": [
+                "127.0.0.1:8790"
+              ]
+            }
+          },
+          "registry": [
+            {
+              "id": "goose",
+              "version": "1.57.0",
+              "provider": "acp:goose",
+              "kind": "binary",
+              "installed_at": 1762000000000
+            }
+          ]
+        },
+        "seal_key": "hSDwCYkwp1R0i33ctD73Wg2_Og0mOBr066SpjqqbTmo"
+      },
+      "sandbox": {
+        "backend": "agent37",
+        "size": "2cpu-4gb",
+        "status": "running",
+        "hourly_cents": 3
+      },
+      "appearance": {
+        "color": "violet",
+        "kind": "cloud"
+      },
+      "created_at": 1762000000000,
+      "last_seen": 1762000000000
+    },
+    "owner": "acme"
+  }
+]

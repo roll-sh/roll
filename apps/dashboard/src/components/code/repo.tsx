@@ -23,6 +23,7 @@ import {
   type Repo,
 } from "@/lib/code-api";
 import { auditLabel, canWrite, queueStripText, summaryFromEvent, summaryFromStats, type QueueSummary } from "@/lib/queue";
+import { Picker } from "../agents/ui/picker";
 import { CodeShell } from "./shell";
 import { LiveChart } from "../queues/live-chart";
 import { ago, btn, Confirm, CopyButton, ErrorNote, input, Panel, primary, Stats, useCopy } from "../ui";
@@ -208,7 +209,8 @@ function OverviewTab({
         ]}
       />
       {repo.import && repo.import.state !== "done" && <ImportNote repo={repo} />}
-      <div className="grid gap-4 lg:grid-cols-5">
+      {/* min-w-0: a grid item is as wide as its widest line (the curl example), wider than a phone. */}
+      <div className="grid gap-4 lg:grid-cols-5 [&>*]:min-w-0">
         <Panel
           title="Landing"
           className="lg:col-span-3"
@@ -488,12 +490,9 @@ function SettingsTab({
   onDeleted: () => void;
 }) {
   const [policy, setPolicy] = useState<LandPolicy>(policyOf(repo.land_policy));
-  const [checks, setChecks] = useState(repo.required_checks.join(", "));
+  const [parsed, setChecks] = useState<string[]>(repo.required_checks);
   const [deleting, setDeleting] = useState(false);
-  const parsed = checks
-    .split(",")
-    .map((c) => c.trim())
-    .filter(Boolean);
+  const reported = useReportedChecks(repo.full_name, repo.default_branch);
   const dirty = policy !== policyOf(repo.land_policy) || parsed.join(",") !== repo.required_checks.join(",");
 
   return (
@@ -519,13 +518,16 @@ function SettingsTab({
               />
             </Field>
             <Field label="Required checks" hint="each change must pass these before it's queued: roll.toml checks or any reported over the API">
-              <input
-                value={checks}
-                onChange={(e) => setChecks(e.target.value)}
+              <Picker
+                label="Required checks"
+                multiple
+                value={parsed}
+                onChange={setChecks}
+                options={reported.map((c) => ({ id: c, label: c, hint: `reported on ${repo.default_branch}` }))}
+                custom
+                mono
                 disabled={policy === "post_merge"}
                 placeholder="test, lint"
-                spellCheck={false}
-                className={`${input} w-full font-mono text-[12px] disabled:opacity-40`}
               />
             </Field>
           </div>
@@ -708,4 +710,20 @@ function AuditLog({ repo, tick }: { repo: Repo; tick: number }) {
       )}
     </Panel>
   );
+}
+
+/** The checks the branch's head reported (statuses), to pick required ones from; none when that fails. */
+function useReportedChecks(repo: string, branch: string): string[] {
+  const [checks, setChecks] = useState<string[]>([]);
+  useEffect(() => {
+    let live = true;
+    codeApi.statuses(repo, branch).then(
+      (c) => live && setChecks([...new Set(c.statuses.map((s) => s.context))].sort()),
+      () => live && setChecks([]),
+    );
+    return () => {
+      live = false;
+    };
+  }, [repo, branch]);
+  return checks;
 }

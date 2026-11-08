@@ -23,6 +23,7 @@ import {
 import { CodeShell } from "./shell";
 import { btn, Connecting, CopyButton, EmptyPanel, ErrorNote, input, Offline, panel, primary, Stats, useCopy } from "../ui";
 import { NameHint, OwnerPicker, useRepoName } from "./names";
+import { useShownOwner } from "../agents/use-connection";
 import { Field, GitHubMark, POLL_MS, Segmented, useAction, VisibilityBadge } from "./shared";
 /** Poll the control plane: code info and every repo. */
 function useRepoList() {
@@ -60,9 +61,16 @@ function useRepoList() {
 
 export function CodeRepos() {
   const router = useRouter();
-  const { info, repos, offline, refresh } = useRepoList();
+  const { info, repos: every, offline, refresh } = useRepoList();
   const { busy, error, run } = useAction(refresh);
   const [creating, setCreating] = useState(false);
+  // An admin sees every owner's repositories; the owner they picked (the sidebar's, the crumb's)
+  // shows first, and "All owners" shows the rest.
+  const shown = useShownOwner();
+  const [allOwners, setAllOwners] = useState(false);
+  const scope = shown?.admin && shown.owner ? shown.owner : null;
+  const repos = every && scope && !allOwners ? every.filter((r) => r.owner === scope) : every;
+  const others = every && repos ? every.length - repos.length : 0;
 
   const create = async (input: RepoInput) => {
     const repo = await run("create", () => codeApi.createRepo(input));
@@ -100,6 +108,20 @@ export function CodeRepos() {
 
       {creating && info && <NewRepo busy={busy === "create"} onCancel={() => setCreating(false)} onCreate={create} />}
 
+      {scope && every && every.length > 0 && (
+        <div className="mt-6 flex items-center gap-3 whitespace-nowrap">
+          <Segmented
+            value={allOwners ? "all" : "shown"}
+            options={[
+              { label: scope, value: "shown" },
+              { label: `All owners (${every.length})`, value: "all" },
+            ]}
+            onChange={(v) => setAllOwners(v === "all")}
+          />
+          <span className="text-[12px] text-subtle">Signed in as admin</span>
+        </div>
+      )}
+
       {offline ? (
         <Offline />
       ) : repos === null || info === null ? (
@@ -107,19 +129,26 @@ export function CodeRepos() {
       ) : repos.length === 0 ? (
         !creating && (
           <EmptyPanel>
-            <h2 className="text-[15px] font-medium">No repositories yet</h2>
+            <h2 className="text-[15px] font-medium">{scope && others > 0 ? `${scope} has no repositories yet` : "No repositories yet"}</h2>
             <p className="max-w-md text-[13px] text-muted">
               Create one on roll, or connect a GitHub repository: roll imports its history, lands every change and
               mirrors the result back to GitHub, so agents get the throughput and your team keeps GitHub.
             </p>
-            <button onClick={() => setCreating(true)} className={primary}>
-              <Plus className="size-3.5" /> New repository
-            </button>
+            <div className="flex flex-wrap justify-center gap-2">
+              <button onClick={() => setCreating(true)} className={primary}>
+                <Plus className="size-3.5" /> New repository
+              </button>
+              {scope && others > 0 && (
+                <button onClick={() => setAllOwners(true)} className={btn}>
+                  Show all owners ({others})
+                </button>
+              )}
+            </div>
           </EmptyPanel>
         )
       ) : (
         <>
-          <div className="mt-6">
+          <div className={scope ? "mt-4" : "mt-6"}>
             <Stats
               items={[
                 { label: "Repositories", value: repos.length, hint: `${repos.filter((r) => r.github).length} connected to GitHub` },

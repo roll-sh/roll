@@ -1,0 +1,9 @@
+{"native_thread":"/s/1.jsonl"}
+{"model":"anthropic/claude-test"}
+{"request":{"body":{"questions":[{"header":"Question","id":"q1","multi":false,"options":[{"label":"Empty value"},{"label":"staging"},{"label":"production"}],"question":"Deploy where?"}],"type":"questions"},"id":"q1","item":null}}
+{"request":{"body":{"questions":[{"header":"Release name","id":"q2","multi":false,"question":"v1.2"}],"type":"questions"},"id":"q2","item":null}}
+{"request":{"body":{"questions":[{"header":"Question","id":"q3","multi":false,"question":"Notes"}],"type":"questions"},"id":"q3","item":null}}
+{"request_cancelled":"q3"}
+{"turn_ref":"u"}
+{"turn_ended":"completed"}
+{"exited":null}

@@ -377,38 +377,6 @@ async fn max_mode_verifies_and_uses_context() {
 }
 
 #[tokio::test]
-async fn standard_has_no_context_and_thorough_raises_effort() {
-    let m = mock(Arc::new(|path, body, _| {
-        if path.ends_with("count_tokens") {
-            return (200, vec![], json!({"input_tokens": 10}));
-        }
-        let user = body["messages"][0]["content"][0]["text"].as_str().unwrap_or("");
-        if user.contains("checking another reviewer's findings") {
-            return ok(json!({"results": [{"index": 0, "confirmed": true, "reason": "ok"}]}), json!({}));
-        }
-        ok(answer_for(body), json!({}))
-    }))
-    .await;
-    let e = Engine::new(anthropic(&m.url), None);
-    let mut i = input(vec![file("a.rs", 2)], Mode::Standard, Speed::Balanced);
-    i.context = vec![ContextBlock { title: "ctx".into(), text: "x".into() }];
-    e.review(&i, None).await.unwrap();
-    i.speed = Speed::Thorough;
-    e.review(&i, None).await.unwrap();
-    let msgs: Vec<Seen> = m.seen.lock().iter().filter(|s| s.path == "/v1/messages").cloned().collect();
-    assert!(!msgs[0].body["messages"][0]["content"][0]["text"].as_str().unwrap().contains("# Repository context"));
-    assert_eq!(msgs[1].body["output_config"]["effort"], "xhigh");
-    // Thorough verifies even in standard mode.
-    assert_eq!(msgs.len(), 3);
-    // An effort override wins.
-    let mut i2 = input(vec![file("a.rs", 2)], Mode::Deep, Speed::Fast);
-    i2.settings.effort = Some(code_review::Effort::Max);
-    e.review(&i2, None).await.unwrap();
-    let last = m.seen.lock().iter().rfind(|s| s.path == "/v1/messages").cloned().unwrap();
-    assert_eq!(last.body["output_config"]["effort"], "max");
-}
-
-#[tokio::test]
 async fn dedupes_against_open_threads_and_profiles() {
     let m = mock(Arc::new(|path, body, _| {
         if path.ends_with("count_tokens") {
@@ -591,10 +559,16 @@ async fn effort_follows_the_table_for_every_mode_and_speed() {
     for (mode, speed, effort) in table {
         assert_eq!(Engine::effort_for(mode, speed, &ReviewerSettings::default()).as_str(), effort, "{mode:?} × {speed:?}");
         let from = m.seen.lock().len();
-        let r = e.review(&input(vec![file("a.rs", 2)], mode, speed), None).await.unwrap();
+        let mut i = input(vec![file("a.rs", 2)], mode, speed);
+        i.context = vec![ContextBlock { title: "ctx".into(), text: "x".into() }];
+        let r = e.review(&i, None).await.unwrap();
         assert_eq!(r.effort.map(|x| x.as_str()), Some(effort));
         let msgs = messages(from);
         assert_eq!(msgs[0].body["output_config"]["effort"], effort, "{mode:?} × {speed:?}");
+        if mode == Mode::Standard {
+            let user = msgs[0].body["messages"][0]["content"][0]["text"].as_str().unwrap();
+            assert!(!user.contains("# Repository context"), "standard gets no repository context ({speed:?})");
+        }
         let fast = speed == Speed::Fast;
         assert_eq!(msgs[0].body["model"] == "claude-haiku-5-5", fast, "{mode:?} × {speed:?}: {}", msgs[0].body["model"]);
         let verifies = !fast && (mode == Mode::Max || speed == Speed::Thorough);

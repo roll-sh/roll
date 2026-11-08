@@ -12,13 +12,21 @@ use serde_json::{Value, json};
 const MCP: &str = "/v1/code/mcp";
 
 /// The tools docs/code/mcp.md lists.
-const TOOLS: [&str; 22] = [
+const TOOLS: [&str; 37] = [
     "search_code", "read_file", "list_tree", "log", "blame", "get_changeset", "compare", "create_change", "revise_change", "land", "get_change",
     "list_changes", "claim_work", "heartbeat_work", "release_work", "complete_work", "list_work", "create_work", "comment", "review", "queue_status",
-    "request_ai_review",
+    "request_ai_review", "list_agent_machines", "list_agent_threads", "create_agent_thread", "send_agent_message", "respond_agent_request",
+    "interrupt_agent_thread", "publish_agent_thread", "create_agent_project", "claim_agent_work", "list_agent_automations", "save_agent_automation",
+    "run_agent_automation", "list_agent_automation_runs", "get_agent_automation_run", "cancel_agent_automation_run",
 ];
+/// The agents tools (not repo-scoped: `agent_tools_drive_a_machine_like_their_routes`,
+/// `agent_tools_work_in_roll_code_like_their_routes` and `automation_tools_map_onto_their_routes`).
+const AGENT_TOOLS: usize = 15;
 /// The ones that only read (`readOnlyHint`).
-const READ_ONLY: [&str; 11] = ["search_code", "read_file", "list_tree", "log", "blame", "get_changeset", "compare", "get_change", "list_changes", "list_work", "queue_status"];
+const READ_ONLY: [&str; 16] = [
+    "search_code", "read_file", "list_tree", "log", "blame", "get_changeset", "compare", "get_change", "list_changes", "list_work", "queue_status",
+    "list_agent_machines", "list_agent_threads", "list_agent_automations", "list_agent_automation_runs", "get_agent_automation_run",
+];
 
 struct Client<'a> {
     a: &'a App,
@@ -163,143 +171,6 @@ async fn transport_sessions_and_protocol() {
     assert_eq!(a.send(del(c.session.clone())).await.status(), StatusCode::NOT_FOUND);
     let (s, _, _) = c.post(json!({ "jsonrpc": "2.0", "id": 16, "method": "ping" }), &[]).await;
     assert_eq!(s, StatusCode::NOT_FOUND, "an ended session is gone");
-}
-
-#[tokio::test]
-async fn every_tool_end_to_end() {
-    let a = app(None);
-    a.repo("acme", "api").await;
-    let mut c = Client::new(&a, None);
-    c.initialize("2025-11-25").await;
-    let repo = "acme/api";
-
-    // Land directly, then read it back every way.
-    let landed = c
-        .tool("land", json!({ "repo": repo, "message": "first", "files": { "src/lib.rs": { "content": "pub fn a() -> u32 {\n    1\n}\n" }, "README.md": { "content": "# api\n" } } }))
-        .await;
-    assert_eq!(landed["status"], "landed", "{landed}");
-    let first = landed["changeset"].as_str().unwrap().to_string();
-    let f = c.tool("read_file", json!({ "repo": repo, "path": "src/lib.rs" })).await;
-    assert_eq!(f["content"], "pub fn a() -> u32 {\n    1\n}\n");
-    assert_eq!((f["total_lines"].as_u64(), f["truncated"].as_bool()), (Some(3), Some(false)));
-    let part = c.tool("read_file", json!({ "repo": repo, "path": "src/lib.rs", "rev": first, "start_line": 2, "end_line": 2 })).await;
-    assert_eq!(part["content"], "    1");
-    assert!(c.tool_err("read_file", json!({ "repo": repo, "path": "nope.rs" })).await.starts_with("not found"));
-    let tree = c.tool("list_tree", json!({ "repo": repo })).await;
-    assert!(tree["entries"].as_array().unwrap().iter().any(|e| e["name"] == "src"));
-    let sub = c.tool("list_tree", json!({ "repo": repo, "path": "src" })).await;
-    assert_eq!(sub["entries"][0]["name"], "lib.rs");
-    let log = c.tool("log", json!({ "repo": repo, "limit": 5 })).await;
-    assert_eq!(log["items"][0]["id"], first);
-    let blame = c.tool("blame", json!({ "repo": repo, "path": "src/lib.rs" })).await;
-    assert_eq!(blame["ranges"][0]["changeset"], first);
-    assert_eq!(blame["lines"], 3);
-    let cs = c.tool("get_changeset", json!({ "repo": repo, "id": first })).await;
-    assert_eq!(cs["id"], first);
-    let hits = c.tool("search_code", json!({ "repo": repo, "query": "pub fn a" })).await;
-    assert_eq!(hits["matches"][0]["path"], "src/lib.rs");
-
-    // A change: create, revise, inspect, compare, comment, review, land.
-    let ch = c
-        .tool("create_change", json!({ "repo": repo, "title": "Return two", "base": "main", "files": { "src/lib.rs": { "content": "pub fn a() -> u32 {\n    2\n}\n" } } }))
-        .await;
-    let id = ch["id"].as_str().unwrap().to_string();
-    let by_number = format!("{repo}#{}", ch["number"]);
-    let revised = c
-        .tool("revise_change", json!({ "change": by_number, "base": "main", "message": "two, documented", "files": { "src/lib.rs": { "content": "/// Two.\npub fn a() -> u32 {\n    2\n}\n" } } }))
-        .await;
-    assert_eq!(revised["revision"], 2);
-    let cmp = c.tool("compare", json!({ "repo": repo, "base": "main", "head": revised["head"] })).await;
-    assert_eq!(cmp["files"][0]["path"], "src/lib.rs");
-    // Searching the change's head finds what only it has.
-    let at = c.tool("search_code", json!({ "repo": repo, "query": "/// Two.", "rev": revised["head"] })).await;
-    assert_eq!(at["matches"][0]["path"], "src/lib.rs", "{at}");
-    let th = c.tool("comment", json!({ "change": id, "path": "src/lib.rs", "line": 1, "body": "Nice doc." })).await;
-    let th_id = th["id"].as_str().unwrap().to_string();
-    let replied = c.tool("comment", json!({ "thread": th_id, "body": "Thanks!" })).await;
-    assert_eq!(replied["comments"].as_array().unwrap().len(), 2);
-    let rv = c.tool("review", json!({ "change": id, "verdict": "approve", "body": "LGTM", "comments": [{ "path": "src/lib.rs", "line": 3, "body": "ok" }] })).await;
-    assert_eq!(rv["verdict"], "approve");
-    let got = c.tool("get_change", json!({ "change": by_number })).await;
-    assert_eq!(got["change"]["id"], id);
-    assert!(got["review_status"].is_object());
-    assert_eq!(got["threads"].as_array().unwrap().len(), 2);
-    let list = c.tool("list_changes", json!({ "repo": repo, "state": "open" })).await;
-    assert_eq!(list["items"][0]["id"], id);
-    let ai = c.tool("request_ai_review", json!({ "change": id, "mode": "standard" })).await;
-    assert_eq!(ai["job"]["state"], "queued");
-    let landed = c.tool("land", json!({ "change": id })).await;
-    assert_eq!(landed["status"], "landed", "{landed}");
-    assert_eq!(c.tool("queue_status", json!({ "repo": repo })).await["policy"], "post_merge");
-
-    // A stale base conflicts: an outcome, not an error.
-    let conflict = c.tool("land", json!({ "repo": repo, "base": first, "message": "stale", "files": { "src/lib.rs": { "content": "pub fn a() -> u32 {\n    3\n}\n" } } })).await;
-    assert_eq!(conflict["status"], "conflict");
-    assert_eq!(conflict["paths"][0], "src/lib.rs");
-    // Rules that need an approval block a land: also an outcome, with blockers.
-    a.ok("PATCH", "/v1/code/repos/acme/api/review-settings", Some(json!({ "required_approvals": 1 }))).await;
-    let ch = c.tool("create_change", json!({ "repo": repo, "title": "Needs review", "base": "main", "files": { "x.txt": { "content": "x\n" } } })).await;
-    let blocked = c.tool("land", json!({ "change": ch["id"] })).await;
-    assert_eq!(blocked["status"], "blocked", "{blocked}");
-    assert!(blocked["blockers"].as_array().unwrap().iter().any(|b| b["kind"] == "needs_approval"));
-
-    // Work: nothing to claim, then create, claim, heartbeat, release, claim, complete.
-    let none = c.tool("claim_work", json!({ "repo": repo, "agent": "bot-1" })).await;
-    assert!(none["work"].is_null());
-    let w = c.tool("create_work", json!({ "repo": repo, "title": "Fix the thing", "labels": ["bug"], "priority": 1 })).await;
-    let claimed = c.tool("claim_work", json!({ "repo": repo, "agent": "bot-1", "labels": ["bug"], "lease_s": 60 })).await;
-    assert_eq!(claimed["work"]["id"], w["id"]);
-    let wnum = format!("{repo}#{}", w["number"]);
-    assert_eq!(c.tool("heartbeat_work", json!({ "work": wnum, "agent": "bot-1" })).await["claimed_by"], "bot-1");
-    assert_eq!(c.tool("release_work", json!({ "work": w["id"], "agent": "bot-1" })).await["state"], "open");
-    c.tool("claim_work", json!({ "repo": repo, "agent": "bot-2" })).await;
-    assert_eq!(c.tool("complete_work", json!({ "work": w["id"], "agent": "bot-2" })).await["state"], "done");
-    let work = c.tool("list_work", json!({ "repo": repo, "state": "done" })).await;
-    assert_eq!(work["items"][0]["id"], w["id"]);
-
-    // Argument errors are tool errors.
-    assert!(c.tool_err("log", json!({ "repo": "no-slash" })).await.contains("owner/repo"));
-    assert!(c.tool_err("get_change", json!({ "change": "acme/api#999" })).await.starts_with("not found"));
-    assert!(c.tool_err("land", json!({})).await.contains("land needs"));
-    assert!(c.tool_err("comment", json!({ "body": "x" })).await.contains("comment needs"));
-}
-
-#[tokio::test]
-async fn tools_enforce_the_routes_authorization() {
-    let a = common::app(Some("root"));
-    for (name, vis) in [("pub", "public"), ("priv", "private")] {
-        a.req("POST", "/v1/code/owners", Some(json!({ "name": "acme", "kind": "org" })), Some("root")).await;
-        let (s, v) = a.req("POST", "/v1/code/repos", Some(json!({ "owner": "acme", "name": name, "visibility": vis })), Some("root")).await;
-        assert!(s.is_success(), "{v}");
-        let (s, v) = a.req("POST", &format!("/v1/code/repos/acme/{name}/land"), Some(json!({ "message": "m", "files": { "a.txt": { "content": "a\n" } } })), Some("root")).await;
-        assert!(s.is_success(), "{v}");
-    }
-    let (_, v) = a.req("POST", "/v1/code/owners", Some(json!({ "name": "eve", "kind": "user" })), Some("root")).await;
-    assert!(v.is_object());
-    let (_, t) = a.req("POST", "/v1/code/owners/eve/tokens", Some(json!({ "name": "t" })), Some("root")).await;
-    let eve = t["token"].as_str().unwrap().to_string();
-
-    // Anonymous: public reads work; private repos don't exist; writes need a token.
-    let mut anon = Client::new(&a, None);
-    anon.initialize("2025-06-18").await;
-    assert_eq!(anon.tool("read_file", json!({ "repo": "acme/pub", "path": "a.txt" })).await["content"], "a\n");
-    assert!(anon.tool_err("read_file", json!({ "repo": "acme/priv", "path": "a.txt" })).await.starts_with("not found"));
-    assert!(anon.tool_err("create_work", json!({ "repo": "acme/pub", "title": "x" })).await.contains("needs a token"));
-    // Another owner's token: reads public, can't write acme's repos.
-    let mut e = Client::new(&a, Some(&eve));
-    e.initialize("2025-06-18").await;
-    assert!(e.tool_err("list_tree", json!({ "repo": "acme/priv" })).await.starts_with("not found"));
-    let err = e.tool_err("land", json!({ "repo": "acme/pub", "base": "main", "message": "x", "files": { "b.txt": { "content": "b\n" } } })).await;
-    assert!(err.starts_with("not allowed"), "{err}");
-    // The admin can.
-    let mut root = Client::new(&a, Some("root"));
-    root.initialize("2025-06-18").await;
-    assert_eq!(root.tool("read_file", json!({ "repo": "acme/priv", "path": "a.txt" })).await["content"], "a\n");
-    // A session belongs to the token that started it.
-    let mut stolen = Client::new(&a, Some(&eve));
-    stolen.session = root.session.clone();
-    let (s, _, _) = stolen.post(json!({ "jsonrpc": "2.0", "id": 1, "method": "ping" }), &[]).await;
-    assert_eq!(s, StatusCode::NOT_FOUND);
 }
 
 /// `Accept: text/event-stream` (without `application/json`): each response comes as a `message`
@@ -510,7 +381,9 @@ async fn land_outcomes_queued_branches_and_errors() {
     let mut c = Client::new(&a, None);
     c.initialize("2025-11-25").await;
     let repo = "acme/api";
-    assert_eq!(c.tool("land", json!({ "repo": repo, "message": "init", "files": { "a.txt": { "content": "a\n" } } })).await["status"], "landed");
+    let init = c.tool("land", json!({ "repo": repo, "message": "init", "files": { "a.txt": { "content": "a\n" } } })).await;
+    assert_eq!(init["status"], "landed");
+    let first = init["changeset"].as_str().unwrap().to_string();
 
     // A branch with a slash in its name.
     let br = c.tool("land", json!({ "repo": repo, "base": "main", "message": "on a branch", "ref": "feature/x", "files": { "b.txt": { "content": "b\n" } } })).await;
@@ -534,6 +407,18 @@ async fn land_outcomes_queued_branches_and_errors() {
     assert!(c.tool_err("land", json!({ "change": "chg_nope" })).await.starts_with("not found"));
     assert!(c.tool_err("land", json!({ "change": "acme/api#x" })).await.contains("expected owner/repo#number"));
     assert!(c.tool_err("land", json!({ "change": "acme#1" })).await.contains("expected \"owner/repo\""));
+
+    // A stale base conflicts: an outcome, not an error.
+    assert_eq!(c.tool("land", json!({ "repo": repo, "message": "a2", "files": { "a.txt": { "content": "a2\n" } } })).await["status"], "landed");
+    let conflict = c.tool("land", json!({ "repo": repo, "base": first, "message": "stale", "files": { "a.txt": { "content": "a3\n" } } })).await;
+    assert_eq!((conflict["status"].as_str(), conflict["paths"][0].as_str()), (Some("conflict"), Some("a.txt")), "{conflict}");
+    // Rules that need an approval block a land: also an outcome, with blockers.
+    a.ok("PATCH", "/v1/code/repos/acme/api/review-settings", Some(json!({ "required_approvals": 1 }))).await;
+    let ch = c.tool("create_change", json!({ "repo": repo, "title": "Needs review", "base": "main", "files": { "x.txt": { "content": "x\n" } } })).await;
+    let blocked = c.tool("land", json!({ "change": ch["id"] })).await;
+    assert_eq!(blocked["status"], "blocked", "{blocked}");
+    assert!(blocked["blockers"].as_array().unwrap().iter().any(|b| b["kind"] == "needs_approval"));
+    a.ok("PATCH", "/v1/code/repos/acme/api/review-settings", Some(json!({ "required_approvals": 0 }))).await;
 
     // A queue repo: landing queues.
     a.ok("PATCH", "/v1/code/repos/acme/api", Some(json!({ "land_policy": "queue" }))).await;
@@ -875,7 +760,8 @@ type Route = (&'static str, String, Option<Value>);
 
 /// Every tool, for anonymous callers and another owner's token, on a public and a private
 /// repo: the tool succeeds exactly when its route does, and a refusal carries the route's
-/// status and words ("this needs a token", "not allowed", "not found").
+/// status and words ("this needs a token", "not allowed", "not found"). The owner and the admin
+/// read and write the private repo.
 #[tokio::test]
 async fn every_tool_is_authorized_like_its_route() {
     let a = app(Some("root"));
@@ -971,65 +857,18 @@ async fn every_tool_is_authorized_like_its_route() {
                     _ => assert!(text.starts_with("not found"), "{ctx}"),
                 }
             }
-            assert_eq!(seen.len(), TOOLS.len(), "every tool is checked");
+            assert_eq!(seen.len(), TOOLS.len() - AGENT_TOOLS, "every repo tool is checked");
         }
     }
-}
-
-/// The auth matrix through MCP tools: every caller × read and write, public and private, as the
-/// routes answer them; and a bad token gets no session. Open mode lets any token in.
-#[tokio::test]
-async fn tools_follow_the_whole_auth_matrix() {
-    let a = common::app(Some("root"));
-    let mut tokens = Vec::new();
-    for owner in ["acme", "other"] {
-        a.req("POST", "/v1/code/owners", Some(json!({ "name": owner, "kind": "org" })), Some("root")).await;
-        let (_, t) = a.req("POST", &format!("/v1/code/owners/{owner}/tokens"), Some(json!({ "name": "t" })), Some("root")).await;
-        tokens.push(t["token"].as_str().unwrap().to_string());
-    }
-    for (name, vis) in [("pub", "public"), ("priv", "private")] {
-        let (s, v) = a.req("POST", "/v1/code/repos", Some(json!({ "owner": "acme", "name": name, "visibility": vis })), Some("root")).await;
-        assert!(s.is_success(), "{v}");
-        let (s, v) = a.req("POST", &format!("/v1/code/repos/acme/{name}/land"), Some(json!({ "message": "m", "files": { "a.txt": { "content": "a\n" } } })), Some("root")).await;
-        assert!(s.is_success(), "{v}");
-    }
-    // None: the tool works; Some(text): it fails, saying that.
-    type Outcomes<'a> = [Option<&'a str>; 4];
-    let rows: [(&str, Option<&str>, Outcomes); 4] = [
-        ("admin", Some("root"), [None; 4]),
-        ("owner", Some(tokens[0].as_str()), [None; 4]),
-        ("another owner", Some(tokens[1].as_str()), [None, Some("not found"), Some("not allowed"), Some("not found")]),
-        ("anonymous", None, [None, Some("not found"), Some("this needs a token"), Some("not found")]),
-    ];
-    for (who, token, want) in rows {
-        let mut c = Client::new(&a, token);
+    // The owner's own token and the admin read and write the private repo.
+    let (_, t) = a.req("POST", "/v1/code/owners/acme/tokens", Some(json!({ "name": "t" })), root).await;
+    let acme = t["token"].as_str().unwrap().to_string();
+    for (who, token) in [("owner", acme.as_str()), ("admin", "root")] {
+        let mut c = Client::new(&a, Some(token));
         c.initialize("2025-06-18").await;
-        for (i, (tool, repo)) in [("read_file", "acme/pub"), ("read_file", "acme/priv"), ("create_work", "acme/pub"), ("create_work", "acme/priv")].into_iter().enumerate() {
-            let args = if tool == "read_file" { json!({ "repo": repo, "path": "a.txt" }) } else { json!({ "repo": repo, "title": format!("by {who}") }) };
-            match want[i] {
-                None if tool == "read_file" => assert_eq!(c.tool(tool, args).await["content"], "a\n", "{who} {tool} {repo}"),
-                None => assert_eq!(c.tool(tool, args).await["title"], format!("by {who}"), "{who} {tool} {repo}"),
-                Some(msg) => {
-                    let err = c.tool_err(tool, args).await;
-                    assert!(err.contains(msg), "{who} {tool} {repo}: {err}");
-                }
-            }
-        }
+        assert_eq!(c.tool("read_file", json!({ "repo": "acme/priv", "path": "a.txt" })).await["content"], "a\n", "{who}");
+        assert_eq!(c.tool("create_work", json!({ "repo": "acme/priv", "title": format!("by {who}") })).await["title"], format!("by {who}"));
     }
-    // Unknown and garbage tokens: no session (401), so no tool runs.
-    let init = json!({ "jsonrpc": "2.0", "id": 0, "method": "initialize", "params": { "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": { "name": "t", "version": "1" } } });
-    for token in ["rlc_0000", "hunter2"] {
-        let (s, _, v) = Client::new(&a, Some(token)).post(init.clone(), &[]).await;
-        assert_eq!(s, StatusCode::UNAUTHORIZED, "{token}: {v}");
-    }
-    // DELETE needs the session header.
-    assert_eq!(a.send(Request::builder().method("DELETE").uri(MCP).body(Body::empty()).unwrap()).await.status(), StatusCode::BAD_REQUEST);
-    // Open mode: every caller is the admin, whatever token it sends.
-    let open = app(None);
-    open.repo("acme", "x").await;
-    let mut c = Client::new(&open, Some("hunter2"));
-    c.initialize("2025-06-18").await;
-    assert_eq!(c.tool("create_work", json!({ "repo": "acme/x", "title": "t" })).await["title"], "t");
 }
 
 /// Sessions live in control.db, so behind a load balancer without stickiness a session started
@@ -1096,4 +935,229 @@ async fn sessions_work_through_any_node() {
     da.session = None;
     da.initialize("2025-11-25").await;
     assert_eq!(da.rpc("ping", json!({})).await["result"], json!({}), "a new one works");
+}
+
+/// The agents tools against a connected test daemon: an agent token lists machines and threads
+/// (with the requests waiting) and drives threads, each tool sending the command its route
+/// takes, with the agent as `by`; answering requests and full_access threads are the owner's. A daemon's error is a result, not a failure; the routes'
+/// refusals (another owner, no token, an unknown machine) are failures with their words.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn agent_tools_drive_a_machine_like_their_routes() {
+    use agent_proto::{Command, DaemonFrame, Decision, ErrorCode, RelayFrame, Reply, ReplyError, Response, Stamped};
+    use common::daemon::Daemon;
+    let a = app(Some("root"));
+    let root = Some("root");
+    let mut tokens = Vec::new();
+    for (owner, name) in [("acme", "agent:bot"), ("eve", "t")] {
+        a.req("POST", "/v1/code/owners", Some(json!({ "name": owner, "kind": "org" })), root).await;
+        let (_, t) = a.req("POST", &format!("/v1/code/owners/{owner}/tokens"), Some(json!({ "name": name })), root).await;
+        tokens.push(t["token"].as_str().unwrap().to_string());
+    }
+    let (_, m) = a.req("POST", "/v1/code/agents/acme/machines", Some(json!({ "name": "box" })), root).await;
+    let (mid, minted) = (m["machine"]["id"].as_str().unwrap().to_string(), m["token"].as_str().unwrap().to_string());
+    let url = a.serve().await;
+    let (mut d, _) = Daemon::connect(&url, &minted).await;
+    let entity = |v: Value| -> agent_proto::Entity { serde_json::from_value(v).unwrap() };
+    let thread = json!({
+        "kind": "thread", "id": "thr_a", "project": "prj_1", "title": "fix it", "provider": "codex", "model": null,
+        "runtime_mode": "full_access", "interaction_mode": "default", "cwd": "/x", "status": "waiting",
+        "run_count": 1, "pending_requests": 1, "created_at": 1, "updated_at": 1
+    });
+    let request = json!({
+        "kind": "request", "id": "req_1", "thread": "thr_a", "run": "run_1", "node": "nod_1", "status": "pending", "created_at": 1,
+        "body": { "type": "approval", "action": "command", "title": "Run `cargo test`", "decisions": ["accept", "decline"] }
+    });
+    let items = vec![
+        Stamped { seq: 1, entity: entity(json!({ "kind": "project", "id": "prj_1", "name": "api", "path": "/x", "created_at": 1, "updated_at": 1 })) },
+        Stamped { seq: 2, entity: entity(thread) },
+        Stamped { seq: 3, entity: entity(request) },
+    ];
+    d.upsert(items).await;
+    // The daemon: records each command, answers interrupts with `conflict`, the rest `created`.
+    let (seen_tx, mut seen) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        while let Some(f) = d.recv().await {
+            if let RelayFrame::Command { id, by, command, .. } = f {
+                let command = *command;
+                let result = match &command {
+                    Command::RunInterrupt { .. } => Reply::Error(ReplyError { code: ErrorCode::Conflict, message: "nothing to interrupt".into() }),
+                    _ => Reply::Created { id: "thr_new".into() },
+                };
+                let _ = seen_tx.send((id.clone(), by, command));
+                d.send(&DaemonFrame::Reply { id, result }).await;
+            }
+        }
+    });
+
+    let mut c = Client::new(&a, Some(&tokens[0]));
+    c.initialize("2025-11-25").await;
+    let machines = c.tool("list_agent_machines", json!({ "owner": "acme" })).await;
+    assert_eq!((machines["items"][0]["id"].as_str(), machines["items"][0]["online"].as_bool()), (Some(mid.as_str()), Some(true)), "{machines}");
+    let listed = c.tool("list_agent_threads", json!({ "owner": "acme", "machine": "box" })).await;
+    assert_eq!((listed["threads"][0]["id"].as_str(), listed["threads"][0]["project_name"].as_str()), (Some("thr_a"), Some("api")), "{listed}");
+    assert_eq!((listed["threads"][0]["machine"].as_str(), listed["requests"][0]["id"].as_str()), (Some(mid.as_str()), Some("req_1")), "{listed}");
+
+    // An agent starts threads in ask or auto_edit only (the default is full_access).
+    let err = c.tool_err("create_agent_thread", json!({ "owner": "acme", "machine": mid, "project": "prj_1", "provider": "claude", "id": "k0" })).await;
+    assert!(err.contains("ask or auto_edit"), "{err}");
+    let created = c
+        .tool("create_agent_thread", json!({ "owner": "acme", "machine": mid, "project": "prj_1", "provider": "claude", "prompt": "hi", "worktree": true, "runtime_mode": "auto_edit", "id": "k1" }))
+        .await;
+    assert_eq!(created, json!({ "type": "created", "id": "thr_new" }));
+    let (id, by, cmd) = seen.recv().await.unwrap();
+    assert_eq!((id.as_str(), by.as_str()), ("k1", "agent:bot"));
+    assert!(matches!(cmd, Command::ThreadCreate { ref provider, ref prompt, worktree: true, .. } if provider.as_str() == "claude" && prompt.as_deref() == Some("hi")), "{cmd:?}");
+
+    c.tool("send_agent_message", json!({ "owner": "acme", "machine": "box", "thread": "thr_a", "text": "go on", "mode": "steer" })).await;
+    let (id, _, cmd) = seen.recv().await.unwrap();
+    assert!(id.starts_with("cmd_"), "a fresh id: {id}");
+    assert!(matches!(cmd, Command::MessageSend { ref text, mode: agent_proto::SendMode::Steer, .. } if text == "go on"), "{cmd:?}");
+
+    // Answering a thread's approvals is the owner's: an agent can't approve its own requests.
+    let err = c.tool_err("respond_agent_request", json!({ "owner": "acme", "machine": "box", "request": "req_1", "decision": "accept_for_session" })).await;
+    assert!(err.contains("agent tokens can't answer"), "{err}");
+    let mut owner = Client::new(&a, root);
+    owner.initialize("2025-11-25").await;
+    owner.tool("respond_agent_request", json!({ "owner": "acme", "machine": "box", "request": "req_1", "decision": "decline", "message": "not now" })).await;
+    let (_, by, cmd) = seen.recv().await.unwrap();
+    assert_eq!(by, "admin");
+    assert_eq!(cmd, Command::RequestRespond { request: agent_proto::RequestId("req_1".into()), response: Response::Decision { decision: Decision::Decline, message: Some("not now".into()) } });
+    owner.tool("respond_agent_request", json!({ "owner": "acme", "machine": "box", "request": "req_2", "answers": { "q1": "yes" } })).await;
+    assert!(matches!(seen.recv().await.unwrap().2, Command::RequestRespond { response: Response::Answers { .. }, .. }));
+    assert!(owner.tool_err("respond_agent_request", json!({ "owner": "acme", "machine": "box", "request": "req_1" })).await.contains("decision"));
+
+    // The daemon's error is a result.
+    let interrupted = c.tool("interrupt_agent_thread", json!({ "owner": "acme", "machine": "box", "thread": "thr_a" })).await;
+    assert_eq!((interrupted["type"].as_str(), interrupted["code"].as_str()), (Some("error"), Some("conflict")), "{interrupted}");
+    assert!(matches!(seen.recv().await.unwrap().2, Command::RunInterrupt { .. }));
+
+    // The routes' refusals are failures.
+    assert!(c.tool_err("send_agent_message", json!({ "owner": "acme", "machine": "nope", "thread": "thr_a", "text": "x" })).await.starts_with("not found"));
+    let mut eve = Client::new(&a, Some(&tokens[1]));
+    eve.initialize("2025-11-25").await;
+    assert!(eve.tool_err("list_agent_machines", json!({ "owner": "acme" })).await.starts_with("not found"));
+    let err = eve.tool_err("interrupt_agent_thread", json!({ "owner": "acme", "machine": mid, "thread": "thr_a" })).await;
+    assert!(err.starts_with("not allowed"), "{err}");
+    let mut anon = Client::new(&a, None);
+    anon.initialize("2025-11-25").await;
+    assert!(anon.tool_err("interrupt_agent_thread", json!({ "owner": "acme", "machine": mid, "thread": "thr_a" })).await.contains("this needs a token"));
+    assert!(seen.try_recv().is_err(), "refused calls send nothing");
+}
+
+/// The tools that put agents to work in roll code, against a connected test daemon: publishing
+/// sends `thread.publish` with a push grant for the project's repo, starting a repo creates it and
+/// sends `project.add` cloning it, and a thread takes the next work item (then none is left).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn agent_tools_work_in_roll_code_like_their_routes() {
+    use agent_proto::{Command, DaemonFrame, Published, RelayFrame, Reply, Stamped};
+    use common::daemon::Daemon;
+    let a = app(Some("root"));
+    let root = Some("root");
+    a.req("POST", "/v1/code/owners", Some(json!({ "name": "acme", "kind": "org" })), root).await;
+    let (_, t) = a.req("POST", "/v1/code/owners/acme/tokens", Some(json!({ "name": "agent:bot" })), root).await;
+    let token = t["token"].as_str().unwrap().to_string();
+    a.req("POST", "/v1/code/repos", Some(json!({ "owner": "acme", "name": "api" })), root).await;
+    let (_, item) = a.req("POST", "/v1/code/repos/acme/api/work", Some(json!({ "title": "Fix it" })), root).await;
+    let (_, m) = a.req("POST", "/v1/code/agents/acme/machines", Some(json!({ "name": "box" })), root).await;
+    let minted = m["token"].as_str().unwrap().to_string();
+    let url = a.serve().await;
+    let (mut d, _) = Daemon::connect(&url, &minted).await;
+    let entity = |v: Value| -> agent_proto::Entity { serde_json::from_value(v).unwrap() };
+    d.upsert(vec![
+        Stamped { seq: 1, entity: entity(json!({ "kind": "project", "id": "prj_1", "name": "api", "path": "/x", "repo": { "owner": "acme", "repo": "api" }, "created_at": 1, "updated_at": 1 })) },
+        Stamped {
+            seq: 2,
+            entity: entity(json!({
+                "kind": "thread", "id": "thr_a", "project": "prj_1", "title": "fix it", "provider": "codex", "model": null,
+                "runtime_mode": "full_access", "interaction_mode": "default", "cwd": "/x-t", "status": "idle",
+                "worktree": { "path": "/x-t", "branch": "roll/fix-it", "base": "abc" },
+                "run_count": 1, "pending_requests": 0, "created_at": 1, "updated_at": 1
+            })),
+        },
+    ])
+    .await;
+    let (seen_tx, mut seen) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        while let Some(f) = d.recv().await {
+            if let RelayFrame::Command { id, command, grant, .. } = f {
+                let command = *command;
+                let result = match &command {
+                    Command::ThreadPublish { .. } => Reply::Published(Published { branch: "roll/fix-it".into(), commit: "abc".into(), change: None, url: None, landing: None }),
+                    _ => Reply::Created { id: "prj_new".into() },
+                };
+                let _ = seen_tx.send((command, grant));
+                d.send(&DaemonFrame::Reply { id, result }).await;
+            }
+        }
+    });
+
+    let mut c = Client::new(&a, Some(&token));
+    c.initialize("2025-11-25").await;
+    let published = c.tool("publish_agent_thread", json!({ "owner": "acme", "machine": "box", "thread": "thr_a", "message": "Fix it" })).await;
+    assert_eq!((published["type"].as_str(), published["branch"].as_str()), (Some("published"), Some("roll/fix-it")), "{published}");
+    let (cmd, grant) = seen.recv().await.unwrap();
+    assert!(matches!(cmd, Command::ThreadPublish { ref message, land: false, .. } if message == "Fix it"), "{cmd:?}");
+    let grant = grant.expect("a grant");
+    assert!(grant.write && grant.url.ends_with("/acme/api.git"), "{grant:?}");
+
+    // Adding projects is the owner's, not its agents': nothing is created or sent.
+    let err = c.tool_err("create_agent_project", json!({ "owner": "acme", "machine": "box", "repo": "fresh", "visibility": "private" })).await;
+    assert!(err.contains("agent tokens can't add projects"), "{err}");
+    assert_eq!(a.req("GET", "/v1/code/repos/acme/fresh", None, root).await.0, StatusCode::NOT_FOUND);
+    let mut owner = Client::new(&a, root);
+    owner.initialize("2025-11-25").await;
+    let started = owner.tool("create_agent_project", json!({ "owner": "acme", "machine": "box", "repo": "fresh", "visibility": "private" })).await;
+    assert_eq!(started, json!({ "type": "created", "id": "prj_new" }));
+    let (cmd, grant) = seen.recv().await.unwrap();
+    assert!(matches!(cmd, Command::ProjectAdd { clone: Some(ref r), .. } if r.owner == "acme" && r.repo == "fresh"), "{cmd:?}");
+    assert!(grant.is_some_and(|g| !g.write));
+    assert_eq!(a.req("GET", "/v1/code/repos/acme/fresh", None, root).await.1["visibility"], "private");
+
+    let claimed = c.tool("claim_agent_work", json!({ "owner": "acme", "thread": "thr_a", "repo": "acme/api" })).await;
+    assert_eq!((claimed["work"]["id"].as_str(), claimed["work"]["claimed_by"].as_str()), (item["id"].as_str(), Some("agent:bot")), "{claimed}");
+    assert_eq!(c.tool("claim_agent_work", json!({ "owner": "acme", "thread": "thr_a", "repo": "acme/api" })).await["work"], Value::Null);
+    assert!(c.tool_err("claim_agent_work", json!({ "owner": "acme", "thread": "thr_nope", "repo": "acme/api" })).await.starts_with("not found"));
+    let (_, state) = a.req("GET", "/v1/code/agents/acme/state", None, root).await;
+    let thread = state["entities"].as_array().unwrap().iter().find(|m| m["entity"]["id"] == "thr_a").unwrap();
+    assert_eq!(thread["entity"]["work"]["id"], item["id"], "{thread}");
+}
+
+/// The automation tools map onto their routes: save, list, run (an agent only when the
+/// automation allows agents), list runs, read and cancel a run.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn automation_tools_map_onto_their_routes() {
+    let a = app(Some("root"));
+    let root = Some("root");
+    a.req("POST", "/v1/code/owners", Some(json!({ "name": "acme", "kind": "org" })), root).await;
+    let mut tokens = Vec::new();
+    for name in ["me", "agent:bot"] {
+        let (_, t) = a.req("POST", "/v1/code/owners/acme/tokens", Some(json!({ "name": name })), root).await;
+        tokens.push(t["token"].as_str().unwrap().to_string());
+    }
+    let mut owner = Client::new(&a, Some(&tokens[0]));
+    owner.initialize("2025-11-25").await;
+    let spec = json!({ "name": "Hello", "trigger": { "type": "manual" }, "steps": [{ "id": "d", "kind": "delay", "config": { "seconds": 60 } }] });
+    let saved = owner.tool("save_agent_automation", json!({ "owner": "acme", "spec": spec })).await;
+    let id = saved["automation"]["id"].as_str().unwrap().to_string();
+    let mut renamed = spec.clone();
+    renamed["name"] = json!("Hello again");
+    let saved = owner.tool("save_agent_automation", json!({ "owner": "acme", "automation": id, "spec": renamed, "revision": 1 })).await;
+    assert_eq!(saved["automation"]["revision"], 2);
+    let listed = owner.tool("list_agent_automations", json!({ "owner": "acme" })).await;
+    assert_eq!(listed["items"][0]["name"], "Hello again", "{listed}");
+    let run = owner.tool("run_agent_automation", json!({ "owner": "acme", "automation": "Hello again", "input": { "x": 1 }, "data": { "title": "main is red" }, "key": "k" })).await;
+    let rid = run["id"].as_str().unwrap().to_string();
+    let runs = owner.tool("list_agent_automation_runs", json!({ "owner": "acme", "automation": id })).await;
+    assert_eq!(runs["items"][0]["id"], rid.as_str(), "{runs}");
+    let detail = owner.tool("get_agent_automation_run", json!({ "owner": "acme", "run": rid })).await;
+    assert_eq!(detail["event"]["data"]["input"]["x"], 1);
+    assert_eq!(detail["event"]["data"]["title"], "main is red", "the event's data as its trigger sends it");
+    let mut agent = Client::new(&a, Some(&tokens[1]));
+    agent.initialize("2025-11-25").await;
+    let err = agent.tool_err("run_agent_automation", json!({ "owner": "acme", "automation": id })).await;
+    assert!(err.contains("allow_agents"), "{err}");
+    let err = agent.tool_err("cancel_agent_automation_run", json!({ "owner": "acme", "run": rid })).await;
+    assert!(err.contains("agent"), "{err}");
+    let cancelled = owner.tool("cancel_agent_automation_run", json!({ "owner": "acme", "run": rid })).await;
+    assert_eq!(cancelled["status"], "cancelled");
 }

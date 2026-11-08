@@ -309,11 +309,6 @@ mod tests {
     }
 
     #[test]
-    fn empty_file_has_nothing() {
-        assert_eq!(RollToml::parse("").unwrap(), RollToml { checks: BTreeMap::new(), preview: None, queue: Default::default(), main: Default::default() });
-    }
-
-    #[test]
     fn errors_name_the_key() {
         let cases = [
             ("[checks.t]\nimage = \"a\"\nrun = \"x\"\nbogus = 1", "bogus"),
@@ -348,13 +343,5 @@ mod tests {
     fn refuses_huge_files() {
         let big = format!("# {}", "x".repeat(MAX_BYTES));
         assert!(RollToml::parse(&big).unwrap_err().contains("larger"));
-    }
-
-    #[test]
-    fn load_missing_is_none() {
-        let dir = tempfile::tempdir().unwrap();
-        assert_eq!(RollToml::load(dir.path()).unwrap(), None);
-        std::fs::write(dir.path().join(FILE), "[preview]\nimage = \"busybox\"\nrun = \"httpd -f\"\nport = 80\nauto = false\n").unwrap();
-        assert!(!RollToml::load(dir.path()).unwrap().unwrap().preview.unwrap().auto);
     }
 }

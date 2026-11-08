@@ -1,0 +1,9 @@
+{"native_thread":"01a11a6a-bbb5-7000-ad0b-0c9e728406e5"}
+{"model":"muse-spark-1.3-contributor"}
+{"item":{"body":{"text":"","type":"message"},"id":"0a68e576-f554-4700-8853-a68ad2b7179b","parent":null,"status":"running"}}
+{"text_delta":{"item":"0a68e576-f554-4700-8853-a68ad2b7179b","text":"fixture simple ok"}}
+{"item":{"body":{"text":"fixture simple ok","type":"message"},"id":"0a68e576-f554-4700-8853-a68ad2b7179b","parent":null,"status":"completed"}}
+{"usage":{"cached_tokens":0,"input_tokens":32350,"output_tokens":24}}
+{"context":{"max_tokens":1007997,"used_tokens":32374}}
+{"turn_ended":"completed"}
+{"exited":null}

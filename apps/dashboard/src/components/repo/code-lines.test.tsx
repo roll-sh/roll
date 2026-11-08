@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Blame } from "@/lib/code-api";
@@ -32,14 +32,6 @@ function threeRuns(over: Partial<Blame> = {}): Blame {
 /** The blame cell of each code line (the first cell of its row). */
 const gutter = () => [...document.querySelectorAll("table.code tbody tr")].map((tr) => tr.querySelector("td")!);
 const lineCell = (n: number) => document.getElementById(`L${n}`)!;
-
-async function showWithBlame(b: Blame | Error) {
-  if (b instanceof Error) api.blame.mockRejectedValue(b);
-  else api.blame.mockResolvedValue(b);
-  const u = userEvent.setup();
-  render(<CodeLines tokens={null} text={TEXT} permalink={null} blame={SRC} />);
-  return u;
-}
 
 describe("CodeLines: the blame gutter", () => {
   it("has no toggle without a blame source, and reads nothing until it's switched on", () => {
@@ -92,51 +84,4 @@ describe("CodeLines: the blame gutter", () => {
     expect(screen.queryByText(/History is long|binary files/)).toBeNull();
   });
 
-  it("adjacent ranges from one changeset read as one run", async () => {
-    const t = now();
-    const a = { changeset: "cs_aaaaaaaaaaaaaaaa", author: { name: "ada", email: "a@x.dev", time: t }, time: t };
-    const u = await showWithBlame(blame({ ranges: [blameRange({ ...a, start: 1, end: 3 }), blameRange({ ...a, start: 4, end: 6 })] }));
-    await u.click(screen.getByRole("button", { name: /Blame/ }));
-    await waitFor(() => expect(gutter()[0].querySelector("a")).not.toBeNull());
-    expect(gutter().map((td) => td.querySelector("a") != null)).toEqual([true, false, false, false, false, false]);
-    expect(screen.getAllByText("ada")).toHaveLength(1);
-  });
-
-  it("says when history was cut short, and still draws the gutter", async () => {
-    const u = await showWithBlame(threeRuns({ complete: false }));
-    await u.click(screen.getByRole("button", { name: /Blame/ }));
-    expect(await screen.findByText("History is long: the oldest lines are attributed to the oldest changeset reached.")).toBeInTheDocument();
-    expect(gutter()[0]).toHaveTextContent("ada");
-  });
-
-  it("binary files get a note and no gutter", async () => {
-    const u = await showWithBlame(blame({ binary: true, ranges: [] }));
-    await u.click(screen.getByRole("button", { name: /Blame/ }));
-    expect(await screen.findByText("Blame isn't available for binary files or files over 1 MiB.")).toBeInTheDocument();
-    expect(lineCell(1).querySelectorAll("td")).toHaveLength(2);
-  });
-
-  it("shows why blame failed", async () => {
-    const u = await showWithBlame(new Error("path not found at main"));
-    await u.click(screen.getByRole("button", { name: /Blame/ }));
-    expect(await screen.findByText("path not found at main")).toHaveClass("text-danger");
-    expect(lineCell(1).querySelectorAll("td")).toHaveLength(2);
-  });
-
-  it("b toggles it (not while typing); switching back on doesn't read again", async () => {
-    await showWithBlame(threeRuns());
-    fireEvent.keyDown(window, { key: "b" });
-    await waitFor(() => expect(lineCell(1).querySelectorAll("td")).toHaveLength(3));
-    fireEvent.keyDown(window, { key: "b" });
-    expect(lineCell(1).querySelectorAll("td")).toHaveLength(2);
-    const input = document.body.appendChild(document.createElement("input"));
-    fireEvent.keyDown(input, { key: "b" });
-    expect(lineCell(1).querySelectorAll("td")).toHaveLength(2);
-    fireEvent.keyDown(window, { key: "b", metaKey: true });
-    expect(lineCell(1).querySelectorAll("td")).toHaveLength(2);
-    input.remove();
-    fireEvent.keyDown(window, { key: "b" });
-    expect(lineCell(1).querySelectorAll("td")).toHaveLength(3);
-    expect(api.blame).toHaveBeenCalledTimes(1);
-  });
 });

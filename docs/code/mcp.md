@@ -63,6 +63,29 @@ Repos are `"owner/repo"`. Changes are `"chg_…"` or `"owner/repo#N"`, and work 
 | `review` | approve, request changes or comment, with inline comments | `POST /changes/{id}/reviews` |
 | `queue_status` | the merge queue | `GET /repos/{r}/queue` |
 | `request_ai_review` | ask roll's reviewer for a review | `POST /changes/{id}/ai-review` |
+| `list_agent_machines` | the owner's machines running `roll agent up` (online, providers) | `GET /agents/{owner}/machines` |
+| `list_agent_threads` | agent threads (with their machine and project name) and the requests waiting for an answer | `GET /agents/{owner}/state` |
+| `create_agent_thread` | start a coding agent in a project on a machine | `POST /agents/{owner}/machines/{m}/commands` (`thread.create`) |
+| `send_agent_message` | message a thread: start a run, queue after it, or steer it | `POST …/commands` (`message.send`) |
+| `respond_agent_request` | answer an approval (`decision`) or questions (`answers`) | `POST …/commands` (`request.respond`) |
+| `interrupt_agent_thread` | stop a thread's running turn | `POST …/commands` (`run.interrupt`) |
+| `publish_agent_thread` | commit and push a thread's branch; in a roll code repo it becomes a change, and `land` sends it to landing (the answer's `landing` says landed, queued, blocked or conflict) | `POST …/commands` (`thread.publish`) |
+| `create_agent_project` | create a roll code repo and clone it onto a machine as a project | `POST /agents/{owner}/machines/{m}/projects` |
+| `claim_agent_work` | give a thread a work item: a given one, or the next one claimed from a repo (`work: null` when none) | `POST /agents/{owner}/threads/{t}/work` |
+| `list_agent_automations` | the owner's automations (docs/code/automations.md) | `GET /agents/{owner}/automations` |
+| `save_agent_automation` | create an automation, or replace one's definition (by id, over a `revision`) | `POST /agents/{owner}/automations`, `PUT …/automations/{id}` |
+| `run_agent_automation` | run one now (by id or name) with `input` and an idempotency `key`; agents only when it allows agents | `POST …/automations/{id}/run` |
+| `list_agent_automation_runs` | runs, newest first (of one automation, by status) | `GET …/automations/runs` |
+| `get_agent_automation_run` | a run's steps (status, output, log) and its event | `GET …/automations/runs/{run}` |
+| `cancel_agent_automation_run` | cancel a run going on (the owner's) | `POST …/automations/runs/{run}/cancel` |
+
+The agents tools (docs/code/agents.md) take `owner`, and a `machine` by id (`mch_…`) or name.
+Commands take an optional `id`, the idempotency key (a fresh one by default). Whatever the
+daemon answers is a result, its errors too (`{type: "error", code, message}`: the thread is busy,
+the machine is offline or didn't answer in 30 s); only the route refusing is a tool failure.
+Agent tokens may use them to orchestrate agents, within what an agent's commands may do
+(docs/code/agents.md, "Machines, login and tokens"): `create_agent_thread` in `ask` or
+`auto_edit` only, and `respond_agent_request` and `create_agent_project` are the owner's.
 
 `tools/list` returns each tool's JSON Schema. Every schema is closed (`additionalProperties: false`).
 

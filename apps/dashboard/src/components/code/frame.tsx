@@ -6,6 +6,7 @@ import Link from "next/link";
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { codeApi, type CodeInfo, type Repo } from "@/lib/code-api";
 import { CodeShell } from "./shell";
+import { useShownOwner } from "../agents/use-connection";
 import { btn, Connecting, EmptyPanel, Offline } from "../ui";
 import { POLL_MS } from "./shared";
 
@@ -105,7 +106,7 @@ export function RepoGate({
   return <>{children()}</>;
 }
 
-/** `code / owner / repo [/ rest]`, each part linked. */
+/** `code / owner / repo [/ rest]`, each part linked; the owner only when the shell's crumb doesn't start with it. */
 export function repoCrumb(fullName: string, rest?: ReactNode) {
   const [owner, name] = fullName.split("/");
   return (
@@ -113,11 +114,7 @@ export function repoCrumb(fullName: string, rest?: ReactNode) {
       <Link href="/dashboard/code" className="text-muted hover:text-fg">
         code
       </Link>{" "}
-      <span className="text-subtle">/</span>{" "}
-      <Link href={`/dashboard/code/${owner}`} className="text-muted hover:text-fg">
-        {owner}
-      </Link>{" "}
-      <span className="text-subtle">/</span>{" "}
+      <span className="text-subtle">/</span> <OwnerCrumb owner={owner} />
       {rest ? (
         <>
           <Link href={`/dashboard/code/${fullName}`} className="text-muted hover:text-fg">
@@ -128,6 +125,20 @@ export function repoCrumb(fullName: string, rest?: ReactNode) {
       ) : (
         name
       )}
+    </>
+  );
+}
+
+/** The repository's owner in its crumb: left out when the shell's crumb already starts with it ("ada / code / ada / …"). */
+function OwnerCrumb({ owner }: { owner: string }) {
+  const shown = useShownOwner();
+  if (shown?.owner === owner) return null;
+  return (
+    <>
+      <Link href={`/dashboard/code/${owner}`} className="text-muted hover:text-fg">
+        {owner}
+      </Link>{" "}
+      <span className="text-subtle">/</span>{" "}
     </>
   );
 }

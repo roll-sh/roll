@@ -1,0 +1,5 @@
+{"native_thread":"agy-session-1"}
+{"model":"gemini-3-flash"}
+{"catalog":[{"default":true,"id":"gemini-3-flash","name":"Gemini 3 Flash"},{"default":false,"id":"gemini-3-pro-preview","name":"Gemini 3 Pro"},{"default":false,"id":"claude-sonnet-4-5","name":"Claude Sonnet 4.5"}]}
+{"turn_ended":{"failed":"You have reached your Antigravity quota for this period."}}
+{"exited":null}

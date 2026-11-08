@@ -67,7 +67,7 @@ fn every_route_tool_and_event_has_tests_in_the_map() {
     let mut missing = Vec::new();
 
     let mut all = BTreeSet::new();
-    for f in ["crates/code-control/src/api.rs", "crates/code-control/src/review/api.rs", "crates/code-control/src/ai/api.rs", "crates/code-control/src/mcp.rs", "crates/code-git/src/server.rs"] {
+    for f in ["crates/code-control/src/api.rs", "crates/code-control/src/review/api.rs", "crates/code-control/src/ai/api.rs", "crates/code-control/src/agents/api.rs", "crates/code-control/src/agents/sandbox/api.rs", "crates/code-control/src/chatops/api.rs", "crates/code-control/src/agents/automations/api.rs", "crates/code-control/src/agents/linear/api.rs", "crates/code-control/src/agents/lookup/mod.rs", "crates/code-control/src/mcp.rs", "crates/code-git/src/server.rs"] {
         all.extend(routes(&read(f)));
     }
     assert!(all.len() > 100, "found only {} routes: is the parser still right?", all.len());
@@ -78,7 +78,7 @@ fn every_route_tool_and_event_has_tests_in_the_map() {
         }
     }
     let tools: Vec<String> = code_control::mcp::tools().iter().map(|t| t["name"].as_str().unwrap().to_string()).collect();
-    assert_eq!(tools.len(), 22);
+    assert_eq!(tools.len(), 37);
     for t in &tools {
         if !has_row(&rows, t) {
             missing.push(format!("MCP tool {t}"));
@@ -136,4 +136,41 @@ fn every_test_the_map_names_exists() {
     }
     assert!(checked > 200, "checked only {checked} references");
     assert!(wrong.is_empty(), "docs/code/test-coverage.md names tests that don't exist:\n  {}", wrong.join("\n  "));
+}
+
+/// Every dashboard or desktop test file the map names (`src/…/x.test.tsx`, relative to its app or
+/// the repo, or a bare file name under the dashboard's `src/`) exists.
+#[test]
+fn every_web_test_file_the_map_names_exists() {
+    fn names(dir: &Path, out: &mut BTreeSet<String>) {
+        for e in std::fs::read_dir(dir).unwrap().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                names(&p, out);
+            } else if let Some(n) = p.file_name().and_then(|n| n.to_str()) {
+                out.insert(n.to_owned());
+            }
+        }
+    }
+    let mut bare = BTreeSet::new();
+    names(&root().join("apps/dashboard/src"), &mut bare);
+    let doc = read("docs/code/test-coverage.md");
+    let mut checked = 0;
+    let mut wrong = Vec::new();
+    for cap in doc.split('`').skip(1).step_by(2) {
+        if !(cap.ends_with(".test.ts") || cap.ends_with(".test.tsx")) || cap.contains('*') || cap.contains(' ') {
+            continue;
+        }
+        checked += 1;
+        let found = if cap.contains('/') {
+            ["", "apps/dashboard", "apps/desktop"].iter().any(|base| root().join(base).join(cap).exists())
+        } else {
+            bare.contains(cap)
+        };
+        if !found {
+            wrong.push(cap.to_owned());
+        }
+    }
+    assert!(checked > 50, "checked only {checked} references");
+    assert!(wrong.is_empty(), "docs/code/test-coverage.md names web test files that don't exist:\n  {}", wrong.join("\n  "));
 }

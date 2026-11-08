@@ -145,6 +145,26 @@ async fn run(code: Arc<Code>, hub: Arc<Hub>, repo_id: String, mut rx: mpsc::Unbo
     }
 }
 
+/// Push commit `to` as branch `branch` of a connected repo's GitHub side (a change opened as a
+/// pull request: `chatops::github`'s `github.pr`), over whatever the branch is there now.
+/// `Err((transient, why))`.
+pub(crate) async fn push_branch(code: &Code, repo: &str, branch: &str, to: &str) -> Result<(), (bool, String)> {
+    let hub = code.github_hub().ok_or((false, "the GitHub App isn't configured".to_string()))?;
+    let name = format!("refs/heads/{branch}");
+    match push(code, hub, repo, &name, None, to).await {
+        Ok(()) => Ok(()),
+        // The branch is there already: again over where it is.
+        Err(PushError::Rejected(Some(remote))) if remote == to => Ok(()),
+        Err(PushError::Rejected(Some(remote))) => match push(code, hub, repo, &name, Some(&remote), to).await {
+            Ok(()) => Ok(()),
+            Err(PushError::Rejected(_)) => Err((false, format!("GitHub refused the push to {branch}"))),
+            Err(PushError::Transient(e)) => Err((true, e)),
+        },
+        Err(PushError::Rejected(None)) => Err((false, format!("GitHub refused the push to {branch}"))),
+        Err(PushError::Transient(e)) => Err((true, e)),
+    }
+}
+
 /// Push `to` over `from` (GitHub's expected value) with every object GitHub doesn't have.
 async fn push(code: &Code, hub: &Hub, repo: &str, ref_name: &str, from: Option<&str>, to: &str) -> Result<(), PushError> {
     let t = |e: &dyn std::fmt::Display| PushError::Transient(e.to_string());

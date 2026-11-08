@@ -1,0 +1,7 @@
+{"native_thread":"/s/1.jsonl"}
+{"model":"anthropic/claude-test"}
+{"turn_ended":{"failed":"No API key found for anthropic"}}
+{"context":{"max_tokens":200000,"total_processed_tokens":120,"used_tokens":100}}
+{"turn_ref":"a"}
+{"turn_ended":{"failed":"429 rate limited"}}
+{"exited":null}

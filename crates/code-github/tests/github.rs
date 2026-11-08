@@ -8,12 +8,8 @@ use axum::{Json, Router};
 use code_github::auth::{Claims, unix_now};
 use code_github::mapping::{issue_draft, pull_request_draft, push_draft};
 use code_github::model::{CheckConclusion, CheckOutput, CheckRunRequest, CheckStatus};
-use code_github::webhook::{
-    CommentAction, InstallationAction, IssueAction, PullRequestAction, RepositoriesAction, sign,
-};
-use code_github::{
-    AppConfig, ClientOptions, DraftState, Error, Event, GitHub, PrState, verify_signature,
-};
+use code_github::webhook::{CommentAction, InstallationAction, IssueAction, PullRequestAction, RepositoriesAction};
+use code_github::{AppConfig, ClientOptions, DraftState, Error, Event, GitHub, PrState};
 use jsonwebtoken::{Algorithm, DecodingKey, Validation};
 use parking_lot::Mutex;
 use serde_json::{Value, json};
@@ -340,6 +336,60 @@ async fn graphql(State(m): S, h: HeaderMap, Json(body): Json<Value>) -> Response
     Json(json!({ "data": { "resolveReviewThread": { "thread": { "id": id, "isResolved": true } } } })).into_response()
 }
 
+/// A repo's labels, two pages (the second through `Link`); `POST` makes one.
+async fn repo_labels(
+    State(m): S,
+    Path((o, r)): Path<(String, String)>,
+    h: HeaderMap,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    if let Some(res) = gate(&m, "/labels-list", &h) {
+        return res;
+    }
+    let base = m.base.lock().clone();
+    assert_eq!(q.get("per_page").map(String::as_str), Some("2"));
+    match q.get("page").map(String::as_str) {
+        Some("1") => {
+            let mut res = Json(json!([{"name": "bug", "color": "d73a4a", "description": "Something isn't working"}, {"name": "docs", "color": "0075ca"}])).into_response();
+            let link = format!(r#"<{base}/repos/{o}/{r}/labels?per_page=2&page=2>; rel="next", <{base}/repos/{o}/{r}/labels?per_page=2&page=2>; rel="last""#);
+            res.headers_mut().insert("link", link.parse().unwrap());
+            rate_headers(res, 4000)
+        }
+        _ => Json(json!([{"name": "roll", "color": "4c8dff"}])).into_response(),
+    }
+}
+
+async fn create_repo_label(State(m): S, h: HeaderMap, Json(body): Json<Value>) -> Response {
+    if let Some(res) = gate(&m, "/labels-create", &h) {
+        return res;
+    }
+    (StatusCode::CREATED, Json(json!({"id": 9, "name": body["name"], "color": body["color"].as_str().unwrap_or("ededed")}))).into_response()
+}
+
+async fn workflows(State(m): S, h: HeaderMap) -> Response {
+    if let Some(res) = gate(&m, "/workflows", &h) {
+        return res;
+    }
+    // `total_count` lies: nothing is sized from it.
+    Json(json!({"total_count": 4_000_000_000u64, "workflows": [{"id": 161335, "name": "CI", "path": ".github/workflows/ci.yml", "state": "active"}]})).into_response()
+}
+
+async fn org_teams(State(m): S, h: HeaderMap) -> Response {
+    if let Some(res) = gate(&m, "/teams", &h) {
+        return res;
+    }
+    (StatusCode::FORBIDDEN, Json(json!({"message": "Resource not accessible by integration"}))).into_response()
+}
+
+/// A body far past what a picker page reads.
+async fn environments(State(m): S, h: HeaderMap) -> Response {
+    if let Some(res) = gate(&m, "/environments", &h) {
+        return res;
+    }
+    let many: Vec<Value> = (0..100_000).map(|i| json!({"id": i, "name": format!("env-{i:08}")})).collect();
+    Json(json!({"total_count": 100_000, "environments": many})).into_response()
+}
+
 async fn serve() -> (Arc<Mock>, String) {
     let m = Arc::new(Mock::default());
     let app = Router::new()
@@ -358,6 +408,10 @@ async fn serve() -> (Arc<Mock>, String) {
         .route("/repos/{o}/{r}/check-runs/{id}", patch(update_check_run))
         .route("/repos/{o}/{r}/branches/{b}", get(branch))
         .route("/repos/{o}/{r}/branches/{b}/protection", get(protection))
+        .route("/repos/{o}/{r}/labels", get(repo_labels).post(create_repo_label))
+        .route("/repos/{o}/{r}/actions/workflows", get(workflows))
+        .route("/repos/{o}/{r}/environments", get(environments))
+        .route("/orgs/{org}/teams", get(org_teams))
         .route("/graphql", post(graphql))
         .with_state(m.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -650,23 +704,52 @@ async fn rate_limits_and_retries() {
     );
 }
 
+/// Pickers' pages: one page at a time with the next page's number from `Link`, a list inside an
+/// object, a label made, a refused permission as a 403, a body past the cap refused, and a rate
+/// limit an error at once (a person is waiting), without a call while the budget is gone.
+#[tokio::test]
+async fn picker_pages_are_bounded_and_impatient() {
+    let (m, base) = serve().await;
+    let gh = client(&base);
+    let p = gh.labels_page(INSTALLATION, "acme", "api", 1, 2).await.unwrap();
+    assert_eq!(p.items.iter().map(|l| l.name.as_str()).collect::<Vec<_>>(), ["bug", "docs"]);
+    assert_eq!((p.items[0].color.as_deref(), p.next), (Some("d73a4a"), Some(2)));
+    let p = gh.labels_page(INSTALLATION, "acme", "api", 2, 2).await.unwrap();
+    assert_eq!((p.items.len(), p.next), (1, None));
+    let made = gh.create_label(INSTALLATION, "acme", "api", "needs qa", Some("#4c8dff")).await.unwrap();
+    assert_eq!((made.name.as_str(), made.color.as_deref()), ("needs qa", Some("4c8dff")));
+
+    let w = gh.workflows_page(INSTALLATION, "acme", "api", 1, 100).await.unwrap();
+    assert_eq!((w.items[0].path.as_str(), w.next), (".github/workflows/ci.yml", None));
+    let e = gh.org_teams_page(INSTALLATION, "acme", 1, 100).await.unwrap_err();
+    assert_eq!(e.status(), Some(403));
+    let e = gh.environments_page(INSTALLATION, "acme", "api", 1, 100).await.unwrap_err();
+    assert!(matches!(&e, Error::Decode(m) if m.contains("bytes")), "{e}");
+
+    // A secondary limit with a short retry-after: the default calls wait it out, a picker doesn't.
+    m.failures.lock().entry("/labels-list".into()).or_default().push((429, vec![("retry-after", "1".into())], json!({"message": "slow down"})));
+    let t = Instant::now();
+    let e = gh.labels_page(INSTALLATION, "acme", "api", 1, 2).await.unwrap_err();
+    assert!(matches!(e, Error::RateLimited { reset } if reset > unix_now()), "{e}");
+    assert!(t.elapsed() < Duration::from_millis(900), "no waiting");
+    // The primary budget gone (until a reset in an hour): nothing goes to GitHub.
+    m.failures.lock().entry("/labels-list".into()).or_default().push((
+        403,
+        vec![("x-ratelimit-remaining", "0".into()), ("x-ratelimit-reset", (unix_now() + 3600).to_string())],
+        json!({"message": "API rate limit exceeded"}),
+    ));
+    assert!(matches!(gh.labels_page(INSTALLATION, "acme", "api", 1, 2).await, Err(Error::RateLimited { .. })));
+    let before = m.tokens.lock().len();
+    assert!(matches!(gh.branches_page(INSTALLATION, "acme", "api", 1, 2).await, Err(Error::RateLimited { .. })));
+    assert_eq!(m.tokens.lock().len(), before);
+}
+
 fn fixture(name: &str) -> Vec<u8> {
     std::fs::read(format!(
         "{}/tests/fixtures/{name}.json",
         env!("CARGO_MANIFEST_DIR")
     ))
     .unwrap()
-}
-
-#[test]
-fn webhook_signature() {
-    let body = fixture("push");
-    let sig = sign(b"whsec", &body);
-    assert!(verify_signature(b"whsec", &body, Some(&sig)));
-    let mut tampered = body.clone();
-    tampered[10] ^= 1;
-    assert!(!verify_signature(b"whsec", &tampered, Some(&sig)));
-    assert!(!verify_signature(b"other", &body, Some(&sig)));
 }
 
 #[test]

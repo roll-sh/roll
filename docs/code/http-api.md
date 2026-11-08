@@ -167,7 +167,7 @@ GET  /v1/code/repos/{owner}/{repo}/changes?state= → Change[]
 POST /v1/code/repos/{owner}/{repo}/changes {title, body?, changeset | (base + message + files), work_item?, author?, draft?} → Change
 GET  /v1/code/repos/{owner}/{repo}/changes/{number} → Change
 GET  /v1/code/changes/{id} → Change (404 when missing)
-PATCH /v1/code/changes/{id} {title?, body?, draft?} → Change          marking a queued change draft dequeues it
+PATCH /v1/code/changes/{id} {title?, body?, draft?, work_item?} → Change    marking a queued change draft dequeues it; work_item (wi_…, of the change's repo) links it as if it had been opened with it: 409 if it does another item or is landed/closed
 POST /v1/code/changes/{id}/approve-run → Change                       writers; recorded in the audit log
 POST /v1/code/changes/{id}/revise {changeset | (base + message + files)} → Change
 POST /v1/code/changes/{id}/land {bypass?, lane?} → same bodies as /land (409 if landed or closed)
@@ -537,6 +537,533 @@ GET    /v1/code/repos/{owner}/{repo}/statuses/{rev} → {changeset, git_commit, 
   (`$BUILDKITE_COMMIT`) and GitHub Actions-style runners (`$GITHUB_SHA`) all expose the commit.
   To trigger CI from roll, add a webhook for `push` (branches) and `landed` (main).
 
+## Agents
+
+roll code agents (docs/code/agents.md): machines running `roll agent up` connect out to the relay,
+which mirrors their records so the canvas loads a snapshot and streams what changes, and forwards
+commands to them. The wire types are `agent_proto` (Rust) and `apps/dashboard/src/lib/agents-api.ts`;
+times in these shapes are **milliseconds** (`Millis`), unlike the rest of this API.
+
+```
+POST /v1/code/agents/login {name?, hostname?, os? /* what the machine says about itself, one line, ≤ 64 */}
+       → DeviceLogin {device_code /* rld_… */, user_code /* "BCDF-GHJK" */,
+       verification_uri /* {web}/dashboard/agents/connect?code=… */, interval: 5, expires_in: 900}
+       No caller needed. 429 (Retry-After) while 20 logins from the client's address (an IPv6 address's
+       /64; `X-Forwarded-For` only with trust_forwarded_for, as for event streams) are waiting; when
+       10,000 are waiting in all, the oldest pending login of the address with the most goes to make
+       room (never a refusal for everyone). 400 a non-string field.
+POST /v1/code/agents/login/poll {device_code} → LoginPoll
+       {status: "pending"} | {status: "approved", token /* rlm_…, handed out once */, machine /* mch_… */, owner}
+       | {status: "denied"} | {status: "expired"} /* also for an unknown code and after the token was handed out */
+GET  /v1/code/agents/{owner}/login/{user_code} → PendingLogin {user_code, name, hostname?, os?, created_at, expires_at}
+       which machine asks, shown before approving ("Approve ada-mbp (macOS)?")
+POST /v1/code/agents/{owner}/login/approve {user_code /* any case, dash optional */, name?} → 204
+POST /v1/code/agents/{owner}/login/deny {user_code} → 204
+       All three need Code::manages (the owner or admin, not agent tokens); 404 when no pending login has the code.
+
+GET    /v1/code/agents/{owner}/machines → [Machine]   oldest first; owner's tokens (agents too), else 404
+POST   /v1/code/agents/{owner}/machines {name?} → 201 {machine: Machine, token /* rlm_…, shown once */}
+       ("Add machine", sandboxes); 422 past 200 machines
+PATCH  /v1/code/agents/{owner}/machines/{machine} {name?, color?, kind?} → Machine
+       renames it or changes how it shows (Machine.appearance): at least one key, each one there
+       changes that field; `color` is an IdentityColor (slate | violet | purple | pink | rose |
+       teal | cyan | green), `kind` a MachineKind (laptop | desktop | server | cloud | container),
+       `null` clears either (the dashboard then makes a colour from the id, a kind from the OS);
+       none of the three, an empty name or an unknown colour or kind → 400
+DELETE /v1/code/agents/{owner}/machines/{machine} → 204: the token stops working, the live link closes now
+       (close code 4401), the machine's mirrored records are dropped, and streams get machine_removed.
+       POST, PATCH and DELETE need Code::manages: 401 anonymous, 403 agent tokens and other owners.
+
+Machine = {id, name, online: bool /* its link is up */, info?: MachineInfo /* from its last hello */,
+           sandbox?: SandboxInfo, created_at, last_seen?}
+           A name is trimmed, one line, 1–64 characters.
+
+GET /v1/code/agents/{owner}/state?threads=thr_a,thr_b → State {cursor, machines: [Machine], entities: [Mirrored]}
+       Mirrored = {cursor, machine, entity: Entity}. The shell (projects, threads, runs, requests,
+       terminals) always; detail (nodes, checkpoints) only for the listed threads (at most 200).
+       Tombstones aren't in the snapshot. Owner's tokens (agents too), else 404.
+GET /v1/code/agents/{owner}/events?threads=…&after=<cursor> → SSE, events named by their `type`:
+       event: entity           id: <cursor>   data: {type: "entity", cursor, machine, entity}
+       event: machine          id: <cursor>   data: {type: "machine", cursor, machine: Machine}
+       event: machine_removed  id: <cursor>   data: {type: "machine_removed", cursor, machine: mch_…}
+       event: delta            (no id)        data: {type: "delta", machine, delta: Delta}
+       event: canvas           id: <cursor>   data: {type: "canvas", cursor, revision, updated_at}
+       event: settings         id: <cursor>   data: {type: "settings", cursor, revision, updated_at}
+       Load /state, then open /events?after=<state.cursor>: a snapshot plus everything with a newer
+       cursor is complete. A reconnect with Last-Event-ID (EventSource sends it) first gets what
+       changed since, from the mirror (each record once, at its newest), then goes on live; cursors
+       only ascend. Without either, only what happens from now on. `entity` events include tombstones
+       ({kind: "removed", entity, id, thread?}). Text and output deltas only for the listed threads;
+       terminal deltas always. Deltas are never replayed. Stream limits as for repo events (429).
+       With both `?after=` and Last-Event-ID (the canvas sends both on a reconnect) the stream resumes
+       after the newer; a Last-Event-ID that isn't a number is ignored, an `after` that isn't is a 400.
+
+GET /v1/code/agents/{owner}/canvas → SavedCanvas {canvas: object | null, revision, updated_at: Millis | null}
+       The canvas as the owner arranged it (the dashboard's document; opaque to roll), so every device
+       shows the same. Before the first save: {canvas: null, revision: 0, updated_at: null}. Owner's
+       tokens (agents too), else 404.
+PUT /v1/code/agents/{owner}/canvas {canvas: object, revision?: int} → SavedCanvas
+       Saves it (revision + 1). With `revision`, only over that revision (0: none saved yet), else 409
+       SavedCanvas + {error}: what is there now, unchanged; without it the last writer wins. `canvas`
+       is at most 64 KiB as compact JSON and the body is read no further than a little past that: 413
+       (also for a Content-Length past it). 400 bad JSON, a body that isn't an object, a `canvas` that
+       isn't an object, a `revision` that isn't a whole number. Code::manages: 401 anonymous, 403 agent
+       tokens and other owners; machine tokens are 401. Each save goes out on /events as `canvas` with
+       its cursor (the owner's, so the snapshot's cursor counts it), and a stream catching up gets the
+       canvas's last save if it's newer: a device showing an older revision loads it again.
+
+GET /v1/code/agents/{owner}/settings → SavedSettings {settings: object | null, revision, updated_at: Millis | null}
+PUT /v1/code/agents/{owner}/settings {settings: object, revision?: int} → SavedSettings
+       The owner's agents settings (docs/code/agents.md, "Owner settings"): a document of its own
+       beside the canvas, exactly as …/canvas (revisions, 409 with what is there, the same readers and
+       writers, 400/401/403/404), at most 32 KiB of compact JSON (413), announced on /events as
+       `settings`. The dashboard's schema (lib/owner-settings.ts); roll keeps nothing secret there.
+
+GET /v1/code/agents/{owner}/endpoints → [EndpointProfile]
+PUT /v1/code/agents/{owner}/endpoints/{id} EndpointProfile → EndpointProfile
+DELETE /v1/code/agents/{owner}/endpoints/{id} → 204
+       The owner's endpoint profiles (docs/code/agents.md, "Endpoints"): {name, kind: anthropic |
+       openai | cliproxy | custom, base_url, providers?, url_env?, key_env?, key_ref?, sandbox_default?,
+       updated_at}, oldest first. Never a key: one sent with a profile is dropped, not stored. The
+       path names it (`[a-z0-9_-]`, at most 64); 400 for a spec `EndpointSpec::check` refuses (a URL
+       that isn't http(s) or holds credentials, a custom endpoint naming no variable, …) and past 32
+       per owner. `sandbox_default` on one takes it off the others. GET: the owner's tokens, agents
+       too (404 others); PUT and DELETE: Code::manages (401 anonymous, 403 agent tokens and other
+       owners; 404 deleting one that isn't there). Applying a profile to a machine is `endpoint.set`
+       through …/commands, with the key sealed to that machine in the browser.
+
+GET /v1/code/agents/{owner}/gateway → GatewayPlan | null
+PUT /v1/code/agents/{owner}/gateway GatewayPlan → GatewayPlan
+DELETE /v1/code/agents/{owner}/gateway → 204
+       The owner's model gateway (docs/code/gateway.md): {host: MachineId, urls?: [{label, url}],
+       members?: [GatewayMember], new_sandboxes?, fallback?, acknowledged_at, updated_at}. No key, ever.
+       PUT: the host is one of the owner's machines (404 otherwise), `acknowledged_at` is when the owner
+       read the notice (0: 400), URLs are http(s) without credentials (400); members sent with it are
+       ignored (only joining and leaving change them), and another host while machines use the gateway is
+       a 409 ("remove the machines first"). DELETE is a 409 while machines use it. The host's gateway
+       itself is set up and removed with `gateway.*` commands. With none set up, GET answers `null`
+       (200: no gateway is a state, not an error), and DELETE and the member routes are 404s.
+POST /v1/code/agents/{owner}/gateway/members GatewayJoin {machine, url?, providers?} → GatewayPlan
+       Joins a machine: the relay sends `gateway.client.issue {name, machine, seal_key}` to the host
+       (the member's seal key from its last `hello`), then `endpoint.set` to the member with
+       {id: "roll-gateway", name: "roll gateway on <host>", kind: gateway, base_url: url, providers,
+       fallback: the plan's} and the host's sealed box as `key` unchanged, and records the member's
+       client id. `url` is one of the plan's (the first when unset); the host may join itself on a
+       loopback URL. `providers` unset: every provider the member reports. 400 a URL that isn't the
+       plan's; 404 no plan, or not one of the owner's live machines; 409 a member that never said a
+       seal key or has no providers, or a host that's gone. A failure of either daemon is recorded on
+       the member (`error`) and answered with its status (400 invalid, 409 not found or conflict, 503
+       offline or no answer, 422 otherwise); a member that refused the endpoint has its new key revoked
+       again. A sandbox joins on its own on its first `hello` while `new_sandboxes` is set.
+DELETE /v1/code/agents/{owner}/gateway/members/{machine} → GatewayPlan
+       `endpoint.remove {endpoint: "roll-gateway"}` to the member (best effort: it may be gone or
+       offline) and `gateway.client.revoke` to the host, then the plan without it. A host that doesn't
+       revoke keeps the member, with `error`, and answers its status. 404 not a member.
+       Every gateway route is Code::manages: 401 anonymous, 403 agent tokens, review apps and other
+       owners; machine tokens are 401.
+
+POST /v1/code/agents/{owner}/machines/{machine}/commands CommandRequest {id, command: Command} → Reply
+       Forwarded to the machine's daemon; waits up to 30 s for its reply. `id` (1–128 characters) is
+       the idempotency key, per sender: retrying with the same id never runs the command twice (the
+       daemon keeps receipts by sender and id), a retry while the first waits shares its reply (another
+       sender's command with that id waiting is a 409 conflict), and a link that drops and comes back
+       within the wait gets the command again. Owner's tokens, agent tokens too (401 anonymous, 403
+       others; 404 an unknown or revoked machine). The daemon is told who sent it: the owner's name,
+       `agent:<name>`, or `admin`.
+       `endpoint.set {endpoint, key?}` (owner only): 400 before it reaches the machine for a spec
+       `EndpointSpec::check` refuses or a `key.sealed` that isn't a roll-seal-v1 box (the relay can't
+       open one; it forwards it and keeps nothing). `endpoint.check` answers `endpoint_checked`.
+       `gateway.*` (owner only; docs/code/gateway.md): 400 before it reaches the machine for
+       `gateway.configure` settings `GatewaySettings::check` refuses (an unspecified listen address,
+       an unknown upstream in a route, a key header), a `gateway.key` `key.sealed` that isn't a
+       roll-seal-v1 box, or a `gateway.client.issue` `seal_key` that isn't 32 bytes of base64url.
+       Replies: `gateway.client.issue` → `gateway_client {client, sealed}` (the key sealed to
+       `seal_key` for the `roll-gateway` endpoint), `gateway.test` → `gateway_tested {checks}`,
+       `gateway.status` → `gateway_status`, `gateway.usage` → `gateway_usage`, `gateway.log` →
+       `gateway_log {entries}`, `gateway.log.body` → `gateway_log_body`; the rest `ok`. A machine
+       that hosts no gateway answers 404 for everything but `gateway.configure` and `gateway.remove`.
+       Agent tokens drive threads only (403 otherwise, docs/code/agents.md "Machines, login and
+       tokens"): `thread.create` in `ask` or `auto_edit` (not `full_access`, the default),
+       `thread.configure` only lowering the thread's modes, `thread.fork`, `thread.archive`,
+       `thread.unarchive`, `message.send`, `message.unqueue`, `message.edit`, `message.reorder`,
+       `message.promote`, `run.interrupt`, `thread.publish`,
+       `diff.get`, `git.status`, and `fs.list`/`fs.read` in a project. The rest (`terminal.*`,
+       `fs.write`, `fs.list` without a project, `request.respond`, `project.add`, `project.remove`,
+       `project.update`, `project.pull`, `thread.delete`, `checkpoint.rollback`, `provider.refresh`,
+       `machine.configure`, `endpoint.*`, `gateway.*`) needs Code::manages.
+       `machine.configure {settings: MachineSettings}` replaces the machine's settings whole
+       (docs/code/agents.md, "Machine settings"); the reply comes after the daemon's `hello` with them
+       (Machine.info.settings). Settings that would carry a credential or an address (a variable named
+       like a key, token, URL, endpoint, proxy or host), or break MachineSettings::check, are a 400
+       here and never reach the machine.
+       200 with the Reply, or Reply.Error {type: "error", code, message, error /* = message */} with
+       not_found 404, invalid 400, conflict 409, provider 422, internal 502,
+       machine_offline 503 (not connected), timeout 504 (no reply in time).
+       A sandbox machine that is asleep, stopped by its owner, or on its way down is woken by any
+       command (also `project.add` through …/projects and the MCP tools, which call this route): the
+       sandbox is set running (Machine.sandbox.status "starting" on the stream) and the request is held
+       until its daemon's link is up, at most ROLL_SANDBOX_WAKE_TIMEOUT (180 s), then the command goes
+       out once and waits for its reply as usual (so allow for 180 + 30 s; a proxy in front of the API
+       must too). A wake that runs out answers machine_offline "the sandbox is still waking up …; send
+       the command again with the same id": the sandbox keeps waking, and the same id is safe to send
+       again. A sandbox being deleted (or failed) never wakes: machine_offline at once.
+       Commands on a roll code repo (docs/code/agents.md, "Agents in roll code"): `project.add` with
+       `clone: {owner, repo}` and `thread.publish` in a project that is a roll code repo carry a grant
+       for that repo to the daemon. The repo must be the machine's owner's (400 otherwise, 404 when it
+       doesn't exist or the caller can't read it); publishing needs write access to it (403). A
+       clone's grant only fetches; a publish's pushes only the thread's worktree branch (400 when that
+       is the repo's default branch; a thread without a worktree gets none). `project.pull`, and
+       `project.update` with `settings.auto_pull` (it pulls at once), in a roll code project carry a
+       fetch-only grant too (docs/code/agents.md, "Project settings"); `project.pull` answers
+       {type: "pulled", at, outcome: {status: "pulled", branch, from, to, commits} | {status:
+       "up_to_date", branch} | {status: "skipped", reason, message} | {status: "failed", message}}.
+       `thread.publish` answers Published {branch, commit, change: number | null /* the branch's open
+       change */, url: string | null, landing?: Landing /* with land: true */};
+       Landing = {status: "landed" | "queued" | "blocked" | "conflict" | "failed", message, blockers: string[]}:
+       the land goes through POST /v1/code/changes/{id}/land with the caller's token (the merge queue on a
+       queue repo, the landing rules otherwise), and a blocked or conflicting land is still a 200.
+
+POST /v1/code/agents/{owner}/machines/{machine}/projects {id /* idempotency key */, repo: {name, description?,
+       visibility?, default_branch?}, path?, name?} → Reply (200, as for commands)
+       Creates the repo (POST /v1/code/repos on the caller's behalf: its 403/422 pass through; a 409, the
+       repo already existing, is a retry and goes on), lands a README as the first commit if the repo has
+       no history, and clones it onto the machine as a project
+       (`project.add` with `clone`). Code::manages (401 anonymous, 403 agent tokens and others,
+       404 an unknown machine, 400 without id or repo.name).
+POST   /v1/code/agents/{owner}/threads/{thread}/work {work?: "wi_…" | "owner/repo#N", repo?: "owner/name",
+       labels?, lease_s?, agent?} → WorkItem | 204
+       The thread takes a work item: `work` (read as the caller: 404 if it can't), or the next open one
+       claimed from `repo` (POST …/work/claim as `agent`, default the caller's agent or
+       `agent:<machine name>`; 204 when none matches). It must be one of the owner's repos (400), and
+       becomes the thread's `work`. 400 with neither; 404 an unknown thread. A claim the item has when
+       the thread takes it is kept alive (renewed by its lease length once half is left) while the
+       thread works: running, or idle under 10 minutes, not archived, its machine connected. Then
+       it runs out like any other. A `thread.publish` links the branch's change to the item
+       (PATCH /v1/code/changes/{id} {work_item} as the sender), so landing it completes the item.
+DELETE /v1/code/agents/{owner}/threads/{thread}/work → 204: the thread lets go of it (the claim stays,
+       no longer kept alive).
+       Both: owner's tokens, agent tokens too (401 anonymous, 403 others).
+
+Thread.change = {repo /* owner/name */, number, status: "checking" | "failing" | "blocked" | "ready" | "queued"
+       | "landed" | "conflict" | "closed", url, detail: string | null} and Thread.work = {id, repo, number,
+       title} are filled by the relay from roll code (the daemon never sets them) and follow the change
+       as it moves, as new `entity` events on the stream.
+
+Grants (`rlg_…`) only open git, for their one repo: fetch, and push for a publish. Every API route
+answers 401 to one, even on an open daemon. They expire after 10 minutes and stop at once when the
+machine is revoked.
+
+GET /v1/code/agents/connect    the daemon's WebSocket (Authorization: Bearer rlm_…; only machine tokens,
+       looked up on every connect: 401 otherwise). Without an upgrade: 200 MachineLogin {machine: Machine,
+       owner}, the machine the token opens (`roll agent login --machine-token`). Text frames of
+       DaemonFrame / RelayFrame JSON: hello → welcome {machine, owner, resume_from}, entities → ack,
+       delta, command → reply, ping/pong (every 20 s; 60 s of silence closes). Frames up to 16 MiB.
+       Close codes: 4400 protocol error (wrong version, no hello), 4401 revoked (stop, don't retry),
+       4409 replaced by a newer link of the same machine, 1012 reconnect (the owner moved nodes).
+DELETE /v1/code/agents/connect → 204   a machine revokes itself with its own token (`roll agent logout`):
+       the same as DELETE …/machines/{machine}; 401 for any other token.
+```
+
+**Shares** are read-only copies of a thread behind a public link, `{web}/agents/s/<id>`
+(docs/code/agents.md, "Shares").
+
+```
+POST   /v1/code/agents/{owner}/threads/{thread}/shares {subtree?: bool} → 201 ShareSummary
+       Freezes the thread's records from the mirror (with `subtree`, the subagent threads it delegated to,
+       recursively, at most 64 threads; forks are separate threads and stay out). Terminals, attachments'
+       bytes and queued messages are left out; the machine's home directory and any /home/<user>,
+       /Users/<user> or /root starting a path become `~` in every string. Over 4 MiB, tool outputs and
+       diffs are cut to their ends (`trimmed: true`); still over is a 422, as is a 501st share.
+       Code::manages; 404 when the mirror has no such thread.
+GET    /v1/code/agents/{owner}/shares → [ShareSummary]   newest first; owner's tokens (agents too), else 404
+DELETE /v1/code/agents/{owner}/shares/{id} → 204          Code::manages; the link stops working at once
+GET    /v1/code/agents/shares/{id} → Share               no caller needed; `Cache-Control: no-store`; 404 unknown
+
+ShareSummary = {id /* shr_ + 24 hex */, title, thread, subtree, url /* {web}/agents/s/<id> */, threads, runs,
+                bytes, created_at, created_by}
+Share = {id, owner, title, thread, subtree, machine: {name, os?}, created_at, trimmed,
+         entities: [Entity] /* project, threads, then runs, requests, checkpoints and nodes as they happened */}
+```
+
+A share is a copy: later work on the thread, revoking its machine or deleting the thread leave it as
+it was. `shares` (like `login`) is a reserved owner name, so `/v1/code/agents/shares/…` never names an
+owner, and it isn't routed by owner in a cluster.
+
+In a cluster every `/v1/code/agents/{owner}/…` request and every machine link of the owner run on the
+node holding the lease `agents:<owner id>` (docs/code/cluster.md).
+
+### Sandboxes
+
+Machines roll hosts for an owner (docs/code/agents.md, "Sandboxes"): each is a container running
+`roll agent up` with a machine of its own, so it also appears in `/machines`, `/state` and `/events`
+with `Machine.sandbox` set. Every route needs Code::manages (401 anonymous, 403 agent tokens and other
+owners). Requests record what the owner wants; the owner's reconciler makes the backend match (at
+once for start, stop and delete; creates in the background) and every change of what the canvas
+shows is a `machine` event. Times are milliseconds.
+
+```
+GET    /v1/code/agents/{owner}/sandboxes → {sandboxes: [Sandbox] /* oldest first */, sizes: [Size] /* the first is the default */,
+       max /* per owner */, backend: "agent37" | "docker" | null /* null: sandboxes are off */}
+POST   /v1/code/agents/{owner}/sandboxes {name?, size? /* a Size name */, env?: {NAME: "value"}}
+       → 201 {sandbox: Sandbox /* status "creating" */, machine: Machine}
+       env is passed to the sandbox only (e.g. ANTHROPIC_API_KEY, OPENAI_API_KEY): sealed with ROLL_SECRET_KEY
+       until the backend has it, then dropped; never returned. At most 32 names (uppercase, digits, _),
+       values one line of at most 4096 characters, 32 KiB in all; ROLL_*, AGENT37_*, HOME, USER, PATH,
+       SHELL and IS_SANDBOX are reserved. 400 bad name, size or env; 422 at the owner's limit (deleting
+       ones count until gone) or without ROLL_SECRET_KEY on the server; 503 sandboxes are off.
+POST   /v1/code/agents/{owner}/sandboxes/{id}/start → Sandbox   desired "running" (asleep ones too: a wake now);
+       409 while it's being deleted
+POST   /v1/code/agents/{owner}/sandboxes/{id}/stop  → Sandbox   desired "stopped" (running time stops being billed;
+       a command to it starts it again)
+DELETE /v1/code/agents/{owner}/sandboxes/{id} → 204 the backend deleted it and its data, and its machine is
+       revoked (machine_removed); 202 Sandbox ("deleting") while the backend is still at it (retried).
+       Removing a sandbox's machine (DELETE …/machines/{machine}, or `roll agent logout` in it) deletes the
+       sandbox the same way. 404 for an unknown or deleted sandbox.
+GET    /v1/code/agents/{owner}/sandboxes/usage?month=YYYY-MM (default: this UTC month)
+       → {owner, month, sandboxes: [{sandbox, name, size, hourly_cents, running_ms, running_hours, price_usd}],
+          totals: {running_ms, running_hours, price_usd}}
+       Running time as the reconciler saw it (it looks every 30 s), deleted sandboxes included; price_usd is
+       hours × hourly_cents / 100, rounded to a hundredth of a cent (0.0001). 400 for a malformed month.
+
+Sandbox = {id /* sbx_… */, name, machine /* mch_… */, backend, size: Size,
+           status: "creating" | "starting" | "running" | "stopped" | "failed" | "deleting" /* = Machine.sandbox.status */,
+           desired: "running" | "stopped" | "asleep" | "deleted" /* asleep: the reconciler stopped it while idle */,
+           stopped_reason?: "idle" | "owner" /* while stopped: asleep, or the owner's stop */,
+           error?: string /* the backend's last complaint */,
+           created_at, updated_at, last_active_at? /* its machine last did something; it sleeps a window after */}
+SandboxInfo = {backend, size /* a Size name */, status /* as Sandbox.status */, hourly_cents,
+               stopped_reason? /* as Sandbox.stopped_reason */}   (Machine.sandbox)
+Size = {name /* "standard" */, cpu, memory_gb, disk_gb, hourly_cents /* price per running hour, US cents */}
+```
+
+A `failed` sandbox stays until it's deleted (a refused create isn't tried again). One that stopped on
+its own while it should run is started again. A running one goes to sleep (desired "asleep", status
+"stopped", stopped_reason "idle") once its machine has done nothing for ROLL_SANDBOX_IDLE_STOP (5 min;
+`0` keeps sandboxes up): no thread on it starting or running (a thread waiting on its user is idle),
+no command for it and no terminal output. "starting" is a stopped sandbox on its way up again (a wake,
+or start); its machine comes online once its daemon connects. Asleep, it isn't billed.
+
+### Automations
+
+Triggers, filters and steps that run the owner's agents and talk to the world (docs/code/automations.md).
+The wire types are `agent_proto::automation` (Rust) and `apps/dashboard/src/lib/automations-api.ts`;
+times are milliseconds. Reading (lists, runs, the catalog, dry runs) is the owner's tokens', agents
+included (404 to everyone else); changing automations, their secrets, cancelling and retrying runs is
+Code::manages (401 anonymous, 403 agent tokens); running one by hand is Code::manages, or an agent token
+when the automation has `allow_agents`. Every change of an automation or a run is an `automation`,
+`automation_removed` or `automation_run` event on the owner's stream (`GET …/events`, with a cursor, so a
+reconnect catches up), and a `notify` step's notice is a `notice` event (no cursor), kept for later too.
+
+```
+GET    /v1/code/agents/{owner}/automations → [Automation] /* oldest first, deleted ones left out */
+POST   /v1/code/agents/{owner}/automations AutomationSpec → 201 AutomationSaved
+       400 a bad spec (the message says where: "steps.2.config.prompt: unclosed {{"), an unknown trigger
+       source or step kind, a config its kind refuses, secrets used outside a webhook's header values;
+       422 at 200 automations, or a webhook trigger without ROLL_SECRET_KEY on the server.
+       A webhook trigger gets its URL and a secret (AutomationSaved.webhook_secret, `rlh_…`, shown once).
+GET    /v1/code/agents/{owner}/automations/catalog → Catalog /* every trigger source and step kind, with
+       JSON Schemas; integrations' too (needs_setup: not connected yet). Each field of a config's
+       properties has "x-order": n, the order to show it in (JSON objects arrive sorted) */
+POST   /v1/code/agents/{owner}/automations/test TestRequest → TestResult
+       what the automation would do with the event: the trigger's and each filter's verdict, each step's
+       config with its templates filled in. Runs nothing; secrets are never filled in.
+GET    /v1/code/agents/{owner}/automations/runs?automation=&status=&before=&limit= → [AutomationRun]
+       newest first, 50 by default, at most 200; `before` a run id (the next page)
+GET    /v1/code/agents/{owner}/automations/runs/{run} → RunDetail {run, event}
+GET    /v1/code/agents/{owner}/automations/notices?before=&limit= → [Notice]
+       the notify steps' notices, newest first (the newest 200 per owner are kept), 50 by default, at most
+       200; `before` a notice's `at` (the next page). For a dashboard that wasn't open when they came.
+POST   /v1/code/agents/{owner}/automations/runs/{run}/cancel → AutomationRun /* "cancelled"; what its steps
+       made only for the run (a sandbox) is cleaned up; a final run is answered as it is */
+POST   /v1/code/agents/{owner}/automations/runs/{run}/retry → AutomationRun /* a failed or cancelled run goes on
+       from the step that stopped it (its attempts start over); 409 for a run that isn't. The run gets
+       `retried_at` (its time counts from there); each step that goes again keeps its error and a
+       "Retried after the run failed: …" line in its log */
+GET    /v1/code/agents/{owner}/automations/{id} → Automation
+PUT    /v1/code/agents/{owner}/automations/{id} AutomationSpec & {revision?} → AutomationSaved
+       replaces the definition; with `revision`, 409 {error, current: Automation} when it isn't the current one.
+       Runs going on keep the definition they started with.
+DELETE /v1/code/agents/{owner}/automations/{id} → 204 /* its runs going on are cancelled; its secrets dropped */
+POST   /v1/code/agents/{owner}/automations/{id}/enable  → Automation
+POST   /v1/code/agents/{owner}/automations/{id}/disable → Automation /* new events start nothing; runs going on go on */
+POST   /v1/code/agents/{owner}/automations/{id}/run RunNow {input?, data?, key?} → 202 AutomationRun
+       an event of source `manual`, kind `run`, data {…data, by, input}; the same `key` is the same run (200 then).
+       Any trigger can be run by hand (its filters still apply: a run they refuse is "skipped"). `data` is
+       the event's data as the automation's trigger sends it (an object, at most 256 KiB; 400 otherwise),
+       so a code or integration automation's steps read `event.data.title` and the like; `by` and `input`
+       are roll's, whatever `data` says. The dashboard starts it from the trigger's sample.
+GET    /v1/code/agents/{owner}/automations/{id}/runs?status=&before=&limit= → [AutomationRun]
+PUT    /v1/code/agents/{owner}/automations/{id}/secrets/{name} {value} → 204
+       name: [A-Z0-9_], 1 to 64; value at most 8 KiB, sealed with ROLL_SECRET_KEY (422 without it) and never
+       returned or logged; at most 20 per automation. Automation.secrets lists the names.
+DELETE /v1/code/agents/{owner}/automations/{id}/secrets/{name} → 204
+POST   /v1/code/agents/{owner}/automations/{id}/webhook/secret → AutomationSaved /* a new inbound secret, shown
+       once; the old one stops working */
+POST   /v1/code/agents/{owner}/automations/{id}/webhook  (no token: the signature is the credential)
+       → 202 {event: "aev_…", duplicate: bool}
+       Either `X-Roll-Signature-256: sha256=<hex HMAC-SHA256(secret, "{timestamp}.{body}")>` with
+       `X-Roll-Timestamp: <unix seconds>` within 5 minutes (roll's own webhook signature), idempotent by
+       `X-Roll-Delivery` (else the signature); or GitHub's `X-Hub-Signature-256` over the body with
+       `X-GitHub-Delivery` as the key. The body (JSON, else text; at most 256 KiB) is `event.data.body`,
+       the headers `event.data.headers` (signatures left out). 401 a bad or old signature, 404 no such
+       automation or not a webhook trigger, 409 disabled, 413 too big.
+```
+
+### Linear
+
+The owner's Linear workspace (docs/code/automations.md, "Linear"): connected by installing roll's
+OAuth app as an agent (`actor=app`; needs `ROLL_LINEAR_CLIENT_ID`/`ROLL_LINEAR_CLIENT_SECRET` on the
+server) or with a personal API key, and `ROLL_SECRET_KEY` either way (tokens are sealed, never
+returned). The owner routes are Code::manages (401 anonymous, 403 agent tokens and other owners, 404 no
+such owner). Times are milliseconds.
+
+```
+GET    /v1/code/agents/{owner}/linear → LinearStatus
+       {connected, app: {oauth, webhook, webhook_url, redirect_uri, secret_key},
+        connection: null | {kind: "oauth"|"api_key", workspace: {id, name, url_key, url}, user: {id, name},
+          agent /* roll can be assigned and mentioned */, scopes, status: "ok"|"reauth", error, expires_at,
+          created_at, created_by, settings: {repos: {TEAM: repo}, default_repo?},
+          webhook: {mode: "app"|"workspace"|"manual", url, status: "ok"|"waiting"|"failing"|"needs_secret",
+                    secret_hint, last_delivery_at, rejected_at, rejected_why}},
+        deliveries: [{id, at, delivery, type, action, summary, result: "recorded"|"duplicate"|"ignored", events}]
+          /* newest first, 20 (50 are kept) */}
+DELETE /v1/code/agents/{owner}/linear → 204 /* revokes roll's OAuth token, or removes the webhook roll made
+       for an API key (best effort), and forgets the connection; 404 not connected */
+POST   /v1/code/agents/{owner}/linear/oauth {return_to?} → {url}
+       Linear's authorize URL (scopes read,write,issues:create,comments:create,app:assignable,app:mentionable,
+       actor=app, PKCE S256, a state good for 15 minutes and once). `return_to`: a dashboard path (default
+       /dashboard). 400 not a path; 422 no OAuth app on the server, or no ROLL_SECRET_KEY.
+GET    /v1/code/linear/oauth/callback?code&state[&error]  (no token: the state is the credential)
+       → 303 to {web_url}{return_to}?linear=connected, or ?linear=error&reason=… (a used or expired state,
+       Linear refused, the workspace is another owner's). Installs the "Linear agent" automation once.
+PUT    /v1/code/agents/{owner}/linear/key {key} → LinearStatus
+       Checks the key with Linear, then makes a webhook for Issues and Comments with a fresh signing secret
+       (webhook.mode "workspace"); a key that may not (not an admin's) leaves mode "manual": make one in
+       Linear to webhook.url and send its signing secret to …/webhook/secret. 400 a malformed key or one
+       Linear refuses; 409 the workspace is another owner's; 422 no ROLL_SECRET_KEY.
+PUT    /v1/code/agents/{owner}/linear/settings {repos?: {TEAM: "repo" | "owner/repo"}, default_repo?} → LinearStatus
+       Which roll code repo a team's issues are in (events carry it as event.data.repo); replaces the
+       settings whole (what's left out is cleared). 400 bad names; 404 not connected.
+PUT    /v1/code/agents/{owner}/linear/webhook/secret {secret} → LinearStatus
+       A hand-made webhook's signing secret (sealed; only its last four characters show). 400 malformed;
+       404 not connected; 409 an OAuth connection (the app's secret is the server's).
+GET    /v1/code/agents/{owner}/linear/teams → {teams: [{id, key, name}]} /* from Linear; 404 not connected,
+       422 the connection needs connecting again, 503 Linear is unreachable or rate limiting */
+POST   /v1/code/linear/webhook          (no token: the signature is the credential) roll's app's deliveries
+POST   /v1/code/linear/webhook/{hook}   a connection's own webhook (API keys)
+       → 200 {recorded, duplicates, ignored} — `Linear-Signature` is hex HMAC-SHA256 of the body under the
+       signing secret; the body's webhookTimestamp must be within 60 s. 401 a bad or old signature (noted
+       on the connection: webhook.status "failing"); 404 no such hook or no app webhook secret on the
+       server; 400 not JSON or over 1 MiB. A workspace no owner has is 200 with `ignored`.
+```
+
+### Lookups
+
+What a picker shows for an integration's things, so nobody types an id
+(`crates/code-control/src/agents/lookup/`, `apps/dashboard/src/lib/lookup-api.ts`). The server
+calls the integration with the owner's stored token; only ids, names, colours and https pictures
+come back. `Code::manages` (the owner or an admin; agents and review apps get 403), routed like the
+rest of `/v1/code/agents/{owner}`.
+
+```
+GET    /v1/code/agents/{owner}/lookup/{source}/{kind}?q=&parent=&cursor=&ids=&limit=
+       → {items: [Item], next?: cursor, problem?: Problem}
+       Item {id, label, key?, hint?, group?, avatar? (https), color? (#rrggbb), icon?}
+         id is what a field stores; key another value naming the same thing (a team's key, a
+         label's name), so values saved before pickers still show their row. icon names a kind
+         (user, agent, channel, private, group, team, role, a Linear state's type).
+       Problem {code: "not_connected" | "reconnect", message} | {code: "rate_limited", retry_after}
+             | {code: "unavailable", message}  — a 200: the picker says it and takes a typed value.
+       q ≤ 100 chars (filtered on the platform's side, or here for a whole list); parent: the
+       rows' owner (a team for its states, a Slack workspace or Discord server); ids: up to 50
+       stored values to resolve instead of listing; limit 1–100 (50).
+       Cached per owner for 30 s; a rate limit holds the source off for the owner until its retry
+       time (the cached page is still served with the problem). 400 a bad query or a kind that
+       needs `parent`; 404 an unknown source or kind.
+         code:   repos (the owner's; id = name, key = owner/name), agents (its agent tokens' names;
+                 key = agent:<name>). Read from control.db, never cached.
+         linear: teams, states (parent: team id or key; none: every team's, grouped), users,
+                 labels (parent: the team's and the workspace's; groups aren't rows), projects,
+                 cycles (parent required; not past), issues (q: a title, or an identifier ENG-12;
+                 ids: ids or identifiers)
+         slack:  through the install's sealed bot token. parent: a workspace's team id or install
+                 id (one the owner installed, else 404); none: the owner's only workspace, or every
+                 workspace's rows grouped by its name. Slack can't search, so a workspace's whole
+                 list (≤ 2000 rows, 200 a call with Slack's cursor) is read once per 30 s and
+                 searched, paged (cursor: an offset) and resolved here. A row's key is its name or
+                 handle (`#general`, `@ada` resolve).
+                 workspaces (the owner's installs: id the team id, key the install id),
+                 channels (public, and private ones the bot is in; not archived; hint the member
+                 count or "not a member"; icon channel/private), users (hint @handle, avatar
+                 image_48; bots and deactivated people only resolve stored ids), usergroups (hint
+                 @handle), targets (channels then people, grouped "Channels"/"People": a field
+                 that takes either). A grant without channels:read, groups:read, users:read or
+                 usergroups:read (installed before roll asked for them) is `reconnect`.
+         discord: as roll's bot, only in servers the owner installed it in. parent: a guild id or
+                 install id (else 404); none: the owner's only server, or every server's rows
+                 grouped by its name. guilds (the owner's installs), channels (text, announcement,
+                 forum; group: the category; read whole and searched here), roles (colour from
+                 the role's; @everyone isn't one; a bot's own role only resolves), members (q: a
+                 username or nickname prefix, searched at Discord; none: by user id, cursor the
+                 last id; ids looked up one by one; bots left out; avatar from Discord's CDN;
+                 needs the Server Members Intent, else `unavailable`).
+         github: only the owner's GitHub-connected repos, with their installation's token (an
+                 installation spans tenants). parent: a repo as the GitHub steps take it (app,
+                 acme/app) or its GitHub name; another owner's or an unknown repo is a 404; none:
+                 the first page of each connected repo (up to 5), grouped by repo. The cursor is
+                 GitHub's page number; q and ids read up to 5 pages of 100 and keep what matches.
+                 repos (roll's name, GitHub's as hint; no GitHub call), branches, labels (#colour,
+                 description as hint), users (assignees), reviewers (People: collaborators, then
+                 Teams), teams (org/slug; a user's repo has none), milestones (id: number),
+                 workflows (id: the file name, key: GitHub's id), environments, issues (open
+                 issues and pull requests; q or ids "#12" look the number up). No App or no
+                 connected repo: not_connected; 401/403: reconnect, naming the permission;
+                 403/429 with x-ratelimit-remaining 0 or retry-after: rate_limited (never waited out).
+POST   /v1/code/agents/{owner}/lookup/{source}/{kind} {name, parent?, color?} → Item
+       Make one where roll can (linear/labels: a team's when parent names one, else the workspace's;
+       github/labels: on parent, or the owner's only connected repo; 409 GitHub has it already).
+       The owner's cached pages of the source are dropped (connecting, updating or removing a
+       Slack or Discord install drops that platform's too). 400 no name (≤ 80 chars); 422 not
+       connected or a kind roll doesn't make (nothing of Slack's or Discord's).
+```
+
+## Chat ops
+
+Slack, Discord and GitHub for the agents (docs/code/chatops.md). The owner's integrations are under
+`/v1/code/agents/{owner}`, routed like the rest of it; the owner manages them and its agent tokens
+get 403.
+
+```
+GET    /v1/code/agents/{owner}/integrations → {
+         slack:   {configured, installs: [Install]},
+         discord: {configured, installs: [Install]},
+         github:  {configured, app_slug, install_url, repos: [{repo, github, url, connected, mirror}]},
+         sealing: bool}                                 # ROLL_SECRET_KEY set (Slack needs it)
+       Install = {id, team_id, team_name, bot_user_id, installer, members: [user id], anyone, created_at}
+POST   /v1/code/agents/{owner}/integrations/{slack|discord}/install → {url}
+       The platform's install URL with a one-time state (10 minutes). 422 when the platform (or, for
+       Slack, ROLL_SECRET_KEY) isn't configured; 404 an unknown platform.
+PATCH  /v1/code/agents/{owner}/integrations/{platform}/{id}  {members?: [user id], anyone?} → Install
+       Who may drive roll from it besides the installer. 400 more than 200 ids or one that isn't
+       letters and digits.
+DELETE /v1/code/agents/{owner}/integrations/{platform}/{id} → 204
+```
+
+The platforms' endpoints, which any node answers (`cluster::classify`: global). Each one is 404 while
+its platform isn't configured, and 401 on a missing, wrong or stale signature (more than five
+minutes off).
+
+```
+GET  /v1/code/chat/slack/oauth?code&state      → 303 to {web}/dashboard/agents?owner=…&settings=integrations&integration=slack&connected=<team>
+                                                  (or &error=expired | <why>, e.g. the workspace belongs to another owner)
+GET  /v1/code/chat/discord/oauth?code&state     → the same for Discord (the guild from the token exchange, not the query)
+POST /v1/code/chat/slack/events                 Events API: {challenge} for url_verification; else 200, recorded once per event_id
+POST /v1/code/chat/slack/commands               /roll: 200 {response_type: "ephemeral", text}
+POST /v1/code/chat/slack/interactions           buttons, selects, modals: 200 (empty)
+POST /v1/code/chat/discord/interactions         200 with the interaction's answer: {type: 1} a ping, 4 an ephemeral
+                                                line, 6 a deferred update, 9 a modal
+```
+
 ## MCP
 
 `/v1/code/mcp` is an MCP server (Streamable HTTP, JSON-RPC 2.0) whose tools call this API on the
@@ -606,6 +1133,9 @@ The browser calls `/v1/code/*` directly: reads, SSE and raw blob links. Allow an
 - Anonymous requests can read public repos.
 - Review app tokens (`rla_…`) are always the app, even on an open daemon: they read the repos the
   app is installed on (private ones too) and review their changes, nothing else.
+- Agent machine grants (`rlg_…`, minted by the relay inside a command; see Agents) are always
+  scoped too: git for one repo, as `agent:<machine name>`, pushing at most one ref (the thread's
+  branch: never the default branch, a tag or a delete), never the API (401).
 - When `auth.required` is true, the dashboard shows a sign-in button. It keeps the token in
   localStorage, sends it as `Bearer`, and opens the prompt on any 401. The event stream uses
   `fetch`, not `EventSource`, so it can send the header too.

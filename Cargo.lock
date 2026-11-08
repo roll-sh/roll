@@ -44,6 +44,58 @@ dependencies = [
 ]
 
 [[package]]
+name = "agent-host"
+version = "0.1.0"
+dependencies = [
+ "aes-gcm",
+ "agent-proto",
+ "anyhow",
+ "async-trait",
+ "axum",
+ "base64 0.22.1",
+ "bzip2",
+ "code-control",
+ "curve25519-dalek",
+ "diffy",
+ "flate2",
+ "futures-util",
+ "hex",
+ "hkdf",
+ "image",
+ "libc",
+ "model-gateway",
+ "parking_lot",
+ "pg-storage",
+ "rand 0.8.8",
+ "reqwest",
+ "rusqlite",
+ "rustls-native-certs",
+ "serde",
+ "serde_json",
+ "serde_yaml_ng",
+ "sha2 0.10.9",
+ "tar",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tokio-rustls 0.26.6",
+ "tokio-tungstenite 0.30.0",
+ "toml",
+ "tower",
+ "tracing",
+ "zeroize",
+ "zip",
+]
+
+[[package]]
+name = "agent-proto"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "aho-corasick"
 version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1486,6 +1538,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "code-chat"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "hex",
+ "hmac 0.12.1",
+ "reqwest",
+ "ring",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror",
+ "tokio",
+ "url",
+]
+
+[[package]]
 name = "code-cluster"
 version = "0.1.0"
 dependencies = [
@@ -1513,6 +1582,8 @@ dependencies = [
 name = "code-control"
 version = "0.1.0"
 dependencies = [
+ "agent-host",
+ "agent-proto",
  "ammonia",
  "anyhow",
  "async-trait",
@@ -1520,6 +1591,8 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "chrono",
+ "chrono-tz",
+ "code-chat",
  "code-cluster",
  "code-git",
  "code-github",
@@ -1528,6 +1601,7 @@ dependencies = [
  "code-sql",
  "code-store",
  "comrak",
+ "croner",
  "diffy",
  "futures",
  "getrandom 0.4.3",
@@ -1549,6 +1623,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+ "tokio-tungstenite 0.30.0",
  "toml",
  "tower",
  "tower-http 0.7.1",
@@ -2563,6 +2638,16 @@ name = "fiat-crypto"
 version = "0.2.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "28dea519a9695b9977216879a3ebfddf92f1c08c05d984f8996aecd6ecdc811d"
+
+[[package]]
+name = "filetime"
+version = "0.2.29"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5c287a33c7f0a620c38e641e7f60827713987b3c0f26e8ddc9462cc69cf75759"
+dependencies = [
+ "cfg-if",
+ "libc",
+]
 
 [[package]]
 name = "find-msvc-tools"
@@ -4059,6 +4144,35 @@ dependencies = [
  "libc",
  "wasi 0.11.1+wasi-snapshot-preview1",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "model-gateway"
+version = "0.1.0"
+dependencies = [
+ "agent-proto",
+ "anyhow",
+ "axum",
+ "base64 0.22.1",
+ "bytes",
+ "futures-util",
+ "hex",
+ "hmac 0.12.1",
+ "jsonwebtoken",
+ "rand 0.8.8",
+ "reqwest",
+ "rsa",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "toml",
+ "tracing",
+ "url",
+ "zeroize",
 ]
 
 [[package]]
@@ -6086,6 +6200,8 @@ dependencies = [
 name = "roll-cli"
 version = "0.1.0"
 dependencies = [
+ "agent-host",
+ "agent-proto",
  "anyhow",
  "aws-sdk-s3",
  "axum",
@@ -6094,8 +6210,11 @@ dependencies = [
  "chrono",
  "chrono-tz",
  "clap",
+ "code-chat",
  "code-control",
+ "code-sql",
  "libc",
+ "model-gateway",
  "nosql-control",
  "nosql-engine",
  "nosql-proto",
@@ -6110,6 +6229,7 @@ dependencies = [
  "s3-control",
  "s3-server",
  "s3-store",
+ "serde",
  "serde_json",
  "tempfile",
  "tokio",
@@ -7382,6 +7502,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7b2093cf4c8eb1e67749a6762251bc9cd836b6fc171623bd0a9d324d37af2417"
 
 [[package]]
+name = "tar"
+version = "0.4.46"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3f6221d9a6003c78398e3b239969f352578258df48c8eb051caadae0015bc840"
+dependencies = [
+ "filetime",
+ "libc",
+]
+
+[[package]]
 name = "tasks"
 version = "0.1.0"
 dependencies = [
@@ -7670,7 +7800,11 @@ checksum = "17a073bfed563fa236697a068031408a93cd9522e08abf9933ead3e73411bd71"
 dependencies = [
  "futures-util",
  "log",
+ "rustls 0.23.46",
+ "rustls-native-certs",
+ "rustls-pki-types",
  "tokio",
+ "tokio-rustls 0.26.6",
  "tungstenite 0.30.0",
 ]
 
@@ -7898,6 +8032,8 @@ dependencies = [
  "httparse",
  "log",
  "rand 0.10.3",
+ "rustls 0.23.46",
+ "rustls-pki-types",
  "sha1 0.11.0",
  "thiserror",
 ]
@@ -7913,6 +8049,12 @@ name = "typed-arena"
 version = "2.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6af6ae20167a9ece4bcb41af5b80f8a1f1df981f6391189ce00fd257af04126a"
+
+[[package]]
+name = "typed-path"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9ce898823d8cd0f028662d2f349694b1af0a5cc9be83f1d213a00d3147445e1e"
 
 [[package]]
 name = "typenum"
@@ -8681,6 +8823,7 @@ version = "1.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e13084392c5e4bc371903e2935a5eaeed24905a7511356b883835e18a78f6879"
 dependencies = [
+ "serde",
  "zeroize_derive",
 ]
 
@@ -8726,6 +8869,23 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.9",
+]
+
+[[package]]
+name = "zip"
+version = "9.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3cec733c9820347a592f6375c3c0089b479ba0a0b1cbf3dd1958b02959b7c033"
+dependencies = [
+ "crc32fast",
+ "flate2",
+ "getrandom 0.4.3",
+ "indexmap",
+ "libc",
+ "memchr",
+ "nix",
+ "typed-path",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

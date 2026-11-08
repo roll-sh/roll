@@ -269,6 +269,7 @@ fn written_packs_index_with_git() {
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let by_id: HashMap<_, _> = pack::read(&data, &Limits::default()).unwrap().into_iter().map(|o| (o.id, o)).collect();
     assert_eq!(by_id.len(), 50);
+    assert_eq!(pack::read(&data, &Limits::default()).unwrap(), objects, "reads back as written");
 }
 
 fn stream(data: &[u8], chunk: usize, meter: Box<dyn Meter>) -> Result<pack::Pack, PackError> {

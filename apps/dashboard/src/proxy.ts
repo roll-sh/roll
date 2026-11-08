@@ -1,9 +1,10 @@
 /**
- * Real status codes for public roll.sh pages. Repo and owner pages stream (their data loads under
- * Suspense), and once streaming starts the status is committed as 200. So the existence check runs
- * here, before rendering: a missing owner or repo is rewritten to a path no route matches, which
- * renders `not-found.tsx` with a 404; a renamed repo gets a permanent redirect to its new name.
- * Git traffic (`.git`, `info/refs`, `git-*-pack`) and the app's own routes pass straight through.
+ * Real status codes for public roll.sh pages. Repo, owner and share pages stream (their data loads
+ * under Suspense), and once streaming starts the status is committed as 200. So the existence check
+ * runs here, before rendering: a missing owner, repo or share (`/agents/s/<id>`) is rewritten to a
+ * path no route matches, which renders `not-found.tsx` with a 404; a renamed repo gets a permanent
+ * redirect to its new name. Git traffic (`.git`, `info/refs`, `git-*-pack`) and the app's own
+ * routes pass straight through.
  */
 
 import { NextResponse, type NextRequest } from "next/server";
@@ -34,7 +35,41 @@ export function classify(pathname: string): Target {
   return { kind: "repo", owner, repo, rest };
 }
 
+/** The share a path is the page of (`/agents/s/<id>`), if any; not its preview image. */
+export function shareOf(pathname: string): string | null {
+  const m = /^\/agents\/s\/([^/]+)\/?$/.exec(pathname);
+  if (!m) return null;
+  try {
+    return decodeURIComponent(m[1]) || null;
+  } catch {
+    return null;
+  }
+}
+
+async function shareExists(request: NextRequest, id: string) {
+  let res: Response;
+  try {
+    res = await fetch(`${API}/v1/code/agents/shares/${encodeURIComponent(id)}`, { method: "HEAD", cache: "no-store" });
+  } catch {
+    return NextResponse.next();
+  }
+  return res.status === 404 ? NextResponse.rewrite(new URL(MISSING, request.url)) : NextResponse.next();
+}
+
+/**
+ * A repo's tab typed or linked as a path (`/dashboard/code/o/r/changes`): the repo page with that
+ * tab open (`#changes`). Only the change pages under `changes/<n>` are real routes.
+ */
+export function repoTab(pathname: string): string | null {
+  const m = /^(\/dashboard\/code\/[^/]+\/[^/]+)\/(overview|work|changes|queue|code|settings)\/?$/.exec(pathname);
+  return m ? `${m[1]}#${m[2]}` : null;
+}
+
 export async function proxy(request: NextRequest) {
+  const tab = repoTab(request.nextUrl.pathname);
+  if (tab) return NextResponse.redirect(new URL(tab, request.url), 307);
+  const share = shareOf(request.nextUrl.pathname);
+  if (share) return shareExists(request, share);
   const t = classify(request.nextUrl.pathname);
   if (!t) return NextResponse.next();
   const enc = encodeURIComponent;

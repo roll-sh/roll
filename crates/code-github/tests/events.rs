@@ -27,6 +27,7 @@ fn every_pull_request_action() {
         ("edited", PullRequestAction::Edited),
         ("ready_for_review", PullRequestAction::ReadyForReview),
         ("converted_to_draft", PullRequestAction::ConvertedToDraft),
+        ("review_requested", PullRequestAction::ReviewRequested),
     ] {
         let Event::PullRequest(pr) = Event::parse("pull_request", &with_action("pull_request_opened", action)).unwrap() else {
             panic!("{action}")
@@ -36,9 +37,38 @@ fn every_pull_request_action() {
         assert_eq!(d.github_pr, pr.number);
         assert!(!d.head_sha.is_empty() && !d.head_ref.is_empty());
     }
-    for ignored in ["labeled", "unlabeled", "assigned", "review_requested", "locked", "auto_merge_enabled", "enqueued"] {
+    for ignored in ["labeled", "unlabeled", "assigned", "locked", "auto_merge_enabled", "enqueued"] {
         assert!(matches!(Event::parse("pull_request", &with_action("pull_request_opened", ignored)).unwrap(), Event::Ignored { .. }), "{ignored}");
     }
+}
+
+#[test]
+fn review_requests_checks_and_statuses() {
+    let mut v = fixture("pull_request_opened");
+    v["action"] = "review_requested".into();
+    v["requested_reviewer"] = serde_json::json!({ "login": "ada", "id": 5, "type": "User" });
+    let Event::PullRequest(pr) = Event::parse("pull_request", &serde_json::to_vec(&v).unwrap()).unwrap() else { panic!() };
+    assert_eq!(pr.requested_reviewer.as_deref(), Some("ada"));
+    v.as_object_mut().unwrap().remove("requested_reviewer");
+    v["requested_team"] = serde_json::json!({ "slug": "core", "name": "Core" });
+    let Event::PullRequest(pr) = Event::parse("pull_request", &serde_json::to_vec(&v).unwrap()).unwrap() else { panic!() };
+    assert_eq!(pr.requested_reviewer.as_deref(), Some("core"));
+
+    let body = serde_json::to_vec(&fixture("check_run_completed")).unwrap();
+    let e = Event::parse("check_run", &body).unwrap();
+    assert_eq!(e.installation_id(), Some(42));
+    assert_eq!(e.repository().map(|r| r.full_name.as_str()), Some("acme/app"));
+    let Event::CheckRun(c) = e else { panic!() };
+    assert_eq!(c.check_run.conclusion.as_deref(), Some("failure"));
+    assert_eq!(c.check_run.pull_requests[0].number, 7);
+    assert_eq!(c.check_run.check_suite.unwrap().head_branch.as_deref(), Some("fix-login"));
+    // Only completed runs matter.
+    assert!(matches!(Event::parse("check_run", &with_action("check_run_completed", "created")).unwrap(), Event::Ignored { .. }));
+
+    let e = Event::parse("status", &serde_json::to_vec(&fixture("status_failure")).unwrap()).unwrap();
+    assert_eq!(e.installation_id(), Some(42));
+    let Event::Status(s) = e else { panic!() };
+    assert_eq!((s.state.as_str(), s.context.as_str(), s.branches[0].name.as_str()), ("failure", "ci/build", "main"));
 }
 
 #[test]
@@ -183,6 +213,8 @@ fn signature_header_forms() {
     let sig = sign(b"s", body);
     assert!(verify_signature(b"s", body, Some(&sig)));
     assert!(verify_signature(b"s", body, Some(&format!("  {sig} "))), "surrounding whitespace is fine");
+    assert!(!verify_signature(b"other", body, Some(&sig)), "another secret");
+    assert!(!verify_signature(b"s", br#"{"zen":"y"}"#, Some(&sig)), "a tampered body");
     assert!(!verify_signature(b"s", body, None));
     assert!(!verify_signature(b"s", body, Some(&sig.replace("sha256=", "sha1="))));
     assert!(!verify_signature(b"s", body, Some("sha256=zz")));
@@ -231,6 +263,23 @@ fn app_config_errors() {
     })
     .unwrap_err();
     assert!(err.to_string().contains("/nonexistent/key.pem"), "{err}");
+    // A pasted key's `\n`s are unescaped; a GHES API URL; the install link carries its state.
+    let c = AppConfig::from_lookup(|k| match k {
+        "ROLL_GITHUB_PRIVATE_KEY" => Some("-----BEGIN-----\\nabc\\n-----END-----".into()),
+        "ROLL_GITHUB_API_URL" => Some("https://ghe.example/api/v3/".into()),
+        "ROLL_GITHUB_WEB_URL" => None,
+        "ROLL_GITHUB_APP_SLUG" => Some("roll-code".into()),
+        k => full(k),
+    })
+    .unwrap()
+    .unwrap();
+    assert_eq!(c.private_key_pem, "-----BEGIN-----\nabc\n-----END-----");
+    assert_eq!(c.api_base, "https://ghe.example/api/v3");
+    assert_eq!(c.install_url(Some("a b")), "https://github.com/apps/roll-code/installations/new?state=a%20b");
+    assert_eq!(c.bot_login(), "roll-code[bot]");
+    // Nothing set: no App; a bad id is an error.
+    assert!(AppConfig::from_lookup(|_| None).unwrap().is_none());
+    assert!(AppConfig::from_lookup(|k| (k == "ROLL_GITHUB_APP_ID").then(|| "x".into())).is_err());
 }
 
 #[test]

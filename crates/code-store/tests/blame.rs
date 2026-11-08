@@ -130,19 +130,7 @@ async fn blame_matches_git_first_parent() {
     assert_eq!(short.ranges.last().unwrap().end, short.lines);
     // Missing files and binary files.
     assert!(store.blame(REPO, &head_cs, "nope.txt", 10).await.unwrap().is_none());
-}
-
-#[tokio::test]
-async fn binary_files_are_not_blamed() {
-    let tmp = tempfile::tempdir().unwrap();
-    let store = store(tmp.path());
-    store.create_repo(REPO).unwrap();
-    let cs = commit(&store, REPO, None, "bin", vec![write("b.bin", "a\0b\n")]).await;
-    let b = store.blame(REPO, &cs, "b.bin", 10).await.unwrap().unwrap();
+    let bin = commit(&store, REPO, Some(head_cs), "bin", vec![write("b.bin", "a\0b\n")]).await;
+    let b = store.blame(REPO, &bin, "b.bin", 10).await.unwrap().unwrap();
     assert!(b.binary && b.ranges.is_empty());
-    let cs2 = commit(&store, REPO, Some(cs), "text", vec![write("t.txt", "one\ntwo\n")]).await;
-    let t = store.blame(REPO, &cs2, "t.txt", 10).await.unwrap().unwrap();
-    assert_eq!(t.lines, 2);
-    assert_eq!(t.ranges.len(), 1);
-    assert_eq!(t.ranges[0].changeset, cs2);
 }

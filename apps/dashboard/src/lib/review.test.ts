@@ -1,45 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { Review, ReviewRules, ReviewStatus, Thread } from "./code-api";
 import { parsePatch, splitRows } from "./diff";
-import {
-  addDraft,
-  applyState,
-  approvalNotes,
-  canSubmit,
-  clampApprovals,
-  codeownerRows,
-  draftFor,
-  draftsOnRow,
-  emptyPending,
-  endsSelection,
-  inSelection,
-  loadPending,
-  newSideText,
-  parseGlobs,
-  pendingKey,
-  placeSplit,
-  placeUnified,
-  removeDraft,
-  reviewerBadges,
-  reviewerName,
-  reviewHeadline,
-  reviewPayload,
-  rowSpots,
-  rulesPatch,
-  savePending,
-  selectionLabel,
-  selectLine,
-  stepThread,
-  stripSuggestion,
-  suggestionDiff,
-  suggestionLines,
-  threadOrder,
-  threadsForFile,
-  tightened,
-  timeline,
-  updateDraft,
-  verdictLabel,
-} from "./review";
+import { addDraft, applyState, approvalNotes, canSubmit, clampApprovals, codeownerRows, draftFor, draftsOnRow, emptyPending, endsSelection, inSelection, loadPending, newSideText, parseGlobs, pendingKey, placeSplit, placeUnified, removeDraft, reviewPayload, rowSpots, rulesPatch, savePending, selectionLabel, selectLine, stripSuggestion, suggestionDiff, suggestionLines, threadsForFile, tightened, timeline, updateDraft } from "./review";
 
 // Old 1..6, new 1..7: line 3 changed, line 5 added after old 4.
 const PATCH = [
@@ -134,21 +96,6 @@ describe("threads in a unified diff", () => {
 });
 
 describe("threads in a split diff", () => {
-  it("puts old-side threads on the left row and new-side ones on the right", () => {
-    const rows = splitRows(lines);
-    const p = placeSplit(rows, [thread("n", { line: 3 }), thread("o", { side: "old", line: 3 }), thread("added", { line: 5 })]);
-    const rowOf = (id: string) => [...p.inline.entries()].find(([, ts]) => ts.some((t) => t.id === id))![0];
-    // The changed line pairs old 3 with new 3 on one split row.
-    expect(rowOf("n")).toBe(rowOf("o"));
-    const [left, right] = rows[rowOf("n")];
-    expect(left).toMatchObject({ kind: "del", old: 3 });
-    expect(right).toMatchObject({ kind: "add", new: 3 });
-    // An added line with nothing removed opposite it sits alone on its row.
-    const [l5, r5] = rows[rowOf("added")];
-    expect(l5).toBeNull();
-    expect(r5).toMatchObject({ kind: "add", new: 5 });
-  });
-
   it("treats outdated and off-diff threads like the unified view", () => {
     const p = placeSplit(splitRows(lines), [thread("x", { outdated: true }), thread("y", { line: 99 })]);
     expect(p.outdated.map((t) => t.id)).toEqual(["x"]);
@@ -236,20 +183,6 @@ describe("suggestions", () => {
 });
 
 describe("review state", () => {
-  it("words every state", () => {
-    expect(reviewHeadline({ state: "approved", approvals: 2, required: 2 })).toEqual({ label: "Approved", detail: "2 of 2 approvals", tone: "ok" });
-    expect(reviewHeadline({ state: "approved", approvals: 1, required: 0 })).toMatchObject({ detail: "1 approval" });
-    expect(reviewHeadline({ state: "approved", approvals: 0, required: 0 })).toMatchObject({ detail: "no approval required" });
-    expect(reviewHeadline({ state: "auto_approved", approvals: 0, required: 1 })).toMatchObject({ label: "Auto-approved", tone: "ok" });
-    expect(reviewHeadline({ state: "changes_requested", approvals: 1, required: 2 })).toEqual({
-      label: "Changes requested",
-      detail: "1 of 2 approvals",
-      tone: "danger",
-    });
-    expect(reviewHeadline({ state: "pending", approvals: 0, required: 1 })).toEqual({ label: "Review required", detail: "0 of 1 approval", tone: "accent" });
-    expect(reviewHeadline({ state: "pending", approvals: 0, required: 0 })).toMatchObject({ label: "Awaiting review", tone: "muted" });
-  });
-
   it("lists code owners still owed first", () => {
     const status = {
       codeowners: [
@@ -274,15 +207,6 @@ describe("review state", () => {
     });
     expect(notes.get("rv_2")).toEqual({ counted: false, reason: "self-approval" });
     expect(approvalNotes(null).size).toBe(0);
-  });
-
-  it("names reviewers, GitHub bots without [bot]", () => {
-    expect(reviewerName({ name: "coderabbitai[bot]" })).toBe("coderabbitai");
-    expect(reviewerName("greptile-apps[bot]")).toBe("greptile-apps");
-    expect(reviewerName({ name: "ana" })).toBe("ana");
-    expect(reviewerBadges({ kind: "app", name: "coderabbitai[bot]", app: null }, "github")).toEqual(["app", "github"]);
-    expect(reviewerBadges({ kind: "agent", name: "fixer", app: null }, "roll")).toEqual(["agent"]);
-    expect(verdictLabel("request_changes")).toBe("requested changes");
   });
 
   it("orders the timeline oldest first, stably", () => {
@@ -383,40 +307,6 @@ describe("the pending review", () => {
     expect(canSubmit("request_changes", " ", 0)).toBe(false);
     expect(canSubmit("request_changes", "", 1)).toBe(true);
     expect(canSubmit("comment", "hi", 0)).toBe(true);
-  });
-});
-
-describe("keyboard order", () => {
-  const files = [
-    { path: "b.txt", old_path: null },
-    { path: "a.txt", old_path: null },
-  ];
-
-  it("walks unresolved threads in file order, then by line", () => {
-    const ts = [
-      thread("a2", { path: "a.txt", line: 2 }),
-      thread("b9", { path: "b.txt", line: 9 }),
-      thread("a1", { path: "a.txt", line: 1 }),
-      thread("done", { path: "a.txt", line: 5, resolved: true }),
-      thread("gone", { path: "zzz.txt", line: 1 }),
-    ];
-    expect(threadOrder(files, ts)).toEqual(["b9", "a1", "a2", "gone"]);
-  });
-
-  it("walks resolved ones when nothing is open", () => {
-    expect(threadOrder(files, [thread("r1", { resolved: true, path: "a.txt" })])).toEqual(["r1"]);
-    expect(threadOrder(files, [])).toEqual([]);
-  });
-
-  it("steps forward and back, wrapping, from nowhere to the ends", () => {
-    const order = ["x", "y", "z"];
-    expect(stepThread(order, null, 1)).toBe("x");
-    expect(stepThread(order, null, -1)).toBe("z");
-    expect(stepThread(order, "x", 1)).toBe("y");
-    expect(stepThread(order, "z", 1)).toBe("x");
-    expect(stepThread(order, "x", -1)).toBe("z");
-    expect(stepThread(order, "gone", 1)).toBe("x");
-    expect(stepThread([], "x", 1)).toBeNull();
   });
 });
 

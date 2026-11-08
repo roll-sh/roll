@@ -625,6 +625,15 @@ impl Code {
         Ok(v)
     }
 
+    /// Whether anything requires a review on `r` (so a direct land on its default branch becomes a
+    /// change instead), before there's a changeset to ask [`direct_land_blockers`] about.
+    pub(crate) async fn direct_lands_need_review(&self, r: &RepoRow) -> Result<bool> {
+        let cfg = self.review_config(r).await;
+        let rules = self.effective_rules(&r.id, &cfg)?;
+        let owners_needed = rules.require_codeowners && !cfg.codeowners.rules.is_empty();
+        Ok(rules.required_approvals > 0 || owners_needed || self.apps_for_repo(r)?.iter().any(|a| a.required && a.active))
+    }
+
     /// Landing straight on `r`'s default branch (not through a change): the review blockers it
     /// would have as a change nobody reviewed yet. Empty when nothing requires a review.
     pub(crate) async fn direct_land_blockers(&self, r: &RepoRow, cs: &ChangesetId) -> Result<Vec<Blocker>> {

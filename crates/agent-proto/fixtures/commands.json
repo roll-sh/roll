@@ -1,0 +1,579 @@
+[
+  {
+    "type": "project.add",
+    "path": "/home/ada/roll",
+    "clone": {
+      "owner": "acme",
+      "repo": "roll"
+    }
+  },
+  {
+    "type": "project.remove",
+    "project": "prj_1234567890abcdef"
+  },
+  {
+    "type": "project.update",
+    "project": "prj_1234567890abcdef",
+    "name": "roll",
+    "settings": {
+      "auto_pull": true,
+      "auto_settle": {
+        "after_days": 3,
+        "on_land": true
+      }
+    }
+  },
+  {
+    "type": "project.update",
+    "project": "prj_1234567890abcdef",
+    "settings": {
+      "auto_pull": false,
+      "auto_settle": {
+        "after_days": 3,
+        "on_land": true
+      },
+      "color": "rose",
+      "icon": {
+        "kind": "emoji",
+        "emoji": "🦀"
+      }
+    }
+  },
+  {
+    "type": "project.update",
+    "project": "prj_1234567890abcdef",
+    "settings": {
+      "auto_pull": false,
+      "auto_settle": {
+        "after_days": 3,
+        "on_land": true
+      },
+      "icon": {
+        "kind": "monogram",
+        "text": "RO"
+      }
+    }
+  },
+  {
+    "type": "project.pull",
+    "project": "prj_1234567890abcdef"
+  },
+  {
+    "type": "project.cleanup",
+    "project": "prj_1234567890abcdef"
+  },
+  {
+    "type": "thread.create",
+    "project": "prj_1234567890abcdef",
+    "provider": "codex",
+    "model": "gpt-5.5-codex",
+    "effort": "high",
+    "options": {
+      "serviceTier": "fast"
+    },
+    "runtime_mode": "full_access",
+    "interaction_mode": "plan",
+    "worktree": true,
+    "prompt": "Add a --json flag to roll code status"
+  },
+  {
+    "type": "thread.create",
+    "project": "prj_1234567890abcdef",
+    "provider": "claude",
+    "model": "claude-opus-5-5",
+    "runtime_mode": "full_access",
+    "interaction_mode": "default",
+    "worktree": false,
+    "prompt": "Add dark mode to the settings page, with tests",
+    "orchestrator": true
+  },
+  {
+    "type": "thread.configure",
+    "thread": "thr_a1b2c3d4e5f60718",
+    "title": "Renamed",
+    "provider": "acp:gemini",
+    "options": {
+      "thinking": false
+    },
+    "runtime_mode": "ask"
+  },
+  {
+    "type": "thread.fork",
+    "thread": "thr_a1b2c3d4e5f60718",
+    "at": "run_0011223344556677",
+    "worktree": true
+  },
+  {
+    "type": "thread.archive",
+    "thread": "thr_a1b2c3d4e5f60718"
+  },
+  {
+    "type": "thread.unarchive",
+    "thread": "thr_a1b2c3d4e5f60718"
+  },
+  {
+    "type": "thread.delete",
+    "thread": "thr_a1b2c3d4e5f60718"
+  },
+  {
+    "type": "thread.settle",
+    "thread": "thr_a1b2c3d4e5f60718"
+  },
+  {
+    "type": "thread.unsettle",
+    "thread": "thr_a1b2c3d4e5f60718"
+  },
+  {
+    "type": "thread.unsettle",
+    "thread": "thr_a1b2c3d4e5f60718",
+    "restore": {
+      "settle": {
+        "state": "active",
+        "at": 1762000000000
+      },
+      "snooze": {
+        "until": 1762003600000,
+        "at": 1762000000000
+      }
+    }
+  },
+  {
+    "type": "thread.snooze",
+    "thread": "thr_a1b2c3d4e5f60718",
+    "until": 1762003600000
+  },
+  {
+    "type": "thread.unsnooze",
+    "thread": "thr_a1b2c3d4e5f60718"
+  },
+  {
+    "type": "thread.visit",
+    "thread": "thr_a1b2c3d4e5f60718"
+  },
+  {
+    "type": "thread.auto_settle",
+    "thread": "thr_a1b2c3d4e5f60718",
+    "enabled": false
+  },
+  {
+    "type": "thread.change_ended",
+    "thread": "thr_a1b2c3d4e5f60718",
+    "landed": true
+  },
+  {
+    "type": "message.send",
+    "thread": "thr_a1b2c3d4e5f60718",
+    "text": "also update the docs",
+    "mode": "steer"
+  },
+  {
+    "type": "message.unqueue",
+    "thread": "thr_a1b2c3d4e5f60718",
+    "message": "q1"
+  },
+  {
+    "type": "message.edit",
+    "thread": "thr_a1b2c3d4e5f60718",
+    "message": "q1",
+    "text": "and the changelog"
+  },
+  {
+    "type": "message.edit",
+    "thread": "thr_a1b2c3d4e5f60718",
+    "message": "q1",
+    "text": "no images",
+    "attachments": []
+  },
+  {
+    "type": "message.reorder",
+    "thread": "thr_a1b2c3d4e5f60718",
+    "message": "q2",
+    "before": "q1"
+  },
+  {
+    "type": "message.reorder",
+    "thread": "thr_a1b2c3d4e5f60718",
+    "message": "q1"
+  },
+  {
+    "type": "message.promote",
+    "thread": "thr_a1b2c3d4e5f60718",
+    "message": "q1"
+  },
+  {
+    "type": "run.interrupt",
+    "thread": "thr_a1b2c3d4e5f60718"
+  },
+  {
+    "type": "request.respond",
+    "request": "req_8899aabbccddeeff",
+    "response": {
+      "type": "decision",
+      "decision": "decline",
+      "message": "use the fake runner"
+    }
+  },
+  {
+    "type": "checkpoint.rollback",
+    "thread": "thr_a1b2c3d4e5f60718",
+    "checkpoint": "chk_0f0f0f0f0f0f0f0f"
+  },
+  {
+    "type": "thread.publish",
+    "thread": "thr_a1b2c3d4e5f60718",
+    "message": "Fix the flaky queue test",
+    "land": true
+  },
+  {
+    "type": "terminal.open",
+    "project": "prj_1234567890abcdef",
+    "command": "claude /login",
+    "cols": 120,
+    "rows": 32
+  },
+  {
+    "type": "terminal.open",
+    "thread": "thr_a1b2c3d4e5f60718",
+    "script": "test",
+    "cols": 120,
+    "rows": 32
+  },
+  {
+    "type": "terminal.input",
+    "terminal": "trm_7777777777777777",
+    "data": "bHMK"
+  },
+  {
+    "type": "terminal.resize",
+    "terminal": "trm_7777777777777777",
+    "cols": 100,
+    "rows": 30
+  },
+  {
+    "type": "terminal.close",
+    "terminal": "trm_7777777777777777"
+  },
+  {
+    "type": "provider.refresh"
+  },
+  {
+    "type": "machine.configure",
+    "settings": {
+      "providers": {
+        "claude": {
+          "binary": "/opt/claude/bin/claude",
+          "args": [
+            "--verbose"
+          ],
+          "env": {
+            "CLAUDE_CONFIG_DIR": "/Users/ada/.claude-work"
+          },
+          "models": [
+            {
+              "id": "claude-opus-5-5[1m]",
+              "name": "Opus 5.5 (1M)"
+            },
+            {
+              "id": "claude-opus-5-5-preview",
+              "options": [
+                {
+                  "type": "select",
+                  "id": "effort",
+                  "label": "Reasoning",
+                  "choices": [
+                    {
+                      "id": "low",
+                      "label": "Low"
+                    },
+                    {
+                      "id": "high",
+                      "label": "High"
+                    }
+                  ],
+                  "default": "high",
+                  "role": "reasoning"
+                }
+              ]
+            }
+          ],
+          "auto_compact_window": 300000,
+          "idle_compaction": "before_cache_expires"
+        },
+        "codex": {
+          "enabled": false
+        }
+      },
+      "defaults": {
+        "provider": "claude",
+        "runtime_mode": "auto_edit",
+        "worktree": true
+      },
+      "worktree_dir": "~/worktrees",
+      "branch_prefix": "ada",
+      "pull_every": 300,
+      "max_depth": 2,
+      "git_name": "Ada Lovelace",
+      "git_email": "ada@example.com",
+      "idle_compaction": "off"
+    }
+  },
+  {
+    "type": "endpoint.set",
+    "endpoint": {
+      "id": "cliproxy",
+      "name": "CLIProxyAPI",
+      "kind": "cliproxy",
+      "base_url": "http://100.64.0.7:8317",
+      "providers": [
+        "claude",
+        "codex"
+      ]
+    },
+    "key": {
+      "type": "set",
+      "sealed": {
+        "v": 1,
+        "epk": "3p7bfXt9wbTTW2HC7OQ1Nz-DQ8hbeGdNrfx-FG-IK08",
+        "nonce": "AAECAwQFBgcICQoL",
+        "ct": "bm90IGEgcmVhbCBrZXksIGp1c3QgYSBzaGFwZQ"
+      }
+    }
+  },
+  {
+    "type": "endpoint.set",
+    "endpoint": {
+      "id": "cliproxy",
+      "name": "CLIProxyAPI",
+      "kind": "cliproxy",
+      "base_url": "http://100.64.0.7:8317",
+      "providers": [
+        "claude"
+      ]
+    }
+  },
+  {
+    "type": "endpoint.set",
+    "endpoint": {
+      "id": "cliproxy",
+      "name": "CLIProxyAPI",
+      "kind": "cliproxy",
+      "base_url": "http://100.64.0.7:8317",
+      "providers": [
+        "claude",
+        "codex"
+      ]
+    },
+    "key": {
+      "type": "clear"
+    }
+  },
+  {
+    "type": "endpoint.remove",
+    "endpoint": "cliproxy"
+  },
+  {
+    "type": "endpoint.check",
+    "endpoint": "cliproxy"
+  },
+  {
+    "type": "gateway.configure",
+    "settings": {
+      "enabled": true,
+      "port": 8790,
+      "listen": [
+        "100.64.0.10"
+      ],
+      "upstreams": [
+        {
+          "id": "anthropic",
+          "name": "Anthropic",
+          "kind": "anthropic"
+        },
+        {
+          "id": "bedrock",
+          "name": "Amazon Bedrock",
+          "kind": "bedrock",
+          "region": "us-east-1",
+          "models": [
+            "anthropic.claude-*"
+          ],
+          "key_ref": "op://Dev/Bedrock/credential"
+        },
+        {
+          "id": "vertex",
+          "name": "Google Vertex AI",
+          "kind": "vertex",
+          "region": "us-east5",
+          "project": "acme-ai",
+          "disabled": true
+        },
+        {
+          "id": "openrouter",
+          "name": "OpenRouter",
+          "kind": "openrouter",
+          "headers": [
+            [
+              "http-referer",
+              "https://roll.sh"
+            ]
+          ]
+        },
+        {
+          "id": "azure",
+          "name": "Azure OpenAI",
+          "kind": "azure_openai",
+          "base_url": "https://acme.openai.azure.com"
+        },
+        {
+          "id": "compat",
+          "name": "Anthropic-compatible",
+          "kind": "anthropic_compatible",
+          "base_url": "https://gw.example.com"
+        },
+        {
+          "id": "openai",
+          "name": "OpenAI",
+          "kind": "openai",
+          "base_url": "https://api.openai.com/v1"
+        },
+        {
+          "id": "local",
+          "name": "OpenAI-compatible",
+          "kind": "openai_compatible",
+          "base_url": "http://127.0.0.1:11434/v1",
+          "models": [
+            "qwen3-coder*"
+          ],
+          "responses": true,
+          "allow_private": true
+        }
+      ],
+      "routes": [
+        {
+          "model": "fast",
+          "targets": [
+            {
+              "upstream": "anthropic",
+              "model": "claude-haiku-4-5"
+            },
+            {
+              "upstream": "bedrock",
+              "model": "anthropic.claude-haiku-4-5"
+            }
+          ]
+        }
+      ],
+      "prices": [
+        {
+          "model": "qwen3-coder*",
+          "input": 0,
+          "output": 0,
+          "cache_read": 0,
+          "cache_write": 0
+        }
+      ],
+      "log_bodies": true,
+      "affinity": false,
+      "retention_days": 90
+    }
+  },
+  {
+    "type": "gateway.key",
+    "upstream": "anthropic",
+    "key": {
+      "type": "set",
+      "sealed": {
+        "v": 1,
+        "epk": "3p7bfXt9wbTTW2HC7OQ1Nz-DQ8hbeGdNrfx-FG-IK08",
+        "nonce": "AAECAwQFBgcICQoL",
+        "ct": "bm90IGEgcmVhbCBrZXksIGp1c3QgYSBzaGFwZQ"
+      }
+    }
+  },
+  {
+    "type": "gateway.key",
+    "upstream": "openrouter",
+    "key": {
+      "type": "clear"
+    }
+  },
+  {
+    "type": "gateway.client.issue",
+    "name": "Ada's sandbox",
+    "machine": "mch_fedcba0987654321",
+    "seal_key": "hSDwCYkwp1R0i33ctD73Wg2_Og0mOBr066SpjqqbTmo"
+  },
+  {
+    "type": "gateway.client.revoke",
+    "client": "gwc_5f1d2c3b4a596877"
+  },
+  {
+    "type": "gateway.test"
+  },
+  {
+    "type": "gateway.test",
+    "upstream": "anthropic"
+  },
+  {
+    "type": "gateway.remove"
+  },
+  {
+    "type": "gateway.status"
+  },
+  {
+    "type": "gateway.usage",
+    "from": 1761395200000,
+    "to": 1762000000000,
+    "by": "machine",
+    "bucket": "day"
+  },
+  {
+    "type": "gateway.log",
+    "after": 41,
+    "limit": 50,
+    "errors": true
+  },
+  {
+    "type": "gateway.log.body",
+    "seq": 42
+  },
+  {
+    "type": "registry.install",
+    "agent": "goose"
+  },
+  {
+    "type": "registry.remove",
+    "agent": "goose"
+  },
+  {
+    "type": "diff.get",
+    "thread": "thr_a1b2c3d4e5f60718",
+    "run": "run_0011223344556677"
+  },
+  {
+    "type": "fs.list",
+    "path": "/home/ada"
+  },
+  {
+    "type": "fs.read",
+    "project": "prj_1234567890abcdef",
+    "path": "README.md"
+  },
+  {
+    "type": "fs.write",
+    "thread": "thr_a1b2c3d4e5f60718",
+    "path": "docs/plans/fix-the-queue.md",
+    "text": "# Fix the queue\n"
+  },
+  {
+    "type": "git.status",
+    "thread": "thr_a1b2c3d4e5f60718"
+  },
+  {
+    "type": "terminal.scrollback",
+    "terminal": "trm_7777777777777777"
+  },
+  {
+    "type": "registry.list"
+  }
+]

@@ -142,11 +142,18 @@ code-cluster = { path = "crates/code-cluster" }
 code-store = { path = "crates/code-store" }
 code-git = { path = "crates/code-git" }
 code-github = { path = "crates/code-github" }
+code-chat = { path = "crates/code-chat" }
 code-control = { path = "crates/code-control" }
 code-preview = { path = "crates/code-preview" }
 code-index = { path = "crates/code-index" }
 code-review = { path = "crates/code-review" }
+agent-proto = { path = "crates/agent-proto" }
+agent-host = { path = "crates/agent-host" }
+model-gateway = { path = "crates/model-gateway" }
 aes-gcm = "0.10"
+# Endpoint keys sealed to a daemon (agent-host `endpoints.rs`): X25519 and HKDF.
+curve25519-dalek = "4"
+hkdf = "0.12"
 toml = "1"
 http-body-util = "0.1"
 http-body = "1"
@@ -182,6 +189,9 @@ s3-select = { path = "crates/s3-select" }
 s3-api = { path = "crates/s3-api" }
 # S3 Select: BZIP2 input (pure Rust, libbz2-rs-sys).
 bzip2 = "0.6"
+# roll code agents: ACP registry archives (agent-host/src/registry/archive.rs), unpacked in Rust.
+tar = { version = "0.4", default-features = false }
+zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
 # Image transformations (s3-image): decoders (JPEG via zune-jpeg, PNG, GIF, WebP: pure Rust), SIMD
 # resizing, a pure-Rust JPEG encoder, libwebp for lossy WebP (C, vendored and statically linked:
 # there's no pure-Rust lossy WebP encoder under a usable licence), AVIF encoding via rav1e.

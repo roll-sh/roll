@@ -3,7 +3,6 @@
 import { RollLogo } from "@roll/brand";
 import {
   Activity,
-  ChevronsUpDown,
   Database,
   GitBranch,
   Globe,
@@ -25,6 +24,9 @@ import {
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { Suspense, useEffect, useState, type ReactNode } from "react";
+import { AgentsControl } from "./agents/agents-control";
+import { useShownOwner } from "./agents/use-connection";
+import { OwnerSwitcher } from "./agents/owner-switcher";
 import { AskPanel } from "./ask";
 import { useMarkState } from "./mark-state";
 
@@ -46,14 +48,20 @@ const nav = [
   { label: "Settings", icon: Settings },
 ];
 
-/** Sidebar, top bar and the ⌘K "Ask roll" palette shared by every dashboard page. */
-export function AppShell({ crumb, actions, children }: { crumb: ReactNode; actions?: ReactNode; children: ReactNode }) {
+/**
+ * Sidebar, top bar and the ⌘K "Ask roll" palette shared by every dashboard page. The top bar
+ * holds the agents (running, waiting, "New agent"; ⌘J opens them over the page). `bleed` gives
+ * the page the whole area under the top bar instead of the centred column.
+ */
+export function AppShell({ crumb, actions, bleed = false, children }: { crumb: ReactNode; actions?: ReactNode; bleed?: boolean; children: ReactNode }) {
   const { state } = useMarkState();
+  const shown = useShownOwner();
   const [paletteOpen, setPaletteOpen] = useState(false);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+      // The agents take ⌘K for their own palette while they're showing (they call preventDefault).
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k" && !e.defaultPrevented) {
         e.preventDefault();
         setPaletteOpen((o) => !o);
       }
@@ -65,16 +73,24 @@ export function AppShell({ crumb, actions, children }: { crumb: ReactNode; actio
 
   return (
     <LucideProvider strokeWidth={1.5}>
-      <div className="flex min-h-svh">
+      <div className={`flex ${bleed ? "h-svh overflow-hidden" : "min-h-svh"}`}>
         <aside className="sticky top-0 hidden h-svh w-60 shrink-0 flex-col border-r border-line bg-panel px-3 py-4 md:flex">
           <Link href="/" className="px-2 py-1" aria-label="roll home">
             <RollLogo state={state} size={19} />
           </Link>
-          <button className="mt-5 flex items-center gap-2 rounded-lg border border-line px-2.5 py-2 text-left text-[13px] hover:border-line-2">
-            <span className="grid size-5 place-items-center rounded bg-accent text-[10px] font-bold text-white">A</span>
-            <span className="flex-1">acme</span>
-            <ChevronsUpDown className="size-3.5 text-subtle" />
-          </button>
+          {shown?.admin && shown.owner ? (
+            // An admin works as any owner: which one shows, everywhere.
+            <div className="mt-5">
+              <OwnerSwitcher owner={shown.owner} />
+              <p className="mt-1 px-1 text-[11px] text-subtle">Signed in as admin</p>
+            </div>
+          ) : (
+            <div className="mt-5 flex items-center gap-2 rounded-lg border border-line px-2.5 py-2 text-left text-[13px]" title={shown?.admin ? "Signed in as admin" : undefined}>
+              <span className="grid size-5 place-items-center rounded bg-accent text-[10px] font-bold text-white uppercase">{shown?.owner?.[0] ?? "·"}</span>
+              <span className={`min-w-0 flex-1 truncate ${shown?.owner ? "" : "text-muted"}`}>{shown === undefined ? "" : (shown.owner ?? "Signed out")}</span>
+              {shown?.admin && <span className="text-[11px] text-subtle">admin</span>}
+            </div>
+          )}
           <Suspense fallback={<Nav pathname={null} />}>
             <CurrentNav />
           </Suspense>
@@ -87,20 +103,32 @@ export function AppShell({ crumb, actions, children }: { crumb: ReactNode; actio
               <RollLogo state={state} size={17} />
             </span>
             <span className="hidden text-[13px] text-muted sm:inline">
-              acme <span className="text-subtle">/</span> <span className="text-fg">{crumb}</span>
+              {shown?.owner && (
+                <>
+                  {shown.owner} <span className="text-subtle">/</span>{" "}
+                </>
+              )}
+              <span className="text-fg">{crumb}</span>
             </span>
             <button
               onClick={() => setPaletteOpen(true)}
-              className="ml-auto flex w-full max-w-xs items-center gap-2 rounded-lg border border-line bg-panel px-3 py-1.5 text-[13px] text-subtle hover:border-line-2"
+              aria-label="Ask roll"
+              className="ml-auto flex w-full max-w-xs min-w-0 items-center gap-2 rounded-lg border border-line bg-panel px-3 py-1.5 text-[13px] text-subtle hover:border-line-2 max-sm:w-auto max-sm:shrink-0 max-sm:px-2"
             >
-              <Search className="size-3.5" />
-              <span className="flex-1 text-left">Ask roll…</span>
-              <kbd className="rounded border border-line px-1.5 font-mono text-[10px]">⌘K</kbd>
+              <Search className="size-3.5 shrink-0" />
+              <span className="flex-1 truncate text-left max-sm:hidden">Ask roll…</span>
+              <kbd className="rounded border border-line px-1.5 font-mono text-[10px] max-sm:hidden">⌘K</kbd>
             </button>
-            {actions}
+            <AgentsControl />
+            {/* A page's buttons (Review, Land, sign-in) scroll sideways on a phone rather than widen the page. */}
+            <span className="flex min-w-0 shrink items-center gap-2 overflow-x-auto [scrollbar-width:none]">{actions}</span>
           </header>
 
-          <main className="mx-auto w-full max-w-6xl flex-1 px-4 py-8">{children}</main>
+          {bleed ? (
+            <main className="relative min-h-0 flex-1">{children}</main>
+          ) : (
+            <main className="mx-auto w-full max-w-6xl flex-1 px-4 py-8">{children}</main>
+          )}
         </div>
 
         {paletteOpen && (

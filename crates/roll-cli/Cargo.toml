@@ -15,7 +15,11 @@ path = "src/main.rs"
 roll-server-tests = ["dep:nosql-engine", "dep:nosql-server", "dep:nosql-storage"]
 
 [dependencies]
+agent-host.workspace = true
+agent-proto.workspace = true
 libc.workspace = true
+# `roll gateway`: the standalone model gateway.
+model-gateway.workspace = true
 anyhow.workspace = true
 base64.workspace = true
 bytes.workspace = true
@@ -27,9 +31,11 @@ nosql-proto = { workspace = true, features = ["client"] }
 nosql-server = { workspace = true, optional = true }
 nosql-storage = { workspace = true, optional = true }
 nosql-types.workspace = true
-reqwest = { workspace = true, features = ["stream"] }
+# rustls: the released CLI talks to https://api.roll.sh (dev-dependencies hid that it had no TLS).
+reqwest = { workspace = true, features = ["stream", "rustls"] }
 rustls-pemfile.workspace = true
 rustyline.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
 tokio.workspace = true
@@ -40,7 +46,9 @@ urlencoding.workspace = true
 
 [dev-dependencies]
 axum.workspace = true
+code-chat.workspace = true
 code-control.workspace = true
+code-sql.workspace = true
 pg-storage.workspace = true
 tempfile.workspace = true
 aws-sdk-s3.workspace = true

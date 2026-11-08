@@ -10,12 +10,12 @@
 //! - [`notify`] reports back: landed PRs are commented on and closed, finished issues closed,
 //!   and checks become check runs.
 
-mod commands;
+pub(crate) mod commands;
 pub(crate) mod inbox;
-mod mirror;
+pub(crate) mod mirror;
 mod notify;
 mod reviews;
-mod sync;
+pub(crate) mod sync;
 
 pub use sync::webhook;
 

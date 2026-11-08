@@ -50,8 +50,8 @@ export interface SseOptions {
   fetch?: typeof fetch;
 }
 
-/** Follow `url` until the returned function is called. */
-export function streamSse(url: string, opts: SseOptions): () => void {
+/** Follow `url` until the returned function is called. A function is asked again on every reconnect. */
+export function streamSse(url: string | (() => string), opts: SseOptions): () => void {
   const ctrl = new AbortController();
   const backoff = opts.backoff ?? [500, 1000, 2000, 5000, 10000];
   const doFetch = opts.fetch ?? fetch;
@@ -59,7 +59,7 @@ export function streamSse(url: string, opts: SseOptions): () => void {
   (async () => {
     while (!ctrl.signal.aborted) {
       try {
-        const res = await doFetch(url, { headers: { accept: "text/event-stream", ...opts.headers?.() }, signal: ctrl.signal, cache: "no-store" });
+        const res = await doFetch(typeof url === "function" ? url() : url, { headers: { accept: "text/event-stream", ...opts.headers?.() }, signal: ctrl.signal, cache: "no-store" });
         if (!res.ok || !res.body) throw new Error(`${res.status}`);
         opts.onOpen?.(true);
         attempt = 0;

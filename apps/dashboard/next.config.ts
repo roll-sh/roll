@@ -13,7 +13,13 @@ const devOrigins = (process.env.ROLL_DEV_ORIGINS ?? "")
 const nextConfig: NextConfig = {
   cacheComponents: true,
   partialPrefetching: true,
+  // The dev tools' "N" badge and its pill sat on the canvas's prompt bar (bottom left), looking
+  // like part of it. Errors still open the overlay.
+  devIndicators: false,
   ...(devOrigins.length > 0 ? { allowedDevOrigins: devOrigins } : {}),
+  // The end to end tests' build (scripts/agents-e2e.mjs) skips Next's own type check: the gates run
+  // `pnpm typecheck` over the same files. Every other build still checks.
+  ...(process.env.ROLL_NEXT_SKIP_TYPECHECK === "1" ? { typescript: { ignoreBuildErrors: true } } : {}),
   turbopack: {
     rules: {
       "*.css": {

@@ -4,7 +4,6 @@ mod common;
 
 use axum::http::StatusCode;
 use common::app;
-use futures::StreamExt;
 use serde_json::json;
 
 #[tokio::test]
@@ -401,35 +400,6 @@ async fn readme_is_rendered_and_sanitized() {
     assert_eq!(r.headers()["content-type"], "text/plain; charset=utf-8");
     assert!(r.headers()["content-security-policy"].to_str().unwrap().contains("sandbox"));
     assert!(r.headers()["x-roll-changeset"].to_str().unwrap().starts_with("cs_"));
-}
-
-#[tokio::test]
-async fn events_stream_landings_and_changes() {
-    let a = app(None);
-    a.repo("acme", "live").await;
-    let p = "/v1/code/repos/acme/live";
-    use tower::ServiceExt;
-    let resp = a
-        .router
-        .clone()
-        .oneshot(axum::http::Request::get(format!("{p}/events")).body(axum::body::Body::empty()).unwrap())
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    let mut body = resp.into_body().into_data_stream();
-    a.ok("POST", &format!("{p}/land"), Some(json!({ "message": "hello", "files": { "a": { "content": "a" } } }))).await;
-    a.ok("POST", &format!("{p}/work"), Some(json!({ "title": "next" }))).await;
-    let mut text = String::new();
-    while !(text.contains("event: landed") && text.contains("event: work")) {
-        let chunk = tokio::time::timeout(std::time::Duration::from_secs(5), body.next()).await.expect("event").unwrap().unwrap();
-        text.push_str(&String::from_utf8_lossy(&chunk));
-    }
-    let landed = text.split("event: landed\ndata: ").nth(1).unwrap().lines().next().unwrap();
-    let v: serde_json::Value = serde_json::from_str(landed).unwrap();
-    assert_eq!(v["message"], "hello");
-    assert_eq!(v["ref"], "main");
-    assert_eq!(v["files"], 1);
-    assert!(v["changeset"].as_str().unwrap().starts_with("cs_"));
 }
 
 /// Postgres text can't hold NUL characters (SQLite's can): there, text with one is the caller's

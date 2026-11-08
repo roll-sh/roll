@@ -34,6 +34,10 @@ Monorepo for roll, serverless infrastructure. Use pnpm for the web side (`apps/*
   - Body text is 13–14px in the dashboard.
 - Icons are `lucide-react` at 14–16px with a 1.5 stroke.
 - Spacing is generous. Panels are flat (`bg-panel`, 1px border, radius 8–12) with no drop shadows.
+- **Exception: the agents surface** (popup, `/dashboard/agents`, desktop Agents window). At the
+  user's request it has layered surfaces, soft shadows on floating things, glass popovers and
+  Linear-style weights. Its rules are in `docs/code/agents-design.md`. Everything else above still
+  applies there (accent, no orange, Horizon, motion).
 
 ## Motion and interactivity
 
@@ -211,17 +215,28 @@ The product should feel alive: dots react to the cursor and the marks "think". E
   - Public pages stream, so `apps/dashboard/src/proxy.ts` checks that the owner or repo exists
     before rendering. That gives real 404s and 308s for renamed repos. Keep the check there,
     not in the pages.
-  - After touching anything code-related, run `pnpm test:code`. It skips itself when nothing
-    relevant changed, and it runs:
-    - the dashboard's vitest suite
-    - the Docker preview tests
-    - 40,000 merges in release
-    - 2,000 changes through the merge queue
-  - Every feature gets a test. `docs/code/test-coverage.md` maps features to tests; update it
-    when you add either. `code-control/tests/coverage_map.rs` and `roll-cli`'s
-    `every_code_command_is_in_the_coverage_map` fail when a route, MCP tool, event or `roll code`
-    command has no row there, or a row names a test that doesn't exist. Put new tests in the
-    matching file:
+  - After touching anything code-related, run `pnpm test:code` (about a minute warm). Each part
+    skips itself when nothing it covers changed. By default it runs:
+    - clippy and the code crates' tests on SQLite, including a small merge-queue throughput run
+    - `roll code` against a live API
+    - typecheck and the dashboard's and desktop's tests (shared with `test:agents`)
+
+    The slow suites are opt-in. Run them before a PR to `main` merges, and after touching the
+    subsystem they cover:
+    - `--docker`: the stores on Postgres (after touching SQL, `code-sql` or the cluster), checks
+      and previews in real Docker (after touching `code-preview`), and the cluster as real
+      `rolld` containers (after touching `code-cluster` or `cluster.rs`)
+    - `--stress`: 40,000 merges in release and 2,000 changes through the merge queue (after
+      touching the lander, `Store::advance` or the queue)
+  - Local gates share one cargo package set (`scripts/lib/gate.sh`) so nothing builds twice. A
+    new gate or suite uses it rather than its own `cargo test -p` calls.
+  - A test is added when it guards behaviour a person relies on and nothing else covers it: one
+    per flow, not one per fix, and never for copy, layout, focus or animation details. The merge
+    gate (`.github/workflows/ci.yml`) must finish in under a minute.
+    `docs/code/test-coverage.md` maps features to tests; update it when you add or remove either.
+    `code-control/tests/coverage_map.rs` and `roll-cli`'s `every_code_command_is_in_the_coverage_map`
+    fail when a route, MCP tool, event or `roll code` command has no row there, or a row names a
+    test that doesn't exist. Put new tests in the matching file:
     - storage and landing: `code-store/tests/{lander,store,roundtrip,advance}.rs`
     - the merge queue, reverts and bisecting: `code-control/tests/queue.rs` (fake runner)
     - work trees: `code-store/tests/checkout.rs` and `code-control/tests/checkout.rs`
@@ -241,11 +256,86 @@ The product should feel alive: dots react to the cursor and the marks "think". E
     - HTTP statuses and the auth matrix for every route: `code-control/tests/routes.rs`
     - the cluster in one process: `code-control/tests/cluster.rs`; as real `rolld` containers
       in Docker (kills, rolling restarts, Postgres restarts under load):
-      `rolld/tests/code_cluster_e2e.rs` (`ROLL_E2E=1`; the image is `deploy/code/Dockerfile`)
+      `rolld/tests/code_cluster_e2e.rs` (`pnpm test:code --docker`; the image is `deploy/code/Dockerfile`)
     - event stream limits: `code-control/tests/streams.rs`
     - the cluster (several nodes in one process: routing, takeover, joining, draining):
       `code-control/tests/cluster.rs`
     - two nodes racing on one control database: `code-control/tests/concurrency.rs`
+- **Agents (roll code agents: the agent harness on a canvas):**
+  - The design is in `docs/code/agents.md`. It works like T3 Code (MIT; behavioural reference
+    for threads, runs, the execution-node tree, requests, checkpoints, forks, handoffs and
+    delegation), with every backend piece in Rust and the UI on a canvas in the dashboard.
+  - `crates/agent-proto` is the wire (no I/O). `crates/agent-host` is the daemon behind
+    `roll agent up` (orchestrator, SQLite store, git worktrees and checkpoints, PTYs, the
+    orchestrator MCP, the relay link, and the providers in `provider/{codex,claude,acp}`).
+    `crates/code-control/src/agents/` is the relay and `/v1/code/agents` (machines, device login,
+    the mirror, SSE, commands, grants, sandboxes, shares). `apps/dashboard` has them in the
+    header of every page, opening as a popup (canvas, conversations, new agent; no nav page), and
+    filling the window at `/dashboard/agents`; `apps/desktop` is the Electron shell (roll in its
+    main window, the agents in an Agents window).
+  - The daemon owns the truth for its machine; the relay only mirrors full records (upserts keyed
+    by id, newest `seq` wins) and forwards commands. Never make the relay decide thread state.
+  - Change a wire type in `agent-proto`, then regenerate the fixtures
+    (`ROLL_FIXTURES=write cargo test -p agent-proto`) and mirror it in
+    `apps/dashboard/src/lib/agents-api.ts`; the fixture tests on both sides fail until they agree.
+  - Command ids are idempotency keys: a daemon never runs one twice. Commands that write records
+    reply only after those records are stored.
+  - Adapters own no roll ids: they turn the provider's native protocol into `ProviderEvent`s and
+    are tested by replaying recorded transcripts through a fake binary. No test calls a real model
+    or needs a provider login.
+  - The daemon runs the user's own installed provider CLIs with their own logins. Never read, copy,
+    relay in the clear or pool a provider credential (no subscription proxying). Endpoints (a base
+    URL and a key: CLIProxyAPI, a gateway) can be set from roll per machine (docs/code/agents.md,
+    "Endpoints"): the browser seals the key to that daemon's `seal_key` (`lib/agents-seal.ts`), the
+    relay only checks the box's shape and forwards it (never stores, logs or returns a key), and only
+    the daemon opens it, keeps it in `agent.db` (0600) and gives it to the processes of the providers
+    that use the endpoint (never terminals, records or `hello`). Owner endpoint profiles on the relay
+    never hold a key, and nothing is shared across owners. Keys may also come from `config.toml`, a
+    sandbox's sealed env, or a 1Password reference the daemon reads on the machine.
+  - Machine tokens (`rlm_…`) only open the relay link; code access is a per-command, one-repo,
+    short-lived grant (`rlg_…`). Both are looked up on every use, never cached.
+  - Checkpoints use a private `GIT_INDEX_FILE` under `refs/roll/checkpoints/`: never touch the
+    user's index, HEAD or working files outside a rollback the user asked for.
+  - Canvas motion follows the rules above: one canvas engine, calm accent pulses only on busy
+    work, reduced motion honoured.
+  - The agents surface has its own design system, `docs/code/agents-design.md` (the user's
+    request, overriding "quieter, no shadows" inside it only):
+    - Linear's inverted L: chrome flush on the base, the canvas an inset panel, a floating sheet.
+    - A near-black ladder, with tokens under `[data-agents]` in globals.css.
+    - Translucent hairlines with a top highlight, and deep shadows on what floats.
+    - Use its tokens (`bg-canvas`, `bg-sheet`, `shadow-pop`, `inset-shadow-highlight`, `glass`…),
+      never raw colours or shadows.
+    - The accent stays `#4c8dff`. No orange, no decorative gradients. The Horizon mark is in the
+      header.
+    - The conversation (transcript, work log, composer, requests) behaves and moves like T3
+      Code's chat (popups scale from their trigger, disclosures animate their height, sheets
+      slide in, 150–300 ms, reduced motion honoured); its components name the T3 files they
+      follow.
+  - The gateway (docs/code/gateway.md): `crates/model-gateway` is roll's model gateway (Messages,
+    Chat and Responses in; the owner's API-key upstreams out; translation, failover, client keys,
+    usage). One machine's daemon runs it in-process (`agent-host/src/gateway.rs`), managed only by
+    `gateway.*` commands (no management HTTP API); members join through the relay
+    (`code-control/src/agents/gateway.rs`) with a client key sealed straight to them. Never: a
+    consumer-subscription login as an upstream, a client presented as another, or another key of
+    the same provider after a 429. Every place a machine uses it shows `GatewayNotice` (its
+    requests go out from the gateway's computer).
+  - Chat ops (docs/code/chatops.md): `crates/code-chat` is the Slack and Discord wire (no roll
+    types); `crates/code-control/src/chatops/` holds installs, the action queue, bindings, and the
+    `slack`/`discord`/`github` triggers and steps. A platform's request is verified (signature and
+    timestamp), then recorded in `chat_actions` by the platform's own id, before it's acknowledged.
+    Answers and steers act as the automation that bound the chat thread, through the API
+    (`Code::automation_api`), never by calling the relay directly. Only the install's members may drive
+    roll from a workspace. GitHub comments count only from `OWNER`/`MEMBER`/`COLLABORATOR`, and a
+    fork's pull request counts only after `approve-run`. Tests: `code-control/tests/chatops.rs`,
+    `github.rs` (`automations_*`), `roll-cli/tests/agent.rs::a_slack_button_answers_the_fake_providers_approval`.
+  - After touching anything agents-related, run `pnpm test:agents` (its Rust, web and end-to-end
+    parts each skip themselves when nothing they cover changed; the end-to-end run builds the
+    dashboard only when the dashboard changed; `--unit` skips the end-to-end
+    run). New tests (see the rule above: one per behaviour nothing else covers) go in
+    `agent-host/tests/{orchestrator,threads,git,terminal,mcp,relay,codex,claude,acp}.rs`,
+    `code-control/tests/{agents,agents_code}.rs` (+ `routes.rs` for the auth matrix),
+    `roll-cli/tests/agent.rs`, `apps/dashboard/src/**/agents-*.test.ts(x)` and
+    `apps/desktop/src/main/*.test.ts` (fakes in `apps/desktop/test/`); map them in `docs/code/test-coverage.md`.
 - **Storage (S3-compatible):**
   - `crates/s3-proto` is the wire protocol with no I/O: SigV4, SigV4a and SigV2 (headers, presigned, aws-chunked with trailers, POST policies), SSE headers, XML, checksums, ranges and conditionals, S3 error codes.
   - `crates/s3-store` is the metadata (SQLite plus a durable log in object storage), branching, refcounts, trash, lifecycle, keys, metering, the blob backend (`aws-sdk-s3` or a local directory) and the GC/scrub jobs. It has no HTTP.

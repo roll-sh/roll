@@ -1,0 +1,40 @@
+{"native_thread":"01a0d5ff-7b98-7e50-a216-1581ca5ebd3a"}
+{"model":"gpt-6-luna"}
+{"item":{"body":{"agent":"chain_level_1","prompt":"","type":"subagent"},"id":"call_HsDv2JL221xSwFqqTIeY1b9r:01a0d5ff-92cd-7ec2-8304-862c24df32be","parent":null,"status":"running"}}
+{"usage":{"cached_tokens":21248,"input_tokens":21473,"output_tokens":71}}
+{"context":{"max_tokens":258400,"total_processed_tokens":21544,"used_tokens":21544}}
+{"item":{"body":{"text":"**Waiting for child**","type":"reasoning"},"id":"rs_08ebdfd40cabefd2016ab5c274f8b887d08dceb98b3b249e2b","parent":null,"status":"running"}}
+{"item":{"body":{"text":"**Waiting for child**","type":"reasoning"},"id":"rs_08ebdfd40cabefd2016ab5c274f8b887d08dceb98b3b249e2b","parent":null,"status":"completed"}}
+{"item":{"body":{"agent":"chain_level_2","prompt":"","type":"subagent"},"id":"call_1jtrYPNGLwINj1fF3bNzbwAB:01a0d5ff-a1d3-7921-8098-5feebe2fa1b0","parent":"call_HsDv2JL221xSwFqqTIeY1b9r:01a0d5ff-92cd-7ec2-8304-862c24df32be","status":"running"}}
+{"item":{"body":{"input":{"command":"/bin/bash -lc pwd","cwd":"/home/replay-user/t3code/packages/effect-codex-app-server"},"kind":"command","name":"commandExecution","title":"pwd","type":"tool"},"id":"exec-dd12904e-606d-4f94-8fe2-1ef52ddee502","parent":"call_1jtrYPNGLwINj1fF3bNzbwAB:01a0d5ff-a1d3-7921-8098-5feebe2fa1b0","status":"running"}}
+{"item":{"body":{"exit_code":0,"input":{"command":"/bin/bash -lc pwd","cwd":"/home/replay-user/t3code/packages/effect-codex-app-server"},"kind":"command","name":"commandExecution","output":"/home/replay-user/t3code/packages/effect-codex-app-server\n","title":"pwd","type":"tool"},"id":"exec-dd12904e-606d-4f94-8fe2-1ef52ddee502","parent":"call_1jtrYPNGLwINj1fF3bNzbwAB:01a0d5ff-a1d3-7921-8098-5feebe2fa1b0","status":"completed"}}
+{"item":{"body":{"agent":"say_hello","prompt":"","type":"subagent"},"id":"call_gXOGZVqlAHVhME4MVxwi8lnx:01a0d5ff-c174-7132-a46c-56af17f6faf3","parent":"call_1jtrYPNGLwINj1fF3bNzbwAB:01a0d5ff-a1d3-7921-8098-5feebe2fa1b0","status":"running"}}
+{"item":{"body":{"text":"","type":"message"},"id":"msg_02df4a7c9a6fdc44016ab5c281ca6087d087f94d41d379d03a","parent":"call_gXOGZVqlAHVhME4MVxwi8lnx:01a0d5ff-c174-7132-a46c-56af17f6faf3","status":"running"}}
+{"text_delta":{"item":"msg_02df4a7c9a6fdc44016ab5c281ca6087d087f94d41d379d03a","text":"Hello"}}
+{"text_delta":{"item":"msg_02df4a7c9a6fdc44016ab5c281ca6087d087f94d41d379d03a","text":"."}}
+{"item":{"body":{"text":"Hello.","type":"message"},"id":"msg_02df4a7c9a6fdc44016ab5c281ca6087d087f94d41d379d03a","parent":"call_gXOGZVqlAHVhME4MVxwi8lnx:01a0d5ff-c174-7132-a46c-56af17f6faf3","status":"completed"}}
+{"item":{"body":{"agent":"say_hello","prompt":"","result":"Hello.","type":"subagent"},"id":"call_gXOGZVqlAHVhME4MVxwi8lnx:01a0d5ff-c174-7132-a46c-56af17f6faf3","parent":"call_1jtrYPNGLwINj1fF3bNzbwAB:01a0d5ff-a1d3-7921-8098-5feebe2fa1b0","status":"running"}}
+{"item":{"body":{"agent":"say_hello","prompt":"","result":"Hello.","type":"subagent"},"id":"call_gXOGZVqlAHVhME4MVxwi8lnx:01a0d5ff-c174-7132-a46c-56af17f6faf3","parent":"call_1jtrYPNGLwINj1fF3bNzbwAB:01a0d5ff-a1d3-7921-8098-5feebe2fa1b0","status":"completed"}}
+{"item":{"body":{"text":"","type":"message"},"id":"msg_0bd9b63de18a598a016ab5c283a46887d087f752d16b8e0587","parent":"call_1jtrYPNGLwINj1fF3bNzbwAB:01a0d5ff-a1d3-7921-8098-5feebe2fa1b0","status":"running"}}
+{"text_delta":{"item":"msg_0bd9b63de18a598a016ab5c283a46887d087f752d16b8e0587","text":"Hello"}}
+{"text_delta":{"item":"msg_0bd9b63de18a598a016ab5c283a46887d087f752d16b8e0587","text":"."}}
+{"item":{"body":{"text":"Hello.","type":"message"},"id":"msg_0bd9b63de18a598a016ab5c283a46887d087f752d16b8e0587","parent":"call_1jtrYPNGLwINj1fF3bNzbwAB:01a0d5ff-a1d3-7921-8098-5feebe2fa1b0","status":"completed"}}
+{"item":{"body":{"agent":"chain_level_2","prompt":"","result":"Hello.","type":"subagent"},"id":"call_1jtrYPNGLwINj1fF3bNzbwAB:01a0d5ff-a1d3-7921-8098-5feebe2fa1b0","parent":"call_HsDv2JL221xSwFqqTIeY1b9r:01a0d5ff-92cd-7ec2-8304-862c24df32be","status":"running"}}
+{"item":{"body":{"agent":"chain_level_2","prompt":"","result":"Hello.","type":"subagent"},"id":"call_1jtrYPNGLwINj1fF3bNzbwAB:01a0d5ff-a1d3-7921-8098-5feebe2fa1b0","parent":"call_HsDv2JL221xSwFqqTIeY1b9r:01a0d5ff-92cd-7ec2-8304-862c24df32be","status":"completed"}}
+{"item":{"body":{"text":"","type":"message"},"id":"msg_0ec341237fb67652016ab5c285368887d0a37983c36d1d91dd","parent":"call_HsDv2JL221xSwFqqTIeY1b9r:01a0d5ff-92cd-7ec2-8304-862c24df32be","status":"running"}}
+{"text_delta":{"item":"msg_0ec341237fb67652016ab5c285368887d0a37983c36d1d91dd","text":"Hello"}}
+{"text_delta":{"item":"msg_0ec341237fb67652016ab5c285368887d0a37983c36d1d91dd","text":"."}}
+{"item":{"body":{"text":"Hello.","type":"message"},"id":"msg_0ec341237fb67652016ab5c285368887d0a37983c36d1d91dd","parent":"call_HsDv2JL221xSwFqqTIeY1b9r:01a0d5ff-92cd-7ec2-8304-862c24df32be","status":"completed"}}
+{"item":{"body":{"agent":"chain_level_1","prompt":"","result":"Hello.","type":"subagent"},"id":"call_HsDv2JL221xSwFqqTIeY1b9r:01a0d5ff-92cd-7ec2-8304-862c24df32be","parent":null,"status":"running"}}
+{"item":{"body":{"agent":"chain_level_1","prompt":"","result":"Hello.","type":"subagent"},"id":"call_HsDv2JL221xSwFqqTIeY1b9r:01a0d5ff-92cd-7ec2-8304-862c24df32be","parent":null,"status":"completed"}}
+{"usage":{"cached_tokens":42496,"input_tokens":43041,"output_tokens":103}}
+{"context":{"max_tokens":258400,"total_processed_tokens":43144,"used_tokens":21600}}
+{"item":{"body":{"text":"","type":"message"},"id":"msg_08ebdfd40cabefd2016ab5c286f50487d09012833b353f7cff","parent":null,"status":"running"}}
+{"text_delta":{"item":"msg_08ebdfd40cabefd2016ab5c286f50487d09012833b353f7cff","text":"Hello"}}
+{"text_delta":{"item":"msg_08ebdfd40cabefd2016ab5c286f50487d09012833b353f7cff","text":"."}}
+{"item":{"body":{"text":"Hello.","type":"message"},"id":"msg_08ebdfd40cabefd2016ab5c286f50487d09012833b353f7cff","parent":null,"status":"completed"}}
+{"usage":{"cached_tokens":63744,"input_tokens":64708,"output_tokens":109}}
+{"context":{"max_tokens":258400,"total_processed_tokens":64817,"used_tokens":21673}}
+{"turn_ref":"01a0d5ff-7c5b-7bf1-a92a-39f93af77a6c"}
+{"turn_ended":"completed"}
+{"exited":null}

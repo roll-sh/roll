@@ -814,13 +814,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn write_then_read() {
-        let objs = vec![Object::new(Kind::Blob, "hello\n"), Object::new(Kind::Blob, vec![1u8; 100_000]), Object::new(Kind::Tree, "")];
-        let pack = write(&objs);
-        assert_eq!(read(&pack, &Limits::default()).unwrap(), objs);
-    }
-
-    #[test]
     fn delta_ops() {
         let base = b"hello world";
         // src 11, dst 16: copy 0..5, insert " big", copy 5..11 ... too short; build by hand

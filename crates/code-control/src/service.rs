@@ -324,6 +324,7 @@ impl Code {
         }
         if github.is_some() {
             crate::github::connected(self, &row.id);
+            self.lookups_changed(&row.owner_id, "github");
         }
         Ok(row)
     }
@@ -339,6 +340,10 @@ impl Code {
                     return Err(Error::Conflict(format!("{}/{n} already exists", r.owner)));
                 }
                 r.name = n;
+                if r.github.is_some() {
+                    // The pickers' GitHub repos go by name.
+                    self.lookups_changed(&r.owner_id, "github");
+                }
             }
         }
         if let Some(d) = patch.get("description") {
@@ -370,6 +375,9 @@ impl Code {
         let r = self.writable(caller, owner, name)?;
         self.check_manage(caller, &r)?;
         crate::github::forget(self, &r.id);
+        if r.github.is_some() {
+            self.lookups_changed(&r.owner_id, "github");
+        }
         if let Some(i) = &self.ai.index {
             i.remove(&r.id);
         }
@@ -786,7 +794,9 @@ impl Code {
         Ok(c)
     }
 
-    /// `PATCH /changes/{id}`: title, body, draft. Marking a queued change draft dequeues it.
+    /// `PATCH /changes/{id}`: title, body, draft, work_item. Marking a queued change draft
+    /// dequeues it. `work_item` links the change to a work item of its repo as if it had been
+    /// opened with it (the item moves to `review`, and is done when the change lands).
     pub fn update_change(&self, r: &RepoRow, c: &Change, patch: &Value) -> Result<Change> {
         let title = match patch.get("title") {
             None | Some(Value::Null) => None,
@@ -803,6 +813,23 @@ impl Code {
             Some(Value::Bool(d)) => Some(*d),
             Some(_) => return Err(Error::Invalid("draft must be true or false".into())),
         };
+        let work = match patch.get("work_item") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(id)) if !id.trim().is_empty() => {
+                let id = id.trim();
+                let wi = self.db.work(id)?.filter(|wi| wi.repo_id == r.id).ok_or_else(|| Error::NotFound(format!("work item {id}")))?;
+                if matches!(c.state, ChangeState::Landed | ChangeState::Closed) {
+                    return Err(Error::Conflict(format!("change {} is {}", c.number, c.state.as_str())));
+                }
+                Some(wi)
+            }
+            Some(_) => return Err(Error::Invalid("work_item must be a work item id (wi_…)".into())),
+        };
+        if let Some(wi) = &work
+            && !self.db.link_work(&c.id, &wi.id)?
+        {
+            return Err(Error::Conflict(format!("change {} does another work item", c.number)));
+        }
         self.db.update_change_meta(&c.id, title.as_deref(), body.as_deref(), draft)?;
         if draft == Some(true) && c.state == ChangeState::Queued {
             self.queued_change_moved(r, c, false)?;
@@ -811,6 +838,11 @@ impl Code {
         let ready = draft == Some(false) && c.draft;
         let c = self.change_or_404(&c.id)?;
         self.emit_change(&c);
+        if let Some(wi) = work
+            && let Some(wi) = self.db.work(&wi.id)?
+        {
+            self.emit_work(&self.work_view(wi)?);
+        }
         if ready {
             // Marked ready: roll reviews it now if it skips drafts.
             self.ai_on_change(r, &c);
@@ -1094,6 +1126,24 @@ impl Code {
         let w = self.work_or_404(&w.id)?;
         self.emit_work(&w);
         Ok(w)
+    }
+
+    /// Keep `claimant`'s claim on `w` alive, for the agents relay while a thread works on it:
+    /// renewed by its lease length once at most half of it is left. False when the claim isn't
+    /// theirs any more (done, in review, released, taken over, or its lease ran out).
+    pub(crate) fn keep_claim(&self, w: &WorkItem, claimant: &str) -> Result<bool> {
+        let t = now();
+        let held = w.state == WorkState::Claimed && w.claimed_by.as_deref() == Some(claimant);
+        let Some(until) = w.lease_until.filter(|u| held && *u >= t) else { return Ok(false) };
+        let lease = self.db.lease_len(&w.id)?.unwrap_or(DEFAULT_LEASE_S);
+        if until - t > lease / 2 {
+            return Ok(true);
+        }
+        if !self.db.renew_lease(&w.id, claimant, t + lease)? {
+            return Ok(false);
+        }
+        self.emit_work(&self.work_or_404(&w.id)?);
+        Ok(true)
     }
 
     pub fn release(&self, w: &WorkItem, input: &Value) -> Result<WorkItem> {

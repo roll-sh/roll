@@ -147,7 +147,7 @@ function Aside({ repo, change: c, status, checks }: { repo: string; change: Chan
         <section>
           <h2 className="text-[13px] font-semibold">Review</h2>
           <div className="mt-2">
-            <ReviewStatusView summary={c.review} status={status} />
+            <ReviewStatusView summary={c.review} status={status} ended={c.state === "landed" || c.state === "closed" ? c.state : undefined} />
           </div>
         </section>
       )}

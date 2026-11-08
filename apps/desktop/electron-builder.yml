@@ -1,0 +1,55 @@
+# electron-builder: `pnpm --filter @roll/desktop dist` packages for the host platform.
+# The roll CLI is staged into resources/bin by scripts/stage-cli.ts and ships as an extra
+# resource (<resources>/bin/roll), next to the asar, so it can be executed.
+appId: sh.roll.desktop
+productName: roll
+# Not "roll": the deb links /usr/bin/<executableName>, and `roll` is the CLI's name.
+executableName: roll-desktop
+copyright: roll — keep the code rolling
+artifactName: roll-${version}-${arch}.${ext}
+directories:
+  output: release
+  buildResources: resources
+files:
+  - package.json
+  - dist/**
+  - "!dist/**/*.map"
+  - resources/icons/**
+extraResources:
+  - from: resources/bin
+    to: bin
+    filter: ["roll", "roll.exe"]
+asar: true
+protocols:
+  - name: roll
+    schemes: [roll]
+mac:
+  category: public.app-category.developer-tools
+  icon: resources/icons/icon.icns
+  target: [dmg, zip]
+  hardenedRuntime: true
+dmg:
+  title: roll
+win:
+  icon: resources/icons/icon.ico
+  target: [nsis]
+nsis:
+  oneClick: true
+  perMachine: false
+  shortcutName: roll
+linux:
+  icon: resources/icons/icon.png
+  target: [AppImage, deb]
+  category: Development
+  synopsis: roll agents on this machine
+  description: The roll agents canvas, with this machine's agent daemon.
+  maintainer: roll
+  desktop:
+    entry:
+      Name: roll
+      StartupWMClass: roll
+deb:
+  packageName: roll-desktop
+  artifactName: roll-desktop_${version}_${arch}.${ext}
+# No update feed yet: auto-update stays off (settings.autoUpdate) and nothing is published.
+publish: null

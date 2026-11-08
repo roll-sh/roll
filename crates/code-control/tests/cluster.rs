@@ -330,7 +330,7 @@ fn assert_exactly_once(log: &[String], acked: &[String]) {
 /// Every kind of request for one repo, sent to every node, runs on the repo's owner: API reads
 /// and landings, changes, threads and work items by id, git push and clone through other
 /// nodes, an event stream through a node that doesn't own the repo (with an event emitted on yet
-/// another node), and MCP tool calls.
+/// another node), MCP tool calls, and a rename (the old name redirects, the owner stays).
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn every_request_for_a_repo_runs_on_its_owner() {
     let net = net("routing", 3).await;
@@ -424,15 +424,24 @@ async fn every_request_for_a_repo_runs_on_its_owner() {
     .unwrap();
     assert!(r["result"]["isError"] != true, "{r}");
 
+    // A rename keeps the repo on the same owner (the lease is the repo id), and the old name keeps
+    // working through any node: 301 on the API, followed by git.
+    assert_eq!(net.ok(p, "PATCH", base, Some(json!({ "name": "web" }))).await["name"], "web");
+    net.ok(q, "POST", "/v1/code/repos/acme/web/land", Some(land_body("after the rename", "r.txt"))).await;
+    let (s, v) = net.req(q, "GET", &format!("{base}/refs"), None).await;
+    assert_eq!((s, v["redirect"].as_str()), (StatusCode::MOVED_PERMANENTLY, Some("acme/web")));
+    git(home, home, &["clone", "-q", &format!("{}/git/acme/api.git", net.nodes[p].url), "old"]);
+    assert_eq!(std::fs::read_to_string(home.join("old/r.txt")).unwrap(), "after the rename\n");
+
     // Everything ran on the owner; the other nodes only forwarded.
     let after: Vec<u64> = net.nodes.iter().map(Node::served).collect();
     for i in &others {
         assert_eq!(after[*i], before[*i], "{} ran repo requests it doesn't own", net.nodes[*i].id);
     }
-    assert!(after[o] >= before[o] + 20, "the owner ran them: {before:?} → {after:?}");
+    assert!(after[o] >= before[o] + 24, "the owner ran them: {before:?} → {after:?}");
     assert_eq!(net.owner(&repo_id), Some(o), "the owner never changed");
-    let log = net.log(p, "api").await;
-    assert_exactly_once(&log, &["via 0".into(), "via 1".into(), "via 2".into(), "while streaming".into(), "via mcp".into()]);
+    let log = net.log(p, "web").await;
+    assert_exactly_once(&log, &["via 0".into(), "via 1".into(), "via 2".into(), "while streaming".into(), "via mcp".into(), "after the rename".into()]);
 }
 
 /// 64 landings at once, spread over every node: each acknowledged one is on main exactly once.
@@ -922,7 +931,7 @@ async fn moving_or_deleting_a_repo_leaves_no_index_or_lease_behind() {
     until("nobody owns it", Duration::from_secs(10), || net.owner(&repo_id).is_none()).await;
     assert!(!index_file(&net.nodes[n], &repo_id).exists(), "the owner's index is gone");
     // Several sweeps later the row hasn't come back, and the name is free.
-    tokio::time::sleep(Duration::from_millis(1500)).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
     assert!(lease_row(&net.nodes[0], &repo_id).is_none() && net.owner(&repo_id).is_none());
     let (s, _) = net.req(other, "GET", "/v1/code/repos/acme/api", None).await;
     assert_eq!(s, StatusCode::NOT_FOUND);
@@ -934,7 +943,7 @@ async fn moving_or_deleting_a_repo_leaves_no_index_or_lease_behind() {
 /// next request takes the repo again, on any node.
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn idle_repos_are_released_and_taken_again_on_demand() {
-    let idle = Duration::from_millis(1500);
+    let idle = Duration::from_millis(600);
     let net = net_with("idle", 3, Arc::new(move |c: &mut Config| c.repo_idle_release = idle)).await;
     let repo_id = net.repo(0, "api").await;
     until("someone owns it", Duration::from_secs(20), || net.owner(&repo_id).is_some()).await;
@@ -957,7 +966,7 @@ async fn idle_repos_are_released_and_taken_again_on_demand() {
     until("the idle repo is given up", idle * 4 + Duration::from_secs(10), || lease_row(&net.nodes[0], &repo_id).is_none()).await;
     until("nobody holds it", Duration::from_secs(10), || net.owner(&repo_id).is_none()).await;
     // Nobody takes it back on their own.
-    tokio::time::sleep(Duration::from_millis(1000)).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
     assert!(net.owner(&repo_id).is_none() && lease_row(&net.nodes[0], &repo_id).is_none());
     // The next request does, wherever it arrives.
     net.ok(p, "POST", "/v1/code/repos/acme/api/land", Some(land_body("after idle", "i.txt"))).await;
@@ -1258,28 +1267,6 @@ async fn draining_moves_every_repo_off_a_node_before_it_leaves() {
     }
 }
 
-/// A rename keeps the repo on the same owner (the lease is the repo id), and the old name keeps
-/// working through any node: 301 on the API, followed by git.
-#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-async fn renaming_a_repo_keeps_its_owner() {
-    let net = net("rename", 3).await;
-    let repo_id = net.repo(0, "api").await;
-    let o = net.owner(&repo_id).unwrap();
-    let (p, q) = ((o + 1) % 3, (o + 2) % 3);
-    let before: Vec<u64> = net.nodes.iter().map(Node::served).collect();
-    assert_eq!(net.ok(p, "PATCH", "/v1/code/repos/acme/api", Some(json!({ "name": "web" }))).await["name"], "web");
-    net.ok(q, "POST", "/v1/code/repos/acme/web/land", Some(land_body("after the rename", "r.txt"))).await;
-    let (s, v) = net.req(q, "GET", "/v1/code/repos/acme/api/refs", None).await;
-    assert_eq!((s, v["redirect"].as_str()), (StatusCode::MOVED_PERMANENTLY, Some("acme/web")));
-    let tmp = tempfile::tempdir().unwrap();
-    git(tmp.path(), tmp.path(), &["clone", "-q", &format!("{}/git/acme/api.git", net.nodes[p].url), "old"]);
-    assert_eq!(std::fs::read_to_string(tmp.path().join("old/r.txt")).unwrap(), "after the rename\n");
-    assert_eq!(net.owner(&repo_id), Some(o));
-    let after: Vec<u64> = net.nodes.iter().map(Node::served).collect();
-    assert_eq!((after[p], after[q]), (before[p], before[q]), "only the owner ran them");
-    assert!(after[o] >= before[o] + 4);
-}
-
 /// An event stream holds its repo's guard; when the repo starts moving the stream ends (its
 /// client reconnects and reaches the new owner), and the move doesn't wait for it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
@@ -1349,4 +1336,109 @@ async fn health_follows_each_node() {
         assert!(Instant::now() < deadline, "never healthy again");
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
+}
+
+type Ws = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+/// A daemon's link through `base`: hello, then the welcome's `resume_from`. `None` while the
+/// owner's agents are between nodes (the upgrade answers 503) or the link closes at once.
+async fn agent_link(base: &str, bearer: &str) -> Option<(Ws, u64)> {
+    use futures::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest};
+    let mut req = format!("{}/v1/code/agents/connect", base.replace("http://", "ws://")).into_client_request().unwrap();
+    req.headers_mut().insert("authorization", format!("Bearer {bearer}").parse().unwrap());
+    let (mut ws, _) = tokio_tungstenite::connect_async(req).await.ok()?;
+    let hello = agent_proto::DaemonFrame::Hello {
+        protocol: agent_proto::PROTOCOL,
+        info: agent_proto::MachineInfo { hostname: "box".into(), os: "linux".into(), arch: "x86_64".into(), version: "0".into(), home: "/".into(), providers: vec![], settings: None, seal_key: None },
+    };
+    ws.send(Message::text(serde_json::to_string(&hello).unwrap())).await.ok()?;
+    match ws.next().await? {
+        Ok(Message::Text(t)) => match serde_json::from_str(t.as_str()).ok()? {
+            agent_proto::RelayFrame::Welcome { resume_from, .. } => Some((ws, resume_from)),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// The next frame of a link that isn't a ping: a relay frame, or the close code.
+async fn agent_recv(ws: &mut Ws) -> Result<agent_proto::RelayFrame, Option<u16>> {
+    use futures::StreamExt;
+    use tokio_tungstenite::tungstenite::Message;
+    loop {
+        match tokio::time::timeout(Duration::from_secs(20), ws.next()).await.expect("a frame within 20 s") {
+            Some(Ok(Message::Text(t))) => match serde_json::from_str(t.as_str()).unwrap() {
+                agent_proto::RelayFrame::Ping => continue,
+                f => return Ok(f),
+            },
+            Some(Ok(Message::Close(c))) => return Err(c.map(|c| u16::from(c.code))),
+            Some(Ok(_)) => continue,
+            _ => return Err(None),
+        }
+    }
+}
+
+/// An owner's agents run on the node holding `agents:<owner id>` (docs/code/cluster.md): a
+/// machine's link through any node lands there, commands and event streams through every other
+/// node reach it, and when the lease moves the link is told to reconnect (1012) and lands on the
+/// new holder, resuming where the mirror is.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn an_owners_agents_follow_their_lease() {
+    use futures::SinkExt;
+    use tokio_tungstenite::tungstenite::Message;
+    let net = net("agents", 3).await;
+    net.ok(0, "POST", "/v1/code/owners", Some(json!({ "name": "acme", "kind": "org" }))).await;
+    let m = net.ok(1, "POST", "/v1/code/agents/acme/machines", Some(json!({ "name": "box" }))).await;
+    let (mid, minted) = (m["machine"]["id"].as_str().unwrap().to_string(), m["token"].as_str().unwrap().to_string());
+    let key = format!("agents:{}", net.nodes[0].code.owner_or_404("acme").unwrap().id);
+    let o = net.owner(&key).expect("adding the machine took the lease");
+    let (p, q) = ((o + 1) % 3, (o + 2) % 3);
+
+    let (mut ws, from) = agent_link(&net.nodes[p].url, &minted).await.expect("connected through another node");
+    assert_eq!(from, 0);
+    until("the link is on the holder", Duration::from_secs(10), || net.nodes[o].code.agents.online(&mid)).await;
+    assert!(!net.nodes[p].code.agents.online(&mid) && !net.nodes[q].code.agents.online(&mid));
+
+    let mut events = net.http.get(format!("{}/v1/code/agents/acme/events", net.nodes[q].url)).send().await.unwrap();
+    assert_eq!(events.status().as_u16(), 200);
+    let project = json!({ "kind": "project", "id": "prj_1", "name": "x", "path": "/x", "created_at": 1, "updated_at": 1 });
+    let batch = json!({ "type": "entities", "items": [{ "seq": 1, "entity": project }] });
+    ws.send(Message::text(batch.to_string())).await.unwrap();
+    assert_eq!(agent_recv(&mut ws).await, Ok(agent_proto::RelayFrame::Ack { seq: 1 }));
+    let mut seen = String::new();
+    while !seen.contains("prj_1") {
+        let chunk = tokio::time::timeout(Duration::from_secs(10), events.chunk()).await.expect("an event").unwrap().expect("open");
+        seen.push_str(&String::from_utf8_lossy(&chunk));
+    }
+
+    // A command through the third node reaches the daemon and its reply comes back.
+    let cmd = json!({ "id": "c1", "command": { "type": "provider.refresh" } });
+    let (http, url, path) = (net.http.clone(), net.nodes[q].url.clone(), format!("/v1/code/agents/acme/machines/{mid}/commands"));
+    let sent = tokio::spawn(async move { req(&http, &url, "POST", &path, Some(cmd)).await });
+    match agent_recv(&mut ws).await {
+        Ok(agent_proto::RelayFrame::Command { id, .. }) => {
+            let reply = agent_proto::DaemonFrame::Reply { id, result: agent_proto::Reply::Ok };
+            ws.send(Message::text(serde_json::to_string(&reply).unwrap())).await.unwrap();
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(sent.await.unwrap(), (StatusCode::OK, json!({ "type": "ok" })));
+
+    // The lease moves: the link is told to reconnect, and comes back on whoever holds it next.
+    assert!(net.nodes[o].cluster().handoff(&key));
+    assert_eq!(agent_recv(&mut ws).await, Err(Some(1012)));
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let (_ws, from) = loop {
+        if let Some(l) = agent_link(&net.nodes[p].url, &minted).await {
+            break l;
+        }
+        assert!(Instant::now() < deadline, "never reconnected");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    assert_eq!(from, 1, "resumes after what the mirror holds");
+    let n = net.owner(&key).expect("someone holds it again");
+    assert!(net.nodes[n].code.agents.online(&mid));
+    let (_, list) = net.req(q, "GET", "/v1/code/agents/acme/machines", None).await;
+    assert_eq!(list[0]["online"], true, "{list}");
 }

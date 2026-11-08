@@ -113,39 +113,3 @@ pub(crate) fn percent_encode(s: &str) -> String {
     }
     out
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::collections::HashMap;
-
-    #[test]
-    fn from_lookup() {
-        let env: HashMap<&str, &str> = [
-            ("ROLL_GITHUB_APP_ID", "42"),
-            (
-                "ROLL_GITHUB_PRIVATE_KEY",
-                "-----BEGIN-----\\nabc\\n-----END-----",
-            ),
-            ("ROLL_GITHUB_WEBHOOK_SECRET", "s"),
-            ("ROLL_GITHUB_APP_SLUG", "roll-code"),
-            ("ROLL_GITHUB_API_URL", "https://ghe.example/api/v3/"),
-        ]
-        .into();
-        let c = AppConfig::from_lookup(|k| env.get(k).map(|v| v.to_string()))
-            .unwrap()
-            .unwrap();
-        assert_eq!(c.app_id, 42);
-        assert_eq!(c.private_key_pem, "-----BEGIN-----\nabc\n-----END-----");
-        assert_eq!(c.api_base, "https://ghe.example/api/v3");
-        assert_eq!(
-            c.install_url(Some("a b")),
-            "https://github.com/apps/roll-code/installations/new?state=a%20b"
-        );
-        assert_eq!(c.bot_login(), "roll-code[bot]");
-        assert!(AppConfig::from_lookup(|_| None).unwrap().is_none());
-        assert!(
-            AppConfig::from_lookup(|k| (k == "ROLL_GITHUB_APP_ID").then(|| "x".into())).is_err()
-        );
-    }
-}

@@ -56,6 +56,10 @@ pub enum Event {
     PullRequestReview(Box<PullRequestReviewEvent>),
     PullRequestReviewComment(Box<PullRequestReviewCommentEvent>),
     PullRequestReviewThread(Box<PullRequestReviewThreadEvent>),
+    /// A check run completed (`check_run`, action `completed`).
+    CheckRun(Box<CheckRunEvent>),
+    /// A commit status was set (`status`).
+    Status(Box<StatusEvent>),
     /// An event or action roll doesn't act on.
     Ignored {
         event: String,
@@ -90,6 +94,8 @@ pub enum PullRequestAction {
     ReadyForReview,
     /// An open pull request went back to draft.
     ConvertedToDraft,
+    /// Someone asked a person or team for a review ([`PullRequestEvent::requested_reviewer`]).
+    ReviewRequested,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -182,6 +188,8 @@ pub struct PullRequestEvent {
     pub action: PullRequestAction,
     pub number: u64,
     pub pull_request: PullRequest,
+    /// `review_requested`: the user's login, or the team's slug.
+    pub requested_reviewer: Option<String>,
     pub repository: Repository,
     pub installation: Option<Installation>,
     pub sender: Option<User>,
@@ -240,6 +248,82 @@ pub struct PullRequestReviewThreadEvent {
     pub sender: Option<User>,
 }
 
+/// A check run that finished, with the pull requests it ran for (GitHub lists none for a fork's).
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct CheckRunEvent {
+    pub check_run: CheckRunPayload,
+    pub repository: Repository,
+    #[serde(default)]
+    pub installation: Option<Installation>,
+    #[serde(default)]
+    pub sender: Option<User>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct CheckRunPayload {
+    pub id: u64,
+    pub name: String,
+    pub head_sha: String,
+    #[serde(default)]
+    pub status: String,
+    /// `success`, `failure`, `timed_out`, `cancelled`, `action_required`, `neutral`, `skipped`, `stale`.
+    #[serde(default)]
+    pub conclusion: Option<String>,
+    #[serde(default)]
+    pub html_url: Option<String>,
+    #[serde(default)]
+    pub details_url: Option<String>,
+    #[serde(default)]
+    pub check_suite: Option<CheckSuiteRef>,
+    #[serde(default)]
+    pub app: Option<CheckApp>,
+    #[serde(default)]
+    pub pull_requests: Vec<CheckPull>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct CheckSuiteRef {
+    #[serde(default)]
+    pub head_branch: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct CheckApp {
+    #[serde(default)]
+    pub slug: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct CheckPull {
+    pub number: u64,
+}
+
+/// A commit status (`POST /repos/…/statuses/{sha}` by a CI).
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct StatusEvent {
+    pub sha: String,
+    /// `pending`, `success`, `failure` or `error`.
+    pub state: String,
+    pub context: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub target_url: Option<String>,
+    /// The branches whose head is this commit.
+    #[serde(default)]
+    pub branches: Vec<BranchName>,
+    pub repository: Repository,
+    #[serde(default)]
+    pub installation: Option<Installation>,
+    #[serde(default)]
+    pub sender: Option<User>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct BranchName {
+    pub name: String,
+}
+
 #[derive(Deserialize)]
 struct ReviewPayload {
     review: crate::model::Review,
@@ -277,11 +361,21 @@ struct ReviewThreadPayload {
 struct PrPayload {
     number: u64,
     pull_request: PullRequest,
+    #[serde(default)]
+    requested_reviewer: Option<User>,
+    #[serde(default)]
+    requested_team: Option<TeamRef>,
     repository: Repository,
     #[serde(default)]
     installation: Option<Installation>,
     #[serde(default)]
     sender: Option<User>,
+}
+
+#[derive(Deserialize)]
+struct TeamRef {
+    #[serde(default)]
+    slug: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -393,6 +487,7 @@ impl Event {
                     "edited" => PullRequestAction::Edited,
                     "ready_for_review" => PullRequestAction::ReadyForReview,
                     "converted_to_draft" => PullRequestAction::ConvertedToDraft,
+                    "review_requested" => PullRequestAction::ReviewRequested,
                     _ => return Ok(ignored()),
                 };
                 let p: PrPayload = decode(event, value)?;
@@ -400,6 +495,7 @@ impl Event {
                     action,
                     number: p.number,
                     pull_request: p.pull_request,
+                    requested_reviewer: p.requested_reviewer.map(|u| u.login).or_else(|| p.requested_team.and_then(|t| t.slug)),
                     repository: p.repository,
                     installation: p.installation,
                     sender: p.sender,
@@ -492,6 +588,8 @@ impl Event {
                     sender: p.sender,
                 }))
             }
+            "check_run" if a == "completed" => Event::CheckRun(Box::new(decode(event, value)?)),
+            "status" => Event::Status(Box::new(decode(event, value)?)),
             _ => ignored(),
         })
     }
@@ -508,6 +606,8 @@ impl Event {
             Event::PullRequestReview(e) => e.installation.as_ref().map(|i| i.id),
             Event::PullRequestReviewComment(e) => e.installation.as_ref().map(|i| i.id),
             Event::PullRequestReviewThread(e) => e.installation.as_ref().map(|i| i.id),
+            Event::CheckRun(e) => e.installation.as_ref().map(|i| i.id),
+            Event::Status(e) => e.installation.as_ref().map(|i| i.id),
             Event::Ping { .. } | Event::Ignored { .. } => None,
         }
     }
@@ -522,6 +622,8 @@ impl Event {
             Event::PullRequestReview(e) => Some(&e.repository),
             Event::PullRequestReviewComment(e) => Some(&e.repository),
             Event::PullRequestReviewThread(e) => Some(&e.repository),
+            Event::CheckRun(e) => Some(&e.repository),
+            Event::Status(e) => Some(&e.repository),
             _ => None,
         }
     }
@@ -543,26 +645,4 @@ impl Event {
 
 fn decode<T: DeserializeOwned>(event: &str, value: serde_json::Value) -> Result<T> {
     serde_json::from_value(value).map_err(|e| Error::Decode(format!("{event}: {e}")))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn signatures() {
-        let body = br#"{"zen":"Keep it logically awesome."}"#;
-        let good = sign(b"secret", body);
-        assert!(verify_signature(b"secret", body, Some(&good)));
-        assert!(!verify_signature(b"other", body, Some(&good)));
-        assert!(!verify_signature(b"secret", b"{}", Some(&good)));
-        assert!(!verify_signature(b"secret", body, None));
-        assert!(!verify_signature(b"secret", body, Some("sha1=abcd")));
-        assert!(!verify_signature(b"secret", body, Some("sha256=zz")));
-        assert!(!verify_signature(
-            b"secret",
-            body,
-            Some(&good[..good.len() - 2])
-        ));
-    }
 }

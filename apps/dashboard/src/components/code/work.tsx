@@ -4,6 +4,7 @@ import { Bot, GitPullRequest, Plus, X } from "lucide-react";
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { codeApi, type Repo, type WorkItem, type WorkState } from "@/lib/code-api";
+import { Picker } from "../agents/ui/picker";
 import { ago, btn, input, panel, primary } from "../ui";
 import { Field, formatLease, SourceBadge, useNow, type Run } from "./shared";
 
@@ -62,6 +63,7 @@ export function WorkTab({ repo, tick, busy, run }: { repo: Repo; tick: number; b
 
       {creating && (
         <NewWork
+          known={[...new Set((items ?? []).flatMap((i) => i.labels))].sort()}
           busy={busy === "work-create"}
           onCancel={() => setCreating(false)}
           onCreate={async (body) => {
@@ -210,17 +212,20 @@ function WorkCard({
 }
 
 function NewWork({
+  known,
   busy,
   onCreate,
   onCancel,
 }: {
+  /** Labels the repo's work items carry now (picked first; a new one is typed). */
+  known: string[];
   busy: boolean;
   onCreate: (body: { title: string; body: string; labels: string[]; priority: number }) => void;
   onCancel: () => void;
 }) {
   const [title, setTitle] = useState("");
   const [body, setBody] = useState("");
-  const [labels, setLabels] = useState("");
+  const [labels, setLabels] = useState<string[]>([]);
   const [priority, setPriority] = useState(2);
   return (
     <form
@@ -231,10 +236,7 @@ function NewWork({
         onCreate({
           title: title.trim(),
           body,
-          labels: labels
-            .split(",")
-            .map((l) => l.trim())
-            .filter(Boolean),
+          labels,
           priority,
         });
       }}
@@ -254,14 +256,8 @@ function NewWork({
         className={`${input} w-full resize-y`}
       />
       <div className="grid gap-3 sm:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
-        <Field label="Labels" hint="comma-separated; agents can claim by label">
-          <input
-            value={labels}
-            onChange={(e) => setLabels(e.target.value)}
-            placeholder="bug, frontend"
-            spellCheck={false}
-            className={`${input} w-full`}
-          />
+        <Field label="Labels" hint="agents can claim by label; type a new one to add it">
+          <Picker label="Labels" multiple value={labels} onChange={setLabels} options={known.map((l) => ({ id: l, label: l, icon: "label" }))} custom placeholder="bug, frontend" recents="code/work-labels" />
         </Field>
         <Field label="Priority">
           <select value={priority} onChange={(e) => setPriority(Number(e.target.value))} className={`${input} w-full`}>

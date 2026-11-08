@@ -1,5 +1,7 @@
 #![allow(dead_code)]
 
+pub mod daemon;
+
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use code_control::{Code, Config};

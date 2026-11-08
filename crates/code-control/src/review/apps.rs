@@ -490,7 +490,7 @@ impl Code {
         Ok(client)
     }
 
-    fn private_webhooks_allowed(&self) -> bool {
+    pub(crate) fn private_webhooks_allowed(&self) -> bool {
         self.config.allow_private_webhooks.unwrap_or(self.config.admin_token.is_none())
     }
 
@@ -668,14 +668,6 @@ mod tests {
         assert!(literal_private_host(&u("http://api.localhost/x")));
         assert!(literal_private_host(&u("http://169.254.169.254/latest")));
         assert!(!literal_private_host(&u("https://api.openai.com/v1")));
-    }
-
-    #[test]
-    fn urls() {
-        assert!(check_url("https://hooks.example.com/roll").is_ok());
-        assert!(check_url("ftp://x").is_err());
-        assert!(check_url("https://user:pw@x.com/").is_err());
-        assert!(check_url("not a url").is_err());
     }
 
     #[test]

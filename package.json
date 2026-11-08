@@ -4,9 +4,10 @@
   "scripts": {
     "dev": "pnpm --filter dashboard dev",
     "build": "pnpm -r build",
-    "typecheck": "pnpm -r typecheck",
+    "typecheck": "node scripts/typecheck.mjs",
     "test:pg": "scripts/test-postgres.sh",
     "test:code": "scripts/test-code.sh",
+    "test:agents": "scripts/test-agents.sh",
     "test:redis": "scripts/test-redis.sh",
     "test:nosql": "scripts/test-nosql.sh",
     "test:tasks": "scripts/test-tasks.sh",
@@ -19,5 +20,8 @@
     "test:s3-conformance": "scripts/test-s3-conformance.sh",
     "test:s3-conformance-localstack": "scripts/test-s3-conformance.sh --backend localstack"
   },
-  "packageManager": "pnpm@12.10.1"
+  "packageManager": "pnpm@12.10.1",
+  "devDependencies": {
+    "typescript": "7.0.2"
+  }
 }

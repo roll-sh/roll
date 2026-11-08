@@ -655,6 +655,8 @@ async fn start_code(
         allow_private_providers: args.code_provider_allow_private,
         // roll's reviewer: ROLL_REVIEW_PROVIDER, ROLL_REVIEW_ANTHROPIC_API_KEY, ROLL_SECRET_KEY, … (docs/code/reviews.md).
         review: code_control::ai::AiConfig::from_env(),
+        // roll code agents' sandboxes: ROLL_SANDBOX_BACKEND, ROLL_AGENT37_API_KEY, … (docs/code/agents.md).
+        sandboxes: code_control::agents::sandbox::SandboxConfig::from_env()?,
         max_streams_per_caller: args.code_max_streams_per_caller,
         max_streams: args.code_max_streams,
         trust_forwarded_for: args.code_trust_forwarded_for,
@@ -670,6 +672,19 @@ async fn start_code(
     code.start_reviewer();
     // Webhook deliveries pick up where they left off (landings while the daemon was down too).
     code.start_webhooks();
+    // Sandboxes' reconcilers (on a cluster each starts where its owner's agents are).
+    if let Some(b) = code.sandboxes.backend_name() {
+        info!(backend = b, "roll code: sandboxes on");
+    }
+    code.start_sandboxes();
+    // Linear: roll's OAuth app (ROLL_LINEAR_CLIENT_ID, ROLL_LINEAR_CLIENT_SECRET,
+    // ROLL_LINEAR_WEBHOOK_SECRET; docs/code/automations.md "Linear"). API keys work without it.
+    let linear = code_control::agents::linear::LinearConfig::from_env();
+    if linear.oauth().is_some() {
+        info!(webhook = linear.webhook_secret.is_some(), "roll code: Linear app configured");
+    }
+    code.configure_linear(linear);
+    code.start_automations();
     match &code.config.review.hosted {
         Some(h) => info!(provider = %h.provider, "roll code: hosted reviewer configured"),
         None => info!("roll code: no hosted reviewer (owners can bring their own key)"),
@@ -677,6 +692,10 @@ async fn start_code(
     // GitHub-connected repos, when ROLL_GITHUB_APP_ID and friends are set (docs/code/github-app.md).
     if code_control::github::enable_from_env(&code)? {
         info!("roll code: GitHub App configured");
+    }
+    // Slack and Discord for the agents, when ROLL_SLACK_* / ROLL_DISCORD_* are set (docs/code/chatops.md).
+    if code_control::chatops::enable_from_env(&code)? {
+        info!("roll code: chat ops configured");
     }
     // Checks and previews: containers, with previews branching roll Postgres and Redis.
     let previews = code_preview::Previews::new(

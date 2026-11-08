@@ -2,9 +2,11 @@
 //! feed and the HTTP API (`/v1/code`, `/git`). Code itself lives in code-store; the git wire
 //! protocol is code-git. See docs/code/architecture.md and docs/code/http-api.md.
 
+pub mod agents;
 pub mod ai;
 pub mod api;
 pub mod broken;
+pub mod chatops;
 pub mod checkout;
 pub mod cluster;
 pub mod db;
@@ -98,6 +100,9 @@ pub struct Config {
     /// this long (and that has none waiting), so leases don't pile up; the next request takes
     /// it again.
     pub repo_idle_release: std::time::Duration,
+    /// roll-hosted sandboxes for roll code agents: the backend, sizes and limits
+    /// (`agents::sandbox::SandboxConfig::from_env`).
+    pub sandboxes: agents::sandbox::SandboxConfig,
 }
 
 /// roll code's Postgres: both databases in one, as two schemas.
@@ -172,6 +177,7 @@ impl Config {
             git_max_request_memory_bytes: None,
             git_memory_wait: std::time::Duration::from_secs(30),
             repo_idle_release: std::time::Duration::from_secs(30 * 60),
+            sandboxes: agents::sandbox::SandboxConfig::default(),
         }
     }
 }
@@ -409,6 +415,16 @@ pub struct Code {
     pub(crate) duties: cluster::Duties,
     /// One memory budget for every git request this node serves.
     pub git_budget: code_git::MemoryBudget,
+    /// roll code agents: connected machines, live event channels, commands in flight.
+    pub agents: agents::Agents,
+    /// roll-hosted sandboxes: the backend and the owners' reconcilers.
+    pub sandboxes: agents::sandbox::Sandboxes,
+    /// roll code automations: the trigger and step registry and the engine's state here.
+    pub automations: agents::automations::Automations,
+    /// Chat ops' platforms (Slack, Discord), once [`chatops::enable`] ran.
+    pub(crate) chat: std::sync::OnceLock<Arc<chatops::Chat>>,
+    /// Linear: roll's app config and the integration's state here.
+    pub linear: agents::linear::Linear,
 }
 
 /// The databases a [`Code`] runs on: code-store's, code-control's, and the cluster's tables
@@ -479,6 +495,7 @@ impl Code {
             ..code_git::ServerConfig::default()
         }
         .budget();
+        let sandboxes = agents::sandbox::Sandboxes::new(&config.sandboxes)?;
         let code = Arc::new_cyclic(|me| Code {
             config,
             store,
@@ -508,7 +525,13 @@ impl Code {
             cluster: std::sync::OnceLock::new(),
             duties: cluster::Duties::default(),
             git_budget,
+            agents: agents::Agents::default(),
+            sandboxes,
+            automations: agents::automations::Automations::default(),
+            chat: std::sync::OnceLock::new(),
+            linear: agents::linear::Linear::default(),
         });
+        chatops::ensure_schema(&code);
         code.clean_worktrees();
         code.clean_indexes();
         if let Some(cfg) = code.config.cluster.clone() {
@@ -588,6 +611,15 @@ impl Code {
     /// the app, even on an open local daemon: apps are scoped to the repos they're installed on.
     pub fn caller(&self, token: Option<&str>) -> Result<Caller> {
         let token = token.map(str::trim).filter(|t| !t.is_empty());
+        // An agent machine's grant only opens git, for its one repo (`agents/code.rs`).
+        if token.is_some_and(|t| t.starts_with(agents::GRANT_PREFIX)) {
+            return Err(Error::Unauthorized);
+        }
+        // A step's call as its automation (agents/automations): checked before the open
+        // daemon's "everyone is admin", so `run_as` narrows it there too.
+        if let Some(t) = token.filter(|t| t.starts_with(agents::automations::TOKEN_PREFIX)) {
+            return self.automation_caller(t);
+        }
         if let Some(t) = token
             && let Some(app) = self.app_caller(t)?
         {
@@ -641,3 +673,4 @@ pub(crate) fn new_token() -> String {
 pub fn cs_id(id: &ChangesetId) -> String {
     format!("cs_{}", id.hex())
 }
+// measure: one-crate change
