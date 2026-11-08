@@ -793,8 +793,8 @@ impl Store {
     pub fn first_with(&self, r: &mut point::PointReader, start: &[u8], end: &[u8], resolve: bool) -> Result<point::First> {
         let ts = r.ts();
         let first = match self.hot.scan(start, end, ts) {
-            Some(rows) => match rows.into_iter().next() {
-                Some((k, v)) => point::First::Row(k.to_vec(), v),
+            Some(mut rows) => match rows.next() {
+                Some((k, v)) => point::First::Row(rows.data()[k].to_vec(), rows.data().slice(v)),
                 None => point::First::None,
             },
             None => r.first_raw(start, end)?,
@@ -835,7 +835,7 @@ impl Store {
         // (A run of deleted keys a scan found before at a snapshot at or before this one,
         // nothing written into it since, is stepped over: `dead`.)
         let start = match self.dead.skip(start, ts) {
-            Some(live) if !end.is_empty() && live.as_slice() >= end => return Scan::of_rows(self.view(), Vec::new(), ts),
+            Some(live) if !end.is_empty() && live.as_slice() >= end => return Scan::of_rows(self.view(), hot::HotRows::empty(), ts),
             Some(live) => live,
             None => start.to_vec(),
         };
@@ -2466,7 +2466,7 @@ pub struct Scan {
     /// Rows come with their out-of-line values put back (`Store::scan`; `toast`).
     resolve: bool,
     /// The rows of a hot range's chains (`hot`), read already: no merge.
-    rows: Option<Box<std::vec::IntoIter<(Bytes, Bytes)>>>,
+    rows: Option<Box<hot::HotRows>>,
     /// Where the scan started, while it has stepped over only deleted keys (`dead`: a hint
     /// is recorded at its first live key past `dead::MIN_DEAD` of them); None: not looked for.
     dead: Option<(Arc<dead::DeadRanges>, Vec<u8>)>,
@@ -2544,7 +2544,7 @@ fn same_sources(view: &View, cursors: &[Cursor], start: &[u8], end: &[u8]) -> bo
 }
 
 impl Scan {
-    fn of_rows(view: Arc<View>, rows: Vec<(Bytes, Bytes)>, ts: u64) -> Scan {
+    fn of_rows(view: Arc<View>, rows: hot::HotRows, ts: u64) -> Scan {
         Scan {
             merge: Merge::new(Vec::new(), Vec::new()),
             ts,
@@ -2555,7 +2555,7 @@ impl Scan {
             horizon: 0,
             _view: view,
             resolve: false,
-            rows: Some(Box::new(rows.into_iter())),
+            rows: Some(Box::new(rows)),
             rdels: Default::default(),
             dead: None,
             dead_run: 0,
@@ -2761,17 +2761,20 @@ impl Scan {
     pub fn fill_batch(&mut self, batch: &mut batch::RowBatch, max: usize) -> Result<()> {
         let target = batch.len() + max;
         if let Some(rows) = &mut self.rows {
-            // (A hot range's rows, their keys shared with its chains: none copied.)
+            // (A hot range's rows, by reference into the scan's copy of them.)
             while batch.len() < target {
                 let Some((k, v)) = rows.next() else { break };
-                if self.rdels.holds(&k) {
+                let data = rows.data();
+                let key = &data[k];
+                if self.rdels.holds(key) {
                     continue;
                 }
-                let v = match self.resolve && toast::has_external(&v) {
-                    true => toast::resolve(&self._view, &k, v, self.ts)?,
-                    false => v,
-                };
-                batch.push(&k, v);
+                if self.resolve && toast::has_external(&data[v.clone()]) {
+                    let v = toast::resolve(&self._view, key, data.slice(v), self.ts)?;
+                    batch.push(key, v);
+                } else {
+                    batch.push_in(key, data, v.start, v.len());
+                }
             }
             return Ok(());
         }
@@ -2858,14 +2861,15 @@ impl Iterator for Scan {
             // reader's own, `excluding`, can cover one.)
             let (k, v) = loop {
                 let (k, v) = rows.next()?;
-                if !self.rdels.holds(&k) {
-                    break (k, v);
+                if !self.rdels.holds(&rows.data()[k.clone()]) {
+                    break (rows.data()[k].to_vec(), v);
                 }
             };
+            let v = rows.data().slice(v);
             if self.resolve && toast::has_external(&v) {
-                return Some(toast::resolve(&self._view, &k, v, self.ts).map(|v| (k.to_vec(), v)));
+                return Some(toast::resolve(&self._view, &k, v, self.ts).map(|v| (k, v)));
             }
-            return Some(Ok((k.to_vec(), v)));
+            return Some(Ok((k, v)));
         }
         let i = match self.position() {
             Ok(Some(i)) => i,
