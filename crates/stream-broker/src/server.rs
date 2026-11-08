@@ -30,6 +30,9 @@ pub struct Session {
     /// After SaslHandshake v0 the next frames are raw SASL tokens, not Kafka requests.
     pub raw_sasl: bool,
     pub tls: bool,
+    /// The broker address (host, port) metadata gives this connection: the config's, or the
+    /// hostname the client connected with (the edge: one virtual broker per tenant hostname).
+    pub advertised: Arc<(String, u16)>,
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -71,16 +74,19 @@ pub async fn serve_on(broker: Arc<Broker>, listener: TcpListener) -> anyhow::Res
         tokio::spawn(async move {
             match tls {
                 Some(acceptor) => match acceptor.accept(sock).await {
-                    Ok(s) => connection(b, s, peer, true).await,
+                    Ok(s) => serve_connection(b, s, peer, true, None).await,
                     Err(e) => debug!(%peer, error = %e, "TLS handshake failed"),
                 },
-                None => connection(b, sock, peer, false).await,
+                None => serve_connection(b, sock, peer, false, None).await,
             }
         });
     }
 }
 
-async fn connection<S: AsyncRead + AsyncWrite + Send + 'static>(b: Arc<Broker>, io: S, peer: SocketAddr, tls: bool) {
+/// Serve one connection whose transport is already set up (a TLS stream from the edge, a
+/// splice). `advertised`: the broker address to give the client instead of the config's.
+pub async fn serve_connection<S: AsyncRead + AsyncWrite + Send + 'static>(b: Arc<Broker>, io: S, peer: SocketAddr, tls: bool, advertised: Option<(String, u16)>) {
+    let advertised = Arc::new(advertised.unwrap_or_else(|| (b.config.advertised_host.clone(), b.config.advertised_port)));
     let (r, w) = tokio::io::split(io);
     let mut reader = BufReader::with_capacity(64 * 1024, r);
     let (tx, rx) = mpsc::channel::<Out>(b.config.max_in_flight.max(1));
@@ -95,6 +101,7 @@ async fn connection<S: AsyncRead + AsyncWrite + Send + 'static>(b: Arc<Broker>, 
         sasl: None,
         raw_sasl: false,
         tls,
+        advertised,
     };
     let max = b.config.max_request_bytes;
     while let Ok(len) = reader.read_u32().await {

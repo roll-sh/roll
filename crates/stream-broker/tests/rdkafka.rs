@@ -571,3 +571,59 @@ async fn restart_recovers_data_offsets_and_producers() {
     })
     .await;
 }
+
+/// Behind roll cloud's edge (TLS ended in front, `server::serve_connection` with the server name):
+/// each connection is told the hostname it connected with as its broker, so a client of
+/// `<tenant>.kafka.<region>.<domain>` never sees a node's address.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn behind_the_edge_the_broker_is_the_hostname_the_client_used() {
+    let names = ["k1.kafka.localhost", "k2.kafka.localhost"];
+    if !names.iter().all(|n| std::net::ToSocketAddrs::to_socket_addrs(&(*n, 1)).is_ok_and(|mut a| a.any(|a| a.ip().is_loopback()))) {
+        eprintln!("skipped: *.localhost doesn't resolve to loopback here");
+        return;
+    }
+    let tb = TestBroker::start("rdk-edge").await;
+    let ck = rcgen::generate_simple_self_signed(vec!["*.kafka.localhost".into()]).unwrap();
+    let ca = ck.cert.pem();
+    let key = stream_broker::tls::load_key(ck.signing_key.serialize_pem().as_bytes()).unwrap();
+    let tls = stream_broker::tls::acceptor_from(vec![ck.cert.der().clone()], key).unwrap();
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = l.local_addr().unwrap().port();
+    let b = tb.broker.clone();
+    tokio::spawn(async move {
+        loop {
+            let (sock, peer) = l.accept().await.unwrap();
+            let (b, tls) = (b.clone(), tls.clone());
+            tokio::spawn(async move {
+                let Ok(s) = tls.accept(sock).await else { return };
+                let sni = s.get_ref().1.server_name().map(str::to_string);
+                stream_broker::server::serve_connection(b, s, peer, true, sni.map(|n| (n, port))).await;
+            });
+        }
+    });
+    let plain = tb.addr.clone();
+    blocking(move || {
+        for name in names {
+            let addr = format!("{name}:{port}");
+            let tls = [("security.protocol", "ssl"), ("ssl.ca.pem", ca.as_str())];
+            let mut c = config(&addr);
+            for (k, v) in tls {
+                c.set(k, v);
+            }
+            let admin: AdminClient<DefaultClientContext> = c.create().unwrap();
+            let md = admin.inner().fetch_metadata(None, T).unwrap();
+            let brokers: Vec<(String, i32)> = md.brokers().iter().map(|b| (b.host().to_string(), b.port())).collect();
+            assert_eq!(brokers, vec![(name.to_string(), port as i32)]);
+            // Produce and consume through it (the client connects to the advertised name).
+            let topic = format!("edge-{}", &name[..2]);
+            create_topic(&plain, &topic, 1, &[]);
+            let p = producer(&addr, &tls);
+            send(&p, &topic, "k", name);
+            p.flush(T).unwrap();
+            let cons = consumer(&addr, &format!("g-{topic}"), &tls);
+            cons.subscribe(&[&topic]).unwrap();
+            assert_eq!(drain(&cons, 1)[0].3, name);
+        }
+    })
+    .await;
+}

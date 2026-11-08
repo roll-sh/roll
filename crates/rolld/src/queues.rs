@@ -147,8 +147,8 @@ pub struct Queues {
     shovels: Arc<Shovels>,
     logs: Arc<dyn LogStore>,
     args: QueuesArgs,
-    /// Host clients are told to connect to (stream metadata).
-    advertise: String,
+    /// The stream protocol's server: its listener and the edge's connections share it.
+    pub stream: mq_stream::Handle,
     home: std::path::PathBuf,
 }
 
@@ -260,7 +260,8 @@ impl Queues {
                 Box::pin(async move { mq_shovel::stop_migration_body(&b).await })
             }),
         });
-        Ok(Queues { broker, control, cluster, shovels, logs, args, home: dir, advertise: advertise_host })
+        let stream = mq_stream::start(broker.clone(), mq_stream::Config { advertised_host: advertise_host, advertised_port: args.stream.port(), ..mq_stream::Config::new(args.stream) }).await;
+        Ok(Queues { broker, control, cluster, shovels, logs, args, stream, home: dir })
     }
 
     pub fn router(&self) -> axum::Router {
@@ -285,7 +286,7 @@ impl Queues {
         let mgmt_listener = bind(a.management).await?;
 
         let stomp = mq_stomp::Config { listen: a.stomp, ws_listen: Some(a.web_stomp), ..mq_stomp::Config::default() };
-        let stream = mq_stream::Config { advertised_host: self.advertise.clone(), ..mq_stream::Config::new(a.stream) };
+        let stream_listener = bind(a.stream).await?;
         let mqtt = mq_mqtt::Config { listen: a.mqtt, ws_listen: Some(a.web_mqtt), ..mq_mqtt::Config::default() };
         let http = mq_http::Config { listen: a.http, public_url: Some(format!("http://{}", a.http)), ..mq_http::Config::default() };
 
@@ -295,7 +296,7 @@ impl Queues {
             r = mq_stomp::serve(b.clone(), stomp.clone()) => r,
             r = mq_stomp::serve_ws(b.clone(), stomp) => r,
             r = mq_mqtt::serve(b.clone(), mqtt) => r,
-            r = mq_stream::serve(b.clone(), stream) => r,
+            r = self.stream.serve_listener(stream_listener) => r,
             r = mq_http::serve(b.clone(), http) => r,
         }
     }

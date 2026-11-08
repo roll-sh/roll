@@ -17,6 +17,7 @@ const MI_OPTION_PURGE_DELAY: libmimalloc_sys::mi_option_t = 15;
 
 mod cluster;
 mod code;
+mod edge;
 mod nosql;
 mod queues;
 mod storage_events;
@@ -259,6 +260,8 @@ struct Args {
     queues: queues::QueuesArgs,
     #[command(flatten)]
     nosql: nosql::NosqlArgs,
+    #[command(flatten)]
+    edge: edge::EdgeArgs,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -288,7 +291,8 @@ async fn run() -> anyhow::Result<()> {
                 .unwrap_or_else(|_| "info,pg_proxy=info,pg_control=info,pg_storage=info,redis_server=info,redis_control=info,stream_broker=info,tasks=info,code_control=info,code_store=info,code_git=info,code_review=info,code_index=info,mq_core=info,mq_amqp=info,mq_cluster=info,mq_mgmt=info,mq_http=info,mq_mqtt=info,mq_stomp=info,mq_shovel=info,nosql_server=info,nosql_control=info,nosql_storage=info,s3_store=info,s3_server=info,s3_control=info".into()),
         )
         .init();
-    let args = Args::parse();
+    let mut args = Args::parse();
+    edge::configure(&mut args);
     let home = std::path::absolute(&args.home)?;
     let home_abs = home.clone();
     let storage_opts = StorageOpts::from(&args);
@@ -383,10 +387,10 @@ async fn run() -> anyhow::Result<()> {
     info!(storage = %control.objects.description, "durable storage");
     reconciler::recover(&control).await?;
 
-    let proxy = Proxy::new(
+    let proxy = std::sync::Arc::new(Proxy::new(
         api::proxy_router(control.clone()),
         ProxyConfig { listen: args.proxy, default_endpoint: args.default_endpoint.clone() },
-    );
+    ));
     // Serverless Redis: same object storage, its own node.
     let mut rcfg = redis_control::RedisConfig::local(std::path::absolute(&args.home)?.join("redis"));
     rcfg.node_name = args.node.clone();
@@ -465,6 +469,19 @@ async fn run() -> anyhow::Result<()> {
         }
     };
     let router = node.router(router);
+    // roll cloud's public listeners (ROLL_EDGE); the internal API gains /healthz.
+    let products = edge::Products {
+        api: router.clone(),
+        pg: proxy.clone(),
+        redis: redis_dir.clone(),
+        streams: broker.clone(),
+        tasks: tasks.clone(),
+        storage: storage_svc.as_ref().map(|s| s.server.clone()),
+        nosql: nosql.as_ref(),
+        queues: queues.as_ref(),
+    };
+    let edge = edge::Edge::start(&args, &storage, products, std::sync::Arc::new(roll_edge::certs::LocalSingleton)).await?;
+    let router = edge::internal(router, edge.as_ref());
     let queues_serve = async {
         match &queues {
             Some(q) => q.serve().await,
@@ -473,7 +490,8 @@ async fn run() -> anyhow::Result<()> {
     };
 
     tokio::select! {
-        r = proxy.serve() => r?,
+        r = proxy.clone().serve_shared() => r?,
+        r = edge::serve(edge) => r?,
         // Client addresses reach handlers (roll code counts anonymous event streams per address).
         r = axum::serve(listener, router.into_make_service_with_connect_info::<std::net::SocketAddr>()) => r?,
         r = redis_server::net::serve(redis_listener, redis_dir.clone(), redis_opts) => r?,
@@ -805,6 +823,8 @@ async fn shutdown_signal() {
     }
     #[cfg(not(unix))]
     let _ = tokio::signal::ctrl_c().await;
+    // With the edge: out of the load balancer before anything stops.
+    edge::stopping().await;
 }
 
 #[cfg(test)]

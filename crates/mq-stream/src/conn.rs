@@ -24,9 +24,12 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
 use std::time::Duration;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
+
+/// A connection's halves: a TCP socket's own, or a split TLS stream's (the edge).
+type ConnRead = Box<dyn AsyncRead + Send + Unpin>;
+type ConnWrite = Box<dyn AsyncWrite + Send + Unpin>;
 use tokio::sync::{Semaphore, mpsc};
 use tokio::time::Instant;
 use tracing::{debug, warn};
@@ -145,7 +148,7 @@ enum Flow {
 }
 
 struct FrameIn {
-    rd: OwnedReadHalf,
+    rd: ConnRead,
     buf: BytesMut,
 }
 
@@ -196,7 +199,7 @@ fn negotiate(client: u32, server: u32) -> u32 {
     }
 }
 
-async fn write_frame(wr: &mut OwnedWriteHalf, b: &mut BytesMut, at: usize) -> std::io::Result<()> {
+async fn write_frame(wr: &mut ConnWrite, b: &mut BytesMut, at: usize) -> std::io::Result<()> {
     finish(b, at);
     wr.write_all(b).await?;
     b.clear();
@@ -204,7 +207,7 @@ async fn write_frame(wr: &mut OwnedWriteHalf, b: &mut BytesMut, at: usize) -> st
 }
 
 /// Peer properties, SASL PLAIN, tune and open. `None`: the connection is to be closed.
-async fn handshake(server: &Server, fin: &mut FrameIn, wr: &mut OwnedWriteHalf, peer: SocketAddr) -> anyhow::Result<Option<Session>> {
+async fn handshake(server: &Server, fin: &mut FrameIn, wr: &mut ConnWrite, peer: SocketAddr) -> anyhow::Result<Option<Session>> {
     let broker = &server.broker;
     let mut b = BytesMut::with_capacity(512);
     let mut client_properties = Vec::new();
@@ -323,11 +326,16 @@ async fn handshake(server: &Server, fin: &mut FrameIn, wr: &mut OwnedWriteHalf, 
 
 /// Serve one accepted socket until it closes.
 pub(crate) async fn run(server: Arc<Server>, sock: TcpStream, peer: SocketAddr, local: SocketAddr) -> anyhow::Result<()> {
+    let (rd, wr) = sock.into_split();
+    run_split(server, Box::new(rd), Box::new(wr), peer, local, false).await
+}
+
+/// Serve one connection from its two halves; `tls` is reported to the management API.
+pub(crate) async fn run_split(server: Arc<Server>, rd: ConnRead, mut wr: ConnWrite, peer: SocketAddr, local: SocketAddr, tls: bool) -> anyhow::Result<()> {
     let broker = server.broker.clone();
     if broker.draining.load(Ordering::Relaxed) {
         return Ok(());
     }
-    let (rd, mut wr) = sock.into_split();
     let mut fin = FrameIn { rd, buf: BytesMut::with_capacity(64 << 10) };
     let session = tokio::time::timeout(HANDSHAKE_TIMEOUT, handshake(&server, &mut fin, &mut wr, peer)).await;
     let Ok(Ok(Some(s))) = session else {
@@ -351,7 +359,7 @@ pub(crate) async fn run(server: Arc<Server>, sock: TcpStream, peer: SocketAddr, 
         local,
         client_properties: serde_json::Value::Object(props),
         connected_at_ms: mq_core::now_ms(),
-        tls: false,
+        tls,
         auth_mechanism: "PLAIN".into(),
         frame_max: s.frame_max.into(),
         channel_max: 0.into(),
@@ -1417,7 +1425,7 @@ fn encode_out(buf: &mut BytesMut, item: Out, shared: &Shared) -> (usize, bool) {
     (0, false)
 }
 
-async fn writer_loop(mut wr: OwnedWriteHalf, mut rx: mpsc::UnboundedReceiver<Out>, shared: Arc<Shared>, heartbeat: u32) {
+async fn writer_loop(mut wr: ConnWrite, mut rx: mpsc::UnboundedReceiver<Out>, shared: Arc<Shared>, heartbeat: u32) {
     let mut buf = BytesMut::with_capacity(256 << 10);
     let idle = Duration::from_secs(heartbeat.max(1) as u64);
     loop {

@@ -70,6 +70,10 @@ x509-parser = "0.18"
 pg-control = { path = "crates/pg-control" }
 pg-storage = { path = "crates/pg-storage" }
 pg-proxy = { path = "crates/pg-proxy" }
+# roll cloud's edge: TLS, SNI and Host routing, PROXY protocol, ACME.
+roll-edge = { path = "crates/roll-edge" }
+# ACME (DNS-01) for the edge's certificates; ring, like the rest of the workspace's rustls.
+instant-acme = { version = "0.8", default-features = false, features = ["ring", "hyper-rustls", "rcgen"] }
 stream-log = { path = "crates/stream-log" }
 stream-broker = { path = "crates/stream-broker" }
 crc32fast = "1"

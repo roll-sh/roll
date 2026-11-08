@@ -147,6 +147,59 @@ written once in SQLite's dialect), as roll code's did.
   Cloudflare can send a proxied request to the right region when there is more than one.
 - roll.cloud isn't needed. If it's bought, it only redirects to roll.sh.
 
+### The edge in rolld
+
+`crates/roll-edge` is the edge; `crates/rolld/src/edge.rs` runs it in front of the products
+when `ROLL_EDGE=1` (without it rolld is unchanged).
+
+| listener | what happens |
+| --- | --- |
+| 8443 (HTTPS) | HTTP/1.1, routed by `Host`: `roll.sh` → `ROLL_DASHBOARD_UPSTREAM` (streamed, WebSockets included) except `/<owner>/<repo>.git/…` → code's git routes; `git.roll.sh` → code's git routes; `api.roll.sh` → rolld's API router; `<id>.redis.…` → Redis REST; `<id>.kafka.…` → the streams HTTP API; `<id>.nosql.…` → Alternator; `<id>.mq.…` → web-STOMP or web-MQTT by `Sec-WebSocket-Protocol`, else the queues HTTP API; `tasks.…` → tasks (`/v1/tasks/…`); `s3.…`, `<bucket>.s3.…` → the S3 server; `chg-<id>.roll.site` → code previews. `<bucket>.roll.site` answers 404 at the origin: it is served by the CDN Worker. |
+| 5432 | `SSLRequest` → `S` → TLS, or TLS straight away (`sslnegotiation=direct`, ALPN `postgresql`); `GSSENCRequest` → `N`; a startup packet in the clear is refused (`08P01`); cancel requests may come in the clear. The endpoint is the server name's `<id>`, else `options=endpoint=<id>`; naming two different ones is an error. |
+| 6379 | TLS, then Redis with the server name (the database is its first label). |
+| 9092 | TLS, then Kafka; metadata names the server name the client used (one virtual broker per hostname), never a node address. |
+| 9042 | TLS, then CQL with the server name (the database is its first label). |
+| 5671, 8883, 61614, 5551 | TLS, then AMQP (0-9-1 and 1.0), MQTT, STOMP and the RabbitMQ stream protocol. |
+
+- **Client addresses** come from the PROXY protocol header (v1 or v2, at most 512 bytes after
+  the fixed part, read under the handshake deadline). On the HTTPS listener handlers get it as
+  `ConnectInfo` and in `X-Forwarded-For` (whatever the client sent is dropped). For a proxied
+  hostname whose peer is a Cloudflare address, `CF-Connecting-IP` is the client; the ranges are in
+  `roll-edge/src/trusted.rs` and `ROLL_EDGE_CLOUDFLARE_IPS` replaces them.
+- **Authenticated origin pulls.** Proxied hostnames (`roll.sh`, `www.roll.sh`, `api.roll.sh`,
+  `*.roll.site`) are handshaken only with Cloudflare's origin-pull client certificate (the CA is
+  `roll-edge/src/cloudflare-origin-pull-ca.pem`, valid to 2029-11-01; `ROLL_EDGE_ORIGIN_PULL_CA`
+  replaces it), and a request naming one of them on a connection that didn't show it gets 403,
+  whatever the TLS server name was. DNS-only hostnames ask for no client certificate.
+- **Certificates**: two sets, so roll.sh and roll.site never share one: `roll.sh`, `api.roll.sh`,
+  `git.roll.sh`, `tasks.us-east-1.roll.sh` and `*.{pg,redis,kafka,nosql,mq}.us-east-1.roll.sh`;
+  and `*.roll.site`, `s3.us-east-1.roll.site`, `*.s3.us-east-1.roll.site`. Bucket names with
+  dots aren't covered by the wildcard and use path style, as on S3. They're stored sealed under
+  `ROLL_SECRET_KEY` (`system/certs/{product,site}.sealed`, plus the ACME account), every node
+  polls them (`ROLL_EDGE_CERT_POLL_S`, 600) and installs a new one without a restart, and the node
+  holding the `acme` singleton orders what's missing or within 30 days of expiry (backing off an
+  hour after a failed order). `roll_edge::certs::Singleton` is the seam for roll-cluster's
+  `singleton(name)`; rolld passes `LocalSingleton` until the merge.
+- **Healthy** (`/healthz` 200) once a certificate is loaded and until SIGTERM. Then `/healthz`
+  fails at once, the public listeners keep accepting and serving for `ROLL_EDGE_DRAIN_DELAY`
+  (15 s) while the NLB takes the node out, keep-alive HTTP connections are closed after their
+  request in flight, and only then do the products start their own drains.
+- **Forwarding TCP** to a tenant's owner: `roll_edge::splice::splice(client, owner_url, signer,
+  hop, first_bytes)` opens an HTTP upgrade to the owner's `/internal/edge/splice` (HMAC-SHA256
+  over the hop and the time under the cluster secret, 60 s skew), writes the bytes already read,
+  then copies both ways. The owner hands the stream to the handler its product registered;
+  Postgres's is registered (the proxy, with the endpoint as named).
+- **Dev mode**: `ROLL_EDGE_CERT_DIR` serves its `<name>.crt`/`<name>.key` pairs (reloaded when
+  they change) and writes a self-signed certificate for every edge name when it has none; origin
+  pulls are off unless `ROLL_EDGE_ORIGIN_PULL=1`. Every listener's address is a setting
+  (`ROLL_EDGE_HTTPS`, `ROLL_EDGE_PG`, `ROLL_EDGE_REDIS`, `ROLL_EDGE_KAFKA`, `ROLL_EDGE_NOSQL`,
+  `ROLL_EDGE_AMQPS`, `ROLL_EDGE_MQTTS`, `ROLL_EDGE_STOMPS`, `ROLL_EDGE_MQ_STREAM`; `0.0.0.0` and
+  the public port by default), so a laptop can run it next to a local Postgres.
+- With the edge on, rolld points the products' own names at the edge's unless they're set:
+  `ROLL_S3_DOMAIN`, Alternator's domain, `ROLL_CODE_PREVIEW_DOMAIN` (`roll.site`), roll code's
+  public, git and web URLs; its own plain Kafka listener moves to `127.0.0.1:19092` if it would
+  take the edge's port.
+
 ## Deploys, scaling and failure
 
 - **Pipeline** (`.github/workflows/deploy.yml`): every merge to `main` builds one arm64 image
@@ -237,6 +290,8 @@ The contract between the stack, the image and rolld. Each setting is a flag with
 | `ROLL_ACME_DIRECTORY`, `ROLL_ACME_EMAIL` | Let's Encrypt production, ops address | |
 | `ROLL_CLOUDFLARE_API_TOKEN` | from Secrets Manager | DNS edit on both zones, for DNS-01 only |
 | `ROLL_DASHBOARD_UPSTREAM` | `http://127.0.0.1:3000` | the dashboard container in the same task |
+| `ROLL_EDGE_DRAIN_DELAY` | `15` | seconds the public listeners keep serving after `/healthz` starts failing |
+| `ROLL_EDGE_ORIGIN_PULL` | `1` (the default outside dev mode) | Cloudflare's origin-pull certificate required on proxied hostnames |
 | `ROLL_DRAIN_TIMEOUT` | `90` | seconds a stopping node waits for its leases to move; `ROLL_CODE_DRAIN_TIMEOUT` stays an alias |
 | `ROLL_LOG_FORMAT` | `json` | one JSON object per line (see "Logs") |
 | `ROLL_CODE_PREVIEW_DOMAIN` | `roll.site` | previews answer on `chg-<id>.roll.site` |
@@ -280,7 +335,7 @@ assume two fields:
 | --- | --- |
 | code + agents on the cluster layer | built: `crates/roll-cluster` with Memory, Postgres and DynamoDB backends; `ROLL_CLUSTER_*`, `ROLL_NODE_ID`, `ROLL_ZONE`, `ROLL_ADVERTISE_URL`, `ROLL_DRAIN_TIMEOUT` in rolld |
 | AWS stack, image, pipeline, Cloudflare | built (`deploy/cloud/README.md`); not yet run against AWS |
-| edge | in progress |
+| edge | built (`crates/roll-edge`, `rolld/src/edge.rs`); not yet run against AWS |
 | control-plane auth lockdown | in progress |
 | GitHub resilience | done |
 | tasks, queues, storage, redis, streams, nosql on the cluster layer | next, one product per change |

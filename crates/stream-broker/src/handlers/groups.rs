@@ -54,8 +54,8 @@ pub fn assignment_partitions(assignment: &Bytes) -> Vec<(String, Vec<i32>)> {
 }
 
 pub fn find_coordinator(ctx: &Ctx, req: FindCoordinatorRequest) -> FindCoordinatorResponse {
-    let host = s(ctx.b.config.advertised_host.clone());
-    let port = ctx.b.config.advertised_port as i32;
+    let host = s(ctx.advertised_host().to_string());
+    let port = ctx.advertised_port() as i32;
     let node = BrokerId(ctx.b.config.node_id);
     if !matches!(req.key_type, 0 | 1) {
         let e = ResponseError::InvalidRequest.code();

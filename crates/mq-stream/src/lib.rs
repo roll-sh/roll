@@ -23,6 +23,7 @@ use mq_core::broker::{Broker, Event};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpListener;
 use tracing::{debug, info};
 
@@ -72,17 +73,23 @@ pub async fn serve(broker: Arc<Broker>, config: Config) -> anyhow::Result<()> {
 
 /// Serve stream connections on an already bound listener forever.
 pub async fn serve_listener(broker: Arc<Broker>, listener: TcpListener, mut config: Config) -> anyhow::Result<()> {
-    let port = listener.local_addr()?.port();
     if config.advertised_port == 0 {
-        config.advertised_port = port;
+        config.advertised_port = listener.local_addr()?.port();
     }
+    start(broker, config).await.serve_listener(listener).await
+}
+
+/// A stream protocol server: what its listener and connections from elsewhere (the edge's TLS
+/// streams) share: stored offsets, publisher sequences, single-active-consumer groups.
+#[derive(Clone)]
+pub struct Handle(Arc<Server>);
+
+/// Open the server's state. `config.advertised_port` 0 stays 0 until a listener is served.
+pub async fn start(broker: Arc<Broker>, mut config: Config) -> Handle {
     if config.advertised_host.is_empty() {
         config.advertised_host = "localhost".into();
     }
-    info!(addr = %config.listen, port, "stream listening");
-    broker.listeners.write().push(mq_core::broker::Listener { protocol: "stream".into(), port, ip_address: config.listen.ip().to_string() });
     let store = store::Store::open(broker.meta.clone()).await;
-    let server = Arc::new(Server { broker: broker.clone(), config, sac: sac::Coordinator::default(), store: store.clone() });
 
     // Stored offsets and publisher sequences go with their stream.
     let mut events = broker.events.subscribe();
@@ -99,19 +106,37 @@ pub async fn serve_listener(broker: Arc<Broker>, listener: TcpListener, mut conf
             }
         }
     });
+    Handle(Arc::new(Server { broker, config, sac: sac::Coordinator::default(), store }))
+}
 
-    loop {
-        let (sock, peer) = listener.accept().await?;
-        if broker.draining.load(Ordering::Relaxed) {
-            continue;
-        }
-        let _ = sock.set_nodelay(true);
-        let local = sock.local_addr().unwrap_or(server.config.listen);
-        let server = server.clone();
-        tokio::spawn(async move {
-            if let Err(e) = conn::run(server, sock, peer, local).await {
-                debug!(%peer, error = %e, "stream connection ended");
+impl Handle {
+    /// Serve one connection whose transport is already set up; `tls` is reported to the
+    /// management API.
+    pub async fn serve_connection<S: AsyncRead + AsyncWrite + Send + Unpin + 'static>(&self, stream: S, peer: SocketAddr, local: SocketAddr, tls: bool) -> anyhow::Result<()> {
+        let (rd, wr) = tokio::io::split(stream);
+        conn::run_split(self.0.clone(), Box::new(rd), Box::new(wr), peer, local, tls).await
+    }
+
+    /// Accept connections on `listener` forever.
+    pub async fn serve_listener(&self, listener: TcpListener) -> anyhow::Result<()> {
+        let server = &self.0;
+        let broker = &server.broker;
+        let port = listener.local_addr()?.port();
+        info!(addr = %server.config.listen, port, "stream listening");
+        broker.listeners.write().push(mq_core::broker::Listener { protocol: "stream".into(), port, ip_address: server.config.listen.ip().to_string() });
+        loop {
+            let (sock, peer) = listener.accept().await?;
+            if broker.draining.load(Ordering::Relaxed) {
+                continue;
             }
-        });
+            let _ = sock.set_nodelay(true);
+            let local = sock.local_addr().unwrap_or(server.config.listen);
+            let server = server.clone();
+            tokio::spawn(async move {
+                if let Err(e) = conn::run(server, sock, peer, local).await {
+                    debug!(%peer, error = %e, "stream connection ended");
+                }
+            });
+        }
     }
 }
