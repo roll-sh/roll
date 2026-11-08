@@ -715,18 +715,28 @@ impl Db {
         )?)
     }
 
-    /// Pending deliveries due by `now_ms`, oldest first.
-    pub fn due_deliveries(&self, now_ms: i64, limit: usize) -> Result<Vec<DeliveryRow>> {
+    /// Pending deliveries due by `now_ms`, oldest first: to webhooks and review apps when
+    /// `github` is false, to GitHub (`gh_…`, sent by each repo's owner) when it's true.
+    pub fn due_deliveries(&self, now_ms: i64, limit: usize, github: bool) -> Result<Vec<DeliveryRow>> {
+        let op = if github { "=" } else { "<>" };
         Ok(self.sql().query(
-            &format!("SELECT {DELIVERY_COLS} FROM review_deliveries WHERE state = 'pending' AND next_at <= ? ORDER BY next_at, rowid LIMIT ?"),
+            &format!("SELECT {DELIVERY_COLS} FROM review_deliveries WHERE state = 'pending' AND next_at <= ? AND substr(app_id, 1, 3) {op} 'gh_' ORDER BY next_at, rowid LIMIT ?"),
             params![now_ms, crate::db::limit(limit)],
             delivery_row,
         )?)
     }
 
-    /// When the next pending delivery is due.
-    pub fn next_delivery_at(&self) -> Result<Option<i64>> {
-        Ok(self.sql().query_row("SELECT MIN(next_at) FROM review_deliveries WHERE state = 'pending'", (), |r| r.get(0))?)
+    /// When the next pending delivery is due. GitHub's count only from `after_ms` on when
+    /// `github_after` is set: those due now belong to repos another node owns.
+    pub fn next_delivery_at(&self, github_after: Option<i64>) -> Result<Option<i64>> {
+        Ok(match github_after {
+            None => self.sql().query_row("SELECT MIN(next_at) FROM review_deliveries WHERE state = 'pending'", (), |r| r.get(0))?,
+            Some(after) => self.sql().query_row(
+                "SELECT MIN(next_at) FROM review_deliveries WHERE state = 'pending' AND (substr(app_id, 1, 3) <> 'gh_' OR next_at > ?)",
+                [after],
+                |r| r.get(0),
+            )?,
+        })
     }
 
     /// Take a due delivery to send it, until `until_ms` (the database's clock); `false` if

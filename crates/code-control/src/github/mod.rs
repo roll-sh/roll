@@ -8,12 +8,18 @@
 //!   become work items, and a direct push to the default branch is ingested as landed history
 //!   (merged with roll's newer landings when both moved).
 //! - [`notify`] reports back: landed PRs are commented on and closed, finished issues closed,
-//!   and checks become check runs.
+//!   and checks become check runs, all from the durable delivery queue ([`outbox`]).
+//! - Nothing is lost while either side is down: [`outbox`] retries until GitHub answers, and
+//!   [`catchup`] asks GitHub to redeliver what roll missed, then [`reconcile`] compares branch
+//!   heads and pull requests for anything older.
 
+mod catchup;
 pub(crate) mod commands;
 pub(crate) mod inbox;
 pub(crate) mod mirror;
 mod notify;
+pub(crate) mod outbox;
+mod reconcile;
 mod reviews;
 pub(crate) mod sync;
 
@@ -43,10 +49,26 @@ CREATE TABLE IF NOT EXISTS github_marks (
 "#;
 
 /// Tunables; the defaults suit production.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct Options {
     pub mirror: MirrorConfig,
     pub client: ClientOptions,
+    /// How often one node asks GitHub to redeliver webhooks roll missed ([`catchup`]).
+    pub catchup_every: std::time::Duration,
+    /// How often a repo's owner compares GitHub's branches and pull requests with roll's
+    /// ([`reconcile`]); it also does when it takes the repo.
+    pub reconcile_every: std::time::Duration,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Options {
+            mirror: MirrorConfig::default(),
+            client: ClientOptions::default(),
+            catchup_every: std::time::Duration::from_secs(5 * 60),
+            reconcile_every: std::time::Duration::from_secs(10 * 60),
+        }
+    }
 }
 
 /// The configured App: REST client, git client and the running mirrors.
@@ -57,7 +79,12 @@ pub struct Hub {
     git: code_git::Client,
     mirrors: Mutex<HashMap<String, mpsc::UnboundedSender<mirror::Cmd>>>,
     imports: Mutex<HashSet<String>>,
-    /// One handler of a repo's GitHub delivery parts at a time ([`inbox`]).
+    /// Repos whose reconcile loop runs here ([`reconcile`]).
+    reconcilers: Mutex<HashSet<String>>,
+    /// One send to GitHub per repo at a time ([`outbox`]).
+    outbox_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// One handler of a repo's GitHub delivery parts at a time ([`inbox`]); reconciling holds it
+    /// too.
     inbox_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// Tests: parts wait while set; parts started; the claim of an attempt (ms).
     inbox_hang: std::sync::atomic::AtomicBool,
@@ -123,14 +150,18 @@ pub fn enable(code: &Arc<Code>, config: AppConfig, opts: Options) -> anyhow::Res
         git: code_git::Client::new(code_git::Limits::default()),
         mirrors: Mutex::new(HashMap::new()),
         imports: Mutex::new(HashSet::new()),
+        reconcilers: Mutex::new(HashSet::new()),
+        outbox_locks: Mutex::new(HashMap::new()),
         inbox_locks: Mutex::new(HashMap::new()),
         inbox_hang: Default::default(),
         inbox_started: Default::default(),
         inbox_claim_ms: std::sync::atomic::AtomicU64::new(inbox::CLAIM.as_millis() as u64),
     });
     code.github.set(hub).map_err(|_| anyhow::anyhow!("GitHub is already enabled"))?;
-    notify::start(code.clone());
     inbox::start_poll(code);
+    catchup::start(code);
+    // GitHub deliveries a previous process queued go out without waiting for a new one.
+    code.kick_deliveries();
     // Pick up where a restart left off (in a cluster: the repos this node owns; the others
     // start on whichever node takes them).
     for r in linked_repos(code)? {
@@ -158,8 +189,14 @@ pub(crate) fn resume(code: &Arc<Code>, r: &RepoRow) {
         forget(code, &r.id);
         return;
     }
+    // Its GitHub deliveries go out from here now.
+    code.kick_deliveries();
     match r.import.as_ref().and_then(|i| i.get("state")).and_then(Value::as_str) {
-        Some("done") => mirror::start(code, &r.id),
+        Some("done") => {
+            mirror::start(code, &r.id);
+            // Whatever happened on GitHub while nobody here was listening.
+            reconcile::start(code, &r.id, true);
+        }
         _ => sync::start_import(code, &r.id),
     }
 }
@@ -170,6 +207,7 @@ pub(crate) fn stop(code: &Code, repo_id: &str) {
     if let Some(h) = code.github_hub() {
         h.mirrors.lock().remove(repo_id);
         h.imports.lock().remove(repo_id);
+        h.reconcilers.lock().remove(repo_id);
     }
 }
 
@@ -318,6 +356,7 @@ pub(crate) fn connected(code: &Arc<Code>, repo_id: &str) {
 pub(crate) fn forget(code: &Code, repo_id: &str) {
     if let Some(h) = code.github_hub() {
         h.mirrors.lock().remove(repo_id);
+        h.reconcilers.lock().remove(repo_id);
     }
 }
 

@@ -6,8 +6,8 @@
 use crate::auth::{AppAuth, InstallationToken, parse_timestamp, unix_now};
 use crate::config::percent_encode;
 use crate::model::{
-    Branch, CheckRun, CheckRunRequest, Comment, Environment, Installation, Issue, Label, Milestone,
-    Person, PullRequest, RepoLabel, Repository, Team, Workflow,
+    Branch, CheckRun, CheckRunRequest, Comment, Environment, HookDelivery, Installation, Issue,
+    Label, Milestone, Person, PullRequest, RepoLabel, Repository, Team, Workflow,
 };
 use crate::{AppConfig, Error, Result};
 use parking_lot::Mutex;
@@ -20,6 +20,17 @@ use std::time::Duration;
 use tracing::{debug, warn};
 
 const API_VERSION: &str = "2022-11-28";
+
+tokio::task_local! {
+    static IMPATIENT: bool;
+}
+
+/// Run `f` with every request in it impatient: a rate limit (`retry-after`, `x-ratelimit-reset`,
+/// a secondary limit) is [`Error::RateLimited`] with its reset at once instead of a wait, so a
+/// durable queue can schedule the retry for then rather than hold a worker.
+pub async fn impatiently<F: std::future::Future>(f: F) -> F::Output {
+    IMPATIENT.scope(true, f).await
+}
 
 #[derive(Clone, Debug)]
 pub struct ClientOptions {
@@ -196,6 +207,36 @@ impl GitHub {
         };
         self.auth.store_token(installation, token.clone());
         Ok(token)
+    }
+
+    /// The App's webhook delivery log, newest first, back to `since` (unix seconds): GitHub keeps
+    /// three days of it. Follows the log's cursor (`Link: rel="next"`) up to `max_pages`.
+    pub async fn hook_deliveries(&self, since: u64) -> Result<Vec<HookDelivery>> {
+        let mut out = Vec::new();
+        let mut next = Some("/app/hook/deliveries?per_page=100".to_string());
+        let mut pages = 0;
+        while let Some(url) = next.take() {
+            pages += 1;
+            if pages > self.opts.max_pages {
+                warn!(pages = self.opts.max_pages, "github delivery log truncated at max_pages");
+                break;
+            }
+            let raw = self.execute(Who::App, Method::GET, &url, None).await?;
+            let page: Vec<HookDelivery> = decode(&raw.body)?;
+            let older = page.iter().any(|d| {
+                d.delivered_at.as_deref().and_then(parse_timestamp).is_some_and(|t| t < since)
+            });
+            out.extend(page);
+            next = if older { None } else { raw.next };
+        }
+        Ok(out)
+    }
+
+    /// Ask GitHub to send delivery `id` again (`POST /app/hook/deliveries/{id}/attempts`).
+    pub async fn redeliver(&self, id: u64) -> Result<()> {
+        let path = format!("/app/hook/deliveries/{id}/attempts");
+        self.execute(Who::App, Method::POST, &path, None).await?;
+        Ok(())
     }
 
     // ── repositories ──
@@ -536,6 +577,35 @@ impl GitHub {
         );
         self.list(Who::Installation(installation), &path, None)
             .await
+    }
+
+    /// Pull requests in any state, most recently updated first, back to `since` (unix seconds;
+    /// a pull request without `updated_at` counts as recent).
+    pub async fn pull_requests_updated_since(
+        &self,
+        installation: u64,
+        owner: &str,
+        repo: &str,
+        since: u64,
+    ) -> Result<Vec<PullRequest>> {
+        let mut out = Vec::new();
+        let mut next = Some(repo_path(owner, repo, "/pulls?state=all&sort=updated&direction=desc&per_page=100"));
+        let mut pages = 0;
+        while let Some(url) = next.take() {
+            pages += 1;
+            if pages > self.opts.max_pages {
+                break;
+            }
+            let raw = self.execute(Who::Installation(installation), Method::GET, &url, None).await?;
+            let page: Vec<PullRequest> = decode(&raw.body)?;
+            let recent = |p: &PullRequest| {
+                p.updated_at.as_deref().and_then(parse_timestamp).is_none_or(|t| t >= since)
+            };
+            let older = page.iter().any(|p| !recent(p));
+            out.extend(page.into_iter().filter(recent));
+            next = if older { None } else { raw.next };
+        }
+        Ok(out)
     }
 
     /// Open a pull request from `head` (a branch of the same repository) into `base`.
@@ -1026,6 +1096,8 @@ impl GitHub {
         } else {
             format!("{}{}", self.config.api_base, path)
         };
+        let mut how = how;
+        how.impatient |= IMPATIENT.try_with(|i| *i).unwrap_or(false);
         let mut attempt = 0;
         loop {
             self.wait_for_budget(who, how.impatient).await?;

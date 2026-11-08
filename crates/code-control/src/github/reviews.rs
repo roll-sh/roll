@@ -8,14 +8,13 @@
 //!   to it (as the App) and keyed the same way. roll's own webhooks are recognised by the App's
 //!   bot login and ignored, so nothing echoes.
 
-use super::{Hub, Link, clear_mark, link_of, mark, set_mark, set_mark_in};
+use super::{Hub, Link, link_of, mark, set_mark, set_mark_in};
 use crate::model::{Change, RepoRow};
 use crate::review::{Origin, Reviewer, ReviewerKind, Thread, Verdict};
 use crate::{Code, Error, Result, cs_id, new_id};
 use code_github::model::{CreateReview, DraftReviewComment, ReviewComment, User};
 use code_github::webhook::{CommentAction, PullRequestReviewCommentEvent, PullRequestReviewEvent, PullRequestReviewThreadEvent, ReviewAction, ThreadAction};
 use code_sql::{OptionalExtension, params};
-use serde_json::Value;
 
 const SOURCE: &str = "github";
 
@@ -289,23 +288,19 @@ fn draft(th: &Thread, body: &str) -> DraftReviewComment {
     }
 }
 
-/// A review made in roll, posted to the pull request with its inline comments.
-pub(crate) async fn post_review(code: &Code, hub: &Hub, data: &Value) -> Result<()> {
-    if data["source"] != "roll" {
-        return Ok(());
-    }
-    let (Some(id), Some(change)) = (data["id"].as_str(), data["change"].as_str()) else { return Ok(()) };
+/// A review made in roll, posted to the pull request with its inline comments (once: GitHub's
+/// review id is kept on it, and the mark says it went).
+pub(crate) async fn post_review(code: &Code, hub: &Hub, id: &str) -> Result<()> {
     let Some(v) = code.db.review(id)? else { return Ok(()) };
-    if v.external_id.is_some() || v.dismissed {
+    if v.source != "roll" || v.external_id.is_some() || v.dismissed {
         return Ok(());
     }
-    let c = code.change_or_404(change)?;
+    let c = code.change_or_404(&v.change)?;
     let Some((_, l, pr, commit)) = pr_and_commit(code, &c)? else { return Ok(()) };
     let key = format!("gh-review:{id}");
-    if mark(code, &key)?.is_some() {
+    if super::notify::done(code, &key)? {
         return Ok(());
     }
-    set_mark(code, &key, "pending")?;
     let threads: Vec<Thread> = code.db.threads(&c.id)?.into_iter().filter(|t| t.review.as_deref() == Some(id) && t.external_id.is_none() && !t.outdated).collect();
     let comments: Vec<DraftReviewComment> = threads.iter().filter_map(|t| t.comments.first().map(|cm| draft(t, &signed(&cm.author, &cm.body)))).collect();
     let event = match v.verdict {
@@ -314,7 +309,7 @@ pub(crate) async fn post_review(code: &Code, hub: &Hub, data: &Value) -> Result<
         Verdict::Comment => "COMMENT",
     };
     let req = CreateReview { commit_id: commit.clone(), body: signed(&v.reviewer, &v.body), event: event.into(), comments };
-    let result = async {
+    {
         let posted = match hub.client.create_review(l.installation_id, &l.owner, &l.repo, pr, &req).await {
             Ok(p) => p,
             // GitHub refuses some verdicts from Apps (or on their own PRs): post it as a comment.
@@ -339,22 +334,13 @@ pub(crate) async fn post_review(code: &Code, hub: &Hub, data: &Value) -> Result<
                 }
             }
         }
-        Ok::<_, Error>(())
     }
-    .await;
-    match result {
-        Ok(()) => set_mark(code, &key, "done"),
-        Err(e) => {
-            clear_mark(code, &key)?;
-            Err(e)
-        }
-    }
+    set_mark(code, &key, "done")
 }
 
 /// Comments made in roll on a pull request's change: a new thread starts one on GitHub, a
 /// reply answers in it.
-pub(crate) async fn post_thread(code: &Code, hub: &Hub, data: &Value) -> Result<()> {
-    let Some(id) = data["id"].as_str() else { return Ok(()) };
+pub(crate) async fn post_thread(code: &Code, hub: &Hub, id: &str) -> Result<()> {
     let Some(th) = code.db.thread(id)? else { return Ok(()) };
     let c = code.change_or_404(&th.change)?;
     let Some((_, l, pr, commit)) = pr_and_commit(code, &c)? else { return Ok(()) };
@@ -364,10 +350,9 @@ pub(crate) async fn post_thread(code: &Code, hub: &Hub, data: &Value) -> Result<
     }
     for cm in th.comments.iter().filter(|cm| cm.source == "roll" && cm.external_id.is_none()) {
         let key = format!("gh-comment:{}", cm.id);
-        if mark(code, &key)?.is_some() {
+        if super::notify::done(code, &key)? {
             continue;
         }
-        set_mark(code, &key, "pending")?;
         let current = code.db.thread(&th.id)?.unwrap_or_else(|| th.clone());
         let posted = match &current.external_id {
             Some(root) => match root.parse::<u64>() {
@@ -385,10 +370,7 @@ pub(crate) async fn post_thread(code: &Code, hub: &Hub, data: &Value) -> Result<
                 }
                 set_mark(code, &key, "done")?;
             }
-            Err(e) => {
-                clear_mark(code, &key)?;
-                return Err(gh(e));
-            }
+            Err(e) => return Err(gh(e)),
         }
     }
     sync_resolution(code, hub, &l, pr, &th.id).await

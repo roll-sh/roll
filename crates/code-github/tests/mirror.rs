@@ -124,6 +124,22 @@ fn transient_failures_back_off_exponentially() {
     assert_eq!((s.failures, s.last_error, s.retry_in), (0, None, None));
 }
 
+/// However long GitHub was down, the next attempt after it comes back is at most 30 s away.
+#[test]
+fn a_long_outage_retries_within_thirty_seconds() {
+    let t0 = Instant::now();
+    let mut m = Mirror::new(MirrorConfig::default(), Some("c0".into()));
+    m.landed("c1", t0);
+    let mut now = t0 + Duration::from_secs(60);
+    for _ in 0..50 {
+        assert!(matches!(m.poll(now), MirrorAction::Push { .. }));
+        m.push_failed(PushFailure::Transient("503".into()), now, &ancestry);
+        let wait = m.status(now).retry_in.unwrap();
+        assert!(wait <= Duration::from_secs(30), "{wait:?}");
+        now += wait;
+    }
+}
+
 #[test]
 fn stale_view_after_lost_response_retries_immediately() {
     let t0 = Instant::now();

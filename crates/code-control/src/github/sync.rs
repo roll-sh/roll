@@ -31,7 +31,7 @@ fn oid_hex(s: &str) -> Option<Oid> {
     ObjectId::from_hex(s.as_bytes()).map(|o| Oid(o.0))
 }
 
-async fn credentials(hub: &Hub, link: &Link) -> Result<(String, Credentials)> {
+pub(super) async fn credentials(hub: &Hub, link: &Link) -> Result<(String, Credentials)> {
     let c = hub.client.git_credentials(link.installation_id, &link.owner, &link.repo).await.map_err(gh)?;
     Ok((c.url, Credentials { username: c.username, password: c.password }))
 }
@@ -56,7 +56,11 @@ pub(crate) fn start_import(code: &Arc<Code>, repo_id: &str) {
             match result {
                 // The repo moved to another node, which imports it again.
                 None => {}
-                Some(Ok(())) => mirror::start(&code, &repo_id),
+                Some(Ok(())) => {
+                    mirror::start(&code, &repo_id);
+                    // The import read everything; the next look is a while away.
+                    super::reconcile::start(&code, &repo_id, false);
+                }
                 Some(Err(e)) => {
                     tracing::warn!(repo = %repo_id, error = %e, "GitHub import failed");
                     let commits = code.db.repo_by_id(&repo_id).ok().flatten().and_then(|r| r.import).and_then(|i| i["commits"].as_u64()).unwrap_or(0);
@@ -377,7 +381,7 @@ pub(crate) async fn upsert_pr(code: &Code, hub: &Hub, r: &RepoRow, link: &Link, 
 
 // ── pushes ──
 
-async fn handle_push(code: &Arc<Code>, hub: &Hub, r: &RepoRow, link: &Link, p: &PushDraft) -> Result<()> {
+pub(super) async fn handle_push(code: &Arc<Code>, hub: &Hub, r: &RepoRow, link: &Link, p: &PushDraft) -> Result<()> {
     let is_default = p.branch() == Some(r.default_branch.as_str());
     if p.sender.as_deref() == Some(hub.config.bot_login().as_str()) {
         // Our own mirror push coming back.

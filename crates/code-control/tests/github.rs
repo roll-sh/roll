@@ -407,7 +407,7 @@ fn enable(a: &App, g: &GitHub, mirror: MirrorConfig) {
     config.api_base = format!("{}/api", g.base);
     config.web_base = format!("{}/git", g.base);
     let client = ClientOptions { max_retries: 1, timeout: Duration::from_secs(10), ..Default::default() };
-    github::enable(&a.code, config, Options { mirror, client }).unwrap();
+    github::enable(&a.code, config, Options { mirror, client, ..Default::default() }).unwrap();
 }
 
 fn fast_mirror() -> MirrorConfig {

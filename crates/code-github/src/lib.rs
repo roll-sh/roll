@@ -18,7 +18,7 @@ pub mod model;
 pub mod webhook;
 
 pub use auth::{AppAuth, InstallationToken};
-pub use client::{BranchProtection, ClientOptions, GitCredentials, GitHub, ListPage, RateLimit};
+pub use client::{BranchProtection, ClientOptions, GitCredentials, GitHub, ListPage, RateLimit, impatiently};
 pub use config::AppConfig;
 pub use mapping::{ChangeDraft, DraftState, PrState, PushCommit, PushDraft, WorkItemDraft};
 pub use mirror::{
