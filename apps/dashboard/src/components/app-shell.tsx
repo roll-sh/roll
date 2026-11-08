@@ -23,6 +23,7 @@ import { useLocation } from "@tanstack/react-router";
 import { useEffect, useState, type ReactNode } from "react";
 import { Link } from "@/components/link";
 import { AgentsControl } from "./agents/agents-control";
+import { SignIn } from "./code/sign-in";
 import { useShownOwner } from "./agents/use-connection";
 import { OwnerSwitcher } from "./agents/owner-switcher";
 import { AskPanel } from "./ask";
@@ -117,7 +118,10 @@ export function AppShell({ crumb, actions, bleed = false, children }: { crumb: R
             </button>
             <AgentsControl />
             {/* A page's buttons (Review, Land, sign-in) scroll sideways on a phone rather than widen the page. */}
-            <span className="flex min-w-0 shrink items-center gap-2 overflow-x-auto [scrollbar-width:none]">{actions}</span>
+            <span className="flex min-w-0 shrink items-center gap-2 overflow-x-auto [scrollbar-width:none]">
+              {actions}
+              <SignIn />
+            </span>
           </header>
 
           {bleed ? (
