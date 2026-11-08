@@ -42,6 +42,8 @@ pub fn router(control: Arc<Control>) -> Router {
         .route("/v1/redis/replicas/{id}", delete(delete_replica))
         // The dashboard calls it from the browser, like the Postgres API.
         .layer(CorsLayer::permissive())
+        // In a cluster, a database's routes run on its owner (outside CORS: the owner adds it).
+        .layer(axum::middleware::from_fn_with_state(control.clone(), crate::cluster::owner_routes))
         .with_state(control)
 }
 

@@ -131,7 +131,7 @@ async fn release_idle_repos(code: Weak<Code>) {
         tokio::time::sleep(every).await;
         let Some(code) = code.upgrade() else { return };
         let Some(cluster) = code.cluster().cloned() else { return };
-        for key in cluster.idle(idle).into_iter().filter(|k| !k.starts_with("singleton:")) {
+        for key in cluster.idle(idle).into_iter().filter(|k| is_repo_key(k) || k.starts_with(AGENTS_KEY)) {
             let (c, code) = (cluster.clone(), code.clone());
             let released = tokio::task::spawn_blocking(move || c.release_if_idle(&key, idle, || !code.repo_busy(&key))).await;
             if let Err(e) = released {
@@ -172,9 +172,10 @@ async fn follow_ownership(code: Weak<Code>, mut rx: mpsc::UnboundedReceiver<Owne
 /// and its machines' links run on the node holding it.
 pub(crate) const AGENTS_KEY: &str = "agents:";
 
-/// Whether a lease key is a repo's (not a singleton's or an owner's agents).
+/// Whether a lease key is a repo's (its bare id), not a singleton's, an owner's agents' or
+/// another product's on the same cluster (`redis:db:…`): those all have a `:`.
 pub(crate) fn is_repo_key(key: &str) -> bool {
-    !key.starts_with("singleton:") && !key.starts_with(AGENTS_KEY)
+    !key.contains(':')
 }
 
 impl Code {

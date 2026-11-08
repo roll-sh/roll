@@ -20,6 +20,7 @@ mod code;
 mod edge;
 mod nosql;
 mod queues;
+mod redis;
 mod storage_events;
 
 /// roll daemon: serverless Postgres, serverless Redis, S3-compatible storage, Kafka-compatible streams, tasks,
@@ -262,6 +263,8 @@ struct Args {
     nosql: nosql::NosqlArgs,
     #[command(flatten)]
     edge: edge::EdgeArgs,
+    #[command(flatten)]
+    redis_args: redis::RedisArgs,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -391,23 +394,12 @@ async fn run() -> anyhow::Result<()> {
         api::proxy_router(control.clone()),
         ProxyConfig { listen: args.proxy, default_endpoint: args.default_endpoint.clone() },
     ));
-    // Serverless Redis: same object storage, its own node.
-    let mut rcfg = redis_control::RedisConfig::local(std::path::absolute(&args.home)?.join("redis"));
-    rcfg.node_name = args.node.clone();
-    rcfg.public_host = args.public_host.clone();
-    rcfg.resp_port = args.redis.port();
-    rcfg.http_port = args.redis_http.port();
-    let tls = match (&args.redis_tls_cert, &args.redis_tls_key) {
-        (Some(c), Some(k)) => Some(redis_server::net::tls_acceptor(&std::fs::read(c)?, &std::fs::read(k)?)?),
-        _ => None,
-    };
-    rcfg.tls = tls.is_some();
-    let redis = redis_control::Control::new(rcfg, redis_server::persist::Objects::new(&storage)?).await?;
-    let redis_dir: std::sync::Arc<dyn redis_server::Directory> = redis.node.clone();
+    // Serverless Redis: same object storage (crate::redis; in a cluster, one owner per database).
+    let clustered = args.code.cluster.resolve(args.code.code_cluster_secret.as_deref(), None, None).is_ok_and(|r| r.backend != cluster::BackendKind::Memory);
+    let redis = redis::Redis::start(&args, &storage, clustered).await?;
     let redis_listener = tokio::net::TcpListener::bind(args.redis).await?;
     let redis_http = tokio::net::TcpListener::bind(args.redis_http).await?;
-    info!(resp = %args.redis, http = %args.redis_http, tls = tls.is_some(), "redis listening");
-    let redis_opts = redis_server::net::ListenOptions { tls, proxy_protocol: args.redis_proxy_protocol };
+    info!(resp = %args.redis, http = %args.redis_http, tls = redis.control.cfg.tls, "redis listening");
 
     let (storage_svc, s3_listener) = if args.no_storage {
         (None, None)
@@ -434,13 +426,14 @@ async fn run() -> anyhow::Result<()> {
     }
 
     // roll code: same object storage; previews branch roll Postgres and Redis.
-    let data: std::sync::Arc<dyn code_preview::DataBranches> = std::sync::Arc::new(code_preview::RollData { postgres: control.clone(), redis: redis.clone() });
+    let data: std::sync::Arc<dyn code_preview::DataBranches> = std::sync::Arc::new(code_preview::RollData { postgres: control.clone(), redis: redis.control.clone() });
     let node = start_code(&args, &home, &storage, Some(data)).await?;
+    redis.join(&node.cluster);
 
     let listener = tokio::net::TcpListener::bind(args.api).await?;
     info!(addr = %args.api, "control API listening");
     let mut router = api::router(control.clone())
-        .merge(redis_control::api::router(redis.clone()))
+        .merge(redis_control::api::router(redis.control.clone()))
         .merge(stream_broker::http::router(broker.clone()))
         .merge(tasks::api::router(tasks.clone()))
         .merge(code_control::api::router(node.code.clone()));
@@ -473,7 +466,7 @@ async fn run() -> anyhow::Result<()> {
     let products = edge::Products {
         api: router.clone(),
         pg: proxy.clone(),
-        redis: redis_dir.clone(),
+        redis: &redis,
         streams: broker.clone(),
         tasks: tasks.clone(),
         storage: storage_svc.as_ref().map(|s| s.server.clone()),
@@ -481,7 +474,7 @@ async fn run() -> anyhow::Result<()> {
         queues: queues.as_ref(),
     };
     let edge = edge::Edge::start(&args, &storage, products, std::sync::Arc::new(edge::ClusterSingleton(node.cluster.clone()))).await?;
-    let router = edge::internal(router, edge.as_ref());
+    let router = redis.internal(edge::internal(router, edge.as_ref()), args.edge.enabled)?;
     let queues_serve = async {
         match &queues {
             Some(q) => q.serve().await,
@@ -494,8 +487,8 @@ async fn run() -> anyhow::Result<()> {
         r = edge::serve(edge) => r?,
         // Client addresses reach handlers (roll code counts anonymous event streams per address).
         r = axum::serve(listener, router.into_make_service_with_connect_info::<std::net::SocketAddr>()) => r?,
-        r = redis_server::net::serve(redis_listener, redis_dir.clone(), redis_opts) => r?,
-        r = redis_server::http::serve_http(redis_http, redis_dir) => r?,
+        r = redis.serve_resp(redis_listener) => r?,
+        r = redis.serve_rest(redis_http) => r?,
         r = queues_serve => r?,
         r = storage_serve => r?,
         r = nosql_serve => r?,
@@ -505,8 +498,7 @@ async fn run() -> anyhow::Result<()> {
         _ = node.shutdown(&args) => {
             info!("shutting down; computes keep running and are adopted on next start");
             // Make every acknowledged Redis write durable before exiting.
-            redis.shipper.flush().await?;
-            redis.shipper.write_manifests(true).await?;
+            redis.shutdown().await?;
         }
     }
     if let Some(n) = &nosql {

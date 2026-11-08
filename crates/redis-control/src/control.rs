@@ -36,14 +36,20 @@ pub struct RedisConfig {
     pub region: String,
     /// Host and ports written into connection strings.
     pub public_host: String,
+    /// Hostnames' suffix behind roll cloud's edge (`redis.us-east-1.roll.sh`): a database is
+    /// `<id>.<domain>`, over TLS on 6379 and HTTPS. Connection strings use it when set.
+    pub domain: Option<String>,
     pub resp_port: u16,
     pub http_port: u16,
     pub tls: bool,
     /// Group-commit interval for the durable log.
     pub flush_interval: Duration,
     /// How often unreferenced log segments and snapshots are looked for; they're deleted once
-    /// found unreferenced twice this far apart. Run on one node per bucket.
+    /// found unreferenced twice this far apart. In a cluster, by one node at a time (the
+    /// `redis-gc` singleton).
     pub gc_interval: Option<Duration>,
+    /// A database moving to another node closes its connections over this long.
+    pub handoff_spread: Duration,
     pub defaults: Defaults,
     pub pricing: Pricing,
 }
@@ -83,11 +89,13 @@ impl RedisConfig {
             node_name: "local".into(),
             region: "local".into(),
             public_host: "127.0.0.1".into(),
+            domain: None,
             resp_port: 56380,
             http_port: 58080,
             tls: false,
             flush_interval: Duration::from_secs(1),
             gc_interval: Some(Duration::from_secs(3600)),
+            handoff_spread: Duration::from_secs(2),
             defaults: Defaults {
                 max_memory_mb: 256,
                 eviction_policy: "noeviction".into(),
@@ -112,6 +120,8 @@ pub struct Control {
     pub store: Arc<Store>,
     pub node: Arc<Node>,
     pub shipper: Arc<Shipper>,
+    /// The fleet this node is part of ([`Control::join`]); none on a node of its own.
+    pub(crate) cluster: std::sync::OnceLock<Arc<roll_cluster::Cluster>>,
 }
 
 /// Database settings a client may change.
@@ -164,7 +174,7 @@ fn engine_config(d: &RedisDb) -> EngineConfig {
     c
 }
 
-fn spec_for(store: &Store, id: &str) -> anyhow::Result<Option<DbSpec>> {
+pub(crate) fn spec_for(store: &Store, id: &str) -> anyhow::Result<Option<DbSpec>> {
     if let Some(d) = store.db(id)? {
         return Ok(Some(DbSpec {
             config: engine_config(&d),
@@ -211,16 +221,37 @@ pub struct Usage {
 }
 
 impl Control {
+    /// A node of its own: the catalog is `redis.db` (SQLite) under the home directory.
     pub async fn new(cfg: RedisConfig, objects: Objects) -> anyhow::Result<Arc<Self>> {
         std::fs::create_dir_all(&cfg.home)?;
-        let store = Arc::new(Store::open(&cfg.home.join("redis.db"))?);
+        let store = Store::sqlite(&cfg.home.join("redis.db"))?;
+        Self::with_store(cfg, objects, store).await
+    }
+
+    /// A node on a catalog of `store`'s (the system database in a cluster). A `redis.db` this
+    /// node kept on its own before is copied in first (what's there already stays), then set
+    /// aside.
+    pub async fn with_store(cfg: RedisConfig, objects: Objects, store: Store) -> anyhow::Result<Arc<Self>> {
+        std::fs::create_dir_all(&cfg.home)?;
+        let own = cfg.home.join("redis.db");
+        if store.sql().backend() == code_sql::Backend::Postgres && own.exists() {
+            let n = store.import(&Store::sqlite(&own)?)?;
+            std::fs::rename(&own, cfg.home.join("redis.db.imported"))?;
+            tracing::info!(databases = n, "redis: this node's own catalog joined the shared one");
+        }
+        let store = Arc::new(store);
         let shipper = Shipper::start(&cfg.node_name, objects, ShipperConfig { flush_interval: cfg.flush_interval, codec: Some(Arc::new(redis_server::RdbCodec)), ..Default::default() }).await?;
         let node = Node::new(
             Arc::new(StoreCatalog(store.clone())),
             Some(shipper.clone()),
-            NodeConfig { idle_timeout: Some(Duration::from_secs(cfg.defaults.idle_timeout_s as u64)), ..Default::default() },
+            NodeConfig {
+                idle_timeout: Some(Duration::from_secs(cfg.defaults.idle_timeout_s as u64)),
+                domain: cfg.domain.clone(),
+                handoff_spread: cfg.handoff_spread,
+                ..Default::default()
+            },
         );
-        let control = Arc::new(Self { cfg, store, node, shipper });
+        let control = Arc::new(Self { cfg, store, node, shipper, cluster: Default::default() });
         control.clone().start_metering();
         if let Some(every) = control.cfg.gc_interval {
             let weak = Arc::downgrade(&control);
@@ -228,6 +259,10 @@ impl Control {
                 loop {
                     tokio::time::sleep(every).await;
                     let Some(control) = weak.upgrade() else { return };
+                    // One node per bucket at a time.
+                    if !control.singleton("redis-gc").await {
+                        continue;
+                    }
                     if let Err(e) = control.expire_archives().await {
                         tracing::warn!(error = %e, "expiring redis restore archives failed");
                     }
@@ -266,9 +301,20 @@ impl Control {
 
     /// `redis://` and HTTP connection details for a database or replica.
     pub fn connection(&self, id: &str, password: &str) -> serde_json::Value {
+        let token = format!("{id}_{password}");
+        if let Some(domain) = &self.cfg.domain {
+            // Behind roll cloud's edge: a hostname per database, TLS, the standard ports.
+            let host = format!("{id}.{domain}");
+            return serde_json::json!({
+                "redis_url": format!("rediss://default:{token}@{host}:6379"),
+                "rest_url": format!("https://{host}"),
+                "rest_token": token,
+                "host": host,
+                "port": 6379,
+            });
+        }
         let scheme = if self.cfg.tls { "rediss" } else { "redis" };
         let http = if self.cfg.tls { "https" } else { "http" };
-        let token = format!("{id}_{password}");
         serde_json::json!({
             "redis_url": format!("{scheme}://default:{token}@{}:{}", self.cfg.public_host, self.cfg.resp_port),
             "rest_url": format!("{http}://{}:{}", self.cfg.public_host, self.cfg.http_port),

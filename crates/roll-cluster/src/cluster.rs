@@ -85,6 +85,10 @@ struct NodeRow {
     draining: bool,
 }
 
+fn zone_in(nodes: &[NodeRow], id: &str) -> Option<String> {
+    nodes.iter().find(|n| n.node.id == id).and_then(|n| n.zone.clone())
+}
+
 struct State {
     held: HashMap<String, Held>,
     /// Keys this node wants gone: if the backend still says they're ours (a release that
@@ -340,7 +344,7 @@ impl Inner {
     }
 
     fn preferred_in(&self, st: &State, key: &str) -> Option<Node> {
-        let id = placement::rendezvous(key, st.eligible.iter().map(String::as_str))?;
+        let id = placement::place(key, &st.eligible, |id| zone_in(&st.nodes, id))?;
         st.nodes.iter().find(|n| n.node.id == id).map(|n| n.node.clone())
     }
 
@@ -629,16 +633,18 @@ impl Inner {
         }
         let generation = st.nodes_gen;
         let eligible = std::mem::take(&mut st.eligible);
+        let nodes = std::mem::take(&mut st.nodes);
         let mut moving = Vec::new();
         for (k, h) in st.held.iter_mut() {
             if h.pref.0 != generation {
-                h.pref = (generation, placement::rendezvous(k, eligible.iter().map(String::as_str)) == Some(self.me()));
+                h.pref = (generation, placement::place(k, &eligible, |id| zone_in(&nodes, id)) == Some(self.me()));
             }
             if !h.pref.1 && h.handoff.is_none() && h.deadline > now {
                 moving.push(k.clone());
             }
         }
         st.eligible = eligible;
+        st.nodes = nodes;
         moving.sort();
         moving.truncate(budget);
         for k in moving {
@@ -969,16 +975,12 @@ impl Cluster {
 
     /// Where a standby of `key` belongs (a hot standby, a replica): the next node by rendezvous
     /// weight, in another zone than the preferred node's when one is live. A hint only: nothing
-    /// about leases depends on zones.
+    /// about leases depends on zones. A key `<key>#<name>` is placed this way by itself
+    /// ([`placement::place`]): a read replica's lease, say.
     pub fn standby(&self, key: &str) -> Option<Node> {
         let st = self.inner.state.lock();
-        let first = self.inner.preferred_in(&st, key)?;
-        let zone_of = |id: &str| st.nodes.iter().find(|n| n.node.id == id).and_then(|n| n.zone.clone());
-        let home = zone_of(&first.id);
-        let mut rest: Vec<&String> = st.eligible.iter().filter(|id| **id != first.id).collect();
-        rest.sort_by_key(|id| std::cmp::Reverse((placement::weight(key, id), (*id).clone())));
-        let pick = rest.iter().find(|id| home.is_some() && zone_of(id) != home).or(rest.first())?;
-        st.nodes.iter().find(|n| &n.node.id == *pick).map(|n| n.node.clone())
+        let pick = placement::standby(key, key, &st.eligible, |id| zone_in(&st.nodes, id))?;
+        st.nodes.iter().find(|n| n.node.id == pick).map(|n| n.node.clone())
     }
 
     /// Take `key` regardless of placement if it's free (no lease, an expired or released one,

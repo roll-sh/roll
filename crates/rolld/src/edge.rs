@@ -144,7 +144,7 @@ pub struct Products<'a> {
     /// The API router (every product's HTTP API, roll code, previews).
     pub api: axum::Router,
     pub pg: Arc<pg_proxy::Proxy<pg_control::control::ProxyRouter>>,
-    pub redis: Arc<dyn redis_server::Directory>,
+    pub redis: &'a crate::redis::Redis,
     pub streams: Arc<stream_broker::Broker>,
     pub tasks: Arc<tasks::Tasks>,
     pub storage: Option<Arc<s3_server::Server>>,
@@ -237,13 +237,13 @@ impl Edge {
         let l = bind(e.pg_listen).await?;
         let tls = roll_edge::tls::server_config(store.clone(), &[roll_edge::pg::ALPN]);
         served.push(io(roll_edge::pg::serve(l, tls, opts, hosts.clone(), p.pg.clone())));
-        // Redis: the server name picks the database.
+        // Redis: the server name picks the database (in a cluster, spliced to its owner right
+        // after the handshake).
         let l = bind(e.redis_listen).await?;
-        let dir = p.redis.clone();
+        let front = p.redis.front.clone();
         served.push(io(listener::serve_tls(l, plain.clone(), opts, move |tls, a| {
-            let dir = dir.clone();
             let fd = { use std::os::fd::AsRawFd; tls.get_ref().0.as_raw_fd() as i64 };
-            redis_server::conn::serve_with(tls, a.peer, a.local, dir, a.sni, fd)
+            front.clone().serve(tls, a.peer, a.local, a.sni, fd)
         })));
         // Kafka: one virtual broker per hostname: clients are told the name they connected with.
         let l = bind(e.kafka_listen).await?;
@@ -293,6 +293,8 @@ impl Edge {
                     })
                 }),
             );
+            // A Redis connection another node read the TLS handshake (or the first AUTH) of.
+            handlers.register(redis_control::cluster::PRODUCT, p.redis.front.handler());
             internal = internal.merge(roll_edge::splice::router(roll_edge::splice::Signer::new(&secret)?, handlers));
         }
         let serve = Box::pin(async move { futures::future::select_all(served).await.0 });
@@ -442,7 +444,7 @@ impl HttpRoutes {
         Ok(Self {
             api: p.api.clone(),
             dashboard: e.dashboard_upstream.as_deref().filter(|u| !u.is_empty()).map(Upstream::new).transpose()?,
-            redis: redis_server::http::router(p.redis.clone()),
+            redis: p.redis.rest_router(),
             kafka: stream_broker::http::router(p.streams.clone()),
             tasks: tasks::api::router(p.tasks.clone()),
             s3: p.storage.clone().map(s3_server::router),
