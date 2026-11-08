@@ -189,7 +189,7 @@ unless said; `oltp` cases on 100k rows, 8 clients.
 | knob | efficient | performance | measured | kept |
 |---|---|---|---|---|
 | shared caches | 64 MB blocks, 36 MB plans | a quarter of the memory the server may use (cgroup limit, else the machine's), 3 : 1, plans at most 1 GB: in 8 GB, 1.5 GB + 512 MB | pgbench scale 10 select-only 1 client **2.21x** [2.21, 2.26, 1.81], CPU per transaction 119 -> 75 µs; 8 clients **1.29x** [1.19, 1.50, 1.29], 79 -> 62 µs; TPC-H SF 0.05 **1.24x** [1.25, 1.24, 1.23], CPU 5.30 -> 4.26 s; analytic 200k 1.02x (noise); memory 275 -> 433 MB | yes |
-| wait spin | none | a waiting connection polls its socket up to 50 µs while working + polling threads fit in a quarter of the cores | select-only 1 client **1.40x** [1.44, 1.32, 1.37, 1.43], latency 0.088 -> 0.065 ms, CPU per transaction 59.5 -> 63.0 µs; TPC-B-like 1 client **1.28x** [1.32, 1.38, 1.14, 1.23], 466 -> 487 µs; 8 and 32 clients, point reads, TPC-B-like 8 clients 0.99-1.02x (with the half-cores rule; the quarter rule's run below) | yes |
+| wait spin | none | a waiting connection polls its socket up to 50 µs, when its client's last message came within that and while working + polling connections fit in a quarter of the cores | select-only 1 client **1.38x** [1.36, 1.38, 1.37], latency 0.082 -> 0.060 ms, CPU per transaction 52 -> 58 µs; TPC-B-like 1 client **1.22x** [1.21, 1.22, 1.28], CPU 372 -> 430 µs (the polls between its statements); 8 clients: select-only 1.02x, point reads 1.05x, range reads 0.96x [1.02, 0.94, 0.96] with 5% more CPU per read; 32 clients 1.02x (the half-cores rule's run) | yes |
 | databases closed when idle | 60 s after the last session | never | the first statement on a database closed for idleness: +5.0 to +15.7 ms over the connection (6 tries, `--idle-close-secs 3` standing in for 60), on an open one +0.6 to +1.1 ms | yes |
 | idle trim | a connection idle 2 s gives its thread's free memory back | sessions keep it | CPU per statement after a 3 s pause (32 clients, 3 rounds): 341-478 µs with the trim, 290-301 without (after a 0.5 s pause, no trim either way: 202-253); latency within the noise; 100 idle sessions 31.9 -> 34.7 MB | yes |
 | transparent huge pages | off | (tried on) | select-only, TPC-B-like, point and range reads: no direction beyond the noise; analytic 0.98x, TPC-H 0.98x; +17-20 MB | no |
@@ -205,14 +205,20 @@ What limits each gain:
   analytic set's 200k rows fit either way. The scoreboard always gave the engine `--cache-mb
   2048` (and PostgreSQL `shared_buffers=2GB`), so its efficient column doesn't show this; its
   performance column sizes itself from the 8 GB container to the same scale.
-- **Spin.** At one client a transaction is the server's work (60 µs) plus the round trip, and
-  the round trip was a sleep and a wake-up on each side (futex, scheduler, a cold core). A
-  thread polling for its client's next message keeps its core and skips the server's half of
-  that; the client's half remains. It costs a few µs of CPU per statement (the polls before
-  the message comes). With other threads at work it only takes their cores: a fixed cap of two
-  pollers on 4 cores cost 32 clients 15%, polling while working + polling threads fit all 4
-  cores cost 8 clients 8%, and in half of them 8 clients' range reads 9% ([1.07, 0.93, 0.83,
-  0.89]): hence a quarter (on 4 cores, only while no other connection works).
+- **Spin.** At one client a transaction is the server's work (50-60 µs a select) plus the round
+  trip, and the round trip was a sleep and a wake-up on each side (futex, scheduler, a cold
+  core). A thread polling for its client's next message keeps its core and skips the server's
+  half of that; the client's half remains. The polls cost CPU: a few µs a select, 58 µs a
+  TPC-B-like transaction (seven statements, each followed by a poll while the client sends the
+  next). Polling where it can't pay only takes cores and CPU, so it is gated three ways, each
+  from a run that lost without it: a fixed cap of two pollers on 4 cores cost 32 clients 15%;
+  polling while working + polling threads fit all 4 cores cost 8 clients 8%, in half of them 8
+  clients' range reads 9% ([1.07, 0.93, 0.83, 0.89]), in a quarter (on 4 cores: only while no
+  other connection works) still 7% with 11% more CPU per read, because the benchmark client,
+  checking 100 rows a read, is slower than the server and leaves every server thread waiting
+  at once. Polling only for a client whose last message came within the 50 µs took that to
+  0.96x and 5% (and select-only at 8 clients 1.02x, point reads 1.05x). Range reads at 8
+  clients are the one case it may still cost a little; at 32 clients nothing polls.
 - **Idle close.** Reopening a database opens its store (manifest, every SST's index), reads its
   catalog and rebuilds the per-database state: 5-15 ms on the first statement. Kept open, the
   store costs its memtable (up to 8 MB) and open files.
@@ -238,7 +244,7 @@ polls nothing.
 bulk loads (COPY, INSERT ... SELECT, pgbench init) and select-only or point reads at 8 clients
 and more are behind PostgreSQL by the engine's CPU per row and per statement in the executor
 and storage, not by anything a mode trades: at 8 and 32 clients the four cores are busy either
-way, so performance mode measures 0.99-1.02x of efficient there, and on data that fits the
+way, so performance mode measures 0.96-1.05x of efficient there, and on data that fits the
 cache both modes do the same work per row. Those gaps belong to the executor, planner, OLTP,
 storage, bulk-write and index owners (agents 167, 177, 178, 169, 175, 176). Performance mode
 helps where the engine waits rather than computes: one or two clients (spin), data bigger than
