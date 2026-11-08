@@ -9009,6 +9009,35 @@ Left, for the planner:
 - Untouched: item 2 (every node's cost, so one-shot plans stop building EXPLAIN trees for
   Gathers and Incremental Sort keys), planning CPU over plans/apps.sql and the ORM queries,
   TPC-H q21 / q18, and the rest of round 10's list.
+## Planner round 12 (agent 190)
+
+Ordered grouping scans retain the ORDER BY directions and the LIMIT or cursor fraction
+while choosing their input path. The comparison includes a sort of the grouped output
+when needed. A cursor uses startup plus its fraction of the remaining cost. On round 11's
+six-row indexed grouping, the default fraction and zero choose GroupAggregate over an
+Index Scan. Fraction one and an ordinary SELECT keep Sort over HashAggregate. This also
+lets the existing cursor code reject backward FETCH on the default plan and abort the
+transaction. EXPLAIN of SCROLL adds Materialize. No cursor or session API changed.
+
+Other changes retained from the saved lane move a pulled-up anti join's variable-free
+InitPlan qual to its join filter, allow shallow sublinks in catalog EXISTS scans, show the
+written collation's relabel in DISTINCT sort keys, and account for the DELETE join target's
+row marks. Planning estimates pg_depend rows from catalog counts without constructing the
+catalog's dependency rows. Scan costing shares index metadata, consumes owned candidate
+paths, and caches at most eight clause selectivities per relation. A relation made for
+another execution starts with an empty cache.
+
+Seven outstanding EXPLAIN cases from the original probe remain in
+`tests/difftest/a190_planner_r12_remaining.sql`, with their setup. They cover a redundant
+GROUP BY key determined by a primary key, a bounded grouping sort with NULLS LAST, a
+DELETE RETURNING scan width, two semi-join gating plans, DISTINCT order propagation, and
+a catalog join plan. They are not passing golden coverage. The original complete probe
+and both outputs are retained under `~/.cache/a190/` and in the WIP history.
+
+Validation and final source identity are recorded below after the focused checks finish.
+No performance comparison was run for this batch. The verification train owns the full
+suite. The lane's worktree and cache remain available to the coordinator.
+
 ## Storage engine, round 1 (agent 169)
 
 Agent 169 owns the store's internals (block format and cache, point lookups inside the store,
