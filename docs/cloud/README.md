@@ -408,3 +408,8 @@ pushes take as long as the pack); `handoff-failures` and `lease-takeovers` on an
 - **Buckets on roll.site.** The CDN Worker serves path-style only, so `<bucket>.roll.site` needs
   virtual-host support, and bucket names starting `chg-` must be reserved (they'd collide with
   previews).
+- **Flaky tests seen on GitHub** (each passed on a plain re-run, and on main): redis
+  `compat_debug_with_redis` (`search_hnsw.txt`, `FT.INFO` while the vector index is still
+  building), nosql conformance `test_compaction.py::test_tombstone_gc_with_conflict_in_memtable`,
+  code-control `automations::a_run_starts_an_agent_waits_for_it_and_notifies` (under load). Each
+  should wait for the state it checks instead of racing it.
