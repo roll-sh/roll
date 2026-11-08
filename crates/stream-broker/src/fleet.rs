@@ -199,6 +199,16 @@ impl Lease {
         stream.tenure.active.fetch_add(1, Ordering::AcqRel);
         Self { guard, stream }
     }
+
+    /// Resolves when this node stops serving the stream under the tenure it serves it under
+    /// now (it was fenced, or gave the stream up), even if the lease didn't say so.
+    pub(crate) fn tenure_ended(&self) -> impl std::future::Future<Output = ()> + Send + 'static {
+        let mut rx = self.stream.tenure.subscribe();
+        async move {
+            let now = *rx.borrow();
+            let _ = rx.wait_for(|s| *s != now).await;
+        }
+    }
 }
 
 impl Drop for Lease {
@@ -393,6 +403,23 @@ impl Broker {
         info!(stream = id, "no longer serving the stream here");
     }
 
+    /// Another node claimed `s` while this one still holds its lease: stop, and hand the lease
+    /// on so whoever should own the stream takes it over properly (with a claim of its own).
+    async fn fenced(self: &Arc<Self>, s: &Stream) {
+        warn!(stream = %s.id, "another node claimed the stream; stopping and handing the lease on");
+        self.give_up(&s.id).await;
+        self.fleet().cluster.handoff(&key(&s.id));
+    }
+
+    /// Test hook: stop as a killed process would, as far as this broker goes: no stream is
+    /// served from now on, and whatever wasn't in the write-ahead log yet is gone.
+    #[doc(hidden)]
+    pub async fn halt(self: &Arc<Self>) {
+        for s in self.served_streams() {
+            self.give_up(&s.id).await;
+        }
+    }
+
     /// Close every partition of `s` and delete its local files.
     async fn wipe_local(&self, s: &Stream) {
         let mut dirs = vec![];
@@ -424,9 +451,8 @@ impl Broker {
             }
             tokio::time::sleep(linger).await;
             if let Err(e) = self.flush_wal(&s, generation).await {
-                if is_fenced(&e) {
-                    warn!(stream = %s.id, "another node took the stream over; stopping");
-                    self.give_up(&s.id).await;
+                if is_fenced(&e) && s.tenure.is(generation) {
+                    self.fenced(&s).await;
                     break;
                 }
                 warn!(stream = %s.id, error = %e, "writing the write-ahead log failed");
@@ -481,6 +507,7 @@ impl Broker {
                 }
             }
         }
+        debug!(stream = %s.id, seq = *seq, partitions = takes.len(), bytes = row.bytes, "wrote a write-ahead log object");
         *seq += 1;
         let n = takes.iter().map(|(_, _, t)| t.batches.len()).sum();
         for (_, log, t) in takes {
@@ -496,6 +523,7 @@ impl Broker {
         let k = key(&s.id);
         if self.fleet().cluster.owns(&k) && s.tenure.is(generation) {
             let started = Instant::now();
+            debug!(stream = %s.id, active = s.tenure.active(), "a handoff started; waiting for the stream's connections");
             let deadline = started + self.fleet().cluster.config().handoff_timeout.mul_f32(0.6);
             while s.tenure.active() > 0 && Instant::now() < deadline {
                 tokio::time::sleep(Duration::from_millis(20)).await;

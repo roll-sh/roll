@@ -7380,6 +7380,7 @@ dependencies = [
  "hmac 0.12.1",
  "http-body 1.1.0",
  "kafka-protocol",
+ "libc",
  "libmimalloc-sys",
  "mimalloc",
  "pbkdf2",

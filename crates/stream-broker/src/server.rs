@@ -268,10 +268,15 @@ async fn run<S: Io>(b: Arc<Broker>, io: S, first: Bytes, peer: SocketAddr, tls: 
 /// stream's clients don't all reconnect at the same instant. The owner keeps serving meanwhile.
 fn leave_when_moving(b: &Arc<Broker>, lease: &Lease) -> BoxFuture<'static, ()> {
     let ending = lease.guard.ending();
+    let ended = lease.tenure_ended();
     let cluster = b.fleet().cluster.clone();
     let key = lease.guard.key().to_string();
     Box::pin(async move {
-        ending.await;
+        tokio::select! {
+            _ = ending => {}
+            // Fenced, or given up: no point in waiting.
+            _ = ended => return,
+        }
         if cluster.owns(&key) {
             let spread = (cluster.config().handoff_timeout / 4).min(Duration::from_secs(1));
             let r = u16::from_be_bytes(crate::ids::random_bytes::<2>()) as f64 / u16::MAX as f64;
