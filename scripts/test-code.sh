@@ -75,7 +75,8 @@ start_dynamodb() {
   cleanup+=("$ddb")
   local port
   port=$(docker port "$ddb" 8000/tcp | head -1 | sed 's/.*://')
-  for _ in $(seq 60); do (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null && break; sleep 0.5; done
+  # Docker accepts connections before DynamoDB Local listens: wait for an HTTP answer.
+  for _ in $(seq 120); do curl -s -o /dev/null "http://127.0.0.1:$port" && break; sleep 0.5; done
   export ROLL_CLUSTER_TEST_DYNAMODB="http://127.0.0.1:$port"
 }
 
@@ -110,9 +111,9 @@ if [[ $docker == 1 ]]; then
     test_args() {
       case "$1" in code-sql | roll-cluster | code-store | code-control | roll-cli) default_args "$@" ;; *) return 1 ;; esac
     }
+    start_dynamodb
     ROLL_CODE_TEST_DATABASE=$pg_url RUST_CLIPPY=0 rust_tests code-pg "${targets[@]}"
     # roll code's cluster with its leases on DynamoDB (data on Postgres).
-    start_dynamodb
     test_args() { [[ $1:$2 == code-control:cluster ]]; }
     ROLL_CODE_TEST_CLUSTER_BACKEND=dynamodb ROLL_CLUSTER_DYNAMODB_REQUIRED=1 ROLL_CODE_TEST_DATABASE=$pg_url RUST_CLIPPY=0 rust_tests code-ddb --test cluster
     # Checks and previews in real containers, and the cluster as real rolld containers

@@ -152,6 +152,14 @@ extern "C" fn remove_container() {
     let _ = Command::new("docker").args(["rm", "-f", CONTAINER]).output();
 }
 
+fn answers_http(addr: &str) -> bool {
+    use std::io::{Read, Write};
+    let Ok(mut s) = std::net::TcpStream::connect(addr) else { return false };
+    let _ = s.set_read_timeout(Some(Duration::from_secs(2)));
+    let mut buf = [0u8; 12];
+    s.write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n").is_ok() && s.read_exact(&mut buf).is_ok() && buf.starts_with(b"HTTP/")
+}
+
 /// DynamoDB Local's endpoint for this test run (see the module docs).
 pub fn dynamodb_endpoint() -> Option<String> {
     static EP: OnceLock<Option<String>> = OnceLock::new();
@@ -177,9 +185,10 @@ pub fn dynamodb_endpoint() -> Option<String> {
         };
         let addr = format!("127.0.0.1:{p}");
         let deadline = Instant::now() + Duration::from_secs(60);
-        while std::net::TcpStream::connect(&addr).is_err() {
+        // Docker's proxy accepts connections before the server listens: wait for an HTTP answer.
+        while !answers_http(&addr) {
             if Instant::now() > deadline {
-                eprintln!("skipping the DynamoDB backend's tests: DynamoDB Local never listened on {addr}");
+                eprintln!("skipping the DynamoDB backend's tests: DynamoDB Local never answered on {addr}");
                 return None;
             }
             std::thread::sleep(Duration::from_millis(200));
