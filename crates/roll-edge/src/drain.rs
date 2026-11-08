@@ -36,6 +36,18 @@ enum Phase {
 struct State {
     serving: bool,
     phase: Phase,
+    /// Listeners still accepting ([`Listening`] guards alive).
+    listening: usize,
+}
+
+/// A listener's accept loop is running: the drain's stop waits for every one to close before the
+/// products drain. Dropped when the listener's socket is closed (or its task ends).
+pub(crate) struct Listening(Drain);
+
+impl Drop for Listening {
+    fn drop(&mut self) {
+        self.0.0.send_modify(|s| s.listening = s.listening.saturating_sub(1));
+    }
 }
 
 /// Shared by everything that needs to know: the health check, the listeners, the products' own
@@ -59,7 +71,7 @@ impl std::fmt::Debug for Drain {
 impl Drain {
     /// Not serving yet, not draining.
     pub fn new() -> Self {
-        Self(Arc::new(watch::channel(State { serving: false, phase: Phase::Running }).0))
+        Self(Arc::new(watch::channel(State { serving: false, phase: Phase::Running, listening: 0 }).0))
     }
 
     /// The listeners are up (or, `false`, down).
@@ -92,6 +104,18 @@ impl Drain {
         self.reach(Phase::Refusing);
     }
 
+    /// A listener starts accepting; it stops (and closes its socket) at [`Drain::stop_accepting`].
+    pub(crate) fn listening(&self) -> Listening {
+        self.0.send_modify(|s| s.listening += 1);
+        Listening(self.clone())
+    }
+
+    /// Resolves once no listener accepts any more (every [`Listening`] guard dropped).
+    async fn listeners_closed(&self) {
+        let mut rx = self.0.subscribe();
+        let _ = rx.wait_for(|s| s.listening == 0).await;
+    }
+
     /// Close the connections still open (everything before it too).
     pub fn close(&self) {
         self.reach(Phase::Closing);
@@ -104,6 +128,9 @@ impl Drain {
         self.start();
         tokio::time::sleep(delay).await;
         self.stop_accepting();
+        // Closed before the products let go of anything (an accept loop stuck elsewhere doesn't
+        // hold the stop up for long).
+        let _ = tokio::time::timeout(Duration::from_secs(2), self.listeners_closed()).await;
         let out = products.await;
         self.close();
         out

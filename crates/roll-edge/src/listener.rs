@@ -121,6 +121,7 @@ where
     F: Fn(TcpStream, SocketAddr) -> Fut + Clone + Send + Sync + 'static,
     Fut: Future<Output = ()> + Send + 'static,
 {
+    let listening = drain.listening();
     let refusing = drain.refusing();
     tokio::pin!(refusing);
     loop {
@@ -151,6 +152,7 @@ where
     }
     let addr = listener.local_addr().ok();
     drop(listener);
+    drop(listening);
     debug!(?addr, "edge: listener closed (draining)");
     // Ending would read as the listener failing: whoever runs it stops on its own schedule.
     std::future::pending().await
