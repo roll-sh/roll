@@ -1003,6 +1003,9 @@ fn same_shape(a: &Expr, b: &Expr) -> Option<bool> {
                 None
             }
         }
+        // (A constant's text starts with its value's variant name, derived Debug: an
+        // uppercase letter, which no other lead is but a call's.)
+        (Const(..), e) | (e, Const(..)) if lead(e).is_some_and(|x| !x.is_ascii_uppercase()) => Some(false),
         _ => match (lead(a), lead(b)) {
             (Some(x), Some(y)) if x != y => Some(false),
             _ => None,
