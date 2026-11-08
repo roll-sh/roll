@@ -591,6 +591,40 @@ pub fn peek_text(b: &[u8], pos: usize) -> Option<Option<&[u8]>> {
     }
 }
 
+/// A stored value as COPY TO writes it from its bytes (`read_stored`).
+pub enum StoredValue<'a> {
+    Null,
+    /// An int2, int4 or int8.
+    Int(i64),
+    Float8(f64),
+    /// A string's bytes.
+    Text(&'a [u8]),
+    /// Any other value (stepped over).
+    Other,
+}
+
+/// The value at `*pos`, read in place, `pos` moved past it.
+pub fn read_stored<'a>(b: &'a [u8], pos: &mut usize) -> Result<StoredValue<'a>> {
+    let at = *pos;
+    let le = |n: usize| b.get(at + 1..at + 1 + n);
+    let v = match b.get(at) {
+        Some(&tag::NULL) => StoredValue::Null,
+        Some(&tag::INT2) => le(2).map_or(StoredValue::Other, |x| StoredValue::Int(i16::from_le_bytes(x.try_into().unwrap()) as i64)),
+        Some(&tag::INT4) => le(4).map_or(StoredValue::Other, |x| StoredValue::Int(i32::from_le_bytes(x.try_into().unwrap()) as i64)),
+        Some(&tag::INT8) => le(8).map_or(StoredValue::Other, |x| StoredValue::Int(i64::from_le_bytes(x.try_into().unwrap()))),
+        Some(&tag::FLOAT8) => le(8).map_or(StoredValue::Other, |x| StoredValue::Float8(f64::from_le_bytes(x.try_into().unwrap()))),
+        Some(&tag::TEXT) => {
+            let mut p = at + 1;
+            let s = take_bytes(b, &mut p)?;
+            *pos = p;
+            return Ok(StoredValue::Text(s));
+        }
+        _ => StoredValue::Other,
+    };
+    skip_value_fast(b, pos)?;
+    Ok(v)
+}
+
 /// `skip_value` with the common fixed-size values stepped over in place.
 #[inline]
 pub fn skip_value_fast(b: &[u8], pos: &mut usize) -> Result<()> {
