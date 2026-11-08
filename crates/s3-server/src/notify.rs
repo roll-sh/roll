@@ -264,6 +264,10 @@ pub struct Notifier {
     wake: Arc<tokio::sync::Notify>,
     /// When Replication Time Control's threshold was last checked (store clock, ms).
     rtc_checked: std::sync::atomic::AtomicI64,
+    /// Held for a whole dispatch pass. The outbox rows a pass reads aren't claimed, so two passes
+    /// at once (the dispatcher's tick and `Server::dispatch_events`) would both deliver a row
+    /// whose delivery is still in flight.
+    dispatching: tokio::sync::Mutex<()>,
     /// Replication to buckets outside roll.
     pub(crate) external: crate::replicate_ext::External,
     /// CDN purges.
@@ -436,7 +440,7 @@ impl Notifier {
             .expect("an HTTP client");
         let aws_http = reqwest::Client::builder().timeout(cfg.webhook_timeout.max(Duration::from_secs(70))).redirect(reqwest::redirect::Policy::none()).user_agent("roll-storage/1").build().expect("an HTTP client");
         let external = crate::replicate_ext::External::new(store.clone());
-        Arc::new(Self { store, cfg, region, sink: RwLock::new(None), http, aws_http, aws: Default::default(), counters: Counters::default(), rtc_checked: Default::default(), wake: Default::default(), external, cdn })
+        Arc::new(Self { store, cfg, region, sink: RwLock::new(None), http, aws_http, aws: Default::default(), counters: Counters::default(), rtc_checked: Default::default(), dispatching: Default::default(), wake: Default::default(), external, cdn })
     }
 
     /// Install the delivery into roll queues and streams (rolld does, once they're up).
@@ -530,6 +534,7 @@ impl Notifier {
     /// One pass over the due outbox rows: deliver notifications, apply replication. Returns how
     /// many rows were looked at.
     pub async fn dispatch(&self) -> Result<usize, StoreError> {
+        let _one_pass_at_a_time = self.dispatching.lock().await;
         // Replication Time Control: versions past the 15-minute threshold report it (checked
         // every 30 s; the events go out through the outbox like any other).
         let now = self.store.now();
