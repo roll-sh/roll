@@ -42,7 +42,13 @@ DROP TABLE a182_d, a182_f, a182_g, a182_src;
 DROP DOMAIN a182_pos;
 
 -- An ignored conversion still consumes both omitted sequence defaults, including identity.
+CREATE TABLE a182_progress (processed bigint, excluded bigint, skipped bigint);
+CREATE FUNCTION a182_progress() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+  INSERT INTO a182_progress SELECT tuples_processed, tuples_excluded, tuples_skipped FROM pg_stat_progress_copy WHERE pid = pg_backend_pid();
+  RETURN NULL;
+END $$;
 CREATE TABLE a182_i (a serial, b int, c int GENERATED ALWAYS AS IDENTITY);
+CREATE TRIGGER a182_progress AFTER INSERT ON a182_i FOR EACH STATEMENT EXECUTE FUNCTION a182_progress();
 COPY a182_i (b) FROM STDIN (ON_ERROR ignore) WHERE b > 0;
 1
 bad
@@ -50,6 +56,8 @@ bad
 3
 \.
 SELECT * FROM a182_i ORDER BY a;
+SELECT * FROM a182_progress;
+TRUNCATE a182_progress;
 SELECT last_value, is_called FROM a182_i_a_seq;
 SELECT last_value, is_called FROM a182_i_c_seq;
 -- A BEFORE trigger can observe the nextval calls on earlier ignored rows.
@@ -89,15 +97,20 @@ CREATE VIEW a182_v AS SELECT 1 AS a, 2 AS b;
 ALTER VIEW a182_v ALTER COLUMN a SET DEFAULT nextval('a182_view_seq');
 CREATE FUNCTION a182_instead() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NULL; END $$;
 CREATE TRIGGER a182_instead INSTEAD OF INSERT ON a182_v FOR EACH ROW EXECUTE FUNCTION a182_instead();
+TRUNCATE a182_progress;
+CREATE TRIGGER a182_progress AFTER INSERT ON a182_v FOR EACH STATEMENT EXECUTE FUNCTION a182_progress();
 COPY a182_v (b) FROM STDIN (ON_ERROR ignore);
 1
 bad
 2
 \.
 SELECT last_value, is_called FROM a182_view_seq;
+SELECT * FROM a182_progress;
 DROP VIEW a182_v;
 DROP FUNCTION a182_instead();
 DROP SEQUENCE a182_view_seq;
+DROP TABLE a182_progress;
+DROP FUNCTION a182_progress();
 -- Domain input errors consume omitted defaults in skipped rows too.
 CREATE DOMAIN a182_pos AS int CHECK (VALUE > 0);
 CREATE TABLE a182_domain (a serial, b a182_pos);

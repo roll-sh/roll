@@ -4677,7 +4677,11 @@ impl Node for InsertNode {
                 events.reverse();
                 if let Some(c) = &self.plan.copy {
                     if let Some(p) = ctx.sess.copy_progress.borrow_mut().as_mut() {
-                        p.tuples_processed = ctx.processed.get() as i64;
+                        p.tuples_processed = if rules.view {
+                            c.feed.lock().unwrap().fed as i64
+                        } else {
+                            ctx.processed.get() as i64
+                        };
                     }
                     let notice = c.feed.lock().unwrap().skipped_notice.clone();
                     if let Some(msg) = notice {
