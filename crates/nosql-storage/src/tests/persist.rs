@@ -111,6 +111,53 @@ async fn crash_recovery_replays_shipped_frames() {
     assert_eq!(get(&db, T1, 1).await.len(), 3);
 }
 
+/// Two nodes that both believe they own a database (a lease that lapsed under a node that kept
+/// running): the one that opened it last wins, and the other can't commit anything to it: no
+/// manifest write, no flush, no compaction, no acknowledged `sync` write.
+#[tokio::test]
+async fn a_second_opener_fences_the_first() {
+    let objects = crate::test_objects("persist-fence");
+    let clock = TestClock::new(1_000_000);
+    let s1 = store(&objects, "n1", &clock).await;
+    let s2 = store(&objects, "n2", &clock).await;
+    let db1 = s1.open("d1", DbConfig { durability: Durability::Sync, ..Default::default() }).await.unwrap();
+    attach(&db1).await;
+    put(&db1, T1, 1, 1, "before", 1).await;
+    // n2 takes the database over while n1 still runs.
+    let db2 = s2.open("d1", DbConfig::default()).await.unwrap();
+    attach(&db2).await;
+    assert_eq!(get(&db2, T1, 1).await, vec![(1, "before".into())], "the acknowledged sync write is replayed");
+    // n1's next sync write isn't acknowledged: its manifest is no longer its own.
+    let t = db1.get_table(T1).unwrap();
+    let late = t.apply(PartitionUpdate::new(key(1)).with_row(row(2, 1, "late"))).await;
+    assert!(late.is_err_and(|e| manifest::is_fenced(&e)));
+    assert!(db1.is_fenced());
+    assert!(db1.write_manifest(false).await.is_err_and(|e| manifest::is_fenced(&e)));
+    assert!(t.apply(PartitionUpdate::new(key(1)).with_row(row(3, 1, "refused"))).await.is_err(), "closed to writes");
+    assert!(s1.abandon_fenced("d1").await);
+    assert!(s1.get("d1").is_none());
+    // n2 carries on and its state is the database's.
+    put(&db2, T1, 1, 4, "n2", 1).await;
+    db2.flush().await.unwrap();
+    s2.unload("d1").await.unwrap();
+    let db = s1.open("d1", DbConfig::default()).await.unwrap();
+    attach(&db).await;
+    assert_eq!(get(&db, T1, 1).await, vec![(1, "before".into()), (4, "n2".into())]);
+
+    // Two opens racing for one manifest: whichever order they land in, one of them can write.
+    s1.unload("d1").await.unwrap();
+    let s3 = store(&objects, "n3", &clock).await;
+    let (a, b) = tokio::join!(s2.open("d1", DbConfig::default()), s3.open("d1", DbConfig::default()));
+    let mut writers = 0;
+    for r in [a, b] {
+        match r {
+            Ok(db) => writers += db.write_manifest(false).await.is_ok() as u32,
+            Err(e) => assert!(manifest::is_fenced(&e), "{e:#}"),
+        }
+    }
+    assert_eq!(writers, 1);
+}
+
 #[tokio::test]
 async fn sync_durability_waits_for_the_segment() {
     let objects = crate::test_objects("persist-sync");

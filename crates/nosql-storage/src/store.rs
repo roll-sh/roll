@@ -244,11 +244,21 @@ impl Store {
 
     /// Ship buffered frames and rewrite a loaded database's manifest, so storage reflects it.
     async fn sync_to_storage(&self, id: &str) -> Result<()> {
-        if let Some(db) = self.get(id) {
-            self.shipper.flush().await?;
-            db.write_manifest(false).await?;
+        match self.get(id) {
+            Some(db) => db.checkpoint().await,
+            None => Ok(()),
         }
-        Ok(())
+    }
+
+    /// Drop a database another node opened since ([`Database::is_fenced`]) without writing
+    /// anything. `false` when it wasn't loaded (or isn't fenced).
+    pub async fn abandon_fenced(&self, id: &str) -> bool {
+        let _t = self.transitions.lock().await;
+        let Some(db) = self.get(id).filter(|d| d.is_fenced()) else { return false };
+        db.forget();
+        self.dbs.lock().remove(id);
+        tracing::warn!(db = id, "nosql database dropped: another node opened it");
+        true
     }
 
     /// Create `child` from `parent`'s state at `at_ms` (latest when `None`). Copies nothing.
@@ -264,7 +274,11 @@ impl Store {
         m.origin = Some(Origin { parent: parent.to_string(), at_ms: at_ms.unwrap_or_else(|| self.now_ms()), restore: false });
         m.version = 1;
         m.written_ms = self.now_ms();
-        manifest::write_manifest(objects, child, &m, true).await
+        // Create-only: two branches racing for one id can't both be created.
+        match manifest::swap_manifest(objects, child, &m, true, None).await {
+            Err(e) if manifest::is_fenced(&e) => bail!("database {child} already exists"),
+            r => r.map(|_| ()),
+        }
     }
 
     /// Restore `id` to its state at `at_ms`. With `into`, as a new database (a branch);
@@ -278,11 +292,11 @@ impl Store {
         let _t = self.transitions.lock().await;
         self.unload_locked(id).await?;
         let objects = self.objects();
-        let Some(current) = manifest::read_manifest(objects, id).await? else { bail!("database {id} does not exist") };
+        let Some((current, read)) = manifest::read_manifest_versioned(objects, id).await? else { bail!("database {id} does not exist") };
         let now = self.now_ms();
         let archive = format!("{id}.{now}");
         let archived = Manifest { node: None, ..current.clone() };
-        manifest::write_manifest(objects, &archive, &archived, true).await?;
+        manifest::swap_manifest(objects, &archive, &archived, true, None).await?;
         let mut m = based_on(objects, id, &current, Some(at_ms), id).await?;
         // The database keeps its stream; frames of the replaced timeline are never replayed as
         // its own again.
@@ -297,7 +311,9 @@ impl Store {
         m.version = current.version + 1;
         m.written_ms = now;
         m.origin = Some(Origin { parent: archive.clone(), at_ms, restore: true });
-        manifest::write_manifest(objects, id, &m, true).await?;
+        // A claim like an open's: a node that had the database open can't write over this.
+        m.fence = current.fence + 1;
+        manifest::swap_manifest(objects, id, &m, true, Some(&read)).await?;
         Ok(Some(archive))
     }
 

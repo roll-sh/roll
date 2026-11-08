@@ -15,10 +15,17 @@
 //! branch or an in-place restore replays before its own. The current manifest is rewritten
 //! lazily as segments ship; every structural change (flush, compaction, truncate, drop,
 //! branch, restore) also writes a numbered version under `manifests/`.
+//!
+//! **Fencing.** `manifest.json` is only ever replaced with a compare-and-swap on the version
+//! its writer last read or wrote ([`swap_manifest`]; S3 `If-Match`), and created only where
+//! there is none (`If-None-Match: *`). Opening a database is such a swap (it bumps
+//! [`Manifest::fence`]), so once a node has opened a database, every manifest write of a node
+//! that opened it before fails with [`Fenced`]: two nodes that both believe they own a database
+//! can't both commit to it, whatever their leases say.
 
 use anyhow::{Context, Result};
 use bytes::Bytes;
-use pg_storage::Objects;
+use pg_storage::{ObjectVersion, Objects};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -210,6 +217,30 @@ pub struct Manifest {
     pub history_floor: u64,
     #[serde(default)]
     pub origin: Option<Origin>,
+    /// How many times the database was opened (each open is a compare-and-swap that bumps it):
+    /// which tenure wrote this.
+    #[serde(default)]
+    pub fence: u64,
+}
+
+/// Another node (or process) opened the database after this writer did: its manifest moved on,
+/// and nothing was written. The writer must stop serving the database.
+#[derive(Debug)]
+pub struct Fenced {
+    pub db: String,
+}
+
+impl std::fmt::Display for Fenced {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "database {} was opened elsewhere since this node opened it; this node no longer writes it", self.db)
+    }
+}
+
+impl std::error::Error for Fenced {}
+
+/// Whether an error is (or wraps) [`Fenced`].
+pub fn is_fenced(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| c.is::<Fenced>())
 }
 
 impl Manifest {
@@ -258,15 +289,33 @@ pub async fn read_manifest(objects: &Objects, db: &str) -> Result<Option<Manifes
     read_json(objects, &manifest_key(db)).await
 }
 
-/// Write the current manifest, and with `history` also its numbered version.
-pub async fn write_manifest(objects: &Objects, db: &str, m: &Manifest, history: bool) -> Result<()> {
+/// The current manifest and its object version (what [`swap_manifest`] expects).
+pub async fn read_manifest_versioned(objects: &Objects, db: &str) -> Result<Option<(Manifest, ObjectVersion)>> {
+    let key = manifest_key(db);
+    match objects.get_versioned(&key).await? {
+        Some((raw, v)) => Ok(Some((serde_json::from_slice(&raw).with_context(|| format!("corrupt manifest {key}"))?, v))),
+        None => Ok(None),
+    }
+}
+
+/// Write the current manifest as a compare-and-swap: over `expected` (the version this writer
+/// last read or wrote), or, with `None`, only where there is no manifest yet. Then, with
+/// `history`, its numbered version too (after the swap, so a fenced writer leaves no history
+/// behind). The new version, or a [`Fenced`] error when the manifest moved on.
+pub async fn swap_manifest(objects: &Objects, db: &str, m: &Manifest, history: bool, expected: Option<&ObjectVersion>) -> Result<ObjectVersion> {
     let raw = Bytes::from(serde_json::to_vec(m)?);
     #[cfg(test)]
     crate::failpoint::check(&manifest_key(db))?;
+    let key = manifest_key(db);
+    let swapped = match expected {
+        Some(v) => objects.put_replacing(&key, raw.clone(), v).await?,
+        None => objects.put_new(&key, raw.clone()).await?,
+    };
+    let Some(v) = swapped else { return Err(Fenced { db: db.to_string() }.into()) };
     if history {
-        objects.put(&version_key(db, m.version), raw.clone()).await?;
+        objects.put(&version_key(db, m.version), raw).await?;
     }
-    objects.put(&manifest_key(db), raw).await
+    Ok(v)
 }
 
 /// Numbered versions of a database's manifest, ascending.
