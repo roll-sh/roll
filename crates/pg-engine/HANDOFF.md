@@ -9534,4 +9534,14 @@ that case. No benchmark, profile, idle-footprint measurement, or memory advantag
 is established. Matched dist builds, useful-work checks, and serialized timing,
 CPU, peak memory, and idle comparisons remain required. No persistent format,
 WAL, durability, session API, or vector source changed. Receipts and the rerunnable
-`audit-gin.py` are in `~/.cache/a192/`; the vector probe remains pending.
+`audit-gin.py` are in `~/.cache/a192/`.
+
+The saved vector probe now matches all 1,150 result rows and three headers in
+`vprobe.ref`. The existing `four_row_kernels_match` test also passes its bitwise
+serial/four-row comparisons. Ordinary joined SQL does not prove that the ANN
+four-row kernels ran; the direct kernel test supplies that check. Vector source
+and test hashes match the recorded build, and neither `vprobe.sql` nor its saved
+reference changed. This reuses the saved reference rather than recording a new
+reference build. No FMA mismatch was established and no vector code changed.
+The probe engine shut down cleanly, and both temporary labeled containers were
+removed. The existing stopped a192 containers, worktree, cache, and WIP remain.
