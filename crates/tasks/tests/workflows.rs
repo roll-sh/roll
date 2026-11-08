@@ -622,13 +622,19 @@ async fn workflows_survive_a_worker_crash() {
     env.post("/events", json!(events)).await;
     tokio::time::sleep(Duration::from_millis(150)).await;
     b.worker.take().unwrap().kill();
-    let deadline = now_ms() + 15_000;
+    // As long as the runs move (a loaded machine may take long), wait; a run that stops moving
+    // for several leases and backoffs is stuck.
+    let (mut deadline, mut seen) = (now_ms() + 10_000, String::new());
     loop {
         let runs = env.runs("pipeline").await;
         if runs.iter().filter(|r| r["status"] == "completed").count() == 10 {
             break;
         }
         assert!(runs.iter().all(|r| r["status"] != "failed"), "pipeline failed: {runs:#?}");
+        let now_at: String = runs.iter().map(|r| format!("{}@{} ", r["id"], r["version"])).collect();
+        if now_at != seen {
+            (deadline, seen) = (now_ms() + 10_000, now_at);
+        }
         if now_ms() >= deadline {
             for run in &runs {
                 if let Some(id) = run["invocation"].as_str() {

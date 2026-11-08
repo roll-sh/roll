@@ -748,19 +748,28 @@ impl Tasks {
         .await
     }
 
+    /// One timer per run, step and kind. The message goes in before the key that says it exists,
+    /// so a worker that dies between the two leaves a timer (a second one, from the delivery
+    /// that redoes this, is harmless: every timer's handler is idempotent), never a key with no
+    /// timer behind it, which would leave the run waiting forever.
     async fn timer(&self, run_id: &str, step_id: &str, kind: TimerKind, at: Ms) -> Result<()> {
         let key = format!("timer:{run_id}:{step_id}:{kind:?}");
-        if !self.store.kv_put(&key, &json!(at), Expect::Absent, Some(at + DAY)).await? {
+        if self.store.kv_get(&key).await?.is_some() {
             return Ok(());
         }
-        self.enqueue(
-            NewMessage {
-                run_id: Some(run_id.into()),
-                ..NewMessage::internal(Target::Timer { run_id: run_id.into(), step_id: step_id.into(), kind }, at)
-            },
-            b"",
-        )
-        .await?;
+        let m = self
+            .enqueue(
+                NewMessage {
+                    run_id: Some(run_id.into()),
+                    ..NewMessage::internal(Target::Timer { run_id: run_id.into(), step_id: step_id.into(), kind }, at)
+                },
+                b"",
+            )
+            .await?;
+        if !self.store.kv_put(&key, &json!(at), Expect::Absent, Some(at + DAY)).await? {
+            // Another delivery of the same invocation set it meanwhile: one timer is enough.
+            let _ = self.cancel(&m.id, "a duplicate timer").await;
+        }
         Ok(())
     }
 
