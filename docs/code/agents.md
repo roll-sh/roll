@@ -1467,10 +1467,11 @@ on the server meanwhile.
   is connected: offline, the mirror's statuses are the daemon's last word, not work going on). A
   thread only `waiting` on its user is idle: it was asked to wait. A delegating parent isn't idle
   while its children run, because the children are threads of the machine too. Activity the relay
-  sees go by also counts: a command for the machine, and terminal output (provider logins happen in a
-  terminal). It's noted in memory and folded into the sandbox's durable `last_active_at` at each
-  look; a busy look, a wake and an owner's start set it too, and so does the look that finds it
-  just come up, so the window starts once it's running however long it took to start.
+  sees go by also counts: a command for the machine (as it goes out and as its reply comes), and
+  terminal output (provider logins happen in a terminal). It's noted in memory and folded into
+  the sandbox's durable `last_active_at` at each look; a busy look, a wake and an owner's start
+  set it too, and so does the look that finds it just come up, so the window starts once it's
+  running however long it took to start.
 - **Sleeping**: the owner's reconciler stops a running sandbox once nothing happened for
   `ROLL_SANDBOX_IDLE_STOP` (5 min; `0` turns sleeping off). Its desired state becomes `asleep`
   (`Sandbox.status` `stopped`, `stopped_reason: idle`), apart from the owner's stop (`stopped`,

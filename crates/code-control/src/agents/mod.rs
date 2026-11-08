@@ -328,6 +328,8 @@ impl Agents {
 
     /// A daemon's reply: to everyone waiting for that command.
     pub(crate) fn replied(&self, machine_id: &str, id: &str, reply: Reply) {
+        // A command's reply is activity too (a sandbox stays up a window after it).
+        self.touch(machine_id);
         if let Some(p) = self.pending.lock().remove(&(machine_id.to_string(), id.to_string())) {
             for w in p.waiters {
                 let _ = w.send(reply.clone());
@@ -371,6 +373,9 @@ impl Agents {
             self.pending.lock().remove(&key);
             return error(ErrorCode::MachineOffline, "the machine's link is closed or too busy");
         }
+        // Activity when it goes out, not only when it was asked for: a woken sandbox's command
+        // waited for its daemon.
+        self.touch(machine_id);
         match tokio::time::timeout(timeout, wrx).await {
             Ok(Ok(r)) => r,
             Ok(Err(_)) => error(ErrorCode::MachineOffline, "the machine went away"),

@@ -4,10 +4,11 @@
 //! - **Sleep.** At each look the owner's reconciler asks [`Code::goes_to_sleep`] about a running
 //!   sandbox. Its machine is busy while a thread on it is starting or running in the mirror (a
 //!   thread only waiting on its user isn't: it was asked to wait). Activity the relay sees go by
-//!   (a command for it, terminal output) is noted in memory ([`Agents::touch`]) and folded into the
-//!   durable `last_active_at` at each look; a wake sets it too, and so does the look that finds
-//!   it just come up, so the window starts once it's up however long it took to start (a wake's
-//!   command still waits for its daemon then). Once nothing happened for
+//!   (a command for it, as it goes out and as its reply comes; terminal output) is noted in
+//!   memory ([`Agents::touch`]) and folded into the durable `last_active_at` at each look; a
+//!   wake sets it too, and so does the look that finds it just come up, so the window starts once
+//!   it's up however long it took to start (a wake's command still waits for its daemon then).
+//!   Once nothing happened for
 //!   `idle_stop`, the sandbox's desired state becomes `asleep` and the reconciler stops it, which
 //!   ends its metering. A reconciler that just started on this node (a restart, a lease move)
 //!   doesn't know what the last one saw since the last durable write, so nothing sleeps sooner
