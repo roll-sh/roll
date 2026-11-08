@@ -8719,9 +8719,10 @@ and speed pull apart. BENCH.md "Modes" has the measurements behind every value.
   never below efficient mode's, the plan caches at most 1 GB (an 8 GB container: 1.5 GB of
   blocks, 512 MB of plans); idle sessions keep their memory (no trim, no wake-ups while idle);
   databases stay open (no `roll-idle` thread); a connection waiting for its client polls its
-  socket for up to 50 µs before it sleeps, while the threads at work and polling fit in a
-  quarter of the cores the process may run on (on 4 cores: only while no other connection
-  works; `server::set_wait_spin`). An idle server spins never: 50 µs after a client's last
+  socket for up to 50 µs before it sleeps, if its client's last message came within that
+  (`IdleRead::spin`) and while the connections at work and polling fit in a quarter of the
+  cores the process may run on (on 4 cores: only while no other connection works;
+  `server::set_wait_spin`). An idle server spins never: at most 50 µs after a client's last
   message, then the thread sleeps in its read.
 - **Where the knobs live.** `src/mode.rs`: `Mode` and `Profile::new(mode, memory)`, the only
   place a knob's per-mode value is decided. `roll-engine`'s `profile()` picks the mode
@@ -8743,7 +8744,8 @@ and speed pull apart. BENCH.md "Modes" has the measurements behind every value.
   purging mimalloc's free pages (`MIMALLOC_PURGE_DELAY=-1`: no faster, 80 MB more); a spin
   capped at half the cores without counting the working threads (32 clients -15%), or allowed
   while working and polling threads fit in all the cores (8 clients -8%) or in half (8
-  clients' range reads -9%). Not mode
+  clients' range reads -9%) or in a quarter for every client (range reads -7%: the
+  per-connection rule took it to -4%, within the noise). Not mode
   knobs: the per-row executor and storage costs behind range reads, TPC-H, bulk loads (the
   executor, planner, OLTP, storage, bulk-write and index owners' areas); more parallel workers
   per Gather on bigger machines (the executor's `parallel_workers`, unmeasurable on the

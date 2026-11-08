@@ -88,7 +88,7 @@ impl Profile {
                     idle_close: Duration::MAX,
                     idle_trim: false,
                     // (A client's next message within it skips the sleep and the wake-up:
-                    // one client's select-only 1.46x, TPC-B-like 1.09x; 100 µs gained
+                    // one client's select-only 1.38x, TPC-B-like 1.22x; 100 µs gained
                     // no more.)
                     wait_spin: Duration::from_micros(50),
                 }
