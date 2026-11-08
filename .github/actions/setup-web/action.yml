@@ -16,10 +16,16 @@ runs:
       run: |
         version=$(jq -r '.packageManager | sub("^pnpm@"; "")' package.json)
         mkdir -p "$RUNNER_TEMP/pnpm"
-        curl -fsSL --retry 5 --retry-all-errors -o "$RUNNER_TEMP/pnpm.tar.gz" "https://github.com/pnpm/pnpm/releases/download/v$version/pnpm-linux-x64.tar.gz"
-        tar -xzf "$RUNNER_TEMP/pnpm.tar.gz" -C "$RUNNER_TEMP/pnpm"
-        echo "$RUNNER_TEMP/pnpm" >> "$GITHUB_PATH"
-        echo "PNPM_STORE=$("$RUNNER_TEMP/pnpm/pnpm" store path)" >> "$GITHUB_ENV"
+        if curl -fsSL --retry 3 --retry-all-errors -o "$RUNNER_TEMP/pnpm.tar.gz" "https://github.com/pnpm/pnpm/releases/download/v$version/pnpm-linux-x64.tar.gz"; then
+          tar -xzf "$RUNNER_TEMP/pnpm.tar.gz" -C "$RUNNER_TEMP/pnpm"
+          echo "$RUNNER_TEMP/pnpm" >> "$GITHUB_PATH"
+          pnpm="$RUNNER_TEMP/pnpm/pnpm"
+        else
+          # GitHub's release downloads can 504 for minutes at a time; npm has the same version.
+          npm install -g --no-fund --no-audit "pnpm@$version"
+          pnpm=pnpm
+        fi
+        echo "PNPM_STORE=$("$pnpm" store path)" >> "$GITHUB_ENV"
     - uses: actions/cache@v4
       with:
         path: ${{ env.PNPM_STORE }}
