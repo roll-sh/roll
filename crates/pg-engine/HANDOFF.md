@@ -4742,6 +4742,15 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
     tests, the chunked COPY wire test and all-target Clippy: 35 tests, zero failures.
     Receipts: `~/.cache/a182/resume-followup/`. The new golden was recorded from PostgreSQL
     18.6 at port 53648. No benchmark or full-suite result is inferred from these checks.
+    After rebasing over the newer planner and mode-setting commits, integrated source
+    `2b4ec8e0c3bc3a326df4e950fc83c740b08eb539` passes a release binary build, the
+    default-order and COPY goldens (six harness tests), the chunked COPY wire test and
+    all-target Clippy: seven tests, zero failures. Receipts and binary hash:
+    `~/.cache/a182/resume-integration/`; `~/.cache/a182/audit-resume.py` checks the source
+    and test receipts. Progress assertions run in AFTER STATEMENT triggers; mid-batch
+    progress sampling is not established by this coverage. Full-wave checks remain with
+    the verification train. No new containers were created; saved checkouts and caches
+    are retained for the coordinator.
 
 - **Result rows stream** (round 19, agent 65): a top-level SELECT's rows go to the client as
   the executor returns them, as PostgreSQL's printtup sends a DataRow per row. A
