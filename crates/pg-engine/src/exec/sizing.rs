@@ -1412,12 +1412,13 @@ pub fn btree_from_build(t: &Table, bix: &BoundIndex, keys: Vec<(Key, Vec<u8>)>, 
     Some((Btree::build(opts, entries), writes))
 }
 
-/// `btree_from_build` from entries at their rows' TIDs (a parallel build's participants
-/// found them, `tids_of`): None when the heap was written since the pass began.
-pub fn btree_from_entries(t: &Table, bix: &BoundIndex, entries: Vec<(Key, Tid)>, writes: u64, db: &Database) -> Option<(Btree, u64)> {
+/// `btree_from_build` from runs of entries at their rows' TIDs (a parallel build's, one per
+/// participant, which found the TIDs: `tids_of`): None when the heap was written since the
+/// pass began.
+pub fn btree_from_entries(t: &Table, bix: &BoundIndex, runs: Vec<Vec<(Key, Tid)>>, writes: u64, db: &Database) -> Option<(Btree, u64)> {
     let opts = btree_opts(bix)?;
     db.relfiles.of(t.oid).read().heaps.get(&t.oid).filter(|h| h.writes() == writes)?;
-    Some((Btree::build(opts, entries), writes))
+    Some((Btree::build_runs(opts, runs), writes))
 }
 
 /// The TIDs of the rows under `keys` in table `t`'s heap model, appended to `out`, while the

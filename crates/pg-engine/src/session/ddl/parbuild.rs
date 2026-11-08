@@ -312,8 +312,9 @@ pub(super) fn index_workers(d: &Ddl, t: &Table, pages: u32) -> usize {
 /// (`sizing::btree_from_build`).
 pub(super) enum ParBuilt {
     Measured(RowMeasure),
-    /// (`entries` None: the heap model changed meanwhile, or lacks a row.)
-    Modelled { rows: usize, tuples: usize, entries: Option<Vec<(Key, Tid)>> },
+    /// (`entries`: each participant's, in its rows' order; None: the heap model changed
+    /// meanwhile, or lacks a row.)
+    Modelled { rows: usize, tuples: usize, entries: Option<Vec<Vec<(Key, Tid)>>> },
 }
 
 /// Gives the reserved workers back to the pool when the build ends.
@@ -432,7 +433,7 @@ impl Ddl<'_, '_> {
             tuples += g.model_rows;
             lost |= g.model_lost;
         }
-        let mut model_keys = Vec::with_capacity(if lost || model.is_none() { 0 } else { tuples });
+        let mut model_keys = Vec::new();
         for g in gathered {
             if let Some(o) = g.oversized
                 && oversized.as_ref().is_none_or(|m| o.0 < m.0)
@@ -443,7 +444,7 @@ impl Ddl<'_, '_> {
             keys.push(g.keys);
             sorted.push(g.entries);
             if !lost {
-                model_keys.extend(g.model);
+                model_keys.push(g.model);
             }
         }
         if ix.unique {

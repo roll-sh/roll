@@ -750,11 +750,44 @@ impl Btree {
         entries.sort_by(|a, b| {
             a.0.cmp_keys(&b.0, nkey).then_with(|| a.1.cmp(&b.1))
         });
+        let n = entries.len();
+        Self::build_sorted(opts, n, entries)
+    }
+
+    /// `build` over runs of entries (a parallel build's participants'): each run in index
+    /// order (as a participant's chunks of a table in its index's order are) merged as it
+    /// goes, without a copy of every entry into one vector or a sort; else as `build`.
+    pub fn build_runs(opts: BtreeOpts, runs: Vec<Vec<(Key, Tid)>>) -> Btree {
+        let nkey = opts.nkey;
+        let le = |a: &(Key, Tid), b: &(Key, Tid)| a.0.cmp_keys(&b.0, nkey).then_with(|| a.1.cmp(&b.1)) != Ordering::Greater;
+        if !runs.iter().all(|r| r.is_sorted_by(le)) {
+            return Self::build(opts, runs.into_iter().flatten().collect());
+        }
+        let n = runs.iter().map(Vec::len).sum();
+        let mut its: Vec<std::iter::Peekable<std::vec::IntoIter<(Key, Tid)>>> =
+            runs.into_iter().filter(|r| !r.is_empty()).map(|r| r.into_iter().peekable()).collect();
+        let merged = std::iter::from_fn(move || {
+            let mut min: Option<usize> = None;
+            for i in 0..its.len() {
+                if let Some(x) = its[i].peek()
+                    && min.is_none_or(|m| its[m].peek().is_some_and(|y| !le(y, x)))
+                {
+                    min = Some(i);
+                }
+            }
+            its[min?].next()
+        });
+        Self::build_sorted(opts, n, merged)
+    }
+
+    /// `build` over `n` entries in index order.
+    fn build_sorted(opts: BtreeOpts, n: usize, entries: impl IntoIterator<Item = (Key, Tid)>) -> Btree {
+        let nkey = opts.nkey;
         let mut b = Builder {
             tree: Btree::new(opts.clone()),
             levels: Vec::new(),
         };
-        b.tree.tuples = entries.len();
+        b.tree.tuples = n;
         let leaf_full = BLCKSZ * (100 - opts.fillfactor) / 100;
         if opts.dedup && !opts.unique {
             const MAX_POSTING: usize = (BLCKSZ * 10 / 100) / 8 * 8 - ITEM_ID;
@@ -2391,6 +2424,11 @@ impl Builder {
             let mut old = std::mem::replace(&mut st.page, newpage);
             old.high = Some(high.clone());
             old.right = Some(nblk);
+            // (Plain as soon as it is full: `plain_leaves` would lay it out again at the end,
+            // and every leaf would hold its items' places and flags until then.)
+            if isleaf {
+                old.items.plain();
+            }
             st.blk = nblk;
             let lowkey = st.lowkey.replace(high).unwrap_or_else(Pivot::minus_inf);
             *self.tree.page_slot(oblk) = Some(old);

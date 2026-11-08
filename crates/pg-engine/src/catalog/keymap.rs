@@ -758,7 +758,7 @@ mod tests {
                     let row = m.remove(&k);
                     assert_eq!(row.is_some(), r.remove(&k).is_some());
                     if let Some(row) = row {
-                        assert_eq!(m.key(row), Some(&k[..]));
+                        assert_eq!(m.key(row).as_deref(), Some(&k[..]));
                     }
                 }
                 1 if i % 1000 == 0 => {
@@ -772,7 +772,7 @@ mod tests {
                 }
                 _ => {
                     let row = m.insert(&k, tid);
-                    assert_eq!(m.key(row), Some(&k[..]));
+                    assert_eq!(m.key(row).as_deref(), Some(&k[..]));
                     r.insert(k.clone(), tid);
                 }
             }
@@ -836,7 +836,7 @@ mod tests {
         assert_eq!((m.asc, m.table.len()), (3000, 0));
         for i in 0..3000u32 {
             assert_eq!(m.get(&key(i)), Some((i, 1)));
-            assert_eq!(m.key(i), Some(&key(i)[..]));
+            assert_eq!(m.key(i).as_deref(), Some(&key(i)[..]));
         }
         assert_eq!(m.remove(&key(5)), Some(5));
         assert_eq!(m.get(&key(5)), None);

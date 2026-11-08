@@ -1214,6 +1214,11 @@ impl Heap {
         self.keys.key(self.tuple(tid)?.row)
     }
 
+    /// Row `row`'s key (a row `committed_rows` gave).
+    pub fn row_key(&self, row: u32) -> super::keymap::RowKey<'_> {
+        self.keys.key(row).unwrap_or(super::keymap::RowKey::Kept(&[]))
+    }
+
     pub fn locate(&self, key: &[u8], v: &Vis) -> Option<Tid> {
         self.locate_row(key, v).map(|(_, tid)| tid)
     }
@@ -1249,10 +1254,10 @@ impl Heap {
     }
 
     /// The rows a scan of the stored data finds (inserted by a committed transaction, not
-    /// deleted by one): (TID, key, tuple length), in TID order.
-    pub fn committed_rows(&self, v: &Vis) -> Vec<(Tid, super::keymap::RowKey<'_>, u32)> {
+    /// deleted by one): (TID, row, tuple length), in TID order (the row's key: `row_key`).
+    pub fn committed_rows(&self, v: &Vis) -> Vec<(Tid, u32, u32)> {
         let mut out = Vec::with_capacity(self.keys.len());
-        for (k, _, latest) in self.keys.iter() {
+        for (_, row, latest) in self.keys.iter() {
             // (`locate` from the latest version: past versions aborted to the one they replaced.)
             let mut tid = Some(latest);
             while let Some(at) = tid
@@ -1265,7 +1270,7 @@ impl Heap {
                 && let Some(t) = self.tuple(tid)
                 && matches!(t.status(v), Htsv::Live | Htsv::DeleteInProgress)
             {
-                out.push((tid, k, t.len as u32));
+                out.push((tid, row, t.len as u32));
             }
         }
         out.sort_unstable_by_key(|x| x.0);
