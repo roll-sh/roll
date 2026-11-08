@@ -13,6 +13,7 @@ use serde_json::{Map, Value, json};
 use std::io::{BufRead, IsTerminal, Read, Write};
 use std::path::{Component, Path};
 
+mod fallback;
 mod ops;
 mod review;
 mod reviewer;
@@ -203,6 +204,9 @@ pub enum Code {
         /// chg_… or owner/repo#number
         change: String,
     },
+    /// What `land` and `change create` queued on GitHub while roll was unreachable (each lands
+    /// through roll, or opens its change, once roll is back).
+    Queued,
     /// Search a repository's code (default branch).
     Search {
         /// owner/repo, or owner/repo@rev to search a change's head or a branch
@@ -593,7 +597,12 @@ fn edit(e: &EditArgs, default_message: Option<&str>) -> anyhow::Result<Map<Strin
 
 struct Client<'a> {
     api: &'a Api,
+    /// What the last answer's `Retry-After` asked for.
+    retry_after: std::sync::Mutex<Option<std::time::Duration>>,
 }
+
+/// Retries of a request roll didn't answer (see [`Client::send`]).
+const RETRIES: u32 = 3;
 
 impl Client<'_> {
     fn request(&self, method: Method, path: &str) -> reqwest::RequestBuilder {
@@ -603,14 +612,47 @@ impl Client<'_> {
         }
         req
     }
-    /// Status and JSON body, without failing on 204 or 409 (callers decide).
+    /// Status and JSON body, without failing on 204 or 409 (callers decide). A connection that
+    /// can't be made and 502/503/504 are retried a few times (waiting what `Retry-After` asks, up
+    /// to 10 s); then it's [`fallback::Unreachable`].
     async fn send(&self, method: Method, path: &str, body: Option<Value>) -> anyhow::Result<(StatusCode, Value)> {
+        let base_ms = std::env::var("ROLL_CODE_RETRY_MS").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(500);
+        let mut wait = std::time::Duration::from_millis(base_ms);
+        let mut why = String::new();
+        for attempt in 0..=RETRIES {
+            if attempt > 0 {
+                tokio::time::sleep(wait).await;
+                wait = (wait * 2).min(std::time::Duration::from_secs(10));
+            }
+            match self.send_once(method.clone(), path, body.clone()).await {
+                Err(e) => match fallback::unreachable(&e) {
+                    Some(u) => why = u.why.clone(),
+                    None => return Err(e),
+                },
+                Ok((status, _)) if matches!(status.as_u16(), 502..=504) => why = format!("HTTP {status}"),
+                Ok(r) => return Ok(r),
+            }
+            if let Some(after) = self.retry_after.lock().unwrap().take() {
+                wait = after.min(std::time::Duration::from_secs(10));
+            }
+        }
+        Err(fallback::Unreachable { api: self.api.base.clone(), why }.into())
+    }
+    /// One attempt of [`Client::send`].
+    async fn send_once(&self, method: Method, path: &str, body: Option<Value>) -> anyhow::Result<(StatusCode, Value)> {
         let mut req = self.request(method, path);
         if let Some(b) = body {
             req = req.json(&b);
         }
-        let res = req.send().await.with_context(|| format!("can't reach {} (is rolld running?)", self.api.base))?;
+        let res = match req.send().await {
+            Ok(r) => r,
+            Err(e) if e.is_connect() => return Err(fallback::Unreachable { api: self.api.base.clone(), why: "connection refused".into() }.into()),
+            Err(e) => return Err(e).with_context(|| format!("can't reach {} (is rolld running?)", self.api.base)),
+        };
         let status = res.status();
+        if let Some(s) = res.headers().get(reqwest::header::RETRY_AFTER).and_then(|v| v.to_str().ok()).and_then(|v| v.trim().parse::<u64>().ok()) {
+            *self.retry_after.lock().unwrap() = Some(std::time::Duration::from_secs(s));
+        }
         let text = res.text().await?;
         let value = if text.is_empty() { Value::Null } else { serde_json::from_str(&text).unwrap_or(Value::String(text)) };
         Ok((status, value))
@@ -993,7 +1035,9 @@ fn land_result(json_out: bool, status: StatusCode, v: &Value) -> anyhow::Result<
 }
 
 pub async fn run(api: &Api, json_out: bool, cmd: Code) -> anyhow::Result<()> {
-    let c = Client { api };
+    let c = Client { api, retry_after: Default::default() };
+    // What was queued on GitHub while roll was down goes through roll now, if it's back.
+    fallback::replay(&c).await;
     let out = match cmd {
         Code::Owners { cmd: None } => {
             let v = c.get("/v1/code/owners").await?;
@@ -1059,6 +1103,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: Code) -> anyhow::Result<()> {
                 "source": source,
             });
             let v = c.post("/v1/code/repos", body).await?;
+            fallback::remember(&api.base, &v);
             if !json_out {
                 print_repo(&v);
                 return Ok(());
@@ -1067,6 +1112,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: Code) -> anyhow::Result<()> {
         }
         Code::Repo { repo } => {
             let v = c.get(&Spec::parse(&repo)?.path()).await?;
+            fallback::remember(&api.base, &v);
             if !json_out {
                 print_repo(&v);
                 return Ok(());
@@ -1192,12 +1238,22 @@ pub async fn run(api: &Api, json_out: bool, cmd: Code) -> anyhow::Result<()> {
         Code::Land { repo, edit: e, target } => {
             let spec = Spec::parse(&repo)?;
             let mut body = edit(&e, None)?;
+            let to_default = target.is_none();
             if let Some(r) = target {
                 body.insert("ref".into(), r.into());
             }
-            let (status, v) = c.send(Method::POST, &format!("{}/land", spec.path()), Some(Value::Object(body))).await?;
+            let (status, v) = match c.send(Method::POST, &format!("{}/land", spec.path()), Some(Value::Object(body.clone()))).await {
+                // A connected repo's land waits on GitHub as a pull request.
+                Err(ref e) if to_default && let Some(down) = fallback::unreachable(e) => {
+                    let title = body.get("message").and_then(Value::as_str).unwrap_or("").lines().next().unwrap_or("").to_string();
+                    return fallback::queue(&c, json_out, &spec, true, &title, &body, down).await;
+                }
+                r => r?,
+            };
+            fallback::learn(&c, &spec).await;
             return land_result(json_out, status, &v);
         }
+        Code::Queued => return fallback::list(&api.base, json_out),
         Code::Change(cmd) => return change(&c, json_out, cmd).await,
         Code::Check { change, name, status, url, summary } => {
             const STATES: [&str; 6] = ["queued", "running", "success", "failure", "cancelled", "skipped"];
@@ -1309,7 +1365,16 @@ async fn change(c: &Client<'_>, json_out: bool, cmd: Change) -> anyhow::Result<(
                 };
                 req.insert("work_item".into(), id.into());
             }
-            let v = c.post(&format!("{}/changes", spec.path()), Value::Object(req)).await?;
+            let files = req.contains_key("files") && !req.contains_key("work_item");
+            let v = match c.post(&format!("{}/changes", spec.path()), Value::Object(req.clone())).await {
+                // Files on a connected repo: the change waits on GitHub as a pull request.
+                Err(ref e) if files && let Some(down) = fallback::unreachable(e) => {
+                    let title = req.get("title").and_then(Value::as_str).unwrap_or("").to_string();
+                    return fallback::queue(c, json_out, &spec, false, &title, &req, down).await;
+                }
+                r => r?,
+            };
+            fallback::learn(c, &spec).await;
             if !json_out {
                 print_change(&v);
                 return Ok(());

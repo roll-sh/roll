@@ -644,6 +644,14 @@ async fn rate_limits_and_retries() {
     gh.repository(INSTALLATION, "acme", "api").await.unwrap();
     assert!(t.elapsed() < Duration::from_secs(2));
 
+    // Inside `impatiently` (the durable outbox to GitHub), a retry-after the default calls wait
+    // out is an error at once, carrying when to try again.
+    fail("/repos/acme/api", 429, vec![("retry-after", "2".into())], "slow down");
+    let t = Instant::now();
+    let e = code_github::impatiently(gh.repository(INSTALLATION, "acme", "api")).await.unwrap_err();
+    assert!(matches!(e, Error::RateLimited { reset } if reset > unix_now()), "{e}");
+    assert!(t.elapsed() < Duration::from_millis(900), "no waiting");
+
     // A primary limit that resets in an hour fails fast instead of sleeping.
     let reset = unix_now() + 3600;
     fail(

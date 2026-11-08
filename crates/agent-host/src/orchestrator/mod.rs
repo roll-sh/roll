@@ -192,6 +192,20 @@ pub(crate) struct Private {
     /// Each checkpoint's base commit (the checkpoint it is diffed against).
     #[serde(default)]
     from: BTreeMap<String, String>,
+    /// Its last publish couldn't reach roll and went to GitHub as a pull request instead; the
+    /// next publish that reaches roll replaces it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) github_queued: Option<QueuedOnGithub>,
+}
+
+/// A publish queued on GitHub while roll was unreachable (docs/code/agents.md, "When roll is down").
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct QueuedOnGithub {
+    pub pr: u64,
+    pub url: String,
+    pub branch: String,
+    pub land: bool,
+    pub at: u64,
 }
 
 /// A turn in a provider's native conversation.

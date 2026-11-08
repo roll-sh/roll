@@ -211,8 +211,8 @@ impl Code {
     }
 
     /// Whether a repo has work its owner must not walk away from: merge-queue entries, reviewer
-    /// jobs, checks queued or running, previews running, promised webhook events, or a GitHub
-    /// connection (its mirror). On any doubt (an error), busy.
+    /// jobs, checks queued or running, previews running, promised webhook events, notifications
+    /// for GitHub, or a GitHub connection (its mirror). On any doubt (an error), busy.
     pub(crate) fn repo_busy(&self, repo_id: &str) -> bool {
         // An owner's agents stay while any of its machines is connected here, or it has sandboxes
         // (their reconciler runs here; on any doubt, busy).
@@ -243,7 +243,8 @@ impl Code {
              OR (EXISTS (SELECT 1 FROM checks k JOIN changes c ON c.id = k.change_id \
                          WHERE c.repo_id = ?1 AND c.state IN ('open', 'queued', 'conflict') AND k.status IN ('queued', 'running'))) \
              OR (EXISTS (SELECT 1 FROM changes WHERE repo_id = ?1 AND preview LIKE '%\"state\":\"running\"%')) \
-             OR (EXISTS (SELECT 1 FROM webhook_outbox WHERE repo_id = ?1))",
+             OR (EXISTS (SELECT 1 FROM webhook_outbox WHERE repo_id = ?1)) \
+             OR (EXISTS (SELECT 1 FROM review_deliveries WHERE app_id = 'gh_' || ?1 AND state = 'pending'))",
             [repo_id],
             |r| r.get::<_, bool>(0),
         );

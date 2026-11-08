@@ -1037,7 +1037,7 @@ async fn github_net(name: &str) -> (Net, String) {
         config.web_base = "https://github.com".into();
         let client = code_github::ClientOptions { max_retries: 0, timeout: Duration::from_secs(2), ..Default::default() };
         let mirror = code_github::MirrorConfig { debounce: Duration::from_secs(600), max_delay: Duration::from_secs(600), ..Default::default() };
-        code_control::github::enable(&n.code, config, code_control::github::Options { mirror, client }).unwrap();
+        code_control::github::enable(&n.code, config, code_control::github::Options { mirror, client, ..Default::default() }).unwrap();
         n.code.set_github_delivery_claim(Duration::from_secs(2));
     }
     (net, repo_id)

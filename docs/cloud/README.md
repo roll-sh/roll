@@ -280,7 +280,7 @@ assume two fields:
 | AWS stack, image, pipeline, Cloudflare | built (`deploy/cloud/README.md`); not yet run against AWS |
 | edge | in progress |
 | control-plane auth lockdown | in progress |
-| GitHub resilience | in progress |
+| GitHub resilience | done |
 | tasks, queues, storage, redis, streams, nosql on the cluster layer | next, one product per change |
 | postgres on the fleet and the system database | with the pg-engine branch |
 | isolated work on Fargate | next |

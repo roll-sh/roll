@@ -1158,6 +1158,7 @@ fn relay_frames() -> Vec<RelayFrame> {
                 write: true,
                 branch: Some("roll/fix-the-flaky-queue-test".into()),
                 expires_at: T + 600_000,
+                github: Some(GrantGithub { owner: "acme".into(), repo: "roll".into(), url: "https://github.com/acme/roll".into(), default_branch: "main".into() }),
             })),
         },
         RelayFrame::Ping,

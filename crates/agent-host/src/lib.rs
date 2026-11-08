@@ -12,6 +12,7 @@ pub mod config;
 pub mod endpoints;
 pub mod fs;
 pub mod gateway;
+pub mod github;
 pub mod mcp;
 pub mod git;
 pub mod logo;

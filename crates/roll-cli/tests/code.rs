@@ -16,6 +16,10 @@ struct Env {
     work: PathBuf,
     _dir: tempfile::TempDir,
     _code: Arc<Code>,
+    /// The API answers 503 to everything while set (roll is down).
+    down: Arc<std::sync::atomic::AtomicBool>,
+    /// Every `Authorization` header the API received.
+    auth_seen: Arc<std::sync::Mutex<Vec<String>>>,
 }
 
 async fn env(admin_token: Option<&str>) -> Env {
@@ -29,13 +33,27 @@ async fn env_with(f: impl FnOnce(&mut Config)) -> Env {
     f(&mut config);
     let code = Code::open(config, objects).unwrap();
     code.start_reviewer();
-    let router = code_control::api::router(code.clone());
+    let down = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let auth_seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (d, seen) = (down.clone(), auth_seen.clone());
+    let router = code_control::api::router(code.clone()).layer(axum::middleware::from_fn(move |req: axum::extract::Request, next: axum::middleware::Next| {
+        let (d, seen) = (d.clone(), seen.clone());
+        async move {
+            if let Some(a) = req.headers().get("authorization").and_then(|v| v.to_str().ok()) {
+                seen.lock().unwrap().push(a.to_string());
+            }
+            if d.load(std::sync::atomic::Ordering::SeqCst) {
+                return axum::response::IntoResponse::into_response((axum::http::StatusCode::SERVICE_UNAVAILABLE, [("retry-after", "0")], "down"));
+            }
+            next.run(req).await
+        }
+    }));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let api = format!("http://{}", listener.local_addr().unwrap());
     tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
     let work = dir.path().join("work");
     std::fs::create_dir_all(&work).unwrap();
-    Env { api, work, _dir: dir, _code: code }
+    Env { api, work, _dir: dir, _code: code, down, auth_seen }
 }
 
 impl Env {
@@ -44,6 +62,10 @@ impl Env {
         c.args(args)
             .current_dir(&self.work)
             .env("ROLL_API_URL", &self.api)
+            .env("ROLL_CODE_STATE_DIR", self._dir.path().join("state"))
+            .env("ROLL_CODE_RETRY_MS", "20")
+            .env_remove("GH_TOKEN")
+            .env_remove("GITHUB_TOKEN")
             .env("NO_COLOR", "1")
             .env_remove("ROLL_CODE_TOKEN")
             .env_remove("ROLL_AGENT")
@@ -1152,4 +1174,103 @@ async fn reviewer_webhook_and_thread_edges() {
     e.fails(&["code", "review-apps", "show", "app_nope"], 1).await;
     e.fails(&["code", "review-apps", "create", "acme", "x", "--url", "http://127.0.0.1:9/h", "--event", "bogus"], 1).await;
     e.fails(&["code", "review-apps", "list", "nobody"], 1).await;
+}
+
+fn git_in(dir: &std::path::Path, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .current_dir(dir)
+        .args(args)
+        .env("HOME", dir)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_AUTHOR_NAME", "Ada")
+        .env("GIT_AUTHOR_EMAIL", "ada@example.com")
+        .env("GIT_COMMITTER_NAME", "Ada")
+        .env("GIT_COMMITTER_EMAIL", "ada@example.com")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+/// GitHub's REST API, as far as the fallback uses it: pull requests opened (body, token).
+async fn github_pulls() -> (String, Arc<std::sync::Mutex<Vec<(String, Value)>>>) {
+    use axum::routing::post;
+    let opened: Arc<std::sync::Mutex<Vec<(String, Value)>>> = Arc::default();
+    let o = opened.clone();
+    let router = axum::Router::new().route(
+        "/repos/{o}/{r}/pulls",
+        post(move |headers: axum::http::HeaderMap, axum::Json(b): axum::Json<Value>| {
+            let o = o.clone();
+            async move {
+                let auth = headers.get("authorization").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+                o.lock().unwrap().push((auth, b));
+                axum::Json(json!({ "number": 7, "html_url": "https://github.example/acme/app/pull/7", "state": "open" }))
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    (url, opened)
+}
+
+/// roll is down (503s past the retry budget). `land` on a GitHub-connected repo pushes a branch
+/// to GitHub and opens a pull request with the user's own token, which never reaches roll, and
+/// records the intent; a native repo gets a clear error. Once roll is back and has the pull
+/// request as a change, the next command lands it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn land_falls_back_to_a_github_pull_request_while_roll_is_down() {
+    // GitHub: its git side is another roll code with real history, its REST API a stub.
+    let gh = env(None).await;
+    gh.ok(&["code", "owners", "create", "acme", "--org"]).await;
+    gh.ok(&["code", "create", "acme/app"]).await;
+    let gh_token = gh.ok(&["code", "token", "create", "acme", "me"]).await.trim().to_string();
+    let seed = gh._dir.path().join("seed");
+    std::fs::create_dir_all(&seed).unwrap();
+    git_in(&seed, &["init", "-q", "-b", "main"]);
+    std::fs::write(seed.join("README.md"), "# app\n").unwrap();
+    git_in(&seed, &["add", "-A"]);
+    git_in(&seed, &["commit", "-qm", "initial"]);
+    git_in(&seed, &["push", "-q", &format!("{}/git/acme/app.git", gh.api), "main"]);
+    let (rest, opened) = github_pulls().await;
+
+    // roll: acme/app is connected to that GitHub repo, acme/lib is native.
+    let e = env(None).await;
+    e.ok(&["code", "owners", "create", "acme", "--org"]).await;
+    e.ok(&["code", "create", "acme/app"]).await;
+    e.ok(&["code", "create", "acme/lib"]).await;
+    let link = json!({
+        "installation_id": 1, "owner": "acme", "repo": "app", "url": format!("{}/git/acme/app", gh.api),
+        "default_branch_protected": null, "mirror": { "state": "ok", "last_push_at": null, "behind": 0, "error": null },
+        "remote_head": null, "connected": true,
+    });
+    e._code.db.sql().execute("UPDATE repos SET source = 'github', github = ? WHERE name = 'app'", [link.to_string()]).unwrap();
+    e.ok(&["code", "repo", "acme/app"]).await;
+    e.ok(&["code", "repo", "acme/lib"]).await;
+
+    e.down.store(true, std::sync::atomic::Ordering::SeqCst);
+    e.write("new.txt", "written while roll was down\n");
+    let out = e.cmd(&["code", "land", "acme/app", "new.txt", "-m", "while roll was down", "--base", "main"]).env("GH_TOKEN", &gh_token).env("ROLL_GITHUB_API_URL", &rest).output().unwrap();
+    assert!(out.status.success(), "{}\n{}", stdout(&out), stderr(&out));
+    assert!(stdout(&out).contains("queued on GitHub as pull request #7"), "{}", stdout(&out));
+    let (auth, pr) = opened.lock().unwrap()[0].clone();
+    assert_eq!(auth, format!("Bearer {gh_token}"));
+    assert_eq!(pr["base"], "main");
+    let branch = pr["head"].as_str().unwrap().to_string();
+    assert!(branch.starts_with("roll/queued-"), "{branch}");
+    assert_eq!(gh.ok(&["code", "cat", &format!("acme/app@{branch}"), "new.txt"]).await, "written while roll was down\n");
+    assert!(!e.auth_seen.lock().unwrap().iter().any(|a| a.contains(&gh_token)), "the GitHub token went to roll");
+    let native = e.cmd(&["code", "land", "acme/lib", "new.txt", "-m", "x", "--base", "main"]).env("GH_TOKEN", &gh_token).output().unwrap();
+    assert_eq!(native.status.code(), Some(1));
+    assert!(stderr(&native).contains("native roll repo"), "{}", stderr(&native));
+    assert!(e.ok(&["code", "queued"]).await.contains("PR #7"));
+
+    // roll is back and has ingested the pull request (a webhook or the reconcile; here, by hand).
+    e.down.store(false, std::sync::atomic::Ordering::SeqCst);
+    let c = e.json(&["code", "change", "create", "acme/app", "-t", "while roll was down", "new.txt", "--base", "main"]).await;
+    e._code.db.sql().execute("UPDATE changes SET github_pr = 7 WHERE id = ?", [c["id"].as_str().unwrap()]).unwrap();
+    let out = e.run(&["code", "queued"], None).await;
+    assert!(stderr(&out).contains("pull request #7") && stderr(&out).contains("landed"), "{}", stderr(&out));
+    assert!(stdout(&out).contains("nothing queued"), "{}", stdout(&out));
+    assert_eq!(e.json(&["code", "change", "show", c["id"].as_str().unwrap()]).await["state"], "landed");
 }
