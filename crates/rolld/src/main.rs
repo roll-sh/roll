@@ -15,6 +15,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 /// `mi_option_purge_delay` (libmimalloc-sys doesn't export the constant).
 const MI_OPTION_PURGE_DELAY: libmimalloc_sys::mi_option_t = 15;
 
+mod auth;
 mod cluster;
 mod code;
 mod edge;
@@ -104,7 +105,7 @@ struct Args {
     kafka_tls_cert: Option<PathBuf>,
     #[arg(long, env = "ROLL_KAFKA_TLS_KEY", requires = "kafka_tls_cert")]
     kafka_tls_key: Option<PathBuf>,
-    /// Require an API key on the HTTP stream data plane.
+    /// Require an API key on the HTTP stream data plane (always on with ROLL_ADMIN_TOKEN).
     #[arg(long, env = "ROLL_STREAM_REQUIRE_AUTH")]
     stream_require_auth: bool,
     /// Local disk target for stream data across open partitions, in MiB (0 = only per-topic
@@ -317,6 +318,7 @@ async fn run() -> anyhow::Result<()> {
     let mut args = Args::parse();
     logs::init(args.log_format);
     edge::configure(&mut args);
+    let auth = auth::Auth::new(&args)?;
     let on = args.products()?;
     info!(products = %on, "starting");
     let home = std::path::absolute(&args.home)?;
@@ -337,11 +339,11 @@ async fn run() -> anyhow::Result<()> {
         false => None,
     };
     let tasks = match on.on(Product::Tasks) {
-        true => Some(start_tasks(&args, &home).await?),
+        true => Some(start_tasks(&args, &auth, &home).await?),
         false => None,
     };
     let mut streams = match on.on(Product::Streams) {
-        true => Some(start_streams(&args, &home, &storage).await?),
+        true => Some(start_streams(&args, &auth, &home, &storage).await?),
         false => None,
     };
     let postgres = match on.on(Product::Postgres) {
@@ -356,7 +358,7 @@ async fn run() -> anyhow::Result<()> {
     let code = match on.on(Product::Code) {
         true => {
             let data = code_preview::RollData { postgres: postgres.as_ref().map(|p| p.control.clone()), redis: redis.as_ref().map(|r| r.control.clone()) };
-            Some(start_code(&args, &home, &storage, std::sync::Arc::new(data)).await?)
+            Some(start_code(&args, &auth, &home, &storage, std::sync::Arc::new(data)).await?)
         }
         false => None,
     };
@@ -382,7 +384,7 @@ async fn run() -> anyhow::Result<()> {
     };
 
     // The internal API: every product's routes, and a clear 404 for the ones that are off.
-    let mut router = on.info_route(cluster.node_id().to_string()).merge(on.off_routes());
+    let mut router = axum::Router::new();
     if let Some(p) = &postgres {
         router = router.merge(api::router(p.control.clone()));
     }
@@ -407,7 +409,11 @@ async fn run() -> anyhow::Result<()> {
     if let Some(n) = &nosql {
         router = router.merge(n.router());
     }
-    let mut router = router.layer(axum::middleware::from_fn(logs::access));
+    // The operator token in front of every product's routes (auth.rs); `/v1/info` and the 404s of
+    // products that are off answer before it. The gated router merges last so its fallback (401
+    // without the token) stays the fallback.
+    let router = on.info_route(cluster.node_id().to_string()).merge(on.off_routes()).merge(auth.gate("api", router));
+    let mut router = auth.cors(router).layer(axum::middleware::from_fn(logs::access));
     if let Some(c) = &code {
         router = c.router(router);
     }
@@ -425,6 +431,7 @@ async fn run() -> anyhow::Result<()> {
         storage: storage_svc.as_ref().map(|s| s.s3_router()),
         nosql: nosql.as_ref(),
         queues: queues.as_ref(),
+        auth: &auth,
     };
     let edge = edge::Edge::start(&args, &storage, products, std::sync::Arc::new(edge::ClusterSingleton(cluster.clone()))).await?;
     let router = edge::internal(router, edge.as_ref());
@@ -516,9 +523,10 @@ struct Tasks {
     worker: tasks::Worker,
 }
 
-async fn start_tasks(args: &Args, home: &std::path::Path) -> anyhow::Result<Tasks> {
+async fn start_tasks(args: &Args, auth: &auth::Auth, home: &std::path::Path) -> anyhow::Result<Tasks> {
     let store = std::sync::Arc::new(tasks::store::sqlite::SqliteStore::open(&home.join("tasks.db"), 4)?);
-    let tasks = tasks::Tasks::new(tasks::Config { token: args.tasks_token.clone().filter(|t| !t.is_empty()), ..tasks::Config::default() }, store).await?;
+    let config = tasks::Config { token: args.tasks_token.clone().filter(|t| !t.is_empty()), require_auth: auth.enforcing(), ..tasks::Config::default() };
+    let tasks = tasks::Tasks::new(config, store).await?;
     let worker = tasks::start(tasks.clone());
     Ok(Tasks { tasks, worker })
 }
@@ -529,7 +537,7 @@ struct Streams {
     kafka: Option<tokio::net::TcpListener>,
 }
 
-async fn start_streams(args: &Args, home: &std::path::Path, storage: &StorageConfig) -> anyhow::Result<Streams> {
+async fn start_streams(args: &Args, auth: &auth::Auth, home: &std::path::Path, storage: &StorageConfig) -> anyhow::Result<Streams> {
     let mut c = stream_broker::Config::local(home.to_path_buf());
     c.listen = args.kafka;
     c.advertised_host = args.kafka_advertised_host.clone().unwrap_or_else(|| args.public_host.clone());
@@ -537,7 +545,7 @@ async fn start_streams(args: &Args, home: &std::path::Path, storage: &StorageCon
     c.default_stream = Some(args.default_stream.clone()).filter(|s| !s.is_empty());
     c.tls = args.kafka_tls_cert.clone().zip(args.kafka_tls_key.clone()).map(|(cert, key)| TlsFiles { cert, key });
     c.http_url = format!("http://{}:{}", args.public_host, args.api.port());
-    c.http_require_auth = args.stream_require_auth;
+    c.http_require_auth = args.stream_require_auth || auth.enforcing();
     c.local_disk_bytes = args.stream_disk_mb << 20;
     c.evict_on_unload = !args.stream_keep_local;
     c.storage = storage.clone();
@@ -640,6 +648,7 @@ where
 /// checks and previews (`data`: what previews branch).
 async fn start_code(
     args: &Args,
+    auth: &auth::Auth,
     home: &std::path::Path,
     storage: &StorageConfig,
     data: std::sync::Arc<dyn code_preview::DataBranches>,
@@ -649,6 +658,7 @@ async fn start_code(
     let code_public = args.code_public_url.clone().unwrap_or_else(|| format!("http://{}:{}", args.public_host, args.api.port()));
     let mut code_config = code_control::Config {
         admin_token: args.code_token.clone().filter(|t| !t.is_empty()),
+        operator_token: auth.token(),
         git_url: args.code_git_url.clone().unwrap_or_else(|| format!("{}/git", code_public.trim_end_matches('/'))),
         api_url: code_public,
         web_url: args.web_url.clone(),

@@ -468,7 +468,7 @@ impl Code {
     }
 
     fn private_providers_allowed(&self) -> bool {
-        self.config.allow_private_providers.unwrap_or(self.config.admin_token.is_none())
+        self.config.allow_private_providers.unwrap_or(!self.config.locked())
     }
 
     /// The HTTP client for owners' own providers: no redirects, and (unless private providers

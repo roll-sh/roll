@@ -152,6 +152,8 @@ pub struct Products<'a> {
     pub storage: Option<axum::Router>,
     pub nosql: Option<&'a crate::nosql::Nosql>,
     pub queues: Option<&'a crate::queues::Queues>,
+    /// The operator-token gate: the Kafka HTTP and tasks hosts carry control-plane routes too.
+    pub auth: &'a crate::auth::Auth,
 }
 
 /// The edge, its listeners bound.
@@ -463,8 +465,8 @@ impl HttpRoutes {
             api: p.api.clone(),
             dashboard: e.dashboard_upstream.as_deref().filter(|u| !u.is_empty()).map(Upstream::new).transpose()?,
             redis: p.redis.map(|r| logged(r.rest_router())),
-            kafka: p.streams.clone().map(|b| logged(stream_broker::http::router(b))),
-            tasks: p.tasks.clone().map(|t| logged(tasks::api::router(t))),
+            kafka: p.streams.clone().map(|b| logged(p.auth.gate("kafka", stream_broker::http::router(b)))),
+            tasks: p.tasks.clone().map(|t| logged(p.auth.gate("tasks", tasks::api::router(t)))),
             s3: p.storage.clone().map(logged),
             alternator: p.nosql.map(|n| logged(n.alternator_router())),
             mq,

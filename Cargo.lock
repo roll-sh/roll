@@ -1592,6 +1592,7 @@ dependencies = [
  "pg-storage",
  "rand 0.8.8",
  "reqwest",
+ "roll-auth",
  "roll-cluster",
  "rsa",
  "serde",
@@ -6216,6 +6217,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "roll-auth"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "serde_json",
+ "tower-http 0.7.1",
+]
+
+[[package]]
 name = "roll-cli"
 version = "0.1.0"
 dependencies = [
@@ -6366,6 +6376,7 @@ dependencies = [
  "redis-control",
  "redis-server",
  "reqwest",
+ "roll-auth",
  "roll-cluster",
  "roll-edge",
  "s3-api",
@@ -6705,6 +6716,7 @@ dependencies = [
  "getrandom 0.4.3",
  "image",
  "reqwest",
+ "roll-auth",
  "s3-image",
  "s3-proto",
  "s3-server",
@@ -7403,6 +7415,7 @@ dependencies = [
  "rcgen",
  "rdkafka",
  "reqwest",
+ "roll-auth",
  "rusqlite",
  "rustls-pemfile",
  "serde",
@@ -7621,6 +7634,7 @@ dependencies = [
  "lambda_http",
  "object_store",
  "reqwest",
+ "roll-auth",
  "rusqlite",
  "serde",
  "serde_json",

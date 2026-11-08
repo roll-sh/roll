@@ -122,18 +122,6 @@ async fn create_validation_and_views() {
     let r = e.http.post(format!("{}/v1/nosql/databases", e.api)).header("content-type", "application/json").body("{not json").send().await.unwrap();
     assert_eq!(r.status().as_u16(), 400);
     assert!(r.json::<Value>().await.unwrap()["error"].as_str().unwrap().starts_with("invalid request body"));
-
-    // The dashboard calls the API from another origin.
-    let pre = e
-        .http
-        .request(Method::OPTIONS, format!("{}/v1/nosql/databases/{id}", e.api))
-        .header("origin", "http://localhost:3000")
-        .header("access-control-request-method", "PATCH")
-        .send()
-        .await
-        .unwrap();
-    assert!(pre.status().is_success());
-    assert!(pre.headers().contains_key("access-control-allow-origin"));
 }
 
 #[tokio::test]

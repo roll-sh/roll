@@ -10,7 +10,6 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::sync::Arc;
-use tower_http::cors::CorsLayer;
 
 type AppState = Arc<Control>;
 type ApiResult<T> = Result<Json<T>, ControlError>;
@@ -41,9 +40,7 @@ pub fn router(control: Arc<Control>) -> Router {
         .route("/v1/redis/databases/{id}/command", post(command))
         .route("/v1/redis/replicas/{id}", delete(delete_replica))
         .route("/v1/redis/replicas/{id}/unload", post(unload_replica))
-        // The dashboard calls it from the browser, like the Postgres API.
-        .layer(CorsLayer::permissive())
-        // In a cluster, a database's routes run on its owner (outside CORS: the owner adds it).
+        // In a cluster, a database's routes run on its owner.
         .layer(axum::middleware::from_fn_with_state(control.clone(), crate::cluster::owner_routes))
         .with_state(control)
 }

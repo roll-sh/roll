@@ -14,7 +14,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
-use tower_http::cors::CorsLayer;
 
 type AppState = Arc<Control>;
 
@@ -48,8 +47,7 @@ pub fn router(control: Arc<Control>) -> Router {
         .route("/v1/endpoints/{id}", get(get_endpoint).patch(update_endpoint).delete(delete_endpoint))
         .route("/v1/endpoints/{id}/start", post(start_endpoint))
         .route("/v1/endpoints/{id}/suspend", post(suspend_endpoint))
-        .route("/v1/endpoints/{id}/query", post(query))
-        .layer(CorsLayer::permissive());
+        .route("/v1/endpoints/{id}/query", post(query));
     public.route("/internal/wal/{branch}/{file}", get(internal_wal)).with_state(control)
 }
 

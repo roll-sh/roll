@@ -29,7 +29,6 @@ use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use tower_http::cors::CorsLayer;
 
 pub struct Api {
     pub b: Arc<Broker>,
@@ -70,7 +69,6 @@ pub fn router(b: Arc<Broker>) -> Router {
         .route("/v1/streams/{s}/usage", get(usage))
         .merge(data::routes())
         .merge(confluent::routes())
-        .layer(CorsLayer::permissive())
         .with_state(api)
 }
 
@@ -144,8 +142,35 @@ pub type ApiResult<T> = Result<T, ApiError>;
 
 // ── auth ──
 
-/// The API key in `Authorization` (Basic `user:secret`, or Bearer `user:secret`), verified.
-fn principal(api: &Api, headers: &HeaderMap) -> ApiResult<Option<Credential>> {
+/// A data-plane request's headers, and whether rolld's gate found the operator's token in them
+/// (`roll_auth::Operator`): the operator reaches every stream.
+pub struct Caller {
+    headers: HeaderMap,
+    pub operator: bool,
+}
+
+impl<St: Send + Sync> axum::extract::FromRequestParts<St> for Caller {
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(parts: &mut axum::http::request::Parts, _: &St) -> Result<Self, Self::Rejection> {
+        Ok(Self { headers: parts.headers.clone(), operator: roll_auth::Operator::on(&parts.extensions) })
+    }
+}
+
+impl std::ops::Deref for Caller {
+    type Target = HeaderMap;
+
+    fn deref(&self) -> &HeaderMap {
+        &self.headers
+    }
+}
+
+/// The API key in `Authorization` (Basic `user:secret`, or Bearer `user:secret`), verified. None
+/// for the operator.
+fn principal(api: &Api, headers: &Caller) -> ApiResult<Option<Credential>> {
+    if headers.operator {
+        return Ok(None);
+    }
     let Some(h) = headers.get(header::AUTHORIZATION) else { return Ok(None) };
     let unauthorized = || ApiError::new(StatusCode::UNAUTHORIZED, "unauthorized", "invalid API key");
     let h = h.to_str().map_err(|_| unauthorized())?;
@@ -165,13 +190,13 @@ fn principal(api: &Api, headers: &HeaderMap) -> ApiResult<Option<Credential>> {
 }
 
 /// The stream a data-plane request targets, checked against its API key.
-pub fn data_stream(api: &Api, headers: &HeaderMap, key: &str) -> ApiResult<Arc<Stream>> {
+pub fn data_stream(api: &Api, headers: &Caller, key: &str) -> ApiResult<Arc<Stream>> {
     let cred = principal(api, headers)?;
     let stream = api.b.find_stream(key).ok_or_else(|| ApiError::not_found(format!("stream {key} not found")))?;
     match cred {
         Some(c) if c.stream_id == stream.id => {}
         Some(_) => return Err(ApiError::new(StatusCode::FORBIDDEN, "forbidden", "this API key belongs to another stream")),
-        None if api.b.config.http_require_auth => {
+        None if api.b.config.http_require_auth && !headers.operator => {
             return Err(ApiError::new(StatusCode::UNAUTHORIZED, "unauthorized", "an API key is required"));
         }
         None => {}

@@ -18,7 +18,6 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::broadcast;
-use tower_http::cors::{AllowHeaders, Any, CorsLayer};
 
 type S = State<Arc<Code>>;
 
@@ -73,17 +72,6 @@ impl<T: serde::de::DeserializeOwned, St: Send + Sync> FromRequestParts<St> for Q
     async fn from_request_parts(parts: &mut Parts, state: &St) -> Result<Self, Self::Rejection> {
         Query::<T>::from_request_parts(parts, state).await.map(|Query(q)| Q(q)).map_err(|e| Error::Invalid(e.body_text()))
     }
-}
-
-/// The browser calls the API directly. `Access-Control-Allow-Headers: *` doesn't cover
-/// `Authorization`, so requested headers are mirrored.
-fn cors() -> CorsLayer {
-    CorsLayer::new()
-        .allow_origin(Any)
-        .allow_methods(Any)
-        .allow_headers(AllowHeaders::mirror_request())
-        .expose_headers([header::HeaderName::from_static("x-roll-changeset"), header::ETAG])
-        .max_age(Duration::from_secs(3600))
 }
 
 pub fn router(code: Arc<Code>) -> Router {
@@ -151,7 +139,6 @@ pub fn router(code: Arc<Code>) -> Router {
         // Writes carry file contents (base64 for binary): room for a file of MAX_WRITE_FILE.
         // The webhook route sets its own limit.
         .layer(axum::extract::DefaultBodyLimit::max(MAX_BODY))
-        .layer(cors())
         .with_state(code.clone());
     let git_config = code_git::ServerConfig { memory_budget: Some(code.git_budget.clone()), ..code_git::ServerConfig::default() };
     let git = code_git::router(GitAdapter::new(code.clone()), git_config);
@@ -166,7 +153,7 @@ pub fn router(code: Arc<Code>) -> Router {
     let all = all.layer(axum::Extension(calls));
     // MCP tools call the rest of the API on the caller's behalf (so they're routed the same way).
     let mcp = crate::mcp::routes(code.clone(), all.clone()).layer(axum::extract::DefaultBodyLimit::max(MAX_BODY));
-    let health = Router::new().route("/v1/code/health", get(health)).layer(cors()).with_state(code.clone());
+    let health = Router::new().route("/v1/code/health", get(health)).with_state(code.clone());
     let mut out = all.merge(mcp).merge(health);
     if let Some(cluster) = code.cluster() {
         out = out
@@ -186,7 +173,7 @@ async fn health(State(code): S) -> Response {
 // ── info, names, owners ──
 
 /// Server info, plus who the request is: the dashboard's sign-in checks a token against it.
-async fn info(State(code): S, headers: axum::http::HeaderMap) -> Result<Json<Value>> {
+async fn info(State(code): S, operator: Option<axum::Extension<roll_auth::Operator>>, headers: axum::http::HeaderMap) -> Result<Json<Value>> {
     let token = headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
@@ -210,7 +197,8 @@ async fn info(State(code): S, headers: axum::http::HeaderMap) -> Result<Json<Val
         "repos": code.db.count_repos()?,
         "stats": code.stats()?,
         "github": { "configured": code.github_hub().is_some() },
-        "auth": { "required": code.config.admin_token.is_some(), "caller": caller },
+        // `operator`: rolld's gate found its operator token (ROLL_ADMIN_TOKEN) on this request.
+        "auth": { "required": code.config.locked(), "operator": operator.is_some(), "caller": caller },
     })))
 }
 

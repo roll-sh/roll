@@ -13,6 +13,7 @@ base64.workspace = true
 bytes.workspace = true
 futures.workspace = true
 getrandom.workspace = true
+roll-auth.workspace = true
 s3-image.workspace = true
 s3-proto.workspace = true
 s3-server.workspace = true

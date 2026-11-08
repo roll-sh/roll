@@ -35,6 +35,7 @@ hmac.workspace = true
 humantime.workspace = true
 reqwest = { workspace = true, features = ["rustls", "stream", "http2"] }
 object_store.workspace = true
+roll-auth.workspace = true
 rusqlite = { workspace = true, features = ["session", "backup"] }
 serde.workspace = true
 serde_json.workspace = true

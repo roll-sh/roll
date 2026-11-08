@@ -17,6 +17,7 @@ hmac.workspace = true
 kafka-protocol.workspace = true
 pbkdf2.workspace = true
 pg-storage.workspace = true
+roll-auth.workspace = true
 rusqlite.workspace = true
 rustls-pemfile.workspace = true
 serde.workspace = true
