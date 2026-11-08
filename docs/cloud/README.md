@@ -23,8 +23,8 @@ of each part is at the end.
 ## Principles
 
 - **One fleet, one binary.** Every node runs the same `rolld` with every product on. There is
-  no per-product server group to deploy, scale or patch. Per-product switches turn a product
-  off without a redeploy.
+  no per-product server group to deploy, scale or patch. A product can be switched off for the
+  whole fleet with a setting (`ROLL_PRODUCTS`; "Products").
 - **Everything has one owner, and ownership moves.** Each tenant resource (a repo, a Postgres
   endpoint, a Redis database, a NoSQL database, a Kafka cluster, a storage account, a queue, a
   tasks tenant) has one owner node at a time, held through a lease. Any node accepts a request or
@@ -77,6 +77,8 @@ written once in SQLite's dialect), as roll code's did.
   standby on a second node, point-in-time recovery from S3.
 - `ROLL_SYSTEM_DATABASE` takes any Postgres URL, so the fleet also runs on an outside Postgres
   (CI and local clusters use `postgres:18-alpine`).
+- roll code keeps its data there (schemas `code_store` and `code_control`) unless
+  `ROLL_CODE_DATABASE` names a Postgres of its own (docs/code/cluster.md, "Code's database").
 - Boot order: nodes join through DynamoDB → the `system:pg` owner starts the system database from
   S3 → products connect → tenant resources get owners on first use or from their leases.
 
@@ -205,9 +207,8 @@ when `ROLL_EDGE=1` (without it rolld is unchanged).
 - **Pipeline** (`.github/workflows/deploy.yml`): every merge to `main` builds one arm64 image
   (rolld plus the dashboard), pushes it to ECR through GitHub OIDC (no stored AWS keys), then:
   1. **canary**: one node of the new version joins the fleet and takes its share; it bakes for
-     10 minutes while alarms watch errors (HTTP 5xx), TCP resets, crashed or unhealthy nodes and
-     the healthy-node count (latency and handoff-failure alarms come with the metrics rolld will
-     publish under `RollCloud`);
+     10 minutes while alarms watch errors (HTTP 5xx), p99 latency, failed lease handoffs, lease
+     takeovers, TCP resets, crashed or unhealthy nodes and the healthy-node count ("Metrics");
   2. **roll**: the rest are replaced one at a time, each new node healthy before the next old one
      stops;
   3. **rollback**: any alarm, failed health check or ECS circuit breaker puts the previous image
@@ -279,7 +280,8 @@ The contract between the stack, the image and rolld. Each setting is a flag with
 | `ROLL_ZONE` | the instance's availability zone | placement spreads standbys across zones |
 | `ROLL_ADVERTISE_URL` | `http://<private ip>:7070` | where other nodes reach this one |
 | `ROLL_API` | `0.0.0.0:7070` | internal HTTP: node-to-node hops and `GET /healthz`; never public |
-| `ROLL_SYSTEM_DATABASE` | the system database's URL | catalogs and accounts for every product |
+| `ROLL_SYSTEM_DATABASE` | the system database's URL | catalogs and accounts for every product; roll code's data unless `ROLL_CODE_DATABASE` is set |
+| `ROLL_PRODUCTS` | `redis,streams,tasks,storage,nosql,queues,code` | the products the node runs (see "Products"); Postgres is off until its engine runs in process |
 | `ROLL_S3_BUCKET`, `AWS_REGION` | `roll-cloud-data-<account>`, `us-east-1` | all product data, under per-product prefixes |
 | `ROLL_SECRET_KEY` | from Secrets Manager | seals owners' keys and the stored certificates |
 | `ROLL_ADMIN_TOKEN` | from Secrets Manager | the operator token every control-plane API accepts |
@@ -293,7 +295,8 @@ The contract between the stack, the image and rolld. Each setting is a flag with
 | `ROLL_EDGE_DRAIN_DELAY` | `15` | seconds the public listeners keep serving after `/healthz` starts failing |
 | `ROLL_EDGE_ORIGIN_PULL` | `1` (the default outside dev mode) | Cloudflare's origin-pull certificate required on proxied hostnames |
 | `ROLL_DRAIN_TIMEOUT` | `90` | seconds a stopping node waits for its leases to move; `ROLL_CODE_DRAIN_TIMEOUT` stays an alias |
-| `ROLL_LOG_FORMAT` | `json` | one JSON object per line (see "Logs") |
+| `ROLL_LOG_FORMAT` | `json` | one JSON object per line, with access lines and metrics (see "Logs") |
+| `ROLL_QUEUES_USER`, `ROLL_QUEUES_PASSWORD` | `roll-admin`, generated in Secrets Manager | roll queues' admin login (guest/guest is refused behind the edge) |
 | `ROLL_CODE_PREVIEW_DOMAIN` | `roll.site` | previews answer on `chg-<id>.roll.site` |
 
 Public ports (NLB listener → node port): 443 → 8443 (HTTPS: dashboard, API, git, S3, REST data
@@ -308,15 +311,69 @@ nine ports), registered by the instance group. Client IP preservation is off: cl
 come only from PROXY protocol v2, on every public port. Health checks on 7070 carry no PROXY
 header.
 
+### Products
+
+`ROLL_PRODUCTS` (`--products`) is a comma list of `postgres`, `redis`, `streams`, `tasks`,
+`storage`, `nosql`, `queues` and `code`; unset, every product runs. The older switches are
+shorthands over the same set: `--no-storage`, `--no-queues` and `--no-nosql` take one out, and
+`--code-only`, `--queues-only` and `--nosql-only` mean `ROLL_PRODUCTS=<that one>`
+(`crates/rolld/src/products.rs` decides).
+
+- A product that's off binds none of its ports (the edge's too), starts no background work, and
+  its API routes answer 404 with `{"error": "roll <product> is off on this node (ROLL_PRODUCTS)",
+  "product": …}`. Its hostnames on the edge answer 404.
+- With Postgres off rolld never runs `docker` for computes. (roll code's checks and previews
+  still use Docker until they move to Fargate: without it they fail, and the node keeps serving.)
+- `GET /v1/info` (no token) answers `{"version", "node", "products"}`; the dashboard hides the
+  products a node doesn't run.
+- Every node of the fleet must run the same set: requests are forwarded to a resource's owner,
+  whichever node that is.
+
 ### Logs
 
-rolld writes one JSON object per line on stdout (`ROLL_LOG_FORMAT=json`; tracing-subscriber's
-JSON format with the event's fields flattened into the object). The stack's metric filters
-assume two fields:
+rolld writes one JSON object per line on stdout (`ROLL_LOG_FORMAT=json`;
+`crates/rolld/src/logs.rs`): `timestamp`, `level` (`"ERROR"`, `"WARN"`, `"INFO"`, …), `target`,
+`msg` and the event's fields. The stack's one metric filter counts `ErrorLogs` from
+`{ $.level = "ERROR" }`.
 
-- `level`: `"ERROR"`, `"WARN"`, `"INFO"`, …; `{ $.level = "ERROR" }` counts `ErrorLogs`.
-- `status`: a number on the line logged when an HTTP request is answered (any listener);
-  `{ $.status >= 500 }` counts `Http5xx`, which the `errors` alarm watches.
+Every HTTP request rolld answers, on the internal API (`listener: "api"`) or the edge's HTTPS
+listener (`"https"`), gets one access line (`target: "access"`, `msg: "request"`) when its
+response body ends:
+
+| field | |
+| --- | --- |
+| `method` | |
+| `route` | the matched route pattern (`/v1/code/repos/{owner}/{repo}`), `unmatched`, or what the edge served (`dashboard`, `queues`, `edge`). Never the path or query: no tenant names, tokens or query strings |
+| `product` | the product the route belongs to (`git` for git's smart-HTTP routes), `dashboard`, `edge`, or `rolld` (`/v1/info`, unmatched paths) |
+| `status` | a number |
+| `duration_ms` | until the response body ended |
+| `ttfb_ms` | until the response head was sent |
+| `bytes` | response body bytes |
+| `forwarded` | `true` when another node forwarded the request here (it logged it too) |
+
+No header is logged (`Authorization`, `Cookie` and the rest). Health checks (`/healthz`) get no access line.
+
+### Metrics
+
+Access lines are also CloudWatch Embedded Metric Format records (`_aws`), so CloudWatch Logs
+turns them into metrics without an API call from the node. Namespace `RollCloud`:
+
+| metric | unit | dimensions | from |
+| --- | --- | --- | --- |
+| `Latency` | Milliseconds | `product`; `service` = `rolld` | `ttfb_ms` of each request (p50/p99 are CloudWatch statistics) |
+| `Requests` | Count | `product`; `service` | 1 per request |
+| `Http5xx` | Count | `product`; `service` | 1 per 5xx answer |
+| `Handoffs` | Count | `service` | leases this node handed to another (per minute, and after a drain) |
+| `HandoffFailures` | Count | `service` | handoffs that timed out with requests in flight, whose release didn't reach the backend, or that a drain left behind |
+| `LeaseTakeovers` | Count | `service` | leases taken from a holder that never released them (it died or was cut off) |
+| `LeasesFenced` | Count | `service` | leases this node stopped using because it couldn't renew them in time |
+
+Forwarded requests carry no metrics: the node that received them counted them. The lease
+counters come from `roll_cluster::Cluster::stats` (roll-cluster has no AWS code).
+
+Alarms (`deploy/cloud/README.md`, "Alarms"): `errors` on `Http5xx`; `latency` on the slowest
+p99 of code, postgres, redis, storage, nosql and tasks (streams and queues long-poll, and git
+pushes take as long as the pack); `handoff-failures` and `lease-takeovers` on any.
 
 ## Where everything lives
 
@@ -337,6 +394,7 @@ assume two fields:
 | AWS stack, image, pipeline, Cloudflare | built (`deploy/cloud/README.md`); not yet run against AWS |
 | edge | built (`crates/roll-edge`, `rolld/src/edge.rs`); not yet run against AWS |
 | control-plane auth lockdown | in progress |
+| product switches, JSON logs, metrics and their alarms | built (`ROLL_PRODUCTS`, `ROLL_LOG_FORMAT`, `GET /v1/info`); not yet run against AWS |
 | GitHub resilience | done |
 | tasks, queues, storage, redis, streams, nosql on the cluster layer | next, one product per change |
 | postgres on the fleet and the system database | with the pg-engine branch |
@@ -344,16 +402,14 @@ assume two fields:
 
 ### Open items
 
-- **Per-product switches.** Today's Postgres product starts computes with the `docker` CLI, so
-  a fleet node with every product on exits with `running docker`. Every product needs an on/off
-  switch (`ROLL_PRODUCTS` or `--no-<product>`); the fleet runs with Postgres off until the
-  in-process engine replaces the Docker computes.
-- **Structured logs.** The stack's error alarms read JSON logs with `level` and a numeric `status`
-  (`ROLL_LOG_FORMAT=json`); rolld doesn't emit them yet.
-- **Metrics** for request latency and failed handoffs, so the canary's bake can alarm on them.
-- **Code's data on the system database.** With `ROLL_CLUSTER_BACKEND=dynamodb` only leases and
-  membership leave Postgres: roll code still needs `ROLL_CODE_DATABASE` for its data, which the
-  stack doesn't set yet. It moves to `ROLL_SYSTEM_DATABASE` with the system database.
+- **Postgres on the fleet.** Today's Postgres product starts computes with the `docker` CLI, so
+  the stack runs with it off (`ROLL_PRODUCTS`) until the in-process engine replaces them.
+- **Code checks and previews** still run in Docker; they move to Fargate ("Isolated work").
 - **Buckets on roll.site.** The CDN Worker serves path-style only, so `<bucket>.roll.site` needs
   virtual-host support, and bucket names starting `chg-` must be reserved (they'd collide with
   previews).
+- **Flaky tests seen on GitHub** (each passed on a plain re-run, and on main): redis
+  `compat_debug_with_redis` (`search_hnsw.txt`, `FT.INFO` while the vector index is still
+  building), nosql conformance `test_compaction.py::test_tombstone_gc_with_conflict_in_memtable`,
+  code-control `automations::a_run_starts_an_agent_waits_for_it_and_notifies` (under load). Each
+  should wait for the state it checks instead of racing it.

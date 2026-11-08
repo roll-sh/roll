@@ -24,7 +24,7 @@ const TIMEOUT: Duration = Duration::from_secs(30);
 
 pub struct RollSink {
     pub queues: Option<Arc<mq_core::Broker>>,
-    pub streams: Arc<stream_broker::broker::Broker>,
+    pub streams: Option<Arc<stream_broker::broker::Broker>>,
 }
 
 impl RollSink {
@@ -36,8 +36,12 @@ impl RollSink {
         b.open_vhost(name).await.ok_or_else(|| format!("vhost {name} is unavailable"))
     }
 
+    fn streams(&self) -> Result<&Arc<stream_broker::broker::Broker>, String> {
+        self.streams.as_ref().ok_or_else(|| "roll streams are off on this deployment".to_string())
+    }
+
     fn topic(&self, stream: &str, topic: &str) -> Result<(Arc<stream_broker::broker::Stream>, Arc<stream_broker::broker::Topic>), String> {
-        let s = self.streams.find_stream(stream).ok_or_else(|| format!("stream {stream} doesn't exist"))?;
+        let s = self.streams()?.find_stream(stream).ok_or_else(|| format!("stream {stream} doesn't exist"))?;
         let t = s.topic(topic).ok_or_else(|| format!("topic {topic} doesn't exist in stream {stream}"))?;
         Ok((s, t))
     }
@@ -90,7 +94,7 @@ impl EventSink for RollSink {
                     let (s, t) = self.topic(stream, topic)?;
                     let headers = vec![("s3-event".to_string(), Bytes::from(d.event_name.clone())), ("s3-bucket".into(), Bytes::from(d.bucket.clone())), ("delivery-id".into(), Bytes::from(d.id.clone()))];
                     let key = (!d.key.is_empty()).then(|| Bytes::from(d.key.clone()));
-                    stream_broker::http::produce_one(&self.streams, &s, &t, key, d.body.clone(), headers, TIMEOUT).await
+                    stream_broker::http::produce_one(self.streams()?, &s, &t, key, d.body.clone(), headers, TIMEOUT).await
                 }
             }
         })
@@ -120,7 +124,7 @@ mod tests {
 
         let store = s3_store::Store::open(s3_store::StoreConfig::new(dir.path().join("s3")).manual(), s3_store::test_backend("rolld-events").await).await.unwrap();
         let server = s3_server::Server::new(store.clone(), s3_server::Config { spool_dir: dir.path().to_path_buf(), ..Default::default() });
-        server.notifier.set_sink(Arc::new(RollSink { queues: Some(mq.clone()), streams: streams.clone() }));
+        server.notifier.set_sink(Arc::new(RollSink { queues: Some(mq.clone()), streams: Some(streams.clone()) }));
         store.create_bucket("uploads", Default::default()).await.unwrap();
         let mut cfg = s3_store::NotificationConfig {
             configurations: vec![s3_store::NotificationTarget {
