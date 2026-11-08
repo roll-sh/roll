@@ -1016,6 +1016,7 @@ impl Session {
                 "DECLARE CURSOR must not contain data-modifying statements in WITH",
             ));
         }
+        crate::session::cursor::check_read_only(s)?;
         // After parse analysis (PerformCursorOpen).
         if !hold && self.status == TxnStatus::Idle {
             return Err(Error::new(
