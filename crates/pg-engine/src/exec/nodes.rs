@@ -126,6 +126,7 @@ fn open_node(plan: &Arc<Plan>, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<B
             let reads = stat_reads(*table, filter.as_ref(), need);
             let mut rows = match is_named_rows(*table, filter.as_ref(), reads.as_deref(), ctx)? {
                 Some(r) => r,
+                None if let Some(r) = sys_obj_rows(*table, filter.as_ref(), path.as_deref(), ctx)? => r,
                 None if reads.is_some() => {
                     let sel = crate::catalog::stat_views::StatSel { reads, ..Default::default() };
                     crate::catalog::stat_views::rows_of(*table, ctx, &sel)?
@@ -965,8 +966,10 @@ pub struct SysRescan {
     rows: Option<Arc<crate::catalog::system::SysRows>>,
 }
 
-/// The first `column = value` among `f`'s conjuncts (only the first conjunct with
-/// `first_only`) that a hash on the column can serve: a built-in `=` over an integer, oid or
+/// The `column = value` among `f`'s conjuncts (only the first conjunct with `first_only`)
+/// that a hash on the column can serve and picks the fewest rows (pg_depend's
+/// `refclassid = 1259 AND refobjid = x` picked every relation's rows by its first conjunct,
+/// and the rest was evaluated on each: Django's sequences query, 150 ms at 10,000 tables): a built-in `=` over an integer, oid or
 /// "char" column, or a name / text column under a deterministic collation (whose equality is
 /// the bytes'), with a value (constant, or of outer references) of the column's own type.
 /// Its column, and the rows whose value equals it, in row order (None: the value is NULL, and
@@ -991,40 +994,120 @@ fn sys_equality(
         let quiet = conj.iter().take_while(|c| quiet_filter(c)).count();
         conj.truncate((quiet + 1).min(conj.len()));
     }
+    let mut best: Option<(usize, Vec<u32>)> = None;
     for c in conj {
-        let Expr::Call(d, args, _) = c else { continue };
-        if d.name != "=" || args.len() != 2 || d.oid >= crate::catalog::FIRST_USER_OID {
-            continue;
-        }
-        if d.coll.as_ref().is_some_and(|c| !c.deterministic) {
-            continue;
-        }
-        let (k, other) = match (&args[0], &args[1]) {
-            (Expr::Col(k, _), o) | (o, Expr::Col(k, _)) => (*k, o),
-            _ => continue,
-        };
-        let mut sub = false;
-        other.walk(&mut |e| sub |= matches!(e, Expr::Subquery(_)));
-        if sub || !other.columns().is_empty() || other.is_volatile() {
-            continue;
-        }
-        let v = crate::sql::expr::eval(other, &[], ctx)?;
-        if v.is_null() {
+        let Some((k, vals)) = sys_eq_values(c, ctx)? else { continue };
+        // (`=` NULL: true for no row.)
+        if matches!(c, Expr::Call(..)) && vals.first().is_some_and(Value::is_null) {
             return Ok(Some((k, None)));
         }
-        let same = |x: &Value| {
-            matches!(
-                (x, &v),
-                (Value::Oid(_), Value::Oid(_))
-                    | (Value::Int2(_), Value::Int2(_))
-                    | (Value::Int4(_), Value::Int4(_))
-                    | (Value::Int8(_), Value::Int8(_))
-                    | (Value::Char(_), Value::Char(_))
-                    | (Value::Text(_), Value::Text(_))
-            )
-        };
-        if let Some(ix) = rows.lookup(k, &v, &same) {
-            return Ok(Some((k, Some(ix))));
+        let mut picked: Vec<u32> = Vec::new();
+        let mut served = true;
+        for v in vals.iter().filter(|v| !v.is_null()) {
+            let same = |x: &Value| {
+                matches!(
+                    (x, v),
+                    (Value::Oid(_), Value::Oid(_))
+                        | (Value::Int2(_), Value::Int2(_))
+                        | (Value::Int4(_), Value::Int4(_))
+                        | (Value::Int8(_), Value::Int8(_))
+                        | (Value::Char(_), Value::Char(_))
+                        | (Value::Text(_), Value::Text(_))
+                )
+            };
+            match rows.lookup(k, v, &same) {
+                Some(ix) => picked.extend(ix),
+                None => {
+                    served = false;
+                    break;
+                }
+            }
+        }
+        if !served {
+            continue;
+        }
+        if vals.len() > 1 {
+            picked.sort_unstable();
+            picked.dedup();
+        }
+        if best.as_ref().is_none_or(|b| picked.len() < b.1.len()) {
+            best = Some((k, picked));
+        }
+    }
+    Ok(best.map(|(k, ix)| (k, Some(ix))))
+}
+
+/// The column and the values conjunct `c` compares it with for equality: a built-in `=`
+/// (one value), `= ANY (array)` or `IN (...)` (ORMs' `relname IN ('t')`, which read every
+/// row), deterministic collations only, values that read no column of the row and run no
+/// subquery. None: another kind of conjunct.
+fn sys_eq_values(c: &Expr, ctx: &ExecCtx) -> Result<Option<(usize, Vec<Value>)>> {
+    let plain = |e: &Expr| {
+        let mut sub = false;
+        e.walk(&mut |x| sub |= matches!(x, Expr::Subquery(_)));
+        !sub && e.columns().is_empty() && !e.is_volatile()
+    };
+    let builtin_eq = |d: &crate::sql::func::FuncDef| {
+        d.name == "=" && d.oid < crate::catalog::FIRST_USER_OID && d.coll.as_ref().is_none_or(|c| c.deterministic)
+    };
+    Ok(match c {
+        Expr::Call(d, args, _) if args.len() == 2 && builtin_eq(d) => {
+            let (k, other) = match (&args[0], &args[1]) {
+                (Expr::Col(k, _), o) | (o, Expr::Col(k, _)) => (*k, o),
+                _ => return Ok(None),
+            };
+            if !plain(other) {
+                return Ok(None);
+            }
+            Some((k, vec![crate::sql::expr::eval(other, &[], ctx)?]))
+        }
+        Expr::ArrayOp { left, right, op, all: false } if builtin_eq(op) && plain(right) => {
+            let Expr::Col(k, _) = **left else { return Ok(None) };
+            match crate::sql::expr::eval(right, &[], ctx)? {
+                Value::Array(a) => Some((k, a.items.clone())),
+                _ => None,
+            }
+        }
+        Expr::InList(x, items, false) if items.iter().all(|(e, d)| builtin_eq(d) && plain(e)) => {
+            let Expr::Col(k, _) = **x else { return Ok(None) };
+            let vals = items.iter().map(|(e, _)| crate::sql::expr::eval(e, &[], ctx)).collect::<Result<Vec<_>>>()?;
+            Some((k, vals))
+        }
+        _ => None,
+    })
+}
+
+/// A catalog generated per scan whose index conditions or filter's first conjunct fix its
+/// object column (`system::obj_column`: pg_description's `objoid = x`): that object's rows
+/// alone (`system::rows_of_object`).
+fn sys_obj_rows(
+    table: crate::catalog::system::SysTable,
+    filter: Option<&Expr>,
+    path: Option<&crate::sql::plan::SysPath>,
+    ctx: &ExecCtx,
+) -> Result<Option<Vec<Row>>> {
+    let Some(col) = crate::catalog::system::obj_column(table) else { return Ok(None) };
+    let mut conds: Vec<&Expr> = Vec::new();
+    if let Some(sp) = path
+        && let crate::sql::plan::Access::Index { quals, .. } = &sp.scan.access
+    {
+        conds.extend(quals.iter().map(|q| &q.expr));
+    }
+    if let Some(f) = filter {
+        let mut first = f;
+        while let Expr::And(items) = first {
+            match items.first() {
+                Some(i) => first = i,
+                None => break,
+            }
+        }
+        conds.push(first);
+    }
+    for c in conds {
+        match col_pin(col, c, ctx)? {
+            Some(Some(o)) => return crate::catalog::system::rows_of_object(table, ctx, o),
+            Some(None) => return Ok(Some(Vec::new())),
+            None => {}
         }
     }
     Ok(None)
@@ -1057,6 +1140,11 @@ fn rel_pin(
     let Some(col) = crate::catalog::system::rel_column(table) else {
         return Ok(None);
     };
+    col_pin(col, c, ctx)
+}
+
+/// The oid conjunct `c` sets column `col` to (`rel_pin`'s reading).
+fn col_pin(col: usize, c: &Expr, ctx: &ExecCtx) -> Result<Option<Option<u32>>> {
     let Expr::Call(d, args, _) = c else { return Ok(None) };
     if d.name != "=" || args.len() != 2 || d.oid >= crate::catalog::FIRST_USER_OID {
         return Ok(None);
@@ -1156,10 +1244,20 @@ fn class_name_bounds(
         if args.len() != 2 || d.oid >= crate::catalog::FIRST_USER_OID {
             continue;
         }
-        if d.coll.as_ref().is_some_and(|c| !c.bytewise()) {
+        // (An equality under any deterministic collation is the bytes'; a range needs byte
+        // order.)
+        let equal = d.name == "=";
+        if d.coll.as_ref().is_some_and(|c| if equal { !c.deterministic } else { !c.bytewise() }) {
             continue;
         }
-        let (Expr::Col(1, _), other) = (&args[0], &args[1]) else { continue };
+        // (The key as the index applies it: of pg_class's indexes only the name index's first
+        // column takes a string, whatever form the key has there. psql's `relname ~ '^(t)$'
+        // COLLATE default` gives `relname = 't'::text` with relname read as text, and it
+        // generated every pg_class row for one: 30-80 ms at 10,000 tables.)
+        if q.col != 0 {
+            continue;
+        }
+        let other = &args[1];
         let mut sub = false;
         other.walk(&mut |e| sub |= matches!(e, Expr::Subquery(_)));
         if sub || !other.columns().is_empty() || other.is_volatile() {
@@ -1238,6 +1336,9 @@ fn sys_rescan(
             && ctx.sys_rel_scans.borrow().get(&table.oid()).copied().unwrap_or(0) < rel_rescans(&cat) =>
         {
             sys_rel_rows(table, Some(f), path, ctx)?
+        }
+        None if crate::catalog::system::obj_column(table).is_some() => {
+            sys_obj_rows(table, Some(f), path, ctx)?.map(|r| Arc::new(crate::catalog::system::SysRows::new(r)))
         }
         _ => None,
     };
@@ -1384,6 +1485,7 @@ fn sys_shared_scan(
             filter: None,
             need: need.map(Rc::from),
             rows: None,
+            peeked: None,
         })));
     }
     let rows = match sys_rel_rows(table, filter, path, ctx)? {
@@ -1408,6 +1510,7 @@ fn sys_shared_scan(
                         filter: filter.cloned(),
                         need: need.map(Rc::from),
                         rows: None,
+                        peeked: None,
                     })));
                 }
                 None => crate::catalog::system::rows_shared(table, ctx)?,
@@ -1425,6 +1528,7 @@ fn sys_shared_scan(
                 filter: filter.cloned(),
                 need: need.map(Rc::from),
                 rows: None,
+                peeked: None,
             })));
         }
         None => crate::catalog::system::rows_shared(table, ctx)?,
@@ -1786,14 +1890,25 @@ impl Node for SharedRowsNode {
     }
 
     fn restrict_keys(&mut self, col: usize, keys: &[u32], _ctx: &ExecCtx) -> Result<()> {
-        // (Only before the first row, and when the filter can't raise anything or call
-        // anything for the rows left out: a Seq Scan's filter runs on every row.)
-        if self.i != 0 || self.chunk != (0, 0) || !self.filter.as_ref().is_none_or(|f| quiet_filter(f)) {
+        // (Only when the filter can't raise anything or call anything for the rows left out:
+        // a Seq Scan's filter runs on every row. The rows already read stay read: a hash join
+        // that read its first outer row before building, as ExecHashJoin does when the outer
+        // side starts cheaper, restricts the rest.)
+        if !self.filter.as_ref().is_none_or(|f| quiet_filter(f)) {
             return Ok(());
         }
+        // The rows not read yet, by their number in row order.
+        let rest: Option<&[u32]> = self.picked.as_ref().map(|p| &p[self.i.min(p.len())..]);
+        let next = match rest {
+            Some(_) => 0,
+            None => {
+                let chunks = self.rows.chunks();
+                chunks.iter().take(self.chunk.0).map(|c| c.len()).sum::<usize>() + self.chunk.1
+            }
+        };
+        let left = rest.map_or_else(|| self.rows.len().saturating_sub(next), |r| r.len());
         // (Past a quarter of the rows, reading them all costs about as much.)
-        let total = self.picked.as_ref().map_or_else(|| self.rows.len(), |p| p.len());
-        if keys.len().saturating_mul(4) > total {
+        if keys.len().saturating_mul(4) > left {
             return Ok(());
         }
         let same = |x: &Value| matches!(x, Value::Oid(_));
@@ -1806,11 +1921,15 @@ impl Node for SharedRowsNode {
         }
         all.sort_unstable();
         all.dedup();
-        if let Some(p) = &self.picked {
-            let had: std::collections::HashSet<u32> = p.iter().copied().collect();
-            all.retain(|i| had.contains(i));
+        match rest {
+            Some(r) => {
+                let had: std::collections::HashSet<u32> = r.iter().copied().collect();
+                all.retain(|i| had.contains(i));
+            }
+            None => all.retain(|&i| i as usize >= next),
         }
         self.picked = Some(all);
+        self.i = 0;
         Ok(())
     }
 }
@@ -1827,6 +1946,8 @@ struct LazyRowsNode {
     filter: Option<Expr>,
     need: Option<Rc<[bool]>>,
     rows: Option<SharedRowsNode>,
+    /// pg_class's first row, made alone before its rows were (`peek`): its oid, read already.
+    peeked: Option<u32>,
 }
 
 impl LazyRowsNode {
@@ -1836,25 +1957,78 @@ impl LazyRowsNode {
                 .then(|| ctx.reading_catalog(self.catalog.clone()));
             let generation = held.as_ref().unwrap_or(ctx);
             let rows = crate::catalog::system::rows_shared(self.table, generation)?;
-            let picked = match &self.filter {
+            let mut picked = match &self.filter {
                 Some(f) => equality_picked(f, &rows, generation)?,
                 None => None,
             };
-            self.rows = Some(SharedRowsNode::new(rows, picked, self.filter.as_ref(), self.need.clone()));
+            // (Past the row `peek` read: the rows up to it were checked then.)
+            let mut start = (0, 0);
+            if let Some(o) = self.peeked
+                && let Some(ix) = rows.lookup(0, &Value::Oid(o), &|x| matches!(x, Value::Oid(_)))
+                && let Some(&n) = ix.first()
+            {
+                match &mut picked {
+                    Some(p) => p.retain(|&i| i > n),
+                    None => {
+                        let mut at = n as usize + 1;
+                        let chunks = rows.chunks();
+                        while start.0 < chunks.len() && at >= chunks[start.0].len() {
+                            at -= chunks[start.0].len();
+                            start.0 += 1;
+                        }
+                        start.1 = at;
+                    }
+                }
+            }
+            let mut node = SharedRowsNode::new(rows, picked, self.filter.as_ref(), self.need.clone());
+            node.chunk = start;
+            self.rows = Some(node);
         }
         Ok(self.rows.as_mut().unwrap())
+    }
+
+    /// pg_class's first row that passes the filter among Postgres's own relations' (which
+    /// lead its rows), made alone: a hash join reads its outer side's first row before it
+    /// builds (ExecHashJoin, when the outer side starts cheaper), and making every row for it
+    /// came before the join's keys could restrict them (`restrict_keys`: psql's `\dt`, whose
+    /// first run after a start made pg_class's 40,000 rows at 10,000 tables for 1,000).
+    fn peek(&mut self, ctx: &ExecCtx) -> Result<Option<Row>> {
+        use crate::catalog::system::SysTable;
+        if self.table != SysTable::PgClass || self.peeked.is_some() || !self.catalog.rel_oid_edits.is_empty() {
+            return Ok(None);
+        }
+        let held = (!Arc::ptr_eq(&self.catalog, &ctx.catalog()))
+            .then(|| ctx.reading_catalog(self.catalog.clone()));
+        let generation = held.as_ref().unwrap_or(ctx);
+        let mut at = 0;
+        while let Some(row) = crate::catalog::system::class_builtin_row(generation, at)? {
+            at += 1;
+            let Some(row) = row else { continue };
+            if self.filter.as_ref().map_or(Ok(true), |f| eval_bool(f, &row, generation))? {
+                let Value::Oid(o) = row[0] else { return Ok(None) };
+                self.peeked = Some(o);
+                return Ok(Some(row));
+            }
+        }
+        Ok(None)
     }
 }
 
 impl Node for LazyRowsNode {
     fn next(&mut self, ctx: &ExecCtx) -> Result<Option<Row>> {
+        if self.rows.is_none()
+            && self.peeked.is_none()
+            && let Some(r) = self.peek(ctx)?
+        {
+            return Ok(Some(r));
+        }
         self.rows(ctx)?.next(ctx)
     }
 
     fn count_rest(&mut self, ctx: &ExecCtx) -> Result<Option<u64>> {
         match &mut self.rows {
             Some(r) => r.count_rest(ctx),
-            None if self.filter.is_none() => {
+            None if self.filter.is_none() && self.peeked.is_none() => {
                 let held = (!Arc::ptr_eq(&self.catalog, &ctx.catalog()))
                     .then(|| ctx.reading_catalog(self.catalog.clone()));
                 let n = crate::catalog::system::row_count(self.table, held.as_ref().unwrap_or(ctx));
@@ -1891,7 +2065,11 @@ impl Node for LazyRowsNode {
             (SysTable::PgAttribute, 0) => crate::catalog::system::attribute_rows_of(generation, keys)?,
             _ => None,
         };
-        if let Some(rows) = subset {
+        if let Some(mut rows) = subset {
+            // (`peek`'s row was read already.)
+            if let Some(o) = self.peeked {
+                rows.retain(|r| r[0] != Value::Oid(o));
+            }
             let rows = Arc::new(crate::catalog::system::SysRows::new(rows));
             self.rows = Some(SharedRowsNode::new(rows, None, self.filter.as_ref(), self.need.clone()));
             return Ok(());
