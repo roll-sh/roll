@@ -91,7 +91,7 @@ written once in SQLite's dialect), as roll code's did.
 | redis | `redis:db:<id>` | the owner serves RESP and REST; others splice connections to it |
 | nosql | `nosql:db:<id>` | replaces the manifest's owner field; fences opens |
 | streams | `stream:cluster:<id>` | a tenant's cluster on one owner at first; per partition later |
-| storage | `storage:account:<id>` | metadata log per account instead of one per deployment |
+| storage | `storage:meta` | built: one metadata log for the deployment, a hot standby following it (docs/storage/architecture.md, "Many nodes"); `storage:account:<id>` (a log per account) is designed there, not built |
 | queues | `mq:<vhost>/<queue>` | mq-cluster's owner records move onto the shared layer |
 | tasks | `tasks:tenant:<id>` | replaces the tasks cell's own lease |
 
@@ -396,7 +396,8 @@ pushes take as long as the pack); `handoff-failures` and `lease-takeovers` on an
 | control-plane auth lockdown | in progress |
 | product switches, JSON logs, metrics and their alarms | built (`ROLL_PRODUCTS`, `ROLL_LOG_FORMAT`, `GET /v1/info`); not yet run against AWS |
 | GitHub resilience | done |
-| tasks, queues, storage, redis, streams, nosql on the cluster layer | next, one product per change |
+| storage on the cluster layer | built (`storage:meta`, `s3-server/src/cluster.rs`); per-account logs designed |
+| tasks, queues, redis, streams, nosql on the cluster layer | next, one product per change |
 | postgres on the fleet and the system database | with the pg-engine branch |
 | isolated work on Fargate | next |
 
@@ -405,9 +406,10 @@ pushes take as long as the pack); `handoff-failures` and `lease-takeovers` on an
 - **Postgres on the fleet.** Today's Postgres product starts computes with the `docker` CLI, so
   the stack runs with it off (`ROLL_PRODUCTS`) until the in-process engine replaces them.
 - **Code checks and previews** still run in Docker; they move to Fargate ("Isolated work").
-- **Buckets on roll.site.** The CDN Worker serves path-style only, so `<bucket>.roll.site` needs
-  virtual-host support, and bucket names starting `chg-` must be reserved (they'd collide with
-  previews).
+- **Buckets on roll.site** are served by host (`<bucket>.roll.site/<key>`, the Worker's
+  `ROLL_BUCKET_DOMAIN`) and by path on the zone (`roll.site/<bucket>/<key>`); set the deployment's
+  CDN `base_url` to `https://roll.site` so purges reach both. Bucket names starting `chg-` are
+  reserved for previews.
 - **Flaky tests seen on GitHub** (each passed on a plain re-run, and on main): redis
   `compat_debug_with_redis` (`search_hnsw.txt`, `FT.INFO` while the vector index is still
   building), nosql conformance `test_compaction.py::test_tombstone_gc_with_conflict_in_memtable`,

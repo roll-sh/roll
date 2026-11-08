@@ -29,6 +29,36 @@ export const DEFAULT_ROUTES: Route[] = [
   { prefix: "/", kind: "s3", auth: "any" },
 ];
 
+/** Bucket names starting with this are roll code previews' hostnames (`chg-<id>.roll.site`). */
+export const PREVIEW_PREFIX = "chg-";
+
+/**
+ * Whether `label` can be a bucket served as `<label>.<domain>`: S3's rules for a name without
+ * dots (one DNS label; names with dots use path style, as on S3), and none of the names roll
+ * reserves (crates/s3-store/src/validate.rs: S3's prefixes and suffixes, and previews' `chg-`).
+ */
+export function isBucketLabel(label: string): boolean {
+  if (label.length < 3 || label.length > 63 || !/^[a-z0-9][a-z0-9-]*[a-z0-9]$/.test(label)) return false;
+  return ![PREVIEW_PREFIX, "xn--", "sthree-", "amzn-s3-demo-"].some((p) => label.startsWith(p)) && !/(-s3alias|--ol-s3|--x-s3|--table-s3)$/.test(label);
+}
+
+/** A domain setting without surrounding dots or space, lowercase. */
+export function bareDomain(domain: string | undefined): string {
+  return (domain ?? "").trim().toLowerCase().replace(/^\.+|\.+$/g, "");
+}
+
+/**
+ * The bucket a virtual-host request names: `<bucket>.<domain>` (`ROLL_BUCKET_DOMAIN`). Every
+ * other host, the domain itself included, is path style.
+ */
+export function bucketOfHost(host: string, domain: string | undefined): string | null {
+  const d = bareDomain(domain);
+  const h = host.toLowerCase().replace(/:\d+$/, "");
+  if (!d || !h.endsWith(`.${d}`)) return null;
+  const label = h.slice(0, -(d.length + 1));
+  return !label.includes(".") && isBucketLabel(label) ? label : null;
+}
+
 /**
  * Whether the Worker hands requests for `host` to the origin untouched (`ROLL_PASS_HOSTS`: comma
  * separated host patterns, where `*` matches within one label, e.g. `chg-*.roll.site` for roll

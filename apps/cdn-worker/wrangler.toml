@@ -57,16 +57,19 @@ ROLL_ROUTES = '''
 # (in this directory). Public buckets and sites on <bucket>.roll.site; roll code's previews
 # (chg-<id>.roll.site) share the zone and go to the origin untouched (ROLL_PASS_HOSTS). The S3
 # API (s3.us-east-1.roll.site, *.s3.us-east-1.roll.site) is DNS only, so this Worker never sees it.
-# deploy/cloud/cloudflare/zones.json lists the same route. Environments don't inherit vars, so
-# they're all here again.
+# deploy/cloud/cloudflare/zones.json lists the same routes. Buckets are served by host
+# (<bucket>.roll.site/<key>) and by path on the zone itself (roll.site/<bucket>/<key>: roll's
+# CDN base_url); bucket names starting chg- are reserved for previews. Environments don't
+# inherit vars, so they're all here again.
 [env.production]
 name = "roll-cdn"
-routes = [{ pattern = "*.roll.site/*", zone_name = "roll.site" }]
+routes = [{ pattern = "*.roll.site/*", zone_name = "roll.site" }, { pattern = "roll.site/*", zone_name = "roll.site" }]
 
 [env.production.vars]
 ROLL_ORIGIN = "https://s3.us-east-1.roll.site"
 ROLL_API_ORIGIN = "https://api.roll.sh"
 ROLL_PASS_HOSTS = "chg-*.roll.site"
+ROLL_BUCKET_DOMAIN = "roll.site"
 ROLL_CDN_DEFAULT_TTL = "60"
 ROLL_CDN_MAX_CACHE_BYTES = "536870912"
 ROLL_CDN_USAGE_FLUSH_MS = "10000"

@@ -68,4 +68,4 @@ pub use model::*;
 pub use append::{AppendBase, PreparedAppend};
 pub use objects::multipart_etag_of;
 pub use rename::RenameCondition;
-pub use store::{Clock, Store, StoreConfig, StoreStats, system_clock};
+pub use store::{Clock, Follower, Store, StoreConfig, StoreStats, system_clock};
