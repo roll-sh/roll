@@ -40,7 +40,7 @@ async fn migrate_shovel_and_federate_with_rabbitmq() {
     let out = Command::new("docker")
         .args(["run", "-d", "--rm", "--name", &name, "--hostname", "rabbit-e2e"])
         .args(["-e", &format!("RABBITMQ_NODE_PORT={amqp_port}"), "-e", "RABBITMQ_DIST_PORT=25672", "-e", &format!("RABBITMQ_DEFAULT_USER={USER}"), "-e", &format!("RABBITMQ_DEFAULT_PASS={PASS}")])
-        .args(["-p", &format!("127.0.0.1:{amqp_port}:{amqp_port}"), "-p", &format!("127.0.0.1:{http_port}:15672"), "rabbitmq:4-management"])
+        .args(["-p", &format!("127.0.0.1:{amqp_port}:{amqp_port}"), "-p", &format!("127.0.0.1:{http_port}:15672"), "rabbitmq:4-management@sha256:af6f50d38098d8bd52fef7f3fa85015dd8b2bf6def58e995bf584ae9ba0f6407"])
         .output()
         .expect("docker");
     assert!(out.status.success(), "docker run failed: {}", String::from_utf8_lossy(&out.stderr));

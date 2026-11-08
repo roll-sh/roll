@@ -14,6 +14,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const IMAGE: &str = "roll-queues:e2e";
+const POSTGRES_IMAGE: &str = "postgres:18-alpine@sha256:123b17998ccaf47e53b502e8c6a1e79afd8f579c6f3eec83c563da026f957395";
 const QUEUES: usize = 6;
 
 fn e2e() -> bool {
@@ -147,7 +148,7 @@ async fn cluster_survives_kill_and_rolling_restart_under_load() {
     let env = Env { tag: format!("{:x}", std::process::id()) };
     docker(&["network", "create", &env.net()]);
     docker(&["volume", "create", &env.name("logs")]);
-    docker(&["run", "-d", "--name", &env.name("pg"), "--network", &env.net(), "-e", "POSTGRES_PASSWORD=roll", "postgres:18-alpine"]);
+    docker(&["run", "-d", "--name", &env.name("pg"), "--network", &env.net(), "-e", "POSTGRES_PASSWORD=roll", POSTGRES_IMAGE]);
     let t = Instant::now();
     while !docker_ok(&["exec", &env.name("pg"), "pg_isready", "-U", "postgres"]) {
         assert!(t.elapsed() < Duration::from_secs(60), "postgres didn't start");

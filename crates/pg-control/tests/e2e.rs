@@ -297,7 +297,7 @@ async fn proxy_speaks_postgres() {
 /// psql (in Docker, on the host's network) with `conninfo`: its output, or its error.
 async fn psql(conninfo: &str, sql: &str) -> Result<String, String> {
     let out = tokio::process::Command::new("docker")
-        .args(["run", "--rm", "--network", "host", "postgres:18-alpine", "psql", conninfo, "-Atc", sql])
+        .args(["run", "--rm", "--network", "host", "postgres:18-alpine@sha256:123b17998ccaf47e53b502e8c6a1e79afd8f579c6f3eec83c563da026f957395", "psql", conninfo, "-Atc", sql])
         .output()
         .await
         .unwrap();
@@ -321,7 +321,7 @@ async fn edge_tls_routes_by_server_name_or_options() {
     let proxy = Arc::new(Proxy::new(api::proxy_router(h.control.clone()), ProxyConfig { listen: "127.0.0.1:0".parse().unwrap(), default_endpoint: None }));
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = l.local_addr().unwrap().port();
-    tokio::spawn(roll_edge::pg::serve(l, tls, Default::default(), hosts.clone(), proxy));
+    tokio::spawn(roll_edge::pg::serve(l, tls, Default::default(), roll_edge::Drain::new(), hosts.clone(), proxy));
 
     let ep = &db.ep.id;
     let base = format!("port={port} user=roll password={} dbname=main sslmode=require", db.project.password);

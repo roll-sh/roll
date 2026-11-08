@@ -62,7 +62,7 @@ done
 IT_TEST=$(IFS=,; echo "${PATTERNS[*]}")
 
 docker build -q -t "$IMAGE" - >/dev/null <<'DOCKERFILE'
-FROM maven:3-eclipse-temurin-21
+FROM maven:3-eclipse-temurin-21@sha256:9673eef9ed503146591667ffb92eaaa22f1b8899ed60d9df0df4da3f3a1214a6
 # python3 runs the AMQP code generator (codegen.py) during generate-sources.
 RUN apt-get update && apt-get install -y --no-install-recommends python3 && rm -rf /var/lib/apt/lists/*
 ENV PYTHON_BIN=python3

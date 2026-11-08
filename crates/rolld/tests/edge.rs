@@ -2,7 +2,7 @@
 //! API, tasks, code's git routes and the dashboard; redis-cli over TLS with the database named by
 //! SNI; and a stop that fails `/healthz` at once while the listeners keep serving.
 //!
-//! redis-cli runs in Docker (`redis:8-alpine`); without Docker that part is skipped.
+//! redis-cli runs in Docker (`REDIS_IMAGE`); without Docker that part is skipped.
 
 use serde_json::{Value, json};
 use std::process::{Child, Command};
@@ -15,6 +15,8 @@ use tokio_rustls::rustls::{self, ClientConfig, RootCertStore};
 
 /// The operator token: the edge listens for the internet, so rolld wants one.
 const TOKEN: &str = "edge-test-operator-token-0123456789";
+/// redis-cli's image, pinned by digest (the multi-arch index), so a rebuilt upstream tag can't change it.
+const REDIS_IMAGE: &str = "redis:8.10.3-alpine@sha256:71885d8cc6e42f2bc0aa2eb853bfc4be200b5108a46ac50e117ae1df0531fb80";
 
 fn free_port() -> u16 {
     static GIVEN: std::sync::Mutex<Vec<u16>> = std::sync::Mutex::new(Vec::new());
@@ -118,7 +120,7 @@ async fn edge_routes_by_host_and_sni_and_drains_on_sigterm() {
         let sni = format!("{id}.redis.r1.roll.test");
         let cli = |args: &[&str]| {
             let port = edge_redis.to_string();
-            let mut a = vec!["run", "--rm", "--network", "host", "redis:8-alpine", "redis-cli", "--tls", "--insecure", "--sni", &sni, "-h", "127.0.0.1", "-p", &port, "--no-auth-warning", "-a", password];
+            let mut a = vec!["run", "--rm", "--network", "host", REDIS_IMAGE, "redis-cli", "--tls", "--insecure", "--sni", &sni, "-h", "127.0.0.1", "-p", &port, "--no-auth-warning", "-a", password];
             a.extend_from_slice(args);
             let out = Command::new("docker").args(&a).output().unwrap();
             // Only redis-cli's answer: Docker writes its own progress to stderr.
@@ -126,7 +128,7 @@ async fn edge_routes_by_host_and_sni_and_drains_on_sigterm() {
             String::from_utf8_lossy(&out.stdout).trim().to_string()
         };
         // Pulled first, so the first command isn't timed against the download.
-        assert!(Command::new("docker").args(["pull", "-q", "redis:8-alpine"]).output().unwrap().status.success());
+        assert!(Command::new("docker").args(["pull", "-q", REDIS_IMAGE]).output().unwrap().status.success());
         assert_eq!(cli(&["SET", "k", "through the edge"]), "OK");
         assert_eq!(cli(&["GET", "k"]), "through the edge");
     } else {

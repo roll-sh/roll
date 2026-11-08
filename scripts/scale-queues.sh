@@ -20,8 +20,8 @@ SETTLE=${SETTLE:-15}
 WINDOW=${WINDOW:-30}
 BROKERS=${BROKERS:-roll rabbitmq}
 NET=roll-bench
-RABBIT_IMAGE=${RABBIT_IMAGE:-rabbitmq:4-management}
-PY_IMAGE=${PY_IMAGE:-python:3.12-alpine}
+RABBIT_IMAGE=${RABBIT_IMAGE:-rabbitmq:4-management@sha256:af6f50d38098d8bd52fef7f3fa85015dd8b2bf6def58e995bf584ae9ba0f6407}
+PY_IMAGE=${PY_IMAGE:-python:3.12-alpine@sha256:e064671ca452259bab50e8e2c7bd896e39e9a343bb06ca25234adf6fe18d0fc7}
 OUT=docs/benchmarks/queues-scale.md
 RAW=$PWD/target/scale-queues
 mkdir -p "$RAW" docs/benchmarks

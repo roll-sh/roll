@@ -14,6 +14,9 @@ PATHS=(crates/redis-proto crates/redis-lua crates/redis-engine crates/redis-serv
        crates/roll-cluster crates/roll-edge crates/pg-storage crates/code-sql
        Cargo.toml Cargo.lock scripts/test-redis.sh .github/workflows/redis.yml)
 STAMP=target/.test-redis.hash
+# Images are pinned by digest (tag@multi-arch index digest): a rebuilt upstream tag can't change them.
+COMPAT_IMAGE=${ROLL_COMPAT_IMAGE:-redis:8.10.3-alpine@sha256:71885d8cc6e42f2bc0aa2eb853bfc4be200b5108a46ac50e117ae1df0531fb80}
+DYNAMODB_IMAGE=amazon/dynamodb-local:3.3.2@sha256:6ada631ec7aa5fc83446855eb17233e3dad184fec47477e8140c6c569cfe0c86
 
 force=0 unit_only=0
 for a in "$@"; do
@@ -42,7 +45,7 @@ start_dynamodb() {
   [[ -n ${ROLL_CLUSTER_TEST_DYNAMODB:-} ]] && return 0
   docker info >/dev/null 2>&1 || return 1
   docker rm -f "$ddb" >/dev/null 2>&1 || true
-  docker run -d --rm --name "$ddb" -p 127.0.0.1::8000 amazon/dynamodb-local >/dev/null || return 1
+  docker run -d --rm --name "$ddb" -p 127.0.0.1::8000 "$DYNAMODB_IMAGE" >/dev/null || return 1
   local port
   port=$(docker port "$ddb" 8000/tcp | head -1 | sed 's/.*://')
   # Docker accepts connections before DynamoDB Local listens: wait for an HTTP answer.
@@ -62,7 +65,7 @@ if [[ $unit_only == 0 ]]; then
     echo "redis: Docker is not running; start it or pass --unit" >&2
     exit 1
   fi
-  docker image inspect "${ROLL_COMPAT_IMAGE:-redis:8.10.3-alpine}" >/dev/null 2>&1 || docker pull -q "${ROLL_COMPAT_IMAGE:-redis:8.10.3-alpine}"
+  docker image inspect "$COMPAT_IMAGE" >/dev/null 2>&1 || docker pull -q "$COMPAT_IMAGE"
   ROLL_COMPAT_REQUIRED=1 cargo test -p redis-server --test compat
   # Redis' replication protocol against real Redis (its own container).
   ROLL_COMPAT_REQUIRED=1 cargo test -p redis-server --test redis_repl

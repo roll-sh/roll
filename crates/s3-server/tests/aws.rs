@@ -27,7 +27,7 @@ use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
 
-const IMAGE: &str = "localstack/localstack:4.9";
+const IMAGE: &str = "localstack/localstack:4.9@sha256:59373b4a27dba3ec15c4db0b7455f0cb68c8a42300e2cbbe362b440f9a131697";
 const CONTAINER: &str = "roll-localstack-tests";
 const RELAY: &str = "roll-localstack-relay";
 const LS_ACCOUNT: &str = "000000000000";

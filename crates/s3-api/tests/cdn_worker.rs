@@ -27,7 +27,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 const ORIGIN_SECRET: &str = "edge-origin-secret-for-the-api-0123";
-const IMAGE: &str = "node:22-bookworm-slim";
+const IMAGE: &str = "node:22-bookworm-slim@sha256:5ec23b7c622b00547753bc6ffd78085dd868a68aeb41c8e0a1418f033e13d96d";
 
 fn required() -> bool {
     std::env::var("ROLL_CDN_REQUIRED").is_ok_and(|v| v == "1")

@@ -114,7 +114,7 @@ async fn stomp_py_in_docker() {
         Command::new("docker")
             .args(["run", "--rm", "--add-host=host.docker.internal:host-gateway"])
             .args(["-e", "STOMP_HOST=host.docker.internal", "-e", &format!("STOMP_PORT={port}"), "-e", &format!("SCRIPT={SCRIPT}")])
-            .args(["python:3.13-alpine", "sh", "-c", "pip install -q --disable-pip-version-check --root-user-action=ignore stomp.py && python -c \"$SCRIPT\""])
+            .args(["python:3.13-alpine@sha256:1e1f6334529d1fb26a2ef619d7cffb30a7c7d7cc1cc7338ebee283a58d1aeaca", "sh", "-c", "pip install -q --disable-pip-version-check --root-user-action=ignore stomp.py && python -c \"$SCRIPT\""])
             .output()
             .expect("docker")
     })

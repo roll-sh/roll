@@ -1,9 +1,9 @@
 //! Tiering and S3ExpressStore over the real S3 API, against MinIO in Docker.
 //! Runs only with `ROLL_E2E=1`.
 //!
-//! The image is `minio/minio` when it can be pulled, otherwise `cgr.dev/chainguard/minio`
-//! (override with `ROLL_MINIO_IMAGE`); the bucket is created with the MinIO client image
-//! (`ROLL_MC_IMAGE`).
+//! The image is `cgr.dev/chainguard/minio` (`minio/minio` is no longer on Docker Hub; override
+//! with `ROLL_MINIO_IMAGE`); the bucket is created with the MinIO client image (`ROLL_MC_IMAGE`).
+//! Both defaults are pinned by digest (the multi-arch index).
 
 mod common;
 
@@ -38,9 +38,7 @@ fn docker(args: &[&str]) -> Result<String, String> {
 }
 
 async fn start_minio() -> Minio {
-    let image = std::env::var("ROLL_MINIO_IMAGE")
-        .ok()
-        .unwrap_or_else(|| if docker(&["pull", "-q", "minio/minio"]).is_ok() { "minio/minio".into() } else { "cgr.dev/chainguard/minio".into() });
+    let image = std::env::var("ROLL_MINIO_IMAGE").unwrap_or_else(|_| "cgr.dev/chainguard/minio:latest@sha256:a1ac4589a5f8136b616e667b48a0bea9719bb10bd45799ea946f24bbedfafde4".into());
     let mut args = vec!["run", "-d", "--rm", "-p", "127.0.0.1::9000", "-e"];
     let user = format!("MINIO_ROOT_USER={USER}");
     let pass = format!("MINIO_ROOT_PASSWORD={PASS}");
@@ -54,7 +52,7 @@ async fn start_minio() -> Minio {
     let port = docker(&["port", &id, "9000"]).expect("minio port");
     let endpoint = format!("http://{}", port.lines().next().unwrap_or_default());
     let m = Minio { id, endpoint };
-    let mc = std::env::var("ROLL_MC_IMAGE").unwrap_or_else(|_| "cgr.dev/chainguard/minio-client".into());
+    let mc = std::env::var("ROLL_MC_IMAGE").unwrap_or_else(|_| "cgr.dev/chainguard/minio-client:latest@sha256:10388d580a724f356b94c9b2631b5a179039cabe8c76e9b37d86ed007d569b05".into());
     let host = format!("MC_HOST_local=http://{USER}:{PASS}@127.0.0.1:9000");
     let net = format!("container:{}", m.id);
     for attempt in 0.. {

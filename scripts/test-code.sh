@@ -27,6 +27,9 @@ CODE_CRATES=(code-sql roll-cluster code-store code-git code-github code-index co
 RUST_PATHS=("${CODE_CRATES[@]/#/crates/}" crates/agent-proto/src crates/roll-cli/src/code crates/roll-cli/src/code.rs crates/roll-cli/src/main.rs
             crates/roll-cli/tests/code.rs crates/roll-cli/tests/common crates/roll-cli/Cargo.toml
             docs/code/test-coverage.md Cargo.toml Cargo.lock scripts/test-code.sh scripts/lib/gate.sh)
+# Images are pinned by digest (tag@multi-arch index digest): a rebuilt upstream tag can't change them.
+DYNAMODB_IMAGE=amazon/dynamodb-local:3.3.2@sha256:6ada631ec7aa5fc83446855eb17233e3dad184fec47477e8140c6c569cfe0c86
+POSTGRES_IMAGE=postgres:18-alpine@sha256:123b17998ccaf47e53b502e8c6a1e79afd8f579c6f3eec83c563da026f957395
 DOCKER_PATHS=("${RUST_PATHS[@]}" crates/rolld/src crates/rolld/tests/code_cluster_e2e.rs deploy/code)
 
 docker=0 stress=0
@@ -71,7 +74,7 @@ trap 'for c in "${cleanup[@]}"; do docker rm -f "$c" >/dev/null 2>&1 || true; do
 start_dynamodb() {
   [[ -n ${ROLL_CLUSTER_TEST_DYNAMODB:-} ]] && return 0
   docker info >/dev/null 2>&1 || return 1
-  docker run -d --rm --name "$ddb" -p 127.0.0.1::8000 amazon/dynamodb-local >/dev/null || return 1
+  docker run -d --rm --name "$ddb" -p 127.0.0.1::8000 "$DYNAMODB_IMAGE" >/dev/null || return 1
   cleanup+=("$ddb")
   local port
   port=$(docker port "$ddb" 8000/tcp | head -1 | sed 's/.*://')
@@ -103,7 +106,7 @@ if [[ $docker == 1 ]]; then
     # Everything that stores metadata, again on Postgres. Each test makes its own schema.
     pg=roll-code-test-pg-$$
     docker run -d --rm --name "$pg" --shm-size=1g -p 127.0.0.1::5432 -e POSTGRES_USER=roll -e POSTGRES_PASSWORD=roll -e POSTGRES_DB=roll \
-      postgres:18-alpine -c max_connections=3000 -c fsync=off -c synchronous_commit=off -c full_page_writes=off >/dev/null
+      "$POSTGRES_IMAGE" -c max_connections=3000 -c fsync=off -c synchronous_commit=off -c full_page_writes=off >/dev/null
     cleanup+=("$pg")
     port=$(docker port "$pg" 5432/tcp | head -1 | sed 's/.*://')
     for _ in $(seq 60); do docker exec "$pg" pg_isready -U roll -h 127.0.0.1 >/dev/null 2>&1 && break; sleep 1; done
