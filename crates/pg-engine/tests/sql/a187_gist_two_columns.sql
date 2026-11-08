@@ -27,18 +27,22 @@ EXPLAIN (COSTS OFF) SELECT id FROM a187_gt WHERE cat = 3 ORDER BY p <-> point(25
 SELECT id FROM a187_gt WHERE cat = 3 ORDER BY p <-> point(250, 250) LIMIT 5;
 RESET enable_seqscan;
 RESET enable_bitmapscan;
--- Rows after the build go in by gistchoose and split pages as gistSplit does.
+-- Rows after the build go in by gistchoose and split pages as gistSplit does. (Not the
+-- indexes on (cat) and (p, cat): equally good subtrees, which PostgreSQL picks between at
+-- random, take their rows there.)
 INSERT INTO a187_gt SELECT 7000 + i, i % 3, i, (i % 7)::int2, point(250 + i / 100.0, 250 - i / 100.0), int4range(i, i + 2)
   FROM generate_series(1, 3000) i;
 SELECT c.relname, pg_relation_size(c.oid) / 8192 AS pages
-  FROM pg_class c WHERE c.relname LIKE 'a187_gt_%' ORDER BY 1;
+  FROM pg_class c WHERE c.relname IN ('a187_gt_big', 'a187_gt_bs', 'a187_gt_cp', 'a187_gt_cr', 'a187_gt_p', 'a187_gt_small') ORDER BY 1;
 DELETE FROM a187_gt WHERE id % 4 = 0;
 VACUUM a187_gt;
 SELECT c.relname, pg_relation_size(c.oid) / 8192 AS pages, c.relpages
-  FROM pg_class c WHERE c.relname LIKE 'a187_gt%' ORDER BY 1;
--- An exclusion constraint's index: (room, during).
-CREATE TABLE a187_gx (room int, during int4range, EXCLUDE USING gist (room WITH =, during WITH &&));
+  FROM pg_class c WHERE c.relname IN ('a187_gt', 'a187_gt_big', 'a187_gt_bs', 'a187_gt_cp', 'a187_gt_cr', 'a187_gt_p', 'a187_gt_small') ORDER BY 1;
+-- An exclusion constraint's index on (room, during), built over the rows.
+CREATE TABLE a187_gx (room int, during int4range);
 INSERT INTO a187_gx SELECT i % 40, int4range(i / 40 * 10, i / 40 * 10 + 5) FROM generate_series(1, 4000) i;
+ALTER TABLE a187_gx ADD EXCLUDE USING gist (room WITH =, during WITH &&);
 SELECT pg_relation_size('a187_gx_room_during_excl') / 8192 AS pages;
+INSERT INTO a187_gx VALUES (3, int4range(12, 14));
 DROP TABLE a187_gx;
 DROP TABLE a187_gt;
