@@ -1999,7 +1999,7 @@ impl Settings {
                     );
                 }
                 check_custom_name(name, &self.reserved)?;
-                Some(value.unwrap_or("").to_string())
+                value.map(str::to_string)
             }
         };
         if in_txn {
