@@ -2367,6 +2367,32 @@ pub static HEAP_ORDER_STREAMED: std::sync::atomic::AtomicU64 = std::sync::atomic
 #[doc(hidden)]
 pub static HEAP_ORDER_HELD: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// `e` with the statement's parameter values in place of its parameters, and calls of pure
+/// built-in functions of constants alone computed: a generic plan's filter as a custom plan
+/// has it, for its kernel (`ScanNode::filter_kernel`). A call that fails stays as it is (its
+/// error is raised as a row is checked, as before). None: `e` reads no parameter.
+fn with_params(e: &Expr, ctx: &ExecCtx) -> Option<Expr> {
+    let mut any = false;
+    e.walk(&mut |x| any |= matches!(x, Expr::Param(..)));
+    if !any {
+        return None;
+    }
+    Some(e.clone().rewrite(&mut |x| match x {
+        Expr::Param(i, ty) => match ctx.param(i) {
+            Ok(v) => Expr::Const(v, ty),
+            Err(_) => Expr::Param(i, ty),
+        },
+        Expr::Call(def, args, ty) if args.iter().all(|a| matches!(a, Expr::Const(..))) && super::kernel::pure_call(&def, &ty).is_some() => {
+            let call = Expr::Call(def, args, ty);
+            match eval(&call, &[], ctx) {
+                Ok(v) => Expr::Const(v, call.ty()),
+                Err(_) => call,
+            }
+        }
+        x => x,
+    }))
+}
+
 /// Whether a deferrable constraint of `t` is enforced by index `ix` (its keys may repeat
 /// until the transaction that wrote them commits).
 fn deferrable_index(t: &Table, ix: u32) -> bool {
@@ -3878,13 +3904,15 @@ impl ScanNode {
     /// The scan's filter decided by its kernel (None: left to `eval`) for the stored row
     /// `bytes` (an index scan's rows, their conditions checked again; a row whose filter reads
     /// a few of its columns): over the stored values first (`StoredCmps`), else over `row`.
-    fn filter_kernel(&mut self, bytes: &[u8], row: Option<&Row>) -> Option<bool> {
+    fn filter_kernel(&mut self, bytes: &[u8], row: Option<&Row>, ctx: &ExecCtx) -> Option<bool> {
         let stored = self.ios_cols.is_none() && !crate::storage::toast::has_external(bytes);
         let plan = &self.plan;
         let (k, cmps) = self
             .kfilter
             .get_or_insert_with(|| {
-                plan.filter.as_ref().and_then(super::kernel::compile).map(|k| {
+                // (A generic plan's filter, its parameters' values put in, as a custom plan's.)
+                let compiled = |f: &Expr| super::kernel::compile(f).or_else(|| with_params(f, ctx).and_then(|g| super::kernel::compile(&g)));
+                plan.filter.as_ref().and_then(compiled).map(|k| {
                     let c = super::kernel::StoredCmps::of(&k);
                     (k, c)
                 })
@@ -4977,7 +5005,7 @@ impl ScanNode {
             let ext = self.toast.is_some() && crate::storage::toast::has_external(bytes);
             // (Decided over the stored values, nothing decoded: `StoredCmps`; else over the
             // filter's columns by its kernel, else `eval`.)
-            match self.filter_kernel(bytes, None) {
+            match self.filter_kernel(bytes, None, ctx) {
                 Some(false) => {
                     ctx.filtered(self.key);
                     return Ok(None);
@@ -4988,7 +5016,7 @@ impl ScanNode {
                         true => self.row_ext(key, bytes, Some(&fm), None, ctx)?,
                         false => scan_row_need(&self.plan, key, bytes, &fm, ctx)?,
                     };
-                    let pass = match self.filter_kernel(bytes, Some(&probe)) {
+                    let pass = match self.filter_kernel(bytes, Some(&probe), ctx) {
                         Some(p) => p,
                         None => eval_bool(self.plan.filter.as_ref().expect("a filter"), &probe, ctx)?,
                     };
@@ -5049,7 +5077,7 @@ impl ScanNode {
         }
         if !prefiltered
             && self.plan.filter.is_some()
-            && !match self.filter_kernel(bytes, Some(&row)) {
+            && !match self.filter_kernel(bytes, Some(&row), ctx) {
                 Some(pass) => pass,
                 None => eval_bool(self.plan.filter.as_ref().expect("a filter"), &row, ctx)?,
             }
