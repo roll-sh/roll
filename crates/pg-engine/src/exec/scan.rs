@@ -3080,56 +3080,55 @@ impl ScanNode {
             }
             return Ok(r);
         }
-        if !self.secondary {
-            self.heap_mode(ctx);
-            if self.streamed {
-                return self.next_stored(ctx);
-            }
-            // Rows stored in heap order already (a table only inserted into, in key order)
-            // are read as they're asked for, each page pruned as the scan reaches it. A row
-            // without its TID puts the rest in heap order as below: the rows read before it
-            // come before all of them there too.
-            let mut first = None;
-            if self.in_order == Some(true) {
-                match self.next_stored(ctx)? {
-                    Some(r) => match stored_tid(&r.1) {
-                        Some((b, _)) => {
-                            debug_assert!(b + 1 >= self.prune_next, "rows out of heap order");
-                            self.prune_to(Some(b + 1), ctx);
-                            return Ok(Some(r));
-                        }
-                        None => {
-                            self.in_order = Some(false);
-                            first = Some(r);
-                        }
-                    },
-                    None => {
-                        self.prune_to(self.nblocks, ctx);
-                        return Ok(None);
-                    }
-                }
-            }
-            if self.sorted.is_none() {
-                let mut rows: Vec<_> = first.into_iter().collect();
-                while let Some(r) = self.next_stored(ctx)? {
-                    ctx.check()?;
-                    rows.push(r);
-                }
-                if let Some(b) = heap_order(&self.plan.table, &mut rows, false, ctx) {
-                    self.blocks = b.into();
-                }
-                self.sorted = Some(rows.into_iter());
-            }
-            let r = self.sorted.as_mut().unwrap().next();
-            // Pages are pruned as the scan reaches them (heapgetpage).
-            match (&r, self.blocks.pop_front()) {
-                (Some(_), Some(Some(b))) => self.prune_to(Some(b + 1), ctx),
-                (None, _) => self.prune_to(self.nblocks, ctx),
-                _ => {}
-            }
-            return Ok(r);
+        // (A secondary index scan's rows come from `next_index_ref`.)
+        debug_assert!(!self.secondary);
+        self.heap_mode(ctx);
+        if self.streamed {
+            return self.next_stored(ctx);
         }
-        unreachable!("a secondary index scan's rows come from `next_index_ref`")
+        // Rows stored in heap order already (a table only inserted into, in key order)
+        // are read as they're asked for, each page pruned as the scan reaches it. A row
+        // without its TID puts the rest in heap order as below: the rows read before it
+        // come before all of them there too.
+        let mut first = None;
+        if self.in_order == Some(true) {
+            match self.next_stored(ctx)? {
+                Some(r) => match stored_tid(&r.1) {
+                    Some((b, _)) => {
+                        debug_assert!(b + 1 >= self.prune_next, "rows out of heap order");
+                        self.prune_to(Some(b + 1), ctx);
+                        return Ok(Some(r));
+                    }
+                    None => {
+                        self.in_order = Some(false);
+                        first = Some(r);
+                    }
+                },
+                None => {
+                    self.prune_to(self.nblocks, ctx);
+                    return Ok(None);
+                }
+            }
+        }
+        if self.sorted.is_none() {
+            let mut rows: Vec<_> = first.into_iter().collect();
+            while let Some(r) = self.next_stored(ctx)? {
+                ctx.check()?;
+                rows.push(r);
+            }
+            if let Some(b) = heap_order(&self.plan.table, &mut rows, false, ctx) {
+                self.blocks = b.into();
+            }
+            self.sorted = Some(rows.into_iter());
+        }
+        let r = self.sorted.as_mut().unwrap().next();
+        // Pages are pruned as the scan reaches them (heapgetpage).
+        match (&r, self.blocks.pop_front()) {
+            (Some(_), Some(Some(b))) => self.prune_to(Some(b + 1), ctx),
+            (None, _) => self.prune_to(self.nblocks, ctx),
+            _ => {}
+        }
+        Ok(r)
     }
 
     /// A sequential scan has read the pages before `to` (None: all of them).
