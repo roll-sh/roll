@@ -72,6 +72,8 @@ pub fn router(control: Arc<Control>) -> Router {
         .route(&db("/flush"), post(flush))
         .route(&db("/compact"), post(compact))
         .route(&db("/unload"), post(unload))
+        // In a cluster, a database's requests run on its owner.
+        .layer(axum::middleware::from_fn_with_state(control.clone(), crate::cluster::route))
         // The dashboard calls it from the browser, like the other products' APIs.
         .layer(CorsLayer::permissive())
         .with_state(control)

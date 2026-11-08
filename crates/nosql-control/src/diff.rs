@@ -488,12 +488,35 @@ impl Control {
         Ok((schema, desc, db.dialect()))
     }
 
+    /// The parent's side of a diff. In a cluster the parent may be served by another node: then
+    /// its schema is read from a throwaway zero-copy branch of it, opened here and deleted.
+    async fn parent_side(&self, p: &crate::store::NosqlDb) -> Result<(std::sync::Arc<Schema>, Described, Dialect)> {
+        let Some(c) = self.cluster() else { return self.side(p).await };
+        if c.owns(&crate::cluster::key(&p.id)) {
+            return self.side(p).await;
+        }
+        let tmp = format!("{}.diff-{}", p.id, crate::control::new_import_id());
+        self.storage.branch(&p.id, &tmp, None).await?;
+        let read = async {
+            let storage = self.storage.open(&tmp, Default::default()).await?;
+            let spec = self.spec(p)?;
+            let db = eng::Database::open(eng::DbConfig { id: tmp.clone(), ..spec.config }, storage).await.map_err(|e| ControlError::Internal(e.into()))?;
+            let schema = db.schema();
+            let desc = Described::from_elements(&eng::describe::schema(&db, &schema, false, eng::describe::Options::default()));
+            Ok::<_, ControlError>((schema, desc, db.dialect()))
+        }
+        .await;
+        let _ = self.storage.unload(&tmp).await;
+        let _ = self.storage.delete_database(&tmp).await;
+        read
+    }
+
     /// The schema difference of a branch against its parent.
     pub async fn diff(&self, id: &str) -> Result<Value> {
         let d = self.get(id)?;
         let Some(pid) = d.parent_id.clone() else { return Err(ControlError::Conflict(format!("{} is not a branch", d.name))) };
         let Some(p) = self.store.db(&pid)? else { return Err(ControlError::Conflict(format!("the parent of {} ({pid}) was deleted", d.name))) };
-        let (parent, _, _) = self.side(&p).await?;
+        let (parent, _, _) = self.parent_side(&p).await?;
         let (branch, desc, dialect) = self.side(&d).await?;
         let statements = schema_diff(&parent, &branch, &desc, dialect);
         let text = statements.iter().map(|s| format!("{s}\n")).collect::<Vec<_>>().join("\n");

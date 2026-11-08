@@ -15,6 +15,7 @@
 //! - [`api`]: the HTTP routes.
 
 pub mod api;
+pub mod cluster;
 pub mod control;
 pub mod diff;
 pub mod import;

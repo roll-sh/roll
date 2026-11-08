@@ -134,7 +134,7 @@ async fn a_second_opener_fences_the_first() {
     assert!(db1.is_fenced());
     assert!(db1.write_manifest(false).await.is_err_and(|e| manifest::is_fenced(&e)));
     assert!(t.apply(PartitionUpdate::new(key(1)).with_row(row(3, 1, "refused"))).await.is_err(), "closed to writes");
-    assert!(s1.abandon_fenced("d1").await);
+    assert!(s1.abandon("d1").await);
     assert!(s1.get("d1").is_none());
     // n2 carries on and its state is the database's.
     put(&db2, T1, 1, 4, "n2", 1).await;

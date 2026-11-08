@@ -11,15 +11,17 @@ anyhow.workspace = true
 axum.workspace = true
 base64.workspace = true
 bytes.workspace = true
+code-sql.workspace = true
 futures.workspace = true
 getrandom.workspace = true
+http-body.workspace = true
 nosql-engine.workspace = true
 nosql-proto = { workspace = true, features = ["client"] }
 nosql-server.workspace = true
 nosql-sstable-import.workspace = true
 nosql-storage.workspace = true
 nosql-types.workspace = true
-rusqlite.workspace = true
+roll-cluster.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -34,6 +36,8 @@ chrono.workspace = true
 flate2.workspace = true
 nosql-alternator.workspace = true
 reqwest.workspace = true
+roll-edge.workspace = true
+rusqlite.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 zstd.workspace = true

@@ -250,15 +250,29 @@ impl Store {
         }
     }
 
-    /// Drop a database another node opened since ([`Database::is_fenced`]) without writing
-    /// anything. `false` when it wasn't loaded (or isn't fenced).
-    pub async fn abandon_fenced(&self, id: &str) -> bool {
+    /// Drop a database without writing anything (another node opened it since:
+    /// [`Database::is_fenced`]; or its flush keeps failing and the log has it). `false` when it
+    /// wasn't loaded.
+    pub async fn abandon(&self, id: &str) -> bool {
         let _t = self.transitions.lock().await;
-        let Some(db) = self.get(id).filter(|d| d.is_fenced()) else { return false };
+        let Some(db) = self.get(id) else { return false };
         db.forget();
         self.dbs.lock().remove(id);
-        tracing::warn!(db = id, "nosql database dropped: another node opened it");
+        tracing::warn!(db = id, fenced = db.is_fenced(), "nosql database dropped without writing");
         true
+    }
+
+    /// Create an empty database without loading it: its first manifest, as a numbered version
+    /// (so it can be branched and restored at once). Create-only; `Ok(false)` when it exists.
+    pub async fn create(&self, id: &str) -> Result<bool> {
+        let mut m = Manifest::new(id);
+        m.version = 1;
+        m.written_ms = self.now_ms();
+        match manifest::swap_manifest(self.objects(), id, &m, true, None).await {
+            Ok(_) => Ok(true),
+            Err(e) if manifest::is_fenced(&e) => Ok(false),
+            Err(e) => Err(e),
+        }
     }
 
     /// Create `child` from `parent`'s state at `at_ms` (latest when `None`). Copies nothing.
