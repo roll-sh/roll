@@ -40,6 +40,10 @@ pub const RULES: &[Rule] = &[
     Rule { route: "/v1/storage", access: Access::Credential("a storage console session") },
     // Tasks: its own token (ROLL_TASKS_TOKEN) and API keys.
     Rule { route: "/v1/tasks", access: Access::Credential("a tasks token or API key") },
+    // Hosted tenants (`/t/<tenant>/v1/tasks`) take only their own API keys; the tasks token
+    // manages them (`/_roll/tenants`).
+    Rule { route: "/t/{tenant}/v1/tasks", access: Access::Credential("the tenant's tasks API key") },
+    Rule { route: "/_roll/tenants", access: Access::Credential("the tasks token") },
     // Streams' HTTP data plane and Confluent REST v3: the stream's API keys.
     Rule { route: "/v1/streams/{s}/topics/{t}/records", access: Access::Credential("a stream API key") },
     Rule { route: "/v1/streams/{s}/topics/{t}/partitions/{p}/records", access: Access::Credential("a stream API key") },

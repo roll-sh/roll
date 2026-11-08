@@ -149,7 +149,8 @@ pub struct Products<'a> {
     pub pg: Option<Arc<pg_proxy::Proxy<pg_control::control::ProxyRouter>>>,
     pub redis: Option<&'a crate::redis::Redis>,
     pub streams: Option<Arc<stream_broker::Broker>>,
-    pub tasks: Option<Arc<tasks::Tasks>>,
+    /// Every tasks request (they run on the cell's leader).
+    pub tasks: Option<axum::Router>,
     /// The S3 API (requests run on the metadata's owner).
     pub storage: Option<axum::Router>,
     pub nosql: Option<&'a crate::nosql::Nosql>,
@@ -333,6 +334,10 @@ pub fn splice_routes(cluster: &roll_cluster::Cluster, p: &Products<'_>) -> anyho
     if let Some(n) = p.nosql {
         handlers.register("cql", n.splice_handler());
     }
+    // A Kafka connection another node authenticated, for a stream this node owns.
+    if let Some(b) = &p.streams {
+        handlers.register("kafka", crate::streams::splice_handler(b.clone()));
+    }
     let signer = roll_edge::splice::Signer::new(&String::from_utf8_lossy(&cluster.config().secret))?;
     Ok(Some(roll_edge::splice::router(signer, handlers)))
 }
@@ -486,7 +491,7 @@ impl HttpRoutes {
             dashboard: e.dashboard_upstream.as_deref().filter(|u| !u.is_empty()).map(Upstream::new).transpose()?,
             redis: p.redis.map(|r| logged(r.rest_router())),
             kafka: p.streams.clone().map(|b| logged(p.auth.gate("kafka", stream_broker::http::router(b)))),
-            tasks: p.tasks.clone().map(|t| logged(p.auth.gate("tasks", tasks::api::router(t)))),
+            tasks: p.tasks.clone().map(|t| logged(p.auth.gate("tasks", t))),
             s3: p.storage.clone().map(logged),
             alternator: p.nosql.map(|n| logged(n.alternator_router())),
             mq,

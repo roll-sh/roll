@@ -6,6 +6,7 @@ pub mod broker;
 pub mod compaction;
 pub mod config;
 pub mod error;
+pub mod fleet;
 pub mod groups;
 pub mod handlers;
 pub mod http;
@@ -17,6 +18,7 @@ pub mod store;
 pub mod tls;
 pub mod topic_config;
 pub mod txn;
+pub mod wal;
 
 pub use broker::Broker;
 pub use config::Config;

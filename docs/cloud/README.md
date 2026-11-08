@@ -90,10 +90,10 @@ written once in SQLite's dialect), as roll code's did.
 | postgres | `pg:endpoint:<id>`, `system:pg` | the engine runs in-process; compute moves with the lease |
 | redis | `redis:db:<id>`, `redis:db:<primary>#<replica>` | built: the owner serves RESP and REST; others splice connections to it; a replica is placed as a standby of its primary ("Redis on the fleet") |
 | nosql | `nosql:db:<id>` | the database's owner loads it; opens and manifest writes are fenced by compare-and-swap in S3 |
-| streams | `stream:cluster:<id>` | a tenant's cluster on one owner at first; per partition later |
+| streams | `stream:cluster:<id>` | a tenant's whole Kafka cluster on one owner (the stream SASL maps a key to); acknowledged once in the owner's write-ahead log in S3; per partition later (`crates/stream-broker/README.md`, "On the fleet") |
 | storage | `storage:meta` | built: one metadata log for the deployment, a hot standby following it (docs/storage/architecture.md, "Many nodes"); `storage:account:<id>` (a log per account) is designed there, not built |
 | queues | `mq:<vhost>/<queue>` | mq-cluster's owner records move onto the shared layer |
-| tasks | `tasks:tenant:<id>` | replaces the tasks cell's own lease |
+| tasks | `tasks:cell:default` | built: the log store cell's leader (replaces the cell's own S3 lease; fencing stays in the log), hot standbys following the log (deploy/aws/README.md, "On the roll cloud fleet"); `tasks:tenant:<id>` needs more cells and a tenant catalog, designed there, not built |
 
 ## The edge
 
@@ -127,7 +127,7 @@ written once in SQLite's dialect), as roll code's did.
 | `<id>.kafka.us-east-1.roll.sh:9092` (TLS + SASL), HTTPS REST on 443 | streams | DNS only |
 | `<id>.nosql.us-east-1.roll.sh:9042` (TLS), HTTPS Alternator on 443 | nosql | DNS only |
 | `<id>.mq.us-east-1.roll.sh` 5671 AMQPS, 8883 MQTTS, 61614 STOMP TLS, 5551 streams, 443 web | queues | DNS only |
-| `tasks.us-east-1.roll.sh` | tasks API | DNS only |
+| `tasks.us-east-1.roll.sh` | tasks API (`/v1/tasks`, hosted tenants at `/t/<tenant>/v1/tasks`) | DNS only |
 | `s3.us-east-1.roll.site`, `<bucket>.s3.us-east-1.roll.site` | S3 API (path and virtual-host style) | DNS only |
 | `<bucket>.roll.site`, custom domains | public buckets and sites (the CDN Worker) | proxied |
 | `chg-<id>.roll.site` | code previews | proxied |
@@ -156,7 +156,7 @@ when `ROLL_EDGE=1` (without it rolld is unchanged).
 
 | listener | what happens |
 | --- | --- |
-| 8443 (HTTPS) | HTTP/1.1, routed by `Host`: `roll.sh` → `ROLL_DASHBOARD_UPSTREAM` (streamed, WebSockets included) except `/<owner>/<repo>.git/…` → code's git routes; `git.roll.sh` → code's git routes; `api.roll.sh` → rolld's API router; `<id>.redis.…` → Redis REST; `<id>.kafka.…` → the streams HTTP API; `<id>.nosql.…` → Alternator; `<id>.mq.…` → web-STOMP or web-MQTT by `Sec-WebSocket-Protocol`, else the queues HTTP API; `tasks.…` → tasks (`/v1/tasks/…`); `s3.…`, `<bucket>.s3.…` → the S3 server; `chg-<id>.roll.site` → code previews. `<bucket>.roll.site` answers 404 at the origin: it is served by the CDN Worker. |
+| 8443 (HTTPS) | HTTP/1.1, routed by `Host`: `roll.sh` → `ROLL_DASHBOARD_UPSTREAM` (streamed, WebSockets included) except `/<owner>/<repo>.git/…` → code's git routes; `git.roll.sh` → code's git routes; `api.roll.sh` → rolld's API router; `<id>.redis.…` → Redis REST; `<id>.kafka.…` → the streams HTTP API; `<id>.nosql.…` → Alternator; `<id>.mq.…` → web-STOMP or web-MQTT by `Sec-WebSocket-Protocol`, else the queues HTTP API; `tasks.…` → tasks (`/v1/tasks/…`, `/t/<tenant>/v1/tasks/…`, `/_roll/tenants`; run on the cell's leader); `s3.…`, `<bucket>.s3.…` → the S3 server; `chg-<id>.roll.site` → code previews. `<bucket>.roll.site` answers 404 at the origin: it is served by the CDN Worker. |
 | 5432 | `SSLRequest` → `S` → TLS, or TLS straight away (`sslnegotiation=direct`, ALPN `postgresql`); `GSSENCRequest` → `N`; a startup packet in the clear is refused (`08P01`); cancel requests may come in the clear. The endpoint is the server name's `<id>`, else `options=endpoint=<id>`; naming two different ones is an error. |
 | 6379 | TLS, then Redis: the server name's first label is the database, and the connection is spliced to its owner right after the handshake (without a server name, from its first AUTH or HELLO … AUTH on). |
 | 9092 | TLS, then Kafka; metadata names the server name the client used (one virtual broker per hostname), never a node address. |
@@ -195,9 +195,12 @@ when `ROLL_EDGE=1` (without it rolld is unchanged).
 - **Forwarding TCP** to a tenant's owner: `roll_edge::splice::splice(client, owner_url, signer,
   hop, first_bytes)` opens an HTTP upgrade to the owner's `/internal/edge/splice` (HMAC-SHA256
   over the hop and the time under the cluster secret, 60 s skew), writes the bytes already read,
-  then copies both ways. The owner hands the stream to the handler its product registered
-  (Postgres, Redis, CQL). The route is on every cluster node's internal API, with the edge or
-  without (rolld's own Redis and CQL ports splice too; `rolld/src/edge.rs`, `splice_routes`).
+  then copies both ways. The owner hands the stream to the handler its product registered:
+  Postgres's (the proxy, with the endpoint as named), Redis's, CQL's and Kafka's (`kafka`:
+  spliced after SASL, the tenant is the stream the connection authenticated as, the server name
+  carries the `host:port` the client was told). The route is on every cluster node's internal
+  API, with the edge or without (rolld's own Redis, CQL and Kafka ports splice too;
+  `rolld/src/edge.rs`, `splice_routes`).
 - **Dev mode**: `ROLL_EDGE_CERT_DIR` serves its `<name>.crt`/`<name>.key` pairs (reloaded when
   they change) and writes a self-signed certificate for every edge name when it has none; origin
   pulls are off unless `ROLL_EDGE_ORIGIN_PULL=1`. Every listener's address is a setting
@@ -318,7 +321,8 @@ The contract between the stack, the image and rolld. Each setting is a flag with
 | `ROLL_ZONE` | the instance's availability zone | placement spreads standbys across zones |
 | `ROLL_ADVERTISE_URL` | `http://<private ip>:7070` | where other nodes reach this one |
 | `ROLL_API` | `0.0.0.0:7070` | internal HTTP: node-to-node hops and `GET /healthz`; never public |
-| `ROLL_SYSTEM_DATABASE` | the system database's URL | catalogs and accounts for every product; roll code's data unless `ROLL_CODE_DATABASE` is set |
+| `ROLL_SYSTEM_DATABASE` | the system database's URL | catalogs and accounts for every product; roll code's data unless `ROLL_CODE_DATABASE` is set; roll streams' catalog (schema `streams`) |
+| `ROLL_STREAM_ACK_LINGER_MS` | `50` | how long a stream's owner gathers appends before writing its write-ahead log object: `acks=all` latency against S3 PUTs (at most one per busy stream per round) |
 | `ROLL_PRODUCTS` | `redis,streams,tasks,storage,nosql,queues,code` | the products the node runs (see "Products"); Postgres is off until its engine runs in process |
 | `ROLL_S3_BUCKET`, `AWS_REGION` | `roll-cloud-data-<account>`, `us-east-1` | all product data, under per-product prefixes |
 | `ROLL_SECRET_KEY` | from Secrets Manager | seals owners' keys and the stored certificates |
@@ -487,9 +491,11 @@ pushes take as long as the pack); `handoff-failures` and `lease-takeovers` on an
 | product switches, JSON logs, metrics and their alarms | built (`ROLL_PRODUCTS`, `ROLL_LOG_FORMAT`, `GET /v1/info`); not yet run against AWS |
 | GitHub resilience | done |
 | storage on the cluster layer | built (`storage:meta`, `s3-server/src/cluster.rs`); per-account logs designed |
+| tasks on the cluster layer | built (`tasks:cell:default`, `tasks/src/fleet.rs`); tenants per node designed |
 | redis on the cluster layer | built ("Redis on the fleet"); not yet run against AWS |
 | nosql on the cluster layer | built: lease `nosql:db:<id>`, catalog on the system database, CQL spliced to the owner (SNI or SASL user), fenced manifests (docs/nosql/architecture.md, "On a fleet") |
-| tasks, queues, streams on the cluster layer | in progress, one product per change |
+| streams on the cluster layer | built (`stream:cluster:<id>`, catalog on the system database, acknowledgements from a write-ahead log in S3, kafka splices); not yet run against AWS |
+| queues on the cluster layer | in progress |
 | postgres on the fleet and the system database | with the pg-engine branch |
 | isolated work on Fargate | next |
 

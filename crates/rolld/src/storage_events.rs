@@ -41,9 +41,16 @@ impl RollSink {
     }
 
     fn topic(&self, stream: &str, topic: &str) -> Result<(Arc<stream_broker::broker::Stream>, Arc<stream_broker::broker::Topic>), String> {
-        let s = self.streams()?.find_stream(stream).ok_or_else(|| format!("stream {stream} doesn't exist"))?;
-        let t = s.topic(topic).ok_or_else(|| format!("topic {topic} doesn't exist in stream {stream}"))?;
-        Ok((s, t))
+        let b = self.streams()?;
+        let find = || b.find_stream(stream).and_then(|s| s.topic(topic).map(|t| (s, t)));
+        // In a cluster the topic may be newer than what this node has of the stream (its owner
+        // created it): look at the catalog again.
+        find()
+            .or_else(|| b.refresh_streams().ok().and_then(|_| find()))
+            .ok_or_else(|| match b.find_stream(stream) {
+                Some(_) => format!("topic {topic} doesn't exist in stream {stream}"),
+                None => format!("stream {stream} doesn't exist"),
+            })
     }
 
     async fn publish(&self, vhost: &str, queue: &str, d: &Delivery) -> Result<(), String> {

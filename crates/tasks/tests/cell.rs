@@ -337,8 +337,9 @@ async fn a_cell_hosts_isolated_tenants_that_survive_a_hand_over() {
     assert_eq!(s, StatusCode::NOT_FOUND, "{v}");
     let (s, _) = req(&http, Method::GET, format!("{proxy}/v1/tasks/messages"), Some(&acme_key), None).await;
     assert_eq!(s, StatusCode::UNAUTHORIZED, "a tenant key works on the default tenant");
+    // A tenant that doesn't exist answers like a bad key (only the operator learns which exist).
     let (s, _) = req(&http, Method::GET, format!("{proxy}/t/nope/v1/tasks/messages"), Some(&acme_key), None).await;
-    assert_eq!(s, StatusCode::NOT_FOUND);
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
 
     // Hand over: tenants, their keys and their data move with the cell.
     let b = start_node_with(objects.clone(), "node-b", Some(ADMIN)).await;
@@ -362,7 +363,7 @@ async fn a_cell_hosts_isolated_tenants_that_survive_a_hand_over() {
     let (s, _) = req(&http, Method::DELETE, format!("{tenants}/acme"), Some(ADMIN), None).await;
     assert_eq!(s, StatusCode::NOT_FOUND);
     let (s, _) = req(&http, Method::GET, format!("{acme_api}/messages/{acme_msg}"), Some(&acme_key), None).await;
-    assert_eq!(s, StatusCode::NOT_FOUND);
+    assert_eq!(s, StatusCode::UNAUTHORIZED, "a deleted tenant answers like a bad key");
     let (s, again) = req(&http, Method::POST, tenants.clone(), Some(ADMIN), Some(json!({ "id": "acme" }))).await;
     assert_eq!(s, StatusCode::CREATED);
     let (s, _) = req(&http, Method::GET, format!("{acme_api}/messages/{acme_msg}"), Some(&acme_key), None).await;

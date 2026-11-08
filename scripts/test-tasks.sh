@@ -40,13 +40,28 @@ if [[ $force == 0 && $e2e_only == 0 && -f $STAMP && "$(cat "$STAMP")" == "$hash"
   exit 0
 fi
 
+# DynamoDB Local for the fleet tests' DynamoDB runs (tests/fleet.rs: leases in DynamoDB; they
+# skip without it). ROLL_CLUSTER_TEST_DYNAMODB set: use that one.
+cluster_ddb=roll-cloud-tasks-ddb-$$
+trap 'docker rm -f "$cluster_ddb" >/dev/null 2>&1 || true' EXIT
+if [[ $unit_only == 0 && -z ${ROLL_CLUSTER_TEST_DYNAMODB:-} ]] && docker info >/dev/null 2>&1; then
+  docker run -d --rm --name "$cluster_ddb" -p 127.0.0.1::8000 amazon/dynamodb-local >/dev/null
+  port=$(docker port "$cluster_ddb" 8000/tcp | head -1 | sed 's/.*://')
+  # Docker accepts connections before DynamoDB Local listens: wait for an HTTP answer.
+  for _ in $(seq 120); do curl -s -o /dev/null "http://127.0.0.1:$port" && break; sleep 0.5; done
+  export ROLL_CLUSTER_TEST_DYNAMODB="http://127.0.0.1:$port"
+fi
+
 # CI runs the unit job separately; keep the default local command comprehensive.
 if [[ $e2e_only == 0 ]]; then
   cargo build -p tasks -p roll-cli
   cargo build -p tasks --features lambda
   cargo clippy -p tasks -p roll-cli --all-targets --features lambda -- -D warnings
+  cargo clippy -p tasks --all-targets --features fleet -- -D warnings
   cargo test -p tasks ${args[@]+"${args[@]}"}
   ROLL_TASKS_E2E_LOG=memory:// cargo test -p tasks --tests ${args[@]+"${args[@]}"}
+  # The cell on a roll-cluster fleet (leases in memory, and in DynamoDB Local when it's up).
+  cargo test -p tasks --features fleet --test fleet ${args[@]+"${args[@]}"}
 fi
 
 if [[ $unit_only == 0 ]]; then
@@ -55,7 +70,7 @@ if [[ $unit_only == 0 ]]; then
     exit 1
   fi
   ddb=roll-tasks-ddb-$$ s3=roll-tasks-s3-$$ minio=roll-tasks-minio-$$
-  trap 'docker rm -f "$ddb" "$s3" "$minio" >/dev/null 2>&1 || true' EXIT
+  trap 'docker rm -f "$ddb" "$s3" "$minio" "$cluster_ddb" >/dev/null 2>&1 || true' EXIT
 
   # The log store on S3.
   docker run -d --rm --name "$minio" -p 127.0.0.1::9000 -e MINIO_ROOT_USER=roll -e MINIO_ROOT_PASSWORD=roll-tasks-test \
@@ -74,6 +89,9 @@ if [[ $unit_only == 0 ]]; then
   AWS_ENDPOINT_URL="http://127.0.0.1:$minio_port" ROLL_TASKS_E2E_LOG=s3://roll-tasks-log/e2e \
   ROLL_TASKS_E2E_VERSIONED=s3://roll-tasks-log/e2e \
     cargo test -p tasks --tests ${args[@]+"${args[@]}"}
+  AWS_ACCESS_KEY_ID=roll AWS_SECRET_ACCESS_KEY=roll-tasks-test AWS_REGION=us-east-1 \
+  AWS_ENDPOINT_URL="http://127.0.0.1:$minio_port" ROLL_TASKS_E2E_LOG=s3://roll-tasks-log/e2e \
+    cargo test -p tasks --features fleet --test fleet ${args[@]+"${args[@]}"}
   docker rm -f "$minio" >/dev/null 2>&1 || true
 
   # DynamoDB.

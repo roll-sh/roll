@@ -923,6 +923,7 @@ impl Tasks {
             if run.status.is_final() || now_ms() >= deadline {
                 return Ok(run);
             }
+            self.check_waiting()?;
             tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
             delay = (delay * 2).min(250);
         }
