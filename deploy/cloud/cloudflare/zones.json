@@ -1,0 +1,62 @@
+{
+  "$comment": [
+    "roll cloud's Cloudflare zones: records, zone settings and Worker routes (docs/cloud/README.md, 'Hostnames').",
+    "Apply with: node deploy/cloud/cloudflare/apply.mjs [--dry-run] --stack roll-cloud (deploy/cloud/README.md).",
+    "Records apply.mjs creates carry the comment below; it only ever changes or deletes those.",
+    "type 'origin' is the NLB: a CNAME to its DNS name, or one A record per Elastic IP.",
+    "Worker routes with script null turn Workers off for that pattern (the most specific route wins)."
+  ],
+  "comment": "managed by roll: deploy/cloud/cloudflare",
+  "origin": "origin.us-east-1.roll.cloud",
+  "zones": {
+    "roll.cloud": {
+      "settings": {
+        "ssl": "strict",
+        "always_use_https": "on",
+        "min_tls_version": "1.2",
+        "tls_1_3": "on",
+        "tls_client_auth": "on",
+        "security_header": {
+          "strict_transport_security": {
+            "enabled": true,
+            "max_age": 31536000,
+            "include_subdomains": false,
+            "preload": false,
+            "nosniff": true
+          }
+        }
+      },
+      "records": [
+        { "name": "origin.us-east-1.roll.cloud", "type": "origin" },
+        { "name": "roll.cloud", "type": "CNAME", "content": "origin.us-east-1.roll.cloud", "proxied": true },
+        { "name": "api.roll.cloud", "type": "CNAME", "content": "origin.us-east-1.roll.cloud", "proxied": true },
+        { "name": "git.roll.cloud", "type": "CNAME", "content": "origin.us-east-1.roll.cloud", "proxied": false },
+        { "name": "*.pg.us-east-1.roll.cloud", "type": "CNAME", "content": "origin.us-east-1.roll.cloud", "proxied": false },
+        { "name": "*.redis.us-east-1.roll.cloud", "type": "CNAME", "content": "origin.us-east-1.roll.cloud", "proxied": false },
+        { "name": "*.kafka.us-east-1.roll.cloud", "type": "CNAME", "content": "origin.us-east-1.roll.cloud", "proxied": false },
+        { "name": "*.cql.us-east-1.roll.cloud", "type": "CNAME", "content": "origin.us-east-1.roll.cloud", "proxied": false },
+        { "name": "*.mq.us-east-1.roll.cloud", "type": "CNAME", "content": "origin.us-east-1.roll.cloud", "proxied": false },
+        { "name": "s3.us-east-1.roll.cloud", "type": "CNAME", "content": "origin.us-east-1.roll.cloud", "proxied": false },
+        { "name": "*.s3.us-east-1.roll.cloud", "type": "CNAME", "content": "origin.us-east-1.roll.cloud", "proxied": false },
+        { "name": "tasks.us-east-1.roll.cloud", "type": "CNAME", "content": "origin.us-east-1.roll.cloud", "proxied": false }
+      ]
+    },
+    "roll.site": {
+      "settings": {
+        "ssl": "strict",
+        "always_use_https": "on",
+        "min_tls_version": "1.2",
+        "tls_1_3": "on",
+        "tls_client_auth": "on"
+      },
+      "records": [
+        { "name": "*.roll.site", "type": "CNAME", "content": "origin.us-east-1.roll.cloud", "proxied": true },
+        { "name": "*.preview.roll.site", "type": "CNAME", "content": "origin.us-east-1.roll.cloud", "proxied": true }
+      ],
+      "workerRoutes": [
+        { "pattern": "*.roll.site/*", "script": "roll-cdn" },
+        { "pattern": "*.preview.roll.site/*", "script": null }
+      ]
+    }
+  }
+}
