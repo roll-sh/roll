@@ -2306,10 +2306,12 @@ struct ScanNode {
     /// `erb`'s entry at its cursor was handed out by reference (`next_raw_ref`): passed at
     /// the next call.
     eheld: bool,
-    /// A unique index's equality ranges read through a point reader (`point_entry`), once
-    /// decided; the reader, kept for the statement's snapshot (from rescan to rescan).
+    /// A unique index's equality ranges read through point readers (`point_entry`), once
+    /// decided; the readers of its entries and of their rows (each keeps the blocks it read
+    /// last, so the two don't take each other's), kept for the statement's snapshot from
+    /// rescan to rescan.
     point: Option<bool>,
-    preader: Option<(Arc<crate::storage::Store>, crate::storage::point::PointReader)>,
+    preader: Option<Box<PointReaders>>,
     /// The last range's store iterator once it ended, for the next range to read on with
     /// (`Txn::reseek_snap`) instead of a new one.
     spare: Option<StoreIter>,
@@ -2391,6 +2393,14 @@ fn with_params(e: &Expr, ctx: &ExecCtx) -> Option<Expr> {
         }
         x => x,
     }))
+}
+
+/// `ScanNode::point_entry`'s readers at one snapshot: of an index's entries, and of the
+/// rows they name.
+struct PointReaders {
+    store: Arc<crate::storage::Store>,
+    entries: crate::storage::point::PointReader,
+    rows: crate::storage::point::PointReader,
 }
 
 /// Whether a deferrable constraint of `t` is enforced by index `ix` (its keys may repeat
@@ -3323,12 +3333,13 @@ impl ScanNode {
         }
         let Some(snap) = ctx.snapshot() else { return Ok(None) };
         let Some((store, ts)) = ctx.txn.borrow().store_reader(&snap) else { return Ok(None) };
-        if self.preader.as_ref().is_none_or(|(s, r)| r.ts() != ts || !Arc::ptr_eq(s, &store)) {
-            self.preader = Some((store.clone(), store.point_reader(ts, false)));
+        if self.preader.as_ref().is_none_or(|p| p.entries.ts() != ts || !Arc::ptr_eq(&p.store, &store)) {
+            let (entries, rows) = (store.point_reader(ts, false), store.point_reader(ts, false));
+            self.preader = Some(Box::new(PointReaders { store, entries, rows }));
         }
-        let (store, r) = self.preader.as_mut().expect("a point reader");
+        let PointReaders { store, entries, rows } = &mut **self.preader.as_mut().expect("point readers");
         let (start, end) = &self.ranges[self.cur_range];
-        let (ekey, dkey) = match store.first_with(r, start, end, false)? {
+        let (ekey, dkey) = match store.first_with(entries, start, end, false)? {
             crate::storage::point::First::Unknown => return Ok(None),
             crate::storage::point::First::None => {
                 self.cur_range += 1;
@@ -3341,7 +3352,7 @@ impl ScanNode {
             // (The entry key stands in for the row: `index_ref`.)
             Some(_) => Some(bytes::Bytes::new()),
             // (With every value put back, as `fetch_rows` reads it.)
-            None => store.get_with(r, &dkey, true)?.and_then(|(_, v)| v),
+            None => store.get_with(rows, &dkey, true)?.and_then(|(_, v)| v),
         };
         self.erb.push(&ekey, dkey);
         self.erows.push(row);
