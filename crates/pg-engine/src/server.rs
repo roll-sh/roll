@@ -2384,10 +2384,7 @@ fn describe_msg(c: &mut Conn, s: &mut Session, body: &[u8]) -> Result<()> {
     match kind {
         b'S' => {
             let Some(p) = s.prepared.get(&name).cloned() else {
-                return Err(Error::new(
-                    code::INVALID_SQL_STATEMENT_NAME,
-                    format!("prepared statement \"{name}\" does not exist"),
-                ));
+                return Err(crate::session::missing_statement(&name));
             };
             let cols = s.describe(&p)?;
             c.msg(b't', |o| {
