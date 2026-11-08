@@ -519,94 +519,84 @@ impl<'c> Reader<'c> {
     }
 }
 
-/// A chunk of a secondary index's entries (or a bitmap heap scan's row keys: entries with
-/// the data key as their value) as the rows they point at, in their order, fetched from the
-/// store a batch at a time at the statement's snapshot (`Txn::store_reader`; None: an
-/// index-only scan's, the entry key standing in for the row).
+/// A chunk of a secondary index's entries (or a bitmap heap scan's row keys) as the rows they
+/// point at, in their order, a fill at a time (`FillRows`): the entries read a batch at a
+/// time by reference, their rows fetched together from the store at the statement's
+/// snapshot (`Txn::store_reader`; None: an index-only scan's, the entry key standing in for
+/// the row, copied into the batch). Nothing is made per row.
 pub struct IndexChunk {
-    pub entries: Box<dyn Iterator<Item = Result<(Vec<u8>, bytes::Bytes)>> + Send>,
-    pub fetch: Option<(Arc<crate::storage::Store>, u64)>,
-    buf: VecDeque<Result<(Vec<u8>, bytes::Bytes)>>,
-    done: bool,
+    entries: Entries,
+    fetch: Option<(Arc<crate::storage::Store>, u64)>,
+    /// The entries of the fill being made.
+    ents: RowBatch,
 }
 
-/// Index entries a chunk's rows are fetched for at a time.
-const FETCH: usize = 256;
+/// Where a chunk's entries come from.
+enum Entries {
+    /// An index range: entry key, the row's data key as the value.
+    Scan(Box<TxnScan>),
+    /// Data keys (strictly ascending), `keyed`'s run of them.
+    Keyed(Arc<[Vec<u8>]>, std::ops::Range<usize>),
+}
 
 impl IndexChunk {
     pub fn new(entries: TxnScan, fetch: Option<(Arc<crate::storage::Store>, u64)>) -> IndexChunk {
-        IndexChunk { entries: Box::new(entries), fetch, buf: VecDeque::new(), done: false }
+        IndexChunk { entries: Entries::Scan(Box::new(entries)), fetch, ents: RowBatch::default() }
     }
 
     /// The rows stored under `keys[run]` (in that order; the invisible ones left out).
     pub fn keyed(keys: Arc<[Vec<u8>]>, run: std::ops::Range<usize>, fetch: (Arc<crate::storage::Store>, u64)) -> IndexChunk {
-        let entries = run.map(move |i| Ok((Vec::new(), bytes::Bytes::copy_from_slice(&keys[i]))));
-        IndexChunk { entries: Box::new(entries), fetch: Some(fetch), buf: VecDeque::new(), done: false }
+        IndexChunk { entries: Entries::Keyed(keys, run), fetch: Some(fetch), ents: RowBatch::default() }
     }
 }
 
-impl Iterator for IndexChunk {
-    type Item = Result<(Vec<u8>, bytes::Bytes)>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        loop {
-            if let Some(x) = self.buf.pop_front() {
-                return Some(x);
-            }
-            if self.done {
-                return None;
-            }
-            let mut ents: Vec<(Vec<u8>, bytes::Bytes)> = Vec::with_capacity(FETCH);
-            while ents.len() < FETCH {
-                match self.entries.next() {
-                    Some(Ok(e)) => ents.push(e),
-                    Some(Err(e)) => {
-                        self.done = true;
-                        self.buf.push_back(Err(e));
-                        break;
-                    }
-                    None => {
-                        self.done = true;
-                        break;
-                    }
+impl FillRows for IndexChunk {
+    fn fill(&mut self, b: &mut RowBatch, max: usize) -> Result<()> {
+        // (Entries whose rows are all invisible append nothing: read on, as an empty fill
+        // ends the chunk.)
+        let before = b.len();
+        while b.len() == before {
+            self.ents.clear();
+            let keys = match &mut self.entries {
+                Entries::Scan(s) => {
+                    s.fill_batch(&mut self.ents, max)?;
+                    None
                 }
+                Entries::Keyed(keys, run) => Some(run.by_ref().take(max).map(|i| keys[i].as_slice()).collect::<Vec<&[u8]>>()),
+            };
+            let n = keys.as_ref().map_or(self.ents.len(), Vec::len);
+            if n == 0 {
+                return Ok(());
             }
-            let err = self.buf.pop_back();
+            let dkey = |i: usize| match &keys {
+                Some(k) => k[i],
+                None => self.ents.get(i).1,
+            };
             match &self.fetch {
                 None => {
                     // (Rows an index-only scan makes from its entries, as `index_row` counts.)
-                    super::scan::ROWS_FROM_INDEX_ENTRIES.fetch_add(ents.len() as u64, std::sync::atomic::Ordering::Relaxed);
-                    for (k, d) in ents {
-                        self.buf.push_back(Ok((d.to_vec(), bytes::Bytes::from(k))));
+                    super::scan::ROWS_FROM_INDEX_ENTRIES.fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
+                    for i in 0..n {
+                        let (k, d) = self.ents.get(i);
+                        b.push_copy(d, k);
                     }
                 }
-                Some((store, ts)) if !ents.is_empty() => {
-                    let mut keys: Vec<&[u8]> = ents.iter().map(|(_, d)| &d[..]).collect();
-                    keys.sort_unstable();
-                    keys.dedup();
-                    match store.get_versions(&keys, *ts) {
-                        Err(e) => {
-                            self.done = true;
-                            self.buf.push_back(Err(e));
-                        }
-                        Ok(got) => {
-                            let found: std::collections::HashMap<&[u8], bytes::Bytes> = keys
-                                .iter()
-                                .zip(got)
-                                .filter_map(|(k, v)| Some((*k, v?.1?)))
-                                .collect();
-                            for (_, d) in &ents {
-                                if let Some(b) = found.get(&d[..]) {
-                                    self.buf.push_back(Ok((d.to_vec(), b.clone())));
-                                }
-                            }
+                Some((store, ts)) => {
+                    let mut sorted: Vec<&[u8]> = (0..n).map(dkey).collect();
+                    sorted.sort_unstable();
+                    sorted.dedup();
+                    let got = store.get_versions(&sorted, *ts)?;
+                    for i in 0..n {
+                        let d = dkey(i);
+                        let at = sorted.binary_search(&d).expect("a fetched key");
+                        if let Some((_, Some(v))) = &got[at] {
+                            b.push(d, v.clone());
                         }
                     }
                 }
-                Some(_) => {}
             }
-            self.buf.extend(err);
         }
+        Ok(())
     }
 }
 
