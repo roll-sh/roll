@@ -3637,21 +3637,20 @@ fn gist_entry_key(
     bix: &BoundIndex,
     v: Option<&Value>,
 ) -> Result<Option<Option<crate::catalog::gistsim::Key>>> {
-    use crate::catalog::gistsim::{GBox, Key, RKey};
-    use crate::types::geo::Geo;
+    // (Logged for single-column indexes only: a two-column index's model is built from its
+    // rows, `gist_model`.)
     if bix.keys.len() != 1 {
         return Ok(None);
     }
-    let range = match bix.keys[0].ty() {
-        DataType::Point => None,
-        DataType::Range(rt) => match rt.oid {
-            3904 | 3912 => Some((4u8, 1.0)),
-            3926 => Some((8, 1.0)),
-            3908 | 3910 => Some((8, 1e6)),
-            _ => return Ok(None),
-        },
-        _ => return Ok(None),
-    };
+    Ok(gist_col_key(&bix.keys[0].ty(), v, 1 + bix.index.include.len()).ok())
+}
+
+/// A GiST index column's key for `v` (None: a null), when the model knows its operator class:
+/// point_ops, range_ops over int4, int8, date and timestamps, btree_gist's int2, int4 and int8
+/// (`natts`: the index's attributes, which gbt_num's penalty scales by). Err: not modelled.
+fn gist_col_key(ty: &DataType, v: Option<&Value>, natts: usize) -> std::result::Result<Option<crate::catalog::gistsim::Key>, ()> {
+    use crate::catalog::gistsim::{GBox, GNum, Key, RKey};
+    use crate::types::geo::Geo;
     let int = |v: &Option<Value>| -> Option<Option<i64>> {
         match v {
             None => Some(None),
@@ -3660,29 +3659,60 @@ fn gist_entry_key(
             Some(_) => None,
         }
     };
-    Ok(Some(match v {
-        Some(Value::Geo(g)) if range.is_none() => match &**g {
-            Geo::Point(p) => Some(Key::Box(GBox::point(p.x, p.y))),
-            _ => return Ok(None),
+    match ty {
+        DataType::Point => match v {
+            Some(Value::Geo(g)) => match &**g {
+                Geo::Point(p) => Ok(Some(Key::Box(GBox::point(p.x, p.y)))),
+                _ => Err(()),
+            },
+            Some(Value::Null) | None => Ok(None),
+            Some(_) => Err(()),
         },
-        Some(Value::Range(r)) if let Some((width, scale)) = range => {
-            let (Some(lower), Some(upper)) = (int(&r.lower), int(&r.upper)) else {
-                return Ok(None);
+        DataType::Range(rt) => {
+            // The range subtype's size and subtype_diff divisor.
+            let (width, scale) = match rt.oid {
+                3904 | 3912 => (4u8, 1.0),
+                3926 => (8, 1.0),
+                3908 | 3910 => (8, 1e6),
+                _ => return Err(()),
             };
-            Some(Key::Range(RKey {
-                empty: r.empty,
-                lower,
-                lower_inc: r.lower_inc,
-                upper,
-                upper_inc: r.upper_inc,
-                contain_empty: false,
-                width,
-                scale,
-            }))
+            match v {
+                Some(Value::Range(r)) => {
+                    let (Some(lower), Some(upper)) = (int(&r.lower), int(&r.upper)) else {
+                        return Err(());
+                    };
+                    Ok(Some(Key::Range(RKey {
+                        empty: r.empty,
+                        lower,
+                        lower_inc: r.lower_inc,
+                        upper,
+                        upper_inc: r.upper_inc,
+                        contain_empty: false,
+                        width,
+                        scale,
+                    })))
+                }
+                Some(Value::Null) | None => Ok(None),
+                Some(_) => Err(()),
+            }
         }
-        Some(Value::Null) | None => None,
-        Some(_) => return Ok(None),
-    }))
+        DataType::Int2 | DataType::Int4 | DataType::Int8 => {
+            let width = match ty {
+                DataType::Int2 => 2,
+                DataType::Int4 => 4,
+                _ => 8,
+            };
+            let num = |i: i64| Ok(Some(Key::Num(GNum { lo: i, hi: i, width, natts: natts as u8 })));
+            match v {
+                Some(Value::Int2(i)) => num(*i as i64),
+                Some(Value::Int4(i)) => num(*i as i64),
+                Some(Value::Int8(i)) => num(*i),
+                Some(Value::Null) | None => Ok(None),
+                Some(_) => Err(()),
+            }
+        }
+        _ => Err(()),
+    }
 }
 
 /// The GiST index as its pages hold it now, with the data key of each row its leaf
@@ -3693,39 +3723,24 @@ fn gist_model(
     indexes: &[BoundIndex],
     ctx: &ExecCtx,
 ) -> Result<Option<(crate::catalog::gistsim::Gist, Vec<Vec<u8>>)>> {
-    use crate::catalog::gistsim::{GBox, Key, RKey, sorted_build_rows};
-    use crate::types::geo::Geo;
-    if bix.keys.len() != 1 {
+    use crate::catalog::gistsim::{Key, sorted_build_rows, sorted_build_rows2};
+    let (ncols, natts) = (bix.keys.len(), bix.keys.len() + bix.index.include.len());
+    // (A two-column index's tuples are sized from its two keys: none with INCLUDE columns.)
+    if !(1..=2).contains(&ncols)
+        || (ncols == 2 && natts > 2)
+        || bix.keys.iter().any(|k| gist_col_key(&k.ty(), None, natts).is_err())
+    {
         return Ok(None);
     }
-    // The range subtype's size and subtype_diff divisor.
-    let range = match bix.keys[0].ty() {
-        DataType::Point => None,
-        DataType::Range(rt) => match rt.oid {
-            3904 | 3912 => Some((4u8, 1.0)),
-            3926 => Some((8, 1.0)),
-            3908 | 3910 => Some((8, 1e6)),
-            _ => return Ok(None),
-        },
-        _ => return Ok(None),
-    };
     if !ensure(t, indexes, ctx)? {
         return Ok(None);
     }
-    let int = |v: &Option<Value>| -> Option<Option<i64>> {
-        match v {
-            None => Some(None),
-            Some(Value::Int4(i)) | Some(Value::Date(i)) => Some(Some(*i as i64)),
-            Some(Value::Int8(i)) | Some(Value::Timestamp(i)) | Some(Value::Timestamptz(i)) => Some(Some(*i)),
-            Some(_) => None,
-        }
-    };
     let start = index_prefix(t.oid, 0);
     let end = prefix_end(&start);
     let raw: Vec<(Vec<u8>, bytes::Bytes)> =
         ctx.txn.borrow().scan(&start, &end).collect::<Result<_>>()?;
-    // (TID, data key, key, the TID index entries name: its HOT chain's root.)
-    let mut rows: Vec<((u32, u16), Vec<u8>, Option<Key>, Tid)> = Vec::new();
+    // (TID, data key, keys, the TID index entries name: its HOT chain's root.)
+    let mut rows: Vec<((u32, u16), Vec<u8>, [Option<Key>; 2], Tid)> = Vec::new();
     {
         let xids = ctx.sess.db.xids();
         let v = Vis::new(&xids);
@@ -3738,51 +3753,55 @@ fn gist_model(
             let Some(vals) = index_values(bix, &row, ctx)? else {
                 continue;
             };
-            let key = match vals.first() {
-                Some(Value::Geo(g)) if range.is_none() => match &**g {
-                    Geo::Point(p) => Some(Key::Box(GBox::point(p.x, p.y))),
-                    _ => return Ok(None),
-                },
-                Some(Value::Range(r)) if let Some((width, scale)) = range => {
-                    let (Some(lower), Some(upper)) = (int(&r.lower), int(&r.upper)) else {
-                        return Ok(None);
-                    };
-                    Some(Key::Range(RKey {
-                        empty: r.empty,
-                        lower,
-                        lower_inc: r.lower_inc,
-                        upper,
-                        upper_inc: r.upper_inc,
-                        contain_empty: false,
-                        width,
-                        scale,
-                    }))
+            let mut keys = [None; 2];
+            for (c, key) in keys.iter_mut().enumerate().take(ncols) {
+                match gist_col_key(&bix.keys[c].ty(), vals.get(c), natts) {
+                    Ok(kc) => *key = kc,
+                    Err(()) => return Ok(None),
                 }
-                Some(Value::Null) | None => None,
-                Some(_) => return Ok(None),
-            };
+            }
             let Some(tid) = heap.locate(k, &v) else {
                 continue;
             };
-            rows.push((tid, k.clone(), key, heap.hot_root(tid)));
+            rows.push((tid, k.clone(), keys, heap.hot_root(tid)));
         }
     }
     // (In the order of the TIDs index entries name, as the build reads its rows.)
     rows.sort_by_key(|r| r.3);
+    let built = ctx.sess.db.relfiles.of(t.oid).read().gin_built.get(&bix.index.oid).and_then(|h| h.first().cloned());
+    if ncols == 2 {
+        // The rows the build read (all of them when it wasn't seen), then the rest.
+        let (first, later): (Vec<_>, Vec<_>) =
+            rows.into_iter().partition(|r| built.as_ref().is_none_or(|b| b.contains(&r.1)));
+        let mut keys: Vec<Vec<u8>> = Vec::new();
+        let mut g = sorted_build_rows2(
+            first
+                .into_iter()
+                .map(|r| {
+                    keys.push(r.1);
+                    (r.2, (keys.len() - 1) as u32)
+                })
+                .collect(),
+        );
+        for r in later {
+            keys.push(r.1);
+            g.insert_row2(r.2, (keys.len() - 1) as u32);
+        }
+        return Ok(Some((g, keys)));
+    }
     // The index as its history built it, while that accounts for every row.
     let log = ctx.sess.db.relfiles.of(t.oid).read().gist_logs.get(&bix.index.oid).cloned();
-    let roots: Vec<(Tid, Vec<u8>, Option<Key>)> = rows.iter().map(|r| (r.3, r.1.clone(), r.2)).collect();
+    let roots: Vec<(Tid, Vec<u8>, Option<Key>)> = rows.iter().map(|r| (r.3, r.1.clone(), r.2[0])).collect();
     if let Some(m) = log.and_then(|l| l.replay(&roots)) {
         return Ok(Some(m));
     }
     // The rows the build read (all of them when it wasn't seen), then the rest.
-    let built = ctx.sess.db.relfiles.of(t.oid).read().gin_built.get(&bix.index.oid).and_then(|h| h.first().cloned());
     let (first, later): (Vec<_>, Vec<_>) =
         rows.into_iter().partition(|r| built.as_ref().is_none_or(|b| b.contains(&r.1)));
     // (Its history starts again from here.)
     if roots.len() <= gistlog::MAX_ENTRIES {
-        let build: Vec<(Tid, Option<Key>)> = first.iter().map(|r| (r.3, r.2)).collect();
-        let log = gistlog::GistLog::new(build, later.iter().map(|r| (r.3, r.2)).collect());
+        let build: Vec<(Tid, Option<Key>)> = first.iter().map(|r| (r.3, r.2[0])).collect();
+        let log = gistlog::GistLog::new(build, later.iter().map(|r| (r.3, r.2[0])).collect());
         ctx.sess.db.relfiles.of(t.oid).write().gist_logs.insert(bix.index.oid, Arc::new(log));
     }
     let mut keys: Vec<Vec<u8>> = Vec::new();
@@ -3791,13 +3810,13 @@ fn gist_model(
             .into_iter()
             .map(|r| {
                 keys.push(r.1);
-                (r.2, (keys.len() - 1) as u32)
+                (r.2[0], (keys.len() - 1) as u32)
             })
             .collect(),
     );
     for r in later {
         keys.push(r.1);
-        g.insert_row(r.2, (keys.len() - 1) as u32);
+        g.insert_row(r.2[0], (keys.len() - 1) as u32);
     }
     Ok(Some((g, keys)))
 }
