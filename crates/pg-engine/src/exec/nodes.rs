@@ -2551,7 +2551,19 @@ impl Node for ProjectNode {
         if self.tried || !identity {
             return Ok(None);
         }
-        self.input.each_stored(f, ctx)
+        // (A decoded row as projected: the input's may have more columns after these. A stored
+        // row's values are counted by whoever reads them.)
+        let n = self.exprs.len();
+        self.input.each_stored(
+            &mut |s| match s {
+                super::Stored::Row(mut r) => {
+                    r.truncate(n);
+                    f(super::Stored::Row(r))
+                }
+                bytes => f(bytes),
+            },
+            ctx,
+        )
     }
 
     fn projection(&self) -> Option<&[Expr]> {
