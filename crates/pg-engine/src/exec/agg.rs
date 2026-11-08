@@ -3758,8 +3758,9 @@ fn shows_alike(g: &crate::sql::expr::Expr, coll: Option<&KeyNorm>, proj: Option<
 /// unless the expression only makes whole numbers: EXTRACT of a date's field; a column of
 /// the projection `proj` below, its expression).
 fn key_equal_apart(e: &crate::sql::expr::Expr, proj: Option<&[crate::sql::expr::Expr]>) -> bool {
+    // (Under its relabelings and the SQL syntax it was written in: EXTRACT(year FROM d).)
     let mut x = e;
-    while let crate::sql::expr::Expr::Relabel(y, _) = x {
+    while let crate::sql::expr::Expr::Relabel(y, _) | crate::sql::expr::Expr::SqlSyntax(y) = x {
         x = y;
     }
     if let (crate::sql::expr::Expr::Col(i, _), Some(p)) = (x, proj)
