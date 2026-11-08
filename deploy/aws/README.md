@@ -236,6 +236,15 @@ reach the leader differ.
   depends on the lease; a node that still believes it leads after losing it can't commit. A node
   that took the log without the lease (a partition, an operator) fences the leader, which takes the
   log back at its next write; that write runs again there.
+- **Markers and effects land together.** Every "seen" marker is written in one atomic group with
+  the effect it guards (`Store::write_all`: one SQLite transaction, so one log commit; a DynamoDB
+  transaction on the DynamoDB layout): a publish's `dedup_id` claim with its messages, an event's id
+  with the event, a timer's claim with its message, a resolved step with the step, a function's
+  idempotency key with the run it starts, a batch with its flush, a new schedule with its first
+  tick. A crash between them can't happen, so a retry never answers `deduplicated` for something
+  that was lost. An event whose waits and triggers didn't all run before a crash runs them when
+  it's sent again with its id, and a run's end (its parent's step, its lifecycle event) is finished
+  by whoever sees the run next.
 - **Single node** (no cluster): rolld leads from the start with the log in its object storage (the
   local directory `<home>/objects/tasks`, or S3 with `--s3-bucket`), commits every 5 ms in a local
   directory (100 ms on S3; `ROLL_TASKS_COMMIT_MS`), and imports the SQLite database earlier
