@@ -148,7 +148,8 @@ pub struct Products<'a> {
     pub redis: Option<Arc<dyn redis_server::Directory>>,
     pub streams: Option<Arc<stream_broker::Broker>>,
     pub tasks: Option<Arc<tasks::Tasks>>,
-    pub storage: Option<Arc<s3_server::Server>>,
+    /// The S3 API (requests run on the metadata's owner).
+    pub storage: Option<axum::Router>,
     pub nosql: Option<&'a crate::nosql::Nosql>,
     pub queues: Option<&'a crate::queues::Queues>,
 }
@@ -460,7 +461,7 @@ impl HttpRoutes {
             redis: p.redis.clone().map(|d| logged(redis_server::http::router(d))),
             kafka: p.streams.clone().map(|b| logged(stream_broker::http::router(b))),
             tasks: p.tasks.clone().map(|t| logged(tasks::api::router(t))),
-            s3: p.storage.clone().map(|s| logged(s3_server::router(s))),
+            s3: p.storage.clone().map(logged),
             alternator: p.nosql.map(|n| logged(n.alternator_router())),
             mq,
         })

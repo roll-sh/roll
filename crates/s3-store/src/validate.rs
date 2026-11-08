@@ -43,6 +43,21 @@ pub fn bucket_name(name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Bucket names starting with this are code previews' hostnames on the user-content domain
+/// (`chg-<id>.roll.site`), which serves buckets at `<bucket>.roll.site` too: no bucket may take
+/// one. (Only roll's own buckets: names of buckets elsewhere, such as replication targets, are
+/// S3's to judge.)
+pub const PREVIEW_PREFIX: &str = "chg-";
+
+/// A name for a new bucket of this deployment (general purpose or directory, created or
+/// branched): S3's rules are checked by the caller; this is roll's own reservation.
+pub fn new_bucket_name(name: &str) -> Result<()> {
+    if name.starts_with(PREVIEW_PREFIX) {
+        return Err(StoreError::InvalidBucketName(format!("{name:?}: names starting with {PREVIEW_PREFIX} are reserved (code previews)")));
+    }
+    Ok(())
+}
+
 pub fn key(key: &str) -> Result<()> {
     if key.is_empty() {
         return Err(StoreError::InvalidArgument("empty key".into()));
@@ -213,6 +228,9 @@ mod tests {
         for bad in ["ab", "ABC", "-abc", "abc-", "a..b", "192.168.1.1", "xn--abc", "a_b", "abc--x-s3", &"x".repeat(64)] {
             assert!(bucket_name(bad).is_err(), "{bad}");
         }
+        // Previews' hostnames are reserved for new buckets only.
+        assert!(bucket_name("chg-1a2b").is_ok() && new_bucket_name("chg-1a2b").is_err());
+        assert!(new_bucket_name("chgx").is_ok() && new_bucket_name("my-chg-1").is_ok());
     }
 
     #[test]

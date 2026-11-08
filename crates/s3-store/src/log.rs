@@ -89,6 +89,8 @@ pub(crate) struct MetaLog {
     durable: watch::Sender<Durable>,
     kick: Notify,
     stopping: AtomicBool,
+    /// Closing for another node to take over: the last entry says so.
+    hand_off: AtomicBool,
     force_snapshot: AtomicBool,
     /// Newest verified snapshot.
     snapshots: watch::Sender<u64>,
@@ -225,10 +227,55 @@ async fn probe_create_only(backend: &dyn Backend, prefix: &str) -> Result<()> {
     }
 }
 
+/// The database rebuilt from object storage up to entry `last`, and what's known about the log
+/// there: everything a node needs to take over as its writer. A standby keeps one current by
+/// following the log ([`MetaLog::follow`]).
+pub(crate) struct Recovered {
+    pub(crate) db: Arc<Db>,
+    /// The last entry applied.
+    pub(crate) last: u64,
+    pruned: u64,
+    /// Verified snapshots in object storage, and other snapshot objects to delete.
+    snaps: (BTreeSet<u64>, BTreeSet<u64>),
+    /// Entries known to be in object storage.
+    wal: BTreeSet<u64>,
+    /// Log bytes applied since the newest verified snapshot (paces the next snapshot).
+    log_bytes: u64,
+}
+
+impl Recovered {
+    fn base(&self) -> u64 {
+        self.snaps.0.last().copied().unwrap_or(0)
+    }
+
+    /// Apply entry `seq` (the next one) as read from object storage.
+    fn apply(&mut self, seq: u64, bytes: &[u8]) -> Result<()> {
+        if seq != self.last + 1 {
+            return Err(StoreError::internal(format!("metadata log gap: expected entry {}, got {seq}", self.last + 1)));
+        }
+        let entry = decode(bytes)?;
+        if entry.seq != seq {
+            return Err(StoreError::internal(format!("log entry {seq} claims to be {}", entry.seq)));
+        }
+        MetaLog::replay(&self.db, &entry).map_err(|e| StoreError::internal(format!("metadata log entry {seq} doesn't apply: {e}")))?;
+        self.wal.insert(seq);
+        self.last = seq;
+        self.log_bytes += bytes.len() as u64;
+        Ok(())
+    }
+}
+
+async fn read_pruned(backend: &dyn Backend, prefix: &str) -> Result<u64> {
+    Ok(match get_retry(backend, &pruned_key(prefix)).await? {
+        Some(b) => serde_json::from_slice::<serde_json::Value>(&b)?["through"].as_u64().unwrap_or(0),
+        None => 0,
+    })
+}
+
 impl MetaLog {
-    /// Rebuild the database from object storage, take over as the log's writer, and start
-    /// committing.
-    pub(crate) async fn open(backend: Arc<dyn Backend>, cfg: LogConfig) -> Result<Arc<Self>> {
+    /// Rebuild the database from the newest usable snapshot and the log after it, writing
+    /// nothing (a standby does this, then follows the log).
+    pub(crate) async fn recover(backend: &Arc<dyn Backend>, cfg: &LogConfig) -> Result<Recovered> {
         let db_path = cfg.dir.join("meta.db");
         let snap_dir = cfg.dir.join("snapshots");
         remove_db_files(&db_path);
@@ -236,15 +283,10 @@ impl MetaLog {
         std::fs::create_dir_all(&snap_dir)?;
         let prefix = cfg.prefix.clone();
 
-        let pruned = match backend.get_bytes(&pruned_key(&prefix)).await? {
-            Some(b) => serde_json::from_slice::<serde_json::Value>(&b)?["through"].as_u64().unwrap_or(0),
-            None => 0,
-        };
+        let pruned = read_pruned(&**backend, &prefix).await?;
 
-        probe_create_only(&*backend, &prefix).await?;
-
-        let wal_listed = crate::backend::list_all(&*backend, &format!("{prefix}/wal/")).await?;
-        let mut all_wal: BTreeSet<u64> = wal_listed.iter().filter_map(|l| seq_of(&l.key)).collect();
+        let wal_listed = crate::backend::list_all(&**backend, &format!("{prefix}/wal/")).await?;
+        let all_wal: BTreeSet<u64> = wal_listed.iter().filter_map(|l| seq_of(&l.key)).collect();
         // Whether every entry after `seq` is still there (a snapshot older than the pruned log
         // may need entries that are gone).
         let replayable = |seq: u64| match all_wal.last() {
@@ -254,7 +296,7 @@ impl MetaLog {
 
         // The newest snapshot that reads back intact and has the log after it; older ones are
         // the fallbacks.
-        let listed = crate::backend::list_all(&*backend, &format!("{prefix}/snap/")).await?;
+        let listed = crate::backend::list_all(&**backend, &format!("{prefix}/snap/")).await?;
         let mut snap_seqs: Vec<u64> = listed.iter().filter_map(|l| seq_of(&l.key)).collect();
         snap_seqs.sort_unstable_by(|a, b| b.cmp(a));
         let mut base = None;
@@ -264,7 +306,7 @@ impl MetaLog {
             if !replayable(seq) {
                 continue;
             }
-            let data = match get_retry(&*backend, &snap_key(&prefix, seq)).await {
+            let data = match get_retry(&**backend, &snap_key(&prefix, seq)).await {
                 Ok(Some(d)) => d,
                 Ok(None) => continue,
                 Err(e) => {
@@ -322,48 +364,93 @@ impl MetaLog {
                 return Err(StoreError::internal(format!("metadata log gap: expected entry {want}, found {s}")));
             }
         }
-        let mut entries = futures::stream::iter(needed.clone())
+        let mut rec = Recovered { db, last: base, pruned, snaps: (good, bad), wal: all_wal, log_bytes: 0 };
+        Self::apply_entries(backend, &prefix, &mut rec, needed).await?;
+        info!(snapshot = base, replayed = rec.last - base, "storage metadata recovered");
+        Ok(rec)
+    }
+
+    /// Fetch and apply `seqs`, which follow `rec.last` without gaps.
+    async fn apply_entries(backend: &Arc<dyn Backend>, prefix: &str, rec: &mut Recovered, seqs: Vec<u64>) -> Result<()> {
+        let mut entries = futures::stream::iter(seqs)
             .map(|s| {
                 let backend = backend.clone();
-                let key = wal_key(&prefix, s);
+                let key = wal_key(prefix, s);
                 async move { Ok::<_, StoreError>((s, get_retry(&*backend, &key).await?.ok_or_else(|| StoreError::internal(format!("log entry {s} vanished")))?)) }
             })
             .buffered(32);
-        let mut last = base;
-        let mut log_bytes = 0u64;
         while let Some(e) = entries.next().await {
             let (seq, bytes) = e?;
-            let entry = decode(&bytes)?;
-            if entry.seq != seq {
-                return Err(StoreError::internal(format!("log entry {seq} claims to be {}", entry.seq)));
-            }
-            Self::replay(&db, &entry).map_err(|e| StoreError::internal(format!("metadata log entry {seq} doesn't apply: {e}")))?;
-            log_bytes += bytes.len() as u64;
-            last = seq;
+            rec.apply(seq, &bytes)?;
         }
-        drop(entries);
+        Ok(())
+    }
 
-        // Take over: claim the next entry. Anything a previous writer slipped in first gets
-        // replayed, and from here on its commits fail.
-        let mut seq = last + 1;
+    /// Apply the entries the writer committed since `rec.last`, reading the next one until it
+    /// isn't there (one GET when nothing's new). `check`: also read the pruned mark and the
+    /// snapshots (a few more requests), which a takeover needs and a follower does now and then.
+    /// An error means `rec` can't be brought forward (the entries it needs were pruned while it
+    /// lagged, or one doesn't apply): recover from a snapshot instead.
+    pub(crate) async fn follow(backend: &Arc<dyn Backend>, cfg: &LogConfig, rec: &mut Recovered, check: bool) -> Result<u64> {
+        let prefix = &cfg.prefix;
+        let from = rec.last;
+        if check {
+            rec.pruned = rec.pruned.max(read_pruned(&**backend, prefix).await?);
+            if rec.pruned > rec.last {
+                return Err(StoreError::internal(format!("the metadata log was pruned through entry {} while this copy was at {}", rec.pruned, rec.last)));
+            }
+        }
+        loop {
+            let seq = rec.last + 1;
+            match get_retry(&**backend, &wal_key(prefix, seq)).await? {
+                Some(bytes) => rec.apply(seq, &bytes)?,
+                None => break,
+            }
+        }
+        if check {
+            // Entries after the gap mean one went missing: never step over it.
+            // (The next one may have just been written; entries are written in order and only
+            // pruned below a snapshot, so anything else after `last` is a gap.)
+            let (after, _) = backend.list_page(&format!("{prefix}/wal/"), Some(&wal_key(prefix, rec.last)), 1).await?;
+            if let Some(l) = after.first().filter(|l| seq_of(&l.key) != Some(rec.last + 1)) {
+                return Err(StoreError::internal(format!("metadata log gap: entry {} is missing but {} is there", rec.last + 1, l.key)));
+            }
+            // Snapshots the writer made meanwhile (it verified each before it pruned anything).
+            let listed = crate::backend::list_all(&**backend, &format!("{prefix}/snap/")).await?;
+            let before = rec.base();
+            for s in listed.iter().filter_map(|l| seq_of(&l.key)).filter(|s| *s <= rec.last && !rec.snaps.1.contains(s)) {
+                rec.snaps.0.insert(s);
+            }
+            if rec.base() != before {
+                rec.log_bytes = 0;
+            }
+            rec.wal.retain(|s| *s > rec.pruned);
+        }
+        Ok(rec.last - from)
+    }
+
+    /// Take over as the log's writer from `rec`: claim the next entry (anything a previous
+    /// writer slipped in first is replayed, and from here on its commits fail), then start
+    /// committing.
+    pub(crate) async fn take_over(backend: Arc<dyn Backend>, cfg: LogConfig, mut rec: Recovered) -> Result<Arc<Self>> {
+        probe_create_only(&*backend, &cfg.prefix).await?;
+        let prefix = cfg.prefix.clone();
+        let mut seq = rec.last + 1;
         loop {
             let marker = encode(seq, "takeover", &cfg.node, &[]);
             if backend.put_create_only(&wal_key(&prefix, seq), Bytes::from(marker)).await? {
                 break;
             }
             let bytes = get_retry(&*backend, &wal_key(&prefix, seq)).await?.ok_or_else(|| StoreError::internal("log entry vanished"))?;
-            let entry = decode(&bytes)?;
-            if entry.seq != seq {
-                return Err(StoreError::internal(format!("log entry {seq} claims to be {}", entry.seq)));
-            }
-            Self::replay(&db, &entry).map_err(|e| StoreError::internal(format!("metadata log entry {seq} doesn't apply: {e}")))?;
-            all_wal.insert(seq);
+            rec.apply(seq, &bytes)?;
             seq += 1;
         }
-        all_wal.insert(seq);
+        rec.wal.insert(seq);
+        let db = rec.db.clone();
         db.migrate_to(schema::LATEST)?;
         db.record_changes()?;
-        info!(snapshot = base, replayed = seq - 1 - base, seq, "storage metadata open");
+        let base = rec.base();
+        info!(snapshot = base, seq, node = %cfg.node, "storage metadata open; this node writes the log");
 
         let log = Arc::new(Self {
             db,
@@ -371,18 +458,21 @@ impl MetaLog {
             durable: watch::channel(Durable::default()).0,
             kick: Notify::new(),
             stopping: AtomicBool::new(false),
+            hand_off: AtomicBool::new(false),
             force_snapshot: AtomicBool::new(false),
             snapshots: watch::channel(base).0,
             snapshot_failures: Default::default(),
-            snaps: Mutex::new((good, bad)),
-            wal: Mutex::new(all_wal),
-            stats: Mutex::new(LogStats { seq, pruned, last_snapshot_seq: base, ..Default::default() }),
+            snaps: Mutex::new(rec.snaps),
+            wal: Mutex::new(rec.wal),
+            stats: Mutex::new(LogStats { seq, pruned: rec.pruned, last_snapshot_seq: base, ..Default::default() }),
             cfg,
         });
         let watcher = log.clone();
+        let since_entries = seq - base;
+        let since_bytes = rec.log_bytes;
         tokio::spawn(async move {
             use futures::FutureExt;
-            let run = std::panic::AssertUnwindSafe(committer(watcher.clone(), seq + 1, seq - base, log_bytes));
+            let run = std::panic::AssertUnwindSafe(committer(watcher.clone(), seq + 1, since_entries, since_bytes));
             if run.catch_unwind().await.is_err() {
                 // Waiting writes get Unavailable, and reads stop, instead of hanging on a log
                 // nobody writes.
@@ -441,18 +531,25 @@ impl MetaLog {
     }
 
     /// Commit everything written so far and stop. Writes (and reads) after this fail.
-    pub(crate) async fn close(&self) {
+    /// `hand_off`: another node takes over next, so the last entry is a `handoff` one. True if
+    /// everything written was committed (false: the log was fenced or failed first).
+    pub(crate) async fn close(&self, hand_off: bool) -> bool {
+        self.hand_off.store(hand_off, Ordering::SeqCst);
         self.stopping.store(true, Ordering::SeqCst);
         self.kick.notify_one();
         let mut rx = self.durable.subscribe();
-        let _ = tokio::time::timeout(Duration::from_secs(60), async {
-            while rx.borrow_and_update().fenced.is_none() {
+        let closed = tokio::time::timeout(Duration::from_secs(60), async {
+            loop {
+                if let Some(reason) = rx.borrow_and_update().fenced.clone() {
+                    return reason == "closed";
+                }
                 if rx.changed().await.is_err() {
-                    break;
+                    return false;
                 }
             }
         })
         .await;
+        closed.unwrap_or(false)
     }
 
     /// Take a snapshot now and wait until it's uploaded and verified. Returns its entry.
@@ -743,6 +840,17 @@ async fn committer(log: Arc<MetaLog>, mut next_seq: u64, mut since_entries: u64,
         if log.stopping.load(Ordering::SeqCst) && !log.db.is_dirty() && copying.is_none() {
             if let Some(t) = snapshot_task.take() {
                 let _ = t.await;
+            }
+            if log.hand_off.load(Ordering::SeqCst) {
+                // The log's last word from this writer: the next one takes over after it.
+                match log.put_entry(next_seq, encode(next_seq, "handoff", &cfg.node, &[])).await {
+                    Ok(true) => log.stats.lock().unwrap().seq = next_seq,
+                    Ok(false) => {
+                        log.fence(format!("another node took over the metadata log at entry {next_seq}"));
+                        break;
+                    }
+                    Err(e) => warn!(error = %e, "writing the metadata log's handoff entry failed (the next writer takes over anyway)"),
+                }
             }
             log.fence("closed".into());
             break;
