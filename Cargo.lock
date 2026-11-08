@@ -7607,6 +7607,7 @@ dependencies = [
  "lambda_http",
  "object_store",
  "reqwest",
+ "roll-cluster",
  "rusqlite",
  "serde",
  "serde_json",

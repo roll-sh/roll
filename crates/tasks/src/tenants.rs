@@ -120,6 +120,13 @@ impl Cell {
         self.tenants.read().unwrap().values().cloned().collect()
     }
 
+    /// End every tenant's long polls and run waits (see [`Tasks::stop_waiting`]).
+    pub fn stop_waiting(&self) {
+        for rt in self.runtimes() {
+            rt.tasks.stop_waiting();
+        }
+    }
+
     /// Drain every tenant's deliveries.
     pub async fn shutdown(&self) {
         let rts = self.runtimes();

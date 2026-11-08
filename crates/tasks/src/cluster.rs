@@ -476,8 +476,9 @@ pub async fn run_node(listener: tokio::net::TcpListener, cfg: NodeConfig, mut st
         cell.shutdown().await;
         shared.set_role(Role::Stopping);
         *shared.api.write().unwrap() = None;
-        // New requests go to the next leader; let the ones under way finish (long polls get
-        // cut short: their writes, if any, fail as retryable).
+        // New requests go to the next leader; let the ones under way finish (long polls end
+        // with a retryable answer the proxy sends on).
+        cell.stop_waiting();
         let deadline = Instant::now() + Duration::from_secs(5);
         while shared.serving.load(Ordering::SeqCst) > 0 && Instant::now() < deadline {
             tokio::time::sleep(Duration::from_millis(10)).await;

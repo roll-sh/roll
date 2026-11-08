@@ -59,6 +59,7 @@ impl Tasks {
             if !out.is_empty() || now_ms() >= deadline {
                 return Ok(out);
             }
+            self.check_waiting()?;
             let left = (deadline - now_ms()).clamp(1, 250) as u64;
             tokio::select! {
                 _ = tokio::time::sleep(Duration::from_millis(left)) => {}

@@ -34,6 +34,7 @@ getrandom.workspace = true
 hmac.workspace = true
 humantime.workspace = true
 reqwest = { workspace = true, features = ["rustls", "stream", "http2"] }
+roll-cluster.workspace = true
 object_store.workspace = true
 rusqlite = { workspace = true, features = ["session", "backup"] }
 serde.workspace = true

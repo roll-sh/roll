@@ -318,6 +318,8 @@ pub struct Tasks {
     pub(crate) hints: Mutex<HashMap<String, Ms>>,
     pub(crate) inflight: Mutex<HashMap<String, crate::dispatch::Inflight>>,
     pub(crate) pull_wake: Notify,
+    /// Set when this engine's node stops serving it: long waits hand their requests back.
+    pub(crate) waits_cut: std::sync::atomic::AtomicBool,
     last_refresh: AtomicI64,
     last_flush: AtomicI64,
     /// Storage writes taken from the store, waiting for other usage to be recorded with.
@@ -385,6 +387,7 @@ impl Tasks {
             hints: Mutex::new(HashMap::new()),
             inflight: Mutex::new(HashMap::new()),
             pull_wake: Notify::new(),
+            waits_cut: Default::default(),
             last_refresh: AtomicI64::new(0),
             last_flush: AtomicI64::new(0),
             storage_writes: Default::default(),
@@ -396,6 +399,21 @@ impl Tasks {
 
     pub fn now(&self) -> Ms {
         now_ms()
+    }
+
+    /// This node is about to stop serving the engine (a handoff): long polls and run waits
+    /// that have nothing yet end at once with the retryable "stepped down" answer, so they're
+    /// sent again where the engine runs next instead of holding the handoff up.
+    pub fn stop_waiting(&self) {
+        self.waits_cut.store(true, Ordering::SeqCst);
+        self.pull_wake.notify_waiters();
+    }
+
+    pub(crate) fn check_waiting(&self) -> Result<()> {
+        match self.waits_cut.load(Ordering::SeqCst) {
+            true => Err(TaskError::Internal(crate::store::log::Unavailable("this node is handing the cell over".into()).into())),
+            false => Ok(()),
+        }
     }
 
     /// Change cached configuration after writing it to the store.

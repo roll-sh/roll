@@ -15,6 +15,7 @@ pub mod cost;
 pub mod dispatch;
 pub mod engine;
 pub mod expr;
+pub mod fleet;
 pub mod flow;
 pub mod ids;
 pub mod model;

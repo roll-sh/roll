@@ -147,7 +147,8 @@ pub struct Products<'a> {
     pub pg: Option<Arc<pg_proxy::Proxy<pg_control::control::ProxyRouter>>>,
     pub redis: Option<Arc<dyn redis_server::Directory>>,
     pub streams: Option<Arc<stream_broker::Broker>>,
-    pub tasks: Option<Arc<tasks::Tasks>>,
+    /// Every tasks request (they run on the cell's leader).
+    pub tasks: Option<axum::Router>,
     /// The S3 API (requests run on the metadata's owner).
     pub storage: Option<axum::Router>,
     pub nosql: Option<&'a crate::nosql::Nosql>,
@@ -456,7 +457,7 @@ impl HttpRoutes {
             dashboard: e.dashboard_upstream.as_deref().filter(|u| !u.is_empty()).map(Upstream::new).transpose()?,
             redis: p.redis.clone().map(|d| logged(redis_server::http::router(d))),
             kafka: p.streams.clone().map(|b| logged(stream_broker::http::router(b))),
-            tasks: p.tasks.clone().map(|t| logged(tasks::api::router(t))),
+            tasks: p.tasks.clone().map(logged),
             s3: p.storage.clone().map(logged),
             alternator: p.nosql.map(|n| logged(nosql_server::alternator::router(n.control.node.clone(), n.alternator_options()))),
             mq,
