@@ -4047,12 +4047,10 @@ fn parallel_workers(ctx: &ExecCtx) -> (usize, usize) {
     (if n == 0 { 0 } else { (n + 1).min(8) }, pool.max(n + 1))
 }
 
-/// The first condition of a scan's filter `f` (the first of an AND, else `f`), when it
-/// reads uncorrelated sub-selects (initplans; a scalar one's value, or `x [NOT] IN` one's
-/// rows: a hashed SubPlan's) through nothing that may skip one (columns, constants, calls,
-/// casts, NOT): each row's filter evaluates them, so the scan's first row runs them, once
-/// (`ExecCtx::subq_cache`), as PostgreSQL's first row reads their parameters or builds the
-/// SubPlan's hash table (or its Gather before its workers start).
+/// Whether the first condition can read its initplans before its row: a kernel call on
+/// columns, constants and one scalar initplan, or IN on a plain column. Other shapes stay
+/// serial: ANY skips its left expression over an empty right side, and row expressions
+/// can fail or have effects before a later initplan is reached.
 fn initplans_first(f: &Expr, ctx: &ExecCtx) -> bool {
     use crate::sql::expr::SubqueryKind;
     if !ctx.outer.borrow().is_empty() {
@@ -4065,23 +4063,39 @@ fn initplans_first(f: &Expr, ctx: &ExecCtx) -> bool {
         },
         e => e,
     };
-    let (mut subs, mut ok) = (0, true);
-    first.walk(&mut |x| match x {
-        Expr::Subquery(s) if s.params.is_empty() && s.func.is_none() => match s.kind {
-            SubqueryKind::Scalar => subs += 1,
-            SubqueryKind::Any if s.left.len() == 1 && s.ops.len() == 1 && s.test_op.is_none() => subs += 1,
-            _ => ok = false,
-        },
-        Expr::Col(..)
-        | Expr::Const(..)
-        | Expr::Call(..)
-        | Expr::Cast(..)
-        | Expr::Relabel(..)
-        | Expr::SqlSyntax(..)
-        | Expr::Not(..) => {}
-        _ => ok = false,
-    });
-    ok && subs > 0
+    fn bare(mut e: &Expr) -> &Expr {
+        while let Expr::Relabel(x, _) | Expr::SqlSyntax(x) = e {
+            e = x;
+        }
+        e
+    }
+    let mut first = bare(first);
+    while let Expr::Not(x) = first {
+        first = bare(x);
+    }
+    let scalar = |e: &Expr| matches!(bare(e), Expr::Subquery(s)
+        if s.params.is_empty() && s.func.is_none() && s.kind == SubqueryKind::Scalar);
+    match first {
+        Expr::Call(d, args, _) if d.volatility == 'i' && !d.spread => {
+            if args.iter().filter(|a| scalar(a)).count() != 1
+                || !args.iter().all(|a| scalar(a) || matches!(bare(a), Expr::Col(..) | Expr::Const(..)))
+            {
+                return false;
+            }
+            let placeholder = first.clone().transform(&mut |e| Ok(match e {
+                Expr::Subquery(s) => Expr::Const(Value::Null, s.ty.clone()),
+                e => e,
+            }));
+            placeholder.ok().is_some_and(|e| super::kernel::compile(&e).is_some())
+        }
+        Expr::Subquery(s) => s.params.is_empty()
+            && s.func.is_none()
+            && s.kind == SubqueryKind::Any
+            && matches!(&s.left[..], [e] if matches!(bare(e), Expr::Col(..)))
+            && matches!(&s.ops[..], [op] if op.name == "=" && op.strict && op.volatility == 'i')
+            && s.test_op.is_none(),
+        _ => false,
+    }
 }
 
 /// An IN sub-select's rows put in as a list of at most this many values (more: left as
