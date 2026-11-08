@@ -4003,6 +4003,51 @@ fn parallel_workers(ctx: &ExecCtx) -> (usize, usize) {
     (if n == 0 { 0 } else { (n + 1).min(8) }, pool.max(n + 1))
 }
 
+/// The first condition of a scan's filter `f` (the first of an AND, else `f`), when it
+/// reads uncorrelated scalar sub-selects (initplans) through nothing that may skip one
+/// (columns, constants, calls, casts): each row's filter evaluates them, so the scan's
+/// first row runs them, once (`ExecCtx::subq_cache`), as PostgreSQL's first row reads
+/// their parameters (or its Gather before its workers start).
+fn initplans_first(f: &Expr, ctx: &ExecCtx) -> bool {
+    use crate::sql::expr::SubqueryKind;
+    if !ctx.outer.borrow().is_empty() {
+        return false;
+    }
+    let first = match f {
+        Expr::And(v) => match v.first() {
+            Some(e) => e,
+            None => return false,
+        },
+        e => e,
+    };
+    let (mut subs, mut ok) = (0, true);
+    first.walk(&mut |x| match x {
+        Expr::Subquery(s) if s.kind == SubqueryKind::Scalar && s.params.is_empty() && s.func.is_none() => subs += 1,
+        Expr::Col(..) | Expr::Const(..) | Expr::Call(..) | Expr::Cast(..) | Expr::Relabel(..) => {}
+        _ => ok = false,
+    });
+    ok && subs > 0
+}
+
+/// `f` with the initplans of its first condition (`initplans_first`) run and put in as
+/// their values: for a scan that has a row (whose filter would run them at it).
+fn initplans_put_in(f: &Expr, ctx: &ExecCtx) -> Result<Expr> {
+    let put = |e: Expr| {
+        e.transform(&mut |x| match x {
+            Expr::Subquery(s) if s.params.is_empty() => Ok(Expr::Const(ctx.eval_subquery(&s, &[])?, s.ty.clone())),
+            x => Ok(x),
+        })
+    };
+    Ok(match f.clone() {
+        Expr::And(mut v) => {
+            let first = put(v.remove(0))?;
+            v.insert(0, first);
+            Expr::And(v)
+        }
+        e => put(e)?,
+    })
+}
+
 /// A parallel scan's chunk boundaries in [start, end): `split_keys`' cuts moved onto the
 /// keys there are (ascending, each once). A cut made of interpolated bytes can extend a
 /// key: the store bounds its sources by keys with their versions appended, the transaction
@@ -4103,8 +4148,11 @@ impl ScanNode {
         // it, probe joins, compute values. Where it would only decode rows for this thread to
         // process, workers save no time and cost CPU (BENCH.md, round 21, agent 102: a GROUP
         // BY over 600,000 rows, 347 ms in parallel against 329 ms, with 41% more CPU).
-        let filter = p.filter.as_ref().and_then(super::kernel::compile);
-        if filter.is_none() && spec.is_none() && stages.is_empty() && computed.extra.is_empty() && computed.topk.is_none() {
+        let mut filter = p.filter.as_ref().and_then(super::kernel::compile);
+        // (A filter whose first condition reads initplans: compiled with their values once
+        // the scan has a row, `initplans_put_in`.)
+        let initplans = filter.is_none() && p.filter.as_ref().is_some_and(|f| initplans_first(f, ctx));
+        if filter.is_none() && !initplans && spec.is_none() && stages.is_empty() && computed.extra.is_empty() && computed.topk.is_none() {
             return Ok(None);
         }
         // A modelled heap whose rows aren't all stored in heap order (some went into an
@@ -4191,6 +4239,12 @@ impl ScanNode {
         };
         if scans.is_empty() {
             return Ok(None);
+        }
+        if initplans && let Some(f) = &p.filter {
+            filter = super::kernel::compile(&initplans_put_in(f, ctx)?);
+            if filter.is_none() && spec.is_none() && stages.is_empty() && computed.extra.is_empty() && computed.topk.is_none() {
+                return Ok(None);
+            }
         }
         // (The columns decoded for a row whose values come from its stored bytes.)
         let need_raw = (!computed.raw.is_empty()).then(|| {
