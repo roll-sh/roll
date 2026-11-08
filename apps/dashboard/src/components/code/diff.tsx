@@ -58,6 +58,23 @@ const rowCls: Record<Line["kind"], string> = {
 const sign: Record<Line["kind"], string> = { hunk: "", add: "+", del: "−", ctx: "", note: "" };
 const signCls = (k: Line["kind"]) => (k === "add" ? "text-ok" : k === "del" ? "text-danger" : "");
 const num = "w-10 select-none border-r border-line px-2 text-right align-top text-[11px] text-subtle tabular-nums";
+
+/** The unified table's widths from its lines alone: the number columns' and the whole table's. */
+function unifiedWidth(lines: readonly Line[]): { num: string; table: string } {
+  let chars = 0;
+  let top = 0;
+  for (const l of lines) {
+    // Tabs to the browser's 8 columns; a wide character counts once (close enough to not shift).
+    let w = 0;
+    for (let i = 0; i < l.text.length; i++) w = l.text.charCodeAt(i) === 9 ? w + 8 - (w % 8) : w + 1;
+    if (w > chars) chars = w;
+    top = Math.max(top, l.old ?? 0, l.new ?? 0);
+  }
+  // 11 px tabular digits (~6.7 px) and the cell's 16 px of padding; never under its 2.5 rem.
+  const num = Math.max(40, Math.ceil(String(top).length * 6.7) + 17);
+  // Two numbers, the sign (1 rem) and the text cell's 1.25 rem of padding.
+  return { num: `${num}px`, table: `calc(${2 * num + 36}px + ${chars}ch)` };
+}
 const selected = "bg-accent/10";
 
 interface FileCtx {
@@ -201,9 +218,18 @@ function Unified({ ctx, placement }: { ctx: FileCtx; placement: Placement | null
   );
   const win = useRowWindow(forced);
   const n = ctx.lines.length;
+  const wide = useMemo(() => unifiedWidth(ctx.lines), [ctx.lines]);
   return (
     <div ref={win.frame} className="overflow-x-auto">
-      <table className="w-full border-collapse font-mono text-[12px] leading-5">
+      {/* As wide as its widest line and numbers from the start: rows render as they near the
+          screen, and a long line or a 5-digit number mounting widened the table under the reader. */}
+      <table className="w-full border-collapse font-mono text-[12px] leading-5" style={{ minWidth: wide.table }}>
+        <colgroup>
+          <col style={{ width: wide.num }} />
+          <col style={{ width: wide.num }} />
+          <col className="w-4" />
+          <col />
+        </colgroup>
         {Array.from({ length: Math.ceil(n / BLOCK) }, (_, b) => {
           const start = b * BLOCK;
           const end = Math.min(start + BLOCK, n);
