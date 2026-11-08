@@ -1,5 +1,3 @@
-"use client";
-
 /**
  * Find in a diff, T3's way (its `CodeViewSearch` in the @pierre/diffs patch, MIT): ⌘F while the
  * diff has focus opens a small bar over it; matches come from the parsed lines (`lib/diff-search`),
