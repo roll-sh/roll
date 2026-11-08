@@ -1123,9 +1123,9 @@ impl LockManager {
         let mut it = v.into_iter().peekable();
         while let Some((p, t)) = it.next() {
             let mut g = self.lock_part(p);
-            f(&mut *g, t);
+            f(&mut g, t);
             while let Some((_, t)) = it.next_if(|(q, _)| *q == p) {
-                f(&mut *g, t);
+                f(&mut g, t);
             }
         }
     }
@@ -2752,6 +2752,12 @@ mod tests {
                 let mut s = seed ^ 0xabc;
                 while !stop.load(Ordering::Relaxed) {
                     let snap = m.snapshot();
+                    // (A backend waits for one lock at a time.)
+                    let mut waiting: Vec<Option<i32>> = snap.iter().filter(|l| !l.granted).map(|l| l.pid).collect();
+                    let n = waiting.len();
+                    waiting.sort();
+                    waiting.dedup();
+                    assert_eq!(waiting.len(), n, "pg_locks: a backend waiting twice: {snap:?}");
                     for (i, a) in snap.iter().enumerate() {
                         for b in snap[i + 1..].iter().filter(|b| b.tag == a.tag) {
                             if a.granted && b.granted && a.pid != b.pid {
