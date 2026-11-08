@@ -120,7 +120,9 @@ A database looks like a healthy single-datacenter cluster:
 
 A **node** (`nosql_server::Node`) serves many databases. A connection is routed to a database by:
 
-1. **TLS SNI**: `<db>.<domain>` (hosted endpoints always use TLS on 9042).
+1. **TLS SNI**: `<db>.<domain>` (hosted endpoints always use TLS on 9042). On roll cloud the
+   edge ends TLS and passes the name on: `<db>.nosql.us-east-1.roll.sh:9042`, and Alternator on
+   `https://<db>.nosql.us-east-1.roll.sh` (docs/cloud/README.md, "The edge in rolld").
 2. **The SASL PLAIN user name** `role@db`. The role inside the database is the part before `@`.
 3. **Single mode**: one default database, used by the Docker image and `rolld --nosql-single`.
    Auth defaults to `AllowAllAuthenticator`, as in the reference images.
