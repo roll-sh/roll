@@ -1,14 +1,42 @@
 //! Real S3 tools in Docker against an in-process server: the AWS CLI (also with SSE-C), rclone,
 //! the MinIO client and s3cmd (SigV2). Skipped when Docker isn't available, unless
 //! `ROLL_COMPAT_REQUIRED=1`. Containers run one at a time, on the host network.
+//!
+//! The server is three storage nodes (docs/storage/architecture.md, "Many nodes"), and every tool
+//! talks to one that doesn't own the metadata, so each request is forwarded to the owner; the AWS
+//! CLI also uploads across a planned handoff.
 
 mod common;
 #[path = "common/samlkit.rs"]
 mod samlkit;
 
+use common::fleet::{Fleet, Kind};
 use common::*;
 use std::path::Path;
 use std::process::Command;
+
+/// The nodes, and a test server view of one that doesn't own the metadata.
+struct Through {
+    t: TestServer,
+    fleet: Fleet,
+}
+
+impl std::ops::Deref for Through {
+    type Target = TestServer;
+    fn deref(&self) -> &TestServer {
+        &self.t
+    }
+}
+
+async fn start() -> Through {
+    start_with(|_| {}).await
+}
+
+async fn start_with(tweak: impl Fn(&mut s3_server::Config) + Send + Sync + 'static) -> Through {
+    let fleet = Fleet::start_with(Kind::Memory, "tools", 3, tweak, None).await.expect("the memory backend is always there");
+    let t = fleet.server(fleet.non_owner(&[]));
+    Through { t, fleet }
+}
 
 fn docker_ok() -> bool {
     let ok = Command::new("docker").arg("info").output().is_ok_and(|o| o.status.success());
@@ -103,16 +131,31 @@ async fn aws_cli() {
     fixtures(dir.path());
     let endpoint = t.endpoint.clone();
     let path = dir.path().to_path_buf();
-    let presigned = blocking(move || {
-        let env = [("AWS_ACCESS_KEY_ID", ACCESS.to_string()), ("AWS_SECRET_ACCESS_KEY", SECRET.to_string()), ("AWS_DEFAULT_REGION", REGION.to_string())];
-        let aws = |args: &[&str]| {
+    let aws_at = |endpoint: String, path: std::path::PathBuf| {
+        move |args: &[&str]| {
+            let env = [("AWS_ACCESS_KEY_ID", ACCESS.to_string()), ("AWS_SECRET_ACCESS_KEY", SECRET.to_string()), ("AWS_DEFAULT_REGION", REGION.to_string())];
             let mut all = vec!["--endpoint-url", endpoint.as_str()];
             all.extend_from_slice(args);
             run("amazon/aws-cli", &env, &path, &all)
-        };
+        }
+    };
+    let aws = aws_at(endpoint.clone(), path.clone());
+    blocking(move || {
         aws(&["s3", "mb", "s3://awscli"]);
         aws(&["s3", "cp", "/data/small.txt", "s3://awscli/small.txt"]);
-        aws(&["s3", "cp", "/data/big.bin", "s3://awscli/big.bin"]);
+    })
+    .await;
+    // A multipart upload while the metadata's owner is drained (a planned handoff).
+    let aws = aws_at(endpoint.clone(), path.clone());
+    let upload = blocking(move || aws(&["s3", "cp", "/data/big.bin", "s3://awscli/big.bin"]));
+    let drain = async {
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+        t.fleet.drain_owner().await
+    };
+    let (_, (old, new)) = tokio::join!(upload, drain);
+    assert_ne!(old, new);
+    let aws = aws_at(endpoint.clone(), path.clone());
+    let presigned = blocking(move || {
         aws(&["s3", "sync", "/data/tree", "s3://awscli/tree"]);
         let ls = aws(&["s3", "ls", "--recursive", "s3://awscli/"]);
         for k in ["small.txt", "big.bin", "tree/a.txt", "tree/b with space.txt", "tree/nested/c.json", "tree/nested/deeper/d+e.txt"] {
