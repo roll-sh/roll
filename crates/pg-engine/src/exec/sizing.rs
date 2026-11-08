@@ -3602,14 +3602,21 @@ pub fn gist_kill(table: u32, index: u32, version: usize, entries: &[u32], ctx: &
 }
 
 /// A modelled point_ops or range_ops GiST index's model, for a scan to search as it goes
-/// (None: the index isn't modelled).
+/// (None: the index isn't modelled, or is another kind: btree_gist's and two-column models
+/// give sizes only).
 pub fn gist_model_of(t: &Arc<Table>, index: u32, ctx: &ExecCtx) -> Result<Option<GistModel>> {
     let indexes = crate::sql::binder::bound_indexes(t, ctx)?;
-    let Some(bix) = indexes.iter().find(|b| b.index.oid == index) else {
+    let Some(bix) = indexes.iter().find(|b| b.index.oid == index && gist_searched(b)) else {
         return Ok(None);
     };
     let model = gist_model_shared(t, bix, &indexes, ctx)?;
     Ok(model.is_some().then_some(model))
+}
+
+/// A point_ops or range_ops index: its model is also what scans search and lock (pages a
+/// row goes to); other modelled GiST indexes' models give their sizes only.
+fn gist_searched(bix: &BoundIndex) -> bool {
+    matches!(&bix.keys[..], [k] if matches!(k.ty(), DataType::Point | DataType::Range(_)))
 }
 
 /// The leaf page of GiST index `bix` a row with these index values goes to (None: not
@@ -3621,6 +3628,9 @@ pub fn gist_insert_page(
     vals: &[Value],
     ctx: &ExecCtx,
 ) -> Result<Option<u32>> {
+    if !gist_searched(bix) {
+        return Ok(None);
+    }
     let Some(key) = gist_entry_key(bix, vals.first())? else {
         return Ok(None);
     };
