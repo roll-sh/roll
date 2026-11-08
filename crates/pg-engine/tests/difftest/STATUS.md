@@ -464,9 +464,11 @@ all of it (round 9's seeds too with `GUARD_SEEDS`).
 
 After each wave of pushes (every 3-4 hours, or 4+ code commits) the full suite runs on origin's
 head in one heavy job (HANDOFF, machine rules): the guard above, debug and release crate tests,
-`crash_random` seeds 1-30 x 4 rounds (release), full regress on a private reference (0 units
+`crash_random` seeds 1-30 x 4 rounds (release) and, since 710c9d3e1, the power stage (`--features powerloss`: the
+`power_cut` tests, seeds 1-30 x 4 with `CRASH_POWER=1`, with and without `CRASH_ASYNC=1`), full regress on a private reference (0 units
 changed against `tests/regress/results.tsv`), isolation, pg_dump_tap. A failure is bisected to
-its commit and sent to the coordinator. `tools/verification-train.sh` is the suite's heavy job
+its commit and sent to the coordinator. The guard covers rounds 6-10 since train 3 (its default seeds, then
+`GUARD_SEEDS=9000-9149,10000-10149`). `tools/verification-train.sh` is the suite's heavy job
 (started with `tools/heavy-bg.sh`; it checks out origin's head when its slot comes, and leaves the
 checkout detached there); its header names the containers and ports it needs.
 
@@ -474,6 +476,7 @@ checkout detached there); its header names the containers and ports it needs.
 |---|---|---|---|---|---|---|---|
 | 1, 2026-11-07 | `fe7b0023c` (as `c59b15238`: + docs, tools) | 0 new (above) | release and debug pass; goldens and clippy (18 warnings, as before) also on this head, which settles a39990c5's skipped post-rebase check | 1-30 x 4 clean | 51,148 / 51,150, 0 changed | 121 / 122 specs, 1,647 / 1,648 | 14,817 / 14,817 |
 | 2, 2026-11-07 | `bf887b455`: agent 163's index builds (639a9be65, 25c0056b), push.sh (dcba895cc), agent 170's fast hasher and kept records (f75a60696, de1d7b3f6), agent 168's crash harness, 171's custom-plan costs, 165's OLTP round 6, 149's scan cost batches 3-4, catalog round 10 | rounds 6-9 against `fe7b0023c`: 0 new, 50 gone (engine_error 41 -> 3) | release and debug pass; clippy 18 warnings (as before) | 1-30 x 4 clean (agent 168's harness; `CRASH_POWER` not on the branch yet) | 51,148 / 51,150, 0 changed (run again after the idle timer had stopped the reference) | 121 / 122, 1,647 / 1,648 | 14,817 / 14,817 |
+| 3, 2026-11-07/08 (agent 184) | `2192a1010`: agent 175's bulk writes batch 2 (126464e98), 172's postgres_fdw round 8 (8500c0bb9), 176's index access round 7 (3dcafdf8e, e5f0da9ac) | rounds 6-10 against `bf887b455`: 0 new, 0 gone (117,080 statements) | release pass; debug: logical_apply `two_phase` panicked once at the debug-only cost check in `explain.rs` `total_and_gathers` ("serial bound": `SELECT * FROM t ORDER BY id` while the apply worker commits a 2,991-row prepared transaction), then passed 6 runs of 6: a flake of the debug cost checks' family (as `prepared_stream_without_two_phase_cleans_up`'s), routed to the planner; clippy 18 warnings | 1-30 x 4 clean (the power stage arrived after: 710c9d3e1) | 51,148 / 51,150, 0 changed (release: 6 minutes) | 121 / 122, 1,647 / 1,648 | 14,817 / 14,817 (run again: the first run's src-repo copy had no src/bin/pg_dump) |
 
 Round 10's seeds on `bf887b455`: wrong_rows 309, plan_variance 2, missing_error 4, wrong_error 1,
 eval_error 25, error_detail 13: nothing new against `c59b15238`, 56 lines gone (the 49

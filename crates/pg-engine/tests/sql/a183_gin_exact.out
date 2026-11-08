@@ -1,0 +1,294 @@
+> CREATE TABLE ge (id int PRIMARY KEY, tags int[], tsv tsvector)
+-- CREATE TABLE
+
+> INSERT INTO ge SELECT g, ARRAY[g % 10, g % 7, 100 + g % 3],
+>   to_tsvector('simple', 'w' || (g % 50) || ' x' || (g % 9) || ' common') FROM generate_series(1, 3000) g
+-- INSERT 0 3000
+
+> CREATE INDEX ge_tags ON ge USING gin (tags)
+-- CREATE INDEX
+
+> CREATE INDEX ge_tsv ON ge USING gin (tsv)
+-- CREATE INDEX
+
+> ANALYZE ge
+-- ANALYZE
+
+> SET enable_seqscan = off
+-- SET
+
+> EXPLAIN (COSTS OFF) SELECT count(*) FROM ge WHERE tsv @@ to_tsquery('simple', 'x3 & common')
+QUERY PLAN:text
+Aggregate
+  ->  Bitmap Heap Scan on ge
+        Recheck Cond: (tsv @@ '''x3'' & ''common'''::tsquery)
+        ->  Bitmap Index Scan on ge_tsv
+              Index Cond: (tsv @@ '''x3'' & ''common'''::tsquery)
+-- EXPLAIN
+
+> SELECT count(*) FROM ge WHERE tsv @@ to_tsquery('simple', 'x3 & common')
+count:int8
+334
+-- SELECT 1
+
+> SELECT count(*) FROM ge WHERE tsv @@ to_tsquery('simple', 'x3 | w7')
+count:int8
+387
+-- SELECT 1
+
+> SELECT count(*) FROM ge WHERE tsv @@ to_tsquery('simple', 'w1:*')
+count:int8
+660
+-- SELECT 1
+
+> SELECT count(*) FROM ge WHERE tsv @@ to_tsquery('simple', 'x3 & !w3')
+count:int8
+327
+-- SELECT 1
+
+> SELECT count(*) FROM ge WHERE tsv @@ to_tsquery('simple', 'x3:A')
+count:int8
+0
+-- SELECT 1
+
+> SELECT count(*) FROM ge WHERE tsv @@ to_tsquery('simple', 'x3 <-> common')
+count:int8
+334
+-- SELECT 1
+
+> SELECT count(*) FROM ge WHERE tags @> ARRAY[3]
+count:int8
+686
+-- SELECT 1
+
+> SELECT count(*) FROM ge WHERE tags @> ARRAY[3, 4]
+count:int8
+86
+-- SELECT 1
+
+> SELECT count(*) FROM ge WHERE tags && ARRAY[3, 101]
+count:int8
+1457
+-- SELECT 1
+
+> SELECT count(*) FROM ge WHERE tags @> ARRAY[3, NULL]
+count:int8
+0
+-- SELECT 1
+
+> SELECT count(*) FROM ge WHERE tags && ARRAY[3, NULL]
+count:int8
+686
+-- SELECT 1
+
+> SELECT count(*) FROM ge WHERE tags @> ARRAY[3] AND tsv @@ to_tsquery('simple', 'x3')
+count:int8
+77
+-- SELECT 1
+
+> SELECT count(*) FROM ge WHERE tags @> ARRAY[3] OR tsv @@ to_tsquery('simple', 'x3')
+count:int8
+943
+-- SELECT 1
+
+> SELECT count(*), sum(id) FROM ge WHERE tsv @@ to_tsquery('simple', 'x3 & common')
+count:int8 | sum:int8
+334 | 501501
+-- SELECT 1
+
+> SELECT count(*) FROM ge WHERE tsv @@ to_tsquery('simple', 'x3 & common') AND id > 1500
+count:int8
+167
+-- SELECT 1
+
+> SELECT id FROM ge WHERE tags @> ARRAY[3, 4] ORDER BY id LIMIT 5
+id:int4
+24
+53
+94
+123
+164
+-- SELECT 5
+
+> BEGIN
+-- BEGIN
+
+> DELETE FROM ge WHERE id % 9 = 3 AND id < 1000
+-- DELETE 111
+
+> SELECT count(*) FROM ge WHERE tsv @@ to_tsquery('simple', 'x3 & common')
+count:int8
+223
+-- SELECT 1
+
+> INSERT INTO ge VALUES (5000, ARRAY[3], to_tsvector('simple', 'x3 common'))
+-- INSERT 0 1
+
+> SELECT count(*) FROM ge WHERE tsv @@ to_tsquery('simple', 'x3 & common')
+count:int8
+224
+-- SELECT 1
+
+> SELECT count(*) FROM ge WHERE tags @> ARRAY[3]
+count:int8
+661
+-- SELECT 1
+
+> ROLLBACK
+-- ROLLBACK
+
+> SELECT count(*) FROM ge WHERE tsv @@ to_tsquery('simple', 'x3 & common')
+count:int8
+334
+-- SELECT 1
+
+> SELECT count(*) FROM ge WHERE tags @> ARRAY[3]
+count:int8
+686
+-- SELECT 1
+
+> UPDATE ge SET tsv = to_tsvector('simple', 'other'), tags = ARRAY[0] WHERE id <= 30
+-- UPDATE 30
+
+> SELECT count(*) FROM ge WHERE tsv @@ to_tsquery('simple', 'x3 & common')
+count:int8
+330
+-- SELECT 1
+
+> SELECT count(*) FROM ge WHERE tags @> ARRAY[3]
+count:int8
+680
+-- SELECT 1
+
+> DELETE FROM ge WHERE id BETWEEN 31 AND 60
+-- DELETE 30
+
+> SELECT count(*) FROM ge WHERE tsv @@ to_tsquery('simple', 'x3 & common')
+count:int8
+327
+-- SELECT 1
+
+> SELECT count(*) FROM ge WHERE tags && ARRAY[3, 101]
+count:int8
+1428
+-- SELECT 1
+
+> INSERT INTO ge VALUES (6000, ARRAY[3, 4], to_tsvector('simple', 'x3 common'))
+-- INSERT 0 1
+
+> SELECT count(*) FROM ge WHERE tsv @@ to_tsquery('simple', 'x3 & common')
+count:int8
+328
+-- SELECT 1
+
+> SELECT count(*) FROM ge WHERE tags @> ARRAY[3, 4]
+count:int8
+85
+-- SELECT 1
+
+> CREATE TABLE gj (id int, j jsonb)
+-- CREATE TABLE
+
+> INSERT INTO gj SELECT g, CASE g % 5
+>     WHEN 0 THEN jsonb_build_object('k' || (g % 7), 1, 'n', jsonb_build_object('deep' || (g % 3), true))
+>     WHEN 1 THEN jsonb_build_array('k' || (g % 7), 'x', jsonb_build_object('k1', 1))
+>     WHEN 2 THEN to_jsonb('k' || (g % 7))
+>     WHEN 3 THEN jsonb_build_object('a', jsonb_build_array('k1', 'k2'))
+>     ELSE NULL END FROM generate_series(1, 2000) g
+-- INSERT 0 2000
+
+> CREATE INDEX gj_j ON gj USING gin (j)
+-- CREATE INDEX
+
+> ANALYZE gj
+-- ANALYZE
+
+> EXPLAIN (COSTS OFF) SELECT count(*) FROM gj WHERE j ? 'k1'
+QUERY PLAN:text
+Aggregate
+  ->  Bitmap Heap Scan on gj
+        Recheck Cond: (j ? 'k1'::text)
+        ->  Bitmap Index Scan on gj_j
+              Index Cond: (j ? 'k1'::text)
+-- EXPLAIN
+
+> SELECT count(*) FROM gj WHERE j ? 'k1'
+count:int8
+172
+-- SELECT 1
+
+> SELECT count(*) FROM gj WHERE j ? 'deep1'
+count:int8
+0
+-- SELECT 1
+
+> SELECT count(*) FROM gj WHERE j ? 'x'
+count:int8
+400
+-- SELECT 1
+
+> SELECT count(*) FROM gj WHERE j ?| ARRAY['k1', 'k2']
+count:int8
+344
+-- SELECT 1
+
+> SELECT count(*) FROM gj WHERE j ?& ARRAY['k1', 'x']
+count:int8
+58
+-- SELECT 1
+
+> SELECT count(*) FROM gj WHERE j ?| ARRAY['k1', NULL]
+count:int8
+172
+-- SELECT 1
+
+> SELECT count(*) FROM gj WHERE j ?& ARRAY[]::text[]
+count:int8
+1600
+-- SELECT 1
+
+> SELECT count(*) FROM gj WHERE j @> '{"n": {"deep1": true}}'
+count:int8
+133
+-- SELECT 1
+
+> UPDATE gj SET j = '{"k1": 0}' WHERE id <= 20
+-- UPDATE 20
+
+> SELECT count(*) FROM gj WHERE j ? 'k1'
+count:int8
+190
+-- SELECT 1
+
+> CREATE TABLE gp (id int, tsv tsvector)
+-- CREATE TABLE
+
+> INSERT INTO gp SELECT g, to_tsvector('simple', 'x' || (g % 9) || ' common') FROM generate_series(1, 2000) g
+-- INSERT 0 2000
+
+> CREATE INDEX gp_tsv ON gp USING gin (tsv) WHERE id > 1000
+-- CREATE INDEX
+
+> ANALYZE gp
+-- ANALYZE
+
+> EXPLAIN (COSTS OFF) SELECT count(*) FROM gp WHERE tsv @@ to_tsquery('simple', 'x3 & common') AND id > 1000
+QUERY PLAN:text
+Aggregate
+  ->  Bitmap Heap Scan on gp
+        Recheck Cond: ((tsv @@ '''x3'' & ''common'''::tsquery) AND (id > 1000))
+        ->  Bitmap Index Scan on gp_tsv
+              Index Cond: (tsv @@ '''x3'' & ''common'''::tsquery)
+-- EXPLAIN
+
+> SELECT count(*) FROM gp WHERE tsv @@ to_tsquery('simple', 'x3 & common') AND id > 1000
+count:int8
+111
+-- SELECT 1
+
+> RESET enable_seqscan
+-- RESET
+
+> DROP TABLE ge, gj, gp
+-- DROP TABLE
+

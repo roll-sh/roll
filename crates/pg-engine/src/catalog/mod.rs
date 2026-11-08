@@ -2189,6 +2189,8 @@ struct Lookups {
     user_types: std::sync::OnceLock<HashMap<u32, (u32, String, bool)>>,
     /// Partitions pending detach: (parent, partition).
     detach_pending: std::sync::OnceLock<Vec<(u32, u32)>>,
+    /// `renamed_toasts`'s answer.
+    renamed_toasts: std::sync::OnceLock<Vec<(String, u32)>>,
 }
 
 impl Clone for Lookups {
@@ -4009,6 +4011,24 @@ impl Catalog {
     /// `Arc`): its lookups may keep hashes.
     pub fn freeze(&mut self) {
         self.lookups.frozen = true;
+    }
+
+    /// The TOAST tables and TOAST indexes renamed (under allow_system_table_mods), which the
+    /// name index doesn't hold: (name, oid).
+    pub fn renamed_toasts(&self) -> Vec<(String, u32)> {
+        let scan = || {
+            let mut out = Vec::new();
+            for (_, d) in self.toasted_dirs() {
+                let Some(e) = d.extra.as_deref() else { continue };
+                out.extend(e.toast_relname.clone().map(|n| (n, d.toast)));
+                out.extend(e.toast_indname.clone().map(|n| (n, d.toast + 1)));
+            }
+            out
+        };
+        match self.lookups.frozen {
+            true => self.lookups.renamed_toasts.get_or_init(scan).clone(),
+            false => scan(),
+        }
     }
 
     /// The partitions pending detach (DETACH PARTITION ... CONCURRENTLY's first transaction

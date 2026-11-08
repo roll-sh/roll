@@ -1166,7 +1166,7 @@ pub fn exclusion_conflict(
                 })
                 .collect();
             match super::search::candidates(t, bix, &conds, None, ctx)? {
-                Some(super::search::Found::Keys(dkeys)) => {
+                Some(super::search::Found::Keys(dkeys) | super::search::Found::Exact(dkeys)) => {
                     let mut rows = Vec::with_capacity(dkeys.len());
                     for dkey in dkeys {
                         if let Some((_, Some(bytes))) = ctx.txn.borrow().get_latest(&dkey)? {

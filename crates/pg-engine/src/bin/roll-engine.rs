@@ -138,9 +138,8 @@ const MODE_SETTING: &str = "roll.engine_mode";
 
 /// The server's profile (`pg_engine::mode`): the mode's, from --mode, else `-c
 /// roll.engine_mode`, else postgresql.auto.conf's, else efficient; then the explicit size and
-/// idle flags in place of its parts. A mode given by --mode is also set as the custom
-/// parameter, so `SHOW roll.engine_mode` reads it.
-fn profile(a: &mut Args) -> anyhow::Result<Profile> {
+/// idle flags in place of its parts.
+fn profile(a: &Args) -> anyhow::Result<Profile> {
     let parse = |v: &str, from: &str| {
         Mode::parse(v).ok_or_else(|| anyhow::anyhow!("invalid {MODE_SETTING} \"{v}\" ({from}): efficient or performance"))
     };
@@ -148,10 +147,6 @@ fn profile(a: &mut Args) -> anyhow::Result<Profile> {
     let argv = argv.map(|(_, v)| parse(v, "command line")).transpose()?;
     let mode = match (a.mode, argv) {
         (Some(m), Some(c)) if m != c => anyhow::bail!("--mode {} and -c {MODE_SETTING}={} disagree", m.name(), c.name()),
-        (Some(m), None) => {
-            a.settings.push((MODE_SETTING.into(), m.name().into()));
-            m
-        }
         (m, c) => match m.or(c) {
             Some(m) => m,
             None => {
@@ -250,8 +245,8 @@ fn main() -> anyhow::Result<()> {
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn".into()),
         )
         .init();
-    let mut a = Args::parse();
-    let profile = profile(&mut a)?;
+    let a = Args::parse();
+    let profile = profile(&a)?;
     if profile.idle_trim {
         idle::trim_idle_sessions();
     }
@@ -443,7 +438,8 @@ mod idle {
     const PR_SET_THP_DISABLE: c_int = 41;
     const MADV_DONTNEED: c_int = 4;
 
-    /// First thing in `main`, both modes: pages faulted before the prctl keep their huge pages.
+    /// First thing in `main`, both modes: pages faulted before the prctl keep their huge pages
+    /// (after the arguments were parsed, 100 idle sessions took 32-34 MB; first thing, 31).
     pub fn setup() {
         // SAFETY: prctl with PR_SET_THP_DISABLE only sets a flag of this process.
         unsafe { prctl(PR_SET_THP_DISABLE, 1 as c_ulong, 0 as c_ulong, 0 as c_ulong, 0 as c_ulong) };
