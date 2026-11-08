@@ -4032,6 +4032,12 @@ impl ScanNode {
         ctx: &ExecCtx,
     ) -> Result<Option<super::parscan::ParScan>> {
         use super::parscan::{Decode, ParScan, split_keys};
+        // (A scan returning its rows' keys is an UPDATE's, DELETE's, MERGE's or a locking
+        // level's: PostgreSQL plans no parallel workers under a ModifyTable or a row mark,
+        // and these rows go to this thread one by one anyway.)
+        if self.plan.with_key {
+            return Ok(None);
+        }
         if self.secondary {
             return self.start_parallel_index(spec, stages, ctx);
         }
@@ -4253,7 +4259,10 @@ impl ScanNode {
         let Some(snap) = ctx.snapshot() else {
             return Ok(None);
         };
-        if workers == 0 || super::sizing::heap_modelled_or_kept(&p.table, ctx) {
+        // (A scan run for each outer row, its range bound by the outer row's values, a SubPlan's
+        // or a nested loop's inner side: PostgreSQL puts no Gather there, and threads started
+        // per run cost more than its few rows. TPC-H q20's 8,332 runs took 9 s.)
+        if workers == 0 || !ctx.outer.borrow().is_empty() || super::sizing::heap_modelled_or_kept(&p.table, ctx) {
             return Ok(None);
         }
         let txn = ctx.txn.borrow();

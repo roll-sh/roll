@@ -160,6 +160,16 @@ fn is_result_change(e: &Error) -> bool {
     e.code == code::FEATURE_NOT_SUPPORTED && e.message == "cached plan must not change result type"
 }
 
+/// A Bind or Describe of a prepared statement there is none of (exec_bind_message,
+/// exec_describe_statement_message: the unnamed statement is named apart).
+pub fn missing_statement(name: &str) -> Error {
+    let msg = match name {
+        "" => "unnamed prepared statement does not exist".to_string(),
+        n => format!("prepared statement \"{n}\" does not exist"),
+    };
+    Error::new(code::INVALID_SQL_STATEMENT_NAME, msg)
+}
+
 impl Prepared {
     /// What pg_prepared_statements shows of it besides its name and text: parameter types,
     /// result types (when known), generic and custom plans made.
@@ -1760,17 +1770,19 @@ impl Session {
     }
 
     /// A custom plan: the statement's analysis with the parameters' values put in
-    /// (`litplan::values_custom`), or bound afresh with them as constants.
+    /// (`litplan::values_custom`; `reuse`: the custom plan before with its scan chosen again
+    /// when it can be), or bound afresh with them as constants.
     fn bound_custom(
         &mut self,
         p: &Prepared,
         stmt: &Node,
         params: &[Value],
+        reuse: bool,
     ) -> Result<Arc<BoundQuery>> {
         self.ensure_txn();
-        let b = match self.values_custom(p, stmt, params) {
+        let b = match self.values_custom(p, stmt, params, reuse) {
             Some(b) => b,
-            None => self.bound_custom_afresh(p, stmt, params)?,
+            None => Arc::new(self.bound_custom_afresh(p, stmt, params)?),
         };
         if let Some(fixed) = &p.plans.lock().fixed_result
             && *fixed != result_row(&b.cols)
@@ -1781,7 +1793,7 @@ impl Session {
             )
             .routine("RevalidateCachedQuery"));
         }
-        Ok(Arc::new(b))
+        Ok(b)
     }
 
     /// A custom plan bound afresh: the statement with the parameters' values as constants.
@@ -1888,7 +1900,7 @@ impl Session {
                 // (Debug builds: it is the custom plan, costing what that does.)
                 #[cfg(debug_assertions)]
                 {
-                    let own = self.bound_custom(p, stmt, params)?;
+                    let own = self.bound_custom(p, stmt, params, false)?;
                     assert!(litplan::same_plan(&own, &bq, &p.param_types, params), "custom plan of {:?}", p.sql);
                     let c = self.plan_cost(&own, params, true);
                     let cost = cost.unwrap_or_else(|| self.plan_cost(&bq, params, true));
@@ -1910,7 +1922,7 @@ impl Session {
                 }
                 return Ok((bq, true));
             }
-            let bq = self.bound_custom(p, stmt, params)?;
+            let bq = self.bound_custom(p, stmt, params, share)?;
             let version = self.txn.as_ref().map_or(0, |t| t.borrow().catalog().version);
             let first = p.plans.lock().first_custom.take();
             let learns = share && self.param_learns(p);
@@ -1952,12 +1964,17 @@ impl Session {
                     // (A lone scan's cost is its access path's, with no Gather: no tree.)
                     let (t, found) = match crate::sql::paths::planned_total(&bq.plan, ctx, planning) {
                         Some(t) => {
-                            // (Debug builds: it is EXPLAIN's, when read now; the planner's
-                            // own is checked as the plan is made, `paths::check_planned_total`.)
+                            // (Debug builds: it is EXPLAIN's, when read now, unless a concurrent
+                            // writer changed the sizes or statistics in between: then reading it
+                            // once more gives another cost. The planner's own is checked as the
+                            // plan is made, `paths::check_planned_total`.)
                             #[cfg(debug_assertions)]
                             if !planning {
                                 let (e, g) = crate::sql::explain::total_and_gathers(&bq.plan, ctx);
-                                assert!(g.is_empty() && e == t, "a lone scan's cost {t} isn't EXPLAIN's {e} ({g:?})");
+                                assert!(
+                                    (g.is_empty() && e == t) || crate::sql::paths::planned_total(&bq.plan, ctx, false) != Some(t),
+                                    "a lone scan's cost {t} isn't EXPLAIN's {e} ({g:?})"
+                                );
                             }
                             (t, Vec::new())
                         }
@@ -2569,10 +2586,7 @@ impl Session {
         result_formats: Vec<i16>,
     ) -> Result<()> {
         let Some(p) = self.prepared.get(stmt).cloned() else {
-            return Err(Error::new(
-                code::INVALID_SQL_STATEMENT_NAME,
-                format!("prepared statement \"{stmt}\" does not exist"),
-            ));
+            return Err(missing_statement(stmt));
         };
         if self.status == TxnStatus::Failed && !ends_failed_txn(p.stmt.as_ref().and_then(inner)) {
             return Err(Error::new(

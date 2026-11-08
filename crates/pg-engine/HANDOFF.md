@@ -3158,10 +3158,9 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
     wall -16%, CPU -17%, peak unchanged, all 22 hashes equal; q01, q17 and q18 ahead of
     PostgreSQL.
   - Found, not this step's:
-    - q20 (0.4 -> 9 s), q02 (1.0 -> 4.5 s) and q11 regressed between fe7b0023c and fe78d36cd,
-      in base and new alike: each SubPlan run starts a parallel scan's threads
-      (`ParScan::start`'s spawns under `__clone` in q20's profile). Routed through the
-      coordinator.
+    - q20 (0.4 -> 9 s), q02 (1.0 -> 4.5 s) and q11 (0.27 -> 1.3 s) regressed in d08674719
+      (bounded parallel index scans): each SubPlan run, and each nested-loop inner scan,
+      started a parallel scan's threads for its few rows. Fixed in step 2.
     - `GROUP BY id ORDER BY id DESC LIMIT n`: PostgreSQL reads the index backward under the
       GroupAggregate; the engine plans a Sort above it (planner).
   - Verified (the targeted train): release build, clippy (no new warnings), crate tests
@@ -3169,6 +3168,16 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
     files join, aggregates, subselect, select_parallel, partition_aggregate, groupingsets,
     window, union, select_distinct, limit, with, collate (4,428 / 4,441, the same units as
     the base build's).
+- **Executor, round 10, step 2: no parallel index scan per outer row** (round 26, agent 167;
+  `exec/scan.rs` `start_parallel_index`): a bounded index scan run under an outer row's values
+  (a correlated SubPlan's, a nested loop's inner side: `ExecCtx::outer` not empty) reads on the
+  statement's thread. PostgreSQL puts no Gather there (the parameters make it
+  parallel-restricted), and threads started per run cost more than the run's few rows.
+  TPC-H q20 9.2 -> 0.57 s, q02 4.5 -> 1.2 s, q11 1.14 -> 0.31 s (dist, containers, a loaded
+  machine), hashes equal. Verified: release build, clippy, crate tests (big_tables'
+  `deferred_entry_deletes` failed once on "the deletes went in as runs", a DELETE storage path
+  this step doesn't reach: for agent 162's train), regress select_parallel, join, subselect,
+  aggregates, btree_index, create_index, partition_join, partition_prune unchanged.
 - **Deep input** (round 19, agent 63; `src/stack.rs`, `tests/deep_input.rs`): the engine no
   longer overflows the stack of the thread that runs it, however deep the input nests. A
   host's 2 MB thread or a test harness thread is safe. Before, 400 `+` terms aborted the
@@ -3984,6 +3993,80 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
     in BENCH's section); the regex filter compiles its pattern per row (`types/regex`
     `compile` in the profile of `\d t`); per-table ORM queries are planning bound (agent
     171); catalog entries weren't shrunk (`Column` 240 bytes, `Table` 440).
+- **Catalog round 12, first batch** (agent 188; BENCH.md "Catalog round 12"):
+  - Why 173's `class_name_bounds` change didn't help `\d t5000`, and why EF Core's pg_class
+    scan ran its subplan on every row: both scans have no planned path. The planner sets a
+    catalog scan's `SysPath` only under a Sort (`paths::syscat::sys_ordered_scan`) or as a
+    join group's relation with an index access or parameters (`joinpath`); otherwise
+    `Plan::SysScan`'s `path` is None and the "Index Scan ... Index Cond" EXPLAIN prints is
+    EXPLAIN's own derivation (`explain::sys_index_scan`), which the executor never saw. Its
+    filter ran in written order: `sys_equality`'s first-conjunct rule stops at the first
+    conjunct that can raise (`quiet_filter`), and EF Core writes `NOT EXISTS (SELECT ... FROM
+    pg_depend WHERE classid = (SELECT ...) AND objid = cls.oid AND deptype IN ('e', 'x'))`
+    before `cls.relname IN ('t')` (one value: `relname = 't'`). (HANDOFF's "with `relname =`
+    or without `deptype` it is one row" didn't reproduce: with the InitPlan every variant ran
+    the subplan 41,420 times; without it the planner makes an anti join.)
+  - Such a scan now runs as the index scan its EXPLAIN shows (`exec/nodes.rs` `sys_derived`,
+    for cacheable catalogs, `sys_shared_scan`): the conditions the index uses whole first, then
+    the rest of the filter, so the filter runs only on the rows they select, as PostgreSQL's
+    index scan checks its filter (a subplan failing on another row raised `division by zero`
+    where PostgreSQL returns the row: `a188_catalog_index_conds`). The index conditions
+    bound pg_class's `relname` (`class_name_bounds` → `derived_name_bounds`), a pattern's
+    fixed prefix among them (`SysCond::Bound`: `=` for `^(t5000)$`, a range for `^(t.*)$`,
+    LIKE's too; `like_prefix_quals`, the one case handled before, is gone); an exact name is
+    looked up through the rows' hash (`sys_named`). `explain::SysCond` / `sys_index_scan` are
+    `pub(crate)` for it.
+  - pg_depend's rows of one dependent object (`system::depend_rows_of`): derived alone by the
+    scoped derivation a DROP's walk runs (`depend::scope_of` → `depends_in`), for a rescan
+    whose conjuncts pin `classid` (an InitPlan's value too: `oid_pin`) and `objid`, while
+    pg_depend's rows aren't generated (`sys_depend_rows`; past `depend_rescans` of them in a
+    statement, the whole catalog, once). Debug builds compare each with the whole derivation
+    (`a188_depend_rows`: every kind of object, run in debug). Objects Postgres made, and those
+    whose rows only the whole derivation makes (internal triggers, composite types' relations),
+    still generate the whole catalog.
+  - `system::class_position` reads the directory records: the stored maps' `contains_key`
+    read each group's raw table entries from storage (about 1,000 tables' JSON a group), for
+    every relation a first `\dt` made a row of.
+  - `class_rows_named` finds renamed TOAST tables and indexes (`Catalog::renamed_toasts`,
+    hashed once per frozen catalog): the name index doesn't hold them, so a planned index scan
+    on `relname = '<renamed>'` missed them (`a56_toast_relations` showed it once path-less scans
+    used the bounds).
+  - Numbers (BENCH, dist builds in containers): EF Core's tables query after its first in a
+    session 129-211 → 2.3-3.6 ms (PostgreSQL 1.2-3.0), its first 437-472 → 239-283 (4.7-8.3);
+    psql's unqualified `\d t5000` lookup 27-62 → 0.54-3.7 ms (0.28-1.8); a first `count(*)` of
+    pg_class 6.3-13 → 4.6-6.4 (6.0-8.6); psql's first `\dt` 52-86 → 50-73 (12-23; on the host,
+    median of six restarts, 72 → 51). Memory after the big catalogs, measured the same way on
+    both sides (each container's cgroup `memory.current`): 116 → 112 MB, PostgreSQL 200 (anon
+    + shmem: 110 against 149); round 11's 143 MB was the process RSS, which counts the
+    binary's resident text.
+  - Left, with what limits each (measured):
+    - EF Core's first query in a process, or after any DDL: 213 ms of planning, because
+      `explain::sys_tuples(PgDepend)` generates pg_depend's rows (116,000 at 10,000 tables,
+      parsing every table entry: `stored_ix::read_all`) to count them for the subplan's
+      cost; `system::row_count` has no pg_depend count. For the planner's owner: an estimate
+      from the relation maps' sizes, or a count kept with the catalog (an estimate changes
+      cost numbers; make it independent of whether the rows are cached, or plans differ
+      between a first and a later run).
+    - `NOT EXISTS (SELECT ... WHERE x = (SELECT ...) ...)`: PostgreSQL pulls it up into an
+      anti join with the inner sub-select as an InitPlan above it (Nested Loop Anti Join);
+      the engine keeps a SubPlan (EXPLAIN differs; planner).
+    - A process's first planning (20-30 ms of a first `\dt` after a start; LBR profile of the
+      first `EXPLAIN` of `\dt`): the function registry's initialization (`func::Registry::
+      from_pg`, `assign_pg_oids`, `pg_proc_oids`: 40% of its samples), `paths::syscat::
+      read_sys_indexes` splitting the whole index list once per catalog (14%), `paths::
+      parallel::func_parallel`'s map (10%), `system::initdb_colstats` (6%). One-time costs
+      that a warm-up at server start, or parsing once, would take off the first query.
+    - psql's per-table `\d` queries execute in 0.1-1.8 ms; the rest is planning, and
+      EXPLAIN's Builder used for estimates (`bind_set_op` → `estimate_in`, SetOp's
+      `hashed_distinct` → `agg_estimate`, `distinct_order`) is 46% of the publications query's
+      CPU (planner, executor).
+    - A first pg_attribute read over a schema's relations (`rows_of_rel` per relation, a nested
+      loop): `rel_columns` reads each table through `PMap::get`, which parses its whole chunk
+      (64 oids, about 8 tables of the bench's round-robin schemas), so every table entry is
+      parsed (121 ms against PostgreSQL's 42). Column directory records (a format step) or
+      parsing one entry of a chunk.
+    - A namespace index of the directory records (a format step) would take
+      `class_keys_checked`'s share of the first `\dt` (10% of its samples, 4-5 ms); not done.
 - **Client libraries** (round 17, agent 38; round 18, agent 51): drivers' and ORMs' own test
   suites against the engine and against PostgreSQL 18.6, test by test: `tests/clients/`
   (runner, per-suite scripts, `STATUS.md` with the per-suite counts and every difference
@@ -8701,6 +8784,120 @@ Left, for the planner:
   ndistinct estimates, FULL JOIN errors, `width_bucket('NaN')`, the domain relabel, hash vs
   btree on char(n), LIMIT over a hashed grouping, autovacuum of catalogs, the catalog
   bitmap scan's index condition).
+
+## Planner round 11 (agent 177)
+
+BENCH.md "Planner, round 11" has the measurements. What changed:
+
+- **A custom plan's scan can be chosen again for another execution's values** (the planner
+  side of custom-plan reuse; agreed with agent 178 through the coordinator, 178 builds the
+  reuse in `session::litplan` / `binder::custom`):
+  - `paths::keeping_choice(|| analyzed.bind_values(..))` returns, with the plan, an
+    `Arc<ScanChoice>` when exactly one scan was planned and it can be chosen again (not for
+    other scans' rows, a PlaceHolderVar, a parameterized path or a cursor's fraction). It is
+    the relation as path generation saw it (`Rel` without its clauses: sizes, indexes and
+    their statistics handles, permissions), what the scan was asked for (`Want`, width), the
+    planner settings and whether the path delivered the order.
+  - `ScanChoice::rechoose(kept, placed, ctx) -> Option<Box<ScanPlan>>`: `kept` the kept
+    plan's base scan, `placed` the analysis's WHERE site with the new values placed
+    (`add_filter`, as `values_in` does). It takes `placed`'s clauses, estimates the rows
+    and clause costs from them (`Planner::estimate_quals`, the same code as `rel()`) and
+    chooses the path again from the kept relation (`Planner::scan_path_applied`, the code
+    `plan_scan` runs). The scan it returns, with its cost in `ScanPlan::est`, is what planning
+    the statement with those values gives. None (plan again): the settings changed, or the
+    new path reads another index, another kind of access, or no longer delivers the order.
+  - Why not a precomputed selectivity range: a scan's path costs depend on several
+    selectivities (the relation's rows, each index's clause set, bitmap sets, skip-scan
+    prefixes) through nonlinear formulas, so a range needs path costing at many points while
+    planning and still leaves the reused plan's cost approximate, where plancache's average
+    custom cost needs the exact one.
+  - The caller checks what the choice doesn't: the plan's environment (catalog version,
+    role, search path), the sizes planning read (`literals::SizeRead`, as kept plans are),
+    and that the new plan still takes no Gather (`planned_total` of it).
+  - Debug builds choose every lone scan's path again for its own values as plans are made
+    (`paths::check_rechoose`, from `Analyzed::plan` / `into_bound`); every golden passes.
+- **Debug cost checks against concurrent writers** (agent 174's flaky
+  `logical_apply::prepared_stream_without_two_phase_cleans_up`, debug only):
+  `check_planned_total`, `check_rechoose` and `total_and_gathers`' serial-bound check cost a
+  plan a second time, and a logical apply worker or autovacuum may change the sizes or
+  statistics in between. They now assert only when the catalog and every size the first
+  costing read are unchanged after the second (`literals::observing`, which records reads
+  without hiding them from an enclosing `recording`, and `literals::unchanged_since`). A
+  column's minimum or maximum read from its rows (`SizeRead::Data`) can't be read again, so a
+  plan that read one isn't checked.
+- **A written COLLATE in DISTINCT and GROUP BY keys** (`explain.rs`): a hashed DISTINCT's
+  key over `t COLLATE "C"` shows PostgreSQL's RelabelType, `(t)::text`, and a relabeling
+  cast names the type with its modifier (`(u)::character varying(10)`, was
+  `(u)::varchar`, in GROUP BY keys and sort keys too). A sort above a DISTINCT shows
+  `((t)::text) COLLATE "C"` (was `(t)`).
+- Golden `a177_planner_r11` (recorded from PostgreSQL 18.6).
+- **UPDATE, DELETE and locking scans read serially** (agent 175's finding; `exec/scan.rs`
+  `ScanNode::start_parallel`): a scan returning its rows' keys (`with_key`: an UPDATE's,
+  DELETE's or MERGE's target, a row mark's) never starts the executor's worker threads.
+  PostgreSQL plans no parallel workers under a ModifyTable or a row mark, and EXPLAIN
+  already showed the serial plan. DELETE of a quarter of a 1M-row table: 809-823 -> 590-597
+  ms of server CPU (PostgreSQL 172-218). Its elapsed time grows by about 0.3 s, as the scan
+  no longer runs on three threads.
+
+Where the range read's CPU goes (frame-pointer dist build, perf, 8 clients): `run_query`
+82%, of which execution (`run_each`, the index scan and the rows sent) 49% and planning
+(`planned_as`) 29%: `Analyzed::bind_values` 25% (placing the values 5.5%, `into_bound`
+19.4%: `plan_scan` 14.1%, of which `choose` 7.7% and `rel()` 4.9%). `rechoose` keeps
+`estimate_quals` and `choose`, about 9%, and skips binding, `rel()` and the plan walk. With
+generic plans (`plan_cache_mode = force_generic_plan`, no planning per execution) the engine
+takes 170-193 us per operation against PostgreSQL's 85-91, so the execution path is about
+twice PostgreSQL's: that floor, not planning, limits the range read. 7.8% of the CPU is
+mimalloc's `_mi_page_malloc_zero`, called mostly from `ScanNode::next_raw_ref` / `next`
+(a zeroed allocation per row): routed to the scan owner.
+
+Left, for the planner:
+- The KNN choice (`ORDER BY p <-> point LIMIT 5`, indexes on (p) and (cat, p)) is a size
+  model gap, not a costing one: the engine sizes the btree_gist index on (cat, p) at 1 page
+  (`pg_relation_size` 8192, PostgreSQL 91 pages), so its scan costs 460 where PostgreSQL's
+  costs 820 and loses to (p)'s 792. Routed to the size models' owner.
+- DISTINCT over a written COLLATE, sorted (`Unique` over a `Sort`, the Sort the DISTINCT's
+  order makes, `order_hint`), still shows `Sort Key: (t)` where PostgreSQL shows
+  `((t)::text) COLLATE "C"`; VERBOSE shows the projection's entry as `(t)` where PostgreSQL
+  shows `((t)::text)` (ruleutils' CollateExpr over a column of another collation is a
+  RelabelType, shown as a cast).
+- Seed 5069 reproduces as described (`DELETE ... USING (SELECT id, pg_size_bytes('bad') z
+  FROM t0) u`, or over a view): the engine fails 22023 for all four shapes, even under
+  EXPLAIN, where PostgreSQL fails only with `OFFSET 0`. The view's unread column is kept
+  (folded) where PostgreSQL's row mark is ROW_MARK_REFERENCE on the base relation.
+- A local `DELETE ... USING` / `UPDATE ... FROM` join's width (agent 172's report):
+  `CREATE TABLE b (id int PRIMARY KEY, v int)`, `s (id int PRIMARY KEY, w int)`, 1,000
+  rows each, analyzed; `EXPLAIN DELETE FROM b r1 USING s r2 WHERE r1.id = r2.id AND
+  r2.w < 3` shows the Nested Loop at width=6 where PostgreSQL has 12 (the target's ctid and
+  r2's ROW_MARK_REFERENCE ctid); also `r1.v = r2.w AND r1.id < 3` (a Hash Join) and the
+  UPDATE. The scans' widths already count the mark (`rowmarks` in the scan's width,
+  explain.rs); the join above doesn't carry r2's ctid. 172 fixed the foreign-scan case in
+  8500c0bb9 (`Planner::fdw_whole_row_width`).
+- `rechoose` is 14.5% of the range read's CPU with 178's reuse wired in (9.5% of it
+  `scan_path_applied` costing every path again). Exact ways to cost less: keep each index's
+  matched clause positions in the `ScanChoice` (the clauses' shapes don't change between
+  executions of one statement, only their values) instead of `match_quals` every time;
+  skip an index that matched no clause and serves no order; cost the bitmap path only when
+  its index paths could beat the kept path.
+- Plain queries fold `'x'::text::date` while binding, where PostgreSQL keeps the cast (a
+  STABLE input routine: eval_const_expressions folds only immutable casts). 178's
+  immutable-only rule for custom plans would fix it, along with a kept plan freezing
+  `'now'::text::timestamptz`, but it changes plain-query estimates, so it needs a full
+  regress run.
+- Reported by other agents for the planner, not started:
+  - `GROUP BY id ORDER BY id DESC LIMIT n`: PostgreSQL reads the index backward under the
+    GroupAggregate; the engine plans a Sort above (167: the executor streams a
+    GroupAggregate under a LIMIT and over backward index scans already).
+  - UPDATE ... FROM: 0.9 ms per statement against PostgreSQL's 0.49, 48% planning (join
+    search 36%, merge-join tries 9%, inequality estimates about 10%, `Planner::endpoint`'s
+    reverse index probes 8%; 167's profile). postgres_fdw's join-DML gap.
+  - ORM introspection on 10,000-table catalogs is mostly planning (173, BENCH "Catalog
+    round 11"): pgjdbc getColumns plans in 9-11 ms (PostgreSQL 1.3-6), getImportedKeys
+    in 27 ms (10.6), a fresh process's first plan about 20 ms.
+  - Recording a plan's Gathers in the plan (167, 149): the EXPLAIN estimate tree built per
+    execution only to find them is 2-3% of psql `\d` CPU. This is item 2.
+- Untouched: item 2 (every node's cost, so one-shot plans stop building EXPLAIN trees for
+  Gathers and Incremental Sort keys), planning CPU over plans/apps.sql and the ORM queries,
+  TPC-H q21 / q18, and the rest of round 10's list.
 
 ## Starting prompt for the next agent
 

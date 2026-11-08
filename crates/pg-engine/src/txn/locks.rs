@@ -2726,7 +2726,7 @@ mod tests {
 
     fn stress(seed: u64, interrupts: bool) {
         const THREADS: usize = 8;
-        const N: usize = 48;
+        const N: usize = 12;
         let m = Arc::new(LockManager::default());
         // Even: object locks; odd: relations of database 1 (the fast path's).
         let keys: Arc<Vec<Vec<u8>>> = Arc::new(
@@ -2752,6 +2752,12 @@ mod tests {
                 let mut s = seed ^ 0xabc;
                 while !stop.load(Ordering::Relaxed) {
                     let snap = m.snapshot();
+                    // (A backend waits for one lock at a time.)
+                    let mut waiting: Vec<Option<i32>> = snap.iter().filter(|l| !l.granted).map(|l| l.pid).collect();
+                    let n = waiting.len();
+                    waiting.sort();
+                    waiting.dedup();
+                    assert_eq!(waiting.len(), n, "pg_locks: a backend waiting twice: {snap:?}");
                     for (i, a) in snap.iter().enumerate() {
                         for b in snap[i + 1..].iter().filter(|b| b.tag == a.tag) {
                             if a.granted && b.granted && a.pid != b.pid {
@@ -2803,7 +2809,7 @@ mod tests {
                         m.hold_xact_lock(owner, owner, p, owner);
                         let compact = rng(&mut s, 4) == 0;
                         let (mut my_keys, mut my_rows) = (vec![xact_key(owner)], Vec::new());
-                        for _ in 0..1 + rng(&mut s, 3) {
+                        for _ in 0..1 + rng(&mut s, 5) {
                             let policy = match rng(&mut s, 10) {
                                 0 => WaitPolicy::NoWait,
                                 1 => WaitPolicy::SkipLocked,

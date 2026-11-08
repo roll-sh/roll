@@ -871,7 +871,7 @@ impl Session {
                     == Some("force_generic_plan");
             self.infer_params = o.generic_plan;
             let bq = if !generic && !values.is_empty() && !p.param_types.is_empty() {
-                self.bound_custom(&p, &q, &values)
+                self.bound_custom(&p, &q, &values, false)
             } else {
                 self.bound_as(&p, &q, &values, declare)
             };
@@ -1016,6 +1016,7 @@ impl Session {
                 "DECLARE CURSOR must not contain data-modifying statements in WITH",
             ));
         }
+        crate::session::cursor::check_read_only(s)?;
         // After parse analysis (PerformCursorOpen).
         if !hold && self.status == TxnStatus::Idle {
             return Err(Error::new(
