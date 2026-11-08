@@ -127,7 +127,7 @@ fn a_dead_nodes_keys_move_to_their_preferred_live_node(kind: Kind) {
     let frozen = Instant::now();
     a.fault_freeze(true);
     let validity = a.config().lease_validity();
-    assert!(eventually(validity + Duration::from_secs(1), || !a.owns(&keys[0])), "a never fenced itself");
+    assert!(eventually(validity + Duration::from_secs(1), || !a.owns(&keys[0]) && a.stats().fenced >= 1), "a never fenced itself");
     a.fault_kill();
     assert!(eventually(Duration::from_secs(15), || keys.iter().all(|k| b.owns(k) || c.owns(k))), "keys never moved");
     let spans = spans.stop();
@@ -138,7 +138,6 @@ fn a_dead_nodes_keys_move_to_their_preferred_live_node(kind: Kind) {
         assert_eq!(record(&b, k), Some((want.to_string(), 2)), "{k} went to its preferred live node");
     }
     assert_eq!(b.stats().takeovers + c.stats().takeovers, keys.len() as u64, "{:?} {:?}", b.stats(), c.stats());
-    assert!(a.stats().fenced >= 1, "{:?}", a.stats());
 }
 
 /// A node that can't reach the backend stops acting as owner (Lost, unhealthy) before any other
