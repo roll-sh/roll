@@ -387,7 +387,7 @@ fn custom_plans_choose_the_scan_again() {
     s.query("INSERT INTO t SELECT g, g % 13 FROM generate_series(5001, 9000) g").unwrap();
     data.extend((5001..=9000).map(|id| (id, id % 13)));
     run(&mut s, &data, Some(8990), Some(9089));
-    for sql in ["ANALYZE t", "CREATE INDEX ON t (v)", "SET enable_indexscan = off", "RESET enable_indexscan", "ALTER TABLE t DROP CONSTRAINT t_pkey"] {
+    for sql in ["ANALYZE t", "CREATE INDEX ON t (v)", "SET enable_indexscan = off", "RESET enable_indexscan"] {
         s.query(sql).unwrap();
         run(&mut s, &data, Some(3), Some(102));
         run(&mut s, &data, Some(4), Some(103));
@@ -397,6 +397,7 @@ fn custom_plans_choose_the_scan_again() {
 
     let mut writer = Session::new(SessionState::new(s.state.db.clone(), s.state.cluster.clone(), "postgres", 4243));
     for level in ["READ COMMITTED", "REPEATABLE READ"] {
+        let used = s.rechosen_custom_uses();
         s.query(&format!("BEGIN ISOLATION LEVEL {level}")).unwrap();
         run(&mut s, &data, Some(40), Some(45)); // establish the transaction snapshot
         run(&mut s, &data, Some(9001), Some(9003)); // empty before the writer's insert
@@ -428,5 +429,9 @@ fn custom_plans_choose_the_scan_again() {
         writer.query("UPDATE t SET v = 3 WHERE id = 42; INSERT INTO t VALUES (43, 4); DELETE FROM t WHERE id = 9002").unwrap();
         run(&mut s, &data, Some(40), Some(45));
         run(&mut s, &data, Some(9001), Some(9003));
+        assert!(s.rechosen_custom_uses() > used, "no custom-plan reuse during {level}");
     }
+    s.query("ALTER TABLE t DROP CONSTRAINT t_pkey").unwrap();
+    run(&mut s, &data, Some(3), Some(102));
+    run(&mut s, &data, Some(4), Some(103));
 }
