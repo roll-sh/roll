@@ -1208,3 +1208,71 @@ fn power_cut_applies_each_replicated_transaction_once() {
         }
     }
 }
+
+/// The catalog format 4 -> 5 upgrade through a power cut: a format-4 data directory
+/// (`tests/data/catalog_format4.tar.gz`, see catalog_format.rs) is opened, upgraded at its
+/// database's first open, given a table and shut down, with the power cut before each
+/// operation (keeping nothing, then a seeded part of what wasn't fsynced). Whatever the cut
+/// left, the database opens, twice, with pg_class as the format-4 build showed it, and the
+/// table there only whole.
+#[cfg(feature = "powerloss")]
+#[test]
+fn power_cut_during_the_catalog_format_upgrade() {
+    let class = "SELECT string_agg(c::text, E'\\n' ORDER BY c.oid) FROM pg_class c WHERE c.oid >= 16384 AND c.relname !~ '^after_upgrade'";
+    let added = "SELECT count(*)::text FROM pg_class WHERE relname ~ '^after_upgrade'";
+    if let Ok(dir) = std::env::var("POWER_CATALOG_CHILD") {
+        let e = open(Path::new(&dir));
+        let mut s = e.connect(1, "postgres", "postgres", "t").unwrap();
+        texts(&mut s, "CREATE TABLE after_upgrade (id int PRIMARY KEY)");
+        drop(s);
+        e.shutdown();
+        println!("ops {}", pg_engine::storage::powerloss::ops());
+        return;
+    }
+    let want = include_str!("data/catalog_format4.pgclass").trim_end();
+    let tmp = tempfile::tempdir().unwrap();
+    let base = tmp.path().join("base");
+    std::fs::create_dir_all(&base).unwrap();
+    let tgz = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/catalog_format4.tar.gz");
+    assert!(std::process::Command::new("tar").arg("xzf").arg(tgz).arg("-C").arg(&base).status().unwrap().success());
+    let run = |at: Option<u64>, keep: Option<u64>| -> String {
+        let run = tmp.path().join("run");
+        let (data, shadow) = (run.join("data"), run.join("shadow"));
+        let _ = std::fs::remove_dir_all(&run);
+        std::fs::create_dir_all(&run).unwrap();
+        assert!(std::process::Command::new("cp").arg("-a").arg(&base).arg(&data).status().unwrap().success());
+        let mut c = std::process::Command::new(std::env::current_exe().unwrap());
+        c.args(["--exact", "power_cut_during_the_catalog_format_upgrade", "--nocapture"])
+            .env("POWER_CATALOG_CHILD", &data)
+            .env("ROLL_POWERLOSS", format!("{}:{}", data.display(), shadow.display()));
+        if let Some(n) = at {
+            c.env("ROLL_POWERLOSS_AT", n.to_string());
+        }
+        let out = c.output().unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+        let what = format!("cut before operation {at:?} (keeping {keep:?})");
+        if out.status.code().is_none() {
+            pg_engine::storage::powerloss::power_cut(&data, &shadow, keep).unwrap();
+        } else {
+            assert_eq!(out.status.code(), Some(0), "{what}: {stdout}{}", String::from_utf8_lossy(&out.stderr));
+        }
+        for _ in 0..2 {
+            let e = open(&data);
+            let mut s = e.connect(1, "postgres", "postgres", "t").unwrap();
+            assert_eq!(texts(&mut s, class).join(""), want, "{what}: pg_class");
+            let n = texts(&mut s, added).join("");
+            // (The table and its primary key, or neither.)
+            assert!(n == "0" || n == "2", "{what}: {n} of the table's relations");
+            drop(s);
+            e.shutdown();
+        }
+        stdout
+    };
+    let out = run(None, None);
+    let ops: u64 = out.lines().find_map(|l| l.strip_prefix("ops ")?.parse().ok()).unwrap();
+    assert!(ops > 10, "only {ops} operations recorded");
+    for at in 1..=ops {
+        run(Some(at), None);
+        run(Some(at), Some(at));
+    }
+}

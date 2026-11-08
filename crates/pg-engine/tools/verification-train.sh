@@ -9,14 +9,16 @@
 # job copies to $TRAIN_DIR/bin/dt-<head>. When the slot comes it fetches origin and checks out
 # its head (if the checkout has no uncommitted changes), so a job queued for hours tests the
 # newest head. Steps, each logged to $TRAIN_DIR/<step>.log, results in $TRAIN_DIR/status:
-# release crate tests, clippy (the warning count), crash_random seeds 1-30 x 4 (and with
-# CRASH_POWER=1 once the harness has it), debug crate tests, the full regression suite on a
+# release crate tests, clippy (the warning count), crash_random seeds 1-30 x 4, then the power
+# stage with `--features powerloss` (HANDOFF "Crash recovery", power loss): the power_cut tests
+# and seeds 1-30 x 4 with CRASH_POWER=1, with and without CRASH_ASYNC=1; debug crate tests, the full regression suite on a
 # private reference, isolation, pg_dump_tap. Containers (made beforehand, HANDOFF "How to
 # test"): <prefix>-rref (the regress reference, default settings), <prefix>-psql (the engine
 # side's psql, host network, $TRAIN_DIR/pgr mounted), <prefix>-iref (isolation reference on the
 # host network at port 53250-style $TRAIN_ISO_REF, max_prepared_transactions=5),
 # <prefix>-dclient (pg_dump client, host network, $TRAIN_DIR/pgdump mounted). The idle timer
 # stops containers quiet for 3 hours: the job starts them itself.
+# $TRAIN_DIR/pgr/src-repo must have src/bin/pg_dump (a sparse copy without it fails pg_dump_tap).
 set -u
 D=${TRAIN_DIR:?TRAIN_DIR: a scratch directory on disk}
 P=${TRAIN_PREFIX:?TRAIN_PREFIX: the prefix of your containers}
@@ -38,9 +40,16 @@ cp "$(ls -t "$T"/release/deps/difftest-* | grep -v '\.d$' | head -1)" "$D/bin/dt
 cargo clippy -p pg-engine --all-targets >"$D/clippy.log" 2>&1; st clippy "$? $(grep -c '^warning' "$D/clippy.log")w"
 SEEDS=$(seq -s, 1 30)
 CRASH_SEEDS=$SEEDS CRASH_ROUNDS=4 cargo test --release -p pg-engine --test crash_random >"$D/crash.log" 2>&1; st crash $?
-if grep -q CRASH_POWER crates/pg-engine/tests/crash_random.rs; then
-  CRASH_POWER=1 CRASH_SEEDS=$SEEDS CRASH_ROUNDS=4 cargo test --release -p pg-engine --test crash_random >"$D/crash-power.log" 2>&1
+# (The power stage builds the engine with the powerloss feature; the regress step after it
+# builds it again without.)
+PW="cargo test --release -p pg-engine --features powerloss --test crash_random"
+if grep -q 'feature = "powerloss"' crates/pg-engine/tests/crash_random.rs; then
+  $PW -- power_cut >"$D/power-cut.log" 2>&1
+  st power-cut "$? $(grep -o '[0-9]* passed' "$D/power-cut.log" | tail -1)"
+  CRASH_POWER=1 CRASH_SEEDS=$SEEDS CRASH_ROUNDS=4 $PW -- --exact random_crashes >"$D/crash-power.log" 2>&1
   st crash-power $?
+  CRASH_POWER=1 CRASH_ASYNC=1 CRASH_SEEDS=$SEEDS CRASH_ROUNDS=4 $PW -- --exact random_crashes >"$D/crash-power-async.log" 2>&1
+  st crash-power-async $?
 fi
 cargo test --no-fail-fast -p pg-engine >"$D/debug.log" 2>&1; st debug $?
 [ -d "$D/pgr/src-repo" ] || echo "no $D/pgr/src-repo: the regress harness clones it" >>"$D/status"

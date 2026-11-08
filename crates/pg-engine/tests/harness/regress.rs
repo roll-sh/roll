@@ -39,7 +39,8 @@
 //!   it counts as stalled (default 300). `PGREGRESS_FILE_TIMEOUT=<secs>`: the cap on a whole run
 //!   of a file (default 3600). After an engine crash or stall the file resumes after the failing
 //!   unit (up to 25 times, 2 timeouts).
-//! - `PGREGRESS_PORT`, `PGREGRESS_CONTAINER`: engine port (55600) and reference container.
+//! - `PGREGRESS_PORT`, `PGREGRESS_CONTAINER`: engine port (55600) and reference container;
+//!   `PGREGRESS_REF_PORT`: the reference's port in its container (5432; one on the host network).
 //! - `PGREGRESS_ENGINE_HOST`: the host name psql in the container uses for the engine
 //!   (default `host.docker.internal`).
 //! - `PGREGRESS_ENGINE_CONTAINER`: run the engine's psql in this container instead, reaching the
@@ -1425,7 +1426,13 @@ fn psql(
     // drops the bridge.)
     let engine_container = std::env::var("PGREGRESS_ENGINE_CONTAINER").ok();
     let (host, port, container) = match target {
-        Target::Reference => ("127.0.0.1".to_string(), 5432, &cfg.container),
+        // (PGREGRESS_REF_PORT: a reference container on the host network, on a port of its
+        // own, so a dump roundtrip can reach it after the run.)
+        Target::Reference => (
+            "127.0.0.1".to_string(),
+            std::env::var("PGREGRESS_REF_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(5432),
+            &cfg.container,
+        ),
         Target::Engine(p) => match &engine_container {
             Some(c) => ("127.0.0.1".to_string(), *p, c),
             None => (

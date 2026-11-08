@@ -180,7 +180,7 @@ impl Database {
                 };
                 let stored = persist::load(&b, read)?;
                 let mut c = stored.clone();
-                if c.catalog_format < persist::CATALOG_FORMAT {
+                if c.catalog_format < 4 {
                     // Stored in an older format (a single value before format 1; before
                     // format 4 without its indexes): every record rewritten, in one commit,
                     // after the upgrades of objects stored before their oids.
@@ -188,6 +188,13 @@ impl Database {
                     c.catalog_format = persist::CATALOG_FORMAT;
                     store.commit(persist::writes_new(&c)?, |_| Ok(()))?;
                 } else {
+                    // Format 4 had no relation directory records: made from every relation
+                    // entry once, and stored with the header in the commit below (one WAL
+                    // record: a crash leaves format 4 whole or format 5 whole).
+                    if c.catalog_format == 4 {
+                        crate::catalog::reldir::fill(&mut c);
+                        c.catalog_format = persist::CATALOG_FORMAT;
+                    }
                     // What `open_upgrades` brought up to date is stored now: later commits
                     // write only what they change.
                     c.open_upgrades();

@@ -11,6 +11,7 @@ pub use parallel::analyzed_plan;
 pub(crate) mod pwagg;
 
 use super::binder::ast::{const_str, inner, with_pos};
+use super::costs::PgMulAdd;
 use super::expr::{Expr, Subquery, SubqueryKind};
 use super::plan::{
     AggCall, ConflictAction, Frame, FrameBound, FrameExclude, FrameUnit, JoinKind, MergeCmd, Plan,
@@ -512,9 +513,6 @@ struct ExNode {
     cte_id: Option<usize>,
     /// An Append member's columns as a node above names them (a set operation's sort).
     out_names: Vec<String>,
-    /// A nested loop whose inner side the executor reads once and keeps (no Materialize
-    /// shown, not parameterized): Postgres rescans it for every outer row.
-    inner_cached: bool,
     node_type: &'static str,
     strategy: Option<&'static str>,
     partial_mode: Option<&'static str>,
@@ -16868,11 +16866,6 @@ impl Builder<'_, '_> {
             r.node = mn;
         }
         n.subplans.append(&mut self.pending);
-        n.inner_cached = method == JoinMethod::NestLoop
-            && !lateral
-            && !material
-            && meta.memoize.is_none()
-            && !matches!(kind, JoinKind::Right | JoinKind::Full);
         // The rows' order: a nested loop's or merge join's outer side's (an inner merge
         // join's keys are equal on both sides: either names it).
         if method != JoinMethod::Hash && !matches!(kind, JoinKind::Full) && (kind != JoinKind::Right || swapped) {
@@ -18510,9 +18503,6 @@ struct Render<'r> {
     /// and the leader when it participates).
     procs: u64,
     leader: bool,
-    /// Inside a nested loop's inner side the executor ran once for all the outer rows:
-    /// the scans Postgres makes of it.
-    rescans: u64,
     /// A nested loop's inner Materialize about to be shown: the outer rows, each a rescan
     /// of it (its input read once).
     mat_loops: Option<u64>,
@@ -18525,12 +18515,7 @@ struct Render<'r> {
 impl Render<'_> {
     fn stats(&self, key: Option<usize>) -> Option<NodeStats> {
         let mut s = self.instr?.get(key?)?;
-        s.loops *= self.procs * self.rescans;
-        s.rows *= self.rescans;
-        s.removed *= self.rescans;
-        s.searches *= self.rescans;
-        s.fetches *= self.rescans;
-        s.pages *= self.rescans;
+        s.loops = s.loops.saturating_mul(self.procs);
         (s.loops > 0).then_some(s)
     }
 
@@ -18570,23 +18555,14 @@ impl Render<'_> {
         }
     }
 
-    /// Render a node's children, the inner side of a nested loop the executor read once
-    /// as the outer rows' many scans of it.
     fn children_of(&mut self, n: &ExNode, f: &mut dyn FnMut(&mut Self, &ExNode)) {
-        let saved = self.rescans;
         for (i, c) in n.initplans.iter().chain(&n.children).chain(&n.subplans).enumerate() {
-            let inner = n.inner_cached && i == n.initplans.len() + 1;
-            if inner {
-                let outer_rows = n.children.first().and_then(|o| self.stats(o.key)).map_or(0, |s| s.rows);
-                self.rescans = saved * outer_rows;
-            }
             if n.node_type == "Nested Loop" && i == n.initplans.len() + 1 && c.node_type == "Materialize" {
                 let outer_rows = n.children.first().and_then(|o| self.stats(o.key)).map_or(0, |s| s.rows);
                 self.mat_loops = Some(outer_rows);
             }
             f(self, c);
             self.mat_loops = None;
-            self.rescans = saved;
         }
     }
 
@@ -18609,11 +18585,11 @@ impl Render<'_> {
                 Removed::Scan(k) => self
                     .instr
                     .and_then(|i| i.get(*k))
-                    .map_or(0, |s| s.removed * self.rescans),
+                    .map_or(0, |s| s.removed),
                 Removed::Diff(k) => self
                     .instr
                     .and_then(|i| i.get(*k))
-                    .map_or(0, |s| (s.rows * self.rescans).saturating_sub(st.rows)),
+                    .map_or(0, |s| s.rows.saturating_sub(st.rows)),
             })
             .sum();
         (total as f64 / st.loops as f64).round()
@@ -19360,7 +19336,7 @@ pub(crate) fn subplan_costs(exprs: &[Expr], ctx: &ExecCtx) -> (f64, f64) {
             let ops = s.ops.len() as f64 * costs::CPU_OPERATOR_COST;
             if hashed {
                 let est = estimate_subquery(&s.plan, ctx);
-                startup += costs::CPU_OPERATOR_COST.mul_add(est.rows, est.total);
+                startup += costs::CPU_OPERATOR_COST.pg_mul_add(est.rows, est.total);
                 per += ops;
             } else if correlated {
                 let est = estimate_subquery(&s.plan, ctx);
@@ -21143,7 +21119,6 @@ pub fn explain(
         instr,
         w: Writer::new(o.format),
         procs: 1,
-        rescans: 1,
         mat_loops: None,
         leader: crate::sql::paths::parallel::ParCfg::read(ctx).leader,
         jg: super::joins::JoinGucs::read(ctx),

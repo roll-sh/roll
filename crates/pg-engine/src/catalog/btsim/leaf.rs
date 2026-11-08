@@ -6,6 +6,9 @@
 //! The model encoding can exceed 64 KiB on a legal page with many NULL attributes.
 //! Readers get `ItemRef`s; the passes that rework a page (deduplication, deletion, splits)
 //! take the items out as owned `Item`s and put them back (`take`, `put`).
+//! A page whose items each have one TID, no LP_DEAD mark and a key of one length (a unique
+//! index's, most of a primary key's pages) is kept plain: each item its TID and key, back to
+//! back, no flags, count or place (`Leaf::stride`); a change lays it out again first.
 
 use super::{Item, KeyBytes, Tid, maxalign};
 
@@ -76,15 +79,57 @@ pub(super) struct Leaf {
     /// Items not LP_DEAD: a page of none is passed whole by a scan's marking
     /// (`Btree::kill`), without stepping over its items.
     live: u32,
+    /// A plain page's bytes per item (6 of TID, then the key), `at` and `garbage` unused;
+    /// 0 for a page laid out item by item.
+    stride: u32,
 }
 
 impl Leaf {
     pub fn len(&self) -> usize {
-        self.at.len()
+        match self.stride {
+            0 => self.at.len(),
+            n => self.buf.len() / n as usize,
+        }
     }
 
     pub fn is_empty(&self) -> bool {
-        self.at.is_empty()
+        self.len() == 0
+    }
+
+    /// Plain if it can be (`stride`).
+    pub(super) fn plain(&mut self) {
+        if self.stride != 0 || self.at.is_empty() || self.live as usize != self.at.len() {
+            return;
+        }
+        let first = self.get(0);
+        let n = 6 + first.key.as_bytes().len();
+        if n > u16::MAX as usize || self.iter().any(|it| it.tids.len() != 1 || 6 + it.key.as_bytes().len() != n) {
+            return;
+        }
+        let mut buf = Vec::with_capacity(n * self.len());
+        for it in self.iter() {
+            buf.extend_from_slice(it.tids.0);
+            buf.extend_from_slice(it.key.as_bytes());
+        }
+        *self = Leaf { buf, at: Vec::new(), garbage: 0, live: self.live, stride: n as u32 };
+    }
+
+    /// Laid out item by item again, for a change.
+    pub(super) fn unplain(&mut self) {
+        let n = self.stride as usize;
+        if n == 0 {
+            return;
+        }
+        let old = std::mem::take(&mut self.buf);
+        self.stride = 0;
+        self.buf = Vec::with_capacity(old.len() + old.len() / n * HEAD + 64);
+        self.at = Vec::with_capacity(old.len() / n);
+        for item in old.chunks_exact(n) {
+            self.at.push(self.buf.len() as u32);
+            self.buf.push(0);
+            self.buf.extend_from_slice(&1u16.to_le_bytes());
+            self.buf.extend_from_slice(item);
+        }
     }
 
     /// Items not LP_DEAD.
@@ -100,6 +145,10 @@ impl Leaf {
     }
 
     pub fn get(&self, i: usize) -> ItemRef<'_> {
+        if self.stride != 0 {
+            let b = &self.buf[i * self.stride as usize..(i + 1) * self.stride as usize];
+            return ItemRef { key: KeyBytes::of(&b[6..]), tids: Tids(&b[..6]), dead: false };
+        }
         let a = self.at[i] as usize;
         let b = &self.buf[a..];
         let n = u16::from_le_bytes([b[1], b[2]]) as usize;
@@ -134,6 +183,7 @@ impl Leaf {
     }
 
     pub fn set_dead(&mut self, i: usize) {
+        self.unplain();
         let a = self.at[i] as usize;
         if self.buf[a] & 1 == 0 {
             self.live -= 1;
@@ -143,6 +193,7 @@ impl Leaf {
 
     /// Append an item's bytes, compacting when garbage outweighs the live bytes.
     fn encode(&mut self, dead: bool, tids: &[Tid], k: &[u8]) -> u32 {
+        self.unplain();
         let need = HEAD + 6 * tids.len() + k.len();
         if self.garbage > self.buf.len() / 2 {
             self.compact();
@@ -181,6 +232,7 @@ impl Leaf {
     }
 
     pub fn pop(&mut self) -> Option<Item> {
+        self.unplain();
         let i = self.len().checked_sub(1)?;
         let it = self.get(i).to_item();
         let (a, b) = self.span(i);
@@ -205,10 +257,12 @@ impl Leaf {
             at: Vec::with_capacity(items.len()),
             garbage: 0,
             live: 0,
+            stride: 0,
         };
         for it in items {
             self.push(it);
         }
+        self.plain();
     }
 
     /// VACUUM's bulk delete on this page (_bt_delitems_vacuum): the TIDs `keep` rejects go,
@@ -241,12 +295,16 @@ impl Leaf {
             }
             buf.extend_from_slice(it.key.as_bytes());
         }
-        *self = Leaf { buf, at, garbage: 0, live };
+        *self = Leaf { buf, at, garbage: 0, live, stride: 0 };
+        self.plain();
         (removed, left, used)
     }
 
     /// The buffer without the bytes no item holds.
     fn compact(&mut self) {
+        if self.stride != 0 {
+            return;
+        }
         let mut buf = Vec::with_capacity(self.buf.len() - self.garbage + 64);
         for i in 0..self.len() {
             let (a, b) = self.span(i);
@@ -298,6 +356,14 @@ mod tests {
                     let items = l.take();
                     assert_eq!(items.len(), want.len());
                     l.put(&items);
+                }
+                3 if !want.is_empty() => {
+                    // (One TID each, none LP_DEAD, keys of one length: put back plain.)
+                    for (i, w) in want.iter_mut().enumerate() {
+                        *w = Item::posting(Key::new(&[vec![7; 9]], &[17]), vec![(n, i as u16)]);
+                    }
+                    l.put(&want);
+                    assert!(l.stride != 0 && l.at.is_empty());
                 }
                 _ => {
                     let i = (x >> 20) as usize % (want.len() + 1);

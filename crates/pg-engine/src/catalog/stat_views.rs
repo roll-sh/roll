@@ -143,10 +143,10 @@ fn keys(ctx: &ExecCtx, pick: ClassSel, keep: ClassKeep) -> Result<Vec<ClassKey>>
 /// The table an index belongs to, as pg_index's `indrelid` has it.
 fn index_owner(ctx: &ExecCtx, ix: u32) -> Option<u32> {
     let cat = ctx.catalog();
-    if let Some(i) = cat.indexes.get(&ix) {
-        return Some(i.table);
+    if let Some(i) = cat.indexes.ix().dir.get(&ix) {
+        return Some(i.link);
     }
-    if let Some((t, true)) = cat.toast_owner(ix) {
+    if let Some((_, true, t)) = cat.toast_dir(ix) {
         return Some(t.toast);
     }
     (super::static_rows::rows(SysTable::PgIndex).iter())
@@ -170,13 +170,10 @@ fn indexes_of(ctx: &ExecCtx, of: &HashSet<u32>, scan: bool) -> HashMap<u32, Vec<
     let cat = ctx.catalog();
     if !scan {
         for &rel in of {
-            if let Some(t) = cat.index_table(rel) {
-                let mut own: Vec<u32> = t.indexes.iter().chain(t.pkey_index.iter()).copied().collect();
-                own.sort_unstable();
-                own.dedup();
-                out.entry(rel).or_default().extend(own);
+            if let Some(t) = cat.storage_dir(rel) {
+                out.entry(rel).or_default().extend(t.indexes.iter().copied());
             }
-            if let Some((t, false)) = cat.toast_owner(rel) {
+            if let Some((_, false, t)) = cat.toast_dir(rel) {
                 out.entry(rel).or_default().push(t.toast + 1);
             }
         }
