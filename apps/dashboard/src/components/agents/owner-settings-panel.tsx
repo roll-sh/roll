@@ -88,6 +88,8 @@ const KEYS: [string, string][] = [
   ["+ − 0 1", "Zoom the canvas, fit it, actual size"],
   ["⇧D", "Lay the canvas out left to right, or top-down"],
   ["⌥↑ ⌥↓", "Move a card among its siblings"],
+  [".  ⇧F10", "The focused card's or row's menu (right-click)"],
+  ["⌘F", "Find in a diff, with the diff focused (↵ next, ⇧↵ back)"],
 ];
 
 /** The browser's word on notifications, live. */

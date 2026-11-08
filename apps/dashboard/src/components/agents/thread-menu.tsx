@@ -47,7 +47,24 @@ const subscribe = (f: () => void) => {
   return () => void subs.delete(f);
 };
 
-/** Opens `thread`'s menu at the pointer (a right-click) or at the element (the menu key, ⇧F10). */
+/**
+ * "." or ⇧F10 on a focused card or row: its menu (a Mac has no menu key, and ⇧F10 there wants fn).
+ * T3's sidebar way (`lib/sidebarTree.ts`): a keyboard contextmenu on the focused element, so each
+ * right-click handler (a canvas card, the list's cursor row, a board card, a sidebar row) opens its
+ * menu at the element. The key is swallowed only when something opened.
+ */
+export function menuFromKey(e: KeyboardEvent) {
+  if (e.defaultPrevented || e.isComposing || e.altKey || e.ctrlKey || e.metaKey) return;
+  if (!((e.key === "." && !e.shiftKey) || (e.key === "F10" && e.shiftKey))) return;
+  const el = e.target;
+  if (!(el instanceof HTMLElement) || el === document.body) return;
+  if (el.closest("input, textarea, select, [contenteditable=true], .xterm, [role=menu], [role=listbox], [role=dialog]:not([data-surface])")) return;
+  const menu = new MouseEvent("contextmenu", { bubbles: true, cancelable: true, button: 0, clientX: 0, clientY: 0 });
+  el.dispatchEvent(menu);
+  if (menu.defaultPrevented) e.preventDefault();
+}
+
+/** Opens `thread`'s menu at the pointer (a right-click) or at the element (the menu key, ⇧F10, "."). */
 export function onThreadContextMenu(e: React.MouseEvent, thread: string, extra?: () => MenuEntry[]) {
   if (!hosts || e.defaultPrevented) return;
   // A right-click in a field keeps the browser's menu (copy, paste, spelling).
@@ -83,7 +100,7 @@ export function ThreadMenuButton({ thread, extra, className = "size-6 hover:bg-p
   const ref = useRef<HTMLButtonElement>(null);
   const open = useSyncExternalStore(subscribe, () => !!opened && opened.anchor === ref.current, () => false);
   return (
-    <Tip label="Thread actions">
+    <Tip label="Thread actions (. or ⇧F10)">
       <button
         ref={ref}
         type="button"
@@ -119,8 +136,10 @@ export function ThreadMenuHost() {
   useEffect(() => {
     if (readOnly) return;
     hosts++;
+    window.addEventListener("keydown", menuFromKey);
     return () => {
       hosts--;
+      window.removeEventListener("keydown", menuFromKey);
       set(null);
     };
   }, [readOnly]);

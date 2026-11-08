@@ -1,4 +1,4 @@
-import { screen, within } from "@testing-library/react";
+import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { ThreadNode } from "./nodes";
@@ -32,6 +32,12 @@ describe("ThreadNode", () => {
     expect(h.openThread).toHaveBeenCalledWith("thr_1");
     // Its menu on a right-click (T3's thread menu): rename it without opening it.
     await userEvent.pointer({ keys: "[MouseRight]", target: card });
+    expect(await screen.findByRole("menuitem", { name: "Rename…" })).toBeInTheDocument();
+    await userEvent.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("menuitem", { name: "Rename…" })).toBeNull());
+    // From the keyboard on a Mac, which has no menu key: "." on the focused card.
+    card.focus();
+    await userEvent.keyboard(".");
     await userEvent.click(await screen.findByRole("menuitem", { name: "Rename…" }));
     const title = await screen.findByRole("textbox", { name: "Title" });
     await userEvent.clear(title);
