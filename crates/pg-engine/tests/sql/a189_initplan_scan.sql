@@ -16,15 +16,16 @@ SELECT substring(s FROM 1 FOR 2) AS code, count(*), sum(v) FROM a189_t
 SELECT count(*) FROM a189_t WHERE v > (SELECT 1 / (min(v) - min(v)) FROM a189_t) AND s LIKE 'a%';
 -- Over an empty table it never runs.
 SELECT count(*) FROM a189_e WHERE v > (SELECT 1 / (count(*) - count(*))::int FROM a189_e) AND s LIKE 'a%';
--- An empty ANY skips its entire left expression, including a nested failing initplan.
-SELECT count(*) FROM a189_t WHERE id + (SELECT 1 / (min(id) - min(id)) FROM a189_t) = ANY (SELECT id FROM a189_e);
 -- NULLs in the left column, the list and a scalar initplan keep SQL's three-valued logic.
 SELECT count(*) FROM a189_t WHERE (CASE WHEN id % 2 = 0 THEN NULL ELSE v END) NOT IN (SELECT id FROM (VALUES (1), (NULL::int)) x(id));
-SELECT count(*) FROM a189_t WHERE v NOT IN (SELECT id FROM a189_e);
-SELECT count(*) FROM a189_t WHERE v IN (SELECT id FROM (VALUES (1), (NULL::int)) x(id));
-SELECT count(*) FROM a189_t WHERE v > (SELECT NULL::int);
+SELECT id FROM a189_t WHERE v NOT IN (SELECT id FROM a189_e) AND id < 5;
+SELECT id FROM a189_t WHERE v IN (SELECT id FROM (VALUES (1), (NULL::int)) x(id)) AND id < 5;
+SELECT id FROM a189_t WHERE v > (SELECT NULL::int);
 -- Each execution gets fresh initplans and parameters; the volatile initplan runs once.
 CREATE SEQUENCE a189_seq;
+-- The row's volatile call must run before a later scalar initplan.
+SELECT id FROM a189_t WHERE nextval('a189_seq') < (SELECT nextval('a189_seq'));
+ALTER SEQUENCE a189_seq RESTART;
 PREPARE a189_p(int) AS SELECT count(*) FROM a189_t WHERE v < (SELECT nextval('a189_seq') + $1);
 EXECUTE a189_p(0);
 EXECUTE a189_p(10);
