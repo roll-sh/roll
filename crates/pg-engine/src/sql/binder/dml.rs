@@ -1092,6 +1092,7 @@ impl Binder<'_, '_> {
             rules,
             source: Arc::new(source),
             target,
+            values_domains_first: sel.is_some_and(|sel| is_plain_values(sel) && sel.values_lists.len() > 1),
             on_conflict,
             returning,
             old_new,
