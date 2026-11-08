@@ -139,14 +139,15 @@ pub fn configure(args: &mut Args) {
     }
 }
 
-/// What the edge serves, from the products this process runs.
+/// What the edge serves, from the products this process runs (`None`: off, `ROLL_PRODUCTS`; its
+/// listener isn't bound and its hostnames answer 404).
 pub struct Products<'a> {
     /// The API router (every product's HTTP API, roll code, previews).
     pub api: axum::Router,
-    pub pg: Arc<pg_proxy::Proxy<pg_control::control::ProxyRouter>>,
-    pub redis: Arc<dyn redis_server::Directory>,
-    pub streams: Arc<stream_broker::Broker>,
-    pub tasks: Arc<tasks::Tasks>,
+    pub pg: Option<Arc<pg_proxy::Proxy<pg_control::control::ProxyRouter>>>,
+    pub redis: Option<Arc<dyn redis_server::Directory>>,
+    pub streams: Option<Arc<stream_broker::Broker>>,
+    pub tasks: Option<Arc<tasks::Tasks>>,
     /// The S3 API (requests run on the metadata's owner).
     pub storage: Option<axum::Router>,
     pub nosql: Option<&'a crate::nosql::Nosql>,
@@ -229,30 +230,37 @@ impl Edge {
             },
             listen: opts,
             origin_pull,
+            observe: Some(Arc::new(crate::logs::EdgeAccess)),
         };
         let routes = HttpRoutes::new(args, &p)?;
         let l = bind(e.https_listen).await?;
         let tls = roll_edge::tls::server_config(store.clone(), roll_edge::http::ALPN);
         served.push(io(roll_edge::http::serve(l, tls, Arc::new(https), Arc::new(routes), drain.clone())));
         // Postgres.
-        let l = bind(e.pg_listen).await?;
-        let tls = roll_edge::tls::server_config(store.clone(), &[roll_edge::pg::ALPN]);
-        served.push(io(roll_edge::pg::serve(l, tls, opts, hosts.clone(), p.pg.clone())));
+        if let Some(pg) = &p.pg {
+            let l = bind(e.pg_listen).await?;
+            let tls = roll_edge::tls::server_config(store.clone(), &[roll_edge::pg::ALPN]);
+            served.push(io(roll_edge::pg::serve(l, tls, opts, hosts.clone(), pg.clone())));
+        }
         // Redis: the server name picks the database.
-        let l = bind(e.redis_listen).await?;
-        let dir = p.redis.clone();
-        served.push(io(listener::serve_tls(l, plain.clone(), opts, move |tls, a| {
+        if let Some(dir) = &p.redis {
+            let l = bind(e.redis_listen).await?;
             let dir = dir.clone();
-            let fd = { use std::os::fd::AsRawFd; tls.get_ref().0.as_raw_fd() as i64 };
-            redis_server::conn::serve_with(tls, a.peer, a.local, dir, a.sni, fd)
-        })));
+            served.push(io(listener::serve_tls(l, plain.clone(), opts, move |tls, a| {
+                let dir = dir.clone();
+                let fd = { use std::os::fd::AsRawFd; tls.get_ref().0.as_raw_fd() as i64 };
+                redis_server::conn::serve_with(tls, a.peer, a.local, dir, a.sni, fd)
+            })));
+        }
         // Kafka: one virtual broker per hostname: clients are told the name they connected with.
-        let l = bind(e.kafka_listen).await?;
-        let b = p.streams.clone();
-        served.push(io(listener::serve_tls(l, plain.clone(), opts, move |tls, a| {
-            let advertised = a.sni.clone().map(|s| (s, a.local.port()));
-            stream_broker::server::serve_connection(b.clone(), tls, a.peer, true, advertised)
-        })));
+        if let Some(b) = &p.streams {
+            let l = bind(e.kafka_listen).await?;
+            let b = b.clone();
+            served.push(io(listener::serve_tls(l, plain.clone(), opts, move |tls, a| {
+                let advertised = a.sni.clone().map(|s| (s, a.local.port()));
+                stream_broker::server::serve_connection(b.clone(), tls, a.peer, true, advertised)
+            })));
+        }
         // nosql (CQL): the server name picks the database.
         if let Some(n) = p.nosql {
             let l = bind(e.nosql_listen).await?;
@@ -266,7 +274,7 @@ impl Edge {
         if let Some(q) = p.queues {
             served.extend(queue_listeners(e, q, &plain, opts).await?);
         }
-        info!(https = %e.https_listen, pg = %e.pg_listen, redis = %e.redis_listen, kafka = %e.kafka_listen, nosql = %e.nosql_listen, domain = %hosts.domain, site = %hosts.site_domain, proxy_protocol = e.proxy_protocol, "edge listening");
+        info!(https = %e.https_listen, listeners = served.len(), domain = %hosts.domain, site = %hosts.site_domain, proxy_protocol = e.proxy_protocol, "edge listening");
 
         // Healthy once there's a certificate to serve; draining from SIGTERM on.
         let (d, s) = (drain.clone(), store.clone());
@@ -282,18 +290,19 @@ impl Edge {
         if let Some(secret) = ["ROLL_CLUSTER_SECRET", "ROLL_CODE_CLUSTER_SECRET"].iter().find_map(|k| std::env::var(k).ok().filter(|v| !v.is_empty())) {
             let handlers = roll_edge::splice::Handlers::default();
             // A connection another node read the startup packet of: the proxy, as if it came here.
-            let pg = p.pg.clone();
-            handlers.register(
-                "pg",
-                Arc::new(move |io, hop| {
-                    let pg = pg.clone();
-                    Box::pin(async move {
-                        if let Err(e) = pg.serve_connection(io, Some(hop.tenant)).await {
-                            tracing::debug!(error = %e, "edge: spliced postgres connection ended with an error");
-                        }
-                    })
-                }),
-            );
+            if let Some(pg) = p.pg.clone() {
+                handlers.register(
+                    "pg",
+                    Arc::new(move |io, hop| {
+                        let pg = pg.clone();
+                        Box::pin(async move {
+                            if let Err(e) = pg.serve_connection(io, Some(hop.tenant)).await {
+                                tracing::debug!(error = %e, "edge: spliced postgres connection ended with an error");
+                            }
+                        })
+                    }),
+                );
+            }
             internal = internal.merge(roll_edge::splice::router(roll_edge::splice::Signer::new(&secret)?, handlers));
         }
         let serve = Box::pin(async move { futures::future::select_all(served).await.0 });
@@ -421,9 +430,9 @@ async fn queue_listeners(e: &EdgeArgs, q: &crate::queues::Queues, plain: &Arc<to
 struct HttpRoutes {
     api: axum::Router,
     dashboard: Option<Upstream>,
-    redis: axum::Router,
-    kafka: axum::Router,
-    tasks: axum::Router,
+    redis: Option<axum::Router>,
+    kafka: Option<axum::Router>,
+    tasks: Option<axum::Router>,
     s3: Option<axum::Router>,
     alternator: Option<axum::Router>,
     /// Queues: web-STOMP, web-MQTT and the HTTP messaging API, on their own listeners.
@@ -440,14 +449,16 @@ impl HttpRoutes {
             }
             None => None,
         };
+        // Their access lines report the matched route (crate::logs).
+        let logged = |r: axum::Router| r.layer(axum::middleware::from_fn(crate::logs::access));
         Ok(Self {
             api: p.api.clone(),
             dashboard: e.dashboard_upstream.as_deref().filter(|u| !u.is_empty()).map(Upstream::new).transpose()?,
-            redis: redis_server::http::router(p.redis.clone()),
-            kafka: stream_broker::http::router(p.streams.clone()),
-            tasks: tasks::api::router(p.tasks.clone()),
-            s3: p.storage.clone(),
-            alternator: p.nosql.map(|n| nosql_server::alternator::router(n.control.node.clone(), n.alternator_options())),
+            redis: p.redis.clone().map(|d| logged(redis_server::http::router(d))),
+            kafka: p.streams.clone().map(|b| logged(stream_broker::http::router(b))),
+            tasks: p.tasks.clone().map(|t| logged(tasks::api::router(t))),
+            s3: p.storage.clone().map(logged),
+            alternator: p.nosql.map(|n| logged(nosql_server::alternator::router(n.control.node.clone(), n.alternator_options()))),
             mq,
         })
     }
@@ -466,9 +477,9 @@ impl Routes for HttpRoutes {
             Host::Git => Target::Prefixed("/git", self.api.clone()),
             Host::Dashboard if roll_edge::hosts::is_git_path(uri.path()) => Target::Prefixed("/git", self.api.clone()),
             Host::Dashboard => self.dashboard.clone().map_or(Target::NotFound, Target::Proxy),
-            Host::Redis(_) => Target::Router(self.redis.clone()),
-            Host::Kafka(_) => Target::Router(self.kafka.clone()),
-            Host::Tasks => Target::Router(self.tasks.clone()),
+            Host::Redis(_) => router(&self.redis),
+            Host::Kafka(_) => router(&self.kafka),
+            Host::Tasks => router(&self.tasks),
             Host::S3 { .. } => router(&self.s3),
             Host::Nosql(_) => router(&self.alternator),
             Host::Mq(_) => match &self.mq {

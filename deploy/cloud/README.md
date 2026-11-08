@@ -83,8 +83,9 @@ aws secretsmanager put-secret-value --region us-east-1 --secret-id roll-cloud/sy
 Until the system database runs on the fleet, `ROLL_SYSTEM_DATABASE` can be any Postgres 18 (RDS,
 or another provider). The image trusts Amazon RDS's CA bundle.
 
-The other secrets (cluster secret, `ROLL_SECRET_KEY`, `ROLL_ADMIN_TOKEN`) are generated. Read the
-admin token with `aws secretsmanager get-secret-value --secret-id <arn>`. Keep `ROLL_SECRET_KEY`
+The other secrets (cluster secret, `ROLL_SECRET_KEY`, `ROLL_ADMIN_TOKEN`, and
+`ROLL_QUEUES_PASSWORD` for roll queues' `roll-admin` login) are generated. Read the admin token
+with `aws secretsmanager get-secret-value --secret-id <arn>`. Keep `ROLL_SECRET_KEY`
 safe: the stack keeps it when deleted, because the data in the bucket needs it.
 
 In GitHub, set the `production` environment's variable `AWS_DEPLOY_ROLE_ARN` to the
@@ -234,9 +235,14 @@ sizes) rolls the fleet one node at a time, like a deploy, but without a canary.
 | `roll-cloud-tcp-resets` | more than `ResetsPerMinute` resets from nodes and the NLB, in 3 of 5 minutes | yes |
 | `roll-cloud-task-failures` | a node crashed, failed to start or failed its health checks, in the last 5 minutes | yes |
 | `roll-cloud-errors` | more than `ErrorsPerMinute` HTTP 5xx answers, in 3 of 5 minutes | yes |
+| `roll-cloud-latency` | the slowest p99 time to the response head of code, postgres, redis, storage, nosql or tasks above `LatencyP99Ms`, in 3 of 5 minutes | yes |
+| `roll-cloud-handoff-failures` | a lease handoff failed (timed out with requests in flight, its release not written, or left by a drain), in the last 5 minutes | yes |
+| `roll-cloud-lease-takeovers` | a node took over leases their holder never released (it died or lost DynamoDB), in the last 5 minutes | yes |
 
-The 5xx and error-log counts come from rolld's JSON logs (docs/cloud/README.md, "Logs"). Logs are
-in the `/roll-cloud/nodes` log group for 30 days. A shell on a node: `aws ssm start-session
+The bake watches every alarm in the `DeployAlarms` output; ECS rolls a deploy back on all but
+`healthy-nodes`. The request and lease metrics come from rolld's JSON logs as Embedded Metric
+Format records (docs/cloud/README.md, "Logs" and "Metrics"), and the error-log count from a
+metric filter. Logs are in the `/roll-cloud/nodes` log group for 30 days. A shell on a node: `aws ssm start-session
 --target <instance id>`; there is no SSH.
 
 ## Check the files locally

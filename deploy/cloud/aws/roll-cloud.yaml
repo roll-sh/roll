@@ -15,7 +15,7 @@ Metadata:
       - Label: { default: Edge }
         Parameters: [Domain, SiteDomain, AcmeEmail, UseElasticIps]
       - Label: { default: Alarms and scaling }
-        Parameters: [ResetsPerMinute, ErrorsPerMinute, ConnectionsPerNode]
+        Parameters: [ResetsPerMinute, ErrorsPerMinute, LatencyP99Ms, ConnectionsPerNode]
       - Label: { default: GitHub }
         Parameters: [GitHubRepo, GitHubOidcProviderArn]
 
@@ -105,6 +105,13 @@ Parameters:
     Type: Number
     Default: 50
     Description: HTTP 5xx answers per minute across the fleet that count as an incident.
+  LatencyP99Ms:
+    Type: Number
+    Default: 2000
+    Description: >-
+      p99 time to the response head, in ms, of any request/response product's API (code,
+      postgres, redis, storage, nosql, tasks) that counts as an incident. Streams and queues
+      long-poll, and git pushes take as long as the pack, so they aren't in it.
   ConnectionsPerNode:
     Type: Number
     Default: 20000
@@ -324,7 +331,7 @@ Resources:
         - { AttributeName: sk, KeyType: RANGE }
       PointInTimeRecoverySpecification: { PointInTimeRecoveryEnabled: true }
 
-  # ── secrets: three generated, two filled in after creation (deploy/cloud/README.md) ──
+  # ── secrets: four generated, two filled in after creation (deploy/cloud/README.md) ──
   ClusterSecret:
     DeletionPolicy: Delete
     UpdateReplacePolicy: Delete
@@ -350,6 +357,16 @@ Resources:
       Description: ROLL_ADMIN_TOKEN, the operator token every control-plane API accepts
       KmsKeyId: !Ref Key
       GenerateSecretString: { PasswordLength: 48, ExcludePunctuation: true }
+  # roll queues' admin login (ROLL_QUEUES_USER is in the task definition): behind the edge rolld
+  # refuses RabbitMQ's guest/guest.
+  QueuesPassword:
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Description: ROLL_QUEUES_PASSWORD, roll queues' admin password
+      KmsKeyId: !Ref Key
+      GenerateSecretString: { PasswordLength: 40, ExcludePunctuation: true }
   CloudflareToken:
     DeletionPolicy: Delete
     UpdateReplacePolicy: Delete
@@ -578,7 +595,7 @@ Resources:
             Statement:
               - Effect: Allow
                 Action: secretsmanager:GetSecretValue
-                Resource: [!Ref ClusterSecret, !Ref SecretKey, !Ref AdminToken, !Ref CloudflareToken, !Ref SystemDatabase]
+                Resource: [!Ref ClusterSecret, !Ref SecretKey, !Ref AdminToken, !Ref QueuesPassword, !Ref CloudflareToken, !Ref SystemDatabase]
               - Effect: Allow
                 Action: kms:Decrypt
                 Resource: !GetAtt Key.Arn
@@ -708,12 +725,17 @@ Resources:
             - { Name: ROLL_ACME_EMAIL, Value: !Ref AcmeEmail }
             - { Name: ROLL_DASHBOARD_UPSTREAM, Value: "http://127.0.0.1:3000" }
             - { Name: ROLL_DRAIN_TIMEOUT, Value: "90" }
+            # JSON lines: the metric filters and the Embedded Metric Format metrics below read them.
             - { Name: ROLL_LOG_FORMAT, Value: json }
             - { Name: ROLL_CODE_PREVIEW_DOMAIN, Value: !Ref SiteDomain }
+            # Every product but Postgres, whose computes need Docker, until it runs in process.
+            - { Name: ROLL_PRODUCTS, Value: "redis,streams,tasks,storage,nosql,queues,code" }
+            - { Name: ROLL_QUEUES_USER, Value: roll-admin }
           Secrets:
             - { Name: ROLL_CLUSTER_SECRET, ValueFrom: !Ref ClusterSecret }
             - { Name: ROLL_SECRET_KEY, ValueFrom: !Ref SecretKey }
             - { Name: ROLL_ADMIN_TOKEN, ValueFrom: !Ref AdminToken }
+            - { Name: ROLL_QUEUES_PASSWORD, ValueFrom: !Ref QueuesPassword }
             - { Name: ROLL_CLOUDFLARE_API_TOKEN, ValueFrom: !Ref CloudflareToken }
             - { Name: ROLL_SYSTEM_DATABASE, ValueFrom: !Ref SystemDatabase }
           # A deploy's next step waits for this. Generous retries: during a DynamoDB or system
@@ -789,7 +811,7 @@ Resources:
           Rollback: true
           # Not CapacityAlarm: it's in ALARM until the first nodes are up. deploy.sh watches it
           # during a canary's bake, and ECS only moves on once each new node is healthy.
-          AlarmNames: [!Ref ResetsAlarm, !Ref TaskFailuresAlarm, !Ref ErrorsAlarm]
+          AlarmNames: [!Ref ResetsAlarm, !Ref TaskFailuresAlarm, !Ref ErrorsAlarm, !Ref LatencyAlarm, !Ref HandoffFailuresAlarm, !Ref TakeoversAlarm]
   # One node of a new version joins the fleet first and bakes (deploy/cloud/deploy.sh). Zero
   # tasks between deploys. It shares the fleet's instances' rules: never next to another node.
   CanaryService:
@@ -1268,14 +1290,9 @@ Resources:
       ComparisonOperator: GreaterThanThreshold
       TreatMissingData: notBreaching
   # rolld logs one JSON object per line (ROLL_LOG_FORMAT=json; docs/cloud/README.md, "Logs"):
-  # `level` is the event's level and an answered HTTP request carries its `status` as a number.
-  Http5xxMetric:
-    Type: AWS::Logs::MetricFilter
-    Properties:
-      LogGroupName: !Ref NodeLogs
-      FilterPattern: "{ $.status >= 500 }"
-      MetricTransformations:
-        - { MetricNamespace: RollCloud, MetricName: Http5xx, MetricValue: "1", DefaultValue: 0 }
+  # `level` is the event's level. Its request and lease metrics (Http5xx, Latency, Requests,
+  # HandoffFailures, LeaseTakeovers, …) come in the same lines as CloudWatch Embedded Metric
+  # Format records, in RollCloud by `product` and fleet-wide by `service` = rolld: no filters.
   ErrorLogsMetric:
     Type: AWS::Logs::MetricFilter
     Properties:
@@ -1290,11 +1307,68 @@ Resources:
       AlarmDescription: HTTP 5xx answers across the fleet above ErrorsPerMinute.
       Namespace: RollCloud
       MetricName: Http5xx
+      Dimensions: [{ Name: service, Value: rolld }]
       Statistic: Sum
       Period: 60
       EvaluationPeriods: 5
       DatapointsToAlarm: 3
       Threshold: !Ref ErrorsPerMinute
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+  # The slowest request/response API's p99 time to the response head (rolld's access lines).
+  LatencyAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${AWS::StackName}-latency
+      AlarmDescription: p99 time to the response head of code, postgres, redis, storage, nosql or tasks above LatencyP99Ms.
+      Metrics:
+        - { Id: code, ReturnData: false, MetricStat: { Metric: { Namespace: RollCloud, MetricName: Latency, Dimensions: [{ Name: product, Value: code }] }, Period: 60, Stat: p99 } }
+        - { Id: postgres, ReturnData: false, MetricStat: { Metric: { Namespace: RollCloud, MetricName: Latency, Dimensions: [{ Name: product, Value: postgres }] }, Period: 60, Stat: p99 } }
+        - { Id: redis, ReturnData: false, MetricStat: { Metric: { Namespace: RollCloud, MetricName: Latency, Dimensions: [{ Name: product, Value: redis }] }, Period: 60, Stat: p99 } }
+        - { Id: storage, ReturnData: false, MetricStat: { Metric: { Namespace: RollCloud, MetricName: Latency, Dimensions: [{ Name: product, Value: storage }] }, Period: 60, Stat: p99 } }
+        - { Id: nosql, ReturnData: false, MetricStat: { Metric: { Namespace: RollCloud, MetricName: Latency, Dimensions: [{ Name: product, Value: nosql }] }, Period: 60, Stat: p99 } }
+        - { Id: tasks, ReturnData: false, MetricStat: { Metric: { Namespace: RollCloud, MetricName: Latency, Dimensions: [{ Name: product, Value: tasks }] }, Period: 60, Stat: p99 } }
+        - Id: slowest
+          Expression: MAX(METRICS())
+          Label: slowest product's p99 (ms)
+          ReturnData: true
+      EvaluationPeriods: 5
+      DatapointsToAlarm: 3
+      Threshold: !Ref LatencyP99Ms
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+  # A handoff that timed out with requests in flight, whose release didn't reach DynamoDB (the
+  # key waits out a lease instead), or that a drain left behind. Planned moves never fail.
+  HandoffFailuresAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${AWS::StackName}-handoff-failures
+      AlarmDescription: A lease handoff failed (timed out, release not written, or left by a drain).
+      Namespace: RollCloud
+      MetricName: HandoffFailures
+      Dimensions: [{ Name: service, Value: rolld }]
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 5
+      DatapointsToAlarm: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+  # Leases taken from a holder that never released them: a node died or was cut off. Drains,
+  # deploys and scale-in hand leases over, so they never count.
+  TakeoversAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${AWS::StackName}-lease-takeovers
+      AlarmDescription: Nodes took over leases their holder never released (a node died or lost DynamoDB).
+      Namespace: RollCloud
+      MetricName: LeaseTakeovers
+      Dimensions: [{ Name: service, Value: rolld }]
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 5
+      DatapointsToAlarm: 1
+      Threshold: 0
       ComparisonOperator: GreaterThanThreshold
       TreatMissingData: notBreaching
 
@@ -1409,7 +1483,7 @@ Outputs:
     Value: !GetAtt CanaryService.Name
   DeployAlarms:
     Description: The alarms a canary's bake watches (and that roll a deploy back).
-    Value: !Join [",", [!Ref CapacityAlarm, !Ref ResetsAlarm, !Ref TaskFailuresAlarm, !Ref ErrorsAlarm]]
+    Value: !Join [",", [!Ref CapacityAlarm, !Ref ResetsAlarm, !Ref TaskFailuresAlarm, !Ref ErrorsAlarm, !Ref LatencyAlarm, !Ref HandoffFailuresAlarm, !Ref TakeoversAlarm]]
   SuppliedSecrets:
     Description: Secrets to fill in after creation (deploy/cloud/README.md).
     Value: !Join [",", [!Ref CloudflareToken, !Ref SystemDatabase]]

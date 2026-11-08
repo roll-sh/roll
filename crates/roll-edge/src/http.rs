@@ -4,7 +4,9 @@
 //!
 //! Every request reaches its handler with the client's address as `ConnectInfo<SocketAddr>` and
 //! in `X-Forwarded-For` (whatever the client sent there is dropped): the PROXY header's source,
-//! or, for a hostname Cloudflare proxies and a peer that is Cloudflare, `CF-Connecting-IP`.
+//! or, for a hostname Cloudflare proxies and a peer that is Cloudflare, `CF-Connecting-IP`; and
+//! with a [`ViaEdge`] extension. Every response, the listener's own included, passes through
+//! [`HttpsConfig::observe`] (access logs, metrics).
 
 use crate::drain::Drain;
 use crate::hosts::{Host, Hostnames};
@@ -12,7 +14,7 @@ use crate::listener::{self, Accepted, ListenOptions};
 use crate::trusted::TrustedProxies;
 use axum::body::Body;
 use axum::extract::ConnectInfo;
-use axum::http::{HeaderMap, HeaderName, HeaderValue, Request, Response, StatusCode, Uri, header};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, Request, Response, StatusCode, Uri, header};
 use hyper::body::Incoming;
 use hyper_util::client::legacy::Client;
 use hyper_util::client::legacy::connect::HttpConnector;
@@ -20,7 +22,7 @@ use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use std::convert::Infallible;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
 use tokio_rustls::rustls::ServerConfig;
 use tower::ServiceExt as _;
@@ -49,6 +51,16 @@ impl<F: Fn(&Host, &Uri, &HeaderMap) -> Target + Send + Sync + 'static> Routes fo
     }
 }
 
+/// Marks a request that came in through the HTTPS listener (a request extension), so a router's
+/// own access logging can leave the request to [`Observe`].
+#[derive(Clone, Copy, Debug)]
+pub struct ViaEdge;
+
+/// Sees every response the listener sends (it may wrap the body, e.g. to log when it ends).
+pub trait Observe: Send + Sync + 'static {
+    fn observe(&self, host: &Host, method: &Method, started: Instant, resp: Response<Body>) -> Response<Body>;
+}
+
 pub struct HttpsConfig {
     pub hosts: Hostnames,
     /// Whose `CF-Connecting-IP` to believe.
@@ -58,6 +70,7 @@ pub struct HttpsConfig {
     /// for the hostnames Cloudflare proxies. Requests for those hostnames on a connection
     /// without that certificate are refused, whatever its server name was.
     pub origin_pull: Option<Arc<ServerConfig>>,
+    pub observe: Option<Arc<dyn Observe>>,
 }
 
 /// The ALPN the HTTPS listener offers.
@@ -126,14 +139,26 @@ fn text(status: StatusCode, msg: &'static str) -> Response<Body> {
 
 const FORWARDING_HEADERS: &[&str] = &["x-forwarded-for", "x-forwarded-proto", "x-forwarded-host", "x-real-ip", "forwarded"];
 
-async fn handle(mut req: Request<Incoming>, accepted: &Accepted, cfg: &HttpsConfig, routes: &dyn Routes) -> Response<Body> {
-    let host = req.headers().get(header::HOST).and_then(|h| h.to_str().ok()).map(str::to_string).or_else(|| req.uri().authority().map(|a| a.to_string()));
-    let Some(host_name) = host else { return text(StatusCode::BAD_REQUEST, "no Host header\n") };
-    let host = cfg.hosts.classify(&host_name);
+async fn handle(req: Request<Incoming>, accepted: &Accepted, cfg: &HttpsConfig, routes: &dyn Routes) -> Response<Body> {
+    let started = Instant::now();
+    let method = req.method().clone();
+    let host_name = req.headers().get(header::HOST).and_then(|h| h.to_str().ok()).map(str::to_string).or_else(|| req.uri().authority().map(|a| a.to_string()));
+    let host = host_name.as_deref().map_or(Host::Unknown, |h| cfg.hosts.classify(h));
+    let resp = match host_name {
+        Some(name) => route(req, accepted, cfg, routes, &host, &name).await,
+        None => text(StatusCode::BAD_REQUEST, "no Host header\n"),
+    };
+    match &cfg.observe {
+        Some(o) => o.observe(&host, &method, started, resp),
+        None => resp,
+    }
+}
+
+async fn route(mut req: Request<Incoming>, accepted: &Accepted, cfg: &HttpsConfig, routes: &dyn Routes, host: &Host, host_name: &str) -> Response<Body> {
     if cfg.origin_pull.is_some() && host.proxied() && !accepted.client_verified {
         return text(StatusCode::FORBIDDEN, "this hostname is served only through Cloudflare\n");
     }
-    let client = client_addr(accepted, &host, req.headers(), &cfg.cloudflare);
+    let client = client_addr(accepted, host, req.headers(), &cfg.cloudflare);
     let headers = req.headers_mut();
     for h in FORWARDING_HEADERS {
         headers.remove(*h);
@@ -146,12 +171,13 @@ async fn handle(mut req: Request<Incoming>, accepted: &Accepted, cfg: &HttpsConf
         headers.insert(HeaderName::from_static("x-forwarded-for"), v);
     }
     headers.insert(HeaderName::from_static("x-forwarded-proto"), HeaderValue::from_static("https"));
-    if let Ok(v) = HeaderValue::from_str(&host_name) {
+    if let Ok(v) = HeaderValue::from_str(host_name) {
         headers.insert(HeaderName::from_static("x-forwarded-host"), v);
     }
     req.extensions_mut().insert(ConnectInfo(client));
+    req.extensions_mut().insert(ViaEdge);
     let req = req.map(Body::new);
-    match routes.target(&host, req.uri(), req.headers()) {
+    match routes.target(host, req.uri(), req.headers()) {
         Target::Router(r) => r.oneshot(req).await.unwrap_or_else(|e| match e {}),
         Target::Prefixed(prefix, r) => {
             let (mut parts, body) = req.into_parts();
