@@ -138,14 +138,15 @@ pub fn set_idle_hook(f: fn()) {
 static WAIT_SPIN_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Connection threads at work (not waiting for their clients) and threads polling their
-/// sockets, counted while a spin is set: a thread polls only while both together fit in half
-/// the cores the process may run on, so polling doesn't take the core a woken thread needs
-/// (it counts as working only once it runs). At 32 clients on 4 cores, two pollers at most
-/// cost 15% of the throughput; while working and polling threads filled all 4 cores, 8
-/// clients lost 8%.
+/// sockets, counted while a spin is set: a thread polls only while both together fit in a
+/// quarter of the cores the process may run on (on 4 cores: only while no other connection
+/// works or polls), so polling never takes the core a woken thread needs (it counts as
+/// working only once it runs). On 4 cores, two pollers at most cost 32 clients 15% of their
+/// throughput; working and polling threads up to all 4 cores cost 8 clients 8%, up to 2
+/// cost 8 clients' range reads 9%.
 static WORKING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 static SPINNING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-static HALF_CORES: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+static QUARTER_CORES: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
 
 /// Poll for a client's next message up to this long before sleeping, while cores are free
 /// (performance mode's): a reply that comes back within it skips the sleep and the wake-up.
@@ -182,8 +183,8 @@ fn spin_read(s: &TcpStream, buf: &mut [u8]) -> Option<std::io::Result<usize>> {
     if ns == 0 || buf.is_empty() {
         return None;
     }
-    let half = *HALF_CORES.get_or_init(|| std::thread::available_parallelism().map_or(1, |n| (n.get() / 2).max(1)));
-    let fits = || WORKING.load(Ordering::Relaxed) + SPINNING.load(Ordering::Relaxed) <= half;
+    let quarter = *QUARTER_CORES.get_or_init(|| std::thread::available_parallelism().map_or(1, |n| (n.get() / 4).max(1)));
+    let fits = || WORKING.load(Ordering::Relaxed) + SPINNING.load(Ordering::Relaxed) <= quarter;
     SPINNING.fetch_add(1, Ordering::Relaxed);
     let start = std::time::Instant::now();
     let r = loop {
