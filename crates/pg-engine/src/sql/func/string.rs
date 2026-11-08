@@ -174,6 +174,11 @@ pub fn substr_chars(st: &str, start: i64, count: Option<i64>) -> Result<String> 
         .take((end - from) as usize)
         .collect())
 }
+/// Whether `imp` is text's substr / substring(text, int, int) (`exec::kernel`'s `Substr`).
+pub fn is_substr(imp: super::FnImpl) -> bool {
+    std::ptr::fn_addr_eq(imp, substr as super::FnImpl)
+}
+
 fn substr(a: &[Value], _: &FnCtx) -> Result<Value> {
     let count = a.get(2).map(int_arg);
     Ok(text(substr_chars(s(&a[0]), int_arg(&a[1]), count)?))
