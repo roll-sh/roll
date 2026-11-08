@@ -4197,7 +4197,7 @@ impl Ddl<'_, '_> {
                 "too many column names were specified",
             ));
         }
-        let mut cols: Vec<OutCol> = bq.cols.clone();
+        let mut cols: Vec<OutCol> = bq.cols.to_vec();
         for (c, n) in cols.iter_mut().zip(&colnames) {
             c.name = n.clone();
         }
