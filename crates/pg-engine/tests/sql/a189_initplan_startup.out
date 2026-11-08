@@ -1,0 +1,118 @@
+> CREATE TABLE a189_t (id int, v int, s text, d date)
+-- CREATE TABLE
+
+> INSERT INTO a189_t SELECT i, i % 100, md5(i::text), date '2000-01-01' + i % 3000 FROM generate_series(1, 200000) i
+-- INSERT 0 200000
+
+> CREATE TABLE a189_e (id int, v int, s text)
+-- CREATE TABLE
+
+> ANALYZE a189_t
+-- ANALYZE
+
+> SELECT count(*) FROM a189_t WHERE id + (SELECT 1 / (min(id) - min(id)) FROM a189_t) = ANY (SELECT id FROM a189_e)
+ERROR 22012: division by zero
+
+> SELECT count(*) FROM a189_t WHERE 1 / (id - id) = ANY (SELECT id FROM a189_e)
+count:int8
+0
+-- SELECT 1
+
+> SELECT count(*) FROM a189_e WHERE id + (SELECT 1 / (min(id) - min(id)) FROM a189_t) = ANY (SELECT id FROM a189_e)
+count:int8
+0
+-- SELECT 1
+
+> SELECT NULL::int = ANY (SELECT id FROM a189_e) AS any_empty, NULL::int <> ALL (SELECT id FROM a189_e) AS all_empty
+any_empty:bool | all_empty:bool
+f | t
+-- SELECT 1
+
+> SELECT id FROM a189_t WHERE id + (SELECT 1 / (min(id) - min(id)) FROM a189_t) = ANY (SELECT id FROM a189_e) LIMIT 0
+id:int4
+-- SELECT 0
+
+> SELECT (SELECT 1 / (min(id) - min(id)) FROM a189_t) FROM a189_t WHERE id < 0
+?column?:int4
+-- SELECT 0
+
+> SELECT count(*) FROM a189_t WHERE v < 0 AND v > (SELECT 1 / (min(v) - min(v)) FROM a189_t)
+ERROR 22012: division by zero
+
+> SET max_parallel_workers_per_gather=0
+-- SET
+
+> SELECT count(*) FROM a189_t WHERE id + (SELECT 1 / (min(id) - min(id)) FROM a189_t) = ANY (SELECT id FROM a189_e)
+count:int8
+0
+-- SELECT 1
+
+> SELECT count(*) FROM a189_t WHERE v < 0 AND v > (SELECT 1 / (min(v) - min(v)) FROM a189_t)
+count:int8
+0
+-- SELECT 1
+
+> RESET max_parallel_workers_per_gather
+-- RESET
+
+> PREPARE a189_start(int) AS SELECT count(*) FROM a189_t WHERE id + (SELECT 1 / (min(id) - min(id) + $1) FROM a189_t) = ANY (SELECT id FROM a189_e)
+-- PREPARE
+
+> SET plan_cache_mode=force_generic_plan
+-- SET
+
+> EXECUTE a189_start(1)
+count:int8
+0
+-- SELECT 1
+
+> EXECUTE a189_start(0)
+ERROR 22012: division by zero
+
+> EXECUTE a189_start(1)
+count:int8
+0
+-- SELECT 1
+
+> SET plan_cache_mode=force_custom_plan
+-- SET
+
+> EXECUTE a189_start(1)
+count:int8
+0
+-- SELECT 1
+
+> EXECUTE a189_start(0)
+ERROR 22012: division by zero
+
+> EXECUTE a189_start(1)
+count:int8
+0
+-- SELECT 1
+
+> DEALLOCATE a189_start
+-- DEALLOCATE
+
+> RESET plan_cache_mode
+-- RESET
+
+> BEGIN
+-- BEGIN
+
+> SELECT count(*) FROM a189_t WHERE id + (SELECT 1 / (min(id) - min(id)) FROM a189_t) = ANY (SELECT id FROM a189_e)
+ERROR 22012: division by zero
+
+> SELECT 42
+ERROR 25P02: current transaction is aborted, commands ignored until end of transaction block
+
+> ROLLBACK
+-- ROLLBACK
+
+> SELECT 42
+?column?:int4
+42
+-- SELECT 1
+
+> DROP TABLE a189_t, a189_e
+-- DROP TABLE
+
