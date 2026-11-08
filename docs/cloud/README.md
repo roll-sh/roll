@@ -8,7 +8,7 @@ of each part is at the end.
 ```
   customers: browsers, git, psql, redis-cli, Kafka/CQL/AMQP/MQTT clients, S3 SDKs, agents
           │ HTTP (proxied)                              │ TCP (DNS only)
-     Cloudflare: DNS for roll.cloud and roll.site, WAF, cache, the CDN Worker
+     Cloudflare: DNS for roll.sh and roll.site, WAF, cache, the CDN Worker
           │                                             │
      AWS Network Load Balancer, 3 zones, TCP passthrough, PROXY protocol v2
           │
@@ -114,24 +114,31 @@ written once in SQLite's dialect), as roll code's did.
 
 | hostname | what | Cloudflare |
 | --- | --- | --- |
-| `roll.cloud` | dashboard | proxied |
-| `api.roll.cloud` | every product's HTTP API, MCP, agents' WebSocket | proxied |
-| `git.roll.cloud` | git smart HTTP (`git.roll.cloud/<owner>/<repo>.git`) | DNS only |
-| `<id>.pg.us-east-1.roll.cloud:5432` | Postgres endpoints | DNS only |
-| `<id>.redis.us-east-1.roll.cloud:6379` (TLS), `https://<id>.redis.us-east-1.roll.cloud` (REST) | Redis | DNS only |
-| `<id>.kafka.us-east-1.roll.cloud:9092` (TLS + SASL), HTTPS REST on 443 | streams | DNS only |
-| `<id>.cql.us-east-1.roll.cloud:9042` (TLS), HTTPS Alternator on 443 | nosql | DNS only |
-| `<id>.mq.us-east-1.roll.cloud` 5671 AMQPS, 8883 MQTTS, 61614 STOMP TLS, 5551 streams, 443 web | queues | DNS only |
-| `s3.us-east-1.roll.cloud`, `<bucket>.s3.us-east-1.roll.cloud` | S3 API (path and virtual-host style) | DNS only |
-| `tasks.us-east-1.roll.cloud` | tasks API | DNS only |
+| `roll.sh` | the site and dashboard (`/dashboard`), public repo pages (`/<owner>/<repo>`) | proxied |
+| `roll.sh/<owner>/<repo>.git` | git smart HTTP; the edge sends `.git` paths straight to code, not through the dashboard | proxied |
+| `git.roll.sh/<owner>/<repo>.git` | the same, without Cloudflare's 100 MB request limit (big first pushes) | DNS only |
+| `api.roll.sh` | every product's HTTP API, MCP, agents' WebSocket | proxied |
+| `<id>.pg.roll.sh:5432` | Postgres endpoints | DNS only |
+| `<id>.redis.roll.sh:6379` (TLS), `https://<id>.redis.roll.sh` (REST) | Redis | DNS only |
+| `<id>.kafka.roll.sh:9092` (TLS + SASL), HTTPS REST on 443 | streams | DNS only |
+| `<id>.nosql.roll.sh:9042` (TLS), HTTPS Alternator on 443 | nosql (the name the nosql docs already use) | DNS only |
+| `<id>.mq.roll.sh` 5671 AMQPS, 8883 MQTTS, 61614 STOMP TLS, 5551 streams, 443 web | queues | DNS only |
+| `tasks.roll.sh` | tasks API | DNS only |
+| `s3.roll.site`, `<bucket>.s3.roll.site` | S3 API (path and virtual-host style) | DNS only |
 | `<bucket>.roll.site`, custom domains | public buckets and sites (the CDN Worker) | proxied |
 | `chg-<id>.roll.site` | code previews | proxied |
-| `origin.us-east-1.roll.cloud` | the NLB, the target of every record above | DNS only |
+| `origin.roll.sh` | the NLB, the target of every DNS-only record above | DNS only |
 
-- **roll.cloud** is the product; **roll.site** only ever serves user content, so nothing a user
-  uploads shares cookies, origin or reputation with the dashboard (roll.site goes on the Public
-  Suffix List). The region in hostnames leaves room for more regions without renaming anything.
-- Wildcards are one record each (`*.pg.us-east-1` and so on) pointing at the NLB.
+- **roll.sh** is the product; **roll.site** serves only user content: anything a user uploaded
+  or built that a browser could render (objects, presigned S3 URLs, previews, sites). Nothing
+  there shares cookies, origin or reputation with the dashboard, the way S3 lives on
+  amazonaws.com rather than amazon.com. roll.site goes on the Public Suffix List.
+- Raw file content from the API (`api.roll.sh`, e.g. a repo's raw files) is served as
+  `text/plain` or an attachment with `X-Content-Type-Options: nosniff`, never as HTML.
+- Wildcards are one record each (`*.pg.roll.sh` and so on) pointing at the NLB. The first
+  region uses the short names; a second region adds `<id>.<product>.<region>.roll.sh` and
+  existing hostnames keep working.
+- roll.cloud isn't needed. If it's bought, it only redirects to roll.sh.
 
 ## Deploys, scaling and failure
 
@@ -214,9 +221,9 @@ The contract between the stack, the image and rolld. Each setting is a flag with
 | `ROLL_S3_BUCKET`, `AWS_REGION` | `roll-cloud-data-<account>`, `us-east-1` | all product data, under per-product prefixes |
 | `ROLL_SECRET_KEY` | from Secrets Manager | seals owners' keys and the stored certificates |
 | `ROLL_ADMIN_TOKEN` | from Secrets Manager | the operator token every control-plane API accepts |
-| `ROLL_DASHBOARD_ORIGIN` | `https://roll.cloud` | the only origin CORS allows |
+| `ROLL_DASHBOARD_ORIGIN` | `https://roll.sh` | the only origin CORS allows |
 | `ROLL_EDGE` | `1` | public listeners with TLS, SNI routing and PROXY protocol |
-| `ROLL_EDGE_DOMAIN`, `ROLL_EDGE_SITE_DOMAIN`, `ROLL_EDGE_REGION` | `roll.cloud`, `roll.site`, `us-east-1` | hostnames are built from these |
+| `ROLL_EDGE_DOMAIN`, `ROLL_EDGE_SITE_DOMAIN`, `ROLL_EDGE_REGION` | `roll.sh`, `roll.site`, `us-east-1` | hostnames are built from these (the region appears in names only outside the first region) |
 | `ROLL_EDGE_PROXY_PROTOCOL` | `1` | expect PROXY protocol v2 from the NLB |
 | `ROLL_ACME_DIRECTORY`, `ROLL_ACME_EMAIL` | Let's Encrypt production, ops address | |
 | `ROLL_CLOUDFLARE_API_TOKEN` | from Secrets Manager | DNS edit on both zones, for DNS-01 only |
