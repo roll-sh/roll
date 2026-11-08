@@ -1283,14 +1283,15 @@ impl CopyReader<'_> {
     /// The first row from `from` on with a NULL a NOT NULL column refuses.
     fn null_violation(&self, from: usize) -> Option<usize> {
         let st = &self.st;
-        if st.not_null_missing && st.rows.len() > from {
-            return Some(from);
+        if st.not_null_missing {
+            return (from..st.rows.len()).find(|&r| !matches!(st.rows[r], CopyRow::Skipped(..)));
         }
         let cols = st.not_null.as_ref()?;
         (from..st.rows.len()).find(|&r| {
             cols.iter().any(|&k| match &st.rows[r] {
                 CopyRow::Values(v) => matches!(v.get(k), Some(Value::Null)),
                 CopyRow::Exprs(e) => matches!(e.get(k), Some(Expr::Const(Value::Null, _))),
+                CopyRow::Skipped(..) => false,
             })
         })
     }
@@ -1378,26 +1379,36 @@ impl CopyReader<'_> {
         let lines = std::mem::take(&mut self.st.lines);
         self.batch_bytes = 0;
         // (A plain COPY's rows need none of `prepare`'s work.)
-        let (rows, lines) = if self.st.plain {
+        let (mut rows, lines) = if self.st.plain {
             (rows, lines)
         } else {
-            let exprs = rows
-                .into_iter()
-                .map(|r| match r {
-                    CopyRow::Exprs(e) => e,
-                    CopyRow::Values(v) => v.into_iter().zip(&self.c.target).map(|(v, &col)| Expr::Const(v, self.c.table.columns[col].ty.clone())).collect(),
-                })
-                .collect();
-            let (rows, lines) = self.prepare(exprs, lines, rules, ctx)?;
-            (rows.into_iter().map(CopyRow::Exprs).collect(), lines)
+            let (rows, lines, failed) = self.prepare(rows, lines, rules, ctx)?;
+            if let Some(e) = failed {
+                self.failed = Some(e);
+                self.eof = true;
+            }
+            (rows, lines)
         };
+        if self.st.skipped > 0 {
+            for row in &mut rows {
+                if let CopyRow::Skipped(exprs, _) = row {
+                    for (col, default) in rules.defaults.iter().enumerate() {
+                        if !self.c.target.contains(&col) && !self.c.table.columns[col].dropped && self.c.table.columns[col].generated.is_none()
+                            && let Some(default) = default
+                        {
+                            exprs.push(default.clone());
+                        }
+                    }
+                }
+            }
+        }
         if let Some(p) = ctx.sess.copy_progress.borrow_mut().as_mut() {
             p.bytes_processed = self.st.bytes as i64;
             p.tuples_excluded = self.excluded;
             p.tuples_skipped = self.st.skipped as i64;
         }
         let mut feed = copy.feed.lock().unwrap();
-        feed.fed += rows.len();
+        feed.fed += rows.iter().filter(|r| !matches!(r, CopyRow::Skipped(..))).count();
         feed.rows
             .extend(rows.into_iter().zip(lines).map(|(r, (line, raw))| (r, line, raw)));
         // (Not done with a record's error still to raise: the next batch raises it.)
@@ -1420,96 +1431,75 @@ impl CopyReader<'_> {
     #[allow(clippy::type_complexity)]
     fn prepare(
         &mut self,
-        mut rows: Vec<Vec<Expr>>,
-        mut lines: Vec<(usize, String)>,
+        rows: Vec<CopyRow>,
+        lines: Vec<(usize, String)>,
         rules: &crate::sql::plan::TableRules,
         ctx: &ExecCtx,
-    ) -> Result<(Vec<Vec<Expr>>, Vec<(usize, String)>)> {
+    ) -> Result<(Vec<CopyRow>, Vec<(usize, String)>, Option<Error>)> {
         let (c, t, fmt) = (self.c, &self.c.table, self.fmt);
         let f = &c.format;
         let target = &c.target;
-        if let Some(filter) = &c.filter {
-            let all = self.target();
-            let mut kept = Vec::with_capacity(rows.len());
-            let mut kept_lines = Vec::with_capacity(lines.len());
-            for (row, line) in rows.into_iter().zip(lines) {
-                let mut full = vec![Value::Null; t.columns.len()];
-                for (e, &col) in row.iter().zip(target) {
-                    full[col] = match e {
-                        Expr::Default(_) => match &rules.defaults[col] {
-                            Some(d) => crate::sql::expr::eval(d, &[], ctx)?,
-                            None => Value::Null,
-                        },
-                        e => crate::sql::expr::eval(e, &[], ctx)?,
+        let mut kept = Vec::with_capacity(rows.len());
+        let mut kept_lines = Vec::with_capacity(lines.len());
+        for (row, line) in rows.into_iter().zip(lines) {
+            let (mut row, mut skipped) = match row {
+                CopyRow::Exprs(e) => (e, None),
+                CopyRow::Values(v) => (
+                    v.into_iter()
+                        .zip(target)
+                        .map(|(v, &col)| Expr::Const(v, t.columns[col].ty.clone()))
+                        .collect(),
+                    None,
+                ),
+                CopyRow::Skipped(e, context) => (e, Some(context)),
+            };
+            // Domain input functions run before the missing columns' defaults, like the
+            // base input functions in parse_copy_data. A hard error waits for earlier rows.
+            if skipped.is_none() {
+                for (k, (e, &col)) in row.iter().zip(target).enumerate() {
+                    let (Expr::Const(v, ty), Some(Some(d))) = (e, rules.domain_checks.get(col))
+                    else {
+                        continue;
                     };
-                }
-                for &col in &all {
-                    if !target.contains(&col)
-                        && let Some(d) = &rules.defaults[col]
-                    {
-                        full[col] = crate::sql::expr::eval(d, &[], ctx)?;
-                    }
-                }
-                if !crate::sql::expr::eval_bool(filter, &full, ctx)? {
-                    self.excluded += 1;
-                    continue;
-                }
-                kept.push(
-                    all.iter()
-                        .map(|&i| Expr::Const(full[i].clone(), t.columns[i].ty.clone()))
-                        .collect::<Vec<_>>(),
-                );
-                kept_lines.push(line);
-            }
-            // (The rows that pass carry every column, their values computed.)
-            return Ok((kept, kept_lines));
-        }
-        // A domain's input function checks each value (NULL too) as the line is read.
-        let mut keep = vec![true; rows.len()];
-        'rows: for (k, (row, (line, _))) in rows.iter().zip(&lines).enumerate() {
-            for (e, &col) in row.iter().zip(target) {
-                let (Expr::Const(v, ty), Some(Some(d))) = (e, rules.domain_checks.get(col)) else {
-                    continue;
-                };
-                if let Err(err) = d.check(v, ctx) {
-                    let colname = &t.columns[col].name;
-                    let shown = if v.is_null() {
-                        "null input".to_string()
-                    } else {
-                        format!("\"{}\"", format_value(v, ty, fmt))
-                    };
-                    // ON_ERROR ignore: the domain's input function failed softly.
-                    if f.on_error_ignore {
+                    if let Err(err) = d.check(v, ctx) {
+                        let colname = &t.columns[col].name;
+                        let shown = if v.is_null() {
+                            "null input".to_string()
+                        } else {
+                            format!("\"{}\"", format_value(v, ty, fmt))
+                        };
+                        let context = format!(
+                            "COPY {}, line {}, column {colname}: {shown}",
+                            t.name, line.0
+                        );
+                        if !f.on_error_ignore {
+                            return Ok((kept, kept_lines, Some(err.context(context))));
+                        }
                         self.st.skipped += 1;
                         if let Some(limit) = f.reject_limit
                             && self.st.skipped as i64 > limit
                         {
-                            return Err(Error::new(code::INVALID_TEXT_REPRESENTATION, format!("skipped more than REJECT_LIMIT ({limit}) rows due to data type incompatibility"))
-                                .context(format!("COPY {}, line {line}, column {colname}: {shown}", t.name)));
+                            let mut prefix = row[..k].to_vec();
+                            for (e, &col) in prefix.iter_mut().zip(target) {
+                                if let Expr::Default(ty) = e {
+                                    *e = rules.defaults[col]
+                                        .clone()
+                                        .unwrap_or_else(|| Expr::null(ty.clone()));
+                                }
+                            }
+                            kept.push(CopyRow::Skipped(prefix, context.clone()));
+                            kept_lines.push(line);
+                            return Ok((kept, kept_lines, Some(Error::new(code::INVALID_TEXT_REPRESENTATION, format!("skipped more than REJECT_LIMIT ({limit}) rows due to data type incompatibility")).context(context))));
                         }
                         if f.log_verbosity >= 2 {
-                            ctx.notice(
-                                super::notice(format!("skipping row due to data type incompatibility at line {line} for column \"{colname}\": {shown}")).context(format!("COPY {}", t.name)),
-                            );
+                            ctx.notice(super::notice(format!("skipping row due to data type incompatibility at line {} for column \"{colname}\": {shown}", line.0)).context(format!("COPY {}", t.name)));
                         }
-                        keep[k] = false;
-                        continue 'rows;
+                        row.truncate(k);
+                        skipped = Some(context);
+                        break;
                     }
-                    return Err(err.context(format!(
-                        "COPY {}, line {line}, column {colname}: {shown}",
-                        t.name
-                    )));
                 }
             }
-        }
-        if keep.contains(&false) {
-            let mut it = keep.iter();
-            rows.retain(|_| *it.next().unwrap());
-            let mut it = keep.iter();
-            lines.retain(|_| *it.next().unwrap());
-        }
-        // DEFAULT markers take the column default.
-        for row in &mut rows {
             for (e, &col) in row.iter_mut().zip(target) {
                 if let Expr::Default(ty) = e {
                     *e = rules.defaults[col]
@@ -1517,8 +1507,55 @@ impl CopyReader<'_> {
                         .unwrap_or_else(|| Expr::null(ty.clone()));
                 }
             }
+            if let Some(filter) = &c.filter {
+                let full: Result<Vec<Value>> = (|| {
+                    let mut values = row
+                        .iter()
+                        .map(|e| crate::sql::expr::eval(e, &[], ctx))
+                        .collect::<Result<Vec<_>>>()?;
+                    if skipped.is_some() {
+                        values.resize(target.len(), Value::Null);
+                    }
+                    // Even a skipped row evaluates all omitted columns' defaults.
+                    let full = crate::exec::dml::new_row(rules, target, values, ctx)?;
+                    Ok(full)
+                })();
+                let full = match full {
+                    Ok(full) => full,
+                    Err(mut e) => {
+                        if let Some(context) = &skipped {
+                            e.context = Some(match e.context.take() {
+                                Some(inner) => format!("{inner}\n{context}").into_boxed_str(),
+                                None => context.clone().into_boxed_str(),
+                            });
+                        }
+                        return Ok((kept, kept_lines, Some(e)));
+                    }
+                };
+                if skipped.is_some() {
+                    continue;
+                }
+                match crate::sql::expr::eval_bool(filter, &full, ctx) {
+                    Ok(false) => {
+                        self.excluded += 1;
+                        continue;
+                    }
+                    Ok(true) => {}
+                    Err(e) => return Ok((kept, kept_lines, Some(e))),
+                }
+                row = self
+                    .target()
+                    .iter()
+                    .map(|&i| Expr::Const(full[i].clone(), t.columns[i].ty.clone()))
+                    .collect();
+            }
+            kept.push(match skipped {
+                Some(context) => CopyRow::Skipped(row, context),
+                None => CopyRow::Exprs(row),
+            });
+            kept_lines.push(line);
         }
-        Ok((rows, lines))
+        Ok((kept, kept_lines, None))
     }
 }
 
@@ -1703,6 +1740,8 @@ pub(crate) fn parse_copy_data(
                         if let Some(limit) = f.reject_limit
                             && *skipped as i64 > limit
                         {
+                            rows.push(CopyRow::Skipped(row, format!("COPY {}, line {line}, column {colname}: \"{s}\"", t.name)));
+                            lines.push((line, raw));
                             return Err(Error::new(code::INVALID_TEXT_REPRESENTATION, format!("skipped more than REJECT_LIMIT ({limit}) rows due to data type incompatibility"))
                                 .context(format!("COPY {}, line {line}, column {colname}: \"{s}\"", t.name)));
                         }
@@ -1711,6 +1750,8 @@ pub(crate) fn parse_copy_data(
                                 super::notice(format!("skipping row due to data type incompatibility at line {line} for column \"{colname}\": \"{s}\"")).context(format!("COPY {}", t.name)),
                             );
                         }
+                        rows.push(CopyRow::Skipped(row, format!("COPY {}, line {line}, column {colname}: \"{s}\"", t.name)));
+                        lines.push((line, raw));
                         continue 'records;
                     }
                     Err(e) => {
@@ -1788,8 +1829,9 @@ impl CopyInParsed {
         self.lines.clear();
         let rows = std::mem::take(&mut self.rows)
             .into_iter()
-            .map(|r| match r {
-                CopyRow::Exprs(e) => e,
+            .filter_map(|r| match r {
+                CopyRow::Exprs(e) => Some(e),
+                CopyRow::Skipped(..) => None,
                 // (Only `CopyReader` reads plain.)
                 CopyRow::Values(_) => unreachable!("file_fdw's rows are never plain"),
             })
