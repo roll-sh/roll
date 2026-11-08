@@ -454,22 +454,24 @@ impl DynamoDb {
     }
 
     /// Take one key if it's free, ours, or its holder is gone. `Some(epoch)` if it's ours now.
-    fn acquire_one(&self, k: &str) -> Result<Option<i64>> {
+    /// Take `k` if we may: its epoch, and whether it was taken from a holder that never
+    /// released it (gone, or silent for a lease length).
+    fn acquire_one(&self, k: &str) -> Result<Option<(i64, bool)>> {
         let inc = self.inc();
         let cur = self.get("lease", k)?;
         // (rvn read, new epoch, a silent holder whose hb the takeover checks)
-        let (rvn, epoch, silent) = match &cur {
-            None => (None, 1, None),
+        let (rvn, epoch, silent, took) = match &cur {
+            None => (None, 1, None, false),
             Some(l) => {
                 let (holder, linc, epoch, free) = (get_s(l, "holder"), get_s(l, "inc"), get_n(l, "epoch"), get_b(l, "free"));
                 let ours = holder == self.id() && linc == inc;
                 if ours && !free {
-                    return Ok(Some(epoch));
+                    return Ok(Some((epoch, false)));
                 }
                 let next = if ours { epoch } else { epoch + 1 };
                 let rvn = Some(get_s(l, "rvn"));
                 if free || ours {
-                    (rvn, next, None)
+                    (rvn, next, None, false)
                 } else {
                     // Look at the holder's node item now (and remember what we saw).
                     let item = self.get("node", &holder)?;
@@ -487,8 +489,8 @@ impl DynamoDb {
                     }
                     match self.holder_gone(&st, &holder, &linc, now) {
                         None => return Ok(None),
-                        Some(hb) if hb.is_empty() => (rvn, next, None),
-                        Some(hb) => (rvn, next, Some((holder, linc, hb))),
+                        Some(hb) if hb.is_empty() => (rvn, next, None, true),
+                        Some(hb) => (rvn, next, Some((holder, linc, hb)), true),
                     }
                 }
             }
@@ -526,7 +528,7 @@ impl DynamoDb {
             Ok(Outcome::Done) => {
                 st.mine.insert(k.to_string(), epoch);
                 st.doubt.remove(k);
-                Ok(Some(epoch))
+                Ok(Some((epoch, took)))
             }
             Ok(Outcome::Refused) => Ok(None),
             Err(e) => {
@@ -679,7 +681,7 @@ impl Backend for DynamoDb {
                 let mut st = self.state.lock();
                 st.confirmed = Some(basis);
                 let leases = st.mine.iter().map(|(k, e)| (k.clone(), *e)).collect();
-                return Ok(Confirmed { leases, basis });
+                return Ok(Confirmed { leases, basis, taken_over: 0 });
             }
             // Our node item changed under us: cleaned up, taken by another process, or another
             // node took one of our leases (gen).
@@ -694,7 +696,7 @@ impl Backend for DynamoDb {
                         (st.inc, st.generation, st.confirmed) = (new, 0, Some(basis));
                         st.mine.clear();
                         tracing::warn!(node = %self.id(), "this node's record was cleaned up while it was silent; registered again");
-                        return Ok(Confirmed { leases: Vec::new(), basis });
+                        return Ok(Confirmed { leases: Vec::new(), basis, taken_over: 0 });
                     }
                 }
                 Some(item) if get_s(&item, "inc") != inc => return Err(Error::Superseded),
@@ -726,16 +728,17 @@ impl Backend for DynamoDb {
         // A lease is only as good as the renewal it rides on: past that renewal's validity,
         // taking one would make it look held while this node can't act on it.
         let Some(basis) = self.state.lock().confirmed.filter(|b| *b + t.lease_ttl > now) else {
-            return Ok(Confirmed { leases: Vec::new(), basis: now.saturating_sub(t.lease_ttl) });
+            return Ok(Confirmed { leases: Vec::new(), basis: now.saturating_sub(t.lease_ttl), taken_over: 0 });
         };
-        let mut leases = Vec::new();
+        let (mut leases, mut taken_over) = (Vec::new(), 0);
         for k in keys {
             // On an error, what was won so far is adopted by the next renewal (it's in `mine`).
-            if let Some(e) = self.acquire_one(k)? {
+            if let Some((e, took)) = self.acquire_one(k)? {
+                taken_over += usize::from(took);
                 leases.push((k.clone(), e));
             }
         }
-        Ok(Confirmed { leases, basis })
+        Ok(Confirmed { leases, basis, taken_over })
     }
 
     fn release(&self, leases: &[(String, i64)]) -> Result<()> {

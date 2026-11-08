@@ -2,7 +2,8 @@
 //!
 //! Alone, roll code keeps both of its databases in SQLite under `--home`. With
 //! `--code-database postgres://…` they live in Postgres (schemas `code_store` and
-//! `code_control`), and with a cluster secret (`ROLL_CLUSTER_SECRET`, or
+//! `code_control`); without it, in the system database (`ROLL_SYSTEM_DATABASE`) when there is
+//! one, and with a cluster secret (`ROLL_CLUSTER_SECRET`, or
 //! `--code-cluster-secret`) too the node joins a cluster of identical nodes that share that
 //! database and S3 (docs/code/cluster.md). Leases and membership are in that database, or in
 //! DynamoDB with `ROLL_CLUSTER_BACKEND=dynamodb` (crate::cluster); code's data stays in Postgres.
@@ -15,7 +16,8 @@ use std::time::Duration;
 #[derive(Args, Clone, Debug)]
 pub struct CodeArgs {
     /// Keep roll code's databases in this Postgres (schemas `code_store` and `code_control`)
-    /// instead of SQLite under --home. Every node of a cluster uses the same one.
+    /// instead of SQLite under --home. Every node of a cluster uses the same one. Default: the
+    /// system database (`ROLL_SYSTEM_DATABASE`), if set.
     #[arg(long = "code-database", env = "ROLL_CODE_DATABASE", hide_env_values = true)]
     pub code_database: Option<String>,
     /// Postgres connections roll code opens at most, per database.
@@ -56,7 +58,7 @@ impl CodeArgs {
         config.git_memory_budget_bytes = self.code_git_memory_budget_mb.max(1) << 20;
         config.git_max_request_memory_bytes = self.code_git_max_request_memory_mb.map(|m| m.max(1) << 20);
         config.git_memory_wait = Duration::from_secs(self.code_git_memory_wait_s);
-        if let Some(url) = self.code_database.as_deref().filter(|u| !u.is_empty()) {
+        if let Some(url) = self.database() {
             let mut d = code_control::DatabaseConfig::new(url);
             d.connections = self.code_db_connections.max(1);
             d.ca = self.code_db_ca.clone();
@@ -70,7 +72,7 @@ impl CodeArgs {
             );
             return Ok(());
         };
-        anyhow::ensure!(config.database.is_some(), "a roll code cluster needs --code-database (ROLL_CODE_DATABASE): code's data is in Postgres");
+        anyhow::ensure!(config.database.is_some(), "a roll code cluster needs ROLL_SYSTEM_DATABASE or ROLL_CODE_DATABASE: code's data is in Postgres");
         let url = r.advertise_url.unwrap_or_else(|| self.default_url(public_host, api));
         let id = r.node_id.unwrap_or_else(roll_cluster::ClusterConfig::random_node_id);
         let mut cluster = roll_cluster::ClusterConfig::new(id, url.trim_end_matches('/'), secret.into_bytes());
@@ -79,6 +81,11 @@ impl CodeArgs {
         config.cluster = Some(cluster);
         config.cluster_backend = self.cluster.code_backend(r.backend);
         Ok(())
+    }
+
+    /// Code's Postgres: `--code-database`, else the system database.
+    fn database(&self) -> Option<&str> {
+        [&self.code_database, &self.cluster.system_database].into_iter().find_map(|s| s.as_deref().filter(|u| !u.is_empty()))
     }
 
     /// Where other nodes reach this one unless told: the API on the public host.
