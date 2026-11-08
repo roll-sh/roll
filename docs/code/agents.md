@@ -1824,6 +1824,11 @@ The surface has three views:
     next, round to the first, in every layout.
   - At 1000 threads (`?demo=1000` adds them to the demo) the list scrolls and selects at 60 fps;
     under the list and the board the canvas isn't mounted.
+- **A thread's menu** (`thread-menu.tsx`, T3's thread context menu): a right-click or the ⋯ on a
+  thread's canvas card, list row, board card or sidebar row (a long press on a touch screen's card):
+  open, pin, fork, rename, settle, snooze, archive, publish, auto-settle, copy, delete. One menu for
+  the page, opened where it was asked for. A card's tools (pins, Fork, ⋯) are one toolbar with
+  tooltips.
 - **Pinned cards.** A thread's conversation or diff, or a terminal, can be pinned onto a view
   (the pin buttons over a card, or the pin in the side panel's title bar) as a big live card
   beside its thread: a pinned conversation shows its newest runs as they stream, answers its
