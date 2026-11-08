@@ -3188,6 +3188,88 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
   `deferred_entry_deletes` failed once on "the deletes went in as runs", a DELETE storage path
   this step doesn't reach: for agent 162's train), regress select_parallel, join, subselect,
   aggregates, btree_index, create_index, partition_join, partition_prune unchanged.
+- **Executor, round 11, batch 1: groupings over joins in the workers, a cheaper merge of parts,
+  initplans and IN lists in workers' filters** (agent 189; BENCH.md "Executor, round 11"):
+  - **Baseline on origin's head `19df462eb`** (167's step 2 included): TPC-H SF1 15.65 s against
+    PostgreSQL's 11.55 s (1.35x), CPU 38.6 s against 29.4 s, peak ~1,790 MB. The largest gaps:
+    q02 +0.72 s, q13 +0.62, q09 +0.56, q12 +0.36, q06 +0.35 (BENCH.md has the 22 queries and
+    where each of the five goes).
+  - **Projections over projections that only move columns** (`exec/nodes.rs` `merge_moves`):
+    opened as one projection of the lowest one's input (`agg::through_projection`), not under
+    EXPLAIN ANALYZE, and only for expressions that read the row through its columns (no
+    sub-selects, aggregates, windows, grouping, set-returning calls). The joins' column
+    reorderings stacked two such projections under q07, q08 and q09's groupings, which kept
+    `pipeline_projected` from reaching the joins: every joined row was made on the executor's
+    thread, twice.
+  - **EXTRACT keys under their SQL syntax** (`agg.rs` `key_equal_apart`): the binder wraps a
+    call written in SQL syntax (`EXTRACT(year FROM d)`) in `Expr::SqlSyntax`, which the check
+    for whole-number keys (167's `datetime::extracts_whole`) didn't look through, so q07, q08
+    and q09's groupings presorted their input and never aggregated in parts. With both, the
+    workers aggregate the joined pairs as they come (`Joined::Pair`, never made): q09 1.92 ->
+    1.41 s, CPU 5.7 -> 3.9 s.
+  - **The merge of parts** (`agg.rs`, the `Item::Part` branch; q13): each part group's states
+    are merged as it is found (no second pass); a single integer key is looked up by its number
+    first (`ints`, a cache of `index`'s lookups, filled as they find or make groups, so the row
+    path and parts still number groups alike); parts' counts (`Partial::Count`) are added in a
+    flat array and merged into the groups' `Count` states once, after the input. A GroupAggregate
+    of one integer key orders its groups by their numbers (`group_order`: the keys are distinct,
+    so this is the one order `compare_values` gives). q13 1.36 -> 0.95 s; its executor's thread
+    is still the busiest (30% of the samples against 23% per worker).
+  - **Bitmap index entries checked by a kernel** (`scan.rs` `dense_bitmap_scan`'s count and
+    `bitmap_keys`, `entry_into`): one row the entry's values are put in, the conditions run as
+    a kernel (`eval` for what it leaves), where each entry made a row of the table's width and
+    went through `eval`. q06 0.78 -> 0.54 s (the count of 973,000 entries runs before the
+    workers start).
+  - **`substring(text FROM n FOR m)` of constants as a kernel** (`kernel.rs` `K::Substr`,
+    `string::is_substr`, `string::substr_chars`; m not negative).
+  - **Initplans in a parallel scan's filter** (`scan.rs` `initplans_first`,
+    `initplans_put_in`): when the first condition of the filter (the first of its AND) reads
+    uncorrelated scalar sub-selects, or `x [NOT] IN (sub-select)` (a hashed SubPlan's), through
+    nothing that may skip one (columns, constants, calls, casts, NOT), and the scan has a row,
+    they are run before the workers start and put in: a value, or `x IN (its values)` (at most
+    4,096; none: false for a plain column). PostgreSQL's first row reads the parameter or builds
+    the SubPlan's hash table (and a Gather evaluates its initplans before starting its
+    workers), so no error is raised that it wouldn't; an empty scan never runs them (golden
+    `a189_initplan_scan`, recorded from PostgreSQL 18.6: the error of a failing initplan, an
+    empty table).
+    Sequential scans (`start_parallel`) and full index scans (`start_parallel_index`). q22 0.40
+    -> 0.30 s (its CPU rose 0.51 -> 0.72: both customer scans now run in the workers), q16
+    0.50 -> 0.41 s.
+  - Measured (BENCH.md "Executor, round 11"; three interleaved rounds): TPC-H 16.85 -> 15.01 s
+    (-11%), CPU -10%, engine/PostgreSQL 1.39x -> 1.24x, peak unchanged, all 22 hashes equal.
+    q12 measured +12% in both comparisons with identical user instructions (23.6 x 10^9 a run):
+    not this batch's work.
+  - Tests: `parallel_scan` `parallel_joins_match_serial` has a grouping over two joins with
+    computed keys (q07 / q09's shape); golden `a189_initplan_scan`.
+  - Found, for other owners:
+    - planner (177): q12's plan is a merge join over a full `orders_pkey` index scan (1.5M heap
+      fetches, the largest part of its gap) where PostgreSQL's and EXPLAIN's is a Parallel Hash
+      Join over Parallel Seq Scans; pg_stat_user_indexes counts an orders_pkey scan of 1.5M
+      tuples per run, which PostgreSQL doesn't (its seq_scan of orders goes up instead).
+    - storage / index access (169, 183): q02's 1,984 inner index scans of partsupp by
+      `partsupp_ps_suppkey_idx` (80 rows each) take 0.39 ms a loop against PostgreSQL's 0.057
+      (`Scan::position` / `Merge::min` / `Cursor::fill`, `Block::seek`); q20's SubPlan runs and
+      q09 / q07's workers' key lookups are the same point fetches; q06's count of the l_shipdate
+      index's 973,000 entries on the executor's thread is now mostly `TxnScan` iteration.
+    - pg_stat (coordinator to route): PostgreSQL counts a parallel sequential scan once per
+      participant (lineitem's and orders' seq_scan +3 per q12 run), the engine once.
+    - Initplans under a Gather (executor and EXPLAIN's plan shape; not changed here):
+      PostgreSQL's Gather evaluates the initplans its workers read before starting them, even
+      when an earlier condition drops every row: `SELECT count(*) FROM t WHERE v < 0 AND v >
+      (SELECT 1 / (min(v) - min(v)) FROM t)` over a 200,000-row table with a parallel plan
+      raises division by zero there (a serial plan returns 0), and the engine returns 0, before
+      and after this batch. Matching it needs the plan's Gather placement at the scan.
+  - Left (next steps, in order):
+    - q13: the merge of parts is still on the executor's thread. A GroupAggregate's groups
+      come out sorted, so their numbering doesn't matter: the workers could aggregate across
+      their chunks into tables partitioned by key hash and merge one partition each at the end
+      (PostgreSQL's plan sorts each worker's groups and merges them under a Gather Merge).
+    - Hash builds of big inner sides run serially on the executor's thread (q14's part, q16's
+      filtered part, q05 / q08's): Parallel Hash.
+    - q02's hash join batches decode every spilled row again; a batch's map is boxed values.
+    - Item 2's batches past the scan (joined rows from batches, the probe hits aggregated from
+      columns), item 4 (streaming merge joins) and item 5 (work_mem for hash tables and sorts)
+      are not started.
 - **Deep input** (round 19, agent 63; `src/stack.rs`, `tests/deep_input.rs`): the engine no
   longer overflows the stack of the thread that runs it, however deep the input nests. A
   host's 2 MB thread or a test harness thread is safe. Before, 400 `+` terms aborted the
