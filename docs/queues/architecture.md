@@ -8,45 +8,41 @@ connection URL, on an architecture built for serverless operation on AWS at the 
 
 ```
               clients (AMQP 0-9-1 / 1.0, MQTT, STOMP, Streams, HTTP)
-                                   │
-                    ┌──────────────┴──────────────┐
-                    │   mq-proxy (per AZ, tiny)   │  wake-on-connect, AZ-aware routing,
-                    └──────────────┬──────────────┘  connection draining
-                                   │
+                                   │  TLS ends on whichever node the NLB picked (the edge)
       ┌────────────────────────────┼────────────────────────────┐
-      │ broker (stateless)          │ broker                    │ broker        Graviton, any AZ
-      │  protocol front ends        │                           │
+      │ rolld                       │ rolld                     │ rolld         every node of the
+      │  protocol front ends        │                           │               roll cloud fleet
       │  mq-core: exchanges, routing, queue partitions (actors) │
+      │  routers ──── internal RPC (signed, on 7070) ────► each queue's owner
       └──────────────┬──────────────┴──────────────┬────────────┘
-                     │ append (quorum) / read       │ metadata, leases, change feed
-          ┌──────────┴──────────┐         ┌─────────┴──────────┐
-          │ log keepers ×3 AZ   │         │ roll postgres      │
-          │ (EBS gp3 segments)  │         │ (or SQLite single) │
-          └──────────┬──────────┘         └────────────────────┘
-                     │ sealed segments
-               S3 Standard (cold tier)  ·  S3 Express One Zone (optional hot backend)
+                     │ group-committed appends      │ metadata, change feed
+          ┌──────────┴──────────┐         ┌─────────┴──────────┐   DynamoDB: who's alive,
+          │ S3 Standard          │         │ the system database │   who owns which queue
+          │ (3 AZs, the source   │         │ (or SQLite alone)   │   (roll-cluster leases)
+          │  of truth)           │         └────────────────────┘
+          └─────────────────────┘
 ```
 
-- **Brokers are stateless.** A broker holds connections, routing tables (cached from the
-  metadata store) and the in-memory state of the queue partitions it currently owns. Every
-  state change of a durable queue is a record in that partition's log, so any broker can
-  rebuild a partition by replaying it.
-- **Durability is the log's job.** `mq-storage` appends each batch to three keepers in three
-  AZs and acknowledges on two (a quorum), with epoch fencing so a deposed owner can't write.
-  Publisher confirms are sent only after the quorum ack. Sealed segments tier to S3 Standard;
-  keepers keep only the hot tail on EBS.
+- **Nodes hold no state of their own.** A node holds connections, routing tables (cached from
+  the metadata store) and the in-memory state of the queue partitions it currently owns. Every
+  state change of a durable queue is a record in that partition's log, so any node can rebuild
+  a partition by replaying it.
+- **Durability is the log's job.** On roll cloud a partition's log is objects in S3 Standard,
+  written with put-if-absent and group-committed per node (`mq-storage`, [storage.md](storage.md)):
+  a publisher confirm is sent only once the batch holding the message is in S3, which keeps it
+  across three availability zones. A node alone keeps logs on local disk.
 - **Metadata** (vhosts, users, permissions, exchanges, queues, bindings, policies,
-  parameters, partition leases) lives in a versioned KV table — SQLite on a single node, roll
-  postgres in a cluster. The version counter is the change feed every broker follows.
-- **Partitions and placement.** A queue is one or more partitions (`x-partitions`, default 1
-  for exact RabbitMQ ordering). Each partition is owned by one broker through a lease. Losing a
-  broker means its leases expire (seconds) and other brokers take the partitions over by
-  fencing and replaying the log — no message is lost because confirmed messages are on a
-  keeper quorum.
-- **Connections don't move when partitions do.** A client connection stays on its broker;
-  operations on partitions owned elsewhere are forwarded over the internal RPC. Rebalancing
-  moves partition ownership, not client connections, so there is no reconnect storm. Rolling
-  upgrades drain connections gradually (`Broker::drain`).
+  parameters) lives in a versioned KV table: SQLite on a single node, the system database
+  (schema `mq`) on a fleet. The version counter is the change feed every node follows.
+- **Partitions and ownership.** A queue is one or more partitions (`x-partitions`, default 1
+  for exact RabbitMQ ordering). Each partition is owned by one node, the holder of its
+  roll-cluster lease. Losing a node means its leases lapse (about 10 s) and other nodes take
+  the partitions over by fencing and replaying the log: no confirmed message is lost, because
+  it's in S3.
+- **Connections don't move when partitions do.** A client connection stays on the node it
+  reached; operations on partitions owned elsewhere are forwarded over the internal RPC.
+  Rebalancing moves partition ownership, not client connections, so there is no reconnect storm.
+  Stopping a node hands its queues off first, then closes its connections gradually.
 - **Scale to zero.** Idle vhosts are unloaded after `--queues-idle-suspend` seconds without
   clients (300 by default): their state stays in the log, and the next connection wakes them,
   like roll postgres wakes computes. See [Idle cost](#idle-cost).
@@ -64,60 +60,68 @@ connection URL, on an architecture built for serverless operation on AWS at the 
 | `mq-mgmt`     | RabbitMQ management HTTP API, definitions, Prometheus metrics                |
 | `mq-http`     | HTTP messaging API: publish, long-poll/SSE/WebSocket consume, webhooks, receipts, tokens |
 | `mq-shovel`   | shovels, federation and live migration from RabbitMQ                         |
-| `mq-storage`  | replicated log keepers, quorum client with fencing, S3 tiering, S3 Express   |
-| `mq-control`  | roll API for the dashboard and CLI, metering and cost, scale-to-zero, cluster placement |
-| `mq-proxy`    | wake-on-connect, AZ-aware front proxy                                         |
-| `rolld`       | runs everything on one node                                                  |
+| `mq-storage`  | log stores: objects in S3 (Standard or Express) with group commit and fencing, self-hosted keepers (quorum, S3 tiering) |
+| `mq-cluster`  | many nodes: queue ownership on roll-cluster leases, routers, internal RPC, metadata on Postgres |
+| `mq-control`  | roll API for the dashboard and CLI, metering and cost, scale-to-zero          |
+| `rolld`       | runs everything on each node                                                  |
 
-## Cluster (`mq-cluster`)
+## Many nodes (`mq-cluster`)
 
-- **Membership.** Every broker heartbeats an `mq_node` record (RPC address, AZ, client
-  listeners, draining flag). A node is gone when its heartbeat hasn't changed for the TTL (5 s).
-- **Ownership.** Each queue partition has an `mq_owner` record `{node, epoch}`, changed only by
-  compare-and-set in the metadata store. A new owner bumps the epoch and opens the log with
-  it, which fences the previous owner in the log store. Failover winners and rebalance targets
-  come from rendezvous hashing over live, non-draining nodes.
-- **AZ affinity.** The owner record also carries the queue's home AZ. Placement hashes over the
-  live nodes in that AZ first, and only falls back to other AZs when it has none. The owner
-  counts operations per source AZ (publishes and deliveries forwarded from other nodes; the
-  rest are local). When another AZ has carried at least ⅔ of them, and at least
-  `place_min_ops` (1000), for two periods in a row, the home moves there and the queue follows
-  with a normal handoff. Clients already land on a broker in their own AZ through the proxy, so a
-  queue used from one AZ ends up with no cross-AZ hop between its clients and its owner.
+On roll cloud every node runs queues (docs/cloud/README.md); membership, placement, handoff and
+takeover are roll-cluster's (docs/code/cluster.md), with DynamoDB holding who's alive and who
+owns what. A node alone uses roll-cluster's memory backend and none of this applies: it owns
+every queue and its logs are local.
+
+- **Ownership.** Each durable queue partition has a lease, `mq:<vhost>/<queue>` (`#<n>` after the
+  first partition; `%`, `/` and `#` in names escaped, so the default vhost is `%2F`). Its holder
+  runs the partition's actor and opens the log with the lease's epoch, which fences every
+  earlier owner out of the log store: their next append fails instead of being confirmed, and
+  an older epoch can't open the log again. Exclusive and transient queues live with their
+  connection's node, as on RabbitMQ. Placement is roll-cluster's rendezvous hashing over the live
+  nodes; zones don't steer it.
+- **Correctness never depends on the lease.** A node that lost its lease without noticing (cut
+  off, frozen) keeps nothing: the next owner's open fences the log, so the old one's appends are
+  refused and its publishers get nacks (`a_deposed_owner_cannot_confirm`).
 - **Routing.** Channels on every node hold a *router* per queue. It forwards to the local actor
-  when this node owns the queue, or over the internal RPC otherwise: one multiplexed TCP
-  connection per node pair, with frames carrying a JSON header plus raw message blobs.
-  Consumers on another node are fed by credit (64 in flight), so prefetch semantics hold across
-  nodes. Nodes prove a shared secret to each other before any RPC
-  (`ROLL_QUEUES_CLUSTER_SECRET`, a mutual HMAC handshake). TLS is optional
-  (`ROLL_QUEUES_CLUSTER_TLS_CERT`/`_KEY`/`_CA`).
-- **Handoff** (rebalance, drain): pause deliveries, let in-flight acks land, stop the actor,
-  transfer ownership by CAS, then tell the new owner to adopt. Routers re-register their
-  consumers with the new owner, so client connections and consumer tags never change.
-- **Failover.** When a node dies, the rendezvous winner claims its queues, replays their logs
-  and serves them. Confirmed messages are in the replicated log, so none are lost. Unacked
-  deliveries become ready again, as with RabbitMQ.
-- **Metadata store.** One Postgres connection per node, re-established if it drops (a restart
-  or a Multi-AZ failover). TLS follows the URL's `sslmode` and always verifies the server, against
-  the system roots plus `ROLL_QUEUES_CLUSTER_META_CA`. The image ships the RDS CA bundle, so
-  `sslmode=require` works with RDS.
+  when this node holds the lease, or over the internal RPC otherwise: one multiplexed connection
+  per node pair, an HTTP/1.1 upgrade of `GET /internal/queues/rpc` on the other node's internal
+  API (`ROLL_ADVERTISE_URL`), signed with the cluster secret like every internal hop; frames carry
+  a JSON header plus raw message blobs. Consumers on another node are fed by credit (64 in
+  flight), so prefetch semantics hold across nodes. A node that gets a request for a queue it
+  doesn't run answers "moved" and, if placement gives the queue to it, starts it; the sender
+  routes again.
+- **Handoff** (rebalancing, a drain): roll-cluster ends the owner's guard; the router pauses
+  deliveries, lets in-flight acks land (1.5 s at most), stops the actor (every write flushed, the
+  log closed with its closing marker) and only then lets go of the lease. Routers on other nodes
+  get "moved", route again and re-register their consumers with the new owner, so client
+  connections and consumer tags never change, and a publish in flight waits for the new owner
+  instead of failing.
+- **Failover.** When a node dies, its leases lapse after 10 s; the node placement prefers takes
+  each one (at its next sweep, or at once when a request for the queue comes), replays the log
+  from S3 and serves it. Confirmed messages are in S3, so none are lost. Unacked deliveries
+  become ready again, as with RabbitMQ. Meanwhile publishes wait in the routers.
+- **Queues that come and go.** A node that takes a lease for a queue of a vhost asleep here wakes
+  the vhost. A deleted queue's owner gives its lease up for good (a new queue of that name has a
+  new log); a queue that still exists keeps its lease record, because its log refuses epochs
+  older than its last owner's and a deleted record starts over at 1.
+- **Draining** (SIGTERM: a deploy, scale-in, Spot): rolld's drain (`ROLL_DRAIN_TIMEOUT`) hands every
+  queue off while the node keeps serving its clients through the moves; after the 15 s it keeps
+  serving for the load balancer, it closes its client connections spread over the rest of the
+  drain (5–10 s), so they reconnect through the edge to the other nodes, not all at once.
+- **Metadata store.** The system database (`ROLL_SYSTEM_DATABASE`), schema `mq`; one connection
+  per node, re-established if it drops. TLS follows the URL's `sslmode` and always verifies the
+  server, against the system roots plus `ROLL_QUEUES_DATABASE_CA` (the image ships the RDS CA
+  bundle). A metadata database from before (tables in `public`, with `mq_node` and `mq_owner`
+  rows) is moved into the schema once and those rows are dropped: roll-cluster has them now.
 - **Definitions owned by other crates** (webhooks) follow the same change feed. The broker
   emits `MetaChanged` for kinds it doesn't own, and their owner reconciles. A webhook created
   or changed on one node starts or restarts on every node.
 - **Streams.** Stream clients ask `Metadata` for a stream's leader. A stream's owner node is
   reported as its leader and its replica, so publishers and readers connect to it directly.
-- **Rolling upgrades.** SIGTERM drains a broker: queues are handed off first, then
-  connections close gradually. Tests: `crates/mq-cluster/tests/cluster.rs` (in-process, three
-  nodes) and `crates/rolld/tests/queues_cluster_e2e.rs` (Docker: real `rolld` containers,
-  Postgres metadata, SIGKILL and SIGTERM under load, then a Postgres restart).
-
-## Front proxy (`mq-proxy`)
-
-An L4 proxy per AZ. It follows the `mq_node` records and sends each new connection to a
-live, non-draining broker in its own AZ with the fewest connections. If no broker in its AZ is
-up, it uses one in another AZ. If none is running at all, it holds the connection, runs its
-waker (an ECS `UpdateService` signed with SigV4, or a shell command) and forwards once a broker
-heartbeats. Load balancer health checks use a separate port, so they never wake brokers.
+- **Tests**: `crates/mq-cluster/tests/cluster.rs` (three nodes in one process, on the memory
+  backend and on DynamoDB Local, logs on a shared object store) and
+  `crates/rolld/tests/queues_cluster_e2e.rs` (Docker: real `rolld` containers with DynamoDB
+  Local, Postgres and MinIO; SIGKILL and SIGTERM under load, then a Postgres restart).
 
 ## Queue engine
 
@@ -170,14 +174,12 @@ against RabbitMQ 4; see [docs/benchmarks/queues-scale.md](../benchmarks/queues-s
 
 ## Cost model
 
-- Graviton (m7g/c7g/c8g) brokers on an on-demand base plus Spot, sized by connections and
-  throughput. Brokers are stateless, so a Spot interruption is a drain (two minutes' notice).
-- Keepers on gp3 EBS hold minutes of data; everything older is on S3 Standard
-  ($0.023/GB-month).
-- AZ-aware routing: the proxy sends clients to a broker in their own AZ, and partition leaders
-  are placed in the AZ of their busiest producers/consumers, so the only cross-AZ bytes are the
-  two replica copies the durability guarantee requires, and those are zstd-compressed.
-- With S3 Express storage, appends of every queue on a broker share objects (group commit), so
-  request costs follow brokers and traffic, not the number of queues.
+- Queues share roll cloud's fleet (Graviton, on demand plus Spot); a node holds no state, so a
+  Spot interruption is a drain (two minutes' notice).
+- Logs are S3 Standard objects ($0.023/GB-month). Appends of every queue on a node share
+  objects (group commit), so PUTs follow nodes and traffic (at most one in flight per node, each
+  carrying whatever arrived meanwhile), not the number of queues; an idle node makes none.
+- Cross-AZ bytes: a client's connection and its queue's owner may be in different zones (the
+  internal RPC); S3 is reached through the VPC's gateway endpoint at no transfer cost.
 - Metering: messages, GB-months stored, connection-hours. Prices are derived from AWS list
   prices, and the dashboard compares them with Amazon MQ and CloudAMQP for the same workload.

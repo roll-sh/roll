@@ -1,14 +1,54 @@
 # roll queues — storage (`mq-storage`)
 
-Brokers are stateless. Every durable queue partition, stream and delayed exchange is a log
-(`mq_core::log::Log`), and `mq-storage` provides the production backends of
+Nodes hold no state of their own. Every durable queue partition, stream and delayed exchange is
+a log (`mq_core::log::Log`), and `mq-storage` provides the production backends of
 `mq_core::log::LogStore`:
 
-| backend          | where the data lives                                         | use                         |
+| backend          | where the data lives                                         | use (`--queues-storage`)    |
 | ---------------- | ------------------------------------------------------------ | --------------------------- |
-| `QuorumStore`    | 3 keepers (one per AZ, EBS gp3) + optional S3 Standard tier  | default cluster deployment  |
-| `S3ExpressStore` | S3 Express One Zone directory bucket, no keepers             | small/serverless clusters   |
-| `FileStore`      | local disk (`mq-core`)                                       | single node (`rolld`)       |
+| `S3ExpressStore` over S3 Standard | objects in a regular bucket, group-committed (3 AZs) | roll cloud: what a cluster uses by default (`s3:`, the node's bucket under `queues/logs`) |
+| `S3ExpressStore` | the same in an S3 Express One Zone directory bucket (1 AZ)   | lower latency where one zone is acceptable (`s3express:`) |
+| `QuorumStore`    | 3 self-hosted `roll-keeper`s (one per AZ, EBS) + optional S3 tier | self-hosted clusters (`quorum:`) |
+| `FileStore`      | local disk (`mq-core`)                                       | a node alone (`rolld`; the default) |
+
+## On roll cloud: S3 Standard, group commit
+
+roll cloud has no servers of its own for queues (docs/cloud/README.md): every node runs them, and
+nothing a confirmed message depends on may live on one node's disk or in one zone. The fleet's
+log store is the object log below on S3 Standard, in the deployment's data bucket.
+
+- **Why S3 and not keepers on the nodes.** The alternative was keepers embedded in the nodes, a
+  2-of-3 quorum across zones on their local disks, with automatic re-replication when a node goes
+  away. It has the lower confirm latency (a network round trip and an fsync, about 1–3 ms) but
+  needs dynamic quorum membership, re-replication and repair while nodes come and go every
+  deploy and Spot interruption, and node disks become something to lose. S3 Standard keeps every
+  object in three zones before a PUT returns, survives losing a node or a zone with nothing to
+  repair, and is already the source of truth for every other product. Its cost is confirm
+  latency: one PUT, tens of milliseconds, instead of one millisecond
+  ([docs/benchmarks/queues-fleet.md](../benchmarks/queues-fleet.md)). Group commit keeps
+  throughput: every queue of a node shares one stream of objects, and each PUT carries whatever
+  arrived while the previous one was in flight, so a busier node writes bigger objects, not more
+  of them. The default is S3 Standard; never a single-zone store (`s3express:` stays an opt-in).
+- **Confirms** are sent only after the stream object holding the message is written (S3 answers
+  only once the object is durable in three zones). Quorum queues deliver only what's durable;
+  classic queues may deliver first, as RabbitMQ's do, and never lose a confirmed message.
+- **Fencing.** Every object is written with `If-None-Match: *`. A new owner (holding the queue's
+  roll-cluster lease) claims the log's tail with a fence marker, and drains the previous owner's
+  stream (writing its next object first), so a deposed owner's next write collides and it can't
+  confirm anything after the takeover. Lease epochs map onto log epochs, and an older lease can't
+  open the log again.
+- **Handoff.** A node handing a queue off (a drain, rebalancing) stops its actor, closes the log
+  (moving what it staged into the log's own objects and writing the closing marker) and only
+  then releases the lease, so the next owner opens a cleanly closed log without draining
+  anything.
+- **Requests.** An idle node makes no PUTs. A busy one makes at most one stream PUT in flight at a
+  time (plus a link per log per stream, and the batched moves into each log's own objects every
+  few minutes or MiB). S3 Standard bills $0.005 per 1,000 PUTs: a node confirming continuously
+  with 25 ms PUTs makes about 40 a second, ~$0.70 an hour at full tilt, whatever its message rate
+  and number of queues.
+- **Conditional writes** need S3 (since 2024), MinIO, R2 or another store with `If-None-Match` on
+  PUT. A concurrent conditional write to the same key (S3's 409) is treated as "already exists",
+  which is what it means for a fence.
 
 ## Quorum log
 
@@ -141,7 +181,7 @@ it can send a request.
   stack uses the secret plus security groups and leaves TLS off. Turn it on if your policy
   needs TLS on every hop.
 
-## Deployment notes (AWS)
+## Self-hosted keepers on AWS
 
 - **Three keepers, one per AZ**, `write_quorum: 2`. Any single keeper (or AZ) can fail without
   losing acknowledged data or availability; losing two stops appends (no false confirms) until
@@ -170,7 +210,11 @@ it can send a request.
 - **Rolling keeper upgrades.** Restart one keeper at a time and wait until it is caught up
   (`QuorumLog::replicas()` / `StorageStats::keepers`) before the next.
 
-## S3 Express One Zone (no keepers)
+## Objects in S3 (no keepers)
+
+The object log (`S3ExpressStore`) works on any bucket with conditional writes: S3 Standard on
+roll cloud (`s3:<bucket>[/prefix]`), an S3 Express One Zone directory bucket
+(`s3express:<bucket>[/prefix]`), MinIO in tests.
 
 ```rust
 let os = mq_storage::S3ExpressStore::directory_bucket("roll-logs--use1-az4--x-s3", "us-east-1")?;
@@ -215,8 +259,8 @@ of every log on a broker go to one shared *stream* first:
 Requests then grow with brokers and traffic, not with the number of queues: 100 queues each
 appending 5 times cost 500 PUTs one by one, and 105 grouped: a link per queue, written once per
 stream, plus 5 stream objects (`grouped_appends_share_objects`).
-- Data lives in one AZ: an AZ outage makes the logs unavailable until it recovers. Use it where
-  that is acceptable, or the quorum store otherwise.
+- With S3 Express One Zone, data lives in one AZ: an AZ outage makes the logs unavailable until
+  it recovers. Use it where that is acceptable; S3 Standard otherwise.
 - `object_store` 0.14 supports directory buckets via `AmazonS3Builder::with_s3_express(true)`
   (session auth, zonal endpoint); conditional puts use `If-None-Match`, which S3 Express
   supports.
@@ -241,4 +285,5 @@ stream, plus 5 stream objects (`grouped_appends_share_objects`).
 - `destroy` on a keeper that is down leaves its copy behind; `QuorumStore::list_logs` exists for
   a future garbage collector.
 - Keeper membership is static (`QuorumConfig::keepers`); replacing a keeper means pointing the
-  brokers at the new address, which then gets repaired log by log as they are written.
+  brokers at the new address, which then gets repaired log by log as they are written. (roll cloud
+  doesn't run keepers: it uses S3, above.)

@@ -145,7 +145,8 @@ impl Queues {
         if args.user == "guest" && args.password == "guest" && !args.remote_guest && let Some(open) = open {
             anyhow::bail!("queues listen on {open} with the default guest/guest login: set ROLL_QUEUES_USER and ROLL_QUEUES_PASSWORD");
         }
-        let logs = open_storage(&args, &dir, objects, clustered).await?;
+        let zone = nodes.config().zone.clone();
+        let logs = open_storage(&args, &dir, objects, clustered, zone.as_deref()).await?;
         let meta: Arc<dyn MetaStore> = match system_database {
             Some(url) => PgMeta::connect_with(url, args.database_ca.as_deref()).await?,
             None if clustered => anyhow::bail!("roll queues on a cluster keeps its metadata in the system database: set ROLL_SYSTEM_DATABASE"),
@@ -157,7 +158,7 @@ impl Queues {
             default_user: args.user.clone(),
             default_pass: args.password.clone(),
             default_queue_type: args.default_queue_type.clone(),
-            az: nodes.config().zone.clone(),
+            az: zone,
             vhost_idle_suspend_ms: args.idle_suspend_s * 1000,
             vhost_publish_rate: args.vhost_publish_rate,
             vhost_publish_bytes_rate: args.vhost_publish_bytes_rate,
@@ -331,7 +332,7 @@ fn storage_spec(args: &QueuesArgs, objects: &StorageConfig, clustered: bool) -> 
 }
 
 /// The log store `--queues-storage` names (see [`storage_spec`]).
-async fn open_storage(args: &QueuesArgs, dir: &Path, objects: &StorageConfig, clustered: bool) -> anyhow::Result<Arc<dyn LogStore>> {
+async fn open_storage(args: &QueuesArgs, dir: &Path, objects: &StorageConfig, clustered: bool, zone: Option<&str>) -> anyhow::Result<Arc<dyn LogStore>> {
     // A node alone owns its logs, so they can group-commit through one WAL. In a cluster on a
     // shared `file:` directory another node may take a log over, and it can't replay our WAL.
     let file = |root: PathBuf| -> anyhow::Result<Arc<dyn LogStore>> { Ok(if clustered { FileStore::new(root) } else { FileStore::with_wal(root, 16 << 20)? }) };
@@ -384,7 +385,7 @@ async fn open_storage(args: &QueuesArgs, dir: &Path, objects: &StorageConfig, cl
             let write_quorum = keepers.len() / 2 + 1;
             let tc = TransportConfig { secret: args.keeper_secret.clone(), tls: args.keeper_tls, tls_ca: args.keeper_tls_ca.clone(), tls_server_name: args.keeper_tls_name.clone(), ..Default::default() };
             let transport = Transport::new("keeper", &tc)?;
-            let az = std::env::var("ROLL_ZONE").unwrap_or_default();
+            let az = zone.unwrap_or_default().to_string();
             let cfg = mq_storage::QuorumConfig { keepers, write_quorum, az, tier, transport, compress: args.keeper_compress, ..Default::default() };
             mq_storage::QuorumStore::connect(cfg).await?
         }
