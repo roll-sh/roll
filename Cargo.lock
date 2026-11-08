@@ -1592,6 +1592,7 @@ dependencies = [
  "pg-storage",
  "rand 0.8.8",
  "reqwest",
+ "roll-auth",
  "roll-cluster",
  "rsa",
  "serde",
@@ -4611,13 +4612,16 @@ name = "nosql-control"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "aws-sdk-dynamodb",
  "axum",
  "base64 0.22.1",
  "bytes",
  "chrono",
+ "code-sql",
  "flate2",
  "futures",
  "getrandom 0.4.3",
+ "http-body 1.1.0",
  "nosql-alternator",
  "nosql-engine",
  "nosql-proto",
@@ -4625,13 +4629,17 @@ dependencies = [
  "nosql-sstable-import",
  "nosql-storage",
  "nosql-types",
+ "rcgen",
  "reqwest",
+ "roll-cluster",
+ "roll-edge",
  "rusqlite",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror",
  "tokio",
+ "tokio-rustls 0.26.6",
  "tower-http 0.7.1",
  "tracing",
  "url",
@@ -5990,19 +5998,25 @@ dependencies = [
  "anyhow",
  "axum",
  "bytes",
+ "code-sql",
  "futures",
  "getrandom 0.4.3",
+ "pg-storage",
  "redis-engine",
  "redis-proto",
  "redis-server",
  "reqwest",
- "rusqlite",
+ "roll-cluster",
+ "roll-edge",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror",
  "tokio",
+ "tokio-rustls 0.26.6",
  "tower-http 0.7.1",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -6203,6 +6217,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "roll-auth"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "serde_json",
+ "tower-http 0.7.1",
+]
+
+[[package]]
 name = "roll-cli"
 version = "0.1.0"
 dependencies = [
@@ -6319,6 +6342,7 @@ dependencies = [
  "clap",
  "code-control",
  "code-preview",
+ "code-sql",
  "futures",
  "futures-util",
  "http-body 1.1.0",
@@ -6352,6 +6376,7 @@ dependencies = [
  "redis-control",
  "redis-server",
  "reqwest",
+ "roll-auth",
  "roll-cluster",
  "roll-edge",
  "s3-api",
@@ -6691,6 +6716,7 @@ dependencies = [
  "getrandom 0.4.3",
  "image",
  "reqwest",
+ "roll-auth",
  "s3-image",
  "s3-proto",
  "s3-server",
@@ -7389,6 +7415,7 @@ dependencies = [
  "rcgen",
  "rdkafka",
  "reqwest",
+ "roll-auth",
  "rusqlite",
  "rustls-pemfile",
  "serde",
@@ -7607,6 +7634,7 @@ dependencies = [
  "lambda_http",
  "object_store",
  "reqwest",
+ "roll-auth",
  "roll-cluster",
  "rusqlite",
  "serde",

@@ -397,12 +397,46 @@ impl Control {
         Ok(imp)
     }
 
-    /// Runs scheduled imports that are due.
-    pub(crate) fn run_due_imports(self: Arc<Self>) -> anyhow::Result<()> {
-        for i in self.store.due_imports(now())? {
-            self.spawn_import(i.id);
+    /// Runs scheduled imports that are due. In a cluster, also the queued ones and those a
+    /// node that's gone (or lost the database) was running, each on its database's owner (or
+    /// on the node the database belongs on, which takes it, when nobody owns it).
+    pub(crate) async fn run_due_imports(self: Arc<Self>) -> anyhow::Result<()> {
+        if self.cluster().is_none() {
+            for i in self.store.due_imports(now())? {
+                self.spawn_import(i.id);
+            }
+            return Ok(());
+        }
+        let me = self.node_name();
+        for (i, by) in self.store.runnable_imports(now(), &me)? {
+            let scheduled = i.state != "running" && i.state != "queued";
+            if scheduled && i.next_run_at.is_none_or(|t| t > now()) {
+                continue;
+            }
+            if i.state == "running" && by.as_deref().is_some_and(|b| !self.node_is_gone(b)) && !self.cluster().is_some_and(|c| c.owns(&crate::cluster::key(&i.db_id))) {
+                // Running on a live node that may still own the database.
+                continue;
+            }
+            if self.take_for_work(&i.db_id).await.is_some() {
+                self.spawn_import(i.id);
+            }
         }
         Ok(())
+    }
+
+    /// This node took database `id` over: run its imports that were left queued or running
+    /// elsewhere.
+    pub(crate) fn resume_imports(self: &Arc<Self>, id: &str) {
+        let Ok(runnable) = self.store.runnable_imports(now(), &self.node_name()) else { return };
+        for (i, _) in runnable.into_iter().filter(|(i, _)| i.db_id == id && (i.state == "running" || i.state == "queued")) {
+            self.spawn_import(i.id);
+        }
+    }
+
+    /// Whether an import into database `id` runs on this node.
+    pub(crate) fn importing(&self, id: &str) -> bool {
+        let running: Vec<String> = self.running_imports.lock().unwrap_or_else(|e| e.into_inner()).iter().cloned().collect();
+        running.iter().any(|i| self.store.import(i).ok().flatten().is_some_and(|i| i.db_id == id))
     }
 
     fn spawn_import(self: &Arc<Self>, import_id: String) {
@@ -418,20 +452,31 @@ impl Control {
         });
     }
 
-    /// One run of an import (also called by tests, which wait for it).
+    /// One run of an import (also called by tests, which wait for it). In a cluster it runs
+    /// while this node owns the database; if the database moves meanwhile, the new owner runs
+    /// it again (imports are idempotent: rows keep their source timestamps, SSTables are swapped
+    /// in at once).
     pub async fn run_import(&self, import_id: &str) -> anyhow::Result<()> {
-        let Some(mut imp) = self.store.import(import_id)? else { return Ok(()) };
+        let Some(imp) = self.store.import(import_id)? else { return Ok(()) };
         let Some(d) = self.store.db(&imp.db_id)? else { return Ok(()) };
-        imp.state = "running".into();
-        imp.started_at = Some(now());
-        imp.finished_at = None;
-        imp.error = None;
-        imp.rows = 0;
-        imp.tables_done = 0;
-        imp.next_run_at = None;
-        self.store.update_import(&imp)?;
+        let guard = match self.take_for_work(&d.id).await {
+            Some(g) => g,
+            None => return Ok(()),
+        };
+        // Owning the database, a claim another node holds is stale.
+        let Some(mut imp) = self.store.claim_import(import_id, &self.node_name(), now(), &|_| guard.is_some())? else { return Ok(()) };
         let rows = Arc::new(AtomicI64::new(0));
-        let result = if crate::import_sstables::is_backup_url(&imp.source) { self.import_sstables(&d, &mut imp, &rows).await } else { self.import_cql(&d, &mut imp, &rows).await };
+        let run = async {
+            if crate::import_sstables::is_backup_url(&imp.source) { self.import_sstables(&d, &mut imp, &rows).await } else { self.import_cql(&d, &mut imp, &rows).await }
+        };
+        let result = match (&guard, self.cluster()) {
+            (Some(g), Some(c)) => match c.while_guarded(g, run).await {
+                Some(r) => r,
+                // Moved away: the new owner runs it again.
+                None => return Ok(()),
+            },
+            _ => run.await,
+        };
         imp.rows = rows.load(Ordering::Relaxed);
         imp.finished_at = Some(now());
         imp.next_run_at = imp.every.map(|e| now() + e);

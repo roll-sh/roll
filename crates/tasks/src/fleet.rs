@@ -74,6 +74,9 @@ pub struct NodeConfig {
     pub ride: Duration,
     /// Largest request accepted (bodies are kept so a request can be sent again).
     pub max_request: usize,
+    /// The operator's token (rolld's `ROLL_ADMIN_TOKEN`): requests carrying it act as the
+    /// operator (`roll_auth::Operator`) on the leader, wherever they came in.
+    pub operator: Option<roll_auth::AdminToken>,
     /// This node is alone (rolld without a cluster): it leads from the start, and failing to
     /// open the log fails [`TasksNode::start`].
     pub single: bool,
@@ -90,6 +93,7 @@ impl NodeConfig {
             open_wait: Duration::from_secs(10),
             ride: Duration::from_secs(25),
             max_request,
+            operator: None,
             single: false,
         }
     }
@@ -224,19 +228,10 @@ impl TasksNode {
         self.live.borrow().as_ref().map(|t| t.log.stats())
     }
 
-    /// Answers every tasks request on any node (`/v1/tasks/…`, `/t/<tenant>/v1/tasks/…`,
-    /// `/_roll/tenants…`): they run on the leader. For the edge's tasks host.
+    /// Every tasks request on any node (`/v1/tasks/…`, `/t/<tenant>/v1/tasks/…`,
+    /// `/_roll/tenants…`), run on the leader: for the edge's tasks host. Real routes rather than
+    /// a fallback, so an access gate in front sees which API a request is for.
     pub fn router(self: &Arc<Self>) -> Router {
-        let node = self.clone();
-        Router::new().fallback(move |req: Request| {
-            let node = node.clone();
-            async move { node.front(req).await }
-        })
-    }
-
-    /// The same requests, as routes to merge into rolld's API router, plus the route other
-    /// nodes forward them to (signed).
-    pub fn api_routes(self: &Arc<Self>) -> Router {
         let h = |node: Arc<Self>| {
             any(move |req: Request| {
                 let node = node.clone();
@@ -244,10 +239,16 @@ impl TasksNode {
             })
         };
         let mut r = Router::new();
-        for path in ["/v1/tasks", "/v1/tasks/{*rest}", "/t/{tenant}/v1/tasks", "/t/{tenant}/v1/tasks/{*rest}", "/_roll/tenants", "/_roll/tenants/{*rest}"] {
+        for path in ["/v1/tasks/health", "/v1/tasks/{*rest}", "/t/{tenant}/v1/tasks/{*rest}", "/_roll/tenants", "/_roll/tenants/{*rest}"] {
             r = r.route(path, h(self.clone()));
         }
-        r.merge(self.internal_routes())
+        r
+    }
+
+    /// The same routes plus the one other nodes forward requests to (signed): for rolld's API
+    /// router.
+    pub fn api_routes(self: &Arc<Self>) -> Router {
+        self.router().merge(self.internal_routes())
     }
 
     /// `/internal/tasks`: requests other nodes forwarded to this one (signed).
@@ -555,10 +556,16 @@ impl TasksNode {
         if !guard.is_valid() {
             return roll_cluster::unavailable(retry);
         }
-        let req = match external(req) {
+        let mut req = match external(req) {
             Ok(r) => r,
             Err(r) => return *r,
         };
+        // The gate's mark doesn't travel with a forwarded request: check the token here.
+        if let Some(op) = &self.cfg.operator
+            && roll_auth::bearer(req.headers()).is_some_and(|b| op.matches(b))
+        {
+            req.extensions_mut().insert(roll_auth::Operator);
+        }
         let resp = match t.router.clone().oneshot(req).await {
             Ok(r) => r,
             Err(never) => match never {},

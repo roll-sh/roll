@@ -251,10 +251,12 @@ What clients see:
 | Pull consumers | A message pulled and not yet acknowledged keeps its lease (pulls and acks are durable API writes) and comes back after its visibility timeout as usual. | The same: pulls and acks that were answered are durable. |
 
 Node settings: `ROLL_TASKS_TOKEN` (the default tenant's admin token, which also manages tenants;
-`ROLL_ADMIN_TOKEN` when it isn't set, and a cluster node refuses to start with neither),
-`ROLL_TASKS_COMMIT_MS`, `ROLL_TASKS_RELAXED_MS` and `ROLL_TASKS_BLOCK_PRIVATE` (on by default in a
+optional), `ROLL_TASKS_COMMIT_MS`, `ROLL_TASKS_RELAXED_MS` and `ROLL_TASKS_BLOCK_PRIVATE` (on by default in a
 cluster: deliveries can't reach the fleet's private network). A handoff drains deliveries for up
-to 5 s in a cluster.
+to 5 s in a cluster. With rolld's `ROLL_ADMIN_TOKEN` set (always on the fleet), every tasks route
+takes the operator's token or tasks' own credentials (the tasks token, API keys; a hosted
+tenant's own keys); the leader checks the operator's token itself, since the gate's mark doesn't
+travel with a forwarded request. An unknown tenant answers like a bad key, except to the operator.
 
 ### Tenants per node: what's missing
 

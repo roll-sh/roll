@@ -92,6 +92,10 @@ pub struct Database {
     /// Signalled to disconnect every client (delete, restore, move to another node).
     pub kicked: tokio::sync::Notify,
     pub evicting: AtomicBool,
+    /// A gradual disconnect ([`Database::kick_gradually`]): when it started and how long it
+    /// spreads over (0: everyone at once).
+    pub kick_from_ms: AtomicU64,
+    pub kick_spread_ms: AtomicU64,
     /// Connection-level counters for INFO.
     pub io: IoStats,
     /// Replication id of this database's write stream (INFO `master_replid`), and the previous
@@ -352,6 +356,8 @@ impl Database {
             backlog: Mutex::new(None),
             kicked: tokio::sync::Notify::new(),
             evicting: AtomicBool::new(false),
+            kick_from_ms: AtomicU64::new(0),
+            kick_spread_ms: AtomicU64::new(0),
             io: IoStats::default(),
             replid: Mutex::new(replid),
             replid2: Mutex::new(None),
@@ -374,8 +380,29 @@ impl Database {
     /// find the database wherever it is next (reloaded, restored, or on another node).
     pub fn close_and_kick(&self) {
         self.closed.store(true, Ordering::SeqCst);
+        self.kick_spread_ms.store(0, Ordering::SeqCst);
         self.evicting.store(true, Ordering::SeqCst);
         self.kicked.notify_waiters();
+    }
+
+    /// Disconnect every client over `spread`, each at its own moment (by its id), so they don't
+    /// all reconnect at once. Commands in flight finish and are answered first.
+    pub fn kick_gradually(&self, spread: Duration) {
+        self.kick_from_ms.store(redis_engine::util::now_ms() as u64, Ordering::SeqCst);
+        self.kick_spread_ms.store(spread.as_millis() as u64, Ordering::SeqCst);
+        self.evicting.store(true, Ordering::SeqCst);
+        self.kicked.notify_waiters();
+    }
+
+    /// When (Unix ms) client `id` is to go, once clients are being disconnected: at once, or its
+    /// moment of a gradual disconnect.
+    pub fn kick_turn(&self, id: u64) -> i64 {
+        let spread = self.kick_spread_ms.load(Ordering::SeqCst);
+        if spread == 0 {
+            return 0;
+        }
+        let at = (id.wrapping_mul(0x9e37_79b9_7f4a_7c15) >> 32) % spread;
+        (self.kick_from_ms.load(Ordering::SeqCst) + at) as i64
     }
 
     pub fn shard(&self, i: usize) -> &Shard {

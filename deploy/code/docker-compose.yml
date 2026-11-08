@@ -17,7 +17,8 @@ x-node: &node
     ROLL_CODE_DATABASE: postgres://roll:roll@postgres:5432/roll?sslmode=disable
     ROLL_CODE_DB_CONNECTIONS: "8"
     ROLL_CODE_CLUSTER_SECRET: local-cluster-secret-change-me
-    ROLL_CODE_TOKEN: dev-admin-token-change-me
+    # The operator token (32+ characters): every API, and roll code's admin.
+    ROLL_ADMIN_TOKEN: dev-operator-token-change-me-0123456789
     ROLL_SECRET_KEY: local-secret-key-change-me-0123456789abcdef
     ROLL_CODE_PUBLIC_URL: http://localhost:${ROLL_CODE_PORT:-7070}
     ROLL_CODE_DRAIN_TIMEOUT: "30"

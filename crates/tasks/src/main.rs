@@ -203,7 +203,8 @@ async fn main() -> anyhow::Result<()> {
         }
         let listener = tokio::net::TcpListener::bind(a.listen).await?;
         info!(addr = %a.listen, "API listening");
-        axum::serve(listener, tasks::api::router(tasks.clone())).await
+        // Browsers: the local dashboard only (rolld answers CORS for its own API).
+        axum::serve(listener, tasks::api::router(tasks.clone()).layer(roll_auth::cors(&roll_auth::Origins::Local))).await
     };
     tokio::select! {
         r = serve => r?,

@@ -398,7 +398,7 @@ Add `--cluster-backend dynamodb --cluster-table roll-cluster` (with AWS credenti
   by default) and, with leases on Postgres, 4 for them. Use a session-mode pooler or none: prepared statements and
   `SET search_path` need session state.
 - Every node must use the same object storage, the same `ROLL_SECRET_KEY` (sealed owner keys) and
-  the same `ROLL_CODE_TOKEN`.
+  the same `ROLL_ADMIN_TOKEN` (and `ROLL_CODE_TOKEN`, if set).
 
 ## Limits
 

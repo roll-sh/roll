@@ -1,11 +1,11 @@
-//! Control-plane state for roll nosql in SQLite (its own file, `<home>/nosql/nosql.db`):
-//! databases (branches are databases with a parent), imports and usage samples.
+//! Control-plane state for roll nosql: databases (branches are databases with a parent),
+//! imports and usage samples. Through `code-sql`: a SQLite file on one node
+//! (`<home>/nosql/nosql.db`), the system database (`ROLL_SYSTEM_DATABASE`, schema
+//! `nosql_control`) in a cluster, so every node sees one catalog.
 
-use rusqlite::{Connection, OptionalExtension, Row, params};
+use code_sql::{Db, OptionalExtension, Row, Target, params};
 use serde::Serialize;
 use serde_json::{Map, Value};
-use std::path::Path;
-use std::sync::Mutex;
 
 /// A database (or branch) as the control plane knows it.
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -123,47 +123,15 @@ pub struct UsageSample {
     pub net_out: i64,
 }
 
-pub struct Store {
-    conn: Mutex<Connection>,
-}
-
-const MIGRATIONS: &[&str] = &[r#"
-CREATE TABLE nosql_databases (
-  id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, dialect TEXT NOT NULL,
-  datacenter TEXT NOT NULL, rack TEXT NOT NULL, cluster_name TEXT NOT NULL,
-  settings TEXT NOT NULL, durability TEXT NOT NULL, idle_timeout_s INTEGER NOT NULL,
-  history_retention_s INTEGER NOT NULL, read_only INTEGER NOT NULL, masking TEXT NOT NULL,
-  expires_at INTEGER, parent_id TEXT, parent_at INTEGER, schema_only INTEGER NOT NULL,
-  superuser TEXT NOT NULL, password TEXT NOT NULL, created_at INTEGER NOT NULL
-);
-CREATE INDEX nosql_databases_expiry ON nosql_databases (expires_at) WHERE expires_at IS NOT NULL;
-CREATE TABLE nosql_imports (
-  id TEXT PRIMARY KEY, db_id TEXT NOT NULL REFERENCES nosql_databases(id) ON DELETE CASCADE,
-  source TEXT NOT NULL, keyspaces TEXT NOT NULL, every_s INTEGER, state TEXT NOT NULL,
-  rows INTEGER NOT NULL, tables_done INTEGER NOT NULL, tables_total INTEGER NOT NULL,
-  error TEXT, runs INTEGER NOT NULL, started_at INTEGER, finished_at INTEGER,
-  next_run_at INTEGER, created_at INTEGER NOT NULL
-);
-CREATE INDEX nosql_imports_db ON nosql_imports (db_id, created_at);
-CREATE TABLE nosql_usage (
-  db_id TEXT NOT NULL, at INTEGER NOT NULL, seconds INTEGER NOT NULL, reads INTEGER NOT NULL,
-  writes INTEGER NOT NULL, requests INTEGER NOT NULL, connection_seconds INTEGER NOT NULL,
-  net_in INTEGER NOT NULL, net_out INTEGER NOT NULL
-);
-CREATE INDEX nosql_usage_db ON nosql_usage (db_id, at);
-"#, r#"
-ALTER TABLE nosql_usage ADD COLUMN alternator_requests INTEGER NOT NULL DEFAULT 0;
-"#];
-
 const DB_COLS: &str = "id, name, dialect, datacenter, rack, cluster_name, settings, durability, idle_timeout_s, history_retention_s, read_only, masking, expires_at, parent_id, parent_at, schema_only, superuser, password, created_at";
 const IMPORT_COLS: &str = "id, db_id, source, keyspaces, every_s, state, rows, tables_done, tables_total, error, runs, started_at, finished_at, next_run_at, created_at";
 
-fn json_map(r: &Row, i: usize) -> rusqlite::Result<Map<String, Value>> {
+fn json_map(r: &Row, i: usize) -> code_sql::Result<Map<String, Value>> {
     let s: String = r.get(i)?;
     Ok(serde_json::from_str(&s).unwrap_or_default())
 }
 
-fn db_row(r: &Row) -> rusqlite::Result<NosqlDb> {
+fn db_row(r: &Row) -> code_sql::Result<NosqlDb> {
     Ok(NosqlDb {
         id: r.get(0)?,
         name: r.get(1)?,
@@ -187,7 +155,7 @@ fn db_row(r: &Row) -> rusqlite::Result<NosqlDb> {
     })
 }
 
-fn import_row(r: &Row) -> rusqlite::Result<Import> {
+fn import_row(r: &Row) -> code_sql::Result<Import> {
     let ks: String = r.get(3)?;
     Ok(Import {
         id: r.get(0)?,
@@ -212,234 +180,282 @@ fn to_json(m: &Map<String, Value>) -> String {
     serde_json::to_string(m).unwrap_or_else(|_| "{}".into())
 }
 
+pub struct Store {
+    db: Db,
+}
+
+/// The catalog's tables, in SQLite's dialect (translated for Postgres). Expand-only: every node
+/// may run it at once, and an older node keeps working on a newer schema.
+const SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS nosql_databases (
+  id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, dialect TEXT NOT NULL,
+  datacenter TEXT NOT NULL, rack TEXT NOT NULL, cluster_name TEXT NOT NULL,
+  settings TEXT NOT NULL, durability TEXT NOT NULL, idle_timeout_s INTEGER NOT NULL,
+  history_retention_s INTEGER NOT NULL, read_only INTEGER NOT NULL, masking TEXT NOT NULL,
+  expires_at INTEGER, parent_id TEXT, parent_at INTEGER, schema_only INTEGER NOT NULL,
+  superuser TEXT NOT NULL, password TEXT NOT NULL, created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS nosql_databases_expiry ON nosql_databases (expires_at);
+CREATE TABLE IF NOT EXISTS nosql_imports (
+  id TEXT PRIMARY KEY, db_id TEXT NOT NULL,
+  source TEXT NOT NULL, keyspaces TEXT NOT NULL, every_s INTEGER, state TEXT NOT NULL,
+  rows INTEGER NOT NULL, tables_done INTEGER NOT NULL, tables_total INTEGER NOT NULL,
+  error TEXT, runs INTEGER NOT NULL, started_at INTEGER, finished_at INTEGER,
+  next_run_at INTEGER, created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS nosql_imports_db ON nosql_imports (db_id, created_at);
+CREATE TABLE IF NOT EXISTS nosql_usage (
+  db_id TEXT NOT NULL, at INTEGER NOT NULL, seconds INTEGER NOT NULL, reads INTEGER NOT NULL,
+  writes INTEGER NOT NULL, requests INTEGER NOT NULL, connection_seconds INTEGER NOT NULL,
+  net_in INTEGER NOT NULL, net_out INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS nosql_usage_db ON nosql_usage (db_id, at);
+"#;
+
+/// The Postgres schema (namespace) of the catalog in the system database.
+pub const PG_SCHEMA: &str = "nosql_control";
+
 impl Store {
-    pub fn open(path: &Path) -> anyhow::Result<Self> {
-        let mut conn = Connection::open(path)?;
-        conn.execute_batch("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;")?;
-        let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        for (i, sql) in MIGRATIONS.iter().enumerate().skip(version as usize) {
-            let tx = conn.transaction()?;
-            tx.execute_batch(sql)?;
-            tx.execute_batch(&format!("PRAGMA user_version = {}", i + 1))?;
-            tx.commit()?;
-        }
-        Ok(Self { conn: Mutex::new(conn) })
+    /// The catalog in `target`: a SQLite file on one node (`<home>/nosql/nosql.db`), or the
+    /// system database's `nosql_control` schema in a cluster.
+    pub fn open(target: &Target) -> anyhow::Result<Self> {
+        Self::on(Db::open(target)?)
     }
 
+    /// The catalog on an open database (creating or extending its tables).
+    pub fn on(db: Db) -> anyhow::Result<Self> {
+        db.ensure_schema(SCHEMA)?;
+        // Later columns (catalogs from before them have the tables without).
+        db.add_column("nosql_usage", "alternator_requests", "INTEGER NOT NULL DEFAULT 0")?;
+        // The node running an import (`state = 'running'`), so another can take it over.
+        db.add_column("nosql_imports", "node", "TEXT")?;
+        Ok(Self { db })
+    }
+
+    /// A fresh catalog in a temporary SQLite file (tests), or in a fresh Postgres schema when
+    /// `ROLL_CODE_TEST_DATABASE` names one.
     pub fn memory() -> anyhow::Result<Self> {
-        Self::open(Path::new(":memory:"))
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static N: AtomicU64 = AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!("roll-nosql-catalog-{}-{}-{}", std::process::id(), crate::control::now_ms(), N.fetch_add(1, Ordering::Relaxed)));
+        std::fs::create_dir_all(&dir)?;
+        Self::on(Db::open_or_test(&Target::Sqlite(dir.join("nosql.db")), "nosql")?)
     }
 
-    /// The schema version (number of migrations applied).
-    pub fn version(&self) -> anyhow::Result<i64> {
-        self.with(|c| c.query_row("PRAGMA user_version", [], |r| r.get(0)))
-    }
-
-    fn with<T>(&self, f: impl FnOnce(&Connection) -> rusqlite::Result<T>) -> anyhow::Result<T> {
-        Ok(f(&self.conn.lock().unwrap_or_else(|e| e.into_inner()))?)
+    pub fn database(&self) -> &Db {
+        &self.db
     }
 
     pub fn insert_db(&self, d: &NosqlDb) -> anyhow::Result<()> {
-        self.with(|c| {
-            c.execute(
-                &format!("INSERT INTO nosql_databases ({DB_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)"),
-                params![
-                    d.id,
-                    d.name,
-                    d.dialect,
-                    d.datacenter,
-                    d.rack,
-                    d.cluster_name,
-                    to_json(&d.settings),
-                    d.durability,
-                    d.idle_timeout_s,
-                    d.history_retention_s,
-                    d.read_only,
-                    to_json(&d.masking),
-                    d.expires_at,
-                    d.parent_id,
-                    d.parent_at,
-                    d.schema_only,
-                    d.superuser,
-                    d.password,
-                    d.created_at
-                ],
-            )
-            .map(|_| ())
-        })
+        self.db.execute(
+            &format!("INSERT INTO nosql_databases ({DB_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)"),
+            params![
+                d.id,
+                d.name,
+                d.dialect,
+                d.datacenter,
+                d.rack,
+                d.cluster_name,
+                to_json(&d.settings),
+                d.durability,
+                d.idle_timeout_s,
+                d.history_retention_s,
+                d.read_only,
+                to_json(&d.masking),
+                d.expires_at,
+                d.parent_id,
+                d.parent_at,
+                d.schema_only,
+                d.superuser,
+                d.password,
+                d.created_at
+            ],
+        )?;
+        Ok(())
     }
 
     /// Rewrites every column but `id` and `created_at`.
     pub fn update_db(&self, d: &NosqlDb) -> anyhow::Result<()> {
-        self.with(|c| {
-            c.execute(
-                "UPDATE nosql_databases SET name = ?2, dialect = ?3, datacenter = ?4, rack = ?5, cluster_name = ?6, settings = ?7,
-                 durability = ?8, idle_timeout_s = ?9, history_retention_s = ?10, read_only = ?11, masking = ?12, expires_at = ?13,
-                 parent_id = ?14, parent_at = ?15, schema_only = ?16, superuser = ?17, password = ?18 WHERE id = ?1",
-                params![
-                    d.id,
-                    d.name,
-                    d.dialect,
-                    d.datacenter,
-                    d.rack,
-                    d.cluster_name,
-                    to_json(&d.settings),
-                    d.durability,
-                    d.idle_timeout_s,
-                    d.history_retention_s,
-                    d.read_only,
-                    to_json(&d.masking),
-                    d.expires_at,
-                    d.parent_id,
-                    d.parent_at,
-                    d.schema_only,
-                    d.superuser,
-                    d.password
-                ],
-            )
-            .map(|_| ())
-        })
+        self.db.execute(
+            "UPDATE nosql_databases SET name = ?2, dialect = ?3, datacenter = ?4, rack = ?5, cluster_name = ?6, settings = ?7,
+             durability = ?8, idle_timeout_s = ?9, history_retention_s = ?10, read_only = ?11, masking = ?12, expires_at = ?13,
+             parent_id = ?14, parent_at = ?15, schema_only = ?16, superuser = ?17, password = ?18 WHERE id = ?1",
+            params![
+                d.id,
+                d.name,
+                d.dialect,
+                d.datacenter,
+                d.rack,
+                d.cluster_name,
+                to_json(&d.settings),
+                d.durability,
+                d.idle_timeout_s,
+                d.history_retention_s,
+                d.read_only,
+                to_json(&d.masking),
+                d.expires_at,
+                d.parent_id,
+                d.parent_at,
+                d.schema_only,
+                d.superuser,
+                d.password
+            ],
+        )?;
+        Ok(())
     }
 
     pub fn db(&self, id: &str) -> anyhow::Result<Option<NosqlDb>> {
-        self.with(|c| c.query_row(&format!("SELECT {DB_COLS} FROM nosql_databases WHERE id = ?1"), [id], db_row).optional())
+        Ok(self.db.query_row(&format!("SELECT {DB_COLS} FROM nosql_databases WHERE id = ?1"), [id], db_row).optional()?)
     }
 
     pub fn db_by_name(&self, name: &str) -> anyhow::Result<Option<NosqlDb>> {
-        self.with(|c| c.query_row(&format!("SELECT {DB_COLS} FROM nosql_databases WHERE name = ?1"), [name], db_row).optional())
+        Ok(self.db.query_row(&format!("SELECT {DB_COLS} FROM nosql_databases WHERE name = ?1"), [name], db_row).optional()?)
     }
 
     pub fn dbs(&self) -> anyhow::Result<Vec<NosqlDb>> {
-        self.with(|c| {
-            let mut st = c.prepare(&format!("SELECT {DB_COLS} FROM nosql_databases ORDER BY created_at, id"))?;
-            st.query_map([], db_row)?.collect()
-        })
+        Ok(self.db.query(&format!("SELECT {DB_COLS} FROM nosql_databases ORDER BY created_at, id"), (), db_row)?)
     }
 
     /// Databases with `expires_at <= now`.
     pub fn expired(&self, now: i64) -> anyhow::Result<Vec<NosqlDb>> {
-        self.with(|c| {
-            let mut st = c.prepare(&format!("SELECT {DB_COLS} FROM nosql_databases WHERE expires_at IS NOT NULL AND expires_at <= ?1 ORDER BY expires_at, id"))?;
-            st.query_map([now], db_row)?.collect()
-        })
+        Ok(self.db.query(&format!("SELECT {DB_COLS} FROM nosql_databases WHERE expires_at IS NOT NULL AND expires_at <= ?1 ORDER BY expires_at, id"), [now], db_row)?)
     }
 
     /// Direct branches of a database.
     pub fn children(&self, id: &str) -> anyhow::Result<Vec<NosqlDb>> {
-        self.with(|c| {
-            let mut st = c.prepare(&format!("SELECT {DB_COLS} FROM nosql_databases WHERE parent_id = ?1 ORDER BY created_at, id"))?;
-            st.query_map([id], db_row)?.collect()
-        })
+        Ok(self.db.query(&format!("SELECT {DB_COLS} FROM nosql_databases WHERE parent_id = ?1 ORDER BY created_at, id"), [id], db_row)?)
     }
 
+    /// The database, its imports and its usage, in one transaction.
     pub fn delete_db(&self, id: &str) -> anyhow::Result<()> {
-        self.with(|c| {
-            c.execute("DELETE FROM nosql_databases WHERE id = ?1", [id])?;
-            c.execute("DELETE FROM nosql_usage WHERE db_id = ?1", [id]).map(|_| ())
-        })
+        self.db.write(|c| {
+            c.execute("DELETE FROM nosql_imports WHERE db_id = ?1", [id])?;
+            c.execute("DELETE FROM nosql_usage WHERE db_id = ?1", [id])?;
+            c.execute("DELETE FROM nosql_databases WHERE id = ?1", [id]).map(|_| ())
+        })?;
+        Ok(())
     }
 
     pub fn insert_import(&self, i: &Import) -> anyhow::Result<()> {
-        self.with(|c| {
-            c.execute(
-                &format!("INSERT INTO nosql_imports ({IMPORT_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)"),
-                params![
-                    i.id,
-                    i.db_id,
-                    i.source,
-                    serde_json::to_string(&i.keyspaces).unwrap_or_else(|_| "[]".into()),
-                    i.every,
-                    i.state,
-                    i.rows,
-                    i.tables_done,
-                    i.tables_total,
-                    i.error,
-                    i.runs,
-                    i.started_at,
-                    i.finished_at,
-                    i.next_run_at,
-                    i.created_at
-                ],
-            )
-            .map(|_| ())
-        })
+        self.db.execute(
+            &format!("INSERT INTO nosql_imports ({IMPORT_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)"),
+            params![
+                i.id,
+                i.db_id,
+                i.source,
+                serde_json::to_string(&i.keyspaces).unwrap_or_else(|_| "[]".into()),
+                i.every,
+                i.state,
+                i.rows,
+                i.tables_done,
+                i.tables_total,
+                i.error,
+                i.runs,
+                i.started_at,
+                i.finished_at,
+                i.next_run_at,
+                i.created_at
+            ],
+        )?;
+        Ok(())
     }
 
     /// Progress and state (everything that changes while an import runs).
     pub fn update_import(&self, i: &Import) -> anyhow::Result<()> {
-        self.with(|c| {
+        self.db.execute(
+            "UPDATE nosql_imports SET state = ?2, rows = ?3, tables_done = ?4, tables_total = ?5, error = ?6, runs = ?7,
+             started_at = ?8, finished_at = ?9, next_run_at = ?10 WHERE id = ?1",
+            params![i.id, i.state, i.rows, i.tables_done, i.tables_total, i.error, i.runs, i.started_at, i.finished_at, i.next_run_at],
+        )?;
+        Ok(())
+    }
+
+    /// Start a run of an import on `node`: it becomes `running` there, unless it's running on
+    /// another node `may_take` refuses (one still alive and owning its database). The import as
+    /// it starts, or `None` (gone, or running elsewhere).
+    pub fn claim_import(&self, id: &str, node: &str, now: i64, may_take: &dyn Fn(&str) -> bool) -> anyhow::Result<Option<Import>> {
+        let claimed = self.db.write(|c| {
+            let row = c.query_row("SELECT state, node FROM nosql_imports WHERE id = ?1", [id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))).optional()?;
+            let Some((state, by)) = row else { return Ok::<_, code_sql::Error>(false) };
+            if state == "running" && by.as_deref().is_some_and(|b| b != node && !may_take(b)) {
+                return Ok(false);
+            }
             c.execute(
-                "UPDATE nosql_imports SET state = ?2, rows = ?3, tables_done = ?4, tables_total = ?5, error = ?6, runs = ?7,
-                 started_at = ?8, finished_at = ?9, next_run_at = ?10 WHERE id = ?1",
-                params![i.id, i.state, i.rows, i.tables_done, i.tables_total, i.error, i.runs, i.started_at, i.finished_at, i.next_run_at],
-            )
-            .map(|_| ())
-        })
+                "UPDATE nosql_imports SET state = 'running', node = ?2, started_at = ?3, finished_at = NULL, error = NULL, rows = 0, tables_done = 0, next_run_at = NULL WHERE id = ?1",
+                params![id, node, now],
+            )?;
+            Ok(true)
+        })?;
+        if !claimed {
+            return Ok(None);
+        }
+        self.import(id)
+    }
+
+    /// Imports that should run and aren't running on `node`: queued, due, or running on
+    /// another node (with that node).
+    pub fn runnable_imports(&self, now: i64, node: &str) -> anyhow::Result<Vec<(Import, Option<String>)>> {
+        Ok(self.db.query(
+            &format!(
+                "SELECT {IMPORT_COLS}, node FROM nosql_imports WHERE state = 'queued' OR (state = 'running' AND (node IS NULL OR node != ?2))
+                 OR (next_run_at IS NOT NULL AND next_run_at <= ?1 AND state != 'running') ORDER BY created_at, id"
+            ),
+            params![now, node],
+            |r| Ok((import_row(r)?, r.get::<_, Option<String>>(15)?)),
+        )?)
     }
 
     pub fn import(&self, id: &str) -> anyhow::Result<Option<Import>> {
-        self.with(|c| c.query_row(&format!("SELECT {IMPORT_COLS} FROM nosql_imports WHERE id = ?1"), [id], import_row).optional())
+        Ok(self.db.query_row(&format!("SELECT {IMPORT_COLS} FROM nosql_imports WHERE id = ?1"), [id], import_row).optional()?)
     }
 
     pub fn imports(&self, db_id: &str) -> anyhow::Result<Vec<Import>> {
-        self.with(|c| {
-            let mut st = c.prepare(&format!("SELECT {IMPORT_COLS} FROM nosql_imports WHERE db_id = ?1 ORDER BY created_at, id"))?;
-            st.query_map([db_id], import_row)?.collect()
-        })
+        Ok(self.db.query(&format!("SELECT {IMPORT_COLS} FROM nosql_imports WHERE db_id = ?1 ORDER BY created_at, id"), [db_id], import_row)?)
     }
 
     /// Scheduled imports whose next run is due.
     pub fn due_imports(&self, now: i64) -> anyhow::Result<Vec<Import>> {
-        self.with(|c| {
-            let mut st = c.prepare(&format!(
-                "SELECT {IMPORT_COLS} FROM nosql_imports WHERE next_run_at IS NOT NULL AND next_run_at <= ?1 AND state != 'running' ORDER BY next_run_at, id"
-            ))?;
-            st.query_map([now], import_row)?.collect()
-        })
+        Ok(self.db.query(
+            &format!("SELECT {IMPORT_COLS} FROM nosql_imports WHERE next_run_at IS NOT NULL AND next_run_at <= ?1 AND state != 'running' ORDER BY next_run_at, id"),
+            [now],
+            import_row,
+        )?)
     }
 
-    /// Imports a restart interrupted: marked failed (scheduled ones run again when due).
+    /// Imports a restart interrupted: marked failed (scheduled ones run again when due). On one
+    /// node only: in a cluster, the database's owner takes them over.
     pub fn fail_running_imports(&self, now: i64) -> anyhow::Result<usize> {
-        self.with(|c| {
-            c.execute(
-                "UPDATE nosql_imports SET state = 'failed', error = 'interrupted by a restart', finished_at = ?1 WHERE state IN ('running', 'queued')",
-                [now],
-            )
-        })
+        Ok(self.db.execute("UPDATE nosql_imports SET state = 'failed', error = 'interrupted by a restart', finished_at = ?1 WHERE state IN ('running', 'queued')", [now])?)
     }
 
     pub fn record_usage(&self, db_id: &str, u: &UsageSample) -> anyhow::Result<()> {
-        self.with(|c| {
-            c.execute(
-                "INSERT INTO nosql_usage (db_id, at, seconds, reads, writes, requests, connection_seconds, net_in, net_out, alternator_requests) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-                params![db_id, u.at, u.seconds, u.reads, u.writes, u.requests, u.connection_seconds, u.net_in, u.net_out, u.alternator_requests],
-            )
-            .map(|_| ())
-        })
+        self.db.execute(
+            "INSERT INTO nosql_usage (db_id, at, seconds, reads, writes, requests, connection_seconds, net_in, net_out, alternator_requests) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![db_id, u.at, u.seconds, u.reads, u.writes, u.requests, u.connection_seconds, u.net_in, u.net_out, u.alternator_requests],
+        )?;
+        Ok(())
     }
 
     pub fn usage_since(&self, db_id: &str, since: i64) -> anyhow::Result<UsageTotals> {
-        self.with(|c| {
-            c.query_row(
-                "SELECT COALESCE(SUM(seconds), 0), COALESCE(SUM(reads), 0), COALESCE(SUM(writes), 0), COALESCE(SUM(requests), 0),
-                        COALESCE(SUM(connection_seconds), 0), COALESCE(SUM(net_in), 0), COALESCE(SUM(net_out), 0),
-                        COALESCE(SUM(alternator_requests), 0)
-                 FROM nosql_usage WHERE db_id = ?1 AND at >= ?2",
-                params![db_id, since],
-                |r| {
-                    Ok(UsageTotals {
-                        active_seconds: r.get(0)?,
-                        reads: r.get(1)?,
-                        writes: r.get(2)?,
-                        requests: r.get(3)?,
-                        connection_seconds: r.get(4)?,
-                        net_in_bytes: r.get(5)?,
-                        net_out_bytes: r.get(6)?,
-                        alternator_requests: r.get(7)?,
-                    })
-                },
-            )
-        })
+        Ok(self.db.query_row(
+            "SELECT COALESCE(SUM(seconds), 0), COALESCE(SUM(reads), 0), COALESCE(SUM(writes), 0), COALESCE(SUM(requests), 0),
+                    COALESCE(SUM(connection_seconds), 0), COALESCE(SUM(net_in), 0), COALESCE(SUM(net_out), 0),
+                    COALESCE(SUM(alternator_requests), 0)
+             FROM nosql_usage WHERE db_id = ?1 AND at >= ?2",
+            params![db_id, since],
+            |r| {
+                Ok(UsageTotals {
+                    active_seconds: r.get(0)?,
+                    reads: r.get(1)?,
+                    writes: r.get(2)?,
+                    requests: r.get(3)?,
+                    connection_seconds: r.get(4)?,
+                    net_in_bytes: r.get(5)?,
+                    net_out_bytes: r.get(6)?,
+                    alternator_requests: r.get(7)?,
+                })
+            },
+        )?)
     }
 }
 
@@ -473,17 +489,62 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn migrations_are_idempotent() {
+    fn reopening_keeps_the_catalog() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("nosql.db");
-        let s = Store::open(&path).unwrap();
-        assert_eq!(s.version().unwrap(), MIGRATIONS.len() as i64);
+        let target = Target::Sqlite(dir.path().join("nosql.db"));
+        let s = Store::open(&target).unwrap();
         s.insert_db(&sample_db("na", "a")).unwrap();
         drop(s);
-        // Reopening applies nothing again and keeps the data.
-        let s = Store::open(&path).unwrap();
-        assert_eq!(s.version().unwrap(), MIGRATIONS.len() as i64);
+        let s = Store::open(&target).unwrap();
         assert_eq!(s.db("na").unwrap().unwrap().name, "a");
+    }
+
+    /// A catalog file from before the move to code-sql (rusqlite, `PRAGMA user_version` 1)
+    /// opens as it is and gains the later columns.
+    #[test]
+    fn a_catalog_from_before_opens() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nosql.db");
+        {
+            let c = rusqlite::Connection::open(&path).unwrap();
+            c.execute_batch(&SCHEMA.replace("IF NOT EXISTS ", "")).unwrap();
+            c.execute_batch("PRAGMA user_version = 1").unwrap();
+        }
+        let s = Store::open(&Target::Sqlite(path)).unwrap();
+        s.insert_db(&sample_db("na", "a")).unwrap();
+        s.record_usage("na", &UsageSample { at: 1, alternator_requests: 2, ..Default::default() }).unwrap();
+        assert_eq!(s.usage_since("na", 0).unwrap().alternator_requests, 2);
+    }
+
+    #[test]
+    fn imports_are_claimed_by_one_node() {
+        let s = Store::memory().unwrap();
+        s.insert_db(&sample_db("na", "app")).unwrap();
+        let i = Import {
+            id: "i1".into(),
+            db_id: "na".into(),
+            source: "cql://h:1".into(),
+            keyspaces: vec![],
+            every: None,
+            state: "queued".into(),
+            rows: 0,
+            tables_done: 0,
+            tables_total: 0,
+            error: None,
+            runs: 0,
+            started_at: None,
+            finished_at: None,
+            next_run_at: None,
+            created_at: 1,
+        };
+        s.insert_import(&i).unwrap();
+        assert_eq!(s.runnable_imports(10, "a").unwrap().len(), 1);
+        assert_eq!(s.claim_import("i1", "a", 10, &|_| false).unwrap().unwrap().state, "running");
+        assert!(s.runnable_imports(10, "a").unwrap().is_empty(), "running here");
+        assert_eq!(s.runnable_imports(10, "b").unwrap().len(), 1, "running elsewhere");
+        assert!(s.claim_import("i1", "b", 11, &|_| false).unwrap().is_none(), "a's claim holds while a may keep it");
+        assert!(s.claim_import("i1", "b", 11, &|n| n == "a").unwrap().is_some(), "taken over from a");
+        assert!(s.claim_import("missing", "b", 11, &|_| true).unwrap().is_none());
     }
 
     #[test]

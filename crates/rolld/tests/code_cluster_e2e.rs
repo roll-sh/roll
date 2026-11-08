@@ -188,6 +188,8 @@ impl Env {
             format!("ROLL_CODE_NODE_ID={n}"),
             format!("ROLL_CODE_DRAIN_TIMEOUT={DRAIN_TIMEOUT_S}"),
             format!("ROLL_CODE_TOKEN={TOKEN}"),
+            // The nodes listen off loopback: rolld wants the operator's token (the same one here).
+            format!("ROLL_ADMIN_TOKEN={TOKEN}"),
             format!("ROLL_SECRET_KEY={SECRET_KEY}"),
             format!("ROLL_CODE_PUBLIC_URL=http://{}:7070", self.node(i)),
             format!("ROLL_S3_BUCKET={BUCKET}"),

@@ -44,6 +44,10 @@ pub struct Hop {
     /// The client (from the PROXY header on the first node).
     pub client: SocketAddr,
     pub sni: Option<String>,
+    /// Splices before this one: a node the tenant moved away from while the connection was on
+    /// its way passes it on to the new owner, a bounded number of times.
+    #[serde(default)]
+    pub hops: u8,
 }
 
 /// Signs and checks hops with the cluster secret (`ROLL_CLUSTER_SECRET`).

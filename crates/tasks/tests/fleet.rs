@@ -23,6 +23,8 @@ use tasks::fleet::{KEY, NodeConfig, TasksNode};
 use tasks::store::log::LogConfig;
 
 const SECRET: &[u8] = b"tasks cluster test secret 012345";
+/// rolld's operator token (`ROLL_ADMIN_TOKEN`): every call below uses it unless it names a key.
+const OPERATOR: &str = "operator-token-for-the-tasks-fleet-tests";
 
 macro_rules! on_backends {
     ($($name:ident),* $(,)?) => {
@@ -149,7 +151,10 @@ impl Fleet {
         let mut engine = fast_config();
         // Well under the test cluster's handoff timeout (1.5 s).
         engine.drain_ms = 300;
+        // As rolld runs it with the operator's token required.
+        engine.require_auth = true;
         let mut cfg = NodeConfig::new(self.log_config(self.dir.path().join(&id)), engine);
+        cfg.operator = Some(roll_auth::AdminToken::new(OPERATOR).unwrap());
         cfg.follow_every = Duration::from_millis(50);
         cfg.check_every = Duration::from_millis(500);
         cfg.open_wait = Duration::from_secs(3);
@@ -218,9 +223,7 @@ impl Fleet {
 
 async fn call(base: &str, method: Method, path: &str, token: Option<&str>, body: Option<Value>) -> (StatusCode, Value) {
     let mut r = reqwest::Client::new().request(method, format!("{base}{path}"));
-    if let Some(t) = token {
-        r = r.bearer_auth(t);
-    }
+    r = r.bearer_auth(token.unwrap_or(OPERATOR));
     if let Some(b) = body {
         r = r.json(&b);
     }
@@ -262,6 +265,11 @@ async fn requests_through_any_node_reach_the_leader(kind: Kind) {
     assert!(s.is_success(), "{s} {v}");
     recv.wait("/m", 10, 10_000).await;
     recv.wait("/acme", 1, 10_000).await;
+    // The operator's token works on the leader wherever it came in; nothing else does.
+    let (s, _) = call(other, Method::GET, "/v1/tasks/queues", Some("not-the-token"), None).await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+    let (s, _) = call(other, Method::GET, "/v1/tasks/queues", Some(&token), None).await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED, "a tenant's key isn't the default tenant's");
     // Every node answers reads, and errors come back as they are.
     for n in &f.nodes {
         let (s, m) = call(&n.base, Method::GET, &format!("/v1/tasks/messages/{}", ids[0]), None, None).await;

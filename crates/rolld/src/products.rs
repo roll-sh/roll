@@ -49,7 +49,7 @@ impl Product {
             Product::Streams => &["/v1/streams", "/v1/kafka", "/kafka/v3"],
             Product::Tasks => &["/v1/tasks", "/t", "/_roll/tenants", "/internal/tasks"],
             Product::Storage => &["/v1/storage"],
-            Product::Nosql => &["/v1/nosql"],
+            Product::Nosql => &["/v1/nosql", "/internal/nosql"],
             Product::Queues => &["/v1/queues"],
             Product::Code => &["/v1/code", "/git", "/internal/code"],
         }

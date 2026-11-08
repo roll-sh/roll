@@ -132,6 +132,12 @@ Resources:
     Properties:
       Description: roll queues internal secret (broker-to-keeper and broker-to-broker handshakes)
       GenerateSecretString: { PasswordLength: 48, ExcludePunctuation: true }
+  # The operator token for the roll API on 7070 (rolld refuses to listen off loopback without one).
+  AdminTokenSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Description: roll queues operator token (ROLL_ADMIN_TOKEN, the roll API's Bearer token)
+      GenerateSecretString: { PasswordLength: 48, ExcludePunctuation: true }
 
   # ── storage ──
   TierBucket:
@@ -452,7 +458,7 @@ Resources:
           PolicyDocument:
             Version: "2012-10-17"
             Statement:
-              - { Effect: Allow, Action: secretsmanager:GetSecretValue, Resource: [!Ref MetadataUrlSecretArn, !Ref AdminPasswordSecretArn, !Ref InternalSecret] }
+              - { Effect: Allow, Action: secretsmanager:GetSecretValue, Resource: [!Ref MetadataUrlSecretArn, !Ref AdminPasswordSecretArn, !Ref InternalSecret, !Ref AdminTokenSecret] }
   BrokerTaskRole:
     Type: AWS::IAM::Role
     Properties:
@@ -508,6 +514,7 @@ Resources:
             - { Name: ROLL_QUEUES_PASSWORD, ValueFrom: !Ref AdminPasswordSecretArn }
             - { Name: ROLL_QUEUES_CLUSTER_SECRET, ValueFrom: !Ref InternalSecret }
             - { Name: ROLL_QUEUES_KEEPER_SECRET, ValueFrom: !Ref InternalSecret }
+            - { Name: ROLL_ADMIN_TOKEN, ValueFrom: !Ref AdminTokenSecret }
           PortMappings:
             - { ContainerPort: 5672 }
             - { ContainerPort: 5552 }

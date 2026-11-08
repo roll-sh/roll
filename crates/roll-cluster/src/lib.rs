@@ -27,7 +27,9 @@
 //!   (or whose holder is gone), or already ours, and bumps `epoch` when the holder changes. The
 //!   same thread renews all of this node's leases in one write every `renew_every`.
 //! - **Placement.** Rendezvous hashing of `(key, node_id)` over live, non-draining nodes
-//!   ([`Cluster::preferred`], [`placement`]).
+//!   ([`Cluster::preferred`], [`placement`]). A key `<anchor>#<name>` (a read replica of
+//!   `<anchor>`) is placed as a standby of `<anchor>`: on another node, in another zone when one
+//!   is live.
 //! - **Routing.** [`Cluster::route`]: [`Route::Local`] with a [`Guard`] if this node holds a
 //!   valid lease; [`Route::Remote`] to the holder (or to the preferred node of a free key);
 //!   [`Route::Unavailable`] while a key moves. A free key whose preferred node is this one is

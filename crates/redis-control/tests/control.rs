@@ -74,17 +74,6 @@ async fn lifecycle() {
     assert_eq!((s, v["error"].as_str().unwrap()), (409, "a database named cache already exists"));
     let (s, _) = e.call(reqwest::Method::POST, "/v1/redis/databases", Some(json!({"name": "x", "eviction_policy": "nope"}))).await;
     assert_eq!(s, 400);
-    // The dashboard calls the API from another origin.
-    let pre = e
-        .http
-        .request(reqwest::Method::OPTIONS, format!("{}/v1/redis/databases/{id}", e.api))
-        .header("origin", "http://localhost:3000")
-        .header("access-control-request-method", "PATCH")
-        .send()
-        .await
-        .unwrap();
-    assert!(pre.status().is_success());
-    assert!(pre.headers().contains_key("access-control-allow-origin"));
 
     let mut c = e.connect(&token(&db)).await;
     assert_eq!(c.cmd(["SET", "k", "v"]).await.unwrap(), Reply::Ok);

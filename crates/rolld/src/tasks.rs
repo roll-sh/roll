@@ -22,10 +22,6 @@ pub struct TasksArgs {
     /// rest of the local API.
     #[arg(long = "tasks-token", env = "ROLL_TASKS_TOKEN", hide_env_values = true)]
     pub token: Option<String>,
-    /// The operator token every control-plane API accepts: the tasks token when
-    /// `ROLL_TASKS_TOKEN` isn't set.
-    #[arg(id = "tasks_admin_token", long = "tasks-admin-token", env = "ROLL_ADMIN_TOKEN", hide_env_values = true, hide = true)]
-    pub admin_token: Option<String>,
     /// Minimum time between two log commits (each is one object write): API writes wait up to
     /// this long for theirs (default: 100 on S3, 5 in a local directory).
     #[arg(long = "tasks-commit-ms", env = "ROLL_TASKS_COMMIT_MS")]
@@ -89,7 +85,7 @@ fn log_objects(storage: &StorageConfig) -> anyhow::Result<(Arc<dyn ObjectStore>,
 /// Take part in serving roll tasks on `cluster`: on a node alone the cell is open when this
 /// returns (and an error opening it fails startup); in a cluster it opens whenever this node gets
 /// the cell's lease.
-pub async fn start(args: &TasksArgs, home: &Path, storage: &StorageConfig, cluster: Arc<roll_cluster::Cluster>) -> anyhow::Result<Tasks> {
+pub async fn start(args: &TasksArgs, auth: &crate::auth::Auth, home: &Path, storage: &StorageConfig, cluster: Arc<roll_cluster::Cluster>) -> anyhow::Result<Tasks> {
     let single = cluster.backend_name() == "memory";
     let local = matches!(storage, StorageConfig::Local(_));
     if !single && local {
@@ -102,11 +98,10 @@ pub async fn start(args: &TasksArgs, home: &Path, storage: &StorageConfig, clust
     log.shards = 4;
     log.commit_ms = args.commit_ms.unwrap_or(if local { 5 } else { 100 });
     log.relaxed_ms = args.relaxed_ms;
-    let token = [&args.token, &args.admin_token].into_iter().flatten().find(|t| !t.is_empty()).cloned();
-    // On a fleet the API is public (api.roll.sh, the edge): never open.
-    anyhow::ensure!(single || token.is_some(), "a tasks cluster needs ROLL_TASKS_TOKEN (or ROLL_ADMIN_TOKEN): without one its API is open");
     let mut engine = ::tasks::Config {
-        token,
+        token: args.token.clone().filter(|t| !t.is_empty()),
+        // With the operator's token required (auth.rs), tasks requires its own credentials too.
+        require_auth: auth.enforcing(),
         block_private_urls: args.block_private.unwrap_or(!single),
         ..::tasks::Config::default()
     };
@@ -134,6 +129,7 @@ pub async fn start(args: &TasksArgs, home: &Path, storage: &StorageConfig, clust
 
     let mut cfg = NodeConfig::new(log, engine);
     cfg.single = single;
+    cfg.operator = auth.token();
     let node = TasksNode::start(cluster, cfg).await?;
     info!(single, "tasks: log store cell");
     Ok(Tasks { node })

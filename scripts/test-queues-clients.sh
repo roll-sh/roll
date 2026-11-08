@@ -77,6 +77,9 @@ elif [[ -z $url ]]; then
   home=$(mktemp -d "${TMPDIR:-/tmp}/roll-qtest.XXXXXX")
   any=0.0.0.0
   # Debug for mq_amqp logs why a connection or channel ended, which is what a flaky client needs.
+  # Listeners off loopback (the clients run in containers): rolld wants an operator token, and the
+  # clients log in as guest/guest from outside, as against RabbitMQ's image.
+  ROLL_ADMIN_TOKEN=${ROLL_ADMIN_TOKEN:-queues-clients-operator-token-0123456789} ROLL_QUEUES_REMOTE_GUEST=1 \
   RUST_LOG=${RUST_LOG:-info,mq_amqp=debug} "$TARGET/release/rolld" --home "$home" --queues-only \
     --api "127.0.0.1:$api_port" --public-host "$host" --queues-advertise-host "$host" \
     --queues-amqp "$any:$p_amqp" --queues-mqtt "$any:$mqtt_port" --queues-stomp "$any:$stomp_port" \

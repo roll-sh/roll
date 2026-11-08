@@ -14,7 +14,6 @@ use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use std::sync::Arc;
-use tower_http::cors::CorsLayer;
 
 type AppState = Arc<Control>;
 type ApiResult<T> = Result<Json<T>, ControlError>;
@@ -72,8 +71,8 @@ pub fn router(control: Arc<Control>) -> Router {
         .route(&db("/flush"), post(flush))
         .route(&db("/compact"), post(compact))
         .route(&db("/unload"), post(unload))
-        // The dashboard calls it from the browser, like the other products' APIs.
-        .layer(CorsLayer::permissive())
+        // In a cluster, a database's requests run on its owner.
+        .layer(axum::middleware::from_fn_with_state(control.clone(), crate::cluster::route))
         .with_state(control)
 }
 

@@ -58,6 +58,8 @@ export interface CodeInfo {
   /** Whether the server wants tokens, and who this request's token is. */
   auth: {
     required: boolean;
+    /** The token is rolld's operator token (`ROLL_ADMIN_TOKEN`): every product's API takes it. */
+    operator?: boolean;
     caller: { kind: "admin" | "owner" | "anonymous" | "invalid"; owner: string | null };
   };
 }

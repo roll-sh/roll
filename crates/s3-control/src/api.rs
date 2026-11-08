@@ -18,7 +18,6 @@ use std::collections::BTreeMap;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
-use tower_http::cors::CorsLayer;
 
 type AppState = Arc<Control>;
 type ApiResult<T> = Result<Json<T>, ControlError>;
@@ -120,8 +119,6 @@ pub fn router(control: Arc<Control>) -> Router {
         .merge(crate::devapi::routes())
         // A signed-in dashboard user's requests act as that IAM user (`console.rs`).
         .route_layer(axum::middleware::from_fn_with_state(control.clone(), crate::console::guard))
-        // The dashboard calls it from the browser, like the other control-plane APIs.
-        .layer(CorsLayer::permissive())
         .with_state(control)
 }
 

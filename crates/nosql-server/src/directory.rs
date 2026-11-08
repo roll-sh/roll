@@ -12,12 +12,15 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
+use bytes::Bytes;
 use futures::future::BoxFuture;
 use nosql_engine as eng;
 use nosql_proto::Dialect;
 use serde::Serialize;
 use tokio::sync::watch;
 
+use crate::conn::{Accepted, Io};
+use crate::fleet::Placement;
 use crate::node::DbSpec;
 
 /// Connection-level settings shared by every listener of a directory.
@@ -123,7 +126,12 @@ pub struct Loaded {
     users: AtomicUsize,
     closed: AtomicBool,
     kick: watch::Sender<bool>,
+    /// Connections leave within this many milliseconds of a kick, each at its own moment, so
+    /// they don't all reconnect at once (a database moving to another node).
+    kick_spread_ms: AtomicU64,
     last_active_ms: AtomicU64,
+    /// Its tenure on this node, when nodes share databases ([`crate::fleet`]).
+    residence: parking_lot::Mutex<Option<Box<dyn crate::fleet::Residence>>>,
     /// The database's Alternator (created by its first DynamoDB API request).
     pub(crate) alternator: std::sync::OnceLock<Arc<nosql_alternator::Alternator>>,
 }
@@ -143,9 +151,33 @@ impl Loaded {
             users: AtomicUsize::new(0),
             closed: AtomicBool::new(false),
             kick: watch::channel(false).0,
+            kick_spread_ms: AtomicU64::new(0),
             last_active_ms: AtomicU64::new(now_ms()),
+            residence: parking_lot::Mutex::new(None),
             alternator: Default::default(),
         })
+    }
+
+    /// Keep `r` (the database's tenure here) for as long as the database is loaded.
+    pub(crate) fn set_residence(&self, r: Box<dyn crate::fleet::Residence>) {
+        *self.residence.lock() = Some(r);
+    }
+
+    /// Let the tenure go (the database left this node).
+    pub(crate) fn end_residence(&self) {
+        self.residence.lock().take();
+    }
+
+    /// How long after a kick a connection waits before it closes (a random part of the spread).
+    pub(crate) fn kick_delay(&self) -> Duration {
+        let spread = self.kick_spread_ms.load(Ordering::Relaxed);
+        if spread == 0 {
+            return Duration::ZERO;
+        }
+        use std::hash::{BuildHasher, Hasher};
+        let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+        h.write_u64(now_ms());
+        Duration::from_millis(h.finish() % spread)
     }
 
     pub fn id(&self) -> &str {
@@ -179,6 +211,12 @@ impl Loaded {
 
     /// Closes the database to new users and disconnects the current ones.
     pub fn kick(&self) {
+        self.kick_within(Duration::ZERO);
+    }
+
+    /// [`Loaded::kick`], with each connection leaving at a random moment within `spread`.
+    pub fn kick_within(&self, spread: Duration) {
+        self.kick_spread_ms.store(spread.as_millis() as u64, Ordering::Relaxed);
         self.set_closed(true);
         let _ = self.kick.send(true);
     }
@@ -297,6 +335,20 @@ pub trait Directory: Send + Sync + 'static {
     fn route_token<'a>(&'a self, token: Option<&'a str>) -> BoxFuture<'a, Option<Arc<DbSpec>>>;
     /// Loads the database if needed and takes a lease on it.
     fn open<'a>(&'a self, spec: &'a Arc<DbSpec>) -> BoxFuture<'a, Result<Lease, OpenError>>;
+    /// Where connections for `spec` are served when nodes share databases ([`crate::fleet`]):
+    /// here unless the directory has a fleet.
+    fn placement<'a>(&'a self, _spec: &'a Arc<DbSpec>) -> BoxFuture<'a, Placement> {
+        Box::pin(async { Placement::Here })
+    }
+    /// Whether connections may be handed to other nodes (so an unrouted connection keeps what
+    /// its client sent until it's routed).
+    fn hands_over(&self) -> bool {
+        false
+    }
+    /// Hand a connection to the node [`Directory::placement`] named.
+    fn hand_over(&self, _owner: String, _spec: Arc<DbSpec>, _io: Box<dyn Io>, _accepted: &Accepted, _first: Bytes, _skip: usize) -> BoxFuture<'static, ()> {
+        Box::pin(async {})
+    }
     /// The database of an Alternator request: named by its SigV4 access key (`role@db`) or its
     /// `Host` (`<db>.alternator.<domain>`), else the directory's default.
     fn route_alternator<'a>(&'a self, host: Option<&'a str>, access_key: Option<&'a str>) -> BoxFuture<'a, Option<Arc<DbSpec>>> {
