@@ -132,37 +132,6 @@ impl RowBatch {
         self.pos += 1;
     }
 
-    /// The rows before the cursor dropped (the buffers only they held released), the cursor
-    /// on the same row, now the first: a batch refilled while its row at the cursor is still
-    /// wanted.
-    pub fn drain_front(&mut self) {
-        let n = self.pos;
-        if n == 0 {
-            return;
-        }
-        if n >= self.ents.len() {
-            self.clear();
-            return;
-        }
-        let cut = self.key_start(n);
-        self.keys.drain(..cut);
-        self.ents.drain(..n);
-        // (Entries name buffers and own bytes in ascending order: the first left names the
-        // first still held.)
-        let buf0 = self.ents.iter().find(|e| e.buf != OWN).map_or(self.bufs.len(), |e| e.buf as usize);
-        let own0 = self.ents.iter().find(|e| e.buf == OWN).map_or(self.own.len(), |e| e.off as usize);
-        self.bufs.drain(..buf0);
-        self.own.drain(..own0);
-        for e in &mut self.ents {
-            e.key_end -= cut as u32;
-            match e.buf {
-                OWN => e.off -= own0 as u32,
-                _ => e.buf -= buf0 as u32,
-            }
-        }
-        self.pos = 0;
-    }
-
     /// The row at the cursor, owned, and the cursor past it (the value shares its buffer).
     pub fn take(&mut self) -> Option<(Vec<u8>, Bytes)> {
         let i = self.pos;
@@ -226,17 +195,6 @@ mod tests {
         assert_eq!(b.get(2), (&b"k3"[..], &b"zz"[..]));
         assert_eq!(b.get(3), (&b"k4"[..], &b"yy"[..]));
         assert_eq!(b.remaining(), 2);
-        b.drain_front();
-        assert_eq!((b.len(), b.pos(), b.bufs.len()), (2, 0, 1), "the first block released");
-        b.push_copy(b"k5", b"xx");
-        assert_eq!(b.get(0), (&b"k3"[..], &b"zz"[..]));
-        assert_eq!(b.get(1), (&b"k4"[..], &b"yy"[..]));
-        assert_eq!(b.get(2), (&b"k5"[..], &b"xx"[..]));
-        b.advance();
-        b.drain_front();
-        assert_eq!((b.bufs.len(), b.own.len()), (0, 4));
-        assert_eq!(b.get(0), (&b"k4"[..], &b"yy"[..]));
-        assert_eq!(b.get(1), (&b"k5"[..], &b"xx"[..]));
         b.clear();
         assert!(b.peek().is_none() && b.is_empty());
     }

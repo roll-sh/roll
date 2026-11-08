@@ -605,16 +605,12 @@ pub fn open_scan(s: &ScanPlan, shared: Option<&Arc<crate::sql::plan::Plan>>, nee
             lazy: None,
             kfilter: None,
             erb: Default::default(),
-            erows: Vec::new(),
-            eheld: false,
-            point: None,
-            preader: None,
             spare: None,
             fscan: None,
             fetch_calls: 0,
             dscan: None,
-            dbatch: Default::default(),
             run: Default::default(),
+            pending: None,
             one_run: false,
             blocks: Default::default(),
             prune_next: 0,
@@ -703,16 +699,12 @@ pub fn open_scan(s: &ScanPlan, shared: Option<&Arc<crate::sql::plan::Plan>>, nee
             lazy: None,
             kfilter: None,
             erb: Default::default(),
-            erows: Vec::new(),
-            eheld: false,
-            point: None,
-            preader: None,
             spare: None,
             fscan: None,
             fetch_calls: 0,
             dscan: None,
-            dbatch: Default::default(),
             run: Default::default(),
+            pending: None,
             one_run: false,
             blocks: Default::default(),
             prune_next: 0,
@@ -791,16 +783,12 @@ pub fn open_scan(s: &ScanPlan, shared: Option<&Arc<crate::sql::plan::Plan>>, nee
             lazy: None,
             kfilter: None,
             erb: Default::default(),
-            erows: Vec::new(),
-            eheld: false,
-            point: None,
-            preader: None,
             spare: None,
             fscan: None,
             fetch_calls: 0,
             dscan: None,
-            dbatch: Default::default(),
             run: Default::default(),
+            pending: None,
             one_run: false,
             blocks: Default::default(),
             prune_next: 0,
@@ -946,16 +934,12 @@ fn open_scan_as(
         lazy: None,
         kfilter: None,
         erb: Default::default(),
-        erows: Vec::new(),
-        eheld: false,
-        point: None,
-        preader: None,
         spare: None,
         fscan: None,
         fetch_calls: 0,
         dscan: None,
-        dbatch: Default::default(),
         run: Default::default(),
+        pending: None,
         blocks: Default::default(),
         prune_next: 0,
         nblocks: None,
@@ -1837,16 +1821,12 @@ fn dense_bitmap_scan(
         lazy: None,
         kfilter: None,
         erb: Default::default(),
-        erows: Vec::new(),
-        eheld: false,
-        point: None,
-        preader: None,
         spare: None,
         fscan: None,
         fetch_calls: 0,
         dscan: None,
-        dbatch: Default::default(),
         run: Default::default(),
+        pending: None,
         one_run: false,
         blocks: Default::default(),
         prune_next: 0,
@@ -2303,20 +2283,8 @@ struct ScanNode {
     /// The filter's kernel, run over a row made before `eval` (an index scan's rows: their
     /// conditions checked again), once compiled; None inside: it has none.
     kfilter: Option<Option<(super::kernel::K, Option<super::kernel::StoredCmps>)>>,
-    /// An index scan's entries read a batch at a time (`fill_entries`): entry key, then the
-    /// row's data key as the value, by reference where the store gave them so; `erows` their
-    /// rows, by place (None: not visible). The entry at the cursor is the next one.
+    /// An index scan's entries read a batch at a time (`next_indexed`).
     erb: crate::storage::batch::RowBatch,
-    erows: Vec<Option<bytes::Bytes>>,
-    /// `erb`'s entry at its cursor was handed out by reference (`next_raw_ref`): passed at
-    /// the next call.
-    eheld: bool,
-    /// A unique index's equality ranges read through point readers (`point_entry`), once
-    /// decided; the readers of its entries and of their rows (each keeps the blocks it read
-    /// last, so the two don't take each other's), kept for the statement's snapshot from
-    /// rescan to rescan.
-    point: Option<bool>,
-    preader: Option<Box<PointReaders>>,
     /// The last range's store iterator once it ended, for the next range to read on with
     /// (`Txn::reseek_snap`) instead of a new one.
     spare: Option<StoreIter>,
@@ -2328,13 +2296,13 @@ struct ScanNode {
     fetch_calls: u32,
     /// Dense fetches' raw scan of the table's rows, kept from batch to batch (`fetch_dense`).
     dscan: Option<Box<TxnScan>>,
-    /// The batch dense fetches read into (`fetch_dense`), kept too.
-    dbatch: crate::storage::batch::RowBatch,
     /// Such a scan read by worker threads (`parscan`), once decided (`par_tried`).
     par: Option<super::parscan::ParScan>,
     par_tried: bool,
     /// An index scan's run of rows with equal keys, in heap order.
     run: std::collections::VecDeque<(Vec<u8>, bytes::Bytes)>,
+    /// The index entry that ended the last run (it starts the next).
+    pending: Option<(Vec<u8>, Vec<u8>, bytes::Bytes)>,
     /// An equality on the index's first column under its nondeterministic collation: the
     /// rows it keeps are one run of equal keys (their bytes differ), in heap order.
     one_run: bool,
@@ -2375,64 +2343,6 @@ pub static ROWS_FROM_INDEX_ENTRIES: std::sync::atomic::AtomicU64 = std::sync::at
 pub static HEAP_ORDER_STREAMED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 #[doc(hidden)]
 pub static HEAP_ORDER_HELD: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-/// `e` with the statement's parameter values in place of its parameters, and calls of pure
-/// built-in functions of constants alone computed: a generic plan's filter as a custom plan
-/// has it, for its kernel (`ScanNode::filter_kernel`). A call that fails stays as it is (its
-/// error is raised as a row is checked, as before). None: `e` reads no parameter.
-fn with_params(e: &Expr, ctx: &ExecCtx) -> Option<Expr> {
-    let mut any = false;
-    e.walk(&mut |x| any |= matches!(x, Expr::Param(..)));
-    if !any {
-        return None;
-    }
-    Some(e.clone().rewrite(&mut |x| match x {
-        Expr::Param(i, ty) => match ctx.param(i) {
-            Ok(v) => Expr::Const(v, ty),
-            Err(_) => Expr::Param(i, ty),
-        },
-        Expr::Call(def, args, ty) if args.iter().all(|a| matches!(a, Expr::Const(..))) && super::kernel::pure_call(&def, &ty).is_some() => {
-            let call = Expr::Call(def, args, ty);
-            match eval(&call, &[], ctx) {
-                Ok(v) => Expr::Const(v, call.ty()),
-                Err(_) => call,
-            }
-        }
-        x => x,
-    }))
-}
-
-/// `ScanNode::point_entry`'s readers at one snapshot: of an index's entries, and of the
-/// rows they name.
-struct PointReaders {
-    store: Arc<crate::storage::Store>,
-    entries: crate::storage::point::PointReader,
-    rows: crate::storage::point::PointReader,
-}
-
-/// Whether a deferrable constraint of `t` is enforced by index `ix` (its keys may repeat
-/// until the transaction that wrote them commits).
-fn deferrable_index(t: &Table, ix: u32) -> bool {
-    t.constraints.iter().any(|c| c.deferrable && c.kind.index() == Some(ix))
-}
-
-/// Entry `i` of a secondary index scan's `erb`: its key columns' part of the entry key (the
-/// entry key is the key columns then the data key's suffix; the value is the data key).
-fn entry_cols(erb: &crate::storage::batch::RowBatch, i: usize) -> &[u8] {
-    let (ikey, dkey) = erb.get(i);
-    &ikey[..ikey.len().saturating_sub(dkey.len().saturating_sub(8))]
-}
-
-/// Entry `i` of a secondary index scan's `erb` as the scan hands it out: the row's data key
-/// and its stored bytes (`erows`; an index-only scan's: the entry key, which stands in for
-/// the row).
-fn index_ref<'a>(erb: &'a crate::storage::batch::RowBatch, erows: &'a [Option<bytes::Bytes>], ios: bool, i: usize) -> (&'a [u8], &'a [u8]) {
-    let (ikey, dkey) = erb.get(i);
-    match ios {
-        true => (dkey, ikey),
-        false => (dkey, erows[i].as_deref().expect("a visible row")),
-    }
-}
 
 /// The index columns (table column, type, direction) a bitmap's quals can be checked on
 /// from the index entries alone: a btree's plain columns of the types `index_only_columns`
@@ -2554,28 +2464,25 @@ const FETCH_BATCH_MAX: usize = 128;
 const RB_MIN: usize = 16;
 const RB_MAX: usize = 256;
 
-/// Index entries a range must hold past for a parallel index scan (`start_parallel_index`).
-const PAR_MIN_ENTRIES: usize = 256;
-
 /// The rows stored under `keys` (None: none visible), as the statement's snapshot sees
 /// them, read together (`Txn::get_many_snap`). Without a statement snapshot, one at a time
 /// through the transaction's writes as they are now.
-pub(super) fn fetch_rows<K: AsRef<[u8]>>(keys: &[K], ctx: &ExecCtx) -> Result<Vec<Option<bytes::Bytes>>> {
-    if let Some(rows) = fetch_dense(keys, false, None, None, ctx)? {
+pub(super) fn fetch_rows(keys: &[Vec<u8>], ctx: &ExecCtx) -> Result<Vec<Option<bytes::Bytes>>> {
+    if let Some(rows) = fetch_dense(keys, false, None, ctx)? {
         return Ok(rows);
     }
     let txn = ctx.txn.borrow();
     match ctx.snapshot().as_deref() {
         Some(s) => get_sorted(&txn, keys, s, true),
-        None => keys.iter().map(|k| txn.get(k.as_ref())).collect(),
+        None => keys.iter().map(|k| txn.get(k)).collect(),
     }
 }
 
 /// `get_many_snap` (`resolve`) or `get_many_snap_raw` of `keys`: ascending ones as a sorted
 /// batch of reads (`Txn::get_sorted_snap_into`), the store sought forward from key to key
 /// instead of a lookup each.
-fn get_sorted<K: AsRef<[u8]>>(txn: &crate::txn::Txn, keys: &[K], s: &crate::txn::Snap, resolve: bool) -> Result<Vec<Option<bytes::Bytes>>> {
-    if keys.len() < 2 || !keys.windows(2).all(|w| w[0].as_ref() < w[1].as_ref()) {
+fn get_sorted(txn: &crate::txn::Txn, keys: &[Vec<u8>], s: &crate::txn::Snap, resolve: bool) -> Result<Vec<Option<bytes::Bytes>>> {
+    if keys.len() < 2 || !keys.windows(2).all(|w| w[0] < w[1]) {
         return match resolve {
             true => txn.get_many_snap(keys, s),
             false => txn.get_many_snap_raw(keys, s),
@@ -2586,7 +2493,7 @@ fn get_sorted<K: AsRef<[u8]>>(txn: &crate::txn::Txn, keys: &[K], s: &crate::txn:
     Ok(keys
         .iter()
         .map(|k| match b.peek() {
-            Some((bk, _)) if bk == k.as_ref() => b.take().map(|r| r.1),
+            Some((bk, _)) if bk == k.as_slice() => b.take().map(|r| r.1),
             _ => None,
         })
         .collect())
@@ -2598,14 +2505,8 @@ fn get_sorted<K: AsRef<[u8]>>(txn: &crate::txn::Txn, keys: &[K], s: &crate::txn:
 /// to the keys, instead of a lookup each. None: not such keys. `raw`: read as stored, a batch
 /// at a time; None also when a row has values stored out of line (`fetch_rows` puts them
 /// back). `kept`: a raw read's scan, kept from call to call (`ScanNode::dscan`) and sought on
-/// to each call's range; `scratch`: the batch it reads into, kept too.
-fn fetch_dense<K: AsRef<[u8]>>(
-    keys: &[K],
-    raw: bool,
-    kept: Option<&mut Option<Box<TxnScan>>>,
-    scratch: Option<&mut crate::storage::batch::RowBatch>,
-    ctx: &ExecCtx,
-) -> Result<Option<Vec<Option<bytes::Bytes>>>> {
+/// to each call's range.
+fn fetch_dense(keys: &[Vec<u8>], raw: bool, kept: Option<&mut Option<Box<TxnScan>>>, ctx: &ExecCtx) -> Result<Option<Vec<Option<bytes::Bytes>>>> {
     let id = |k: &[u8]| -> Option<i64> {
         let mut pos = 8;
         match crate::storage::keys::decode_index_value(k, &mut pos, &crate::types::DataType::Int8, false)? {
@@ -2613,9 +2514,9 @@ fn fetch_dense<K: AsRef<[u8]>>(
             _ => None,
         }
     };
-    let (Some(first), Some(last)) = (keys.first().map(K::as_ref), keys.last().map(K::as_ref)) else { return Ok(None) };
+    let (Some(first), Some(last)) = (keys.first(), keys.last()) else { return Ok(None) };
     // (Read as stored, a batch at a time, a range costs no more than a few lookups.)
-    if keys.len() < if raw { 4 } else { 16 } || first[..8.min(first.len())] != last[..8.min(last.len())] || !keys.windows(2).all(|w| w[0].as_ref() < w[1].as_ref()) {
+    if keys.len() < if raw { 4 } else { 16 } || first[..8.min(first.len())] != last[..8.min(last.len())] || !keys.windows(2).all(|w| w[0] < w[1]) {
         return Ok(None);
     }
     let (Some(a), Some(b)) = (id(first), id(last)) else { return Ok(None) };
@@ -2627,7 +2528,7 @@ fn fetch_dense<K: AsRef<[u8]>>(
     let txn = ctx.txn.borrow();
     let snap = ctx.snapshot();
     let mut out = Vec::with_capacity(keys.len());
-    let mut want = keys.iter().map(K::as_ref).peekable();
+    let mut want = keys.iter().peekable();
     if raw {
         // (Rows as stored, a batch at a time by reference: no key made per row. The scan of
         // the last call read on over this one's range when it can be: `kept`.)
@@ -2643,21 +2544,20 @@ fn fetch_dense<K: AsRef<[u8]>>(
                 None => txn.scan(first, &end),
             }.raw()),
         };
-        let mut own = crate::storage::batch::RowBatch::default();
-        let b = scratch.unwrap_or(&mut own);
+        let mut b = crate::storage::batch::RowBatch::default();
         let mut external = false;
         'fill: while want.peek().is_some() {
             b.clear();
-            it.fill_batch(b, keys.len() - out.len())?;
+            it.fill_batch(&mut b, keys.len() - out.len())?;
             if b.is_empty() {
                 break;
             }
             for i in 0..b.len() {
                 let k = b.get(i).0;
-                while want.next_if(|w| *w < k).is_some() {
+                while want.next_if(|w| w.as_slice() < k).is_some() {
                     out.push(None);
                 }
-                if want.next_if(|w| *w == k).is_some() {
+                if want.next_if(|w| w.as_slice() == k).is_some() {
                     // (A row with values stored out of line: they're put back after all.)
                     if crate::storage::toast::has_external(b.get(i).1) {
                         external = true;
@@ -2685,10 +2585,10 @@ fn fetch_dense<K: AsRef<[u8]>>(
     };
     for r in it {
         let (k, v) = r?;
-        while want.next_if(|w| *w < k.as_slice()).is_some() {
+        while want.next_if(|w| w.as_slice() < k.as_slice()).is_some() {
             out.push(None);
         }
-        if want.next_if(|w| *w == k.as_slice()).is_some() {
+        if want.next_if(|w| w.as_slice() == k.as_slice()).is_some() {
             out.push(Some(v));
         }
         if want.peek().is_none() {
@@ -2948,9 +2848,7 @@ impl ScanNode {
         self.run_blocks.clear();
         self.emitted = 0;
         self.run.clear();
-        self.erb.clear();
-        self.erows.clear();
-        self.eheld = false;
+        self.pending = None;
         self.fetched.clear();
         self.batch = FETCH_BATCH_MIN;
         if let Some(Some(f)) = &mut self.fetcher {
@@ -3080,55 +2978,104 @@ impl ScanNode {
             }
             return Ok(r);
         }
-        // (A secondary index scan's rows come from `next_index_ref`.)
-        debug_assert!(!self.secondary);
-        self.heap_mode(ctx);
-        if self.streamed {
-            return self.next_stored(ctx);
-        }
-        // Rows stored in heap order already (a table only inserted into, in key order)
-        // are read as they're asked for, each page pruned as the scan reaches it. A row
-        // without its TID puts the rest in heap order as below: the rows read before it
-        // come before all of them there too.
-        let mut first = None;
-        if self.in_order == Some(true) {
-            match self.next_stored(ctx)? {
-                Some(r) => match stored_tid(&r.1) {
-                    Some((b, _)) => {
-                        debug_assert!(b + 1 >= self.prune_next, "rows out of heap order");
-                        self.prune_to(Some(b + 1), ctx);
-                        return Ok(Some(r));
-                    }
+        if !self.secondary {
+            self.heap_mode(ctx);
+            if self.streamed {
+                return self.next_stored(ctx);
+            }
+            // Rows stored in heap order already (a table only inserted into, in key order)
+            // are read as they're asked for, each page pruned as the scan reaches it. A row
+            // without its TID puts the rest in heap order as below: the rows read before it
+            // come before all of them there too.
+            let mut first = None;
+            if self.in_order == Some(true) {
+                match self.next_stored(ctx)? {
+                    Some(r) => match stored_tid(&r.1) {
+                        Some((b, _)) => {
+                            debug_assert!(b + 1 >= self.prune_next, "rows out of heap order");
+                            self.prune_to(Some(b + 1), ctx);
+                            return Ok(Some(r));
+                        }
+                        None => {
+                            self.in_order = Some(false);
+                            first = Some(r);
+                        }
+                    },
                     None => {
-                        self.in_order = Some(false);
-                        first = Some(r);
+                        self.prune_to(self.nblocks, ctx);
+                        return Ok(None);
                     }
-                },
-                None => {
-                    self.prune_to(self.nblocks, ctx);
-                    return Ok(None);
                 }
             }
-        }
-        if self.sorted.is_none() {
-            let mut rows: Vec<_> = first.into_iter().collect();
-            while let Some(r) = self.next_stored(ctx)? {
-                ctx.check()?;
-                rows.push(r);
+            if self.sorted.is_none() {
+                let mut rows: Vec<_> = first.into_iter().collect();
+                while let Some(r) = self.next_stored(ctx)? {
+                    ctx.check()?;
+                    rows.push(r);
+                }
+                if let Some(b) = heap_order(&self.plan.table, &mut rows, false, ctx) {
+                    self.blocks = b.into();
+                }
+                self.sorted = Some(rows.into_iter());
             }
-            if let Some(b) = heap_order(&self.plan.table, &mut rows, false, ctx) {
-                self.blocks = b.into();
+            let r = self.sorted.as_mut().unwrap().next();
+            // Pages are pruned as the scan reaches them (heapgetpage).
+            match (&r, self.blocks.pop_front()) {
+                (Some(_), Some(Some(b))) => self.prune_to(Some(b + 1), ctx),
+                (None, _) => self.prune_to(self.nblocks, ctx),
+                _ => {}
             }
-            self.sorted = Some(rows.into_iter());
+            return Ok(r);
         }
-        let r = self.sorted.as_mut().unwrap().next();
-        // Pages are pruned as the scan reaches them (heapgetpage).
-        match (&r, self.blocks.pop_front()) {
-            (Some(_), Some(Some(b))) => self.prune_to(Some(b + 1), ctx),
-            (None, _) => self.prune_to(self.nblocks, ctx),
-            _ => {}
+        if let Some(r) = self.run.pop_front() {
+            return Ok(Some(r));
         }
-        Ok(r)
+        // The next run of index entries with equal keys.
+        let first = match self.pending.take() {
+            Some(p) => p,
+            None => match self.next_entry(ctx)? {
+                Some(e) => e,
+                None => {
+                    if let Some(k) = &mut self.kills {
+                        k.done();
+                    }
+                    return Ok(None);
+                }
+            },
+        };
+        let (prefix, fk, fv) = first;
+        // (The entries after the first with its key; a run of one, a unique index's, makes
+        // nothing more.)
+        let mut more: Vec<(Vec<u8>, bytes::Bytes)> = Vec::new();
+        loop {
+            match self.next_entry(ctx)? {
+                Some(e) if self.one_run || e.0 == prefix => more.push((e.1, e.2)),
+                Some(e) => {
+                    self.pending = Some(e);
+                    break;
+                }
+                None => break,
+            }
+        }
+        if more.is_empty() {
+            if let Some(k) = &mut self.kills {
+                k.passed(&prefix);
+            }
+            return Ok(Some((fk, fv)));
+        }
+        let mut run = Vec::with_capacity(more.len() + 1);
+        run.push((fk, fv));
+        run.append(&mut more);
+        if self.rev {
+            backward_order(&self.plan, &prefix, &mut run, ctx);
+        } else {
+            let _ = heap_order(&self.plan.table, &mut run, true, ctx);
+        }
+        if let Some(k) = &mut self.kills {
+            k.passed(&prefix);
+        }
+        self.run = run.into();
+        Ok(self.run.pop_front())
     }
 
     /// A sequential scan has read the pages before `to` (None: all of them).
@@ -3143,239 +3090,79 @@ impl ScanNode {
         }
     }
 
-    /// A secondary index scan's next row (`next_raw_ref`; false: none left): by reference,
-    /// the entry at `erb`'s cursor with its row in `erows` (`index_ref`), or a run of entries
-    /// with equal keys put in heap order and handed out owned (`run`, `one`). Entries whose
-    /// row isn't visible are passed.
-    fn next_index_ref(&mut self, ctx: &ExecCtx) -> Result<bool> {
-        if std::mem::take(&mut self.eheld) {
-            self.erb.advance();
-        }
-        if let Some(r) = self.run.pop_front() {
-            self.one = Some(r);
-            return Ok(true);
-        }
-        let Some(skip) = self.visible_from(0, ctx)? else {
-            if let Some(k) = &mut self.kills {
-                k.done();
-            }
-            return Ok(false);
+    /// An index scan's next entry: its key columns' part of the entry key, the row's data
+    /// key and the row.
+    fn next_entry(&mut self, ctx: &ExecCtx) -> Result<Option<(Vec<u8>, Vec<u8>, bytes::Bytes)>> {
+        let Some((mut ikey, dkey, row)) = self.next_indexed(ctx)? else {
+            return Ok(None);
         };
-        for _ in 0..skip {
-            self.erb.advance();
-        }
-        if !self.tid_order {
-            // (Rows in storage order: marked by their data keys.)
-            if let Some(k) = &mut self.kills {
-                k.passed(self.erb.peek().expect("an entry").1);
-            }
-            self.eheld = true;
-            return Ok(true);
-        }
-        // The run of entries with the first one's key columns: their places after the
-        // cursor (a unique index's run of one has none).
-        let mut more: Vec<usize> = Vec::new();
-        let mut last = 0;
-        while let Some(j) = self.visible_from(last + 1, ctx)? {
-            let at = self.erb.pos();
-            if !self.one_run && entry_cols(&self.erb, at + j) != entry_cols(&self.erb, at) {
-                break;
-            }
-            more.push(j);
-            last = j;
-        }
-        let at = self.erb.pos();
-        if more.is_empty() {
-            if let Some(k) = &mut self.kills {
-                k.passed(entry_cols(&self.erb, at));
-            }
-            self.eheld = true;
-            return Ok(true);
-        }
-        let ios = self.ios_cols.is_some();
-        let mut run: Vec<(Vec<u8>, bytes::Bytes)> = std::iter::once(0)
-            .chain(more)
-            .map(|i| {
-                let (dkey, bytes) = index_ref(&self.erb, &self.erows, ios, at + i);
-                // (Rows by their buffers, not copied: only an index-only scan's entry is.)
-                let row = match &self.erows[at + i] {
-                    Some(r) if !ios => r.clone(),
-                    _ => bytes::Bytes::copy_from_slice(bytes),
-                };
-                (dkey.to_vec(), row)
-            })
-            .collect();
-        let prefix = entry_cols(&self.erb, at).to_vec();
-        for _ in 0..=last {
-            self.erb.advance();
-        }
-        if self.rev {
-            backward_order(&self.plan, &prefix, &mut run, ctx);
-        } else {
-            let _ = heap_order(&self.plan.table, &mut run, true, ctx);
-        }
-        if let Some(k) = &mut self.kills {
-            k.passed(&prefix);
-        }
-        self.run = run.into();
-        self.one = self.run.pop_front();
-        Ok(true)
+        // The entry key is the key columns then the data key's suffix.
+        let cut = ikey.len().saturating_sub(dkey.len().saturating_sub(8));
+        ikey.truncate(cut);
+        Ok(Some((ikey, dkey, row)))
     }
 
-    /// The first place at or after `off` past `erb`'s cursor holding an entry whose row is
-    /// visible, reading more entries when the batch runs out (None: none left).
-    fn visible_from(&mut self, off: usize, ctx: &ExecCtx) -> Result<Option<usize>> {
-        let mut j = off;
+    /// The next index entry's key, with the row it points at (secondary index scans). The
+    /// entries are read a batch ahead and their rows fetched together; nothing a client sees
+    /// happens on fetching (the scan's counts, pruning and locks are taken as rows are
+    /// returned), and the rows are read at the statement's snapshot, so reading ahead reads
+    /// what reading one at a time would.
+    fn next_indexed(
+        &mut self,
+        ctx: &ExecCtx,
+    ) -> Result<Option<(Vec<u8>, Vec<u8>, bytes::Bytes)>> {
         loop {
-            let i = self.erb.pos() + j;
-            if i < self.erows.len() {
-                if self.erows[i].is_some() {
-                    return Ok(Some(j));
+            while let Some((k, dkey, row)) = self.fetched.pop_front() {
+                if let Some(row) = row {
+                    return Ok(Some((k, dkey, row)));
                 }
-                j += 1;
-                continue;
             }
-            if !self.fill_entries(ctx)? {
+            let want = if ctx.snapshot().is_some() { self.batch } else { 1 };
+            let mut ents: Vec<(Vec<u8>, Vec<u8>)> = Vec::with_capacity(want);
+            while ents.len() < want {
+                if self.iter.is_none() && !self.open_range(ctx) {
+                    break;
+                }
+                // (A forward range's entries a batch at a time, by reference: `fill_batch`.)
+                if let Some(StoreIter::Fwd(it)) = self.iter.as_mut()
+                    && self.skip.as_ref().is_none_or(|s| s.plain)
+                {
+                    self.erb.clear();
+                    it.fill_batch(&mut self.erb, want - ents.len())?;
+                    if self.erb.is_empty() {
+                        self.spare = self.iter.take();
+                    }
+                    for i in 0..self.erb.len() {
+                        let (k, v) = self.erb.get(i);
+                        ents.push((k.to_vec(), v.to_vec()));
+                    }
+                    continue;
+                }
+                match self.iter_next(ctx) {
+                    Some(r) => {
+                        let (k, v) = r?;
+                        ents.push((k, v.to_vec()));
+                    }
+                    None => self.spare = self.iter.take(),
+                }
+            }
+            if ents.is_empty() {
                 return Ok(None);
             }
-        }
-    }
-
-    /// The rows of the next batch of index entries fetched together into `erows`, the
-    /// entries read into `erb` first when it holds none not fetched yet (the ones before its
-    /// cursor dropped; false: none left; secondary index scans). The entries are read a batch
-    /// ahead; nothing a client sees happens on fetching (the scan's counts, pruning and locks
-    /// are taken as rows are returned), and the rows are read at the statement's snapshot,
-    /// so reading ahead reads what reading one at a time would. The entries stay where the
-    /// store keeps them where it can (`fill_batch`): nothing is copied per entry.
-    fn fill_entries(&mut self, ctx: &ExecCtx) -> Result<bool> {
-        let at = self.erb.pos().min(self.erows.len());
-        self.erows.drain(..at);
-        self.erb.drain_front();
-        let from = self.erows.len();
-        let want = if ctx.snapshot().is_some() { self.batch } else { 1 };
-        // (Entries read already, `start_parallel_index`'s, are fetched first.)
-        let read = self.erb.len() > from;
-        if !read {
-            while self.iter.is_none() {
-                match self.point_entry(ctx)? {
-                    Some(true) => return Ok(true),
-                    Some(false) => {}
-                    None => break,
-                }
-            }
-        }
-        while !read && self.erb.len() - from < want {
-            if self.iter.is_none() && !self.open_range(ctx) {
-                break;
-            }
-            // (A forward range's entries a batch at a time, by reference: `fill_batch`.)
-            if let Some(StoreIter::Fwd(it)) = self.iter.as_mut()
-                && self.skip.as_ref().is_none_or(|s| s.plain)
-            {
-                let before = self.erb.len();
-                it.fill_batch(&mut self.erb, want - (before - from))?;
-                if self.erb.len() == before {
-                    self.spare = self.iter.take();
-                }
+            self.batch = (self.batch * 2).min(FETCH_BATCH_MAX);
+            if self.ios_cols.is_some() {
+                // (The entry key stands in for the row: `index_row`.)
+                self.fetched.extend(ents.into_iter().map(|(k, d)| {
+                    let b = bytes::Bytes::copy_from_slice(&k);
+                    (k, d, Some(b))
+                }));
                 continue;
             }
-            match self.iter_next(ctx) {
-                Some(r) => {
-                    let (k, v) = r?;
-                    self.erb.push(&k, v);
-                }
-                None => self.spare = self.iter.take(),
-            }
+            let (iks, dks): (Vec<Vec<u8>>, Vec<Vec<u8>>) = ents.into_iter().unzip();
+            let rows = self.fetch_stored(&dks, ctx)?;
+            self.fetched
+                .extend(iks.into_iter().zip(dks).zip(rows).map(|((k, d), r)| (k, d, r)));
         }
-        if self.erb.len() == from {
-            return Ok(false);
-        }
-        let to = self.erb.len().min(from + want);
-        self.batch = (self.batch * 2).min(FETCH_BATCH_MAX);
-        if self.ios_cols.is_some() {
-            // (The entry key stands in for the row: `index_ref`.)
-            self.erows.resize(to, Some(bytes::Bytes::new()));
-            return Ok(true);
-        }
-        let erb = std::mem::take(&mut self.erb);
-        let dkeys: Vec<&[u8]> = (from..to).map(|i| erb.get(i).1).collect();
-        let rows = self.fetch_stored(&dkeys, ctx);
-        drop(dkeys);
-        self.erb = erb;
-        match rows {
-            Ok(rows) => self.erows.extend(rows),
-            Err(e) => {
-                self.erb.clear();
-                self.erows.clear();
-                return Err(e);
-            }
-        }
-        Ok(true)
-    }
-
-    /// The next range read as a point lookup when it is a unique index's equality (every key
-    /// column; not a deferrable one's, whose duplicates a transaction may hold until it
-    /// commits) at the statement's snapshot, by a transaction that wrote nothing: its one
-    /// visible entry found without a merging scan (`Store::first_with`), and its row read,
-    /// through one point reader kept for the snapshot, pushed into `erb` / `erows` (Some(true);
-    /// Some(false): the range holds no visible entry). None: not such a range (or the
-    /// reader couldn't tell), read by a scan as any other.
-    fn point_entry(&mut self, ctx: &ExecCtx) -> Result<Option<bool>> {
-        if !self.point_ranges() || self.cur_range >= self.ranges.len() {
-            return Ok(None);
-        }
-        // (A table that has stored values out of line has its rows read as stored, its scan
-        // reading the values (`fetch_stored`): left to it.)
-        let raw = self.plan.mark.is_none() && !self.plan.sys && super::sizing::tracked(self.plan.table.oid);
-        if raw && self.ios_cols.is_none() {
-            return Ok(None);
-        }
-        let Some(snap) = ctx.snapshot() else { return Ok(None) };
-        let Some((store, ts)) = ctx.txn.borrow().store_reader(&snap) else { return Ok(None) };
-        if self.preader.as_ref().is_none_or(|p| p.entries.ts() != ts || !Arc::ptr_eq(&p.store, &store)) {
-            let (entries, rows) = (store.point_reader(ts, false), store.point_reader(ts, false));
-            self.preader = Some(Box::new(PointReaders { store, entries, rows }));
-        }
-        let PointReaders { store, entries, rows } = &mut **self.preader.as_mut().expect("point readers");
-        let (start, end) = &self.ranges[self.cur_range];
-        let (ekey, dkey) = match store.first_with(entries, start, end, false)? {
-            crate::storage::point::First::Unknown => return Ok(None),
-            crate::storage::point::First::None => {
-                self.cur_range += 1;
-                return Ok(Some(false));
-            }
-            crate::storage::point::First::Row(k, v) => (k, v),
-        };
-        self.cur_range += 1;
-        let row = match self.ios_cols {
-            // (The entry key stands in for the row: `index_ref`.)
-            Some(_) => Some(bytes::Bytes::new()),
-            // (With every value put back, as `fetch_rows` reads it.)
-            None => store.get_with(rows, &dkey, true)?.and_then(|(_, v)| v),
-        };
-        self.erb.push(&ekey, dkey);
-        self.erows.push(row);
-        Ok(Some(true))
-    }
-
-    /// Whether each of the scan's ranges is a unique index's equality on every key column, so
-    /// holds one visible entry at most (decided once: `point`).
-    fn point_ranges(&mut self) -> bool {
-        if self.point.is_none() {
-            let p = &self.plan;
-            let ok = p.index.as_ref().is_some_and(|(ix, b)| {
-                ix.method == "btree"
-                    && ix.unique
-                    && b.eq.len() == ix.columns.len()
-                    && b.any.is_none()
-                    && b.skip.is_none()
-                    && b.order.is_empty()
-                    && !deferrable_index(&p.table, ix.oid)
-            });
-            self.point = Some(ok && !self.rev && !self.one_run && self.skip.is_none());
-        }
-        self.point == Some(true)
     }
 
     /// Next (data key, stored row bytes) in storage order.
@@ -3430,6 +3217,10 @@ impl ScanNode {
                 self.fetched
                     .extend(batch.into_iter().zip(rows).map(|(k, r)| (Vec::new(), k, r)));
             }
+        }
+        if self.secondary {
+            // Index entry → its row.
+            return Ok(self.next_indexed(ctx)?.map(|(_, dkey, row)| (dkey, row)));
         }
         if !self.next_plain(ctx)? {
             return Ok(None);
@@ -3493,9 +3284,6 @@ impl ScanNode {
     /// `rb` as the store gave them, the other paths' as `next_raw` makes them (`one`).
     fn next_raw_ref(&mut self, ctx: &ExecCtx) -> Result<bool> {
         self.one = None;
-        if self.secondary {
-            return self.next_index_ref(ctx);
-        }
         if self.am.is_none() && self.keys.is_none() && !self.secondary {
             if !self.tid_order && self.kills.is_none() {
                 return self.next_plain(ctx);
@@ -3739,7 +3527,7 @@ impl ScanNode {
     /// plain sequential scan reads its rows (`toast`: the out-of-line values of the columns
     /// decoded, read then), when the statement has a snapshot and the rows aren't locked or
     /// read with their system columns; else with every value put back (`fetch_rows`).
-    fn fetch_stored<K: AsRef<[u8]>>(&mut self, keys: &[K], ctx: &ExecCtx) -> Result<Vec<Option<bytes::Bytes>>> {
+    fn fetch_stored(&mut self, keys: &[Vec<u8>], ctx: &ExecCtx) -> Result<Vec<Option<bytes::Bytes>>> {
         // (A table that never stored a value out of line has rows only as stored.)
         let Some(snap) = ctx
             .snapshot()
@@ -3748,7 +3536,7 @@ impl ScanNode {
             // (Keys close together: one range read a batch at a time, the rows as stored when
             // none has values out of line.)
             if ctx.snapshot().is_some()
-                && let Some(rows) = fetch_dense(keys, true, Some(&mut self.dscan), Some(&mut self.dbatch), ctx)?
+                && let Some(rows) = fetch_dense(keys, true, Some(&mut self.dscan), ctx)?
             {
                 return Ok(rows);
             }
@@ -3778,7 +3566,7 @@ impl ScanNode {
     /// lookups (a nested loop's inner rows, an index's entries in its table's order) reads on
     /// in the blocks the last one read, instead of a lookup from the top each. Values are put
     /// back as `fetch_rows` puts them. None: no statement snapshot, or the scan's first fetch.
-    fn fetch_kept<K: AsRef<[u8]>>(&mut self, keys: &[K], ctx: &ExecCtx) -> Result<Option<Vec<Option<bytes::Bytes>>>> {
+    fn fetch_kept(&mut self, keys: &[Vec<u8>], ctx: &ExecCtx) -> Result<Option<Vec<Option<bytes::Bytes>>>> {
         let Some(snap) = ctx.snapshot() else {
             return Ok(None);
         };
@@ -3790,7 +3578,6 @@ impl ScanNode {
         let txn = ctx.txn.borrow();
         let mut out = Vec::with_capacity(keys.len());
         for k in keys {
-            let k = k.as_ref();
             // Include the timestamp suffix of every physical version of this user key.
             let end = prefix_end(k);
             let kept = self.fscan.take().and_then(|mut it| txn.reseek_snap(&mut it, k, &end, &snap).then_some(it));
@@ -3798,7 +3585,7 @@ impl ScanNode {
             out.push(match it.next() {
                 Some(r) => {
                     let (rk, v) = r?;
-                    (rk == k).then_some(v)
+                    (rk == *k).then_some(v)
                 }
                 None => None,
             });
@@ -3934,15 +3721,13 @@ impl ScanNode {
     /// The scan's filter decided by its kernel (None: left to `eval`) for the stored row
     /// `bytes` (an index scan's rows, their conditions checked again; a row whose filter reads
     /// a few of its columns): over the stored values first (`StoredCmps`), else over `row`.
-    fn filter_kernel(&mut self, bytes: &[u8], row: Option<&Row>, ctx: &ExecCtx) -> Option<bool> {
+    fn filter_kernel(&mut self, bytes: &[u8], row: Option<&Row>) -> Option<bool> {
         let stored = self.ios_cols.is_none() && !crate::storage::toast::has_external(bytes);
         let plan = &self.plan;
         let (k, cmps) = self
             .kfilter
             .get_or_insert_with(|| {
-                // (A generic plan's filter, its parameters' values put in, as a custom plan's.)
-                let compiled = |f: &Expr| super::kernel::compile(f).or_else(|| with_params(f, ctx).and_then(|g| super::kernel::compile(&g)));
-                plan.filter.as_ref().and_then(compiled).map(|k| {
+                plan.filter.as_ref().and_then(super::kernel::compile).map(|k| {
                     let c = super::kernel::StoredCmps::of(&k);
                     (k, c)
                 })
@@ -4505,8 +4290,6 @@ impl ScanNode {
             || p.sys
             || p.limit.is_some()
             || self.ranges.len() != 1
-            // (Not once the serial scan has started.)
-            || self.cur_range > 0
             || ctx.instrumented()
             || super::sizing::tracked(p.table.oid)
             || predicate_locked(&p.table, ctx)
@@ -4526,40 +4309,18 @@ impl ScanNode {
         if workers == 0 || !ctx.outer.borrow().is_empty() || super::sizing::heap_modelled_or_kept(&p.table, ctx) {
             return Ok(None);
         }
-        // (A unique index's equality: one row at most.)
-        if self.point_ranges() {
-            return Ok(None);
-        }
+        let txn = ctx.txn.borrow();
         let fetch = match &self.ios_cols {
             Some(_) => None,
-            None => match ctx.txn.borrow().store_reader(&snap) {
+            None => match txn.store_reader(&snap) {
                 Some(r) => Some(r),
                 None => return Ok(None),
             },
         };
-        // A range of a few entries (an equality on a unique index, a short BETWEEN) isn't
-        // worth threads: its first entries are read as the serial scan reads them and left
-        // to it, which then reads on from them. Past them, the range is cut where its keys
-        // are, and read again by the workers.
-        self.open_range(ctx);
-        while self.erb.len() < PAR_MIN_ENTRIES {
-            let Some(StoreIter::Fwd(it)) = self.iter.as_mut() else { return Ok(None) };
-            let n = self.erb.len();
-            it.fill_batch(&mut self.erb, PAR_MIN_ENTRIES - n)?;
-            if self.erb.len() == n {
-                return Ok(None);
-            }
-        }
-        let lo = self.erb.get(0).0.to_vec();
-        // (The serial scan, should no thread start, reads the range from its start.)
-        self.erb.clear();
-        self.spare = self.iter.take();
-        self.cur_range = 0;
-        let p = &self.plan;
-        let txn = ctx.txn.borrow();
         let (start, end) = self.ranges[0].clone();
+        let lo = txn.scan_snap(&start, &end, &snap).next().transpose()?.map(|(k, _)| k);
         let hi = txn.scan_rev(&start, &end, Some(&*snap)).next().transpose()?.map(|(k, _)| k);
-        let Some(hi) = hi else {
+        let (Some(lo), Some(hi)) = (lo, hi) else {
             return Ok(None);
         };
         let cuts = keyed_cuts(&txn, split_keys(&lo, &hi, ParScan::chunks(workers)), &start, &end, &snap, None)?;
@@ -4577,7 +4338,7 @@ impl ScanNode {
         };
         let scans = bounds
             .windows(2)
-            .map(|w| super::parscan::fill_source(IndexChunk::new(txn.scan_snap(&w[0], &w[1], &snap), fetch.clone()), bulk))
+            .map(|w| super::parscan::chunk(IndexChunk::new(txn.scan_snap(&w[0], &w[1], &snap), fetch.clone()), bulk).into())
             .collect();
         drop(txn);
         let d = Decode {
@@ -4650,7 +4411,7 @@ impl ScanNode {
         let per = keys.len().div_ceil(ParScan::chunks(workers)).max(1);
         let scans = (0..keys.len())
             .step_by(per)
-            .map(|i| super::parscan::Source::Fill(Box::new(IndexChunk::keyed(keys.clone(), i..(i + per).min(keys.len()), fetch.clone()))))
+            .map(|i| super::parscan::Source::Rows(Box::new(IndexChunk::keyed(keys.clone(), i..(i + per).min(keys.len()), fetch.clone()))))
             .collect();
         let d = Decode {
             need: self.need.as_deref().map(Arc::from),
@@ -4843,6 +4604,59 @@ impl Node for ScanNode {
         Ok(Some(n))
     }
 
+    /// A plain sequential scan's rows as stored, as `next` would return them (counted,
+    /// pruned, in heap order where it reads in it), without its parallel workers: COPY TO
+    /// of a table formats them from their bytes, as PostgreSQL's reads them serially.
+    fn each_stored(&mut self, f: &mut dyn FnMut(super::Stored<'_>) -> Result<bool>, ctx: &ExecCtx) -> Result<Option<()>> {
+        let p = &self.plan;
+        if self.par.is_some()
+            || self.emitted > 0
+            || ctx.instrumented()
+            || p.limit.is_some()
+            || p.filter.is_some()
+            || p.with_key
+            || self.secondary
+            || self.ios_cols.is_some()
+            || self.am.is_some()
+            || self.keys.is_some()
+            || self.only.is_some()
+            || self.sample.is_some()
+            || p.index.is_some()
+            || !matches!(p.access, Access::Seq | Access::Unplanned)
+            || p.mark.is_some()
+            || p.sys
+            || !matches!(self.stat, StatTarget::Off | StatTarget::Seq(_))
+            || super::sizing::tracked(p.table.oid)
+            || p.table.columns.iter().any(|c| c.virtual_gen)
+        {
+            return Ok(None);
+        }
+        self.par_tried = true;
+        loop {
+            ctx.check()?;
+            if !self.next_raw_ref(ctx)? {
+                return Ok(Some(()));
+            }
+            // (The row borrowed from the batch while `f` reads it, as `next` makes its rows.)
+            let (rb, one) = (std::mem::take(&mut self.rb), self.one.take());
+            let (key, bytes) = match &one {
+                Some((k, v)) => (&k[..], &v[..]),
+                None => rb.peek().expect("a row handed out"),
+            };
+            if let StatTarget::Seq(t) = self.stat {
+                super::pgstat::count_returned(ctx, t, 1);
+            }
+            let r = match f(super::Stored::Bytes(bytes)) {
+                Ok(true) => Ok(true),
+                Ok(false) => self.full_row(key, bytes, ctx).and_then(|row| f(super::Stored::Row(row))),
+                Err(e) => Err(e),
+            };
+            self.rb = rb;
+            r?;
+            self.emitted += 1;
+        }
+    }
+
     fn key_order(&self) -> Option<Vec<(usize, bool, bool)>> {
         use crate::catalog::IndexKey;
         let p = &self.plan;
@@ -4959,14 +4773,12 @@ impl Node for ScanNode {
             };
             // (The row borrowed from the batch while its row is made.)
             let (rb, one) = (std::mem::take(&mut self.rb), self.one.take());
-            let (erb, erows) = (std::mem::take(&mut self.erb), std::mem::take(&mut self.erows));
             let (key, bytes) = match &one {
                 Some((k, v)) => (&k[..], &v[..]),
-                None if self.eheld => index_ref(&erb, &erows, self.ios_cols.is_some(), erb.pos()),
                 None => rb.peek().expect("a row handed out"),
             };
             let r = self.emit(key, bytes, ctx);
-            (self.rb, self.erb, self.erows) = (rb, erb, erows);
+            self.rb = rb;
             if let Some(row) = r? {
                 return Ok(Some(row));
             }
@@ -5039,7 +4851,7 @@ impl ScanNode {
             let ext = self.toast.is_some() && crate::storage::toast::has_external(bytes);
             // (Decided over the stored values, nothing decoded: `StoredCmps`; else over the
             // filter's columns by its kernel, else `eval`.)
-            match self.filter_kernel(bytes, None, ctx) {
+            match self.filter_kernel(bytes, None) {
                 Some(false) => {
                     ctx.filtered(self.key);
                     return Ok(None);
@@ -5050,7 +4862,7 @@ impl ScanNode {
                         true => self.row_ext(key, bytes, Some(&fm), None, ctx)?,
                         false => scan_row_need(&self.plan, key, bytes, &fm, ctx)?,
                     };
-                    let pass = match self.filter_kernel(bytes, Some(&probe), ctx) {
+                    let pass = match self.filter_kernel(bytes, Some(&probe)) {
                         Some(p) => p,
                         None => eval_bool(self.plan.filter.as_ref().expect("a filter"), &probe, ctx)?,
                     };
@@ -5111,7 +4923,7 @@ impl ScanNode {
         }
         if !prefiltered
             && self.plan.filter.is_some()
-            && !match self.filter_kernel(bytes, Some(&row), ctx) {
+            && !match self.filter_kernel(bytes, Some(&row)) {
                 Some(pass) => pass,
                 None => eval_bool(self.plan.filter.as_ref().expect("a filter"), &row, ctx)?,
             }
@@ -5835,16 +5647,12 @@ fn keyed_scan(s: &ScanPlan, plan: ScanPlan, ix: &Index, keys: Keys, ctx: &ExecCt
         lazy: None,
         kfilter: None,
         erb: Default::default(),
-        erows: Vec::new(),
-        eheld: false,
-        point: None,
-        preader: None,
         spare: None,
         fscan: None,
         fetch_calls: 0,
         dscan: None,
-        dbatch: Default::default(),
         run: Default::default(),
+        pending: None,
         one_run: false,
         blocks: Default::default(),
         prune_next: 0,

@@ -269,11 +269,25 @@ pub fn check_row_rls(
     row: &[Value],
     ctx: &ExecCtx,
 ) -> Result<()> {
+    check_row_except(rules, rls, row, &[], ctx)
+}
+
+/// `check_row_rls`, the domains of the columns in `checked` left out (`new_row_checked`
+/// checked them as the row was formed).
+fn check_row_except(
+    rules: &TableRules,
+    rls: &[crate::sql::plan::RlsCheck],
+    row: &[Value],
+    checked: &[usize],
+    ctx: &ExecCtx,
+) -> Result<()> {
     check_rls(rls, row, ctx)?;
     let t = &rules.table;
     // The values' domains are checked as the row is formed, before its constraints.
     for (i, d) in rules.domain_checks.iter().enumerate() {
-        if let Some(d) = d {
+        if let Some(d) = d
+            && !checked.contains(&i)
+        {
             d.check(&row[i], ctx)?;
         }
     }
@@ -1014,26 +1028,44 @@ pub const NEED_COPY_ROWS: &str = "XXCPY";
 
 /// COPY FROM's next row (its values, line number and text); None: the data has all been
 /// read and inserted.
-fn next_copied(c: &CopyLines, ctx: &ExecCtx) -> Result<Option<(Row, (usize, String))>> {
-    let mut feed = c.feed.lock().unwrap();
-    let next = feed.rows.pop_front();
-    let done = feed.done;
-    drop(feed);
-    match next {
-        Some((crate::sql::plan::CopyRow::Values(row), line, raw)) => Ok(Some((row, (line, raw)))),
-        // (The values read are constants, taken as they are; defaults are evaluated.)
-        Some((crate::sql::plan::CopyRow::Exprs(exprs), line, raw)) => {
-            let mut row = Vec::with_capacity(exprs.len());
-            for e in exprs {
-                row.push(match e {
-                    Expr::Const(v, _) => v,
-                    e => eval(&e, &[], ctx)?,
-                });
+fn next_copied(
+    c: &CopyLines,
+    ctx: &ExecCtx,
+) -> Result<Option<(Row, (usize, String))>> {
+    loop {
+        let mut feed = c.feed.lock().unwrap();
+        let next = feed.rows.pop_front();
+        let done = feed.done;
+        drop(feed);
+        match next {
+            Some((crate::sql::plan::CopyRow::Values(row), line, raw)) => {
+                return Ok(Some((row, (line, raw))));
             }
-            Ok(Some((row, (line, raw))))
+            // (The values read are constants, taken as they are; defaults are evaluated.)
+            Some((crate::sql::plan::CopyRow::Exprs(exprs), line, raw)) => {
+                let mut row = Vec::with_capacity(exprs.len());
+                for e in exprs {
+                    row.push(match e {
+                        Expr::Const(v, _) => v,
+                        e => eval(&e, &[], ctx)?,
+                    });
+                }
+                return Ok(Some((row, (line, raw))));
+            }
+            Some((crate::sql::plan::CopyRow::Skipped(exprs, context), _, _)) => {
+                for e in exprs {
+                    eval(&e, &[], ctx).map_err(|mut e| {
+                        e.context = Some(match e.context.take() {
+                            Some(inner) => format!("{inner}\n{context}").into_boxed_str(),
+                            None => context.clone().into_boxed_str(),
+                        });
+                        e
+                    })?;
+                }
+            }
+            None if done => return Ok(None),
+            None => return Err(Error::new(NEED_COPY_ROWS, "COPY FROM needs its next rows")),
         }
-        None if done => Ok(None),
-        None => Err(Error::new(NEED_COPY_ROWS, "COPY FROM needs its next rows")),
     }
 }
 
@@ -3177,6 +3209,81 @@ pub fn new_row(rules: &TableRules, target: &[usize], src: Row, ctx: &ExecCtx) ->
     Ok(row)
 }
 
+/// Where an INSERT's given values have their domains checked (`new_row_checked`).
+#[derive(Clone, Copy, PartialEq)]
+enum Given {
+    /// A multi-row VALUES list: coerced as its rows are made, before any default.
+    First,
+    /// Any other source: in column order, among the defaults the rewriter adds to the same
+    /// target list (rewriteTargetListIU), one default's sequence moved before a later
+    /// column fails, not after an earlier one.
+    InColumnOrder,
+    /// With the row's other constraints (`check_row_rls`): COPY's are checked as its lines
+    /// are read (`session::copy` `prepare`).
+    Later,
+}
+
+impl Given {
+    fn of(plan: &InsertPlan) -> Given {
+        if plan.copy.is_some() {
+            Given::Later
+        } else if plan.values_domains_first {
+            Given::First
+        } else {
+            Given::InColumnOrder
+        }
+    }
+}
+
+/// `new_row` with the given values' domains checked where PostgreSQL's target list checks
+/// them (`given`). True: those of the given columns are checked (`check_row_except` leaves
+/// them).
+fn new_row_checked(
+    rules: &TableRules,
+    target: &[usize],
+    src: Row,
+    given: Given,
+    ctx: &ExecCtx,
+) -> Result<(Row, bool)> {
+    let t = &rules.table;
+    let all = src.len() == t.columns.len()
+        && target.len() == src.len()
+        && target.iter().enumerate().all(|(i, c)| i == *c);
+    if all || given == Given::Later || rules.domain_checks.iter().all(Option::is_none) {
+        return Ok((new_row(rules, target, src, ctx)?, false));
+    }
+    let mut row: Row = vec![Value::Null; t.columns.len()];
+    let mut provided = vec![false; t.columns.len()];
+    for (v, c) in src.into_iter().zip(target) {
+        row[*c] = v;
+        provided[*c] = true;
+    }
+    let check = |i: usize, row: &Row| match rules.domain_checks.get(i) {
+        Some(Some(d)) => d.check(&row[i], ctx),
+        _ => Ok(()),
+    };
+    if given == Given::First {
+        for i in (0..row.len()).filter(|&i| provided[i]) {
+            check(i, &row)?;
+        }
+    }
+    for (i, c) in t.columns.iter().enumerate() {
+        if provided[i] {
+            if given == Given::InColumnOrder {
+                check(i, &row)?;
+            }
+            continue;
+        }
+        if c.dropped || c.generated.is_some() {
+            continue;
+        }
+        if let Some(d) = &rules.defaults[i] {
+            row[i] = eval(d, &[], ctx)?;
+        }
+    }
+    Ok((row, true))
+}
+
 /// A row ready for its unique checks and its write (ExecInsert at its `vlock:` label):
 /// defaults, BEFORE ROW triggers, generated columns and checks done, its key chosen. An ON
 /// CONFLICT DO UPDATE whose conflicting row changed while it waited starts over from here.
@@ -3193,10 +3300,11 @@ fn prepare_insert(
     target: &[usize],
     src: Row,
     rls: &[crate::sql::plan::RlsCheck],
+    given: Given,
     ctx: &ExecCtx,
 ) -> Result<std::result::Result<Prepared, Inserted>> {
     let t = &rules.table;
-    let mut row = new_row(rules, target, src, ctx)?;
+    let (mut row, checked) = new_row_checked(rules, target, src, given, ctx)?;
     if rules.view {
         return Ok(Err(
             match trigger::instead(&rules.triggers, t, tt::INSERT, None, Some(row), ctx)? {
@@ -3225,7 +3333,7 @@ fn prepare_insert(
             row[i] = generated_value(rules, i, e, &row, ctx)?;
         }
     }
-    check_row_rls(rules, rls, &row, ctx)?;
+    check_row_except(rules, rls, &row, if checked { target } else { &[] }, ctx)?;
     // (ExecInsert checks a foreign partition's row by its server only.)
     if t.foreign.is_none() {
         check_partition(rules, &row, ctx)?;
@@ -3256,7 +3364,22 @@ pub fn insert_new(
     after: &mut Vec<AfterRow>,
     ctx: &ExecCtx,
 ) -> Result<Inserted> {
-    match prepare_insert(rules, target, src, rls, ctx)? {
+    insert_new_given(rules, target, src, rls, on_conflict, Given::Later, after, ctx)
+}
+
+/// `insert_new` of an INSERT's row, its given values' domains checked as `given` says.
+#[allow(clippy::too_many_arguments)]
+fn insert_new_given(
+    rules: &TableRules,
+    target: &[usize],
+    src: Row,
+    rls: &[crate::sql::plan::RlsCheck],
+    on_conflict: Option<&crate::sql::plan::OnConflict>,
+    given: Given,
+    after: &mut Vec<AfterRow>,
+    ctx: &ExecCtx,
+) -> Result<Inserted> {
+    match prepare_insert(rules, target, src, rls, given, ctx)? {
         Ok(p) => insert_prepared(rules, p, on_conflict, after, ctx),
         Err(done) => Ok(done),
     }
@@ -3508,7 +3631,7 @@ fn index_entries_checked(
                             }
                             // heap_insert counted it (pgstat_count_heap_insert); the abort
                             // makes it a dead tuple.
-                            super::pgstat::count_insert(ctx, t.oid, 1);
+                            super::pgstat::count_failed_insert(ctx, t);
                             return Err(index_violation(t, bix, v, other.as_deref(), ctx));
                         }
                     }
@@ -3544,8 +3667,7 @@ fn store_inserted(
     let t = &rules.table;
     let Prepared { row, dkey } = p;
     let tid = super::sizing::inserted_with(t, &rules.indexes, &dkey, &row, Some(&vals.vals), ctx)?;
-    super::pgstat::count_insert(ctx, t.oid, 1);
-    super::pgstat::io_insert(ctx, t, 1, "normal");
+    super::pgstat::count_stored(ctx, t);
     let xid = ctx.txn.borrow_mut().cur_xid();
     // (A row of a table keyed by row ids has a key never used before.)
     let fresh = t.has_rowid();
@@ -3716,6 +3838,104 @@ pub struct InsertNode {
     plain: bool,
     /// Its rows not counted in pg_stat yet (`flush_plain_counts`).
     plain_counts: std::cell::Cell<i64>,
+    /// A multi-insert COPY on the general path: its rows not counted yet, per table
+    /// (`pgstat::count_stored`, `flush_plain_counts`).
+    held_counts: std::cell::RefCell<Vec<(u32, i64)>>,
+    /// A plain INSERT … SELECT copying a table's stored rows (`StoredInsert`), once decided;
+    /// Some(None): not this one.
+    stored: Option<Option<StoredInsert>>,
+    /// Its source handed out all its rows that way (`Node::each_stored`).
+    source_done: bool,
+}
+
+/// Rows INSERT … SELECT copied as stored (`StoredInsert::insert`), for tests.
+#[doc(hidden)]
+pub static STORED_INSERTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// A plain INSERT … SELECT whose source hands out a table's rows as stored
+/// (`Node::each_stored`: its columns as they are, which are the target's, of the same types)
+/// into a table keyed by row ids without indexes, CHECK constraints, domains, RLS or a
+/// change stream, past its size model: each row's stored values go in as they are under a
+/// new header, without being decoded and encoded again (`insert`).
+struct StoredInsert {
+    /// The target is past its model now (`sizing::is_estimated`): it stays so.
+    estimated: std::cell::Cell<bool>,
+    types: Vec<DataType>,
+    /// No column is virtual or dropped (`stored_tuple_len`'s mask).
+    none: Vec<bool>,
+    not_null: Vec<bool>,
+}
+
+impl StoredInsert {
+    fn of(plan: &InsertPlan, ctx: &ExecCtx) -> Option<StoredInsert> {
+        let rules = &plan.rules;
+        let t = &rules.table;
+        let n = t.columns.len();
+        let plain = plan.copy.is_none()
+            && t.has_rowid()
+            && !t.temporary
+            && rules.indexes.is_empty()
+            && rules.checks.is_empty()
+            && rules.domain_checks.iter().all(Option::is_none)
+            && t.columns.iter().all(|c| !c.dropped && !c.virtual_gen && c.generated.is_none())
+            && plan.target.len() == n
+            && plan.target.iter().enumerate().all(|(i, c)| i == *c)
+            && !ctx.txn.borrow().serializable_tracked()
+            && !crate::repl::log::logs_inserts(t, ctx);
+        plain.then(|| StoredInsert {
+            estimated: std::cell::Cell::new(false),
+            types: t.columns.iter().map(|c| c.ty.clone()).collect(),
+            none: vec![false; n],
+            not_null: t.columns.iter().map(|c| c.not_null).collect(),
+        })
+    }
+
+    /// A stored row of the source in (`plain_counts` counting it): false when it can't go in
+    /// as stored (a NULL in a NOT NULL column, a value out of line or long enough that it
+    /// might go out of line, a row stored before a column was added, a modelled table), for
+    /// the caller to insert decoded.
+    fn insert(&self, plan: &InsertPlan, bytes: &[u8], plain_counts: &std::cell::Cell<i64>, ctx: &ExecCtx) -> Result<bool> {
+        use crate::storage::row::{read_stored, StoredValue};
+        let t = &plan.rules.table;
+        // (A modelled target places each row in its model: decoded.)
+        if !self.estimated.get() {
+            self.estimated.set(super::sizing::is_estimated(t.oid, &ctx.sess.db));
+        }
+        if !self.estimated.get() || crate::storage::toast::has_external(bytes) {
+            return Ok(false);
+        }
+        let data = super::scan::row_data(bytes)?;
+        let mut pos = 0;
+        if crate::storage::sst::get_varint(data, &mut pos)? as usize != self.types.len() {
+            return Ok(false);
+        }
+        for &not_null in &self.not_null {
+            let at = pos;
+            let null = matches!(read_stored(data, &mut pos)?, StoredValue::Null);
+            // (`toast::encode` keeps a value whose encoding is under 128 bytes in line.)
+            if (null && not_null) || pos - at >= 128 {
+                return Ok(false);
+            }
+        }
+        let Some(len) = crate::storage::row::stored_tuple_len(data, &self.types, &self.none) else {
+            return Ok(false);
+        };
+        if !super::sizing::inserted_stored(t, len, ctx) {
+            return Ok(false);
+        }
+        let rowid = ctx.sess.db.nextval_by_one(t.oid, || crate::session::ddl::rowid_sequence(t))?;
+        let dkey = data_key(t, &[], Some(rowid));
+        plain_counts.set(plain_counts.get() + 1);
+        let mut txn = ctx.txn.borrow_mut();
+        let xid = txn.cur_xid();
+        let mut row = Vec::with_capacity(data.len() + 10);
+        row.push(crate::storage::row::ROW_HEADER);
+        crate::storage::sst::put_varint(&mut row, xid);
+        row.extend_from_slice(data);
+        txn.put_fresh(dkey, row)?;
+        STORED_INSERTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(true)
+    }
 }
 
 impl InsertNode {
@@ -3819,6 +4039,9 @@ impl InsertNode {
             retry: None,
             plain,
             plain_counts: Default::default(),
+            held_counts: Default::default(),
+            stored: None,
+            source_done: false,
         })
     }
 
@@ -3942,12 +4165,13 @@ impl InsertNode {
                 &mut self.after,
                 ctx,
             )?,
-            _ => insert_new(
+            _ => insert_new_given(
                 rules,
                 &self.plan.target,
                 src,
                 &rules.rls_checks,
                 self.plan.on_conflict.as_ref(),
+                Given::of(&self.plan),
                 &mut self.after,
                 ctx,
             )?,
@@ -4004,7 +4228,20 @@ impl InsertNode {
             f.len() - 1
         };
         let mut at_flush = false;
+        let hold = c.multi && !self.plain;
+        if hold {
+            super::pgstat::hold_inserts(ctx);
+        }
         let r = if self.plain { self.insert_plain(src, ctx) } else { self.insert(src, ctx) };
+        if hold {
+            let mut h = self.held_counts.borrow_mut();
+            for (rel, n) in super::pgstat::take_held(ctx) {
+                match h.iter_mut().find(|e| e.0 == rel) {
+                    Some(e) => e.1 += n,
+                    None => h.push((rel, n)),
+                }
+            }
+        }
         let r = r.map_err(|e| {
             // (And an index entry too big, `rowsize`: its index insertion is the flush's too.)
             if c.multi
@@ -4051,6 +4288,43 @@ impl InsertNode {
         r
     }
 
+    /// `plain_row` of this insert's row.
+    fn insert_plain(&mut self, src: Row, ctx: &ExecCtx) -> Result<Option<(Row, Vec<u8>, Option<Row>)>> {
+        Self::plain_row(&self.plan, &self.plain_counts, src, ctx)
+    }
+
+    /// A plain INSERT … SELECT's rows from its source as stored (`StoredInsert`), each one
+    /// that can't go in as stored inserted decoded (`plain_row`), as the rows `next` reads
+    /// one by one would go in: the source is then done (`source_done`).
+    fn insert_each_stored(&mut self, ctx: &ExecCtx) -> Result<()> {
+        let InsertNode { plan, source, stored, plain_counts, sink, source_done, .. } = self;
+        let Some(Some(si)) = stored.as_ref() else { return Ok(()) };
+        let (plan, plain_counts): (&InsertPlan, &std::cell::Cell<i64>) = (plan, plain_counts);
+        let mut each = |s: super::Stored<'_>| -> Result<bool> {
+            if *sink == Some(false) && ctx.processed.get() >= SINK_AFTER {
+                let mut txn = ctx.txn.borrow_mut();
+                *sink = txn.open_sink().then_some(true);
+                if sink.is_some() {
+                    txn.sink_runs_ok();
+                }
+            }
+            match s {
+                super::Stored::Bytes(b) => {
+                    if !si.insert(plan, b, plain_counts, ctx)? {
+                        return Ok(false);
+                    }
+                }
+                super::Stored::Row(r) => {
+                    Self::plain_row(plan, plain_counts, r, ctx)?;
+                }
+            }
+            ctx.processed.set(ctx.processed.get() + 1);
+            Ok(true)
+        };
+        *source_done = source.each_stored(&mut each, ctx)?.is_some();
+        Ok(())
+    }
+
     /// A plain COPY's or INSERT … SELECT's row (`plain`): what `insert_new` does for a table without
     /// triggers, RLS, generated columns, partitions, foreign storage, view checks or unique /
     /// exclusion indexes, in the same order (defaults, domains, NOT NULL and CHECK, the row
@@ -4059,21 +4333,13 @@ impl InsertNode {
     /// flushed (CopyMultiInsertBufferFlush's heap_multi_insert): a row failing its
     /// constraints drops the buffer's rows before it uncounted. (A temporary table's I/O
     /// counts follow its model row by row.)
-    fn insert_plain(&mut self, src: Row, ctx: &ExecCtx) -> Result<Option<(Row, Vec<u8>, Option<Row>)>> {
-        let rules = &self.plan.rules;
+    fn plain_row(plan: &InsertPlan, plain_counts: &std::cell::Cell<i64>, src: Row, ctx: &ExecCtx) -> Result<Option<(Row, Vec<u8>, Option<Row>)>> {
+        let rules = &plan.rules;
         let t = &rules.table;
         // (A COPY row's defaults and constraints fail it before it is buffered, as
         // ExecConstraints does in CopyFrom: the buffer's rows before it never go in.)
-        let formed = new_row(rules, &self.plan.target, src, ctx).and_then(|row| check_row_rls(rules, &[], &row, ctx).map(|()| row));
-        let row = match formed {
-            Ok(row) => row,
-            Err(e) => {
-                if self.plan.copy.is_some() {
-                    self.plain_counts.set(0);
-                }
-                return Err(e);
-            }
-        };
+        let (row, checked) = new_row_checked(rules, &plan.target, src, Given::of(plan), ctx)?;
+        check_row_except(rules, &[], &row, if checked { &plan.target } else { &[] }, ctx)?;
         let rowid = if t.has_rowid() {
             Some(ctx.sess.db.nextval_by_one(t.oid, || crate::session::ddl::rowid_sequence(t))?)
         } else {
@@ -4085,8 +4351,8 @@ impl InsertNode {
         let vals = index_entries_checked(rules, &p, None, None, ctx)?;
         let Prepared { row, dkey } = p;
         let tid = super::sizing::inserted_with(t, &rules.indexes, &dkey, &row, Some(&vals.vals), ctx)?;
-        if !t.temporary && (self.plan.copy.is_some() || rules.checks.is_empty()) {
-            self.plain_counts.set(self.plain_counts.get() + 1);
+        if !t.temporary && (plan.copy.is_some() || rules.checks.is_empty()) {
+            plain_counts.set(plain_counts.get() + 1);
         } else {
             super::pgstat::count_insert(ctx, t.oid, 1);
             super::pgstat::io_insert(ctx, t, 1, "normal");
@@ -4111,6 +4377,20 @@ impl InsertNode {
         if n > 0 {
             super::pgstat::count_insert(ctx, self.plan.rules.table.oid, n);
             super::pgstat::io_insert(ctx, &self.plan.rules.table, n, "normal");
+        }
+        super::pgstat::count_held(ctx, self.held_counts.take());
+    }
+
+    /// The counts of rows not counted yet as an error leaves: an INSERT … SELECT's rows went
+    /// in one by one (counted), a multi-insert COPY's buffer is lost before its flush
+    /// (CopyMultiInsertBufferFlush never runs: dropped). A unique violation the flush finds
+    /// (`copy_err`) is raised after the flush's counts.
+    fn counts_on_error(&self, ctx: &ExecCtx) {
+        if self.plan.copy.as_ref().is_some_and(|c| c.multi) {
+            self.plain_counts.set(0);
+            self.held_counts.take();
+        } else {
+            self.flush_plain_counts(ctx);
         }
     }
 
@@ -4348,21 +4628,30 @@ impl Node for InsertNode {
         if self.queue_mark.is_none() {
             self.queue_mark = Some(ctx.after_queue.borrow().len());
         }
+        if self.plain && self.stored.is_none() {
+            self.stored = Some(StoredInsert::of(&self.plan, ctx));
+            self.insert_each_stored(ctx).inspect_err(|_| self.counts_on_error(ctx))?;
+        }
         loop {
-            // (A plain COPY's pending counts go in before anything leaves: its next batch,
-            // an error, the end.)
+            // (Pending counts go in before anything leaves: the next batch, the end; an
+            // error drops a multi-insert COPY's, `counts_on_error`.)
             if let Err(e) = ctx.check() {
-                self.flush_plain_counts(ctx);
+                self.counts_on_error(ctx);
                 return Err(e);
             }
             let next = match &self.plan.copy {
-                Some(c) => match next_copied(c, ctx).inspect_err(|_| self.flush_plain_counts(ctx))? {
+                Some(c) => match next_copied(c, ctx).inspect_err(|e| {
+                    if e.code != NEED_COPY_ROWS {
+                        self.counts_on_error(ctx);
+                    }
+                })? {
                     Some((row, line)) => {
                         self.copy_line = line;
                         Some(row)
                     }
                     None => None,
                 },
+                None if self.source_done => None,
                 None => self.source.next(ctx).inspect_err(|_| self.flush_plain_counts(ctx))?,
             };
             let Some(src) = next else {
@@ -4410,7 +4699,11 @@ impl Node for InsertNode {
                 events.reverse();
                 if let Some(c) = &self.plan.copy {
                     if let Some(p) = ctx.sess.copy_progress.borrow_mut().as_mut() {
-                        p.tuples_processed = ctx.processed.get() as i64;
+                        p.tuples_processed = if rules.view {
+                            c.feed.lock().unwrap().fed as i64
+                        } else {
+                            ctx.processed.get() as i64
+                        };
                     }
                     let notice = c.feed.lock().unwrap().skipped_notice.clone();
                     if let Some(msg) = notice {
@@ -4437,7 +4730,7 @@ impl Node for InsertNode {
                 return Ok(None);
             };
             let inserted = match self.plan.copy.clone() {
-                Some(c) => self.insert_copied(&c, src, ctx).inspect_err(|_| self.flush_plain_counts(ctx))?,
+                Some(c) => self.insert_copied(&c, src, ctx).inspect_err(|_| self.counts_on_error(ctx))?,
                 None => {
                     // (Its rows are stored as they go, final: the sink takes them once there
                     // are enough to be worth its room.)

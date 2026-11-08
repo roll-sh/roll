@@ -103,55 +103,21 @@ impl Chains {
         }
     }
 
-    /// The rows visible at `ts` among keys in [start, end), copied into one buffer of the
-    /// reader's own: every reader of a range cloning the chains' shared keys and values
-    /// contended on their reference counts (a small table every transaction scans).
-    fn visible(&self, start: &[u8], end: &[u8], ts: u64) -> HotRows {
+    /// The rows visible at `ts` among keys in [start, end) (the keys shared, not copied).
+    fn visible(&self, start: &[u8], end: &[u8], ts: u64) -> Vec<(Bytes, Bytes)> {
         let range = (Bound::Included(start), Bound::Excluded(end));
-        let mut data = Vec::new();
-        let mut ents = Vec::new();
-        for (k, chain) in self.keys.range::<[u8], _>(range) {
-            if let Some((_, Some(v))) = newest(chain, ts) {
-                ents.push((data.len() as u32, k.len() as u32, v.len() as u32));
-                data.extend_from_slice(k);
-                data.extend_from_slice(v);
-            }
-        }
-        HotRows { data: Bytes::from(data), ents, at: 0 }
+        self.keys
+            .range::<[u8], _>(range)
+            .filter_map(|(k, chain)| {
+                let (_, v) = newest(chain, ts)?;
+                Some((k.clone(), v.clone()?))
+            })
+            .collect()
     }
 
     fn too_big(&self) -> bool {
         self.keys.len() > MAX_KEYS || self.bytes > MAX_BYTES
     }
-}
-
-/// A kept range's rows a reader took (`Hot::scan`): keys and values end to end in one
-/// buffer, read in key order.
-pub(super) struct HotRows {
-    data: Bytes,
-    /// (where the key starts, its length, the value's length; the value follows the key).
-    ents: Vec<(u32, u32, u32)>,
-    at: usize,
-}
-
-impl HotRows {
-    pub(super) fn empty() -> HotRows {
-        HotRows { data: Bytes::new(), ents: Vec::new(), at: 0 }
-    }
-
-    /// The next row: where its key and its value are in `data`.
-    pub(super) fn next(&mut self) -> Option<(std::ops::Range<usize>, std::ops::Range<usize>)> {
-        let &(o, k, v) = self.ents.get(self.at)?;
-        self.at += 1;
-        let (o, k, v) = (o as usize, k as usize, v as usize);
-        Some((o..o + k, o + k..o + k + v))
-    }
-
-    /// The buffer the rows are in.
-    pub(super) fn data(&self) -> &Bytes {
-        &self.data
-    }
-
 }
 
 /// A chain's newest version at or before `ts`.
@@ -186,7 +152,7 @@ pub(super) fn covering(start: &[u8], end: &[u8]) -> Option<Prefix> {
 
 impl Hot {
     /// The rows of [start, end) visible at `ts`, when a kept range holds them.
-    pub(super) fn scan(&self, start: &[u8], end: &[u8], ts: u64) -> Option<HotRows> {
+    pub(super) fn scan(&self, start: &[u8], end: &[u8], ts: u64) -> Option<Vec<(Bytes, Bytes)>> {
         if !self.any.load(Ordering::Acquire) {
             return None;
         }

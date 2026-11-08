@@ -198,66 +198,6 @@ pub struct SstWriter {
     /// The bloom filter, when sized up front (`expect_keys`): its bits are set as keys come
     /// instead of keeping every key's hash until `finish`.
     bloom: Option<(Vec<u8>, FastMod)>,
-    /// A compressed run's blocks compressed on a thread of their own (`create_run`).
-    pipe: Option<Compressor>,
-}
-
-/// Blocks in flight to a `Compressor` before the writer waits for one.
-const PIPE_DEPTH: usize = 8;
-
-/// A thread compressing a run's blocks while its writer goes on adding entries (a COPY's or
-/// an index build's, which would otherwise wait for each block's compression): the writer
-/// sends each finished block and writes the blocks back in order as they come, so the file
-/// is the one it would have written itself.
-struct Compressor {
-    tx: Option<std::sync::mpsc::SyncSender<Vec<u8>>>,
-    /// (the block's buffer, to be used again; the block as written).
-    rx: std::sync::mpsc::Receiver<(Vec<u8>, Result<Vec<u8>>)>,
-    /// The last key of each block in flight, oldest first.
-    keys: std::collections::VecDeque<Vec<u8>>,
-    spare: Vec<Vec<u8>>,
-}
-
-impl Compressor {
-    fn start() -> Option<Compressor> {
-        let (tx, jobs) = std::sync::mpsc::sync_channel::<Vec<u8>>(PIPE_DEPTH);
-        let (done, rx) = std::sync::mpsc::channel();
-        std::thread::Builder::new()
-            .name("roll-run-zstd".into())
-            .spawn(move || {
-                for raw in jobs {
-                    let data = encode_block(&raw, true);
-                    if done.send((raw, data)).is_err() {
-                        break;
-                    }
-                }
-            })
-            .ok()?;
-        Some(Compressor { tx: Some(tx), rx, keys: Default::default(), spare: Vec::new() })
-    }
-}
-
-/// A block's bytes as a file holds them: the compression byte, the entries (zstd's when that
-/// saves an eighth), the CRC.
-fn encode_block(raw: &[u8], compress: bool) -> Result<Vec<u8>> {
-    let mut data = Vec::with_capacity(raw.len() + 9);
-    if compress {
-        let c = zstd::bulk::compress(raw, 1).map_err(|e| internal(format!("zstd: {e}")))?;
-        if c.len() < raw.len() * 7 / 8 {
-            data.push(1);
-            data.extend_from_slice(&(raw.len() as u32).to_le_bytes());
-            data.extend_from_slice(&c);
-        } else {
-            data.push(0);
-            data.extend_from_slice(raw);
-        }
-    } else {
-        data.push(0);
-        data.extend_from_slice(raw);
-    }
-    let crc = crc32fast::hash(&data);
-    data.extend_from_slice(&crc.to_le_bytes());
-    Ok(data)
 }
 
 impl SstWriter {
@@ -274,10 +214,6 @@ impl SstWriter {
     pub fn create_run(dir: &Path, id: u64, compress: bool) -> Result<Self> {
         let mut w = Self::create(dir, id, compress)?;
         w.sync = false;
-        // (Its blocks compressed off the producer's thread; without a thread, on it.)
-        if compress {
-            w.pipe = Compressor::start();
-        }
         Ok(w)
     }
 
@@ -314,7 +250,6 @@ impl SstWriter {
             compress,
             sync: true,
             bloom: None,
-            pipe: None,
         })
     }
 
@@ -377,68 +312,36 @@ impl SstWriter {
         if self.block_entries == 0 {
             return Ok(());
         }
-        self.block_entries = 0;
-        if let Some(mut c) = self.pipe.take() {
-            let r = self.send_block(&mut c);
-            self.pipe = Some(c);
-            return r;
+        let raw = std::mem::take(&mut self.block);
+        let mut data = Vec::with_capacity(raw.len() + 1);
+        if self.compress {
+            let c = zstd::bulk::compress(&raw, 1).map_err(|e| internal(format!("zstd: {e}")))?;
+            if c.len() < raw.len() * 7 / 8 {
+                data.push(1);
+                data.extend_from_slice(&(raw.len() as u32).to_le_bytes());
+                data.extend_from_slice(&c);
+            } else {
+                data.push(0);
+                data.extend_from_slice(&raw);
+            }
+        } else {
+            data.push(0);
+            data.extend_from_slice(&raw);
         }
-        let data = encode_block(&self.block, self.compress)?;
-        self.block.clear();
-        let key = self.prev_key.clone();
-        self.write_block(key, &data)
-    }
-
-    fn write_block(&mut self, last_key: Vec<u8>, data: &[u8]) -> Result<()> {
-        self.out.write_all(data)?;
-        self.index.push((last_key, self.offset, data.len() as u32));
+        let crc = crc32fast::hash(&data);
+        data.extend_from_slice(&crc.to_le_bytes());
+        self.out.write_all(&data)?;
+        self.index
+            .push((self.prev_key.clone(), self.offset, data.len() as u32));
         self.offset += data.len() as u64;
-        Ok(())
-    }
-
-    /// The current block to the compressing thread, and the blocks it finished written (all
-    /// but `PIPE_DEPTH - 1` of those in flight, waiting for them when there are more).
-    fn send_block(&mut self, c: &mut Compressor) -> Result<()> {
-        let next = c.spare.pop().unwrap_or_else(|| Vec::with_capacity(BLOCK_TARGET + 1024));
-        let raw = std::mem::replace(&mut self.block, next);
-        c.keys.push_back(self.prev_key.clone());
-        let gone = || internal("the run's compressing thread stopped");
-        c.tx.as_ref().ok_or_else(gone)?.send(raw).map_err(|_| gone())?;
-        loop {
-            let got = match c.keys.len() >= PIPE_DEPTH {
-                true => c.rx.recv().map_err(|_| gone())?,
-                false => match c.rx.try_recv() {
-                    Ok(r) => r,
-                    Err(_) => return Ok(()),
-                },
-            };
-            self.took_block(c, got)?;
-        }
-    }
-
-    /// A block back from the compressing thread: written, its buffer kept for another.
-    fn took_block(&mut self, c: &mut Compressor, (mut raw, data): (Vec<u8>, Result<Vec<u8>>)) -> Result<()> {
-        let key = c.keys.pop_front().expect("a block in flight");
-        self.write_block(key, &data?)?;
-        raw.clear();
-        c.spare.push(raw);
-        Ok(())
-    }
-
-    /// Every block in flight written (the thread done).
-    fn drain_pipe(&mut self) -> Result<()> {
-        let Some(mut c) = self.pipe.take() else { return Ok(()) };
-        c.tx = None;
-        while !c.keys.is_empty() {
-            let got = c.rx.recv().map_err(|_| internal("the run's compressing thread stopped"))?;
-            self.took_block(&mut c, got)?;
-        }
+        self.block = raw;
+        self.block.clear();
+        self.block_entries = 0;
         Ok(())
     }
 
     pub fn finish(mut self) -> Result<SstMeta> {
         self.finish_block()?;
-        self.drain_pipe()?;
         let mut index = Vec::new();
         put_varint(&mut index, self.index.len() as u64);
         for (k, off, len) in &self.index {
@@ -1616,32 +1519,6 @@ mod tests {
             b.seek(&[0xFF], &mut pos);
             assert_eq!(pos.index(), b.len());
         }
-    }
-
-    /// A run whose blocks a thread compresses (`create_run`) is the file its writer would have
-    /// written compressing them itself.
-    #[test]
-    fn piped_runs_are_written_as_compressed_in_place() {
-        let dir = tempfile::tempdir().unwrap();
-        let write = |mut w: SstWriter| {
-            for i in 0..20_000u32 {
-                let mut k = vec![0, 0, 0x40, 0x41, 0, 0, 0, 0];
-                k.extend_from_slice(&i.to_be_bytes());
-                k.extend_from_slice(&(!9u64).to_be_bytes());
-                let v = format!("{}{}", "value ".repeat((i % 9) as usize), i * 7919);
-                w.add(&k, (i % 13 != 0).then_some(v.as_bytes())).unwrap();
-            }
-            w.finish().unwrap()
-        };
-        let piped = SstWriter::create_run(dir.path(), 1, true).unwrap();
-        assert!(piped.pipe.is_some());
-        let mut inline = SstWriter::create(dir.path(), 2, true).unwrap();
-        inline.sync = false;
-        let (a, b) = (write(piped), write(inline));
-        assert!(a.size > 64 * BLOCK_TARGET as u64 / 8, "blocks to pipe: {}", a.size);
-        assert_eq!((a.size, a.entries, &a.first_key, &a.last_key), (b.size, b.entries, &b.first_key, &b.last_key));
-        let bytes = |id| std::fs::read(sst_path(dir.path(), id)).unwrap();
-        assert!(bytes(1) == bytes(2), "the same file");
     }
 
     /// A linked run's block decoded in one pass reads as the relinked block does.

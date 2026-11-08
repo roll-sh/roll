@@ -793,8 +793,8 @@ impl Store {
     pub fn first_with(&self, r: &mut point::PointReader, start: &[u8], end: &[u8], resolve: bool) -> Result<point::First> {
         let ts = r.ts();
         let first = match self.hot.scan(start, end, ts) {
-            Some(mut rows) => match rows.next() {
-                Some((k, v)) => point::First::Row(rows.data()[k].to_vec(), rows.data().slice(v)),
+            Some(rows) => match rows.into_iter().next() {
+                Some((k, v)) => point::First::Row(k.to_vec(), v),
                 None => point::First::None,
             },
             None => r.first_raw(start, end)?,
@@ -835,7 +835,7 @@ impl Store {
         // (A run of deleted keys a scan found before at a snapshot at or before this one,
         // nothing written into it since, is stepped over: `dead`.)
         let start = match self.dead.skip(start, ts) {
-            Some(live) if !end.is_empty() && live.as_slice() >= end => return Scan::of_rows(self.view(), hot::HotRows::empty(), ts),
+            Some(live) if !end.is_empty() && live.as_slice() >= end => return Scan::of_rows(self.view(), Vec::new(), ts),
             Some(live) => live,
             None => start.to_vec(),
         };
@@ -2334,13 +2334,11 @@ struct Merge {
     cur: Option<usize>,
     bound: Vec<u8>,
     bounded: bool,
-    /// The source whose head is `bound`.
-    second: usize,
 }
 
 impl Merge {
     fn new(sources: Vec<Cursor>, end: Vec<u8>) -> Merge {
-        Merge { sources, end, cur: None, bound: Vec::new(), bounded: false, second: 0 }
+        Merge { sources, end, cur: None, bound: Vec::new(), bounded: false }
     }
 
     /// The source holding the smallest raw entry left (None: none below the end). Identical
@@ -2361,19 +2359,19 @@ impl Merge {
             c.fill()?;
         }
         let mut best: Option<(usize, &[u8])> = None;
-        let mut second: Option<(usize, &[u8])> = None;
+        let mut second: Option<&[u8]> = None;
         for (i, c) in self.sources.iter().enumerate() {
             let Some((k, _)) = c.head() else {
                 continue;
             };
             match best {
                 Some((_, b)) if k >= b => {
-                    if second.is_none_or(|(_, s)| k < s) {
-                        second = Some((i, k));
+                    if second.is_none_or(|s| k < s) {
+                        second = Some(k);
                     }
                 }
                 _ => {
-                    second = best;
+                    second = best.map(|(_, b)| b);
                     best = Some((i, k));
                 }
             }
@@ -2387,80 +2385,12 @@ impl Merge {
             return Ok(None);
         }
         self.bound.clear();
-        if let Some((j, s)) = second {
+        if let Some(s) = second {
             self.bound.extend_from_slice(s);
-            self.second = j;
         }
         self.bounded = second.is_some();
         self.cur = Some(i);
         Ok(Some(i))
-    }
-
-    /// After a run of `cur`'s rows up to `bound`: the rows of `cur` and of the source at
-    /// `bound` (`second`) merged here while both lie below every other source's head (an
-    /// updated table: its newer source's rows and the older source's, interleaved), a run of
-    /// one at a time (`Cursor::run_into`) below the other's head, older versions of the row
-    /// pushed last passed: a key comparison or two a row instead of a merge over every
-    /// source. Stops at anything else (a deletion, a version past `ts`, a value to put back,
-    /// another source's head), which `Scan::position` takes. How many rows it pushed, and the
-    /// last one's version.
-    fn two_way(&mut self, ts: u64, resolve: bool, batch: &mut batch::RowBatch, max: usize) -> Result<(usize, u64)> {
-        let (Some(i), true) = (self.cur, self.bounded) else { return Ok((0, 0)) };
-        let j = self.second;
-        // (The other sources' smallest head: none of them moves here.)
-        let third = (0..self.sources.len())
-            .filter(|&t| t != i && t != j)
-            .filter_map(|t| self.sources[t].head().map(|(k, _)| (t, k)))
-            .min_by(|a, b| a.1.cmp(b.1))
-            .map(|(t, _)| t);
-        self.cur = None;
-        let (mut n, mut last) = (0, 0);
-        while n < max {
-            self.sources[i].fill()?;
-            self.sources[j].fill()?;
-            let (s, o) = match (self.sources[i].head(), self.sources[j].head()) {
-                (Some(a), Some(b)) if a.0 < b.0 => (i, Some(j)),
-                (Some(_), Some(_)) => (j, Some(i)),
-                (Some(_), None) => (i, None),
-                (None, Some(_)) => (j, None),
-                (None, None) => break,
-            };
-            let (k, v) = self.sources[s].head().expect("a head entry");
-            let t = third.and_then(|t| self.sources[t].head()).map(|(h, _)| h);
-            if t.is_some_and(|t| k >= t) || k.len() < 8 {
-                break;
-            }
-            if batch.last_key() == Some(user_key(k)) {
-                // (An older version of the row pushed last.)
-                self.sources[s].advance();
-                continue;
-            }
-            let Some(v) = v else { break };
-            if key_ts(k) > ts || resolve && toast::has_external(v) {
-                break;
-            }
-            // (Its rows below the other's head and the third's: a run.)
-            self.bound.clear();
-            match (o.and_then(|o| self.sources[o].head()).map(|(h, _)| h), t) {
-                (Some(h), Some(t)) => self.bound.extend_from_slice(h.min(t)),
-                (Some(h), None) | (None, Some(h)) => self.bound.extend_from_slice(h),
-                (None, None) => {}
-            }
-            let bound = (!self.bound.is_empty()).then_some(self.bound.as_slice());
-            let (m, l) = self.sources[s].run_into(ts, bound, resolve, batch, max - n);
-            if m > 0 {
-                (n, last) = (n + m, l);
-                continue;
-            }
-            // (A memtable's row, or one `run_into` leaves: pushed alone.)
-            let c = &self.sources[s];
-            let (k, _) = c.head().expect("a head entry");
-            last = key_ts(k);
-            c.push_head(k.len() - 8, batch);
-            self.sources[s].advance();
-            n += 1;
-        }
-        Ok((n, last))
     }
 
     /// Every source on to its first entry >= `target`.
@@ -2491,7 +2421,7 @@ pub struct Scan {
     /// Rows come with their out-of-line values put back (`Store::scan`; `toast`).
     resolve: bool,
     /// The rows of a hot range's chains (`hot`), read already: no merge.
-    rows: Option<Box<hot::HotRows>>,
+    rows: Option<Box<std::vec::IntoIter<(Bytes, Bytes)>>>,
     /// Where the scan started, while it has stepped over only deleted keys (`dead`: a hint
     /// is recorded at its first live key past `dead::MIN_DEAD` of them); None: not looked for.
     dead: Option<(Arc<dead::DeadRanges>, Vec<u8>)>,
@@ -2569,7 +2499,7 @@ fn same_sources(view: &View, cursors: &[Cursor], start: &[u8], end: &[u8]) -> bo
 }
 
 impl Scan {
-    fn of_rows(view: Arc<View>, rows: hot::HotRows, ts: u64) -> Scan {
+    fn of_rows(view: Arc<View>, rows: Vec<(Bytes, Bytes)>, ts: u64) -> Scan {
         Scan {
             merge: Merge::new(Vec::new(), Vec::new()),
             ts,
@@ -2580,7 +2510,7 @@ impl Scan {
             horizon: 0,
             _view: view,
             resolve: false,
-            rows: Some(Box::new(rows)),
+            rows: Some(Box::new(rows.into_iter())),
             rdels: Default::default(),
             dead: None,
             dead_run: 0,
@@ -2786,20 +2716,17 @@ impl Scan {
     pub fn fill_batch(&mut self, batch: &mut batch::RowBatch, max: usize) -> Result<()> {
         let target = batch.len() + max;
         if let Some(rows) = &mut self.rows {
-            // (A hot range's rows, by reference into the scan's copy of them.)
+            // (A hot range's rows, their keys shared with its chains: none copied.)
             while batch.len() < target {
                 let Some((k, v)) = rows.next() else { break };
-                let data = rows.data();
-                let key = &data[k];
-                if self.rdels.holds(key) {
+                if self.rdels.holds(&k) {
                     continue;
                 }
-                if self.resolve && toast::has_external(&data[v.clone()]) {
-                    let v = toast::resolve(&self._view, key, data.slice(v), self.ts)?;
-                    batch.push(key, v);
-                } else {
-                    batch.push_in(key, data, v.start, v.len());
-                }
+                let v = match self.resolve && toast::has_external(&v) {
+                    true => toast::resolve(&self._view, &k, v, self.ts)?,
+                    false => v,
+                };
+                batch.push(&k, v);
             }
             return Ok(());
         }
@@ -2824,15 +2751,7 @@ impl Scan {
                 continue;
             }
             let bound = self.merge.bounded.then_some(self.merge.bound.as_slice());
-            let c = &mut self.merge.sources[i];
-            let (mut n, mut last) = c.run_into(self.ts, bound, self.resolve, batch, target - batch.len());
-            // (Then this source's rows and the next one's, interleaved, a pair at a time.)
-            if batch.len() < target {
-                let (m, l) = self.merge.two_way(self.ts, self.resolve, batch, target - batch.len())?;
-                if m > 0 {
-                    (n, last) = (n + m, l);
-                }
-            }
+            let (n, last) = c.run_into(self.ts, bound, self.resolve, batch, target - batch.len());
             if n > 0 {
                 let d = self.decided.get_or_insert_with(Vec::new);
                 d.clear();
@@ -2886,15 +2805,14 @@ impl Iterator for Scan {
             // reader's own, `excluding`, can cover one.)
             let (k, v) = loop {
                 let (k, v) = rows.next()?;
-                if !self.rdels.holds(&rows.data()[k.clone()]) {
-                    break (rows.data()[k].to_vec(), v);
+                if !self.rdels.holds(&k) {
+                    break (k, v);
                 }
             };
-            let v = rows.data().slice(v);
             if self.resolve && toast::has_external(&v) {
-                return Some(toast::resolve(&self._view, &k, v, self.ts).map(|v| (k, v)));
+                return Some(toast::resolve(&self._view, &k, v, self.ts).map(|v| (k.to_vec(), v)));
             }
-            return Some(Ok((k, v)));
+            return Some(Ok((k.to_vec(), v)));
         }
         let i = match self.position() {
             Ok(Some(i)) => i,

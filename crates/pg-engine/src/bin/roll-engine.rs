@@ -5,6 +5,7 @@
 
 use clap::Parser;
 use pg_engine::engine::{Engine, EngineOptions};
+use pg_engine::mode::{Mode, Profile};
 use pg_engine::server::{AuthMethod, ServerOptions};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -50,21 +51,31 @@ struct Args {
     /// (default: scram-sha-256 with --password, else trust).
     #[arg(long, value_parser = |s: &str| AuthMethod::parse(s).ok_or("trust, password, md5 or scram-sha-256"))]
     auth: Option<AuthMethod>,
-    /// Block cache shared by all databases, in MiB (default 64, or three quarters of
-    /// --memory-budget-mb).
+    /// Where the server leans when footprint and speed pull apart: `efficient` (the default:
+    /// small caches, idle sessions give their memory back, idle databases close; for test,
+    /// development and many-branch serverless use) or `performance` (caches from a quarter of
+    /// the memory the server may use, its container's limit or the machine's; sessions and
+    /// databases kept warm; for production). Results, errors and durability are the same in
+    /// both. Also `-c roll.engine_mode=...` or postgresql.auto.conf's (ALTER SYSTEM), read at
+    /// start. The flags below override single parts of the mode's profile.
+    #[arg(long, value_parser = |s: &str| Mode::parse(s).ok_or("efficient or performance"))]
+    mode: Option<Mode>,
+    /// Block cache shared by all databases, in MiB (default: the mode's, 64 in efficient mode;
+    /// or three quarters of --memory-budget-mb).
     #[arg(long)]
     cache_mb: Option<usize>,
-    /// Parse trees, statement templates and PL/pgSQL compiles shared by all sessions, in MiB (default 36, or a
-    /// quarter of --memory-budget-mb).
+    /// Parse trees, statement templates and PL/pgSQL compiles shared by all sessions, in MiB
+    /// (default: the mode's, 36 in efficient mode; or a quarter of --memory-budget-mb).
     #[arg(long)]
     plan_cache_mb: Option<usize>,
     /// What the caches shared by all sessions may hold together, in MiB: the block cache and
     /// the plan caches, 3 : 1 (--cache-mb or --plan-cache-mb, when given, set that part).
     #[arg(long)]
     memory_budget_mb: Option<usize>,
-    /// Close a database this many seconds after its last session ends.
-    #[arg(long, default_value_t = 60)]
-    idle_close_secs: u64,
+    /// Close a database this many seconds after its last session ends (default: the mode's,
+    /// 60 in efficient mode; performance mode keeps databases open).
+    #[arg(long)]
+    idle_close_secs: Option<u64>,
     /// Don't fsync the WAL on commit (faster, loses the last commits on a crash).
     #[arg(long)]
     no_sync: bool,
@@ -120,6 +131,49 @@ struct Args {
     /// User name maps in pg_ident.conf's format (pg_ident_file_mappings).
     #[arg(long, value_name = "FILE")]
     ident_file: Option<PathBuf>,
+}
+
+/// The custom parameter (`-c`, postgresql.auto.conf) naming the mode, as `--mode` does.
+const MODE_SETTING: &str = "roll.engine_mode";
+
+/// The server's profile (`pg_engine::mode`): the mode's, from --mode, else `-c
+/// roll.engine_mode`, else postgresql.auto.conf's, else efficient; then the explicit size and
+/// idle flags in place of its parts.
+fn profile(a: &Args) -> anyhow::Result<Profile> {
+    let parse = |v: &str, from: &str| {
+        Mode::parse(v).ok_or_else(|| anyhow::anyhow!("invalid {MODE_SETTING} \"{v}\" ({from}): efficient or performance"))
+    };
+    let argv = a.settings.iter().rev().find(|(k, _)| k.eq_ignore_ascii_case(MODE_SETTING));
+    let argv = argv.map(|(_, v)| parse(v, "command line")).transpose()?;
+    let mode = match (a.mode, argv) {
+        (Some(m), Some(c)) if m != c => anyhow::bail!("--mode {} and -c {MODE_SETTING}={} disagree", m.name(), c.name()),
+        (m, c) => match m.or(c) {
+            Some(m) => m,
+            None => {
+                let auto = std::fs::read_to_string(a.data.join(pg_engine::sysconf::AUTO_NAME)).unwrap_or_default();
+                let items = pg_engine::sysconf::parse(&auto, pg_engine::sysconf::AUTO_FILE);
+                match items.iter().rev().find(|i| i.name.as_deref().is_some_and(|n| n.eq_ignore_ascii_case(MODE_SETTING))) {
+                    Some(i) => parse(i.value.as_deref().unwrap_or(""), pg_engine::sysconf::AUTO_NAME)?,
+                    None => Mode::default(),
+                }
+            }
+        },
+    };
+    let mut p = Profile::new(mode, pg_engine::mode::server_memory());
+    if let Some(b) = a.memory_budget_mb {
+        p.cache_bytes = (b * 3 / 4) << 20;
+        p.plan_cache_bytes = (b / 4) << 20;
+    }
+    if let Some(mb) = a.cache_mb {
+        p.cache_bytes = mb << 20;
+    }
+    if let Some(mb) = a.plan_cache_mb {
+        p.plan_cache_bytes = mb << 20;
+    }
+    if let Some(s) = a.idle_close_secs {
+        p.idle_close = Duration::from_secs(s);
+    }
+    Ok(p)
 }
 
 fn parse_setting(s: &str) -> Result<(String, String), String> {
@@ -192,12 +246,19 @@ fn main() -> anyhow::Result<()> {
         )
         .init();
     let a = Args::parse();
+    let profile = profile(&a)?;
+    if profile.idle_trim {
+        idle::trim_idle_sessions();
+    }
+    pg_engine::server::set_wait_spin(profile.wait_spin);
     // --listen is `postgres -h host -p port`: listen_addresses is the host as given (the port
     // is the one bound, which sessions read from the listener).
     if a.settings.iter().any(|(k, _)| k == "port" || k == "listen_addresses") {
         anyhow::bail!("port and listen_addresses are set by --listen");
     }
     let mut settings = a.settings;
+    settings.retain(|(k, _)| !k.eq_ignore_ascii_case(MODE_SETTING));
+    settings.push((MODE_SETTING.into(), profile.mode.name().into()));
     if let Some((host, _)) = a.listen.rsplit_once(':') {
         let host = host.trim_start_matches('[').trim_end_matches(']');
         settings.push(("listen_addresses".into(), host.to_string()));
@@ -208,13 +269,12 @@ fn main() -> anyhow::Result<()> {
         AuthMethod::Trust
     });
     let data_dir = a.data.clone();
-    let plan_mb = a.plan_cache_mb.unwrap_or(a.memory_budget_mb.map_or(pg_engine::lru::PLAN_CACHE_BYTES >> 20, |b| b / 4));
-    pg_engine::lru::set_plan_cache_bytes(plan_mb << 20);
+    pg_engine::lru::set_plan_cache_bytes(profile.plan_cache_bytes);
     let engine = Engine::open(EngineOptions {
         data_dir: a.data,
-        cache_bytes: a.cache_mb.unwrap_or(a.memory_budget_mb.map_or(64, |b| b * 3 / 4)) << 20,
+        cache_bytes: profile.cache_bytes,
         sync: !a.no_sync,
-        idle_close: Duration::from_secs(a.idle_close_secs),
+        idle_close: profile.idle_close,
         superuser: a.user,
         password: a.password,
         server_files: a.allow_server_files,
@@ -362,9 +422,10 @@ fn main() -> anyhow::Result<()> {
 
 /// Idle sessions keep little memory (each connection is a thread of its own). Transparent
 /// huge pages are off for the process: with the system's `always` mode every thread's first
-/// heap pages took a 2 MB page, 2-3 MB per idle session (BENCH.md). And a connection idle for
-/// a while (`server::set_idle_hook`) gives its thread's free heap pages and the stack its
-/// statements touched but no longer use back to the system.
+/// heap pages took a 2 MB page, 2-3 MB per idle session (BENCH.md); in performance mode too,
+/// where they sped up nothing measured (BENCH.md "Modes"). And in efficient mode a connection
+/// idle for a while (`server::set_idle_hook`) gives its thread's free heap pages and the stack
+/// its statements touched but no longer use back to the system.
 #[cfg(target_os = "linux")]
 mod idle {
     use std::ffi::{c_int, c_ulong, c_void};
@@ -379,10 +440,11 @@ mod idle {
     const PR_SET_THP_DISABLE: c_int = 41;
     const MADV_DONTNEED: c_int = 4;
 
+    /// First thing in `main`, both modes: pages faulted before the prctl keep their huge pages
+    /// (after the arguments were parsed, 100 idle sessions took 32-34 MB; first thing, 31).
     pub fn setup() {
         // SAFETY: prctl with PR_SET_THP_DISABLE only sets a flag of this process.
         unsafe { prctl(PR_SET_THP_DISABLE, 1 as c_ulong, 0 as c_ulong, 0 as c_ulong, 0 as c_ulong) };
-        pg_engine::server::set_idle_hook(trim);
         // Memory freed by busy threads, or by threads that ended, goes back to the system
         // only when some thread runs the allocator's collection: after a burst of sessions
         // nothing would, and the process would keep its peak (BENCH.md "Memory under
@@ -399,6 +461,11 @@ mod idle {
             });
     }
 
+    /// Efficient mode's: a connection idle for a while trims its thread's memory.
+    pub fn trim_idle_sessions() {
+        pg_engine::server::set_idle_hook(trim);
+    }
+
     fn trim() {
         // SAFETY: mi_collect only returns free memory of the global allocator (mimalloc).
         unsafe { mi_collect(true) };
@@ -413,6 +480,7 @@ mod idle {
 #[cfg(not(target_os = "linux"))]
 mod idle {
     pub fn setup() {}
+    pub fn trim_idle_sessions() {}
 }
 
 /// The open-file limit up to its hard limit. One process holds every connection's socket and
@@ -427,5 +495,29 @@ fn raise_open_files() {
             l.rlim_cur = l.rlim_max;
             libc::setrlimit(libc::RLIMIT_NOFILE, &l);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mode_selection_and_overrides() {
+        let dir = tempfile::tempdir().unwrap();
+        let args = |extra: &[&str]| {
+            let mut argv = vec!["roll-engine", "--data", dir.path().to_str().unwrap()];
+            argv.extend_from_slice(extra);
+            Args::try_parse_from(argv).unwrap()
+        };
+        assert_eq!(profile(&args(&[])).unwrap().mode, Mode::Efficient);
+        std::fs::write(dir.path().join(pg_engine::sysconf::AUTO_NAME), "roll.engine_mode = 'performance'\n").unwrap();
+        assert_eq!(profile(&args(&[])).unwrap().mode, Mode::Performance);
+        assert_eq!(profile(&args(&["--mode", "efficient"])).unwrap().mode, Mode::Efficient);
+        assert_eq!(profile(&args(&["-c", "ROLL.engine_mode=efficient"])).unwrap().mode, Mode::Efficient);
+        assert!(profile(&args(&["--mode", "performance", "-c", "roll.engine_mode=efficient"])).is_err());
+        assert!(profile(&args(&["-c", "roll.engine_mode=fast"])).is_err());
+        let p = profile(&args(&["--memory-budget-mb", "128", "--cache-mb", "8", "--plan-cache-mb", "4", "--idle-close-secs", "7"])).unwrap();
+        assert_eq!((p.cache_bytes, p.plan_cache_bytes, p.idle_close), (8 << 20, 4 << 20, Duration::from_secs(7)));
     }
 }

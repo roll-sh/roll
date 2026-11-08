@@ -137,7 +137,7 @@ fn truthy(v: &Value) -> Option<bool> {
 }
 
 /// A pure built-in call of `def` with result type `ty`, as `eval` would make it.
-pub(super) fn pure_call(def: &crate::sql::func::FuncDef, ty: &DataType) -> Option<PureFn> {
+fn pure_call(def: &crate::sql::func::FuncDef, ty: &DataType) -> Option<PureFn> {
     if def.spread || def.coll.is_some() || matches!(ty, DataType::Void) {
         return None;
     }
