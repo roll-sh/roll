@@ -253,6 +253,76 @@ around the one statement; elapsed time through `docker run psql`, which adds abo
 well. The drop matches agent 175's profile, where about half of the DELETE's CPU was its
 source scan on three worker threads. The elapsed time went up on purpose (about 0.3 s): the
 scan now runs serially, as PostgreSQL plans it, and CPU fell by 27%.
+## Storage engine, round 1 (2026-11-08, agent 169)
+
+HANDOFF.md, "Storage engine, round 1", has what changed. **base** is origin at `a0328ac02`
+(what the batch was first rebased on); **new** is the batch on `6a1e90670`. Both are dist
+builds in containers on cores 24-27 (`run.sh ENGINE_DOCKER=1`, host network, `--cache-mb
+2048`), PostgreSQL 18.6 in its container on the same cores. The machine ran at load 12-42, so
+wall times and cgroup CPU move 10-20% from run to run; user instructions (`perf stat -e
+instructions:u` of the engine process from a privileged helper container) are what the
+comparisons below rest on. Engines alternated, each a fresh container on a copy of its own
+loaded data directory.
+
+### TPC-H SF1 (22 queries, a warm-up pass, then the measured one; all hashes equal)
+
+| | user instructions, 10^9 | engine VmHWM, MB | load: bytes written | load: copy / index s | data directory |
+|---|---:|---:|---:|---:|---:|
+| base | 305.7, 305.3, 307.7 | 1,854-1,868 | 13.4 GB | 38.5 / 31.3 | 680 MB |
+| new | 299.2, 299.2 | 1,863-1,880 | 10.3 GB | 42-51 / 32-36 | 668 MB |
+
+-2.3% instructions; the peak within the runs' spread. Wall times (sum of the 22): PostgreSQL
+12.8 s, base 30.1-30.6 s, new 30.3-30.8 s. **q20 takes 6-9 s on base and new against 0.5 s on
+`fe7b0023c`** (PostgreSQL 0.11 s): an origin regression, not this batch's (HANDOFF "Found").
+The load writes less because linked runs that no other source overlaps go straight to L1; its
+COPY steps take longer because the runs are compressed as they are written.
+
+### 200,000 inner index lookups (`bench nl`, 5 reps)
+
+| | user instructions, 10^9 (the 3 queries) | inner, s |
+|---|---:|---:|
+| PostgreSQL | | 0.275 |
+| base | 49.7, 49.7, 49.7 | 0.47-0.54 |
+| new | 50.9, 50.9 | 0.48-0.53 |
+
++2.4% instructions. The profile difference is mimalloc's generic allocation path (`mi_find_page`,
+`_mi_malloc_generic`: about 5% of new's instructions, none of base's) and `bind_scan`; agent
+149's kept cursors (`Scan::reseek`, on both) already keep a lookup in its block, so the point
+reader's held blocks add nothing here. `Store::first_with` isn't wired into the scan yet.
+Tried and dropped: a seek passing entries by their shared prefix (+2.6% with it).
+
+### The bulk workload (1M rows, 3 reps; all steps' median s)
+
+| | user instructions, 10^9 | cgroup CPU s | bytes written | peak MB |
+|---|---:|---:|---:|---:|
+| base | 268.9, 268.6 | 35.6, 35.6 | 2,077, 2,036 MB | 331, 346 |
+| new | 248.6, 248.9 | 33.9, 34.1 | 882, 880 MB | 347, 365 |
+
+-7.4% instructions, -57% bytes written. Per step (base / new, s): copy_in 1.11-1.13 / 1.18-1.22,
+create_index 0.76-0.79 / 0.86-0.90 (the runs compressed in the foreground), copy_out
+0.48-0.51 / 0.54-0.55, update_half 1.68-1.76 / 1.64-1.69, others within the spread. Without the
+L1 placement (the same binary with it switched off) the batch costs +5.5% instructions on this
+workload: compressing runs pays off only when compaction doesn't rewrite them.
+
+### pgbench (scale 10, 8 clients, prepared, 30 s; cgroup µs CPU per transaction)
+
+| | select-only | simple-update | tpcb-like |
+|---|---:|---:|---:|
+| PostgreSQL (an earlier, quieter pass) | 41.9 | 192.8 | 292.8 |
+| base | 58.4, 59.3 | 243.5, 232.6 | 502.2, 456.9 |
+| new | 58.2, 57.8 | 234.8, 243.7 | 468.0, 464.8 |
+
+Within the runs' spread.
+
+### Verification
+
+Crate tests release on the final tree, 500 passed (`crash_random` seeds 1-30); the same batch
+before its last three fixes (`a052675`): debug and release crate tests (the three failures were
+`first_with`'s own check, fixed since; `logical_apply`'s `aborted_subtransactions_stream` fails
+one debug run in two on a planner debug check, HANDOFF "Found"), difftest smoke, isolation
+138 / 139 specs and 1,805 / 1,806 permutations, full regress on a private reference
+51,148 / 51,150 with 0 units changed, pg_dump_tap 14,817 / 14,817; clippy with no warning in
+the files changed.
 
 ## Planner, round 10 (2026-11-07, agent 171)
 

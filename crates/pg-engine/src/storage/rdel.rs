@@ -59,17 +59,85 @@ pub fn is_marker(key: &[u8]) -> bool {
     key.len() > PREFIX.len() && key.starts_with(PREFIX)
 }
 
-/// The deletion that hides version `vts` of `uk` from a reader at `read_ts`, if any.
-pub fn covering<'a>(list: &'a [RangeDel], uk: &[u8], vts: u64, read_ts: u64) -> Option<&'a RangeDel> {
-    list.iter().find(|r| r.contains(uk) && r.hides(vts, read_ts))
+/// A store's committed range deletions (its view's), sorted by start, so a read finds the
+/// ones holding a key by a binary search instead of reading the whole list: every row
+/// fetch asks, and replication deletes a range per batch of confirmed records (agent 158),
+/// so the list can be long until compaction retires its markers. Reads as a slice.
+#[derive(Clone, Debug, Default)]
+pub struct RangeDels {
+    list: Vec<RangeDel>,
+    /// `reach[i]`: the largest `end` among `list[..=i]` (a search stops at the first entry
+    /// whose prefix ends at or before the key).
+    reach: Vec<Vec<u8>>,
 }
 
-/// The deletions of `list` that can hide something in [start, end) from a reader at `ts`.
-pub fn relevant(list: &[RangeDel], start: &[u8], end: &[u8], ts: u64) -> Vec<RangeDel> {
-    list.iter()
-        .filter(|r| (r.ts <= ts || r.ts == ALL) && r.overlaps(start, end))
-        .cloned()
-        .collect()
+impl RangeDels {
+    pub fn new(mut list: Vec<RangeDel>) -> RangeDels {
+        list.sort_by(|a, b| a.start.cmp(&b.start).then(a.ts.cmp(&b.ts)));
+        let mut reach: Vec<Vec<u8>> = Vec::with_capacity(list.len());
+        for r in &list {
+            let e = match reach.last() {
+                Some(m) if *m >= r.end => m.clone(),
+                _ => r.end.clone(),
+            };
+            reach.push(e);
+        }
+        RangeDels { list, reach }
+    }
+
+    /// These and `more`.
+    pub fn with(&self, more: impl Iterator<Item = RangeDel>) -> RangeDels {
+        RangeDels::new(self.list.iter().cloned().chain(more).collect())
+    }
+
+    /// Whether some deletion's range holds `uk`.
+    pub fn holds(&self, uk: &[u8]) -> bool {
+        self.holding(uk).next().is_some()
+    }
+
+    /// The deletions whose range holds `uk`, last first.
+    fn holding<'a>(&'a self, uk: &'a [u8]) -> impl Iterator<Item = &'a RangeDel> + 'a {
+        let n = self.list.partition_point(|r| r.start.as_slice() <= uk);
+        (0..n)
+            .rev()
+            .take_while(move |&i| self.reach[i].as_slice() > uk)
+            .map(move |i| &self.list[i])
+            .filter(move |r| r.contains(uk))
+    }
+
+    /// The newest deletion that hides version `vts` of `uk` from a reader at `read_ts`.
+    pub fn covering<'a>(&'a self, uk: &'a [u8], vts: u64, read_ts: u64) -> Option<&'a RangeDel> {
+        self.holding(uk).filter(|r| r.hides(vts, read_ts)).max_by_key(|r| r.ts)
+    }
+
+    /// The deletions that can hide something in [start, end) from a reader at `ts` (an
+    /// empty `end`: unbounded): of those starting before `end`, the ones reaching past
+    /// `start`.
+    pub fn relevant(&self, start: &[u8], end: &[u8], ts: u64) -> Vec<RangeDel> {
+        if self.list.is_empty() {
+            return Vec::new();
+        }
+        let n = match end.is_empty() {
+            true => self.list.len(),
+            false => self.list.partition_point(|r| r.start.as_slice() < end),
+        };
+        let mut out: Vec<RangeDel> = (0..n)
+            .rev()
+            .take_while(|&i| self.reach[i].as_slice() > start)
+            .map(|i| &self.list[i])
+            .filter(|r| (r.ts <= ts || r.ts == ALL) && r.overlaps(start, end))
+            .cloned()
+            .collect();
+        out.reverse();
+        out
+    }
+}
+
+impl std::ops::Deref for RangeDels {
+    type Target = [RangeDel];
+    fn deref(&self) -> &[RangeDel] {
+        &self.list
+    }
 }
 
 /// `list` after a commit at `ts` of writes including these markers (value Some(end): a
@@ -79,7 +147,7 @@ pub fn noted<'a>(
     list: &[RangeDel],
     markers: impl Iterator<Item = (&'a [u8], Option<&'a [u8]>)>,
     ts: u64,
-) -> Option<Vec<RangeDel>> {
+) -> Option<RangeDels> {
     let mut out: Option<Vec<RangeDel>> = None;
     for (k, v) in markers {
         if !is_marker(k) {
@@ -96,7 +164,7 @@ pub fn noted<'a>(
             None => l.retain(|r| r.start.as_slice() != start),
         }
     }
-    out
+    out.map(RangeDels::new)
 }
 
 /// Whether a file's user keys all lie in `r`'s range, every version older than its ts.
@@ -232,13 +300,14 @@ impl Store {
     }
 
     /// `f` written again without the entries `live` covers (none left: no file).
-    fn rewrite_without(&self, f: &Arc<SstReader>, live: &[RangeDel], horizon: u64) -> Result<Vec<Arc<SstReader>>> {
+    pub(super) fn rewrite_without(&self, f: &Arc<SstReader>, live: &[RangeDel], horizon: u64) -> Result<Vec<Arc<SstReader>>> {
+        let live = RangeDels::new(live.to_vec());
         let mut merge = Merge::new(vec![Cursor::level_uncached(vec![f.clone()])], Vec::new());
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let mut w = SstWriter::create(&self.dir, id, self.opts.compress)?;
         while let Some(i) = merge.min()? {
             let (k, v) = merge.sources[i].head().expect("a head entry");
-            if covering(live, user_key(k), key_ts(k), horizon).is_none()
+            if live.covering(user_key(k), key_ts(k), horizon).is_none()
                 && let Err(e) = w.add(k, v)
             {
                 w.abandon();
@@ -252,5 +321,49 @@ impl Store {
         }
         let meta = w.finish()?;
         Ok(vec![Arc::new(SstReader::open(&self.dir, meta, self.opts.cache.clone())?)])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The sorted list answers as a search over every deletion does.
+    #[test]
+    fn sorted_lookups_match_a_linear_search() {
+        let mut rng = 0x1234_5678_u64;
+        let mut next = |n: u64| {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            rng % n
+        };
+        for round in 0..200 {
+            let list: Vec<RangeDel> = (0..next(40))
+                .map(|_| {
+                    let a = next(100) as u8;
+                    let b = a + 1 + next(if round % 2 == 0 { 3 } else { 60 }) as u8;
+                    let ts = if next(10) == 0 { ALL } else { next(50) };
+                    RangeDel { start: vec![a], end: vec![b], ts }
+                })
+                .collect();
+            let sorted = RangeDels::new(list.clone());
+            let order = |a: &RangeDel, b: &RangeDel| (&a.start, a.ts, &a.end).cmp(&(&b.start, b.ts, &b.end));
+            for _ in 0..100 {
+                let k = [next(170) as u8];
+                let (vts, rts) = (next(50), next(60));
+                let want = list.iter().filter(|r| r.contains(&k) && r.hides(vts, rts)).map(|r| r.ts).max();
+                assert_eq!(sorted.covering(&k, vts, rts).map(|r| r.ts), want);
+                assert_eq!(sorted.holds(&k), list.iter().any(|r| r.contains(&k)));
+                let s = [next(170) as u8];
+                let e = if next(4) == 0 { vec![] } else { vec![next(170) as u8] };
+                let mut want: Vec<_> =
+                    list.iter().filter(|r| (r.ts <= rts || r.ts == ALL) && r.overlaps(&s, &e)).cloned().collect();
+                let mut got = sorted.relevant(&s, &e, rts);
+                want.sort_by(order);
+                got.sort_by(order);
+                assert_eq!(got, want);
+            }
+        }
     }
 }

@@ -4380,7 +4380,7 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
     (a model of every version through flushes, compactions, collection, retirement and
     crashes, pinned snapshots read at every step), `tests/txn_spill.rs` (TRUNCATE / DROP with
     savepoints and spills).
-  - **Linked runs** (format 2: `SstMeta::commit_ts`, read by `sst::relink` when a block is
+  - **Linked runs** (format 2: `SstMeta::commit_ts`, read by `Block::decode_linked` when a block is
     loaded and by the index at open; files without it read as before): a spilled run whose
     every write was fresh (`Txn::put_fresh`: a new row's key, a fresh row id, and its index
     entries; an index build's sorted runs; a DELETE's deferred entry deletes) becomes a file
@@ -4391,8 +4391,21 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
     (`Runs::segs`: a run's whole range spans every table between its first and last key, so
     pgbench -i's TRUNCATE and COPYs of three tables in one transaction linked nothing).
     Linked runs merge in tiers of 16, not 4.
-    `Store::close` compacts linked files away. COPY's 64 MB runs are linked; its last
-    buffer still goes into the commit's file.
+    Fresh sink runs use `StoreOptions::compress`; other temporary runs stay uncompressed.
+    A linked run can enter L1 directly when its key range overlaps no memtable, frozen
+    source, L0/L1 file or sibling run, its size fits the bottom-level target, and its
+    encoding meets the store's compression policy. Linked L1 commit timestamps, as well
+    as L0 timestamps, split WAL replay into ordered memtables. After normal pending L0
+    compaction and range collection, `Store::close` rewrites each remaining linked L1
+    file individually into an ordinary L1 file, preserving unrelated file identities
+    and clean-close compatibility with pre-linked builds without expanding hot compaction.
+    Clean-close compatibility assumes writers have drained; the pre-existing race with
+    a writer adding linked L0 after the compatibility pass is not redesigned here.
+    Bottom-level compaction can reclaim a tombstone and all older versions only past
+    the snapshot horizon; its timestamp remains available to conflict checks while a
+    snapshot can still need it. Tests `storage_linked_gc` cover overlapping L0/L1 and
+    direct-L1 snapshots, replay barriers, compression policy and crash/clean reopen.
+    COPY's 64 MB runs are linked; its last buffer still goes into the commit's file.
   - **ANALYZE of a table too big to model** doesn't measure it: its pages are the estimate kept
     as it grew (`sizing::heap_blocks`), its tuples the rows the sample's pass counts, and its
     indexes' tuples and pages follow (`Ddl::sampled_counts`; an index's pages grow with its
@@ -8982,6 +8995,96 @@ Left, for the planner:
 - Untouched: item 2 (every node's cost, so one-shot plans stop building EXPLAIN trees for
   Gathers and Incremental Sort keys), planning CPU over plans/apps.sql and the ORM queries,
   TPC-H q21 / q18, and the rest of round 10's list.
+## Storage engine, round 1 (agent 169)
+
+Agent 169 owns the store's internals (block format and cache, point lookups inside the store,
+memtable / SST / compaction CPU and write amplification, hot-row chains, and since agent 149
+finished, the scan side's storage cost). BENCH.md "Storage engine, round 1" has the numbers.
+
+- **Point reads** (`storage/point.rs`, new): every single-key read goes through `point::newest`
+  (memtables, frozen sources, L0 newest first, then L1); range deletions are applied after it
+  (`deleted_by_range`). `sst_get` / `ssts_get` are gone.
+  - A `PointReader` (`Store::point_reader(ts, bloom_last)`) keeps one view and, per file source,
+    the block it read last and the seek key that found it. A key at or past that seek key and
+    at or before the block's last key is read in that block, with no file search, bloom check,
+    block index search or block cache lookup. `Store::get_versions` (row fetches) reads its
+    keys through one. Slots are per source in `newest`'s order (every frozen source has one).
+  - `Store::get_with(r, key, resolve)`: one key through a reader, the hot ranges first.
+  - `Store::first_with(r, start, end, resolve)`: the first visible row in [start, end) without
+    a merging scan: the smallest user key any source holds there, then its visible version.
+    After four keys without one it answers `First::Unknown` (scan instead). A key that `start`
+    extends (its versions sort after `start`) is stepped over. This is the point-lookup API for
+    the scan side, not wired in yet: a unique equality range, through `Txn::store_reader(snap)`
+    (the transaction wrote nothing), with one reader kept for the statement and made again
+    when the snapshot's ts changes.
+- **Range deletions sorted** (`rdel::RangeDels`): the view's list is sorted by start with a
+  running maximum of ends, so `covering` and `relevant` are binary searches, not a pass over
+  every deletion (every row fetch and scan asks). It derefs to the slice. The free functions
+  `rdel::covering` / `relevant` are gone.
+- **Linked runs written once** (agent 148's proposal): a commit's linked run that no other
+  source holds keys of (no memtable, frozen file, L0 or L1 file, nor another of its runs), not
+  over twice `target_file_bytes`, and compressed when the store compresses, goes straight into
+  L1 (`Store::alone_at_bottom`, under `bg` taken with `try_lock`; when busy, L0 as before), so
+  compaction never rewrites it: a new index's entries, a table loaded right after TRUNCATE.
+  Fresh runs (`Runs::write_fresh`, `SstWriter::create_run`) follow `StoreOptions::compress`.
+  WAL replay splits memtables at linked L1 files' commit ts as at L0's. A clean close rewrites
+  each linked L1 file into an ordinary one (`rewrite_linked_l1_for_close`), so builds before
+  linked runs still read a cleanly closed store. `LINKED_TO_L1` counts them (tests).
+  - Cost: the runs are compressed as they are written, in the COPY or index build, so COPY's
+    wall time goes up (TPC-H's load copy +9%) while the load's CPU stays and its bytes written
+    drop (BENCH).
+  - A linked run's block is decoded in one pass (`Block::decode_linked`: versions set, the run's
+    value tags stripped), not relinked and then decoded.
+- **Cached blocks keep their keys before their values** (`Block::decode`, `BlockPos::vnext`,
+  `Block::rvals`): a seek walks the keys of one restart interval (a few cache lines) instead of
+  the rows between them. The file format is unchanged.
+  - Tried and dropped: passing entries that share more of the key before than the probe does
+    without a comparison (a byte loop from the shared prefix on). It took more instructions
+    than the memcmp it saved (nl +2.6%).
+- **No bloom filter for files of index entries alone** (`sst::index_entry`): their keys are
+  scanned, not looked up alone; an empty filter passes every key (builds before this one read it
+  the same way). Compaction outputs of an index's range build none.
+  - Tried and dropped: blocked bloom filters (a key's bits in one 64-byte line, a word-at-a-time
+    hash). They need a footer magic that builds before this one refuse, which breaks the
+    downgrade after a clean shutdown, and most point reads skip L1's filters anyway.
+- **Hot ranges** (`hot.rs`; agent 149's patch, finished here): chains are keyed by `Bytes`
+  shared with readers (a hot range's scan copies no key per row; `Scan::fill_batch` pushes its
+  rows straight from them), kept oldest first (a write appends instead of shifting the chain),
+  and the maps hash with foldhash.
+- Reviewed agent 158's `storage/discard.rs` (e4214aa4): no conflict. Flushes and compactions
+  filter ascending keys; a file wholly inside a discarded range goes unread; reads never look
+  (the owner never reads there). Linked runs can't fall in a discarded range.
+- Tests: `storage::rdel::tests::sorted_lookups_match_a_linear_search`,
+  `storage::tests::lone_linked_runs_go_to_l1`, `point_reads_over_every_source`, `check_at`'s
+  `first_with` over ranges of every shape, `sst::tests::linked_blocks_decode_as_relinked`,
+  `index_entry_files_have_no_bloom_filter`, `tests/storage_linked_gc.rs`,
+  `tests/storage_read_once.rs`.
+- Found, not storage:
+  - **q20 is 15x slower on origin since fe7b0023c** (0.5 s -> 6-9 s warm, PostgreSQL 0.11 s),
+    while its EXPLAIN ANALYZE in the same engine takes 0.4 s. Instrumented runs skip
+    `ScanNode::start_parallel_index`; plain runs reach its range-end probe (a forward scan and a
+    `TxnRevScan`, which expands a whole block) at every SubPlan run. pgbench select-only shows
+    the same probe (RevScan and `Block::expand` about 5% of its samples) where fe7b0023c has
+    none. The commits between touch `exec/scan.rs` (agent 149's batch 3) and the size models'
+    kept records; not bisected.
+  - `tests/logical_apply.rs` `aborted_subtransactions_stream` fails one debug run in two on the
+    planner's debug check that a scan's serial bound equals its full estimate
+    (`sql/explain.rs` "serial bound of"): two estimates of a table the apply worker is writing.
+- Left:
+  - Wire `first_with` into `ScanNode`'s unique equality lookups and keep a `PointReader` per
+    statement for row fetches; the unique check (`dml::committed_conflict`'s secondary index
+    path) can use it too.
+  - TPC-H's peak: the cache's decoded blocks are about PostgreSQL's heap and index bytes
+    (lineitem's rows 789 MB of values, 131 bytes a row). Getting under PostgreSQL needs a more
+    compact row encoding (char(n)'s padding, ints and dates as varints, one tag byte per value),
+    a stored format change for the row owners.
+  - Zone maps (per-block min / max of leading columns, for scans to skip blocks): bytes after the
+    index's entries, which older readers ignore, so no format break.
+  - Agent 175's findings: compaction of a fresh load overlapping the next query (the L1 placement
+    removes it for a table or index loaded alone), and `count(*)` after updates spending its time
+    in `Scan::position` (an updated row's two versions sit in two sources, so the merge goes a
+    row at a time). Agent 178's: `scan_row_rest`'s key `Arc` per UPDATE row, `Hot::scan`'s
+    collected rows, two copies per index entry in `next_indexed`.
 
 ## Starting prompt for the next agent
 
