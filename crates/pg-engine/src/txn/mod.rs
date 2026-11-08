@@ -4101,6 +4101,10 @@ type SpilledWrites = Box<dyn Iterator<Item = Result<(Vec<u8>, Option<Bytes>)>>>;
 /// Sort items by their keys (`key`), every key sharing its first `skip` bytes (one index's):
 /// by the 16 bytes after them first, with the items' places, then runs of equal ones by the
 /// whole key. (The keys aren't read while they differ there: a sort of plain numbers.)
+/// Keys that arrive in order (a table's rows by row id, the entries of an index whose keys
+/// follow them) are runs the stable sort merges in linear time; a few interleaved sequences
+/// of them (a DELETE's rows and their entries in each index, which differ in their first 8
+/// bytes) are first put each in one place, as they came (`by_prefix`).
 fn sort_by_key_after<T>(items: &mut Vec<T>, skip: usize, key: impl Fn(&T) -> &[u8]) {
     let word = |k: &[u8]| {
         let mut b = [0u8; 16];
@@ -4110,7 +4114,8 @@ fn sort_by_key_after<T>(items: &mut Vec<T>, skip: usize, key: impl Fn(&T) -> &[u
         u128::from_be_bytes(b)
     };
     let mut order: Vec<(u128, usize)> = items.iter().enumerate().map(|(i, e)| (word(key(e)), i)).collect();
-    order.sort_unstable_by_key(|o| o.0);
+    by_prefix(&mut order);
+    order.sort_by_key(|o| o.0);
     for run in order.chunk_by_mut(|a, b| a.0 == b.0) {
         if run.len() > 1 {
             run.sort_unstable_by(|a, b| key(&items[a.1]).cmp(key(&items[b.1])));
@@ -4118,6 +4123,50 @@ fn sort_by_key_after<T>(items: &mut Vec<T>, skip: usize, key: impl Fn(&T) -> &[u
     }
     let mut taken: Vec<Option<T>> = std::mem::take(items).into_iter().map(Some).collect();
     items.extend(order.into_iter().map(|(_, i)| taken[i].take().expect("each item once")));
+}
+
+/// Words grouped by their first 8 bytes, each group in its words' order, when there are
+/// at most 16 such prefixes (else left as they are).
+fn by_prefix(order: &mut Vec<(u128, usize)>) {
+    let mut prefixes: Vec<(u64, usize)> = Vec::new();
+    let mut last = None;
+    for o in order.iter() {
+        let p = (o.0 >> 64) as u64;
+        if last == Some(p) {
+            continue;
+        }
+        last = Some(p);
+        if !prefixes.iter().any(|e| e.0 == p) {
+            if prefixes.len() == 16 {
+                return;
+            }
+            prefixes.push((p, 0));
+        }
+    }
+    if prefixes.len() < 2 {
+        return;
+    }
+    for o in order.iter() {
+        let p = (o.0 >> 64) as u64;
+        if let Some(e) = prefixes.iter_mut().find(|e| e.0 == p) {
+            e.1 += 1;
+        }
+    }
+    // (Each group's start, then each word into its group's next place.)
+    let mut at = 0;
+    for e in prefixes.iter_mut() {
+        let n = e.1;
+        e.1 = at;
+        at += n;
+    }
+    let mut grouped = vec![(0u128, 0usize); order.len()];
+    for o in order.iter() {
+        let p = (o.0 >> 64) as u64;
+        let e = prefixes.iter_mut().find(|e| e.0 == p).expect("a prefix seen");
+        grouped[e.1] = *o;
+        e.1 += 1;
+    }
+    *order = grouped;
 }
 
 /// A spilled transaction's writes for its commit, in key order: each key's last, the
@@ -4404,6 +4453,23 @@ impl Iterator for TxnScan {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn sort_by_key_after_sorts_interleaved_sequences() {
+        // A DELETE's deferred keys: a table's rows, an index in their order and one in
+        // another, interleaved, each with an 8-byte prefix of its own.
+        let key = |p: u64, v: u64| [p.to_be_bytes(), v.to_be_bytes(), 7u64.to_be_bytes()].concat();
+        let mut keys: Vec<Vec<u8>> = Vec::new();
+        for i in 0..3000u64 {
+            keys.push(key(1, i));
+            keys.push(key(2, (i * 7919) % 1000));
+            keys.push(key(3, i / 3));
+        }
+        let mut want = keys.clone();
+        want.sort();
+        super::sort_by_key_after(&mut keys, 0, |k| k.as_slice());
+        assert_eq!(keys, want);
+    }
+
     #[test]
     fn sort_by_key_after_sorts_as_the_keys() {
         // Keys sharing a 3-byte prefix, then tails short, long, equal for 8 bytes, padded.
