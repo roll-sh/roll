@@ -399,6 +399,10 @@ fn custom_plans_choose_the_scan_again() {
     for level in ["READ COMMITTED", "REPEATABLE READ"] {
         let used = s.rechosen_custom_uses();
         s.query(&format!("BEGIN ISOLATION LEVEL {level}")).unwrap();
+        // Start a reusable entry in this environment after the invalidation cases.
+        s.close_statement("rr");
+        s.parse_message("rr", range, &[]).unwrap();
+        s.sync().unwrap();
         run(&mut s, &data, Some(40), Some(45)); // establish the transaction snapshot
         run(&mut s, &data, Some(9001), Some(9003)); // empty before the writer's insert
         writer.query("BEGIN; UPDATE t SET v = -4200 WHERE id = 42; DELETE FROM t WHERE id = 43; INSERT INTO t VALUES (9002, -9002)").unwrap();
