@@ -3104,16 +3104,10 @@ impl Txn {
             let xid = self.cur_xid();
             let proc = self.lock_proc();
             self.table_used = true;
+            // (As `lock` and `hold_unique_key` do: the transaction's own lock, which waiting for
+            // it waits on (held since `cur_xid`), and its subtransaction's.)
+            self.hold_holder_lock(holder, xid);
             if self.db.locks.hold_compact_unique_key(key, self.id, proc, holder, xid, row_key) {
-                // (As `lock` and `hold_unique_key` do: the transaction's own lock, which
-                // waiting for it waits on, and its subtransaction's.)
-                if !self.xact_locks.contains(&self.id) {
-                    self.db.locks.hold_xact_lock(self.id, self.id, proc, self.xid);
-                    self.xact_locks.push(self.id);
-                }
-                if !self.xact_locks.contains(&holder) {
-                    self.xact_locks.push(holder);
-                }
                 return Ok(true);
             }
         }
@@ -3275,6 +3269,16 @@ impl Txn {
         self.lock(&key, mode, policy, &|| format!("relation \"{}\"", name()))
     }
 
+    /// (Sub)transaction `holder`'s own lock (transaction id `xid`), which whoever finds one
+    /// of its row or compact locks waits for: held before the first of them is taken. (The
+    /// top-level transaction's is held from its transaction id on: `xid`.)
+    fn hold_holder_lock(&mut self, holder: u64, xid: u64) {
+        if !self.xact_locks.contains(&holder) {
+            self.db.locks.hold_xact_lock(holder, self.id, self.lock_proc(), xid);
+            self.xact_locks.push(holder);
+        }
+    }
+
     /// The lock id of the running (sub)transaction (whose transaction lock its row locks
     /// are waited for through).
     fn holder(&self) -> u64 {
@@ -3302,6 +3306,7 @@ impl Txn {
         let mut compacted = false;
         let compact = (self.row_locks.len() >= bulklocks::compact_after()).then_some(&mut compacted);
         self.table_used = true;
+        self.hold_holder_lock(holder, xid);
         let got = self.db.locks.lock_row(
             key,
             &tuple,
@@ -3316,9 +3321,6 @@ impl Txn {
             xact_ctx,
         )?;
         if got {
-            if !self.xact_locks.contains(&holder) {
-                self.xact_locks.push(holder);
-            }
             if !compacted {
                 self.row_locks.push((key.to_vec(), self.savepoints.len()));
             }
