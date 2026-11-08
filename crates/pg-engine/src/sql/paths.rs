@@ -11,7 +11,7 @@
 use crate::catalog::{Index, Table};
 use crate::exec::ExecCtx;
 use crate::sql::binder::optimize::{bpchar_pad, conjuncts, eq_probe_ok, probe_ok, pseudo_constant};
-use crate::sql::costs::{self, CPU_OPERATOR_COST, CPU_TUPLE_COST, Est, RelSize, VarRef};
+use crate::sql::costs::{self, CPU_OPERATOR_COST, CPU_TUPLE_COST, Est, PgMulAdd, RelSize, VarRef};
 use crate::sql::expr::Expr;
 use crate::sql::func::FuncDef;
 use crate::sql::plan::{
@@ -1731,7 +1731,7 @@ impl BPath {
     /// cost_bitmap_tree_node: (cost, selectivity).
     fn cost_sel(&self) -> (f64, f64) {
         match self {
-            BPath::Index(p) => ((0.1 * CPU_OPERATOR_COST).mul_add(p.rows, p.index_total), p.index_sel),
+            BPath::Index(p) => ((0.1 * CPU_OPERATOR_COST).pg_mul_add(p.rows, p.index_total), p.index_sel),
             BPath::And(_, c, s) | BPath::Or(_, c, s) => (*c, *s),
         }
     }
@@ -2291,12 +2291,12 @@ impl Planner<'_, '_> {
             num_pages * self.g.random_page_cost
         };
         let arg_cost = self.other_operands_cost(rel, quals);
-        // (The reference build fuses multiply-adds, as GCC does on aarch64.)
+        // (Fused as the reference build fuses them on its architecture: `PgMulAdd`.)
         let per_tuple =
-            CPU_OPERATOR_COST.mul_add((quals.len() + orderbys) as f64, CPU_INDEX_TUPLE_COST);
+            CPU_OPERATOR_COST.pg_mul_add((quals.len() + orderbys) as f64, CPU_INDEX_TUPLE_COST);
         let startup = arg_cost;
         total += arg_cost;
-        total = (tuples * num_sa_scans).mul_add(per_tuple, total);
+        total = (tuples * num_sa_scans).pg_mul_add(per_tuple, total);
         (
             AmCost {
                 startup,
@@ -2430,11 +2430,11 @@ impl Planner<'_, '_> {
         if ii.tuples > 1.0 {
             let d = (ii.tuples.ln() / 2f64.ln()).ceil() * CPU_OPERATOR_COST;
             c.startup += d;
-            c.total = num_sa_scans.mul_add(d, c.total);
+            c.total = num_sa_scans.pg_mul_add(d, c.total);
         }
         let d = (ii.height as f64 + 1.0) * PAGE_CPU_MULTIPLIER * CPU_OPERATOR_COST;
         c.startup += d;
-        c.total = num_sa_scans.mul_add(d, c.total);
+        c.total = num_sa_scans.pg_mul_add(d, c.total);
         c.correlation = correlation.unwrap_or_else(|| self.correlation(rel, ii));
         c
     }
@@ -2643,7 +2643,7 @@ impl Planner<'_, '_> {
             let pf = vis((am.sel * pages).ceil());
             let min_io = if pf > 0.0 {
                 if pf > 1.0 {
-                    (pf - 1.0).mul_add(spc, rpc)
+                    (pf - 1.0).pg_mul_add(spc, rpc)
                 } else {
                     rpc
                 }
@@ -2653,7 +2653,7 @@ impl Planner<'_, '_> {
             (max_io, min_io)
         };
         let csq = am.correlation * am.correlation;
-        run += csq.mul_add(min_io - max_io, max_io);
+        run += csq.pg_mul_add(min_io - max_io, max_io);
         // The quals the index doesn't enforce (nor its predicate).
         let qpquals: Vec<Expr> = rel
             .quals
@@ -2692,7 +2692,7 @@ impl Planner<'_, '_> {
         let (index_cost, sel) = b.cost_sel();
         let mut tuples = costs::clamp_rows(sel * rel.size.tuples);
         let t = if rel.size.pages > 1.0 { rel.size.pages } else { 1.0 };
-        let mut pages = (2.0 * t * tuples) / 2.0f64.mul_add(t, tuples);
+        let mut pages = (2.0 * t * tuples) / 2.0f64.pg_mul_add(t, tuples);
         let heap_pages = pages.min(rel.size.pages);
         // tbm_calculate_entries: 64 bytes per page entry.
         let maxentries = (self.g.work_mem * 1024.0 / 64.0).floor().max(16.0);
@@ -2720,7 +2720,7 @@ impl Planner<'_, '_> {
         let rpc = self.g.random_page_cost;
         let spc = self.g.seq_page_cost;
         let cost_per_page = if pages >= 2.0 {
-            (-(rpc - spc)).mul_add((pages / t).sqrt(), rpc)
+            (-(rpc - spc)).pg_mul_add((pages / t).sqrt(), rpc)
         } else {
             rpc
         };
@@ -2741,7 +2741,7 @@ impl Planner<'_, '_> {
             sel *= s;
             cost += c;
             if i > 0 {
-                cost = 100f64.mul_add(CPU_OPERATOR_COST, cost);
+                cost = 100f64.pg_mul_add(CPU_OPERATOR_COST, cost);
             }
         }
         BPath::And(paths, cost, sel)
@@ -2755,7 +2755,7 @@ impl Planner<'_, '_> {
             sel += s;
             cost += c;
             if i > 0 && !matches!(p, BPath::Index(_)) {
-                cost = 100f64.mul_add(CPU_OPERATOR_COST, cost);
+                cost = 100f64.pg_mul_add(CPU_OPERATOR_COST, cost);
             }
         }
         BPath::Or(paths, cost, sel.min(1.0))
@@ -3265,7 +3265,7 @@ impl Planner<'_, '_> {
                 let ops = s.ops.len() as f64 * CPU_OPERATOR_COST;
                 if hashed {
                     let est = crate::sql::explain::estimate_subquery(&s.plan, self.ctx);
-                    startup += CPU_OPERATOR_COST.mul_add(est.rows, est.total);
+                    startup += CPU_OPERATOR_COST.pg_mul_add(est.rows, est.total);
                     per_tuple += ops;
                 } else if correlated {
                     let est = crate::sql::explain::estimate_subquery(&s.plan, self.ctx);

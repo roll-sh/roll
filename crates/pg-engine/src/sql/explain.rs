@@ -11,6 +11,7 @@ pub use parallel::analyzed_plan;
 pub(crate) mod pwagg;
 
 use super::binder::ast::{const_str, inner, with_pos};
+use super::costs::PgMulAdd;
 use super::expr::{Expr, Subquery, SubqueryKind};
 use super::plan::{
     AggCall, ConflictAction, Frame, FrameBound, FrameExclude, FrameUnit, JoinKind, MergeCmd, Plan,
@@ -19360,7 +19361,7 @@ pub(crate) fn subplan_costs(exprs: &[Expr], ctx: &ExecCtx) -> (f64, f64) {
             let ops = s.ops.len() as f64 * costs::CPU_OPERATOR_COST;
             if hashed {
                 let est = estimate_subquery(&s.plan, ctx);
-                startup += costs::CPU_OPERATOR_COST.mul_add(est.rows, est.total);
+                startup += costs::CPU_OPERATOR_COST.pg_mul_add(est.rows, est.total);
                 per += ops;
             } else if correlated {
                 let est = estimate_subquery(&s.plan, ctx);

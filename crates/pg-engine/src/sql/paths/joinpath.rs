@@ -8,6 +8,7 @@
 use super::*;
 use crate::sql::joins::{self, In, InKind, JoinGucs, Jt, QualCost, Semi};
 use crate::sql::plan::{JoinMeta, JoinMethod};
+use crate::sql::costs::PgMulAdd;
 use std::rc::Rc;
 
 pub(super) mod foreign;
@@ -4142,17 +4143,17 @@ impl Search<'_, '_, '_> {
             (
                 input.disabled + (!self.pl.g.sort) as u32,
                 st,
-                CPU_OPERATOR_COST.mul_add(rows_in * n, tot),
+                CPU_OPERATOR_COST.pg_mul_add(rows_in * n, tot),
             )
         });
         // HashAggregate, when the table fits in hash_mem.
         let hash_mem = self.g.work_mem * self.g.hash_mem_multiplier * 1024.0;
         let hash = (can_hash && (width as f64 + 64.0) * groups <= hash_mem).then(|| {
-            let st = (CPU_OPERATOR_COST * n).mul_add(rows_in, input.total);
+            let st = (CPU_OPERATOR_COST * n).pg_mul_add(rows_in, input.total);
             (
                 input.disabled + (!self.pl.g.hashagg) as u32,
                 st,
-                CPU_TUPLE_COST.mul_add(groups, st),
+                CPU_TUPLE_COST.pg_mul_add(groups, st),
             )
         });
         let (hashed, (disabled, startup, total)) = match (sort, hash) {
