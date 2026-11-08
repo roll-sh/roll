@@ -48,6 +48,13 @@ struct Mock {
     reads: Mutex<Vec<String>>,
     rate_limited: std::sync::atomic::AtomicBool,
     teams_forbidden: std::sync::atomic::AtomicBool,
+    /// GitHub's REST API answers 503 to everything while set (an outage).
+    down: std::sync::atomic::AtomicBool,
+    /// GitHub's git endpoint fails fetches (upload-pack) while set.
+    fail_fetches: std::sync::atomic::AtomicBool,
+    /// The App's webhook delivery log (newest first), and the attempts roll asked for.
+    hook_log: Mutex<Vec<Value>>,
+    redeliveries: Mutex<Vec<u64>>,
 }
 
 type S = State<Arc<Mock>>;
@@ -233,6 +240,15 @@ async fn permission(State(m): S, Path((_o, _r, user)): Path<(String, String, Str
     }
 }
 
+async fn hook_log(State(m): S) -> Json<Value> {
+    Json(Value::Array(m.hook_log.lock().clone()))
+}
+
+async fn redeliver(State(m): S, Path(id): Path<u64>) -> StatusCode {
+    m.redeliveries.lock().push(id);
+    StatusCode::ACCEPTED
+}
+
 // ── what pickers list ──
 
 type ListQuery = axum::extract::Query<HashMap<String, String>>;
@@ -333,6 +349,12 @@ async fn list_environments(State(m): S, Path((o, r)): Path<(String, String)>, ax
 }
 
 async fn count_pushes(State(m): S, req: axum::extract::Request, next: axum::middleware::Next) -> Response {
+    if m.down.load(Ordering::SeqCst) && req.uri().path().starts_with("/api/") {
+        return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "message": "unicorn" }))).into_response();
+    }
+    if m.fail_fetches.load(Ordering::SeqCst) && req.uri().path().ends_with("/git-upload-pack") {
+        return (StatusCode::SERVICE_UNAVAILABLE, "unicorn\n").into_response();
+    }
     if req.uri().path().ends_with("/git-receive-pack") {
         if m.fail_pushes.load(Ordering::SeqCst) {
             return (StatusCode::SERVICE_UNAVAILABLE, "unicorn\n").into_response();
@@ -355,6 +377,8 @@ async fn github_mock() -> GitHub {
     gh.repo("acme", "app").await;
     let rest = Router::new()
         .route("/app/installations", get(installations))
+        .route("/app/hook/deliveries", get(hook_log))
+        .route("/app/hook/deliveries/{id}/attempts", post(redeliver))
         .route("/app/installations/{id}/access_tokens", post(token))
         .route("/installation/repositories", get(installation_repos))
         .route("/repos/{o}/{r}", get(repo))
@@ -2042,4 +2066,136 @@ async fn pickers_look_up_github_through_the_owners_repos() {
     assert_eq!((v["problem"]["code"].as_str(), v["items"].as_array().map(Vec::len)), (Some("reconnect"), Some(0)), "{v}");
 
     assert!(answers.lock().iter().all(|v| !v.contains("ghs_test")), "the installation token never leaves the server");
+}
+
+// ── either side down ──
+
+fn mirror_state(v: &Value) -> String {
+    v["github"]["mirror"]["state"].as_str().unwrap_or("").to_string()
+}
+
+/// GitHub is down when a PR's change lands: the close and the comment wait in the delivery queue
+/// (retried with backoff, nothing given up) and reach GitHub once, after it's back.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_landed_prs_close_reaches_github_after_an_outage() {
+    let g = github_mock().await;
+    let tmp = tempfile::tempdir().unwrap();
+    let w = seed(tmp.path(), &format!("{}/git/acme/app.git", g.base));
+    let (main_sha, feature_sha) = (rev(tmp.path(), &w, "main"), rev(tmp.path(), &w, "feature"));
+    g.mock.pulls.lock().insert(3, pr_json(&g.mock, 3, "feature", &feature_sha, &main_sha));
+    let a = common::app_with(|c| c.review_app_retry_ms = 50);
+    enable(&a, &g, quiet_mirror());
+    let a = &a;
+    let repo_id = connect(a).await;
+    until("PR import", || async { imported(a).await }).await;
+    let c3 = a.ok("GET", "/v1/code/repos/acme/app/changes", None).await[0]["id"].as_str().unwrap().to_string();
+
+    g.mock.down.store(true, Ordering::SeqCst);
+    a.ok("POST", &format!("/v1/code/changes/{c3}/land"), None).await;
+    let pending = || {
+        a.code
+            .db
+            .sql()
+            .query_row("SELECT state, attempts FROM review_deliveries WHERE app_id = ? AND event = 'github.pr_landed' ORDER BY rowid LIMIT 1", [format!("gh_{repo_id}")], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+            })
+            .unwrap()
+    };
+    until("a few failed attempts", || async { pending().1 >= 3 }).await;
+    assert_eq!(pending().0, "pending", "an outage never gives up");
+    let closes = || g.mock.calls.lock().iter().filter(|(m, p, _)| m == "PATCH" && p == "/repos/acme/app/pulls/3").count();
+    assert_eq!(closes(), 0);
+
+    g.mock.down.store(false, Ordering::SeqCst);
+    until("PR 3 closed", || async { closes() == 1 }).await;
+    until("delivered", || async { pending().0 == "delivered" }).await;
+    let calls = g.mock.calls.lock().clone();
+    assert_eq!(calls.iter().filter(|(_, p, _)| p == "/repos/acme/app/issues/3/comments").count(), 1, "{calls:?}");
+    assert_eq!(closes(), 1);
+}
+
+/// roll was down while GitHub moved. A push whose delivery failed is redelivered when roll asks
+/// GitHub's delivery log (not one roll recorded, nor one that got through). With nothing in the
+/// log, the reconcile finds the rest: a direct push to main that had stopped the mirror (merged in,
+/// and the mirror resumes) and a pull request opened meanwhile.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn what_github_did_while_roll_was_down_is_caught_up() {
+    let g = github_mock().await;
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path();
+    let w = seed(home, &format!("{}/git/acme/app.git", g.base));
+    let a = app(None);
+    enable(&a, &g, fast_mirror());
+    let a = &a;
+    let repo_id = connect(a).await;
+    let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+
+    // Redelivery: a push GitHub couldn't deliver.
+    let before = rev(home, &w, "main");
+    write(&w, "docs/missed.md", "missed\n");
+    git(home, &w, &["add", "-A"]);
+    git(home, &w, &["commit", "-qm", "pushed while roll was down"]);
+    git(home, &w, &["push", "-q", "origin", "main"]);
+    let after = rev(home, &w, "main");
+    let push = json!({
+        "ref": "refs/heads/main", "before": before, "after": after,
+        "repository": repo_json(&g.mock), "sender": { "login": "human", "id": 5 }, "installation": { "id": INSTALLATION },
+    });
+    let ping = json!({ "zen": "hi", "hook_id": 1 });
+    assert_eq!(hook(a, "ping", "seen-1", &ping, SECRET).await, StatusCode::OK);
+    *g.mock.hook_log.lock() = vec![
+        json!({ "id": 13, "guid": "lost-1", "delivered_at": now, "redelivery": false, "status_code": 502, "event": "push" }),
+        json!({ "id": 12, "guid": "seen-1", "delivered_at": now, "redelivery": false, "status_code": 0, "event": "ping" }),
+        json!({ "id": 11, "guid": "fine-1", "delivered_at": now, "redelivery": false, "status_code": 200, "event": "push" }),
+    ];
+    assert_eq!(a.code.github_catch_up_now().await.unwrap(), 1);
+    assert_eq!(*g.mock.redeliveries.lock(), [13]);
+    // Not asked twice while its attempt hasn't shown up.
+    assert_eq!(a.code.github_catch_up_now().await.unwrap(), 0);
+    // GitHub's redelivery.
+    assert_eq!(hook(a, "push", "lost-1", &push, SECRET).await, StatusCode::OK);
+    assert_eq!(a.ok("GET", "/v1/code/repos/acme/app", None).await["head_git"], after);
+    g.mock.hook_log.lock().insert(0, json!({ "id": 14, "guid": "lost-1", "delivered_at": now, "redelivery": true, "status_code": 200, "event": "push" }));
+    assert_eq!(a.code.github_catch_up_now().await.unwrap(), 0);
+    until("mirror ok", || async { mirror_state(&a.ok("GET", "/v1/code/repos/acme/app", None).await) == "ok" }).await;
+
+    // Reconcile. GitHub's main moves, and its push reaches roll while roll can't fetch from
+    // GitHub: the mirror stops (GitHub has commits roll never saw) and the delivery fails, and
+    // GitHub's log will have nothing roll can use.
+    g.mock.fail_fetches.store(true, Ordering::SeqCst);
+    write(&w, "docs/direct.md", "direct\n");
+    git(home, &w, &["add", "-A"]);
+    git(home, &w, &["commit", "-qm", "direct push to main"]);
+    git(home, &w, &["push", "-q", "origin", "main"]);
+    let github_main = rev(home, &w, "main");
+    let push = json!({
+        "ref": "refs/heads/main", "before": after, "after": github_main,
+        "repository": repo_json(&g.mock), "sender": { "login": "human", "id": 5 }, "installation": { "id": INSTALLATION },
+    });
+    assert_ne!(hook(a, "push", "failed-1", &push, SECRET).await, StatusCode::OK);
+    until("mirror stopped", || async { mirror_state(&a.ok("GET", "/v1/code/repos/acme/app", None).await) == "paused" }).await;
+    // roll lands meanwhile, and a pull request opens on GitHub with no delivery at all.
+    a.ok("POST", "/v1/code/repos/acme/app/land", Some(json!({ "message": "roll side", "files": { "roll.txt": { "content": "roll\n" } } }))).await;
+    let roll_head = a.ok("GET", "/v1/code/repos/acme/app", None).await["head_git"].as_str().unwrap().to_string();
+    git(home, &w, &["checkout", "-qb", "outage"]);
+    write(&w, "outage.txt", "outage\n");
+    git(home, &w, &["add", "-A"]);
+    git(home, &w, &["commit", "-qm", "work during the outage"]);
+    git(home, &w, &["push", "-q", "origin", "outage"]);
+    git(home, &w, &["checkout", "-q", "main"]);
+    g.mock.pulls.lock().insert(9, pr_json(&g.mock, 9, "outage", &rev(home, &w, "outage"), &github_main));
+    g.mock.fail_fetches.store(false, Ordering::SeqCst);
+
+    let done = a.code.github_reconcile_now(&repo_id).await.unwrap();
+    assert_eq!((done.branches, done.pulls), (2, 1), "{done:?}");
+    let head = a.ok("GET", "/v1/code/repos/acme/app", None).await["head_git"].as_str().unwrap().to_string();
+    let raw = a.code.store.git_object(&repo_id, &code_store::Oid(code_git::ObjectId::from_hex(head.as_bytes()).unwrap().0)).await.unwrap().unwrap().1;
+    let parents: Vec<String> = code_git::parse_commit(&raw).unwrap().parents.iter().map(|p| p.to_hex()).collect();
+    assert_eq!(parents, [roll_head, github_main], "GitHub's push merged into roll's mainline");
+    until("the mirror caught GitHub up", || async { g.gh.ok("GET", "/v1/code/repos/acme/app", None).await["head_git"] == head.as_str() }).await;
+    until("mirror ok again", || async { mirror_state(&a.ok("GET", "/v1/code/repos/acme/app", None).await) == "ok" }).await;
+    let changes = a.ok("GET", "/v1/code/repos/acme/app/changes", None).await;
+    assert!(changes.as_array().unwrap().iter().any(|c| c["github_pr"] == 9 && c["state"] == "open"), "{changes}");
+    // A second look finds nothing new.
+    assert_eq!(a.code.github_reconcile_now(&repo_id).await.unwrap(), Default::default());
 }

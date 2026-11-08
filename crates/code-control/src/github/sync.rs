@@ -465,6 +465,12 @@ async fn ingest_default(code: &Arc<Code>, hub: &Hub, r: &RepoRow, link: &Link, b
             .find(|b| {
                 code.store.is_ancestor(&r.id, b, &head).unwrap_or(false) && code.store.is_ancestor(&r.id, b, &remote).unwrap_or(false)
             });
+        // No push said where GitHub started from (a reconcile after an outage): the newest of
+        // GitHub's first parents that's on roll's mainline, within the commits GitHub got.
+        let base = match base {
+            Some(b) => Some(b),
+            None => first_parent_on(code, &r.id, &remote, &head)?,
+        };
         let Some(base) = base else {
             return blocked(code, r, "GitHub's history was rewritten; roll can't merge it automatically".into());
         };
@@ -509,6 +515,24 @@ async fn ingest_default(code: &Arc<Code>, hub: &Hub, r: &RepoRow, link: &Link, b
         }
     }
     blocked(code, r, "roll's main kept moving while merging GitHub's; will retry on the next push".into())
+}
+
+/// How far back [`first_parent_on`] walks GitHub's history.
+const BASE_WALK: usize = 10_000;
+
+/// The first of `remote`'s first-parent ancestors that's an ancestor of `head` (at most
+/// [`BASE_WALK`] steps).
+fn first_parent_on(code: &Code, repo: &str, remote: &ChangesetId, head: &ChangesetId) -> Result<Option<ChangesetId>> {
+    let mut at = *remote;
+    for _ in 0..BASE_WALK {
+        let Some(meta) = code.store.meta(repo, &at)? else { return Ok(None) };
+        let Some(parent) = meta.cs.parents.first().copied() else { return Ok(None) };
+        if code.store.is_ancestor(repo, &parent, head)? {
+            return Ok(Some(parent));
+        }
+        at = parent;
+    }
+    Ok(None)
 }
 
 async fn land(code: &Code, r: &RepoRow, cs: ChangesetId) -> Result<()> {

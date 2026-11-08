@@ -23,6 +23,7 @@ mod reconcile;
 mod reviews;
 pub(crate) mod sync;
 
+pub use reconcile::Reconciled;
 pub use sync::webhook;
 
 use crate::model::RepoRow;
