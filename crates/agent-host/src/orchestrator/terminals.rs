@@ -107,13 +107,17 @@ impl Host {
         let host = self.me.clone();
         let out_id = id.clone();
         let out_owner = owner.clone();
+        let out_project = in_project.clone();
         let pump = tokio::spawn(async move {
             while let Some(chunk) = output.recv().await {
                 ring.lock().unwrap().push(&chunk);
                 let Some(host) = host.upgrade() else { return };
                 host.delta(Delta::Terminal { terminal: out_id.clone(), data: B64.encode(&chunk) });
-                if let Some(thread) = &out_owner {
-                    host.touch_diff(thread);
+                // A project's own terminal works in its checkout: the threads working there count it.
+                match (&out_owner, &out_project) {
+                    (Some(thread), _) => host.touch_diff(thread),
+                    (None, Some(project)) => host.touch_in_place(project),
+                    (None, None) => {}
                 }
             }
         });
@@ -127,8 +131,10 @@ impl Host {
             let _ = tokio::time::timeout(Duration::from_secs(1), pump).await;
             let Some(host) = host.upgrade() else { return };
             host.terminals.lock().unwrap().remove(&exit_id);
-            if let Some(thread) = &owner {
-                host.touch_diff(thread);
+            match (&owner, &in_project) {
+                (Some(thread), _) => host.touch_diff(thread),
+                (None, Some(project)) => host.touch_in_place(project),
+                (None, None) => {}
             }
             // What was done in it (`git remote add`, a commit, a checkout) shows on the project.
             if let Some(project) = &in_project {

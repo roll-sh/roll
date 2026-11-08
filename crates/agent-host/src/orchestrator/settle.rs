@@ -145,6 +145,10 @@ impl Host {
         let mut rt = self.lock(id).await?;
         rt.thread.inbox.visited_at = Some(now());
         self.put(vec![Entity::Thread(rt.thread.clone())])?;
+        drop(rt);
+        // Its files may have changed outside roll (an editor, another terminal): counted again as
+        // it's opened, once, quietly (one thread: what changed since its base).
+        self.touch_diff(id);
         Ok(Reply::Ok)
     }
 

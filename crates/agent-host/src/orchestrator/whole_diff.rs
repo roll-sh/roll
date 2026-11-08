@@ -6,8 +6,11 @@
 //! went back to (both tree to tree). Between runs a terminal or `fs.write` can change files, so
 //! they [`Host::touch_diff`]: the thread is counted again once it has been quiet for [`QUIET`]
 //! (never later than [`LATEST`] after the first change), from the working tree through a private
-//! index like a checkpoint's, never the user's. A whole-thread `diff.get` stores what it counted
-//! too, and threads a daemon before this one never counted are counted once after it starts.
+//! index like a checkpoint's, never the user's. A project's own terminal (no thread) touches the
+//! project ([`Host::touch_in_place`]): its threads working in the checkout itself are counted
+//! against one tree of it. Opening a conversation (`thread.visit`) counts the thread again too,
+//! for edits made outside roll. A whole-thread `diff.get` stores what it counted too, and threads
+//! a daemon before this one never counted are counted once after it starts.
 
 use super::{Host, Rt};
 use crate::git;
@@ -23,9 +26,16 @@ const QUIET: Duration = Duration::from_millis(800);
 /// The longest a refresh waits while the files keep changing (a long build in a terminal).
 const LATEST: Duration = Duration::from_secs(10);
 
-/// Threads waiting to be counted again: when the first and the newest change came.
+/// What waits to be counted again: a thread, or a project's threads working in its checkout.
+#[derive(Clone, PartialEq, Eq, Hash)]
+enum Touched {
+    Thread(ThreadId),
+    InPlace(ProjectId),
+}
+
+/// What waits to be counted again: when the first and the newest change came.
 #[derive(Default)]
-pub(crate) struct Pending(std::sync::Mutex<HashMap<ThreadId, (Instant, Instant)>>);
+pub(crate) struct Pending(std::sync::Mutex<HashMap<Touched, (Instant, Instant)>>);
 
 impl Host {
     /// The commit a thread's whole diff starts from: its base checkpoint, else (no run yet) the
@@ -54,16 +64,26 @@ impl Host {
 
     /// The thread's files may have changed outside a run: count them again once it goes quiet.
     pub(crate) fn touch_diff(&self, thread: &ThreadId) {
+        self.touch(Touched::Thread(thread.clone()));
+    }
+
+    /// The project's checkout may have changed (its own terminal): count the threads working in
+    /// it again once it goes quiet. Threads with a worktree of their own aren't touched.
+    pub(crate) fn touch_in_place(&self, project: &ProjectId) {
+        self.touch(Touched::InPlace(project.clone()));
+    }
+
+    fn touch(&self, what: Touched) {
         let at = Instant::now();
         {
             let mut pending = self.whole_diff.0.lock().unwrap();
-            if let Some((_, last)) = pending.get_mut(thread) {
+            if let Some((_, last)) = pending.get_mut(&what) {
                 *last = at;
                 return;
             }
-            pending.insert(thread.clone(), (at, at));
+            pending.insert(what.clone(), (at, at));
         }
-        let (me, id) = (self.me.clone(), thread.clone());
+        let (me, id) = (self.me.clone(), what);
         tokio::spawn(async move {
             loop {
                 let due = {
@@ -84,9 +104,49 @@ impl Host {
                 }
             }
             if let Some(host) = me.upgrade() {
-                host.refresh_diff(&id).await;
+                match &id {
+                    Touched::Thread(thread) => host.refresh_diff(thread).await,
+                    Touched::InPlace(project) => host.refresh_in_place(project).await,
+                }
             }
         });
+    }
+
+    /// Counts every unarchived thread of `project` that works in its checkout against one tree of
+    /// it: one pass over the checkout, then each thread's stat from its base (what changed).
+    async fn refresh_in_place(&self, project: &ProjectId) {
+        let Ok(p) = self.project(project) else { return };
+        let threads: Vec<ThreadId> = match self.store.list(EntityKind::Thread) {
+            Ok(all) => all
+                .into_iter()
+                .filter_map(|e| match e {
+                    Entity::Thread(t) if t.project == *project && t.archived_at.is_none() && Path::new(&t.cwd) == Path::new(&p.path) => Some(t.id),
+                    _ => None,
+                })
+                .collect(),
+            Err(e) => return tracing::warn!("listing the threads of {project}: {e:#}"),
+        };
+        if threads.is_empty() {
+            return;
+        }
+        let tree = match git::working_tree(Path::new(&p.path)).await {
+            Ok(tree) => tree,
+            Err(e) => return tracing::debug!("reading the checkout of {project}: {e:#}"),
+        };
+        for id in threads {
+            let quiet = matches!(self.lock(&id).await, Ok(rt) if rt.git && rt.active.is_none());
+            if !quiet {
+                continue;
+            }
+            match self.diff_base(&id, Path::new(&p.path)).await {
+                Ok(Some(base)) => match git::stat(Path::new(&p.path), &base, &tree).await {
+                    Ok(stat) => self.keep_diff(&id, stat).await,
+                    Err(e) => tracing::debug!("counting the changes of {id}: {e:#}"),
+                },
+                Ok(None) => {}
+                Err(e) => tracing::debug!("counting the changes of {id}: {e:#}"),
+            }
+        }
     }
 
     /// Counts the thread's working tree against its base and stores the record if the numbers

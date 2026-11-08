@@ -144,6 +144,18 @@ async fn thread_terminals_run_in_the_thread_and_go_with_it() {
     read_until(&mut rx, &id, &mut seen, "written").await;
     let t = w.wait_thread(&thread, |t| t.diff.is_some()).await;
     assert_eq!(t.diff, Some(DiffStat { files: 1, additions: 2, deletions: 0 }));
+    // A project's own terminal (no thread) works in its checkout: a thread working there in place
+    // counts what it made; the thread in its own worktree doesn't.
+    let in_place = w.thread("codex", None, false).await;
+    let Reply::Created { id: project_terminal } = w
+        .run(Command::TerminalOpen { project: Some(w.project.clone()), thread: None, command: Some("printf 'a\\nb\\nc\\n' > notes.txt".into()), script: None, cols: 80, rows: 24 })
+        .await
+    else {
+        panic!()
+    };
+    let t = w.wait_thread(&in_place, |t| t.diff.is_some_and(|d| d.files > 0)).await;
+    assert_eq!(t.diff, Some(DiffStat { files: 1, additions: 3, deletions: 0 }), "{project_terminal}");
+    assert_eq!(w.state().await.thread(&thread).unwrap().diff, Some(DiffStat { files: 1, additions: 2, deletions: 0 }));
     assert_eq!(w.run(Command::ThreadDelete { thread: thread.clone() }).await, Reply::Ok);
     assert!(terminal(&w.state().await, &id).is_none());
     let unknown = w.run(Command::TerminalScrollback { terminal: TerminalId("trm_nope".into()) }).await;
