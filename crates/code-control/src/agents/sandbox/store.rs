@@ -277,10 +277,12 @@ pub fn observe(db: &code_sql::Db, id: &str, o: &Observed<'_>, now: i64) -> code_
         }
         let metered_at = (status == SandboxStatus::Running).then_some(now.max(s.metered_at.unwrap_or(0)));
         let changed = status != s.status || o.error != s.error.as_deref();
+        // Coming up is activity: its idle window starts once it runs, however long it took.
+        let active = if status == SandboxStatus::Running && s.status != SandboxStatus::Running { Some(now.max(s.last_active_at.unwrap_or(0))) } else { s.last_active_at };
         c.execute(
             "UPDATE agent_sandboxes SET status = ?, error = ?, metered_at = ?, updated_at = ?, backend_id = COALESCE(?, backend_id), \
-             sealed = CASE WHEN ? THEN NULL ELSE sealed END WHERE id = ?",
-            params![status_str(status), o.error, metered_at, if changed { now } else { s.updated_at }, o.backend_id, o.unseal, id],
+             sealed = CASE WHEN ? THEN NULL ELSE sealed END, last_active_at = ? WHERE id = ?",
+            params![status_str(status), o.error, metered_at, if changed { now } else { s.updated_at }, o.backend_id, o.unseal, active, id],
         )?;
         let s = get(c, id)?.expect("still there");
         let m = if changed { sync_machine(c, &s)? } else { None };

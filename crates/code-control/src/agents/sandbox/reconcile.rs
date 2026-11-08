@@ -233,8 +233,9 @@ impl Code {
             Ok(state) => observed(&s, state),
             Err(e) => return self.note(&s, s.status, Some(e.to_string()), None, false).await,
         };
-        // A running sandbox whose machine has been idle for a window goes to sleep.
-        if s.desired == Desired::Running && status == SandboxStatus::Running && self.goes_to_sleep(&s).await {
+        // A running sandbox whose machine has been idle for a window goes to sleep (not in the
+        // look that finds it just come up: its window starts then).
+        if s.desired == Desired::Running && s.status == SandboxStatus::Running && status == SandboxStatus::Running && self.goes_to_sleep(&s).await {
             s.desired = Desired::Asleep;
         }
         // Make it what the owner asked for: an always-on sandbox that stopped (a crash, a host

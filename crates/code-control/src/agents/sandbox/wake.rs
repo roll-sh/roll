@@ -6,9 +6,9 @@
 //!   thread only waiting on its user isn't: it was asked to wait). Activity the relay sees go by
 //!   (a command for it, as it goes out and as its reply comes; terminal output) is noted in
 //!   memory ([`Agents::touch`]) and folded into the durable `last_active_at` at each look; a
-//!   wake sets it too, and so does the look that finds it just come up, so the window starts once
-//!   it's up however long it took to start (a wake's command still waits for its daemon then).
-//!   Once nothing happened for
+//!   wake sets it too, and so does coming up (its status becoming `running`), so the window starts
+//!   once it's up however long it took to start (a wake's command still waits for its daemon
+//!   then). Once nothing happened for
 //!   `idle_stop`, the sandbox's desired state becomes `asleep` and the reconciler stops it, which
 //!   ends its metering. A reconciler that just started on this node (a restart, a lease move)
 //!   doesn't know what the last one saw since the last durable write, so nothing sleeps sooner
@@ -48,10 +48,8 @@ impl Code {
         let Some(since) = self.sandboxes.reconcilers.lock().get(&s.owner_id).map(|r| r.since) else { return false };
         let db = self.db.sql();
         let now = code_sql::now_ms();
-        // It just came up (it wasn't running as of the last look): active now. Offline, the
-        // mirror's statuses are the daemon's last word, not work going on.
-        let came_up = s.status != SandboxStatus::Running;
-        let busy = came_up || (self.agents.online(&s.machine_id) && mirror::machine_busy(db, &s.machine_id).unwrap_or(true));
+        // Offline, the mirror's statuses are the daemon's last word, not work going on.
+        let busy = self.agents.online(&s.machine_id) && mirror::machine_busy(db, &s.machine_id).unwrap_or(true);
         let durable = s.last_active_at.unwrap_or(s.created_at);
         let last = if busy { now } else { durable.max(self.agents.touched(&s.machine_id).unwrap_or(0)) };
         if last > durable
