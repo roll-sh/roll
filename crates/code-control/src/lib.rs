@@ -45,9 +45,12 @@ use tokio::sync::broadcast;
 pub struct Config {
     /// State directory: `<home>/code/control.db` and code-store's `<home>/code/code.db`.
     pub home: PathBuf,
-    /// Admin token (`ROLL_CODE_TOKEN`). Without one the API is open, like the rest of the
-    /// local daemon: every caller is an admin.
+    /// Admin token (`ROLL_CODE_TOKEN`). Without one (and without `operator_token`) the API is
+    /// open, like the rest of the local daemon: every caller is an admin.
     pub admin_token: Option<String>,
+    /// The operator's token (`ROLL_ADMIN_TOKEN`), an admin like `admin_token`, which keeps
+    /// working next to it.
+    pub operator_token: Option<roll_auth::AdminToken>,
     /// Where this API is reachable from outside (README image links).
     pub api_url: String,
     /// Base of clone URLs: `{git_url}/{owner}/{repo}.git`.
@@ -152,10 +155,16 @@ impl std::fmt::Debug for DatabaseConfig {
 }
 
 impl Config {
+    /// Whether callers need a token (an admin or operator token is set).
+    pub fn locked(&self) -> bool {
+        self.admin_token.is_some() || self.operator_token.is_some()
+    }
+
     pub fn local(home: PathBuf) -> Config {
         Config {
             home,
             admin_token: None,
+            operator_token: None,
             api_url: "http://127.0.0.1:7070".into(),
             git_url: "http://127.0.0.1:7070/git".into(),
             web_url: "http://localhost:3000".into(),
@@ -625,9 +634,11 @@ impl Code {
         {
             return Ok(app);
         }
-        let Some(admin) = &self.config.admin_token else { return Ok(Caller::Admin) };
+        if !self.config.locked() {
+            return Ok(Caller::Admin);
+        }
         let Some(token) = token else { return Ok(Caller::Anonymous) };
-        if constant_eq(token.as_bytes(), admin.as_bytes()) {
+        if self.config.admin_token.as_ref().is_some_and(|admin| constant_eq(token.as_bytes(), admin.as_bytes())) || self.config.operator_token.as_ref().is_some_and(|op| op.matches(token)) {
             return Ok(Caller::Admin);
         }
         if token.starts_with("rlc_")

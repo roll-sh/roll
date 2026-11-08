@@ -320,7 +320,6 @@ thing but not do it, 404 one who can't see it (docs/code/http-api.md).
 | work: create, priority and label validation, claim (priority order, labels, 204), lease expiry, heartbeat (keeps the lease length), release, complete, patch, someone else's lease (409) | `api.rs::changes_and_work`, `contract.rs::lookups_by_number_and_id`, `contract.rs::errors_are_json_with_the_right_status` |
 | SSE: `landed`, `change`, `work`, `check`, `preview` shapes, per-repo isolation, private feeds | `webhooks.rs::every_event_is_the_same_on_the_stream_and_in_webhooks`, `routes.rs::every_repo_route_follows_the_auth_matrix` |
 | errors: JSON `{error}` with the right status for bad JSON, unknown revs, bad paths, bad enums and every 404 | `contract.rs::errors_are_json_with_the_right_status` |
-| CORS: preflight with `Authorization`, `x-roll-changeset` exposed | `contract.rs::cors_for_the_browser` |
 | GitHub endpoints without an App: info, installations, setup redirect, webhook 404, connect refused | `contract.rs::open_mode_makes_everyone_admin`, `contract.rs::auth_matrix`, `routes.rs::bad_tokens_are_401_on_every_route` |
 | restart: owners, repos, redirects, changes, checks, work items, the number counter | `contract.rs::state_survives_a_restart` |
 | blame: per-line commits equal `git blame --first-parent` of a pushed history with a merge; author/time/message per range; cached; a revision is echoed; 404 file and revision | `webhooks.rs::blame_matches_git` |

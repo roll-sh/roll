@@ -15,6 +15,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 /// `mi_option_purge_delay` (libmimalloc-sys doesn't export the constant).
 const MI_OPTION_PURGE_DELAY: libmimalloc_sys::mi_option_t = 15;
 
+mod auth;
 mod code;
 mod nosql;
 mod queues;
@@ -96,7 +97,7 @@ struct Args {
     kafka_tls_cert: Option<PathBuf>,
     #[arg(long, env = "ROLL_KAFKA_TLS_KEY", requires = "kafka_tls_cert")]
     kafka_tls_key: Option<PathBuf>,
-    /// Require an API key on the HTTP stream data plane.
+    /// Require an API key on the HTTP stream data plane (always on with ROLL_ADMIN_TOKEN).
     #[arg(long, env = "ROLL_STREAM_REQUIRE_AUTH")]
     stream_require_auth: bool,
     /// Local disk target for stream data across open partitions, in MiB (0 = only per-topic
@@ -288,6 +289,7 @@ async fn run() -> anyhow::Result<()> {
         )
         .init();
     let args = Args::parse();
+    let auth = auth::Auth::new(&args)?;
     let home = std::path::absolute(&args.home)?;
     let home_abs = home.clone();
     let storage_opts = StorageOpts::from(&args);
@@ -303,10 +305,10 @@ async fn run() -> anyhow::Result<()> {
 
     if args.code_only {
         anyhow::ensure!(!args.queues_only, "--code-only and --queues-only can't both be set");
-        let node = start_code(&args, &home, &storage, None).await?;
+        let node = start_code(&args, &auth, &home, &storage, None).await?;
         let listener = tokio::net::TcpListener::bind(args.api).await?;
         info!(addr = %args.api, "roll code API listening");
-        let router = node.router(code_control::api::router(node.code.clone()));
+        let router = node.router(auth.wrap(code_control::api::router(node.code.clone())));
         let (close, closed) = tokio::sync::oneshot::channel::<()>();
         let api = axum::serve(listener, router.into_make_service_with_connect_info::<std::net::SocketAddr>())
             .with_graceful_shutdown(async move {
@@ -328,7 +330,7 @@ async fn run() -> anyhow::Result<()> {
         let listener = tokio::net::TcpListener::bind(args.api).await?;
         info!(addr = %args.api, "nosql control API listening");
         tokio::select! {
-            r = axum::serve(listener, n.router()) => r?,
+            r = axum::serve(listener, auth.wrap(n.router())) => r?,
             r = n.serve() => r?,
             _ = shutdown_signal() => info!("shutting down"),
         }
@@ -342,7 +344,7 @@ async fn run() -> anyhow::Result<()> {
         let listener = tokio::net::TcpListener::bind(args.api).await?;
         info!(addr = %args.api, "queues control API listening");
         tokio::select! {
-            r = axum::serve(listener, q.router()) => r?,
+            r = axum::serve(listener, auth.wrap(q.router())) => r?,
             r = q.serve() => r?,
             _ = shutdown_signal() => info!("shutting down"),
         }
@@ -352,7 +354,7 @@ async fn run() -> anyhow::Result<()> {
 
     let tasks_store = std::sync::Arc::new(tasks::store::sqlite::SqliteStore::open(&home.join("tasks.db"), 4)?);
     let tasks = tasks::Tasks::new(
-        tasks::Config { token: args.tasks_token.clone().filter(|t| !t.is_empty()), ..tasks::Config::default() },
+        tasks::Config { token: args.tasks_token.clone().filter(|t| !t.is_empty()), require_auth: auth.enforcing(), ..tasks::Config::default() },
         tasks_store,
     )
     .await?;
@@ -365,7 +367,7 @@ async fn run() -> anyhow::Result<()> {
     stream_config.default_stream = Some(args.default_stream.clone()).filter(|s| !s.is_empty());
     stream_config.tls = args.kafka_tls_cert.clone().zip(args.kafka_tls_key.clone()).map(|(cert, key)| TlsFiles { cert, key });
     stream_config.http_url = format!("http://{}:{}", args.public_host, args.api.port());
-    stream_config.http_require_auth = args.stream_require_auth;
+    stream_config.http_require_auth = args.stream_require_auth || auth.enforcing();
     stream_config.local_disk_bytes = args.stream_disk_mb << 20;
     stream_config.evict_on_unload = !args.stream_keep_local;
 
@@ -430,7 +432,7 @@ async fn run() -> anyhow::Result<()> {
 
     // roll code: same object storage; previews branch roll Postgres and Redis.
     let data: std::sync::Arc<dyn code_preview::DataBranches> = std::sync::Arc::new(code_preview::RollData { postgres: control.clone(), redis: redis.clone() });
-    let node = start_code(&args, &home, &storage, Some(data)).await?;
+    let node = start_code(&args, &auth, &home, &storage, Some(data)).await?;
 
     let listener = tokio::net::TcpListener::bind(args.api).await?;
     info!(addr = %args.api, "control API listening");
@@ -463,7 +465,7 @@ async fn run() -> anyhow::Result<()> {
             None => std::future::pending().await,
         }
     };
-    let router = node.router(router);
+    let router = node.router(auth.wrap(router));
     let queues_serve = async {
         match &queues {
             Some(q) => q.serve().await,
@@ -638,6 +640,7 @@ impl From<&Args> for StorageOpts {
 /// checks and previews (`data`: what previews branch; none on a roll code-only node).
 async fn start_code(
     args: &Args,
+    auth: &auth::Auth,
     home: &std::path::Path,
     storage: &StorageConfig,
     data: Option<std::sync::Arc<dyn code_preview::DataBranches>>,
@@ -647,6 +650,7 @@ async fn start_code(
     let code_public = args.code_public_url.clone().unwrap_or_else(|| format!("http://{}:{}", args.public_host, args.api.port()));
     let mut code_config = code_control::Config {
         admin_token: args.code_token.clone().filter(|t| !t.is_empty()),
+        operator_token: auth.token(),
         git_url: args.code_git_url.clone().unwrap_or_else(|| format!("{}/git", code_public.trim_end_matches('/'))),
         api_url: code_public,
         web_url: args.web_url.clone(),

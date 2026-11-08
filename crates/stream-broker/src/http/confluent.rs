@@ -4,11 +4,11 @@
 
 use super::data::{Acks, Incoming, produce_records};
 use super::time::{format_ms, parse_ms};
-use super::{Api, ApiError, ApiResult, S, data_stream};
+use super::{Api, ApiError, ApiResult, Caller, S, data_stream};
 use crate::broker::{Stream, Topic};
 use axum::Router;
 use axum::extract::{Path, State};
-use axum::http::{HeaderMap, StatusCode, header};
+use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use base64::Engine;
@@ -61,7 +61,7 @@ fn base(api: &Api) -> String {
 }
 
 /// The stream behind a cluster id (its Kafka cluster id, stream id or name).
-fn cluster_stream(api: &Api, headers: &HeaderMap, c: &str) -> ApiResult<Arc<Stream>> {
+fn cluster_stream(api: &Api, headers: &Caller, c: &str) -> ApiResult<Arc<Stream>> {
     let s = api
         .b
         .streams()
@@ -111,30 +111,31 @@ fn list(kind: &str, url: String, data: Vec<Value>) -> axum::Json<Value> {
     axum::Json(json!({ "kind": kind, "metadata": { "self": url, "next": null }, "data": data }))
 }
 
-async fn clusters(State(api): S, headers: HeaderMap) -> V3<axum::Json<Value>> {
+async fn clusters(State(api): S, headers: Caller) -> V3<axum::Json<Value>> {
     let cred = super::principal(&api, &headers)?;
+    let anyone = headers.operator || !api.b.config.http_require_auth;
     let streams: Vec<Value> = api
         .b
         .streams()
         .iter()
         .filter(|s| match &cred {
             Some(c) => c.stream_id == s.id,
-            None => !api.b.config.http_require_auth,
+            None => anyone,
         })
         .map(|s| cluster_view(&api, s))
         .collect();
-    if cred.is_none() && api.b.config.http_require_auth {
+    if cred.is_none() && !anyone {
         return Err(ApiError::new(StatusCode::UNAUTHORIZED, "unauthorized", "an API key is required").into());
     }
     Ok(list("KafkaClusterList", format!("{}/clusters", base(&api)), streams))
 }
 
-async fn cluster(State(api): S, Path(c): Path<String>, headers: HeaderMap) -> V3<axum::Json<Value>> {
+async fn cluster(State(api): S, Path(c): Path<String>, headers: Caller) -> V3<axum::Json<Value>> {
     let s = cluster_stream(&api, &headers, &c)?;
     Ok(axum::Json(cluster_view(&api, &s)))
 }
 
-async fn topics(State(api): S, Path(c): Path<String>, headers: HeaderMap) -> V3<axum::Json<Value>> {
+async fn topics(State(api): S, Path(c): Path<String>, headers: Caller) -> V3<axum::Json<Value>> {
     let s = cluster_stream(&api, &headers, &c)?;
     let data = s.topics().iter().map(|t| topic_view(&api, &s, t)).collect();
     Ok(list("KafkaTopicList", format!("{}/clusters/{}/topics", base(&api), s.cluster_id), data))
@@ -159,7 +160,7 @@ struct CreateTopic {
     validate_only: bool,
 }
 
-async fn create_topic(State(api): S, Path(c): Path<String>, headers: HeaderMap, axum::Json(req): axum::Json<CreateTopic>) -> V3<Response> {
+async fn create_topic(State(api): S, Path(c): Path<String>, headers: Caller, axum::Json(req): axum::Json<CreateTopic>) -> V3<Response> {
     let s = cluster_stream(&api, &headers, &c)?;
     let configs: BTreeMap<String, String> = req.configs.into_iter().filter_map(|c| c.value.map(|v| (c.name, v))).collect();
     let t = api.b.create_topic(&s, &req.topic_name, req.partitions_count.unwrap_or(-1), req.replication_factor.unwrap_or(-1), configs, req.validate_only)?;
@@ -170,13 +171,13 @@ async fn create_topic(State(api): S, Path(c): Path<String>, headers: HeaderMap, 
     Ok((StatusCode::CREATED, axum::Json(view)).into_response())
 }
 
-async fn topic(State(api): S, Path((c, t)): Path<(String, String)>, headers: HeaderMap) -> V3<axum::Json<Value>> {
+async fn topic(State(api): S, Path((c, t)): Path<(String, String)>, headers: Caller) -> V3<axum::Json<Value>> {
     let s = cluster_stream(&api, &headers, &c)?;
     let t = super::topic_of(&s, &t)?;
     Ok(axum::Json(topic_view(&api, &s, &t)))
 }
 
-async fn delete_topic(State(api): S, Path((c, t)): Path<(String, String)>, headers: HeaderMap) -> V3<StatusCode> {
+async fn delete_topic(State(api): S, Path((c, t)): Path<(String, String)>, headers: Caller) -> V3<StatusCode> {
     let s = cluster_stream(&api, &headers, &c)?;
     let t = super::topic_of(&s, &t)?;
     api.leases.topic_deleted(&s.id, &t.name);
@@ -184,7 +185,7 @@ async fn delete_topic(State(api): S, Path((c, t)): Path<(String, String)>, heade
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn partitions(State(api): S, Path((c, t)): Path<(String, String)>, headers: HeaderMap) -> V3<axum::Json<Value>> {
+async fn partitions(State(api): S, Path((c, t)): Path<(String, String)>, headers: Caller) -> V3<axum::Json<Value>> {
     let s = cluster_stream(&api, &headers, &c)?;
     let t = super::topic_of(&s, &t)?;
     let url = format!("{}/clusters/{}/topics/{}/partitions", base(&api), s.cluster_id, t.name);
@@ -206,7 +207,7 @@ async fn partitions(State(api): S, Path((c, t)): Path<(String, String)>, headers
     Ok(list("KafkaPartitionList", url, data))
 }
 
-async fn groups(State(api): S, Path(c): Path<String>, headers: HeaderMap) -> V3<axum::Json<Value>> {
+async fn groups(State(api): S, Path(c): Path<String>, headers: Caller) -> V3<axum::Json<Value>> {
     let s = cluster_stream(&api, &headers, &c)?;
     let url = format!("{}/clusters/{}/consumer-groups", base(&api), s.cluster_id);
     let data = api
@@ -285,7 +286,7 @@ fn v3_bytes(d: Option<V3Data>) -> Result<(Option<Bytes>, &'static str), String> 
 
 /// `POST .../records`: one record per JSON object; several concatenated objects is Confluent's
 /// streaming mode, answered with one result object per record.
-async fn produce(State(api): S, Path((c, t)): Path<(String, String)>, headers: HeaderMap, body: Bytes) -> V3<Response> {
+async fn produce(State(api): S, Path((c, t)): Path<(String, String)>, headers: Caller, body: Bytes) -> V3<Response> {
     let s = cluster_stream(&api, &headers, &c)?;
     let topic = match s.topic(&t) {
         Some(t) => t,

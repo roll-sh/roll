@@ -159,8 +159,10 @@ impl Queues {
         if args.az.is_none() {
             args.az = mq_cluster::aws::ecs_availability_zone().await;
         }
-        if args.user == "guest" && args.password == "guest" && !args.amqp.ip().is_loopback() {
-            tracing::warn!("queues listen on {} with the default guest/guest login; set ROLL_QUEUES_USER and ROLL_QUEUES_PASSWORD", args.amqp.ip());
+        // RabbitMQ's rule: guest/guest only from this machine.
+        let listeners = [args.amqp, args.management, args.stomp, args.web_stomp, args.mqtt, args.web_mqtt, args.stream, args.http];
+        if args.user == "guest" && args.password == "guest" && let Some(open) = listeners.iter().find(|a| !a.ip().is_loopback()) {
+            anyhow::bail!("queues listen on {open} with the default guest/guest login: set ROLL_QUEUES_USER and ROLL_QUEUES_PASSWORD");
         }
         let logs = open_storage(&args, &dir).await?;
         let meta: Arc<dyn MetaStore> = match &args.cluster_meta {

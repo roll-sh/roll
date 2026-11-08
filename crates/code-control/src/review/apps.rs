@@ -491,7 +491,7 @@ impl Code {
     }
 
     pub(crate) fn private_webhooks_allowed(&self) -> bool {
-        self.config.allow_private_webhooks.unwrap_or(self.config.admin_token.is_none())
+        self.config.allow_private_webhooks.unwrap_or(!self.config.locked())
     }
 
     /// Send what's due; how long until the next one is.

@@ -101,7 +101,6 @@ pub fn router(c: Arc<QueuesControl>) -> Router {
         .route("/v1/queues/migrate", get(migrate_status).post(migrate).delete(stop_migration))
         .layer(axum::middleware::from_fn_with_state(c.clone(), awake))
         .with_state(c)
-        .layer(tower_http::cors::CorsLayer::permissive())
 }
 
 /// Dashboard and API requests (publishing a test message, replaying a DLQ) keep the broker out
