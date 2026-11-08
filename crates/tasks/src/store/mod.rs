@@ -79,6 +79,8 @@ pub struct Due {
 }
 
 /// One write of an atomic group ([`Store::write_all`]).
+// Groups are a few writes that live for one call: boxing the big records buys nothing.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug)]
 pub enum Write {
     /// As [`Store::kv_put`].
