@@ -351,8 +351,10 @@ async fn route_alternator(State(control): State<Arc<Control>>, req: Request, nex
     let original = req.uri().clone();
     // Forwarded to the owner's internal route (the path comes back off there); run here as is.
     let (mut parts, body) = req.into_parts();
-    let pq = original.path_and_query().map_or("/", |p| p.as_str());
-    parts.uri = format!("{ALTERNATOR_INTERNAL}{pq}").parse().unwrap_or(original.clone());
+    // `/` is the nest's own path (`/internal/nosql/alternator`, no trailing slash).
+    let path = Some(original.path()).filter(|p| *p != "/").unwrap_or("");
+    let query = original.query().map(|q| format!("?{q}")).unwrap_or_default();
+    parts.uri = format!("{ALTERNATOR_INTERNAL}{path}{query}").parse().unwrap_or(original.clone());
     parts.extensions.remove::<axum::extract::OriginalUri>();
     let req = Request::from_parts(parts, body);
     dispatch(&cluster, &key(&spec.id), req, move |mut req: Request| {

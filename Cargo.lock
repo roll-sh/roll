@@ -4611,6 +4611,7 @@ name = "nosql-control"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "aws-sdk-dynamodb",
  "axum",
  "base64 0.22.1",
  "bytes",
@@ -4627,6 +4628,7 @@ dependencies = [
  "nosql-sstable-import",
  "nosql-storage",
  "nosql-types",
+ "rcgen",
  "reqwest",
  "roll-cluster",
  "roll-edge",
@@ -4636,6 +4638,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+ "tokio-rustls 0.26.6",
  "tower-http 0.7.1",
  "tracing",
  "url",

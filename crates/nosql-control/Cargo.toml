@@ -34,9 +34,12 @@ urlencoding.workspace = true
 [dev-dependencies]
 chrono.workspace = true
 flate2.workspace = true
+aws-sdk-dynamodb.workspace = true
 nosql-alternator.workspace = true
+rcgen.workspace = true
 reqwest.workspace = true
 roll-edge.workspace = true
+tokio-rustls.workspace = true
 rusqlite.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }

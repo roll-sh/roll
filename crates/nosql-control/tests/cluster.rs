@@ -2,7 +2,8 @@
 //! object store, one catalog and one lease store (roll-cluster's memory backend, or a fresh
 //! table on DynamoDB Local with `ROLL_NOSQL_TEST_CLUSTER_BACKEND=dynamodb` and
 //! `ROLL_CLUSTER_TEST_DYNAMODB` naming its endpoint). Each node has its internal API (forwarded
-//! requests, the CQL splice hop) and a CQL listener.
+//! requests, the CQL splice hop), a CQL listener, a TLS one routed by SNI (`<id>.nosql.test`, as
+//! the edge's) and Alternator.
 //!
 //! - requests and CQL connections that reach any node run on the database's owner;
 //! - a killed owner's databases are taken over within the lease, with every acknowledged
@@ -30,6 +31,8 @@ enum Leases {
 }
 
 struct Fleet {
+    /// `*.nosql.test`, for the TLS listeners.
+    cert: rcgen::CertifiedKey<rcgen::KeyPair>,
     objects: nosql_storage::Objects,
     catalog: Arc<Store>,
     leases: Leases,
@@ -43,6 +46,8 @@ struct NodeUnderTest {
     cluster: Arc<Cluster>,
     api: String,
     cql: SocketAddr,
+    cql_tls: SocketAddr,
+    alternator: String,
     tasks: Vec<tokio::task::JoinHandle<()>>,
 }
 
@@ -75,6 +80,7 @@ impl Fleet {
             Ok(other) => panic!("ROLL_NOSQL_TEST_CLUSTER_BACKEND={other}: memory or dynamodb"),
         };
         let mut f = Fleet {
+            cert: rcgen::generate_simple_self_signed(vec!["*.nosql.test".into()]).unwrap(),
             objects: nosql_storage::test_objects(&format!("cluster-{name}")),
             catalog: Arc::new(Store::memory().unwrap()),
             leases,
@@ -120,7 +126,12 @@ impl Fleet {
 
         let cql_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let cql = cql_listener.local_addr().unwrap();
+        let tls_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let cql_tls = tls_listener.local_addr().unwrap();
+        let alt_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let alternator = format!("http://{}", alt_listener.local_addr().unwrap());
         let mut cfg = NosqlConfig::local(home.path().to_path_buf());
+        cfg.domain = Some("nosql.test".into());
         cfg.node_name = id.into();
         cfg.cql_port = cql.port();
         cfg.cql_shard_aware_port = None;
@@ -155,7 +166,17 @@ impl Fleet {
             .merge(roll_edge::splice::router(signer, handlers))
             .layer(axum::middleware::from_fn_with_state(cluster.clone(), roll_cluster::accept_forwarded));
         let dir: Arc<dyn nosql_server::Directory> = control.node.clone();
+        let acceptor = nosql_server::net::tls_acceptor(self.cert.cert.pem().as_bytes(), self.cert.signing_key.serialize_pem().as_bytes()).unwrap();
+        let tls_opts = nosql_server::ListenOptions { tls: Some(acceptor), ..Default::default() };
+        let tls_dir = dir.clone();
+        let alt = nosql_control::cluster::alternator(control.clone(), Default::default());
         let tasks = vec![
+            tokio::spawn(async move {
+                let _ = nosql_server::net::serve(tls_listener, tls_dir, tls_opts).await;
+            }),
+            tokio::spawn(async move {
+                let _ = axum::serve(alt_listener, alt).await;
+            }),
             tokio::spawn(async move {
                 let _ = axum::serve(api_listener, router.into_make_service_with_connect_info::<SocketAddr>()).await;
             }),
@@ -163,7 +184,7 @@ impl Fleet {
                 let _ = nosql_server::net::serve(cql_listener, dir, nosql_server::ListenOptions::default()).await;
             }),
         ];
-        self.nodes.push(NodeUnderTest { control, cluster, api, cql, tasks });
+        self.nodes.push(NodeUnderTest { control, cluster, api, cql, cql_tls, alternator, tasks });
         self._homes.push(home);
     }
 
@@ -238,6 +259,33 @@ async fn requests_and_connections_reach_the_owner() {
     exec(&c, "CREATE TABLE ks.t (k int PRIMARY KEY, v text)").await;
     exec(&c, "INSERT INTO ks.t (k, v) VALUES (1, 'one')").await;
     assert_eq!(texts(&c, "SELECT v FROM ks.t WHERE k = 1").await, ["one"]);
+    for n in f.others(owner.id()) {
+        assert!(n.control.node.get_loaded(&id).is_none(), "{} loaded {id}", n.id());
+    }
+    // A TLS connection naming the database by SNI, as the edge's are, is handed over at once.
+    let mut roots = tokio_rustls::rustls::RootCertStore::empty();
+    roots.add(f.cert.cert.der().clone()).unwrap();
+    let tls = nosql_proto::client::TlsConfig::with_roots(roots, format!("{id}.nosql.test")).unwrap();
+    let password = db["credentials"]["password"].as_str().unwrap();
+    let c = Client::connect(ClientConfig::new(other.cql_tls.to_string()).tls(tls).credentials("cassandra", password)).await.unwrap();
+    assert_eq!(texts(&c, "SELECT v FROM ks.t WHERE k = 1").await, ["one"]);
+    // Alternator through another node runs on the owner (the access key names the database).
+    let (s, creds) = f.call(other, reqwest::Method::GET, &format!("/v1/nosql/databases/{id}/alternator"), None).await;
+    assert_eq!(s, 200, "{creds}");
+    let sdk = {
+        use aws_sdk_dynamodb::config::{BehaviorVersion, Credentials, Region};
+        let key = creds["access_key_id"].as_str().unwrap();
+        let secret = creds["secret_access_key"].as_str().unwrap();
+        let conf = aws_sdk_dynamodb::Config::builder()
+            .behavior_version(BehaviorVersion::latest())
+            .region(Region::new("us-east-1"))
+            .endpoint_url(&other.alternator)
+            .credentials_provider(Credentials::new(key, secret, None, None, "test"))
+            .build();
+        aws_sdk_dynamodb::Client::from_conf(conf)
+    };
+    let tables = sdk.list_tables().send().await.unwrap();
+    assert!(tables.table_names().is_empty(), "{tables:?}");
     for n in f.others(owner.id()) {
         assert!(n.control.node.get_loaded(&id).is_none(), "{} loaded {id}", n.id());
     }
