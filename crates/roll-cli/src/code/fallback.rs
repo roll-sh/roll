@@ -1,7 +1,7 @@
 //! When roll can't be reached, work on a GitHub-connected repo isn't lost (docs/code/architecture.md,
 //! "When roll is down"): `roll code land` and `roll code change create` push their files to a new
 //! branch on GitHub and open a pull request, with the user's own GitHub credentials on this
-//! machine (`GH_TOKEN`/`GITHUB_TOKEN`, `gh auth token`, or git's credential helper). The
+//! machine (`agent_host::github`: `GH_TOKEN`/`GITHUB_TOKEN`, `gh auth token`, or git's credential helper). The
 //! credentials go to GitHub only: never to roll, never to disk, never to a log. What was meant
 //! (land it, or just open the change) is recorded in `<config>/roll/code/queued.json`; the next
 //! `roll code` command that reaches roll finds the pull request's change (roll ingests it by
@@ -14,7 +14,7 @@
 use super::{Client, Spec, enc};
 use anyhow::{Context, bail};
 use base64::Engine;
-use reqwest::{Method, StatusCode};
+use reqwest::Method;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
@@ -135,9 +135,10 @@ pub(super) async fn queue(c: &Client<'_>, json_out: bool, spec: &Spec, land: boo
         Some(None) => bail!("{down}. {} is a native roll repo, so there's nothing to fall back to: try again once roll is back", spec.full()),
         None => bail!("{down}. This machine hasn't seen {} reach roll yet, so it doesn't know whether it's on GitHub: try again once roll is back", spec.full()),
     };
-    let host = url::Url::parse(&linked.url).ok().and_then(|u| u.host_str().map(str::to_string)).context("the repo's GitHub URL")?;
-    let token = github_token(&host).await?;
-    let id = format!("{:08x}", rand_u32());
+    let token = agent_host::github::token(&agent_host::github::host(&linked.url)).await?;
+    let mut b = [0u8; 4];
+    getrandom::fill(&mut b).expect("system randomness");
+    let id = hex_id(b);
     let branch = format!("roll/queued-{id}");
     let message = body.get("message").and_then(Value::as_str).unwrap_or(title).to_string();
     let commit = push_branch(&linked, &token, &branch, &message, body).await?;
@@ -146,7 +147,16 @@ pub(super) async fn queue(c: &Client<'_>, json_out: bool, spec: &Spec, land: boo
         c.api.base,
         if land { "" } else { " and someone lands it" }
     );
-    let (pr, url) = open_pr(&linked, &host, &token, &branch, title, &pr_body).await?;
+    let pr = agent_host::github::PullRequest {
+        web_url: &linked.url,
+        owner: &linked.owner,
+        repo: &linked.repo,
+        head: &branch,
+        base: &linked.default_branch,
+        title,
+        body: &pr_body,
+    };
+    let (pr, url) = agent_host::github::open_pull_request(&token, &pr).await?;
     let intent = Intent {
         id,
         api: c.api.base.clone(),
@@ -172,77 +182,11 @@ pub(super) async fn queue(c: &Client<'_>, json_out: bool, spec: &Spec, land: boo
     Ok(())
 }
 
-fn rand_u32() -> u32 {
-    let mut b = [0u8; 4];
-    getrandom::fill(&mut b).expect("system randomness");
-    u32::from_le_bytes(b)
-}
-
-/// The user's GitHub token for `host`: `GH_TOKEN`, `GITHUB_TOKEN`, `gh auth token`, or git's
-/// credential helper. Held in memory for this command only.
-async fn github_token(host: &str) -> anyhow::Result<String> {
-    for var in ["GH_TOKEN", "GITHUB_TOKEN"] {
-        if let Ok(t) = std::env::var(var)
-            && !t.trim().is_empty()
-        {
-            return Ok(t.trim().to_string());
-        }
-    }
-    let host = host.to_string();
-    tokio::task::spawn_blocking(move || {
-        if let Ok(out) = std::process::Command::new("gh").args(["auth", "token", "--hostname", &host]).stdin(Stdio::null()).stderr(Stdio::null()).output()
-            && out.status.success()
-            && let Ok(t) = String::from_utf8(out.stdout)
-            && !t.trim().is_empty()
-        {
-            return Ok(t.trim().to_string());
-        }
-        let mut child = std::process::Command::new("git")
-            .args(["credential", "fill"])
-            .env("GIT_TERMINAL_PROMPT", "0")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .context("running git")?;
-        use std::io::Write as _;
-        child.stdin.take().context("git's stdin")?.write_all(format!("protocol=https\nhost={host}\n\n").as_bytes())?;
-        let out = child.wait_with_output()?;
-        let text = String::from_utf8_lossy(&out.stdout);
-        match text.lines().find_map(|l| l.strip_prefix("password=")) {
-            Some(p) if out.status.success() && !p.is_empty() => Ok(p.to_string()),
-            _ => bail!("no GitHub credentials for {host} on this machine: set GH_TOKEN, run `gh auth login`, or store one in git's credential helper"),
-        }
-    })
-    .await?
-}
-
-/// GitHub's REST API for a repo's web URL (`ROLL_GITHUB_API_URL` overrides it).
-fn api_base(linked: &Linked, host: &str) -> String {
-    if let Ok(u) = std::env::var("ROLL_GITHUB_API_URL")
-        && !u.trim().is_empty()
-    {
-        return u.trim_end_matches('/').to_string();
-    }
-    let scheme = linked.url.split_once("://").map_or("https", |(s, _)| s);
-    if host == "github.com" { "https://api.github.com".into() } else { format!("{scheme}://{host}/api/v3") }
-}
-
 /// Git, authenticated to GitHub by a header in its environment (never its arguments or a file),
 /// with no hooks and no prompts.
 fn git(dir: &Path, token: &str, args: &[&str], stdin: Option<&[u8]>, env: &[(&str, &str)]) -> anyhow::Result<String> {
-    let basic = base64::engine::general_purpose::STANDARD.encode(format!("x-access-token:{token}"));
     let mut cmd = std::process::Command::new("git");
-    cmd.current_dir(dir)
-        .args(args)
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_CONFIG_COUNT", "2")
-        .env("GIT_CONFIG_KEY_0", "http.extraHeader")
-        .env("GIT_CONFIG_VALUE_0", format!("Authorization: Basic {basic}"))
-        .env("GIT_CONFIG_KEY_1", "core.hooksPath")
-        .env("GIT_CONFIG_VALUE_1", "/dev/null")
-        .stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() })
+    cmd.current_dir(dir).args(args).envs(agent_host::github::git_env(token)).env("GIT_CONFIG_NOSYSTEM", "1").stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     for (k, v) in env {
@@ -306,34 +250,6 @@ async fn push_branch(linked: &Linked, token: &str, branch: &str, message: &str, 
         Ok(commit)
     })
     .await?
-}
-
-/// Open the pull request (or find the one GitHub already has for the branch): its number and URL.
-async fn open_pr(linked: &Linked, host: &str, token: &str, branch: &str, title: &str, body: &str) -> anyhow::Result<(u64, String)> {
-    let api = api_base(linked, host);
-    let http = reqwest::Client::builder().user_agent("roll-cli").timeout(std::time::Duration::from_secs(30)).build()?;
-    let pulls = format!("{api}/repos/{}/{}/pulls", enc(&linked.owner), enc(&linked.repo));
-    let res = http
-        .post(&pulls)
-        .bearer_auth(token)
-        .header("accept", "application/vnd.github+json")
-        .json(&json!({ "title": title, "head": branch, "base": linked.default_branch, "body": body }))
-        .send()
-        .await
-        .context("opening the pull request on GitHub")?;
-    let status = res.status();
-    let v: Value = res.json().await.unwrap_or(Value::Null);
-    let found = if status.is_success() {
-        v
-    } else if status == StatusCode::UNPROCESSABLE_ENTITY {
-        let q = format!("{pulls}?state=open&head={}", enc(&format!("{}:{branch}", linked.owner)));
-        let list: Value = http.get(&q).bearer_auth(token).header("accept", "application/vnd.github+json").send().await?.json().await?;
-        list.get(0).cloned().with_context(|| format!("GitHub refused the pull request: {}", v["message"].as_str().unwrap_or("422")))?
-    } else {
-        bail!("GitHub refused the pull request ({status}): {}", v["message"].as_str().unwrap_or(""));
-    };
-    let n = found["number"].as_u64().context("GitHub's pull request has no number")?;
-    Ok((n, found["html_url"].as_str().unwrap_or_default().to_string()))
 }
 
 /// Replay what was queued on GitHub while roll was down, for the roll at `c` (best effort: if
@@ -407,4 +323,8 @@ pub(super) fn list(api: &str, json_out: bool) -> anyhow::Result<()> {
         println!("{}  PR #{}  {}  {what} when roll is back · {}", i.repo, i.pr, i.url, crate::ago(i.created_at));
     }
     Ok(())
+}
+
+fn hex_id(b: [u8; 4]) -> String {
+    b.iter().map(|x| format!("{x:02x}")).collect()
 }

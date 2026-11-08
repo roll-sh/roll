@@ -742,6 +742,20 @@ pub async fn publish_as(dir: &Path, branch: &str, remote: &str, message: &str, t
     Ok(Published { branch: remote.to_string(), commit, change: None, url: None, landing: None })
 }
 
+/// Pushes the checkout's `HEAD` as `branch` to a GitHub repository (`url`, its git URL) with the
+/// user's own `token` (`crate::github`): the fallback of a publish while roll can't be reached.
+/// The token is a header in this one process's environment, and no hook runs.
+pub async fn push_to_github(dir: &Path, url: &str, branch: &str, token: &str) -> anyhow::Result<()> {
+    let refspec = format!("HEAD:refs/heads/{branch}");
+    let mut push = git(dir, &["push", "--progress", "--", url, &refspec]);
+    push.sealed = true;
+    for (k, v) in crate::github::git_env(token) {
+        push = push.env(k, v);
+    }
+    push.patient(NETWORK_IDLE).run().await.map_err(|e| anyhow::Error::new(Network(e)))?;
+    Ok(())
+}
+
 /// A clone or push that failed on the way (the network, the server, no progress for
 /// [`NETWORK_IDLE`]): nothing was kept, and trying again may work. Commands that end this way
 /// leave no receipt, so a retry with the same command id runs again.

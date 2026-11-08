@@ -41,7 +41,13 @@
       "token": "rlg_0123456789abcdef0123456789abcdef0123456789abcdef",
       "write": true,
       "branch": "roll/fix-the-flaky-queue-test",
-      "expires_at": 1762000600000
+      "expires_at": 1762000600000,
+      "github": {
+        "owner": "acme",
+        "repo": "roll",
+        "url": "https://github.com/acme/roll",
+        "default_branch": "main"
+      }
     }
   },
   {
