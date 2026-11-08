@@ -35,10 +35,11 @@ ARG PROFILE=release
 ARG CARGO_BUILD_JOBS
 ENV CARGO_PROFILE_DEV_DEBUG=line-tables-only CARGO_INCREMENTAL=0
 COPY --from=plan /src/recipe.json recipe.json
+# The vendored crates are [patch]ed in by path, which the recipe doesn't carry.
+COPY vendor vendor
 RUN cargo chef cook --profile "$PROFILE" --recipe-path recipe.json -p rolld
 COPY Cargo.toml Cargo.lock ./
 COPY crates crates
-COPY vendor vendor
 RUN cargo build --profile "$PROFILE" -p rolld --bin rolld \
  && dir=$([ "$PROFILE" = dev ] && echo debug || echo "$PROFILE") \
  && cp "target/$dir/rolld" /usr/local/bin/rolld \
