@@ -64,7 +64,7 @@ impl TxnStatus {
 #[derive(Clone, Debug, Default)]
 pub struct QueryResult {
     /// Some: the statement returns rows (and a RowDescription), possibly none.
-    pub cols: Option<Vec<OutCol>>,
+    pub cols: Option<Arc<[OutCol]>>,
     pub rows: Vec<Row>,
     pub tag: String,
 }
@@ -78,9 +78,9 @@ impl QueryResult {
         }
     }
 
-    pub fn rows(cols: Vec<OutCol>, rows: Vec<Row>, tag: impl Into<String>) -> Self {
+    pub fn rows(cols: impl Into<Arc<[OutCol]>>, rows: Vec<Row>, tag: impl Into<String>) -> Self {
         QueryResult {
-            cols: Some(cols),
+            cols: Some(cols.into()),
             rows,
             tag: tag.into(),
         }
@@ -249,7 +249,7 @@ pub struct Portal {
     pub params: Vec<Value>,
     pub result_formats: Vec<i16>,
     run: PortalRun,
-    pub cols: Option<Vec<OutCol>>,
+    pub cols: Option<Arc<[OutCol]>>,
     /// A SELECT suspended after an Execute's row count: its executor, which the next
     /// Execute runs on (PORTAL_ONE_SELECT runs as its rows are asked for).
     lazy: Option<cursor::Lazy>,
@@ -1762,24 +1762,26 @@ impl Session {
             b.bind_statement(stmt)
         });
         match analyzed {
-            Ok(b) => Ok((b.params.clone(), b.cols.clone())),
+            Ok(b) => Ok((b.params.clone(), b.cols.to_vec())),
             Err(e) if inlining(&e) && inlining(&planned) => Ok((types, Vec::new())),
             Err(_) => Err(planned),
         }
     }
 
     /// A custom plan: the statement's analysis with the parameters' values put in
-    /// (`litplan::values_custom`), or bound afresh with them as constants.
+    /// (`litplan::values_custom`; `reuse`: the custom plan before with its scan chosen again
+    /// when it can be), or bound afresh with them as constants.
     fn bound_custom(
         &mut self,
         p: &Prepared,
         stmt: &Node,
         params: &[Value],
+        reuse: bool,
     ) -> Result<Arc<BoundQuery>> {
         self.ensure_txn();
-        let b = match self.values_custom(p, stmt, params) {
+        let b = match self.values_custom(p, stmt, params, reuse) {
             Some(b) => b,
-            None => self.bound_custom_afresh(p, stmt, params)?,
+            None => Arc::new(self.bound_custom_afresh(p, stmt, params)?),
         };
         if let Some(fixed) = &p.plans.lock().fixed_result
             && *fixed != result_row(&b.cols)
@@ -1790,7 +1792,7 @@ impl Session {
             )
             .routine("RevalidateCachedQuery"));
         }
-        Ok(Arc::new(b))
+        Ok(b)
     }
 
     /// A custom plan bound afresh: the statement with the parameters' values as constants.
@@ -1897,7 +1899,7 @@ impl Session {
                 // (Debug builds: it is the custom plan, costing what that does.)
                 #[cfg(debug_assertions)]
                 {
-                    let own = self.bound_custom(p, stmt, params)?;
+                    let own = self.bound_custom(p, stmt, params, false)?;
                     assert!(litplan::same_plan(&own, &bq, &p.param_types, params), "custom plan of {:?}", p.sql);
                     let c = self.plan_cost(&own, params, true);
                     let cost = cost.unwrap_or_else(|| self.plan_cost(&bq, params, true));
@@ -1919,7 +1921,7 @@ impl Session {
                 }
                 return Ok((bq, true));
             }
-            let bq = self.bound_custom(p, stmt, params)?;
+            let bq = self.bound_custom(p, stmt, params, share)?;
             let version = self.txn.as_ref().map_or(0, |t| t.borrow().catalog().version);
             let first = p.plans.lock().first_custom.take();
             let learns = share && self.param_learns(p);
@@ -2467,18 +2469,18 @@ impl Session {
     }
 
     /// Result columns of a statement, without running it.
-    pub fn describe(&mut self, p: &Arc<Prepared>) -> Result<Option<Vec<OutCol>>> {
+    pub fn describe(&mut self, p: &Arc<Prepared>) -> Result<Option<Arc<[OutCol]>>> {
         crate::stack::grow(|| self.describe_here(p))
     }
 
-    fn describe_here(&mut self, p: &Arc<Prepared>) -> Result<Option<Vec<OutCol>>> {
+    fn describe_here(&mut self, p: &Arc<Prepared>) -> Result<Option<Arc<[OutCol]>>> {
         // (`pg_temp` is this session's while it binds, on a thread another session may
         // have run on: an embedder's Parse / Describe before any execute.)
         crate::catalog::set_session_temp_schema_of(self.state.proc.number());
         let Some(stmt) = p.stmt.as_ref() else {
             return Ok(None);
         };
-        let r = (|| -> Result<Option<Vec<OutCol>>> {
+        let r = (|| -> Result<Option<Arc<[OutCol]>>> {
             match inner(stmt) {
                 // (DML on a derived system catalog: no RETURNING, no rows.)
                 Some(n) if ddl::catalog_dml_query(n).is_some() => Ok(None),
@@ -2488,7 +2490,7 @@ impl Session {
                     Ok(b) => b.cols.clone(),
                     Err(e) if is_result_change(&e) => return Err(e),
 
-                    Err(e) => self.analyzed_params(stmt, &p.param_types, e)?.1,
+                    Err(e) => self.analyzed_params(stmt, &p.param_types, e)?.1.into(),
                 })),
                 Some(
                     NodeEnum::InsertStmt(_)
@@ -2500,11 +2502,11 @@ impl Session {
                         Ok(b) => b.cols.clone(),
                             Err(e) if is_result_change(&e) => return Err(e),
 
-                            Err(e) => self.analyzed_params(stmt, &p.param_types, e)?.1,
+                            Err(e) => self.analyzed_params(stmt, &p.param_types, e)?.1.into(),
                     };
                     Ok((!cols.is_empty()).then_some(cols))
                 }
-                Some(NodeEnum::VariableShowStmt(s)) => Ok(Some(self.show_cols(&s.name))),
+                Some(NodeEnum::VariableShowStmt(s)) => Ok(Some(self.show_cols(&s.name).into())),
                 Some(NodeEnum::ExplainStmt(e)) => {
                     // (ExplainResultDesc: json for FORMAT JSON, xml for XML, else text.)
                     let format = e.options.iter().find_map(|o| match inner(o) {
@@ -2521,7 +2523,7 @@ impl Session {
                         Some("xml") => DataType::Xml,
                         _ => DataType::Text,
                     };
-                    Ok(Some(vec![OutCol::new("QUERY PLAN", ty)]))
+                    Ok(Some(Arc::from([OutCol::new("QUERY PLAN", ty)])))
                 }
                 Some(NodeEnum::CallStmt(c)) => {
                     // A procedure with output parameters returns them as one row.
@@ -2543,7 +2545,7 @@ impl Session {
                     .cursors
                     .borrow()
                     .get(&f.portalname)
-                    .map(|c| c.cols.clone())),
+                    .map(|c| c.cols.as_slice().into())),
                 Some(NodeEnum::ExecuteStmt(e)) => match self.prepared.get(&e.name).cloned() {
                     Some(inner_p) => self.describe(&inner_p),
                     None => Ok(None),
@@ -3013,7 +3015,7 @@ impl Session {
     }
 
     /// A portal's result columns for Describe: a bound one's, or a cursor's (in text).
-    pub fn portal_cols(&self, name: &str) -> Option<(Option<Vec<OutCol>>, Vec<i16>)> {
+    pub fn portal_cols(&self, name: &str) -> Option<(Option<Arc<[OutCol]>>, Vec<i16>)> {
         if let Some(pt) = self.portals.get(name) {
             return Some((pt.cols.clone(), pt.result_formats.clone()));
         }
@@ -3021,7 +3023,7 @@ impl Session {
             .cursors
             .borrow()
             .get(name)
-            .map(|c| (Some(c.cols.clone()), Vec::new()))
+            .map(|c| (Some(c.cols.as_slice().into()), Vec::new()))
     }
 
     pub fn close_statement(&mut self, name: &str) {

@@ -7884,7 +7884,7 @@ impl Binder<'_, '_> {
         };
         let r = if by_statement && self.body_writes_ruled_table(fdef) {
             self.bind_statement(&body)
-                .map(|bq| ((*bq.plan).clone(), bq.cols))
+                .map(|bq| ((*bq.plan).clone(), bq.cols.to_vec()))
         } else {
             // (A statement planned on its own, a SQL function's: its command.)
             if !inline {
