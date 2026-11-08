@@ -2717,6 +2717,9 @@ between rounds (select-only 42.6k / 33.9k base, 34.6k / 39.0k new).
 
 ## Executor, round 11 (agent 189)
 
+Historical records only. The recovery audit below limits these observations; they are not
+a current-source performance claim.
+
 HANDOFF "Executor, round 11". **base** is origin's head `19df462eb` (167's step 2 included);
 **new** is this round on top of it. Both are dist builds (fat LTO, line tables) of the same
 checkout, one after the other into one target directory, copied aside before the next.
@@ -2800,16 +2803,57 @@ and without inlined frames.
 - q12 measured +12% (0.89 -> 1.00 s) in both comparisons, but its user instructions are the
   base's (23.56 / 23.61 x 10^9 a run against 23.56 / 23.62, `perf stat`, two alternating
   pairs) and its cycles went either way (13.99 / 13.91 against 12.68 / 14.34 x 10^9): no
-  change reaches its plan (a merge join, a sorted lineitem scan, a hash-free grouping); left
-  as code placement, not work.
+  change reaches its plan (a merge join, a sorted lineitem scan, a hash-free grouping).
+  Code placement remained a hypothesis, not an established explanation.
 - The first build of this round (without the EXTRACT key fix, the IN lists and the flat
   counts) measured q09 2.16 against 2.08 s: merging the projections alone left the grouping
   presorting its input, so its rows still came to the executor's thread. The fix of the key
   check made the difference.
 
-Footprint: no thread, timer or cache that outlives a statement. pgbench's statements take
-none of the changed paths but the projection merge at open (a walk of the projection's
-expressions), which they don't run long enough to show.
+Source review found no new thread, timer or cache that outlives a statement. This is not
+a footprint or OLTP regression measurement.
+
+### Recovery audit, 2026-11-08
+
+The tables above are saved historical observations. They do not establish a performance
+change for the recovered batch on current origin. No benchmark or profile ran during this
+recovery because other lanes were active.
+
+The read-only audit `~/.cache/a189/scripts/audit-saved.py` validates all 22 query names,
+complete round blocks, row counts, result hashes, timing bounds, error fields, and frozen
+binary hashes. Its output is `~/.cache/a189/logs/audit-saved.json`.
+
+- `bench/a2-vs-base.tsv` contains 198 result records, three rounds each of PostgreSQL,
+  base and a2. All saved query rows and hashes agree, with zero reported errors. The saved
+  runner checks rows and hashes between repetitions. Warm-up output was discarded.
+- The base build log names `19df462eb5fb967202d4a244b92aa38d2e0bca09`.
+  The frozen binary SHA-256 is
+  `ef476177342b4365921ac87920a17e002c3aa6a586ac0a86fd88f1e60bda2917`.
+- The a2 build log names `62ddbd462c9d6e847d409780d82a7cc40e84d2b4`, with only the two
+  golden files untracked. The frozen binary SHA-256 is
+  `0632e0f117956c1ba96e69c6eea60cd6a3e1583f855bd8ca58c5f9e6a45c6659`.
+  Later integration changed other executor and storage code. The recovered batch also
+  restricts initplan substitution after a PostgreSQL differential exposed wrong rows.
+- `bench/r1-rounds.tsv` contains 88 records, two rounds each of PostgreSQL and r1, all
+  saved query rows and hashes equal and zero reported errors. Its build log names
+  `36c70d5158ed4d24db1e835c5db12603bdf23333`, with frozen binary SHA-256
+  `b5db714171827601f81412a87d8bf2d030f9f4fd54b2b9d3cd28014590692404`.
+  That campaign has no paired base engine and cannot show a before/after gain.
+
+The old build logs name HEAD and print git status but lack before/after source manifests
+and frozen compiler environments. The benchmark scripts pipe the client through `sed`
+without preserving its exit code. Complete error-free result blocks support the saved
+query observations, but `HEAVY-EXIT 0` alone does not prove command success. Three paired
+rounds under shared load also fall short of the five alternating pairs in the benchmark
+checklist. The historical q12 timing increase remains unexplained by the saved instruction
+counts. Code placement was a hypothesis, not an established cause.
+
+Engine `PEAK` records read host VmHWM in KiB and convert it to MiB. Per-query
+`peak_mem_mb` samples cgroup anonymous and shared memory. Neither establishes unchanged
+idle footprint or memory under other workloads. No new OLTP regression measurement or
+matched comparison of efficient and performance modes exists for this recovery.
+A serialized comparison on the integrated head is still required before a current speed,
+CPU or memory claim. The planner, storage and pg_stat findings above remain owner handoffs.
 
 ## Executor, round 10 (round 26, agent 167)
 

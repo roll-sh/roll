@@ -3190,6 +3190,9 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
   aggregates, btree_index, create_index, partition_join, partition_prune unchanged.
 - **Executor, round 11, batch 1: groupings over joins in the workers, a cheaper merge of parts,
   initplans and IN lists in workers' filters** (agent 189; BENCH.md "Executor, round 11"):
+  - The performance figures in this section are historical records from saved builds. They
+    do not establish a current-source speed, CPU or footprint claim. BENCH.md, "Executor,
+    round 11", records the recovery audit and evidence limits.
   - **Baseline on origin's head `19df462eb`** (167's step 2 included): TPC-H SF1 15.65 s against
     PostgreSQL's 11.55 s (1.35x), CPU 38.6 s against 29.4 s, peak ~1,790 MB. The largest gaps:
     q02 +0.72 s, q13 +0.62, q09 +0.56, q12 +0.36, q06 +0.35 (BENCH.md has the 22 queries and
@@ -3223,25 +3226,51 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
   - **`substring(text FROM n FOR m)` of constants as a kernel** (`kernel.rs` `K::Substr`,
     `string::is_substr`, `string::substr_chars`; m not negative).
   - **Initplans in a parallel scan's filter** (`scan.rs` `initplans_first`,
-    `initplans_put_in`): when the first condition of the filter (the first of its AND) reads
-    uncorrelated scalar sub-selects, or `x [NOT] IN (sub-select)` (a hashed SubPlan's), through
-    nothing that may skip one (columns, constants, calls, casts, NOT), and the scan has a row,
-    they are run before the workers start and put in: a value, or `x IN (its values)` (at most
-    4,096; none: false for a plain column). PostgreSQL's first row reads the parameter or builds
-    the SubPlan's hash table (and a Gather evaluates its initplans before starting its
-    workers), so no error is raised that it wouldn't; an empty scan never runs them (golden
-    `a189_initplan_scan`, recorded from PostgreSQL 18.6: the error of a failing initplan, an
-    empty table).
-    Sequential scans (`start_parallel`) and full index scans (`start_parallel_index`). q22 0.40
-    -> 0.30 s (its CPU rose 0.51 -> 0.72: both customer scans now run in the workers), q16
-    0.50 -> 0.41 s.
-  - Measured (BENCH.md "Executor, round 11"; three interleaved rounds): TPC-H 16.85 -> 15.01 s
+    `initplans_put_in`): the first condition may be an immutable kernel call with columns,
+    constants and one scalar initplan as direct arguments, or IN with a plain column on
+    its left. NOT and harmless relabelings are allowed. Correlated contexts retain the
+    normal executor path. Once the scan has a visible row or index entry, the eligible
+    initplan supplies a scalar value or an IN list of at most 4,096 values. An empty IN
+    list becomes false for a plain column. Other shapes retain normal evaluation order.
+    Both sequential and full index scans use the eligibility check.
+  - Saved historical observations (BENCH.md "Executor, round 11"; three interleaved rounds):
+    TPC-H 16.85 -> 15.01 s
     (-11%), CPU -10%, engine/PostgreSQL 1.39x -> 1.24x, peak unchanged, all 22 hashes equal.
-    q12 measured +12% in both comparisons with identical user instructions (23.6 x 10^9 a run):
-    not this batch's work.
+    q12 measured +12% in both comparisons with similar user instructions (23.6 x 10^9 a run).
+    The cause remains unresolved.
   - Tests: `parallel_scan` `parallel_joins_match_serial` has a grouping over two joins with
     computed keys (q07 / q09's shape); golden `a189_initplan_scan`.
+  - **Recovered batch verification, 2026-11-08**: the original clean checkout at `36c70d5`
+    matched backup `2cb028c1c` by tree. `tests2.log` reports 247 passes, two ignored tests,
+    Clippy completion and 5,448/5,449 regression units with no changed baseline units.
+    Its pipelines do not retain individual command exits. `verify1.log` contains actual
+    failed tests despite `HEAVY-EXIT 0`; it is not successful verification.
+    The recovery fixes a concrete wrong-result case: PostgreSQL returns id 1 for
+    `nextval('a189_seq') < (SELECT nextval('a189_seq'))`, while the saved binary returned no rows after
+    running the initplan first. The new eligibility check retains the normal executor
+    path for that expression. Golden `a189_initplan_scan` also covers NULLs, empty IN
+    lists, and fresh initplans and parameters across prepared executions.
+    The focused release gates on clean `b0593a0bbada3e3aafceb5c9d987f0506b4f9e31`, tree
+    `a36eb2ee1074d8a4c9fe3625e3069fceb7373dd9`, pass with real command exits: build;
+    251 tests passed, two ignored, including one golden file in embedded, wire and
+    shuffled execution; all-target Clippy; and the 16-file regression subset,
+    5,448/5,449 units. Its result rows equal the saved run, with no new baseline units.
+    Receipts and rerunnable audits are in `~/.cache/a189/logs/resume-*` and
+    `~/.cache/a189/scripts/{audit-resume,audit-saved}.py`. Before/after source manifests
+    agree. The manifest SHA-256 is
+    `56b0a605ff69317bd4815a843027acaf6b8744aa0e0aadcf8443c9b140ff1bc9`.
+    Later origin additions from a185 and a192 are preserved by the final rebase. These
+    focused receipts do not verify that combined source. Full combined crate, regression
+    and `pnpm test:pg` verification remains pending for the verification train. No storage
+    format, durability or mode-default setting changed in this batch. No benchmark ran.
+    The owned a189 runtimes are stopped; checkout, cache and WIP remain for the coordinator.
   - Found, for other owners:
+    - A separate exploratory probe of the saved release binary found an aggregate/initplan
+      gap: over the golden's nonempty `a189_t` and empty `a189_e`,
+      `SELECT count(*) FROM a189_t WHERE id + (SELECT 1 / (min(id) - min(id)) FROM a189_t) = ANY (SELECT id FROM a189_e)`
+      raises division by zero on PostgreSQL 18.6 but returns zero in the saved engine.
+      This case was not repaired or included in the passing golden. Its status on the
+      final combined head remains pending.
     - planner (177): q12's plan is a merge join over a full `orders_pkey` index scan (1.5M heap
       fetches, the largest part of its gap) where PostgreSQL's and EXPLAIN's is a Parallel Hash
       Join over Parallel Seq Scans; pg_stat_user_indexes counts an orders_pkey scan of 1.5M
