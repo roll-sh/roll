@@ -729,3 +729,71 @@ impl Elements {
 pub(super) fn path_ops(bix: &crate::sql::plan::BoundIndex, col: usize) -> bool {
     bix.index.columns.get(col).and_then(|c| crate::catalog::system::opclass_name(c.opclass)).is_some_and(|(n, _)| n == "jsonb_path_ops")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn jsonb_selection_matches_evaluator() {
+        use crate::types::json::parse_jsonb;
+        use crate::types::jsonpath;
+
+        // The same behavioral corpus is recorded against PG18.6 by the SQL golden.
+        let sql = include_str!("../../../tests/sql/a192_gin_jsonb_paths.sql");
+        let mut docs = parse_jsonb(sql.split("$matrix$").nth(1).unwrap()).unwrap().into_array().unwrap();
+        let base = docs.clone();
+        for j in base {
+            docs.push(parse_jsonb(&format!("[{}]", j)).unwrap());
+            docs.push(parse_jsonb(&format!("{{\"a\":{}}}", j)).unwrap());
+        }
+        for path_ops in [false, true] {
+            let sh = Shape { dim: None, parts: vec![0], tys: Vec::new(), path_ops: if path_ops { vec![0] } else { Vec::new() } };
+            let mut el = Elements::make(sh, String::new(), 0);
+            for (i, j) in docs.iter().enumerate() {
+                el.add(&(i as u64).to_be_bytes(), Some(&[Value::Jsonb(j.clone())]));
+            }
+            el.add(&(docs.len() as u64).to_be_bytes(), Some(&[Value::Null]));
+            let selected = |s: &Sel, i: usize| match s {
+                Sel::All => true,
+                Sel::Rows(rows) => rows.binary_search(&(i as u32)).is_ok(),
+            };
+            let mut exact_queries = 0;
+            for q in &docs {
+                let arg = Value::Jsonb(q.clone());
+                let sel = el.select(0, "@>", &arg);
+                let exact = el.exact(0, "@>", &arg);
+                exact_queries += usize::from(exact);
+                for (i, j) in docs.iter().enumerate() {
+                    let holds = j.contains(q);
+                    let hit = selected(&sel, i);
+                    assert!(!holds || hit, "false negative: path_ops={path_ops}, {j} @> {q}");
+                    if exact {
+                        assert_eq!(hit, holds, "false exact: path_ops={path_ops}, {j} @> {q}");
+                    }
+                }
+                if exact {
+                    assert!(!selected(&sel, docs.len()), "SQL NULL cannot contain {q}");
+                }
+            }
+            assert!(exact_queries > 20, "exercise exact selections");
+            for path in ["$.a == 1", "$.a.b == 1", "$.a[*].b == 1", "$.a == null", "$.a == \"x\"",
+                "$.a.b == 1 && $.a.c == 2", "$.a.b == 1 || $.ab == 1", "$.** == 1", "$[*] == 1"] {
+                for mode in ["lax", "strict"] {
+                    let path = format!("{mode} {path}");
+                    let parsed = jsonpath::parse(&path).unwrap();
+                    let sel = el.jsonpath(0, false, &path);
+                    for (i, j) in docs.iter().enumerate() {
+                        let holds = jsonpath::matches(j, &parsed, None, true, false, &crate::types::datetime::TimeZone::Utc).unwrap() == Some(true);
+                        assert!(!holds || selected(&sel, i), "jsonpath false negative: path_ops={path_ops}, {j} @@ {path}");
+                    }
+                }
+            }
+            // Container and multi-leaf array-element queries retain ordinary recheck.
+            for q in ["{}", "[]", r#"[{"a":1,"b":2}]"#, r#"{"a":[{"b":1},{}]}"#] {
+                assert!(!el.exact(0, "@>", &Value::Jsonb(parse_jsonb(q).unwrap())));
+            }
+            assert!(!el.exact(0, "@@", &Value::Text("$.a == 1".into())));
+        }
+    }
+}

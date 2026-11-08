@@ -948,11 +948,21 @@ impl Session {
                 // (One statement around both, so the query's own doesn't run the queue.)
                 ctx.statement(|| {
                     crate::exec::trigger::batch(ctx, || {
-                        crate::exec::run_each(&bq.plan, ctx, |r| {
+                        // (A table's rows formatted from their stored bytes where they can be,
+                        // `CopyLines::row_stored`.)
+                        crate::exec::run_each_stored(&bq.plan, ctx, &mut |s| {
                             // (A cancel while the data goes out stops it: `sink::Feed::row`.)
                             ctx.check()?;
+                            let line = match s {
+                                crate::exec::Stored::Bytes(b) => match lines.row_stored(b)? {
+                                    Some(line) => line,
+                                    None => return Ok(false),
+                                },
+                                crate::exec::Stored::Row(r) => lines.row(&r)?,
+                            };
                             n += 1;
-                            dest.put(lines.row(&r)?)
+                            dest.put(line)?;
+                            Ok(true)
                         })?;
                         if let Some(t) = lines.trailer() {
                             dest.put(t)?;
@@ -1340,10 +1350,13 @@ impl CopyReader<'_> {
                 ctx.notice(n);
             }
             if let Err(e) = parsed {
-                // (Rows read earlier in this batch are still to go in first; buffered, a row
-                // of them NOT NULL refuses still fails first: ExecConstraints checks each row
-                // as it is read, before the next.)
-                if self.st.rows.is_empty() || copy.multi && self.null_violation(before).is_none() {
+                // (Rows read earlier in this batch are still to go in first, buffered or not:
+                // CopyFrom evaluates each row's defaults and checks it as its line is read,
+                // and flushes its multi-insert buffer when it fills, before reading the next
+                // line. Those of a buffer the error comes before are never flushed: their
+                // sequences moved, their counts are dropped, a unique violation among them
+                // isn't found.)
+                if self.st.rows.is_empty() {
                     return Err(e);
                 }
                 self.failed = Some(e);
@@ -1352,16 +1365,12 @@ impl CopyReader<'_> {
             }
             self.batch_bytes += self.st.lines[before..].iter().map(|l| l.1.len()).sum::<usize>();
             // A row a NOT NULL column refuses fails the COPY as it is read: the rows up to it
-            // go in, and its own error is the one inserting them raises.
+            // go in (their defaults evaluated; buffered, their counts dropped as the error
+            // comes before the buffer is flushed), and its own error is the one inserting
+            // them raises.
             if let Some(k) = self.null_violation(before) {
                 self.st.rows.truncate(k + 1);
                 self.st.lines.truncate(k + 1);
-                // (Buffered, the rows before it never go in: ExecConstraints refuses it
-                // before CopyMultiInsertBufferFlush inserts them, so it is the error.)
-                if copy.multi {
-                    self.st.rows.drain(..k);
-                    self.st.lines.drain(..k);
-                }
                 self.null_stop = true;
             }
         }
@@ -2315,6 +2324,42 @@ impl<'a> CopyLines<'a> {
         }
         line.push('\n');
         self.encoded(line)
+    }
+
+    /// `row`'s text line formatted from a row's stored bytes (`storage::row`), when its values
+    /// are the columns in order and each is NULL, an integer, a float8 or a string of a text
+    /// or varchar column: written from the stored value as `row` writes the decoded one. None:
+    /// some value isn't (the caller formats the decoded row).
+    fn row_stored(&self, stored: &[u8]) -> Result<Option<Vec<u8>>> {
+        use crate::storage::row::StoredValue as V;
+        let f = self.format;
+        if f.binary || f.csv || (self.enc, self.fmt.server_encoding) != (crate::types::mbconv::UTF8, crate::types::mbconv::UTF8) {
+            return Ok(None);
+        }
+        let data = crate::exec::scan::row_data(stored)?;
+        let mut pos = 0;
+        if crate::storage::sst::get_varint(data, &mut pos)? as usize != self.cols.len() {
+            return Ok(None);
+        }
+        let numeric_ok = !matches!(f.delimiter, '-' | '+' | 'I' | 'N');
+        let mut line = String::with_capacity(64);
+        for (i, c) in self.cols.iter().enumerate() {
+            if i > 0 {
+                line.push(f.delimiter);
+            }
+            match (crate::storage::row::read_stored(data, &mut pos)?, &c.ty) {
+                (V::Null, _) => line.push_str(&f.null),
+                (V::Int(n), DataType::Int2 | DataType::Int4 | DataType::Int8) if numeric_ok => push_int(&mut line, n),
+                (V::Float8(x), DataType::Float8) if numeric_ok => crate::types::text::push_float8(&mut line, x, self.fmt.extra_float_digits),
+                (V::Text(s), DataType::Text | DataType::Varchar(_)) => match std::str::from_utf8(s) {
+                    Ok(s) => text_escape_into(&mut line, s, f.delimiter),
+                    Err(_) => return Ok(None),
+                },
+                _ => return Ok(None),
+            }
+        }
+        line.push('\n');
+        Ok(Some(line.into_bytes()))
     }
 
     /// The binary trailer (with the signature, when no row carried it).

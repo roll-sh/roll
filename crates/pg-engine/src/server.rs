@@ -133,6 +133,83 @@ pub fn set_idle_hook(f: fn()) {
     let _ = IDLE_HOOK.set(f);
 }
 
+/// How long a connection's thread polls its socket for the client's next message before it
+/// sleeps in the read (`set_wait_spin`; zero: it sleeps at once).
+static WAIT_SPIN_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Connection threads at work (not waiting for their clients) and threads polling their
+/// sockets, counted while a spin is set: a thread polls only while both together fit in a
+/// quarter of the cores the process may run on (on 4 cores: only while no other connection
+/// works or polls), so polling never takes the core a woken thread needs (it counts as
+/// working only once it runs). On 4 cores, two pollers at most cost 32 clients 15% of their
+/// throughput; working and polling threads up to all 4 cores cost 8 clients 8%, up to 2
+/// cost 8 clients' range reads 9%.
+static WORKING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static SPINNING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static QUARTER_CORES: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+
+/// Poll for a client's next message up to this long before sleeping, while cores are free
+/// (performance mode's): a reply that comes back within it skips the sleep and the wake-up.
+/// Set before serving.
+pub fn set_wait_spin(d: std::time::Duration) {
+    WAIT_SPIN_NS.store(d.as_nanos().min(u64::MAX as u128) as u64, Ordering::Relaxed);
+}
+
+/// A connection thread out of `WORKING` while it waits for its client.
+struct Waiting(bool);
+
+impl Waiting {
+    fn new(counted: bool) -> Waiting {
+        if counted {
+            WORKING.fetch_sub(1, Ordering::Relaxed);
+        }
+        Waiting(counted)
+    }
+}
+
+impl Drop for Waiting {
+    fn drop(&mut self) {
+        if self.0 {
+            WORKING.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
+/// The client's next bytes if they come within `set_wait_spin`'s time while cores are free
+/// (None: they didn't, or no spin is set, or no core is free).
+fn spin_read(s: &TcpStream, buf: &mut [u8]) -> Option<std::io::Result<usize>> {
+    use std::os::fd::AsRawFd;
+    let ns = WAIT_SPIN_NS.load(Ordering::Relaxed);
+    if ns == 0 || buf.is_empty() {
+        return None;
+    }
+    let quarter = *QUARTER_CORES.get_or_init(|| std::thread::available_parallelism().map_or(1, |n| (n.get() / 4).max(1)));
+    let fits = || WORKING.load(Ordering::Relaxed) + SPINNING.load(Ordering::Relaxed) <= quarter;
+    SPINNING.fetch_add(1, Ordering::Relaxed);
+    let start = std::time::Instant::now();
+    let r = loop {
+        if !fits() {
+            break None;
+        }
+        // SAFETY: recv writes at most buf.len() bytes into buf, a live exclusive slice.
+        let n = unsafe { libc::recv(s.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len(), libc::MSG_DONTWAIT) };
+        if n >= 0 {
+            break Some(Ok(n as usize));
+        }
+        let e = std::io::Error::last_os_error();
+        match e.kind() {
+            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted => {}
+            _ => break Some(Err(e)),
+        }
+        if start.elapsed().as_nanos() as u64 >= ns {
+            break None;
+        }
+        std::hint::spin_loop();
+    };
+    SPINNING.fetch_sub(1, Ordering::Relaxed);
+    r
+}
+
 /// A connection's reading side: a read that waits past `IDLE_TRIM` runs the idle hook (once
 /// until the client sends something again) and goes on waiting; one waiting past `deadline`
 /// (an idle timeout) fails with `IdleTimeout`.
@@ -140,6 +217,20 @@ struct IdleRead {
     s: Arc<TcpStream>,
     armed: bool,
     deadline: Option<std::time::Instant>,
+    /// Counted in `WORKING` (a spin was set when the connection came).
+    counted: bool,
+    /// Poll before the next wait: the client's last message came within the spin's time. A
+    /// client slower than that (8 clients' range reads, each checking 100 rows) would only
+    /// have its server threads poll for nothing: 7% fewer reads, 11% more CPU per read.
+    spin: bool,
+}
+
+impl Drop for IdleRead {
+    fn drop(&mut self) {
+        if self.counted {
+            WORKING.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
 }
 
 /// The error a read past `IdleRead::deadline` fails with.
@@ -159,12 +250,16 @@ impl IdleRead {
         if IDLE_HOOK.get().is_some() {
             s.set_read_timeout(Some(IDLE_TRIM))?;
         }
-        Ok(IdleRead { s, armed: true, deadline: None })
+        let counted = WAIT_SPIN_NS.load(Ordering::Relaxed) != 0;
+        if counted {
+            WORKING.fetch_add(1, Ordering::Relaxed);
+        }
+        Ok(IdleRead { s, armed: true, deadline: None, counted, spin: counted })
     }
 
-    /// The socket's read timeout: the idle hook's period, and no later than the deadline.
+    /// Wake for the pending idle trim or a session deadline; otherwise block for data.
     fn wait_for(&self) -> Option<std::time::Duration> {
-        let hook = IDLE_HOOK.get().map(|_| IDLE_TRIM);
+        let hook = IDLE_HOOK.get().filter(|_| self.armed).map(|_| IDLE_TRIM);
         let left = self.deadline.map(|d| {
             d.saturating_duration_since(std::time::Instant::now())
                 .max(std::time::Duration::from_millis(1))
@@ -178,13 +273,28 @@ impl IdleRead {
 
 impl Read for IdleRead {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let _waiting = Waiting::new(self.counted);
         if self.deadline.is_some() {
             self.s.set_read_timeout(self.wait_for())?;
+        }
+        // (How long the client takes, for whether to poll next time.)
+        let began = self.counted.then(std::time::Instant::now);
+        if let Some(r) = self.spin.then(|| spin_read(&self.s, buf)).flatten() {
+            let n = r?;
+            if !std::mem::replace(&mut self.armed, true) {
+                self.s.set_read_timeout(self.wait_for())?;
+            }
+            return Ok(n);
         }
         loop {
             match (&*self.s).read(buf) {
                 Ok(n) => {
-                    self.armed = true;
+                    if let Some(b) = began {
+                        self.spin = b.elapsed().as_nanos() as u64 <= WAIT_SPIN_NS.load(Ordering::Relaxed);
+                    }
+                    if !std::mem::replace(&mut self.armed, true) {
+                        self.s.set_read_timeout(self.wait_for())?;
+                    }
                     return Ok(n);
                 }
                 Err(e)
@@ -201,9 +311,7 @@ impl Read for IdleRead {
                     {
                         h();
                     }
-                    if self.deadline.is_some() {
-                        self.s.set_read_timeout(self.wait_for())?;
-                    }
+                    self.s.set_read_timeout(self.wait_for())?;
                 }
                 Err(e) => return Err(e),
             }
@@ -317,7 +425,7 @@ impl Conn {
         if deadline.is_some() {
             let r = self.rd.get_mut();
             r.deadline = None;
-            r.s.set_read_timeout(IDLE_HOOK.get().map(|_| IDLE_TRIM))?;
+            r.s.set_read_timeout(r.wait_for())?;
         }
         if first? == 0 {
             return Ok(None);
@@ -2442,6 +2550,73 @@ fn close_msg(c: &mut Conn, s: &mut Session, body: &[u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::parse_options;
+
+    #[test]
+    fn idle_read_parks_after_trimming_and_rearms_on_data() {
+        use super::{IDLE_TRIM, IdleRead, IdleTimeout, set_idle_hook};
+        use std::io::{Read, Write};
+        use std::net::{TcpListener, TcpStream};
+        use std::time::{Duration, Instant};
+
+        set_idle_hook(|| {});
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let socket = listener.accept().unwrap().0;
+        let observer = socket.try_clone().unwrap();
+        let mut reader = IdleRead::new(std::sync::Arc::new(socket)).unwrap();
+        let worker = std::thread::spawn(move || {
+            let mut byte = [0];
+            reader.read_exact(&mut byte).unwrap();
+            (reader, byte)
+        });
+        let deadline = Instant::now() + Duration::from_secs(6);
+        while observer.read_timeout().unwrap().is_some() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let parked = observer.read_timeout().unwrap().is_none();
+        client.write_all(&[42]).unwrap();
+        let (mut reader, byte) = worker.join().unwrap();
+        assert!(parked, "a trimmed idle connection still has a polling timeout");
+        assert_eq!(byte, [42]);
+        assert_eq!(observer.read_timeout().unwrap(), Some(IDLE_TRIM));
+
+        reader.deadline = Some(Instant::now() + IDLE_TRIM + Duration::from_millis(50));
+        let error = reader.read(&mut [0]).unwrap_err();
+        assert!(error.get_ref().unwrap().is::<IdleTimeout>());
+    }
+
+    #[test]
+    fn wait_spin_polls_only_for_a_quick_client() {
+        use super::{IdleRead, set_wait_spin};
+        use std::io::{Read, Write};
+        use std::net::{TcpListener, TcpStream};
+        use std::time::Duration;
+
+        // (5 ms, not performance mode's 50 µs: a loaded machine can preempt a read for longer.)
+        set_wait_spin(Duration::from_millis(5));
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let mut reader = IdleRead::new(std::sync::Arc::new(listener.accept().unwrap().0)).unwrap();
+        let mut b = [0u8; 1];
+        client.write_all(&[1]).unwrap();
+        reader.read_exact(&mut b).unwrap();
+        assert_eq!(b, [1]);
+        // A reply past the poll's time: read when it comes, and no poll before the next.
+        let late = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            client.write_all(&[2]).unwrap();
+            client
+        });
+        reader.read_exact(&mut b).unwrap();
+        let mut client = late.join().unwrap();
+        assert_eq!((b, reader.spin), ([2], false));
+        // A quick one again: polls again.
+        client.write_all(&[3]).unwrap();
+        std::thread::sleep(Duration::from_millis(5));
+        reader.read_exact(&mut b).unwrap();
+        set_wait_spin(Duration::ZERO);
+        assert_eq!((b, reader.spin), ([3], true));
+    }
 
     #[test]
     fn startup_options() {

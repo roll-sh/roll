@@ -113,3 +113,58 @@ INSERT INTO jp VALUES (7001, '{"a": {"b": 3, "c": "x1"}}', '{"a": {"b": 3, "c": 
 SELECT count(*) AS ops, (SELECT count(*) FROM jp WHERE k @> '{"a": {"b": 3, "c": "x1"}}') AS path FROM jp WHERE j @> '{"a": {"b": 3, "c": "x1"}}';
 RESET enable_seqscan;
 DROP TABLE jp;
+
+-- A bounded containment matrix. Record the complete matching id sets, not just counts.
+CREATE TABLE jm (id int, j jsonb, k jsonb, plain jsonb);
+INSERT INTO jm SELECT ord::int, j, j, j FROM jsonb_array_elements($matrix$[
+ null, true, false, 0, -0.0, 1, 1.0, 1.50, "x", "é", "", {}, [],
+ [1], [1,1.0], [1,2], [[1]], [[1,2]], [[1],[2]], [[],1],
+ {"a":1}, {"a":[1]}, {"a":[[1]]}, {"a":[]}, {"a":{}}, {"a":null},
+ {"a":{"b":1}}, {"a":{"b":[1]}}, {"a":[{"b":1}]},
+ {"a":[{"b":1,"c":2}]}, {"a":[{"b":1},{"c":2}]},
+ {"a":[{"b":1,"c":0},{"b":0,"c":2}]},
+ [{"a":1}], [{"a":[1]}], [{"a":1,"b":2}], [{"a":1},{"b":2}],
+ [{"a":1,"b":0},{"a":0,"b":2}],
+ {"a":{"b":1},"ab":1}, {"a":1,"a":2}, {"":1,"ab":"x"},
+ {"a":[{"b":1},{}]}, [{"a":1},{}], {"a":[1,[]]},
+ {"a":{"b":[]},"c":1}, {"a":{"b":1.000}}, {"a":[1.0,1.00]},
+ {"a":[{"b":[1,2]}]}, {"a":[{"b":[1]},{"b":[2]}]}
+]$matrix$::jsonb) WITH ORDINALITY AS d(j, ord);
+INSERT INTO jm VALUES (100, NULL, NULL, NULL);
+CREATE INDEX jm_ops ON jm USING gin (j);
+CREATE INDEX jm_path ON jm USING gin (k jsonb_path_ops);
+ANALYZE jm;
+SET enable_seqscan = off;
+EXPLAIN (COSTS OFF) SELECT id FROM jm WHERE j @> '{"a":1}';
+EXPLAIN (COSTS OFF) SELECT id FROM jm WHERE k @> '{"a":1}';
+CREATE FUNCTION jm_check(q jsonb) RETURNS text LANGUAGE plpgsql AS $$
+DECLARE r1 text; r2 text; r3 text;
+BEGIN
+  SELECT string_agg(id::text, ',' ORDER BY id) INTO r1 FROM jm WHERE j @> q;
+  SELECT string_agg(id::text, ',' ORDER BY id) INTO r2 FROM jm WHERE k @> q;
+  SELECT string_agg(id::text, ',' ORDER BY id) INTO r3 FROM jm WHERE plain @> q;
+  RETURN coalesce(r1, '-') || ' | ' || (r1 IS NOT DISTINCT FROM r2) || ' ' || (r1 IS NOT DISTINCT FROM r3);
+END $$;
+SELECT id, jm_check(plain) FROM jm ORDER BY id;
+-- The two-leaf object must come from one array element. Empty siblings require recheck.
+SELECT jm_check('{"a":[{"b":1,"c":2}]}'), jm_check('[{"a":1,"b":2}]'), jm_check('{"a":[{"b":1},{}]}');
+BEGIN;
+UPDATE jm SET j = '{"a":1}', k = '{"a":1}', plain = '{"a":1}' WHERE id = 22;
+DELETE FROM jm WHERE id = 21;
+INSERT INTO jm VALUES (101, '{"a":1}', '{"a":1}', '{"a":1}');
+SELECT jm_check('{"a":1}'), jm_check('{"a":[1]}');
+ROLLBACK;
+SELECT jm_check('{"a":1}'), jm_check('{"a":[1]}');
+UPDATE jm SET j = '{"a":[1]}', k = '{"a":[1]}', plain = '{"a":[1]}' WHERE id = 21;
+DELETE FROM jm WHERE id = 22;
+INSERT INTO jm VALUES (102, '{"a":[1]}', '{"a":[1]}', '{"a":[1]}');
+SELECT jm_check('{"a":1}'), jm_check('{"a":[1]}');
+-- Partial indexes retain the heap predicate and recheck.
+DROP INDEX jm_ops, jm_path;
+CREATE INDEX jm_ops ON jm USING gin (j) WHERE id > 25;
+CREATE INDEX jm_path ON jm USING gin (k jsonb_path_ops) WHERE id > 25;
+SELECT string_agg(id::text, ',' ORDER BY id) FROM jm WHERE j @> '{"a":[{"b":1}]}' AND id > 25;
+SELECT string_agg(id::text, ',' ORDER BY id) FROM jm WHERE k @> '{"a":[{"b":1}]}' AND id > 25;
+RESET enable_seqscan;
+DROP FUNCTION jm_check(jsonb);
+DROP TABLE jm;

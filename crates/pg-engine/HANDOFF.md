@@ -1134,8 +1134,12 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
   base's 80), and the client side decodes a little less per value (a remote row of every
   column in order is the row without a NULL row filled first, `ScanNode::dense`; each text
   value's UTF-8 checked once, `remote::conn` DataRow). Its traffic numbers weren't measured
-  yet (the bench job was stopped to free the heavy slot). Still open: 628 differs only in
-  the outer plan's choice (PostgreSQL's epq path is a hash
+  yet (the bench job was stopped to free the heavy slot; measured since: BENCH.md "postgres_fdw,
+  round 9", second batch). Third batch (1,952: 628 gained, none lost): the target scan the
+  wrapper joins remotely (`fdw_dml_target`) gets `fdw_sorted_paths` too, its ordering kept
+  by `mark_target` (`ORDER BY ... FOR UPDATE`): with remote estimates the sorted path costs
+  the plain one's and add_path keeps it, so the epq path's hash join reads it. Before it: 628
+  differed only in the outer plan's choice (PostgreSQL's epq path is a hash
   join whose outer side is the sorted remote scan, `ORDER BY "C 1"`: the join search's,
   agent 177); the remote SELECT list puts a SET expression's columns first only when they
   are the target's (`UPDATE f4 SET c3 = f5.c3 || ...`: PostgreSQL has `r2.c3` first); a
@@ -4657,6 +4661,70 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
     build keeping its heap measure for the next (`txn::unchanged`, as VACUUM's is) would save
     sizing the rows again (7% of a CREATE UNIQUE INDEX after a CREATE INDEX), but the build's
     own linked run invalidates the table's watch when it commits; not done.
+- **Write path, round 9** (agent 182; BENCH.md "Bulk writes, round 9"): a rolled-back DROP's
+  row ids, COPY's n_tup_ins on the general path, DELETE's run sorted by runs, COPY TO and
+  INSERT … SELECT from stored rows; DELETE leaving its index entries for VACUUM measured and
+  dropped.
+  - **A rolled-back DROP keeps its sequences** (data loss before): `drop_table_now` reset the
+    table's hidden row-id sequence (and a serial's owned sequence, a dropped sequence, a
+    matview's storage's) at once and outside the transaction (`Database::reset_seq` commits
+    to the store), so after ROLLBACK, ROLLBACK TO or a crash with the DROP in flight the next
+    INSERT took row id 1 again and `put_new_row` replaced the row stored under it. The resets
+    wait for the commit (`Txn::seq_drops`, applied by `finish_xid` once the store commit
+    returned, truncated by ROLLBACK TO; a crash after the commit leaks a 9-byte key, which
+    CREATE SEQUENCE resets anyway). The dropped table also counts as given new storage
+    (`mark_new_storage`), so a rollback lays its size models out from its rows again (the
+    next row took ctid (0,1) next to the row already there). Row ids are allocated only by
+    `nextval_by_one` / `nextval(rowid_sequence)` (inserts, rewrites, `write_new_rows`, the
+    format-0 upgrade) and never go back now but at a committed DROP or an unlogged table's
+    reset, both of which delete the table's key range. Golden `a182_drop_rollback`,
+    `crash_unlogged` `drop_in_flight_keeps_row_ids_after_a_crash`; `crash_random` inserts
+    into its e<i> tables (`InsE`): its DROP TABLE and ROLLBACK steps had nothing writing to
+    the dropped tables after, so it never saw this.
+  - **DELETE leaving its index entries for VACUUM: measured, dropped.** The design (a
+    per-statement blob of the deleted row ids under `oid | 0xFFFFFFFE`, written in the
+    DELETE's own commit; index-only scans and other entry-only readers filtering by it,
+    unique checks reading the row; VACUUM scanning each index and tombstoning the entries
+    whose row id is in a committed blob, then deleting the blobs in the same commit) was
+    agreed with the index, storage and durability reviewers, then measured first on the
+    1M-row bulk sequence (dist, profiles): the DELETE would save about 0.25 s (its entry
+    keys are about 27% of its connection thread: the run's sort, write and the entries'
+    values), but VACUUM would pay a raw scan of each index (0.16 s per 1M-entry index: the
+    storage merge share of the index-only scan right after the DELETE) and a sorted run of
+    500k tombstones (about 0.1 s), and the next index scan would save only about 0.03 s: about
+    +0.15 s in all (BENCH.md "Bulk writes, round 9" has the table). PostgreSQL's VACUUM pays
+    the same index scans; the engine's raw entry scan simply costs more than the sorted run
+    at delete time. What would change the answer: a raw entry scan near PostgreSQL's cost
+    (the store's merge: agent 169's `Scan::position` / merge work), or a way for VACUUM to
+    find the dead entries without scanning the indexes (none without the old values). Don't
+    re-propose it without one of the two.
+  - **COPY's n_tup_ins on the general path** (unique indexes, AFTER triggers, partitions): a
+    multi-insert COPY's stored rows are held (`pgstat::hold_inserts`, `count_stored` in
+    `store_inserted`, `take_held`) and counted as its buffer is flushed (`flush_plain_counts`,
+    as heap_multi_insert counts them); an error before the flush drops them, on the plain
+    path too (`counts_on_error`: it counted them on a parse error). A unique violation is
+    found at the flush and raised after its counts. Golden `a182_copy_counts`.
+    The index-violation path also holds its failed heap insertion (`count_failed_insert`):
+    a later parse error can discard that buffer before the index error would be raised.
+    `a182_copy_batches` covers both sides of the 1,000-row boundary.
+  - **COPY TO from stored rows**: a serial table scan and an identity projection can pass
+    stored tuples through `Node::each_stored`. Text COPY emits supported integers, float8s
+    and strings without constructing a decoded row. Unsupported types, older tuples missing
+    added columns, dropped or virtual columns, CSV, binary and other encodings use the
+    decoded path. Golden `a182_copy_out` records PostgreSQL 18.6 output.
+  - **INSERT SELECT from stored rows**: an eligible plain target past the size model stores
+    the source tuple's values under a fresh header (`StoredInsert`, `inserted_stored`).
+    Domains, indexes, CHECKs, dropped/generated columns, SSI and change streams exclude this
+    path. NULL for NOT NULL, long encoded values, older short tuples and modelled targets
+    fall back to decoded insertion. `big_tables::insert_select_from_stored_rows` checks it.
+  - Resume verification, 2026-11-08: source `85307c242973e58f63d9c514475fb992e35011bc`
+    passes release goldens filtered by `copy`, `stat`, `insert` (three harness tests each),
+    all 19 `big_tables` tests and all-target Clippy. Logs: `~/.cache/a182/resume-primary/`.
+    Job 7 at `2f1b3a3e5` passed 1,804 selected regression units and the spill test, but its
+    COPY goldens failed; its final HEAVY-EXIT 0 did not imply every step passed. The resume
+    check fixes and reruns those failures. Later complete-suite coverage belongs to the
+    verification train. No storage format or durability rule changes in this batch.
+
 - **Result rows stream** (round 19, agent 65): a top-level SELECT's rows go to the client as
   the executor returns them, as PostgreSQL's printtup sends a DataRow per row. A
   `session::RowSink` (`session/sink.rs`, PostgreSQL's DestReceiver) takes them in
@@ -4719,7 +4787,8 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
   - *Memory back to the system*: `roll-engine` runs mimalloc's collection once a second on a
     thread of its own (`roll-trim`): memory freed by busy threads or by threads that ended
     went back only when a thread ran the collection, so a quiet process kept its peak.
-  - *Operator settings* (engine options, not PostgreSQL settings): `--cache-mb` (block cache,
+  - *Operator settings* (engine options, not PostgreSQL settings; since agent 180 the defaults
+    are `--mode`'s, "Modes" below, efficient's here): `--cache-mb` (block cache,
     64), `--plan-cache-mb` (parse trees, statement templates and PL/pgSQL compiles, 36, split
     6 : 2 : 1 since round 24's agent 145: `lru::set_plan_cache_bytes`; the templates were a
     fixed 16 MB outside it; `memory_load`'s `statement_templates_hold_what_they_count`
@@ -9005,6 +9074,46 @@ Left, for the planner:
 - Untouched: item 2 (every node's cost, so one-shot plans stop building EXPLAIN trees for
   Gathers and Incremental Sort keys), planning CPU over plans/apps.sql and the ORM queries,
   TPC-H q21 / q18, and the rest of round 10's list.
+## Planner round 12 (agent 190)
+
+Ordered grouping scans retain the ORDER BY directions and the LIMIT or cursor fraction
+while choosing their input path. The comparison includes a sort of the grouped output
+when needed. A cursor uses startup plus its fraction of the remaining cost. On round 11's
+six-row indexed grouping, the default fraction and zero choose GroupAggregate over an
+Index Scan. Fraction one and an ordinary SELECT keep Sort over HashAggregate. This also
+lets the existing cursor code reject backward FETCH on the default plan and abort the
+transaction. EXPLAIN of SCROLL adds Materialize. No cursor or session API changed.
+
+Other changes retained from the saved lane move a pulled-up anti join's variable-free
+InitPlan qual to its join filter, allow shallow sublinks in catalog EXISTS scans, show the
+written collation's relabel in DISTINCT sort keys, and account for the DELETE join target's
+row marks. Planning estimates pg_depend rows from catalog counts without constructing the
+catalog's dependency rows. Scan costing shares index metadata, consumes owned candidate
+paths, and caches at most eight clause selectivities per relation. A relation made for
+another execution starts with an empty cache.
+
+Seven outstanding EXPLAIN cases from the original probe remain in
+`tests/difftest/a190_planner_r12_remaining.sql`, with their setup. They cover a redundant
+GROUP BY key determined by a primary key, a bounded grouping sort with NULLS LAST, a
+DELETE RETURNING scan width, two semi-join gating plans, DISTINCT order propagation, and
+a catalog join plan. They are not passing golden coverage. The original complete probe
+and both outputs are retained under `~/.cache/a190/` and in the WIP history.
+
+Verification on base `5ead496c2` with the lane's production patch: release build passed,
+focused release Clippy completed with 10 warnings and no errors, and 19 planner plus 14
+cursor golden files matched in-process, over the wire, and in shuffled order. The new
+`a190_planner_r12` golden has 99 statements, recorded from PostgreSQL 18.6. The first full
+probe had seven EXPLAIN differences, preserved above. Logs and the source patch are in
+`~/.cache/a190/resume-logs/`; `resume-recheck.log` ends with `HEAVY-EXIT 0`.
+
+Origin advanced during these checks. The batch was rebased onto `140b4c531` and its
+planner patch remained byte-identical. Focused release Clippy on the combined source
+completed with 10 warnings and no errors, with `resume-integrated-check.log` ending in
+`HEAVY-EXIT 0`. The goldens above describe the pre-rebase build. The verification train
+owns the full suite.
+No performance comparison was run for this batch. The lane's worktree and cache remain
+available to the coordinator.
+
 ## Storage engine, round 1 (agent 169)
 
 Agent 169 owns the store's internals (block format and cache, point lookups inside the store,
@@ -9095,6 +9204,84 @@ finished, the scan side's storage cost). BENCH.md "Storage engine, round 1" has 
     in `Scan::position` (an updated row's two versions sit in two sources, so the merge goes a
     row at a time). Agent 178's: `scan_row_rest`'s key `Arc` per UPDATE row, `Hot::scan`'s
     collected rows, two copies per index entry in `next_indexed`.
+
+## Modes: efficient and performance (agent 180, 2026-11-07)
+
+`roll-engine --mode efficient|performance` picks which way the server leans where footprint
+and speed pull apart. BENCH.md "Modes" has the measurements behind every value.
+
+- **Efficient** (the default, exactly the behaviour before the switch): a 64 MB block cache and
+  36 MB of plan caches, a connection idle for 2 s gives its thread's free memory back
+  (`server::set_idle_hook`), a database closes 60 s after its last session. For test and
+  development environments and many-branch serverless use, where most servers and sessions
+  sit idle.
+- **Performance** (production): the shared caches take a quarter of the memory the server may
+  use (its cgroup's `memory.max`, the tightest of its own and its ancestors', else MemTotal:
+  `mode::server_memory`), 3 : 1 between blocks and plans as `--memory-budget-mb` splits them,
+  never below efficient mode's, the plan caches at most 1 GB (an 8 GB container: 1.5 GB of
+  blocks, 512 MB of plans); idle sessions keep their memory (no trim, no wake-ups while idle);
+  databases stay open (no `roll-idle` thread); a connection waiting for its client polls its
+  socket for up to 50 µs before it sleeps, if its client's last message came within that
+  (`IdleRead::spin`) and while the connections at work and polling fit in a quarter of the
+  cores the process may run on (on 4 cores: only while no other connection works;
+  `server::set_wait_spin`). An idle server spins never: at most 50 µs after a client's last
+  message, then the thread sleeps in its read.
+- **Where the knobs live.** `src/mode.rs`: `Mode` and `Profile::new(mode, memory)`, the only
+  place a knob's per-mode value is decided. `roll-engine`'s `profile()` picks the mode
+  (`--mode`, else `-c roll.engine_mode=...`, else `roll.engine_mode` in postgresql.auto.conf,
+  i.e. `ALTER SYSTEM SET roll.engine_mode = 'performance'` and a restart, else efficient; a
+  `--mode` and a `-c` that disagree refuse to start), then the explicit flags replace single
+  parts: `--memory-budget-mb`, `--cache-mb`, `--plan-cache-mb`, `--idle-close-secs`. Read at
+  start only. `SHOW roll.engine_mode` starts with the selected mode, including the default
+  and `--mode`. It is a custom (placeholder) parameter: a session `SET` changes its displayed
+  value, not the running profile; `RESET` restores the startup selection. Custom command-line
+  parameters now create placeholders as PostgreSQL does (`Settings::set_command_line`).
+  `ALTER SYSTEM` takes effect on restart; reload keeps the running selection visible. A new knob
+  goes into `Profile` with both values, never as an `if performance` at its use.
+- **The same in both modes**: query results, errors, notices, plans, catalog contents,
+  everything SQL sees apart from `roll.engine_mode` itself; durability (fsync on commit, crash
+  safety: performance mode is not `--no-sync`); transparent huge pages stay off.
+- **Measured and left out** (BENCH.md "Modes"): transparent huge pages (no workload faster in
+  either direction beyond the noise, 17-20 MB more memory, TPC-H and analytic a little slower);
+  memtables of 32 / 64 MB instead of 8 (bulk loads 5-15% slower, reads unchanged); never
+  purging mimalloc's free pages (`MIMALLOC_PURGE_DELAY=-1`: no faster, 80 MB more); a spin
+  capped at half the cores without counting the working threads (32 clients -15%), or allowed
+  while working and polling threads fit in all the cores (8 clients -8%) or in half (8
+  clients' range reads -9%) or in a quarter for every client (range reads -7%: the
+  per-connection rule took it to -4%, within the noise). Not mode
+  knobs: the per-row executor and storage costs behind range reads, TPC-H, bulk loads (the
+  executor, planner, OLTP, storage, bulk-write and index owners' areas); more parallel workers
+  per Gather on bigger machines (the executor's `parallel_workers`, unmeasurable on the
+  scoreboard's 4 cores).
+- **Efficient mode, free improvements kept in both modes**: idle connections park after their
+  trim (d7e454cc5, from `perf/pg-engine-idle-park-20261105`): before, an idle session woke
+  every 2 s for nothing.
+- **Scoreboard**: `tools/bench/scoreboard.sh` runs both modes (`engine` efficient with
+  `--cache-mb 2048` as always, `engperf` performance sizing itself from `SERVER_MEM`, 8g, the
+  memory limit every server container gets), PostgreSQL tuned (`run.sh pg-start`'s
+  `shared_buffers=2GB`: a quarter of 8 GB, the same rule) and with its stock settings
+  (`pgdef`, `SB_PG_DEFAULT=` leaves it out), and pgrust; a table per mode. The gate's
+  baselines and status are efficient mode's; performance mode's gate values are shown.
+  `run.sh engperf-start` / `pgdef-start` start them by hand; `CACHE_MB=` (set empty) starts the
+  engine without `--cache-mb`.
+
+
+- **Resumed verification (2026-11-08)**: fixed the missing custom command-line placeholder
+  and its RESET default; the earlier job F SHOW errors were real, not passing probes.
+  Release build and Clippy pass (the same 18 warnings); 206 library tests and the CLI mode
+  selection test pass, two library tests ignored. The live probe passes 29 assertions across
+  seven starts and three rejected starts, including SHOW / RESET, reload versus restart,
+  explicit overrides and committed rows retained across both mode directions. Receipts:
+  `~/.cache/a180/logs/jobG2.log`, `testG.log`, `relG.log`, `clippyG.log`; live probe script:
+  `~/.cache/a180/probeG.py`. Reused: job C's 85 wire/lifecycle/session tests (one ignored),
+  isolation 1,647/1,648 permutations and 12,234/12,238 steps (the documented L2 difference).
+  Scoreboard shell syntax and the five-server renderer fixture pass. The saved efficient
+  footprint gate (job E) passed before this SQL visibility fix; final dist footprint and
+  loaded comparisons await the serialized verification train. No new benchmark claim.
+  Release/runtime receipts cover pre-rebase `2546a4e37`; rebasing onto bulk batch
+  `140b4c531` and planner batch `223fffc6c` preserved all nine lane source/script blobs
+  exactly. Combined all-target Clippy passes with 18 warnings: `jobH.log` (bulk) and
+  `jobI.log` (planner); full combined runtime checks remain with the train.
 
 ## Starting prompt for the next agent
 
