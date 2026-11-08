@@ -1,0 +1,144 @@
+> CREATE SCHEMA a188_ic
+-- CREATE SCHEMA
+
+> CREATE TABLE a188_ic.a188_t1 (id int PRIMARY KEY, a text)
+-- CREATE TABLE
+
+> CREATE TABLE a188_ic.a188_t2 (id int)
+-- CREATE TABLE
+
+> CREATE VIEW a188_ic.a188_v AS SELECT 1 AS one
+-- CREATE VIEW
+
+> SELECT ns.nspname, cls.relname, cls.relkind
+> FROM pg_class AS cls
+> JOIN pg_namespace AS ns ON ns.oid = cls.relnamespace
+> LEFT OUTER JOIN pg_description AS des ON des.objoid = cls.oid AND des.objsubid = 0
+> WHERE cls.relkind IN ('r', 'v', 'm', 'f', 'p')
+>   AND ns.nspname NOT IN ('pg_catalog', 'information_schema')
+>   AND NOT EXISTS (
+>       SELECT * FROM pg_depend AS dep
+>       WHERE dep.classid = (SELECT cls.oid FROM pg_class AS cls JOIN pg_namespace AS ns ON ns.oid = cls.relnamespace WHERE relname = 'pg_class' AND ns.nspname = 'pg_catalog')
+>         AND dep.objid = cls.oid AND dep.deptype IN ('e', 'x'))
+>   AND cls.relname IN ('a188_t1')
+> ORDER BY 2
+nspname:name | relname:name | relkind:char
+a188_ic | a188_t1 | r
+-- SELECT 1
+
+> SELECT c.relname FROM pg_class c
+> WHERE NOT EXISTS (SELECT 1 FROM pg_depend d
+>                   WHERE d.classid = (SELECT 'pg_class'::regclass::oid) AND d.objid = c.oid
+>                     AND 1 / (CASE WHEN c.relname = 'a188_t1' THEN 1 ELSE 0 END) = 0)
+>   AND c.relname IN ('a188_t1')
+relname:name
+a188_t1
+-- SELECT 1
+
+> SELECT c.relname FROM pg_class c
+> WHERE NOT EXISTS (SELECT 1 FROM pg_depend d
+>                   WHERE d.classid = (SELECT 'pg_class'::regclass::oid) AND d.objid = c.oid
+>                     AND 1 / (CASE WHEN c.relname = 'a188_t1' THEN 1 ELSE 0 END) = 0)
+>   AND c.relname = 'a188_t1' AND c.relnamespace = 'a188_ic'::regnamespace
+relname:name
+a188_t1
+-- SELECT 1
+
+> SELECT c.relname FROM pg_class c
+> WHERE NOT EXISTS (SELECT 1 FROM pg_depend d
+>                   WHERE d.classid = (SELECT 'pg_class'::regclass::oid) AND d.objid = c.oid
+>                     AND 1 / (CASE WHEN c.relname = 'a188_t1' THEN 1 ELSE 0 END) = 0)
+>   AND c.relname OPERATOR(pg_catalog.~) '^(a188_t1)$' COLLATE pg_catalog.default
+relname:name
+a188_t1
+-- SELECT 1
+
+> SELECT c.relname FROM pg_class c
+> WHERE NOT EXISTS (SELECT 1 FROM pg_depend d
+>                   WHERE d.classid = (SELECT 'pg_class'::regclass::oid) AND d.objid = c.oid
+>                     AND 1 / (CASE WHEN c.relname LIKE 'a188_t%' THEN 1 ELSE 0 END) = 0)
+>   AND c.relname OPERATOR(pg_catalog.~) '^(a188_t.*)$' COLLATE pg_catalog.default
+> ORDER BY 1
+relname:name
+a188_t1
+a188_t1_pkey
+a188_t2
+-- SELECT 3
+
+> SELECT c.relname FROM pg_class c
+> WHERE NOT EXISTS (SELECT 1 FROM pg_depend d
+>                   WHERE d.classid = (SELECT 'pg_class'::regclass::oid) AND d.objid = c.oid
+>                     AND 1 / (CASE WHEN c.relname LIKE 'a188\_t%' THEN 1 ELSE 0 END) = 0)
+>   AND c.relname LIKE 'a188\_t%'
+> ORDER BY 1
+relname:name
+a188_t1
+a188_t1_pkey
+a188_t2
+-- SELECT 3
+
+> SELECT c.relname, n.nspname FROM pg_catalog.pg_class c
+>      LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+> WHERE c.relname OPERATOR(pg_catalog.~) '^(a188_t1)$' COLLATE pg_catalog.default
+>   AND pg_catalog.pg_table_is_visible(c.oid)
+> ORDER BY 2, 1
+relname:name | nspname:name
+-- SELECT 0
+
+> SET search_path = a188_ic, public
+-- SET
+
+> SELECT c.relname, n.nspname FROM pg_catalog.pg_class c
+>      LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+> WHERE c.relname OPERATOR(pg_catalog.~) '^(a188_t1)$' COLLATE pg_catalog.default
+>   AND pg_catalog.pg_table_is_visible(c.oid)
+> ORDER BY 2, 1
+relname:name | nspname:name
+a188_t1 | a188_ic
+-- SELECT 1
+
+> SELECT c.relname FROM pg_catalog.pg_class c
+> WHERE c.relname OPERATOR(pg_catalog.~) '^(a188_t)$' COLLATE pg_catalog.default
+>   AND pg_catalog.pg_table_is_visible(c.oid)
+relname:name
+-- SELECT 0
+
+> SELECT c.relname FROM pg_catalog.pg_class c
+> WHERE c.relname OPERATOR(pg_catalog.~) '^(a188_t.*)$' COLLATE pg_catalog.default
+>   AND pg_catalog.pg_table_is_visible(c.oid)
+> ORDER BY 1
+relname:name
+a188_t1
+a188_t1_pkey
+a188_t2
+-- SELECT 3
+
+> SELECT c.relname FROM pg_catalog.pg_class c
+> WHERE c.relname OPERATOR(pg_catalog.~) '^(a188_.*_pkey)$' COLLATE pg_catalog.default
+> ORDER BY 1
+relname:name
+a188_t1_pkey
+-- SELECT 1
+
+> RESET search_path
+-- RESET
+
+> SELECT c.relname FROM pg_class c
+> WHERE c.relname ~ '(a188_t1|a188_v)$' AND c.relnamespace = 'a188_ic'::regnamespace ORDER BY 1
+relname:name
+a188_t1
+a188_v
+-- SELECT 2
+
+> SELECT c.relname FROM pg_class c WHERE c.relname ~* '^(A188_T1)$'
+relname:name
+a188_t1
+-- SELECT 1
+
+> DROP SCHEMA a188_ic CASCADE
+NOTICE 00000: drop cascades to 3 other objects
+DETAIL: drop cascades to table a188_ic.a188_t1
+DETAIL: drop cascades to table a188_ic.a188_t2
+DETAIL: drop cascades to view a188_ic.a188_v
+-- DROP SCHEMA
+

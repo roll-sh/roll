@@ -477,6 +477,14 @@ impl Scope {
     }
 }
 
+/// The scope whose derivation (`depends_in`) makes object `a`'s own rows, pg_depend's rows
+/// with it as `objid`. None: an object whose rows only a whole derivation makes (`entity_of`'s
+/// `Always`), or one the scoped walk doesn't handle.
+pub fn scope_of(cat: &Catalog, a: Addr) -> Option<Scope> {
+    let mut s = Scope::default();
+    s.add(entity_of(cat, a)?).then_some(s)
+}
+
 /// The entity deriving `a`'s rows. None: an object of a kind the scoped walk doesn't handle
 /// (schemas, functions' ranges, domain constraints, ...), or one that doesn't exist.
 fn entity_of(cat: &Catalog, (class, oid, _): Addr) -> Option<Entity> {
