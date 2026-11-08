@@ -182,15 +182,22 @@ when `ROLL_EDGE=1` (without it rolld is unchanged).
   holding the `acme` singleton orders what's missing or within 30 days of expiry (backing off an
   hour after a failed order). `roll_edge::certs::Singleton` is the seam for roll-cluster's
   `singleton(name)`; rolld passes `LocalSingleton` until the merge.
-- **Healthy** (`/healthz` 200) once a certificate is loaded and until SIGTERM. Then `/healthz`
-  fails at once, the public listeners keep accepting and serving for `ROLL_EDGE_DRAIN_DELAY`
-  (15 s) while the NLB takes the node out, keep-alive HTTP connections are closed after their
-  request in flight, and only then do the products start their own drains.
+- **Healthy** (`/healthz` 200) once a certificate is loaded and until SIGTERM. Then, in this
+  order (`roll_edge::drain`), so a client moves once: `/healthz` fails at once; the public
+  listeners keep accepting and serving for `ROLL_EDGE_DRAIN_DELAY` (15 s) while the NLB takes the
+  node out; they stop accepting (a late connection is refused and goes to another node) and
+  keep-alive HTTP connections close after their request in flight; the products drain, each
+  closing its own tenants' connections gradually as it hands them off (Redis over 2 s, CQL over
+  a second); only then does the edge close the TCP connections still open, the ones no product
+  here owns (spliced on to another node, or never past their first message). Tested with real
+  clients by `redis-control/tests/cluster.rs::a_drain_hands_a_busy_database_over_losing_nothing`
+  and `nosql-control/tests/cluster.rs::a_drain_hands_databases_over_with_nothing_lost`.
 - **Forwarding TCP** to a tenant's owner: `roll_edge::splice::splice(client, owner_url, signer,
   hop, first_bytes)` opens an HTTP upgrade to the owner's `/internal/edge/splice` (HMAC-SHA256
   over the hop and the time under the cluster secret, 60 s skew), writes the bytes already read,
-  then copies both ways. The owner hands the stream to the handler its product registered;
-  Postgres's is registered (the proxy, with the endpoint as named).
+  then copies both ways. The owner hands the stream to the handler its product registered
+  (Postgres, Redis, CQL). The route is on every cluster node's internal API, with the edge or
+  without (rolld's own Redis and CQL ports splice too; `rolld/src/edge.rs`, `splice_routes`).
 - **Dev mode**: `ROLL_EDGE_CERT_DIR` serves its `<name>.crt`/`<name>.key` pairs (reloaded when
   they change) and writes a self-signed certificate for every edge name when it has none; origin
   pulls are off unless `ROLL_EDGE_ORIGIN_PULL=1`. Every listener's address is a setting

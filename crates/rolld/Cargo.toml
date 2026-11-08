@@ -71,3 +71,4 @@ reqwest.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
 tokio.workspace = true
+tower.workspace = true

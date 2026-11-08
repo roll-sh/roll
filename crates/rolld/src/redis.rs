@@ -107,18 +107,13 @@ impl Redis {
         redis_control::cluster::rest_router(self.control.clone())
     }
 
-    /// The internal route other nodes splice connections to (`/internal/edge/splice`), when the
-    /// edge (which serves it otherwise) is off.
-    pub fn internal(&self, router: axum::Router, edge_on: bool) -> anyhow::Result<axum::Router> {
-        if self.control.cluster().is_none() {
-            return Ok(router);
+    /// The internal route REST requests other nodes forward come in on (their database is
+    /// here). Spliced connections come in on the node's splice route (`edge::splice_routes`).
+    pub fn internal(&self, router: axum::Router) -> axum::Router {
+        match self.control.cluster() {
+            Some(_) => router.merge(redis_control::cluster::internal_router(self.control.clone())),
+            None => router,
         }
-        // REST requests other nodes forward to this one (their database is here).
-        let router = router.merge(redis_control::cluster::internal_router(self.control.clone()));
-        let (Some(secret), false) = (cluster_secret(), edge_on) else { return Ok(router) };
-        let handlers = roll_edge::splice::Handlers::default();
-        handlers.register(redis_control::cluster::PRODUCT, self.front.handler());
-        Ok(router.merge(roll_edge::splice::router(roll_edge::splice::Signer::new(&secret)?, handlers)))
     }
 
     /// Make every acknowledged write durable before the process exits (the databases a drain

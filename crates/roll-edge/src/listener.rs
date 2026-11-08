@@ -1,6 +1,9 @@
 //! The accept loop every public TCP listener shares: the PROXY header (when the NLB sends one),
-//! then the TLS handshake, both under a deadline, then the product's handler.
+//! then the TLS handshake, both under a deadline, then the product's handler. Each follows the
+//! node's [`Drain`]: it stops accepting when the drain says so, and a product protocol's
+//! connections still open when the edge closes are closed ([`crate::drain`] has the order).
 
+use crate::drain::Drain;
 use crate::proxy_protocol;
 use std::future::Future;
 use std::net::SocketAddr;
@@ -83,20 +86,24 @@ where
     Ok((stream, accepted))
 }
 
-/// Accept forever: each connection gets its PROXY header read and its TLS handshake done, then
-/// `handler` runs on it in its own task.
-pub async fn serve_tls<F, Fut>(listener: TcpListener, tls: Arc<ServerConfig>, opts: ListenOptions, handler: F) -> std::io::Result<()>
+/// Accept until the drain stops it: each connection gets its PROXY header read and its TLS
+/// handshake done, then `handler` runs on it in its own task, until it ends or the edge closes
+/// the connections left ([`Drain::close`]).
+pub async fn serve_tls<F, Fut>(listener: TcpListener, tls: Arc<ServerConfig>, opts: ListenOptions, drain: Drain, handler: F) -> std::io::Result<()>
 where
     F: Fn(TlsStream<TcpStream>, Accepted) -> Fut + Clone + Send + Sync + 'static,
     Fut: Future<Output = ()> + Send + 'static,
 {
     let acceptor = TlsAcceptor::from(tls);
-    serve_tcp(listener, opts, move |sock, peer| {
-        let acceptor = acceptor.clone();
-        let handler = handler.clone();
+    serve_tcp(listener, opts, drain.clone(), move |sock, peer| {
+        let (acceptor, handler, drain) = (acceptor.clone(), handler.clone(), drain.clone());
         async move {
             match tokio::time::timeout(opts.handshake_timeout, handshake(sock, peer, &acceptor)).await {
-                Ok(Ok((stream, accepted))) => handler(stream, accepted).await,
+                Ok(Ok((stream, accepted))) => {
+                    if drain.until_closing(handler(stream, accepted)).await.is_none() {
+                        debug!(%peer, "edge: connection closed by the drain");
+                    }
+                }
                 Ok(Err(e)) => debug!(%peer, error = %e, "edge: TLS handshake failed"),
                 Err(_) => debug!(%peer, "edge: TLS handshake timed out"),
             }
@@ -105,15 +112,24 @@ where
     .await
 }
 
-/// Accept forever, read each connection's PROXY header (under the handshake deadline) and hand
-/// the socket and the client's address to `handler` in its own task.
-pub async fn serve_tcp<F, Fut>(listener: TcpListener, opts: ListenOptions, handler: F) -> std::io::Result<()>
+/// Accept until the drain stops it ([`Drain::stop_accepting`]; then the socket is closed, so
+/// new connections are refused, and this never returns), read each connection's PROXY header
+/// (under the handshake deadline) and hand the socket and the client's address to `handler` in
+/// its own task. Connections already accepted are the handler's to end.
+pub async fn serve_tcp<F, Fut>(listener: TcpListener, opts: ListenOptions, drain: Drain, handler: F) -> std::io::Result<()>
 where
     F: Fn(TcpStream, SocketAddr) -> Fut + Clone + Send + Sync + 'static,
     Fut: Future<Output = ()> + Send + 'static,
 {
+    let refusing = drain.refusing();
+    tokio::pin!(refusing);
     loop {
-        let (mut sock, peer) = match listener.accept().await {
+        let accepted = tokio::select! {
+            biased;
+            _ = &mut refusing => break,
+            r = listener.accept() => r,
+        };
+        let (mut sock, peer) = match accepted {
             Ok(x) => x,
             Err(e) => {
                 // Out of descriptors and the like: back off instead of spinning.
@@ -133,4 +149,9 @@ where
             handler(sock, client).await;
         });
     }
+    let addr = listener.local_addr().ok();
+    drop(listener);
+    debug!(?addr, "edge: listener closed (draining)");
+    // Ending would read as the listener failing: whoever runs it stops on its own schedule.
+    std::future::pending().await
 }

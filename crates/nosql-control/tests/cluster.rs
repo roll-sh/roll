@@ -9,7 +9,9 @@
 //! - a killed owner's databases are taken over within the lease, with every acknowledged
 //!   (`sync`) write, and the old owner can't write any more (fencing);
 //! - a drain hands databases over with every acknowledged (`async`) write, clients only
-//!   reconnecting.
+//!   reconnecting once: each node also serves CQL as the edge does (`roll_edge::listener`, TLS,
+//!   following the node's `roll_edge::Drain`), and a node's stop in the edge's order leaves the
+//!   closing of a database's connections to its handoff.
 
 mod common;
 
@@ -47,6 +49,9 @@ struct NodeUnderTest {
     api: String,
     cql: SocketAddr,
     cql_tls: SocketAddr,
+    /// CQL over TLS as the edge's listener serves it, following `drain`.
+    edge: SocketAddr,
+    drain: roll_edge::Drain,
     alternator: String,
     tasks: Vec<tokio::task::JoinHandle<()>>,
 }
@@ -172,7 +177,22 @@ impl Fleet {
         let tls_opts = nosql_server::ListenOptions { tls: Some(acceptor), ..Default::default() };
         let tls_dir = dir.clone();
         let alt = nosql_control::cluster::alternator(control.clone(), Default::default());
+        // The edge's CQL listener (rolld/src/edge.rs), on a drain of the node's own.
+        let drain = roll_edge::Drain::new();
+        let store = roll_edge::CertStore::new();
+        store.install(&roll_edge::tls::CertPem { chain: self.cert.cert.pem(), key: self.cert.signing_key.serialize_pem() }.parse().unwrap());
+        let edge_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let edge = edge_listener.local_addr().unwrap();
+        let edge_dir = dir.clone();
+        let door = roll_edge::listener::serve_tls(edge_listener, roll_edge::tls::server_config(store, &[]), Default::default(), drain.clone(), move |tls, a| {
+            let details = nosql_server::net::tls_details(tls.get_ref().1);
+            let accepted = nosql_server::conn::Accepted { peer: a.peer, sni: a.sni, shard_aware: false, tls: details, certificate: None };
+            nosql_server::conn::serve(Box::new(tls), accepted, edge_dir.clone())
+        });
         let tasks = vec![
+            tokio::spawn(async move {
+                let _ = door.await;
+            }),
             tokio::spawn(async move {
                 let _ = nosql_server::net::serve(tls_listener, tls_dir, tls_opts).await;
             }),
@@ -186,7 +206,7 @@ impl Fleet {
                 let _ = nosql_server::net::serve(cql_listener, dir, nosql_server::ListenOptions::default()).await;
             }),
         ];
-        self.nodes.push(NodeUnderTest { control, cluster, api, cql, cql_tls, alternator, tasks });
+        self.nodes.push(NodeUnderTest { control, cluster, api, cql, cql_tls, edge, drain, alternator, tasks });
         self._homes.push(home);
     }
 
@@ -224,6 +244,15 @@ impl Fleet {
         v
     }
 
+    /// A CQL connection through `at`'s edge listener, the database named by the server name.
+    async fn cql_edge(&self, at: &NodeUnderTest, db: &Value) -> Client {
+        let mut roots = tokio_rustls::rustls::RootCertStore::empty();
+        roots.add(self.cert.cert.der().clone()).unwrap();
+        let tls = nosql_proto::client::TlsConfig::with_roots(roots, format!("{}.nosql.test", db["id"].as_str().unwrap())).unwrap();
+        let password = db["credentials"]["password"].as_str().unwrap();
+        Client::connect(ClientConfig::new(at.edge.to_string()).tls(tls).credentials("cassandra", password)).await.unwrap()
+    }
+
     /// A CQL connection through `at`, routed by the SASL user (`role@db`).
     async fn cql(&self, at: &NodeUnderTest, db: &Value) -> Client {
         let user = format!("cassandra@{}", db["id"].as_str().unwrap());
@@ -238,6 +267,11 @@ impl Fleet {
         }
         panic!("no CQL connection through {}: {last:?}", at.id());
     }
+}
+
+/// Whether a CQL connection still answers.
+async fn alive(c: &Client) -> bool {
+    c.query("SELECT * FROM system.local WHERE key = 'local'", Default::default()).await.is_ok()
 }
 
 /// Whichever node a request or a connection reaches, the database runs on its owner only.
@@ -353,8 +387,38 @@ async fn a_drain_hands_databases_over_with_nothing_lost() {
         let c = if k % 2 == 0 { &direct } else { &through };
         exec(c, &format!("INSERT INTO ks.t (k, v) VALUES ({k}, 'v{k}')")).await;
     }
-    // Acknowledged, not yet shipped (the ship interval is 100 ms): the drain must keep them.
-    owner.cluster.drain(Duration::from_secs(30)).await;
+    // On the owner's edge listener: a client of the database (its handoff closes it), and one of
+    // a database another node serves (spliced on: no product here owns it).
+    let at_edge = f.cql_edge(owner, &db).await;
+    let mut bystander = None;
+    for i in 0..20 {
+        let other = f.create(&f.nodes[0], &format!("elsewhere{i}"), "async").await;
+        let c = f.cql_edge(owner, &other).await;
+        exec(&c, "SELECT * FROM system.local WHERE key = 'local'").await;
+        if !owner.cluster.owns(&nosql_control::cluster::key(other["id"].as_str().unwrap())) {
+            bystander = Some(c);
+            break;
+        }
+    }
+    let bystander = bystander.expect("a database another node serves");
+    // The node stops as rolld stops it behind the edge. Acknowledged writes not yet shipped (the
+    // ship interval is 100 ms): the drain must keep them.
+    owner
+        .drain
+        .stop(Duration::from_millis(300), async {
+            assert!(tokio::net::TcpStream::connect(owner.edge).await.is_err(), "the edge still accepts during the products' drain");
+            assert!(alive(&at_edge).await, "the edge closed a connection before its product drained");
+            owner.cluster.drain(Duration::from_secs(30)).await;
+            assert!(!alive(&at_edge).await, "the handoff closes its database's connections");
+            assert!(alive(&bystander).await, "the edge closed a connection before the products drained");
+        })
+        .await;
+    let closed = tokio::time::timeout(Duration::from_secs(5), async {
+        while alive(&bystander).await {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    });
+    assert!(closed.await.is_ok(), "the edge closes the connections left");
     assert!(owner.control.node.get_loaded(&id).is_none(), "released");
     // The clients' connections were closed; through the same entry node, a new one reaches the
     // new owner.
