@@ -27,6 +27,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
+      # The cluster tests' DynamoDB backend (the script starts it).
+      - run: docker pull -q amazon/dynamodb-local
       - run: scripts/test-redis.sh --force --unit
 
   compat:

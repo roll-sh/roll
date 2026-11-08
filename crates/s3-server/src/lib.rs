@@ -22,6 +22,7 @@ mod body;
 mod bucket;
 pub mod cache;
 pub mod cdn;
+pub mod cluster;
 mod config;
 pub mod console;
 mod cors;
@@ -204,18 +205,29 @@ pub struct Server {
 
 impl Server {
     pub fn new(store: Arc<Store>, cfg: Config) -> Arc<Self> {
-        let cdn = Cdn::new(cfg.cdn.clone());
-        let notifier = Notifier::new(store.clone(), cfg.notify.clone(), cfg.region.clone(), cdn.clone());
-        notifier.spawn();
-        let oidc = sts::oidc::Oidc::new(Arc::new(HttpFetch::new(cfg.oidc_allow_http)));
-        let images = render::Images::new(cfg.image_concurrency);
-        let cache = match BlobCache::new(cfg.cache.clone()) {
+        let cache = Self::cache(&cfg);
+        Self::with_cache(store, cfg, cache)
+    }
+
+    /// The hot-object cache `cfg` asks for (`None`: off, or its disk tier can't be used).
+    pub fn cache(cfg: &Config) -> Option<Arc<BlobCache>> {
+        match BlobCache::new(cfg.cache.clone()) {
             Ok(c) => c,
             Err(e) => {
                 tracing::warn!(error = %e, "the storage cache's disk tier can't be used; running without the cache");
                 None
             }
-        };
+        }
+    }
+
+    /// [`Server::new`] with a cache made before (it's keyed by blob, so one cache serves every
+    /// store a node opens).
+    pub fn with_cache(store: Arc<Store>, cfg: Config, cache: Option<Arc<BlobCache>>) -> Arc<Self> {
+        let cdn = Cdn::new(cfg.cdn.clone());
+        let notifier = Notifier::new(store.clone(), cfg.notify.clone(), cfg.region.clone(), cdn.clone());
+        notifier.spawn();
+        let oidc = sts::oidc::Oidc::new(Arc::new(HttpFetch::new(cfg.oidc_allow_http)));
+        let images = render::Images::new(cfg.image_concurrency);
         let server = Arc::new(Self { store, cfg, logs: Default::default(), notifier, oidc, lambda: Default::default(), renames: Default::default(), images, cache, cdn });
         if let (Some(every), Ok(rt)) = (server.cfg.notify.inventory_interval, tokio::runtime::Handle::try_current()) {
             let weak = Arc::downgrade(&server);

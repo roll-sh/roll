@@ -5,12 +5,14 @@ import {
   DEFAULT_ROUTES,
   acceptsWebp,
   asksTransform,
+  bucketOfHost,
   cacheKey,
   cacheTags,
   canonicalQuery,
   credentialOf,
   hs256Key,
   isAuthParam,
+  isBucketLabel,
   matchRoute,
   parsePath,
   parseRange,
@@ -258,4 +260,18 @@ test("pass-through hosts: one label per *, ports ignored, nothing else", () => {
   assert.ok(!passesThrough("a.chg-x.roll.site", p));
   assert.ok(!passesThrough("chg-x.roll.site.evil.example", p));
   assert.ok(!passesThrough("chg-x.roll.site", undefined));
+});
+
+test("buckets by host: one label under the bucket domain, never a preview's or another reserved name", () => {
+  const d = "roll.site";
+  assert.equal(bucketOfHost("media.roll.site", d), "media");
+  assert.equal(bucketOfHost("Media.Roll.Site:443", ".roll.site."), "media");
+  assert.equal(bucketOfHost("roll.site", d), null, "the domain itself is path style");
+  assert.equal(bucketOfHost("chg-abc123.roll.site", d), null, "previews");
+  assert.equal(bucketOfHost("a.b.roll.site", d), null, "dotted names use path style");
+  for (const h of ["ab.roll.site", "-x-.roll.site", "xn--abc.roll.site", "logs--use1-az4--x-s3.roll.site", "media.roll.site.evil.example", "media.other.site"]) {
+    assert.equal(bucketOfHost(h, d), null, h);
+  }
+  assert.equal(bucketOfHost("media.roll.site", undefined), null, "off without ROLL_BUCKET_DOMAIN");
+  assert.ok(isBucketLabel("my-chg-1") && !isBucketLabel("chg-1"));
 });

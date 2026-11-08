@@ -1,9 +1,10 @@
-//! Control-plane state for Redis in SQLite (its own file, `redis.db`).
+//! Control-plane state for Redis: databases, replicas, credentials and metering, through
+//! `code-sql`. On one node that is SQLite (`redis.db`, the file it always was); in a cluster it is
+//! the shared system database (`ROLL_SYSTEM_DATABASE`, schema `redis`), so every node sees the
+//! same catalog and credentials.
 
-use rusqlite::{Connection, OptionalExtension, Row, params};
+use code_sql::{Db, OptionalExtension, Row, params};
 use serde::Serialize;
-use std::path::Path;
-use std::sync::Mutex;
 
 #[derive(Clone, Debug, Serialize)]
 pub struct RedisDb {
@@ -62,30 +63,34 @@ pub struct UsageSample {
 }
 
 pub struct Store {
-    conn: Mutex<Connection>,
+    db: Db,
 }
 
-const MIGRATIONS: &[&str] = &[r#"
-CREATE TABLE redis_databases (
+/// The tables (SQLite's dialect; translated for Postgres). The same as the SQLite file of
+/// earlier releases had, so an existing `redis.db` opens as it is.
+const SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS redis_databases (
   id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, region TEXT NOT NULL, password TEXT NOT NULL,
   max_memory_mb INTEGER NOT NULL, eviction_policy TEXT NOT NULL, durability TEXT NOT NULL,
   idle_timeout_s INTEGER NOT NULL, history_retention_s INTEGER NOT NULL,
   parent_id TEXT, parent_at INTEGER, created_at INTEGER NOT NULL
 );
-CREATE TABLE redis_replicas (
-  id TEXT PRIMARY KEY, db_id TEXT NOT NULL REFERENCES redis_databases(id) ON DELETE CASCADE,
+CREATE TABLE IF NOT EXISTS redis_replicas (
+  id TEXT PRIMARY KEY, db_id TEXT NOT NULL,
   region TEXT NOT NULL, password TEXT NOT NULL, created_at INTEGER NOT NULL
 );
-CREATE TABLE redis_usage (
+CREATE INDEX IF NOT EXISTS redis_replicas_db ON redis_replicas (db_id);
+CREATE TABLE IF NOT EXISTS redis_usage (
   db_id TEXT NOT NULL, at INTEGER NOT NULL, seconds INTEGER NOT NULL, mem_bytes INTEGER NOT NULL,
   commands INTEGER NOT NULL, net_in INTEGER NOT NULL, net_out INTEGER NOT NULL
 );
-CREATE INDEX redis_usage_db ON redis_usage (db_id, at);
-"#];
+CREATE INDEX IF NOT EXISTS redis_usage_db ON redis_usage (db_id, at);
+"#;
 
 const DB_COLS: &str = "id, name, region, password, max_memory_mb, eviction_policy, durability, idle_timeout_s, history_retention_s, parent_id, parent_at, created_at";
+const REPLICA_COLS: &str = "id, db_id, region, password, created_at";
 
-fn db_row(r: &Row) -> rusqlite::Result<RedisDb> {
+fn db_row(r: &Row) -> code_sql::Result<RedisDb> {
     Ok(RedisDb {
         id: r.get(0)?,
         name: r.get(1)?,
@@ -102,143 +107,138 @@ fn db_row(r: &Row) -> rusqlite::Result<RedisDb> {
     })
 }
 
-fn replica_row(r: &Row) -> rusqlite::Result<Replica> {
+fn replica_row(r: &Row) -> code_sql::Result<Replica> {
     Ok(Replica { id: r.get(0)?, db_id: r.get(1)?, region: r.get(2)?, password: r.get(3)?, created_at: r.get(4)? })
 }
 
 impl Store {
-    pub fn open(path: &Path) -> anyhow::Result<Self> {
-        let mut conn = Connection::open(path)?;
-        conn.execute_batch("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;")?;
-        let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        for (i, sql) in MIGRATIONS.iter().enumerate().skip(version as usize) {
-            let tx = conn.transaction()?;
-            tx.execute_batch(sql)?;
-            tx.execute_batch(&format!("PRAGMA user_version = {}", i + 1))?;
-            tx.commit()?;
-        }
-        Ok(Self { conn: Mutex::new(conn) })
+    /// The catalog on `db`, its tables created if they aren't there.
+    pub fn open(db: Db) -> anyhow::Result<Self> {
+        db.ensure_schema(SCHEMA)?;
+        Ok(Self { db })
+    }
+
+    /// A catalog in a SQLite file of its own (one node).
+    pub fn sqlite(path: &std::path::Path) -> anyhow::Result<Self> {
+        Self::open(Db::open_sqlite(path, code_sql::SqliteOptions::default())?)
     }
 
     pub fn memory() -> anyhow::Result<Self> {
-        Self::open(Path::new(":memory:"))
+        let dir = std::env::temp_dir().join(format!("roll-redis-store-{}-{}", std::process::id(), redis_engine::util::now_ms()));
+        std::fs::create_dir_all(&dir)?;
+        Self::sqlite(&dir.join("redis.db"))
     }
 
-    fn with<T>(&self, f: impl FnOnce(&Connection) -> rusqlite::Result<T>) -> anyhow::Result<T> {
-        Ok(f(&self.conn.lock().unwrap())?)
+    pub fn sql(&self) -> &Db {
+        &self.db
+    }
+
+    /// Copy what a node's own SQLite catalog (an earlier release's, or a node that ran alone)
+    /// holds into this one, keeping what's here: a node joining a cluster brings its databases.
+    pub fn import(&self, from: &Store) -> anyhow::Result<usize> {
+        let (dbs, replicas) = (from.dbs()?, from.db.read(|c| c.query(&format!("SELECT {REPLICA_COLS} FROM redis_replicas"), (), replica_row))?);
+        let n = self.db.write(|c| {
+            let mut n = 0;
+            for d in &dbs {
+                n += c.execute(
+                    &format!("INSERT INTO redis_databases ({DB_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12) ON CONFLICT DO NOTHING"),
+                    params![d.id, d.name, d.region, d.password, d.max_memory_mb, d.eviction_policy, d.durability, d.idle_timeout_s, d.history_retention_s, d.parent_id, d.parent_at, d.created_at],
+                )?;
+            }
+            for r in &replicas {
+                c.execute(
+                    &format!("INSERT INTO redis_replicas ({REPLICA_COLS}) VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT DO NOTHING"),
+                    params![r.id, r.db_id, r.region, r.password, r.created_at],
+                )?;
+            }
+            Ok::<_, code_sql::Error>(n)
+        })?;
+        Ok(n)
     }
 
     pub fn insert_db(&self, d: &RedisDb) -> anyhow::Result<()> {
-        self.with(|c| {
-            c.execute(
-                &format!("INSERT INTO redis_databases ({DB_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)"),
-                params![
-                    d.id,
-                    d.name,
-                    d.region,
-                    d.password,
-                    d.max_memory_mb,
-                    d.eviction_policy,
-                    d.durability,
-                    d.idle_timeout_s,
-                    d.history_retention_s,
-                    d.parent_id,
-                    d.parent_at,
-                    d.created_at
-                ],
-            )
-            .map(|_| ())
-        })
+        self.db.execute(
+            &format!("INSERT INTO redis_databases ({DB_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)"),
+            params![d.id, d.name, d.region, d.password, d.max_memory_mb, d.eviction_policy, d.durability, d.idle_timeout_s, d.history_retention_s, d.parent_id, d.parent_at, d.created_at],
+        )?;
+        Ok(())
     }
 
     pub fn update_db(&self, d: &RedisDb) -> anyhow::Result<()> {
-        self.with(|c| {
-            c.execute(
-                "UPDATE redis_databases SET name = ?2, password = ?3, max_memory_mb = ?4, eviction_policy = ?5, durability = ?6,
-                 idle_timeout_s = ?7, history_retention_s = ?8 WHERE id = ?1",
-                params![d.id, d.name, d.password, d.max_memory_mb, d.eviction_policy, d.durability, d.idle_timeout_s, d.history_retention_s],
-            )
-            .map(|_| ())
-        })
+        self.db.execute(
+            "UPDATE redis_databases SET name = ?2, password = ?3, max_memory_mb = ?4, eviction_policy = ?5, durability = ?6,
+             idle_timeout_s = ?7, history_retention_s = ?8 WHERE id = ?1",
+            params![d.id, d.name, d.password, d.max_memory_mb, d.eviction_policy, d.durability, d.idle_timeout_s, d.history_retention_s],
+        )?;
+        Ok(())
     }
 
     pub fn db(&self, id: &str) -> anyhow::Result<Option<RedisDb>> {
-        self.with(|c| c.query_row(&format!("SELECT {DB_COLS} FROM redis_databases WHERE id = ?1"), [id], db_row).optional())
+        Ok(self.db.query_row(&format!("SELECT {DB_COLS} FROM redis_databases WHERE id = ?1"), [id], db_row).optional()?)
     }
 
     pub fn db_by_name(&self, name: &str) -> anyhow::Result<Option<RedisDb>> {
-        self.with(|c| c.query_row(&format!("SELECT {DB_COLS} FROM redis_databases WHERE name = ?1"), [name], db_row).optional())
+        Ok(self.db.query_row(&format!("SELECT {DB_COLS} FROM redis_databases WHERE name = ?1"), [name], db_row).optional()?)
     }
 
     pub fn dbs(&self) -> anyhow::Result<Vec<RedisDb>> {
-        self.with(|c| {
-            let mut st = c.prepare(&format!("SELECT {DB_COLS} FROM redis_databases ORDER BY created_at, id"))?;
-            st.query_map([], db_row)?.collect()
-        })
+        Ok(self.db.query(&format!("SELECT {DB_COLS} FROM redis_databases ORDER BY created_at, id"), (), db_row)?)
     }
 
     pub fn delete_db(&self, id: &str) -> anyhow::Result<()> {
-        self.with(|c| {
+        self.db.write(|c| {
+            c.execute("DELETE FROM redis_replicas WHERE db_id = ?1", [id])?;
             c.execute("DELETE FROM redis_databases WHERE id = ?1", [id])?;
-            c.execute("DELETE FROM redis_usage WHERE db_id = ?1", [id]).map(|_| ())
-        })
+            c.execute("DELETE FROM redis_usage WHERE db_id = ?1", [id])?;
+            Ok::<_, code_sql::Error>(())
+        })?;
+        Ok(())
     }
 
     pub fn insert_replica(&self, r: &Replica) -> anyhow::Result<()> {
-        self.with(|c| {
-            c.execute(
-                "INSERT INTO redis_replicas (id, db_id, region, password, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![r.id, r.db_id, r.region, r.password, r.created_at],
-            )
-            .map(|_| ())
-        })
+        self.db.execute(&format!("INSERT INTO redis_replicas ({REPLICA_COLS}) VALUES (?1, ?2, ?3, ?4, ?5)"), params![r.id, r.db_id, r.region, r.password, r.created_at])?;
+        Ok(())
     }
 
     pub fn replica(&self, id: &str) -> anyhow::Result<Option<Replica>> {
-        self.with(|c| c.query_row("SELECT id, db_id, region, password, created_at FROM redis_replicas WHERE id = ?1", [id], replica_row).optional())
+        Ok(self.db.query_row(&format!("SELECT {REPLICA_COLS} FROM redis_replicas WHERE id = ?1"), [id], replica_row).optional()?)
     }
 
     pub fn replicas(&self, db_id: &str) -> anyhow::Result<Vec<Replica>> {
-        self.with(|c| {
-            let mut st = c.prepare("SELECT id, db_id, region, password, created_at FROM redis_replicas WHERE db_id = ?1 ORDER BY created_at, id")?;
-            st.query_map([db_id], replica_row)?.collect()
-        })
+        Ok(self.db.query(&format!("SELECT {REPLICA_COLS} FROM redis_replicas WHERE db_id = ?1 ORDER BY created_at, id"), [db_id], replica_row)?)
     }
 
     pub fn delete_replica(&self, id: &str) -> anyhow::Result<()> {
-        self.with(|c| c.execute("DELETE FROM redis_replicas WHERE id = ?1", [id]).map(|_| ()))
+        self.db.execute("DELETE FROM redis_replicas WHERE id = ?1", [id])?;
+        Ok(())
     }
 
     pub fn record_usage(&self, db_id: &str, u: &UsageSample) -> anyhow::Result<()> {
-        self.with(|c| {
-            c.execute(
-                "INSERT INTO redis_usage (db_id, at, seconds, mem_bytes, commands, net_in, net_out) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                params![db_id, u.at, u.seconds, u.mem_bytes, u.commands, u.net_in, u.net_out],
-            )
-            .map(|_| ())
-        })
+        self.db.execute(
+            "INSERT INTO redis_usage (db_id, at, seconds, mem_bytes, commands, net_in, net_out) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![db_id, u.at, u.seconds, u.mem_bytes, u.commands, u.net_in, u.net_out],
+        )?;
+        Ok(())
     }
 
     pub fn usage_since(&self, db_id: &str, since: i64) -> anyhow::Result<UsageTotals> {
-        self.with(|c| {
-            c.query_row(
-                "SELECT COALESCE(SUM(seconds), 0), COALESCE(SUM(seconds * mem_bytes), 0.0), COALESCE(SUM(commands), 0),
-                        COALESCE(SUM(net_in), 0), COALESCE(SUM(net_out), 0), COALESCE(MAX(mem_bytes), 0)
-                 FROM redis_usage WHERE db_id = ?1 AND at >= ?2",
-                params![db_id, since],
-                |r| {
-                    let byte_seconds: f64 = r.get(1)?;
-                    Ok(UsageTotals {
-                        active_seconds: r.get(0)?,
-                        gib_hours: byte_seconds / (1u64 << 30) as f64 / 3600.0,
-                        commands: r.get(2)?,
-                        net_in_bytes: r.get(3)?,
-                        net_out_bytes: r.get(4)?,
-                        peak_memory_bytes: r.get(5)?,
-                    })
-                },
-            )
-        })
+        Ok(self.db.query_row(
+            "SELECT COALESCE(SUM(seconds), 0), COALESCE(SUM(seconds * mem_bytes), 0), COALESCE(SUM(commands), 0),
+                    COALESCE(SUM(net_in), 0), COALESCE(SUM(net_out), 0), COALESCE(MAX(mem_bytes), 0)
+             FROM redis_usage WHERE db_id = ?1 AND at >= ?2",
+            params![db_id, since],
+            |r| {
+                let byte_seconds: f64 = r.get(1)?;
+                Ok(UsageTotals {
+                    active_seconds: r.get(0)?,
+                    gib_hours: byte_seconds / (1u64 << 30) as f64 / 3600.0,
+                    commands: r.get(2)?,
+                    net_in_bytes: r.get(3)?,
+                    net_out_bytes: r.get(4)?,
+                    peak_memory_bytes: r.get(5)?,
+                })
+            },
+        )?)
     }
 }
 
@@ -275,6 +275,11 @@ mod tests {
         assert_eq!(u.active_seconds, 120);
         assert!((u.gib_hours - 120.0 / 3600.0).abs() < 1e-9);
         assert_eq!(u.commands, 1500);
+        // A node's own catalog joins a shared one without overwriting it.
+        let shared = Store::memory().unwrap();
+        assert_eq!(shared.import(&s).unwrap(), 1);
+        assert_eq!(shared.import(&s).unwrap(), 0);
+        assert_eq!(shared.replicas("rdb_a").unwrap().len(), 1);
         s.delete_db("rdb_a").unwrap();
         assert!(s.replicas("rdb_a").unwrap().is_empty());
         assert_eq!(s.usage_since("rdb_a", 0).unwrap().commands, 0);

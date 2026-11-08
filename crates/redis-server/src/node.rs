@@ -12,6 +12,11 @@
 //!   parent's history.
 //! - **Catalog.** Which databases exist and their credentials come from a [`Catalog`]: the
 //!   control plane in production, a static map for local use.
+//! - **Owners.** In a cluster an [`Owner`] says which databases are this node's: a database is
+//!   loaded only under a [`Tenure`], and when the tenure ends (a handoff, a lapsed lease) it moves
+//!   away: connections close over `handoff_spread`, everything is flushed, the final manifest is
+//!   written, and only then is the tenure let go. A database another node took over regardless
+//!   (storage fenced this node, see [`persist`]) is dropped at once.
 
 use crate::database::Database;
 use crate::directory::{AuthError, AuthRequest, Directory, Session};
@@ -93,11 +98,14 @@ pub struct NodeConfig {
     /// DNS suffix of database hostnames, for SNI routing (`redis.example.com`).
     pub domain: Option<String>,
     pub snapshots: SnapshotPolicy,
+    /// A database moving to another node closes its connections over this long, each at its own
+    /// moment, so its clients don't all reconnect at once.
+    pub handoff_spread: Duration,
 }
 
 impl Default for NodeConfig {
     fn default() -> Self {
-        Self { idle_timeout: Some(Duration::from_secs(300)), domain: None, snapshots: SnapshotPolicy::default() }
+        Self { idle_timeout: Some(Duration::from_secs(300)), domain: None, snapshots: SnapshotPolicy::default(), handoff_spread: Duration::from_secs(2) }
     }
 }
 
@@ -120,6 +128,42 @@ impl Default for SnapshotPolicy {
     }
 }
 
+/// Which node serves a database: roll's cluster layer in a fleet (`redis-control`). A node
+/// without one serves every database it's asked for.
+pub trait Owner: Send + Sync + 'static {
+    /// Hold `db` (a replica: of `primary`) on this node for as long as the tenure lives, waiting
+    /// out a move in progress.
+    fn claim<'a>(&'a self, db: &'a str, primary: Option<&'a str>) -> BoxFuture<'a, Result<Box<dyn Tenure>, Refused>>;
+}
+
+/// Why a database isn't served here.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Refused {
+    /// Another node serves it (this node, say, just handed it over): a connection closes so its
+    /// client reconnects there.
+    Elsewhere(String),
+    /// It's still moving between nodes after waiting a lease's length.
+    Moving(String),
+}
+
+impl std::fmt::Display for Refused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Refused::Elsewhere(node) => write!(f, "the database is served by node {node}"),
+            Refused::Moving(db) => write!(f, "database {db} is moving between nodes; retry"),
+        }
+    }
+}
+
+impl std::error::Error for Refused {}
+
+/// A database's stay on this node.
+pub trait Tenure: Send + Sync + 'static {
+    /// Resolves when the database must leave this node: handed off, or no longer this node's.
+    fn ending(&self) -> BoxFuture<'static, ()>;
+    fn is_ending(&self) -> bool;
+}
+
 type Slot = Arc<OnceCell<Arc<Database>>>;
 
 pub struct Node {
@@ -135,6 +179,10 @@ pub struct Node {
     pub replica_poll: Duration,
     /// Serialises loads and unloads of the same database.
     transitions: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    owner: std::sync::OnceLock<Arc<dyn Owner>>,
+    /// The loaded databases' tenures (with an [`Owner`]).
+    tenures: Mutex<HashMap<String, Box<dyn Tenure>>>,
+    me: std::sync::Weak<Node>,
 }
 
 /// Which database a connection wants, and the secret to check.
@@ -146,14 +194,8 @@ pub fn route<'a>(req: &AuthRequest<'a>, domain: Option<&str>) -> Option<(String,
     {
         return Some((db.to_string(), Some(name.to_string()), req.password));
     }
-    if let Some(sni) = req.sni {
-        let label = match domain {
-            Some(d) => sni.strip_suffix(d).and_then(|s| s.strip_suffix('.')),
-            None => sni.split('.').next(),
-        };
-        if let Some(db) = label.filter(|l| !l.is_empty() && !l.contains('.')) {
-            return Some((db.to_string(), user, req.password));
-        }
+    if let Some(db) = req.sni.and_then(|sni| sni_db(sni, domain)) {
+        return Some((db, user, req.password));
     }
     // `<db>_<secret>` tokens (database ids may contain `_`, secrets don't).
     let pos = req.password.iter().rposition(|&b| b == b'_')?;
@@ -161,13 +203,26 @@ pub fn route<'a>(req: &AuthRequest<'a>, domain: Option<&str>) -> Option<(String,
     Some((db.to_string(), user, &req.password[pos + 1..]))
 }
 
+/// The database a TLS server name names: its first label (under `domain`, when given).
+pub fn sni_db(sni: &str, domain: Option<&str>) -> Option<String> {
+    let label = match domain {
+        Some(d) => sni.strip_suffix(d).and_then(|s| s.strip_suffix('.')),
+        None => sni.split('.').next(),
+    };
+    label.filter(|l| !l.is_empty() && !l.contains('.')).map(str::to_string)
+}
+
 fn ct_eq(a: &[u8], b: &[u8]) -> bool {
     a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
+/// Attempts at loading a database whose manifest keeps changing under the load (a previous
+/// owner still running, moving to a new log).
+const LOAD_ATTEMPTS: usize = 3;
+
 impl Node {
     pub fn new(catalog: Arc<dyn Catalog>, shipper: Option<Arc<Shipper>>, cfg: NodeConfig) -> Arc<Self> {
-        let node = Arc::new(Self {
+        let node = Arc::new_cyclic(|me| Self {
             catalog,
             shipper,
             cfg,
@@ -177,7 +232,20 @@ impl Node {
             retention: Mutex::new(HashMap::new()),
             replica_poll: Duration::from_millis(100),
             transitions: Mutex::new(HashMap::new()),
+            owner: std::sync::OnceLock::new(),
+            tenures: Mutex::new(HashMap::new()),
+            me: me.clone(),
         });
+        if let Some(shipper) = &node.shipper {
+            // Another node took a database over: it stops here at once.
+            let weak = Arc::downgrade(&node);
+            shipper.on_fenced(move |id| {
+                if let Some(node) = weak.upgrade() {
+                    let id = id.to_string();
+                    tokio::spawn(async move { node.drop_fenced(&id).await });
+                }
+            });
+        }
         if let (Some(idle), Some(_)) = (node.cfg.idle_timeout, &node.shipper) {
             let weak = Arc::downgrade(&node);
             tokio::spawn(async move {
@@ -205,6 +273,12 @@ impl Node {
             });
         }
         node
+    }
+
+    /// Serve databases only while `owner` says they're this node's (a cluster). Set once, before
+    /// anything is loaded.
+    pub fn set_owner(&self, owner: Arc<dyn Owner>) {
+        let _ = self.owner.set(owner);
     }
 
     /// Snapshot the loaded primaries whose log outgrew the policy, one at a time.
@@ -240,6 +314,11 @@ impl Node {
         self.dbs.lock().get(id).and_then(|s| s.get().cloned())
     }
 
+    /// Whether `id` is loaded here but on its way to another node (it takes no new sessions).
+    fn leaving(&self, id: &str) -> bool {
+        self.tenures.lock().get(id).is_some_and(|t| t.is_ending())
+    }
+
     fn idle(&self, default: Duration) -> Vec<String> {
         let overrides = self.idle_overrides.lock().clone();
         self.loaded()
@@ -260,38 +339,34 @@ impl Node {
         };
     }
 
-    /// The database, restoring it from object storage if it isn't in memory.
+    /// The database, restoring it from object storage if it isn't in memory. With an
+    /// [`Owner`], only while it's this node's.
     pub async fn open(&self, spec: &DbSpec) -> anyhow::Result<Arc<Database>> {
         loop {
+            if self.leaving(&spec.id) {
+                // Moving away: no new sessions here. Once it's gone, ask where it is now.
+                drop(self.transition_lock(&spec.id).lock().await);
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                continue;
+            }
             let slot = self.dbs.lock().entry(spec.id.clone()).or_default().clone();
+            // The tenure a fresh load took, held once the database is in its slot.
+            let fresh: Mutex<Option<Box<dyn Tenure>>> = Mutex::new(None);
             let db = slot
                 .get_or_try_init(|| async {
                     let lock = self.transition_lock(&spec.id);
                     let _g = lock.lock().await;
-                    let db = Database::new(spec.id.clone(), spec.config.clone(), spec.shards);
-                    db.sync_writes.store(spec.sync_writes, Ordering::Relaxed);
-                    self.set_idle_timeout(&spec.id, spec.idle_timeout);
-                    self.retention.lock().insert(spec.id.clone(), spec.history_retention);
-                    if let Some(primary) = &spec.replica_of {
-                        let Some(shipper) = &self.shipper else { anyhow::bail!("replicas need object storage") };
-                        persist::restore_at(&shipper.objects, primary, &db, persist::Until::LATEST, shipper.codec().as_deref()).await?;
-                        let f = Follower::with_codec(db.clone(), shipper.codec());
-                        tokio::spawn(f.clone().tail_storage(shipper.objects.clone(), primary.clone(), self.replica_poll));
-                        self.followers.lock().insert(spec.id.clone(), f);
-                        db.start_cron();
-                        return anyhow::Ok(db);
+                    if let Some(o) = self.owner.get() {
+                        let t = o.claim(&spec.id, spec.replica_of.as_deref()).await.map_err(anyhow::Error::from)?;
+                        *fresh.lock() = Some(t);
                     }
-                    if let Some(shipper) = &self.shipper {
-                        let started = std::time::Instant::now();
-                        let m = persist::restore(&shipper.objects, &db, shipper.codec().as_deref()).await?;
-                        shipper.attach(&db, m).await?;
-                        tracing::info!(db = spec.id, keys = db.total_keys(), ms = started.elapsed().as_millis() as u64, "database loaded");
-                    }
-                    db.start_cron();
-                    anyhow::Ok(db)
+                    self.load(spec).await
                 })
                 .await?
                 .clone();
+            if let Some(t) = fresh.lock().take() {
+                self.hold(&db, t);
+            }
             if !db.closed.load(Ordering::SeqCst) {
                 return Ok(db);
             }
@@ -299,6 +374,125 @@ impl Node {
             let lock = self.transition_lock(&spec.id);
             drop(lock.lock().await);
         }
+    }
+
+    /// Build a database from object storage and start shipping (or following) it.
+    async fn load(&self, spec: &DbSpec) -> anyhow::Result<Arc<Database>> {
+        let mut attempt = 0;
+        loop {
+            attempt += 1;
+            let db = Database::new(spec.id.clone(), spec.config.clone(), spec.shards);
+            db.sync_writes.store(spec.sync_writes, Ordering::Relaxed);
+            self.set_idle_timeout(&spec.id, spec.idle_timeout);
+            self.retention.lock().insert(spec.id.clone(), spec.history_retention);
+            if let Some(primary) = &spec.replica_of {
+                let Some(shipper) = &self.shipper else { anyhow::bail!("replicas need object storage") };
+                persist::restore_at(&shipper.objects, primary, &db, persist::Until::LATEST, shipper.codec().as_deref()).await?;
+                let f = Follower::with_codec(db.clone(), shipper.codec());
+                tokio::spawn(f.clone().tail_storage(shipper.objects.clone(), primary.clone(), self.replica_poll));
+                self.followers.lock().insert(spec.id.clone(), f);
+                db.start_cron();
+                return Ok(db);
+            }
+            if let Some(shipper) = &self.shipper {
+                let started = std::time::Instant::now();
+                let m = persist::restore(&shipper.objects, &db, shipper.codec().as_deref()).await?;
+                if let Err(e) = shipper.attach(&db, m).await {
+                    if attempt < LOAD_ATTEMPTS {
+                        tracing::info!(db = spec.id, error = %e, "loading again");
+                        continue;
+                    }
+                    return Err(e);
+                }
+                tracing::info!(db = spec.id, keys = db.total_keys(), ms = started.elapsed().as_millis() as u64, "database loaded");
+            }
+            db.start_cron();
+            return Ok(db);
+        }
+    }
+
+    /// Keep `db` here while `tenure` lasts; when it ends, the database moves away.
+    fn hold(&self, db: &Arc<Database>, tenure: Box<dyn Tenure>) {
+        let ending = tenure.ending();
+        self.tenures.lock().insert(db.id.clone(), tenure);
+        let (me, weak_db) = (self.me.clone(), Arc::downgrade(db));
+        tokio::spawn(async move {
+            ending.await;
+            if let (Some(node), Some(db)) = (me.upgrade(), weak_db.upgrade()) {
+                node.move_away(&db).await;
+            }
+        });
+    }
+
+    /// Forget a database that is no longer loaded here (its tenure ends with it).
+    fn forget(&self, id: &str) {
+        self.dbs.lock().remove(id);
+        self.retention.lock().remove(id);
+        self.tenures.lock().remove(id);
+    }
+
+    /// Hand a database over to its next node: its connections close over `handoff_spread`, each
+    /// at its own moment (commands in flight finish and are answered first), then everything it
+    /// wrote is flushed and its final manifest written, and only then does its tenure end, so the
+    /// next owner loads every acknowledged write.
+    async fn move_away(&self, db: &Arc<Database>) {
+        let lock = self.transition_lock(&db.id);
+        let _g = lock.lock().await;
+        if !self.get_loaded(&db.id).is_some_and(|d| Arc::ptr_eq(&d, db)) {
+            return;
+        }
+        let spread = self.cfg.handoff_spread;
+        tracing::info!(db = db.id, clients = db.connections.load(Ordering::SeqCst), "handing the database to another node");
+        db.kick_gradually(spread);
+        let until = std::time::Instant::now() + spread + Duration::from_secs(1);
+        while db.connections.load(Ordering::SeqCst) > 0 && std::time::Instant::now() < until {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        // Whatever is left (a long script, a slow socket) goes now.
+        db.close_and_kick();
+        for _ in 0..500 {
+            if db.connections.load(Ordering::SeqCst) == 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        if let Some(f) = self.followers.lock().remove(&db.id) {
+            f.stop();
+        } else if let Some(shipper) = &self.shipper {
+            let mut tries: u64 = 0;
+            while let Err(e) = shipper.detach(db).await {
+                tries += 1;
+                if tries >= 3 {
+                    // The next owner fences this node's log and replays what reached storage.
+                    tracing::warn!(db = db.id, error = %e, "couldn't flush the database before handing it over");
+                    shipper.abandon(db);
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(200 * tries)).await;
+            }
+        }
+        self.forget(&db.id);
+        tracing::info!(db = db.id, "database handed over");
+    }
+
+    /// Another node took `id` over (its manifest moved on): disconnect everyone at once. Nothing
+    /// is flushed; what wasn't durable here was never this node's to keep.
+    async fn drop_fenced(&self, id: &str) {
+        let lock = self.transition_lock(id);
+        let _g = lock.lock().await;
+        let Some(db) = self.get_loaded(id) else { return };
+        db.close_and_kick();
+        for _ in 0..500 {
+            if db.connections.load(Ordering::SeqCst) == 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        if let Some(shipper) = &self.shipper {
+            shipper.abandon(&db);
+        }
+        self.followers.lock().remove(id);
+        self.forget(id);
     }
 
     /// Flush a database to object storage and drop it from memory, unless it is in use.
@@ -357,8 +551,7 @@ impl Node {
             db.closed.store(false, Ordering::SeqCst);
             return Err(e);
         }
-        self.dbs.lock().remove(id);
-        self.retention.lock().remove(id);
+        self.forget(id);
         tracing::info!(db = id, "database unloaded");
         Ok(true)
     }
@@ -386,7 +579,9 @@ impl Node {
             end: m.end,
             ..Default::default()
         };
-        shipper.objects.put(&persist::manifest_key(child), bytes::Bytes::from(serde_json::to_vec(&manifest)?)).await?;
+        if !persist::create_manifest(&shipper.objects, child, &manifest).await? {
+            anyhow::bail!("database {child} already exists");
+        }
         Ok(m.end)
     }
 
@@ -404,12 +599,16 @@ impl Node {
         let Some(current) = persist::read_manifest(&shipper.objects, id).await? else {
             anyhow::bail!("database {id} has no history yet");
         };
+        // A manifest that still names a log (its owner crashed): nothing more goes into that
+        // log, so the archive's view of it is final.
+        if let Some(log) = &current.node {
+            persist::fence_log(&shipper.objects, log, current.after_seq).await?;
+        }
         let archive = format!("{id}.{}", redis_engine::util::now_ms());
-        // Frozen: everything was flushed and listed by the eviction, and later segments hold
-        // the restored database's new frames under the same stream id.
-        let frozen = persist::Manifest { stream: Some(current.stream.clone().unwrap_or_else(|| id.to_string())), node: None, ..current };
-        let raw = bytes::Bytes::from(serde_json::to_vec(&frozen)?);
-        shipper.objects.put(&persist::manifest_key(&archive), raw).await?;
+        let frozen = persist::Manifest { stream: Some(current.stream.clone().unwrap_or_else(|| id.to_string())), version: None, ..current.clone() };
+        if !persist::create_manifest(&shipper.objects, &archive, &frozen).await? {
+            anyhow::bail!("restore archive {archive} exists already; retry");
+        }
         let scratch = Database::new(&archive, Config::default(), 1);
         let m = persist::restore_at(&shipper.objects, &archive, &scratch, until, shipper.codec().as_deref()).await?;
         let manifest = persist::Manifest {
@@ -420,9 +619,12 @@ impl Node {
                 history: Some(Box::new(persist::history(&m, &archive, m.end))),
             }),
             end: m.end,
+            version: current.version.clone(),
             ..Default::default()
         };
-        shipper.objects.put(&persist::manifest_key(id), bytes::Bytes::from(serde_json::to_vec(&manifest)?)).await?;
+        if !persist::replace_manifest(&shipper.objects, id, &manifest).await? {
+            anyhow::bail!("database {id} changed during the restore; retry");
+        }
         Ok(archive)
     }
 
@@ -443,7 +645,10 @@ impl Directory for Node {
             // Only known databases are loaded: a wrong token for an existing database still
             // wakes it, but that is needed to check tenant-defined ACL users anyway.
             loop {
-                let db = self.open(&spec).await.map_err(|e| AuthError::Unavailable(e.to_string()))?;
+                let db = self.open(&spec).await.map_err(|e| match e.downcast_ref::<Refused>() {
+                    Some(Refused::Elsewhere(_)) => AuthError::Moved,
+                    _ => AuthError::Unavailable(e.to_string()),
+                })?;
                 let user = {
                     let acl = db.acl.read();
                     if platform && is_default {

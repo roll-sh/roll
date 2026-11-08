@@ -40,8 +40,11 @@ pub fn router(control: Arc<Control>) -> Router {
         .route("/v1/redis/databases/{id}/unload", post(unload))
         .route("/v1/redis/databases/{id}/command", post(command))
         .route("/v1/redis/replicas/{id}", delete(delete_replica))
+        .route("/v1/redis/replicas/{id}/unload", post(unload_replica))
         // The dashboard calls it from the browser, like the Postgres API.
         .layer(CorsLayer::permissive())
+        // In a cluster, a database's routes run on its owner (outside CORS: the owner adds it).
+        .layer(axum::middleware::from_fn_with_state(control.clone(), crate::cluster::owner_routes))
         .with_state(control)
 }
 
@@ -169,6 +172,13 @@ async fn usage(State(c): State<AppState>, Path(id): Path<String>, Query(q): Quer
 
 async fn unload(State(c): State<AppState>, Path(id): Path<String>) -> ApiResult<Value> {
     Ok(Json(json!({ "unloaded": c.unload(&id).await? })))
+}
+
+/// A replica reloads from its primary's history on its next connection (after a restore; in a
+/// cluster this runs on the node that serves it).
+async fn unload_replica(State(c): State<AppState>, Path(id): Path<String>) -> ApiResult<Value> {
+    c.store.replica(&id)?.ok_or_else(|| ControlError::NotFound(format!("no replica {id}")))?;
+    Ok(Json(json!({ "unloaded": c.node.evict(&id).await? })))
 }
 
 #[derive(Deserialize)]

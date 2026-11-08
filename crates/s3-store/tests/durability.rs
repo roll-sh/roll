@@ -97,6 +97,44 @@ async fn a_new_writer_fences_the_old_one() {
     assert_eq!(keys(&third, "fence"), ["before", "next"]);
 }
 
+/// A standby follows the log (through snapshots and the pruning after them) and takes over from
+/// its copy: every acknowledged write is there and the handed-off writer stops. One that lagged
+/// behind the pruning can't be brought forward and rebuilds from object storage instead.
+#[tokio::test]
+async fn a_standby_follows_the_log_and_takes_over_from_its_copy() {
+    let (backend, clock, s) = env("follow").await;
+    s.create_bucket("zeta", BucketOptions::default()).await.unwrap();
+    let mut cfg = config(&clock);
+    cfg.node = "standby".into();
+    let mut standby = Follower::start(&cfg, backend.clone()).await.unwrap();
+    let lagging_cfg = config(&clock);
+    let mut lagging = Follower::start(&lagging_cfg, backend.clone()).await.unwrap();
+    let bucket_rows = |f: &Follower| f.read(|c| Ok(c.query_row("SELECT count(*) FROM buckets", [], |r| r.get::<_, i64>(0))?)).unwrap();
+    assert_eq!(bucket_rows(&standby), 1);
+    workload(&s).await;
+    assert!(standby.poll(false).await.unwrap() > 0);
+    s.snapshot_now().await.unwrap();
+    put(&s, "alpha", "between", b"x").await;
+    s.snapshot_now().await.unwrap();
+    standby.poll(true).await.unwrap();
+    assert_eq!(standby.seq(), s.stats().unwrap().log.seq);
+    assert_eq!(bucket_rows(&standby), 4);
+    assert_eq!(standby.poll(true).await.unwrap(), 0, "nothing new");
+    assert!(lagging.poll(true).await.is_err(), "the entries it needs were pruned");
+    put(&s, "alpha", "last", b"y").await;
+    let before = state(&s).await;
+    // A planned handoff: the old writer commits and steps down; the standby reads what's new.
+    assert!(s.hand_off().await);
+    assert!(!s.is_open());
+    let new = Store::take_over(cfg, backend.clone(), Some(standby)).await.unwrap();
+    assert_eq!(state(&new).await, before);
+    put(&new, "alpha", "after", b"z").await;
+    let rebuilt = Store::take_over(lagging_cfg, backend.clone(), Some(lagging)).await.unwrap();
+    assert_eq!(read(&rebuilt, "alpha", "after").await.unwrap(), b"z");
+    assert!(put_with(&new, "alpha", "fenced", b"w", &WriteCondition::none()).await.is_err());
+    assert_consistent(&rebuilt, &backend).await;
+}
+
 #[tokio::test]
 async fn snapshots_bound_the_log() {
     let backend = test_backend("snap").await;

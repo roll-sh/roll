@@ -370,12 +370,14 @@ The product should feel alive: dots react to the cursor and the marks "think". E
   - After touching anything storage-related, run `pnpm test:storage`. It skips itself when nothing relevant changed and runs real S3 tools in Docker (`amazon/aws-cli`, `rclone/rclone`, MinIO's `mc` from `bitnamilegacy/minio-client`, `d3fk/s3cmd` for SigV2).
   - `pnpm test:storage-aws` runs `crates/s3-server/tests/aws.rs` against LocalStack in Docker (no AWS account): SSE-KMS with the backing bucket on LocalStack, notifications to SQS/SNS/Lambda/EventBridge, replication to buckets outside roll, Object Lambda. Run it after touching SSE, notifications, replication targets or Object Lambda.
   - `pnpm test:s3-conformance` runs the S3 conformance suite (ceph/s3-tests, pinned) in Docker against a fresh server (`crates/s3-server/examples/serve.rs`) and compares the outcome with `tests/s3-conformance/expected.txt`, which lists every test known not to pass and why. It fails on a regression and on an unexpected pass: after fixing something, remove its lines. Run it after changing S3 behaviour; it skips itself when nothing relevant changed. `pnpm test:s3-conformance-localstack` runs it with the backing bucket on LocalStack S3 and KMS (SSE-KMS, `ROLL_S3_SSE_S3_AT_REST`); a line whose category ends in `@local` or `@localstack` only applies to that backend.
+  - On many nodes (`s3-server/src/cluster.rs`, docs/storage/architecture.md "Many nodes") only the holder of the lease `storage:meta` opens the store; every node's S3, developer-API and `/v1/storage` routes forward to it, and its background jobs run only there. A forward carries the client's path, query and `Content-Length` untouched (SigV4 signs them) and never buffers a body past roll-cluster's 4 MiB. Takeovers start from a standby's `Follower` copy; fencing stays the log's create-only entries, never the lease.
   - The gateway cache (`s3-server/src/cache.rs`) is keyed by blob id and chunk: never invalidate it or add TTLs for correctness. The CDN (`s3-server/src/cdn.rs`, `s3-store/src/cdn.rs`, the Worker in `apps/cdn-worker`) purges through the outbox. After touching either, run `pnpm test:storage-cdn` (the Worker in workerd/Miniflare in Docker, purges to a mock Cloudflare API).
   - Put new tests in the matching place:
     - protocol vectors and parsers: unit tests in `s3-proto`
     - metadata, durability, branching and GC: `crates/s3-store/tests/`
     - the S3 API through the AWS SDK: `crates/s3-server/tests/` (notifications, replication and inventory: `tests/events.rs`)
-    - real tools: `crates/s3-server/tests/tools.rs`
+    - real tools: `crates/s3-server/tests/tools.rs` (through a node that doesn't own the metadata)
+    - several nodes (forwarding, takeover, handoff, fencing, events across a takeover): `crates/s3-server/tests/cluster.rs`
     - `/v1/storage`: `crates/s3-control/tests/`
   - Set `ROLL_E2E_S3_BUCKET` (plus `ROLL_E2E_S3_ENDPOINT` and AWS credentials) to run the store and server tests against S3.
 - **NoSQL (ScyllaDB / Cassandra compatible):**

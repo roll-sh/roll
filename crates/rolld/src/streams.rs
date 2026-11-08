@@ -85,7 +85,7 @@ struct EdgeSplicer {
 impl Splicer for EdgeSplicer {
     fn splice(&self, to: &Node, io: Box<dyn Io>, hop: Hop) -> BoxFuture<'static, std::io::Result<()>> {
         let (signer, url) = (self.signer.clone(), to.url.clone());
-        let edge_hop = roll_edge::splice::Hop { product: "kafka".into(), tenant: hop.stream, client: hop.peer, sni: hop.advertised.map(|(h, p)| format!("{h}:{p}")) };
+        let edge_hop = roll_edge::splice::Hop { product: "kafka".into(), tenant: hop.stream, client: hop.peer, sni: hop.advertised.map(|(h, p)| format!("{h}:{p}")), hops: 0 };
         Box::pin(async move { roll_edge::splice::splice(io, &url, &signer, &edge_hop, &hop.first).await.map(drop) })
     }
 }

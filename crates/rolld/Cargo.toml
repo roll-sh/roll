@@ -14,7 +14,6 @@ chrono.workspace = true
 clap.workspace = true
 roll-cluster.workspace = true
 code-control.workspace = true
-code-sql.workspace = true
 code-preview.workspace = true
 futures.workspace = true
 http-body.workspace = true
@@ -43,6 +42,7 @@ pg-control.workspace = true
 pg-proxy.workspace = true
 pg-storage.workspace = true
 redis-control.workspace = true
+code-sql.workspace = true
 redis-server.workspace = true
 roll-edge.workspace = true
 reqwest = { workspace = true, features = ["rustls"] }
