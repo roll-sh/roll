@@ -538,6 +538,23 @@ DataRow parsing (`Conn::process` 1.0%, `Message::parse` 1.0%, `BytesMut` split /
 a `String` per value (`from_utf8_lossy` 1.7% plus its allocation) then parsed into a `Value`
 (`parse_value_ex` 0.9%).
 
+Second batch (`8ae592fb`: ANALYZE fetching 1,000 rows a round trip, the client's dense rows and
+one UTF-8 check per value), measured the same way, runs interleaved base, new, PostgreSQL, new,
+base, new, base (3 runs of each engine, 1 of PostgreSQL; load 30-40):
+
+| phase | PG writes / stmt | new | PG ms | base ms | new ms | new / PG time | PG CPU ms | base CPU | new CPU | new / PG CPU |
+|---|---|---|---|---|---|---|---|---|---|---|
+| ANALYZE ft, fs (1) | 237 | **29** | 171 | 86 | **81** | 0.47 | 125 | 99 | **61** | 0.49 |
+| foreign joins (100) | 208 | **203** | **12,992** | 14,534 | 17,388 | 1.34 | **4,656** | 6,097 | 6,246 | 1.34 |
+| full scans, 20k rows (10) | 205 | **202** | **1,460** | 1,581 | 1,560 | 1.07 | **590** | 639 | 642 | 1.09 |
+
+ANALYZE now beats PostgreSQL in round trips, time and CPU with its bytes (867 kB against
+884 kB): base's 9 round trips read the table twice, batch 1's 230 read it once. The client-side
+changes aren't resolved: the foreign joins' CPU per run was base 5,823 / 6,208 / 6,260 ms, new
+6,239 / 6,052 / 6,446 ms (one new run's elapsed time, 36.5 s against 27-29 s, was the machine's);
+by the profile above they touch about 3% of that phase's CPU. Peak memory: engine 58-62 MB new,
+68-124 MB base, PostgreSQL 149 MB.
+
 ```sh
 SERVER_CPUS=4-7 CLIENT_CPUS=8-9 tools/fdwtraffic/compare.sh <roll-engine> <scratch> <prefix> <port> [pg] [engine]
 ```

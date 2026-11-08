@@ -1134,8 +1134,12 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
   base's 80), and the client side decodes a little less per value (a remote row of every
   column in order is the row without a NULL row filled first, `ScanNode::dense`; each text
   value's UTF-8 checked once, `remote::conn` DataRow). Its traffic numbers weren't measured
-  yet (the bench job was stopped to free the heavy slot). Still open: 628 differs only in
-  the outer plan's choice (PostgreSQL's epq path is a hash
+  yet (the bench job was stopped to free the heavy slot; measured since: BENCH.md "postgres_fdw,
+  round 9", second batch). Third batch (1,952: 628 gained, none lost): the target scan the
+  wrapper joins remotely (`fdw_dml_target`) gets `fdw_sorted_paths` too, its ordering kept
+  by `mark_target` (`ORDER BY ... FOR UPDATE`): with remote estimates the sorted path costs
+  the plain one's and add_path keeps it, so the epq path's hash join reads it. Before it: 628
+  differed only in the outer plan's choice (PostgreSQL's epq path is a hash
   join whose outer side is the sorted remote scan, `ORDER BY "C 1"`: the join search's,
   agent 177); the remote SELECT list puts a SET expression's columns first only when they
   are the target's (`UPDATE f4 SET c3 = f5.c3 || ...`: PostgreSQL has `r2.c3` first); a
