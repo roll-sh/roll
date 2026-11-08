@@ -1123,9 +1123,9 @@ impl LockManager {
         let mut it = v.into_iter().peekable();
         while let Some((p, t)) = it.next() {
             let mut g = self.lock_part(p);
-            f(&mut *g, t);
+            f(&mut g, t);
             while let Some((_, t)) = it.next_if(|(q, _)| *q == p) {
-                f(&mut *g, t);
+                f(&mut g, t);
             }
         }
     }
