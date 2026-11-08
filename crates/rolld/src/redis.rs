@@ -7,25 +7,19 @@
 //! each database is served by the holder of its lease, and every listener (rolld's own and the
 //! edge's) hands connections and requests for a database to its owner.
 
-use clap::Args;
 use pg_storage::StorageConfig;
 use redis_control::cluster::Front;
 use std::net::SocketAddr;
 use std::sync::Arc;
-
-#[derive(Args, Clone, Debug)]
-pub struct RedisArgs {
-    /// The system database (Postgres URL): the Redis catalog and credentials in a cluster, schema
-    /// `redis`. Default: roll code's database (`--code-database`).
-    #[arg(id = "system_database", long = "system-database", env = "ROLL_SYSTEM_DATABASE", hide_env_values = true)]
-    pub system_database: Option<String>,
-}
+use tokio::net::TcpListener;
 
 pub struct Redis {
     pub control: Arc<redis_control::Control>,
     pub front: Arc<Front>,
     /// The listener options of rolld's own RESP port.
     opts: redis_server::net::ListenOptions,
+    /// rolld's own RESP and REST listeners, bound at start, until they're served.
+    pub listeners: Option<(TcpListener, TcpListener)>,
 }
 
 /// The shared catalog of a cluster (`None` on a node of its own: SQLite under `--home`).
@@ -33,7 +27,7 @@ fn catalog(args: &crate::Args, clustered: bool) -> anyhow::Result<Option<redis_c
     if !clustered {
         return Ok(None);
     }
-    let url = args.redis_args.system_database.clone().or_else(|| args.code.code_database.clone()).filter(|u| !u.is_empty());
+    let url = args.code.cluster.system_database.clone().or_else(|| args.code.code_database.clone()).filter(|u| !u.is_empty());
     let Some(url) = url else {
         anyhow::bail!("Redis in a cluster needs the system database (ROLL_SYSTEM_DATABASE): every node must see the same catalog");
     };
@@ -72,7 +66,16 @@ impl Redis {
         let public = if args.edge.enabled { args.edge.redis_listen } else { args.redis };
         let secret = cluster_secret().unwrap_or_else(|| roll_cluster::ClusterConfig::random_node_id() + "-redis-local-only");
         let front = Front::new(control.clone(), &secret, public)?;
-        Ok(Redis { control, front, opts: redis_server::net::ListenOptions { tls, proxy_protocol: args.redis_proxy_protocol } })
+        let listeners = (TcpListener::bind(args.redis).await?, TcpListener::bind(args.redis_http).await?);
+        tracing::info!(resp = %args.redis, http = %args.redis_http, tls = tls.is_some(), "redis listening");
+        let opts = redis_server::net::ListenOptions { tls, proxy_protocol: args.redis_proxy_protocol };
+        Ok(Redis { control, front, opts, listeners: Some(listeners) })
+    }
+
+    /// Whether this node is part of a cluster (not the memory backend), from its settings.
+    pub fn clustered(args: &crate::Args) -> bool {
+        let c = &args.code;
+        c.cluster.resolve(c.code_cluster_secret.as_deref(), None, None).is_ok_and(|r| r.backend != crate::cluster::BackendKind::Memory)
     }
 
     /// Serve databases while this node holds their leases (a cluster node; nothing on the
