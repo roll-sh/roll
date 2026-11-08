@@ -1,0 +1,657 @@
+> CREATE TABLE a190_g (id int PRIMARY KEY, x int)
+-- CREATE TABLE
+
+> INSERT INTO a190_g SELECT i, i % 7 FROM generate_series(1, 10000) i
+-- INSERT 0 10000
+
+> ANALYZE a190_g
+-- ANALYZE
+
+> EXPLAIN SELECT id, count(*) FROM a190_g GROUP BY id ORDER BY id DESC LIMIT 5
+QUERY PLAN:text
+Limit  (cost=0.29..0.52 rows=5 width=12)
+  ->  GroupAggregate  (cost=0.29..468.29 rows=10000 width=12)
+        Group Key: id
+        ->  Index Only Scan Backward using a190_g_pkey on a190_g  (cost=0.29..318.29 rows=10000 width=4)
+-- EXPLAIN
+
+> SELECT id, count(*) FROM a190_g GROUP BY id ORDER BY id DESC LIMIT 5
+id:int4 | count:int8
+10000 | 1
+9999 | 1
+9998 | 1
+9997 | 1
+9996 | 1
+-- SELECT 5
+
+> EXPLAIN SELECT id, sum(x) FROM a190_g GROUP BY id ORDER BY id DESC LIMIT 5
+QUERY PLAN:text
+Limit  (cost=0.29..0.52 rows=5 width=12)
+  ->  GroupAggregate  (cost=0.29..468.29 rows=10000 width=12)
+        Group Key: id
+        ->  Index Scan Backward using a190_g_pkey on a190_g  (cost=0.29..318.29 rows=10000 width=8)
+-- EXPLAIN
+
+> EXPLAIN SELECT id FROM a190_g GROUP BY id ORDER BY id DESC LIMIT 5
+QUERY PLAN:text
+Limit  (cost=0.29..0.46 rows=5 width=4)
+  ->  Group  (cost=0.29..343.29 rows=10000 width=4)
+        Group Key: id
+        ->  Index Only Scan Backward using a190_g_pkey on a190_g  (cost=0.29..318.29 rows=10000 width=4)
+-- EXPLAIN
+
+> SELECT id FROM a190_g GROUP BY id ORDER BY id DESC LIMIT 5
+id:int4
+10000
+9999
+9998
+9997
+9996
+-- SELECT 5
+
+> EXPLAIN SELECT id, count(*) FROM a190_g GROUP BY id ORDER BY id LIMIT 5
+QUERY PLAN:text
+Limit  (cost=0.29..0.52 rows=5 width=12)
+  ->  GroupAggregate  (cost=0.29..468.29 rows=10000 width=12)
+        Group Key: id
+        ->  Index Only Scan using a190_g_pkey on a190_g  (cost=0.29..318.29 rows=10000 width=4)
+-- EXPLAIN
+
+> EXPLAIN SELECT x, id, count(*) FROM a190_g GROUP BY id, x ORDER BY id DESC LIMIT 5
+QUERY PLAN:text
+Limit  (cost=0.29..0.52 rows=5 width=16)
+  ->  GroupAggregate  (cost=0.29..468.29 rows=10000 width=16)
+        Group Key: id
+        ->  Index Scan Backward using a190_g_pkey on a190_g  (cost=0.29..318.29 rows=10000 width=8)
+-- EXPLAIN
+
+> EXPLAIN SELECT id, count(*) FROM a190_g GROUP BY id ORDER BY id DESC NULLS LAST LIMIT 5
+QUERY PLAN:text
+Limit  (cost=461.10..461.11 rows=5 width=12)
+  ->  Sort  (cost=461.10..486.10 rows=10000 width=12)
+        Sort Key: id DESC NULLS LAST
+        ->  HashAggregate  (cost=195.00..295.00 rows=10000 width=12)
+              Group Key: id
+              ->  Seq Scan on a190_g  (cost=0.00..145.00 rows=10000 width=4)
+-- EXPLAIN
+
+> EXPLAIN SELECT id, count(*) FROM a190_g GROUP BY id ORDER BY id DESC LIMIT 5 OFFSET 10
+QUERY PLAN:text
+Limit  (cost=0.75..0.99 rows=5 width=12)
+  ->  GroupAggregate  (cost=0.29..468.29 rows=10000 width=12)
+        Group Key: id
+        ->  Index Only Scan Backward using a190_g_pkey on a190_g  (cost=0.29..318.29 rows=10000 width=4)
+-- EXPLAIN
+
+> SELECT id, count(*) FROM a190_g GROUP BY id ORDER BY id DESC LIMIT 5 OFFSET 10
+id:int4 | count:int8
+9990 | 1
+9989 | 1
+9988 | 1
+9987 | 1
+9986 | 1
+-- SELECT 5
+
+> EXPLAIN SELECT id, count(*) FROM a190_g WHERE id > 9000 GROUP BY id ORDER BY id DESC
+QUERY PLAN:text
+GroupAggregate  (cost=0.29..52.78 rows=1000 width=12)
+  Group Key: id
+  ->  Index Only Scan Backward using a190_g_pkey on a190_g  (cost=0.29..37.78 rows=1000 width=4)
+        Index Cond: (id > 9000)
+-- EXPLAIN
+
+> EXPLAIN SELECT id, count(*) FROM a190_g WHERE id < 50 GROUP BY id ORDER BY id DESC
+QUERY PLAN:text
+GroupAggregate  (cost=0.29..9.88 rows=49 width=12)
+  Group Key: id
+  ->  Index Only Scan Backward using a190_g_pkey on a190_g  (cost=0.29..9.14 rows=49 width=4)
+        Index Cond: (id < 50)
+-- EXPLAIN
+
+> EXPLAIN SELECT id, count(*) FROM a190_g WHERE id < 50 GROUP BY id ORDER BY id
+QUERY PLAN:text
+GroupAggregate  (cost=0.29..9.88 rows=49 width=12)
+  Group Key: id
+  ->  Index Only Scan using a190_g_pkey on a190_g  (cost=0.29..9.14 rows=49 width=4)
+        Index Cond: (id < 50)
+-- EXPLAIN
+
+> EXPLAIN SELECT id, count(*) FROM a190_g GROUP BY id ORDER BY id
+QUERY PLAN:text
+GroupAggregate  (cost=0.29..468.29 rows=10000 width=12)
+  Group Key: id
+  ->  Index Only Scan using a190_g_pkey on a190_g  (cost=0.29..318.29 rows=10000 width=4)
+-- EXPLAIN
+
+> EXPLAIN SELECT id, count(*) FROM a190_g GROUP BY id ORDER BY id DESC
+QUERY PLAN:text
+GroupAggregate  (cost=0.29..468.29 rows=10000 width=12)
+  Group Key: id
+  ->  Index Only Scan Backward using a190_g_pkey on a190_g  (cost=0.29..318.29 rows=10000 width=4)
+-- EXPLAIN
+
+> EXPLAIN SELECT x, count(*) FROM a190_g GROUP BY x ORDER BY x DESC LIMIT 2
+QUERY PLAN:text
+Limit  (cost=195.14..195.14 rows=2 width=12)
+  ->  Sort  (cost=195.14..195.16 rows=7 width=12)
+        Sort Key: x DESC
+        ->  HashAggregate  (cost=195.00..195.07 rows=7 width=12)
+              Group Key: x
+              ->  Seq Scan on a190_g  (cost=0.00..145.00 rows=10000 width=4)
+-- EXPLAIN
+
+> SET enable_seqscan = off
+-- SET
+
+> SET enable_hashagg = off
+-- SET
+
+> EXPLAIN SELECT id, count(*) FROM a190_g GROUP BY id ORDER BY id DESC
+QUERY PLAN:text
+GroupAggregate  (cost=0.29..468.29 rows=10000 width=12)
+  Group Key: id
+  ->  Index Only Scan Backward using a190_g_pkey on a190_g  (cost=0.29..318.29 rows=10000 width=4)
+-- EXPLAIN
+
+> EXPLAIN SELECT id, count(*) FROM a190_g GROUP BY id ORDER BY id DESC LIMIT 5
+QUERY PLAN:text
+Limit  (cost=0.29..0.52 rows=5 width=12)
+  ->  GroupAggregate  (cost=0.29..468.29 rows=10000 width=12)
+        Group Key: id
+        ->  Index Only Scan Backward using a190_g_pkey on a190_g  (cost=0.29..318.29 rows=10000 width=4)
+-- EXPLAIN
+
+> RESET enable_seqscan
+-- RESET
+
+> RESET enable_hashagg
+-- RESET
+
+> CREATE TABLE a190_b (id int PRIMARY KEY, v int)
+-- CREATE TABLE
+
+> CREATE TABLE a190_s (id int PRIMARY KEY, w int)
+-- CREATE TABLE
+
+> INSERT INTO a190_b SELECT g, g FROM generate_series(1, 1000) g
+-- INSERT 0 1000
+
+> INSERT INTO a190_s SELECT g, g FROM generate_series(1, 1000) g
+-- INSERT 0 1000
+
+> ANALYZE a190_b
+-- ANALYZE
+
+> ANALYZE a190_s
+-- ANALYZE
+
+> EXPLAIN DELETE FROM a190_b r1 USING a190_s r2 WHERE r1.id = r2.id AND r2.w < 3
+QUERY PLAN:text
+Delete on a190_b r1  (cost=0.28..34.10 rows=0 width=0)
+  ->  Nested Loop  (cost=0.28..34.10 rows=2 width=12)
+        ->  Seq Scan on a190_s r2  (cost=0.00..17.50 rows=2 width=10)
+              Filter: (w < 3)
+        ->  Index Scan using a190_b_pkey on a190_b r1  (cost=0.28..8.29 rows=1 width=10)
+              Index Cond: (id = r2.id)
+-- EXPLAIN
+
+> EXPLAIN VERBOSE DELETE FROM a190_b r1 USING a190_s r2 WHERE r1.id = r2.id AND r2.w < 3
+QUERY PLAN:text
+Delete on public.a190_b r1  (cost=0.28..34.10 rows=0 width=0)
+  ->  Nested Loop  (cost=0.28..34.10 rows=2 width=12)
+        Output: r1.ctid, r2.ctid
+        Inner Unique: true
+        ->  Seq Scan on public.a190_s r2  (cost=0.00..17.50 rows=2 width=10)
+              Output: r2.ctid, r2.id
+              Filter: (r2.w < 3)
+        ->  Index Scan using a190_b_pkey on public.a190_b r1  (cost=0.28..8.29 rows=1 width=10)
+              Output: r1.ctid, r1.id
+              Index Cond: (r1.id = r2.id)
+-- EXPLAIN
+
+> EXPLAIN DELETE FROM a190_b r1 USING a190_s r2 WHERE r1.v = r2.w AND r1.id < 3
+QUERY PLAN:text
+Delete on a190_b r1  (cost=8.34..27.11 rows=0 width=0)
+  ->  Hash Join  (cost=8.34..27.11 rows=2 width=12)
+        Hash Cond: (r2.w = r1.v)
+        ->  Seq Scan on a190_s r2  (cost=0.00..15.00 rows=1000 width=10)
+        ->  Hash  (cost=8.31..8.31 rows=2 width=10)
+              ->  Index Scan using a190_b_pkey on a190_b r1  (cost=0.28..8.31 rows=2 width=10)
+                    Index Cond: (id < 3)
+-- EXPLAIN
+
+> EXPLAIN DELETE FROM a190_b r1 USING a190_s r2 WHERE r1.id = r2.id AND r2.w < 3 RETURNING r2.w
+QUERY PLAN:text
+Delete on a190_b r1  (cost=0.28..34.10 rows=2 width=16)
+  ->  Nested Loop  (cost=0.28..34.10 rows=2 width=16)
+        ->  Seq Scan on a190_s r2  (cost=0.00..17.50 rows=2 width=14)
+              Filter: (w < 3)
+        ->  Index Scan using a190_b_pkey on a190_b r1  (cost=0.28..8.29 rows=1 width=10)
+              Index Cond: (id = r2.id)
+-- EXPLAIN
+
+> EXPLAIN UPDATE a190_b r1 SET v = 0 FROM a190_s r2 WHERE r1.id = r2.id AND r2.w < 3
+QUERY PLAN:text
+Update on a190_b r1  (cost=0.28..34.10 rows=0 width=0)
+  ->  Nested Loop  (cost=0.28..34.10 rows=2 width=16)
+        ->  Seq Scan on a190_s r2  (cost=0.00..17.50 rows=2 width=10)
+              Filter: (w < 3)
+        ->  Index Scan using a190_b_pkey on a190_b r1  (cost=0.28..8.29 rows=1 width=10)
+              Index Cond: (id = r2.id)
+-- EXPLAIN
+
+> BEGIN
+-- BEGIN
+
+> DELETE FROM a190_b r1 USING a190_s r2 WHERE r1.id = r2.id AND r2.w < 3 RETURNING r1.id, r2.w
+id:int4 | w:int4
+1 | 1
+2 | 2
+-- DELETE 2
+
+> ROLLBACK
+-- ROLLBACK
+
+> CREATE TABLE a190_na (id int PRIMARY KEY, x int)
+-- CREATE TABLE
+
+> CREATE TABLE a190_nb (id int PRIMARY KEY, y int)
+-- CREATE TABLE
+
+> INSERT INTO a190_na SELECT g, g % 100 FROM generate_series(1, 1000) g
+-- INSERT 0 1000
+
+> INSERT INTO a190_nb SELECT g, g % 50 FROM generate_series(1, 1000) g
+-- INSERT 0 1000
+
+> ANALYZE a190_na
+-- ANALYZE
+
+> ANALYZE a190_nb
+-- ANALYZE
+
+> EXPLAIN (COSTS OFF) SELECT * FROM a190_na WHERE NOT EXISTS (SELECT 1 FROM a190_nb WHERE a190_nb.y = a190_na.x AND EXISTS (SELECT 1 FROM a190_na n2 WHERE n2.x = 7))
+QUERY PLAN:text
+Hash Anti Join
+  Hash Cond: (a190_na.x = a190_nb.y)
+  Join Filter: (InitPlan 1).col1
+  InitPlan 1
+    ->  Seq Scan on a190_na n2
+          Filter: (x = 7)
+  ->  Seq Scan on a190_na
+  ->  Hash
+        ->  Seq Scan on a190_nb
+-- EXPLAIN
+
+> SELECT count(*) FROM a190_na WHERE NOT EXISTS (SELECT 1 FROM a190_nb WHERE a190_nb.y = a190_na.x AND EXISTS (SELECT 1 FROM a190_na n2 WHERE n2.x = 7))
+count:int8
+500
+-- SELECT 1
+
+> EXPLAIN (COSTS OFF) SELECT * FROM a190_na WHERE EXISTS (SELECT 1 FROM a190_nb WHERE a190_nb.y = a190_na.x AND EXISTS (SELECT 1 FROM a190_na n2 WHERE n2.x = 7))
+QUERY PLAN:text
+Result
+  One-Time Filter: (InitPlan 1).col1
+  InitPlan 1
+    ->  Seq Scan on a190_na n2
+          Filter: (x = 7)
+  ->  Hash Join
+        Hash Cond: (a190_na.x = a190_nb.y)
+        ->  Seq Scan on a190_na
+        ->  Hash
+              ->  HashAggregate
+                    Group Key: a190_nb.y
+                    ->  Seq Scan on a190_nb
+-- EXPLAIN
+
+> SELECT count(*) FROM a190_na WHERE EXISTS (SELECT 1 FROM a190_nb WHERE a190_nb.y = a190_na.x AND EXISTS (SELECT 1 FROM a190_na n2 WHERE n2.x = 7))
+count:int8
+500
+-- SELECT 1
+
+> EXPLAIN (COSTS OFF) SELECT * FROM a190_na WHERE NOT EXISTS (SELECT 1 FROM a190_nb WHERE a190_nb.y = a190_na.x AND NOT EXISTS (SELECT 1 FROM a190_na n2 WHERE n2.x = 700))
+QUERY PLAN:text
+Hash Anti Join
+  Hash Cond: (a190_na.x = a190_nb.y)
+  Join Filter: (NOT (InitPlan 1).col1)
+  InitPlan 1
+    ->  Seq Scan on a190_na n2
+          Filter: (x = 700)
+  ->  Seq Scan on a190_na
+  ->  Hash
+        ->  Seq Scan on a190_nb
+-- EXPLAIN
+
+> SELECT count(*) FROM a190_na WHERE NOT EXISTS (SELECT 1 FROM a190_nb WHERE a190_nb.y = a190_na.x AND NOT EXISTS (SELECT 1 FROM a190_na n2 WHERE n2.x = 700))
+count:int8
+500
+-- SELECT 1
+
+> EXPLAIN (COSTS OFF) SELECT * FROM a190_na WHERE x IN (SELECT y FROM a190_nb WHERE EXISTS (SELECT 1 FROM a190_na n2 WHERE n2.x = 7))
+QUERY PLAN:text
+Result
+  One-Time Filter: (InitPlan 1).col1
+  InitPlan 1
+    ->  Seq Scan on a190_na n2
+          Filter: (x = 7)
+  ->  Hash Join
+        Hash Cond: (a190_na.x = a190_nb.y)
+        ->  Seq Scan on a190_na
+        ->  Hash
+              ->  HashAggregate
+                    Group Key: a190_nb.y
+                    ->  Seq Scan on a190_nb
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT * FROM a190_na WHERE NOT EXISTS (SELECT 1 FROM a190_nb WHERE EXISTS (SELECT 1 FROM a190_na n2 WHERE n2.x = 7))
+QUERY PLAN:text
+Result
+  One-Time Filter: (NOT (InitPlan 2).col1)
+  InitPlan 2
+    ->  Result
+          One-Time Filter: (InitPlan 1).col1
+          InitPlan 1
+            ->  Seq Scan on a190_na n2
+                  Filter: (x = 7)
+          ->  Seq Scan on a190_nb
+  ->  Seq Scan on a190_na
+-- EXPLAIN
+
+> CREATE TABLE a190_dc (t text, u varchar(10))
+-- CREATE TABLE
+
+> INSERT INTO a190_dc SELECT 'v' || (g % 50), 'u' || (g % 7) FROM generate_series(1, 2000) g
+-- INSERT 0 2000
+
+> ANALYZE a190_dc
+-- ANALYZE
+
+> SET enable_hashagg = off
+-- SET
+
+> EXPLAIN (COSTS OFF) SELECT DISTINCT t COLLATE "C" FROM a190_dc
+QUERY PLAN:text
+Unique
+  ->  Sort
+        Sort Key: ((t)::text) COLLATE "C"
+        ->  Seq Scan on a190_dc
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT DISTINCT t COLLATE "C" AS x FROM a190_dc ORDER BY 1
+QUERY PLAN:text
+Unique
+  ->  Sort
+        Sort Key: ((t)::text) COLLATE "C"
+        ->  Seq Scan on a190_dc
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT DISTINCT u COLLATE "C" FROM a190_dc
+QUERY PLAN:text
+Unique
+  ->  Sort
+        Sort Key: ((u)::character varying(10)) COLLATE "C"
+        ->  Seq Scan on a190_dc
+-- EXPLAIN
+
+> SELECT DISTINCT u COLLATE "C" FROM a190_dc
+u:varchar
+u0
+u1
+u2
+u3
+u4
+u5
+u6
+-- SELECT 7
+
+> RESET enable_hashagg
+-- RESET
+
+> CREATE SCHEMA a190_ic
+-- CREATE SCHEMA
+
+> CREATE TABLE a190_ic.a190_t1 (id int PRIMARY KEY, a text)
+-- CREATE TABLE
+
+> EXPLAIN (COSTS OFF) SELECT c.relname FROM pg_class c
+> WHERE NOT EXISTS (SELECT 1 FROM pg_depend d
+>                   WHERE d.classid = (SELECT 'pg_class'::regclass::oid) AND d.objid = c.oid AND d.deptype IN ('e', 'x'))
+>   AND c.relname IN ('a190_t1')
+QUERY PLAN:text
+Nested Loop Anti Join
+  InitPlan 1
+    ->  Result
+  ->  Index Scan using pg_class_relname_nsp_index on pg_class c
+        Index Cond: (relname = 'a190_t1'::name)
+  ->  Index Scan using pg_depend_depender_index on pg_depend d
+        Index Cond: ((classid = (InitPlan 1).col1) AND (objid = c.oid))
+        Filter: (deptype = ANY ('{e,x}'::"char"[]))
+-- EXPLAIN
+
+> SELECT c.relname FROM pg_class c
+> WHERE NOT EXISTS (SELECT 1 FROM pg_depend d
+>                   WHERE d.classid = (SELECT 'pg_class'::regclass::oid) AND d.objid = c.oid AND d.deptype IN ('e', 'x'))
+>   AND c.relname IN ('a190_t1')
+relname:name
+a190_t1
+-- SELECT 1
+
+> EXPLAIN (COSTS OFF) SELECT ns.nspname, cls.relname, cls.relkind
+> FROM pg_class AS cls
+> JOIN pg_namespace AS ns ON ns.oid = cls.relnamespace
+> LEFT OUTER JOIN pg_description AS des ON des.objoid = cls.oid AND des.objsubid = 0
+> WHERE cls.relkind IN ('r', 'v', 'm', 'f', 'p')
+>   AND ns.nspname NOT IN ('pg_catalog', 'information_schema')
+>   AND NOT EXISTS (
+>       SELECT * FROM pg_depend AS dep
+>       WHERE dep.classid = (SELECT cls.oid FROM pg_class AS cls JOIN pg_namespace AS ns ON ns.oid = cls.relnamespace WHERE relname = 'pg_class' AND ns.nspname = 'pg_catalog')
+>         AND dep.objid = cls.oid AND dep.deptype IN ('e', 'x'))
+>   AND cls.relname IN ('a190_t1')
+> ORDER BY 2
+QUERY PLAN:text
+Nested Loop Anti Join
+  InitPlan 1
+    ->  Nested Loop
+          Join Filter: (cls_1.relnamespace = ns_1.oid)
+          ->  Index Scan using pg_class_relname_nsp_index on pg_class cls_1
+                Index Cond: (relname = 'pg_class'::name)
+          ->  Seq Scan on pg_namespace ns_1
+                Filter: (nspname = 'pg_catalog'::name)
+  ->  Nested Loop Left Join
+        ->  Nested Loop
+              Join Filter: (cls.relnamespace = ns.oid)
+              ->  Index Scan using pg_class_relname_nsp_index on pg_class cls
+                    Index Cond: (relname = 'a190_t1'::name)
+                    Filter: (relkind = ANY ('{r,v,m,f,p}'::"char"[]))
+              ->  Seq Scan on pg_namespace ns
+                    Filter: (nspname <> ALL ('{pg_catalog,information_schema}'::name[]))
+        ->  Index Only Scan using pg_description_o_c_o_index on pg_description des
+              Index Cond: ((objoid = cls.oid) AND (objsubid = 0))
+  ->  Index Scan using pg_depend_depender_index on pg_depend dep
+        Index Cond: ((classid = (InitPlan 1).col1) AND (objid = cls.oid))
+        Filter: (deptype = ANY ('{e,x}'::"char"[]))
+-- EXPLAIN
+
+> SELECT ns.nspname, cls.relname, cls.relkind
+> FROM pg_class AS cls
+> JOIN pg_namespace AS ns ON ns.oid = cls.relnamespace
+> LEFT OUTER JOIN pg_description AS des ON des.objoid = cls.oid AND des.objsubid = 0
+> WHERE cls.relkind IN ('r', 'v', 'm', 'f', 'p')
+>   AND ns.nspname NOT IN ('pg_catalog', 'information_schema')
+>   AND NOT EXISTS (
+>       SELECT * FROM pg_depend AS dep
+>       WHERE dep.classid = (SELECT cls.oid FROM pg_class AS cls JOIN pg_namespace AS ns ON ns.oid = cls.relnamespace WHERE relname = 'pg_class' AND ns.nspname = 'pg_catalog')
+>         AND dep.objid = cls.oid AND dep.deptype IN ('e', 'x'))
+>   AND cls.relname IN ('a190_t1')
+> ORDER BY 2
+nspname:name | relname:name | relkind:char
+a190_ic | a190_t1 | r
+-- SELECT 1
+
+> DROP SCHEMA a190_ic CASCADE
+NOTICE 00000: drop cascades to table a190_ic.a190_t1
+-- DROP SCHEMA
+
+> CREATE TABLE a190_cursor (id int PRIMARY KEY, v int, w text) WITH (autovacuum_enabled = off)
+-- CREATE TABLE
+
+> CREATE INDEX a190_cursor_v ON a190_cursor (v)
+-- CREATE INDEX
+
+> INSERT INTO a190_cursor SELECT i, (i * 7) % 31, 'w' || i FROM generate_series(1, 6) i
+-- INSERT 0 6
+
+> CREATE TABLE a190_cursor_effects (id int)
+-- CREATE TABLE
+
+> EXPLAIN (COSTS OFF) SELECT v, count(*), min(id) FROM a190_cursor GROUP BY v ORDER BY v
+QUERY PLAN:text
+Sort
+  Sort Key: v
+  ->  HashAggregate
+        Group Key: v
+        ->  Seq Scan on a190_cursor
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) DECLARE c CURSOR FOR SELECT v, count(*), min(id) FROM a190_cursor GROUP BY v ORDER BY v
+QUERY PLAN:text
+GroupAggregate
+  Group Key: v
+  ->  Index Scan using a190_cursor_v on a190_cursor
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) DECLARE c SCROLL CURSOR FOR SELECT v, count(*), min(id) FROM a190_cursor GROUP BY v ORDER BY v
+QUERY PLAN:text
+Materialize
+  ->  GroupAggregate
+        Group Key: v
+        ->  Index Scan using a190_cursor_v on a190_cursor
+-- EXPLAIN
+
+> BEGIN
+-- BEGIN
+
+> INSERT INTO a190_cursor_effects VALUES (1)
+-- INSERT 0 1
+
+> DECLARE c CURSOR FOR SELECT v, count(*), min(id) FROM a190_cursor GROUP BY v ORDER BY v
+-- DECLARE CURSOR
+
+> SELECT name, is_scrollable FROM pg_cursors ORDER BY name
+name:text | is_scrollable:bool
+c | f
+-- SELECT 1
+
+> FETCH ABSOLUTE -1 FROM c
+ERROR 55000: cursor can only scan forward
+HINT: Declare it with SCROLL option to enable backward scan.
+
+> SELECT 1
+ERROR 25P02: current transaction is aborted, commands ignored until end of transaction block
+
+> COMMIT
+-- ROLLBACK
+
+> SELECT * FROM a190_cursor_effects
+id:int4
+-- SELECT 0
+
+> BEGIN
+-- BEGIN
+
+> DECLARE c SCROLL CURSOR FOR SELECT v, count(*), min(id) FROM a190_cursor GROUP BY v ORDER BY v
+-- DECLARE CURSOR
+
+> SELECT name, is_scrollable FROM pg_cursors ORDER BY name
+name:text | is_scrollable:bool
+c | t
+-- SELECT 1
+
+> FETCH ABSOLUTE -1 FROM c
+v:int4 | count:int8 | min:int4
+28 | 1 | 4
+-- FETCH 1
+
+> ROLLBACK
+-- ROLLBACK
+
+> SET cursor_tuple_fraction = 1
+-- SET
+
+> EXPLAIN (COSTS OFF) DECLARE c CURSOR FOR SELECT v, count(*), min(id) FROM a190_cursor GROUP BY v ORDER BY v
+QUERY PLAN:text
+Sort
+  Sort Key: v
+  ->  HashAggregate
+        Group Key: v
+        ->  Seq Scan on a190_cursor
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) DECLARE c SCROLL CURSOR FOR SELECT v, count(*), min(id) FROM a190_cursor GROUP BY v ORDER BY v
+QUERY PLAN:text
+Sort
+  Sort Key: v
+  ->  HashAggregate
+        Group Key: v
+        ->  Seq Scan on a190_cursor
+-- EXPLAIN
+
+> BEGIN
+-- BEGIN
+
+> DECLARE c CURSOR FOR SELECT v, count(*), min(id) FROM a190_cursor GROUP BY v ORDER BY v
+-- DECLARE CURSOR
+
+> SELECT name, is_scrollable FROM pg_cursors ORDER BY name
+name:text | is_scrollable:bool
+c | t
+-- SELECT 1
+
+> FETCH ABSOLUTE -1 FROM c
+v:int4 | count:int8 | min:int4
+28 | 1 | 4
+-- FETCH 1
+
+> ROLLBACK
+-- ROLLBACK
+
+> SET cursor_tuple_fraction = 0
+-- SET
+
+> EXPLAIN (COSTS OFF) DECLARE c CURSOR FOR SELECT v, count(*), min(id) FROM a190_cursor GROUP BY v ORDER BY v
+QUERY PLAN:text
+GroupAggregate
+  Group Key: v
+  ->  Index Scan using a190_cursor_v on a190_cursor
+-- EXPLAIN
+
+> BEGIN
+-- BEGIN
+
+> DECLARE c CURSOR FOR SELECT v, count(*), min(id) FROM a190_cursor GROUP BY v ORDER BY v
+-- DECLARE CURSOR
+
+> SELECT name, is_scrollable FROM pg_cursors ORDER BY name
+name:text | is_scrollable:bool
+c | f
+-- SELECT 1
+
+> FETCH ABSOLUTE -1 FROM c
+ERROR 55000: cursor can only scan forward
+HINT: Declare it with SCROLL option to enable backward scan.
+
+> ROLLBACK
+-- ROLLBACK
+
+> RESET cursor_tuple_fraction
+-- RESET
+
+> EXPLAIN (COSTS OFF) SELECT v, count(*), min(id) FROM a190_cursor GROUP BY v ORDER BY v
+QUERY PLAN:text
+Sort
+  Sort Key: v
+  ->  HashAggregate
+        Group Key: v
+        ->  Seq Scan on a190_cursor
+-- EXPLAIN
+
