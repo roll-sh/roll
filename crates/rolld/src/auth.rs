@@ -33,6 +33,7 @@ pub const RULES: &[Rule] = &[
     Rule { route: "/internal", access: Access::Product("internal: signed hops and the WAL token") },
     // Storage: IAM users signed in to the dashboard (console sessions) act as themselves.
     Rule { route: "/v1/storage/console/signin", access: Access::Public("storage sign-in: checks the IAM user's password and MFA") },
+    Rule { route: "/v1/storage/console/session", access: Access::Product("storage: who a console session is, for that session's token only") },
     Rule { route: "/v1/storage", access: Access::Credential("a storage console session") },
     // Tasks: its own token (ROLL_TASKS_TOKEN) and API keys.
     Rule { route: "/v1/tasks", access: Access::Credential("a tasks token or API key") },
@@ -103,17 +104,18 @@ impl Auth {
     /// access at debug (`RUST_LOG=rolld::auth=debug`).
     pub fn wrap(&self, router: axum::Router) -> axum::Router {
         let routes = route_patterns(&router);
-        let (mut public, mut product, mut operator) = (0, 0, 0);
+        let (mut public, mut product, mut credential, mut operator) = (0, 0, 0, 0);
         for r in &routes {
             let access = self.gate.access(r);
             match access {
                 Access::Public(_) => public += 1,
-                Access::Product(_) | Access::Credential(_) => product += 1,
+                Access::Product(_) => product += 1,
+                Access::Credential(_) => credential += 1,
                 Access::Operator => operator += 1,
             }
             debug!(target: "rolld::auth", route = %r, access = %access, "route");
         }
-        info!(routes = routes.len(), operator, own_credentials = product, public, "control-plane routes");
+        info!(routes = routes.len(), operator, operator_or_credential = credential, product, public, "control-plane routes");
         router.layer(axum::middleware::from_fn_with_state(self.gate.clone(), roll_auth::check)).layer(roll_auth::cors(&self.origins))
     }
 }

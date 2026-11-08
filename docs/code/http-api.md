@@ -17,7 +17,8 @@ are listed in [architecture.md](architecture.md#http-api-v1code).
 ```
 GET /v1/code → {storage, git_url /* e.g. "https://roll.sh" or "http://127.0.0.1:7070/git" */, repos,
                 stats: {merges_today, merges_per_s, queue_depth}, github: {configured},
-                auth: {required: bool /* ROLL_CODE_TOKEN is set */,
+                auth: {required: bool /* ROLL_CODE_TOKEN or ROLL_ADMIN_TOKEN is set */,
+                       operator: bool /* the token is rolld's operator token (ROLL_ADMIN_TOKEN): every product's API takes it */,
                        caller: {kind: "admin" | "owner" | "app" | "anonymous" | "invalid", owner: string | null,
                                 app?: string /* kind app */,
                                 reviewer: {kind: "user" | "agent" | "app", name} | null /* who it reviews and comments as,

@@ -62,13 +62,13 @@ fn base(api: &Api) -> String {
 
 /// The stream behind a cluster id (its Kafka cluster id, stream id or name).
 fn cluster_stream(api: &Api, headers: &Caller, c: &str) -> ApiResult<Arc<Stream>> {
-    let s = api
-        .b
-        .streams()
-        .into_iter()
-        .find(|s| s.cluster_id == c)
-        .or_else(|| api.b.find_stream(c))
-        .ok_or_else(|| ApiError::not_found(format!("cluster {c} not found")))?;
+    let Some(s) = api.b.streams().into_iter().find(|s| s.cluster_id == c).or_else(|| api.b.find_stream(c)) else {
+        // Which clusters exist is for callers that may call at all.
+        if super::principal(api, headers)?.is_none() && api.b.config.http_require_auth && !headers.operator {
+            return Err(ApiError::new(StatusCode::UNAUTHORIZED, "unauthorized", "an API key is required"));
+        }
+        return Err(ApiError::not_found(format!("cluster {c} not found")));
+    };
     data_stream(api, headers, &s.id)
 }
 

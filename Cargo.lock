@@ -6203,8 +6203,6 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "serde_json",
- "tokio",
- "tower",
  "tower-http 0.7.1",
 ]
 

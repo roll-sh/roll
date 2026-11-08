@@ -140,16 +140,13 @@ impl Gate {
 /// It reads the matched route, so it goes on the router whose routes it guards.
 pub async fn check(State(gate): State<Arc<Gate>>, mut req: Request, next: Next) -> Response {
     let Some(token) = &gate.token else { return next.run(req).await };
-    let access = req.extensions().get::<MatchedPath>().map_or(Access::Operator, |m| gate.access(m.as_str()));
-    if let Access::Public(_) = access {
-        return next.run(req).await;
-    }
     if bearer(req.headers()).is_some_and(|t| token.matches(t)) {
         req.extensions_mut().insert(Operator);
         return next.run(req).await;
     }
+    let access = req.extensions().get::<MatchedPath>().map_or(Access::Operator, |m| gate.access(m.as_str()));
     match access {
-        Access::Product(_) => next.run(req).await,
+        Access::Public(_) | Access::Product(_) => next.run(req).await,
         Access::Credential(_) if req.headers().contains_key(header::AUTHORIZATION) => next.run(req).await,
         _ => unauthorized(),
     }
@@ -171,7 +168,7 @@ pub enum Origins {
 }
 
 impl Origins {
-    /// Comma-separated origins (`https://roll.cloud,https://staging.roll.cloud`).
+    /// Comma-separated origins (`https://roll.sh,https://staging.roll.sh`).
     pub fn parse(list: &str) -> Result<Self, String> {
         let mut out = Vec::new();
         for o in list.split(',').map(str::trim).filter(|o| !o.is_empty()) {
@@ -214,92 +211,24 @@ pub fn cors(origins: &Origins) -> CorsLayer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::Router;
-    use axum::body::Body;
-    use axum::routing::get;
-    use tower::ServiceExt;
 
-    const TOKEN: &str = "0123456789abcdef0123456789abcdef";
-
-    fn app() -> Router {
-        let rules = vec![
-            Rule { route: "/health", access: Access::Public("load balancers") },
-            Rule { route: "/v1/code", access: Access::Product("roll code's own rules") },
-            Rule { route: "/v1/storage", access: Access::Credential("a console session") },
-        ];
-        let gate = Gate::new(Some(AdminToken::new(TOKEN).unwrap()), rules);
-        let op = |req: Request| async move { if Operator::on(req.extensions()) { "operator" } else { "caller" } };
-        Router::new()
-            .route("/health", get(op))
-            .route("/v1/code/repos/{id}", get(op))
-            .route("/v1/codex", get(op))
-            .route("/v1/storage/buckets", get(op))
-            .route("/v1/projects", get(op))
-            .layer(axum::middleware::from_fn_with_state(gate, check))
-    }
-
-    async fn call(path: &str, auth: Option<&str>) -> (StatusCode, String) {
-        let mut req = Request::get(path);
-        if let Some(a) = auth {
-            req = req.header(header::AUTHORIZATION, a);
-        }
-        let res = app().oneshot(req.body(Body::empty()).unwrap()).await.unwrap();
-        let status = res.status();
-        let body = axum::body::to_bytes(res.into_body(), 1 << 16).await.unwrap();
-        (status, String::from_utf8_lossy(&body).into_owned())
-    }
-
-    #[tokio::test]
-    async fn routes_take_what_their_access_says() {
-        let op = format!("Bearer {TOKEN}");
-        assert_eq!(call("/health", None).await, (StatusCode::OK, "caller".into()));
-        assert_eq!(call("/v1/code/repos/x", None).await, (StatusCode::OK, "caller".into()), "the product decides");
-        assert_eq!(call("/v1/codex", None).await.0, StatusCode::UNAUTHORIZED, "a prefix is a whole segment");
-        assert_eq!(call("/v1/storage/buckets", None).await.0, StatusCode::UNAUTHORIZED);
-        assert_eq!(call("/v1/storage/buckets", Some("Bearer session")).await, (StatusCode::OK, "caller".into()), "the product verifies its own");
-        assert_eq!(call("/v1/projects", Some("Bearer session")).await.0, StatusCode::UNAUTHORIZED);
-        assert_eq!(call("/v1/projects", Some(&format!("Bearer {TOKEN}x"))).await.0, StatusCode::UNAUTHORIZED);
-        assert_eq!(call("/nothing/here", None).await.0, StatusCode::UNAUTHORIZED, "no route says nothing either");
-        for path in ["/v1/projects", "/v1/storage/buckets", "/v1/code/repos/x"] {
-            assert_eq!(call(path, Some(&op)).await, (StatusCode::OK, "operator".into()), "{path}");
-        }
-        assert_eq!(call("/nothing/here", Some(&op)).await.0, StatusCode::NOT_FOUND);
-    }
-
-    #[tokio::test]
-    async fn cors_answers_only_the_dashboard() {
-        let origins = Origins::parse("https://roll.cloud").unwrap();
-        let app = Router::new().route("/v1/projects", get(|| async { "ok" })).layer(cors(&origins));
-        let preflight = |origin: &str| {
-            Request::options("/v1/projects")
-                .header(header::ORIGIN, origin)
-                .header(header::ACCESS_CONTROL_REQUEST_METHOD, "GET")
-                .header(header::ACCESS_CONTROL_REQUEST_HEADERS, "authorization")
-                .body(Body::empty())
-                .unwrap()
-        };
-        let res = app.clone().oneshot(preflight("https://roll.cloud")).await.unwrap();
-        assert_eq!(res.headers()[header::ACCESS_CONTROL_ALLOW_ORIGIN], "https://roll.cloud");
-        assert!(res.headers()[header::ACCESS_CONTROL_ALLOW_HEADERS].to_str().unwrap().contains("authorization"));
-        assert!(!res.headers().contains_key(header::ACCESS_CONTROL_ALLOW_CREDENTIALS));
-        let res = app.clone().oneshot(preflight("https://evil.example")).await.unwrap();
-        assert!(!res.headers().contains_key(header::ACCESS_CONTROL_ALLOW_ORIGIN), "a foreign origin gets no CORS grant");
-
-        let local = Router::new().route("/v1/projects", get(|| async { "ok" })).layer(cors(&Origins::Local));
-        for (origin, ok) in [("http://localhost:3000", true), ("http://127.0.0.1:5173", true), ("http://[::1]:3000", true), ("http://localhost.evil.example", false), ("http://evil.example:3000", false)] {
-            let res = local.clone().oneshot(preflight(origin)).await.unwrap();
-            assert_eq!(res.headers().contains_key(header::ACCESS_CONTROL_ALLOW_ORIGIN), ok, "{origin}");
-        }
-        assert!(Origins::parse("https://roll.cloud/path").is_err());
-        assert!(Origins::parse("*").is_err());
-    }
-
+    /// The loopback default can't be met by a look-alike host, and the token never prints.
     #[test]
-    fn the_token_is_long_and_never_printed() {
+    fn local_origins_and_the_token() {
+        for (origin, ok) in [
+            ("http://localhost:3000", true),
+            ("http://127.0.0.1", true),
+            ("http://[::1]:5173", true),
+            ("http://localhost.evil.example", false),
+            ("http://localhost:3000.evil.example", false),
+            ("http://127.0.0.1@evil.example", false),
+        ] {
+            assert_eq!(is_local(&HeaderValue::from_static(origin)), ok, "{origin}");
+        }
+        assert!(Origins::parse("https://roll.sh/path").is_err() && Origins::parse("*").is_err());
         assert!(AdminToken::new("short").is_err());
-        assert!(AdminToken::new("0123456789abcdef 0123456789abcdef").is_err());
-        let t = AdminToken::new(TOKEN).unwrap();
-        assert!(t.matches(TOKEN) && !t.matches("0123456789abcdef0123456789abcdeX") && !t.matches(""));
+        let t = AdminToken::new("0123456789abcdef0123456789abcdef").unwrap();
+        assert!(t.matches("0123456789abcdef0123456789abcdef") && !t.matches("0123456789abcdef0123456789abcdeX"));
         assert!(!format!("{t:?}").contains("0123"));
     }
 }

@@ -50,6 +50,7 @@ impl Env {
         docker(&[
             "run", "-d", "--name", &self.name(n), "--hostname", n, "--network", &self.net(), "-v", &vol, "-e", &meta, "-e", &id,
             "-e", "ROLL_QUEUES_STORAGE=file:/shared/logs", "-e", "ROLL_QUEUES_USER=e2e", "-e", "ROLL_QUEUES_PASSWORD=e2e",
+            "-e", "ROLL_ADMIN_TOKEN=e2e-operator-token-0123456789abcdef",
             "-e", "ROLL_QUEUES_DRAIN_TIMEOUT=20", "-e", "ROLL_QUEUES_CLUSTER_SECRET=e2e-cluster-secret", "-e", "RUST_LOG=info,mq_cluster=debug", "-p", "127.0.0.1::5672", IMAGE,
         ]);
     }

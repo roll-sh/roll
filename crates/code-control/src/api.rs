@@ -173,7 +173,7 @@ async fn health(State(code): S) -> Response {
 // ── info, names, owners ──
 
 /// Server info, plus who the request is: the dashboard's sign-in checks a token against it.
-async fn info(State(code): S, headers: axum::http::HeaderMap) -> Result<Json<Value>> {
+async fn info(State(code): S, operator: Option<axum::Extension<roll_auth::Operator>>, headers: axum::http::HeaderMap) -> Result<Json<Value>> {
     let token = headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
@@ -197,7 +197,8 @@ async fn info(State(code): S, headers: axum::http::HeaderMap) -> Result<Json<Val
         "repos": code.db.count_repos()?,
         "stats": code.stats()?,
         "github": { "configured": code.github_hub().is_some() },
-        "auth": { "required": code.config.locked(), "caller": caller },
+        // `operator`: rolld's gate found its operator token (ROLL_ADMIN_TOKEN) on this request.
+        "auth": { "required": code.config.locked(), "operator": operator.is_some(), "caller": caller },
     })))
 }
 
