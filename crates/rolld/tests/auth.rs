@@ -60,6 +60,12 @@ fn loopback_args(api: u16) -> Vec<String> {
 }
 
 fn concrete(pattern: &str) -> String {
+    // A catch-all that forwards a product's API to its owner (storage's `/v1/storage/{*rest}`)
+    // is probed at a real route behind it, so the check is the product's, not a 404 for a path
+    // that doesn't exist.
+    if pattern == "/v1/storage/{*rest}" {
+        return "/v1/storage/buckets".into();
+    }
     pattern.split('/').map(|seg| if seg.starts_with('{') { "0" } else { seg }).collect::<Vec<_>>().join("/")
 }
 
