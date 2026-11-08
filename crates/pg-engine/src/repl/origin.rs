@@ -2,7 +2,16 @@
 //! (pg_replication_origin_session_setup) stamped on the transactions it commits, and each
 //! origin's progress. Origins are the cluster's, stored in `<data>/replorigins.json`; a
 //! commit's progress also goes into its own database's store in the same commit (under
-//! `log::PREFIX`), so an apply worker resumes exactly after what it committed.
+//! `log::PREFIX`), as PostgreSQL's commit record carries it, so an apply worker resumes
+//! exactly after what it committed.
+//!
+//! After a crash the stored progress is the truth: the file is written lazily and may be
+//! ahead of what survived (an asynchronous commit lost to a power cut). Each origin has a
+//! generation, new at its creation and at each pg_replication_origin_advance (both written
+//! durably), and a commit stores its progress with the generation it was made in; `recover`
+//! takes the stored progress of the current generation, or else the position the generation
+//! started at. (So an origin id used again doesn't resume at its old owner's position, and an
+//! explicit advance isn't undone by older commits.)
 
 use super::log::PREFIX;
 use crate::error::{Error, Result, code};
@@ -20,6 +29,16 @@ pub struct Origin {
     pub name: String,
     pub remote_lsn: u64,
     pub local_lsn: u64,
+    /// The generation (0: an origin stored by an older build) and the position it started
+    /// at (creation or pg_replication_origin_advance), both durable.
+    #[serde(default)]
+    pub generation: u64,
+    #[serde(default)]
+    pub start_lsn: u64,
+    /// Whether `remote_lsn` is this process's own (not the file's, which a crash may have left
+    /// ahead of the stored progress): set at creation, advance and `recover`.
+    #[serde(skip)]
+    pub recovered: bool,
 }
 
 /// A backend's session origin (replorigin_session_*).
@@ -29,6 +48,8 @@ pub struct SessionOrigin {
     /// pg_replication_origin_xact_setup's: the remote commit's position and time.
     pub xact_lsn: u64,
     pub xact_time: i64,
+    /// The origin's generation (`session` fills it in).
+    pub generation: u64,
     /// The acquired_by it joined the origin with (0: it acquired it).
     pub joined: i32,
 }
@@ -37,6 +58,7 @@ pub struct SessionOrigin {
 struct State {
     origins: Vec<Origin>,
     sessions: HashMap<i32, SessionOrigin>,
+    next_generation: u64,
     /// Progress moved by commits since the file was last written, and when that was.
     dirty: bool,
     saved_at: Option<std::time::Instant>,
@@ -52,6 +74,8 @@ pub struct Origins {
 #[derive(Serialize, Deserialize, Default)]
 struct Stored {
     origins: Vec<Origin>,
+    #[serde(default)]
+    next_generation: u64,
 }
 
 /// The key of origin `id`'s progress in a database's store.
@@ -60,6 +84,31 @@ pub fn progress_key(id: u16) -> Vec<u8> {
     k.push(b'O');
     k.extend_from_slice(&id.to_be_bytes());
     k
+}
+
+/// The value stored under `progress_key`: the remote position and the origin's generation.
+pub fn progress_value(lsn: u64, generation: u64) -> Vec<u8> {
+    let mut v = lsn.to_be_bytes().to_vec();
+    v.extend_from_slice(&generation.to_be_bytes());
+    v
+}
+
+/// A stored progress value: (position, generation); an older build's has no generation (0).
+pub fn parse_progress(v: &[u8]) -> Option<(u64, u64)> {
+    let lsn = u64::from_be_bytes(v.get(..8)?.try_into().ok()?);
+    let generation = match v.get(8..) {
+        Some([]) => 0,
+        Some(g) => u64::from_be_bytes(g.try_into().ok()?),
+        None => return None,
+    };
+    Some((lsn, generation))
+}
+
+/// Origin `id`'s progress as `db`'s last commit stored it, or (with none) where its
+/// generation started: what a crash leaves (`Origins::recover`).
+pub fn recover(db: &crate::txn::Database, origins: &Origins, id: u16) {
+    let stored = db.store.get(&progress_key(id), db.store.visible_ts()).ok().flatten().and_then(|b| parse_progress(&b));
+    origins.recover(id, stored);
 }
 
 /// pg_replication_origin_create's check of the name (IsReservedOriginName); internal callers
@@ -89,7 +138,7 @@ impl Drop for Origins {
     fn drop(&mut self) {
         let mut st = std::mem::take(&mut *self.st.lock());
         if st.dirty {
-            self.save(&mut st);
+            let _ = self.save(&mut st, true);
         }
     }
 }
@@ -97,25 +146,53 @@ impl Drop for Origins {
 impl Origins {
     pub fn open(dir: Option<PathBuf>) -> Origins {
         let path = dir.map(|d| d.join("replorigins.json"));
-        let origins = path
+        let stored = path
             .as_ref()
             .and_then(|p| std::fs::read(p).ok())
             .and_then(|b| serde_json::from_slice::<Stored>(&b).ok())
-            .map(|s| s.origins)
             .unwrap_or_default();
-        Origins { st: Mutex::new(State { origins, sessions: HashMap::new(), dirty: false, saved_at: None }), sessions_n: AtomicUsize::new(0), path }
+        let next_generation = stored.origins.iter().map(|o| o.generation).fold(stored.next_generation, u64::max);
+        let st = State { origins: stored.origins, sessions: HashMap::new(), next_generation, dirty: false, saved_at: None };
+        Origins { st: Mutex::new(st), sessions_n: AtomicUsize::new(0), path }
     }
 
-    fn save(&self, st: &mut State) {
+    /// Write the file; `sync`: durably (a creation, a drop, an advance, the close), else only
+    /// atomically, for the progress shown after a clean restart (`recover` decides after a
+    /// crash). It is never torn: a torn file would lose every origin.
+    fn save(&self, st: &mut State, sync: bool) -> Result<()> {
         st.dirty = false;
         st.saved_at = Some(std::time::Instant::now());
-        let Some(p) = &self.path else { return };
-        let tmp = p.with_extension("json.tmp");
-        if let Ok(b) = serde_json::to_vec(&Stored { origins: st.origins.clone() })
-            && std::fs::write(&tmp, b).is_ok()
-        {
-            let _ = std::fs::rename(&tmp, p);
+        let Some(p) = &self.path else { return Ok(()) };
+        let b = serde_json::to_vec(&Stored { origins: st.origins.clone(), next_generation: st.next_generation })
+            .map_err(|e| crate::error::internal(e.to_string()))?;
+        let r = if sync { crate::storage::durable::replace(p, &b, true) } else { crate::storage::durable::replace_atomic(p, &b) };
+        r.map_err(|e| crate::error::internal(format!("could not write replication origin state \"{}\": {e}", p.display())))
+    }
+
+    /// Write the file at most once a second (and when the origins close).
+    fn save_lazily(&self, st: &mut State) {
+        st.dirty = true;
+        if st.saved_at.is_none_or(|t| t.elapsed() >= std::time::Duration::from_secs(1)) {
+            let _ = self.save(st, false);
         }
+    }
+
+    /// The progress a crash left origin `id` with: `stored` (`progress_value`, from the
+    /// database the origin's commits went to) when it is of the current generation, else the
+    /// generation's start. Once per process: after that the progress in memory is the truth.
+    pub fn recover(&self, id: u16, stored: Option<(u64, u64)>) {
+        let mut st = self.st.lock();
+        let Some(o) = st.origins.iter_mut().find(|o| o.id == id) else { return };
+        if o.recovered {
+            return;
+        }
+        o.recovered = true;
+        o.remote_lsn = match stored {
+            Some((lsn, g)) if g == o.generation => lsn,
+            // (An origin stored by an older build: the file's progress or the stored one, as before.)
+            _ if o.generation == 0 => stored.map_or(o.remote_lsn, |(lsn, _)| lsn.max(o.remote_lsn)),
+            _ => o.start_lsn,
+        };
     }
 
     pub fn list(&self) -> Vec<Origin> {
@@ -149,8 +226,13 @@ impl Origins {
         let Some(id) = (1..=u16::MAX).find(|i| !st.origins.iter().any(|o| o.id == *i)) else {
             return Err(Error::new(code::PROGRAM_LIMIT_EXCEEDED, "could not find free replication origin ID"));
         };
-        st.origins.push(Origin { id, name: name.to_string(), remote_lsn: 0, local_lsn: 0 });
-        self.save(&mut st);
+        st.next_generation += 1;
+        let generation = st.next_generation;
+        st.origins.push(Origin { id, name: name.to_string(), remote_lsn: 0, local_lsn: 0, generation, start_lsn: 0, recovered: true });
+        if let Err(e) = self.save(&mut st, true) {
+            st.origins.retain(|o| o.id != id);
+            return Err(e);
+        }
         Ok(id)
     }
 
@@ -167,22 +249,37 @@ impl Origins {
             ));
         }
         st.origins.retain(|x| x.id != o.id);
-        self.save(&mut st);
+        if let Err(e) = self.save(&mut st, true) {
+            st.origins.push(o);
+            return Err(e);
+        }
         Ok(())
     }
 
-    /// Record progress: the remote commit `remote` is applied locally at `local`.
-    pub fn advance(&self, id: u16, remote: u64, local: u64, go_backward: bool) {
+    /// Progress no commit stored: the remote transaction ending at `remote` is done here
+    /// (prepared, or aborted). It is in memory and the file only, so a crash may take it back:
+    /// the remote transaction comes again, and is found prepared, or aborts again.
+    pub fn advance(&self, id: u16, remote: u64) {
         let mut st = self.st.lock();
         if let Some(o) = st.origins.iter_mut().find(|o| o.id == id) {
-            if go_backward || remote > o.remote_lsn {
-                o.remote_lsn = remote;
-            }
-            if local > o.local_lsn {
-                o.local_lsn = local;
-            }
+            o.remote_lsn = o.remote_lsn.max(remote);
         }
-        self.save(&mut st);
+        self.save_lazily(&mut st);
+    }
+
+    /// pg_replication_origin_advance: the position set (backward too) in a new generation,
+    /// durably; the progress earlier commits stored no longer counts.
+    pub fn set_progress(&self, id: u16, remote: u64) -> Result<()> {
+        let mut st = self.st.lock();
+        st.next_generation += 1;
+        let generation = st.next_generation;
+        if let Some(o) = st.origins.iter_mut().find(|o| o.id == id) {
+            o.remote_lsn = remote;
+            o.start_lsn = remote;
+            o.generation = generation;
+            o.recovered = true;
+        }
+        self.save(&mut st, true)
     }
 
     /// `advance` for a commit that stored the origin's progress itself (`before_commit`'s
@@ -194,17 +291,17 @@ impl Origins {
             o.remote_lsn = o.remote_lsn.max(remote);
             o.local_lsn = o.local_lsn.max(local);
         }
-        st.dirty = true;
-        if st.saved_at.is_none_or(|t| t.elapsed() >= std::time::Duration::from_secs(1)) {
-            self.save(&mut st);
-        }
+        self.save_lazily(&mut st);
     }
 
     pub fn session(&self, pid: i32) -> Option<SessionOrigin> {
         if self.sessions_n.load(Ordering::Acquire) == 0 {
             return None;
         }
-        self.st.lock().sessions.get(&pid).copied()
+        let st = self.st.lock();
+        let mut s = *st.sessions.get(&pid)?;
+        s.generation = st.origins.iter().find(|o| o.id == s.id).map_or(0, |o| o.generation);
+        Some(s)
     }
 
     /// replorigin_session_setup.
@@ -292,17 +389,17 @@ pub fn before_commit(sess: &crate::session::state::SessionState, txn: &mut crate
         l.origin_lsn = so.xact_lsn;
     }
     if so.xact_lsn != 0 {
-        let _ = txn.put_log(progress_key(so.id), so.xact_lsn.to_be_bytes().to_vec());
+        let _ = txn.put_log(progress_key(so.id), progress_value(so.xact_lsn, so.generation));
     }
     Some((so.id, so.xact_lsn))
 }
 
-/// The session origin's position a ROLLBACK PREPARED stores with its record (no commit of a
-/// transaction carries it): (origin, position), None without one.
-pub fn rollback_progress(sess: &crate::session::state::SessionState) -> Option<(u16, u64)> {
+/// The session origin's progress a ROLLBACK PREPARED stores with its record (no commit of a
+/// transaction carries it): (origin, position) and the value to store, None without one.
+pub fn rollback_progress(sess: &crate::session::state::SessionState) -> Option<((u16, u64), Vec<u8>)> {
     let r = sess.db.repl()?;
     let so = r.origins.session(sess.pid)?;
-    (so.xact_lsn != 0).then_some((so.id, so.xact_lsn))
+    (so.xact_lsn != 0).then(|| ((so.id, so.xact_lsn), progress_value(so.xact_lsn, so.generation)))
 }
 
 /// After it committed: the origin's progress in memory (replorigin_session_advance: the local
@@ -341,7 +438,12 @@ fn oid(a: &[Value], c: &FnCtx) -> Result<Value> {
 }
 fn session_setup(a: &[Value], c: &FnCtx) -> Result<Value> {
     let pid = a.get(1).and_then(|v| v.as_i64()).unwrap_or(0) as i32;
-    origins(c)?.origins.session_setup(c.exec.sess.pid, text_arg(&a[0]), pid)?;
+    let r = origins(c)?;
+    r.origins.session_setup(c.exec.sess.pid, text_arg(&a[0]), pid)?;
+    // (Its progress as this database's commits stored it: after a crash the file's may be ahead.)
+    if let Some(o) = r.origins.by_name(text_arg(&a[0])) {
+        recover(&c.exec.sess.db, &r.origins, o.id);
+    }
     Ok(Value::Null)
 }
 fn session_reset(_: &[Value], c: &FnCtx) -> Result<Value> {
@@ -375,7 +477,7 @@ fn advance(a: &[Value], c: &FnCtx) -> Result<Value> {
     let r = origins(c)?;
     let name = text_arg(&a[0]);
     let Some(o) = r.origins.by_name(name) else { return Err(no_origin(name)) };
-    r.origins.advance(o.id, lsn(&a[1]), 0, true);
+    r.origins.set_progress(o.id, lsn(&a[1]))?;
     Ok(Value::Null)
 }
 fn progress(a: &[Value], c: &FnCtx) -> Result<Value> {

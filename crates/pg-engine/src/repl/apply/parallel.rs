@@ -956,7 +956,7 @@ impl Worker<'_> {
                 let _ = self.sess.query("ROLLBACK");
             }
             if abort_lsn != 0 {
-                self.repl.origins.advance(self.origin, abort_lsn, 0, false);
+                self.repl.origins.advance(self.origin, abort_lsn);
             }
             self.txn = None;
             self.subxacts.clear();

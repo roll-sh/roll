@@ -323,6 +323,162 @@ async fn advisory_leader(t: Target) {
     assert!(terms.load(Ordering::Relaxed) > 0);
 }
 
+/// DDL against DML on one table. Sessions move money between accounts (two updates, ids in
+/// order) and insert a note per move, while one session runs DDL on the accounts: ADD and
+/// DROP COLUMN with a default, ALTER COLUMN TYPE both ways (rewrites), CREATE / DROP INDEX
+/// CONCURRENTLY, REINDEX CONCURRENTLY, VACUUM FULL and CLUSTER. Two scanners read the total
+/// all the while, one by seq scan and one through the indexes, and another session holds a
+/// cursor open over a table that a fourth one drops. Each statement's snapshot is taken
+/// after its locks (READ COMMITTED), so a rewrite never shows an empty table. Checked: the
+/// total never changes, no acknowledged move or note is lost or doubled, every index agrees
+/// with the table, no index is left invalid, and DROP waits for the cursor.
+async fn ddl_against_dml(t: Target) {
+    const ACCOUNTS: u64 = 200;
+    const WRITERS: u64 = 6;
+    let c = t.connect().await;
+    c.batch_execute(&format!(
+        "DROP TABLE IF EXISTS acct, notes, victim;
+         CREATE TABLE acct (id int PRIMARY KEY, grp int NOT NULL, bal int NOT NULL);
+         CREATE INDEX acct_grp ON acct (grp);
+         INSERT INTO acct SELECT g, g % 10, 100 FROM generate_series(1, {ACCOUNTS}) g;
+         CREATE TABLE notes (w int, i int, body text);
+         CREATE INDEX notes_wi ON notes (w, i);
+         CREATE TABLE victim (id int);
+         INSERT INTO victim SELECT generate_series(1, 5000)"
+    ))
+    .await
+    .unwrap();
+    let total = format!("{}|{ACCOUNTS}", ACCOUNTS * 100);
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut writers = Vec::new();
+    for w in 0..WRITERS {
+        let (t, stop) = (t.clone(), stop.clone());
+        writers.push(tokio::spawn(async move {
+            let c = t.connect().await;
+            let mut rng = Lcg(w + 31);
+            let mut moves = 0;
+            while !stop.load(Ordering::Relaxed) {
+                let (a, b) = (1 + rng.next(ACCOUNTS), 1 + rng.next(ACCOUNTS));
+                if a == b {
+                    continue;
+                }
+                let (lo, hi, amount) = (a.min(b), a.max(b), 1 + rng.next(5));
+                let txn = format!(
+                    "BEGIN;
+                     UPDATE acct SET bal = bal - {amount} WHERE id = {lo};
+                     UPDATE acct SET bal = bal + {amount} WHERE id = {hi};
+                     INSERT INTO notes VALUES ({w}, {moves}, repeat('n', 40));
+                     COMMIT"
+                );
+                loop {
+                    match c.batch_execute(&txn).await {
+                        Ok(()) => break,
+                        Err(e) if e.code() == Some(&SqlState::T_R_DEADLOCK_DETECTED) => c.batch_execute("ROLLBACK").await.unwrap(),
+                        Err(e) => panic!("writer {w}, move {moves}: {e:?}"),
+                    }
+                }
+                moves += 1;
+            }
+            moves
+        }));
+    }
+    // (A row of `SELECT sum, count` as text.)
+    async fn sum_count(c: &Client, sql: &str) -> String {
+        let r = c.query_one(sql, &[]).await.unwrap_or_else(|e| panic!("{sql}: {e:?}"));
+        format!("{}|{}", r.get::<_, Option<i64>>(0).map_or("null".into(), |v| v.to_string()), r.get::<_, i64>(1))
+    }
+    let mut scanners = Vec::new();
+    for by_index in [false, true] {
+        let (t, stop, total) = (t.clone(), stop.clone(), total.clone());
+        scanners.push(tokio::spawn(async move {
+            let c = t.connect().await;
+            if by_index {
+                c.batch_execute("SET enable_seqscan = off; SET enable_bitmapscan = off").await.unwrap();
+            }
+            let mut scans = 0;
+            while !stop.load(Ordering::Relaxed) {
+                for sql in [
+                    "SELECT sum(bal)::int8, count(*) FROM acct WHERE id > 0",
+                    "SELECT sum(bal)::int8, count(*) FROM acct WHERE grp >= 0",
+                ] {
+                    assert_eq!(sum_count(&c, sql).await, total, "{sql} (by index: {by_index})");
+                }
+                scans += 1;
+            }
+            scans
+        }));
+    }
+    // DROP TABLE waits for a cursor reading the table, which reads it whole.
+    let dropping = {
+        let t = t.clone();
+        tokio::spawn(async move {
+            let c = t.connect().await;
+            c.batch_execute("BEGIN; DECLARE cur CURSOR FOR SELECT id FROM victim ORDER BY id").await.unwrap();
+            let first = c.query("FETCH 100 FROM cur", &[]).await.unwrap().len();
+            let dropper = {
+                let t = t.clone();
+                tokio::spawn(async move { t.connect().await.batch_execute("DROP TABLE victim").await })
+            };
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            assert!(!dropper.is_finished(), "DROP TABLE didn't wait for the open cursor");
+            let rest: Vec<i32> = c.query("FETCH ALL FROM cur", &[]).await.unwrap().iter().map(|r| r.get(0)).collect();
+            assert_eq!((first, rest.len(), rest.first(), rest.last()), (100, 4900, Some(&101), Some(&5000)));
+            c.batch_execute("COMMIT").await.unwrap();
+            dropper.await.unwrap().unwrap();
+        })
+    };
+    for _ in 0..3 {
+        for ddl in [
+            "ALTER TABLE acct ADD COLUMN extra int DEFAULT 7",
+            "CREATE INDEX CONCURRENTLY acct_bal ON acct (bal)",
+            "ALTER TABLE acct ALTER COLUMN bal TYPE bigint",
+            "REINDEX TABLE CONCURRENTLY acct",
+            "ALTER TABLE acct DROP COLUMN extra",
+            "VACUUM FULL acct",
+            "DROP INDEX CONCURRENTLY acct_bal",
+            "ALTER TABLE acct ALTER COLUMN bal TYPE int",
+            "CLUSTER acct USING acct_pkey",
+        ] {
+            c.batch_execute(ddl).await.unwrap_or_else(|e| panic!("{ddl}: {e:?}"));
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+    dropping.await.unwrap();
+    stop.store(true, Ordering::Relaxed);
+    let mut moves = HashMap::new();
+    for (w, task) in writers.into_iter().enumerate() {
+        moves.insert(w as i32, task.await.unwrap());
+    }
+    for task in scanners {
+        assert!(task.await.unwrap() > 0, "a scanner never finished a scan");
+    }
+    assert!(moves.values().all(|&n| n > 0), "every writer moved money: {moves:?}");
+    // Every note once, through each access path; the total unchanged; the indexes whole.
+    let notes = "SELECT w, count(*), count(DISTINCT i), max(i) FROM notes GROUP BY w ORDER BY w";
+    for settings in ["SET enable_seqscan = on; SET enable_bitmapscan = on", "SET enable_seqscan = off; SET enable_bitmapscan = off"] {
+        c.batch_execute(settings).await.unwrap();
+        let got: Vec<(i32, i64, i64, i32)> =
+            c.query(notes, &[]).await.unwrap().iter().map(|r| (r.get(0), r.get(1), r.get(2), r.get(3))).collect();
+        let want: Vec<(i32, i64, i64, i32)> = (0..WRITERS as i32).map(|w| (w, moves[&w] as i64, moves[&w] as i64, moves[&w] as i32 - 1)).collect();
+        assert_eq!(got, want, "notes ({settings})");
+        for sql in ["SELECT sum(bal)::int8, count(*) FROM acct WHERE id > 0", "SELECT sum(bal)::int8, count(*) FROM acct WHERE grp >= 0"] {
+            assert_eq!(sum_count(&c, sql).await, total, "{sql} ({settings})");
+        }
+    }
+    let leftovers: i64 = c
+        .query_one(
+            "SELECT count(*) FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid
+              WHERE NOT (i.indisvalid AND i.indisready AND i.indislive) OR c.relname ~ '_cc(new|old)'",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(leftovers, 0, "an index left invalid or behind by a concurrent build");
+    let victim: i64 = c.query_one("SELECT count(*) FROM pg_class WHERE relname = 'victim'", &[]).await.unwrap().get(0);
+    assert_eq!(victim, 0);
+}
+
 /// LISTEN / NOTIFY: a transaction's notifications arrive together, in the order sent;
 /// transactions' in commit order (each sender's in its order); none lost or doubled.
 async fn notify_order(t: Target) {
@@ -431,6 +587,11 @@ fn notifications_in_commit_order() {
     on_engine(notify_order);
 }
 
+#[test]
+fn ddl_against_dml_keeps_every_row() {
+    on_engine(ddl_against_dml);
+}
+
 /// The same checks against a reference PostgreSQL (`APPCONC_REF`, `APPCONC_PASSWORD`): it
 /// makes a database `appconc` there and drops it at the end.
 #[test]
@@ -458,6 +619,7 @@ fn against_reference() {
         exclusion_on_conflict(t.clone()).await;
         serializable_transfers(t.clone()).await;
         advisory_leader(t.clone()).await;
+        ddl_against_dml(t.clone()).await;
         notify_order(t).await;
         admin.batch_execute("DROP DATABASE appconc WITH (FORCE)").await.unwrap();
     });

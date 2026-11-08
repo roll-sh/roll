@@ -564,15 +564,9 @@ impl ServerConfig {
         match &self.dir {
             None => *g = text,
             Some(d) => {
-                let tmp = d.join(format!("{AUTO_NAME}.tmp"));
-                let write = || -> std::io::Result<()> {
-                    use std::io::Write;
-                    let mut f = std::fs::File::create(&tmp)?;
-                    f.write_all(text.as_bytes())?;
-                    f.sync_all()?;
-                    std::fs::rename(&tmp, d.join(AUTO_NAME))
-                };
-                write().map_err(|e| {
+                // (durable_rename: the directory fsynced too, or a power cut can bring the old
+                // file back after ALTER SYSTEM returned.)
+                crate::storage::durable::replace(&d.join(AUTO_NAME), text.as_bytes(), true).map_err(|e| {
                     Error::new(code::IO_ERROR, format!("could not write to file \"{AUTO_NAME}.tmp\": {e}"))
                 })?;
             }

@@ -1131,15 +1131,10 @@ impl Worker<'_> {
         Ok(r.last().and_then(|r| r.tag.rsplit(' ').next()?.parse().ok()).unwrap_or(0))
     }
 
-    /// The origin's progress as its last commit stored it (the origin file may be behind it
-    /// after a crash).
+    /// The origin's progress as its last commit stored it (after a crash the origin file may
+    /// be behind it, or ahead of it: `origin::recover`).
     fn load_progress(&self) {
-        let db = &self.sess.state.db;
-        if let Ok(Some(b)) = db.store.get(&super::origin::progress_key(self.origin), db.store.visible_ts())
-            && let Ok(b) = <[u8; 8]>::try_from(&b[..])
-        {
-            self.repl.origins.advance(self.origin, u64::from_be_bytes(b), 0, false);
-        }
+        super::origin::recover(&self.sess.state.db, &self.repl.origins, self.origin);
     }
 
     /// The origin's progress: the end of the last transaction applied.
@@ -1654,7 +1649,7 @@ impl Worker<'_> {
         }
         let gid = self.gid(t.xid);
         self.query(&format!("PREPARE TRANSACTION {}", walrcv::literal(&gid)))?;
-        self.repl.origins.advance(self.origin, end_lsn, 0, false);
+        self.repl.origins.advance(self.origin, end_lsn);
         if t.skipping {
             self.log(Severity::Log, &format!("logical replication completed skipping transaction at LSN {}", lsn(t.final_lsn)));
         }

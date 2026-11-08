@@ -150,19 +150,14 @@ impl Slots {
                 .map(|s| s.data.clone())
                 .collect(),
         };
-        let tmp = path.with_extension("json.tmp");
         let body = serde_json::to_vec(&stored).map_err(|e| crate::error::internal(e.to_string()))?;
-        {
-            use std::io::Write;
-            let mut f = std::fs::File::create(&tmp)?;
-            f.write_all(&body)?;
-            if sync {
-                f.sync_all()?;
-            }
-        }
-        std::fs::rename(&tmp, path)?;
-        if sync && let Some(d) = path.parent() && let Ok(f) = std::fs::File::open(d) {
-            let _ = f.sync_all();
+        // (Unsynced, a save still fsyncs the new file before its rename, as SaveSlotToPath
+        // does: a power cut leaves the old file or the new one, never a torn one, which
+        // would keep the server from starting.)
+        if sync {
+            crate::storage::durable::replace(path, &body, true)?;
+        } else {
+            crate::storage::durable::replace_atomic(path, &body)?;
         }
         Ok(())
     }
