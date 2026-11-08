@@ -117,8 +117,12 @@ async fn edge_routes_by_host_and_sni_and_drains_on_sigterm() {
             let mut a = vec!["run", "--rm", "--network", "host", "redis:8-alpine", "redis-cli", "--tls", "--insecure", "--sni", &sni, "-h", "127.0.0.1", "-p", &port, "--no-auth-warning", "-a", password];
             a.extend_from_slice(args);
             let out = Command::new("docker").args(&a).output().unwrap();
-            String::from_utf8_lossy(&out.stdout).trim().to_string() + &String::from_utf8_lossy(&out.stderr)
+            // Only redis-cli's answer: Docker writes its own progress to stderr.
+            assert!(out.status.success(), "redis-cli: {}", String::from_utf8_lossy(&out.stderr));
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
         };
+        // Pulled first, so the first command isn't timed against the download.
+        assert!(Command::new("docker").args(["pull", "-q", "redis:8-alpine"]).output().unwrap().status.success());
         assert_eq!(cli(&["SET", "k", "through the edge"]), "OK");
         assert_eq!(cli(&["GET", "k"]), "through the edge");
     } else {
