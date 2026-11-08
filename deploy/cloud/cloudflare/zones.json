@@ -2,14 +2,15 @@
   "$comment": [
     "roll cloud's Cloudflare zones: records, zone settings and Worker routes (docs/cloud/README.md, 'Hostnames').",
     "Apply with: node deploy/cloud/cloudflare/apply.mjs [--dry-run] --stack roll-cloud (deploy/cloud/README.md).",
-    "Records apply.mjs creates carry the comment below; it only ever changes or deletes those.",
+    "Records apply.mjs creates carry the comment below; it only ever changes or deletes those. Any other record in the way is a conflict: reported, never overwritten.",
     "type 'origin' is the NLB: a CNAME to its DNS name, or one A record per Elastic IP.",
-    "Worker routes with script null turn Workers off for that pattern (the most specific route wins)."
+    "*.roll.site also covers chg-<id>.roll.site (previews): the CDN Worker hands chg-* hosts to the origin untouched (ROLL_PASS_HOSTS in apps/cdn-worker/wrangler.toml).",
+    "s3.roll.site and *.s3.roll.site are DNS only, so the Worker never runs there (a more specific record wins over the wildcard)."
   ],
   "comment": "managed by roll: deploy/cloud/cloudflare",
-  "origin": "origin.us-east-1.roll.cloud",
+  "origin": "origin.roll.sh",
   "zones": {
-    "roll.cloud": {
+    "roll.sh": {
       "settings": {
         "ssl": "strict",
         "always_use_https": "on",
@@ -27,18 +28,16 @@
         }
       },
       "records": [
-        { "name": "origin.us-east-1.roll.cloud", "type": "origin" },
-        { "name": "roll.cloud", "type": "CNAME", "content": "origin.us-east-1.roll.cloud", "proxied": true },
-        { "name": "api.roll.cloud", "type": "CNAME", "content": "origin.us-east-1.roll.cloud", "proxied": true },
-        { "name": "git.roll.cloud", "type": "CNAME", "content": "origin.us-east-1.roll.cloud", "proxied": false },
-        { "name": "*.pg.us-east-1.roll.cloud", "type": "CNAME", "content": "origin.us-east-1.roll.cloud", "proxied": false },
-        { "name": "*.redis.us-east-1.roll.cloud", "type": "CNAME", "content": "origin.us-east-1.roll.cloud", "proxied": false },
-        { "name": "*.kafka.us-east-1.roll.cloud", "type": "CNAME", "content": "origin.us-east-1.roll.cloud", "proxied": false },
-        { "name": "*.cql.us-east-1.roll.cloud", "type": "CNAME", "content": "origin.us-east-1.roll.cloud", "proxied": false },
-        { "name": "*.mq.us-east-1.roll.cloud", "type": "CNAME", "content": "origin.us-east-1.roll.cloud", "proxied": false },
-        { "name": "s3.us-east-1.roll.cloud", "type": "CNAME", "content": "origin.us-east-1.roll.cloud", "proxied": false },
-        { "name": "*.s3.us-east-1.roll.cloud", "type": "CNAME", "content": "origin.us-east-1.roll.cloud", "proxied": false },
-        { "name": "tasks.us-east-1.roll.cloud", "type": "CNAME", "content": "origin.us-east-1.roll.cloud", "proxied": false }
+        { "name": "origin.roll.sh", "type": "origin" },
+        { "name": "roll.sh", "type": "CNAME", "content": "origin.roll.sh", "proxied": true },
+        { "name": "api.roll.sh", "type": "CNAME", "content": "origin.roll.sh", "proxied": true },
+        { "name": "git.roll.sh", "type": "CNAME", "content": "origin.roll.sh", "proxied": false },
+        { "name": "*.pg.roll.sh", "type": "CNAME", "content": "origin.roll.sh", "proxied": false },
+        { "name": "*.redis.roll.sh", "type": "CNAME", "content": "origin.roll.sh", "proxied": false },
+        { "name": "*.kafka.roll.sh", "type": "CNAME", "content": "origin.roll.sh", "proxied": false },
+        { "name": "*.nosql.roll.sh", "type": "CNAME", "content": "origin.roll.sh", "proxied": false },
+        { "name": "*.mq.roll.sh", "type": "CNAME", "content": "origin.roll.sh", "proxied": false },
+        { "name": "tasks.roll.sh", "type": "CNAME", "content": "origin.roll.sh", "proxied": false }
       ]
     },
     "roll.site": {
@@ -50,13 +49,11 @@
         "tls_client_auth": "on"
       },
       "records": [
-        { "name": "*.roll.site", "type": "CNAME", "content": "origin.us-east-1.roll.cloud", "proxied": true },
-        { "name": "*.preview.roll.site", "type": "CNAME", "content": "origin.us-east-1.roll.cloud", "proxied": true }
+        { "name": "s3.roll.site", "type": "CNAME", "content": "origin.roll.sh", "proxied": false },
+        { "name": "*.s3.roll.site", "type": "CNAME", "content": "origin.roll.sh", "proxied": false },
+        { "name": "*.roll.site", "type": "CNAME", "content": "origin.roll.sh", "proxied": true }
       ],
-      "workerRoutes": [
-        { "pattern": "*.roll.site/*", "script": "roll-cdn" },
-        { "pattern": "*.preview.roll.site/*", "script": null }
-      ]
+      "workerRoutes": [{ "pattern": "*.roll.site/*", "script": "roll-cdn" }]
     }
   }
 }

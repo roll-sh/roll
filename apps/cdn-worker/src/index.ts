@@ -21,6 +21,7 @@ import {
   parsePath,
   parseRange,
   parseRoutes,
+  passesThrough,
   privateKey,
   safeEqual,
   verifyJwt,
@@ -33,6 +34,8 @@ export interface Env {
   ROLL_API_ORIGIN?: string;
   ROLL_CDN_ORIGIN_SECRET: string;
   ROLL_ROUTES?: string;
+  /** Hosts sent to the origin as they are (`passesThrough`). */
+  ROLL_PASS_HOSTS?: string;
   ROLL_CDN_JWT_SECRET?: string;
   ROLL_CDN_JWT_ES256_JWK?: string;
   ROLL_CDN_PRESIGN_KEY_ID?: string;
@@ -365,6 +368,8 @@ export default {
     const hook = await testHook(req, env, url.pathname);
     if (hook) return hook;
 
+    // Hosts in this zone that aren't the CDN's (previews): straight to the origin.
+    if (passesThrough(url.hostname, env.ROLL_PASS_HOSTS)) return fetch(req);
     const route = matchRoute(routes(env), url.pathname);
     if (!route) return denied(undefined, 404, "no route for this path");
     // Paths the CDN doesn't serve (the storage API's authenticated and write routes: use the

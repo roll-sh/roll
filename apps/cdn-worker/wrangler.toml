@@ -52,3 +52,33 @@ ROLL_ROUTES = '''
   { "prefix": "/storage/v1/v/", "kind": "immutable", "auth": "public", "api": true }
 ]
 '''
+
+# roll cloud (docs/cloud/README.md, "Hostnames"): `pnpm --filter @roll/cdn-worker deploy --env
+# production`. Public buckets and sites on <bucket>.roll.site; roll code's previews
+# (chg-<id>.roll.site) share the zone and go to the origin untouched (ROLL_PASS_HOSTS). The S3
+# API (s3.roll.site, *.s3.roll.site) is DNS only, so this Worker never sees it.
+# deploy/cloud/cloudflare/zones.json lists the same route. Environments don't inherit vars, so
+# they're all here again.
+[env.production]
+name = "roll-cdn"
+routes = [{ pattern = "*.roll.site/*", zone_name = "roll.site" }]
+
+[env.production.vars]
+ROLL_ORIGIN = "https://s3.roll.site"
+ROLL_API_ORIGIN = "https://api.roll.sh"
+ROLL_PASS_HOSTS = "chg-*.roll.site"
+ROLL_CDN_DEFAULT_TTL = "60"
+ROLL_CDN_MAX_CACHE_BYTES = "536870912"
+ROLL_CDN_USAGE_FLUSH_MS = "10000"
+ROLL_ROUTES = '''
+[
+  { "prefix": "/v/", "kind": "immutable" },
+  { "prefix": "/", "kind": "s3" },
+  { "prefix": "/storage/v1/", "kind": "none", "auth": "public", "api": true },
+  { "prefix": "/storage/v1/object/public/", "kind": "bucket-key", "auth": "public", "api": true },
+  { "prefix": "/storage/v1/object/sign/", "kind": "bucket-key", "auth": "token", "forward_token": true, "api": true },
+  { "prefix": "/storage/v1/render/image/public/", "kind": "bucket-key", "auth": "public", "api": true, "vary_accept": true },
+  { "prefix": "/storage/v1/render/image/sign/", "kind": "bucket-key", "auth": "token", "forward_token": true, "api": true, "vary_accept": true },
+  { "prefix": "/storage/v1/v/", "kind": "immutable", "auth": "public", "api": true }
+]
+'''

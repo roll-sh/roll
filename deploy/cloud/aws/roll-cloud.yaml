@@ -82,20 +82,20 @@ Parameters:
     Description: Root volume per instance (gp3). Node disks are caches.
   Domain:
     Type: String
-    Default: roll.cloud
+    Default: roll.sh
   SiteDomain:
     Type: String
     Default: roll.site
   AcmeEmail:
     Type: String
-    Default: ops@roll.cloud
+    Default: ops@roll.sh
     Description: Let's Encrypt account address (expiry notices).
   UseElasticIps:
     Type: String
     Default: "true"
     AllowedValues: ["true", "false"]
     Description: >-
-      Give the NLB one Elastic IP per zone, so origin.<region>.<Domain> can be A records that
+      Give the NLB one Elastic IP per zone, so origin.<Domain> can be A records that
       never change. An NLB has a public address per zone either way; EIPs add no cost.
   ResetsPerMinute:
     Type: Number
@@ -707,7 +707,7 @@ Resources:
             - { Name: ROLL_DASHBOARD_UPSTREAM, Value: "http://127.0.0.1:3000" }
             - { Name: ROLL_DRAIN_TIMEOUT, Value: "90" }
             - { Name: ROLL_LOG_FORMAT, Value: json }
-            - { Name: ROLL_CODE_PREVIEW_DOMAIN, Value: !Sub "preview.${SiteDomain}" }
+            - { Name: ROLL_CODE_PREVIEW_DOMAIN, Value: !Ref SiteDomain }
           Secrets:
             - { Name: ROLL_CLUSTER_SECRET, ValueFrom: !Ref ClusterSecret }
             - { Name: ROLL_SECRET_KEY, ValueFrom: !Ref SecretKey }
@@ -1376,7 +1376,7 @@ Resources:
 
 Outputs:
   LoadBalancerDnsName:
-    Description: The NLB; origin.<region>.<Domain> points here (CNAME), or at ElasticIps (A).
+    Description: The NLB; origin.<Domain> points here (CNAME), or at ElasticIps (A).
     Value: !GetAtt LoadBalancer.DNSName
   ElasticIps:
     Condition: UseEips

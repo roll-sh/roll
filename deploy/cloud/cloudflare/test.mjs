@@ -17,15 +17,15 @@ function fakeCloudflare() {
   let next = 1;
   const id = () => `id${next++}`;
   const zones = {
-    "roll.cloud": {
+    "roll.sh": {
       id: "z1",
       records: [
         // Someone's own record: never touched.
-        { id: id(), type: "TXT", name: "roll.cloud", content: "google-site-verification=x", proxied: false, ttl: 1 },
+        { id: id(), type: "TXT", name: "roll.sh", content: "google-site-verification=x", proxied: false, ttl: 1 },
         // Ours, stale: deleted.
-        { id: id(), type: "CNAME", name: "old.roll.cloud", content: "origin.us-east-1.roll.cloud", proxied: false, ttl: 1, comment: COMMENT },
+        { id: id(), type: "CNAME", name: "old.roll.sh", content: "origin.roll.sh", proxied: false, ttl: 1, comment: COMMENT },
         // Ours, wrong: updated.
-        { id: id(), type: "CNAME", name: "api.roll.cloud", content: "elsewhere.example", proxied: false, ttl: 300, comment: COMMENT },
+        { id: id(), type: "CNAME", name: "api.roll.sh", content: "elsewhere.example", proxied: false, ttl: 300, comment: COMMENT },
       ],
       settings: { ssl: "full", always_use_https: "off", min_tls_version: "1.0", tls_1_3: "on", tls_client_auth: "off", security_header: { strict_transport_security: { enabled: false, max_age: 0, include_subdomains: false, preload: false, nosniff: false } } },
       routes: [],
@@ -128,27 +128,27 @@ test("dry run plans and changes nothing; a run converges; the next run plans not
     const dry = await run(api, origin, true);
     assert.equal(fake.writes.length, 0);
     assert.equal(dry.conflicts, 0);
-    assert.ok(dry.lines.includes("roll.cloud: - delete CNAME old.roll.cloud → origin.us-east-1.roll.cloud"), dry.lines.join("\n"));
-    assert.ok(dry.lines.includes("roll.cloud: + create CNAME origin.us-east-1.roll.cloud → " + NLB));
-    assert.ok(dry.lines.some((l) => l.startsWith("roll.cloud: ~ update CNAME api.roll.cloud → elsewhere.example")));
+    assert.ok(dry.lines.includes("roll.sh: - delete CNAME old.roll.sh → origin.roll.sh"), dry.lines.join("\n"));
+    assert.ok(dry.lines.includes("roll.sh: + create CNAME origin.roll.sh → " + NLB));
+    assert.ok(dry.lines.some((l) => l.startsWith("roll.sh: ~ update CNAME api.roll.sh → elsewhere.example")));
     assert.ok(dry.lines.includes('roll.site: ~ setting ssl: "flexible"  ⇒  "strict"'));
     assert.ok(dry.lines.at(-1).startsWith("dry run:"));
 
     const real = await run(api, origin, false);
     assert.equal(real.conflicts, 0);
-    const cloud = fake.zones["roll.cloud"];
+    const cloud = fake.zones["roll.sh"];
     const names = cloud.records.map((r) => `${r.type} ${r.name}`).sort();
-    assert.ok(names.includes("TXT roll.cloud"), "unmanaged record kept");
-    assert.ok(!names.includes("CNAME old.roll.cloud"), "stale managed record deleted");
-    const api_ = cloud.records.find((r) => r.name === "api.roll.cloud");
-    assert.equal(api_.content, "origin.us-east-1.roll.cloud");
+    assert.ok(names.includes("TXT roll.sh"), "unmanaged record kept");
+    assert.ok(!names.includes("CNAME old.roll.sh"), "stale managed record deleted");
+    const api_ = cloud.records.find((r) => r.name === "api.roll.sh");
+    assert.equal(api_.content, "origin.roll.sh");
     assert.equal(api_.proxied, true);
-    assert.equal(cloud.records.find((r) => r.name === "*.pg.us-east-1.roll.cloud").proxied, false);
+    assert.equal(cloud.records.find((r) => r.name === "*.pg.roll.sh").proxied, false);
     assert.equal(cloud.settings.ssl, "strict");
     assert.equal(cloud.settings.security_header.strict_transport_security.enabled, true);
     const site = fake.zones["roll.site"];
     assert.equal(site.settings.min_tls_version, "1.2");
-    assert.deepEqual(site.routes.map((r) => `${r.pattern} ${r.script ?? "-"}`).sort(), ["*.preview.roll.site/* -", "*.roll.site/* roll-cdn", "other.roll.site/* someone-else"]);
+    assert.deepEqual(site.routes.map((r) => `${r.pattern} ${r.script ?? "-"}`).sort(), ["*.roll.site/* roll-cdn", "other.roll.site/* someone-else"]);
 
     fake.writes.length = 0;
     const again = await run(api, origin, false);
@@ -160,15 +160,22 @@ test("switching the origin to Elastic IPs replaces the CNAME with A records", ()
   withFake(async (fake, api) => {
     await run(api, { dns: NLB, ips: [] }, false);
     await run(api, { dns: NLB, ips: ["3.0.0.1", "3.0.0.2", "3.0.0.3"] }, false);
-    const origin = fake.zones["roll.cloud"].records.filter((r) => r.name === "origin.us-east-1.roll.cloud");
+    const origin = fake.zones["roll.sh"].records.filter((r) => r.name === "origin.roll.sh");
     assert.deepEqual(origin.map((r) => `${r.type} ${r.content}`).sort(), ["A 3.0.0.1", "A 3.0.0.2", "A 3.0.0.3"]);
   }));
 
-test("an unmanaged record in the way is a conflict, not overwritten", () =>
+test("records already in the zone (the site at roll.sh) are conflicts: shown in the dry run, never overwritten", () =>
   withFake(async (fake, api) => {
-    fake.zones["roll.cloud"].records.push({ id: "mine", type: "A", name: "git.roll.cloud", content: "192.0.2.1", proxied: false, ttl: 1 });
-    const { conflicts, lines } = await run(api, { dns: NLB, ips: [] }, false);
-    assert.equal(conflicts, 1);
-    assert.ok(lines.some((l) => l.includes("! conflict: CNAME git.roll.cloud")));
-    assert.equal(fake.zones["roll.cloud"].records.find((r) => r.id === "mine").content, "192.0.2.1");
+    const site = { id: "site", type: "A", name: "roll.sh", content: "192.0.2.1", proxied: true, ttl: 1 };
+    fake.zones["roll.sh"].records.push(site, { id: "www", type: "CNAME", name: "git.roll.sh", content: "elsewhere.example", proxied: false, ttl: 1 });
+    const dry = await run(api, { dns: NLB, ips: [] }, true);
+    assert.equal(dry.conflicts, 2);
+    assert.equal(fake.writes.length, 0);
+    assert.ok(dry.lines.some((l) => l.startsWith("roll.sh: ! conflict: CNAME roll.sh → origin.roll.sh (proxied) is blocked by an unmanaged A roll.sh → 192.0.2.1")), dry.lines.join("\n"));
+    assert.ok(dry.lines.some((l) => l.includes("! conflict: CNAME git.roll.sh")));
+    const real = await run(api, { dns: NLB, ips: [] }, false);
+    assert.equal(real.conflicts, 2);
+    const kept = fake.zones["roll.sh"].records.filter((r) => r.id === "site" || r.id === "www");
+    assert.deepEqual(kept.map((r) => r.content).sort(), ["192.0.2.1", "elsewhere.example"]);
+    assert.ok(!fake.zones["roll.sh"].records.some((r) => r.comment === COMMENT && (r.name === "roll.sh" || r.name === "git.roll.sh")));
   }));

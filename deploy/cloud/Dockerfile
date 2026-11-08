@@ -55,7 +55,7 @@ COPY apps/dashboard/package.json apps/dashboard/package.json
 RUN pnpm install --frozen-lockfile --filter dashboard...
 COPY apps/dashboard apps/dashboard
 # The API as browsers reach it, built into the client. The server reaches rolld at ROLL_API_URL.
-ARG VITE_ROLL_API=https://api.roll.cloud
+ARG VITE_ROLL_API=https://api.roll.sh
 RUN pnpm --filter dashboard build \
  && pnpm --filter dashboard deploy --prod --legacy /out \
  && cp -r apps/dashboard/dist /out/dist

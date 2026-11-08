@@ -134,13 +134,17 @@ function matches(want, have) {
   return want === have;
 }
 
-/** Worker routes: create or fix the listed patterns; delete routes of listed scripts not listed. */
+/**
+ * Worker routes: create or fix the listed patterns; delete routes of listed scripts whose
+ * pattern isn't listed. A listed pattern that runs some other Worker is a conflict.
+ */
 export function planRoutes(wantRoutes, existing) {
-  const plan = { create: [], update: [], delete: [] };
+  const plan = { create: [], update: [], delete: [], conflicts: [] };
   const scripts = new Set((wantRoutes ?? []).map((r) => r.script).filter(Boolean));
   for (const w of wantRoutes ?? []) {
     const have = existing.find((r) => r.pattern === w.pattern);
     if (!have) plan.create.push(w);
+    else if (have.script && !scripts.has(have.script)) plan.conflicts.push({ want: w, have });
     else if ((have.script || null) !== w.script) plan.update.push({ id: have.id, from: have, to: w });
   }
   for (const r of existing) if (r.script && scripts.has(r.script) && !(wantRoutes ?? []).some((w) => w.pattern === r.pattern)) plan.delete.push(r);
@@ -201,6 +205,8 @@ export async function apply({ config, token, api = DEFAULT_API, origin, dryRun, 
     if (zone.workerRoutes) {
       const routes = (await cf("GET", `/zones/${zoneId}/workers/routes`)).result ?? [];
       const rp = planRoutes(zone.workerRoutes, routes);
+      for (const c of rp.conflicts) say(`! conflict: route ${c.want.pattern} runs the Worker ${c.have.script}; remove that route to hand it over`);
+      conflicts += rp.conflicts.length;
       const body = (r) => (r.script ? { pattern: r.pattern, script: r.script } : { pattern: r.pattern });
       for (const r of rp.delete) {
         say(`- route ${r.pattern} → ${r.script}`);

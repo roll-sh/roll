@@ -29,6 +29,24 @@ export const DEFAULT_ROUTES: Route[] = [
   { prefix: "/", kind: "s3", auth: "any" },
 ];
 
+/**
+ * Whether the Worker hands requests for `host` to the origin untouched (`ROLL_PASS_HOSTS`: comma
+ * separated host patterns, where `*` matches within one label, e.g. `chg-*.roll.site` for roll
+ * code's previews, which share the zone with the buckets this Worker serves).
+ */
+export function passesThrough(host: string, patterns: string | undefined): boolean {
+  const labels = host.toLowerCase().replace(/:\d+$/, "").split(".");
+  const label = (pattern: string) => new RegExp(`^${pattern.split("*").map((s) => s.replace(/[.+?^${}()|[\]\\]/g, "\\$&")).join("[^.]*")}$`);
+  return (patterns ?? "")
+    .split(",")
+    .map((p) => p.trim().toLowerCase())
+    .filter(Boolean)
+    .some((p) => {
+      const want = p.split(".");
+      return want.length === labels.length && want.every((w, i) => label(w).test(labels[i]));
+    });
+}
+
 /** Parse `ROLL_ROUTES` (a JSON array); throws on anything malformed. */
 export function parseRoutes(json: string | undefined): Route[] {
   if (!json || !json.trim()) return DEFAULT_ROUTES;
