@@ -370,21 +370,22 @@ async fn debounce_keeps_the_last_event() {
     let env = env().await;
     let app = MockApp::start("deb").await;
     app.function(
-        json!({ "id": "sync-profile", "debounce": { "period_ms": 400, "key": "event.data.user" }, "triggers": [{ "event": "profile.changed" }] }),
+        json!({ "id": "sync-profile", "debounce": { "period_ms": 1000, "key": "event.data.user" }, "triggers": [{ "event": "profile.changed" }] }),
         |ctx| Ok(ctx.event["data"]["v"].clone()),
     );
     app.sync(&env).await;
-    for v in 1..=4 {
-        env.post("/events", json!({ "name": "profile.changed", "data": { "user": "u1", "v": v } })).await;
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    env.post("/events", json!({ "name": "profile.changed", "data": { "user": "u2", "v": 99 } })).await;
-    eventually(5000, "debounced runs", || async {
-        env.runs("sync-profile").await.iter().filter(|r| r["status"] == "completed").count() == 2
+    // In one request, so they land within one window however slow the machine is (separate
+    // requests a slow runner spaced past the window debounced into runs of their own).
+    let mut events: Vec<Value> = (1..=4).map(|v| json!({ "name": "profile.changed", "data": { "user": "u1", "v": v } })).collect();
+    events.push(json!({ "name": "profile.changed", "data": { "user": "u2", "v": 99 } }));
+    env.post("/events", json!(events)).await;
+    eventually(10_000, "debounced runs", || async {
+        let runs = env.runs("sync-profile").await;
+        runs.len() >= 2 && runs.iter().all(|r| r["status"] == "completed")
     })
     .await;
     let runs = env.runs("sync-profile").await;
-    let mut outputs: Vec<i64> = runs.iter().map(|r| r["output"].as_i64().unwrap()).collect();
+    let mut outputs: Vec<i64> = runs.iter().map(|r| r["output"].as_i64().unwrap_or(-1)).collect();
     outputs.sort();
     assert_eq!(outputs, vec![4, 99]);
 }

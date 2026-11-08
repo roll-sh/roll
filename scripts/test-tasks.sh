@@ -45,7 +45,7 @@ fi
 cluster_ddb=roll-cloud-tasks-ddb-$$
 trap 'docker rm -f "$cluster_ddb" >/dev/null 2>&1 || true' EXIT
 if [[ $unit_only == 0 && -z ${ROLL_CLUSTER_TEST_DYNAMODB:-} ]] && docker info >/dev/null 2>&1; then
-  docker run -d --rm --name "$cluster_ddb" -p 127.0.0.1::8000 amazon/dynamodb-local >/dev/null
+  docker run -d --rm --name "$cluster_ddb" -p 127.0.0.1::8000 "$DYNAMODB_IMAGE" >/dev/null
   port=$(docker port "$cluster_ddb" 8000/tcp | head -1 | sed 's/.*://')
   # Docker accepts connections before DynamoDB Local listens: wait for an HTTP answer.
   for _ in $(seq 120); do curl -s -o /dev/null "http://127.0.0.1:$port" && break; sleep 0.5; done
