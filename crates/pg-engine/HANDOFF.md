@@ -3852,6 +3852,82 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
     its downgrade). Catalog entries weren't shrunk: at 10,000 tables after reading pg_class,
     pg_attribute, pg_type, pg_index, pg_constraint and pg_stat_user_tables whole the engine's
     RSS is 166 MB against PostgreSQL's cgroup 134 MB (22 against 29 MB fresh).
+- **Catalog round 11, first batch** (round 26, agent 173; BENCH.md "Catalog round 11"):
+  - Catalog format 5: each relation's directory record (`catalog/reldir.rs` `RelDir`): name,
+    namespace, owner, relkind, persistence, relhasindex, rls, relispartition, populated,
+    relnatts, relchecks, reltype, reloftype, the TOAST oid, the table of an index (the owning
+    table of a sequence), the access method, replica identity, a table's own indexes, and the
+    rare options and renamed TOAST names. The relation maps' indexes keep one per entry
+    (`relindex`'s `TableIx` / `ViewIx` / `IndexIx` / `SeqIx` `dir`, made by `RelDir::of_*`
+    from the entry as `MapIndex::add` / `replace` see it, so every path that changes an
+    entry changes its record), stored as index records (tags 152-155, `stored_ix!`) in a
+    varint binary form (`RelDir::encode`, about 40 bytes a relation against a table entry's
+    600 bytes of JSON and 1.7 kB once parsed). What depends on another entry (an index's
+    schema, owner, persistence and `I` kind are its table's; a TOAST relation's everything)
+    is looked up in its table's record when read (`Catalog::storage_dir`, `toast_dir`,
+    `toasted_dirs`, `toast_schema_of`).
+  - Read from them, never from the entries: pg_class's rows (`system::relations_of`, the
+    generation; only `relpartbound` reads a partition's entry), its directory
+    (`class_keys_of`), the statistics views' relations and each table's index list
+    (`stat_views::indexes_of`, `index_owner`), `class_position`. pg_class's whole generation
+    reads the directory records and the small per-relation maps on threads
+    (`stored_ix::read_class`), not every entry (`read_relations`). Debug builds check every
+    record read against its entry (`reldir::check`).
+  - Upgrade: a format-4 database gets its records at its first open (`reldir::fill`, every
+    relation's entry read once), written with the header in the one commit `Database::open`
+    already made for `open_upgrades` (one WAL record: a crash leaves format 4 whole, and the
+    next open upgrades again); formats 0-3 are rewritten whole as before (`writes_new`
+    includes the records). `--downgrade-catalog` deletes them with the other index records.
+    Test `catalog_format.rs` `a_format_4_data_directory_opens_and_upgrades` opens
+    `tests/data/catalog_format4.tar.gz` (a format-4 build's data directory made from
+    `catalog_format4.sql`: every relation kind, options, row security, replica identity,
+    unlogged tables and sequences, partitions, triggers, rules, 300 tables) and checks pg_class
+    against `catalog_format4.pgclass` (that build's rows), then DDL and reopens.
+  - Executor-side catalog scans (`exec/nodes.rs`): `sys_equality` takes the equality that
+    picks the fewest rows, and `= ANY (array)` / `IN (...)` conjuncts too (`sys_eq_values`):
+    Django's sequences query (pg_depend `classid = .. AND refclassid = 1259 AND refobjid = x`)
+    picked every relation's dependencies by its first conjunct (130-150 ms at 10,000 tables,
+    now 3.6-4.3; PostgreSQL 1.8). A hash join's outer catalog scan is restricted to its keys
+    after the scan has started too (`SharedRowsNode::restrict_keys`: the rows not read yet),
+    and pg_class's first row is made alone before its rows are (`LazyRowsNode::peek`,
+    `system::class_builtin_row`) when a hash join reads an outer row before building
+    (ExecHashJoin's outer-first read made all of pg_class's rows before the join could name
+    the schema). A kinds-only pg_class restriction gives up from the maps' sizes before
+    reading every directory record. pg_description's rows of one object are made alone
+    (`system::obj_column`, `rows_of_object`, `description_places`; `exec/nodes.rs`
+    `sys_obj_rows`, also per rescan): every scan made Postgres's 5,000 descriptions and
+    filtered them (1-2.5 ms per statement of pgjdbc's getColumns, EF Core, psql's `\d+`).
+    `class_name_bounds` reads the name index's first column whatever form the key takes, and
+    equality under any deterministic collation (for agent 171's report on psql's `\d t`,
+    below: it didn't change that query's time).
+  - A process's first catalog queries: the planner's look at a system catalog's column
+    statistics parsed every catalog's (pg_statistic's rows typed with pg_attribute's and
+    pg_type's, 480 kB of text); one relation's are parsed on first use now
+    (`static_rows::rel_rows`, `statistic_rows_of`, `system::initdb_colstats`); `row_count`'s
+    per-schema counts read pg_attribute's first column only (`static_rows::first_oids`).
+    A first query on a fresh server 17 → 6-11 ms.
+  - Numbers (BENCH): first `count(*)` of pg_stat_user_tables 75 → 26-33 ms (PostgreSQL
+    43-51); first `count(*)` of pg_class 24 → 6.5-11 (7-11); psql's first `\dt` 110 → 61-106
+    (17-27); psql `\d` 23-38 → 11-22 ms (8.3-9.4); memory after the big catalogs 166 → 143
+    MB (PostgreSQL's cgroup 177 after a restart). The ORM and driver table is in BENCH.
+  - Left (measured, BENCH): psql's unqualified `\d t5000` lookup (`relname ~ '^(t5000)$'
+    COLLATE default AND pg_table_is_visible(oid)`, agent 171's report): its index condition
+    `relname = 't5000'::text` (derived from the pattern, lossy) selects no rows in the
+    executor's catalog scan, and the pattern runs on all 41,416 rows (the profile is the regex
+    DFA: 26-92 ms against PostgreSQL's 0.1-1.0). An explicit `relname = 't5000'::text` is
+    0.7 ms and `relname = 't5000'` 0.02: the derived clause (`sql/paths.rs`
+    `PrefixStatus::Exact`, `make`) differs from the bound one in a way `class_name_bounds`
+    / `sys_equality` don't accept; not found yet without a debug build. psql's first `\dt` (20 ms planning in a fresh process, reading every
+    table's directory record before the hash join names the schema: a namespace index of the
+    records would read one schema's); a first pg_attribute read parses every table entry it
+    reads (its rows are the columns; a column directory or column records are the next
+    format step); EF Core's `NOT EXISTS (SELECT 1 FROM pg_depend WHERE classid = (SELECT ...)
+    AND objid = cls.oid AND deptype IN ('e', 'x'))` beside `cls.relname IN ('t')`: the pg_class
+    index scan checks the subplan on every row (41,416 at 10,000 tables, 100-200 ms per
+    statement; with `relname = 't'` or without `deptype` it is one row: not found yet, repro
+    in BENCH's section); the regex filter compiles its pattern per row (`types/regex`
+    `compile` in the profile of `\d t`); per-table ORM queries are planning bound (agent
+    171); catalog entries weren't shrunk (`Column` 240 bytes, `Table` 440).
 - **Client libraries** (round 17, agent 38; round 18, agent 51): drivers' and ORMs' own test
   suites against the engine and against PostgreSQL 18.6, test by test: `tests/clients/`
   (runner, per-suite scripts, `STATUS.md` with the per-suite counts and every difference
@@ -7032,13 +7108,14 @@ container name: pick your own).
   round 20 agent 76, moved comments into records of their own; format 3, round 21 agent 92,
   leaves fields at their defaults out, `catalog::compact`; format 4, round 24 agent 146, stores
   the relation maps' indexes as records and reads large maps on demand, `catalog::stored_ix`;
+  format 5, round 26 agent 173, stores each relation's directory record, `catalog::reldir`;
   `roll-engine --downgrade-catalog`
   stores format 1 again for an older build). A field given `skip_serializing_if` must have
   `#[serde(default)]` and use a `compact::` predicate (a downgrade writes it again). A field added to
   `Catalog` must be listed in `persist.rs`'s `stored_fields!` (as a map, a set or in the header;
   the macro's exhaustive destructuring doesn't compile otherwise), with a record tag never used
   before. A sub-index added to a `relindex` index must be listed in `stored_ix.rs`'s
-  `stored_ix!` (a map with a new tag from 152 on, or a small part in the header; its
+  `stored_ix!` (a map with a new tag from 156 on, or a small part in the header; its
   destructuring is exhaustive, so an unlisted field doesn't compile); a `PMap` map added to
   `Catalog` that grows with the catalog belongs in `lazy_maps!` with its tag in `LAZY_TAGS`.
 - A per-object catalog map that can grow with the catalog is a `pmap::PMap` (or an

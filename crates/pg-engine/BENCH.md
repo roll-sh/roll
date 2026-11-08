@@ -7613,6 +7613,128 @@ On `912559c`: `cargo test -p pg-engine` debug and release (every binary; goldens
 (debug, private reference): 51,148 / 51,150, no unit changed against `results.tsv`.
 pg_dump_tap was queued and cancelled under the verification train (agent 162's full suite).
 
+## Catalog round 11 (round 26, agent 173)
+
+HANDOFF.md "Catalog round 11, first batch" has what changed (catalog format 5: each
+relation's directory record; pg_class and the statistics views read from them). The same
+objects as round 10 (`bench scale`'s: 10,000 tables of three columns with a primary key and
+a default in 10 schemas, a partitioned table of 1,000 partitions, loaded with psql), and a
+second database `k1` of 1,000 such tables. The engine is the dist build of `89daa2a5` in a
+container (`run.sh` `ENGINE_DOCKER=1`), PostgreSQL 18.6 in its container on the host
+network, both on cores 12-15; psql `\timing` (ms) from a client container on cores 16-17;
+other agents' builds and suites ran on the machine throughout (load 30-50).
+
+First query after a server start (each on a freshly started server, then once more; the
+engine's CPU and peak RSS over both). PostgreSQL restarted per run, its first numbers
+include its relcache init:
+
+| query | PostgreSQL | round 10 | this batch (CPU, RSS) |
+|---|---|---|---|
+| `count(*)` of pg_stat_user_tables | 43-51 / 34-39 | 75 / 9.9 | 26-33 / 7.9-8.8 (0.10 s, 58 MB) |
+| pg_stat_user_tables `relname =` | 9.3-13 / 1.5-3.4 | 30 / 0.55 | 13-20 / 0.3-0.4 (0.07 s, 45 MB) |
+| `count(*)` of pg_statio_user_tables | 24-28 / 9.6-17 | 52 / 6.6 | 22-31 / 5.6-6.2 (0.09 s, 53 MB) |
+| psql `\dt` of a schema | 17-27 / 10-18 | 110 / 15 | 64-95 / 9.8-16 (0.15 s, 68 MB) |
+| the same after a first `count(*) FROM pg_am` | | | 52-64 / 9.8-15 (first query 5.7-11) |
+| `count(*)` of pg_class | 6.9-11 / 4.1-4.5 | 24 / 0.65 | 6.5-11 / 0.3-0.5 (0.07 s, 41 MB) |
+| `SELECT * FROM pg_class` | 104-117 / 92-98 | 231 / 79 | 123-165 / 53-60 (0.28 s, 72 MB) |
+| pg_class × pg_attribute of a schema | 39-41 / 10-12 | 141 / 51 | 145-179 / 37-60 (0.28 s, 94 MB) |
+
+The statistics views and `count(*)` of pg_class no longer parse a table's entry: their first
+read decodes the directory records (40 bytes a relation). psql's first `\dt` still pays for
+the process's first catalog queries (function registry, Postgres's own pg_class rows parsed
+from text; 6-11 ms in a first query of its own, 17 ms before this batch) and reads every
+table's directory record before the hash join names the schema; its planning is 20 ms of
+it. A first pg_attribute read parses every table's entry (its columns are the entry's).
+
+Steady state, again in one session (PostgreSQL / engine):
+
+| query | PostgreSQL | engine |
+|---|---|---|
+| `count(*)` of pg_stat_user_tables | 29-30 | 9.8-16 |
+| pg_stat_user_tables `relname =` | 1.1-1.6 | 0.40-0.49 |
+| pg_stat_user_tables `relid =` | 0.8-3.7 | 0.22-0.35 |
+| `count(*)` of pg_stat_user_indexes | 27-42 | 17-26 |
+| `count(*)` of pg_statio_user_tables | 8.6-18 | 4.0-7.3 |
+| `count(*)` of pg_class | 3.3-5.8 | 0.36-0.53 |
+| `SELECT * FROM pg_class` | 87-125 | 61-66 |
+
+psql `\d sc0.t5000` (its 11 queries, steady, three rounds; with agent 171's planner round 10
+underneath): PostgreSQL 8.3-9.4 ms in all, the engine 11-22 ms (round 10: 23-38). Per query,
+PostgreSQL / engine: lookup 0.33-0.41 / 0.78-2.0, table 0.32-0.40 / 0.93-1.9, columns
+0.44-0.63 / 0.91-2.6, indexes 0.73-0.87 / 2.7-6.2, foreign keys 0.20-0.28 / 0.53-1.3,
+referenced by 3.3-3.8 / 0.78-1.4, policies 0.43-0.54 / 0.42-0.93, statistics 0.21-0.22 /
+0.28-1.6, publications 0.81-0.91 / 1.9-2.4, inherits 0.25-0.27 / 1.0-1.5, partitions
+0.34-0.42 / 0.99-4.3. The unqualified `\d t5000` lookup (`relname ~ '^(t5000)$'` without a
+schema) still evaluates the pattern on every pg_class row (26-92 ms, in `820b1573` too,
+against PostgreSQL's 0.1-1.0): HANDOFF's "Left".
+
+Memory at 10,000 tables after reading pg_class, pg_attribute, pg_type, pg_index,
+pg_constraint and pg_stat_user_tables whole in one session: the engine's RSS 21 MB fresh,
+143 MB after (round 10: 22 / 166); PostgreSQL's cgroup `memory.current` after a restart and
+the same reads 177 MB (anon 5, file 169, of it shmem 123: catalog pages in shared buffers;
+round 10 measured 134 MB without the restart's page cache drop).
+
+### ORM and driver introspection
+
+`tests/clients`-style probes in containers (cache in `~/.cache/a173/orm`, not committed):
+pgjdbc 42.7.14, SQLAlchemy 2.1.8 with psycopg 3.3.8, Django 5.2.19, Prisma 6.19.3, Npgsql
+9.0.5 and EF Core 9.0.4 (`dotnet ef` 9.0.22). Each operation: the first call in a fresh
+connection, then the median of three repeats (ms); per-table calls on `sc0.t500` (1k) or
+`sc0.t5000` (10k). Client start-up (JIT, imports) is in every first call, on both sides.
+The engine's numbers are `89daa2a5`'s, but for pgjdbc getColumns and EF Core's model of one
+table: `820b1573`'s (pg_description's rows of one object).
+
+| client, operation | PostgreSQL 1k | engine 1k | PostgreSQL 10k | engine 10k |
+|---|---|---|---|---|
+| pgjdbc getColumns | 24-35 / 5.3 | 70 / 8.5 | 43 / 7.5 | 127 / 8.9 |
+| pgjdbc getIndexInfo | 21-22 / 3.9 | 13 / 5.9 | 11-25 / 3.8 | 15 / 6.2 |
+| pgjdbc getPrimaryKeys | 18-22 / 2.9 | 31 / 4.6 | 9-11 / 2.0 | 117 / 5.1 |
+| pgjdbc getImportedKeys | 27-33 / 11 | 50 / 21 | 21-25 / 12 | 159 / 45 |
+| pgjdbc getTables (schema) | 13-15 / 5.6 | 13 / 8.6 | 48-60 / 22 | 55 / 20 |
+| SQLAlchemy get_columns | 20-25 / 3.4 | 25 / 6.4 | 17-21 / 3.3 | 53 / 5.8 |
+| SQLAlchemy get_pk_constraint | 25-31 / 4.0 | 44 / 9.1 | 20-26 / 3.0 | 76 / 12.8 |
+| SQLAlchemy get_indexes | 27-34 / 5.3 | 26 / 6.3 | 29-31 / 4.3 | 43 / 8.6 |
+| SQLAlchemy get_table_names | 11-18 / 4.3 | 22 / 6.6 | 24-35 / 15 | 83 / 25 |
+| SQLAlchemy reflect (schema) | 196-220 / 114 | 319 / 205 | 777-986 / 708 | 1,513 / 1,500 |
+| Django get_table_list | 36-45 / 7.5 | 11 / 2.7 | 176-264 / 40 | 64 / 13 |
+| Django get_table_description | 7-16 / 2.6 | 20 / 5.3 | 10-16 / 3.0 | 62 / 4.4 |
+| Django get_constraints | 18 / 3.2 | 15 / 7.7 | 10-17 / 3.0 | 47 / 11.8 |
+| Django get_sequences | 5-13 / 1.5 | 23 / 3.3 | 12-14 / 1.8 | 99 / 3.9 |
+| Django inspectdb (one table) | 41-56 / 15 | 41 / 19.5 | 196-253 / 58 | 58 / 38 |
+| Prisma db pull (wall) | 1,008-1,054 / 993 | 1,301 / 939 | 2,708-3,198 / 3,862 | 1,746 / 1,606 |
+| Npgsql GetSchema Columns | 95-108 / 7.4 | 76 / 3.8 | 101-121 / 8.3 | 76 / 3.0 |
+| Npgsql GetSchema Tables (all) | 18-32 / 8.2 | 13 / 8.5 | 87-116 / 65 | 77 / 70 |
+| EF Core model, one table | 178-212 / 33 | 306 / 62 | 178-190 / 36 | 952 / 545-637 |
+| EF Core model, schema | 55-86 / 48 | 145 / 122 | 317-502 / 376 | 932 / 897 |
+| `dotnet ef dbcontext scaffold` (wall) | 2,542-2,552 / 2,627 | 2,756 / 2,759 | 2,758-3,375 / 2,778 | 3,404 / 3,448 |
+
+Ahead: whole-schema listings (Django's table list and inspectdb, Prisma, Npgsql's schema
+collections, pgjdbc getTables at 10k). Behind: the per-table queries after the first (planning
+bound: HANDOFF), first calls at 10k (a first read of pg_attribute parses every table's entry),
+SQLAlchemy's schema reflection (1,000 tables' queries), and EF Core, whose queries put
+`NOT EXISTS (SELECT ... FROM pg_depend WHERE classid = (SELECT ...) ...)` beside
+`relname IN (...)`: the pg_class scan checks that subplan on every row (HANDOFF).
+Django's sequences query (pg_depend `refclassid = 1259 AND refobjid = x`) was 130-150 ms at
+10,000 tables and is 3.6-4.3 (the most selective equality picks the rows).
+
+The scoreboard's footprint gate (quick, `89daa2a5`'s dist build) passes: idle CPU over 5
+minutes 0.025 s (PostgreSQL 0.64), memory with 100 idle sessions 31.1 MB (211), a fresh data
+directory 3.03 MB (38.9).
+
+### Verification (round 26, agent 173, first batch)
+
+The full suite, as a catalog format change needs, on `820b1573` (this batch's code) and
+`d1b6c709` (with the regress harness's `PGREGRESS_REF_PORT`, used to keep the reference on
+the host network for the dump roundtrip): `cargo test -p pg-engine` release and debug (every
+binary; `catalog_format.rs` `a_format_4_data_directory_opens_and_upgrades` new, with
+`tests/data/catalog_format4.*` from a format-4 build of `8227ffe6`), clippy (nothing new),
+`crash_random` seeds 1-30 x 4 rounds, isolation 121 / 122 specs (1,647 / 1,648
+permutations; `intra-grant-inplace` as before), pg_dump_tap 14,817 / 14,817, the regression
+suite in full (release, private reference): 51,148 / 51,150, 0 units newly differing against
+`results.tsv`; the dump roundtrip of the regression database: 0 errors in each of the ten
+restores (`pg_restore`, `pg_restore -j 4` from custom and directory archives, tar, psql, both
+ways), re-dumped 2,706 / 2,733 entries alike (2,704 recorded).
+
 ## OLTP round 3 (round 23, agent 136)
 
 HANDOFF.md, "OLTP round 3", has what changed: extended-protocol statements bound once per
