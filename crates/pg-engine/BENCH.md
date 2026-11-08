@@ -633,6 +633,23 @@ DataRow parsing (`Conn::process` 1.0%, `Message::parse` 1.0%, `BytesMut` split /
 a `String` per value (`from_utf8_lossy` 1.7% plus its allocation) then parsed into a `Value`
 (`parse_value_ex` 0.9%).
 
+Second batch (`8ae592fb`: ANALYZE fetching 1,000 rows a round trip, the client's dense rows and
+one UTF-8 check per value), measured the same way, runs interleaved base, new, PostgreSQL, new,
+base, new, base (3 runs of each engine, 1 of PostgreSQL; load 30-40):
+
+| phase | PG writes / stmt | new | PG ms | base ms | new ms | new / PG time | PG CPU ms | base CPU | new CPU | new / PG CPU |
+|---|---|---|---|---|---|---|---|---|---|---|
+| ANALYZE ft, fs (1) | 237 | **29** | 171 | 86 | **81** | 0.47 | 125 | 99 | **61** | 0.49 |
+| foreign joins (100) | 208 | **203** | **12,992** | 14,534 | 17,388 | 1.34 | **4,656** | 6,097 | 6,246 | 1.34 |
+| full scans, 20k rows (10) | 205 | **202** | **1,460** | 1,581 | 1,560 | 1.07 | **590** | 639 | 642 | 1.09 |
+
+ANALYZE now beats PostgreSQL in round trips, time and CPU with its bytes (867 kB against
+884 kB): base's 9 round trips read the table twice, batch 1's 230 read it once. The client-side
+changes aren't resolved: the foreign joins' CPU per run was base 5,823 / 6,208 / 6,260 ms, new
+6,239 / 6,052 / 6,446 ms (one new run's elapsed time, 36.5 s against 27-29 s, was the machine's);
+by the profile above they touch about 3% of that phase's CPU. Peak memory: engine 58-62 MB new,
+68-124 MB base, PostgreSQL 149 MB.
+
 ```sh
 SERVER_CPUS=4-7 CLIENT_CPUS=8-9 tools/fdwtraffic/compare.sh <roll-engine> <scratch> <prefix> <port> [pg] [engine]
 ```
@@ -6599,6 +6616,13 @@ build's (GIN jsonb 3.0 s, PostgreSQL 3.0; tsvector 1.3, PostgreSQL 1.5; int[] 1.
 0.142, GIN int[] 0.336 / 0.825 / 0.435, jsonb 1.135 / 1.737 / 0.816, jsonb_path_ops 0.550 /
 1.269 / 0.544, tsvector 0.504 / 1.165 / 0.424, GiST point 1.163 / 0.593 / 0.591, btree int
 0.303 / 0.706 / 0.737.
+
+The serial GiST point and btree builds aren't the batch's: four more rounds of them alone,
+head / fix1 / fix2 s, GiST point 0.702 / 0.677 / 0.725 (fix2 0.655-0.918), btree int 0.863 /
+0.879 / 0.853 (PostgreSQL 1.221, 0.392); three after a BRIN build, GiST point 0.731 / 0.683
+/ 0.709. That BRIN build, first in a fresh engine process, reads the table cold: head 0.692,
+fix1 0.298, fix2 0.262 s against PostgreSQL's 0.116, whose cluster keeps it in its buffers
+from run to run.
 
 ## XML: the tree, input checks and building (round 21, agent 107)
 

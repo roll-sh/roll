@@ -164,7 +164,9 @@ fn mark_target(cat: &Catalog, source: &mut Arc<Plan>, oid: u32, update: bool) {
             let row_tg = |ty: u16| cat.triggers.values().any(|tg| tg.table == s.table.oid && tg.tgtype & tt::ROW != 0 && tg.tgtype & ty != 0);
             let wholerow = update || row_tg(tt::DELETE);
             let member = wholerow && s.table.oid != oid && row_tg(u16::MAX);
-            s.fdw = Some(Arc::new(FdwPushdown { target: true, wholerow, member, ..Default::default() }));
+            // (An ordering sent with it stays: `ORDER BY ... FOR UPDATE`.)
+            let order = s.fdw.as_ref().map(|f| f.order.clone()).unwrap_or_default();
+            s.fdw = Some(Arc::new(FdwPushdown { target: true, wholerow, member, order, ..Default::default() }));
         }
         return;
     }

@@ -1586,6 +1586,12 @@ impl Settings {
             if !self.argv.contains(&d.name) {
                 self.argv.push(d.name);
             }
+        } else if check_custom_name(name, &self.reserved).is_ok() {
+            // Custom command-line parameters create placeholders too. Keep their reset
+            // value below session and role/database settings, above configuration files.
+            let canon = name.to_ascii_lowercase();
+            self.touched(&canon);
+            self.defaults.insert(canon, value.to_string());
         }
         self.stats_fetch_assigned();
     }
@@ -2668,6 +2674,16 @@ mod tests {
         assert!(s.set("nope", Some("1"), false, false).is_err());
         s.set("my.custom", Some("x"), false, false).unwrap();
         assert_eq!(s.show("my.custom").unwrap(), "x");
+        s.set_command_line("My.Custom", "startup");
+        assert_eq!(s.show("my.custom").unwrap(), "x");
+        s.set("my.custom", None, false, false).unwrap();
+        assert_eq!(s.show("MY.CUSTOM").unwrap(), "startup");
+        s.set("my.custom", Some("local"), true, true).unwrap();
+        s.end_transaction(true);
+        assert_eq!(s.show("my.custom").unwrap(), "startup");
+        s.set("my.custom", Some("session"), false, false).unwrap();
+        s.reset_all();
+        assert_eq!(s.show("my.custom").unwrap(), "startup");
     }
 
     #[test]

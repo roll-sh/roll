@@ -1127,9 +1127,19 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
   Contrib postgres_fdw 1,950 / 2,053 (no unit changed against a base run: 628 and 636 now
   differ only in the lines below), dblink 218, file_fdw 187; `fdw_loopback`
   `analyzed_foreign_table_estimates` (PostgreSQL's estimates and ANALYZE's counts under each
-  sampling method). Still open: 636's outer plan scans don't show their copies (`ft4.*`:
-  the level's whole-row pass that adds them is kept off the laid-out plan); 628 differs
-  also in the outer plan's choice (PostgreSQL's epq path is a hash
+  sampling method). Second batch (1,951: 636 gained, none lost): the outer plan's scans
+  return their copies (`ft4.*`) themselves (`epq_layout`), ANALYZE fetches 1,000 rows a
+  round trip unless fetch_size is set (every row goes into the sample; a scan, which may stop
+  early, keeps PostgreSQL's 100: round 9's ANALYZE took 230 round trips, 216 ms against
+  base's 80), and the client side decodes a little less per value (a remote row of every
+  column in order is the row without a NULL row filled first, `ScanNode::dense`; each text
+  value's UTF-8 checked once, `remote::conn` DataRow). Its traffic numbers weren't measured
+  yet (the bench job was stopped to free the heavy slot; measured since: BENCH.md "postgres_fdw,
+  round 9", second batch). Third batch (1,952: 628 gained, none lost): the target scan the
+  wrapper joins remotely (`fdw_dml_target`) gets `fdw_sorted_paths` too, its ordering kept
+  by `mark_target` (`ORDER BY ... FOR UPDATE`): with remote estimates the sorted path costs
+  the plain one's and add_path keeps it, so the epq path's hash join reads it. Before it: 628
+  differed only in the outer plan's choice (PostgreSQL's epq path is a hash
   join whose outer side is the sorted remote scan, `ORDER BY "C 1"`: the join search's,
   agent 177); the remote SELECT list puts a SET expression's columns first only when they
   are the target's (`UPDATE f4 SET c3 = f5.c3 || ...`: PostgreSQL has `r2.c3` first); a
@@ -6836,14 +6846,18 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
       workers each side; jsonb 0.7-0.8x, tsvector 0.8-0.9x). What is left in the participants
       is the per-row decode (a `Vec<Value>`, the array or document) and `gin_keys`'
       allocations; the merge is serial. btree int is 2.3-2.6x. One run had the serial GiST
-      point build at 0.709 s for fix2 against head's 0.633 (fix1's 0.591 against 0.593 in the
-      other run); nothing in the batch is on that path.
+      point build at 0.709 s for fix2 against head's 0.633; four more rounds give head 0.702,
+      fix1 0.677, fix2 0.725 (ranges overlapping), and three after a BRIN build 0.731 / 0.683
+      / 0.709: the spread, not the batch (nothing in it is on that path).
+    - The first build in a fresh engine process reads the table cold: BRIN first takes 0.26 s
+      (fix2) against 0.13 after another build, while PostgreSQL's cluster keeps the table in
+      its buffers from run to run (0.12). The runs restart the engine and not PostgreSQL.
     - hnsw build memory (item 4): not started this round, 149's design stands.
     - `tests/big_tables.rs` `deferred_entry_deletes` failed once after the rebase (the DELETE
       didn't go in as runs): it and `copy_through_the_sink` both set the process-wide default
       spill size around their engine's open and reset it to 0, so one can open with the
       other's reset (a race between the two tests, there since 856b8009d). It passed in the
-      two runs before the rebase.
+      two runs before the rebase, and three more after it (18 / 18), and the two tests alone.
     - 176's items 2, 6 and 7 (lineitem index-only counts, GiST / BRIN index row size errors,
       the multi-row COPY's TID, the GiST box size model, the SP-GiST quad NaN): not reached.
       Probed: BRIN's text minmax summary of a 9,600-byte value builds (compressed), and a
@@ -9114,11 +9128,11 @@ and speed pull apart. BENCH.md "Modes" has the measurements behind every value.
   i.e. `ALTER SYSTEM SET roll.engine_mode = 'performance'` and a restart, else efficient; a
   `--mode` and a `-c` that disagree refuse to start), then the explicit flags replace single
   parts: `--memory-budget-mb`, `--cache-mb`, `--plan-cache-mb`, `--idle-close-secs`. Read at
-  start only. `roll.engine_mode` is a custom (placeholder) parameter: from postgresql.auto.conf
-  `SHOW roll.engine_mode` reads it (as PostgreSQL would); a `SET` of it changes nothing but its
-  own value. From `-c` it picks the mode but SHOW doesn't see it: the engine drops every custom
-  `-c x.y=...` it has no definition for (`Settings::set_command_line`), where PostgreSQL makes a
-  placeholder (an open difference, not the modes'). `--mode` isn't visible to SQL. A new knob
+  start only. `SHOW roll.engine_mode` starts with the selected mode, including the default
+  and `--mode`. It is a custom (placeholder) parameter: a session `SET` changes its displayed
+  value, not the running profile; `RESET` restores the startup selection. Custom command-line
+  parameters now create placeholders as PostgreSQL does (`Settings::set_command_line`).
+  `ALTER SYSTEM` takes effect on restart; reload keeps the running selection visible. A new knob
   goes into `Profile` with both values, never as an `if performance` at its use.
 - **The same in both modes**: query results, errors, notices, plans, catalog contents,
   everything SQL sees apart from `roll.engine_mode` itself; durability (fsync on commit, crash
