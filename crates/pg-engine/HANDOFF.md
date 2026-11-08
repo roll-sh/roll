@@ -6751,6 +6751,90 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
       that leaves its entries and cleared by VACUUM's index pass, under which they fetch the
       row (PostgreSQL's VM check for a page not all-visible).
 
+- **Index access at index cost, round 8** (round 25, agent 183; BENCH.md "Index access,
+  round 8"):
+  - Round 7's GiST "regressions" aren't its strip search's. The same dist build with and
+    without e5f0da9ac's exec/search.rs and exec/scan.rs, interleaved with PostgreSQL in
+    containers: gist_box 0.229 ms without it, 0.196 with it; gist_point_box 0.197 and 0.191
+    (PostgreSQL 0.117 and 0.129 in those rounds; 0.12-0.20 from run to run). Round 6's
+    ratios (1.30 / 0.75) came from a PostgreSQL that measured 0.170 / 0.283 ms that day; the
+    engine's own times are round 6's or better. The CPU above wall time on gist_box (0.45 ms
+    a query) is the first case after the engine starts paying its background work: after
+    another case it is 0.20 ms (BENCH round 8 runs `max_id` first for that).
+  - A bitmap scan of an index not read by its entries binds the index once (`scan::Searched`):
+    round 7's point path bound the table's indexes and evaluated the quals for
+    `search::candidate_points`, then the old path did both again, for every GIN, BRIN and
+    non-point GiST bitmap scan; and the table isn't cloned for it.
+  - GIN and BRIN builds of a table too big to model run in parallel as PostgreSQL 18's do
+    (`parbuild::measure_am_parallel`; `am_measure::AmPlan`, `AmPart`, `merged_pages`): the
+    leader and max_parallel_maintenance_workers' workers (plan_create_index_workers' count:
+    by heap pages, 32 MB of maintenance_work_mem a participant) read key-range chunks of the
+    rows (`build_chunks`, btree's). A row is known by (chunk, place) until every chunk's rows
+    are counted; then its TID is the serial measure's (`Places`: the kept measure's density,
+    or the first `SIZED_SAMPLE` rows sized and packed and the rest at their density).
+    - GIN: each participant accumulates posting lists up to its share of
+      maintenance_work_mem, then keeps them as a compressed sorted run (ginBuildCallbackParallel's
+      flushes into its tuplesort); the runs are merged by key and each key's list inserted once
+      (`_gin_parallel_merge`). array_ops' index row size error: each participant's first in
+      key order, the earliest reported (`rowsize::gin_form_error_with`).
+    - BRIN of fixed-size summaries (minmax of fixed-size types, box_inclusion_ops): the
+      participants note each row's nulls; a range's summary is formed from its columns seen
+      null and seen with a value, the same as the serial measure's. Text minmax summaries and
+      the other classes build serially.
+    - relpages and pg_relation_size are the serial measure's, which PostgreSQL's parallel
+      builds also give: `brin_gin_builds_measure_as_postgres` builds in parallel too (PostgreSQL
+      with min_parallel_table_scan_size 0 gives the same pages for that table).
+    - The block cache: a build's scan of a table over a quarter of the cache is a bulk read
+      (it evicts nothing), as PostgreSQL's ring is for one over NBuffers / 4; below that both
+      cache the table. The engine's peak over a run of builds is 320-525 MB against
+      PostgreSQL's 430-750, so there was nothing to take back there.
+  - GIN bitmap scans whose structure's selection is exact over a table nothing was written to
+    since the structure read it give `search::Found::Exact`: the bitmap reads and checks no
+    row, the heap side reads each once without a recheck, and a `count(*)` over it counts the
+    keys (`scan::Keys::Visible`, `ScanNode::count_rest`; tuples fetched counted as the fetches
+    would count them). Exact (`gin::Elements::exact`): a tsquery of AND / OR over lexemes
+    without weights (prefixes too); an array's `@>` / `&&` of elements it keys, none null;
+    jsonb's `?`, `?|`, `?&` of strings (the structure keys the top level's object keys and
+    array strings apart, `K` / `E`, so `?` also selects fewer rows when not exact); built-in
+    classes only (intarray's `@>` errors on a row's NULL element); no partial index (the
+    structure ignores predicates). Nothing written: `Placing::written`, set by every write
+    the structure's log passes on, deletions too, until it is rebuilt; the snapshot not older
+    than the structure; no own writes in the table. Golden `a183_gin_exact`.
+  - `tools/bench/access.rs` `access-builds` sets maintenance_work_mem on both servers (`--mwm`,
+    default the reference's 256 MB server setting): it decides the parallel workers.
+  - Verified (targeted, per the verification train), rebased on d79d9b4e8: release
+    build; clippy (no warning in the files touched); release lib, golden, parallel_scan,
+    deep_input and big_tables tests (big_tables 17 / 18 after the rebase: the race below);
+    regress files create_index, create_index_spgist, gist, spgist, gin, brin, btree_index,
+    hash_index, indexing, select_parallel, geometry,
+    tsearch, tsdicts, point, box, polygon, circle, create_misc, create_table, stats, arrays,
+    jsonb 5,856 / 5,856, 0 units changed; contrib btree_gist 613 / 616, pg_trgm 261, citext
+    544, bloom 58, pgvector 803 / 915 against `a89-pgvector` (its bench flags' INFO lines, as
+    round 7).
+  - Left after round 8 (agent 183):
+    - GiST short queries (gist_box 1.3-1.8x, gist_point_box 1.45-1.5x, the KNN cases
+      1.45-1.9x): the search itself is under a tenth of gist_box's profile; binding and
+      planning and the row fetches are the rest. gist_point_circle is 1.8-2.0x.
+    - GIN jsonb_path_ops `@>` (2.9-3.2x): the structure's tokens aren't paths, so its selection
+      is a superset and every candidate is read and checked. Path-aware tokens would make it
+      exact. gin_jsonb_exists is now 1.06x, gin_tsvector_and 0.28x.
+    - Builds: BRIN 1.0-1.2x, GIN int[] 1.0-1.3x and jsonb_path_ops 1.0x PostgreSQL's (two
+      workers each side; jsonb 0.7-0.8x, tsvector 0.8-0.9x). What is left in the participants
+      is the per-row decode (a `Vec<Value>`, the array or document) and `gin_keys`'
+      allocations; the merge is serial. btree int is 2.3-2.6x. One run had the serial GiST
+      point build at 0.709 s for fix2 against head's 0.633 (fix1's 0.591 against 0.593 in the
+      other run); nothing in the batch is on that path.
+    - hnsw build memory (item 4): not started this round, 149's design stands.
+    - `tests/big_tables.rs` `deferred_entry_deletes` failed once after the rebase (the DELETE
+      didn't go in as runs): it and `copy_through_the_sink` both set the process-wide default
+      spill size around their engine's open and reset it to 0, so one can open with the
+      other's reset (a race between the two tests, there since 856b8009d). It passed in the
+      two runs before the rebase.
+    - 176's items 2, 6 and 7 (lineitem index-only counts, GiST / BRIN index row size errors,
+      the multi-row COPY's TID, the GiST box size model, the SP-GiST quad NaN): not reached.
+      Probed: BRIN's text minmax summary of a 9,600-byte value builds (compressed), and a
+      btree_gist text key fails "index row requires 9616 bytes, maximum size is 8191".
+
 - **Stored scans** (round 24, agent 149):
   - Recovered `eb44c2c9` and `78f4186f` onto `251924c1`. String comparisons
     use stored bytes when the operator and collation permit bytewise comparison.
