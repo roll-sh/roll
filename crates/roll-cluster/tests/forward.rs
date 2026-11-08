@@ -10,7 +10,7 @@ use axum::extract::{Path, Request, State};
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::any;
-use code_cluster::{Cluster, ClusterConfig, Forwarded, Guard, MAX_HOPS, Node, accept_forwarded, hops, unavailable};
+use roll_cluster::{Cluster, ClusterConfig, Forwarded, Guard, MAX_HOPS, Node, accept_forwarded, hops, unavailable};
 use common::*;
 use futures::StreamExt;
 use hmac::{Hmac, Mac};
@@ -146,8 +146,8 @@ async fn start(env: &Env, id: &str) -> TestNode {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let cfg = env.scaled(ClusterConfig::for_tests(id, format!("http://{addr}"), SECRET));
-    let db = env.node_db();
-    let cluster = tokio::task::spawn_blocking(move || Cluster::join(db, cfg).unwrap()).await.unwrap();
+    let backend = env.backend();
+    let cluster = tokio::task::spawn_blocking(move || Cluster::join(backend, cfg).unwrap()).await.unwrap();
     let state = AppState { cluster: cluster.clone(), flaky: Arc::default(), loops: Arc::default(), peer: Arc::default() };
     let app = Router::new()
         .route("/r/{key}/{*rest}", any(routed))
@@ -160,7 +160,7 @@ async fn start(env: &Env, id: &str) -> TestNode {
 }
 
 async fn pair(name: &str) -> (Env, TestNode, TestNode) {
-    let env = Env::new(name);
+    let env = Env::new(Kind::Memory, name).unwrap();
     let a = start(&env, "a").await;
     let b = start(&env, "b").await;
     let _ = a.peer.set(b.cluster.node());

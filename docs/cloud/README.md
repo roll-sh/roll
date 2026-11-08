@@ -23,8 +23,8 @@ of each part is at the end.
 ## Principles
 
 - **One fleet, one binary.** Every node runs the same `rolld` with every product on. There is
-  no per-product server group to deploy, scale or patch. Per-product switches turn a product
-  off without a redeploy.
+  no per-product server group to deploy, scale or patch. A product can be switched off for the
+  whole fleet with a setting (`ROLL_PRODUCTS`; "Products").
 - **Everything has one owner, and ownership moves.** Each tenant resource (a repo, a Postgres
   endpoint, a Redis database, a NoSQL database, a Kafka cluster, a storage account, a queue, a
   tasks tenant) has one owner node at a time, held through a lease. Any node accepts a request or
@@ -47,8 +47,8 @@ zones by AWS:
 
 | item | pk / sk | what |
 | --- | --- | --- |
-| node | `node` / `<node id>` | advertise URL, version, zone, draining flag, heartbeat counter |
-| lease | `lease` / `<key>` | holder node, epoch, record version |
+| node | `node` / `<node id>` | advertise URL, version, zone, draining flag, incarnation, heartbeat token (`hb`), takeover generation (`gen`), release counter |
+| lease | `lease` / `<key>` | holder node and its incarnation, epoch, free flag, record version |
 | singleton | `lease` / `singleton:<name>` | one-per-fleet jobs (ACME, GC per bucket, the land forwarder) |
 
 - **No clocks are compared.** DynamoDB has no server clock, so liveness works like the AWS
@@ -56,14 +56,16 @@ zones by AWS:
   heartbeat; a contender that watches a record and sees the same version for a full lease
   duration, on its own monotonic clock, may take it with a conditional write on that version and
   a bumped epoch. Holders stop acting at lease minus a safety margin since their last successful
-  renewal, on their own monotonic clock (self-fencing), exactly as in code-cluster.
+  renewal, on their own monotonic clock (self-fencing), as on Postgres. The takeover is a
+  transaction that also checks the holder's node item still carries the watched token and bumps
+  its `gen`, so a renewal that lands after it fails and the holder re-reads its leases.
 - **Renewals are per node, not per lease.** A node heartbeats its `node` item; a lease is valid
   while its holder's node item is live and the epoch is unchanged, so the table's write rate is
   nodes × heartbeat rate, not leases × rate. Placement is rendezvous hashing over live nodes.
 - Cost at test scale: a few million writes a month, about $1–3.
 - Single-node and local development keep using the in-process (or Postgres) backend:
-  `roll-cluster` has a backend trait with `Memory`, `Postgres` (today's code-cluster) and
-  `DynamoDb` implementations.
+  `roll-cluster` has a backend trait with `Memory`, `Postgres` (roll code's original tables, on
+  the database's clock) and `DynamoDb` implementations (docs/code/cluster.md, "Backends").
 
 ## Shared state: the system database
 
@@ -75,6 +77,8 @@ written once in SQLite's dialect), as roll code's did.
   standby on a second node, point-in-time recovery from S3.
 - `ROLL_SYSTEM_DATABASE` takes any Postgres URL, so the fleet also runs on an outside Postgres
   (CI and local clusters use `postgres:18-alpine`).
+- roll code keeps its data there (schemas `code_store` and `code_control`) unless
+  `ROLL_CODE_DATABASE` names a Postgres of its own (docs/code/cluster.md, "Code's database").
 - Boot order: nodes join through DynamoDB → the `system:pg` owner starts the system database from
   S3 → products connect → tenant resources get owners on first use or from their leases.
 
@@ -82,7 +86,7 @@ written once in SQLite's dialect), as roll code's did.
 
 | product | key | notes |
 | --- | --- | --- |
-| code | `code:repo:<id>`, `agents:<owner id>` | already built (code-cluster) |
+| code | `<repo id>`, `agents:<owner id>` | built (roll-cluster); repo leases keep their bare ids so a running Postgres cluster upgrades in place |
 | postgres | `pg:endpoint:<id>`, `system:pg` | the engine runs in-process; compute moves with the lease |
 | redis | `redis:db:<id>` | the owner serves RESP and REST; others splice connections to it |
 | nosql | `nosql:db:<id>` | replaces the manifest's owner field; fences opens |
@@ -107,7 +111,7 @@ written once in SQLite's dialect), as roll code's did.
   API, by one node at a time (singleton `acme`), stored sealed in S3 (`system/certs/`) and
   reloaded by every node without a restart. Renewal starts 30 days before expiry.
 - **Forwarding** to the owner is a signed internal hop on the private network: HTTP requests are
-  forwarded as in code-cluster; TCP connections are spliced after the first message that names
+  forwarded as in roll-cluster (`Cluster::dispatch`); TCP connections are spliced after the first message that names
   the tenant (startup packet, AUTH/HELLO, SASL, CQL STARTUP/AUTH, AMQP vhost).
 
 ### Hostnames
@@ -118,16 +122,16 @@ written once in SQLite's dialect), as roll code's did.
 | `roll.sh/<owner>/<repo>.git` | git smart HTTP; the edge sends `.git` paths straight to code, not through the dashboard | proxied |
 | `git.roll.sh/<owner>/<repo>.git` | the same, without Cloudflare's 100 MB request limit (big first pushes) | DNS only |
 | `api.roll.sh` | every product's HTTP API, MCP, agents' WebSocket | proxied |
-| `<id>.pg.roll.sh:5432` | Postgres endpoints | DNS only |
-| `<id>.redis.roll.sh:6379` (TLS), `https://<id>.redis.roll.sh` (REST) | Redis | DNS only |
-| `<id>.kafka.roll.sh:9092` (TLS + SASL), HTTPS REST on 443 | streams | DNS only |
-| `<id>.nosql.roll.sh:9042` (TLS), HTTPS Alternator on 443 | nosql (the name the nosql docs already use) | DNS only |
-| `<id>.mq.roll.sh` 5671 AMQPS, 8883 MQTTS, 61614 STOMP TLS, 5551 streams, 443 web | queues | DNS only |
-| `tasks.roll.sh` | tasks API | DNS only |
-| `s3.roll.site`, `<bucket>.s3.roll.site` | S3 API (path and virtual-host style) | DNS only |
+| `<id>.pg.us-east-1.roll.sh:5432` | Postgres endpoints | DNS only |
+| `<id>.redis.us-east-1.roll.sh:6379` (TLS), `https://<id>.redis.us-east-1.roll.sh` (REST) | Redis | DNS only |
+| `<id>.kafka.us-east-1.roll.sh:9092` (TLS + SASL), HTTPS REST on 443 | streams | DNS only |
+| `<id>.nosql.us-east-1.roll.sh:9042` (TLS), HTTPS Alternator on 443 | nosql | DNS only |
+| `<id>.mq.us-east-1.roll.sh` 5671 AMQPS, 8883 MQTTS, 61614 STOMP TLS, 5551 streams, 443 web | queues | DNS only |
+| `tasks.us-east-1.roll.sh` | tasks API | DNS only |
+| `s3.us-east-1.roll.site`, `<bucket>.s3.us-east-1.roll.site` | S3 API (path and virtual-host style) | DNS only |
 | `<bucket>.roll.site`, custom domains | public buckets and sites (the CDN Worker) | proxied |
 | `chg-<id>.roll.site` | code previews | proxied |
-| `origin.roll.sh` | the NLB, the target of every DNS-only record above | DNS only |
+| `origin.us-east-1.roll.sh` | the region's NLB, the target of every DNS-only record above | DNS only |
 
 - **roll.sh** is the product; **roll.site** serves only user content: anything a user uploaded
   or built that a browser could render (objects, presigned S3 URLs, previews, sites). Nothing
@@ -135,17 +139,76 @@ written once in SQLite's dialect), as roll code's did.
   amazonaws.com rather than amazon.com. roll.site goes on the Public Suffix List.
 - Raw file content from the API (`api.roll.sh`, e.g. a repo's raw files) is served as
   `text/plain` or an attachment with `X-Content-Type-Options: nosniff`, never as HTML.
-- Wildcards are one record each (`*.pg.roll.sh` and so on) pointing at the NLB. The first
-  region uses the short names; a second region adds `<id>.<product>.<region>.roll.sh` and
-  existing hostnames keep working.
+- **Hostnames customers connect to directly carry the AWS region** (`us-east-1`). Connection
+  strings live in customers' code and can never be renamed, the region tells them where to run
+  their apps for low latency and no cross-region transfer, and it's the region S3 clients sign
+  with. Each region is one wildcard record per product (`*.pg.us-east-1.roll.sh` and so on)
+  pointing at that region's NLB: no per-tenant DNS records and no global router.
+- Global or Cloudflare-proxied names carry no region (`roll.sh`, `api.roll.sh`, `git.roll.sh`,
+  `<bucket>.roll.site`, `chg-<id>.roll.site`): the API routes to a resource's region, and
+  Cloudflare can send a proxied request to the right region when there is more than one.
 - roll.cloud isn't needed. If it's bought, it only redirects to roll.sh.
+
+### The edge in rolld
+
+`crates/roll-edge` is the edge; `crates/rolld/src/edge.rs` runs it in front of the products
+when `ROLL_EDGE=1` (without it rolld is unchanged).
+
+| listener | what happens |
+| --- | --- |
+| 8443 (HTTPS) | HTTP/1.1, routed by `Host`: `roll.sh` → `ROLL_DASHBOARD_UPSTREAM` (streamed, WebSockets included) except `/<owner>/<repo>.git/…` → code's git routes; `git.roll.sh` → code's git routes; `api.roll.sh` → rolld's API router; `<id>.redis.…` → Redis REST; `<id>.kafka.…` → the streams HTTP API; `<id>.nosql.…` → Alternator; `<id>.mq.…` → web-STOMP or web-MQTT by `Sec-WebSocket-Protocol`, else the queues HTTP API; `tasks.…` → tasks (`/v1/tasks/…`); `s3.…`, `<bucket>.s3.…` → the S3 server; `chg-<id>.roll.site` → code previews. `<bucket>.roll.site` answers 404 at the origin: it is served by the CDN Worker. |
+| 5432 | `SSLRequest` → `S` → TLS, or TLS straight away (`sslnegotiation=direct`, ALPN `postgresql`); `GSSENCRequest` → `N`; a startup packet in the clear is refused (`08P01`); cancel requests may come in the clear. The endpoint is the server name's `<id>`, else `options=endpoint=<id>`; naming two different ones is an error. |
+| 6379 | TLS, then Redis with the server name (the database is its first label). |
+| 9092 | TLS, then Kafka; metadata names the server name the client used (one virtual broker per hostname), never a node address. |
+| 9042 | TLS, then CQL with the server name (the database is its first label). |
+| 5671, 8883, 61614, 5551 | TLS, then AMQP (0-9-1 and 1.0), MQTT, STOMP and the RabbitMQ stream protocol. |
+
+- **Client addresses** come from the PROXY protocol header (v1 or v2, at most 512 bytes after
+  the fixed part, read under the handshake deadline). On the HTTPS listener handlers get it as
+  `ConnectInfo` and in `X-Forwarded-For` (whatever the client sent is dropped). For a proxied
+  hostname whose peer is a Cloudflare address, `CF-Connecting-IP` is the client; the ranges are in
+  `roll-edge/src/trusted.rs` and `ROLL_EDGE_CLOUDFLARE_IPS` replaces them.
+- **Authenticated origin pulls.** Proxied hostnames (`roll.sh`, `www.roll.sh`, `api.roll.sh`,
+  `*.roll.site`) are handshaken only with Cloudflare's origin-pull client certificate (the CA is
+  `roll-edge/src/cloudflare-origin-pull-ca.pem`, valid to 2029-11-01; `ROLL_EDGE_ORIGIN_PULL_CA`
+  replaces it), and a request naming one of them on a connection that didn't show it gets 403,
+  whatever the TLS server name was. DNS-only hostnames ask for no client certificate.
+- **Certificates**: two sets, so roll.sh and roll.site never share one: `roll.sh`, `api.roll.sh`,
+  `git.roll.sh`, `tasks.us-east-1.roll.sh` and `*.{pg,redis,kafka,nosql,mq}.us-east-1.roll.sh`;
+  and `*.roll.site`, `s3.us-east-1.roll.site`, `*.s3.us-east-1.roll.site`. Bucket names with
+  dots aren't covered by the wildcard and use path style, as on S3. They're stored sealed under
+  `ROLL_SECRET_KEY` (`system/certs/{product,site}.sealed`, plus the ACME account), every node
+  polls them (`ROLL_EDGE_CERT_POLL_S`, 600) and installs a new one without a restart, and the node
+  holding the `acme` singleton orders what's missing or within 30 days of expiry (backing off an
+  hour after a failed order). `roll_edge::certs::Singleton` is the seam for roll-cluster's
+  `singleton(name)`; rolld passes `LocalSingleton` until the merge.
+- **Healthy** (`/healthz` 200) once a certificate is loaded and until SIGTERM. Then `/healthz`
+  fails at once, the public listeners keep accepting and serving for `ROLL_EDGE_DRAIN_DELAY`
+  (15 s) while the NLB takes the node out, keep-alive HTTP connections are closed after their
+  request in flight, and only then do the products start their own drains.
+- **Forwarding TCP** to a tenant's owner: `roll_edge::splice::splice(client, owner_url, signer,
+  hop, first_bytes)` opens an HTTP upgrade to the owner's `/internal/edge/splice` (HMAC-SHA256
+  over the hop and the time under the cluster secret, 60 s skew), writes the bytes already read,
+  then copies both ways. The owner hands the stream to the handler its product registered;
+  Postgres's is registered (the proxy, with the endpoint as named).
+- **Dev mode**: `ROLL_EDGE_CERT_DIR` serves its `<name>.crt`/`<name>.key` pairs (reloaded when
+  they change) and writes a self-signed certificate for every edge name when it has none; origin
+  pulls are off unless `ROLL_EDGE_ORIGIN_PULL=1`. Every listener's address is a setting
+  (`ROLL_EDGE_HTTPS`, `ROLL_EDGE_PG`, `ROLL_EDGE_REDIS`, `ROLL_EDGE_KAFKA`, `ROLL_EDGE_NOSQL`,
+  `ROLL_EDGE_AMQPS`, `ROLL_EDGE_MQTTS`, `ROLL_EDGE_STOMPS`, `ROLL_EDGE_MQ_STREAM`; `0.0.0.0` and
+  the public port by default), so a laptop can run it next to a local Postgres.
+- With the edge on, rolld points the products' own names at the edge's unless they're set:
+  `ROLL_S3_DOMAIN`, Alternator's domain, `ROLL_CODE_PREVIEW_DOMAIN` (`roll.site`), roll code's
+  public, git and web URLs; its own plain Kafka listener moves to `127.0.0.1:19092` if it would
+  take the edge's port.
 
 ## Deploys, scaling and failure
 
 - **Pipeline** (`.github/workflows/deploy.yml`): every merge to `main` builds one arm64 image
   (rolld plus the dashboard), pushes it to ECR through GitHub OIDC (no stored AWS keys), then:
   1. **canary**: one node of the new version joins the fleet and takes its share; it bakes for
-     10 minutes while alarms watch errors, latency, restarts and handoff failures;
+     10 minutes while alarms watch errors (HTTP 5xx), p99 latency, failed lease handoffs, lease
+     takeovers, TCP resets, crashed or unhealthy nodes and the healthy-node count ("Metrics");
   2. **roll**: the rest are replaced one at a time, each new node healthy before the next old one
      stops;
   3. **rollback**: any alarm, failed health check or ECS circuit breaker puts the previous image
@@ -189,13 +252,17 @@ never on a fleet node or through a Docker socket.
 - **The operator token.** `ROLL_ADMIN_TOKEN` (`Authorization: Bearer`, 32 characters or more) opens
   every route rolld's API serves. One check (`crates/roll-auth`) sits in front of all the merged
   routers, and `crates/rolld/src/auth.rs` (`RULES`) is the one list of routes that don't need it:
-  - public: the health endpoints and storage's console sign-in;
+  - public: the health endpoints (`/healthz` and each product's), `GET /v1/info` (the dashboard's
+    sidebar reads it before sign-in) and storage's console sign-in; a product that's off
+    answers 404 before the check;
   - the product decides: roll code (`/v1/code`, `/git`: owners, tokens, public repos, signed
     webhooks, device login), signed internal hops (`/internal`);
   - the token or the product's own credential: storage (console sessions), tasks (its token
     and API keys), streams' HTTP data plane and Confluent REST (stream API keys).
 
-  Every other route, and any route a product adds later, is the operator's. The token is
+  Every other route, and any route a product adds later, is the operator's, on the internal API
+  and through the edge (the API host, and the Kafka HTTP and tasks hosts, which carry control-plane
+  routes too; Redis REST, S3 and Alternator are data planes with their own credentials). The token is
   compared in constant time and never logged; products get only an `Operator` marker on the
   request. `RUST_LOG=rolld::auth=debug` lists every route with its access at startup, and
   `crates/rolld/tests/auth.rs` walks that list.
@@ -244,22 +311,100 @@ The contract between the stack, the image and rolld. Each setting is a flag with
 | `ROLL_ZONE` | the instance's availability zone | placement spreads standbys across zones |
 | `ROLL_ADVERTISE_URL` | `http://<private ip>:7070` | where other nodes reach this one |
 | `ROLL_API` | `0.0.0.0:7070` | internal HTTP: node-to-node hops and `GET /healthz`; never public |
-| `ROLL_SYSTEM_DATABASE` | the system database's URL | catalogs and accounts for every product |
+| `ROLL_SYSTEM_DATABASE` | the system database's URL | catalogs and accounts for every product; roll code's data unless `ROLL_CODE_DATABASE` is set |
+| `ROLL_PRODUCTS` | `redis,streams,tasks,storage,nosql,queues,code` | the products the node runs (see "Products"); Postgres is off until its engine runs in process |
 | `ROLL_S3_BUCKET`, `AWS_REGION` | `roll-cloud-data-<account>`, `us-east-1` | all product data, under per-product prefixes |
 | `ROLL_SECRET_KEY` | from Secrets Manager | seals owners' keys and the stored certificates |
 | `ROLL_ADMIN_TOKEN` | from Secrets Manager | the operator token every control-plane API accepts |
 | `ROLL_DASHBOARD_ORIGIN` | `https://roll.sh` | the only origin CORS allows |
 | `ROLL_EDGE` | `1` | public listeners with TLS, SNI routing and PROXY protocol |
-| `ROLL_EDGE_DOMAIN`, `ROLL_EDGE_SITE_DOMAIN`, `ROLL_EDGE_REGION` | `roll.sh`, `roll.site`, `us-east-1` | hostnames are built from these (the region appears in names only outside the first region) |
+| `ROLL_EDGE_DOMAIN`, `ROLL_EDGE_SITE_DOMAIN`, `ROLL_EDGE_REGION` | `roll.sh`, `roll.site`, `us-east-1` | hostnames are built from these |
 | `ROLL_EDGE_PROXY_PROTOCOL` | `1` | expect PROXY protocol v2 from the NLB |
 | `ROLL_ACME_DIRECTORY`, `ROLL_ACME_EMAIL` | Let's Encrypt production, ops address | |
 | `ROLL_CLOUDFLARE_API_TOKEN` | from Secrets Manager | DNS edit on both zones, for DNS-01 only |
 | `ROLL_DASHBOARD_UPSTREAM` | `http://127.0.0.1:3000` | the dashboard container in the same task |
+| `ROLL_EDGE_DRAIN_DELAY` | `15` | seconds the public listeners keep serving after `/healthz` starts failing |
+| `ROLL_EDGE_ORIGIN_PULL` | `1` (the default outside dev mode) | Cloudflare's origin-pull certificate required on proxied hostnames |
+| `ROLL_DRAIN_TIMEOUT` | `90` | seconds a stopping node waits for its leases to move; `ROLL_CODE_DRAIN_TIMEOUT` stays an alias |
+| `ROLL_LOG_FORMAT` | `json` | one JSON object per line, with access lines and metrics (see "Logs") |
+| `ROLL_QUEUES_USER`, `ROLL_QUEUES_PASSWORD` | `roll-admin`, generated in Secrets Manager | roll queues' admin login (guest/guest is refused behind the edge) |
+| `ROLL_CODE_PREVIEW_DOMAIN` | `roll.site` | previews answer on `chg-<id>.roll.site` |
 
 Public ports (NLB listener → node port): 443 → 8443 (HTTPS: dashboard, API, git, S3, REST data
 planes, WebSockets), 5432, 6379, 9092, 9042, 5671, 8883, 61614 and 5551, each to the same port on
 the node. The NLB's health check is `GET http://<node>:7070/healthz`: 200 while the node serves and
-isn't draining.
+isn't draining. It runs every 5 s and takes a node out after 2 failures, so a stopping node keeps
+serving for at least 15 s after `/healthz` starts failing before it closes listeners. The ECS stop
+timeout is 120 s (drain 90 + NLB 10–15 + margin), which also fits inside Spot's two-minute notice.
+
+The instances are the NLB's targets (an ECS service attaches at most five target groups; there are
+nine ports), registered by the instance group. Client IP preservation is off: client addresses
+come only from PROXY protocol v2, on every public port. Health checks on 7070 carry no PROXY
+header.
+
+### Products
+
+`ROLL_PRODUCTS` (`--products`) is a comma list of `postgres`, `redis`, `streams`, `tasks`,
+`storage`, `nosql`, `queues` and `code`; unset, every product runs. The older switches are
+shorthands over the same set: `--no-storage`, `--no-queues` and `--no-nosql` take one out, and
+`--code-only`, `--queues-only` and `--nosql-only` mean `ROLL_PRODUCTS=<that one>`
+(`crates/rolld/src/products.rs` decides).
+
+- A product that's off binds none of its ports (the edge's too), starts no background work, and
+  its API routes answer 404 with `{"error": "roll <product> is off on this node (ROLL_PRODUCTS)",
+  "product": …}`. Its hostnames on the edge answer 404.
+- With Postgres off rolld never runs `docker` for computes. (roll code's checks and previews
+  still use Docker until they move to Fargate: without it they fail, and the node keeps serving.)
+- `GET /v1/info` (no token) answers `{"version", "node", "products"}`; the dashboard hides the
+  products a node doesn't run.
+- Every node of the fleet must run the same set: requests are forwarded to a resource's owner,
+  whichever node that is.
+
+### Logs
+
+rolld writes one JSON object per line on stdout (`ROLL_LOG_FORMAT=json`;
+`crates/rolld/src/logs.rs`): `timestamp`, `level` (`"ERROR"`, `"WARN"`, `"INFO"`, …), `target`,
+`msg` and the event's fields. The stack's one metric filter counts `ErrorLogs` from
+`{ $.level = "ERROR" }`.
+
+Every HTTP request rolld answers, on the internal API (`listener: "api"`) or the edge's HTTPS
+listener (`"https"`), gets one access line (`target: "access"`, `msg: "request"`) when its
+response body ends:
+
+| field | |
+| --- | --- |
+| `method` | |
+| `route` | the matched route pattern (`/v1/code/repos/{owner}/{repo}`), `unmatched`, or what the edge served (`dashboard`, `queues`, `edge`). Never the path or query: no tenant names, tokens or query strings |
+| `product` | the product the route belongs to (`git` for git's smart-HTTP routes), `dashboard`, `edge`, or `rolld` (`/v1/info`, unmatched paths) |
+| `status` | a number |
+| `duration_ms` | until the response body ended |
+| `ttfb_ms` | until the response head was sent |
+| `bytes` | response body bytes |
+| `forwarded` | `true` when another node forwarded the request here (it logged it too) |
+
+No header is logged (`Authorization`, `Cookie` and the rest). Health checks (`/healthz`) get no access line.
+
+### Metrics
+
+Access lines are also CloudWatch Embedded Metric Format records (`_aws`), so CloudWatch Logs
+turns them into metrics without an API call from the node. Namespace `RollCloud`:
+
+| metric | unit | dimensions | from |
+| --- | --- | --- | --- |
+| `Latency` | Milliseconds | `product`; `service` = `rolld` | `ttfb_ms` of each request (p50/p99 are CloudWatch statistics) |
+| `Requests` | Count | `product`; `service` | 1 per request |
+| `Http5xx` | Count | `product`; `service` | 1 per 5xx answer |
+| `Handoffs` | Count | `service` | leases this node handed to another (per minute, and after a drain) |
+| `HandoffFailures` | Count | `service` | handoffs that timed out with requests in flight, whose release didn't reach the backend, or that a drain left behind |
+| `LeaseTakeovers` | Count | `service` | leases taken from a holder that never released them (it died or was cut off) |
+| `LeasesFenced` | Count | `service` | leases this node stopped using because it couldn't renew them in time |
+
+Forwarded requests carry no metrics: the node that received them counted them. The lease
+counters come from `roll_cluster::Cluster::stats` (roll-cluster has no AWS code).
+
+Alarms (`deploy/cloud/README.md`, "Alarms"): `errors` on `Http5xx`; `latency` on the slowest
+p99 of code, postgres, redis, storage, nosql and tasks (streams and queues long-poll, and git
+pushes take as long as the pack); `handoff-failures` and `lease-takeovers` on any.
 
 ## Where everything lives
 
@@ -269,18 +414,33 @@ isn't draining.
 | Cloudflare zones and records | `deploy/cloud/cloudflare/` |
 | fleet image | `deploy/cloud/Dockerfile` |
 | deploy pipeline | `.github/workflows/deploy.yml` |
-| cluster layer | `crates/roll-cluster` (from `crates/code-cluster`) |
+| cluster layer | `crates/roll-cluster`; rolld's settings and handle in `crates/rolld/src/cluster.rs` |
 | edge (TLS, SNI, ACME, PROXY protocol, routing) | `crates/roll-edge` |
 
 ## Status
 
 | part | state |
 | --- | --- |
-| code + agents on the cluster layer | built (Postgres leases); DynamoDB backend in progress |
-| AWS stack, image, pipeline, Cloudflare | in progress |
-| edge | in progress |
-| control-plane auth lockdown | built (`ROLL_ADMIN_TOKEN`, `crates/roll-auth`); customer accounts next |
-| GitHub resilience | in progress |
+| code + agents on the cluster layer | built: `crates/roll-cluster` with Memory, Postgres and DynamoDB backends; `ROLL_CLUSTER_*`, `ROLL_NODE_ID`, `ROLL_ZONE`, `ROLL_ADVERTISE_URL`, `ROLL_DRAIN_TIMEOUT` in rolld |
+| AWS stack, image, pipeline, Cloudflare | built (`deploy/cloud/README.md`); not yet run against AWS |
+| edge | built (`crates/roll-edge`, `rolld/src/edge.rs`); not yet run against AWS |
+| control-plane auth lockdown | built (`ROLL_ADMIN_TOKEN`, `crates/roll-auth`, `rolld/src/auth.rs`); customer accounts next |
+| product switches, JSON logs, metrics and their alarms | built (`ROLL_PRODUCTS`, `ROLL_LOG_FORMAT`, `GET /v1/info`); not yet run against AWS |
+| GitHub resilience | done |
 | tasks, queues, storage, redis, streams, nosql on the cluster layer | next, one product per change |
 | postgres on the fleet and the system database | with the pg-engine branch |
 | isolated work on Fargate | next |
+
+### Open items
+
+- **Postgres on the fleet.** Today's Postgres product starts computes with the `docker` CLI, so
+  the stack runs with it off (`ROLL_PRODUCTS`) until the in-process engine replaces them.
+- **Code checks and previews** still run in Docker; they move to Fargate ("Isolated work").
+- **Buckets on roll.site.** The CDN Worker serves path-style only, so `<bucket>.roll.site` needs
+  virtual-host support, and bucket names starting `chg-` must be reserved (they'd collide with
+  previews).
+- **Flaky tests seen on GitHub** (each passed on a plain re-run, and on main): redis
+  `compat_debug_with_redis` (`search_hnsw.txt`, `FT.INFO` while the vector index is still
+  building), nosql conformance `test_compaction.py::test_tombstone_gc_with_conflict_in_memtable`,
+  code-control `automations::a_run_starts_an_agent_waits_for_it_and_notifies` (under load). Each
+  should wait for the state it checks instead of racing it.

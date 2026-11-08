@@ -279,6 +279,19 @@ pub(super) fn start_poll(code: &Arc<Code>) {
                     continue;
                 }
             };
+            // Notifications for GitHub wait on their repo's owner too (another node's, or nobody's).
+            if code.cluster().is_some() {
+                match super::outbox::due_repos(&code, now) {
+                    Ok(r) => {
+                        for repo in r {
+                            if !code.owns_repo(&repo) && !repos.contains(&repo) {
+                                code.kick_owner(&repo);
+                            }
+                        }
+                    }
+                    Err(e) => tracing::warn!(error = %e, "looking for due notifications to GitHub"),
+                }
+            }
             for repo in repos {
                 if code.owns_repo(&repo) {
                     process_due(&code, &repo).await;

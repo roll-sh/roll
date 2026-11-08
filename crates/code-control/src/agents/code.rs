@@ -145,7 +145,14 @@ pub(super) fn mint(code: &Code, m: &MachineRow, r: &RepoRow, asked: &RepoRef, pu
     let expires_at = code_sql::now_ms() + GRANT_TTL.as_millis() as i64;
     let push_ref = push.map(code_store::full_ref);
     store::insert_grant(code.db.sql(), &hash_token(&token), &m.id, &r.id, push_ref.as_deref(), expires_at)?;
-    Ok(CodeGrant { repo: asked.clone(), url: code.clone_url(r), token, write: push.is_some(), branch: push.map(str::to_string), expires_at: expires_at.max(0) as u64 })
+    // A connected repo's GitHub side, for a publish's fallback while roll can't be reached.
+    let github = crate::github::link_of(r).filter(|l| l.connected && push.is_some()).map(|l| agent_proto::GrantGithub {
+        owner: l.owner.clone(),
+        repo: l.repo.clone(),
+        url: l.url.trim_end_matches('/').to_string(),
+        default_branch: r.default_branch.clone(),
+    });
+    Ok(CodeGrant { repo: asked.clone(), url: code.clone_url(r), token, write: push.is_some(), branch: push.map(str::to_string), expires_at: expires_at.max(0) as u64, github })
 }
 
 /// The repo a command works on and the grant for it, when it needs one. A clone's grant only
@@ -278,7 +285,8 @@ pub(super) async fn published(code: &Code, api: Option<&ApiRouter>, headers: &He
         }
     };
     let Some(c) = change else {
-        if land {
+        // The daemon said already (roll's git couldn't be reached: queued on GitHub).
+        if land && p.landing.is_none() {
             p.landing = Some(Landing {
                 status: LandingStatus::Failed,
                 message: format!("{} has no open change in {} (it may have landed already)", p.branch, r.full_name()),

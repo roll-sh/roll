@@ -160,7 +160,7 @@ pub fn router(code: Arc<Code>) -> Router {
             .merge(crate::cluster::internal_routes(code.clone(), cluster.clone()))
             .merge(cluster.router())
             // Requests from other nodes are verified (and their client address kept).
-            .layer(axum::middleware::from_fn_with_state(cluster.clone(), code_cluster::accept_forwarded));
+            .layer(axum::middleware::from_fn_with_state(cluster.clone(), roll_cluster::accept_forwarded));
     }
     out
 }
@@ -336,8 +336,14 @@ async fn blob(
     let (cs, file) = code.blob(&r, &rev, &path).await?;
     let mut resp = file.data.clone().into_response();
     let h = resp.headers_mut();
-    h.insert(header::CONTENT_TYPE, HeaderValue::from_static(render::content_type(&path, &file.data)));
+    let content_type = render::content_type(&path, &file.data);
+    h.insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
     h.insert(header::X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
+    // Documents a browser would open as a page on api.roll.sh download instead (`<img>` still
+    // shows an SVG); everything else is inert: text/plain, images, fonts, video.
+    if render::opens_as_page(content_type) {
+        h.insert(header::CONTENT_DISPOSITION, HeaderValue::from_static("attachment"));
+    }
     h.insert(header::CONTENT_SECURITY_POLICY, HeaderValue::from_static("default-src 'none'; style-src 'unsafe-inline'; sandbox"));
     if let Ok(v) = HeaderValue::from_str(&cs_id(&cs)) {
         h.insert("x-roll-changeset", v);
@@ -840,7 +846,7 @@ impl Code {
 /// Who an event stream counts against ([`crate::streams::key`]). A stream forwarded by another
 /// node counts against the client that node saw (verified).
 pub(crate) fn stream_key(code: &Code, caller: &Caller, parts: &Parts) -> String {
-    let peer = match parts.extensions.get::<code_cluster::Forwarded>() {
+    let peer = match parts.extensions.get::<roll_cluster::Forwarded>() {
         Some(f) => f.client.as_deref().and_then(|c| c.parse::<std::net::IpAddr>().ok()).map(|ip| std::net::SocketAddr::new(ip, 0)),
         None => parts.extensions.get::<axum::extract::ConnectInfo<std::net::SocketAddr>>().map(|c| c.0),
     };

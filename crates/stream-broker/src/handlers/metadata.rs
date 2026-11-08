@@ -95,8 +95,8 @@ pub fn metadata(ctx: &Ctx, req: MetadataRequest) -> MetadataResponse {
     };
     let broker = MetadataResponseBroker::default()
         .with_node_id(node(ctx))
-        .with_host(s(ctx.b.config.advertised_host.clone()))
-        .with_port(ctx.b.config.advertised_port as i32)
+        .with_host(s(ctx.advertised_host().to_string()))
+        .with_port(ctx.advertised_port() as i32)
         .with_rack(ctx.b.config.rack.clone().map(s));
     MetadataResponse::default()
         .with_brokers(vec![broker])
@@ -109,8 +109,8 @@ pub fn metadata(ctx: &Ctx, req: MetadataRequest) -> MetadataResponse {
 pub fn describe_cluster(ctx: &Ctx, req: DescribeClusterRequest) -> DescribeClusterResponse {
     let broker = DescribeClusterBroker::default()
         .with_broker_id(node(ctx))
-        .with_host(s(ctx.b.config.advertised_host.clone()))
-        .with_port(ctx.b.config.advertised_port as i32)
+        .with_host(s(ctx.advertised_host().to_string()))
+        .with_port(ctx.advertised_port() as i32)
         .with_rack(ctx.b.config.rack.clone().map(s));
     DescribeClusterResponse::default()
         .with_cluster_id(s(ctx.stream.cluster_id.clone()))
@@ -151,7 +151,7 @@ pub fn describe_quorum(ctx: &Ctx, req: DescribeQuorumRequest) -> DescribeQuorumR
         .collect();
     let mut resp = DescribeQuorumResponse::default().with_topics(topics);
     if ctx.version >= 2 {
-        let listener = Listener::default().with_name(s("CONTROLLER")).with_host(s(ctx.b.config.advertised_host.clone())).with_port(ctx.b.config.advertised_port);
+        let listener = Listener::default().with_name(s("CONTROLLER")).with_host(s(ctx.advertised_host().to_string())).with_port(ctx.advertised_port());
         resp.nodes = vec![describe_quorum_response::Node::default().with_node_id(node(ctx)).with_listeners(vec![listener])];
     }
     resp

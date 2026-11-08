@@ -50,6 +50,11 @@ variable (see `crates/rolld/src/queues.rs`).
   (`Authorization: Bearer`, docs/cloud/README.md "Security").
 - `roll queues url` prints the AMQP URL for a vhost.
 
+On roll cloud the edge (docs/cloud/README.md) ends TLS in front of these: AMQPS on
+`<id>.mq.us-east-1.roll.sh:5671`, MQTTS on `:8883`, STOMP over TLS on `:61614`, the stream
+protocol over TLS on `:5551`, and web-STOMP, web-MQTT (picked by `Sec-WebSocket-Protocol`) and the
+HTTP messaging API on `https://<id>.mq.us-east-1.roll.sh`.
+
 ## A vhost per app
 
 Each app or environment gets its own vhost, its own user and one URL per protocol, so it works

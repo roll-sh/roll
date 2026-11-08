@@ -44,6 +44,9 @@ tokio-rustls.workspace = true
 tokio-tungstenite = { workspace = true, features = ["rustls-tls-native-roots"] }
 toml.workspace = true
 tracing.workspace = true
+# The GitHub fallback (`github.rs`).
+url.workspace = true
+urlencoding.workspace = true
 zeroize = { workspace = true, features = ["serde"] }
 zip.workspace = true
 

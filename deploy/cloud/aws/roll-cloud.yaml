@@ -1,0 +1,1491 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  roll cloud: every roll product on one fleet of identical rolld nodes (ECS on Graviton EC2, one
+  node per instance, host networking) behind a Network Load Balancer, with coordination in
+  DynamoDB and all data in one S3 bucket. The design is docs/cloud/README.md; standing it up,
+  deploys and teardown are in deploy/cloud/README.md.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label: { default: Image }
+        Parameters: [ImageTag]
+      - Label: { default: Fleet }
+        Parameters: [Nodes, MaxNodes, InstanceType, InstanceType2, InstanceType3, OnDemandInstances, MinInstances, MaxInstances, DesiredInstances, NodeCpu, NodeMemory, DiskGiB]
+      - Label: { default: Edge }
+        Parameters: [Domain, SiteDomain, AcmeEmail, UseElasticIps]
+      - Label: { default: Alarms and scaling }
+        Parameters: [ResetsPerMinute, ErrorsPerMinute, LatencyP99Ms, ConnectionsPerNode]
+      - Label: { default: GitHub }
+        Parameters: [GitHubRepo, GitHubOidcProviderArn]
+
+Parameters:
+  ImageTag:
+    Type: String
+    Default: none
+    Description: >-
+      The fleet image's tag in this stack's ECR repository. "none" (the first create: the
+      repository is empty) runs no nodes. After that, always pass the tag that is running
+      (deploy/cloud/deploy.sh current), or the update deploys that tag.
+  Nodes:
+    Type: Number
+    Default: 3
+    MinValue: 1
+    Description: rolld nodes, one per instance; also the floor service auto scaling keeps (one per zone).
+  MaxNodes:
+    Type: Number
+    Default: 7
+    MinValue: 1
+    Description: The most nodes auto scaling runs. Keep it at MaxInstances - 2 (a deploy and the canary each need a spare instance).
+  InstanceType:
+    Type: String
+    Default: t4g.medium
+    Description: Graviton instance type, first choice for on-demand.
+  InstanceType2:
+    Type: String
+    Default: ""
+    Description: Optional second type of the same size (more Spot pools, fewer interruptions), e.g. c7g.large.
+  InstanceType3:
+    Type: String
+    Default: ""
+    Description: Optional third type, e.g. m7g.large.
+  OnDemandInstances:
+    Type: Number
+    Default: 1
+    MinValue: 0
+    Description: Instances kept on-demand; the rest are Spot.
+  MinInstances:
+    Type: Number
+    Default: 3
+    MinValue: 0
+  MaxInstances:
+    Type: Number
+    Default: 9
+    MinValue: 1
+  DesiredInstances:
+    Type: Number
+    Default: 3
+    MinValue: 0
+    Description: Instances at creation; the ECS capacity provider manages the count afterwards.
+  NodeCpu:
+    Type: Number
+    Default: 1536
+    Description: CPU units reserved for rolld per node (a t4g.medium has 2048; the dashboard takes 256).
+  NodeMemory:
+    Type: Number
+    Default: 2560
+    Description: MiB reserved for rolld per node (soft; a t4g.medium registers about 3800).
+  DiskGiB:
+    Type: Number
+    Default: 30
+    MinValue: 30
+    Description: Root volume per instance (gp3). Node disks are caches.
+  Domain:
+    Type: String
+    Default: roll.sh
+  SiteDomain:
+    Type: String
+    Default: roll.site
+  AcmeEmail:
+    Type: String
+    Default: ops@roll.sh
+    Description: Let's Encrypt account address (expiry notices).
+  UseElasticIps:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+    Description: >-
+      Give the NLB one Elastic IP per zone, so origin.<region>.<Domain> can be A records that
+      never change. An NLB has a public address per zone either way; EIPs add no cost.
+  ResetsPerMinute:
+    Type: Number
+    Default: 300
+    Description: TCP resets per minute from targets and the NLB that count as an incident.
+  ErrorsPerMinute:
+    Type: Number
+    Default: 50
+    Description: HTTP 5xx answers per minute across the fleet that count as an incident.
+  LatencyP99Ms:
+    Type: Number
+    Default: 2000
+    Description: >-
+      p99 time to the response head, in ms, of any request/response product's API (code,
+      postgres, redis, storage, nosql, tasks) that counts as an incident. Streams and queues
+      long-poll, and git pushes take as long as the pack, so they aren't in it.
+  ConnectionsPerNode:
+    Type: Number
+    Default: 20000
+    Description: Scale out above this many NLB flows per node.
+  GitHubRepo:
+    Type: String
+    Default: roll-sh/roll
+    Description: owner/repo whose main branch, in the production environment, may deploy.
+  GitHubOidcProviderArn:
+    Type: String
+    Default: ""
+    Description: The account's existing token.actions.githubusercontent.com OIDC provider, if it has one (an account holds one per URL). Empty creates it.
+  EcsAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ecs/optimized-ami/amazon-linux-2023/arm64/recommended/image_id
+
+Conditions:
+  Bootstrapped: !Not [!Equals [!Ref ImageTag, none]]
+  HasType2: !Not [!Equals [!Ref InstanceType2, ""]]
+  HasType3: !Not [!Equals [!Ref InstanceType3, ""]]
+  UseEips: !Equals [!Ref UseElasticIps, "true"]
+  CreateOidc: !Equals [!Ref GitHubOidcProviderArn, ""]
+
+Resources:
+  # ── network: three public subnets, no NAT; S3 and DynamoDB through free gateway endpoints ──
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.80.0.0/16
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags: [{ Key: Name, Value: roll-cloud }]
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags: [{ Key: Name, Value: roll-cloud }]
+  GatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties: { VpcId: !Ref Vpc, InternetGatewayId: !Ref InternetGateway }
+  RouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags: [{ Key: Name, Value: roll-cloud }]
+  DefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: GatewayAttachment
+    Properties: { RouteTableId: !Ref RouteTable, DestinationCidrBlock: 0.0.0.0/0, GatewayId: !Ref InternetGateway }
+  Subnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      CidrBlock: 10.80.0.0/20
+      MapPublicIpOnLaunch: true
+      Tags: [{ Key: Name, Value: roll-cloud-1 }]
+  Subnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      CidrBlock: 10.80.16.0/20
+      MapPublicIpOnLaunch: true
+      Tags: [{ Key: Name, Value: roll-cloud-2 }]
+  Subnet3:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      AvailabilityZone: !Select [2, !GetAZs ""]
+      CidrBlock: 10.80.32.0/20
+      MapPublicIpOnLaunch: true
+      Tags: [{ Key: Name, Value: roll-cloud-3 }]
+  Subnet1Routes:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: { SubnetId: !Ref Subnet1, RouteTableId: !Ref RouteTable }
+  Subnet2Routes:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: { SubnetId: !Ref Subnet2, RouteTableId: !Ref RouteTable }
+  Subnet3Routes:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: { SubnetId: !Ref Subnet3, RouteTableId: !Ref RouteTable }
+  S3Endpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref Vpc
+      VpcEndpointType: Gateway
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.s3
+      RouteTableIds: [!Ref RouteTable]
+  DynamoDbEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref Vpc
+      VpcEndpointType: Gateway
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.dynamodb
+      RouteTableIds: [!Ref RouteTable]
+
+  # The NLB takes the public ports from anywhere; nodes take them only from the NLB, and the
+  # internal port (7070) only from the NLB's health checks and each other.
+  LoadBalancerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: roll cloud NLB, public ports
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - { IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIp: 0.0.0.0/0, Description: "HTTPS: dashboard, API, git, S3, REST data planes" }
+        - { IpProtocol: tcp, FromPort: 5432, ToPort: 5432, CidrIp: 0.0.0.0/0, Description: Postgres }
+        - { IpProtocol: tcp, FromPort: 6379, ToPort: 6379, CidrIp: 0.0.0.0/0, Description: Redis TLS }
+        - { IpProtocol: tcp, FromPort: 9092, ToPort: 9092, CidrIp: 0.0.0.0/0, Description: Kafka TLS }
+        - { IpProtocol: tcp, FromPort: 9042, ToPort: 9042, CidrIp: 0.0.0.0/0, Description: CQL TLS }
+        - { IpProtocol: tcp, FromPort: 5671, ToPort: 5671, CidrIp: 0.0.0.0/0, Description: AMQPS }
+        - { IpProtocol: tcp, FromPort: 8883, ToPort: 8883, CidrIp: 0.0.0.0/0, Description: MQTTS }
+        - { IpProtocol: tcp, FromPort: 61614, ToPort: 61614, CidrIp: 0.0.0.0/0, Description: STOMP TLS }
+        - { IpProtocol: tcp, FromPort: 5551, ToPort: 5551, CidrIp: 0.0.0.0/0, Description: RabbitMQ streams TLS }
+      Tags: [{ Key: Name, Value: roll-cloud-nlb }]
+  NodeSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: roll cloud nodes
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - { IpProtocol: tcp, FromPort: 8443, ToPort: 8443, SourceSecurityGroupId: !Ref LoadBalancerSecurityGroup, Description: HTTPS from the NLB }
+        - { IpProtocol: tcp, FromPort: 5432, ToPort: 5432, SourceSecurityGroupId: !Ref LoadBalancerSecurityGroup, Description: Postgres from the NLB }
+        - { IpProtocol: tcp, FromPort: 6379, ToPort: 6379, SourceSecurityGroupId: !Ref LoadBalancerSecurityGroup, Description: Redis from the NLB }
+        - { IpProtocol: tcp, FromPort: 9092, ToPort: 9092, SourceSecurityGroupId: !Ref LoadBalancerSecurityGroup, Description: Kafka from the NLB }
+        - { IpProtocol: tcp, FromPort: 9042, ToPort: 9042, SourceSecurityGroupId: !Ref LoadBalancerSecurityGroup, Description: CQL from the NLB }
+        - { IpProtocol: tcp, FromPort: 5671, ToPort: 5671, SourceSecurityGroupId: !Ref LoadBalancerSecurityGroup, Description: AMQPS from the NLB }
+        - { IpProtocol: tcp, FromPort: 8883, ToPort: 8883, SourceSecurityGroupId: !Ref LoadBalancerSecurityGroup, Description: MQTTS from the NLB }
+        - { IpProtocol: tcp, FromPort: 61614, ToPort: 61614, SourceSecurityGroupId: !Ref LoadBalancerSecurityGroup, Description: STOMP from the NLB }
+        - { IpProtocol: tcp, FromPort: 5551, ToPort: 5551, SourceSecurityGroupId: !Ref LoadBalancerSecurityGroup, Description: RabbitMQ streams from the NLB }
+        - { IpProtocol: tcp, FromPort: 7070, ToPort: 7070, SourceSecurityGroupId: !Ref LoadBalancerSecurityGroup, Description: health checks from the NLB }
+      Tags: [{ Key: Name, Value: roll-cloud-node }]
+  NodeToNode:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref NodeSecurityGroup
+      SourceSecurityGroupId: !Ref NodeSecurityGroup
+      IpProtocol: tcp
+      FromPort: 7070
+      ToPort: 7070
+      Description: signed internal hops between nodes
+
+  # ── data: one KMS key, one bucket, one table ──
+  Key:
+    Type: AWS::KMS::Key
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Description: roll cloud data bucket and secrets
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          # The account administers and uses the key through IAM policies (the roles below).
+          - Effect: Allow
+            Principal: { AWS: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:root" }
+            Action: kms:*
+            Resource: "*"
+  KeyAlias:
+    Type: AWS::KMS::Alias
+    Properties: { AliasName: !Sub "alias/${AWS::StackName}", TargetKeyId: !Ref Key }
+
+  DataBucket:
+    Type: AWS::S3::Bucket
+    # The source of truth for every product: never deleted with the stack.
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub roll-cloud-data-${AWS::AccountId}
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault: { SSEAlgorithm: aws:kms, KMSMasterKeyID: !GetAtt Key.Arn }
+            # One data key per bucket rather than a KMS call per object.
+            BucketKeyEnabled: true
+      VersioningConfiguration: { Status: Enabled }
+      LifecycleConfiguration:
+        Rules:
+          - Id: noncurrent-35-days
+            Status: Enabled
+            NoncurrentVersionExpiration: { NoncurrentDays: 35 }
+          - Id: expired-delete-markers
+            Status: Enabled
+            ExpiredObjectDeleteMarker: true
+      OwnershipControls:
+        Rules: [{ ObjectOwnership: BucketOwnerEnforced }]
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+  DataBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref DataBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: TlsOnly
+            Effect: Deny
+            Principal: "*"
+            Action: s3:*
+            Resource: [!GetAtt DataBucket.Arn, !Sub "${DataBucket.Arn}/*"]
+            Condition: { Bool: { aws:SecureTransport: "false" } }
+
+  ClusterTable:
+    # Membership and leases only: rebuilt by the nodes.
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: roll-cluster
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: pk, AttributeType: S }
+        - { AttributeName: sk, AttributeType: S }
+      KeySchema:
+        - { AttributeName: pk, KeyType: HASH }
+        - { AttributeName: sk, KeyType: RANGE }
+      PointInTimeRecoverySpecification: { PointInTimeRecoveryEnabled: true }
+
+  # ── secrets: four generated, two filled in after creation (deploy/cloud/README.md) ──
+  ClusterSecret:
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Description: ROLL_CLUSTER_SECRET, signs internal hops between nodes
+      KmsKeyId: !Ref Key
+      GenerateSecretString: { PasswordLength: 48, ExcludePunctuation: true }
+  SecretKey:
+    # The bucket's sealed data (owners' keys, certificates) needs it: kept with the bucket.
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Description: ROLL_SECRET_KEY, seals owners' keys and the stored certificates. Losing it loses them.
+      KmsKeyId: !Ref Key
+      GenerateSecretString: { PasswordLength: 64, ExcludePunctuation: true }
+  AdminToken:
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Description: ROLL_ADMIN_TOKEN, the operator token every control-plane API accepts
+      KmsKeyId: !Ref Key
+      GenerateSecretString: { PasswordLength: 48, ExcludePunctuation: true }
+  # roll queues' admin login (ROLL_QUEUES_USER is in the task definition): behind the edge rolld
+  # refuses RabbitMQ's guest/guest.
+  QueuesPassword:
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Description: ROLL_QUEUES_PASSWORD, roll queues' admin password
+      KmsKeyId: !Ref Key
+      GenerateSecretString: { PasswordLength: 40, ExcludePunctuation: true }
+  CloudflareToken:
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub ${AWS::StackName}/cloudflare-api-token
+      Description: ROLL_CLOUDFLARE_API_TOKEN, DNS edit on both zones (ACME DNS-01). Put the real value before the first deploy.
+      KmsKeyId: !Ref Key
+      SecretString: unset
+  SystemDatabase:
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub ${AWS::StackName}/system-database
+      Description: ROLL_SYSTEM_DATABASE, the system database's Postgres URL. Put the real value before the first deploy.
+      KmsKeyId: !Ref Key
+      SecretString: unset
+
+  # ── images ──
+  Repository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Ref AWS::StackName
+      ImageScanningConfiguration: { ScanOnPush: true }
+      # Tags are commit SHAs: one image per commit, never moved.
+      ImageTagMutability: IMMUTABLE
+      EmptyOnDelete: true
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {"rules": [
+            {"rulePriority": 1, "description": "untagged layers after a day",
+             "selection": {"tagStatus": "untagged", "countType": "sinceImagePushed", "countUnit": "days", "countNumber": 1},
+             "action": {"type": "expire"}},
+            {"rulePriority": 2, "description": "keep the last 30 images (rollbacks)",
+             "selection": {"tagStatus": "any", "countType": "imageCountMoreThan", "countNumber": 30},
+             "action": {"type": "expire"}}
+          ]}
+  # BuildKit's layer cache for CI (cargo-chef's dependency layer is the slow one). Its tag moves.
+  CacheRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub ${AWS::StackName}-cache
+      EmptyOnDelete: true
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {"rules": [
+            {"rulePriority": 1, "description": "untagged cache blobs after a week",
+             "selection": {"tagStatus": "untagged", "countType": "sinceImagePushed", "countUnit": "days", "countNumber": 7},
+             "action": {"type": "expire"}}
+          ]}
+
+  # ── logs ──
+  NodeLogs:
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /${AWS::StackName}/nodes
+      RetentionInDays: 30
+  # Tasks that stop on their own (a crash, a failed start, failed health checks), from
+  # EventBridge; the TaskFailures metric below counts them.
+  TaskEventLogs:
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/events/${AWS::StackName}/task-failures
+      RetentionInDays: 30
+  TaskEventLogsPolicy:
+    Type: AWS::Logs::ResourcePolicy
+    Properties:
+      PolicyName: !Sub ${AWS::StackName}-task-failures
+      PolicyDocument: !Sub |
+        {"Version": "2012-10-17", "Statement": [{
+          "Effect": "Allow",
+          "Principal": {"Service": ["events.amazonaws.com", "delivery.logs.amazonaws.com"]},
+          "Action": ["logs:CreateLogStream", "logs:PutLogEvents"],
+          "Resource": "${TaskEventLogs.Arn}"
+        }]}
+  TaskFailureRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: rolld tasks that stopped without the scheduler asking
+      EventPattern:
+        source: [aws.ecs]
+        detail-type: [ECS Task State Change]
+        detail:
+          clusterArn: [!GetAtt Cluster.Arn]
+          lastStatus: [STOPPED]
+          $or:
+            - stopCode: [EssentialContainerExited, TaskFailedToStart]
+            - stoppedReason: [{ prefix: Task failed container health checks }]
+      Targets:
+        - { Id: logs, Arn: !GetAtt TaskEventLogs.Arn }
+
+  # ── the fleet: ECS on Graviton EC2, an on-demand base plus Spot ──
+  Cluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Ref AWS::StackName
+      ClusterSettings: [{ Name: containerInsights, Value: disabled }]
+
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement: [{ Effect: Allow, Principal: { Service: ec2.amazonaws.com }, Action: sts:AssumeRole }]
+      ManagedPolicyArns:
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role
+        # Session Manager instead of SSH (no port 22 anywhere).
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties: { Roles: [!Ref InstanceRole] }
+
+  LaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateData:
+        ImageId: !Ref EcsAmiId
+        IamInstanceProfile: { Arn: !GetAtt InstanceProfile.Arn }
+        SecurityGroupIds: [!Ref NodeSecurityGroup]
+        # IMDSv2 only. Host networking puts the containers on the host's stack, so one hop is
+        # enough for the entrypoint to read the instance id, zone and address; AWS credentials
+        # come from the task role (the SDKs prefer it over the instance's).
+        MetadataOptions: { HttpEndpoint: enabled, HttpTokens: required, HttpPutResponseHopLimit: 1 }
+        BlockDeviceMappings:
+          - DeviceName: /dev/xvda
+            Ebs: { VolumeSize: !Ref DiskGiB, VolumeType: gp3, Encrypted: true, DeleteOnTermination: true }
+        TagSpecifications:
+          - ResourceType: instance
+            Tags: [{ Key: Name, Value: roll-cloud-node }]
+          - ResourceType: volume
+            Tags: [{ Key: Name, Value: roll-cloud-node }]
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            set -eu
+            # rolld's cache directory (uid 10001 is the image's user `roll`). One task per
+            # instance, so a replacement task on the same instance reuses the cache.
+            mkdir -p /var/lib/roll && chown 10001:10001 /var/lib/roll
+            cat >> /etc/ecs/ecs.config <<EOF
+            ECS_CLUSTER=${Cluster}
+            ECS_ENABLE_SPOT_INSTANCE_DRAINING=true
+            ECS_CONTAINER_STOP_TIMEOUT=120s
+            ECS_ENABLE_TASK_IAM_ROLE_NETWORK_HOST=true
+            ECS_ENABLE_CONTAINER_METADATA=true
+            EOF
+
+  AutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    DependsOn: DefaultRoute
+    Properties:
+      VPCZoneIdentifier: [!Ref Subnet1, !Ref Subnet2, !Ref Subnet3]
+      MinSize: !Ref MinInstances
+      MaxSize: !Ref MaxInstances
+      DesiredCapacity: !Ref DesiredInstances
+      # EC2 health only: an instance between tasks (a deploy) fails the NLB's check, and must
+      # not be terminated for it.
+      HealthCheckType: EC2
+      # Managed termination protection: ECS moves an instance's task before it's scaled in.
+      NewInstancesProtectedFromScaleIn: true
+      # Replace Spot instances at elevated risk of interruption before AWS takes them.
+      CapacityRebalance: true
+      # Instances are the NLB's targets (an ECS service can attach at most five target groups;
+      # there are nine ports). The health check on 7070 decides whether a node gets traffic.
+      TargetGroupARNs:
+        - !Ref Tg8443
+        - !Ref Tg5432
+        - !Ref Tg6379
+        - !Ref Tg9092
+        - !Ref Tg9042
+        - !Ref Tg5671
+        - !Ref Tg8883
+        - !Ref Tg61614
+        - !Ref Tg5551
+      MixedInstancesPolicy:
+        InstancesDistribution:
+          OnDemandAllocationStrategy: prioritized
+          OnDemandBaseCapacity: !Ref OnDemandInstances
+          OnDemandPercentageAboveBaseCapacity: 0
+          SpotAllocationStrategy: price-capacity-optimized
+        LaunchTemplate:
+          LaunchTemplateSpecification:
+            LaunchTemplateId: !Ref LaunchTemplate
+            Version: !GetAtt LaunchTemplate.LatestVersionNumber
+          Overrides:
+            - InstanceType: !Ref InstanceType
+            - !If [HasType2, { InstanceType: !Ref InstanceType2 }, !Ref AWS::NoValue]
+            - !If [HasType3, { InstanceType: !Ref InstanceType3 }, !Ref AWS::NoValue]
+      Tags: [{ Key: Name, Value: roll-cloud-node, PropagateAtLaunch: true }]
+
+  CapacityProvider:
+    Type: AWS::ECS::CapacityProvider
+    Properties:
+      AutoScalingGroupProvider:
+        AutoScalingGroupArn: !Ref AutoScalingGroup
+        # Instances follow tasks: a deploy's extra task (and the canary) gets a new instance,
+        # and empty instances go away afterwards.
+        ManagedScaling: { Status: ENABLED, TargetCapacity: 100, MinimumScalingStepSize: 1, MaximumScalingStepSize: 3 }
+        ManagedTerminationProtection: ENABLED
+        # Scale-in, Spot rebalancing and instance refreshes stop the instance's task first.
+        ManagedDraining: ENABLED
+  ClusterCapacity:
+    Type: AWS::ECS::ClusterCapacityProviderAssociations
+    Properties:
+      Cluster: !Ref Cluster
+      CapacityProviders: [!Ref CapacityProvider]
+      DefaultCapacityProviderStrategy: [{ CapacityProvider: !Ref CapacityProvider, Weight: 1 }]
+
+  # ── roles ──
+  ExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement: [{ Effect: Allow, Principal: { Service: ecs-tasks.amazonaws.com }, Action: sts:AssumeRole }]
+      # ECR pulls and the awslogs driver.
+      ManagedPolicyArns: [!Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"]
+      Policies:
+        - PolicyName: secrets
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: [!Ref ClusterSecret, !Ref SecretKey, !Ref AdminToken, !Ref QueuesPassword, !Ref CloudflareToken, !Ref SystemDatabase]
+              - Effect: Allow
+                Action: kms:Decrypt
+                Resource: !GetAtt Key.Arn
+                Condition: { StringEquals: { kms:ViaService: !Sub "secretsmanager.${AWS::Region}.amazonaws.com" } }
+  TaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement: [{ Effect: Allow, Principal: { Service: ecs-tasks.amazonaws.com }, Action: sts:AssumeRole }]
+      Policies:
+        - PolicyName: node
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: Data
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:GetObjectAttributes
+                  - s3:PutObject
+                  - s3:DeleteObject
+                  - s3:DeleteObjectVersion
+                  - s3:AbortMultipartUpload
+                  - s3:ListMultipartUploadParts
+                Resource: !Sub "${DataBucket.Arn}/*"
+              - Sid: DataBucket
+                Effect: Allow
+                Action: [s3:ListBucket, s3:ListBucketVersions, s3:ListBucketMultipartUploads, s3:GetBucketLocation]
+                Resource: !GetAtt DataBucket.Arn
+              - Sid: Key
+                Effect: Allow
+                Action: [kms:Encrypt, kms:Decrypt, kms:ReEncrypt*, kms:GenerateDataKey*, kms:DescribeKey]
+                Resource: !GetAtt Key.Arn
+              - Sid: Cluster
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:BatchGetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:BatchWriteItem
+                  # Transactions are authorized item by item through these.
+                  - dynamodb:ConditionCheckItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                  - dynamodb:DescribeTable
+                Resource: !GetAtt ClusterTable.Arn
+              # Isolated work (checks, previews, sandboxes) as their own tasks in this cluster
+              # (docs/cloud/README.md, "Isolated work"). Their task roles get iam:PassRole here
+              # when they exist.
+              - Sid: IsolatedWork
+                Effect: Allow
+                Action: [ecs:RunTask, ecs:StopTask, ecs:DescribeTasks]
+                Resource: "*"
+                Condition: { ArnEquals: { ecs:cluster: !GetAtt Cluster.Arn } }
+              - Sid: Metrics
+                Effect: Allow
+                Action: cloudwatch:PutMetricData
+                Resource: "*"
+                Condition: { StringEquals: { cloudwatch:namespace: RollCloud } }
+              - Sid: Logs
+                Effect: Allow
+                Action: [logs:CreateLogStream, logs:PutLogEvents]
+                Resource: !Sub "${NodeLogs.Arn}:*"
+
+  # ── the node ──
+  NodeTask:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Ref AWS::StackName
+      RequiresCompatibilities: [EC2]
+      # The node owns the instance's ports: no NAT in the data path, and the advertise URL is
+      # the instance's own address.
+      NetworkMode: host
+      RuntimePlatform: { CpuArchitecture: ARM64, OperatingSystemFamily: LINUX }
+      ExecutionRoleArn: !GetAtt ExecutionRole.Arn
+      TaskRoleArn: !GetAtt TaskRole.Arn
+      Volumes:
+        - Name: cache
+          Host: { SourcePath: /var/lib/roll }
+      ContainerDefinitions:
+        - Name: rolld
+          Image: !Sub "${Repository.RepositoryUri}:${ImageTag}"
+          Command: [rolld]
+          Essential: true
+          Cpu: !Ref NodeCpu
+          MemoryReservation: !Ref NodeMemory
+          # A stopping node fails /healthz, waits for the NLB to take it out (two 5 s checks),
+          # hands its leases over (ROLL_DRAIN_TIMEOUT) and exits: 90 + 10 + 20 s of margin. 120 s
+          # is ECS's limit and fits inside Spot's two-minute notice.
+          StopTimeout: 120
+          Ulimits: [{ Name: nofile, SoftLimit: 1048576, HardLimit: 1048576 }]
+          MountPoints: [{ SourceVolume: cache, ContainerPath: /data }]
+          # Host networking: these are the instance's ports, which also keeps two nodes off one
+          # instance (the canary too).
+          PortMappings:
+            - { ContainerPort: 8443, HostPort: 8443, Protocol: tcp }
+            - { ContainerPort: 5432, HostPort: 5432, Protocol: tcp }
+            - { ContainerPort: 6379, HostPort: 6379, Protocol: tcp }
+            - { ContainerPort: 9092, HostPort: 9092, Protocol: tcp }
+            - { ContainerPort: 9042, HostPort: 9042, Protocol: tcp }
+            - { ContainerPort: 5671, HostPort: 5671, Protocol: tcp }
+            - { ContainerPort: 8883, HostPort: 8883, Protocol: tcp }
+            - { ContainerPort: 61614, HostPort: 61614, Protocol: tcp }
+            - { ContainerPort: 5551, HostPort: 5551, Protocol: tcp }
+            - { ContainerPort: 7070, HostPort: 7070, Protocol: tcp }
+          # docs/cloud/README.md, "Node settings". ROLL_NODE_ID, ROLL_ZONE and
+          # ROLL_ADVERTISE_URL come from instance metadata (deploy/cloud/entrypoint.sh).
+          Environment:
+            - { Name: ROLL_CLUSTER_BACKEND, Value: dynamodb }
+            - { Name: ROLL_CLUSTER_TABLE, Value: !Ref ClusterTable }
+            - { Name: ROLL_API, Value: "0.0.0.0:7070" }
+            - { Name: ROLL_S3_BUCKET, Value: !Ref DataBucket }
+            - { Name: AWS_REGION, Value: !Ref AWS::Region }
+            - { Name: ROLL_DASHBOARD_ORIGIN, Value: !Sub "https://${Domain}" }
+            - { Name: ROLL_EDGE, Value: "1" }
+            - { Name: ROLL_EDGE_DOMAIN, Value: !Ref Domain }
+            - { Name: ROLL_EDGE_SITE_DOMAIN, Value: !Ref SiteDomain }
+            # The region in direct-connect hostnames (*.pg.<region>.<Domain>, s3.<region>.<SiteDomain>)
+            # is the stack's own: one stack per region, and S3 clients sign with this region.
+            - { Name: ROLL_EDGE_REGION, Value: !Ref AWS::Region }
+            - { Name: ROLL_EDGE_PROXY_PROTOCOL, Value: "1" }
+            - { Name: ROLL_ACME_DIRECTORY, Value: "https://acme-v02.api.letsencrypt.org/directory" }
+            - { Name: ROLL_ACME_EMAIL, Value: !Ref AcmeEmail }
+            - { Name: ROLL_DASHBOARD_UPSTREAM, Value: "http://127.0.0.1:3000" }
+            - { Name: ROLL_DRAIN_TIMEOUT, Value: "90" }
+            # JSON lines: the metric filters and the Embedded Metric Format metrics below read them.
+            - { Name: ROLL_LOG_FORMAT, Value: json }
+            - { Name: ROLL_CODE_PREVIEW_DOMAIN, Value: !Ref SiteDomain }
+            # Every product but Postgres, whose computes need Docker, until it runs in process.
+            - { Name: ROLL_PRODUCTS, Value: "redis,streams,tasks,storage,nosql,queues,code" }
+            - { Name: ROLL_QUEUES_USER, Value: roll-admin }
+          Secrets:
+            - { Name: ROLL_CLUSTER_SECRET, ValueFrom: !Ref ClusterSecret }
+            - { Name: ROLL_SECRET_KEY, ValueFrom: !Ref SecretKey }
+            - { Name: ROLL_ADMIN_TOKEN, ValueFrom: !Ref AdminToken }
+            - { Name: ROLL_QUEUES_PASSWORD, ValueFrom: !Ref QueuesPassword }
+            - { Name: ROLL_CLOUDFLARE_API_TOKEN, ValueFrom: !Ref CloudflareToken }
+            - { Name: ROLL_SYSTEM_DATABASE, ValueFrom: !Ref SystemDatabase }
+          # A deploy's next step waits for this. Generous retries: during a DynamoDB or system
+          # database blip every node is unhealthy for a few seconds, and ECS must not replace
+          # them all for it.
+          HealthCheck:
+            Command: [CMD, /usr/local/bin/roll-health]
+            Interval: 10
+            Timeout: 5
+            Retries: 6
+            StartPeriod: 120
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref NodeLogs
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: node
+              mode: non-blocking
+              max-buffer-size: 25m
+        - Name: dashboard
+          Image: !Sub "${Repository.RepositoryUri}:${ImageTag}"
+          Command: [dashboard]
+          Essential: true
+          # Restarted in place if it exits; the node keeps serving everything else meanwhile.
+          RestartPolicy: { Enabled: true, RestartAttemptPeriod: 60 }
+          Cpu: 256
+          MemoryReservation: 256
+          Memory: 768
+          StopTimeout: 30
+          Environment:
+            - { Name: ROLL_API_URL, Value: "http://127.0.0.1:7070" }
+            - { Name: DASHBOARD_HOST, Value: 127.0.0.1 }
+            - { Name: DASHBOARD_PORT, Value: "3000" }
+          HealthCheck:
+            Command: [CMD, /usr/local/bin/roll-health, dashboard]
+            Interval: 15
+            Timeout: 5
+            Retries: 4
+            StartPeriod: 30
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref NodeLogs
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: dashboard
+              mode: non-blocking
+              max-buffer-size: 25m
+
+  # The fleet. Deploys replace one node at a time without dropping below the desired count:
+  # MinimumHealthyPercent 100 and a MaximumPercent that allows exactly one extra task
+  # (deploy/cloud/deploy.sh sets it for the current count on every deploy; 134 is right for
+  # 3–5 nodes). The extra task can't share an instance (host ports, distinctInstance), so the
+  # capacity provider adds one instance for it, and removes the empty one afterwards.
+  NodeService:
+    Type: AWS::ECS::Service
+    DependsOn: [ClusterCapacity, Listener443, Listener5432, Listener6379, Listener9092, Listener9042, Listener5671, Listener8883, Listener61614, Listener5551]
+    Properties:
+      ServiceName: rolld
+      Cluster: !Ref Cluster
+      TaskDefinition: !Ref NodeTask
+      DesiredCount: !If [Bootstrapped, !Ref Nodes, 0]
+      CapacityProviderStrategy: [{ CapacityProvider: !Ref CapacityProvider, Weight: 1 }]
+      PlacementConstraints: [{ Type: distinctInstance }]
+      PlacementStrategies: [{ Type: spread, Field: attribute:ecs.availability-zone }]
+      EnableECSManagedTags: true
+      PropagateTags: SERVICE
+      DeploymentConfiguration:
+        MinimumHealthyPercent: 100
+        MaximumPercent: 134
+        DeploymentCircuitBreaker: { Enable: true, Rollback: true }
+        Alarms:
+          Enable: true
+          Rollback: true
+          # Not CapacityAlarm: it's in ALARM until the first nodes are up. deploy.sh watches it
+          # during a canary's bake, and ECS only moves on once each new node is healthy.
+          AlarmNames: [!Ref ResetsAlarm, !Ref TaskFailuresAlarm, !Ref ErrorsAlarm, !Ref LatencyAlarm, !Ref HandoffFailuresAlarm, !Ref TakeoversAlarm]
+  # One node of a new version joins the fleet first and bakes (deploy/cloud/deploy.sh). Zero
+  # tasks between deploys. It shares the fleet's instances' rules: never next to another node.
+  CanaryService:
+    Type: AWS::ECS::Service
+    DependsOn: [ClusterCapacity, NodeService]
+    Properties:
+      ServiceName: rolld-canary
+      Cluster: !Ref Cluster
+      TaskDefinition: !Ref NodeTask
+      DesiredCount: 0
+      CapacityProviderStrategy: [{ CapacityProvider: !Ref CapacityProvider, Weight: 1 }]
+      PlacementConstraints: [{ Type: distinctInstance }]
+      EnableECSManagedTags: true
+      PropagateTags: SERVICE
+      DeploymentConfiguration:
+        MinimumHealthyPercent: 0
+        MaximumPercent: 100
+        DeploymentCircuitBreaker: { Enable: true, Rollback: false }
+
+  # ── scaling: CPU, memory and connections, never below one node per zone ──
+  NodeScaling:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    Condition: Bootstrapped
+    Properties:
+      ServiceNamespace: ecs
+      ScalableDimension: ecs:service:DesiredCount
+      ResourceId: !Sub "service/${Cluster}/${NodeService.Name}"
+      MinCapacity: !Ref Nodes
+      MaxCapacity: !Ref MaxNodes
+  NodeCpuScaling:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Condition: Bootstrapped
+    Properties:
+      PolicyName: rolld-cpu
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref NodeScaling
+      TargetTrackingScalingPolicyConfiguration:
+        TargetValue: 60
+        ScaleOutCooldown: 120
+        ScaleInCooldown: 600
+        PredefinedMetricSpecification: { PredefinedMetricType: ECSServiceAverageCPUUtilization }
+  NodeMemoryScaling:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Condition: Bootstrapped
+    Properties:
+      PolicyName: rolld-memory
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref NodeScaling
+      TargetTrackingScalingPolicyConfiguration:
+        TargetValue: 75
+        ScaleOutCooldown: 120
+        ScaleInCooldown: 600
+        PredefinedMetricSpecification: { PredefinedMetricType: ECSServiceAverageMemoryUtilization }
+  NodeConnectionScaling:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Condition: Bootstrapped
+    Properties:
+      PolicyName: rolld-connections
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref NodeScaling
+      TargetTrackingScalingPolicyConfiguration:
+        TargetValue: !Ref ConnectionsPerNode
+        ScaleOutCooldown: 120
+        ScaleInCooldown: 600
+        CustomizedMetricSpecification:
+          Metrics:
+            - Id: flows
+              ReturnData: false
+              MetricStat:
+                Metric:
+                  Namespace: AWS/NetworkELB
+                  MetricName: ActiveFlowCount
+                  Dimensions: [{ Name: LoadBalancer, Value: !GetAtt LoadBalancer.LoadBalancerFullName }]
+                Stat: Average
+            # ECS reports one CPU sample per running task per minute: the node count.
+            - Id: nodes
+              ReturnData: false
+              MetricStat:
+                Metric:
+                  Namespace: AWS/ECS
+                  MetricName: CPUUtilization
+                  Dimensions: [{ Name: ClusterName, Value: !Ref Cluster }, { Name: ServiceName, Value: !GetAtt NodeService.Name }]
+                Stat: SampleCount
+            - Id: perNode
+              Expression: flows / MAX([nodes, 1])
+              Label: flows per node
+              ReturnData: true
+
+  # ── the NLB: TCP passthrough on every public port, PROXY protocol v2 to the nodes ──
+  Eip1:
+    Type: AWS::EC2::EIP
+    Condition: UseEips
+    Properties: { Domain: vpc, Tags: [{ Key: Name, Value: roll-cloud-nlb-1 }] }
+  Eip2:
+    Type: AWS::EC2::EIP
+    Condition: UseEips
+    Properties: { Domain: vpc, Tags: [{ Key: Name, Value: roll-cloud-nlb-2 }] }
+  Eip3:
+    Type: AWS::EC2::EIP
+    Condition: UseEips
+    Properties: { Domain: vpc, Tags: [{ Key: Name, Value: roll-cloud-nlb-3 }] }
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    DependsOn: GatewayAttachment
+    Properties:
+      Name: !Ref AWS::StackName
+      Type: network
+      Scheme: internet-facing
+      IpAddressType: ipv4
+      SecurityGroups: [!Ref LoadBalancerSecurityGroup]
+      SubnetMappings: !If
+        - UseEips
+        - - { SubnetId: !Ref Subnet1, AllocationId: !GetAtt Eip1.AllocationId }
+          - { SubnetId: !Ref Subnet2, AllocationId: !GetAtt Eip2.AllocationId }
+          - { SubnetId: !Ref Subnet3, AllocationId: !GetAtt Eip3.AllocationId }
+        - - { SubnetId: !Ref Subnet1 }
+          - { SubnetId: !Ref Subnet2 }
+          - { SubnetId: !Ref Subnet3 }
+      LoadBalancerAttributes:
+        - { Key: load_balancing.cross_zone.enabled, Value: "true" }
+
+  # Every target group: instance targets (the ASG registers each instance in all nine), the
+  # health check GET :7070/healthz (5 s, 2 strikes), PROXY protocol v2 for client addresses
+  # (client IP preservation off, so a node can reach the NLB itself and the nodes' security
+  # group sees the NLB), a 10 s deregistration delay, and connections kept open while a node
+  # drains (it closes them itself, gradually) instead of reset by the NLB.
+  Tg8443:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      VpcId: !Ref Vpc
+      Protocol: TCP
+      Port: 8443
+      TargetType: instance
+      HealthCheckProtocol: HTTP
+      HealthCheckPort: "7070"
+      HealthCheckPath: /healthz
+      HealthCheckIntervalSeconds: 5
+      HealthCheckTimeoutSeconds: 3
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 2
+      Matcher: { HttpCode: "200" }
+      TargetGroupAttributes:
+        - { Key: proxy_protocol_v2.enabled, Value: "true" }
+        - { Key: preserve_client_ip.enabled, Value: "false" }
+        - { Key: deregistration_delay.timeout_seconds, Value: "10" }
+        - { Key: deregistration_delay.connection_termination.enabled, Value: "false" }
+        - { Key: target_health_state.unhealthy.connection_termination.enabled, Value: "false" }
+  Tg5432:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      VpcId: !Ref Vpc
+      Protocol: TCP
+      Port: 5432
+      TargetType: instance
+      HealthCheckProtocol: HTTP
+      HealthCheckPort: "7070"
+      HealthCheckPath: /healthz
+      HealthCheckIntervalSeconds: 5
+      HealthCheckTimeoutSeconds: 3
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 2
+      Matcher: { HttpCode: "200" }
+      TargetGroupAttributes:
+        - { Key: proxy_protocol_v2.enabled, Value: "true" }
+        - { Key: preserve_client_ip.enabled, Value: "false" }
+        - { Key: deregistration_delay.timeout_seconds, Value: "10" }
+        - { Key: deregistration_delay.connection_termination.enabled, Value: "false" }
+        - { Key: target_health_state.unhealthy.connection_termination.enabled, Value: "false" }
+  Tg6379:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      VpcId: !Ref Vpc
+      Protocol: TCP
+      Port: 6379
+      TargetType: instance
+      HealthCheckProtocol: HTTP
+      HealthCheckPort: "7070"
+      HealthCheckPath: /healthz
+      HealthCheckIntervalSeconds: 5
+      HealthCheckTimeoutSeconds: 3
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 2
+      Matcher: { HttpCode: "200" }
+      TargetGroupAttributes:
+        - { Key: proxy_protocol_v2.enabled, Value: "true" }
+        - { Key: preserve_client_ip.enabled, Value: "false" }
+        - { Key: deregistration_delay.timeout_seconds, Value: "10" }
+        - { Key: deregistration_delay.connection_termination.enabled, Value: "false" }
+        - { Key: target_health_state.unhealthy.connection_termination.enabled, Value: "false" }
+  Tg9092:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      VpcId: !Ref Vpc
+      Protocol: TCP
+      Port: 9092
+      TargetType: instance
+      HealthCheckProtocol: HTTP
+      HealthCheckPort: "7070"
+      HealthCheckPath: /healthz
+      HealthCheckIntervalSeconds: 5
+      HealthCheckTimeoutSeconds: 3
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 2
+      Matcher: { HttpCode: "200" }
+      TargetGroupAttributes:
+        - { Key: proxy_protocol_v2.enabled, Value: "true" }
+        - { Key: preserve_client_ip.enabled, Value: "false" }
+        - { Key: deregistration_delay.timeout_seconds, Value: "10" }
+        - { Key: deregistration_delay.connection_termination.enabled, Value: "false" }
+        - { Key: target_health_state.unhealthy.connection_termination.enabled, Value: "false" }
+  Tg9042:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      VpcId: !Ref Vpc
+      Protocol: TCP
+      Port: 9042
+      TargetType: instance
+      HealthCheckProtocol: HTTP
+      HealthCheckPort: "7070"
+      HealthCheckPath: /healthz
+      HealthCheckIntervalSeconds: 5
+      HealthCheckTimeoutSeconds: 3
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 2
+      Matcher: { HttpCode: "200" }
+      TargetGroupAttributes:
+        - { Key: proxy_protocol_v2.enabled, Value: "true" }
+        - { Key: preserve_client_ip.enabled, Value: "false" }
+        - { Key: deregistration_delay.timeout_seconds, Value: "10" }
+        - { Key: deregistration_delay.connection_termination.enabled, Value: "false" }
+        - { Key: target_health_state.unhealthy.connection_termination.enabled, Value: "false" }
+  Tg5671:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      VpcId: !Ref Vpc
+      Protocol: TCP
+      Port: 5671
+      TargetType: instance
+      HealthCheckProtocol: HTTP
+      HealthCheckPort: "7070"
+      HealthCheckPath: /healthz
+      HealthCheckIntervalSeconds: 5
+      HealthCheckTimeoutSeconds: 3
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 2
+      Matcher: { HttpCode: "200" }
+      TargetGroupAttributes:
+        - { Key: proxy_protocol_v2.enabled, Value: "true" }
+        - { Key: preserve_client_ip.enabled, Value: "false" }
+        - { Key: deregistration_delay.timeout_seconds, Value: "10" }
+        - { Key: deregistration_delay.connection_termination.enabled, Value: "false" }
+        - { Key: target_health_state.unhealthy.connection_termination.enabled, Value: "false" }
+  Tg8883:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      VpcId: !Ref Vpc
+      Protocol: TCP
+      Port: 8883
+      TargetType: instance
+      HealthCheckProtocol: HTTP
+      HealthCheckPort: "7070"
+      HealthCheckPath: /healthz
+      HealthCheckIntervalSeconds: 5
+      HealthCheckTimeoutSeconds: 3
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 2
+      Matcher: { HttpCode: "200" }
+      TargetGroupAttributes:
+        - { Key: proxy_protocol_v2.enabled, Value: "true" }
+        - { Key: preserve_client_ip.enabled, Value: "false" }
+        - { Key: deregistration_delay.timeout_seconds, Value: "10" }
+        - { Key: deregistration_delay.connection_termination.enabled, Value: "false" }
+        - { Key: target_health_state.unhealthy.connection_termination.enabled, Value: "false" }
+  Tg61614:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      VpcId: !Ref Vpc
+      Protocol: TCP
+      Port: 61614
+      TargetType: instance
+      HealthCheckProtocol: HTTP
+      HealthCheckPort: "7070"
+      HealthCheckPath: /healthz
+      HealthCheckIntervalSeconds: 5
+      HealthCheckTimeoutSeconds: 3
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 2
+      Matcher: { HttpCode: "200" }
+      TargetGroupAttributes:
+        - { Key: proxy_protocol_v2.enabled, Value: "true" }
+        - { Key: preserve_client_ip.enabled, Value: "false" }
+        - { Key: deregistration_delay.timeout_seconds, Value: "10" }
+        - { Key: deregistration_delay.connection_termination.enabled, Value: "false" }
+        - { Key: target_health_state.unhealthy.connection_termination.enabled, Value: "false" }
+  Tg5551:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      VpcId: !Ref Vpc
+      Protocol: TCP
+      Port: 5551
+      TargetType: instance
+      HealthCheckProtocol: HTTP
+      HealthCheckPort: "7070"
+      HealthCheckPath: /healthz
+      HealthCheckIntervalSeconds: 5
+      HealthCheckTimeoutSeconds: 3
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 2
+      Matcher: { HttpCode: "200" }
+      TargetGroupAttributes:
+        - { Key: proxy_protocol_v2.enabled, Value: "true" }
+        - { Key: preserve_client_ip.enabled, Value: "false" }
+        - { Key: deregistration_delay.timeout_seconds, Value: "10" }
+        - { Key: deregistration_delay.connection_termination.enabled, Value: "false" }
+        - { Key: target_health_state.unhealthy.connection_termination.enabled, Value: "false" }
+
+  # Listeners: 443 → 8443, the rest 1:1. Idle connections (database pools, MQTT keep-alives,
+  # WebSockets) live an hour rather than the NLB's default 350 s.
+  Listener443:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Protocol: TCP
+      Port: 443
+      DefaultActions: [{ Type: forward, TargetGroupArn: !Ref Tg8443 }]
+      ListenerAttributes:
+        - { Key: tcp.idle_timeout.seconds, Value: "3600" }
+  Listener5432:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Protocol: TCP
+      Port: 5432
+      DefaultActions: [{ Type: forward, TargetGroupArn: !Ref Tg5432 }]
+      ListenerAttributes:
+        - { Key: tcp.idle_timeout.seconds, Value: "3600" }
+  Listener6379:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Protocol: TCP
+      Port: 6379
+      DefaultActions: [{ Type: forward, TargetGroupArn: !Ref Tg6379 }]
+      ListenerAttributes:
+        - { Key: tcp.idle_timeout.seconds, Value: "3600" }
+  Listener9092:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Protocol: TCP
+      Port: 9092
+      DefaultActions: [{ Type: forward, TargetGroupArn: !Ref Tg9092 }]
+      ListenerAttributes:
+        - { Key: tcp.idle_timeout.seconds, Value: "3600" }
+  Listener9042:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Protocol: TCP
+      Port: 9042
+      DefaultActions: [{ Type: forward, TargetGroupArn: !Ref Tg9042 }]
+      ListenerAttributes:
+        - { Key: tcp.idle_timeout.seconds, Value: "3600" }
+  Listener5671:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Protocol: TCP
+      Port: 5671
+      DefaultActions: [{ Type: forward, TargetGroupArn: !Ref Tg5671 }]
+      ListenerAttributes:
+        - { Key: tcp.idle_timeout.seconds, Value: "3600" }
+  Listener8883:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Protocol: TCP
+      Port: 8883
+      DefaultActions: [{ Type: forward, TargetGroupArn: !Ref Tg8883 }]
+      ListenerAttributes:
+        - { Key: tcp.idle_timeout.seconds, Value: "3600" }
+  Listener61614:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Protocol: TCP
+      Port: 61614
+      DefaultActions: [{ Type: forward, TargetGroupArn: !Ref Tg61614 }]
+      ListenerAttributes:
+        - { Key: tcp.idle_timeout.seconds, Value: "3600" }
+  Listener5551:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Protocol: TCP
+      Port: 5551
+      DefaultActions: [{ Type: forward, TargetGroupArn: !Ref Tg5551 }]
+      ListenerAttributes:
+        - { Key: tcp.idle_timeout.seconds, Value: "3600" }
+
+  # ── alarms: each one fails a canary's bake (deploy.sh); all but CapacityAlarm also roll a
+  # deploy of NodeService back ──
+  # Fewer healthy nodes than the floor for three minutes. Deploys never get here: they add a
+  # node before they stop one. (Unhealthy hosts alone are normal: an instance between tasks.)
+  CapacityAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${AWS::StackName}-healthy-nodes
+      AlarmDescription: Fewer healthy nodes behind the NLB than the fleet's floor (Nodes).
+      Namespace: AWS/NetworkELB
+      MetricName: HealthyHostCount
+      Dimensions:
+        - { Name: LoadBalancer, Value: !GetAtt LoadBalancer.LoadBalancerFullName }
+        - { Name: TargetGroup, Value: !GetAtt Tg8443.TargetGroupFullName }
+      Statistic: Minimum
+      Period: 60
+      EvaluationPeriods: 3
+      DatapointsToAlarm: 3
+      Threshold: !Ref Nodes
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: breaching
+  # Connections reset by the nodes or by the NLB (a node that dies or closes abruptly).
+  ResetsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${AWS::StackName}-tcp-resets
+      AlarmDescription: TCP resets from the nodes and the NLB above ResetsPerMinute.
+      Metrics:
+        - Id: target
+          ReturnData: false
+          MetricStat:
+            Metric:
+              Namespace: AWS/NetworkELB
+              MetricName: TCP_Target_Reset_Count
+              Dimensions: [{ Name: LoadBalancer, Value: !GetAtt LoadBalancer.LoadBalancerFullName }]
+            Period: 60
+            Stat: Sum
+        - Id: elb
+          ReturnData: false
+          MetricStat:
+            Metric:
+              Namespace: AWS/NetworkELB
+              MetricName: TCP_ELB_Reset_Count
+              Dimensions: [{ Name: LoadBalancer, Value: !GetAtt LoadBalancer.LoadBalancerFullName }]
+            Period: 60
+            Stat: Sum
+        - Id: resets
+          Expression: FILL(target, 0) + FILL(elb, 0)
+          Label: resets per minute
+          ReturnData: true
+      EvaluationPeriods: 5
+      DatapointsToAlarm: 3
+      Threshold: !Ref ResetsPerMinute
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+  TaskFailuresMetric:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Ref TaskEventLogs
+      FilterPattern: '{ $.detail.lastStatus = "STOPPED" }'
+      MetricTransformations:
+        - { MetricNamespace: RollCloud, MetricName: TaskFailures, MetricValue: "1", DefaultValue: 0 }
+  # Any node that crashed, failed to start or failed its health checks in the last five minutes.
+  TaskFailuresAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${AWS::StackName}-task-failures
+      AlarmDescription: A rolld task stopped on its own (crash, failed start, failed health checks).
+      Namespace: RollCloud
+      MetricName: TaskFailures
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 5
+      DatapointsToAlarm: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+  # rolld logs one JSON object per line (ROLL_LOG_FORMAT=json; docs/cloud/README.md, "Logs"):
+  # `level` is the event's level. Its request and lease metrics (Http5xx, Latency, Requests,
+  # HandoffFailures, LeaseTakeovers, …) come in the same lines as CloudWatch Embedded Metric
+  # Format records, in RollCloud by `product` and fleet-wide by `service` = rolld: no filters.
+  ErrorLogsMetric:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Ref NodeLogs
+      FilterPattern: '{ $.level = "ERROR" }'
+      MetricTransformations:
+        - { MetricNamespace: RollCloud, MetricName: ErrorLogs, MetricValue: "1", DefaultValue: 0 }
+  ErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${AWS::StackName}-errors
+      AlarmDescription: HTTP 5xx answers across the fleet above ErrorsPerMinute.
+      Namespace: RollCloud
+      MetricName: Http5xx
+      Dimensions: [{ Name: service, Value: rolld }]
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 5
+      DatapointsToAlarm: 3
+      Threshold: !Ref ErrorsPerMinute
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+  # The slowest request/response API's p99 time to the response head (rolld's access lines).
+  LatencyAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${AWS::StackName}-latency
+      AlarmDescription: p99 time to the response head of code, postgres, redis, storage, nosql or tasks above LatencyP99Ms.
+      Metrics:
+        - { Id: code, ReturnData: false, MetricStat: { Metric: { Namespace: RollCloud, MetricName: Latency, Dimensions: [{ Name: product, Value: code }] }, Period: 60, Stat: p99 } }
+        - { Id: postgres, ReturnData: false, MetricStat: { Metric: { Namespace: RollCloud, MetricName: Latency, Dimensions: [{ Name: product, Value: postgres }] }, Period: 60, Stat: p99 } }
+        - { Id: redis, ReturnData: false, MetricStat: { Metric: { Namespace: RollCloud, MetricName: Latency, Dimensions: [{ Name: product, Value: redis }] }, Period: 60, Stat: p99 } }
+        - { Id: storage, ReturnData: false, MetricStat: { Metric: { Namespace: RollCloud, MetricName: Latency, Dimensions: [{ Name: product, Value: storage }] }, Period: 60, Stat: p99 } }
+        - { Id: nosql, ReturnData: false, MetricStat: { Metric: { Namespace: RollCloud, MetricName: Latency, Dimensions: [{ Name: product, Value: nosql }] }, Period: 60, Stat: p99 } }
+        - { Id: tasks, ReturnData: false, MetricStat: { Metric: { Namespace: RollCloud, MetricName: Latency, Dimensions: [{ Name: product, Value: tasks }] }, Period: 60, Stat: p99 } }
+        - Id: slowest
+          Expression: MAX(METRICS())
+          Label: slowest product's p99 (ms)
+          ReturnData: true
+      EvaluationPeriods: 5
+      DatapointsToAlarm: 3
+      Threshold: !Ref LatencyP99Ms
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+  # A handoff that timed out with requests in flight, whose release didn't reach DynamoDB (the
+  # key waits out a lease instead), or that a drain left behind. Planned moves never fail.
+  HandoffFailuresAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${AWS::StackName}-handoff-failures
+      AlarmDescription: A lease handoff failed (timed out, release not written, or left by a drain).
+      Namespace: RollCloud
+      MetricName: HandoffFailures
+      Dimensions: [{ Name: service, Value: rolld }]
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 5
+      DatapointsToAlarm: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+  # Leases taken from a holder that never released them: a node died or was cut off. Drains,
+  # deploys and scale-in hand leases over, so they never count.
+  TakeoversAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${AWS::StackName}-lease-takeovers
+      AlarmDescription: Nodes took over leases their holder never released (a node died or lost DynamoDB).
+      Namespace: RollCloud
+      MetricName: LeaseTakeovers
+      Dimensions: [{ Name: service, Value: rolld }]
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 5
+      DatapointsToAlarm: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  # ── GitHub Actions: OIDC, only main in the production environment ──
+  GitHubOidc:
+    Type: AWS::IAM::OIDCProvider
+    Condition: CreateOidc
+    Properties:
+      Url: https://token.actions.githubusercontent.com
+      ClientIdList: [sts.amazonaws.com]
+      ThumbprintList: [6938fd4d98bab03faadb97b34396831e3780aea1, 1c58a3a8518e8759bf075b76b750d4f2df264fcd]
+  DeployRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${AWS::StackName}-deploy
+      MaxSessionDuration: 7200
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Federated: !If [CreateOidc, !Ref GitHubOidc, !Ref GitHubOidcProviderArn] }
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                # The repository's subject claim includes the ref (deploy/cloud/README.md sets
+                # it up): a job in the production environment, on main.
+                token.actions.githubusercontent.com:sub: !Sub "repo:${GitHubRepo}:environment:production:ref:refs/heads/main"
+      Policies:
+        - PolicyName: deploy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: EcrLogin
+                Effect: Allow
+                Action: ecr:GetAuthorizationToken
+                Resource: "*"
+              - Sid: EcrPush
+                Effect: Allow
+                Action:
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:BatchGetImage
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:InitiateLayerUpload
+                  - ecr:UploadLayerPart
+                  - ecr:CompleteLayerUpload
+                  - ecr:PutImage
+                  - ecr:DescribeImages
+                Resource: [!GetAtt Repository.Arn, !GetAtt CacheRepository.Arn]
+              - Sid: TaskDefinitions
+                Effect: Allow
+                Action: [ecs:RegisterTaskDefinition, ecs:DescribeTaskDefinition]
+                Resource: "*"
+              # A revision keeps its predecessor's tags, if it has any.
+              - Sid: TagRevisions
+                Effect: Allow
+                Action: ecs:TagResource
+                Resource: "*"
+                Condition: { StringEquals: { ecs:CreateAction: RegisterTaskDefinition } }
+              - Sid: Services
+                Effect: Allow
+                Action: [ecs:UpdateService, ecs:DescribeServices]
+                Resource: [!Ref NodeService, !Ref CanaryService]
+              - Sid: Tasks
+                Effect: Allow
+                Action: [ecs:ListTasks, ecs:DescribeTasks]
+                Resource: "*"
+                Condition: { ArnEquals: { ecs:cluster: !GetAtt Cluster.Arn } }
+              - Sid: PassTaskRoles
+                Effect: Allow
+                Action: iam:PassRole
+                Resource: [!GetAtt TaskRole.Arn, !GetAtt ExecutionRole.Arn]
+                Condition: { StringEquals: { iam:PassedToService: ecs-tasks.amazonaws.com } }
+              - Sid: Watch
+                Effect: Allow
+                Action: [cloudwatch:DescribeAlarms, cloudwatch:GetMetricData]
+                Resource: "*"
+              - Sid: Stack
+                Effect: Allow
+                Action: cloudformation:DescribeStacks
+                Resource: !Ref AWS::StackId
+              # Preflight: the secrets filled in after creation have been filled in.
+              - Sid: SecretsFilled
+                Effect: Allow
+                Action: secretsmanager:ListSecretVersionIds
+                Resource: [!Ref CloudflareToken, !Ref SystemDatabase]
+
+Outputs:
+  LoadBalancerDnsName:
+    Description: The NLB; origin.<region>.<Domain> points here (CNAME), or at ElasticIps (A).
+    Value: !GetAtt LoadBalancer.DNSName
+  ElasticIps:
+    Condition: UseEips
+    Description: The NLB's addresses, one per zone.
+    Value: !Join [",", [!Ref Eip1, !Ref Eip2, !Ref Eip3]]
+  DataBucket:
+    Value: !Ref DataBucket
+  ClusterTable:
+    Value: !Ref ClusterTable
+  RepositoryUri:
+    Value: !GetAtt Repository.RepositoryUri
+  CacheRepositoryUri:
+    Value: !GetAtt CacheRepository.RepositoryUri
+  DeployRoleArn:
+    Description: For the GitHub production environment's AWS_DEPLOY_ROLE_ARN variable.
+    Value: !GetAtt DeployRole.Arn
+  ClusterName:
+    Value: !Ref Cluster
+  NodeServiceName:
+    Value: !GetAtt NodeService.Name
+  CanaryServiceName:
+    Value: !GetAtt CanaryService.Name
+  DeployAlarms:
+    Description: The alarms a canary's bake watches (and that roll a deploy back).
+    Value: !Join [",", [!Ref CapacityAlarm, !Ref ResetsAlarm, !Ref TaskFailuresAlarm, !Ref ErrorsAlarm, !Ref LatencyAlarm, !Ref HandoffFailuresAlarm, !Ref TakeoversAlarm]]
+  SuppliedSecrets:
+    Description: Secrets to fill in after creation (deploy/cloud/README.md).
+    Value: !Join [",", [!Ref CloudflareToken, !Ref SystemDatabase]]
+  NodeLogGroup:
+    Value: !Ref NodeLogs

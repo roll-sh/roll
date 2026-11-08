@@ -58,7 +58,7 @@ async fn publishing_in_a_repository_with_no_commits_makes_its_first_commit() {
     let bare = src.path().join("app.git");
     let repo = RepoRef { owner: "acme".into(), repo: "app".into() };
     let grant = |write: bool, branch: Option<&str>| {
-        Some(CodeGrant { repo: repo.clone(), url: bare.to_string_lossy().into(), token: "rlg_t".into(), write, branch: branch.map(Into::into), expires_at: u64::MAX })
+        Some(CodeGrant { repo: repo.clone(), url: bare.to_string_lossy().into(), token: "rlg_t".into(), write, branch: branch.map(Into::into), expires_at: u64::MAX, github: None })
     };
     let dest = tempfile::tempdir().unwrap();
     let folder = dest.path().join("app");
@@ -832,7 +832,7 @@ async fn a_failed_clone_runs_again_with_the_same_id_and_a_refusal_does_not() {
     let dest = tempfile::tempdir().unwrap();
     let target = dest.path().join("app");
     let repo = RepoRef { owner: "acme".into(), repo: "app".into() };
-    let grant = || CodeGrant { repo: repo.clone(), url: url.to_string_lossy().into(), token: "rlg_t".into(), write: false, branch: None, expires_at: u64::MAX };
+    let grant = || CodeGrant { repo: repo.clone(), url: url.to_string_lossy().into(), token: "rlg_t".into(), write: false, branch: None, expires_at: u64::MAX, github: None };
     let add = Command::ProjectAdd { path: target.to_string_lossy().into(), name: None, clone: Some(repo.clone()) };
 
     let first = w.host.run_granted("clone-1".into(), "owner".into(), add.clone(), Some(grant())).await;
@@ -1370,7 +1370,7 @@ async fn keep_changes_holds_a_published_thread_until_its_change_ends() {
     sh(src.path(), &["clone", "-q", "--bare", ".", "app.git"]);
     let url = src.path().join("app.git").to_string_lossy().into_owned();
     let repo = RepoRef { owner: "acme".into(), repo: "app".into() };
-    let grant = |write| Some(CodeGrant { repo: repo.clone(), url: url.clone(), token: "rlg_t".into(), write, branch: None, expires_at: u64::MAX });
+    let grant = |write| Some(CodeGrant { repo: repo.clone(), url: url.clone(), token: "rlg_t".into(), write, branch: None, expires_at: u64::MAX, github: None });
     let dest = tempfile::tempdir().unwrap();
     let add = Command::ProjectAdd { path: dest.path().join("app").to_string_lossy().into(), name: None, clone: Some(repo.clone()) };
     let Reply::Created { id: project } = w.host.run_granted("add".into(), "owner".into(), add, grant(false)).await else { panic!() };
@@ -1407,4 +1407,100 @@ async fn keep_changes_holds_a_published_thread_until_its_change_ends() {
     assert!(matches!(s.thread(&quiet).unwrap().inbox.settle, Some(Settle::Settled { by: SettledBy::Inactivity, .. })));
     assert_eq!(w.run(Command::ThreadChangeEnded { thread: published.clone(), landed: true }).await, Reply::Ok);
     assert!(matches!(w.state().await.thread(&published).unwrap().inbox.settle, Some(Settle::Settled { by: SettledBy::Landed, .. })));
+}
+
+/// The child half of [`publish_falls_back_to_github_while_roll_is_down`]: runs only in the
+/// process that test starts (with the user's `GH_TOKEN` and the fake GitHub API in its env).
+#[tokio::test]
+async fn publish_to_github_child() {
+    use agent_host::Daemon;
+    let Ok(gh_git) = std::env::var("ROLL_TEST_GH_GIT") else { return };
+    let w = World::new(vec![FakeProvider::new("codex")]).await;
+    let src = std::env::var("ROLL_TEST_GH_SRC").unwrap();
+    let repo = RepoRef { owner: "acme".into(), repo: "app".into() };
+    let dest = tempfile::tempdir().unwrap();
+    let clone = CodeGrant { repo: repo.clone(), url: src, token: "rlg_t".into(), write: false, branch: None, expires_at: u64::MAX, github: None };
+    let add = Command::ProjectAdd { path: dest.path().join("app").to_string_lossy().into(), name: None, clone: Some(repo.clone()) };
+    let Reply::Created { id: project } = w.host.run_granted("add".into(), "owner".into(), add, Some(clone)).await else { panic!() };
+    let create = Command::ThreadCreate {
+        project: ProjectId(project),
+        provider: ProviderId::codex(),
+        model: None,
+        effort: None,
+        options: Default::default(),
+        runtime_mode: RuntimeMode::FullAccess,
+        interaction_mode: InteractionMode::Default,
+        worktree: true,
+        title: None,
+        prompt: Some("Fix it".into()),
+        attachments: Vec::new(),
+        orchestrator: false,
+    };
+    let Reply::Created { id: thread } = w.run(create).await else { panic!() };
+    let thread = ThreadId(thread);
+    let t = w.wait_thread(&thread, |t| t.status == ThreadStatus::Idle && t.run_count == 1).await;
+    let wt = t.worktree.clone().unwrap();
+    std::fs::write(Path::new(&wt.path).join("fix.txt"), "fixed\n").unwrap();
+    // roll's git is gone; the grant names the repo's GitHub side.
+    let grant = CodeGrant {
+        repo,
+        url: "http://127.0.0.1:1/acme/app.git".into(),
+        token: "rlg_t".into(),
+        write: true,
+        branch: Some(wt.branch.clone()),
+        expires_at: u64::MAX,
+        github: Some(GrantGithub { owner: "acme".into(), repo: "app".into(), url: gh_git.clone(), default_branch: "main".into() }),
+    };
+    let publish = Command::ThreadPublish { thread: thread.clone(), message: "Fix it".into(), land: true };
+    let reply = w.host.run_granted("pub".into(), "owner".into(), publish, Some(grant)).await;
+    let Reply::Published(p) = reply else { panic!("{reply:?}") };
+    assert_eq!(p.branch, wt.branch);
+    assert_eq!(p.url.as_deref(), Some("https://github.example/acme/app/pull/7"));
+    assert_eq!(p.landing.as_ref().map(|l| l.status), Some(LandingStatus::Queued), "{p:?}");
+    assert_eq!(sh(Path::new(&format!("{gh_git}.git")), &["rev-parse", &format!("refs/heads/{}", wt.branch)]).trim(), p.commit);
+    assert!(sh(Path::new(&format!("{gh_git}.git")), &["rev-parse", "refs/heads/main"]).trim() != p.commit, "the default branch is never pushed");
+}
+
+/// roll can't be reached when a thread of a GitHub-connected repo is published: its branch goes
+/// to GitHub and a pull request opens there, with the user's own token (from `GH_TOKEN` here),
+/// and the reply says it's queued there.
+#[test]
+fn publish_falls_back_to_github_while_roll_is_down() {
+    let src = tempfile::tempdir().unwrap();
+    git_repo(src.path());
+    sh(src.path(), &["clone", "-q", "--bare", ".", "app.git"]);
+    sh(src.path(), &["clone", "-q", "--bare", ".", "gh.git"]);
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let opened: Arc<std::sync::Mutex<Vec<(String, serde_json::Value)>>> = Arc::default();
+    let o = opened.clone();
+    let api = rt.block_on(async move {
+        let router = axum::Router::new().route(
+            "/repos/{o}/{r}/pulls",
+            axum::routing::post(move |h: axum::http::HeaderMap, axum::Json(b): axum::Json<serde_json::Value>| {
+                let o = o.clone();
+                async move {
+                    o.lock().unwrap().push((h.get("authorization").and_then(|v| v.to_str().ok()).unwrap_or("").to_string(), b));
+                    axum::Json(serde_json::json!({ "number": 7, "html_url": "https://github.example/acme/app/pull/7" }))
+                }
+            }),
+        );
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", l.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(l, router).await.unwrap() });
+        url
+    });
+    let child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "publish_to_github_child", "--nocapture"])
+        .env("ROLL_TEST_GH_GIT", src.path().join("gh"))
+        .env("ROLL_TEST_GH_SRC", src.path().join("app.git"))
+        .env("ROLL_GITHUB_API_URL", &api)
+        .env("GH_TOKEN", "ghp_the_users_own")
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&child.stdout);
+    assert!(child.status.success() && text.contains("1 passed"), "{text}{}", String::from_utf8_lossy(&child.stderr));
+    let opened = opened.lock().unwrap();
+    assert_eq!(opened.len(), 1);
+    assert_eq!(opened[0].0, "Bearer ghp_the_users_own");
+    assert_eq!((opened[0].1["base"].as_str(), opened[0].1["title"].as_str()), (Some("main"), Some("Fix it")));
 }

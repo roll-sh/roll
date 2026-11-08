@@ -66,6 +66,15 @@ export interface Health {
   proxy: string;
 }
 
+/** A product rolld can run; `GET /v1/info` lists the ones this node runs (`ROLL_PRODUCTS`). */
+export type Product = "postgres" | "redis" | "streams" | "tasks" | "storage" | "nosql" | "queues" | "code";
+
+export interface Info {
+  version: string;
+  node: string;
+  products: Product[];
+}
+
 export interface QueryResult {
   columns: string[];
   rows: (string | null)[][];
@@ -105,6 +114,7 @@ export async function call<T>(method: string, path: string, body?: unknown): Pro
 }
 
 export const api = {
+  info: () => call<Info>("GET", "/v1/info"),
   health: () => call<Health>("GET", "/v1/health"),
   projects: () => call<Project[]>("GET", "/v1/projects"),
   createProject: (name: string, pg_version?: number) =>

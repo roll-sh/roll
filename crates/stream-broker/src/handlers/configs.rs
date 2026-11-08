@@ -65,7 +65,7 @@ fn broker_configs(ctx: &Ctx) -> Vec<Entry> {
     let st = ctx.stream.settings();
     let e = |name: &str, value: String, kind: Kind| Entry { name: name.into(), value, read_only: true, source: SOURCE_STATIC_BROKER, kind, doc: "" };
     vec![
-        e("advertised.listeners", format!("{}://{}:{}", listener_protocol(b), c.advertised_host, c.advertised_port), Kind::String),
+        e("advertised.listeners", format!("{}://{}:{}", listener_protocol(b), ctx.advertised_host(), ctx.advertised_port()), Kind::String),
         e("auto.create.topics.enable", st.auto_create_topics.to_string(), Kind::Bool),
         e("broker.id", c.node_id.to_string(), Kind::Int),
         e("compression.type", "producer".into(), Kind::String),

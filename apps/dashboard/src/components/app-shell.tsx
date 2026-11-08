@@ -22,6 +22,7 @@ import {
 import { useLocation } from "@tanstack/react-router";
 import { useEffect, useState, type ReactNode } from "react";
 import { Link } from "@/components/link";
+import { api, type Product } from "@/lib/roll-api";
 import { AgentsControl } from "./agents/agents-control";
 import { SignIn } from "./code/sign-in";
 import { useShownOwner } from "./agents/use-connection";
@@ -29,16 +30,16 @@ import { OwnerSwitcher } from "./agents/owner-switcher";
 import { AskPanel } from "./ask";
 import { useMarkState } from "./mark-state";
 
-const nav = [
+const nav: { label: string; icon: typeof LayoutGrid; href?: string; product?: Product }[] = [
   { label: "Overview", icon: LayoutGrid, href: "/dashboard" },
-  { label: "Code", icon: GitBranch, href: "/dashboard/code" },
-  { label: "Databases", icon: Database, href: "/dashboard/databases" },
-  { label: "Redis", icon: MemoryStick, href: "/dashboard/redis" },
-  { label: "Storage", icon: HardDrive, href: "/dashboard/storage" },
-  { label: "NoSQL", icon: Boxes, href: "/dashboard/nosql" },
-  { label: "Queues", icon: Inbox, href: "/dashboard/queues" },
-  { label: "Tasks", icon: Workflow, href: "/dashboard/tasks" },
-  { label: "Streams", icon: Waves, href: "/dashboard/streams" },
+  { label: "Code", icon: GitBranch, href: "/dashboard/code", product: "code" },
+  { label: "Databases", icon: Database, href: "/dashboard/databases", product: "postgres" },
+  { label: "Redis", icon: MemoryStick, href: "/dashboard/redis", product: "redis" },
+  { label: "Storage", icon: HardDrive, href: "/dashboard/storage", product: "storage" },
+  { label: "NoSQL", icon: Boxes, href: "/dashboard/nosql", product: "nosql" },
+  { label: "Queues", icon: Inbox, href: "/dashboard/queues", product: "queues" },
+  { label: "Tasks", icon: Workflow, href: "/dashboard/tasks", product: "tasks" },
+  { label: "Streams", icon: Waves, href: "/dashboard/streams", product: "streams" },
   { label: "Functions", icon: SquareFunction },
   { label: "Deployments", icon: Rocket },
   { label: "Edge", icon: Globe },
@@ -154,11 +155,28 @@ export function AppShell({ crumb, actions, bleed = false, children }: { crumb: R
 }
 
 /** Nav with the current section highlighted. */
+/** The products rolld runs (`GET /v1/info`); `null` until known, or from a rolld that doesn't say. */
+function useProducts(): Set<Product> | null {
+  const [products, setProducts] = useState<Set<Product> | null>(null);
+  useEffect(() => {
+    let live = true;
+    api.info().then(
+      (i) => live && setProducts(new Set(i.products)),
+      () => {},
+    );
+    return () => {
+      live = false;
+    };
+  }, []);
+  return products;
+}
+
 function Nav() {
   const pathname = useLocation({ select: (l) => l.pathname });
+  const products = useProducts();
   return (
     <nav className="mt-5 space-y-0.5">
-      {nav.map(({ label, icon: Icon, href }) => {
+      {nav.filter((n) => !n.product || !products || products.has(n.product)).map(({ label, icon: Icon, href }) => {
         const active =
           !!href && (href === pathname || (href !== "/dashboard" && pathname.startsWith(`${href}/`)));
         const cls = `flex items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-[13px] transition ${

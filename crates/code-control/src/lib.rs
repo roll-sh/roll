@@ -88,7 +88,9 @@ pub struct Config {
     /// them in SQLite under `home` (one node).
     pub database: Option<DatabaseConfig>,
     /// Run as one node of a cluster (docs/code/cluster.md). Needs `database` and S3.
-    pub cluster: Option<code_cluster::ClusterConfig>,
+    pub cluster: Option<roll_cluster::ClusterConfig>,
+    /// Where the cluster keeps membership and leases (code's own database by default).
+    pub cluster_backend: ClusterBackend,
     /// Tests only: a cluster whose nodes share one process may use SQLite and a local object
     /// directory.
     #[doc(hidden)]
@@ -106,6 +108,19 @@ pub struct Config {
     /// roll-hosted sandboxes for roll code agents: the backend, sizes and limits
     /// (`agents::sandbox::SandboxConfig::from_env`).
     pub sandboxes: agents::sandbox::SandboxConfig,
+}
+
+/// Where a cluster keeps its membership and leases (docs/code/cluster.md, "Backends"). Only
+/// leases and membership move: code's data stays in `Config::database` either way.
+#[derive(Clone, Debug, Default)]
+pub enum ClusterBackend {
+    /// Code's own database (Postgres in a cluster): tables `code_nodes` and `code_leases`.
+    #[default]
+    Database,
+    /// One DynamoDB table (`roll-cluster` in the cloud).
+    DynamoDb(roll_cluster::DynamoDbConfig),
+    /// Nodes of one process sharing a store (tests).
+    Memory(roll_cluster::MemoryStore),
 }
 
 /// roll code's Postgres: both databases in one, as two schemas.
@@ -181,6 +196,7 @@ impl Config {
             review_index_wait_ms: 60_000,
             database: None,
             cluster: None,
+            cluster_backend: ClusterBackend::default(),
             cluster_single_host: false,
             git_memory_budget_bytes: 1 << 30,
             git_max_request_memory_bytes: None,
@@ -419,7 +435,7 @@ pub struct Code {
     me: std::sync::Weak<Code>,
     /// The cluster this node is part of (docs/code/cluster.md); unset on a single node, which
     /// owns every repo.
-    pub(crate) cluster: std::sync::OnceLock<Arc<code_cluster::Cluster>>,
+    pub(crate) cluster: std::sync::OnceLock<Arc<roll_cluster::Cluster>>,
     /// What this node does for the repos it owns, started and stopped as ownership moves.
     pub(crate) duties: cluster::Duties,
     /// One memory budget for every git request this node serves.
@@ -455,9 +471,9 @@ impl Code {
                 let store = code_sql::Db::connect(&d.url, &d.store_schema, d.options(d.connections))?;
                 let control = code_sql::Db::connect(&d.url, &d.control_schema, d.options(d.connections))?;
                 // Leases get a small pool of their own, so renewals never queue behind requests.
-                let cluster = match &config.cluster {
-                    Some(_) => Some(code_sql::Db::connect(&d.url, &d.control_schema, d.options(4))?),
-                    None => None,
+                let cluster = match (&config.cluster, &config.cluster_backend) {
+                    (Some(_), ClusterBackend::Database) => Some(code_sql::Db::connect(&d.url, &d.control_schema, d.options(4))?),
+                    _ => None,
                 };
                 Code::open_on(config, objects, Databases { store, control, cluster })
             }
@@ -559,7 +575,7 @@ impl Code {
     }
 
     /// The cluster, if this node is part of one.
-    pub fn cluster(&self) -> Option<&Arc<code_cluster::Cluster>> {
+    pub fn cluster(&self) -> Option<&Arc<roll_cluster::Cluster>> {
         self.cluster.get()
     }
 

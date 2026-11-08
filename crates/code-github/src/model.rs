@@ -392,3 +392,28 @@ pub struct Environment {
     pub id: u64,
     pub name: String,
 }
+
+/// One attempt in the App's webhook delivery log (`GET /app/hook/deliveries`). A redelivery is a
+/// new attempt with the same `guid` (GitHub's `X-GitHub-Delivery`).
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct HookDelivery {
+    pub id: u64,
+    pub guid: String,
+    /// When GitHub sent it (ISO 8601).
+    #[serde(default)]
+    pub delivered_at: Option<String>,
+    #[serde(default)]
+    pub redelivery: bool,
+    /// The receiver's HTTP status (0: it couldn't be reached).
+    #[serde(default)]
+    pub status_code: u16,
+    #[serde(default)]
+    pub event: Option<String>,
+}
+
+impl HookDelivery {
+    /// The receiver took it (2xx).
+    pub fn ok(&self) -> bool {
+        (200..300).contains(&self.status_code)
+    }
+}

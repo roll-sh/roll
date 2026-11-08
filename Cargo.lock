@@ -83,6 +83,8 @@ dependencies = [
  "toml",
  "tower",
  "tracing",
+ "url",
+ "urlencoding",
  "zeroize",
  "zip",
 ]
@@ -1555,30 +1557,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "code-cluster"
-version = "0.1.0"
-dependencies = [
- "axum",
- "bytes",
- "code-sql",
- "futures",
- "hex",
- "hmac 0.12.1",
- "http-body-util",
- "hyper 1.12.0",
- "hyper-util",
- "libc",
- "parking_lot",
- "reqwest",
- "sha2 0.10.9",
- "tempfile",
- "thiserror",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "code-control"
 version = "0.1.0"
 dependencies = [
@@ -1593,7 +1571,6 @@ dependencies = [
  "chrono",
  "chrono-tz",
  "code-chat",
- "code-cluster",
  "code-git",
  "code-github",
  "code-index",
@@ -1616,6 +1593,7 @@ dependencies = [
  "rand 0.8.8",
  "reqwest",
  "roll-auth",
+ "roll-cluster",
  "rsa",
  "serde",
  "serde_json",
@@ -3316,6 +3294,7 @@ dependencies = [
  "hyper-util",
  "rustls 0.23.46",
  "rustls-native-certs",
+ "rustls-platform-verifier",
  "tokio",
  "tokio-rustls 0.26.6",
  "tower-service",
@@ -3542,6 +3521,32 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3b5cf4372d022092674a83b8febf5865f7a573cc0c5baec5e49c879b6a20978f"
 dependencies = [
  "hybrid-array",
+]
+
+[[package]]
+name = "instant-acme"
+version = "0.8.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9f05ad37c421b962354c358d347d4a6130151df9407978372d3ad7f0c8f71a64"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "bytes",
+ "http 1.5.0",
+ "http-body 1.1.0",
+ "http-body-util",
+ "httpdate",
+ "hyper 1.12.0",
+ "hyper-rustls 0.27.10",
+ "hyper-util",
+ "rcgen",
+ "ring",
+ "rustls 0.23.46",
+ "rustls-pki-types",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
 ]
 
 [[package]]
@@ -5240,6 +5245,7 @@ dependencies = [
  "pg-proxy",
  "pg-storage",
  "reqwest",
+ "roll-edge",
  "rusqlite",
  "serde",
  "serde_json",
@@ -6223,6 +6229,7 @@ dependencies = [
  "code-chat",
  "code-control",
  "code-sql",
+ "getrandom 0.4.3",
  "libc",
  "model-gateway",
  "nosql-control",
@@ -6246,7 +6253,68 @@ dependencies = [
  "tokio-rustls 0.26.6",
  "tokio-util",
  "unicode-width",
+ "url",
  "urlencoding",
+]
+
+[[package]]
+name = "roll-cluster"
+version = "0.1.0"
+dependencies = [
+ "aws-config",
+ "aws-sdk-dynamodb",
+ "axum",
+ "bytes",
+ "code-sql",
+ "futures",
+ "hex",
+ "hmac 0.12.1",
+ "http-body-util",
+ "hyper 1.12.0",
+ "hyper-util",
+ "libc",
+ "parking_lot",
+ "reqwest",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "roll-edge"
+version = "0.1.0"
+dependencies = [
+ "aes-gcm",
+ "anyhow",
+ "axum",
+ "base64 0.22.1",
+ "bytes",
+ "futures",
+ "futures-util",
+ "getrandom 0.4.3",
+ "hex",
+ "http-body-util",
+ "hyper 1.12.0",
+ "hyper-util",
+ "instant-acme",
+ "ipnet",
+ "pg-proxy",
+ "pg-storage",
+ "rcgen",
+ "reqwest",
+ "ring",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tokio",
+ "tokio-rustls 0.26.6",
+ "tokio-tungstenite 0.30.0",
+ "tower",
+ "tracing",
+ "x509-parser",
 ]
 
 [[package]]
@@ -6257,12 +6325,13 @@ dependencies = [
  "aws-sdk-dynamodb",
  "axum",
  "bytes",
+ "chrono",
  "clap",
- "code-cluster",
  "code-control",
  "code-preview",
  "futures",
  "futures-util",
+ "http-body 1.1.0",
  "lapin",
  "libc",
  "libmimalloc-sys",
@@ -6294,6 +6363,8 @@ dependencies = [
  "redis-server",
  "reqwest",
  "roll-auth",
+ "roll-cluster",
+ "roll-edge",
  "s3-api",
  "s3-control",
  "s3-server",

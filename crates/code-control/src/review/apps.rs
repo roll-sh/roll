@@ -42,6 +42,10 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 /// deliveries go out again within about 20 s. A send only starts while [`TIMEOUT`] and 5 s of
 /// the claim are left (`send_window`). See [`Deliveries`].
 const CLAIM: Duration = Duration::from_secs(20);
+/// Longest a send to GitHub may take: a few requests, each with its own timeout and retries.
+const GITHUB_TIMEOUT: Duration = Duration::from_secs(90);
+/// How long the repo's owner holds a GitHub delivery it's sending.
+const GITHUB_CLAIM: Duration = Duration::from_secs(150);
 const MAX_APPS_PER_OWNER: usize = 50;
 
 /// The delivery worker's state.
@@ -504,10 +508,17 @@ impl Code {
         let now = self.db.sql().now_ms()?;
         let until = now + claim.as_millis() as i64;
         let deadline = started + send_window(timeout, claim);
-        let due = self.db.due_deliveries(now, 50)?;
+        let due = self.db.due_deliveries(now, 50, false)?;
+        // GitHub's go out from each repo's owner (`github::outbox`), with a claim long enough for
+        // a few GitHub requests.
+        let github = self.db.due_deliveries(now, 50, true)?;
+        let full = due.len() == 50 || github.len() == 50;
+        let gh_until = now + GITHUB_CLAIM.as_millis() as i64;
+        let gh_deadline = started + send_window(GITHUB_TIMEOUT, GITHUB_CLAIM);
         let Some(me) = self.me.upgrade() else { return Ok(Duration::from_secs(60)) };
         let mut sends = Vec::new();
-        for d in due {
+        let ours = github.into_iter().filter(|d| self.owns_repo(d.app_id.strip_prefix(crate::github::outbox::PREFIX).unwrap_or_default()));
+        for (d, until, deadline) in due.into_iter().map(|d| (d, until, deadline)).chain(ours.map(|d| (d, gh_until, gh_deadline))) {
             // Claim it first (a compare-and-swap on `next_at`): with several nodes sending, each
             // delivery is attempted by one of them (see `Deliveries`).
             if !self.db.claim_delivery(&d.id, d.next_at, until)? {
@@ -521,17 +532,59 @@ impl Code {
         for s in sends {
             let _ = s.await;
         }
-        let next = self.db.next_delivery_at()?;
+        if full {
+            return Ok(Duration::ZERO);
+        }
         let now = self.db.sql().now_ms()?;
+        let next = self.db.next_delivery_at(self.cluster().map(|_| now))?;
         Ok(match next {
             Some(at) => Duration::from_millis((at - now).clamp(0, 60_000) as u64),
             None => Duration::from_secs(60),
         })
     }
 
-    async fn send_delivery(&self, client: &reqwest::Client, d: DeliveryRow, claimed_until: i64, deadline: std::time::Instant) {
+    /// Send a delivery to GitHub (`gh_…`, see `github::outbox`) and record the attempt. A
+    /// failure GitHub didn't decide (it was down, slow or rate limited) is retried for as long
+    /// as it takes; only its refusals count towards giving up.
+    async fn send_github(&self, d: DeliveryRow, claimed_until: i64, deadline: std::time::Instant) {
+        use crate::github::outbox::{self, Failure};
         let attempts = d.attempts + 1;
-        // Deliveries go to review apps (`app_…`) and repo webhooks (`wh_…`) alike.
+        if std::time::Instant::now() >= deadline {
+            if let Err(e) = self.db.unclaim_delivery(&d.id, claimed_until, d.next_at) {
+                tracing::warn!(delivery = %d.id, error = %e, "putting a GitHub delivery back");
+            }
+            return;
+        }
+        let result = match tokio::time::timeout(GITHUB_TIMEOUT, outbox::send(self, &d)).await {
+            Ok(r) => r,
+            Err(_) => Err(Failure::transient(format!("GitHub didn't answer within {} s", GITHUB_TIMEOUT.as_secs()))),
+        };
+        let r = match result {
+            Ok(()) => self.db.finish_delivery(&d.id, claimed_until, "delivered", attempts, d.next_at, Some(200), None, None),
+            Err(f) => {
+                let now = code_store::now_ms();
+                let next = f.retry_at.unwrap_or(0).max(now + outbox::backoff_ms(self.config.review_app_retry_ms, attempts) as i64);
+                let state = if f.refused && attempts >= MAX_ATTEMPTS { "failed" } else { "pending" };
+                if state == "failed" {
+                    tracing::warn!(delivery = %d.id, event = %d.event, error = %f.error, "GitHub refused a notification; giving up");
+                }
+                self.db.finish_delivery(&d.id, claimed_until, state, attempts, next, f.status.map(i64::from), Some(&f.error), None)
+            }
+        };
+        match r {
+            Ok(true) => {}
+            Ok(false) => tracing::warn!(delivery = %d.id, "a GitHub delivery was sent after its claim was lost"),
+            Err(e) => tracing::warn!(delivery = %d.id, error = %e, "recording a GitHub delivery"),
+        }
+    }
+
+    async fn send_delivery(&self, client: &reqwest::Client, d: DeliveryRow, claimed_until: i64, deadline: std::time::Instant) {
+        if d.app_id.starts_with(crate::github::outbox::PREFIX) {
+            return self.send_github(d, claimed_until, deadline).await;
+        }
+        let attempts = d.attempts + 1;
+        // Deliveries go to review apps (`app_…`) and repo webhooks (`wh_…`) alike (GitHub's,
+        // `gh_…`, went to `send_github`).
         let target: std::result::Result<Option<(&str, bool, String, String)>, String> = if d.app_id.starts_with("wh_") {
             self.db.webhook(&d.app_id).map(|h| h.map(|h| ("webhook", h.active, h.url, h.secret))).map_err(|e| e.to_string())
         } else {

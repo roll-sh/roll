@@ -1,40 +1,13 @@
 //! roll → GitHub, beyond the mirror: a change from a PR lands → comment and close the PR; a
-//! work item from an issue is done → comment and close the issue; checks → check runs. Driven by
-//! the control plane's event feed, so every path that changes a change, work item or check is
-//! covered. Marks make each notification happen once, and nothing is echoed back for updates
+//! work item from an issue is done → comment and close the issue; checks → check runs. Each is
+//! sent from the durable delivery queue ([`super::outbox`]) on the repo's owner, reading the
+//! state as it is then. Marks make the closes happen once, and nothing is echoed back for updates
 //! that came from GitHub.
 
-use super::{Hub, Link, clear_mark, link_of, mark, set_mark};
+use super::{Hub, Link, link_of, mark, set_mark};
 use crate::model::{Change, ChangeState, Check, CheckStatus, RepoRow, WorkItem, WorkState};
 use crate::{Code, Result};
 use code_github::model::{CheckConclusion, CheckOutput, CheckRunRequest, CheckStatus as GhStatus};
-use serde_json::Value;
-use std::sync::Arc;
-use tokio::sync::broadcast;
-
-pub(crate) fn start(code: Arc<Code>) {
-    let mut events = code.subscribe();
-    tokio::spawn(async move {
-        loop {
-            let ev = match events.recv().await {
-                Ok(ev) => ev,
-                Err(broadcast::error::RecvError::Lagged(n)) => {
-                    tracing::warn!(missed = n, "GitHub notifications fell behind");
-                    continue;
-                }
-                Err(broadcast::error::RecvError::Closed) => return,
-            };
-            let Some(hub) = code.github_hub().cloned() else { return };
-            // The repo's owner tells GitHub (its marks make each notification happen once).
-            if !code.owns_repo(&ev.repo_id) {
-                continue;
-            }
-            if let Err(e) = handle(&code, &hub, ev.kind, &ev.data).await {
-                tracing::warn!(kind = ev.kind, error = %e, "notifying GitHub");
-            }
-        }
-    });
-}
 
 fn connected(code: &Code, repo_id: &str) -> Option<(RepoRow, Link)> {
     let r = code.db.repo_by_id(repo_id).ok()??;
@@ -42,47 +15,13 @@ fn connected(code: &Code, repo_id: &str) -> Option<(RepoRow, Link)> {
     Some((r, l))
 }
 
-async fn handle(code: &Code, hub: &Hub, kind: &str, data: &Value) -> Result<()> {
-    match kind {
-        "change" => {
-            let Some(id) = data["id"].as_str() else { return Ok(()) };
-            if data["state"] != "landed" || data["github_pr"].is_null() {
-                return Ok(());
-            }
-            let c = code.change_or_404(id)?;
-            change_landed(code, hub, &c).await
-        }
-        "work" => {
-            let Some(id) = data["id"].as_str() else { return Ok(()) };
-            if !data["source"].as_str().is_some_and(|s| s.starts_with("github#")) {
-                return Ok(());
-            }
-            let w = code.work_or_404(id)?;
-            if matches!(w.state, WorkState::Done | WorkState::Closed) { work_finished(code, hub, &w).await } else { Ok(()) }
-        }
-        "check" => {
-            let Some(change) = data["change"].as_str() else { return Ok(()) };
-            let Ok(check) = serde_json::from_value::<Check>(data["check"].clone()) else { return Ok(()) };
-            if check.source == "github" {
-                return Ok(());
-            }
-            let c = code.change_or_404(change)?;
-            check_run(code, hub, &c, &check).await
-        }
-        "review" => super::reviews::post_review(code, hub, data).await,
-        "thread" => super::reviews::post_thread(code, hub, data).await,
-        _ => Ok(()),
-    }
-}
-
-async fn change_landed(code: &Code, hub: &Hub, c: &Change) -> Result<()> {
+pub(super) async fn change_landed(code: &Code, hub: &Hub, c: &Change) -> Result<()> {
     let (Some(pr), Some((r, l))) = (c.github_pr, connected(code, &c.repo_id)) else { return Ok(()) };
     let key = format!("pr-landed:{}", c.id);
-    if c.state != ChangeState::Landed || mark(code, &key)?.is_some() {
+    if c.state != ChangeState::Landed || done(code, &key)? {
         return Ok(());
     }
-    set_mark(code, &key, "pending")?;
-    let result = async {
+    {
         let gh = |e: code_github::Error| crate::Error::Internal(e.into());
         let current = hub.client.pull_request(l.installation_id, &l.owner, &l.repo, pr).await.map_err(gh)?;
         if current.state == "open" {
@@ -107,27 +46,18 @@ async fn change_landed(code: &Code, hub: &Hub, c: &Change) -> Result<()> {
             hub.client.create_comment(l.installation_id, &l.owner, &l.repo, pr, &body).await.map_err(gh)?;
             hub.client.close_pull_request(l.installation_id, &l.owner, &l.repo, pr).await.map_err(gh)?;
         }
-        Ok::<_, crate::Error>(())
     }
-    .await;
-    match result {
-        Ok(()) => set_mark(code, &key, "done"),
-        Err(e) => {
-            clear_mark(code, &key)?;
-            Err(e)
-        }
-    }
+    set_mark(code, &key, "done")
 }
 
-async fn work_finished(code: &Code, hub: &Hub, w: &WorkItem) -> Result<()> {
+pub(super) async fn work_finished(code: &Code, hub: &Hub, w: &WorkItem) -> Result<()> {
     let Some(number) = w.source.strip_prefix("github#").and_then(|n| n.parse::<u64>().ok()) else { return Ok(()) };
     let Some((r, l)) = connected(code, &w.repo_id) else { return Ok(()) };
     let key = format!("issue-closed:{}", w.id);
-    if mark(code, &key)?.is_some() {
+    if !matches!(w.state, WorkState::Done | WorkState::Closed) || done(code, &key)? {
         return Ok(());
     }
-    set_mark(code, &key, "pending")?;
-    let result = async {
+    {
         let gh = |e: code_github::Error| crate::Error::Internal(e.into());
         let issue = hub.client.issue(l.installation_id, &l.owner, &l.repo, number).await.map_err(gh)?;
         if issue.state == "open" {
@@ -147,20 +77,21 @@ async fn work_finished(code: &Code, hub: &Hub, w: &WorkItem) -> Result<()> {
             let reason = if done { "completed" } else { "not_planned" };
             hub.client.close_issue(l.installation_id, &l.owner, &l.repo, number, Some(reason)).await.map_err(gh)?;
         }
-        Ok::<_, crate::Error>(())
     }
-    .await;
-    match result {
-        Ok(()) => set_mark(code, &key, "done"),
-        Err(e) => {
-            clear_mark(code, &key)?;
-            Err(e)
-        }
-    }
+    set_mark(code, &key, "done")
 }
 
-async fn check_run(code: &Code, hub: &Hub, c: &Change, check: &Check) -> Result<()> {
+/// A one-time notification already went out (or wasn't needed: it came from GitHub). `pending`
+/// is what older versions wrote while sending, and doesn't count.
+pub(super) fn done(code: &Code, key: &str) -> Result<bool> {
+    Ok(mark(code, key)?.is_some_and(|v| v != "pending"))
+}
+
+pub(super) async fn check_run(code: &Code, hub: &Hub, c: &Change, check: &Check) -> Result<()> {
     let (Some(_), Some((r, l))) = (c.github_pr, connected(code, &c.repo_id)) else { return Ok(()) };
+    if check.source == "github" {
+        return Ok(());
+    }
     let Some(cs) = code.store.resolve(&r.id, &c.head)? else { return Ok(()) };
     let (commit, _) = code.store.derive_git(&r.id, &cs)?;
     let sha = commit.hex();

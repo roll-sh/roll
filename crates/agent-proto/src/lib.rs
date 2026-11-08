@@ -2759,6 +2759,22 @@ pub struct CodeGrant {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
     pub expires_at: Millis,
+    /// The GitHub repository a connected repo mirrors: where a publish's branch goes, as a pull
+    /// request opened with the user's own GitHub credentials, when roll can't be reached
+    /// (docs/code/agents.md, "When roll is down"). Unset for native repos.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github: Option<GrantGithub>,
+}
+
+/// A connected repo's GitHub side, as the relay knows it (no credential: the daemon uses the
+/// user's own).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GrantGithub {
+    pub owner: String,
+    pub repo: String,
+    /// `https://github.com/<owner>/<repo>`; git is at `<url>.git`.
+    pub url: String,
+    pub default_branch: String,
 }
 
 impl std::fmt::Debug for CodeGrant {
@@ -2769,6 +2785,7 @@ impl std::fmt::Debug for CodeGrant {
             .field("write", &self.write)
             .field("branch", &self.branch)
             .field("expires_at", &self.expires_at)
+            .field("github", &self.github)
             .finish_non_exhaustive()
     }
 }

@@ -251,6 +251,20 @@ impl Nosql {
         nosql_control::api::router(self.control.clone())
     }
 
+    /// Alternator's settings from the flags (its listeners and the edge's HTTPS share them).
+    pub fn alternator_options(&self) -> nosql_server::alternator::AlternatorOptions {
+        let a = &self.args;
+        let mut alt = nosql_server::alternator::AlternatorOptions {
+            ttl_period: std::time::Duration::from_secs_f64(a.nosql_alternator_ttl_period.clamp(0.01, 1e9)),
+            ..Default::default()
+        };
+        alt.config.local_nodes[0].address = self.control.cfg.public_host.clone();
+        if let Some(w) = a.nosql_alternator_write_isolation.as_deref().and_then(WriteIsolation::parse) {
+            alt.config.write_isolation = w;
+        }
+        alt
+    }
+
     /// Run every listener until one fails.
     pub async fn serve(&self) -> anyhow::Result<()> {
         let a = &self.args;
@@ -275,14 +289,7 @@ impl Nosql {
             Some(addr) => Some(bind(addr).await?),
             None => None,
         };
-        let mut alt = nosql_server::alternator::AlternatorOptions {
-            ttl_period: std::time::Duration::from_secs_f64(a.nosql_alternator_ttl_period.clamp(0.01, 1e9)),
-            ..Default::default()
-        };
-        alt.config.local_nodes[0].address = self.control.cfg.public_host.clone();
-        if let Some(w) = a.nosql_alternator_write_isolation.as_deref().and_then(WriteIsolation::parse) {
-            alt.config.write_isolation = w;
-        }
+        let alt = self.alternator_options();
         let metrics = match a.nosql_metrics {
             Some(addr) => Some(bind(addr).await?),
             None => None,

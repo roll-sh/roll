@@ -23,6 +23,9 @@ pub const RULES: &[Rule] = &[
     Rule { route: "/v1/tasks/health", access: Access::Public("health: tasks node status") },
     Rule { route: "/v1/queues/health", access: Access::Public("health: queues node status") },
     Rule { route: "/healthz", access: Access::Public("health: load balancers") },
+    // Version, node and which products are on: the dashboard's sidebar reads it before sign-in.
+    // It (and the 404s of products that are off) is merged in front of the gate in main.rs.
+    Rule { route: "/v1/info", access: Access::Public("version, node and products on, for the dashboard before sign-in") },
     // roll code has owners and tokens of its own (docs/code/http-api.md "Auth"): public repos and
     // pages read anonymously, git per its own rules, GitHub/Slack/Discord/Linear webhooks verify
     // their signatures, agents' device login and machine links use their own tokens. It takes the
@@ -100,9 +103,9 @@ impl Auth {
         self.token.clone()
     }
 
-    /// `router` behind the gate and the dashboard's CORS policy. Logs every route with its
-    /// access at debug (`RUST_LOG=rolld::auth=debug`).
-    pub fn wrap(&self, router: axum::Router) -> axum::Router {
+    /// `router` behind the gate (`host`: where it's served, `api` or an edge host). Logs every
+    /// route with its access at debug (`RUST_LOG=rolld::auth=debug`).
+    pub fn gate(&self, host: &str, router: axum::Router) -> axum::Router {
         let routes = route_patterns(&router);
         let (mut public, mut product, mut credential, mut operator) = (0, 0, 0, 0);
         for r in &routes {
@@ -113,10 +116,15 @@ impl Auth {
                 Access::Credential(_) => credential += 1,
                 Access::Operator => operator += 1,
             }
-            debug!(target: "rolld::auth", route = %r, access = %access, "route");
+            debug!(target: "rolld::auth", host = %host, route = %r, access = %access, "route");
         }
-        info!(routes = routes.len(), operator, operator_or_credential = credential, product, public, "control-plane routes");
-        router.layer(axum::middleware::from_fn_with_state(self.gate.clone(), roll_auth::check)).layer(roll_auth::cors(&self.origins))
+        info!(host = %host, routes = routes.len(), operator, operator_or_credential = credential, product, public, "control-plane routes");
+        router.layer(axum::middleware::from_fn_with_state(self.gate.clone(), roll_auth::check))
+    }
+
+    /// `router` answering the dashboard's origins (CORS), preflights included.
+    pub fn cors(&self, router: axum::Router) -> axum::Router {
+        router.layer(roll_auth::cors(&self.origins))
     }
 }
 
@@ -144,7 +152,8 @@ fn listeners(a: &Args) -> Vec<SocketAddr> {
 pub fn route_patterns(router: &axum::Router) -> Vec<String> {
     let text = format!("{router:?}");
     let mut out = Vec::new();
-    let mut rest = text.as_str();
+    // The routes, not the fallback's (`fallback_router` comes after `path_router`).
+    let mut rest = text.split("fallback_router:").next().unwrap_or_default();
     // The path map's entries: `RouteId(7): "/v1/projects/{id}"`.
     while let Some(i) = rest.find("RouteId(") {
         rest = &rest[i + "RouteId(".len()..];

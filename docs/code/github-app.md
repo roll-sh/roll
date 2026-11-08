@@ -30,6 +30,11 @@ Repository permissions:
 Subscribe to these events: **Push**, **Pull request**, **Issues**, **Issue comment**. Installation
 events are sent without subscribing.
 
+roll also reads the App's own delivery log with its JWT (no extra permission): when rolld was
+down, it asks GitHub to redeliver what failed (Settings → Advanced shows the same log), and
+compares connected repos' branches and pull requests with its own state for anything older than
+GitHub's three days.
+
 Under *Where can this GitHub App be installed?*, pick *Any account* for a public service. For
 a single organisation, pick *Only on this account*.
 
@@ -70,3 +75,14 @@ reachable). PR comments and the setup redirect link there.
 Agents then work through roll: claim work items, land changes over the API or with
 `git push origin HEAD:refs/land/main`. GitHub stays in sync and receives one push every few
 seconds, however many changes land in between.
+
+## 4. When either side is down
+
+- **GitHub down**: roll keeps landing; the mirror catches up within about 30 s of GitHub coming
+  back, and every comment, close, check run and review roll owes GitHub waits in roll's delivery
+  queue until GitHub answers.
+- **roll down**: GitHub's failed deliveries are redelivered and the repos reconciled when roll is
+  back. Meanwhile `roll code land`, `roll code change create` and agent threads open pull requests
+  on GitHub with the user's own GitHub login (`gh auth login`, `GH_TOKEN`, or git's credential
+  helper); they land through roll once it's back. See
+  [architecture.md](architecture.md#github-connected-repositories).

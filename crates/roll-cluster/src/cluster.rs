@@ -1,9 +1,8 @@
 //! The lease state machine: membership, leases with self-fencing, placement, routing, guards,
 //! handoff, rebalancing, draining and the background threads that drive them.
 
-use crate::sql::{SCHEMA, Sql};
+use crate::backend::{Backend, Holder, Registration, Timing};
 use crate::{Error, Result, clock, placement, sign};
-use code_sql::{Conn, Db, Isolation, OptionalExtension, params};
 use parking_lot::Mutex;
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
@@ -37,8 +36,8 @@ pub enum Ownership {
 pub enum Route {
     /// Here: this node holds a valid lease. The guard counts the request as in flight.
     Local(Guard),
-    /// On another node, which holds a valid lease (or should take the key).
-    Remote(Node),
+    /// On another node, which holds a valid lease (or should take the key): forward it there.
+    Forward(Node),
     /// Nowhere right now (the key is being handed off, this node's lease is past its local
     /// deadline, the holder is dead but its lease hasn't expired yet, or no node is live): ask
     /// again after `retry_after`.
@@ -49,7 +48,7 @@ impl std::fmt::Debug for Route {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Route::Local(g) => write!(f, "Local({} @{})", g.key, g.epoch),
-            Route::Remote(n) => write!(f, "Remote({})", n.id),
+            Route::Forward(n) => write!(f, "Forward({})", n.id),
             Route::Unavailable { retry_after } => write!(f, "Unavailable({retry_after:?})"),
         }
     }
@@ -82,12 +81,13 @@ struct Held {
 #[derive(Clone)]
 struct NodeRow {
     node: Node,
+    zone: Option<String>,
     draining: bool,
 }
 
 struct State {
     held: HashMap<String, Held>,
-    /// Keys this node wants gone: if the database still says they're ours (a release that
+    /// Keys this node wants gone: if the backend still says they're ours (a release that
     /// failed, a handoff that was fenced), they're released again instead of adopted.
     release: HashSet<String>,
     /// Live nodes, as of the last refresh.
@@ -113,6 +113,36 @@ struct Flags {
     superseded: AtomicBool,
 }
 
+/// What happened to this node's leases since it joined: counters only go up. The node's
+/// process reports them (rolld publishes them as metrics); this crate does no I/O for them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Stats {
+    /// Keys this node handed to another node (drain, rebalancing, an idle or retired key).
+    pub handoffs: u64,
+    /// Handoffs that didn't go cleanly: they timed out with requests still in flight, their
+    /// release didn't reach the backend (the lease lapses instead, so the key is unavailable
+    /// for up to a lease length), or a drain ended with the key still held.
+    pub handoff_failures: u64,
+    /// Leases this node took from a holder that never released them (it died, was cut off,
+    /// or left with requests in flight). Planned handoffs don't count.
+    pub takeovers: u64,
+    /// Leases this node stopped using because it couldn't renew them in time (self-fencing),
+    /// or because a renewal found them gone.
+    pub fenced: u64,
+}
+
+#[derive(Default)]
+struct Counters {
+    handoffs: AtomicU64,
+    handoff_failures: AtomicU64,
+    takeovers: AtomicU64,
+    fenced: AtomicU64,
+}
+
+fn bump(c: &AtomicU64, n: usize) {
+    c.fetch_add(n as u64, Ordering::Relaxed);
+}
+
 #[derive(Default)]
 pub(crate) struct Faults {
     pub freeze: AtomicBool,
@@ -127,10 +157,7 @@ struct Health {
 
 pub(crate) struct Inner {
     pub(crate) cfg: ClusterConfig,
-    db: Db,
-    sql: Sql,
-    /// This process's incarnation of the node id (the `started_at` of its row).
-    started_at: i64,
+    backend: Box<dyn Backend>,
     validity: Duration,
     state: Mutex<State>,
     /// Serializes this node's lease writes (acquire, renew, release) with the local state
@@ -139,6 +166,7 @@ pub(crate) struct Inner {
     ops: Mutex<()>,
     flags: Flags,
     pub(crate) faults: Faults,
+    counters: Counters,
     health: Mutex<Health>,
     tick: OnceLock<Thread>,
     watchdog: OnceLock<Thread>,
@@ -230,25 +258,12 @@ impl Inner {
         &self.cfg.node_id
     }
 
-    fn ttl_ms(&self) -> i64 {
-        self.cfg.lease_ttl.as_millis() as i64
-    }
-
-    fn fault(&self) -> Result<()> {
+    /// The backend, unless a test made it unreachable.
+    fn backend(&self) -> Result<&dyn Backend> {
         if self.faults.fail_db.load(Ordering::SeqCst) {
-            return Err(Error::Fault("the database is unreachable from this node (test fault)"));
+            return Err(Error::Fault("the cluster backend is unreachable from this node (test fault)"));
         }
-        Ok(())
-    }
-
-    fn read<T>(&self, mut f: impl FnMut(&Conn<'_>) -> code_sql::Result<T>) -> Result<T> {
-        self.fault()?;
-        Ok(self.db.read(|c| f(c))?)
-    }
-
-    fn write<T>(&self, iso: Isolation, mut f: impl FnMut(&Conn<'_>) -> code_sql::Result<T>) -> Result<T> {
-        self.fault()?;
-        Ok(self.db.write_with(iso, |c| f(c))?)
+        Ok(&*self.backend)
     }
 
     fn no_acquire(&self) -> bool {
@@ -301,6 +316,7 @@ impl Inner {
             return Some(e);
         }
         let expired: Vec<String> = st.held.iter().filter(|(_, h)| h.deadline <= now).map(|(k, _)| k.clone()).collect();
+        bump(&self.counters.fenced, expired.len());
         for k in expired {
             self.drop_held(&mut st, &k, "its lease passed its local deadline without a renewal");
         }
@@ -312,24 +328,12 @@ impl Inner {
 
     fn heartbeat(&self) -> Result<()> {
         let sent = clock::now();
-        let draining = self.flags.draining.load(Ordering::SeqCst) as i64;
-        let (id, url, started) = (self.me(), self.cfg.advertise_url.as_str(), self.started_at);
-        let superseded = self.write(Isolation::ReadCommitted, |c| {
-            if c.execute(&self.sql.heartbeat, params![id, started])? == 1 {
-                return Ok(false);
+        match self.backend()?.heartbeat(self.flags.draining.load(Ordering::SeqCst)) {
+            Err(Error::Superseded) => {
+                self.supersede();
+                return Err(Error::Superseded);
             }
-            // No row of ours: either another process took this node id over (it waited for us
-            // to look dead first), or our row was cleaned up as dead while we were stalled.
-            let other: Option<i64> = c.query_row("SELECT started_at FROM code_nodes WHERE id = ?1", [id], |r| r.get(0)).optional()?;
-            if other.is_some() {
-                return Ok(true);
-            }
-            c.execute(&self.sql.reinsert_node, params![id, url, started, draining])?;
-            Ok(false)
-        })?;
-        if superseded {
-            self.supersede();
-            return Err(Error::Superseded);
+            r => r?,
         }
         self.health.lock().heartbeat_ok = Some(sent);
         Ok(())
@@ -349,12 +353,8 @@ impl Inner {
     }
 
     pub(crate) fn refresh_nodes(&self) -> Result<()> {
-        let ttl = self.cfg.node_ttl.as_millis() as i64;
-        let rows = self.read(|c| {
-            c.query(&self.sql.live_nodes, [ttl], |r| {
-                Ok(NodeRow { node: Node { id: r.get(0)?, url: r.get(1)? }, draining: r.get::<_, i64>(2)? != 0 })
-            })
-        })?;
+        let rows: Vec<NodeRow> =
+            self.backend()?.members()?.into_iter().map(|m| NodeRow { node: m.node, zone: m.zone, draining: m.draining }).collect();
         let mut st = self.state.lock();
         st.nodes = rows;
         self.recompute_eligible(&mut st);
@@ -378,14 +378,18 @@ impl Inner {
 
     // ---- leases ----
 
-    /// Renew every lease of this node in one statement, then reconcile local state with what
-    /// the database says we hold.
+    /// Renew every lease of this node (one write), then reconcile local state with what the
+    /// backend says we hold.
     fn renew(&self) -> Result<()> {
         let _ops = self.ops.lock();
-        let sent = clock::now();
-        let rows: Vec<(String, i64)> = self.write(Isolation::ReadCommitted, |c| {
-            c.query(&self.sql.renew, params![self.ttl_ms(), self.me(), self.started_at], |r| Ok((r.get(0)?, r.get(1)?)))
-        })?;
+        let confirmed = match self.backend()?.renew() {
+            Err(Error::Superseded) => {
+                self.supersede();
+                return Err(Error::Superseded);
+            }
+            r => r?,
+        };
+        let (rows, sent) = (confirmed.leases, confirmed.basis);
         let deadline = sent + self.validity;
         self.health.lock().renew_ok_sent = Some(sent);
         self.fence_expired();
@@ -401,6 +405,7 @@ impl Inner {
             // Everything held was acquired before this renewal was sent (both happen under
             // `ops`), so a held key the renewal didn't extend is no longer ours.
             let gone: Vec<String> = st.held.iter().filter(|(k, h)| returned.get(*k) != Some(&h.epoch)).map(|(k, _)| k.clone()).collect();
+            bump(&self.counters.fenced, gone.len());
             for k in gone {
                 self.drop_held(&mut st, &k, "the renewal found it expired or held by another node");
             }
@@ -409,8 +414,8 @@ impl Inner {
                     h.deadline = h.deadline.max(deadline);
                     continue;
                 }
-                // Ours in the database but not held here: an acquisition whose answer was lost,
-                // a lease fenced while the database was slow, or one we meant to give up.
+                // Ours in the backend but not held here: an acquisition whose answer was lost,
+                // a lease fenced while the backend was slow, or one we meant to give up.
                 let leaving = self.no_acquire() || st.release.contains(k);
                 if !leaving && deadline > now {
                     self.adopt(&mut st, k, epoch, deadline, "the renewal found it still ours");
@@ -429,13 +434,7 @@ impl Inner {
     /// Expire leases we held (after they've been dropped locally) so their preferred nodes take
     /// them. Must be called with `ops` held.
     fn release_rows(&self, rows: &[(String, i64)]) {
-        let res = self.write(Isolation::ReadCommitted, |c| {
-            let mut n = 0;
-            for (k, e) in rows {
-                n += c.execute(&self.sql.release, params![k, self.me(), *e])?;
-            }
-            Ok(n)
-        });
+        let res = self.backend().and_then(|b| b.release(rows));
         let mut st = self.state.lock();
         match res {
             Ok(_) => {
@@ -445,6 +444,7 @@ impl Inner {
             }
             Err(e) => {
                 tracing::warn!(node = %self.me(), error = %e, keys = rows.len(), "releasing leases failed; they'll be released again or expire");
+                bump(&self.counters.handoff_failures, rows.len());
                 for (k, _) in rows {
                     st.release.insert(k.clone());
                 }
@@ -472,18 +472,10 @@ impl Inner {
         if todo.is_empty() {
             return Ok(Some(HashMap::new()));
         }
-        let sent = clock::now();
-        let won: Vec<(String, i64)> = self.write(Isolation::Serializable, |c| {
-            let mut won = Vec::new();
-            for k in &todo {
-                let e = c.query_row(&self.sql.acquire, params![k.as_str(), self.me(), self.ttl_ms(), self.started_at], |r| r.get::<_, i64>(0)).optional()?;
-                if let Some(e) = e {
-                    won.push(((*k).clone(), e));
-                }
-            }
-            Ok(won)
-        })?;
-        let deadline = sent + self.validity;
+        let todo: Vec<String> = todo.into_iter().cloned().collect();
+        let confirmed = self.backend()?.acquire(&todo)?;
+        bump(&self.counters.takeovers, confirmed.taken_over);
+        let (won, deadline) = (confirmed.leases, confirmed.basis + self.validity);
         let mut st = self.state.lock();
         // Too slow to act on, or we started leaving meanwhile: leave them to the renewal, which
         // adopts or releases what's still ours.
@@ -514,7 +506,7 @@ impl Inner {
         Local::Guard(Guard { inner: self.clone(), key: key.to_string(), epoch: h.epoch, tenure: h.tenure.clone() })
     }
 
-    /// The answer of [`Inner::route`] if it needs no database access.
+    /// The answer of [`Inner::route`] if it needs no backend call.
     pub(crate) fn route_fast(self: &Arc<Self>, key: &str) -> Option<Route> {
         match self.local(key) {
             Local::Guard(g) => return Some(Route::Local(g)),
@@ -522,7 +514,7 @@ impl Inner {
             Local::None => {}
         }
         let st = self.state.lock();
-        st.remote.get(key).filter(|(_, until)| *until > clock::now()).map(|(n, _)| Route::Remote(n.clone()))
+        st.remote.get(key).filter(|(_, until)| *until > clock::now()).map(|(n, _)| Route::Forward(n.clone()))
     }
 
     pub(crate) fn route(self: &Arc<Self>, key: &str) -> Result<Route> {
@@ -530,35 +522,18 @@ impl Inner {
             if let Some(r) = self.route_fast(key) {
                 return Ok(r);
             }
-            let row = self.read(|c| {
-                c.query_row(&self.sql.lease, [key], |r| {
-                    Ok(LeaseRow {
-                        node_id: r.get(0)?,
-                        expires_at: r.get(2)?,
-                        now: r.get(3)?,
-                        url: r.get(4)?,
-                        heartbeat_at: r.get(5)?,
-                    })
-                })
-                .optional()
-            })?;
-            if let Some(r) = row.as_ref().filter(|r| r.expires_at > r.now) {
-                let left = Duration::from_millis((r.expires_at - r.now).max(1) as u64);
-                if r.node_id == self.me() {
-                    // Ours in the database, not usable here: being released, fenced, or about
-                    // to be adopted by the next renewal.
-                    return Ok(Route::Unavailable { retry_after: left.min(self.cfg.renew_every) });
+            match self.backend()?.lookup(key)? {
+                // Ours in the backend, not usable here: being released, fenced, or about to be
+                // adopted by the next renewal.
+                Holder::Me { left } => return Ok(Route::Unavailable { retry_after: left.min(self.cfg.renew_every) }),
+                Holder::Other { id, url: Some(url), live: true, .. } => {
+                    let n = Node { id, url };
+                    self.cache_remote(key, &n);
+                    return Ok(Route::Forward(n));
                 }
-                let live = r.heartbeat_at.is_some_and(|hb| hb > r.now - self.cfg.node_ttl.as_millis() as i64);
-                return Ok(match (&r.url, live) {
-                    (Some(url), true) => {
-                        let n = Node { id: r.node_id.clone(), url: url.clone() };
-                        self.cache_remote(key, &n);
-                        Route::Remote(n)
-                    }
-                    // The holder looks dead; its lease runs out first.
-                    _ => Route::Unavailable { retry_after: left.min(self.cfg.lease_ttl) },
-                });
+                // The holder looks dead; its lease runs out first.
+                Holder::Other { left, .. } => return Ok(Route::Unavailable { retry_after: left.min(self.cfg.lease_ttl) }),
+                Holder::Free => {}
             }
             // Nobody holds it: its preferred node takes it.
             let pref = self.preferred_in(&self.state.lock(), key);
@@ -572,7 +547,7 @@ impl Inner {
                 },
                 Some(n) => {
                     self.cache_remote(key, &n);
-                    return Ok(Route::Remote(n));
+                    return Ok(Route::Forward(n));
                 }
             }
         }
@@ -630,8 +605,10 @@ impl Inner {
             let mut retired = Vec::new();
             for (k, _) in &rows {
                 let inflight = st.held.get(k).map_or(0, |h| h.tenure.inflight.load(Ordering::Acquire));
+                bump(&self.counters.handoffs, 1);
                 if inflight > 0 {
                     tracing::warn!(node = %self.me(), key = %k, inflight, "handoff timed out waiting for requests in flight");
+                    bump(&self.counters.handoff_failures, 1);
                 }
                 if let Some(h) = self.drop_held(&mut st, k, "handed off")
                     && h.retire
@@ -654,12 +631,7 @@ impl Inner {
     /// Delete leases we held (after they've been dropped locally): nobody takes them until a
     /// request comes. Must be called with `ops` held. If it fails, they're expired instead.
     fn delete_rows(&self, rows: &[(String, i64)]) {
-        let res = self.write(Isolation::ReadCommitted, |c| {
-            for (k, e) in rows {
-                c.execute(&self.sql.delete_lease, params![k, self.me(), *e])?;
-            }
-            Ok(())
-        });
+        let res = self.backend().and_then(|b| b.delete(rows));
         let mut st = self.state.lock();
         match res {
             Ok(()) => {
@@ -711,23 +683,20 @@ impl Inner {
         }
     }
 
-    /// Take expired leases whose preferred node is this one.
-    fn sweep(&self, cursor: &mut (i64, String)) -> Result<()> {
+    /// Take takeable leases (expired, released, or held by a node that's gone) whose preferred
+    /// node is this one.
+    fn sweep(&self) -> Result<()> {
         if self.no_acquire() {
             return Ok(());
         }
         let page = self.cfg.sweep_page;
         let mut refreshed = false;
         for _ in 0..SWEEP_PAGES {
-            let rows: Vec<(String, i64)> = self.read(|c| {
-                c.query(&self.sql.sweep, params![cursor.0, cursor.1.as_str(), page as i64], |r| Ok((r.get(0)?, r.get(1)?)))
-            })?;
-            let full = rows.len() == page;
-            match (full, rows.last()) {
-                (true, Some((k, e))) => *cursor = (*e, k.clone()),
-                _ => *cursor = (i64::MIN, String::new()),
-            }
+            let (rows, full) = self.backend()?.sweep(page)?;
             if rows.is_empty() {
+                if full {
+                    continue;
+                }
                 break;
             }
             if !refreshed {
@@ -739,7 +708,6 @@ impl Inner {
             let mine: Vec<String> = {
                 let st = self.state.lock();
                 rows.into_iter()
-                    .map(|(k, _)| k)
                     .filter(|k| !st.held.contains_key(k) && self.preferred_in(&st, k).is_some_and(|n| n.id == self.me()))
                     .collect()
             };
@@ -754,8 +722,7 @@ impl Inner {
     }
 
     fn delete_dead_nodes(&self) {
-        let age = (self.cfg.node_ttl * 12).max(Duration::from_secs(60)).as_millis() as i64;
-        if let Err(e) = self.write(Isolation::ReadCommitted, |c| c.execute(&self.sql.delete_dead_nodes, [age])) {
+        if let Err(e) = self.backend().and_then(|b| b.cleanup()) {
             tracing::debug!(error = %e, "cleaning up dead nodes failed");
         }
     }
@@ -768,7 +735,6 @@ impl Inner {
         let (mut next_hb, mut next_sweep) = (start + c.heartbeat, start);
         let mut next_rebalance = start + c.rebalance_every;
         let mut next_cleanup = start + c.node_ttl * 12;
-        let mut cursor = (i64::MIN, String::new());
         let mut next_renew = start + c.renew_every;
         // Renewal comes first: it's checked again between every other step, so a slow
         // heartbeat or sweep doesn't push it back.
@@ -780,6 +746,7 @@ impl Inner {
             *next_renew = match self.renew() {
                 // Paced from when it was sent, not when it came back.
                 Ok(()) => (now + c.renew_every).max(clock::now() + c.renew_every / 4),
+                Err(Error::Superseded) => clock::now() + c.renew_every,
                 Err(e) => {
                     tracing::warn!(node = %self.me(), error = %e, "renewing leases failed");
                     clock::now() + (c.renew_every / 4).max(Duration::from_millis(10))
@@ -805,7 +772,7 @@ impl Inner {
                 renew_if_due(&mut next_renew);
             }
             if clock::now() >= next_sweep && !self.paused() {
-                if let Err(e) = self.sweep(&mut cursor) {
+                if let Err(e) = self.sweep() {
                     tracing::warn!(node = %self.me(), error = %e, "sweeping expired leases failed");
                 }
                 next_sweep = clock::now() + c.sweep_every;
@@ -854,18 +821,20 @@ impl Inner {
     /// requests in flight. Keys with requests in flight are left to expire.
     fn give_up_all(&self) {
         let ops = self.ops.try_lock_for(Duration::from_secs(5));
-        let rows: Vec<(String, i64)> = {
+        let (rows, busy): (Vec<(String, i64)>, bool) = {
             let mut st = self.state.lock();
             let keys: Vec<String> = st.held.keys().cloned().collect();
-            let mut rows = Vec::new();
+            let (mut rows, mut busy) = (Vec::new(), false);
             for k in keys {
-                if let Some(h) = self.drop_held(&mut st, &k, "this node is leaving")
-                    && h.tenure.inflight.load(Ordering::Acquire) == 0
-                {
-                    rows.push((k, h.epoch));
+                if let Some(h) = self.drop_held(&mut st, &k, "this node is leaving") {
+                    if h.tenure.inflight.load(Ordering::Acquire) == 0 {
+                        rows.push((k, h.epoch));
+                    } else {
+                        busy = true;
+                    }
                 }
             }
-            rows
+            (rows, busy)
         };
         if ops.is_none() {
             tracing::warn!(node = %self.me(), "a lease write is stuck; leaving without releasing leases (they expire)");
@@ -874,8 +843,9 @@ impl Inner {
         if !rows.is_empty() {
             self.release_rows(&rows);
         }
-        if let Err(e) = self.write(Isolation::ReadCommitted, |c| c.execute(&self.sql.delete_node, params![self.me(), self.started_at])) {
-            tracing::warn!(node = %self.me(), error = %e, "deleting this node's row failed; it goes stale");
+        let released_all = !busy && self.state.lock().release.is_empty();
+        if let Err(e) = self.backend().and_then(|b| b.leave(released_all)) {
+            tracing::warn!(node = %self.me(), error = %e, "removing this node's membership failed; it goes stale");
         }
     }
 }
@@ -888,54 +858,6 @@ fn now_ms() -> u64 {
 /// No guard of the tenure in flight, and none granted or dropped for `min_idle`.
 fn is_idle(t: &Tenure, min_idle: Duration) -> bool {
     t.inflight.load(Ordering::Acquire) == 0 && now_ms().saturating_sub(t.last_active.load(Ordering::Relaxed)) >= min_idle.as_millis() as u64
-}
-
-struct LeaseRow {
-    node_id: String,
-    expires_at: i64,
-    now: i64,
-    url: Option<String>,
-    heartbeat_at: Option<i64>,
-}
-
-/// Register this process as `cfg.node_id`, waiting (up to `node_ttl + lease_ttl` and a bit)
-/// for a previous process with the same id to look dead and for its leases to expire. Returns
-/// the new incarnation (`started_at`).
-fn claim_node_id(db: &Db, sql: &Sql, cfg: &ClusterConfig) -> Result<i64> {
-    let deadline = Instant::now() + cfg.node_ttl + cfg.lease_ttl + Duration::from_secs(1);
-    let node_ttl = cfg.node_ttl.as_millis() as i64;
-    loop {
-        let claimed = db.write(|c| -> code_sql::Result<Option<i64>> {
-            let now: i64 = c.query_row(&sql.now, (), |r| r.get(0))?;
-            let prev: Option<(i64, i64)> =
-                c.query_row("SELECT started_at, heartbeat_at FROM code_nodes WHERE id = ?1", [&cfg.node_id], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
-            if prev.is_some_and(|(_, hb)| hb > now - node_ttl) {
-                return Ok(None);
-            }
-            let held: i64 =
-                c.query_row("SELECT COUNT(*) FROM code_leases WHERE node_id = ?1 AND expires_at > CAST(?2 AS BIGINT)", params![&cfg.node_id, now], |r| r.get(0))?;
-            if held > 0 {
-                return Ok(None);
-            }
-            let started = prev.map_or(now, |(s, _)| now.max(s + 1));
-            c.execute(
-                "INSERT INTO code_nodes (id, url, started_at, heartbeat_at, draining) VALUES (?1, ?2, CAST(?3 AS BIGINT), CAST(?4 AS BIGINT), 0) \
-                 ON CONFLICT (id) DO UPDATE SET url = excluded.url, started_at = excluded.started_at, heartbeat_at = excluded.heartbeat_at, draining = 0",
-                params![&cfg.node_id, &cfg.advertise_url, started, now],
-            )?;
-            // Expired leases a previous process with this id left behind: disown them, so taking
-            // one again counts as a change of holder (the epoch goes up).
-            c.execute("UPDATE code_leases SET node_id = '' WHERE node_id = ?1", [&cfg.node_id])?;
-            Ok(Some(started))
-        })?;
-        if let Some(s) = claimed {
-            return Ok(s);
-        }
-        if Instant::now() >= deadline {
-            return Err(Error::NodeIdInUse(cfg.node_id.clone()));
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    }
 }
 
 /// This node's membership in the cluster. See the crate docs.
@@ -951,14 +873,13 @@ impl std::fmt::Debug for Cluster {
 }
 
 impl Cluster {
-    /// Join the cluster: create the tables if needed, register this node (waiting for a
-    /// previous process with the same pinned id to look dead), and start the lease thread and
-    /// the fencing watchdog. Blocks on the database.
-    pub fn join(db: Db, cfg: ClusterConfig) -> Result<Arc<Cluster>> {
+    /// Join the cluster on `backend`: register this node (waiting for a previous process with
+    /// the same pinned id to look dead), and start the lease thread and the fencing watchdog.
+    /// Blocks on the backend.
+    pub fn join(backend: Box<dyn Backend>, cfg: ClusterConfig) -> Result<Arc<Cluster>> {
         cfg.validate()?;
-        db.ensure_schema(SCHEMA)?;
-        let sql = Sql::new(db.backend());
-        let started_at = claim_node_id(&db, &sql, &cfg)?;
+        let reg = Registration { node_id: cfg.node_id.clone(), url: cfg.advertise_url.clone(), zone: cfg.zone.clone() };
+        backend.join(&reg, Timing { node_ttl: cfg.node_ttl, lease_ttl: cfg.lease_ttl, renew_every: cfg.renew_every })?;
         let http = reqwest::Client::builder()
             .no_proxy()
             .no_gzip()
@@ -974,9 +895,7 @@ impl Cluster {
         let inner = Arc::new(Inner {
             validity: cfg.lease_validity(),
             cfg,
-            db,
-            sql,
-            started_at,
+            backend,
             state: Mutex::new(State {
                 held: HashMap::new(),
                 release: HashSet::new(),
@@ -992,6 +911,7 @@ impl Cluster {
             ops: Mutex::new(()),
             flags: Flags::default(),
             faults: Faults::default(),
+            counters: Counters::default(),
             health: Mutex::new(Health { heartbeat_ok: Some(now), renew_ok_sent: Some(now) }),
             tick: OnceLock::new(),
             watchdog: OnceLock::new(),
@@ -1004,12 +924,12 @@ impl Cluster {
             let i = inner.clone();
             std::thread::Builder::new().name(name.into()).spawn(move || f(i)).map_err(|e| Error::Config(format!("spawning {name}: {e}")))
         };
-        let tick = spawn("code-cluster-lease", Inner::tick_loop)?;
+        let tick = spawn("roll-cluster-lease", Inner::tick_loop)?;
         let _ = inner.tick.set(tick.thread().clone());
-        let watchdog = spawn("code-cluster-fence", Inner::watchdog_loop)?;
+        let watchdog = spawn("roll-cluster-fence", Inner::watchdog_loop)?;
         let _ = inner.watchdog.set(watchdog.thread().clone());
         cluster.threads.lock().extend([tick, watchdog]);
-        tracing::info!(node = %inner.cfg.node_id, url = %inner.cfg.advertise_url, "joined the code cluster");
+        tracing::info!(node = %inner.cfg.node_id, url = %inner.cfg.advertise_url, backend = inner.backend.name(), "joined the cluster");
         Ok(Arc::new(cluster))
     }
 
@@ -1031,7 +951,7 @@ impl Cluster {
     /// (`Acquired`, `Lost`, `Acquired`, …): a `Lost` is always delivered before a later
     /// `Acquired` of the same key. Events are sent while the state lock is held, so all
     /// subscribers see one order. Dropping the receiver unsubscribes.
-    pub fn subscribe(&self) -> mpsc::UnboundedReceiver<Ownership> {
+    pub fn subscribe_ownership(&self) -> mpsc::UnboundedReceiver<Ownership> {
         let (tx, rx) = mpsc::unbounded_channel();
         let mut st = self.inner.state.lock();
         for (k, h) in &st.held {
@@ -1064,7 +984,7 @@ impl Cluster {
     }
 
     /// A guard for local work on `key` (a landing, a queue batch) if this node owns it and isn't
-    /// handing it off. Never touches the database.
+    /// handing it off. Never calls the backend.
     pub fn guard(&self, key: &str) -> Option<Guard> {
         match self.inner.local(key) {
             Local::Guard(g) => Some(g),
@@ -1085,15 +1005,80 @@ impl Cluster {
         self.inner.preferred_in(&st, key)
     }
 
-    /// Take `key` regardless of placement if it's free (no lease, or expired on the database's
-    /// clock) or already ours. `Some(epoch)` if this node now owns it (and isn't handing it
-    /// off). Blocks on the database. Emits `Acquired` when it takes the key.
+    /// Where a standby of `key` belongs (a hot standby, a replica): the next node by rendezvous
+    /// weight, in another zone than the preferred node's when one is live. A hint only: nothing
+    /// about leases depends on zones.
+    pub fn standby(&self, key: &str) -> Option<Node> {
+        let st = self.inner.state.lock();
+        let first = self.inner.preferred_in(&st, key)?;
+        let zone_of = |id: &str| st.nodes.iter().find(|n| n.node.id == id).and_then(|n| n.zone.clone());
+        let home = zone_of(&first.id);
+        let mut rest: Vec<&String> = st.eligible.iter().filter(|id| **id != first.id).collect();
+        rest.sort_by_key(|id| std::cmp::Reverse((placement::weight(key, id), (*id).clone())));
+        let pick = rest.iter().find(|id| home.is_some() && zone_of(id) != home).or(rest.first())?;
+        st.nodes.iter().find(|n| &n.node.id == *pick).map(|n| n.node.clone())
+    }
+
+    /// Take `key` regardless of placement if it's free (no lease, an expired or released one,
+    /// or a holder that's gone) or already ours. `Some(epoch)` if this node now owns it (and
+    /// isn't handing it off). Blocks on the backend. Emits `Acquired` when it takes the key.
     pub fn acquire(&self, key: &str) -> Result<Option<i64>> {
         if let Some(r) = self.held_usable(key) {
             return Ok(r);
         }
         self.inner.acquire_keys(&[key.to_string()], None)?;
         Ok(self.held_usable(key).flatten())
+    }
+
+    /// Take `key` here (as [`Cluster::acquire`]) and a guard for work on it: `None` if another
+    /// node holds it. For async code; the backend is called on the blocking pool.
+    pub async fn lease(self: &Arc<Self>, key: &str) -> Result<Option<Guard>> {
+        if let Some(g) = self.guard(key) {
+            return Ok(Some(g));
+        }
+        let (me, k) = (self.clone(), key.to_string());
+        tokio::task::spawn_blocking(move || me.acquire(&k)).await.map_err(|e| Error::Internal(format!("lease task: {e}")))??;
+        Ok(self.guard(key))
+    }
+
+    /// Run `fut` while this node owns `key`, holding a guard so a handoff waits for it (up to
+    /// `handoff_timeout`). `None` if the key isn't ours, or stops being ours (the work is
+    /// dropped at its next await, checked every 100 ms: its writes must be safe to leave half
+    /// done, as for a crash).
+    pub async fn while_owner<T>(&self, key: &str, fut: impl Future<Output = T>) -> Option<T> {
+        let g = self.guard(key)?;
+        self.while_guarded(&g, fut).await
+    }
+
+    /// [`Cluster::while_owner`] under a guard already held.
+    pub async fn while_guarded<T>(&self, g: &Guard, fut: impl Future<Output = T>) -> Option<T> {
+        let mut fut = std::pin::pin!(fut);
+        let mut tick = tokio::time::interval(Duration::from_millis(100));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                biased;
+                v = &mut fut => return Some(v),
+                _ = tick.tick() => {
+                    // Held through a handoff (which waits for this guard), gone once it's lost,
+                    // fenced, or the process stopped taking part.
+                    if self.epoch(g.key()) != Some(g.epoch()) {
+                        return None;
+                    }
+                }
+            }
+        }
+    }
+
+    /// The backend's record of `key`'s lease: the node it names and its epoch (diagnostics and
+    /// tests; a record doesn't mean the lease is held). Blocks on the backend.
+    pub fn lease_record(&self, key: &str) -> Result<Option<(String, i64)>> {
+        self.inner.backend()?.holder(key)
+    }
+
+    /// Which backend this node runs on (`memory`, `postgres`, `dynamodb`).
+    pub fn backend_name(&self) -> &'static str {
+        self.inner.backend.name()
     }
 
     fn held_usable(&self, key: &str) -> Option<Option<i64>> {
@@ -1104,7 +1089,7 @@ impl Cluster {
 
     /// Where a request for `key` runs (see [`Route`]). Answers from memory when this node owns
     /// the key or recently routed it elsewhere; otherwise reads the lease (and may acquire it),
-    /// so it blocks on the database: call it from blocking context, or use
+    /// so it blocks on the backend: call it from blocking context, or use
     /// [`Cluster::dispatch`], which does that for you.
     pub fn route(&self, key: &str) -> Result<Route> {
         self.inner.route(key)
@@ -1180,7 +1165,7 @@ impl Cluster {
 
     /// Whether this node runs the cluster-wide singleton `name` (the lease
     /// `singleton:<name>`). Takes it when this node is its preferred node and it's free; call
-    /// it every time before doing the singleton's work. Blocks on the database at most once
+    /// it every time before doing the singleton's work. Blocks on the backend at most once
     /// per `sweep_every` while it isn't ours.
     pub fn singleton(&self, name: &str) -> bool {
         let key = format!("singleton:{name}");
@@ -1214,6 +1199,13 @@ impl Cluster {
         }
     }
 
+    /// This node's lease counters since it joined.
+    pub fn stats(&self) -> Stats {
+        let c = &self.inner.counters;
+        let get = |a: &AtomicU64| a.load(Ordering::Relaxed);
+        Stats { handoffs: get(&c.handoffs), handoff_failures: get(&c.handoff_failures), takeovers: get(&c.takeovers), fenced: get(&c.fenced) }
+    }
+
     /// For the load balancer's health check: this node is a member, its heartbeat is recent,
     /// and its last successful renewal is still within the lease's local validity.
     pub fn is_healthy(&self) -> bool {
@@ -1240,10 +1232,7 @@ impl Cluster {
             inner.recompute_eligible(&mut st);
         }
         let i = inner.clone();
-        let marked = tokio::task::spawn_blocking(move || {
-            i.write(Isolation::ReadCommitted, |c| c.execute(&i.sql.set_draining, params![i.me(), i.started_at]))
-        })
-        .await;
+        let marked = tokio::task::spawn_blocking(move || i.backend().and_then(|b| b.set_draining())).await;
         if !matches!(marked, Ok(Ok(_))) {
             tracing::warn!(node = %inner.me(), "marking this node draining failed; handing off anyway");
         }
@@ -1259,6 +1248,11 @@ impl Cluster {
         while Instant::now() < deadline && !inner.state.lock().held.is_empty() {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
+        let left = inner.state.lock().held.len();
+        if left > 0 {
+            tracing::warn!(node = %inner.me(), keys = left, timeout_s = timeout.as_secs(), "drain timed out with keys still held");
+            bump(&inner.counters.handoff_failures, left);
+        }
         let me = self.inner.clone();
         let threads = std::mem::take(&mut *self.threads.lock());
         let _ = tokio::task::spawn_blocking(move || leave(&me, threads)).await;
@@ -1266,7 +1260,7 @@ impl Cluster {
 
     /// Leave now: stop the threads, give up every key (`Lost`; released unless requests are in
     /// flight, in which case it expires), and delete this node's row. Idempotent; also runs on
-    /// drop. Blocks on the database (a few seconds at most if it's unreachable).
+    /// drop. Blocks on the backend (a few seconds at most if it's unreachable).
     pub fn leave(&self) {
         let threads = std::mem::take(&mut *self.threads.lock());
         leave(&self.inner, threads);
@@ -1291,7 +1285,7 @@ impl Cluster {
         self.inner.wake_tick();
     }
 
-    /// Test hook: every database statement of this node fails.
+    /// Test hook: every backend call of this node fails (it is unreachable).
     #[doc(hidden)]
     pub fn fault_db(&self, on: bool) {
         self.inner.faults.fail_db.store(on, Ordering::SeqCst);
@@ -1328,7 +1322,7 @@ fn leave(inner: &Arc<Inner>, threads: Vec<JoinHandle<()>>) {
     if let Some(t) = inner.watchdog.get() {
         t.unpark();
     }
-    // The lease thread may be stuck in a database call; don't wait on it forever.
+    // The lease thread may be stuck in a backend call; don't wait on it forever.
     let deadline = Instant::now() + Duration::from_secs(5);
     for t in threads {
         while !t.is_finished() && Instant::now() < deadline {
@@ -1339,7 +1333,7 @@ fn leave(inner: &Arc<Inner>, threads: Vec<JoinHandle<()>>) {
         }
     }
     inner.give_up_all();
-    tracing::info!(node = %inner.cfg.node_id, "left the code cluster");
+    tracing::info!(node = %inner.cfg.node_id, "left the cluster");
 }
 
 impl Drop for Cluster {
