@@ -2554,7 +2554,7 @@ mod tests {
         let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
         let socket = listener.accept().unwrap().0;
         let observer = socket.try_clone().unwrap();
-        let mut reader = IdleRead::new(socket).unwrap();
+        let mut reader = IdleRead::new(std::sync::Arc::new(socket)).unwrap();
         let worker = std::thread::spawn(move || {
             let mut byte = [0];
             reader.read_exact(&mut byte).unwrap();
