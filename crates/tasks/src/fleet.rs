@@ -448,8 +448,12 @@ impl TasksNode {
         let fenced = tokio::select! {
             _ = ending => false,
             reason = t.log.fenced() => {
-                warn!(%reason, "tasks: the cell's log was taken over");
-                true
+                // "closed": this node stopped (`shutdown`), which ended the tenure itself.
+                let fenced = reason != "closed";
+                if fenced {
+                    warn!(%reason, "tasks: the cell's log stopped taking commits");
+                }
+                fenced
             }
         };
         // Within the handoff's patience, so the log has closed before the lease moves.

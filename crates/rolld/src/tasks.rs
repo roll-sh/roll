@@ -22,6 +22,10 @@ pub struct TasksArgs {
     /// rest of the local API.
     #[arg(long = "tasks-token", env = "ROLL_TASKS_TOKEN", hide_env_values = true)]
     pub token: Option<String>,
+    /// The operator token every control-plane API accepts: the tasks token when
+    /// `ROLL_TASKS_TOKEN` isn't set.
+    #[arg(id = "tasks_admin_token", long = "tasks-admin-token", env = "ROLL_ADMIN_TOKEN", hide_env_values = true, hide = true)]
+    pub admin_token: Option<String>,
     /// Minimum time between two log commits (each is one object write): API writes wait up to
     /// this long for theirs (default: 100 on S3, 5 in a local directory).
     #[arg(long = "tasks-commit-ms", env = "ROLL_TASKS_COMMIT_MS")]
@@ -98,8 +102,11 @@ pub async fn start(args: &TasksArgs, home: &Path, storage: &StorageConfig, clust
     log.shards = 4;
     log.commit_ms = args.commit_ms.unwrap_or(if local { 5 } else { 100 });
     log.relaxed_ms = args.relaxed_ms;
+    let token = [&args.token, &args.admin_token].into_iter().flatten().find(|t| !t.is_empty()).cloned();
+    // On a fleet the API is public (api.roll.sh, the edge): never open.
+    anyhow::ensure!(single || token.is_some(), "a tasks cluster needs ROLL_TASKS_TOKEN (or ROLL_ADMIN_TOKEN): without one its API is open");
     let mut engine = ::tasks::Config {
-        token: args.token.clone().filter(|t| !t.is_empty()),
+        token,
         block_private_urls: args.block_private.unwrap_or(!single),
         ..::tasks::Config::default()
     };

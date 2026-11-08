@@ -93,7 +93,7 @@ written once in SQLite's dialect), as roll code's did.
 | streams | `stream:cluster:<id>` | a tenant's cluster on one owner at first; per partition later |
 | storage | `storage:meta` | built: one metadata log for the deployment, a hot standby following it (docs/storage/architecture.md, "Many nodes"); `storage:account:<id>` (a log per account) is designed there, not built |
 | queues | `mq:<vhost>/<queue>` | mq-cluster's owner records move onto the shared layer |
-| tasks | `tasks:tenant:<id>` | replaces the tasks cell's own lease |
+| tasks | `tasks:cell:default` | built: the log store cell's leader (replaces the cell's own S3 lease; fencing stays in the log), hot standbys following the log (deploy/aws/README.md, "On the roll cloud fleet"); `tasks:tenant:<id>` needs more cells and a tenant catalog, designed there, not built |
 
 ## The edge
 
@@ -127,7 +127,7 @@ written once in SQLite's dialect), as roll code's did.
 | `<id>.kafka.us-east-1.roll.sh:9092` (TLS + SASL), HTTPS REST on 443 | streams | DNS only |
 | `<id>.nosql.us-east-1.roll.sh:9042` (TLS), HTTPS Alternator on 443 | nosql | DNS only |
 | `<id>.mq.us-east-1.roll.sh` 5671 AMQPS, 8883 MQTTS, 61614 STOMP TLS, 5551 streams, 443 web | queues | DNS only |
-| `tasks.us-east-1.roll.sh` | tasks API | DNS only |
+| `tasks.us-east-1.roll.sh` | tasks API (`/v1/tasks`, hosted tenants at `/t/<tenant>/v1/tasks`) | DNS only |
 | `s3.us-east-1.roll.site`, `<bucket>.s3.us-east-1.roll.site` | S3 API (path and virtual-host style) | DNS only |
 | `<bucket>.roll.site`, custom domains | public buckets and sites (the CDN Worker) | proxied |
 | `chg-<id>.roll.site` | code previews | proxied |
@@ -156,7 +156,7 @@ when `ROLL_EDGE=1` (without it rolld is unchanged).
 
 | listener | what happens |
 | --- | --- |
-| 8443 (HTTPS) | HTTP/1.1, routed by `Host`: `roll.sh` → `ROLL_DASHBOARD_UPSTREAM` (streamed, WebSockets included) except `/<owner>/<repo>.git/…` → code's git routes; `git.roll.sh` → code's git routes; `api.roll.sh` → rolld's API router; `<id>.redis.…` → Redis REST; `<id>.kafka.…` → the streams HTTP API; `<id>.nosql.…` → Alternator; `<id>.mq.…` → web-STOMP or web-MQTT by `Sec-WebSocket-Protocol`, else the queues HTTP API; `tasks.…` → tasks (`/v1/tasks/…`); `s3.…`, `<bucket>.s3.…` → the S3 server; `chg-<id>.roll.site` → code previews. `<bucket>.roll.site` answers 404 at the origin: it is served by the CDN Worker. |
+| 8443 (HTTPS) | HTTP/1.1, routed by `Host`: `roll.sh` → `ROLL_DASHBOARD_UPSTREAM` (streamed, WebSockets included) except `/<owner>/<repo>.git/…` → code's git routes; `git.roll.sh` → code's git routes; `api.roll.sh` → rolld's API router; `<id>.redis.…` → Redis REST; `<id>.kafka.…` → the streams HTTP API; `<id>.nosql.…` → Alternator; `<id>.mq.…` → web-STOMP or web-MQTT by `Sec-WebSocket-Protocol`, else the queues HTTP API; `tasks.…` → tasks (`/v1/tasks/…`, `/t/<tenant>/v1/tasks/…`, `/_roll/tenants`; run on the cell's leader); `s3.…`, `<bucket>.s3.…` → the S3 server; `chg-<id>.roll.site` → code previews. `<bucket>.roll.site` answers 404 at the origin: it is served by the CDN Worker. |
 | 5432 | `SSLRequest` → `S` → TLS, or TLS straight away (`sslnegotiation=direct`, ALPN `postgresql`); `GSSENCRequest` → `N`; a startup packet in the clear is refused (`08P01`); cancel requests may come in the clear. The endpoint is the server name's `<id>`, else `options=endpoint=<id>`; naming two different ones is an error. |
 | 6379 | TLS, then Redis with the server name (the database is its first label). |
 | 9092 | TLS, then Kafka; metadata names the server name the client used (one virtual broker per hostname), never a node address. |
@@ -397,7 +397,8 @@ pushes take as long as the pack); `handoff-failures` and `lease-takeovers` on an
 | product switches, JSON logs, metrics and their alarms | built (`ROLL_PRODUCTS`, `ROLL_LOG_FORMAT`, `GET /v1/info`); not yet run against AWS |
 | GitHub resilience | done |
 | storage on the cluster layer | built (`storage:meta`, `s3-server/src/cluster.rs`); per-account logs designed |
-| tasks, queues, redis, streams, nosql on the cluster layer | next, one product per change |
+| tasks on the cluster layer | built (`tasks:cell:default`, `tasks/src/fleet.rs`); tenants per node designed |
+| queues, redis, streams, nosql on the cluster layer | next, one product per change |
 | postgres on the fleet and the system database | with the pg-engine branch |
 | isolated work on Fargate | next |
 

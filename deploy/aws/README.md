@@ -160,7 +160,7 @@ aws ecs update-service --cluster $CLUSTER --service $SERVICE --desired-count 2
   number.
 - **Scaling past one leader.** Beyond one leader, run more cells (one stack each) and place tenants
   on them, or use the DynamoDB layout. Cells don't yet move tenants between each other
-  automatically.
+  automatically ("Tenants per node: what's missing", below).
 - **Commit latency.** An API write waits for the next commit window (up to `ROLL_TASKS_COMMIT_MS`,
   100 ms) and one S3 PUT, typically 20–60 ms on S3 Standard. One client publishing one message at a
   time therefore gets about 10 a second; use `/batch` or concurrency for more.
@@ -211,6 +211,71 @@ aws ecs update-service --cluster $CLUSTER --service $SERVICE --desired-count 2
 
 `roll tasks usage` and the dashboard price your actual traffic from the S3 writes the store
 metered (`crates/tasks/src/cost.rs`).
+
+## On the roll cloud fleet (rolld)
+
+The same log store cell runs inside rolld, on every node of the roll cloud fleet
+(docs/cloud/README.md), with leadership from the fleet's cluster layer instead of the `lease`
+object and health checks (`crates/tasks/src/fleet.rs`, `crates/rolld/src/tasks.rs`). The code is
+shared: the log, the tenants and the engines are the ones above; only who leads and how requests
+reach the leader differ.
+
+- **Leader.** The holder of the roll-cluster lease `tasks:cell:default`. It takes the log over
+  (writing the takeover entry), starts every tenant's engine and serves. The cell's data is under
+  `tasks/` in the fleet's bucket (`ROLL_S3_BUCKET`, after `ROLL_S3_PREFIX`). The `lease` object
+  isn't used.
+- **Standbys.** The two nodes placement prefers for the lease, and the one it places in another
+  zone, keep a copy of every tenant current: they replay the log as it grows (one GET of the next
+  entry every 500 ms, about $2 a month each on S3) and check the pruned marker every 30 s. Taking
+  over from that copy reads only the entries after it.
+- **Requests.** Every node answers `tasks.<region>.roll.sh` (the edge) and `/v1/tasks`,
+  `/t/<tenant>/v1/tasks` and `/_roll/tenants` on rolld's API, and forwards them to the leader
+  (signed, to `/internal/tasks`). While the cell moves, the node a client reached holds the request
+  and sends it again, for up to 25 s; only answers that say nothing ran are retried.
+- **Fencing** is unchanged: create-only log entries and the takeover entry. Correctness never
+  depends on the lease; a node that still believes it leads after losing it can't commit. A node
+  that took the log without the lease (a partition, an operator) fences the leader, which takes the
+  log back at its next write; that write runs again there.
+- **Single node** (no cluster): rolld leads from the start with the log in its object storage (the
+  local directory `<home>/objects/tasks`, or S3 with `--s3-bucket`), commits every 5 ms in a local
+  directory (100 ms on S3; `ROLL_TASKS_COMMIT_MS`), and imports the SQLite database earlier
+  versions kept (`<home>/tasks.db`, kept afterwards as `tasks.db.imported`) into a new log on its
+  first start. A cluster node never imports a local database.
+
+What clients see:
+
+| | planned handoff (deploy, scale-in, Spot, rebalancing) | leader crash |
+| --- | --- | --- |
+| API calls (publish, queues, pulls, acks) | They wait at the node they reached while the cell moves (deliveries draining, at most 5 s, plus the takeover), then succeed. Long polls and run waits end on the old leader and are sent on to the new one. No request fails. | They wait until the lease runs out (about 10–13 s) and a standby takes over, then succeed; past 25 s they get `503` with `Retry-After`. A write whose connection broke after it reached the dead leader gets `502` (it may or may not have been applied): retry it with a `dedup_id`. Every write that was acknowledged is there. |
+| HTTP deliveries (endpoints, callbacks) | Deliveries in flight finish and are recorded (up to 5 s); any still running then are handed back and delivered again by the new leader. With fast endpoints nothing is delivered twice. Deliveries pause for the handoff. | Deliveries made in the last `ROLL_TASKS_RELAXED_MS` (5 s) before the crash, and those in flight, are delivered again after the takeover, with the same `roll-message-id`. Schedule ticks and workflow steps of that window may run again; that window's usage counts are lost (never counted twice). |
+| Pull consumers | A message pulled and not yet acknowledged keeps its lease (pulls and acks are durable API writes) and comes back after its visibility timeout as usual. | The same: pulls and acks that were answered are durable. |
+
+Node settings: `ROLL_TASKS_TOKEN` (the default tenant's admin token, which also manages tenants;
+`ROLL_ADMIN_TOKEN` when it isn't set, and a cluster node refuses to start with neither),
+`ROLL_TASKS_COMMIT_MS`, `ROLL_TASKS_RELAXED_MS` and `ROLL_TASKS_BLOCK_PRIVATE` (on by default in a
+cluster: deliveries can't reach the fleet's private network). A handoff drains deliveries for up
+to 5 s in a cluster.
+
+### Tenants per node: what's missing
+
+One cell serves every tenant from one leader, so a fleet's tasks throughput is one node's. The
+ownership table's `tasks:tenant:<id>` (each tenant on its own owner) doesn't fit the log store as it
+is: all of a cell's tenants share one log, whose single writer is the point (one commit carries
+every tenant's writes, so cost follows the commit rate). Spreading tenants needs:
+
+1. **More cells, one lease each** (`tasks:cell:<n>`), each with its own log prefix
+   (`tasks/<n>/`), spread over nodes by rendezvous placement like any key.
+2. **A catalog** of tenant → cell in the system database (`code-sql`), read by every node to route
+   `/t/<tenant>/…` to its cell's leader, and written when tenants are created.
+3. **Moving a tenant** between cells, under both leases: the source leader stops the tenant's
+   engine, snapshots it at an exact commit and writes a drop; the target imports that snapshot as a
+   create (like `import_sqlite`, at the target's next entry); the catalog row flips in the same
+   step that makes the target the writer, and requests ride out the move. Pruning must keep the
+   source's entries until the catalog has flipped.
+4. **Placement policy**: how many cells, and when a busy tenant gets a cell of its own.
+
+Until then, a deployment that outgrows one leader runs more fleets (or the standalone stacks
+below) and places tenants by hand, as before.
 
 ## The DynamoDB layout
 
