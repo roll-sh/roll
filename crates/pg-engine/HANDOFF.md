@@ -4661,6 +4661,70 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
     build keeping its heap measure for the next (`txn::unchanged`, as VACUUM's is) would save
     sizing the rows again (7% of a CREATE UNIQUE INDEX after a CREATE INDEX), but the build's
     own linked run invalidates the table's watch when it commits; not done.
+- **Write path, round 9** (agent 182; BENCH.md "Bulk writes, round 9"): a rolled-back DROP's
+  row ids, COPY's n_tup_ins on the general path, DELETE's run sorted by runs, COPY TO and
+  INSERT … SELECT from stored rows; DELETE leaving its index entries for VACUUM measured and
+  dropped.
+  - **A rolled-back DROP keeps its sequences** (data loss before): `drop_table_now` reset the
+    table's hidden row-id sequence (and a serial's owned sequence, a dropped sequence, a
+    matview's storage's) at once and outside the transaction (`Database::reset_seq` commits
+    to the store), so after ROLLBACK, ROLLBACK TO or a crash with the DROP in flight the next
+    INSERT took row id 1 again and `put_new_row` replaced the row stored under it. The resets
+    wait for the commit (`Txn::seq_drops`, applied by `finish_xid` once the store commit
+    returned, truncated by ROLLBACK TO; a crash after the commit leaks a 9-byte key, which
+    CREATE SEQUENCE resets anyway). The dropped table also counts as given new storage
+    (`mark_new_storage`), so a rollback lays its size models out from its rows again (the
+    next row took ctid (0,1) next to the row already there). Row ids are allocated only by
+    `nextval_by_one` / `nextval(rowid_sequence)` (inserts, rewrites, `write_new_rows`, the
+    format-0 upgrade) and never go back now but at a committed DROP or an unlogged table's
+    reset, both of which delete the table's key range. Golden `a182_drop_rollback`,
+    `crash_unlogged` `drop_in_flight_keeps_row_ids_after_a_crash`; `crash_random` inserts
+    into its e<i> tables (`InsE`): its DROP TABLE and ROLLBACK steps had nothing writing to
+    the dropped tables after, so it never saw this.
+  - **DELETE leaving its index entries for VACUUM: measured, dropped.** The design (a
+    per-statement blob of the deleted row ids under `oid | 0xFFFFFFFE`, written in the
+    DELETE's own commit; index-only scans and other entry-only readers filtering by it,
+    unique checks reading the row; VACUUM scanning each index and tombstoning the entries
+    whose row id is in a committed blob, then deleting the blobs in the same commit) was
+    agreed with the index, storage and durability reviewers, then measured first on the
+    1M-row bulk sequence (dist, profiles): the DELETE would save about 0.25 s (its entry
+    keys are about 27% of its connection thread: the run's sort, write and the entries'
+    values), but VACUUM would pay a raw scan of each index (0.16 s per 1M-entry index: the
+    storage merge share of the index-only scan right after the DELETE) and a sorted run of
+    500k tombstones (about 0.1 s), and the next index scan would save only about 0.03 s: about
+    +0.15 s in all (BENCH.md "Bulk writes, round 9" has the table). PostgreSQL's VACUUM pays
+    the same index scans; the engine's raw entry scan simply costs more than the sorted run
+    at delete time. What would change the answer: a raw entry scan near PostgreSQL's cost
+    (the store's merge: agent 169's `Scan::position` / merge work), or a way for VACUUM to
+    find the dead entries without scanning the indexes (none without the old values). Don't
+    re-propose it without one of the two.
+  - **COPY's n_tup_ins on the general path** (unique indexes, AFTER triggers, partitions): a
+    multi-insert COPY's stored rows are held (`pgstat::hold_inserts`, `count_stored` in
+    `store_inserted`, `take_held`) and counted as its buffer is flushed (`flush_plain_counts`,
+    as heap_multi_insert counts them); an error before the flush drops them, on the plain
+    path too (`counts_on_error`: it counted them on a parse error). A unique violation is
+    found at the flush and raised after its counts. Golden `a182_copy_counts`.
+    The index-violation path also holds its failed heap insertion (`count_failed_insert`):
+    a later parse error can discard that buffer before the index error would be raised.
+    `a182_copy_batches` covers both sides of the 1,000-row boundary.
+  - **COPY TO from stored rows**: a serial table scan and an identity projection can pass
+    stored tuples through `Node::each_stored`. Text COPY emits supported integers, float8s
+    and strings without constructing a decoded row. Unsupported types, older tuples missing
+    added columns, dropped or virtual columns, CSV, binary and other encodings use the
+    decoded path. Golden `a182_copy_out` records PostgreSQL 18.6 output.
+  - **INSERT SELECT from stored rows**: an eligible plain target past the size model stores
+    the source tuple's values under a fresh header (`StoredInsert`, `inserted_stored`).
+    Domains, indexes, CHECKs, dropped/generated columns, SSI and change streams exclude this
+    path. NULL for NOT NULL, long encoded values, older short tuples and modelled targets
+    fall back to decoded insertion. `big_tables::insert_select_from_stored_rows` checks it.
+  - Resume verification, 2026-11-08: source `85307c242973e58f63d9c514475fb992e35011bc`
+    passes release goldens filtered by `copy`, `stat`, `insert` (three harness tests each),
+    all 19 `big_tables` tests and all-target Clippy. Logs: `~/.cache/a182/resume-primary/`.
+    Job 7 at `2f1b3a3e5` passed 1,804 selected regression units and the spill test, but its
+    COPY goldens failed; its final HEAVY-EXIT 0 did not imply every step passed. The resume
+    check fixes and reruns those failures. Later complete-suite coverage belongs to the
+    verification train. No storage format or durability rule changes in this batch.
+
 - **Result rows stream** (round 19, agent 65): a top-level SELECT's rows go to the client as
   the executor returns them, as PostgreSQL's printtup sends a DataRow per row. A
   `session::RowSink` (`session/sink.rs`, PostgreSQL's DestReceiver) takes them in

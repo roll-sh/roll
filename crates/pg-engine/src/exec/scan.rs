@@ -4604,6 +4604,59 @@ impl Node for ScanNode {
         Ok(Some(n))
     }
 
+    /// A plain sequential scan's rows as stored, as `next` would return them (counted,
+    /// pruned, in heap order where it reads in it), without its parallel workers: COPY TO
+    /// of a table formats them from their bytes, as PostgreSQL's reads them serially.
+    fn each_stored(&mut self, f: &mut dyn FnMut(super::Stored<'_>) -> Result<bool>, ctx: &ExecCtx) -> Result<Option<()>> {
+        let p = &self.plan;
+        if self.par.is_some()
+            || self.emitted > 0
+            || ctx.instrumented()
+            || p.limit.is_some()
+            || p.filter.is_some()
+            || p.with_key
+            || self.secondary
+            || self.ios_cols.is_some()
+            || self.am.is_some()
+            || self.keys.is_some()
+            || self.only.is_some()
+            || self.sample.is_some()
+            || p.index.is_some()
+            || !matches!(p.access, Access::Seq | Access::Unplanned)
+            || p.mark.is_some()
+            || p.sys
+            || !matches!(self.stat, StatTarget::Off | StatTarget::Seq(_))
+            || super::sizing::tracked(p.table.oid)
+            || p.table.columns.iter().any(|c| c.virtual_gen)
+        {
+            return Ok(None);
+        }
+        self.par_tried = true;
+        loop {
+            ctx.check()?;
+            if !self.next_raw_ref(ctx)? {
+                return Ok(Some(()));
+            }
+            // (The row borrowed from the batch while `f` reads it, as `next` makes its rows.)
+            let (rb, one) = (std::mem::take(&mut self.rb), self.one.take());
+            let (key, bytes) = match &one {
+                Some((k, v)) => (&k[..], &v[..]),
+                None => rb.peek().expect("a row handed out"),
+            };
+            if let StatTarget::Seq(t) = self.stat {
+                super::pgstat::count_returned(ctx, t, 1);
+            }
+            let r = match f(super::Stored::Bytes(bytes)) {
+                Ok(true) => Ok(true),
+                Ok(false) => self.full_row(key, bytes, ctx).and_then(|row| f(super::Stored::Row(row))),
+                Err(e) => Err(e),
+            };
+            self.rb = rb;
+            r?;
+            self.emitted += 1;
+        }
+    }
+
     fn key_order(&self) -> Option<Vec<(usize, bool, bool)>> {
         use crate::catalog::IndexKey;
         let p = &self.plan;
