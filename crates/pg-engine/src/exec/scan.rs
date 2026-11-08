@@ -4004,10 +4004,11 @@ fn parallel_workers(ctx: &ExecCtx) -> (usize, usize) {
 }
 
 /// The first condition of a scan's filter `f` (the first of an AND, else `f`), when it
-/// reads uncorrelated scalar sub-selects (initplans) through nothing that may skip one
-/// (columns, constants, calls, casts): each row's filter evaluates them, so the scan's
-/// first row runs them, once (`ExecCtx::subq_cache`), as PostgreSQL's first row reads
-/// their parameters (or its Gather before its workers start).
+/// reads uncorrelated sub-selects (initplans; a scalar one's value, or `x [NOT] IN` one's
+/// rows: a hashed SubPlan's) through nothing that may skip one (columns, constants, calls,
+/// casts, NOT): each row's filter evaluates them, so the scan's first row runs them, once
+/// (`ExecCtx::subq_cache`), as PostgreSQL's first row reads their parameters or builds the
+/// SubPlan's hash table (or its Gather before its workers start).
 fn initplans_first(f: &Expr, ctx: &ExecCtx) -> bool {
     use crate::sql::expr::SubqueryKind;
     if !ctx.outer.borrow().is_empty() {
@@ -4022,19 +4023,52 @@ fn initplans_first(f: &Expr, ctx: &ExecCtx) -> bool {
     };
     let (mut subs, mut ok) = (0, true);
     first.walk(&mut |x| match x {
-        Expr::Subquery(s) if s.kind == SubqueryKind::Scalar && s.params.is_empty() && s.func.is_none() => subs += 1,
-        Expr::Col(..) | Expr::Const(..) | Expr::Call(..) | Expr::Cast(..) | Expr::Relabel(..) => {}
+        Expr::Subquery(s) if s.params.is_empty() && s.func.is_none() => match s.kind {
+            SubqueryKind::Scalar => subs += 1,
+            SubqueryKind::Any if s.left.len() == 1 && s.ops.len() == 1 && s.test_op.is_none() => subs += 1,
+            _ => ok = false,
+        },
+        Expr::Col(..)
+        | Expr::Const(..)
+        | Expr::Call(..)
+        | Expr::Cast(..)
+        | Expr::Relabel(..)
+        | Expr::SqlSyntax(..)
+        | Expr::Not(..) => {}
         _ => ok = false,
     });
     ok && subs > 0
 }
 
-/// `f` with the initplans of its first condition (`initplans_first`) run and put in as
-/// their values: for a scan that has a row (whose filter would run them at it).
+/// An IN sub-select's rows put in as a list of at most this many values (more: left as
+/// it is, to the executor's thread).
+const INITPLAN_LIST_MAX: usize = 4096;
+
+/// `f` with the initplans of its first condition (`initplans_first`) run and put in: a
+/// scalar one as its value, `x IN (sub-select)` as `x IN (its values)` (`=` over a list
+/// is ANY's: NULLs alike; none: false, for a plain column `x`). For a scan that has a row
+/// (whose filter would run them at it).
 fn initplans_put_in(f: &Expr, ctx: &ExecCtx) -> Result<Expr> {
+    use crate::sql::expr::SubqueryKind;
     let put = |e: Expr| {
         e.transform(&mut |x| match x {
-            Expr::Subquery(s) if s.params.is_empty() => Ok(Expr::Const(ctx.eval_subquery(&s, &[])?, s.ty.clone())),
+            Expr::Subquery(s) if s.params.is_empty() && s.kind == SubqueryKind::Scalar => {
+                Ok(Expr::Const(ctx.eval_subquery(&s, &[])?, s.ty.clone()))
+            }
+            Expr::Subquery(s) if s.params.is_empty() && s.kind == SubqueryKind::Any && s.left.len() == 1 && s.ops.len() == 1 => {
+                let rows = ctx.subquery_rows(&s, &[], None)?;
+                let op = s.ops[0].clone();
+                let ty = op.args.get(1).cloned().unwrap_or_else(|| s.left[0].ty());
+                Ok(match rows.len() {
+                    0 if matches!(s.left[0], Expr::Col(..)) => Expr::Const(Value::Bool(false), crate::types::DataType::Bool),
+                    n if n > 0 && n <= INITPLAN_LIST_MAX && rows.iter().all(|r| r.len() == 1) => Expr::InList(
+                        Box::new(s.left[0].clone()),
+                        rows.iter().map(|r| (Expr::Const(r[0].clone(), ty.clone()), op.clone())).collect(),
+                        false,
+                    ),
+                    _ => Expr::Subquery(s),
+                })
+            }
             x => Ok(x),
         })
     };
@@ -4364,12 +4398,20 @@ impl ScanNode {
             .map(|w| super::parscan::chunk(IndexChunk::new(txn.scan_snap(&w[0], &w[1], &snap), fetch.clone()), bulk).into())
             .collect();
         drop(txn);
+        // (The index has an entry: initplans its filter reads first run now, `initplans_put_in`.)
+        let filter = match &p.filter {
+            Some(f) => match super::kernel::compile(f) {
+                None if initplans_first(f, ctx) => super::kernel::compile(&initplans_put_in(f, ctx)?),
+                k => k,
+            },
+            None => None,
+        };
         let d = Decode {
             need: self.need.as_deref().map(Arc::from),
             missing: p.table.columns.iter().map(|c| c.missing.clone()).collect(),
             types: p.table.columns.iter().map(|c| c.ty.clone()).collect(),
             with_key: p.with_key,
-            filter: p.filter.as_ref().and_then(super::kernel::compile),
+            filter,
             filtered: p.filter.is_some(),
             spec,
             stages,
