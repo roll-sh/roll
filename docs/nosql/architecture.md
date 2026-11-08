@@ -174,8 +174,8 @@ node alone (the memory backend) none of this changes anything.
   `diff` reads a parent another node serves through a throwaway zero-copy branch.
 - **Moves.** When the lease starts moving (rebalancing, a drain on SIGTERM) or is lost, the
   owner releases the database: registered clients get `STATUS_CHANGE DOWN`, connections close
-  over a second (each at its own moment, so they don't all reconnect at once; a node releases
-  four databases at a time), requests in flight finish, the commit log is shipped and the
+  over a second (each at its own moment, so they don't all reconnect at once), requests in
+  flight finish, the commit log is shipped and the
   manifest written (from here every acknowledged write is in object storage, `async` ones
   included), the memtables are flushed, and only then is the lease released. Drivers see their
   connection close and reconnect to the same host name, landing on the new owner: the driver

@@ -182,9 +182,6 @@ pub struct Node {
     idle_timeouts: Mutex<HashMap<String, Option<Duration>>>,
     /// The other nodes serving the same databases, if any ([`Node::set_fleet`]).
     fleet: OnceLock<Arc<dyn Fleet>>,
-    /// Databases moving away at once (each flushes): a draining node releases them a few at a
-    /// time, so their clients don't all reconnect in the same moment.
-    releases: tokio::sync::Semaphore,
     me: Weak<Node>,
 }
 
@@ -223,7 +220,6 @@ impl Node {
             transitions: Mutex::new(HashMap::new()),
             idle_timeouts: Mutex::new(HashMap::new()),
             fleet: OnceLock::new(),
-            releases: tokio::sync::Semaphore::new(4),
             me: me.clone(),
         });
         let weak = Arc::downgrade(&node);
@@ -271,10 +267,11 @@ impl Node {
     /// The database leaves this node (it moved, or the lease was lost): registered clients get
     /// `STATUS_CHANGE DOWN` and every client is disconnected within [`MOVE_SPREAD`]; then the
     /// log is shipped and the manifest written, so every acknowledged write is in object storage
-    /// even if the handoff stops waiting; then the memtables are flushed and the database
-    /// dropped. Its residence goes last, which lets the handoff complete.
+    /// even if the handoff stops waiting; then the memtables are flushed (as many databases at
+    /// once as the flush concurrency allows) and the database dropped. Its residence goes last,
+    /// which lets the handoff complete. Every database starts at once: one waiting its turn
+    /// would keep taking writes past the handoff's timeout.
     pub async fn release(&self, id: &str) {
-        let _turn = self.releases.acquire().await;
         let lock = self.transition_lock(id);
         let _g = lock.lock().await;
         let Some(l) = self.get_loaded(id) else { return };
@@ -333,11 +330,15 @@ impl Node {
                     }
                 }
             }
-            let (Some(node), Some(l)) = (node.upgrade(), loaded.upgrade()) else { return };
-            let current = node.get_loaded(&id).is_some_and(|c| Arc::ptr_eq(&c, &l));
-            drop(l);
-            if current {
-                node.release(&id).await;
+            // A residence can end while its load finishes: wait for the database to be in place.
+            for _ in 0..250 {
+                let (Some(node), Some(l)) = (node.upgrade(), loaded.upgrade()) else { return };
+                if node.get_loaded(&id).is_some_and(|c| Arc::ptr_eq(&c, &l)) {
+                    drop(l);
+                    return node.release(&id).await;
+                }
+                drop((node, l));
+                tokio::time::sleep(Duration::from_millis(20)).await;
             }
         });
     }
