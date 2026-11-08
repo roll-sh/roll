@@ -720,6 +720,10 @@ mod order {
 /// the grant: a grant's wakeup was lost (tests read it).
 pub static LATE_GRANTS: AtomicU64 = AtomicU64::new(0);
 
+/// The oldest grant a waiter found when its sleep timed out, in microseconds (tests read it):
+/// no wakeup is lost, so only a timeout racing a grant leaves one here, and a fresh one.
+pub static MAX_TIMED_OUT_GRANT_US: AtomicU64 = AtomicU64::new(0);
+
 impl Part {
     /// A strong lock of relation `key` is held or asked for.
     fn mark_strong(&mut self, key: &[u8], strong: &[AtomicU32]) {
@@ -1428,8 +1432,12 @@ impl LockManager {
         let mut logged = false;
         loop {
             if let Some(granted_at) = g.waiters.get(&proc).filter(|x| x.status == Status::Granted).map(|x| x.granted_at) {
-                if timed_out && granted_at.is_some_and(|t| t.elapsed() >= Duration::from_millis(40)) {
-                    LATE_GRANTS.fetch_add(1, Ordering::Relaxed);
+                if timed_out && let Some(t) = granted_at {
+                    let us = t.elapsed().as_micros() as u64;
+                    MAX_TIMED_OUT_GRANT_US.fetch_max(us, Ordering::Relaxed);
+                    if us >= 40_000 {
+                        LATE_GRANTS.fetch_add(1, Ordering::Relaxed);
+                    }
                 }
                 if logged {
                     log_wait(&g, key, proc, mode, start, "acquired", false);
@@ -1485,7 +1493,8 @@ impl LockManager {
                         // (Queues reordered: whoever that lets in was woken.)
                     }
                     Deadlock::None => {
-                        if log_waits {
+                        // (Not when it was granted meanwhile.)
+                        if log_waits && all.get(key).waiters.get(&proc).is_some_and(|w| w.status == Status::Waiting) {
                             logged = true;
                             log_wait(all.get(key), key, proc, mode, start, "still waiting for", true);
                         }
@@ -2696,39 +2705,62 @@ mod tests {
         assert_eq!(m.held_count(), 0);
     }
 
-    /// Seeded stress: threads take and release heavyweight and row locks over every
-    /// partition with random wait policies, lock timeouts and cancels, deadlocking now and
-    /// then. Conflicting holders never overlap, no grant's wakeup is lost (`LATE_GRANTS`), and
-    /// pg_locks never shows a conflicting granted pair.
+    /// Seeded stress: threads take and release object locks, relation locks (weak ones on the
+    /// fast path, strong ones moving its holds) and row locks (some into compact sets) over
+    /// every partition with random wait policies, deadlocking now and then; the first run also
+    /// with lock timeouts and cancels. Conflicting holders never overlap, pg_locks never shows a
+    /// conflicting granted pair nor a backend granted and waiting in one mode, and no grant's
+    /// wakeup is lost: without interruptions, no waiter finds its grant only when its sleep
+    /// times out, 5 ms or more after it.
     #[test]
     fn partitions_under_load() {
-        const THREADS: usize = 8;
         let seed: u64 = std::env::var("LOCKS_SEED").ok().and_then(|s| s.parse().ok()).unwrap_or(0x5eed);
+        let late = LATE_GRANTS.load(Ordering::Relaxed);
+        stress(seed, true);
+        assert_eq!(LATE_GRANTS.load(Ordering::Relaxed), late, "a grant's wakeup was lost");
+        MAX_TIMED_OUT_GRANT_US.store(0, Ordering::Relaxed);
+        stress(seed ^ 0x9e37_79b9, false);
+        let us = MAX_TIMED_OUT_GRANT_US.load(Ordering::Relaxed);
+        assert!(us < 5_000, "a waiter found its grant {us} us old when its sleep timed out");
+    }
+
+    fn stress(seed: u64, interrupts: bool) {
+        const THREADS: usize = 8;
+        const N: usize = 48;
         let m = Arc::new(LockManager::default());
-        let keys: Arc<Vec<Vec<u8>>> = Arc::new((0..48).map(|i| object_key(1, 1259, i, 0)).collect());
-        let rows: Arc<Vec<Vec<u8>>> = Arc::new((0..48u32).map(|i| [&[0, 0, 64, 0, 0, 0, 0, 0][..], &i.to_be_bytes()].concat()).collect());
+        // Even: object locks; odd: relations of database 1 (the fast path's).
+        let keys: Arc<Vec<Vec<u8>>> = Arc::new(
+            (0..N as u32).map(|i| if i % 2 == 0 { object_key(1, 1259, i, 0) } else { relation_key(1, 16384 + i) }).collect(),
+        );
+        let rows: Arc<Vec<Vec<u8>>> = Arc::new((0..N as u32).map(|i| [&[0, 0, 64, 0, 0, 0, 0, 0][..], &i.to_be_bytes()].concat()).collect());
         // What has been granted and not yet released, as the threads saw it: (owner, mode).
-        let held: Arc<Vec<Mutex<Vec<(u64, LockMode)>>>> = Arc::new((0..48).map(|_| Mutex::default()).collect());
-        let held_rows: Arc<Vec<Mutex<Vec<(u64, RowLockMode)>>>> = Arc::new((0..48).map(|_| Mutex::default()).collect());
+        let held: Arc<Vec<Mutex<Vec<(u64, LockMode)>>>> = Arc::new((0..N).map(|_| Mutex::default()).collect());
+        let held_rows: Arc<Vec<Mutex<Vec<(u64, RowLockMode)>>>> = Arc::new((0..N).map(|_| Mutex::default()).collect());
         let cancels: Arc<Vec<AtomicBool>> = Arc::new((0..THREADS).map(|_| AtomicBool::new(false)).collect());
         let stop = Arc::new(AtomicBool::new(false));
-        let late = LATE_GRANTS.load(Ordering::Relaxed);
+        // What ended requests other than a grant: deadlocks, lock timeouts, cancels, skips.
+        let ends: Arc<[AtomicU64; 4]> = Arc::new(Default::default());
         let rng = |s: &mut u64, n: usize| {
             *s ^= *s << 13;
             *s ^= *s >> 7;
             *s ^= *s << 17;
             (*s % n as u64) as usize
         };
-        // pg_locks never shows two backends' conflicting granted holds; pg_blocking_pids runs.
         let watcher = {
             let (m, stop) = (m.clone(), stop.clone());
             thread::spawn(move || {
                 let mut s = seed ^ 0xabc;
                 while !stop.load(Ordering::Relaxed) {
                     let snap = m.snapshot();
-                    for (i, a) in snap.iter().enumerate().filter(|(_, a)| a.granted) {
-                        for b in snap[i + 1..].iter().filter(|b| b.granted && b.tag == a.tag && b.pid != a.pid) {
-                            assert!(!a.mode.conflicts_with(b.mode), "pg_locks: {a:?} and {b:?}");
+                    for (i, a) in snap.iter().enumerate() {
+                        for b in snap[i + 1..].iter().filter(|b| b.tag == a.tag) {
+                            if a.granted && b.granted && a.pid != b.pid {
+                                assert!(!a.mode.conflicts_with(b.mode), "pg_locks: {a:?} and {b:?}");
+                            }
+                            // (Granted one mode and waiting for another is an upgrade.)
+                            if a.granted != b.granted && a.pid == b.pid {
+                                assert!(a.mode != b.mode, "pg_locks: granted and waiting: {a:?} and {b:?}");
+                            }
                         }
                     }
                     m.blocking_pids(1 + rng(&mut s, THREADS) as i32);
@@ -2736,7 +2768,7 @@ mod tests {
                 }
             })
         };
-        let canceller = {
+        let canceller = interrupts.then(|| {
             let (cancels, stop) = (cancels.clone(), stop.clone());
             thread::spawn(move || {
                 let mut s = seed ^ 0xdef;
@@ -2747,18 +2779,29 @@ mod tests {
                     thread::sleep(Duration::from_millis(3));
                 }
             })
-        };
+        });
         let workers: Vec<_> = (0..THREADS)
             .map(|t| {
-                let (m, keys, rows, held, held_rows, cancels) =
-                    (m.clone(), keys.clone(), rows.clone(), held.clone(), held_rows.clone(), cancels.clone());
+                let (m, keys, rows, held, held_rows, cancels, ends) =
+                    (m.clone(), keys.clone(), rows.clone(), held.clone(), held_rows.clone(), cancels.clone(), ends.clone());
+                let end = move |r: &Result<bool>| {
+                    let i = match r {
+                        Err(e) if e.code == code::DEADLOCK_DETECTED => 0,
+                        Err(e) if e.code == code::LOCK_NOT_AVAILABLE => 1,
+                        Err(_) => 2,
+                        Ok(_) => 3,
+                    };
+                    ends[i].fetch_add(1, Ordering::Relaxed);
+                };
                 thread::spawn(move || {
                     let mut s = seed.wrapping_mul(t as u64 + 1) | 1;
                     let p = proc(t as u32 + 1);
-                    for i in 0..200u64 {
+                    let slot = m.fast_slot(p).unwrap();
+                    for i in 0..400u64 {
                         let owner = (t as u64) << 32 | i;
                         cancels[t].store(false, Ordering::Relaxed);
                         m.hold_xact_lock(owner, owner, p, owner);
+                        let compact = rng(&mut s, 4) == 0;
                         let (mut my_keys, mut my_rows) = (vec![xact_key(owner)], Vec::new());
                         for _ in 0..1 + rng(&mut s, 3) {
                             let policy = match rng(&mut s, 10) {
@@ -2766,11 +2809,16 @@ mod tests {
                                 1 => WaitPolicy::SkipLocked,
                                 _ => WaitPolicy::Block,
                             };
-                            let lock_timeout = (rng(&mut s, 4) == 0).then_some(Duration::from_millis(20));
+                            let lock_timeout = (interrupts && rng(&mut s, 4) == 0).then_some(Duration::from_millis(20));
                             let w = Waits { deadlock_timeout: Duration::from_millis(10), lock_timeout, ..Waits::new(policy, &cancels[t]) };
                             if rng(&mut s, 2) == 0 {
                                 let (k, mode) = (rng(&mut s, keys.len()), LockMode::ALL[rng(&mut s, 8)]);
-                                match m.acquire(&keys[k], owner, p, mode, &w, &String::new) {
+                                let fast = rng(&mut s, 2) == 0 && m.acquire_fast(&slot, &keys[k], owner, mode);
+                                let got = if fast { Ok(true) } else { m.acquire(&keys[k], owner, p, mode, &w, &String::new) };
+                                if !matches!(got, Ok(true)) {
+                                    end(&got);
+                                }
+                                match got {
                                     Ok(true) => {
                                         let mut h = held[k].lock();
                                         for (o, md) in h.iter() {
@@ -2786,7 +2834,13 @@ mod tests {
                                 let r = rng(&mut s, rows.len());
                                 let mode = [RowLockMode::KeyShare, RowLockMode::Share, RowLockMode::NoKeyUpdate, RowLockMode::Update][rng(&mut s, 4)];
                                 let tuple = || tuple_key(1, 1, &rows[r]);
-                                match m.lock_row(&rows[r], &tuple, owner, owner, p, owner, mode, &w, &|| "t".into(), None, &|| None) {
+                                let mut compacted = false;
+                                let into = compact.then_some(&mut compacted);
+                                let got = m.lock_row(&rows[r], &tuple, owner, owner, p, owner, mode, &w, &|| "t".into(), into, &|| None);
+                                if !matches!(got, Ok(true)) {
+                                    end(&got);
+                                }
+                                match got {
                                     Ok(true) => {
                                         let mut h = held_rows[r].lock();
                                         for (o, md) in h.iter() {
@@ -2800,7 +2854,7 @@ mod tests {
                                 }
                             }
                         }
-                        if rng(&mut s, 4) == 0 {
+                        if rng(&mut s, 2) == 0 {
                             thread::sleep(Duration::from_millis(1));
                         }
                         // (Forgotten here before they are released: what is listed is held.)
@@ -2810,6 +2864,8 @@ mod tests {
                         for h in held_rows.iter() {
                             h.lock().retain(|(o, _)| *o != owner);
                         }
+                        // As a transaction ends: its fast-path holds, then the main table's.
+                        m.release_fast_owner(&slot, owner);
                         m.release_with_rows(owner, my_keys, my_rows);
                     }
                 })
@@ -2820,8 +2876,11 @@ mod tests {
         }
         stop.store(true, Ordering::Relaxed);
         watcher.join().unwrap();
-        canceller.join().unwrap();
+        if let Some(c) = canceller {
+            c.join().unwrap();
+        }
+        let n: Vec<u64> = ends.iter().map(|e| e.load(Ordering::Relaxed)).collect();
+        eprintln!("stress (interrupts {interrupts}): deadlocks {}, lock timeouts / NOWAIT {}, cancels {}, skipped {}", n[0], n[1], n[2], n[3]);
         assert_eq!(m.held_count(), 0);
-        assert_eq!(LATE_GRANTS.load(Ordering::Relaxed), late, "a grant's wakeup was lost");
     }
 }

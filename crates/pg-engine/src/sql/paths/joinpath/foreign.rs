@@ -141,8 +141,10 @@ impl Search<'_, '_, '_> {
         // (A locking level with relations a remote query can't lock, local ones: the level's
         // row marks go up from every relation to its LockRows, the join's as its bases'
         // whole rows, and EvalPlanQual rechecks a row with the local join path the
-        // relation already has (GetExistingLocalJoinPath); without one, no remote join.)
-        let epq = if self.leaves.iter().any(|l| l.scan.as_ref().is_some_and(|(s, _)| s.mark.is_some())) && !self.fdw_lock_level() {
+        // relation already has (GetExistingLocalJoinPath); without one, no remote join.
+        // An UPDATE's or DELETE's level too, its other relations' marks whole rows.)
+        let marked = self.leaves.iter().any(|l| l.scan.as_ref().is_some_and(|(s, _)| s.mark.is_some()));
+        let epq = if (marked || self.pl.fdw_dml_level.get()) && !self.fdw_lock_level() {
             let Some(p) = self.local_join_path(ri) else { return };
             Some(p)
         } else {

@@ -164,38 +164,103 @@ fn row_values(bytes: &[u8]) -> Option<&[u8]> {
     bytes.get(pos..)
 }
 
-/// The value at `data[pos]` into `col`'s typed slot (false: it doesn't fit: odd).
+/// The value at `data[*pos]` into `col`'s typed slot, `*pos` moved past it (false: it doesn't
+/// fit, `*pos` unchanged: odd). A string's bytes stay where they are: in `buf` (the block
+/// buffer `data` is in, at `base`), else copied into `own` (buffer 0).
 #[inline]
-fn push_typed(col: &mut Col, own: &mut Vec<u8>, data: &[u8], pos: usize) -> bool {
-    let t = data[pos];
-    let le = |n: usize| data.get(pos + 1..pos + 1 + n);
+fn push_typed(col: &mut Col, own: &mut Vec<u8>, data: &[u8], pos: &mut usize, buf: Option<(u32, usize)>) -> bool {
+    let p = *pos;
+    let t = data[p];
+    macro_rules! fixed {
+        ($v:expr, $ty:ty, $n:expr, $conv:expr) => {{
+            let Some(x) = data.get(p + 1..p + 1 + $n) else { return false };
+            let x = <$ty>::from_le_bytes(x.try_into().unwrap());
+            $v.push($conv(x));
+            *pos = p + 1 + $n;
+        }};
+    }
     match (&mut col.data, t) {
-        (ColData::I32(v), tag::INT4) => v.push(i32::from_le_bytes(le(4).and_then(|x| x.try_into().ok()).unwrap_or_default())),
-        (ColData::I32(v), tag::INT2) => v.push(i16::from_le_bytes(le(2).and_then(|x| x.try_into().ok()).unwrap_or_default()) as i32),
-        (ColData::Date(v), tag::DATE) => v.push(i32::from_le_bytes(le(4).and_then(|x| x.try_into().ok()).unwrap_or_default())),
-        (ColData::I64(v), tag::INT8) => v.push(i64::from_le_bytes(le(8).and_then(|x| x.try_into().ok()).unwrap_or_default())),
-        (ColData::F64(v), tag::FLOAT8) => v.push(f64::from_le_bytes(le(8).and_then(|x| x.try_into().ok()).unwrap_or_default())),
-        (ColData::F64(v), tag::FLOAT4) => v.push(f32::from_le_bytes(le(4).and_then(|x| x.try_into().ok()).unwrap_or_default()) as f64),
-        (ColData::Bool(v), tag::TRUE | tag::FALSE) => v.push(t == tag::TRUE),
-        (ColData::Num(v), tag::NUMERIC) => match super::row::peek_num(data, pos) {
-            Some(Some(n)) => v.push(n),
-            _ => return false,
-        },
-        (ColData::Bytes(v), tag::TEXT | tag::BYTEA) => {
-            let mut p = pos + 1;
-            let Ok(n) = get_varint(data, &mut p) else { return false };
-            let Some(x) = data.get(p..p + n as usize) else { return false };
-            let s = own.len() as u32;
-            own.extend_from_slice(x);
-            v.push((0, s, own.len() as u32));
+        (ColData::I32(v), tag::INT4) => fixed!(v, i32, 4, |x| x),
+        (ColData::I32(v), tag::INT2) => fixed!(v, i16, 2, |x: i16| x as i32),
+        (ColData::Date(v), tag::DATE) => fixed!(v, i32, 4, |x| x),
+        (ColData::I64(v), tag::INT8) => fixed!(v, i64, 8, |x| x),
+        (ColData::F64(v), tag::FLOAT8) => fixed!(v, f64, 8, |x| x),
+        (ColData::F64(v), tag::FLOAT4) => fixed!(v, f32, 4, |x: f32| x as f64),
+        (ColData::Bool(v), tag::TRUE | tag::FALSE) => {
+            v.push(t == tag::TRUE);
+            *pos = p + 1;
         }
-        (ColData::Values(v), _) => match super::row::decode_value(data, &mut pos.clone()) {
-            Ok(x) => v.push(x),
-            Err(_) => return false,
-        },
+        (ColData::Num(v), tag::NUMERIC) => {
+            // (Scale and length in a byte each, the common case; `peek_num` otherwise.)
+            let (sc, n) = match (data.get(p + 1), data.get(p + 2)) {
+                (Some(&sc), Some(&n)) if sc < 0x80 && n < 0x80 => (sc as u32, n as usize),
+                _ => {
+                    let Some(Some(x)) = super::row::peek_num(data, p) else { return false };
+                    let mut q = p + 1;
+                    if get_varint(data, &mut q).is_err() {
+                        return false;
+                    }
+                    let Ok(len) = get_varint(data, &mut q) else { return false };
+                    v.push(x);
+                    *pos = q + len as usize;
+                    return true;
+                }
+            };
+            let Some(x) = data.get(p + 3..p + 3 + n) else { return false };
+            // (Two's complement, little-endian, none longer than an i128's.)
+            if n > 16 {
+                return false;
+            }
+            let fill = if n > 0 && x[n - 1] & 0x80 != 0 { 0xFF } else { 0 };
+            let mut w = [fill; 16];
+            w[..n].copy_from_slice(x);
+            v.push((i128::from_le_bytes(w), sc));
+            *pos = p + 3 + n;
+        }
+        (ColData::Bytes(v), tag::TEXT | tag::BYTEA) => {
+            let mut q = p + 1;
+            let Ok(n) = get_varint(data, &mut q) else { return false };
+            let e = q + n as usize;
+            if e > data.len() {
+                return false;
+            }
+            match buf {
+                Some((b, base)) => v.push((b, (base + q) as u32, (base + e) as u32)),
+                None => {
+                    let s = own.len() as u32;
+                    own.extend_from_slice(&data[q..e]);
+                    v.push((0, s, own.len() as u32));
+                }
+            }
+            *pos = e;
+        }
+        (ColData::Values(v), _) => {
+            let mut q = p;
+            match super::row::decode_value(data, &mut q) {
+                Ok(x) => v.push(x),
+                Err(_) => return false,
+            }
+            *pos = q;
+        }
         _ => return false,
     }
     true
+}
+
+/// `row::skip_value_fast` with numerics stepped over in place too.
+#[inline]
+fn skip(data: &[u8], pos: &mut usize) -> Result<()> {
+    let p = *pos;
+    if data.get(p) == Some(&tag::NUMERIC)
+        && let (Some(&sc), Some(&n)) = (data.get(p + 1), data.get(p + 2))
+        && sc < 0x80
+        && n < 0x80
+        && p + 3 + (n as usize) <= data.len()
+    {
+        *pos = p + 3 + n as usize;
+        return Ok(());
+    }
+    super::row::skip_value_fast(data, pos)
 }
 
 /// Rows `rows` of `batch` as columns into `out`: the columns `need` marks, decoded as
@@ -229,42 +294,56 @@ pub fn decode_cols(
     out.bufs.clear();
     out.ext.clear();
     out.own.clear();
+    // (Buffer 0 is `own`, put in place at the end; the block buffers rows are in follow,
+    // each once while consecutive rows share it.)
+    out.bufs.push(Bytes::new());
     let upto = need.iter().take(ncols).rposition(|b| *b).map_or(0, |c| c + 1);
     for (r, i) in rows.enumerate() {
-        let (_, bytes) = batch.get(i);
+        let (bytes, inbuf) = batch.value_in(i);
         let ext = matches!(bytes.first(), Some(&(ROW_HEADER_EXT | ROW_HEADER_TID_EXT)));
         if ext {
             out.ext.push(r as u32);
         }
         let data = row_values(bytes).ok_or_else(|| crate::error::internal("stored row without a header"))?;
+        let buf = inbuf.map(|(b, _)| {
+            let last = out.bufs.last().unwrap();
+            if out.bufs.len() == 1 || last.as_ptr() != b.as_ptr() || last.len() != b.len() {
+                out.bufs.push(b.clone());
+            }
+            ((out.bufs.len() - 1) as u32, data.as_ptr() as usize - b.as_ptr() as usize)
+        });
         let mut pos = 0;
         let n = get_varint(data, &mut pos)? as usize;
         for c in 0..upto {
+            let Some(col) = out.cols[c].as_mut() else {
+                if c < n {
+                    skip(data, &mut pos)?;
+                }
+                continue;
+            };
             let present = c < n;
-            let at = pos;
-            if present && c + 1 < upto {
-                super::row::skip_value_fast(data, &mut pos)?;
+            if present && !ext && data.get(pos) != Some(&tag::NULL) && push_typed(col, &mut out.own, data, &mut pos, buf) {
+                col.nulls.push(false);
+                continue;
             }
-            let Some(col) = out.cols[c].as_mut() else { continue };
-            if ext || (present && data.get(at) == Some(&tag::NULL)) {
+            if ext || (present && data.get(pos) == Some(&tag::NULL)) {
+                if present {
+                    skip(data, &mut pos)?;
+                }
                 col.nulls.push(true);
                 col.data.push_default();
                 continue;
             }
-            if !present || !push_typed(col, &mut out.own, data, at) {
-                let v = match present {
-                    true => super::row::decode_value(data, &mut at.clone())?,
-                    false => missing.get(c).cloned().unwrap_or(Value::Null),
-                };
-                col.nulls.push(v.is_null());
-                col.data.push_default();
-                col.odd.push((r as u32, v));
-                continue;
-            }
-            col.nulls.push(false);
+            let v = match present {
+                true => super::row::decode_value(data, &mut pos)?,
+                false => missing.get(c).cloned().unwrap_or(Value::Null),
+            };
+            col.nulls.push(v.is_null());
+            col.data.push_default();
+            col.odd.push((r as u32, v));
         }
     }
-    out.bufs.push(Bytes::from(std::mem::take(&mut out.own)));
+    out.bufs[0] = Bytes::from(std::mem::take(&mut out.own));
     Ok(())
 }
 

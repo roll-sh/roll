@@ -13,6 +13,22 @@ use std::sync::Arc;
 pub const SEQ_PAGE_COST: f64 = 1.0;
 pub const CPU_TUPLE_COST: f64 = 0.01;
 pub const CPU_OPERATOR_COST: f64 = 0.0025;
+
+/// `self * b + c` as PostgreSQL's build computes `c += self * b` in its cost functions: GCC
+/// contracts it into one fused multiply-add on aarch64 (its default -ffp-contract=fast,
+/// with fmadd in the base ISA) and not on x86-64 (no FMA in the baseline ISA). The two
+/// round differently, and EXPLAIN's two decimals show it at a boundary (mw.py's 3M-row
+/// `Bitmap Index Scan on mw1_k`: 197.595 fused prints 197.59, unfused 197.60).
+pub trait PgMulAdd {
+    fn pg_mul_add(self, b: f64, c: f64) -> f64;
+}
+
+impl PgMulAdd for f64 {
+    #[inline]
+    fn pg_mul_add(self, b: f64, c: f64) -> f64 {
+        if cfg!(target_arch = "aarch64") { self.mul_add(b, c) } else { self * b + c }
+    }
+}
 const DEFAULT_EQ_SEL: f64 = 0.005;
 const DEFAULT_INEQ_SEL: f64 = 0.3333333333333333;
 const DEFAULT_RANGE_INEQ_SEL: f64 = 0.005;
@@ -1855,7 +1871,7 @@ impl Est<'_> {
                     selec = heursel;
                 } else {
                     let w = hist_size as f64 / 100.0;
-                    selec = selec.mul_add(w, heursel * (1.0 - w));
+                    selec = selec.pg_mul_add(w, heursel * (1.0 - w));
                 }
             }
             selec = selec.clamp(0.0001, 0.9999);
@@ -1868,7 +1884,7 @@ impl Est<'_> {
                     sumcommon += f;
                 }
             }
-            selec.mul_add(1.0 - nullfrac - sumcommon, mcv)
+            selec.pg_mul_add(1.0 - nullfrac - sumcommon, mcv)
         };
         if negate {
             result = 1.0 - result - nullfrac;

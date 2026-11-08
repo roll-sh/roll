@@ -284,7 +284,7 @@ impl TempFile {
     pub fn create_raw(ctx: &super::ExecCtx) -> Result<TempFile> {
         let dir = ctx.sess.db.store.spill_dir().join("tmp");
         let io = |e: std::io::Error| Error::new(code::INTERNAL_ERROR, format!("could not create temporary file: {e}"));
-        std::fs::create_dir_all(&dir).map_err(io)?;
+        crate::storage::durable::create_dir_all(&dir).map_err(io)?;
         let n = ctx.sess.temp.raw.fetch_add(1, Ordering::Relaxed);
         let p = dir.join(format!("e{}.{n}.{}", ctx.sess.pid, std::process::id()));
         let file = std::fs::OpenOptions::new().read(true).write(true).create_new(true).open(&p).map_err(io)?;

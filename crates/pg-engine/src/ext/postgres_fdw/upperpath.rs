@@ -175,7 +175,7 @@ pub fn grouped(ctx: &crate::exec::ExecCtx, cat: &Catalog, fmt: &FormatCtx, p: &P
             gpos[k] = Some(tlist.len());
         }
     }
-    finish(ctx, cat, fmt, &js, a, tlist, gpos.into_iter().flatten().collect(), having, pexprs, &sub)
+    finish(ctx, cat, fmt, &js, below, a, tlist, gpos.into_iter().flatten().collect(), having, pexprs, &sub)
 }
 
 /// The HAVING clauses split into sent and checked here, the projection over the grouped
@@ -186,6 +186,7 @@ fn finish(
     cat: &Catalog,
     fmt: &FormatCtx,
     js: &JoinScan,
+    agg: &Plan,
     a: Vec<AggCall>,
     mut tlist: Vec<Expr>,
     group_by: Vec<usize>,
@@ -197,6 +198,7 @@ fn finish(
     q.aggs = &a;
     let ship = |e: &Expr| q.shippable(&js.info, e);
     let mut remote = Vec::new();
+    let mut remote_src = Vec::new();
     let mut local_src = Vec::new();
     if let Some(h) = having {
         let mut parts = Vec::new();
@@ -205,6 +207,7 @@ fn finish(
             let sc = sub(&c)?;
             if ship(&sc) {
                 remote.push(sc);
+                remote_src.push(c);
             } else {
                 for i in agg_refs(&sc) {
                     let ae = Expr::Agg(i, a[i].ty.clone());
@@ -225,8 +228,18 @@ fn finish(
     let cols = js.bases.iter().map(|b| b.cols.clone()).collect();
     let n = tlist.len();
     let up = UpperScan { input: js.clone(), aggs: a, tlist, group_by, having: remote, local, order: Vec::new(), limit: None };
-    let est = match upper_estimate(ctx, js, &up.aggs, up.group_by.len(), up.having.len() + up.local.len()) {
-        Some((rows, startup, total)) => (rows, startup, total, js.info.width),
+    let est = match upper_estimate(ctx, js, agg, &up, &remote_src, &local_src) {
+        Some(e) => {
+            // (add_path among the grouped relation's local paths: the cheaper one.)
+            let here = match having {
+                Some(h) => Plan::Filter { input: Arc::new(agg.clone()), pred: h.clone() },
+                None => agg.clone(),
+            };
+            if crate::sql::explain::estimate(&Arc::new(here), ctx).total <= e.2 {
+                return None;
+            }
+            e
+        }
         None => (js.info.rows, js.info.startup, js.info.total, js.info.width),
     };
     let fr = crate::sql::plan::ForeignRel {
@@ -240,29 +253,44 @@ fn finish(
     Some(Plan::Project { input: Arc::new(Plan::Foreign(Box::new(fr))), exprs })
 }
 
-/// estimate_path_cost_size of a grouped relation without remote estimates, for one group
-/// (no GROUP BY, no HAVING): its input's bare cost, the aggregates' transition costs per
-/// input row and final costs, a tuple, then the transfer costs. (rows, startup, total);
-/// None: not that case.
-fn upper_estimate(ctx: &crate::exec::ExecCtx, js: &JoinScan, aggs: &[AggCall], ngroups: usize, nhaving: usize) -> Option<(f64, f64, f64)> {
-    use crate::sql::costs::CPU_TUPLE_COST;
-    if ngroups > 0 || nhaving > 0 || js.info.opts.use_remote_estimate {
-        return None;
-    }
+/// estimate_path_cost_size of a grouped relation without remote estimates: its input's bare
+/// cost; per input row the aggregates' transition costs, the grouping columns' comparisons
+/// and the grouping expressions' evaluation; per group (estimate_num_groups: the local Agg's
+/// rows) the final costs, a tuple and the HAVING clauses sent, those checked here per group
+/// retrieved; the target list per row; then the transfer costs. `agg` is the local Agg,
+/// `remote_src` / `local_src` its HAVING clauses sent and kept, over its row.
+/// (rows, startup, total, width); None: with use_remote_estimate.
+fn upper_estimate(
+    ctx: &crate::exec::ExecCtx,
+    js: &JoinScan,
+    agg: &Plan,
+    up: &UpperScan,
+    remote_src: &[Expr],
+    local_src: &[Expr],
+) -> Option<(f64, f64, f64, u32)> {
+    use crate::sql::costs::{CPU_OPERATOR_COST, CPU_TUPLE_COST, qual_cost};
     let info = &js.info;
     let o = &info.opts;
-    let (rows, rel_startup, rel_total) = match info.kind {
+    if o.use_remote_estimate {
+        return None;
+    }
+    let (input_rows, rel_startup, rel_total) = match info.kind {
         super::join::Kind::Base(_) => {
-            // (The base relation's own estimate, as wide as the columns aggregated.)
+            // (The base relation's own estimate, as wide as the columns grouped and
+            // aggregated.)
             let s = &js.bases.first()?.scan;
             let n = s.table.columns.len();
             let mut need = vec![false; n];
-            for a in aggs {
-                for c in a.args.iter().chain(a.filter.iter()).flat_map(|e| e.columns()) {
+            let mut mark = |e: &Expr| {
+                for c in e.columns() {
                     if c < n {
                         need[c] = true;
                     }
                 }
+            };
+            up.tlist.iter().chain(&up.having).for_each(&mut mark);
+            for a in &up.aggs {
+                a.args.iter().chain(a.filter.iter()).for_each(&mut mark);
             }
             let d = crate::sql::paths::describe_foreign(ctx, s, &need)?;
             (d.rows, d.startup - o.startup_cost, d.total - o.startup_cost - (o.tuple_cost + CPU_TUPLE_COST) * d.rows)
@@ -270,10 +298,39 @@ fn upper_estimate(ctx: &crate::exec::ExecCtx, js: &JoinScan, aggs: &[AggCall], n
         _ if info.rel_total >= 0.0 => (info.rows, info.rel_startup, info.rel_total),
         _ => return None,
     };
-    let (per_row, per_group) = crate::sql::paths::parallel::agg_clause_costs(aggs, crate::sql::paths::parallel::AggSplit::Simple);
-    let startup = rel_startup + per_row * rows;
-    let total = startup + (rel_total - rel_startup) + per_group + CPU_TUPLE_COST;
-    Some((1.0, startup + o.startup_cost, total + o.startup_cost + o.tuple_cost + CPU_TUPLE_COST))
+    let rows_of = |p: Plan| crate::sql::explain::estimate(&Arc::new(p), ctx).rows;
+    let groups = if up.group_by.is_empty() { 1.0 } else { rows_of(agg.clone()) };
+    let filtered = |mut conds: Vec<Expr>| match conds.len() {
+        0 => groups,
+        1 => rows_of(Plan::Filter { input: Arc::new(agg.clone()), pred: conds.remove(0) }),
+        _ => rows_of(Plan::Filter { input: Arc::new(agg.clone()), pred: Expr::And(conds) }),
+    };
+    let retrieved = filtered(remote_src.to_vec());
+    let rows = if local_src.is_empty() { retrieved } else { filtered(remote_src.iter().chain(local_src).cloned().collect()) };
+    let (per_row, per_group) = crate::sql::paths::parallel::agg_clause_costs(&up.aggs, crate::sql::paths::parallel::AggSplit::Simple);
+    let keys: Vec<&Expr> = up.group_by.iter().filter_map(|&k| up.tlist.get(k.wrapping_sub(1))).collect();
+    let input_target: f64 = keys.iter().map(|e| qual_cost(e)).sum();
+    let target: f64 = up.tlist.iter().map(qual_cost).sum();
+    let startup = rel_startup + per_row * input_rows + CPU_OPERATOR_COST * keys.len() as f64 * input_rows;
+    let mut run = rel_total - rel_startup + input_target * input_rows + (per_group + CPU_TUPLE_COST) * groups;
+    run += up.having.iter().map(qual_cost).sum::<f64>() * groups;
+    run += up.local.iter().map(qual_cost).sum::<f64>() * retrieved;
+    run += target * rows;
+    let cat = ctx.catalog();
+    let width: u32 = up
+        .tlist
+        .iter()
+        .map(|e| match e {
+            Expr::Col(g, ty) => js
+                .bases
+                .iter()
+                .find_map(|b| b.col(*g).filter(|&k| k < b.scan.table.columns.len()).map(|k| crate::sql::costs::col_width(&cat, &b.scan.table, k)))
+                .unwrap_or_else(|| crate::sql::costs::type_width(ty)),
+            e => crate::sql::costs::type_width(&e.ty()),
+        })
+        .sum();
+    let startup = startup + o.startup_cost;
+    Some((rows, startup, startup + run + (o.tuple_cost + CPU_TUPLE_COST) * retrieved, width))
 }
 
 /// An expression over the Agg's row as one over the grouped relation's (its target

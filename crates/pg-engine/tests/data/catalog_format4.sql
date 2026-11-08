@@ -1,0 +1,45 @@
+-- A database of every kind of relation whose directory record catalog format 5 stores (made
+-- by a format-4 build: tests/data/catalog_format4.tar.gz; tests/data/catalog_format4.pgclass
+-- is that build's pg_class rows of it).
+CREATE SCHEMA s1;
+CREATE TABLE s1.parent (id int PRIMARY KEY, v text DEFAULT 'x' CHECK (v <> ''), n numeric CHECK (n > 0));
+CREATE TABLE s1.child (extra int) INHERITS (s1.parent);
+CREATE TABLE s1.part (k int NOT NULL, v text) PARTITION BY RANGE (k);
+CREATE TABLE s1.part1 PARTITION OF s1.part FOR VALUES FROM (0) TO (100);
+CREATE TABLE s1.part2 PARTITION OF s1.part FOR VALUES FROM (100) TO (200);
+CREATE INDEX part_k ON s1.part (k);
+CREATE TABLE s1.ref (id serial PRIMARY KEY, p int REFERENCES s1.parent (id), big text) WITH (fillfactor = 70, toast.autovacuum_enabled = off);
+CREATE INDEX ref_lower ON s1.ref (lower(big)) WITH (fillfactor = 80) WHERE id > 0;
+CREATE INDEX ref_hash ON s1.ref USING hash (p);
+ALTER TABLE s1.ref ENABLE ROW LEVEL SECURITY;
+ALTER TABLE s1.ref FORCE ROW LEVEL SECURITY;
+CREATE POLICY pol ON s1.ref USING (id > 0);
+ALTER TABLE s1.ref REPLICA IDENTITY FULL;
+CREATE UNLOGGED TABLE s1.logless (id serial PRIMARY KEY, t text);
+CREATE TYPE s1.pair AS (a int, b text);
+CREATE TABLE s1.typed OF s1.pair;
+CREATE TABLE s1.uses (p s1.pair, ps s1.pair[]);
+ALTER TABLE s1.uses ADD COLUMN gone int;
+ALTER TABLE s1.uses DROP COLUMN gone;
+CREATE VIEW s1.v WITH (security_barrier) AS SELECT id, v FROM s1.parent WHERE v <> 'y' WITH CHECK OPTION;
+CREATE VIEW s1.plain AS SELECT 1 AS one;
+CREATE MATERIALIZED VIEW s1.mv WITH (fillfactor = 60) AS SELECT id, v FROM s1.parent;
+CREATE UNIQUE INDEX mv_id ON s1.mv (id);
+CREATE MATERIALIZED VIEW s1.mv_empty AS SELECT 1 AS x WITH NO DATA;
+CREATE SEQUENCE s1.seq START 5;
+CREATE UNLOGGED SEQUENCE s1.useq;
+CREATE FUNCTION s1.f(a int) RETURNS int LANGUAGE sql AS 'SELECT a + 1';
+CREATE FUNCTION s1.trg() RETURNS trigger LANGUAGE plpgsql AS 'BEGIN RETURN NEW; END';
+CREATE TRIGGER t BEFORE INSERT ON s1.child FOR EACH ROW EXECUTE FUNCTION s1.trg();
+CREATE RULE r AS ON INSERT TO s1.typed DO ALSO NOTIFY typed;
+COMMENT ON TABLE s1.parent IS 'the parent';
+INSERT INTO s1.parent VALUES (1, 'a', 1.5), (2, 'b', 2.5);
+INSERT INTO s1.child VALUES (3, 'c', 3.5, 30);
+INSERT INTO s1.part VALUES (5, 'five'), (150, 'x');
+INSERT INTO s1.ref (p, big) VALUES (1, repeat('z', 5000));
+INSERT INTO s1.logless (t) VALUES ('u');
+SELECT nextval('s1.seq');
+REFRESH MATERIALIZED VIEW s1.mv;
+ANALYZE;
+TRUNCATE s1.part1;
+DO $$ BEGIN FOR i IN 1..300 LOOP EXECUTE format('CREATE TABLE s1.t%s (id int PRIMARY KEY, a text DEFAULT %L)', i, 'd' || i); END LOOP; END $$;
