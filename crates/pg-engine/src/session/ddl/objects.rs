@@ -1846,7 +1846,10 @@ impl Ddl<'_, '_> {
             self.cat.drop_comments(oid);
             if let Some(st) = &v.storage {
                 crate::exec::dml::truncate(st, self.ctx)?;
-                self.ctx.txn.borrow_mut().seq_drops.push(st.oid);
+                let mut txn = self.ctx.txn.borrow_mut();
+                txn.mark_new_storage(st.oid);
+                txn.seq_drops.push(st.oid);
+                drop(txn);
                 for i in &st.indexes {
                     if let Some(ix) = self.cat.indexes.remove(i) {
                         self.cat.remove_name(v.schema, &ix.name);
@@ -6153,7 +6156,12 @@ impl Ddl<'_, '_> {
     fn drop_table_now(&mut self, t: &Arc<Table>) -> Result<()> {
         crate::exec::dml::truncate(t, self.ctx)?;
         crate::exec::pgstat::count_drop(self.ctx, t.oid);
-        self.ctx.txn.borrow_mut().seq_drops.push(rowid_sequence(t).oid);
+        // (A rollback gives the table its rows back: its size models are laid out from them
+        // again, each row on the page it had, and its row ids go on.)
+        let mut txn = self.ctx.txn.borrow_mut();
+        txn.mark_new_storage(t.oid);
+        txn.seq_drops.push(rowid_sequence(t).oid);
+        drop(txn);
         for c in &t.columns {
             if let Some(s) = c.seq
                 && self
