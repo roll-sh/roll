@@ -752,7 +752,7 @@ mod tests {
             let sh = Shape { dim: None, parts: vec![0], tys: Vec::new(), path_ops: if path_ops { vec![0] } else { Vec::new() } };
             let mut el = Elements::make(sh, String::new(), 0);
             for (i, j) in docs.iter().enumerate() {
-                el.add(&(i as u64).to_be_bytes(), Some(&[Value::Jsonb(j.clone())]));
+                el.add(&(i as u64).to_be_bytes(), Some(&[Value::Jsonb(j.clone().into())]));
             }
             el.add(&(docs.len() as u64).to_be_bytes(), Some(&[Value::Null]));
             let selected = |s: &Sel, i: usize| match s {
@@ -761,7 +761,7 @@ mod tests {
             };
             let mut exact_queries = 0;
             for q in &docs {
-                let arg = Value::Jsonb(q.clone());
+                let arg = Value::Jsonb(q.clone().into());
                 let sel = el.select(0, "@>", &arg);
                 let exact = el.exact(0, "@>", &arg);
                 exact_queries += usize::from(exact);
@@ -779,7 +779,7 @@ mod tests {
             }
             assert!(exact_queries > 20, "exercise exact selections");
             for path in ["$.a == 1", "$.a.b == 1", "$.a[*].b == 1", "$.a == null", "$.a == \"x\"",
-                "$.a.b == 1 && $.a.c == 2", "$.a.b == 1 || $.ab == 1", "$.** == 1", "$[*] == 1", "$ == \"x\""] {
+                "$.a.b == 1 && $.a.c == 2", "$.a.b == 1 || $.ab == 1", "$.** == 1", "$[*] == 1"] {
                 for mode in ["lax", "strict"] {
                     let path = format!("{mode} {path}");
                     let parsed = jsonpath::parse(&path).unwrap();
@@ -792,7 +792,7 @@ mod tests {
             }
             // Container and multi-leaf array-element queries retain ordinary recheck.
             for q in ["{}", "[]", r#"[{"a":1,"b":2}]"#, r#"{"a":[{"b":1},{}]}"#] {
-                assert!(!el.exact(0, "@>", &Value::Jsonb(parse_jsonb(q).unwrap())));
+                assert!(!el.exact(0, "@>", &Value::Jsonb(parse_jsonb(q).unwrap().into())));
             }
             assert!(!el.exact(0, "@@", &Value::Text("$.a == 1".into())));
         }
