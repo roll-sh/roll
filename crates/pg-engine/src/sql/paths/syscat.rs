@@ -82,10 +82,21 @@ fn sys_indexes(t: SysTable) -> &'static [Arc<Index>] {
     static BY_TABLE: std::sync::OnceLock<HashMap<u32, Vec<Arc<Index>>>> = std::sync::OnceLock::new();
     BY_TABLE
         .get_or_init(|| {
+            // (The list's lines by catalog, split once: a process's first plan read it whole
+            // for every catalog.)
+            let mut lines: HashMap<&str, Vec<(usize, Vec<&str>)>> = HashMap::new();
+            for (n, line) in INDEXES.lines().filter(|l| !l.starts_with('#')).enumerate() {
+                let f: Vec<&str> = line.split('\t').collect();
+                if f.len() >= 3 {
+                    lines.entry(f[0]).or_default().push((n, f));
+                }
+            }
             let mut m = HashMap::new();
             for t in SysTable::all() {
                 // (The first of an oid, as `SysTable::by_oid` finds it.)
-                m.entry(t.oid()).or_insert_with(|| read_sys_indexes(t));
+                if let std::collections::hash_map::Entry::Vacant(e) = m.entry(t.oid()) {
+                    e.insert(read_sys_indexes(t, lines.get(t.name()).map_or(&[][..], |v| v.as_slice())));
+                }
             }
             m
         })
@@ -93,15 +104,14 @@ fn sys_indexes(t: SysTable) -> &'static [Arc<Index>] {
         .map_or(&[], |v| v.as_slice())
 }
 
-fn read_sys_indexes(t: SysTable) -> Vec<Arc<Index>> {
-    static INDEXES: &str = include_str!("../../catalog/sys_indexes.tsv");
+static INDEXES: &str = include_str!("../../catalog/sys_indexes.tsv");
+
+/// Catalog `t`'s indexes from its lines of the list: (line number, fields).
+fn read_sys_indexes(t: SysTable, lines: &[(usize, Vec<&str>)]) -> Vec<Arc<Index>> {
     let cols = t.columns();
     let mut out = Vec::new();
-    for (n, line) in INDEXES.lines().filter(|l| !l.starts_with('#')).enumerate() {
-        let f: Vec<&str> = line.split('\t').collect();
-        if f.len() < 3 || f[0] != t.name() {
-            continue;
-        }
+    for (n, f) in lines {
+        let n = *n;
         let keys: Option<Vec<usize>> = f[2]
             .split(',')
             .map(|k| cols.iter().position(|(c, _)| c == k))

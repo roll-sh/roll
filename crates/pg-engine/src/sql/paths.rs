@@ -403,7 +403,7 @@ struct Rel {
     /// has (the row's key, system columns).
     needed: Vec<bool>,
     other: bool,
-    indexes: Vec<IndexInfo>,
+    indexes: Arc<[IndexInfo]>,
     /// The scans a parameterized path is repeated for (1: not parameterized).
     loop_count: f64,
     /// Index expressions, with their statistics.
@@ -423,6 +423,37 @@ struct Rel {
     params: Arc<Vec<Expr>>,
     /// A postgres_fdw table's plain path (estimate_path_cost_size): startup and total cost.
     fdw: Option<(f64, f64)>,
+    /// Selectivities of clause lists over it already estimated (`Planner::sel`).
+    sels: SelMemo,
+}
+
+/// The selectivities `Planner::sel` estimated for one relation: the same list of clauses
+/// is estimated several times while its paths are costed (the relation's rows, then
+/// btcostestimate's index tuples and genericcostestimate's selectivity of each index's
+/// clauses, mostly the same list), and the estimate depends only on the list and the
+/// relation. A relation made from another (`Rel::shallow`) starts with none.
+/// (A relation a kept custom plan's `ScanChoice` holds is shared between sessions' threads.)
+#[derive(Default)]
+struct SelMemo(parking_lot::Mutex<Vec<(Vec<Expr>, f64)>>);
+
+impl SelMemo {
+    /// Entries kept: a relation's own list and its indexes' few.
+    const CAP: usize = 8;
+
+    fn get(&self, quals: &[Expr]) -> Option<f64> {
+        let m = self.0.lock();
+        m.iter()
+            .find(|(k, _)| k.len() == quals.len() && k.iter().zip(quals).all(|(a, b)| a.same_as(b)))
+            .map(|e| e.1)
+    }
+
+    fn put(&self, quals: &[Expr], sel: f64) {
+        let mut m = self.0.lock();
+        if m.len() == Self::CAP {
+            m.remove(0);
+        }
+        m.push((quals.to_vec(), sel));
+    }
 }
 
 impl Rel {
@@ -1912,13 +1943,7 @@ fn cheaper_total(a: &Path, b: &Path) -> bool {
 }
 
 fn cheapest(list: &[Path]) -> Option<&Path> {
-    let mut best: Option<&Path> = None;
-    for p in list {
-        if best.is_none_or(|b| cheaper_total(p, b)) {
-            best = Some(p);
-        }
-    }
-    best
+    cheapest_index(list).map(|i| &list[i])
 }
 
 /// What the relation's scan is asked for: an order (the query's pathkeys) and a LIMIT.
@@ -1994,6 +2019,10 @@ struct Planner<'c, 'a> {
     /// The ORDER BY over the grouping below: per key, (group key, descending, nulls
     /// first), for the order of the GROUP BY (`joinpath::grouped_join`).
     group_dirs: std::cell::RefCell<Option<GroupDirs>>,
+    /// The ORDER BY over the grouping below is all GROUP BY keys (so the grouping can give
+    /// its order) and has this LIMIT above it: the grouping's input path is chosen for the
+    /// rows the LIMIT reads of the sorted groups (`hinted_scan`).
+    group_sort_lim: std::cell::Cell<Option<Option<(f64, f64)>>>,
     /// Planning a join group under a grouping that may go partitionwise.
     pw_agg_join: std::cell::Cell<bool>,
     /// Planning a join group under a grouping a LIMIT reads (tuple_fraction > 0: the join
@@ -2060,6 +2089,7 @@ impl<'c, 'a> Planner<'c, 'a> {
             absorbed: Default::default(),
             post_cost: Default::default(),
             group_dirs: Default::default(),
+            group_sort_lim: Default::default(),
             pw_agg_join: Default::default(),
             group_limit: Default::default(),
             pw_retry: Default::default(),
@@ -2149,6 +2179,15 @@ struct AmCost {
 
 impl Planner<'_, '_> {
     fn sel(&self, rel: &Rel, quals: &[Expr]) -> f64 {
+        if let Some(s) = rel.sels.get(quals) {
+            return s;
+        }
+        let s = self.sel_of(rel, quals);
+        rel.sels.put(quals, s);
+        s
+    }
+
+    fn sel_of(&self, rel: &Rel, quals: &[Expr]) -> f64 {
         // Conditions on the row's ctid have estimates of their own (ctid_sel); range pairs
         // combine as clauselist_selectivity's do.
         if quals.iter().any(|q| ctid_sel(rel, q).is_some()) {
@@ -3068,6 +3107,7 @@ impl Rel {
             hidden: self.hidden.clone(),
             params: self.params.clone(),
             fdw: self.fdw,
+            sels: SelMemo::default(),
         }
     }
 }
@@ -3474,23 +3514,22 @@ impl Planner<'_, '_> {
     /// create_ordered_paths over the relation's paths, then the LIMIT: the path to run.
     fn choose(&self, rel: &Rel, want: &Want, width: u32) -> Path {
         let list = self.paths(rel, want);
-        let cheapest = cheapest(&list).cloned().expect("a path");
         let startup = want.startup();
         let mut out: Vec<Path> = Vec::new();
         if want.keys.is_empty() {
-            out = list.clone();
+            out = list;
         } else {
             let limit_tuples = match want.limit {
                 Some((c, o)) if c > 0.0 && o >= 0.0 => Some(c + o),
                 _ => None,
             };
-            for p in &list {
+            let cheapest_at = cheapest_index(&list).expect("a path");
+            for (i, p) in list.into_iter().enumerate() {
                 let (sorted, pre) = presorted(&want.keys, &p.keys);
-                let is_cheapest = std::ptr::eq(p, cheapest_ref(&list));
                 let path = if sorted {
-                    p.clone()
+                    p
                 } else {
-                    if !is_cheapest && (pre == 0 || !self.g.incremental_sort) {
+                    if i != cheapest_at && (pre == 0 || !self.g.incremental_sort) {
                         continue;
                     }
                     let (st, tot) = if pre == 0 || !self.g.incremental_sort {
@@ -3511,11 +3550,12 @@ impl Planner<'_, '_> {
                     if !self.g.sort {
                         disabled += 1;
                     }
+                    let rows = p.rows;
                     Path {
-                        kind: PathKind::Sort(Box::new(p.clone())),
+                        kind: PathKind::Sort(Box::new(p)),
                         startup: st,
                         total: tot,
-                        rows: p.rows,
+                        rows,
                         keys: want.keys.clone(),
                         disabled,
                     }
@@ -3523,25 +3563,26 @@ impl Planner<'_, '_> {
                 add_path(&mut out, path, startup);
             }
         }
-        let _ = cheapest;
         let Some((count, offset)) = want.limit else {
-            return cheapest_owned(&out);
+            let at = cheapest_index(&out).expect("a path");
+            return out.swap_remove(at);
         };
         // The Limit over each (adjust_limit_rows_costs), then get_cheapest_fractional_path:
         // a constant LIMIT compares total costs, another one a tenth of the rows.
         let fraction = lim_fraction(count, offset);
-        let mut best: Option<(Path, f64)> = None;
-        for p in &out {
+        let mut best: Option<(usize, f64)> = None;
+        for (i, p) in out.iter().enumerate() {
             let (st, tot) = limit_costs(p, count, offset);
             let cost = st + fraction * (tot - st);
             let tie = st;
-            let better = match &best {
+            let better = match best {
                 None => true,
-                Some((bp, bcost)) => {
+                Some((b, bcost)) => {
+                    let bp = &out[b];
                     if p.disabled != bp.disabled {
                         p.disabled < bp.disabled
-                    } else if cost != *bcost {
-                        cost < *bcost
+                    } else if cost != bcost {
+                        cost < bcost
                     } else {
                         let (bst, _) = limit_costs(bp, count, offset);
                         tie < bst
@@ -3549,19 +3590,23 @@ impl Planner<'_, '_> {
                 }
             };
             if better {
-                best = Some((p.clone(), cost));
+                best = Some((i, cost));
             }
         }
-        best.map(|b| b.0).unwrap_or_else(|| cheapest_owned(&out))
+        let at = best.map(|b| b.0).or_else(|| cheapest_index(&out)).expect("a path");
+        out.swap_remove(at)
     }
 }
 
-fn cheapest_ref(list: &[Path]) -> &Path {
-    cheapest(list).expect("a path")
-}
-
-fn cheapest_owned(list: &[Path]) -> Path {
-    cheapest(list).cloned().expect("a path")
+/// `cheapest`'s position in `list`.
+fn cheapest_index(list: &[Path]) -> Option<usize> {
+    let mut best: Option<usize> = None;
+    for (i, p) in list.iter().enumerate() {
+        if best.is_none_or(|b| cheaper_total(p, &list[b])) {
+            best = Some(i);
+        }
+    }
+    best
 }
 
 /// The `lim` a DECLAREd cursor's query is planned for: standard_planner's tuple_fraction
@@ -3836,7 +3881,7 @@ impl Planner<'_, '_> {
             qual_startup: 0.0,
             needed: need,
             other,
-            indexes,
+            indexes: indexes.into(),
             loop_count: 1.0,
             exprs,
             booleq,
@@ -3845,6 +3890,7 @@ impl Planner<'_, '_> {
             hidden: Arc::new(hidden),
             params: s.params.0.clone(),
             fdw: None,
+            sels: SelMemo::default(),
         };
         {
             let mut pq = self.phv_quals.borrow_mut();
@@ -5264,13 +5310,19 @@ impl Planner<'_, '_> {
             if let Plan::Sort { input, keys } = &*p
                 && let Some(d) = sort_group_dirs(input, keys)
             {
+                self.group_sort_lim.set((d.0.len() == keys.len()).then_some(lim));
                 self.group_dirs.replace(Some(d));
             }
         }
         // A grouping (or DISTINCT) over a join group: the joins planned for the GROUP BY's
         // order.
+        let mut sorted_by: Option<(GroupDirs, Option<Option<(f64, f64)>>)> = None;
         if matches!(p, Plan::Agg { .. } | Plan::Distinct { on: None, .. }) {
+            let sort_lim = self.group_sort_lim.take();
             let dirs = self.group_dirs.take().unwrap_or_default();
+            if matches!(p, Plan::Agg { sets: None, .. }) && !dirs.0.is_empty() {
+                sorted_by = Some((dirs.clone(), sort_lim));
+            }
             // (Partitionwise aggregation needs the join partitionwise: Postgres keeps
             // that path for it and costs them together.)
             let pw = matches!(p, Plan::Agg { groups, sets: None, .. } if !groups.is_empty())
@@ -5326,7 +5378,7 @@ impl Planner<'_, '_> {
                 _ => (0, 0.0),
             };
             if let Plan::Agg { input, .. } | Plan::Distinct { input, .. } = p
-                && self.hinted_scan(take(input), &n, keys, distinct, trans, lim)
+                && self.hinted_scan(take(input), &n, keys, distinct, trans, lim, sorted_by.as_ref())
             {
                 return;
             }
@@ -5485,6 +5537,7 @@ impl Planner<'_, '_> {
         // is (set_subquery_pathlist's tuple_fraction).
         if let Plan::Barrier { input, secure: false, .. } = p {
             let dirs = self.group_dirs.take();
+            self.group_sort_lim.take();
             let removed = plan_level_ordered(self.ctx, take(input), needed, lim, dirs);
             self.removed.set(self.removed.get() + removed);
             return;
@@ -6021,6 +6074,7 @@ impl Planner<'_, '_> {
 
     /// A scan (through projections) whose order on `keys` (over its consumer's row) would
     /// be useful above: its index paths in that order considered, the cheapest taken.
+    #[allow(clippy::too_many_arguments)]
     fn hinted_scan(
         &self,
         p: &mut Plan,
@@ -6029,6 +6083,7 @@ impl Planner<'_, '_> {
         distinct: bool,
         trans: (usize, f64),
         lim: Option<(f64, f64)>,
+        sorted_by: Option<&(GroupDirs, Option<Option<(f64, f64)>>)>,
     ) -> bool {
         let scan_needed = scan_needs(p, needed);
         let Some((s, mapped)) = sort_target(p, keys) else {
@@ -6037,6 +6092,22 @@ impl Planner<'_, '_> {
         if !plannable(s) {
             return false;
         }
+        // The GROUP BY keys' directions, an ORDER BY's above it (transformGroupClause takes
+        // its sort operators), as the scan's columns; and the ORDER BY as such keys, when it
+        // is all GROUP BY keys and the grouping can give its order.
+        let as_col = |e: &Expr| match e {
+            Expr::Col(i, _) if *i < s.table.columns.len() => Some(Expr::Col(*i, s.table.columns[*i].ty.clone())),
+            _ => None,
+        };
+        let dir_cols: Vec<(Expr, bool, bool)> = sorted_by
+            .map(|(d, _)| d.1.iter().filter_map(|&(g, desc, nf)| Some((as_col(mapped.get(g)?)?, desc, nf))).collect())
+            .unwrap_or_default();
+        let order_seq: Option<Vec<(Expr, bool, bool)>> = sorted_by
+            .filter(|(_, full)| full.is_some())
+            .and_then(|(d, _)| d.0.iter().map(|&(g, desc, nf)| Some((as_col(mapped.get(g)?)?, desc, nf))).collect());
+        let dir_of = |e: &Expr| {
+            dir_cols.iter().find(|(c, ..)| same_key(c, e)).map_or((false, false), |&(_, d, n)| (d, n))
+        };
         let merge: Vec<Expr> = mapped
             .into_iter()
             .filter_map(|e| match e {
@@ -6055,15 +6126,28 @@ impl Planner<'_, '_> {
         if merge.is_empty() {
             return false;
         }
-        let want = Want {
-            keys: Vec::new(),
-            limit: None,
-            merge,
+        // (Keys in a direction of their own: the grouping's pathkeys, which index paths read
+        // backward may have, the ORDER BY's first.)
+        let keys = if merge.iter().any(|m| dir_of(m) != (false, false)) {
+            let mut k: Vec<PathKey> = Vec::new();
+            let firsts = order_seq.iter().flatten().map(|(e, ..)| e);
+            for e in firsts.chain(merge.iter()) {
+                if k.iter().any(|x| same_key(&x.expr, e)) {
+                    continue;
+                }
+                let (desc, nulls_first) = dir_of(e);
+                k.push(PathKey { expr: e.clone(), desc, nulls_first, cmp: 0, coll: 0 });
+            }
+            k
+        } else {
+            Vec::new()
         };
+        let want = Want { keys, limit: None, merge };
         let Some(rel) = self.rel(s, &scan_needed) else {
             return false;
         };
         if rel.indexes.is_empty() {
+            let want = Want { keys: Vec::new(), ..want };
             self.plan_scan(s, &scan_needed, &want, 0);
             return true;
         }
@@ -6094,15 +6178,81 @@ impl Planner<'_, '_> {
         } else {
             sorted
         };
+        // (A path in the GROUP BY keys' order, in their directions.)
+        let covers = |p: &Path| {
+            let n = want.merge.len();
+            p.keys.len() >= n
+                && p.keys[..n].iter().all(|k| {
+                    (k.desc, k.nulls_first) == dir_of(&k.expr) && want.merge.iter().any(|m| same_key(m, &k.expr))
+                })
+        };
+        // An ORDER BY of GROUP BY keys alone above: the grouping's paths ordered for it
+        // (create_ordered_paths over the grouping's): those in its order as they are, the
+        // others with the groups sorted, the sort of the input in the grouping's pathkeys
+        // already in it; under its LIMIT, for the fraction of the sorted groups it reads.
+        if let Some(seq) = &order_seq {
+            let top_lim = sorted_by.and_then(|x| x.1).flatten();
+            let per_input = costs::CPU_OPERATOR_COST * c.rows * (want.merge.len() + trans.0) as f64;
+            let per_group = costs::CPU_TUPLE_COST * groups;
+            let out_width: u32 = want
+                .merge
+                .iter()
+                .filter_map(|e| match e {
+                    Expr::Col(i, _) => Some(costs::col_width(&self.cat, &s.table, *i)),
+                    _ => None,
+                })
+                .sum::<u32>()
+                + 8 * trans.0 as u32;
+            let limit_tuples = match top_lim {
+                Some((n, o)) if n > 0.0 && o >= 0.0 => Some(n + o),
+                _ => None,
+            };
+            let in_order = |p: &Path| {
+                p.keys.len() >= seq.len()
+                    && p.keys.iter().zip(seq).all(|(k, (e, d, n))| same_key(&k.expr, e) && k.desc == *d && k.nulls_first == *n)
+            };
+            let top_sort = |total: f64| costs::sort_cost(total, groups, out_width, limit_tuples);
+            // (Each choice: disabled nodes, startup and total cost of the ordered groups.)
+            let at_limit = |disabled: u32, st: f64, tot: f64| {
+                let cost = match top_lim {
+                    Some((count, offset)) => {
+                        let q = Path { kind: PathKind::Seq, startup: st, total: tot, rows: groups, keys: Vec::new(), disabled };
+                        let (ls, lt) = limit_costs(&q, count, offset);
+                        ls + lim_fraction(count, offset) * (lt - ls)
+                    }
+                    None => tot,
+                };
+                (disabled, cost)
+            };
+            let (hs, ht) = top_sort(hashed.1 + per_input + per_group);
+            let hashed_at = at_limit(c.disabled + hashed.0 + !self.g.sort as u32, hs, ht);
+            let (ss, st) = costs::sort_cost(c.total, c.rows, width, None);
+            let sorted_at = at_limit(sorted.0, ss, st + per_input + per_group);
+            let mut pick = if hashed_at.0 < sorted_at.0 || (hashed_at.0 == sorted_at.0 && hashed_at.1 <= sorted_at.1) {
+                (hashed_at, c.clone())
+            } else {
+                (sorted_at, c.clone())
+            };
+            for p in list.iter().filter(|p| covers(p)) {
+                let total = p.total + per_input + per_group;
+                let at = if in_order(p) {
+                    at_limit(p.disabled, p.startup, total)
+                } else {
+                    let (ts, tt) = top_sort(total);
+                    at_limit(p.disabled + !self.g.sort as u32, ts, tt)
+                };
+                if at.0 < pick.0.0 || (at.0 == pick.0.0 && at.1 < pick.0.1) {
+                    pick = (at, p.clone());
+                }
+            }
+            apply(&rel, s, &pick.1);
+            s.useful = crate::sql::plan::ScanUseful(Some(Arc::new((Vec::new(), want.merge.clone()))));
+            return true;
+        }
         let mut best = c.clone();
         let mut best_cost = (c.disabled + other.0, other.1);
         for p in &list {
-            let n = want.merge.len();
-            let covers = p.keys.len() >= n
-                && p.keys[..n].iter().all(|k| {
-                    !k.desc && !k.nulls_first && want.merge.iter().any(|m| same_key(m, &k.expr))
-                });
-            if !covers {
+            if !covers(p) {
                 continue;
             }
             let cost = (p.disabled, p.total);
@@ -6132,13 +6282,8 @@ impl Planner<'_, '_> {
                 (c.disabled + sorted.0, frac(sst, per_group), c.clone())
             };
             for p in &list {
-                let n = want.merge.len();
-                let covers = p.keys.len() >= n
-                    && p.keys[..n].iter().all(|k| {
-                        !k.desc && !k.nulls_first && want.merge.iter().any(|m| same_key(m, &k.expr))
-                    });
                 let cost = frac(p.startup, p.total - p.startup + per_input + per_group);
-                if covers && (p.disabled < pick.0 || (p.disabled == pick.0 && cost < pick.1)) {
+                if covers(p) && (p.disabled < pick.0 || (p.disabled == pick.0 && cost < pick.1)) {
                     pick = (p.disabled, cost, p.clone());
                 }
             }
@@ -7281,7 +7426,7 @@ pub fn index_order(ctx: &ExecCtx, s: &ScanPlan) -> Vec<SortKey> {
         qual_startup: 0.0,
         needed: Vec::new(),
         other: false,
-        indexes: Vec::new(),
+        indexes: Arc::new([]),
         loop_count: 1.0,
         exprs: Vec::new(),
         booleq: None,
@@ -7290,6 +7435,7 @@ pub fn index_order(ctx: &ExecCtx, s: &ScanPlan) -> Vec<SortKey> {
         hidden: Default::default(),
         params: Default::default(),
         fdw: None,
+        sels: SelMemo::default(),
     };
     let mut out = Vec::new();
     for (i, k) in b.keys.iter().enumerate() {
