@@ -459,8 +459,10 @@ async fn compaction_controls_and_read_metrics() {
     assert_eq!(r.call(reqwest::Method::GET, "/storage_service/trace_probability").await.1, "0");
     let c = connect(r.s.addr, nosql_proto::Version::V4, None).await;
     let q = QueryParams::default;
-    // Auto compaction off: the flushed SSTables wait, and are counted as a pending task.
-    assert_eq!(r.delete("/storage_service/auto_compaction/srv_rest?cf=t").await.0, 200);
+    // Auto compaction off (for the table, as cqlpy's `no_autocompaction_context` does): the
+    // flushed SSTables wait, and are counted as a pending task.
+    assert_eq!(r.delete("/column_family/autocompaction/srv_rest:t").await.0, 200);
+    assert_eq!(r.get("/column_family/autocompaction/srv_rest:t").await.1, json!(false));
     for k in 10..15 {
         c.query(&format!("INSERT INTO srv_rest.t (k, v) VALUES ({k}, 'x')"), q()).await.unwrap();
         r.post("/storage_service/keyspace_flush/srv_rest?cf=t").await;
