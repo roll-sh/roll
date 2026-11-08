@@ -9545,3 +9545,37 @@ reference changed. This reuses the saved reference rather than recording a new
 reference build. No FMA mismatch was established and no vector code changed.
 The probe engine shut down cleanly, and both temporary labeled containers were
 removed. The existing stopped a192 containers, worktree, cache, and WIP remain.
+
+## a185 compatibility recovery, 2026-11-08
+
+The cursor and missing-statement fixes are verified at `8e1a80f95` on top of
+`628c8d94b`. DECLARE SCROLL and WITH HOLD reject row-locking queries with PostgreSQL
+18.6's 0A000 message and DETAIL. INSENSITIVE keeps its distinct 42P11 error. The
+first row mark's final strength determines the message. CTE references and SELECT
+without a lockable relation remain valid. Top-level and SPI declarations use the
+same check. Bind and Describe name a missing unnamed prepared statement explicitly.
+
+The final compatibility job ends with HEAVY-EXIT 0. Release wire tests pass 69/69.
+The a185 cursor and a190 planner goldens each pass embedded, wire, and shuffled
+execution. The regression subset matches 3,610/3,610 units with no newly differing
+units. Clippy passes with 14 distinct diagnostics: ten library warnings, two
+additional library-test warnings, one example warning, and one difftest warning.
+No warning points at the compatibility changes. The source manifest stays unchanged
+through the job. Evidence is in `~/.cache/a185/logs/resume-compat-run.log`,
+`resume-compat.status`, `resume-compat.source.json`, and `compat-*.log`.
+
+The earlier integrated candidate job also ends with HEAVY-EXIT 0. It passes the
+release build, nine kept-plan tests, 69 wire tests, six two-phase tests, three lock
+tests in each of release and debug, both selected goldens, Clippy, and the same
+3,610 regression units. Its source is `ecffa8ab3` plus the saved dirty changes in
+`logs/resume-focused.patch` and `resume-focused.source.json`. That run precedes the
+final CTE correction and the later upstream bulk and GIN additions. The original
+job5 validates the separate reusesrc tree, not the column-sharing or lock rewrite.
+
+Custom-plan reuse, shared result columns, and partitioned locks remain candidates
+in `work-a185`, backed up to `wip/a185`. They are not part of this compatibility
+push. Serial performance comparisons and the integrated efficient-mode footprint
+gate remain open. The old new-src footprint run predates custom-plan reuse. The
+reuse range test checks its first row, so complete ordered-result validation also
+remains open. No speedup or blanket performance acceptance is claimed. The full
+verification train remains an integrated-origin gate before candidate acceptance.
