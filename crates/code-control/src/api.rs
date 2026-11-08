@@ -348,8 +348,14 @@ async fn blob(
     let (cs, file) = code.blob(&r, &rev, &path).await?;
     let mut resp = file.data.clone().into_response();
     let h = resp.headers_mut();
-    h.insert(header::CONTENT_TYPE, HeaderValue::from_static(render::content_type(&path, &file.data)));
+    let content_type = render::content_type(&path, &file.data);
+    h.insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
     h.insert(header::X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
+    // Documents a browser would open as a page on api.roll.sh download instead (`<img>` still
+    // shows an SVG); everything else is inert: text/plain, images, fonts, video.
+    if render::opens_as_page(content_type) {
+        h.insert(header::CONTENT_DISPOSITION, HeaderValue::from_static("attachment"));
+    }
     h.insert(header::CONTENT_SECURITY_POLICY, HeaderValue::from_static("default-src 'none'; style-src 'unsafe-inline'; sandbox"));
     if let Ok(v) = HeaderValue::from_str(&cs_id(&cs)) {
         h.insert("x-roll-changeset", v);

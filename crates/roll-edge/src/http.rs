@@ -30,21 +30,22 @@ use tracing::debug;
 #[derive(Clone)]
 pub enum Target {
     Router(axum::Router),
-    /// The router, with `prefix` put in front of the path (`git.roll.cloud/o/r.git/info/refs`
+    /// The router, with `prefix` put in front of the path (`git.roll.sh/o/r.git/info/refs`
     /// is the API's `/git/o/r.git/info/refs`).
     Prefixed(&'static str, axum::Router),
     Proxy(Upstream),
     NotFound,
 }
 
-/// Picks the target for a request's host.
+/// Picks the target for a request: by its host, and where one host serves several things (git
+/// paths on the dashboard's host, the two WebSocket protocols on a queue's), its path or headers.
 pub trait Routes: Send + Sync + 'static {
-    fn target(&self, host: &Host, headers: &HeaderMap) -> Target;
+    fn target(&self, host: &Host, uri: &Uri, headers: &HeaderMap) -> Target;
 }
 
-impl<F: Fn(&Host, &HeaderMap) -> Target + Send + Sync + 'static> Routes for F {
-    fn target(&self, host: &Host, headers: &HeaderMap) -> Target {
-        self(host, headers)
+impl<F: Fn(&Host, &Uri, &HeaderMap) -> Target + Send + Sync + 'static> Routes for F {
+    fn target(&self, host: &Host, uri: &Uri, headers: &HeaderMap) -> Target {
+        self(host, uri, headers)
     }
 }
 
@@ -132,7 +133,7 @@ async fn handle(mut req: Request<Incoming>, accepted: &Accepted, cfg: &HttpsConf
     }
     req.extensions_mut().insert(ConnectInfo(client));
     let req = req.map(Body::new);
-    match routes.target(&host, req.headers()) {
+    match routes.target(&host, req.uri(), req.headers()) {
         Target::Router(r) => r.oneshot(req).await.unwrap_or_else(|e| match e {}),
         Target::Prefixed(prefix, r) => {
             let (mut parts, body) = req.into_parts();

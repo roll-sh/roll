@@ -234,6 +234,12 @@ pub fn content_type(path: &str, data: &[u8]) -> &'static str {
     }
 }
 
+/// Whether a browser opening a file of this type would render it as a document (one that can
+/// hold scripts or links): served as an attachment, never inline on the API's origin.
+pub fn opens_as_page(content_type: &str) -> bool {
+    matches!(content_type, "image/svg+xml" | "application/pdf")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

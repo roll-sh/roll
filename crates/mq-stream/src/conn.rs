@@ -28,8 +28,8 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 /// A connection's halves: a TCP socket's own, or a split TLS stream's (the edge).
-type Rd = Box<dyn AsyncRead + Send + Unpin>;
-type Wr = Box<dyn AsyncWrite + Send + Unpin>;
+type ConnRead = Box<dyn AsyncRead + Send + Unpin>;
+type ConnWrite = Box<dyn AsyncWrite + Send + Unpin>;
 use tokio::sync::{Semaphore, mpsc};
 use tokio::time::Instant;
 use tracing::{debug, warn};
@@ -148,7 +148,7 @@ enum Flow {
 }
 
 struct FrameIn {
-    rd: Rd,
+    rd: ConnRead,
     buf: BytesMut,
 }
 
@@ -199,7 +199,7 @@ fn negotiate(client: u32, server: u32) -> u32 {
     }
 }
 
-async fn write_frame(wr: &mut Wr, b: &mut BytesMut, at: usize) -> std::io::Result<()> {
+async fn write_frame(wr: &mut ConnWrite, b: &mut BytesMut, at: usize) -> std::io::Result<()> {
     finish(b, at);
     wr.write_all(b).await?;
     b.clear();
@@ -207,7 +207,7 @@ async fn write_frame(wr: &mut Wr, b: &mut BytesMut, at: usize) -> std::io::Resul
 }
 
 /// Peer properties, SASL PLAIN, tune and open. `None`: the connection is to be closed.
-async fn handshake(server: &Server, fin: &mut FrameIn, wr: &mut Wr, peer: SocketAddr) -> anyhow::Result<Option<Session>> {
+async fn handshake(server: &Server, fin: &mut FrameIn, wr: &mut ConnWrite, peer: SocketAddr) -> anyhow::Result<Option<Session>> {
     let broker = &server.broker;
     let mut b = BytesMut::with_capacity(512);
     let mut client_properties = Vec::new();
@@ -331,7 +331,7 @@ pub(crate) async fn run(server: Arc<Server>, sock: TcpStream, peer: SocketAddr, 
 }
 
 /// Serve one connection from its two halves; `tls` is reported to the management API.
-pub(crate) async fn run_split(server: Arc<Server>, rd: Rd, mut wr: Wr, peer: SocketAddr, local: SocketAddr, tls: bool) -> anyhow::Result<()> {
+pub(crate) async fn run_split(server: Arc<Server>, rd: ConnRead, mut wr: ConnWrite, peer: SocketAddr, local: SocketAddr, tls: bool) -> anyhow::Result<()> {
     let broker = server.broker.clone();
     if broker.draining.load(Ordering::Relaxed) {
         return Ok(());
@@ -1425,7 +1425,7 @@ fn encode_out(buf: &mut BytesMut, item: Out, shared: &Shared) -> (usize, bool) {
     (0, false)
 }
 
-async fn writer_loop(mut wr: Wr, mut rx: mpsc::UnboundedReceiver<Out>, shared: Arc<Shared>, heartbeat: u32) {
+async fn writer_loop(mut wr: ConnWrite, mut rx: mpsc::UnboundedReceiver<Out>, shared: Arc<Shared>, heartbeat: u32) {
     let mut buf = BytesMut::with_capacity(256 << 10);
     let idle = Duration::from_secs(heartbeat.max(1) as u64);
     loop {
