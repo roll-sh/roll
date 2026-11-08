@@ -1291,6 +1291,7 @@ impl CopyReader<'_> {
             cols.iter().any(|&k| match &st.rows[r] {
                 CopyRow::Values(v) => matches!(v.get(k), Some(Value::Null)),
                 CopyRow::Exprs(e) => matches!(e.get(k), Some(Expr::Const(Value::Null, _))),
+                CopyRow::Skipped => false,
             })
         })
     }
@@ -1384,12 +1385,18 @@ impl CopyReader<'_> {
             let exprs = rows
                 .into_iter()
                 .map(|r| match r {
-                    CopyRow::Exprs(e) => e,
-                    CopyRow::Values(v) => v.into_iter().zip(&self.c.target).map(|(v, &col)| Expr::Const(v, self.c.table.columns[col].ty.clone())).collect(),
+                    CopyRow::Exprs(e) => Some(e),
+                    CopyRow::Values(v) => Some(v.into_iter().zip(&self.c.target).map(|(v, &col)| Expr::Const(v, self.c.table.columns[col].ty.clone())).collect()),
+                    CopyRow::Skipped => None,
                 })
                 .collect();
-            let (rows, lines) = self.prepare(exprs, lines, rules, ctx)?;
-            (rows.into_iter().map(CopyRow::Exprs).collect(), lines)
+            let (rows, lines, failed) = self.prepare(exprs, lines, rules, ctx)?;
+            // (A row failing there fails the COPY once the rows before it went in.)
+            if let Some(e) = failed {
+                self.failed = Some(e);
+                self.eof = true;
+            }
+            (rows.into_iter().map(|r| r.map_or(CopyRow::Skipped, CopyRow::Exprs)).collect(), lines)
         };
         if let Some(p) = ctx.sess.copy_progress.borrow_mut().as_mut() {
             p.bytes_processed = self.st.bytes as i64;
@@ -1397,7 +1404,7 @@ impl CopyReader<'_> {
             p.tuples_skipped = self.st.skipped as i64;
         }
         let mut feed = copy.feed.lock().unwrap();
-        feed.fed += rows.len();
+        feed.fed += rows.iter().filter(|r| !matches!(r, CopyRow::Skipped)).count();
         feed.rows
             .extend(rows.into_iter().zip(lines).map(|(r, (line, raw))| (r, line, raw)));
         // (Not done with a record's error still to raise: the next batch raises it.)
@@ -1711,6 +1718,8 @@ pub(crate) fn parse_copy_data(
                                 super::notice(format!("skipping row due to data type incompatibility at line {line} for column \"{colname}\": \"{s}\"")).context(format!("COPY {}", t.name)),
                             );
                         }
+                        rows.push(CopyRow::Skipped);
+                        lines.push((line, raw));
                         continue 'records;
                     }
                     Err(e) => {
@@ -1788,8 +1797,9 @@ impl CopyInParsed {
         self.lines.clear();
         let rows = std::mem::take(&mut self.rows)
             .into_iter()
-            .map(|r| match r {
-                CopyRow::Exprs(e) => e,
+            .filter_map(|r| match r {
+                CopyRow::Exprs(e) => Some(e),
+                CopyRow::Skipped => None,
                 // (Only `CopyReader` reads plain.)
                 CopyRow::Values(_) => unreachable!("file_fdw's rows are never plain"),
             })

@@ -269,11 +269,25 @@ pub fn check_row_rls(
     row: &[Value],
     ctx: &ExecCtx,
 ) -> Result<()> {
+    check_row_except(rules, rls, row, &[], ctx)
+}
+
+/// `check_row_rls`, the domains of the columns in `checked` left out (`new_row_checked`
+/// checked them as the row was formed).
+fn check_row_except(
+    rules: &TableRules,
+    rls: &[crate::sql::plan::RlsCheck],
+    row: &[Value],
+    checked: &[usize],
+    ctx: &ExecCtx,
+) -> Result<()> {
     check_rls(rls, row, ctx)?;
     let t = &rules.table;
     // The values' domains are checked as the row is formed, before its constraints.
     for (i, d) in rules.domain_checks.iter().enumerate() {
-        if let Some(d) = d {
+        if let Some(d) = d
+            && !checked.contains(&i)
+        {
             d.check(&row[i], ctx)?;
         }
     }
@@ -3177,6 +3191,74 @@ pub fn new_row(rules: &TableRules, target: &[usize], src: Row, ctx: &ExecCtx) ->
     Ok(row)
 }
 
+/// Where an INSERT's given values have their domains checked (`new_row_checked`).
+#[derive(Clone, Copy, PartialEq)]
+pub enum Given {
+    /// A multi-row VALUES list: coerced as its rows are made, before any default.
+    First,
+    /// Any other source: in column order, among the defaults the rewriter adds to the same
+    /// target list (rewriteTargetListIU), one default's sequence moved before a later
+    /// column fails, not after an earlier one.
+    InColumnOrder,
+    /// With the row's other constraints (`check_row_rls`): COPY's are checked as its lines
+    /// are read (`session::copy` `prepare`).
+    Later,
+}
+
+impl Given {
+    pub fn of(plan: &InsertPlan) -> Given {
+        use crate::sql::plan::Plan;
+        let values = |p: &Plan| matches!(p, Plan::Values { rows, .. } if rows.len() > 1);
+        match &*plan.source {
+            _ if plan.copy.is_some() => Given::Later,
+            p if values(p) => Given::First,
+            Plan::Project { input, .. } if values(input) => Given::First,
+            _ => Given::InColumnOrder,
+        }
+    }
+}
+
+/// `new_row` with the given values' domains checked where PostgreSQL's target list checks
+/// them (`given`). True: those of the given columns are checked (`check_row_except` leaves
+/// them).
+pub fn new_row_checked(rules: &TableRules, target: &[usize], src: Row, given: Given, ctx: &ExecCtx) -> Result<(Row, bool)> {
+    let t = &rules.table;
+    let all = src.len() == t.columns.len() && target.len() == src.len() && target.iter().enumerate().all(|(i, c)| i == *c);
+    if all || given == Given::Later || rules.domain_checks.iter().all(Option::is_none) {
+        return Ok((new_row(rules, target, src, ctx)?, false));
+    }
+    let mut row: Row = vec![Value::Null; t.columns.len()];
+    let mut provided = vec![false; t.columns.len()];
+    for (v, c) in src.into_iter().zip(target) {
+        row[*c] = v;
+        provided[*c] = true;
+    }
+    let check = |i: usize, row: &Row| match rules.domain_checks.get(i) {
+        Some(Some(d)) => d.check(&row[i], ctx),
+        _ => Ok(()),
+    };
+    if given == Given::First {
+        for i in (0..row.len()).filter(|&i| provided[i]) {
+            check(i, &row)?;
+        }
+    }
+    for (i, c) in t.columns.iter().enumerate() {
+        if provided[i] {
+            if given == Given::InColumnOrder {
+                check(i, &row)?;
+            }
+            continue;
+        }
+        if c.dropped || c.generated.is_some() {
+            continue;
+        }
+        if let Some(d) = &rules.defaults[i] {
+            row[i] = eval(d, &[], ctx)?;
+        }
+    }
+    Ok((row, true))
+}
+
 /// A row ready for its unique checks and its write (ExecInsert at its `vlock:` label):
 /// defaults, BEFORE ROW triggers, generated columns and checks done, its key chosen. An ON
 /// CONFLICT DO UPDATE whose conflicting row changed while it waited starts over from here.
@@ -3193,10 +3275,11 @@ fn prepare_insert(
     target: &[usize],
     src: Row,
     rls: &[crate::sql::plan::RlsCheck],
+    given: Given,
     ctx: &ExecCtx,
 ) -> Result<std::result::Result<Prepared, Inserted>> {
     let t = &rules.table;
-    let mut row = new_row(rules, target, src, ctx)?;
+    let (mut row, checked) = new_row_checked(rules, target, src, given, ctx)?;
     if rules.view {
         return Ok(Err(
             match trigger::instead(&rules.triggers, t, tt::INSERT, None, Some(row), ctx)? {
@@ -3225,7 +3308,7 @@ fn prepare_insert(
             row[i] = generated_value(rules, i, e, &row, ctx)?;
         }
     }
-    check_row_rls(rules, rls, &row, ctx)?;
+    check_row_except(rules, rls, &row, if checked { target } else { &[] }, ctx)?;
     // (ExecInsert checks a foreign partition's row by its server only.)
     if t.foreign.is_none() {
         check_partition(rules, &row, ctx)?;
@@ -3256,7 +3339,22 @@ pub fn insert_new(
     after: &mut Vec<AfterRow>,
     ctx: &ExecCtx,
 ) -> Result<Inserted> {
-    match prepare_insert(rules, target, src, rls, ctx)? {
+    insert_new_given(rules, target, src, rls, on_conflict, Given::Later, after, ctx)
+}
+
+/// `insert_new` of an INSERT's row, its given values' domains checked as `given` says.
+#[allow(clippy::too_many_arguments)]
+fn insert_new_given(
+    rules: &TableRules,
+    target: &[usize],
+    src: Row,
+    rls: &[crate::sql::plan::RlsCheck],
+    on_conflict: Option<&crate::sql::plan::OnConflict>,
+    given: Given,
+    after: &mut Vec<AfterRow>,
+    ctx: &ExecCtx,
+) -> Result<Inserted> {
+    match prepare_insert(rules, target, src, rls, given, ctx)? {
         Ok(p) => insert_prepared(rules, p, on_conflict, after, ctx),
         Err(done) => Ok(done),
     }
@@ -4042,12 +4140,13 @@ impl InsertNode {
                 &mut self.after,
                 ctx,
             )?,
-            _ => insert_new(
+            _ => insert_new_given(
                 rules,
                 &self.plan.target,
                 src,
                 &rules.rls_checks,
                 self.plan.on_conflict.as_ref(),
+                Given::of(&self.plan),
                 &mut self.after,
                 ctx,
             )?,
@@ -4214,7 +4313,8 @@ impl InsertNode {
         let t = &rules.table;
         // (A COPY row's defaults and constraints fail it before it is buffered, as
         // ExecConstraints does in CopyFrom: the buffer's rows before it never go in.)
-        let row = new_row(rules, &plan.target, src, ctx).and_then(|row| check_row_rls(rules, &[], &row, ctx).map(|()| row))?;
+        let (row, checked) = new_row_checked(rules, &plan.target, src, Given::of(plan), ctx)?;
+        check_row_except(rules, &[], &row, if checked { &plan.target } else { &[] }, ctx)?;
         let rowid = if t.has_rowid() {
             Some(ctx.sess.db.nextval_by_one(t.oid, || crate::session::ddl::rowid_sequence(t))?)
         } else {
