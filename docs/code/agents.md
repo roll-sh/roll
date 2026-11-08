@@ -119,7 +119,10 @@ Machine            a daemon (hostname, os, providers and their auth state, onlin
   The thread keeps its whole stat too (`Thread.diff`, the "Whole thread" diff's numbers: the base
   to its files now), which the list, the board and the cards show: each run's end and rollback set
   it from the checkpoint, and a thread terminal's output or exit and `fs.write` recount the working
-  tree (private index) once the thread has been quiet 800 ms (`orchestrator/whole_diff.rs`).
+  tree (private index) once the thread has been quiet 800 ms (`orchestrator/whole_diff.rs`). A
+  project's own terminal recounts the threads working in its checkout (one tree of it, then each
+  thread's stat from its base), and `thread.visit` (opening the conversation) recounts the thread,
+  for edits made outside roll.
   `checkpoint.rollback` restores the tree of a checkpoint and marks later
   runs `rolled_back` (and rolls back the provider thread where the provider can). A project in a
   subdirectory of a repository owns only that directory: its diffs, `git.status` and rollbacks

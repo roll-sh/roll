@@ -218,7 +218,12 @@ last list (auto-core's note): `lastRunOf` takes the newest run the store has.
 
 - A `notify` step's `notice` is a toast: glass, 360px, the level's icon, the title at 13/510, up to
   three lines of body, and "Open" for its link (`#agents/…` links navigate the surface; http(s)
-  links open a new tab), "Open the thread" (the newest thread its run started) and "View the run".
+  links open a new tab), "Open the thread" (the newest thread its run started, else the thread its
+  agent event was about) and "View the run".
+- A notice from a waiting event (`thread.waiting`, `request.opened`; `Notice.about` carries the
+  event, thread and request) that has been answered since says **Answered**, quietly, isn't new
+  (no dot, no count) and leaves the toasts: a phone check-in read "X waits on you" as current.
+  Answered: its request isn't pending, or its thread has no pending request from then.
 - The server keeps them (the newest 200 per owner, `GET …/automations/notices`), so a notice nobody
   saw isn't gone: the sheet's **Notices** list (`#agents/automations/notices`, ⌘K "Notices") has
   them newest first with the same actions, "Older notices" for more. Ones newer than this device
