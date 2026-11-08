@@ -9161,6 +9161,20 @@ and speed pull apart. BENCH.md "Modes" has the measurements behind every value.
   `run.sh engperf-start` / `pgdef-start` start them by hand; `CACHE_MB=` (set empty) starts the
   engine without `--cache-mb`.
 
+
+- **Resumed verification (2026-11-08)**: fixed the missing custom command-line placeholder
+  and its RESET default; the earlier job F SHOW errors were real, not passing probes.
+  Release build and Clippy pass (the same 18 warnings); 206 library tests and the CLI mode
+  selection test pass, two library tests ignored. The live probe passes 29 assertions across
+  seven starts and three rejected starts, including SHOW / RESET, reload versus restart,
+  explicit overrides and committed rows retained across both mode directions. Receipts:
+  `~/.cache/a180/logs/jobG2.log`, `testG.log`, `relG.log`, `clippyG.log`; live probe script:
+  `~/.cache/a180/probeG.py`. Reused: job C's 85 wire/lifecycle/session tests (one ignored),
+  isolation 1,647/1,648 permutations and 12,234/12,238 steps (the documented L2 difference).
+  Scoreboard shell syntax and the five-server renderer fixture pass. The saved efficient
+  footprint gate (job E) passed before this SQL visibility fix; final dist footprint and
+  loaded comparisons await the serialized verification train. No new benchmark claim.
+
 ## Starting prompt for the next agent
 
 Paste this into the new agent, from the repository root on branch
