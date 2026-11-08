@@ -8831,6 +8831,13 @@ BENCH.md "Planner, round 11" has the measurements. What changed:
   `(u)::varchar`, in GROUP BY keys and sort keys too). A sort above a DISTINCT shows
   `((t)::text) COLLATE "C"` (was `(t)`).
 - Golden `a177_planner_r11` (recorded from PostgreSQL 18.6).
+- **UPDATE, DELETE and locking scans read serially** (agent 175's finding; `exec/scan.rs`
+  `ScanNode::start_parallel`): a scan returning its rows' keys (`with_key`: an UPDATE's,
+  DELETE's or MERGE's target, a row mark's) never starts the executor's worker threads.
+  PostgreSQL plans no parallel workers under a ModifyTable or a row mark, and EXPLAIN
+  already showed the serial plan. DELETE of a quarter of a 1M-row table: 809-823 -> 590-597
+  ms of server CPU (PostgreSQL 172-218). Its elapsed time grows by about 0.3 s, as the scan
+  no longer runs on three threads.
 
 Where the range read's CPU goes (frame-pointer dist build, perf, 8 clients): `run_query`
 82%, of which execution (`run_each`, the index scan and the rows sent) 49% and planning
@@ -8865,6 +8872,17 @@ Left, for the planner:
   UPDATE. The scans' widths already count the mark (`rowmarks` in the scan's width,
   explain.rs); the join above doesn't carry r2's ctid. 172 fixed the foreign-scan case in
   8500c0bb9 (`Planner::fdw_whole_row_width`).
+- `rechoose` is 14.5% of the range read's CPU with 178's reuse wired in (9.5% of it
+  `scan_path_applied` costing every path again). Exact ways to cost less: keep each index's
+  matched clause positions in the `ScanChoice` (the clauses' shapes don't change between
+  executions of one statement, only their values) instead of `match_quals` every time;
+  skip an index that matched no clause and serves no order; cost the bitmap path only when
+  its index paths could beat the kept path.
+- Plain queries fold `'x'::text::date` while binding, where PostgreSQL keeps the cast (a
+  STABLE input routine: eval_const_expressions folds only immutable casts). 178's
+  immutable-only rule for custom plans would fix it, along with a kept plan freezing
+  `'now'::text::timestamptz`, but it changes plain-query estimates, so it needs a full
+  regress run.
 - Untouched: item 2 (every node's cost, so one-shot plans stop building EXPLAIN trees for
   Gathers and Incremental Sort keys), planning CPU over plans/apps.sql and the ORM queries,
   TPC-H q21 / q18, and the rest of round 10's list.

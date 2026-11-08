@@ -4032,6 +4032,12 @@ impl ScanNode {
         ctx: &ExecCtx,
     ) -> Result<Option<super::parscan::ParScan>> {
         use super::parscan::{Decode, ParScan, split_keys};
+        // (A scan returning its rows' keys is an UPDATE's, DELETE's, MERGE's or a locking
+        // level's: PostgreSQL plans no parallel workers under a ModifyTable or a row mark,
+        // and these rows go to this thread one by one anyway.)
+        if self.plan.with_key {
+            return Ok(None);
+        }
         if self.secondary {
             return self.start_parallel_index(spec, stages, ctx);
         }

@@ -240,6 +240,19 @@ profile, the engine's planning is 29% of its CPU and binding the values and plan
 choice, about 9%) would take the range read to about 190-200 us, near 1.45x. The generic
 floor shows that the execution path is twice PostgreSQL's, and it is most of what is left.
 
+**DELETE of a quarter of a 1M-row table** (`DELETE FROM pdel WHERE v = 1`, 1,000,000 rows
+of (int primary key, int, 40-byte text), vacuumed and analyzed; each server's cgroup CPU
+around the one statement; elapsed time through `docker run psql`, which adds about 0.4 s):
+
+| | before (dist `0737165c`) | after (serial `with_key` scans) | PostgreSQL |
+|---|---:|---:|---:|
+| server CPU | 809-823 ms | 590-597 ms | 172-218 ms |
+| elapsed | 0.81-0.87 s | 1.13-1.15 s | 0.58-0.72 s |
+
+"Before" is an older origin head, and the commits between could move the DELETE as
+well. The drop matches agent 175's profile, where about half of the DELETE's CPU was its
+source scan on three worker threads.
+
 ## Planner, round 10 (2026-11-07, agent 171)
 
 HANDOFF.md, "Planner round 10", has what changed. Both servers ran in containers (`run.sh
