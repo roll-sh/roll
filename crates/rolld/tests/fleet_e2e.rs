@@ -35,6 +35,9 @@
 //! 12 attempts within 90 s, 30 s per attempt, backoff from 250 ms doubling to 4 s (or the answer's
 //! `Retry-After`, at most 4 s); a reconnect after a dropped connection. Kafka retries inside
 //! librdkafka (`message.timeout.ms` 90 s); a record whose delivery failed is sent again.
+//!
+//! `ROLL_E2E_KILL=<lease key>` (e.g. `tasks:cell:default`) makes the SIGKILL hit that lease's
+//! holder rather than the node holding the most leases, to reproduce a finding.
 
 use aws_sdk_s3::primitives::ByteStream;
 use aws_smithy_runtime_api::client::dns::{DnsFuture, ResolveDns};
@@ -1551,6 +1554,9 @@ async fn storage_verify(w: &World, s: &StorageState) {
 struct TasksState {
     /// Acknowledged publishes: op → message id.
     acks: Mutex<HashMap<u64, String>>,
+    /// Each publish's attempts (outcome, and the answer when there was one), for the report on
+    /// anything lost.
+    trail: Mutex<HashMap<u64, Vec<String>>>,
     /// Deliveries: op → message ids delivered (one per delivery).
     delivered: Mutex<HashMap<u64, Vec<String>>>,
     /// The consumer runs until this is set (after the publishers stop and everything arrived).
@@ -1565,20 +1571,23 @@ async fn tasks_writer(w: Arc<World>, t: Arc<TasksState>) {
     while w.running() {
         let body = json!({ "queue": QUEUE, "body": format!("op-{n}"), "dedup_id": format!("fleet-{n}") });
         w.write(Product::Tasks);
-        let ids = Mutex::new(HashSet::new());
+        let trail = Mutex::new(Vec::new());
         let res = retry(&w, Product::Tasks, |_| async {
-            match send(w.http.post(&url).bearer_auth(TOKEN).json(&body)).await {
-                Ok(a) if a.status == 201 || a.status == 200 => {
-                    let id = a.body["message_id"].as_str().unwrap_or_default().to_string();
-                    ids.lock().insert(id.clone());
-                    Step::Done(id)
-                }
+            let sent = w.at(Instant::now());
+            let r = send(w.http.post(&url).bearer_auth(TOKEN).json(&body)).await;
+            trail.lock().push(match &r {
+                Ok(a) => format!("+{sent:.2}s {} {}", a.status, a.text.trim().chars().take(200).collect::<String>()),
+                Err(k) => format!("+{sent:.2}s {k}"),
+            });
+            match r {
+                Ok(a) if a.status == 201 || a.status == 200 => Step::Done(a.body["message_id"].as_str().unwrap_or_default().to_string()),
                 Ok(a) if a.status >= 500 => Step::Retry(a.status.to_string(), a.retry_after),
                 Ok(a) => Step::Fail(format!("{} {}", a.status, a.text)),
                 Err(k) => Step::Retry(k, None),
             }
         })
         .await;
+        t.trail.lock().insert(n, trail.into_inner());
         match res {
             Ok(id) => {
                 w.ack(Product::Tasks);
@@ -1645,8 +1654,9 @@ async fn tasks_consumer(w: Arc<World>, t: Arc<TasksState>) {
 }
 
 /// Every acknowledged publish was delivered, as the message id the publish returned (duplicate
-/// deliveries are allowed: at least once, deduplicable by that id).
-fn tasks_verify(w: &World, t: &TasksState) {
+/// deliveries are allowed: at least once, deduplicable by that id). What happened to a missing
+/// one (its publish attempts, and what the API says about its message) goes in the report.
+async fn tasks_verify(w: &World, t: &TasksState) {
     let acks = t.acks.lock().clone();
     let delivered = t.delivered.lock().clone();
     let mut verified = 0;
@@ -1662,6 +1672,12 @@ fn tasks_verify(w: &World, t: &TasksState) {
     if !missing.is_empty() {
         missing.sort_unstable();
         w.problem(Product::Tasks, format!("{} acknowledged publishes never delivered, e.g. op-{:?}", missing.len(), &missing[..missing.len().min(5)]));
+        for n in missing.iter().take(5) {
+            let id = &acks[n];
+            let state = send(w.http.get(w.tasks(&format!("/v1/tasks/messages/{id}"))).bearer_auth(TOKEN)).await.map(|a| format!("{} {}", a.status, a.text)).unwrap_or_else(|e| e);
+            let trail = t.trail.lock().get(n).cloned().unwrap_or_default();
+            w.note(Product::Tasks, format!("lost op-{n}: published as {id}; attempts {trail:?}; GET /v1/tasks/messages/{id} → {state}"));
+        }
     }
     if !other_ids.is_empty() {
         w.problem(Product::Tasks, format!("{} publishes delivered under another message id (dedup_id didn't deduplicate), e.g. {:?}", other_ids.len(), &other_ids[..other_ids.len().min(3)]));
@@ -1966,7 +1982,9 @@ async fn every_product_keeps_every_acknowledged_write_through_kill_rolling_resta
 
     // (a) SIGKILL the node holding the most leases, then start it again (ECS replacing it).
     let counts = lease_counts(&ddb).await;
-    let victim = (0..3).max_by_key(|i| counts.get(NODES[*i]).map_or(0, Vec::len)).unwrap();
+    // `ROLL_E2E_KILL=<lease key>`: kill that lease's holder instead (to reproduce a finding).
+    let chosen = std::env::var("ROLL_E2E_KILL").ok().and_then(|k| (0..3).find(|i| counts.get(NODES[*i]).is_some_and(|ks| ks.contains(&k))));
+    let victim = chosen.unwrap_or_else(|| (0..3).max_by_key(|i| counts.get(NODES[*i]).map_or(0, Vec::len)).unwrap());
     let held = counts.get(NODES[victim]).cloned().unwrap_or_default();
     let kill_at = Instant::now();
     docker(&["kill", "-s", "KILL", &container(victim)]);
@@ -2054,7 +2072,7 @@ async fn every_product_keeps_every_acknowledged_write_through_kill_rolling_resta
         tokio::task::spawn_blocking(move || kafka_verify(&w2, &k2, &s2)).await.unwrap();
     }
     storage_verify(&w, &storage).await;
-    tasks_verify(&w, &tasks_state);
+    tasks_verify(&w, &tasks_state).await;
 
     // ── the scoreboard ──
     eprintln!("\n=== roll cloud fleet e2e: {:.0}s of traffic ===", (traffic_to - traffic_from).as_secs_f64());

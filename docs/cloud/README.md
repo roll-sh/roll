@@ -522,7 +522,7 @@ against it, then removes everything it created (all named `roll-cloud-e2e-*`).
 | nosql on the cluster layer | built: lease `nosql:db:<id>`, catalog on the system database, CQL spliced to the owner (SNI or SASL user), fenced manifests (docs/nosql/architecture.md, "On a fleet") |
 | streams on the cluster layer | built (`stream:cluster:<id>`, catalog on the system database, acknowledgements from a write-ahead log in S3, kafka splices); not yet run against AWS |
 | queues on the cluster layer | in progress |
-| fleet end to end test | built (`pnpm test:fleet`, "Testing the fleet"): every product but queues and postgres, through a SIGKILL, a rolling restart and a scale-out; green locally, findings under "Open items" |
+| fleet end to end test | built (`pnpm test:fleet`, "Testing the fleet"): every product but queues and postgres, through a SIGKILL, a rolling restart and a scale-out; passes except when the tasks leader dies between a publish's two commits ("Open items") |
 | postgres on the fleet and the system database | with the pg-engine branch |
 | isolated work on Fargate | next |
 
@@ -535,15 +535,33 @@ against it, then removes everything it created (all named `roll-cloud-e2e-*`).
   `ROLL_BUCKET_DOMAIN`) and by path on the zone (`roll.site/<bucket>/<key>`); set the deployment's
   CDN `base_url` to `https://roll.site` so purges reach both. Bucket names starting `chg-` are
   reserved for previews.
-- **What the fleet test shows** (`pnpm test:fleet`, three runs on 2026-11-08 on a shared 36-core
-  machine; "Testing the fleet"). No acknowledged write was lost or duplicated in any product, in
-  any scenario: 4.7k code landings, 6.6k Redis `SET`s, 6k CQL `INSERT`s, 21k Kafka records, 3.1k
-  objects (21 multipart) and 1.1k tasks in the last run, every one read back. Every drained node
-  exited 0 holding no lease, and placement was right after every scenario. Still open:
+- **What the fleet test shows** (`pnpm test:fleet`, six runs on 2026-11-08 on a shared 36-core
+  machine; "Testing the fleet"). Each run makes about 4.5k code landings, 6.5k Redis `SET`s, 6k
+  CQL `INSERT`s, 21k Kafka records, 3k objects (about 20 of them multipart) and 1k tasks
+  publishes. One acknowledged write was lost, a tasks publish (below). Every other one was read
+  back, and nothing was duplicated. Every drained node exited 0 holding no lease, and placement
+  was right after every scenario. The test passed twice; the other runs failed on findings now
+  fixed, and once on the tasks loss. Still open:
+  - **tasks: a publish retried after its leader died can be acknowledged and lost.** In one run
+    out of the three whose SIGKILL hit the tasks leader, one publish (`op-95`, at the kill) was
+    answered 201 but never delivered. Its first attempt got `502`, the answer the docs say to
+    retry with the same `dedup_id`. Likely cause, read from the code: `Tasks::publish`
+    (`crates/tasks/src/engine.rs`) claims `dedup:<id>` with a durable `kv_put`, which waits for
+    its own commit. Only then does it insert the message, which waits for the next commit. If
+    the leader dies between the two commits, the claim survives the takeover and the message
+    doesn't. The retry then finds the claim and answers `deduplicated: true` with a message id
+    that doesn't exist. The same order holds on DynamoDB and on a single node. The fix belongs
+    to the tasks lane: make the claim and the message durable together, or treat a claim whose
+    messages don't exist as unclaimed. The second needs care so a publish still in flight on
+    the same leader isn't doubled. The test now prints each lost publish's attempts and what
+    `GET /v1/tasks/messages/{id}` says. `ROLL_E2E_KILL=tasks:cell:default` aims the SIGKILL at
+    the tasks leader.
   - **Takeover after a crash takes about 10 s.** The killed node's leases moved 9.2–10.0 s after
-    SIGKILL. Writes to its tenants stalled about as long, within the documented 10–15 s: Redis
-    9.4 s, NoSQL 7.0–11.1 s, storage 8.6–9.9 s, streams 9.2–10.5 s. Other tenants didn't stall
-    (under 1 s). Lane `cloud/hardening` is working on takeover latency.
+    SIGKILL. Writes to its tenants stalled about as long, within the documented 10–15 s: code
+    10.0 s, tasks 9.9 s, Redis 9.4 s, NoSQL 7.0–11.1 s, storage 8.6–9.9 s, streams 9.2–10.5 s.
+    Other tenants stalled under 1 s. A new connection the load balancer sent to the dead node
+    hung until the health check took it out, so a client sees a connect timeout, as an NLB would
+    give it. Lane `cloud/hardening` is working on takeover latency.
   - **Streams stall the longest on a planned handoff.** During the rolling restart a stream's
     producer waited 2.7–6.1 s for acknowledgements. Redis and NoSQL waited at most 2.6 s, every
     other product under 1.5 s. Each move costs librdkafka a reconnect and a metadata refresh.
