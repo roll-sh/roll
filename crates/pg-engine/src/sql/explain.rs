@@ -8459,7 +8459,24 @@ impl Builder<'_, '_> {
                                     .iter()
                                     .find(|x| x.1 == presorted_name(k))
                                     .is_some_and(|x| matches!(&**input, Plan::Project { exprs, .. } if exprs.get(x.0).is_some_and(name_derived_c)));
-                                if derived {
+                                // (A written COLLATE over a column of another collation: a
+                                // RelabelType sorted under it, `((t)::text) COLLATE "C"`.)
+                                let relabeled = named.iter().find(|x| x.1 == presorted_name(k)).and_then(|x| match &**input {
+                                    Plan::Project { exprs, input: pin } => match exprs.get(x.0) {
+                                        Some(Expr::Collate(e, coll, loc)) if *loc >= 0 && matches!(**e, Expr::Col(..)) => {
+                                            let own = derived_collation(pin, e)
+                                                .unwrap_or_else(|| if e.ty() == DataType::Name { "C".into() } else { "default".into() });
+                                            (own != *coll).then(|| (self.ctx.catalog().format_type(&e.ty(), None, &self.ctx.search_path), coll.clone()))
+                                        }
+                                        _ => None,
+                                    },
+                                    _ => None,
+                                });
+                                if let Some((ty, coll)) = relabeled {
+                                    let base = presorted_name(k);
+                                    let bare = base.strip_prefix('(').and_then(|x| x.strip_suffix(')')).filter(|x| balanced(x)).unwrap_or(&base);
+                                    format!("(({bare})::{ty}) COLLATE {}{}", quote_ident(&coll), &k[base.len()..])
+                                } else if derived {
                                     let base = presorted_name(k);
                                     format!("{base} COLLATE \"C\"{}", &k[base.len()..])
                                 } else {

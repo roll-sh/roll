@@ -57,6 +57,16 @@ EXPLAIN (COSTS OFF) SELECT * FROM a190_na WHERE NOT EXISTS (SELECT 1 FROM a190_n
 SELECT count(*) FROM a190_na WHERE NOT EXISTS (SELECT 1 FROM a190_nb WHERE a190_nb.y = a190_na.x AND NOT EXISTS (SELECT 1 FROM a190_na n2 WHERE n2.x = 700));
 EXPLAIN (COSTS OFF) SELECT * FROM a190_na WHERE x IN (SELECT y FROM a190_nb WHERE EXISTS (SELECT 1 FROM a190_na n2 WHERE n2.x = 7));
 EXPLAIN (COSTS OFF) SELECT * FROM a190_na WHERE NOT EXISTS (SELECT 1 FROM a190_nb WHERE EXISTS (SELECT 1 FROM a190_na n2 WHERE n2.x = 7));
+-- A sorted DISTINCT over a written COLLATE of another collation sorts the RelabelType.
+CREATE TABLE a190_dc (t text, u varchar(10));
+INSERT INTO a190_dc SELECT 'v' || (g % 50), 'u' || (g % 7) FROM generate_series(1, 2000) g;
+ANALYZE a190_dc;
+SET enable_hashagg = off;
+EXPLAIN (COSTS OFF) SELECT DISTINCT t COLLATE "C" FROM a190_dc;
+EXPLAIN (COSTS OFF) SELECT DISTINCT t COLLATE "C" AS x FROM a190_dc ORDER BY 1;
+EXPLAIN (COSTS OFF) SELECT DISTINCT u COLLATE "C" FROM a190_dc;
+SELECT DISTINCT u COLLATE "C" FROM a190_dc;
+RESET enable_hashagg;
 -- NOT EXISTS over a catalog with an InitPlan in its WHERE (EF Core's tables query): an anti
 -- join, the sub-select an InitPlan above it.
 CREATE SCHEMA a190_ic;
