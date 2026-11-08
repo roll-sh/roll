@@ -47,7 +47,7 @@ impl Product {
             Product::Postgres => &["/v1/projects", "/v1/endpoints", "/v1/health", "/internal/wal"],
             Product::Redis => &["/v1/redis"],
             Product::Streams => &["/v1/streams", "/v1/kafka", "/kafka/v3", "/internal/streams"],
-            Product::Tasks => &["/v1/tasks"],
+            Product::Tasks => &["/v1/tasks", "/t", "/_roll/tenants", "/internal/tasks"],
             Product::Storage => &["/v1/storage"],
             Product::Nosql => &["/v1/nosql", "/internal/nosql"],
             Product::Queues => &["/v1/queues"],

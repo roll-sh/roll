@@ -25,6 +25,7 @@ mod storage;
 mod redis;
 mod storage_events;
 mod streams;
+mod tasks;
 
 use products::{Product, Products};
 
@@ -114,9 +115,6 @@ struct Args {
     /// Keep closed partitions' data on local disk instead of serving it from object storage.
     #[arg(long, env = "ROLL_STREAM_KEEP_LOCAL")]
     stream_keep_local: bool,
-    /// Token for the tasks API (`/v1/tasks`); without one it's open, like the rest of the local API.
-    #[arg(long, env = "ROLL_TASKS_TOKEN")]
-    tasks_token: Option<String>,
     /// Run only roll queues (no Postgres control plane or proxy): broker nodes on AWS.
     #[arg(long, env = "ROLL_QUEUES_ONLY", value_parser = clap::builder::BoolishValueParser::new(), default_value_t = false, num_args = 0..=1, default_missing_value = "true")]
     queues_only: bool,
@@ -265,6 +263,8 @@ struct Args {
     #[command(flatten)]
     queues: queues::QueuesArgs,
     #[command(flatten)]
+    tasks: tasks::TasksArgs,
+    #[command(flatten)]
     nosql: nosql::NosqlArgs,
     #[command(flatten)]
     edge: edge::EdgeArgs,
@@ -339,10 +339,6 @@ async fn run() -> anyhow::Result<()> {
         true => Some(queues::Queues::start(&home, args.queues.clone(), &args.public_host).await?),
         false => None,
     };
-    let tasks = match on.on(Product::Tasks) {
-        true => Some(start_tasks(&args, &auth, &home).await?),
-        false => None,
-    };
     let postgres = match on.on(Product::Postgres) {
         true => Some(start_postgres(&args, &home, &storage).await?),
         false => None,
@@ -364,6 +360,11 @@ async fn run() -> anyhow::Result<()> {
     // roll streams: one owner per stream in a cluster, so it starts once the cluster is joined.
     let mut streams = match on.on(Product::Streams) {
         true => Some(streams::start(&args, &auth, &home, &storage, &cluster).await?),
+        false => None,
+    };
+    // roll tasks on the node's cluster: every node serves it, the cell's leader runs it.
+    let tasks = match on.on(Product::Tasks) {
+        true => Some(tasks::start(&args.tasks, &auth, &home, &storage, cluster.clone()).await?),
         false => None,
     };
     if let Some(r) = &redis {
@@ -397,7 +398,7 @@ async fn run() -> anyhow::Result<()> {
         router = router.merge(stream_broker::http::router(s.broker.clone()));
     }
     if let Some(t) = &tasks {
-        router = router.merge(tasks::api::router(t.tasks.clone()));
+        router = router.merge(t.api_routes());
     }
     if let Some(c) = &code {
         router = router.merge(code_control::api::router(c.code.clone()));
@@ -429,7 +430,7 @@ async fn run() -> anyhow::Result<()> {
         pg: postgres.as_ref().map(|p| p.proxy.clone()),
         redis: redis.as_ref(),
         streams: streams.as_ref().map(|s| s.broker.clone()),
-        tasks: tasks.as_ref().map(|t| t.tasks.clone()),
+        tasks: tasks.as_ref().map(|t| t.router()),
         storage: storage_svc.as_ref().map(|s| s.s3_router()),
         nosql: nosql.as_ref(),
         queues: queues.as_ref(),
@@ -509,28 +510,14 @@ async fn run() -> anyhow::Result<()> {
     if let Some(st) = &storage_svc {
         st.shutdown().await;
     }
-    if let Some(t) = tasks {
-        t.worker.shutdown().await;
+    if let Some(t) = &tasks {
+        t.shutdown().await;
     }
     if let Some(s) = &streams {
         s.broker.sync_all().await;
     }
     info!("shut down");
     Ok(())
-}
-
-/// roll tasks: its store under `--home` and its worker.
-struct Tasks {
-    tasks: std::sync::Arc<tasks::Tasks>,
-    worker: tasks::Worker,
-}
-
-async fn start_tasks(args: &Args, auth: &auth::Auth, home: &std::path::Path) -> anyhow::Result<Tasks> {
-    let store = std::sync::Arc::new(tasks::store::sqlite::SqliteStore::open(&home.join("tasks.db"), 4)?);
-    let config = tasks::Config { token: args.tasks_token.clone().filter(|t| !t.is_empty()), require_auth: auth.enforcing(), ..tasks::Config::default() };
-    let tasks = tasks::Tasks::new(config, store).await?;
-    let worker = tasks::start(tasks.clone());
-    Ok(Tasks { tasks, worker })
 }
 
 /// roll postgres: the control plane (computes in Docker) and the proxy.
