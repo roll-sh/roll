@@ -4704,6 +4704,26 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
     as heap_multi_insert counts them); an error before the flush drops them, on the plain
     path too (`counts_on_error`: it counted them on a parse error). A unique violation is
     found at the flush and raised after its counts. Golden `a182_copy_counts`.
+    The index-violation path also holds its failed heap insertion (`count_failed_insert`):
+    a later parse error can discard that buffer before the index error would be raised.
+    `a182_copy_batches` covers both sides of the 1,000-row boundary.
+  - **COPY TO from stored rows**: a serial table scan and an identity projection can pass
+    stored tuples through `Node::each_stored`. Text COPY emits supported integers, float8s
+    and strings without constructing a decoded row. Unsupported types, older tuples missing
+    added columns, dropped or virtual columns, CSV, binary and other encodings use the
+    decoded path. Golden `a182_copy_out` records PostgreSQL 18.6 output.
+  - **INSERT SELECT from stored rows**: an eligible plain target past the size model stores
+    the source tuple's values under a fresh header (`StoredInsert`, `inserted_stored`).
+    Domains, indexes, CHECKs, dropped/generated columns, SSI and change streams exclude this
+    path. NULL for NOT NULL, long encoded values, older short tuples and modelled targets
+    fall back to decoded insertion. `big_tables::insert_select_from_stored_rows` checks it.
+  - Resume verification, 2026-11-08: source `85307c242973e58f63d9c514475fb992e35011bc`
+    passes release goldens filtered by `copy`, `stat`, `insert` (three harness tests each),
+    all 19 `big_tables` tests and all-target Clippy. Logs: `~/.cache/a182/resume-primary/`.
+    Job 7 at `2f1b3a3e5` passed 1,804 selected regression units and the spill test, but its
+    COPY goldens failed; its final HEAVY-EXIT 0 did not imply every step passed. The resume
+    check fixes and reruns those failures. Later complete-suite coverage belongs to the
+    verification train. No storage format or durability rule changes in this batch.
 
 - **Result rows stream** (round 19, agent 65): a top-level SELECT's rows go to the client as
   the executor returns them, as PostgreSQL's printtup sends a DataRow per row. A

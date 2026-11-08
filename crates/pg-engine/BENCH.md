@@ -5795,6 +5795,16 @@ and slice, psql in a third container; CPU and bytes written from the containers'
 three), at a quieter hour than round 8's (load 10-20), so every number is lower on both
 sides. Base: origin `4d48ff398` (round 8 plus the DROP fix, which costs nothing here).
 
+Recovered evidence note (2026-11-08): job 8 built the candidate with `--profile dist`
+at source `2f1b3a3e5` (only BENCH.md was dirty), then ran the saved interleaved bulk
+scripts against the saved `4d48ff398` base and PostgreSQL 18.6. Receipts and raw output
+remain under `~/.cache/a182/job8/`; frozen executables remain in `bin-base/` and
+`bin-new/`. These records do not establish a performance gain for the landed batch:
+the SQL results were overwritten per step, COPY output went to `/dev/null`, the
+script lacks expected-result assertions, and the later integration source differs.
+No comparison was rerun during recovery. The DELETE estimates below remain the
+saved investigation's estimates, not an accepted optimization.
+
 ### DELETE leaving its index entries for VACUUM: measured, not built
 
 Profiled on the base (`perf record -g dwarf`, the 1M-row sequence up to DELETE a quarter):
