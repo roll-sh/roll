@@ -1155,6 +1155,13 @@ fn rel_rescans(cat: &crate::catalog::Catalog) -> u32 {
     REL_RESCANS.max((rels / 8) as u32)
 }
 
+/// `rel_rescans` for pg_depend's rows of one object (`sys_depend_rows`): fewer, since one
+/// object's derivation costs about as much as a sixtieth of the relations' rows do.
+fn depend_rescans(cat: &crate::catalog::Catalog) -> u32 {
+    let rels = cat.tables.len() + cat.views.len() + cat.indexes.len() + cat.sequences.len();
+    REL_RESCANS.max((rels / 64) as u32)
+}
+
 /// How many inner rows a hash join asks its outer side to restrict itself to at most
 /// (`Node::restrict_keys`; the outer side restricts itself only when the keys are few
 /// against its rows: a schema's 1,500 relations against pg_attribute's 150,000 rows).
@@ -1194,6 +1201,75 @@ fn col_pin(col: usize, c: &Expr, ctx: &ExecCtx) -> Result<Option<Option<u32>>> {
         Value::Oid(o) => Some(Some(o)),
         _ => None,
     })
+}
+
+/// `col_pin`, where the value may also come from sub-selects that read nothing of the
+/// enclosing rows (InitPlans: run once per statement, as an index scan's condition on one
+/// runs it when the scan starts).
+fn oid_pin(col: usize, c: &Expr, ctx: &ExecCtx) -> Result<Option<Option<u32>>> {
+    let Expr::Call(d, args, _) = c else { return Ok(None) };
+    if d.name != "=" || args.len() != 2 || d.oid >= crate::catalog::FIRST_USER_OID {
+        return Ok(None);
+    }
+    let other = match (&args[0], &args[1]) {
+        (Expr::Col(k, _), o) | (o, Expr::Col(k, _)) if *k == col => o,
+        _ => return Ok(None),
+    };
+    let mut ok = other.columns().is_empty();
+    other.walk(&mut |e| match e {
+        Expr::Subquery(s) if !s.params.is_empty() || s.kind != crate::sql::expr::SubqueryKind::Scalar || s.func.is_some() => {
+            ok = false
+        }
+        Expr::Call(d, ..) if d.volatility == 'v' => ok = false,
+        _ => {}
+    });
+    if !ok {
+        return Ok(None);
+    }
+    Ok(match crate::sql::expr::eval(other, &[], ctx)? {
+        Value::Null => Some(None),
+        Value::Oid(o) => Some(Some(o)),
+        _ => None,
+    })
+}
+
+/// pg_depend's rows of the one object a rescan's conjuncts pin as dependent (`classid = c AND
+/// objid = o`, in any order: a rescan picks its rows by any of its equalities,
+/// `sys_equality`), derived alone (`system::depend_rows_of`) when pg_depend's rows aren't
+/// generated already: EF Core's `NOT EXISTS (SELECT ... FROM pg_depend WHERE classid =
+/// (SELECT ...) AND objid = cls.oid AND deptype IN ('e', 'x'))`.
+fn sys_depend_rows(f: &Expr, ctx: &ExecCtx) -> Result<Option<Arc<crate::catalog::system::SysRows>>> {
+    use crate::catalog::system::{SysRows, SysTable};
+    if crate::catalog::system::rows_cached(SysTable::PgDepend, ctx).is_some() {
+        return Ok(None);
+    }
+    fn split<'e>(e: &'e Expr, out: &mut Vec<&'e Expr>) {
+        match e {
+            Expr::And(items) => items.iter().for_each(|i| split(i, out)),
+            e => out.push(e),
+        }
+    }
+    let mut conj = Vec::new();
+    split(f, &mut conj);
+    let (mut class, mut obj) = (None, None);
+    for c in conj {
+        if class.is_none() {
+            class = oid_pin(0, c, ctx)?;
+        }
+        if obj.is_none() {
+            obj = col_pin(1, c, ctx)?;
+        }
+    }
+    let rows = match (class, obj) {
+        // (`= NULL`: true for no row.)
+        (Some(None), _) | (_, Some(None)) => Vec::new(),
+        (Some(Some(c)), Some(Some(o))) => match crate::catalog::system::depend_rows_of(ctx, c, o)? {
+            Some(r) => r,
+            None => return Ok(None),
+        },
+        _ => return Ok(None),
+    };
+    Ok(Some(Arc::new(SysRows::new(rows))))
 }
 
 /// The rows of the one relation a scan of a cacheable catalog reads, generated alone
@@ -1244,7 +1320,7 @@ fn sys_rel_rows(
         }
     }
     // pg_class read through its name index: the relations of those names alone.
-    if let Some(bounds) = class_name_bounds(table, path, ctx)?
+    if let Some(bounds) = class_name_bounds(table, filter, path, ctx)?
         && crate::catalog::system::rows_cached(table, ctx).is_none()
         && let Some(rows) = crate::catalog::system::class_rows_named(ctx, &bounds)?
     {
@@ -1255,16 +1331,23 @@ fn sys_rel_rows(
 
 /// The bounds an index scan of pg_class puts on `relname` (`pg_class_relname_nsp_index`'s
 /// first column: `=`, or a pattern's prefix range), with built-in operators comparing bytes.
-/// Postgres's scan reads only the index entries within them.
+/// Postgres's scan reads only the index entries within them. A scan without a planned path
+/// reads as the index scan its EXPLAIN shows (`sys_derived`).
 fn class_name_bounds(
     table: crate::catalog::system::SysTable,
+    filter: Option<&Expr>,
     path: Option<&crate::sql::plan::SysPath>,
     ctx: &ExecCtx,
 ) -> Result<Option<crate::catalog::system::NameBounds>> {
     if table != crate::catalog::system::SysTable::PgClass {
         return Ok(None);
     }
-    let Some(sp) = path else { return Ok(None) };
+    let Some(sp) = path else {
+        return match filter.and_then(|f| sys_derived(table, f)) {
+            Some((_, conds)) => derived_name_bounds(&conds, ctx),
+            None => Ok(None),
+        };
+    };
     let crate::sql::plan::Access::Index { quals, .. } = &sp.scan.access else {
         return Ok(None);
     };
@@ -1272,56 +1355,122 @@ fn class_name_bounds(
     let mut any = false;
     for q in quals {
         let Expr::Call(d, args, _) = &q.expr else { continue };
-        if args.len() != 2 || d.oid >= crate::catalog::FIRST_USER_OID {
-            continue;
-        }
-        // (An equality under any deterministic collation is the bytes'; a range needs byte
-        // order.)
-        let equal = d.name == "=";
-        if d.coll.as_ref().is_some_and(|c| if equal { !c.deterministic } else { !c.bytewise() }) {
-            continue;
-        }
         // (The key as the index applies it: of pg_class's indexes only the name index's first
         // column takes a string, whatever form the key has there. psql's `relname ~ '^(t)$'
         // COLLATE default` gives `relname = 't'::text` with relname read as text, and it
         // generated every pg_class row for one: 30-80 ms at 10,000 tables.)
-        if q.col != 0 {
+        if q.col != 0 || args.len() != 2 {
             continue;
         }
-        let other = &args[1];
-        let mut sub = false;
-        other.walk(&mut |e| sub |= matches!(e, Expr::Subquery(_)));
-        if sub || !other.columns().is_empty() || other.is_volatile() {
-            continue;
+        any |= name_bound(&mut bounds, d, &args[1], ctx)?;
+    }
+    Ok(any.then_some(bounds))
+}
+
+/// Narrows `bounds` by `relname op other` (`d` the operator) when it is a built-in operator
+/// comparing bytes and `other` reads no column and runs no subquery or volatile function:
+/// whether it did.
+fn name_bound(
+    bounds: &mut crate::catalog::system::NameBounds,
+    d: &crate::sql::func::FuncDef,
+    other: &Expr,
+    ctx: &ExecCtx,
+) -> Result<bool> {
+    if d.oid >= crate::catalog::FIRST_USER_OID {
+        return Ok(false);
+    }
+    // (An equality under any deterministic collation is the bytes'; a range needs byte
+    // order.)
+    let equal = d.name == "=";
+    if d.coll.as_ref().is_some_and(|c| if equal { !c.deterministic } else { !c.bytewise() }) {
+        return Ok(false);
+    }
+    let mut sub = false;
+    other.walk(&mut |e| sub |= matches!(e, Expr::Subquery(_)));
+    if sub || !other.columns().is_empty() || other.is_volatile() {
+        return Ok(false);
+    }
+    let v = crate::sql::expr::eval(other, &[], ctx)?;
+    let Some(s) = v.as_str() else { return Ok(false) };
+    let s = s.to_string();
+    let (lo, hi) = match d.name {
+        "=" => (Some((s.clone(), true)), Some((s, true))),
+        ">=" | "~>=~" => (Some((s, true)), None),
+        ">" | "~>~" => (Some((s, false)), None),
+        "<=" | "~<=~" => (None, Some((s, true))),
+        "<" | "~<~" => (None, Some((s, false))),
+        _ => return Ok(false),
+    };
+    bounds.narrow(lo, hi);
+    Ok(true)
+}
+
+/// A catalog scan without a planned path whose filter has conditions on a catalog index's
+/// leading columns is shown by EXPLAIN as that index's scan (`explain::sys_index_scan`, the
+/// index the planner would pick), and runs as one: the filter with the conditions the index
+/// uses whole first, then the rest (an index scan checks its filter only on the rows they
+/// select; EF Core's `NOT EXISTS (SELECT ... FROM pg_depend ...) AND relname IN ('t')` ran
+/// its subplan on every pg_class row, 41,416 at 10,000 tables, 100-200 ms a statement), and
+/// those index conditions, a pattern's fixed prefix among them (lossy: psql's `\d t5000`,
+/// `relname ~ '^(t5000)$'`, matched the pattern against every name).
+fn sys_derived(
+    table: crate::catalog::system::SysTable,
+    f: &Expr,
+) -> Option<(Expr, Vec<crate::sql::explain::SysCond>)> {
+    use crate::sql::explain::SysCond;
+    if table.is_view() {
+        return None;
+    }
+    let (_, conds, rest) = crate::sql::explain::sys_index_scan(table.name(), f, &table.columns())?;
+    let mut all: Vec<Expr> = (conds.iter())
+        .filter_map(|c| match c {
+            SysCond::Expr(e) => Some(e.clone()),
+            SysCond::Bound(..) => None,
+        })
+        .collect();
+    all.extend(rest);
+    let filter = match all.len() {
+        1 => all.swap_remove(0),
+        _ => Expr::And(all),
+    };
+    Some((filter, conds))
+}
+
+/// The bounds `sys_derived`'s index conditions put on pg_class's `relname` (column 1).
+fn derived_name_bounds(
+    conds: &[crate::sql::explain::SysCond],
+    ctx: &ExecCtx,
+) -> Result<Option<crate::catalog::system::NameBounds>> {
+    use crate::sql::explain::SysCond;
+    let relname = |e: &Expr| match e {
+        Expr::Col(1, _) => true,
+        Expr::Relabel(x, _) | Expr::Cast(x, _, _, false) => matches!(**x, Expr::Col(1, _)),
+        _ => false,
+    };
+    let mut bounds = crate::catalog::system::NameBounds::default();
+    let mut any = false;
+    for c in conds {
+        match c {
+            SysCond::Expr(Expr::Call(d, args, _)) if args.len() == 2 => {
+                if relname(&args[0]) {
+                    any |= name_bound(&mut bounds, d, &args[1], ctx)?;
+                } else if d.name == "=" && relname(&args[1]) {
+                    any |= name_bound(&mut bounds, d, &args[0], ctx)?;
+                }
+            }
+            // (A pattern's fixed prefix: `=` for an exact pattern, else a range.)
+            SysCond::Bound(1, op, v) => {
+                let v = v.clone();
+                match *op {
+                    "=" => bounds.narrow(Some((v.clone(), true)), Some((v, true))),
+                    ">=" => bounds.narrow(Some((v, true)), None),
+                    "<" => bounds.narrow(None, Some((v, false))),
+                    _ => continue,
+                }
+                any = true;
+            }
+            _ => {}
         }
-        let v = crate::sql::expr::eval(other, &[], ctx)?;
-        let Some(s) = v.as_str() else { continue };
-        let s = s.to_string();
-        let tighter_lo = |b: &Option<(String, bool)>, n: &(String, bool)| {
-            b.as_ref().is_none_or(|(x, inc)| n.0 > *x || (n.0 == *x && *inc && !n.1))
-        };
-        let tighter_hi = |b: &Option<(String, bool)>, n: &(String, bool)| {
-            b.as_ref().is_none_or(|(x, inc)| n.0 < *x || (n.0 == *x && *inc && !n.1))
-        };
-        let (lo, hi) = match d.name {
-            "=" => (Some((s.clone(), true)), Some((s, true))),
-            ">=" | "~>=~" => (Some((s, true)), None),
-            ">" | "~>~" => (Some((s, false)), None),
-            "<=" | "~<=~" => (None, Some((s, true))),
-            "<" | "~<~" => (None, Some((s, false))),
-            _ => continue,
-        };
-        if let Some(l) = lo
-            && tighter_lo(&bounds.lo, &l)
-        {
-            bounds.lo = Some(l);
-        }
-        if let Some(h) = hi
-            && tighter_hi(&bounds.hi, &h)
-        {
-            bounds.hi = Some(h);
-        }
-        any = true;
     }
     Ok(any.then_some(bounds))
 }
@@ -1362,10 +1511,13 @@ fn sys_rescan(
         .cloned();
     // (The first few rescans of a catalog not generated yet read one relation's rows alone;
     // past them, the whole catalog is generated, once.)
+    let scans = ctx.sys_rel_scans.borrow().get(&table.oid()).copied().unwrap_or(0);
     let rel_rows = match &cached {
-        None if crate::catalog::system::rows_cacheable(table)
-            && ctx.sys_rel_scans.borrow().get(&table.oid()).copied().unwrap_or(0) < rel_rescans(&cat) =>
-        {
+        None if table == crate::catalog::system::SysTable::PgDepend => match scans < depend_rescans(&cat) {
+            true => sys_depend_rows(f, ctx)?,
+            false => None,
+        },
+        None if crate::catalog::system::rows_cacheable(table) && scans < rel_rescans(&cat) => {
             sys_rel_rows(table, Some(f), path, ctx)?
         }
         None if crate::catalog::system::obj_column(table).is_some() => {
@@ -1408,7 +1560,7 @@ fn sys_rescan(
     let picked = match found {
         Some((_, None)) => return Ok(Some(Vec::new())),
         Some((_, Some(ix))) => Some(ix),
-        None => class_name_bounds(table, path, ctx)?.map(|b| sys_named(all, &b)),
+        None => class_name_bounds(table, Some(f), path, ctx)?.map(|b| sys_named(all, &b)),
     };
     // (Only the columns read above are copied, `RowChunk::project`; an index order a sort
     // relies on is found on whole rows first.)
@@ -1487,13 +1639,15 @@ fn sys_shared_scan(
         Some(crate::sql::plan::Access::Index { quals, .. }) => quals.iter().map(|q| q.expr.clone()).collect(),
         _ => Vec::new(),
     };
-    // (A pg_class scan planned as the index scan its EXPLAIN shows: a LIKE on relname reads
-    // only the names its fixed prefix selects, as the derived index condition does.)
-    let quals = match (quals.is_empty(), path, filter) {
-        (true, None, Some(f)) if table == crate::catalog::system::SysTable::PgClass => like_prefix_quals(f),
-        _ => quals,
+    // (A scan without a planned path as the index scan its EXPLAIN shows: its index
+    // conditions first, `sys_derived`; a pattern's prefix bounds `relname`,
+    // `class_name_bounds`.)
+    let derived = match (path, filter) {
+        (None, Some(f)) => sys_derived(table, f).map(|(d, _)| d),
+        _ => None,
     };
     let checked = match (quals.is_empty(), filter) {
+        _ if derived.is_some() => derived,
         (true, _) => filter.cloned(),
         (false, Some(f)) => Some(Expr::And(quals.into_iter().chain([f.clone()]).collect())),
         (false, None) => None,
@@ -1568,7 +1722,7 @@ fn sys_shared_scan(
     // against every row.)
     let equal = sys_index_equality(path, &rows, ctx)?;
     let named = match equal {
-        None => class_name_bounds(table, path, ctx)?.map(|b| sys_named(&rows, &b)),
+        None => class_name_bounds(table, filter, path, ctx)?.map(|b| sys_named(&rows, &b)),
         Some(_) => None,
     };
     let picked = match equal {
@@ -1617,39 +1771,13 @@ fn sys_index_prefilter(rows: Vec<Row>, sp: &crate::sql::plan::SysPath, ctx: &Exe
     Ok(kept)
 }
 
-/// A filter's `relname LIKE 'const'` conjuncts as the index conditions their fixed prefix
-/// derives (like_support.c: `relname = 'prefix'` for an exact prefix, `relname ^@ 'prefix'`
-/// for a partial one), to be checked before the filter.
-fn like_prefix_quals(f: &Expr) -> Vec<Expr> {
-    let conj: Vec<&Expr> = match f {
-        Expr::And(items) => items.iter().collect(),
-        e => vec![e],
-    };
-    let mut out = Vec::new();
-    for c in conj {
-        let Expr::Call(d, args, _) = c else { continue };
-        if d.name != "~~" || args.len() != 2 || d.coll.as_ref().is_some_and(|c| !c.bytewise()) {
-            continue;
-        }
-        let (Expr::Col(1, _), Expr::Const(Value::Text(p), _)) = (&args[0], &args[1]) else { continue };
-        let (status, prefix, _) = crate::sql::costs::pattern_prefix(p, crate::sql::costs::Ptype::Like);
-        let pre = Expr::Const(Value::Text(prefix.into()), crate::types::DataType::Text);
-        let col = args[0].clone();
-        // (texteq, text_starts_with.)
-        let oid = match status {
-            crate::sql::costs::PrefixStatus::Exact => 67,
-            crate::sql::costs::PrefixStatus::Partial => 3696,
-            crate::sql::costs::PrefixStatus::None => continue,
-        };
-        if let Some(def) = crate::sql::func::def_by_oid(oid) {
-            out.push(Expr::Call(def, vec![col, pre], crate::types::DataType::Bool));
-        }
-    }
-    out
-}
-
 /// The rows of pg_class's `rows` whose `relname` `bounds` admits, in row order.
 fn sys_named(rows: &crate::catalog::system::SysRows, bounds: &crate::catalog::system::NameBounds) -> Vec<u32> {
+    if let Some(n) = bounds.exact()
+        && let Some(ix) = rows.lookup(1, &Value::Text(n.into()), &|x| matches!(x, Value::Text(_)))
+    {
+        return ix;
+    }
     (rows.places())
         .filter(|&(_, c, i)| c.with_value(i, 1, |v| v.as_str().is_some_and(|n| bounds.admits(n))))
         .map(|(n, ..)| n as u32)

@@ -19356,7 +19356,7 @@ pub(crate) fn subplan_costs(exprs: &[Expr], ctx: &ExecCtx) -> (f64, f64) {
 
 /// An index condition of a system catalog scan: a clause as it is, or a pattern's prefix
 /// bound on a column (`col op 'value'::text`).
-enum SysCond {
+pub(crate) enum SysCond {
     Expr(Expr),
     Bound(usize, &'static str, String),
 }
@@ -19368,7 +19368,7 @@ fn quote_literal(v: &str) -> String {
 /// The catalog index a system catalog scan's quals can use (the most leading key columns
 /// matched; a prefix pattern bounds its column, lossily): its name, the index
 /// conditions, and the quals left to filter.
-fn sys_index_scan(
+pub(crate) fn sys_index_scan(
     table: &str,
     filter: &Expr,
     cols: &[(String, DataType)],
