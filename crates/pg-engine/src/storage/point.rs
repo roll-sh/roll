@@ -21,6 +21,8 @@ pub type Version = (u64, Option<Bytes>);
 pub(super) struct Held {
     block: Arc<super::sst::Block>,
     from: Vec<u8>,
+    /// Where the last read in it stopped (the next of ascending reads starts there).
+    pos: BlockPos,
 }
 
 /// Single-key reads at one snapshot over the sources as they were when it was made (see the
@@ -124,7 +126,8 @@ const FIRST_TRIES: u32 = 4;
 /// into `out` (false: none).
 fn smallest_key(view: &View, from: &[u8], held: &mut [Option<Held>], pos: &mut BlockPos, out: &mut Vec<u8>) -> Result<bool> {
     let mut found = false;
-    let mut take = |k: &[u8], out: &mut Vec<u8>| {
+    let mut take = |k: &[u8]| {
+        let k = user_key(k);
         if !found || k < out.as_slice() {
             out.clear();
             out.extend_from_slice(k);
@@ -133,7 +136,7 @@ fn smallest_key(view: &View, from: &[u8], held: &mut [Option<Held>], pos: &mut B
     };
     for m in view.memtables() {
         if let Some(e) = m.map.range::<[u8], _>((Bound::Included(from), Bound::Unbounded)).next() {
-            take(user_key(e.key()), out);
+            take(e.key());
         }
     }
     // (Slots as `newest` numbers them: every frozen source has one, a memtable's unused.)
@@ -147,27 +150,29 @@ fn smallest_key(view: &View, from: &[u8], held: &mut [Option<Held>], pos: &mut B
         .chain(view.l0.iter().map(|s| Some(std::slice::from_ref(s))))
         .chain(std::iter::once(Some(view.l1.as_slice())));
     for (slot, ssts) in files.enumerate() {
-        if let Some(ssts) = ssts.filter(|s| !s.is_empty())
-            && let Some(k) = file_first(ssts, held.get_mut(slot), from, pos)?
-        {
-            take(user_key(k), out);
+        if let Some(ssts) = ssts.filter(|s| !s.is_empty()) {
+            file_first(ssts, held.get_mut(slot), from, pos, &mut take)?;
         }
     }
     Ok(found)
 }
 
-/// The first storage key at or after `from` in non-overlapping files in key order, through
-/// the block `held` keeps when `from` falls in it (`pos` is left on it).
-fn file_first<'a>(ssts: &[Arc<SstReader>], mut held: Option<&mut Option<Held>>, from: &[u8], pos: &'a mut BlockPos) -> Result<Option<&'a [u8]>> {
-    if let Some(Some(h)) = held.as_deref()
+/// The first storage key at or after `from` in non-overlapping files in key order, to `f`
+/// (not called: none), through the block `held` keeps when `from` falls in it.
+fn file_first(ssts: &[Arc<SstReader>], mut held: Option<&mut Option<Held>>, from: &[u8], pos: &mut BlockPos, f: &mut dyn FnMut(&[u8])) -> Result<()> {
+    if let Some(Some(h)) = held.as_deref_mut()
         && h.from.as_slice() <= from
         && h.block.last_key().is_some_and(|l| from <= l)
     {
-        h.block.seek(from, pos);
-        return Ok((pos.index() < h.block.len()).then(|| pos.key()));
+        // (From where the last read in the block stopped.)
+        h.block.seek_on(from, &mut h.pos);
+        if h.pos.index() < h.block.len() {
+            f(h.pos.key());
+        }
+        return Ok(());
     }
-    let f = ssts.partition_point(|s| s.meta.last_key.as_slice() < from);
-    for sst in &ssts[f.min(ssts.len())..] {
+    let first_file = ssts.partition_point(|s| s.meta.last_key.as_slice() < from);
+    for sst in &ssts[first_file.min(ssts.len())..] {
         let first = sst.find_block(from);
         for b in first..sst.block_count() {
             let block = sst.block(b)?;
@@ -175,15 +180,16 @@ fn file_first<'a>(ssts: &[Arc<SstReader>], mut held: Option<&mut Option<Held>>, 
             if pos.index() >= block.len() {
                 continue;
             }
+            f(pos.key());
             if b == first
-                && let Some(slot) = held.as_deref_mut()
+                && let Some(slot) = held
             {
-                *slot = Some(Held { block, from: from.to_vec() });
+                *slot = Some(Held { block, from: from.to_vec(), pos: pos.clone() });
             }
-            return Ok(Some(pos.key()));
+            return Ok(());
         }
     }
-    Ok(None)
+    Ok(())
 }
 
 /// `hit` with the range deletions of `view` applied: a version one hides reads as the
@@ -263,12 +269,16 @@ fn file_get(
         let k = pos.key();
         Some((user_key(k) == key).then(|| (key_ts(k), block.value(pos))))
     };
-    if let Some(Some(h)) = held.as_deref()
+    if let Some(Some(h)) = held.as_deref_mut()
         && h.from.as_slice() <= seek
         && h.block.last_key().is_some_and(|l| seek <= l)
-        && let Some(hit) = found(&h.block, pos)
     {
-        return Ok(hit);
+        // (From where the last read in the block stopped.)
+        h.block.seek_on(seek, &mut h.pos);
+        if h.pos.index() < h.block.len() {
+            let k = h.pos.key();
+            return Ok((user_key(k) == key).then(|| (key_ts(k), h.block.value(&h.pos))));
+        }
     }
     let f = match ssts.len() {
         1 => 0,
@@ -291,8 +301,9 @@ fn file_get(
                     h.block = block;
                     h.from.clear();
                     h.from.extend_from_slice(seek);
+                    h.pos.clone_from(pos);
                 }
-                None => *slot = Some(Held { block, from: seek.to_vec() }),
+                None => *slot = Some(Held { block, from: seek.to_vec(), pos: pos.clone() }),
             }
         }
         return Ok(hit);
