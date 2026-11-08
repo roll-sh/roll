@@ -33,4 +33,7 @@ SELECT count(*) FROM a189_t WHERE id + (SELECT 1 / (min(id) - min(id)) FROM a189
 SELECT 42;
 ROLLBACK;
 SELECT 42;
+-- EXPLAIN ANALYZE uses the same boundary, directly and through SPI.
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF) SELECT count(*) FROM a189_t WHERE id + (SELECT 1 / (min(id) - min(id)) FROM a189_t) = ANY (SELECT id FROM a189_e);
+DO $$ BEGIN EXECUTE 'EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF) SELECT count(*) FROM a189_t WHERE id + (SELECT 1 / (min(id) - min(id)) FROM a189_t) = ANY (SELECT id FROM a189_e)'; END $$;
 DROP TABLE a189_t, a189_e;

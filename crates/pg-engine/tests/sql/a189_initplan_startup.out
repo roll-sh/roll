@@ -113,6 +113,14 @@ ERROR 25P02: current transaction is aborted, commands ignored until end of trans
 42
 -- SELECT 1
 
+> EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF) SELECT count(*) FROM a189_t WHERE id + (SELECT 1 / (min(id) - min(id)) FROM a189_t) = ANY (SELECT id FROM a189_e)
+ERROR 22012: division by zero
+
+> DO $$ BEGIN EXECUTE 'EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF) SELECT count(*) FROM a189_t WHERE id + (SELECT 1 / (min(id) - min(id)) FROM a189_t) = ANY (SELECT id FROM a189_e)'; END $$
+ERROR 22012: division by zero
+CONTEXT: SQL statement "EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF) SELECT count(*) FROM a189_t WHERE id + (SELECT 1 / (min(id) - min(id)) FROM a189_t) = ANY (SELECT id FROM a189_e)"
+CONTEXT: PL/pgSQL function inline_code_block line 1 at EXECUTE
+
 > DROP TABLE a189_t, a189_e
 -- DROP TABLE
 

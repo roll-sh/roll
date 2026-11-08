@@ -4,7 +4,10 @@
 //! lock a PARALLEL SAFE function takes, at transaction or session level) go once it has
 //! returned its last row, as the workers' go when they exit at the Gather's end.
 //!
-//! Only when the workers alone run the part (parallel_leader_participation off, workers
+//! Gather startup evaluates the independent initplan outputs the part reads before any
+//! of its rows run, as ExecInitParallelPlan prepares parameters sent to workers.
+//!
+//! Lock release applies only when the workers alone run the part (parallel_leader_participation off, workers
 //! launched): with the leader taking part, which rows it runs itself is up to timing, and
 //! it running every one (keeping their locks) is one of PostgreSQL's schedules.
 
@@ -38,7 +41,7 @@ pub struct Part {
     pub alone: bool,
 }
 
-/// A node running a Gather's part in the "workers".
+/// A Gather part's startup work and, when exclusive, its worker lock ownership.
 pub struct WorkerPart {
     inner: BoxNode,
     initplans: Option<Arc<[Expr]>>,
@@ -307,12 +310,18 @@ pub fn start(
     }
     let launched = launch(gathers, ctx);
     let exclusive = if alone && !plan.writes() { worker_parts(gathers, launched.as_ref(), ctx) } else { Vec::new() };
+    prepare(gathers, &exclusive, ctx);
+    launched
+}
+
+/// Attach each concrete Gather boundary's startup work to this execution. EXPLAIN
+/// ANALYZE uses it too, without changing its separate worker instrumentation.
+pub fn prepare(gathers: &[Gather], exclusive: &[usize], ctx: &ExecCtx) {
     *ctx.worker_parts.borrow_mut() = gathers.iter().filter(|g| g.workers > 0).filter_map(|g| {
         let key = g.part?;
         let alone = exclusive.contains(&key);
         (alone || !g.initplans.is_empty()).then(|| Part { key, initplans: g.initplans.clone(), alone })
     }).collect();
-    launched
 }
 
 /// The workers a statement's Gathers launch as other backends see them (pg_stat_activity's

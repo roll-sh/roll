@@ -118,6 +118,10 @@ pub(crate) fn explain(
         {
             plan.0 = p;
         }
+        if ctas.is_none() {
+            let gathers = crate::exec::parallel_part::gathers(&plan.0, &bq.perms.locks, ctx);
+            crate::exec::parallel_part::prepare(&gathers, &[], ctx);
+        }
         let r = match &ctas {
             Some(node) => crate::session::ddl::execute(ctx, node, "").map(|_| ()),
             None => collect(&plan.0, ctx, None).map(|_| ()),
