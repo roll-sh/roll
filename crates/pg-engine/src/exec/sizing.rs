@@ -1958,6 +1958,25 @@ fn may_toast(v: &Value) -> bool {
 /// a value goes out of line (toast_save_datum; a value an update keeps from `old`, the
 /// version it replaces, stays where it is) or one of `old`'s goes (toast_delete_datum), and
 /// the estimate grown by its tuple (one layout of the row for both).
+/// A row of a table too big to model (`is_estimated`) goes in as stored bytes (an INSERT …
+/// SELECT copying them, `dml::StoredInsert`): its heap estimate grows by the tuple's length
+/// `len` (its `row_len`, by `storage::row::stored_tuple_len`), as `inserted_with` grows it
+/// for a row short enough to keep its values in line. False: the table is modelled, or the
+/// row long (nothing done: the row goes in decoded).
+pub fn inserted_stored(t: &Table, len: usize, ctx: &ExecCtx) -> bool {
+    if len > TOAST_THRESHOLD {
+        return false;
+    }
+    let mut rf = ctx.sess.db.relfiles.of(t.oid).write();
+    if !rf.untracked.contains(&t.oid) {
+        return false;
+    }
+    if let Some(e) = rf.estimated.get_mut(&t.oid) {
+        e.add(len, heap_fillfactor(t));
+    }
+    true
+}
+
 fn untracked_write(
     t: &Table,
     row: &[Value],

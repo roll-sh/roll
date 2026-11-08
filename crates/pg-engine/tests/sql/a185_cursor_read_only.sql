@@ -19,6 +19,19 @@ ROLLBACK;
 BEGIN;
 DECLARE c6 SCROLL CURSOR FOR SELECT * FROM a185_c FOR SHARE OF a185_c FOR UPDATE OF a185_c;
 ROLLBACK;
+-- The first FROM relation of an untargeted clause can be nested inside a join.
+BEGIN;
+DECLARE cj SCROLL CURSOR FOR SELECT a.id FROM a185_c a JOIN a185_c b USING (id) FOR SHARE FOR UPDATE OF a;
+ROLLBACK;
+-- Explicit OF order determines the first row mark.
+BEGIN;
+DECLARE co SCROLL CURSOR FOR SELECT a.id FROM a185_c a JOIN a185_c b USING (id) FOR SHARE OF b,a FOR UPDATE OF a;
+ROLLBACK;
+-- A clause with no lockable relation adds no row mark.
+BEGIN;
+DECLARE cc SCROLL CURSOR FOR SELECT 1 FOR UPDATE;
+FETCH cc;
+ROLLBACK;
 -- A locking clause in a subquery isn't the cursor's own.
 BEGIN;
 DECLARE c7 SCROLL CURSOR FOR SELECT * FROM (SELECT * FROM a185_c FOR UPDATE) s;

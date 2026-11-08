@@ -3786,6 +3786,14 @@ impl Ddl<'_, '_> {
             },
             false => None,
         };
+        // (A BRIN or GIN index measured in workers too, as PostgreSQL 18 builds them.)
+        let parallel = match parallel {
+            None if measures && matches!(ix.method.as_str(), "brin" | "gin") => match super::parbuild::index_workers(self, t, blocks.unwrap_or(0)) {
+                0 => None,
+                w => self.measure_am_parallel(t, ix, &bix, w, &progress)?,
+            },
+            p => p,
+        };
         // (A parallel build reports its own scan's end and its load.)
         let serial = parallel.is_none();
         let mut model_keys = writes.map(|w| (w, Vec::new()));

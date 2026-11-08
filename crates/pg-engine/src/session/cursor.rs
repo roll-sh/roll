@@ -1946,8 +1946,6 @@ pub fn spi_cursor_stmt(
     })
 }
 
-/// Whether a query locks the rows it reads (FOR UPDATE / SHARE): a LockRows node, or a
-/// scan with a row mark.
 /// transformDeclareCursorStmt: a cursor whose query has a locking clause (FOR UPDATE ...) can't
 /// be WITH HOLD, SCROLL or INSENSITIVE: those must be READ ONLY.
 pub fn check_read_only(s: &pb::DeclareCursorStmt) -> Result<()> {
@@ -1955,6 +1953,9 @@ pub fn check_read_only(s: &pb::DeclareCursorStmt) -> Result<()> {
     const SCROLL: i32 = 0x0002;
     const INSENSITIVE: i32 = 0x0008;
     const HOLD: i32 = 0x0020;
+    if s.options & (SCROLL | INSENSITIVE | HOLD) == 0 {
+        return Ok(());
+    }
     let Some(pg_query::NodeEnum::SelectStmt(sel)) = s.query.as_deref().and_then(inner) else {
         return Ok(());
     };
@@ -1978,12 +1979,22 @@ pub fn check_read_only(s: &pb::DeclareCursorStmt) -> Result<()> {
         Some(pg_query::NodeEnum::RangeVar(r)) => Some(r.alias.as_ref().map_or(r.relname.clone(), |a| a.aliasname.clone())),
         _ => None,
     };
+    fn first_from(n: &pb::Node) -> Option<String> {
+        match inner(n) {
+            Some(pg_query::NodeEnum::RangeVar(r)) => Some(r.alias.as_ref().map_or_else(|| r.relname.clone(), |a| a.aliasname.clone())),
+            Some(pg_query::NodeEnum::RangeSubselect(r)) => r.alias.as_ref().map(|a| a.aliasname.clone()),
+            Some(pg_query::NodeEnum::JoinExpr(j)) => j.larg.as_deref().and_then(first_from).or_else(|| j.rarg.as_deref().and_then(first_from)),
+            _ => None,
+        }
+    }
     let target = match first.locked_rels.first() {
         Some(n) => name_of(n),
-        None => sel.from_clause.first().and_then(name_of),
+        None => sel.from_clause.iter().find_map(first_from),
     };
+    // A clause without a lockable FROM item adds no row mark (SELECT 1 FOR UPDATE).
+    let Some(target) = target else { return Ok(()) };
     let covers = |l: &pb::LockingClause| {
-        l.locked_rels.is_empty() || target.as_ref().is_some_and(|t| l.locked_rels.iter().any(|n| name_of(n).as_ref() == Some(t)))
+        l.locked_rels.is_empty() || l.locked_rels.iter().any(|n| name_of(n).as_ref() == Some(&target))
     };
     let strength = clauses.iter().filter(|l| covers(l)).map(|l| l.strength).max().unwrap_or(first.strength);
     // (LCS_asString.)
@@ -2005,6 +2016,7 @@ pub fn check_read_only(s: &pb::DeclareCursorStmt) -> Result<()> {
     Err(Error::new(code, msg).detail(format!("{detail} cursors must be READ ONLY.")))
 }
 
+/// Whether a query locks the rows it reads: a LockRows node or a scan with a row mark.
 pub fn has_row_marks(plan: &Plan) -> bool {
     match plan {
         Plan::LockRows { .. } => true,

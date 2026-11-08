@@ -404,7 +404,9 @@ fn index_build_measures_as_analyze() {
 
 /// BRIN and GIN builds of a table too big to model measure the index as their access method
 /// lays it out (`am_measure`): PostgreSQL 18.6's relpages (and pg_relation_size) for the same
-/// table, after the build and after a VACUUM (whose kept measure the next build reads).
+/// table, after the build and after a VACUUM (whose kept measure the next build reads); built
+/// in parallel too (`parbuild::measure_am_parallel`; PostgreSQL's parallel builds of this table,
+/// with min_parallel_table_scan_size 0, give the same pages), first and after the VACUUM.
 #[test]
 fn brin_gin_builds_measure_as_postgres() {
     let dir = tempfile::tempdir().unwrap();
@@ -423,11 +425,25 @@ fn brin_gin_builds_measure_as_postgres() {
              CREATE INDEX am_jp ON am USING gin (j jsonb_path_ops)";
         let stats = "SELECT string_agg(relname || ' ' || relpages, ', ' ORDER BY relname) FROM pg_class WHERE relname LIKE 'am%' AND relpages = pg_relation_size(oid) / 8192";
         let want = [r#"[Text("am 91, am_b 3, am_bt 3, am_d 11, am_g 8, am_j 10, am_jp 8")]"#];
+        let drop = "DROP INDEX am_b, am_bt, am_g, am_d, am_j, am_jp";
+        // (Workers for a table this small, two as PostgreSQL's 256 MB allows; am_bt's text
+        // summaries are measured serially.)
+        let parallel = |s: &mut Session| {
+            run(s, "SET min_parallel_table_scan_size = 0;\nSET maintenance_work_mem = '256MB'");
+            let before = pg_engine::exec::parscan::index_builds();
+            run(s, build);
+            assert!(pg_engine::exec::parscan::index_builds() - before >= 5, "parallel builds");
+            assert_eq!(rows(s, stats), want);
+            run(s, &format!("{drop};\nRESET min_parallel_table_scan_size;\nRESET maintenance_work_mem"));
+        };
+        parallel(&mut s);
         run(&mut s, build);
         assert_eq!(rows(&mut s, stats), want);
-        run(&mut s, "DROP INDEX am_b, am_bt, am_g, am_d, am_j, am_jp;\nVACUUM am");
+        run(&mut s, &format!("{drop};\nVACUUM am"));
         run(&mut s, build);
         assert_eq!(rows(&mut s, stats), want);
+        run(&mut s, drop);
+        parallel(&mut s);
     });
 }
 
@@ -749,4 +765,50 @@ fn hash_gin_brin_sizes_past_the_model() {
         };
         if big { with_max_versions(5000, go) } else { go() }
     }
+}
+
+/// INSERT … SELECT of a table's rows into a table past the model copies their stored values
+/// (`dml::StoredInsert`): the same rows, counts and size estimate as the decoded path takes
+/// (a filtered source); rows it can't copy so (a long value, one stored before a column was
+/// added) go in decoded, and a NULL for a NOT NULL column fails as it does.
+#[test]
+fn insert_select_from_stored_rows() {
+    use pg_engine::exec::dml::STORED_INSERTS;
+    let dir = tempfile::tempdir().unwrap();
+    let eng = open(dir.path());
+    with_max_versions(500, || {
+        let mut s = eng.connect(1, "postgres", "postgres", "t").unwrap();
+        run(
+            &mut s,
+            "CREATE TABLE src (id int NOT NULL, a int, b text, c float8, v varchar(20));
+INSERT INTO src SELECT g, CASE WHEN g = 2500 THEN NULL ELSE g % 7 END, CASE WHEN g % 500 = 0 THEN repeat('x', 300) ELSE 'text ' || g END, g / 3.0, 'v' || (g % 11) FROM generate_series(1, 3000) g;
+CREATE TABLE src2 (id int, a int);
+INSERT INTO src2 SELECT g, g FROM generate_series(1, 1000) g;
+ALTER TABLE src2 ADD COLUMN d int DEFAULT 5;
+INSERT INTO src2 SELECT g, g, g FROM generate_series(1001, 1100) g;
+CREATE TABLE dst3 (LIKE src2);
+CREATE TABLE dst (LIKE src);
+CREATE TABLE dst2 (LIKE src);
+CREATE TABLE dnn (LIKE src);
+ALTER TABLE dnn ALTER COLUMN a SET NOT NULL",
+        );
+        let before = STORED_INSERTS.load(Ordering::Relaxed);
+        run(&mut s, "BEGIN;\nINSERT INTO dst SELECT * FROM src");
+        let copied = STORED_INSERTS.load(Ordering::Relaxed) - before;
+        assert!(copied > 2000 && copied < 3000, "{copied} rows copied as stored");
+        assert_eq!(rows(&mut s, "SELECT n_tup_ins FROM pg_stat_xact_user_tables WHERE relname = 'dst'"), ["[Int8(3000)]"]);
+        run(&mut s, "COMMIT;\nINSERT INTO dst2 SELECT * FROM src WHERE id > 0");
+        let all = |s: &mut Session, t: &str| rows(s, &format!("SELECT * FROM {t} ORDER BY id"));
+        assert_eq!(all(&mut s, "dst"), all(&mut s, "src"));
+        assert_eq!(all(&mut s, "dst2"), all(&mut s, "src"));
+        run(&mut s, "INSERT INTO dst3 SELECT * FROM src2");
+        assert_eq!(all(&mut s, "dst3"), all(&mut s, "src2"));
+        assert_eq!(
+            rows(&mut s, "SELECT pg_relation_size('dst') = pg_relation_size('dst2'), pg_relation_size('dst') > 0"),
+            ["[Bool(true), Bool(true)]"]
+        );
+        let e = s.query("INSERT INTO dnn SELECT * FROM src").unwrap_err();
+        assert!(format!("{e:?}").contains("violates not-null constraint"), "{e:?}");
+        assert_eq!(rows(&mut s, "SELECT count(*) FROM dnn"), ["[Int8(0)]"]);
+    });
 }
