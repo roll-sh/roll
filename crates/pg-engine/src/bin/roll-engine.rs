@@ -183,6 +183,12 @@ fn main() -> anyhow::Result<()> {
     #[cfg(feature = "heapprof")]
     heapprof::start();
     idle::setup();
+    // The built-in functions' registry (every signature parsed from the catalog's rows) is
+    // built while the engine opens, not by the first statement after a start: it was most
+    // of that statement's time (BENCH.md "Size models, round 8").
+    let _ = std::thread::Builder::new().name("roll-warm".into()).spawn(|| {
+        pg_engine::sql::func::registry();
+    });
     raise_open_files();
     tracing_subscriber::fmt()
         .with_env_filter(
