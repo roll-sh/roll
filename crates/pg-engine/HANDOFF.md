@@ -4805,7 +4805,8 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
   - *Memory back to the system*: `roll-engine` runs mimalloc's collection once a second on a
     thread of its own (`roll-trim`): memory freed by busy threads or by threads that ended
     went back only when a thread ran the collection, so a quiet process kept its peak.
-  - *Operator settings* (engine options, not PostgreSQL settings): `--cache-mb` (block cache,
+  - *Operator settings* (engine options, not PostgreSQL settings; since agent 180 the defaults
+    are `--mode`'s, "Modes" below, efficient's here): `--cache-mb` (block cache,
     64), `--plan-cache-mb` (parse trees, statement templates and PL/pgSQL compiles, 36, split
     6 : 2 : 1 since round 24's agent 145: `lru::set_plan_cache_bytes`; the templates were a
     fixed 16 MB outside it; `memory_load`'s `statement_templates_hold_what_they_count`
@@ -9091,6 +9092,46 @@ Left, for the planner:
 - Untouched: item 2 (every node's cost, so one-shot plans stop building EXPLAIN trees for
   Gathers and Incremental Sort keys), planning CPU over plans/apps.sql and the ORM queries,
   TPC-H q21 / q18, and the rest of round 10's list.
+## Planner round 12 (agent 190)
+
+Ordered grouping scans retain the ORDER BY directions and the LIMIT or cursor fraction
+while choosing their input path. The comparison includes a sort of the grouped output
+when needed. A cursor uses startup plus its fraction of the remaining cost. On round 11's
+six-row indexed grouping, the default fraction and zero choose GroupAggregate over an
+Index Scan. Fraction one and an ordinary SELECT keep Sort over HashAggregate. This also
+lets the existing cursor code reject backward FETCH on the default plan and abort the
+transaction. EXPLAIN of SCROLL adds Materialize. No cursor or session API changed.
+
+Other changes retained from the saved lane move a pulled-up anti join's variable-free
+InitPlan qual to its join filter, allow shallow sublinks in catalog EXISTS scans, show the
+written collation's relabel in DISTINCT sort keys, and account for the DELETE join target's
+row marks. Planning estimates pg_depend rows from catalog counts without constructing the
+catalog's dependency rows. Scan costing shares index metadata, consumes owned candidate
+paths, and caches at most eight clause selectivities per relation. A relation made for
+another execution starts with an empty cache.
+
+Seven outstanding EXPLAIN cases from the original probe remain in
+`tests/difftest/a190_planner_r12_remaining.sql`, with their setup. They cover a redundant
+GROUP BY key determined by a primary key, a bounded grouping sort with NULLS LAST, a
+DELETE RETURNING scan width, two semi-join gating plans, DISTINCT order propagation, and
+a catalog join plan. They are not passing golden coverage. The original complete probe
+and both outputs are retained under `~/.cache/a190/` and in the WIP history.
+
+Verification on base `5ead496c2` with the lane's production patch: release build passed,
+focused release Clippy completed with 10 warnings and no errors, and 19 planner plus 14
+cursor golden files matched in-process, over the wire, and in shuffled order. The new
+`a190_planner_r12` golden has 99 statements, recorded from PostgreSQL 18.6. The first full
+probe had seven EXPLAIN differences, preserved above. Logs and the source patch are in
+`~/.cache/a190/resume-logs/`; `resume-recheck.log` ends with `HEAVY-EXIT 0`.
+
+Origin advanced during these checks. The batch was rebased onto `140b4c531` and its
+planner patch remained byte-identical. Focused release Clippy on the combined source
+completed with 10 warnings and no errors, with `resume-integrated-check.log` ending in
+`HEAVY-EXIT 0`. The goldens above describe the pre-rebase build. The verification train
+owns the full suite.
+No performance comparison was run for this batch. The lane's worktree and cache remain
+available to the coordinator.
+
 ## Storage engine, round 1 (agent 169)
 
 Agent 169 owns the store's internals (block format and cache, point lookups inside the store,
@@ -9181,6 +9222,84 @@ finished, the scan side's storage cost). BENCH.md "Storage engine, round 1" has 
     in `Scan::position` (an updated row's two versions sit in two sources, so the merge goes a
     row at a time). Agent 178's: `scan_row_rest`'s key `Arc` per UPDATE row, `Hot::scan`'s
     collected rows, two copies per index entry in `next_indexed`.
+
+## Modes: efficient and performance (agent 180, 2026-11-07)
+
+`roll-engine --mode efficient|performance` picks which way the server leans where footprint
+and speed pull apart. BENCH.md "Modes" has the measurements behind every value.
+
+- **Efficient** (the default, exactly the behaviour before the switch): a 64 MB block cache and
+  36 MB of plan caches, a connection idle for 2 s gives its thread's free memory back
+  (`server::set_idle_hook`), a database closes 60 s after its last session. For test and
+  development environments and many-branch serverless use, where most servers and sessions
+  sit idle.
+- **Performance** (production): the shared caches take a quarter of the memory the server may
+  use (its cgroup's `memory.max`, the tightest of its own and its ancestors', else MemTotal:
+  `mode::server_memory`), 3 : 1 between blocks and plans as `--memory-budget-mb` splits them,
+  never below efficient mode's, the plan caches at most 1 GB (an 8 GB container: 1.5 GB of
+  blocks, 512 MB of plans); idle sessions keep their memory (no trim, no wake-ups while idle);
+  databases stay open (no `roll-idle` thread); a connection waiting for its client polls its
+  socket for up to 50 µs before it sleeps, if its client's last message came within that
+  (`IdleRead::spin`) and while the connections at work and polling fit in a quarter of the
+  cores the process may run on (on 4 cores: only while no other connection works;
+  `server::set_wait_spin`). An idle server spins never: at most 50 µs after a client's last
+  message, then the thread sleeps in its read.
+- **Where the knobs live.** `src/mode.rs`: `Mode` and `Profile::new(mode, memory)`, the only
+  place a knob's per-mode value is decided. `roll-engine`'s `profile()` picks the mode
+  (`--mode`, else `-c roll.engine_mode=...`, else `roll.engine_mode` in postgresql.auto.conf,
+  i.e. `ALTER SYSTEM SET roll.engine_mode = 'performance'` and a restart, else efficient; a
+  `--mode` and a `-c` that disagree refuse to start), then the explicit flags replace single
+  parts: `--memory-budget-mb`, `--cache-mb`, `--plan-cache-mb`, `--idle-close-secs`. Read at
+  start only. `SHOW roll.engine_mode` starts with the selected mode, including the default
+  and `--mode`. It is a custom (placeholder) parameter: a session `SET` changes its displayed
+  value, not the running profile; `RESET` restores the startup selection. Custom command-line
+  parameters now create placeholders as PostgreSQL does (`Settings::set_command_line`).
+  `ALTER SYSTEM` takes effect on restart; reload keeps the running selection visible. A new knob
+  goes into `Profile` with both values, never as an `if performance` at its use.
+- **The same in both modes**: query results, errors, notices, plans, catalog contents,
+  everything SQL sees apart from `roll.engine_mode` itself; durability (fsync on commit, crash
+  safety: performance mode is not `--no-sync`); transparent huge pages stay off.
+- **Measured and left out** (BENCH.md "Modes"): transparent huge pages (no workload faster in
+  either direction beyond the noise, 17-20 MB more memory, TPC-H and analytic a little slower);
+  memtables of 32 / 64 MB instead of 8 (bulk loads 5-15% slower, reads unchanged); never
+  purging mimalloc's free pages (`MIMALLOC_PURGE_DELAY=-1`: no faster, 80 MB more); a spin
+  capped at half the cores without counting the working threads (32 clients -15%), or allowed
+  while working and polling threads fit in all the cores (8 clients -8%) or in half (8
+  clients' range reads -9%) or in a quarter for every client (range reads -7%: the
+  per-connection rule took it to -4%, within the noise). Not mode
+  knobs: the per-row executor and storage costs behind range reads, TPC-H, bulk loads (the
+  executor, planner, OLTP, storage, bulk-write and index owners' areas); more parallel workers
+  per Gather on bigger machines (the executor's `parallel_workers`, unmeasurable on the
+  scoreboard's 4 cores).
+- **Efficient mode, free improvements kept in both modes**: idle connections park after their
+  trim (d7e454cc5, from `perf/pg-engine-idle-park-20261105`): before, an idle session woke
+  every 2 s for nothing.
+- **Scoreboard**: `tools/bench/scoreboard.sh` runs both modes (`engine` efficient with
+  `--cache-mb 2048` as always, `engperf` performance sizing itself from `SERVER_MEM`, 8g, the
+  memory limit every server container gets), PostgreSQL tuned (`run.sh pg-start`'s
+  `shared_buffers=2GB`: a quarter of 8 GB, the same rule) and with its stock settings
+  (`pgdef`, `SB_PG_DEFAULT=` leaves it out), and pgrust; a table per mode. The gate's
+  baselines and status are efficient mode's; performance mode's gate values are shown.
+  `run.sh engperf-start` / `pgdef-start` start them by hand; `CACHE_MB=` (set empty) starts the
+  engine without `--cache-mb`.
+
+
+- **Resumed verification (2026-11-08)**: fixed the missing custom command-line placeholder
+  and its RESET default; the earlier job F SHOW errors were real, not passing probes.
+  Release build and Clippy pass (the same 18 warnings); 206 library tests and the CLI mode
+  selection test pass, two library tests ignored. The live probe passes 29 assertions across
+  seven starts and three rejected starts, including SHOW / RESET, reload versus restart,
+  explicit overrides and committed rows retained across both mode directions. Receipts:
+  `~/.cache/a180/logs/jobG2.log`, `testG.log`, `relG.log`, `clippyG.log`; live probe script:
+  `~/.cache/a180/probeG.py`. Reused: job C's 85 wire/lifecycle/session tests (one ignored),
+  isolation 1,647/1,648 permutations and 12,234/12,238 steps (the documented L2 difference).
+  Scoreboard shell syntax and the five-server renderer fixture pass. The saved efficient
+  footprint gate (job E) passed before this SQL visibility fix; final dist footprint and
+  loaded comparisons await the serialized verification train. No new benchmark claim.
+  Release/runtime receipts cover pre-rebase `2546a4e37`; rebasing onto bulk batch
+  `140b4c531` and planner batch `223fffc6c` preserved all nine lane source/script blobs
+  exactly. Combined all-target Clippy passes with 18 warnings: `jobH.log` (bulk) and
+  `jobI.log` (planner); full combined runtime checks remain with the train.
 
 ## Starting prompt for the next agent
 
