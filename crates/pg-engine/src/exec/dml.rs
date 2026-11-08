@@ -4641,7 +4641,11 @@ impl Node for InsertNode {
                 return Err(e);
             }
             let next = match &self.plan.copy {
-                Some(c) => match next_copied(c, ctx).inspect_err(|_| self.counts_on_error(ctx))? {
+                Some(c) => match next_copied(c, ctx).inspect_err(|e| {
+                    if e.code != NEED_COPY_ROWS {
+                        self.counts_on_error(ctx);
+                    }
+                })? {
                     Some((row, line)) => {
                         self.copy_line = line;
                         Some(row)
