@@ -6336,6 +6336,9 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "aws-sdk-dynamodb",
+ "aws-sdk-s3",
+ "aws-smithy-http-client",
+ "aws-smithy-runtime-api",
  "axum",
  "bytes",
  "chrono",
@@ -6374,6 +6377,7 @@ dependencies = [
  "pg-proxy",
  "pg-storage",
  "rcgen",
+ "rdkafka",
  "redis-control",
  "redis-server",
  "reqwest",

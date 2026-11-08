@@ -461,11 +461,45 @@ pushes take as long as the pack); `handoff-failures` and `lease-takeovers` on an
   owner had flushed (all but its last second at most).
 - Garbage collection runs on one node at a time (singleton `redis-gc`).
 
+## Testing the fleet
+
+`pnpm test:fleet` (`scripts/test-fleet.sh`; the `fleet` workflow on GitHub, run by hand) is the end
+to end test of this design. It builds the fleet image (dev profile), brings up a local copy of
+roll cloud (`deploy/cloud/local/docker-compose.yml`) and runs `crates/rolld/tests/fleet_e2e.rs`
+against it, then removes everything it created (all named `roll-cloud-e2e-*`).
+
+- **The stack.** Three `rolld` nodes from the fleet image with the cloud's node settings
+  (`ROLL_CLUSTER_BACKEND=dynamodb` on DynamoDB Local, `ROLL_SYSTEM_DATABASE` on
+  `postgres:18-alpine`, S3 on MinIO, `ROLL_EDGE=1` with self-signed wildcard certificates for
+  `roll.localhost` and `rollsite.localhost` from `deploy/cloud/local/gen-certs.sh`,
+  `ROLL_PRODUCTS` without postgres, `ROLL_LOG_FORMAT=json`), and HAProxy in front as the NLB: TCP
+  passthrough on every public port, PROXY protocol v2, `GET /healthz` on 7070 every second, out
+  after two failures (the drain delay is 5 s to match). A fourth node is the scale-out
+  (`--profile scale`). Ports are published on 127.0.0.1 and the test drives the stack from the
+  host by the edge's hostnames (`*.localhost` resolves to loopback).
+- **The load**, through the load balancer, with real clients, each writer recording every
+  acknowledged write and a reader beside it: roll code (API landings on four repos, `git push` and
+  fetches over `git.`), Redis (RESP over TLS with SNI, a `sync` database), NoSQL (CQL over TLS with
+  SNI, a `sync` database), streams (librdkafka, SASL_SSL, `acks=all`, idempotent), storage
+  (aws-sdk-s3, path and virtual-host style, multipart uploads), tasks (publish with `dedup_id`,
+  pull and ack). Queues join when they're on the cluster layer.
+- **The disruptions**: SIGKILL of the node holding the most leases (started again afterwards); a
+  rolling restart, each node stopped with SIGTERM (it must exit 0 holding no lease) and healthy
+  again before the next; a fourth node joining and leaving. After each, every tenant lease must be
+  on the node placement prefers.
+- **The checks**: every acknowledged write reads back; nothing is duplicated where the product
+  promises exactly once (code landings, Kafka records, storage keys) and tasks' at-least-once
+  deliveries carry the message id the publish returned; every client-visible error is a kind the
+  product's docs allow (`Product::allows` lists them, with the docs they come from); no operation
+  fails after the client retry policy. It prints writes, acknowledgements, verified writes,
+  errors by kind and the longest stall, per product and per disruption.
+
 ## Where everything lives
 
 | part | path |
 | --- | --- |
 | AWS stack | `deploy/cloud/aws/roll-cloud.yaml` |
+| local fleet and its end to end test | `deploy/cloud/local/`, `crates/rolld/tests/fleet_e2e.rs`, `scripts/test-fleet.sh` |
 | Cloudflare zones and records | `deploy/cloud/cloudflare/` |
 | fleet image | `deploy/cloud/Dockerfile` |
 | deploy pipeline | `.github/workflows/deploy.yml` |
@@ -488,6 +522,7 @@ pushes take as long as the pack); `handoff-failures` and `lease-takeovers` on an
 | nosql on the cluster layer | built: lease `nosql:db:<id>`, catalog on the system database, CQL spliced to the owner (SNI or SASL user), fenced manifests (docs/nosql/architecture.md, "On a fleet") |
 | streams on the cluster layer | built (`stream:cluster:<id>`, catalog on the system database, acknowledgements from a write-ahead log in S3, kafka splices); not yet run against AWS |
 | queues on the cluster layer | in progress |
+| fleet end to end test | built (`pnpm test:fleet`, "Testing the fleet"): every product but queues and postgres, through a SIGKILL, a rolling restart and a scale-out; green locally, findings under "Open items" |
 | postgres on the fleet and the system database | with the pg-engine branch |
 | isolated work on Fargate | next |
 
@@ -500,6 +535,40 @@ pushes take as long as the pack); `handoff-failures` and `lease-takeovers` on an
   `ROLL_BUCKET_DOMAIN`) and by path on the zone (`roll.site/<bucket>/<key>`); set the deployment's
   CDN `base_url` to `https://roll.site` so purges reach both. Bucket names starting `chg-` are
   reserved for previews.
+- **What the fleet test shows** (`pnpm test:fleet`, three runs on 2026-11-08 on a shared 36-core
+  machine; "Testing the fleet"). No acknowledged write was lost or duplicated in any product, in
+  any scenario: 4.7k code landings, 6.6k Redis `SET`s, 6k CQL `INSERT`s, 21k Kafka records, 3.1k
+  objects (21 multipart) and 1.1k tasks in the last run, every one read back. Every drained node
+  exited 0 holding no lease, and placement was right after every scenario. Still open:
+  - **Takeover after a crash takes about 10 s.** The killed node's leases moved 9.2–10.0 s after
+    SIGKILL. Writes to its tenants stalled about as long, within the documented 10–15 s: Redis
+    9.4 s, NoSQL 7.0–11.1 s, storage 8.6–9.9 s, streams 9.2–10.5 s. Other tenants didn't stall
+    (under 1 s). Lane `cloud/hardening` is working on takeover latency.
+  - **Streams stall the longest on a planned handoff.** During the rolling restart a stream's
+    producer waited 2.7–6.1 s for acknowledgements. Redis and NoSQL waited at most 2.6 s, every
+    other product under 1.5 s. Each move costs librdkafka a reconnect and a metadata refresh.
+    The client saw no error beyond reconnects.
+  - **A stopping node waits for the load balancer twice.** On SIGTERM the edge keeps serving for
+    `ROLL_EDGE_DRAIN_DELAY`, then the products drain, then `rolld`'s stop still sleeps out
+    `cluster::DEREGISTER` (15 s), counted from after the edge's delay. A node that held nothing
+    took 20.6–22.9 s to exit with a 5 s edge delay. In the cloud (15 s delay) that is about 13 s
+    per node of every deploy and scale-in spent holding nothing. Lane `cloud/hardening` is
+    reworking the stop order.
+  - **NoSQL and streams hand out connection details that don't work behind the edge.**
+    `POST /v1/nosql/databases` answers `endpoints.cql` `127.0.0.1:59042`, an Alternator URL on
+    `:58000`, `server_name: null` and `tls: false`. `POST /v1/streams` answers `bootstrap`
+    `127.0.0.1:9092` with `SASL_PLAINTEXT`, and an HTTP URL on the internal API. They should
+    give `<id>.nosql.<region>.<domain>:9042` (TLS), `<host>.kafka.<region>.<domain>:9092`
+    (`SASL_SSL`) and `https://<id>.kafka.…`, as Redis already does (`rediss://…`). The test
+    builds those names itself.
+  - **Queues run on every node but not as a fleet.** The stack turns queues on
+    (`ROLL_PRODUCTS`), but until lane `cloud/queues` lands, each node runs its own broker, and a
+    client's queue depends on which node the NLB picks. The fleet test leaves queues out (marked
+    in `fleet_e2e.rs`).
+- **Fixed by the fleet test**: the fleet image didn't build: `deploy/cloud/Dockerfile.dockerignore`
+  left out the Cloudflare origin-pull CA, which roll-edge compiles in. A code write forwarded to
+  an owner that then died answered an undocumented `502`. That answer is correct, since the write
+  may have run, and docs/code/http-api.md now documents it.
 - **Flaky tests seen on GitHub** (each passed on a plain re-run, and on main): redis
   `compat_debug_with_redis` (`search_hnsw.txt`, `FT.INFO` while the vector index is still
   building), nosql conformance `test_compaction.py::test_tombstone_gc_with_conflict_in_memtable`,
