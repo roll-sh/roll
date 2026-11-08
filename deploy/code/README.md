@@ -56,6 +56,7 @@ you pin one).
 | `ROLL_CODE_PUBLIC_URL` | The load balancer's URL (`https://code.example.com`), for links and clone URLs. `ROLL_CODE_GIT_URL` overrides the clone URL base. |
 | `ROLL_CODE_NODE_ID` | Optional. A stable id per node (a StatefulSet ordinal, an instance id). Without it each process gets a random one. A restarted process with a pinned id waits until its previous incarnation looks dead (about 5 s). |
 | `ROLL_CODE_DRAIN_TIMEOUT` | Seconds a stopping node waits for its repos to move (30). |
+| `ROLL_CLUSTER_BACKEND` | Optional. `dynamodb` keeps leases and membership in a DynamoDB table (`ROLL_CLUSTER_TABLE`, `roll-cluster`) instead of the Postgres above; the data stays in Postgres. The `ROLL_CODE_CLUSTER_SECRET`, `_ADVERTISE_URL`, `_NODE_ID` and `_DRAIN_TIMEOUT` names above are aliases of `ROLL_CLUSTER_SECRET`, `ROLL_ADVERTISE_URL`, `ROLL_NODE_ID` and `ROLL_DRAIN_TIMEOUT` (docs/code/cluster.md). |
 | `ROLL_CODE_DB_CONNECTIONS` | Connections per database per node (16). See sizing. |
 | `ROLL_CODE_DB_CA` | Extra CA certificates for Postgres. The image sets it to the RDS bundle (`/etc/roll/rds-global-bundle.pem`). |
 
