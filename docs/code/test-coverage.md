@@ -337,8 +337,8 @@ Open mode: `contract.rs::open_mode_makes_everyone_admin`.
 
 | Caller | Read public | Read private | Write public | Write private |
 | --- | --- | --- | --- | --- |
-| open mode (no `ROLL_CODE_TOKEN`) | ✓ | ✓ | ✓ | ✓ |
-| admin token | ✓ | ✓ | ✓ | ✓ |
+| open mode (no `ROLL_CODE_TOKEN` or `ROLL_ADMIN_TOKEN`) | ✓ | ✓ | ✓ | ✓ |
+| admin token (`ROLL_CODE_TOKEN`, or rolld's operator token: `rolld/tests/auth.rs::every_control_plane_route_needs_the_operator_token`) | ✓ | ✓ | ✓ | ✓ |
 | owner's token | ✓ | ✓ | ✓ | ✓ |
 | another owner's token | ✓ | 404 | 403 | 404 |
 | anonymous | ✓ | 404 (git: 401 with a Basic challenge, so git sends credentials) | 401 | 404 (git: 401) |
@@ -1071,6 +1071,8 @@ Every code-control test runs on SQLite, and on Postgres with `ROLL_CODE_TEST_DAT
 
 | Defect fixed | Test |
 | --- | --- |
+| control planes without auth: every route rolld merges answers 401 without the operator token (and to a wrong one, or another credential, where the product checks its own) and not 401 with it, except `crates/rolld/src/auth.rs`'s public list; CORS answers only `ROLL_DASHBOARD_ORIGIN` | `rolld/tests/auth.rs::every_control_plane_route_needs_the_operator_token` |
+| rolld off loopback (or `ROLL_EDGE=1`) without `ROLL_ADMIN_TOKEN`, or with a short one, refuses to start and doesn't print it | `rolld/tests/auth.rs::refuses_to_listen_off_loopback_without_a_token` |
 | owners' provider `base_url` on private addresses (SSRF; literals at set and use time, credentials in the URL) | `reviewer.rs::byok_endpoints_on_private_addresses_are_refused` |
 | provider answers over 16 MiB, and redirects | `code-review/tests/engine.rs::oversized_answers_and_redirects_are_refused` |
 | NAT64/6to4-wrapped private IPv4, `*.localhost` | `review::apps` unit `private_ranges` |
@@ -1138,7 +1140,7 @@ jsdom (`vitest.config.mts` projects `node` and `dom`, setup in `src/test/`).
 | diff parsing and split pairing | `src/lib/diff.test.ts` |
 | highlighting: language mapping, token classes, limits | `src/lib/highlight.test.ts` |
 | git proxy: target URL, header allowlist, forwarding headers, streaming body, dropped response headers, 401 passthrough, 502 | `src/lib/git-proxy.test.ts` |
-| sign-in token storage and events | `src/lib/code-token.test.ts` |
+| sign-in token storage and events; the token goes to the other products' APIs only while it's rolld's operator token | `src/lib/code-token.test.ts` |
 | owner tokens list and revoke requests, token rows (prefix or id, last use) | `src/lib/code-api.test.ts`, `src/lib/ci.test.ts` |
 | 404s and renames on public pages: the app's own names never reach the API, a missing repo or owner is a 404, a renamed repo a 308 keeping the rest of the path and the query, a repo's tab typed as a path (`/dashboard/code/o/r/changes`) a 307 to the repo page on that tab (`#changes`), API down is the error page; the route tree sends app routes, owner and repo pages and git traffic where they belong, and keeps search params as written | `src/lib/public-pages.test.ts`, `src/router.test.tsx` (and checked against the production server: real 404 and 308) |
 | reserved names: lowercase, unique, every top-level route, in sync with Rust | `src/lib/reserved-names.test.ts`, `code-control/src/names.rs::reserved_matches_the_dashboard` |

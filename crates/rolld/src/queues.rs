@@ -159,9 +159,10 @@ impl Queues {
         if args.az.is_none() {
             args.az = mq_cluster::aws::ecs_availability_zone().await;
         }
-        // RabbitMQ's rule: guest/guest only from this machine.
+        // RabbitMQ's rule: guest/guest only from this machine (behind the edge, nothing is).
         let listeners = [args.amqp, args.management, args.stomp, args.web_stomp, args.mqtt, args.web_mqtt, args.stream, args.http];
-        if args.user == "guest" && args.password == "guest" && let Some(open) = listeners.iter().find(|a| !a.ip().is_loopback()) {
+        let open = listeners.iter().find(|a| !a.ip().is_loopback()).map(|a| a.to_string()).or_else(|| crate::auth::edge().then(|| "the edge".to_string()));
+        if args.user == "guest" && args.password == "guest" && let Some(open) = open {
             anyhow::bail!("queues listen on {open} with the default guest/guest login: set ROLL_QUEUES_USER and ROLL_QUEUES_PASSWORD");
         }
         let logs = open_storage(&args, &dir).await?;

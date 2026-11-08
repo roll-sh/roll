@@ -49,11 +49,6 @@ impl AdminToken {
     pub fn matches(&self, presented: &str) -> bool {
         constant_eq(presented.as_bytes(), self.0.as_bytes())
     }
-
-    /// The token itself, for a product that checks it on its own (roll code's admin token).
-    pub fn reveal(&self) -> &str {
-        &self.0
-    }
 }
 
 impl fmt::Debug for AdminToken {

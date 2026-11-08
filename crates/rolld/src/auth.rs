@@ -63,7 +63,7 @@ impl Auth {
             Some(t) => Some(AdminToken::new(&t).map_err(|why| anyhow::anyhow!("ROLL_ADMIN_TOKEN {why}"))?),
             None => None,
         };
-        let edge = std::env::var("ROLL_EDGE").is_ok_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"));
+        let edge = edge();
         let open: Vec<SocketAddr> = listeners(args).into_iter().filter(|a| !a.ip().is_loopback()).collect();
         let exposed = edge || !open.is_empty();
         if token.is_none() && exposed {
@@ -118,6 +118,12 @@ impl Auth {
         info!(routes = routes.len(), operator, operator_or_credential = credential, product, public, "control-plane routes");
         router.layer(axum::middleware::from_fn_with_state(self.gate.clone(), roll_auth::check)).layer(roll_auth::cors(&self.origins))
     }
+}
+
+/// Whether rolld serves the internet through its edge (`ROLL_EDGE=1`): the public listeners reach
+/// products whatever addresses those bind.
+pub fn edge() -> bool {
+    std::env::var("ROLL_EDGE").is_ok_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
 }
 
 /// Every address rolld may listen on with these flags.

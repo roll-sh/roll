@@ -178,7 +178,7 @@ async fn open_mode_makes_everyone_admin() {
     assert_eq!(a.code.caller(None).unwrap(), Caller::Admin);
     assert_eq!(a.code.caller(Some("anything")).unwrap(), Caller::Admin);
     let info = a.ok("GET", "/v1/code", None).await;
-    assert_eq!(info["auth"], json!({ "required": false, "caller": { "kind": "admin", "owner": null, "reviewer": { "kind": "user", "name": "admin" } } }));
+    assert_eq!(info["auth"], json!({ "required": false, "operator": false, "caller": { "kind": "admin", "owner": null, "reviewer": { "kind": "user", "name": "admin" } } }));
     a.repo("acme", "x").await;
     a.ok("PATCH", "/v1/code/repos/acme/x", Some(json!({ "visibility": "private" }))).await;
     a.ok("GET", "/v1/code/repos/acme/x", None).await;
