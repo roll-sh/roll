@@ -845,10 +845,13 @@ export function DiffPane({
   const nodes = client.data.nodes.get(thread.id);
   const edits = useMemo(() => (readOnly ? editsDiff(client.data, thread.id, run) : null), [readOnly, client.data, nodes, thread.id, run]);
   const diff = edits ?? fetched;
-  // Re-fetch when the scope changes or a run finishes.
+  // Re-fetch when the scope changes, a run finishes or the machine comes back.
   const version = `${run}:${lastRun?.id}:${lastRun?.status}`;
+  // The diff is read from the machine: offline, what the records know (the numbers) and how to get the rest.
+  const online = reachable(machine);
+  const known = run ? runs.find((r) => r.id === run)?.stat : thread.diff;
   useEffect(() => {
-    if (!machine || readOnly) return;
+    if (!machine || readOnly || !online) return;
     let live = true;
     setDiff(null);
     setError(null);
@@ -860,7 +863,7 @@ export function DiffPane({
       live = false;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [client, machine?.id, thread.id, version]);
+  }, [client, machine?.id, thread.id, version, online]);
 
   return (
     <>
@@ -876,7 +879,7 @@ export function DiffPane({
             ...runs.filter((r) => r.status !== "rolled_back").map((r) => ({ value: r.id, label: `Run ${r.ordinal}: ${r.prompt.slice(0, 40)}` })),
           ]}
         />
-        {diff && <Stat stat={diff.stat} className="text-[11.5px]" />}
+        {diff ? <Stat stat={diff.stat} className="text-[11.5px]" /> : !online && !readOnly && known ? <Stat stat={known} className="text-[11.5px]" /> : null}
         {onClose && (
           <span className="ml-auto">
             <IconButton label="Close the diff" onClick={onClose}>
@@ -886,7 +889,11 @@ export function DiffPane({
         )}
       </div>
       <div className="min-h-0 flex-1 overflow-auto overscroll-contain p-3 select-text" data-scroll>
-        {error ? (
+        {!diff && !online && !readOnly ? (
+          <p className="py-10 text-center text-[12.5px] text-subtle">
+            {machine ? `${machine.name} is offline` : "Its machine is gone"}: the diff is read from the machine{machine ? <> once it&apos;s back (<code className="font-mono">roll agent up</code> there)</> : ""}.
+          </p>
+        ) : error ? (
           <p className="text-[12.5px] text-danger">{error}</p>
         ) : !diff ? (
           <p className="text-[12.5px] text-subtle">
