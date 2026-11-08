@@ -8685,6 +8685,64 @@ against 2,564 (posting list splits; reproduced with 200k rows, `a170_btree_posti
 With the engine's autovacuum on and PostgreSQL's off, the engine's ANALYZE changed the
 estimates and widths: compare the two servers configured alike.
 
+## Size models, round 7 (agent 179)
+
+HANDOFF.md, "Size models, round 7", has what changed. Engines are dist builds of this round's
+final tree in containers as run.sh's `ENGINE_DOCKER` (cores 24-27, CPU weight 2, PostgreSQL
+18.6 the same, clients on 20-23); other agents' builds ran unpinned throughout, so single
+cells moved by up to 1.5x (the 400k column's own select-only peak: 288 / 391 MB in one job,
+239 / 423 in another).
+
+**The lift table** (`liftcmp.sh`, 2 rounds; CPU s, or ms per transaction; peak MB):
+
+| check | 400k | lifted | PostgreSQL | round 6 lifted |
+|---|---|---|---|---|
+| COPY 1M (g) | 1.52 / 1.58 s | 1.65 / 1.75 s | 0.72 / 0.76 s | 2.23 / 2.22 |
+| VACUUM (v) | 0.49 / 0.59 s | 0.57 / 0.18 s | 0.13 / 0.14 s | 0.18 / 0.19 |
+| primary key (p) | 0.75 / 0.78 s | 0.81 / 0.84 s | 0.45 / 0.44 s | 0.76 / 0.74 |
+| CREATE INDEX (bid) | 0.98 / 1.05 s | 1.04 / 0.95 s | 0.40 / 0.32 s | 0.80 / 0.88 |
+| DELETE 10% | 0.53 / 0.65 s | 0.76 / 0.71 s | 0.14 / 0.14 s | 0.87 / 0.94 |
+| VACUUM after DELETE | 0.73 / 0.69 s | 0.77 / 0.74 s | 0.22 / 0.25 s | 0.69 / 0.93 |
+| first statement after restart | 8.8 / 16.7 ms | 13.4 / 19.4 ms | 2.8 / 2.5 ms | 10 / 18 |
+| select-only c8 | 0.056 / 0.059, 288 / 391 MB | 0.039 / 0.042, 526 / 480 MB | 0.038 / 0.041, 248 / 246 MB | 0.049 / 0.052, 479 / 525 |
+| simple-update c8 | 0.219 / 0.246, 223 / 252 MB | 0.226 / 0.257, 362 / 328 MB | 0.178 / 0.211, 267 / 265 MB | 0.276 / 0.287, 376 / 362 |
+| tpcb-like c8 | 0.447 / 0.507, 260 / 269 MB | 0.456 / 0.536, 373 / 357 MB | 0.299 / 0.342, 268 / 265 MB | 0.514 / 0.544, 351 / 367 |
+
+The limit stays: COPY (+8%), the primary key (+7%), DELETE (+20%) and every peak are above
+the 400k column. An earlier job on the same changes (before the first statement's fix) had
+COPY 1.63 / 1.62 against 1.56 / 2.36 and simple-update 0.230 / 0.231 against 0.224 / 0.222:
+the two are at the noise's edge.
+
+**The first statement after a restart** (lift.sh's sequence at 500k and 1M rows, the release
+engine on the host): origin 927e1015 without this round's commits 97 / 196 ms; with them,
+before `heap_modelled_or_kept`, 156 / 235; after it 21 / 13. Planning took 13 ms throughout
+(the record's sizes); the execution waited in `ScanNode::start_parallel` -> `heap_modelled`
+-> `ensure` for the background layout (perf `sched:sched_switch` with DWARF stacks).
+
+**Profiles** (perf of the lifted dist engine, flat self time, one run each, before the memory
+changes). COPY of 1M rows: the models 9% (`CopyLoad::model` 2.1%, `inserted_with` 1.9%, the
+batch push 1.4%, `ensure` 1.2%, compression tracking 1.3%; round 6: `inserted_with` 12%,
+`multi_insert` 5%). DELETE of 10%: the models 4.7% (`KeyMap::find` 2.6%, `locate_row` 1.1%,
+`delete_cid` 1.1%), 0.65 s of CPU against 0.53 at 400k, the rest of the difference the
+executor's and storage's. simple-update: the models 3.6% (`KeyMap::asc_row` 1.5%, since an
+interpolation search).
+
+**Model memory** (`restart_cost` at 1M rows of pgbench_accounts' shape with its primary key, a
+tenth of the rows updated; live allocations after the first statement): lifted 87.3 MB
+before the memory changes, 74.2 after, 5.9 at 400k: 81 -> 68 bytes a row, against
+PostgreSQL's 150 (heap 128 MB, index 22 MB). That table's updates leave its key map hashed
+and few pages runs; a loaded int-keyed table's rows take 15 bytes in the key map (22 before),
+15 per primary key entry (22) and no line-pointer slot on a settled page (8). Its layout
+(the first statement) 0.27 s against 0.36 before.
+
+**Apply** (`apply.sh`, PostgreSQL publisher, 60,000 transactions, 1 round, with the identity
+lookups' bound at the live entry): PostgreSQL's subscriber 2.57 s of CPU, apply worker 30 MB;
+the engine 3.52 s, +32 MB; every page count PostgreSQL's (acc 162, acc_pkey 30, hist 382,
+hist_aid 108, hist_pkey 166).
+
+**3M rows** (`mw.py`, STATS=1, autovacuum off on both, lifted): every line matches PostgreSQL
+18.6's, the 197.59 / 197.60 cost included (fused multiply-adds, HANDOFF).
+
 ## Where it is still slower, and why
 
 In rough order of what it costs users:

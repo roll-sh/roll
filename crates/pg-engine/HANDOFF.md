@@ -8262,6 +8262,88 @@ index row size checks, merged into the parallel model mode below).
   3M rows' mw1_k cost; memory (the engine's peak is above PostgreSQL's at 400k too: not the
   models); lineitem's index-only `count(*)` (needs lineitem modelled: not lifted).
 
+## Size models, round 7 (agent 179)
+
+BENCH.md "Size models, round 7" has the numbers. The limit stays at 400,000: lifted, COPY
+(+8%), the primary key (+7%), DELETE of 10% (+20%) and every pgbench peak (+100-240 MB) are
+still above the 400k column; the first statement after a restart, CREATE INDEX, VACUUM and
+pgbench's CPU are at it.
+
+- **COPY's per-row upkeep** (`exec/sizing.rs` `BATCHES`, `with_batch`, `CopyLoad`;
+  `catalog/heapsim.rs` `Heap::insert`, `multi_insert`, `put_quiet`). A COPY's multi-insert
+  buffer is the thread's (`BATCHES`: by database instance, table and transaction), not the
+  shard's: a buffered row takes no shard lock (twice a row before: `inserted_with` and
+  `row_done`), no xid horizon and no catalog lookup; the batch goes in under one lock at
+  `flush`. `multi_insert` takes the keys by reference (a copy of every key before), places
+  each tuple with its command id (`set_raw_cid`'s second write of every tuple is gone), and
+  publishes a page's prune hint and the visibility watches once per page; `keyed` sets the
+  row in place (`Lps::set_row`). 175's plain COPY path reaches it through `inserted_with`, the
+  held rows' interface (`store_held_rows`) unchanged. The models are now 9% of a lifted
+  COPY's samples (round 6: `inserted_with` 12% and `multi_insert` 5%).
+- **A page's own xmin** (`catalog/heapsim/lps.rs` `OWN_XMIN`, `Lps::own`): a small slot's xmin
+  code 3 (FirstNormalTransactionId: no special xid's code) stands for one normal xid per
+  page, so versions just written (a load's, a run of inserts) take 8 bytes from the start
+  instead of a 40-byte whole `Tup` until they settle, and settle by rewriting two bits.
+  Versions of another xid on the page are whole, as before.
+- **DELETE / UPDATE**: visibility from `Table::temporary` (`vis_of`) instead of a catalog
+  lookup and schema name per row; DELETE probes the TOAST rows only for a table with TOAST.
+  DELETE's lifted profile: the models 4.7% (`KeyMap::find`, `locate_row`, `delete_cid`); the
+  rest of its gap to 400k is the executor's and storage's.
+- **Model memory**: settled pages' line pointers as one run (`Lps::freeze` / `thaw`: a page
+  whose slots are small, settled or frozen, alike but for consecutive rows keeps `run` and
+  `run_n`, no slot each; from `settle`, layouts and VACUUM); KeyMap's ascending rows keep
+  their keys back to back when they are of one length (`AscKeys::Fixed`; `Var` places from
+  the first key of another length on) and their TIDs in 6 bytes with the present bit
+  (`AscTid`), the rows after them as before, and a random lookup of a fixed-length key
+  interpolates on the bytes past the keys' common prefix (`asc_guess`); btree leaves whose
+  items each have one TID, no LP_DEAD mark and a key of one length are plain
+  (`Leaf::stride`: TID and key per item, no flags, count or place; any change lays the page
+  out again, `unplain`; builds and images end plain, `Btree::plain_leaves`). Per row of an
+  int-keyed table: KeyMap 22 -> 15 bytes, primary key entries 22 -> 15, line pointers 8 -> 0
+  on settled pages. `restart_cost` (1M rows, a tenth updated: its key map is hashed and few
+  pages are runs) 87.3 -> 74.2 MB live.
+- **Item 4, the 3M-row cost** (`sql/costs.rs` `PgMulAdd`): the planner fused its
+  multiply-adds because its reference was aarch64, where GCC contracts `c += a * b`; this
+  machine's (x86-64) doesn't, and 197.595 rounds to 197.59 fused, 197.60 unfused.
+  `pg_mul_add` fuses on aarch64 only. `scan_paths`'s golden (recorded on aarch64)
+  re-recorded on x86-64: four costs 33.72 -> 33.71. mw.py at 3M rows matches PostgreSQL in
+  every line. A golden recorded on one architecture can differ in a cost's last digit on the
+  other: record on the architecture the tests run on.
+- **Item 5, apply's identity lookups** (`sizing::identity_kills`, `Btree::dead_before`,
+  `set_dead`): RelationFindReplTupleByIndex stops at the live entry; the lookup marks only the
+  dead entries before it (by heap TID within the key's run), not the whole run. apply.sh's
+  pages still all match PostgreSQL's.
+- **Item 6, index sizes of tables too big to model** (`sizing::BigIndex`,
+  `modelled_index_pages`; `session/ddl/vacuum.rs` `measure_rows_with`): agent 176 landed BRIN
+  and GIN (`am_measure`) the same day; this round adds hash: its pages from the build's
+  (VACUUM's, ANALYZE's) pass over the rows, laid out as `hashidx::index_pages` does (codes in
+  storage order, `_hash_init`'s estimate), and pg_relation_size reads them from relpages (it
+  said 10, the empty index). A modelled table's hash and GIN relpages after CREATE INDEX and
+  VACUUM were the btree estimate (219 / 31 / 84 against PostgreSQL's 44 / 136 / 130): they are
+  their models' now (BRIN's its three pages). Test `big_tables::hash_gin_brin_sizes_past_the_model`.
+- **The first statement after a restart** waited for its table's layout again (196 ms at 1M
+  rows on origin 927e1015, without this round's commits; round 6 measured 10-18):
+  `ScanNode::start_parallel` called `heap_modelled`, which lays a kept table out. The parallel
+  scans' and the lookup workers' checks only decide whether to go serial:
+  `heap_modelled_or_kept` counts a kept table planned from its record's sizes as modelled
+  without waiting (13-19 ms lifted). `heap_modelled` itself still waits (a sequential scan's
+  heap order needs the model). Found with perf's context switches and DWARF stacks
+  (`perf record -e sched:sched_switch --call-graph dwarf` in roll-perf-tools).
+- **Verified** (one job on the final tree, then a clean rebase over unrelated commits): release
+  build, clippy (no warning in a file touched), the models' unit tests (26), models_kept,
+  big_tables (18), golden / golden_wire / golden_shuffled, 27 regress files 8,562 / 8,563 with 0
+  newly differing (join 368 differs in results.tsv too), contrib pageinspect 102 / 291,
+  pgstattuple 83 / 83, amcheck 204 / 204 (202 committed), pg_visibility 99 / 99, apply.sh,
+  mw.py at 3M rows, the lift table.
+- **Left**: the lift. The peaks are the gate furthest away, and they aren't the models' live
+  bytes alone (74 MB at 1M rows; the lifted select-only peak is 100-240 MB above 400k's, and
+  400k's own moved 239 -> 423 MB between rounds): profile the allocations of a lifted
+  `pgbench -i` (the primary key's build holds a `Key` and a data key per row,
+  `btree_from_build`), then the transient batches. DELETE's gap is the executor's; the
+  primary key's build. A KeyMap with arithmetic keys (a serial's: no key bytes) needs
+  `KeyMap::key` / `Heap::key_at` to stop lending `&[u8]`. Page counts at 10M rows wait for the
+  lift; lineitem's index-only `count(*)` too.
+
 ## Planner round 9 (agent 155)
 
 BENCH.md "Planner, round 9" has the measurements. What changed in batch 1:
