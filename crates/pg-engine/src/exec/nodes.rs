@@ -330,31 +330,31 @@ fn open_node(plan: &Arc<Plan>, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<B
             input: open_need(input, nd::add(need.map(<[bool]>::to_vec), [pred]), ctx)?,
             pred: pred.clone(),
         }),
-        Plan::Project { input, exprs } => Box::new(ProjectNode {
+        Plan::Project { input, exprs } => {
+            let (input, exprs) = merge_moves(input, exprs, ctx);
             // (An output nothing reads that is a plain column needs no input column: it
             // evaluates to whatever is there, without effects. Every other is evaluated as
             // ever, its columns read.)
-            input: open_need(
-                input,
-                match need {
-                    Some(m) => nd::of(
-                        exprs
-                            .iter()
-                            .enumerate()
-                            .filter(|(i, e)| m.get(*i).copied().unwrap_or(false) || !matches!(e, Expr::Col(..)))
-                            .map(|(_, e)| e),
-                    ),
-                    None => nd::of(exprs),
-                },
-                ctx,
-            )?,
-            exprs: exprs.clone(),
-            computed: None,
-            tried: false,
-            topk: None,
-            moves: None,
-            piped: false,
-        }),
+            let input_need = match need {
+                Some(m) => nd::of(
+                    exprs
+                        .iter()
+                        .enumerate()
+                        .filter(|(i, e)| m.get(*i).copied().unwrap_or(false) || !matches!(e, Expr::Col(..)))
+                        .map(|(_, e)| e),
+                ),
+                None => nd::of(&exprs),
+            };
+            Box::new(ProjectNode {
+                input: open_need(input, input_need, ctx)?,
+                exprs,
+                computed: None,
+                tried: false,
+                topk: None,
+                moves: None,
+                piped: false,
+            })
+        }
         Plan::ProjectSet { input, exprs, srfs } => Box::new(ProjectSetNode {
             input: open(input, ctx)?,
             exprs: exprs.clone(),
@@ -2456,6 +2456,50 @@ struct ProjectNode {
 }
 
 const NOT_MOVED: u32 = u32::MAX;
+
+/// A projection over projections that only move columns (plain columns and constants: the
+/// joins' reorderings of their columns), as one projection of the lowest one's input: the
+/// same values, one row made where each level made one, and an aggregation above reads the
+/// rows below through it (`pipeline_projected`: aggregated in a parallel scan's workers).
+/// Not under EXPLAIN ANALYZE, which runs the plan as planned.
+fn merge_moves<'p>(mut input: &'p Arc<Plan>, exprs: &[Expr], ctx: &ExecCtx) -> (&'p Arc<Plan>, Vec<Expr>) {
+    let mut exprs = exprs.to_vec();
+    if ctx.instrumented() {
+        return (input, exprs);
+    }
+    // (Expressions reading the row other than through its columns aren't put through.)
+    let plain = |e: &Expr| {
+        let mut ok = true;
+        e.walk(&mut |x| {
+            if matches!(
+                x,
+                Expr::Subquery(..)
+                    | Expr::Agg(..)
+                    | Expr::Window(..)
+                    | Expr::Grouping(..)
+                    | Expr::Srf(..)
+                    | Expr::Assign { .. }
+                    | Expr::Xml(..)
+                    | Expr::RowCompare(..)
+                    | Expr::CaseTest(..)
+            ) {
+                ok = false;
+            }
+        });
+        ok
+    };
+    if !exprs.iter().all(plain) {
+        return (input, exprs);
+    }
+    while let Plan::Project { input: below, exprs: moves } = &**input
+        && moves.iter().all(|e| matches!(e, Expr::Col(..) | Expr::Const(..)))
+        && let Some(merged) = exprs.iter().map(|e| super::agg::through_projection(e, moves)).collect::<Option<Vec<_>>>()
+    {
+        exprs = merged;
+        input = below;
+    }
+    (input, exprs)
+}
 
 /// A piped projection's next item: a part as it comes, a row projected.
 #[inline(never)]
