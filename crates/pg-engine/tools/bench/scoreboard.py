@@ -42,6 +42,8 @@ GATE_NAMES = {
     'idle_cpu_s_5min': 'idle CPU over 5 minutes (s)',
     'idle_100_sessions_mb': 'memory with 100 idle sessions (MB)',
     'fresh_data_mb': 'fresh data directory (MB)',
+    # (Informational, no baseline: 100 sessions' CPU while they sit idle.)
+    'idle_100_sessions_cpu_s_5min': 'CPU with 100 idle sessions over 5 minutes (s)',
 }
 
 
@@ -136,91 +138,107 @@ def ratios(kind, other, en):
     return out + [(wr, False)]
 
 
-def table(score, gate, order, mode, rounds, idle):
-    # pgrust (a third server, github.com/malisper/pgrust) when the run had it.
-    third = any(t == 'pgrust' for (_, t) in score)
-    rows, wins, cells, pwins, pcells, failures = [], 0, 0, 0, 0, []
+# The servers a run can have (scoreboard.sh's names), as the tables name them.
+NAMES = {'engine': 'engine efficient', 'engperf': 'engine performance', 'pg': 'PostgreSQL',
+         'pgdef': 'PostgreSQL default', 'pgrust': 'pgrust'}
+
+
+def table_for(score, order, en_t, present):
+    """One engine mode's table: its four ratios against PostgreSQL (tuned) and pgrust, its
+    throughput against PostgreSQL with stock settings, and every server's raw value."""
+    third, pgdef = 'pgrust' in present, 'pgdef' in present
+    rows, tally, failures = [], {'pg': [0, 0], 'pgrust': [0, 0]}, []
     for w in order:
-        pg, en, pr = (score.get((w, t), []) for t in ('pg', 'engine', 'pgrust'))
+        runs = {t: score.get((w, t), []) for t in present}
+        en, pg = runs[en_t], runs['pg']
         kind = (pg or en)[0].get('kind', 'work')
         key, unit = ('tps', ' tps') if kind == 'time' else ('secs', ' s')
-        shown = f"{fmt(med(en, key))} / {fmt(med(pg, key))}" + (f" / {fmt(med(pr, key))}" if third else '') + unit
-        vs_pg = ratios(kind, pg, en)
-        for r, _ in vs_pg:
-            if r is not None:
-                cells += 1
-                wins += r >= 1
+        shown = ' / '.join(fmt(med(runs[t], key)) for t in present) + unit
         bad = sum(1 for x in pg + en if x.get('ok') != '1')
         note = f' ({bad} failed runs)' if bad else ''
-        if not third:
-            rows.append(f'| {w}{note} | {shown} | ' + ' | '.join(cell(r, s) for r, s in vs_pg) + ' |')
-            continue
-        vs_pr = ratios(kind, pr, en)
-        for r, _ in vs_pr:
-            if r is not None:
-                pcells += 1
-                pwins += r >= 1
-        errs = [x.get('err') or 'failed' for x in pr if x.get('ok') != '1']
-        if errs:
-            failures.append(f'- {w}: pgrust {len(errs)} of {len(pr)} runs failed: `{errs[0]}`')
-        rows.append(f'| {w}{note} | {shown} | '
-                    + ' | '.join(f'{cell(a, sa)} | {cell(b, sb)}' for (a, sa), (b, sb) in zip(vs_pg, vs_pr)) + ' |')
+        vs = {t: ratios(kind, runs[t], en) for t in ('pg', 'pgrust', 'pgdef') if t in present}
+        for t in ('pg', 'pgrust'):
+            for r, _ in vs.get(t, []):
+                if r is not None:
+                    tally[t][1] += 1
+                    tally[t][0] += r >= 1
+        if third:
+            errs = [x.get('err') or 'failed' for x in runs['pgrust'] if x.get('ok') != '1']
+            if errs:
+                failures.append(f'- {w}: pgrust {len(errs)} of {len(runs["pgrust"])} runs failed: `{errs[0]}`')
+        cells = []
+        for m in range(4):
+            cells.append(cell(*vs['pg'][m]))
+            if m == 0 and pgdef:
+                cells.append(cell(*vs['pgdef'][0]))
+            if third:
+                cells.append(cell(*vs['pgrust'][m]))
+        rows.append(f'| {w}{note} | {shown} | ' + ' | '.join(cells) + ' |')
+    heads = []
+    for m in ('throughput', 'CPU per op', 'peak memory', 'bytes written'):
+        heads.append(f'{m} ÷PG')
+        if m == 'throughput' and pgdef:
+            heads.append('÷PG default')
+        if third:
+            heads.append('÷pgrust')
+    hdr = [f'| workload | {" / ".join(NAMES[t] for t in present)} | ' + ' | '.join(heads) + ' |',
+           '|' + '---|' * (len(heads) + 2)]
+    return hdr + rows + (['', 'pgrust failures (its cells n/a):', *failures] if failures else []), tally
+
+
+def table(score, gate, order, mode, rounds, idle):
+    servers = {t for (_, t) in score} | {t for g in gate.values() for t in g}
+    present = [t for t in NAMES if t in servers]
+    engines = [t for t in ('engine', 'engperf') if t in present]
+    third = 'pgrust' in present
     commit = os.environ.get('SB_COMMIT')
     try:
         commit = commit or subprocess.run(['git', 'rev-parse', '--short', 'HEAD'], capture_output=True, text=True,
                                 cwd=os.path.dirname(os.path.abspath(__file__))).stdout.strip()
     except OSError:
         commit = '?'
-    if third:
-        header = [
-            f'Scoreboard, {mode} mode ({rounds} interleaved rounds, the median of the rounds\' ratios), '
-            f'engine at `{commit}`, {datetime.date.today().isoformat()}, all three servers in containers on '
-            f'the same cores: the engine ahead of PostgreSQL 18.6 in **{wins} of {cells}** cells and of '
-            f'pgrust in **{pwins} of {pcells}**. Ratios are the engine against each (÷PG, ÷pgrust); above 1x '
-            'the engine is ahead (bold: behind; ~: the rounds disagree on which is ahead). '
-            '`tools/bench/scoreboard.sh quick|full`.',
-            '',
-            '| workload | engine / PostgreSQL / pgrust | throughput ÷PG | ÷pgrust | CPU per op ÷PG | ÷pgrust '
-            '| peak memory ÷PG | ÷pgrust | bytes written ÷PG | ÷pgrust |',
-            '|---|---|---|---|---|---|---|---|---|---|',
-            *rows,
-        ]
-        if failures:
-            header += ['', 'pgrust failures (its cells n/a):', *failures]
-    else:
-        header = [
-            f'Scoreboard, {mode} mode ({rounds} interleaved rounds, the median of the rounds\' ratios), '
-            f'engine at `{commit}` (in a container, as PostgreSQL), '
-            f'{datetime.date.today().isoformat()}: the engine ahead in **{wins} of {cells}** cells. '
-            'Ratios are engine against PostgreSQL 18.6 on the same cores; above 1x the engine is ahead '
-            '(bold: behind; ~: the rounds disagree on which is ahead). `tools/bench/scoreboard.sh quick|full`.',
-            '',
-            '| workload | engine / PostgreSQL | throughput | CPU per op | peak memory | bytes written |',
-            '|---|---|---|---|---|---|',
-            *rows,
-        ]
-    out = header + [
+    out = [
+        f'Scoreboard, {mode} mode ({rounds} interleaved rounds, the median of the rounds\' ratios), '
+        f'engine at `{commit}`, {datetime.date.today().isoformat()}, every server in a container on the '
+        f'same cores ({", ".join(NAMES[t] for t in present)}). Ratios are the engine against each; '
+        'above 1x the engine is ahead (bold: behind; ~: the rounds disagree on which is ahead). '
+        'PostgreSQL is tuned (shared_buffers=2GB, a quarter of the containers\' memory); PostgreSQL '
+        'default has its stock settings. `tools/bench/scoreboard.sh quick|full`.',
+    ]
+    for en_t in engines:
+        rows, tally = table_for(score, order, en_t, present)
+        ahead = f'ahead of PostgreSQL in **{tally["pg"][0]} of {tally["pg"][1]}** cells'
+        if third:
+            ahead += f' and of pgrust in **{tally["pgrust"][0]} of {tally["pgrust"][1]}**'
+        how = '--mode performance, caches sized from its memory' if en_t == 'engperf' else '--cache-mb 2048'
+        out += ['', f'**{NAMES[en_t]}** ({how}): {ahead}.', '', *rows]
+    others = [t for t in present if t not in ('engine', 'pg')]
+    out += [
         '',
         f'Footprint gate (fresh servers, one at a time; idle CPU measured over {idle:g} s and scaled '
-        'to 5 minutes):',
+        'to 5 minutes; the baseline and status are efficient mode\'s):',
         '',
-        '| gate | engine | PostgreSQL | lead | baseline | status |' + (' pgrust |' if third else ''),
-        '|---|---|---|---|---|---|' + ('---|' if third else ''),
+        '| gate | engine efficient | PostgreSQL | lead | baseline | status |' + ''.join(f' {NAMES[t]} |' for t in others),
+        '|---|---|---|---|---|---|' + '---|' * len(others),
     ]
     failed = False
     for k, name in GATE_NAMES.items():
         g = gate.get(k, {})
         e, p = g.get('engine'), g.get('pg')
-        base, slack, share = GATE_BASELINE[k]
-        ok = e is not None and p is not None and e <= max(base + slack, base * (1 + share)) and e < p
-        failed |= not ok
-        # (No idle CPU measured: the lead is at least PostgreSQL's over one 10 ms clock tick,
-        # scaled as the measurement is.)
-        floor = 0.01 * 300 / idle if k == 'idle_cpu_s_5min' else None
+        if k in GATE_BASELINE:
+            base, slack, share = GATE_BASELINE[k]
+            ok = e is not None and p is not None and e <= max(base + slack, base * (1 + share)) and e < p
+            failed |= not ok
+            base, status = f'{base:g}', 'pass' if ok else '**FAIL**'
+        else:
+            base, status = 'n/a', 'info'
+        # (No CPU measured: the lead is at least PostgreSQL's over one 10 ms clock tick, scaled
+        # as the measurement is.)
+        floor = {'idle_cpu_s_5min': 0.01 * 300 / idle, 'idle_100_sessions_cpu_s_5min': 0.01 * 300 / 20}.get(k)
         lead = ('n/a' if e is None or not p else f'{p / e:.1f}x' if e > 0
                 else f'>{p / floor:.1f}x' if floor else 'n/a')
-        out.append(f'| {name} | {fmt(e)} | {fmt(p)} | {lead} | {base:g} | {"pass" if ok else "**FAIL**"} |'
-                   + (f' {fmt(g.get("pgrust"))} |' if third else ''))
+        out.append(f'| {name} | {fmt(e)} | {fmt(p)} | {lead} | {base} | {status} |'
+                   + ''.join(f' {fmt(g.get(t))} |' for t in others))
     return '\n'.join(out), failed
 
 
