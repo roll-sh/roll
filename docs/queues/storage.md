@@ -24,8 +24,9 @@ log store is the object log below on S3 Standard, in the deployment's data bucke
   deploy and Spot interruption, and node disks become something to lose. S3 Standard keeps every
   object in three zones before a PUT returns, survives losing a node or a zone with nothing to
   repair, and is already the source of truth for every other product. Its cost is confirm
-  latency: one PUT, tens of milliseconds, instead of one millisecond
-  ([docs/benchmarks/queues-fleet.md](../benchmarks/queues-fleet.md)). Group commit keeps
+  latency: about three PUT latencies today (p50 ~70 ms, p99 ~240 ms with S3's latency modelled at
+  25 ± 10 ms per request) instead of a few milliseconds, so one queue's throughput is its
+  publishers' confirm window over that ([docs/benchmarks/queues-fleet.md](../benchmarks/queues-fleet.md)). Group commit keeps
   throughput: every queue of a node shares one stream of objects, and each PUT carries whatever
   arrived while the previous one was in flight, so a busier node writes bigger objects, not more
   of them. The default is S3 Standard; never a single-zone store (`s3express:` stays an opt-in).

@@ -16,6 +16,7 @@
 #   scripts/bench-queues-fleet.sh                  # file, s3-local, s3-modelled (s3 too when set)
 #   MODES="s3-modelled" DURATION=20 scripts/bench-queues-fleet.sh
 #   LATENCY=40 JITTER=20 scripts/bench-queues-fleet.sh
+#   REPORT_ONLY=1 scripts/bench-queues-fleet.sh   # rewrite the report from target/bench-queues-fleet
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -61,7 +62,7 @@ start_s3() {
 
 start_broker() {
   docker rm -f -v bench-fleet-broker >/dev/null 2>&1 || true
-  local env=(-e ROLL_QUEUES_USER=bench -e ROLL_QUEUES_PASSWORD=bench)
+  local env=(-e ROLL_QUEUES_USER=bench -e ROLL_QUEUES_PASSWORD=bench -e ROLL_ADMIN_TOKEN=bench-operator-token-0123456789abcdef)
   case $1 in
     file) ;;
     s3-local) env+=(-e ROLL_QUEUES_STORAGE=s3:roll/logs -e ROLL_S3_BUCKET=roll -e ROLL_S3_ENDPOINT=http://bench-fleet-minio:9000 -e AWS_REGION=us-east-1
@@ -96,6 +97,7 @@ run() {
   echo "${send:-0} ${recv:-0} $(cut -d/ -f2 <<<"$conf") $(cut -d/ -f5 <<<"$conf") $(cut -d/ -f2 <<<"$cons") $(cut -d/ -f5 <<<"$cons")"
 }
 
+if [ -z "${REPORT_ONLY:-}" ]; then
 docker info >/dev/null 2>&1 || { echo "bench: Docker is not running" >&2; exit 1; }
 docker build -q -f deploy/queues/Dockerfile -t roll-queues:bench . >/dev/null
 docker pull -q "$PERFTEST_IMAGE" >/dev/null
@@ -110,6 +112,7 @@ for mode in $MODES; do
     echo "  $(cat "$RAW/$mode-$i.res")"
   done
 done
+fi
 
 rate() { awk -v s="$1" -v r="$2" 'BEGIN { f = r >= 1000 ? sprintf("%.1fk", r / 1000) : sprintf("%d", r)
   if (s > r * 1.01) f = f sprintf(" (sent %.1fk)", s / 1000); print f }'; }
@@ -135,10 +138,27 @@ ms() { awk -v n="$1" 'BEGIN { printf "%.1f", n / 1000 }'; }
   echo
   echo "- **file**: local disk, group-committed through the shared WAL: a node alone (\`rolld\` on a laptop)."
   echo "- **s3-local**: the fleet's code path (\`s3:\` storage, group commit) on MinIO in the same Docker"
-  echo "  network, PUTs of about a millisecond: what the storage code itself costs."
+  echo "  network, no added network latency: what the storage code itself costs."
   echo "- **s3-modelled**: the same through Toxiproxy, which delays every answer by ${LATENCY} ± ${JITTER} ms,"
   echo "  standing in for S3 Standard's PUT latency in-region. A model, not a measurement of S3."
   echo "- **s3**: a real S3 Standard bucket (only when \`ROLL_BENCH_S3_BUCKET\` was set)."
+  echo
+  echo "## Reading the numbers"
+  echo
+  echo "- **One queue's throughput is its confirm window over the confirm latency.** A publisher with"
+  echo "  N confirms in flight gets at most N / latency messages a second: 200 in flight at ~75 ms is"
+  echo "  ~2.7k/s, and the 1000 msg/s scenario (50 in flight) can't reach its rate on modelled S3."
+  echo "  Publishers that want more from one queue keep more in flight or use more queues."
+  echo "- **A confirm costs about three PUT latencies** on the object log: a queue has one log append"
+  echo "  in flight at a time (the object log has no pipelined appends), and a node's shared stream"
+  echo "  has one PUT in flight at a time, so a message waits for the PUT before it, then its own."
+  echo "  Pipelining both would bring it towards one PUT."
+  echo "- **A node's throughput isn't capped by PUTs**: with many queues every stream PUT carries"
+  echo "  whatever arrived meanwhile (the 100-queue scenario keeps its 5k msg/s at any latency)."
+  echo "- **s3-local** is bounded by MinIO itself (it syncs every object to disk) on a shared host, not"
+  echo "  by the network; read it as the code path's cost, not as S3's."
+  echo "- Why S3 Standard is still the fleet's default (over keepers on the nodes, 1–3 ms): docs/queues/storage.md,"
+  echo "  \"On roll cloud\"."
   echo
   echo "Raw PerfTest output is in \`target/bench-queues-fleet/\`. Scenario arguments:"
   echo
