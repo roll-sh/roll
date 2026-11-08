@@ -54,6 +54,10 @@ pub struct Config {
     pub pricing: Pricing,
     /// Base URL of the HTTP API, shown in connection details.
     pub http_url: String,
+    /// Behind roll cloud's edge: connection details name `<stream id>.<domain>` (Kafka over TLS
+    /// with SASL on `advertised_port`, HTTPS for the HTTP API) instead of `advertised_host` and
+    /// `http_url`.
+    pub public_domain: Option<String>,
     /// Require an API key on the HTTP data plane even when the control plane is open.
     pub http_require_auth: bool,
 }
@@ -173,6 +177,7 @@ impl Config {
             tail_cache_bytes: 1 << 20,
             tail_cache_total_bytes: 256 << 20,
             pricing: Pricing::default(),
+            public_domain: None,
             http_url: "http://127.0.0.1:7070".into(),
             http_require_auth: false,
         }

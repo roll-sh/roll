@@ -125,6 +125,8 @@ pub fn configure(args: &mut Args) {
     }
     let hosts = args.edge.hostnames();
     args.s3_domain.get_or_insert_with(|| hosts.s3_domain());
+    // The S3 endpoint storage shows (and gives Object Lambda functions).
+    args.s3_public_endpoint.get_or_insert_with(|| format!("https://{}", hosts.s3_domain()));
     args.nosql.nosql_alternator_domain.get_or_insert_with(|| hosts.product_domain("nosql"));
     if !env_set("ROLL_CODE_PREVIEW_DOMAIN") {
         args.code_preview_domain = hosts.site_domain.clone();
@@ -138,6 +140,52 @@ pub fn configure(args: &mut Args) {
         let moved = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 19092);
         info!(from = %args.kafka, to = %moved, "edge: rolld's own Kafka listener moves off the edge's port");
         args.kafka = moved;
+    }
+}
+
+/// The names clients use behind the edge (docs/cloud/README.md, "Hostnames"), for the
+/// connection details products hand out: `None` without the edge (they keep this node's
+/// addresses). TCP products keep their port (the edge listens on the public one); HTTPS is the
+/// NLB's 443.
+pub struct Public {
+    pub hosts: Hostnames,
+    pub pg_port: u16,
+    pub kafka_port: u16,
+    pub nosql_port: u16,
+}
+
+impl Public {
+    pub fn of(args: &Args) -> Option<Public> {
+        let e = &args.edge;
+        e.enabled.then(|| Public { hosts: e.hostnames(), pg_port: e.pg_listen.port(), kafka_port: e.kafka_listen.port(), nosql_port: e.nosql_listen.port() })
+    }
+
+    /// nosql: `<id>.nosql.<region>.<domain>:9042` over TLS (the server name picks the database),
+    /// Alternator on `https://<id>.nosql.<region>.<domain>`; the shard-aware and REST ports aren't
+    /// public.
+    pub fn nosql(&self, cfg: &mut nosql_control::NosqlConfig) {
+        let domain = self.hosts.product_domain("nosql");
+        cfg.domain = Some(domain.clone());
+        cfg.alternator_domain = Some(domain);
+        cfg.tls = true;
+        cfg.cql_port = self.nosql_port;
+        cfg.cql_shard_aware_port = None;
+        cfg.cql_shard_aware_port_ssl = None;
+        cfg.rest_port = None;
+        cfg.alternator_https_port = Some(443);
+    }
+
+    /// streams: `<stream id>.kafka.<region>.<domain>:9092` with `SASL_SSL`, HTTP on
+    /// `https://<stream id>.kafka.<region>.<domain>`.
+    pub fn streams(&self, cfg: &mut stream_broker::Config) {
+        cfg.public_domain = Some(self.hosts.product_domain("kafka"));
+        cfg.advertised_port = self.kafka_port;
+    }
+
+    /// Postgres: `<endpoint>.pg.<region>.<domain>:5432`, `sslmode=require`.
+    pub fn postgres(&self, cfg: &mut pg_control::Config) {
+        cfg.public_domain = Some(self.hosts.product_domain("pg"));
+        cfg.public_port = self.pg_port;
     }
 }
 

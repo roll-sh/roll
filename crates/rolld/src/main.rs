@@ -372,7 +372,7 @@ async fn run() -> anyhow::Result<()> {
     }
     // roll nosql: same object storage; in a cluster its databases follow their leases.
     let nosql = match on.on(Product::Nosql) {
-        true => Some(nosql::Nosql::start(&home, args.nosql.clone(), &args.public_host, &args.node, &storage, Some(&cluster), args.code.cluster.system_database.as_deref()).await?),
+        true => Some(nosql::Nosql::start(&home, args.nosql.clone(), &args.public_host, &args.node, &storage, Some(&cluster), args.code.cluster.system_database.as_deref(), edge::Public::of(&args).as_ref()).await?),
         false => None,
     };
 
@@ -538,6 +538,10 @@ async fn start_postgres(args: &Args, home: &std::path::Path, storage: &StorageCo
     config.evict_after_s = args.evict_after;
     config.internal_url = args.internal_url.clone().unwrap_or_else(|| format!("http://host.docker.internal:{}", args.api.port()));
     config.storage = storage.clone();
+    // Behind the edge, connection strings name the endpoint's public hostname.
+    if let Some(p) = edge::Public::of(args) {
+        p.postgres(&mut config);
+    }
     let control = Control::new(config).await?;
     info!(storage = %control.objects.description, "durable storage");
     reconciler::recover(&control).await?;
