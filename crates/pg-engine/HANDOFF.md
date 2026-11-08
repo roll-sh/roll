@@ -9502,3 +9502,36 @@ called by measure_rows_with's heap_pages. This failure and a targeted backtrace 
 sealed, with no baseline attribution yet. The fixture uses the bulk insert's asserted
 unmodelled heap state directly; both 2816/8320 index error expectations are unchanged.
 This avoids the unrelated setup operation, without fixing or accepting the VACUUM gap.
+
+### Agent 192 resumed GIN path batch (2026-11-08)
+
+GIN jsonb containment selects by full key paths, scalar values, and array depth at
+each key. A query is exact only when no empty subtree occurs and each array element
+contributes one scalar leaf. Multi-leaf elements retain heap recheck, so separate
+array elements cannot satisfy a correlated object. Raw scalar queries also search
+top-level array elements. Both jsonb classes use these containment tokens;
+jsonb_path_ops keeps only path tokens and searches jsonpath scalars by path prefix.
+Jsonpath still rechecks. Partial and custom-class eligibility, snapshot checks,
+own writes, and commits after the structure read retain their existing guards.
+The normal evaluator now rejects an object member's array containing a scalar:
+`{"a":[1]} @> {"a":1}` is false, while `[1] @> 1` remains true, as in PG18.6.
+
+Release verification passes the 144-by-144 bounded selection matrix under both
+classes, four GIN goldens in embedded, wire, and shuffled execution, and Clippy.
+The focused PG18.6 comparison matches 2,064/2,064 units across test_setup, gin,
+jsonb, and jsonb_jsonpath, with no panics or failed engine invocation. An initial
+fixture symlink escaped the engine's allowed file root and caused COPY failures;
+copying the fixtures inside the lane cache restored the comparison without a
+source change. Those failed outputs remain preserved. After rebasing onto a182's
+input-default batch, all five changed source and fixture files are byte-identical
+to the verified versions, and Clippy passes again with ten unrelated warnings.
+The combined runtime suite remains verification-train work.
+
+The new golden preserves a PG18.6 inconsistency already recorded by a127:
+jsonb_ops misses a raw string for `@@ 'strict $ == "x"'`, while jsonb_path_ops
+and the evaluator return it. The candidate-completeness matrix does not claim
+that case. No benchmark, profile, idle-footprint measurement, or memory advantage
+is established. Matched dist builds, useful-work checks, and serialized timing,
+CPU, peak memory, and idle comparisons remain required. No persistent format,
+WAL, durability, session API, or vector source changed. Receipts and the rerunnable
+`audit-gin.py` are in `~/.cache/a192/`; the vector probe remains pending.
