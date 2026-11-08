@@ -43,7 +43,9 @@ variable (see `crates/rolld/src/queues.rs`).
 
 - The first start creates `guest` / `guest` (an administrator) on vhost `/`. Change it with
   `--queues-user` / `--queues-password` (`ROLL_QUEUES_USER` / `ROLL_QUEUES_PASSWORD`).
-  rolld refuses to start with `guest` / `guest` when a queues listener is off loopback.
+  rolld refuses to start with `guest` / `guest` when a queues listener is off loopback (or behind
+  the edge); `ROLL_QUEUES_REMOTE_GUEST=1` allows it, like RabbitMQ's `loopback_users = none`, for
+  client test matrices only.
 - The roll API on `:7070` is open on loopback; off loopback it needs `ROLL_ADMIN_TOKEN`
   (`Authorization: Bearer`, docs/cloud/README.md "Security").
 - `roll queues url` prints the AMQP URL for a vhost.
