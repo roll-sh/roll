@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
-use tokio::io::{AsyncWriteExt, copy};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, copy};
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{debug, info, warn};
 
@@ -55,9 +55,14 @@ impl<R: Router> Proxy<R> {
     }
 
     pub async fn serve(self) -> anyhow::Result<()> {
+        Arc::new(self).serve_shared().await
+    }
+
+    /// [`Proxy::serve`] for a proxy that also serves connections from elsewhere (the edge).
+    pub async fn serve_shared(self: Arc<Self>) -> anyhow::Result<()> {
         let listener = TcpListener::bind(self.config.listen).await?;
         info!(addr = %self.config.listen, "postgres proxy listening");
-        let this = Arc::new(self);
+        let this = self;
         loop {
             let (socket, peer) = listener.accept().await?;
             let this = this.clone();
@@ -69,11 +74,21 @@ impl<R: Router> Proxy<R> {
         }
     }
 
-    async fn handle(&self, mut client: TcpStream) -> anyhow::Result<()> {
+    async fn handle(&self, client: TcpStream) -> anyhow::Result<()> {
         client.set_nodelay(true)?;
+        self.serve_connection(client, None).await
+    }
+
+    /// Serve a connection whose transport is already set up (the edge's TLS stream, a splice).
+    /// `named`: the endpoint the connection's host named (`<id>.pg.<region>.<domain>` in its
+    /// TLS server name); a client may name one in `options=endpoint=` instead, but not another.
+    pub async fn serve_connection<S>(&self, mut client: S, named: Option<String>) -> anyhow::Result<()>
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send,
+    {
         let (version, mut params) = loop {
             match read_startup(&mut client).await? {
-                // TLS / GSS encryption are terminated at the edge (not yet); tell libpq to continue in plaintext.
+                // Plain listener: no TLS here (roll-edge terminates it in front). Inside TLS: already encrypted.
                 Startup::Ssl | Startup::GssEnc => write_all(&mut client, b"N").await?,
                 Startup::Cancel { pid, key } => return self.forward_cancel(pid, key).await,
                 Startup::Params { version, params } => break (version, params),
@@ -90,7 +105,14 @@ impl<R: Router> Proxy<R> {
                 params[i].1 = rest;
             }
         }
-        let Some(endpoint) = endpoint.or_else(|| self.config.default_endpoint.clone()) else {
+        if let (Some(named), Some(asked)) = (&named, &endpoint)
+            && named != asked
+        {
+            let msg = format!("the host names endpoint {named} but options name {asked}");
+            write_all(&mut client, &error_response("08004", &msg)).await?;
+            return Ok(());
+        }
+        let Some(endpoint) = endpoint.or(named).or_else(|| self.config.default_endpoint.clone()) else {
             let msg = "no endpoint specified: add ?options=endpoint%3D<endpoint_id> to the connection string";
             write_all(&mut client, &error_response("08004", msg)).await?;
             return Ok(());
@@ -130,14 +152,14 @@ impl<R: Router> Proxy<R> {
         result
     }
 
-    async fn relay(
+    async fn relay<S: AsyncRead + AsyncWrite + Unpin>(
         &self,
-        client: TcpStream,
+        client: S,
         backend: TcpStream,
         addr: SocketAddr,
         cancel_key: &mut Option<CancelKey>,
     ) -> anyhow::Result<()> {
-        let (mut client_r, mut client_w) = client.into_split();
+        let (mut client_r, mut client_w) = tokio::io::split(client);
         let (mut backend_r, mut backend_w) = backend.into_split();
 
         let client_to_backend = async {
