@@ -66,7 +66,8 @@ impl NodeUnderTest {
 }
 
 impl Fleet {
-    async fn new(name: &str, n: usize) -> Fleet {
+    /// `n` nodes whose new databases (and unrouted connections) have `dialect`.
+    async fn new(name: &str, n: usize, dialect: &str) -> Fleet {
         let leases = match std::env::var("ROLL_NOSQL_TEST_CLUSTER_BACKEND").as_deref() {
             Ok("dynamodb") => {
                 let endpoint = std::env::var("ROLL_CLUSTER_TEST_DYNAMODB").expect("ROLL_CLUSTER_TEST_DYNAMODB: DynamoDB Local's endpoint");
@@ -89,7 +90,7 @@ impl Fleet {
             _homes: Vec::new(),
         };
         for i in 0..n {
-            f.add(&format!("n{i}")).await;
+            f.add(&format!("n{i}"), dialect).await;
         }
         // Everyone sees everyone before placement is relied on.
         let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
@@ -107,7 +108,7 @@ impl Fleet {
         }
     }
 
-    async fn add(&mut self, id: &str) {
+    async fn add(&mut self, id: &str, dialect: &str) {
         let home = tempfile::tempdir().unwrap();
         let api_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let api = format!("http://{}", api_listener.local_addr().unwrap());
@@ -132,6 +133,7 @@ impl Fleet {
         let alternator = format!("http://{}", alt_listener.local_addr().unwrap());
         let mut cfg = NosqlConfig::local(home.path().to_path_buf());
         cfg.domain = Some("nosql.test".into());
+        cfg.defaults.dialect = dialect.into();
         cfg.node_name = id.into();
         cfg.cql_port = cql.port();
         cfg.cql_shard_aware_port = None;
@@ -241,7 +243,7 @@ impl Fleet {
 /// Whichever node a request or a connection reaches, the database runs on its owner only.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn requests_and_connections_reach_the_owner() {
-    let f = Fleet::new("route", 3).await;
+    let f = Fleet::new("route", 3, "scylla").await;
     let db = f.create(&f.nodes[0], "app", "async").await;
     let id = db["id"].as_str().unwrap().to_string();
     // The console's CQL through every node.
@@ -298,7 +300,7 @@ async fn requests_and_connections_reach_the_owner() {
 /// acknowledged (`sync`), and the old owner, if it comes back to life, can't write.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_killed_owner_is_taken_over_with_every_acknowledged_write() {
-    let f = Fleet::new("kill", 3).await;
+    let f = Fleet::new("kill", 3, "scylla").await;
     let db = f.create(&f.nodes[0], "app", "sync").await;
     let id = db["id"].as_str().unwrap().to_string();
     let entry = &f.nodes[0];
@@ -329,10 +331,12 @@ async fn a_killed_owner_is_taken_over_with_every_acknowledged_write() {
 }
 
 /// A drain hands every database over with every acknowledged write, `async` ones included;
-/// clients only see their connection close and reconnect.
+/// clients only see their connection close and reconnect. (Cassandra's dialect: protocol v5,
+/// whose AUTH_RESPONSE comes in a segment after STARTUP's answer switched the framing; the
+/// owner gets it as the client sent it.)
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_drain_hands_databases_over_with_nothing_lost() {
-    let f = Fleet::new("drain", 3).await;
+    let f = Fleet::new("drain", 3, "cassandra").await;
     let db = f.create(&f.nodes[0], "app", "async").await;
     let id = db["id"].as_str().unwrap().to_string();
     let c = f.cql(&f.nodes[0], &db).await;
@@ -344,6 +348,7 @@ async fn a_drain_hands_databases_over_with_nothing_lost() {
     let direct = f.cql(owner, &db).await;
     let entry = f.others(&leaving).next().unwrap();
     let through = f.cql(entry, &db).await;
+    assert_eq!(through.version(), nosql_proto::Version::V5);
     for k in 0..50 {
         let c = if k % 2 == 0 { &direct } else { &through };
         exec(c, &format!("INSERT INTO ks.t (k, v) VALUES ({k}, 'v{k}')")).await;
