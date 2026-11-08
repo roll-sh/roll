@@ -51,6 +51,8 @@ struct Mock {
     next: u32,
     /// Deletes answer 500 (a sandbox stays `deleting`).
     fail_deletes: bool,
+    /// New instances stay `provisioning` until the test says they run.
+    hold_provisioning: bool,
 }
 
 type M = Arc<Mutex<Mock>>;
@@ -78,7 +80,8 @@ async fn create(State(m): State<M>, h: HeaderMap, Json(body): Json<Value>) -> Re
     }
     m.next += 1;
     let id = format!("inst{:06}", m.next);
-    let inst = json!({ "id": id, "status": "running", "metadata": body["metadata"], "resources": body["resources"], "template": body["template"] });
+    let status = if m.hold_provisioning { "provisioning" } else { "running" };
+    let inst = json!({ "id": id, "status": status, "metadata": body["metadata"], "resources": body["resources"], "template": body["template"] });
     m.instances.insert(id, inst.clone());
     if what == OnCreate::LoseAnswer {
         return err(StatusCode::INTERNAL_SERVER_ERROR, "internal_error");
@@ -532,9 +535,26 @@ fn message(id: &str) -> Value {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_idle_sandbox_sleeps_and_a_command_wakes_it() {
     let w = world(|c| c.idle_stop = IDLE).await;
-    let (id, machine, token) = w.running().await;
+    // Its daemon reports the running thread while the instance is still provisioning, so the
+    // window can't run out during the test's own setup.
+    w.mock.lock().hold_provisioning = true;
+    let made = w.create(json!({ "name": "box" })).await;
+    let (id, machine) = (made["sandbox"]["id"].as_str().unwrap().to_string(), made["machine"]["id"].as_str().unwrap().to_string());
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let token = loop {
+        let t = w.mock.lock().creates.iter().find(|c| c["metadata"]["roll_sandbox"] == id.as_str()).map(|c| c["env"]["ROLL_AGENT_TOKEN"].as_str().unwrap().to_string());
+        if let Some(t) = t {
+            break t;
+        }
+        assert!(Instant::now() < deadline, "agent37 never got the create");
+        tokio::time::sleep(Duration::from_millis(30)).await;
+    };
     let (mut d, _) = Daemon::connect(&w.url, &token).await;
     d.upsert(vec![Stamped { seq: 1, entity: thread_record("thr_1", "running") }]).await;
+    for i in w.mock.lock().instances.values_mut().filter(|i| i["metadata"]["roll_sandbox"] == id.as_str()) {
+        i["status"] = json!("running");
+    }
+    w.until(&id, "running", status_is("running")).await;
     tokio::time::sleep(IDLE * 3).await;
     let s = w.sandbox(&id).await.unwrap();
     assert_eq!((s["status"].as_str(), s["desired"].as_str(), &s["stopped_reason"]), (Some("running"), Some("running"), &Value::Null), "a running thread keeps it up: {s}");
