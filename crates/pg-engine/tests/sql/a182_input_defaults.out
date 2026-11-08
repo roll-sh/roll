@@ -1,0 +1,420 @@
+> CREATE DOMAIN a182_pos AS int CHECK (VALUE > 0)
+-- CREATE DOMAIN
+
+> CREATE TABLE a182_d (x serial, v a182_pos)
+-- CREATE TABLE
+
+> INSERT INTO a182_d (v) SELECT g FROM generate_series(1, 3) g
+-- INSERT 0 3
+
+> INSERT INTO a182_d (v) SELECT CASE WHEN g = 3 THEN -1 ELSE g END FROM generate_series(1, 5) g
+ERROR 23514: value for domain a182_pos violates check constraint "a182_pos_check"
+OBJECTS: schema=public datatype=a182_pos constraint=a182_pos_check
+
+> SELECT last_value, is_called FROM a182_d_x_seq
+last_value:int8 | is_called:bool
+6 | t
+-- SELECT 1
+
+> INSERT INTO a182_d (v) VALUES (5), (-5)
+ERROR 23514: value for domain a182_pos violates check constraint "a182_pos_check"
+OBJECTS: schema=public datatype=a182_pos constraint=a182_pos_check
+
+> SELECT last_value, is_called FROM a182_d_x_seq
+last_value:int8 | is_called:bool
+7 | t
+-- SELECT 1
+
+> CREATE TABLE a182_e (x serial, v int, w int GENERATED ALWAYS AS IDENTITY)
+-- CREATE TABLE
+
+> COPY a182_e (v) FROM STDIN (ON_ERROR ignore)
+>> 1
+>> 2
+>> z
+>> 4
+NOTICE 00000: 1 row was skipped due to data type incompatibility
+-- COPY 3
+
+> SELECT * FROM a182_e ORDER BY x
+x:int4 | v:int4 | w:int4
+1 | 1 | 1
+2 | 2 | 2
+4 | 4 | 4
+-- SELECT 3
+
+> SELECT last_value, is_called FROM a182_e_x_seq
+last_value:int8 | is_called:bool
+4 | t
+-- SELECT 1
+
+> COPY a182_e (v) FROM STDIN (ON_ERROR ignore, REJECT_LIMIT 5)
+>> 5
+>> y
+>> 6
+NOTICE 00000: 1 row was skipped due to data type incompatibility
+-- COPY 2
+
+> SELECT * FROM a182_e ORDER BY x
+x:int4 | v:int4 | w:int4
+1 | 1 | 1
+2 | 2 | 2
+4 | 4 | 4
+5 | 5 | 5
+7 | 6 | 7
+-- SELECT 5
+
+> DROP TABLE a182_d, a182_e
+-- DROP TABLE
+
+> DROP DOMAIN a182_pos
+-- DROP DOMAIN
+
+> CREATE DOMAIN a182_pos AS int CHECK (VALUE > 0)
+-- CREATE DOMAIN
+
+> CREATE TABLE a182_d (v a182_pos, x serial)
+-- CREATE TABLE
+
+> INSERT INTO a182_d (v) SELECT CASE WHEN g = 3 THEN -1 ELSE g END FROM generate_series(1, 5) g
+ERROR 23514: value for domain a182_pos violates check constraint "a182_pos_check"
+OBJECTS: schema=public datatype=a182_pos constraint=a182_pos_check
+
+> SELECT last_value, is_called FROM a182_d_x_seq
+last_value:int8 | is_called:bool
+2 | t
+-- SELECT 1
+
+> CREATE TABLE a182_f (x serial, v a182_pos)
+-- CREATE TABLE
+
+> INSERT INTO a182_f (v) SELECT CASE WHEN g = 3 THEN -1 ELSE g END FROM generate_series(1, 5) g
+ERROR 23514: value for domain a182_pos violates check constraint "a182_pos_check"
+OBJECTS: schema=public datatype=a182_pos constraint=a182_pos_check
+
+> SELECT last_value, is_called FROM a182_f_x_seq
+last_value:int8 | is_called:bool
+3 | t
+-- SELECT 1
+
+> CREATE TABLE a182_g (x serial, v a182_pos)
+-- CREATE TABLE
+
+> CREATE TABLE a182_src (g int)
+-- CREATE TABLE
+
+> INSERT INTO a182_src SELECT generate_series(1, 5)
+-- INSERT 0 5
+
+> INSERT INTO a182_g (v) SELECT CASE WHEN g = 3 THEN -1 ELSE g END FROM a182_src
+ERROR 23514: value for domain a182_pos violates check constraint "a182_pos_check"
+OBJECTS: schema=public datatype=a182_pos constraint=a182_pos_check
+
+> SELECT last_value, is_called FROM a182_g_x_seq
+last_value:int8 | is_called:bool
+3 | t
+-- SELECT 1
+
+> INSERT INTO a182_g (v) SELECT g::a182_pos FROM a182_src
+-- INSERT 0 5
+
+> SELECT last_value, is_called FROM a182_g_x_seq
+last_value:int8 | is_called:bool
+8 | t
+-- SELECT 1
+
+> DROP TABLE a182_d, a182_f, a182_g, a182_src
+-- DROP TABLE
+
+> DROP DOMAIN a182_pos
+-- DROP DOMAIN
+
+> CREATE TABLE a182_progress (processed bigint, excluded bigint, skipped bigint)
+-- CREATE TABLE
+
+> CREATE FUNCTION a182_progress() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+>   INSERT INTO a182_progress SELECT tuples_processed, tuples_excluded, tuples_skipped FROM pg_stat_progress_copy WHERE pid = pg_backend_pid();
+>   RETURN NULL;
+> END $$
+-- CREATE FUNCTION
+
+> CREATE TABLE a182_i (a serial, b int, c int GENERATED ALWAYS AS IDENTITY)
+-- CREATE TABLE
+
+> CREATE TRIGGER a182_progress AFTER INSERT ON a182_i FOR EACH STATEMENT EXECUTE FUNCTION a182_progress()
+-- CREATE TRIGGER
+
+> COPY a182_i (b) FROM STDIN (ON_ERROR ignore) WHERE b > 0
+>> 1
+>> bad
+>> -2
+>> 3
+NOTICE 00000: 1 row was skipped due to data type incompatibility
+-- COPY 2
+
+> SELECT * FROM a182_i ORDER BY a
+a:int4 | b:int4 | c:int4
+1 | 1 | 1
+4 | 3 | 4
+-- SELECT 2
+
+> SELECT * FROM a182_progress
+processed:int8 | excluded:int8 | skipped:int8
+2 | 1 | 1
+-- SELECT 1
+
+> TRUNCATE a182_progress
+-- TRUNCATE TABLE
+
+> SELECT last_value, is_called FROM a182_i_a_seq
+last_value:int8 | is_called:bool
+4 | t
+-- SELECT 1
+
+> SELECT last_value, is_called FROM a182_i_c_seq
+last_value:int8 | is_called:bool
+4 | t
+-- SELECT 1
+
+> CREATE FUNCTION a182_before() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$
+-- CREATE FUNCTION
+
+> CREATE TRIGGER a182_before BEFORE INSERT ON a182_i FOR EACH ROW EXECUTE FUNCTION a182_before()
+-- CREATE TRIGGER
+
+> COPY a182_i (b) FROM STDIN (ON_ERROR ignore)
+>> bad
+>> 4
+NOTICE 00000: 1 row was skipped due to data type incompatibility
+-- COPY 1
+
+> SELECT * FROM a182_i ORDER BY a
+a:int4 | b:int4 | c:int4
+1 | 1 | 1
+4 | 3 | 4
+6 | 4 | 6
+-- SELECT 3
+
+> COPY a182_i (b) FROM STDIN (ON_ERROR ignore, REJECT_LIMIT 1)
+>> bad
+>> bad
+>> 5
+ERROR 22P02: skipped more than REJECT_LIMIT (1) rows due to data type incompatibility
+CONTEXT: COPY a182_i, line 2, column b: "bad"
+
+> SELECT last_value, is_called FROM a182_i_a_seq
+last_value:int8 | is_called:bool
+8 | t
+-- SELECT 1
+
+> SELECT last_value, is_called FROM a182_i_c_seq
+last_value:int8 | is_called:bool
+8 | t
+-- SELECT 1
+
+> DROP TABLE a182_i
+-- DROP TABLE
+
+> DROP FUNCTION a182_before()
+-- DROP FUNCTION
+
+> CREATE SEQUENCE a182_mark_seq
+-- CREATE SEQUENCE
+
+> CREATE TABLE a182_m (a int DEFAULT nextval('a182_mark_seq'), b int, c serial)
+-- CREATE TABLE
+
+> COPY a182_m (a, b) FROM STDIN (DEFAULT 'D', ON_ERROR ignore)
+>> D	1
+>> D	bad
+>> D	2
+NOTICE 00000: 1 row was skipped due to data type incompatibility
+-- COPY 2
+
+> SELECT * FROM a182_m ORDER BY a
+a:int4 | b:int4 | c:int4
+1 | 1 | 1
+3 | 2 | 3
+-- SELECT 2
+
+> SELECT last_value, is_called FROM a182_mark_seq
+last_value:int8 | is_called:bool
+3 | t
+-- SELECT 1
+
+> SELECT last_value, is_called FROM a182_m_c_seq
+last_value:int8 | is_called:bool
+3 | t
+-- SELECT 1
+
+> DROP TABLE a182_m
+-- DROP TABLE
+
+> DROP SEQUENCE a182_mark_seq
+-- DROP SEQUENCE
+
+> CREATE SEQUENCE a182_view_seq
+-- CREATE SEQUENCE
+
+> CREATE VIEW a182_v AS SELECT 1 AS a, 2 AS b
+-- CREATE VIEW
+
+> ALTER VIEW a182_v ALTER COLUMN a SET DEFAULT nextval('a182_view_seq')
+-- ALTER VIEW
+
+> CREATE FUNCTION a182_instead() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NULL; END $$
+-- CREATE FUNCTION
+
+> CREATE TRIGGER a182_instead INSTEAD OF INSERT ON a182_v FOR EACH ROW EXECUTE FUNCTION a182_instead()
+-- CREATE TRIGGER
+
+> TRUNCATE a182_progress
+-- TRUNCATE TABLE
+
+> CREATE TRIGGER a182_progress AFTER INSERT ON a182_v FOR EACH STATEMENT EXECUTE FUNCTION a182_progress()
+-- CREATE TRIGGER
+
+> COPY a182_v (b) FROM STDIN (ON_ERROR ignore)
+>> 1
+>> bad
+>> 2
+NOTICE 00000: 1 row was skipped due to data type incompatibility
+-- COPY 2
+
+> SELECT last_value, is_called FROM a182_view_seq
+last_value:int8 | is_called:bool
+3 | t
+-- SELECT 1
+
+> SELECT * FROM a182_progress
+processed:int8 | excluded:int8 | skipped:int8
+2 | 0 | 1
+-- SELECT 1
+
+> DROP VIEW a182_v
+-- DROP VIEW
+
+> DROP FUNCTION a182_instead()
+-- DROP FUNCTION
+
+> DROP SEQUENCE a182_view_seq
+-- DROP SEQUENCE
+
+> DROP TABLE a182_progress
+-- DROP TABLE
+
+> DROP FUNCTION a182_progress()
+-- DROP FUNCTION
+
+> CREATE DOMAIN a182_pos AS int CHECK (VALUE > 0)
+-- CREATE DOMAIN
+
+> CREATE TABLE a182_domain (a serial, b a182_pos)
+-- CREATE TABLE
+
+> COPY a182_domain (b) FROM STDIN (ON_ERROR ignore)
+>> 1
+>> -1
+>> 2
+NOTICE 00000: 1 row was skipped due to data type incompatibility
+-- COPY 2
+
+> SELECT * FROM a182_domain ORDER BY a
+a:int4 | b:int4
+1 | 1
+3 | 2
+-- SELECT 2
+
+> SELECT last_value, is_called FROM a182_domain_a_seq
+last_value:int8 | is_called:bool
+3 | t
+-- SELECT 1
+
+> COPY a182_domain (b) FROM STDIN (ON_ERROR ignore, REJECT_LIMIT 1)
+>> -1
+>> -2
+>> 3
+ERROR 22P02: skipped more than REJECT_LIMIT (1) rows due to data type incompatibility
+CONTEXT: COPY a182_domain, line 2, column b: "-2"
+
+> SELECT last_value, is_called FROM a182_domain_a_seq
+last_value:int8 | is_called:bool
+5 | t
+-- SELECT 1
+
+> DROP TABLE a182_domain
+-- DROP TABLE
+
+> DROP DOMAIN a182_pos
+-- DROP DOMAIN
+
+> CREATE SEQUENCE a182_limited MINVALUE 0 MAXVALUE 1 START 1
+-- CREATE SEQUENCE
+
+> CREATE TABLE a182_limit (a bigint DEFAULT nextval('a182_limited'), b int)
+-- CREATE TABLE
+
+> COPY a182_limit (b) FROM STDIN (ON_ERROR ignore)
+>> 1
+>> bad
+ERROR 2200H: nextval: reached maximum value of sequence "a182_limited" (1)
+CONTEXT: COPY a182_limit, line 2, column b: "bad"
+
+> SELECT last_value, is_called FROM a182_limited
+last_value:int8 | is_called:bool
+1 | t
+-- SELECT 1
+
+> ALTER SEQUENCE a182_limited RESTART WITH 1
+-- ALTER SEQUENCE
+
+> COPY a182_limit (b) FROM STDIN (ON_ERROR ignore) WHERE b > 0
+>> 1
+>> bad
+ERROR 2200H: nextval: reached maximum value of sequence "a182_limited" (1)
+CONTEXT: COPY a182_limit, line 2, column b: "bad"
+
+> SELECT last_value, is_called FROM a182_limited
+last_value:int8 | is_called:bool
+1 | t
+-- SELECT 1
+
+> DROP TABLE a182_limit
+-- DROP TABLE
+
+> DROP SEQUENCE a182_limited
+-- DROP SEQUENCE
+
+> CREATE DOMAIN a182_values_pos AS int CHECK (VALUE > 0)
+-- CREATE DOMAIN
+
+> CREATE TABLE a182_sv (a serial, b a182_values_pos)
+-- CREATE TABLE
+
+> INSERT INTO a182_sv (b) SELECT v FROM (VALUES (1), (-1)) s(v)
+ERROR 23514: value for domain a182_values_pos violates check constraint "a182_values_pos_check"
+OBJECTS: schema=public datatype=a182_values_pos constraint=a182_values_pos_check
+
+> SELECT last_value, is_called FROM a182_sv_a_seq
+last_value:int8 | is_called:bool
+2 | t
+-- SELECT 1
+
+> CREATE TABLE a182_vs (b a182_values_pos, a serial)
+-- CREATE TABLE
+
+> INSERT INTO a182_vs (b) SELECT v FROM (VALUES (1), (-1)) s(v)
+ERROR 23514: value for domain a182_values_pos violates check constraint "a182_values_pos_check"
+OBJECTS: schema=public datatype=a182_values_pos constraint=a182_values_pos_check
+
+> SELECT last_value, is_called FROM a182_vs_a_seq
+last_value:int8 | is_called:bool
+1 | t
+-- SELECT 1
+
+> DROP TABLE a182_sv, a182_vs
+-- DROP TABLE
+
+> DROP DOMAIN a182_values_pos
+-- DROP DOMAIN
+

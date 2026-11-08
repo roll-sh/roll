@@ -3,7 +3,7 @@
 //! per element, as GIN keys them (an array's elements, a jsonb value's keys and scalars, a
 //! tsvector's lexemes). A scan's conditions select the rows whose elements they need; every
 //! candidate's conditions are checked on its row as before, so a posting list is only ever
-//! a superset of the rows an operator holds for.
+//! a superset of the rows an operator holds for (exactly those where `Elements::exact` says).
 
 use super::{Placing, Posting, RowKeys, Shape};
 use crate::types::json::Jsonb;
@@ -19,6 +19,8 @@ const NULLS: u8 = b'n';
 /// Rows by element: `cols` are the index columns keyed (by `Shape::parts`).
 pub(super) struct Elements {
     cols: Vec<usize>,
+    /// Those of `cols` with jsonb_path_ops: keyed by their path tokens alone.
+    path_ops: Vec<usize>,
     fingerprint: String,
     pub(super) ts: u64,
     pub(super) rows: RowKeys,
@@ -74,9 +76,8 @@ fn elem_bytes(v: &Value, ty: &DataType) -> Option<Vec<u8>> {
 
 /// A jsonb value's tokens: every object key (`k`), and every scalar (`s` strings, `#`
 /// numbers, `t` / `f`, `z` null) at any depth, a string array element (a raw scalar's too)
-/// as `e`: jsonb_ops keys those as it keys object keys, its other strings apart. A value
-/// containing another (`@>`) has every token of it; one with key or element `k` at its top
-/// (`?`) has `k` or `e` of it.
+/// as `e`: jsonb_ops keys those as it keys object keys, its other strings apart (its jsonpath
+/// entries select by them).
 fn json_tokens(col: usize, j: &Jsonb, out: &mut Vec<Vec<u8>>) {
     // (A raw scalar is a one-element array's.)
     if let Jsonb::String(s) = j {
@@ -108,8 +109,138 @@ fn json_tokens(col: usize, j: &Jsonb, out: &mut Vec<Vec<u8>>) {
     }
 }
 
-/// A row's tokens for its value `v` of index column `col` (false: a value not keyed).
-fn row_tokens(col: usize, v: &Value, out: &mut Vec<Vec<u8>>) -> bool {
+/// A jsonb value's path tokens (`P`): each scalar with the object keys above it, then how
+/// many arrays it is in at each step (a raw scalar in none). A value contains another (`@>`)
+/// only if it has every path token of it (keys are unique, a scalar is contained only by an
+/// equal one at the same place, a raw scalar only by itself or a top-level array's element),
+/// and does if besides every array element of the other gives one token: elements are
+/// contained each by some element, and one token can't be split across two (`exact` false
+/// otherwise, and for an empty object or array, which gives none).
+struct Paths<'a> {
+    col: usize,
+    /// The keys above (`path_key`).
+    keys: Vec<u8>,
+    /// Arrays entered at each step: one more than the keys.
+    arrs: Vec<u32>,
+    out: &'a mut Vec<Vec<u8>>,
+    exact: bool,
+}
+
+/// Key `k` as a step of a path token.
+fn path_key(buf: &mut Vec<u8>, k: &str) {
+    buf.push(1);
+    buf.extend_from_slice(&(k.len() as u32).to_be_bytes());
+    buf.extend_from_slice(k.as_bytes());
+}
+
+/// A path token's leaf after its keys: `s` a string, `#` a number (as `normalize` writes it:
+/// equal under numeric's `=`, equal bytes), `t`, `f`, `z` null.
+fn path_leaf(buf: &mut Vec<u8>, kind: u8, b: &[u8]) {
+    buf.push(0);
+    buf.push(kind);
+    buf.extend_from_slice(&(b.len() as u32).to_be_bytes());
+    buf.extend_from_slice(b);
+}
+
+fn json_leaf(j: &Jsonb) -> Option<(u8, std::borrow::Cow<'_, [u8]>)> {
+    Some(match j {
+        Jsonb::String(s) => (b's', s.as_bytes().into()),
+        Jsonb::Number(n) => (b'#', n.normalize().to_string().into_bytes().into()),
+        Jsonb::Bool(b) => (if *b { b't' } else { b'f' }, (&[][..]).into()),
+        Jsonb::Null => (b'z', (&[][..]).into()),
+        _ => return None,
+    })
+}
+
+/// The tokens of `col`'s path tokens with these keys and this leaf, whatever arrays they are in.
+fn path_prefix<'a>(col: usize, keys: impl Iterator<Item = &'a str>, kind: u8, b: &[u8]) -> Vec<u8> {
+    let mut t = vec![col as u8, b'P'];
+    keys.for_each(|k| path_key(&mut t, k));
+    path_leaf(&mut t, kind, b);
+    t
+}
+
+impl Paths<'_> {
+    fn of(col: usize, j: &Jsonb, out: &mut Vec<Vec<u8>>) -> bool {
+        let mut p = Paths { col, keys: Vec::new(), arrs: vec![0], out, exact: true };
+        p.walk(j);
+        p.exact
+    }
+
+    fn token(&self, kind: u8, b: &[u8], arrs: &[u32]) -> Vec<u8> {
+        let mut t = Vec::with_capacity(self.keys.len() + b.len() + arrs.len() + 9);
+        t.push(self.col as u8);
+        t.push(b'P');
+        t.extend_from_slice(&self.keys);
+        path_leaf(&mut t, kind, b);
+        for &a in arrs {
+            let mut a = a;
+            while a >= 0x80 {
+                t.push(a as u8 | 0x80);
+                a >>= 7;
+            }
+            t.push(a as u8);
+        }
+        t
+    }
+
+    /// The tokens `j` gives (pushed to `out`), how many.
+    fn walk(&mut self, j: &Jsonb) -> usize {
+        match j {
+            Jsonb::Object(pairs) => {
+                self.exact &= !pairs.is_empty();
+                let mut n = 0;
+                for (k, v) in pairs {
+                    let mark = self.keys.len();
+                    path_key(&mut self.keys, k);
+                    self.arrs.push(0);
+                    n += crate::stack::grow(|| self.walk(v));
+                    self.arrs.pop();
+                    self.keys.truncate(mark);
+                }
+                n
+            }
+            Jsonb::Array(items) => {
+                self.exact &= !items.is_empty();
+                *self.arrs.last_mut().unwrap() += 1;
+                let mut n = 0;
+                for it in items {
+                    let m = crate::stack::grow(|| self.walk(it));
+                    self.exact &= m == 1;
+                    n += m;
+                }
+                *self.arrs.last_mut().unwrap() -= 1;
+                n
+            }
+            j => {
+                let (kind, b) = json_leaf(j).expect("a scalar");
+                let t = self.token(kind, &b, &self.arrs);
+                self.out.push(t);
+                1
+            }
+        }
+    }
+}
+
+/// `@>` of jsonb `q`'s tokens on column `col`: every one of the first, or (a raw scalar `q`)
+/// any of them; whether the rows having them are exactly those containing `q`.
+fn contained(col: usize, q: &Jsonb) -> (Vec<Vec<u8>>, bool, bool) {
+    let mut toks = Vec::new();
+    if let Some((kind, b)) = json_leaf(q) {
+        // (A raw scalar contains it, and a top-level array with it as an element.)
+        let p = Paths { col, keys: Vec::new(), arrs: Vec::new(), out: &mut Vec::new(), exact: true };
+        return (vec![p.token(kind, &b, &[0]), p.token(kind, &b, &[1])], false, true);
+    }
+    let exact = Paths::of(col, q, &mut toks);
+    toks.sort_unstable();
+    toks.dedup();
+    let exact = exact && !toks.is_empty();
+    (toks, true, exact)
+}
+
+/// A row's tokens for its value `v` of index column `col` (false: a value not keyed),
+/// `path_ops`: a jsonb value's path tokens alone.
+fn row_tokens(col: usize, v: &Value, path_ops: bool, out: &mut Vec<Vec<u8>>) -> bool {
     match v {
         // (No operator holds for NULL.)
         Value::Null => {}
@@ -127,6 +258,10 @@ fn row_tokens(col: usize, v: &Value, out: &mut Vec<Vec<u8>>) -> bool {
             }
         }
         Value::Jsonb(j) => {
+            Paths::of(col, j, out);
+            if path_ops {
+                return true;
+            }
             json_tokens(col, j, out);
             // (Its top level's keys and string elements apart (`K`, `E`), which `?`, `?|` and
             // `?&` test: an object's keys, an array's (a raw scalar's) strings.)
@@ -149,12 +284,12 @@ fn row_tokens(col: usize, v: &Value, out: &mut Vec<Vec<u8>>) -> bool {
 impl Placing for Elements {
     const ROW_CAP: bool = true;
     fn make(shape: Shape, fingerprint: String, ts: u64) -> Elements {
-        Elements { cols: shape.parts, fingerprint, ts, rows: RowKeys::default(), post: BTreeMap::new(), always: Vec::new(), built: 0, written: false }
+        Elements { cols: shape.parts, path_ops: shape.path_ops, fingerprint, ts, rows: RowKeys::default(), post: BTreeMap::new(), always: Vec::new(), built: 0, written: false }
     }
     fn add(&mut self, suffix: &[u8], vals: Option<&[Value]>) {
         let row = self.rows.push(suffix);
         let mut toks = Vec::new();
-        let keyed = vals.is_some_and(|vals| self.cols.iter().all(|&c| vals.get(c).is_some_and(|v| row_tokens(c, v, &mut toks))));
+        let keyed = vals.is_some_and(|vals| self.cols.iter().all(|&c| vals.get(c).is_some_and(|v| row_tokens(c, v, self.path_ops.contains(&c), &mut toks))));
         if !keyed {
             self.always.push(row);
             return;
@@ -264,15 +399,22 @@ impl Elements {
         Sel::Rows(super::every(toks.iter().map(|t| self.list(t)).collect()))
     }
 
+    /// The rows having a token starting with `t`.
+    fn prefixed(&self, t: &[u8]) -> Sel {
+        let end = crate::storage::keys::prefix_end(t);
+        let mut rows: Vec<u32> = self.post.range::<[u8], _>((Bound::Included(t), Bound::Excluded(&end[..]))).flat_map(|(_, l)| l.iter()).collect();
+        rows.sort_unstable();
+        rows.dedup();
+        Sel::Rows(rows)
+    }
+
     /// The rows with lexeme `word` (`prefix`: one starting with it) in column `col`.
     fn lexeme(&self, col: usize, word: &str, prefix: bool) -> Sel {
         let t = token(col, b'l', word.as_bytes());
         if !prefix {
             return Sel::Rows(self.list(&t).iter().collect());
         }
-        let end = crate::storage::keys::prefix_end(&t);
-        let toks: Vec<Vec<u8>> = self.post.range::<[u8], _>((Bound::Included(&t[..]), Bound::Excluded(&end[..]))).map(|(k, _)| k.to_vec()).collect();
-        self.any(&toks)
+        self.prefixed(&t)
     }
 
     /// The rows a tsquery's node `i` (polish notation: the right operand next, the left
@@ -299,12 +441,15 @@ impl Elements {
     /// holds for, not more: a tsquery of AND and OR over lexemes without weights (a row has a
     /// lexeme, or one it prefixes), an array's `@>` or `&&` of elements it keys, none null
     /// (elements equal under `=` have equal bytes: `elem_bytes`), jsonb's `?`, `?|`, `?&` of
-    /// strings (its top level's tokens). A row it couldn't key (`always`) makes none exact.
+    /// strings (its top level's tokens), jsonb's `@>` of a value whose arrays' elements give
+    /// one path token each (`Paths`). A row it couldn't key (`always`) makes none exact.
     pub(super) fn exact(&self, col: usize, op: &str, arg: &Value) -> bool {
         if !self.cols.contains(&col) || !self.always.is_empty() {
             return false;
         }
         match (op, arg) {
+            ("@>", Value::Jsonb(j)) => contained(col, j).2,
+            _ if self.path_ops.contains(&col) => false,
             ("@@" | "@@@", Value::TsQuery(q)) => {
                 !q.items.is_empty()
                     && q.items.iter().all(|it| match it {
@@ -325,6 +470,16 @@ impl Elements {
     /// The rows `col op arg` may hold for.
     pub(super) fn select(&self, col: usize, op: &str, arg: &Value) -> Sel {
         if !self.cols.contains(&col) {
+            return Sel::All;
+        }
+        if let ("@>", Value::Jsonb(j)) = (op, arg) {
+            return match contained(col, j) {
+                (toks, false, _) => self.any(&toks),
+                (toks, true, _) => self.every(&toks),
+            };
+        }
+        // (jsonb_path_ops keys paths alone, which its other operators don't search.)
+        if self.path_ops.contains(&col) {
             return Sel::All;
         }
         // `?` a key: the key of the top-level object, or a string element of the top-level
@@ -364,13 +519,6 @@ impl Elements {
                         self.every(&toks)
                     }
                 }
-            }
-            ("@>", Value::Jsonb(j)) => {
-                let mut toks = Vec::new();
-                json_tokens(col, j, &mut toks);
-                toks.sort_unstable();
-                toks.dedup();
-                self.every(&toks)
             }
             ("?", Value::Text(s)) => self.any(&key(s)),
             ("?|", Value::Array(a)) => self.any(&texts(a).iter().flat_map(|s| key(s)).collect::<Vec<_>>()),
@@ -419,6 +567,8 @@ enum PathItem {
 /// these tokens, those every node selects, those any node selects.
 enum JpNode {
     Entry(Vec<Vec<u8>>),
+    /// The tokens starting with it.
+    Prefix(Vec<u8>),
     And(Vec<JpNode>),
     Or(Vec<JpNode>),
 }
@@ -427,7 +577,7 @@ enum JpNode {
 /// under jsonb_ops or jsonb_path_ops (`path_ops`), over column `col`'s tokens. A
 /// jsonb_ops key entry selects object keys and string array elements, both of which this
 /// structure keys (`k`, `s`); jsonb_path_ops' entry, a hash of the path's keys and the
-/// value, selects the rows having each of those keys and the value.
+/// value, selects the rows with the value under those keys (`Paths`' tokens of any arrays).
 struct JpExtract {
     col: usize,
     path_ops: bool,
@@ -458,9 +608,21 @@ impl JpExtract {
     fn extract_nodes(&self, path: &[PathItem], scalar: Option<&crate::types::jsonpath::Node>, nodes: &mut Vec<JpNode>) {
         use crate::types::jsonpath::Node;
         let Some(scalar) = scalar else { return };
+        if self.path_ops {
+            let keys = path.iter().filter_map(|it| if let PathItem::Key(k) = it { Some(k.as_str()) } else { None });
+            let (kind, b): (u8, std::borrow::Cow<'_, [u8]>) = match scalar {
+                Node::Null => (b'z', (&[][..]).into()),
+                Node::Bool(b) => (if *b { b't' } else { b'f' }, (&[][..]).into()),
+                Node::Num(x) => (b'#', x.normalize().to_string().into_bytes().into()),
+                Node::Str(s) => (b's', s.as_bytes().into()),
+                _ => return,
+            };
+            nodes.push(JpNode::Prefix(path_prefix(self.col, keys, kind, &b)));
+            return;
+        }
         for it in path {
             if let PathItem::Key(k) = it {
-                nodes.push(JpNode::Entry(if self.path_ops { vec![token(self.col, b'k', k.as_bytes())] } else { self.key(k) }));
+                nodes.push(JpNode::Entry(self.key(k)));
             }
         }
         let col = self.col;
@@ -468,9 +630,7 @@ impl JpExtract {
             Node::Null => vec![token(col, b'z', &[])],
             Node::Bool(b) => vec![token(col, if *b { b't' } else { b'f' }, &[])],
             Node::Num(x) => vec![token(col, b'#', x.normalize().to_string().as_bytes())],
-            // (jsonb_path_ops: a value at the path, an element or not. jsonb_ops: a key
-            // entry, a value's, or both (lax, or after `.**`), as the last item says.)
-            Node::Str(s) if self.path_ops => vec![token(col, b's', s.as_bytes()), token(col, b'e', s.as_bytes())],
+            // (A key entry, a value's, or both (lax, or after `.**`), as the last item says.)
             Node::Str(s) => {
                 let last = path.last();
                 let key = !self.lax && matches!(last, Some(PathItem::Array));
@@ -545,20 +705,21 @@ impl Elements {
     fn jp_rows(&self, n: &JpNode) -> Sel {
         match n {
             JpNode::Entry(toks) => self.any(toks),
+            JpNode::Prefix(t) => self.prefixed(t),
             JpNode::And(xs) => xs.iter().fold(Sel::All, |acc, x| acc.and(self.jp_rows(x))),
             JpNode::Or(xs) => xs.iter().map(|x| self.jp_rows(x)).reduce(Sel::or).unwrap_or(Sel::All),
         }
     }
 
     /// The rows jsonb column `col` `@?` (`exists`) or `@@` jsonpath `path` may hold for,
-    /// as gin_extract_jsonb_query's entries for it select them (under jsonb_path_ops when
-    /// `path_ops`): every row when it extracts none.
-    pub(super) fn jsonpath(&self, col: usize, exists: bool, path_ops: bool, path: &str) -> Sel {
+    /// as gin_extract_jsonb_query's entries for it select them (under the column's class):
+    /// every row when it extracts none.
+    pub(super) fn jsonpath(&self, col: usize, exists: bool, path: &str) -> Sel {
         if !self.cols.contains(&col) {
             return Sel::All;
         }
         let Ok(jp) = crate::types::jsonpath::parse(path) else { return Sel::All };
-        let x = JpExtract { col, path_ops, lax: !jp.strict };
+        let x = JpExtract { col, path_ops: self.path_ops.contains(&col), lax: !jp.strict };
         let node = if exists { x.path_expr(Vec::new(), &jp.expr, None) } else { x.bool_expr(Vec::new(), &jp.expr, false) };
         node.map_or(Sel::All, |n| self.jp_rows(&n))
     }
@@ -567,4 +728,73 @@ impl Elements {
 /// Whether index `bix`'s column `col` has jsonb_path_ops.
 pub(super) fn path_ops(bix: &crate::sql::plan::BoundIndex, col: usize) -> bool {
     bix.index.columns.get(col).and_then(|c| crate::catalog::system::opclass_name(c.opclass)).is_some_and(|(n, _)| n == "jsonb_path_ops")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn jsonb_selection_matches_evaluator() {
+        use crate::types::json::parse_jsonb;
+        use crate::types::jsonpath;
+
+        // The same behavioral corpus is recorded against PG18.6 by the SQL golden.
+        let sql = include_str!("../../../tests/sql/a192_gin_jsonb_paths.sql");
+        let mut docs = parse_jsonb(sql.split("$matrix$").nth(1).unwrap()).unwrap().into_array().unwrap();
+        let tz = crate::types::datetime::TimeZone::gmt();
+        let base = docs.clone();
+        for j in base {
+            docs.push(parse_jsonb(&format!("[{}]", j)).unwrap());
+            docs.push(parse_jsonb(&format!("{{\"a\":{}}}", j)).unwrap());
+        }
+        for path_ops in [false, true] {
+            let sh = Shape { dim: None, parts: vec![0], tys: Vec::new(), path_ops: if path_ops { vec![0] } else { Vec::new() } };
+            let mut el = Elements::make(sh, String::new(), 0);
+            for (i, j) in docs.iter().enumerate() {
+                el.add(&(i as u64).to_be_bytes(), Some(&[Value::Jsonb(j.clone().into())]));
+            }
+            el.add(&(docs.len() as u64).to_be_bytes(), Some(&[Value::Null]));
+            let selected = |s: &Sel, i: usize| match s {
+                Sel::All => true,
+                Sel::Rows(rows) => rows.binary_search(&(i as u32)).is_ok(),
+            };
+            let mut exact_queries = 0;
+            for q in &docs {
+                let arg = Value::Jsonb(q.clone().into());
+                let sel = el.select(0, "@>", &arg);
+                let exact = el.exact(0, "@>", &arg);
+                exact_queries += usize::from(exact);
+                for (i, j) in docs.iter().enumerate() {
+                    let holds = j.contains(q);
+                    let hit = selected(&sel, i);
+                    assert!(!holds || hit, "false negative: path_ops={path_ops}, {j} @> {q}");
+                    if exact {
+                        assert_eq!(hit, holds, "false exact: path_ops={path_ops}, {j} @> {q}");
+                    }
+                }
+                if exact {
+                    assert!(!selected(&sel, docs.len()), "SQL NULL cannot contain {q}");
+                }
+            }
+            assert!(exact_queries > 20, "exercise exact selections");
+            for path in ["$.a == 1", "$.a.b == 1", "$.a[*].b == 1", "$.a == null", "$.a == \"x\"",
+                "$.a.b == 1 && $.a.c == 2", "$.a.b == 1 || $.ab == 1", "$.** == 1", "$[*] == 1"] {
+                for mode in ["lax", "strict"] {
+                    let path = format!("{mode} {path}");
+                    let parsed = jsonpath::parse(&path).unwrap();
+                    let sel = el.jsonpath(0, false, &path);
+                    for (i, j) in docs.iter().enumerate() {
+                        let holds = jsonpath::matches(j, &parsed, None, true, false, &tz).unwrap() == Some(true);
+                        assert!(!holds || selected(&sel, i), "jsonpath false negative: path_ops={path_ops}, {j} @@ {path}");
+                    }
+                }
+            }
+            // Container and multi-leaf array-element queries retain ordinary recheck.
+            for q in ["{}", "[]", r#"[{"a":1,"b":2}]"#, r#"{"a":[{"b":1},{}]}"#] {
+                assert!(!el.exact(0, "@>", &Value::Jsonb(parse_jsonb(q).unwrap().into())));
+            }
+            assert!(!el.exact(0, "@@", &Value::Text("$.a == 1".into())));
+        }
+    }
 }

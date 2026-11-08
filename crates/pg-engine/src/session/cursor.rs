@@ -1899,7 +1899,7 @@ pub fn spi_cursor_stmt(
                 .with_params(params.iter().map(|p| p.0.clone()).collect())
                 .for_cursor(ctx, scroll)?;
             let mut c = Cursor::new_lazy(
-                bq.cols.to_vec(),
+                bq.cols.clone(),
                 lazy,
                 keyed.map(|k| k.1),
                 hold,

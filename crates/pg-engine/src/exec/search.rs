@@ -155,6 +155,8 @@ struct Shape {
     dim: Option<(usize, Kind)>,
     parts: Vec<usize>,
     tys: Vec<DataType>,
+    /// GIN: the columns of `parts` with jsonb_path_ops (`gin::Elements` keys only their paths).
+    path_ops: Vec<usize>,
 }
 
 fn ordered_scalar(ty: &DataType) -> bool {
@@ -210,7 +212,7 @@ fn shape(bix: &BoundIndex) -> Option<Shape> {
     if let Some((i, Kind::Scalar)) = dim {
         parts.retain(|&p| p != i);
     }
-    (dim.is_some() || !parts.is_empty()).then_some(Shape { dim, parts, tys })
+    (dim.is_some() || !parts.is_empty()).then_some(Shape { dim, parts, tys, path_ops: Vec::new() })
 }
 
 /// An order-preserving key of an ordered value (None: none, or NaN).
@@ -1345,7 +1347,7 @@ pub fn nearest(
         if col != 0 || !matches!(op, "<->" | "<->>" | "<->>>") {
             return Ok(None);
         }
-        let sh = Shape { dim: None, parts: Vec::new(), tys: Vec::new() };
+        let sh = Shape { dim: None, parts: Vec::new(), tys: Vec::new(), path_ops: Vec::new() };
         let Some(st) = structure::<Trigrams>(t, bix, &sh, ctx)? else { return Ok(None) };
         let g = st.lock();
         let Some(tg) = g.downcast_ref::<Trigrams>().filter(|tg| snapshot.is_none_or(|s| s >= tg.ts)) else {
@@ -1614,7 +1616,7 @@ fn trigram_candidates(t: &Table, bix: &BoundIndex, conds: &[(usize, &str, Value)
     if !conds.iter().any(|(_, op, v)| similarity_share(op, ctx).is_some() || !required_trigrams(op, v).is_empty()) {
         return Ok(None);
     }
-    let sh = Shape { dim: None, parts: Vec::new(), tys: Vec::new() };
+    let sh = Shape { dim: None, parts: Vec::new(), tys: Vec::new(), path_ops: Vec::new() };
     let Some(st) = structure::<Trigrams>(t, bix, &sh, ctx)? else { return Ok(None) };
     let g = st.lock();
     let Some(tg) = g.downcast_ref::<Trigrams>() else { return Ok(None) };
@@ -1632,7 +1634,8 @@ fn element_candidates(t: &Table, bix: &BoundIndex, conds: &[(usize, &str, Value)
     if !conds.iter().any(|(c, _, _)| cols.contains(c)) {
         return Ok(None);
     }
-    let sh = Shape { dim: None, parts: cols, tys: Vec::new() };
+    let path_ops = cols.iter().copied().filter(|&c| gin::path_ops(bix, c)).collect();
+    let sh = Shape { dim: None, parts: cols, tys: Vec::new(), path_ops };
     let Some(st) = structure::<gin::Elements>(t, bix, &sh, ctx)? else { return Ok(None) };
     let g = st.lock();
     let Some(el) = g.downcast_ref::<gin::Elements>() else { return Ok(None) };
@@ -1643,7 +1646,7 @@ fn element_candidates(t: &Table, bix: &BoundIndex, conds: &[(usize, &str, Value)
         acc.and(match (*op, v) {
             // (jsonb `@?` / `@@` jsonpath: the jsonpath's text.)
             ("@?" | "@@", Value::Text(p)) if bix.keys.get(*c).is_some_and(|k| k.ty() == DataType::Jsonb) => {
-                el.jsonpath(*c, *op == "@?", gin::path_ops(bix, *c), p)
+                el.jsonpath(*c, *op == "@?", p)
             }
             _ => el.select(*c, op, v),
         })
@@ -1655,7 +1658,7 @@ fn element_candidates(t: &Table, bix: &BoundIndex, conds: &[(usize, &str, Value)
     // element, which only reading the row finds.)
     let builtin = |c: usize| {
         bix.index.columns.get(c).is_some_and(|ic| {
-            ic.opclass == 0 || matches!(crate::catalog::system::opclass_name(ic.opclass).map(|(n, _)| n), Some("array_ops" | "tsvector_ops" | "jsonb_ops"))
+            ic.opclass == 0 || matches!(crate::catalog::system::opclass_name(ic.opclass).map(|(n, _)| n), Some("array_ops" | "tsvector_ops" | "jsonb_ops" | "jsonb_path_ops"))
         })
     };
     let exact = snapshot.is_some_and(|s| s >= el.ts)

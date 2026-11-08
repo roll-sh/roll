@@ -839,7 +839,7 @@ pub(crate) fn pg_depend_dml(ctx: &crate::exec::ExecCtx, node: &NodeEnum) -> Resu
         let mut b = Binder::new(&child, Vec::new());
         let bq = b.bind_statement(&node)?;
         let rows = crate::exec::collect(&bq.plan, &child, None)?;
-        Ok((bq.cols.to_vec(), rows))
+        Ok((bq.cols, rows))
     };
     let mut d = Ddl::new(ctx, "");
     match node {
@@ -1128,7 +1128,7 @@ pub(crate) fn merge_pg_class(
         let mut b = Binder::new(&child, Vec::new());
         let bq = b.bind_statement(&node)?;
         let rows = crate::exec::collect(&bq.plan, &child, None)?;
-        Ok((bq.cols.to_vec(), rows))
+        Ok((bq.cols, rows))
     };
     let (mut cols, mut rows) = query()?;
     // The rows matched are updated (heap_update): one another transaction is updating is

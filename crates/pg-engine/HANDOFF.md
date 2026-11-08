@@ -4724,6 +4724,33 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
     COPY goldens failed; its final HEAVY-EXIT 0 did not imply every step passed. The resume
     check fixes and reruns those failures. Later complete-suite coverage belongs to the
     verification train. No storage format or durability rule changes in this batch.
+  - **Input failures still evaluate defaults in PostgreSQL's order** (resumed a182): COPY
+    keeps ignored lines as feed events. DEFAULT markers preceding the failed conversion and
+    omitted-column defaults still run; ignored rows insert nothing, are excluded from view
+    command tags, and remain visible as skipped progress. REJECT_LIMIT follows the rejected
+    row's defaults, and a failing default retains the input column's COPY context.
+    INSERT carries `values_domains_first` from its written syntax through optimization:
+    multirow VALUES checks provided domains before omitted defaults; SELECT interleaves them
+    in table-column order, including a SELECT whose optimized source is Values. The
+    PostgreSQL 18.6 golden `a182_input_defaults` covers both column orders and these COPY paths.
+  - **A COPY request for more data preserves pending counts**: `NEED_COPY_ROWS` is control
+    flow, so it must not discard the current multi-insert buffer's statistics. The recovered
+    executable counted 1,000 for 1,010 valid copied rows (PostgreSQL: 1,010). The existing
+    chunked `wire::copy_in_and_out` test now checks that transaction-local count.
+    Source `cbdb37d70ea851c2ef54ac1df0192ff4b699405e` passes 15 release golden harness
+    checks (`a182_input_defaults`, `copy`, `insert`, `domain`, `stat`), all 19 big-table
+    tests, the chunked COPY wire test and all-target Clippy: 35 tests, zero failures.
+    Receipts: `~/.cache/a182/resume-followup/`. The new golden was recorded from PostgreSQL
+    18.6 at port 53648. No benchmark or full-suite result is inferred from these checks.
+    After rebasing over the newer planner and mode-setting commits, integrated source
+    `2b4ec8e0c3bc3a326df4e950fc83c740b08eb539` passes a release binary build, the
+    default-order and COPY goldens (six harness tests), the chunked COPY wire test and
+    all-target Clippy: seven tests, zero failures. Receipts and binary hash:
+    `~/.cache/a182/resume-integration/`; `~/.cache/a182/audit-resume.py` checks the source
+    and test receipts. Progress assertions run in AFTER STATEMENT triggers; mid-batch
+    progress sampling is not established by this coverage. Full-wave checks remain with
+    the verification train. No new containers were created; saved checkouts and caches
+    are retained for the coordinator.
 
 - **Result rows stream** (round 19, agent 65): a top-level SELECT's rows go to the client as
   the executor returns them, as PostgreSQL's printtup sends a DataRow per row. A
@@ -9475,3 +9502,80 @@ called by measure_rows_with's heap_pages. This failure and a targeted backtrace 
 sealed, with no baseline attribution yet. The fixture uses the bulk insert's asserted
 unmodelled heap state directly; both 2816/8320 index error expectations are unchanged.
 This avoids the unrelated setup operation, without fixing or accepting the VACUUM gap.
+
+### Agent 192 resumed GIN path batch (2026-11-08)
+
+GIN jsonb containment selects by full key paths, scalar values, and array depth at
+each key. A query is exact only when no empty subtree occurs and each array element
+contributes one scalar leaf. Multi-leaf elements retain heap recheck, so separate
+array elements cannot satisfy a correlated object. Raw scalar queries also search
+top-level array elements. Both jsonb classes use these containment tokens;
+jsonb_path_ops keeps only path tokens and searches jsonpath scalars by path prefix.
+Jsonpath still rechecks. Partial and custom-class eligibility, snapshot checks,
+own writes, and commits after the structure read retain their existing guards.
+The normal evaluator now rejects an object member's array containing a scalar:
+`{"a":[1]} @> {"a":1}` is false, while `[1] @> 1` remains true, as in PG18.6.
+
+Release verification passes the 144-by-144 bounded selection matrix under both
+classes, four GIN goldens in embedded, wire, and shuffled execution, and Clippy.
+The focused PG18.6 comparison matches 2,064/2,064 units across test_setup, gin,
+jsonb, and jsonb_jsonpath, with no panics or failed engine invocation. An initial
+fixture symlink escaped the engine's allowed file root and caused COPY failures;
+copying the fixtures inside the lane cache restored the comparison without a
+source change. Those failed outputs remain preserved. After rebasing onto a182's
+input-default batch, all five changed source and fixture files are byte-identical
+to the verified versions, and Clippy passes again with ten unrelated warnings.
+The combined runtime suite remains verification-train work.
+
+The new golden preserves a PG18.6 inconsistency already recorded by a127:
+jsonb_ops misses a raw string for `@@ 'strict $ == "x"'`, while jsonb_path_ops
+and the evaluator return it. The candidate-completeness matrix does not claim
+that case. No benchmark, profile, idle-footprint measurement, or memory advantage
+is established. Matched dist builds, useful-work checks, and serialized timing,
+CPU, peak memory, and idle comparisons remain required. No persistent format,
+WAL, durability, session API, or vector source changed. Receipts and the rerunnable
+`audit-gin.py` are in `~/.cache/a192/`.
+
+The saved vector probe now matches all 1,150 result rows and three headers in
+`vprobe.ref`. The existing `four_row_kernels_match` test also passes its bitwise
+serial/four-row comparisons. Ordinary joined SQL does not prove that the ANN
+four-row kernels ran; the direct kernel test supplies that check. Vector source
+and test hashes match the recorded build, and neither `vprobe.sql` nor its saved
+reference changed. This reuses the saved reference rather than recording a new
+reference build. No FMA mismatch was established and no vector code changed.
+The probe engine shut down cleanly, and both temporary labeled containers were
+removed. The existing stopped a192 containers, worktree, cache, and WIP remain.
+
+## a185 compatibility recovery, 2026-11-08
+
+The cursor and missing-statement fixes are verified at `8e1a80f95` on top of
+`628c8d94b`. DECLARE SCROLL and WITH HOLD reject row-locking queries with PostgreSQL
+18.6's 0A000 message and DETAIL. INSENSITIVE keeps its distinct 42P11 error. The
+first row mark's final strength determines the message. CTE references and SELECT
+without a lockable relation remain valid. Top-level and SPI declarations use the
+same check. Bind and Describe name a missing unnamed prepared statement explicitly.
+
+The final compatibility job ends with HEAVY-EXIT 0. Release wire tests pass 69/69.
+The a185 cursor and a190 planner goldens each pass embedded, wire, and shuffled
+execution. The regression subset matches 3,610/3,610 units with no newly differing
+units. Clippy passes with 14 distinct diagnostics: ten library warnings, two
+additional library-test warnings, one example warning, and one difftest warning.
+No warning points at the compatibility changes. The source manifest stays unchanged
+through the job. Evidence is in `~/.cache/a185/logs/resume-compat-run.log`,
+`resume-compat.status`, `resume-compat.source.json`, and `compat-*.log`.
+
+The earlier integrated candidate job also ends with HEAVY-EXIT 0. It passes the
+release build, nine kept-plan tests, 69 wire tests, six two-phase tests, three lock
+tests in each of release and debug, both selected goldens, Clippy, and the same
+3,610 regression units. Its source is `ecffa8ab3` plus the saved dirty changes in
+`logs/resume-focused.patch` and `resume-focused.source.json`. That run precedes the
+final CTE correction and the later upstream bulk and GIN additions. The original
+job5 validates the separate reusesrc tree, not the column-sharing or lock rewrite.
+
+Custom-plan reuse, shared result columns, and partitioned locks remain candidates
+in `work-a185`, backed up to `wip/a185`. They are not part of this compatibility
+push. Serial performance comparisons and the integrated efficient-mode footprint
+gate remain open. The old new-src footprint run predates custom-plan reuse. The
+reuse range test checks its first row, so complete ordered-result validation also
+remains open. No speedup or blanket performance acceptance is claimed. The full
+verification train remains an integrated-origin gate before candidate acceptance.

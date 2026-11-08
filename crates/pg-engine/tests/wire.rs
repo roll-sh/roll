@@ -813,10 +813,11 @@ fn copy_in_and_out() {
     runtime().block_on(async {
         let c = s.connect("postgres").await;
         c.batch_execute("CREATE TABLE cp (id int, name text)").await.unwrap();
+        c.batch_execute("BEGIN").await.unwrap();
         let sink = c.copy_in("COPY cp FROM STDIN").await.unwrap();
         futures::pin_mut!(sink);
         let mut data = String::new();
-        for i in 0..1000 {
+        for i in 0..1010 {
             data.push_str(&format!("{i}\tname {i}\n"));
         }
         // Several CopyData messages, split mid-line.
@@ -824,7 +825,9 @@ fn copy_in_and_out() {
             sink.send(bytes::Bytes::copy_from_slice(chunk)).await.unwrap();
         }
         let n = sink.finish().await.unwrap();
-        assert_eq!(n, 1000);
+        assert_eq!(n, 1010);
+        assert_eq!(c.query_one("SELECT n_tup_ins FROM pg_stat_xact_user_tables WHERE relname = 'cp'", &[]).await.unwrap().get::<_, i64>(0), 1010);
+        c.batch_execute("COMMIT").await.unwrap();
         let out = c.copy_out("COPY (SELECT id, name FROM cp WHERE id < 3 ORDER BY id) TO STDOUT WITH (FORMAT csv)").await.unwrap();
         futures::pin_mut!(out);
         let mut text = Vec::new();
@@ -838,7 +841,7 @@ fn copy_in_and_out() {
         sink.send(bytes::Bytes::from_static(b"x\ty\n")).await.unwrap();
         let err = sink.finish().await.unwrap_err();
         assert_eq!(err.code().map(|c| c.code()), Some("22P02"));
-        assert_eq!(c.query_one("SELECT count(*) FROM cp", &[]).await.unwrap().get::<_, i64>(0), 1000);
+        assert_eq!(c.query_one("SELECT count(*) FROM cp", &[]).await.unwrap().get::<_, i64>(0), 1010);
     });
     s.engine.shutdown();
 }

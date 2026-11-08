@@ -57,9 +57,8 @@ use std::sync::Arc;
 #[derive(Clone, Debug)]
 pub struct BoundQuery {
     pub plan: Arc<Plan>,
-    /// Result columns (empty for DML without RETURNING), shared with the portals and
-    /// results made from it.
-    pub cols: Arc<[OutCol]>,
+    /// Result columns (empty for DML without RETURNING).
+    pub cols: Vec<OutCol>,
     /// Types of `$n` parameters, as declared or inferred.
     pub params: Vec<DataType>,
     /// Privileges it needs (checked each time it runs).
@@ -85,7 +84,7 @@ pub struct BoundQuery {
 #[derive(Clone)]
 pub struct Analyzed {
     plan: Plan,
-    cols: Arc<[OutCol]>,
+    cols: Vec<OutCol>,
     params: Vec<DataType>,
     perms: perms::Perms,
     hidden_rtes: usize,
@@ -1443,7 +1442,7 @@ impl<'b, 'a> Binder<'b, 'a> {
             .collect();
         Analyzed {
             plan,
-            cols: cols.into(),
+            cols,
             params,
             perms: self.perms.clone(),
             hidden_rtes: self.hidden_rtes,

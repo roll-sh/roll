@@ -871,7 +871,7 @@ impl Session {
                     == Some("force_generic_plan");
             self.infer_params = o.generic_plan;
             let bq = if !generic && !values.is_empty() && !p.param_types.is_empty() {
-                self.bound_custom(&p, &q, &values, false)
+                self.bound_custom(&p, &q, &values)
             } else {
                 self.bound_as(&p, &q, &values, declare)
             };
@@ -975,7 +975,7 @@ impl Session {
                     f.out_cols
                         .iter()
                         .map(|(n, t)| OutCol::new(n.clone(), t.clone()))
-                        .collect::<Vec<_>>(),
+                        .collect(),
                     vec![row],
                     "CALL",
                 )),
@@ -1065,7 +1065,7 @@ impl Session {
             .with_params(params.to_vec())
             .for_cursor(ctx, scroll)?;
             Ok(Cursor::new_lazy(
-                bq.cols.to_vec(),
+                bq.cols.clone(),
                 lazy,
                 keyed.map(|k| k.1),
                 hold,
