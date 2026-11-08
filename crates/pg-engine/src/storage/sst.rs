@@ -1488,6 +1488,20 @@ mod tests {
                     b.seek(&probe, &mut pos);
                     assert_eq!(pos.index(), want, "{restart} {probe:?}");
                     assert_eq!(e.seek(&probe), want);
+                    // (`seek_on` from places before, at and after it finds the same entry.)
+                    for j in [0, want.saturating_sub(5), want.saturating_sub(1), want, want + 1, want + 17] {
+                        if j >= ents.len() {
+                            continue;
+                        }
+                        let mut from = BlockPos::default();
+                        b.at(j, &mut from);
+                        b.seek_on(&probe, &mut from);
+                        assert_eq!(from.index(), want, "seek_on from {j}: {restart} {probe:?}");
+                        if want < ents.len() {
+                            assert_eq!(from.key(), ents[want].0.as_slice());
+                            assert_eq!(b.value_ref(&from), ents[want].1.as_deref());
+                        }
+                    }
                     if want < ents.len() {
                         assert_eq!(pos.key(), ents[want].0.as_slice());
                         assert_eq!(b.value_ref(&pos), ents[want].1.as_deref());
