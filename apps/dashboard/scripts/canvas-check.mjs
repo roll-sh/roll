@@ -448,8 +448,21 @@ async function runGroup(browser, g, ctxOpts) {
           for (let i = 0; i < 4; i++) {
             if (phone) await press(page, "ArrowLeft");
             else {
-              const box = await page.locator('[aria-label="Agents canvas"]').boundingBox();
-              await page.mouse.move(box.x + box.width / 2, box.y + box.height / 3);
+              // Over empty canvas: a wheel over a card that scrolls (a live request) scrolls the
+              // card, and Fit then went to the overview (nw-1440-h-panel, nw-2000).
+              const at = await page.evaluate(() => {
+                const c = document.querySelector('[aria-label="Agents canvas"]');
+                const r = c.getBoundingClientRect();
+                for (let gy = 1; gy < 8; gy++)
+                  for (let gx = 1; gx < 8; gx++) {
+                    const x = r.left + (r.width * gx) / 8;
+                    const y = r.top + (r.height * gy) / 8;
+                    const el = document.elementFromPoint(x, y);
+                    if (el && c.contains(el) && !el.closest("[data-card], [data-zoom-bar], button, input, textarea")) return { x, y };
+                  }
+                return { x: r.left + r.width / 2, y: r.top + r.height / 3 };
+              });
+              await page.mouse.move(at.x, at.y);
               await page.mouse.wheel(60, 40);
               await page.mouse.move(1, 1);
             }

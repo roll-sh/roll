@@ -760,6 +760,20 @@ body {
   [data-greek] [data-card] :is([data-title], [data-title] *) {
     --bar: color-mix(in oklab, var(--fg) 28%, transparent);
   }
+  /* What needs you outweighs those firmer grey frames: half-transparent accent and red on white
+     read fainter than a plain card's frame far out. Solid there, nearly so below 55 %. */
+  [data-brief] [data-card] [data-drag]:is([data-tone="busy"], [data-tone="waiting"]) {
+    --tone-c: color-mix(in oklab, var(--accent) 75%, transparent);
+  }
+  [data-brief] [data-card] [data-drag][data-tone="error"] {
+    --tone-c: color-mix(in oklab, var(--danger) 80%, transparent);
+  }
+  [data-greek] [data-card] [data-drag][data-tone="waiting"] {
+    --tone-c: var(--accent);
+  }
+  [data-greek] [data-card] [data-drag][data-tone="error"] {
+    --tone-c: var(--danger);
+  }
   /* The done green as text on white (`--ok` alone is about 1.9:1). */
   [data-card] .text-ok {
     color: color-mix(in oklab, var(--ok) 55%, var(--fg));
@@ -869,12 +883,6 @@ body {
 [data-desktop="agents-mac"] [data-drag-region] :is(button, a, input, select, textarea, label, [data-nodrag]) {
   app-region: no-drag;
   -webkit-app-region: no-drag;
-}
-
-/* A thread card's pins sit left of its own tools (one button: 30 px, and a 4 px gap), both above
-   the card, never over its time or status. */
-[data-card]:has([data-card-tools]) [data-pin-tools] {
-  right: 42px;
 }
 
 /* A card's floating tools blur what's under them only while they show: a backdrop filter makes a
