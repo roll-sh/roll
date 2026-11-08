@@ -182,7 +182,28 @@ impl Analyzed {
         #[cfg(debug_assertions)]
         let (plan, hidden_rtes) = planned?;
         #[cfg(not(debug_assertions))]
-        let (plan, hidden_rtes) = self.planned(plan, ctx)?;
+        let (plan, hidden_rtes) = match std::env::var("A190_RECHOOSE").ok().and_then(|v| v.parse::<u32>().ok()) {
+            Some(n) => {
+                let (r, choice) = crate::sql::paths::keeping_choice(|| self.planned(plan, ctx));
+                let r = r?;
+                if let Some(c) = choice {
+                    let mut p = &r.0;
+                    while let Plan::Project { input, .. } = p {
+                        p = input;
+                    }
+                    if let Plan::Scan(s) = p {
+                        let t = std::time::Instant::now();
+                        let mut some = 0;
+                        for _ in 0..n {
+                            some += c.rechoose(s, s, ctx).is_some() as u32;
+                        }
+                        eprintln!("A190 rechoose {} ns/iter ({some}/{n} some)", t.elapsed().as_nanos() / n.max(1) as u128);
+                    }
+                }
+                r
+            }
+            None => self.planned(plan, ctx)?,
+        };
         self.perms.add_plan_locks(&plan, &self.cat);
         let plan = Arc::new(plan);
         #[cfg(debug_assertions)]

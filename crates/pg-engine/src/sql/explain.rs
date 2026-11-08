@@ -9898,6 +9898,29 @@ impl Builder<'_, '_> {
                 if self.o.verbose && none_read {
                     c.node.output = vec!["NULL::oid".into(), "NULL::tid".into()];
                 }
+                // A join computes the final target list, as UPDATE's does: the target row's
+                // ctid (an inheritance tree's tableoid too), the other relations' row marks
+                // and what RETURNING reads of them.
+                if c.node.is_join() && !dp.inh {
+                    let cat = self.ctx.catalog();
+                    let ncols = t.columns.len();
+                    let mut w: u32 = 6 + if cat.class_has_subclass.contains(&t.oid) { 4 } else { 0 };
+                    w += 6 * rowmarks_under(&dp.source, &self.rowmarks) as u32
+                        + copy_widths_under(&dp.source, &self.copy_marks);
+                    let mut seen = Vec::new();
+                    for e in &returning {
+                        e.walk(&mut |x| {
+                            if let Expr::Col(i, ty) = x
+                                && *i > ncols
+                                && !seen.contains(i)
+                            {
+                                seen.push(*i);
+                                w += c.node.cols.get(*i).map_or_else(|| type_width(ty), |x| x.width);
+                            }
+                        });
+                    }
+                    c.node.width = w;
+                }
                 let mut n = self.modify("Delete", t, &refname, &c.node);
                 if t.foreign.is_some() {
                     self.foreign_delete_returning(&mut n, dp);
@@ -17589,7 +17612,10 @@ pub(crate) fn sys_tuples(table: crate::catalog::system::SysTable, ctx: &ExecCtx)
     if let Some(n) = SYS_ROWS.with(|m| m.borrow().get(&key).map(|e| e.1)) {
         return n;
     }
-    let n = if crate::catalog::system::rows_cacheable(table) {
+    let n = if matches!(table, crate::catalog::system::SysTable::PgDepend) {
+        // (Estimated from the catalog's counts, whether its rows are generated or not.)
+        crate::catalog::system::depend_estimate(&cat) as f64
+    } else if crate::catalog::system::rows_cacheable(table) {
         // (Counted without generating the rows, unless they are already: `row_count`.)
         match crate::catalog::system::rows_cached(table, ctx) {
             Some(r) => Ok(r.len()),

@@ -1427,7 +1427,7 @@ impl<'s, 'c, 'a> Search<'s, 'c, 'a> {
             // (An expression index's key that is an expression member of the class too.)
             let off = self.leaves[l].off;
             let mut keyed: Vec<usize> = Vec::new();
-            for ii in &rel.indexes {
+            for ii in rel.indexes.iter() {
                 if !matches!(ii.am, crate::sql::paths::Am::Btree | crate::sql::paths::Am::Hash) {
                     continue;
                 }
