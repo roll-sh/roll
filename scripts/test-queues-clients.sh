@@ -84,7 +84,7 @@ elif [[ -z $url ]]; then
     --api "127.0.0.1:$api_port" --public-host "$host" --queues-advertise-host "$host" \
     --queues-amqp "$any:$p_amqp" --queues-mqtt "$any:$mqtt_port" --queues-stomp "$any:$stomp_port" \
     --queues-stream "$any:$stream_port" --queues-management "$any:$mgmt_port" --queues-http "$any:$http_port" \
-    --queues-web-mqtt 127.0.0.1:0 --queues-web-stomp 127.0.0.1:0 --queues-rpc 127.0.0.1:0 >"$OUT/broker.log" 2>&1 &
+    --queues-web-mqtt 127.0.0.1:0 --queues-web-stomp 127.0.0.1:0 >"$OUT/broker.log" 2>&1 &
   BROKER_PID=$!
   ((keep)) || trap 'kill $BROKER_PID 2>/dev/null || true; wait $BROKER_PID 2>/dev/null || true; rm -rf "$home"' EXIT
   for _ in $(seq 200); do
