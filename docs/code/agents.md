@@ -925,6 +925,17 @@ that change (checks, reviews, the merge queue, landing) shows on the thread. The
   around the rules; the answer is `Published.landing {status: landed | queued | blocked |
   conflict | failed, message, blockers}`, a result, never an error. A project that isn't a roll
   code repo pushes to `origin` as before (and refuses `land`).
+- **When roll is down.** A publish's grant for a GitHub-connected repo names its GitHub side
+  (`CodeGrant.github`: owner, repo, web URL, default branch; never a credential). If the push to
+  roll fails on the way (`git::Network`), the daemon pushes the thread's branch to GitHub and
+  opens a pull request with the user's own GitHub credentials on the machine
+  (`agent_host::github`: `GH_TOKEN`/`GITHUB_TOKEN`, `gh auth token`, or git's credential helper;
+  a header in that one git process's environment, never relayed, stored or logged). The default
+  branch is never pushed. The reply is `Published` with the pull request's `url` and, with `land`,
+  `landing: queued` ("queued on GitHub as pull request #N"); the relay leaves the daemon's
+  landing alone. The daemon keeps it with the thread in `agent.db` (`github_queued`) until a
+  publish reaches roll: roll ingests the pull request as the branch's change (webhook or
+  reconcile), and publishing again links it and lands it through roll's rules.
 - **The first commit.** A repository with no commits has nothing to branch a worktree from, so its
   threads work in the project folder (`thread.create`). Publishing one of them is the repo's first
   commit, the way T3's local-mode commit and push works: the daemon commits the folder's files on

@@ -147,7 +147,7 @@ Taking a repo over (`Ownership::Acquired`) first drops everything the node cache
 | --- | --- | --- |
 | merge queue | a worker starts if entries are active; it first recovers the batch the last owner left (a batch that was landing counts as landed if its tip is on the branch; the rest is tested again) | the worker is aborted (each batch runs under the repo's guard, so a handoff waits for it first) |
 | roll's reviewer | jobs `running` under another node's claim are queued again; queued ones run here (each runs under the repo's guard) | running jobs are aborted and left `running` for the next owner |
-| GitHub | the import if it never finished, else the mirror | the mirror and import stop |
+| GitHub | the import if it never finished, else the mirror and the reconcile (at once, then every 10 minutes); its notifications for GitHub (`gh_…` deliveries) go out from here | the mirror, import and reconcile stop; its notifications wait for the next owner |
 | code index | an index this node still has catches up; a repo whose reviewer is on builds one in the background; others build on first use (search answers 503 until it's built, as on a fresh repo) | removed from disk if the repo hasn't come back after two lease lengths (a node that fenced itself through a slow database usually gets it straight back); a node starting in a cluster removes every index it finds (it owns nothing yet), and a single node those of repos that no longer exist; deleting a repo removes its index on its owner at once |
 | checks (code-preview) | checks that were queued or running on open changes run again; the default branch's head is checked unless it's the last green one (which opens or closes `broken-main` items) | results of checks still running are dropped |
 | previews (code-preview) | previews stored as running are asleep (their containers were elsewhere); the next visit starts one here | the containers stop |
@@ -276,6 +276,13 @@ node that dies mid-way leaves nothing behind that the others can't finish.
   leaves it due when its claim (20 s) lapses. Parts run at least once: one handled by a node that
   died before deleting its row runs again, and the handlers are idempotent (keyed by GitHub's
   ids).
+- **What roll tells GitHub** (PR comments and closes, issue closes, check runs, reviews) is a
+  `review_deliveries` row with the target `gh_<repo id>`, queued like a webhook's. Every node's
+  delivery worker takes only those of the repos it owns (claimed for 150 s, a send's 90 s plus a
+  margin); a node that sees one due for a repo it doesn't own kicks the repo's owner, and a repo
+  with one pending is never given up as idle.
+- **Redelivery of missed GitHub webhooks** runs on one node (`Code::singleton("github-catchup")`)
+  every 5 minutes; what it asks for arrives as ordinary webhooks.
 - **Event-stream limits** (`--code-max-streams-per-caller`, `--code-max-streams`) are per node.
 - **The git memory budget** (`--code-git-memory-budget`) is per node.
 
