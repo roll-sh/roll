@@ -41,7 +41,7 @@ pub struct EngineOptions {
     pub memtable_bytes: usize,
     /// fsync the WAL on commit.
     pub sync: bool,
-    /// Close a database this long after its last session ends.
+    /// Close a database this long after its last session ends (`Duration::MAX`: never).
     pub idle_close: Duration,
     /// The superuser every new database is bootstrapped with.
     pub superuser: String,
@@ -600,22 +600,25 @@ impl Engine {
         for e in &prepared {
             engine.open_db(e)?;
         }
-        let weak = Arc::downgrade(&engine);
-        let tick =
-            (engine.opts.idle_close / 4).clamp(Duration::from_millis(100), Duration::from_secs(10));
-        std::thread::Builder::new()
-            .name("roll-idle".into())
-            .spawn(move || {
-                loop {
-                    std::thread::sleep(tick);
-                    let Some(e) = weak.upgrade() else { return };
-                    if e.stopped.load(Ordering::Acquire) {
-                        return;
+        // (`Duration::MAX`: databases stay open, performance mode's; no thread to wake.)
+        if engine.opts.idle_close != Duration::MAX {
+            let weak = Arc::downgrade(&engine);
+            let tick = (engine.opts.idle_close / 4)
+                .clamp(Duration::from_millis(100), Duration::from_secs(10));
+            std::thread::Builder::new()
+                .name("roll-idle".into())
+                .spawn(move || {
+                    loop {
+                        std::thread::sleep(tick);
+                        let Some(e) = weak.upgrade() else { return };
+                        if e.stopped.load(Ordering::Acquire) {
+                            return;
+                        }
+                        e.close_idle(e.opts.idle_close);
                     }
-                    e.close_idle(e.opts.idle_close);
-                }
-            })
-            .map_err(|e| internal(format!("spawn idle thread: {e}")))?;
+                })
+                .map_err(|e| internal(format!("spawn idle thread: {e}")))?;
+        }
         engine
             .workers
             .start_launcher(&engine)
