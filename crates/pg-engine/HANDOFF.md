@@ -8785,6 +8785,90 @@ Left, for the planner:
   btree on char(n), LIMIT over a hashed grouping, autovacuum of catalogs, the catalog
   bitmap scan's index condition).
 
+## Planner round 11 (agent 177)
+
+BENCH.md "Planner, round 11" has the measurements. What changed:
+
+- **A custom plan's scan can be chosen again for another execution's values** (the planner
+  side of custom-plan reuse; agreed with agent 178 through the coordinator, 178 builds the
+  reuse in `session::litplan` / `binder::custom`):
+  - `paths::keeping_choice(|| analyzed.bind_values(..))` returns, with the plan, an
+    `Arc<ScanChoice>` when exactly one scan was planned and it can be chosen again (not for
+    other scans' rows, a PlaceHolderVar, a parameterized path or a cursor's fraction). It is
+    the relation as path generation saw it (`Rel` without its clauses: sizes, indexes and
+    their statistics handles, permissions), what the scan was asked for (`Want`, width), the
+    planner settings and whether the path delivered the order.
+  - `ScanChoice::rechoose(kept, placed, ctx) -> Option<Box<ScanPlan>>`: `kept` the kept
+    plan's base scan, `placed` the analysis's WHERE site with the new values placed
+    (`add_filter`, as `values_in` does). It takes `placed`'s clauses, estimates the rows
+    and clause costs from them (`Planner::estimate_quals`, the same code as `rel()`) and
+    chooses the path again from the kept relation (`Planner::scan_path_applied`, the code
+    `plan_scan` runs). The scan it returns, with its cost in `ScanPlan::est`, is what planning
+    the statement with those values gives. None (plan again): the settings changed, or the
+    new path reads another index, another kind of access, or no longer delivers the order.
+  - Why not a precomputed selectivity range: a scan's path costs depend on several
+    selectivities (the relation's rows, each index's clause set, bitmap sets, skip-scan
+    prefixes) through nonlinear formulas, so a range needs path costing at many points while
+    planning and still leaves the reused plan's cost approximate, where plancache's average
+    custom cost needs the exact one.
+  - The caller checks what the choice doesn't: the plan's environment (catalog version,
+    role, search path), the sizes planning read (`literals::SizeRead`, as kept plans are),
+    and that the new plan still takes no Gather (`planned_total` of it).
+  - Debug builds choose every lone scan's path again for its own values as plans are made
+    (`paths::check_rechoose`, from `Analyzed::plan` / `into_bound`); every golden passes.
+- **Debug cost checks against concurrent writers** (agent 174's flaky
+  `logical_apply::prepared_stream_without_two_phase_cleans_up`, debug only):
+  `check_planned_total`, `check_rechoose` and `total_and_gathers`' serial-bound check cost a
+  plan a second time, and a logical apply worker or autovacuum may change the sizes or
+  statistics in between. They now assert only when the catalog and every size the first
+  costing read are unchanged after the second (`literals::observing`, which records reads
+  without hiding them from an enclosing `recording`, and `literals::unchanged_since`). A
+  column's minimum or maximum read from its rows (`SizeRead::Data`) can't be read again, so a
+  plan that read one isn't checked.
+- **A written COLLATE in DISTINCT and GROUP BY keys** (`explain.rs`): a hashed DISTINCT's
+  key over `t COLLATE "C"` shows PostgreSQL's RelabelType, `(t)::text`, and a relabeling
+  cast names the type with its modifier (`(u)::character varying(10)`, was
+  `(u)::varchar`, in GROUP BY keys and sort keys too). A sort above a DISTINCT shows
+  `((t)::text) COLLATE "C"` (was `(t)`).
+- Golden `a177_planner_r11` (recorded from PostgreSQL 18.6).
+
+Where the range read's CPU goes (frame-pointer dist build, perf, 8 clients): `run_query`
+82%, of which execution (`run_each`, the index scan and the rows sent) 49% and planning
+(`planned_as`) 29%: `Analyzed::bind_values` 25% (placing the values 5.5%, `into_bound`
+19.4%: `plan_scan` 14.1%, of which `choose` 7.7% and `rel()` 4.9%). `rechoose` keeps
+`estimate_quals` and `choose`, about 9%, and skips binding, `rel()` and the plan walk. With
+generic plans (`plan_cache_mode = force_generic_plan`, no planning per execution) the engine
+takes 170-193 us per operation against PostgreSQL's 85-91, so the execution path is about
+twice PostgreSQL's: that floor, not planning, limits the range read. 7.8% of the CPU is
+mimalloc's `_mi_page_malloc_zero`, called mostly from `ScanNode::next_raw_ref` / `next`
+(a zeroed allocation per row): routed to the scan owner.
+
+Left, for the planner:
+- The KNN choice (`ORDER BY p <-> point LIMIT 5`, indexes on (p) and (cat, p)) is a size
+  model gap, not a costing one: the engine sizes the btree_gist index on (cat, p) at 1 page
+  (`pg_relation_size` 8192, PostgreSQL 91 pages), so its scan costs 460 where PostgreSQL's
+  costs 820 and loses to (p)'s 792. Routed to the size models' owner.
+- DISTINCT over a written COLLATE, sorted (`Unique` over a `Sort`, the Sort the DISTINCT's
+  order makes, `order_hint`), still shows `Sort Key: (t)` where PostgreSQL shows
+  `((t)::text) COLLATE "C"`; VERBOSE shows the projection's entry as `(t)` where PostgreSQL
+  shows `((t)::text)` (ruleutils' CollateExpr over a column of another collation is a
+  RelabelType, shown as a cast).
+- Seed 5069 reproduces as described (`DELETE ... USING (SELECT id, pg_size_bytes('bad') z
+  FROM t0) u`, or over a view): the engine fails 22023 for all four shapes, even under
+  EXPLAIN, where PostgreSQL fails only with `OFFSET 0`. The view's unread column is kept
+  (folded) where PostgreSQL's row mark is ROW_MARK_REFERENCE on the base relation.
+- A local `DELETE ... USING` / `UPDATE ... FROM` join's width (agent 172's report):
+  `CREATE TABLE b (id int PRIMARY KEY, v int)`, `s (id int PRIMARY KEY, w int)`, 1,000
+  rows each, analyzed; `EXPLAIN DELETE FROM b r1 USING s r2 WHERE r1.id = r2.id AND
+  r2.w < 3` shows the Nested Loop at width=6 where PostgreSQL has 12 (the target's ctid and
+  r2's ROW_MARK_REFERENCE ctid); also `r1.v = r2.w AND r1.id < 3` (a Hash Join) and the
+  UPDATE. The scans' widths already count the mark (`rowmarks` in the scan's width,
+  explain.rs); the join above doesn't carry r2's ctid. 172 fixed the foreign-scan case in
+  8500c0bb9 (`Planner::fdw_whole_row_width`).
+- Untouched: item 2 (every node's cost, so one-shot plans stop building EXPLAIN trees for
+  Gathers and Incremental Sort keys), planning CPU over plans/apps.sql and the ORM queries,
+  TPC-H q21 / q18, and the rest of round 10's list.
+
 ## Starting prompt for the next agent
 
 Paste this into the new agent, from the repository root on branch

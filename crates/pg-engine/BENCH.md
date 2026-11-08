@@ -213,6 +213,33 @@ manager's state (`Txn::lock_row` 0.78% of CPU samples, `release_locks` 0.59%,
 `LockManager::acquire` 0.34%, `Txn::xid` 0.29%) and `wait_durable` (0.36%): every row lock
 goes through the lock table's one mutex, where PostgreSQL keeps tuple locks in the tuple.
 
+## Planner, round 11 (2026-11-07, agent 177)
+
+HANDOFF.md, "Planner round 11", has what changed. This round's planner change for the range
+read is the interface custom-plan reuse builds on (`ScanChoice::rechoose`, agent 178's to
+wire in), so the numbers below are the starting point and where the CPU goes, not a speedup.
+Both servers ran in containers (`run.sh ENGINE_DOCKER=1`, the engine's dist build of
+`0737165c` with this round's planner code bind-mounted, `--cpu-shares 2`, host network) on
+cores 28-31, the clients on 32-35, PostgreSQL 18.6 the pinned image, the machine at load
+22-54. Server CPU per operation comes from each container's cgroup (`usage_usec` over the
+run).
+
+**The 8-client range read** (`bench oltp --only range_scan_100`, 200,000 accounts, 10-second
+rounds alternating engine and PostgreSQL):
+
+| | engine | PostgreSQL | engine / PostgreSQL |
+|---|---:|---:|---:|
+| custom plans (the default), CPU per operation | 219-228 us | 132-137 us | 1.66x |
+| custom plans, throughput | 13,842-15,378 tps | 20,936-22,813 tps | |
+| `plan_cache_mode = force_generic_plan`, CPU per operation | 170-193 us | 85-91 us | 2.0x |
+
+A first engine run before a restart measured 255-261 us against 143-148. Custom planning
+costs PostgreSQL about 47 us per execution and the engine about 50 us. In the frame-pointer
+profile, the engine's planning is 29% of its CPU and binding the values and planning
+(`bind_values`) 25%. Choosing the scan again (`rechoose`: the selectivities and the path
+choice, about 9%) would take the range read to about 190-200 us, near 1.45x. The generic
+floor shows that the execution path is twice PostgreSQL's, and it is most of what is left.
+
 ## Planner, round 10 (2026-11-07, agent 171)
 
 HANDOFF.md, "Planner round 10", has what changed. Both servers ran in containers (`run.sh
