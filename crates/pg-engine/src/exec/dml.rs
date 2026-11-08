@@ -3225,13 +3225,12 @@ enum Given {
 
 impl Given {
     fn of(plan: &InsertPlan) -> Given {
-        use crate::sql::plan::Plan;
-        let values = |p: &Plan| matches!(p, Plan::Values { rows, .. } if rows.len() > 1);
-        match &*plan.source {
-            _ if plan.copy.is_some() => Given::Later,
-            p if values(p) => Given::First,
-            Plan::Project { input, .. } if values(input) => Given::First,
-            _ => Given::InColumnOrder,
+        if plan.copy.is_some() {
+            Given::Later
+        } else if plan.values_domains_first {
+            Given::First
+        } else {
+            Given::InColumnOrder
         }
     }
 }

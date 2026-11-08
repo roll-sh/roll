@@ -146,3 +146,14 @@ bad
 SELECT last_value, is_called FROM a182_limited;
 DROP TABLE a182_limit;
 DROP SEQUENCE a182_limited;
+
+-- A VALUES source under SELECT still follows SELECT's table-column order.
+CREATE DOMAIN a182_values_pos AS int CHECK (VALUE > 0);
+CREATE TABLE a182_sv (a serial, b a182_values_pos);
+INSERT INTO a182_sv (b) SELECT v FROM (VALUES (1), (-1)) s(v);
+SELECT last_value, is_called FROM a182_sv_a_seq;
+CREATE TABLE a182_vs (b a182_values_pos, a serial);
+INSERT INTO a182_vs (b) SELECT v FROM (VALUES (1), (-1)) s(v);
+SELECT last_value, is_called FROM a182_vs_a_seq;
+DROP TABLE a182_sv, a182_vs;
+DROP DOMAIN a182_values_pos;

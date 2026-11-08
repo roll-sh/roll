@@ -1152,6 +1152,7 @@ impl Session {
                     rti: Default::default(),
                 }),
                 target,
+                values_domains_first: false,
                 on_conflict: None,
                 returning: Vec::new(),
                 old_new: None,

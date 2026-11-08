@@ -1074,6 +1074,9 @@ pub struct InsertPlan {
     /// Rows from here have one value per `target` column.
     pub source: Arc<Plan>,
     pub target: Vec<usize>,
+    /// A written multirow VALUES list coerces its inputs before omitted defaults.
+    /// Keep this through optimization: SELECT from a Values plan uses column order.
+    pub values_domains_first: bool,
     pub on_conflict: Option<OnConflict>,
     /// Over the new row.
     pub returning: Vec<Expr>,
