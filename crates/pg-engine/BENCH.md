@@ -251,7 +251,8 @@ around the one statement; elapsed time through `docker run psql`, which adds abo
 
 "Before" is an older origin head, and the commits between could move the DELETE as
 well. The drop matches agent 175's profile, where about half of the DELETE's CPU was its
-source scan on three worker threads.
+source scan on three worker threads. The elapsed time went up on purpose (about 0.3 s): the
+scan now runs serially, as PostgreSQL plans it, and CPU fell by 27%.
 
 ## Planner, round 10 (2026-11-07, agent 171)
 
