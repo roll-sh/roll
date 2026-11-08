@@ -8883,6 +8883,18 @@ Left, for the planner:
   immutable-only rule for custom plans would fix it, along with a kept plan freezing
   `'now'::text::timestamptz`, but it changes plain-query estimates, so it needs a full
   regress run.
+- Reported by other agents for the planner, not started:
+  - `GROUP BY id ORDER BY id DESC LIMIT n`: PostgreSQL reads the index backward under the
+    GroupAggregate; the engine plans a Sort above (167: the executor streams a
+    GroupAggregate under a LIMIT and over backward index scans already).
+  - UPDATE ... FROM: 0.9 ms per statement against PostgreSQL's 0.49, 48% planning (join
+    search 36%, merge-join tries 9%, inequality estimates about 10%, `Planner::endpoint`'s
+    reverse index probes 8%; 167's profile). postgres_fdw's join-DML gap.
+  - ORM introspection on 10,000-table catalogs is mostly planning (173, BENCH "Catalog
+    round 11"): pgjdbc getColumns plans in 9-11 ms (PostgreSQL 1.3-6), getImportedKeys
+    in 27 ms (10.6), a fresh process's first plan about 20 ms.
+  - Recording a plan's Gathers in the plan (167, 149): the EXPLAIN estimate tree built per
+    execution only to find them is 2-3% of psql `\d` CPU. This is item 2.
 - Untouched: item 2 (every node's cost, so one-shot plans stop building EXPLAIN trees for
   Gathers and Incremental Sort keys), planning CPU over plans/apps.sql and the ORM queries,
   TPC-H q21 / q18, and the rest of round 10's list.
