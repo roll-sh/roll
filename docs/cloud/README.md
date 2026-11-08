@@ -284,3 +284,16 @@ assume two fields:
 | tasks, queues, storage, redis, streams, nosql on the cluster layer | next, one product per change |
 | postgres on the fleet and the system database | with the pg-engine branch |
 | isolated work on Fargate | next |
+
+### Open items
+
+- **Per-product switches.** Today's Postgres product starts computes with the `docker` CLI, so
+  a fleet node with every product on exits with `running docker`. Every product needs an on/off
+  switch (`ROLL_PRODUCTS` or `--no-<product>`); the fleet runs with Postgres off until the
+  in-process engine replaces the Docker computes.
+- **Structured logs.** The stack's error alarms read JSON logs with `level` and a numeric `status`
+  (`ROLL_LOG_FORMAT=json`); rolld doesn't emit them yet.
+- **Metrics** for request latency and failed handoffs, so the canary's bake can alarm on them.
+- **Buckets on roll.site.** The CDN Worker serves path-style only, so `<bucket>.roll.site` needs
+  virtual-host support, and bucket names starting `chg-` must be reserved (they'd collide with
+  previews).
