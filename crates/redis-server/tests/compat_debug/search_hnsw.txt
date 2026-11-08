@@ -1,7 +1,8 @@
 # HNSW graphs through _FT.DEBUG: DUMP_HNSW (each document's neighbours per level, as labels)
 # and VECSIM_INFO (levels, entry point, marked deletes, every tier's memory) of graphs built in
 # place (`search-workers 0`) and with one worker thread, whose deletes mark the elements, queue
-# repair jobs (run in submission order) and leave the swaps to the fork GC; KNN over expiring
+# repair jobs (run in submission order) and leave the swaps to the fork GC (each look at a graph
+# built by the worker first waits for its jobs: `_FT.DEBUG WORKERS DRAIN`); KNN over expiring
 # documents and fields (the top k chosen first, the expired ones dropped after); the geometry
 # index dump.
 FLUSHALL
@@ -431,7 +432,7 @@ HSET aw:77 v "\x9a\x99\xb9\xbf\x29\x5c\xdf\x40\x1f\x85\xe3\xc0" t b
 HSET aw:78 v "\x66\x66\x26\x40\xec\x51\x90\xc0\x9a\x99\xf1\xc0" t a
 HSET aw:79 v "\x33\x33\xd3\x3f\x00\x00\x70\x40\x85\xeb\xd1\x3f" t b
 HSET aw:80 v "\x0a\xd7\x73\xc0\xb8\x1e\xe5\x40\x85\xeb\x15\x41" t a
-@sleep 200
+_FT.DEBUG WORKERS DRAIN
 _FT.DEBUG DUMP_HNSW aw v
 _FT.DEBUG VECSIM_INFO aw v
 !mask total_indexing_time,total_ms_run,average_cycle_time_ms,last_run_time_ms FT.INFO aw
@@ -451,7 +452,7 @@ DEL aw:54
 DEL aw:80
 DEL aw:79
 DEL aw:20
-@sleep 200
+_FT.DEBUG WORKERS DRAIN
 _FT.DEBUG DUMP_HNSW aw v
 _FT.DEBUG VECSIM_INFO aw v
 !mask total_indexing_time,total_ms_run,average_cycle_time_ms,last_run_time_ms FT.INFO aw
@@ -462,7 +463,7 @@ FT.SEARCH aw "@t:{a}=>[KNN 5 @v $B]=>{$HYBRID_POLICY: BATCHES; $BATCH_SIZE: 2}" 
 FT.SEARCH aw "@t:{b}=>[KNN 5 @v $B]" PARAMS 2 B "\x5c\x8f\xc2\xbe\xf6\x28\xbc\x40\xd7\xa3\xd8\x40" SORTBY __v_score RETURN 1 __v_score DIALECT 2
 HSET aw:5 v "\x00\x00\xb0\x40\x0a\xd7\xe3\x40\x66\x66\x0e\x41" t a
 HSET aw:9 v "\x29\x5c\x0f\xc1\x8f\xc2\x01\xc1\x66\x66\xee\x40" t a
-@sleep 200
+_FT.DEBUG WORKERS DRAIN
 _FT.DEBUG DUMP_HNSW aw v
 _FT.DEBUG VECSIM_INFO aw v
 !mask total_indexing_time,total_ms_run,average_cycle_time_ms,last_run_time_ms FT.INFO aw
@@ -500,7 +501,7 @@ DEL aw:26
 DEL aw:27
 DEL aw:28
 DEL aw:29
-@sleep 200
+_FT.DEBUG WORKERS DRAIN
 CONFIG SET search-workers 0
 DEL aw:30
 DEL aw:31
@@ -586,7 +587,7 @@ _FT.DEBUG VECSIM_INFO bl v
 HSET bl:1 v "\xc3\xf5\xf8\xc0\x8f\xc2\xc5\x40"
 HSET bl:2 v "\xb8\x1e\xa5\x3f\xe1\x7a\x9c\x40"
 HSET bl:3 v "\xae\x47\x01\x41\x1f\x85\x1f\xc1"
-@sleep 100
+_FT.DEBUG WORKERS DRAIN
 _FT.DEBUG VECSIM_INFO bl v
 CONFIG SET search-workers 0
 DEL bl:2
