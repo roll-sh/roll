@@ -4724,6 +4724,33 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
     COPY goldens failed; its final HEAVY-EXIT 0 did not imply every step passed. The resume
     check fixes and reruns those failures. Later complete-suite coverage belongs to the
     verification train. No storage format or durability rule changes in this batch.
+  - **Input failures still evaluate defaults in PostgreSQL's order** (resumed a182): COPY
+    keeps ignored lines as feed events. DEFAULT markers preceding the failed conversion and
+    omitted-column defaults still run; ignored rows insert nothing, are excluded from view
+    command tags, and remain visible as skipped progress. REJECT_LIMIT follows the rejected
+    row's defaults, and a failing default retains the input column's COPY context.
+    INSERT carries `values_domains_first` from its written syntax through optimization:
+    multirow VALUES checks provided domains before omitted defaults; SELECT interleaves them
+    in table-column order, including a SELECT whose optimized source is Values. The
+    PostgreSQL 18.6 golden `a182_input_defaults` covers both column orders and these COPY paths.
+  - **A COPY request for more data preserves pending counts**: `NEED_COPY_ROWS` is control
+    flow, so it must not discard the current multi-insert buffer's statistics. The recovered
+    executable counted 1,000 for 1,010 valid copied rows (PostgreSQL: 1,010). The existing
+    chunked `wire::copy_in_and_out` test now checks that transaction-local count.
+    Source `cbdb37d70ea851c2ef54ac1df0192ff4b699405e` passes 15 release golden harness
+    checks (`a182_input_defaults`, `copy`, `insert`, `domain`, `stat`), all 19 big-table
+    tests, the chunked COPY wire test and all-target Clippy: 35 tests, zero failures.
+    Receipts: `~/.cache/a182/resume-followup/`. The new golden was recorded from PostgreSQL
+    18.6 at port 53648. No benchmark or full-suite result is inferred from these checks.
+    After rebasing over the newer planner and mode-setting commits, integrated source
+    `2b4ec8e0c3bc3a326df4e950fc83c740b08eb539` passes a release binary build, the
+    default-order and COPY goldens (six harness tests), the chunked COPY wire test and
+    all-target Clippy: seven tests, zero failures. Receipts and binary hash:
+    `~/.cache/a182/resume-integration/`; `~/.cache/a182/audit-resume.py` checks the source
+    and test receipts. Progress assertions run in AFTER STATEMENT triggers; mid-batch
+    progress sampling is not established by this coverage. Full-wave checks remain with
+    the verification train. No new containers were created; saved checkouts and caches
+    are retained for the coordinator.
 
 - **Result rows stream** (round 19, agent 65): a top-level SELECT's rows go to the client as
   the executor returns them, as PostgreSQL's printtup sends a DataRow per row. A
