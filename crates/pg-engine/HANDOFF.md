@@ -9105,9 +9105,11 @@ cursor golden files matched in-process, over the wire, and in shuffled order. Th
 probe had seven EXPLAIN differences, preserved above. Logs and the source patch are in
 `~/.cache/a190/resume-logs/`; `resume-recheck.log` ends with `HEAVY-EXIT 0`.
 
-Origin advanced during these checks. The final batch includes those bulk-write changes
-through a rebase, and receives a focused Clippy check of the combined source before push.
-The goldens above describe the pre-rebase build. The verification train owns the full suite.
+Origin advanced during these checks. The batch was rebased onto `140b4c531` and its
+planner patch remained byte-identical. Focused release Clippy on the combined source
+completed with 10 warnings and no errors, with `resume-integrated-check.log` ending in
+`HEAVY-EXIT 0`. The goldens above describe the pre-rebase build. The verification train
+owns the full suite.
 No performance comparison was run for this batch. The lane's worktree and cache remain
 available to the coordinator.
 
