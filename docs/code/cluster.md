@@ -128,7 +128,7 @@ the node item, above).
 - **Requests for a repo run on its owner.** Whichever node receives a request forwards it to the
   repo's owner, streaming in both directions (git pushes and packs, event streams), with the
   original path, method and headers, signed, carrying the client's address. The owner verifies
-  the signature (`code_cluster::accept_forwarded` on the router) and counts anonymous event
+  the signature (`roll_cluster::accept_forwarded` on the router) and counts anonymous event
   streams against that address. A node that isn't the owner never runs a repo's lander, queue,
   reviews, index, mirror or containers.
 
