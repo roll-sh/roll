@@ -46,6 +46,9 @@ export function firstCommit(thread: Thread, project: Project | undefined): boole
 
 /** What More's publish item says: the first commit, a new change, or more work on its open change. */
 export function publishLabel(thread: Thread, project: Project | undefined): string {
+  // Nowhere to push (no roll repo, no remote) says so first: "Publish the first commit" read as
+  // something it could do, greyed out.
+  if (!project?.repo && !project?.git?.remote) return "Publish (no remote to push to)";
   if (firstCommit(thread, project)) return "Publish the first commit";
   // Not a roll code repo: the daemon commits on the thread's branch and pushes it to `origin`.
   if (!project?.repo) return project?.git?.remote ? "Commit and push to origin" : "Publish (no remote to push to)";

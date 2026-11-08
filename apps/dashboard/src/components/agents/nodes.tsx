@@ -28,7 +28,8 @@ import { openMachineSettings, ProviderSetup } from "./provider-setup";
 import { canRunAgents, notReadyReason, readiness } from "@/lib/agents-setup";
 import { cn } from "./ui/cn";
 import { fitWords, unbroken } from "./fit-words";
-import { onThreadContextMenu, ThreadMenuButton } from "./thread-menu";
+import { onThreadContextMenu, openThreadMenuAt, ThreadMenuButton } from "./thread-menu";
+import { useLongPress } from "./thread-list";
 import type { MenuItem as MenuEntry } from "./menu";
 import { Tip } from "./ui/tooltip";
 
@@ -50,6 +51,7 @@ export function Card({
   className = "",
   onClick,
   onContextMenu,
+  touch,
   label,
 }: {
   width: number;
@@ -63,6 +65,8 @@ export function Card({
   onClick?: () => void;
   /** Its menu on a right-click (a thread's: thread-menu.tsx). */
   onContextMenu?: (e: React.MouseEvent) => void;
+  /** A touch screen's long press (a thread's menu). */
+  touch?: Pick<React.HTMLAttributes<HTMLDivElement>, "onPointerDown" | "onPointerMove" | "onPointerUp" | "onPointerCancel">;
   label?: string;
 }) {
   // Offline is a state of its own, not a dimmed card: the frame turns dashed, everything in it reads.
@@ -76,6 +80,7 @@ export function Card({
       aria-label={label}
       onClick={onClick}
       onContextMenu={onContextMenu}
+      {...touch}
       onKeyDown={
         onClick
           ? (e) => {
@@ -570,6 +575,8 @@ export const ThreadCard = memo(function ThreadCard({
   const { client, openThread, startNew, readOnly } = useAgents();
   const providers = machine?.info?.providers ?? NO_PROVIDERS;
   const { run: runFork, error: forkError } = useRun();
+  // A touch screen has no right-click: a long press opens the menu where the finger is.
+  const { consumed: _pressed, onContextMenu: _ctx, ...press } = useLongPress((at) => openThreadMenuAt(thread.id, at, menu));
   // A fork from the card (T3's fork from the latest point): click, or drag the handle onto the canvas.
   const forkable = !!startNew && !readOnly && thread.archived_at === null && reachable(machine) && providers.find((p) => p.id === thread.provider)?.capabilities.fork !== false;
   const fork = () =>
@@ -612,6 +619,7 @@ export const ThreadCard = memo(function ThreadCard({
       edge
       onClick={() => openThread(thread.id)}
       onContextMenu={readOnly ? undefined : (e) => onThreadContextMenu(e, thread.id, menu)}
+      touch={readOnly ? undefined : press}
       label={`Thread ${thread.title}`}
     >
       <div className="flex h-full flex-col px-3.5 pt-2.5 pb-2.5">

@@ -58,6 +58,11 @@ export function onThreadContextMenu(e: React.MouseEvent, thread: string, extra?:
   set({ thread, anchor: keyboard ? e.currentTarget : { x: e.clientX, y: e.clientY }, extra });
 }
 
+/** Opens `thread`'s menu at a point (a long press on a touch screen, which has no right-click). */
+export function openThreadMenuAt(thread: string, at: { x: number; y: number }, extra?: () => MenuEntry[]) {
+  if (hosts) set({ thread, anchor: at, extra });
+}
+
 /** Opens `thread`'s menu at `el` for an event the caller took (the list's menu key on its cursor row). */
 export function openThreadMenu(thread: string, el: Element, e: React.SyntheticEvent) {
   if (!hosts) return;

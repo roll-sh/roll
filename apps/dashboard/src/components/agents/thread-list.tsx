@@ -279,7 +279,7 @@ function swallowRelease() {
   window.addEventListener("pointercancel", done, { capture: true, once: true });
 }
 
-export function useLongPress(fn: () => void) {
+export function useLongPress(fn: (at: { x: number; y: number }) => void) {
   const t = useRef<{ timer: ReturnType<typeof setTimeout>; x: number; y: number; fired: boolean } | null>(null);
   const cancel = () => {
     if (t.current) clearTimeout(t.current.timer);
@@ -290,7 +290,7 @@ export function useLongPress(fn: () => void) {
       cancel();
       const fire = () => {
         s.fired = true;
-        fn();
+        fn({ x: s.x, y: s.y });
         navigator.vibrate?.(10);
         swallowRelease();
       };
