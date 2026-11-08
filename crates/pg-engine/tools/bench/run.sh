@@ -186,7 +186,9 @@ pgrust-stop)
   docker volume rm "$PGRUST_NAME-data" >/dev/null 2>&1 || true
   ;;
 engine-start)
-  engine_start engine --cache-mb "${CACHE_MB:-2048}" ${ENGINE_ARGS:-} "$@"
+  # (CACHE_MB= set empty: no --cache-mb, the mode's own size.)
+  c=${CACHE_MB-2048}
+  engine_start engine ${c:+--cache-mb "$c"} ${ENGINE_ARGS:-} "$@"
   ;;
 engine-stop)
   engine_stop engine
