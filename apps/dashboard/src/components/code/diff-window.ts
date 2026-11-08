@@ -20,7 +20,7 @@ const MARGIN = "1500px 0px";
 const FIRST = 2;
 
 /** The element that scrolls the diff: the first scrolling ancestor above `from`, or the page. */
-function scroller(from: HTMLElement | null): Element | null {
+export function scroller(from: HTMLElement | null): Element | null {
   for (let el = from; el; el = el.parentElement) {
     const y = getComputedStyle(el).overflowY;
     if (y === "auto" || y === "scroll" || y === "overlay") return el;
@@ -48,6 +48,7 @@ export function useRowWindow(forced: ReadonlySet<number>): RowWindow {
   const index = useRef(new Map<Element, number>()).current;
   const refs = useRef(new Map<number, (el: HTMLTableSectionElement | null) => void>()).current;
   const io = useRef<IntersectionObserver | null>(null);
+  const ro = useRef<ResizeObserver | null>(null);
 
   useEffect(() => {
     if (!frameEl || typeof IntersectionObserver === "undefined") return;
@@ -73,9 +74,38 @@ export function useRowWindow(forced: ReadonlySet<number>): RowWindow {
     );
     io.current = obs;
     for (const el of index.keys()) obs.observe(el);
+    // Scroll anchoring of our own: a block above the viewport that changes height (a placeholder's
+    // estimate becoming wrapped split rows, a thread opening) moves what's being read by as much, so
+    // the scroller follows it. Where the browser has none (Safari), and in a DiffViewer, which opts
+    // out of the browser's (`data-diff-anchor`): Chromium's anchor, picked before find jumped far
+    // down, scrolled the jump back by the blocks it swapped out.
+    const box = scroller(frameEl.parentElement);
+    const px = new Map<number, number>();
+    const manual = typeof CSS === "undefined" || !CSS.supports("overflow-anchor", "auto") || frameEl.closest("[data-diff-anchor]") != null;
+    const anchors =
+      typeof ResizeObserver !== "undefined" && manual
+        ? new ResizeObserver((entries) => {
+            const top = box ? box.getBoundingClientRect().top : 0;
+            let shift = 0;
+            for (const e of entries) {
+              const b = index.get(e.target);
+              if (b == null) continue;
+              const h = (e.target as HTMLElement).offsetHeight;
+              const was = px.get(b);
+              px.set(b, h);
+              if (was != null && was !== h && e.target.getBoundingClientRect().top < top) shift += h - was;
+            }
+            if (shift && box) box.scrollTop += shift;
+            else if (shift) window.scrollBy(0, shift);
+          })
+        : null;
+    ro.current = anchors;
+    if (anchors) for (const el of index.keys()) anchors.observe(el);
     return () => {
       obs.disconnect();
+      anchors?.disconnect();
       io.current = null;
+      ro.current = null;
     };
   }, [frameEl, heights, index]);
 
@@ -88,11 +118,13 @@ export function useRowWindow(forced: ReadonlySet<number>): RowWindow {
           if (mine) {
             index.delete(mine);
             io.current?.unobserve(mine);
+            ro.current?.unobserve(mine);
           }
           mine = el;
           if (el) {
             index.set(el, b);
             io.current?.observe(el);
+            ro.current?.observe(el);
           }
         };
         refs.set(b, ref);

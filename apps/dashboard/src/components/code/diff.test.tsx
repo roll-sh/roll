@@ -78,3 +78,22 @@ describe("DiffViewer: threads in a unified diff", () => {
   });
 });
 
+
+describe("DiffViewer: find", () => {
+  it("finds a row a folded big file hasn't drawn, counts, steps and opens the file at it", async () => {
+    const big = { path: "big.txt", patch: `@@ -1,500 +1,500 @@\n${Array.from({ length: 500 }, (_, i) => ` line ${i}`).join("\n")}` };
+    render(<DiffViewer files={[fileDiff(), fileDiff(big)]} />);
+    expect(screen.queryByText("line 480")).toBeNull();
+    await userEvent.click(screen.getByText("const a = 1;"));
+    await userEvent.keyboard("{Control>}f{/Control}");
+    const field = screen.getByRole("textbox", { name: "Find in diff" });
+    await userEvent.type(field, "line 48");
+    // line 48 and 480–489.
+    expect(await screen.findByText("1 of 11")).toBeInTheDocument();
+    await userEvent.keyboard("{ArrowUp}");
+    expect(screen.getByText("11 of 11")).toBeInTheDocument();
+    expect(await screen.findByText("line 489")).toBeInTheDocument();
+    await userEvent.keyboard("{Escape}");
+    expect(screen.queryByRole("textbox", { name: "Find in diff" })).toBeNull();
+  });
+});

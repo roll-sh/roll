@@ -1,7 +1,7 @@
 "use client";
 
-import { ChevronDown, ChevronRight, MessageSquare } from "lucide-react";
-import { Fragment, memo, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { ChevronDown, ChevronRight, MessageSquare, Search } from "lucide-react";
+import { Fragment, memo, useDeferredValue, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { FileDiff, Thread, ThreadSide } from "@/lib/code-api";
 import { parsePatch, splitRows, type Line, type Side } from "@/lib/diff";
 import {
@@ -21,6 +21,9 @@ import {
   type PendingReview,
   type Placement,
 } from "@/lib/review";
+import { isMac } from "@/lib/agents-selection";
+import { findInDiff, matchFrom, type DiffMatch, type DiffQuery } from "@/lib/diff-search";
+import { FindBar, firstVisibleLine, revealMatch, usePaintMatches } from "./diff-find";
 import { BLOCK, codeOf, useHighlight, useRowWindow } from "./diff-window";
 import { ThreadCard, type ThreadActions } from "./thread";
 
@@ -79,6 +82,8 @@ const selected = "bg-accent/10";
 
 interface FileCtx {
   file: FileDiff;
+  /** The file's place in the diff: its lines' `data-l` keys (find in the diff paints and reveals by them). */
+  index: number;
   lines: Line[];
   review?: DiffReview;
   focused: string | null;
@@ -133,7 +138,7 @@ function rowExtras(ctx: FileCtx, threads: Thread[], l: Line | null, side?: Threa
 }
 
 /** The blocks that stay rendered wherever they scroll: threads, drafts and the composer live in them. */
-function useForced(ctx: FileCtx, inline: Map<number, Thread[]> | undefined, rows: number, hasExtra: (i: number) => boolean) {
+function useForced(ctx: FileCtx, inline: Map<number, Thread[]> | undefined, rows: number, hasExtra: (i: number) => boolean, pin: number | null) {
   const compose = ctx.review?.compose;
   const path = ctx.file.path;
   const busy = !!compose && (compose.selection?.path === path || compose.pending.comments.some((c) => c.path === path));
@@ -143,8 +148,10 @@ function useForced(ctx: FileCtx, inline: Map<number, Thread[]> | undefined, rows
     const s = new Set<number>();
     for (const i of inline?.keys() ?? []) s.add(Math.floor(i / BLOCK));
     if (busy) for (let i = 0; i < rows; i++) if (extra.current(i)) s.add(Math.floor(i / BLOCK));
+    // The row find in the diff is on stays rendered, so it can be scrolled to and painted.
+    if (pin != null) s.add(Math.floor(pin / BLOCK));
     return s;
-  }, [inline, busy, compose?.selection, compose?.pending, rows, ctx.lines]);
+  }, [inline, busy, compose?.selection, compose?.pending, rows, ctx.lines, pin]);
 }
 
 /** A line's code, highlighted once its block's tokens are in. */
@@ -190,7 +197,7 @@ const UnifiedBlock = memo(function UnifiedBlock({ ctx, start, end, live, seen, h
               <NumCell n={l.kind === "hunk" || l.kind === "note" ? null : l.old} side="old" ctx={ctx} />
               <NumCell n={l.kind === "hunk" || l.kind === "note" ? null : l.new} side="new" ctx={ctx} />
               <td className={`w-4 select-none pl-2 ${signCls(l.kind)}`}>{sign[l.kind]}</td>
-              <td className="pr-4 pl-1 whitespace-pre">
+              <td className="pr-4 pl-1 whitespace-pre" data-l={`${ctx.index}:${i}`}>
                 <Code l={l} />
               </td>
             </tr>
@@ -208,19 +215,20 @@ const UnifiedBlock = memo(function UnifiedBlock({ ctx, start, end, live, seen, h
   );
 });
 
-function Unified({ ctx, placement }: { ctx: FileCtx; placement: Placement | null }) {
+function Unified({ ctx, placement, findLine }: { ctx: FileCtx; placement: Placement | null; findLine: number | null }) {
   const compose = ctx.review?.compose;
   const forced = useForced(
     ctx,
     placement?.inline,
     ctx.lines.length,
     (i) => !!compose && (draftsOnRow(compose.pending, ctx.file.path, ctx.lines[i]).length > 0 || endsSelection(compose.selection, ctx.file.path, ctx.lines[i])),
+    findLine,
   );
   const win = useRowWindow(forced);
   const n = ctx.lines.length;
   const wide = useMemo(() => unifiedWidth(ctx.lines), [ctx.lines]);
   return (
-    <div ref={win.frame} className="overflow-x-auto">
+    <div ref={win.frame} className="overflow-x-auto" data-diff-frame>
       {/* As wide as its widest line and numbers from the start: rows render as they near the
           screen, and a long line or a 5-digit number mounting widened the table under the reader. */}
       <table className="w-full border-collapse font-mono text-[12px] leading-5" style={{ minWidth: wide.table }}>
@@ -262,7 +270,8 @@ const SplitBlock = memo(function SplitBlock({
   tbody,
   rows,
   placement,
-}: BlockProps & { rows: [Side, Side][]; placement: Placement }) {
+  at,
+}: BlockProps & { rows: [Side, Side][]; placement: Placement; at: Map<Line, number> }) {
   const slice = useMemo(() => {
     const here = new Set<Line>();
     for (const [a, b] of rows.slice(start, end)) {
@@ -289,9 +298,11 @@ const SplitBlock = memo(function SplitBlock({
     return (
       <>
         <NumCell n={on ? n : null} side={side} ctx={ctx} className={cls} />
-        <td className={`w-1/2 border-r border-line pr-3 pl-2 whitespace-pre-wrap break-all last:border-r-0 ${cls}`}>
+        <td className={`w-1/2 border-r border-line pr-3 pl-2 align-top whitespace-pre-wrap break-all last:border-r-0 ${cls}`}>
           <span className={`mr-2 select-none ${signCls(l.kind)}`}>{sign[l.kind] || " "}</span>
-          <Code l={l} />
+          <span data-l={`${ctx.index}:${at.get(l)}`}>
+            <Code l={l} />
+          </span>
         </td>
       </>
     );
@@ -326,8 +337,19 @@ const SplitBlock = memo(function SplitBlock({
   );
 });
 
-function Split({ ctx, threads }: { ctx: FileCtx; threads: Thread[] }) {
+function Split({ ctx, threads, findLine }: { ctx: FileCtx; threads: Thread[]; findLine: number | null }) {
   const rows = useMemo(() => splitRows(ctx.lines), [ctx.lines]);
+  // Each line's index (its `data-l`) and each line's row (a context line's is its only row).
+  const at = useMemo(() => new Map(ctx.lines.map((l, i) => [l, i])), [ctx.lines]);
+  const rowOf = useMemo(() => {
+    const m = new Map<Line, number>();
+    rows.forEach(([a, b], i) => {
+      if (a) m.set(a, i);
+      if (b) m.set(b, i);
+    });
+    return m;
+  }, [rows]);
+  const findRow = findLine == null ? null : (rowOf.get(ctx.lines[findLine]) ?? null);
   const placement = useMemo(() => placeSplit(rows, threads), [rows, threads]);
   const compose = ctx.review?.compose;
   const forced = useForced(ctx, placement.inline, rows.length, (i) => {
@@ -340,11 +362,11 @@ function Split({ ctx, threads }: { ctx: FileCtx; threads: Thread[] }) {
       endsSelection(compose.selection, p, a, "old") ||
       endsSelection(compose.selection, p, b, "new")
     );
-  });
+  }, findRow);
   const win = useRowWindow(forced);
   const n = rows.length;
   return (
-    <div ref={win.frame} className="overflow-x-auto">
+    <div ref={win.frame} className="overflow-x-auto" data-diff-frame>
       <table className="w-full table-fixed border-collapse font-mono text-[12px] leading-5">
         <colgroup>
           <col className="w-10" />
@@ -360,6 +382,7 @@ function Split({ ctx, threads }: { ctx: FileCtx; threads: Thread[] }) {
               key={b}
               ctx={ctx}
               rows={rows}
+              at={at}
               placement={placement}
               start={start}
               end={end}
@@ -387,11 +410,17 @@ export function FileDiffView({
   mode = "unified",
   review,
   focused = null,
+  index = 0,
+  findLine = null,
 }: {
   file: FileDiff;
   mode?: DiffMode;
   review?: DiffReview;
   focused?: string | null;
+  /** Its place in the diff (find in the diff's keys). */
+  index?: number;
+  /** The line (into its parsed lines) find in the diff is on: opens the file and keeps the row rendered. */
+  findLine?: number | null;
 }) {
   const threads = useMemo(() => (review ? threadsForFile(file, review.threads) : []), [file, review]);
   const [open, setOpen] = useState(() => !file.patch || patchRows(file.patch) <= COLLAPSE_LINES || threads.length > 0);
@@ -402,11 +431,11 @@ export function FileDiffView({
   const focusedOutdated = focused != null && (placement?.outdated.some((t) => t.id === focused) ?? false);
 
   useEffect(() => {
-    if (focusedHere) setOpen(true);
+    if (focusedHere || findLine != null) setOpen(true);
     if (focusedOutdated) setShowOutdated(true);
-  }, [focusedHere, focusedOutdated]);
+  }, [focusedHere, focusedOutdated, findLine]);
 
-  const ctx: FileCtx = useMemo(() => ({ file, lines, review, focused }), [file, lines, review, focused]);
+  const ctx: FileCtx = useMemo(() => ({ file, index, lines, review, focused }), [file, index, lines, review, focused]);
   const kind = file.change === "added" ? "A" : file.change === "deleted" ? "D" : "M";
   const unresolved = threads.filter((t) => !t.resolved).length;
   const offDiff = placement?.offDiff ?? [];
@@ -450,7 +479,7 @@ export function FileDiffView({
         ) : !file.patch ? (
           <p className="px-4 py-3 text-[12px] text-subtle">Diff too large to show</p>
         ) : (
-          mode === "split" ? <Split ctx={ctx} threads={threads} /> : <Unified ctx={ctx} placement={placement} />
+          mode === "split" ? <Split ctx={ctx} threads={threads} findLine={findLine} /> : <Unified ctx={ctx} placement={placement} findLine={findLine} />
         ))}
       {open && (offDiff.length > 0 || outdated.length > 0) && (
         <div className="space-y-2 border-t border-line bg-bg px-3 py-3">
@@ -489,17 +518,20 @@ export function DiffList({
   mode = "unified",
   review,
   focused = null,
+  found = null,
 }: {
   files: FileDiff[];
   mode?: DiffMode;
   review?: DiffReview;
   focused?: string | null;
+  /** The match find in the diff is on. */
+  found?: DiffMatch | null;
 }) {
   if (!files.length) return <p className="text-[13px] text-subtle">No file changes.</p>;
   return (
     <div className="space-y-3">
-      {files.map((f) => (
-        <FileDiffView key={f.path} file={f} mode={mode} review={review} focused={focused} />
+      {files.map((f, i) => (
+        <FileDiffView key={f.path} file={f} mode={mode} review={review} focused={focused} index={i} findLine={found?.file === i ? found.line : null} />
       ))}
     </div>
   );
@@ -548,11 +580,65 @@ export function DiffViewer({ files, review }: { files: FileDiff[]; review?: Diff
     return review.threads.filter((t) => !shown.has(t.id));
   }, [files, review]);
 
+  // Find in the diff: every file's lines are parsed for it (folded ones too) only while it's open.
+  const root = useRef<HTMLDivElement>(null);
+  const input = useRef<HTMLInputElement>(null);
+  const [query, setQuery] = useState<DiffQuery | null>(null);
+  const [current, setCurrent] = useState(0);
+  const finding = query != null;
+  const parsed = useMemo(() => (finding ? files.map((f) => (f.patch && !f.binary ? parsePatch(f.patch) : [])) : null), [finding, files]);
+  const deferred = useDeferredValue(query);
+  const matches = useMemo(() => (parsed && deferred ? findInDiff(parsed, deferred) : []), [parsed, deferred]);
+  const found = matches.length ? matches[Math.min(current, matches.length - 1)] : null;
+  // A new query starts at the first match from where the reader is (T3's first visible match).
+  useEffect(() => {
+    const at = root.current && firstVisibleLine(root.current);
+    setCurrent(at ? matchFrom(matches, at[0], at[1]) : 0);
+  }, [matches]);
+  // Get the match on screen: its file opens and its block renders first, so try for a few frames.
+  useEffect(() => {
+    if (!found || !root.current) return;
+    let tries = 0;
+    let frame = requestAnimationFrame(function go() {
+      if (root.current && !revealMatch(root.current, found) && ++tries < 30) frame = requestAnimationFrame(go);
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [found]);
+  usePaintMatches(root, matches, found);
+  const openFind = () => {
+    const picked = document.getSelection()?.toString() ?? "";
+    setQuery((q) => (picked && !picked.includes("\n") ? { text: picked, caseSensitive: q?.caseSensitive ?? false } : (q ?? { text: "", caseSensitive: false })));
+    requestAnimationFrame(() => input.current?.select());
+  };
+  const closeFind = () => {
+    setQuery(null);
+    root.current?.focus({ preventScroll: true });
+  };
+  const step = (by: 1 | -1) => {
+    if (matches.length) setCurrent((c) => (Math.min(c, matches.length - 1) + by + matches.length) % matches.length);
+  };
+  const onKeyDown = (e: React.KeyboardEvent) => {
+    const mod = e.metaKey || e.ctrlKey;
+    const key = e.key.toLowerCase();
+    if (mod && !e.altKey && !e.shiftKey && (key === "f" || e.code === "KeyF")) {
+      e.preventDefault();
+      openFind();
+    } else if (finding && mod && !e.altKey && (key === "g" || e.code === "KeyG")) {
+      e.preventDefault();
+      step(e.shiftKey ? -1 : 1);
+    } else if (finding && e.key === "Escape" && !(e.target as HTMLElement).closest("input, textarea, [role=dialog]")) {
+      e.preventDefault();
+      closeFind();
+    }
+  };
+
   const adds = files.reduce((s, f) => s + f.additions, 0);
   const dels = files.reduce((s, f) => s + f.deletions, 0);
   const open = review ? review.threads.filter((t) => !t.resolved).length : 0;
   return (
-    <div className="space-y-3">
+    // Focusable, so ⌘F in it finds in the diff (rows not drawn yet included), not in the page; out of
+    // the browser's scroll anchoring (useRowWindow anchors its blocks itself).
+    <div ref={root} tabIndex={-1} onKeyDown={onKeyDown} data-diff-anchor className="space-y-3 outline-none [overflow-anchor:none]">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <p className="font-mono text-[12px] text-subtle">
           {files.length} file{files.length === 1 ? "" : "s"} changed · <span className="text-ok">+{adds}</span>{" "}
@@ -565,22 +651,36 @@ export function DiffViewer({ files, review }: { files: FileDiff[]; review?: Diff
             </span>
           )}
         </p>
-        <div className="flex rounded-lg border border-line bg-panel p-0.5" role="radiogroup" aria-label="Diff layout">
-          {(["unified", "split"] as const).map((m) => (
-            <button
-              key={m}
-              type="button"
-              role="radio"
-              aria-checked={m === mode}
-              onClick={() => choose(m)}
-              className={`rounded-md px-2.5 py-1 text-[12px] transition ${m === mode ? "bg-panel-2 text-fg" : "text-subtle hover:text-fg"}`}
-            >
-              {m}
-            </button>
-          ))}
+        <div className="ml-auto flex items-center gap-2">
+          <button
+            type="button"
+            onClick={openFind}
+            aria-label="Find in diff"
+            title={`Find in diff (${isMac() ? "⌘" : "Ctrl+"}F)`}
+            className={`grid size-7 place-items-center rounded-lg border border-line transition hover:text-fg ${finding ? "bg-panel-2 text-fg" : "bg-panel text-subtle"}`}
+          >
+            <Search className="size-3.5" strokeWidth={1.5} />
+          </button>
+          <div className="flex rounded-lg border border-line bg-panel p-0.5" role="radiogroup" aria-label="Diff layout">
+            {(["unified", "split"] as const).map((m) => (
+              <button
+                key={m}
+                type="button"
+                role="radio"
+                aria-checked={m === mode}
+                onClick={() => choose(m)}
+                className={`rounded-md px-2.5 py-1 text-[12px] transition ${m === mode ? "bg-panel-2 text-fg" : "text-subtle hover:text-fg"}`}
+              >
+                {m}
+              </button>
+            ))}
+          </div>
         </div>
       </div>
-      <DiffList files={files} mode={mode} review={review} focused={focused} />
+      <div>
+        {query && <FindBar query={query} onQuery={setQuery} count={matches.length} current={Math.min(current, matches.length - 1)} onStep={step} onClose={closeFind} input={input} />}
+        <DiffList files={files} mode={mode} review={review} focused={focused} found={found} />
+      </div>
       {elsewhere.length > 0 && (
         <div className="space-y-2">
           <p className="text-[12px] text-subtle">Threads on files this revision no longer changes</p>

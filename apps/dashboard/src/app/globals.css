@@ -247,6 +247,15 @@ body {
   background: color-mix(in srgb, var(--accent) 35%, transparent);
 }
 
+/* Find in a diff (components/code/diff-find.tsx): every match, and the one it's on. */
+::highlight(diff-find) {
+  background-color: color-mix(in srgb, var(--accent) 22%, transparent);
+}
+::highlight(diff-find-current) {
+  background-color: color-mix(in srgb, var(--accent) 60%, transparent);
+  color: var(--fg);
+}
+
 /* "AI is thinking" text shimmer */
 @keyframes shimmer {
   from {
