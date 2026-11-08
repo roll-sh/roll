@@ -9232,11 +9232,11 @@ and speed pull apart. BENCH.md "Modes" has the measurements behind every value.
   i.e. `ALTER SYSTEM SET roll.engine_mode = 'performance'` and a restart, else efficient; a
   `--mode` and a `-c` that disagree refuse to start), then the explicit flags replace single
   parts: `--memory-budget-mb`, `--cache-mb`, `--plan-cache-mb`, `--idle-close-secs`. Read at
-  start only. `roll.engine_mode` is a custom (placeholder) parameter: from postgresql.auto.conf
-  `SHOW roll.engine_mode` reads it (as PostgreSQL would); a `SET` of it changes nothing but its
-  own value. From `-c` it picks the mode but SHOW doesn't see it: the engine drops every custom
-  `-c x.y=...` it has no definition for (`Settings::set_command_line`), where PostgreSQL makes a
-  placeholder (an open difference, not the modes'). `--mode` isn't visible to SQL. A new knob
+  start only. `SHOW roll.engine_mode` starts with the selected mode, including the default
+  and `--mode`. It is a custom (placeholder) parameter: a session `SET` changes its displayed
+  value, not the running profile; `RESET` restores the startup selection. Custom command-line
+  parameters now create placeholders as PostgreSQL does (`Settings::set_command_line`).
+  `ALTER SYSTEM` takes effect on restart; reload keeps the running selection visible. A new knob
   goes into `Profile` with both values, never as an `if performance` at its use.
 - **The same in both modes**: query results, errors, notices, plans, catalog contents,
   everything SQL sees apart from `roll.engine_mode` itself; durability (fsync on commit, crash
@@ -9264,6 +9264,24 @@ and speed pull apart. BENCH.md "Modes" has the measurements behind every value.
   baselines and status are efficient mode's; performance mode's gate values are shown.
   `run.sh engperf-start` / `pgdef-start` start them by hand; `CACHE_MB=` (set empty) starts the
   engine without `--cache-mb`.
+
+
+- **Resumed verification (2026-11-08)**: fixed the missing custom command-line placeholder
+  and its RESET default; the earlier job F SHOW errors were real, not passing probes.
+  Release build and Clippy pass (the same 18 warnings); 206 library tests and the CLI mode
+  selection test pass, two library tests ignored. The live probe passes 29 assertions across
+  seven starts and three rejected starts, including SHOW / RESET, reload versus restart,
+  explicit overrides and committed rows retained across both mode directions. Receipts:
+  `~/.cache/a180/logs/jobG2.log`, `testG.log`, `relG.log`, `clippyG.log`; live probe script:
+  `~/.cache/a180/probeG.py`. Reused: job C's 85 wire/lifecycle/session tests (one ignored),
+  isolation 1,647/1,648 permutations and 12,234/12,238 steps (the documented L2 difference).
+  Scoreboard shell syntax and the five-server renderer fixture pass. The saved efficient
+  footprint gate (job E) passed before this SQL visibility fix; final dist footprint and
+  loaded comparisons await the serialized verification train. No new benchmark claim.
+  Release/runtime receipts cover pre-rebase `2546a4e37`; rebasing onto bulk batch
+  `140b4c531` and planner batch `223fffc6c` preserved all nine lane source/script blobs
+  exactly. Combined all-target Clippy passes with 18 warnings: `jobH.log` (bulk) and
+  `jobI.log` (planner); full combined runtime checks remain with the train.
 
 ## Starting prompt for the next agent
 
