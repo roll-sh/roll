@@ -108,7 +108,7 @@ In GitHub, set the `production` environment's variable `AWS_DEPLOY_ROLE_ARN` to 
    ```
 
    - `+`, `~` and `-` lines are what it would create, change and delete. It only changes or
-     deletes records that carry its comment (`managed by roll: deploy/cloud/cloudflare`).
+     deletes records that carry its comment (`managed by roll: deploy/cloud/cloudflare (us-east-1)`).
    - `!` lines are conflicts: a record it didn't make is in the way (for example the current
      site at `roll.sh`). It never overwrites one. When you're ready to move that name to the
      fleet, delete the old record in Cloudflare, or add the comment to it to hand it over.
@@ -122,8 +122,17 @@ In GitHub, set the `production` environment's variable `AWS_DEPLOY_ROLE_ARN` to 
    node deploy/cloud/cloudflare/apply.mjs --stack roll-cloud
    ```
 
-With Elastic IPs (the default), `origin.roll.sh` is three A records. Without them it's a CNAME to
-the NLB. Every other DNS-only name is a CNAME to `origin.roll.sh`.
+With Elastic IPs (the default), `origin.us-east-1.roll.sh` is three A records. Without them it's
+a CNAME to the NLB. Every other name is a CNAME to it.
+
+The region is one value: `region` in `zones.json` (the names that customers connect to directly,
+such as `*.pg.us-east-1.roll.sh`), and the stack's own AWS region (`ROLL_EDGE_REGION` is
+`AWS::Region`, so the hostnames always match the region that S3 clients sign with). For a second
+region, create the stack there. Then copy `zones.json` with that `region`, keep only the records
+whose names contain `{region}`, and drop `workerRoutes`. Apply the copy with `--file <copy>
+--stack roll-cloud --region <region>`. Each file's comment names its region, so neither file
+touches the other's records. The global names (`roll.sh`, `api.roll.sh`, `git.roll.sh`,
+`*.roll.site`) stay in the first file.
 
 ### 5. The first deploy
 
@@ -245,7 +254,7 @@ docker build -f deploy/cloud/Dockerfile --build-arg PROFILE=dev -t roll-cloud-te
 1. Remove the Cloudflare records the script made. Run it with a zones file that lists no records:
 
    ```sh
-   echo '{"comment": "managed by roll: deploy/cloud/cloudflare", "zones": {"roll.sh": {}, "roll.site": {}}}' >/tmp/empty.json
+   echo '{"comment": "managed by roll: deploy/cloud/cloudflare (us-east-1)", "zones": {"roll.sh": {}, "roll.site": {}}}' >/tmp/empty.json
    node deploy/cloud/cloudflare/apply.mjs --file /tmp/empty.json
    ```
 

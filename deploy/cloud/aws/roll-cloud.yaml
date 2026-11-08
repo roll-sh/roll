@@ -95,7 +95,7 @@ Parameters:
     Default: "true"
     AllowedValues: ["true", "false"]
     Description: >-
-      Give the NLB one Elastic IP per zone, so origin.<Domain> can be A records that
+      Give the NLB one Elastic IP per zone, so origin.<region>.<Domain> can be A records that
       never change. An NLB has a public address per zone either way; EIPs add no cost.
   ResetsPerMinute:
     Type: Number
@@ -700,6 +700,8 @@ Resources:
             - { Name: ROLL_EDGE, Value: "1" }
             - { Name: ROLL_EDGE_DOMAIN, Value: !Ref Domain }
             - { Name: ROLL_EDGE_SITE_DOMAIN, Value: !Ref SiteDomain }
+            # The region in direct-connect hostnames (*.pg.<region>.<Domain>, s3.<region>.<SiteDomain>)
+            # is the stack's own: one stack per region, and S3 clients sign with this region.
             - { Name: ROLL_EDGE_REGION, Value: !Ref AWS::Region }
             - { Name: ROLL_EDGE_PROXY_PROTOCOL, Value: "1" }
             - { Name: ROLL_ACME_DIRECTORY, Value: "https://acme-v02.api.letsencrypt.org/directory" }
@@ -1382,7 +1384,7 @@ Resources:
 
 Outputs:
   LoadBalancerDnsName:
-    Description: The NLB; origin.<Domain> points here (CNAME), or at ElasticIps (A).
+    Description: The NLB; origin.<region>.<Domain> points here (CNAME), or at ElasticIps (A).
     Value: !GetAtt LoadBalancer.DNSName
   ElasticIps:
     Condition: UseEips

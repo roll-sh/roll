@@ -5,8 +5,10 @@
 // run a script it lists; everything else in the zones is left alone.
 //
 //   node deploy/cloud/cloudflare/apply.mjs [--dry-run] [--stack roll-cloud]
-//        [--origin-dns <nlb dns name> | --origin-ips <ip,ip,ip>] [--file zones.json]
+//        [--origin-dns <nlb dns name> | --origin-ips <ip,ip,ip>] [--file zones.json] [--region r]
 //
+// `{region}` anywhere in the file is its `region` (or --region): the AWS region of the stack
+// whose NLB the regional names point at. A second region is a copy of the file.
 // CLOUDFLARE_API_TOKEN: Zone Read, DNS Edit, Zone Settings Edit and Workers Routes Edit on both
 // zones. The origin (the NLB) comes from the stack's outputs (`--stack`, through the AWS CLI)
 // or is given; with Elastic IPs it's A records, else a CNAME. --dry-run reads and prints the
@@ -151,6 +153,17 @@ export function planRoutes(wantRoutes, existing) {
   return plan;
 }
 
+/** `config` with every `{region}` replaced. */
+export function withRegion(config, region) {
+  if (!region) {
+    if (JSON.stringify(config).includes("{region}")) throw new Error("the zones file uses {region} but sets no region");
+    return config;
+  }
+  const walk = (v) =>
+    typeof v === "string" ? v.replaceAll("{region}", region) : Array.isArray(v) ? v.map(walk) : v && typeof v === "object" ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, walk(x)])) : v;
+  return { ...walk(config), region };
+}
+
 /** The NLB's DNS name and Elastic IPs from the CloudFormation stack's outputs. */
 function originFromStack(stack, region) {
   const json = execFileSync(
@@ -163,7 +176,8 @@ function originFromStack(stack, region) {
 }
 
 /** Plans (and unless dryRun, makes) every change; returns the number of conflicts. */
-export async function apply({ config, token, api = DEFAULT_API, origin, dryRun, log = console.log }) {
+export async function apply({ config: raw, region, token, api = DEFAULT_API, origin, dryRun, log = console.log }) {
+  const config = withRegion(raw, region ?? raw.region);
   const cf = client(api, token);
   let conflicts = 0;
   let changes = 0;
@@ -233,7 +247,7 @@ async function main() {
       "dry-run": { type: "boolean", default: false },
       file: { type: "string", default: join(dirname(fileURLToPath(import.meta.url)), "zones.json") },
       stack: { type: "string" },
-      region: { type: "string", default: process.env.AWS_REGION ?? "us-east-1" },
+      region: { type: "string" },
       "origin-dns": { type: "string" },
       "origin-ips": { type: "string" },
     },
@@ -241,10 +255,11 @@ async function main() {
   const token = process.env.CLOUDFLARE_API_TOKEN;
   if (!token) throw new Error("CLOUDFLARE_API_TOKEN is not set");
   const config = JSON.parse(readFileSync(values.file, "utf8"));
+  const region = values.region ?? config.region;
   const origin = values.stack
-    ? originFromStack(values.stack, values.region)
+    ? originFromStack(values.stack, region ?? process.env.AWS_REGION ?? "us-east-1")
     : { dns: values["origin-dns"], ips: values["origin-ips"]?.split(",").map((s) => s.trim()).filter(Boolean) ?? [] };
-  const conflicts = await apply({ config, token, api: process.env.CLOUDFLARE_API_URL ?? DEFAULT_API, origin, dryRun: values["dry-run"] });
+  const conflicts = await apply({ config, region, token, api: process.env.CLOUDFLARE_API_URL ?? DEFAULT_API, origin, dryRun: values["dry-run"] });
   if (conflicts > 0) process.exitCode = 1;
 }
 
