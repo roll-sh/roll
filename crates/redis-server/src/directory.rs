@@ -98,6 +98,7 @@ pub trait Directory: Send + Sync + 'static {
 
 /// Disconnect every client of `db` and let new ones in again.
 pub async fn kick_all(db: &Database) {
+    db.kick_spread_ms.store(0, Ordering::SeqCst);
     db.evicting.store(true, Ordering::SeqCst);
     db.kicked.notify_waiters();
     for _ in 0..500 {

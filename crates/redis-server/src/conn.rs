@@ -216,6 +216,44 @@ impl Portable for tokio_rustls::server::TlsStream<tokio::net::TcpStream> {
     }
 }
 
+/// Any stream, kept on the event loop it started on like TLS: a connection spliced from another
+/// node, or one with bytes already read put back in front.
+pub struct Fixed<S>(pub S);
+
+impl<S: AsyncRead + Unpin> AsyncRead for Fixed<S> {
+    fn poll_read(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>, buf: &mut tokio::io::ReadBuf<'_>) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.0).poll_read(cx, buf)
+    }
+}
+
+impl<S: AsyncWrite + Unpin> AsyncWrite for Fixed<S> {
+    fn poll_write(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>, buf: &[u8]) -> std::task::Poll<std::io::Result<usize>> {
+        std::pin::Pin::new(&mut self.0).poll_write(cx, buf)
+    }
+    fn poll_flush(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.0).poll_flush(cx)
+    }
+    fn poll_shutdown(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.0).poll_shutdown(cx)
+    }
+    fn poll_write_vectored(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>, bufs: &[std::io::IoSlice<'_>]) -> std::task::Poll<std::io::Result<usize>> {
+        std::pin::Pin::new(&mut self.0).poll_write_vectored(cx, bufs)
+    }
+    fn is_write_vectored(&self) -> bool {
+        self.0.is_write_vectored()
+    }
+}
+
+impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> Portable for Fixed<S> {
+    type Detached = std::convert::Infallible;
+    fn detach(self) -> Result<Self::Detached, Self> {
+        Err(self)
+    }
+    fn attach(d: Self::Detached) -> std::io::Result<Self> {
+        match d {}
+    }
+}
+
 /// A connection between event loops.
 struct Parked<S> {
     conn: Conn,
@@ -363,6 +401,7 @@ impl Conn {
             // Read a little at a time like Redis (more only for the rest of a big argument), so the
             // query buffer limit sees what a read adds to the unparsed input.
             let mut room = (&mut *inbuf).limit(self.qb_want.max(READ_CHUNK));
+            let id = self.client.id;
             let kicked = async {
                 match &db {
                     Some(db) => {
@@ -371,6 +410,8 @@ impl Conn {
                         if !db.evicting.load(Ordering::SeqCst) {
                             n.await;
                         }
+                        // A gradual disconnect: this connection's moment.
+                        sleep_until_ms(db.kick_turn(id)).await;
                     }
                     None => std::future::pending().await,
                 }
@@ -648,6 +689,11 @@ impl Conn {
         if let Some(db) = &db {
             db.hub.obuf_disconnections.fetch_add(1, Ordering::Relaxed);
         }
+        self.drop_output();
+    }
+
+    /// Close the connection without sending anything it has pending.
+    fn drop_output(&mut self) {
         self.obuf_closed = true;
         self.close_after = true;
         self.pending.clear();
@@ -928,8 +974,11 @@ impl Conn {
                 let durability = db.durability.lock().clone();
                 if after > before
                     && let Some(d) = durability
+                    && !d.wait(after, None).await
                 {
-                    d.wait(after, None).await;
+                    // It never became durable here (another node took the database over):
+                    // nothing of this batch may be acknowledged.
+                    self.drop_output();
                 }
             }
         }
