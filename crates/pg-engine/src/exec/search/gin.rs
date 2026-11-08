@@ -27,6 +27,9 @@ pub(super) struct Elements {
     /// Rows always read (a value it can't key).
     pub(super) always: Vec<u32>,
     built: usize,
+    /// A commit wrote the table since it was built (`Placing::written`): its postings may
+    /// hold rows written again or deleted.
+    pub(super) written: bool,
 }
 
 fn token(col: usize, kind: u8, bytes: &[u8]) -> Vec<u8> {
@@ -123,7 +126,20 @@ fn row_tokens(col: usize, v: &Value, out: &mut Vec<Vec<u8>>) -> bool {
                 out.push(token(col, b'e', &b));
             }
         }
-        Value::Jsonb(j) => json_tokens(col, j, out),
+        Value::Jsonb(j) => {
+            json_tokens(col, j, out);
+            // (Its top level's keys and string elements apart (`K`, `E`), which `?`, `?|` and
+            // `?&` test: an object's keys, an array's (a raw scalar's) strings.)
+            match &**j {
+                Jsonb::Object(pairs) => out.extend(pairs.iter().map(|(k, _)| token(col, b'K', k.as_bytes()))),
+                Jsonb::Array(items) => out.extend(items.iter().filter_map(|it| match it {
+                    Jsonb::String(s) => Some(token(col, b'E', s.as_bytes())),
+                    _ => None,
+                })),
+                Jsonb::String(s) => out.push(token(col, b'E', s.as_bytes())),
+                _ => {}
+            }
+        }
         Value::TsVector(tv) => out.extend(tv.lexemes.iter().map(|l| token(col, b'l', l.word.as_bytes()))),
         _ => return false,
     }
@@ -133,7 +149,7 @@ fn row_tokens(col: usize, v: &Value, out: &mut Vec<Vec<u8>>) -> bool {
 impl Placing for Elements {
     const ROW_CAP: bool = true;
     fn make(shape: Shape, fingerprint: String, ts: u64) -> Elements {
-        Elements { cols: shape.parts, fingerprint, ts, rows: RowKeys::default(), post: BTreeMap::new(), always: Vec::new(), built: 0 }
+        Elements { cols: shape.parts, fingerprint, ts, rows: RowKeys::default(), post: BTreeMap::new(), always: Vec::new(), built: 0, written: false }
     }
     fn add(&mut self, suffix: &[u8], vals: Option<&[Value]>) {
         let row = self.rows.push(suffix);
@@ -175,6 +191,9 @@ impl Placing for Elements {
     }
     fn full(&self) -> bool {
         self.rows.full()
+    }
+    fn written(&mut self) {
+        self.written = true;
     }
 }
 
@@ -276,13 +295,41 @@ impl Elements {
         }
     }
 
+    /// Whether `select(col, op, arg)` is exactly the rows of those read that `col op arg`
+    /// holds for, not more: a tsquery of AND and OR over lexemes without weights (a row has a
+    /// lexeme, or one it prefixes), an array's `@>` or `&&` of elements it keys, none null
+    /// (elements equal under `=` have equal bytes: `elem_bytes`), jsonb's `?`, `?|`, `?&` of
+    /// strings (its top level's tokens). A row it couldn't key (`always`) makes none exact.
+    pub(super) fn exact(&self, col: usize, op: &str, arg: &Value) -> bool {
+        if !self.cols.contains(&col) || !self.always.is_empty() {
+            return false;
+        }
+        match (op, arg) {
+            ("@@" | "@@@", Value::TsQuery(q)) => {
+                !q.items.is_empty()
+                    && q.items.iter().all(|it| match it {
+                        QueryItem::Val(o) => o.weight == 0 && !o.word.is_empty(),
+                        QueryItem::Opr { oper, .. } => matches!(*oper, OP_AND | OP_OR),
+                        QueryItem::Stop => false,
+                    })
+            }
+            ("@>" | "&&", Value::Array(a)) => {
+                !a.items.is_empty() && a.items.iter().all(|e| !e.is_null() && elem_bytes(e, &a.elem).is_some())
+            }
+            ("?", Value::Text(_)) => true,
+            ("?|" | "?&", Value::Array(a)) => !a.items.is_empty() && a.items.iter().all(|v| matches!(v, Value::Text(_))),
+            _ => false,
+        }
+    }
+
     /// The rows `col op arg` may hold for.
     pub(super) fn select(&self, col: usize, op: &str, arg: &Value) -> Sel {
         if !self.cols.contains(&col) {
             return Sel::All;
         }
-        // `?` a key: the key of an object, or a string element (a raw scalar's too).
-        let key = |s: &str| [token(col, b'k', s.as_bytes()), token(col, b'e', s.as_bytes())];
+        // `?` a key: the key of the top-level object, or a string element of the top-level
+        // array (a raw scalar's too).
+        let key = |s: &str| [token(col, b'K', s.as_bytes()), token(col, b'E', s.as_bytes())];
         let texts = |a: &crate::types::array::ArrayValue| -> Vec<std::sync::Arc<str>> {
             a.items.iter().filter_map(|v| if let Value::Text(s) = v { Some(s.clone()) } else { None }).collect()
         };

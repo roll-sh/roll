@@ -1,0 +1,93 @@
+> CREATE TABLE a177_d (t text, u varchar(10), c text COLLATE "C", n int)
+-- CREATE TABLE
+
+> INSERT INTO a177_d SELECT 'x' || (g % 50), 'y' || (g % 7), 'z' || (g % 9), g FROM generate_series(1, 1000) g
+-- INSERT 0 1000
+
+> ANALYZE a177_d
+-- ANALYZE
+
+> EXPLAIN (COSTS OFF) SELECT DISTINCT t COLLATE "C" FROM a177_d
+QUERY PLAN:text
+HashAggregate
+  Group Key: (t)::text
+  ->  Seq Scan on a177_d
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT DISTINCT t COLLATE "en-x-icu" FROM a177_d
+QUERY PLAN:text
+HashAggregate
+  Group Key: (t)::text
+  ->  Seq Scan on a177_d
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT DISTINCT u COLLATE "C" FROM a177_d
+QUERY PLAN:text
+HashAggregate
+  Group Key: (u)::character varying(10)
+  ->  Seq Scan on a177_d
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT DISTINCT c COLLATE "C" FROM a177_d
+QUERY PLAN:text
+HashAggregate
+  Group Key: c
+  ->  Seq Scan on a177_d
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT DISTINCT t COLLATE "default" FROM a177_d
+QUERY PLAN:text
+HashAggregate
+  Group Key: t
+  ->  Seq Scan on a177_d
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT DISTINCT t COLLATE "C" FROM a177_d ORDER BY 1
+QUERY PLAN:text
+Sort
+  Sort Key: ((t)::text) COLLATE "C"
+  ->  HashAggregate
+        Group Key: (t)::text
+        ->  Seq Scan on a177_d
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT DISTINCT u COLLATE "C" FROM a177_d ORDER BY 1 DESC
+QUERY PLAN:text
+Sort
+  Sort Key: ((u)::character varying(10)) COLLATE "C" DESC
+  ->  HashAggregate
+        Group Key: (u)::character varying(10)
+        ->  Seq Scan on a177_d
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT u COLLATE "C", count(*) FROM a177_d GROUP BY 1
+QUERY PLAN:text
+HashAggregate
+  Group Key: (u)::character varying(10)
+  ->  Seq Scan on a177_d
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT t FROM a177_d ORDER BY u COLLATE "C"
+QUERY PLAN:text
+Sort
+  Sort Key: ((u)::character varying(10)) COLLATE "C"
+  ->  Seq Scan on a177_d
+-- EXPLAIN
+
+> SELECT DISTINCT t COLLATE "C" FROM a177_d ORDER BY 1 LIMIT 3
+t:text
+x0
+x1
+x10
+-- SELECT 3
+
+> SELECT DISTINCT u COLLATE "C" FROM a177_d ORDER BY 1 DESC LIMIT 3
+u:varchar
+y6
+y5
+y4
+-- SELECT 3
+
+> DROP TABLE a177_d
+-- DROP TABLE
+

@@ -222,12 +222,16 @@ fn has_foreign_scan(p: &crate::sql::plan::Plan) -> bool {
 
 /// fetch_size: the table's option, else the server's, else 100.
 fn fetch_size(cat: &Catalog, t: &Table) -> usize {
+    fetch_option(cat, t).unwrap_or(100)
+}
+
+/// The fetch_size option set for `t` (the table's, else its server's).
+fn fetch_option(cat: &Catalog, t: &Table) -> Option<usize> {
     let f = t.foreign.as_ref();
     let srv = f.and_then(|f| cat.servers.get(&f.server));
     option::get(f.and_then(|f| f.options.as_ref()), "fetch_size")
         .or_else(|| srv.and_then(|s| option::get(s.options.as_ref(), "fetch_size")))
         .and_then(|v| v.trim().parse().ok())
-        .unwrap_or(100)
 }
 
 /// A remote query read through a cursor, `fetch` rows at a time (create_cursor,
@@ -305,6 +309,13 @@ struct ScanNode {
     col_aliases: Option<Arc<Vec<(String, String)>>>,
     /// `FdwPushdown::member`: each row returned is kept whole for the DML node.
     member: bool,
+    /// `retrieved` is every column in order: each remote row's values are the row's.
+    dense: bool,
+}
+
+/// Whether a scan retrieving `retrieved` of `t` gets every column in order.
+fn dense(t: &Table, retrieved: &[usize]) -> bool {
+    retrieved.len() == t.columns.len() && retrieved.iter().enumerate().all(|(k, &i)| k == i)
 }
 
 /// make_tuple_from_result_row: a remote row as the table's row (columns not retrieved are
@@ -314,21 +325,33 @@ fn make_row(n: &ScanNode, vals: Vec<Option<String>>, ctx: &ExecCtx) -> Result<Ro
     // (Room for the key and system columns too: no reallocation per row.)
     let extra = n.with_key as usize + if n.sys { crate::exec::scan::NUM_SYS_COLS } else { 0 };
     let mut row = Vec::with_capacity(t.columns.len() + extra);
-    row.resize(t.columns.len(), Value::Null);
-    for (k, &i) in n.retrieved.iter().enumerate() {
-        if let Some(Some(s)) = vals.get(k) {
-            let col = &t.columns[i];
-            row[i] = crate::types::text::parse_value(s, &col.ty, ctx.fmt())
-                .map_err(|e| {
-                    // (conversion_error_callback: the names the query knows them by.)
-                    let cname = n
-                        .col_aliases
-                        .as_ref()
-                        .and_then(|a| a.iter().find(|(c, _)| *c == col.name).map(|(_, x)| x.clone()))
-                        .unwrap_or_else(|| col.name.clone());
-                    let rname = n.alias.clone().unwrap_or_else(|| t.name.clone());
-                    e.context(format!("column \"{cname}\" of foreign table \"{rname}\""))
-                })?;
+    let parse = |i: usize, s: &str| {
+        let col = &t.columns[i];
+        crate::types::text::parse_value(s, &col.ty, ctx.fmt()).map_err(|e| {
+            // (conversion_error_callback: the names the query knows them by.)
+            let cname = n
+                .col_aliases
+                .as_ref()
+                .and_then(|a| a.iter().find(|(c, _)| *c == col.name).map(|(_, x)| x.clone()))
+                .unwrap_or_else(|| col.name.clone());
+            let rname = n.alias.clone().unwrap_or_else(|| t.name.clone());
+            e.context(format!("column \"{cname}\" of foreign table \"{rname}\""))
+        })
+    };
+    if n.dense && vals.len() >= t.columns.len() {
+        // (Each value in its place: no NULL row filled first.)
+        for (i, v) in vals[..t.columns.len()].iter().enumerate() {
+            row.push(match v {
+                Some(s) => parse(i, s)?,
+                None => Value::Null,
+            });
+        }
+    } else {
+        row.resize(t.columns.len(), Value::Null);
+        for (k, &i) in n.retrieved.iter().enumerate() {
+            if let Some(Some(s)) = vals.get(k) {
+                row[i] = parse(i, s)?;
+            }
         }
     }
     let ctid = if n.ctid { vals.get(n.retrieved.len()).cloned().flatten() } else { None };
@@ -415,6 +438,7 @@ pub fn open(s: &ScanPlan, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<BoxNod
     Ok(Box::new(ScanNode {
         table: s.table.clone(),
         cur: Cursor::new(key, fetch_size(&cat, &s.table), spec.sql, spec.params).numbered(number),
+        dense: dense(&s.table, &spec.retrieved),
         retrieved: spec.retrieved,
         ctid: spec.ctid,
         with_key: s.with_key,
@@ -647,7 +671,10 @@ pub fn remote_sample(t: &Table, ctx: &ExecCtx, targrows: usize, offer: &mut dyn 
     }
     let mut node = ScanNode {
         table: Arc::new(t.clone()),
-        cur: Cursor::new(key, fetch_size(&cat, t), sql, Vec::new()),
+        // (Every row goes into the sample: a thousand a round trip unless fetch_size is set,
+        // where a scan, which may stop early, fetches a hundred.)
+        cur: Cursor::new(key, fetch_option(&cat, t).unwrap_or(1000), sql, Vec::new()),
+        dense: dense(t, &cols),
         retrieved: cols,
         ctid: false,
         with_key: false,

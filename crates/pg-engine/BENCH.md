@@ -213,6 +213,117 @@ manager's state (`Txn::lock_row` 0.78% of CPU samples, `release_locks` 0.59%,
 `LockManager::acquire` 0.34%, `Txn::xid` 0.29%) and `wait_durable` (0.36%): every row lock
 goes through the lock table's one mutex, where PostgreSQL keeps tuple locks in the tuple.
 
+## Planner, round 11 (2026-11-07, agent 177)
+
+HANDOFF.md, "Planner round 11", has what changed. This round's planner change for the range
+read is the interface custom-plan reuse builds on (`ScanChoice::rechoose`, agent 178's to
+wire in), so the numbers below are the starting point and where the CPU goes, not a speedup.
+Both servers ran in containers (`run.sh ENGINE_DOCKER=1`, the engine's dist build of
+`0737165c` with this round's planner code bind-mounted, `--cpu-shares 2`, host network) on
+cores 28-31, the clients on 32-35, PostgreSQL 18.6 the pinned image, the machine at load
+22-54. Server CPU per operation comes from each container's cgroup (`usage_usec` over the
+run).
+
+**The 8-client range read** (`bench oltp --only range_scan_100`, 200,000 accounts, 10-second
+rounds alternating engine and PostgreSQL):
+
+| | engine | PostgreSQL | engine / PostgreSQL |
+|---|---:|---:|---:|
+| custom plans (the default), CPU per operation | 219-228 us | 132-137 us | 1.66x |
+| custom plans, throughput | 13,842-15,378 tps | 20,936-22,813 tps | |
+| `plan_cache_mode = force_generic_plan`, CPU per operation | 170-193 us | 85-91 us | 2.0x |
+
+A first engine run before a restart measured 255-261 us against 143-148. Custom planning
+costs PostgreSQL about 47 us per execution and the engine about 50 us. In the frame-pointer
+profile, the engine's planning is 29% of its CPU and binding the values and planning
+(`bind_values`) 25%. Choosing the scan again (`rechoose`: the selectivities and the path
+choice, about 9%) would take the range read to about 190-200 us, near 1.45x. The generic
+floor shows that the execution path is twice PostgreSQL's, and it is most of what is left.
+
+**DELETE of a quarter of a 1M-row table** (`DELETE FROM pdel WHERE v = 1`, 1,000,000 rows
+of (int primary key, int, 40-byte text), vacuumed and analyzed; each server's cgroup CPU
+around the one statement; elapsed time through `docker run psql`, which adds about 0.4 s):
+
+| | before (dist `0737165c`) | after (serial `with_key` scans) | PostgreSQL |
+|---|---:|---:|---:|
+| server CPU | 809-823 ms | 590-597 ms | 172-218 ms |
+| elapsed | 0.81-0.87 s | 1.13-1.15 s | 0.58-0.72 s |
+
+"Before" is an older origin head, and the commits between could move the DELETE as
+well. The drop matches agent 175's profile, where about half of the DELETE's CPU was its
+source scan on three worker threads. The elapsed time went up on purpose (about 0.3 s): the
+scan now runs serially, as PostgreSQL plans it, and CPU fell by 27%.
+## Storage engine, round 1 (2026-11-08, agent 169)
+
+HANDOFF.md, "Storage engine, round 1", has what changed. **base** is origin at `a0328ac02`
+(what the batch was first rebased on); **new** is the batch on `6a1e90670`. Both are dist
+builds in containers on cores 24-27 (`run.sh ENGINE_DOCKER=1`, host network, `--cache-mb
+2048`), PostgreSQL 18.6 in its container on the same cores. The machine ran at load 12-42, so
+wall times and cgroup CPU move 10-20% from run to run; user instructions (`perf stat -e
+instructions:u` of the engine process from a privileged helper container) are what the
+comparisons below rest on. Engines alternated, each a fresh container on a copy of its own
+loaded data directory.
+
+### TPC-H SF1 (22 queries, a warm-up pass, then the measured one; all hashes equal)
+
+| | user instructions, 10^9 | engine VmHWM, MB | load: bytes written | load: copy / index s | data directory |
+|---|---:|---:|---:|---:|---:|
+| base | 305.7, 305.3, 307.7 | 1,854-1,868 | 13.4 GB | 38.5 / 31.3 | 680 MB |
+| new | 299.2, 299.2 | 1,863-1,880 | 10.3 GB | 42-51 / 32-36 | 668 MB |
+
+-2.3% instructions; the peak within the runs' spread. Wall times (sum of the 22): PostgreSQL
+12.8 s, base 30.1-30.6 s, new 30.3-30.8 s. **q20 takes 6-9 s on base and new against 0.5 s on
+`fe7b0023c`** (PostgreSQL 0.11 s): an origin regression, not this batch's (HANDOFF "Found").
+The load writes less because linked runs that no other source overlaps go straight to L1; its
+COPY steps take longer because the runs are compressed as they are written.
+
+### 200,000 inner index lookups (`bench nl`, 5 reps)
+
+| | user instructions, 10^9 (the 3 queries) | inner, s |
+|---|---:|---:|
+| PostgreSQL | | 0.275 |
+| base | 49.7, 49.7, 49.7 | 0.47-0.54 |
+| new | 50.9, 50.9 | 0.48-0.53 |
+
++2.4% instructions. The profile difference is mimalloc's generic allocation path (`mi_find_page`,
+`_mi_malloc_generic`: about 5% of new's instructions, none of base's) and `bind_scan`; agent
+149's kept cursors (`Scan::reseek`, on both) already keep a lookup in its block, so the point
+reader's held blocks add nothing here. `Store::first_with` isn't wired into the scan yet.
+Tried and dropped: a seek passing entries by their shared prefix (+2.6% with it).
+
+### The bulk workload (1M rows, 3 reps; all steps' median s)
+
+| | user instructions, 10^9 | cgroup CPU s | bytes written | peak MB |
+|---|---:|---:|---:|---:|
+| base | 268.9, 268.6 | 35.6, 35.6 | 2,077, 2,036 MB | 331, 346 |
+| new | 248.6, 248.9 | 33.9, 34.1 | 882, 880 MB | 347, 365 |
+
+-7.4% instructions, -57% bytes written. Per step (base / new, s): copy_in 1.11-1.13 / 1.18-1.22,
+create_index 0.76-0.79 / 0.86-0.90 (the runs compressed in the foreground), copy_out
+0.48-0.51 / 0.54-0.55, update_half 1.68-1.76 / 1.64-1.69, others within the spread. Without the
+L1 placement (the same binary with it switched off) the batch costs +5.5% instructions on this
+workload: compressing runs pays off only when compaction doesn't rewrite them.
+
+### pgbench (scale 10, 8 clients, prepared, 30 s; cgroup µs CPU per transaction)
+
+| | select-only | simple-update | tpcb-like |
+|---|---:|---:|---:|
+| PostgreSQL (an earlier, quieter pass) | 41.9 | 192.8 | 292.8 |
+| base | 58.4, 59.3 | 243.5, 232.6 | 502.2, 456.9 |
+| new | 58.2, 57.8 | 234.8, 243.7 | 468.0, 464.8 |
+
+Within the runs' spread.
+
+### Verification
+
+Crate tests release on the final tree, 500 passed (`crash_random` seeds 1-30); the same batch
+before its last three fixes (`a052675`): debug and release crate tests (the three failures were
+`first_with`'s own check, fixed since; `logical_apply`'s `aborted_subtransactions_stream` fails
+one debug run in two on a planner debug check, HANDOFF "Found"), difftest smoke, isolation
+138 / 139 specs and 1,805 / 1,806 permutations, full regress on a private reference
+51,148 / 51,150 with 0 units changed, pg_dump_tap 14,817 / 14,817; clippy with no warning in
+the files changed.
+
 ## Planner, round 10 (2026-11-07, agent 171)
 
 HANDOFF.md, "Planner round 10", has what changed. Both servers ran in containers (`run.sh
@@ -426,6 +537,23 @@ client side about 10%: `make_row` 1.8%, its row's NULL fill (`Vec::extend_with`)
 DataRow parsing (`Conn::process` 1.0%, `Message::parse` 1.0%, `BytesMut` split / drop 1.8%),
 a `String` per value (`from_utf8_lossy` 1.7% plus its allocation) then parsed into a `Value`
 (`parse_value_ex` 0.9%).
+
+Second batch (`8ae592fb`: ANALYZE fetching 1,000 rows a round trip, the client's dense rows and
+one UTF-8 check per value), measured the same way, runs interleaved base, new, PostgreSQL, new,
+base, new, base (3 runs of each engine, 1 of PostgreSQL; load 30-40):
+
+| phase | PG writes / stmt | new | PG ms | base ms | new ms | new / PG time | PG CPU ms | base CPU | new CPU | new / PG CPU |
+|---|---|---|---|---|---|---|---|---|---|---|
+| ANALYZE ft, fs (1) | 237 | **29** | 171 | 86 | **81** | 0.47 | 125 | 99 | **61** | 0.49 |
+| foreign joins (100) | 208 | **203** | **12,992** | 14,534 | 17,388 | 1.34 | **4,656** | 6,097 | 6,246 | 1.34 |
+| full scans, 20k rows (10) | 205 | **202** | **1,460** | 1,581 | 1,560 | 1.07 | **590** | 639 | 642 | 1.09 |
+
+ANALYZE now beats PostgreSQL in round trips, time and CPU with its bytes (867 kB against
+884 kB): base's 9 round trips read the table twice, batch 1's 230 read it once. The client-side
+changes aren't resolved: the foreign joins' CPU per run was base 5,823 / 6,208 / 6,260 ms, new
+6,239 / 6,052 / 6,446 ms (one new run's elapsed time, 36.5 s against 27-29 s, was the machine's);
+by the profile above they touch about 3% of that phase's CPU. Peak memory: engine 58-62 MB new,
+68-124 MB base, PostgreSQL 149 MB.
 
 ```sh
 SERVER_CPUS=4-7 CLIENT_CPUS=8-9 tools/fdwtraffic/compare.sh <roll-engine> <scratch> <prefix> <port> [pg] [engine]
@@ -5658,6 +5786,57 @@ landed.) The
 CREATE INDEX builds and ANALYZE spend their time in the store's scan positioning and the
 entries' runs; DELETE's index entries left for VACUUM need index access (agent 163).
 
+## Bulk writes, round 9 (agent 182)
+
+HANDOFF.md's "Write path, round 9" has what changed. Method as round 8's (`--profile dist`
+with line tables, both servers in containers on the same four cores, 20-23, the same CPU weight
+and slice, psql in a third container; CPU and bytes written from the containers' cgroups;
+1M rows, autovacuum off for both tables; PostgreSQL, base and new interleaved, medians of
+three), at a quieter hour than round 8's (load 10-20), so every number is lower on both
+sides. Base: origin `4d48ff398` (round 8 plus the DROP fix, which costs nothing here).
+
+Recovered evidence note (2026-11-08): job 8 built the candidate with `--profile dist`
+at source `2f1b3a3e5` (only BENCH.md was dirty), then ran the saved interleaved bulk
+scripts against the saved `4d48ff398` base and PostgreSQL 18.6. Receipts and raw output
+remain under `~/.cache/a182/job8/`; frozen executables remain in `bin-base/` and
+`bin-new/`. These records do not establish a performance gain for the landed batch:
+the SQL results were overwritten per step, COPY output went to `/dev/null`, the
+script lacks expected-result assertions, and the later integration source differs.
+No comparison was rerun during recovery. The DELETE estimates below remain the
+saved investigation's estimates, not an accepted optimization.
+
+### DELETE leaving its index entries for VACUUM: measured, not built
+
+Profiled on the base (`perf record -g dwarf`, the 1M-row sequence up to DELETE a quarter):
+the DELETE's connection thread is 58.6% of its CPU (the source scan's three workers the
+rest: agent 177's); in it, the deferred run of entry and row tombstones is about 35% (the
+sort `sort_by_key_after` 10%, `SstWriter::add` and bloom 8.6%, `put_entry_deletes` 6.3%,
+copying into `mvcc_key` and the run about 10%), the index values and entry keys about 4.5%.
+Entry keys are two of the three tombstones per row, the longer ones: about 27% of the thread.
+The index-only scan right after the DELETE took 0.47 s (bulk_a) and 0.50 s (bulk_id), of
+which the store's merge (`Cursor::head/fill/take`, `Merge::min`, `Block::read`,
+`Scan::position`) is about 34%: 0.16 s per 1M-entry index.
+
+| | CPU |
+|---|---|
+| DELETE: no entry keys, sort or run for them | -0.25 s |
+| VACUUM: a raw scan of each of the two indexes | +0.32 s |
+| VACUUM: a sorted run of 500k entry tombstones | about +0.1 s |
+| the next index scan: no tombstone run to merge, a bitmap probe | about -0.03 s |
+| total | about +0.15 s |
+
+PostgreSQL's VACUUM scans its indexes too; the engine's raw entry scan costs more than the
+sorted run at delete time. It would pay with a raw entry scan near PostgreSQL's cost (the
+merge path: agent 191) or a VACUUM that finds dead entries without the old values.
+
+### DELETE's run sorted by runs: measured, dropped
+
+`sort_by_key_after` grouping each 8-byte prefix's keys (the table's rows, each index's
+entries) in arrival order, then a stable sort that merges the runs they arrive in: DELETE
+1.07 -> 1.07 s, the sort 9.9% -> about 9% of the connection thread. The source's three
+workers interleave their rows in short runs, and the random third (bulk_a's entries)
+dominates. Not landed.
+
 ## Native deparser (round 21, agent 93)
 
 `ast::deparse_expr` / `deparse_stmt` (views, rules, defaults, checks, index expressions,
@@ -6322,6 +6501,84 @@ profile); the pushed batch skips strips whose x high ends are below the query's.
 1M-row table gained from agent 149's kept cursors (round 6: 0.95-1.16 ms); a quarter of its
 profile and of gin_tsvector_and's is statement overhead (EXPLAIN text built for each
 execution's Gather check, `total_and_gathers`, and planning).
+
+## Index access, round 8 (round 25, agent 183)
+
+HANDOFF.md's "Index access at index cost, round 8" has what changed. Engine against PostgreSQL
+18.6 in containers on both sides (`tools/bench/run.sh` with `ENGINE_DOCKER=1`, both servers on
+cores 20-23 at the same CPU weight, the host network, `--cache-mb 2048` and
+`shared_buffers=2GB`), machine load 9-18. Engines built with `--profile dist`: "base" is
+round 7's search / scan batch taken back (e5f0da9ac's parent's exec/search.rs and
+exec/scan.rs on 28c3d59e0), "head" 28c3d59e0 (round 7 as pushed), "fix1" this round's first
+batch, "fix2" the batch as pushed (fix1 with jsonb's top-level tokens and the BRIN merge by
+ranges). A fresh engine process for each engine run, all on one data directory; rounds
+alternate the order (PostgreSQL first, then last). Queries: 300 a case after 5 warm-ups, the
+median over rounds of each run's median (ms) and the server's CPU per query (ms, background
+threads included). PostgreSQL's short cases move by up to half between runs (gist_box 0.096,
+0.117, 0.157 ms in three of them), so compare within a table.
+
+Round 7's GiST cases (six rounds; `max_id` ran first in each engine run to take the start's
+background work, which otherwise lands on the first case's CPU):
+
+| case | PostgreSQL ms (cpu) | head ms (cpu) | fix1 ms (cpu) | fix1 / PostgreSQL |
+|---|---:|---:|---:|---:|
+| gist_box | 0.157 (0.14) | 0.197 (0.20) | 0.200 (0.21) | 1.28 |
+| gist_point_box | 0.133 (0.11) | 0.192 (0.17) | 0.193 (0.17) | 1.45 |
+| gist_point_circle | 0.179 (0.18) | 0.363 (0.35) | 0.352 (0.35) | 1.96 |
+| gist_point_knn | 0.164 (0.14) | 0.240 (0.25) | 0.237 (0.25) | 1.45 |
+| gist_box_knn | 0.167 (0.16) | 0.309 (0.34) | 0.318 (0.34) | 1.91 |
+
+With round 7's batch taken back (an earlier run of four rounds, gist_box first in each engine
+run), base / head ms: gist_box 0.229 / 0.196, gist_point_box 0.197 / 0.191,
+gist_point_circle 0.707 / 0.351, gist_point_knn 0.239 / 0.235, gist_box_knn 0.284 / 0.332
+(PostgreSQL 0.117, 0.129, 0.197, 0.165, 0.194).
+
+GIN queries (six rounds):
+
+| case | PostgreSQL ms (cpu) | head ms (cpu) | fix1 ms (cpu) | fix2 ms (cpu) | fix2 / PostgreSQL |
+|---|---:|---:|---:|---:|---:|
+| gin_array | 0.243 (0.35) | 0.694 (0.94) | 0.461 (0.50) | **0.429 (0.42)** | 1.77 |
+| gin_jsonb | 0.691 (0.65) | 0.634 (0.64) | 0.633 (0.61) | 0.645 (0.70) | 0.93 |
+| gin_jsonb_exists | 0.372 (0.37) | 0.980 (1.00) | 1.013 (1.11) | **0.395 (0.40)** | **1.06** |
+| gin_jsonb_path | 0.315 (0.33) | 0.984 (1.07) | 0.974 (1.00) | 0.966 (0.99) | 3.07 |
+| gin_tsvector | 0.229 (0.22) | 0.512 (0.48) | 0.416 (0.42) | **0.384 (0.41)** | 1.68 |
+| gin_tsvector_and | 3.118 (3.21) | 6.627 (6.93) | 0.843 (0.95) | **0.887 (0.97)** | **0.28** |
+
+An earlier run (four rounds; PostgreSQL / head / fix1 ms): gin_array_overlap 0.255 / 0.720 /
+0.387, brin_range 1.934 / 2.776 / 2.678; gin_tsvector_and 2.671 / 5.376 / 0.748.
+
+Index builds (`access-builds`, CREATE INDEX over 1M rows then DROP INDEX; maintenance_work_mem
+256 MB on both, two workers each; three rounds; s, the server's CPU s, the server's peak MB,
+pages):
+
+| index | PostgreSQL s (cpu) | head s (cpu) | fix2 s (cpu) | fix2 / PostgreSQL | head / PostgreSQL | pages PostgreSQL / engine |
+|---|---:|---:|---:|---:|---:|---:|
+| BRIN timestamptz | 0.130 (0.28) | 0.320 (0.64) | **0.132 (0.38)** | **1.02** | 2.46 | 3 / 3 |
+| GIN int[] | 0.386 (0.95) | 0.868 (1.72) | **0.391 (1.22)** | **1.01** | 2.25 | 1,475 / 1,474 |
+| GIN jsonb | 1.148 (3.01) | 1.839 (3.65) | **0.891 (2.96)** | **0.78** | 1.60 | 1,866 / 1,866 |
+| GIN jsonb_path_ops | 0.588 (1.43) | 1.409 (2.11) | **0.612 (2.14)** | **1.04** | 2.40 | 1,459 / 1,459 |
+| GIN tsvector | 0.563 (1.49) | 1.176 (1.18) | **0.492 (1.30)** | **0.87** | 2.09 | 1,059 / 1,059 |
+| GiST point | 1.178 (1.18) | 0.633 (1.26) | 0.709 (1.43) | 0.60 | 0.54 | 7,557 / 1 |
+| btree int | 0.327 (0.58) | 0.765 (1.96) | 0.843 (2.02) | 2.58 | 2.34 | 2,745 / 2,745 |
+
+(PostgreSQL's int[] index is 1,474 or 1,475 pages from run to run, its parallel merge.) Peak
+memory over the run's builds (the engine process's RSS, PostgreSQL's cgroup anon + shmem):
+PostgreSQL 365-433 MB (a cluster restarted cold before the run), head 380-526, fix2 398-551;
+in an earlier run, with PostgreSQL's shared buffers already filled by the load, 680-750 MB
+against the engine's 365-525. The parallel builds hold the participants' posting lists until
+the merge: 30-80 MB more than the serial build at the peak. Their CPU is about the serial
+build's (GIN jsonb 3.0 s, PostgreSQL 3.0; tsvector 1.3, PostgreSQL 1.5; int[] 1.2, PostgreSQL
+1.0). The earlier run (two rounds, fix1, PostgreSQL / head / fix1 s): BRIN 0.116 / 0.292 /
+0.142, GIN int[] 0.336 / 0.825 / 0.435, jsonb 1.135 / 1.737 / 0.816, jsonb_path_ops 0.550 /
+1.269 / 0.544, tsvector 0.504 / 1.165 / 0.424, GiST point 1.163 / 0.593 / 0.591, btree int
+0.303 / 0.706 / 0.737.
+
+The serial GiST point and btree builds aren't the batch's: four more rounds of them alone,
+head / fix1 / fix2 s, GiST point 0.702 / 0.677 / 0.725 (fix2 0.655-0.918), btree int 0.863 /
+0.879 / 0.853 (PostgreSQL 1.221, 0.392); three after a BRIN build, GiST point 0.731 / 0.683
+/ 0.709. That BRIN build, first in a fresh engine process, reads the table cold: head 0.692,
+fix1 0.298, fix2 0.262 s against PostgreSQL's 0.116, whose cluster keeps it in its buffers
+from run to run.
 
 ## XML: the tree, input checks and building (round 21, agent 107)
 
@@ -7657,6 +7914,73 @@ On `912559c`: `cargo test -p pg-engine` debug and release (every binary; goldens
 139 specs with the 17 roll-* specs (intra-grant-inplace), the regression suite in full
 (debug, private reference): 51,148 / 51,150, no unit changed against `results.tsv`.
 pg_dump_tap was queued and cancelled under the verification train (agent 162's full suite).
+
+## Catalog round 12 (agent 188)
+
+HANDOFF.md "Catalog round 12, first batch" has what changed. The objects are round 11's
+(`bench scale`'s 10,000 tables of three columns with a primary key and a default in 10
+schemas, a partitioned table of 1,000 partitions, `public.t`; loaded with psql). Dist builds
+of `6a1e9067` (base) and `770e23d2` (this batch) in their container (`run.sh`
+`ENGINE_DOCKER=1`), each started from a copy of one data directory; PostgreSQL 18.6 in its
+container on the host network; all on cores 8-11, psql from a client container; three rounds,
+every server restarted before each file. Other agents' builds ran throughout (load 15-25).
+
+First query after a start, then once more (ms; each round's server freshly started):
+
+| query | PostgreSQL | base | this batch |
+|---|---|---|---|
+| psql `\dt` of a schema | 12-23 / 7.8-13 | 52-86 / 7.5-11 | 50-73 / 7.4-13 |
+| `count(*)` of pg_class | 6.0-8.6 / 3.7-4.5 | 6.3-13 / 0.33-0.49 | 4.6-6.4 / 0.24-0.31 |
+| pg_class × pg_attribute of a schema | 20-28 / 13-16 | 121-167 / 29-35 | 146-169 / 28-46 |
+| `count(*)` of pg_stat_user_tables | 32-45 / 20-30 | 22-36 / 5.9-8.6 | 27-34 / 6.6-8.3 |
+
+On the host (release builds, nice 19, six alternating restarts each), psql's first `\dt`:
+base 48, 62, 66, 78, 80, 87 ms; this batch 40, 47, 48, 55, 68, 70 (the profile no longer
+has `PMap<Table>::contains_key` reading table entries from storage under `class_position`).
+
+In one session after a start (the first statement included), three rounds:
+
+| query | PostgreSQL | base | this batch |
+|---|---|---|---|
+| EF Core's tables query of one table (`relname IN ('t5000')`), the session's first | 4.7-8.3 | 437-472 | 239-283 |
+| the same, the next four | 1.2-3.0 | 129-211 | 2.3-3.6 |
+| psql's unqualified `\d t5000` lookup (5 times) | 0.28-1.8 | 27-62 | 0.54-3.7 |
+| psql `\d sc0.t5000`'s 11 queries, first time | 30-36 | 93-102 | 67-99 |
+| the same, the next two times | 11-17 | 13-24 | 13-25 |
+
+The EF Core query no longer runs its `NOT EXISTS` subplan on each of pg_class's 41,416 rows,
+and its pg_depend rescan derives the one relation's rows. Its first run in a process (or after
+any DDL) is still 213 ms of planning: `explain::sys_tuples` generates pg_depend's 116,000
+rows to count them (HANDOFF's "Left"). `\d sc0.t5000`'s first time is pg_attribute's and
+pg_constraint's first reads (columns 42-49 ms, indexes 36-41 ms).
+
+Memory after a start and reading pg_class, pg_attribute, pg_type, pg_index, pg_constraint
+and pg_stat_user_tables whole in one session (the session held open while measured), from
+each container's cgroup (`memory.current`; `memory.stat`'s anon, shmem), MB:
+
+| | memory.current | anon | shmem | process RSS |
+|---|---|---|---|---|
+| PostgreSQL | 200 | 12 | 137 | |
+| base | 116 | 114 | 0 | 141 |
+| this batch | 112 | 110 | 0 | 138 |
+
+The method: the cgroup's `memory.current` on both sides (each side's private memory, shared
+memory and page cache, measured the same way), or anon + shmem without the reclaimable page
+cache (PostgreSQL 149, the engine 110). The engine's RSS counts the mapped binary's resident
+pages (its 70 MB text), which PostgreSQL's anon doesn't: round 11's 143 MB was RSS, and
+PostgreSQL's 134 / 177 were its cgroup with and without a page cache drop.
+
+### Verification (agent 188, first batch)
+
+One heavy job on the rebased head `770e23d2`: the release library tests, `golden` (677
+files; `a188_catalog_index_conds` and `a188_depend_rows` new, recorded from PostgreSQL 18.6,
+also run in a debug build for the debug comparisons), `catalog_format`,
+`catalog_lazy_snapshot`, `catalog_storage`, `session_state`: all pass; clippy: no new
+warning (18, as before); the regression files psql, psql_crosstab, psql_pipeline, sysviews,
+oidjoins, rules, misc_sanity, opr_sanity, type_sanity, regproc, subselect, alter_table,
+create_index, inherit, privileges, rowsecurity, dependency, namespace, object_address,
+misc_functions, stats (private reference): 9,906 / 9,906, 0 units newly differing against
+`results.tsv`; pg_dump_tap 14,817 / 14,817.
 
 ## Catalog round 11 (round 26, agent 173)
 
