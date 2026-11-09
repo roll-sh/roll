@@ -2546,6 +2546,17 @@ fn project_moves(exprs: &[Expr]) -> Option<Box<[u32]>> {
 /// the row whole), then the moved columns taken out of it.
 #[inline(never)]
 fn project_moving(exprs: &[Expr], moves: &[u32], mut r: Row, ctx: &ExecCtx) -> Result<Row> {
+    if moves.iter().enumerate().all(|(i, &m)| {
+        m != NOT_MOVED && (m as usize) < r.len() && (i == 0 || moves[i - 1] < m)
+    }) {
+        // Increasing distinct sources are at or after their destinations: no swap
+        // overwrites an unread column. Truncation drops every unselected value.
+        for (i, &m) in moves.iter().enumerate() {
+            r.swap(i, m as usize);
+        }
+        r.truncate(moves.len());
+        return Ok(r);
+    }
     let mut out = Vec::with_capacity(exprs.len());
     for (e, &m) in exprs.iter().zip(moves) {
         out.push(if m == NOT_MOVED || m as usize >= r.len() { eval(e, &r, ctx)? } else { Value::Null });
@@ -2556,6 +2567,127 @@ fn project_moving(exprs: &[Expr], moves: &[u32], mut r: Row, ctx: &ExecCtx) -> R
         }
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod projection_tests {
+    use super::*;
+    use crate::session::state::{SessionState, SingleCluster};
+    use crate::storage::{Store, StoreOptions};
+    use crate::txn::{Database, Isolation};
+    use crate::types::DataType;
+
+    fn with_ctx(f: impl FnOnce(&ExecCtx)) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path(), StoreOptions {
+            sync: false,
+            memtable_bytes: 2 << 20,
+            cache: crate::storage::cache::BlockCache::new(4 << 20),
+            ..StoreOptions::default()
+        }).unwrap();
+        let db = Database::open("projection", 16384, store, "postgres").unwrap();
+        let cluster = Arc::new(SingleCluster {
+            name: "projection".into(), started: 0, locale: Default::default(), conf: Default::default(),
+        });
+        let sess = SessionState::new(db.clone(), cluster, "postgres", 4242);
+        let txn = RefCell::new(db.begin(Isolation::ReadCommitted, false, Arc::default()));
+        f(&ExecCtx::new(&txn, &sess, &[], 0, 0));
+    }
+
+    fn col(i: usize) -> Expr { Expr::Col(i, DataType::Text) }
+
+    #[test]
+    fn ordered_subsets_reuse_input_and_drop_unselected_values() {
+        with_ctx(|ctx| {
+            // Every ordered subset, including empty/identity/non-prefix subsets.
+            for mask in 0..16 {
+                let values = [Value::Null, Value::text("one"), Value::text("two"), Value::Int4(3)];
+                let moves: Vec<u32> = (0..4).filter(|i| mask & (1 << i) != 0).collect();
+                let exprs: Vec<_> = moves.iter().map(|&i| col(i as usize)).collect();
+                let want: Vec<_> = moves.iter().map(|&i| values[i as usize].clone()).collect();
+                let mut row = Vec::with_capacity(128);
+                row.extend(values);
+                let (ptr, cap) = (row.as_ptr(), row.capacity());
+                let out = project_moving(&exprs, &moves, row, ctx).unwrap();
+                assert_eq!(out, want);
+                assert_eq!((out.as_ptr(), out.capacity()), (ptr, cap));
+            }
+            let keep: Arc<str> = "keep".into();
+            let discard: Arc<str> = "discard".into();
+            let (kept, discarded) = (Arc::downgrade(&keep), Arc::downgrade(&discard));
+            let mut row = vec![Value::Text(discard), Value::Null, Value::Text(keep)];
+            row.resize(128, Value::Null);
+            let out = project_moving(&[col(1), col(2)], &[1, 2], row, ctx).unwrap();
+            assert_eq!(out, vec![Value::Null, Value::text("keep")]);
+            assert!(discarded.upgrade().is_none(), "unselected values dropped before returning");
+            assert_eq!(kept.strong_count(), 1, "selected value moved without cloning");
+            drop(out);
+            assert!(kept.upgrade().is_none());
+        });
+    }
+
+    #[test]
+    fn fallback_preserves_duplicates_reordering_expressions_and_missing_columns() {
+        with_ctx(|ctx| {
+            for exprs in [
+                vec![col(0), col(0), col(2)],
+                vec![col(2), col(0)],
+                vec![col(0), Expr::Coalesce(vec![col(0), col(1)], DataType::Text), col(2)],
+                vec![col(0), Expr::Const(Value::text("constant"), DataType::Text), col(2)],
+                vec![col(0), col(5)],
+            ] {
+                let row = vec![Value::text("zero"), Value::Null, Value::text("two")];
+                let moves = project_moves(&exprs).unwrap();
+                let want = eval_all(&exprs, &row, ctx);
+                let got = project_moving(&exprs, &moves, row, ctx);
+                match (got, want) {
+                    (Ok(g), Ok(w)) => assert_eq!(g, w),
+                    (Err(g), Err(w)) => assert_eq!((g.code, g.message), (w.code, w.message)),
+                    _ => panic!("projection disagrees with evaluation"),
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn piped_projection_keeps_row_levels_and_parts() {
+        use super::super::pipe::Item;
+        struct Items(std::collections::VecDeque<Item>);
+        impl Node for Items {
+            fn next(&mut self, _: &ExecCtx) -> Result<Option<Row>> { panic!("use next_item") }
+            fn next_item(&mut self, _: &ExecCtx) -> Result<Option<Item>> { Ok(self.0.pop_front()) }
+        }
+        with_ctx(|ctx| {
+            let row = vec![Value::Int4(7), Value::text("discard"), Value::Null];
+            let ptr = row.as_ptr();
+            let part = super::super::partial::Part {
+                groups: vec![(vec![Value::Int4(9)], vec![super::super::partial::Partial::Count(3)])],
+                seq: vec![0], read: 5, rows: 3,
+            };
+            let mut p = ProjectNode {
+                input: Box::new(Items([Item::Part(part), Item::Row(row, 2)].into())),
+                exprs: vec![col(0), col(2)], moves: Some(vec![0, 2].into_boxed_slice()),
+                computed: None, tried: true, topk: None, piped: true,
+            };
+            match projected_item(&mut p, ctx).unwrap().unwrap() {
+                Item::Part(part) => {
+                    assert_eq!((part.read, part.rows, part.seq), (5, 3, vec![0]));
+                    assert_eq!(part.groups[0].0, vec![Value::Int4(9)]);
+                    assert!(matches!(part.groups[0].1.as_slice(), [super::super::partial::Partial::Count(3)]));
+                }
+                _ => panic!("part was changed to a row"),
+            }
+            match projected_item(&mut p, ctx).unwrap().unwrap() {
+                Item::Row(row, level) => {
+                    assert_eq!(level, 2);
+                    assert_eq!(row, vec![Value::Int4(7), Value::Null]);
+                    assert_eq!(row.as_ptr(), ptr);
+                }
+                _ => panic!("row was changed to a part"),
+            }
+            assert!(projected_item(&mut p, ctx).unwrap().is_none());
+        });
+    }
 }
 
 /// A direct column whose built-in ordering can be used by a worker's first-key heap.

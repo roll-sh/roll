@@ -148,3 +148,53 @@ fn stored_comparisons_match_evaluation() {
     assert_eq!(rows(&mut s, "SELECT a FROM wbig WHERE e = repeat('y', 200000)"), "[[Int4(3002)]]");
     assert_eq!(rows(&mut s, "SELECT length(e) FROM wbig WHERE a = 3002"), "[[Int4(200000)]]");
 }
+
+#[test]
+fn direct_projection_preserves_values_expressions_and_effects() {
+    use pg_engine::types::Value;
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = engine_session(open_store(dir.path()), "projection");
+    s.query("SET max_parallel_workers_per_gather = 0").unwrap();
+    let extra = (0..64).map(|i| format!(", pad{i} text")).collect::<String>();
+    s.query(&format!("CREATE TABLE accounts (id int PRIMARY KEY, owner text, balance int, note text{extra})")).unwrap();
+    s.query("INSERT INTO accounts (id, owner, balance, note) SELECT i, 'owner ' || i,
+        CASE WHEN i % 7 = 0 THEN NULL ELSE i * 10 END,
+        CASE WHEN i % 11 = 0 THEN NULL ELSE repeat(md5(i::text), 400) END
+        FROM generate_series(1, 103) i").unwrap();
+    let get = |s: &mut pg_engine::session::Session, sql: &str| {
+        s.query(sql).unwrap_or_else(|e| panic!("{sql}: {e:?}")).pop().unwrap().rows
+    };
+    let balance = |i: i32| if i % 7 == 0 { Value::Null } else { Value::Int4(i * 10) };
+    // The measured primary-key range's exact [0, 2] projection, with a wide input row.
+    s.query("PREPARE range_read(int) AS SELECT id, balance FROM accounts WHERE id BETWEEN $1 AND $1+99 ORDER BY id").unwrap();
+    let want: Vec<_> = (2..=101).map(|i| vec![Value::Int4(i), balance(i)]).collect();
+    assert_eq!(get(&mut s, "EXECUTE range_read(2)"), want);
+    for (projection, expected) in [
+        ("balance, id", (2..=101).map(|i| vec![balance(i), Value::Int4(i)]).collect::<Vec<_>>()),
+        ("id, id, balance", (2..=101).map(|i| vec![Value::Int4(i), Value::Int4(i), balance(i)]).collect()),
+        ("id, balance + id, balance", (2..=101).map(|i| vec![Value::Int4(i),
+            if i % 7 == 0 { Value::Null } else { Value::Int4(i * 11) }, balance(i)]).collect()),
+    ] {
+        assert_eq!(get(&mut s, &format!("SELECT {projection} FROM accounts WHERE id BETWEEN 2 AND 101 ORDER BY id")), expected);
+    }
+    // TOAST is resolved by the scan: moving the value must keep the entire text alive.
+    let text = get(&mut s, "SELECT id, note FROM accounts WHERE id BETWEEN 10 AND 12 ORDER BY id");
+    for (i, row) in (10..=12).zip(&text) {
+        let expected = if i == 11 { Value::Null } else {
+            get(&mut s, &format!("SELECT repeat(md5('{i}'), 400)"))[0][0].clone()
+        };
+        assert_eq!(row, &vec![Value::Int4(i), expected]);
+    }
+    s.query("ALTER TABLE accounts ADD COLUMN added text DEFAULT 'later'").unwrap();
+    assert_eq!(get(&mut s, "SELECT id, added FROM accounts WHERE id = 2"), vec![vec![Value::Int4(2), Value::text("later")]]);
+    assert_eq!(get(&mut s, "SELECT FROM accounts WHERE id BETWEEN 2 AND 4"), vec![vec![], vec![], vec![]]);
+    assert!(get(&mut s, "SELECT id, balance FROM accounts WHERE id < 0").is_empty());
+    s.query("CREATE SEQUENCE projection_effect").unwrap();
+    assert_eq!(get(&mut s, "SELECT id, nextval('projection_effect'), balance FROM accounts WHERE id BETWEEN 2 AND 4 ORDER BY id"),
+        (2..=4).map(|i| vec![Value::Int4(i), Value::Int8((i - 1) as i64), balance(i)]).collect::<Vec<_>>());
+    // Evaluated expressions run in order before columns move, including on error.
+    s.query("ALTER SEQUENCE projection_effect RESTART WITH 1").unwrap();
+    let error = s.query("SELECT id, nextval('projection_effect'), 1 / (id - id), nextval('projection_effect'), balance FROM accounts WHERE id = 2").unwrap_err();
+    assert_eq!(error.code, pg_engine::error::code::DIVISION_BY_ZERO);
+    assert_eq!(get(&mut s, "SELECT currval('projection_effect')"), vec![vec![Value::Int8(1)]]);
+}
