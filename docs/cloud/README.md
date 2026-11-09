@@ -480,11 +480,45 @@ pushes take as long as the pack); `handoff-failures` and `lease-takeovers` on an
   owner had flushed (all but its last second at most).
 - Garbage collection runs on one node at a time (singleton `redis-gc`).
 
+## Testing the fleet
+
+`pnpm test:fleet` (`scripts/test-fleet.sh`; the `fleet` workflow on GitHub, run by hand) is the end
+to end test of this design. It builds the fleet image (dev profile), brings up a local copy of
+roll cloud (`deploy/cloud/local/docker-compose.yml`) and runs `crates/rolld/tests/fleet_e2e.rs`
+against it, then removes everything it created (all named `roll-cloud-e2e-*`).
+
+- **The stack.** Three `rolld` nodes from the fleet image with the cloud's node settings
+  (`ROLL_CLUSTER_BACKEND=dynamodb` on DynamoDB Local, `ROLL_SYSTEM_DATABASE` on
+  `postgres:18-alpine`, S3 on MinIO, `ROLL_EDGE=1` with self-signed wildcard certificates for
+  `roll.localhost` and `rollsite.localhost` from `deploy/cloud/local/gen-certs.sh`,
+  `ROLL_PRODUCTS` without postgres, `ROLL_LOG_FORMAT=json`), and HAProxy in front as the NLB: TCP
+  passthrough on every public port, PROXY protocol v2, `GET /healthz` on 7070 every second, out
+  after two failures (the drain delay is 5 s to match). A fourth node is the scale-out
+  (`--profile scale`). Ports are published on 127.0.0.1 and the test drives the stack from the
+  host by the edge's hostnames (`*.localhost` resolves to loopback).
+- **The load**, through the load balancer, with real clients, each writer recording every
+  acknowledged write and a reader beside it: roll code (API landings on four repos, `git push` and
+  fetches over `git.`), Redis (RESP over TLS with SNI, a `sync` database), NoSQL (CQL over TLS with
+  SNI, a `sync` database), streams (librdkafka, SASL_SSL, `acks=all`, idempotent), storage
+  (aws-sdk-s3, path and virtual-host style, multipart uploads), tasks (publish with `dedup_id`,
+  pull and ack). Queues join when they're on the cluster layer.
+- **The disruptions**: SIGKILL of the node holding the most leases (started again afterwards); a
+  rolling restart, each node stopped with SIGTERM (it must exit 0 holding no lease) and healthy
+  again before the next; a fourth node joining and leaving. After each, every tenant lease must be
+  on the node placement prefers.
+- **The checks**: every acknowledged write reads back; nothing is duplicated where the product
+  promises exactly once (code landings, Kafka records, storage keys) and tasks' at-least-once
+  deliveries carry the message id the publish returned; every client-visible error is a kind the
+  product's docs allow (`Product::allows` lists them, with the docs they come from); no operation
+  fails after the client retry policy. It prints writes, acknowledgements, verified writes,
+  errors by kind and the longest stall, per product and per disruption.
+
 ## Where everything lives
 
 | part | path |
 | --- | --- |
 | AWS stack | `deploy/cloud/aws/roll-cloud.yaml` |
+| local fleet and its end to end test | `deploy/cloud/local/`, `crates/rolld/tests/fleet_e2e.rs`, `scripts/test-fleet.sh` |
 | Cloudflare zones and records | `deploy/cloud/cloudflare/` |
 | fleet image | `deploy/cloud/Dockerfile` |
 | deploy pipeline | `.github/workflows/deploy.yml` |
@@ -507,6 +541,7 @@ pushes take as long as the pack); `handoff-failures` and `lease-takeovers` on an
 | nosql on the cluster layer | built: lease `nosql:db:<id>`, catalog on the system database, CQL spliced to the owner (SNI or SASL user), fenced manifests (docs/nosql/architecture.md, "On a fleet") |
 | streams on the cluster layer | built (`stream:cluster:<id>`, catalog on the system database, acknowledgements from a write-ahead log in S3, kafka splices); not yet run against AWS |
 | queues on the cluster layer | built: lease `mq:<vhost>/<queue>`, metadata on the system database (schema `mq`), logs in S3 Standard with group commit (no keepers, no proxies), drain = roll-cluster's (docs/queues/deploy-aws.md) |
+| fleet end to end test | built (`pnpm test:fleet`, "Testing the fleet"): every product but postgres through a SIGKILL, a rolling restart and a scale-out, through HAProxy with PROXY v2; queues to be added to it |
 | postgres on the fleet and the system database | with the pg-engine branch |
 | isolated work on Fargate | next |
 
@@ -545,3 +580,22 @@ pushes take as long as the pack); `handoff-failures` and `lease-takeovers` on an
   `{v}` template in `pg-control`'s config that the gates' pre-pulls must match) and the bases of
   the `deploy/` Dockerfiles that end-to-end gates build (`deploy/code`, `deploy/queues`,
   `deploy/nosql`). Every other image a suite or gate pulls is `tag@sha256:<multi-arch index>`.
+- **What the fleet test showed** (`pnpm test:fleet`, 2026-11-08; "Testing the fleet"). Each run
+  makes about 4.5k code landings, 6.5k Redis `SET`s, 6k CQL `INSERT`s, 21k Kafka records, 3k
+  objects and 1k–2k tasks publishes through a SIGKILL, a rolling restart and a scale-out. Every
+  drained node exited 0 holding no lease, and placement was right after every scenario. It found:
+  a lost acknowledged tasks publish (a dedup claim committed apart from its message: fixed with
+  `Store::write_all`, and the tasks consumers that fell behind a backlog: fixed by committing a
+  pull once), takeover after a crash at about 10 s, a stopping node waiting for the load balancer
+  twice, and NoSQL and streams handing out internal endpoints behind the edge (all three fixed by
+  lane `cloud/hardening`), and an image that didn't build. Still open from it:
+  - **Streams stall the longest on a planned handoff**: a producer waited 2.7–6.1 s for
+    acknowledgements during the rolling restart (Redis and NoSQL at most 2.6 s, others under
+    1.5 s); each move costs librdkafka a reconnect and a metadata refresh.
+  - **Queues aren't in the fleet test yet** (marked in `fleet_e2e.rs`; HAProxy already forwards
+    5671).
+  - The takeover and stop-order numbers above predate the hardening fixes: rerun the fleet test to
+    measure them again.
+- **tasks debounce on DynamoDB**: `workflows.rs::debounce_keeps_the_last_event` gave an extra run
+  for a window's first event ([1, 4, 99] for [4, 99]) on the DynamoDB store in CI, with the events
+  in one request. Debounce must give one run per window per key; lane `cloud/tasks` is on it.

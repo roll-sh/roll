@@ -13,6 +13,7 @@
     "test:tasks": "scripts/test-tasks.sh",
     "test:stream": "scripts/test-stream.sh",
     "test:queues": "scripts/test-queues.sh",
+    "test:fleet": "scripts/test-fleet.sh",
     "test:storage": "scripts/test-storage.sh",
     "test:storage-aws": "scripts/test-storage-aws.sh",
     "test:storage-cdn": "scripts/test-storage-cdn.sh",
