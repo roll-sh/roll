@@ -255,7 +255,10 @@ of every log on a broker go to one shared *stream* first:
   stream first: it fences the stream (writes its next object), copies every record into the
   per-log objects of its logs (put-if-absent, so a racing flush by the old writer is harmless),
   marks the stream `drained` and deletes it. Nothing confirmed is lost; the old writer's next
-  write to that stream fails, and it continues on a fresh stream for its other logs.
+  write to that stream fails, and it continues on a fresh stream for its other logs. A busy
+  stream holds one object per group commit since its logs last flushed (thousands after a few
+  minutes), and the new owner waits for the drain, so its reads, copies and deletes go 32 at a
+  time (1040 objects took 12.7 s one at a time on the fleet test's MinIO).
 - **Fencing** is unchanged: per-log objects are still put-if-absent at an index, and the new
   owner's fence marker sits after everything drained.
 - Truncation in grouped mode records the new start in memory and writes the `epoch` marker with

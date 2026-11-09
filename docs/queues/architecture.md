@@ -99,7 +99,11 @@ every queue and its logs are local.
 - **Failover.** When a node dies, its leases lapse after 10 s; the node placement prefers takes
   each one (at its next sweep, or at once when a request for the queue comes), replays the log
   from S3 and serves it. Confirmed messages are in S3, so none are lost. Unacked deliveries
-  become ready again, as with RabbitMQ. Meanwhile publishes wait in the routers.
+  become ready again, as with RabbitMQ. Meanwhile publishes wait in the routers. A dead machine
+  closes none of its connections, so nodes don't wait for TCP to notice: the RPC connection is
+  pinged every 2 s from the side that opened it and dropped by either side after 8 s of silence
+  (less than a lease), and what was in flight on it goes to the next owner
+  (`an_owner_that_vanishes_without_a_word_holds_nothing_up`).
 - **Queues that come and go.** A node that takes a lease for a queue of a vhost asleep here wakes
   the vhost. A deleted queue's owner gives its lease up for good (a new queue of that name has a
   new log); a queue that still exists keeps its lease record, because its log refuses epochs

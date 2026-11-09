@@ -297,6 +297,21 @@ impl Args {
     }
 }
 
+/// Every socket is a file descriptor: client connections, each product's pools to S3, DynamoDB
+/// and Postgres, node-to-node hops. Containers start with a soft limit of 1024, which a fleet node
+/// ran out of while draining under the fleet test (`Too many open files`, then nothing could
+/// reach the next owner); the hard limit is the real ceiling, so take it, as Go's runtime does.
+fn raise_open_files_limit() {
+    let mut rl = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+    // SAFETY: getrlimit and setrlimit only read and write the struct passed.
+    unsafe {
+        if libc::getrlimit(libc::RLIMIT_NOFILE, &mut rl) == 0 && rl.rlim_cur < rl.rlim_max {
+            rl.rlim_cur = rl.rlim_max;
+            libc::setrlimit(libc::RLIMIT_NOFILE, &rl);
+        }
+    }
+}
+
 fn main() -> anyhow::Result<()> {
     // Return freed memory to the OS right away (mimalloc's default waits 1 s), and have each worker
     // collect its heap when it goes idle: otherwise memory freed after a burst stays with threads
@@ -304,6 +319,7 @@ fn main() -> anyhow::Result<()> {
     // → 24–31 MB (and ~90 MB → ~60 MB with 600 partitions).
     unsafe { libmimalloc_sys::mi_option_set(MI_OPTION_PURGE_DELAY, 0) };
     nosql_storage::memory::set_allocator_release(|| unsafe { libmimalloc_sys::mi_collect(true) });
+    raise_open_files_limit();
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .on_thread_park(|| unsafe { libmimalloc_sys::mi_collect(false) })
