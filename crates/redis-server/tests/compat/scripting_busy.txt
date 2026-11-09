@@ -1,0 +1,47 @@
+# Scripts running past busy-reply-threshold: BUSY replies on other connections, SCRIPT KILL /
+# FUNCTION KILL, UNKILLABLE once a script wrote, FUNCTION STATS while a function runs.
+
+CONFIG SET busy-reply-threshold 100
+
+# ---- an EVAL that never ends, killed ----
+!send EVAL "local i = 0 while true do i = i + 1 end" 0
+@conn 2
+@sleep 400
+PING
+GET k
+FUNCTION KILL
+FUNCTION STATS
+SCRIPT KILL
+@conn 1
+@recv
+PING
+SCRIPT KILL
+FUNCTION KILL
+
+# ---- a function, killed with FUNCTION KILL ----
+FUNCTION LOAD "#!lua name=spin\nredis.register_function{function_name='spin', callback=function() while true do end end, flags={'no-writes'}}"
+!send FCALL spin 0 a1 a2
+@conn 2
+@sleep 400
+PING
+SCRIPT KILL
+!mask duration_ms FUNCTION STATS
+FUNCTION KILL
+@conn 1
+@recv
+FUNCTION STATS
+
+# ---- a script that wrote can't be killed; it finishes on its own ----
+!send EVAL "redis.call('SET', 'dirty', 1) local t = tonumber(redis.call('TIME')[1]) * 1000000 + tonumber(redis.call('TIME')[2]) local stop = t + 800000 while true do local now = redis.call('TIME') if tonumber(now[1]) * 1000000 + tonumber(now[2]) > stop then break end end return 'done'" 0
+@conn 2
+@sleep 400
+SCRIPT KILL
+GET dirty
+@conn 1
+@recv
+GET dirty
+
+# ---- below the threshold nothing is busy ----
+CONFIG SET busy-reply-threshold 5000
+EVAL "local i = 0 while i < 3000000 do i = i + 1 end return i" 0
+SCRIPT KILL

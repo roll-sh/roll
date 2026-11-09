@@ -1,0 +1,80 @@
+
+COPY [cqlsh only]
+
+  COPY x FROM: Imports CSV data into a Cassandra table
+  COPY x TO: Exports data from a Cassandra table in CSV format.
+
+COPY <table_name> [ ( column [, ...] ) ]
+     FROM ( '<file_pattern_1, file_pattern_2, ... file_pattern_n>' | STDIN )
+     [ WITH <option>='value' [AND ...] ];
+
+File patterns are either file names or valid python glob expressions, e.g. *.csv or folder/*.csv.
+
+COPY <table_name> [ ( column [, ...] ) ]
+     TO ( '<filename>' | STDOUT )
+     [ WITH <option>='value' [AND ...] ];
+
+Available common COPY options and defaults:
+
+  DELIMITER=','           - character that appears between records
+  QUOTE='"'               - quoting character to be used to quote fields
+  ESCAPE='\'              - character to appear before the QUOTE char when quoted
+  HEADER=false            - whether to ignore the first line
+  NULL=''                 - string that represents a null value
+  DATETIMEFORMAT=         - timestamp strftime format
+    '%Y-%m-%d %H:%M:%S%z'   defaults to time_format value in cqlshrc
+  MAXATTEMPTS=5           - the maximum number of attempts per batch or range
+  REPORTFREQUENCY=0.25    - the frequency with which we display status updates in seconds
+  DECIMALSEP='.'          - the separator for decimal values
+  THOUSANDSSEP=''         - the separator for thousands digit groups
+  BOOLSTYLE='True,False'  - the representation for booleans, case insensitive, specify true followed by false,
+                            for example yes,no or 1,0
+  NUMPROCESSES=n          - the number of worker processes, by default the number of cores minus one
+                            capped at 16
+  CONFIGFILE=''           - a configuration file with the same format as .cqlshrc (see the Python ConfigParser
+                            documentation) where you can specify WITH options under the following optional
+                            sections: [copy], [copy-to], [copy-from], [copy:ks.table], [copy-to:ks.table],
+                            [copy-from:ks.table], where <ks> is your keyspace name and <table> is your table
+                            name. Options are read from these sections, in the order specified
+                            above, and command line options always override options in configuration files.
+                            Depending on the COPY direction, only the relevant copy-from or copy-to sections
+                            are used. If no configfile is specified then .cqlshrc is searched instead.
+  RATEFILE=''             - an optional file where to print the output statistics
+
+Available COPY FROM options and defaults:
+
+  CHUNKSIZE=5000          - the size of chunks passed to worker processes
+  INGESTRATE=100000       - an approximate ingest rate in rows per second
+  MINBATCHSIZE=10         - the minimum size of an import batch
+  MAXBATCHSIZE=20         - the maximum size of an import batch
+  MAXROWS=-1              - the maximum number of rows, -1 means no maximum
+  SKIPROWS=0              - the number of rows to skip
+  SKIPCOLS=''             - a comma separated list of column names to skip
+  MAXPARSEERRORS=-1       - the maximum global number of parsing errors, -1 means no maximum
+  MAXINSERTERRORS=1000    - the maximum global number of insert errors, -1 means no maximum
+  ERRFILE=''              - a file where to store all rows that could not be imported, by default this is
+                            import_ks_table.err where <ks> is your keyspace and <table> is your table name.
+  PREPAREDSTATEMENTS=True - whether to use prepared statements when importing, by default True. Set this to
+                            False if you don't mind shifting data parsing to the cluster. The cluster will also
+                            have to compile every batch statement. For large and oversized clusters
+                            this will result in a faster import but for smaller clusters it may generate
+                            timeouts.
+  TTL=3600                - the time to live in seconds, by default data will not expire
+
+Available COPY TO options and defaults:
+
+  ENCODING='utf8'          - encoding for CSV output
+  PAGESIZE='1000'          - the page size for fetching results
+  PAGETIMEOUT=10           - the page timeout in seconds for fetching results
+  BEGINTOKEN=''            - the minimum token string to consider when exporting data
+  ENDTOKEN=''              - the maximum token string to consider when exporting data
+  MAXREQUESTS=6            - the maximum number of requests each worker process can work on in parallel
+  MAXOUTPUTSIZE='-1'       - the maximum size of the output file measured in number of lines,
+                             beyond this maximum the output file will be split into segments,
+                             -1 means unlimited.
+  FLOATPRECISION=5         - the number of digits displayed after the decimal point for cql float values
+  DOUBLEPRECISION=12       - the number of digits displayed after the decimal point for cql double values
+
+When entering CSV data on STDIN, you can use the sequence "\."
+on a line by itself to end the data input.
+

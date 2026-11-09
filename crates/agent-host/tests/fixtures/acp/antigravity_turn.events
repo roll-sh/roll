@@ -1,0 +1,21 @@
+{"native_thread":"agy-session-1"}
+{"model":"gemini-3-flash"}
+{"catalog":[{"default":true,"id":"gemini-3-flash","name":"Gemini 3 Flash"},{"default":false,"id":"gemini-3-pro-preview","name":"Gemini 3 Pro"},{"default":false,"id":"claude-sonnet-4-5","name":"Claude Sonnet 4.5"}]}
+{"request":{"body":{"questions":[{"header":"Question","id":"interaction_9960062f","multi":false,"options":[{"label":"Verified"},{"label":"Needs review"}],"question":"Which result label should be used for the verification?"}],"type":"questions"},"id":"1001","item":null}}
+{"item":{"body":{"agent":"Antigravity subagent batch","prompt":"Run invoke_subagent?","type":"subagent"},"id":"35bea692fa95447fbdae6333fec5515f","parent":null,"status":"running"}}
+{"item":{"body":{"agent":"Readme Reader","prompt":"Read README.md","type":"subagent"},"id":"35bea692fa95447fbdae6333fec5515f","parent":null,"status":"running"}}
+{"request":{"body":{"action":"tool","decisions":["accept","decline","cancel"],"input":{"Subagents":[{"Prompt":"Read README.md","Role":"Readme Reader","TypeName":"research"}]},"title":"Run invoke_subagent?","tool":"invoke_subagent","type":"approval"},"id":"1002","item":"35bea692fa95447fbdae6333fec5515f"}}
+{"item":{"body":{"agent":"Readme Reader","prompt":"Read README.md","type":"subagent"},"id":"35bea692fa95447fbdae6333fec5515f","parent":null,"status":"running"}}
+{"item":{"body":{"agent":"Readme Reader","prompt":"Read README.md","type":"subagent"},"id":"35bea692fa95447fbdae6333fec5515f","parent":null,"status":"running"}}
+{"item":{"body":{"input":{"CommandLine":"cat probe.txt","Cwd":"<workspace>"},"kind":"command","name":"run_command","title":"cat probe.txt","type":"tool"},"id":"fc28d0af6ad14be8bbba20f4258d4d3e","parent":null,"status":"running"}}
+{"item":{"body":{"input":{"CommandLine":"cat probe.txt","Cwd":"<workspace>"},"kind":"command","name":"run_command","title":"cat probe.txt","type":"tool"},"id":"fc28d0af6ad14be8bbba20f4258d4d3e","parent":null,"status":"running"}}
+{"request":{"body":{"action":"command","command":"cat probe.txt","cwd":"<workspace>","decisions":["accept","accept_for_session","decline","cancel"],"input":{"CommandLine":"cat probe.txt","Cwd":"<workspace>"},"reason":"Untrusted files could re-run this action without asking.","title":"Run `cat probe.txt`","tool":"run_command","type":"approval"},"id":"1003","item":"fc28d0af6ad14be8bbba20f4258d4d3e"}}
+{"output_delta":{"item":"fc28d0af6ad14be8bbba20f4258d4d3e","text":"after\n"}}
+{"item":{"body":{"exit_code":0,"input":{"CommandLine":"cat probe.txt","Cwd":"<workspace>"},"kind":"command","name":"run_command","output":"after\n","title":"cat probe.txt","type":"tool"},"id":"fc28d0af6ad14be8bbba20f4258d4d3e","parent":null,"status":"completed"}}
+{"item":{"body":{"text":"","type":"message"},"id":"msg:1:1","parent":null,"status":"running"}}
+{"text_delta":{"item":"msg:1:1","text":"The probe says after."}}
+{"item":{"body":{"text":"The probe says after.","type":"message"},"id":"msg:1:1","parent":null,"status":"running"}}
+{"item":{"body":{"text":"The probe says after.","type":"message"},"id":"msg:1:1","parent":null,"status":"completed"}}
+{"item":{"body":{"agent":"Readme Reader","prompt":"Read README.md","type":"subagent"},"id":"35bea692fa95447fbdae6333fec5515f","parent":null,"status":"completed"}}
+{"turn_ended":"completed"}
+{"exited":null}

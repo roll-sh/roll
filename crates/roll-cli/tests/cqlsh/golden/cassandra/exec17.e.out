@@ -1,0 +1,111 @@
+
+t
+
+
+pt
+
+
+CREATE TABLE cli_g_exec.t (
+    k int PRIMARY KEY,
+    v text
+) WITH additional_write_policy = '99p'
+    AND allow_auto_snapshot = true
+    AND bloom_filter_fp_chance = 0.01
+    AND caching = {'keys': 'ALL', 'rows_per_partition': 'NONE'}
+    AND cdc = false
+    AND comment = ''
+    AND compaction = {'class': 'org.apache.cassandra.db.compaction.SizeTieredCompactionStrategy', 'max_threshold': '32', 'min_threshold': '4'}
+    AND compression = {'chunk_length_in_kb': '16', 'class': 'org.apache.cassandra.io.compress.LZ4Compressor'}
+    AND memtable = 'default'
+    AND crc_check_chance = 1.0
+    AND default_time_to_live = 0
+    AND extensions = {}
+    AND gc_grace_seconds = 864000
+    AND incremental_backups = true
+    AND max_index_interval = 2048
+    AND memtable_flush_period_in_ms = 0
+    AND min_index_interval = 128
+    AND read_repair = 'BLOCKING'
+    AND speculative_retry = '99p';
+
+CREATE INDEX t_v ON cli_g_exec.t (v);
+
+CREATE TABLE cli_g_exec.t (
+    k int PRIMARY KEY,
+    v text
+) WITH additional_write_policy = '99p'
+    AND allow_auto_snapshot = true
+    AND bloom_filter_fp_chance = 0.01
+    AND caching = {'keys': 'ALL', 'rows_per_partition': 'NONE'}
+    AND cdc = false
+    AND comment = ''
+    AND compaction = {'class': 'org.apache.cassandra.db.compaction.SizeTieredCompactionStrategy', 'max_threshold': '32', 'min_threshold': '4'}
+    AND compression = {'chunk_length_in_kb': '16', 'class': 'org.apache.cassandra.io.compress.LZ4Compressor'}
+    AND memtable = 'default'
+    AND crc_check_chance = 1.0
+    AND default_time_to_live = 0
+    AND extensions = {}
+    AND gc_grace_seconds = 864000
+    AND incremental_backups = true
+    AND max_index_interval = 2048
+    AND memtable_flush_period_in_ms = 0
+    AND min_index_interval = 128
+    AND read_repair = 'BLOCKING'
+    AND speculative_retry = '99p';
+
+CREATE INDEX t_v ON cli_g_exec.t (v);
+
+CREATE KEYSPACE cli_g_exec WITH replication = {'class': 'NetworkTopologyStrategy', 'datacenter1': '1'}  AND durable_writes = true;
+
+CREATE TYPE cli_g_exec.pt (
+    x int,
+    y text
+);
+
+CREATE TABLE cli_g_exec.t (
+    k int PRIMARY KEY,
+    v text
+) WITH additional_write_policy = '99p'
+    AND allow_auto_snapshot = true
+    AND bloom_filter_fp_chance = 0.01
+    AND caching = {'keys': 'ALL', 'rows_per_partition': 'NONE'}
+    AND cdc = false
+    AND comment = ''
+    AND compaction = {'class': 'org.apache.cassandra.db.compaction.SizeTieredCompactionStrategy', 'max_threshold': '32', 'min_threshold': '4'}
+    AND compression = {'chunk_length_in_kb': '16', 'class': 'org.apache.cassandra.io.compress.LZ4Compressor'}
+    AND memtable = 'default'
+    AND crc_check_chance = 1.0
+    AND default_time_to_live = 0
+    AND extensions = {}
+    AND gc_grace_seconds = 864000
+    AND incremental_backups = true
+    AND max_index_interval = 2048
+    AND memtable_flush_period_in_ms = 0
+    AND min_index_interval = 128
+    AND read_repair = 'BLOCKING'
+    AND speculative_retry = '99p';
+
+CREATE INDEX t_v ON cli_g_exec.t (v);
+
+Cluster: Test Cluster
+Partitioner: Murmur3Partitioner
+Snitch: DynamicEndpointSnitch
+
+Range ownership:
+                    -1718092954189363016  [bcc174daf503/172.17.0.4:7000]
+                    -2535764886801713810  [bcc174daf503/172.17.0.4:7000]
+                    -3553616291544140826  [bcc174daf503/172.17.0.4:7000]
+                    -4625116907884173638  [bcc174daf503/172.17.0.4:7000]
+                    -6065385137786756878  [bcc174daf503/172.17.0.4:7000]
+                     -642337072963783477  [bcc174daf503/172.17.0.4:7000]
+                    -6909761785277918635  [bcc174daf503/172.17.0.4:7000]
+                    -8001058895970130895  [bcc174daf503/172.17.0.4:7000]
+                    -9097100796205069184  [bcc174daf503/172.17.0.4:7000]
+                     1172951427194711821  [bcc174daf503/172.17.0.4:7000]
+                     2416471432875303793  [bcc174daf503/172.17.0.4:7000]
+                     3383835675953839292  [bcc174daf503/172.17.0.4:7000]
+                     4973840228467737930  [bcc174daf503/172.17.0.4:7000]
+                     6592863524164781227  [bcc174daf503/172.17.0.4:7000]
+                     7571008976680895303  [bcc174daf503/172.17.0.4:7000]
+                       93578619747110163  [bcc174daf503/172.17.0.4:7000]
+

@@ -24,7 +24,7 @@ icu_collator = { workspace = true, optional = true }
 icu_locale_core = { workspace = true, optional = true }
 icu_provider = { workspace = true, optional = true }
 icu_segmenter = { workspace = true, optional = true }
-md-5.workspace = true
+md5.workspace = true
 mimalloc.workspace = true
 libc.workspace = true
 num-bigint.workspace = true

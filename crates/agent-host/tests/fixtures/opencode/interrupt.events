@@ -1,0 +1,14 @@
+{"native_thread":"ses_f148c8240ffegmJ5ZhqhyYOcSH"}
+{"model":"opencode/big-pickle"}
+{"item":{"body":{"text":"","type":"message"},"id":"msg_0eb737e1a001oFX6xYltb810rB:text:0","parent":null,"status":"running"}}
+{"text_delta":{"item":"msg_0eb737e1a001oFX6xYltb810rB:text:0","text":"I'll run that now"}}
+{"text_delta":{"item":"msg_0eb737e1a001oFX6xYltb810rB:text:0","text":"."}}
+{"item":{"body":{"input":{},"kind":"command","name":"shell","title":"shell","type":"tool"},"id":"call_function_1swk4r27uraj_1","parent":null,"status":"running"}}
+{"item":{"body":{"input":{"command":"sleep 60 && echo LATE","timeout":90000},"kind":"command","name":"shell","title":"sleep 60 && echo LATE","type":"tool"},"id":"call_function_1swk4r27uraj_1","parent":null,"status":"running"}}
+{"item":{"body":{"text":"I'll run that now.","type":"message"},"id":"msg_0eb737e1a001oFX6xYltb810rB:text:0","parent":null,"status":"completed"}}
+{"item":{"body":{"input":{"command":"sleep 60 && echo LATE","timeout":90000},"kind":"command","name":"shell","output":"Tool execution interrupted","title":"sleep 60 && echo LATE","type":"tool"},"id":"call_function_1swk4r27uraj_1","parent":null,"status":"interrupted"}}
+{"usage":{"cached_tokens":486,"input_tokens":9248,"output_tokens":47}}
+{"context":{"max_tokens":160000,"used_tokens":9295}}
+{"turn_ref":"msg_roll_turn_#1"}
+{"turn_ended":"interrupted"}
+{"exited":null}

@@ -1,0 +1,815 @@
+# RedisBloom 8.10 (bundled with Redis 8): bloom and cuckoo filters, count-min sketches, top-k
+# and t-digests — every command with its errors and RESP3 replies, SCANDUMP/LOADCHUNK round
+# trips, the module configs, DUMP/RESTORE, MEMORY USAGE, keyspace events, dirty counts, WATCH
+# and command metadata.
+
+FLUSHALL
+SET str v
+
+# ---- BF.RESERVE ----
+BF.RESERVE bf 0.01 100
+BF.RESERVE bf 0.01 100
+BF.RESERVE bf2 0.001 1000 EXPANSION 4
+BF.INFO bf2
+BF.RESERVE bf3 0.1 10 NONSCALING
+BF.INFO bf3
+BF.RESERVE bf4 0.5 10
+BF.DEBUG bf4
+BF.RESERVE x abc 100
+BF.RESERVE x 0 100
+BF.RESERVE x 1 100
+BF.RESERVE x -0.1 100
+BF.RESERVE x nan 100
+BF.RESERVE x 0.01 abc
+BF.RESERVE x 0.01 0
+BF.RESERVE x 0.01 1073741825
+BF.RESERVE x 0.01 100 EXPANSION
+BF.RESERVE x 0.01 100 EXPANSION abc
+BF.RESERVE x 0.01 100 EXPANSION 40000
+BF.RESERVE x 0.01 100 EXPANSION -1
+BF.RESERVE x 0.01 100 NONSCALING EXPANSION 2
+BF.RESERVE x 0.01 100 a b c d
+BF.RESERVE x 0.01
+BF.RESERVE str 0.01 100
+EXISTS x
+BF.RESERVE x 0.01 100 EXPANSION 0
+BF.INFO x
+BF.RESERVE x2 0.01 100 FOO
+
+# ---- BF.ADD / BF.MADD / BF.EXISTS / BF.MEXISTS / BF.CARD ----
+BF.ADD bf a
+BF.ADD bf a
+BF.MADD bf a b c
+BF.EXISTS bf a
+BF.EXISTS bf z
+BF.MEXISTS bf a b z
+BF.EXISTS nosuch a
+BF.MEXISTS nosuch a b
+BF.EXISTS str a
+BF.MEXISTS str a
+BF.ADD str a
+BF.MADD str a
+BF.ADD auto x
+BF.INFO auto
+BF.CARD bf
+BF.CARD nosuch
+BF.CARD str
+BF.ADD bf
+BF.MADD bf
+
+# ---- scaling, non-scaling ----
+BF.RESERVE sc 0.01 2
+BF.MADD sc a b c d e f g h i j k l
+BF.INFO sc
+BF.DEBUG sc
+BF.INFO sc CAPACITY
+BF.INFO sc size
+BF.INFO sc Filters
+BF.INFO sc ITEMS
+BF.INFO sc EXPANSION
+BF.INFO sc foo
+BF.INFO sc a b
+BF.INFO nosuch
+BF.INFO str
+BF.INFO bf3 expansion
+BF.DEBUG nosuch
+BF.DEBUG str
+BF.RESERVE ns 0.01 2 NONSCALING
+BF.MADD ns a b c d e
+BF.ADD ns f
+BF.CARD ns
+BF.INFO ns
+
+# ---- BF.INSERT ----
+BF.INSERT ins ITEMS a b
+BF.INSERT ins2 CAPACITY 1000 ERROR 0.001 EXPANSION 4 ITEMS a b
+BF.INFO ins2
+BF.DEBUG ins2
+BF.INSERT ins3 NOCREATE ITEMS a
+EXISTS ins3
+BF.INSERT ins3 NONSCALING CAPACITY 2 ITEMS a b c d
+BF.INFO ins3
+BF.INSERT ins4 ERROR 2 ITEMS a
+BF.INSERT ins4 ERROR x ITEMS a
+BF.INSERT ins4 EXPANSION x ITEMS a
+BF.INSERT ins4 EXPANSION 40000 ITEMS a
+BF.INSERT ins4 CAPACITY 0 ITEMS a
+BF.INSERT ins4 CAPACITY x ITEMS a
+BF.INSERT ins4 FOO ITEMS a
+BF.INSERT ins4 ITEMS
+BF.INSERT ins4 CAPACITY
+BF.INSERT ins4 ERROR
+BF.INSERT ins4 CAPACITY 10 NOCREATE
+BF.INSERT ins4 "" ITEMS a
+BF.INSERT ins4 EXPANSION 0 ITEMS a b c
+BF.INFO ins4
+BF.INSERT ins5 ERR 0.5 ITEMS a
+BF.DEBUG ins5
+BF.INSERT ins6 e 3 ITEMS a
+BF.INFO ins6
+BF.INSERT ins7 nonscaling items a
+BF.INFO ins7
+BF.INSERT str ITEMS a
+BF.INSERT bf NOCREATE ITEMS q
+BF.EXISTS bf q
+
+# ---- BF.SCANDUMP / BF.LOADCHUNK ----
+BF.SCANDUMP bf 0
+BF.SCANDUMP bf 1
+BF.SCANDUMP bf 100
+BF.SCANDUMP bf 145
+BF.SCANDUMP bf -1
+BF.SCANDUMP bf x
+BF.SCANDUMP nosuch 0
+BF.SCANDUMP str 0
+BF.SCANDUMP nosuch x
+EVAL "local it = 0; local n = 0; while true do local r = redis.call('BF.SCANDUMP', KEYS[1], it); it = r[1]; if it == 0 then break end; redis.call('BF.LOADCHUNK', KEYS[2], it, r[2]); n = n + 1 end; return n" 2 sc sccopy
+BF.DEBUG sccopy
+BF.MEXISTS sccopy a b l z
+BF.INFO sccopy
+BF.LOADCHUNK nosuch2 2 abc
+BF.LOADCHUNK nosuch2 1 abc
+BF.LOADCHUNK nosuch2 x abc
+BF.LOADCHUNK sccopy 1 abc
+BF.LOADCHUNK sccopy 100000 abc
+BF.LOADCHUNK sccopy 0 abc
+BF.LOADCHUNK sccopy 4 abc
+BF.LOADCHUNK str 1 abc
+BF.LOADCHUNK sccopy 1
+EVAL "return redis.call('BF.LOADCHUNK', KEYS[1], 1, string.rep('\0', 20))" 1 zerohdr
+
+# ---- CF.RESERVE ----
+CF.RESERVE cf 100
+CF.RESERVE cf 100
+CF.INFO cf
+CF.DEBUG cf
+CF.RESERVE cf2 1000 BUCKETSIZE 4 MAXITERATIONS 10 EXPANSION 2
+CF.INFO cf2
+CF.RESERVE cf3 x
+CF.RESERVE cf3 100 BUCKETSIZE
+CF.RESERVE cf3 100 BUCKETSIZE x
+CF.RESERVE cf3 100 BUCKETSIZE 0
+CF.RESERVE cf3 100 BUCKETSIZE 256
+CF.RESERVE cf3 100 MAXITERATIONS 0
+CF.RESERVE cf3 100 MAXITERATIONS x
+CF.RESERVE cf3 100 MAXITERATIONS 65536
+CF.RESERVE cf3 100 EXPANSION 40000
+CF.RESERVE cf3 100 EXPANSION x
+CF.RESERVE cf3 3 BUCKETSIZE 2
+CF.RESERVE cf3 1073741825
+CF.RESERVE cf3 -5
+CF.RESERVE cf3
+CF.RESERVE str 100
+CF.RESERVE cf3 100 FOO BAR
+CF.INFO cf3
+CF.RESERVE cf4 100 EXPANSION 0
+CF.INFO cf4
+CF.RESERVE cf5 100 EXPANSION 3 BUCKETSIZE 3
+CF.INFO cf5
+CF.DEBUG cf5
+
+# ---- CF.ADD / CF.ADDNX / CF.INSERT / CF.INSERTNX / CF.EXISTS / CF.COUNT ----
+CF.ADD cf a
+CF.ADD cf a
+CF.ADDNX cf a
+CF.ADDNX cf b
+CF.EXISTS cf a
+CF.EXISTS cf z
+CF.MEXISTS cf a b z
+CF.COUNT cf a
+CF.COUNT cf z
+CF.EXISTS nosuch a
+CF.COUNT nosuch a
+CF.MEXISTS nosuch a b
+CF.MEXISTS str a
+CF.COUNT str a
+CF.ADD str a
+CF.ADDNX str a
+CF.ADD autocf a
+CF.INFO autocf
+CF.INSERT cins ITEMS a b a
+CF.INSERTNX cins ITEMS a c
+CF.INSERT cins2 CAPACITY 50 ITEMS a
+CF.INFO cins2
+CF.INSERT cins3 NOCREATE ITEMS a
+CF.INSERT cins3 CAPACITY 1 ITEMS a
+CF.INSERT cins3 CAPACITY 1073741825 ITEMS a
+CF.INSERT cins3 CAPACITY x ITEMS a
+CF.INSERT cins3 FOO ITEMS a
+CF.INSERT cins3 ITEMS
+CF.INSERT cins3 CAPACITY
+CF.INSERT cins3 NOCREATE
+EXISTS cins3
+CF.INSERT str ITEMS a
+CF.INSERTNX str ITEMS a
+
+# ---- CF.DEL / CF.COMPACT ----
+CF.DEL cf a
+CF.DEL cf a
+CF.DEL cf zz
+CF.DEL nosuch a
+CF.DEL str a
+CF.COMPACT cf
+CF.COMPACT nosuch
+CF.COMPACT str
+CF.COMPACT
+CF.COMPACT a b
+CF.INFO cf
+
+# ---- full filters, expansion ----
+CF.RESERVE full 4 BUCKETSIZE 1 EXPANSION 0 MAXITERATIONS 5
+CF.INSERT full ITEMS a b c d e f g h i j
+CF.ADD full k
+CF.ADDNX full l
+CF.INFO full
+CF.RESERVE grow 4 BUCKETSIZE 1
+CF.INSERT grow ITEMS 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20
+CF.INFO grow
+CF.DEBUG grow
+CF.MEXISTS grow 1 5 10 20 21
+CF.DEL grow 1
+CF.DEL grow 2
+CF.DEL grow 3
+CF.INFO grow
+CF.COMPACT grow
+CF.INFO grow
+CF.COUNT grow 4
+
+# ---- CF.SCANDUMP / CF.LOADCHUNK ----
+CF.RESERVE dumped 16 BUCKETSIZE 2
+CF.INSERT dumped ITEMS a b c
+CF.SCANDUMP dumped 0
+CF.SCANDUMP dumped 1
+CF.SCANDUMP dumped 17
+CF.SCANDUMP dumped 5
+CF.SCANDUMP dumped -1
+CF.SCANDUMP dumped x
+CF.SCANDUMP nosuch 0
+CF.SCANDUMP str 0
+CF.SCANDUMP nosuch -1
+CF.RESERVE emptycf 100
+CF.SCANDUMP emptycf 0
+EVAL "local it = 0; local n = 0; while true do local r = redis.call('CF.SCANDUMP', KEYS[1], it); it = r[1]; if it == 0 then break end; redis.call('CF.LOADCHUNK', KEYS[2], it, r[2]); n = n + 1 end; return n" 2 grow growcopy
+CF.INFO growcopy
+CF.MEXISTS growcopy 4 5 20 21
+CF.LOADCHUNK nosuch3 1 abc
+CF.LOADCHUNK nosuch3 0 abc
+CF.LOADCHUNK nosuch3 x abc
+CF.LOADCHUNK nosuch3 5 abc
+CF.LOADCHUNK dumped 1 abc
+CF.LOADCHUNK dumped 99999 abc
+CF.LOADCHUNK dumped 4 abc
+CF.LOADCHUNK str 1 abc
+EVAL "return redis.pcall('CF.LOADCHUNK', KEYS[1], 1, string.rep('\0', 38))" 1 zerocf
+EXISTS zerocf
+
+# ---- CMS ----
+CMS.INITBYDIM cms 100 5
+CMS.INITBYDIM cms 100 5
+CMS.INITBYDIM str 100 5
+CMS.INITBYPROB cmsp 0.001 0.01
+CMS.INFO cmsp
+CMS.INITBYPROB cmsp2 0.3 0.9
+CMS.INFO cmsp2
+CMS.INITBYDIM x 0 5
+CMS.INITBYDIM x 5 0
+CMS.INITBYDIM x a 5
+CMS.INITBYDIM x 5 a
+CMS.INITBYPROB x 0 0.5
+CMS.INITBYPROB x 0.5 1
+CMS.INITBYPROB x a 0.5
+CMS.INITBYPROB x 0.5 a
+CMS.INITBYPROB x 0.5 1e-300
+CMS.INITBYDIM x 9223372036854775807 2
+CMS.INITBYDIM x 5
+EXISTS x
+CMS.INCRBY cms a 1 b 2 a 3
+CMS.INCRBY cms a x
+CMS.INCRBY cms a -1
+CMS.INCRBY cms a 1 b
+CMS.INCRBY nosuch a 1
+CMS.INCRBY str a 1
+CMS.INCRBY cms big 4294967290 big 10 small 1
+CMS.QUERY cms a b c big small
+CMS.QUERY nosuch a
+CMS.QUERY str a
+CMS.QUERY cms
+CMS.INFO cms
+CMS.INFO nosuch
+CMS.INFO str
+CMS.INITBYDIM m1 100 5
+CMS.INITBYDIM m2 100 5
+CMS.INCRBY m1 a 1
+CMS.INCRBY m2 a 2 b 3
+CMS.MERGE dst 2 m1 m2
+CMS.INITBYDIM dst 100 5
+CMS.MERGE dst 2 m1 m2
+CMS.QUERY dst a b
+CMS.INFO dst
+CMS.MERGE dst 2 m1 m2 WEIGHTS 2 3
+CMS.QUERY dst a b
+CMS.MERGE dst 2 dst m1
+CMS.QUERY dst a b
+CMS.INFO dst
+CMS.MERGE dst 0 m1
+CMS.MERGE dst -1 m1
+CMS.MERGE dst x m1
+CMS.MERGE dst 3 m1 m2
+CMS.MERGE dst 1 m1 m2
+CMS.MERGE dst 2 m1 m2 WEIGHTS 1
+CMS.MERGE dst 2 m1 m2 WEIGHTS 1 x
+CMS.MERGE dst 2 m1 WEIGHTS 1 2
+CMS.MERGE dst 1 cmsp
+CMS.MERGE dst 1 nosuch
+CMS.MERGE dst 1 str
+CMS.MERGE nosuch 1 m1
+CMS.MERGE str 1 m1
+CMS.MERGE dst 1 m1 WEIGHTS -1
+CMS.MERGE dst 1 m1 WEIGHTS 9223372036854775807
+CMS.MERGE dst 1 m1 WEIGHTS 4294967296
+CMS.QUERY dst a b
+
+# ---- TOPK ----
+TOPK.RESERVE tk 3 1000 5 0.9
+TOPK.RESERVE tk 3
+TOPK.RESERVE tkd 2
+TOPK.INFO tkd
+TOPK.INFO tk
+TOPK.RESERVE x 0
+TOPK.RESERVE x a
+TOPK.RESERVE x 4294967296
+TOPK.RESERVE x 3 0 5 0.9
+TOPK.RESERVE x 3 10 0 0.9
+TOPK.RESERVE x 3 10 5 0
+TOPK.RESERVE x 3 10 5 1.5
+TOPK.RESERVE x 3 10 5 a
+TOPK.RESERVE x 3 10
+TOPK.RESERVE x 3 10 5 0.9 1
+TOPK.RESERVE str 3
+TOPK.RESERVE tk1 3 10 5 1
+TOPK.INFO tk1
+TOPK.ADD tk a b c a a b d e
+TOPK.LIST tk
+TOPK.LIST tk WITHCOUNT
+TOPK.LIST tk withc
+TOPK.LIST tk ""
+TOPK.LIST tk WITHCOUNTS
+TOPK.LIST tk foo
+TOPK.LIST tk a b
+TOPK.QUERY tk a z e
+TOPK.COUNT tk a b z
+TOPK.INCRBY tk f 10 g 5
+TOPK.LIST tk WITHCOUNT
+TOPK.INCRBY tk f 100001
+TOPK.INCRBY tk f -1
+TOPK.INCRBY tk f x
+TOPK.INCRBY tk f
+TOPK.INCRBY tk f 0
+TOPK.LIST tk WITHCOUNT
+TOPK.ADD nosuch a
+TOPK.ADD str a
+TOPK.INCRBY nosuch a 1
+TOPK.QUERY nosuch a
+TOPK.COUNT str a
+TOPK.LIST nosuch
+TOPK.LIST nosuch foo
+TOPK.INFO nosuch
+TOPK.RESERVE tkn 2 1000 5 0.9
+EVAL "return redis.call('TOPK.ADD', KEYS[1], 'x\0y', 'x\0y', 'p')" 1 tkn
+TOPK.LIST tkn WITHCOUNT
+EVAL "return redis.call('TOPK.QUERY', KEYS[1], 'x\0y', 'x')" 1 tkn
+
+# ---- TDIGEST ----
+TDIGEST.CREATE td
+TDIGEST.CREATE td
+TDIGEST.CREATE td2 COMPRESSION 50
+TDIGEST.CREATE td3 compression 1
+TDIGEST.INFO td3
+TDIGEST.CREATE x COMPRESSION 0
+TDIGEST.CREATE x COMPRESSION -1
+TDIGEST.CREATE x COMPRESSION abc
+TDIGEST.CREATE x FOO 10
+TDIGEST.CREATE x 10 COMPRESSION
+TDIGEST.CREATE x COMPRESSION
+TDIGEST.CREATE x a b c
+TDIGEST.CREATE str
+EXISTS x
+TDIGEST.INFO td
+TDIGEST.INFO td2
+TDIGEST.MIN td
+TDIGEST.MAX td
+TDIGEST.QUANTILE td 0.5
+TDIGEST.CDF td 1
+TDIGEST.RANK td 1
+TDIGEST.REVRANK td 1
+TDIGEST.BYRANK td 0
+TDIGEST.BYREVRANK td 0
+TDIGEST.TRIMMED_MEAN td 0.1 0.9
+TDIGEST.ADD td 1 2 3 4 5 6 7 8 9 10
+TDIGEST.INFO td
+TDIGEST.MIN td
+TDIGEST.MAX td
+TDIGEST.INFO td
+TDIGEST.QUANTILE td 0 0.1 0.5 0.9 1 0.5 0.25
+TDIGEST.INFO td
+TDIGEST.CDF td 0 1 5 5.5 10 11
+TDIGEST.RANK td 0 1 5 5.5 10 11
+TDIGEST.REVRANK td 0 1 5 5.5 10 11
+TDIGEST.BYRANK td 0 1 5 9 10 11
+TDIGEST.BYREVRANK td 0 1 5 9 10 11
+TDIGEST.TRIMMED_MEAN td 0.1 0.9
+TDIGEST.TRIMMED_MEAN td 0 1
+TDIGEST.TRIMMED_MEAN td 0.2 0.3
+TDIGEST.TRIMMED_MEAN td 0.5 0.5
+TDIGEST.TRIMMED_MEAN td 0.6 0.5
+TDIGEST.TRIMMED_MEAN td -1 0.5
+TDIGEST.TRIMMED_MEAN td 0.1 2
+TDIGEST.TRIMMED_MEAN td a 0.5
+TDIGEST.TRIMMED_MEAN td 0.1 b
+TDIGEST.TRIMMED_MEAN td 0.1
+TDIGEST.QUANTILE td 1.5
+TDIGEST.QUANTILE td -0.1
+TDIGEST.QUANTILE td x
+TDIGEST.QUANTILE td nan
+TDIGEST.QUANTILE td
+TDIGEST.CDF td x
+TDIGEST.CDF td inf -inf
+TDIGEST.RANK td x
+TDIGEST.RANK td inf -inf
+TDIGEST.REVRANK td inf -inf
+TDIGEST.BYRANK td -1
+TDIGEST.BYRANK td x
+TDIGEST.BYRANK td 9223372036854775807
+TDIGEST.BYREVRANK td 9223372036854775807
+TDIGEST.ADD td x
+TDIGEST.ADD td 1 x
+TDIGEST.ADD td nan
+TDIGEST.ADD td inf
+TDIGEST.ADD td -inf
+TDIGEST.ADD td 1e308 -1e308
+TDIGEST.INFO td
+TDIGEST.ADD nosuch 1
+TDIGEST.ADD str 1
+TDIGEST.MIN nosuch
+TDIGEST.MIN str
+TDIGEST.MAX str
+TDIGEST.QUANTILE nosuch 0.5
+TDIGEST.QUANTILE str 0.5
+TDIGEST.INFO nosuch
+TDIGEST.RESET td
+TDIGEST.INFO td
+TDIGEST.MIN td
+TDIGEST.RESET nosuch
+TDIGEST.RESET str
+TDIGEST.CREATE many COMPRESSION 10
+EVAL "for i = 1, 500 do redis.call('TDIGEST.ADD', KEYS[1], i, i * 2, 1000 - i) end return 1" 1 many
+TDIGEST.INFO many
+TDIGEST.QUANTILE many 0.01 0.25 0.5 0.75 0.99
+TDIGEST.CDF many 1 100 500 999
+TDIGEST.RANK many 1 100 500 999
+TDIGEST.REVRANK many 1 100 500 999
+TDIGEST.BYRANK many 1 100 750 1499
+TDIGEST.BYREVRANK many 1 100 750 1499
+TDIGEST.TRIMMED_MEAN many 0.1 0.9
+TDIGEST.INFO many
+
+# ---- TDIGEST.MERGE ----
+TDIGEST.CREATE s1 COMPRESSION 100
+TDIGEST.CREATE s2 COMPRESSION 200
+TDIGEST.ADD s1 1 2 3
+TDIGEST.ADD s2 4 5 6
+TDIGEST.MERGE m 2 s1 s2
+TDIGEST.INFO m
+TDIGEST.INFO s1
+TDIGEST.QUANTILE m 0.5
+TDIGEST.MERGE m 1 s1
+TDIGEST.INFO m
+TDIGEST.MERGE m 1 s1 OVERRIDE
+TDIGEST.INFO m
+TDIGEST.MERGE m 1 s1 COMPRESSION 50
+TDIGEST.INFO m
+TDIGEST.MERGE m 2 m s2
+TDIGEST.INFO m
+TDIGEST.MERGE m2 1 m2
+TDIGEST.MERGE m 1 nosuch
+TDIGEST.MERGE m 1 str
+TDIGEST.MERGE str 1 s1
+TDIGEST.MERGE m 0 s1
+TDIGEST.MERGE m -1 s1
+TDIGEST.MERGE m x s1
+TDIGEST.MERGE m 3 s1 s2
+TDIGEST.MERGE m 1 s1 FOO
+TDIGEST.MERGE m 1 s1 COMPRESSION
+TDIGEST.MERGE m 1 s1 COMPRESSION 0
+TDIGEST.MERGE m 1 s1 COMPRESSION x
+TDIGEST.MERGE m 1 s1 FOO OVERRIDE
+TDIGEST.MERGE m 1 s1 COMPRESSION 10 OVERRIDE
+TDIGEST.INFO m
+EXPIRE m 100
+TDIGEST.MERGE m 1 s1
+TTL m
+TDIGEST.MERGE fresh 1 s1 OVERRIDE
+TDIGEST.INFO fresh
+
+# ---- generic commands ----
+TYPE bf
+TYPE cf
+TYPE cms
+TYPE tk
+TYPE s1
+OBJECT ENCODING bf
+OBJECT ENCODING s1
+MEMORY USAGE bf
+MEMORY USAGE sc
+MEMORY USAGE cf
+MEMORY USAGE grow
+MEMORY USAGE cms
+MEMORY USAGE tk
+MEMORY USAGE tkd
+MEMORY USAGE s1
+MEMORY USAGE td2
+!sort SCAN 0 TYPE MBbloom-- COUNT 1000
+!sort SCAN 0 TYPE mbbloomcf COUNT 1000
+!sort SCAN 0 TYPE TDIS-TYPE COUNT 1000
+DUMP bf
+DUMP sc
+DUMP cf
+DUMP grow
+DUMP cms
+DUMP s1
+TDIGEST.ADD s2 7 8
+TDIGEST.INFO s2
+DUMP s2
+TDIGEST.INFO s2
+TDIGEST.ADD s2 9
+SAVE
+TDIGEST.INFO s2
+EVAL "local d = redis.call('DUMP', KEYS[1]); redis.call('DEL', KEYS[2]); return redis.call('RESTORE', KEYS[2], 0, d)" 2 sc scr
+BF.DEBUG scr
+BF.MEXISTS scr a l z
+EVAL "local d = redis.call('DUMP', KEYS[1]); redis.call('DEL', KEYS[2]); return redis.call('RESTORE', KEYS[2], 0, d)" 2 grow growr
+CF.INFO growr
+EVAL "local d = redis.call('DUMP', KEYS[1]); redis.call('DEL', KEYS[2]); return redis.call('RESTORE', KEYS[2], 0, d)" 2 dst dstr
+CMS.QUERY dstr a b
+EVAL "local d = redis.call('DUMP', KEYS[1]); redis.call('DEL', KEYS[2]); return redis.call('RESTORE', KEYS[2], 0, d)" 2 tk tkr
+TOPK.LIST tkr WITHCOUNT
+TOPK.INFO tkr
+TOPK.ADD tkr a
+EVAL "local d = redis.call('DUMP', KEYS[1]); redis.call('DEL', KEYS[2]); return redis.call('RESTORE', KEYS[2], 0, d)" 2 many manyr
+TDIGEST.INFO manyr
+TDIGEST.QUANTILE manyr 0.5
+COPY bf bfcopy
+COPY bf bf2
+COPY nosuch bfcopy
+COPY tk tkcopy
+EXISTS bfcopy
+RENAME bf bfren
+BF.EXISTS bfren a
+RENAME bfren bf
+
+# ---- module configs ----
+CONFIG GET bf-error-rate
+!sort CONFIG GET bf-*
+!sort CONFIG GET cf-*
+CONFIG GET bf.bf-error-rate
+CONFIG GET BF-ERROR-RATE
+CONFIG SET bf-error-rate 0.0100
+CONFIG GET bf-error-rate
+CONFIG SET bf-error-rate 0.5
+CONFIG GET bf-error-rate
+BF.ADD cfgbf a
+BF.DEBUG cfgbf
+CONFIG SET bf-error-rate 1e-3
+CONFIG GET bf-error-rate
+BF.ADD cfgbf1 a
+BF.DEBUG cfgbf1
+CONFIG SET bf-error-rate 0
+CONFIG SET bf-error-rate 1
+CONFIG SET bf-error-rate abc
+CONFIG SET bf-error-rate ""
+CONFIG GET bf-error-rate
+CONFIG SET bf-initial-size 0
+CONFIG SET bf-initial-size 1073741825
+CONFIG SET bf-initial-size x
+CONFIG SET bf-initial-size 7
+BF.ADD cfgbf2 a
+BF.INFO cfgbf2
+CONFIG SET bf-expansion-factor 0
+BF.ADD cfgbf3 a
+BF.INFO cfgbf3
+BF.RESERVE cfgbf4 0.01 10 EXPANSION 2
+BF.RESERVE cfgbf4 0.01 10
+BF.INFO cfgbf4
+CONFIG SET bf-expansion-factor 32769
+CONFIG SET bf-expansion-factor 3
+BF.INSERT cfgbf5 ITEMS a
+BF.INFO cfgbf5
+CONFIG SET cf-bucket-size 4
+CONFIG SET cf-initial-size 6
+CONFIG SET cf-initial-size 100
+CONFIG SET cf-bucket-size 60
+CONFIG SET cf-bucket-size 0
+CONFIG SET cf-max-iterations 0
+CONFIG SET cf-max-iterations 65536
+CONFIG SET cf-max-iterations 7
+CONFIG SET cf-expansion-factor 3
+CF.ADD cfgcf a
+CF.INFO cfgcf
+CF.RESERVE cfgcf2 1000 BUCKETSIZE 60
+CF.INSERT cfgcf3 CAPACITY 4 ITEMS a
+CF.INSERT cfgcf3 CAPACITY 8 ITEMS a
+CF.INFO cfgcf3
+CONFIG SET cf-max-expansions 0
+CONFIG SET cf-max-expansions 65537
+CONFIG SET cf-max-expansions 1
+CF.ADD cfgcf b
+CF.INSERT cfgcf ITEMS b
+CF.ADD cfgcf4 a
+EXISTS cfgcf4
+!sort CONFIG GET cf-*
+CONFIG SET bf-error-rate 0.01 bf-initial-size 100 bf-expansion-factor 2 cf-bucket-size 2 cf-initial-size 1024 cf-max-iterations 20 cf-expansion-factor 1 cf-max-expansions 32
+!sort CONFIG GET bf-*
+!sort CONFIG GET cf-*
+
+# ---- RESP3 ----
+@resp 3
+BF.ADD r3 a
+BF.MADD r3 a b
+BF.EXISTS r3 a
+BF.MEXISTS r3 a z
+BF.EXISTS nosuch a
+BF.INFO r3
+BF.INFO r3 capacity
+BF.INFO bf3
+BF.INFO bf3 expansion
+BF.INSERT r3 ITEMS c d
+BF.MADD ns z
+CF.ADD r3c a
+CF.ADDNX r3c a
+CF.INSERT r3c ITEMS a b
+CF.INSERTNX r3c ITEMS a c
+CF.EXISTS r3c a
+CF.MEXISTS r3c a z
+CF.COUNT r3c a
+CF.DEL r3c a
+CF.DEL r3c zz
+CF.EXISTS nosuch a
+CF.MEXISTS nosuch a
+CF.COUNT nosuch a
+CF.INFO r3c
+CF.INSERT full ITEMS z
+CF.INSERTNX full ITEMS z2
+CF.SCANDUMP emptycf 0
+CMS.INFO cms
+CMS.INCRBY cms a 1
+TOPK.INFO tk
+TOPK.QUERY tk a z
+TOPK.ADD tk a
+TOPK.LIST tk WITHCOUNT
+TDIGEST.INFO many
+TDIGEST.QUANTILE s1 0.5 1
+TDIGEST.CREATE r3t
+TDIGEST.MIN r3t
+TDIGEST.BYRANK s1 100
+TDIGEST.BYREVRANK s1 100
+TDIGEST.RANK s1 2
+@resp 2
+
+# ---- keyspace events ----
+CONFIG SET notify-keyspace-events KEAnm
+@conn 2
+!send PSUBSCRIBE __key*__:ev*
+@recv
+@conn 1
+BF.RESERVE ev1 0.01 100
+BF.ADD ev1 a
+BF.ADD ev2 a
+CF.ADD ev3 a
+CMS.INITBYDIM ev4 10 2
+CMS.INCRBY ev4 a 1
+TOPK.RESERVE ev5 2
+TOPK.ADD ev5 a
+TDIGEST.CREATE ev6
+TDIGEST.ADD ev6 1
+EXPIRE ev6 100
+TDIGEST.MERGE ev6 1 ev6
+BF.EXISTS evmiss a
+DEL ev1 ev2 ev3 ev4 ev5 ev6
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+PUNSUBSCRIBE
+@conn 1
+CONFIG SET notify-keyspace-events ""
+
+# ---- dirty (one change per replicated command) ----
+SAVE
+BF.ADD dy a
+!info rdb_changes_since_last_save INFO persistence
+BF.ADD dy a
+!info rdb_changes_since_last_save INFO persistence
+BF.EXISTS dy a
+BF.RESERVE dy 0.01 100
+BF.MADD dy
+!info rdb_changes_since_last_save INFO persistence
+CF.ADD dyc a
+CF.DEL dyc z
+CF.DEL nosuch z
+!info rdb_changes_since_last_save INFO persistence
+CF.COMPACT dyc
+!info rdb_changes_since_last_save INFO persistence
+CMS.INITBYDIM dym 10 2
+CMS.INCRBY dym a 1
+CMS.INCRBY dym a x
+!info rdb_changes_since_last_save INFO persistence
+TOPK.RESERVE dyt 2
+TOPK.INCRBY dyt a x
+!info rdb_changes_since_last_save INFO persistence
+TDIGEST.CREATE dyd
+TDIGEST.ADD dyd x
+TDIGEST.ADD dyd 1
+TDIGEST.QUANTILE dyd 0.5
+!info rdb_changes_since_last_save INFO persistence
+TDIGEST.MERGE dyd 1 dyd
+!info rdb_changes_since_last_save INFO persistence
+BF.RESERVE ns2 0.01 1 NONSCALING
+BF.MADD ns2 a b c
+!info rdb_changes_since_last_save INFO persistence
+
+# ---- error stats (errors inside arrays count) ----
+CONFIG RESETSTAT
+BF.MADD ns2 x y
+CMS.INCRBY cms big 10
+!info errorstat_ERR INFO errorstats
+!info total_error_replies INFO stats
+
+# ---- WATCH: opening a key for writing touches it ----
+WATCH bf
+@conn 2
+BF.RESERVE bf 0.01 100
+@conn 1
+MULTI
+PING
+EXEC
+WATCH bf
+@conn 2
+BF.EXISTS bf a
+TDIGEST.QUANTILE bf 0.5
+@conn 1
+MULTI
+PING
+EXEC
+WATCH s1
+@conn 2
+TDIGEST.QUANTILE s1 0.5
+@conn 1
+MULTI
+PING
+EXEC
+WATCH nosuchw
+@conn 2
+CMS.INCRBY nosuchw a 1
+@conn 1
+MULTI
+PING
+EXEC
+
+# ---- scripts and transactions ----
+EVAL "return redis.call('BF.ADD', KEYS[1], 'x')" 1 sbf
+EVAL "return redis.pcall('CMS.INCRBY', KEYS[1], 'x', 'y')" 1 cms
+EVAL "return redis.call('TDIGEST.INFO', KEYS[1])" 1 s1
+MULTI
+BF.ADD txbf a
+BF.EXISTS txbf a
+CF.ADD txbf a
+EXEC
+
+# ---- command metadata ----
+COMMAND INFO bf.add bf.reserve cf.compact cf.del tdigest.merge cms.merge topk.list tdigest.trimmed_mean
+COMMAND GETKEYS TDIGEST.MERGE d 2 a b COMPRESSION 10
+COMMAND GETKEYS CMS.MERGE d 2 a b
+COMMAND GETKEYS BF.INSERT k ITEMS a
+!sort ACL CAT bloom
+!sort ACL CAT cuckoo
+!sort ACL CAT cms
+!sort ACL CAT topk
+!sort ACL CAT tdigest
+!sort COMMAND LIST FILTERBY PATTERN bf.*
+!sort COMMAND LIST FILTERBY PATTERN tdigest.*
+COMMAND DOCS bf.add
+COMMAND DOCS tdigest.merge
+
+FLUSHALL

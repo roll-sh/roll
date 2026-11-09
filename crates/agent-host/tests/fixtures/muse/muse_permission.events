@@ -1,0 +1,23 @@
+{"native_thread":"01a11a6d-39bb-7000-8c93-4594c98e6a11"}
+{"model":"muse-spark-1.3-contributor"}
+{"usage":{"cached_tokens":0,"input_tokens":32618,"output_tokens":315}}
+{"context":{"max_tokens":1007997,"used_tokens":32933}}
+{"request":{"body":{"action":"command","command":"touch muse-approved.txt","decisions":["accept","decline"],"input":{"command":"touch muse-approved.txt","description":"Create approval marker file"},"title":"Run `touch muse-approved.txt`","tool":"bash","type":"approval"},"id":"01a11a6d-4730-75f1-bc60-4e5df1a3cdc0","item":"01a11a6d-4730-75f1-bc60-4e5df1a3cdc0"}}
+{"item":{"body":{"input":{"command":"touch muse-approved.txt","description":"Create approval marker file"},"kind":"command","name":"bash","title":"touch muse-approved.txt","type":"tool"},"id":"01a11a6d-4730-75f1-bc60-4e5df1a3cdc0","parent":null,"status":"running"}}
+{"item":{"body":{"exit_code":0,"input":{"command":"touch muse-approved.txt","description":"Create approval marker file"},"kind":"command","name":"bash","title":"touch muse-approved.txt","type":"tool"},"id":"01a11a6d-4730-75f1-bc60-4e5df1a3cdc0","parent":null,"status":"completed"}}
+{"item":{"body":{"text":"","type":"message"},"id":"ae8db1e0-7a51-4efc-a025-8ae43f755700","parent":null,"status":"running"}}
+{"text_delta":{"item":"ae8db1e0-7a51-4efc-a025-8ae43f755700","text":"DONE"}}
+{"item":{"body":{"text":"DONE","type":"message"},"id":"ae8db1e0-7a51-4efc-a025-8ae43f755700","parent":null,"status":"completed"}}
+{"usage":{"cached_tokens":32497,"input_tokens":65644,"output_tokens":337}}
+{"context":{"max_tokens":1007997,"used_tokens":33048}}
+{"turn_ended":"completed"}
+{"usage":{"cached_tokens":33009,"input_tokens":33401,"output_tokens":201}}
+{"context":{"max_tokens":1007997,"used_tokens":33602}}
+{"request":{"body":{"action":"command","command":"touch muse-declined.txt","decisions":["accept","decline"],"input":{"command":"touch muse-declined.txt","description":"Create declined marker file"},"title":"Run `touch muse-declined.txt`","tool":"bash","type":"approval"},"id":"01a11a6d-9054-70c0-bf68-3ec59d37fbf8","item":"01a11a6d-9054-70c0-bf68-3ec59d37fbf8"}}
+{"item":{"body":{"text":"","type":"message"},"id":"05a64d05-5be4-48c4-938e-70db3ba23f0a","parent":null,"status":"running"}}
+{"text_delta":{"item":"05a64d05-5be4-48c4-938e-70db3ba23f0a","text":"REJECTED"}}
+{"item":{"body":{"text":"REJECTED","type":"message"},"id":"05a64d05-5be4-48c4-938e-70db3ba23f0a","parent":null,"status":"completed"}}
+{"usage":{"cached_tokens":66402,"input_tokens":67032,"output_tokens":261}}
+{"context":{"max_tokens":1007997,"used_tokens":33691}}
+{"turn_ended":"completed"}
+{"exited":null}

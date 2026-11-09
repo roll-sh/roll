@@ -1,0 +1,78 @@
+[
+  {
+    "triggers": [
+      {
+        "source": "manual",
+        "title": "By hand",
+        "description": "Run it from the dashboard, the CLI or MCP.",
+        "events": [
+          {
+            "kind": "run",
+            "title": "Run",
+            "fields": [
+              "input",
+              "by"
+            ],
+            "sample": {
+              "by": "acme",
+              "input": {}
+            }
+          }
+        ]
+      },
+      {
+        "source": "linear",
+        "title": "Linear",
+        "description": "Issues and comments in Linear.",
+        "events": [
+          {
+            "kind": "issue.created",
+            "title": "Issue created",
+            "fields": [
+              "issue.title",
+              "issue.labels"
+            ]
+          }
+        ],
+        "config": {
+          "properties": {
+            "team": {
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "needs_setup": true
+      }
+    ],
+    "steps": [
+      {
+        "kind": "notify",
+        "title": "Notify",
+        "description": "A notice in the dashboard.",
+        "config": {
+          "required": [
+            "title"
+          ],
+          "type": "object"
+        },
+        "output": [
+          "id"
+        ]
+      },
+      {
+        "kind": "linear.comment",
+        "title": "Comment on the issue",
+        "description": "A comment in Linear.",
+        "config": {
+          "type": "object"
+        },
+        "output": [
+          "comment"
+        ],
+        "integration": "linear",
+        "needs_setup": true
+      }
+    ]
+  }
+]

@@ -1,0 +1,164 @@
+# FT.AGGREGATE execution: the pipeline (LOAD, APPLY, FILTER, SORTBY, LIMIT), the reply.
+
+FLUSHALL
+FT.CREATE idx ON HASH PREFIX 1 d: SCHEMA name TEXT SORTABLE age NUMERIC SORTABLE city TAG tags TAG SORTABLE score NUMERIC body TEXT nick TEXT SORTABLE UNF
+HSET d:1 name alice age 30 city NYC tags "a,b" score 1.5 body "hello world" nick Al
+HSET d:2 name bob age 25 city LA tags b score 2 body "hello there" nick Bo
+HSET d:3 name carol age 35 city NYC score 3.25 extra x body "world peace"
+HSET d:4 name dave age 40 city SF tags "c,a" score -1 body "hello hello" nick Da
+HSET d:5 name eve age 22 city LA tags "" score 10 body goodbye
+HSET d:6 name 5 age 28 city NYC tags "b,c" extra y
+FT.AGGREGATE idx *
+FT.AGGREGATE idx hello
+FT.AGGREGATE idx * LOAD 1 @extra
+FT.AGGREGATE idx * LOAD 2 @extra @city
+FT.AGGREGATE idx * LOAD 3 @city AS c
+FT.AGGREGATE idx * LOAD 3 @city AS
+FT.AGGREGATE idx * LOAD 3 @city AS as
+FT.AGGREGATE idx * LOAD 1 city
+FT.AGGREGATE idx * LOAD 1 @__key
+FT.AGGREGATE idx * LOAD 2 @__key @nosuch
+FT.AGGREGATE idx * LOAD *
+FT.AGGREGATE idx hello LOAD *
+FT.AGGREGATE idx * LOAD 1 @name
+FT.AGGREGATE idx * LOAD 1 @nick
+FT.AGGREGATE idx * LOAD 0
+FT.AGGREGATE idx * LOAD 2 @extra
+FT.AGGREGATE idx * LOAD x
+FT.AGGREGATE idx * APPLY @age*2 AS dbl
+FT.AGGREGATE idx * APPLY "@age * 2"
+FT.AGGREGATE idx * APPLY @age/0 AS inf
+FT.AGGREGATE idx * APPLY upper(@name) AS up
+FT.AGGREGATE idx * APPLY upper(@age) AS up
+FT.AGGREGATE idx * APPLY @city AS c
+FT.AGGREGATE idx * LOAD 1 @city APPLY lower(@city) AS c
+FT.AGGREGATE idx * LOAD * APPLY @extra AS e
+FT.AGGREGATE idx * LOAD * APPLY @city AS c
+FT.AGGREGATE idx * APPLY sqrt(@nosuch) AS s
+FT.AGGREGATE idx * APPLY "1 +" AS s
+FT.AGGREGATE idx * APPLY "@age + " AS s
+FT.AGGREGATE idx * LOAD 1 @extra APPLY "@extra" AS e
+FT.AGGREGATE idx * LOAD 1 @extra APPLY "exists(@extra)" AS e
+FT.AGGREGATE idx * LOAD 1 @extra APPLY "@extra == 'x'" AS e
+FT.AGGREGATE idx * APPLY "@age + 1" AS age
+FT.AGGREGATE idx * APPLY "@age + 1" AS age APPLY "@age * 10" AS age10
+FT.AGGREGATE idx * APPLY "@age + 1" AS age SORTBY 2 @age DESC
+FT.AGGREGATE idx * APPLY "matched_terms()" AS t
+FT.AGGREGATE idx hello APPLY "matched_terms()" AS t
+FT.AGGREGATE idx "hello world" APPLY "matched_terms()" AS t
+FT.AGGREGATE idx hello WITHSCORES APPLY "matched_terms(1)" AS t
+FT.AGGREGATE idx * FILTER "@age > 27"
+FT.AGGREGATE idx * FILTER "@age > 27" LOAD 1 @name
+FT.AGGREGATE idx * LOAD 1 @name FILTER "@age > 27"
+FT.AGGREGATE idx * FILTER "@nosuch > 1"
+FT.AGGREGATE idx * LOAD 1 @extra FILTER "@extra == 'x'"
+FT.AGGREGATE idx * LOAD 1 @extra FILTER "exists(@extra)"
+FT.AGGREGATE idx * FILTER "@age > 100"
+FT.AGGREGATE idx * FILTER "@age > 27" FILTER "@age < 35"
+FT.AGGREGATE idx * SORTBY 2 @age DESC
+FT.AGGREGATE idx * SORTBY 2 @age ASC
+FT.AGGREGATE idx * SORTBY 1 @age
+FT.AGGREGATE idx * SORTBY 2 @name ASC
+FT.AGGREGATE idx * SORTBY 2 @name DESC
+FT.AGGREGATE idx * SORTBY 4 @city ASC @age DESC
+FT.AGGREGATE idx * SORTBY 2 @extra ASC
+FT.AGGREGATE idx * SORTBY 2 @nosuch ASC
+FT.AGGREGATE idx * SORTBY 2 @age DESC MAX 2
+FT.AGGREGATE idx * SORTBY 2 @age DESC LIMIT 1 2
+FT.AGGREGATE idx * SORTBY 2 @age DESC LIMIT 0 3
+FT.AGGREGATE idx * SORTBY 2 @age DESC LIMIT 4 10
+FT.AGGREGATE idx * SORTBY 2 @score DESC
+FT.AGGREGATE idx * LOAD 1 @score SORTBY 2 @score DESC
+FT.AGGREGATE idx * SORTBY 2 @nick ASC
+FT.AGGREGATE idx * SORTBY 2 @tags ASC
+FT.AGGREGATE idx * APPLY "@name" AS n SORTBY 2 @n ASC
+FT.AGGREGATE idx * APPLY "@age" AS n APPLY "case(@age > 30, 'x', @age)" AS m SORTBY 2 @m ASC
+FT.AGGREGATE idx * LIMIT 0 0
+FT.AGGREGATE idx * LIMIT 0 2
+FT.AGGREGATE idx * LIMIT 1 1
+FT.AGGREGATE idx * LIMIT 1 1 LOAD 1 @name
+FT.AGGREGATE idx * LIMIT 2 2 LOAD 1 @extra
+FT.AGGREGATE idx * LIMIT 10 2
+FT.AGGREGATE idx * LOAD 1 @name LIMIT 0 3 APPLY "@name" AS x
+FT.AGGREGATE idx * NOCONTENT
+FT.AGGREGATE idx * WITHPAYLOADS
+FT.AGGREGATE idx * WITHRAWIDS
+FT.AGGREGATE idx * WITHSORTKEYS
+FT.AGGREGATE idx * WITHSORTKEYS SORTBY 2 @age DESC
+FT.AGGREGATE idx * WITHSORTKEYS SORTBY 2 @name ASC
+FT.AGGREGATE idx * WITHSORTKEYS SORTBY 2 @city ASC
+FT.AGGREGATE idx * WITHSCORES
+FT.AGGREGATE idx hello WITHSCORES
+FT.AGGREGATE idx hello ADDSCORES
+FT.AGGREGATE idx hello WITHSCORES ADDSCORES
+FT.AGGREGATE idx hello ADDSCORES SORTBY 2 @__score DESC
+FT.AGGREGATE idx hello ADDSCORES SCORER TFIDF SORTBY 2 @__score DESC
+FT.AGGREGATE idx hello WITHSCORES SCORER BM25STD.NORM
+FT.AGGREGATE idx hello ADDSCORES SCORER BM25STD.NORM
+FT.AGGREGATE idx hello WITHSCORES EXPLAINSCORE SCORER TFIDF
+FT.AGGREGATE idx hello ADDSCORES APPLY "@__score * 2" AS s2
+FT.AGGREGATE idx * DIALECT 4
+FT.AGGREGATE idx * DIALECT 4 LIMIT 0 2
+FT.AGGREGATE idx * DIALECT 4 LIMIT 1 2
+FT.AGGREGATE idx hello DIALECT 4
+FT.AGGREGATE idx hello DIALECT 4 LIMIT 0 2
+FT.AGGREGATE idx * DIALECT 4 SORTBY 2 @name DESC
+FT.AGGREGATE idx * WITHCOUNT
+FT.AGGREGATE idx * WITHCOUNT LIMIT 0 2
+FT.AGGREGATE idx * WITHCOUNT LIMIT 1 2
+FT.AGGREGATE idx * WITHCOUNT SORTBY 2 @age DESC LIMIT 1 2
+FT.AGGREGATE idx * WITHOUTCOUNT
+FT.AGGREGATE idx * WITHOUTCOUNT LIMIT 0 3
+FT.AGGREGATE idx @city:{NYC}
+FT.AGGREGATE idx @city:{NYC} LOAD 1 @name
+FT.AGGREGATE idx @age:[25 30] SORTBY 2 @age ASC
+FT.AGGREGATE idx nosuchword
+FT.AGGREGATE idx nosuchword LOAD *
+FT.AGGREGATE noidx *
+FT.AGGREGATE idx
+FT.AGGREGATE idx * BADARG
+FT.AGGREGATE idx * LOAD 1 @name APPLY "@name" AS n LOAD 1 @age
+FT.AGGREGATE idx * SORTBY 2 @age DESC APPLY "@age * 2" AS d
+FT.AGGREGATE idx * TIMEOUT 0 SORTBY 2 @age DESC
+MULTI
+FT.AGGREGATE idx *
+FT.AGGREGATE idx * LOAD 1 @extra
+FT.AGGREGATE idx * LOAD 1 @extra LIMIT 1 2
+EXEC
+@resp 3
+FT.AGGREGATE idx *
+FT.AGGREGATE idx * LOAD 1 @extra
+FT.AGGREGATE idx * APPLY @age*2 AS dbl
+FT.AGGREGATE idx * SORTBY 2 @age DESC LIMIT 0 3
+FT.AGGREGATE idx * LIMIT 0 0
+FT.AGGREGATE idx * NOCONTENT
+FT.AGGREGATE idx * WITHSORTKEYS SORTBY 2 @age DESC
+FT.AGGREGATE idx hello WITHSCORES ADDSCORES
+FT.AGGREGATE idx * WITHRAWIDS WITHPAYLOADS LIMIT 0 2
+FT.AGGREGATE idx * DIALECT 4 LIMIT 0 2
+FT.AGGREGATE idx * APPLY "@age + 1" AS age
+FT.AGGREGATE idx * LOAD 1 @extra APPLY "@extra" AS e
+FT.AGGREGATE idx * APPLY "@age" AS n APPLY "case(@age > 30, 'x', @age)" AS m SORTBY 2 @m ASC
+FT.AGGREGATE idx * LOAD * FORMAT EXPAND DIALECT 3
+FT.AGGREGATE idx * FORMAT STRING
+@resp 2
+FT.DROPINDEX idx
+FT.CREATE jdx ON JSON PREFIX 1 j: SCHEMA $.name AS name TEXT SORTABLE $.age AS age NUMERIC $.tags[*] AS tags TAG
+JSON.SET j:1 $ '{"name":"alice","age":30,"tags":["a","b"],"x":{"y":1}}'
+JSON.SET j:2 $ '{"name":"bob","age":25,"tags":["b"]}'
+JSON.SET j:3 $ '{"name":"carol","age":35}'
+FT.AGGREGATE jdx *
+FT.AGGREGATE jdx * LOAD 1 @age SORTBY 2 @age DESC
+FT.AGGREGATE jdx * LOAD 1 @tags SORTBY 2 @name ASC
+FT.AGGREGATE jdx * LOAD 3 $.x AS x SORTBY 2 @name ASC
+FT.AGGREGATE jdx * LOAD *
+FT.AGGREGATE jdx * LOAD 1 @age APPLY "@age + 1" AS a SORTBY 2 @a DESC
+FT.AGGREGATE jdx * LOAD 1 @tags GROUPBY 1 @tags REDUCE COUNT 0 AS n SORTBY 2 @tags ASC
+FT.AGGREGATE jdx * LOAD * DIALECT 3
+FT.AGGREGATE jdx * LOAD 1 @tags SORTBY 2 @name ASC DIALECT 3
+@resp 3
+FT.AGGREGATE jdx * LOAD 1 @age SORTBY 2 @age DESC
+FT.AGGREGATE jdx * LOAD * FORMAT EXPAND DIALECT 3
+@resp 2
+FT.DROPINDEX jdx
+FLUSHALL

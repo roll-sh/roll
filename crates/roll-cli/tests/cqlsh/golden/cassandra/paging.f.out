@@ -1,0 +1,121 @@
+Page size: 2
+
+ k | c | v
+---+---+----
+ 1 | 1 |  a
+ 1 | 2 | bb
+ 1 | 3 |  ccc
+ 2 | 1 | dddd
+ 4 | 1 | ffffffffffff
+ 3 | 1 |        eeeee
+
+(6 rows)
+EXPAND set to ON
+
+@ Row 1
+---+----
+ k | 1
+ c | 1
+ v | a
+
+@ Row 2
+---+----
+ k | 1
+ c | 2
+ v | bb
+
+@ Row 3
+---+------
+ k | 1
+ c | 3
+ v | ccc
+
+@ Row 4
+---+------
+ k | 2
+ c | 1
+ v | dddd
+
+@ Row 5
+---+--------------
+ k | 4
+ c | 1
+ v | ffffffffffff
+
+@ Row 6
+---+--------------
+ k | 3
+ c | 1
+ v | eeeee
+
+
+(6 rows)
+EXPAND set to OFF
+Page size: 100
+
+ k | c | v
+---+---+---
+
+
+(0 rows)
+
+ count
+-------
+     6
+
+(1 rows)
+
+Warnings :
+Aggregation query used without partition key
+
+
+ k | c | v
+---+---+---
+ 1 | 1 | a
+
+(1 rows)
+PAGING set to OFF
+
+ k | c | v
+---+---+--------------
+ 1 | 1 |            a
+ 1 | 2 |           bb
+ 1 | 3 |          ccc
+ 2 | 1 |         dddd
+ 4 | 1 | ffffffffffff
+ 3 | 1 |        eeeee
+
+(6 rows)
+
+ [applied] | k | c | v
+-----------+---+---+---
+     False | 1 | 1 | a
+
+ [applied]
+-----------
+      True
+
+ [applied] | v
+-----------+---
+     False | a
+
+ [applied]
+-----------
+      True
+
+ [applied]
+-----------
+     False
+
+ k  | c | v
+----+---+---
+ 20 | 1 | a
+ 21 | 1 | b
+
+(2 rows)
+
+ k | c | v
+---+---+---
+
+
+(0 rows)

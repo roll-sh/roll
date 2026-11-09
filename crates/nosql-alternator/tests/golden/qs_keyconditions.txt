@@ -1,0 +1,266 @@
+# Tables: S/N, S/S, B/B, S hash only
+> CreateTable {"TableName":"alt_qs_kc_sn","KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"AttributeName":"c","KeyType":"RANGE"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"},{"AttributeName":"c","AttributeType":"N"}],"BillingMode":"PAY_PER_REQUEST"}
+< 200 {"TableDescription":{"TableName":"alt_qs_kc_sn","KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"AttributeName":"c","KeyType":"RANGE"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"},{"AttributeName":"c","AttributeType":"N"}],"BillingMode":"PAY_PER_REQUEST","CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+> CreateTable {"TableName":"alt_qs_kc_ss","KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"AttributeName":"c","KeyType":"RANGE"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"},{"AttributeName":"c","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST"}
+< 200 {"TableDescription":{"TableName":"alt_qs_kc_ss","KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"AttributeName":"c","KeyType":"RANGE"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"},{"AttributeName":"c","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+> CreateTable {"TableName":"alt_qs_kc_sb","KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"AttributeName":"c","KeyType":"RANGE"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"B"},{"AttributeName":"c","AttributeType":"B"}],"BillingMode":"PAY_PER_REQUEST"}
+< 200 {"TableDescription":{"TableName":"alt_qs_kc_sb","KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"AttributeName":"c","KeyType":"RANGE"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"B"},{"AttributeName":"c","AttributeType":"B"}],"BillingMode":"PAY_PER_REQUEST","CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+> CreateTable {"TableName":"alt_qs_kc_hs","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST"}
+< 200 {"TableDescription":{"TableName":"alt_qs_kc_hs","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+# Fill
+> BatchWriteItem {"RequestItems":{"alt_qs_kc_sn":[{"PutRequest":{"Item":{"p":{"S":"p1"},"c":{"N":"-10"},"v":{"N":"0"}}}},{"PutRequest":{"Item":{"p":{"S":"p1"},"c":{"N":"-1.5"},"v":{"N":"1"}}}},{"PutRequest":{"Item":{"p":{"S":"p1"},"c":{"N":"0"},"v":{"N":"2"}}}},{"PutRequest":{"Item":{"p":{"S":"p1"},"c":{"N":"1"},"v":{"N":"3"}}}},{"PutRequest":{"Item":{"p":{"S":"p1"},"c":{"N":"2"},"v":{"N":"4"}}}},{"PutRequest":{"Item":{"p":{"S":"p1"},"c":{"N":"3"},"v":{"N":"5"}}}},{"PutRequest":{"Item":{"p":{"S":"p1"},"c":{"N":"5"},"v":{"N":"6"}}}},{"PutRequest":{"Item":{"p":{"S":"p1"},"c":{"N":"7.25"},"v":{"N":"7"}}}},{"PutRequest":{"Item":{"p":{"S":"p1"},"c":{"N":"10"},"v":{"N":"8"}}}},{"PutRequest":{"Item":{"p":{"S":"p1"},"c":{"N":"11"},"v":{"N":"9"}}}},{"PutRequest":{"Item":{"p":{"S":"p1"},"c":{"N":"100"},"v":{"N":"10"}}}},{"PutRequest":{"Item":{"p":{"S":"p1"},"c":{"N":"1000"},"v":{"N":"11"}}}},{"PutRequest":{"Item":{"p":{"S":"p2"},"c":{"N":"-10"},"v":{"N":"0"}}}},{"PutRequest":{"Item":{"p":{"S":"p2"},"c":{"N":"-1.5"},"v":{"N":"1"}}}},{"PutRequest":{"Item":{"p":{"S":"p2"},"c":{"N":"0"},"v":{"N":"2"}}}},{"PutRequest":{"Item":{"p":{"S":"p2"},"c":{"N":"1"},"v":{"N":"3"}}}},{"PutRequest":{"Item":{"p":{"S":"p2"},"c":{"N":"2"},"v":{"N":"4"}}}},{"PutRequest":{"Item":{"p":{"S":"p2"},"c":{"N":"3"},"v":{"N":"5"}}}},{"PutRequest":{"Item":{"p":{"S":"p2"},"c":{"N":"5"},"v":{"N":"6"}}}},{"PutRequest":{"Item":{"p":{"S":"p2"},"c":{"N":"7.25"},"v":{"N":"7"}}}},{"PutRequest":{"Item":{"p":{"S":"p2"},"c":{"N":"10"},"v":{"N":"8"}}}},{"PutRequest":{"Item":{"p":{"S":"p2"},"c":{"N":"11"},"v":{"N":"9"}}}},{"PutRequest":{"Item":{"p":{"S":"p2"},"c":{"N":"100"},"v":{"N":"10"}}}},{"PutRequest":{"Item":{"p":{"S":"p2"},"c":{"N":"1000"},"v":{"N":"11"}}}}]}}
+< 200 {"UnprocessedItems":{}}
+> BatchWriteItem {"RequestItems":{"alt_qs_kc_ss":[{"PutRequest":{"Item":{"p":{"S":"s1"},"c":{"S":"a"},"v":{"N":"0"}}}},{"PutRequest":{"Item":{"p":{"S":"s1"},"c":{"S":"aa"},"v":{"N":"1"}}}},{"PutRequest":{"Item":{"p":{"S":"s1"},"c":{"S":"ab"},"v":{"N":"2"}}}},{"PutRequest":{"Item":{"p":{"S":"s1"},"c":{"S":"abc"},"v":{"N":"3"}}}},{"PutRequest":{"Item":{"p":{"S":"s1"},"c":{"S":"b"},"v":{"N":"4"}}}},{"PutRequest":{"Item":{"p":{"S":"s1"},"c":{"S":"ba"},"v":{"N":"5"}}}},{"PutRequest":{"Item":{"p":{"S":"s1"},"c":{"S":"B"},"v":{"N":"6"}}}},{"PutRequest":{"Item":{"p":{"S":"s1"},"c":{"S":"Z"},"v":{"N":"7"}}}},{"PutRequest":{"Item":{"p":{"S":"s1"},"c":{"S":"é"},"v":{"N":"8"}}}},{"PutRequest":{"Item":{"p":{"S":"s1"},"c":{"S":"10"},"v":{"N":"9"}}}},{"PutRequest":{"Item":{"p":{"S":"s1"},"c":{"S":"9"},"v":{"N":"10"}}}},{"PutRequest":{"Item":{"p":{"S":"s1"},"c":{"S":"a b"},"v":{"N":"11"}}}}]}}
+< 200 {"UnprocessedItems":{}}
+> BatchWriteItem {"RequestItems":{"alt_qs_kc_sb":[{"PutRequest":{"Item":{"p":{"B":"CQ=="},"c":{"B":"AA=="},"v":{"N":"0"}}}},{"PutRequest":{"Item":{"p":{"B":"CQ=="},"c":{"B":"AQ=="},"v":{"N":"1"}}}},{"PutRequest":{"Item":{"p":{"B":"CQ=="},"c":{"B":"AAE="},"v":{"N":"2"}}}},{"PutRequest":{"Item":{"p":{"B":"CQ=="},"c":{"B":"fw=="},"v":{"N":"3"}}}},{"PutRequest":{"Item":{"p":{"B":"CQ=="},"c":{"B":"gA=="},"v":{"N":"4"}}}},{"PutRequest":{"Item":{"p":{"B":"CQ=="},"c":{"B":"/v8="},"v":{"N":"5"}}}},{"PutRequest":{"Item":{"p":{"B":"CQ=="},"c":{"B":"/w=="},"v":{"N":"6"}}}},{"PutRequest":{"Item":{"p":{"B":"CQ=="},"c":{"B":"/wA="},"v":{"N":"7"}}}},{"PutRequest":{"Item":{"p":{"B":"CQ=="},"c":{"B":"//8="},"v":{"N":"8"}}}},{"PutRequest":{"Item":{"p":{"B":"CQ=="},"c":{"B":"YWI="},"v":{"N":"9"}}}},{"PutRequest":{"Item":{"p":{"B":"CQ=="},"c":{"B":"YQ=="},"v":{"N":"10"}}}},{"PutRequest":{"Item":{"p":{"B":"CQ=="},"c":{"B":"YWM="},"v":{"N":"11"}}}}]}}
+< 200 {"UnprocessedItems":{}}
+> BatchWriteItem {"RequestItems":{"alt_qs_kc_hs":[{"PutRequest":{"Item":{"p":{"S":"h1"},"v":{"N":"0"}}}},{"PutRequest":{"Item":{"p":{"S":"h2"},"v":{"N":"1"}}}},{"PutRequest":{"Item":{"p":{"S":"h3"},"v":{"N":"2"}}}}]}}
+< 200 {"UnprocessedItems":{}}
+# Hash EQ only
+> Query {"TableName":"alt_qs_kc_sn","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"p1"}]}}}
+< 200 {"Count":12,"ScannedCount":12,"Items":[{"p":{"S":"p1"},"c":{"N":"-10"},"v":{"N":"0"}},{"p":{"S":"p1"},"c":{"N":"-1.5"},"v":{"N":"1"}},{"p":{"S":"p1"},"c":{"N":"0"},"v":{"N":"2"}},{"p":{"S":"p1"},"c":{"N":"1"},"v":{"N":"3"}},{"p":{"S":"p1"},"c":{"N":"2"},"v":{"N":"4"}},{"p":{"S":"p1"},"c":{"N":"3"},"v":{"N":"5"}},{"p":{"S":"p1"},"c":{"N":"5"},"v":{"N":"6"}},{"p":{"S":"p1"},"c":{"N":"7.25"},"v":{"N":"7"}},{"p":{"S":"p1"},"c":{"N":"10"},"v":{"N":"8"}},{"p":{"S":"p1"},"c":{"N":"11"},"v":{"N":"9"}},{"p":{"S":"p1"},"c":{"N":"100"},"v":{"N":"10"}},{"p":{"S":"p1"},"c":{"N":"1000"},"v":{"N":"11"}}]}
+> Query {"TableName":"alt_qs_kc_sn","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"zz"}]}}}
+< 200 {"Count":0,"ScannedCount":0,"Items":[]}
+# Range: every allowed operator on N
+> Query {"TableName":"alt_qs_kc_sn","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"p1"}]},"c":{"ComparisonOperator":"EQ","AttributeValueList":[{"N":"3"}]}}}
+< 200 {"Count":1,"ScannedCount":1,"Items":[{"p":{"S":"p1"},"c":{"N":"3"},"v":{"N":"5"}}]}
+> Query {"TableName":"alt_qs_kc_sn","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"p1"}]},"c":{"ComparisonOperator":"LT","AttributeValueList":[{"N":"3"}]}}}
+< 200 {"Count":5,"ScannedCount":5,"Items":[{"p":{"S":"p1"},"c":{"N":"-10"},"v":{"N":"0"}},{"p":{"S":"p1"},"c":{"N":"-1.5"},"v":{"N":"1"}},{"p":{"S":"p1"},"c":{"N":"0"},"v":{"N":"2"}},{"p":{"S":"p1"},"c":{"N":"1"},"v":{"N":"3"}},{"p":{"S":"p1"},"c":{"N":"2"},"v":{"N":"4"}}]}
+> Query {"TableName":"alt_qs_kc_sn","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"p1"}]},"c":{"ComparisonOperator":"LE","AttributeValueList":[{"N":"3"}]}}}
+< 200 {"Count":6,"ScannedCount":6,"Items":[{"p":{"S":"p1"},"c":{"N":"-10"},"v":{"N":"0"}},{"p":{"S":"p1"},"c":{"N":"-1.5"},"v":{"N":"1"}},{"p":{"S":"p1"},"c":{"N":"0"},"v":{"N":"2"}},{"p":{"S":"p1"},"c":{"N":"1"},"v":{"N":"3"}},{"p":{"S":"p1"},"c":{"N":"2"},"v":{"N":"4"}},{"p":{"S":"p1"},"c":{"N":"3"},"v":{"N":"5"}}]}
+> Query {"TableName":"alt_qs_kc_sn","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"p1"}]},"c":{"ComparisonOperator":"GT","AttributeValueList":[{"N":"3"}]}}}
+< 200 {"Count":6,"ScannedCount":6,"Items":[{"p":{"S":"p1"},"c":{"N":"5"},"v":{"N":"6"}},{"p":{"S":"p1"},"c":{"N":"7.25"},"v":{"N":"7"}},{"p":{"S":"p1"},"c":{"N":"10"},"v":{"N":"8"}},{"p":{"S":"p1"},"c":{"N":"11"},"v":{"N":"9"}},{"p":{"S":"p1"},"c":{"N":"100"},"v":{"N":"10"}},{"p":{"S":"p1"},"c":{"N":"1000"},"v":{"N":"11"}}]}
+> Query {"TableName":"alt_qs_kc_sn","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"p1"}]},"c":{"ComparisonOperator":"GE","AttributeValueList":[{"N":"3"}]}}}
+< 200 {"Count":7,"ScannedCount":7,"Items":[{"p":{"S":"p1"},"c":{"N":"3"},"v":{"N":"5"}},{"p":{"S":"p1"},"c":{"N":"5"},"v":{"N":"6"}},{"p":{"S":"p1"},"c":{"N":"7.25"},"v":{"N":"7"}},{"p":{"S":"p1"},"c":{"N":"10"},"v":{"N":"8"}},{"p":{"S":"p1"},"c":{"N":"11"},"v":{"N":"9"}},{"p":{"S":"p1"},"c":{"N":"100"},"v":{"N":"10"}},{"p":{"S":"p1"},"c":{"N":"1000"},"v":{"N":"11"}}]}
+> Query {"TableName":"alt_qs_kc_sn","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"p1"}]},"c":{"ComparisonOperator":"BETWEEN","AttributeValueList":[{"N":"0"},{"N":"10"}]}}}
+< 200 {"Count":7,"ScannedCount":7,"Items":[{"p":{"S":"p1"},"c":{"N":"0"},"v":{"N":"2"}},{"p":{"S":"p1"},"c":{"N":"1"},"v":{"N":"3"}},{"p":{"S":"p1"},"c":{"N":"2"},"v":{"N":"4"}},{"p":{"S":"p1"},"c":{"N":"3"},"v":{"N":"5"}},{"p":{"S":"p1"},"c":{"N":"5"},"v":{"N":"6"}},{"p":{"S":"p1"},"c":{"N":"7.25"},"v":{"N":"7"}},{"p":{"S":"p1"},"c":{"N":"10"},"v":{"N":"8"}}]}
+> Query {"TableName":"alt_qs_kc_sn","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"p1"}]},"c":{"ComparisonOperator":"BETWEEN","AttributeValueList":[{"N":"7.25"},{"N":"7.25"}]}}}
+< 200 {"Count":1,"ScannedCount":1,"Items":[{"p":{"S":"p1"},"c":{"N":"7.25"},"v":{"N":"7"}}]}
+> Query {"TableName":"alt_qs_kc_sn","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"p1"}]},"c":{"ComparisonOperator":"BETWEEN","AttributeValueList":[{"N":"10"},{"N":"0"}]}}}
+< 200 {"Count":0,"ScannedCount":0,"Items":[]}
+> Query {"TableName":"alt_qs_kc_sn","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"p1"}]},"c":{"ComparisonOperator":"EQ","AttributeValueList":[{"N":"3.000"}]}}}
+< 200 {"Count":1,"ScannedCount":1,"Items":[{"p":{"S":"p1"},"c":{"N":"3"},"v":{"N":"5"}}]}
+> Query {"TableName":"alt_qs_kc_sn","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"p1"}]},"c":{"ComparisonOperator":"GT","AttributeValueList":[{"N":"1e2"}]}}}
+< 200 {"Count":1,"ScannedCount":1,"Items":[{"p":{"S":"p1"},"c":{"N":"1000"},"v":{"N":"11"}}]}
+# Range condition listed before hash
+> Query {"TableName":"alt_qs_kc_sn","KeyConditions":{"c":{"ComparisonOperator":"LT","AttributeValueList":[{"N":"0"}]},"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"p1"}]}}}
+< 200 {"Count":2,"ScannedCount":2,"Items":[{"p":{"S":"p1"},"c":{"N":"-10"},"v":{"N":"0"}},{"p":{"S":"p1"},"c":{"N":"-1.5"},"v":{"N":"1"}}]}
+# Hash: every non-EQ operator is rejected
+> Query {"TableName":"alt_qs_kc_sn","KeyConditions":{"p":{"ComparisonOperator":"NE","AttributeValueList":[{"S":"p1"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Hash key can only be restricted with equality operator (EQ). \"NE\" not supported."}
+> Query {"TableName":"alt_qs_kc_sn","KeyConditions":{"p":{"ComparisonOperator":"LT","AttributeValueList":[{"S":"p1"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Hash key can only be restricted with equality operator (EQ). \"LT\" not supported."}
+> Query {"TableName":"alt_qs_kc_sn","KeyConditions":{"p":{"ComparisonOperator":"LE","AttributeValueList":[{"S":"p1"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Hash key can only be restricted with equality operator (EQ). \"LE\" not supported."}
+> Query {"TableName":"alt_qs_kc_sn","KeyConditions":{"p":{"ComparisonOperator":"GT","AttributeValueList":[{"S":"p1"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Hash key can only be restricted with equality operator (EQ). \"GT\" not supported."}
+> Query {"TableName":"alt_qs_kc_sn","KeyConditions":{"p":{"ComparisonOperator":"GE","AttributeValueList":[{"S":"p1"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Hash key can only be restricted with equality operator (EQ). \"GE\" not supported."}
+> Query {"TableName":"alt_qs_kc_sn","KeyConditions":{"p":{"ComparisonOperator":"BETWEEN","AttributeValueList":[{"S":"p1"},{"S":"p2"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Hash key can only be restricted with equality operator (EQ). \"BETWEEN\" not supported."}
+> Query {"TableName":"alt_qs_kc_sn","KeyConditions":{"p":{"ComparisonOperator":"BEGINS_WITH","AttributeValueList":[{"S":"p"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Hash key can only be restricted with equality operator (EQ). \"BEGINS_WITH\" not supported."}
+> Query {"TableName":"alt_qs_kc_sn","KeyConditions":{"p":{"ComparisonOperator":"IN","AttributeValueList":[{"S":"p1"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Hash key can only be restricted with equality operator (EQ). \"IN\" not supported."}
+> Query {"TableName":"alt_qs_kc_sn","KeyConditions":{"p":{"ComparisonOperator":"NULL","AttributeValueList":[]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Hash key can only be restricted with equality operator (EQ). \"NULL\" not supported."}
+> Query {"TableName":"alt_qs_kc_sn","KeyConditions":{"p":{"ComparisonOperator":"NOT_NULL","AttributeValueList":[]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Hash key can only be restricted with equality operator (EQ). \"NOT_NULL\" not supported."}
+> Query {"TableName":"alt_qs_kc_sn","KeyConditions":{"p":{"ComparisonOperator":"CONTAINS","AttributeValueList":[{"S":"p"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Hash key can only be restricted with equality operator (EQ). \"CONTAINS\" not supported."}
+> Query {"TableName":"alt_qs_kc_sn","KeyConditions":{"p":{"ComparisonOperator":"NOT_CONTAINS","AttributeValueList":[{"S":"p"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Hash key can only be restricted with equality operator (EQ). \"NOT_CONTAINS\" not supported."}
+# Hash: lowercase / unknown / non-string operator
+> Query {"TableName":"alt_qs_kc_sn","KeyConditions":{"p":{"ComparisonOperator":"eq","AttributeValueList":[{"S":"p1"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Unsupported comparison operator eq"}
+> Query {"TableName":"alt_qs_kc_sn","KeyConditions":{"p":{"ComparisonOperator":"Eq","AttributeValueList":[{"S":"p1"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Unsupported comparison operator Eq"}
+> Query {"TableName":"alt_qs_kc_sn","KeyConditions":{"p":{"ComparisonOperator":"XX","AttributeValueList":[{"S":"p1"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Unsupported comparison operator XX"}
+> Query {"TableName":"alt_qs_kc_sn","KeyConditions":{"p":{"ComparisonOperator":"","AttributeValueList":[{"S":"p1"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Unsupported comparison operator "}
+> Query {"TableName":"alt_qs_kc_sn","KeyConditions":{"p":{"ComparisonOperator":1,"AttributeValueList":[{"S":"p1"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Invalid comparison operator definition 1"}
+# Hash: wrong number of values
+> Query {"TableName":"alt_qs_kc_sn","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"A single attribute is required for a hash key EQ restriction: []"}
+> Query {"TableName":"alt_qs_kc_sn","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"p1"},{"S":"p2"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"A single attribute is required for a hash key EQ restriction: [{\"S\":\"p1\"},{\"S\":\"p2\"}]"}
+> Query {"TableName":"alt_qs_kc_sn","KeyConditions":{"p":{"ComparisonOperator":"EQ"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"JSON parameter AttributeValueList not found"}
+> Query {"TableName":"alt_qs_kc_sn","KeyConditions":{"p":{"AttributeValueList":[{"S":"p1"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"JSON parameter ComparisonOperator not found"}
+> Query {"TableName":"alt_qs_kc_sn","KeyConditions":{"p":{}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"JSON parameter ComparisonOperator not found"}
+> Query {"TableName":"alt_qs_kc_sn","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"p1"}],"Exists":true}}}
+< 200 {"Count":12,"ScannedCount":12,"Items":[{"p":{"S":"p1"},"c":{"N":"-10"},"v":{"N":"0"}},{"p":{"S":"p1"},"c":{"N":"-1.5"},"v":{"N":"1"}},{"p":{"S":"p1"},"c":{"N":"0"},"v":{"N":"2"}},{"p":{"S":"p1"},"c":{"N":"1"},"v":{"N":"3"}},{"p":{"S":"p1"},"c":{"N":"2"},"v":{"N":"4"}},{"p":{"S":"p1"},"c":{"N":"3"},"v":{"N":"5"}},{"p":{"S":"p1"},"c":{"N":"5"},"v":{"N":"6"}},{"p":{"S":"p1"},"c":{"N":"7.25"},"v":{"N":"7"}},{"p":{"S":"p1"},"c":{"N":"10"},"v":{"N":"8"}},{"p":{"S":"p1"},"c":{"N":"11"},"v":{"N":"9"}},{"p":{"S":"p1"},"c":{"N":"100"},"v":{"N":"10"}},{"p":{"S":"p1"},"c":{"N":"1000"},"v":{"N":"11"}}]}
+> Query {"TableName":"alt_qs_kc_sn","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"p1"}],"Value":{"S":"p1"}}}}
+< 200 {"Count":12,"ScannedCount":12,"Items":[{"p":{"S":"p1"},"c":{"N":"-10"},"v":{"N":"0"}},{"p":{"S":"p1"},"c":{"N":"-1.5"},"v":{"N":"1"}},{"p":{"S":"p1"},"c":{"N":"0"},"v":{"N":"2"}},{"p":{"S":"p1"},"c":{"N":"1"},"v":{"N":"3"}},{"p":{"S":"p1"},"c":{"N":"2"},"v":{"N":"4"}},{"p":{"S":"p1"},"c":{"N":"3"},"v":{"N":"5"}},{"p":{"S":"p1"},"c":{"N":"5"},"v":{"N":"6"}},{"p":{"S":"p1"},"c":{"N":"7.25"},"v":{"N":"7"}},{"p":{"S":"p1"},"c":{"N":"10"},"v":{"N":"8"}},{"p":{"S":"p1"},"c":{"N":"11"},"v":{"N":"9"}},{"p":{"S":"p1"},"c":{"N":"100"},"v":{"N":"10"}},{"p":{"S":"p1"},"c":{"N":"1000"},"v":{"N":"11"}}]}
+# Hash: wrong value types
+> Query {"TableName":"alt_qs_kc_sn","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"N":"1"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Type mismatch: expected type S for key column p, got type \"N\""}
+> Query {"TableName":"alt_qs_kc_sn","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"SS":["p1"]}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Type mismatch: expected type S for key column p, got type \"SS\""}
+> Query {"TableName":"alt_qs_kc_sn","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":""}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The AttributeValue for a key attribute cannot contain an empty string value. Key: p"}
+> Query {"TableName":"alt_qs_kc_sn","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"p1","N":"1"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Malformed value object for key column p: {\"S\":\"p1\",\"N\":\"1\"}"}
+> Query {"TableName":"alt_qs_kc_sn","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":["p1"]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Malformed value object for key column p: \"p1\""}
+# Range: rejected operators on N
+> Query {"TableName":"alt_qs_kc_sn","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"p1"}]},"c":{"ComparisonOperator":"NE","AttributeValueList":[{"N":"1"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Operator \"NE\" not supported for sort key"}
+> Query {"TableName":"alt_qs_kc_sn","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"p1"}]},"c":{"ComparisonOperator":"IN","AttributeValueList":[{"N":"1"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Operator \"IN\" not supported for sort key"}
+> Query {"TableName":"alt_qs_kc_sn","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"p1"}]},"c":{"ComparisonOperator":"IN","AttributeValueList":[{"N":"1"},{"N":"2"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"1 arguments expected for a sort key restriction: [{\"N\":\"1\"},{\"N\":\"2\"}]"}
+> Query {"TableName":"alt_qs_kc_sn","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"p1"}]},"c":{"ComparisonOperator":"NULL","AttributeValueList":[]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"1 arguments expected for a sort key restriction: []"}
+> Query {"TableName":"alt_qs_kc_sn","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"p1"}]},"c":{"ComparisonOperator":"NOT_NULL","AttributeValueList":[]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"1 arguments expected for a sort key restriction: []"}
+> Query {"TableName":"alt_qs_kc_sn","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"p1"}]},"c":{"ComparisonOperator":"CONTAINS","AttributeValueList":[{"N":"1"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Operator \"CONTAINS\" not supported for sort key"}
+> Query {"TableName":"alt_qs_kc_sn","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"p1"}]},"c":{"ComparisonOperator":"NOT_CONTAINS","AttributeValueList":[{"N":"1"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Operator \"NOT_CONTAINS\" not supported for sort key"}
+> Query {"TableName":"alt_qs_kc_sn","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"p1"}]},"c":{"ComparisonOperator":"BEGINS_WITH","AttributeValueList":[{"N":"1"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"BEGINS_WITH operator cannot be applied to type N"}
+> Query {"TableName":"alt_qs_kc_sn","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"p1"}]},"c":{"ComparisonOperator":"lt","AttributeValueList":[{"N":"1"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Unsupported comparison operator lt"}
+> Query {"TableName":"alt_qs_kc_sn","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"p1"}]},"c":{"ComparisonOperator":"XX","AttributeValueList":[{"N":"1"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Unsupported comparison operator XX"}
+# Range: wrong value counts
+> Query {"TableName":"alt_qs_kc_sn","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"p1"}]},"c":{"ComparisonOperator":"EQ","AttributeValueList":[]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"1 arguments expected for a sort key restriction: []"}
+> Query {"TableName":"alt_qs_kc_sn","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"p1"}]},"c":{"ComparisonOperator":"LT","AttributeValueList":[]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"1 arguments expected for a sort key restriction: []"}
+> Query {"TableName":"alt_qs_kc_sn","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"p1"}]},"c":{"ComparisonOperator":"LT","AttributeValueList":[{"N":"1"},{"N":"2"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"1 arguments expected for a sort key restriction: [{\"N\":\"1\"},{\"N\":\"2\"}]"}
+> Query {"TableName":"alt_qs_kc_sn","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"p1"}]},"c":{"ComparisonOperator":"BETWEEN","AttributeValueList":[{"N":"1"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"2 arguments expected for a sort key restriction: [{\"N\":\"1\"}]"}
+> Query {"TableName":"alt_qs_kc_sn","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"p1"}]},"c":{"ComparisonOperator":"BETWEEN","AttributeValueList":[{"N":"1"},{"N":"2"},{"N":"3"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"2 arguments expected for a sort key restriction: [{\"N\":\"1\"},{\"N\":\"2\"},{\"N\":\"3\"}]"}
+> Query {"TableName":"alt_qs_kc_sn","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"p1"}]},"c":{"ComparisonOperator":"BETWEEN","AttributeValueList":[]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"2 arguments expected for a sort key restriction: []"}
+> Query {"TableName":"alt_qs_kc_sn","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"p1"}]},"c":{"ComparisonOperator":"GE","AttributeValueList":[{"N":"1"},{"N":"2"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"1 arguments expected for a sort key restriction: [{\"N\":\"1\"},{\"N\":\"2\"}]"}
+# Range: wrong value types
+> Query {"TableName":"alt_qs_kc_sn","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"p1"}]},"c":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"1"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Type mismatch: expected type N for key column c, got type \"S\""}
+> Query {"TableName":"alt_qs_kc_sn","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"p1"}]},"c":{"ComparisonOperator":"LT","AttributeValueList":[{"S":"1"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Type mismatch: expected type N for key column c, got type \"S\""}
+> Query {"TableName":"alt_qs_kc_sn","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"p1"}]},"c":{"ComparisonOperator":"BETWEEN","AttributeValueList":[{"S":"1"},{"N":"2"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Type mismatch: expected type N for key column c, got type \"S\""}
+> Query {"TableName":"alt_qs_kc_sn","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"p1"}]},"c":{"ComparisonOperator":"BETWEEN","AttributeValueList":[{"N":"1"},{"S":"2"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Type mismatch: expected type N for key column c, got type \"S\""}
+> Query {"TableName":"alt_qs_kc_sn","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"p1"}]},"c":{"ComparisonOperator":"GT","AttributeValueList":[{"B":"AQ=="}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Type mismatch: expected type N for key column c, got type \"B\""}
+> Query {"TableName":"alt_qs_kc_sn","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"p1"}]},"c":{"ComparisonOperator":"EQ","AttributeValueList":[{"N":"abc"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The parameter cannot be converted to a numeric value: abc"}
+> Query {"TableName":"alt_qs_kc_sn","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"p1"}]},"c":{"ComparisonOperator":"EQ","AttributeValueList":[{"NULL":true}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Type mismatch: expected type N for key column c, got type \"NULL\""}
+# Missing hash condition / non-key / too many conditions
+> Query {"TableName":"alt_qs_kc_sn","KeyConditions":{"c":{"ComparisonOperator":"EQ","AttributeValueList":[{"N":"1"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Query missing condition on hash key 'p'"}
+> Query {"TableName":"alt_qs_kc_sn","KeyConditions":{"x":{"ComparisonOperator":"EQ","AttributeValueList":[{"N":"1"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Query missing condition on hash key 'p'"}
+> Query {"TableName":"alt_qs_kc_sn","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"p1"}]},"x":{"ComparisonOperator":"EQ","AttributeValueList":[{"N":"1"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Query missing condition on sort key 'c'"}
+> Query {"TableName":"alt_qs_kc_sn","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"p1"}]},"c":{"ComparisonOperator":"EQ","AttributeValueList":[{"N":"1"}]},"x":{"ComparisonOperator":"EQ","AttributeValueList":[{"N":"1"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Only one or two conditions allowed in table with hash key and sort key"}
+> Query {"TableName":"alt_qs_kc_sn","KeyConditions":{}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Query missing condition on hash key 'p'"}
+# Which error wins: non-EQ hash vs missing hash vs bad range op vs value type
+> Query {"TableName":"alt_qs_kc_sn","KeyConditions":{"p":{"ComparisonOperator":"LT","AttributeValueList":[{"N":"1"}]},"c":{"ComparisonOperator":"NE","AttributeValueList":[{"N":"1"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Hash key can only be restricted with equality operator (EQ). \"LT\" not supported."}
+> Query {"TableName":"alt_qs_kc_sn","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"N":"1"}]},"c":{"ComparisonOperator":"NE","AttributeValueList":[{"N":"1"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Type mismatch: expected type S for key column p, got type \"N\""}
+> Query {"TableName":"alt_qs_kc_sn","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"p1"}]},"c":{"ComparisonOperator":"NE","AttributeValueList":[{"S":"1"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Type mismatch: expected type N for key column c, got type \"S\""}
+> Query {"TableName":"alt_qs_kc_sn","KeyConditions":{"c":{"ComparisonOperator":"NE","AttributeValueList":[{"N":"1"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Operator \"NE\" not supported for sort key"}
+> Query {"TableName":"alt_qs_kc_sn","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[]},"c":{"ComparisonOperator":"BETWEEN","AttributeValueList":[{"N":"1"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"A single attribute is required for a hash key EQ restriction: []"}
+> Query {"TableName":"alt_qs_kc_sn","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"N":"1"}]},"x":{"ComparisonOperator":"EQ","AttributeValueList":[{"N":"1"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Type mismatch: expected type S for key column p, got type \"N\""}
+# S range key: allowed operators incl. BEGINS_WITH
+> Query {"TableName":"alt_qs_kc_ss","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"s1"}]},"c":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"ab"}]}}}
+< 200 {"Count":1,"ScannedCount":1,"Items":[{"p":{"S":"s1"},"c":{"S":"ab"},"v":{"N":"2"}}]}
+> Query {"TableName":"alt_qs_kc_ss","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"s1"}]},"c":{"ComparisonOperator":"LT","AttributeValueList":[{"S":"ab"}]}}}
+< 200 {"Count":7,"ScannedCount":7,"Items":[{"p":{"S":"s1"},"c":{"S":"10"},"v":{"N":"9"}},{"p":{"S":"s1"},"c":{"S":"9"},"v":{"N":"10"}},{"p":{"S":"s1"},"c":{"S":"B"},"v":{"N":"6"}},{"p":{"S":"s1"},"c":{"S":"Z"},"v":{"N":"7"}},{"p":{"S":"s1"},"c":{"S":"a"},"v":{"N":"0"}},{"p":{"S":"s1"},"c":{"S":"a b"},"v":{"N":"11"}},{"p":{"S":"s1"},"c":{"S":"aa"},"v":{"N":"1"}}]}
+> Query {"TableName":"alt_qs_kc_ss","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"s1"}]},"c":{"ComparisonOperator":"LE","AttributeValueList":[{"S":"ab"}]}}}
+< 200 {"Count":8,"ScannedCount":8,"Items":[{"p":{"S":"s1"},"c":{"S":"10"},"v":{"N":"9"}},{"p":{"S":"s1"},"c":{"S":"9"},"v":{"N":"10"}},{"p":{"S":"s1"},"c":{"S":"B"},"v":{"N":"6"}},{"p":{"S":"s1"},"c":{"S":"Z"},"v":{"N":"7"}},{"p":{"S":"s1"},"c":{"S":"a"},"v":{"N":"0"}},{"p":{"S":"s1"},"c":{"S":"a b"},"v":{"N":"11"}},{"p":{"S":"s1"},"c":{"S":"aa"},"v":{"N":"1"}},{"p":{"S":"s1"},"c":{"S":"ab"},"v":{"N":"2"}}]}
+> Query {"TableName":"alt_qs_kc_ss","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"s1"}]},"c":{"ComparisonOperator":"GT","AttributeValueList":[{"S":"ab"}]}}}
+< 200 {"Count":4,"ScannedCount":4,"Items":[{"p":{"S":"s1"},"c":{"S":"abc"},"v":{"N":"3"}},{"p":{"S":"s1"},"c":{"S":"b"},"v":{"N":"4"}},{"p":{"S":"s1"},"c":{"S":"ba"},"v":{"N":"5"}},{"p":{"S":"s1"},"c":{"S":"é"},"v":{"N":"8"}}]}
+> Query {"TableName":"alt_qs_kc_ss","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"s1"}]},"c":{"ComparisonOperator":"GE","AttributeValueList":[{"S":"ab"}]}}}
+< 200 {"Count":5,"ScannedCount":5,"Items":[{"p":{"S":"s1"},"c":{"S":"ab"},"v":{"N":"2"}},{"p":{"S":"s1"},"c":{"S":"abc"},"v":{"N":"3"}},{"p":{"S":"s1"},"c":{"S":"b"},"v":{"N":"4"}},{"p":{"S":"s1"},"c":{"S":"ba"},"v":{"N":"5"}},{"p":{"S":"s1"},"c":{"S":"é"},"v":{"N":"8"}}]}
+> Query {"TableName":"alt_qs_kc_ss","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"s1"}]},"c":{"ComparisonOperator":"BETWEEN","AttributeValueList":[{"S":"a"},{"S":"b"}]}}}
+< 200 {"Count":6,"ScannedCount":6,"Items":[{"p":{"S":"s1"},"c":{"S":"a"},"v":{"N":"0"}},{"p":{"S":"s1"},"c":{"S":"a b"},"v":{"N":"11"}},{"p":{"S":"s1"},"c":{"S":"aa"},"v":{"N":"1"}},{"p":{"S":"s1"},"c":{"S":"ab"},"v":{"N":"2"}},{"p":{"S":"s1"},"c":{"S":"abc"},"v":{"N":"3"}},{"p":{"S":"s1"},"c":{"S":"b"},"v":{"N":"4"}}]}
+> Query {"TableName":"alt_qs_kc_ss","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"s1"}]},"c":{"ComparisonOperator":"BEGINS_WITH","AttributeValueList":[{"S":"a"}]}}}
+< 200 {"Count":5,"ScannedCount":5,"Items":[{"p":{"S":"s1"},"c":{"S":"a"},"v":{"N":"0"}},{"p":{"S":"s1"},"c":{"S":"a b"},"v":{"N":"11"}},{"p":{"S":"s1"},"c":{"S":"aa"},"v":{"N":"1"}},{"p":{"S":"s1"},"c":{"S":"ab"},"v":{"N":"2"}},{"p":{"S":"s1"},"c":{"S":"abc"},"v":{"N":"3"}}]}
+> Query {"TableName":"alt_qs_kc_ss","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"s1"}]},"c":{"ComparisonOperator":"BEGINS_WITH","AttributeValueList":[{"S":"ab"}]}}}
+< 200 {"Count":2,"ScannedCount":2,"Items":[{"p":{"S":"s1"},"c":{"S":"ab"},"v":{"N":"2"}},{"p":{"S":"s1"},"c":{"S":"abc"},"v":{"N":"3"}}]}
+> Query {"TableName":"alt_qs_kc_ss","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"s1"}]},"c":{"ComparisonOperator":"BEGINS_WITH","AttributeValueList":[{"S":"é"}]}}}
+< 200 {"Count":1,"ScannedCount":1,"Items":[{"p":{"S":"s1"},"c":{"S":"é"},"v":{"N":"8"}}]}
+> Query {"TableName":"alt_qs_kc_ss","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"s1"}]},"c":{"ComparisonOperator":"BEGINS_WITH","AttributeValueList":[{"S":"q"}]}}}
+< 200 {"Count":0,"ScannedCount":0,"Items":[]}
+# S range key: BEGINS_WITH errors
+> Query {"TableName":"alt_qs_kc_ss","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"s1"}]},"c":{"ComparisonOperator":"BEGINS_WITH","AttributeValueList":[{"N":"1"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Type mismatch: expected type S for key column c, got type \"N\""}
+> Query {"TableName":"alt_qs_kc_ss","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"s1"}]},"c":{"ComparisonOperator":"BEGINS_WITH","AttributeValueList":[]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"1 arguments expected for a sort key restriction: []"}
+> Query {"TableName":"alt_qs_kc_ss","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"s1"}]},"c":{"ComparisonOperator":"BEGINS_WITH","AttributeValueList":[{"S":"a"},{"S":"b"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"1 arguments expected for a sort key restriction: [{\"S\":\"a\"},{\"S\":\"b\"}]"}
+> Query {"TableName":"alt_qs_kc_ss","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"s1"}]},"c":{"ComparisonOperator":"BEGINS_WITH","AttributeValueList":[{"S":""}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The AttributeValue for a key attribute cannot contain an empty string value. Key: c"}
+> Query {"TableName":"alt_qs_kc_ss","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"s1"}]},"c":{"ComparisonOperator":"begins_with","AttributeValueList":[{"S":"a"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Unsupported comparison operator begins_with"}
+# B range key
+> Query {"TableName":"alt_qs_kc_sb","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"B":"CQ=="}]},"c":{"ComparisonOperator":"EQ","AttributeValueList":[{"B":"gA=="}]}}}
+< 200 {"Count":1,"ScannedCount":1,"Items":[{"p":{"B":"CQ=="},"c":{"B":"gA=="},"v":{"N":"4"}}]}
+> Query {"TableName":"alt_qs_kc_sb","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"B":"CQ=="}]},"c":{"ComparisonOperator":"LT","AttributeValueList":[{"B":"gA=="}]}}}
+< 200 {"Count":7,"ScannedCount":7,"Items":[{"p":{"B":"CQ=="},"c":{"B":"AA=="},"v":{"N":"0"}},{"p":{"B":"CQ=="},"c":{"B":"AAE="},"v":{"N":"2"}},{"p":{"B":"CQ=="},"c":{"B":"AQ=="},"v":{"N":"1"}},{"p":{"B":"CQ=="},"c":{"B":"YQ=="},"v":{"N":"10"}},{"p":{"B":"CQ=="},"c":{"B":"YWI="},"v":{"N":"9"}},{"p":{"B":"CQ=="},"c":{"B":"YWM="},"v":{"N":"11"}},{"p":{"B":"CQ=="},"c":{"B":"fw=="},"v":{"N":"3"}}]}
+> Query {"TableName":"alt_qs_kc_sb","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"B":"CQ=="}]},"c":{"ComparisonOperator":"LE","AttributeValueList":[{"B":"gA=="}]}}}
+< 200 {"Count":8,"ScannedCount":8,"Items":[{"p":{"B":"CQ=="},"c":{"B":"AA=="},"v":{"N":"0"}},{"p":{"B":"CQ=="},"c":{"B":"AAE="},"v":{"N":"2"}},{"p":{"B":"CQ=="},"c":{"B":"AQ=="},"v":{"N":"1"}},{"p":{"B":"CQ=="},"c":{"B":"YQ=="},"v":{"N":"10"}},{"p":{"B":"CQ=="},"c":{"B":"YWI="},"v":{"N":"9"}},{"p":{"B":"CQ=="},"c":{"B":"YWM="},"v":{"N":"11"}},{"p":{"B":"CQ=="},"c":{"B":"fw=="},"v":{"N":"3"}},{"p":{"B":"CQ=="},"c":{"B":"gA=="},"v":{"N":"4"}}]}
+> Query {"TableName":"alt_qs_kc_sb","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"B":"CQ=="}]},"c":{"ComparisonOperator":"GT","AttributeValueList":[{"B":"gA=="}]}}}
+< 200 {"Count":4,"ScannedCount":4,"Items":[{"p":{"B":"CQ=="},"c":{"B":"/v8="},"v":{"N":"5"}},{"p":{"B":"CQ=="},"c":{"B":"/w=="},"v":{"N":"6"}},{"p":{"B":"CQ=="},"c":{"B":"/wA="},"v":{"N":"7"}},{"p":{"B":"CQ=="},"c":{"B":"//8="},"v":{"N":"8"}}]}
+> Query {"TableName":"alt_qs_kc_sb","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"B":"CQ=="}]},"c":{"ComparisonOperator":"GE","AttributeValueList":[{"B":"gA=="}]}}}
+< 200 {"Count":5,"ScannedCount":5,"Items":[{"p":{"B":"CQ=="},"c":{"B":"gA=="},"v":{"N":"4"}},{"p":{"B":"CQ=="},"c":{"B":"/v8="},"v":{"N":"5"}},{"p":{"B":"CQ=="},"c":{"B":"/w=="},"v":{"N":"6"}},{"p":{"B":"CQ=="},"c":{"B":"/wA="},"v":{"N":"7"}},{"p":{"B":"CQ=="},"c":{"B":"//8="},"v":{"N":"8"}}]}
+> Query {"TableName":"alt_qs_kc_sb","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"B":"CQ=="}]},"c":{"ComparisonOperator":"BETWEEN","AttributeValueList":[{"B":"fw=="},{"B":"/w=="}]}}}
+< 200 {"Count":4,"ScannedCount":4,"Items":[{"p":{"B":"CQ=="},"c":{"B":"fw=="},"v":{"N":"3"}},{"p":{"B":"CQ=="},"c":{"B":"gA=="},"v":{"N":"4"}},{"p":{"B":"CQ=="},"c":{"B":"/v8="},"v":{"N":"5"}},{"p":{"B":"CQ=="},"c":{"B":"/w=="},"v":{"N":"6"}}]}
+> Query {"TableName":"alt_qs_kc_sb","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"B":"CQ=="}]},"c":{"ComparisonOperator":"BEGINS_WITH","AttributeValueList":[{"B":"YQ=="}]}}}
+< 200 {"Count":3,"ScannedCount":3,"Items":[{"p":{"B":"CQ=="},"c":{"B":"YQ=="},"v":{"N":"10"}},{"p":{"B":"CQ=="},"c":{"B":"YWI="},"v":{"N":"9"}},{"p":{"B":"CQ=="},"c":{"B":"YWM="},"v":{"N":"11"}}]}
+> Query {"TableName":"alt_qs_kc_sb","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"B":"CQ=="}]},"c":{"ComparisonOperator":"BEGINS_WITH","AttributeValueList":[{"B":"/w=="}]}}}
+< 200 {"Count":3,"ScannedCount":3,"Items":[{"p":{"B":"CQ=="},"c":{"B":"/w=="},"v":{"N":"6"}},{"p":{"B":"CQ=="},"c":{"B":"/wA="},"v":{"N":"7"}},{"p":{"B":"CQ=="},"c":{"B":"//8="},"v":{"N":"8"}}]}
+> Query {"TableName":"alt_qs_kc_sb","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"B":"CQ=="}]},"c":{"ComparisonOperator":"BEGINS_WITH","AttributeValueList":[{"B":"//8="}]}}}
+< 200 {"Count":1,"ScannedCount":1,"Items":[{"p":{"B":"CQ=="},"c":{"B":"//8="},"v":{"N":"8"}}]}
+> Query {"TableName":"alt_qs_kc_sb","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"B":"CQ=="}]},"c":{"ComparisonOperator":"BEGINS_WITH","AttributeValueList":[{"S":"a"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Type mismatch: expected type B for key column c, got type \"S\""}
+# Hash-only table
+> Query {"TableName":"alt_qs_kc_hs","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"h2"}]}}}
+< 200 {"Count":1,"ScannedCount":1,"Items":[{"p":{"S":"h2"},"v":{"N":"1"}}]}
+> Query {"TableName":"alt_qs_kc_hs","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"h2"}]},"c":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"x"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Only one condition allowed in table with only hash key"}
+> Query {"TableName":"alt_qs_kc_hs","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"h2"}]},"v":{"ComparisonOperator":"EQ","AttributeValueList":[{"N":"1"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Only one condition allowed in table with only hash key"}
+# KeyConditions mixed with expression parameters
+> Query {"TableName":"alt_qs_kc_sn","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"p1"}]}},"ExpressionAttributeValues":{":x":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeValues has spurious ':x', not used in Query"}
+> Query {"TableName":"alt_qs_kc_sn","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"p1"}]}},"ExpressionAttributeNames":{"#x":"c"}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeNames has spurious '#x', not used in Query"}
+> Query {"TableName":"alt_qs_kc_sn","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"p1"}]}},"FilterExpression":"v > :x","ExpressionAttributeValues":{":x":{"N":"1"}}}
+< 200 {"Count":10,"ScannedCount":12,"Items":[{"p":{"S":"p1"},"c":{"N":"0"},"v":{"N":"2"}},{"p":{"S":"p1"},"c":{"N":"1"},"v":{"N":"3"}},{"p":{"S":"p1"},"c":{"N":"2"},"v":{"N":"4"}},{"p":{"S":"p1"},"c":{"N":"3"},"v":{"N":"5"}},{"p":{"S":"p1"},"c":{"N":"5"},"v":{"N":"6"}},{"p":{"S":"p1"},"c":{"N":"7.25"},"v":{"N":"7"}},{"p":{"S":"p1"},"c":{"N":"10"},"v":{"N":"8"}},{"p":{"S":"p1"},"c":{"N":"11"},"v":{"N":"9"}},{"p":{"S":"p1"},"c":{"N":"100"},"v":{"N":"10"}},{"p":{"S":"p1"},"c":{"N":"1000"},"v":{"N":"11"}}]}
+> Query {"TableName":"alt_qs_kc_sn","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"p1"}]}},"ProjectionExpression":"c"}
+< 200 {"Count":12,"ScannedCount":12,"Items":[{"c":{"N":"-10"}},{"c":{"N":"-1.5"}},{"c":{"N":"0"}},{"c":{"N":"1"}},{"c":{"N":"2"}},{"c":{"N":"3"}},{"c":{"N":"5"}},{"c":{"N":"7.25"}},{"c":{"N":"10"}},{"c":{"N":"11"}},{"c":{"N":"100"}},{"c":{"N":"1000"}}]}
+> Query {"TableName":"alt_qs_kc_sn","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"p1"}]}},"ProjectionExpression":"#c","ExpressionAttributeNames":{"#c":"c"}}
+< 200 {"Count":12,"ScannedCount":12,"Items":[{"c":{"N":"-10"}},{"c":{"N":"-1.5"}},{"c":{"N":"0"}},{"c":{"N":"1"}},{"c":{"N":"2"}},{"c":{"N":"3"}},{"c":{"N":"5"}},{"c":{"N":"7.25"}},{"c":{"N":"10"}},{"c":{"N":"11"}},{"c":{"N":"100"}},{"c":{"N":"1000"}}]}
+# KeyConditions with QueryFilter and AttributesToGet (all legacy: allowed)
+> Query {"TableName":"alt_qs_kc_sn","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"p1"}]}},"QueryFilter":{"v":{"ComparisonOperator":"GT","AttributeValueList":[{"N":"8"}]}},"AttributesToGet":["c","v"]}
+< 200 {"Count":3,"ScannedCount":12,"Items":[{"c":{"N":"11"},"v":{"N":"9"}},{"c":{"N":"100"},"v":{"N":"10"}},{"c":{"N":"1000"},"v":{"N":"11"}}]}
+> DeleteTable {"TableName":"alt_qs_kc_sn"}
+< 200 {"TableDescription":{"TableName":"alt_qs_kc_sn","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_qs_kc_sn:scylla:table/alt_qs_kc_sn","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0}}}
+> DeleteTable {"TableName":"alt_qs_kc_ss"}
+< 200 {"TableDescription":{"TableName":"alt_qs_kc_ss","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_qs_kc_ss:scylla:table/alt_qs_kc_ss","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0}}}
+> DeleteTable {"TableName":"alt_qs_kc_sb"}
+< 200 {"TableDescription":{"TableName":"alt_qs_kc_sb","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_qs_kc_sb:scylla:table/alt_qs_kc_sb","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0}}}
+> DeleteTable {"TableName":"alt_qs_kc_hs"}
+< 200 {"TableDescription":{"TableName":"alt_qs_kc_hs","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_qs_kc_hs:scylla:table/alt_qs_kc_hs","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0}}}

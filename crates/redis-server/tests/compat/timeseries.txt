@@ -1,0 +1,1165 @@
+# Time series (the RedisTimeSeries module built into Redis 8.10): every TS.* command with its
+# errors and RESP3 replies, every aggregation with EMPTY/ALIGN/BUCKETTIMESTAMP, compaction rules
+# fed by appends, upserts and deletions, LATEST, multi-series queries with GROUPBY, TS.READ,
+# the label index across RENAME/COPY/RESTORE/DEL, global configs, MEMORY USAGE, keyspace
+# events, dirty counts and command metadata. Timestamps are always explicit (`*` is the clock).
+
+FLUSHALL
+SET str v
+
+# ---- TS.CREATE ----
+TS.CREATE
+TS.CREATE c1
+TS.CREATE c1
+TS.CREATE str
+TS.CREATE c2 RETENTION 1000 CHUNK_SIZE 128 DUPLICATE_POLICY LAST LABELS a 1 b 2
+TS.CREATE c3 RETENTION -1
+TS.CREATE c3 RETENTION x
+TS.CREATE c3 RETENTION
+TS.CREATE c3 CHUNK_SIZE 47
+TS.CREATE c3 CHUNK_SIZE 50
+TS.CREATE c3 CHUNK_SIZE 1048584
+TS.CREATE c3 CHUNK_SIZE x
+TS.CREATE c3 CHUNK_SIZE
+TS.CREATE c3 ENCODING
+TS.CREATE c3 ENCODING foo
+TS.CREATE c3 DUPLICATE_POLICY
+TS.CREATE c3 DUPLICATE_POLICY foo
+TS.CREATE c3 IGNORE 1
+TS.CREATE c3 IGNORE -1 1
+TS.CREATE c3 IGNORE 1 -1
+TS.CREATE c3 IGNORE x 1
+TS.CREATE c3 LABELS a
+TS.CREATE c3 LABELS a ""
+TS.CREATE c3 LABELS "" b
+TS.CREATE c3 LABELS a "b(c"
+TS.CREATE c3 LABELS a "b,c"
+TS.CREATE c3 LABELS a 1 b
+EXISTS c3
+TS.CREATE c4 ENCODING uncompressed
+TS.CREATE c5 ENCODING COMPRESSED
+TS.CREATE c6 UNCOMPRESSED
+TS.CREATE c7 IGNORE 10 0.5 DUPLICATE_POLICY min
+TS.CREATE c8 LABELS
+TS.CREATE c9 RETENTION 5 RETENTION 6
+TYPE c1
+OBJECT ENCODING c1
+TS.INFO c1
+TS.INFO c2
+TS.INFO c4
+TS.INFO c5
+TS.INFO c6
+TS.INFO c7
+TS.INFO c8
+TS.INFO c9
+TS.INFO c1 DEBUG
+TS.INFO c1 x
+TS.INFO c1 DEBUG x
+TS.INFO nokey
+TS.INFO str
+TS.QUERYINDEX a=1
+
+# ---- TS.ALTER ----
+TS.ALTER nokey RETENTION 1
+TS.ALTER str RETENTION 1
+TS.ALTER c2 RETENTION 0
+TS.ALTER c2 LABELS a 3
+TS.INFO c2
+TS.QUERYINDEX a=1
+TS.QUERYINDEX a=3
+TS.ALTER c2 CHUNK_SIZE 256 DUPLICATE_POLICY max IGNORE 3 0.25
+TS.INFO c2
+TS.ALTER c2 LABELS
+TS.INFO c2
+TS.QUERYINDEX a=3
+TS.ALTER c2 CHUNK_SIZE 7
+TS.ALTER c2 ENCODING uncompressed
+TS.INFO c2
+
+# ---- TS.ADD ----
+TS.ADD a 1
+TS.ADD a 1 x
+TS.ADD a x 1
+TS.ADD a -1 1
+TS.ADD a 1 inf
+TS.ADD a 1 1e400
+TS.ADD a 1 " 1"
+TS.ADD a 1 01
+TS.ADD a 1 1.
+TS.ADD a 1 .5
+TS.ADD a 1 +1
+TS.ADD str 1 1
+EXISTS a
+TS.ADD a 100 1.5 LABELS name a kind x
+TS.ADD a 100 2
+TS.ADD a 100 2 ON_DUPLICATE
+TS.ADD a 100 2 ON_DUPLICATE foo
+TS.ADD a 100 2 ON_DUPLICATE LAST
+TS.ADD a 100 3 ON_DUPLICATE first
+TS.ADD a 100 1 ON_DUPLICATE min
+TS.ADD a 100 9 ON_DUPLICATE max
+TS.ADD a 100 1 ON_DUPLICATE sum
+TS.RANGE a - +
+TS.ADD a 200 nan
+TS.ADD a 200 1 ON_DUPLICATE sum
+TS.ADD a 200 1 ON_DUPLICATE last
+TS.ADD a 200 NaN ON_DUPLICATE last
+TS.ADD a 300 -nan
+TS.ADD a 50 0.1
+TS.RANGE a - +
+TS.GET a
+TS.INFO a
+TS.ADD n1 1 1 RETENTION 10 LABELS
+TS.ADD n1 2 2 RETENTION 20
+TS.INFO n1
+TS.ADD r 1000 1 RETENTION 100
+TS.ADD r 899 1
+TS.ADD r 900 1
+TS.ADD r 2000 2
+TS.ADD r 1950 3
+TS.RANGE r - +
+TS.INFO r
+TS.ADD ig 10 1 IGNORE 5 0.5 DUPLICATE_POLICY last
+TS.ADD ig 12 1.2
+TS.ADD ig 15 1.6
+TS.ADD ig 16 1.6
+TS.ADD ig 30 1.6
+TS.ADD ig 5 1.6
+TS.ADD ig 31 nan
+TS.ADD ig 32 nan
+TS.RANGE ig - +
+TS.ADD ig2 10 1 IGNORE 5 0.5
+TS.ADD ig2 12 1.2
+TS.ADD ig2 13 1.2 ON_DUPLICATE last
+TS.RANGE ig2 - +
+
+# ---- TS.MADD ----
+TS.MADD a 1
+TS.MADD a 1 1 b
+TS.MADD a 400 1 nokey 1 1 str 1 1 a x 1 a 401 y a 50 5 a 402 2
+TS.RANGE a 400 +
+
+# ---- TS.INCRBY / TS.DECRBY ----
+TS.INCRBY
+TS.INCRBY i
+TS.INCRBY str 1
+TS.INCRBY i x
+TS.INCRBY i 1 TIMESTAMP
+TS.INCRBY i 1 TIMESTAMP x
+TS.INCRBY i 1 TIMESTAMP ""
+TS.INCRBY i 5 TIMESTAMP 10 LABELS k v
+TS.INCRBY i 5 TIMESTAMP 10
+TS.INCRBY i 5 TIMESTAMP 9
+TS.DECRBY i 2.5 TIMESTAMP 20
+TS.INCRBY i 1 TIMESTAMP 20 RETENTION 1
+TS.RANGE i - +
+TS.INFO i
+TS.ADD inan 1 nan
+TS.INCRBY inan 1 TIMESTAMP 2
+TS.INCRBY i2 1 TIMESTAMP 5 LABELS TIMESTAMP 7
+TS.RANGE i2 - +
+TS.INFO i2
+TS.INCRBY i3 1 TIMESTAMP 5 DUPLICATE_POLICY block
+TS.INCRBY i3 1 TIMESTAMP 5
+TS.INCRBY i3 1 TIMESTAMP -5
+TS.RANGE i3 - +
+
+# ---- TS.GET ----
+TS.GET
+TS.GET a
+TS.GET a LATEST
+TS.GET a x
+TS.GET a LATEST x
+TS.GET c1
+TS.GET nokey
+TS.GET str
+TS.GET LATEST
+
+# ---- TS.RANGE / TS.REVRANGE: options and errors ----
+DEL s
+TS.CREATE s LABELS name s
+TS.MADD s 1 1 s 2 2 s 3 3 s 5 5 s 8 8 s 13 13 s 21 21 s 34 34 s 55 55 s 89 89
+TS.ADD s 100 nan
+TS.ADD s 110 -1.5
+TS.RANGE s - +
+TS.REVRANGE s - +
+TS.RANGE s 3 21
+TS.REVRANGE s 3 21
+TS.RANGE s 22 33
+TS.RANGE s 30 3
+TS.RANGE s
+TS.RANGE s -
+TS.RANGE s x +
+TS.RANGE s - x
+TS.RANGE s -1 +
+TS.RANGE s "- " +
+TS.RANGE nokey - +
+TS.RANGE str - +
+TS.RANGE s - + COUNT 3
+TS.REVRANGE s - + COUNT 3
+TS.RANGE s - + COUNT
+TS.RANGE s - + COUNT 0
+TS.RANGE s - + COUNT x
+TS.RANGE s - + COUNT -1
+TS.RANGE s - + COUNT 2 COUNT 5
+TS.RANGE s - + FILTER_BY_TS 3 5 8 100 1000
+TS.REVRANGE s - + FILTER_BY_TS 3 5 8
+TS.RANGE s - + FILTER_BY_TS 8 3 3 5 COUNT 2
+TS.RANGE s - + FILTER_BY_TS
+TS.RANGE s - + FILTER_BY_TS x
+TS.RANGE s - + FILTER_BY_TS 1 x 2
+TS.RANGE s - + FILTER_BY_VALUE 3 21
+TS.REVRANGE s - + FILTER_BY_VALUE 3 21
+TS.RANGE s - + FILTER_BY_VALUE 3
+TS.RANGE s - + FILTER_BY_VALUE x 3
+TS.RANGE s - + FILTER_BY_VALUE 3 x
+TS.RANGE s - + FILTER_BY_VALUE 21 3
+TS.RANGE s - + FILTER_BY_VALUE -inf inf
+TS.RANGE s - + FILTER_BY_TS 1 2 3 5 FILTER_BY_VALUE 2 4
+TS.RANGE s - + LATEST
+TS.RANGE s - + latest COUNT 1
+
+# ---- aggregations ----
+TS.RANGE s - + AGGREGATION
+TS.RANGE s - + AGGREGATION avg
+TS.RANGE s - + AGGREGATION avg 0
+TS.RANGE s - + AGGREGATION avg -1
+TS.RANGE s - + AGGREGATION avg x
+TS.RANGE s - + AGGREGATION foo 10
+TS.RANGE s - + AGGREGATION "" 10
+TS.RANGE s - + AGGREGATION avg, 10
+TS.RANGE s - + AGGREGATION ,avg 10
+TS.RANGE s - + AGGREGATION avg,,sum 10
+TS.RANGE s - + AGGREGATION avg,foo 10
+TS.RANGE s - + AGGREGATION min,max,sum,avg,count,first,last,range,std.p,std.s,var.p,var.s,twa,countnan,countall,min 10
+TS.RANGE s - + AGGREGATION avg 10
+TS.RANGE s - + AGGREGATION AVG 10
+TS.RANGE s - + AGGREGATION min 10
+TS.RANGE s - + AGGREGATION max 10
+TS.RANGE s - + AGGREGATION sum 10
+TS.RANGE s - + AGGREGATION count 10
+TS.RANGE s - + AGGREGATION first 10
+TS.RANGE s - + AGGREGATION last 10
+TS.RANGE s - + AGGREGATION range 10
+TS.RANGE s - + AGGREGATION std.p 10
+TS.RANGE s - + AGGREGATION std.s 10
+TS.RANGE s - + AGGREGATION var.p 10
+TS.RANGE s - + AGGREGATION var.s 10
+TS.RANGE s - + AGGREGATION twa 10
+TS.RANGE s - + AGGREGATION countnan 10
+TS.RANGE s - + AGGREGATION countall 10
+TS.REVRANGE s - + AGGREGATION twa 10
+TS.REVRANGE s - + AGGREGATION avg 10
+TS.RANGE s - + AGGREGATION min,max,sum,avg,count,first,last,range,std.p,std.s,var.p,var.s,twa,countnan,countall 25
+TS.REVRANGE s - + AGGREGATION min,max,sum,avg,count,first,last,range,std.p,std.s,var.p,var.s,twa,countnan,countall 25
+TS.RANGE s - + AGGREGATION avg,twa,last 7 EMPTY
+TS.REVRANGE s - + AGGREGATION avg,twa,last 7 EMPTY
+TS.RANGE s - + AGGREGATION sum 10 EMPTY
+TS.RANGE s - + AGGREGATION count 10 EMPTY
+TS.RANGE s - + AGGREGATION last 10 EMPTY
+TS.RANGE s - + AGGREGATION twa 10 EMPTY
+TS.REVRANGE s - + AGGREGATION twa 10 EMPTY
+TS.RANGE s - + AGGREGATION twa 3 EMPTY
+TS.RANGE s 4 60 AGGREGATION twa 7 EMPTY
+TS.REVRANGE s 4 60 AGGREGATION twa 7 EMPTY
+TS.RANGE s - + AGGREGATION max 10 BUCKETTIMESTAMP end
+TS.RANGE s - + AGGREGATION max 10 BUCKETTIMESTAMP +
+TS.RANGE s - + AGGREGATION max 10 BUCKETTIMESTAMP mid
+TS.RANGE s - + AGGREGATION max 10 BUCKETTIMESTAMP ~
+TS.RANGE s - + AGGREGATION max 10 BUCKETTIMESTAMP start
+TS.RANGE s - + AGGREGATION max 10 BUCKETTIMESTAMP -
+TS.RANGE s - + AGGREGATION max 10 BUCKETTIMESTAMP foo
+TS.RANGE s - + AGGREGATION max 10 BUCKETTIMESTAMP
+TS.RANGE s - + AGGREGATION max 10 EMPTY BUCKETTIMESTAMP end
+TS.RANGE s - + AGGREGATION max 10 BUCKETTIMESTAMP mid EMPTY
+TS.RANGE s - + AGGREGATION max 10 FOO EMPTY
+TS.RANGE s - + AGGREGATION max 10 FOO FOO FOO EMPTY
+TS.RANGE s - + AGGREGATION max 10 FOO BUCKETTIMESTAMP end
+TS.RANGE s - + AGGREGATION max 10 FOO FOO BUCKETTIMESTAMP end
+TS.RANGE s - + ALIGN start AGGREGATION max 10
+TS.RANGE s 4 + ALIGN start AGGREGATION max 10
+TS.RANGE s 4 + ALIGN - AGGREGATION max 10
+TS.RANGE s - 60 ALIGN end AGGREGATION max 10
+TS.RANGE s - 60 ALIGN + AGGREGATION max 10
+TS.RANGE s - + ALIGN end AGGREGATION max 10
+TS.RANGE s - + ALIGN 3 AGGREGATION max 10
+TS.RANGE s - + ALIGN 3 AGGREGATION max 10 EMPTY
+TS.REVRANGE s - + ALIGN 3 AGGREGATION max 10 EMPTY
+TS.RANGE s - + ALIGN 3
+TS.RANGE s - + ALIGN foo AGGREGATION max 10
+TS.RANGE s - + ALIGN
+TS.RANGE s - + AGGREGATION max 10 ALIGN
+TS.RANGE s - + AGGREGATION avg 10 COUNT 2
+TS.RANGE s - + COUNT 2 AGGREGATION avg 10
+TS.RANGE s - + AGGREGATION count 10 COUNT 2
+TS.RANGE s - + AGGREGATION count 10
+TS.RANGE s - + AGGREGATION avg 10 FILTER_BY_VALUE 2 30
+TS.RANGE s - + AGGREGATION avg 10 FILTER_BY_TS 1 2 3 21
+TS.RANGE s - + FILTER_BY_TS 1 2 3 21 AGGREGATION avg 10 EMPTY
+TS.RANGE s 0 1000 AGGREGATION avg 1000000
+TS.RANGE s 0 0 AGGREGATION avg 1
+TS.RANGE s 9223372036854775807 + AGGREGATION avg 10
+TS.RANGE s - + AGGREGATION avg 9223372036854775807
+TS.RANGE s - + AGGREGATION countnan,countall,count 50
+TS.RANGE s - + AGGREGATION sum 1 EMPTY COUNT 15
+TS.REVRANGE s - + AGGREGATION sum 1 EMPTY COUNT 15
+
+# ---- compaction rules ----
+FLUSHALL
+SET str v
+TS.CREATE src LABELS t src
+TS.CREATE dst LABELS t dst
+TS.CREATE dst2
+TS.CREATE dst3
+TS.CREATERULE
+TS.CREATERULE src dst
+TS.CREATERULE src dst AGGREGATION
+TS.CREATERULE src dst AGGREGATION avg
+TS.CREATERULE src dst AGGREGATION avg 0
+TS.CREATERULE src dst AGGREGATION avg x
+TS.CREATERULE src dst AGGREGATION foo 10
+TS.CREATERULE src dst AGGREGATION avg,sum 10
+TS.CREATERULE src dst AGGREGATION avg 10 x
+TS.CREATERULE src dst AGGREGATION avg 10 -1
+TS.CREATERULE src dst AGGREGATION avg 10 x y
+TS.CREATERULE src dst FOO avg 10
+TS.CREATERULE src src AGGREGATION avg 10
+TS.CREATERULE nokey dst AGGREGATION avg 10
+TS.CREATERULE src nokey AGGREGATION avg 10
+TS.CREATERULE str dst AGGREGATION avg 10
+TS.CREATERULE src str AGGREGATION avg 10
+TS.CREATERULE src dst AGGREGATION avg 10
+TS.CREATERULE src dst AGGREGATION sum 10
+TS.CREATERULE src dst2 AGGREGATION twa 10 3
+TS.CREATERULE dst dst3 AGGREGATION max 20
+TS.CREATERULE dst2 dst AGGREGATION max 20
+TS.CREATERULE dst3 src AGGREGATION max 20
+TS.INFO src
+TS.INFO dst
+TS.INFO dst2
+TS.INFO dst3
+TS.MADD src 1 1 src 4 4 src 9 9 src 11 11 src 15 15 src 23 23
+TS.RANGE dst - +
+TS.RANGE dst2 - +
+TS.RANGE dst - + LATEST
+TS.RANGE dst2 - + LATEST
+TS.REVRANGE dst - + LATEST
+TS.GET dst
+TS.GET dst LATEST
+TS.GET dst2 LATEST
+TS.GET src LATEST
+TS.ADD src 5 100
+TS.RANGE src - +
+TS.ADD src 5 100 ON_DUPLICATE sum
+TS.RANGE dst - +
+TS.RANGE dst2 - +
+TS.ADD src 40 nan
+TS.RANGE dst - +
+TS.RANGE dst - +
+TS.ADD src 41 2
+TS.ADD src 61 2
+TS.RANGE dst - + LATEST
+TS.RANGE dst2 - + LATEST
+TS.RANGE dst3 - + LATEST
+TS.DEL src 0 4
+TS.RANGE dst - +
+TS.RANGE src - +
+TS.DEL src 11 11
+TS.RANGE dst - +
+TS.DEL src 41 41
+TS.RANGE dst - + LATEST
+TS.DEL
+TS.DEL src
+TS.DEL src 1
+TS.DEL src x 1
+TS.DEL src 1 x
+TS.DEL src 5 1
+TS.DEL nokey 1 2
+TS.DEL str 1 2
+TS.DEL src - +
+TS.DEL src 0 100
+TS.RANGE src - +
+TS.RANGE dst - +
+TS.INFO src
+TS.DELETERULE
+TS.DELETERULE src
+TS.DELETERULE src nokey
+TS.DELETERULE nokey dst
+TS.DELETERULE str dst
+TS.DELETERULE src str
+TS.DELETERULE src dst3
+TS.DELETERULE src dst
+TS.DELETERULE src dst
+TS.INFO src
+TS.INFO dst
+DEL dst2
+TS.INFO src
+TS.CREATERULE src dst AGGREGATION last 5
+DEL src
+TS.INFO dst
+TS.INFO dst3
+
+# ---- every aggregation as a rule, fed out of order ----
+FLUSHALL
+TS.CREATE in DUPLICATE_POLICY last
+TS.CREATE o1
+TS.CREATE o2
+TS.CREATE o3
+TS.CREATE o4
+TS.CREATE o5
+TS.CREATE o6
+TS.CREATE o7
+TS.CREATE o8
+TS.CREATE o9
+TS.CREATE o10
+TS.CREATE o11
+TS.CREATE o12
+TS.CREATE o13
+TS.CREATE o14
+TS.CREATE o15
+TS.CREATERULE in o1 AGGREGATION min 10
+TS.CREATERULE in o2 AGGREGATION max 10
+TS.CREATERULE in o3 AGGREGATION sum 10
+TS.CREATERULE in o4 AGGREGATION avg 10
+TS.CREATERULE in o5 AGGREGATION count 10
+TS.CREATERULE in o6 AGGREGATION first 10
+TS.CREATERULE in o7 AGGREGATION last 10
+TS.CREATERULE in o8 AGGREGATION range 10
+TS.CREATERULE in o9 AGGREGATION std.p 10
+TS.CREATERULE in o10 AGGREGATION std.s 10
+TS.CREATERULE in o11 AGGREGATION var.p 10
+TS.CREATERULE in o12 AGGREGATION var.s 10
+TS.CREATERULE in o13 AGGREGATION twa 10
+TS.CREATERULE in o14 AGGREGATION countnan 10
+TS.CREATERULE in o15 AGGREGATION countall 10
+TS.MADD in 2 3 in 5 nan in 7 -2 in 12 4 in 18 8 in 21 1 in 33 5 in 47 6
+TS.ADD in 15 10
+TS.ADD in 12 1
+TS.ADD in 1 9
+TS.DEL in 18 18
+TS.ADD in 25 nan
+TS.MRANGE - + WITHLABELS FILTER t!=x
+TS.MRANGE - + LATEST FILTER t!=x
+TS.DEL in 0 9
+TS.MRANGE - + LATEST FILTER t!=x
+TS.INFO in
+
+# ---- global compaction policy ----
+CONFIG GET ts-compaction-policy
+CONFIG SET ts-compaction-policy foo
+CONFIG SET ts-compaction-policy avg:1m
+CONFIG SET ts-compaction-policy avg:1m:1h:5
+CONFIG SET ts-compaction-policy foo:1m:1h
+CONFIG SET ts-compaction-policy avg:1x:1h
+CONFIG SET ts-compaction-policy "max:1m:1h;min:10s:5d:10d;last:5M:10m;avg:2h:10d;avg:3d:100d"
+CONFIG GET ts-compaction-policy
+TS.CREATE gp LABELS a b
+!sort KEYS gp*
+TS.INFO gp
+TS.ADD gp2 1 1
+!sort KEYS gp2*
+TS.CREATE gp_AVG_60000
+TS.INFO gp_AVG_60000
+TS.ADD gp_AVG_60000 1 1
+TS.CREATE {g}x
+!sort KEYS {g}x*
+CONFIG SET ts-compaction-policy "sum:1s:1h:1"
+TS.CREATE gp3
+!sort KEYS gp3*
+TS.INFO gp3
+TS.MADD gp3 1 1 gp3 1500 1 gp3 2500 2
+TS.RANGE gp3_SUM_1000_1 - +
+CONFIG SET ts-compaction-policy ""
+CONFIG GET ts-compaction-policy
+TS.CREATE gp4
+!sort KEYS gp4*
+
+# ---- multi-series: MRANGE / MREVRANGE ----
+FLUSHALL
+SET str v
+TS.CREATE m:1 LABELS host a dc east kind cpu
+TS.CREATE m:2 LABELS host b dc east kind cpu
+TS.CREATE m:3 LABELS host c dc west kind mem
+TS.CREATE m:4 LABELS host d kind cpu
+TS.CREATE m:5 LABELS host e dc "" kind
+TS.CREATE m:6
+TS.MADD m:1 10 1 m:1 20 2 m:1 30 3 m:2 10 10 m:2 25 20 m:3 15 100 m:3 20 nan m:4 40 7
+TS.MRANGE - + FILTER kind=cpu
+TS.MREVRANGE - + FILTER kind=cpu
+TS.MRANGE - + WITHLABELS FILTER kind=cpu
+TS.MRANGE - + SELECTED_LABELS dc host nothere FILTER kind=cpu
+TS.MRANGE - + FILTER dc=east
+TS.MRANGE - + FILTER dc!=east
+TS.MRANGE - + FILTER dc=
+TS.MRANGE - + FILTER dc!=
+TS.MRANGE - + FILTER dc=(east,west)
+TS.MRANGE - + FILTER dc!=(east,west) kind=cpu
+TS.MRANGE - + FILTER host=(a,b) dc=east
+TS.MRANGE - + FILTER kind=cpu dc!=
+TS.MRANGE - + FILTER kind=cpu dc=
+TS.MRANGE - + FILTER kind=nope
+TS.MRANGE - + FILTER dc!=east
+TS.MRANGE - + FILTER kind
+TS.MRANGE - + FILTER kind=(cpu
+TS.MRANGE - + FILTER =cpu
+TS.MRANGE - + FILTER "kind=cpu "
+TS.MRANGE - + FILTER " kind=cpu"
+TS.MRANGE - + FILTER kind=(cpu,mem)
+TS.MRANGE - + FILTER kind==cpu
+TS.MRANGE - + FILTER kind=!cpu
+TS.MRANGE - + FILTER kind!==cpu
+TS.MRANGE - +
+TS.MRANGE - + FILTER
+TS.MRANGE - + COUNT 1 FILTER kind=cpu
+TS.MRANGE - + FILTER kind=cpu COUNT 1
+TS.MRANGE - + FILTER_BY_VALUE 2 50 FILTER kind=cpu
+TS.MRANGE - + FILTER_BY_TS 10 20 FILTER kind=cpu
+TS.MRANGE - + AGGREGATION sum 20 FILTER kind=cpu
+TS.MRANGE - + AGGREGATION sum,count 20 EMPTY FILTER kind=cpu
+TS.MRANGE - + ALIGN end AGGREGATION max 20 BUCKETTIMESTAMP mid FILTER kind=cpu
+TS.MRANGE 15 25 FILTER kind=(cpu,mem)
+TS.MRANGE 15 25 EXCLUDEEMPTY FILTER kind=(cpu,mem)
+TS.MRANGE 15 25 FILTER kind=(cpu,mem) EXCLUDEEMPTY
+TS.MRANGE 100 200 EXCLUDEEMPTY FILTER kind=(cpu,mem)
+TS.MRANGE - + WITHLABELS SELECTED_LABELS dc FILTER kind=cpu
+TS.MRANGE - + SELECTED_LABELS FILTER kind=cpu
+TS.MRANGE - + WITHLABELS WITHLABELS FILTER kind=cpu
+TS.MRANGE - + FILTER kind=cpu GROUPBY dc REDUCE sum
+TS.MRANGE - + FILTER kind=cpu GROUPBY dc REDUCE max
+TS.MRANGE - + FILTER kind=cpu GROUPBY host REDUCE count
+TS.MRANGE - + FILTER kind=cpu GROUPBY kind REDUCE min
+TS.MRANGE - + FILTER kind=cpu GROUPBY kind REDUCE avg
+TS.MRANGE - + FILTER kind=cpu GROUPBY kind REDUCE range
+TS.MRANGE - + FILTER kind=cpu GROUPBY kind REDUCE std.p
+TS.MRANGE - + FILTER kind=cpu GROUPBY kind REDUCE std.s
+TS.MRANGE - + FILTER kind=cpu GROUPBY kind REDUCE var.p
+TS.MRANGE - + FILTER kind=cpu GROUPBY kind REDUCE var.s
+TS.MRANGE - + FILTER kind=cpu GROUPBY kind REDUCE countnan
+TS.MRANGE - + FILTER kind=cpu GROUPBY kind REDUCE countall
+TS.MRANGE - + FILTER kind=(cpu,mem) GROUPBY kind REDUCE countnan
+TS.MRANGE - + FILTER kind=(cpu,mem) GROUPBY kind REDUCE countall
+TS.MRANGE - + FILTER kind=cpu GROUPBY kind REDUCE first
+TS.MRANGE - + FILTER kind=cpu GROUPBY kind REDUCE last
+TS.MRANGE - + FILTER kind=cpu GROUPBY kind REDUCE twa
+TS.MRANGE - + FILTER kind=cpu GROUPBY kind REDUCE foo
+TS.MRANGE - + FILTER kind=cpu GROUPBY kind REDUCE
+TS.MRANGE - + FILTER kind=cpu GROUPBY kind
+TS.MRANGE - + FILTER kind=cpu GROUPBY
+TS.MRANGE - + FILTER kind=cpu GROUPBY kind REDUCE sum x
+TS.MRANGE - + FILTER kind=cpu GROUPBY kind FOO sum
+TS.MRANGE - + GROUPBY kind REDUCE sum FILTER kind=cpu
+TS.MRANGE - + FILTER kind=cpu GROUPBY kind REDUCE sum EXCLUDEEMPTY
+TS.MRANGE - + EXCLUDEEMPTY FILTER kind=cpu GROUPBY kind REDUCE sum
+TS.MRANGE - + AGGREGATION sum,max 10 FILTER kind=cpu GROUPBY kind REDUCE sum
+TS.MRANGE - + WITHLABELS FILTER kind=cpu GROUPBY dc REDUCE sum
+TS.MRANGE - + SELECTED_LABELS dc __reducer__ __source__ FILTER kind=cpu GROUPBY dc REDUCE sum
+TS.MREVRANGE - + COUNT 2 FILTER kind=cpu GROUPBY kind REDUCE sum
+TS.MRANGE - + AGGREGATION avg 10 COUNT 1 FILTER kind=cpu GROUPBY kind REDUCE sum
+TS.MRANGE - + FILTER_BY_VALUE 2 50 FILTER kind=cpu GROUPBY kind REDUCE sum
+@resp 3
+TS.MRANGE - + FILTER kind=cpu
+TS.MRANGE - + WITHLABELS AGGREGATION sum,min 20 FILTER kind=cpu
+TS.MRANGE - + SELECTED_LABELS dc FILTER kind=cpu
+TS.MRANGE - + FILTER kind=cpu GROUPBY dc REDUCE sum
+TS.MRANGE - + WITHLABELS FILTER kind=cpu GROUPBY dc REDUCE sum
+TS.MRANGE - + SELECTED_LABELS dc __reducer__ FILTER kind=cpu GROUPBY dc REDUCE sum
+TS.MGET FILTER kind=cpu
+TS.MGET WITHLABELS FILTER kind=cpu
+TS.QUERYINDEX kind=cpu
+TS.QUERYLABELS LABELS
+TS.QUERYLABELS VALUES host
+TS.RANGE m:3 - + AGGREGATION avg 10
+TS.GET m:1
+TS.GET m:6
+TS.INFO m:1
+TS.NRANGE 2 m:1 m:2 - +
+@resp 2
+
+# ---- MGET ----
+TS.MGET
+TS.MGET FILTER
+TS.MGET FILTER kind=cpu
+TS.MGET FILTER kind=(cpu,mem)
+TS.MGET WITHLABELS FILTER kind=cpu
+TS.MGET SELECTED_LABELS dc FILTER kind=cpu
+TS.MGET SELECTED_LABELS FILTER kind=cpu
+TS.MGET WITHLABELS SELECTED_LABELS dc FILTER kind=cpu
+TS.MGET LATEST FILTER kind=cpu
+TS.MGET FILTER kind=cpu LATEST
+TS.MGET FOO FILTER kind=cpu
+TS.MGET FILTER dc!=east
+TS.MGET FILTER kind
+TS.MGET FILTER host=(a,b,c,d,e)
+
+# ---- QUERYINDEX / QUERYLABELS ----
+TS.QUERYINDEX
+TS.QUERYINDEX kind=cpu
+TS.QUERYINDEX kind!=cpu
+TS.QUERYINDEX dc=
+TS.QUERYINDEX dc!=
+TS.QUERYINDEX kind= dc=
+TS.QUERYINDEX host=(a,b) host=(b,c)
+TS.QUERYINDEX host!=(a,b) kind=cpu
+TS.QUERYINDEX kind
+TS.QUERYINDEX kind=cpu foo
+TS.QUERYINDEX "kind=(cpu,mem)" dc=east
+TS.QUERYLABELS
+TS.QUERYLABELS LABELS
+TS.QUERYLABELS labels
+TS.QUERYLABELS VALUES
+TS.QUERYLABELS VALUES host
+TS.QUERYLABELS VALUES dc
+TS.QUERYLABELS VALUES nope
+TS.QUERYLABELS FOO
+TS.QUERYLABELS LABELS FILTER
+TS.QUERYLABELS LABELS FILTER kind=mem
+TS.QUERYLABELS LABELS FOO kind=mem
+TS.QUERYLABELS VALUES host FILTER kind=cpu dc!=
+TS.QUERYLABELS VALUES host FILTER kind
+TS.QUERYLABELS VALUES host x
+
+# ---- NRANGE / NREVRANGE ----
+TS.NRANGE
+TS.NRANGE 0 m:1 - +
+TS.NRANGE -1 m:1 - +
+TS.NRANGE x m:1 - +
+TS.NRANGE 3 m:1 m:2 - +
+TS.NRANGE 1 m:1 - +
+TS.NRANGE 2 m:1 m:2 - +
+TS.NREVRANGE 2 m:1 m:2 - +
+TS.NRANGE 3 m:1 m:2 m:3 - +
+TS.NRANGE 2 m:1 nokey - +
+TS.NRANGE 2 m:1 str - +
+TS.NRANGE 2 m:1 m:1 - +
+TS.NRANGE 2 m:1 m:2 - + COUNT 2
+TS.NREVRANGE 2 m:1 m:2 - + COUNT 2
+TS.NRANGE 2 m:1 m:2 15 25
+TS.NRANGE 2 m:1 m:2 - + FILTER_BY_VALUE 2 15
+TS.NRANGE 2 m:1 m:2 - + FILTER_BY_TS 10 25
+TS.NRANGE 1 m:1 - + AGGREGATION sum,max 20
+TS.NRANGE 2 m:1 m:2 - + AGGREGATION sum 20
+TS.NRANGE 2 m:1 m:2 - + AGGREGATION sum max 20
+TS.NRANGE 2 m:1 m:2 - + AGGREGATION sum,count max 20
+TS.NRANGE 2 m:1 m:2 - + AGGREGATION sum,count max 20 EMPTY
+TS.NREVRANGE 2 m:1 m:2 - + AGGREGATION sum,count max 20 BUCKETTIMESTAMP end
+TS.NRANGE 2 m:1 m:2 - + AGGREGATION sum 20 max
+TS.NRANGE 2 m:1 m:2 - + AGGREGATION sum max min 20
+TS.NRANGE 2 m:1 m:2 - + AGGREGATION sum foo 20
+TS.NRANGE 2 m:1 m:2 - + AGGREGATION sum "" 20
+TS.NRANGE 2 m:1 m:2 - + AGGREGATION sum max
+TS.NRANGE 2 m:1 m:2 - + AGGREGATION sum max x
+TS.NRANGE 2 m:1 m:2 - + ALIGN start AGGREGATION sum max 7
+TS.NRANGE 2 m:1 m:2 - + LATEST
+TS.NRANGE 2 m:1 m:2 x +
+TS.NRANGE 2 m:1 m:2 - + FOO
+@resp 3
+TS.NRANGE 2 m:1 m:2 - + AGGREGATION sum,count max 20
+TS.NRANGE 3 m:1 m:2 m:3 - +
+@resp 2
+
+# ---- TS.READ ----
+FLUSHALL
+SET str v
+TS.READ
+TS.READ rk
+TS.READ rk -
+TS.READ rk - x
+TS.READ rk - BLOCK
+TS.READ rk - BLOCK 1
+TS.READ rk - BLOCK x 1
+TS.READ rk - BLOCK -1 1
+TS.READ rk - BLOCK 1 0
+TS.READ rk - BLOCK 1 x
+TS.READ rk - MAX_COUNT
+TS.READ rk - MAX_COUNT 0
+TS.READ rk - MAX_COUNT x
+TS.READ rk - BLOCK 1 5 MAX_COUNT 2
+TS.READ rk x
+TS.READ rk -1
+TS.READ str -
+TS.READ str $
+TS.READ rk -
+TS.READ rk $
+TS.READ rk +
+TS.MADD rk 1 1 rk 1 1
+TS.ADD rk 1 1
+TS.ADD rk 2 2
+TS.ADD rk 5 5
+TS.READ rk -
+TS.READ rk 2
+TS.READ rk 3
+TS.READ rk 6
+TS.READ rk +
+TS.READ rk $
+TS.READ rk - MAX_COUNT 2
+TS.READ rk - BLOCK 0 2
+TS.READ rk - BLOCK 0 3 MAX_COUNT 3
+TS.READ rk 0 MAX_COUNT 1
+@conn 2
+!send TS.READ rk $ BLOCK 0 1
+@sleep 50
+@conn 1
+TS.ADD rk 6 6
+@conn 2
+@recv
+!send TS.READ rk $ BLOCK 0 2
+@sleep 50
+@conn 1
+TS.ADD rk 7 7
+TS.ADD rk 8 8
+@conn 2
+@recv
+!send TS.READ rk 9 BLOCK 0 2 MAX_COUNT 3
+@sleep 50
+@conn 1
+TS.MADD rk 9 9 rk 10 10 rk 11 11 rk 12 12
+@conn 2
+@recv
+!send TS.READ rk $ BLOCK 100 1
+@sleep 50
+@recv
+!send TS.READ newk - BLOCK 0 1
+@sleep 50
+@conn 1
+TS.CREATE newk
+TS.ADD newk 3 3
+@conn 2
+@recv
+!send TS.READ newk $ BLOCK 0 1
+@sleep 50
+@conn 1
+DEL newk
+SET newk x
+@conn 2
+@recv
+!send TS.READ gone $ BLOCK 0 1
+@sleep 50
+@conn 1
+TS.ADD gone 1 1
+@conn 2
+@recv
+@resp 3
+TS.READ rk 10
+TS.READ rk 100
+@resp 2
+@conn 1
+MULTI
+TS.READ rk $ BLOCK 0 1
+TS.READ rk - BLOCK 0 1
+EXEC
+EVAL "return redis.pcall('TS.READ', KEYS[1], '$', 'BLOCK', 0, 1)" 1 rk
+!info blocked_clients INFO clients
+
+# ---- key hooks: RENAME, COPY, MOVE, RESTORE, SWAPDB, FLUSHDB ----
+FLUSHALL
+TS.CREATE h1 LABELS l 1
+TS.CREATE h2 LABELS l 2
+TS.CREATE hd
+TS.CREATERULE h1 hd AGGREGATION sum 10
+TS.ADD h1 1 1
+TS.ADD h1 11 1
+TS.QUERYINDEX l!=x
+RENAME h1 h1r
+TS.QUERYINDEX l!=x
+TS.INFO h1r
+TS.INFO hd
+TS.ADD h1r 21 1
+TS.RANGE hd - +
+RENAME hd hdr
+TS.INFO h1r
+TS.INFO hdr
+TS.ADD h1r 31 1
+TS.RANGE hdr - +
+RENAME h1r h2
+TS.QUERYINDEX l!=x
+TS.INFO hdr
+COPY h2 hc
+TS.QUERYINDEX l!=x
+TS.INFO hc
+TS.INFO h2
+COPY hdr hdc
+TS.INFO hdc
+TS.ADD hc 50 1
+TS.RANGE hdr - +
+COPY h2 hc REPLACE
+TS.INFO hc
+COPY h2 hc
+COPY h2 hc DB 1
+SELECT 1
+TS.QUERYINDEX l!=x
+TS.INFO hc
+SELECT 0
+DUMP h2
+DUMP hdr
+TS.CREATE hx LABELS l x RETENTION 5000 DUPLICATE_POLICY sum IGNORE 3 0.5 CHUNK_SIZE 64
+TS.MADD hx 1 1 hx 2 2.5 hx 3 nan
+DUMP hx
+TS.CREATE hu ENCODING uncompressed LABELS l u
+TS.MADD hu 1 1 hu 2 2.5
+# A module keeps the key name of a RESTORE run from a script: the argv object, which Lua may
+# reuse from an earlier call (with a bigger allocation). A key created from Lua empties that
+# cache slot (also retained), so the sizes below don't depend on earlier scripts.
+EVAL "return redis.call('TS.CREATE', KEYS[1])" 1 luaprime
+DEL luaprime
+EVAL "local d = redis.call('DUMP', KEYS[1]); redis.call('RESTORE', KEYS[2], 0, d); return 1" 2 h2 hres
+TS.QUERYINDEX l!=x
+TS.INFO hres
+EVAL "local d = redis.call('DUMP', KEYS[1]); redis.call('RESTORE', KEYS[2], 0, d, 'REPLACE'); return 1" 2 hx hres
+TS.QUERYINDEX l=x
+TS.INFO hres
+TS.RANGE hres - +
+EVAL "local d = redis.call('DUMP', KEYS[1]); redis.call('RESTORE', KEYS[2], 0, d); return 1" 2 hu hres2
+TS.INFO hres2
+TS.RANGE hres2 - +
+EVAL "local d = redis.call('DUMP', KEYS[1]); redis.call('RESTORE', KEYS[2], 0, d); return 1" 2 hdr hres3
+TS.INFO hres3
+MOVE hres 2
+TS.QUERYINDEX l=x
+SELECT 2
+TS.INFO hres
+TS.QUERYINDEX l=x
+FLUSHDB
+TS.QUERYINDEX l=x
+SELECT 0
+SWAPDB 0 1
+TS.QUERYINDEX l!=x
+SWAPDB 0 1
+TS.QUERYINDEX l!=x
+DEL h2
+TS.QUERYINDEX l!=x
+TS.INFO hdr
+UNLINK hc
+TS.QUERYINDEX l!=x
+EXPIRE hu 1
+@sleep 1100
+TS.QUERYINDEX l!=x
+SET hres2 x
+TS.QUERYINDEX l!=x
+SELECT 1
+FLUSHDB
+SELECT 0
+TS.QUERYINDEX l!=x
+
+# ---- the static context reads db 0 ----
+FLUSHALL
+SELECT 1
+TS.CREATE z1
+TS.CREATE z2
+TS.CREATERULE z1 z2 AGGREGATION sum 10
+TS.ADD z1 1 1
+TS.ADD z1 11 1
+TS.RANGE z2 - +
+TS.RANGE z2 - + LATEST
+TS.GET z2 LATEST
+TS.ADD z1 5 5 ON_DUPLICATE sum
+TS.RANGE z2 - +
+TS.DEL z1 0 5
+TS.RANGE z2 - +
+TS.INFO z1
+SELECT 0
+TS.CREATE z2
+TS.ADD z2 1 9
+SELECT 1
+TS.GET z2 LATEST
+TS.ADD z1 2 2
+TS.RANGE z2 - +
+SELECT 0
+TS.RANGE z2 - +
+FLUSHALL
+
+# ---- configs ----
+!sort CONFIG GET ts-*
+CONFIG SET ts-retention-policy 1000
+CONFIG SET ts-retention-policy -1
+CONFIG SET ts-chunk-size-bytes 47
+CONFIG SET ts-chunk-size-bytes 1048577
+CONFIG SET ts-chunk-size-bytes 1000
+CONFIG SET ts-chunk-size-bytes 1024
+CONFIG SET ts-encoding foo
+CONFIG SET ts-encoding COMPRESSED
+CONFIG SET ts-duplicate-policy foo
+CONFIG SET ts-duplicate-policy last
+CONFIG SET ts-ignore-max-time-diff -1
+CONFIG SET ts-ignore-max-time-diff 10
+CONFIG SET ts-ignore-max-val-diff -1
+CONFIG SET ts-ignore-max-val-diff 0.5
+CONFIG SET ts-num-threads 2
+!sort CONFIG GET ts-*
+TS.CREATE cfg
+TS.INFO cfg
+TS.ADD cfg 1 1
+TS.ADD cfg 1 2
+TS.ADD cfg 5 2.2
+TS.RANGE cfg - +
+TS.ADD cfg2 1 1 RETENTION 0 ENCODING compressed CHUNK_SIZE 4096 DUPLICATE_POLICY block IGNORE 0 0
+TS.INFO cfg2
+CONFIG SET ts-retention-policy 0
+CONFIG SET ts-chunk-size-bytes 4096
+CONFIG SET ts-encoding compressed
+CONFIG SET ts-duplicate-policy block
+CONFIG SET ts-ignore-max-time-diff 0
+CONFIG SET ts-ignore-max-val-diff 0
+CONFIG SET ts-num-threads 3
+!sort CONFIG GET ts-*
+FLUSHALL
+
+# ---- keyspace events ----
+CONFIG SET notify-keyspace-events KEA
+@conn 2
+!send PSUBSCRIBE __key*__:ev*
+@recv
+@conn 1
+TS.CREATE ev1
+TS.CREATE ev1
+TS.ALTER ev1 RETENTION 5
+TS.ADD ev1 1 1
+TS.ADD ev1 1 1
+TS.MADD ev1 2 2 ev1 3 3 evx 1 1
+TS.INCRBY ev2 1 TIMESTAMP 1
+TS.DECRBY ev2 1 TIMESTAMP 2
+TS.CREATE evd
+TS.CREATERULE ev1 evd AGGREGATION sum 2
+TS.ADD ev1 5 5
+TS.DEL ev1 0 1
+TS.DELETERULE ev1 evd
+TS.GET ev1
+TS.RANGE ev1 - +
+TS.ADD ev3 1 1 LABELS a b
+DEL ev1 ev2 evd ev3
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+PUNSUBSCRIBE
+@conn 1
+CONFIG SET notify-keyspace-events ""
+
+# ---- dirty ----
+SAVE
+TS.CREATE dy
+!info rdb_changes_since_last_save INFO persistence
+TS.CREATE dy
+TS.ADD dy 1 1
+TS.ADD dy 1 1
+!info rdb_changes_since_last_save INFO persistence
+TS.MADD dy 2 2 dy 3 3 nokey 1 1
+!info rdb_changes_since_last_save INFO persistence
+TS.MADD dy 1 1 nokey 1 1
+!info rdb_changes_since_last_save INFO persistence
+TS.INCRBY dy 1 TIMESTAMP 4
+TS.ALTER dy RETENTION 0
+TS.DEL dy 100 200
+!info rdb_changes_since_last_save INFO persistence
+TS.DEL dy 0 1
+TS.CREATE dyd
+TS.CREATERULE dy dyd AGGREGATION sum 10
+TS.DELETERULE dy dyd
+TS.DELETERULE dy dyd
+!info rdb_changes_since_last_save INFO persistence
+TS.GET dy
+TS.RANGE dy - +
+TS.INFO dy
+TS.MGET FILTER a=b
+!info rdb_changes_since_last_save INFO persistence
+
+# ---- error stats ----
+CONFIG RESETSTAT
+TS.ADD dy x 1
+TS.CREATE dy
+TS.GET str
+SET str v
+TS.GET str
+TS.RANGE dy
+TS.MRANGE - + FILTER x
+!info errorstat_ERR,errorstat_WRONGTYPE INFO errorstats
+!info total_error_replies INFO stats
+!sort !mask usec,usec_per_call !info cmdstat_* INFO commandstats
+
+# ---- MEMORY USAGE / TS.INFO memoryUsage ----
+FLUSHALL
+TS.CREATE mu
+MEMORY USAGE mu
+TS.CREATE mu2 LABELS x 1
+MEMORY USAGE mu2
+TS.CREATE mu3 LABELS abcdefghijklmnopqrstuvwxyz 0123456789012345678901234567890123456789 b 2 c 3
+MEMORY USAGE mu3
+TS.INFO mu3
+TS.CREATE mu4 ENCODING uncompressed CHUNK_SIZE 128
+TS.MADD mu4 1 1 mu4 2 2 mu4 3 3 mu4 4 4 mu4 5 5 mu4 6 6 mu4 7 7 mu4 8 8 mu4 9 9
+MEMORY USAGE mu4
+TS.INFO mu4 DEBUG
+TS.CREATE mu5 CHUNK_SIZE 64
+TS.MADD mu5 1 1.5 mu5 2 2.25 mu5 3 3 mu5 10 4 mu5 100 -5 mu5 1000 6 mu5 10000 7.125 mu5 100000 8
+TS.MADD mu5 100001 1 mu5 100002 2 mu5 100003 3 mu5 100004 4 mu5 100005 5 mu5 100006 6 mu5 100007 7 mu5 100008 8
+MEMORY USAGE mu5
+TS.INFO mu5 DEBUG
+DUMP mu5
+TS.CREATERULE mu5 mu AGGREGATION avg 10
+MEMORY USAGE mu5
+TS.INFO mu5
+DEBUG DIGEST-VALUE mu5
+OBJECT FREQ mu5
+
+# ---- scripts and transactions ----
+FLUSHALL
+SET str v
+EVAL "return redis.call('TS.ADD', KEYS[1], 1, 1)" 1 sk
+EVAL "return redis.pcall('TS.ADD', KEYS[1], 'x', 1)" 1 sk
+EVAL "return redis.call('TS.RANGE', KEYS[1], '-', '+')" 1 sk
+EVAL "return redis.call('TS.GET', KEYS[1])" 1 sk
+EVAL "return redis.call('TS.INFO', KEYS[1])" 1 sk
+EVAL_RO "return redis.call('TS.GET', KEYS[1])" 1 sk
+EVAL_RO "return redis.pcall('TS.ADD', KEYS[1], 2, 1)" 1 sk
+EVAL "return redis.pcall('TS.MGET', 'FILTER', 'a=b')" 0
+EVAL "return redis.pcall('TS.QUERYINDEX', 'a=b')" 0
+MULTI
+TS.ADD tx 1 1
+TS.ADD tx 1 1
+TS.RANGE tx - +
+TS.MADD tx 2 2 str 1 1
+EXEC
+TS.ADD str 1 1
+TS.RANGE str - +
+TS.INFO str
+TS.ALTER str RETENTION 1
+TS.MRANGE - + FILTER a=b
+TS.MGET FILTER a=b
+TS.QUERYINDEX a=b
+
+# ---- WATCH ----
+WATCH wt
+@conn 2
+TS.CREATE wt
+@conn 1
+MULTI
+PING
+EXEC
+WATCH wt
+@conn 2
+TS.GET wt
+TS.RANGE wt - +
+TS.INFO wt
+@conn 1
+MULTI
+PING
+EXEC
+WATCH wt
+@conn 2
+TS.ADD wt 1 x
+@conn 1
+MULTI
+PING
+EXEC
+WATCH wt
+@conn 2
+TS.ALTER wt RETENTION 1
+@conn 1
+MULTI
+PING
+EXEC
+WATCH wt
+@conn 2
+TS.DEL wt 100 200
+@conn 1
+MULTI
+PING
+EXEC
+WATCH wt
+@conn 2
+TS.CREATE wt
+@conn 1
+MULTI
+PING
+EXEC
+
+# ---- ACL ----
+ACL SETUSER tsu on nopass +@all -@dangerous ~a* &*
+ACL SETUSER tsr on nopass +@read ~* &*
+ACL SETUSER tsw on nopass +@all ~w* %R~* &*
+@conn 2
+AUTH tsu x
+TS.CREATE a1 LABELS l 1
+TS.CREATE b1 LABELS l 1
+TS.ADD a2 1 1 LABELS l 2
+TS.QUERYINDEX l!=x
+TS.MGET FILTER l!=x
+TS.MRANGE - + FILTER l!=x
+TS.QUERYLABELS VALUES l
+TS.NRANGE 1 a1 - +
+TS.CREATE a3
+TS.CREATERULE a1 a3 AGGREGATION sum 10
+TS.CREATERULE a1 b1 AGGREGATION sum 10
+@conn 1
+TS.CREATE b1 LABELS l 1
+TS.CREATE b2 LABELS l 1
+@conn 2
+TS.QUERYINDEX l!=x
+TS.MGET FILTER l!=x
+TS.MRANGE - + FILTER l!=x
+TS.MRANGE - + FILTER l=1 GROUPBY l REDUCE sum
+TS.QUERYLABELS VALUES l
+TS.QUERYLABELS LABELS
+TS.NRANGE 2 a1 b1 - +
+TS.GET b1
+TS.ADD a1 1 1
+TS.RANGE a3 - + LATEST
+@conn 1
+TS.CREATE wsrc
+TS.CREATE wdst
+TS.CREATERULE wsrc wdst AGGREGATION sum 10
+TS.ADD wsrc 1 1
+@conn 2
+AUTH tsw x
+TS.RANGE wdst - + LATEST
+TS.GET wdst LATEST
+TS.ADD wsrc 2 2
+TS.MGET LATEST FILTER l!=x
+TS.MRANGE - + LATEST FILTER l!=x
+TS.ALTER a1 RETENTION 5
+AUTH tsr x
+TS.ADD a1 1 1
+TS.GET a1
+TS.READ a1 -
+RESET
+@conn 1
+ACL DELUSER tsu tsr tsw
+
+# ---- command metadata ----
+!sort ACL CAT timeseries
+!sort COMMAND LIST FILTERBY MODULE timeseries
+!sort COMMAND LIST FILTERBY ACLCAT timeseries
+COMMAND INFO TS.CREATE TS.ALTER TS.ADD TS.MADD TS.INCRBY TS.DECRBY TS.DEL TS.CREATERULE TS.DELETERULE
+COMMAND INFO TS.GET TS.MGET TS.RANGE TS.REVRANGE TS.MRANGE TS.MREVRANGE TS.NRANGE TS.NREVRANGE
+COMMAND INFO TS.INFO TS.QUERYINDEX TS.QUERYLABELS TS.READ
+COMMAND GETKEYS TS.MADD a 1 1 b 2 2 c 3 3
+COMMAND GETKEYS TS.CREATERULE a b AGGREGATION sum 10
+COMMAND GETKEYS TS.NRANGE 2 a b - +
+COMMAND GETKEYS TS.MRANGE - + FILTER a=b
+COMMAND GETKEYS TS.READ k - BLOCK 0 1
+COMMAND DOCS TS.ADD
+COMMAND DOCS TS.MRANGE
+COMMAND DOCS TS.NRANGE
+COMMAND INFO timeseries.CLUSTERSET timeseries.REFRESHCLUSTER
+COMMAND DOCS timeseries.CLUSTERSET timeseries.REFRESHCLUSTER
+timeseries.REFRESHCLUSTER
+EVAL "return redis.pcall('timeseries.REFRESHCLUSTER')" 0
+
+FLUSHALL

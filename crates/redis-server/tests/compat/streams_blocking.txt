@@ -1,0 +1,242 @@
+# Streams: blocking XREAD / XREADGROUP across connections.
+
+# ---- XREAD BLOCK with $ ----
+DEL s s2 str
+@conn 2
+!send XREAD BLOCK 0 STREAMS s $
+@conn 1
+@sleep 50
+XADD s 1-0 a 1
+@conn 2
+@recv
+@conn 1
+XADD s 2-0 a 2
+@conn 2
+!send XREAD BLOCK 0 STREAMS s $
+@conn 1
+@sleep 50
+XADD s2 1-0 b 1
+XADD s 3-0 a 3
+@conn 2
+@recv
+
+# ---- Timeouts ----
+XREAD BLOCK 50 STREAMS s $
+XREAD BLOCK 50 STREAMS missing $
+XREAD BLOCK 50 STREAMS s 3-0
+XREAD BLOCK 50 STREAMS s 2-0
+XREAD BLOCK 50 STREAMS s +
+XREAD BLOCK 50 COUNT 1 STREAMS s 0
+XREAD BLOCK 50 STREAMS s s2 $ $
+@resp 3
+XREAD BLOCK 50 STREAMS s $
+XREAD BLOCK 50 STREAMS s 0
+@resp 2
+@conn 1
+
+# ---- Multiple keys / explicit IDs / + ----
+@conn 2
+!send XREAD BLOCK 0 STREAMS s s2 3-0 $
+@conn 1
+@sleep 50
+XADD s2 2-0 b 2
+@conn 2
+@recv
+!send XREAD BLOCK 0 STREAMS empty +
+@conn 1
+@sleep 50
+XADD empty 5-0 e 5
+@conn 2
+@recv
+!send XREAD COUNT 1 BLOCK 0 STREAMS s 5-0
+@conn 1
+@sleep 50
+MULTI
+XADD s 6-0 a 6
+XADD s 7-0 a 7
+EXEC
+@conn 2
+@recv
+!send XREAD BLOCK 0 STREAMS s 7-0
+@conn 1
+@sleep 50
+MULTI
+XADD s 8-0 a 8
+XADD s 9-0 a 9
+EXEC
+@conn 2
+@recv
+
+# ---- XREAD keeps waiting through DEL and type changes ----
+@conn 2
+!send XREAD BLOCK 0 STREAMS k $
+@conn 1
+@sleep 50
+XADD k 1-0 a 1
+DEL k
+@conn 2
+@recv
+!send XREAD BLOCK 0 STREAMS k 1-0
+@conn 1
+@sleep 50
+SET k x
+DEL k
+XADD k 1-0 z z
+XADD k 2-0 z z
+@conn 2
+@recv
+@conn 1
+DEL k
+@conn 2
+!send XREAD BLOCK 0 STREAMS k $
+@conn 1
+@sleep 50
+SET k x
+@sleep 50
+DEL k
+XADD k 5-0 y y
+@conn 2
+@recv
+@conn 1
+
+# ---- Two readers on the same key ----
+DEL s
+XADD s 1-0 a 1
+@conn 2
+!send XREAD BLOCK 0 STREAMS s $
+@sleep 50
+@conn 3
+!send XREAD BLOCK 0 STREAMS s $
+@conn 1
+@sleep 50
+XADD s 2-0 a 2
+@conn 2
+@recv
+@conn 3
+@recv
+@conn 1
+
+# ---- BLOCK inside MULTI ----
+MULTI
+XREAD BLOCK 0 STREAMS s $
+XREAD BLOCK 0 STREAMS s 0
+EXEC
+MULTI
+XREADGROUP GROUP g c BLOCK 0 STREAMS s >
+EXEC
+
+# ---- XREADGROUP BLOCK woken by XADD ----
+DEL s
+XGROUP CREATE s g $ MKSTREAM
+@conn 2
+!send XREADGROUP GROUP g c1 BLOCK 0 STREAMS s >
+@sleep 50
+@conn 3
+!send XREADGROUP GROUP g c2 BLOCK 0 STREAMS s >
+@conn 1
+@sleep 50
+XADD s 1-0 a 1
+@conn 2
+@recv
+@conn 1
+XADD s 2-0 a 2
+@conn 3
+@recv
+@conn 1
+XPENDING s g
+XINFO GROUPS s
+XREADGROUP GROUP g c1 BLOCK 50 STREAMS s >
+XREADGROUP GROUP g c1 BLOCK 50 STREAMS s 0
+XREADGROUP GROUP g c9 BLOCK 50 STREAMS s 0
+@resp 3
+XREADGROUP GROUP g c1 BLOCK 50 STREAMS s >
+@resp 2
+@conn 1
+!type XINFO CONSUMERS s g
+
+# ---- NOACK while blocked ----
+@conn 2
+!send XREADGROUP GROUP g c3 NOACK BLOCK 0 STREAMS s >
+@conn 1
+@sleep 50
+XADD s 3-0 a 3
+@conn 2
+@recv
+@conn 1
+XPENDING s g
+
+# ---- XREADGROUP BLOCK woken by deletion and group destruction ----
+@conn 2
+!send XREADGROUP GROUP g c1 BLOCK 0 STREAMS s >
+@conn 1
+@sleep 50
+DEL s
+@conn 2
+@recv
+@conn 1
+XGROUP CREATE s g $ MKSTREAM
+@conn 2
+!send XREADGROUP GROUP g c1 BLOCK 0 STREAMS s >
+@conn 1
+@sleep 50
+XGROUP DESTROY s g
+@conn 2
+@recv
+@conn 1
+XGROUP CREATE s g $
+@conn 2
+!send XREADGROUP GROUP g c1 BLOCK 0 STREAMS s >
+@conn 1
+@sleep 50
+SET s x
+@conn 2
+@recv
+@conn 1
+DEL s
+XGROUP CREATE s g $ MKSTREAM
+@conn 2
+!send XREADGROUP GROUP g c1 BLOCK 0 STREAMS s >
+@conn 1
+@sleep 50
+XADD s 1-0 a 1
+XGROUP DESTROY s g
+@conn 2
+@recv
+@conn 1
+
+# ---- XREADGROUP CLAIM wakeup ----
+DEL s
+XADD s 1-0 a 1
+XADD s 2-0 a 2
+XGROUP CREATE s g 0
+XREADGROUP GROUP g c1 STREAMS s >
+@conn 2
+!send !type XREADGROUP GROUP g c2 CLAIM 150 BLOCK 5000 STREAMS s >
+@conn 1
+@sleep 50
+XPENDING s g
+@conn 2
+@recv
+@conn 1
+!type XPENDING s g - + 10
+XPENDING s g - + 10 c1
+@conn 2
+!send XREADGROUP GROUP g c3 CLAIM 100000 BLOCK 100 STREAMS s >
+@recv
+!send !type XREADGROUP GROUP g c3 CLAIM 100000 BLOCK 0 STREAMS s >
+@conn 1
+@sleep 50
+XNACK s g FAIL IDS 1 1-0
+@conn 2
+@recv
+@conn 1
+!type XPENDING s g - + 10
+@conn 2
+!send XREADGROUP GROUP g c4 CLAIM 100000 BLOCK 0 STREAMS s >
+@conn 1
+@sleep 50
+XADD s 3-0 a 3
+@conn 2
+@recv
+@conn 1
+!type XPENDING s g - + 10

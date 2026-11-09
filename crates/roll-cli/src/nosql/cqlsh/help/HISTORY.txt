@@ -1,0 +1,9 @@
+
+HISTORY [cqlsh only]
+
+   Displays the most recent commands executed in cqlsh
+
+HISTORY (<n>)
+
+   If n is specified, the history display length is set to n for this session
+

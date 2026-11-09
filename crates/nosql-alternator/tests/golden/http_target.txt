@@ -1,0 +1,118 @@
+# HTTP layer: X-Amz-Target dispatch and request-envelope errors.
+# capture.py sends POST / with Content-Type application/x-amz-json-1.0 and
+# X-Amz-Target "DynamoDB_20120810.<Op>" (or no X-Amz-Target for "-").
+# The operation name is whatever follows the first '.' of the target.
+# Missing X-Amz-Target: UnknownOperationException with an empty name, whatever the body.
+> - {}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#UnknownOperationException","message":"Unsupported operation "}
+> - garbage
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#UnknownOperationException","message":"Unsupported operation "}
+> -
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#UnknownOperationException","message":"Unsupported operation "}
+> - null
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#UnknownOperationException","message":"Unsupported operation "}
+# Unknown operation names: the name is echoed verbatim.
+> Bogus {}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#UnknownOperationException","message":"Unsupported operation Bogus"}
+> Bogus
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#UnknownOperationException","message":"Unsupported operation Bogus"}
+> Bogus garbage
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#UnknownOperationException","message":"Unsupported operation Bogus"}
+> Bogus null
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#UnknownOperationException","message":"Unsupported operation Bogus"}
+> Bogus []
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#UnknownOperationException","message":"Unsupported operation Bogus"}
+# Operation names are case-sensitive.
+> listtables {}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#UnknownOperationException","message":"Unsupported operation listtables"}
+> LISTTABLES {}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#UnknownOperationException","message":"Unsupported operation LISTTABLES"}
+> describeTable {"TableName":"alt_http_none"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#UnknownOperationException","message":"Unsupported operation describeTable"}
+# Only the first '.' separates prefix and name, so the rest (dots included) is the name.
+> ListTables.x {}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#UnknownOperationException","message":"Unsupported operation ListTables.x"}
+> a.ListTables {}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#UnknownOperationException","message":"Unsupported operation a.ListTables"}
+> ListTables. {}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#UnknownOperationException","message":"Unsupported operation ListTables."}
+# A valid operation name dispatches (ListTables proven through a deterministic validation error).
+> ListTables {"Limit":0}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Limit must be greater than 0 and no greater than 100"}
+> DescribeTable {"TableName":"alt_http_none"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException","message":"Requested resource not found: Table: alt_http_none not found"}
+# Body envelope for a known operation: empty, non-object, malformed JSON.
+> DescribeTable
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Parsing JSON failed: The document is empty. at 0"}
+> DescribeTable null
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Request content must be an object"}
+> DescribeTable []
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Request content must be an object"}
+> DescribeTable "x"
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Request content must be an object"}
+> DescribeTable 7
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Request content must be an object"}
+> DescribeTable true
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Request content must be an object"}
+> DescribeTable {
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Parsing JSON failed: Missing a name for object member. at 1"}
+> DescribeTable {"TableName":"alt_http_none"} x
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Parsing JSON failed: The document root must not be followed by other values. at 30"}
+> DescribeTable {"TableName":"alt_http_none"}{}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Parsing JSON failed: The document root must not be followed by other values. at 29"}
+> DescribeTable {"TableName":"alt_http_none","TableName":"alt_http_none2"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException","message":"Requested resource not found: Table: alt_http_none not found"}
+> DescribeTable    {"TableName":"alt_http_none"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException","message":"Requested resource not found: Table: alt_http_none not found"}
+> ListTables {}x
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Parsing JSON failed: The document root must not be followed by other values. at 2"}
+> ListTables {broken json
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Parsing JSON failed: Missing a name for object member. at 1"}
+# DynamoDB Streams operations are reachable with the DynamoDB_20120810 prefix too.
+> DescribeStream {"StreamArn":"bogus"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Malformed value StreamArn : \"bogus\""}
+> GetShardIterator {"StreamArn":"bogus","ShardId":"x","ShardIteratorType":"LATEST"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Malformed value StreamArn : \"bogus\""}
+> GetRecords {"ShardIterator":"bogus"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Malformed value ShardIterator : \"bogus\""}
+# DynamoDB operations that Alternator does not implement.
+> ExecuteStatement {"Statement":"SELECT * FROM t"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#UnknownOperationException","message":"Unsupported operation ExecuteStatement"}
+> BatchExecuteStatement {"Statements":[]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#UnknownOperationException","message":"Unsupported operation BatchExecuteStatement"}
+> ExecuteTransaction {"TransactStatements":[]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#UnknownOperationException","message":"Unsupported operation ExecuteTransaction"}
+> TransactGetItems {"TransactItems":[]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#UnknownOperationException","message":"Unsupported operation TransactGetItems"}
+> TransactWriteItems {"TransactItems":[]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#UnknownOperationException","message":"Unsupported operation TransactWriteItems"}
+> CreateBackup {"TableName":"alt_http_none","BackupName":"b"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#UnknownOperationException","message":"Unsupported operation CreateBackup"}
+> DescribeBackup {"BackupArn":"x"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#UnknownOperationException","message":"Unsupported operation DescribeBackup"}
+> ListBackups {}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#UnknownOperationException","message":"Unsupported operation ListBackups"}
+> DescribeLimits {}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#UnknownOperationException","message":"Unsupported operation DescribeLimits"}
+> CreateGlobalTable {"GlobalTableName":"x","ReplicationGroup":[]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#UnknownOperationException","message":"Unsupported operation CreateGlobalTable"}
+> ListGlobalTables {}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#UnknownOperationException","message":"Unsupported operation ListGlobalTables"}
+> DescribeGlobalTable {"GlobalTableName":"x"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#UnknownOperationException","message":"Unsupported operation DescribeGlobalTable"}
+> PutResourcePolicy {"ResourceArn":"x","Policy":"{}"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#UnknownOperationException","message":"Unsupported operation PutResourcePolicy"}
+> GetResourcePolicy {"ResourceArn":"x"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#UnknownOperationException","message":"Unsupported operation GetResourcePolicy"}
+> DescribeKinesisStreamingDestination {"TableName":"alt_http_none"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#UnknownOperationException","message":"Unsupported operation DescribeKinesisStreamingDestination"}
+> DescribeContributorInsights {"TableName":"alt_http_none"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#UnknownOperationException","message":"Unsupported operation DescribeContributorInsights"}
+> ListContributorInsights {}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#UnknownOperationException","message":"Unsupported operation ListContributorInsights"}
+> DescribeTableReplicaAutoScaling {"TableName":"alt_http_none"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#UnknownOperationException","message":"Unsupported operation DescribeTableReplicaAutoScaling"}
+> ListExports {}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#UnknownOperationException","message":"Unsupported operation ListExports"}
+> ListImports {}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#UnknownOperationException","message":"Unsupported operation ListImports"}

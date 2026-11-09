@@ -1,0 +1,83 @@
+# Connection & server commands
+PING
+PING hello
+PING a b
+ECHO hi
+ECHO
+NOSUCHCOMMAND a b
+nosuchcommand
+CONFIG SET maxmemory-policy allkeys-lru
+CONFIG GET maxmemory-policy
+CONFIG SET maxmemory-policy noeviction
+CONFIG GET maxmemory-policy
+CONFIG SET maxmemory-policy bogus
+CONFIG SET nosuchparam 1
+!sort CONFIG GET *max-*-entries*
+CONFIG GET hash-max-listpack-entries
+CONFIG SET hash-max-listpack-entries 64 hash-max-listpack-value 32
+!sort CONFIG GET hash-max-listpack-*
+CONFIG SET hash-max-listpack-entries 512 hash-max-listpack-value 64
+CONFIG SET notify-keyspace-events KEA
+CONFIG GET notify-keyspace-events
+CONFIG SET notify-keyspace-events Ex$
+CONFIG GET notify-keyspace-events
+CONFIG SET notify-keyspace-events ""
+CONFIG GET notify-keyspace-events
+CONFIG SET maxmemory-samples 0
+CONFIG SET maxmemory 1
+CONFIG SET maxmemory abc
+CONFIG SET maxmemory 0
+CONFIG GET maxmemory
+CONFIG SET lua-time-limit 5000
+CONFIG GET lua-time-limit
+CONFIG FOO
+CONFIG
+!type TIME
+!type LASTSAVE
+CLIENT SETNAME myconn
+CLIENT GETNAME
+CLIENT SETNAME "bad name"
+CLIENT SETNAME ""
+CLIENT GETNAME
+CLIENT SETINFO lib-name mylib
+CLIENT SETINFO lib-ver 1.0
+CLIENT SETINFO foo bar
+!type CLIENT ID
+CLIENT NO-EVICT on
+CLIENT NO-EVICT off
+CLIENT NO-TOUCH on
+CLIENT NO-TOUCH off
+CLIENT NO-TOUCH maybe
+CLIENT FOO
+COMMAND COUNT FOO
+COMMAND GETKEYS GET a
+COMMAND GETKEYS MSET a 1 b 2
+COMMAND GETKEYS PING
+COMMAND GETKEYS NOSUCH a
+COMMAND INFO nosuch
+!type COMMAND INFO get
+SELECT 0
+DBSIZE
+SET a 1
+DBSIZE
+MEMORY FOO
+MEMORY USAGE nokey
+SLOWLOG FOO
+SLOWLOG RESET
+!type SLOWLOG GET
+SLOWLOG GET -2
+SLOWLOG GET abc
+CLIENT REPLY FOO
+@resp 3
+PING
+GET nokey
+CONFIG GET maxmemory
+@resp 2
+GET nokey
+HELLO 4
+HELLO abc
+!type HELLO 2 SETNAME foo
+CLIENT GETNAME
+HELLO 2 FOO
+MODULE HELP
+MODULE HELP extra

@@ -1,0 +1,33 @@
+[package]
+name = "s3-control"
+description = "roll storage: control-plane API (/v1/storage)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+axum.workspace = true
+base64.workspace = true
+bytes.workspace = true
+futures.workspace = true
+getrandom.workspace = true
+s3-image.workspace = true
+s3-proto.workspace = true
+s3-server.workspace = true
+s3-store.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tower-http.workspace = true
+tracing.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+aws-config.workspace = true
+aws-sdk-s3.workspace = true
+image.workspace = true
+reqwest = { workspace = true, features = ["stream"] }
+tempfile.workspace = true

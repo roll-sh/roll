@@ -1,0 +1,20 @@
+friso dictionary data
+=====================
+
+dict/ holds the UTF-8 lexicon of friso, the Chinese segmenter RediSearch bundles, copied
+unmodified from upstream:
+
+  source:  https://github.com/lionsoul2014/friso
+  path:    vendors/dict/UTF-8/ (friso.lex.ini and the 25 lex-*.lex files it lists)
+  commit:  b1808a4716dd07948154f3c8239ed34372dd0446 (2023-09-18)
+  licence: Apache License 2.0 (LICENSE.md, the repository's licence file, copied unmodified)
+  author:  lionsoul <chenxin619315@gmail.com>
+
+The lexicon files are byte-identical to the ones RediSearch 8.10.1 bundles (deps/cndict);
+its friso.lex.ini differs only in whitespace. Only this data is used: no friso source code
+was copied (src/search/friso.rs is a reimplementation) and none of RediSearch's own files are
+included. The files are embedded into the binary at build time (src/search/friso.rs).
+
+t2s.tsv, the traditional -> simplified table, is not friso's or RediSearch's data: it was
+recorded black-box from the observable behaviour of Redis 8.10.2 (redis:8-alpine) by
+gen_t2s.py, which also explains how to regenerate and verify it.

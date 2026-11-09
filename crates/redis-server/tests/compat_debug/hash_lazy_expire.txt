@@ -1,0 +1,5304 @@
+# Lazy hash-field expiry with active expiry off: which commands delete an expired field
+# (hashTypeGetValue's HFE_LAZY_* flags), which only hide it (iterators, HLEN still counting it),
+# what the hash's key-level commands see, the hexpired/del events and their order, MULTI/EXEC,
+# scripts, CLIENT PAUSE (expired fields hidden, never deleted) and
+# DEBUG SET-ALLOW-ACCESS-EXPIRED. Both encodings: listpackex, then hashtable.
+# Both sides' RediSearch/RedisTimeSeries keyspace hooks on (their key lookups count as hits/misses).
+FT.CREATE compat-subscribe ON HASH PREFIX 1 compat-subscribe: SCHEMA t TEXT
+FT.DROPINDEX compat-subscribe
+TS.CREATE compat-subscribe
+DEL compat-subscribe
+FLUSHALL
+CONFIG SET hash-max-listpack-entries 512
+CONFIG RESETSTAT
+DEBUG SET-ACTIVE-EXPIRE 0
+FUNCTION FLUSH
+FUNCTION LOAD "#!lua name=hfelib\nredis.register_function('lazyget', function(keys, args) return redis.call('hget', keys[1], 'a') end)"
+RPUSH l h
+# ---- listpackex ----
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+HGET h a
+HLEN h
+HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+HGET h b
+HLEN h
+HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+HMGET h a b
+HLEN h
+HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+HMGET h zz a c
+HLEN h
+HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+HEXISTS h a
+HLEN h
+HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+HEXISTS h zz
+HLEN h
+HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+HSTRLEN h a
+HLEN h
+HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+HSTRLEN h b
+HLEN h
+HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+HGETALL h
+HLEN h
+HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+HKEYS h
+HLEN h
+HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+HVALS h
+HLEN h
+HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+HSCAN h 0
+HLEN h
+HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+HSCAN h 0 NOVALUES
+HLEN h
+HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+HSCAN h 0 MATCH a
+HLEN h
+HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+HLEN h
+HLEN h
+HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+!type HRANDFIELD h
+HLEN h
+HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+!type HRANDFIELD h 5
+HLEN h
+HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+!type HRANDFIELD h -5 WITHVALUES
+HLEN h
+HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+!type HRANDFIELD h 1
+HLEN h
+HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+HRANDFIELD h 0
+HLEN h
+HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+HTTL h FIELDS 3 a b c
+HLEN h
+HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+HPTTL h FIELDS 1 a
+HLEN h
+HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+HEXPIRETIME h FIELDS 1 a
+HLEN h
+HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+HPEXPIRETIME h FIELDS 1 a
+HLEN h
+HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+HPERSIST h FIELDS 3 a b c
+HLEN h
+HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+HGETDEL h FIELDS 2 a b
+HLEN h
+HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+HGETDEL h FIELDS 1 a
+HLEN h
+HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+HGETDEL h FIELDS 2 zz a
+HLEN h
+HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+HGETEX h FIELDS 2 a b
+HLEN h
+HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+HGETEX h PERSIST FIELDS 2 a c
+HLEN h
+HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+HGETEX h PX 100000 FIELDS 2 a b
+HLEN h
+HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+HGETEX h PXAT 1 FIELDS 2 a b
+HLEN h
+HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+HINCRBY h a 5
+HLEN h
+HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+HINCRBYFLOAT h a 1.5
+HLEN h
+HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+HSETNX h a z
+HLEN h
+HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+HSET h a z
+HLEN h
+HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+HMSET h a z
+HLEN h
+HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+HDEL h a
+HLEN h
+HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+HDEL h a b
+HLEN h
+HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+HSETEX h FIELDS 1 a z
+HLEN h
+HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+HSETEX h KEEPTTL FIELDS 1 a z
+HLEN h
+HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+HSETEX h FNX FIELDS 1 a z
+HLEN h
+HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+HSETEX h FXX FIELDS 1 a z
+HLEN h
+HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+HSETEX h FXX FIELDS 2 b z a z
+HLEN h
+HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+HSETEX h FNX PX 100000 FIELDS 1 a z
+HLEN h
+HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+HSETEX h PX 100000 FIELDS 1 a z
+HLEN h
+HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+HSETEX h PXAT 1 FIELDS 1 a z
+HLEN h
+HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+HEXPIRE h 100 FIELDS 1 a
+HLEN h
+HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+HEXPIRE h 100 NX FIELDS 1 a
+HLEN h
+HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+HEXPIRE h 100 XX FIELDS 1 a
+HLEN h
+HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+HEXPIRE h 100 GT FIELDS 1 a
+HLEN h
+HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+HEXPIRE h 100 LT FIELDS 1 a
+HLEN h
+HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+HPEXPIREAT h 1 FIELDS 2 a b
+HLEN h
+HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+OBJECT ENCODING h
+HLEN h
+HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+MEMORY USAGE h
+HLEN h
+HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+TYPE h
+HLEN h
+HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+EXISTS h
+HLEN h
+HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+!type DUMP h
+HLEN h
+HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+TOUCH h
+HLEN h
+HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+COPY h h2
+HLEN h
+HGETALL h
+OBJECT ENCODING h
+HLEN h2
+HGETALL h2
+OBJECT ENCODING h2
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+RENAME h h3
+HLEN h
+HGETALL h
+OBJECT ENCODING h
+HLEN h3
+HGETALL h3
+OBJECT ENCODING h3
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+MOVE h 9
+SELECT 9
+HLEN h
+HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+FLUSHDB
+SELECT 0
+HLEN h
+HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+SORT l BY *->a
+HLEN h
+HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+SORT l BY nosort GET *->a
+HLEN h
+HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+SORT l BY *->c GET *->a GET #
+HLEN h
+HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+SORT_RO l BY nosort GET *->a
+HLEN h
+HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+SORT l BY nosort GET *->a STORE h2
+HLEN h
+HGETALL h
+OBJECT ENCODING h
+HLEN h2
+HGETALL h2
+OBJECT ENCODING h2
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+EVAL "return redis.call('hget', KEYS[1], 'a')" 1 h
+HLEN h
+HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+EVAL "return redis.call('hgetall', KEYS[1])" 1 h
+HLEN h
+HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+EVAL_RO "return redis.call('hexists', KEYS[1], 'a')" 1 h
+HLEN h
+HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+EVAL "redis.call('hget', KEYS[1], 'a') return redis.call('hlen', KEYS[1])" 1 h
+HLEN h
+HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+FCALL lazyget 1 h
+HLEN h
+HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+MULTI
+HLEN h
+HGET h a
+HLEN h
+HGETDEL h FIELDS 2 a c
+EXEC
+HLEN h
+HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+FLUSHALL
+RPUSH l h
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+HGET h a
+EXISTS h h2 h3
+DBSIZE
+HLEN h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+FLUSHALL
+RPUSH l h
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+HMGET h a a
+EXISTS h h2 h3
+DBSIZE
+HLEN h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+FLUSHALL
+RPUSH l h
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+HMGET h zz a zz
+EXISTS h h2 h3
+DBSIZE
+HLEN h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+FLUSHALL
+RPUSH l h
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+HEXISTS h a
+EXISTS h h2 h3
+DBSIZE
+HLEN h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+FLUSHALL
+RPUSH l h
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+HSTRLEN h a
+EXISTS h h2 h3
+DBSIZE
+HLEN h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+FLUSHALL
+RPUSH l h
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+HSETNX h a z
+EXISTS h h2 h3
+DBSIZE
+HLEN h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+FLUSHALL
+RPUSH l h
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+HINCRBY h a 1
+EXISTS h h2 h3
+DBSIZE
+HLEN h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+FLUSHALL
+RPUSH l h
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+HINCRBYFLOAT h a 1
+EXISTS h h2 h3
+DBSIZE
+HLEN h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+FLUSHALL
+RPUSH l h
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+HGETDEL h FIELDS 1 a
+EXISTS h h2 h3
+DBSIZE
+HLEN h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+FLUSHALL
+RPUSH l h
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+HGETEX h FIELDS 1 a
+EXISTS h h2 h3
+DBSIZE
+HLEN h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+FLUSHALL
+RPUSH l h
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+HGETEX h PX 100000 FIELDS 1 a
+EXISTS h h2 h3
+DBSIZE
+HLEN h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+FLUSHALL
+RPUSH l h
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+HSETEX h FNX FIELDS 1 a z
+EXISTS h h2 h3
+DBSIZE
+HLEN h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+FLUSHALL
+RPUSH l h
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+HSETEX h FXX FIELDS 1 a z
+EXISTS h h2 h3
+DBSIZE
+HLEN h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+FLUSHALL
+RPUSH l h
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+HSETEX h FNX FIELDS 1 b z
+EXISTS h h2 h3
+DBSIZE
+HLEN h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+FLUSHALL
+RPUSH l h
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+HRANDFIELD h
+EXISTS h h2 h3
+DBSIZE
+HLEN h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+FLUSHALL
+RPUSH l h
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+HRANDFIELD h 2
+EXISTS h h2 h3
+DBSIZE
+HLEN h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+FLUSHALL
+RPUSH l h
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+HRANDFIELD h -2 WITHVALUES
+EXISTS h h2 h3
+DBSIZE
+HLEN h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+FLUSHALL
+RPUSH l h
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+HGETALL h
+EXISTS h h2 h3
+DBSIZE
+HLEN h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+FLUSHALL
+RPUSH l h
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+HLEN h
+EXISTS h h2 h3
+DBSIZE
+HLEN h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+FLUSHALL
+RPUSH l h
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+HSCAN h 0
+EXISTS h h2 h3
+DBSIZE
+HLEN h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+FLUSHALL
+RPUSH l h
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+HTTL h FIELDS 1 a
+EXISTS h h2 h3
+DBSIZE
+HLEN h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+FLUSHALL
+RPUSH l h
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+HPERSIST h FIELDS 1 a
+EXISTS h h2 h3
+DBSIZE
+HLEN h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+FLUSHALL
+RPUSH l h
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+HEXPIRE h 100 FIELDS 1 a
+EXISTS h h2 h3
+DBSIZE
+HLEN h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+FLUSHALL
+RPUSH l h
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+HPEXPIREAT h 1 FIELDS 1 a
+EXISTS h h2 h3
+DBSIZE
+HLEN h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+FLUSHALL
+RPUSH l h
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+HDEL h a
+EXISTS h h2 h3
+DBSIZE
+HLEN h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+FLUSHALL
+RPUSH l h
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+HSET h a z
+EXISTS h h2 h3
+DBSIZE
+HLEN h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+FLUSHALL
+RPUSH l h
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+OBJECT ENCODING h
+EXISTS h h2 h3
+DBSIZE
+HLEN h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+FLUSHALL
+RPUSH l h
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+MEMORY USAGE h
+EXISTS h h2 h3
+DBSIZE
+HLEN h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+FLUSHALL
+RPUSH l h
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+TYPE h
+EXISTS h h2 h3
+DBSIZE
+HLEN h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+FLUSHALL
+RPUSH l h
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+EXISTS h
+EXISTS h h2 h3
+DBSIZE
+HLEN h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+FLUSHALL
+RPUSH l h
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+!type DUMP h
+EXISTS h h2 h3
+DBSIZE
+HLEN h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+FLUSHALL
+RPUSH l h
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+COPY h h2
+EXISTS h h2 h3
+DBSIZE
+HLEN h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+FLUSHALL
+RPUSH l h
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+RENAME h h3
+EXISTS h h2 h3
+DBSIZE
+HLEN h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+FLUSHALL
+RPUSH l h
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+SORT l BY nosort GET *->a
+EXISTS h h2 h3
+DBSIZE
+HLEN h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+FLUSHALL
+RPUSH l h
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+!sort SCAN 0
+EXISTS h h2 h3
+DBSIZE
+HLEN h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+FLUSHALL
+RPUSH l h
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+!type RANDOMKEY
+EXISTS h h2 h3
+DBSIZE
+HLEN h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+FLUSHALL
+RPUSH l h
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+DBSIZE
+EXISTS h h2 h3
+DBSIZE
+HLEN h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+FLUSHALL
+RPUSH l h
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+!sort KEYS *
+EXISTS h h2 h3
+DBSIZE
+HLEN h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+FLUSHALL
+RPUSH l h
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+TTL h
+EXISTS h h2 h3
+DBSIZE
+HLEN h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+FLUSHALL
+RPUSH l h
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+EVAL "return redis.call('hget', KEYS[1], 'a')" 1 h
+EXISTS h h2 h3
+DBSIZE
+HLEN h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+RPUSH l h
+DEL h
+HSET h a 1 b 2 c 3 d 4
+HPEXPIRE h 1 FIELDS 2 a b
+@sleep 20
+HMGET h a b c d
+HLEN h
+HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h
+HSET h a 1 b 2 c 3 d 4
+HPEXPIRE h 1 FIELDS 2 a b
+@sleep 20
+HGETDEL h FIELDS 3 a b c
+HLEN h
+HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h
+HSET h a 1 b 2 c 3 d 4
+HPEXPIRE h 1 FIELDS 2 a b
+@sleep 20
+HGETEX h PERSIST FIELDS 3 a b c
+HLEN h
+HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h
+HSET h a 1 b 2 c 3 d 4
+HPEXPIRE h 1 FIELDS 2 a b
+@sleep 20
+!type HRANDFIELD h 1
+HLEN h
+HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h
+HSET h a 1 b 2 c 3 d 4
+HPEXPIRE h 1 FIELDS 2 a b
+@sleep 20
+HGETDEL h FIELDS 4 a b c d
+HLEN h
+HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h
+HSET h a 1 b 2 c 3 d 4
+HPEXPIRE h 1 FIELDS 2 a b
+@sleep 20
+HMGET h a b
+HLEN h
+HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+# Events of lazily expired fields (KEA on __key*@*__:*).
+@conn 2
+PSUBSCRIBE __key*@*__:*
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+CONFIG SET notify-keyspace-events KEA
+HGET h a
+@conn 2
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+CONFIG SET notify-keyspace-events KEA
+HMGET h a b
+@conn 2
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1 b 2 c 3 d 4
+HPEXPIRE h 1 FIELDS 2 a b
+@sleep 20
+CONFIG SET notify-keyspace-events KEA
+HMGET h a b c
+@conn 2
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+CONFIG SET notify-keyspace-events KEA
+HEXISTS h a
+@conn 2
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+CONFIG SET notify-keyspace-events KEA
+HSTRLEN h a
+@conn 2
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+CONFIG SET notify-keyspace-events KEA
+HSETNX h a z
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+CONFIG SET notify-keyspace-events KEA
+HINCRBY h a 1
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+CONFIG SET notify-keyspace-events KEA
+HINCRBYFLOAT h a 1
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+CONFIG SET notify-keyspace-events KEA
+HGETDEL h FIELDS 2 a b
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1 b 2 c 3 d 4
+HPEXPIRE h 1 FIELDS 2 a b
+@sleep 20
+CONFIG SET notify-keyspace-events KEA
+HGETDEL h FIELDS 3 a c b
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+CONFIG SET notify-keyspace-events KEA
+HGETEX h FIELDS 1 a
+@conn 2
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+CONFIG SET notify-keyspace-events KEA
+HGETEX h PERSIST FIELDS 2 a c
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+CONFIG SET notify-keyspace-events KEA
+HGETEX h PXAT 1 FIELDS 2 a b
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+CONFIG SET notify-keyspace-events KEA
+HSETEX h FNX FIELDS 1 a z
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+CONFIG SET notify-keyspace-events KEA
+HSETEX h FXX FIELDS 2 b z a z
+@conn 2
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+CONFIG SET notify-keyspace-events KEA
+HSET h a z
+@conn 2
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+CONFIG SET notify-keyspace-events KEA
+HEXPIRE h 100 FIELDS 1 a
+@conn 2
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+CONFIG SET notify-keyspace-events KEA
+HPERSIST h FIELDS 2 a c
+@conn 2
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+CONFIG SET notify-keyspace-events KEA
+HDEL h a
+@conn 2
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+CONFIG SET notify-keyspace-events KEA
+HRANDFIELD h 0
+@conn 2
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1 b 2 c 3 d 4
+HPEXPIRE h 1 FIELDS 2 a b
+@sleep 20
+CONFIG SET notify-keyspace-events KEA
+HRANDFIELD h 0
+@conn 2
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+CONFIG SET notify-keyspace-events KEA
+HGETALL h
+@conn 2
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+CONFIG SET notify-keyspace-events KEA
+HSCAN h 0
+@conn 2
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+CONFIG SET notify-keyspace-events KEA
+SORT l BY nosort GET *->a
+@conn 2
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+CONFIG SET notify-keyspace-events KEA
+EVAL "return redis.call('hget', KEYS[1], 'a')" 1 h
+@conn 2
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1 b 2 c 3 d 4
+HPEXPIRE h 1 FIELDS 2 a b
+@sleep 20
+CONFIG SET notify-keyspace-events KEA
+EVAL "redis.call('hget', KEYS[1], 'a') return redis.call('hget', KEYS[1], 'b')" 1 h
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+CONFIG SET notify-keyspace-events KEA
+HGET h a
+@conn 2
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+CONFIG SET notify-keyspace-events KEA
+HMGET h a a
+@conn 2
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+CONFIG SET notify-keyspace-events KEA
+HEXISTS h a
+@conn 2
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+CONFIG SET notify-keyspace-events KEA
+HSETNX h a z
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+CONFIG SET notify-keyspace-events KEA
+HINCRBY h a 1
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+CONFIG SET notify-keyspace-events KEA
+HINCRBYFLOAT h a 1
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+CONFIG SET notify-keyspace-events KEA
+HGETDEL h FIELDS 1 a
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+CONFIG SET notify-keyspace-events KEA
+HGETEX h PX 1000 FIELDS 1 a
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+CONFIG SET notify-keyspace-events KEA
+HSETEX h FNX FIELDS 1 b z
+@conn 2
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+CONFIG SET notify-keyspace-events KEA
+HSETEX h FXX FIELDS 1 a z
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+CONFIG SET notify-keyspace-events KEA
+!type HRANDFIELD h
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+CONFIG SET notify-keyspace-events KEA
+!type HRANDFIELD h 3
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+CONFIG SET notify-keyspace-events KEA
+SORT l BY nosort GET *->a
+@conn 2
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+CONFIG SET notify-keyspace-events KEA
+HGETALL h
+@conn 2
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+CONFIG SET notify-keyspace-events KEA
+HLEN h
+@conn 2
+@conn 1
+CONFIG SET notify-keyspace-events ""
+@conn 2
+PUNSUBSCRIBE __key*@*__:*
+@conn 1
+# Events of lazily expired fields (KEhgxnSTIV on __*).
+@conn 2
+PSUBSCRIBE __*
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+CONFIG SET notify-keyspace-events KEhgxnSTIV
+HGET h a
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+CONFIG SET notify-keyspace-events KEhgxnSTIV
+HMGET h a b
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1 b 2 c 3 d 4
+HPEXPIRE h 1 FIELDS 2 a b
+@sleep 20
+CONFIG SET notify-keyspace-events KEhgxnSTIV
+HMGET h a b c
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+CONFIG SET notify-keyspace-events KEhgxnSTIV
+HEXISTS h a
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+CONFIG SET notify-keyspace-events KEhgxnSTIV
+HSTRLEN h a
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+CONFIG SET notify-keyspace-events KEhgxnSTIV
+HSETNX h a z
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+CONFIG SET notify-keyspace-events KEhgxnSTIV
+HINCRBY h a 1
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+CONFIG SET notify-keyspace-events KEhgxnSTIV
+HINCRBYFLOAT h a 1
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+CONFIG SET notify-keyspace-events KEhgxnSTIV
+HGETDEL h FIELDS 2 a b
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1 b 2 c 3 d 4
+HPEXPIRE h 1 FIELDS 2 a b
+@sleep 20
+CONFIG SET notify-keyspace-events KEhgxnSTIV
+HGETDEL h FIELDS 3 a c b
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+CONFIG SET notify-keyspace-events KEhgxnSTIV
+HGETEX h FIELDS 1 a
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+CONFIG SET notify-keyspace-events KEhgxnSTIV
+HGETEX h PERSIST FIELDS 2 a c
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+CONFIG SET notify-keyspace-events KEhgxnSTIV
+HGETEX h PXAT 1 FIELDS 2 a b
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+CONFIG SET notify-keyspace-events KEhgxnSTIV
+HSETEX h FNX FIELDS 1 a z
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+CONFIG SET notify-keyspace-events KEhgxnSTIV
+HSETEX h FXX FIELDS 2 b z a z
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+CONFIG SET notify-keyspace-events KEhgxnSTIV
+HSET h a z
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+CONFIG SET notify-keyspace-events KEhgxnSTIV
+HEXPIRE h 100 FIELDS 1 a
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+CONFIG SET notify-keyspace-events KEhgxnSTIV
+HPERSIST h FIELDS 2 a c
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+CONFIG SET notify-keyspace-events KEhgxnSTIV
+HDEL h a
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+CONFIG SET notify-keyspace-events KEhgxnSTIV
+HRANDFIELD h 0
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1 b 2 c 3 d 4
+HPEXPIRE h 1 FIELDS 2 a b
+@sleep 20
+CONFIG SET notify-keyspace-events KEhgxnSTIV
+HRANDFIELD h 0
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+CONFIG SET notify-keyspace-events KEhgxnSTIV
+HGETALL h
+@conn 2
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+CONFIG SET notify-keyspace-events KEhgxnSTIV
+HSCAN h 0
+@conn 2
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+CONFIG SET notify-keyspace-events KEhgxnSTIV
+SORT l BY nosort GET *->a
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+CONFIG SET notify-keyspace-events KEhgxnSTIV
+EVAL "return redis.call('hget', KEYS[1], 'a')" 1 h
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1 b 2 c 3 d 4
+HPEXPIRE h 1 FIELDS 2 a b
+@sleep 20
+CONFIG SET notify-keyspace-events KEhgxnSTIV
+EVAL "redis.call('hget', KEYS[1], 'a') return redis.call('hget', KEYS[1], 'b')" 1 h
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+CONFIG SET notify-keyspace-events KEhgxnSTIV
+HGET h a
+@conn 2
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+CONFIG SET notify-keyspace-events KEhgxnSTIV
+HMGET h a a
+@conn 2
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+CONFIG SET notify-keyspace-events KEhgxnSTIV
+HEXISTS h a
+@conn 2
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+CONFIG SET notify-keyspace-events KEhgxnSTIV
+HSETNX h a z
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+CONFIG SET notify-keyspace-events KEhgxnSTIV
+HINCRBY h a 1
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+CONFIG SET notify-keyspace-events KEhgxnSTIV
+HINCRBYFLOAT h a 1
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+CONFIG SET notify-keyspace-events KEhgxnSTIV
+HGETDEL h FIELDS 1 a
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+CONFIG SET notify-keyspace-events KEhgxnSTIV
+HGETEX h PX 1000 FIELDS 1 a
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+CONFIG SET notify-keyspace-events KEhgxnSTIV
+HSETEX h FNX FIELDS 1 b z
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+CONFIG SET notify-keyspace-events KEhgxnSTIV
+HSETEX h FXX FIELDS 1 a z
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+CONFIG SET notify-keyspace-events KEhgxnSTIV
+!type HRANDFIELD h
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+CONFIG SET notify-keyspace-events KEhgxnSTIV
+!type HRANDFIELD h 3
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+CONFIG SET notify-keyspace-events KEhgxnSTIV
+SORT l BY nosort GET *->a
+@conn 2
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+CONFIG SET notify-keyspace-events KEhgxnSTIV
+HGETALL h
+@conn 2
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+CONFIG SET notify-keyspace-events KEhgxnSTIV
+HLEN h
+@conn 2
+@conn 1
+CONFIG SET notify-keyspace-events ""
+@conn 2
+PUNSUBSCRIBE __*
+@conn 1
+# CLIENT PAUSE holds back lazy expiry too.
+FLUSHALL
+RPUSH l h1
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HSET h1 a 1
+HPEXPIRE h1 1 FIELDS 1 a
+@sleep 20
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+CLIENT PAUSE 100000 WRITE
+HGET h a
+HMGET h a b
+HEXISTS h a
+HSTRLEN h a
+HLEN h
+HGETALL h
+HKEYS h
+HSCAN h 0
+HTTL h FIELDS 2 a b
+HPEXPIRETIME h FIELDS 1 c
+HRANDFIELD h1
+HRANDFIELD h1 -2
+HRANDFIELD h1 1 WITHVALUES
+HRANDFIELD h1 3
+HSCAN h1 0
+HGETALL h1
+EXISTS h1
+SORT_RO l BY nosort GET *->a
+EVAL_RO "return redis.call('hget', KEYS[1], 'a')" 1 h1
+HLEN h1
+DBSIZE
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+CLIENT UNPAUSE
+HLEN h
+HGET h a
+HLEN h
+HRANDFIELD h1
+EXISTS h1
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+# DEBUG SET-ALLOW-ACCESS-EXPIRED: expired fields are plain fields to reads.
+FLUSHALL
+RPUSH l h1
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HSET h1 a 1
+HPEXPIRE h1 1 FIELDS 1 a
+@sleep 20
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+DEBUG SET-ALLOW-ACCESS-EXPIRED 1
+HGET h a
+HMGET h a b
+HEXISTS h a
+HSTRLEN h a
+HLEN h
+HGETALL h
+HKEYS h
+HSCAN h 0
+HTTL h FIELDS 2 a b
+HPEXPIRETIME h FIELDS 1 c
+HRANDFIELD h1
+HRANDFIELD h1 -2
+HRANDFIELD h1 1 WITHVALUES
+HRANDFIELD h1 3
+HSCAN h1 0
+HGETALL h1
+EXISTS h1
+SORT_RO l BY nosort GET *->a
+EVAL_RO "return redis.call('hget', KEYS[1], 'a')" 1 h1
+HLEN h1
+DBSIZE
+HPERSIST h FIELDS 1 a
+HGETEX h FIELDS 2 a b
+HSETNX h a z
+HINCRBY h a 1
+HLEN h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+DEBUG SET-ALLOW-ACCESS-EXPIRED 0
+HLEN h
+HGET h a
+HLEN h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+# WATCH: a lazy field deletion modifies the key, a hidden expired field doesn't.
+FLUSHALL
+RPUSH l h1
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HSET h1 a 1
+HPEXPIRE h1 1 FIELDS 1 a
+@sleep 20
+WATCH h
+HGETALL h
+HLEN h
+MULTI
+PING
+EXEC
+WATCH h
+HGET h a
+MULTI
+PING
+EXEC
+WATCH h1
+HMGET h1 a
+MULTI
+PING
+EXEC
+# Persistence: what an RDB round trip keeps of expired fields.
+FLUSHALL
+RPUSH l h1
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HSET h1 a 1
+HPEXPIRE h1 1 FIELDS 1 a
+@sleep 20
+DEBUG RELOAD
+HLEN h
+HGETALL h
+EXISTS h1
+HLEN h1
+DBSIZE
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+# ---- hashtable ----
+CONFIG SET hash-max-listpack-entries 0
+FLUSHALL
+RPUSH l h
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+HGET h a
+HLEN h
+!sort HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+HGET h b
+HLEN h
+!sort HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+HMGET h a b
+HLEN h
+!sort HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+HMGET h zz a c
+HLEN h
+!sort HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+HEXISTS h a
+HLEN h
+!sort HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+HEXISTS h zz
+HLEN h
+!sort HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+HSTRLEN h a
+HLEN h
+!sort HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+HSTRLEN h b
+HLEN h
+!sort HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+!sort HGETALL h
+HLEN h
+!sort HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+!sort HKEYS h
+HLEN h
+!sort HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+!sort HVALS h
+HLEN h
+!sort HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+!sort HSCAN h 0
+HLEN h
+!sort HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+!sort HSCAN h 0 NOVALUES
+HLEN h
+!sort HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+!sort HSCAN h 0 MATCH a
+HLEN h
+!sort HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+HLEN h
+HLEN h
+!sort HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+!type HRANDFIELD h
+HLEN h
+!sort HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+!type HRANDFIELD h 5
+HLEN h
+!sort HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+!type HRANDFIELD h -5 WITHVALUES
+HLEN h
+!sort HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+!type HRANDFIELD h 1
+HLEN h
+!sort HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+HRANDFIELD h 0
+HLEN h
+!sort HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+HTTL h FIELDS 3 a b c
+HLEN h
+!sort HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+HPTTL h FIELDS 1 a
+HLEN h
+!sort HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+HEXPIRETIME h FIELDS 1 a
+HLEN h
+!sort HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+HPEXPIRETIME h FIELDS 1 a
+HLEN h
+!sort HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+HPERSIST h FIELDS 3 a b c
+HLEN h
+!sort HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+HGETDEL h FIELDS 2 a b
+HLEN h
+!sort HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+HGETDEL h FIELDS 1 a
+HLEN h
+!sort HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+HGETDEL h FIELDS 2 zz a
+HLEN h
+!sort HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+HGETEX h FIELDS 2 a b
+HLEN h
+!sort HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+HGETEX h PERSIST FIELDS 2 a c
+HLEN h
+!sort HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+HGETEX h PX 100000 FIELDS 2 a b
+HLEN h
+!sort HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+HGETEX h PXAT 1 FIELDS 2 a b
+HLEN h
+!sort HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+HINCRBY h a 5
+HLEN h
+!sort HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+HINCRBYFLOAT h a 1.5
+HLEN h
+!sort HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+HSETNX h a z
+HLEN h
+!sort HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+HSET h a z
+HLEN h
+!sort HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+HMSET h a z
+HLEN h
+!sort HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+HDEL h a
+HLEN h
+!sort HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+HDEL h a b
+HLEN h
+!sort HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+HSETEX h FIELDS 1 a z
+HLEN h
+!sort HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+HSETEX h KEEPTTL FIELDS 1 a z
+HLEN h
+!sort HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+HSETEX h FNX FIELDS 1 a z
+HLEN h
+!sort HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+HSETEX h FXX FIELDS 1 a z
+HLEN h
+!sort HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+HSETEX h FXX FIELDS 2 b z a z
+HLEN h
+!sort HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+HSETEX h FNX PX 100000 FIELDS 1 a z
+HLEN h
+!sort HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+HSETEX h PX 100000 FIELDS 1 a z
+HLEN h
+!sort HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+HSETEX h PXAT 1 FIELDS 1 a z
+HLEN h
+!sort HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+HEXPIRE h 100 FIELDS 1 a
+HLEN h
+!sort HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+HEXPIRE h 100 NX FIELDS 1 a
+HLEN h
+!sort HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+HEXPIRE h 100 XX FIELDS 1 a
+HLEN h
+!sort HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+HEXPIRE h 100 GT FIELDS 1 a
+HLEN h
+!sort HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+HEXPIRE h 100 LT FIELDS 1 a
+HLEN h
+!sort HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+HPEXPIREAT h 1 FIELDS 2 a b
+HLEN h
+!sort HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+OBJECT ENCODING h
+HLEN h
+!sort HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+MEMORY USAGE h
+HLEN h
+!sort HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+TYPE h
+HLEN h
+!sort HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+EXISTS h
+HLEN h
+!sort HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+!type DUMP h
+HLEN h
+!sort HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+TOUCH h
+HLEN h
+!sort HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+COPY h h2
+HLEN h
+!sort HGETALL h
+OBJECT ENCODING h
+HLEN h2
+!sort HGETALL h2
+OBJECT ENCODING h2
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+RENAME h h3
+HLEN h
+!sort HGETALL h
+OBJECT ENCODING h
+HLEN h3
+!sort HGETALL h3
+OBJECT ENCODING h3
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+MOVE h 9
+SELECT 9
+HLEN h
+!sort HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+FLUSHDB
+SELECT 0
+HLEN h
+!sort HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+SORT l BY *->a
+HLEN h
+!sort HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+SORT l BY nosort GET *->a
+HLEN h
+!sort HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+SORT l BY *->c GET *->a GET #
+HLEN h
+!sort HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+SORT_RO l BY nosort GET *->a
+HLEN h
+!sort HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+SORT l BY nosort GET *->a STORE h2
+HLEN h
+!sort HGETALL h
+OBJECT ENCODING h
+HLEN h2
+!sort HGETALL h2
+OBJECT ENCODING h2
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+EVAL "return redis.call('hget', KEYS[1], 'a')" 1 h
+HLEN h
+!sort HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+!sort EVAL "return redis.call('hgetall', KEYS[1])" 1 h
+HLEN h
+!sort HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+EVAL_RO "return redis.call('hexists', KEYS[1], 'a')" 1 h
+HLEN h
+!sort HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+EVAL "redis.call('hget', KEYS[1], 'a') return redis.call('hlen', KEYS[1])" 1 h
+HLEN h
+!sort HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+FCALL lazyget 1 h
+HLEN h
+!sort HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+MULTI
+HLEN h
+HGET h a
+HLEN h
+HGETDEL h FIELDS 2 a c
+EXEC
+HLEN h
+!sort HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+FLUSHALL
+RPUSH l h
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+HGET h a
+EXISTS h h2 h3
+DBSIZE
+HLEN h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+FLUSHALL
+RPUSH l h
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+HMGET h a a
+EXISTS h h2 h3
+DBSIZE
+HLEN h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+FLUSHALL
+RPUSH l h
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+HMGET h zz a zz
+EXISTS h h2 h3
+DBSIZE
+HLEN h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+FLUSHALL
+RPUSH l h
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+HEXISTS h a
+EXISTS h h2 h3
+DBSIZE
+HLEN h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+FLUSHALL
+RPUSH l h
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+HSTRLEN h a
+EXISTS h h2 h3
+DBSIZE
+HLEN h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+FLUSHALL
+RPUSH l h
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+HSETNX h a z
+EXISTS h h2 h3
+DBSIZE
+HLEN h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+FLUSHALL
+RPUSH l h
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+HINCRBY h a 1
+EXISTS h h2 h3
+DBSIZE
+HLEN h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+FLUSHALL
+RPUSH l h
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+HINCRBYFLOAT h a 1
+EXISTS h h2 h3
+DBSIZE
+HLEN h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+FLUSHALL
+RPUSH l h
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+HGETDEL h FIELDS 1 a
+EXISTS h h2 h3
+DBSIZE
+HLEN h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+FLUSHALL
+RPUSH l h
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+HGETEX h FIELDS 1 a
+EXISTS h h2 h3
+DBSIZE
+HLEN h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+FLUSHALL
+RPUSH l h
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+HGETEX h PX 100000 FIELDS 1 a
+EXISTS h h2 h3
+DBSIZE
+HLEN h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+FLUSHALL
+RPUSH l h
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+HSETEX h FNX FIELDS 1 a z
+EXISTS h h2 h3
+DBSIZE
+HLEN h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+FLUSHALL
+RPUSH l h
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+HSETEX h FXX FIELDS 1 a z
+EXISTS h h2 h3
+DBSIZE
+HLEN h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+FLUSHALL
+RPUSH l h
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+HSETEX h FNX FIELDS 1 b z
+EXISTS h h2 h3
+DBSIZE
+HLEN h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+FLUSHALL
+RPUSH l h
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+HRANDFIELD h
+EXISTS h h2 h3
+DBSIZE
+HLEN h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+FLUSHALL
+RPUSH l h
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+HRANDFIELD h 2
+EXISTS h h2 h3
+DBSIZE
+HLEN h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+FLUSHALL
+RPUSH l h
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+HRANDFIELD h -2 WITHVALUES
+EXISTS h h2 h3
+DBSIZE
+HLEN h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+FLUSHALL
+RPUSH l h
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+HGETALL h
+EXISTS h h2 h3
+DBSIZE
+HLEN h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+FLUSHALL
+RPUSH l h
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+HLEN h
+EXISTS h h2 h3
+DBSIZE
+HLEN h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+FLUSHALL
+RPUSH l h
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+HSCAN h 0
+EXISTS h h2 h3
+DBSIZE
+HLEN h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+FLUSHALL
+RPUSH l h
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+HTTL h FIELDS 1 a
+EXISTS h h2 h3
+DBSIZE
+HLEN h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+FLUSHALL
+RPUSH l h
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+HPERSIST h FIELDS 1 a
+EXISTS h h2 h3
+DBSIZE
+HLEN h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+FLUSHALL
+RPUSH l h
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+HEXPIRE h 100 FIELDS 1 a
+EXISTS h h2 h3
+DBSIZE
+HLEN h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+FLUSHALL
+RPUSH l h
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+HPEXPIREAT h 1 FIELDS 1 a
+EXISTS h h2 h3
+DBSIZE
+HLEN h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+FLUSHALL
+RPUSH l h
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+HDEL h a
+EXISTS h h2 h3
+DBSIZE
+HLEN h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+FLUSHALL
+RPUSH l h
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+HSET h a z
+EXISTS h h2 h3
+DBSIZE
+HLEN h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+FLUSHALL
+RPUSH l h
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+OBJECT ENCODING h
+EXISTS h h2 h3
+DBSIZE
+HLEN h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+FLUSHALL
+RPUSH l h
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+MEMORY USAGE h
+EXISTS h h2 h3
+DBSIZE
+HLEN h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+FLUSHALL
+RPUSH l h
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+TYPE h
+EXISTS h h2 h3
+DBSIZE
+HLEN h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+FLUSHALL
+RPUSH l h
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+EXISTS h
+EXISTS h h2 h3
+DBSIZE
+HLEN h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+FLUSHALL
+RPUSH l h
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+!type DUMP h
+EXISTS h h2 h3
+DBSIZE
+HLEN h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+FLUSHALL
+RPUSH l h
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+COPY h h2
+EXISTS h h2 h3
+DBSIZE
+HLEN h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+FLUSHALL
+RPUSH l h
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+RENAME h h3
+EXISTS h h2 h3
+DBSIZE
+HLEN h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+FLUSHALL
+RPUSH l h
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+SORT l BY nosort GET *->a
+EXISTS h h2 h3
+DBSIZE
+HLEN h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+FLUSHALL
+RPUSH l h
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+!sort SCAN 0
+EXISTS h h2 h3
+DBSIZE
+HLEN h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+FLUSHALL
+RPUSH l h
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+!type RANDOMKEY
+EXISTS h h2 h3
+DBSIZE
+HLEN h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+FLUSHALL
+RPUSH l h
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+DBSIZE
+EXISTS h h2 h3
+DBSIZE
+HLEN h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+FLUSHALL
+RPUSH l h
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+!sort KEYS *
+EXISTS h h2 h3
+DBSIZE
+HLEN h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+FLUSHALL
+RPUSH l h
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+TTL h
+EXISTS h h2 h3
+DBSIZE
+HLEN h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+FLUSHALL
+RPUSH l h
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+EVAL "return redis.call('hget', KEYS[1], 'a')" 1 h
+EXISTS h h2 h3
+DBSIZE
+HLEN h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+RPUSH l h
+DEL h
+HSET h a 1 b 2 c 3 d 4
+HPEXPIRE h 1 FIELDS 2 a b
+@sleep 20
+HMGET h a b c d
+HLEN h
+!sort HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h
+HSET h a 1 b 2 c 3 d 4
+HPEXPIRE h 1 FIELDS 2 a b
+@sleep 20
+HGETDEL h FIELDS 3 a b c
+HLEN h
+!sort HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h
+HSET h a 1 b 2 c 3 d 4
+HPEXPIRE h 1 FIELDS 2 a b
+@sleep 20
+HGETEX h PERSIST FIELDS 3 a b c
+HLEN h
+!sort HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h
+HSET h a 1 b 2 c 3 d 4
+HPEXPIRE h 1 FIELDS 2 a b
+@sleep 20
+!type HRANDFIELD h 1
+HLEN h
+!sort HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h
+HSET h a 1 b 2 c 3 d 4
+HPEXPIRE h 1 FIELDS 2 a b
+@sleep 20
+HGETDEL h FIELDS 4 a b c d
+HLEN h
+!sort HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+DEL h
+HSET h a 1 b 2 c 3 d 4
+HPEXPIRE h 1 FIELDS 2 a b
+@sleep 20
+HMGET h a b
+HLEN h
+!sort HGETALL h
+OBJECT ENCODING h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+# Events of lazily expired fields (KEA on __key*@*__:*).
+@conn 2
+PSUBSCRIBE __key*@*__:*
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+CONFIG SET notify-keyspace-events KEA
+HGET h a
+@conn 2
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+CONFIG SET notify-keyspace-events KEA
+HMGET h a b
+@conn 2
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1 b 2 c 3 d 4
+HPEXPIRE h 1 FIELDS 2 a b
+@sleep 20
+CONFIG SET notify-keyspace-events KEA
+HMGET h a b c
+@conn 2
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+CONFIG SET notify-keyspace-events KEA
+HEXISTS h a
+@conn 2
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+CONFIG SET notify-keyspace-events KEA
+HSTRLEN h a
+@conn 2
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+CONFIG SET notify-keyspace-events KEA
+HSETNX h a z
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+CONFIG SET notify-keyspace-events KEA
+HINCRBY h a 1
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+CONFIG SET notify-keyspace-events KEA
+HINCRBYFLOAT h a 1
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+CONFIG SET notify-keyspace-events KEA
+HGETDEL h FIELDS 2 a b
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1 b 2 c 3 d 4
+HPEXPIRE h 1 FIELDS 2 a b
+@sleep 20
+CONFIG SET notify-keyspace-events KEA
+HGETDEL h FIELDS 3 a c b
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+CONFIG SET notify-keyspace-events KEA
+HGETEX h FIELDS 1 a
+@conn 2
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+CONFIG SET notify-keyspace-events KEA
+HGETEX h PERSIST FIELDS 2 a c
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+CONFIG SET notify-keyspace-events KEA
+HGETEX h PXAT 1 FIELDS 2 a b
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+CONFIG SET notify-keyspace-events KEA
+HSETEX h FNX FIELDS 1 a z
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+CONFIG SET notify-keyspace-events KEA
+HSETEX h FXX FIELDS 2 b z a z
+@conn 2
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+CONFIG SET notify-keyspace-events KEA
+HSET h a z
+@conn 2
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+CONFIG SET notify-keyspace-events KEA
+HEXPIRE h 100 FIELDS 1 a
+@conn 2
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+CONFIG SET notify-keyspace-events KEA
+HPERSIST h FIELDS 2 a c
+@conn 2
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+CONFIG SET notify-keyspace-events KEA
+HDEL h a
+@conn 2
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+CONFIG SET notify-keyspace-events KEA
+HRANDFIELD h 0
+@conn 2
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1 b 2 c 3 d 4
+HPEXPIRE h 1 FIELDS 2 a b
+@sleep 20
+CONFIG SET notify-keyspace-events KEA
+HRANDFIELD h 0
+@conn 2
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+CONFIG SET notify-keyspace-events KEA
+!sort HGETALL h
+@conn 2
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+CONFIG SET notify-keyspace-events KEA
+!sort HSCAN h 0
+@conn 2
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+CONFIG SET notify-keyspace-events KEA
+SORT l BY nosort GET *->a
+@conn 2
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+CONFIG SET notify-keyspace-events KEA
+EVAL "return redis.call('hget', KEYS[1], 'a')" 1 h
+@conn 2
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1 b 2 c 3 d 4
+HPEXPIRE h 1 FIELDS 2 a b
+@sleep 20
+CONFIG SET notify-keyspace-events KEA
+EVAL "redis.call('hget', KEYS[1], 'a') return redis.call('hget', KEYS[1], 'b')" 1 h
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+CONFIG SET notify-keyspace-events KEA
+HGET h a
+@conn 2
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+CONFIG SET notify-keyspace-events KEA
+HMGET h a a
+@conn 2
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+CONFIG SET notify-keyspace-events KEA
+HEXISTS h a
+@conn 2
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+CONFIG SET notify-keyspace-events KEA
+HSETNX h a z
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+CONFIG SET notify-keyspace-events KEA
+HINCRBY h a 1
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+CONFIG SET notify-keyspace-events KEA
+HINCRBYFLOAT h a 1
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+CONFIG SET notify-keyspace-events KEA
+HGETDEL h FIELDS 1 a
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+CONFIG SET notify-keyspace-events KEA
+HGETEX h PX 1000 FIELDS 1 a
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+CONFIG SET notify-keyspace-events KEA
+HSETEX h FNX FIELDS 1 b z
+@conn 2
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+CONFIG SET notify-keyspace-events KEA
+HSETEX h FXX FIELDS 1 a z
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+CONFIG SET notify-keyspace-events KEA
+!type HRANDFIELD h
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+CONFIG SET notify-keyspace-events KEA
+!type HRANDFIELD h 3
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+CONFIG SET notify-keyspace-events KEA
+SORT l BY nosort GET *->a
+@conn 2
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+CONFIG SET notify-keyspace-events KEA
+!sort HGETALL h
+@conn 2
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+CONFIG SET notify-keyspace-events KEA
+HLEN h
+@conn 2
+@conn 1
+CONFIG SET notify-keyspace-events ""
+@conn 2
+PUNSUBSCRIBE __key*@*__:*
+@conn 1
+# Events of lazily expired fields (KEhgxnSTIV on __*).
+@conn 2
+PSUBSCRIBE __*
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+CONFIG SET notify-keyspace-events KEhgxnSTIV
+HGET h a
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+CONFIG SET notify-keyspace-events KEhgxnSTIV
+HMGET h a b
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1 b 2 c 3 d 4
+HPEXPIRE h 1 FIELDS 2 a b
+@sleep 20
+CONFIG SET notify-keyspace-events KEhgxnSTIV
+HMGET h a b c
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+CONFIG SET notify-keyspace-events KEhgxnSTIV
+HEXISTS h a
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+CONFIG SET notify-keyspace-events KEhgxnSTIV
+HSTRLEN h a
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+CONFIG SET notify-keyspace-events KEhgxnSTIV
+HSETNX h a z
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+CONFIG SET notify-keyspace-events KEhgxnSTIV
+HINCRBY h a 1
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+CONFIG SET notify-keyspace-events KEhgxnSTIV
+HINCRBYFLOAT h a 1
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+CONFIG SET notify-keyspace-events KEhgxnSTIV
+HGETDEL h FIELDS 2 a b
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1 b 2 c 3 d 4
+HPEXPIRE h 1 FIELDS 2 a b
+@sleep 20
+CONFIG SET notify-keyspace-events KEhgxnSTIV
+HGETDEL h FIELDS 3 a c b
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+CONFIG SET notify-keyspace-events KEhgxnSTIV
+HGETEX h FIELDS 1 a
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+CONFIG SET notify-keyspace-events KEhgxnSTIV
+HGETEX h PERSIST FIELDS 2 a c
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+CONFIG SET notify-keyspace-events KEhgxnSTIV
+HGETEX h PXAT 1 FIELDS 2 a b
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+CONFIG SET notify-keyspace-events KEhgxnSTIV
+HSETEX h FNX FIELDS 1 a z
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+CONFIG SET notify-keyspace-events KEhgxnSTIV
+HSETEX h FXX FIELDS 2 b z a z
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+CONFIG SET notify-keyspace-events KEhgxnSTIV
+HSET h a z
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+CONFIG SET notify-keyspace-events KEhgxnSTIV
+HEXPIRE h 100 FIELDS 1 a
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+CONFIG SET notify-keyspace-events KEhgxnSTIV
+HPERSIST h FIELDS 2 a c
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+CONFIG SET notify-keyspace-events KEhgxnSTIV
+HDEL h a
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+CONFIG SET notify-keyspace-events KEhgxnSTIV
+HRANDFIELD h 0
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1 b 2 c 3 d 4
+HPEXPIRE h 1 FIELDS 2 a b
+@sleep 20
+CONFIG SET notify-keyspace-events KEhgxnSTIV
+HRANDFIELD h 0
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+CONFIG SET notify-keyspace-events KEhgxnSTIV
+!sort HGETALL h
+@conn 2
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+CONFIG SET notify-keyspace-events KEhgxnSTIV
+!sort HSCAN h 0
+@conn 2
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+CONFIG SET notify-keyspace-events KEhgxnSTIV
+SORT l BY nosort GET *->a
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HPEXPIRE h 100000 FIELDS 1 c
+@sleep 20
+CONFIG SET notify-keyspace-events KEhgxnSTIV
+EVAL "return redis.call('hget', KEYS[1], 'a')" 1 h
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1 b 2 c 3 d 4
+HPEXPIRE h 1 FIELDS 2 a b
+@sleep 20
+CONFIG SET notify-keyspace-events KEhgxnSTIV
+EVAL "redis.call('hget', KEYS[1], 'a') return redis.call('hget', KEYS[1], 'b')" 1 h
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+CONFIG SET notify-keyspace-events KEhgxnSTIV
+HGET h a
+@conn 2
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+CONFIG SET notify-keyspace-events KEhgxnSTIV
+HMGET h a a
+@conn 2
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+CONFIG SET notify-keyspace-events KEhgxnSTIV
+HEXISTS h a
+@conn 2
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+CONFIG SET notify-keyspace-events KEhgxnSTIV
+HSETNX h a z
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+CONFIG SET notify-keyspace-events KEhgxnSTIV
+HINCRBY h a 1
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+CONFIG SET notify-keyspace-events KEhgxnSTIV
+HINCRBYFLOAT h a 1
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+CONFIG SET notify-keyspace-events KEhgxnSTIV
+HGETDEL h FIELDS 1 a
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+CONFIG SET notify-keyspace-events KEhgxnSTIV
+HGETEX h PX 1000 FIELDS 1 a
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+CONFIG SET notify-keyspace-events KEhgxnSTIV
+HSETEX h FNX FIELDS 1 b z
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+CONFIG SET notify-keyspace-events KEhgxnSTIV
+HSETEX h FXX FIELDS 1 a z
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+CONFIG SET notify-keyspace-events KEhgxnSTIV
+!type HRANDFIELD h
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+CONFIG SET notify-keyspace-events KEhgxnSTIV
+!type HRANDFIELD h 3
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+CONFIG SET notify-keyspace-events KEhgxnSTIV
+SORT l BY nosort GET *->a
+@conn 2
+@recv
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+CONFIG SET notify-keyspace-events KEhgxnSTIV
+!sort HGETALL h
+@conn 2
+@conn 1
+CONFIG SET notify-keyspace-events ""
+DEL h h2 h3
+HSET h a 1
+HPEXPIRE h 1 FIELDS 1 a
+@sleep 20
+CONFIG SET notify-keyspace-events KEhgxnSTIV
+HLEN h
+@conn 2
+@conn 1
+CONFIG SET notify-keyspace-events ""
+@conn 2
+PUNSUBSCRIBE __*
+@conn 1
+# CLIENT PAUSE holds back lazy expiry too.
+FLUSHALL
+RPUSH l h1
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HSET h1 a 1
+HPEXPIRE h1 1 FIELDS 1 a
+@sleep 20
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+CLIENT PAUSE 100000 WRITE
+HGET h a
+HMGET h a b
+HEXISTS h a
+HSTRLEN h a
+HLEN h
+!sort HGETALL h
+!sort HKEYS h
+!sort HSCAN h 0
+HTTL h FIELDS 2 a b
+HPEXPIRETIME h FIELDS 1 c
+HRANDFIELD h1
+HRANDFIELD h1 -2
+HRANDFIELD h1 1 WITHVALUES
+HRANDFIELD h1 3
+HSCAN h1 0
+HGETALL h1
+EXISTS h1
+SORT_RO l BY nosort GET *->a
+EVAL_RO "return redis.call('hget', KEYS[1], 'a')" 1 h1
+HLEN h1
+DBSIZE
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+CLIENT UNPAUSE
+HLEN h
+HGET h a
+HLEN h
+HRANDFIELD h1
+EXISTS h1
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+# DEBUG SET-ALLOW-ACCESS-EXPIRED: expired fields are plain fields to reads.
+FLUSHALL
+RPUSH l h1
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HSET h1 a 1
+HPEXPIRE h1 1 FIELDS 1 a
+@sleep 20
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+DEBUG SET-ALLOW-ACCESS-EXPIRED 1
+HGET h a
+HMGET h a b
+HEXISTS h a
+HSTRLEN h a
+HLEN h
+!sort HGETALL h
+!sort HKEYS h
+!sort HSCAN h 0
+HTTL h FIELDS 2 a b
+HPEXPIRETIME h FIELDS 1 c
+HRANDFIELD h1
+HRANDFIELD h1 -2
+HRANDFIELD h1 1 WITHVALUES
+HRANDFIELD h1 3
+HSCAN h1 0
+HGETALL h1
+EXISTS h1
+SORT_RO l BY nosort GET *->a
+EVAL_RO "return redis.call('hget', KEYS[1], 'a')" 1 h1
+HLEN h1
+DBSIZE
+HPERSIST h FIELDS 1 a
+HGETEX h FIELDS 2 a b
+HSETNX h a z
+HINCRBY h a 1
+HLEN h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+DEBUG SET-ALLOW-ACCESS-EXPIRED 0
+HLEN h
+HGET h a
+HLEN h
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+# WATCH: a lazy field deletion modifies the key, a hidden expired field doesn't.
+FLUSHALL
+RPUSH l h1
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HSET h1 a 1
+HPEXPIRE h1 1 FIELDS 1 a
+@sleep 20
+WATCH h
+!sort HGETALL h
+HLEN h
+MULTI
+PING
+EXEC
+WATCH h
+HGET h a
+MULTI
+PING
+EXEC
+WATCH h1
+HMGET h1 a
+MULTI
+PING
+EXEC
+# Persistence: what an RDB round trip keeps of expired fields.
+FLUSHALL
+RPUSH l h1
+HSET h a 1 b 2 c 3
+HPEXPIRE h 1 FIELDS 1 a
+HSET h1 a 1
+HPEXPIRE h1 1 FIELDS 1 a
+@sleep 20
+DEBUG RELOAD
+HLEN h
+!sort HGETALL h
+EXISTS h1
+HLEN h1
+DBSIZE
+!delta expired_subkeys,expired_subkeys_active,expired_keys,keyspace_hits,keyspace_misses INFO stats
+!info db0,db9 INFO keyspace
+CONFIG SET hash-max-listpack-entries 512
+FUNCTION FLUSH
+DEBUG SET-ACTIVE-EXPIRE 1
+FLUSHALL

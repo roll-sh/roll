@@ -1,0 +1,952 @@
+# JSON (RedisJSON 8.10, bundled with Redis 8): every JSON.* command with legacy and JSONPath
+# paths, argument and path errors, typed (FPHA) arrays, RESP3 replies, projections, keyspace
+# events, dirty counts, persistence and the generic commands on JSON keys.
+
+FLUSHALL
+
+# ---- JSON.SET / JSON.GET ----
+JSON.SET doc $ '{"a":1,"b":[1,2,3],"c":{"d":"x","e":null,"f":true},"g":2.5,"h":"hello"}'
+JSON.GET doc
+JSON.GET doc $
+JSON.GET doc .
+JSON.GET doc .a
+JSON.GET doc a
+JSON.GET doc $.a
+JSON.GET doc $..d
+JSON.GET doc $.b[0]
+JSON.GET doc $.b[-1]
+JSON.GET doc $.b[0:2]
+JSON.GET doc $.b[*]
+JSON.GET doc $.c.*
+JSON.GET doc $.nosuch
+JSON.GET doc .nosuch
+JSON.GET doc nosuch
+JSON.GET doc $.c.f
+JSON.GET doc $.g
+JSON.GET nosuchkey
+JSON.GET nosuchkey $
+!json JSON.GET doc $.a $.b
+!json JSON.GET doc .a .b
+!json JSON.GET doc .a $.b
+JSON.GET doc .a .nosuch
+!json JSON.GET doc $.a $.nosuch
+!json JSON.GET doc $.a $.
+!json JSON.GET doc $.a $.a
+JSON.GET doc INDENT "\t" NEWLINE "\n" SPACE " " $
+JSON.GET doc INDENT ab NEWLINE cd SPACE ef .c
+JSON.GET doc indent "  " .b
+JSON.GET doc NOESCAPE .h
+JSON.GET doc INDENT
+JSON.GET doc FORMAT STRING
+JSON.GET doc $ FORMAT STRING
+JSON.GET doc $ FORMAT STRINGS
+JSON.GET doc $ FORMAT expand
+JSON.GET doc $ FORMAT EXPAND
+JSON.GET doc $.
+JSON.GET doc $[
+JSON.GET doc $..
+JSON.GET doc 'x y'
+JSON.GET doc $.a[1:2:0]
+JSON.GET doc $.a[?@>]
+JSON.SET s $ '"a string"'
+JSON.GET s
+JSON.SET n $ 42
+JSON.GET n
+JSON.SET n2 $ -0.0
+JSON.GET n2
+JSON.SET n3 $ 1e20
+JSON.GET n3
+JSON.SET n4 $ 18446744073709551615
+JSON.GET n4
+JSON.SET n5 $ 123456789012345678901234567890
+JSON.GET n5
+JSON.SET nl $ null
+JSON.GET nl
+JSON.SET esc $ '"\u0001\n\"\\/é"'
+JSON.GET esc
+JSON.SET dup $ '{"a":1,"b":2,"a":3}'
+JSON.GET dup
+
+# ---- JSON.SET errors and options ----
+JSON.SET
+JSON.SET doc
+JSON.SET doc $
+JSON.SET bad $ x
+JSON.SET bad $ '{"a":'
+JSON.SET bad $ '[1] x'
+JSON.SET bad $ foo
+EXISTS bad
+JSON.SET bad $.a 1
+JSON.SET bad .a 1
+JSON.SET doc $ 1 NX NX
+JSON.SET doc $ 1 XX NX
+JSON.SET doc $ 1 BOGUS
+JSON.SET doc $ 1 FORMAT
+JSON.SET doc $ 1 FORMAT json
+JSON.SET doc $ 1 FORMAT XML
+JSON.SET doc $ 1 FPHA
+JSON.SET doc $ 1 FPHA FP8
+JSON.SET doc $ '{"x":1}' NX
+JSON.SET doc . '{"x":1}' NX
+JSON.SET newk $ 1 XX
+EXISTS newk
+JSON.SET newk $ '{"x":1}' NX
+JSON.GET newk
+JSON.SET newk $.y 2 XX
+JSON.SET newk $.y 2 NX
+JSON.SET newk $.y 3 NX
+JSON.SET newk $.x 5 XX
+JSON.SET newk $.x 6 NX
+JSON.GET newk
+JSON.SET newk $.z.w 1
+JSON.SET newk .z.w 1
+JSON.SET newk $..x 1
+JSON.SET newk $.* 9
+JSON.GET newk
+JSON.SET newk "$['q']" '"quoted"'
+JSON.SET newk '$["r"]' '"dq"'
+JSON.GET newk
+JSON.SET arr $ '[1,2,3]'
+JSON.SET arr $[1] '"two"'
+JSON.SET arr $[5] 1
+JSON.SET arr $[-1] 30
+JSON.SET arr $[-9] 30
+JSON.GET arr
+JSON.SET arr $[1] 7 NX
+JSON.SET arr $.x 1
+JSON.SET arr $[*] 0
+JSON.GET arr
+JSON.SET nest $ '{"a":{"b":{"c":1}}}'
+JSON.SET nest $.a.b '{"c":2,"d":[]}'
+JSON.SET nest $..c 3
+JSON.GET nest
+JSON.SET nest $.a.x.y 1
+JSON.SET nest $ '{"a":[{"k":1},{"k":2}]}'
+JSON.SET nest $.a[*].k 5
+JSON.SET nest $.a[*].n 6
+JSON.SET nest $.a[0].n 6
+JSON.GET nest
+JSON.SET nest '$.a[?(@.k==5)].k' 8
+JSON.GET nest
+JSON.SET nest '$.a.length()' 1
+JSON.SET nest '$.a[0] + 1' 1
+JSON.SET deep $ '{128*[}{128*]}'
+JSON.SET deep $ '{127*[}{127*]}'
+JSON.SET dp $ '{"a":[]}'
+JSON.SET dp $.a '{127*[}{127*]}'
+JSON.SET dp $.b '{127*[}{127*]}'
+JSON.SET dp $.a '{126*[}{126*]}'
+JSON.GET dp $.b
+SET str v
+JSON.SET str $ 1
+JSON.GET str
+JSON.TYPE str
+
+# ---- FPHA typed arrays ----
+JSON.SET fp $ '[0.1,2,3.3]' FPHA FP16
+JSON.GET fp
+JSON.SET fp $ '[0.1,2,3.3]' FPHA fp32
+JSON.GET fp
+JSON.SET fp $ '[0.1,2,3.3]' FPHA BF16
+JSON.GET fp
+JSON.SET fp $ '[0.1,2,3.3]' FPHA FP64
+JSON.GET fp
+JSON.SET fp $ '{"v":[1.5,2.25],"w":[1,"x",2]}' FPHA FP16
+JSON.GET fp
+JSON.SET fp $ '[1e10]' FPHA FP16
+JSON.SET fp $ '[1e40]' FPHA FP32
+JSON.SET fp $ '[1,2,3]'
+JSON.GET fp
+JSON.SET fp $ '[1,2,300]'
+JSON.GET fp
+JSON.SET fp $ '[-1,2,70000]'
+JSON.GET fp
+JSON.SET fp $ '[1.5,2.5]'
+JSON.GET fp $[0]
+JSON.SET ta $ '[1,2,3]'
+JSON.ARRAPPEND ta $ 1000
+JSON.GET ta
+JSON.ARRAPPEND ta $ 1.5
+JSON.GET ta
+JSON.ARRAPPEND ta $ '"s"'
+JSON.GET ta
+JSON.SET ta $ '[1,2,3]'
+JSON.SET ta $[1] 99999
+JSON.GET ta
+JSON.SET ta $[0] '"x"'
+JSON.GET ta
+JSON.SET ta $ '[0.5,0.25]' FPHA FP32
+JSON.NUMINCRBY ta $[0] 1
+JSON.NUMINCRBY ta $[1] 1e300
+JSON.GET ta
+JSON.SET ta $ '[1,2]'
+JSON.NUMINCRBY ta $[0] 1000
+JSON.NUMINCRBY ta $[1] 0.5
+JSON.GET ta
+JSON.SET ta $ '[100,2]'
+JSON.NUMMULTBY ta $[0] 100
+JSON.GET ta
+JSON.SET ta $ '[1.5,2]' FPHA FP16
+JSON.NUMINCRBY ta $[0] 100000
+JSON.GET ta
+JSON.SET ta $ '[1.5]' FPHA FP16
+JSON.NUMMULTBY ta $[0] 1e308
+JSON.NUMMULTBY ta $[0] 1e300
+JSON.GET ta
+JSON.SET ta $ '[1.5]' FPHA FP32
+JSON.NUMMULTBY ta $[0] 1e300
+JSON.NUMMULTBY ta $[0] 1e40
+JSON.GET ta
+JSON.SET ta $ '[[1,2],[3,4]]'
+JSON.GET ta $[*][1]
+JSON.ARRPOP ta $[1]
+JSON.GET ta
+JSON.SET ta $ '[0.1]' FPHA FP32
+JSON.ARRPOP ta
+JSON.SET ta $ '[0.1,0.2]' FPHA FP16
+JSON.ARRPOP ta $ 0
+JSON.SET ta $ '[1,2,3]'
+JSON.ARRINSERT ta $ 1 7 8
+JSON.GET ta
+JSON.ARRINSERT ta $ 0 1.5
+JSON.GET ta
+JSON.ARRINDEX ta $ 7
+JSON.ARRINDEX ta $ 1.5
+JSON.ARRINDEX ta $ 1
+JSON.SET ta $ '[1,2,3]'
+JSON.ARRINDEX ta $ 2
+JSON.ARRINDEX ta $ 2.0
+JSON.SET ta $ '[1,2,3]'
+JSON.TOGGLE ta $[0]
+JSON.STRAPPEND ta $[0] '"x"'
+JSON.CLEAR ta $[0]
+JSON.CLEAR ta $[1]
+JSON.CLEAR ta $
+JSON.GET ta
+JSON.SET ta $ '[1,2,3]'
+JSON.DEL ta $[1]
+JSON.GET ta
+JSON.ARRTRIM ta $ 0 0
+JSON.GET ta
+JSON.SET ta $ '[1,2,3]'
+JSON.MERGE ta $[0] 5
+JSON.MERGE ta $ '{"a":1}'
+JSON.GET ta
+JSON.SET ta $ '[1,2]'
+JSON.TYPE ta $[*]
+JSON.SET ta $ '[18446744073709551615]'
+JSON.TYPE ta $[0]
+JSON.GET ta
+
+# ---- memory ----
+JSON.SET m $ '{"a":[1,2,3],"b":"a longer string here","c":{"d":1.5},"e":[1,"x",null,true]}'
+MEMORY USAGE m
+JSON.DEBUG MEMORY m
+JSON.DEBUG MEMORY m $
+JSON.DEBUG MEMORY m $.*
+JSON.DEBUG MEMORY m .b
+JSON.DEBUG MEMORY m $.a[0]
+JSON.DEBUG MEMORY m .nosuch
+JSON.DEBUG MEMORY nosuch
+JSON.DEBUG MEMORY nosuch $
+JSON.DEBUG memory m
+JSON.DEBUG MEMORY
+JSON.DEBUG HELP
+JSON.DEBUG help
+JSON.DEBUG DEFRAG_INFO
+JSON.DEBUG nope
+JSON.SET m $ '[1,2,3,4,5,6,7,8,9,10]'
+MEMORY USAGE m
+JSON.DEBUG MEMORY m
+JSON.ARRAPPEND m $ 11
+MEMORY USAGE m
+JSON.DEBUG MEMORY m
+JSON.SET m $ '[0.5,1.5]' FPHA FP16
+JSON.DEBUG MEMORY m
+MEMORY USAGE m
+JSON.SET m $ '[100000,1]'
+JSON.DEBUG MEMORY m
+JSON.SET m $ '{"k1":1,"k2":2,"k3":3,"k4":4,"k5":5,"k6":6,"k7":7,"k8":8,"k9":9}'
+JSON.DEBUG MEMORY m
+MEMORY USAGE m
+JSON.DEL m $.k1
+JSON.DEBUG MEMORY m
+JSON.SET m $ '"short"'
+JSON.DEBUG MEMORY m
+JSON.SET m $ 1000000000
+JSON.DEBUG MEMORY m
+JSON.SET m $ 7
+JSON.DEBUG MEMORY m
+JSON.SET m $ 0.5
+JSON.DEBUG MEMORY m
+JSON.SET m $ '[]'
+JSON.DEBUG MEMORY m
+JSON.SET m $ '{}'
+JSON.DEBUG MEMORY m
+MEMORY USAGE m
+JSON.SET m $ '{"a":[1,2,3]}'
+JSON.SET m $.b '{"x":[1,2,3,4,5]}'
+JSON.MERGE m $ '{"c":{"y":[1,2]}}'
+JSON.DEBUG MEMORY m
+MEMORY USAGE m
+
+# ---- JSON.MERGE ----
+JSON.SET mg $ '{"a":1,"b":{"c":2,"d":3},"e":[1,2]}'
+JSON.MERGE mg $ '{"a":null,"b":{"c":4,"x":5},"e":{"f":1},"g":"new"}'
+JSON.GET mg
+JSON.MERGE mg $.b '{"c":null}'
+JSON.MERGE mg $.e 7
+JSON.MERGE mg $.nosuch '{"z":1}'
+JSON.MERGE mg $.nosuch.deeper 1
+JSON.MERGE mg $..c 9
+JSON.GET mg
+JSON.MERGE mg $ 5
+JSON.GET mg
+JSON.MERGE newmg $ '{"a":1}'
+JSON.GET newmg
+JSON.MERGE newmg2 $.a 1
+JSON.MERGE mg $ '{"a":'
+JSON.MERGE mg $ 1 FORMAT
+JSON.MERGE mg $ 1 FORMAT JSON
+JSON.MERGE mg $ 1 NX
+JSON.SET mg $ '{"a":{"b":1},"c":{"b":2}}'
+JSON.MERGE mg $.* '{"b":null,"x":1}'
+JSON.GET mg
+JSON.MERGE mg $.a.q '{"r":1}'
+JSON.GET mg
+JSON.MERGE mg '$.a + 1' 1
+
+# ---- JSON.MSET / JSON.MGET ----
+JSON.MSET m1 $ '{"a":1}' m2 $ '{"a":2}' m3 $ '[1]'
+JSON.MGET m1 m2 m3 nosuch str $.a
+JSON.MGET m1 m2 m3 nosuch str .a
+JSON.MGET m1 m2 $
+JSON.MGET m1 .
+JSON.MGET m1
+JSON.MGET m1 m2 '$.a + 1'
+JSON.MGET m1 m2 $.
+JSON.MSET m1 $.b 5 m2 $.a 7
+JSON.MGET m1 m2 $
+JSON.MSET m1 $.b
+JSON.MSET m1 $.b 5 m2
+JSON.MSET m1 $.b 5 m2 $.a
+JSON.MSET m1 $.b x
+JSON.MSET nosuch1 $.a 1
+JSON.MSET m1 $.x.y 1
+JSON.MSET m1 $..a 9 m3 $[5] 1
+JSON.MSET m1 $..a 9 m3 $[0] 1
+JSON.MGET m1 m3 $
+JSON.MSET str $ 1
+JSON.MSET m1 $ 1 m1 $.x 2
+JSON.MGET m1 $
+
+# ---- JSON.DEL / JSON.FORGET ----
+JSON.SET d $ '{"a":1,"b":[1,2,3],"c":{"a":2,"x":{"a":3}}}'
+JSON.DEL d $.a
+JSON.DEL d $..a
+JSON.GET d
+JSON.DEL d $.b[0]
+JSON.DEL d $.b[*]
+JSON.GET d
+JSON.DEL d $.nosuch
+JSON.DEL d .nosuch
+JSON.DEL d $.
+JSON.DEL d '$.a + 1'
+JSON.FORGET d $.c
+JSON.GET d
+JSON.DEL d $.b
+EXISTS d
+JSON.SET d $ '{"a":1}'
+JSON.DEL d $.a
+EXISTS d
+JSON.SET d $ '[1]'
+JSON.DEL d $[0]
+EXISTS d
+JSON.SET d $ '{"a":1}'
+JSON.DEL d
+EXISTS d
+JSON.SET d $ 1
+JSON.DEL d .
+EXISTS d
+JSON.DEL d
+JSON.DEL str
+JSON.SET d $ '{"a":{"b":[1,2,{"c":1}]},"d":[[1,2],[3,4]]}'
+JSON.DEL d $..*
+JSON.GET d
+JSON.SET d $ '{"a":[1,2,3,4,5,6,7,8,9,10,11,12]}'
+JSON.DEL d '$.a[?(@>3)]'
+JSON.GET d
+JSON.SET d $ '{"a":[1,2,3,4,5]}'
+JSON.DEL d $.a[1:4]
+JSON.GET d
+JSON.DEL d $.a[0] extra args
+JSON.GET d
+
+# ---- JSON.TYPE ----
+JSON.SET t $ '{"a":1,"b":1.5,"c":"s","d":true,"e":null,"f":[],"g":{},"h":18446744073709551615,"i":1e5}'
+JSON.TYPE t
+JSON.TYPE t $
+JSON.TYPE t $.*
+JSON.TYPE t .a
+JSON.TYPE t .b
+JSON.TYPE t .c
+JSON.TYPE t .h
+JSON.TYPE t .i
+JSON.TYPE t .nosuch
+JSON.TYPE t $.nosuch
+JSON.TYPE nosuch
+JSON.TYPE nosuch $
+JSON.TYPE t $.
+JSON.TYPE t 'a + 1'
+JSON.TYPE t '$.a + 1'
+JSON.TYPE str
+JSON.TYPE t .a extra
+
+# ---- JSON.NUMINCRBY / NUMMULTBY / NUMPOWBY ----
+JSON.SET num $ '{"a":1,"b":2.5,"c":"x","d":[1,2.5],"e":9223372036854775807,"f":18446744073709551615}'
+JSON.NUMINCRBY num $.a 2
+JSON.NUMINCRBY num .a 2
+JSON.NUMINCRBY num $.b 0.25
+JSON.NUMINCRBY num .b 1
+JSON.NUMINCRBY num $.a 1.5
+JSON.NUMINCRBY num $.c 1
+JSON.NUMINCRBY num .c 1
+JSON.NUMINCRBY num $.* 1
+JSON.NUMINCRBY num $.d[*] 1
+JSON.NUMINCRBY num .d 1
+JSON.NUMINCRBY num $.e 1
+JSON.NUMINCRBY num .e 1.0
+JSON.NUMINCRBY num $.f 1
+JSON.NUMMULTBY num $.a 3
+JSON.NUMMULTBY num $.a 1e300
+JSON.NUMMULTBY num $.a 1e300
+JSON.NUMMULTBY num .a 2
+JSON.NUMPOWBY num $.d[0] 3
+JSON.NUMPOWBY num $.d[0] -1
+JSON.NUMPOWBY num $.d[0] 0.5
+JSON.NUMPOWBY num $.d[0] 100
+JSON.GET num
+JSON.NUMINCRBY num $.a x
+JSON.NUMINCRBY num $.a '"1"'
+JSON.NUMINCRBY num $.a '[1]'
+JSON.NUMINCRBY num $.c x
+JSON.NUMINCRBY num $.nosuch x
+JSON.NUMINCRBY num .nosuch 1
+JSON.NUMINCRBY num $. 1
+JSON.NUMINCRBY num '$.a + 1' 1
+JSON.NUMINCRBY nosuch $.a 1
+JSON.NUMINCRBY nosuch .a 1
+JSON.NUMINCRBY str $.a 1
+JSON.NUMINCRBY num $.a 1e400
+JSON.NUMINCRBY num $.a
+JSON.NUMINCRBY num $.a 1 2
+JSON.SET num $ 0.1
+JSON.NUMINCRBY num $ 0.2
+JSON.NUMINCRBY num . 0.2
+JSON.SET num $ 10
+JSON.NUMMULTBY num $ 0.5
+JSON.NUMMULTBY num $ 2
+JSON.GET num
+JSON.NUMPOWBY num $ 2
+JSON.SET num $ 2
+JSON.NUMPOWBY num . 0.5
+
+# ---- JSON.TOGGLE ----
+JSON.SET tg $ '{"a":true,"b":false,"c":1,"d":[true,false]}'
+JSON.TOGGLE tg $.a
+JSON.TOGGLE tg .a
+JSON.TOGGLE tg $.*
+JSON.TOGGLE tg $.d[*]
+JSON.TOGGLE tg .c
+JSON.TOGGLE tg .nosuch
+JSON.TOGGLE tg $.nosuch
+JSON.TOGGLE nosuch $
+JSON.TOGGLE tg
+JSON.TOGGLE tg $.
+JSON.GET tg
+
+# ---- JSON.STRAPPEND / JSON.STRLEN ----
+JSON.SET st $ '{"a":"foo","b":{"a":"bar"},"c":1}'
+JSON.STRAPPEND st $.a '"baz"'
+JSON.STRAPPEND st .a '"!"'
+JSON.STRAPPEND st $..a '"x"'
+JSON.STRAPPEND st $.* '"y"'
+JSON.STRAPPEND st .c '"y"'
+JSON.STRAPPEND st $.a baz
+JSON.STRAPPEND st $.a 1
+JSON.STRAPPEND st $.c baz
+JSON.STRAPPEND st $.nosuch '"x"'
+JSON.STRAPPEND st .nosuch '"x"'
+JSON.STRAPPEND st '"top"'
+JSON.STRAPPEND nosuch $ '"x"'
+JSON.STRAPPEND st $.a '"é"'
+JSON.GET st
+JSON.STRLEN st $.a
+JSON.STRLEN st .a
+JSON.STRLEN st $..a
+JSON.STRLEN st $.*
+JSON.STRLEN st .c
+JSON.STRLEN st .nosuch
+JSON.STRLEN st $.nosuch
+JSON.STRLEN st
+JSON.STRLEN nosuch
+JSON.STRLEN nosuch $
+JSON.STRLEN st $.
+JSON.SET st $ '"abc"'
+JSON.STRAPPEND st '"def"'
+JSON.STRLEN st
+JSON.STRAPPEND st $ '"def"' extra
+
+# ---- arrays ----
+JSON.SET a $ '{"x":[1,2,3],"y":{"x":[4]},"z":"s"}'
+JSON.ARRAPPEND a $.x 4 5
+JSON.ARRAPPEND a .x 6
+JSON.ARRAPPEND a $..x 7
+JSON.ARRAPPEND a $.* 8
+JSON.ARRAPPEND a .z 1
+JSON.ARRAPPEND a $.nosuch 1
+JSON.ARRAPPEND a .nosuch 1
+JSON.ARRAPPEND a $.x
+JSON.ARRAPPEND a $.x x
+JSON.ARRAPPEND a $.x '{"k":[1,{"m":null}]}'
+JSON.ARRAPPEND nosuch $ 1
+JSON.ARRAPPEND nosuch $ x
+JSON.GET a
+JSON.ARRINDEX a $.x 4
+JSON.ARRINDEX a .x 4
+JSON.ARRINDEX a $..x 7
+JSON.ARRINDEX a $.* 8
+JSON.ARRINDEX a $.x 4 4
+JSON.ARRINDEX a $.x 4 0 3
+JSON.ARRINDEX a $.x 4 -5
+JSON.ARRINDEX a $.x 4 1 -1
+JSON.ARRINDEX a $.x 1 0 0
+JSON.ARRINDEX a $.x 1 5 2
+JSON.ARRINDEX a $.x '{"k":[1,{"m":null}]}'
+JSON.ARRINDEX a $.x 4.0
+JSON.ARRINDEX a .z 1
+JSON.ARRINDEX a .nosuch 1
+JSON.ARRINDEX a $.nosuch 1
+JSON.ARRINDEX a $.x x
+JSON.ARRINDEX a $.x 1 x
+JSON.ARRINDEX a $.x 1 0 x
+JSON.ARRINDEX a $.x 1 0 0 extra
+JSON.ARRINDEX nosuch $ 1
+JSON.ARRINDEX str $ 1
+JSON.ARRINSERT a $.x 0 '"first"'
+JSON.ARRINSERT a .x -1 '"before last"'
+JSON.ARRINSERT a $.x 100 1
+JSON.ARRINSERT a $.x -100 1
+JSON.ARRINSERT a $..x 1 '"in"'
+JSON.ARRINSERT a $.* 0 0
+JSON.ARRINSERT a .z 0 0
+JSON.ARRINSERT a $.x x 1
+JSON.ARRINSERT a $.x 0
+JSON.ARRINSERT a $.x 0 x
+JSON.GET a
+JSON.ARRLEN a $.x
+JSON.ARRLEN a .x
+JSON.ARRLEN a $..x
+JSON.ARRLEN a $.*
+JSON.ARRLEN a .z
+JSON.ARRLEN a .nosuch
+JSON.ARRLEN a $.nosuch
+JSON.ARRLEN a
+JSON.ARRLEN nosuch
+JSON.ARRLEN nosuch $
+JSON.ARRPOP a $.x
+JSON.ARRPOP a .x
+JSON.ARRPOP a $.x 0
+JSON.ARRPOP a $.x -2
+JSON.ARRPOP a $.x 100
+JSON.ARRPOP a $.x abc
+JSON.ARRPOP a $..x
+JSON.ARRPOP a $.*
+JSON.ARRPOP a .z
+JSON.ARRPOP a $.nosuch
+JSON.ARRPOP a .nosuch
+JSON.ARRPOP a
+JSON.ARRPOP nosuch
+JSON.ARRPOP a FORMAT
+JSON.ARRPOP a FORMAT STRINGS $.x
+JSON.ARRPOP a FORMAT EXPAND $.x
+JSON.ARRPOP a FORMAT STRING $.x
+JSON.ARRPOP a FORMAT bogus $.x
+JSON.GET a
+JSON.SET a $ '{"x":[[1,2,3],[4,5,6]]}'
+JSON.ARRPOP a $..* -1
+JSON.GET a
+JSON.SET a $ '{"x":[]}'
+JSON.ARRPOP a $.x
+JSON.ARRPOP a .x
+JSON.SET a $ '{"x":[0,1,2,3,4,5,6]}'
+JSON.ARRTRIM a $.x 1 3
+JSON.GET a
+JSON.ARRTRIM a .x -2 -1
+JSON.GET a
+JSON.ARRTRIM a $.x 5 10
+JSON.GET a
+JSON.SET a $ '{"x":[0,1,2,3,4,5,6],"y":{"x":[1,2]}}'
+JSON.ARRTRIM a $..x 0 0
+JSON.ARRTRIM a $.* 1 -1
+JSON.GET a
+JSON.SET a $ '{"x":[0,1,2,3,4,5,6]}'
+JSON.ARRTRIM a $.x -100 100
+JSON.ARRTRIM a $.x 3 1
+JSON.GET a
+JSON.SET a $ '{"x":[0,1,2,3]}'
+JSON.ARRTRIM a $.x 10 2
+JSON.GET a
+JSON.ARRTRIM a .y 0 1
+JSON.ARRTRIM a $.y 0 1
+JSON.ARRTRIM a $.x 0
+JSON.ARRTRIM a $.x x 1
+JSON.ARRTRIM nosuch $ 0 1
+JSON.SET a $ '[[1,2],[3,4],[5,6]]'
+JSON.ARRINSERT a $[*] 1 9
+JSON.ARRINSERT a $.. 0 0
+JSON.GET a
+JSON.SET a $ '[1]'
+JSON.ARRINSERT a $ 1 '{127*[}{127*]}'
+JSON.ARRAPPEND a $ '{127*[}{127*]}'
+JSON.ARRAPPEND a $ '{126*[}{126*]}'
+JSON.ARRLEN a
+
+# ---- objects ----
+JSON.SET o $ '{"a":{"x":1,"y":2},"b":{"x":{"z":1}},"c":1}'
+JSON.OBJKEYS o
+JSON.OBJKEYS o $
+JSON.OBJKEYS o $.a
+JSON.OBJKEYS o .a
+JSON.OBJKEYS o $..x
+JSON.OBJKEYS o $.*
+JSON.OBJKEYS o .c
+JSON.OBJKEYS o .nosuch
+JSON.OBJKEYS o $.nosuch
+JSON.OBJKEYS nosuch
+JSON.OBJKEYS nosuch $
+JSON.OBJKEYS o 'a + 1'
+JSON.OBJKEYS o $.
+JSON.OBJLEN o
+JSON.OBJLEN o $
+JSON.OBJLEN o .a
+JSON.OBJLEN o $.*
+JSON.OBJLEN o .c
+JSON.OBJLEN o .nosuch
+JSON.OBJLEN o $.nosuch
+JSON.OBJLEN nosuch
+JSON.OBJLEN nosuch $
+JSON.OBJLEN o 'a + 1'
+JSON.OBJLEN o $.
+JSON.OBJLEN o .
+JSON.OBJLEN str
+
+# ---- JSON.CLEAR ----
+JSON.SET cl $ '{"a":[1,2],"b":{"c":1},"d":5,"e":0,"f":"s","g":2.5,"h":[],"i":true}'
+JSON.CLEAR cl $.*
+JSON.GET cl
+JSON.SET cl $ '{"a":[1,2],"b":{"c":1}}'
+JSON.CLEAR cl
+JSON.GET cl
+JSON.CLEAR cl
+JSON.SET cl $ '{"a":{"b":{"c":[1,2]}}}'
+JSON.CLEAR cl $..*
+JSON.GET cl
+JSON.SET cl $ '{"a":[1,2]}'
+JSON.CLEAR cl .a
+JSON.GET cl
+JSON.CLEAR cl $.nosuch
+JSON.CLEAR cl $.
+JSON.CLEAR nosuch
+JSON.CLEAR cl $ extra
+JSON.CLEAR
+
+# ---- JSON.RESP ----
+JSON.SET r $ '{"a":[1,2.5,"s",true,false,null,{"b":1}],"c":1.5,"d":18446744073709551615}'
+JSON.RESP r
+JSON.RESP r $
+JSON.RESP r .a
+JSON.RESP r $.a[*]
+JSON.RESP r .c
+JSON.RESP r .d
+JSON.RESP r .nosuch
+JSON.RESP r $.nosuch
+JSON.RESP r $.
+JSON.RESP r '$.c + 1'
+JSON.RESP r 'c + 1'
+JSON.RESP nosuch
+JSON.RESP str
+JSON.RESP r $ extra
+
+# ---- projections ----
+JSON.SET p $ '{"a":[3,1,2],"b":{"x":1,"y":2},"c":"str","n":5}'
+JSON.GET p '$.a.length()'
+JSON.GET p '$.a.min()'
+JSON.GET p '$.a.max()'
+JSON.GET p '$.a.sum()'
+JSON.GET p '$.a.avg()'
+JSON.GET p '$.n + 1'
+JSON.GET p '$.n * 2 - 3'
+JSON.GET p '$.n / 2'
+JSON.GET p '$.n % 2'
+JSON.GET p '$.n / 0'
+JSON.GET p 'n + 1'
+JSON.GET p '$.b~'
+JSON.GET p '$.b.keys()'
+JSON.GET p '$.c.length()'
+JSON.GET p 'length($.a)'
+!json JSON.GET p '$.n + 1' $.a
+JSON.GET p $.a[?@>1]
+JSON.GET p '$.a[?(@>1 && @<3)]'
+JSON.GET p '$.a[?(@==1 || @==3)]'
+JSON.GET p '$.*[?(@ in [1,2])]'
+JSON.GET p '$.c[?(@ =~ "^s")]'
+JSON.GET p '$[?(@.x==1)]'
+JSON.GET p '$..[?(@>1)]'
+JSON.GET p '$.a[?(!(@>1))]'
+
+# ---- wrong types ----
+LPUSH lst a
+JSON.GET lst
+JSON.SET lst $ 1
+JSON.MERGE lst $ 1
+JSON.DEL lst
+JSON.ARRAPPEND lst $ 1
+JSON.STRLEN lst
+JSON.OBJLEN lst
+JSON.OBJKEYS lst
+JSON.ARRLEN lst
+JSON.DEBUG MEMORY lst
+JSON.MGET lst $
+GET doc
+LPUSH doc x
+INCR doc
+
+# ---- generic commands on JSON keys ----
+JSON.SET g $ '{"a":[1,2,3],"b":"text","c":{"d":1.5}}'
+TYPE g
+OBJECT ENCODING g
+!sort SCAN 0 TYPE ReJSON-RL COUNT 1000
+!sort SCAN 0 TYPE rejson-rl COUNT 1000
+DUMP g
+COPY g g3
+JSON.GET g3
+RENAME g3 g4
+JSON.GET g4
+JSON.SET g $.b '"changed"'
+JSON.GET g4
+EXPIRE g 100
+JSON.SET g $ '{"new":1}'
+TTL g
+JSON.SET g $.x 1
+TTL g
+JSON.MERGE g $ '{"y":2}'
+TTL g
+JSON.DEL g
+TTL g
+JSON.SET ft $ '[1.5,2.5]' FPHA FP32
+DUMP ft
+JSON.SET ft $ '[1,-2,300,70000]'
+DUMP ft
+JSON.SET ft $ '{"s":"a longer string value here","n":null,"t":true,"f":false,"i":-5,"u":18446744073709551615,"d":0.1}'
+DUMP ft
+JSON.SET ft $ '[1.5,2.5]' FPHA FP16
+DUMP ft
+JSON.SET ft $ '[1.5,2.5]' FPHA BF16
+DUMP ft
+JSON.SET ft $ '[1.5,2.5]' FPHA FP64
+DUMP ft
+
+# ---- RESP3 ----
+@resp 3
+JSON.GET doc
+JSON.GET doc $
+JSON.GET doc $ FORMAT STRING
+JSON.GET doc FORMAT STRING $
+JSON.GET doc FORMAT EXPAND1 $
+JSON.GET doc FORMAT EXPAND1 $.a $.b $.c $.h $.g
+!sort JSON.GET doc FORMAT EXPAND $
+JSON.GET doc FORMAT EXPAND $.b $.c.f $.nosuch
+JSON.GET doc FORMAT EXPAND .a
+JSON.GET doc FORMAT EXPAND1 '$.a + 1' '$.b.length()'
+JSON.GET doc FORMAT EXPAND $.
+JSON.GET doc FORMAT STRINGS $
+JSON.GET doc FORMAT bogus $
+!sort JSON.GET doc FORMAT EXPAND
+JSON.TYPE doc
+JSON.TYPE doc $.a
+JSON.TYPE doc $..*
+JSON.TYPE nosuch
+JSON.SET num3 $ '{"a":1,"b":2.5,"c":"x"}'
+JSON.NUMINCRBY num3 $.* 1
+JSON.NUMINCRBY num3 .a 1
+JSON.NUMMULTBY num3 .b 2
+JSON.NUMINCRBY num3 $.a 0.5
+JSON.SET pop3 $ '{"a":[1,{"b":2},"s",1.5,true,null,[1]]}'
+JSON.ARRPOP pop3 FORMAT EXPAND $.a
+JSON.ARRPOP pop3 FORMAT EXPAND1 $.a
+JSON.ARRPOP pop3 FORMAT EXPAND $.a 0
+JSON.ARRPOP pop3 FORMAT EXPAND1 $.a 0
+JSON.ARRPOP pop3 FORMAT STRINGS $.a 0
+JSON.ARRPOP pop3 FORMAT EXPAND .a
+JSON.ARRPOP pop3 FORMAT EXPAND
+JSON.ARRPOP pop3 $.a
+JSON.ARRPOP pop3
+JSON.ARRPOP pop3 FORMAT STRINGS
+JSON.GET pop3
+JSON.RESP doc
+JSON.DEBUG DEFRAG_INFO
+JSON.MGET doc nosuch $.a
+@resp 2
+JSON.GET doc $.a FORMAT EXPAND
+JSON.GET doc FORMAT EXPAND $.a
+
+# ---- arguments that aren't UTF-8 ----
+JSON.SET u8 $ '{"a":1}'
+JSON.GET u8 "\xff"
+JSON.GET u8 "\xff" $.a
+JSON.GET u8 $.a "\xff" $.b
+JSON.SET u8 "\xff" 1
+JSON.SET u8 $ "\xff"
+JSON.SET u8 $ 1 "\xff"
+JSON.TYPE u8 "\xff"
+JSON.DEL u8 "\xff"
+JSON.STRAPPEND u8 $ "\xff"
+JSON.ARRAPPEND u8 $ "\xff"
+JSON.ARRPOP u8 "\xff"
+JSON.MGET u8 "\xff"
+JSON.RESP u8 "\xff"
+JSON.DEBUG "\xff"
+
+# ---- keyspace events ----
+CONFIG SET notify-keyspace-events KEA
+@conn 2
+!send PSUBSCRIBE __key*__:*
+@recv
+@conn 1
+JSON.SET ev $ '{"a":1,"b":[1],"c":"s","d":true}'
+JSON.SET ev $.a 2
+JSON.MERGE ev $ '{"e":1}'
+JSON.MSET ev $.a 3 ev2 $ 1
+JSON.NUMINCRBY ev $.a 1
+JSON.NUMMULTBY ev $.a 1
+JSON.NUMPOWBY ev $.a 1
+JSON.TOGGLE ev $.d
+JSON.STRAPPEND ev $.c '"x"'
+JSON.ARRAPPEND ev $.b 2
+JSON.ARRINSERT ev $.b 0 0
+JSON.ARRPOP ev $.b
+JSON.ARRTRIM ev $.b 0 0
+JSON.CLEAR ev $.b
+JSON.DEL ev $.e
+JSON.SET ev $.zz.y 1
+JSON.ARRPOP ev $.b
+JSON.DEL ev
+JSON.DEL ev2 $
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+PUNSUBSCRIBE
+@conn 1
+CONFIG SET notify-keyspace-events ""
+
+# ---- dirty (one change per replicated command) ----
+SAVE
+JSON.SET dy $ '{"a":[1,2],"b":1}'
+!info rdb_changes_since_last_save INFO persistence
+JSON.SET dy $.a[5] 1
+!info rdb_changes_since_last_save INFO persistence
+JSON.SET dy $.nosuch.x 1
+!info rdb_changes_since_last_save INFO persistence
+JSON.SET dy $ 1 NX
+!info rdb_changes_since_last_save INFO persistence
+JSON.NUMINCRBY dy $.* 1
+!info rdb_changes_since_last_save INFO persistence
+JSON.ARRPOP dy $.b
+!info rdb_changes_since_last_save INFO persistence
+JSON.MSET dy $.nosuch 1 dy $.zz 2
+!info rdb_changes_since_last_save INFO persistence
+JSON.MSET dy $.q.r 1
+!info rdb_changes_since_last_save INFO persistence
+JSON.DEL dy $.nosuch
+!info rdb_changes_since_last_save INFO persistence
+JSON.CLEAR dy $.b
+!info rdb_changes_since_last_save INFO persistence
+JSON.SET dy $.b x
+!info rdb_changes_since_last_save INFO persistence
+JSON.DEL dy
+!info rdb_changes_since_last_save INFO persistence
+
+# ---- WATCH: opening a key for writing touches it ----
+JSON.SET w $ '{"a":1}'
+WATCH w
+@conn 2
+JSON.DEL w $.nosuch
+@conn 1
+MULTI
+JSON.GET w
+EXEC
+WATCH nosuchw
+@conn 2
+JSON.DEL nosuchw
+@conn 1
+MULTI
+PING
+EXEC
+
+# ---- scripts and transactions ----
+EVAL "return redis.call('JSON.SET', KEYS[1], '$', ARGV[1])" 1 sk '{"a":[1,2]}'
+EVAL "return redis.call('JSON.GET', KEYS[1], '$.a')" 1 sk
+EVAL "return redis.call('JSON.ARRLEN', KEYS[1], '$.a')" 1 sk
+EVAL "return redis.pcall('JSON.SET', KEYS[1], '$.a.b.c', '1')" 1 sk
+MULTI
+JSON.SET tx $ 1
+JSON.NUMINCRBY tx $ 1
+JSON.GET tx
+EXEC
+
+# ---- command metadata ----
+COMMAND INFO json.get json.set json.mset json.debug json.mget
+COMMAND GETKEYS JSON.DEBUG MEMORY k
+COMMAND GETKEYS JSON.DEBUG HELP
+COMMAND GETKEYS JSON.MSET a $ 1 b $ 2
+!sort ACL CAT json
+!sort COMMAND LIST FILTERBY PATTERN json.*
+COMMAND DOCS json.get
+COMMAND DOCS json.arrpop
+
+FLUSHALL

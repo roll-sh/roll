@@ -1,0 +1,190 @@
+# Auto-complete dictionaries: FT.SUGADD, FT.SUGGET, FT.SUGDEL and FT.SUGLEN over RediSearch's
+# trietype0 keys (scores, INCR, payloads, fuzzy prefixes, limits), and the key type itself
+# (TYPE, DUMP/RESTORE, MEMORY USAGE, COPY, digests, events, propagation).
+
+FLUSHALL
+CONFIG RESETSTAT
+
+# ---- errors ----
+FT.SUGADD
+FT.SUGADD s
+FT.SUGADD s a
+FT.SUGADD s a 1 INCR PAYLOAD p x
+FT.SUGADD s a 1 BOGUS
+FT.SUGADD s a 1 PAYLOAD
+FT.SUGADD s a nan
+FT.SUGADD s a abc
+FT.SUGADD s a ""
+EXISTS s
+TYPE s
+FT.SUGLEN s
+FT.SUGLEN
+FT.SUGLEN s x
+FT.SUGDEL s
+FT.SUGDEL s a b
+FT.SUGDEL s a
+FT.SUGGET
+FT.SUGGET s
+FT.SUGGET s a b c d e f g h
+FT.SUGGET s a
+FT.SUGGET s a BOGUS
+FT.SUGGET s a MAX
+FT.SUGGET s a MAX 0
+FT.SUGGET s a MAX -1
+FT.SUGGET s a MAX abc
+FT.SUGGET s a MAX 4294967296
+FT.SUGGET s aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+FT.SUGGET s aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+SET str x
+FT.SUGADD str a 1
+FT.SUGGET str a
+FT.SUGLEN str
+FT.SUGDEL str a
+DEL str
+!info rdb_changes_since_last_save INFO persistence
+
+!info keyspace_hits,keyspace_misses INFO stats
+# ---- adding, scores and INCR ----
+FT.SUGADD s hello 1
+FT.SUGADD s help 2
+FT.SUGADD s helicopter 0.5
+FT.SUGADD s hero 3 PAYLOAD superman
+FT.SUGADD s hello 4
+FT.SUGADD s help 1.5 INCR
+FT.SUGADD s HELLO 1
+FT.SUGADD s world 1 incr payload globe
+FT.SUGADD s empty 1 PAYLOAD ""
+FT.SUGADD s zero 0
+FT.SUGADD s neg -2
+FT.SUGADD s big 1e300
+FT.SUGADD s inf inf
+FT.SUGLEN s
+TYPE s
+OBJECT ENCODING s
+!info rdb_changes_since_last_save INFO persistence
+FT.SUGGET s he
+FT.SUGGET s he WITHSCORES
+FT.SUGGET s he WITHSCORES WITHPAYLOADS MAX 10
+FT.SUGGET s He WITHPAYLOADS
+FT.SUGGET s hel MAX 1 WITHSCORES
+FT.SUGGET s h max 2 max 3
+FT.SUGGET s "" MAX 20 WITHSCORES
+FT.SUGGET s x
+FT.SUGGET s wor WITHSCORES WITHPAYLOADS
+FT.SUGGET s e WITHPAYLOADS
+FT.SUGGET s z WITHSCORES
+FT.SUGGET s n WITHSCORES
+FT.SUGGET s b WITHSCORES
+FT.SUGGET s i WITHSCORES
+
+!info keyspace_hits,keyspace_misses INFO stats
+# ---- FUZZY, TRIM, OPTIMIZE ----
+FT.SUGGET s hwl FUZZY
+FT.SUGGET s hep FUZZY WITHSCORES
+FT.SUGGET s jello FUZZY WITHSCORES
+FT.SUGGET s hi FUZZY WITHSCORES MAX 10
+FT.SUGGET s he FUZZY TRIM WITHSCORES
+FT.SUGGET s he OPTIMIZE WITHSCORES
+FT.SUGGET s he TRIM OPTIMIZE FUZZY WITHSCORES WITHPAYLOADS MAX 3
+
+!info keyspace_hits,keyspace_misses INFO stats
+# ---- unicode and lengths ----
+FT.SUGADD u élan 1
+FT.SUGADD u Éclair 2
+FT.SUGADD u ÉCOLE 1
+FT.SUGADD u straße 1
+FT.SUGADD u 日本語 1
+FT.SUGADD u 😀smile 1
+FT.SUGGET u é WITHSCORES
+FT.SUGGET u É WITHSCORES
+FT.SUGGET u éc FUZZY
+FT.SUGGET u stra
+FT.SUGGET u 日
+FT.SUGGET u 😀
+FT.SUGADD u aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa 1
+FT.SUGADD u bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb 1
+FT.SUGLEN u
+FT.SUGGET u bbbbbbbbbbbbbbbbbbbb
+FT.SUGDEL u bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+FT.SUGLEN u
+
+!info keyspace_hits,keyspace_misses INFO stats
+# ---- deleting ----
+FT.SUGDEL s hello
+FT.SUGDEL s hello
+FT.SUGDEL s HEL
+FT.SUGDEL s nosuch
+FT.SUGGET s he WITHSCORES
+FT.SUGLEN s
+FT.SUGADD d one 1
+FT.SUGDEL d one
+EXISTS d
+FT.SUGDEL d one
+!info rdb_changes_since_last_save INFO persistence
+
+!info keyspace_hits,keyspace_misses INFO stats
+# ---- the key type ----
+MEMORY USAGE s
+MEMORY USAGE u
+COPY s s2
+EXISTS s2
+RENAME s s3
+FT.SUGLEN s3
+EXPIRE s3 100
+TTL s3
+FT.SUGADD s3 extra 1
+TTL s3
+SET plain x EX 100
+FT.SUGADD plain a 1
+!sort SCAN 0 TYPE trietype0
+!sort SCAN 0 TYPE TRIETYPE0
+FT.SUGADD dd x 1 PAYLOAD p
+FT.SUGADD dd xy 2
+FT.SUGADD dd 日本 3 PAYLOAD 語
+# The module saves each payload with one byte past its end (heap garbage, no NUL): those
+# payloads can't be compared byte for byte, a trie without payloads can.
+!type DUMP dd
+FT.SUGADD np b 1
+FT.SUGADD np ba 2.5
+FT.SUGADD np 日本 3
+DUMP np
+EVAL "local d = redis.call('DUMP', KEYS[1]); return redis.call('RESTORE', KEYS[2], 0, d)" 2 dd dd2
+FT.SUGGET dd2 x WITHSCORES WITHPAYLOADS
+FT.SUGGET dd2 日 WITHPAYLOADS
+!type DUMP dd2
+MEMORY USAGE dd2
+EVAL "local d = redis.call('DUMP', KEYS[1]); return redis.call('RESTORE', KEYS[1], 0, d, 'REPLACE')" 1 dd2
+@resp 3
+FT.SUGGET dd x WITHSCORES WITHPAYLOADS
+FT.SUGGET dd x WITHSCORES
+@resp 2
+
+!info keyspace_hits,keyspace_misses INFO stats
+# ---- events ----
+CONFIG SET notify-keyspace-events KEAn
+@conn 2
+PSUBSCRIBE __key*@0__:*
+@conn 1
+FT.SUGADD ev a 1
+FT.SUGADD ev b 1
+FT.SUGDEL ev a
+FT.SUGDEL ev b
+FT.SUGADD ev2 x 1 PAYLOAD p
+DEL ev2
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@recv
+@recv
+PUNSUBSCRIBE
+@conn 1
+CONFIG SET notify-keyspace-events ""
+
+!info keyspace_hits,keyspace_misses INFO stats
+# ---- statistics ----
+FLUSHALL
+!info keyspace_hits,keyspace_misses INFO stats
+!sort !mask usec,usec_per_call !info cmdstat_* INFO commandstats
+!info errorstat* INFO errorstats

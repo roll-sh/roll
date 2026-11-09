@@ -1,0 +1,27 @@
+{"native_thread":"ses_f1484bef1ffeGfSJ1e2FXLCaus"}
+{"model":"opencode/big-pickle"}
+{"item":{"body":{"input":{},"kind":"edit","name":"write","title":"write","type":"tool"},"id":"call-146cafaa-f178-4ab4-8008-a118b7518a98","parent":null,"status":"running"}}
+{"item":{"body":{"files":[{"change":"add","path":"reverted.txt"}],"input":{"content":"ALPHA\n","path":"reverted.txt"},"kind":"edit","name":"write","title":"reverted.txt","type":"tool"},"id":"call-146cafaa-f178-4ab4-8008-a118b7518a98","parent":null,"status":"running"}}
+{"item":{"body":{"files":[{"change":"add","path":"reverted.txt"}],"input":{"content":"ALPHA\n","path":"reverted.txt"},"kind":"edit","name":"write","output":"Created file successfully: reverted.txt","title":"reverted.txt","type":"tool"},"id":"call-146cafaa-f178-4ab4-8008-a118b7518a98","parent":null,"status":"completed"}}
+{"usage":{"cached_tokens":384,"input_tokens":9185,"output_tokens":40}}
+{"context":{"max_tokens":160000,"used_tokens":9225}}
+{"item":{"body":{"text":"","type":"message"},"id":"msg_0eb7b46b2001GnMZuEFelqdw4Z:text:0","parent":null,"status":"running"}}
+{"text_delta":{"item":"msg_0eb7b46b2001GnMZuEFelqdw4Z:text:0","text":"DONE"}}
+{"item":{"body":{"text":"DONE","type":"message"},"id":"msg_0eb7b46b2001GnMZuEFelqdw4Z:text:0","parent":null,"status":"completed"}}
+{"usage":{"cached_tokens":9600,"input_tokens":18431,"output_tokens":44}}
+{"context":{"max_tokens":160000,"used_tokens":9250}}
+{"turn_ref":"msg_roll_turn_#1"}
+{"turn_ended":"completed"}
+{"item":{"body":{"input":{},"kind":"edit","name":"write","title":"write","type":"tool"},"id":"call-4a391b60-0f17-48d3-afa1-b79f4004cae7","parent":null,"status":"running"}}
+{"item":{"body":{"files":[{"change":"add","path":"reverted.txt"}],"input":{"content":"BETA\n","path":"reverted.txt"},"kind":"edit","name":"write","title":"reverted.txt","type":"tool"},"id":"call-4a391b60-0f17-48d3-afa1-b79f4004cae7","parent":null,"status":"running"}}
+{"item":{"body":{"files":[{"change":"add","path":"reverted.txt"}],"input":{"content":"BETA\n","path":"reverted.txt"},"kind":"edit","name":"write","output":"Wrote file successfully: reverted.txt","title":"reverted.txt","type":"tool"},"id":"call-4a391b60-0f17-48d3-afa1-b79f4004cae7","parent":null,"status":"completed"}}
+{"usage":{"cached_tokens":9216,"input_tokens":9279,"output_tokens":39}}
+{"context":{"max_tokens":160000,"used_tokens":9318}}
+{"item":{"body":{"text":"","type":"message"},"id":"msg_0eb7b4fc1001jd3wUmiUPduL54:text:0","parent":null,"status":"running"}}
+{"text_delta":{"item":"msg_0eb7b4fc1001jd3wUmiUPduL54:text:0","text":"DONE"}}
+{"item":{"body":{"text":"DONE","type":"message"},"id":"msg_0eb7b4fc1001jd3wUmiUPduL54:text:0","parent":null,"status":"completed"}}
+{"usage":{"cached_tokens":18432,"input_tokens":18619,"output_tokens":43}}
+{"context":{"max_tokens":160000,"used_tokens":9344}}
+{"turn_ref":"msg_roll_turn_#2"}
+{"turn_ended":"completed"}
+{"exited":null}

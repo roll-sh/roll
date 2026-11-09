@@ -1,0 +1,264 @@
+# FT.HYBRID like Redis 8's bundled RediSearch 8.10.1: a SEARCH and a VSIM subquery merged by
+# document key with RRF or LINEAR scores, the LOAD/GROUPBY/APPLY/SORTBY/FILTER/LIMIT tail,
+# YIELD_SCORE_AS, EXPLAINSCORE, RESP2/RESP3 replies, warnings, errors and FT.PROFILE HYBRID.
+FLUSHALL
+FT.CREATE hy ON HASH PREFIX 1 d: SCHEMA t TEXT n NUMERIC SORTABLE g TAG v VECTOR FLAT 6 TYPE FLOAT32 DIM 2 DISTANCE_METRIC L2
+HSET d:1 t "hello world" n 1 g a v "\x00\x00\x00\x00\x00\x00\x00\x00"
+HSET d:2 t "hello there" n 2 g b v "\x00\x00\x80\x3f\x00\x00\x00\x00"
+HSET d:3 t "goodbye world" n 3 g a v "\x00\x00\x00\x00\x00\x00\x80\x3f"
+HSET d:4 t "hello hello" n 4 g b v "\x00\x00\x80\x3f\x00\x00\x80\x3f"
+HSET d:5 t "nothing" n 5 g c v "\x00\x00\x00\x40\x00\x00\x00\x40"
+# Argument errors, in the module's parse order.
+FT.HYBRID
+FT.HYBRID hy
+FT.HYBRID nope 2 SEARCH x VSIM @v $B
+!mask execution_time FT.HYBRID hy 3 SEARCH x VSIM @v $B
+!mask execution_time FT.HYBRID hy 2 FOO
+!mask execution_time FT.HYBRID hy 0 SEARCH x
+!mask execution_time FT.HYBRID hy foo
+!mask execution_time FT.HYBRID hy 2 SEARCH
+!mask execution_time FT.HYBRID hy 2 SEARCH hello
+!mask execution_time FT.HYBRID hy 2 SEARCH hello DIALECT 2 VSIM @v $B
+!mask execution_time FT.HYBRID hy 2 SEARCH hello FOO VSIM @v $B
+!mask execution_time FT.HYBRID hy 2 SEARCH hello SCORER VSIM @v $B
+!mask execution_time FT.HYBRID hy 2 SEARCH hello SCORER
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM v $B
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v B
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 C x
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @nope $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00"
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @t $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00"
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B abc
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B KNN
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B KNN x
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B KNN 3
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B KNN 0
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B KNN 2
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B KNN 4 K 1
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B KNN 2 K
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B KNN 2 K 0
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B KNN 2 K x
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B KNN 4 K 1 K 2
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B KNN 2 EF_RUNTIME 4
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B KNN 4 K 2 EF_RUNTIME 0
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B KNN 6 K 2 EF_RUNTIME 4 EF_RUNTIME 5
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B KNN 4 K 2 EF_RUNTIME 4 PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00"
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B KNN 4 K 2 SHARD_K_RATIO 2 PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00"
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B KNN 4 K 2 SHARD_K_RATIO x PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00"
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B KNN 4 K 2 SHARD_K_RATIO 0.5 PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00"
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B KNN 4 K 2 FOO 1
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B KNN 2 SHARD_K_RATIO
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B RANGE 2 RADIUS -1
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B RANGE 2 EPSILON 1
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B RANGE 4 RADIUS 1 EPSILON 0
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B RANGE 4 RADIUS 1 RADIUS 2
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B RANGE 2 FOO 1
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B RANGE 2 RADIUS
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B FILTER
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B FILTER 3 @g:{a}
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B FILTER 3 @g:{a} POLICY FOO
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B FILTER 3 @g:{a} FOO 1
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B FILTER 0
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B YIELD_SCORE_AS
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B YIELD_SCORE_AS a YIELD_SCORE_AS b
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B DIALECT 2
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" DIALECT 2
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" FOO
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" LIMIT 0
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" LIMIT x 1
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" LIMIT 0 x
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" LIMIT 1 0
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" LIMIT 0 2000000
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" LIMIT 0 1 LIMIT 0 2
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" SORTBY 1 @n NOSORT
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" NOSORT SORTBY 1 @n
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" SORTBY 1 n
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" SORTBY 0
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" SORTBY 2 @n
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" PARAMS 2 C x
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 3 B "\x00\x00\x00\x00\x00\x00\x00\x00" C
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 0
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" TIMEOUT x
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" TIMEOUT -1
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" FORMAT FOO
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" FORMAT EXPAND
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" WITHSCORES
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" EXPLAINSCORE GROUPBY 1 @g
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" COMBINE
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" COMBINE FOO
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" COMBINE RRF
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" COMBINE RRF x
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" COMBINE RRF 1
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" COMBINE RRF 4 CONSTANT 1
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" COMBINE RRF 2 WINDOW 0
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" COMBINE RRF 2 FOO 1
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" COMBINE RRF 2 CONSTANT x
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" COMBINE RRF 4 CONSTANT 1 CONSTANT 2
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" COMBINE LINEAR 2 ALPHA 1
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" COMBINE LINEAR 2 BETA 1
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" COMBINE LINEAR 2 WINDOW -1
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" COMBINE LINEAR 0
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" COMBINE RRF 2 YIELD_SCORE_AS a YIELD_SCORE_AS b
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" COMBINE RRF 0 YIELD_SCORE_AS
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" COMBINE RRF 0 COMBINE RRF 0
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" LOAD
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" LOAD x
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" LOAD 3 @t
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" LOAD 1 t
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" GROUPBY 0
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" GROUPBY 1 g
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" GROUPBY 1 @g REDUCE
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" GROUPBY 1 @g REDUCE FOO 0
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" GROUPBY 1 @g REDUCE SUM 1 n
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" GROUPBY 1 @g REDUCE SUM 1 @n SORTBY 1 @g
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" APPLY
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" APPLY 1+ AS x
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" APPLY 1 AS
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" FILTER
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" FILTER @nope>1
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" FILTER 1 FILTER 2
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" WITHCURSOR COUNT 0
+!mask execution_time FT.HYBRID hy 2 SEARCH "@v:[VECTOR_RANGE 1 $B]" VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00"
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B FILTER "@v:[VECTOR_RANGE 1 $B]" PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00"
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B FILTER "@t:hello=>{$weight:2}" PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00"
+!mask execution_time FT.HYBRID hy 2 SEARCH "hello=>{$weight:2}" VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" LIMIT 0 1
+!mask execution_time FT.HYBRID hy 2 SEARCH hello SCORER FOO VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00"
+!mask execution_time FT.HYBRID hy 2 SEARCH "hello(" VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00"
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B FILTER "@g:{" PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00"
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B YIELD_SCORE_AS t PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00"
+!mask execution_time FT.HYBRID hy 2 SEARCH hello YIELD_SCORE_AS t VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00"
+!mask execution_time FT.HYBRID hy 2 SEARCH hello YIELD_SCORE_AS s VSIM @v $B YIELD_SCORE_AS s PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00"
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" COMBINE RRF 2 YIELD_SCORE_AS __key
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x00\x00\x00\x00\x00" COMBINE RRF 2 YIELD_SCORE_AS t LOAD 1 @t
+# Results.
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x3f\x00\x00\x00\x00"
+!mask execution_time FT.HYBRID hy SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x3f\x00\x00\x00\x00"
+!mask execution_time FT.HYBRID hy 2 SEARCH world VSIM @v $B KNN 2 K 2 PARAMS 2 B "\x00\x00\x00\x3f\x00\x00\x00\x00"
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x3f\x00\x00\x00\x00" LOAD 2 @t @n
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x3f\x00\x00\x00\x00" LOAD *
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x3f\x00\x00\x00\x00" LOAD 1 @n SORTBY 1 @n
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x3f\x00\x00\x00\x00" LOAD 1 @n SORTBY 2 @n DESC
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x3f\x00\x00\x00\x00" LIMIT 0 2
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x3f\x00\x00\x00\x00" LIMIT 1 2
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x3f\x00\x00\x00\x00" LIMIT 0 0
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x3f\x00\x00\x00\x00" NOSORT
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x3f\x00\x00\x00\x00" COMBINE RRF 2 CONSTANT 1
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x3f\x00\x00\x00\x00" COMBINE RRF 4 CONSTANT 10 WINDOW 2
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x3f\x00\x00\x00\x00" COMBINE RRF 2 YIELD_SCORE_AS s
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x3f\x00\x00\x00\x00" COMBINE RRF 0 YIELD_SCORE_AS s
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x3f\x00\x00\x00\x00" COMBINE LINEAR 0
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x3f\x00\x00\x00\x00" COMBINE LINEAR 4 ALPHA 0.6 BETA 0.4
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x3f\x00\x00\x00\x00" COMBINE LINEAR 6 ALPHA 1 BETA 1 WINDOW 3 YIELD_SCORE_AS s
+!mask execution_time FT.HYBRID hy 2 SEARCH hello YIELD_SCORE_AS ts VSIM @v $B YIELD_SCORE_AS vs PARAMS 2 B "\x00\x00\x00\x3f\x00\x00\x00\x00"
+!mask execution_time FT.HYBRID hy 2 SEARCH hello YIELD_SCORE_AS ts VSIM @v $B YIELD_SCORE_AS vs PARAMS 2 B "\x00\x00\x00\x3f\x00\x00\x00\x00" COMBINE LINEAR 4 ALPHA 0.5 BETA 0.5 YIELD_SCORE_AS s
+!mask execution_time FT.HYBRID hy 2 SEARCH hello SCORER TFIDF YIELD_SCORE_AS ts VSIM @v $B PARAMS 2 B "\x00\x00\x00\x3f\x00\x00\x00\x00" COMBINE LINEAR 0
+!mask execution_time FT.HYBRID hy 2 SEARCH hello SCORER BM25 VSIM @v $B PARAMS 2 B "\x00\x00\x00\x3f\x00\x00\x00\x00" COMBINE LINEAR 0 LOAD 1 @__score
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B RANGE 2 RADIUS 1 PARAMS 2 B "\x00\x00\x00\x3f\x00\x00\x00\x00"
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B RANGE 4 RADIUS 1 EPSILON 0.5 PARAMS 2 B "\x00\x00\x00\x3f\x00\x00\x00\x00"
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B RANGE 2 RADIUS 5 FILTER @g:{b} PARAMS 2 B "\x00\x00\x00\x3f\x00\x00\x00\x00"
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B FILTER @g:{a} PARAMS 2 B "\x00\x00\x00\x3f\x00\x00\x00\x00"
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B FILTER 1 @g:{a|c} PARAMS 2 B "\x00\x00\x00\x3f\x00\x00\x00\x00"
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B FILTER 3 @g:{a|c} POLICY ADHOC PARAMS 2 B "\x00\x00\x00\x3f\x00\x00\x00\x00"
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B FILTER 5 @g:{a|c} POLICY BATCHES BATCH_SIZE 2 PARAMS 2 B "\x00\x00\x00\x3f\x00\x00\x00\x00"
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B KNN 4 K 3 EF_RUNTIME 5 PARAMS 2 B "\x00\x00\x00\x3f\x00\x00\x00\x00"
+!mask execution_time FT.HYBRID hy 2 SEARCH nosuchterm VSIM @v $B PARAMS 2 B "\x00\x00\x00\x3f\x00\x00\x00\x00"
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B FILTER @g:{zzz} PARAMS 2 B "\x00\x00\x00\x3f\x00\x00\x00\x00"
+!mask execution_time FT.HYBRID hy 2 SEARCH "@t:hello" VSIM @v $B PARAMS 2 B "\x00\x00\x00\x3f\x00\x00\x00\x00" GROUPBY 1 @g SORTBY 1 @g
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x3f\x00\x00\x00\x00" LOAD 1 @g GROUPBY 1 @g REDUCE COUNT 0 AS c SORTBY 3 @c DESC @g
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x3f\x00\x00\x00\x00" LOAD 2 @g @n GROUPBY 1 @g REDUCE SUM 1 @n SORTBY 1 @g
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x3f\x00\x00\x00\x00" LOAD 1 @n APPLY "@n*2" AS nn SORTBY 1 @nn
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x3f\x00\x00\x00\x00" LOAD 1 @n APPLY "@n*2" SORTBY 1 @n
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x3f\x00\x00\x00\x00" LOAD 1 @n FILTER "@n>2"
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x3f\x00\x00\x00\x00" FILTER "@__score>0.03"
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x3f\x00\x00\x00\x00" APPLY "@nope+1" AS x
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x3f\x00\x00\x00\x00" FORMAT EXPAND LOAD 1 @t
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x3f\x00\x00\x00\x00" TIMEOUT 1000
+!mask execution_time FT.HYBRID hy 2 SEARCH "hel*" VSIM @v $B PARAMS 2 B "\x00\x00\x00\x3f\x00\x00\x00\x00"
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x3f\x00\x00\x00\x00" EXPLAINSCORE
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x3f\x00\x00\x00\x00" EXPLAINSCORE COMBINE LINEAR 4 ALPHA 0.25 BETA 0.75
+!mask execution_time FT.HYBRID hy 2 SEARCH hello SCORER TFIDF VSIM @v $B RANGE 4 RADIUS 1 EPSILON 0.5 PARAMS 2 B "\x00\x00\x00\x3f\x00\x00\x00\x00" EXPLAINSCORE
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B RANGE 2 RADIUS 1 PARAMS 2 B "\x00\x00\x00\x3f\x00\x00\x00\x00" EXPLAINSCORE COMBINE LINEAR 0
+!mask execution_time FT.HYBRID hy 2 SEARCH "@t:(hello|world)" VSIM @v $B FILTER "@n:[2 5]" PARAMS 2 B "\x00\x00\x00\x3f\x00\x00\x00\x00" LOAD 2 @t @g SORTBY 1 @g
+!mask execution_time FT.HYBRID hy 2 SEARCH "*" VSIM @v $B PARAMS 2 B "\x00\x00\x00\x3f\x00\x00\x00\x00" LIMIT 0 3
+@resp 3
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x3f\x00\x00\x00\x00"
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x3f\x00\x00\x00\x00" LOAD 2 @t @n EXPLAINSCORE
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x3f\x00\x00\x00\x00" COMBINE LINEAR 0 YIELD_SCORE_AS s
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x3f\x00\x00\x00\x00" LOAD 1 @g GROUPBY 1 @g REDUCE COUNT 0 AS c SORTBY 1 @g
+CONFIG SET search-workers 0
+# Without workers a TIMEOUT over search-_max-foreground-timeout-limit (or 0) is capped.
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x3f\x00\x00\x00\x00" TIMEOUT 0 LIMIT 0 1
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x3f\x00\x00\x00\x00" TIMEOUT 100000 LIMIT 0 1
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x3f\x00\x00\x00\x00" TIMEOUT 60000 LIMIT 0 1
+!timing !mask execution_time FT.PROFILE hy HYBRID QUERY 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x3f\x00\x00\x00\x00"
+!timing !mask execution_time FT.PROFILE hy HYBRID LIMITED QUERY 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x3f\x00\x00\x00\x00" LOAD 1 @n SORTBY 1 @n
+@resp 2
+!timing !mask execution_time FT.PROFILE hy HYBRID QUERY 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x3f\x00\x00\x00\x00"
+!timing !mask execution_time FT.PROFILE hy HYBRID QUERY 2 SEARCH "hello|world" VSIM @v $B FILTER @g:{a} PARAMS 2 B "\x00\x00\x00\x3f\x00\x00\x00\x00" COMBINE LINEAR 0 LOAD 1 @g GROUPBY 1 @g SORTBY 1 @g
+!timing !mask execution_time FT.PROFILE hy HYBRID QUERY 2 SEARCH hello VSIM @v $B RANGE 2 RADIUS 1 PARAMS 2 B "\x00\x00\x00\x3f\x00\x00\x00\x00" LIMIT 0 1
+FT.PROFILE hy HYBRID FOO 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x3f\x00\x00\x00\x00"
+FT.PROFILE nope HYBRID QUERY 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x3f\x00\x00\x00\x00"
+FT.PROFILE hy HYBRID QUERY 2 SEARCH hello VSIM @v $B
+CONFIG SET search-workers 16
+# More tail and subquery shapes.
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x3f\x00\x00\x00\x00" SORTBY 1 @__score
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x3f\x00\x00\x00\x00" SORTBY 2 @__score ASC
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x3f\x00\x00\x00\x00" LOAD 1 @__key
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x3f\x00\x00\x00\x00" APPLY "@__score*100" AS x
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x3f\x00\x00\x00\x00" LOAD 1 @t APPLY "upper(@t)" AS u SORTBY 1 @u
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B KNN 2 K 50 PARAMS 2 B "\x00\x00\x00\x3f\x00\x00\x00\x00" COMBINE RRF 2 WINDOW 3
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x3f\x00\x00\x00\x00" LIMIT 10 5
+!mask execution_time FT.HYBRID hy 2 SEARCH "@n:[2 3]" VSIM @v $B PARAMS 2 B "\x00\x00\x00\x3f\x00\x00\x00\x00" LOAD 1 @n
+!mask execution_time FT.HYBRID hy 2 SEARCH "@g:{b}" VSIM @v $B FILTER "-@g:{a}" PARAMS 2 B "\x00\x00\x00\x3f\x00\x00\x00\x00" COMBINE LINEAR 0
+!mask execution_time FT.HYBRID hy 2 SEARCH hello SCORER BM25STD.NORM VSIM @v $B PARAMS 2 B "\x00\x00\x00\x3f\x00\x00\x00\x00" COMBINE LINEAR 0
+!mask execution_time FT.HYBRID hy 2 SEARCH hello SCORER DISMAX VSIM @v $B PARAMS 2 B "\x00\x00\x00\x3f\x00\x00\x00\x00" COMBINE LINEAR 0 EXPLAINSCORE
+!mask execution_time FT.HYBRID hy 2 SEARCH hello SCORER DOCSCORE VSIM @v $B PARAMS 2 B "\x00\x00\x00\x3f\x00\x00\x00\x00" COMBINE LINEAR 0
+!mask execution_time FT.HYBRID hy 2 SEARCH "hello world" VSIM @v $B PARAMS 2 B "\x00\x00\x00\x3f\x00\x00\x00\x00" COMBINE LINEAR 4 ALPHA 2 BETA -1 LOAD 1 @t
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x80\x3f\x00\x00\x80\x3f"
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B RANGE 2 RADIUS 0.3 PARAMS 2 B "\x00\x00\x00\x3f\x00\x00\x00\x00"
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B RANGE 2 RADIUS 0 PARAMS 2 B "\x00\x00\x00\x3f\x00\x00\x00\x00"
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B RANGE 2 RADIUS 100 YIELD_SCORE_AS d PARAMS 2 B "\x00\x00\x00\x3f\x00\x00\x00\x00" LOAD 2 @d @n SORTBY 1 @n
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B YIELD_SCORE_AS d PARAMS 2 B "\x00\x00\x00\x3f\x00\x00\x00\x00" FILTER "@d<0.9"
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x00\x3f\x00\x00\x00\x00" LOAD 1 @n FILTER "@n>100"
+!mask total_indexing_time FT.INFO hy
+CONFIG SET search-max-prefix-expansions 1
+!mask execution_time FT.HYBRID hy 2 SEARCH "*o*" VSIM @v $B PARAMS 2 B "\x00\x00\x00\x3f\x00\x00\x00\x00"
+!mask execution_time FT.HYBRID hy 2 SEARCH hello VSIM @v $B FILTER "@t:*o*" PARAMS 2 B "\x00\x00\x00\x3f\x00\x00\x00\x00"
+CONFIG SET search-workers 0
+!timing !mask execution_time FT.PROFILE hy HYBRID QUERY 2 SEARCH "*o*" VSIM @v $B PARAMS 2 B "\x00\x00\x00\x3f\x00\x00\x00\x00" LIMIT 0 1
+CONFIG SET search-workers 16
+CONFIG SET search-max-prefix-expansions 200
+# JSON and the other metrics.
+FT.DROPINDEX hy
+FLUSHALL
+FT.CREATE hj ON JSON PREFIX 1 j: SCHEMA $.t AS t TEXT $.n AS n NUMERIC SORTABLE $.v AS v VECTOR FLAT 6 TYPE FLOAT32 DIM 2 DISTANCE_METRIC COSINE
+FT.CREATE hi ON HASH PREFIX 1 i: SCHEMA t TEXT v VECTOR FLAT 6 TYPE FLOAT32 DIM 2 DISTANCE_METRIC IP
+JSON.SET j:1 $ '{"t":"hello world","n":1,"v":[1,0]}'
+JSON.SET j:2 $ '{"t":"hello there","n":2,"v":[0,1]}'
+JSON.SET j:3 $ '{"t":"goodbye","n":3,"v":[1,1]}'
+JSON.SET j:4 $ '{"t":["hello","again"],"n":4,"v":[-1,0.5]}'
+HSET i:1 t "hello world" v "\x00\x00\x80\x3f\x00\x00\x00\x00"
+HSET i:2 t "hello there" v "\x00\x00\x00\x00\x00\x00\x80\x3f"
+HSET i:3 t "goodbye" v "\x00\x00\x00\x40\x00\x00\x00\x3f"
+!mask execution_time FT.HYBRID hj 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x80\x3f\x00\x00\x80\x3f"
+!mask execution_time FT.HYBRID hj 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x80\x3f\x00\x00\x80\x3f" COMBINE LINEAR 0 EXPLAINSCORE
+!mask execution_time FT.HYBRID hj 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x80\x3f\x00\x00\x80\x3f" LOAD 1 $.t
+!mask execution_time FT.HYBRID hj 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x80\x3f\x00\x00\x80\x3f" LOAD 3 $.t AS tt
+!mask execution_time FT.HYBRID hj 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x80\x3f\x00\x00\x80\x3f" LOAD 2 @t @n SORTBY 2 @n DESC
+!mask execution_time FT.HYBRID hj 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x80\x3f\x00\x00\x80\x3f" LOAD *
+!mask execution_time FT.HYBRID hj 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x80\x3f\x00\x00\x80\x3f" LOAD 1 t
+!mask execution_time FT.HYBRID hj 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x80\x3f\x00\x00\x80\x3f" FORMAT EXPAND LOAD 1 @t
+!mask execution_time FT.HYBRID hj 2 SEARCH hello VSIM @v $B RANGE 2 RADIUS 0.5 PARAMS 2 B "\x00\x00\x80\x3f\x00\x00\x80\x3f"
+!mask execution_time FT.HYBRID hi 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x80\x3f\x00\x00\x80\x3f"
+!mask execution_time FT.HYBRID hi 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x80\x3f\x00\x00\x80\x3f" COMBINE LINEAR 0 YIELD_SCORE_AS s EXPLAINSCORE
+!mask execution_time FT.HYBRID hi 2 SEARCH hello VSIM @v $B YIELD_SCORE_AS d PARAMS 2 B "\x00\x00\x80\x3f\x00\x00\x80\x3f" LOAD 1 @d
+@resp 3
+!mask execution_time FT.HYBRID hj 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x80\x3f\x00\x00\x80\x3f" LOAD 1 @t
+!mask execution_time FT.HYBRID hj 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x80\x3f\x00\x00\x80\x3f" FORMAT EXPAND LOAD 1 @t
+!mask execution_time FT.HYBRID hj 2 SEARCH hello VSIM @v $B PARAMS 2 B "\x00\x00\x80\x3f\x00\x00\x80\x3f" FORMAT EXPAND LOAD *
+@resp 2
+FT.DROPINDEX hj
+FT.DROPINDEX hi
+FLUSHALL

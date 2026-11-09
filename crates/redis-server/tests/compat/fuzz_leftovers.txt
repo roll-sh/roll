@@ -1,0 +1,111 @@
+# Leftovers from the differential fuzzer: SWAPDB/SELECT/MOVE/COPY with indexes past int range,
+# AUTH queued in MULTI and run by EXEC, OBJECT REFCOUNT in a transaction and a script, and
+# conversions when an update meets limits lowered after the value was built.
+FLUSHALL
+SWAPDB 4294967296 1
+SWAPDB 1 4294967296
+SWAPDB -1 1
+SWAPDB 1 99
+SELECT 4294967296
+MOVE k 4294967296
+COPY a b DB 4294967296
+MULTI
+AUTH nosuch
+SET k v
+EXEC
+MULTI
+AUTH default x
+EXEC
+MULTI
+AUTH a b c
+EXEC
+SET k 12345678901
+MULTI
+OBJECT REFCOUNT k
+OBJECT REFCOUNT nosuch
+EXEC
+OBJECT REFCOUNT k
+SET s v
+MULTI
+OBJECT REFCOUNT s
+EXEC
+EVAL "return redis.call('OBJECT','REFCOUNT','s')" 0
+HMSET k1 27 3 c e "x y" v
+CONFIG SET hash-max-listpack-entries 2
+HMSET k1 "x y" 0
+OBJECT ENCODING k1
+CONFIG SET hash-max-listpack-entries 512
+HSET k2 a 1 b 2 c 3
+CONFIG SET hash-max-listpack-entries 2
+HINCRBY k2 a 1
+OBJECT ENCODING k2
+HSET k3 a 1 b 2 c 3
+HSETNX k3 a 9
+OBJECT ENCODING k3
+HSETNX k3 z 9
+OBJECT ENCODING k3
+CONFIG SET hash-max-listpack-entries 512
+CONFIG SET hash-max-listpack-value 3
+HSET k4 a 1
+HSET k4 a 12345
+OBJECT ENCODING k4
+CONFIG SET hash-max-listpack-value 64
+SADD s1 1 2 3 4
+CONFIG SET set-max-intset-entries 2
+SADD s1 1
+OBJECT ENCODING s1
+SADD s1 5
+OBJECT ENCODING s1
+CONFIG SET set-max-intset-entries 512
+SADD s2 a b c
+CONFIG SET set-max-listpack-entries 2
+SADD s2 a
+OBJECT ENCODING s2
+SADD s2 d
+OBJECT ENCODING s2
+CONFIG SET set-max-listpack-entries 128
+ZADD z1 1 a 2 b 3 c
+CONFIG SET zset-max-listpack-entries 2
+ZADD z1 5 a
+OBJECT ENCODING z1
+ZINCRBY z1 1 b
+OBJECT ENCODING z1
+ZADD z1 9 d
+OBJECT ENCODING z1
+CONFIG SET zset-max-listpack-entries 128
+CONFIG SET zset-max-listpack-value 3
+ZADD z2 1 a
+ZADD z2 2 abcdef
+OBJECT ENCODING z2
+CONFIG SET zset-max-listpack-value 64
+RPUSH l1 a b c d e
+CONFIG SET list-max-listpack-size 2
+LSET l1 0 x
+OBJECT ENCODING l1
+LINSERT l1 BEFORE x y
+OBJECT ENCODING l1
+RPUSH l1 z
+OBJECT ENCODING l1
+CONFIG SET list-max-listpack-size -2
+FLUSHALL
+
+# MSETEX with an expiry fires each key's expire event before its set event (event order found
+# by the notification fuzzer).
+FLUSHALL
+CONFIG SET notify-keyspace-events KEA
+@conn 2
+!send PSUBSCRIBE __keyevent@0__:*
+@recv
+@conn 1
+MSETEX 2 mk1 a mk2 b PXAT 4102444800500
+MSETEX 1 mk3 c KEEPTTL
+@conn 2
+@recv
+@recv
+@recv
+@recv
+@recv
+PUNSUBSCRIBE
+@conn 1
+CONFIG SET notify-keyspace-events ""
+FLUSHALL

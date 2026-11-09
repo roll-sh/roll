@@ -1,0 +1,15 @@
+
+Textual input/output
+
+When control characters, or other characters which can't be encoded
+in your current locale, are found in values of 'text' or 'ascii'
+types, it will be shown as a backslash escape. If color is enabled,
+any such backslash escapes will be shown in a different color from
+the surrounding text.
+
+Unicode code points in your data will be output intact, if the
+encoding for your locale is capable of decoding them. If you prefer
+that non-ascii characters be shown with Python-style "\uABCD"
+escape sequences, invoke cqlsh with an ASCII locale (for example,
+by setting the $LANG environment variable to "C").
+

@@ -1,0 +1,37 @@
+[package]
+name = "nosql-proto"
+description = "CQL native protocol v3/v4/v5: frames, v5 segments, compression and every message, with bounded decoding"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+# The async client (`nosql_proto::client`): the CLI and the differential test harness use it.
+client = ["dep:tokio", "dep:futures", "dep:tokio-rustls", "dep:rustls-native-certs"]
+
+[dependencies]
+bytes.workspace = true
+thiserror.workspace = true
+lz4_flex.workspace = true
+snap.workspace = true
+crc32fast.workspace = true
+tokio-util.workspace = true
+tokio = { workspace = true, optional = true }
+futures = { workspace = true, optional = true }
+tokio-rustls = { workspace = true, optional = true }
+rustls-native-certs = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio.workspace = true
+futures.workspace = true
+tokio-rustls.workspace = true
+rcgen.workspace = true
+
+[[test]]
+name = "reference"
+required-features = ["client"]
+
+[[test]]
+name = "loopback"
+required-features = ["client"]

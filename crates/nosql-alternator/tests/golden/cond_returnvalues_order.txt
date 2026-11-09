@@ -1,0 +1,162 @@
+# Setup: hash table with item k (a=1, s='x'); hash+range table with item (a,b)
+> CreateTable {"TableName":"alt_cond_rv_s","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST"}
+< 200 {"TableDescription":{"TableName":"alt_cond_rv_s","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+> CreateTable {"TableName":"alt_cond_rv_ss","KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"AttributeName":"c","KeyType":"RANGE"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"},{"AttributeName":"c","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST"}
+< 200 {"TableDescription":{"TableName":"alt_cond_rv_ss","KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"AttributeName":"c","KeyType":"RANGE"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"},{"AttributeName":"c","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+> PutItem {"TableName":"alt_cond_rv_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"s":{"S":"x"}}}
+< 200 {}
+> PutItem {"TableName":"alt_cond_rv_ss","Item":{"p":{"S":"a"},"c":{"S":"b"},"a":{"N":"1"}}}
+< 200 {}
+# PutItem ReturnValuesOnConditionCheckFailure: ALL_OLD puts the old item into the error; NONE does not; missing item gives no Item
+> PutItem {"TableName":"alt_cond_rv_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"s":{"S":"x"}},"ConditionExpression":"a = :v","ExpressionAttributeValues":{":v":{"N":"2"}},"ReturnValuesOnConditionCheckFailure":"ALL_OLD"}
+< 400 {"Item":{"p":{"S":"k"},"a":{"N":"1"},"s":{"S":"x"}},"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+> PutItem {"TableName":"alt_cond_rv_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"s":{"S":"x"}},"ConditionExpression":"a = :v","ExpressionAttributeValues":{":v":{"N":"2"}},"ReturnValuesOnConditionCheckFailure":"NONE"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+> PutItem {"TableName":"alt_cond_rv_s","Item":{"p":{"S":"absent"}},"ConditionExpression":"attribute_exists(a)","ReturnValuesOnConditionCheckFailure":"ALL_OLD"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+> PutItem {"TableName":"alt_cond_rv_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"s":{"S":"x"}},"ConditionExpression":"a = :v","ExpressionAttributeValues":{":v":{"N":"2"}},"ReturnValuesOnConditionCheckFailure":"ALL_OLD","ReturnValues":"ALL_OLD"}
+< 400 {"Item":{"p":{"S":"k"},"a":{"N":"1"},"s":{"S":"x"}},"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+# ReturnValuesOnConditionCheckFailure has no effect when the condition succeeds or there is no condition
+> PutItem {"TableName":"alt_cond_rv_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"s":{"S":"x"}},"ConditionExpression":"a = :v","ExpressionAttributeValues":{":v":{"N":"1"}},"ReturnValuesOnConditionCheckFailure":"ALL_OLD"}
+< 200 {}
+> PutItem {"TableName":"alt_cond_rv_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"s":{"S":"x"}},"ReturnValuesOnConditionCheckFailure":"ALL_OLD"}
+< 200 {}
+> PutItem {"TableName":"alt_cond_rv_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"s":{"S":"x"}},"ConditionExpression":"a = :v","ExpressionAttributeValues":{":v":{"N":"1"}},"ReturnValuesOnConditionCheckFailure":"ALL_OLD","ReturnValues":"ALL_OLD"}
+< 200 {"Attributes":{"p":{"S":"k"},"a":{"N":"1"},"s":{"S":"x"}}}
+# ReturnValuesOnConditionCheckFailure invalid values
+> PutItem {"TableName":"alt_cond_rv_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"s":{"S":"x"}},"ConditionExpression":"a = :v","ExpressionAttributeValues":{":v":{"N":"2"}},"ReturnValuesOnConditionCheckFailure":"UPDATED_OLD"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Unrecognized value for ReturnValuesOnConditionCheckFailure: UPDATED_OLD"}
+> PutItem {"TableName":"alt_cond_rv_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"s":{"S":"x"}},"ConditionExpression":"a = :v","ExpressionAttributeValues":{":v":{"N":"2"}},"ReturnValuesOnConditionCheckFailure":"ALL_NEW"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Unrecognized value for ReturnValuesOnConditionCheckFailure: ALL_NEW"}
+> PutItem {"TableName":"alt_cond_rv_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"s":{"S":"x"}},"ConditionExpression":"a = :v","ExpressionAttributeValues":{":v":{"N":"2"}},"ReturnValuesOnConditionCheckFailure":"UPDATED_NEW"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Unrecognized value for ReturnValuesOnConditionCheckFailure: UPDATED_NEW"}
+> PutItem {"TableName":"alt_cond_rv_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"s":{"S":"x"}},"ConditionExpression":"a = :v","ExpressionAttributeValues":{":v":{"N":"2"}},"ReturnValuesOnConditionCheckFailure":"DOG"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Unrecognized value for ReturnValuesOnConditionCheckFailure: DOG"}
+> PutItem {"TableName":"alt_cond_rv_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"s":{"S":"x"}},"ConditionExpression":"a = :v","ExpressionAttributeValues":{":v":{"N":"2"}},"ReturnValuesOnConditionCheckFailure":"all_old"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Unrecognized value for ReturnValuesOnConditionCheckFailure: all_old"}
+> PutItem {"TableName":"alt_cond_rv_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"s":{"S":"x"}},"ConditionExpression":"a = :v","ExpressionAttributeValues":{":v":{"N":"2"}},"ReturnValuesOnConditionCheckFailure":""}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Unrecognized value for ReturnValuesOnConditionCheckFailure: "}
+> PutItem {"TableName":"alt_cond_rv_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"s":{"S":"x"}},"ConditionExpression":"a = :v","ExpressionAttributeValues":{":v":{"N":"2"}},"ReturnValuesOnConditionCheckFailure":1}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Expected string value for ReturnValuesOnConditionCheckFailure, got: 1"}
+> PutItem {"TableName":"alt_cond_rv_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"s":{"S":"x"}},"ConditionExpression":"a = :v","ExpressionAttributeValues":{":v":{"N":"2"}},"ReturnValuesOnConditionCheckFailure":null}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Expected string value for ReturnValuesOnConditionCheckFailure, got: null"}
+> PutItem {"TableName":"alt_cond_rv_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"s":{"S":"x"}},"ConditionExpression":"a = :v","ExpressionAttributeValues":{":v":{"N":"2"}},"ReturnValuesOnConditionCheckFailure":true}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Expected string value for ReturnValuesOnConditionCheckFailure, got: true"}
+> PutItem {"TableName":"alt_cond_rv_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"s":{"S":"x"}},"ReturnValuesOnConditionCheckFailure":"DOG"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Unrecognized value for ReturnValuesOnConditionCheckFailure: DOG"}
+# ReturnValuesOnConditionCheckFailure with legacy Expected
+> PutItem {"TableName":"alt_cond_rv_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"s":{"S":"x"}},"Expected":{"a":{"Value":{"N":"2"}}},"ReturnValuesOnConditionCheckFailure":"ALL_OLD"}
+< 400 {"Item":{"p":{"S":"k"},"a":{"N":"1"},"s":{"S":"x"}},"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+# DeleteItem ReturnValuesOnConditionCheckFailure
+> DeleteItem {"TableName":"alt_cond_rv_s","Key":{"p":{"S":"k"}},"ConditionExpression":"a = :v","ExpressionAttributeValues":{":v":{"N":"2"}},"ReturnValuesOnConditionCheckFailure":"ALL_OLD"}
+< 400 {"Item":{"p":{"S":"k"},"a":{"N":"1"},"s":{"S":"x"}},"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+> DeleteItem {"TableName":"alt_cond_rv_s","Key":{"p":{"S":"k"}},"ConditionExpression":"a = :v","ExpressionAttributeValues":{":v":{"N":"2"}},"ReturnValuesOnConditionCheckFailure":"NONE"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+> DeleteItem {"TableName":"alt_cond_rv_s","Key":{"p":{"S":"absent"}},"ConditionExpression":"attribute_exists(a)","ReturnValuesOnConditionCheckFailure":"ALL_OLD"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+> DeleteItem {"TableName":"alt_cond_rv_s","Key":{"p":{"S":"k"}},"ConditionExpression":"a = :v","ExpressionAttributeValues":{":v":{"N":"2"}},"ReturnValuesOnConditionCheckFailure":"UPDATED_NEW"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Unrecognized value for ReturnValuesOnConditionCheckFailure: UPDATED_NEW"}
+> DeleteItem {"TableName":"alt_cond_rv_ss","Key":{"p":{"S":"a"},"c":{"S":"b"}},"ConditionExpression":"a = :v","ExpressionAttributeValues":{":v":{"N":"2"}},"ReturnValuesOnConditionCheckFailure":"ALL_OLD"}
+< 400 {"Item":{"p":{"S":"a"},"c":{"S":"b"},"a":{"N":"1"}},"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+# ReturnConsumedCapacity on a failed condition (is it reported in the error?) and on success
+> PutItem {"TableName":"alt_cond_rv_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"s":{"S":"x"}},"ConditionExpression":"a = :v","ExpressionAttributeValues":{":v":{"N":"2"}},"ReturnConsumedCapacity":"TOTAL"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+> PutItem {"TableName":"alt_cond_rv_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"s":{"S":"x"}},"ConditionExpression":"a = :v","ExpressionAttributeValues":{":v":{"N":"1"}},"ReturnConsumedCapacity":"TOTAL"}
+< 200 {"ConsumedCapacity":{"CapacityUnits":1.0}}
+> DeleteItem {"TableName":"alt_cond_rv_s","Key":{"p":{"S":"k"}},"ConditionExpression":"a = :v","ExpressionAttributeValues":{":v":{"N":"2"}},"ReturnConsumedCapacity":"TOTAL","ReturnValuesOnConditionCheckFailure":"ALL_OLD"}
+< 400 {"Item":{"p":{"S":"k"},"a":{"N":"1"},"s":{"S":"x"}},"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+# Conditional PutItem / DeleteItem success shapes
+> PutItem {"TableName":"alt_cond_rv_s","Item":{"p":{"S":"new"},"a":{"N":"5"}},"ConditionExpression":"attribute_not_exists(p)","ReturnValues":"ALL_OLD"}
+< 200 {}
+> PutItem {"TableName":"alt_cond_rv_s","Item":{"p":{"S":"new"},"a":{"N":"6"}},"ConditionExpression":"attribute_not_exists(p)","ReturnValues":"ALL_OLD"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+> PutItem {"TableName":"alt_cond_rv_s","Item":{"p":{"S":"new"},"a":{"N":"6"}},"ConditionExpression":"a = :v","ExpressionAttributeValues":{":v":{"N":"5"}},"ReturnValues":"ALL_OLD"}
+< 200 {"Attributes":{"p":{"S":"new"},"a":{"N":"5"}}}
+> DeleteItem {"TableName":"alt_cond_rv_s","Key":{"p":{"S":"new"}},"ConditionExpression":"a = :v","ExpressionAttributeValues":{":v":{"N":"6"}},"ReturnValues":"ALL_OLD"}
+< 200 {"Attributes":{"p":{"S":"new"},"a":{"N":"6"}}}
+> DeleteItem {"TableName":"alt_cond_rv_s","Key":{"p":{"S":"new"}},"ConditionExpression":"attribute_not_exists(a)","ReturnValues":"ALL_OLD"}
+< 200 {}
+> DeleteItem {"TableName":"alt_cond_rv_s","Key":{"p":{"S":"new"}},"ConditionExpression":"attribute_exists(a)"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+> GetItem {"TableName":"alt_cond_rv_s","Key":{"p":{"S":"new"}}}
+< 200 {}
+# Condition errors are reported even when the item does not exist
+> PutItem {"TableName":"alt_cond_rv_s","Item":{"p":{"S":"absent"}},"ConditionExpression":"a < :v","ExpressionAttributeValues":{":v":{"L":[]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"LT operator allow only the types String, Number, or Binary"}
+> PutItem {"TableName":"alt_cond_rv_s","Item":{"p":{"S":"absent"}},"ConditionExpression":"attribute_type(a, :t)","ExpressionAttributeValues":{":t":{"S":"DOG"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ConditionExpression: attribute_types()'s second parameter, \"DOG\", is not a known type"}
+> PutItem {"TableName":"alt_cond_rv_s","Item":{"p":{"S":"absent"}},"ConditionExpression":"a BETWEEN :x AND :y","ExpressionAttributeValues":{":x":{"N":"2"},":y":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+> PutItem {"TableName":"alt_cond_rv_s","Item":{"p":{"S":"absent"}},"ConditionExpression":"begins_with(a, :v)","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"begins_with() supports only string or binary type, got: {\"N\":\"1\"}"}
+> PutItem {"TableName":"alt_cond_rv_s","Item":{"p":{"S":"absent"}},"ConditionExpression":"size(:v) = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Unsupported operand type \"N\" for function size()"}
+> PutItem {"TableName":"alt_cond_rv_s","Item":{"p":{"S":"absent"}},"ConditionExpression":"size(a) = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"invalid object: null"}
+> PutItem {"TableName":"alt_cond_rv_s","Item":{"p":{"S":"absent"}},"ConditionExpression":"a < :v","ExpressionAttributeValues":{":v":{"N":"abc"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+> DeleteItem {"TableName":"alt_cond_rv_s","Key":{"p":{"S":"absent"}},"ConditionExpression":"a < :v","ExpressionAttributeValues":{":v":{"L":[]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"LT operator allow only the types String, Number, or Binary"}
+> DeleteItem {"TableName":"alt_cond_rv_s","Key":{"p":{"S":"absent"}},"ConditionExpression":"size(a) = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"invalid object: null"}
+# Runtime-only condition errors: false short-circuit before an invalid branch
+> PutItem {"TableName":"alt_cond_rv_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"s":{"S":"x"}},"ConditionExpression":"a = :x AND a < :v","ExpressionAttributeValues":{":x":{"N":"2"},":v":{"L":[]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+> PutItem {"TableName":"alt_cond_rv_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"s":{"S":"x"}},"ConditionExpression":"a = :x OR a < :v","ExpressionAttributeValues":{":x":{"N":"1"},":v":{"L":[]}}}
+< 200 {}
+> PutItem {"TableName":"alt_cond_rv_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"s":{"S":"x"}},"ConditionExpression":"a = :x AND size(z) = :x","ExpressionAttributeValues":{":x":{"N":"2"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+> PutItem {"TableName":"alt_cond_rv_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"s":{"S":"x"}},"ConditionExpression":"a = :x OR size(z) = :x","ExpressionAttributeValues":{":x":{"N":"1"}}}
+< 200 {}
+> PutItem {"TableName":"alt_cond_rv_s","Item":{"p":{"S":"k"},"a":{"N":"1"},"s":{"S":"x"}},"ConditionExpression":"size(z) = :x OR a = :x","ExpressionAttributeValues":{":x":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"invalid object: null"}
+# Validation order: item/key problems vs condition problems vs ReturnValues*
+> PutItem {"TableName":"alt_cond_rv_s","Item":{"p":{"N":"1"}},"ConditionExpression":"a = "}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Type mismatch: expected type S for key column p, got type \"N\""}
+> PutItem {"TableName":"alt_cond_rv_s","Item":{"p":{"N":"1"}},"ConditionExpression":"a = :v","ExpressionAttributeValues":{":v":{"N":"1"},":u":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Type mismatch: expected type S for key column p, got type \"N\""}
+> PutItem {"TableName":"alt_cond_rv_s","Item":{"p":{"S":"k"},"e":{"SS":[]}},"ConditionExpression":"a = "}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"PutItem: empty set not allowed"}
+> PutItem {"TableName":"alt_cond_rv_s","Item":{"p":{"S":"k"},"e":{"SS":[]}},"ConditionExpression":"a = :v","ExpressionAttributeValues":{":v":{"N":"1"},":u":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"PutItem: empty set not allowed"}
+> PutItem {"TableName":"alt_cond_rv_s","Item":{"p":{"S":"k"},"e":{"X":"1"}},"ConditionExpression":"a = "}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"PutItem: unknown type X for value {\"X\":\"1\"}"}
+> PutItem {"TableName":"alt_cond_rv_s","Item":{"x":{"S":"k"}},"ConditionExpression":"a = "}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Key column p not found"}
+> PutItem {"TableName":"alt_cond_rv_s","Item":{"p":{"S":"k"}},"ConditionExpression":"a = ","ReturnValuesOnConditionCheckFailure":"DOG"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Unrecognized value for ReturnValuesOnConditionCheckFailure: DOG"}
+> PutItem {"TableName":"alt_cond_rv_s","Item":{"p":{"S":"k"}},"ConditionExpression":"a = :v","ExpressionAttributeValues":{":v":{"N":"2"}},"ReturnValuesOnConditionCheckFailure":"DOG","ReturnValues":"DOG"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Unrecognized value for ReturnValues: DOG"}
+> PutItem {"TableName":"alt_cond_rv_s","Item":{"p":{"N":"1"}},"ReturnValuesOnConditionCheckFailure":"DOG"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Unrecognized value for ReturnValuesOnConditionCheckFailure: DOG"}
+> PutItem {"TableName":"alt_cond_rv_s","Item":{"p":{"S":"k"}},"ConditionExpression":"a = :v","ExpressionAttributeValues":{":v":{"X":"1"}},"ReturnValues":"DOG"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Unrecognized value for ReturnValues: DOG"}
+> PutItem {"TableName":"alt_cond_rv_s","Item":{"p":{"S":"k"}},"ConditionExpression":"a = :v","ReturnConsumedCapacity":"DOG"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Unknown consumed capacity DOG"}
+> PutItem {"TableName":"alt_cond_rv_s","Item":{"p":{"S":"k"},"e":{"SS":[]}},"ReturnValues":"DOG"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Unrecognized value for ReturnValues: DOG"}
+> PutItem {"TableName":"alt_cond_rv_s","Item":{"p":{"S":"k"},"e":{"SS":[]}},"ReturnConsumedCapacity":"DOG"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Unknown consumed capacity DOG"}
+> PutItem {"TableName":"alt_cond_rv_s","Item":{"p":{"S":"k"},"e":{"SS":[]}},"Expected":{"a":{"Exists":true}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"PutItem: empty set not allowed"}
+> PutItem {"TableName":"alt_cond_rv_s","Item":{"p":{"S":"k"}},"ConditionExpression":"a = ","Expected":{"a":{"Exists":true}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing ConditionExpression 'a = ': syntax error at char 0"}
+> PutItem {"TableName":"alt_cond_rv_s","Item":{"p":{"S":"k"}},"Expected":{"a":{"Exists":true}},"ConditionalOperator":"XOR"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"'ConditionalOperator' parameter must be AND, OR or missing. Found XOR."}
+> DeleteItem {"TableName":"alt_cond_rv_s","Key":{"p":{"N":"1"}},"ConditionExpression":"a = "}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Type mismatch: expected type S for key column p, got type \"N\""}
+> DeleteItem {"TableName":"alt_cond_rv_s","Key":{"p":{"S":"k"}},"ConditionExpression":"a = ","ReturnValuesOnConditionCheckFailure":"DOG"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Unrecognized value for ReturnValuesOnConditionCheckFailure: DOG"}
+> DeleteItem {"TableName":"alt_cond_rv_s","Key":{"p":{"N":"1"}},"ReturnValuesOnConditionCheckFailure":"DOG"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Unrecognized value for ReturnValuesOnConditionCheckFailure: DOG"}
+# Missing table wins over everything
+> PutItem {"TableName":"alt_cond_rv_missing","Item":{"p":{"S":"k"}},"ConditionExpression":"a = ","ReturnValuesOnConditionCheckFailure":"DOG"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException","message":"Requested resource not found: Table: alt_cond_rv_missing not found"}
+> DeleteItem {"TableName":"alt_cond_rv_missing","Key":{"p":{"S":"k"}},"ConditionExpression":"a = ","ReturnValuesOnConditionCheckFailure":"DOG"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException","message":"Requested resource not found: Table: alt_cond_rv_missing not found"}
+> PutItem {"TableName":"alt_cond_rv_missing","Item":{"p":{"S":"k"}},"ReturnConsumedCapacity":"DOG"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException","message":"Requested resource not found: Table: alt_cond_rv_missing not found"}
+> DeleteTable {"TableName":"alt_cond_rv_s"}
+< 200 {"TableDescription":{"TableName":"alt_cond_rv_s","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_cond_rv_s:scylla:table/alt_cond_rv_s","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0}}}
+> DeleteTable {"TableName":"alt_cond_rv_ss"}
+< 200 {"TableDescription":{"TableName":"alt_cond_rv_ss","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_cond_rv_ss:scylla:table/alt_cond_rv_ss","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0}}}

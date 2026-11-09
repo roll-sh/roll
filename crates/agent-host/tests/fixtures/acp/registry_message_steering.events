@@ -1,0 +1,16 @@
+{"native_thread":"grok-replay-session-1"}
+{"model":"grok-build"}
+{"catalog":[{"default":true,"id":"grok-build","name":"Grok Build"}]}
+{"item":{"body":{"text":"","type":"message"},"id":"msg:1:1","parent":null,"status":"running"}}
+{"text_delta":{"item":"msg:1:1","text":"ste"}}
+{"item":{"body":{"text":"ste","type":"message"},"id":"msg:1:1","parent":null,"status":"running"}}
+{"item":{"body":{"text":"ste","type":"message"},"id":"msg:1:1","parent":null,"status":"completed"}}
+{"turn_ended":"interrupted"}
+{"item":{"body":{"text":"","type":"message"},"id":"msg:2:1","parent":null,"status":"running"}}
+{"text_delta":{"item":"msg:2:1","text":"steering fixture "}}
+{"item":{"body":{"text":"steering fixture ","type":"message"},"id":"msg:2:1","parent":null,"status":"running"}}
+{"text_delta":{"item":"msg:2:1","text":"observed"}}
+{"item":{"body":{"text":"steering fixture observed","type":"message"},"id":"msg:2:1","parent":null,"status":"running"}}
+{"item":{"body":{"text":"steering fixture observed","type":"message"},"id":"msg:2:1","parent":null,"status":"completed"}}
+{"turn_ended":"completed"}
+{"exited":null}

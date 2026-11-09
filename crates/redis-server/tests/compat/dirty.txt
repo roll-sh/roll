@@ -1,0 +1,423 @@
+# rdb_changes_since_last_save after each command (Redis' per-command `server.dirty` increments):
+# members/fields/elements changed, not keys touched; expiry and emptied-key deletion are free.
+
+# ---- strings ----
+SAVE
+SET a 1
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+SET a 1 NX
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+MSET a 1 a 2 b 3
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+MSETNX a 1 c 2
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+MSETNX c 1 d 2 c 3
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+SET a 1 EXAT 1
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+SET nokey 1 EXAT 1
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+SET a 1 PXAT 1 GET
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+APPEND s abc
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+SETRANGE s 1 zz
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+INCR n
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+INCRBYFLOAT n 1.5
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+GETDEL n
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+GETDEL n
+!info rdb_changes_since_last_save INFO persistence
+SET g v
+SAVE
+GETEX g EX 100
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+GETEX g PERSIST
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+GETEX g
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+DEL a b c d missing
+!info rdb_changes_since_last_save INFO persistence
+SET e v PX 1
+@sleep 20
+SAVE
+GET e
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+EXISTS e
+!info rdb_changes_since_last_save INFO persistence
+# ---- lists ----
+SAVE
+RPUSH l a b c
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+LPUSHX nolist a b
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+LPOP l 2
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+RPOP l
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+RPOP l
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+RPUSH l 1 2 3 4 5
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+LTRIM l 1 -2
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+LTRIM l 0 100
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+LTRIM l 5 10
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+RPUSH l a b a c a
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+LREM l 0 a
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+LREM l 0 zzz
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+LINSERT l BEFORE b x
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+LINSERT l BEFORE nope x
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+LSET l 0 y
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+LMOVE l l2 LEFT RIGHT
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+LMOVE l2 l2 LEFT RIGHT
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+LMOVEM l l2 LEFT LEFT COUNT 2 OBO
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+LMOVEM l2 l2 LEFT RIGHT COUNT 2 BULK
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+LMPOP 2 nolist l2 LEFT COUNT 10
+!info rdb_changes_since_last_save INFO persistence
+# ---- sets ----
+SAVE
+SADD s1 a b c a
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+SADD s1 a
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+SREM s1 a z
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+SADD s2 b x
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+SINTERSTORE s3 s1 s2
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+SINTERSTORE s3 s1 nos
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+SUNIONSTORE s3 s1 s2
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+SDIFFSTORE s3 s1 s1
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+SMOVE s1 s2 b
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+SMOVE s1 s2 c
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+!sort SPOP s2 5
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+SPOP nos
+!info rdb_changes_since_last_save INFO persistence
+# ---- hashes ----
+SAVE
+HSET h a 1 a 2 b 3
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+HSET h a 2
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+HSETNX h a 1
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+HSETNX h c 1
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+HINCRBY h n 5
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+HINCRBYFLOAT h f 1.5
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+HDEL h a z b
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+HEXPIRE h 100 FIELDS 3 c n nofield
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+HEXPIRE h 100 NX FIELDS 2 c n
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+HPERSIST h FIELDS 2 c n
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+HGETDEL h FIELDS 2 c z
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+HGETEX h EX 100 FIELDS 2 n f
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+HGETEX h PERSIST FIELDS 2 n f
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+HSETEX h FNX FIELDS 2 p 1 q 2
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+HSETEX h FNX FIELDS 1 p 1
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+HSETEX h EX 100 FIELDS 2 p 3 q 4
+!info rdb_changes_since_last_save INFO persistence
+HSET h2 f v g w
+HPEXPIRE h2 1 FIELDS 1 f
+@sleep 20
+SAVE
+HGET h2 f
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+HLEN h2
+!info rdb_changes_since_last_save INFO persistence
+# ---- sorted sets ----
+SAVE
+ZADD z 1 a 2 b 3 c
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+ZADD z CH 1 a 5 b
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+ZADD z NX 9 a
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+ZINCRBY z 1 a
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+ZREM z a nope
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+ZADD z 4 d 5 e 6 f
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+ZREMRANGEBYSCORE z 4 5
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+ZREMRANGEBYRANK z 0 0
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+ZPOPMIN z 2
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+ZPOPMAX z 10
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+ZADD z2 1 a 2 b
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+ZRANGESTORE z3 z2 0 -1
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+ZRANGESTORE z3 z2 5 10
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+ZUNIONSTORE z3 2 z2 z2
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+ZMPOP 1 z2 MIN COUNT 5
+!info rdb_changes_since_last_save INFO persistence
+# ---- bitmaps, hll, geo ----
+SAVE
+SETBIT bm 7 1
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+SETBIT bm 7 1
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+BITFIELD bf SET u8 0 255 INCRBY u8 0 1 GET u8 0
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+BITFIELD bf OVERFLOW FAIL INCRBY u8 0 1000
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+BITOP NOT bm2 bm
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+PFADD hll a b c
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+PFADD hll a
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+PFCOUNT hll
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+PFCOUNT hll
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+PFMERGE hll2 hll
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+GEOADD geo 13.36 38.11 p 15.08 37.50 c
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+GEOSEARCHSTORE gd geo FROMLONLAT 15 37 BYRADIUS 200 km
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+GEOSEARCHSTORE gd geo FROMLONLAT 0 0 BYRADIUS 1 km
+!info rdb_changes_since_last_save INFO persistence
+# ---- keys ----
+SET k1 v
+SAVE
+RENAME k1 k2
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+RENAME k2 k2
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+COPY k2 k3
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+COPY k2 k3 REPLACE
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+MOVE k3 1
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+EXPIRE k2 100
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+PERSIST k2
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+PERSIST k2
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+EXPIRE k2 -1
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+SWAPDB 0 1
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+SWAPDB 0 1
+!info rdb_changes_since_last_save INFO persistence
+SET k4 v
+SAVE
+EVAL "local d = redis.call('dump', KEYS[1]) redis.call('restore', KEYS[2], 0, d) redis.call('restore', KEYS[2], 0, d, 'REPLACE') return 1" 2 k4 k5
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+SORT l2 ALPHA STORE sorted
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+SORT nolist STORE sorted
+!info rdb_changes_since_last_save INFO persistence
+# ---- streams ----
+SAVE
+XADD x 1-0 f v
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+XADD x 2-0 f v
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+XADD x 3-0 f v
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+XGROUP CREATE x g 0
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+XGROUP CREATE x2 g $ MKSTREAM
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+XREADGROUP GROUP g c COUNT 2 STREAMS x >
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+XACK x g 1-0 9-0
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+XCLAIM x g c2 0 2-0
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+XAUTOCLAIM x g c3 0 0
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+XDEL x 1-0 3-0 9-0
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+XTRIM x MAXLEN 0
+!info rdb_changes_since_last_save INFO persistence
+# ---- transactions, scripts ----
+SAVE
+EVAL "redis.call('rpush', 'sl', 'a', 'b') redis.call('set', 'sk', 'v') return 1" 0
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+EVAL "for i = 1, 10 do redis.call('incr', 'sc') end return 1" 0
+!info rdb_changes_since_last_save INFO persistence
+MULTI
+RPUSH tq 1 2 3
+SET tk v
+SAVE
+EXEC
+!info rdb_changes_since_last_save INFO persistence
+# ---- flushes ----
+SAVE
+FLUSHDB
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+FLUSHDB
+!info rdb_changes_since_last_save INFO persistence
+SET f1 v
+SET f2 v
+SAVE
+FLUSHALL
+!info rdb_changes_since_last_save INFO persistence
+CONFIG SET save ""
+SET f1 v
+SET f2 v
+SAVE
+FLUSHALL
+!info rdb_changes_since_last_save INFO persistence
+SAVE
+FLUSHALL
+!info rdb_changes_since_last_save INFO persistence
+CONFIG SET save "3600 1 300 100 60 10000"

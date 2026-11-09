@@ -1,0 +1,154 @@
+# FT.SEARCH HIGHLIGHT and SUMMARIZE: the highlighter's fragments, tags, context and trimming.
+
+FLUSHALL
+CONFIG SET hash-max-listpack-value 1024
+FT.CREATE h ON HASH PREFIX 1 h: SCHEMA title TEXT WEIGHT 2 body TEXT tag TAG n NUMERIC s TEXT SORTABLE
+HSET h:1 title "Hello world" body "The quick brown fox jumps over the lazy dog. The dog sleeps. A fox is quick and the hello is loud, very loud indeed, said the fox to the dog in the morning" tag x n 5 s "Sortable Fox"
+HSET h:2 title "Foxes and hounds" body "Running foxes outran the hounds; the hounds ran after the foxes all day long until the night came and the moon rose over the hills where the foxes hid" tag y n 6 s "nothing here"
+HSET h:3 title "Another title" body "Nothing relevant here at all, just some filler words to make the document longer than one fragment and then some more words follow until the end" extra "an unindexed field with fox inside of it" n 7
+HSET h:4 title "dogs" body "dog dog dog cat cat cat dog bird bird bird bird bird bird bird bird bird bird fox fox bird bird bird bird bird bird bird bird bird bird cat"
+FT.SEARCH h fox
+FT.SEARCH h fox HIGHLIGHT
+FT.SEARCH h fox HIGHLIGHT SORTBY n ASC
+FT.SEARCH h fox SUMMARIZE SORTBY n ASC
+FT.SEARCH h "fox|hello" SUMMARIZE FIELDS 1 body FRAGS 2 LEN 5 HIGHLIGHT TAGS "[" "]" SORTBY n ASC
+FT.SEARCH h fox HIGHLIGHT FIELDS 1 nope
+FT.SEARCH h fox LIMIT 0 0 HIGHLIGHT FIELDS 1 nope
+FT.SEARCH h fox RETURN 1 title HIGHLIGHT FIELDS 1 nope
+FT.SEARCH h fox RETURN 1 title HIGHLIGHT FIELDS 1 body
+FT.SEARCH h fox RETURN 2 title body HIGHLIGHT FIELDS 1 body SORTBY n ASC
+FT.SEARCH h fox RETURN 2 title extra HIGHLIGHT FIELDS 1 extra
+FT.SEARCH h fox RETURN 2 title extra SUMMARIZE SORTBY n ASC
+FT.SEARCH h fox RETURN 1 s HIGHLIGHT SORTBY n ASC
+FT.SEARCH h fox RETURN 1 s HIGHLIGHT FIELDS 1 s SORTBY n ASC
+FT.SEARCH h fox HIGHLIGHT FIELDS 2 body title TAGS "<em>" "</em>" SORTBY n ASC
+FT.SEARCH h fox HIGHLIGHT FIELDS 1 title HIGHLIGHT FIELDS 1 body TAGS "{" "}" SORTBY n ASC
+FT.SEARCH h fox SUMMARIZE FIELDS 1 body LEN 3 FRAGS 1 SEPARATOR "|" SORTBY n ASC
+FT.SEARCH h fox SUMMARIZE FIELDS 1 body LEN 0 SORTBY n ASC
+FT.SEARCH h fox SUMMARIZE FIELDS 1 body FRAGS 0 SORTBY n ASC
+FT.SEARCH h fox SUMMARIZE FIELDS 1 body LEN 100 FRAGS 10 SORTBY n ASC
+FT.SEARCH h fox SUMMARIZE FIELDS 1 title SORTBY n ASC
+FT.SEARCH h fox SUMMARIZE FIELDS 1 title HIGHLIGHT FIELDS 1 title SORTBY n ASC
+FT.SEARCH h fox SUMMARIZE LEN 2 HIGHLIGHT FIELDS 1 body SORTBY n ASC
+FT.SEARCH h fox HIGHLIGHT SUMMARIZE FIELDS 1 tag SORTBY n ASC
+FT.SEARCH h "fox dog" SUMMARIZE FIELDS 1 body FRAGS 3 LEN 4 HIGHLIGHT SORTBY n ASC
+FT.SEARCH h "fox|cat|bird" SUMMARIZE FIELDS 1 body FRAGS 1 LEN 4 HIGHLIGHT SORTBY n ASC
+FT.SEARCH h "fox|cat|bird" SUMMARIZE FIELDS 1 body FRAGS 2 LEN 6 HIGHLIGHT SORTBY n ASC
+FT.SEARCH h "cat|dog" SUMMARIZE FIELDS 1 body FRAGS 2 LEN 2 HIGHLIGHT SORTBY n ASC
+FT.SEARCH h "bird" SUMMARIZE FIELDS 1 body FRAGS 3 LEN 8 HIGHLIGHT
+FT.SEARCH h "foxes" HIGHLIGHT FIELDS 2 title body
+FT.SEARCH h "running" HIGHLIGHT FIELDS 1 body
+FT.SEARCH h "running" VERBATIM HIGHLIGHT FIELDS 1 body
+FT.SEARCH h "hound*" HIGHLIGHT FIELDS 1 body
+FT.SEARCH h "%hounde%" HIGHLIGHT FIELDS 1 body
+FT.SEARCH h "*ound*" HIGHLIGHT FIELDS 1 body
+FT.SEARCH h "\"the hounds\"" HIGHLIGHT FIELDS 1 body
+FT.SEARCH h "foxes -nothing" HIGHLIGHT FIELDS 1 body
+FT.SEARCH h "foxes ~night" HIGHLIGHT FIELDS 1 body
+FT.SEARCH h "@title:foxes" HIGHLIGHT FIELDS 2 title body
+FT.SEARCH h "foxes" INFIELDS 1 title HIGHLIGHT FIELDS 2 title body
+FT.SEARCH h "@tag:{x}" HIGHLIGHT
+FT.SEARCH h "@n:[5 5]" SUMMARIZE
+FT.SEARCH h "*" SUMMARIZE FIELDS 1 body LEN 3 SORTBY n ASC
+FT.SEARCH h "fox" NOCONTENT HIGHLIGHT
+FT.SEARCH h "fox" WITHSCORES SCORER TFIDF HIGHLIGHT FIELDS 1 title SORTBY n ASC
+FT.SEARCH h "fox" WITHSORTKEYS SORTBY n DESC HIGHLIGHT FIELDS 1 body LIMIT 0 1
+FT.SEARCH h "fox" LIMIT 1 1 SORTBY n ASC HIGHLIGHT FIELDS 1 body
+FT.SEARCH h "hello" HIGHLIGHT FIELDS 1 title DIALECT 2
+FT.SEARCH h "hello" HIGHLIGHT FIELDS 1 title DIALECT 3
+FT.SEARCH h fox SUMMARIZE FRAGS
+FT.SEARCH h fox SUMMARIZE FRAGS abc
+FT.SEARCH h fox SUMMARIZE LEN -1
+FT.SEARCH h fox SUMMARIZE SEPARATOR
+FT.SEARCH h fox HIGHLIGHT TAGS "<b>"
+FT.SEARCH h fox HIGHLIGHT FIELDS 3 a b
+FT.SEARCH h fox HIGHLIGHT FIELDS abc
+FT.SEARCH h fox HIGHLIGHT FIELDS 1 body BOGUS
+FT.SEARCH h fox HIGHLIGHT TAGS
+FT.AGGREGATE h fox HIGHLIGHT
+FT.AGGREGATE h fox SUMMARIZE
+@resp 3
+FT.SEARCH h fox HIGHLIGHT FIELDS 1 body SUMMARIZE FIELDS 1 title SORTBY n ASC
+FT.SEARCH h fox SUMMARIZE FIELDS 1 body FRAGS 1 LEN 4 SORTBY n ASC
+@resp 2
+FT.DROPINDEX h
+
+# Spacing, punctuation and separators the context walks over
+FT.CREATE p ON HASH PREFIX 1 p: SCHEMA t TEXT u TEXT
+HSET p:1 t "alpha,beta;gamma...delta   epsilon\t\tzeta\nalpha eta---theta (alpha) [iota] kappa  lambda   mu nu xi omicron pi rho sigma tau upsilon phi chi psi omega alpha"
+HSET p:2 t "short alpha" u "x"
+HSET p:3 t "ünïcödé wörds alpha ünïcödé wörds and more ünïcödé text" u "alpha"
+HSET p:4 t "alpha\nbeta alpha\ngamma"
+FT.SEARCH p alpha HIGHLIGHT SORTBY t ASC
+FT.SEARCH p alpha SUMMARIZE SORTBY t ASC
+FT.SEARCH p alpha SUMMARIZE LEN 2 FRAGS 5 SORTBY t ASC
+FT.SEARCH p alpha SUMMARIZE LEN 1 FRAGS 5 HIGHLIGHT SORTBY t ASC
+FT.SEARCH p alpha SUMMARIZE LEN 9 FRAGS 2 SEPARATOR " ## " HIGHLIGHT TAGS "<<" ">>" SORTBY t ASC
+FT.SEARCH p "beta|gamma" HIGHLIGHT SORTBY t ASC
+FT.SEARCH p "beta|gamma" SUMMARIZE LEN 1 SORTBY t ASC
+FT.SEARCH p "ünïcödé" HIGHLIGHT
+FT.SEARCH p "wörds" SUMMARIZE LEN 2 FRAGS 2 HIGHLIGHT
+FT.SEARCH p "@u:alpha" HIGHLIGHT
+FT.SEARCH p "@u:alpha" SUMMARIZE
+FT.SEARCH p "nomatch|x" SUMMARIZE SORTBY t ASC
+FT.SEARCH p "x" SUMMARIZE FIELDS 1 t
+FT.SEARCH p "x" SUMMARIZE FIELDS 1 t LEN 1 FRAGS 1
+HSET p:5 t "rare word one two three four five six seven eight nine ten common alpha eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen rare alpha nineteen twenty x y z w v u t s r q common common end"
+FT.SEARCH p "(rare|common|alpha) seventeen" SUMMARIZE FRAGS 1 LEN 3 HIGHLIGHT
+FT.SEARCH p "(rare|common|alpha) seventeen" SUMMARIZE FRAGS 2 LEN 3 HIGHLIGHT
+FT.SEARCH p "(rare|common|alpha) seventeen" SUMMARIZE FRAGS 3 LEN 1 HIGHLIGHT
+FT.SEARCH p "(rare|common|alpha) seventeen" SUMMARIZE FRAGS 4 LEN 0
+FT.SEARCH p "(rare|common|alpha) seventeen" SUMMARIZE FRAGS 5 LEN 30 SEPARATOR "  ..  " HIGHLIGHT TAGS "< b >" "</ b >"
+FT.SEARCH p "(rare|common|alpha) seventeen" SUMMARIZE FRAGS 2 LEN 12
+FT.SEARCH p "(common|alpha) seventeen" SUMMARIZE FRAGS 1 LEN 6
+FT.SEARCH p "(alpha|rare) seventeen" SUMMARIZE FRAGS 1 LEN 6 SCORER BM25
+FT.SEARCH p "seventeen" SUMMARIZE FRAGS 1 LEN 2
+FT.DROPINDEX p
+
+# Indexes without byte offsets, stopwords and stemming options
+FT.CREATE nh ON HASH NOHL PREFIX 1 nh: SCHEMA t TEXT
+HSET nh:1 t "hello there"
+FT.SEARCH nh hello HIGHLIGHT
+FT.SEARCH nh hello SUMMARIZE
+FT.SEARCH nh hello
+FT.DROPINDEX nh
+FT.CREATE no ON HASH NOOFFSETS PREFIX 1 no: SCHEMA t TEXT
+HSET no:1 t "hello there"
+FT.SEARCH no hello HIGHLIGHT
+FT.DROPINDEX no
+FT.CREATE sw ON HASH PREFIX 1 sw: STOPWORDS 0 SCHEMA t TEXT NOSTEM u TEXT
+HSET sw:1 t "the cats and the dogs of the town, running the show" u "the cats and the dogs of the town, running the show"
+FT.SEARCH sw "the" HIGHLIGHT
+FT.SEARCH sw "cat" HIGHLIGHT
+FT.SEARCH sw "running" HIGHLIGHT
+FT.SEARCH sw "the|town" SUMMARIZE LEN 2 FRAGS 3 HIGHLIGHT
+FT.DROPINDEX sw
+
+# JSON documents
+FT.CREATE j ON JSON PREFIX 1 j: SCHEMA $.title AS title TEXT $.body AS body TEXT $.tags[*] AS tags TEXT $.n AS n NUMERIC
+JSON.SET j:1 $ "{\"title\":\"Hello json world\",\"body\":\"A json body with a fox and another fox\",\"tags\":[\"fox one\",\"two\"],\"n\":1}"
+JSON.SET j:2 $ "{\"title\":\"Fox title\",\"body\":\"no match here\",\"tags\":[\"x\"],\"n\":2}"
+FT.SEARCH j fox HIGHLIGHT
+FT.SEARCH j fox RETURN 1 title HIGHLIGHT FIELDS 1 tags
+FT.SEARCH j fox RETURN 1 tags HIGHLIGHT
+FT.SEARCH j fox RETURN 2 title body HIGHLIGHT SORTBY n ASC
+FT.SEARCH j fox RETURN 2 title body SUMMARIZE LEN 2 SORTBY n ASC
+FT.SEARCH j fox RETURN 2 $.title body HIGHLIGHT SORTBY n ASC
+FT.SEARCH j fox RETURN 3 $.body AS body HIGHLIGHT SORTBY n ASC
+FT.SEARCH j fox RETURN 2 title body HIGHLIGHT SORTBY n ASC DIALECT 3
+FT.SEARCH j fox RETURN 2 title body SUMMARIZE FIELDS 1 body LEN 1 SORTBY n ASC DIALECT 3
+FT.SEARCH j fox RETURN 1 n HIGHLIGHT SORTBY n ASC
+@resp 3
+FT.SEARCH j fox RETURN 2 title body HIGHLIGHT SORTBY n ASC DIALECT 3
+FT.SEARCH j fox RETURN 2 title body HIGHLIGHT SORTBY n ASC DIALECT 3 FORMAT EXPAND
+@resp 2
+FT.DROPINDEX j
+FT.CREATE ja ON JSON PREFIX 1 ja: SCHEMA $.arr AS arr TEXT $.t AS t TEXT
+JSON.SET ja:1 $ "{\"arr\":[\"fox a\",\"fox b\"],\"t\":\"fox\"}"
+FT.SEARCH ja fox RETURN 1 arr HIGHLIGHT
+FT.SEARCH ja fox RETURN 2 arr t HIGHLIGHT FIELDS 1 t
+FT.SEARCH ja fox RETURN 1 t HIGHLIGHT
+FT.SEARCH ja fox RETURN 1 t HIGHLIGHT DIALECT 3
+FT.DROPINDEX ja
+CONFIG SET hash-max-listpack-value 64
+FLUSHALL

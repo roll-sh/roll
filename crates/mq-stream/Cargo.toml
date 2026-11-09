@@ -1,0 +1,29 @@
+[package]
+name = "mq-stream"
+description = "roll queues RabbitMQ Stream protocol server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+bytes.workspace = true
+crc32fast.workspace = true
+flate2.workspace = true
+lz4_flex.workspace = true
+mq-core.workspace = true
+parking_lot.workspace = true
+serde_json.workspace = true
+snap.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+zstd.workspace = true
+
+[dev-dependencies]
+futures.workspace = true
+lapin.workspace = true
+rabbitmq-stream-client.workspace = true
+tempfile.workspace = true
+tracing-subscriber.workspace = true
+mq-amqp.workspace = true

@@ -1,0 +1,39 @@
+# ListTables: Limit bounds and types (only deterministic cases: the table order is the server's internal hash order)
+> ListTables {"Limit":101}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Limit must be greater than 0 and no greater than 100"}
+> ListTables {"Limit":0}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Limit must be greater than 0 and no greater than 100"}
+> ListTables {"Limit":-1}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Limit must be greater than 0 and no greater than 100"}
+> ListTables {"Limit":1000}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Limit must be greater than 0 and no greater than 100"}
+> ListTables []
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Request content must be an object"}
+> ListTables x
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Parsing JSON failed: Invalid value. at 0"}
+> ListTables 
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Parsing JSON failed: The document is empty. at 0"}
+# ExclusiveStartTableName that does not name an existing table: empty page, no validation of the name
+> ListTables {"ExclusiveStartTableName":"alt_tbl_ls_nonexistent"}
+< 200 {"TableNames":[]}
+> ListTables {"ExclusiveStartTableName":"ab"}
+< 200 {"TableNames":[]}
+> ListTables {"ExclusiveStartTableName":"a@b"}
+< 200 {"TableNames":[]}
+> ListTables {"ExclusiveStartTableName":"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}
+< 200 {"TableNames":[]}
+> ListTables {"ExclusiveStartTableName":"alt_tbl_ls_nonexistent","Limit":5}
+< 200 {"TableNames":[]}
+> ListTables {"ExclusiveStartTableName":"alt_tbl_ls_nonexistent","Limit":0}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Limit must be greater than 0 and no greater than 100"}
+> ListTables {"ExclusiveStartTableName":5}
+< 500 {"__type":"com.amazonaws.dynamodb.v20120810#InternalServerError","message":"Internal server error: std::runtime_error (rjson::to_string expects a string value, got: kNumberType)"}
+> ListTables {"ExclusiveStartTableName":5,"Limit":0}
+< 500 {"__type":"com.amazonaws.dynamodb.v20120810#InternalServerError","message":"Internal server error: std::runtime_error (rjson::to_string expects a string value, got: kNumberType)"}
+# a deleted table cannot be used as ExclusiveStartTableName
+> CreateTable {"TableName":"alt_tbl_ls","BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}]}
+< 200 {"TableDescription":{"TableName":"alt_tbl_ls","BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+> DeleteTable {"TableName":"alt_tbl_ls"}
+< 200 {"TableDescription":{"TableName":"alt_tbl_ls","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_tbl_ls:scylla:table/alt_tbl_ls","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0}}}
+> ListTables {"ExclusiveStartTableName":"alt_tbl_ls"}
+< 200 {"TableNames":[]}

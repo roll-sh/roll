@@ -1,0 +1,17 @@
+[
+  {
+    "status": "pending"
+  },
+  {
+    "status": "approved",
+    "token": "rlm_0123456789abcdef",
+    "machine": "mch_fedcba0987654321",
+    "owner": "acme"
+  },
+  {
+    "status": "expired"
+  },
+  {
+    "status": "denied"
+  }
+]

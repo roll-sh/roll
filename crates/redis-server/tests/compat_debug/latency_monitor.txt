@@ -1,0 +1,37 @@
+# The latency monitor: spikes of slow commands (DEBUG SLEEP) once latency-monitor-threshold is
+# set, and LATENCY LATEST/HISTORY/GRAPH/DOCTOR/RESET over them (times and latencies vary, so
+# those replies compare by shape).
+
+FLUSHALL
+LATENCY RESET
+CONFIG GET latency-monitor-threshold
+LATENCY DOCTOR
+LATENCY GRAPH command
+LATENCY LATEST
+CONFIG SET latency-monitor-threshold 5
+# (no spikes yet: the report depends on the host having transparent huge pages)
+!skip LATENCY DOCTOR
+DEBUG SLEEP 0
+LATENCY LATEST
+DEBUG SLEEP 0.02
+!type LATENCY LATEST
+!type LATENCY HISTORY command
+LATENCY HISTORY fast-command
+!type LATENCY HISTORY COMMAND
+!skip LATENCY GRAPH command
+!type LATENCY DOCTOR
+LATENCY GRAPH nosuch
+LATENCY RESET nosuch
+LATENCY RESET COMMAND
+LATENCY LATEST
+LATENCY GRAPH command
+DEBUG SLEEP 0.02
+LATENCY RESET command command
+DEBUG SLEEP 0.02
+LATENCY RESET
+LATENCY RESET
+CONFIG SET latency-monitor-threshold 0
+DEBUG SLEEP 0.02
+LATENCY LATEST
+LATENCY DOCTOR
+FLUSHALL

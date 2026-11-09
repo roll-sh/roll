@@ -1,0 +1,83 @@
+{"native_thread":"/pi-sessions/session-1.jsonl"}
+{"model":"openrouter/deepseek/deepseek-v4-flash"}
+{"item":{"body":{"text":"","type":"reasoning"},"id":"t1:m1:c0","parent":null,"status":"running"}}
+{"text_delta":{"item":"t1:m1:c0","text":"The"}}
+{"text_delta":{"item":"t1:m1:c0","text":" user wants me to remember"}}
+{"text_delta":{"item":"t1:m1:c0","text":" the"}}
+{"text_delta":{"item":"t1:m1:c0","text":" opaque marker \"compaction-m"}}
+{"text_delta":{"item":"t1:m1:c0","text":"arker-4Z7Q"}}
+{"text_delta":{"item":"t1:m1:c0","text":"\" and"}}
+{"text_delta":{"item":"t1:m1:c0","text":" respond with exactly \""}}
+{"text_delta":{"item":"t1:m1:c0","text":"compaction marker stored\"."}}
+{"item":{"body":{"text":"","type":"message"},"id":"t1:m1:c1","parent":null,"status":"running"}}
+{"text_delta":{"item":"t1:m1:c1","text":"compaction marker stored"}}
+{"context":{"max_tokens":1048576,"used_tokens":1839}}
+{"item":{"body":{"text":"The user wants me to remember the opaque marker \"compaction-marker-4Z7Q\" and respond with exactly \"compaction marker stored\".","type":"reasoning"},"id":"t1:m1:c0","parent":null,"status":"completed"}}
+{"item":{"body":{"text":"compaction marker stored","type":"message"},"id":"t1:m1:c1","parent":null,"status":"completed"}}
+{"usage":{"cached_tokens":0,"cost_usd":0.0000784875,"input_tokens":1803,"output_tokens":36}}
+{"context":{"max_tokens":1048576,"total_processed_tokens":1839,"used_tokens":1839}}
+{"turn_ref":"9923aaa9"}
+{"turn_ended":"completed"}
+{"item":{"body":{"type":"compaction"},"id":"t2:compaction:1","parent":null,"status":"running"}}
+{"item":{"body":{"error":"Compaction failed: Nothing to compact (session too small)","type":"compaction"},"id":"t2:compaction:1","parent":null,"status":"failed"}}
+{"context":{"max_tokens":1048576,"total_processed_tokens":1839,"used_tokens":1839}}
+{"turn_ref":"9923aaa9"}
+{"turn_ended":"completed"}
+{"item":{"body":{"text":"","type":"reasoning"},"id":"t3:m1:c0","parent":null,"status":"running"}}
+{"text_delta":{"item":"t3:m1:c0","text":"The"}}
+{"text_delta":{"item":"t3:m1:c0","text":" user wants"}}
+{"text_delta":{"item":"t3:m1:c0","text":" me to respond with exactly"}}
+{"text_delta":{"item":"t3:m1:c0","text":" \"second compaction fixture turn\"."}}
+{"item":{"body":{"text":"","type":"message"},"id":"t3:m1:c1","parent":null,"status":"running"}}
+{"text_delta":{"item":"t3:m1:c1","text":"second compaction fixture turn"}}
+{"context":{"max_tokens":1048576,"used_tokens":1870}}
+{"item":{"body":{"text":"The user wants me to respond with exactly \"second compaction fixture turn\".","type":"reasoning"},"id":"t3:m1:c0","parent":null,"status":"completed"}}
+{"item":{"body":{"text":"second compaction fixture turn","type":"message"},"id":"t3:m1:c1","parent":null,"status":"completed"}}
+{"usage":{"cached_tokens":1792,"cost_usd":0.000019104904,"input_tokens":58,"output_tokens":20}}
+{"context":{"max_tokens":1048576,"total_processed_tokens":3709,"used_tokens":1870}}
+{"turn_ref":"70c802be"}
+{"turn_ended":"completed"}
+{"item":{"body":{"text":"","type":"reasoning"},"id":"t4:m1:c0","parent":null,"status":"running"}}
+{"text_delta":{"item":"t4:m1:c0","text":"The"}}
+{"text_delta":{"item":"t4:m1:c0","text":" user wants me to respond with"}}
+{"text_delta":{"item":"t4:m1:c0","text":" exactly \"third compaction fixture turn"}}
+{"text_delta":{"item":"t4:m1:c0","text":"\"."}}
+{"item":{"body":{"text":"","type":"message"},"id":"t4:m1:c1","parent":null,"status":"running"}}
+{"text_delta":{"item":"t4:m1:c1","text":"third compaction fixture turn"}}
+{"context":{"max_tokens":1048576,"used_tokens":1901}}
+{"item":{"body":{"text":"The user wants me to respond with exactly \"third compaction fixture turn\".","type":"reasoning"},"id":"t4:m1:c0","parent":null,"status":"completed"}}
+{"item":{"body":{"text":"third compaction fixture turn","type":"message"},"id":"t4:m1:c1","parent":null,"status":"completed"}}
+{"usage":{"cached_tokens":1792,"cost_usd":0.000020402564,"input_tokens":89,"output_tokens":20}}
+{"context":{"max_tokens":1048576,"total_processed_tokens":5610,"used_tokens":1901}}
+{"turn_ref":"705e1e5c"}
+{"turn_ended":"completed"}
+{"item":{"body":{"type":"compaction"},"id":"t5:compaction:1","parent":null,"status":"running"}}
+{"item":{"body":{"after_tokens":1890,"before_tokens":1901,"type":"compaction"},"id":"t5:compaction:1","parent":null,"status":"completed"}}
+{"context":{"max_tokens":1048576,"total_processed_tokens":7306,"used_tokens":1890}}
+{"turn_ref":"f5058450"}
+{"turn_ended":"completed"}
+{"item":{"body":{"text":"","type":"reasoning"},"id":"t6:m1:c0","parent":null,"status":"running"}}
+{"text_delta":{"item":"t6:m1:c0","text":"The"}}
+{"text_delta":{"item":"t6:m1:c0","text":" user is asking me to recall"}}
+{"text_delta":{"item":"t6:m1:c0","text":" the opaque marker that"}}
+{"text_delta":{"item":"t6:m1:c0","text":" was stored earlier"}}
+{"text_delta":{"item":"t6:m1:c0","text":" in the conversation"}}
+{"text_delta":{"item":"t6:m1:c0","text":". According"}}
+{"text_delta":{"item":"t6:m1:c0","text":" to the summary, the marker"}}
+{"text_delta":{"item":"t6:m1:c0","text":" value is \"compaction-m"}}
+{"text_delta":{"item":"t6:m1:c0","text":"arker-4Z7Q"}}
+{"text_delta":{"item":"t6:m1:c0","text":"\". I"}}
+{"text_delta":{"item":"t6:m1:c0","text":" need to respond with only"}}
+{"text_delta":{"item":"t6:m1:c0","text":" that marker."}}
+{"item":{"body":{"text":"","type":"message"},"id":"t6:m1:c1","parent":null,"status":"running"}}
+{"text_delta":{"item":"t6:m1:c1","text":"compaction"}}
+{"text_delta":{"item":"t6:m1:c1","text":"-marker-4Z7"}}
+{"text_delta":{"item":"t6:m1:c1","text":"Q"}}
+{"context":{"max_tokens":1048576,"used_tokens":2277}}
+{"item":{"body":{"text":"The user is asking me to recall the opaque marker that was stored earlier in the conversation. According to the summary, the marker value is \"compaction-marker-4Z7Q\". I need to respond with only that marker.","type":"reasoning"},"id":"t6:m1:c0","parent":null,"status":"completed"}}
+{"item":{"body":{"text":"compaction-marker-4Z7Q","type":"message"},"id":"t6:m1:c1","parent":null,"status":"completed"}}
+{"usage":{"cached_tokens":0,"cost_usd":0.0000977431,"input_tokens":2219,"output_tokens":58}}
+{"context":{"max_tokens":1048576,"total_processed_tokens":9583,"used_tokens":2277}}
+{"turn_ref":"ebd084d3"}
+{"turn_ended":"completed"}
+{"exited":null}

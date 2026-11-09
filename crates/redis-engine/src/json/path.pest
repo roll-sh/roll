@@ -1,0 +1,125 @@
+// JSONPath as RedisJSON 8.10 accepts it. Rule names and the order of alternatives are part of
+// the interface: syntax errors list the rules expected at the failing position by name.
+
+// Field names after `.` and in `..name`.
+literal = @{ ('a'..'z' | 'A'..'Z' | '0'..'9' | "-" | "_" | "`" | "+" | "#" | "%" | "$" | "^" | "/" | ":")+ }
+
+// Quoted strings: plain, or with `\\` and an escaped quote of the same kind.
+string = _{
+    ("'" ~ string_value ~ "'")
+  | ("\"" ~ string_value ~ "\"")
+  | ("\"" ~ string_value_escape_1 ~ "\"")
+  | ("'" ~ string_value_escape_2 ~ "'")
+}
+string_escape = @{ "\\" }
+string_value = @{ ((!("\"" | "\\" | "'") ~ ANY)+)* }
+string_value_escape_1 = @{ ((!("\"" | "\\") ~ ANY)+ | string_escape ~ ("\"" | "\\"))* }
+string_value_escape_2 = @{ ((!("'" | "\\") ~ ANY)+ | string_escape ~ ("'" | "\\"))* }
+
+string_list = { string ~ ("," ~ string)* }
+
+pos_number = @{ ASCII_NONZERO_DIGIT ~ ASCII_DIGIT* }
+number = @{ "-"? ~ ASCII_NONZERO_DIGIT ~ ASCII_DIGIT* | "-"? ~ ASCII_DIGIT }
+decimal = @{ number ~ ("." ~ ASCII_DIGIT+)? }
+numbers_list = { number ~ ("," ~ number)* }
+
+// Slices: [:end], [:], [start:], [start:end], each with an optional :step.
+numbers_range = { (full_range | right_range | all_range | left_range) }
+right_range = { ":" ~ number ~ ((":" ~ pos_number) | ":")? }
+all_range = { ":" ~ ((":" ~ pos_number) | ":")? }
+left_range = { number ~ ":" ~ ((":" ~ pos_number) | ":")? }
+full_range = { number ~ ":" ~ number ~ ((":" ~ pos_number) | ":")? }
+
+from_current = { "@" ~ root? }
+from_root = { "$" ~ root? }
+select_term = _{ from_current | from_root }
+
+// Comparison operators; the word operators end at a word boundary.
+op = _{ ge | gt | le | lt | eq | ne | re | in_op | nin_op | subsetof_op | anyof_op | noneof_op | size_op | empty_op }
+ge = @{ ">=" }
+gt = @{ ">" }
+le = @{ "<=" }
+lt = @{ "<" }
+eq = @{ "==" }
+ne = @{ "!=" }
+re = @{ "=~" }
+in_op = @{ "in" ~ !(ASCII_ALPHANUMERIC | "_") }
+nin_op = @{ "nin" ~ !(ASCII_ALPHANUMERIC | "_") }
+subsetof_op = @{ "subsetof" ~ !(ASCII_ALPHANUMERIC | "_") }
+anyof_op = @{ "anyof" ~ !(ASCII_ALPHANUMERIC | "_") }
+noneof_op = @{ "noneof" ~ !(ASCII_ALPHANUMERIC | "_") }
+size_op = @{ ("sizeof" | "size") ~ !(ASCII_ALPHANUMERIC | "_") }
+empty_op = @{ "empty" ~ !(ASCII_ALPHANUMERIC | "_") }
+
+boolean = _{ boolean_true | boolean_false }
+boolean_true = @{ "true" }
+boolean_false = @{ "false" }
+null = @{ "null" }
+
+// JSON literals as operands.
+array_literal = { "[" ~ (json_value ~ ("," ~ json_value)*)? ~ "]" }
+object_literal = { "{" ~ (object_member ~ ("," ~ object_member)*)? ~ "}" }
+object_member = { string ~ ":" ~ json_value }
+json_value = _{ decimal | string | boolean | null | array_literal | object_literal }
+
+function_name = @{ ASCII_ALPHA ~ (ASCII_ALPHANUMERIC | "_")* }
+function_call = { function_name ~ "(" ~ (term ~ ("," ~ term)*)? ~ ")" }
+
+term = _{ select_term | decimal | string | boolean | null | array_literal | object_literal | function_call }
+
+// Arithmetic: unary signs, then * / %, then + -. Binary operators need surrounding spaces in
+// practice, since + - / % are field-name characters.
+add = @{ "+" }
+sub = @{ "-" }
+mul = @{ "*" }
+div = @{ "/" }
+rem = @{ "%" }
+add_op = _{ add | sub }
+mul_op = _{ mul | div | rem }
+neg = @{ "-" }
+pos = @{ "+" }
+unary_op = _{ neg | pos }
+// `.name(args)` applied to what precedes it.
+postfix_method = { "." ~ function_name ~ "(" ~ (arith_expr ~ ("," ~ arith_expr)*)? ~ ")" }
+// `~`: the member names of an object.
+get_keys_op = { "~" }
+method_chain = { term ~ get_keys_op | term ~ postfix_method+ }
+arith_primary = _{ "(" ~ arith_expr ~ ")" | method_chain | term }
+arith_factor = { unary_op? ~ arith_primary }
+arith_term = { arith_factor ~ (mul_op ~ arith_factor)* }
+arith_expr = { arith_term ~ (add_op ~ arith_term)* }
+
+single_filter = { arith_expr ~ op ~ arith_expr | arith_expr }
+
+filter_relation = _{ and | or }
+and = { "&&" }
+or = { "||" }
+
+negation = { "!" ~ inner_filter }
+inner_filter = _{ negation | single_filter | "(" ~ filter ~ ")" }
+filter = { inner_filter ~ (filter_relation ~ inner_filter)* }
+
+all = { "*" }
+full_scan = { ".." }
+
+bracket = _{ numbers_range | numbers_list | string_list | all | "?" ~ filter }
+
+// `.name` (unless it is a method call), `..name` / `..*` / `..[…]`, `.*`, `[…]` or `.[…]`.
+element = _{
+    "." ~ !(function_name ~ "(") ~ literal
+  | full_scan ~ (literal | all | "[" ~ bracket ~ "]")
+  | "." ~ all
+  | ("."? ~ "[" ~ bracket ~ "]")
+}
+
+// Word operators can't start a path without a dot.
+op_keyword = @{ ("in" | "nin" | "subsetof" | "anyof" | "noneof" | "sizeof" | "size" | "empty") ~ !(ASCII_ALPHANUMERIC | "_") }
+first_element = _{ (!op_keyword ~ literal) | all }
+
+root = { (element | first_element) ~ element* }
+simple_root = { "." ~ literal }
+
+query = _{ SOI ~ arith_expr ~ EOI }
+simple_query = _{ SOI ~ "$" ~ simple_root ~ EOI }
+
+WHITESPACE = _{ " " }

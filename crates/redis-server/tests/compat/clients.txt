@@ -1,0 +1,363 @@
+# CLIENT: introspection (LIST/INFO with volatile fields masked), names and library info, KILL,
+# UNBLOCK, PAUSE, REPLY, and client-side caching (TRACKING with its invalidation messages).
+
+# ---- argument errors and HELP ----
+CLIENT
+CLIENT HELP
+CLIENT NOPE
+CLIENT ID x
+CLIENT GETNAME x
+CLIENT SETNAME
+CLIENT SETNAME "a b"
+CLIENT SETNAME "a\nb"
+CLIENT SETINFO
+CLIENT SETINFO lib-name
+CLIENT SETINFO foo bar
+CLIENT SETINFO lib-name "a b"
+CLIENT SETINFO lib-ver "a\nb"
+CLIENT LIST TYPE
+CLIENT LIST TYPE nope
+CLIENT LIST ID
+CLIENT LIST ID x
+CLIENT LIST ID 0
+CLIENT LIST FOO
+CLIENT KILL
+CLIENT KILL nope
+CLIENT KILL ID x
+CLIENT KILL ID 999999
+CLIENT KILL ADDR 1.2.3.4:5
+CLIENT KILL TYPE nope
+CLIENT KILL MAXAGE x
+CLIENT KILL SKIPME maybe
+CLIENT KILL 1.2.3.4:5
+CLIENT UNBLOCK
+CLIENT UNBLOCK x
+CLIENT UNBLOCK 999999
+CLIENT UNBLOCK 999999 NOPE
+CLIENT UNBLOCK 999999 ERROR extra
+CLIENT PAUSE
+CLIENT PAUSE x
+CLIENT PAUSE -1
+CLIENT PAUSE 10 NOPE
+CLIENT PAUSE 10 WRITE extra
+CLIENT UNPAUSE x
+CLIENT REPLY
+CLIENT REPLY NOPE
+CLIENT NO-EVICT
+CLIENT NO-EVICT maybe
+CLIENT NO-TOUCH
+CLIENT NO-TOUCH maybe
+CLIENT CACHING
+CLIENT CACHING yes
+CLIENT GETREDIR x
+CLIENT TRACKINGINFO x
+CLIENT TRACKING
+CLIENT TRACKING maybe
+CLIENT TRACKING on REDIRECT
+CLIENT TRACKING on REDIRECT x
+CLIENT TRACKING on REDIRECT 999999
+CLIENT TRACKING on NOPE
+CLIENT TRACKING on PREFIX a
+CLIENT TRACKING on OPTIN OPTOUT
+CLIENT TRACKING on BCAST OPTIN
+CLIENT TRACKING off PREFIX a
+
+# ---- names and library info ----
+CLIENT GETNAME
+CLIENT SETNAME conn1
+CLIENT GETNAME
+CLIENT SETINFO lib-name mylib
+CLIENT SETINFO LIB-VER 1.2.3
+!mask id,addr,laddr,fd,age,idle,qbuf,qbuf-free,argv-mem,rbs,rbp,obl,oll,omem,tot-mem,tot-net-in,tot-net-out,tot-cmds,read-events,avg-pipeline-len-sum,avg-pipeline-len-cnt,io-thread CLIENT INFO
+!mask id,addr,laddr,fd,age,idle,qbuf,qbuf-free,argv-mem,rbs,rbp,obl,oll,omem,tot-mem,tot-net-in,tot-net-out,tot-cmds,read-events,avg-pipeline-len-sum,avg-pipeline-len-cnt,io-thread CLIENT LIST ID {id:1}
+CLIENT SETNAME ""
+CLIENT GETNAME
+CLIENT SETINFO lib-name ""
+!mask id,addr,laddr,fd,age,idle,qbuf,qbuf-free,argv-mem,rbs,rbp,obl,oll,omem,tot-mem,tot-net-in,tot-net-out,tot-cmds,read-events,avg-pipeline-len-sum,avg-pipeline-len-cnt,io-thread CLIENT INFO
+!ids CLIENT ID
+CLIENT LIST ID 999999
+@conn 2
+CLIENT SETNAME second
+@conn 1
+!mask addr,laddr,fd,age,idle,qbuf,qbuf-free,argv-mem,rbs,rbp,obl,oll,omem,tot-mem,tot-net-in,tot-net-out,tot-cmds,read-events,avg-pipeline-len-sum,avg-pipeline-len-cnt,io-thread !ids CLIENT LIST ID {id:2} {id:1}
+!mask addr,laddr,fd,age,idle,qbuf,qbuf-free,argv-mem,rbs,rbp,obl,oll,omem,tot-mem,tot-net-in,tot-net-out,tot-cmds,read-events,avg-pipeline-len-sum,avg-pipeline-len-cnt,io-thread !ids CLIENT LIST TYPE pubsub
+
+# ---- flags: MULTI, subscriptions, watch ----
+SET w 1
+WATCH w
+!mask id,addr,laddr,fd,age,idle,qbuf,qbuf-free,argv-mem,rbs,rbp,obl,oll,omem,tot-mem,tot-net-in,tot-net-out,tot-cmds,read-events,avg-pipeline-len-sum,avg-pipeline-len-cnt,io-thread,multi-mem CLIENT INFO
+MULTI
+CLIENT INFO
+!mask id,addr,laddr,fd,age,idle,qbuf,qbuf-free,argv-mem,rbs,rbp,obl,oll,omem,tot-mem,tot-net-in,tot-net-out,tot-cmds,read-events,avg-pipeline-len-sum,avg-pipeline-len-cnt,io-thread EXEC
+UNWATCH
+@conn 3
+SUBSCRIBE ch1 ch2
+PSUBSCRIBE p*
+@conn 1
+!mask addr,laddr,fd,age,idle,qbuf,qbuf-free,argv-mem,rbs,rbp,obl,oll,omem,tot-mem,tot-net-in,tot-net-out,tot-cmds,read-events,avg-pipeline-len-sum,avg-pipeline-len-cnt,io-thread !ids CLIENT LIST ID {id:3}
+!mask addr,laddr,fd,age,idle,qbuf,qbuf-free,argv-mem,rbs,rbp,obl,oll,omem,tot-mem,tot-net-in,tot-net-out,tot-cmds,read-events,avg-pipeline-len-sum,avg-pipeline-len-cnt,io-thread !ids CLIENT LIST TYPE pubsub
+CLIENT NO-EVICT on
+CLIENT NO-TOUCH on
+!mask id,addr,laddr,fd,age,idle,qbuf,qbuf-free,argv-mem,rbs,rbp,obl,oll,omem,tot-mem,tot-net-in,tot-net-out,tot-cmds,read-events,avg-pipeline-len-sum,avg-pipeline-len-cnt,io-thread CLIENT INFO
+CLIENT NO-EVICT off
+CLIENT NO-TOUCH off
+
+# ---- KILL ----
+CLIENT KILL ID {id:3}
+CLIENT KILL ID {id:3}
+@conn 4
+CLIENT SETNAME victim
+@conn 1
+CLIENT KILL ID {id:4} SKIPME yes
+CLIENT KILL ID {id:1} SKIPME yes
+@conn 5
+PING
+@conn 1
+CLIENT KILL ID {id:5} USER default LADDR nope
+CLIENT KILL ID {id:5} USER nobody
+CLIENT KILL ID {id:5} MAXAGE 100000
+CLIENT KILL ID {id:5} TYPE pubsub
+CLIENT KILL ID {id:5} TYPE normal
+@conn 6
+CLIENT KILL ID {id:6} SKIPME no
+@conn 1
+PING
+
+# ---- UNBLOCK ----
+@conn 7
+!send BLPOP never 0
+@sleep 50
+@conn 1
+CLIENT UNBLOCK {id:7}
+@conn 7
+@recv
+!send BLPOP never 0
+@sleep 50
+@conn 1
+!mask addr,laddr,fd,age,idle,qbuf,qbuf-free,argv-mem,rbs,rbp,obl,oll,omem,tot-mem,tot-net-in,tot-net-out,tot-cmds,read-events,avg-pipeline-len-sum,avg-pipeline-len-cnt,io-thread !ids CLIENT LIST ID {id:7}
+CLIENT UNBLOCK {id:7} ERROR
+CLIENT UNBLOCK {id:7} ERROR
+@conn 7
+@recv
+!send BLPOP never 0
+@sleep 50
+@conn 1
+CLIENT UNBLOCK {id:7} TIMEOUT
+@conn 7
+@recv
+
+# ---- PAUSE: WRITE postpones writes only; ALL postpones everything ----
+@conn 1
+CLIENT PAUSE 300 WRITE
+@conn 8
+GET w
+!send SET w 2
+@sleep 50
+@conn 1
+GET w
+!mask addr,laddr,fd,age,idle,qbuf,qbuf-free,argv-mem,rbs,rbp,obl,oll,omem,tot-mem,tot-net-in,tot-net-out,tot-cmds,read-events,avg-pipeline-len-sum,avg-pipeline-len-cnt,io-thread !ids CLIENT LIST ID {id:8}
+CLIENT UNPAUSE
+@conn 8
+@recv
+GET w
+@conn 1
+CLIENT PAUSE 200
+@conn 8
+!send GET w
+@sleep 400
+@recv
+@conn 1
+CLIENT PAUSE 100000 WRITE
+GET w
+CLIENT UNPAUSE
+EVAL "#!lua flags=no-writes\nreturn 1" 0
+CLIENT PAUSE 300 WRITE
+@conn 8
+!send EVAL "#!lua flags=no-writes\nreturn redis.call('GET', 'w')" 0
+@recv
+!send EVAL "return 1" 0
+@sleep 50
+@conn 1
+CLIENT UNPAUSE
+@conn 8
+@recv
+
+# ---- REPLY ----
+@conn 9
+!send CLIENT REPLY SKIP
+!send SET r 1
+GET r
+!send CLIENT REPLY OFF
+!send SET r 2
+!send GET r
+CLIENT REPLY ON
+GET r
+
+# ---- TRACKING (RESP3): the default mode remembers read keys ----
+@conn 10
+@resp 3
+CLIENT TRACKING on
+CLIENT TRACKINGINFO
+CLIENT GETREDIR
+SET t1 a
+GET t1
+@conn 1
+SET t1 b
+@conn 10
+@recv
+SET t1 c
+GET t1
+SET t1 d
+@recv
+MGET t1 t2
+@conn 1
+MSET t1 x t2 y
+@conn 10
+@recv
+@recv
+# Writes alone don't make a key tracked.
+SET t3 v
+@conn 1
+SET t3 w
+@conn 10
+PING
+GET t1
+@conn 1
+FLUSHALL
+@conn 10
+@recv
+CLIENT TRACKING off
+CLIENT TRACKINGINFO
+
+# ---- NOLOOP ----
+CLIENT TRACKING on NOLOOP
+CLIENT TRACKINGINFO
+GET n1
+SET n1 x
+PING
+GET n1
+@conn 1
+SET n1 y
+@conn 10
+@recv
+CLIENT TRACKING off
+
+# ---- OPTIN / OPTOUT ----
+CLIENT TRACKING on OPTIN
+CLIENT TRACKINGINFO
+GET o1
+CLIENT CACHING yes
+CLIENT CACHING no
+GET o2
+@conn 1
+MSET o1 1 o2 2
+@conn 10
+@recv
+PING
+CLIENT CACHING yes
+PING
+GET o1
+@conn 1
+SET o1 3
+@conn 10
+PING
+CLIENT TRACKING off
+CLIENT TRACKING on OPTOUT
+CLIENT TRACKINGINFO
+CLIENT CACHING yes
+CLIENT CACHING no
+GET o3
+GET o4
+@conn 1
+MSET o3 1 o4 2
+@conn 10
+@recv
+CLIENT TRACKING off
+
+# ---- BCAST with prefixes ----
+CLIENT TRACKING on BCAST PREFIX a: PREFIX b:
+CLIENT TRACKINGINFO
+CLIENT TRACKING on BCAST PREFIX a
+CLIENT TRACKING on BCAST PREFIX a:x
+CLIENT TRACKING on BCAST PREFIX c:
+CLIENT TRACKINGINFO
+@conn 1
+SET a:1 x
+@conn 10
+@recv
+@conn 1
+MSET b:1 x b:2 y zz 1
+@conn 10
+@recv
+@conn 1
+MULTI
+SET c:1 1
+SET c:2 2
+EXEC
+@conn 10
+@recv
+SET a:self v
+@recv
+CLIENT TRACKING off
+CLIENT TRACKING on BCAST NOLOOP
+SET own v
+PING
+@conn 1
+SET other v
+@conn 10
+@recv
+CLIENT TRACKING off
+
+# ---- REDIRECT to a RESP2 connection subscribed to __redis__:invalidate ----
+@conn 11
+SUBSCRIBE __redis__:invalidate
+@conn 12
+CLIENT TRACKING on REDIRECT {id:11}
+!ids CLIENT GETREDIR
+!ids CLIENT TRACKINGINFO
+GET rd1
+@conn 1
+SET rd1 x
+@conn 11
+@recv
+@conn 12
+CLIENT TRACKING on BCAST REDIRECT {id:11}
+CLIENT TRACKING off
+CLIENT TRACKING on BCAST REDIRECT {id:11}
+@conn 1
+SET rd2 x
+@conn 11
+@recv
+@conn 1
+FLUSHDB
+@conn 11
+@recv
+@conn 12
+CLIENT TRACKING off
+!ids CLIENT GETREDIR
+
+# ---- a broken redirect ----
+@conn 13
+PING
+@conn 14
+@resp 3
+CLIENT TRACKING on REDIRECT {id:13}
+GET br1
+@conn 1
+CLIENT KILL ID {id:13}
+SET br1 x
+@conn 14
+@recv ids
+!ids CLIENT TRACKINGINFO
+!ids CLIENT GETREDIR
+CLIENT TRACKING off
+
+# ---- RESP2 tracking without a redirect: nothing is sent (no push channel) ----
+@conn 15
+CLIENT TRACKING on
+GET r2k
+@conn 1
+SET r2k x
+@conn 15
+PING
+CLIENT TRACKING off

@@ -1,0 +1,518 @@
+# Streams: XADD, XRANGE/XREVRANGE, XLEN, XDEL, XTRIM, XSETID, XINFO STREAM, IDMP, errors.
+
+# ---- XADD basics ----
+XADD s 1-1 a 1
+XADD s 1-2 a 2 b 3
+XADD s 2-0 a 4
+XADD s 2-* a 5
+XADD s 2-* a 6
+XADD s 3 c 7
+XLEN s
+XRANGE s - +
+XREVRANGE s + -
+TYPE s
+OBJECT ENCODING s
+!type XADD s * f v
+XLEN s
+
+# equal or smaller IDs
+XADD s 3-0 x y
+XADD s 1-5 x y
+XADD s 2-* x y
+XADD t 0-0 a b
+XADD t 0-* a b
+XADD t 0-* a b
+XADD t 0-1 a b
+XRANGE t - +
+XADD t 18446744073709551615-18446744073709551615 a b
+XADD t * a b
+XADD t 18446744073709551615-* a b
+XADD u 5-18446744073709551615 a b
+XADD u 5-* a b
+XADD u 6-* a b
+
+# invalid IDs
+XADD v - a b
+XADD v + a b
+XADD v abc a b
+XADD v 1-x a b
+XADD v -1 a b
+XADD v 1--1 a b
+XADD v 1-01 a b
+XADD v 01-1 a b
+XADD v " 5" a b
+XADD v +7 a b
+XADD v 1-*x a b
+XADD v *-1 a b
+XADD v 1-2-3 a b
+XADD v 18446744073709551616 a b
+XRANGE v - +
+EXISTS v
+
+# arity / fields
+XADD s 10-0 a
+XADD s 10-0 a b c
+XADD s 10-0
+XADD s MAXLEN 5
+XADD s NOMKSTREAM
+XADD
+
+# NOMKSTREAM
+XADD nokey NOMKSTREAM 1-0 a b
+EXISTS nokey
+XADD s NOMKSTREAM 20-0 a b
+XLEN s
+
+# wrong type
+SET str x
+XADD str 1-0 a b
+XLEN str
+XRANGE str - +
+XREVRANGE str + -
+XDEL str 1-0
+XTRIM str MAXLEN 0
+XSETID str 1-0
+XINFO STREAM str
+XINFO GROUPS str
+
+# ---- XRANGE details ----
+DEL r
+XADD r 1-0 a 1
+XADD r 1-1 a 2
+XADD r 2-0 a 3
+XADD r 2-5 a 4
+XADD r 3-0 a 5
+XRANGE r 1 2
+XRANGE r 2 2
+XRANGE r (1-0 (3-0
+XRANGE r (1 +
+XRANGE r - (2
+XRANGE r - + COUNT 2
+XRANGE r - + COUNT 0
+XRANGE r - + COUNT -1
+XRANGE r - + COUNT 2 COUNT 1
+XRANGE r - + COUNT
+XRANGE r - + LIMIT 2
+XRANGE r - + COUNT x
+XRANGE r 3 1
+XRANGE r (- +
+XRANGE r - (+
+XRANGE r ( +
+XRANGE r (18446744073709551615-18446744073709551615 +
+XRANGE r - (0-0
+XRANGE r x +
+XRANGE r - y
+XRANGE r 0-0 0-0
+XRANGE r 18446744073709551615 +
+XREVRANGE r + - COUNT 2
+XREVRANGE r (3 (1
+XREVRANGE r 2 2
+XREVRANGE r - +
+XREVRANGE r + - COUNT 0
+XRANGE missing - +
+XRANGE missing - + COUNT 0
+XREVRANGE missing + -
+XLEN missing
+
+# binary-ish and numeric values
+XADD bin 1-0 "" "" f " spaced value " 123 -45 9223372036854775807 x
+XRANGE bin - +
+
+# ---- XDEL ----
+DEL d
+XADD d 1-0 a 1
+XADD d 2-0 a 2
+XADD d 3-0 a 3
+XDEL d 2-0
+XDEL d 2-0 9-9
+XDEL d 1 3
+XDEL d foo
+XDEL missing 1-0
+XDEL missing foo
+XLEN d
+XINFO STREAM d
+EXISTS d
+XADD d 2-0 a b
+XADD d 4-0 a b
+XINFO STREAM d
+XDEL d -
+XDEL d +
+
+# ---- XTRIM / MAXLEN / MINID ----
+DEL tr
+XADD tr 1-0 a 1
+XADD tr 2-0 a 2
+XADD tr 3-0 a 3
+XADD tr 4-0 a 4
+XADD tr 5-0 a 5
+XTRIM tr MAXLEN 3
+XRANGE tr - +
+XTRIM tr MAXLEN = 2
+XTRIM tr MINID 5
+XRANGE tr - +
+XTRIM tr MINID = 0
+XTRIM tr MAXLEN ~ 0
+XTRIM tr MAXLEN 0
+XINFO STREAM tr
+XTRIM missing MAXLEN 0
+XTRIM tr
+XTRIM tr FOO
+XTRIM tr MAXLEN
+XTRIM tr MAXLEN -1
+XTRIM tr MAXLEN x
+XTRIM tr MAXLEN 1 MINID 2
+XTRIM tr MINID 1 MAXLEN 2
+XTRIM tr MINID -
+XTRIM tr MINID 1-*
+XTRIM tr LIMIT 10
+XTRIM tr MAXLEN 1 LIMIT 10
+XTRIM tr MAXLEN ~ 1 LIMIT -1
+XTRIM tr MAXLEN ~ 1 LIMIT x
+XTRIM tr MAXLEN 1 LIMIT 0
+XTRIM tr MAXLEN 1 KEEPREF DELREF
+XTRIM tr MAXLEN 1 ACKED
+XTRIM tr MAXLEN 1 NOMKSTREAM
+XTRIM tr MAXLEN ~
+XTRIM tr MAXLEN ~ 5 ~
+
+# XADD with trimming
+DEL xt
+XADD xt MAXLEN 2 1-0 a 1
+XADD xt MAXLEN 2 2-0 a 2
+XADD xt MAXLEN 2 3-0 a 3
+XRANGE xt - +
+XADD xt MINID 3 4-0 a 4
+XADD xt MINID = 4 5-0 a 5
+XRANGE xt - +
+XADD xt MAXLEN 1 MINID 1 6-0 a b
+XADD xt LIMIT 5 7-0 a b
+XADD xt MAXLEN 1 LIMIT 5 7-0 a b
+XADD xt MAXLEN ~ 1 LIMIT 5 7-0 a b
+XRANGE xt - +
+XADD xt KEEPREF DELREF 8-0 a b
+XADD xt ACKED 8-0 a b
+XADD xt NOMKSTREAM NOMKSTREAM 9-0 a b
+XRANGE xt - +
+XADD xt MAXLEN -1 10-0 a b
+XADD xt MAXLEN x 10-0 a b
+XADD xt MINID x 10-0 a b
+XADD xt LIMIT x 10-0 a b
+XADD xt LIMIT -1 10-0 a b
+
+# approximate trimming works on whole nodes (100 entries per node by default)
+CONFIG SET stream-node-max-entries 10
+DEL ap
+XADD ap 1-0 f v
+XADD ap 2-0 f v
+XADD ap 3-0 f v
+XADD ap 4-0 f v
+XADD ap 5-0 f v
+XADD ap 6-0 f v
+XADD ap 7-0 f v
+XADD ap 8-0 f v
+XADD ap 9-0 f v
+XADD ap 10-0 f v
+XADD ap 11-0 f v
+XADD ap 12-0 f v
+XADD ap 13-0 f v
+XADD ap 14-0 f v
+XADD ap 15-0 f v
+XADD ap 16-0 f v
+XADD ap 17-0 f v
+XADD ap 18-0 f v
+XADD ap 19-0 f v
+XADD ap 20-0 f v
+XADD ap 21-0 f v
+XADD ap 22-0 f v
+XADD ap 23-0 f v
+XADD ap 24-0 f v
+XADD ap 25-0 f v
+XINFO STREAM ap
+XTRIM ap MAXLEN ~ 20
+XLEN ap
+XTRIM ap MAXLEN ~ 12
+XLEN ap
+XTRIM ap MAXLEN ~ 4
+XLEN ap
+XINFO STREAM ap
+XTRIM ap MINID ~ 23
+XLEN ap
+XTRIM ap MINID ~ 25
+XLEN ap
+XTRIM ap MINID ~ 26
+XLEN ap
+XINFO STREAM ap
+DEL ap
+XADD ap 1-0 f v
+XADD ap 2-0 f v
+XADD ap 3-0 f v
+XADD ap 4-0 f v
+XADD ap 5-0 f v
+XADD ap 6-0 f v
+XADD ap 7-0 f v
+XADD ap 8-0 f v
+XADD ap 9-0 f v
+XADD ap 10-0 f v
+XADD ap 11-0 f v
+XADD ap 12-0 f v
+XADD ap 13-0 f v
+XADD ap 14-0 f v
+XADD ap 15-0 f v
+XADD ap 16-0 f v
+XADD ap 17-0 f v
+XADD ap 18-0 f v
+XADD ap 19-0 f v
+XADD ap 20-0 f v
+XADD ap 21-0 f v
+XADD ap 22-0 f v
+XADD ap 23-0 f v
+XTRIM ap MAXLEN ~ 0 LIMIT 5
+XLEN ap
+XTRIM ap MAXLEN ~ 0 LIMIT 10
+XLEN ap
+XTRIM ap MAXLEN ~ 0 LIMIT 0
+XLEN ap
+XINFO STREAM ap
+DEL ap
+XADD ap 1-0 f v
+XADD ap 2-0 f v
+XADD ap 3-0 f v
+XADD ap 4-0 f v
+XADD ap 5-0 f v
+XADD ap 6-0 f v
+XADD ap 7-0 f v
+XADD ap 8-0 f v
+XADD ap 9-0 f v
+XADD ap 10-0 f v
+XADD ap 11-0 f v
+XADD ap MAXLEN ~ 1 12-0 f v
+XLEN ap
+XADD ap MAXLEN ~ 1 LIMIT 1 13-0 f v
+XLEN ap
+XDEL ap 12-0
+XINFO STREAM ap
+CONFIG SET stream-node-max-entries 100
+
+# node splits by bytes
+CONFIG SET stream-node-max-bytes 100
+DEL nb
+XADD nb 1-0 field value-aaaaaaaaaaaaaaaaaaaa
+XADD nb 2-0 field value-aaaaaaaaaaaaaaaaaaaa
+XADD nb 3-0 field value-aaaaaaaaaaaaaaaaaaaa
+XADD nb 4-0 field value-aaaaaaaaaaaaaaaaaaaa
+XADD nb 5-0 other 12345
+XADD nb 6-0 other 12345 more 1
+XADD nb 7-0 field value-aaaaaaaaaaaaaaaaaaaa
+XADD nb 8-0 field value-aaaaaaaaaaaaaaaaaaaa
+XINFO STREAM nb
+XTRIM nb MAXLEN ~ 1
+XINFO STREAM nb
+CONFIG SET stream-node-max-bytes 0
+DEL nb
+XADD nb 1-0 a b
+XADD nb 2-0 a b
+XINFO STREAM nb
+CONFIG SET stream-node-max-bytes 4096
+
+# ---- XSETID ----
+DEL si
+XADD si 5-0 a b
+XSETID si 4-0
+XSETID si 5-0
+XSETID si 10-0
+XINFO STREAM si
+XADD si 9-0 a b
+XADD si 12-* a b
+XSETID si 20-0 ENTRIESADDED 0
+XSETID si 20-0 ENTRIESADDED 5 MAXDELETEDID 15-0
+XINFO STREAM si
+XSETID si 14-0
+XSETID si 30-0 MAXDELETEDID 31-0
+XSETID si 30-0 ENTRIESADDED -1
+XSETID si 30-0 ENTRIESADDED x
+XSETID si 30-0 FOO 1
+XSETID si 30-0 ENTRIESADDED
+XSETID si -
+XSETID si +
+XSETID si foo
+XSETID missing 1-0
+XSETID missing 1-0 ENTRIESADDED -1
+DEL si2
+XADD si2 1-0 a b
+XDEL si2 1-0
+XSETID si2 0-1
+XSETID si2 1-0
+XINFO STREAM si2
+!type XADD si2 * a b
+
+# ---- XINFO STREAM ----
+DEL in
+XINFO STREAM in
+XADD in 1-0 a 1 b 2
+XADD in 2-0 a 3
+XINFO STREAM in
+XINFO STREAM in FULL
+XINFO STREAM in FULL COUNT 1
+XINFO STREAM in FULL COUNT 0
+XINFO STREAM in FULL COUNT -5
+XINFO STREAM in FULL COUNT x
+XINFO STREAM in FULL x
+XINFO STREAM in COUNT 1
+XINFO STREAM in FULL COUNT 1 2
+XINFO STREAM in full count 1
+XINFO STREAM
+XINFO HELP
+XINFO HELP x
+XINFO FOO in
+XINFO
+XINFO GROUPS in
+XINFO GROUPS missing
+XINFO CONSUMERS missing g
+XINFO CONSUMERS in g
+XINFO STREAM missing FULL x
+
+# ---- monotonic auto IDs after explicit future IDs ----
+DEL fut
+XADD fut 99999999999999-5 a b
+XADD fut * a b
+XADD fut * a b
+XRANGE fut - +
+XADD fut 99999999999999-* a b
+
+# ---- IDMP ----
+# IDs far in the future keep auto IDs deterministic and IIDs from expiring.
+DEL id
+XADD id 99999999999990-0 seed x
+XADD id IDMP p1 i1 * a 1
+XLEN id
+XADD id IDMP p1 i1 * a 2
+XLEN id
+XADD id IDMP p1 i2 1-0 a 2
+XADD id IDMP p1 i2 99999999999999-0 a 2
+XADD id IDMP "" i2 * a 2
+XADD id IDMP p1 "" * a 2
+XADD id IDMPAUTO "" * a 2
+XADD id IDMP p1 i3 IDMP p1 i4 * a 2
+XADD id IDMPAUTO p1 IDMP p1 i4 * a 2
+XADD id IDMP p1 * a 2
+XADD id IDMP p1 i9
+XADD id IDMPAUTO p2 * a 1 b 2
+XADD id IDMPAUTO p2 * b 2 a 1
+XADD id IDMPAUTO p2 * b 2 a 3
+XADD id IDMPAUTO p2 * a 1 b 2 a 1 b 2
+XADD id IDMPAUTO p2 * ab "" a b
+XADD id IDMPAUTO p2 * a b ab ""
+XADD id IDMP p3 i1 MAXLEN 100 * a 1
+XADD id MAXLEN 100 IDMP p3 i1 * a 1
+XADD id NOMKSTREAM IDMP p3 i2 * a 1
+XLEN id
+XINFO STREAM id
+XCFGSET id IDMP-DURATION 100
+XINFO STREAM id
+XCFGSET id IDMP-DURATION 50
+XINFO STREAM id
+XCFGSET id IDMP-DURATION 50 IDMP-MAXSIZE 2
+XADD id IDMP p1 i1 * a 1
+XADD id IDMP p1 i2 * a 1
+XADD id IDMP p1 i3 * a 1
+XADD id IDMP p1 i1 * a 1
+XADD id IDMP p1 i3 * a 1
+XLEN id
+XINFO STREAM id
+XINFO STREAM id FULL
+XCFGSET id
+XCFGSET id IDMP-DURATION 0
+XCFGSET id IDMP-DURATION 86401
+XCFGSET id IDMP-MAXSIZE 0
+XCFGSET id IDMP-MAXSIZE 10001
+XCFGSET id IDMP-MAXSIZE x
+XCFGSET id IDMP-DURATION 5 IDMP-DURATION 6
+XCFGSET id IDMP-MAXSIZE 5 IDMP-MAXSIZE 6
+XCFGSET id FOO 1
+XCFGSET id IDMP-DURATION
+XCFGSET missing IDMP-DURATION 5
+XCFGSET str IDMP-DURATION 5
+!sort CONFIG GET stream-idmp-*
+CONFIG SET stream-idmp-duration 0
+CONFIG SET stream-idmp-maxsize 20000
+CONFIG SET stream-idmp-duration 200
+DEL id2
+XADD id2 99999999999990-0 a b
+XINFO STREAM id2
+CONFIG SET stream-idmp-duration 100
+XIDMPRECORD id2 p1 i1 99999999999990-0
+XIDMPRECORD id2 p1 i1 99999999999990-0
+XIDMPRECORD id2 p1 i1 99999999999990-1
+XADD id2 99999999999990-1 c d
+XIDMPRECORD id2 p1 i1 99999999999990-1
+XIDMPRECORD id2 p1 i2 99999999999990-1
+XIDMPRECORD id2 "" i1 99999999999990-0
+XIDMPRECORD id2 p1 "" 99999999999990-0
+XIDMPRECORD id2 p1 i1 x
+XIDMPRECORD id2 p1 i1 -
+XIDMPRECORD missing p1 i1 1-0
+XIDMPRECORD str p1 i1 1-0
+XADD id2 IDMP p1 i1 * e f
+XADD id2 IDMP p1 i2 * e f
+XINFO STREAM id2
+XDEL id2 99999999999990-0
+XADD id2 IDMP p1 i1 * e f
+XINFO STREAM id2
+
+# ---- RESP3 ----
+@resp 3
+XRANGE r - + COUNT 2
+XRANGE r - + COUNT 0
+XRANGE missing - +
+XINFO STREAM in
+XINFO STREAM in FULL
+XADD nokey NOMKSTREAM 1-0 a b
+XINFO STREAM bin
+@resp 2
+
+# ---- keyspace notifications ----
+CONFIG SET notify-keyspace-events KEA
+@conn 2
+PSUBSCRIBE __keyevent@0__:*
+@conn 1
+DEL ev
+XADD ev 1-0 a b
+@conn 2
+@recv
+@conn 1
+XADD ev MAXLEN 1 2-0 a b
+@conn 2
+@recv
+@recv
+@conn 1
+XDEL ev 2-0
+XDEL ev 2-0
+@conn 2
+@recv
+@conn 1
+XADD ev 3-0 a b
+XTRIM ev MAXLEN 0
+XTRIM ev MAXLEN 0
+@conn 2
+@recv
+@recv
+@conn 1
+XSETID ev 10-0
+@conn 2
+@recv
+@conn 1
+XADD ev NOMKSTREAM 11-0 a b
+DEL ev
+@conn 2
+@recv
+@recv
+@conn 1
+XADD ev2 NOMKSTREAM 1-0 a b
+XGROUP CREATE ev2 g $ MKSTREAM
+@conn 2
+@recv
+@conn 1
+CONFIG SET notify-keyspace-events ""
+@conn 2
+PUNSUBSCRIBE
+@conn 1

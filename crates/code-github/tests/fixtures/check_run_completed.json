@@ -1,0 +1,28 @@
+{
+  "action": "completed",
+  "check_run": {
+    "id": 4011,
+    "name": "ci / test",
+    "head_sha": "6dcb09b5b57875f334f61aebed695e2e4193db5e",
+    "status": "completed",
+    "conclusion": "failure",
+    "html_url": "https://github.com/acme/app/runs/4011",
+    "details_url": "https://ci.example.com/acme/app/4011",
+    "check_suite": { "id": 5, "head_branch": "fix-login" },
+    "app": { "id": 15368, "slug": "github-actions" },
+    "pull_requests": [
+      { "id": 1, "number": 7, "head": { "ref": "fix-login", "sha": "6dcb09b5b57875f334f61aebed695e2e4193db5e" }, "base": { "ref": "main", "sha": "0000000000000000000000000000000000000001" } }
+    ]
+  },
+  "repository": {
+    "id": 1296269,
+    "name": "app",
+    "full_name": "acme/app",
+    "owner": { "login": "acme", "id": 1, "type": "Organization" },
+    "private": true,
+    "default_branch": "main",
+    "html_url": "https://github.com/acme/app"
+  },
+  "installation": { "id": 42 },
+  "sender": { "login": "github-actions[bot]", "id": 41898282, "type": "Bot" }
+}

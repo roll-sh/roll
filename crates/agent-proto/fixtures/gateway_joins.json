@@ -1,0 +1,12 @@
+[
+  {
+    "machine": "mch_fedcba0987654321"
+  },
+  {
+    "machine": "mch_fedcba0987654321",
+    "url": "http://172.30.0.1:8790",
+    "providers": [
+      "claude"
+    ]
+  }
+]

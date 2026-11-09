@@ -1,0 +1,14 @@
+/tmp/roll-cqlsh-golden/describe.cql:19:'nope' not found in keyspaces
+/tmp/roll-cqlsh-golden/describe.cql:20:Table 'nope' not found in keyspace 'cli_g_desc'
+/tmp/roll-cqlsh-golden/describe.cql:21:User defined type 'nope' not found in 'cli_g_desc'
+/tmp/roll-cqlsh-golden/describe.cql:22:Table for existing index 'nope' not found in 'cli_g_desc'
+/tmp/roll-cqlsh-golden/describe.cql:23:Materialized view 'nope' not found in 'cli_g_desc'
+/tmp/roll-cqlsh-golden/describe.cql:24:User defined function 'nope' not found in 'cli_g_desc'
+/tmp/roll-cqlsh-golden/describe.cql:25:User defined aggregate 'nope' not found in 'cli_g_desc'
+/tmp/roll-cqlsh-golden/describe.cql:26:'nope' not found in keyspace 'cli_g_desc'
+/tmp/roll-cqlsh-golden/describe.cql:27:'nope' not found in keyspaces
+/tmp/roll-cqlsh-golden/describe.cql:28:No keyspace specified and no current keyspace
+/tmp/roll-cqlsh-golden/describe.cql:29:No keyspace specified and no current keyspace
+/tmp/roll-cqlsh-golden/describe.cql:30:No keyspace specified and no current keyspace
+/tmp/roll-cqlsh-golden/describe.cql:40:'nope' not found in keyspace 'cli_g_desc'
+/tmp/roll-cqlsh-golden/describe.cql:41:User defined type 'nope' not found in 'cli_g_desc'

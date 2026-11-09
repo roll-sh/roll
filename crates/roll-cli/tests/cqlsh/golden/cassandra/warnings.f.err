@@ -1,0 +1,5 @@
+/tmp/roll-cqlsh-golden/warnings.cql:13:InvalidRequest: Error from server: code=2200 [Invalid query] message="fromjson() cannot be used in the selection clause of a SELECT statement"
+/tmp/roll-cqlsh-golden/warnings.cql:16:Unauthorized: Error from server: code=2100 [Unauthorized] message="You have to be logged in and not anonymous to perform this request"
+/tmp/roll-cqlsh-golden/warnings.cql:17:Unauthorized: Error from server: code=2100 [Unauthorized] message="You have to be logged in and not anonymous to perform this request"
+/tmp/roll-cqlsh-golden/warnings.cql:18:Unauthorized: Error from server: code=2100 [Unauthorized] message="You have to be logged in and not anonymous to perform this request"
+/tmp/roll-cqlsh-golden/warnings.cql:20:SyntaxException: line 1:38 no viable alternative at input 'USING' (...1 AND c = 1 [USING]...)

@@ -1,0 +1,260 @@
+{"native_thread":"01a0d5ef-0ba3-7552-b090-7cfbb328e278"}
+{"model":"gpt-6-luna"}
+{"item":{"body":{"text":"","type":"plan"},"id":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","parent":null,"status":"running"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":"1"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":"."}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" **"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":"Find"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" the"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" replay"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" boundary"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":"."}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":"**"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" Trace"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" the"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" Cod"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":"ex"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" app"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":"-server"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" adapter"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" from"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" incoming"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" JSON"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":"-R"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":"PC"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" messages"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" through"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" event"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" translation"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":","}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" and"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" identify"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" the"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" smallest"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" deterministic"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" input"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":"/output"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" boundary"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" suitable"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" for"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" fixtures"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":"."}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" Follow"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" existing"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" fixture"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" and"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" test"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" conventions"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" in"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" this"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" package"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":".\n\n"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":"2"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":"."}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" **"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":"Define"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" a"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" compact"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" fixture"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" format"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":"."}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":"**"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" Store"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" representative"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" input"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" message"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" sequences"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" and"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" expected"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" normalized"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" events"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":"."}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" Keep"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" timestamps"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":","}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" IDs"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":","}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" and"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" other"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" nond"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":"etermin"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":"istic"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" values"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" fixed"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" or"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" normalized"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" explicitly"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" so"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" replay"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" comparisons"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" are"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" stable"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":".\n\n"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":"3"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":"."}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" **"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":"Add"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" a"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" replay"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" helper"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":"."}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":"**"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" Build"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" a"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" test"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":"-only"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" helper"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" that"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" reads"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" a"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" fixture"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":","}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" feeds"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" messages"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" through"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" the"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" adapter"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" boundary"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":","}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" and"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" compares"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" the"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" resulting"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" events"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" with"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" the"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" expected"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" output"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":"."}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" Keep"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" it"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" isolated"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" from"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" live"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" provider"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" processes"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" and"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" external"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" state"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":".\n\n"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":"4"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":"."}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" **"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":"Cover"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" key"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" protocol"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" paths"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":"."}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":"**"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" Add"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" a"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" small"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" set"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" of"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" fixtures"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" for"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" a"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" normal"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" turn"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":","}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" tool"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" activity"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":","}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" completion"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":","}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" and"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" at"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" least"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" one"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" error"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" or"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" interruption"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" path"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":"."}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" Include"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" a"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" case"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" that"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" protects"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" against"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" message"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" ordering"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" regress"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":"ions"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":".\n\n"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":"5"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":"."}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" **"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":"Document"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" fixture"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" updates"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" briefly"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":"."}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":"**"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" Add"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" a"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" nearby"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" comment"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" or"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" concise"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" test"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" note"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" explaining"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" how"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" to"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" capture"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" or"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" update"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" fixtures"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" and"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" which"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" values"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" require"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" normalization"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":".\n\n"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":"6"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":"."}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" **"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":"Verify"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" narrowly"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":"."}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":"**"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" Run"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" the"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" focused"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" fixture"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" test"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" file"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" and"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" the"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" package"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":"’s"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" targeted"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" type"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":"check"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" or"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" lint"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" for"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" any"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" new"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" helper"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":","}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" then"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" review"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" fixture"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" dif"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":"fs"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" for"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" unintended"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" protocol"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" detail"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" or"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" unstable"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":" fields"}}
+{"text_delta":{"item":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","text":".\n"}}
+{"item":{"body":{"text":"1. **Find the replay boundary.** Trace the Codex app-server adapter from incoming JSON-RPC messages through event translation, and identify the smallest deterministic input/output boundary suitable for fixtures. Follow existing fixture and test conventions in this package.\n\n2. **Define a compact fixture format.** Store representative input message sequences and expected normalized events. Keep timestamps, IDs, and other nondeterministic values fixed or normalized explicitly so replay comparisons are stable.\n\n3. **Add a replay helper.** Build a test-only helper that reads a fixture, feeds messages through the adapter boundary, and compares the resulting events with the expected output. Keep it isolated from live provider processes and external state.\n\n4. **Cover key protocol paths.** Add a small set of fixtures for a normal turn, tool activity, completion, and at least one error or interruption path. Include a case that protects against message ordering regressions.\n\n5. **Document fixture updates briefly.** Add a nearby comment or concise test note explaining how to capture or update fixtures and which values require normalization.\n\n6. **Verify narrowly.** Run the focused fixture test file and the package’s targeted typecheck or lint for any new helper, then review fixture diffs for unintended protocol detail or unstable fields.\n","type":"plan"},"id":"01a0d5ef-0c85-7f41-ad02-13753158be02-plan","parent":null,"status":"completed"}}
+{"usage":{"cached_tokens":6912,"input_tokens":21310,"output_tokens":265}}
+{"context":{"max_tokens":258400,"total_processed_tokens":21575,"used_tokens":21575}}
+{"turn_ref":"01a0d5ef-0c85-7f41-ad02-13753158be02"}
+{"turn_ended":"completed"}
+{"exited":null}

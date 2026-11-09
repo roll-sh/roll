@@ -1,0 +1,358 @@
+> CreateTable {"TableName":"alt_vec_it","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","VectorIndexes":[{"IndexName":"vi1","VectorAttribute":{"AttributeName":"v","Dimensions":3}}]}
+< 200 {"TableDescription":{"TableName":"alt_vec_it","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","VectorIndexes":[{"IndexName":"vi1","VectorAttribute":{"AttributeName":"v","Dimensions":3}}],"CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*","LatestStreamArn":"*","LatestStreamLabel":"*","StreamSpecification":{"StreamEnabled":false,"StreamViewType":"KEYS_ONLY"}}}
+# PutItem: the indexed attribute must be an L of exactly Dimensions N values (or a FLOAT32VECTOR)
+> PutItem {"TableName":"alt_vec_it","Item":{"p":{"S":"a"},"v":{"L":[{"N":"1"},{"N":"2"},{"N":"3"}]}}}
+< 200 {}
+> GetItem {"TableName":"alt_vec_it","Key":{"p":{"S":"a"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"a"},"v":{"L":[{"N":"1"},{"N":"2"},{"N":"3"}]}}}
+> PutItem {"TableName":"alt_vec_it","Item":{"p":{"S":"a"},"v":{"L":[{"N":"1"},{"N":"2"},{"N":"3"},{"N":"4"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Vector index attribute 'v' must be a list or vector of exactly 3 numbers, got 4 elements"}
+> PutItem {"TableName":"alt_vec_it","Item":{"p":{"S":"a"},"v":{"L":[]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Vector index attribute 'v' must be a list or vector of exactly 3 numbers, got 0 elements"}
+> PutItem {"TableName":"alt_vec_it","Item":{"p":{"S":"a"},"v":{"L":[{"N":"1"},{"S":"2"},{"N":"3"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Vector index attribute 'v' must contain only numbers"}
+> PutItem {"TableName":"alt_vec_it","Item":{"p":{"S":"a"},"v":{"L":[{"N":"1"},{"L":[]},{"N":"3"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Vector index attribute 'v' must contain only numbers"}
+> PutItem {"TableName":"alt_vec_it","Item":{"p":{"S":"a"},"v":{"L":[{"S":"1"},{"N":"2"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Vector index attribute 'v' must be a list or vector of exactly 3 numbers, got 2 elements"}
+# each N must fit a 32-bit float (overflow and underflow both rejected)
+> PutItem {"TableName":"alt_vec_it","Item":{"p":{"S":"a"},"v":{"L":[{"N":"1"},{"N":"abc"},{"N":"3"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Vector index attribute 'v' element 'abc' cannot be represented as a 32-bit float"}
+> PutItem {"TableName":"alt_vec_it","Item":{"p":{"S":"a"},"v":{"L":[{"N":"1"},{"N":"1e100"},{"N":"3"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Vector index attribute 'v' element '1e100' cannot be represented as a 32-bit float"}
+> PutItem {"TableName":"alt_vec_it","Item":{"p":{"S":"a"},"v":{"L":[{"N":"1"},{"N":"1e-100"},{"N":"3"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Vector index attribute 'v' element '1e-100' cannot be represented as a 32-bit float"}
+> PutItem {"TableName":"alt_vec_it","Item":{"p":{"S":"a"},"v":{"L":[{"N":"1"},{"N":"3.5e38"},{"N":"3"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Vector index attribute 'v' element '3.5e38' cannot be represented as a 32-bit float"}
+> PutItem {"TableName":"alt_vec_it","Item":{"p":{"S":"a"},"v":{"L":[{"N":"1"},{"N":"3.4e38"},{"N":"1e-45"}]}}}
+< 200 {}
+> PutItem {"TableName":"alt_vec_it","Item":{"p":{"S":"a"},"v":{"L":[{"N":"1"},{"N":"1e-46"},{"N":"3"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Vector index attribute 'v' element '1e-46' cannot be represented as a 32-bit float"}
+> PutItem {"TableName":"alt_vec_it","Item":{"p":{"S":"a"},"v":{"L":[{"N":"0.1"},{"N":"-0"},{"N":"12345678901234567890"}]}}}
+< 200 {}
+> GetItem {"TableName":"alt_vec_it","Key":{"p":{"S":"a"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"a"},"v":{"L":[{"N":"0.1"},{"N":"-0"},{"N":"12345678901234567890"}]}}}
+# wrong types for the indexed attribute
+> PutItem {"TableName":"alt_vec_it","Item":{"p":{"S":"a"},"v":{"NS":["1","2","3"]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Vector index attribute 'v' must be a list or vector of 3 numbers, got type NS"}
+> PutItem {"TableName":"alt_vec_it","Item":{"p":{"S":"a"},"v":{"N":"3"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Vector index attribute 'v' must be a list or vector of 3 numbers, got type N"}
+> PutItem {"TableName":"alt_vec_it","Item":{"p":{"S":"a"},"v":{"NULL":true}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Vector index attribute 'v' must be a list or vector of 3 numbers, got type NULL"}
+> PutItem {"TableName":"alt_vec_it","Item":{"p":{"S":"a"},"v":{"M":{}}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Vector index attribute 'v' must be a list or vector of 3 numbers, got type M"}
+> PutItem {"TableName":"alt_vec_it","Item":{"p":{"S":"a"},"v":{"B":"AAAA"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Vector index attribute 'v' must be a list or vector of 3 numbers, got type B"}
+> PutItem {"TableName":"alt_vec_it","Item":{"p":{"S":"a"},"v":{"BOOL":true}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Vector index attribute 'v' must be a list or vector of 3 numbers, got type BOOL"}
+> PutItem {"TableName":"alt_vec_it","Item":{"p":{"S":"a"},"v":{"SS":["a"]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Vector index attribute 'v' must be a list or vector of 3 numbers, got type SS"}
+> PutItem {"TableName":"alt_vec_it","Item":{"p":{"S":"a"},"v":{"BS":["AAAA"]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Vector index attribute 'v' must be a list or vector of 3 numbers, got type BS"}
+> PutItem {"TableName":"alt_vec_it","Item":{"p":{"S":"a"},"v":{"S":"x"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Vector index attribute 'v' must be a list or vector of 3 numbers, got type S"}
+# FLOAT32VECTOR (ScyllaDB extension): stored as 32-bit floats, returned as JSON numbers
+> PutItem {"TableName":"alt_vec_it","Item":{"p":{"S":"a"},"v":{"FLOAT32VECTOR":[1,2,3]}}}
+< 200 {}
+> GetItem {"TableName":"alt_vec_it","Key":{"p":{"S":"a"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"a"},"v":{"FLOAT32VECTOR":[1.0,2.0,3.0]}}}
+> PutItem {"TableName":"alt_vec_it","Item":{"p":{"S":"a"},"v":{"FLOAT32VECTOR":[0.1,-0.3,0.7]}}}
+< 200 {}
+> GetItem {"TableName":"alt_vec_it","Key":{"p":{"S":"a"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"a"},"v":{"FLOAT32VECTOR":[0.10000000149011612,-0.30000001192092896,0.699999988079071]}}}
+> PutItem {"TableName":"alt_vec_it","Item":{"p":{"S":"a"},"v":{"FLOAT32VECTOR":[1,2]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Vector index attribute 'v' must be a list or vector of exactly 3 numbers, got 2 elements"}
+> PutItem {"TableName":"alt_vec_it","Item":{"p":{"S":"a"},"v":{"FLOAT32VECTOR":[]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Vector index attribute 'v' must be a list or vector of exactly 3 numbers, got 0 elements"}
+> PutItem {"TableName":"alt_vec_it","Item":{"p":{"S":"a"},"v":{"FLOAT32VECTOR":[1,"2",3]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"PutItem: vector elements must be numbers, got '\"2\"'"}
+> PutItem {"TableName":"alt_vec_it","Item":{"p":{"S":"a"},"v":{"FLOAT32VECTOR":"abc"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"PutItem: improperly formatted vector '{\"FLOAT32VECTOR\":\"abc\"}'"}
+> PutItem {"TableName":"alt_vec_it","Item":{"p":{"S":"a"},"v":{"FLOAT32VECTOR":[1,1e+100,3]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"PutItem: vector element '1e+100' cannot be represented as a 32-bit float"}
+> PutItem {"TableName":"alt_vec_it","Item":{"p":{"S":"a"},"v":{"FLOAT32VECTOR":[1,2,3],"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"PutItem: improperly formatted value '{\"FLOAT32VECTOR\":[1,2,3],\"N\":\"1\"}'"}
+# FLOAT32VECTOR on a non-indexed attribute: any length, no Dimensions check
+> PutItem {"TableName":"alt_vec_it","Item":{"p":{"S":"a"},"w":{"FLOAT32VECTOR":[0.1,-0.3]}}}
+< 200 {}
+> GetItem {"TableName":"alt_vec_it","Key":{"p":{"S":"a"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"a"},"w":{"FLOAT32VECTOR":[0.10000000149011612,-0.30000001192092896]}}}
+> PutItem {"TableName":"alt_vec_it","Item":{"p":{"S":"a"},"w":{"FLOAT32VECTOR":[]}}}
+< 200 {}
+> GetItem {"TableName":"alt_vec_it","Key":{"p":{"S":"a"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"a"},"w":{"FLOAT32VECTOR":[]}}}
+> PutItem {"TableName":"alt_vec_it","Item":{"p":{"S":"a"},"w":{"FLOAT32VECTOR":[1e-50,3.4028234663852886e38,16777217,0.1,1e30,1.5e-7,2,-3.25,1e21,1e-7,123456.7,-0.0,-0,1.0,1E2,1.5e-45]}}}
+< 200 {}
+> GetItem {"TableName":"alt_vec_it","Key":{"p":{"S":"a"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"a"},"w":{"FLOAT32VECTOR":[0.0,3.4028234663852886e+38,16777216.0,0.10000000149011612,1.0000000150474662e+30,1.500000053056283e-07,2.0,-3.25,1.0000000200408773e+21,1.0000000116860974e-07,123456.703125,-0.0,0.0,1.0,100.0,1.401298464324817e-45]}}}
+# FLOAT32VECTOR element errors
+> PutItem {"TableName":"alt_vec_it","Item":{"p":{"S":"a"},"w":{"FLOAT32VECTOR":[true]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"PutItem: vector elements must be numbers, got 'true'"}
+> PutItem {"TableName":"alt_vec_it","Item":{"p":{"S":"a"},"w":{"FLOAT32VECTOR":[null]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"PutItem: vector elements must be numbers, got 'null'"}
+> PutItem {"TableName":"alt_vec_it","Item":{"p":{"S":"a"},"w":{"FLOAT32VECTOR":[[1]]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"PutItem: vector elements must be numbers, got '[1]'"}
+> PutItem {"TableName":"alt_vec_it","Item":{"p":{"S":"a"},"w":{"FLOAT32VECTOR":[{"N":"1"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"PutItem: vector elements must be numbers, got '{\"N\":\"1\"}'"}
+> PutItem {"TableName":"alt_vec_it","Item":{"p":{"S":"a"},"w":{"FLOAT32VECTOR":{}}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"PutItem: improperly formatted vector '{\"FLOAT32VECTOR\":{}}'"}
+> PutItem {"TableName":"alt_vec_it","Item":{"p":{"S":"a"},"w":{"FLOAT32VECTOR":5}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"PutItem: improperly formatted vector '{\"FLOAT32VECTOR\":5}'"}
+> PutItem {"TableName":"alt_vec_it","Item":{"p":{"S":"a"},"w":{"FLOAT32VECTOR":null}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"PutItem: improperly formatted vector '{\"FLOAT32VECTOR\":null}'"}
+> PutItem {"TableName":"alt_vec_it","Item":{"p":{"S":"a"},"w":{"FLOAT32VECTOR":[1e+39]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"PutItem: vector element '1e+39' cannot be represented as a 32-bit float"}
+> PutItem {"TableName":"alt_vec_it","Item":{"p":{"S":"a"},"w":{"FLOAT32VECTOR":[-1e+39]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"PutItem: vector element '-1e+39' cannot be represented as a 32-bit float"}
+> PutItem {"TableName":"alt_vec_it","Item":{"p":{"S":"a"},"w":{"FLOAT32VECTOR":[1,"x",1e+39]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"PutItem: vector elements must be numbers, got '\"x\"'"}
+# FLOAT32VECTOR is not a key type
+> PutItem {"TableName":"alt_vec_it","Item":{"p":{"FLOAT32VECTOR":[1]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Type mismatch: expected type S for key column p, got type \"FLOAT32VECTOR\""}
+> GetItem {"TableName":"alt_vec_it","Key":{"p":{"FLOAT32VECTOR":[1]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Type mismatch: expected type S for key column p, got type \"FLOAT32VECTOR\""}
+# nested FLOAT32VECTOR inside M/L is stored verbatim without validation
+> PutItem {"TableName":"alt_vec_it","Item":{"p":{"S":"a"},"m":{"M":{"x":{"FLOAT32VECTOR":[1,2]},"y":{"FLOAT32VECTOR":"junk"}}},"l":{"L":[{"FLOAT32VECTOR":[3,"x"]}]}}}
+< 200 {}
+> GetItem {"TableName":"alt_vec_it","Key":{"p":{"S":"a"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"a"},"l":{"L":[{"FLOAT32VECTOR":[3,"x"]}]},"m":{"M":{"x":{"FLOAT32VECTOR":[1,2]},"y":{"FLOAT32VECTOR":"junk"}}}}}
+# UpdateItem validates the new value of the indexed attribute
+> PutItem {"TableName":"alt_vec_it","Item":{"p":{"S":"a"},"v":{"FLOAT32VECTOR":[1,2,3]},"w":{"FLOAT32VECTOR":[0.5,1.5]}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_vec_it","Key":{"p":{"S":"a"}},"UpdateExpression":"SET v = :v","ExpressionAttributeValues":{":v":{"L":[{"N":"1"},{"N":"2"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Vector index attribute 'v' must be a list or vector of exactly 3 numbers, got 2 elements"}
+> UpdateItem {"TableName":"alt_vec_it","Key":{"p":{"S":"a"}},"UpdateExpression":"SET v = :v","ExpressionAttributeValues":{":v":{"S":"x"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Vector index attribute 'v' must be a list or vector of 3 numbers, got type S"}
+> UpdateItem {"TableName":"alt_vec_it","Key":{"p":{"S":"a"}},"UpdateExpression":"SET v = :v","ExpressionAttributeValues":{":v":{"FLOAT32VECTOR":[1,2]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Vector index attribute 'v' must be a list or vector of exactly 3 numbers, got 2 elements"}
+> UpdateItem {"TableName":"alt_vec_it","Key":{"p":{"S":"a"}},"UpdateExpression":"SET v = :v","ExpressionAttributeValues":{":v":{"L":[{"N":"1"},{"N":"x"},{"N":"3"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Vector index attribute 'v' element 'x' cannot be represented as a 32-bit float"}
+> UpdateItem {"TableName":"alt_vec_it","Key":{"p":{"S":"a"}},"UpdateExpression":"SET v = w"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Vector index attribute 'v' must be a list or vector of exactly 3 numbers, got 2 elements"}
+> UpdateItem {"TableName":"alt_vec_it","Key":{"p":{"S":"a"}},"UpdateExpression":"SET v = :v","ExpressionAttributeValues":{":v":{"FLOAT32VECTOR":[4,5,6]}},"ReturnValues":"ALL_NEW"}
+< 200 {"Attributes":{"p":{"S":"a"},"v":{"FLOAT32VECTOR":[4,5,6]},"w":{"FLOAT32VECTOR":[0.5,1.5]}}}
+> UpdateItem {"TableName":"alt_vec_it","Key":{"p":{"S":"a"}},"UpdateExpression":"SET v = :v","ExpressionAttributeValues":{":v":{"L":[{"N":"1"},{"N":"2"},{"N":"3"}]}},"ReturnValues":"ALL_OLD"}
+< 200 {"Attributes":{"p":{"S":"a"},"v":{"FLOAT32VECTOR":[4.0,5.0,6.0]},"w":{"FLOAT32VECTOR":[0.5,1.5]}}}
+> UpdateItem {"TableName":"alt_vec_it","Key":{"p":{"S":"a"}},"UpdateExpression":"SET v = :v","ExpressionAttributeValues":{":v":{"FLOAT32VECTOR":[4,5,6]}},"ReturnValues":"UPDATED_OLD"}
+< 200 {"Attributes":{"v":{"L":[{"N":"1"},{"N":"2"},{"N":"3"}]}}}
+# document paths into a FLOAT32VECTOR, list functions and ADD do not apply to it
+> UpdateItem {"TableName":"alt_vec_it","Key":{"p":{"S":"a"}},"UpdateExpression":"SET v[0] = :x","ExpressionAttributeValues":{":x":{"N":"9"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateExpression: document paths not valid for this item: v[0]"}
+> UpdateItem {"TableName":"alt_vec_it","Key":{"p":{"S":"a"}},"UpdateExpression":"SET w[0] = :x","ExpressionAttributeValues":{":x":{"N":"9"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateExpression: document paths not valid for this item: w[0]"}
+> UpdateItem {"TableName":"alt_vec_it","Key":{"p":{"S":"a"}},"UpdateExpression":"REMOVE w[0]"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateExpression: document paths not valid for this item: w[0]"}
+> UpdateItem {"TableName":"alt_vec_it","Key":{"p":{"S":"a"}},"UpdateExpression":"SET w = list_append(w, :x)","ExpressionAttributeValues":{":x":{"L":[{"N":"9"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateExpression: list_append() given a non-list"}
+> UpdateItem {"TableName":"alt_vec_it","Key":{"p":{"S":"a"}},"UpdateExpression":"SET w = list_append(:x, w)","ExpressionAttributeValues":{":x":{"L":[{"N":"9"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateExpression: list_append() given a non-list"}
+> UpdateItem {"TableName":"alt_vec_it","Key":{"p":{"S":"a"}},"UpdateExpression":"ADD w :x","ExpressionAttributeValues":{":x":{"NS":["1"]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"An operand in the update expression has an incorrect data type: {\"FLOAT32VECTOR\":[0.5,1.5]}"}
+> UpdateItem {"TableName":"alt_vec_it","Key":{"p":{"S":"a"}},"UpdateExpression":"SET w = w + :x","ExpressionAttributeValues":{":x":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateExpression: expected number, found type '\"FLOAT32VECTOR\"'"}
+> UpdateItem {"TableName":"alt_vec_it","Key":{"p":{"S":"a"}},"UpdateExpression":"SET z = w","ReturnValues":"UPDATED_NEW"}
+< 200 {"Attributes":{"z":{"FLOAT32VECTOR":[0.5,1.5]}}}
+> UpdateItem {"TableName":"alt_vec_it","Key":{"p":{"S":"a"}},"UpdateExpression":"SET z2 = :x","ExpressionAttributeValues":{":x":{"FLOAT32VECTOR":[7,8.5]}},"ReturnValues":"UPDATED_NEW"}
+< 200 {"Attributes":{"z2":{"FLOAT32VECTOR":[7,8.5]}}}
+> GetItem {"TableName":"alt_vec_it","Key":{"p":{"S":"a"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"a"},"v":{"FLOAT32VECTOR":[4.0,5.0,6.0]},"w":{"FLOAT32VECTOR":[0.5,1.5]},"z":{"FLOAT32VECTOR":[0.5,1.5]},"z2":{"FLOAT32VECTOR":[7.0,8.5]}}}
+# indexed attribute through AttributeUpdates
+> UpdateItem {"TableName":"alt_vec_it","Key":{"p":{"S":"a"}},"AttributeUpdates":{"v":{"Action":"PUT","Value":{"L":[{"N":"1"},{"N":"2"}]}}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Vector index attribute 'v' must be a list or vector of exactly 3 numbers, got 2 elements"}
+> UpdateItem {"TableName":"alt_vec_it","Key":{"p":{"S":"a"}},"AttributeUpdates":{"v":{"Action":"ADD","Value":{"L":[{"N":"1"},{"N":"2"}]}}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Operand type mismatch in AttributeUpdates ADD. Expected FLOAT32VECTOR, got L"}
+> UpdateItem {"TableName":"alt_vec_it","Key":{"p":{"S":"a"}},"AttributeUpdates":{"v":{"Action":"PUT","Value":{"L":[{"N":"7"},{"N":"8"},{"N":"9"}]}}},"ReturnValues":"ALL_NEW"}
+< 200 {"Attributes":{"p":{"S":"a"},"v":{"L":[{"N":"7"},{"N":"8"},{"N":"9"}]},"w":{"FLOAT32VECTOR":[0.5,1.5]},"z":{"FLOAT32VECTOR":[0.5,1.5]},"z2":{"FLOAT32VECTOR":[7.0,8.5]}}}
+> UpdateItem {"TableName":"alt_vec_it","Key":{"p":{"S":"a"}},"AttributeUpdates":{"v":{"Action":"DELETE"}},"ReturnValues":"ALL_NEW"}
+< 200 {"Attributes":{"p":{"S":"a"},"z2":{"FLOAT32VECTOR":[7.0,8.5]},"w":{"FLOAT32VECTOR":[0.5,1.5]},"z":{"FLOAT32VECTOR":[0.5,1.5]}}}
+# REMOVE of the indexed attribute is allowed
+> UpdateItem {"TableName":"alt_vec_it","Key":{"p":{"S":"a"}},"UpdateExpression":"SET v = :v","ExpressionAttributeValues":{":v":{"FLOAT32VECTOR":[4,5,6]}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_vec_it","Key":{"p":{"S":"a"}},"UpdateExpression":"REMOVE v","ReturnValues":"UPDATED_OLD"}
+< 200 {"Attributes":{"v":{"FLOAT32VECTOR":[4.0,5.0,6.0]}}}
+# projections and expressions over FLOAT32VECTOR values
+> UpdateItem {"TableName":"alt_vec_it","Key":{"p":{"S":"a"}},"UpdateExpression":"SET v = :v","ExpressionAttributeValues":{":v":{"FLOAT32VECTOR":[4,5,6]}}}
+< 200 {}
+> GetItem {"TableName":"alt_vec_it","Key":{"p":{"S":"a"}},"ConsistentRead":true,"ProjectionExpression":"v[1], w"}
+< 200 {"Item":{"w":{"FLOAT32VECTOR":[0.5,1.5]}}}
+> GetItem {"TableName":"alt_vec_it","Key":{"p":{"S":"a"}},"ConsistentRead":true,"ProjectionExpression":"v[1]"}
+< 200 {"Item":{}}
+> GetItem {"TableName":"alt_vec_it","Key":{"p":{"S":"a"}},"ConsistentRead":true,"ProjectionExpression":"v"}
+< 200 {"Item":{"v":{"FLOAT32VECTOR":[4.0,5.0,6.0]}}}
+> GetItem {"TableName":"alt_vec_it","Key":{"p":{"S":"a"}},"ConsistentRead":true,"AttributesToGet":["w"]}
+< 200 {"Item":{"w":{"FLOAT32VECTOR":[0.5,1.5]}}}
+> Query {"TableName":"alt_vec_it","KeyConditionExpression":"p = :p","FilterExpression":"attribute_type(v, :t)","ExpressionAttributeValues":{":p":{"S":"a"},":t":{"S":"L"}}}
+< 200 {"Count":0,"ScannedCount":1,"Items":[]}
+> Query {"TableName":"alt_vec_it","KeyConditionExpression":"p = :p","FilterExpression":"attribute_type(v, :t)","ExpressionAttributeValues":{":p":{"S":"a"},":t":{"S":"FLOAT32VECTOR"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ConditionExpression: attribute_types()'s second parameter, \"FLOAT32VECTOR\", is not a known type"}
+> Query {"TableName":"alt_vec_it","KeyConditionExpression":"p = :p","FilterExpression":"size(v) = :t","ExpressionAttributeValues":{":p":{"S":"a"},":t":{"N":"3"}}}
+< 200 {"Count":0,"ScannedCount":1,"Items":[]}
+> Query {"TableName":"alt_vec_it","KeyConditionExpression":"p = :p","FilterExpression":"v = :t","ExpressionAttributeValues":{":p":{"S":"a"},":t":{"FLOAT32VECTOR":[4,5,6]}}}
+< 200 {"Count":1,"ScannedCount":1,"Items":[{"p":{"S":"a"},"v":{"FLOAT32VECTOR":[4.0,5.0,6.0]},"w":{"FLOAT32VECTOR":[0.5,1.5]},"z":{"FLOAT32VECTOR":[0.5,1.5]},"z2":{"FLOAT32VECTOR":[7.0,8.5]}}]}
+> Query {"TableName":"alt_vec_it","KeyConditionExpression":"p = :p","FilterExpression":"v = :t","ExpressionAttributeValues":{":p":{"S":"a"},":t":{"FLOAT32VECTOR":[4.0,5.0,6.0]}}}
+< 200 {"Count":1,"ScannedCount":1,"Items":[{"p":{"S":"a"},"v":{"FLOAT32VECTOR":[4.0,5.0,6.0]},"w":{"FLOAT32VECTOR":[0.5,1.5]},"z":{"FLOAT32VECTOR":[0.5,1.5]},"z2":{"FLOAT32VECTOR":[7.0,8.5]}}]}
+> Query {"TableName":"alt_vec_it","KeyConditionExpression":"p = :p","FilterExpression":"v = :t","ExpressionAttributeValues":{":p":{"S":"a"},":t":{"L":[{"N":"4"},{"N":"5"},{"N":"6"}]}}}
+< 200 {"Count":0,"ScannedCount":1,"Items":[]}
+> Query {"TableName":"alt_vec_it","KeyConditionExpression":"p = :p","FilterExpression":"contains(v, :t)","ExpressionAttributeValues":{":p":{"S":"a"},":t":{"N":"4"}}}
+< 200 {"Count":0,"ScannedCount":1,"Items":[]}
+> Query {"TableName":"alt_vec_it","KeyConditionExpression":"p = :p","FilterExpression":"v[0] = :t","ExpressionAttributeValues":{":p":{"S":"a"},":t":{"N":"4"}}}
+< 200 {"Count":0,"ScannedCount":1,"Items":[]}
+> Query {"TableName":"alt_vec_it","KeyConditionExpression":"p = :p","FilterExpression":"attribute_exists(v)","ExpressionAttributeValues":{":p":{"S":"a"}}}
+< 200 {"Count":1,"ScannedCount":1,"Items":[{"p":{"S":"a"},"v":{"FLOAT32VECTOR":[4.0,5.0,6.0]},"w":{"FLOAT32VECTOR":[0.5,1.5]},"z":{"FLOAT32VECTOR":[0.5,1.5]},"z2":{"FLOAT32VECTOR":[7.0,8.5]}}]}
+> PutItem {"TableName":"alt_vec_it","Item":{"p":{"S":"q"}},"ConditionExpression":"attribute_not_exists(v) AND :a = :a","ExpressionAttributeValues":{":a":{"FLOAT32VECTOR":[1]}}}
+< 200 {}
+> PutItem {"TableName":"alt_vec_it","Item":{"p":{"S":"a"},"v":{"FLOAT32VECTOR":[4,5,6]}},"Expected":{"v":{"ComparisonOperator":"EQ","AttributeValueList":[{"FLOAT32VECTOR":[4,5,6]}]}}}
+< 200 {}
+# DeleteItem returns the stored floats
+> DeleteItem {"TableName":"alt_vec_it","Key":{"p":{"S":"a"}},"ReturnValues":"ALL_OLD"}
+< 200 {"Attributes":{"p":{"S":"a"},"v":{"FLOAT32VECTOR":[4.0,5.0,6.0]}}}
+# BatchWriteItem: one bad vector fails the whole batch
+> BatchWriteItem {"RequestItems":{"alt_vec_it":[{"PutRequest":{"Item":{"p":{"S":"x"},"v":{"FLOAT32VECTOR":[1,2,3]}}}},{"PutRequest":{"Item":{"p":{"S":"y"},"v":{"L":[{"N":"1"}]}}}}]}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Vector index attribute 'v' must be a list or vector of exactly 3 numbers, got 1 elements"}
+> BatchWriteItem {"RequestItems":{"alt_vec_it":[{"PutRequest":{"Item":{"p":{"S":"x"},"v":{"FLOAT32VECTOR":[1,2,3]}}}},{"PutRequest":{"Item":{"p":{"S":"y"},"v":{"L":[{"N":"1"},{"N":"2"},{"N":"3"}]}}}}]}}
+< 200 {"UnprocessedItems":{}}
+> BatchGetItem {"RequestItems":{"alt_vec_it":{"Keys":[{"p":{"S":"x"}},{"p":{"S":"y"}}],"ConsistentRead":true}}}
+< 200 {"Responses":{"alt_vec_it":[{"p":{"S":"y"},"v":{"L":[{"N":"1"},{"N":"2"},{"N":"3"}]}},{"p":{"S":"x"},"v":{"FLOAT32VECTOR":[1.0,2.0,3.0]}}]},"UnprocessedKeys":{}}
+# Scan returns FLOAT32VECTOR values as stored
+> Scan {"TableName":"alt_vec_it","ConsistentRead":true}
+< 200 {"Count":3,"ScannedCount":3,"Items":[{"p":{"S":"q"}},{"p":{"S":"y"},"v":{"L":[{"N":"1"},{"N":"2"},{"N":"3"}]}},{"p":{"S":"x"},"v":{"FLOAT32VECTOR":[1.0,2.0,3.0]}}]}
+# Query with VectorSearch: validation order; reaching the store gives 'Vector Store is disabled'
+> Query {"TableName":"alt_vec_it","IndexName":"vi1","VectorSearch":{"QueryVector":{"L":[{"N":"1"},{"N":"2"},{"N":"3"}]}},"Limit":2}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Vector Store is disabled"}
+> Query {"TableName":"alt_vec_it","IndexName":"vi1","VectorSearch":{"QueryVector":{"FLOAT32VECTOR":[1,2,3]}},"Limit":1000000}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Vector Store is disabled"}
+> Query {"TableName":"alt_vec_it","IndexName":"vi1","VectorSearch":{"QueryVector":{"L":[{"N":"1"},{"N":"2"},{"N":"3"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"VectorSearch requires a positive integer Limit parameter"}
+> Query {"TableName":"alt_vec_it","IndexName":"vi1","VectorSearch":{"QueryVector":{"L":[{"N":"1"},{"N":"2"},{"N":"3"}]}},"Limit":0}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Limit must be greater than 0"}
+> Query {"TableName":"alt_vec_it","IndexName":"vi1","VectorSearch":{"QueryVector":{"L":[{"N":"1"},{"N":"2"},{"N":"3"}]}},"Limit":-1}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"VectorSearch requires a positive integer Limit parameter"}
+> Query {"TableName":"alt_vec_it","IndexName":"vi1","VectorSearch":{"QueryVector":{"L":[{"N":"1"},{"N":"2"},{"N":"3"}]}},"Limit":"2"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"VectorSearch requires a positive integer Limit parameter"}
+> Query {"TableName":"alt_vec_it","IndexName":"vi1","VectorSearch":{"QueryVector":{"L":[{"N":"1"},{"N":"2"},{"N":"3"}]}},"Limit":1.5}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"VectorSearch requires a positive integer Limit parameter"}
+> Query {"TableName":"alt_vec_it","IndexName":"vi1","VectorSearch":{"QueryVector":{"L":[{"N":"1"},{"N":"2"},{"N":"3"}]}},"Limit":true}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"VectorSearch requires a positive integer Limit parameter"}
+> Query {"TableName":"alt_vec_it","IndexName":"vi1","VectorSearch":{"QueryVector":{"L":[{"N":"1"},{"N":"2"},{"N":"3"}]}},"Limit":null}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"VectorSearch requires a positive integer Limit parameter"}
+> Query {"TableName":"alt_vec_it","IndexName":"vi1","VectorSearch":{"QueryVector":{"L":[{"N":"1"},{"N":"2"}]}},"Limit":2}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"VectorSearch QueryVector length 2 does not match index Dimensions 3"}
+> Query {"TableName":"alt_vec_it","IndexName":"vi1","VectorSearch":{"QueryVector":{"FLOAT32VECTOR":[1,2]}},"Limit":2}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"VectorSearch QueryVector length 2 does not match index Dimensions 3"}
+> Query {"TableName":"alt_vec_it","IndexName":"vi1","VectorSearch":{"QueryVector":{"FLOAT32VECTOR":[1,"x",2]}},"Limit":2}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"VectorSearch QueryVector must contain only numbers"}
+> Query {"TableName":"alt_vec_it","IndexName":"vi1","VectorSearch":{"QueryVector":{"FLOAT32VECTOR":"x"}},"Limit":2}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"VectorSearch QueryVector FLOAT32VECTOR must be a list of numbers"}
+> Query {"TableName":"alt_vec_it","IndexName":"vi1","VectorSearch":{"QueryVector":{"FLOAT32VECTOR":[1,1e+39,2]}},"Limit":2}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"VectorSearch QueryVector element '1e+39' cannot be represented as a 32-bit float"}
+> Query {"TableName":"alt_vec_it","IndexName":"vi1","VectorSearch":{"QueryVector":{"S":"x"}},"Limit":2}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"VectorSearch QueryVector must be a list of numbers"}
+> Query {"TableName":"alt_vec_it","IndexName":"vi1","VectorSearch":{"QueryVector":{"NS":["1","2","3"]}},"Limit":2}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"VectorSearch QueryVector must be a list of numbers"}
+> Query {"TableName":"alt_vec_it","IndexName":"vi1","VectorSearch":{"QueryVector":{"L":[{"S":"x"},{"N":"1"},{"N":"1"}]}},"Limit":2}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"VectorSearch QueryVector must contain only numbers"}
+> Query {"TableName":"alt_vec_it","IndexName":"vi1","VectorSearch":{"QueryVector":{"L":[{"N":"x"},{"N":"1"},{"N":"1"}]}},"Limit":2}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"VectorSearch QueryVector element 'x' is not a valid number"}
+> Query {"TableName":"alt_vec_it","IndexName":"vi1","VectorSearch":{"QueryVector":{"L":[{"N":"1e100"},{"N":"1"},{"N":"1"}]}},"Limit":2}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"VectorSearch QueryVector element '1e100' is not a valid number"}
+> Query {"TableName":"alt_vec_it","IndexName":"vi1","VectorSearch":{"QueryVector":{"L":[{"N":"1e-100"},{"N":"1"},{"N":"1"}]}},"Limit":2}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"VectorSearch QueryVector element '1e-100' is not a valid number"}
+> Query {"TableName":"alt_vec_it","IndexName":"vi1","VectorSearch":{},"Limit":2}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"VectorSearch requires a QueryVector parameter"}
+> Query {"TableName":"alt_vec_it","IndexName":"vi1","VectorSearch":5,"Limit":2}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"VectorSearch requires a VectorSearch parameter"}
+> Query {"TableName":"alt_vec_it","IndexName":"vi1","VectorSearch":null,"Limit":2}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"VectorSearch requires a VectorSearch parameter"}
+> Query {"TableName":"alt_vec_it","IndexName":"vi1","VectorSearch":{"QueryVector":5},"Limit":2}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"VectorSearch QueryVector must be a value with type 'FLOAT32VECTOR' or 'L'"}
+> Query {"TableName":"alt_vec_it","IndexName":"vi1","VectorSearch":{"QueryVector":[1,2,3]},"Limit":2}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"VectorSearch QueryVector must be a value with type 'FLOAT32VECTOR' or 'L'"}
+> Query {"TableName":"alt_vec_it","IndexName":"vi1","VectorSearch":{"QueryVector":{"L":[{"N":"1"},{"N":"2"},{"N":"3"}]},"Foo":1},"Limit":2}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Vector Store is disabled"}
+> Query {"TableName":"alt_vec_it","VectorSearch":{"QueryVector":{"L":[{"N":"1"},{"N":"2"},{"N":"3"}]}},"Limit":2}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"VectorSearch requires IndexName referring to a vector index"}
+> Query {"TableName":"alt_vec_it","IndexName":"nope","VectorSearch":{"QueryVector":{"L":[{"N":"1"},{"N":"2"},{"N":"3"}]}},"Limit":2}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"VectorSearch IndexName 'nope' is not a vector index."}
+> Query {"TableName":"alt_vec_it","IndexName":"vi1","VectorSearch":{"QueryVector":{"L":[{"N":"1"},{"N":"2"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"VectorSearch QueryVector length 2 does not match index Dimensions 3"}
+> Query {"TableName":"alt_vec_it","IndexName":"nope","VectorSearch":{"QueryVector":{"L":[{"N":"1"},{"N":"2"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"VectorSearch IndexName 'nope' is not a vector index."}
+# other Query parameters alongside VectorSearch
+> Query {"TableName":"alt_vec_it","IndexName":"vi1","VectorSearch":{"QueryVector":{"L":[{"N":"1"},{"N":"2"},{"N":"3"}]}},"Limit":2,"KeyConditionExpression":"p = :p","ExpressionAttributeValues":{":p":{"S":"a"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeValues has spurious ':p', not used in Query"}
+> Query {"TableName":"alt_vec_it","IndexName":"vi1","VectorSearch":{"QueryVector":{"L":[{"N":"1"},{"N":"2"},{"N":"3"}]}},"Limit":2,"KeyConditionExpression":"p = :p"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Vector Store is disabled"}
+> Query {"TableName":"alt_vec_it","IndexName":"vi1","VectorSearch":{"QueryVector":{"L":[{"N":"1"},{"N":"2"},{"N":"3"}]}},"Limit":2,"FilterExpression":"x = :p","ExpressionAttributeValues":{":p":{"S":"a"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Vector Store is disabled"}
+> Query {"TableName":"alt_vec_it","IndexName":"vi1","VectorSearch":{"QueryVector":{"L":[{"N":"1"},{"N":"2"},{"N":"3"}]}},"Limit":2,"ProjectionExpression":"p"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Vector Store is disabled"}
+> Query {"TableName":"alt_vec_it","IndexName":"vi1","VectorSearch":{"QueryVector":{"L":[{"N":"1"},{"N":"2"},{"N":"3"}]}},"Limit":2,"Select":"COUNT"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Vector Store is disabled"}
+> Query {"TableName":"alt_vec_it","IndexName":"vi1","VectorSearch":{"QueryVector":{"L":[{"N":"1"},{"N":"2"},{"N":"3"}]}},"Limit":2,"Select":"BAD"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Unknown Select value 'BAD'. Allowed choices: ALL_ATTRIBUTES, SPECIFIC_ATTRIBUTES, ALL_PROJECTED_ATTRIBUTES, COUNT"}
+> Query {"TableName":"alt_vec_it","IndexName":"vi1","VectorSearch":{"QueryVector":{"L":[{"N":"1"},{"N":"2"},{"N":"3"}]}},"Limit":2,"ConsistentRead":true}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Consistent reads are not allowed on vector indexes"}
+> Query {"TableName":"alt_vec_it","IndexName":"vi1","VectorSearch":{"QueryVector":{"L":[{"N":"1"},{"N":"2"},{"N":"3"}]}},"Limit":2,"ConsistentRead":false}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Vector Store is disabled"}
+> Query {"TableName":"alt_vec_it","IndexName":"vi1","VectorSearch":{"QueryVector":{"L":[{"N":"1"},{"N":"2"},{"N":"3"}]}},"Limit":2,"ExclusiveStartKey":{"p":{"S":"a"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"VectorSearch does not support pagination (ExclusiveStartKey)"}
+> Query {"TableName":"alt_vec_it","IndexName":"vi1","VectorSearch":{"QueryVector":{"L":[{"N":"1"},{"N":"2"},{"N":"3"}]}},"Limit":2,"ScanIndexForward":false}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"VectorSearch does not support ScanIndexForward"}
+> Query {"TableName":"alt_vec_it","IndexName":"vi1","VectorSearch":{"QueryVector":{"L":[{"N":"1"},{"N":"2"},{"N":"3"}]}},"Limit":2,"ScanIndexForward":true}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"VectorSearch does not support ScanIndexForward"}
+> Query {"TableName":"alt_vec_it","IndexName":"vi1","VectorSearch":{"QueryVector":{"L":[{"N":"1"},{"N":"2"},{"N":"3"}]}},"Limit":2,"KeyConditions":{"p":{"AttributeValueList":[{"S":"a"}],"ComparisonOperator":"EQ"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Vector Store is disabled"}
+> Query {"TableName":"alt_vec_it","IndexName":"vi1","VectorSearch":{"QueryVector":{"L":[{"N":"1"},{"N":"2"},{"N":"3"}]}},"Limit":2,"AttributesToGet":["p"]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Vector Store is disabled"}
+> Query {"TableName":"alt_vec_it","IndexName":"vi1","VectorSearch":{"QueryVector":{"L":[{"N":"1"},{"N":"2"},{"N":"3"}]}},"Limit":2,"ExpressionAttributeValues":{":p":{"S":"a"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeValues has spurious ':p', not used in Query"}
+> Query {"TableName":"alt_vec_it","IndexName":"vi1","VectorSearch":{"QueryVector":{"L":[{"N":"1"},{"N":"2"},{"N":"3"}]}},"Limit":2,"ExpressionAttributeNames":{"#p":"p"}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeNames has spurious '#p', not used in Query"}
+> Query {"TableName":"alt_vec_it","IndexName":"vi1","VectorSearch":{"QueryVector":{"L":[{"N":"1"},{"N":"2"},{"N":"3"}]}},"Limit":2,"ConsistentRead":true,"ExclusiveStartKey":{"p":{"S":"a"}},"ScanIndexForward":false}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Consistent reads are not allowed on vector indexes"}
+> Query {"TableName":"alt_vec_it","IndexName":"vi1","VectorSearch":{"QueryVector":{"L":[{"N":"1"},{"N":"2"},{"N":"3"}]}},"Limit":2,"ExclusiveStartKey":{"p":{"S":"a"}},"ScanIndexForward":false}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"VectorSearch does not support pagination (ExclusiveStartKey)"}
+> Query {"TableName":"alt_vec_it","IndexName":"vi1","VectorSearch":{"QueryVector":{"L":[{"N":"1"},{"N":"2"}]}},"Limit":2,"ConsistentRead":true}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"VectorSearch QueryVector length 2 does not match index Dimensions 3"}
+> Query {"TableName":"alt_vec_it","IndexName":"vi1","VectorSearch":{"QueryVector":{"L":[{"N":"1"},{"N":"2"},{"N":"3"}]}},"ConsistentRead":true}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"VectorSearch requires a positive integer Limit parameter"}
+# vector index without VectorSearch: Query and Scan both rejected (message says Query)
+> Query {"TableName":"alt_vec_it","IndexName":"vi1"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"IndexName 'vi1' is a vector index for table 'alt_vec_it, so VectorSearch is mandatory in Query."}
+> Query {"TableName":"alt_vec_it","IndexName":"vi1","KeyConditionExpression":"p = :p","ExpressionAttributeValues":{":p":{"S":"a"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"IndexName 'vi1' is a vector index for table 'alt_vec_it, so VectorSearch is mandatory in Query."}
+> Scan {"TableName":"alt_vec_it","IndexName":"vi1"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"IndexName 'vi1' is a vector index for table 'alt_vec_it, so VectorSearch is mandatory in Query."}
+> Scan {"TableName":"alt_vec_it","IndexName":"vi1","VectorSearch":{"QueryVector":{"L":[{"N":"1"},{"N":"2"},{"N":"3"}]}},"Limit":2}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"IndexName 'vi1' is a vector index for table 'alt_vec_it, so VectorSearch is mandatory in Query."}
+# VectorSearch on Scan without IndexName is ignored; on Query without IndexName is an error
+> Scan {"TableName":"alt_vec_it","VectorSearch":{"QueryVector":{"L":[{"N":"1"},{"N":"2"},{"N":"3"}]}},"Select":"COUNT","ConsistentRead":true}
+< 200 {"Count":3,"ScannedCount":3}
+> Query {"TableName":"alt_vec_it","KeyConditionExpression":"p = :p","ExpressionAttributeValues":{":p":{"S":"a"}},"VectorSearch":{"QueryVector":{"L":[{"N":"1"},{"N":"2"},{"N":"3"}]}},"Limit":2}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"VectorSearch requires IndexName referring to a vector index"}
+# SearchVectors (newer API) is not an operation on this version
+> SearchVectors {"TableName":"alt_vec_it","IndexName":"vi1","SearchVector":{"L":[{"N":"1"},{"N":"2"},{"N":"3"}]},"TopK":2}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#UnknownOperationException","message":"Unsupported operation SearchVectors"}
+> SearchVectors {}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#UnknownOperationException","message":"Unsupported operation SearchVectors"}
+# FLOAT32VECTOR on a table with no vector index; VectorSearch with a GSI
+> CreateTable {"TableName":"alt_vec_it2","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"},{"AttributeName":"g","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","GlobalSecondaryIndexes":[{"IndexName":"gsi1","KeySchema":[{"AttributeName":"g","KeyType":"HASH"}],"Projection":{"ProjectionType":"ALL"}}]}
+< 200 {"TableDescription":{"TableName":"alt_vec_it2","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"},{"AttributeName":"g","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","GlobalSecondaryIndexes":[{"IndexName":"gsi1","KeySchema":[{"AttributeName":"g","KeyType":"HASH"}],"Projection":{"ProjectionType":"ALL"}}],"CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+> PutItem {"TableName":"alt_vec_it2","Item":{"p":{"S":"a"},"g":{"S":"x"},"v":{"FLOAT32VECTOR":[1.25,2]}}}
+< 200 {}
+> GetItem {"TableName":"alt_vec_it2","Key":{"p":{"S":"a"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"a"},"g":{"S":"x"},"v":{"FLOAT32VECTOR":[1.25,2.0]}}}
+> PutItem {"TableName":"alt_vec_it2","Item":{"p":{"S":"a"},"g":{"FLOAT32VECTOR":[1]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Type mismatch: expected type S for GSI or LSI key attribute g, got type FLOAT32VECTOR"}
+> Query {"TableName":"alt_vec_it2","IndexName":"gsi1","VectorSearch":{"QueryVector":{"L":[{"N":"1"},{"N":"2"},{"N":"3"}]}},"Limit":2}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"VectorSearch IndexName 'gsi1' is not a vector index."}
+> Query {"TableName":"alt_vec_it2","IndexName":"gsi1","KeyConditionExpression":"g = :g","ExpressionAttributeValues":{":g":{"S":"x"}},"VectorSearch":{"QueryVector":{"L":[{"N":"1"},{"N":"2"},{"N":"3"}]}},"Limit":2}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"VectorSearch IndexName 'gsi1' is not a vector index."}
+> Query {"TableName":"alt_vec_it2","IndexName":"gsi1","KeyConditionExpression":"g = :g","ExpressionAttributeValues":{":g":{"S":"x"}}}
+< 200 {"Count":1,"ScannedCount":1,"Items":[{"g":{"S":"x"},"p":{"S":"a"},"v":{"FLOAT32VECTOR":[1.25,2.0]}}]}
+> Query {"TableName":"alt_vec_it2","VectorSearch":{"QueryVector":{"L":[{"N":"1"},{"N":"2"},{"N":"3"}]}},"Limit":2}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"VectorSearch requires IndexName referring to a vector index"}
+> DeleteTable {"TableName":"alt_vec_it2"}
+< 200 {"TableDescription":{"TableName":"alt_vec_it2","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_vec_it2:scylla:table/alt_vec_it2","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0}}}
+> DeleteTable {"TableName":"alt_vec_it"}
+< 200 {"TableDescription":{"TableName":"alt_vec_it","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_vec_it:scylla:table/alt_vec_it","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0},"LatestStreamArn":"*","LatestStreamLabel":"*","StreamSpecification":{"StreamEnabled":false,"StreamViewType":"KEYS_ONLY"}}}

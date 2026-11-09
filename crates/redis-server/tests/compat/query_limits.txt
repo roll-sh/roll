@@ -1,0 +1,28 @@
+# proto-max-bulk-len refuses longer arguments (protocol error, connection closed), and
+# client-query-buffer-limit closes a connection whose unprocessed input (plus commands queued in
+# MULTI) grows past it, without a reply.
+CONFIG RESETSTAT
+CONFIG SET proto-max-bulk-len 1mb
+CONFIG GET proto-max-bulk-len
+SET small {1000000*x}
+STRLEN small
+@conn 2
+SET big {1100000*x}
+@conn 1
+EXISTS big
+CONFIG SET proto-max-bulk-len 512mb
+CONFIG SET client-query-buffer-limit 1mb
+CONFIG GET client-query-buffer-limit
+SET fits {1000000*x}
+@conn 3
+SET big {1200000*x}
+@conn 1
+EXISTS big
+# Queued MULTI arguments count too.
+@conn 4
+MULTI
+SET q1 {600000*x}
+SET q2 {600000*x}
+@conn 1
+!info client_query_buffer_limit_disconnections INFO stats
+CONFIG SET client-query-buffer-limit 1gb

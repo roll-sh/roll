@@ -1,0 +1,8 @@
+{"env":{"ROLL_FAKE_SESSION_ENV":"1","CLAUDE_CODE_ENTRYPOINT":"sdk-ts"}}
+{"dir":"out","line":{"type":"control_request","request_id":"r1","request":{"subtype":"initialize"}}}
+{"dir":"in","line":{"type":"control_response","response":{"subtype":"success","request_id":"r1","response":{}}}}
+{"dir":"out","line":{"type":"user","message":{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"aGk="}},{"type":"text","text":"Look"}]},"parent_tool_use_id":null}}
+{"dir":"in","line":{"type":"system","subtype":"init","session_id":"11111111-2222-4333-8444-555555555555","model":"claude-opus-5-5","permissionMode":"acceptEdits","cwd":"/tmp/roll-claude-fixture"}}
+{"dir":"in","line":{"type":"assistant","message":{"id":"msg_i","model":"claude-opus-5-5","role":"assistant","content":[{"type":"text","text":"An image of hi."}]},"parent_tool_use_id":null,"session_id":"11111111-2222-4333-8444-555555555555","uuid":"u1"}}
+{"dir":"in","line":{"type":"result","subtype":"success","is_error":false,"result":"An image of hi.","session_id":"11111111-2222-4333-8444-555555555555","uuid":"res","usage":{"input_tokens":1,"output_tokens":1},"terminal_reason":"completed"}}
+{"dir":"exit","line":0}

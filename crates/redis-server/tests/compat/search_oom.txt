@@ -1,0 +1,134 @@
+# The query memory guard (search-on-oom / FT.CONFIG ON_OOM): with used memory at or over
+# maxmemory, FT.SEARCH, FT.AGGREGATE, FT.PROFILE and FT.HYBRID stop before running. RETURN
+# (the default) replies with no results and the out-of-memory warning (RESP3, FT.PROFILE's
+# shard warning), shaped by a shallow look at WITHCURSOR and FORMAT; FAIL with the OOM error;
+# IGNORE runs the query. The guard comes before the index lookup (FT.PROFILE's after it and
+# its SEARCH/QUERY words); cursor reads and other commands are not guarded. maxmemory and the
+# policy are put back at the end.
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
+FLUSHALL
+FT.CREATE i ON HASH PREFIX 1 d: SCHEMA t TEXT n NUMERIC SORTABLE
+FT.CREATE hv ON HASH PREFIX 1 h: SCHEMA t TEXT v VECTOR FLAT 6 TYPE FLOAT32 DIM 2 DISTANCE_METRIC L2
+HSET d:1 t "hello world" n 1
+HSET d:2 t "hello there" n 2
+HSET d:3 t "hello again" n 3
+HSET h:1 t hello v "\x00\x00\x80\x3f\x00\x00\x80\x3f"
+HSET h:2 t world v "\x00\x00\x00\x40\x00\x00\x00\x40"
+CONFIG GET search-on-oom
+FT.CONFIG GET ON_OOM
+FT.CONFIG SET ON_OOM bad
+!capture c FT.AGGREGATE i hello LOAD 1 @n WITHCURSOR COUNT 1
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
+CONFIG SET maxmemory 1
+
+# ON_OOM RETURN: empty replies.
+FT.SEARCH i hello
+FT.SEARCH i hello NOCONTENT WITHSCORES LIMIT 0 1
+FT.SEARCH nosuch hello
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
+FT.SEARCH i "@t:("
+FT.SEARCH i hello LIMIT x
+FT.SEARCH i hello WITHCURSOR COUNT 1
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
+FT.SEARCH i hello FORMAT EXPAND
+FT.SEARCH i hello FORMAT STRING
+FT.SEARCH i hello FORMAT
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
+FT.SEARCH i hello FORMAT bad
+FT.SEARCH i hello format expand
+FT.SEARCH FORMAT hello
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
+FT.SEARCH i WITHCURSOR
+FT.SEARCH i
+FT.AGGREGATE i hello
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
+FT.AGGREGATE nosuch hello GROUPBY 1 @n
+FT.AGGREGATE i hello WITHCURSOR COUNT 1 MAXIDLE 10
+FT.AGGREGATE i hello FORMAT STRING WITHCURSOR
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
+FT.AGGREGATE i hello FORMAT nope
+!timing FT.PROFILE i SEARCH QUERY hello
+!timing FT.PROFILE i SEARCH LIMITED QUERY hello NOCONTENT
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
+!timing FT.PROFILE i AGGREGATE QUERY hello LOAD 1 @n
+!timing FT.PROFILE i AGGREGATE QUERY hello FORMAT EXPAND
+FT.PROFILE i AGGREGATE QUERY hello FORMAT bad
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
+FT.PROFILE nosuch SEARCH QUERY hello
+FT.PROFILE i BAD QUERY hello
+FT.PROFILE i SEARCH hello
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
+FT.PROFILE i SEARCH QUERY hello WITHCURSOR
+FT.HYBRID hv SEARCH hello VSIM @v $b PARAMS 2 b "\x00\x00\x80\x3f\x00\x00\x80\x3f"
+FT.HYBRID nosuch SEARCH hello VSIM @v $b
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
+FT.HYBRID hv SEARCH hello VSIM @v $b WITHCURSOR
+FT.PROFILE hv HYBRID QUERY SEARCH hello VSIM @v $b PARAMS 2 b "\x00\x00\x80\x3f\x00\x00\x80\x3f"
+FT.PROFILE hv HYBRID LIMITED QUERY SEARCH hello VSIM @v $b
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
+# Not guarded: a cursor opened before reads on; other commands run.
+FT.CURSOR READ i {$c}
+FT.CURSOR READ i 123
+FT.EXPLAIN i hello
+FT.TAGVALS i n
+!mask total_indexing_time FT.INFO i
+HSET d:9 t nope
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
+@resp 3
+FT.SEARCH i hello
+FT.SEARCH i hello WITHCURSOR
+FT.SEARCH i hello FORMAT EXPAND
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
+FT.AGGREGATE i hello WITHCURSOR COUNT 2
+!timing FT.PROFILE i SEARCH QUERY hello
+!timing FT.PROFILE i AGGREGATE QUERY hello FORMAT EXPAND
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
+FT.HYBRID hv SEARCH hello VSIM @v $b
+FT.PROFILE hv HYBRID QUERY SEARCH hello VSIM @v $b
+FT.CURSOR READ i {$c}
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
+@resp 2
+
+# ON_OOM FAIL: the error.
+FT.CONFIG SET ON_OOM fail
+FT.CONFIG GET ON_OOM
+FT.SEARCH i hello
+FT.SEARCH nosuch hello WITHCURSOR
+FT.SEARCH i hello FORMAT bad
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
+FT.AGGREGATE i hello
+FT.PROFILE i SEARCH QUERY hello
+FT.PROFILE i AGGREGATE QUERY hello
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
+FT.PROFILE nosuch AGGREGATE QUERY hello
+FT.HYBRID hv SEARCH hello VSIM @v $b
+FT.PROFILE hv HYBRID QUERY SEARCH hello VSIM @v $b
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
+FT.CURSOR READ i {$c}
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
+@resp 3
+FT.SEARCH i hello
+FT.HYBRID hv SEARCH hello VSIM @v $b
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
+@resp 2
+
+# ON_OOM IGNORE: queries run.
+CONFIG SET search-on-oom ignore
+FT.SEARCH i hello NOCONTENT SORTBY n
+FT.AGGREGATE i hello LOAD 1 @n SORTBY 2 @n ASC
+!mask execution_time FT.HYBRID hv SEARCH hello VSIM @v $b PARAMS 2 b "\x00\x00\x80\x3f\x00\x00\x80\x3f" LOAD 1 @t
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
+!timing FT.PROFILE i SEARCH QUERY hello NOCONTENT SORTBY n
+FT.CURSOR READ i {$c}
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
+
+# Under the limit again.
+CONFIG SET search-on-oom return
+CONFIG SET maxmemory 0
+FT.SEARCH i hello NOCONTENT SORTBY n
+CONFIG GET maxmemory
+CONFIG GET search-on-oom
+FT.DROPINDEX i
+FT.DROPINDEX hv
+FLUSHALL
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors

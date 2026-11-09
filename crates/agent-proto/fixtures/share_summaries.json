@@ -1,0 +1,14 @@
+[
+  {
+    "id": "shr_0123456789abcdef01234567",
+    "title": "Fix the flaky queue test",
+    "thread": "thr_a1b2c3d4e5f60718",
+    "subtree": false,
+    "url": "https://roll.sh/agents/s/shr_0123456789abcdef01234567",
+    "threads": 1,
+    "runs": 2,
+    "bytes": 18432,
+    "created_at": 1762000000000,
+    "created_by": "acme"
+  }
+]

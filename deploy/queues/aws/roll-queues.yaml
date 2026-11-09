@@ -1,0 +1,816 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  roll queues on AWS: a shared fleet of stateless Graviton brokers (ECS on EC2, an on-demand base
+  plus Spot, or Fargate), three log keepers (one per AZ, gp3) with sealed segments tiered to S3, a
+  tiny AZ-local proxy per AZ behind an NLB with cross-zone routing off, and metadata in Postgres.
+  Tenants (vhosts) scale to zero on warm brokers and wake in milliseconds; the brokers themselves
+  can also stop when nobody is connected (IdleMinutesToZero), at the cost of a cold start.
+
+Parameters:
+  ImageUri:
+    Type: String
+    Description: roll-queues image built from deploy/queues/Dockerfile for linux/arm64 (ECR URI).
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+  PrivateSubnets:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Exactly three private subnets in three different AZs (brokers, keepers, proxies).
+  LoadBalancerSubnets:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Subnets for the NLB (public subnets for an internet-facing endpoint), one per AZ.
+  Scheme:
+    Type: String
+    AllowedValues: [internet-facing, internal]
+    Default: internal
+  ClientCidr:
+    Type: String
+    Default: 10.0.0.0/8
+    Description: Who may connect to the client ports.
+  MetadataUrlSecretArn:
+    Type: String
+    Description: Secrets Manager secret holding the Postgres URL for cluster metadata (roll postgres or RDS).
+  AdminPasswordSecretArn:
+    Type: String
+    Description: Secrets Manager secret holding the broker admin password (user "admin").
+  BrokerCount:
+    Type: Number
+    Default: 2
+    MinValue: 0
+    Description: Warm brokers (the fleet never shrinks below this unless IdleMinutesToZero is set).
+  MaxBrokers:
+    Type: Number
+    Default: 12
+  BrokerCompute:
+    Type: String
+    AllowedValues: [ec2, fargate]
+    Default: ec2
+    Description: >
+      ec2: Graviton instances from an Auto Scaling group, OnDemandBrokers of them on demand and the
+      rest Spot (about a third of Fargate's price); Spot interruptions drain gracefully.
+      fargate: no instances to manage, at Fargate prices.
+  OnDemandBrokers:
+    Type: Number
+    Default: 1
+    MinValue: 0
+    Description: With ec2, how many broker instances are always on demand; everything above is Spot.
+  BrokerVcpus:
+    Type: Number
+    Default: 2
+    Description: With ec2, vCPUs per broker instance (any current Graviton type with this many qualifies).
+  BrokerInstanceMemoryMiB:
+    Type: Number
+    Default: 4096
+    Description: With ec2, the least memory per broker instance.
+  BrokerCpu:
+    Type: Number
+    Default: 1024
+    AllowedValues: [512, 1024, 2048, 4096, 8192, 16384]
+    Description: CPU units per broker task (with ec2, leave room for the ECS agent on the instance).
+  BrokerMemory:
+    Type: Number
+    Default: 2048
+  VhostPublishRate:
+    Type: Number
+    Default: 0
+    MinValue: 0
+    Description: Default publish budget per vhost in messages/s (0 = unlimited); a vhost's max-publish-rate limit overrides it.
+  VhostPublishBytesRate:
+    Type: Number
+    Default: 0
+    MinValue: 0
+    Description: The same in bytes/s (max-publish-bytes-rate).
+  IdleVhostSeconds:
+    Type: Number
+    Default: 300
+    MinValue: 0
+    Description: Unload a vhost after this many seconds without clients; it keeps its data and wakes on the next connection (0 keeps vhosts loaded).
+  IdleMinutesToZero:
+    Type: Number
+    Default: 0
+    Description: >
+      Stop every broker after this many minutes without client connections (0: keep BrokerCount
+      warm). A shared fleet keeps brokers warm and lets idle vhosts sleep instead; stopping the
+      brokers suits a single small tenant that accepts a cold start (tens of seconds).
+  KeeperInstanceType:
+    Type: String
+    Default: m7g.medium
+  KeeperVolumeGiB:
+    Type: Number
+    Default: 100
+  KeeperVolumeThroughput:
+    Type: Number
+    Default: 250
+  StorageMode:
+    Type: String
+    AllowedValues: [keepers, s3express]
+    Default: keepers
+    Description: >
+      keepers: three log keepers (one per AZ, 2-of-3 quorum) with S3 tiering; survives an AZ loss.
+      s3express: logs in one S3 Express One Zone directory bucket, no keepers; cheapest, but an
+      outage of that AZ makes queues unavailable until it recovers.
+  ExpressAzId:
+    Type: String
+    Default: ""
+    Description: With s3express, the AZ id for the directory bucket (e.g. use1-az4); pick one of your private subnets' AZs.
+  LatestAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64
+  EcsAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ecs/optimized-ami/amazon-linux-2023/arm64/recommended/image_id
+
+Conditions:
+  ScaleToZero: !Not [!Equals [!Ref IdleMinutesToZero, 0]]
+  UseEc2: !Equals [!Ref BrokerCompute, ec2]
+  UseKeepers: !Equals [!Ref StorageMode, keepers]
+  UseExpress: !Equals [!Ref StorageMode, s3express]
+
+Resources:
+  # Shared secret for internal traffic: brokers prove it to keepers and to each other.
+  InternalSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Description: roll queues internal secret (broker-to-keeper and broker-to-broker handshakes)
+      GenerateSecretString: { PasswordLength: 48, ExcludePunctuation: true }
+
+  # ── storage ──
+  TierBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault: { SSEAlgorithm: AES256 }
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  ExpressBucket:
+    Condition: UseExpress
+    Type: AWS::S3Express::DirectoryBucket
+    Properties:
+      DataRedundancy: SingleAvailabilityZone
+      LocationName: !Ref ExpressAzId
+
+  ClusterSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: roll queues brokers, keepers and proxies
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - { IpProtocol: tcp, FromPort: 5672, ToPort: 5672, CidrIp: !Ref ClientCidr, Description: AMQP 0-9-1 and 1.0 }
+        - { IpProtocol: tcp, FromPort: 5552, ToPort: 5552, CidrIp: !Ref ClientCidr, Description: RabbitMQ Streams }
+        - { IpProtocol: tcp, FromPort: 1883, ToPort: 1883, CidrIp: !Ref ClientCidr, Description: MQTT }
+        - { IpProtocol: tcp, FromPort: 61613, ToPort: 61613, CidrIp: !Ref ClientCidr, Description: STOMP }
+        - { IpProtocol: tcp, FromPort: 8080, ToPort: 8080, CidrIp: !Ref ClientCidr, Description: HTTP API }
+        - { IpProtocol: tcp, FromPort: 15672, ToPort: 15672, CidrIp: !Ref ClientCidr, Description: Management API }
+  ClusterSelfIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref ClusterSecurityGroup
+      IpProtocol: "-1"
+      SourceSecurityGroupId: !Ref ClusterSecurityGroup
+      Description: brokers, keepers and proxies talk to each other
+
+  KeeperRole:
+    Condition: UseKeepers
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement: [{ Effect: Allow, Principal: { Service: ec2.amazonaws.com }, Action: sts:AssumeRole }]
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+      Policies:
+        - PolicyName: internal-secret
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - { Effect: Allow, Action: secretsmanager:GetSecretValue, Resource: !Ref InternalSecret }
+  KeeperProfile:
+    Condition: UseKeepers
+    Type: AWS::IAM::InstanceProfile
+    Properties: { Roles: [!Ref KeeperRole] }
+
+  Keeper1:
+    Condition: UseKeepers
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref LatestAmiId
+      InstanceType: !Ref KeeperInstanceType
+      IamInstanceProfile: !Ref KeeperProfile
+      SubnetId: !Select [0, !Ref PrivateSubnets]
+      SecurityGroupIds: [!Ref ClusterSecurityGroup]
+      MetadataOptions: { HttpTokens: required }
+      Tags: [{ Key: Name, Value: roll-queues-keeper }]
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -euxo pipefail
+          dnf install -y docker
+          systemctl enable --now docker
+          # The data volume is attached after boot; wait for it.
+          for i in $(seq 1 120); do
+            dev=$(lsblk -dpno NAME,SERIAL | awk '/vol/ && $1 != "/dev/nvme0n1" {print $1; exit}')
+            [ -n "$dev" ] && break
+            sleep 2
+          done
+          blkid "$dev" || mkfs.xfs "$dev"
+          mkdir -p /var/lib/roll-keeper && mount "$dev" /var/lib/roll-keeper
+          echo "$dev /var/lib/roll-keeper xfs defaults,nofail 0 2" >> /etc/fstab
+          chown 999:999 /var/lib/roll-keeper
+          token=$(curl -sX PUT http://169.254.169.254/latest/api/token -H 'X-aws-ec2-metadata-token-ttl-seconds: 60')
+          az=$(curl -sH "X-aws-ec2-metadata-token: $token" http://169.254.169.254/latest/meta-data/placement/availability-zone)
+          aws ecr get-login-password --region ${AWS::Region} | docker login --username AWS --password-stdin "$(echo ${ImageUri} | cut -d/ -f1)" || true
+          # Keep the secret out of the cloud-init log and the process list.
+          set +x
+          umask 077
+          printf 'ROLL_KEEPER_SECRET=%s\n' "$(aws secretsmanager get-secret-value --region ${AWS::Region} --secret-id ${InternalSecret} --query SecretString --output text)" > /etc/roll-keeper.env
+          set -x
+          docker run -d --restart always --name roll-keeper --network host --user 999 --env-file /etc/roll-keeper.env \
+            -v /var/lib/roll-keeper:/var/lib/roll-keeper -e ROLL_KEEPER_AZ="$az" ${ImageUri} roll-keeper
+  Keeper2:
+    Condition: UseKeepers
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref LatestAmiId
+      InstanceType: !Ref KeeperInstanceType
+      IamInstanceProfile: !Ref KeeperProfile
+      SubnetId: !Select [1, !Ref PrivateSubnets]
+      SecurityGroupIds: [!Ref ClusterSecurityGroup]
+      MetadataOptions: { HttpTokens: required }
+      Tags: [{ Key: Name, Value: roll-queues-keeper }]
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -euxo pipefail
+          dnf install -y docker
+          systemctl enable --now docker
+          # The data volume is attached after boot; wait for it.
+          for i in $(seq 1 120); do
+            dev=$(lsblk -dpno NAME,SERIAL | awk '/vol/ && $1 != "/dev/nvme0n1" {print $1; exit}')
+            [ -n "$dev" ] && break
+            sleep 2
+          done
+          blkid "$dev" || mkfs.xfs "$dev"
+          mkdir -p /var/lib/roll-keeper && mount "$dev" /var/lib/roll-keeper
+          echo "$dev /var/lib/roll-keeper xfs defaults,nofail 0 2" >> /etc/fstab
+          chown 999:999 /var/lib/roll-keeper
+          token=$(curl -sX PUT http://169.254.169.254/latest/api/token -H 'X-aws-ec2-metadata-token-ttl-seconds: 60')
+          az=$(curl -sH "X-aws-ec2-metadata-token: $token" http://169.254.169.254/latest/meta-data/placement/availability-zone)
+          aws ecr get-login-password --region ${AWS::Region} | docker login --username AWS --password-stdin "$(echo ${ImageUri} | cut -d/ -f1)" || true
+          # Keep the secret out of the cloud-init log and the process list.
+          set +x
+          umask 077
+          printf 'ROLL_KEEPER_SECRET=%s\n' "$(aws secretsmanager get-secret-value --region ${AWS::Region} --secret-id ${InternalSecret} --query SecretString --output text)" > /etc/roll-keeper.env
+          set -x
+          docker run -d --restart always --name roll-keeper --network host --user 999 --env-file /etc/roll-keeper.env \
+            -v /var/lib/roll-keeper:/var/lib/roll-keeper -e ROLL_KEEPER_AZ="$az" ${ImageUri} roll-keeper
+  Keeper3:
+    Condition: UseKeepers
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref LatestAmiId
+      InstanceType: !Ref KeeperInstanceType
+      IamInstanceProfile: !Ref KeeperProfile
+      SubnetId: !Select [2, !Ref PrivateSubnets]
+      SecurityGroupIds: [!Ref ClusterSecurityGroup]
+      MetadataOptions: { HttpTokens: required }
+      Tags: [{ Key: Name, Value: roll-queues-keeper }]
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -euxo pipefail
+          dnf install -y docker
+          systemctl enable --now docker
+          # The data volume is attached after boot; wait for it.
+          for i in $(seq 1 120); do
+            dev=$(lsblk -dpno NAME,SERIAL | awk '/vol/ && $1 != "/dev/nvme0n1" {print $1; exit}')
+            [ -n "$dev" ] && break
+            sleep 2
+          done
+          blkid "$dev" || mkfs.xfs "$dev"
+          mkdir -p /var/lib/roll-keeper && mount "$dev" /var/lib/roll-keeper
+          echo "$dev /var/lib/roll-keeper xfs defaults,nofail 0 2" >> /etc/fstab
+          chown 999:999 /var/lib/roll-keeper
+          token=$(curl -sX PUT http://169.254.169.254/latest/api/token -H 'X-aws-ec2-metadata-token-ttl-seconds: 60')
+          az=$(curl -sH "X-aws-ec2-metadata-token: $token" http://169.254.169.254/latest/meta-data/placement/availability-zone)
+          aws ecr get-login-password --region ${AWS::Region} | docker login --username AWS --password-stdin "$(echo ${ImageUri} | cut -d/ -f1)" || true
+          # Keep the secret out of the cloud-init log and the process list.
+          set +x
+          umask 077
+          printf 'ROLL_KEEPER_SECRET=%s\n' "$(aws secretsmanager get-secret-value --region ${AWS::Region} --secret-id ${InternalSecret} --query SecretString --output text)" > /etc/roll-keeper.env
+          set -x
+          docker run -d --restart always --name roll-keeper --network host --user 999 --env-file /etc/roll-keeper.env \
+            -v /var/lib/roll-keeper:/var/lib/roll-keeper -e ROLL_KEEPER_AZ="$az" ${ImageUri} roll-keeper
+
+  Keeper1Volume:
+    Condition: UseKeepers
+    Type: AWS::EC2::Volume
+    DeletionPolicy: Snapshot
+    UpdateReplacePolicy: Snapshot
+    Properties:
+      AvailabilityZone: !GetAtt Keeper1.AvailabilityZone
+      VolumeType: gp3
+      Size: !Ref KeeperVolumeGiB
+      Throughput: !Ref KeeperVolumeThroughput
+      Encrypted: true
+  Keeper1Attachment:
+    Condition: UseKeepers
+    Type: AWS::EC2::VolumeAttachment
+    Properties: { InstanceId: !Ref Keeper1, VolumeId: !Ref Keeper1Volume, Device: /dev/sdf }
+  Keeper2Volume:
+    Condition: UseKeepers
+    Type: AWS::EC2::Volume
+    DeletionPolicy: Snapshot
+    UpdateReplacePolicy: Snapshot
+    Properties:
+      AvailabilityZone: !GetAtt Keeper2.AvailabilityZone
+      VolumeType: gp3
+      Size: !Ref KeeperVolumeGiB
+      Throughput: !Ref KeeperVolumeThroughput
+      Encrypted: true
+  Keeper2Attachment:
+    Condition: UseKeepers
+    Type: AWS::EC2::VolumeAttachment
+    Properties: { InstanceId: !Ref Keeper2, VolumeId: !Ref Keeper2Volume, Device: /dev/sdf }
+  Keeper3Volume:
+    Condition: UseKeepers
+    Type: AWS::EC2::Volume
+    DeletionPolicy: Snapshot
+    UpdateReplacePolicy: Snapshot
+    Properties:
+      AvailabilityZone: !GetAtt Keeper3.AvailabilityZone
+      VolumeType: gp3
+      Size: !Ref KeeperVolumeGiB
+      Throughput: !Ref KeeperVolumeThroughput
+      Encrypted: true
+  Keeper3Attachment:
+    Condition: UseKeepers
+    Type: AWS::EC2::VolumeAttachment
+    Properties: { InstanceId: !Ref Keeper3, VolumeId: !Ref Keeper3Volume, Device: /dev/sdf }
+
+  # ── brokers ──
+  Cluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterSettings: [{ Name: containerInsights, Value: disabled }]
+  Logs:
+    Type: AWS::Logs::LogGroup
+    Properties: { RetentionInDays: 14 }
+
+  # ── broker instances (ec2): Graviton, an on-demand base plus Spot ──
+  BrokerInstanceRole:
+    Condition: UseEc2
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement: [{ Effect: Allow, Principal: { Service: ec2.amazonaws.com }, Action: sts:AssumeRole }]
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+  BrokerInstanceProfile:
+    Condition: UseEc2
+    Type: AWS::IAM::InstanceProfile
+    Properties: { Roles: [!Ref BrokerInstanceRole] }
+  BrokerLaunchTemplate:
+    Condition: UseEc2
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateData:
+        ImageId: !Ref EcsAmiId
+        IamInstanceProfile: { Arn: !GetAtt BrokerInstanceProfile.Arn }
+        SecurityGroupIds: [!Ref ClusterSecurityGroup]
+        # Hop limit 1: tasks get credentials from their task role, never from the instance.
+        MetadataOptions: { HttpTokens: required, HttpPutResponseHopLimit: 1 }
+        TagSpecifications: [{ ResourceType: instance, Tags: [{ Key: Name, Value: roll-queues-broker }] }]
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            cat >> /etc/ecs/ecs.config <<EOF
+            ECS_CLUSTER=${Cluster}
+            ECS_ENABLE_SPOT_INSTANCE_DRAINING=true
+            ECS_CONTAINER_STOP_TIMEOUT=120s
+            ECS_ENABLE_CONTAINER_METADATA=true
+            EOF
+  BrokerGroup:
+    Condition: UseEc2
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      VPCZoneIdentifier: !Ref PrivateSubnets
+      MinSize: "0"
+      MaxSize: !Ref MaxBrokers
+      # ECS managed scaling sets the desired count; instances running brokers are protected
+      # from scale-in until ECS has moved their tasks.
+      NewInstancesProtectedFromScaleIn: true
+      # Replace Spot instances at elevated risk of interruption before AWS takes them.
+      CapacityRebalance: true
+      MixedInstancesPolicy:
+        InstancesDistribution:
+          OnDemandBaseCapacity: !Ref OnDemandBrokers
+          OnDemandPercentageAboveBaseCapacity: 0
+          SpotAllocationStrategy: price-capacity-optimized
+        LaunchTemplate:
+          LaunchTemplateSpecification: { LaunchTemplateId: !Ref BrokerLaunchTemplate, Version: !GetAtt BrokerLaunchTemplate.LatestVersionNumber }
+          # Any current Graviton type of the right size: more Spot pools, fewer interruptions.
+          Overrides:
+            - InstanceRequirements:
+                VCpuCount: { Min: !Ref BrokerVcpus, Max: !Ref BrokerVcpus }
+                MemoryMiB: { Min: !Ref BrokerInstanceMemoryMiB }
+                CpuManufacturers: [amazon-web-services]
+                InstanceGenerations: [current]
+                BurstablePerformance: excluded
+      Tags: [{ Key: Name, Value: roll-queues-broker, PropagateAtLaunch: true }]
+  BrokerCapacity:
+    Condition: UseEc2
+    Type: AWS::ECS::CapacityProvider
+    Properties:
+      AutoScalingGroupProvider:
+        AutoScalingGroupArn: !Ref BrokerGroup
+        ManagedScaling: { Status: ENABLED, TargetCapacity: 100 }
+        ManagedTerminationProtection: ENABLED
+        ManagedDraining: ENABLED
+  ClusterCapacity:
+    Type: AWS::ECS::ClusterCapacityProviderAssociations
+    Properties:
+      Cluster: !Ref Cluster
+      CapacityProviders: !If [UseEc2, [FARGATE, !Ref BrokerCapacity], [FARGATE]]
+      DefaultCapacityProviderStrategy: [{ CapacityProvider: FARGATE, Weight: 1 }]
+
+  ExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement: [{ Effect: Allow, Principal: { Service: ecs-tasks.amazonaws.com }, Action: sts:AssumeRole }]
+      ManagedPolicyArns: [arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy]
+      Policies:
+        - PolicyName: secrets
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - { Effect: Allow, Action: secretsmanager:GetSecretValue, Resource: [!Ref MetadataUrlSecretArn, !Ref AdminPasswordSecretArn, !Ref InternalSecret] }
+  BrokerTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement: [{ Effect: Allow, Principal: { Service: ecs-tasks.amazonaws.com }, Action: sts:AssumeRole }]
+      Policies:
+        - PolicyName: tier
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - { Effect: Allow, Action: [s3:GetObject, s3:PutObject, s3:DeleteObject], Resource: !Sub "${TierBucket.Arn}/*" }
+              - { Effect: Allow, Action: s3:ListBucket, Resource: !GetAtt TierBucket.Arn }
+              - !If
+                - UseExpress
+                - { Effect: Allow, Action: s3express:CreateSession, Resource: !GetAtt ExpressBucket.Arn }
+                - !Ref AWS::NoValue
+
+  BrokerTask:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      RequiresCompatibilities: [EC2, FARGATE]
+      NetworkMode: awsvpc
+      RuntimePlatform: { CpuArchitecture: ARM64, OperatingSystemFamily: LINUX }
+      Cpu: !Ref BrokerCpu
+      Memory: !Ref BrokerMemory
+      ExecutionRoleArn: !GetAtt ExecutionRole.Arn
+      TaskRoleArn: !GetAtt BrokerTaskRole.Arn
+      ContainerDefinitions:
+        - Name: broker
+          Image: !Ref ImageUri
+          Command: [rolld]
+          Essential: true
+          # Drain on SIGTERM: queues move to other brokers, connections close gradually. Spot
+          # gives two minutes' notice; the drain fits inside it.
+          StopTimeout: 120
+          Environment:
+            - { Name: ROLL_QUEUES_USER, Value: admin }
+            - { Name: ROLL_QUEUES_DRAIN_TIMEOUT, Value: "90" }
+            - { Name: ROLL_QUEUES_DEFAULT_QUEUE_TYPE, Value: quorum }
+            - { Name: ROLL_QUEUES_IDLE_SUSPEND, Value: !Ref IdleVhostSeconds }
+            - { Name: ROLL_QUEUES_VHOST_PUBLISH_RATE, Value: !Ref VhostPublishRate }
+            - { Name: ROLL_QUEUES_VHOST_PUBLISH_BYTES_RATE, Value: !Ref VhostPublishBytesRate }
+            - Name: ROLL_QUEUES_STORAGE
+              Value: !If
+                - UseKeepers
+                - !Sub "quorum:${Keeper1.PrivateIp}:9580@${Keeper1.AvailabilityZone},${Keeper2.PrivateIp}:9580@${Keeper2.AvailabilityZone},${Keeper3.PrivateIp}:9580@${Keeper3.AvailabilityZone}"
+                - !Sub "s3express:${ExpressBucket}/queues"
+            - { Name: ROLL_QUEUES_TIER, Value: !Sub "s3://${TierBucket}/queues" }
+            - { Name: AWS_REGION, Value: !Ref AWS::Region }
+          Secrets:
+            - { Name: ROLL_QUEUES_CLUSTER_META, ValueFrom: !Ref MetadataUrlSecretArn }
+            - { Name: ROLL_QUEUES_PASSWORD, ValueFrom: !Ref AdminPasswordSecretArn }
+            - { Name: ROLL_QUEUES_CLUSTER_SECRET, ValueFrom: !Ref InternalSecret }
+            - { Name: ROLL_QUEUES_KEEPER_SECRET, ValueFrom: !Ref InternalSecret }
+          PortMappings:
+            - { ContainerPort: 5672 }
+            - { ContainerPort: 5552 }
+            - { ContainerPort: 1883 }
+            - { ContainerPort: 61613 }
+            - { ContainerPort: 8080 }
+            - { ContainerPort: 15672 }
+            - { ContainerPort: 25672 }
+          LogConfiguration:
+            LogDriver: awslogs
+            Options: { awslogs-group: !Ref Logs, awslogs-region: !Ref AWS::Region, awslogs-stream-prefix: broker }
+
+  BrokerService:
+    Type: AWS::ECS::Service
+    DependsOn: ClusterCapacity
+    Properties:
+      Cluster: !Ref Cluster
+      TaskDefinition: !Ref BrokerTask
+      DesiredCount: !Ref BrokerCount
+      CapacityProviderStrategy: !If
+        - UseEc2
+        - [{ CapacityProvider: !Ref BrokerCapacity, Weight: 1 }]
+        - [{ CapacityProvider: FARGATE, Weight: 1 }]
+      # One broker per AZ before any AZ gets a second (EC2 only; Fargate spreads by itself).
+      PlacementStrategies: !If
+        - UseEc2
+        - [{ Type: spread, Field: attribute:ecs.availability-zone }, { Type: binpack, Field: memory }]
+        - !Ref AWS::NoValue
+      DeploymentConfiguration: { MinimumHealthyPercent: 100, MaximumPercent: 200 }
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          Subnets: !Ref PrivateSubnets
+          SecurityGroups: [!Ref ClusterSecurityGroup]
+          AssignPublicIp: DISABLED
+
+  BrokerScaling:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    Properties:
+      ServiceNamespace: ecs
+      ScalableDimension: ecs:service:DesiredCount
+      ResourceId: !Sub "service/${Cluster}/${BrokerService.Name}"
+      # A shared fleet stays warm: only vhosts sleep.
+      MinCapacity: !If [ScaleToZero, 0, !Ref BrokerCount]
+      MaxCapacity: !Ref MaxBrokers
+  # Scale out on CPU; scale in one broker at a time while more than one runs. Going to zero is
+  # only done by the idle alarm below (no client connections at all).
+  BrokerCpuTracking:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: roll-queues-cpu-out
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref BrokerScaling
+      TargetTrackingScalingPolicyConfiguration:
+        TargetValue: 60
+        DisableScaleIn: true
+        ScaleOutCooldown: 60
+        PredefinedMetricSpecification: { PredefinedMetricType: ECSServiceAverageCPUUtilization }
+  ScaleInPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: roll-queues-cpu-in
+      PolicyType: StepScaling
+      ScalingTargetId: !Ref BrokerScaling
+      StepScalingPolicyConfiguration:
+        AdjustmentType: ChangeInCapacity
+        Cooldown: 300
+        StepAdjustments: [{ MetricIntervalLowerBound: 0, ScalingAdjustment: -1 }]
+  ScaleInAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: roll queues brokers are mostly idle and there is more than one
+      EvaluationPeriods: 15
+      DatapointsToAlarm: 15
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref ScaleInPolicy]
+      Metrics:
+        - Id: cpu
+          ReturnData: false
+          MetricStat:
+            Metric:
+              Namespace: AWS/ECS
+              MetricName: CPUUtilization
+              Dimensions: [{ Name: ClusterName, Value: !Ref Cluster }, { Name: ServiceName, Value: !GetAtt BrokerService.Name }]
+            Period: 60
+            Stat: Average
+        - Id: tasks
+          ReturnData: false
+          MetricStat:
+            Metric:
+              Namespace: AWS/ECS
+              MetricName: CPUUtilization
+              Dimensions: [{ Name: ClusterName, Value: !Ref Cluster }, { Name: ServiceName, Value: !GetAtt BrokerService.Name }]
+            Period: 60
+            # One CPU sample per running task per minute.
+            Stat: SampleCount
+        - Id: shrink
+          Expression: IF(cpu < 20 AND tasks > 1, 1, 0)
+          ReturnData: true
+
+  # Scale to zero: no client flows through the NLB for IdleMinutesToZero minutes → no brokers.
+  # The proxies stay up and start a broker on the next connection.
+  ToZeroPolicy:
+    Condition: ScaleToZero
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: roll-queues-to-zero
+      PolicyType: StepScaling
+      ScalingTargetId: !Ref BrokerScaling
+      StepScalingPolicyConfiguration:
+        AdjustmentType: ExactCapacity
+        StepAdjustments: [{ MetricIntervalUpperBound: 0, ScalingAdjustment: 0 }]
+  IdleAlarm:
+    Condition: ScaleToZero
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: roll queues has had no client connections
+      Namespace: AWS/NetworkELB
+      MetricName: ActiveFlowCount
+      Dimensions: [{ Name: LoadBalancer, Value: !GetAtt LoadBalancer.LoadBalancerFullName }]
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: !Ref IdleMinutesToZero
+      Threshold: 0
+      ComparisonOperator: LessThanOrEqualToThreshold
+      TreatMissingData: breaching
+      AlarmActions: [!Ref ToZeroPolicy]
+
+  # ── proxies: one per AZ, AZ-local, wake brokers on connect ──
+  ProxyTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement: [{ Effect: Allow, Principal: { Service: ecs-tasks.amazonaws.com }, Action: sts:AssumeRole }]
+      Policies:
+        - PolicyName: wake
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - { Effect: Allow, Action: ecs:UpdateService, Resource: !Ref BrokerService }
+  ProxyTask:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      RequiresCompatibilities: [FARGATE]
+      NetworkMode: awsvpc
+      RuntimePlatform: { CpuArchitecture: ARM64, OperatingSystemFamily: LINUX }
+      Cpu: "256"
+      Memory: "512"
+      ExecutionRoleArn: !GetAtt ExecutionRole.Arn
+      TaskRoleArn: !GetAtt ProxyTaskRole.Arn
+      ContainerDefinitions:
+        - Name: proxy
+          Image: !Ref ImageUri
+          Command: [mq-proxy]
+          Essential: true
+          Environment:
+            - { Name: ROLL_PROXY_LISTEN, Value: "amqp=0.0.0.0:5672,stream=0.0.0.0:5552,mqtt=0.0.0.0:1883,stomp=0.0.0.0:61613,http=0.0.0.0:8080,management=0.0.0.0:15672" }
+            - { Name: ROLL_PROXY_HEALTH, Value: "0.0.0.0:8081" }
+            - { Name: ROLL_PROXY_WAKE_ECS_SERVICE, Value: !Sub "${Cluster}/${BrokerService.Name}" }
+            - { Name: ROLL_PROXY_WAKE_COUNT, Value: "1" }
+            - { Name: AWS_REGION, Value: !Ref AWS::Region }
+          Secrets:
+            - { Name: ROLL_QUEUES_CLUSTER_META, ValueFrom: !Ref MetadataUrlSecretArn }
+          PortMappings:
+            - { ContainerPort: 5672 }
+            - { ContainerPort: 5552 }
+            - { ContainerPort: 1883 }
+            - { ContainerPort: 61613 }
+            - { ContainerPort: 8080 }
+            - { ContainerPort: 8081 }
+            - { ContainerPort: 15672 }
+          LogConfiguration:
+            LogDriver: awslogs
+            Options: { awslogs-group: !Ref Logs, awslogs-region: !Ref AWS::Region, awslogs-stream-prefix: proxy }
+  ProxyService:
+    Type: AWS::ECS::Service
+    DependsOn: [ClusterCapacity, ListenerAmqp, ListenerStream, ListenerMqtt, ListenerStomp, ListenerHttp, ListenerManagement]
+    Properties:
+      Cluster: !Ref Cluster
+      TaskDefinition: !Ref ProxyTask
+      DesiredCount: 3
+      CapacityProviderStrategy: [{ CapacityProvider: FARGATE, Weight: 1 }]
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          Subnets: !Ref PrivateSubnets
+          SecurityGroups: [!Ref ClusterSecurityGroup]
+          AssignPublicIp: DISABLED
+      LoadBalancers:
+        - { ContainerName: proxy, ContainerPort: 5672, TargetGroupArn: !Ref TgAmqp }
+        - { ContainerName: proxy, ContainerPort: 5552, TargetGroupArn: !Ref TgStream }
+        - { ContainerName: proxy, ContainerPort: 1883, TargetGroupArn: !Ref TgMqtt }
+        - { ContainerName: proxy, ContainerPort: 61613, TargetGroupArn: !Ref TgStomp }
+        - { ContainerName: proxy, ContainerPort: 8080, TargetGroupArn: !Ref TgHttp }
+        - { ContainerName: proxy, ContainerPort: 15672, TargetGroupArn: !Ref TgManagement }
+
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Type: network
+      Scheme: !Ref Scheme
+      Subnets: !Ref LoadBalancerSubnets
+      SecurityGroups: [!Ref ClusterSecurityGroup]
+      # AZ-local: a client's flow stays in its AZ (no cross-AZ data charges).
+      LoadBalancerAttributes: [{ Key: load_balancing.cross_zone.enabled, Value: "false" }]
+
+  # Health checks hit the proxy's health port, which never touches brokers, so they don't wake a
+  # cluster that scaled to zero.
+  TgAmqp:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      VpcId: !Ref VpcId
+      Protocol: TCP
+      Port: 5672
+      TargetType: ip
+      HealthCheckProtocol: HTTP
+      HealthCheckPort: "8081"
+      HealthCheckPath: /
+      TargetGroupAttributes: [{ Key: deregistration_delay.timeout_seconds, Value: "30" }]
+  TgStream:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      VpcId: !Ref VpcId
+      Protocol: TCP
+      Port: 5552
+      TargetType: ip
+      HealthCheckProtocol: HTTP
+      HealthCheckPort: "8081"
+      HealthCheckPath: /
+      TargetGroupAttributes: [{ Key: deregistration_delay.timeout_seconds, Value: "30" }]
+  TgMqtt:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      VpcId: !Ref VpcId
+      Protocol: TCP
+      Port: 1883
+      TargetType: ip
+      HealthCheckProtocol: HTTP
+      HealthCheckPort: "8081"
+      HealthCheckPath: /
+      TargetGroupAttributes: [{ Key: deregistration_delay.timeout_seconds, Value: "30" }]
+  TgStomp:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      VpcId: !Ref VpcId
+      Protocol: TCP
+      Port: 61613
+      TargetType: ip
+      HealthCheckProtocol: HTTP
+      HealthCheckPort: "8081"
+      HealthCheckPath: /
+      TargetGroupAttributes: [{ Key: deregistration_delay.timeout_seconds, Value: "30" }]
+  TgHttp:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      VpcId: !Ref VpcId
+      Protocol: TCP
+      Port: 8080
+      TargetType: ip
+      HealthCheckProtocol: HTTP
+      HealthCheckPort: "8081"
+      HealthCheckPath: /
+      TargetGroupAttributes: [{ Key: deregistration_delay.timeout_seconds, Value: "30" }]
+  TgManagement:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      VpcId: !Ref VpcId
+      Protocol: TCP
+      Port: 15672
+      TargetType: ip
+      HealthCheckProtocol: HTTP
+      HealthCheckPort: "8081"
+      HealthCheckPath: /
+      TargetGroupAttributes: [{ Key: deregistration_delay.timeout_seconds, Value: "30" }]
+
+  ListenerAmqp:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties: { LoadBalancerArn: !Ref LoadBalancer, Protocol: TCP, Port: 5672, DefaultActions: [{ Type: forward, TargetGroupArn: !Ref TgAmqp }] }
+  ListenerStream:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties: { LoadBalancerArn: !Ref LoadBalancer, Protocol: TCP, Port: 5552, DefaultActions: [{ Type: forward, TargetGroupArn: !Ref TgStream }] }
+  ListenerMqtt:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties: { LoadBalancerArn: !Ref LoadBalancer, Protocol: TCP, Port: 1883, DefaultActions: [{ Type: forward, TargetGroupArn: !Ref TgMqtt }] }
+  ListenerStomp:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties: { LoadBalancerArn: !Ref LoadBalancer, Protocol: TCP, Port: 61613, DefaultActions: [{ Type: forward, TargetGroupArn: !Ref TgStomp }] }
+  ListenerHttp:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties: { LoadBalancerArn: !Ref LoadBalancer, Protocol: TCP, Port: 8080, DefaultActions: [{ Type: forward, TargetGroupArn: !Ref TgHttp }] }
+  ListenerManagement:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties: { LoadBalancerArn: !Ref LoadBalancer, Protocol: TCP, Port: 15672, DefaultActions: [{ Type: forward, TargetGroupArn: !Ref TgManagement }] }
+
+Outputs:
+  AmqpUrl:
+    Value: !Sub "amqp://admin:<password>@${LoadBalancer.DNSName}:5672"
+  StreamEndpoint:
+    Value: !Sub "rabbitmq-stream://admin:<password>@${LoadBalancer.DNSName}:5552"
+  HttpApi:
+    Value: !Sub "http://${LoadBalancer.DNSName}:8080"
+  Management:
+    Value: !Sub "http://${LoadBalancer.DNSName}:15672"
+  TierBucket:
+    Value: !Ref TierBucket

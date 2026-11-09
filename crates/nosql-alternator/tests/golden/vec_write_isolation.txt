@@ -1,0 +1,313 @@
+# invalid system:write_isolation values at CreateTable: the table is not created
+> CreateTable {"TableName":"alt_vec_wi_x","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","Tags":[{"Key":"system:write_isolation","Value":"dog"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Incorrect write isolation tag dog. Allowed values: {\"unsafe_rmw\", \"unsafe\", \"u\", \"o\", \"always_use_lwt\", \"always\", \"only_rmw_uses_lwt\", \"a\", \"forbid_rmw\", \"forbid\", \"f\"}"}
+> CreateTable {"TableName":"alt_vec_wi_x","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","Tags":[{"Key":"system:write_isolation","Value":"FORBID"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Incorrect write isolation tag FORBID. Allowed values: {\"unsafe_rmw\", \"unsafe\", \"u\", \"o\", \"always_use_lwt\", \"always\", \"only_rmw_uses_lwt\", \"a\", \"forbid_rmw\", \"forbid\", \"f\"}"}
+> CreateTable {"TableName":"alt_vec_wi_x","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","Tags":[{"Key":"system:write_isolation","Value":"Forbid"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Incorrect write isolation tag Forbid. Allowed values: {\"unsafe_rmw\", \"unsafe\", \"u\", \"o\", \"always_use_lwt\", \"always\", \"only_rmw_uses_lwt\", \"a\", \"forbid_rmw\", \"forbid\", \"f\"}"}
+> CreateTable {"TableName":"alt_vec_wi_x","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","Tags":[{"Key":"system:write_isolation","Value":"F"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Incorrect write isolation tag F. Allowed values: {\"unsafe_rmw\", \"unsafe\", \"u\", \"o\", \"always_use_lwt\", \"always\", \"only_rmw_uses_lwt\", \"a\", \"forbid_rmw\", \"forbid\", \"f\"}"}
+> CreateTable {"TableName":"alt_vec_wi_x","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","Tags":[{"Key":"system:write_isolation","Value":"forbid "}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Incorrect write isolation tag forbid . Allowed values: {\"unsafe_rmw\", \"unsafe\", \"u\", \"o\", \"always_use_lwt\", \"always\", \"only_rmw_uses_lwt\", \"a\", \"forbid_rmw\", \"forbid\", \"f\"}"}
+> CreateTable {"TableName":"alt_vec_wi_x","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","Tags":[{"Key":"system:write_isolation","Value":""}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Incorrect write isolation tag . Allowed values: {\"unsafe_rmw\", \"unsafe\", \"u\", \"o\", \"always_use_lwt\", \"always\", \"only_rmw_uses_lwt\", \"a\", \"forbid_rmw\", \"forbid\", \"f\"}"}
+> CreateTable {"TableName":"alt_vec_wi_x","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","Tags":[{"Key":"system:write_isolation","Value":"always_use_lwt2"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Incorrect write isolation tag always_use_lwt2. Allowed values: {\"unsafe_rmw\", \"unsafe\", \"u\", \"o\", \"always_use_lwt\", \"always\", \"only_rmw_uses_lwt\", \"a\", \"forbid_rmw\", \"forbid\", \"f\"}"}
+> CreateTable {"TableName":"alt_vec_wi_x","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","Tags":[{"Key":"system:write_isolation","Value":"forbid-rmw"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Incorrect write isolation tag forbid-rmw. Allowed values: {\"unsafe_rmw\", \"unsafe\", \"u\", \"o\", \"always_use_lwt\", \"always\", \"only_rmw_uses_lwt\", \"a\", \"forbid_rmw\", \"forbid\", \"f\"}"}
+> DescribeTable {"TableName":"alt_vec_wi_x"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException","message":"Requested resource not found: Table: alt_vec_wi_x not found"}
+> CreateTable {"TableName":"alt_vec_wi_x","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","Tags":[{"Key":"a","Value":"b"},{"Key":"system:write_isolation","Value":"bah"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Incorrect write isolation tag bah. Allowed values: {\"unsafe_rmw\", \"unsafe\", \"u\", \"o\", \"always_use_lwt\", \"always\", \"only_rmw_uses_lwt\", \"a\", \"forbid_rmw\", \"forbid\", \"f\"}"}
+> DescribeTable {"TableName":"alt_vec_wi_x"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException","message":"Requested resource not found: Table: alt_vec_wi_x not found"}
+# every valid spelling is accepted at CreateTable and via TagResource
+> CreateTable {"TableName":"alt_vec_wi_x","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","Tags":[{"Key":"system:write_isolation","Value":"f"}]}
+< 200 {"TableDescription":{"TableName":"alt_vec_wi_x","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","Tags":[{"Key":"system:write_isolation","Value":"f"}],"CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+> ListTagsOfResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_vec_wi_x:scylla:table/alt_vec_wi_x"}
+< 200 {"Tags":[{"Key":"system:write_isolation","Value":"f"}]}
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_vec_wi_x:scylla:table/alt_vec_wi_x","Tags":[{"Key":"system:write_isolation","Value":"forbid"}]}
+< 200 ""
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_vec_wi_x:scylla:table/alt_vec_wi_x","Tags":[{"Key":"system:write_isolation","Value":"forbid_rmw"}]}
+< 200 ""
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_vec_wi_x:scylla:table/alt_vec_wi_x","Tags":[{"Key":"system:write_isolation","Value":"a"}]}
+< 200 ""
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_vec_wi_x:scylla:table/alt_vec_wi_x","Tags":[{"Key":"system:write_isolation","Value":"always"}]}
+< 200 ""
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_vec_wi_x:scylla:table/alt_vec_wi_x","Tags":[{"Key":"system:write_isolation","Value":"always_use_lwt"}]}
+< 200 ""
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_vec_wi_x:scylla:table/alt_vec_wi_x","Tags":[{"Key":"system:write_isolation","Value":"o"}]}
+< 200 ""
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_vec_wi_x:scylla:table/alt_vec_wi_x","Tags":[{"Key":"system:write_isolation","Value":"only_rmw_uses_lwt"}]}
+< 200 ""
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_vec_wi_x:scylla:table/alt_vec_wi_x","Tags":[{"Key":"system:write_isolation","Value":"u"}]}
+< 200 ""
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_vec_wi_x:scylla:table/alt_vec_wi_x","Tags":[{"Key":"system:write_isolation","Value":"unsafe"}]}
+< 200 ""
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_vec_wi_x:scylla:table/alt_vec_wi_x","Tags":[{"Key":"system:write_isolation","Value":"unsafe_rmw"}]}
+< 200 ""
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_vec_wi_x:scylla:table/alt_vec_wi_x","Tags":[{"Key":"system:write_isolation","Value":"f"}]}
+< 200 ""
+> ListTagsOfResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_vec_wi_x:scylla:table/alt_vec_wi_x"}
+< 200 {"Tags":[{"Key":"system:write_isolation","Value":"f"}]}
+# invalid value via TagResource; other tags in the same request are not applied
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_vec_wi_x:scylla:table/alt_vec_wi_x","Tags":[{"Key":"system:write_isolation","Value":"bah"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Incorrect write isolation tag bah. Allowed values: {\"unsafe_rmw\", \"unsafe\", \"u\", \"o\", \"always_use_lwt\", \"always\", \"only_rmw_uses_lwt\", \"a\", \"forbid_rmw\", \"forbid\", \"f\"}"}
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_vec_wi_x:scylla:table/alt_vec_wi_x","Tags":[{"Key":"k1","Value":"v1"},{"Key":"system:write_isolation","Value":"Always"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Incorrect write isolation tag Always. Allowed values: {\"unsafe_rmw\", \"unsafe\", \"u\", \"o\", \"always_use_lwt\", \"always\", \"only_rmw_uses_lwt\", \"a\", \"forbid_rmw\", \"forbid\", \"f\"}"}
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_vec_wi_x:scylla:table/alt_vec_wi_x","Tags":[{"Key":"system:write_isolation","Value":""}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Incorrect write isolation tag . Allowed values: {\"unsafe_rmw\", \"unsafe\", \"u\", \"o\", \"always_use_lwt\", \"always\", \"only_rmw_uses_lwt\", \"a\", \"forbid_rmw\", \"forbid\", \"f\"}"}
+> ListTagsOfResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_vec_wi_x:scylla:table/alt_vec_wi_x"}
+< 200 {"Tags":[{"Key":"system:write_isolation","Value":"f"}]}
+# other system: tags are not validated here
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_vec_wi_x:scylla:table/alt_vec_wi_x","Tags":[{"Key":"system:other","Value":"x"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Tag key 'system:other' is reserved for internal use"}
+> ListTagsOfResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_vec_wi_x:scylla:table/alt_vec_wi_x"}
+< 200 {"Tags":[{"Key":"system:write_isolation","Value":"f"}]}
+> DeleteTable {"TableName":"alt_vec_wi_x"}
+< 200 {"TableDescription":{"TableName":"alt_vec_wi_x","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_vec_wi_x:scylla:table/alt_vec_wi_x","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0}}}
+# a forbid_rmw table (short spelling 'f') and an unsafe_rmw table
+> CreateTable {"TableName":"alt_vec_wi_f","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","Tags":[{"Key":"system:write_isolation","Value":"f"}]}
+< 200 {"TableDescription":{"TableName":"alt_vec_wi_f","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","Tags":[{"Key":"system:write_isolation","Value":"f"}],"CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+> CreateTable {"TableName":"alt_vec_wi_u","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","Tags":[{"Key":"system:write_isolation","Value":"unsafe"}]}
+< 200 {"TableDescription":{"TableName":"alt_vec_wi_u","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","Tags":[{"Key":"system:write_isolation","Value":"unsafe"}],"CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+# pure writes work in both
+> PutItem {"TableName":"alt_vec_wi_u","Item":{"p":{"S":"k"},"a":{"N":"1"}}}
+< 200 {}
+> PutItem {"TableName":"alt_vec_wi_f","Item":{"p":{"S":"k"},"a":{"N":"1"}}}
+< 200 {}
+> PutItem {"TableName":"alt_vec_wi_u","Item":{"p":{"S":"k"},"a":{"N":"1"}},"ReturnValues":"NONE"}
+< 200 {}
+> PutItem {"TableName":"alt_vec_wi_f","Item":{"p":{"S":"k"},"a":{"N":"1"}},"ReturnValues":"NONE"}
+< 200 {}
+> UpdateItem {"TableName":"alt_vec_wi_u","Key":{"p":{"S":"k"}},"UpdateExpression":"SET a = :v, b = :w REMOVE c","ExpressionAttributeValues":{":v":{"N":"1"},":w":{"SS":["x","y","z"]}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_vec_wi_f","Key":{"p":{"S":"k"}},"UpdateExpression":"SET a = :v, b = :w REMOVE c","ExpressionAttributeValues":{":v":{"N":"1"},":w":{"SS":["x","y","z"]}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_vec_wi_u","Key":{"p":{"S":"k"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"N":"2"}},"ReturnValues":"UPDATED_NEW"}
+< 200 {"Attributes":{"a":{"N":"2"}}}
+> UpdateItem {"TableName":"alt_vec_wi_f","Key":{"p":{"S":"k"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"N":"2"}},"ReturnValues":"UPDATED_NEW"}
+< 200 {"Attributes":{"a":{"N":"2"}}}
+> UpdateItem {"TableName":"alt_vec_wi_u","Key":{"p":{"S":"k"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"N":"1"}},"ReturnValues":"NONE"}
+< 200 {}
+> UpdateItem {"TableName":"alt_vec_wi_f","Key":{"p":{"S":"k"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"N":"1"}},"ReturnValues":"NONE"}
+< 200 {}
+> UpdateItem {"TableName":"alt_vec_wi_u","Key":{"p":{"S":"k"}},"AttributeUpdates":{"d":{"Action":"PUT","Value":{"N":"5"}},"e":{"Action":"DELETE"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_vec_wi_f","Key":{"p":{"S":"k"}},"AttributeUpdates":{"d":{"Action":"PUT","Value":{"N":"5"}},"e":{"Action":"DELETE"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_vec_wi_u","Key":{"p":{"S":"k"}},"AttributeUpdates":{"d":{"Action":"PUT","Value":{"N":"5"}}},"ReturnValues":"UPDATED_NEW"}
+< 200 {"Attributes":{"d":{"N":"5"}}}
+> UpdateItem {"TableName":"alt_vec_wi_f","Key":{"p":{"S":"k"}},"AttributeUpdates":{"d":{"Action":"PUT","Value":{"N":"5"}}},"ReturnValues":"UPDATED_NEW"}
+< 200 {"Attributes":{"d":{"N":"5"}}}
+> UpdateItem {"TableName":"alt_vec_wi_u","Key":{"p":{"S":"k2"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_vec_wi_f","Key":{"p":{"S":"k2"}}}
+< 200 {}
+> DeleteItem {"TableName":"alt_vec_wi_u","Key":{"p":{"S":"k2"}},"ReturnValues":"NONE"}
+< 200 {}
+> DeleteItem {"TableName":"alt_vec_wi_f","Key":{"p":{"S":"k2"}},"ReturnValues":"NONE"}
+< 200 {}
+> DeleteItem {"TableName":"alt_vec_wi_u","Key":{"p":{"S":"k3"}}}
+< 200 {}
+> DeleteItem {"TableName":"alt_vec_wi_f","Key":{"p":{"S":"k3"}}}
+< 200 {}
+> BatchWriteItem {"RequestItems":{"alt_vec_wi_u":[{"PutRequest":{"Item":{"p":{"S":"b1"},"x":{"S":"y"}}}},{"DeleteRequest":{"Key":{"p":{"S":"b2"}}}}]}}
+< 200 {"UnprocessedItems":{}}
+> BatchWriteItem {"RequestItems":{"alt_vec_wi_f":[{"PutRequest":{"Item":{"p":{"S":"b1"},"x":{"S":"y"}}}},{"DeleteRequest":{"Key":{"p":{"S":"b2"}}}}]}}
+< 200 {"UnprocessedItems":{}}
+> GetItem {"TableName":"alt_vec_wi_u","Key":{"p":{"S":"k"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"SS":["x","y","z"]},"d":{"N":"5"}}}
+> GetItem {"TableName":"alt_vec_wi_f","Key":{"p":{"S":"k"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"SS":["x","y","z"]},"d":{"N":"5"}}}
+# conditions (ConditionExpression, non-empty Expected) are read-modify-write; an empty Expected is not
+> PutItem {"TableName":"alt_vec_wi_u","Item":{"p":{"S":"k"},"a":{"N":"1"}},"ConditionExpression":"attribute_exists(a)"}
+< 200 {}
+> PutItem {"TableName":"alt_vec_wi_f","Item":{"p":{"S":"k"},"a":{"N":"1"}},"ConditionExpression":"attribute_exists(a)"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Read-modify-write operations are disabled by 'forbid_rmw' write isolation policy. Refer to https://github.com/scylladb/scylla/blob/master/docs/alternator/alternator.md#write-isolation-policies for more information."}
+> PutItem {"TableName":"alt_vec_wi_u","Item":{"p":{"S":"k"},"a":{"N":"1"}},"ConditionExpression":"attribute_not_exists(a)"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+> PutItem {"TableName":"alt_vec_wi_f","Item":{"p":{"S":"k"},"a":{"N":"1"}},"ConditionExpression":"attribute_not_exists(a)"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Read-modify-write operations are disabled by 'forbid_rmw' write isolation policy. Refer to https://github.com/scylladb/scylla/blob/master/docs/alternator/alternator.md#write-isolation-policies for more information."}
+> PutItem {"TableName":"alt_vec_wi_u","Item":{"p":{"S":"k"},"a":{"N":"1"}},"Expected":{"a":{"Exists":true,"Value":{"N":"1"}}}}
+< 200 {}
+> PutItem {"TableName":"alt_vec_wi_f","Item":{"p":{"S":"k"},"a":{"N":"1"}},"Expected":{"a":{"Exists":true,"Value":{"N":"1"}}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Read-modify-write operations are disabled by 'forbid_rmw' write isolation policy. Refer to https://github.com/scylladb/scylla/blob/master/docs/alternator/alternator.md#write-isolation-policies for more information."}
+> PutItem {"TableName":"alt_vec_wi_u","Item":{"p":{"S":"k"},"a":{"N":"1"}},"Expected":{}}
+< 200 {}
+> PutItem {"TableName":"alt_vec_wi_f","Item":{"p":{"S":"k"},"a":{"N":"1"}},"Expected":{}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Read-modify-write operations are disabled by 'forbid_rmw' write isolation policy. Refer to https://github.com/scylladb/scylla/blob/master/docs/alternator/alternator.md#write-isolation-policies for more information."}
+> DeleteItem {"TableName":"alt_vec_wi_u","Key":{"p":{"S":"zz"}},"ConditionExpression":"attribute_exists(a)"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+> DeleteItem {"TableName":"alt_vec_wi_f","Key":{"p":{"S":"zz"}},"ConditionExpression":"attribute_exists(a)"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Read-modify-write operations are disabled by 'forbid_rmw' write isolation policy. Refer to https://github.com/scylladb/scylla/blob/master/docs/alternator/alternator.md#write-isolation-policies for more information."}
+> DeleteItem {"TableName":"alt_vec_wi_u","Key":{"p":{"S":"zz"}},"Expected":{"a":{"Exists":false}}}
+< 200 {}
+> DeleteItem {"TableName":"alt_vec_wi_f","Key":{"p":{"S":"zz"}},"Expected":{"a":{"Exists":false}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Read-modify-write operations are disabled by 'forbid_rmw' write isolation policy. Refer to https://github.com/scylladb/scylla/blob/master/docs/alternator/alternator.md#write-isolation-policies for more information."}
+> UpdateItem {"TableName":"alt_vec_wi_u","Key":{"p":{"S":"k"}},"UpdateExpression":"SET b = :v","ConditionExpression":"a = :one","ExpressionAttributeValues":{":v":{"N":"1"},":one":{"N":"1"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_vec_wi_f","Key":{"p":{"S":"k"}},"UpdateExpression":"SET b = :v","ConditionExpression":"a = :one","ExpressionAttributeValues":{":v":{"N":"1"},":one":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Read-modify-write operations are disabled by 'forbid_rmw' write isolation policy. Refer to https://github.com/scylladb/scylla/blob/master/docs/alternator/alternator.md#write-isolation-policies for more information."}
+> UpdateItem {"TableName":"alt_vec_wi_u","Key":{"p":{"S":"k"}},"AttributeUpdates":{"b":{"Action":"PUT","Value":{"N":"1"}}},"Expected":{"a":{"ComparisonOperator":"EQ","AttributeValueList":[{"N":"1"}]}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_vec_wi_f","Key":{"p":{"S":"k"}},"AttributeUpdates":{"b":{"Action":"PUT","Value":{"N":"1"}}},"Expected":{"a":{"ComparisonOperator":"EQ","AttributeValueList":[{"N":"1"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Read-modify-write operations are disabled by 'forbid_rmw' write isolation policy. Refer to https://github.com/scylladb/scylla/blob/master/docs/alternator/alternator.md#write-isolation-policies for more information."}
+> PutItem {"TableName":"alt_vec_wi_u","Item":{"p":{"S":"k"},"a":{"N":"1"}},"ConditionExpression":"attribute_exists(a)","ReturnValuesOnConditionCheckFailure":"ALL_OLD"}
+< 200 {}
+> PutItem {"TableName":"alt_vec_wi_f","Item":{"p":{"S":"k"},"a":{"N":"1"}},"ConditionExpression":"attribute_exists(a)","ReturnValuesOnConditionCheckFailure":"ALL_OLD"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Read-modify-write operations are disabled by 'forbid_rmw' write isolation policy. Refer to https://github.com/scylladb/scylla/blob/master/docs/alternator/alternator.md#write-isolation-policies for more information."}
+# ReturnValues needing the old item
+> PutItem {"TableName":"alt_vec_wi_u","Item":{"p":{"S":"k"},"a":{"N":"1"}},"ReturnValues":"ALL_OLD"}
+< 200 {"Attributes":{"p":{"S":"k"},"a":{"N":"1"}}}
+> PutItem {"TableName":"alt_vec_wi_f","Item":{"p":{"S":"k"},"a":{"N":"1"}},"ReturnValues":"ALL_OLD"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Read-modify-write operations are disabled by 'forbid_rmw' write isolation policy. Refer to https://github.com/scylladb/scylla/blob/master/docs/alternator/alternator.md#write-isolation-policies for more information."}
+> DeleteItem {"TableName":"alt_vec_wi_u","Key":{"p":{"S":"zz"}},"ReturnValues":"ALL_OLD"}
+< 200 {}
+> DeleteItem {"TableName":"alt_vec_wi_f","Key":{"p":{"S":"zz"}},"ReturnValues":"ALL_OLD"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Read-modify-write operations are disabled by 'forbid_rmw' write isolation policy. Refer to https://github.com/scylladb/scylla/blob/master/docs/alternator/alternator.md#write-isolation-policies for more information."}
+> UpdateItem {"TableName":"alt_vec_wi_u","Key":{"p":{"S":"k"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"N":"1"}},"ReturnValues":"ALL_OLD"}
+< 200 {"Attributes":{"p":{"S":"k"},"a":{"N":"1"}}}
+> UpdateItem {"TableName":"alt_vec_wi_f","Key":{"p":{"S":"k"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"N":"1"}},"ReturnValues":"ALL_OLD"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Read-modify-write operations are disabled by 'forbid_rmw' write isolation policy. Refer to https://github.com/scylladb/scylla/blob/master/docs/alternator/alternator.md#write-isolation-policies for more information."}
+> UpdateItem {"TableName":"alt_vec_wi_u","Key":{"p":{"S":"k"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"N":"1"}},"ReturnValues":"UPDATED_OLD"}
+< 200 {"Attributes":{"a":{"N":"1"}}}
+> UpdateItem {"TableName":"alt_vec_wi_f","Key":{"p":{"S":"k"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"N":"1"}},"ReturnValues":"UPDATED_OLD"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Read-modify-write operations are disabled by 'forbid_rmw' write isolation policy. Refer to https://github.com/scylladb/scylla/blob/master/docs/alternator/alternator.md#write-isolation-policies for more information."}
+> UpdateItem {"TableName":"alt_vec_wi_u","Key":{"p":{"S":"k"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"N":"1"}},"ReturnValues":"ALL_NEW"}
+< 200 {"Attributes":{"p":{"S":"k"},"a":{"N":"1"}}}
+> UpdateItem {"TableName":"alt_vec_wi_f","Key":{"p":{"S":"k"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"N":"1"}},"ReturnValues":"ALL_NEW"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Read-modify-write operations are disabled by 'forbid_rmw' write isolation policy. Refer to https://github.com/scylladb/scylla/blob/master/docs/alternator/alternator.md#write-isolation-policies for more information."}
+> UpdateItem {"TableName":"alt_vec_wi_u","Key":{"p":{"S":"k"}},"AttributeUpdates":{"a":{"Action":"PUT","Value":{"N":"1"}}},"ReturnValues":"ALL_NEW"}
+< 200 {"Attributes":{"p":{"S":"k"},"a":{"N":"1"}}}
+> UpdateItem {"TableName":"alt_vec_wi_f","Key":{"p":{"S":"k"}},"AttributeUpdates":{"a":{"Action":"PUT","Value":{"N":"1"}}},"ReturnValues":"ALL_NEW"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Read-modify-write operations are disabled by 'forbid_rmw' write isolation policy. Refer to https://github.com/scylladb/scylla/blob/master/docs/alternator/alternator.md#write-isolation-policies for more information."}
+# UpdateExpressions reading the old item
+> UpdateItem {"TableName":"alt_vec_wi_u","Key":{"p":{"S":"k"}},"UpdateExpression":"SET a = a + :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_vec_wi_f","Key":{"p":{"S":"k"}},"UpdateExpression":"SET a = a + :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Read-modify-write operations are disabled by 'forbid_rmw' write isolation policy. Refer to https://github.com/scylladb/scylla/blob/master/docs/alternator/alternator.md#write-isolation-policies for more information."}
+> UpdateItem {"TableName":"alt_vec_wi_u","Key":{"p":{"S":"k"}},"UpdateExpression":"SET z = a"}
+< 200 {}
+> UpdateItem {"TableName":"alt_vec_wi_f","Key":{"p":{"S":"k"}},"UpdateExpression":"SET z = a"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Read-modify-write operations are disabled by 'forbid_rmw' write isolation policy. Refer to https://github.com/scylladb/scylla/blob/master/docs/alternator/alternator.md#write-isolation-policies for more information."}
+> UpdateItem {"TableName":"alt_vec_wi_u","Key":{"p":{"S":"k"}},"UpdateExpression":"SET z = if_not_exists(z, :v)","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_vec_wi_f","Key":{"p":{"S":"k"}},"UpdateExpression":"SET z = if_not_exists(z, :v)","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Read-modify-write operations are disabled by 'forbid_rmw' write isolation policy. Refer to https://github.com/scylladb/scylla/blob/master/docs/alternator/alternator.md#write-isolation-policies for more information."}
+> UpdateItem {"TableName":"alt_vec_wi_u","Key":{"p":{"S":"k"}},"UpdateExpression":"SET l = list_append(:l, :l)","ExpressionAttributeValues":{":l":{"L":[{"N":"1"}]}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_vec_wi_f","Key":{"p":{"S":"k"}},"UpdateExpression":"SET l = list_append(:l, :l)","ExpressionAttributeValues":{":l":{"L":[{"N":"1"}]}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_vec_wi_u","Key":{"p":{"S":"k"}},"UpdateExpression":"SET l = list_append(l, :l)","ExpressionAttributeValues":{":l":{"L":[{"N":"1"}]}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_vec_wi_f","Key":{"p":{"S":"k"}},"UpdateExpression":"SET l = list_append(l, :l)","ExpressionAttributeValues":{":l":{"L":[{"N":"1"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Read-modify-write operations are disabled by 'forbid_rmw' write isolation policy. Refer to https://github.com/scylladb/scylla/blob/master/docs/alternator/alternator.md#write-isolation-policies for more information."}
+> UpdateItem {"TableName":"alt_vec_wi_u","Key":{"p":{"S":"k"}},"UpdateExpression":"SET z = :a + :a","ExpressionAttributeValues":{":a":{"N":"1"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_vec_wi_f","Key":{"p":{"S":"k"}},"UpdateExpression":"SET z = :a + :a","ExpressionAttributeValues":{":a":{"N":"1"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_vec_wi_u","Key":{"p":{"S":"k"}},"UpdateExpression":"ADD a :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_vec_wi_f","Key":{"p":{"S":"k"}},"UpdateExpression":"ADD a :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Read-modify-write operations are disabled by 'forbid_rmw' write isolation policy. Refer to https://github.com/scylladb/scylla/blob/master/docs/alternator/alternator.md#write-isolation-policies for more information."}
+> UpdateItem {"TableName":"alt_vec_wi_u","Key":{"p":{"S":"k"}},"UpdateExpression":"DELETE b :v","ExpressionAttributeValues":{":v":{"SS":["x"]}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_vec_wi_f","Key":{"p":{"S":"k"}},"UpdateExpression":"DELETE b :v","ExpressionAttributeValues":{":v":{"SS":["x"]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Read-modify-write operations are disabled by 'forbid_rmw' write isolation policy. Refer to https://github.com/scylladb/scylla/blob/master/docs/alternator/alternator.md#write-isolation-policies for more information."}
+> UpdateItem {"TableName":"alt_vec_wi_u","Key":{"p":{"S":"k"}},"UpdateExpression":"SET m = :m","ExpressionAttributeValues":{":m":{"M":{"x":{"S":"y"}}}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_vec_wi_f","Key":{"p":{"S":"k"}},"UpdateExpression":"SET m = :m","ExpressionAttributeValues":{":m":{"M":{"x":{"S":"y"}}}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_vec_wi_u","Key":{"p":{"S":"k"}},"UpdateExpression":"SET m.b = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_vec_wi_f","Key":{"p":{"S":"k"}},"UpdateExpression":"SET m.b = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Read-modify-write operations are disabled by 'forbid_rmw' write isolation policy. Refer to https://github.com/scylladb/scylla/blob/master/docs/alternator/alternator.md#write-isolation-policies for more information."}
+> UpdateItem {"TableName":"alt_vec_wi_u","Key":{"p":{"S":"k"}},"UpdateExpression":"REMOVE m.x"}
+< 200 {}
+> UpdateItem {"TableName":"alt_vec_wi_f","Key":{"p":{"S":"k"}},"UpdateExpression":"REMOVE m.x"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Read-modify-write operations are disabled by 'forbid_rmw' write isolation policy. Refer to https://github.com/scylladb/scylla/blob/master/docs/alternator/alternator.md#write-isolation-policies for more information."}
+> UpdateItem {"TableName":"alt_vec_wi_u","Key":{"p":{"S":"k"}},"UpdateExpression":"SET l[0] = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_vec_wi_f","Key":{"p":{"S":"k"}},"UpdateExpression":"SET l[0] = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Read-modify-write operations are disabled by 'forbid_rmw' write isolation policy. Refer to https://github.com/scylladb/scylla/blob/master/docs/alternator/alternator.md#write-isolation-policies for more information."}
+> UpdateItem {"TableName":"alt_vec_wi_u","Key":{"p":{"S":"k"}},"UpdateExpression":"REMOVE l[0]"}
+< 200 {}
+> UpdateItem {"TableName":"alt_vec_wi_f","Key":{"p":{"S":"k"}},"UpdateExpression":"REMOVE l[0]"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Read-modify-write operations are disabled by 'forbid_rmw' write isolation policy. Refer to https://github.com/scylladb/scylla/blob/master/docs/alternator/alternator.md#write-isolation-policies for more information."}
+> UpdateItem {"TableName":"alt_vec_wi_u","Key":{"p":{"S":"k"}},"AttributeUpdates":{"a":{"Action":"ADD","Value":{"N":"1"}}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_vec_wi_f","Key":{"p":{"S":"k"}},"AttributeUpdates":{"a":{"Action":"ADD","Value":{"N":"1"}}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Read-modify-write operations are disabled by 'forbid_rmw' write isolation policy. Refer to https://github.com/scylladb/scylla/blob/master/docs/alternator/alternator.md#write-isolation-policies for more information."}
+> UpdateItem {"TableName":"alt_vec_wi_u","Key":{"p":{"S":"k"}},"AttributeUpdates":{"b":{"Action":"DELETE","Value":{"SS":["y"]}}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_vec_wi_f","Key":{"p":{"S":"k"}},"AttributeUpdates":{"b":{"Action":"DELETE","Value":{"SS":["y"]}}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Read-modify-write operations are disabled by 'forbid_rmw' write isolation policy. Refer to https://github.com/scylladb/scylla/blob/master/docs/alternator/alternator.md#write-isolation-policies for more information."}
+> UpdateItem {"TableName":"alt_vec_wi_u","Key":{"p":{"S":"k"}},"AttributeUpdates":{"b":{"Action":"ADD","Value":{"SS":["q"]}}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_vec_wi_f","Key":{"p":{"S":"k"}},"AttributeUpdates":{"b":{"Action":"ADD","Value":{"SS":["q"]}}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Read-modify-write operations are disabled by 'forbid_rmw' write isolation policy. Refer to https://github.com/scylladb/scylla/blob/master/docs/alternator/alternator.md#write-isolation-policies for more information."}
+> GetItem {"TableName":"alt_vec_wi_u","Key":{"p":{"S":"k"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"k"},"a":{"N":"4"},"b":{"SS":["q"]},"l":{"L":[{"N":"1"},{"N":"1"}]},"m":{"M":{"b":{"N":"1"}}},"z":{"N":"2"}}}
+> GetItem {"TableName":"alt_vec_wi_f","Key":{"p":{"S":"k"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"k"},"a":{"N":"1"},"b":{"SS":["x","y","z"]},"d":{"N":"5"},"l":{"L":[{"N":"1"},{"N":"1"}]},"m":{"M":{"x":{"S":"y"}}},"z":{"N":"2"}}}
+# validation order: request errors vs the write-isolation rejection
+> UpdateItem {"TableName":"alt_vec_wi_u","Key":{"p":{"S":"k"}},"UpdateExpression":"SET a = a +","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'SET a = a +': syntax error at char 0"}
+> UpdateItem {"TableName":"alt_vec_wi_f","Key":{"p":{"S":"k"}},"UpdateExpression":"SET a = a +","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'SET a = a +': syntax error at char 0"}
+> UpdateItem {"TableName":"alt_vec_wi_u","Key":{"p":{"S":"k"}},"UpdateExpression":"SET a = a + :v","ExpressionAttributeValues":{":v":{"N":"1"},":unused":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeValues has spurious ':unused', not used in UpdateItem"}
+> UpdateItem {"TableName":"alt_vec_wi_f","Key":{"p":{"S":"k"}},"UpdateExpression":"SET a = a + :v","ExpressionAttributeValues":{":v":{"N":"1"},":unused":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeValues has spurious ':unused', not used in UpdateItem"}
+> UpdateItem {"TableName":"alt_vec_wi_u","Key":{"p":{"S":"k"}},"UpdateExpression":"SET a = a + :v"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeValues missing, entry ':v' required by expression"}
+> UpdateItem {"TableName":"alt_vec_wi_f","Key":{"p":{"S":"k"}},"UpdateExpression":"SET a = a + :v"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeValues missing, entry ':v' required by expression"}
+> PutItem {"TableName":"alt_vec_wi_u","Item":{"p":{"S":"k"}},"ConditionExpression":"attribute_exists(a)","ReturnValues":"BAD"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Unrecognized value for ReturnValues: BAD"}
+> PutItem {"TableName":"alt_vec_wi_f","Item":{"p":{"S":"k"}},"ConditionExpression":"attribute_exists(a)","ReturnValues":"BAD"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Unrecognized value for ReturnValues: BAD"}
+> PutItem {"TableName":"alt_vec_wi_u","Item":{"p":{"N":"1"}},"ConditionExpression":"attribute_exists(a)"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Type mismatch: expected type S for key column p, got type \"N\""}
+> PutItem {"TableName":"alt_vec_wi_f","Item":{"p":{"N":"1"}},"ConditionExpression":"attribute_exists(a)"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Type mismatch: expected type S for key column p, got type \"N\""}
+> PutItem {"TableName":"alt_vec_wi_u","Item":{"p":{"S":"k"}},"ConditionExpression":"attribute_exists(a) AND"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing ConditionExpression 'attribute_exists(a) AND': syntax error at char 0"}
+> PutItem {"TableName":"alt_vec_wi_f","Item":{"p":{"S":"k"}},"ConditionExpression":"attribute_exists(a) AND"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing ConditionExpression 'attribute_exists(a) AND': syntax error at char 0"}
+> UpdateItem {"TableName":"alt_vec_wi_u","Key":{"p":{"S":"k"},"q":{"S":"x"}},"UpdateExpression":"ADD a :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Given key attribute not in schema"}
+> UpdateItem {"TableName":"alt_vec_wi_f","Key":{"p":{"S":"k"},"q":{"S":"x"}},"UpdateExpression":"ADD a :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Given key attribute not in schema"}
+> UpdateItem {"TableName":"alt_vec_wi_u","Key":{"p":{"S":"k"}},"UpdateExpression":"ADD a :v","ExpressionAttributeValues":{":v":{"S":"x"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Incorrect operand type for operator or function. Expected N: {\"S\":\"x\"}"}
+> UpdateItem {"TableName":"alt_vec_wi_f","Key":{"p":{"S":"k"}},"UpdateExpression":"ADD a :v","ExpressionAttributeValues":{":v":{"S":"x"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Read-modify-write operations are disabled by 'forbid_rmw' write isolation policy. Refer to https://github.com/scylladb/scylla/blob/master/docs/alternator/alternator.md#write-isolation-policies for more information."}
+# TagResource switches the mode immediately; UntagResource returns to the server default (always_use_lwt here)
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_vec_wi_u:scylla:table/alt_vec_wi_u","Tags":[{"Key":"system:write_isolation","Value":"forbid_rmw"}]}
+< 200 ""
+> UpdateItem {"TableName":"alt_vec_wi_u","Key":{"p":{"S":"k"}},"UpdateExpression":"ADD a :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Read-modify-write operations are disabled by 'forbid_rmw' write isolation policy. Refer to https://github.com/scylladb/scylla/blob/master/docs/alternator/alternator.md#write-isolation-policies for more information."}
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_vec_wi_u:scylla:table/alt_vec_wi_u","Tags":[{"Key":"system:write_isolation","Value":"only_rmw_uses_lwt"}]}
+< 200 ""
+> UpdateItem {"TableName":"alt_vec_wi_u","Key":{"p":{"S":"k"}},"UpdateExpression":"ADD a :v","ExpressionAttributeValues":{":v":{"N":"1"}},"ReturnValues":"UPDATED_NEW"}
+< 200 {"Attributes":{"a":{"N":"5"}}}
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_vec_wi_f:scylla:table/alt_vec_wi_f","Tags":[{"Key":"system:write_isolation","Value":"a"}]}
+< 200 ""
+> UpdateItem {"TableName":"alt_vec_wi_f","Key":{"p":{"S":"k"}},"UpdateExpression":"ADD a :v","ExpressionAttributeValues":{":v":{"N":"1"}},"ReturnValues":"UPDATED_NEW"}
+< 200 {"Attributes":{"a":{"N":"2"}}}
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_vec_wi_f:scylla:table/alt_vec_wi_f","Tags":[{"Key":"system:write_isolation","Value":"forbid"}]}
+< 200 ""
+> UpdateItem {"TableName":"alt_vec_wi_f","Key":{"p":{"S":"k"}},"UpdateExpression":"ADD a :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Read-modify-write operations are disabled by 'forbid_rmw' write isolation policy. Refer to https://github.com/scylladb/scylla/blob/master/docs/alternator/alternator.md#write-isolation-policies for more information."}
+> UntagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_vec_wi_f:scylla:table/alt_vec_wi_f","TagKeys":["system:write_isolation"]}
+< 200 ""
+> ListTagsOfResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_vec_wi_f:scylla:table/alt_vec_wi_f"}
+< 200 {"Tags":[]}
+> UpdateItem {"TableName":"alt_vec_wi_f","Key":{"p":{"S":"k"}},"UpdateExpression":"ADD a :v","ExpressionAttributeValues":{":v":{"N":"1"}},"ReturnValues":"UPDATED_NEW"}
+< 200 {"Attributes":{"a":{"N":"3"}}}
+> DeleteTable {"TableName":"alt_vec_wi_f"}
+< 200 {"TableDescription":{"TableName":"alt_vec_wi_f","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_vec_wi_f:scylla:table/alt_vec_wi_f","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0}}}
+> DeleteTable {"TableName":"alt_vec_wi_u"}
+< 200 {"TableDescription":{"TableName":"alt_vec_wi_u","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_vec_wi_u:scylla:table/alt_vec_wi_u","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0}}}

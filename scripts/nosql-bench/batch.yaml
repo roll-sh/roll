@@ -1,0 +1,22 @@
+# cassandra-stress user profile: LOGGED batches of 10 rows over 5 partitions (2 rows each).
+keyspace: bench_batch
+keyspace_definition: |
+  CREATE KEYSPACE bench_batch WITH replication = {'class': 'NetworkTopologyStrategy', 'datacenter1': 1};
+table: events
+table_definition: |
+  CREATE TABLE events (pk bigint, ck int, payload text, PRIMARY KEY (pk, ck))
+columnspec:
+  - name: pk
+    population: uniform(1..1000000)
+  - name: ck
+    cluster: fixed(2)
+  - name: payload
+    size: fixed(100)
+insert:
+  partitions: fixed(5)
+  select: fixed(1)/1
+  batchtype: LOGGED
+queries:
+  read:
+    cql: SELECT * FROM events WHERE pk = ?
+    fields: samerow

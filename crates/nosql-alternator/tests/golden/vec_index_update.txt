@@ -1,0 +1,180 @@
+# plain table with a GSI; no CDC log yet
+> CreateTable {"TableName":"alt_vec_ut","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"},{"AttributeName":"g","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","GlobalSecondaryIndexes":[{"IndexName":"gsi1","KeySchema":[{"AttributeName":"g","KeyType":"HASH"}],"Projection":{"ProjectionType":"ALL"}}]}
+< 200 {"TableDescription":{"TableName":"alt_vec_ut","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"},{"AttributeName":"g","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","GlobalSecondaryIndexes":[{"IndexName":"gsi1","KeySchema":[{"AttributeName":"g","KeyType":"HASH"}],"Projection":{"ProjectionType":"ALL"}}],"CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+# VectorIndexUpdates shape errors
+> UpdateTable {"TableName":"alt_vec_ut","VectorIndexUpdates":[]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateTable requires one of GlobalSecondaryIndexUpdates, VectorIndexUpdates, StreamSpecification or BillingMode to be specified"}
+> UpdateTable {"TableName":"alt_vec_ut","VectorIndexUpdates":{}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"VectorIndexUpdates must be an array"}
+> UpdateTable {"TableName":"alt_vec_ut","VectorIndexUpdates":"x"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"VectorIndexUpdates must be an array"}
+> UpdateTable {"TableName":"alt_vec_ut","VectorIndexUpdates":[{}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"VectorIndexUpdates array must contain one object with a Create or Delete operation"}
+> UpdateTable {"TableName":"alt_vec_ut","VectorIndexUpdates":[5]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"VectorIndexUpdates array must contain one object with a Create or Delete operation"}
+> UpdateTable {"TableName":"alt_vec_ut","VectorIndexUpdates":[{"Update":{"IndexName":"vi1"}}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"VectorIndexUpdates supports a Create or Delete operation, saw 'Update'"}
+> UpdateTable {"TableName":"alt_vec_ut","VectorIndexUpdates":[{"Create":{"IndexName":"vi4","VectorAttribute":{"AttributeName":"v","Dimensions":3}},"Delete":{"IndexName":"vi1"}}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"VectorIndexUpdates array must contain one object with a Create or Delete operation"}
+> UpdateTable {"TableName":"alt_vec_ut","VectorIndexUpdates":[{"Create":{"IndexName":"vi4","VectorAttribute":{"AttributeName":"v","Dimensions":3}}},{"Delete":{"IndexName":"vi1"}}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#LimitExceededException","message":"VectorIndexUpdates only allows one index creation or deletion"}
+> UpdateTable {"TableName":"alt_vec_ut","VectorIndexUpdates":[{"Delete":{"IndexName":"vi1"}},{"Delete":{"IndexName":"vi2"}}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#LimitExceededException","message":"VectorIndexUpdates only allows one index creation or deletion"}
+> UpdateTable {"TableName":"alt_vec_ut","VectorIndexUpdates":[{"Delete":5}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"VectorIndexUpdates entries must be objects"}
+> UpdateTable {"TableName":"alt_vec_ut","VectorIndexUpdates":[{"Create":5}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"VectorIndexUpdates entries must be objects"}
+> UpdateTable {"TableName":"alt_vec_ut","VectorIndexUpdates":[{"Create":{}}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"VectorIndexUpdates operation must have IndexName"}
+> UpdateTable {"TableName":"alt_vec_ut","VectorIndexUpdates":[{"Delete":{}}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"VectorIndexUpdates operation must have IndexName"}
+> UpdateTable {"TableName":"alt_vec_ut","VectorIndexUpdates":[{"Delete":{"IndexName":5}}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"VectorIndexUpdates operation must have IndexName"}
+# Create field validation
+> UpdateTable {"TableName":"alt_vec_ut","VectorIndexUpdates":[{"Create":{"IndexName":5,"VectorAttribute":{"AttributeName":"v","Dimensions":3}}}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"VectorIndexUpdates operation must have IndexName"}
+> UpdateTable {"TableName":"alt_vec_ut","VectorIndexUpdates":[{"Create":{"IndexName":"x","VectorAttribute":{"AttributeName":"v","Dimensions":3}}}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"VectorIndexUpdates IndexName must be at least 3 characters long and at most 192 characters long"}
+> UpdateTable {"TableName":"alt_vec_ut","VectorIndexUpdates":[{"Create":{"IndexName":"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx","VectorAttribute":{"AttributeName":"v","Dimensions":3}}}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"VectorIndexUpdates IndexName must be at least 3 characters long and at most 192 characters long"}
+> UpdateTable {"TableName":"alt_vec_ut","VectorIndexUpdates":[{"Create":{"IndexName":"a b c","VectorAttribute":{"AttributeName":"v","Dimensions":3}}}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"VectorIndexUpdates IndexName must satisfy regular expression pattern: [a-zA-Z0-9_.-]+"}
+> UpdateTable {"TableName":"alt_vec_ut","VectorIndexUpdates":[{"Create":{"IndexName":"vi1"}}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"VectorIndexUpdates Create VectorAttribute must be an object."}
+> UpdateTable {"TableName":"alt_vec_ut","VectorIndexUpdates":[{"Create":{"IndexName":"vi1","VectorAttribute":5}}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"VectorIndexUpdates Create VectorAttribute must be an object."}
+> UpdateTable {"TableName":"alt_vec_ut","VectorIndexUpdates":[{"Create":{"IndexName":"vi1","VectorAttribute":{}}}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"VectorIndexUpdates Create AttributeName must be a string."}
+> UpdateTable {"TableName":"alt_vec_ut","VectorIndexUpdates":[{"Create":{"IndexName":"vi1","VectorAttribute":{"AttributeName":""}}}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"AttributeName in VectorIndexUpdates - Empty attribute name"}
+> UpdateTable {"TableName":"alt_vec_ut","VectorIndexUpdates":[{"Create":{"IndexName":"vi1","VectorAttribute":{"AttributeName":"","Dimensions":3}}}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"AttributeName in VectorIndexUpdates - Empty attribute name"}
+> UpdateTable {"TableName":"alt_vec_ut","VectorIndexUpdates":[{"Create":{"IndexName":"vi1","VectorAttribute":{"AttributeName":"v"}}}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"VectorIndexUpdates Dimensions must be an integer between 1 and 16000."}
+> UpdateTable {"TableName":"alt_vec_ut","VectorIndexUpdates":[{"Create":{"IndexName":"vi1","VectorAttribute":{"AttributeName":"v","Dimensions":0}}}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"VectorIndexUpdates Dimensions must be an integer between 1 and 16000."}
+> UpdateTable {"TableName":"alt_vec_ut","VectorIndexUpdates":[{"Create":{"IndexName":"vi1","VectorAttribute":{"AttributeName":"v","Dimensions":16001}}}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"VectorIndexUpdates Dimensions must be an integer between 1 and 16000."}
+> UpdateTable {"TableName":"alt_vec_ut","VectorIndexUpdates":[{"Create":{"IndexName":"vi1","VectorAttribute":{"AttributeName":"v","Dimensions":2.5}}}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"VectorIndexUpdates Dimensions must be an integer between 1 and 16000."}
+> UpdateTable {"TableName":"alt_vec_ut","VectorIndexUpdates":[{"Create":{"IndexName":"vi1","VectorAttribute":{"AttributeName":"v","Dimensions":3},"SimilarityFunction":"X"}}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"VectorIndexUpdates SimilarityFunction 'X' is not valid. Valid values are: EUCLIDEAN, COSINE, DOT_PRODUCT."}
+> UpdateTable {"TableName":"alt_vec_ut","VectorIndexUpdates":[{"Create":{"IndexName":"vi1","VectorAttribute":{"AttributeName":"v","Dimensions":3},"SimilarityFunction":1}}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Expected string value for attribute SimilarityFunction, got: {\"IndexName\":\"vi1\",\"VectorAttribute\":{\"AttributeName\":\"v\",\"Dimensions\":3},\"SimilarityFunction\":1}"}
+> UpdateTable {"TableName":"alt_vec_ut","VectorIndexUpdates":[{"Create":{"IndexName":"vi1","VectorAttribute":{"AttributeName":"v","Dimensions":3},"Projection":{"ProjectionType":"ALL"}}}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"VectorIndexUpdates Projection: only ProjectionType=KEYS_ONLY is currently supported."}
+> UpdateTable {"TableName":"alt_vec_ut","VectorIndexUpdates":[{"Create":{"IndexName":"vi1","VectorAttribute":{"AttributeName":"v","Dimensions":3},"Projection":[]}}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"VectorIndexUpdates Projection must be an object."}
+# key columns of the base table / of a GSI
+> UpdateTable {"TableName":"alt_vec_ut","VectorIndexUpdates":[{"Create":{"IndexName":"vi1","VectorAttribute":{"AttributeName":"p","Dimensions":3}}}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"VectorIndexUpdates AttributeName 'p' is a key column and cannot be used as a vector index target."}
+> UpdateTable {"TableName":"alt_vec_ut","VectorIndexUpdates":[{"Create":{"IndexName":"vi1","VectorAttribute":{"AttributeName":"g","Dimensions":3}}}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"VectorIndexUpdates AttributeName 'g' is a key column of a GSI or LSI and cannot be used as a vector index target."}
+> UpdateTable {"TableName":"alt_vec_ut","VectorIndexUpdates":[{"Create":{"IndexName":"vi1","VectorAttribute":{"AttributeName":"p"}}}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"VectorIndexUpdates AttributeName 'p' is a key column and cannot be used as a vector index target."}
+# name taken by a GSI
+> UpdateTable {"TableName":"alt_vec_ut","VectorIndexUpdates":[{"Create":{"IndexName":"gsi1","VectorAttribute":{"AttributeName":"v","Dimensions":3}}}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"GSI or LSI gsi1 already exists in table alt_vec_ut, cannot reuse the name for a vector index"}
+# missing table: ResourceNotFound wins over Create field validation
+> UpdateTable {"TableName":"alt_vec_nonexistent","VectorIndexUpdates":[{"Create":{"IndexName":"x","VectorAttribute":{"AttributeName":"v","Dimensions":3}}}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException","message":"Requested resource not found: Table: alt_vec_nonexistent not found"}
+> UpdateTable {"TableName":"alt_vec_nonexistent","VectorIndexUpdates":[{"Create":{"IndexName":"vi1","VectorAttribute":{"AttributeName":"v","Dimensions":3}}}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException","message":"Requested resource not found: Table: alt_vec_nonexistent not found"}
+> UpdateTable {"TableName":"alt_vec_nonexistent","VectorIndexUpdates":[{"Delete":{"IndexName":"vi1"}}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException","message":"Requested resource not found: Table: alt_vec_nonexistent not found"}
+# delete of a missing vector index (or of a GSI) is ResourceNotFound
+> UpdateTable {"TableName":"alt_vec_ut","VectorIndexUpdates":[{"Delete":{"IndexName":"nope"}}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException","message":"No vector index nope in table alt_vec_ut"}
+> UpdateTable {"TableName":"alt_vec_ut","VectorIndexUpdates":[{"Delete":{"IndexName":"gsi1"}}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException","message":"No vector index gsi1 in table alt_vec_ut"}
+> UpdateTable {"TableName":"alt_vec_ut","VectorIndexUpdates":[{"Delete":{"IndexName":"a b"}}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException","message":"No vector index a b in table alt_vec_ut"}
+# success: response is the request echoed into TableDescription plus CDC stream fields
+> UpdateTable {"TableName":"alt_vec_ut","VectorIndexUpdates":[{"Create":{"IndexName":"vi1","VectorAttribute":{"AttributeName":"v","Dimensions":3,"X":1},"Junk":true}}]}
+< 200 {"TableDescription":{"TableName":"alt_vec_ut","VectorIndexUpdates":[{"Create":{"IndexName":"vi1","VectorAttribute":{"AttributeName":"v","Dimensions":3,"X":1},"Junk":true}}],"CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*","LatestStreamArn":"*","LatestStreamLabel":"*","StreamSpecification":{"StreamEnabled":false,"StreamViewType":"KEYS_ONLY"}}}
+> DescribeTable {"TableName":"alt_vec_ut"}
+< 200 {"Table":{"TableName":"alt_vec_ut","TableSizeBytes":"*","TableStatus":"ACTIVE","TableArn":"arn:scylla:alternator:alternator_alt_vec_ut:scylla:table/alt_vec_ut","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0},"CreationDateTime":"*","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"GlobalSecondaryIndexes":[{"IndexName":"gsi1","IndexArn":"arn:scylla:alternator:alternator_alt_vec_ut:scylla:table/alt_vec_ut/index/gsi1","KeySchema":[{"AttributeName":"g","KeyType":"HASH"}],"Projection":{"ProjectionType":"ALL"},"IndexStatus":"ACTIVE"}],"VectorIndexes":[{"IndexName":"vi1","VectorAttribute":{"AttributeName":"v","Dimensions":3},"Projection":{"ProjectionType":"KEYS_ONLY"},"SimilarityFunction":"COSINE","IndexStatus":"CREATING"}],"AttributeDefinitions":[{"AttributeName":"g","AttributeType":"S"},{"AttributeName":"p","AttributeType":"S"}],"LatestStreamArn":"*","LatestStreamLabel":"*","StreamSpecification":{"StreamEnabled":false,"StreamViewType":"KEYS_ONLY"}}}
+> UpdateTable {"TableName":"alt_vec_ut","VectorIndexUpdates":[{"Create":{"IndexName":"vi2","VectorAttribute":{"AttributeName":"w","Dimensions":4},"SimilarityFunction":"EUCLIDEAN","Projection":{"ProjectionType":"KEYS_ONLY"}}}]}
+< 200 {"TableDescription":{"TableName":"alt_vec_ut","VectorIndexUpdates":[{"Create":{"IndexName":"vi2","VectorAttribute":{"AttributeName":"w","Dimensions":4},"SimilarityFunction":"EUCLIDEAN","Projection":{"ProjectionType":"KEYS_ONLY"}}}],"CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*","LatestStreamArn":"*","LatestStreamLabel":"*","StreamSpecification":{"StreamEnabled":false,"StreamViewType":"KEYS_ONLY"}}}
+> DescribeTable {"TableName":"alt_vec_ut"}
+< 200 {"Table":{"TableName":"alt_vec_ut","TableSizeBytes":"*","TableStatus":"ACTIVE","TableArn":"arn:scylla:alternator:alternator_alt_vec_ut:scylla:table/alt_vec_ut","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0},"CreationDateTime":"*","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"GlobalSecondaryIndexes":[{"IndexName":"gsi1","IndexArn":"arn:scylla:alternator:alternator_alt_vec_ut:scylla:table/alt_vec_ut/index/gsi1","KeySchema":[{"AttributeName":"g","KeyType":"HASH"}],"Projection":{"ProjectionType":"ALL"},"IndexStatus":"ACTIVE"}],"VectorIndexes":[{"IndexName":"vi2","VectorAttribute":{"AttributeName":"w","Dimensions":4},"Projection":{"ProjectionType":"KEYS_ONLY"},"SimilarityFunction":"EUCLIDEAN","IndexStatus":"CREATING"},{"IndexName":"vi1","VectorAttribute":{"AttributeName":"v","Dimensions":3},"Projection":{"ProjectionType":"KEYS_ONLY"},"SimilarityFunction":"COSINE","IndexStatus":"CREATING"}],"AttributeDefinitions":[{"AttributeName":"g","AttributeType":"S"},{"AttributeName":"p","AttributeType":"S"}],"LatestStreamArn":"*","LatestStreamLabel":"*","StreamSpecification":{"StreamEnabled":false,"StreamViewType":"KEYS_ONLY"}}}
+# conflicts with existing vector indexes
+> UpdateTable {"TableName":"alt_vec_ut","VectorIndexUpdates":[{"Create":{"IndexName":"vi1","VectorAttribute":{"AttributeName":"x","Dimensions":3}}}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Vector index vi1 already exists in table alt_vec_ut"}
+> UpdateTable {"TableName":"alt_vec_ut","VectorIndexUpdates":[{"Create":{"IndexName":"vi3","VectorAttribute":{"AttributeName":"v","Dimensions":3}}}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"VectorIndexUpdates AttributeName 'v' is already the target of an existing vector index."}
+> UpdateTable {"TableName":"alt_vec_ut","VectorIndexUpdates":[{"Create":{"IndexName":"vi1","VectorAttribute":{"AttributeName":"v","Dimensions":3}}}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Vector index vi1 already exists in table alt_vec_ut"}
+> UpdateTable {"TableName":"alt_vec_ut","VectorIndexUpdates":[{"Create":{"IndexName":"vi3","VectorAttribute":{"AttributeName":"v","Dimensions":7}}}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"VectorIndexUpdates AttributeName 'v' is already the target of an existing vector index."}
+# combined with GlobalSecondaryIndexUpdates / StreamSpecification / BillingMode
+> UpdateTable {"TableName":"alt_vec_ut","VectorIndexUpdates":[{"Create":{"IndexName":"vi5","VectorAttribute":{"AttributeName":"z","Dimensions":3}}}],"GlobalSecondaryIndexUpdates":[{"Delete":{"IndexName":"gsi1"}}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#LimitExceededException","message":"UpdateTable cannot have both VectorIndexUpdates and GlobalSecondaryIndexUpdates in the same request"}
+> UpdateTable {"TableName":"alt_vec_ut","VectorIndexUpdates":[{"Create":{"IndexName":"vi5","VectorAttribute":{"AttributeName":"v","Dimensions":3}}}],"GlobalSecondaryIndexUpdates":[{"Delete":{"IndexName":"gsi1"}}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"VectorIndexUpdates AttributeName 'v' is already the target of an existing vector index."}
+> UpdateTable {"TableName":"alt_vec_ut","VectorIndexUpdates":[{"Delete":{"IndexName":"vi2"}}],"BillingMode":"PAY_PER_REQUEST"}
+< 200 {"TableDescription":{"TableName":"alt_vec_ut","VectorIndexUpdates":[{"Delete":{"IndexName":"vi2"}}],"BillingMode":"PAY_PER_REQUEST","CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*","LatestStreamArn":"*","LatestStreamLabel":"*","StreamSpecification":{"StreamEnabled":false,"StreamViewType":"KEYS_ONLY"}}}
+> DescribeTable {"TableName":"alt_vec_ut"}
+< 200 {"Table":{"TableName":"alt_vec_ut","TableSizeBytes":"*","TableStatus":"ACTIVE","TableArn":"arn:scylla:alternator:alternator_alt_vec_ut:scylla:table/alt_vec_ut","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0},"CreationDateTime":"*","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"GlobalSecondaryIndexes":[{"IndexName":"gsi1","IndexArn":"arn:scylla:alternator:alternator_alt_vec_ut:scylla:table/alt_vec_ut/index/gsi1","KeySchema":[{"AttributeName":"g","KeyType":"HASH"}],"Projection":{"ProjectionType":"ALL"},"IndexStatus":"ACTIVE"}],"VectorIndexes":[{"IndexName":"vi1","VectorAttribute":{"AttributeName":"v","Dimensions":3},"Projection":{"ProjectionType":"KEYS_ONLY"},"SimilarityFunction":"COSINE","IndexStatus":"CREATING"}],"AttributeDefinitions":[{"AttributeName":"g","AttributeType":"S"},{"AttributeName":"p","AttributeType":"S"}],"LatestStreamArn":"*","LatestStreamLabel":"*","StreamSpecification":{"StreamEnabled":false,"StreamViewType":"KEYS_ONLY"}}}
+> UpdateTable {"TableName":"alt_vec_ut","VectorIndexUpdates":[{"Create":{"IndexName":"vi2","VectorAttribute":{"AttributeName":"w","Dimensions":4}}}],"StreamSpecification":{"StreamEnabled":true,"StreamViewType":"KEYS_ONLY"}}
+< 500 {"__type":"com.amazonaws.dynamodb.v20120810#InternalServerError","message":"Internal server error: exceptions::invalid_request_exception (Vector Search is enabled on this table.\nThe CDC log must meet the minimal requirements for external indexes.\nThis means that the CDC's TTL must be at least 86400 seconds (24 hours), and the CDC's delta mode must be set to 'full' or postimage must be enabled.)"}
+> UpdateTable {"TableName":"alt_vec_ut","StreamSpecification":{"StreamEnabled":true,"StreamViewType":"KEYS_ONLY"}}
+< 500 {"__type":"com.amazonaws.dynamodb.v20120810#InternalServerError","message":"Internal server error: exceptions::invalid_request_exception (Vector Search is enabled on this table.\nThe CDC log must meet the minimal requirements for external indexes.\nThis means that the CDC's TTL must be at least 86400 seconds (24 hours), and the CDC's delta mode must be set to 'full' or postimage must be enabled.)"}
+> UpdateTable {"TableName":"alt_vec_ut","StreamSpecification":{"StreamEnabled":true,"StreamViewType":"NEW_AND_OLD_IMAGES"}}
+< 200 {"TableDescription":{"TableName":"alt_vec_ut","StreamSpecification":{"StreamEnabled":false,"StreamViewType":"NEW_AND_OLD_IMAGES"},"CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*","LatestStreamArn":"*","LatestStreamLabel":"*"}}
+> DescribeTable {"TableName":"alt_vec_ut"}
+< 200 {"Table":{"TableName":"alt_vec_ut","TableSizeBytes":"*","TableStatus":"ACTIVE","TableArn":"arn:scylla:alternator:alternator_alt_vec_ut:scylla:table/alt_vec_ut","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0},"CreationDateTime":"*","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"GlobalSecondaryIndexes":[{"IndexName":"gsi1","IndexArn":"arn:scylla:alternator:alternator_alt_vec_ut:scylla:table/alt_vec_ut/index/gsi1","KeySchema":[{"AttributeName":"g","KeyType":"HASH"}],"Projection":{"ProjectionType":"ALL"},"IndexStatus":"ACTIVE"}],"VectorIndexes":[{"IndexName":"vi1","VectorAttribute":{"AttributeName":"v","Dimensions":3},"Projection":{"ProjectionType":"KEYS_ONLY"},"SimilarityFunction":"COSINE","IndexStatus":"CREATING"}],"AttributeDefinitions":[{"AttributeName":"g","AttributeType":"S"},{"AttributeName":"p","AttributeType":"S"}],"LatestStreamArn":"*","LatestStreamLabel":"*","StreamSpecification":{"StreamEnabled":false,"StreamViewType":"NEW_AND_OLD_IMAGES"}}}
+# GSI updates when vector indexes exist
+> UpdateTable {"TableName":"alt_vec_ut","AttributeDefinitions":[{"AttributeName":"g","AttributeType":"S"}],"GlobalSecondaryIndexUpdates":[{"Create":{"IndexName":"vi1","KeySchema":[{"AttributeName":"g","KeyType":"HASH"}],"Projection":{"ProjectionType":"ALL"}}}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Vector index vi1 already exists in table alt_vec_ut, cannot reuse the name for a GSI"}
+> UpdateTable {"TableName":"alt_vec_ut","AttributeDefinitions":[{"AttributeName":"v","AttributeType":"S"}],"GlobalSecondaryIndexUpdates":[{"Create":{"IndexName":"gsi2","KeySchema":[{"AttributeName":"v","KeyType":"HASH"}],"Projection":{"ProjectionType":"ALL"}}}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"AttributeDefinitions redefines v but already a key of a vector index in this table"}
+# Query/Scan on GSI still fine; on a vector index needs VectorSearch
+> Query {"TableName":"alt_vec_ut","IndexName":"gsi1","KeyConditionExpression":"g = :g","ExpressionAttributeValues":{":g":{"S":"x"}}}
+< 200 {"Count":0,"ScannedCount":0,"Items":[]}
+> Scan {"TableName":"alt_vec_ut","IndexName":"vi1"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"IndexName 'vi1' is a vector index for table 'alt_vec_ut, so VectorSearch is mandatory in Query."}
+# delete all vector indexes: VectorIndexes disappears from DescribeTable, the CDC log stays
+> UpdateTable {"TableName":"alt_vec_ut","VectorIndexUpdates":[{"Delete":{"IndexName":"vi1","Extra":1}}]}
+< 200 {"TableDescription":{"TableName":"alt_vec_ut","VectorIndexUpdates":[{"Delete":{"IndexName":"vi1","Extra":1}}],"CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*","LatestStreamArn":"*","LatestStreamLabel":"*","StreamSpecification":{"StreamEnabled":true,"StreamViewType":"NEW_AND_OLD_IMAGES"}}}
+> UpdateTable {"TableName":"alt_vec_ut","VectorIndexUpdates":[{"Delete":{"IndexName":"vi1"}}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException","message":"No vector index vi1 in table alt_vec_ut"}
+> DescribeTable {"TableName":"alt_vec_ut"}
+< 200 {"Table":{"TableName":"alt_vec_ut","TableSizeBytes":"*","TableStatus":"ACTIVE","TableArn":"arn:scylla:alternator:alternator_alt_vec_ut:scylla:table/alt_vec_ut","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0},"CreationDateTime":"*","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"GlobalSecondaryIndexes":[{"IndexName":"gsi1","IndexArn":"arn:scylla:alternator:alternator_alt_vec_ut:scylla:table/alt_vec_ut/index/gsi1","KeySchema":[{"AttributeName":"g","KeyType":"HASH"}],"Projection":{"ProjectionType":"ALL"},"IndexStatus":"ACTIVE"}],"AttributeDefinitions":[{"AttributeName":"g","AttributeType":"S"},{"AttributeName":"p","AttributeType":"S"}],"LatestStreamArn":"*","LatestStreamLabel":"*","StreamSpecification":{"StreamEnabled":true,"StreamViewType":"NEW_AND_OLD_IMAGES"}}}
+> Query {"TableName":"alt_vec_ut","IndexName":"vi1","VectorSearch":{"QueryVector":{"L":[{"N":"1"},{"N":"2"},{"N":"3"}]}},"Limit":1}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"VectorSearch IndexName 'vi1' is not a vector index."}
+> Scan {"TableName":"alt_vec_ut","IndexName":"vi1"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Requested resource not found: Index 'vi1' for table 'alt_vec_ut'"}
+# re-create on the same attribute with different Dimensions
+> UpdateTable {"TableName":"alt_vec_ut","VectorIndexUpdates":[{"Create":{"IndexName":"vi1","VectorAttribute":{"AttributeName":"v","Dimensions":5}}}]}
+< 200 {"TableDescription":{"TableName":"alt_vec_ut","VectorIndexUpdates":[{"Create":{"IndexName":"vi1","VectorAttribute":{"AttributeName":"v","Dimensions":5}}}],"CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*","LatestStreamArn":"*","LatestStreamLabel":"*","StreamSpecification":{"StreamEnabled":true,"StreamViewType":"NEW_AND_OLD_IMAGES"}}}
+> DescribeTable {"TableName":"alt_vec_ut"}
+< 200 {"Table":{"TableName":"alt_vec_ut","TableSizeBytes":"*","TableStatus":"ACTIVE","TableArn":"arn:scylla:alternator:alternator_alt_vec_ut:scylla:table/alt_vec_ut","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0},"CreationDateTime":"*","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"GlobalSecondaryIndexes":[{"IndexName":"gsi1","IndexArn":"arn:scylla:alternator:alternator_alt_vec_ut:scylla:table/alt_vec_ut/index/gsi1","KeySchema":[{"AttributeName":"g","KeyType":"HASH"}],"Projection":{"ProjectionType":"ALL"},"IndexStatus":"ACTIVE"}],"VectorIndexes":[{"IndexName":"vi1","VectorAttribute":{"AttributeName":"v","Dimensions":5},"Projection":{"ProjectionType":"KEYS_ONLY"},"SimilarityFunction":"COSINE","IndexStatus":"CREATING"}],"AttributeDefinitions":[{"AttributeName":"g","AttributeType":"S"},{"AttributeName":"p","AttributeType":"S"}],"LatestStreamArn":"*","LatestStreamLabel":"*","StreamSpecification":{"StreamEnabled":true,"StreamViewType":"NEW_AND_OLD_IMAGES"}}}
+> DeleteTable {"TableName":"alt_vec_ut"}
+< 200 {"TableDescription":{"TableName":"alt_vec_ut","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_vec_ut:scylla:table/alt_vec_ut","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0},"LatestStreamArn":"*","LatestStreamLabel":"*","StreamSpecification":{"StreamEnabled":true,"StreamViewType":"NEW_AND_OLD_IMAGES"}}}
+# UpdateTable on a vnodes table cannot add a vector index
+> CreateTable {"TableName":"alt_vec_ut","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","Tags":[{"Key":"system:initial_tablets","Value":"none"}]}
+< 200 {"TableDescription":{"TableName":"alt_vec_ut","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","Tags":[{"Key":"system:initial_tablets","Value":"none"}],"CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+> UpdateTable {"TableName":"alt_vec_ut","VectorIndexUpdates":[{"Create":{"IndexName":"vi1","VectorAttribute":{"AttributeName":"v","Dimensions":3}}}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Vector indexes are not supported on tables using vnodes."}
+> DescribeTable {"TableName":"alt_vec_ut"}
+< 200 {"Table":{"TableName":"alt_vec_ut","TableSizeBytes":"*","TableStatus":"ACTIVE","TableArn":"arn:scylla:alternator:alternator_alt_vec_ut:scylla:table/alt_vec_ut","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0},"CreationDateTime":"*","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}]}}
+> DeleteTable {"TableName":"alt_vec_ut"}
+< 200 {"TableDescription":{"TableName":"alt_vec_ut","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_vec_ut:scylla:table/alt_vec_ut","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0}}}
+# adding a vector index to a table with existing items: no validation of existing data
+> CreateTable {"TableName":"alt_vec_ut","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST"}
+< 200 {"TableDescription":{"TableName":"alt_vec_ut","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+> PutItem {"TableName":"alt_vec_ut","Item":{"p":{"S":"a"},"v":{"S":"not a vector"}}}
+< 200 {}
+> PutItem {"TableName":"alt_vec_ut","Item":{"p":{"S":"b"},"v":{"L":[{"N":"1"}]}}}
+< 200 {}
+> UpdateTable {"TableName":"alt_vec_ut","VectorIndexUpdates":[{"Create":{"IndexName":"vi1","VectorAttribute":{"AttributeName":"v","Dimensions":3}}}]}
+< 200 {"TableDescription":{"TableName":"alt_vec_ut","VectorIndexUpdates":[{"Create":{"IndexName":"vi1","VectorAttribute":{"AttributeName":"v","Dimensions":3}}}],"CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*","LatestStreamArn":"*","LatestStreamLabel":"*","StreamSpecification":{"StreamEnabled":false,"StreamViewType":"KEYS_ONLY"}}}
+> GetItem {"TableName":"alt_vec_ut","Key":{"p":{"S":"a"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"a"},"v":{"S":"not a vector"}}}
+> UpdateItem {"TableName":"alt_vec_ut","Key":{"p":{"S":"b"}},"UpdateExpression":"SET x = :x","ExpressionAttributeValues":{":x":{"N":"1"}},"ReturnValues":"ALL_NEW"}
+< 200 {"Attributes":{"p":{"S":"b"},"v":{"L":[{"N":"1"}]},"x":{"N":"1"}}}
+> UpdateItem {"TableName":"alt_vec_ut","Key":{"p":{"S":"b"}},"UpdateExpression":"SET v = :x","ExpressionAttributeValues":{":x":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Vector index attribute 'v' must be a list or vector of 3 numbers, got type N"}
+> DeleteTable {"TableName":"alt_vec_ut"}
+< 200 {"TableDescription":{"TableName":"alt_vec_ut","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_vec_ut:scylla:table/alt_vec_ut","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0},"LatestStreamArn":"*","LatestStreamLabel":"*","StreamSpecification":{"StreamEnabled":false,"StreamViewType":"KEYS_ONLY"}}}

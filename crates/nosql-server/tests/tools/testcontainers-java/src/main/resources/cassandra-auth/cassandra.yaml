@@ -1,0 +1,4 @@
+# What Testcontainers' docs suggest for auth: a cassandra.yaml given with withConfigurationOverride.
+cluster_name: 'Test Cluster'
+authenticator: PasswordAuthenticator
+authorizer: CassandraAuthorizer

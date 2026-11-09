@@ -1,0 +1,20 @@
+{"native_thread":"sess_00000000-0000-4000-8000-000000000001"}
+{"model":"claude-haiku-4.5"}
+{"item":{"body":{"text":"","type":"message"},"id":"msg:1:1","parent":null,"status":"running"}}
+{"text_delta":{"item":"msg:1:1","text":"I'll run"}}
+{"item":{"body":{"text":"I'll run","type":"message"},"id":"msg:1:1","parent":null,"status":"running"}}
+{"text_delta":{"item":"msg:1:1","text":" that"}}
+{"item":{"body":{"text":"I'll run that","type":"message"},"id":"msg:1:1","parent":null,"status":"running"}}
+{"text_delta":{"item":"msg:1:1","text":" exact command and"}}
+{"item":{"body":{"text":"I'll run that exact command and","type":"message"},"id":"msg:1:1","parent":null,"status":"running"}}
+{"text_delta":{"item":"msg:1:1","text":" wait"}}
+{"item":{"body":{"text":"I'll run that exact command and wait","type":"message"},"id":"msg:1:1","parent":null,"status":"running"}}
+{"text_delta":{"item":"msg:1:1","text":" for it to complete."}}
+{"item":{"body":{"text":"I'll run that exact command and wait for it to complete.","type":"message"},"id":"msg:1:1","parent":null,"status":"running"}}
+{"item":{"body":{"text":"I'll run that exact command and wait for it to complete.","type":"message"},"id":"msg:1:1","parent":null,"status":"completed"}}
+{"item":{"body":{"input":{"command":"node -e \"console.log('interrupt fixture tool started'); setTimeout(() => {}, 30000)\"","description":"Run interrupt fixture tool","run_in_background":false,"timeout":35000},"kind":"command","name":"execute","title":"node -e \"console.log('interrupt fixture tool started'); setTimeout(() => {}, 30000)\"","type":"tool"},"id":"run_command_tooluse_y1v4bBCwl4978KEjYmFWrP","parent":null,"status":"running"}}
+{"item":{"body":{"input":{"command":"node -e \"console.log('interrupt fixture tool started'); setTimeout(() => {}, 30000)\"","description":"Run interrupt fixture tool","run_in_background":false,"timeout":35000},"kind":"command","name":"execute","title":"node -e \"console.log('interrupt fixture tool started'); setTimeout(() => {}, 30000)\"","type":"tool"},"id":"run_command_tooluse_y1v4bBCwl4978KEjYmFWrP","parent":null,"status":"running"}}
+{"item":{"body":{"input":{"command":"node -e \"console.log('interrupt fixture tool started'); setTimeout(() => {}, 30000)\"","description":"Run interrupt fixture tool","run_in_background":false,"timeout":35000},"kind":"command","name":"execute","title":"node -e \"console.log('interrupt fixture tool started'); setTimeout(() => {}, 30000)\"","type":"tool"},"id":"run_command_tooluse_y1v4bBCwl4978KEjYmFWrP","parent":null,"status":"running"}}
+{"item":{"body":{"input":{"command":"node -e \"console.log('interrupt fixture tool started'); setTimeout(() => {}, 30000)\"","description":"Run interrupt fixture tool","run_in_background":false,"timeout":35000},"kind":"command","name":"execute","title":"node -e \"console.log('interrupt fixture tool started'); setTimeout(() => {}, 30000)\"","type":"tool"},"id":"run_command_tooluse_y1v4bBCwl4978KEjYmFWrP","parent":null,"status":"interrupted"}}
+{"turn_ended":"interrupted"}
+{"exited":null}

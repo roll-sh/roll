@@ -37,7 +37,8 @@ export function RollMark({
 
   useEffect(() => {
     const canvas = canvasRef.current;
-    if (!canvas) return;
+    // No 2D canvas (old browsers, jsdom): leave the mark undrawn rather than throw.
+    if (!canvas || !canvas.getContext("2d")) return;
     const engine = new RollMarkEngine(canvas, { density, interactive, accent, reducedMotion });
     engineRef.current = engine;
     engine.resize(size);

@@ -1,0 +1,2 @@
+/tmp/roll-cqlsh-golden/types.cql:28:SyntaxException: line 1:71 mismatched input '=' expecting K_FROM (...intAsBlob(7), now() [=]...)
+/tmp/roll-cqlsh-golden/types.cql:45:InvalidRequest: Error from server: code=2200 [Invalid query] message="Undefined column name "Zip" in table cli_g_types.scalars"

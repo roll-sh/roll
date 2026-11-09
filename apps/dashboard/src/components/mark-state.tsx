@@ -1,5 +1,3 @@
-"use client";
-
 import type { MarkState } from "@roll/brand";
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
@@ -53,4 +51,9 @@ export function useMarkState() {
   const ctx = useContext(Ctx);
   if (!ctx) throw new Error("useMarkState must be used inside <MarkStateProvider>");
   return ctx;
+}
+
+/** The shared state for a mark that only shows it (idle outside a provider, as in tests). */
+export function useMarkStateValue() {
+  return useContext(Ctx)?.state ?? "idle";
 }

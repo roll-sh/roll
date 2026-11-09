@@ -1,0 +1,29 @@
+[package]
+name = "code-github"
+description = "GitHub App integration for roll code: auth, webhooks, REST client, event mapping"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+bytes.workspace = true
+chrono.workspace = true
+hex.workspace = true
+hmac.workspace = true
+jsonwebtoken.workspace = true
+parking_lot.workspace = true
+reqwest = { workspace = true, features = ["rustls"] }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["sync", "time"] }
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+axum.workspace = true
+rsa = { version = "0.9", features = ["pem"] }
+rand = "0.8"
+tokio.workspace = true

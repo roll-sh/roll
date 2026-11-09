@@ -1,0 +1,164 @@
+# The legacy document commands: FT.ADD and FT.SAFEADD (an HSET with the rule's __score,
+# __language and __payload fields, REPLACE [PARTIAL], NOCREATE, IF conditions and their
+# errors), FT.GET and FT.MGET (the hash without those fields, nulls for documents the index
+# doesn't hold) and FT.DEL (a DEL of any key).
+
+FLUSHALL
+CONFIG RESETSTAT
+FT.CREATE di ON HASH PREFIX 1 a SCHEMA t TEXT n NUMERIC SORTABLE g TAG
+
+# FT.ADD's arguments.
+FT.ADD
+FT.ADD di
+FT.ADD di a3
+FT.SAFEADD di
+FT.ADD nosuch a3 1 FIELDS t a
+FT.ADD di a3 x FIELDS t a
+FT.ADD di a3 1.5 FIELDS t a
+FT.ADD di a3 -0.1 FIELDS t a
+FT.ADD di a3 nan FIELDS t a
+FT.ADD di a3 " 1" FIELDS t a
+FT.ADD di a3 1x FIELDS t a
+FT.ADD di a3 1 FIELDS t
+FT.ADD di a3 1 fields t a b
+FT.ADD di a3 1 FOO
+FT.ADD di a3 1
+FT.ADD di a3 1 PAYLOAD
+FT.ADD di a3 1 LANGUAGE
+FT.ADD di a3 1 IF
+FT.ADD di a3 1 LANGUAGE klingon FIELDS t a
+FT.ADD di a3 1 LANGUAGE klingon
+FT.ADD di a3 1 NOSAVE FIELDS t a
+FT.ADD di a3 1 REPLACEX FIELDS t a
+FT.ADD di a3 1 FIELDSX t a
+FT.ADD di a3 1 REPLACE FOO FIELDS t a
+EXISTS a3
+
+# Adding, scores and existing documents.
+FT.ADD di a1 1 FIELDS t hello n 1 g x
+FT.ADD di a1 1 FIELDS t hello n 1
+HGETALL a1
+FT.ADD di a2 0.5 FIELDS t hi n 2
+HGETALL a2
+FT.ADD di a3 1 FIELDS
+EXISTS a3
+FT.ADD di a3 -0 FIELDS t a
+HGETALL a3
+FT.ADD di a3 1 replace partial nocreate FIELDS t b
+HGETALL a3
+FT.ADD di a3 1 REPLACE FIELDS n 3
+HGETALL a3
+FT.ADD di a4 1 NOCREATE FIELDS t a
+EXISTS a4
+SET str x
+FT.ADD di str 1 FIELDS t a
+FT.ADD di str 1 REPLACE FIELDS t a
+FT.ADD di a6 0.5 FIELDS
+HGETALL a6
+FT.SAFEADD di a7 1 PAYLOAD pp LANGUAGE german FIELDS t gut n 7
+HGETALL a7
+FT.ADD di a8 1 LANGUAGE GERMAN REPLACE FIELDS t besser
+HGETALL a8
+FT.ADD di a9 0.25 PAYLOAD p1 PAYLOAD p2 FIELDS t hello
+HGETALL a9
+FT.SEARCH di hello WITHSCORES WITHPAYLOADS NOCONTENT SCORER DOCSCORE
+!mask total_indexing_time FT.INFO di
+
+# IF: only evaluated on existing documents.
+FT.ADD di b1 1 IF "@n==1" FIELDS t new
+FT.ADD di a1 1 REPLACE IF "@n==2" FIELDS t y
+FT.ADD di a1 1 REPLACE IF "@n==1" FIELDS t y n 1
+HGETALL a1
+FT.ADD di a1 1 REPLACE IF "@zz==1" FIELDS t y
+FT.ADD di a1 1 REPLACE IF "@@@" FIELDS t y
+FT.ADD di a1 1 REPLACE IF "" FIELDS t y
+FT.ADD di a1 1 REPLACE IF "1 +" FIELDS t y
+FT.ADD di a1 1 REPLACE IF "nosuchfn(1)" FIELDS t y
+FT.ADD di a1 1 REPLACE IF "@n<" FIELDS t y
+FT.ADD di a1 1 REPLACE PARTIAL IF "@t==\"y\"" FIELDS t z
+HGETALL a1
+FT.ADD di a1 1 REPLACE IF "upper(@t)==\"Z\"" FIELDS t w
+HGETALL a1
+FT.ADD di a1 1 REPLACE IF "@n" FIELDS t v
+FT.ADD di a1 1 REPLACE IF "@g==\"x\"" FIELDS t v
+FT.ADD di a2 1 REPLACE IF "@n>1 && @t==\"hi\"" FIELDS t v n 5
+HGETALL a2
+FT.ADD di a2 1 REPLACE IF "!(@n==5)" FIELDS t u
+FT.ADD di a2 1 REPLACE IF "@n" PARTIAL FIELDS g q
+HGETALL a2
+HSET other t x n 1
+FT.ADD di other 1 REPLACE IF "@n==1" FIELDS t y
+FT.ADD di other 1 REPLACE FIELDS t y
+HGETALL other
+
+# FT.GET and FT.MGET.
+FT.GET di a7
+FT.GET di a6
+FT.GET di nosuch
+FT.GET di other
+FT.GET di str
+FT.GET
+FT.GET di
+FT.GET di a7 x
+FT.GET nosuch a7
+HSET a10 t "" n 2 __SCORE 0.3 __Language english __payload x
+FT.GET di a10
+FT.MGET di a7 a6 nosuch other a1 str a10
+FT.MGET
+FT.MGET di
+FT.MGET nosuch a1
+FT.ALIASADD dal di
+FT.GET dal a7
+FT.MGET dal a7
+
+# FT.DEL.
+FT.DEL di other
+EXISTS other
+FT.DEL di str
+EXISTS str
+FT.DEL di a7 DD
+FT.DEL di a7
+FT.DEL di a6 x
+FT.DEL dal a9
+FT.DEL di
+FT.DEL di a1 DD x
+FT.DEL nosuch a1
+FT.SEARCH di * NOCONTENT SORTBY n
+
+# Inside MULTI.
+MULTI
+FT.ADD di m1 1 FIELDS t multi n 9
+FT.ADD di m1 0.5 REPLACE FIELDS t again
+FT.GET di m1
+FT.MGET di m1 a1
+FT.DEL di m1
+EXEC
+
+# RESP3.
+@resp 3
+FT.ADD di r1 1 FIELDS t three n 3
+FT.GET di r1
+FT.GET di nosuch
+FT.MGET di r1 nosuch a6
+FT.ADD di r1 1 FIELDS t again
+FT.ADD di r1 1 REPLACE IF "@n==4" FIELDS t again
+FT.DEL di r1
+@resp 2
+
+# The ACL: the index's prefixes must be accessible.
+ACL SETUSER dadm on nopass ~b* +@all
+AUTH dadm x
+FT.ADD di b2 1 FIELDS t x
+FT.GET di a1
+FT.MGET di a1
+FT.DEL di a1
+FT.SAFEADD di b2 1 FIELDS t x
+AUTH default x
+ACL DELUSER dadm
+
+# The nested commands' statistics and changes.
+!info rdb_changes_since_last_save INFO persistence
+!sort !mask usec,usec_per_call !info cmdstat_* INFO commandstats
+
+FT.DROPINDEX di
+FLUSHALL

@@ -1,0 +1,19 @@
+{"native_thread":"/s/1.jsonl"}
+{"model":"anthropic/claude-test"}
+{"request":{"body":{"action":"command","command":"make test","cwd":"<cwd>","decisions":["accept","accept_for_session","decline","cancel"],"input":{"command":"make test"},"title":"Run `make test`","tool":"bash","type":"approval"},"id":"u1","item":null}}
+{"item":{"body":{"input":{"command":"make test"},"kind":"command","name":"bash","title":"make test","type":"tool"},"id":"c1","parent":null,"status":"running"}}
+{"item":{"body":{"exit_code":0,"input":{"command":"make test"},"kind":"command","name":"bash","output":"ok","title":"make test","type":"tool"},"id":"c1","parent":null,"status":"completed"}}
+{"request":{"body":{"action":"file_change","decisions":["accept","accept_for_session","decline","cancel"],"files":[{"change":"add","path":"a.txt"}],"input":{"content":"x","path":"a.txt"},"title":"Write a.txt","tool":"write","type":"approval"},"id":"u2","item":null}}
+{"request":{"body":{"action":"file_change","decisions":["accept","accept_for_session","decline","cancel"],"files":[{"change":"modify","path":"b.txt"}],"input":{"path":"b.txt"},"title":"Edit b.txt","tool":"edit","type":"approval"},"id":"u4","item":null}}
+{"request":{"body":{"action":"tool","decisions":["accept","accept_for_session","decline","cancel"],"input":{"prompt":"x"},"title":"Use mcp__roll__delegate_task","tool":"mcp__roll__delegate_task","type":"approval"},"id":"u5","item":null}}
+{"request":{"body":{"action":"command","command":"rm -rf /","cwd":"<cwd>","decisions":["accept","accept_for_session","decline","cancel"],"input":{"command":"rm -rf /"},"title":"Run `rm -rf /`","tool":"bash","type":"approval"},"id":"u6","item":null}}
+{"request_cancelled":"u6"}
+{"item":{"body":{"text":"heads up","type":"system"},"id":"t1:notice:1","parent":null,"status":"completed"}}
+{"item":{"body":{"text":"","type":"message"},"id":"t1:m1:c0","parent":null,"status":"running"}}
+{"text_delta":{"item":"t1:m1:c0","text":"done"}}
+{"item":{"body":{"text":"done","type":"message"},"id":"t1:m1:c0","parent":null,"status":"completed"}}
+{"usage":{"cached_tokens":0,"cost_usd":0.001,"input_tokens":10,"output_tokens":2}}
+{"context":{"max_tokens":200000,"total_processed_tokens":120,"used_tokens":100}}
+{"turn_ref":"a"}
+{"turn_ended":"completed"}
+{"exited":null}

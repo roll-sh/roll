@@ -1,0 +1,32 @@
+{
+  "name": "@roll/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "roll desktop: the agents canvas with this machine's agent daemon",
+  "author": "roll",
+  "homepage": "https://roll.sh",
+  "license": "UNLICENSED",
+  "type": "module",
+  "main": "dist/main.cjs",
+  "scripts": {
+    "icons": "node scripts/icons.ts",
+    "build": "node scripts/icons.ts && node scripts/build.ts",
+    "dist": "pnpm build && node scripts/stage-cli.ts && electron-builder --publish never",
+    "start": "pnpm build && electron .",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "electron-updater": "6.8.9"
+  },
+  "devDependencies": {
+    "@resvg/resvg-js": "2.6.2",
+    "@roll/brand": "workspace:*",
+    "@types/node": "^20",
+    "electron": "45.0.0",
+    "electron-builder": "26.16.1",
+    "esbuild": "0.28.2",
+    "typescript": "^5",
+    "vitest": "^5.0.5"
+  }
+}

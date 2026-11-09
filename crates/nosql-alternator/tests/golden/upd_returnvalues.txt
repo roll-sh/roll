@@ -1,0 +1,290 @@
+> CreateTable {"TableName":"alt_upd_rv","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST"}
+< 200 {"TableDescription":{"TableName":"alt_upd_rv","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+> CreateTable {"TableName":"alt_upd_rv_ss","KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"AttributeName":"c","KeyType":"RANGE"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"},{"AttributeName":"c","AttributeType":"N"}],"BillingMode":"PAY_PER_REQUEST"}
+< 200 {"TableDescription":{"TableName":"alt_upd_rv_ss","KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"AttributeName":"c","KeyType":"RANGE"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"},{"AttributeName":"c","AttributeType":"N"}],"BillingMode":"PAY_PER_REQUEST","CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+# NONE (default and explicit); invalid values (case-sensitive, wrong type)
+> PutItem {"TableName":"alt_upd_rv","Item":{"p":{"S":"a"},"a":{"S":"hi"},"b":{"S":"dog"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"a"}},"UpdateExpression":"SET b = :v","ExpressionAttributeValues":{":v":{"S":"cat"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"a"}},"UpdateExpression":"SET b = :v","ExpressionAttributeValues":{":v":{"S":"cat"}},"ReturnValues":"NONE"}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"a"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"N":"1"}},"ReturnValues":"none"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Unrecognized value for ReturnValues: none"}
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"a"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"N":"1"}},"ReturnValues":"DOG"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Unrecognized value for ReturnValues: DOG"}
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"a"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"N":"1"}},"ReturnValues":""}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Unrecognized value for ReturnValues: "}
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"a"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"N":"1"}},"ReturnValues":"All_New"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Unrecognized value for ReturnValues: All_New"}
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"a"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"N":"1"}},"ReturnValues":5}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Expected string value for ReturnValues, got: 5"}
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"a"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"N":"1"}},"ReturnValues":null}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Expected string value for ReturnValues, got: null"}
+# invalid ReturnValues vs. other errors: which wins
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"a"}},"UpdateExpression":"SET a = :v","ReturnValues":"DOG"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Unrecognized value for ReturnValues: DOG"}
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"a"}},"UpdateExpression":"SET a = a + :v","ExpressionAttributeValues":{":v":{"N":"1"}},"ReturnValues":"DOG"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Unrecognized value for ReturnValues: DOG"}
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"a"}},"UpdateExpression":"SET a = :v SET","ExpressionAttributeValues":{":v":{"N":"1"}},"ReturnValues":"DOG"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Unrecognized value for ReturnValues: DOG"}
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"a"},"x":{"S":"y"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"N":"1"}},"ReturnValues":"DOG"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Unrecognized value for ReturnValues: DOG"}
+> GetItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"a"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"a"},"a":{"S":"hi"},"b":{"S":"cat"}}}
+# ALL_OLD: whole old item; missing item -> no Attributes
+> PutItem {"TableName":"alt_upd_rv","Item":{"p":{"S":"o"},"a":{"S":"hi"},"b":{"S":"dog"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"o"}},"UpdateExpression":"SET b = :v","ExpressionAttributeValues":{":v":{"S":"cat"}},"ReturnValues":"ALL_OLD"}
+< 200 {"Attributes":{"p":{"S":"o"},"a":{"S":"hi"},"b":{"S":"dog"}}}
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"o-new"}},"UpdateExpression":"SET b = :v","ExpressionAttributeValues":{":v":{"S":"cat"}},"ReturnValues":"ALL_OLD"}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"o"}},"UpdateExpression":"REMOVE a, b","ReturnValues":"ALL_OLD"}
+< 200 {"Attributes":{"p":{"S":"o"},"a":{"S":"hi"},"b":{"S":"cat"}}}
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"o"}},"UpdateExpression":"REMOVE a","ReturnValues":"ALL_OLD"}
+< 200 {"Attributes":{"p":{"S":"o"}}}
+# ALL_OLD with AttributeUpdates ADD / DELETE / PUT
+> PutItem {"TableName":"alt_upd_rv","Item":{"p":{"S":"oa"},"a":{"N":"3"},"b":{"S":"dog"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"oa"}},"AttributeUpdates":{"a":{"Action":"ADD","Value":{"N":"2"}}},"ReturnValues":"ALL_OLD"}
+< 200 {"Attributes":{"p":{"S":"oa"},"a":{"N":"3"},"b":{"S":"dog"}}}
+> PutItem {"TableName":"alt_upd_rv","Item":{"p":{"S":"oa"},"a":{"NS":["2","4","6","7"]},"b":{"S":"dog"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"oa"}},"AttributeUpdates":{"a":{"Action":"DELETE","Value":{"NS":["4","5"]}}},"ReturnValues":"ALL_OLD"}
+< 200 {"Attributes":{"p":{"S":"oa"},"a":{"NS":["2","4","6","7"]},"b":{"S":"dog"}}}
+> PutItem {"TableName":"alt_upd_rv","Item":{"p":{"S":"oa"},"a":{"S":"hi"},"c":{"N":"7"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"oa"}},"AttributeUpdates":{"a":{"Action":"PUT","Value":{"N":"17"}}},"ReturnValues":"ALL_OLD"}
+< 200 {"Attributes":{"p":{"S":"oa"},"a":{"S":"hi"},"c":{"N":"7"}}}
+> GetItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"oa"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"oa"},"a":{"N":"17"},"c":{"N":"7"}}}
+# UPDATED_OLD: only overwritten attributes that existed before
+> PutItem {"TableName":"alt_upd_rv","Item":{"p":{"S":"uo"},"a":{"S":"hi"},"b":{"S":"dog"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"uo"}},"UpdateExpression":"SET b = :v, c = :w","ExpressionAttributeValues":{":v":{"S":"cat"},":w":{"S":"hello"}},"ReturnValues":"UPDATED_OLD"}
+< 200 {"Attributes":{"b":{"S":"dog"}}}
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"uo"}},"UpdateExpression":"SET b = :v","ExpressionAttributeValues":{":v":{"S":"cat"}},"ReturnValues":"UPDATED_OLD"}
+< 200 {"Attributes":{"b":{"S":"cat"}}}
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"uo"}},"UpdateExpression":"REMOVE b","ReturnValues":"UPDATED_OLD"}
+< 200 {"Attributes":{"b":{"S":"cat"}}}
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"uo"}},"UpdateExpression":"SET b = :v","ExpressionAttributeValues":{":v":{"S":"cat"}},"ReturnValues":"UPDATED_OLD"}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"uo"}},"UpdateExpression":"SET b = :v, d = :w","ExpressionAttributeValues":{":v":{"S":"dog"},":w":{"S":"lion"}},"ReturnValues":"UPDATED_OLD"}
+< 200 {"Attributes":{"b":{"S":"cat"}}}
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"uo"}},"UpdateExpression":"SET b = :v, d = :w","ExpressionAttributeValues":{":v":{"S":"cat"},":w":{"S":"tiger"}},"ReturnValues":"UPDATED_OLD"}
+< 200 {"Attributes":{"d":{"S":"lion"},"b":{"S":"dog"}}}
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"uo"}},"UpdateExpression":"REMOVE zz","ReturnValues":"UPDATED_OLD"}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"uo"}},"AttributeUpdates":{},"ReturnValues":"UPDATED_OLD"}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"uo"}},"AttributeUpdates":{"a":{"Action":"PUT","Value":{"S":"x"}},"q":{"Action":"PUT","Value":{"N":"1"}},"d":{"Action":"DELETE"}},"ReturnValues":"UPDATED_OLD"}
+< 200 {"Attributes":{"a":{"S":"hi"},"d":{"S":"tiger"}}}
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"uo-new"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"N":"1"}},"ReturnValues":"UPDATED_OLD"}
+< 200 {}
+# ALL_NEW: whole new item; REMOVE not returned; new item includes the key
+> PutItem {"TableName":"alt_upd_rv","Item":{"p":{"S":"an"},"a":{"S":"hi"},"b":{"S":"dog"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"an"}},"UpdateExpression":"SET b = :v","ExpressionAttributeValues":{":v":{"S":"cat"}},"ReturnValues":"ALL_NEW"}
+< 200 {"Attributes":{"p":{"S":"an"},"a":{"S":"hi"},"b":{"S":"cat"}}}
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"an"}},"UpdateExpression":"REMOVE b","ReturnValues":"ALL_NEW"}
+< 200 {"Attributes":{"p":{"S":"an"},"a":{"S":"hi"}}}
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"an-new"}},"UpdateExpression":"SET b = :v","ExpressionAttributeValues":{":v":{"S":"cat"}},"ReturnValues":"ALL_NEW"}
+< 200 {"Attributes":{"p":{"S":"an-new"},"b":{"S":"cat"}}}
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"an-new2"}},"UpdateExpression":"REMOVE b","ReturnValues":"ALL_NEW"}
+< 200 {}
+> GetItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"an-new2"}},"ConsistentRead":true}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"an-new2"}},"AttributeUpdates":{},"ReturnValues":"ALL_NEW"}
+< 200 {"Attributes":{"p":{"S":"an-new2"}}}
+> PutItem {"TableName":"alt_upd_rv","Item":{"p":{"S":"an-new2"},"a":{"S":"hi"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"an-new2"}},"AttributeUpdates":{},"ReturnValues":"ALL_NEW"}
+< 200 {"Attributes":{"p":{"S":"an-new2"},"a":{"S":"hi"}}}
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"an-new2"}},"UpdateExpression":"REMOVE a","ReturnValues":"ALL_NEW"}
+< 200 {"Attributes":{"p":{"S":"an-new2"}}}
+# ALL_NEW with REMOVE + SET together, ADD on existing, ALL_NEW on update removing all non-key attributes
+> PutItem {"TableName":"alt_upd_rv","Item":{"p":{"S":"an2"},"s":{"S":"dog"},"d":{"S":"foo"},"n":{"N":"3"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"an2"}},"UpdateExpression":"REMOVE d SET s = :v","ExpressionAttributeValues":{":v":{"S":"cat"}},"ReturnValues":"ALL_NEW"}
+< 200 {"Attributes":{"p":{"S":"an2"},"s":{"S":"cat"},"n":{"N":"3"}}}
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"an2"}},"UpdateExpression":"ADD n :inc","ExpressionAttributeValues":{":inc":{"N":"1"}},"ReturnValues":"ALL_NEW"}
+< 200 {"Attributes":{"p":{"S":"an2"},"n":{"N":"4"},"s":{"S":"cat"}}}
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"an2"}},"UpdateExpression":"REMOVE s, n","ReturnValues":"ALL_NEW"}
+< 200 {"Attributes":{"p":{"S":"an2"}}}
+> GetItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"an2"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"an2"}}}
+# UPDATED_NEW: new values of written attributes; REMOVEd ones not returned; key never returned
+> PutItem {"TableName":"alt_upd_rv","Item":{"p":{"S":"un"},"a":{"S":"hi"},"b":{"S":"dog"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"un"}},"UpdateExpression":"SET b = :v, c = :w","ExpressionAttributeValues":{":v":{"S":"cat"},":w":{"S":"hello"}},"ReturnValues":"UPDATED_NEW"}
+< 200 {"Attributes":{"c":{"S":"hello"},"b":{"S":"cat"}}}
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"un"}},"UpdateExpression":"REMOVE b","ReturnValues":"UPDATED_NEW"}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"un"}},"UpdateExpression":"SET a = :v, b = :w REMOVE c","ExpressionAttributeValues":{":v":{"S":"dog"},":w":{"S":"tiger"}},"ReturnValues":"UPDATED_NEW"}
+< 200 {"Attributes":{"b":{"S":"tiger"},"a":{"S":"dog"}}}
+> PutItem {"TableName":"alt_upd_rv","Item":{"p":{"S":"un2"},"a":{"N":"1"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"un2"}},"UpdateExpression":"SET a = a + :v","ExpressionAttributeValues":{":v":{"N":"1"}},"ReturnValues":"UPDATED_NEW"}
+< 200 {"Attributes":{"a":{"N":"2"}}}
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"un3"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"N":"1"}},"ReturnValues":"UPDATED_NEW"}
+< 200 {"Attributes":{"a":{"N":"1"}}}
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"un4"}},"AttributeUpdates":{},"ReturnValues":"UPDATED_NEW"}
+< 200 {}
+> PutItem {"TableName":"alt_upd_rv","Item":{"p":{"S":"un4"},"a":{"S":"hi"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"un4"}},"AttributeUpdates":{},"ReturnValues":"UPDATED_NEW"}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"un4"}},"AttributeUpdates":{"a":{"Action":"PUT","Value":{"S":"x"}},"q":{"Action":"ADD","Value":{"N":"1"}},"d":{"Action":"DELETE"}},"ReturnValues":"UPDATED_NEW"}
+< 200 {"Attributes":{"a":{"S":"x"},"q":{"N":"1"}}}
+# UPDATED_* with ADD / DELETE on sets and numbers
+> PutItem {"TableName":"alt_upd_rv","Item":{"p":{"S":"us"},"s":{"SS":["a","b"]},"n":{"N":"5"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"us"}},"UpdateExpression":"ADD s :s, n :n","ExpressionAttributeValues":{":s":{"SS":["c"]},":n":{"N":"1"}},"ReturnValues":"UPDATED_OLD"}
+< 200 {"Attributes":{"n":{"N":"5"},"s":{"SS":["a","b"]}}}
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"us"}},"UpdateExpression":"ADD s :s, n :n","ExpressionAttributeValues":{":s":{"SS":["d"]},":n":{"N":"1"}},"ReturnValues":"UPDATED_NEW"}
+< 200 {"Attributes":{"n":{"N":"7"},"s":{"SS":["a","b","c","d"]}}}
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"us"}},"UpdateExpression":"DELETE s :s","ExpressionAttributeValues":{":s":{"SS":["a"]}},"ReturnValues":"UPDATED_OLD"}
+< 200 {"Attributes":{"s":{"SS":["a","b","c","d"]}}}
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"us"}},"UpdateExpression":"DELETE s :s","ExpressionAttributeValues":{":s":{"SS":["b"]}},"ReturnValues":"UPDATED_NEW"}
+< 200 {"Attributes":{"s":{"SS":["c","d"]}}}
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"us"}},"UpdateExpression":"DELETE s :s","ExpressionAttributeValues":{":s":{"SS":["c","d"]}},"ReturnValues":"UPDATED_NEW"}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"us"}},"UpdateExpression":"DELETE s :s","ExpressionAttributeValues":{":s":{"SS":["c"]}},"ReturnValues":"UPDATED_OLD"}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"us"}},"UpdateExpression":"SET n = n","ReturnValues":"UPDATED_OLD"}
+< 200 {"Attributes":{"n":{"N":"7"}}}
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"us"}},"UpdateExpression":"SET n = n","ReturnValues":"UPDATED_NEW"}
+< 200 {"Attributes":{"n":{"N":"7"}}}
+# nested updates: ALL_OLD whole item; UPDATED_* project only the nested path
+> PutItem {"TableName":"alt_upd_rv","Item":{"p":{"S":"x"},"a":{"M":{"b":{"S":"dog"},"c":{"L":[{"N":"1"},{"N":"2"},{"N":"3"}]}}},"d":{"S":"cat"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"x"}},"UpdateExpression":"SET a.b = :v","ExpressionAttributeValues":{":v":{"S":"hi"}},"ReturnValues":"ALL_OLD"}
+< 200 {"Attributes":{"p":{"S":"x"},"a":{"M":{"b":{"S":"dog"},"c":{"L":[{"N":"1"},{"N":"2"},{"N":"3"}]}}},"d":{"S":"cat"}}}
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"x"}},"UpdateExpression":"SET a.b = :v","ExpressionAttributeValues":{":v":{"S":"yo"}},"ReturnValues":"UPDATED_OLD"}
+< 200 {"Attributes":{"a":{"M":{"b":{"S":"hi"}}}}}
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"x"}},"UpdateExpression":"SET a.c[1] = :v","ExpressionAttributeValues":{":v":{"N":"7"}},"ReturnValues":"UPDATED_OLD"}
+< 200 {"Attributes":{"a":{"M":{"c":{"L":[{"N":"2"}]}}}}}
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"x"}},"UpdateExpression":"SET a.c[1] = :v, a.b = :w","ExpressionAttributeValues":{":v":{"N":"8"},":w":{"S":"dog"}},"ReturnValues":"UPDATED_OLD"}
+< 200 {"Attributes":{"a":{"M":{"b":{"S":"yo"},"c":{"L":[{"N":"7"}]}}}}}
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"x"}},"UpdateExpression":"SET a.b = :v","ExpressionAttributeValues":{":v":{"S":"hello"}},"ReturnValues":"UPDATED_NEW"}
+< 200 {"Attributes":{"a":{"M":{"b":{"S":"hello"}}}}}
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"x"}},"UpdateExpression":"SET a.c[1] = :v","ExpressionAttributeValues":{":v":{"N":"4"}},"ReturnValues":"UPDATED_NEW"}
+< 200 {"Attributes":{"a":{"M":{"c":{"L":[{"N":"4"}]}}}}}
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"x"}},"UpdateExpression":"SET a.c[1] = :v, a.b = :w","ExpressionAttributeValues":{":v":{"N":"3"},":w":{"S":"dog"}},"ReturnValues":"UPDATED_NEW"}
+< 200 {"Attributes":{"a":{"M":{"b":{"S":"dog"},"c":{"L":[{"N":"3"}]}}}}}
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"x"}},"UpdateExpression":"SET a.b = :v","ExpressionAttributeValues":{":v":{"S":"hi"}},"ReturnValues":"ALL_NEW"}
+< 200 {"Attributes":{"p":{"S":"x"},"a":{"M":{"b":{"S":"hi"},"c":{"L":[{"N":"1"},{"N":"3"},{"N":"3"}]}}},"d":{"S":"cat"}}}
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"x"}},"UpdateExpression":"SET a.c[1] = :v","ExpressionAttributeValues":{":v":{"N":"4"}},"ReturnValues":"ALL_NEW"}
+< 200 {"Attributes":{"p":{"S":"x"},"a":{"M":{"b":{"S":"hi"},"c":{"L":[{"N":"1"},{"N":"4"},{"N":"3"}]}}},"d":{"S":"cat"}}}
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"x"}},"UpdateExpression":"SET a.c[1] = :v, a.b = :w","ExpressionAttributeValues":{":v":{"N":"3"},":w":{"S":"dog"}},"ReturnValues":"ALL_NEW"}
+< 200 {"Attributes":{"p":{"S":"x"},"a":{"M":{"b":{"S":"dog"},"c":{"L":[{"N":"1"},{"N":"3"},{"N":"3"}]}}},"d":{"S":"cat"}}}
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"x"}},"UpdateExpression":"REMOVE a.c[1], a.c[3]","ReturnValues":"UPDATED_OLD"}
+< 200 {"Attributes":{"a":{"M":{"c":{"L":[{"N":"3"}]}}}}}
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"x"}},"UpdateExpression":"SET a.x1 = :v","ExpressionAttributeValues":{":v":{"N":"8"}},"ReturnValues":"UPDATED_OLD"}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"x"}},"UpdateExpression":"SET a.x2 = :v","ExpressionAttributeValues":{":v":{"N":"8"}},"ReturnValues":"UPDATED_NEW"}
+< 200 {"Attributes":{"a":{"M":{"x2":{"N":"8"}}}}}
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"x"}},"UpdateExpression":"SET a.c[100] = :v","ExpressionAttributeValues":{":v":{"N":"70"}},"ReturnValues":"UPDATED_NEW"}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"x"}},"UpdateExpression":"REMOVE a.c[1]","ReturnValues":"UPDATED_NEW"}
+< 200 {"Attributes":{"a":{"M":{"c":{"L":[{"N":"70"}]}}}}}
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"x"}},"UpdateExpression":"SET a.c[0] = :v, d = :w","ExpressionAttributeValues":{":v":{"N":"0"},":w":{"S":"dd"}},"ReturnValues":"UPDATED_OLD"}
+< 200 {"Attributes":{"d":{"S":"cat"},"a":{"M":{"c":{"L":[{"N":"1"}]}}}}}
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"x"}},"UpdateExpression":"SET a.c[0] = :v, d = :w","ExpressionAttributeValues":{":v":{"N":"1"},":w":{"S":"ee"}},"ReturnValues":"UPDATED_NEW"}
+< 200 {"Attributes":{"d":{"S":"ee"},"a":{"M":{"c":{"L":[{"N":"1"}]}}}}}
+> GetItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"x"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"x"},"a":{"M":{"b":{"S":"dog"},"c":{"L":[{"N":"1"},{"N":"70"}]},"x1":{"N":"8"},"x2":{"N":"8"}}},"d":{"S":"ee"}}}
+# nested: two indexes of one list, nested maps, ADD on nested path
+> PutItem {"TableName":"alt_upd_rv","Item":{"p":{"S":"y"},"a":{"M":{"l":{"L":[{"N":"10"},{"N":"20"},{"N":"30"},{"N":"40"}]},"m":{"M":{"q":{"M":{"r":{"N":"1"}}}}},"n":{"N":"1"}}}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"y"}},"UpdateExpression":"SET a.l[3] = :v, a.l[0] = :v","ExpressionAttributeValues":{":v":{"N":"0"}},"ReturnValues":"UPDATED_OLD"}
+< 200 {"Attributes":{"a":{"M":{"l":{"L":[{"N":"10"},{"N":"40"}]}}}}}
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"y"}},"UpdateExpression":"SET a.l[3] = :v, a.l[0] = :w","ExpressionAttributeValues":{":v":{"N":"4"},":w":{"N":"1"}},"ReturnValues":"UPDATED_NEW"}
+< 200 {"Attributes":{"a":{"M":{"l":{"L":[{"N":"1"},{"N":"4"}]}}}}}
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"y"}},"UpdateExpression":"SET a.m.q.r = :v, a.m.q.s = :v","ExpressionAttributeValues":{":v":{"N":"2"}},"ReturnValues":"UPDATED_NEW"}
+< 200 {"Attributes":{"a":{"M":{"m":{"M":{"q":{"M":{"r":{"N":"2"},"s":{"N":"2"}}}}}}}}}
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"y"}},"UpdateExpression":"SET a.m.q.r = :v, a.m.q.s = :v","ExpressionAttributeValues":{":v":{"N":"3"}},"ReturnValues":"UPDATED_OLD"}
+< 200 {"Attributes":{"a":{"M":{"m":{"M":{"q":{"M":{"r":{"N":"2"},"s":{"N":"2"}}}}}}}}}
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"y"}},"UpdateExpression":"ADD a.n :v","ExpressionAttributeValues":{":v":{"N":"5"}},"ReturnValues":"UPDATED_NEW"}
+< 200 {"Attributes":{"a":{"M":{"n":{"N":"6"}}}}}
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"y"}},"UpdateExpression":"REMOVE a.m.q","ReturnValues":"UPDATED_OLD"}
+< 200 {"Attributes":{"a":{"M":{"m":{"M":{"q":{"M":{"r":{"N":"3"},"s":{"N":"3"}}}}}}}}}
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"y"}},"UpdateExpression":"REMOVE a.l[1], a.l[2]","ReturnValues":"UPDATED_NEW"}
+< 200 {"Attributes":{"a":{"M":{"l":{"L":[{"N":"4"}]}}}}}
+# ReturnValues on a table with a range key: UPDATED_NEW excludes both key attributes
+> UpdateItem {"TableName":"alt_upd_rv_ss","Key":{"p":{"S":"k"},"c":{"N":"1"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"N":"1"}},"ReturnValues":"UPDATED_NEW"}
+< 200 {"Attributes":{"a":{"N":"1"}}}
+> UpdateItem {"TableName":"alt_upd_rv_ss","Key":{"p":{"S":"k"},"c":{"N":"1"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"N":"2"}},"ReturnValues":"ALL_NEW"}
+< 200 {"Attributes":{"p":{"S":"k"},"c":{"N":"1"},"a":{"N":"2"}}}
+> UpdateItem {"TableName":"alt_upd_rv_ss","Key":{"p":{"S":"k"},"c":{"N":"1"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"N":"3"}},"ReturnValues":"UPDATED_OLD"}
+< 200 {"Attributes":{"a":{"N":"2"}}}
+> UpdateItem {"TableName":"alt_upd_rv_ss","Key":{"p":{"S":"k"},"c":{"N":"1"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"N":"4"}},"ReturnValues":"ALL_OLD"}
+< 200 {"Attributes":{"p":{"S":"k"},"c":{"N":"1"},"a":{"N":"3"}}}
+# attribute order in Attributes
+> PutItem {"TableName":"alt_upd_rv","Item":{"p":{"S":"ord"},"z":{"N":"1"},"B":{"N":"2"},"a":{"N":"3"},"_":{"N":"4"},"aa":{"N":"5"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"ord"}},"UpdateExpression":"SET z = :v, a = :v, B = :v, m = :v","ExpressionAttributeValues":{":v":{"N":"0"}},"ReturnValues":"UPDATED_OLD"}
+< 200 {"Attributes":{"B":{"N":"2"},"a":{"N":"3"},"z":{"N":"1"}}}
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"ord"}},"UpdateExpression":"SET z = :v, a = :v, B = :v, m = :v","ExpressionAttributeValues":{":v":{"N":"9"}},"ReturnValues":"UPDATED_NEW"}
+< 200 {"Attributes":{"B":{"N":"9"},"a":{"N":"9"},"m":{"N":"9"},"z":{"N":"9"}}}
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"ord"}},"UpdateExpression":"SET y = :v","ExpressionAttributeValues":{":v":{"N":"9"}},"ReturnValues":"ALL_NEW"}
+< 200 {"Attributes":{"p":{"S":"ord"},"B":{"N":"9"},"_":{"N":"4"},"a":{"N":"9"},"aa":{"N":"5"},"m":{"N":"9"},"z":{"N":"9"},"y":{"N":"9"}}}
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"ord8"}},"UpdateExpression":"SET a = :v, b = :v, c = :v, d = :v, e = :v, f = :v, g = :v, h = :v","ExpressionAttributeValues":{":v":{"N":"1"}},"ReturnValues":"UPDATED_NEW"}
+< 200 {"Attributes":{"g":{"N":"1"},"f":{"N":"1"},"e":{"N":"1"},"c":{"N":"1"},"h":{"N":"1"},"b":{"N":"1"},"d":{"N":"1"},"a":{"N":"1"}}}
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"ord8"}},"UpdateExpression":"SET h = :v, g = :v, f = :v, e = :v, d = :v, c = :v, b = :v, a = :v","ExpressionAttributeValues":{":v":{"N":"2"}},"ReturnValues":"UPDATED_NEW"}
+< 200 {"Attributes":{"c":{"N":"2"},"a":{"N":"2"},"d":{"N":"2"},"e":{"N":"2"},"f":{"N":"2"},"g":{"N":"2"},"b":{"N":"2"},"h":{"N":"2"}}}
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"ord8"}},"UpdateExpression":"SET a = :v, b = :v, c = :v, d = :v, e = :v, f = :v, g = :v, h = :v","ExpressionAttributeValues":{":v":{"N":"3"}},"ReturnValues":"UPDATED_OLD"}
+< 200 {"Attributes":{"g":{"N":"2"},"f":{"N":"2"},"e":{"N":"2"},"c":{"N":"2"},"h":{"N":"2"},"b":{"N":"2"},"d":{"N":"2"},"a":{"N":"2"}}}
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"ord8"}},"UpdateExpression":"SET b = :v, c = :v","ExpressionAttributeValues":{":v":{"N":"4"}},"ReturnValues":"UPDATED_NEW"}
+< 200 {"Attributes":{"c":{"N":"4"},"b":{"N":"4"}}}
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"ord8"}},"UpdateExpression":"SET c = :v, b = :v","ExpressionAttributeValues":{":v":{"N":"5"}},"ReturnValues":"UPDATED_NEW"}
+< 200 {"Attributes":{"b":{"N":"5"},"c":{"N":"5"}}}
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"ord8"}},"UpdateExpression":"SET c = :v REMOVE a ADD n :v","ExpressionAttributeValues":{":v":{"N":"6"}},"ReturnValues":"UPDATED_OLD"}
+< 200 {"Attributes":{"a":{"N":"3"},"c":{"N":"5"}}}
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"ord8"}},"UpdateExpression":"SET c = :v REMOVE b ADD n :v","ExpressionAttributeValues":{":v":{"N":"7"}},"ReturnValues":"ALL_NEW"}
+< 200 {"Attributes":{"p":{"S":"ord8"},"n":{"N":"13"},"c":{"N":"7"},"d":{"N":"3"},"e":{"N":"3"},"f":{"N":"3"},"g":{"N":"3"},"h":{"N":"3"}}}
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"ord8"}},"UpdateExpression":"SET x0 = :v, x1 = :v, x2 = :v, x3 = :v, x4 = :v, x5 = :v, x6 = :v, x7 = :v, x8 = :v, x9 = :v, x10 = :v, x11 = :v, x12 = :v, x13 = :v, x14 = :v, x15 = :v, x16 = :v, x17 = :v, x18 = :v, x19 = :v","ExpressionAttributeValues":{":v":{"N":"8"}},"ReturnValues":"UPDATED_NEW"}
+< 200 {"Attributes":{"x18":{"N":"8"},"x17":{"N":"8"},"x16":{"N":"8"},"x15":{"N":"8"},"x14":{"N":"8"},"x0":{"N":"8"},"x7":{"N":"8"},"x19":{"N":"8"},"x13":{"N":"8"},"x9":{"N":"8"},"x1":{"N":"8"},"x10":{"N":"8"},"x2":{"N":"8"},"x12":{"N":"8"},"x3":{"N":"8"},"x8":{"N":"8"},"x4":{"N":"8"},"x11":{"N":"8"},"x5":{"N":"8"},"x6":{"N":"8"}}}
+# ConditionExpression failures and ReturnValuesOnConditionCheckFailure
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"cc"}},"UpdateExpression":"SET s = :v2","ExpressionAttributeValues":{":v1":{"S":"dog"},":v2":{"S":"cat"}},"ConditionExpression":"s = :v1","ReturnValuesOnConditionCheckFailure":"ALL_OLD"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+> PutItem {"TableName":"alt_upd_rv","Item":{"p":{"S":"cc"},"s":{"S":"dog"},"o":{"N":"1"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"cc"}},"UpdateExpression":"SET s = :v2","ExpressionAttributeValues":{":v1":{"S":"dog"},":v2":{"S":"cat"}},"ConditionExpression":"s = :v1","ReturnValuesOnConditionCheckFailure":"ALL_OLD"}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"cc"}},"UpdateExpression":"SET s = :v2","ExpressionAttributeValues":{":v1":{"S":"rat"},":v2":{"S":"cow"}},"ConditionExpression":"s = :v1","ReturnValuesOnConditionCheckFailure":"ALL_OLD"}
+< 400 {"Item":{"p":{"S":"cc"},"o":{"N":"1"},"s":{"S":"cat"}},"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"cc"}},"UpdateExpression":"SET s = :v2","ExpressionAttributeValues":{":v1":{"S":"rat"},":v2":{"S":"cow"}},"ConditionExpression":"s = :v1","ReturnValuesOnConditionCheckFailure":"NONE"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"cc"}},"UpdateExpression":"SET s = :v2","ExpressionAttributeValues":{":v1":{"S":"rat"},":v2":{"S":"cow"}},"ConditionExpression":"s = :v1"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"cc"}},"UpdateExpression":"SET s = :v2","ExpressionAttributeValues":{":v1":{"S":"rat"},":v2":{"S":"cow"}},"ConditionExpression":"s = :v1","ReturnValues":"ALL_NEW","ReturnValuesOnConditionCheckFailure":"ALL_OLD"}
+< 400 {"Item":{"p":{"S":"cc"},"o":{"N":"1"},"s":{"S":"cat"}},"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"cc"}},"UpdateExpression":"SET s = :v2","ExpressionAttributeValues":{":v1":{"S":"rat"},":v2":{"S":"cow"}},"ConditionExpression":"s = :v1","ReturnValues":"ALL_OLD"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"cc"}},"UpdateExpression":"SET s = :v2","ExpressionAttributeValues":{":v1":{"S":"cat"},":v2":{"S":"cow"}},"ConditionExpression":"s = :v1","ReturnValues":"UPDATED_OLD","ReturnValuesOnConditionCheckFailure":"ALL_OLD"}
+< 200 {"Attributes":{"s":{"S":"cat"}}}
+# invalid ReturnValuesOnConditionCheckFailure values
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"cc"}},"UpdateExpression":"SET s = :v2","ExpressionAttributeValues":{":v1":{"S":"rat"},":v2":{"S":"cow"}},"ConditionExpression":"s = :v1","ReturnValuesOnConditionCheckFailure":"DUMMY"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Unrecognized value for ReturnValuesOnConditionCheckFailure: DUMMY"}
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"cc"}},"UpdateExpression":"SET s = :v2","ExpressionAttributeValues":{":v1":{"S":"rat"},":v2":{"S":"cow"}},"ConditionExpression":"s = :v1","ReturnValuesOnConditionCheckFailure":"UPDATED_OLD"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Unrecognized value for ReturnValuesOnConditionCheckFailure: UPDATED_OLD"}
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"cc"}},"UpdateExpression":"SET s = :v2","ExpressionAttributeValues":{":v1":{"S":"rat"},":v2":{"S":"cow"}},"ConditionExpression":"s = :v1","ReturnValuesOnConditionCheckFailure":"ALL_NEW"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Unrecognized value for ReturnValuesOnConditionCheckFailure: ALL_NEW"}
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"cc"}},"UpdateExpression":"SET s = :v2","ExpressionAttributeValues":{":v1":{"S":"rat"},":v2":{"S":"cow"}},"ConditionExpression":"s = :v1","ReturnValuesOnConditionCheckFailure":"UPDATED_NEW"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Unrecognized value for ReturnValuesOnConditionCheckFailure: UPDATED_NEW"}
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"cc"}},"UpdateExpression":"SET s = :v2","ExpressionAttributeValues":{":v1":{"S":"rat"},":v2":{"S":"cow"}},"ConditionExpression":"s = :v1","ReturnValuesOnConditionCheckFailure":"all_old"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Unrecognized value for ReturnValuesOnConditionCheckFailure: all_old"}
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"cc"}},"UpdateExpression":"SET s = :v2","ExpressionAttributeValues":{":v1":{"S":"rat"},":v2":{"S":"cow"}},"ConditionExpression":"s = :v1","ReturnValuesOnConditionCheckFailure":""}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Unrecognized value for ReturnValuesOnConditionCheckFailure: "}
+# ReturnValuesOnConditionCheckFailure without any condition
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"cc"}},"UpdateExpression":"SET s = :v","ExpressionAttributeValues":{":v":{"S":"x"}},"ReturnValuesOnConditionCheckFailure":"ALL_OLD"}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"cc"}},"UpdateExpression":"SET s = :v","ExpressionAttributeValues":{":v":{"S":"x"}},"ReturnValuesOnConditionCheckFailure":"BAD"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Unrecognized value for ReturnValuesOnConditionCheckFailure: BAD"}
+> GetItem {"TableName":"alt_upd_rv","Key":{"p":{"S":"cc"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"cc"},"o":{"N":"1"},"s":{"S":"x"}}}
+> DeleteTable {"TableName":"alt_upd_rv"}
+< 200 {"TableDescription":{"TableName":"alt_upd_rv","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_upd_rv:scylla:table/alt_upd_rv","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0}}}
+> DeleteTable {"TableName":"alt_upd_rv_ss"}
+< 200 {"TableDescription":{"TableName":"alt_upd_rv_ss","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_upd_rv_ss:scylla:table/alt_upd_rv_ss","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0}}}

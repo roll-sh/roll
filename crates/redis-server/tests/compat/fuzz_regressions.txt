@@ -1,0 +1,279 @@
+# Differences tests/fuzz_diff.rs found, reduced to their minimal sequences.
+FLUSHALL
+
+# COMMAND HELP's INFO/DOCS lines.
+COMMAND HELP
+
+# AUTH's arity is checked before the command.
+AUTH
+
+# A rejected EXEC (wrong arity) aborts as EXECABORT and discards the transaction, MULTI or not.
+EXEC k1 a
+SET wk 1
+WATCH wk
+MULTI
+SET a 1
+EXEC x
+EXEC
+UNWATCH
+
+# SET's options as parseExtendedStringArgumentsOrReply reads them: a condition or expiry may
+# repeat (the last one counts), values are checked after the syntax.
+SET s1 v NX NX
+SET s1 v2 XX XX
+GET s1
+SET s1 v3 EX 100 EX 200
+TTL s1
+SET s1 v KEEPTTL KEEPTTL
+SET s1 v IFEQ a IFEQ v3
+SET s1 v IFEQ a IFNE b
+SET s1 v EX abc BOGUS
+SET s1 v EX 10 PX 10
+# IFNE / IFDNE set a missing key (no digest check then); XX / IFEQ / IFDEQ don't.
+SET m1 v IFNE x
+SET m2 v IFDNE 0123456789abcdef
+SET m3 v IFDNE 1
+SET m4 v IFDEQ 1
+SET m5 v IFEQ v
+MGET m1 m2 m3 m4 m5
+SET m6 0x10 IFNE a GET
+GET m6
+SET m7 +1 IFDNE FFFFFFFFFFFFFFFF GET PX 1000000
+GETDEL m7
+SET m8 x IFDNE 1 PXAT 9223372036854775807
+GET m8
+# An existing key: the digest's length is checked (after GET's reply, which Redis sends too).
+SET m1 v IFDEQ 0
+SET m1 v IFDNE 0
+SET m1 v IFDEQ E8B86BC0D2EBB53A
+HSET hh f v
+SET hh v IFEQ x
+SET hh v IFDEQ 0123456789abcdef GET
+
+# GETEX: a missing key before the time; PERSIST may repeat.
+GETEX gx1 PX 0
+GETEX gx1 EX abc
+SET gx1 v
+GETEX gx1 PX 0
+GETEX gx1 EX abc
+GETEX gx1 PERSIST PERSIST
+GETEX gx1 EX 10 PERSIST
+GETEX gx1 KEEPTTL
+GETEX gx1 EX 100 EX 200
+TTL gx1
+
+# MSETEX's numkeys and pair count.
+MSETEX abc k1 b
+MSETEX 0 k1 b
+MSETEX -1 k1 b
+MSETEX 2147483648 k1 b
+MSETEX 100 k1 "" k2 "" k2 -1 k1 inf EX ""
+MSETEX 2 k1 v k2
+MSETEX 1 k1 v NX NX
+MSETEX 1 k1 v EX 100 EX 200
+TTL k1
+MSETEX 1 k1 v EX 10 KEEPTTL
+MSETEX 1 k1 v GET
+
+# DELEX: arity, the key's type, then the condition.
+DELEX dk IFNE
+DELEX dk a b c
+DELEX dk 1.0 1
+SET dk -1
+DELEX dk 1.0 1
+DELEX dk IFDEQ 0
+DELEX dk IFDNE 0
+DELEX dk IFDEQ 0123456789abcdef
+DELEX hh IFNE foo
+DELEX hh IFDEQ 0
+DELEX nokey IFDEQ 0
+DELEX dk IFNE -1
+DELEX dk IFNE x
+EXISTS dk
+
+# DB indexes: `int`s (getIntFromObjectOrReply), SWAPDB parses both before the range.
+SWAPDB 16 abc
+SWAPDB abc 16
+SWAPDB 0 2147483648
+SELECT 9223372036854775807
+SELECT 2147483648
+SELECT -2147483649
+MOVE s1 2147483648
+MOVE s1 16
+COPY s1 s9 DB 2147483648
+COPY s1 s9 DB 99
+
+# COMMAND LIST FILTERBY ACLCAT matches subcommands by their own categories.
+!sort COMMAND LIST FILTERBY ACLCAT keyspace
+!sort COMMAND LIST FILTERBY ACLCAT slow
+
+# SORT's scores parse with string2d: the empty string and surrounding spaces fail.
+SADD ss 20 0 9223372036854775808 ""
+SORT ss
+SORT ss ALPHA
+SORT ss ASC STORE ss
+DEL ss
+RPUSH sl " 1" 2
+SORT sl
+DEL sl
+RPUSH sl "1 " 2
+SORT sl
+DEL sl
+RPUSH sl 1e-400 2
+SORT sl
+DEL sl
+RPUSH sl 1e400 2
+SORT sl
+DEL sl
+RPUSH sl inf -inf 0x10 2.5
+SORT sl
+
+# LCS checks the keys' types before its options.
+ZADD lz 1 m
+LCS nokey lz MINMATCHLEN abc WITHMATCHLEN
+LCS nokey lz BOGUS
+SET la ohmytext
+SET lb mynewtext
+LCS la lb MINMATCHLEN abc
+# The LCS table (4-byte cells) against proto-max-bulk-len.
+SET lc1 {12000*a}
+SET lc2 {12000*a}
+LCS lc1 lc2 LEN
+CONFIG SET proto-max-bulk-len 1mb
+SET lc3 {600*a}
+SET lc4 {600*b}
+LCS lc3 lc4 LEN
+SET lc4 {400*b}
+LCS lc3 lc4 LEN
+CONFIG SET proto-max-bulk-len 512mb
+DEL lc1 lc2 lc3 lc4
+
+# EXPIRE's options: all read first, XX also applies with GT/LT.
+SET e1 v
+EXPIRE e1 -1 LT XX
+EXPIRE e1 100 XX LT
+EXPIRE e1 100 LT XX
+TTL e1
+EXPIRE e1 100 NX XX foo
+EXPIRE e1 100 NX LT
+EXPIRE e1 100 GT LT GT
+EXPIRE e1 100 GT XX
+EXPIRE e1 200 GT XX
+TTL e1
+EXPIRE e1 50 LT XX
+TTL e1
+EXPIRE e1 abc NX XX
+EXPIRE e1 9223372036854775807
+EXPIRE e1 -9223372036854775808
+
+# SCAN cursors: string2ull (strtoull after the strict parse: spaces, signs).
+FLUSHALL
+SCAN " 0" TYPE string
+SCAN "+0"
+SCAN " -1"
+SCAN "0 "
+SCAN ""
+SCAN -1
+SCAN 18446744073709551616
+SCAN " 0" MATCH k[12] COUNT -1 TYPE stream
+SCAN " 0" COUNT abc
+SSCAN nokey " 0" COUNT -1
+SADD sc a b
+SSCAN sc " 0"
+SSCAN sc "+5"
+ZADD zc 1 a
+ZSCAN zc " 0"
+HSET hc f v
+HSCAN hc " 0" COUNT 2
+
+# ZSCAN of a skiplist prints scores with %.17Lg; a listpack's as stored.
+CONFIG SET zset-max-listpack-value 1
+ZADD zs 1e-5 10 0.1 m -1 2 inf x
+!sort ZSCAN zs 0
+CONFIG SET zset-max-listpack-value 64
+ZADD zl 1e-5 10 0.1 m
+ZSCAN zl 0
+
+# INCREX BYFLOAT stores a string object, never an int.
+INCREX ix BYFLOAT 10
+OBJECT ENCODING ix
+INCREX ix2 BYFLOAT 10 SATURATE UBOUND -9223372036854775808
+OBJECT ENCODING ix2
+GET ix2
+INCREX ix3 BYINT 10
+OBJECT ENCODING ix3
+
+# PFDEBUG: SIMD, the subcommand's arity, the name up to a NUL, and the value made raw before
+# the subcommand is known.
+PFDEBUG SIMD ON
+PFDEBUG SIMD OFF
+PFDEBUG SIMD ON
+PFDEBUG SIMD ON x
+PFADD hl a b c
+PFDEBUG ENCODING hl x
+PFDEBUG GETREG hl x
+PFDEBUG "\x00\x01" hl
+PFDEBUG "ab\x00cd" hl
+SET hs "HYLL\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x80\x7f\xff"
+OBJECT ENCODING hs
+PFDEBUG nosuch hs
+OBJECT ENCODING hs
+
+# Popping from a COPY of a skiplist sorted set (and a quicklist) twice.
+ZADD zk 10 b 1e3 "x y" 1e3 {70*m}
+COPY zk zk2
+ZPOPMIN zk2
+ZMPOP 3 "" zk2 zk MIN
+ZRANGE zk2 0 -1 WITHSCORES
+ZRANGE zk 0 -1 WITHSCORES
+CONFIG SET list-max-listpack-size 2
+RPUSH lk a b c d e {70*m}
+COPY lk lk2
+LPOP lk2 2
+RPOP lk2 3
+LRANGE lk2 0 -1
+OBJECT ENCODING lk2
+CONFIG SET list-max-listpack-size -2
+
+# A sparse HLL with an opcode past the last register is corrupt for PFMERGE / PFCOUNT too.
+PFMERGE hm1 hm2
+APPEND hm1 "\xce\xa9"
+PFMERGE hm1 hm1 hm2 hm2
+PFMERGE hm3 hm1
+PFCOUNT hm1
+PFDEBUG TODENSE hm1
+SET hm4 "HYLL\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x80\x7f\xff\x40"
+PFMERGE hm5 hm4
+PFCOUNT hm4
+
+# WAIT / WAITAOF are queued in MULTI (arity errors abort EXEC) and answer without blocking.
+MULTI
+WAIT 1 x a
+EXEC
+MULTI
+WAIT 0 0
+WAITAOF 0 0 0
+WAIT x 0
+WAITAOF 2 0 0
+WAITAOF 0 -1 0
+WAITAOF 1 0 0
+WAIT 0 -1
+EXEC
+WAITAOF 2 0 0
+WAITAOF 0 -1 0
+WAITAOF 0 0 -1
+WAIT 0 9223372036854775807
+
+# A key already expired when watched and then deleted doesn't abort EXEC.
+MSETEX 2 w3 1e3 w2 10 EXAT 1
+WATCH w3 w2
+MULTI
+EXEC
+# Commands that reply twice in Redis (an error after another reply), last: each reply after
+# them is read one command late, on both sides alike.
+SET m1 v IFDEQ 0 GET
+PING
+PFDEBUG SIMD x
+PING
+PING
+FLUSHALL

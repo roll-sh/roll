@@ -1,0 +1,8 @@
+{"native_thread":"registry-replay-session-1"}
+{"request":{"body":{"questions":[{"header":"Fixture","id":"schema_vs_ui_flexibility","multi":false,"options":[{"label":"Strict schemas (Recommended)"},{"label":"UI flexibility"}],"question":"Should this fixture prefer strict schemas or UI flexibility?"}],"type":"questions"},"id":"1001","item":null}}
+{"item":{"body":{"text":"","type":"message"},"id":"msg:1:1","parent":null,"status":"running"}}
+{"text_delta":{"item":"msg:1:1","text":"plan questions fixture complete"}}
+{"item":{"body":{"text":"plan questions fixture complete","type":"message"},"id":"msg:1:1","parent":null,"status":"running"}}
+{"item":{"body":{"text":"plan questions fixture complete","type":"message"},"id":"msg:1:1","parent":null,"status":"completed"}}
+{"turn_ended":"completed"}
+{"exited":null}

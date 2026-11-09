@@ -1,0 +1,81 @@
+# LATENCY: the latency monitor's subcommands with the monitor off (spikes are in
+# compat_debug/latency_monitor.txt), their errors, and LATENCY HISTOGRAM's per-command
+# distributions (bucket values are timings, masked).
+
+FLUSHALL
+CONFIG RESETSTAT
+LATENCY RESET
+LATENCY
+LATENCY HELP
+LATENCY HELP extra
+LATENCY nosuch
+LATENCY LATEST
+LATENCY LATEST extra
+LATENCY HISTORY
+LATENCY HISTORY command
+LATENCY HISTORY nosuch
+LATENCY HISTORY command extra
+LATENCY GRAPH
+LATENCY GRAPH command
+LATENCY GRAPH nosuch
+LATENCY GRAPH command extra
+LATENCY RESET
+LATENCY RESET command
+LATENCY RESET command fast-command nosuch
+LATENCY DOCTOR
+LATENCY DOCTOR extra
+CONFIG GET latency-monitor-threshold
+CONFIG GET latency-tracking
+CONFIG GET latency-tracking-info-percentiles
+
+# ---- LATENCY HISTOGRAM ----
+CONFIG RESETSTAT
+!mask histogram_usec LATENCY HISTOGRAM
+LATENCY HISTOGRAM nosuch
+LATENCY HISTOGRAM nosuch|sub
+LATENCY HISTOGRAM a|b|c
+SET k v
+GET k
+GET k
+INCR n
+CONFIG GET maxmemory
+CONFIG GET maxmemory
+!mask histogram_usec LATENCY HISTOGRAM set
+!mask histogram_usec LATENCY HISTOGRAM GET SET
+!mask histogram_usec LATENCY HISTOGRAM get get
+!mask histogram_usec LATENCY HISTOGRAM incr nosuch get
+!mask histogram_usec LATENCY HISTOGRAM config|get
+!mask histogram_usec LATENCY HISTOGRAM CONFIG|GET
+!mask histogram_usec LATENCY HISTOGRAM config|nosuch
+!mask histogram_usec LATENCY HISTOGRAM get|sub
+!mask histogram_usec LATENCY HISTOGRAM latency
+# Module commands answer under their declared names; a container lists its subcommands.
+FT.CREATE lhidx SCHEMA t TEXT
+FT.SEARCH lhidx foo
+VADD lhvs VALUES 2 1 2 a
+!mask histogram_usec LATENCY HISTOGRAM ft.search FT.CREATE vadd
+OBJECT ENCODING k
+!mask histogram_usec LATENCY HISTOGRAM object
+FT.DROPINDEX lhidx
+DEL lhvs
+@resp 3
+!mask histogram_usec LATENCY HISTOGRAM set get
+@resp 2
+CONFIG SET latency-tracking no
+GET k
+!mask histogram_usec LATENCY HISTOGRAM get
+CONFIG SET latency-tracking yes
+GET k
+!mask histogram_usec LATENCY HISTOGRAM get
+CONFIG RESETSTAT
+LATENCY HISTOGRAM get
+
+# ---- latencystats ----
+CONFIG RESETSTAT
+GET k
+CONFIG SET latency-tracking-info-percentiles "50 99.9"
+CONFIG GET latency-tracking-info-percentiles
+CONFIG SET latency-tracking-info-percentiles ""
+CONFIG GET latency-tracking-info-percentiles
+CONFIG SET latency-tracking-info-percentiles "50 99 99.9"
+FLUSHALL

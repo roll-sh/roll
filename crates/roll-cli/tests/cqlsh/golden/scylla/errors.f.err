@@ -1,0 +1,38 @@
+/tmp/roll-cqlsh-golden/errors.cql:5:SyntaxException: line 1:0 no viable alternative at input 'SELEC'
+/tmp/roll-cqlsh-golden/errors.cql:6:InvalidRequest: Error from server: code=2200 [Invalid query] message="unconfigured table nope"
+/tmp/roll-cqlsh-golden/errors.cql:7:InvalidRequest: Error from server: code=2200 [Invalid query] message="Unrecognized name nope"
+/tmp/roll-cqlsh-golden/errors.cql:8:InvalidRequest: Error from server: code=2200 [Invalid query] message="Keyspace 'nope' does not exist"
+/tmp/roll-cqlsh-golden/errors.cql:9:Improper USE command.
+/tmp/roll-cqlsh-golden/errors.cql:10:Improper USE command.
+/tmp/roll-cqlsh-golden/errors.cql:11:AlreadyExists: Keyspace 'cli_g_errors' already exists
+/tmp/roll-cqlsh-golden/errors.cql:13:AlreadyExists: Table 'cli_g_errors.t' already exists
+/tmp/roll-cqlsh-golden/errors.cql:14:InvalidRequest: Error from server: code=2200 [Invalid query] message="Invalid INTEGER constant (1) for "v" of type text"
+/tmp/roll-cqlsh-golden/errors.cql:15:InvalidRequest: Error from server: code=2200 [Invalid query] message="Missing mandatory PRIMARY KEY part k"
+/tmp/roll-cqlsh-golden/errors.cql:16:InvalidRequest: Error from server: code=2200 [Invalid query] message="Cannot execute this query as it might involve data filtering and thus may have unpredictable performance. If you want to execute this query despite the performance unpredictability, use ALLOW FILTERING"
+/tmp/roll-cqlsh-golden/errors.cql:17:Invalid syntax at line 1, char 8
+/tmp/roll-cqlsh-golden/errors.cql:17:  SELECT & FROM cli_g_errors.t;
+/tmp/roll-cqlsh-golden/errors.cql:17:         ^
+/tmp/roll-cqlsh-golden/errors.cql:20:Invalid syntax at line 3, char 13
+/tmp/roll-cqlsh-golden/errors.cql:20:    WHERE k = # 1;
+/tmp/roll-cqlsh-golden/errors.cql:20:              ^
+/tmp/roll-cqlsh-golden/errors.cql:21:Improper CONSISTENCY command.
+/tmp/roll-cqlsh-golden/errors.cql:23:Improper SERIAL command.
+/tmp/roll-cqlsh-golden/errors.cql:24:Improper EXPAND command.
+/tmp/roll-cqlsh-golden/errors.cql:25:Improper TRACING command.
+/tmp/roll-cqlsh-golden/errors.cql:26:Improper PAGING command.
+/tmp/roll-cqlsh-golden/errors.cql:27:Improper SHOW command.
+/tmp/roll-cqlsh-golden/errors.cql:28:Improper SHOW command.
+/tmp/roll-cqlsh-golden/errors.cql:29:Improper SOURCE command.
+/tmp/roll-cqlsh-golden/errors.cql:30:Could not open '/tmp/roll-cqlsh-golden/does-not-exist.cql': [Errno 2] No such file or directory: '/tmp/roll-cqlsh-golden/does-not-exist.cql'
+/tmp/roll-cqlsh-golden/errors.cql:31:Not currently capturing output.
+/tmp/roll-cqlsh-golden/errors.cql:32:Improper CAPTURE command.
+/tmp/roll-cqlsh-golden/errors.cql:33:Improper COPY command.
+/tmp/roll-cqlsh-golden/errors.cql:34:Improper COPY command.
+/tmp/roll-cqlsh-golden/errors.cql:35:Column family nope not found
+/tmp/roll-cqlsh-golden/errors.cql:36:Keyspace 'nope' not found.
+/tmp/roll-cqlsh-golden/errors.cql:37:Invalid column name nope
+/tmp/roll-cqlsh-golden/errors.cql:38:Improper DESC command.
+/tmp/roll-cqlsh-golden/errors.cql:39:Improper DESC command.
+/tmp/roll-cqlsh-golden/errors.cql:40:Improper UNICODE command.
+/tmp/roll-cqlsh-golden/errors.cql:41:SyntaxException: line 1:0 no viable alternative at input 'foo'
+/tmp/roll-cqlsh-golden/errors.cql:43:Incomplete statement at end of file

@@ -1,0 +1,167 @@
+# String commands
+SET foo bar
+GET foo
+GET nosuchkey
+SET foo baz XX
+SET newkey v NX
+SET newkey v2 NX
+SET newkey v3 NX GET
+SET newkey v4 XX GET
+GET newkey
+SET k v EX 100
+TTL k
+SET k v PX 100000
+!type PTTL k
+SET k v KEEPTTL
+TTL k
+SET k v EX 0
+SET k v EX -1
+SET k v EX abc
+SET k v EX
+SET k v NX XX
+SET k v EX 10 PX 100
+SET k v KEEPTTL EX 10
+SET k v FOO
+SET k v EXAT 1
+EXISTS k
+SET k v PXAT 99999999999999
+TTL k
+SET k
+SETNX foo x
+SETNX brandnew x
+SETEX sx 100 val
+TTL sx
+SETEX sx 0 val
+SETEX sx -5 val
+SETEX sx abc val
+PSETEX px 100000 val
+PSETEX px 0 val
+GETSET foo newval
+GETSET none newval
+GET none
+GETDEL foo
+GETDEL foo
+EXISTS foo
+SET ge val EX 100
+GETEX ge
+GETEX ge PERSIST
+TTL ge
+GETEX ge EX 50
+TTL ge
+GETEX ge PX 0
+GETEX ge EX 10 PX 10
+GETEX nokey EX 10
+GETEX ge FOO
+MSET a 1 b 2 c 3
+MGET a b c d
+MSET a 1 b
+MSETNX a 5 z 6
+MSETNX y 5 z 6
+MGET y z
+LPUSH alist x
+MGET a alist
+GET alist
+APPEND ap hello
+APPEND ap " world"
+GET ap
+STRLEN ap
+STRLEN nokey
+APPEND alist x
+STRLEN alist
+SET n 10
+INCR n
+INCRBY n 5
+DECR n
+DECRBY n 3
+INCRBY n -20
+INCR nokey1
+DECR nokey2
+SET n 9223372036854775807
+INCR n
+SET n -9223372036854775808
+DECR n
+DECRBY n -9223372036854775808
+SET n abc
+INCR n
+SET n "1 "
+INCR n
+SET n 007
+INCR n
+SET n 1.5
+INCR n
+INCRBY n abc
+INCRBY n 9223372036854775808
+INCR alist
+SET f 10.50
+INCRBYFLOAT f 0.1
+INCRBYFLOAT f -5
+INCRBYFLOAT f 2.0e2
+INCRBYFLOAT newf 3.0e3
+SET f 0.1
+INCRBYFLOAT f 0.2
+SET f 1e20
+INCRBYFLOAT f 1
+INCRBYFLOAT f abc
+INCRBYFLOAT f inf
+INCRBYFLOAT f " 1"
+SET f abc
+INCRBYFLOAT f 1
+SET f 5
+INCRBYFLOAT f 1.5
+GET f
+SET gr "This is a string"
+GETRANGE gr 0 3
+GETRANGE gr -3 -1
+GETRANGE gr 0 -1
+GETRANGE gr 10 100
+GETRANGE gr 5 1
+GETRANGE gr -1 -5
+GETRANGE gr -100 -50
+GETRANGE nokey 0 -1
+GETRANGE gr a b
+SUBSTR gr 0 3
+SETRANGE sr 5 hello
+GET sr
+SETRANGE sr 0 HE
+GET sr
+SETRANGE sr -1 x
+SETRANGE nk 5 ""
+EXISTS nk
+SETRANGE sr 0 ""
+SETRANGE sr 536870911 x
+SETRANGE alist 0 x
+SET l1 ohmytext
+SET l2 mynewtext
+LCS l1 l2
+LCS l1 l2 LEN
+LCS l1 l2 IDX
+LCS l1 l2 IDX MINMATCHLEN 4
+LCS l1 l2 IDX MINMATCHLEN 4 WITHMATCHLEN
+LCS l1 l2 IDX WITHMATCHLEN
+LCS l1 l2 LEN IDX
+LCS l1 nokey
+LCS l1 alist
+LCS l1 l2 FOO
+SET dg hello
+DIGEST dg
+DIGEST nokey
+SET dg world IFEQ hello
+GET dg
+SET dg x IFNE world
+SET dg x IFNE other
+GET dg
+SET ne x IFEQ y
+EXISTS ne
+SET alist x IFEQ y
+DELEX dg IFEQ nope
+DELEX dg IFEQ x
+EXISTS dg
+DELEX nokey
+MSETEX 2 m1 v1 m2 v2 EX 100
+TTL m1
+MSETEX 2 m1 v1 m2 v2 NX
+MSETEX 1 m3 v3 XX
+MSETEX 1 m1
+MSETEX 0 a b
+GET
+SET a b c d e

@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# cqlsh in the roll/nosql image: Apache cqlsh's command line (`cqlsh [options] [host [port]]`,
+# CQLSH_HOST / CQLSH_PORT) on roll's built-in shell, which prints what the cqlsh of the database's
+# dialect prints. Testcontainers runs it in the container to check readiness and to apply init
+# scripts.
+args=() pos=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    # cqlsh options roll's shell has no use for.
+    --debug|--no-file-io|--coverage) shift ;;
+    --cqlshrc|--browser|-b|--secure-connect-bundle) shift 2 ;;
+    --cqlshrc=*|--browser=*|--secure-connect-bundle=*) shift ;;
+    --version) echo "cqlsh 6.2.0"; exit 0 ;;
+    -u|-p|-k|-e|-f|--username|--password|--keyspace|--execute|--file|--encoding|--cqlversion|--protocol-version|--connect-timeout|--request-timeout|--server-name)
+      args+=("$1" "${2-}"); shift; [[ $# -gt 0 ]] && shift ;;
+    -*) args+=("$1"); shift ;;
+    *) pos+=("$1"); shift ;;
+  esac
+done
+default=$(cat /tmp/roll-nosql-cql 2>/dev/null || echo 127.0.0.1:9042)
+host=${pos[0]:-${CQLSH_HOST:-${default%:*}}}
+port=${pos[1]:-${CQLSH_PORT:-${default##*:}}}
+exec roll nosql cqlsh --host "$host" --port "$port" "${args[@]}"

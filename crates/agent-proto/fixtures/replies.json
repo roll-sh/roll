@@ -1,0 +1,352 @@
+[
+  {
+    "type": "ok"
+  },
+  {
+    "type": "created",
+    "id": "thr_a1b2c3d4e5f60718"
+  },
+  {
+    "type": "diff",
+    "stat": {
+      "files": 1,
+      "additions": 1,
+      "deletions": 0
+    },
+    "files": [
+      {
+        "path": "README.md",
+        "change": "add",
+        "diff": "@@ -0,0 +1 @@\n+hi\n"
+      }
+    ],
+    "truncated": false
+  },
+  {
+    "type": "entries",
+    "entries": [
+      {
+        "name": "src",
+        "dir": true,
+        "size": 0
+      },
+      {
+        "name": "Cargo.toml",
+        "dir": false,
+        "size": 812
+      }
+    ]
+  },
+  {
+    "type": "file",
+    "path": "README.md",
+    "text": "hi\n",
+    "size": 3
+  },
+  {
+    "type": "git_status",
+    "branch": "roll/fix",
+    "ahead": 2,
+    "behind": 0,
+    "files": [
+      {
+        "path": "README.md",
+        "change": "add",
+        "diff": "@@ -0,0 +1 @@\n+hi\n"
+      }
+    ]
+  },
+  {
+    "type": "published",
+    "branch": "roll/fix",
+    "commit": "9fceb02d",
+    "change": 42,
+    "url": "https://roll.sh/acme/roll/changes/42",
+    "landing": {
+      "status": "blocked",
+      "message": "change #42 can't land yet",
+      "blockers": [
+        "needs an approving review"
+      ]
+    }
+  },
+  {
+    "type": "pulled",
+    "at": 1762000000000,
+    "outcome": {
+      "status": "up_to_date",
+      "branch": "main"
+    }
+  },
+  {
+    "type": "pulled",
+    "at": 1762000000000,
+    "outcome": {
+      "status": "skipped",
+      "reason": "local_changes",
+      "message": "the checkout has uncommitted changes"
+    }
+  },
+  {
+    "type": "pulled",
+    "at": 1762000000000,
+    "outcome": {
+      "status": "failed",
+      "message": "fetching origin failed: could not resolve host"
+    }
+  },
+  {
+    "type": "written",
+    "path": "docs/plans/fix-the-queue.md"
+  },
+  {
+    "type": "cleaned",
+    "removed": [
+      "thr_a1b2c3d4e5f60718"
+    ],
+    "kept": [
+      {
+        "thread": "thr_0000000000000001",
+        "reason": "local_changes"
+      },
+      {
+        "thread": "thr_0000000000000001",
+        "reason": "busy"
+      },
+      {
+        "thread": "thr_0000000000000001",
+        "reason": "terminal"
+      },
+      {
+        "thread": "thr_0000000000000001",
+        "reason": "other_branch"
+      },
+      {
+        "thread": "thr_0000000000000001",
+        "reason": "shared"
+      },
+      {
+        "thread": "thr_0000000000000001",
+        "reason": "not_managed"
+      },
+      {
+        "thread": "thr_0000000000000001",
+        "reason": "failed"
+      }
+    ]
+  },
+  {
+    "type": "scrollback",
+    "data": "JCBscwo="
+  },
+  {
+    "type": "endpoint_checked",
+    "ok": true,
+    "models": 42,
+    "ms": 180
+  },
+  {
+    "type": "endpoint_checked",
+    "ok": false,
+    "models": 0,
+    "ms": 10000,
+    "error": "the endpoint answered 401 Unauthorized"
+  },
+  {
+    "type": "gateway_client",
+    "client": {
+      "id": "gwc_5f1d2c3b4a596877",
+      "name": "Ada's sandbox",
+      "machine": "mch_fedcba0987654321",
+      "created_at": 1762000000000
+    },
+    "sealed": {
+      "v": 1,
+      "epk": "3p7bfXt9wbTTW2HC7OQ1Nz-DQ8hbeGdNrfx-FG-IK08",
+      "nonce": "AAECAwQFBgcICQoL",
+      "ct": "bm90IGEgcmVhbCBrZXksIGp1c3QgYSBzaGFwZQ"
+    }
+  },
+  {
+    "type": "gateway_tested",
+    "checks": [
+      {
+        "upstream": "anthropic",
+        "ok": true,
+        "ms": 210,
+        "models": 9
+      },
+      {
+        "upstream": "openrouter",
+        "ok": false,
+        "ms": 80,
+        "models": 0,
+        "error": "OpenRouter answered 401 Unauthorized"
+      }
+    ]
+  },
+  {
+    "type": "gateway_status",
+    "run": {
+      "state": "running",
+      "addresses": [
+        "127.0.0.1:8790",
+        "100.64.0.10:8790"
+      ],
+      "since": 1762000000000
+    },
+    "upstreams": [
+      {
+        "upstream": "anthropic",
+        "circuit": "closed",
+        "failures": 0,
+        "last_ok_at": 1762000000000,
+        "requests_hour": 312,
+        "p50_ms": 640
+      },
+      {
+        "upstream": "bedrock",
+        "circuit": "open",
+        "failures": 5,
+        "open_until": 1762000030000,
+        "cooling_until": 1762000020000,
+        "last_error": "Amazon Bedrock answered 503 Service Unavailable",
+        "last_error_at": 1762000000000,
+        "requests_hour": 4
+      }
+    ],
+    "clients_seen": [
+      {
+        "client": "gwc_5f1d2c3b4a596877",
+        "at": 1762000000000
+      }
+    ],
+    "models": [
+      "claude-sonnet-4-5",
+      "fast",
+      "gpt-5.5"
+    ]
+  },
+  {
+    "type": "gateway_usage",
+    "by": "model",
+    "bucket": "day",
+    "from": 1761913600000,
+    "to": 1762000000000,
+    "rows": [
+      {
+        "at": 1761913600000,
+        "key": "claude-sonnet-4-5",
+        "requests": 1204,
+        "errors": 3,
+        "input_tokens": 8400000,
+        "output_tokens": 610000,
+        "cache_read_tokens": 52000000,
+        "cache_write_tokens": 1900000,
+        "cost_micros": 55485000
+      }
+    ]
+  },
+  {
+    "type": "gateway_log",
+    "entries": [
+      {
+        "seq": 42,
+        "at": 1762000000000,
+        "client": "gwc_5f1d2c3b4a596877",
+        "machine": "mch_fedcba0987654321",
+        "project": "prj_1234567890abcdef",
+        "thread": "thr_a1b2c3d4e5f60718",
+        "format": "responses",
+        "model": "fast",
+        "stream": true,
+        "status": 200,
+        "ms": 4210,
+        "first_byte_ms": 690,
+        "attempts": [
+          {
+            "upstream": "anthropic",
+            "model": "claude-haiku-4-5",
+            "status": 529,
+            "ms": 120,
+            "error": "overloaded"
+          },
+          {
+            "upstream": "bedrock",
+            "model": "anthropic.claude-haiku-4-5",
+            "status": 200,
+            "ms": 4090
+          }
+        ],
+        "input_tokens": 12000,
+        "output_tokens": 800,
+        "cache_read_tokens": 40000,
+        "cache_write_tokens": 0,
+        "cost_micros": 19200,
+        "has_body": true
+      }
+    ]
+  },
+  {
+    "type": "gateway_log_body",
+    "seq": 42,
+    "request": "{\"model\":\"fast\"}",
+    "response": "event: message_start\n",
+    "truncated": true
+  },
+  {
+    "type": "registry",
+    "agents": [
+      {
+        "id": "goose",
+        "name": "goose",
+        "version": "1.57.0",
+        "description": "A local, extensible, open source AI agent that automates engineering tasks",
+        "repository": "https://github.com/block/goose",
+        "icon": "https://cdn.agentclientprotocol.com/registry/v1/latest/goose.svg",
+        "kinds": [
+          "binary"
+        ],
+        "installable": true,
+        "integrity": "sha256",
+        "installed": "1.57.0",
+        "offered": "acp:goose"
+      },
+      {
+        "id": "fast-agent",
+        "name": "fast-agent",
+        "version": "0.10.1",
+        "website": "https://fast-agent.ai",
+        "kinds": [
+          "uvx"
+        ],
+        "installable": false,
+        "integrity": "registry"
+      },
+      {
+        "id": "junie",
+        "name": "Junie",
+        "version": "3959.5.0",
+        "description": "JetBrains' coding agent",
+        "kinds": [
+          "binary",
+          "npx"
+        ],
+        "installable": true,
+        "integrity": "none"
+      }
+    ],
+    "fetched_at": 1762000000000
+  },
+  {
+    "type": "registry",
+    "agents": [],
+    "fetched_at": 0,
+    "error": "couldn't fetch the ACP registry: timed out"
+  },
+  {
+    "type": "error",
+    "code": "machine_offline",
+    "message": "the machine isn't connected"
+  }
+]

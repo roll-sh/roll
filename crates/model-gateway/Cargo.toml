@@ -1,0 +1,36 @@
+[package]
+name = "model-gateway"
+description = "roll's model gateway: Anthropic Messages, OpenAI Chat and Responses in, the owner's API-key upstreams out, with translation, failover, client keys and usage history (docs/code/gateway.md)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+agent-proto.workspace = true
+anyhow.workspace = true
+axum.workspace = true
+base64.workspace = true
+bytes.workspace = true
+futures-util.workspace = true
+hex.workspace = true
+hmac.workspace = true
+# Vertex AI: a service account's JWT (RS256) for its access token.
+jsonwebtoken.workspace = true
+rand.workspace = true
+reqwest = { workspace = true, features = ["rustls", "stream", "json"] }
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+toml.workspace = true
+tracing.workspace = true
+url.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+# Tests only: a service account's RSA key for the Vertex token flow.
+rsa = { workspace = true, features = ["pem"] }

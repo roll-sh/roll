@@ -1,0 +1,20 @@
+# `timeout`: clients idle longer than it are closed, except pub/sub and blocked clients.
+CONFIG SET timeout 1
+@conn 2
+PING
+@conn 3
+SUBSCRIBE ch
+@conn 4
+!send BLPOP nolist 4
+@conn 1
+@sleep 2600
+@conn 2
+PING
+@conn 3
+PING
+@conn 4
+@recv
+# The idle connection 1 is gone as well: a fresh one restores the setting.
+@conn 5
+CONFIG SET timeout 0
+CONFIG GET timeout

@@ -1,0 +1,30 @@
+{"native_thread":"/pi-sessions/session-1.jsonl"}
+{"model":"openrouter/deepseek/deepseek-v4-flash"}
+{"item":{"body":{"text":"","type":"reasoning"},"id":"t1:m1:c0","parent":null,"status":"running"}}
+{"text_delta":{"item":"t1:m1:c0","text":"The"}}
+{"text_delta":{"item":"t1:m1:c0","text":" user wants me to respond with"}}
+{"text_delta":{"item":"t1:m1:c0","text":" exactly: \"steering"}}
+{"text_delta":{"item":"t1:m1:c0","text":" fixture initial response\""}}
+{"item":{"body":{"text":"","type":"message"},"id":"t1:m1:c1","parent":null,"status":"running"}}
+{"text_delta":{"item":"t1:m1:c1","text":"ste"}}
+{"text_delta":{"item":"t1:m1:c1","text":"ering fixture initial response"}}
+{"context":{"max_tokens":1048576,"used_tokens":1812}}
+{"item":{"body":{"text":"The user wants me to respond with exactly: \"steering fixture initial response\"","type":"reasoning"},"id":"t1:m1:c0","parent":null,"status":"completed"}}
+{"item":{"body":{"text":"steering fixture initial response","type":"message"},"id":"t1:m1:c1","parent":null,"status":"completed"}}
+{"usage":{"cached_tokens":0,"cost_usd":0.0000768131,"input_tokens":1789,"output_tokens":23}}
+{"item":{"body":{"text":"","type":"reasoning"},"id":"t1:m2:c0","parent":null,"status":"running"}}
+{"text_delta":{"item":"t1:m2:c0","text":"The"}}
+{"text_delta":{"item":"t1:m2:c0","text":" user wants me to respond with"}}
+{"text_delta":{"item":"t1:m2:c0","text":" exactly: \"steering fixture"}}
+{"text_delta":{"item":"t1:m2:c0","text":" observed\""}}
+{"item":{"body":{"text":"","type":"message"},"id":"t1:m2:c1","parent":null,"status":"running"}}
+{"text_delta":{"item":"t1:m2:c1","text":"steering fixture"}}
+{"text_delta":{"item":"t1:m2:c1","text":" observed"}}
+{"context":{"max_tokens":1048576,"used_tokens":1845}}
+{"item":{"body":{"text":"The user wants me to respond with exactly: \"steering fixture observed\"","type":"reasoning"},"id":"t1:m2:c0","parent":null,"status":"completed"}}
+{"item":{"body":{"text":"steering fixture observed","type":"message"},"id":"t1:m2:c1","parent":null,"status":"completed"}}
+{"usage":{"cached_tokens":1792,"cost_usd":0.000094913364,"input_tokens":1821,"output_tokens":44}}
+{"context":{"max_tokens":1048576,"total_processed_tokens":3657,"used_tokens":1845}}
+{"turn_ref":"0271e80c"}
+{"turn_ended":"completed"}
+{"exited":null}

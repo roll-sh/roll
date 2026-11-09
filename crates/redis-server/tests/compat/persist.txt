@@ -1,0 +1,77 @@
+# SAVE, BGSAVE, BGREWRITEAOF and LASTSAVE: replies, the background "child" and the INFO fields
+# they move. rdb-key-save-delay (per key, µs) makes a background save last long enough to see.
+
+CONFIG RESETSTAT
+FLUSHALL
+SAVE
+!info rdb_changes_since_last_save,rdb_saves,rdb_bgsave_in_progress,rdb_last_bgsave_status,rdb_current_bgsave_time_sec,current_save_keys_total INFO persistence
+!info total_forks,latest_fork_usec INFO stats
+SET a 1
+INCR a
+DEL nosuch
+!info rdb_changes_since_last_save INFO persistence
+EVAL "return redis.call('lastsave') - redis.call('time')[1] <= 0 and 1 or 0" 0
+
+# Arguments.
+BGSAVE x
+BGSAVE SCHEDULE x
+!err BGSAVE SCHEDULE x
+SAVE x
+BGREWRITEAOF x
+LASTSAVE x
+
+# A slow background save.
+CONFIG SET rdb-key-save-delay 400000
+CONFIG GET rdb-key-save-delay
+CONFIG GET RDB-KEY-SAVE-DELAY
+CONFIG GET rdb-key-save-*
+CONFIG GET rdb-key-save-delay rdb-key-save-delay RDB-KEY-SAVE-DELAY
+SET b 1
+BGSAVE
+!info rdb_bgsave_in_progress,rdb_current_bgsave_time_sec,current_save_keys_total,rdb_saves,aof_rewrite_in_progress,aof_rewrite_scheduled INFO persistence
+!info total_forks INFO stats
+BGSAVE
+BGSAVE SCHEDULE
+SAVE
+BGREWRITEAOF
+!info aof_rewrite_in_progress,aof_rewrite_scheduled,aof_rewrites INFO persistence
+SET c 1
+# (The *_time_sec of finished saves are whole-second differences: they depend on the clock.)
+@sleep 1200
+!info rdb_bgsave_in_progress,rdb_saves,rdb_changes_since_last_save,rdb_last_bgsave_status,aof_rewrite_scheduled,aof_rewrite_in_progress,aof_rewrites,current_save_keys_total INFO persistence
+BGREWRITEAOF
+BGSAVE
+BGSAVE SCHEDULE
+@sleep 1700
+!info rdb_bgsave_in_progress,aof_rewrite_in_progress,aof_rewrite_scheduled,aof_rewrites,rdb_saves INFO persistence
+@sleep 1700
+!info rdb_bgsave_in_progress,aof_rewrite_in_progress,aof_rewrite_scheduled,aof_rewrites,rdb_saves,aof_last_bgrewrite_status INFO persistence
+!info total_forks INFO stats
+
+# Inside MULTI a BGSAVE is scheduled; SAVE isn't allowed at all.
+MULTI
+BGSAVE
+BGREWRITEAOF
+EXEC
+MULTI
+SAVE
+DISCARD
+@sleep 1700
+!info rdb_bgsave_in_progress,aof_rewrite_in_progress,aof_rewrite_scheduled,aof_rewrites,rdb_saves INFO persistence
+@sleep 2500
+!info rdb_bgsave_in_progress,aof_rewrite_in_progress,aof_rewrite_scheduled,aof_rewrites,rdb_saves INFO persistence
+
+# FLUSHALL kills a background save: no save counted, the changes stay.
+BGSAVE
+FLUSHALL
+@sleep 300
+!info rdb_bgsave_in_progress,rdb_saves INFO persistence
+
+# Scripts can't save.
+EVAL "return redis.call('save')" 0
+EVAL "return redis.call('bgsave')" 0
+EVAL "return redis.call('bgrewriteaof')" 0
+CONFIG SET rdb-key-save-delay 0
+CONFIG RESETSTAT
+!info rdb_saves,aof_rewrites INFO persistence
+!info total_forks,latest_fork_usec INFO stats

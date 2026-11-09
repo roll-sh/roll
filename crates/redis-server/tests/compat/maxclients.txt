@@ -1,0 +1,34 @@
+# maxclients: a connection over the limit gets "-ERR max number of clients reached" and is closed
+# before it can run anything; it counts in rejected_connections, not total_connections_received.
+
+CONFIG RESETSTAT
+!info connected_clients INFO clients
+CONFIG GET maxclients
+CONFIG SET maxclients 3
+@conn 2
+PING
+@conn 3
+PING
+@conn 4
+PING
+@conn 1
+!info connected_clients INFO clients
+!info rejected_connections INFO stats
+@conn 2
+QUIT
+@sleep 100
+@conn 5
+PING
+@conn 1
+!info connected_clients INFO clients
+!info rejected_connections INFO stats
+CONFIG SET maxclients 10000
+@conn 6
+PING
+@conn 1
+!info rejected_connections INFO stats
+CONFIG SET maxclients 0
+CONFIG SET maxclients -1
+CONFIG SET maxclients 4294967296
+CONFIG SET maxclients x
+CONFIG GET maxclients

@@ -1,0 +1,275 @@
+# CreateTable: request body shape
+> CreateTable [1]
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Request content must be an object"}
+> CreateTable xyz
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Parsing JSON failed: Invalid value. at 0"}
+> CreateTable 
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Parsing JSON failed: The document is empty. at 0"}
+> CreateTable {}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Missing TableName field in request"}
+> CreateTable null
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Request content must be an object"}
+# TableName: missing, wrong type, length 3..192, charset [a-zA-Z0-9_.-]
+> CreateTable {"BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Missing TableName field in request"}
+> CreateTable {"TableName":5,"BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Non-string TableName field in request"}
+> CreateTable {"TableName":null,"BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Non-string TableName field in request"}
+> CreateTable {"TableName":"","BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"TableName must be at least 3 characters long and at most 192 characters long"}
+> CreateTable {"TableName":"a","BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"TableName must be at least 3 characters long and at most 192 characters long"}
+> CreateTable {"TableName":"ab","BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"TableName must be at least 3 characters long and at most 192 characters long"}
+> CreateTable {"TableName":"alt_tbl_nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn","BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"TableName must be at least 3 characters long and at most 192 characters long"}
+# 192 characters is accepted
+> CreateTable {"TableName":"alt_tbl_nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn","BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}]}
+< 200 {"TableDescription":{"TableName":"alt_tbl_nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn","BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+> DeleteTable {"TableName":"alt_tbl_nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn"}
+< 200 {"TableDescription":{"TableName":"alt_tbl_nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_tbl_nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn:scylla:table/alt_tbl_nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0}}}
+> CreateTable {"TableName":"alt_tbl_nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn","BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"TableName must be at least 3 characters long and at most 192 characters long"}
+> CreateTable {"TableName":"alt_tbl_x@y","BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"TableName must satisfy regular expression pattern: [a-zA-Z0-9_.-]+"}
+> CreateTable {"TableName":"alt_tbl_x y","BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"TableName must satisfy regular expression pattern: [a-zA-Z0-9_.-]+"}
+> CreateTable {"TableName":"alt_tbl_\u00e9","BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"TableName must satisfy regular expression pattern: [a-zA-Z0-9_.-]+"}
+> CreateTable {"TableName":"alt_tbl_x/y","BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"TableName must satisfy regular expression pattern: [a-zA-Z0-9_.-]+"}
+> CreateTable {"TableName":"a@","BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"TableName must be at least 3 characters long and at most 192 characters long"}
+# TableName errors win over missing KeySchema/AttributeDefinitions
+> CreateTable {"TableName":"a@"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"TableName must be at least 3 characters long and at most 192 characters long"}
+> CreateTable {"TableName":"x"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"TableName must be at least 3 characters long and at most 192 characters long"}
+> CreateTable {"TableName":"alt_tbl_ce"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Missing AttributeDefinitions in CreateTable request"}
+# missing AttributeDefinitions / KeySchema, and which wins
+> CreateTable {"TableName":"alt_tbl_ce","BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Missing AttributeDefinitions in CreateTable request"}
+> CreateTable {"TableName":"alt_tbl_ce","BillingMode":"PAY_PER_REQUEST","AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Missing KeySchema member"}
+> CreateTable {"TableName":"alt_tbl_ce","BillingMode":"PAY_PER_REQUEST"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Missing AttributeDefinitions in CreateTable request"}
+> CreateTable {"TableName":"alt_tbl_ce","BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":null}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"AttributeDefinitions must be an array"}
+> CreateTable {"TableName":"alt_tbl_ce","BillingMode":"PAY_PER_REQUEST","KeySchema":null,"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"KeySchema must list exactly one or two key columns"}
+> CreateTable {"TableName":"alt_tbl_ce","BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":"x"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"AttributeDefinitions must be an array"}
+> CreateTable {"TableName":"alt_tbl_ce","BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":{}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"AttributeDefinitions must be an array"}
+> CreateTable {"TableName":"alt_tbl_ce","BillingMode":"PAY_PER_REQUEST","KeySchema":"x","AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"KeySchema must list exactly one or two key columns"}
+> CreateTable {"TableName":"alt_tbl_ce","BillingMode":"PAY_PER_REQUEST","KeySchema":{},"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"KeySchema must list exactly one or two key columns"}
+> CreateTable {"TableName":"alt_tbl_ce","BillingMode":"PAY_PER_REQUEST","KeySchema":[],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"KeySchema must list exactly one or two key columns"}
+> CreateTable {"TableName":"alt_tbl_ce","BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"KeySchema key 'p' missing in AttributeDefinitions"}
+> CreateTable {"TableName":"alt_tbl_ce","BillingMode":"PAY_PER_REQUEST","KeySchema":[],"AttributeDefinitions":[]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"KeySchema must list exactly one or two key columns"}
+# KeySchema entries
+> CreateTable {"TableName":"alt_tbl_ce","BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"AttributeName":"c","KeyType":"RANGE"},{"AttributeName":"z","KeyType":"RANGE"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"},{"AttributeName":"c","AttributeType":"S"},{"AttributeName":"z","AttributeType":"S"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"KeySchema must list exactly one or two key columns"}
+> CreateTable {"TableName":"alt_tbl_ce","BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"AttributeName":"c","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"},{"AttributeName":"c","AttributeType":"S"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Second key in KeySchema must be a RANGE key"}
+> CreateTable {"TableName":"alt_tbl_ce","BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":"c","KeyType":"RANGE"},{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"},{"AttributeName":"c","AttributeType":"S"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"First key in KeySchema must be a HASH key"}
+> CreateTable {"TableName":"alt_tbl_ce","BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":"c","KeyType":"RANGE"}],"AttributeDefinitions":[{"AttributeName":"c","AttributeType":"S"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"First key in KeySchema must be a HASH key"}
+> CreateTable {"TableName":"alt_tbl_ce","BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":"p","KeyType":"RANGE"},{"AttributeName":"c","KeyType":"RANGE"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"},{"AttributeName":"c","AttributeType":"S"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"First key in KeySchema must be a HASH key"}
+> CreateTable {"TableName":"alt_tbl_ce","BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":"p","KeyType":"hash"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"First key in KeySchema must be a HASH key"}
+> CreateTable {"TableName":"alt_tbl_ce","BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":"p","KeyType":"XYZ"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"First key in KeySchema must be a HASH key"}
+> CreateTable {"TableName":"alt_tbl_ce","BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"AttributeName":"c","KeyType":"range"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"},{"AttributeName":"c","AttributeType":"S"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Second key in KeySchema must be a RANGE key"}
+> CreateTable {"TableName":"alt_tbl_ce","BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"AttributeName":"c","KeyType":"XYZ"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"},{"AttributeName":"c","AttributeType":"S"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Second key in KeySchema must be a RANGE key"}
+> CreateTable {"TableName":"alt_tbl_ce","BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":"p"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"First key in KeySchema must be a HASH key"}
+> CreateTable {"TableName":"alt_tbl_ce","BillingMode":"PAY_PER_REQUEST","KeySchema":[{"KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"First key in KeySchema must have string AttributeName"}
+> CreateTable {"TableName":"alt_tbl_ce","BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":5,"KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"First key in KeySchema must have string AttributeName"}
+> CreateTable {"TableName":"alt_tbl_ce","BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":"p","KeyType":5}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"First key in KeySchema must be a HASH key"}
+> CreateTable {"TableName":"alt_tbl_ce","BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":"","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"","AttributeType":"S"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"in AttributeDefinitions - Empty attribute name"}
+> CreateTable {"TableName":"alt_tbl_ce","BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"AttributeName":"c"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"},{"AttributeName":"c","AttributeType":"S"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Second key in KeySchema must be a RANGE key"}
+> CreateTable {"TableName":"alt_tbl_ce","BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"KeyType":"RANGE"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"},{"AttributeName":"c","AttributeType":"S"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Second key in KeySchema must have string AttributeName"}
+> CreateTable {"TableName":"alt_tbl_ce","BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"AttributeName":7,"KeyType":"RANGE"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"},{"AttributeName":"c","AttributeType":"S"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Second key in KeySchema must have string AttributeName"}
+# unknown members inside KeySchema entries are ignored, and CreateTable's response echoes the request's KeySchema verbatim
+> CreateTable {"TableName":"alt_tbl_ce","BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":"p","KeyType":"HASH","Extra":1}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}]}
+< 200 {"TableDescription":{"TableName":"alt_tbl_ce","BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":"p","KeyType":"HASH","Extra":1}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+> DescribeTable {"TableName":"alt_tbl_ce"}
+< 200 {"Table":{"TableName":"alt_tbl_ce","TableSizeBytes":"*","TableStatus":"ACTIVE","TableArn":"arn:scylla:alternator:alternator_alt_tbl_ce:scylla:table/alt_tbl_ce","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0},"CreationDateTime":"*","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}]}}
+> DeleteTable {"TableName":"alt_tbl_ce"}
+< 200 {"TableDescription":{"TableName":"alt_tbl_ce","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_tbl_ce:scylla:table/alt_tbl_ce","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0}}}
+# AttributeDefinitions entries
+> CreateTable {"TableName":"alt_tbl_ce","BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"AttributeType missing in AttributeDefinitions"}
+> CreateTable {"TableName":"alt_tbl_ce","BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeType":"S"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"AttributeName missing in AttributeDefinitions"}
+> CreateTable {"TableName":"alt_tbl_ce","BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"AttributeName missing in AttributeDefinitions"}
+> CreateTable {"TableName":"alt_tbl_ce","BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":5,"AttributeType":"S"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"AttributeName in AttributeDefinitions must be a string"}
+> CreateTable {"TableName":"alt_tbl_ce","BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":5}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"AttributeType in AttributeDefinitions must be a string"}
+> CreateTable {"TableName":"alt_tbl_ce","BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"Q"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Invalid key type 'Q', can only be S, B or N."}
+> CreateTable {"TableName":"alt_tbl_ce","BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":""}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Invalid key type '', can only be S, B or N."}
+> CreateTable {"TableName":"alt_tbl_ce","BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"s"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Invalid key type 's', can only be S, B or N."}
+> CreateTable {"TableName":"alt_tbl_ce","BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"BOOL"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Invalid key type 'BOOL', can only be S, B or N."}
+> CreateTable {"TableName":"alt_tbl_ce","BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"BS"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Invalid key type 'BS', can only be S, B or N."}
+> CreateTable {"TableName":"alt_tbl_ce","BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"L"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Invalid key type 'L', can only be S, B or N."}
+> CreateTable {"TableName":"alt_tbl_ce","BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"M"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Invalid key type 'M', can only be S, B or N."}
+> CreateTable {"TableName":"alt_tbl_ce","BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"NS"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Invalid key type 'NS', can only be S, B or N."}
+> CreateTable {"TableName":"alt_tbl_ce","BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"NULL"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Invalid key type 'NULL', can only be S, B or N."}
+> CreateTable {"TableName":"alt_tbl_ce","BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"SS"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Invalid key type 'SS', can only be S, B or N."}
+> CreateTable {"TableName":"alt_tbl_ce","BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"AttributeName":"c","KeyType":"RANGE"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"},{"AttributeName":"c","AttributeType":"SS"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Invalid key type 'SS', can only be S, B or N."}
+> CreateTable {"TableName":"alt_tbl_ce","BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"q","AttributeType":"S"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"KeySchema key 'p' missing in AttributeDefinitions"}
+> CreateTable {"TableName":"alt_tbl_ce","BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"},{"AttributeName":"c","AttributeType":"S"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"AttributeDefinitions defines spurious attributes not used by any KeySchema: {\"c\"}"}
+> CreateTable {"TableName":"alt_tbl_ce","BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"},{"AttributeName":"c","AttributeType":"S"},{"AttributeName":"d","AttributeType":"N"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"AttributeDefinitions defines spurious attributes not used by any KeySchema: {\"d\", \"c\"}"}
+> CreateTable {"TableName":"alt_tbl_ce","BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"},{"AttributeName":"p","AttributeType":"N"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Duplicate AttributeName=p in AttributeDefinitions"}
+> CreateTable {"TableName":"alt_tbl_ce","BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"},{"AttributeName":"p","AttributeType":"S"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Duplicate AttributeName=p in AttributeDefinitions"}
+> CreateTable {"TableName":"alt_tbl_ce","BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"AttributeName":"c","KeyType":"RANGE"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"KeySchema key 'c' missing in AttributeDefinitions"}
+> CreateTable {"TableName":"alt_tbl_ce","BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"AttributeName":"c","KeyType":"RANGE"}],"AttributeDefinitions":[{"AttributeName":"c","AttributeType":"S"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"KeySchema key 'p' missing in AttributeDefinitions"}
+# which wins: bad key type vs missing definition vs spurious vs duplicate
+> CreateTable {"TableName":"alt_tbl_ce","BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"X"},{"AttributeName":"q","AttributeType":"S"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Invalid key type 'X', can only be S, B or N."}
+> CreateTable {"TableName":"alt_tbl_ce","BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"q","AttributeType":"X"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"KeySchema key 'p' missing in AttributeDefinitions"}
+> CreateTable {"TableName":"alt_tbl_ce","BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"q","AttributeType":"S"},{"AttributeName":"q","AttributeType":"S"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Duplicate AttributeName=q in AttributeDefinitions"}
+> CreateTable {"TableName":"alt_tbl_ce","BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":"c","KeyType":"RANGE"}],"AttributeDefinitions":[{"AttributeName":"q","AttributeType":"X"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"First key in KeySchema must be a HASH key"}
+> CreateTable {"TableName":"alt_tbl_ce","BillingMode":"PAY_PER_REQUEST","KeySchema":[],"AttributeDefinitions":[{"AttributeName":"q","AttributeType":"X"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"KeySchema must list exactly one or two key columns"}
+> CreateTable {"TableName":"alt_tbl_ce","BillingMode":"bad","KeySchema":[],"AttributeDefinitions":[{"AttributeName":"q","AttributeType":"X"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"KeySchema must list exactly one or two key columns"}
+> CreateTable {"TableName":"alt_tbl_ce","BillingMode":"bad","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"q","AttributeType":"X"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"KeySchema key 'p' missing in AttributeDefinitions"}
+> CreateTable {"TableName":"x","BillingMode":"bad","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"TableName must be at least 3 characters long and at most 192 characters long"}
+> CreateTable {"TableName":"alt_tbl_ce","BillingMode":"bad","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":null}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"AttributeDefinitions must be an array"}
+# BillingMode / ProvisionedThroughput
+> CreateTable {"TableName":"alt_tbl_ce","BillingMode":"unknown","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Unknown BillingMode={}. Must be PAY_PER_REQUEST or PROVISIONED."}
+> CreateTable {"TableName":"alt_tbl_ce","BillingMode":"pay_per_request","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Unknown BillingMode={}. Must be PAY_PER_REQUEST or PROVISIONED."}
+> CreateTable {"TableName":"alt_tbl_ce","BillingMode":"","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Unknown BillingMode={}. Must be PAY_PER_REQUEST or PROVISIONED."}
+> CreateTable {"TableName":"alt_tbl_ce","BillingMode":"PROVISIONED ","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Unknown BillingMode={}. Must be PAY_PER_REQUEST or PROVISIONED."}
+> CreateTable {"TableName":"alt_tbl_ce","BillingMode":5,"KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Expected string value for attribute BillingMode, got: {\"TableName\":\"alt_tbl_ce\",\"BillingMode\":5,\"KeySchema\":[{\"AttributeName\":\"p\",\"KeyType\":\"HASH\"}],\"AttributeDefinitions\":[{\"AttributeName\":\"p\",\"AttributeType\":\"S\"}]}"}
+> CreateTable {"TableName":"alt_tbl_ce","BillingMode":null,"KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Expected string value for attribute BillingMode, got: {\"TableName\":\"alt_tbl_ce\",\"BillingMode\":null,\"KeySchema\":[{\"AttributeName\":\"p\",\"KeyType\":\"HASH\"}],\"AttributeDefinitions\":[{\"AttributeName\":\"p\",\"AttributeType\":\"S\"}]}"}
+> CreateTable {"TableName":"alt_tbl_ce","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"When BillingMode=PROVISIONED, ProvisionedThroughput must be specified."}
+> CreateTable {"TableName":"alt_tbl_ce","BillingMode":"PROVISIONED","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"When BillingMode=PROVISIONED, ProvisionedThroughput must be specified."}
+> CreateTable {"TableName":"alt_tbl_ce","BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"ProvisionedThroughput":{"ReadCapacityUnits":1,"WriteCapacityUnits":1}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"When BillingMode=PAY_PER_REQUEST, ProvisionedThroughput cannot be specified."}
+> CreateTable {"TableName":"alt_tbl_ce","BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"ProvisionedThroughput":{}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"When BillingMode=PAY_PER_REQUEST, ProvisionedThroughput cannot be specified."}
+> CreateTable {"TableName":"alt_tbl_ce","BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"ProvisionedThroughput":null}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"When BillingMode=PAY_PER_REQUEST, ProvisionedThroughput cannot be specified."}
+> CreateTable {"TableName":"alt_tbl_ce","BillingMode":"PROVISIONED","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"ProvisionedThroughput":{}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"provisionedThroughput.readCapacityUnits is missing, when BillingMode=PROVISIONED, ProvisionedThroughput must be specified."}
+> CreateTable {"TableName":"alt_tbl_ce","BillingMode":"PROVISIONED","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"ProvisionedThroughput":{"ReadCapacityUnits":1}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"provisionedThroughput.writeCapacityUnits is missing, when BillingMode=PROVISIONED, ProvisionedThroughput must be specified."}
+> CreateTable {"TableName":"alt_tbl_ce","BillingMode":"PROVISIONED","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"ProvisionedThroughput":{"WriteCapacityUnits":1}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"provisionedThroughput.readCapacityUnits is missing, when BillingMode=PROVISIONED, ProvisionedThroughput must be specified."}
+> CreateTable {"TableName":"alt_tbl_ce","BillingMode":"PROVISIONED","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"ProvisionedThroughput":{"ReadCapacityUnits":"1","WriteCapacityUnits":1}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Expected integer value for attribute ReadCapacityUnits, got: {\"ReadCapacityUnits\":\"1\",\"WriteCapacityUnits\":1}"}
+> CreateTable {"TableName":"alt_tbl_ce","BillingMode":"PROVISIONED","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"ProvisionedThroughput":{"ReadCapacityUnits":1,"WriteCapacityUnits":"1"}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Expected integer value for attribute WriteCapacityUnits, got: {\"ReadCapacityUnits\":1,\"WriteCapacityUnits\":\"1\"}"}
+> CreateTable {"TableName":"alt_tbl_ce","BillingMode":"PROVISIONED","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"ProvisionedThroughput":{"ReadCapacityUnits":1.5,"WriteCapacityUnits":1}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Expected integer value for attribute ReadCapacityUnits, got: {\"ReadCapacityUnits\":1.5,\"WriteCapacityUnits\":1}"}
+> CreateTable {"TableName":"alt_tbl_ce","BillingMode":"PROVISIONED","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"ProvisionedThroughput":{"ReadCapacityUnits":1,"WriteCapacityUnits":2.0}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Expected integer value for attribute WriteCapacityUnits, got: {\"ReadCapacityUnits\":1,\"WriteCapacityUnits\":2.0}"}
+> CreateTable {"TableName":"alt_tbl_ce","BillingMode":"PROVISIONED","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"ProvisionedThroughput":{"ReadCapacityUnits":100000000000000,"WriteCapacityUnits":1}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Expected integer value for attribute ReadCapacityUnits, got: {\"ReadCapacityUnits\":100000000000000,\"WriteCapacityUnits\":1}"}
+> CreateTable {"TableName":"alt_tbl_ce","BillingMode":"PROVISIONED","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"ProvisionedThroughput":{"ReadCapacityUnits":2147483648,"WriteCapacityUnits":1}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Expected integer value for attribute ReadCapacityUnits, got: {\"ReadCapacityUnits\":2147483648,\"WriteCapacityUnits\":1}"}
+> CreateTable {"TableName":"alt_tbl_ce","BillingMode":"PROVISIONED","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"ProvisionedThroughput":{"ReadCapacityUnits":true,"WriteCapacityUnits":1}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Expected integer value for attribute ReadCapacityUnits, got: {\"ReadCapacityUnits\":true,\"WriteCapacityUnits\":1}"}
+> CreateTable {"TableName":"alt_tbl_ce","BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"q","AttributeType":"X"}],"ProvisionedThroughput":{"ReadCapacityUnits":1,"WriteCapacityUnits":1}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"KeySchema key 'p' missing in AttributeDefinitions"}
+> CreateTable {"TableName":"alt_tbl_ce","BillingMode":"PROVISIONED","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"q","AttributeType":"X"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"KeySchema key 'p' missing in AttributeDefinitions"}
+# ProvisionedThroughput values are not range-checked: 0, negative and int32 max are accepted and echoed
+> CreateTable {"TableName":"alt_tbl_ce","BillingMode":"PROVISIONED","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"ProvisionedThroughput":{"ReadCapacityUnits":-1,"WriteCapacityUnits":1}}
+< 200 {"TableDescription":{"TableName":"alt_tbl_ce","BillingMode":"PROVISIONED","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"ProvisionedThroughput":{"ReadCapacityUnits":-1,"WriteCapacityUnits":1},"CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+> DeleteTable {"TableName":"alt_tbl_ce"}
+< 200 {"TableDescription":{"TableName":"alt_tbl_ce","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_tbl_ce:scylla:table/alt_tbl_ce","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PROVISIONED"},"ProvisionedThroughput":{"ReadCapacityUnits":-1,"WriteCapacityUnits":1,"NumberOfDecreasesToday":0}}}
+> CreateTable {"TableName":"alt_tbl_ce","BillingMode":"PROVISIONED","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"ProvisionedThroughput":{"ReadCapacityUnits":1,"WriteCapacityUnits":-5}}
+< 200 {"TableDescription":{"TableName":"alt_tbl_ce","BillingMode":"PROVISIONED","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"ProvisionedThroughput":{"ReadCapacityUnits":1,"WriteCapacityUnits":-5},"CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+> DeleteTable {"TableName":"alt_tbl_ce"}
+< 200 {"TableDescription":{"TableName":"alt_tbl_ce","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_tbl_ce:scylla:table/alt_tbl_ce","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PROVISIONED"},"ProvisionedThroughput":{"ReadCapacityUnits":1,"WriteCapacityUnits":-5,"NumberOfDecreasesToday":0}}}
+> CreateTable {"TableName":"alt_tbl_ce","BillingMode":"PROVISIONED","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0}}
+< 200 {"TableDescription":{"TableName":"alt_tbl_ce","BillingMode":"PROVISIONED","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0},"CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+> DeleteTable {"TableName":"alt_tbl_ce"}
+< 200 {"TableDescription":{"TableName":"alt_tbl_ce","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_tbl_ce:scylla:table/alt_tbl_ce","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PROVISIONED"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0}}}
+> CreateTable {"TableName":"alt_tbl_ce","BillingMode":"PROVISIONED","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"ProvisionedThroughput":{"ReadCapacityUnits":2147483647,"WriteCapacityUnits":2147483647}}
+< 200 {"TableDescription":{"TableName":"alt_tbl_ce","BillingMode":"PROVISIONED","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"ProvisionedThroughput":{"ReadCapacityUnits":2147483647,"WriteCapacityUnits":2147483647},"CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+> DeleteTable {"TableName":"alt_tbl_ce"}
+< 200 {"TableDescription":{"TableName":"alt_tbl_ce","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_tbl_ce:scylla:table/alt_tbl_ce","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PROVISIONED"},"ProvisionedThroughput":{"ReadCapacityUnits":2147483647,"WriteCapacityUnits":2147483647,"NumberOfDecreasesToday":0}}}
+> CreateTable {"TableName":"alt_tbl_ce","BillingMode":"PROVISIONED","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"ProvisionedThroughput":{"ReadCapacityUnits":-2147483648,"WriteCapacityUnits":1}}
+< 200 {"TableDescription":{"TableName":"alt_tbl_ce","BillingMode":"PROVISIONED","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"ProvisionedThroughput":{"ReadCapacityUnits":-2147483648,"WriteCapacityUnits":1},"CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+> DeleteTable {"TableName":"alt_tbl_ce"}
+< 200 {"TableDescription":{"TableName":"alt_tbl_ce","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_tbl_ce:scylla:table/alt_tbl_ce","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PROVISIONED"},"ProvisionedThroughput":{"ReadCapacityUnits":-2147483648,"WriteCapacityUnits":1,"NumberOfDecreasesToday":0}}}
+> CreateTable {"TableName":"alt_tbl_ce","BillingMode":"PROVISIONED","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"ProvisionedThroughput":{"ReadCapacityUnits":-2147483649,"WriteCapacityUnits":1}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Expected integer value for attribute ReadCapacityUnits, got: {\"ReadCapacityUnits\":-2147483649,\"WriteCapacityUnits\":1}"}
+# extra members in ProvisionedThroughput / BillingMode PROVISIONED response echo
+> CreateTable {"TableName":"alt_tbl_ce","BillingMode":"PROVISIONED","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"ProvisionedThroughput":{"WriteCapacityUnits":3,"ReadCapacityUnits":2,"Extra":"x"}}
+< 200 {"TableDescription":{"TableName":"alt_tbl_ce","BillingMode":"PROVISIONED","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"ProvisionedThroughput":{"WriteCapacityUnits":3,"ReadCapacityUnits":2,"Extra":"x"},"CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+> DescribeTable {"TableName":"alt_tbl_ce"}
+< 200 {"Table":{"TableName":"alt_tbl_ce","TableSizeBytes":"*","TableStatus":"ACTIVE","TableArn":"arn:scylla:alternator:alternator_alt_tbl_ce:scylla:table/alt_tbl_ce","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PROVISIONED"},"ProvisionedThroughput":{"ReadCapacityUnits":2,"WriteCapacityUnits":3,"NumberOfDecreasesToday":0},"CreationDateTime":"*","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}]}}
+> DeleteTable {"TableName":"alt_tbl_ce"}
+< 200 {"TableDescription":{"TableName":"alt_tbl_ce","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_tbl_ce:scylla:table/alt_tbl_ce","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PROVISIONED"},"ProvisionedThroughput":{"ReadCapacityUnits":2,"WriteCapacityUnits":3,"NumberOfDecreasesToday":0}}}
+# table already exists: checked after all validation
+> CreateTable {"TableName":"alt_tbl_ce","BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}]}
+< 200 {"TableDescription":{"TableName":"alt_tbl_ce","BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+> CreateTable {"TableName":"alt_tbl_ce","BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ResourceInUseException","message":"Table alt_tbl_ce already exists"}
+> CreateTable {"TableName":"alt_tbl_ce","BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":"a","KeyType":"HASH"},{"AttributeName":"b","KeyType":"RANGE"}],"AttributeDefinitions":[{"AttributeName":"a","AttributeType":"N"},{"AttributeName":"b","AttributeType":"B"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ResourceInUseException","message":"Table alt_tbl_ce already exists"}
+> CreateTable {"TableName":"alt_tbl_ce","BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"q","AttributeType":"X"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"KeySchema key 'p' missing in AttributeDefinitions"}
+> CreateTable {"TableName":"alt_tbl_ce","BillingMode":"bad","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Unknown BillingMode={}. Must be PAY_PER_REQUEST or PROVISIONED."}
+> DeleteTable {"TableName":"alt_tbl_ce"}
+< 200 {"TableDescription":{"TableName":"alt_tbl_ce","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_tbl_ce:scylla:table/alt_tbl_ce","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0}}}
+> DeleteTable {"TableName":"alt_tbl_ce"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException","message":"Requested resource not found: Table: alt_tbl_ce not found"}

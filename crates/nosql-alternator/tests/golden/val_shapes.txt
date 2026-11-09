@@ -1,0 +1,387 @@
+# Malformed AttributeValue shapes: what Alternator validates at the top level of an attribute value, and what it stores verbatim.
+> CreateTable {"TableName":"alt_val_shapes","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST"}
+< 200 {"TableDescription":{"TableName":"alt_val_shapes","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+# Unknown type tag (case-sensitive), including lowercase versions of real tags
+> PutItem {"TableName":"alt_val_shapes","Item":{"p":{"S":"k"},"a":{"X":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"PutItem: unknown type X for value {\"X\":\"1\"}"}
+> PutItem {"TableName":"alt_val_shapes","Item":{"p":{"S":"k"},"a":{"s":"x"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"PutItem: unknown type s for value {\"s\":\"x\"}"}
+> PutItem {"TableName":"alt_val_shapes","Item":{"p":{"S":"k"},"a":{"n":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"PutItem: unknown type n for value {\"n\":\"1\"}"}
+> PutItem {"TableName":"alt_val_shapes","Item":{"p":{"S":"k"},"a":{"Bool":true}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"PutItem: unknown type Bool for value {\"Bool\":true}"}
+> PutItem {"TableName":"alt_val_shapes","Item":{"p":{"S":"k"},"a":{"null":true}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"PutItem: unknown type null for value {\"null\":true}"}
+> PutItem {"TableName":"alt_val_shapes","Item":{"p":{"S":"k"},"a":{"":"x"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"PutItem: unknown type  for value {\"\":\"x\"}"}
+> PutItem {"TableName":"alt_val_shapes","Item":{"p":{"S":"k"},"a":{"X":{"S":"x"}}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"PutItem: unknown type X for value {\"X\":{\"S\":\"x\"}}"}
+# More than one member, or none: 'improperly formatted value' (even when both members are valid tags or duplicates)
+> PutItem {"TableName":"alt_val_shapes","Item":{"p":{"S":"k"},"a":{"S":"1","N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"PutItem: improperly formatted value '{\"S\":\"1\",\"N\":\"1\"}'"}
+> PutItem {"TableName":"alt_val_shapes","Item":{"p":{"S":"k"},"a":{"S":"a","S":"b"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"PutItem: improperly formatted value '{\"S\":\"a\",\"S\":\"b\"}'"}
+> PutItem {"TableName":"alt_val_shapes","Item":{"p":{"S":"k"},"a":{"N":"1","N":"2"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"PutItem: improperly formatted value '{\"N\":\"1\",\"N\":\"2\"}'"}
+> PutItem {"TableName":"alt_val_shapes","Item":{"p":{"S":"k"},"a":{"S":"a","X":"b"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"PutItem: improperly formatted value '{\"S\":\"a\",\"X\":\"b\"}'"}
+> PutItem {"TableName":"alt_val_shapes","Item":{"p":{"S":"k"},"a":{"X":"a","S":"b"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"PutItem: improperly formatted value '{\"X\":\"a\",\"S\":\"b\"}'"}
+> PutItem {"TableName":"alt_val_shapes","Item":{"p":{"S":"k"},"a":{}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"PutItem: improperly formatted value '{}'"}
+# The value is not a JSON object
+> PutItem {"TableName":"alt_val_shapes","Item":{"p":{"S":"k"},"a":"x"}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"PutItem: improperly formatted value '\"x\"'"}
+> PutItem {"TableName":"alt_val_shapes","Item":{"p":{"S":"k"},"a":1}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"PutItem: improperly formatted value '1'"}
+> PutItem {"TableName":"alt_val_shapes","Item":{"p":{"S":"k"},"a":[]}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"PutItem: improperly formatted value '[]'"}
+> PutItem {"TableName":"alt_val_shapes","Item":{"p":{"S":"k"},"a":[{"S":"x"}]}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"PutItem: improperly formatted value '[{\"S\":\"x\"}]'"}
+> PutItem {"TableName":"alt_val_shapes","Item":{"p":{"S":"k"},"a":null}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"PutItem: improperly formatted value 'null'"}
+> PutItem {"TableName":"alt_val_shapes","Item":{"p":{"S":"k"},"a":true}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"PutItem: improperly formatted value 'true'"}
+# S payload of the wrong JSON type
+> PutItem {"TableName":"alt_val_shapes","Item":{"p":{"S":"k"},"a":{"S":1}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"PutItem: improperly formatted value '{\"S\":1}'"}
+> PutItem {"TableName":"alt_val_shapes","Item":{"p":{"S":"k"},"a":{"S":null}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"PutItem: improperly formatted value '{\"S\":null}'"}
+> PutItem {"TableName":"alt_val_shapes","Item":{"p":{"S":"k"},"a":{"S":true}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"PutItem: improperly formatted value '{\"S\":true}'"}
+> PutItem {"TableName":"alt_val_shapes","Item":{"p":{"S":"k"},"a":{"S":[]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"PutItem: improperly formatted value '{\"S\":[]}'"}
+> PutItem {"TableName":"alt_val_shapes","Item":{"p":{"S":"k"},"a":{"S":{}}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"PutItem: improperly formatted value '{\"S\":{}}'"}
+> PutItem {"TableName":"alt_val_shapes","Item":{"p":{"S":"k"},"a":{"S":["x"]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"PutItem: improperly formatted value '{\"S\":[\"x\"]}'"}
+# N payload of the wrong JSON type: a JSON number is a SerializationException, anything else is improperly formatted
+> PutItem {"TableName":"alt_val_shapes","Item":{"p":{"S":"k"},"a":{"N":1}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#SerializationException","message":"PutItem: number value must be encoded as string '{\"N\":1}'"}
+> PutItem {"TableName":"alt_val_shapes","Item":{"p":{"S":"k"},"a":{"N":1.5}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#SerializationException","message":"PutItem: number value must be encoded as string '{\"N\":1.5}'"}
+> PutItem {"TableName":"alt_val_shapes","Item":{"p":{"S":"k"},"a":{"N":-0}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#SerializationException","message":"PutItem: number value must be encoded as string '{\"N\":0}'"}
+> PutItem {"TableName":"alt_val_shapes","Item":{"p":{"S":"k"},"a":{"N":null}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#SerializationException","message":"PutItem: number value must be encoded as string '{\"N\":null}'"}
+> PutItem {"TableName":"alt_val_shapes","Item":{"p":{"S":"k"},"a":{"N":true}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#SerializationException","message":"PutItem: number value must be encoded as string '{\"N\":true}'"}
+> PutItem {"TableName":"alt_val_shapes","Item":{"p":{"S":"k"},"a":{"N":[]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#SerializationException","message":"PutItem: number value must be encoded as string '{\"N\":[]}'"}
+> PutItem {"TableName":"alt_val_shapes","Item":{"p":{"S":"k"},"a":{"N":{}}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#SerializationException","message":"PutItem: number value must be encoded as string '{\"N\":{}}'"}
+> PutItem {"TableName":"alt_val_shapes","Item":{"p":{"S":"k"},"a":{"N":["1"]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#SerializationException","message":"PutItem: number value must be encoded as string '{\"N\":[\"1\"]}'"}
+# B payload of the wrong JSON type, and B that is not base64
+> PutItem {"TableName":"alt_val_shapes","Item":{"p":{"S":"k"},"a":{"B":1}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"PutItem: improperly formatted value '{\"B\":1}'"}
+> PutItem {"TableName":"alt_val_shapes","Item":{"p":{"S":"k"},"a":{"B":null}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"PutItem: improperly formatted value '{\"B\":null}'"}
+> PutItem {"TableName":"alt_val_shapes","Item":{"p":{"S":"k"},"a":{"B":[]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"PutItem: improperly formatted value '{\"B\":[]}'"}
+> PutItem {"TableName":"alt_val_shapes","Item":{"p":{"S":"k"},"a":{"B":{}}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"PutItem: improperly formatted value '{\"B\":{}}'"}
+> PutItem {"TableName":"alt_val_shapes","Item":{"p":{"S":"k"},"a":{"B":"!!"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#SerializationException","message":"Invalid base64 data"}
+> PutItem {"TableName":"alt_val_shapes","Item":{"p":{"S":"k"},"a":{"B":"AA"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#SerializationException","message":"Invalid base64 data"}
+# Set payloads that are not arrays: 'improperly formatted set'
+> PutItem {"TableName":"alt_val_shapes","Item":{"p":{"S":"k"},"a":{"SS":"x"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"PutItem: improperly formatted set '{\"SS\":\"x\"}'"}
+> PutItem {"TableName":"alt_val_shapes","Item":{"p":{"S":"k"},"a":{"SS":{}}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"PutItem: improperly formatted set '{\"SS\":{}}'"}
+> PutItem {"TableName":"alt_val_shapes","Item":{"p":{"S":"k"},"a":{"SS":1}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"PutItem: improperly formatted set '{\"SS\":1}'"}
+> PutItem {"TableName":"alt_val_shapes","Item":{"p":{"S":"k"},"a":{"SS":null}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"PutItem: improperly formatted set '{\"SS\":null}'"}
+> PutItem {"TableName":"alt_val_shapes","Item":{"p":{"S":"k"},"a":{"NS":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"PutItem: improperly formatted set '{\"NS\":\"1\"}'"}
+> PutItem {"TableName":"alt_val_shapes","Item":{"p":{"S":"k"},"a":{"NS":{}}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"PutItem: improperly formatted set '{\"NS\":{}}'"}
+> PutItem {"TableName":"alt_val_shapes","Item":{"p":{"S":"k"},"a":{"BS":"AA=="}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"PutItem: improperly formatted set '{\"BS\":\"AA==\"}'"}
+> PutItem {"TableName":"alt_val_shapes","Item":{"p":{"S":"k"},"a":{"BS":true}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"PutItem: improperly formatted set '{\"BS\":true}'"}
+# Empty sets are rejected for each set type
+> PutItem {"TableName":"alt_val_shapes","Item":{"p":{"S":"k"},"a":{"SS":[]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"PutItem: empty set not allowed"}
+> PutItem {"TableName":"alt_val_shapes","Item":{"p":{"S":"k"},"a":{"NS":[]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"PutItem: empty set not allowed"}
+> PutItem {"TableName":"alt_val_shapes","Item":{"p":{"S":"k"},"a":{"BS":[]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"PutItem: empty set not allowed"}
+# Set elements are not validated: non-string elements, duplicates, invalid numbers, invalid base64 and mixed types are stored and returned as sent
+> PutItem {"TableName":"alt_val_shapes","Item":{"p":{"S":"set0"},"a":{"SS":[1]}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_shapes","Key":{"p":{"S":"set0"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"set0"},"a":{"SS":[1]}}}
+> PutItem {"TableName":"alt_val_shapes","Item":{"p":{"S":"set1"},"a":{"SS":["a","a"]}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_shapes","Key":{"p":{"S":"set1"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"set1"},"a":{"SS":["a","a"]}}}
+> PutItem {"TableName":"alt_val_shapes","Item":{"p":{"S":"set2"},"a":{"SS":["b","a",null]}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_shapes","Key":{"p":{"S":"set2"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"set2"},"a":{"SS":["b","a",null]}}}
+> PutItem {"TableName":"alt_val_shapes","Item":{"p":{"S":"set3"},"a":{"NS":["1","x"]}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_shapes","Key":{"p":{"S":"set3"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"set3"},"a":{"NS":["1","x"]}}}
+> PutItem {"TableName":"alt_val_shapes","Item":{"p":{"S":"set4"},"a":{"NS":["1","1.0","01"]}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_shapes","Key":{"p":{"S":"set4"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"set4"},"a":{"NS":["1","1.0","01"]}}}
+> PutItem {"TableName":"alt_val_shapes","Item":{"p":{"S":"set5"},"a":{"NS":[1,2]}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_shapes","Key":{"p":{"S":"set5"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"set5"},"a":{"NS":[1,2]}}}
+> PutItem {"TableName":"alt_val_shapes","Item":{"p":{"S":"set6"},"a":{"NS":["1e126"]}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_shapes","Key":{"p":{"S":"set6"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"set6"},"a":{"NS":["1e126"]}}}
+> PutItem {"TableName":"alt_val_shapes","Item":{"p":{"S":"set7"},"a":{"BS":["AA==","AA=="]}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_shapes","Key":{"p":{"S":"set7"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"set7"},"a":{"BS":["AA==","AA=="]}}}
+> PutItem {"TableName":"alt_val_shapes","Item":{"p":{"S":"set8"},"a":{"BS":["!"]}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_shapes","Key":{"p":{"S":"set8"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"set8"},"a":{"BS":["!"]}}}
+> PutItem {"TableName":"alt_val_shapes","Item":{"p":{"S":"set9"},"a":{"BS":[{}]}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_shapes","Key":{"p":{"S":"set9"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"set9"},"a":{"BS":[{}]}}}
+# NULL and the container types are not validated: any payload is stored and returned verbatim
+> PutItem {"TableName":"alt_val_shapes","Item":{"p":{"S":"c0"},"a":{"NULL":true}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_shapes","Key":{"p":{"S":"c0"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"c0"},"a":{"NULL":true}}}
+> PutItem {"TableName":"alt_val_shapes","Item":{"p":{"S":"c1"},"a":{"NULL":false}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_shapes","Key":{"p":{"S":"c1"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"c1"},"a":{"NULL":false}}}
+> PutItem {"TableName":"alt_val_shapes","Item":{"p":{"S":"c2"},"a":{"NULL":"true"}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_shapes","Key":{"p":{"S":"c2"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"c2"},"a":{"NULL":"true"}}}
+> PutItem {"TableName":"alt_val_shapes","Item":{"p":{"S":"c3"},"a":{"NULL":1}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_shapes","Key":{"p":{"S":"c3"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"c3"},"a":{"NULL":1}}}
+> PutItem {"TableName":"alt_val_shapes","Item":{"p":{"S":"c4"},"a":{"NULL":null}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_shapes","Key":{"p":{"S":"c4"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"c4"},"a":{"NULL":null}}}
+> PutItem {"TableName":"alt_val_shapes","Item":{"p":{"S":"c5"},"a":{"NULL":{}}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_shapes","Key":{"p":{"S":"c5"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"c5"},"a":{"NULL":{}}}}
+> PutItem {"TableName":"alt_val_shapes","Item":{"p":{"S":"c6"},"a":{"M":[]}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_shapes","Key":{"p":{"S":"c6"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"c6"},"a":{"M":[]}}}
+> PutItem {"TableName":"alt_val_shapes","Item":{"p":{"S":"c7"},"a":{"M":"x"}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_shapes","Key":{"p":{"S":"c7"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"c7"},"a":{"M":"x"}}}
+> PutItem {"TableName":"alt_val_shapes","Item":{"p":{"S":"c8"},"a":{"M":[1,2]}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_shapes","Key":{"p":{"S":"c8"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"c8"},"a":{"M":[1,2]}}}
+> PutItem {"TableName":"alt_val_shapes","Item":{"p":{"S":"c9"},"a":{"M":null}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_shapes","Key":{"p":{"S":"c9"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"c9"},"a":{"M":null}}}
+> PutItem {"TableName":"alt_val_shapes","Item":{"p":{"S":"c10"},"a":{"L":{}}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_shapes","Key":{"p":{"S":"c10"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"c10"},"a":{"L":{}}}}
+> PutItem {"TableName":"alt_val_shapes","Item":{"p":{"S":"c11"},"a":{"L":"x"}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_shapes","Key":{"p":{"S":"c11"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"c11"},"a":{"L":"x"}}}
+> PutItem {"TableName":"alt_val_shapes","Item":{"p":{"S":"c12"},"a":{"L":{"a":1}}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_shapes","Key":{"p":{"S":"c12"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"c12"},"a":{"L":{"a":1}}}}
+> PutItem {"TableName":"alt_val_shapes","Item":{"p":{"S":"c13"},"a":{"L":[1,"x",null]}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_shapes","Key":{"p":{"S":"c13"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"c13"},"a":{"L":[1,"x",null]}}}
+> PutItem {"TableName":"alt_val_shapes","Item":{"p":{"S":"c14"},"a":{"L":null}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_shapes","Key":{"p":{"S":"c14"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"c14"},"a":{"L":null}}}
+# Malformed values nested in M and L are stored verbatim, at any depth
+> PutItem {"TableName":"alt_val_shapes","Item":{"p":{"S":"n0"},"a":{"M":{"b":{"X":1}}}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_shapes","Key":{"p":{"S":"n0"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"n0"},"a":{"M":{"b":{"X":1}}}}}
+> PutItem {"TableName":"alt_val_shapes","Item":{"p":{"S":"n1"},"a":{"M":{"b":{"S":1}}}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_shapes","Key":{"p":{"S":"n1"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"n1"},"a":{"M":{"b":{"S":1}}}}}
+> PutItem {"TableName":"alt_val_shapes","Item":{"p":{"S":"n2"},"a":{"M":{"b":{"N":"x"}}}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_shapes","Key":{"p":{"S":"n2"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"n2"},"a":{"M":{"b":{"N":"x"}}}}}
+> PutItem {"TableName":"alt_val_shapes","Item":{"p":{"S":"n3"},"a":{"M":{"b":{"N":1}}}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_shapes","Key":{"p":{"S":"n3"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"n3"},"a":{"M":{"b":{"N":1}}}}}
+> PutItem {"TableName":"alt_val_shapes","Item":{"p":{"S":"n4"},"a":{"M":{"b":{"B":"!"}}}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_shapes","Key":{"p":{"S":"n4"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"n4"},"a":{"M":{"b":{"B":"!"}}}}}
+> PutItem {"TableName":"alt_val_shapes","Item":{"p":{"S":"n5"},"a":{"M":{"b":{"SS":[]}}}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_shapes","Key":{"p":{"S":"n5"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"n5"},"a":{"M":{"b":{"SS":[]}}}}}
+> PutItem {"TableName":"alt_val_shapes","Item":{"p":{"S":"n6"},"a":{"M":{"b":{}}}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_shapes","Key":{"p":{"S":"n6"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"n6"},"a":{"M":{"b":{}}}}}
+> PutItem {"TableName":"alt_val_shapes","Item":{"p":{"S":"n7"},"a":{"M":{"b":"x"}}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_shapes","Key":{"p":{"S":"n7"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"n7"},"a":{"M":{"b":"x"}}}}
+> PutItem {"TableName":"alt_val_shapes","Item":{"p":{"S":"n8"},"a":{"M":{"b":{"S":"a","N":"1"}}}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_shapes","Key":{"p":{"S":"n8"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"n8"},"a":{"M":{"b":{"S":"a","N":"1"}}}}}
+> PutItem {"TableName":"alt_val_shapes","Item":{"p":{"S":"n9"},"a":{"L":[{"N":"x"}]}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_shapes","Key":{"p":{"S":"n9"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"n9"},"a":{"L":[{"N":"x"}]}}}
+> PutItem {"TableName":"alt_val_shapes","Item":{"p":{"S":"n10"},"a":{"L":[1]}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_shapes","Key":{"p":{"S":"n10"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"n10"},"a":{"L":[1]}}}
+> PutItem {"TableName":"alt_val_shapes","Item":{"p":{"S":"n11"},"a":{"L":[{"SS":[]},{"M":{"c":{"Q":true}}}]}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_shapes","Key":{"p":{"S":"n11"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"n11"},"a":{"L":[{"SS":[]},{"M":{"c":{"Q":true}}}]}}}
+> PutItem {"TableName":"alt_val_shapes","Item":{"p":{"S":"n12"},"a":{"M":{"x":{"N":1.50e2}}}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_shapes","Key":{"p":{"S":"n12"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"n12"},"a":{"M":{"x":{"N":150.0}}}}}
+# Nested JSON is re-serialised compactly (whitespace dropped, member order kept, numbers in nested JSON re-printed)
+> PutItem {"TableName":"alt_val_shapes","Item":{"p":{"S":"ws"},"a":{ "M" : { "z" : { "N" : "1.50" } , "a" : { "L" : [ { "S" : "x" } , { "N" : "1e2" } ] } } },"b":{ "SS" : [ "b" , "a" ] },"c":{"L":[1.0,2.50,1e2,-0,0.1E-3]}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_shapes","Key":{"p":{"S":"ws"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"ws"},"a":{"M":{"z":{"N":"1.50"},"a":{"L":[{"S":"x"},{"N":"1e2"}]}}},"b":{"SS":["b","a"]},"c":{"L":[1.0,2.5,100.0,0,0.0001]}}}
+# JSON numbers inside nested values are re-printed the way rapidjson writes them (int64/uint64 exact, otherwise shortest double)
+> PutItem {"TableName":"alt_val_shapes","Item":{"p":{"S":"dbl"},"a":{"L":[0,-0,-0.0,1.0,0.1,1e21,1e22,1e-7,1e-6,123456789012345678901234567890,9007199254740993,18446744073709551615,18446744073709551616,-9223372036854775808,-9223372036854775809,1.7976931348623157e308,5e-324,2.2250738585072014e-308,3.14159265358979323846,100,1E2,12e-1]}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_shapes","Key":{"p":{"S":"dbl"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"dbl"},"a":{"L":[0,0,-0.0,1.0,0.1,1e+21,1e+22,1e-07,1e-06,1.2345678901234568e+29,9007199254740993,18446744073709551615,1.8446744073709552e+19,-9223372036854775808,-9.223372036854776e+18,1.7976931348623157e+308,5e-324,2.2250738585072014e-308,3.141592653589793,100,100.0,1.2]}}}
+# Duplicate member names inside M: the re-serialised nested JSON keeps only the last one
+> PutItem {"TableName":"alt_val_shapes","Item":{"p":{"S":"dup"},"a":{"M":{"x":{"S":"1"},"x":{"S":"2"}}}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_shapes","Key":{"p":{"S":"dup"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"dup"},"a":{"M":{"x":{"S":"2"}}}}}
+# Duplicate top-level attribute names in Item: the first one wins
+> PutItem {"TableName":"alt_val_shapes","Item":{"p":{"S":"dup2"},"a":{"S":"1"},"a":{"S":"2"}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_shapes","Key":{"p":{"S":"dup2"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"dup2"},"a":{"S":"1"}}}
+# Duplicate key attribute in Item: the first one is the key
+> PutItem {"TableName":"alt_val_shapes","Item":{"p":{"S":"dup3"},"p":{"S":"dup4"},"a":{"S":"1"}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_shapes","Key":{"p":{"S":"dup3"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"dup3"},"a":{"S":"1"}}}
+> GetItem {"TableName":"alt_val_shapes","Key":{"p":{"S":"dup4"}},"ConsistentRead":true}
+< 200 {}
+# Validation order: several bad attributes - the first one in request order is reported
+> PutItem {"TableName":"alt_val_shapes","Item":{"p":{"S":"o"},"a":{"N":"x"},"b":{"X":"x"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The parameter cannot be converted to a numeric value: x"}
+> PutItem {"TableName":"alt_val_shapes","Item":{"p":{"S":"o"},"b":{"X":"x"},"a":{"N":"x"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"PutItem: unknown type X for value {\"X\":\"x\"}"}
+> PutItem {"TableName":"alt_val_shapes","Item":{"p":{"S":"o"},"a":{"SS":[]},"b":{"S":1}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"PutItem: empty set not allowed"}
+> PutItem {"TableName":"alt_val_shapes","Item":{"p":{"S":"o"},"b":{"B":"!"},"a":{"SS":[]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#SerializationException","message":"Invalid base64 data"}
+# Validation order: key errors win over errors in other attributes, wherever the key appears
+> PutItem {"TableName":"alt_val_shapes","Item":{"a":{"X":"x"},"p":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Type mismatch: expected type S for key column p, got type \"N\""}
+> PutItem {"TableName":"alt_val_shapes","Item":{"a":{"X":"x"},"p":{"S":""}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The AttributeValue for a key attribute cannot contain an empty string value. Key: p"}
+> PutItem {"TableName":"alt_val_shapes","Item":{"a":{"X":"x"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Key column p not found"}
+> PutItem {"TableName":"alt_val_shapes","Item":{"a":{"X":"x"},"p":{"S":1}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Malformed value object for key column p: {\"S\":1}"}
+# Validation order: value errors vs attribute name errors
+> PutItem {"TableName":"alt_val_shapes","Item":{"p":{"S":"o"},"":{"X":"x"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"PutItem: unknown type X for value {\"X\":\"x\"}"}
+> PutItem {"TableName":"alt_val_shapes","Item":{"p":{"S":"o"},"":{"S":"x"},"a":{"X":"x"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Empty attribute name"}
+> PutItem {"TableName":"alt_val_shapes","Item":{"p":{"S":"o"},"a":{"X":"x"},"":{"S":"x"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"PutItem: unknown type X for value {\"X\":\"x\"}"}
+# Same shapes in UpdateItem ExpressionAttributeValues (prefix 'ExpressionAttributeValues:')
+> UpdateItem {"TableName":"alt_val_shapes","Key":{"p":{"S":"u"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"X":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeValues: unknown type X for value {\"X\":\"1\"}"}
+> UpdateItem {"TableName":"alt_val_shapes","Key":{"p":{"S":"u"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"S":"1","N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeValues: improperly formatted value '{\"S\":\"1\",\"N\":\"1\"}'"}
+> UpdateItem {"TableName":"alt_val_shapes","Key":{"p":{"S":"u"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeValues: improperly formatted value '{}'"}
+> UpdateItem {"TableName":"alt_val_shapes","Key":{"p":{"S":"u"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":"x"}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeValues: improperly formatted value '\"x\"'"}
+> UpdateItem {"TableName":"alt_val_shapes","Key":{"p":{"S":"u"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"S":1}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeValues: improperly formatted value '{\"S\":1}'"}
+> UpdateItem {"TableName":"alt_val_shapes","Key":{"p":{"S":"u"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"N":1}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#SerializationException","message":"ExpressionAttributeValues: number value must be encoded as string '{\"N\":1}'"}
+> UpdateItem {"TableName":"alt_val_shapes","Key":{"p":{"S":"u"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"N":"x"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The parameter cannot be converted to a numeric value: x"}
+> UpdateItem {"TableName":"alt_val_shapes","Key":{"p":{"S":"u"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"B":1}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeValues: improperly formatted value '{\"B\":1}'"}
+> UpdateItem {"TableName":"alt_val_shapes","Key":{"p":{"S":"u"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"B":"!"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#SerializationException","message":"Invalid base64 data"}
+> UpdateItem {"TableName":"alt_val_shapes","Key":{"p":{"S":"u"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"SS":"x"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeValues: improperly formatted set '{\"SS\":\"x\"}'"}
+> UpdateItem {"TableName":"alt_val_shapes","Key":{"p":{"S":"u"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"SS":[]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeValues: empty set not allowed"}
+> UpdateItem {"TableName":"alt_val_shapes","Key":{"p":{"S":"u"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"NS":[]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeValues: empty set not allowed"}
+# Unvalidated shapes through UpdateItem SET are stored verbatim too
+> UpdateItem {"TableName":"alt_val_shapes","Key":{"p":{"S":"u"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"M":{"x":{"Q":1}}}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_val_shapes","Key":{"p":{"S":"u"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"NS":["x","x"]}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_shapes","Key":{"p":{"S":"u"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"u"},"a":{"NS":["x","x"]}}}
+# Same shapes in UpdateItem AttributeUpdates (prefix 'AttributeUpdates:')
+> UpdateItem {"TableName":"alt_val_shapes","Key":{"p":{"S":"u"}},"AttributeUpdates":{"a":{"Value":{"X":"1"},"Action":"PUT"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"AttributeUpdates: unknown type X for value {\"X\":\"1\"}"}
+> UpdateItem {"TableName":"alt_val_shapes","Key":{"p":{"S":"u"}},"AttributeUpdates":{"a":{"Value":{"S":"1","N":"1"},"Action":"PUT"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"AttributeUpdates: improperly formatted value '{\"S\":\"1\",\"N\":\"1\"}'"}
+> UpdateItem {"TableName":"alt_val_shapes","Key":{"p":{"S":"u"}},"AttributeUpdates":{"a":{"Value":{},"Action":"PUT"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"AttributeUpdates: improperly formatted value '{}'"}
+> UpdateItem {"TableName":"alt_val_shapes","Key":{"p":{"S":"u"}},"AttributeUpdates":{"a":{"Value":"x","Action":"PUT"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"AttributeUpdates: improperly formatted value '\"x\"'"}
+> UpdateItem {"TableName":"alt_val_shapes","Key":{"p":{"S":"u"}},"AttributeUpdates":{"a":{"Value":{"S":1},"Action":"PUT"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"AttributeUpdates: improperly formatted value '{\"S\":1}'"}
+> UpdateItem {"TableName":"alt_val_shapes","Key":{"p":{"S":"u"}},"AttributeUpdates":{"a":{"Value":{"N":1},"Action":"PUT"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#SerializationException","message":"AttributeUpdates: number value must be encoded as string '{\"N\":1}'"}
+> UpdateItem {"TableName":"alt_val_shapes","Key":{"p":{"S":"u"}},"AttributeUpdates":{"a":{"Value":{"N":"x"},"Action":"PUT"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The parameter cannot be converted to a numeric value: x"}
+> UpdateItem {"TableName":"alt_val_shapes","Key":{"p":{"S":"u"}},"AttributeUpdates":{"a":{"Value":{"B":"!"},"Action":"PUT"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#SerializationException","message":"Invalid base64 data"}
+> UpdateItem {"TableName":"alt_val_shapes","Key":{"p":{"S":"u"}},"AttributeUpdates":{"a":{"Value":{"SS":"x"},"Action":"PUT"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"AttributeUpdates: improperly formatted set '{\"SS\":\"x\"}'"}
+> UpdateItem {"TableName":"alt_val_shapes","Key":{"p":{"S":"u"}},"AttributeUpdates":{"a":{"Value":{"SS":[]},"Action":"PUT"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"AttributeUpdates: empty set not allowed"}
+# Same shapes in a ConditionExpression's ExpressionAttributeValues on PutItem
+> PutItem {"TableName":"alt_val_shapes","Item":{"p":{"S":"u"}},"ConditionExpression":"a = :v","ExpressionAttributeValues":{":v":{"X":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeValues: unknown type X for value {\"X\":\"1\"}"}
+> PutItem {"TableName":"alt_val_shapes","Item":{"p":{"S":"u"}},"ConditionExpression":"a = :v","ExpressionAttributeValues":{":v":{"S":1}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeValues: improperly formatted value '{\"S\":1}'"}
+> PutItem {"TableName":"alt_val_shapes","Item":{"p":{"S":"u"}},"ConditionExpression":"a = :v","ExpressionAttributeValues":{":v":{"N":1}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#SerializationException","message":"ExpressionAttributeValues: number value must be encoded as string '{\"N\":1}'"}
+> PutItem {"TableName":"alt_val_shapes","Item":{"p":{"S":"u"}},"ConditionExpression":"a = :v","ExpressionAttributeValues":{":v":{"SS":[]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeValues: empty set not allowed"}
+> PutItem {"TableName":"alt_val_shapes","Item":{"p":{"S":"u"}},"ConditionExpression":"a = :v","ExpressionAttributeValues":{":v":{"B":"!"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+# A malformed value in an unused ExpressionAttributeValues entry
+> UpdateItem {"TableName":"alt_val_shapes","Key":{"p":{"S":"u"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"S":"x"},":w":{"X":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeValues has spurious ':w', not used in UpdateItem"}
+> DeleteTable {"TableName":"alt_val_shapes"}
+< 200 {"TableDescription":{"TableName":"alt_val_shapes","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_val_shapes:scylla:table/alt_val_shapes","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0}}}

@@ -1,0 +1,7 @@
+Consistency level set to ALL.
+
+ k | v
+---+-----
+ 1 | one
+
+(1 rows)

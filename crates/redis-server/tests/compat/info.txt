@@ -1,0 +1,183 @@
+# INFO: every section's field names in Redis' order, and the values that don't depend on the
+# machine or the process' history (stats are reset first). The default set, `all`, `everything`
+# and `modules` also list the bundled modules, which are compared with the modules.
+
+CONFIG RESETSTAT
+!info - INFO server
+!info - INFO clients
+!info - INFO memory
+!info - INFO persistence
+!info - INFO threads
+!info - INFO stats
+!info - INFO replication
+!info - INFO cpu
+!info - INFO hotkeys
+!info - INFO cluster
+!info - INFO keyspace
+!info - INFO keysizes
+!info - INFO debug
+
+# Sections come out in Redis' order whatever the argument order; names are case-insensitive.
+!info - INFO keyspace SERVER Clients
+!info - INFO cpu server
+INFO nosuch
+INFO cluster nosuch cluster
+
+# ---- clients ----
+!info connected_clients,cluster_connections,maxclients,blocked_clients,tracking_clients,pubsub_clients,watching_clients,clients_in_timeout_table,total_watched_keys,total_blocking_keys,total_blocking_keys_on_nokey INFO clients
+@conn 2
+SUBSCRIBE ch
+@conn 3
+CLIENT TRACKING on
+SET w 1
+WATCH w x
+@conn 4
+!send BLPOP bl1 bl2 0
+@conn 5
+!send XREADGROUP GROUP g c BLOCK 0 STREAMS nosuch >
+@conn 6
+!send BRPOP bl3 5
+@sleep 50
+@conn 1
+!info connected_clients,blocked_clients,tracking_clients,pubsub_clients,watching_clients,clients_in_timeout_table,total_watched_keys,total_blocking_keys,total_blocking_keys_on_nokey INFO clients
+RPUSH bl1 a
+@conn 4
+@recv
+@conn 1
+!info blocked_clients,total_blocking_keys INFO clients
+@conn 5
+@recv
+@conn 1
+
+# ---- stats ----
+CONFIG RESETSTAT
+SET k1 v
+GET k1
+GET nokey
+MGET k1 nokey k1
+EXISTS k1
+INCR k1
+NOSUCHCOMMAND
+GET
+CONFIG GET
+XINFO
+PUBLISH ch m
+!sort !mask usec,usec_per_call !info cmdstat_* INFO commandstats
+!info total_commands_processed,keyspace_hits,keyspace_misses,total_error_replies,unexpected_error_replies,expired_keys,expired_keys_active,evicted_keys,pubsub_channels,pubsub_patterns,pubsubshard_channels,tracking_total_keys,tracking_total_items,tracking_total_prefixes,migrate_cached_sockets,dump_payload_sanitizations,rejected_connections,sync_full,sync_partial_ok,sync_partial_err,total_forks,evicted_clients,slave_expires_tracked_keys INFO stats
+
+# ---- expiry counters ----
+CONFIG RESETSTAT
+SET e1 v PX 20
+SET e2 v PX 20
+HSET h f1 v f2 v f3 v
+HPEXPIRE h 1 FIELDS 2 f1 f2
+@sleep 300
+!info expired_keys,expired_keys_active,expired_subkeys,expired_subkeys_active INFO stats
+GET e1
+HGETALL h
+
+# ---- slowlog counters ----
+CONFIG SET slowlog-log-slower-than 0
+CONFIG RESETSTAT
+PING
+GET k1
+!info slowlog_commands_count INFO stats
+CONFIG SET slowlog-log-slower-than 10000
+SLOWLOG RESET
+
+# ---- commandstats and errorstats ----
+CONFIG RESETSTAT
+SET c1 1
+GET c1
+GET c1
+HSET c1 f v
+LPUSH c1 x
+!sort !mask usec,usec_per_call !info cmdstat_* INFO commandstats
+!info errorstat_* INFO errorstats
+CONFIG SET slowlog-log-slower-than 0
+CONFIG RESETSTAT
+GET c1
+!sort !mask usec,usec_per_call,slowlog_time_ms_sum,slowlog_time_ms_max !info cmdstat_* INFO commandstats
+CONFIG SET slowlog-log-slower-than 10000
+SLOWLOG RESET
+
+# ---- blocked commands count once, when they end ----
+CONFIG RESETSTAT
+@conn 7
+!send BLPOP bq 0
+@sleep 50
+@conn 1
+!sort !mask usec,usec_per_call !info cmdstat_* INFO commandstats
+!info total_commands_processed INFO stats
+RPUSH bq a
+@conn 7
+@recv
+!send BLPOP bq 1
+@sleep 1300
+@recv
+!send BLPOP bq 0
+@sleep 50
+@conn 1
+CLIENT UNBLOCK {id:7} ERROR
+@conn 7
+@recv
+@conn 1
+!sort !mask usec,usec_per_call !info cmdstat_* INFO commandstats
+!info errorstat_* INFO errorstats
+
+# ---- latencystats ----
+CONFIG RESETSTAT
+GET c1
+SET c2 v
+!sort !info - INFO latencystats
+CONFIG GET latency-tracking-info-percentiles
+CONFIG SET latency-tracking-info-percentiles "50.5 99 100"
+CONFIG GET latency-tracking-info-percentiles
+!sort !info - INFO latencystats
+CONFIG SET latency-tracking-info-percentiles ""
+CONFIG GET latency-tracking-info-percentiles
+!sort !info - INFO latencystats
+!err CONFIG SET latency-tracking-info-percentiles "101"
+!err CONFIG SET latency-tracking-info-percentiles "x"
+CONFIG SET latency-tracking-info-percentiles "50 99 99.9"
+CONFIG SET latency-tracking no
+INFO latencystats
+CONFIG SET latency-tracking yes
+
+# ---- keyspace and keysizes ----
+FLUSHALL
+INFO keyspace
+INFO keysizes
+SET s1 a
+SET s2 abcdefghij
+SET s3 ""
+SET s4 12345
+RPUSH l1 a b c
+SADD st 1 2 3 4 5 6 7 8 9
+ZADD z 1 a
+HSET hh a 1 b 2
+XADD xs 1-1 a 1
+SELECT 3
+SET other 1
+EXPIRE other 1000
+SELECT 0
+!mask avg_ttl INFO keyspace
+INFO keysizes
+APPEND s1 bcdefghijklmnopqrstuvwxyz
+RPUSH l1 d e f g h
+SREM st 1 2 3 4 5 6 7 8
+DEL z
+LPOP l1 8
+INFO keysizes
+FLUSHDB
+INFO keysizes
+SELECT 3
+FLUSHDB
+SELECT 0
+INFO keysizes
+
+# ---- replication and persistence fields that don't depend on history ----
+!info role,connected_slaves,master_failover_state,master_replid2,second_repl_offset,repl_backlog_active,repl_backlog_size,repl_backlog_first_byte_offset,repl_backlog_histlen INFO replication
+!info loading,async_loading,rdb_bgsave_in_progress,rdb_last_bgsave_status,rdb_current_bgsave_time_sec,aof_enabled,aof_rewrite_in_progress,aof_rewrite_scheduled,aof_current_rewrite_time_sec,aof_last_bgrewrite_status,aof_rewrites,aof_last_write_status,module_fork_in_progress INFO persistence
+!info redis_version,redis_mode,arch_bits,process_supervised,hz,configured_hz,config_file,io_threads_active INFO server
+!info maxmemory,maxmemory_human,maxmemory_policy,mem_clients_slaves,mem_replication_backlog,mem_aof_buffer,mem_cluster_links,active_defrag_running,lazyfree_pending_objects INFO memory

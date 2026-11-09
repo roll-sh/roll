@@ -1,0 +1,580 @@
+# Number (N) validation and canonical output for non-key attributes.
+> CreateTable {"TableName":"alt_val_num","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST"}
+< 200 {"TableDescription":{"TableName":"alt_val_num","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+# Accepted syntaxes and their canonical form on GetItem (plain notation, no exponent, trailing zeros dropped, -0 is 0)
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"r0"},"a":{"N":"1"}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_num","Key":{"p":{"S":"r0"}},"ProjectionExpression":"a","ConsistentRead":true}
+< 200 {"Item":{"a":{"N":"1"}}}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"r1"},"a":{"N":"-0"}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_num","Key":{"p":{"S":"r1"}},"ProjectionExpression":"a","ConsistentRead":true}
+< 200 {"Item":{"a":{"N":"0"}}}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"r2"},"a":{"N":"+0"}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_num","Key":{"p":{"S":"r2"}},"ProjectionExpression":"a","ConsistentRead":true}
+< 200 {"Item":{"a":{"N":"0"}}}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"r3"},"a":{"N":"0"}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_num","Key":{"p":{"S":"r3"}},"ProjectionExpression":"a","ConsistentRead":true}
+< 200 {"Item":{"a":{"N":"0"}}}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"r4"},"a":{"N":"1.50"}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_num","Key":{"p":{"S":"r4"}},"ProjectionExpression":"a","ConsistentRead":true}
+< 200 {"Item":{"a":{"N":"1.5"}}}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"r5"},"a":{"N":"1e5"}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_num","Key":{"p":{"S":"r5"}},"ProjectionExpression":"a","ConsistentRead":true}
+< 200 {"Item":{"a":{"N":"100000"}}}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"r6"},"a":{"N":"1E5"}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_num","Key":{"p":{"S":"r6"}},"ProjectionExpression":"a","ConsistentRead":true}
+< 200 {"Item":{"a":{"N":"100000"}}}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"r7"},"a":{"N":"1e+5"}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_num","Key":{"p":{"S":"r7"}},"ProjectionExpression":"a","ConsistentRead":true}
+< 200 {"Item":{"a":{"N":"100000"}}}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"r8"},"a":{"N":"1E+2"}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_num","Key":{"p":{"S":"r8"}},"ProjectionExpression":"a","ConsistentRead":true}
+< 200 {"Item":{"a":{"N":"100"}}}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"r9"},"a":{"N":"1e-2"}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_num","Key":{"p":{"S":"r9"}},"ProjectionExpression":"a","ConsistentRead":true}
+< 200 {"Item":{"a":{"N":"0.01"}}}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"r10"},"a":{"N":".5"}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_num","Key":{"p":{"S":"r10"}},"ProjectionExpression":"a","ConsistentRead":true}
+< 200 {"Item":{"a":{"N":"0.5"}}}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"r11"},"a":{"N":"-.5"}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_num","Key":{"p":{"S":"r11"}},"ProjectionExpression":"a","ConsistentRead":true}
+< 200 {"Item":{"a":{"N":"-0.5"}}}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"r12"},"a":{"N":"5."}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_num","Key":{"p":{"S":"r12"}},"ProjectionExpression":"a","ConsistentRead":true}
+< 200 {"Item":{"a":{"N":"5"}}}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"r13"},"a":{"N":"-5."}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_num","Key":{"p":{"S":"r13"}},"ProjectionExpression":"a","ConsistentRead":true}
+< 200 {"Item":{"a":{"N":"-5"}}}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"r14"},"a":{"N":"+1"}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_num","Key":{"p":{"S":"r14"}},"ProjectionExpression":"a","ConsistentRead":true}
+< 200 {"Item":{"a":{"N":"1"}}}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"r15"},"a":{"N":"00012"}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_num","Key":{"p":{"S":"r15"}},"ProjectionExpression":"a","ConsistentRead":true}
+< 200 {"Item":{"a":{"N":"12"}}}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"r16"},"a":{"N":"0001.2300"}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_num","Key":{"p":{"S":"r16"}},"ProjectionExpression":"a","ConsistentRead":true}
+< 200 {"Item":{"a":{"N":"1.23"}}}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"r17"},"a":{"N":"100e-2"}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_num","Key":{"p":{"S":"r17"}},"ProjectionExpression":"a","ConsistentRead":true}
+< 200 {"Item":{"a":{"N":"1"}}}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"r18"},"a":{"N":"0.000"}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_num","Key":{"p":{"S":"r18"}},"ProjectionExpression":"a","ConsistentRead":true}
+< 200 {"Item":{"a":{"N":"0"}}}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"r19"},"a":{"N":"0e0"}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_num","Key":{"p":{"S":"r19"}},"ProjectionExpression":"a","ConsistentRead":true}
+< 200 {"Item":{"a":{"N":"0"}}}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"r20"},"a":{"N":"-0.0e-5"}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_num","Key":{"p":{"S":"r20"}},"ProjectionExpression":"a","ConsistentRead":true}
+< 200 {"Item":{"a":{"N":"0"}}}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"r21"},"a":{"N":"1e0005"}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_num","Key":{"p":{"S":"r21"}},"ProjectionExpression":"a","ConsistentRead":true}
+< 200 {"Item":{"a":{"N":"100000"}}}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"r22"},"a":{"N":"1e0001"}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_num","Key":{"p":{"S":"r22"}},"ProjectionExpression":"a","ConsistentRead":true}
+< 200 {"Item":{"a":{"N":"10"}}}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"r23"},"a":{"N":"-.5e-3"}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_num","Key":{"p":{"S":"r23"}},"ProjectionExpression":"a","ConsistentRead":true}
+< 200 {"Item":{"a":{"N":"-0.0005"}}}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"r24"},"a":{"N":"12345678901234567890123456789012345678e10"}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_num","Key":{"p":{"S":"r24"}},"ProjectionExpression":"a","ConsistentRead":true}
+< 200 {"Item":{"a":{"N":"123456789012345678901234567890123456780000000000"}}}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"r25"},"a":{"N":"1.5e-130"}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_num","Key":{"p":{"S":"r25"}},"ProjectionExpression":"a","ConsistentRead":true}
+< 200 {"Item":{"a":{"N":"0.00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000015"}}}
+# Rejected syntaxes: 'The parameter cannot be converted to a numeric value: <input>'
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"bad"},"a":{"N":""}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The parameter cannot be converted to a numeric value: "}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"bad"},"a":{"N":"  1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The parameter cannot be converted to a numeric value:   1"}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"bad"},"a":{"N":"1 "}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The parameter cannot be converted to a numeric value: 1 "}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"bad"},"a":{"N":" "}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The parameter cannot be converted to a numeric value:  "}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"bad"},"a":{"N":"\t1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The parameter cannot be converted to a numeric value: \t1"}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"bad"},"a":{"N":"0x10"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The parameter cannot be converted to a numeric value: 0x10"}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"bad"},"a":{"N":"1e"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The parameter cannot be converted to a numeric value: 1e"}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"bad"},"a":{"N":"e1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The parameter cannot be converted to a numeric value: e1"}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"bad"},"a":{"N":"1e+"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The parameter cannot be converted to a numeric value: 1e+"}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"bad"},"a":{"N":"1e-"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The parameter cannot be converted to a numeric value: 1e-"}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"bad"},"a":{"N":"-"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The parameter cannot be converted to a numeric value: -"}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"bad"},"a":{"N":"+"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The parameter cannot be converted to a numeric value: +"}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"bad"},"a":{"N":"."}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The parameter cannot be converted to a numeric value: ."}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"bad"},"a":{"N":"-."}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The parameter cannot be converted to a numeric value: -."}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"bad"},"a":{"N":"+-1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The parameter cannot be converted to a numeric value: +-1"}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"bad"},"a":{"N":"--1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The parameter cannot be converted to a numeric value: --1"}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"bad"},"a":{"N":"1.2.3"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The parameter cannot be converted to a numeric value: 1.2.3"}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"bad"},"a":{"N":"1e5.5"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The parameter cannot be converted to a numeric value: 1e5.5"}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"bad"},"a":{"N":"1e1e1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The parameter cannot be converted to a numeric value: 1e1e1"}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"bad"},"a":{"N":"dog"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The parameter cannot be converted to a numeric value: dog"}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"bad"},"a":{"N":"NaN"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The parameter cannot be converted to a numeric value: NaN"}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"bad"},"a":{"N":"-NaN"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The parameter cannot be converted to a numeric value: -NaN"}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"bad"},"a":{"N":"nan"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The parameter cannot be converted to a numeric value: nan"}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"bad"},"a":{"N":"Infinity"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The parameter cannot be converted to a numeric value: Infinity"}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"bad"},"a":{"N":"-Infinity"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The parameter cannot be converted to a numeric value: -Infinity"}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"bad"},"a":{"N":"inf"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The parameter cannot be converted to a numeric value: inf"}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"bad"},"a":{"N":"1_000"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The parameter cannot be converted to a numeric value: 1_000"}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"bad"},"a":{"N":"1,000"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The parameter cannot be converted to a numeric value: 1,000"}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"bad"},"a":{"N":"١"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The parameter cannot be converted to a numeric value: ١"}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"bad"},"a":{"N":"１"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The parameter cannot be converted to a numeric value: １"}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"bad"},"a":{"N":"1d"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The parameter cannot be converted to a numeric value: 1d"}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"bad"},"a":{"N":"1f"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The parameter cannot be converted to a numeric value: 1f"}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"bad"},"a":{"N":"0b1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The parameter cannot be converted to a numeric value: 0b1"}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"bad"},"a":{"N":"e"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The parameter cannot be converted to a numeric value: e"}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"bad"},"a":{"N":"E5"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The parameter cannot be converted to a numeric value: E5"}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"bad"},"a":{"N":"1..2"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The parameter cannot be converted to a numeric value: 1..2"}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"bad"},"a":{"N":"1.e5"}}}
+< 200 {}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"bad"},"a":{"N":".e5"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The parameter cannot be converted to a numeric value: .e5"}
+# Precision: up to 38 significant digits; leading and trailing zeros (on either side of the point) do not count
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"r26"},"a":{"N":"12345678901234567890123456789012345678"}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_num","Key":{"p":{"S":"r26"}},"ProjectionExpression":"a","ConsistentRead":true}
+< 200 {"Item":{"a":{"N":"12345678901234567890123456789012345678"}}}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"r27"},"a":{"N":"99999999999999999999999999999999999999"}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_num","Key":{"p":{"S":"r27"}},"ProjectionExpression":"a","ConsistentRead":true}
+< 200 {"Item":{"a":{"N":"99999999999999999999999999999999999999"}}}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"r28"},"a":{"N":"-99999999999999999999999999999999999999"}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_num","Key":{"p":{"S":"r28"}},"ProjectionExpression":"a","ConsistentRead":true}
+< 200 {"Item":{"a":{"N":"-99999999999999999999999999999999999999"}}}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"r29"},"a":{"N":"1.2345678901234567890123456789012345678"}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_num","Key":{"p":{"S":"r29"}},"ProjectionExpression":"a","ConsistentRead":true}
+< 200 {"Item":{"a":{"N":"1.2345678901234567890123456789012345678"}}}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"r30"},"a":{"N":"0.00012345678901234567890123456789012345678"}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_num","Key":{"p":{"S":"r30"}},"ProjectionExpression":"a","ConsistentRead":true}
+< 200 {"Item":{"a":{"N":"0.00012345678901234567890123456789012345678"}}}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"r31"},"a":{"N":"000012345678901234567890123456789012345678"}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_num","Key":{"p":{"S":"r31"}},"ProjectionExpression":"a","ConsistentRead":true}
+< 200 {"Item":{"a":{"N":"12345678901234567890123456789012345678"}}}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"r32"},"a":{"N":"12345678901234567890123456789012345678000"}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_num","Key":{"p":{"S":"r32"}},"ProjectionExpression":"a","ConsistentRead":true}
+< 200 {"Item":{"a":{"N":"12345678901234567890123456789012345678000"}}}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"r33"},"a":{"N":"1.23456789012345678901234567890123456780000"}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_num","Key":{"p":{"S":"r33"}},"ProjectionExpression":"a","ConsistentRead":true}
+< 200 {"Item":{"a":{"N":"1.2345678901234567890123456789012345678"}}}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"r34"},"a":{"N":"1000000000000000000000000000000000000000000000000000000000.00"}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_num","Key":{"p":{"S":"r34"}},"ProjectionExpression":"a","ConsistentRead":true}
+< 200 {"Item":{"a":{"N":"1000000000000000000000000000000000000000000000000000000000"}}}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"r35"},"a":{"N":"0.10000000000000000000000000000000000000000"}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_num","Key":{"p":{"S":"r35"}},"ProjectionExpression":"a","ConsistentRead":true}
+< 200 {"Item":{"a":{"N":"0.1"}}}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"r36"},"a":{"N":"1234567890123456789012345678901234567800e-2"}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_num","Key":{"p":{"S":"r36"}},"ProjectionExpression":"a","ConsistentRead":true}
+< 200 {"Item":{"a":{"N":"12345678901234567890123456789012345678"}}}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"r37"},"a":{"N":"31415926535897932384626433832795028841e30"}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_num","Key":{"p":{"S":"r37"}},"ProjectionExpression":"a","ConsistentRead":true}
+< 200 {"Item":{"a":{"N":"31415926535897932384626433832795028841000000000000000000000000000000"}}}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"bad"},"a":{"N":"123456789012345678901234567890123456789"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Number too precise: 123456789012345678901234567890123456789. Attempting to store a number with more significant digits than supported."}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"bad"},"a":{"N":"999999999999999999999999999999999999999"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Number too precise: 999999999999999999999999999999999999999. Attempting to store a number with more significant digits than supported."}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"bad"},"a":{"N":"-123456789012345678901234567890123456789"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Number too precise: -123456789012345678901234567890123456789. Attempting to store a number with more significant digits than supported."}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"bad"},"a":{"N":"1.23456789012345678901234567890123456789"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Number too precise: 1.23456789012345678901234567890123456789. Attempting to store a number with more significant digits than supported."}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"bad"},"a":{"N":"1.2345678901234567890123456789012345678900001"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Number too precise: 1.2345678901234567890123456789012345678900001. Attempting to store a number with more significant digits than supported."}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"bad"},"a":{"N":"0.000123456789012345678901234567890123456789"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Number too precise: 0.000123456789012345678901234567890123456789. Attempting to store a number with more significant digits than supported."}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"bad"},"a":{"N":"314159265358979323846264338327950288419e30"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Number too precise: 314159265358979323846264338327950288419e30. Attempting to store a number with more significant digits than supported."}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"bad"},"a":{"N":"1.23456789012345678901234567890123456789e-120"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Number too precise: 1.23456789012345678901234567890123456789e-120. Attempting to store a number with more significant digits than supported."}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"bad"},"a":{"N":"10000000000000000000000000000000000000001"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Number too precise: 10000000000000000000000000000000000000001. Attempting to store a number with more significant digits than supported."}
+# Magnitude: the decimal exponent of the leading digit must be within [-130, 125]; zero is always allowed whatever its exponent
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"r38"},"a":{"N":"1e125"}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_num","Key":{"p":{"S":"r38"}},"ProjectionExpression":"a","ConsistentRead":true}
+< 200 {"Item":{"a":{"N":"100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"}}}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"r39"},"a":{"N":"-1e125"}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_num","Key":{"p":{"S":"r39"}},"ProjectionExpression":"a","ConsistentRead":true}
+< 200 {"Item":{"a":{"N":"-100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"}}}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"r40"},"a":{"N":"9.9999999999999999999999999999999999999e125"}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_num","Key":{"p":{"S":"r40"}},"ProjectionExpression":"a","ConsistentRead":true}
+< 200 {"Item":{"a":{"N":"999999999999999999999999999999999999990000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"}}}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"r41"},"a":{"N":"0.1e126"}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_num","Key":{"p":{"S":"r41"}},"ProjectionExpression":"a","ConsistentRead":true}
+< 200 {"Item":{"a":{"N":"100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"}}}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"r42"},"a":{"N":"0.01e127"}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_num","Key":{"p":{"S":"r42"}},"ProjectionExpression":"a","ConsistentRead":true}
+< 200 {"Item":{"a":{"N":"100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"}}}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"r43"},"a":{"N":"1000e122"}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_num","Key":{"p":{"S":"r43"}},"ProjectionExpression":"a","ConsistentRead":true}
+< 200 {"Item":{"a":{"N":"100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"}}}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"r44"},"a":{"N":"1e-130"}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_num","Key":{"p":{"S":"r44"}},"ProjectionExpression":"a","ConsistentRead":true}
+< 200 {"Item":{"a":{"N":"0.0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001"}}}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"r45"},"a":{"N":"-1e-130"}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_num","Key":{"p":{"S":"r45"}},"ProjectionExpression":"a","ConsistentRead":true}
+< 200 {"Item":{"a":{"N":"-0.0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001"}}}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"r46"},"a":{"N":"10e-131"}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_num","Key":{"p":{"S":"r46"}},"ProjectionExpression":"a","ConsistentRead":true}
+< 200 {"Item":{"a":{"N":"0.0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001"}}}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"r47"},"a":{"N":"0.1e-129"}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_num","Key":{"p":{"S":"r47"}},"ProjectionExpression":"a","ConsistentRead":true}
+< 200 {"Item":{"a":{"N":"0.0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001"}}}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"r48"},"a":{"N":"100e-132"}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_num","Key":{"p":{"S":"r48"}},"ProjectionExpression":"a","ConsistentRead":true}
+< 200 {"Item":{"a":{"N":"0.0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001"}}}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"r49"},"a":{"N":"0e126"}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_num","Key":{"p":{"S":"r49"}},"ProjectionExpression":"a","ConsistentRead":true}
+< 200 {"Item":{"a":{"N":"0"}}}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"r50"},"a":{"N":"0.0e126"}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_num","Key":{"p":{"S":"r50"}},"ProjectionExpression":"a","ConsistentRead":true}
+< 200 {"Item":{"a":{"N":"0"}}}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"r51"},"a":{"N":"0e-131"}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_num","Key":{"p":{"S":"r51"}},"ProjectionExpression":"a","ConsistentRead":true}
+< 200 {"Item":{"a":{"N":"0"}}}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"r52"},"a":{"N":"0.0e1000"}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_num","Key":{"p":{"S":"r52"}},"ProjectionExpression":"a","ConsistentRead":true}
+< 200 {"Item":{"a":{"N":"0"}}}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"r53"},"a":{"N":"0e2147483647"}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_num","Key":{"p":{"S":"r53"}},"ProjectionExpression":"a","ConsistentRead":true}
+< 200 {"Item":{"a":{"N":"0"}}}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"r54"},"a":{"N":"-0e-99999"}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_num","Key":{"p":{"S":"r54"}},"ProjectionExpression":"a","ConsistentRead":true}
+< 200 {"Item":{"a":{"N":"0"}}}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"r55"},"a":{"N":"0.00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_num","Key":{"p":{"S":"r55"}},"ProjectionExpression":"a","ConsistentRead":true}
+< 200 {"Item":{"a":{"N":"0"}}}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"bad"},"a":{"N":"1e126"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Number overflow: 1e126. Attempting to store a number with magnitude larger than supported range."}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"bad"},"a":{"N":"-1e126"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Number overflow: -1e126. Attempting to store a number with magnitude larger than supported range."}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"bad"},"a":{"N":"11e125"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Number overflow: 11e125. Attempting to store a number with magnitude larger than supported range."}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"bad"},"a":{"N":"1000e123"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Number overflow: 1000e123. Attempting to store a number with magnitude larger than supported range."}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"bad"},"a":{"N":"1e1000"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Number overflow: 1e1000. Attempting to store a number with magnitude larger than supported range."}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"bad"},"a":{"N":"1e2147483647"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Number overflow: 1e2147483647. Attempting to store a number with magnitude larger than supported range."}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"bad"},"a":{"N":"1e2147483648"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Number overflow: 1e2147483648. Attempting to store a number with magnitude larger than supported range."}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"bad"},"a":{"N":"10e2147483647"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Number overflow: 10e2147483647. Attempting to store a number with magnitude larger than supported range."}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"bad"},"a":{"N":"0.1e2147483648"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Number overflow: 0.1e2147483648. Attempting to store a number with magnitude larger than supported range."}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"bad"},"a":{"N":"1e-131"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Number underflow: 1e-131. Attempting to store a number with magnitude lower than supported range."}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"bad"},"a":{"N":"-1e-131"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Number underflow: -1e-131. Attempting to store a number with magnitude lower than supported range."}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"bad"},"a":{"N":"0.9e-130"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Number underflow: 0.9e-130. Attempting to store a number with magnitude lower than supported range."}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"bad"},"a":{"N":"0.1e-130"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Number underflow: 0.1e-130. Attempting to store a number with magnitude lower than supported range."}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"bad"},"a":{"N":"1e-1000"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Number underflow: 1e-1000. Attempting to store a number with magnitude lower than supported range."}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"bad"},"a":{"N":"1e-2147483647"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Number underflow: 1e-2147483647. Attempting to store a number with magnitude lower than supported range."}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"bad"},"a":{"N":"0.0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Number underflow: 0.0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001. Attempting to store a number with magnitude lower than supported range."}
+# Quirk: an exponent written with more than 4 characters (sign included) is reported as overflow (or underflow if it starts with '-') whatever its value, unless the mantissa is zero
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"r56"},"a":{"N":"1e0001"}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_num","Key":{"p":{"S":"r56"}},"ProjectionExpression":"a","ConsistentRead":true}
+< 200 {"Item":{"a":{"N":"10"}}}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"r57"},"a":{"N":"1e-001"}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_num","Key":{"p":{"S":"r57"}},"ProjectionExpression":"a","ConsistentRead":true}
+< 200 {"Item":{"a":{"N":"0.1"}}}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"r58"},"a":{"N":"1e0125"}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_num","Key":{"p":{"S":"r58"}},"ProjectionExpression":"a","ConsistentRead":true}
+< 200 {"Item":{"a":{"N":"100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"}}}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"r59"},"a":{"N":"1e+125"}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_num","Key":{"p":{"S":"r59"}},"ProjectionExpression":"a","ConsistentRead":true}
+< 200 {"Item":{"a":{"N":"100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"}}}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"r60"},"a":{"N":"1e00001"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Number overflow: 1e00001. Attempting to store a number with magnitude larger than supported range."}
+> GetItem {"TableName":"alt_val_num","Key":{"p":{"S":"r60"}},"ProjectionExpression":"a","ConsistentRead":true}
+< 200 {}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"r61"},"a":{"N":"1e000001"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Number overflow: 1e000001. Attempting to store a number with magnitude larger than supported range."}
+> GetItem {"TableName":"alt_val_num","Key":{"p":{"S":"r61"}},"ProjectionExpression":"a","ConsistentRead":true}
+< 200 {}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"r62"},"a":{"N":"1e+0001"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Number overflow: 1e+0001. Attempting to store a number with magnitude larger than supported range."}
+> GetItem {"TableName":"alt_val_num","Key":{"p":{"S":"r62"}},"ProjectionExpression":"a","ConsistentRead":true}
+< 200 {}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"r63"},"a":{"N":"1E+0001"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Number overflow: 1E+0001. Attempting to store a number with magnitude larger than supported range."}
+> GetItem {"TableName":"alt_val_num","Key":{"p":{"S":"r63"}},"ProjectionExpression":"a","ConsistentRead":true}
+< 200 {}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"r64"},"a":{"N":"1e00000"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Number overflow: 1e00000. Attempting to store a number with magnitude larger than supported range."}
+> GetItem {"TableName":"alt_val_num","Key":{"p":{"S":"r64"}},"ProjectionExpression":"a","ConsistentRead":true}
+< 200 {}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"r65"},"a":{"N":"1e-0001"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Number underflow: 1e-0001. Attempting to store a number with magnitude lower than supported range."}
+> GetItem {"TableName":"alt_val_num","Key":{"p":{"S":"r65"}},"ProjectionExpression":"a","ConsistentRead":true}
+< 200 {}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"r66"},"a":{"N":"1e-00001"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Number underflow: 1e-00001. Attempting to store a number with magnitude lower than supported range."}
+> GetItem {"TableName":"alt_val_num","Key":{"p":{"S":"r66"}},"ProjectionExpression":"a","ConsistentRead":true}
+< 200 {}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"r67"},"a":{"N":"1e-0130"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Number underflow: 1e-0130. Attempting to store a number with magnitude lower than supported range."}
+> GetItem {"TableName":"alt_val_num","Key":{"p":{"S":"r67"}},"ProjectionExpression":"a","ConsistentRead":true}
+< 200 {}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"r68"},"a":{"N":"-1e00001"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Number overflow: -1e00001. Attempting to store a number with magnitude larger than supported range."}
+> GetItem {"TableName":"alt_val_num","Key":{"p":{"S":"r68"}},"ProjectionExpression":"a","ConsistentRead":true}
+< 200 {}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"r69"},"a":{"N":"-1e-0001"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Number underflow: -1e-0001. Attempting to store a number with magnitude lower than supported range."}
+> GetItem {"TableName":"alt_val_num","Key":{"p":{"S":"r69"}},"ProjectionExpression":"a","ConsistentRead":true}
+< 200 {}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"r70"},"a":{"N":"1.5e00001"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Number overflow: 1.5e00001. Attempting to store a number with magnitude larger than supported range."}
+> GetItem {"TableName":"alt_val_num","Key":{"p":{"S":"r70"}},"ProjectionExpression":"a","ConsistentRead":true}
+< 200 {}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"r71"},"a":{"N":"0.00001e0001"}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_num","Key":{"p":{"S":"r71"}},"ProjectionExpression":"a","ConsistentRead":true}
+< 200 {"Item":{"a":{"N":"0.0001"}}}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"r72"},"a":{"N":"1e00000000000000000000000000000000001"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Number overflow: 1e00000000000000000000000000000000001. Attempting to store a number with magnitude larger than supported range."}
+> GetItem {"TableName":"alt_val_num","Key":{"p":{"S":"r72"}},"ProjectionExpression":"a","ConsistentRead":true}
+< 200 {}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"r73"},"a":{"N":"0e00001"}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_num","Key":{"p":{"S":"r73"}},"ProjectionExpression":"a","ConsistentRead":true}
+< 200 {"Item":{"a":{"N":"0"}}}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"r74"},"a":{"N":"0.0e00001"}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_num","Key":{"p":{"S":"r74"}},"ProjectionExpression":"a","ConsistentRead":true}
+< 200 {"Item":{"a":{"N":"0"}}}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"r75"},"a":{"N":"0e-00001"}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_num","Key":{"p":{"S":"r75"}},"ProjectionExpression":"a","ConsistentRead":true}
+< 200 {"Item":{"a":{"N":"0"}}}
+# Exponent that does not fit: the scale (fraction digits minus exponent) must fit in a signed 32-bit integer, else it is a conversion error
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"bad"},"a":{"N":"1e-2147483648"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The parameter cannot be converted to a numeric value: 1e-2147483648"}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"bad"},"a":{"N":"1e-2147483649"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The parameter cannot be converted to a numeric value: 1e-2147483649"}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"bad"},"a":{"N":"1e4294967296"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The parameter cannot be converted to a numeric value: 1e4294967296"}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"bad"},"a":{"N":"1e9223372036854775807"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The parameter cannot be converted to a numeric value: 1e9223372036854775807"}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"bad"},"a":{"N":"1e9223372036854775808"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The parameter cannot be converted to a numeric value: 1e9223372036854775808"}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"bad"},"a":{"N":"1e99999999999999999999"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The parameter cannot be converted to a numeric value: 1e99999999999999999999"}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"bad"},"a":{"N":"1e-99999999999999999999"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The parameter cannot be converted to a numeric value: 1e-99999999999999999999"}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"bad"},"a":{"N":"0e99999999999999999999"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The parameter cannot be converted to a numeric value: 0e99999999999999999999"}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"bad"},"a":{"N":"0.1e-2147483648"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The parameter cannot be converted to a numeric value: 0.1e-2147483648"}
+# Error precedence: magnitude errors win over precision errors
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"bad"},"a":{"N":"123456789012345678901234567890123456789e126"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Number overflow: 123456789012345678901234567890123456789e126. Attempting to store a number with magnitude larger than supported range."}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"bad"},"a":{"N":"123456789012345678901234567890123456789e-200"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Number underflow: 123456789012345678901234567890123456789e-200. Attempting to store a number with magnitude lower than supported range."}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"bad"},"a":{"N":"123456789012345678901234567890123456789e00001"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Number overflow: 123456789012345678901234567890123456789e00001. Attempting to store a number with magnitude larger than supported range."}
+# Canonical form of numbers nested in M and L and in NS: stored and returned exactly as sent (no validation, no canonicalisation)
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"nest"},"m":{"M":{"x":{"N":"1.50"},"y":{"N":"1e2"},"z":{"N":"-0"}}},"l":{"L":[{"N":"100e-2"},{"N":"0.000"},{"N":"1E+2"},{"N":"12345678901234567890123456789012345678e10"}]},"ns":{"NS":["1.50","1e2","-0","0.000","1E+2"]}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_num","Key":{"p":{"S":"nest"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"nest"},"l":{"L":[{"N":"100e-2"},{"N":"0.000"},{"N":"1E+2"},{"N":"12345678901234567890123456789012345678e10"}]},"m":{"M":{"x":{"N":"1.50"},"y":{"N":"1e2"},"z":{"N":"-0"}}},"ns":{"NS":["1.50","1e2","-0","0.000","1E+2"]}}}
+# Numbers in ExpressionAttributeValues are validated the same way (SET a = :v); note UPDATED_NEW echoes the value as sent, not the canonical stored form
+> UpdateItem {"TableName":"alt_val_num","Key":{"p":{"S":"eav"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"N":"1.50"}},"ReturnValues":"UPDATED_NEW"}
+< 200 {"Attributes":{"a":{"N":"1.50"}}}
+> UpdateItem {"TableName":"alt_val_num","Key":{"p":{"S":"eav"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"N":"1e2"}},"ReturnValues":"UPDATED_NEW"}
+< 200 {"Attributes":{"a":{"N":"1e2"}}}
+> UpdateItem {"TableName":"alt_val_num","Key":{"p":{"S":"eav"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"N":"-0"}},"ReturnValues":"UPDATED_NEW"}
+< 200 {"Attributes":{"a":{"N":"-0"}}}
+> UpdateItem {"TableName":"alt_val_num","Key":{"p":{"S":"eav"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"N":"dog"}},"ReturnValues":"UPDATED_NEW"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The parameter cannot be converted to a numeric value: dog"}
+> UpdateItem {"TableName":"alt_val_num","Key":{"p":{"S":"eav"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"N":"1e126"}},"ReturnValues":"UPDATED_NEW"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Number overflow: 1e126. Attempting to store a number with magnitude larger than supported range."}
+> UpdateItem {"TableName":"alt_val_num","Key":{"p":{"S":"eav"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"N":"1e-131"}},"ReturnValues":"UPDATED_NEW"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Number underflow: 1e-131. Attempting to store a number with magnitude lower than supported range."}
+> UpdateItem {"TableName":"alt_val_num","Key":{"p":{"S":"eav"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"N":"123456789012345678901234567890123456789"}},"ReturnValues":"UPDATED_NEW"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Number too precise: 123456789012345678901234567890123456789. Attempting to store a number with more significant digits than supported."}
+> UpdateItem {"TableName":"alt_val_num","Key":{"p":{"S":"eav"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"N":" 1"}},"ReturnValues":"UPDATED_NEW"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The parameter cannot be converted to a numeric value:  1"}
+# Numbers in AttributeUpdates PUT are validated the same way (ALL_NEW also echoes the value as sent)
+> GetItem {"TableName":"alt_val_num","Key":{"p":{"S":"eav"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"eav"},"a":{"N":"0"}}}
+> UpdateItem {"TableName":"alt_val_num","Key":{"p":{"S":"au"}},"AttributeUpdates":{"a":{"Value":{"N":"1.50"},"Action":"PUT"}},"ReturnValues":"ALL_NEW"}
+< 200 {"Attributes":{"p":{"S":"au"},"a":{"N":"1.50"}}}
+> UpdateItem {"TableName":"alt_val_num","Key":{"p":{"S":"au"}},"AttributeUpdates":{"a":{"Value":{"N":"dog"},"Action":"PUT"}},"ReturnValues":"ALL_NEW"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The parameter cannot be converted to a numeric value: dog"}
+> UpdateItem {"TableName":"alt_val_num","Key":{"p":{"S":"au"}},"AttributeUpdates":{"a":{"Value":{"N":"1e126"},"Action":"PUT"}},"ReturnValues":"ALL_NEW"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Number overflow: 1e126. Attempting to store a number with magnitude larger than supported range."}
+> GetItem {"TableName":"alt_val_num","Key":{"p":{"S":"au"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"au"},"a":{"N":"1.5"}}}
+# NS in SET: elements of sets are not validated even in UpdateItem
+> UpdateItem {"TableName":"alt_val_num","Key":{"p":{"S":"ns"}},"UpdateExpression":"SET s = :v","ExpressionAttributeValues":{":v":{"NS":["1.50","x"]}},"ReturnValues":"ALL_NEW"}
+< 200 {"Attributes":{"p":{"S":"ns"},"s":{"NS":["1.50","x"]}}}
+# ReturnValues ALL_OLD/UPDATED_OLD return the canonical stored form; UPDATED_NEW/ALL_NEW of SET echo the input
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"rv"},"a":{"N":"1.500"}}}
+< 200 {}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"rv"},"a":{"N":"2e0"}},"ReturnValues":"ALL_OLD"}
+< 200 {"Attributes":{"p":{"S":"rv"},"a":{"N":"1.5"}}}
+> UpdateItem {"TableName":"alt_val_num","Key":{"p":{"S":"rv"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"N":"3.00"}},"ReturnValues":"UPDATED_OLD"}
+< 200 {"Attributes":{"a":{"N":"2"}}}
+> UpdateItem {"TableName":"alt_val_num","Key":{"p":{"S":"rv"}},"UpdateExpression":"SET a = :v, b = :v","ExpressionAttributeValues":{":v":{"N":"3.00"}},"ReturnValues":"ALL_NEW"}
+< 200 {"Attributes":{"p":{"S":"rv"},"a":{"N":"3.00"},"b":{"N":"3.00"}}}
+> DeleteItem {"TableName":"alt_val_num","Key":{"p":{"S":"rv"}},"ReturnValues":"ALL_OLD"}
+< 200 {"Attributes":{"p":{"S":"rv"},"a":{"N":"3"},"b":{"N":"3"}}}
+# Quirk: '=' / EQ compare the canonical stored form with the value as sent, textually: 1.5 matches a stored 1.50 but 1.50, 100.0 and 1e2 do not match; ordering operators compare numerically
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"cmp"},"a":{"N":"1.50"},"b":{"N":"1e2"}}}
+< 200 {}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"cmp"},"a":{"N":"1.50"},"b":{"N":"1e2"}},"ConditionExpression":"a = :x","ExpressionAttributeValues":{":x":{"N":"1.5"}}}
+< 200 {}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"cmp"},"a":{"N":"1.50"},"b":{"N":"1e2"}},"ConditionExpression":"a = :x","ExpressionAttributeValues":{":x":{"N":"1.50"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"cmp"},"a":{"N":"1.50"},"b":{"N":"1e2"}},"ConditionExpression":"b = :x","ExpressionAttributeValues":{":x":{"N":"100"}}}
+< 200 {}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"cmp"},"a":{"N":"1.50"},"b":{"N":"1e2"}},"ConditionExpression":"b = :x","ExpressionAttributeValues":{":x":{"N":"100.0"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"cmp"},"a":{"N":"1.50"},"b":{"N":"1e2"}},"ConditionExpression":"b = :x","ExpressionAttributeValues":{":x":{"N":"1e2"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"cmp"},"a":{"N":"1.50"},"b":{"N":"1e2"}},"ConditionExpression":"b <> :x","ExpressionAttributeValues":{":x":{"N":"1e2"}}}
+< 200 {}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"cmp"},"a":{"N":"1.50"},"b":{"N":"1e2"}},"ConditionExpression":"b <= :x","ExpressionAttributeValues":{":x":{"N":"100.0"}}}
+< 200 {}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"cmp"},"a":{"N":"1.50"},"b":{"N":"1e2"}},"ConditionExpression":"b >= :x","ExpressionAttributeValues":{":x":{"N":"1e2"}}}
+< 200 {}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"cmp"},"a":{"N":"1.50"},"b":{"N":"1e2"}},"ConditionExpression":"b < :x","ExpressionAttributeValues":{":x":{"N":"100.1"}}}
+< 200 {}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"cmp"},"a":{"N":"1.50"},"b":{"N":"1e2"}},"ConditionExpression":"b BETWEEN :x AND :x","ExpressionAttributeValues":{":x":{"N":"100.0"}}}
+< 200 {}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"cmp"},"a":{"N":"1.50"},"b":{"N":"1e2"}},"ConditionExpression":"b IN (:x)","ExpressionAttributeValues":{":x":{"N":"1e2"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"cmp"},"a":{"N":"1.50"},"b":{"N":"1e2"}},"ConditionExpression":"b IN (:x)","ExpressionAttributeValues":{":x":{"N":"100"}}}
+< 200 {}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"cmp"},"a":{"N":"1.50"},"b":{"N":"1e2"}},"Expected":{"b":{"Value":{"N":"100.0"}}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"cmp"},"a":{"N":"1.50"},"b":{"N":"1e2"}},"Expected":{"b":{"Value":{"N":"100"}}}}
+< 200 {}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"cmp"},"a":{"N":"1.50"},"b":{"N":"1e2"}},"Expected":{"b":{"ComparisonOperator":"EQ","AttributeValueList":[{"N":"100.0"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"cmp"},"a":{"N":"1.50"},"b":{"N":"1e2"}},"Expected":{"b":{"ComparisonOperator":"GE","AttributeValueList":[{"N":"100.0"}]}}}
+< 200 {}
+# Equality in NS sets and nested numbers is textual too
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"cmp2"},"s":{"NS":["1.50","2"]},"m":{"M":{"x":{"N":"1.50"}}}}}
+< 200 {}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"cmp2"},"s":{"NS":["1.50","2"]},"m":{"M":{"x":{"N":"1.50"}}}},"ConditionExpression":"s = :x","ExpressionAttributeValues":{":x":{"NS":["1.50","2"]}}}
+< 200 {}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"cmp2"},"s":{"NS":["1.50","2"]},"m":{"M":{"x":{"N":"1.50"}}}},"ConditionExpression":"s = :x","ExpressionAttributeValues":{":x":{"NS":["2","1.50"]}}}
+< 200 {}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"cmp2"},"s":{"NS":["1.50","2"]},"m":{"M":{"x":{"N":"1.50"}}}},"ConditionExpression":"s = :x","ExpressionAttributeValues":{":x":{"NS":["1.5","2"]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"cmp2"},"s":{"NS":["1.50","2"]},"m":{"M":{"x":{"N":"1.50"}}}},"ConditionExpression":"m = :x","ExpressionAttributeValues":{":x":{"M":{"x":{"N":"1.50"}}}}}
+< 200 {}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"cmp2"},"s":{"NS":["1.50","2"]},"m":{"M":{"x":{"N":"1.50"}}}},"ConditionExpression":"m = :x","ExpressionAttributeValues":{":x":{"M":{"x":{"N":"1.5"}}}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"cmp2"},"s":{"NS":["1.50","2"]},"m":{"M":{"x":{"N":"1.50"}}}},"ConditionExpression":"m.x = :x","ExpressionAttributeValues":{":x":{"N":"1.50"}}}
+< 200 {}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"cmp2"},"s":{"NS":["1.50","2"]},"m":{"M":{"x":{"N":"1.50"}}}},"ConditionExpression":"m.x = :x","ExpressionAttributeValues":{":x":{"N":"1.5"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"cmp2"},"s":{"NS":["1.50","2"]},"m":{"M":{"x":{"N":"1.50"}}}},"ConditionExpression":"m.x < :x","ExpressionAttributeValues":{":x":{"N":"1.6"}}}
+< 200 {}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"cmp2"},"s":{"NS":["1.50","2"]},"m":{"M":{"x":{"N":"1.50"}}}},"ConditionExpression":"contains(s, :x)","ExpressionAttributeValues":{":x":{"N":"1.5"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"cmp2"},"s":{"NS":["1.50","2"]},"m":{"M":{"x":{"N":"1.50"}}}},"ConditionExpression":"contains(s, :x)","ExpressionAttributeValues":{":x":{"N":"1.50"}}}
+< 200 {}
+# A malformed number in a condition value is only reported when the comparison parses it
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"cmp"},"a":{"N":"1"}},"ConditionExpression":"a = :x","ExpressionAttributeValues":{":x":{"N":"dog"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"cmp"},"a":{"N":"1"}},"ConditionExpression":"a < :x","ExpressionAttributeValues":{":x":{"N":"dog"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The parameter cannot be converted to a numeric value: dog"}
+> PutItem {"TableName":"alt_val_num","Item":{"p":{"S":"cmp"},"a":{"N":"1"}},"ConditionExpression":"z < :x","ExpressionAttributeValues":{":x":{"N":"dog"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"The conditional request failed"}
+> GetItem {"TableName":"alt_val_num","Key":{"p":{"S":"cmp"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"cmp"},"a":{"N":"1.5"},"b":{"N":"100"}}}
+> DeleteTable {"TableName":"alt_val_num"}
+< 200 {"TableDescription":{"TableName":"alt_val_num","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_val_num:scylla:table/alt_val_num","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0}}}

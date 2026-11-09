@@ -1,0 +1,410 @@
+# ARN validation before the table exists
+> ListTagsOfResource {"ResourceArn":"I_do_not_exist"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#AccessDeniedException","message":"ResourceArn: Invalid table ARN `I_do_not_exist`  - missing `arn:` prefix"}
+> ListTagsOfResource {"ResourceArn":""}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#AccessDeniedException","message":"ResourceArn: Invalid table ARN ``  - missing `arn:` prefix"}
+> ListTagsOfResource {"ResourceArn":"arn:"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#AccessDeniedException","message":"ResourceArn: Invalid table ARN `arn:` - missing arn:<partition>:<service>:<region>:<account-id> prefix"}
+> ListTagsOfResource {"ResourceArn":"arn:not/a/good/format"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#AccessDeniedException","message":"ResourceArn: Invalid table ARN `arn:not/a/good/format` - missing arn:<partition>:<service>:<region>:<account-id> prefix"}
+> ListTagsOfResource {"ResourceArn":"arn:scylla/scylla/scylla/scylla/scylla/scylla/scylla/scylla/scylla/scylla/scylla/scylla/scylla/scylla/scylla/"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#AccessDeniedException","message":"ResourceArn: Invalid table ARN `arn:scylla/scylla/scylla/scylla/scylla/scylla/scylla/scylla/scylla/scylla/scylla/scylla/scylla/scylla/scylla/` - missing arn:<partition>:<service>:<region>:<account-id> prefix"}
+> ListTagsOfResource {"ResourceArn":":/:/:/:/:/:/:/:/:/:/:/:/:/:/:/:/:/:/:/:/:/:/:/:/:/:/:/:/:/:/"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#AccessDeniedException","message":"ResourceArn: Invalid table ARN `:/:/:/:/:/:/:/:/:/:/:/:/:/:/:/:/:/:/:/:/:/:/:/:/:/:/:/:/:/:/`  - missing `arn:` prefix"}
+> ListTagsOfResource {"ResourceArn":" "}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#AccessDeniedException","message":"ResourceArn: Invalid table ARN ` `  - missing `arn:` prefix"}
+> ListTagsOfResource {"ResourceArn":"\u043d\u0435\u0437\u0430\u043a\u043e\u043d\u043d\u044b\u0435 \u0431\u0443\u043a\u0432\u044b"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#AccessDeniedException","message":"ResourceArn: Invalid table ARN `незаконные буквы`  - missing `arn:` prefix"}
+> ListTagsOfResource {"ResourceArn":"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#AccessDeniedException","message":"ResourceArn: Invalid table ARN `xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx`  - missing `arn:` prefix"}
+> ListTagsOfResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException","message":"ResourceArn: Invalid table ARN `arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg` - not found"}
+> ListTagsOfResource {"ResourceArn":"arn:aws:dynamodb:us-east-1:123456789012:table/alt_tbl_tg"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ResourceArn: Invalid table ARN `arn:aws:dynamodb:us-east-1:123456789012:table/alt_tbl_tg` - missing separator `@`"}
+> ListTagsOfResource {"ResourceArn":"table/alt_tbl_tg"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#AccessDeniedException","message":"ResourceArn: Invalid table ARN `table/alt_tbl_tg`  - missing `arn:` prefix"}
+> ListTagsOfResource {"ResourceArn":"arn:x/alt_tbl_tg"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#AccessDeniedException","message":"ResourceArn: Invalid table ARN `arn:x/alt_tbl_tg` - missing arn:<partition>:<service>:<region>:<account-id> prefix"}
+> ListTagsOfResource {}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#AccessDeniedException","message":"Incorrect resource identifier"}
+> ListTagsOfResource {"ResourceArn":5}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#AccessDeniedException","message":"Incorrect resource identifier"}
+> TagResource {}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#AccessDeniedException","message":"Incorrect resource identifier"}
+> UntagResource {}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#AccessDeniedException","message":"Incorrect resource identifier"}
+> CreateTable {"TableName":"alt_tbl_tg","BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"AttributeName":"c","KeyType":"RANGE"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"},{"AttributeName":"c","AttributeType":"S"},{"AttributeName":"x","AttributeType":"S"}],"GlobalSecondaryIndexes":[{"IndexName":"gsi","KeySchema":[{"AttributeName":"x","KeyType":"HASH"}],"Projection":{"ProjectionType":"ALL"}}],"LocalSecondaryIndexes":[{"IndexName":"lsi","KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"AttributeName":"x","KeyType":"RANGE"}],"Projection":{"ProjectionType":"ALL"}}]}
+< 200 {"TableDescription":{"TableName":"alt_tbl_tg","BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"AttributeName":"c","KeyType":"RANGE"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"},{"AttributeName":"c","AttributeType":"S"},{"AttributeName":"x","AttributeType":"S"}],"GlobalSecondaryIndexes":[{"IndexName":"gsi","KeySchema":[{"AttributeName":"x","KeyType":"HASH"}],"Projection":{"ProjectionType":"ALL"}}],"LocalSecondaryIndexes":[{"IndexName":"lsi","KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"AttributeName":"x","KeyType":"RANGE"}],"Projection":{"ProjectionType":"ALL"}}],"CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+# ListTagsOfResource on a new table and ARN variants that name the same table
+> ListTagsOfResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg"}
+< 200 {"Tags":[]}
+> ListTagsOfResource {"ResourceArn":"arn:aws:dynamodb:us-east-1:123456789012:table/alt_tbl_tg"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ResourceArn: Invalid table ARN `arn:aws:dynamodb:us-east-1:123456789012:table/alt_tbl_tg` - missing separator `@`"}
+> ListTagsOfResource {"ResourceArn":"table/alt_tbl_tg"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#AccessDeniedException","message":"ResourceArn: Invalid table ARN `table/alt_tbl_tg`  - missing `arn:` prefix"}
+> ListTagsOfResource {"ResourceArn":"arn:x/alt_tbl_tg"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#AccessDeniedException","message":"ResourceArn: Invalid table ARN `arn:x/alt_tbl_tg` - missing arn:<partition>:<service>:<region>:<account-id> prefix"}
+> ListTagsOfResource {"ResourceArn":"arn:alt_tbl_tg"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#AccessDeniedException","message":"ResourceArn: Invalid table ARN `arn:alt_tbl_tg` - missing arn:<partition>:<service>:<region>:<account-id> prefix"}
+> ListTagsOfResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tgx"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException","message":"ResourceArn: Invalid table ARN `arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tgx` - not found"}
+> ListTagsOfResource {"ResourceArn":"arn:scylla:alternator:alternator_other:scylla:table/alt_tbl_tg"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException","message":"ResourceArn: Invalid table ARN `arn:scylla:alternator:alternator_other:scylla:table/alt_tbl_tg` - not found"}
+> ListTagsOfResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg/index/gsi"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ResourceArn: Invalid table ARN `arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg/index/gsi` - expected `` after table name `alt_tbl_tg`"}
+> ListTagsOfResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg/index/lsi"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ResourceArn: Invalid table ARN `arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg/index/lsi` - expected `` after table name `alt_tbl_tg`"}
+> ListTagsOfResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg/stream/2020"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ResourceArn: Invalid table ARN `arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg/stream/2020` - expected `` after table name `alt_tbl_tg`"}
+> ListTagsOfResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg/"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ResourceArn: Invalid table ARN `arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg/` - expected `` after table name `alt_tbl_tg`"}
+> ListTagsOfResource {"ResourceArn":"ARN:SCYLLA:ALTERNATOR:ALTERNATOR_ALT_TBL_TG:SCYLLA:TABLE/ALT_TBL_TG"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#AccessDeniedException","message":"ResourceArn: Invalid table ARN `ARN:SCYLLA:ALTERNATOR:ALTERNATOR_ALT_TBL_TG:SCYLLA:TABLE/ALT_TBL_TG`  - missing `arn:` prefix"}
+> ListTagsOfResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/ab"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException","message":"ResourceArn: Invalid table ARN `arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/ab` - not found"}
+> ListTagsOfResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","NextToken":"abc"}
+< 200 {"Tags":[]}
+> ListTagsOfResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","NextToken":5}
+< 200 {"Tags":[]}
+# TagResource / UntagResource parameter validation
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Cannot parse tags"}
+> TagResource {"Tags":[{"Key":"a","Value":"b"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#AccessDeniedException","message":"Incorrect resource identifier"}
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","Tags":[]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The number of tags must be at least 1"}
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","Tags":"x"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Cannot parse tags"}
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","Tags":{}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Cannot parse tags"}
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","Tags":["x"]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"invalid tag object"}
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","Tags":[{}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"string Key and Value required"}
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","Tags":[{"Key":"dog"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"string Key and Value required"}
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","Tags":[{"Value":"dog"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"string Key and Value required"}
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","Tags":[{"Key":"","Value":"dog"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"A tag Key cannot be empty"}
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","Tags":[{"Key":5,"Value":"dog"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"string Key and Value required"}
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","Tags":[{"Key":"dog","Value":5}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"string Key and Value required"}
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","Tags":[{"Key":"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx","Value":"dog"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"A tag Key is limited to 128 characters"}
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","Tags":[{"Key":"dog","Value":"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"A tag Value is limited to 256 characters"}
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","Tags":[{"Key":"\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0","Value":"dog"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"A tag Key is limited to 128 characters"}
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","Tags":[{"Key":"dog","Value":"\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0\u05d0"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"A tag Value is limited to 256 characters"}
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","Tags":[{"Key":"hi!","Value":"dog"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"A tag Key can only contain letters, spaces, and [+-=._:/]"}
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","Tags":[{"Key":"dog","Value":"hi!"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"A tag Value can only contain letters, spaces, and [+-=._:/]"}
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","Tags":[{"Key":"d%g","Value":"dog"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"A tag Key can only contain letters, spaces, and [+-=._:/]"}
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","Tags":[{"Key":"dog","Value":"d%g"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"A tag Value can only contain letters, spaces, and [+-=._:/]"}
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","Tags":[{"Key":"\"hello\"","Value":"dog"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"A tag Key can only contain letters, spaces, and [+-=._:/]"}
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","Tags":[{"Key":"dog","Value":"\"hello\""}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"A tag Value can only contain letters, spaces, and [+-=._:/]"}
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","Tags":[{"Key":"a*b","Value":"dog"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"A tag Key can only contain letters, spaces, and [+-=._:/]"}
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","Tags":[{"Key":"dog","Value":"a*b"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"A tag Value can only contain letters, spaces, and [+-=._:/]"}
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","Tags":[{"Key":"a,b","Value":"dog"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"A tag Key can only contain letters, spaces, and [+-=._:/]"}
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","Tags":[{"Key":"dog","Value":"a,b"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"A tag Value can only contain letters, spaces, and [+-=._:/]"}
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","Tags":[{"Key":"#!%%^$$&","Value":"dog"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"A tag Key can only contain letters, spaces, and [+-=._:/]"}
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","Tags":[{"Key":"dog","Value":"#!%%^$$&"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"A tag Value can only contain letters, spaces, and [+-=._:/]"}
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","Tags":[{"Key":"->>;-)])","Value":"dog"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"A tag Key can only contain letters, spaces, and [+-=._:/]"}
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","Tags":[{"Key":"dog","Value":"->>;-)])"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"A tag Value can only contain letters, spaces, and [+-=._:/]"}
+# allowed characters: letters (unicode), digits, whitespace and + - = . _ : / (not @)
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","Tags":[{"Key":"a@b","Value":"x"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"A tag Key can only contain letters, spaces, and [+-=._:/]"}
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","Tags":[{"Key":"x","Value":"a@b"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"A tag Value can only contain letters, spaces, and [+-=._:/]"}
+# each character class individually: ASCII letters/digits, space, tab, newline, + - = . _ : / pass; any non-ASCII fails
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","Tags":[{"Key":"a b","Value":"v"}]}
+< 200 ""
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","Tags":[{"Key":"v","Value":"a b"}]}
+< 200 ""
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","Tags":[{"Key":"a+b","Value":"v"}]}
+< 200 ""
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","Tags":[{"Key":"v","Value":"a+b"}]}
+< 200 ""
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","Tags":[{"Key":"a-b","Value":"v"}]}
+< 200 ""
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","Tags":[{"Key":"v","Value":"a-b"}]}
+< 200 ""
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","Tags":[{"Key":"a=b","Value":"v"}]}
+< 200 ""
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","Tags":[{"Key":"v","Value":"a=b"}]}
+< 200 ""
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","Tags":[{"Key":"a.b","Value":"v"}]}
+< 200 ""
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","Tags":[{"Key":"v","Value":"a.b"}]}
+< 200 ""
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","Tags":[{"Key":"a_b","Value":"v"}]}
+< 200 ""
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","Tags":[{"Key":"v","Value":"a_b"}]}
+< 200 ""
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","Tags":[{"Key":"a:b","Value":"v"}]}
+< 200 ""
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","Tags":[{"Key":"v","Value":"a:b"}]}
+< 200 ""
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","Tags":[{"Key":"a/b","Value":"v"}]}
+< 200 ""
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","Tags":[{"Key":"v","Value":"a/b"}]}
+< 200 ""
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","Tags":[{"Key":"ABC123","Value":"v"}]}
+< 200 ""
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","Tags":[{"Key":"v","Value":"ABC123"}]}
+< 200 ""
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","Tags":[{"Key":"tab\tkey","Value":"v"}]}
+< 200 ""
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","Tags":[{"Key":"v","Value":"tab\tkey"}]}
+< 200 ""
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","Tags":[{"Key":"nl\nk","Value":"v"}]}
+< 200 ""
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","Tags":[{"Key":"v","Value":"nl\nk"}]}
+< 200 ""
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","Tags":[{"Key":"\u0437\u0430\u043a\u043e\u043d\u043d\u044b\u0435","Value":"v"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"A tag Key can only contain letters, spaces, and [+-=._:/]"}
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","Tags":[{"Key":"v","Value":"\u0437\u0430\u043a\u043e\u043d\u043d\u044b\u0435"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"A tag Value can only contain letters, spaces, and [+-=._:/]"}
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","Tags":[{"Key":"\u046e\u046e \u046e","Value":"v"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"A tag Key can only contain letters, spaces, and [+-=._:/]"}
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","Tags":[{"Key":"v","Value":"\u046e\u046e \u046e"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"A tag Value can only contain letters, spaces, and [+-=._:/]"}
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","Tags":[{"Key":"\u00e9","Value":"v"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"A tag Key can only contain letters, spaces, and [+-=._:/]"}
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","Tags":[{"Key":"v","Value":"\u00e9"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"A tag Value can only contain letters, spaces, and [+-=._:/]"}
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","Tags":[{"Key":"\u65e5\u672c","Value":"v"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"A tag Key can only contain letters, spaces, and [+-=._:/]"}
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","Tags":[{"Key":"v","Value":"\u65e5\u672c"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"A tag Value can only contain letters, spaces, and [+-=._:/]"}
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","Tags":[{"Key":"a\u00a0b","Value":"v"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"A tag Key can only contain letters, spaces, and [+-=._:/]"}
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","Tags":[{"Key":"v","Value":"a\u00a0b"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"A tag Value can only contain letters, spaces, and [+-=._:/]"}
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","Tags":[{"Key":"\u0663","Value":"v"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"A tag Key can only contain letters, spaces, and [+-=._:/]"}
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","Tags":[{"Key":"v","Value":"\u0663"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"A tag Value can only contain letters, spaces, and [+-=._:/]"}
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","Tags":[{"Key":"a\u0000b","Value":"v"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"A tag Key can only contain letters, spaces, and [+-=._:/]"}
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","Tags":[{"Key":"v","Value":"a\u0000b"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"A tag Value can only contain letters, spaces, and [+-=._:/]"}
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","Tags":[{"Key":"a\rb","Value":"v"}]}
+< 200 ""
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","Tags":[{"Key":"v","Value":"a\rb"}]}
+< 200 ""
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","Tags":[{"Key":"a\u000bb","Value":"v"}]}
+< 200 ""
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","Tags":[{"Key":"v","Value":"a\u000bb"}]}
+< 200 ""
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","Tags":[{"Key":"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx","Value":"yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"},{"Key":"e","Value":""}]}
+< 200 ""
+> ListTagsOfResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg"}
+< 200 {"Tags":[{"Key":"ABC123","Value":"v"},{"Key":"a\u000bb","Value":"v"},{"Key":"a\rb","Value":"v"},{"Key":"a b","Value":"v"},{"Key":"a+b","Value":"v"},{"Key":"a-b","Value":"v"},{"Key":"a.b","Value":"v"},{"Key":"a/b","Value":"v"},{"Key":"a:b","Value":"v"},{"Key":"a=b","Value":"v"},{"Key":"a_b","Value":"v"},{"Key":"e","Value":""},{"Key":"nl\nk","Value":"v"},{"Key":"tab\tkey","Value":"v"},{"Key":"v","Value":"a\u000bb"},{"Key":"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx","Value":"yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"}]}
+> UntagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","TagKeys":["a b","a+b","a-b","a=b","a.b","a_b","a:b","a/b","ABC123","tab\tkey","nl\nk","a\rb","a\u000bb","xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx","e","v","not-there"]}
+< 200 ""
+> ListTagsOfResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg"}
+< 200 {"Tags":[]}
+# UntagResource validation
+> UntagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Cannot parse tag keys"}
+> UntagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","TagKeys":[]}
+< 200 ""
+> UntagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","TagKeys":"x"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Cannot parse tag keys"}
+> UntagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","TagKeys":[5]}
+< 500 {"__type":"com.amazonaws.dynamodb.v20120810#InternalServerError","message":"Internal server error: std::runtime_error (rjson::to_string_view expects a string value, got: kNumberType)"}
+> UntagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","TagKeys":[""]}
+< 200 ""
+> UntagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","TagKeys":["xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"]}
+< 200 ""
+> UntagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","TagKeys":["bad!"]}
+< 200 ""
+> UntagResource {"ResourceArn":"I_do_not_exist","TagKeys":["a"]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#AccessDeniedException","message":"ResourceArn: Invalid table ARN `I_do_not_exist`  - missing `arn:` prefix"}
+> UntagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tgx","TagKeys":["a"]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException","message":"ResourceArn: Invalid table ARN `arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tgx` - not found"}
+# overwrite, duplicates within one request, ordering of ListTagsOfResource
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","Tags":[{"Key":"k2","Value":"v2"},{"Key":"k1","Value":"v1"},{"Key":"k3","Value":"v3"}]}
+< 200 ""
+> ListTagsOfResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg"}
+< 200 {"Tags":[{"Key":"k1","Value":"v1"},{"Key":"k2","Value":"v2"},{"Key":"k3","Value":"v3"}]}
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","Tags":[{"Key":"k1","Value":"new"},{"Key":"k1","Value":"newer"}]}
+< 200 ""
+> ListTagsOfResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg"}
+< 200 {"Tags":[{"Key":"k1","Value":"newer"},{"Key":"k2","Value":"v2"},{"Key":"k3","Value":"v3"}]}
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","Tags":[{"Key":"K1","Value":"upper"}]}
+< 200 ""
+> ListTagsOfResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg"}
+< 200 {"Tags":[{"Key":"K1","Value":"upper"},{"Key":"k1","Value":"newer"},{"Key":"k2","Value":"v2"},{"Key":"k3","Value":"v3"}]}
+> UntagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","TagKeys":["k1","k1","K1","k2","k3"]}
+< 200 ""
+> ListTagsOfResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg"}
+< 200 {"Tags":[]}
+# limit of 50 tags per table
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","Tags":[{"Key":"t00","Value":"0"},{"Key":"t01","Value":"1"},{"Key":"t02","Value":"2"},{"Key":"t03","Value":"3"},{"Key":"t04","Value":"4"},{"Key":"t05","Value":"5"},{"Key":"t06","Value":"6"},{"Key":"t07","Value":"7"},{"Key":"t08","Value":"8"},{"Key":"t09","Value":"9"},{"Key":"t10","Value":"10"},{"Key":"t11","Value":"11"},{"Key":"t12","Value":"12"},{"Key":"t13","Value":"13"},{"Key":"t14","Value":"14"},{"Key":"t15","Value":"15"},{"Key":"t16","Value":"16"},{"Key":"t17","Value":"17"},{"Key":"t18","Value":"18"},{"Key":"t19","Value":"19"},{"Key":"t20","Value":"20"},{"Key":"t21","Value":"21"},{"Key":"t22","Value":"22"},{"Key":"t23","Value":"23"},{"Key":"t24","Value":"24"},{"Key":"t25","Value":"25"},{"Key":"t26","Value":"26"},{"Key":"t27","Value":"27"},{"Key":"t28","Value":"28"},{"Key":"t29","Value":"29"}]}
+< 200 ""
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","Tags":[{"Key":"t20","Value":"20"},{"Key":"t21","Value":"21"},{"Key":"t22","Value":"22"},{"Key":"t23","Value":"23"},{"Key":"t24","Value":"24"},{"Key":"t25","Value":"25"},{"Key":"t26","Value":"26"},{"Key":"t27","Value":"27"},{"Key":"t28","Value":"28"},{"Key":"t29","Value":"29"},{"Key":"t30","Value":"30"},{"Key":"t31","Value":"31"},{"Key":"t32","Value":"32"},{"Key":"t33","Value":"33"},{"Key":"t34","Value":"34"},{"Key":"t35","Value":"35"},{"Key":"t36","Value":"36"},{"Key":"t37","Value":"37"},{"Key":"t38","Value":"38"},{"Key":"t39","Value":"39"},{"Key":"t40","Value":"40"},{"Key":"t41","Value":"41"},{"Key":"t42","Value":"42"},{"Key":"t43","Value":"43"},{"Key":"t44","Value":"44"},{"Key":"t45","Value":"45"},{"Key":"t46","Value":"46"},{"Key":"t47","Value":"47"},{"Key":"t48","Value":"48"},{"Key":"t49","Value":"49"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Number of Tags exceed the current limit for the provided ResourceArn"}
+> ListTagsOfResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg"}
+< 200 {"Tags":[{"Key":"t00","Value":"0"},{"Key":"t01","Value":"1"},{"Key":"t02","Value":"2"},{"Key":"t03","Value":"3"},{"Key":"t04","Value":"4"},{"Key":"t05","Value":"5"},{"Key":"t06","Value":"6"},{"Key":"t07","Value":"7"},{"Key":"t08","Value":"8"},{"Key":"t09","Value":"9"},{"Key":"t10","Value":"10"},{"Key":"t11","Value":"11"},{"Key":"t12","Value":"12"},{"Key":"t13","Value":"13"},{"Key":"t14","Value":"14"},{"Key":"t15","Value":"15"},{"Key":"t16","Value":"16"},{"Key":"t17","Value":"17"},{"Key":"t18","Value":"18"},{"Key":"t19","Value":"19"},{"Key":"t20","Value":"20"},{"Key":"t21","Value":"21"},{"Key":"t22","Value":"22"},{"Key":"t23","Value":"23"},{"Key":"t24","Value":"24"},{"Key":"t25","Value":"25"},{"Key":"t26","Value":"26"},{"Key":"t27","Value":"27"},{"Key":"t28","Value":"28"},{"Key":"t29","Value":"29"}]}
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","Tags":[{"Key":"t50","Value":"x"}]}
+< 200 ""
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","Tags":[{"Key":"t00","Value":"overwrite"}]}
+< 200 ""
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","Tags":[{"Key":"t00","Value":"0"},{"Key":"t01","Value":"1"},{"Key":"t02","Value":"2"},{"Key":"t03","Value":"3"},{"Key":"t04","Value":"4"},{"Key":"t05","Value":"5"},{"Key":"t06","Value":"6"},{"Key":"t07","Value":"7"},{"Key":"t08","Value":"8"},{"Key":"t09","Value":"9"},{"Key":"t10","Value":"10"},{"Key":"t11","Value":"11"},{"Key":"t12","Value":"12"},{"Key":"t13","Value":"13"},{"Key":"t14","Value":"14"},{"Key":"t15","Value":"15"},{"Key":"t16","Value":"16"},{"Key":"t17","Value":"17"},{"Key":"t18","Value":"18"},{"Key":"t19","Value":"19"},{"Key":"t20","Value":"20"},{"Key":"t21","Value":"21"},{"Key":"t22","Value":"22"},{"Key":"t23","Value":"23"},{"Key":"t24","Value":"24"},{"Key":"t25","Value":"25"},{"Key":"t26","Value":"26"},{"Key":"t27","Value":"27"},{"Key":"t28","Value":"28"},{"Key":"t29","Value":"29"},{"Key":"t30","Value":"30"},{"Key":"t31","Value":"31"},{"Key":"t32","Value":"32"},{"Key":"t33","Value":"33"},{"Key":"t34","Value":"34"},{"Key":"t35","Value":"35"},{"Key":"t36","Value":"36"},{"Key":"t37","Value":"37"},{"Key":"t38","Value":"38"},{"Key":"t39","Value":"39"},{"Key":"t40","Value":"40"},{"Key":"t41","Value":"41"},{"Key":"t42","Value":"42"},{"Key":"t43","Value":"43"},{"Key":"t44","Value":"44"},{"Key":"t45","Value":"45"},{"Key":"t46","Value":"46"},{"Key":"t47","Value":"47"},{"Key":"t48","Value":"48"},{"Key":"t49","Value":"49"},{"Key":"t50","Value":"50"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Number of Tags exceed the current limit for the provided ResourceArn"}
+> UntagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","TagKeys":["t00","t01","t02","t03","t04","t05","t06","t07","t08","t09","t10","t11","t12","t13","t14","t15","t16","t17","t18","t19","t20","t21","t22","t23","t24","t25","t26","t27","t28","t29","t30","t31","t32","t33","t34","t35","t36","t37","t38","t39","t40","t41","t42","t43","t44","t45","t46","t47","t48","t49"]}
+< 200 ""
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","Tags":[{"Key":"u00","Value":"0"},{"Key":"u01","Value":"1"},{"Key":"u02","Value":"2"},{"Key":"u03","Value":"3"},{"Key":"u04","Value":"4"},{"Key":"u05","Value":"5"},{"Key":"u06","Value":"6"},{"Key":"u07","Value":"7"},{"Key":"u08","Value":"8"},{"Key":"u09","Value":"9"},{"Key":"u10","Value":"10"},{"Key":"u11","Value":"11"},{"Key":"u12","Value":"12"},{"Key":"u13","Value":"13"},{"Key":"u14","Value":"14"},{"Key":"u15","Value":"15"},{"Key":"u16","Value":"16"},{"Key":"u17","Value":"17"},{"Key":"u18","Value":"18"},{"Key":"u19","Value":"19"},{"Key":"u20","Value":"20"},{"Key":"u21","Value":"21"},{"Key":"u22","Value":"22"},{"Key":"u23","Value":"23"},{"Key":"u24","Value":"24"},{"Key":"u25","Value":"25"},{"Key":"u26","Value":"26"},{"Key":"u27","Value":"27"},{"Key":"u28","Value":"28"},{"Key":"u29","Value":"29"},{"Key":"u30","Value":"30"},{"Key":"u31","Value":"31"},{"Key":"u32","Value":"32"},{"Key":"u33","Value":"33"},{"Key":"u34","Value":"34"},{"Key":"u35","Value":"35"},{"Key":"u36","Value":"36"},{"Key":"u37","Value":"37"},{"Key":"u38","Value":"38"},{"Key":"u39","Value":"39"},{"Key":"u40","Value":"40"},{"Key":"u41","Value":"41"},{"Key":"u42","Value":"42"},{"Key":"u43","Value":"43"},{"Key":"u44","Value":"44"},{"Key":"u45","Value":"45"},{"Key":"u46","Value":"46"},{"Key":"u47","Value":"47"},{"Key":"u48","Value":"48"},{"Key":"u49","Value":"49"},{"Key":"u50","Value":"50"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Number of Tags exceed the current limit for the provided ResourceArn"}
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","Tags":[{"Key":"u00","Value":"0"},{"Key":"u01","Value":"1"},{"Key":"u02","Value":"2"},{"Key":"u03","Value":"3"},{"Key":"u04","Value":"4"},{"Key":"u05","Value":"5"},{"Key":"u06","Value":"6"},{"Key":"u07","Value":"7"},{"Key":"u08","Value":"8"},{"Key":"u09","Value":"9"},{"Key":"u10","Value":"10"},{"Key":"u11","Value":"11"},{"Key":"u12","Value":"12"},{"Key":"u13","Value":"13"},{"Key":"u14","Value":"14"},{"Key":"u15","Value":"15"},{"Key":"u16","Value":"16"},{"Key":"u17","Value":"17"},{"Key":"u18","Value":"18"},{"Key":"u19","Value":"19"},{"Key":"u20","Value":"20"},{"Key":"u21","Value":"21"},{"Key":"u22","Value":"22"},{"Key":"u23","Value":"23"},{"Key":"u24","Value":"24"},{"Key":"u25","Value":"25"},{"Key":"u26","Value":"26"},{"Key":"u27","Value":"27"},{"Key":"u28","Value":"28"},{"Key":"u29","Value":"29"},{"Key":"u30","Value":"30"},{"Key":"u31","Value":"31"},{"Key":"u32","Value":"32"},{"Key":"u33","Value":"33"},{"Key":"u34","Value":"34"},{"Key":"u35","Value":"35"},{"Key":"u36","Value":"36"},{"Key":"u37","Value":"37"},{"Key":"u38","Value":"38"},{"Key":"u39","Value":"39"},{"Key":"u40","Value":"40"},{"Key":"u41","Value":"41"},{"Key":"u42","Value":"42"},{"Key":"u43","Value":"43"},{"Key":"u44","Value":"44"},{"Key":"u45","Value":"45"},{"Key":"u46","Value":"46"},{"Key":"u47","Value":"47"},{"Key":"u48","Value":"48"},{"Key":"u49","Value":"49"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Number of Tags exceed the current limit for the provided ResourceArn"}
+> UntagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","TagKeys":["u00","u01","u02","u03","u04","u05","u06","u07","u08","u09","u10","u11","u12","u13","u14","u15","u16","u17","u18","u19","u20","u21","u22","u23","u24","u25","u26","u27","u28","u29","u30","u31","u32","u33","u34","u35","u36","u37","u38","u39","u40","u41","u42","u43","u44","u45","u46","u47","u48","u49"]}
+< 200 ""
+# index ARNs cannot be tagged
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg/index/gsi","Tags":[{"Key":"hi","Value":"hello"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ResourceArn: Invalid table ARN `arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg/index/gsi` - expected `` after table name `alt_tbl_tg`"}
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg/index/lsi","Tags":[{"Key":"hi","Value":"hello"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ResourceArn: Invalid table ARN `arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg/index/lsi` - expected `` after table name `alt_tbl_tg`"}
+> UntagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg/index/gsi","TagKeys":["hi"]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ResourceArn: Invalid table ARN `arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg/index/gsi` - expected `` after table name `alt_tbl_tg`"}
+# system:write_isolation values
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","Tags":[{"Key":"system:write_isolation","Value":"f"}]}
+< 200 ""
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","Tags":[{"Key":"system:write_isolation","Value":"forbid"}]}
+< 200 ""
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","Tags":[{"Key":"system:write_isolation","Value":"forbid_rmw"}]}
+< 200 ""
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","Tags":[{"Key":"system:write_isolation","Value":"a"}]}
+< 200 ""
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","Tags":[{"Key":"system:write_isolation","Value":"always"}]}
+< 200 ""
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","Tags":[{"Key":"system:write_isolation","Value":"always_use_lwt"}]}
+< 200 ""
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","Tags":[{"Key":"system:write_isolation","Value":"o"}]}
+< 200 ""
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","Tags":[{"Key":"system:write_isolation","Value":"only_rmw_uses_lwt"}]}
+< 200 ""
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","Tags":[{"Key":"system:write_isolation","Value":"u"}]}
+< 200 ""
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","Tags":[{"Key":"system:write_isolation","Value":"unsafe"}]}
+< 200 ""
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","Tags":[{"Key":"system:write_isolation","Value":"unsafe_rmw"}]}
+< 200 ""
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","Tags":[{"Key":"system:write_isolation","Value":"bah"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Incorrect write isolation tag bah. Allowed values: {\"unsafe_rmw\", \"unsafe\", \"u\", \"o\", \"always_use_lwt\", \"always\", \"only_rmw_uses_lwt\", \"a\", \"forbid_rmw\", \"forbid\", \"f\"}"}
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","Tags":[{"Key":"system:write_isolation","Value":""}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Incorrect write isolation tag . Allowed values: {\"unsafe_rmw\", \"unsafe\", \"u\", \"o\", \"always_use_lwt\", \"always\", \"only_rmw_uses_lwt\", \"a\", \"forbid_rmw\", \"forbid\", \"f\"}"}
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","Tags":[{"Key":"system:write_isolation","Value":"ALWAYS"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Incorrect write isolation tag ALWAYS. Allowed values: {\"unsafe_rmw\", \"unsafe\", \"u\", \"o\", \"always_use_lwt\", \"always\", \"only_rmw_uses_lwt\", \"a\", \"forbid_rmw\", \"forbid\", \"f\"}"}
+> ListTagsOfResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg"}
+< 200 {"Tags":[{"Key":"system:write_isolation","Value":"unsafe_rmw"},{"Key":"t50","Value":"x"}]}
+# other system: tags
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","Tags":[{"Key":"system:initial_tablets","Value":"4"}]}
+< 200 ""
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","Tags":[{"Key":"system:other","Value":"x"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Tag key 'system:other' is reserved for internal use"}
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","Tags":[{"Key":"system:","Value":"x"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Tag key 'system:' is reserved for internal use"}
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","Tags":[{"Key":"System:write_isolation","Value":"bah"}]}
+< 200 ""
+> ListTagsOfResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg"}
+< 200 {"Tags":[{"Key":"System:write_isolation","Value":"bah"},{"Key":"system:initial_tablets","Value":"4"},{"Key":"system:write_isolation","Value":"unsafe_rmw"},{"Key":"t50","Value":"x"}]}
+> UntagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","TagKeys":["system:write_isolation","system:initial_tablets","system:other","system:","System:write_isolation"]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Tag key 'system:other' is reserved for internal use"}
+> ListTagsOfResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg"}
+< 200 {"Tags":[{"Key":"System:write_isolation","Value":"bah"},{"Key":"system:initial_tablets","Value":"4"},{"Key":"system:write_isolation","Value":"unsafe_rmw"},{"Key":"t50","Value":"x"}]}
+# bad tag in a batch: nothing is applied
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","Tags":[{"Key":"good","Value":"1"},{"Key":"bad!","Value":"2"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"A tag Key can only contain letters, spaces, and [+-=._:/]"}
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","Tags":[{"Key":"good","Value":"1"},{"Key":"system:write_isolation","Value":"bah"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Incorrect write isolation tag bah. Allowed values: {\"unsafe_rmw\", \"unsafe\", \"u\", \"o\", \"always_use_lwt\", \"always\", \"only_rmw_uses_lwt\", \"a\", \"forbid_rmw\", \"forbid\", \"f\"}"}
+> ListTagsOfResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg"}
+< 200 {"Tags":[{"Key":"System:write_isolation","Value":"bah"},{"Key":"system:initial_tablets","Value":"4"},{"Key":"system:write_isolation","Value":"unsafe_rmw"},{"Key":"t50","Value":"x"}]}
+# TableName-based errors after deletion
+> DeleteTable {"TableName":"alt_tbl_tg"}
+< 200 {"TableDescription":{"TableName":"alt_tbl_tg","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0}}}
+> ListTagsOfResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException","message":"ResourceArn: Invalid table ARN `arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg` - not found"}
+> TagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","Tags":[{"Key":"a","Value":"b"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException","message":"ResourceArn: Invalid table ARN `arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg` - not found"}
+> UntagResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","TagKeys":["a"]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException","message":"ResourceArn: Invalid table ARN `arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg` - not found"}
+# Tags at CreateTable: validation (table must not be created)
+> CreateTable {"TableName":"alt_tbl_tg","BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"Tags":[{"Key":"bad!","Value":"x"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"A tag Key can only contain letters, spaces, and [+-=._:/]"}
+> ListTagsOfResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException","message":"ResourceArn: Invalid table ARN `arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg` - not found"}
+> DeleteTable {"TableName":"alt_tbl_tg"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException","message":"Requested resource not found: Table: alt_tbl_tg not found"}
+> CreateTable {"TableName":"alt_tbl_tg","BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"Tags":[{"Key":"system:write_isolation","Value":"dog"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Incorrect write isolation tag dog. Allowed values: {\"unsafe_rmw\", \"unsafe\", \"u\", \"o\", \"always_use_lwt\", \"always\", \"only_rmw_uses_lwt\", \"a\", \"forbid_rmw\", \"forbid\", \"f\"}"}
+> ListTagsOfResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException","message":"ResourceArn: Invalid table ARN `arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg` - not found"}
+> DeleteTable {"TableName":"alt_tbl_tg"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException","message":"Requested resource not found: Table: alt_tbl_tg not found"}
+> CreateTable {"TableName":"alt_tbl_tg","BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"Tags":[{"Key":"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx","Value":"x"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"A tag Key is limited to 128 characters"}
+> ListTagsOfResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException","message":"ResourceArn: Invalid table ARN `arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg` - not found"}
+> DeleteTable {"TableName":"alt_tbl_tg"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException","message":"Requested resource not found: Table: alt_tbl_tg not found"}
+> CreateTable {"TableName":"alt_tbl_tg","BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"Tags":[{"Key":"t0","Value":"x"},{"Key":"t1","Value":"x"},{"Key":"t2","Value":"x"},{"Key":"t3","Value":"x"},{"Key":"t4","Value":"x"},{"Key":"t5","Value":"x"},{"Key":"t6","Value":"x"},{"Key":"t7","Value":"x"},{"Key":"t8","Value":"x"},{"Key":"t9","Value":"x"},{"Key":"t10","Value":"x"},{"Key":"t11","Value":"x"},{"Key":"t12","Value":"x"},{"Key":"t13","Value":"x"},{"Key":"t14","Value":"x"},{"Key":"t15","Value":"x"},{"Key":"t16","Value":"x"},{"Key":"t17","Value":"x"},{"Key":"t18","Value":"x"},{"Key":"t19","Value":"x"},{"Key":"t20","Value":"x"},{"Key":"t21","Value":"x"},{"Key":"t22","Value":"x"},{"Key":"t23","Value":"x"},{"Key":"t24","Value":"x"},{"Key":"t25","Value":"x"},{"Key":"t26","Value":"x"},{"Key":"t27","Value":"x"},{"Key":"t28","Value":"x"},{"Key":"t29","Value":"x"},{"Key":"t30","Value":"x"},{"Key":"t31","Value":"x"},{"Key":"t32","Value":"x"},{"Key":"t33","Value":"x"},{"Key":"t34","Value":"x"},{"Key":"t35","Value":"x"},{"Key":"t36","Value":"x"},{"Key":"t37","Value":"x"},{"Key":"t38","Value":"x"},{"Key":"t39","Value":"x"},{"Key":"t40","Value":"x"},{"Key":"t41","Value":"x"},{"Key":"t42","Value":"x"},{"Key":"t43","Value":"x"},{"Key":"t44","Value":"x"},{"Key":"t45","Value":"x"},{"Key":"t46","Value":"x"},{"Key":"t47","Value":"x"},{"Key":"t48","Value":"x"},{"Key":"t49","Value":"x"},{"Key":"t50","Value":"x"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Number of Tags exceed the current limit for the provided ResourceArn"}
+> ListTagsOfResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException","message":"ResourceArn: Invalid table ARN `arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg` - not found"}
+> DeleteTable {"TableName":"alt_tbl_tg"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException","message":"Requested resource not found: Table: alt_tbl_tg not found"}
+> CreateTable {"TableName":"alt_tbl_tg","BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"Tags":"x"}
+< 200 {"TableDescription":{"TableName":"alt_tbl_tg","BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"Tags":"x","CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+> ListTagsOfResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg"}
+< 200 {"Tags":[]}
+> DeleteTable {"TableName":"alt_tbl_tg"}
+< 200 {"TableDescription":{"TableName":"alt_tbl_tg","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0}}}
+> CreateTable {"TableName":"alt_tbl_tg","BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"Tags":[{"Key":"a"}]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"string Key and Value required"}
+> ListTagsOfResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException","message":"ResourceArn: Invalid table ARN `arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg` - not found"}
+> DeleteTable {"TableName":"alt_tbl_tg"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException","message":"Requested resource not found: Table: alt_tbl_tg not found"}
+> CreateTable {"TableName":"alt_tbl_tg","BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"Tags":[{"Key":"a","Value":"1"},{"Key":"a","Value":"2"}]}
+< 200 {"TableDescription":{"TableName":"alt_tbl_tg","BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"Tags":[{"Key":"a","Value":"1"},{"Key":"a","Value":"2"}],"CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+> ListTagsOfResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg"}
+< 200 {"Tags":[{"Key":"a","Value":"2"}]}
+> DeleteTable {"TableName":"alt_tbl_tg"}
+< 200 {"TableDescription":{"TableName":"alt_tbl_tg","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0}}}
+> CreateTable {"TableName":"alt_tbl_tg","BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"Tags":[{"Key":"system:initial_tablets","Value":"none"}]}
+< 200 {"TableDescription":{"TableName":"alt_tbl_tg","BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"Tags":[{"Key":"system:initial_tablets","Value":"none"}],"CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+> ListTagsOfResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg"}
+< 200 {"Tags":[{"Key":"system:initial_tablets","Value":"none"}]}
+> DeleteTable {"TableName":"alt_tbl_tg"}
+< 200 {"TableDescription":{"TableName":"alt_tbl_tg","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0}}}
+> CreateTable {"TableName":"alt_tbl_tg","BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"Tags":[{"Key":"system:initial_tablets","Value":"dog"}]}
+< 200 {"TableDescription":{"TableName":"alt_tbl_tg","BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"Tags":[{"Key":"system:initial_tablets","Value":"dog"}],"CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+> ListTagsOfResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg"}
+< 200 {"Tags":[{"Key":"system:initial_tablets","Value":"dog"}]}
+> DeleteTable {"TableName":"alt_tbl_tg"}
+< 200 {"TableDescription":{"TableName":"alt_tbl_tg","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0}}}
+> CreateTable {"TableName":"alt_tbl_tg","BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"Tags":[{"Key":"system:initial_tablets","Value":"-1"}]}
+< 200 {"TableDescription":{"TableName":"alt_tbl_tg","BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"Tags":[{"Key":"system:initial_tablets","Value":"-1"}],"CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+> ListTagsOfResource {"ResourceArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg"}
+< 200 {"Tags":[{"Key":"system:initial_tablets","Value":"-1"}]}
+> DeleteTable {"TableName":"alt_tbl_tg"}
+< 200 {"TableDescription":{"TableName":"alt_tbl_tg","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_tbl_tg:scylla:table/alt_tbl_tg","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0}}}

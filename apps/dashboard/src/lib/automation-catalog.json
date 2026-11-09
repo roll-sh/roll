@@ -1,0 +1,1294 @@
+{
+  "steps": [
+    {
+      "config": {
+        "properties": {
+          "mode": {
+            "enum": [
+              "queue",
+              "steer"
+            ],
+            "x-order": 2
+          },
+          "text": {
+            "description": "The message",
+            "format": "template-long",
+            "type": "string",
+            "x-order": 1
+          },
+          "thread": {
+            "description": "A thread id, e.g. {{steps.start.thread}} (default: the run's latest thread)",
+            "format": "roll-thread",
+            "type": "string",
+            "x-order": 0
+          }
+        },
+        "required": [
+          "text"
+        ],
+        "type": "object"
+      },
+      "description": "Send a message to the thread: a new run when it's idle; queued after the active run, or steering it.",
+      "kind": "agent.message",
+      "output": [
+        "thread",
+        "run"
+      ],
+      "title": "Message the agent"
+    },
+    {
+      "config": {
+        "properties": {
+          "land": {
+            "type": "boolean",
+            "x-order": 2
+          },
+          "message": {
+            "description": "The commit message (default: the thread's title)",
+            "format": "template",
+            "type": "string",
+            "x-order": 1
+          },
+          "thread": {
+            "description": "A thread id, e.g. {{steps.start.thread}} (default: the run's latest thread)",
+            "format": "roll-thread",
+            "type": "string",
+            "x-order": 0
+          }
+        },
+        "type": "object"
+      },
+      "description": "Commit the thread's worktree on its branch and push it: a roll code change (land sends it to landing: the merge queue on queue repos, else the landing rules).",
+      "kind": "agent.publish",
+      "output": [
+        "branch",
+        "commit",
+        "change",
+        "url",
+        "landing"
+      ],
+      "title": "Publish the agent's work"
+    },
+    {
+      "config": {
+        "properties": {
+          "answers": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object",
+            "x-order": 3
+          },
+          "first_option": {
+            "type": "boolean",
+            "x-order": 4
+          },
+          "message": {
+            "description": "A note to the agent with a decline",
+            "format": "template",
+            "type": "string",
+            "x-order": 5
+          },
+          "otherwise": {
+            "enum": [
+              "accept",
+              "accept_for_session",
+              "decline",
+              "cancel"
+            ],
+            "x-order": 2
+          },
+          "rules": {
+            "items": {
+              "properties": {
+                "action": {
+                  "enum": [
+                    "command",
+                    "file_change",
+                    "permission",
+                    "tool",
+                    "plan"
+                  ],
+                  "x-order": 0
+                },
+                "command": {
+                  "description": "A glob on the command",
+                  "type": "string",
+                  "x-order": 1
+                },
+                "decision": {
+                  "enum": [
+                    "accept",
+                    "accept_for_session",
+                    "decline",
+                    "cancel"
+                  ],
+                  "x-order": 4
+                },
+                "files": {
+                  "description": "A glob every changed file matches",
+                  "type": "string",
+                  "x-order": 2
+                },
+                "tool": {
+                  "description": "A glob on the tool",
+                  "type": "string",
+                  "x-order": 3
+                }
+              },
+              "required": [
+                "decision"
+              ],
+              "type": "object"
+            },
+            "type": "array",
+            "x-order": 1
+          },
+          "thread": {
+            "description": "A thread id, e.g. {{steps.start.thread}} (default: the run's latest thread)",
+            "format": "roll-thread",
+            "type": "string",
+            "x-order": 0
+          }
+        },
+        "type": "object"
+      },
+      "description": "Answer the thread's pending approvals by rules (the first that matches decides, else `otherwise`) and its questions (by id or header, or their first option). What no rule decides is left for you.",
+      "kind": "agent.respond",
+      "output": [
+        "answered",
+        "left"
+      ],
+      "title": "Answer the agent"
+    },
+    {
+      "config": {
+        "properties": {
+          "project": {
+            "format": "roll-project",
+            "oneOf": [
+              {
+                "properties": {
+                  "id": {
+                    "description": "A project id (prj_…)",
+                    "type": "string",
+                    "x-order": 1
+                  },
+                  "type": {
+                    "const": "id",
+                    "x-order": 0
+                  }
+                },
+                "required": [
+                  "type",
+                  "id"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "path": {
+                    "description": "Where to clone it when the machine has none",
+                    "type": "string",
+                    "x-order": 2
+                  },
+                  "repo": {
+                    "description": "A roll code repo (repo or owner/repo)",
+                    "type": "string",
+                    "x-order": 1
+                  },
+                  "type": {
+                    "const": "repo",
+                    "x-order": 0
+                  }
+                },
+                "required": [
+                  "type",
+                  "repo"
+                ],
+                "type": "object"
+              }
+            ],
+            "x-order": 2
+          },
+          "script": {
+            "description": "The script's id",
+            "type": "string",
+            "x-order": 0
+          },
+          "target": {
+            "format": "roll-target",
+            "oneOf": [
+              {
+                "properties": {
+                  "machine": {
+                    "description": "A machine's id (mch_…) or name",
+                    "type": "string",
+                    "x-order": 1
+                  },
+                  "type": {
+                    "const": "machine",
+                    "x-order": 0
+                  }
+                },
+                "required": [
+                  "type",
+                  "machine"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "keep": {
+                    "description": "Keep the sandbox when the run ends",
+                    "type": "boolean",
+                    "x-order": 2
+                  },
+                  "size": {
+                    "description": "A sandbox size (default standard)",
+                    "type": "string",
+                    "x-order": 1
+                  },
+                  "type": {
+                    "const": "sandbox",
+                    "x-order": 0
+                  }
+                },
+                "required": [
+                  "type"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "type": {
+                    "const": "any_online",
+                    "x-order": 0
+                  }
+                },
+                "required": [
+                  "type"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "type": {
+                    "const": "project_machine",
+                    "x-order": 0
+                  }
+                },
+                "required": [
+                  "type"
+                ],
+                "type": "object"
+              }
+            ],
+            "x-order": 3
+          },
+          "thread": {
+            "description": "A thread id, e.g. {{steps.start.thread}} (default: the run's latest thread)",
+            "format": "roll-thread",
+            "type": "string",
+            "x-order": 1
+          }
+        },
+        "required": [
+          "script"
+        ],
+        "type": "object"
+      },
+      "description": "Run one of the project's scripts in a terminal: in the thread's worktree when thread is set, else in the project's checkout.",
+      "kind": "agent.script",
+      "output": [
+        "terminal",
+        "machine"
+      ],
+      "title": "Run a project script"
+    },
+    {
+      "config": {
+        "properties": {
+          "action": {
+            "enum": [
+              "settle",
+              "archive",
+              "unsettle"
+            ],
+            "x-order": 1
+          },
+          "thread": {
+            "description": "A thread id, e.g. {{steps.start.thread}} (default: the run's latest thread)",
+            "format": "roll-thread",
+            "type": "string",
+            "x-order": 0
+          }
+        },
+        "type": "object"
+      },
+      "description": "Settle, archive or un-settle the thread.",
+      "kind": "agent.settle",
+      "output": [
+        "thread",
+        "action"
+      ],
+      "title": "Settle or archive"
+    },
+    {
+      "config": {
+        "properties": {
+          "effort": {
+            "description": "low … max",
+            "type": "string",
+            "x-order": 6
+          },
+          "interaction_mode": {
+            "enum": [
+              "default",
+              "plan"
+            ],
+            "x-order": 9
+          },
+          "model": {
+            "description": "A model id",
+            "format": "roll-model",
+            "type": "string",
+            "x-order": 5
+          },
+          "options": {
+            "description": "The model's other options by id (a speed, a context window, …)",
+            "type": "object",
+            "x-order": 7
+          },
+          "orchestrator": {
+            "description": "Plan and delegate to subagents",
+            "type": "boolean",
+            "x-order": 11
+          },
+          "project": {
+            "format": "roll-project",
+            "oneOf": [
+              {
+                "properties": {
+                  "id": {
+                    "description": "A project id (prj_…)",
+                    "type": "string",
+                    "x-order": 1
+                  },
+                  "type": {
+                    "const": "id",
+                    "x-order": 0
+                  }
+                },
+                "required": [
+                  "type",
+                  "id"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "path": {
+                    "description": "Where to clone it when the machine has none",
+                    "type": "string",
+                    "x-order": 2
+                  },
+                  "repo": {
+                    "description": "A roll code repo (repo or owner/repo)",
+                    "type": "string",
+                    "x-order": 1
+                  },
+                  "type": {
+                    "const": "repo",
+                    "x-order": 0
+                  }
+                },
+                "required": [
+                  "type",
+                  "repo"
+                ],
+                "type": "object"
+              }
+            ],
+            "x-order": 3
+          },
+          "prompt": {
+            "description": "What the agent is asked",
+            "format": "template-long",
+            "type": "string",
+            "x-order": 0
+          },
+          "provider": {
+            "description": "codex, claude or acp:<name>",
+            "type": "string",
+            "x-order": 4
+          },
+          "runtime_mode": {
+            "enum": [
+              "full_access",
+              "auto_edit",
+              "ask"
+            ],
+            "x-order": 8
+          },
+          "target": {
+            "format": "roll-target",
+            "oneOf": [
+              {
+                "properties": {
+                  "machine": {
+                    "description": "A machine's id (mch_…) or name",
+                    "type": "string",
+                    "x-order": 1
+                  },
+                  "type": {
+                    "const": "machine",
+                    "x-order": 0
+                  }
+                },
+                "required": [
+                  "type",
+                  "machine"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "keep": {
+                    "description": "Keep the sandbox when the run ends",
+                    "type": "boolean",
+                    "x-order": 2
+                  },
+                  "size": {
+                    "description": "A sandbox size (default standard)",
+                    "type": "string",
+                    "x-order": 1
+                  },
+                  "type": {
+                    "const": "sandbox",
+                    "x-order": 0
+                  }
+                },
+                "required": [
+                  "type"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "type": {
+                    "const": "any_online",
+                    "x-order": 0
+                  }
+                },
+                "required": [
+                  "type"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "type": {
+                    "const": "project_machine",
+                    "x-order": 0
+                  }
+                },
+                "required": [
+                  "type"
+                ],
+                "type": "object"
+              }
+            ],
+            "x-order": 2
+          },
+          "title": {
+            "description": "The thread's title",
+            "format": "template",
+            "type": "string",
+            "x-order": 1
+          },
+          "worktree": {
+            "description": "Its own git worktree",
+            "type": "boolean",
+            "x-order": 10
+          }
+        },
+        "required": [
+          "prompt"
+        ],
+        "type": "object"
+      },
+      "description": "Start a thread on a machine, a new sandbox, any connected machine with the project, or the project's machine. Unset fields come from the automation's defaults, then the project's.",
+      "kind": "agent.start",
+      "output": [
+        "machine",
+        "project",
+        "thread",
+        "sandbox"
+      ],
+      "title": "Start an agent"
+    },
+    {
+      "config": {
+        "properties": {
+          "on_timeout": {
+            "enum": [
+              "fail",
+              "continue"
+            ],
+            "x-order": 3
+          },
+          "thread": {
+            "description": "A thread id, e.g. {{steps.start.thread}} (default: the run's latest thread)",
+            "format": "roll-thread",
+            "type": "string",
+            "x-order": 0
+          },
+          "timeout_s": {
+            "minimum": 1,
+            "type": "integer",
+            "x-order": 2
+          },
+          "until": {
+            "items": {
+              "enum": [
+                "done",
+                "failed",
+                "waiting",
+                "settled"
+              ]
+            },
+            "type": "array",
+            "x-order": 1
+          }
+        },
+        "type": "object"
+      },
+      "description": "Wait until the thread is done, failed, waiting on you or settled (default done or failed), at most timeout_s (default an hour).",
+      "kind": "agent.wait",
+      "output": [
+        "outcome",
+        "thread",
+        "run",
+        "status",
+        "error",
+        "message"
+      ],
+      "title": "Wait for the agent"
+    },
+    {
+      "config": {
+        "properties": {
+          "seconds": {
+            "maximum": 604800,
+            "minimum": 1,
+            "type": "integer",
+            "x-order": 0
+          }
+        },
+        "required": [
+          "seconds"
+        ],
+        "type": "object"
+      },
+      "description": "Wait this long (a restart doesn't start it over).",
+      "kind": "delay",
+      "title": "Wait"
+    },
+    {
+      "config": {
+        "properties": {
+          "body": {
+            "description": "More about it",
+            "format": "template-long",
+            "type": "string",
+            "x-order": 1
+          },
+          "level": {
+            "enum": [
+              "info",
+              "success",
+              "warning",
+              "error"
+            ],
+            "x-order": 2
+          },
+          "link": {
+            "description": "Where it links",
+            "format": "template",
+            "type": "string",
+            "x-order": 3
+          },
+          "title": {
+            "description": "The notice",
+            "format": "template",
+            "type": "string",
+            "x-order": 0
+          }
+        },
+        "required": [
+          "title"
+        ],
+        "type": "object"
+      },
+      "description": "A notice in the dashboard (a toast on every open device).",
+      "kind": "notify",
+      "output": [
+        "id"
+      ],
+      "title": "Notify"
+    },
+    {
+      "config": {
+        "properties": {
+          "body": {
+            "description": "A template, or JSON whose strings are templates (default: the event)",
+            "format": "template-long",
+            "x-order": 3
+          },
+          "headers": {
+            "additionalProperties": {
+              "format": "template",
+              "type": "string"
+            },
+            "type": "object",
+            "x-order": 2
+          },
+          "method": {
+            "enum": [
+              "GET",
+              "POST",
+              "PUT",
+              "PATCH",
+              "DELETE"
+            ],
+            "x-order": 1
+          },
+          "ok_statuses": {
+            "items": {
+              "type": "integer"
+            },
+            "type": "array",
+            "x-order": 5
+          },
+          "secret": {
+            "description": "One of the automation's secrets to sign with",
+            "format": "roll-secret",
+            "type": "string",
+            "x-order": 4
+          },
+          "url": {
+            "description": "Where to send it",
+            "format": "template",
+            "type": "string",
+            "x-order": 0
+          }
+        },
+        "required": [
+          "url"
+        ],
+        "type": "object"
+      },
+      "description": "An HTTP request to a public address (no redirects, private addresses refused, the answer read up to 1 MiB). With secret, the body is signed like roll's webhooks (X-Roll-Signature-256). Header values may use {{secrets.<name>}}.",
+      "kind": "webhook",
+      "output": [
+        "status",
+        "headers",
+        "body"
+      ],
+      "title": "Call a webhook"
+    }
+  ],
+  "triggers": [
+    {
+      "description": "The owner's agents: threads starting, finishing, failing, waiting on you or settling, requests opening.",
+      "events": [
+        {
+          "fields": [
+            "machine",
+            "project",
+            "thread.id",
+            "thread.title",
+            "thread.status",
+            "thread.provider",
+            "thread.change"
+          ],
+          "kind": "thread.created",
+          "sample": {
+            "machine": "mch_0123456789abcd",
+            "project": "prj_0123456789abcd",
+            "thread": {
+              "change": null,
+              "error": null,
+              "id": "thr_0123456789abcd",
+              "model": "gpt-5.5",
+              "orchestrator": false,
+              "parent": null,
+              "project": "prj_0123456789abcd",
+              "provider": "codex",
+              "status": "running",
+              "title": "Fix the flaky queue test",
+              "work": null,
+              "worktree": null
+            }
+          },
+          "title": "thread.created"
+        },
+        {
+          "fields": [
+            "machine",
+            "project",
+            "thread.id",
+            "thread.title",
+            "thread.status",
+            "thread.provider",
+            "thread.change",
+            "run.status",
+            "run.error",
+            "run.prompt"
+          ],
+          "kind": "thread.done",
+          "sample": {
+            "machine": "mch_0123456789abcd",
+            "project": "prj_0123456789abcd",
+            "run": {
+              "error": null,
+              "id": "run_0123456789abcd",
+              "model": "gpt-5.5",
+              "ordinal": 1,
+              "prompt": "Find out why the queue test is flaky and fix it.",
+              "provider": "codex",
+              "stat": null,
+              "status": "completed"
+            },
+            "thread": {
+              "change": null,
+              "error": null,
+              "id": "thr_0123456789abcd",
+              "model": "gpt-5.5",
+              "orchestrator": false,
+              "parent": null,
+              "project": "prj_0123456789abcd",
+              "provider": "codex",
+              "status": "running",
+              "title": "Fix the flaky queue test",
+              "work": null,
+              "worktree": null
+            }
+          },
+          "title": "thread.done"
+        },
+        {
+          "fields": [
+            "machine",
+            "project",
+            "thread.id",
+            "thread.title",
+            "thread.status",
+            "thread.provider",
+            "thread.change",
+            "run.status",
+            "run.error",
+            "run.prompt"
+          ],
+          "kind": "thread.failed",
+          "sample": {
+            "machine": "mch_0123456789abcd",
+            "project": "prj_0123456789abcd",
+            "run": {
+              "error": "cargo test failed: 2 tests",
+              "id": "run_0123456789abcd",
+              "model": "gpt-5.5",
+              "ordinal": 1,
+              "prompt": "Find out why the queue test is flaky and fix it.",
+              "provider": "codex",
+              "stat": null,
+              "status": "failed"
+            },
+            "thread": {
+              "change": null,
+              "error": null,
+              "id": "thr_0123456789abcd",
+              "model": "gpt-5.5",
+              "orchestrator": false,
+              "parent": null,
+              "project": "prj_0123456789abcd",
+              "provider": "codex",
+              "status": "running",
+              "title": "Fix the flaky queue test",
+              "work": null,
+              "worktree": null
+            }
+          },
+          "title": "thread.failed"
+        },
+        {
+          "fields": [
+            "machine",
+            "project",
+            "thread.id",
+            "thread.title",
+            "thread.status",
+            "thread.provider",
+            "thread.change"
+          ],
+          "kind": "thread.waiting",
+          "sample": {
+            "machine": "mch_0123456789abcd",
+            "project": "prj_0123456789abcd",
+            "thread": {
+              "change": null,
+              "error": null,
+              "id": "thr_0123456789abcd",
+              "model": "gpt-5.5",
+              "orchestrator": false,
+              "parent": null,
+              "project": "prj_0123456789abcd",
+              "provider": "codex",
+              "status": "waiting",
+              "title": "Fix the flaky queue test",
+              "work": null,
+              "worktree": null
+            }
+          },
+          "title": "thread.waiting"
+        },
+        {
+          "fields": [
+            "machine",
+            "project",
+            "thread.id",
+            "thread.title",
+            "thread.status",
+            "thread.provider",
+            "thread.change"
+          ],
+          "kind": "thread.settled",
+          "sample": {
+            "machine": "mch_0123456789abcd",
+            "project": "prj_0123456789abcd",
+            "thread": {
+              "change": null,
+              "error": null,
+              "id": "thr_0123456789abcd",
+              "model": "gpt-5.5",
+              "orchestrator": false,
+              "parent": null,
+              "project": "prj_0123456789abcd",
+              "provider": "codex",
+              "status": "running",
+              "title": "Fix the flaky queue test",
+              "work": null,
+              "worktree": null
+            }
+          },
+          "title": "thread.settled"
+        },
+        {
+          "fields": [
+            "machine",
+            "project",
+            "thread.id",
+            "thread.title",
+            "thread.status",
+            "thread.provider",
+            "thread.change",
+            "request.body.type",
+            "request.body.action",
+            "request.body.command"
+          ],
+          "kind": "request.opened",
+          "sample": {
+            "machine": "mch_0123456789abcd",
+            "project": "prj_0123456789abcd",
+            "request": {
+              "body": {
+                "action": "command",
+                "command": "cargo test -p queue",
+                "cwd": "/src/app",
+                "decisions": [
+                  "accept",
+                  "decline"
+                ],
+                "input": null,
+                "title": "Run `cargo test`",
+                "type": "approval"
+              },
+              "created_at": 1,
+              "id": "req_0123456789abcd",
+              "node": "nod_0123456789abcd",
+              "run": "run_0123456789abcd",
+              "status": "pending",
+              "thread": "thr_0123456789abcd"
+            },
+            "run": {
+              "id": "run_0123456789abcd"
+            },
+            "thread": {
+              "change": null,
+              "error": null,
+              "id": "thr_0123456789abcd",
+              "model": "gpt-5.5",
+              "orchestrator": false,
+              "parent": null,
+              "project": "prj_0123456789abcd",
+              "provider": "codex",
+              "status": "running",
+              "title": "Fix the flaky queue test",
+              "work": null,
+              "worktree": null
+            }
+          },
+          "title": "request.opened"
+        }
+      ],
+      "source": "agent",
+      "title": "Agents"
+    },
+    {
+      "description": "Events of the owner's repos: changes, checks, reviews, the merge queue, landings, pushes, work items, previews.",
+      "events": [
+        {
+          "fields": [
+            "repo",
+            "ref",
+            "message",
+            "author",
+            "change",
+            "files"
+          ],
+          "kind": "landed",
+          "sample": {
+            "at": 1762000000,
+            "author": "ada",
+            "change": "chg_0123456789abcd",
+            "changeset": "cs_0123456789abcdef",
+            "count": 1,
+            "files": [
+              "src/queue.rs"
+            ],
+            "generation": 42,
+            "git_commit": "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+            "message": "Fix the flaky queue test",
+            "ref": "main",
+            "repo": "acme/app",
+            "repo_id": "rep_0123456789abcd"
+          },
+          "title": "landed"
+        },
+        {
+          "fields": [
+            "repo",
+            "number",
+            "title",
+            "state",
+            "author",
+            "branch",
+            "draft"
+          ],
+          "kind": "change",
+          "sample": {
+            "author": "ada",
+            "base": "main",
+            "blockers": [],
+            "body": "The queue test waited on a timer.",
+            "branch": "fix-queue",
+            "checks": [],
+            "created_at": 1762000000000,
+            "draft": false,
+            "github_pr": null,
+            "github_url": null,
+            "head": "cs_0123456789abcdef",
+            "id": "chg_0123456789abcd",
+            "number": 12,
+            "repo": "acme/app",
+            "repo_id": "rep_0123456789abcd",
+            "revision": 1,
+            "state": "open",
+            "title": "Fix the flaky queue test",
+            "trusted": true,
+            "updated_at": 1762000000000,
+            "work_item": null
+          },
+          "title": "change"
+        },
+        {
+          "fields": [
+            "repo",
+            "change",
+            "verdict",
+            "reviewer.name",
+            "reviewer.kind",
+            "source"
+          ],
+          "kind": "review",
+          "sample": {
+            "body": "Looks right.",
+            "change": "chg_0123456789abcd",
+            "created_at": 1762000000000,
+            "dismissed": false,
+            "head": "cs_0123456789abcdef",
+            "id": "rev_0123456789abcd",
+            "repo": "acme/app",
+            "repo_id": "rep_0123456789abcd",
+            "reviewer": {
+              "app": null,
+              "kind": "user",
+              "name": "grace"
+            },
+            "revision": 1,
+            "source": "roll",
+            "stale": false,
+            "updated_at": 1762000000000,
+            "url": null,
+            "verdict": "approve"
+          },
+          "title": "review"
+        },
+        {
+          "fields": [
+            "repo",
+            "change",
+            "path",
+            "resolved",
+            "outdated"
+          ],
+          "kind": "thread",
+          "sample": {
+            "change": "chg_0123456789abcd",
+            "comments": [
+              {
+                "author": {
+                  "app": null,
+                  "kind": "user",
+                  "name": "grace"
+                },
+                "body": "Can this wait on the event instead?",
+                "created_at": 1762000000000,
+                "id": "cmt_0123456789abcd",
+                "source": "roll",
+                "thread": "rth_0123456789abcd"
+              }
+            ],
+            "created_at": 1762000000000,
+            "id": "rth_0123456789abcd",
+            "line": 40,
+            "outdated": false,
+            "path": "src/queue.rs",
+            "repo": "acme/app",
+            "repo_id": "rep_0123456789abcd",
+            "resolved": false,
+            "review": null,
+            "revision": 1,
+            "side": "new",
+            "source": "roll",
+            "start_line": 40,
+            "updated_at": 1762000000000
+          },
+          "title": "thread"
+        },
+        {
+          "fields": [
+            "repo",
+            "change",
+            "check.name",
+            "check.status",
+            "check.source"
+          ],
+          "kind": "check",
+          "sample": {
+            "change": "chg_0123456789abcd",
+            "check": {
+              "finished_at": 1762000060000,
+              "name": "test",
+              "source": "runner",
+              "started_at": 1762000000000,
+              "status": "failure",
+              "summary": "2 tests failed",
+              "url": null
+            },
+            "repo": "acme/app",
+            "repo_id": "rep_0123456789abcd"
+          },
+          "title": "check"
+        },
+        {
+          "fields": [
+            "repo",
+            "state",
+            "paused",
+            "depth"
+          ],
+          "kind": "queue",
+          "sample": {
+            "batch": null,
+            "depth": 2,
+            "paused": false,
+            "repo": "acme/app",
+            "repo_id": "rep_0123456789abcd",
+            "state": "idle"
+          },
+          "title": "queue"
+        },
+        {
+          "fields": [
+            "repo",
+            "number",
+            "title",
+            "state",
+            "labels",
+            "priority",
+            "source"
+          ],
+          "kind": "work",
+          "sample": {
+            "body": "`test` failed on main at 4b825dc.",
+            "changes": [],
+            "claimed_by": null,
+            "created_at": 1762000000000,
+            "github_url": null,
+            "id": "wi_0123456789abcd",
+            "labels": [
+              "broken-main"
+            ],
+            "number": 7,
+            "priority": 1,
+            "repo": "acme/app",
+            "repo_id": "rep_0123456789abcd",
+            "source": "roll",
+            "state": "open",
+            "title": "main is broken: test",
+            "updated_at": 1762000000000
+          },
+          "title": "work"
+        },
+        {
+          "fields": [
+            "repo",
+            "change",
+            "preview.state",
+            "preview.url"
+          ],
+          "kind": "preview",
+          "sample": {
+            "change": "chg_0123456789abcd",
+            "preview": {
+              "created_at": 1762000000000,
+              "error": null,
+              "state": "running",
+              "url": "https://chg-12.preview.roll.sh"
+            },
+            "repo": "acme/app",
+            "repo_id": "rep_0123456789abcd"
+          },
+          "title": "preview"
+        },
+        {
+          "fields": [
+            "repo",
+            "ref",
+            "pusher",
+            "accepted"
+          ],
+          "kind": "push",
+          "sample": {
+            "accepted": true,
+            "after": "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391",
+            "before": "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+            "pusher": "ada",
+            "reason": null,
+            "ref": "refs/heads/main",
+            "repo": "acme/app",
+            "repo_id": "rep_0123456789abcd"
+          },
+          "title": "push"
+        }
+      ],
+      "source": "code",
+      "title": "roll code"
+    },
+    {
+      "description": "Every so many seconds (at least 60).",
+      "events": [
+        {
+          "fields": [
+            "at",
+            "scheduled"
+          ],
+          "kind": "tick",
+          "sample": {
+            "at": 1762000000000,
+            "scheduled": 1762000000000
+          },
+          "title": "Tick"
+        }
+      ],
+      "source": "interval",
+      "title": "Every so often"
+    },
+    {
+      "description": "Run it from the dashboard, `roll agent automation run`, or the MCP tool.",
+      "events": [
+        {
+          "fields": [
+            "input",
+            "by"
+          ],
+          "kind": "run",
+          "sample": {
+            "by": "acme",
+            "input": {
+              "version": "1.4.0"
+            }
+          },
+          "title": "Run"
+        }
+      ],
+      "source": "manual",
+      "title": "By hand"
+    },
+    {
+      "description": "A cron expression in a time zone.",
+      "events": [
+        {
+          "fields": [
+            "at",
+            "scheduled"
+          ],
+          "kind": "tick",
+          "sample": {
+            "at": 1762000000000,
+            "scheduled": 1762000000000
+          },
+          "title": "Tick"
+        }
+      ],
+      "source": "schedule",
+      "title": "On a schedule"
+    },
+    {
+      "description": "A POST to the automation's own URL, signed with its secret (roll's or GitHub's signature).",
+      "events": [
+        {
+          "fields": [
+            "body",
+            "headers"
+          ],
+          "kind": "post",
+          "sample": {
+            "body": {
+              "ref": "main",
+              "status": "green"
+            },
+            "headers": {
+              "content-type": "application/json"
+            }
+          },
+          "title": "Post"
+        }
+      ],
+      "source": "webhook",
+      "title": "A webhook"
+    }
+  ]
+}

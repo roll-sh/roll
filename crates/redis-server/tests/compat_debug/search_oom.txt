@@ -1,0 +1,42 @@
+# The query memory guard and the module's debug wrappers: _FT.DEBUG FT.SEARCH, FT.AGGREGATE,
+# FT.PROFILE (SEARCH/AGGREGATE), _FT.PROFILE and FT.HYBRID run their queries whatever the
+# memory (`DEBUG_execCommandCommon`, `DEBUG_hybridCommandHandler` have no guard), while the
+# internal _FT.HYBRID checks once its debug parameters are read: its empty reply holds no
+# subquery cursors. maxmemory and the policy are put back at the end.
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
+FLUSHALL
+FT.CREATE i ON HASH PREFIX 1 d: SCHEMA t TEXT n NUMERIC SORTABLE
+FT.CREATE hv ON HASH PREFIX 1 h: SCHEMA t TEXT v VECTOR FLAT 6 TYPE FLOAT32 DIM 2 DISTANCE_METRIC L2
+HSET d:1 t "hello world" n 1
+HSET d:2 t "hello there" n 2
+HSET d:3 t "hello again" n 3
+HSET h:1 t hello v "\x00\x00\x80\x3f\x00\x00\x80\x3f"
+HSET h:2 t world v "\x00\x00\x00\x40\x00\x00\x00\x40"
+CONFIG SET maxmemory 1
+FT.SEARCH i hello
+_FT.DEBUG FT.SEARCH i hello NOCONTENT SORTBY n TIMEOUT_AFTER_N 100 DEBUG_PARAMS_COUNT 2
+_FT.DEBUG FT.AGGREGATE i hello LOAD 1 @n SORTBY 2 @n ASC TIMEOUT_AFTER_N 100 DEBUG_PARAMS_COUNT 2
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
+_FT.DEBUG _FT.SEARCH i hello NOCONTENT SORTBY n TIMEOUT_AFTER_N 100 DEBUG_PARAMS_COUNT 2
+!timing _FT.DEBUG FT.PROFILE i SEARCH QUERY hello NOCONTENT SORTBY n TIMEOUT_AFTER_N 100 DEBUG_PARAMS_COUNT 2
+!timing _FT.DEBUG _FT.PROFILE i AGGREGATE QUERY hello LOAD 1 @n TIMEOUT_AFTER_N 100 DEBUG_PARAMS_COUNT 2
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
+!mask execution_time _FT.DEBUG FT.HYBRID hv SEARCH hello VSIM @v $b PARAMS 2 b "\x00\x00\x80\x3f\x00\x00\x80\x3f" TIMEOUT_AFTER_N_SEARCH 100 DEBUG_PARAMS_COUNT 2
+_FT.DEBUG _FT.HYBRID hv SEARCH hello VSIM @v $b PARAMS 2 b "\x00\x00\x80\x3f\x00\x00\x80\x3f" WITHCURSOR TIMEOUT_AFTER_N_SEARCH 100 DEBUG_PARAMS_COUNT 2
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
+@resp 3
+_FT.DEBUG _FT.HYBRID hv SEARCH hello VSIM @v $b PARAMS 2 b "\x00\x00\x80\x3f\x00\x00\x80\x3f" WITHCURSOR TIMEOUT_AFTER_N_SEARCH 100 DEBUG_PARAMS_COUNT 2
+_FT.DEBUG FT.SEARCH i hello NOCONTENT SORTBY n TIMEOUT_AFTER_N 100 DEBUG_PARAMS_COUNT 2
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
+@resp 2
+FT.CONFIG SET ON_OOM fail
+_FT.DEBUG _FT.HYBRID hv SEARCH hello VSIM @v $b PARAMS 2 b "\x00\x00\x80\x3f\x00\x00\x80\x3f" WITHCURSOR TIMEOUT_AFTER_N_SEARCH 100 DEBUG_PARAMS_COUNT 2
+_FT.DEBUG FT.SEARCH i hello NOCONTENT SORTBY n TIMEOUT_AFTER_N 100 DEBUG_PARAMS_COUNT 2
+!delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
+FT.CONFIG SET ON_OOM return
+CONFIG SET maxmemory 0
+CONFIG GET maxmemory
+FT.CONFIG GET ON_OOM
+FT.DROPINDEX i
+FT.DROPINDEX hv
+FLUSHALL

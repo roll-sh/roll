@@ -1,0 +1,10 @@
+{"native_thread":"grok-replay-session-1"}
+{"model":"grok-build"}
+{"catalog":[{"default":true,"id":"grok-build","name":"Grok Build"}]}
+{"request":{"body":{"questions":[{"header":"Question 1","id":"schema_vs_ui_flexibility","multi":false,"options":[{"description":"Favor precise contracts and validation.","label":"Strict schemas (Recommended)"},{"description":"Favor looser fixture shapes.","label":"UI flexibility"}],"question":"For this fixture, should the plan prefer strict schemas or UI flexibility?"}],"type":"questions"},"id":"1001","item":"ask-user-question-tool-call-1"}}
+{"item":{"body":{"text":"","type":"message"},"id":"msg:1:1","parent":null,"status":"running"}}
+{"text_delta":{"item":"msg:1:1","text":"plan questions fixture complete"}}
+{"item":{"body":{"text":"plan questions fixture complete","type":"message"},"id":"msg:1:1","parent":null,"status":"running"}}
+{"item":{"body":{"text":"plan questions fixture complete","type":"message"},"id":"msg:1:1","parent":null,"status":"completed"}}
+{"turn_ended":"completed"}
+{"exited":null}

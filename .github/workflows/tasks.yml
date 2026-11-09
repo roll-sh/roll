@@ -1,0 +1,49 @@
+name: tasks
+
+# Extended validation, run manually when needed.
+on:
+  workflow_dispatch:
+  # Extended suites run on demand; ci.yml is the two-minute merge gate.
+  workflow_call:
+
+concurrency:
+  group: tasks-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
+  CARGO_INCREMENTAL: '0'
+
+jobs:
+  # SQLite and the log store in memory.
+  sqlite:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - run: scripts/test-tasks.sh --force --unit
+
+  # The log store on S3 (MinIO) and DynamoDB Local.
+  aws:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - name: Pull images
+        run: |
+          docker pull -q amazon/dynamodb-local & docker pull -q chrislusf/seaweedfs &
+          docker pull -q cgr.dev/chainguard/minio & docker pull -q cgr.dev/chainguard/minio-client & wait
+      - run: scripts/test-tasks.sh --force --e2e-only

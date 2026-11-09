@@ -1,0 +1,344 @@
+//! One request: addressing, auth, routing and the common response headers.
+
+use crate::auth::{self, Auth};
+use crate::response::{self, Reply};
+use crate::{Server, bucket, cors, object, post};
+use axum::body::Body;
+use axum::extract::Request;
+use axum::http::{HeaderMap, Method, StatusCode};
+use axum::response::Response;
+use s3_proto::http::{parse_query, percent_decode_path};
+use s3_proto::{Code, S3Error};
+use s3_store::{Class, Store};
+use std::net::IpAddr;
+use std::sync::Arc;
+
+pub(crate) struct Ctx {
+    pub server: Arc<Server>,
+    pub method: Method,
+    /// As on the request line (percent-encoded), and the raw query.
+    pub raw_path: String,
+    pub raw_query: String,
+    pub query: Vec<(String, String)>,
+    pub headers: HeaderMap,
+    pub bucket: Option<String>,
+    pub key: Option<String>,
+    /// The bucket came from the `Host` header (virtual-host style).
+    pub vhost: bool,
+    pub peer: Option<IpAddr>,
+    pub auth: Option<Auth>,
+    /// Addressed to the bucket's website endpoint (`<bucket>.<website_domain>`).
+    pub website: bool,
+    pub(crate) access_cache: crate::access::AccessCache,
+    pub(crate) started: std::time::Instant,
+    /// Addressed to an access point (`accesspoint/`): `bucket` is then its bucket's.
+    pub(crate) access_point: Option<Arc<crate::accesspoint::ApRequest>>,
+    /// Requester Pays: buckets whose charges for this request go to the requester's account
+    /// (bucket id, payer account).
+    pub(crate) payers: std::sync::Mutex<Vec<(String, String)>>,
+    /// The request came from the CDN (`cdn.rs`).
+    pub(crate) cdn: Option<crate::cdn::CdnRequest>,
+}
+
+impl Ctx {
+    pub fn store(&self) -> &Arc<Store> {
+        &self.server.store
+    }
+
+    /// A query parameter's (decoded) value.
+    pub fn q(&self, name: &str) -> Option<&str> {
+        self.query.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str())
+    }
+
+    /// Whether a query parameter (subresource) is present.
+    pub fn has(&self, name: &str) -> bool {
+        self.query.iter().any(|(k, _)| k == name)
+    }
+
+    pub fn h(&self, name: &str) -> Option<&str> {
+        self.headers.get(name).and_then(|v| v.to_str().ok())
+    }
+
+    /// Every header as text (lossy), for signing and metadata.
+    pub fn header_pairs(&self) -> Vec<(String, String)> {
+        self.headers.iter().map(|(k, v)| (k.as_str().to_string(), String::from_utf8_lossy(v.as_bytes()).into_owned())).collect()
+    }
+
+    pub fn bucket_name(&self) -> &str {
+        self.bucket.as_deref().unwrap_or_default()
+    }
+
+    pub fn key_name(&self) -> &str {
+        self.key.as_deref().unwrap_or_default()
+    }
+
+    /// `/bucket/key`, for error bodies.
+    pub fn resource(&self) -> String {
+        match (&self.bucket, &self.key) {
+            (Some(b), Some(k)) => format!("/{b}/{k}"),
+            (Some(b), None) => format!("/{b}"),
+            _ => "/".into(),
+        }
+    }
+
+    pub fn internal(&self) -> bool {
+        self.peer.is_some_and(|ip| self.server.is_internal(ip))
+    }
+
+    pub fn meter(&self, bucket_id: &str, class: Class) {
+        self.store().meter.request_by(bucket_id, self.payer(bucket_id).as_deref(), class);
+    }
+
+    /// Bill this request's charges on `bucket_id` to `payer` (Requester Pays).
+    pub fn charge(&self, bucket_id: &str, payer: &str) {
+        let mut p = self.payers.lock().unwrap();
+        if !p.iter().any(|(b, _)| b == bucket_id) {
+            p.push((bucket_id.to_string(), payer.to_string()));
+        }
+    }
+
+    /// Who pays for this request's charges on `bucket_id`: `None` is the bucket's owner.
+    pub fn payer(&self, bucket_id: &str) -> Option<String> {
+        self.payers.lock().unwrap().iter().find(|(b, _)| b == bucket_id).map(|(_, p)| p.clone())
+    }
+
+    /// Unix seconds now (the store's clock, so tests can move it).
+    pub fn now_s(&self) -> i64 {
+        self.store().now().div_euclid(1000)
+    }
+}
+
+fn request_id() -> String {
+    let mut b = [0u8; 8];
+    getrandom::fill(&mut b).expect("os randomness");
+    hex::encode_upper(b)
+}
+
+/// Bucket and key from the `Host` header (virtual-host style, `true`) or the path.
+fn address(server: &Server, headers: &HeaderMap, raw_path: &str) -> Result<(Option<String>, Option<String>, bool), S3Error> {
+    let path = raw_path.strip_prefix('/').unwrap_or(raw_path);
+    if let Some(b) = crate::website::host_bucket(server, headers) {
+        return Ok((Some(b), Some(percent_decode_path(path)?), true));
+    }
+    if let Some(domain) = &server.cfg.virtual_host_domain {
+        // Host names are case-insensitive.
+        let host = headers.get("host").and_then(|h| h.to_str().ok()).unwrap_or_default().to_ascii_lowercase();
+        let host = host.rsplit_once(':').filter(|(_, p)| p.bytes().all(|c| c.is_ascii_digit())).map_or(host.as_str(), |(h, _)| h);
+        if let Some(b) = host.strip_suffix(domain.to_ascii_lowercase().as_str()).and_then(|h| h.strip_suffix('.')).filter(|b| !b.is_empty()) {
+            // S3 Express endpoints: `s3express-control.<domain>` is path style (bucket
+            // administration, ListDirectoryBuckets); `<bucket>.s3express-<zone>.<domain>` is the
+            // bucket's zonal endpoint.
+            let b = match b.rsplit_once('.') {
+                Some((bucket, zonal)) if zonal.starts_with("s3express-") => Some(bucket),
+                None if b.starts_with("s3express-") => None,
+                _ => Some(b),
+            };
+            if let Some(b) = b {
+                let key = Some(percent_decode_path(path)?).filter(|k| !k.is_empty());
+                return Ok((Some(b.to_string()), key, true));
+            }
+        }
+    }
+    if path.is_empty() {
+        return Ok((None, None, false));
+    }
+    let (b, k) = path.split_once('/').unwrap_or((path, ""));
+    let bucket = percent_decode_path(b)?;
+    let key = Some(percent_decode_path(k)?).filter(|k| !k.is_empty());
+    Ok((Some(bucket), key, false))
+}
+
+pub(crate) async fn dispatch(server: Arc<Server>, peer: Option<IpAddr>, req: Request) -> Response {
+    let (mut parts, body) = req.into_parts();
+    let raw_path = parts.uri.path().to_string();
+    let mut raw_query = parts.uri.query().unwrap_or_default().to_string();
+    // The CDN's usage reports.
+    let body = match crate::cdn::intercept(&server, &parts.method, &raw_path, &parts.headers, body).await {
+        Ok(r) => return r,
+        Err(body) => body,
+    };
+    let head = parts.method == Method::HEAD;
+    // Whether the request has a body an error answer may leave unread (see below).
+    let has_body = parts.headers.contains_key("transfer-encoding")
+        || parts.headers.get("content-length").and_then(|v| v.to_str().ok()).is_some_and(|v| v.trim() != "0");
+    let request_id = request_id();
+    // A request from the CDN: checked, and addressed by its path without an immutable URL's
+    // token (signatures still cover the path as it came).
+    let (cdn, addressed) = match server.cdn.prepare(&server.store, &parts.method, &mut parts.headers, &mut raw_query, &raw_path) {
+        Ok(Some((path, c))) => (Some(c), address(&server, &parts.headers, &path)),
+        Ok(None) => (None, address(&server, &parts.headers, &raw_path)),
+        Err(e) => (None, Err(e)),
+    };
+    let website = crate::website::host_bucket(&server, &parts.headers).is_some();
+    let mut ctx = Ctx {
+        server,
+        method: parts.method,
+        query: parse_query(&raw_query),
+        raw_path,
+        raw_query,
+        headers: parts.headers,
+        bucket: None,
+        key: None,
+        vhost: false,
+        peer,
+        auth: None,
+        website,
+        access_cache: Default::default(),
+        started: std::time::Instant::now(),
+        access_point: None,
+        payers: Default::default(),
+        cdn,
+    };
+    let result = match addressed {
+        Ok((b, k, vhost)) => {
+            ctx.bucket = b;
+            ctx.key = k;
+            ctx.vhost = vhost;
+            // Who's asking, for the events the request's changes record.
+            let origin = s3_store::Origin { source_ip: peer.map(|p| p.to_string()), request_id: Some(request_id.clone()), ..Default::default() };
+            match crate::accesspoint::resolve(&mut ctx) {
+                Ok(()) => s3_store::events::with_origin(origin, run(&mut ctx, body)).await,
+                Err(e) => Err(e),
+            }
+        }
+        Err(e) => Err(e),
+    };
+    // A change may have queued events or replication (durable by now): dispatch them now
+    // rather than at the next tick, so replication is prompt.
+    if result.is_ok() && !matches!(ctx.method, Method::GET | Method::HEAD | Method::OPTIONS) {
+        ctx.server.notifier.wake();
+    }
+    let mut error_code = None;
+    let mut resp = match result {
+        Ok(r) => r,
+        Err(e) => {
+            error_code = Some(e.code);
+            if e.code == Code::InternalError || e.code == Code::ServiceUnavailable {
+                tracing::warn!(code = e.code.as_str(), message = e.message, method = %ctx.method, resource = ctx.resource(), "s3 request failed");
+            }
+            let e = if e.resource.is_none() { e.with_resource(ctx.resource()) } else { e };
+            let mut r = response::error(&e, &request_id, head);
+            // An error can come before the body is read (often with `Expect: 100-continue`, the
+            // client still waiting to send it). A client that sends it anyway after its wait
+            // times out must not have those bytes read as its next request: close instead.
+            if has_body {
+                response::set(&mut r, "connection", "close");
+            }
+            r
+        }
+    };
+    if !ctx.payers.lock().unwrap().is_empty() {
+        response::set(&mut resp, "x-amz-request-charged", "requester");
+    }
+    response::set(&mut resp, "x-amz-request-id", &request_id);
+    response::set(&mut resp, "x-amz-id-2", &request_id);
+    response::set(&mut resp, "server", "roll");
+    if ctx.method != Method::OPTIONS {
+        cors::decorate(&ctx, &mut resp);
+    }
+    crate::logging::record(&ctx, &resp, &request_id, error_code);
+    resp
+}
+
+fn is_form_post(ctx: &Ctx) -> bool {
+    ctx.method == Method::POST && ctx.key.is_none() && ctx.bucket.is_some() && ctx.h("content-type").is_some_and(|c| c.to_ascii_lowercase().starts_with("multipart/form-data"))
+}
+
+async fn run(ctx: &mut Ctx, body: Body) -> Reply {
+    if ctx.website {
+        return Ok(crate::website::serve(ctx).await);
+    }
+    if crate::sts::is_sts(ctx) {
+        return Ok(if crate::iam::is_iam(ctx) { crate::iam::handle(ctx, body).await } else { crate::sts::handle(ctx, body).await });
+    }
+    if ctx.method == Method::OPTIONS {
+        return cors::preflight(ctx);
+    }
+    if crate::accesspoint::lambda::is_write_get_object_response(ctx) {
+        return crate::accesspoint::lambda::write_get_object_response(ctx, body).await;
+    }
+    if is_form_post(ctx) {
+        return post::upload(ctx, body).await;
+    }
+    reject_unsupported_headers(ctx)?;
+    ctx.auth = auth::authenticate(ctx)?;
+    if let Some(id) = ctx.auth.as_ref().and_then(|a| a.key.acting_key()) {
+        ctx.store().touch_key(id);
+    }
+    if crate::accesspoint::control::is_control(ctx) {
+        return crate::accesspoint::control::handle(ctx, body).await;
+    }
+    crate::owner::check(ctx)?;
+    let principal = ctx.auth.as_ref().map_or_else(|| "anonymous".to_string(), |a| crate::identity::event_principal(&a.key, &a.identity));
+    s3_store::events::set_origin(|o| o.principal = Some(principal));
+    if ctx.access_point.is_some() {
+        crate::accesspoint::check_request(ctx)?;
+        crate::accesspoint::lambda::authorize_olap(ctx)?;
+        if let Some(r) = crate::accesspoint::lambda::transform(ctx).await {
+            return r;
+        }
+    }
+    match (&ctx.bucket, &ctx.key) {
+        (None, _) => match ctx.method {
+            Method::GET if ctx.q("x-id") == Some("ListDirectoryBuckets") || express_control(ctx) || crate::directory::signed_for_express(ctx) => crate::directory::list(ctx),
+            Method::GET => bucket::list_buckets(ctx),
+            _ => Err(S3Error::new(Code::MethodNotAllowed)),
+        },
+        (Some(_), None) => bucket::route(ctx, body).await,
+        (Some(_), Some(_)) => object::route(ctx, body).await,
+    }
+}
+
+/// Addressed to the `s3express-control` endpoint (`s3express-control.<region>.amazonaws.com`, or
+/// under `ROLL_S3_DOMAIN`), where `GET /` is ListDirectoryBuckets.
+fn express_control(ctx: &Ctx) -> bool {
+    ctx.h("host").is_some_and(|h| h.trim().to_ascii_lowercase().starts_with("s3express-control."))
+}
+
+/// Header values S3 itself refuses.
+fn reject_unsupported_headers(ctx: &Ctx) -> Result<(), S3Error> {
+    if let Some(rp) = ctx.h("x-amz-request-payer")
+        && !rp.trim().eq_ignore_ascii_case("requester")
+    {
+        return Err(S3Error::new(Code::InvalidArgument).with("ArgumentName", "x-amz-request-payer"));
+    }
+    if let Some(class) = ctx.h("x-amz-storage-class") {
+        const CLASSES: [&str; 10] = ["STANDARD", "REDUCED_REDUNDANCY", "STANDARD_IA", "ONEZONE_IA", "INTELLIGENT_TIERING", "GLACIER", "DEEP_ARCHIVE", "GLACIER_IR", "OUTPOSTS", "EXPRESS_ONEZONE"];
+        if !CLASSES.contains(&class.trim()) {
+            return Err(S3Error::new(Code::InvalidStorageClass).with("StorageClassRequested", class.to_string()));
+        }
+    }
+    Ok(())
+}
+
+/// Read a small request body (XML) completely, refusing anything over `limit` bytes. Its
+/// `Content-MD5` and `x-amz-checksum-*` headers are checked against it.
+pub(crate) async fn read_small(ctx: &Ctx, body: Body, limit: usize) -> Result<bytes::Bytes, S3Error> {
+    read_small_as(ctx, body, limit, crate::body::requested_checksum(ctx)?).await
+}
+
+/// [`read_small`] for CompleteMultipartUpload, whose `x-amz-checksum-*` headers are the whole
+/// object's checksum, not the body's (`Content-MD5` is still checked).
+pub(crate) async fn read_small_object_checksum(ctx: &Ctx, body: Body, limit: usize) -> Result<bytes::Bytes, S3Error> {
+    read_small_as(ctx, body, limit, None).await
+}
+
+async fn read_small_as(ctx: &Ctx, body: Body, limit: usize, checksum: Option<(s3_proto::checksum::Algorithm, Option<String>)>) -> Result<bytes::Bytes, S3Error> {
+    use futures::StreamExt;
+    let mut decoded = crate::body::Incoming::new(ctx, body, checksum, Some(limit as u64))?;
+    let mut out = Vec::new();
+    while let Some(chunk) = decoded.next().await {
+        let chunk = chunk.map_err(|_| decoded.error().unwrap_or_else(|| S3Error::new(Code::IncompleteBody)))?;
+        if out.len() + chunk.len() > limit {
+            return Err(S3Error::new(Code::MaxMessageLengthExceeded));
+        }
+        out.extend_from_slice(&chunk);
+    }
+    let f = decoded.finished()?;
+    f.digest.verify_content_md5(ctx.h("content-md5"))?;
+    Ok(out.into())
+}
+
+pub(crate) fn no_content() -> Reply {
+    Ok(response::empty(StatusCode::NO_CONTENT))
+}

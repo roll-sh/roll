@@ -1,0 +1,164 @@
+# Size and depth limits: key length, attribute name length, JSON nesting depth, large items.
+> CreateTable {"TableName":"alt_val_lim_s","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST"}
+< 200 {"TableDescription":{"TableName":"alt_val_lim_s","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+> CreateTable {"TableName":"alt_val_lim_ss","KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"AttributeName":"c","KeyType":"RANGE"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"},{"AttributeName":"c","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST"}
+< 200 {"TableDescription":{"TableName":"alt_val_lim_ss","KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"AttributeName":"c","KeyType":"RANGE"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"},{"AttributeName":"c","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+> CreateTable {"TableName":"alt_val_lim_b","KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"AttributeName":"c","KeyType":"RANGE"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"B"},{"AttributeName":"c","AttributeType":"B"}],"BillingMode":"PAY_PER_REQUEST"}
+< 200 {"TableDescription":{"TableName":"alt_val_lim_b","KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"AttributeName":"c","KeyType":"RANGE"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"B"},{"AttributeName":"c","AttributeType":"B"}],"BillingMode":"PAY_PER_REQUEST","CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+# Key length: DynamoDB's 2048/1024-byte key limits are not enforced; keys up to 65533 bytes work
+> PutItem {"TableName":"alt_val_lim_s","Item":{"p":{"S":"$repeat(x,2048)"}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_lim_s","Key":{"p":{"S":"$repeat(x,2048)"}},"ProjectionExpression":"q","ConsistentRead":true}
+< 200 {"Item":{}}
+> PutItem {"TableName":"alt_val_lim_s","Item":{"p":{"S":"$repeat(x,2049)"}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_lim_s","Key":{"p":{"S":"$repeat(x,2049)"}},"ProjectionExpression":"q","ConsistentRead":true}
+< 200 {"Item":{}}
+> PutItem {"TableName":"alt_val_lim_s","Item":{"p":{"S":"$repeat(x,1024)"}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_lim_s","Key":{"p":{"S":"$repeat(x,1024)"}},"ProjectionExpression":"q","ConsistentRead":true}
+< 200 {"Item":{}}
+> PutItem {"TableName":"alt_val_lim_s","Item":{"p":{"S":"$repeat(x,1025)"}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_lim_s","Key":{"p":{"S":"$repeat(x,1025)"}},"ProjectionExpression":"q","ConsistentRead":true}
+< 200 {"Item":{}}
+> PutItem {"TableName":"alt_val_lim_s","Item":{"p":{"S":"$repeat(x,65533)"}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_lim_s","Key":{"p":{"S":"$repeat(x,65533)"}},"ProjectionExpression":"q","ConsistentRead":true}
+< 200 {"Item":{}}
+> PutItem {"TableName":"alt_val_lim_ss","Item":{"p":{"S":"a"},"c":{"S":"$repeat(x,1025)"}}}
+< 200 {}
+> PutItem {"TableName":"alt_val_lim_ss","Item":{"p":{"S":"a"},"c":{"S":"$repeat(x,65533)"}}}
+< 200 {}
+> PutItem {"TableName":"alt_val_lim_ss","Item":{"p":{"S":"$repeat(x,65533)"},"c":{"S":"$repeat(y,65533)"}}}
+< 200 {}
+> Query {"TableName":"alt_val_lim_ss","KeyConditionExpression":"p = :p AND c > :c","ExpressionAttributeValues":{":p":{"S":"a"},":c":{"S":"$repeat(x,1025)"}},"ProjectionExpression":"q","ConsistentRead":true}
+< 200 {"Count":1,"ScannedCount":1,"Items":[{}]}
+# A key of 65534 bytes or more fails inside the database with an InternalServerError (Key length = size + 2)
+> PutItem {"TableName":"alt_val_lim_s","Item":{"p":{"S":"$repeat(x,65534)"}}}
+< 500 {"__type":"com.amazonaws.dynamodb.v20120810#InternalServerError","message":"Internal server error: exceptions::invalid_request_exception (Key length of 65536 is longer than maximum of 65535)"}
+> PutItem {"TableName":"alt_val_lim_s","Item":{"p":{"S":"$repeat(x,65535)"}}}
+< 500 {"__type":"com.amazonaws.dynamodb.v20120810#InternalServerError","message":"Internal server error: exceptions::invalid_request_exception (Key length of 65537 is longer than maximum of 65535)"}
+> PutItem {"TableName":"alt_val_lim_s","Item":{"p":{"S":"$repeat(x,65536)"}}}
+< 500 {"__type":"com.amazonaws.dynamodb.v20120810#InternalServerError","message":"Internal server error: exceptions::invalid_request_exception (Key length of 65538 is longer than maximum of 65535)"}
+> PutItem {"TableName":"alt_val_lim_s","Item":{"p":{"S":"$repeat(x,70000)"}}}
+< 500 {"__type":"com.amazonaws.dynamodb.v20120810#InternalServerError","message":"Internal server error: exceptions::invalid_request_exception (Key length of 70002 is longer than maximum of 65535)"}
+> GetItem {"TableName":"alt_val_lim_s","Key":{"p":{"S":"$repeat(x,65534)"}}}
+< 500 {"__type":"com.amazonaws.dynamodb.v20120810#InternalServerError","message":"Internal server error: exceptions::invalid_request_exception (Key length of 65536 is longer than maximum of 65535)"}
+> DeleteItem {"TableName":"alt_val_lim_s","Key":{"p":{"S":"$repeat(x,65534)"}}}
+< 500 {"__type":"com.amazonaws.dynamodb.v20120810#InternalServerError","message":"Internal server error: exceptions::invalid_request_exception (Key length of 65536 is longer than maximum of 65535)"}
+> UpdateItem {"TableName":"alt_val_lim_s","Key":{"p":{"S":"$repeat(x,65534)"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"S":"x"}}}
+< 500 {"__type":"com.amazonaws.dynamodb.v20120810#InternalServerError","message":"Internal server error: exceptions::invalid_request_exception (Key length of 65536 is longer than maximum of 65535)"}
+> PutItem {"TableName":"alt_val_lim_ss","Item":{"p":{"S":"a"},"c":{"S":"$repeat(x,65534)"}}}
+< 500 {"__type":"com.amazonaws.dynamodb.v20120810#InternalServerError","message":"Internal server error: exceptions::invalid_request_exception (Key length of 65536 is longer than maximum of 65535)"}
+> PutItem {"TableName":"alt_val_lim_ss","Item":{"p":{"S":"$repeat(x,65535)"},"c":{"S":"a"}}}
+< 500 {"__type":"com.amazonaws.dynamodb.v20120810#InternalServerError","message":"Internal server error: exceptions::invalid_request_exception (Key length of 65537 is longer than maximum of 65535)"}
+> GetItem {"TableName":"alt_val_lim_ss","Key":{"p":{"S":"a"},"c":{"S":"$repeat(x,65535)"}}}
+< 500 {"__type":"com.amazonaws.dynamodb.v20120810#InternalServerError","message":"Internal server error: exceptions::invalid_request_exception (Key length of 65537 is longer than maximum of 65535)"}
+> Query {"TableName":"alt_val_lim_ss","KeyConditionExpression":"p = :p","ExpressionAttributeValues":{":p":{"S":"$repeat(x,65534)"}}}
+< 500 {"__type":"com.amazonaws.dynamodb.v20120810#InternalServerError","message":"Internal server error: exceptions::invalid_request_exception (Key length of 65536 is longer than maximum of 65535)"}
+> Query {"TableName":"alt_val_lim_ss","KeyConditionExpression":"p = :p AND c > :c","ExpressionAttributeValues":{":p":{"S":"a"},":c":{"S":"$repeat(x,65534)"}}}
+< 500 {"__type":"com.amazonaws.dynamodb.v20120810#InternalServerError","message":"Internal server error: exceptions::invalid_request_exception (Key length of 65536 is longer than maximum of 65535)"}
+# The same boundary for multi-byte strings (counted in UTF-8 bytes) and for binary keys (decoded bytes)
+> PutItem {"TableName":"alt_val_lim_s","Item":{"p":{"S":"$repeat(é,32766)a"}}}
+< 200 {}
+> PutItem {"TableName":"alt_val_lim_s","Item":{"p":{"S":"$repeat(é,32767)"}}}
+< 500 {"__type":"com.amazonaws.dynamodb.v20120810#InternalServerError","message":"Internal server error: exceptions::invalid_request_exception (Key length of 65536 is longer than maximum of 65535)"}
+> PutItem {"TableName":"alt_val_lim_b","Item":{"p":{"B":"$repeat(AAAA,21844)AA=="},"c":{"B":"AA=="}}}
+< 200 {}
+> PutItem {"TableName":"alt_val_lim_b","Item":{"p":{"B":"$repeat(AAAA,21844)AAA="},"c":{"B":"AA=="}}}
+< 500 {"__type":"com.amazonaws.dynamodb.v20120810#InternalServerError","message":"Internal server error: exceptions::invalid_request_exception (Key length of 65536 is longer than maximum of 65535)"}
+> PutItem {"TableName":"alt_val_lim_b","Item":{"p":{"B":"AA=="},"c":{"B":"$repeat(AAAA,21844)AA=="}}}
+< 200 {}
+> PutItem {"TableName":"alt_val_lim_b","Item":{"p":{"B":"AA=="},"c":{"B":"$repeat(AAAA,21844)AAA="}}}
+< 500 {"__type":"com.amazonaws.dynamodb.v20120810#InternalServerError","message":"Internal server error: exceptions::invalid_request_exception (Key length of 65536 is longer than maximum of 65535)"}
+# Attribute names: up to 65535 bytes at top level; 65536 or more is rejected; the empty name is rejected
+> PutItem {"TableName":"alt_val_lim_s","Item":{"p":{"S":"n"},"$repeat(a,65535)":{"S":"x"}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_lim_s","Key":{"p":{"S":"n"}},"ProjectionExpression":"p","ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"n"}}}
+> PutItem {"TableName":"alt_val_lim_s","Item":{"p":{"S":"n"},"$repeat(a,65536)":{"S":"x"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Attribute name is too large, must be less than 65536 bytes"}
+> PutItem {"TableName":"alt_val_lim_s","Item":{"p":{"S":"n"},"$repeat(a,100000)":{"S":"x"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Attribute name is too large, must be less than 65536 bytes"}
+> PutItem {"TableName":"alt_val_lim_s","Item":{"p":{"S":"n"},"$repeat(é,32767)a":{"S":"x"}}}
+< 200 {}
+> PutItem {"TableName":"alt_val_lim_s","Item":{"p":{"S":"n"},"$repeat(é,32768)":{"S":"x"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Attribute name is too large, must be less than 65536 bytes"}
+> PutItem {"TableName":"alt_val_lim_s","Item":{"p":{"S":"n"},"":{"S":"x"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Empty attribute name"}
+> PutItem {"TableName":"alt_val_lim_s","Item":{"p":{"S":"n"},"":{"S":"x"},"$repeat(a,65536)":{"S":"x"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Empty attribute name"}
+> PutItem {"TableName":"alt_val_lim_s","Item":{"p":{"S":"n"},"$repeat(a,65536)":{"S":"x"},"":{"S":"x"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Attribute name is too large, must be less than 65536 bytes"}
+# Attribute name limits in the other places names appear
+> GetItem {"TableName":"alt_val_lim_s","Key":{"p":{"S":"n"}},"AttributesToGet":[""]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"in AttributesToGet - Empty attribute name"}
+> GetItem {"TableName":"alt_val_lim_s","Key":{"p":{"S":"n"}},"AttributesToGet":["$repeat(a,65536)"]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"in AttributesToGet - Attribute name is too large, must be less than 65536 bytes"}
+> GetItem {"TableName":"alt_val_lim_s","Key":{"p":{"S":"n"}},"ProjectionExpression":"#n","ExpressionAttributeNames":{"#n":""}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeNames contains invalid value: Empty attribute name"}
+> GetItem {"TableName":"alt_val_lim_s","Key":{"p":{"S":"n"}},"ProjectionExpression":"#n","ExpressionAttributeNames":{"#n":"$repeat(a,65536)"}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeNames contains invalid value: Attribute name is too large, must be less than 65536 bytes"}
+> UpdateItem {"TableName":"alt_val_lim_s","Key":{"p":{"S":"n"}},"AttributeUpdates":{"":{"Value":{"S":"x"},"Action":"PUT"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"in AttributeUpdates - Empty attribute name"}
+> UpdateItem {"TableName":"alt_val_lim_s","Key":{"p":{"S":"n"}},"AttributeUpdates":{"$repeat(a,65536)":{"Value":{"S":"x"},"Action":"PUT"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"in AttributeUpdates - Attribute name is too large, must be less than 65536 bytes"}
+> UpdateItem {"TableName":"alt_val_lim_s","Key":{"p":{"S":"n"}},"UpdateExpression":"SET #n = :v","ExpressionAttributeNames":{"#n":""},"ExpressionAttributeValues":{":v":{"S":"x"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeNames contains invalid value: Empty attribute name"}
+> UpdateItem {"TableName":"alt_val_lim_s","Key":{"p":{"S":"n"}},"UpdateExpression":"SET #n = :v","ExpressionAttributeNames":{"#n":"$repeat(a,65536)"},"ExpressionAttributeValues":{":v":{"S":"x"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeNames contains invalid value: Attribute name is too large, must be less than 65536 bytes"}
+> UpdateItem {"TableName":"alt_val_lim_s","Key":{"p":{"S":"n"}},"UpdateExpression":"SET #n = :v","ExpressionAttributeNames":{"#n":"$repeat(a,65535)"},"ExpressionAttributeValues":{":v":{"S":"y"}},"ReturnValues":"UPDATED_OLD"}
+< 200 {}
+> PutItem {"TableName":"alt_val_lim_s","Item":{"p":{"S":"n"}},"ConditionExpression":"attribute_exists(#n)","ExpressionAttributeNames":{"#n":""}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeNames contains invalid value: Empty attribute name"}
+> DeleteItem {"TableName":"alt_val_lim_s","Key":{"p":{"S":"n"}},"Expected":{"":{"Exists":false}}}
+< 200 {}
+# Names nested inside M are not limited: empty and very long names are stored
+> PutItem {"TableName":"alt_val_lim_s","Item":{"p":{"S":"nn"},"m":{"M":{"":{"S":"empty"},"$repeat(b,70000)":{"S":"long"}}}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_lim_s","Key":{"p":{"S":"nn"}},"ProjectionExpression":"m.#e","ExpressionAttributeNames":{"#e":""}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeNames contains invalid value: Empty attribute name"}
+> UpdateItem {"TableName":"alt_val_lim_s","Key":{"p":{"S":"nn"}},"UpdateExpression":"SET m.#e = :v","ExpressionAttributeNames":{"#e":""},"ExpressionAttributeValues":{":v":{"S":"x"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeNames contains invalid value: Empty attribute name"}
+# JSON nesting depth: the whole request may nest at most 78 levels ('Max nested level reached: 78' is raised while parsing)
+> PutItem {"TableName":"alt_val_lim_s","Item":{"p":{"S":"deepM37"},"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"S":"x"}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}
+< 200 {}
+> PutItem {"TableName":"alt_val_lim_s","Item":{"p":{"S":"deepL37"},"a":{"L":[{"L":[{"L":[{"L":[{"L":[{"L":[{"L":[{"L":[{"L":[{"L":[{"L":[{"L":[{"L":[{"L":[{"L":[{"L":[{"L":[{"L":[{"L":[{"L":[{"L":[{"L":[{"L":[{"L":[{"L":[{"L":[{"L":[{"L":[{"L":[{"L":[{"L":[{"L":[{"L":[{"L":[{"L":[{"L":[{"L":[{"S":"x"}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}}}
+< 200 {}
+> PutItem {"TableName":"alt_val_lim_s","Item":{"p":{"S":"deepM38"},"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"S":"x"}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Max nested level reached: 78"}
+> PutItem {"TableName":"alt_val_lim_s","Item":{"p":{"S":"deepL38"},"a":{"L":[{"L":[{"L":[{"L":[{"L":[{"L":[{"L":[{"L":[{"L":[{"L":[{"L":[{"L":[{"L":[{"L":[{"L":[{"L":[{"L":[{"L":[{"L":[{"L":[{"L":[{"L":[{"L":[{"L":[{"L":[{"L":[{"L":[{"L":[{"L":[{"L":[{"L":[{"L":[{"L":[{"L":[{"L":[{"L":[{"L":[{"L":[{"S":"x"}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Max nested level reached: 78"}
+> GetItem {"TableName":"alt_val_lim_s","Key":{"p":{"S":"deepM37"}},"ProjectionExpression":"p","ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"deepM37"}}}
+# Depth counts every JSON object and array in the request, including unknown parameters
+> PutItem {"TableName":"alt_val_lim_s","Item":{"p":{"S":"x"}},"Junk":[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]}
+< 200 {}
+> PutItem {"TableName":"alt_val_lim_s","Item":{"p":{"S":"x"}},"Junk":[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Max nested level reached: 78"}
+> PutItem [[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Request content must be an object"}
+> PutItem [[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Max nested level reached: 78"}
+> PutItem [[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Max nested level reached: 78"}
+> PutItem [[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Parsing JSON failed: Invalid value. at 78"}
+> PutItem {"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":1}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Max nested level reached: 78"}
+> GetItem {"TableName":"alt_val_lim_s","Key":{"p":{"S":"x"}},"Junk":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Max nested level reached: 78"}
+> PutItem {"TableName":"alt_val_lim_nonexist","Junk":[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Max nested level reached: 78"}
+# Large items: there is no 400 KB item size limit
+> PutItem {"TableName":"alt_val_lim_s","Item":{"p":{"S":"big"},"a":{"S":"$repeat(x,409600)"},"b":{"S":"$repeat(y,409600)"}}}
+< 200 {}
+> GetItem {"TableName":"alt_val_lim_s","Key":{"p":{"S":"big"}},"ProjectionExpression":"p","ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"big"}}}
+> DeleteTable {"TableName":"alt_val_lim_s"}
+< 200 {"TableDescription":{"TableName":"alt_val_lim_s","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_val_lim_s:scylla:table/alt_val_lim_s","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0}}}
+> DeleteTable {"TableName":"alt_val_lim_ss"}
+< 200 {"TableDescription":{"TableName":"alt_val_lim_ss","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_val_lim_ss:scylla:table/alt_val_lim_ss","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0}}}
+> DeleteTable {"TableName":"alt_val_lim_b"}
+< 200 {"TableDescription":{"TableName":"alt_val_lim_b","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_val_lim_b:scylla:table/alt_val_lim_b","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0}}}

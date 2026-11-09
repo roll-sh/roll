@@ -1,0 +1,194 @@
+# The Lua debugger (SCRIPT DEBUG YES|SYNC): an EVAL becomes a session driven by debugger
+# commands, each answered with an array of status lines; the session ends with <endsession>,
+# the EVAL's reply, and the connection closing. SYNC sessions keep their changes, YES sessions
+# run on a copy (a fork in Redis) and the client is gone from the server meanwhile.
+
+FLUSHALL
+SCRIPT DEBUG maybe
+SCRIPT DEBUG NO
+EVALSHA abc 0
+
+# ---- stepping, printing, listing, breakpoints, eval, redis, maxlen ----
+@conn 2
+SCRIPT DEBUG SYNC
+EVALSHA aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa 0
+EVALSHA abc 0
+EVAL "local a = 1\nlocal b = {1,2,'x'}\nredis.call('set','k',a)\nredis.debug('hi', b)\nreturn redis.call('get','k')\n" 0
+step
+print
+list
+p b
+next
+b 5
+b
+trace
+eval 1+1
+redis ping
+maxlen
+help
+continue
+continue
+@recv
+GET k
+
+@conn 3
+SCRIPT DEBUG SYNC
+EVAL "local t = {a=1, [2]='x', nested={1,{2,{3}}}}\nlocal function f(x)\n  local y = x * 2\n  return y\nend\nlocal s = 'a\\nb\"c\\1'\nlocal r = f(3)\nredis.pcall('incr','notanum','extra')\nredis.call('set','s','x')\nredis.pcall('incr','s')\nreturn {r, s}\n" 0
+b 3
+c
+trace
+p
+p t
+s
+s
+s
+p r
+p s
+w
+l 2 1
+l 0
+l 99
+b -3
+b -9
+b 0
+b abc 99
+b 0 1 2
+b
+b -1 -2
+e x = =
+e local z = 5
+e "error('boom')"
+e t
+e
+m 10
+p t
+m 0
+m
+bogus
+r
+r set
+s
+s
+s
+@recv
+GET s
+
+# ---- trimming and its hint ----
+@conn 4
+SCRIPT DEBUG SYNC
+EVAL "local big = string.rep('x', 300)\nredis.call('set', 'big', big)\nreturn redis.call('get', 'big')\n" 0
+s
+p big
+s
+p big
+m 70
+p big
+c
+@recv
+
+# ---- abort, errors, the protocol ----
+@conn 5
+SCRIPT DEBUG SYNC
+EVAL "return 1" 0
+abort
+@recv
+@conn 6
+SCRIPT DEBUG SYNC
+EVAL "local x = nil\nreturn x.y" 0
+s
+@recv
+@conn 7
+SCRIPT DEBUG SYNC
+EVAL "local ok = 1\nreturn ok" 0
+x 1 2 3 4 5 6 7 8 9 10 11 12
+eval_ro
+c
+@recv
+@conn 8
+SCRIPT DEBUG SYNC
+EVAL_RO "return redis.call('get','k')" 1 k
+c
+@recv
+@conn 9
+SCRIPT DEBUG SYNC
+EVAL "local a=1\nredis.breakpoint()\nlocal b=2\nredis.debug(1.5, true, nil, 'q', {1, {k='v'}})\nreturn b" 0
+c
+c
+@recv
+@conn 10
+EVAL "redis.debug('x')\nreturn redis.breakpoint()" 0
+
+# ---- logged commands and replies, RESP3 included ----
+@conn 11
+SCRIPT DEBUG SYNC
+EVAL "redis.call('hset','hh','a','1')\nredis.setresp(3)\nlocal r = redis.call('hgetall','hh')\nlocal r2 = redis.call('smembers','nosuch')\nlocal r3 = redis.call('incrbyfloat','fl','1.5')\nlocal r4 = redis.pcall('nosuchcmd')\nlocal r5 = redis.call('mset','a','1','b','2','c','3','d','4','e','5','f','6')\nreturn 1" 0
+s
+s
+s
+s
+s
+s
+s
+c
+@recv
+
+# ---- SCRIPT DEBUG with replies pending ----
+@conn 12
+MULTI
+SCRIPT DEBUG YES
+EXEC
+SCRIPT DEBUG NO
+
+# ---- YES: a copy of the data, the client gone meanwhile ----
+@conn 13
+DEL fk
+CLIENT SETNAME dbg
+SCRIPT DEBUG YES
+EVAL "redis.call('set','fk','1')\nreturn 1" 0
+@conn 14
+!mask id,addr,laddr,fd,age,idle,qbuf,qbuf-free,argv-mem,multi-mem,obl,oll,omem,tot-mem,net-i,net-o,events,cmd,user,lib-name,lib-ver,io-thread,tot-net-in,tot-net-out,tot-cmds,resp,rbs,rbp CLIENT LIST
+@conn 13
+s
+@conn 14
+GET fk
+@conn 13
+c
+@recv
+@conn 14
+GET fk
+
+# ---- inside a transaction: the session ends it (later replies dropped; YES: in the copy). The
+# truncated EXEC reply that follows <endsession> isn't read here (the harness can't parse it).
+@conn 15
+DEL ex1 ex2 ex3
+SCRIPT DEBUG SYNC
+MULTI
+SET ex1 v
+EVAL "redis.call('set','ex2','v')\nreturn 1" 0
+SET ex3 v
+EXEC
+c
+@conn 16
+MGET ex1 ex2 ex3
+DEL ex1 ex2 ex3
+@conn 17
+SCRIPT DEBUG YES
+MULTI
+SET ex1 v
+EVAL "redis.call('set','ex2','v')\nreturn 1" 0
+SET ex3 v
+EXEC
+c
+@conn 16
+MGET ex1 ex2 ex3
+
+# ---- a script running past busy-reply-threshold stops ----
+CONFIG SET busy-reply-threshold 200
+@conn 18
+SCRIPT DEBUG SYNC
+EVAL "local i = 0\nwhile true do\n  i = i + 1\nend\nreturn i" 0
+c
+abort
+@recv
+@conn 16
+CONFIG SET busy-reply-threshold 5000

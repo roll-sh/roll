@@ -1,0 +1,20 @@
+{"native_thread":"cursor-session-1"}
+{"model":"composer-2"}
+{"catalog":[{"default":false,"id":"default","name":"Auto","options":[{"choices":[{"id":"low","label":"Low"},{"id":"medium","label":"Medium"},{"id":"high","label":"High"}],"default":"medium","id":"effort","label":"Reasoning","role":"reasoning","type":"select"},{"choices":[{"id":"200k","label":"200K"},{"id":"1m","label":"1M"}],"default":"200k","id":"context","label":"Context","role":"context_window","type":"select"},{"default":false,"id":"fast","label":"Fast","role":"speed","type":"boolean"},{"default":false,"id":"thinking","label":"Thinking","type":"boolean"}]},{"default":true,"id":"composer-2","name":"Composer 2","options":[{"choices":[{"id":"low","label":"Low"},{"id":"medium","label":"Medium"},{"id":"high","label":"High"}],"default":"medium","id":"effort","label":"Reasoning","role":"reasoning","type":"select"},{"choices":[{"id":"200k","label":"200K"},{"id":"1m","label":"1M"}],"default":"200k","id":"context","label":"Context","role":"context_window","type":"select"},{"default":false,"id":"fast","label":"Fast","role":"speed","type":"boolean"},{"default":false,"id":"thinking","label":"Thinking","type":"boolean"}]},{"default":false,"id":"claude-opus-4-8","name":"Opus 4.8","options":[{"choices":[{"id":"low","label":"Low"},{"id":"medium","label":"Medium"},{"id":"high","label":"High"}],"default":"medium","id":"effort","label":"Reasoning","role":"reasoning","type":"select"},{"choices":[{"id":"200k","label":"200K"},{"id":"1m","label":"1M"}],"default":"200k","id":"context","label":"Context","role":"context_window","type":"select"},{"default":false,"id":"fast","label":"Fast","role":"speed","type":"boolean"},{"default":false,"id":"thinking","label":"Thinking","type":"boolean"}]}]}
+{"item":{"body":{"items":[{"status":"in_progress","text":"Read the diff"},{"status":"pending","text":"Write the review"}],"type":"todos"},"id":"plan:1","parent":null,"status":"running"}}
+{"item":{"body":{"agent":"explore","prompt":"List the crates","type":"subagent"},"id":"toolu_task_1","parent":null,"status":"running"}}
+{"item":{"body":{"agent":"explore","model":"composer-2","prompt":"List the crates","type":"subagent"},"id":"toolu_task_1","parent":null,"status":"running"}}
+{"item":{"body":{"agent":"explore","model":"composer-2","prompt":"List the crates","type":"subagent"},"id":"toolu_task_1","parent":null,"status":"running"}}
+{"item":{"body":{"agent":"explore","model":"composer-2","prompt":"List the crates","result":"Found 3 crates.","type":"subagent"},"id":"toolu_task_1","parent":null,"status":"completed"}}
+{"item":{"body":{"agent":"explore","model":"composer-2","prompt":"List the crates","result":"Found 3 crates.","type":"subagent"},"id":"toolu_task_1","parent":null,"status":"completed"}}
+{"request":{"body":{"questions":[{"header":"Review","id":"depth","multi":false,"options":[{"label":"Quick"},{"label":"Thorough"}],"question":"How deep?"}],"type":"questions"},"id":"1003","item":null}}
+{"item":{"body":{"text":"# Review\n\n1. Read\n2. Write","type":"plan"},"id":"plan:1:toolu_plan_1","parent":null,"status":"completed"}}
+{"item":{"body":{"items":[{"status":"completed","text":"Read the diff"},{"status":"pending","text":"Write the review"}],"type":"todos"},"id":"plan:1","parent":null,"status":"running"}}
+{"context":{"max_tokens":200000,"used_tokens":5000}}
+{"item":{"body":{"text":"","type":"message"},"id":"msg:1:1","parent":null,"status":"running"}}
+{"text_delta":{"item":"msg:1:1","text":"Reviewed."}}
+{"item":{"body":{"text":"Reviewed.","type":"message"},"id":"msg:1:1","parent":null,"status":"running"}}
+{"item":{"body":{"text":"Reviewed.","type":"message"},"id":"msg:1:1","parent":null,"status":"completed"}}
+{"item":{"body":{"items":[{"status":"completed","text":"Read the diff"},{"status":"pending","text":"Write the review"}],"type":"todos"},"id":"plan:1","parent":null,"status":"completed"}}
+{"turn_ended":"completed"}
+{"exited":null}

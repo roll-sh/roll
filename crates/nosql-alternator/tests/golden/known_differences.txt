@@ -1,0 +1,82 @@
+# Golden responses the in-memory backend does not reproduce, by design. tests/golden.rs reports
+# them separately; a listed response that starts matching fails the test (remove it here).
+#
+# internal: reads and writes of ScyllaDB's internal tables (`.scylla.alternator.KS.T`) see the
+#   engine's system tables through `Backend::internal_table`; the in-memory backend has none, so
+#   these answer "Internal table: KS.T not found". The name resolution and refusal rules around
+#   them are covered by the other cases of the same files.
+internal qs_segments_misc.txt:159
+internal qs_segments_misc.txt:161
+internal qs_segments_misc.txt:163
+internal qs_segments_misc.txt:165
+internal qs_segments_misc.txt:167
+internal vec_system_tables.txt:107
+internal vec_system_tables.txt:109
+internal vec_system_tables.txt:11
+internal vec_system_tables.txt:111
+internal vec_system_tables.txt:113
+internal vec_system_tables.txt:117
+internal vec_system_tables.txt:13
+internal vec_system_tables.txt:15
+internal vec_system_tables.txt:18
+internal vec_system_tables.txt:20
+internal vec_system_tables.txt:22
+internal vec_system_tables.txt:24
+internal vec_system_tables.txt:26
+internal vec_system_tables.txt:28
+internal vec_system_tables.txt:30
+internal vec_system_tables.txt:32
+internal vec_system_tables.txt:34
+internal vec_system_tables.txt:36
+internal vec_system_tables.txt:38
+internal vec_system_tables.txt:40
+internal vec_system_tables.txt:42
+internal vec_system_tables.txt:44
+internal vec_system_tables.txt:46
+internal vec_system_tables.txt:48
+internal vec_system_tables.txt:5
+internal vec_system_tables.txt:51
+internal vec_system_tables.txt:53
+internal vec_system_tables.txt:55
+internal vec_system_tables.txt:57
+internal vec_system_tables.txt:59
+internal vec_system_tables.txt:61
+internal vec_system_tables.txt:63
+internal vec_system_tables.txt:66
+internal vec_system_tables.txt:68
+internal vec_system_tables.txt:7
+internal vec_system_tables.txt:70
+internal vec_system_tables.txt:72
+internal vec_system_tables.txt:74
+internal vec_system_tables.txt:76
+internal vec_system_tables.txt:78
+internal vec_system_tables.txt:81
+internal vec_system_tables.txt:83
+internal vec_system_tables.txt:85
+internal vec_system_tables.txt:87
+internal vec_system_tables.txt:89
+internal vec_system_tables.txt:9
+internal vec_tablets.txt:105
+internal vec_tablets.txt:112
+internal vec_tablets.txt:119
+internal vec_tablets.txt:126
+internal vec_tablets.txt:133
+internal vec_tablets.txt:14
+internal vec_tablets.txt:140
+internal vec_tablets.txt:147
+internal vec_tablets.txt:162
+internal vec_tablets.txt:182
+internal vec_tablets.txt:21
+internal vec_tablets.txt:28
+internal vec_tablets.txt:35
+internal vec_tablets.txt:4
+internal vec_tablets.txt:42
+internal vec_tablets.txt:49
+internal vec_tablets.txt:56
+internal vec_tablets.txt:6
+internal vec_tablets.txt:63
+internal vec_tablets.txt:70
+internal vec_tablets.txt:77
+internal vec_tablets.txt:84
+internal vec_tablets.txt:91
+internal vec_tablets.txt:98

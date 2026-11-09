@@ -1,0 +1,304 @@
+# Setup: item with nested map/list documents
+> CreateTable {"TableName":"alt_cond_pj_s","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST"}
+< 200 {"TableDescription":{"TableName":"alt_cond_pj_s","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+> PutItem {"TableName":"alt_cond_pj_s","Item":{"p":{"S":"k"},"a":{"M":{"b":{"L":[{"N":"1"},{"M":{"c":{"S":"x"},"d":{"N":"2"}}},{"N":"3"}]},"e":{"S":"y"}}},"l":{"L":[{"N":"10"},{"N":"20"},{"L":[{"N":"30"},{"N":"40"}]}]},"s":{"S":"str"},"n":{"N":"5"},"x.y":{"S":"dotted"},"ss":{"SS":["q"]},"x":{"M":{"y":{"S":"nested"}}},"name":{"S":"reserved"},"a_b":{"N":"7"},"_u":{"N":"8"},"A9":{"N":"9"}}}
+< 200 {}
+# Top-level attributes; key attributes only if asked; missing attributes give an empty Item
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"a"}
+< 200 {"Item":{"a":{"M":{"b":{"L":[{"N":"1"},{"M":{"c":{"S":"x"},"d":{"N":"2"}}},{"N":"3"}]},"e":{"S":"y"}}}}}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"s, n"}
+< 200 {"Item":{"n":{"N":"5"},"s":{"S":"str"}}}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"p"}
+< 200 {"Item":{"p":{"S":"k"}}}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"p, s"}
+< 200 {"Item":{"p":{"S":"k"},"s":{"S":"str"}}}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"nonexistent"}
+< 200 {"Item":{}}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"s,n,p"}
+< 200 {"Item":{"p":{"S":"k"},"n":{"N":"5"},"s":{"S":"str"}}}
+# Projection on a missing item: no Item
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"missing"}},"ProjectionExpression":"a"}
+< 200 {}
+# Nested paths and list indexes
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"a.b"}
+< 200 {"Item":{"a":{"M":{"b":{"L":[{"N":"1"},{"M":{"c":{"S":"x"},"d":{"N":"2"}}},{"N":"3"}]}}}}}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"a.e"}
+< 200 {"Item":{"a":{"M":{"e":{"S":"y"}}}}}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"a.b[0]"}
+< 200 {"Item":{"a":{"M":{"b":{"L":[{"N":"1"}]}}}}}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"a.b[1]"}
+< 200 {"Item":{"a":{"M":{"b":{"L":[{"M":{"c":{"S":"x"},"d":{"N":"2"}}}]}}}}}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"a.b[1].c"}
+< 200 {"Item":{"a":{"M":{"b":{"L":[{"M":{"c":{"S":"x"}}}]}}}}}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"a.b[1].c, a.e"}
+< 200 {"Item":{"a":{"M":{"b":{"L":[{"M":{"c":{"S":"x"}}}]},"e":{"S":"y"}}}}}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"a.b[0], a.b[2]"}
+< 200 {"Item":{"a":{"M":{"b":{"L":[{"N":"1"},{"N":"3"}]}}}}}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"a.b[2], a.b[0]"}
+< 200 {"Item":{"a":{"M":{"b":{"L":[{"N":"1"},{"N":"3"}]}}}}}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"l[2][1]"}
+< 200 {"Item":{"l":{"L":[{"L":[{"N":"40"}]}]}}}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"l[0], l[2][0]"}
+< 200 {"Item":{"l":{"L":[{"N":"10"},{"L":[{"N":"30"}]}]}}}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"l[1], l[2][1]"}
+< 200 {"Item":{"l":{"L":[{"N":"20"},{"L":[{"N":"40"}]}]}}}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"x.y"}
+< 200 {"Item":{"x":{"M":{"y":{"S":"nested"}}}}}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"a.b[1].d, a.b[1].c"}
+< 200 {"Item":{"a":{"M":{"b":{"L":[{"M":{"c":{"S":"x"},"d":{"N":"2"}}}]}}}}}
+# Paths that do not exist: beyond list end, missing map key, indexing a map / scalar, dotting into list / scalar
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"l[5]"}
+< 200 {"Item":{}}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"l[999]"}
+< 200 {"Item":{}}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"a.z"}
+< 200 {"Item":{}}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"z.q"}
+< 200 {"Item":{}}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"s.x"}
+< 200 {"Item":{}}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"s[0]"}
+< 200 {"Item":{}}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"a[0]"}
+< 200 {"Item":{}}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"l.x"}
+< 200 {"Item":{}}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"n[0]"}
+< 200 {"Item":{}}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"a.b[1].z"}
+< 200 {"Item":{}}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"a.b[7].c"}
+< 200 {"Item":{}}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"a.b[1][0]"}
+< 200 {"Item":{}}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"ss[0]"}
+< 200 {"Item":{}}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"a.e, z"}
+< 200 {"Item":{"a":{"M":{"e":{"S":"y"}}}}}
+# ExpressionAttributeNames in projections; literal dotted names need a #name
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"#d","ExpressionAttributeNames":{"#d":"x.y"}}
+< 200 {"Item":{"x.y":{"S":"dotted"}}}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"#n","ExpressionAttributeNames":{"#n":"a"}}
+< 200 {"Item":{"a":{"M":{"b":{"L":[{"N":"1"},{"M":{"c":{"S":"x"},"d":{"N":"2"}}},{"N":"3"}]},"e":{"S":"y"}}}}}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"#n.#m","ExpressionAttributeNames":{"#n":"a","#m":"e"}}
+< 200 {"Item":{"a":{"M":{"e":{"S":"y"}}}}}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"#n.b[1].#m","ExpressionAttributeNames":{"#n":"a","#m":"c"}}
+< 200 {"Item":{"a":{"M":{"b":{"L":[{"M":{"c":{"S":"x"}}}]}}}}}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"#n[2]","ExpressionAttributeNames":{"#n":"l"}}
+< 200 {"Item":{"l":{"L":[{"L":[{"N":"30"},{"N":"40"}]}]}}}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"#n, #n","ExpressionAttributeNames":{"#n":"s"}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Invalid ProjectionExpression: two document paths overlap at s"}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"#n, s","ExpressionAttributeNames":{"#n":"s"}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Invalid ProjectionExpression: two document paths overlap at s"}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"#a1, #b_2","ExpressionAttributeNames":{"#a1":"s","#b_2":"n"}}
+< 200 {"Item":{"n":{"N":"5"},"s":{"S":"str"}}}
+# ExpressionAttributeNames errors: undefined, unused, bad name form, empty map, non-string value
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"#n","ExpressionAttributeNames":{"#m":"a"}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeNames missing entry '#n' required by expression"}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"#n","ExpressionAttributeNames":{"#n":"a","#unused":"b"}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeNames has spurious '#unused', not used in GetItem"}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"s","ExpressionAttributeNames":{"#unused":"b"}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeNames has spurious '#unused', not used in GetItem"}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"#n","ExpressionAttributeNames":{}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeNames missing entry '#n' required by expression"}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"#n","ExpressionAttributeNames":{"#n":5}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeNames missing entry '#n' required by expression"}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"#n","ExpressionAttributeNames":{"#n":""}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeNames contains invalid value: Empty attribute name"}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"#n","ExpressionAttributeNames":{"n":"a","#n":"a"}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeNames has spurious 'n', not used in GetItem"}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"#","ExpressionAttributeNames":{"#":"a"}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing ProjectionExpression '#': syntax error"}
+# ExpressionAttributeValues with a projection (values are never usable in projections)
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"s","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 200 {"Item":{"s":{"S":"str"}}}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":":v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing ProjectionExpression ':v': syntax error at char 0"}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"s","ExpressionAttributeValues":{}}
+< 200 {"Item":{"s":{"S":"str"}}}
+# Reserved words and unusual characters in plain attribute names
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"name"}
+< 200 {"Item":{"name":{"S":"reserved"}}}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"a_b"}
+< 200 {"Item":{"a_b":{"N":"7"}}}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"_u"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing ProjectionExpression '_u': syntax error"}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"A9"}
+< 200 {"Item":{"A9":{"N":"9"}}}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"9a"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing ProjectionExpression '9a': syntax error at char 0"}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"a-b"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing ProjectionExpression 'a-b': syntax error at char 1"}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"ä"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing ProjectionExpression 'ä': syntax error"}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"a b"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing ProjectionExpression 'a b': syntax error at char 2"}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"SELECT"}
+< 200 {"Item":{}}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"size"}
+< 200 {"Item":{}}
+# Overlapping and conflicting paths
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"a, a"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Invalid ProjectionExpression: two document paths overlap at a"}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"a, a.b"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Invalid ProjectionExpression: two document paths overlap at a"}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"a.b, a"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Invalid ProjectionExpression: two document paths overlap at a"}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"a.b, a.b[0]"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Invalid ProjectionExpression: two document paths overlap at a.b[0]"}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"a.b[0], a.b[0]"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Invalid ProjectionExpression: two document paths overlap at a.b[0]"}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"a.b[1].c, a.b[1]"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Invalid ProjectionExpression: two document paths overlap at a.b[1]"}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"a.b[0], a.b.c"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Invalid ProjectionExpression: two document paths conflict at a.b.c"}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"a.b.c, a.b[0]"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Invalid ProjectionExpression: two document paths conflict at a.b[0]"}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"l[0], l.x"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Invalid ProjectionExpression: two document paths conflict at l.x"}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"l[2][0], l[2].z"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Invalid ProjectionExpression: two document paths conflict at l[2].z"}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"a.b[0], a.b[1], a"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Invalid ProjectionExpression: two document paths overlap at a"}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"p, p"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Invalid ProjectionExpression: two document paths overlap at p"}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"s, n, s"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Invalid ProjectionExpression: two document paths overlap at s"}
+# Syntax errors
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":""}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing ProjectionExpression '': syntax error at char 0"}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":" "}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing ProjectionExpression ' ': syntax error at char 0"}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"a,"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing ProjectionExpression 'a,': syntax error at char 0"}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":",a"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing ProjectionExpression ',a': syntax error at char 0"}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"a,,b"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing ProjectionExpression 'a,,b': syntax error at char 2"}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"a."}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing ProjectionExpression 'a.': syntax error at char 0"}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":".a"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing ProjectionExpression '.a': syntax error at char 0"}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"a..b"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing ProjectionExpression 'a..b': syntax error at char 2"}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"a["}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing ProjectionExpression 'a[': syntax error at char 0"}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"a[]"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing ProjectionExpression 'a[]': syntax error at char 2"}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"a[-1]"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing ProjectionExpression 'a[-1]': syntax error at char 2"}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"a[1.5]"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing ProjectionExpression 'a[1.5]': syntax error at char 3"}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"a[x]"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing ProjectionExpression 'a[x]': syntax error at char 2"}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"a]"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing ProjectionExpression 'a]': syntax error at char 1"}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"a[0]b"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing ProjectionExpression 'a[0]b': syntax error at char 4"}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"a[0"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing ProjectionExpression 'a[0': syntax error at char 0"}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"a b"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing ProjectionExpression 'a b': syntax error at char 2"}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"(a)"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing ProjectionExpression '(a)': syntax error at char 0"}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"a = 1"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing ProjectionExpression 'a = 1': syntax error at char 2"}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"size(a)"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing ProjectionExpression 'size(a)': syntax error at char 4"}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"#"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing ProjectionExpression '#': syntax error"}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"a, "}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing ProjectionExpression 'a, ': syntax error at char 0"}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":" a , s "}
+< 200 {"Item":{"a":{"M":{"b":{"L":[{"N":"1"},{"M":{"c":{"S":"x"},"d":{"N":"2"}}},{"N":"3"}]},"e":{"S":"y"}}},"s":{"S":"str"}}}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"a . e"}
+< 200 {"Item":{"a":{"M":{"e":{"S":"y"}}}}}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"a.b [0]"}
+< 200 {"Item":{"a":{"M":{"b":{"L":[{"N":"1"}]}}}}}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"a.b[ 0 ]"}
+< 200 {"Item":{"a":{"M":{"b":{"L":[{"N":"1"}]}}}}}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"a.b[00]"}
+< 200 {"Item":{"a":{"M":{"b":{"L":[{"N":"1"}]}}}}}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"a.b[01]"}
+< 200 {"Item":{"a":{"M":{"b":{"L":[{"M":{"c":{"S":"x"},"d":{"N":"2"}}}]}}}}}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"a,\tn"}
+< 200 {"Item":{"a":{"M":{"b":{"L":[{"N":"1"},{"M":{"c":{"S":"x"},"d":{"N":"2"}}},{"N":"3"}]},"e":{"S":"y"}}},"n":{"N":"5"}}}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"a\n,s"}
+< 200 {"Item":{"a":{"M":{"b":{"L":[{"N":"1"},{"M":{"c":{"S":"x"},"d":{"N":"2"}}},{"N":"3"}]},"e":{"S":"y"}}},"s":{"S":"str"}}}
+# List index range: large indexes
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"l[2147483647]"}
+< 200 {"Item":{}}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"l[2147483648]"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing ProjectionExpression 'l[2147483648]': list index out of integer range"}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"l[4294967296]"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing ProjectionExpression 'l[4294967296]': list index out of integer range"}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"l[99999999999999]"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing ProjectionExpression 'l[99999999999999]': list index out of integer range"}
+# Nesting depth: 32 levels allowed, 33 rejected (counting the top-level attribute)
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"a.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b"}
+< 200 {"Item":{}}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"a.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing ProjectionExpression 'a.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b': Document path exceeded 32 nesting levels"}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"l[0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0]"}
+< 200 {"Item":{}}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"l[0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0]"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing ProjectionExpression 'l[0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0]': Document path exceeded 32 nesting levels"}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"a.b[0].b[0].b[0].b[0].b[0].b[0].b[0].b[0].b[0].b[0].b[0].b[0].b[0].b[0].b[0].b[0]"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing ProjectionExpression 'a.b[0].b[0].b[0].b[0].b[0].b[0].b[0].b[0].b[0].b[0].b[0].b[0].b[0].b[0].b[0].b[0]': Document path exceeded 32 nesting levels"}
+# Very long projections and attribute names
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"$repeat(a,65535)"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ProjectionExpression expression size 65535 exceeds allowed maximum 4096."}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"$repeat(a,65536)"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ProjectionExpression expression size 65536 exceeds allowed maximum 4096."}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"$repeat(a,4096)"}
+< 200 {"Item":{}}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"$repeat(a,4097)"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ProjectionExpression expression size 4097 exceeds allowed maximum 4096."}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"$repeat( ,4095)s"}
+< 200 {"Item":{"s":{"S":"str"}}}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":"$repeat( ,4096)s"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ProjectionExpression expression size 4097 exceeds allowed maximum 4096."}
+# AttributesToGet: basic, missing attribute, duplicate, empty, dotted name is literal
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"AttributesToGet":["s"]}
+< 200 {"Item":{"s":{"S":"str"}}}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"AttributesToGet":["s","n"]}
+< 200 {"Item":{"n":{"N":"5"},"s":{"S":"str"}}}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"AttributesToGet":["p"]}
+< 200 {"Item":{"p":{"S":"k"}}}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"AttributesToGet":["nonexistent"]}
+< 200 {"Item":{}}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"AttributesToGet":["s","s"]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Invalid AttributesToGet: Duplicate attribute: s"}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"AttributesToGet":[]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Empty AttributesToGet is not allowed. Consider using Select=COUNT instead."}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"AttributesToGet":["x.y"]}
+< 200 {"Item":{"x.y":{"S":"dotted"}}}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"AttributesToGet":["a.b"]}
+< 200 {"Item":{}}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"missing"}},"AttributesToGet":["a"]}
+< 200 {}
+# AttributesToGet: wrong element types (non-array AttributesToGet gives a backtrace message: not captured)
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"AttributesToGet":[1]}
+< 500 {"__type":"com.amazonaws.dynamodb.v20120810#InternalServerError","message":"Internal server error: std::runtime_error (rjson::to_string expects a string value, got: kNumberType)"}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"AttributesToGet":[null]}
+< 500 {"__type":"com.amazonaws.dynamodb.v20120810#InternalServerError","message":"Internal server error: std::runtime_error (rjson::to_string expects a string value, got: kNullType)"}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"AttributesToGet":[""]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"in AttributesToGet - Empty attribute name"}
+# AttributesToGet combined with ProjectionExpression / ExpressionAttributeNames
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"AttributesToGet":["s"],"ProjectionExpression":"s"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"GetItem does not allow both ProjectionExpression and AttributesToGet to be given together"}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"AttributesToGet":["s"],"ExpressionAttributeNames":{"#n":"s"}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeNames has spurious '#n', not used in GetItem"}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"AttributesToGet":["s"],"ProjectionExpression":"#n","ExpressionAttributeNames":{"#n":"s"}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"GetItem does not allow both ProjectionExpression and AttributesToGet to be given together"}
+# ProjectionExpression of wrong JSON type
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":5}
+< 500 {"__type":"com.amazonaws.dynamodb.v20120810#InternalServerError","message":"Internal server error: std::runtime_error (rjson::to_string_view expects a string value, got: kNumberType)"}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":["s"]}
+< 500 {"__type":"com.amazonaws.dynamodb.v20120810#InternalServerError","message":"Internal server error: std::runtime_error (rjson::to_string_view expects a string value, got: kArrayType)"}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ProjectionExpression":null}
+< 500 {"__type":"com.amazonaws.dynamodb.v20120810#InternalServerError","message":"Internal server error: std::runtime_error (rjson::to_string_view expects a string value, got: kNullType)"}
+> GetItem {"TableName":"alt_cond_pj_s","Key":{"p":{"S":"k"}},"ExpressionAttributeNames":{"#n":"s"}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeNames has spurious '#n', not used in GetItem"}
+> DeleteTable {"TableName":"alt_cond_pj_s"}
+< 200 {"TableDescription":{"TableName":"alt_cond_pj_s","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_cond_pj_s:scylla:table/alt_cond_pj_s","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0}}}

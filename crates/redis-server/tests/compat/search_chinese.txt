@@ -1,0 +1,103 @@
+# LANGUAGE chinese: the module's friso segmenter (complex mode over its bundled dictionary)
+# for documents, the query expander and highlighting.
+FLUSHALL
+FT.CREATE cn ON HASH PREFIX 1 c: LANGUAGE chinese SCHEMA t TEXT n TEXT NOSTEM
+HSET c:1 t "中华人民共和国成立了，我们都很高兴。Hello World 卡拉OK qq2013 3.14元"
+HSET c:2 t "研究生命起源是一个很有意思的课题" n "结婚的和尚未结婚的"
+HSET c:3 t "北京大学生前来应聘，他说的确实在理"
+HSET c:4 t "繁體中文轉換成簡體中文：電腦、軟體、資訊" n "臺灣"
+HSET c:5 t "ＡＢＣ全角字母１２３和半角abc 混合 Ｈｅｌｌｏ"
+HSET c:6 t "the quick brown fox 和 THE LAZY DOG 是 stopwords 吗"
+HSET c:7 t "价格：￥100元，折扣50%，数量3个，长度2.5米"
+HSET c:8 t "c++和c#都是编程语言，b超和x射线"
+HSET c:9 t "😀表情符号😀后面的中文"
+HSET c:10 t "转义\,逗号 和 a\.b 以及 \-连字符"
+FT.SEARCH cn 中华人民共和国 NOCONTENT
+FT.SEARCH cn 成立 NOCONTENT
+FT.SEARCH cn hello NOCONTENT
+FT.SEARCH cn 卡拉ok NOCONTENT
+FT.SEARCH cn qq2013 NOCONTENT
+FT.SEARCH cn 研究 NOCONTENT
+FT.SEARCH cn 生命 NOCONTENT
+FT.SEARCH cn 尚未 NOCONTENT
+FT.SEARCH cn @n:和尚 NOCONTENT
+FT.SEARCH cn 大学生 NOCONTENT
+FT.SEARCH cn 确实 NOCONTENT
+FT.SEARCH cn 电脑 NOCONTENT
+FT.SEARCH cn 電腦 NOCONTENT
+FT.SEARCH cn 台湾 NOCONTENT
+FT.SEARCH cn abc NOCONTENT
+FT.SEARCH cn 123 NOCONTENT
+FT.SEARCH cn the NOCONTENT
+FT.SEARCH cn stopwords NOCONTENT
+FT.SEARCH cn 100元 NOCONTENT
+FT.SEARCH cn 50% NOCONTENT
+FT.SEARCH cn 2.5米 NOCONTENT
+FT.SEARCH cn c++ NOCONTENT
+FT.SEARCH cn b超 NOCONTENT
+FT.SEARCH cn 表情 NOCONTENT
+FT.SEARCH cn 中文 NOCONTENT
+FT.SEARCH cn 逗号 NOCONTENT
+FT.SEARCH cn "转义\\,逗号" NOCONTENT
+FT.EXPLAIN cn 中华人民共和国成立了
+FT.EXPLAIN cn 研究生命起源
+FT.EXPLAIN cn 北京大学生前来应聘
+FT.EXPLAIN cn 结婚的和尚未结婚的
+FT.EXPLAIN cn 繁體中文轉換成簡體中文
+FT.EXPLAIN cn 我们都很高兴
+FT.EXPLAIN cn "@t:中华人民共和国"
+FT.EXPLAIN cn "中国 人民"
+FT.EXPLAIN cn 卡拉OK
+FT.EXPLAIN cn 价格100元
+FT.EXPLAIN cn 美国总统奥巴马访问中国
+FT.EXPLAIN cn 南京市长江大桥
+FT.EXPLAIN cn 乒乓球拍卖完了
+FT.EXPLAIN cn 他从马上下来
+FT.EXPLAIN cn 我爱北京天安门
+FT.EXPLAIN cn 王小明和李华去上海
+FT.EXPLAIN cn 一九四九年十月一日
+FT.EXPLAIN cn 这是一个测试句子用于验证分词效果
+FT.SEARCH cn 成立 HIGHLIGHT
+FT.SEARCH cn 中华人民共和国 HIGHLIGHT SUMMARIZE FRAGS 1 LEN 3
+FT.SEARCH cn 研究 SUMMARIZE FIELDS 1 t LEN 2 HIGHLIGHT FIELDS 1 t
+FT.SEARCH cn 电脑 HIGHLIGHT TAGS < >
+FT.AGGREGATE cn 生命 LOAD 1 @t
+FT.SEARCH cn 中华 LANGUAGE english NOCONTENT
+FT.SEARCH cn 中华人民共和国 LANGUAGE english NOCONTENT
+# Traditional characters become simplified before any lookup: words of their own, characters
+# only words inside longer words (古剎, 交疊, 撒手鐧), ones that become no word (唝, 鰧: "c#"
+# keeps before a non-CJK character), and ‧/‥, whose shorter replacement desynchronizes the reader.
+FT.CREATE tr ON HASH PREFIX 1 tr: LANGUAGE chinese SCHEMA t TEXT
+HSET tr:1 t "臺灣的電腦軟體與資訊網路發展"
+HSET tr:2 t "古剎裡的老和尚說交疊的撒手鐧"
+HSET tr:3 t "c#鰧 c#唝 c#丂 c++鰧 唝唝"
+HSET tr:4 t "中‧国 中‥国 a‧b 王‧明"
+HSET tr:5 t "國際貿易與經濟發展 簡體中文 繁體中文 门 們 個人"
+FT.SEARCH tr 台湾 NOCONTENT
+FT.SEARCH tr 臺灣 NOCONTENT
+FT.SEARCH tr 电脑 HIGHLIGHT
+FT.SEARCH tr 軟體 SUMMARIZE FRAGS 1 LEN 3 HIGHLIGHT
+FT.SEARCH tr 古刹 NOCONTENT
+FT.SEARCH tr 古剎 HIGHLIGHT
+FT.SEARCH tr 交叠 NOCONTENT
+FT.SEARCH tr 撒手锏 NOCONTENT
+FT.SEARCH tr c# NOCONTENT
+FT.SEARCH tr 国 NOCONTENT
+FT.SEARCH tr 國際 NOCONTENT
+FT.SEARCH tr 个人 HIGHLIGHT
+FT.EXPLAIN tr 國際貿易與經濟發展
+FT.EXPLAIN tr 古剎交疊撒手鐧
+FT.EXPLAIN tr "c#鰧唝"
+FT.EXPLAIN tr "中‧国‥王"
+FT.DROPINDEX tr
+# A document's own language.
+FT.CREATE lf ON HASH PREFIX 1 l: LANGUAGE_FIELD lang SCHEMA t TEXT
+HSET l:1 t "中华人民共和国成立了" lang chinese
+HSET l:2 t "中华人民共和国成立了" lang english
+FT.SEARCH lf 成立 NOCONTENT
+FT.SEARCH lf 成立 LANGUAGE chinese NOCONTENT
+FT.SEARCH lf 中华人民共和国成立了 NOCONTENT
+!mask total_indexing_time FT.INFO cn
+FT.DROPINDEX cn
+FT.DROPINDEX lf
+FLUSHALL

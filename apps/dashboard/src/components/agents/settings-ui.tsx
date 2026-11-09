@@ -1,0 +1,385 @@
+/**
+ * T3 Code's settings layout (`settingsLayout.tsx`, `SettingsPanels.tsx` there, MIT) for the side
+ * panel: a search box over sections; a section is a title over a grouped card; a row is its title
+ * and description on the left and its control on the right (stacked when narrow), with a reset
+ * button when it differs from its default. Searching keeps the rows that match (T3's
+ * `searchSettings`) in their sections and hides the rest. T3's settings are one page; here they're
+ * the owner's and each machine's, so a search also lists what matches on the others (`elsewhere`),
+ * each opening that page with the same search.
+ */
+
+import { Check, ChevronRight, RotateCcw, Search, X } from "lucide-react";
+import { createContext, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { setAgentsView } from "@/lib/agents-surface";
+import { searchSettings, type SettingItem } from "@/lib/settings-search";
+import { IconButton } from "./session";
+import { cn } from "./ui";
+
+/** A row's words: its title, its section, its description, other terms. */
+export interface Setting extends SettingItem {
+  description?: string;
+}
+
+const SearchCtx = createContext<{ query: string; matches: Set<string> | null }>({ query: "", matches: null });
+
+/** The surface opens "Add a machine" on this (settings has no handle on its state). */
+export const ADD_MACHINE_EVENT = "roll:agents:add-machine";
+
+/** Places a settings search can't find as settings: "automation" found nothing, "sandbox" no way to rent one. */
+const PLACES: { item: SettingItem; title: string; hint: string; open: () => void }[] = [
+  {
+    item: { id: "place.automations", title: "Automations", section: "", terms: ["automation", "workflow", "trigger", "schedule", "cron", "slack", "discord", "notice", "run"] },
+    title: "Automations",
+    hint: "Workflows that start agents, on a schedule or an event (A)",
+    open: () => setAgentsView({ kind: "automations" }),
+  },
+  {
+    item: { id: "place.machine", title: "Add a machine", section: "", terms: ["sandbox", "rent", "cloud", "new machine", "connect", "computer", "server"] },
+    title: "Add a machine",
+    hint: "Connect a computer, or rent a sandbox",
+    open: () => window.dispatchEvent(new Event(ADD_MACHINE_EVENT)),
+  },
+];
+
+/** Whether a row (or any of `ids`) shows with the current search. */
+export function useShown(ids: readonly string[]): boolean {
+  const { matches } = useContext(SearchCtx);
+  return !matches || ids.some((id) => matches.has(id));
+}
+
+/** The search's words, to open what holds a match (a provider's details). */
+export const useSearching = () => useContext(SearchCtx).query.trim().length > 0;
+
+/** Another settings page, for the search: its target (`owner`, `m:<id>`), its name, its rows. */
+export interface SettingsElsewhere {
+  target: string;
+  title: string;
+  items: readonly Setting[];
+}
+
+/** The search a page opened from another page's results starts with. */
+let carried = "";
+
+/** Opens a settings page (`owner`, `m:<id>`, `p:<id>`), searched for `query` when given. */
+export function openSettings(target: string, query = "") {
+  carried = query;
+  setAgentsView({ kind: "settings", target });
+}
+
+export function SettingsPage({
+  icon,
+  title,
+  subtitle,
+  onClose,
+  items,
+  search = true,
+  elsewhere,
+  children,
+}: {
+  icon: ReactNode;
+  title: string;
+  subtitle: string;
+  onClose: () => void;
+  /** Every row the page has, for the search. */
+  items: readonly Setting[];
+  /** Offer the search box (a short page needs none). */
+  search?: boolean;
+  /** The other settings pages, searched too. */
+  elsewhere?: readonly SettingsElsewhere[];
+  children: ReactNode;
+}) {
+  const [query, setQuery] = useState(() => {
+    const q = carried;
+    carried = "";
+    return q;
+  });
+  const box = useRef<HTMLInputElement>(null);
+  const page = useRef<HTMLDivElement>(null);
+  // Opening moves focus into the panel, so Tab and Escape work there at once: the search on a
+  // desktop (typing finds a setting), the page itself on a touch screen (no keyboard popping up).
+  useEffect(() => {
+    const root = page.current;
+    if (!root || root.contains(document.activeElement)) return;
+    const touch = window.matchMedia?.("(pointer: coarse)").matches;
+    (search && !touch ? box.current : root)?.focus({ preventScroll: true });
+    // On opening only.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  const matches = useMemo(() => (query.trim() ? new Set(searchSettings(query, items).map((i) => i.id)) : null), [query, items]);
+  const others = useMemo(
+    () => (query.trim() && elsewhere ? elsewhere.map((e) => ({ ...e, hits: searchSettings(query, e.items) })).filter((e) => e.hits.length > 0) : []),
+    [query, elsewhere],
+  );
+  // Things people look for in settings that live elsewhere (only on the agents' own pages).
+  const places = useMemo(() => (query.trim() && elsewhere ? PLACES.filter((p) => searchSettings(query, [p.item]).length > 0) : []), [query, elsewhere]);
+  // T3: `/` or ⌘/Ctrl+F searches the settings.
+  useEffect(() => {
+    if (!search) return;
+    const onKey = (e: KeyboardEvent) => {
+      const el = e.target as HTMLElement | null;
+      const typing = el && (el.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName));
+      if ((e.key === "/" && !typing) || ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "f")) {
+        e.preventDefault();
+        box.current?.focus();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [search]);
+  return (
+    <div ref={page} tabIndex={-1} aria-label={`${title}: ${subtitle}`} className="flex min-h-0 flex-1 flex-col outline-none">
+      <div className="flex h-12 shrink-0 items-center gap-2.5 border-b border-line px-3">
+        {icon}
+        <div className="min-w-0 flex-1 leading-tight">
+          <p className="truncate text-[13px] font-medium tracking-[-0.01em]">{title}</p>
+          <p className="text-[11px] text-subtle">{subtitle}</p>
+        </div>
+        <IconButton label="Close (Esc)" onClick={onClose}>
+          <X className="size-4" />
+        </IconButton>
+      </div>
+      <div className={cn("shrink-0 px-4 pt-3 pb-1", !search && "hidden")}>
+        <label className="flex h-8 items-center gap-2 rounded-lg border border-line-2 bg-panel-2 px-2.5 text-[13px] transition-colors focus-within:border-line-3">
+          <Search className="size-3.5 shrink-0 text-subtle" aria-hidden />
+          <input
+            ref={box}
+            type="search"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Escape" && query) {
+                e.preventDefault();
+                e.stopPropagation();
+                setQuery("");
+              }
+            }}
+            placeholder="Search settings"
+            aria-label="Search settings"
+            className="min-w-0 flex-1 bg-transparent outline-none placeholder:text-subtle [&::-webkit-search-cancel-button]:hidden"
+          />
+          {query && (
+            <button type="button" onClick={() => setQuery("")} className="text-subtle hover:text-fg" aria-label="Clear the search">
+              <X className="size-3.5" />
+            </button>
+          )}
+        </label>
+      </div>
+      <div className="min-h-0 flex-1 overflow-y-auto px-4 pt-3 pb-8" data-scroll>
+        <SearchCtx.Provider value={{ query, matches }}>
+          {matches && matches.size === 0 ? others.length === 0 && places.length === 0 && <p className="py-10 text-center text-[13px] text-subtle">No settings found</p> : children}
+          {places.length > 0 && (
+            <section className="mb-6" aria-label="Not a setting">
+              <h3 className="mb-2 px-0.5 text-[12px] font-medium text-soft">Not in settings</h3>
+              <div className="divide-y divide-line overflow-hidden rounded-xl border border-line-2 bg-raised shadow-card inset-shadow-highlight">
+                {places.map((p) => (
+                  <button
+                    key={p.title}
+                    type="button"
+                    onClick={p.open}
+                    className="flex w-full items-center gap-3 px-4 py-3 text-left transition-colors hover:bg-fg/[0.03] focus-visible:bg-fg/[0.04] focus-visible:outline-none"
+                  >
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-[13px] font-[510] text-fg">{p.title}</span>
+                      <span className="block truncate text-[12px] text-muted">{p.hint}</span>
+                    </span>
+                    <ChevronRight className="size-4 shrink-0 text-subtle" strokeWidth={1.5} aria-hidden />
+                  </button>
+                ))}
+              </div>
+            </section>
+          )}
+          {others.length > 0 && (
+            <section className="mb-6" aria-label="In other settings">
+              <h3 className="mb-2 px-0.5 text-[12px] font-medium text-soft">{matches?.size === 0 ? "Not here, but in" : "Also in"}</h3>
+              <div className="divide-y divide-line overflow-hidden rounded-xl border border-line-2 bg-raised shadow-card inset-shadow-highlight">
+                {others.map((o) => (
+                  <button
+                    key={o.target}
+                    type="button"
+                    onClick={() => openSettings(o.target, query)}
+                    className="flex w-full items-center gap-3 px-4 py-3 text-left transition-colors hover:bg-fg/[0.03] focus-visible:bg-fg/[0.04] focus-visible:outline-none"
+                  >
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-[13px] font-[510] text-fg">{o.title}</span>
+                      <span className="block truncate text-[12px] text-muted">{[...new Set(o.hits.map((h) => h.title))].join(", ")}</span>
+                    </span>
+                    <ChevronRight className="size-4 shrink-0 text-subtle" strokeWidth={1.5} aria-hidden />
+                  </button>
+                ))}
+              </div>
+            </section>
+          )}
+        </SearchCtx.Provider>
+      </div>
+    </div>
+  );
+}
+
+/** A titled group of rows; hidden while a search matches none of `ids`. */
+export function SettingsSection({ title, ids, action, children }: { title: string; ids: readonly string[]; action?: ReactNode; children: ReactNode }) {
+  if (!useShown(ids)) return null;
+  return (
+    <section className="mb-6" aria-label={title}>
+      <div className="mb-2 flex items-center gap-2 px-0.5">
+        <h3 className="flex-1 text-[12px] font-medium text-soft">{title}</h3>
+        {action}
+      </div>
+      <div className="divide-y divide-line overflow-hidden rounded-xl border border-line-2 bg-raised shadow-card inset-shadow-highlight">{children}</div>
+    </section>
+  );
+}
+
+/**
+ * One setting: title and description, the control at the end, a reset when it was changed
+ * (`onReset`). `children` go under it (lists, editors). Hidden while a search doesn't match it.
+ */
+export function SettingRow({
+  s,
+  control,
+  onReset,
+  resetLabel = "Reset to default",
+  note,
+  children,
+  className,
+  shownFor,
+}: {
+  s: Setting;
+  control?: ReactNode;
+  onReset?: (() => void) | null;
+  resetLabel?: string;
+  /** A quiet marker after the title ("from config.toml"). */
+  note?: ReactNode;
+  children?: ReactNode;
+  className?: string;
+  /** Other settings a search for which shows this row (it stands in for them: the gateway's rows before there's one). */
+  shownFor?: readonly string[];
+}) {
+  if (!useShown(shownFor ? [s.id, ...shownFor] : [s.id])) return null;
+  return (
+    <div className={cn("px-3.5 py-3 text-[13px]", className)} data-setting={s.id}>
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+        <div className="min-w-48 flex-1">
+          <div className="flex items-center gap-1.5">
+            <h4 className="font-medium tracking-[-0.01em]">{s.title}</h4>
+            {note}
+            {onReset && (
+              <button type="button" onClick={onReset} title={resetLabel} aria-label={`${resetLabel}: ${s.title}`} className="grid size-5 place-items-center rounded text-subtle transition hover:bg-fg/[0.06] hover:text-fg">
+                <RotateCcw className="size-3" />
+              </button>
+            )}
+          </div>
+          {s.description && <p className="mt-0.5 text-[12px] leading-snug text-subtle">{s.description}</p>}
+        </div>
+        {control !== undefined && <div className="flex min-w-0 shrink-0 items-center gap-2">{control}</div>}
+      </div>
+      {children}
+    </div>
+  );
+}
+
+/** A quiet tag after a row's title. */
+export function Note({ children, title, className }: { children: ReactNode; title?: string; className?: string }) {
+  return (
+    <span className={`rounded border border-line-2 bg-panel-2 px-1 py-px text-[10.5px] text-subtle ${className ?? "shrink-0"}`} title={title}>
+      {children}
+    </span>
+  );
+}
+
+export const field =
+  "h-8 min-w-0 rounded-lg border border-line-2 bg-panel-2 px-2.5 text-[13px] text-fg outline-none transition-colors placeholder:text-faint hover:border-line-3 focus:border-line-3 disabled:opacity-60";
+
+/**
+ * A text setting saved when it's left or Enter is pressed (T3's inputs), shown as `value` until
+ * edited; an empty one is unset (the placeholder says what applies then). Escape puts it back.
+ */
+export function TextField({
+  label,
+  value,
+  placeholder,
+  onSave,
+  disabled,
+  mono = false,
+  className,
+  type = "text",
+}: {
+  label: string;
+  value: string;
+  placeholder?: string;
+  onSave: (value: string) => Promise<unknown> | void;
+  disabled?: boolean;
+  mono?: boolean;
+  className?: string;
+  type?: "text" | "email";
+}) {
+  const [draft, setDraft] = useState(value);
+  useEffect(() => setDraft(value), [value]);
+  const commit = () => {
+    if (draft.trim() !== value.trim()) void onSave(draft.trim());
+  };
+  return (
+    <input
+      type={type}
+      aria-label={label}
+      value={draft}
+      placeholder={placeholder}
+      disabled={disabled}
+      spellCheck={false}
+      onChange={(e) => setDraft(e.target.value)}
+      onBlur={commit}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          commit();
+        } else if (e.key === "Escape" && draft !== value) {
+          e.preventDefault();
+          e.stopPropagation();
+          setDraft(value);
+        }
+      }}
+      className={cn(field, mono && "font-mono text-[12px]", className ?? "w-64 max-w-full")}
+    />
+  );
+}
+
+/** What saving is doing, for a page's footer line. */
+export function SaveState({ saving, error, offline }: { saving: boolean; error: string | null; offline?: string | null }) {
+  const saved = useJustSaved(saving, !!error);
+  if (offline) return <p className="mb-4 rounded-lg border border-line-2 bg-raised px-3 py-2 text-[12px] text-subtle">{offline}</p>;
+  if (error)
+    return (
+      <p role="alert" className="mb-4 rounded-lg border border-danger/40 bg-danger/5 px-3 py-2 text-[12px] text-danger">
+        {error}
+      </p>
+    );
+  // Saving, then "Saved" for a moment: in the corner, over the page, so nothing below moves.
+  return (
+    <div className="pointer-events-none sticky top-0 z-10 flex h-0 justify-end">
+      <p role="status" className={cn("flex h-6 items-center gap-1 rounded-full border px-2.5 text-[11.5px] transition-opacity duration-150", saving || saved ? "border-line-2 bg-raised text-muted opacity-100 inset-shadow-highlight" : "border-transparent opacity-0")}>
+        {saving ? (
+          <span className="shimmer">Saving…</span>
+        ) : saved ? (
+          <>
+            <Check className="size-3 text-ok" aria-hidden /> Saved
+          </>
+        ) : null}
+      </p>
+    </div>
+  );
+}
+
+/** True for a moment after `saving` ends without a failure: long enough to read "Saved". */
+export function useJustSaved(saving: boolean, failed: boolean, ms = 1600): boolean {
+  const [shown, setShown] = useState(false);
+  const was = useRef(saving);
+  useEffect(() => {
+    const ended = was.current && !saving;
+    was.current = saving;
+    if (saving || failed) return setShown(false);
+    if (!ended) return;
+    setShown(true);
+    const t = setTimeout(() => setShown(false), ms);
+    return () => clearTimeout(t);
+  }, [saving, failed, ms]);
+  return shown;
+}
