@@ -168,6 +168,13 @@ pub trait Store: Send + Sync + 'static {
     async fn usage_add(&self, day: i64, u: &Usage) -> Result<()>;
     async fn usage(&self, from_day: i64) -> Result<Vec<(i64, Usage)>>;
 
+    /// Wait until every write made so far is durable, the relaxed ones included (stores whose
+    /// writes are durable when they return do nothing). A request that made many relaxed
+    /// writes calls it once before answering, instead of waiting for each.
+    async fn sync(&self) -> Result<()> {
+        Ok(())
+    }
+
     /// Delete expired records (backends with native expiry do nothing).
     async fn sweep(&self, now: Ms) -> Result<u64>;
 

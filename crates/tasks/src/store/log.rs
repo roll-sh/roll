@@ -1301,6 +1301,11 @@ impl Store for LogStore {
         self.t.db.shards()
     }
 
+    async fn sync(&self) -> Result<()> {
+        // Strict, whatever the caller's mode: it's the wait the relaxed writes skipped.
+        self.log.written(None).await
+    }
+
     async fn write_all(&self, writes: &[Write]) -> Result<bool> {
         anyhow::ensure!(
             !writes.iter().any(|w| matches!(w, Write::Doc { kind, .. } if kind == crate::engine::KIND_NODE)),
