@@ -80,7 +80,7 @@ pub struct FargateConfig {
     pub spot: bool,
     /// The port a preview task's guard listens on, which nodes connect to.
     pub preview_port: u16,
-    /// Where bundles go: `s3://<bucket>/<prefix><run>.tgz`, deleted when the run ends.
+    /// Where bundles go: `s3://<bucket>/<prefix><run>-<random>.tgz`, deleted when the run ends.
     pub bucket: String,
     pub prefix: String,
     pub region: Option<String>,
@@ -193,6 +193,8 @@ impl Template {
 #[derive(Clone)]
 struct Prepared {
     kind: Kind,
+    /// Its own, even for a preview whose name a previous owner used too.
+    bundle: String,
     template: Arc<Template>,
     task_def: String,
     run: String,
@@ -205,6 +207,7 @@ struct Prepared {
 #[derive(Clone)]
 struct Started {
     arn: String,
+    bundle: String,
     template: Arc<Template>,
     /// The last look, for `running`.
     seen: Option<(Instant, bool)>,
@@ -523,10 +526,10 @@ impl Fargate {
     /// Look at a task until `done` says so or it stopped.
     pub(crate) async fn wait(&self, arn: &str, done: impl Fn(&Task) -> bool) -> anyhow::Result<Task> {
         loop {
-            if let Some(t) = self.describe(arn).await? {
-                if t.last_status() == Some("STOPPED") || done(&t) {
-                    return Ok(t);
-                }
+            if let Some(t) = self.describe(arn).await?
+                && (t.last_status() == Some("STOPPED") || done(&t))
+            {
+                return Ok(t);
             }
             tokio::time::sleep(self.cfg.poll).await;
         }
@@ -563,7 +566,7 @@ impl Fargate {
     }
 
     async fn launch_job(&self, name: &str, p: &Prepared, spot: bool, port: Option<u16>) -> anyhow::Result<String> {
-        let url = self.bundle_url(name).await?;
+        let url = self.bundle_url(&p.bundle).await?;
         let deadline = p.deadline.as_secs().max(60).to_string();
         let guard = match (p.kind, port) {
             (Kind::Preview, Some(port)) => vec![
@@ -585,7 +588,7 @@ impl Fargate {
         ];
         let group = format!("roll-{}", p.kind.as_str());
         let arn = self.launch(Launch { name, group: &group, task_def: &p.task_def, spot, cpu: p.cpu, memory: p.memory, disk_gib: None, containers }).await?;
-        self.started.lock().insert(name.to_string(), Started { arn: arn.clone(), template: p.template.clone(), seen: None });
+        self.started.lock().insert(name.to_string(), Started { arn: arn.clone(), bundle: p.bundle.clone(), template: p.template.clone(), seen: None });
         Ok(arn)
     }
 }
@@ -607,10 +610,14 @@ impl Isolation for Fargate {
         let template = self.template(family).await?;
         let task_def = self.task_def(&template, &job.image).await?;
         let env: BTreeMap<String, String> = job.env.iter().cloned().collect();
-        self.upload(&job.name, env, Some(tree)).await?;
+        let bundle = format!("{}-{}", job.name, crate::docker::random_suffix());
+        self.upload(&bundle, env, Some(tree)).await?;
         let (cpu, memory) = fargate_size(job.cpus, job.memory_mb);
-        let p = Prepared { kind: job.kind, template, task_def, run: job.run.clone(), cpu, memory, deadline: job.deadline };
-        self.prepared.lock().insert(job.name.clone(), p);
+        let p = Prepared { kind: job.kind, bundle, template, task_def, run: job.run.clone(), cpu, memory, deadline: job.deadline };
+        let old = self.prepared.lock().insert(job.name.clone(), p);
+        if let Some(old) = old {
+            self.delete_bundle(&old.bundle).await;
+        }
         Ok(())
     }
 
@@ -645,7 +652,7 @@ impl Isolation for Fargate {
             let log = self.log_lines(&p.template, FETCH, &arn, 20).await.join("\n");
             bail!("the preview's task stopped: {}{}", stopped_reason(&t), if log.is_empty() { String::new() } else { format!("\n\n{log}") });
         }
-        self.delete_bundle(name).await;
+        self.delete_bundle(&p.bundle).await;
         let ip = t
             .containers()
             .iter()
@@ -681,14 +688,21 @@ impl Isolation for Fargate {
     }
 
     async fn remove(&self, name: &str) {
-        self.prepared.lock().remove(name);
-        let started = self.started.lock().remove(name);
-        if let Some(s) = started {
-            self.stop_task(&s.arn, "roll: the run ended").await;
-        }
-        // Any other task of the name (a launch whose answer was lost, a previous owner's preview).
+        self.release(name).await;
+        // Any other task of the name: a launch whose answer was lost, a previous owner's preview.
         self.stop_named(name, "roll: the run ended").await;
-        self.delete_bundle(name).await;
+    }
+
+    async fn release(&self, name: &str) {
+        let prepared = self.prepared.lock().remove(name);
+        let started = self.started.lock().remove(name);
+        if let Some(s) = &started {
+            self.stop_task(&s.arn, "roll: the run ended").await;
+            self.delete_bundle(&s.bundle).await;
+        }
+        if let Some(p) = prepared.filter(|p| started.as_ref().is_none_or(|s| s.bundle != p.bundle)) {
+            self.delete_bundle(&p.bundle).await;
+        }
     }
 
     /// Nothing to do: every task ends by itself (a check's deadline, a preview's idle guard), and

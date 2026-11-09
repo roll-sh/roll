@@ -86,8 +86,12 @@ pub trait Isolation: Send + Sync {
     async fn running(&self, name: &str) -> bool;
     /// The end of a job's output (why a preview didn't start).
     async fn logs_tail(&self, name: &str, lines: usize) -> String;
-    /// Stop and remove everything made for the job of this name, prepared or running; idempotent.
+    /// Stop and remove everything made for the job of this name, prepared or running, by any
+    /// node; idempotent.
     async fn remove(&self, name: &str);
+    /// Stop and remove what this node made for the job, leaving what another node runs under
+    /// the same name (a preview whose repo moved: its new owner may already run one).
+    async fn release(&self, name: &str);
     /// Remove what a previous process of this node left of one kind.
     async fn remove_leftovers(&self, kind: Kind);
     /// A data URL (Postgres, Redis) as the job's container reaches it.

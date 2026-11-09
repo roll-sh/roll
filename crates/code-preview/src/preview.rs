@@ -146,9 +146,10 @@ impl Previews {
         });
     }
 
-    /// The previews of a repo just taken over: none of their containers runs here. One the
-    /// previous owner left running (on Fargate, where it isn't on that node) is stopped: the
-    /// next visit starts it here.
+    /// The previews of a repo just taken over: none of their containers runs here. A Fargate
+    /// task the previous owner left running isn't stopped here (that could race the next visit's
+    /// start): starting a preview stops any older task of its name first, and an unvisited one
+    /// stops by itself once idle.
     fn reconcile_repo(&self, repo_id: &str) {
         let Ok(code) = self.code() else { return };
         let Ok(changes) = code.db.changes(repo_id, None, usize::MAX) else { return };
@@ -157,8 +158,6 @@ impl Previews {
                 && !self.live.lock().get(&c.id).is_some_and(|l| matches!(*l.phase.borrow(), Phase::Running { .. } | Phase::Starting))
             {
                 self.persist(&c.id, |p| p.state = PreviewState::Sleeping);
-                let (isolation, name) = (self.isolation.clone(), container_name(&c.id));
-                tokio::spawn(async move { isolation.remove(&name).await });
             }
         }
     }
@@ -216,7 +215,7 @@ impl Previews {
     async fn stop(&self, live: &Live) {
         let name = live.container.lock().take();
         if let Some(name) = name {
-            self.isolation.remove(&name).await;
+            self.isolation.release(&name).await;
         }
         live.phase.send_replace(Phase::Stopped);
     }
@@ -621,9 +620,9 @@ impl PreviewBackend for Previews {
         let live = self.live.lock().remove(&change.id);
         if let Some(live) = live {
             self.stop(&live).await;
-        } else {
-            self.isolation.remove(&container_name(&change.id)).await;
         }
+        // Whichever node started it.
+        self.isolation.remove(&container_name(&change.id)).await;
         if let Some(p) = &change.preview
             && let Some(data) = &self.data
         {

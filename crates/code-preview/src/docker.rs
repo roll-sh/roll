@@ -200,6 +200,11 @@ impl Isolation for Docker {
         remove(name).await
     }
 
+    /// Containers are this host's: the same as [`Isolation::remove`].
+    async fn release(&self, name: &str) {
+        remove(name).await
+    }
+
     async fn remove_leftovers(&self, kind: Kind) {
         remove_leftovers(kind.as_str()).await
     }

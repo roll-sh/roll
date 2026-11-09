@@ -295,8 +295,9 @@ the host (`ROLL_CODE_RUNNER=docker`, the default), exactly as before.
   `port`; 9970 itself is refused). The address lives only in the owner's memory, with the rest of
   a running preview; nothing persists it, because a new owner never adopts a running task. A
   preview stops when it's idle (the owner's reaper, or its own guard), when its change lands or
-  closes, and when its repo moves: the old owner stops it, the new one marks previews stored as
-  running asleep and stops any task of theirs still running, and the next visit starts one there
+  closes, and when its repo moves: the old owner stops it (if it's alive to), the new one marks
+  previews stored as running asleep, and the next visit starts one there, stopping any older task
+  of the preview's name first; one nobody visits again stops by itself once idle
   (docs/code/cluster.md, "Moving work"). Data URLs reach the repo's Postgres and Redis branches by
   their public names on the edge.
 - **Sandboxes.** A running sandbox is one task named `roll-sbx-<id>` (`startedBy`), in group
