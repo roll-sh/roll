@@ -6317,6 +6317,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "roll-fetch"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "flate2",
+ "reqwest",
+ "tar",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "rolld"
 version = "0.1.0"
 dependencies = [

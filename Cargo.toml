@@ -152,6 +152,10 @@ code-github = { path = "crates/code-github" }
 code-chat = { path = "crates/code-chat" }
 code-control = { path = "crates/code-control" }
 code-preview = { path = "crates/code-preview" }
+# Isolated work: checks, previews and sandboxes as their own Fargate tasks (docs/cloud/README.md).
+roll-fetch = { path = "crates/roll-fetch" }
+aws-sdk-ecs = "1"
+aws-sdk-cloudwatchlogs = "1"
 code-index = { path = "crates/code-index" }
 code-review = { path = "crates/code-review" }
 agent-proto = { path = "crates/agent-proto" }
