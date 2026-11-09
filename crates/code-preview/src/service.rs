@@ -11,7 +11,6 @@
 //! - A change that lands or closes loses its preview (and its data branches).
 
 use crate::config::{FILE, RollToml};
-use crate::docker;
 use futures::future::join_all;
 use code_control::Code;
 use code_control::broken::Source;
@@ -68,7 +67,7 @@ impl Service {
         let dir = self.work_dir();
         tokio::spawn(async move {
             let _ = tokio::fs::remove_dir_all(&dir).await;
-            docker::remove_leftovers("check").await;
+            this.runner.remove_leftovers().await;
             if !clustered {
                 this.recover();
             }

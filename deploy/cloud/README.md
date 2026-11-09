@@ -5,7 +5,7 @@ nodes in us-east-1, behind Cloudflare. The design is [docs/cloud/README.md](../.
 
 | file | what |
 | --- | --- |
-| `Dockerfile` | the fleet image: `rolld` (release, every product) and the dashboard's Node server |
+| `Dockerfile` | the fleet image: `rolld` (release, every product) and the dashboard's Node server; target `fetch`, roll's small image beside customer code in isolated tasks (`roll-fetch`) |
 | `entrypoint.sh`, `health.sh` | the image's entrypoint (node id, zone and address from instance metadata) and health check |
 | `aws/roll-cloud.yaml` | one CloudFormation stack: VPC, DynamoDB, S3, KMS, secrets, ECR, ECS on Graviton, NLB, alarms, GitHub OIDC |
 | `deploy.sh` | build and push, canary, bake, roll, rollback |
@@ -25,6 +25,13 @@ nodes in us-east-1, behind Cloudflare. The design is [docs/cloud/README.md](../.
 - Secrets come from Secrets Manager, sealed with the stack's KMS key. Nodes reach S3 and DynamoDB
   through free gateway endpoints. There is no NAT gateway: instances have public addresses, and
   their security group only admits the NLB and the other nodes.
+- Customer code (roll.toml checks, previews, agent sandboxes) never runs on an instance: each run
+  is a Fargate task in the same cluster, in three isolated subnets whose network ACL and security
+  group keep it away from the nodes (nodes reach a preview on `PreviewPort`, nothing else gets
+  in), with a task role that has no permissions and a public IP as its only way out. The
+  templates are `<stack>-check`, `<stack>-preview` and, with a `SandboxImage`, `<stack>-sandbox`;
+  rolld registers a copy per customer image. Their logs are in the `RunnerLogGroup` output.
+  docs/cloud/README.md, "Isolated work".
 
 ## Stand it up from zero
 
@@ -65,7 +72,10 @@ aws cloudformation deploy --region us-east-1 --stack-name roll-cloud \
 - An AWS account holds one GitHub OIDC provider. If yours has one, add
   `--parameter-overrides GitHubOidcProviderArn=arn:aws:iam::<account>:oidc-provider/token.actions.githubusercontent.com`.
 - Parameters are listed at the top of the template: instance types, Spot mix, node counts, alarm
-  thresholds, Elastic IPs. The defaults are the testing size in docs/cloud/README.md, "Cost".
+  thresholds, Elastic IPs, and isolated work's `PreviewPort`, `ChecksOnSpot` and `SandboxImage`
+  (the agent sandbox image, `deploy/agent/Dockerfile` built for arm64 and pushed where Fargate can
+  pull it; empty runs no sandboxes). The defaults are the testing size in docs/cloud/README.md,
+  "Cost".
 
 Read the outputs:
 
@@ -163,8 +173,9 @@ From now on every merge to `main` deploys.
 Every merge to `main` runs `.github/workflows/deploy.yml`. It runs one deploy at a time; a newer
 merge waits. The job:
 
-1. Builds the image for linux/arm64 on an arm64 runner and pushes it to ECR as `<commit sha>`.
-   Layers are cached in the `roll-cloud-cache` repository.
+1. Builds the image for linux/arm64 on an arm64 runner and pushes it to ECR as `<commit sha>`,
+   and roll's `fetch` image as `fetch-<commit sha>`. Layers are cached in the `roll-cloud-cache`
+   repository.
 2. **Canary.** Registers a new task definition revision with the new image and scales
    `rolld-canary` to 1. The capacity provider adds an instance for it. One node of the new version
    joins the fleet and takes its share.
@@ -205,7 +216,9 @@ aws cloudformation deploy --region us-east-1 --stack-name roll-cloud \
 ```
 
 Parameters you don't name keep their values. A change to the task definition (environment,
-sizes) rolls the fleet one node at a time, like a deploy, but without a canary.
+sizes) rolls the fleet one node at a time, like a deploy, but without a canary. The isolated-work
+templates take their `fetch` image from `ImageTag` too, so a stack update moves them to the
+running tag's `fetch-<tag>`; deploys don't touch them.
 
 ## Scaling
 

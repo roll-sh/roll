@@ -7,8 +7,8 @@
 //! The data branches stay until the preview is deleted (the change lands or closes).
 
 use crate::config::{PreviewSpec, RollToml};
-use crate::data::{DataBranch, DataBranches, for_container};
-use crate::docker::{self, LABEL};
+use crate::data::{DataBranch, DataBranches};
+use crate::isolation::{Isolation, Job, Kind};
 use async_trait::async_trait;
 use axum::body::Body;
 use axum::extract::{Request, State};
@@ -25,6 +25,7 @@ use hyper_util::rt::{TokioExecutor, TokioIo};
 use parking_lot::Mutex;
 use serde_json::json;
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock, Weak};
 use std::time::{Duration, Instant};
@@ -64,7 +65,7 @@ impl Default for PreviewConfig {
 enum Phase {
     Stopped,
     Starting,
-    Running { port: u16 },
+    Running { addr: SocketAddr },
     Failed(String),
 }
 
@@ -79,6 +80,7 @@ pub struct Previews {
     cfg: PreviewConfig,
     code: OnceLock<Weak<Code>>,
     data: Option<Arc<dyn DataBranches>>,
+    isolation: Arc<dyn Isolation>,
     live: Mutex<HashMap<String, Arc<Live>>>,
     client: Client<HttpConnector, Body>,
 }
@@ -98,11 +100,12 @@ fn container_name(change_id: &str) -> String {
 }
 
 impl Previews {
-    pub fn new(cfg: PreviewConfig, data: Option<Arc<dyn DataBranches>>) -> Arc<Previews> {
+    pub fn new(cfg: PreviewConfig, data: Option<Arc<dyn DataBranches>>, isolation: Arc<dyn Isolation>) -> Arc<Previews> {
         Arc::new(Previews {
             cfg,
             code: OnceLock::new(),
             data,
+            isolation,
             live: Mutex::new(HashMap::new()),
             client: Client::builder(TokioExecutor::new()).build_http(),
         })
@@ -117,8 +120,9 @@ impl Previews {
         let clustered = code.cluster().is_some();
         let mut ownership = code.subscribe_ownership();
         let this = Arc::downgrade(self);
+        let isolation = self.isolation.clone();
         tokio::spawn(async move {
-            docker::remove_leftovers("preview").await;
+            isolation.remove_leftovers(Kind::Preview).await;
             if !clustered && let Some(p) = this.upgrade() {
                 p.reconcile();
             }
@@ -142,7 +146,10 @@ impl Previews {
         });
     }
 
-    /// The previews of a repo just taken over: none of their containers runs here.
+    /// The previews of a repo just taken over: none of their containers runs here. A Fargate
+    /// task the previous owner left running isn't stopped here (that could race the next visit's
+    /// start): starting a preview stops any older task of its name first, and an unvisited one
+    /// stops by itself once idle.
     fn reconcile_repo(&self, repo_id: &str) {
         let Ok(code) = self.code() else { return };
         let Ok(changes) = code.db.changes(repo_id, None, usize::MAX) else { return };
@@ -208,7 +215,7 @@ impl Previews {
     async fn stop(&self, live: &Live) {
         let name = live.container.lock().take();
         if let Some(name) = name {
-            docker::remove(&name).await;
+            self.isolation.release(&name).await;
         }
         live.phase.send_replace(Phase::Stopped);
     }
@@ -241,8 +248,8 @@ impl Previews {
         }
     }
 
-    /// The host port a preview answers on, starting it if needed. Waits up to `cfg.wait`.
-    async fn ready(self: &Arc<Self>, change_id: &str) -> Result<u16, Unavailable> {
+    /// Where a preview answers, starting it if needed. Waits up to `cfg.wait`.
+    async fn ready(self: &Arc<Self>, change_id: &str) -> Result<SocketAddr, Unavailable> {
         let code = self.code().map_err(|_| Unavailable::NotFound)?;
         let c = code.change_or_404(change_id).map_err(|_| Unavailable::NotFound)?;
         if c.preview.is_none() || matches!(c.state, ChangeState::Landed | ChangeState::Closed) {
@@ -254,7 +261,7 @@ impl Previews {
         let start = {
             let phase = rx.borrow_and_update().clone();
             match phase {
-                Phase::Running { port } => return Ok(port),
+                Phase::Running { addr } => return Ok(addr),
                 Phase::Starting => false,
                 // A failed preview gets another try on the next visit: the failure is stored
                 // on the change for whoever wants to read it.
@@ -276,7 +283,7 @@ impl Previews {
                     return Err(Unavailable::NotFound);
                 }
                 match rx.borrow_and_update().clone() {
-                    Phase::Running { port } => return Ok(port),
+                    Phase::Running { addr } => return Ok(addr),
                     Phase::Failed(e) => return Err(Unavailable::Failed(e)),
                     Phase::Stopped => return Err(Unavailable::NotFound),
                     Phase::Starting => {}
@@ -288,8 +295,8 @@ impl Previews {
 
     async fn start(&self, change_id: &str, live: &Live) {
         match tokio::time::timeout(self.cfg.start_timeout, self.start_inner(change_id, live)).await {
-            Ok(Ok(port)) => {
-                live.phase.send_replace(Phase::Running { port });
+            Ok(Ok(addr)) => {
+                live.phase.send_replace(Phase::Running { addr });
             }
             failed => {
                 let e = match failed {
@@ -298,7 +305,7 @@ impl Previews {
                 };
                 let container = live.container.lock().clone();
                 let tail = match container {
-                    Some(name) => docker::logs_tail(&name, 30).await,
+                    Some(name) => self.isolation.logs_tail(&name, 30).await,
                     None => String::new(),
                 };
                 self.stop(live).await;
@@ -314,7 +321,7 @@ impl Previews {
         }
     }
 
-    async fn start_inner(&self, change_id: &str, live: &Live) -> anyhow::Result<u16> {
+    async fn start_inner(&self, change_id: &str, live: &Live) -> anyhow::Result<SocketAddr> {
         let code = self.code()?;
         let c = code.change_or_404(change_id)?;
         let repo = code.repo_by_id(&c.repo_id)?;
@@ -336,44 +343,34 @@ impl Previews {
             p.redis = redis.as_ref().map(|b| PreviewRedis { db_id: b.id.clone() });
         });
 
-        let env = preview_env(&spec, &repo, &c, pg.as_ref().map(|(_, b)| b), redis.as_ref());
+        let env = preview_env(&spec, &repo, &c, pg.as_ref().map(|(_, b)| b), redis.as_ref(), &|u| self.isolation.reach(u));
         let name = container_name(change_id);
-        docker::remove(&name).await;
+        self.isolation.remove(&name).await;
         *live.container.lock() = Some(name.clone());
-        let mut args: Vec<String> = vec![
-            "create".into(),
-            "--name".into(),
-            name.clone(),
-            "--label".into(),
-            format!("{LABEL}=preview"),
-            "--label".into(),
-            format!("{LABEL}.change={change_id}"),
-            "--publish".into(),
-            format!("127.0.0.1::{}", spec.port),
-            "--workdir".into(),
-            "/app".into(),
-            "--add-host".into(),
-            "host.docker.internal:host-gateway".into(),
-        ];
-        args.extend(docker::limits(spec.memory_mb, spec.cpus));
-        for (k, v) in &env {
-            args.push("--env".into());
-            args.push(format!("{k}={v}"));
-        }
-        args.extend(["--entrypoint".into(), "sh".into(), spec.image.clone(), "-c".into(), spec.run.clone()]);
-        let argv: Vec<&str> = args.iter().map(String::as_str).collect();
-        docker::docker(&argv).await?;
+        let job = Job {
+            kind: Kind::Preview,
+            name: name.clone(),
+            image: spec.image.clone(),
+            run: spec.run.clone(),
+            env,
+            memory_mb: spec.memory_mb,
+            cpus: spec.cpus,
+            port: Some(spec.port),
+            change: Some(change_id.to_string()),
+            // A preview lives while it's visited: on Fargate it stops by itself a little after
+            // `idle` without a byte, if this node is gone and can't stop it.
+            deadline: self.cfg.idle + Duration::from_secs(120),
+        };
         {
             let tree = code.checkout(&repo.id, &head).await?;
-            docker::docker(&["cp", &format!("{}/.", tree.path().display()), &format!("{name}:/app")]).await?;
+            self.isolation.prepare(&job, tree.path()).await?;
         }
-        docker::docker(&["start", &name]).await?;
-        let port = docker::host_port(&name, spec.port).await?;
+        let addr = self.isolation.start(&name, spec.port).await?;
         loop {
-            if !docker::running(&name).await {
+            if !self.isolation.running(&name).await {
                 anyhow::bail!("the preview command exited");
             }
-            if answers(port).await {
+            if answers(addr).await {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(250)).await;
@@ -384,8 +381,8 @@ impl Previews {
             p.url = Some(url);
             p.error = None;
         });
-        info!(change = %change_id, port, "preview running");
-        Ok(port)
+        info!(change = %change_id, %addr, "preview running");
+        Ok(addr)
     }
 
     async fn branch_data(
@@ -414,21 +411,21 @@ impl Previews {
     /// Proxy a request for a preview host to its container.
     async fn proxy(self: &Arc<Self>, change_id: &str, mut req: Request) -> Response {
         let mut retried = false;
-        let port = loop {
-            let port = match self.ready(change_id).await {
-                Ok(p) => p,
+        let addr = loop {
+            let addr = match self.ready(change_id).await {
+                Ok(a) => a,
                 Err(u) => return u.into_response(),
             };
             // A container that died underneath us: start it again, once.
-            if retried || answers(port).await {
-                break port;
+            if retried || answers(addr).await {
+                break addr;
             }
             retried = true;
             let live = self.live(change_id);
             self.stop(&live).await;
         };
         let pq = req.uri().path_and_query().map(|p| p.as_str().to_string()).unwrap_or_else(|| "/".into());
-        let Ok(uri) = format!("http://127.0.0.1:{port}{pq}").parse::<Uri>() else {
+        let Ok(uri) = format!("http://{addr}{pq}").parse::<Uri>() else {
             return (StatusCode::BAD_REQUEST, "bad request").into_response();
         };
         let upgrade = is_upgrade(req.headers());
@@ -480,7 +477,15 @@ fn load_spec(dir: &Path) -> Result<PreviewSpec, String> {
 }
 
 /// The environment a preview's container gets: `roll.toml` env, then what roll provides.
-pub fn preview_env(spec: &PreviewSpec, repo: &RepoRow, c: &Change, pg: Option<&DataBranch>, redis: Option<&DataBranch>) -> Vec<(String, String)> {
+/// `reach` writes a data URL for where the container runs ([`Isolation::reach`]).
+pub fn preview_env(
+    spec: &PreviewSpec,
+    repo: &RepoRow,
+    c: &Change,
+    pg: Option<&DataBranch>,
+    redis: Option<&DataBranch>,
+    reach: &dyn Fn(&str) -> String,
+) -> Vec<(String, String)> {
     let mut env: Vec<(String, String)> = spec.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
     let mut set = |k: &str, v: String| {
         env.retain(|(name, _)| name != k);
@@ -491,19 +496,19 @@ pub fn preview_env(spec: &PreviewSpec, repo: &RepoRow, c: &Change, pg: Option<&D
     set("ROLL_CHANGE", c.id.clone());
     set("ROLL_CHANGESET", c.head.clone());
     if let Some(b) = pg {
-        set("DATABASE_URL", for_container(&b.url));
+        set("DATABASE_URL", reach(&b.url));
     }
     if let Some(b) = redis {
-        set("REDIS_URL", for_container(&b.url));
+        set("REDIS_URL", reach(&b.url));
     }
     env
 }
 
-/// Whether something answers HTTP on the port. A published port accepts connections before
-/// the app listens (Docker's proxy), so wait for actual bytes back.
-async fn answers(port: u16) -> bool {
+/// Whether something answers HTTP there. A published port (Docker's proxy, a Fargate task's
+/// guard) accepts connections before the app listens, so wait for actual bytes back.
+async fn answers(addr: SocketAddr) -> bool {
     let attempt = async {
-        let mut s = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.ok()?;
+        let mut s = tokio::net::TcpStream::connect(addr).await.ok()?;
         s.write_all(b"HEAD / HTTP/1.0\r\nHost: localhost\r\n\r\n").await.ok()?;
         let mut b = [0u8; 1];
         (s.read(&mut b).await.ok()? == 1).then_some(())
@@ -615,9 +620,9 @@ impl PreviewBackend for Previews {
         let live = self.live.lock().remove(&change.id);
         if let Some(live) = live {
             self.stop(&live).await;
-        } else {
-            docker::remove(&container_name(&change.id)).await;
         }
+        // Whichever node started it.
+        self.isolation.remove(&container_name(&change.id)).await;
         if let Some(p) = &change.preview
             && let Some(data) = &self.data
         {
@@ -646,7 +651,7 @@ mod tests {
     use crate::config::RollToml;
 
     fn previews() -> Arc<Previews> {
-        Previews::new(PreviewConfig { port: Some(7070), ..PreviewConfig::default() }, None)
+        Previews::new(PreviewConfig { port: Some(7070), ..PreviewConfig::default() }, None, Arc::new(crate::docker::Docker))
     }
 
     #[test]
@@ -660,7 +665,11 @@ mod tests {
         assert_eq!(p.change_for_host("x.chg-abc.preview.localhost"), None);
         assert_eq!(p.change_for_host("chg-.preview.localhost"), None);
         assert_eq!(p.change_for_host("evil-preview.localhost"), None);
-        let https = Previews::new(PreviewConfig { scheme: "https".into(), port: Some(443), domain: "preview.roll.sh".into(), ..PreviewConfig::default() }, None);
+        let https = Previews::new(
+            PreviewConfig { scheme: "https".into(), port: Some(443), domain: "preview.roll.sh".into(), ..PreviewConfig::default() },
+            None,
+            Arc::new(crate::docker::Docker),
+        );
         assert_eq!(https.url("chg_x1"), "https://chg-x1.preview.roll.sh");
     }
 
@@ -720,14 +729,14 @@ mod tests {
         };
         let pg = DataBranch { id: "br_1".into(), url: "postgres://roll:pw@127.0.0.1:55432/main?options=endpoint%3Dep_1".into() };
         let redis = DataBranch { id: "rdb_2".into(), url: "redis://default:t@127.0.0.1:56380".into() };
-        let env: HashMap<String, String> = preview_env(&spec, &repo, &change(), Some(&pg), Some(&redis)).into_iter().collect();
+        let env: HashMap<String, String> = preview_env(&spec, &repo, &change(), Some(&pg), Some(&redis), &crate::data::for_container).into_iter().collect();
         assert_eq!(env["PORT"], "3000", "roll's PORT wins over roll.toml's");
         assert_eq!(env["NODE_ENV"], "preview");
         assert_eq!(env["ROLL_REPO"], "acme/web");
         assert_eq!(env["ROLL_CHANGE"], "chg_abc");
         assert_eq!(env["DATABASE_URL"], "postgres://roll:pw@host.docker.internal:55432/main?options=endpoint%3Dep_1");
         assert_eq!(env["REDIS_URL"], "redis://default:t@host.docker.internal:56380");
-        let bare: HashMap<String, String> = preview_env(&spec, &repo, &change(), None, None).into_iter().collect();
+        let bare: HashMap<String, String> = preview_env(&spec, &repo, &change(), None, None, &crate::data::for_container).into_iter().collect();
         assert!(!bare.contains_key("DATABASE_URL") && !bare.contains_key("REDIS_URL"));
     }
 
@@ -801,14 +810,15 @@ mod tests {
         code.db.set_change_preview(&c.id, Some(&stored)).unwrap();
 
         // A restarted daemon has no containers: a stored "running" preview is asleep.
-        let p = Previews::new(PreviewConfig { domain: "preview.test".into(), ..PreviewConfig::default() }, None);
+        let p = Previews::new(PreviewConfig { domain: "preview.test".into(), ..PreviewConfig::default() }, None, Arc::new(crate::docker::Docker));
         p.attach(&code);
         p.reconcile();
         assert_eq!(code.change_or_404(&c.id).unwrap().preview.unwrap().state, PreviewState::Sleeping);
 
         // Pretend the container is up on `port`.
         let port = upstream().await;
-        p.live(&c.id).phase.send_replace(Phase::Running { port });
+        let addr = SocketAddr::from(([127, 0, 0, 1], port));
+        p.live(&c.id).phase.send_replace(Phase::Running { addr });
         let app = axum::Router::new().fallback(|| async { "api" }).layer(axum::middleware::from_fn_with_state(p.clone(), route));
         let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = l.local_addr().unwrap();
@@ -849,10 +859,10 @@ mod tests {
 
         // Nobody visits for `idle`: the reaper stops it and the change says it's asleep.
         code.db.set_change_preview(&c.id, Some(&Preview { state: PreviewState::Running, ..stored.clone() })).unwrap();
-        let idle = Previews::new(PreviewConfig { domain: "preview.test".into(), idle: Duration::ZERO, ..PreviewConfig::default() }, None);
+        let idle = Previews::new(PreviewConfig { domain: "preview.test".into(), idle: Duration::ZERO, ..PreviewConfig::default() }, None, Arc::new(crate::docker::Docker));
         idle.attach(&code);
         let live = idle.live(&c.id);
-        live.phase.send_replace(Phase::Running { port });
+        live.phase.send_replace(Phase::Running { addr });
         *live.last_request.lock() = Instant::now() - Duration::from_secs(1);
         idle.reap().await;
         assert_eq!(*live.phase.borrow(), Phase::Stopped);

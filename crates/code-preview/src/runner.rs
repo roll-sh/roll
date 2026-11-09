@@ -1,19 +1,18 @@
-//! Checks in containers. A tree is copied in (never bind-mounted, so a check can't write to the
-//! host and leaves nothing root-owned behind), the check runs as `sh -c <run>` with resource
-//! limits and a timeout, and the tail of its output becomes the check's summary.
+//! Checks in containers, on whichever [`Isolation`] the node uses. A tree is copied in, the
+//! check runs as `sh -c <run>` with resource limits and a timeout, and the tail of its output
+//! becomes the check's summary. Whatever happens, everything made for the run is removed.
 
 use crate::config::{CheckSpec, FILE, RollToml};
-use crate::docker::{self, LABEL, Tail};
+use crate::docker::{self, Tail};
+use crate::isolation::{Isolation, Job, Kind};
 use async_trait::async_trait;
 use code_control::Runner;
 use code_control::db::now;
 use code_control::model::{Change, Check, CheckStatus, RepoRow};
 use parking_lot::Mutex;
 use std::path::Path;
-use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::process::Command;
 use tokio::sync::Semaphore;
 
 /// The check that reports a broken `roll.toml`.
@@ -21,14 +20,15 @@ pub const CONFIG_CHECK: &str = "roll.toml";
 /// Summaries are stored up to 4000 characters; leave room for the status line.
 const SUMMARY_BYTES: usize = 3500;
 
-pub struct DockerRunner {
+pub struct CheckRunner {
+    isolation: Arc<dyn Isolation>,
     slots: Semaphore,
 }
 
-impl DockerRunner {
-    /// `concurrency`: checks running at once on this host (each gets its own memory limit).
-    pub fn new(concurrency: usize) -> DockerRunner {
-        DockerRunner { slots: Semaphore::new(concurrency.max(1)) }
+impl CheckRunner {
+    /// `concurrency`: checks running at once from this node (each gets its own memory limit).
+    pub fn new(isolation: Arc<dyn Isolation>, concurrency: usize) -> CheckRunner {
+        CheckRunner { isolation, slots: Semaphore::new(concurrency.max(1)) }
     }
 }
 
@@ -49,7 +49,7 @@ fn finished(name: &str, status: CheckStatus, summary: String, started: i64) -> C
 }
 
 #[async_trait]
-impl Runner for DockerRunner {
+impl Runner for CheckRunner {
     async fn plan(&self, _repo: &RepoRow, dir: &Path) -> anyhow::Result<Vec<Check>> {
         Ok(match RollToml::load(dir) {
             Ok(None) => Vec::new(),
@@ -60,6 +60,10 @@ impl Runner for DockerRunner {
 
     fn validate(&self, text: &str) -> Option<String> {
         RollToml::parse(text).err()
+    }
+
+    async fn remove_leftovers(&self) {
+        self.isolation.remove_leftovers(Kind::Check).await;
     }
 
     async fn run(&self, repo: &RepoRow, change: Option<&Change>, dir: &Path, check: &Check) -> anyhow::Result<Check> {
@@ -82,7 +86,7 @@ impl Runner for DockerRunner {
             env.push(("ROLL_CHANGESET".into(), c.head.clone()));
         }
         let started = now();
-        let out = run_check(&spec, dir, &env).await;
+        let out = run_check(&self.isolation, &spec, dir, &env).await;
         let (status, line) = match out.result {
             Outcome::Exited(0) => (CheckStatus::Success, format!("passed in {}", secs(out.elapsed))),
             Outcome::Exited(code) => (CheckStatus::Failure, format!("failed with exit code {code} after {}", secs(out.elapsed))),
@@ -111,77 +115,50 @@ pub struct RunOutput {
     pub elapsed: Duration,
 }
 
-/// Longest creating a check's container (pulling its image) and copying the tree in may take.
-const PREPARE_TIMEOUT: Duration = Duration::from_secs(600);
+/// Longest preparing a check's container (pulling its image, copying the tree in) may take.
+pub const PREPARE_TIMEOUT: Duration = Duration::from_secs(600);
 
-/// Create the container, copy the tree in, run it attached, and always remove it. The check's
-/// timeout covers the run, not creating the container: a timeout that cut `docker create` short
-/// could let the container appear after it was removed.
-pub async fn run_check(spec: &CheckSpec, dir: &Path, env: &[(String, String)]) -> RunOutput {
-    let name = format!("roll-check-{}", docker::random_suffix());
+/// Prepare the container, run it attached, and always remove it. The check's timeout covers the
+/// run, not preparing: a timeout that cut `docker create` (or `RunTask`) short could let the
+/// container appear after it was removed, so it's removed again once it could have.
+pub async fn run_check(isolation: &Arc<dyn Isolation>, spec: &CheckSpec, dir: &Path, env: &[(String, String)]) -> RunOutput {
+    let job = Job {
+        kind: Kind::Check,
+        name: format!("roll-check-{}", docker::random_suffix()),
+        image: spec.image.clone(),
+        run: spec.run.clone(),
+        env: spec.env.iter().map(|(k, v)| (k.clone(), v.clone())).chain(env.iter().cloned()).collect(),
+        memory_mb: spec.memory_mb,
+        cpus: spec.cpus,
+        port: None,
+        change: None,
+        deadline: PREPARE_TIMEOUT + spec.timeout + Duration::from_secs(60),
+    };
+    let name = job.name.clone();
     let tail = Arc::new(Mutex::new(Tail::new(SUMMARY_BYTES)));
     let start = Instant::now();
-    let result = match tokio::time::timeout(PREPARE_TIMEOUT, prepare(&name, spec, dir, env)).await {
-        Ok(Ok(())) => match tokio::time::timeout(spec.timeout, run_attached(&name, tail.clone())).await {
+    let result = match tokio::time::timeout(PREPARE_TIMEOUT, isolation.prepare(&job, dir)).await {
+        Ok(Ok(())) => match tokio::time::timeout(spec.timeout, isolation.attach(&name, tail.clone())).await {
             Ok(Ok(code)) => Outcome::Exited(code),
             Ok(Err(e)) => Outcome::Error(format!("{e:#}")),
             Err(_) => Outcome::TimedOut,
         },
         Ok(Err(e)) => Outcome::Error(format!("{e:#}")),
-        Err(_) => {
-            // `docker create` may still finish: remove the container again once it could have.
-            let late = name.clone();
-            tokio::spawn(async move {
-                tokio::time::sleep(Duration::from_secs(60)).await;
-                docker::remove(&late).await;
-            });
-            Outcome::Error(format!("creating the container took over {}", secs(PREPARE_TIMEOUT)))
-        }
+        Err(_) => Outcome::Error(format!("creating the container took over {}", secs(PREPARE_TIMEOUT))),
     };
-    docker::remove(&name).await;
+    isolation.remove(&name).await;
+    if matches!(result, Outcome::TimedOut | Outcome::Error(_)) {
+        late_remove(isolation, name);
+    }
     let log = tail.lock().text();
     RunOutput { result, log, elapsed: start.elapsed() }
 }
 
-/// Create the container and copy the tree in.
-async fn prepare(name: &str, spec: &CheckSpec, dir: &Path, env: &[(String, String)]) -> anyhow::Result<()> {
-    let mut args: Vec<String> = vec![
-        "create".into(),
-        "--name".into(),
-        name.into(),
-        "--label".into(),
-        format!("{LABEL}=check"),
-        "--workdir".into(),
-        "/workspace".into(),
-        "--add-host".into(),
-        "host.docker.internal:host-gateway".into(),
-    ];
-    args.extend(docker::limits(spec.memory_mb, spec.cpus));
-    for (k, v) in spec.env.iter().chain(env.iter().map(|(k, v)| (k, v))) {
-        args.push("--env".into());
-        args.push(format!("{k}={v}"));
-    }
-    args.extend(["--entrypoint".into(), "sh".into(), spec.image.clone(), "-c".into(), spec.run.clone()]);
-    let argv: Vec<&str> = args.iter().map(String::as_str).collect();
-    docker::docker(&argv).await?;
-    let src = format!("{}/.", dir.display());
-    docker::docker(&["cp", &src, &format!("{name}:/workspace")]).await?;
-    Ok(())
-}
-
-/// Start the prepared container attached; its exit code.
-async fn run_attached(name: &str, tail: Arc<Mutex<Tail>>) -> anyhow::Result<i32> {
-    let mut child = Command::new("docker")
-        .args(["start", "--attach", name])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()?;
-    let out = tokio::spawn(docker::drain(child.stdout.take().expect("piped"), tail.clone()));
-    let err = tokio::spawn(docker::drain(child.stderr.take().expect("piped"), tail));
-    let status = child.wait().await?;
-    let _ = out.await;
-    let _ = err.await;
-    Ok(status.code().unwrap_or(-1))
+/// Remove a run again a minute later: a create (or `RunTask`) cut short may still finish.
+fn late_remove(isolation: &Arc<dyn Isolation>, name: String) {
+    let isolation = isolation.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        isolation.remove(&name).await;
+    });
 }

@@ -42,7 +42,9 @@ the ideas of Piper and Mononoke/Bonsai, and adapts it to a multi-tenant serverle
      SQLite or Postgres meta   pg_storage::Objects (S3 or local dir): blobs
 ```
 
-Previews and checks run as containers through the same driver that runs Postgres computes.
+Previews and checks run as containers through an `Isolation` (`code-preview`): the `docker` CLI
+on this host, or a Fargate task per run on roll cloud's fleet (`ROLL_CODE_RUNNER=fargate`;
+docs/cloud/README.md, "Isolated work").
 Previews branch the repository's linked roll Postgres project and roll Redis database.
 
 ## Crates
@@ -360,8 +362,9 @@ merges per second; most of the time goes into writing the tree out for each test
   heartbeats. The lease expires back to `open`. That's queue semantics, so many agents can pull
   work safely.
 - **Checks** (`crates/code-preview`): runner checks come from `roll.toml`.
-  - Each check runs as `sh -c <run>` in its own container. The tree is copied in, never
-    bind-mounted, and the container gets memory, CPU and process limits and a timeout. The
+  - Each check runs as `sh -c <run>` in its own container (a Docker container here, a Fargate
+    task on the fleet). The tree is copied in, never bind-mounted, and the container gets
+    memory, CPU and process limits and a timeout. The
     timeout covers the run, not creating the container (pulling its image has its own 10
     minutes), so a timeout can never leave a container behind that appeared after removal.
   - The tail of the output becomes the check's summary.

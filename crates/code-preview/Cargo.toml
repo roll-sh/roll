@@ -1,6 +1,6 @@
 [package]
 name = "code-preview"
-description = "roll code checks and previews: roll.toml, a Docker runner, branched Postgres and Redis, preview routing"
+description = "roll code checks and previews: roll.toml, isolated runs (Docker locally, Fargate on the fleet), branched Postgres and Redis, preview routing, Fargate sandboxes"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,24 +9,33 @@ publish.workspace = true
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
+aws-config.workspace = true
+aws-sdk-cloudwatchlogs.workspace = true
+aws-sdk-ecs.workspace = true
 axum.workspace = true
 code-control.workspace = true
+code-review.workspace = true
 code-store.workspace = true
 futures.workspace = true
 getrandom.workspace = true
 http-body-util.workspace = true
 hyper.workspace = true
 hyper-util.workspace = true
+object_store.workspace = true
 parking_lot.workspace = true
 pg-control.workspace = true
 redis-control.workspace = true
+roll-fetch.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
+hex.workspace = true
 tokio.workspace = true
 toml.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+reqwest.workspace = true
 pg-storage.workspace = true
 tempfile.workspace = true
 tower.workspace = true

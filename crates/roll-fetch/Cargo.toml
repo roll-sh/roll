@@ -1,0 +1,21 @@
+[package]
+name = "roll-fetch"
+description = "Isolated work's handoff: the bundle a run's tree and env travel in, unpacked with roll code's hostile-tree rules, and the helper that runs beside customer code in a Fargate task"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "roll-fetch"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+flate2.workspace = true
+reqwest = { workspace = true, features = ["rustls"] }
+tar.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
