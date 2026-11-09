@@ -1431,6 +1431,15 @@ routes: docs/code/http-api.md, "Sandboxes".
       there. `ROLL_SANDBOX_DOCKER_DISK_LIMIT=1` caps each container's writable layer
       (`--storage-opt size=<disk_gb>G`) on storage drivers that support it (overlay2 on xfs with
       `pquota`, btrfs, zfs). agent37 enforces the size's disk itself.
+  - **fargate** (roll cloud's fleet, `ROLL_SANDBOX_BACKEND=fargate` with `ROLL_CODE_RUNNER=fargate`;
+    `code-preview/src/sandbox.rs`): a running sandbox is one Fargate task of the stack's sandbox
+    template named `roll-sbx-<id>`, with a task role that has no permissions, in the isolated
+    subnets and security group (docs/cloud/README.md, "Isolated work"). Stopped or asleep is no
+    task. The env is kept sealed with `ROLL_SECRET_KEY` in S3 (`code/sandboxes/<id>.sealed`) until
+    the sandbox is deleted, since every start needs it again, and goes to the task in a bundle
+    behind a short presigned URL, never in the `RunTask` request; `fetch` writes it to
+    `/roll/env`, which the sandbox's command removes once read. Its home is the task's storage:
+    a sleep loses it (provider logins, `agent.db`); an EFS access point per sandbox would keep it.
 - **The image** is `deploy/agent/Dockerfile`: the non-root user `roll`, the `roll` CLI built from
   this repository, git, node, ripgrep, and the codex and claude CLIs at pinned versions,
   `IS_SANDBOX=1`. Its command is `roll agent up`, which, with no login file, takes the machine token

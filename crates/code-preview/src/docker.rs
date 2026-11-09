@@ -1,8 +1,16 @@
-//! The Docker CLI, the same way pg-control drives Postgres computes.
+//! The Docker CLI, the same way pg-control drives Postgres computes, and [`Docker`]: checks and
+//! previews as containers on this host (one node and development; the fleet uses
+//! [`crate::fargate`]).
 
+use crate::isolation::{Isolation, Job, Kind};
 use anyhow::{Context, bail};
+use async_trait::async_trait;
+use parking_lot::Mutex;
 use std::collections::VecDeque;
+use std::net::SocketAddr;
+use std::path::Path;
 use std::process::Stdio;
+use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Command;
 use tracing::debug;
@@ -123,6 +131,86 @@ pub async fn drain(mut r: impl AsyncRead + Unpin, tail: std::sync::Arc<parking_l
             Ok(0) | Err(_) => return,
             Ok(n) => tail.lock().push(&buf[..n]),
         }
+    }
+}
+
+/// Containers on this host through the `docker` CLI. A tree is copied in (`docker cp`, never
+/// bind-mounted, so a run can't write to the host and leaves nothing root-owned behind); data
+/// URLs on loopback are rewritten to `host.docker.internal`.
+pub struct Docker;
+
+#[async_trait]
+impl Isolation for Docker {
+    fn name(&self) -> &'static str {
+        "docker"
+    }
+
+    async fn prepare(&self, job: &Job, tree: &Path) -> anyhow::Result<()> {
+        let workdir = job.kind.workdir();
+        let mut args: Vec<String> = vec!["create".into(), "--name".into(), job.name.clone(), "--label".into(), format!("{LABEL}={}", job.kind.as_str())];
+        if let Some(c) = &job.change {
+            args.extend(["--label".into(), format!("{LABEL}.change={c}")]);
+        }
+        if let (Kind::Preview, Some(port)) = (job.kind, job.port) {
+            args.extend(["--publish".into(), format!("127.0.0.1::{port}")]);
+        }
+        args.extend(["--workdir".into(), workdir.into(), "--add-host".into(), "host.docker.internal:host-gateway".into()]);
+        args.extend(limits(job.memory_mb, job.cpus));
+        for (k, v) in &job.env {
+            args.push("--env".into());
+            args.push(format!("{k}={v}"));
+        }
+        args.extend(["--entrypoint".into(), "sh".into(), job.image.clone(), "-c".into(), job.run.clone()]);
+        let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+        docker(&argv).await?;
+        docker(&["cp", &format!("{}/.", tree.display()), &format!("{}:{workdir}", job.name)]).await?;
+        Ok(())
+    }
+
+    async fn attach(&self, name: &str, tail: Arc<Mutex<Tail>>) -> anyhow::Result<i32> {
+        let mut child = Command::new("docker")
+            .args(["start", "--attach", name])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()?;
+        let out = tokio::spawn(drain(child.stdout.take().expect("piped"), tail.clone()));
+        let err = tokio::spawn(drain(child.stderr.take().expect("piped"), tail));
+        let status = child.wait().await?;
+        let _ = out.await;
+        let _ = err.await;
+        Ok(status.code().unwrap_or(-1))
+    }
+
+    async fn start(&self, name: &str, port: u16) -> anyhow::Result<SocketAddr> {
+        docker(&["start", name]).await?;
+        Ok(SocketAddr::from(([127, 0, 0, 1], host_port(name, port).await?)))
+    }
+
+    async fn running(&self, name: &str) -> bool {
+        running(name).await
+    }
+
+    async fn logs_tail(&self, name: &str, lines: usize) -> String {
+        logs_tail(name, lines).await
+    }
+
+    async fn remove(&self, name: &str) {
+        remove(name).await
+    }
+
+    /// Containers are this host's: the same as [`Isolation::remove`].
+    async fn release(&self, name: &str) {
+        remove(name).await
+    }
+
+    async fn remove_leftovers(&self, kind: Kind) {
+        remove_leftovers(kind.as_str()).await
+    }
+
+    fn reach(&self, url: &str) -> String {
+        crate::data::for_container(url)
     }
 }
 

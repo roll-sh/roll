@@ -27,4 +27,6 @@ pub trait Runner: Send + Sync {
     fn validate(&self, _text: &str) -> Option<String> {
         None
     }
+    /// Remove what a previous process of this node left running; called before checks resume.
+    async fn remove_leftovers(&self) {}
 }

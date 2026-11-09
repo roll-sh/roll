@@ -5,6 +5,10 @@
 #   rolld       the default command
 #   dashboard   `dashboard`: the dashboard on 127.0.0.1:3000, which rolld proxies to
 #
+# The `fetch` target is roll's small image beside customer code in isolated Fargate tasks
+# (`roll-fetch`; docs/cloud/README.md, "Isolated work"), pushed as `fetch-<tag>`:
+#   docker buildx build --platform linux/arm64 -f deploy/cloud/Dockerfile --target fetch -t roll-fetch .
+#
 # Build from the repository root (it uses deploy/cloud/Dockerfile.dockerignore):
 #   docker build -f deploy/cloud/Dockerfile -t roll-cloud .
 # For the fleet (Graviton), on an arm64 host or with buildx:
@@ -40,10 +44,16 @@ COPY vendor vendor
 RUN cargo chef cook --profile "$PROFILE" --recipe-path recipe.json -p rolld
 COPY Cargo.toml Cargo.lock ./
 COPY crates crates
-RUN cargo build --profile "$PROFILE" -p rolld --bin rolld \
+RUN cargo build --profile "$PROFILE" -p rolld --bin rolld -p roll-fetch --bin roll-fetch \
  && dir=$([ "$PROFILE" = dev ] && echo debug || echo "$PROFILE") \
- && cp "target/$dir/rolld" /usr/local/bin/rolld \
- && strip --strip-debug /usr/local/bin/rolld
+ && cp "target/$dir/rolld" "target/$dir/roll-fetch" /usr/local/bin/ \
+ && strip --strip-debug /usr/local/bin/rolld /usr/local/bin/roll-fetch
+
+# ── roll-fetch: its own small image (no shell needed, root only to write the task's volumes) ──
+FROM debian:trixie-slim AS fetch
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
+COPY --from=rolld /usr/local/bin/roll-fetch /usr/local/bin/roll-fetch
+CMD ["roll-fetch"]
 
 # ── the dashboard ──
 FROM ${NODE_IMAGE} AS dashboard

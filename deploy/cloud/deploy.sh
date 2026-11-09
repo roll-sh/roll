@@ -81,6 +81,14 @@ cmd_push() {
     --label "org.opencontainers.image.revision=$tag" \
     -t "$REPO:$tag" --push "$root"
   log "pushed $REPO:$tag"
+  # roll-fetch, beside customer code in isolated tasks (the runner templates use fetch-<tag>);
+  # its layers come from the build above.
+  docker buildx build "${builder[@]}" "${jobs[@]}" --platform linux/arm64 \
+    -f "$root/deploy/cloud/Dockerfile" --target fetch \
+    --cache-from "type=registry,ref=$CACHE:main" \
+    --label "org.opencontainers.image.revision=$tag" \
+    -t "$REPO:fetch-$tag" --push "$root"
+  log "pushed $REPO:fetch-$tag"
 }
 
 # ── waiting ──

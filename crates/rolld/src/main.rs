@@ -17,6 +17,7 @@ mod auth;
 mod cluster;
 mod code;
 mod edge;
+mod isolation;
 mod logs;
 mod nosql;
 mod products;
@@ -143,7 +144,8 @@ struct Args {
     /// roll code previews answer on `<change>.<this domain>` (on the API port).
     #[arg(long, env = "ROLL_CODE_PREVIEW_DOMAIN", default_value = "preview.localhost")]
     code_preview_domain: String,
-    /// roll code checks running at once on this host (each in its own container).
+    /// roll code checks running at once from this node (each in its own container or Fargate
+    /// task; `ROLL_CODE_RUNNER`, see `isolation.rs`).
     #[arg(long, env = "ROLL_CODE_RUNNER_CONCURRENCY", default_value_t = 2)]
     code_runner_concurrency: usize,
     /// roll code event streams (`/events`, MCP) one caller may hold open: a token, or an
@@ -660,6 +662,8 @@ async fn start_code(
         ..code_control::Config::local(home.to_path_buf())
     };
     args.code.apply(&mut code_config, &args.public_host, args.api)?;
+    // Docker on this host, or a Fargate task per run (ROLL_CODE_RUNNER; isolation.rs).
+    let isolation = isolation::setup(home, &mut code_config.sandboxes).await?;
     let code = code_control::Code::open(code_config, objects)?;
     match (&code.config.database, code.cluster()) {
         (_, Some(c)) => info!(node = %c.node_id(), url = %c.config().advertise_url, backend = c.backend_name(), "roll code: cluster node (data on Postgres)"),
@@ -694,7 +698,7 @@ async fn start_code(
     if code_control::chatops::enable_from_env(&code)? {
         info!("roll code: chat ops configured");
     }
-    // Checks and previews: containers, with previews branching roll Postgres and Redis.
+    // Checks and previews: containers or Fargate tasks, with previews branching roll Postgres and Redis.
     let previews = code_preview::Previews::new(
         code_preview::PreviewConfig {
             domain: args.code_preview_domain.trim_matches('.').to_ascii_lowercase(),
@@ -702,8 +706,10 @@ async fn start_code(
             ..Default::default()
         },
         Some(data),
+        isolation.clone(),
     );
-    let checks = code_preview::start(&code, std::sync::Arc::new(code_preview::DockerRunner::new(args.code_runner_concurrency)), previews.clone());
+    let runner = code_preview::CheckRunner::new(isolation, args.code_runner_concurrency);
+    let checks = code_preview::start(&code, std::sync::Arc::new(runner), previews.clone());
     Ok(CodeNode { code, previews, _checks: checks })
 }
 

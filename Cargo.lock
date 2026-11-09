@@ -625,6 +625,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "aws-sdk-cloudwatchlogs"
+version = "1.157.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8f6e015fb4953ff5aa49982d62591ff395c130487d2748daadf6762c0d4f894d"
+dependencies = [
+ "arc-swap",
+ "aws-credential-types",
+ "aws-runtime",
+ "aws-smithy-async",
+ "aws-smithy-eventstream",
+ "aws-smithy-http",
+ "aws-smithy-json",
+ "aws-smithy-observability",
+ "aws-smithy-runtime",
+ "aws-smithy-runtime-api",
+ "aws-smithy-schema",
+ "aws-smithy-types",
+ "aws-types",
+ "bytes",
+ "fastrand",
+ "http 1.5.0",
+ "regex-lite",
+ "tracing",
+]
+
+[[package]]
 name = "aws-sdk-dynamodb"
 version = "1.130.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -648,6 +674,31 @@ dependencies = [
  "regex-lite",
  "tracing",
  "url",
+]
+
+[[package]]
+name = "aws-sdk-ecs"
+version = "1.151.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7ef7404455f21861add58134ade0d617e1f3aaf40c646d1360ca96d82fb56bb8"
+dependencies = [
+ "arc-swap",
+ "aws-credential-types",
+ "aws-runtime",
+ "aws-smithy-async",
+ "aws-smithy-http",
+ "aws-smithy-json",
+ "aws-smithy-observability",
+ "aws-smithy-runtime",
+ "aws-smithy-runtime-api",
+ "aws-smithy-schema",
+ "aws-smithy-types",
+ "aws-types",
+ "bytes",
+ "fastrand",
+ "http 1.5.0",
+ "regex-lite",
+ "tracing",
 ]
 
 [[package]]
@@ -1675,20 +1726,29 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "aws-config",
+ "aws-sdk-cloudwatchlogs",
+ "aws-sdk-ecs",
  "axum",
  "code-control",
+ "code-review",
  "code-store",
  "futures",
  "getrandom 0.4.3",
+ "hex",
  "http-body-util",
  "hyper 1.12.0",
  "hyper-util",
+ "object_store",
  "parking_lot",
  "pg-control",
  "pg-storage",
  "redis-control",
+ "reqwest",
+ "roll-fetch",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "tokio",
  "toml",
@@ -6314,6 +6374,18 @@ dependencies = [
  "tower",
  "tracing",
  "x509-parser",
+]
+
+[[package]]
+name = "roll-fetch"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "flate2",
+ "reqwest",
+ "tar",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]
