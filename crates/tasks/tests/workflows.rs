@@ -374,11 +374,14 @@ async fn debounce_keeps_the_last_event() {
         |ctx| Ok(ctx.event["data"]["v"].clone()),
     );
     app.sync(&env).await;
-    // In one request, so they land within one window however slow the machine is (separate
-    // requests a slow runner spaced past the window debounced into runs of their own).
+    // No worker runs while the events go in, so they're all within one window however slow the
+    // store is: a window is wall-clock time on the server, and a slow store (DynamoDB Local on a
+    // busy runner) spaced even one request's events past it, closing it early.
+    env.take_worker().unwrap().shutdown().await;
     let mut events: Vec<Value> = (1..=4).map(|v| json!({ "name": "profile.changed", "data": { "user": "u1", "v": v } })).collect();
     events.push(json!({ "name": "profile.changed", "data": { "user": "u2", "v": 99 } }));
     env.post("/events", json!(events)).await;
+    let _worker = tasks::start(env.tasks.clone());
     eventually(10_000, "debounced runs", || async {
         let runs = env.runs("sync-profile").await;
         runs.len() >= 2 && runs.iter().all(|r| r["status"] == "completed")
