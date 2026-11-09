@@ -1744,6 +1744,7 @@ dependencies = [
  "pg-control",
  "pg-storage",
  "redis-control",
+ "reqwest",
  "roll-fetch",
  "serde",
  "serde_json",

@@ -229,7 +229,8 @@ pub struct Fargate {
     s3: AmazonS3,
     templates: tokio::sync::Mutex<HashMap<String, Arc<Template>>>,
     /// Task definitions registered for (template ARN, image).
-    derived: Mutex<HashMap<(String, String), String>>,
+    /// Held while one is registered, so runs of a new image at once register it once.
+    derived: tokio::sync::Mutex<HashMap<(String, String), String>>,
     prepared: Mutex<HashMap<String, Prepared>>,
     started: Mutex<HashMap<String, Started>>,
 }
@@ -292,7 +293,7 @@ impl Fargate {
             s3,
             cfg,
             templates: tokio::sync::Mutex::default(),
-            derived: Mutex::default(),
+            derived: tokio::sync::Mutex::default(),
             prepared: Mutex::default(),
             started: Mutex::default(),
         }))
@@ -314,7 +315,8 @@ impl Fargate {
     /// The task definition for `image` from template `t`: registered once, then reused.
     async fn task_def(&self, t: &Template, image: &str) -> anyhow::Result<String> {
         let key = (t.arn.clone(), image.to_string());
-        if let Some(arn) = self.derived.lock().get(&key) {
+        let mut derived = self.derived.lock().await;
+        if let Some(arn) = derived.get(&key) {
             return Ok(arn.clone());
         }
         let base = t.def.family().context("the template has no family")?;
@@ -357,7 +359,7 @@ impl Fargate {
                 arn
             }
         };
-        self.derived.lock().insert(key, arn.clone());
+        derived.insert(key, arn.clone());
         Ok(arn)
     }
 
