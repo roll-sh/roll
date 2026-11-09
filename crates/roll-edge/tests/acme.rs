@@ -173,7 +173,9 @@ async fn wildcards_are_issued_over_dns01_and_stored_sealed() {
     assert_eq!(stored.len(), 3, "two certificates and the ACME account: {stored:?}");
     for (key, _) in &stored {
         let raw = objects.get(key).await.unwrap().unwrap();
-        assert!(!raw.windows(11).any(|w| w == b"PRIVATE KEY") && !raw.windows(3).any(|w| w == b"\"d\""), "{key} is sealed");
+        // Plaintext key material, long enough not to turn up by chance in ciphertext (a JWK's
+        // private `"d":"` member, a PEM key's header).
+        assert!(!raw.windows(11).any(|w| w == b"PRIVATE KEY") && !raw.windows(5).any(|w| w == b"\"d\":\""), "{key} is sealed");
     }
     assert!(*fake.created.lock().unwrap() >= hosts.all_cert_names().len() - 1);
     assert!(fake.records.lock().unwrap().is_empty(), "challenge records removed");
