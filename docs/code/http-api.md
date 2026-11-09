@@ -42,6 +42,10 @@ clients except for the following:
 - A repo that is moving between nodes (a handoff, or a dead node's lease that hasn't expired yet)
   makes the receiving node wait and try again for about a lease's length; past that the request
   answers `503 {error}` with `Retry-After` and `x-roll-code-unavailable`. Nothing ran: retry it.
+- A write already forwarded to the owner when that node dies answers `502` (`forwarding to node
+  … failed`, plain text): it may or may not have run, and the receiving node never sends a write
+  twice. Retry it in a way that is safe either way: a landing that did land conflicts on its own
+  paths when sent again (409 naming them).
 - An event stream ends when its repo starts moving to another node: reconnect (the dashboard and
   `roll code watch` do).
 - `x-roll-code-*` request headers belong to the cluster: a request carrying one that isn't signed
