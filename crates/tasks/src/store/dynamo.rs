@@ -575,7 +575,28 @@ fn message_filter(q: &MessageQuery, skip: &[&str]) -> Option<Filter> {
 #[async_trait]
 impl Store for DynamoStore {
     async fn write_all(&self, writes: &[Write]) -> Result<bool> {
-        let put = |item: Item, condition: Option<&str>| -> Result<TransactWriteItem> {
+        // One write is atomic by itself: no transaction (they cost twice the write units, and
+        // are slower).
+        if let [w] = writes {
+            return match w {
+                Write::Kv { key: k, value, expect, expires_at } => self.kv_put(k, value, *expect, *expires_at).await,
+                Write::KvDelete { key: k, expect } => self.kv_delete(k, *expect).await,
+                Write::Doc { kind, id, value, expect } => self.doc_put(kind, id, value, *expect).await,
+                Write::NewRun(run) => self.run_put(run, Expect::Absent).await,
+                Write::Step(step) => self.step_put(step).await.map(|_| true),
+                Write::Event(e) => self.event_put(e).await.map(|_| true),
+                Write::Wait(wait) => self.wait_put(wait).await.map(|_| true),
+                Write::Msg { message, body } => {
+                    let item = self.msg_insert_parts(message, body).await?;
+                    match self.db.put_item().table_name(&self.table).set_item(Some(item)).condition_expression("attribute_not_exists(pk)").send().await {
+                        Ok(_) => Ok(true),
+                        Err(e) if cond_failed(&e) => Ok(false),
+                        Err(e) => Err(anyhow::anyhow!("inserting message {}: {}", message.id, e.into_service_error())),
+                    }
+                }
+            };
+        }
+        let put =|item: Item, condition: Option<&str>| -> Result<TransactWriteItem> {
             let p = TxPut::builder().table_name(&self.table).set_item(Some(item)).set_condition_expression(condition.map(String::from)).build()?;
             Ok(TransactWriteItem::builder().put(p).build())
         };
