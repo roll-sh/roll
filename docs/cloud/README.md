@@ -701,3 +701,17 @@ against it, then removes everything it created (all named `roll-cloud-e2e-*`).
     1.5 s); each move costs librdkafka a reconnect and a metadata refresh.
   - The takeover and stop-order numbers above predate the hardening fixes: rerun the fleet test to
     measure them again.
+- **What the fleet test showed for queues** (2026-11-09, lane `cloud/queues-finish`; about 8–10k
+  confirmed AMQPS publishes a run, the SIGKILL aimed at the queue's owner with
+  `ROLL_E2E_KILL=mq:fleet/orders`). Nothing confirmed was lost and the only errors were closed
+  connections. It found, and the lane fixed: nodes reaching 2,547 open descriptors at a drain
+  against a soft limit of 1024 (a log's flush deleted every spent group-commit object at once;
+  rolld now also raises the limit to the hard one), which stalled Redis and NoSQL 10–15 s on
+  every rolling restart; the edge cancelling queue connections before queues closed them, which
+  hung publishes on a draining node for 10 s (now 1.0 s at most); a dead writer's stream drained
+  one request at a time (12.7 s for 1,040 objects, now about 3 s); RPC connections to a dead node
+  kept until TCP gave up (now dropped after 8 s without an answer). Still open:
+  - **Queues' takeover after a crash** is the longest stall of any product (19.8 s: the lease's
+    9.5 s, the drain's 3 s, then about 7 s replaying the log the drain wrote as one object per
+    group commit). Writing those records into larger objects when draining, or reading ahead on
+    replay, would bring it near the lease.
