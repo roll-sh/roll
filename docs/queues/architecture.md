@@ -116,8 +116,21 @@ every queue and its logs are local.
 - **Definitions owned by other crates** (webhooks) follow the same change feed. The broker
   emits `MetaChanged` for kinds it doesn't own, and their owner reconciles. A webhook created
   or changed on one node starts or restarts on every node.
-- **Streams.** Stream clients ask `Metadata` for a stream's leader. A stream's owner node is
-  reported as its leader and its replica, so publishers and readers connect to it directly.
+- **Streams.** Stream clients ask `Metadata` for a stream's leader and connect to it. Behind the
+  edge every node answers as one virtual node at the host and port the client connected with
+  (`<vhost>.mq.<region>.<domain>:5551`, or the default vhost's name for a client without SNI), the
+  leader of every stream with no replicas, as a RabbitMQ of one node would: no node's own address
+  leaves the fleet. Whichever node the load balancer picked serves the connection, and the
+  stream's router carries its publishes (with their publishing ids, so deduplication holds) and
+  its subscriptions (chunks by offset, fed by credit) to the owner over the RPC, as for every
+  other queue: one stream connection may use streams with different owners, so a connection
+  can't be spliced to one of them. A subscription follows its stream when it moves, from the
+  offset after the last chunk its client was handed, so the client reads every entry once, in
+  order, without reconnecting (`stream_clients_behind_the_edge_see_one_node_across_a_move`). Off
+  the edge (rolld's own stream port on a cluster) `Metadata` names the owner's listener as
+  leader and replica, so clients connect to it directly. Single active consumer groups are
+  coordinated per node: behind the edge, consumers of one group that reach different nodes are
+  each active (docs/cloud/README.md, "Open items").
 - **Tests**: `crates/mq-cluster/tests/cluster.rs` (three nodes in one process, on the memory
   backend and on DynamoDB Local, logs on a shared object store) and
   `crates/rolld/tests/queues_cluster_e2e.rs` (Docker: real `rolld` containers with DynamoDB

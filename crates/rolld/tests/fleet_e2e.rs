@@ -17,7 +17,7 @@
 //! | streams | librdkafka, SASL_SSL, `acks=all`, idempotent | records | a consumer group |
 //! | storage | aws-sdk-s3, path and virtual-host style | `PutObject`, multipart uploads | `GetObject` of acknowledged keys |
 //! | tasks | HTTPS on `tasks.` | publishes with a `dedup_id` | pull and ack |
-//! | queues | — | not on the fleet yet (lane `cloud/queues`); see `queues` below | |
+//! | queues | lapin over AMQPS, the URL the API gave for a vhost (SNI `<vhost>.mq.…`) | publishes with confirms to a quorum queue | a consumer with manual acks |
 //!
 //! Under that load: (a) SIGKILL the node holding the most leases, then start it again; (b) a rolling
 //! restart, each node in turn stopped with SIGTERM (it must drain and exit 0), started again and
@@ -26,7 +26,7 @@
 //!
 //! Then: every acknowledged write is readable; nothing is duplicated where the product promises
 //! exactly once (a code landing on its branch, a Kafka record from the idempotent producer, a
-//! storage key), and at-least-once deliveries (tasks) are deduplicable by message id; every
+//! storage key), and at-least-once deliveries (tasks, queues) are deduplicable by message id; every
 //! client-visible error is one the product's docs allow; no operation failed after the client's
 //! retry policy. A table prints writes, acknowledgements, verified writes, errors by kind and the
 //! longest stall per product; the test fails on any problem after printing it.
@@ -147,7 +147,7 @@ enum Product {
     Kafka,
     Storage,
     Tasks,
-    // Queues: add here when `cloud/queues` lands (module docs).
+    Queues,
 }
 
 impl Product {
@@ -159,6 +159,7 @@ impl Product {
             Product::Kafka => "streams",
             Product::Storage => "storage",
             Product::Tasks => "tasks",
+            Product::Queues => "queues",
         }
     }
 
@@ -180,7 +181,10 @@ impl Product {
     ///   (the SDK retries it);
     /// - tasks (deploy/aws/README.md, "On the roll cloud fleet"): reconnects, `503` with
     ///   `Retry-After`, and `502` for a write whose connection broke at a dead leader (retried
-    ///   with its `dedup_id`).
+    ///   with its `dedup_id`);
+    /// - queues (docs/queues/architecture.md, "Many nodes"): a connection closed (its node
+    ///   stopped or died) and the reconnect; a publish in flight while its queue moves waits for
+    ///   the new owner and is confirmed there, so a nack or a confirm timeout is never allowed.
     fn allows(self, kind: &str) -> bool {
         let k = kind.split_whitespace().next().unwrap_or_default();
         match self {
@@ -189,6 +193,7 @@ impl Product {
             Product::Redis => matches!(k, "connect" | "closed" | "LOADING"),
             Product::Nosql => matches!(k, "connect" | "closed"),
             Product::Kafka => matches!(k, "reconnect" | "NotLeaderForPartition" | "NotCoordinator" | "NotEnoughReplicas" | "LeaderNotAvailable"),
+            Product::Queues => matches!(k, "connect" | "closed"),
         }
     }
 }
@@ -213,6 +218,7 @@ struct Ports {
     redis: u16,
     kafka: u16,
     nosql: u16,
+    amqps: u16,
     ddb: u16,
     stats: u16,
 }
@@ -1689,12 +1695,164 @@ async fn tasks_verify(w: &World, t: &TasksState) {
 }
 
 // ── queues ──
-//
-// Not on the fleet yet: roll queues' cluster layer is lane `cloud/queues` (docs/cloud/README.md,
-// Status). When it lands, add `Product::Queues` with an AMQPS (5671, SNI `<id>.mq.<region>.<domain>`)
-// publisher with confirms recording every confirmed message, a consumer acking, and a verify
-// step: every confirmed message delivered (at least once, deduplicable by message id). The load
-// balancer already forwards 5671 (deploy/cloud/local/haproxy.cfg).
+
+/// A vhost with its own user, a quorum queue in it, and the vhost's AMQPS URL as the API gave it
+/// (`<vhost>.mq.<region>.<domain>`; the edge listens on the published port here, so the URL works
+/// as it is).
+struct QueuesState {
+    url: String,
+    /// Confirmed publishes (message ids).
+    acks: Mutex<HashSet<String>>,
+    /// Every message id published (confirmed or not).
+    sent: Mutex<HashSet<String>>,
+    /// Deliveries: message id → how many times.
+    delivered: Mutex<HashMap<String, u32>>,
+    /// The consumer runs until this is set (after the publishers stop and everything arrived).
+    consumer_stop: AtomicBool,
+}
+
+const MQ_VHOST: &str = "fleet";
+const MQ_QUEUE: &str = "orders";
+const MQ_PUBLISHERS: usize = 2;
+
+type Amqp = (lapin::Connection, lapin::Channel);
+
+/// An AMQPS connection and a channel through the load balancer: `connect` if it never got as far
+/// as an open channel (nothing was sent).
+async fn amqp_open(w: &World, q: &QueuesState, confirms: bool) -> Result<Amqp, String> {
+    let tls = lapin::tcp::OwnedTLSConfig { identity: None, cert_chain: Some(w.ca_pem.clone()) };
+    let runtime = lapin::runtime::default_runtime().map_err(|e| format!("runtime: {e}"))?;
+    let connect = lapin::Connection::connect_with_config(&q.url, lapin::ConnectionProperties::default(), tls, runtime);
+    let conn = tokio::time::timeout(Duration::from_secs(10), connect).await.map_err(|_| "connect".to_string())?.map_err(|_| "connect".to_string())?;
+    let ch = conn.create_channel().await.map_err(|_| "connect".to_string())?;
+    if confirms {
+        ch.confirm_select(lapin::options::ConfirmSelectOptions::default()).await.map_err(|_| "connect".to_string())?;
+    }
+    Ok((conn, ch))
+}
+
+/// One publish, confirmed, on a shared connection (opened again if it dropped), as one attempt.
+async fn amqp_publish(w: &World, q: &QueuesState, conn: &tokio::sync::Mutex<Option<Amqp>>, id: &str) -> Result<(), String> {
+    let mut g = conn.lock().await;
+    if g.as_ref().is_some_and(|(c, ch)| !c.status().connected() || !ch.status().connected()) {
+        *g = None;
+    }
+    if g.is_none() {
+        *g = Some(amqp_open(w, q, true).await?);
+    }
+    let ch = g.as_ref().unwrap().1.clone();
+    let props = lapin::BasicProperties::default().with_delivery_mode(2).with_message_id(id.into());
+    let published = ch.basic_publish("".into(), MQ_QUEUE.into(), lapin::options::BasicPublishOptions::default(), id.as_bytes(), props).await;
+    let confirm = match published {
+        Ok(c) => c,
+        Err(_) => {
+            *g = None;
+            return Err("closed".into());
+        }
+    };
+    match tokio::time::timeout(ATTEMPT_TIMEOUT, confirm).await {
+        Ok(Ok(c)) if c.is_ack() => Ok(()),
+        Ok(Ok(_)) => Err("nack".into()),
+        Ok(Err(_)) => {
+            *g = None;
+            Err("closed".into())
+        }
+        Err(_) => {
+            *g = None;
+            Err("timeout".into())
+        }
+    }
+}
+
+/// Publishes with confirms, one at a time, recording every confirmed message id. A publish that
+/// failed is sent again with the same id (at least once).
+async fn queues_publisher(w: Arc<World>, q: Arc<QueuesState>, k: usize) {
+    let conn = tokio::sync::Mutex::new(None);
+    let mut n = 0u64;
+    while w.running() {
+        let id = format!("p{k}-{n}");
+        q.sent.lock().insert(id.clone());
+        w.write(Product::Queues);
+        let res = retry(&w, Product::Queues, |_| async {
+            match amqp_publish(&w, &q, &conn, &id).await {
+                Ok(()) => Step::Done(()),
+                Err(k) => Step::Retry(k, None),
+            }
+        })
+        .await;
+        match res {
+            Ok(()) => {
+                w.ack(Product::Queues);
+                q.acks.lock().insert(id);
+            }
+            Err(e) => w.problem(Product::Queues, format!("publish {id}: {e}")),
+        }
+        n += 1;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+/// Consumes with manual acks (prefetch 100) until told to stop, reconnecting when its
+/// connection closes; a delivery is recorded before it's acked.
+async fn queues_consumer(w: Arc<World>, q: Arc<QueuesState>) {
+    while !q.consumer_stop.load(Ordering::SeqCst) {
+        let opened = retry(&w, Product::Queues, |_| async {
+            let (conn, ch) = match amqp_open(&w, &q, false).await {
+                Ok(c) => c,
+                Err(k) => return Step::Retry(k, None),
+            };
+            if ch.basic_qos(100, lapin::options::BasicQosOptions::default()).await.is_err() {
+                return Step::Retry("closed".into(), None);
+            }
+            match ch.basic_consume(MQ_QUEUE.into(), "".into(), lapin::options::BasicConsumeOptions::default(), lapin::types::FieldTable::default()).await {
+                Ok(c) => Step::Done((conn, c)),
+                Err(_) => Step::Retry("closed".into(), None),
+            }
+        })
+        .await;
+        let (_conn, mut consumer) = match opened {
+            Ok(c) => c,
+            Err(e) => {
+                w.problem(Product::Queues, format!("consume: {e}"));
+                continue;
+            }
+        };
+        while !q.consumer_stop.load(Ordering::SeqCst) {
+            let d = match tokio::time::timeout(Duration::from_secs(1), consumer.next()).await {
+                Err(_) => continue,
+                Ok(Some(Ok(d))) => d,
+                Ok(Some(Err(_)) | None) => {
+                    w.error(Product::Queues, "closed");
+                    break;
+                }
+            };
+            match d.properties.message_id().as_ref().map(|m| m.as_str().to_string()) {
+                Some(id) if q.sent.lock().contains(&id) => *q.delivered.lock().entry(id).or_default() += 1,
+                other => w.problem(Product::Queues, format!("a delivery with an unknown message id: {other:?}")),
+            }
+            if d.ack(lapin::options::BasicAckOptions::default()).await.is_err() {
+                // Not lost: an unacked delivery comes back when its connection closes.
+                w.error(Product::Queues, "closed");
+                break;
+            }
+        }
+    }
+}
+
+/// Every confirmed publish was delivered (at least once; duplicates carry the same message id).
+fn queues_verify(w: &World, q: &QueuesState) {
+    let acks = q.acks.lock().clone();
+    let delivered = q.delivered.lock().clone();
+    let mut missing: Vec<&String> = acks.iter().filter(|id| !delivered.contains_key(*id)).collect();
+    if !missing.is_empty() {
+        missing.sort();
+        w.problem(Product::Queues, format!("{} confirmed publishes never delivered, e.g. {:?}", missing.len(), &missing[..missing.len().min(5)]));
+    }
+    let twice = delivered.values().filter(|n| **n > 1).count();
+    let unconfirmed = delivered.keys().filter(|id| !acks.contains(*id)).count();
+    w.note(Product::Queues, format!("{} messages delivered, {twice} more than once (at least once; deduplicable by message id), {unconfirmed} never confirmed to their publisher", delivered.len()));
+    w.stat(Product::Queues, |st| st.verified = (acks.len() - missing.len()) as u64);
+}
 
 // ── the fleet ──
 
@@ -1851,6 +2009,7 @@ async fn every_product_keeps_every_acknowledged_write_through_kill_rolling_resta
         redis: port("ROLL_E2E_REDIS_PORT", 26379),
         kafka: port("ROLL_E2E_KAFKA_PORT", 29092),
         nosql: port("ROLL_E2E_NOSQL_PORT", 29042),
+        amqps: port("ROLL_E2E_AMQPS_PORT", 25671),
         ddb: port("ROLL_E2E_DDB_PORT", 28000),
         stats: port("ROLL_E2E_LB_STATS_PORT", 28404),
     };
@@ -1892,7 +2051,7 @@ async fn every_product_keeps_every_acknowledged_write_through_kill_rolling_resta
     let info = ok(&w, "GET", &w.api("/v1/info"), None).await;
     let products: HashSet<String> = info["products"].as_array().unwrap().iter().filter_map(|p| p.as_str().map(str::to_string)).collect();
     eprintln!("fleet up: {info}");
-    for p in ["code", "redis", "nosql", "streams", "storage", "tasks"] {
+    for p in ["code", "redis", "nosql", "streams", "storage", "tasks", "queues"] {
         assert!(products.contains(p), "{p} is off on the fleet (ROLL_PRODUCTS): {info}");
     }
 
@@ -1951,6 +2110,12 @@ async fn every_product_keeps_every_acknowledged_write_through_kill_rolling_resta
     let storage = Arc::new(StorageState { path: s3_client(&w, ak, sk, true), vhost: s3_client(&w, ak, sk, false), acks: Mutex::default(), multipart: Mutex::default(), sent: Mutex::default() });
     retry(&w, Product::Storage, |_| async { s3_step(storage.path.create_bucket().bucket(BUCKET).send().await) }).await.expect("CreateBucket");
     let tasks_state = Arc::new(TasksState::default());
+    // queues: a vhost with its own user, and a quorum queue; clients use the AMQPS URL as given.
+    let vh = ok(&w, "POST", &w.api("/v1/queues/vhosts"), Some(json!({ "name": MQ_VHOST, "credentials": true }))).await;
+    let url = vh["credentials"]["urls"]["amqps"].as_str().unwrap_or_default().to_string();
+    assert!(url.starts_with("amqps://") && url.contains(&format!("@{MQ_VHOST}.mq.{REGION}.{DOMAIN}:{}/", ports.amqps)), "the vhost's AMQPS URL names its public hostname: {vh}");
+    ok(&w, "POST", &w.api(&format!("/v1/queues/vhosts/{MQ_VHOST}/queues")), Some(json!({ "name": MQ_QUEUE, "type": "quorum" }))).await;
+    let queues = Arc::new(QueuesState { url, acks: Mutex::default(), sent: Mutex::default(), delivered: Mutex::default(), consumer_stop: AtomicBool::new(false) });
     eprintln!("setup done in {:.1}s", w.at(Instant::now()));
 
     // ── traffic ──
@@ -1968,6 +2133,10 @@ async fn every_product_keeps_every_acknowledged_write_through_kill_rolling_resta
     tasks.push(tokio::spawn(storage_reader(w.clone(), storage.clone())));
     tasks.push(tokio::spawn(tasks_writer(w.clone(), tasks_state.clone())));
     let consumer = tokio::spawn(tasks_consumer(w.clone(), tasks_state.clone()));
+    for k in 0..MQ_PUBLISHERS {
+        tasks.push(tokio::spawn(queues_publisher(w.clone(), queues.clone(), k)));
+    }
+    let mq_consumer = tokio::spawn(queues_consumer(w.clone(), queues.clone()));
     let kafka_threads = {
         let (w1, k1, s1) = (w.clone(), kafka.clone(), kafka_setup.clone());
         let (w2, k2, s2) = (w.clone(), kafka.clone(), kafka_setup.clone());
@@ -2063,6 +2232,13 @@ async fn every_product_keeps_every_acknowledged_write_through_kill_rolling_resta
     }
     tasks_state.consumer_stop.store(true, Ordering::SeqCst);
     consumer.await.unwrap();
+    // The queues consumer too, until every confirmed publish arrived (or 90 s).
+    let t2 = Instant::now();
+    while t2.elapsed() < OP_DEADLINE && !queues.acks.lock().iter().all(|id| queues.delivered.lock().contains_key(id)) {
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    queues.consumer_stop.store(true, Ordering::SeqCst);
+    mq_consumer.await.unwrap();
     tl.add(&w, format!("consumers drained ({:.1}s)", t.elapsed().as_secs_f64()));
 
     code_verify(&w, &code, scratch.path()).await;
@@ -2074,6 +2250,7 @@ async fn every_product_keeps_every_acknowledged_write_through_kill_rolling_resta
     }
     storage_verify(&w, &storage).await;
     tasks_verify(&w, &tasks_state).await;
+    queues_verify(&w, &queues);
 
     // ── the scoreboard ──
     eprintln!("\n=== roll cloud fleet e2e: {:.0}s of traffic ===", (traffic_to - traffic_from).as_secs_f64());

@@ -92,7 +92,7 @@ written once in SQLite's dialect), as roll code's did.
 | nosql | `nosql:db:<id>` | the database's owner loads it; opens and manifest writes are fenced by compare-and-swap in S3 |
 | streams | `stream:cluster:<id>` | a tenant's whole Kafka cluster on one owner (the stream SASL maps a key to); acknowledged once in the owner's write-ahead log in S3; per partition later (`crates/stream-broker/README.md`, "On the fleet") |
 | storage | `storage:meta` | built: one metadata log for the deployment, a hot standby following it (docs/storage/architecture.md, "Many nodes"); `storage:account:<id>` (a log per account) is designed there, not built |
-| queues | `mq:<vhost>/<queue>` (`#<n>` per partition after the first) | built: every node serves every client and forwards to each queue's owner over the internal RPC (no splice); logs in S3 Standard, fenced by put-if-absent (docs/queues/architecture.md, "Many nodes") |
+| queues | `mq:<vhost>/<queue>` (`#<n>` per partition after the first) | built: every node serves every client (stream clients too, as one virtual node) and forwards to each queue's owner over the internal RPC (no splice); logs in S3 Standard, fenced by put-if-absent (docs/queues/architecture.md, "Many nodes") |
 | tasks | `tasks:cell:default` | built: the log store cell's leader (replaces the cell's own S3 lease; fencing stays in the log), hot standbys following the log (deploy/aws/README.md, "On the roll cloud fleet"); `tasks:tenant:<id>` needs more cells and a tenant catalog, designed there, not built |
 
 ## The edge
@@ -113,8 +113,9 @@ written once in SQLite's dialect), as roll code's did.
 - **Forwarding** to the owner is a signed internal hop on the private network: HTTP requests are
   forwarded as in roll-cluster (`Cluster::dispatch`); TCP connections are spliced after the first message that names
   the tenant (startup packet, AUTH/HELLO, SASL, CQL STARTUP/AUTH). Queues' connections aren't
-  spliced: a connection's queues can each have a different owner, so the node serves the
-  connection itself and forwards each queue's operations to its owner.
+  spliced: a connection's queues (and a stream connection's streams) can each have a different
+  owner, so the node serves the connection itself and forwards each queue's operations to its
+  owner.
 
 ### Hostnames
 
@@ -128,7 +129,7 @@ written once in SQLite's dialect), as roll code's did.
 | `<id>.redis.us-east-1.roll.sh:6379` (TLS), `https://<id>.redis.us-east-1.roll.sh` (REST) | Redis | DNS only |
 | `<id>.kafka.us-east-1.roll.sh:9092` (TLS + SASL), HTTPS REST on 443 | streams | DNS only |
 | `<id>.nosql.us-east-1.roll.sh:9042` (TLS), HTTPS Alternator on 443 | nosql | DNS only |
-| `<id>.mq.us-east-1.roll.sh` 5671 AMQPS, 8883 MQTTS, 61614 STOMP TLS, 5551 streams, 443 web | queues | DNS only |
+| `<vhost>.mq.us-east-1.roll.sh` 5671 AMQPS, 8883 MQTTS, 61614 STOMP TLS, 5551 streams (TLS), 443 web | queues: one hostname per vhost (below) | DNS only |
 | `tasks.us-east-1.roll.sh` | tasks API (`/v1/tasks`, hosted tenants at `/t/<tenant>/v1/tasks`) | DNS only |
 | `s3.us-east-1.roll.site`, `<bucket>.s3.us-east-1.roll.site` | S3 API (path and virtual-host style) | DNS only |
 | `<bucket>.roll.site`, custom domains | public buckets and sites (the CDN Worker) | proxied |
@@ -150,6 +151,15 @@ written once in SQLite's dialect), as roll code's did.
   `<bucket>.roll.site`, `chg-<id>.roll.site`): the API routes to a resource's region, and
   Cloudflare can send a proxied request to the right region when there is more than one.
 - roll.cloud isn't needed. If it's bought, it only redirects to roll.sh.
+- **Queues' `<vhost>`** is the vhost's DNS label: its name when that is one (lowercase letters,
+  digits, inner hyphens, at most 63), `default` for `/`, else the name lowercased with each run of
+  other characters made one hyphen (`mq_control::host_label`). A vhost is queues' tenant (its own
+  user, one connection string per protocol: docs/queues/README.md, "A vhost per app"). The edge
+  routes every `*.mq.<region>.<domain>` the same way and neither SNI nor the label picks the
+  tenant: every node serves every vhost, and a connection opens the vhost its connection string
+  names (AMQP's and STOMP's path, MQTT's `vhost:user`, the stream protocol's `Open`). The name
+  is what the stream protocol hands back as its one virtual node, and what connection details
+  print.
 
 ### The edge in rolld
 
@@ -163,7 +173,7 @@ when `ROLL_EDGE=1` (without it rolld is unchanged).
 | 6379 | TLS, then Redis: the server name's first label is the database, and the connection is spliced to its owner right after the handshake (without a server name, from its first AUTH or HELLO … AUTH on). |
 | 9092 | TLS, then Kafka; metadata names the server name the client used (one virtual broker per hostname), never a node address. |
 | 9042 | TLS, then CQL with the server name (the database is its first label). |
-| 5671, 8883, 61614, 5551 | TLS, then AMQP (0-9-1 and 1.0), MQTT, STOMP and the RabbitMQ stream protocol. |
+| 5671, 8883, 61614, 5551 | TLS, then AMQP (0-9-1 and 1.0), MQTT, STOMP and the RabbitMQ stream protocol, served by this node, each queue's operations forwarded to its owner. On 5551 the connection sees one virtual node at the server name and port the client used (the default vhost's name without SNI): `Metadata` names it as every stream's leader, never a node address. |
 
 - **Client addresses** come from the PROXY protocol header (v1 or v2, at most 512 bytes after
   the fixed part, read under the handshake deadline). On the HTTPS listener handlers get it as
@@ -220,8 +230,12 @@ when `ROLL_EDGE=1` (without it rolld is unchanged).
   streams `<stream id>.kafka.<region>.<domain>:9092` with `SASL_SSL` and
   `https://<stream id>.kafka.<region>.<domain>/v1/streams/<id>`; Postgres
   `<endpoint>.pg.<region>.<domain>:5432` with `sslmode=require`; Redis
-  `rediss://…@<id>.redis.<region>.<domain>:6379` ("Redis on the fleet"). Tested by
-  `rolld/tests/edge.rs`.
+  `rediss://…@<id>.redis.<region>.<domain>:6379` ("Redis on the fleet"); queues
+  `amqps://…@<vhost>.mq.<region>.<domain>:5671/<vhost>`, `mqtts://…:8883`,
+  `stomp+ssl://…:61614/<vhost>`, `rabbitmq-stream+tls://…:5551/<vhost>` and
+  `https://<vhost>.mq.<region>.<domain>`, with no plain AMQP and no management port (the overview's
+  `endpoints` are the default vhost's). Tested by `rolld/tests/edge.rs`, which also runs a stream
+  client over TLS through the edge.
 
 ## Deploys, scaling and failure
 
@@ -501,14 +515,16 @@ against it, then removes everything it created (all named `roll-cloud-e2e-*`).
   fetches over `git.`), Redis (RESP over TLS with SNI, a `sync` database), NoSQL (CQL over TLS with
   SNI, a `sync` database), streams (librdkafka, SASL_SSL, `acks=all`, idempotent), storage
   (aws-sdk-s3, path and virtual-host style, multipart uploads), tasks (publish with `dedup_id`,
-  pull and ack). Queues join when they're on the cluster layer.
+  pull and ack), queues (lapin over AMQPS with the URL the API gave a vhost, publisher confirms to
+  a quorum queue, a consumer with manual acks).
 - **The disruptions**: SIGKILL of the node holding the most leases (started again afterwards); a
   rolling restart, each node stopped with SIGTERM (it must exit 0 holding no lease) and healthy
   again before the next; a fourth node joining and leaving. After each, every tenant lease must be
   on the node placement prefers.
 - **The checks**: every acknowledged write reads back; nothing is duplicated where the product
-  promises exactly once (code landings, Kafka records, storage keys) and tasks' at-least-once
-  deliveries carry the message id the publish returned; every client-visible error is a kind the
+  promises exactly once (code landings, Kafka records, storage keys), tasks' at-least-once
+  deliveries carry the message id the publish returned, and every confirmed queues publish is
+  delivered (at least once, by message id); every client-visible error is a kind the
   product's docs allow (`Product::allows` lists them, with the docs they come from); no operation
   fails after the client retry policy. It prints writes, acknowledgements, verified writes,
   errors by kind and the longest stall, per product and per disruption.
@@ -541,7 +557,7 @@ against it, then removes everything it created (all named `roll-cloud-e2e-*`).
 | nosql on the cluster layer | built: lease `nosql:db:<id>`, catalog on the system database, CQL spliced to the owner (SNI or SASL user), fenced manifests (docs/nosql/architecture.md, "On a fleet") |
 | streams on the cluster layer | built (`stream:cluster:<id>`, catalog on the system database, acknowledgements from a write-ahead log in S3, kafka splices); not yet run against AWS |
 | queues on the cluster layer | built: lease `mq:<vhost>/<queue>`, metadata on the system database (schema `mq`), logs in S3 Standard with group commit (no keepers, no proxies), drain = roll-cluster's (docs/queues/deploy-aws.md) |
-| fleet end to end test | built (`pnpm test:fleet`, "Testing the fleet"): every product but postgres through a SIGKILL, a rolling restart and a scale-out, through HAProxy with PROXY v2; queues to be added to it |
+| fleet end to end test | built (`pnpm test:fleet`, "Testing the fleet"): every product but postgres through a SIGKILL, a rolling restart and a scale-out, through HAProxy with PROXY v2 |
 | postgres on the fleet and the system database | with the pg-engine branch |
 | isolated work on Fargate | next |
 
@@ -561,10 +577,12 @@ against it, then removes everything it created (all named `roll-cloud-e2e-*`).
   in about 2 ms, but need dynamic quorum membership and re-replication as nodes come and go
   (docs/queues/storage.md, "On roll cloud"). Pipelining the object log's appends would bring S3
   towards one PUT per confirm. Not yet measured against real S3.
-- **RabbitMQ Streams behind the edge.** Stream clients ask `Metadata` for a stream's leader and get
-  a node's own address back, which they can't reach from outside. It needs the fix Kafka has:
-  advertise the hostname the client used (`<id>.mq.<region>.roll.sh:5551`) and let the edge reach
-  the owner.
+- **Single active consumer across nodes.** Stream protocol single-active-consumer groups are
+  coordinated by each node's stream server. Behind the edge a group's consumers reach whichever
+  nodes the NLB picks, and consumers of one group on different nodes are each active. It needs
+  the group kept at the stream's owner (the router could carry registrations and
+  `ConsumerUpdate`s as it carries subscriptions). Off the edge clients connect to the owner, and
+  groups work.
 - **code-control `automations::a_run_starts_an_agent_waits_for_it_and_notifies`** failed once on
   GitHub under load and never locally; its helpers now wait up to 60 s for the state they check
   (they had 5–20 s), and reading the engine, relay and event stream found no race. If it fails
@@ -572,10 +590,6 @@ against it, then removes everything it created (all named `roll-cloud-e2e-*`).
 - **Per-table tombstone GC switches** (`/column_family/tombstone_gc/<ks>:<cf>`,
   `/storage_service/tombstone_gc/<ks>`) are answered without doing anything in roll nosql, as the
   per-table autocompaction switch was until it broke a conformance test.
-- **Queues' connection details behind the edge** still name the node's own AMQP, MQTT, STOMP and
-  stream ports (`amqp://<public host>:55672/…`). They should name `<id>.mq.<region>.<domain>`
-  (AMQPS 5671, MQTTS 8883, STOMP 61614, streams 5551), but what `<id>` is (a vhost, a tenant)
-  comes with queues on the fleet (lane `cloud/queues`). Tasks hand out no connection strings.
 - **Images not pinned by digest**: the Postgres compute images (`postgres:{16,17,18}-alpine`, one
   `{v}` template in `pg-control`'s config that the gates' pre-pulls must match) and the bases of
   the `deploy/` Dockerfiles that end-to-end gates build (`deploy/code`, `deploy/queues`,
@@ -592,7 +606,5 @@ against it, then removes everything it created (all named `roll-cloud-e2e-*`).
   - **Streams stall the longest on a planned handoff**: a producer waited 2.7–6.1 s for
     acknowledgements during the rolling restart (Redis and NoSQL at most 2.6 s, others under
     1.5 s); each move costs librdkafka a reconnect and a metadata refresh.
-  - **Queues aren't in the fleet test yet** (marked in `fleet_e2e.rs`; HAProxy already forwards
-    5671).
   - The takeover and stop-order numbers above predate the hardening fixes: rerun the fleet test to
     measure them again.
