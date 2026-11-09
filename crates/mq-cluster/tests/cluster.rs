@@ -501,6 +501,31 @@ fn an_owner_that_vanishes_without_a_word_holds_nothing_up() {
     });
 }
 
+/// A node that drained (its queues handed off, the cluster left) keeps serving the clients still
+/// connected to it until it closes them: their publishes go to the queues' new owners.
+#[test]
+fn a_drained_node_serves_its_clients_until_it_closes_them() {
+    let env = Env::memory();
+    let (a, b) = (Node::start(&env, "a"), Node::start(&env, "b"));
+    let client = Runtime::new().unwrap();
+    client.block_on(async {
+        let (_ca, cha) = channel(&a.url).await;
+        declare(&cha, "after").await;
+        known_on(&b, "after").await;
+        cha.confirm_select(ConfirmSelectOptions::default()).await.unwrap();
+        assert_eq!(publish_confirmed(&cha, "after", 0..20).await.len(), 20);
+        let an = a.nodes.clone();
+        a.spawn(async move { an.drain(Duration::from_secs(15)).await }).await.unwrap();
+        assert_eq!(a.cluster.owned_count(), 0);
+        let t = Instant::now();
+        let after = publish_confirmed(&cha, "after", 20..40).await;
+        assert_eq!(after.len(), 20, "publishes through the drained node, {:.1}s", t.elapsed().as_secs_f64());
+        assert!(t.elapsed() < Duration::from_secs(3), "they waited {:.1}s", t.elapsed().as_secs_f64());
+        let seen = consume_ids(&b.url, "after", 40, Duration::from_secs(20)).await;
+        assert_eq!(seen, (0..40).collect::<HashSet<u32>>());
+    });
+}
+
 /// Correctness never rests on the lease: an owner whose membership died but whose process keeps
 /// running (cut off, frozen) is fenced out of the log by the next owner, so it can't confirm a
 /// message the next owner doesn't have.
