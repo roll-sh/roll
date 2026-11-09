@@ -69,6 +69,11 @@ pub fn unavailable(retry_after: Duration) -> Response {
     r
 }
 
+/// Set on the `502` a node answers when a request it forwarded failed after it was sent (the
+/// owner died or the connection broke mid-way): whether it ran is unknown. Products turn it into
+/// their own protocol's "internal error, retry" answer.
+pub const FORWARD_FAILED: &str = "x-roll-forward-failed";
+
 fn plain(status: StatusCode, msg: impl Into<String>) -> Response {
     (status, msg.into()).into_response()
 }
@@ -350,7 +355,9 @@ impl Cluster {
             Err(e) => {
                 let why = chain(&e);
                 tracing::warn!(to = %to.id, error = %why, "forwarded request failed");
-                Ok(plain(StatusCode::BAD_GATEWAY, format!("forwarding to node {} failed: {why}\n", to.id)))
+                let mut r = plain(StatusCode::BAD_GATEWAY, format!("forwarding to node {} failed: {why}\n", to.id));
+                r.headers_mut().insert(FORWARD_FAILED, axum::http::HeaderValue::from_static("1"));
+                Ok(r)
             }
         }
     }

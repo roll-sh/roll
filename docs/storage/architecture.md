@@ -1670,7 +1670,9 @@ One node at a time owns the deployment's metadata; every node serves the APIs.
   there's an owner to send it to and then gets one try. If that fails because the owner started
   handing off at that moment, or the wait ran out, the client gets `503 ServiceUnavailable` with
   `Retry-After` (S3's XML; the developer API's and the control plane's JSON), which every S3
-  SDK retries. A request that reaches the new owner while its store is still opening waits for
+  SDK retries. A request that reached the owner when the owner died before answering may have
+  run: it gets `500 InternalError` (the developer API's JSON; `502` on the control plane), which
+  the SDKs retry too, and a retried write is safe (it writes the object again). A request that reaches the new owner while its store is still opening waits for
   it (up to 10 s, `NodeConfig::open_wait`) with its body untouched.
 - **Reads aren't served by the node a client reached.** Every request, reads included, runs on
   the owner. Serving immutable blobs from the receiving node would need the owner to authorize

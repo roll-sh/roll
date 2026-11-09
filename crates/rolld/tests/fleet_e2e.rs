@@ -175,15 +175,16 @@ impl Product {
     /// - streams (crates/stream-broker/README.md, "On the fleet"): reconnects, and
     ///   `NOT_LEADER_OR_FOLLOWER`, `NOT_COORDINATOR`, `NOT_ENOUGH_REPLICAS` (retriable) when a
     ///   stream is lost; librdkafka retries them and refreshes its metadata;
-    /// - storage (docs/storage/architecture.md, "Many nodes"): reconnects and `503` with
-    ///   `Retry-After`;
+    /// - storage (docs/storage/architecture.md, "Many nodes"): reconnects, `503` with
+    ///   `Retry-After`, and `500 InternalError` for a request whose owner died while serving it
+    ///   (the SDK retries it);
     /// - tasks (deploy/aws/README.md, "On the roll cloud fleet"): reconnects, `503` with
     ///   `Retry-After`, and `502` for a write whose connection broke at a dead leader (retried
     ///   with its `dedup_id`).
     fn allows(self, kind: &str) -> bool {
         let k = kind.split_whitespace().next().unwrap_or_default();
         match self {
-            Product::Storage => matches!(k, "connect" | "closed" | "503"),
+            Product::Storage => matches!(k, "connect" | "closed" | "503" | "500"),
             Product::Code | Product::Tasks => matches!(k, "connect" | "closed" | "503" | "502"),
             Product::Redis => matches!(k, "connect" | "closed" | "LOADING"),
             Product::Nosql => matches!(k, "connect" | "closed"),

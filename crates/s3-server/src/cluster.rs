@@ -469,10 +469,13 @@ impl StorageNode {
             Err(r) => return *r,
         };
         let resp = self.ride(surface, req).await;
-        match unavailable_for(&resp) {
-            Some(_) => retry_later(surface, &resp),
-            None => resp,
+        if unavailable_for(&resp).is_some() {
+            return retry_later(surface, &resp);
         }
+        if resp.headers().contains_key(roll_cluster::FORWARD_FAILED) {
+            return outcome_unknown(surface);
+        }
+        resp
     }
 
     /// The node a client reached keeps a request whose body it could buffer and routes it
@@ -644,9 +647,35 @@ fn retry_later(surface: Surface, resp: &Response) -> Response {
     r
 }
 
+/// The answer a client gets when its request reached the owner and the owner went away before
+/// answering (it may have run): S3's `InternalError`, which every SDK retries (storage's writes are
+/// safe to retry: a retried PUT writes the object again), in the surface's own error format.
+fn outcome_unknown(surface: Surface) -> Response {
+    let message = "storage's node went away while serving the request; retry it";
+    let (status, content_type, body) = match surface {
+        Surface::S3 => {
+            let mut id = [0u8; 8];
+            let _ = getrandom::fill(&mut id);
+            (StatusCode::INTERNAL_SERVER_ERROR, "application/xml", s3_proto::error::S3Error::new(s3_proto::error::Code::InternalError).to_xml(&hex::encode_upper(id)))
+        }
+        Surface::Api => (StatusCode::INTERNAL_SERVER_ERROR, "application/json", serde_json::json!({ "statusCode": "500", "code": "InternalError", "error": "Internal Server Error", "message": message }).to_string()),
+        Surface::Control => (StatusCode::BAD_GATEWAY, "application/json", serde_json::json!({ "error": message }).to_string()),
+    };
+    let mut r = (status, body).into_response();
+    r.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
+    r
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_request_whose_owner_went_away_gets_the_s3_error_sdks_retry() {
+        let r = outcome_unknown(Surface::S3);
+        assert_eq!(r.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(r.headers()[header::CONTENT_TYPE], "application/xml");
+    }
 
     #[test]
     fn requests_travel_with_their_own_path_and_host() {
