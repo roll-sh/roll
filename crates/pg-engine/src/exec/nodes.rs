@@ -2546,7 +2546,8 @@ fn project_moves(exprs: &[Expr]) -> Option<Box<[u32]>> {
 /// the row whole), then the moved columns taken out of it.
 #[inline(never)]
 fn project_moving(exprs: &[Expr], moves: &[u32], mut r: Row, ctx: &ExecCtx) -> Result<Row> {
-    if moves.iter().enumerate().all(|(i, &m)| {
+    // Bound retained slot storage when a narrow result comes from a wide input.
+    if r.capacity() <= moves.len().saturating_mul(3) && moves.iter().enumerate().all(|(i, &m)| {
         m != NOT_MOVED && (m as usize) < r.len() && (i == 0 || moves[i - 1] < m)
     }) {
         // Increasing distinct sources are at or after their destinations: no swap
@@ -2605,12 +2606,15 @@ mod projection_tests {
                 let moves: Vec<u32> = (0..4).filter(|i| mask & (1 << i) != 0).collect();
                 let exprs: Vec<_> = moves.iter().map(|&i| col(i as usize)).collect();
                 let want: Vec<_> = moves.iter().map(|&i| values[i as usize].clone()).collect();
-                let mut row = Vec::with_capacity(128);
-                row.extend(values);
+                let row = Vec::from(values);
                 let (ptr, cap) = (row.as_ptr(), row.capacity());
                 let out = project_moving(&exprs, &moves, row, ctx).unwrap();
                 assert_eq!(out, want);
-                assert_eq!((out.as_ptr(), out.capacity()), (ptr, cap));
+                if cap <= moves.len().saturating_mul(3) {
+                    assert_eq!((out.as_ptr(), out.capacity()), (ptr, cap));
+                } else {
+                    assert_eq!(out.capacity(), moves.len());
+                }
             }
             let keep: Arc<str> = "keep".into();
             let discard: Arc<str> = "discard".into();
@@ -2619,6 +2623,7 @@ mod projection_tests {
             row.resize(128, Value::Null);
             let out = project_moving(&[col(1), col(2)], &[1, 2], row, ctx).unwrap();
             assert_eq!(out, vec![Value::Null, Value::text("keep")]);
+            assert_eq!(out.capacity(), 2, "wide input storage is not retained");
             assert!(discarded.upgrade().is_none(), "unselected values dropped before returning");
             assert_eq!(kept.strong_count(), 1, "selected value moved without cloning");
             drop(out);
