@@ -894,6 +894,10 @@ impl Session {
                 {
                     plan.0 = p;
                 }
+                if ctas.is_none() {
+                    let gathers = crate::exec::parallel_part::gathers(&plan.0, &bq.perms.locks, ctx);
+                    crate::exec::parallel_part::prepare(&gathers, &[], ctx);
+                }
                 let instr = std::rc::Rc::new(crate::exec::Instr::default());
                 *ctx.instr.borrow_mut() = Some(instr.clone());
                 let t = std::time::Instant::now();

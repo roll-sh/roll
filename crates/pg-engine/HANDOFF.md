@@ -3188,6 +3188,156 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
   `deferred_entry_deletes` failed once on "the deletes went in as runs", a DELETE storage path
   this step doesn't reach: for agent 162's train), regress select_parallel, join, subselect,
   aggregates, btree_index, create_index, partition_join, partition_prune unchanged.
+- **Executor, round 11, batch 1: groupings over joins in the workers, a cheaper merge of parts,
+  initplans and IN lists in workers' filters** (agent 189; BENCH.md "Executor, round 11"):
+  - The performance figures in this section are historical records from saved builds. They
+    do not establish a current-source speed, CPU or footprint claim. BENCH.md, "Executor,
+    round 11", records the recovery audit and evidence limits.
+  - **Baseline on origin's head `19df462eb`** (167's step 2 included): TPC-H SF1 15.65 s against
+    PostgreSQL's 11.55 s (1.35x), CPU 38.6 s against 29.4 s, peak ~1,790 MB. The largest gaps:
+    q02 +0.72 s, q13 +0.62, q09 +0.56, q12 +0.36, q06 +0.35 (BENCH.md has the 22 queries and
+    where each of the five goes).
+  - **Projections over projections that only move columns** (`exec/nodes.rs` `merge_moves`):
+    opened as one projection of the lowest one's input (`agg::through_projection`), not under
+    EXPLAIN ANALYZE, and only for expressions that read the row through its columns (no
+    sub-selects, aggregates, windows, grouping, set-returning calls). The joins' column
+    reorderings stacked two such projections under q07, q08 and q09's groupings, which kept
+    `pipeline_projected` from reaching the joins: every joined row was made on the executor's
+    thread, twice.
+  - **EXTRACT keys under their SQL syntax** (`agg.rs` `key_equal_apart`): the binder wraps a
+    call written in SQL syntax (`EXTRACT(year FROM d)`) in `Expr::SqlSyntax`, which the check
+    for whole-number keys (167's `datetime::extracts_whole`) didn't look through, so q07, q08
+    and q09's groupings presorted their input and never aggregated in parts. With both, the
+    workers aggregate the joined pairs as they come (`Joined::Pair`, never made): q09 1.92 ->
+    1.41 s, CPU 5.7 -> 3.9 s.
+  - **The merge of parts** (`agg.rs`, the `Item::Part` branch; q13): each part group's states
+    are merged as it is found (no second pass); a single integer key is looked up by its number
+    first (`ints`, a cache of `index`'s lookups, filled as they find or make groups, so the row
+    path and parts still number groups alike); parts' counts (`Partial::Count`) are added in a
+    flat array and merged into the groups' `Count` states once, after the input. A GroupAggregate
+    of one integer key orders its groups by their numbers (`group_order`: the keys are distinct,
+    so this is the one order `compare_values` gives). q13 1.36 -> 0.95 s; its executor's thread
+    is still the busiest (30% of the samples against 23% per worker).
+  - **Bitmap index entries checked by a kernel** (`scan.rs` `dense_bitmap_scan`'s count and
+    `bitmap_keys`, `entry_into`): one row the entry's values are put in, the conditions run as
+    a kernel (`eval` for what it leaves), where each entry made a row of the table's width and
+    went through `eval`. q06 0.78 -> 0.54 s (the count of 973,000 entries runs before the
+    workers start).
+  - **`substring(text FROM n FOR m)` of constants as a kernel** (`kernel.rs` `K::Substr`,
+    `string::is_substr`, `string::substr_chars`; m not negative).
+  - **Initplans in a parallel scan's filter** (`scan.rs` `initplans_first`,
+    `initplans_put_in`): the first condition may be an immutable kernel call with columns,
+    constants and one scalar initplan as direct arguments, or IN with a plain column on
+    its left. NOT and harmless relabelings are allowed. Correlated contexts retain the
+    normal executor path. Once the scan has a visible row or index entry, the eligible
+    initplan supplies a scalar value or an IN list of at most 4,096 values. An empty IN
+    list becomes false for a plain column. Other shapes retain normal evaluation order.
+    Both sequential and full index scans use the eligibility check.
+  - Saved historical observations (BENCH.md "Executor, round 11"; three interleaved rounds):
+    TPC-H 16.85 -> 15.01 s
+    (-11%), CPU -10%, engine/PostgreSQL 1.39x -> 1.24x, peak unchanged, all 22 hashes equal.
+    q12 measured +12% in both comparisons with similar user instructions (23.6 x 10^9 a run).
+    The cause remains unresolved.
+  - Tests: `parallel_scan` `parallel_joins_match_serial` has a grouping over two joins with
+    computed keys (q07 / q09's shape); golden `a189_initplan_scan`.
+  - **Recovered batch verification, 2026-11-08**: the original clean checkout at `36c70d5`
+    matched backup `2cb028c1c` by tree. `tests2.log` reports 247 passes, two ignored tests,
+    Clippy completion and 5,448/5,449 regression units with no changed baseline units.
+    Its pipelines do not retain individual command exits. `verify1.log` contains actual
+    failed tests despite `HEAVY-EXIT 0`; it is not successful verification.
+    The recovery fixes a concrete wrong-result case: PostgreSQL returns id 1 for
+    `nextval('a189_seq') < (SELECT nextval('a189_seq'))`, while the saved binary returned no rows after
+    running the initplan first. The new eligibility check retains the normal executor
+    path for that expression. Golden `a189_initplan_scan` also covers NULLs, empty IN
+    lists, and fresh initplans and parameters across prepared executions.
+    The focused release gates on clean `b0593a0bbada3e3aafceb5c9d987f0506b4f9e31`, tree
+    `a36eb2ee1074d8a4c9fe3625e3069fceb7373dd9`, pass with real command exits: build;
+    251 tests passed, two ignored, including one golden file in embedded, wire and
+    shuffled execution; all-target Clippy; and the 16-file regression subset,
+    5,448/5,449 units. Its result rows equal the saved run, with no new baseline units.
+    Receipts and rerunnable audits are in `~/.cache/a189/logs/resume-*` and
+    `~/.cache/a189/scripts/{audit-resume,audit-saved}.py`. Before/after source manifests
+    agree. The manifest SHA-256 is
+    `56b0a605ff69317bd4815a843027acaf6b8744aa0e0aadcf8443c9b140ff1bc9`.
+    Later origin additions from a185 and a192 are preserved by the final rebase. These
+    focused receipts do not verify that combined source. Full combined crate, regression
+    and `pnpm test:pg` verification remains pending for the verification train. No storage
+    format, durability or mode-default setting changed in this batch. No benchmark ran.
+    The owned a189 runtimes are stopped; checkout, cache and WIP remain for the coordinator.
+  - **Initplan startup follow-up, 2026-11-08 (a189)**: the saved empty-ANY probe also
+    returned zero on clean `61afb498b`. PostgreSQL 18.6's default plan has a Gather
+    above the join and raises `22012`; forcing serial hash joins returns zero. This
+    is a plan/startup boundary discrepancy, not permission to evaluate ANY's left
+    operand eagerly. The pre-round-11 binary from `19df462eb` reproduces it too.
+    PostgreSQL's `ExecInitParallelPlan` forces the initplan outputs sent to workers.
+    Two engine boundaries were missing: EXPLAIN's `safe_tree` rejected the pure
+    distinct HashAggregate used by the semi join, and Gather parts never initialized
+    the independent subquery values they read before running their children.
+    The correction admits parallel-safe DISTINCT inputs in `safe_tree`, records each
+    Gather part's referenced independent initplans, and runs that startup work through
+    the existing `WorkerPart` before its first execution or worker pipeline. The
+    statement's existing `subq_cache` owns the values. Serial plans, unstarted parts,
+    ordinary row expressions and initplans used only above the Gather remain lazy.
+    No scan eligibility, ANY evaluator, storage format, durability or mode setting
+    changed. The previous `nextval` ordering golden remains the control.
+    Golden `a189_initplan_startup` is recorded from PostgreSQL 18.6. It covers the
+    original error, empty input and right side, NULL semantics, LIMIT 0, unused target
+    initplans, serial controls, generic/custom executions and error transaction state.
+    The same boundary also fixes the documented false-first filter under a Gather.
+    Final focused receipts are for `87b34c64bc17e8ec55b39238f925957d370f4271`, tree
+    `b15e5a8ec920d97aa81da9d031fbefa4f5a617d5`, rebased over storage191's `72007ce57`.
+    The release build, seven goldens in embedded/wire/shuffled execution, all eleven
+    `parallel_scan` tests and all-target release Clippy pass. Clippy retains the existing
+    benchmark-example warning. The old golden binary fails the new fixture with exit
+    101 on the actual zero-versus-22012 difference. Efficient and performance standalone
+    servers match the complete PostgreSQL behavioral transcript. Direct and SPI
+    EXPLAIN ANALYZE return the same error too. Before/after source manifests agree:
+    `11e71c9b96e2c1bd73b158d15418575210fb6d0b45ee8566b7c906c83cd1c848`.
+    Logs, binary hashes and actual command exits are in `~/.cache/a189/logs/gap-*`;
+    `~/.cache/a189/scripts/audit-gap.py` regenerates `logs/audit-gap.json`. Earlier
+    preliminary receipts are retained under `logs/gap-preintegration/`.
+    Scope remains the Gather parts registered by a top-level query execution with a
+    concrete executor plan node. This does not redesign Gather placement, synthetic
+    parts without a plan key, separate function/subquery query levels, or the parallel
+    worker lifecycle. EXPLAIN ANALYZE, directly and through SPI, registers the same
+    startup work. Other function, CTAS and SPI query execution paths are not covered
+    by this change. The earlier regress receipt's one `join:1479` EXPLAIN difference is
+    outside this focused run. Full combined verification remains pending.
+  - Found, for other owners:
+    - A separate exploratory probe of the saved release binary found an aggregate/initplan
+      gap: over the golden's nonempty `a189_t` and empty `a189_e`,
+      `SELECT count(*) FROM a189_t WHERE id + (SELECT 1 / (min(id) - min(id)) FROM a189_t) = ANY (SELECT id FROM a189_e)`
+      raises division by zero on PostgreSQL 18.6 but returns zero in the saved engine.
+      This case was not repaired or included in the passing golden. Its status on the
+      final combined head remains pending.
+    - planner (177): q12's plan is a merge join over a full `orders_pkey` index scan (1.5M heap
+      fetches, the largest part of its gap) where PostgreSQL's and EXPLAIN's is a Parallel Hash
+      Join over Parallel Seq Scans; pg_stat_user_indexes counts an orders_pkey scan of 1.5M
+      tuples per run, which PostgreSQL doesn't (its seq_scan of orders goes up instead).
+    - storage / index access (169, 183): q02's 1,984 inner index scans of partsupp by
+      `partsupp_ps_suppkey_idx` (80 rows each) take 0.39 ms a loop against PostgreSQL's 0.057
+      (`Scan::position` / `Merge::min` / `Cursor::fill`, `Block::seek`); q20's SubPlan runs and
+      q09 / q07's workers' key lookups are the same point fetches; q06's count of the l_shipdate
+      index's 973,000 entries on the executor's thread is now mostly `TxnScan` iteration.
+    - pg_stat (coordinator to route): PostgreSQL counts a parallel sequential scan once per
+      participant (lineitem's and orders' seq_scan +3 per q12 run), the engine once.
+    - Initplans under a Gather (executor and EXPLAIN's plan shape; not changed here):
+      PostgreSQL's Gather evaluates the initplans its workers read before starting them, even
+      when an earlier condition drops every row: `SELECT count(*) FROM t WHERE v < 0 AND v >
+      (SELECT 1 / (min(v) - min(v)) FROM t)` over a 200,000-row table with a parallel plan
+      raises division by zero there (a serial plan returns 0), and the engine returns 0, before
+      and after this batch. Matching it needs the plan's Gather placement at the scan.
+  - Left (next steps, in order):
+    - q13: the merge of parts is still on the executor's thread. A GroupAggregate's groups
+      come out sorted, so their numbering doesn't matter: the workers could aggregate across
+      their chunks into tables partitioned by key hash and merge one partition each at the end
+      (PostgreSQL's plan sorts each worker's groups and merges them under a Gather Merge).
+    - Hash builds of big inner sides run serially on the executor's thread (q14's part, q16's
+      filtered part, q05 / q08's): Parallel Hash.
+    - q02's hash join batches decode every spilled row again; a batch's map is boxed values.
+    - Item 2's batches past the scan (joined rows from batches, the probe hits aggregated from
+      columns), item 4 (streaming merge joins) and item 5 (work_mem for hash tables and sorts)
+      are not started.
 - **Deep input** (round 19, agent 63; `src/stack.rs`, `tests/deep_input.rs`): the engine no
   longer overflows the stack of the thread that runs it, however deep the input nests. A
   host's 2 MB thread or a test harness thread is safe. Before, 400 `+` terms aborted the

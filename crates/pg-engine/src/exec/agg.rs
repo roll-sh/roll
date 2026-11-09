@@ -2704,6 +2704,30 @@ impl AggNode {
                 })
                 .collect();
             let mut idx: Vec<usize> = (0..n).collect();
+            // (One integer key: the groups' keys are distinct numbers (and one NULL at most),
+            // so the order sorting by their numbers gives is the only one.)
+            if let [(0, k)] = &sk[..]
+                && self.groups.len() == 1
+                && let Some(nums) = keys
+                    .iter()
+                    .map(|(key, _)| match &key[0] {
+                        Value::Null => Some(None),
+                        v @ (Value::Int2(_) | Value::Int4(_) | Value::Int8(_)) => v.as_i64().map(Some),
+                        _ => None,
+                    })
+                    .collect::<Option<Vec<Option<i64>>>>()
+            {
+                idx.sort_unstable_by(|&a, &b| match (nums[a], nums[b]) {
+                    (Some(x), Some(y)) if k.desc => y.cmp(&x),
+                    (Some(x), Some(y)) => x.cmp(&y),
+                    (None, None) => Ordering::Equal,
+                    (None, _) if k.nulls_first => Ordering::Less,
+                    (None, _) => Ordering::Greater,
+                    (_, None) if k.nulls_first => Ordering::Greater,
+                    (_, None) => Ordering::Less,
+                });
+                return Ok(idx);
+            }
             let mut f = |a: &usize, b: &usize| -> Result<Ordering> {
                 for (i, k) in &sk {
                     match super::nodes::compare_values(&keys[*a].0[*i], &keys[*b].0[*i], k, ctx)? {
@@ -2879,6 +2903,14 @@ impl AggNode {
             // holds group numbers (and `hkeys` the keys it compares when they're normalised:
             // nondeterministic collations).
             let mut index = super::fasthash::KeyIndex::default();
+            // (The groups of single integer keys by their numbers, as parts' groups find
+            // them: a cache of `index`'s lookups, of the groups any integer key equal to the
+            // number belongs to.)
+            let mut ints: super::fasthash::HashMap<i64, u32> = Default::default();
+            // (Parts' counts by group and aggregate, added here and merged into the groups'
+            // states once, after the input: `Count`'s merge adds.)
+            let mut counts: Vec<i64> = Vec::new();
+            let naggs = self.aggs.len();
             let mut hkeys: Vec<Vec<Value>> = Vec::new();
             let mut groups: Vec<(Vec<Value>, Vec<AggState>)> = Vec::new();
             // (Keys that group nothing more aren't in the hash table's key.)
@@ -3080,38 +3112,58 @@ impl AggNode {
                         Some(super::pipe::Item::Row(row, _)) => row,
                         Some(super::pipe::Item::Part(p)) => {
                             // Its groups in their order of appearance (the serial order:
-                            // the part's rows come before the later ones), each row's
-                            // lookup, then its states added.
-                            let mut map = Vec::with_capacity(p.groups.len());
-                            let mut parts = Vec::with_capacity(p.groups.len());
+                            // the part's rows come before the later ones), each one's
+                            // states added as it is found; then each row's lookup.
+                            let mut map = Vec::with_capacity(if hash_order { p.groups.len() } else { 0 });
                             for (k, st) in p.groups {
-                                // (The key compared is the key itself unless normalised.)
-                                let gi = if nondet {
-                                    let hk = group_key(&k, &colls);
-                                    let h = index.hash(&hk);
-                                    match find_group!(h, &hk) {
-                                        Some(i) => i,
-                                        None => new_group!(h, k, hk),
-                                    }
-                                } else {
-                                    let h = index.hash(&k);
-                                    match find_group!(h, &k) {
-                                        Some(i) => i,
-                                        None => new_group!(h, k, Vec::new()),
+                                // (A single integer key is looked up by its number first.)
+                                let int = match (nondet, &k[..]) {
+                                    (false, [v @ (Value::Int2(_) | Value::Int4(_) | Value::Int8(_))]) => v.as_i64(),
+                                    _ => None,
+                                };
+                                let gi = match int.and_then(|x| ints.get(&x)) {
+                                    Some(&i) => i as usize,
+                                    // (The key compared is the key itself unless normalised.)
+                                    None => {
+                                        let gi = if nondet {
+                                            let hk = group_key(&k, &colls);
+                                            let h = index.hash(&hk);
+                                            match find_group!(h, &hk) {
+                                                Some(i) => i,
+                                                None => new_group!(h, k, hk),
+                                            }
+                                        } else {
+                                            let h = index.hash(&k);
+                                            match find_group!(h, &k) {
+                                                Some(i) => i,
+                                                None => new_group!(h, k, Vec::new()),
+                                            }
+                                        };
+                                        if let Some(x) = int {
+                                            ints.insert(x, gi as u32);
+                                        }
+                                        gi
                                     }
                                 };
-                                map.push(gi);
-                                parts.push(st);
+                                for (a, x) in st.into_iter().enumerate() {
+                                    match x {
+                                        super::partial::Partial::Count(n) => {
+                                            if counts.len() < groups.len() * naggs {
+                                                counts.resize(groups.len() * naggs, 0);
+                                            }
+                                            counts[gi * naggs + a] += n;
+                                        }
+                                        x => groups[gi].1[a].acc.merge(x)?,
+                                    }
+                                }
+                                if hash_order {
+                                    map.push(gi);
+                                }
                             }
                             if hash_order {
                                 for &l in &p.seq {
                                     let g = map[l as usize];
                                     hashed.lookup(ghash[g], g);
-                                }
-                            }
-                            for (gi, st) in map.into_iter().zip(parts) {
-                                for (s, x) in groups[gi].1.iter_mut().zip(st) {
-                                    s.acc.merge(x)?;
                                 }
                             }
                             continue;
@@ -3172,6 +3224,11 @@ impl AggNode {
                     }
                 }
             }
+            for (i, n) in std::mem::take(&mut counts).into_iter().enumerate() {
+                if n != 0 {
+                    groups[i / naggs].1[i % naggs].acc.merge(super::partial::Partial::Count(n))?;
+                }
+            }
             if groups.is_empty() && self.groups.is_empty() {
                 // No GROUP BY: one row even over empty input.
                 let states = self.states(&[], ctx)?;
@@ -3199,6 +3256,7 @@ impl AggNode {
                 Some(b) => {
                     batch = Some(b);
                     index = Default::default();
+                    ints.clear();
                     hkeys.clear();
                     ghash.clear();
                     hashed.reset();
@@ -3671,7 +3729,7 @@ fn projection_read_always<'a>(proj: &[crate::sql::expr::Expr], exprs: impl Itera
 
 /// `e` over a projection's input row: its columns replaced by the projection's expressions
 /// (None: a column it doesn't have).
-fn through_projection(e: &crate::sql::expr::Expr, proj: &[crate::sql::expr::Expr]) -> Option<crate::sql::expr::Expr> {
+pub(super) fn through_projection(e: &crate::sql::expr::Expr, proj: &[crate::sql::expr::Expr]) -> Option<crate::sql::expr::Expr> {
     use crate::sql::expr::Expr;
     let mut ok = true;
     let out = e
@@ -3717,8 +3775,9 @@ fn shows_alike(g: &crate::sql::expr::Expr, coll: Option<&KeyNorm>, proj: Option<
 /// unless the expression only makes whole numbers: EXTRACT of a date's field; a column of
 /// the projection `proj` below, its expression).
 fn key_equal_apart(e: &crate::sql::expr::Expr, proj: Option<&[crate::sql::expr::Expr]>) -> bool {
+    // (Under its relabelings and the SQL syntax it was written in: EXTRACT(year FROM d).)
     let mut x = e;
-    while let crate::sql::expr::Expr::Relabel(y, _) = x {
+    while let crate::sql::expr::Expr::Relabel(y, _) | crate::sql::expr::Expr::SqlSyntax(y) = x {
         x = y;
     }
     if let (crate::sql::expr::Expr::Col(i, _), Some(p)) = (x, proj)

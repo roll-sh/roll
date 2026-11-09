@@ -1,0 +1,295 @@
+> CREATE TABLE pl (id int PRIMARY KEY, u text UNIQUE, d int, v text)
+-- CREATE TABLE
+
+> INSERT INTO pl SELECT i, 'u' || i, i % 10, 'v' || i FROM generate_series(1, 2000) i
+-- INSERT 0 2000
+
+> CREATE UNIQUE INDEX pl_du ON pl (d, id)
+-- CREATE INDEX
+
+> ANALYZE pl
+-- ANALYZE
+
+> SELECT * FROM pl WHERE id = 7
+id:int4 | u:text | d:int4 | v:text
+7 | u7 | 7 | v7
+-- SELECT 1
+
+> SELECT * FROM pl WHERE id = 0
+id:int4 | u:text | d:int4 | v:text
+-- SELECT 0
+
+> SELECT * FROM pl WHERE id = NULL
+id:int4 | u:text | d:int4 | v:text
+-- SELECT 0
+
+> SELECT * FROM pl WHERE u = 'u15'
+id:int4 | u:text | d:int4 | v:text
+15 | u15 | 5 | v15
+-- SELECT 1
+
+> SELECT id, v FROM pl WHERE d = 3 AND id = 13
+id:int4 | v:text
+13 | v13
+-- SELECT 1
+
+> SELECT id, v FROM pl WHERE d = 3 AND id = 14
+id:int4 | v:text
+-- SELECT 0
+
+> UPDATE pl SET v = 'changed' WHERE id = 8
+-- UPDATE 1
+
+> UPDATE pl SET id = 3000 WHERE id = 9
+-- UPDATE 1
+
+> UPDATE pl SET u = 'u16b' WHERE id = 16
+-- UPDATE 1
+
+> DELETE FROM pl WHERE id = 10
+-- DELETE 1
+
+> SELECT * FROM pl WHERE id = 8
+id:int4 | u:text | d:int4 | v:text
+8 | u8 | 8 | changed
+-- SELECT 1
+
+> SELECT * FROM pl WHERE id = 9
+id:int4 | u:text | d:int4 | v:text
+-- SELECT 0
+
+> SELECT * FROM pl WHERE id = 3000
+id:int4 | u:text | d:int4 | v:text
+3000 | u9 | 9 | v9
+-- SELECT 1
+
+> SELECT * FROM pl WHERE id = 10
+id:int4 | u:text | d:int4 | v:text
+-- SELECT 0
+
+> SELECT * FROM pl WHERE u = 'u16'
+id:int4 | u:text | d:int4 | v:text
+-- SELECT 0
+
+> SELECT * FROM pl WHERE u = 'u16b'
+id:int4 | u:text | d:int4 | v:text
+16 | u16b | 6 | v16
+-- SELECT 1
+
+> BEGIN
+-- BEGIN
+
+> UPDATE pl SET v = 'mine' WHERE id = 11
+-- UPDATE 1
+
+> SELECT * FROM pl WHERE id = 11
+id:int4 | u:text | d:int4 | v:text
+11 | u11 | 1 | mine
+-- SELECT 1
+
+> DELETE FROM pl WHERE id = 12
+-- DELETE 1
+
+> SELECT * FROM pl WHERE id = 12
+id:int4 | u:text | d:int4 | v:text
+-- SELECT 0
+
+> INSERT INTO pl VALUES (12, 'u12x', 2, 'again')
+-- INSERT 0 1
+
+> SELECT * FROM pl WHERE id = 12
+id:int4 | u:text | d:int4 | v:text
+12 | u12x | 2 | again
+-- SELECT 1
+
+> SELECT * FROM pl WHERE u = 'u12x'
+id:int4 | u:text | d:int4 | v:text
+12 | u12x | 2 | again
+-- SELECT 1
+
+> ROLLBACK
+-- ROLLBACK
+
+> SELECT * FROM pl WHERE id IN (11, 12) ORDER BY id
+id:int4 | u:text | d:int4 | v:text
+11 | u11 | 1 | v11
+12 | u12 | 2 | v12
+-- SELECT 2
+
+> SELECT * FROM pl WHERE id = 12
+id:int4 | u:text | d:int4 | v:text
+12 | u12 | 2 | v12
+-- SELECT 1
+
+> VACUUM pl
+-- VACUUM
+
+> SELECT id FROM pl WHERE id = 7
+id:int4
+7
+-- SELECT 1
+
+> SELECT u FROM pl WHERE u = 'u20'
+u:text
+u20
+-- SELECT 1
+
+> SELECT count(*) FROM pl WHERE id = 21
+count:int8
+1
+-- SELECT 1
+
+> CREATE TABLE dfr (k int UNIQUE DEFERRABLE INITIALLY DEFERRED, x int)
+-- CREATE TABLE
+
+> INSERT INTO dfr VALUES (1, 1), (2, 2)
+-- INSERT 0 2
+
+> BEGIN
+-- BEGIN
+
+> UPDATE dfr SET k = 1 WHERE x = 2
+-- UPDATE 1
+
+> SELECT x FROM dfr WHERE k = 1 ORDER BY x
+x:int4
+1
+2
+-- SELECT 2
+
+> ROLLBACK
+-- ROLLBACK
+
+> SELECT x FROM dfr WHERE k = 1
+x:int4
+1
+-- SELECT 1
+
+> SET enable_hashjoin = off
+-- SET
+
+> SET enable_mergejoin = off
+-- SET
+
+> SELECT count(*), sum(p.d) FROM generate_series(1, 3000, 7) g JOIN pl p ON p.id = g
+count:int8 | sum:int8
+286 | 1291
+-- SELECT 1
+
+> SELECT count(*) FROM generate_series(1, 300) g WHERE EXISTS (SELECT 1 FROM pl p WHERE p.u = 'u' || g * 3)
+count:int8
+300
+-- SELECT 1
+
+> SELECT g, p.v FROM generate_series(5, 12) g LEFT JOIN pl p ON p.id = g ORDER BY g
+g:int4 | v:text
+5 | v5
+6 | v6
+7 | v7
+8 | changed
+9 | NULL
+10 | NULL
+11 | v11
+12 | v12
+-- SELECT 8
+
+> RESET enable_hashjoin
+-- RESET
+
+> RESET enable_mergejoin
+-- RESET
+
+> PREPARE r(int) AS SELECT id, d FROM pl WHERE id BETWEEN $1 AND $1 + 4 ORDER BY id
+-- PREPARE
+
+> PREPARE q(int, text) AS SELECT id FROM pl WHERE id > $1 AND v > $2 ORDER BY id LIMIT 3
+-- PREPARE
+
+> PREPARE z(int) AS SELECT id FROM pl WHERE id < 20 AND v <> 'x' || (10 / $1) ORDER BY id
+-- PREPARE
+
+> PREPARE n(numeric) AS SELECT id FROM pl WHERE id >= $1 AND id < $1 + 2 ORDER BY id
+-- PREPARE
+
+> SET plan_cache_mode = force_generic_plan
+-- SET
+
+> EXECUTE r(5)
+id:int4 | d:int4
+5 | 5
+6 | 6
+7 | 7
+8 | 8
+-- SELECT 4
+
+> EXECUTE r(NULL)
+id:int4 | d:int4
+-- SELECT 0
+
+> EXECUTE r(1998)
+id:int4 | d:int4
+1998 | 8
+1999 | 9
+2000 | 0
+-- SELECT 3
+
+> EXECUTE r(2147483647)
+ERROR 22003: integer out of range
+
+> EXECUTE q(100, 'v5')
+id:int4
+500
+501
+502
+-- SELECT 3
+
+> EXECUTE z(5)
+id:int4
+1
+11
+12
+13
+14
+15
+16
+17
+18
+19
+2
+3
+4
+5
+6
+7
+8
+-- SELECT 17
+
+> EXECUTE z(0)
+ERROR 22012: division by zero
+
+> EXECUTE n(4.5)
+id:int4
+5
+6
+-- SELECT 2
+
+> RESET plan_cache_mode
+-- RESET
+
+> EXECUTE r(5)
+id:int4 | d:int4
+5 | 5
+6 | 6
+7 | 7
+8 | 8
+-- SELECT 4
+
+> EXECUTE n(4.5)
+id:int4
+5
+6
+-- SELECT 2
+
+> DROP TABLE pl, dfr
+-- DROP TABLE
+

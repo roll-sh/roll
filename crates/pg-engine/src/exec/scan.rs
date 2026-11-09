@@ -1553,19 +1553,29 @@ fn bitmap_keys(t: &Arc<Table>, q: &BitmapQual, kept: &mut Option<KeptRows>, note
                 };
                 if let Some(cols) = &ecols {
                     let mut left = Vec::new();
+                    // (One row the entries' values are put in, checked by a kernel; what it
+                    // leaves to `eval` is evaluated.)
+                    let kernel = super::kernel::compile(&crate::sql::expr::Expr::And(quals.iter().map(|q| q.orig.clone()).collect()));
+                    let mut row = vec![Value::Null; t.columns.len()];
                     for (k, v) in entries {
                         ctx.check()?;
-                        let Some(row) = entry_row(t.columns.len(), cols, &k) else {
+                        if !entry_into(&mut row, cols, &k) {
                             left.push((k, v));
                             continue;
-                        };
-                        let mut ok = true;
-                        for c in quals {
-                            if !eval_bool(&c.orig, &row, ctx)? {
-                                ok = false;
-                                break;
-                            }
                         }
+                        let ok = match kernel.as_ref().and_then(|f| f.passes(&row[..])) {
+                            Some(pass) => pass,
+                            None => {
+                                let mut ok = true;
+                                for c in quals {
+                                    if !eval_bool(&c.orig, &row, ctx)? {
+                                        ok = false;
+                                        break;
+                                    }
+                                }
+                                ok
+                            }
+                        };
                         if ok {
                             out.push(v.to_vec());
                         }
@@ -1722,8 +1732,12 @@ fn dense_bitmap_scan(
                 }
                 let mut n = 0i64;
                 // (The range can be wider than the quals, as for a date column's bound by a
-                // timestamp: entries whose values fail them aren't the bitmap's.)
+                // timestamp: entries whose values fail them aren't the bitmap's. They are
+                // checked by a kernel over one row the entries' values are put in; what it
+                // leaves to `eval` is evaluated.)
                 let ecols = entry_columns(t, index, bounds, quals, ctx);
+                let kernel = ecols.as_ref().and_then(|_| super::kernel::compile(&Expr::And(quals.iter().map(|q| q.orig.clone()).collect())));
+                let mut row = vec![Value::Null; t.columns.len()];
                 for (start, end) in ranges(t, index, bounds, ctx)? {
                     let txn = ctx.txn.borrow();
                     let it = match ctx.snapshot().as_deref() {
@@ -1733,8 +1747,10 @@ fn dense_bitmap_scan(
                     for r in it {
                         let (k, _) = r?;
                         if let Some(cols) = &ecols
-                            && let Some(row) = entry_row(t.columns.len(), cols, &k)
-                            && !quals.iter().all(|c| eval_bool(&c.orig, &row, ctx).unwrap_or(true))
+                            && entry_into(&mut row, cols, &k)
+                            && !kernel.as_ref().and_then(|f| f.passes(&row[..])).unwrap_or_else(|| {
+                                quals.iter().all(|c| eval_bool(&c.orig, &row, ctx).unwrap_or(true))
+                            })
                         {
                             continue;
                         }
@@ -2389,16 +2405,19 @@ fn entry_columns(
     ok.then_some(cols)
 }
 
-/// A row of `width` columns with the values of index entry `entry` (`entry_columns`), the
-/// others NULL; None when one doesn't decode.
-fn entry_row(width: usize, cols: &[(usize, crate::types::DataType, bool)], entry: &[u8]) -> Option<Row> {
-    let mut row = vec![Value::Null; width];
+/// The values of index entry `entry` (`entry_columns`) put in their columns of `row` (a
+/// row of the table's width; its other columns left as they are, NULL where nothing else
+/// is put); false when one doesn't decode.
+fn entry_into(row: &mut [Value], cols: &[(usize, crate::types::DataType, bool)], entry: &[u8]) -> bool {
     // (Past the table and index ids.)
     let mut pos = 8;
     for (col, ty, desc) in cols {
-        row[*col] = crate::storage::keys::decode_index_value(entry, &mut pos, ty, *desc)?;
+        match crate::storage::keys::decode_index_value(entry, &mut pos, ty, *desc) {
+            Some(v) => row[*col] = v,
+            None => return false,
+        }
     }
-    Some(row)
+    true
 }
 
 /// An index-only scan whose rows can come from the index entries alone: a btree's over
@@ -4028,6 +4047,99 @@ fn parallel_workers(ctx: &ExecCtx) -> (usize, usize) {
     (if n == 0 { 0 } else { (n + 1).min(8) }, pool.max(n + 1))
 }
 
+/// Whether the first condition can read its initplans before its row: a kernel call on
+/// columns, constants and one scalar initplan, or IN on a plain column. Other shapes stay
+/// serial: ANY skips its left expression over an empty right side, and row expressions
+/// can fail or have effects before a later initplan is reached.
+fn initplans_first(f: &Expr, ctx: &ExecCtx) -> bool {
+    use crate::sql::expr::SubqueryKind;
+    if !ctx.outer.borrow().is_empty() {
+        return false;
+    }
+    let first = match f {
+        Expr::And(v) => match v.first() {
+            Some(e) => e,
+            None => return false,
+        },
+        e => e,
+    };
+    fn bare(mut e: &Expr) -> &Expr {
+        while let Expr::Relabel(x, _) | Expr::SqlSyntax(x) = e {
+            e = x;
+        }
+        e
+    }
+    let mut first = bare(first);
+    while let Expr::Not(x) = first {
+        first = bare(x);
+    }
+    let scalar = |e: &Expr| matches!(bare(e), Expr::Subquery(s)
+        if s.params.is_empty() && s.func.is_none() && s.kind == SubqueryKind::Scalar);
+    match first {
+        Expr::Call(d, args, _) if d.volatility == 'i' && !d.spread => {
+            if args.iter().filter(|a| scalar(a)).count() != 1
+                || !args.iter().all(|a| scalar(a) || matches!(bare(a), Expr::Col(..) | Expr::Const(..)))
+            {
+                return false;
+            }
+            let placeholder = first.clone().transform(&mut |e| Ok(match e {
+                Expr::Subquery(s) => Expr::Const(Value::Null, s.ty.clone()),
+                e => e,
+            }));
+            placeholder.ok().is_some_and(|e| super::kernel::compile(&e).is_some())
+        }
+        Expr::Subquery(s) => s.params.is_empty()
+            && s.func.is_none()
+            && s.kind == SubqueryKind::Any
+            && matches!(&s.left[..], [e] if matches!(bare(e), Expr::Col(..)))
+            && matches!(&s.ops[..], [op] if op.name == "=" && op.strict && op.volatility == 'i')
+            && s.test_op.is_none(),
+        _ => false,
+    }
+}
+
+/// An IN sub-select's rows put in as a list of at most this many values (more: left as
+/// it is, to the executor's thread).
+const INITPLAN_LIST_MAX: usize = 4096;
+
+/// `f` with the initplans of its first condition (`initplans_first`) run and put in: a
+/// scalar one as its value, `x IN (sub-select)` as `x IN (its values)` (`=` over a list
+/// is ANY's: NULLs alike; none: false, for a plain column `x`). For a scan that has a row
+/// (whose filter would run them at it).
+fn initplans_put_in(f: &Expr, ctx: &ExecCtx) -> Result<Expr> {
+    use crate::sql::expr::SubqueryKind;
+    let put = |e: Expr| {
+        e.transform(&mut |x| match x {
+            Expr::Subquery(s) if s.params.is_empty() && s.kind == SubqueryKind::Scalar => {
+                Ok(Expr::Const(ctx.eval_subquery(&s, &[])?, s.ty.clone()))
+            }
+            Expr::Subquery(s) if s.params.is_empty() && s.kind == SubqueryKind::Any && s.left.len() == 1 && s.ops.len() == 1 => {
+                let rows = ctx.subquery_rows(&s, &[], None)?;
+                let op = s.ops[0].clone();
+                let ty = op.args.get(1).cloned().unwrap_or_else(|| s.left[0].ty());
+                Ok(match rows.len() {
+                    0 if matches!(s.left[0], Expr::Col(..)) => Expr::Const(Value::Bool(false), crate::types::DataType::Bool),
+                    n if n > 0 && n <= INITPLAN_LIST_MAX && rows.iter().all(|r| r.len() == 1) => Expr::InList(
+                        Box::new(s.left[0].clone()),
+                        rows.iter().map(|r| (Expr::Const(r[0].clone(), ty.clone()), op.clone())).collect(),
+                        false,
+                    ),
+                    _ => Expr::Subquery(s),
+                })
+            }
+            x => Ok(x),
+        })
+    };
+    Ok(match f.clone() {
+        Expr::And(mut v) => {
+            let first = put(v.remove(0))?;
+            v.insert(0, first);
+            Expr::And(v)
+        }
+        e => put(e)?,
+    })
+}
+
 /// A parallel scan's chunk boundaries in [start, end): `split_keys`' cuts moved onto the
 /// keys there are (ascending, each once). A cut made of interpolated bytes can extend a
 /// key: the store bounds its sources by keys with their versions appended, the transaction
@@ -4134,8 +4246,11 @@ impl ScanNode {
         // it, probe joins, compute values. Where it would only decode rows for this thread to
         // process, workers save no time and cost CPU (BENCH.md, round 21, agent 102: a GROUP
         // BY over 600,000 rows, 347 ms in parallel against 329 ms, with 41% more CPU).
-        let filter = p.filter.as_ref().and_then(super::kernel::compile);
-        if filter.is_none() && spec.is_none() && stages.is_empty() && computed.extra.is_empty() && computed.topk.is_none() {
+        let mut filter = p.filter.as_ref().and_then(super::kernel::compile);
+        // (A filter whose first condition reads initplans: compiled with their values once
+        // the scan has a row, `initplans_put_in`.)
+        let initplans = filter.is_none() && p.filter.as_ref().is_some_and(|f| initplans_first(f, ctx));
+        if filter.is_none() && !initplans && spec.is_none() && stages.is_empty() && computed.extra.is_empty() && computed.topk.is_none() {
             return Ok(None);
         }
         // A modelled heap whose rows aren't all stored in heap order (some went into an
@@ -4222,6 +4337,12 @@ impl ScanNode {
         };
         if scans.is_empty() {
             return Ok(None);
+        }
+        if initplans && let Some(f) = &p.filter {
+            filter = super::kernel::compile(&initplans_put_in(f, ctx)?);
+            if filter.is_none() && spec.is_none() && stages.is_empty() && computed.extra.is_empty() && computed.topk.is_none() {
+                return Ok(None);
+            }
         }
         // (The columns decoded for a row whose values come from its stored bytes.)
         let need_raw = (!computed.raw.is_empty()).then(|| {
@@ -4341,12 +4462,20 @@ impl ScanNode {
             .map(|w| super::parscan::chunk(IndexChunk::new(txn.scan_snap(&w[0], &w[1], &snap), fetch.clone()), bulk).into())
             .collect();
         drop(txn);
+        // (The index has an entry: initplans its filter reads first run now, `initplans_put_in`.)
+        let filter = match &p.filter {
+            Some(f) => match super::kernel::compile(f) {
+                None if initplans_first(f, ctx) => super::kernel::compile(&initplans_put_in(f, ctx)?),
+                k => k,
+            },
+            None => None,
+        };
         let d = Decode {
             need: self.need.as_deref().map(Arc::from),
             missing: p.table.columns.iter().map(|c| c.missing.clone()).collect(),
             types: p.table.columns.iter().map(|c| c.ty.clone()).collect(),
             with_key: p.with_key,
-            filter: p.filter.as_ref().and_then(super::kernel::compile),
+            filter,
             filtered: p.filter.is_some(),
             spec,
             stages,

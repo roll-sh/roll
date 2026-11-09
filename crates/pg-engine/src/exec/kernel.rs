@@ -56,6 +56,9 @@ pub enum K {
         f: PureFn,
         args: Box<[K; 2]>,
     },
+    /// `substring(text FROM start FOR count)` of constants, the count not negative
+    /// (`string::substr_chars`; TPC-H q22's country codes).
+    Substr(Box<K>, i64, i64),
 }
 
 /// A numeric operator a kernel computes without allocating (`K::Num`).
@@ -373,6 +376,15 @@ fn compile_node(e: &Expr) -> Option<K> {
             let pat = crate::sql::func::string::LikePattern::new(p, Some('\\')).ok()?;
             K::Like(Box::new(compile(&args[0])?), Box::new(pat), neg)
         }
+        Expr::Call(def, args, DataType::Text)
+            if args.len() == 3
+                && def.strict
+                && crate::sql::func::string::is_substr(def.imp)
+                && let (Expr::Const(Value::Int4(start), _), Expr::Const(Value::Int4(count), _)) = (&args[1], &args[2])
+                && *count >= 0 =>
+        {
+            K::Substr(Box::new(compile(&args[0])?), *start as i64, *count as i64)
+        }
         Expr::Call(def, args, ty) if args.len() == 2 => K::Call {
             f: pure_call(def, ty).or_else(|| collated_bytes(def, args))?,
             args: Box::new([compile(&args[0])?, compile(&args[1])?]),
@@ -665,6 +677,14 @@ impl K {
                 match a.arg(row, &mut t)? {
                     Value::Null => Value::Null,
                     Value::Text(s) => Value::Bool(pat.matches(s).ok()? != *neg),
+                    _ => return None,
+                }
+            }
+            K::Substr(a, start, count) => {
+                let mut t = Value::Null;
+                match a.arg(row, &mut t)? {
+                    Value::Null => Value::Null,
+                    Value::Text(s) => Value::text(crate::sql::func::string::substr_chars(s, *start, Some(*count)).ok()?),
                     _ => return None,
                 }
             }
