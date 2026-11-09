@@ -1,5 +1,28 @@
 # pg-engine handoff
 
+## Current standalone defaults (2026-11-09)
+
+`roll-engine` now always uses the former performance defaults. Shared caches use one
+quarter of the container's memory limit (or host memory), split 3:1 between blocks and
+plans, with a 64 MiB block minimum and 36 MiB–1 GiB plans. Databases and idle sessions
+stay warm, and connections poll for up to 50 µs while cores are free before sleeping.
+Idle-session trimming is disabled. Sync and SQL behavior are unchanged.
+
+Use `--cache-mb`, `--plan-cache-mb`, `--memory-budget-mb` and `--idle-close-secs` for
+explicit overrides. Individual cache flags override their part of the memory budget.
+There is no `--mode`; remove saved `roll.engine_mode` settings before restarting.
+`SET` and `ALTER SYSTEM SET roll.engine_mode` are rejected. `ALTER SYSTEM RESET
+roll.engine_mode` can remove a stale saved setting on an already running server.
+
+The efficient/performance comparisons below are historical, including the former
+33 MiB footprint acceptance limit. That limit does not apply to this default; a prior
+measurement of the former performance profile was about 36 MiB with 100 idle sessions.
+It is not a new measurement or a new acceptance limit. The current scoreboard runs
+one engine arm, with memory-derived sizing by default (`CACHE_MB` overrides it), and
+reports idle-session memory without the retired limit. Old raw results and preliminary
+quick read/write comparisons remain historical; they do not establish universal
+performance superiority over PostgreSQL.
+
 Everything a new agent needs to continue the PostgreSQL 18.6 parity work on another machine.
 Read this file, `../../AGENTS.md`, and `tests/regress/STATUS.md` before changing anything.
 
@@ -9382,7 +9405,7 @@ finished, the scan side's storage cost). BENCH.md "Storage engine, round 1" has 
     row at a time). Agent 178's: `scan_row_rest`'s key `Arc` per UPDATE row, `Hot::scan`'s
     collected rows, two copies per index entry in `next_indexed`.
 
-## Modes: efficient and performance (agent 180, 2026-11-07)
+## Historical modes: efficient and performance (agent 180, 2026-11-07)
 
 `roll-engine --mode efficient|performance` picks which way the server leans where footprint
 and speed pull apart. BENCH.md "Modes" has the measurements behind every value.

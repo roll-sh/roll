@@ -4,8 +4,8 @@
 #
 #   tools/bench/run.sh pg-start | pg-stop | engine-start [--no-sync] | engine-stop
 #   tools/bench/run.sh pgrust-start | pgrust-stop
-#   tools/bench/run.sh pgdef-start | pgdef-stop | engperf-start | engperf-stop
-#   tools/bench/run.sh pgbench <pg|engine|pgrust|pgdef|engperf> <pgbench args...>
+#   tools/bench/run.sh pgdef-start | pgdef-stop
+#   tools/bench/run.sh pgbench <pg|engine|pgrust|pgdef> <pgbench args...>
 #   tools/bench/run.sh bench <pg|engine> <workload> [--opt value...]
 #   tools/bench/run.sh inproc <workload> [--opt value...]   (the engine server stopped)
 #   tools/bench/run.sh psql <pg|engine> <sql>
@@ -45,26 +45,21 @@ mkdir -p "$DATA/logs"
 PGRUST_NAME=${PGRUST_NAME:-$PG_NAME-pgrust}
 PGRUST_PORT=${PGRUST_PORT:-55362}
 PGRUST_IMAGE=${PGRUST_IMAGE:-malisper/pgrust@sha256:9ec8cbd68b422729ef3d5f6062e8ac501607357a0a5832bd1c6e0b69670360a9}
-# Two more servers for the modes' comparison: pgdef, PostgreSQL with its stock settings (pg is
-# tuned: shared_buffers=2GB and the others below), and engperf, the engine in performance mode
-# (`--mode performance`, its caches sized from the container's memory; engine is the engine as
-# given: efficient mode unless ENGINE_ARGS says otherwise, --cache-mb CACHE_MB).
+# PostgreSQL with stock settings (pg is tuned with shared_buffers=2GB).
 PGDEF_NAME=${PGDEF_NAME:-$PG_NAME-def}
 PGDEF_PORT=${PGDEF_PORT:-55363}
-ENGPERF_NAME=${ENGPERF_NAME:-$PG_NAME-engperf}
-ENGPERF_PORT=${ENGPERF_PORT:-55364}
-# SERVER_MEM (e.g. 8g) caps every server container's memory (docker --memory): performance mode
-# sizes its caches from it, as PostgreSQL's tuning guidance sizes shared_buffers (a quarter).
+# SERVER_MEM (e.g. 8g) caps every server container's memory (docker --memory); the engine
+# sizes its shared caches from it. CACHE_MB explicitly overrides the block-cache capacity.
 MEMOPT=${SERVER_MEM:+--memory $SERVER_MEM}
 port() {
   case $1 in pg) echo "$PG_PORT" ;; pgrust) echo "$PGRUST_PORT" ;; pgdef) echo "$PGDEF_PORT" ;;
-    engperf) echo "$ENGPERF_PORT" ;; *) echo "$ENGINE_PORT" ;; esac
+    engine) echo "$ENGINE_PORT" ;; *) echo "unknown server: $1" >&2; return 2 ;; esac
 }
 cname() {
   case $1 in pg) echo "$PG_NAME" ;; pgrust) echo "$PGRUST_NAME" ;; pgdef) echo "$PGDEF_NAME" ;;
-    engperf) echo "$ENGPERF_NAME" ;; *) echo "$ENGINE_NAME" ;; esac
+    engine) echo "$ENGINE_NAME" ;; *) echo "unknown server: $1" >&2; return 2 ;; esac
 }
-is_engine() { [ "$1" = engine ] || [ "$1" = engperf ]; }
+is_engine() { [ "$1" = engine ]; }
 memopt() {
   if ! is_engine "$1" || [ -n "${ENGINE_DOCKER:-}" ]; then
     id=$(docker inspect -f '{{.Id}}' "$(cname "$1")")
@@ -93,7 +88,7 @@ pg_start() {
   sleep 2
   docker exec "$n" psql -U postgres -p "$inport" -Atc "select version()"
 }
-# engine_start <engine|engperf> <roll-engine args...>: data in $DATA/<t>, pid in $DATA/<t>.pid.
+# engine_start <engine> <roll-engine args...>: data in $DATA/<t>, pid in $DATA/<t>.pid.
 engine_start() {
   t=$1; shift; n=$(cname "$t"); p=$(port "$t"); d=$DATA/$t
   if ss -ltn | grep -q ":$p "; then echo "port $p busy" >&2; exit 1; fi
@@ -134,6 +129,11 @@ engine_stop() {
 }
 
 cmd=$1; shift
+case $cmd in
+pgbench|bench|psql|du|mem|cpu)
+  case ${1:-} in pg|engine|pgrust|pgdef) ;; *) echo "unknown server: ${1:-}" >&2; exit 2 ;; esac
+  ;;
+esac
 case $cmd in
 pg-start)
   # Plan-affecting settings (work_mem, effective_cache_size, random_page_cost) stay at their
@@ -186,19 +186,12 @@ pgrust-stop)
   docker volume rm "$PGRUST_NAME-data" >/dev/null 2>&1 || true
   ;;
 engine-start)
-  # (CACHE_MB= set empty: no --cache-mb, the mode's own size.)
-  c=${CACHE_MB-2048}
+  # No override by default: use the server's memory-derived cache sizing.
+  c=${CACHE_MB:-}
   engine_start engine ${c:+--cache-mb "$c"} ${ENGINE_ARGS:-} "$@"
   ;;
 engine-stop)
   engine_stop engine
-  ;;
-engperf-start)
-  # Performance mode with its own sizing (from SERVER_MEM's limit, else the machine's memory).
-  engine_start engperf --mode performance ${ENGPERF_ARGS:-} "$@"
-  ;;
-engperf-stop)
-  engine_stop engperf
   ;;
 pgbench)
   t=$1; shift

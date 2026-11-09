@@ -1239,8 +1239,14 @@ pub fn check_setting(name: &str, value: &str) -> Result<String> {
     }
 }
 
+/// Migration error for the retired standalone server selector.
+pub const REMOVED_ENGINE_MODE: &str = "roll.engine_mode has been removed; remove this setting; the server now uses the former performance defaults (override caches and idle close with CLI flags)";
+
 /// A custom (placeholder) parameter's name must be valid and outside reserved prefixes.
 fn check_custom_name(name: &str, reserved: &[&str]) -> Result<()> {
+    if name.eq_ignore_ascii_case("roll.engine_mode") {
+        bail!(INVALID_PARAMETER_VALUE, "{REMOVED_ENGINE_MODE}");
+    }
     if !valid_custom_name(name) {
         return Err(Error::new(
             code::INVALID_NAME,
@@ -1338,7 +1344,7 @@ pub fn file_param(name: &str, raw: &str) -> FileParam {
             value: normalize(d, raw).ok(),
             default: d.default,
         },
-        None if valid_custom_name(name) => FileParam::Custom(name.to_ascii_lowercase()),
+        None if check_custom_name(name, &[]).is_ok() => FileParam::Custom(name.to_ascii_lowercase()),
         None => FileParam::Unknown,
     }
 }

@@ -29,11 +29,8 @@ import sys
 # may drift above it before the gate fails (noise: absolute slack plus a share).
 GATE_BASELINE = {
     'idle_cpu_s_5min': (0.01, 0.05, 0.25),
-    # Re-recorded from 63 (the host engine's RSS) when the engine moved into a container of its
-    # own (2026-11-03, agent 156): its cgroup's anon + shmem, as PostgreSQL's is measured. RSS
-    # counted the mapped binary's pages; the cgroup's anon doesn't, so the same engine reads
-    # about half and the old baseline would no longer guard anything.
-    'idle_100_sessions_mb': (30.0, 2.0, 0.10),
+    # The former efficient-mode memory gate (30 MB + 10% = 33 MB) is historical.
+    # Memory is informational until a default-profile acceptance limit is established.
     # Re-recorded from 2.0 the scoreboard's way: the running server with template0, template1
     # and postgres open, a preallocated 1 MB WAL file each (the 2.0 was a du with fewer open).
     'fresh_data_mb': (3.0, 0.5, 0.10),
@@ -139,12 +136,12 @@ def ratios(kind, other, en):
 
 
 # The servers a run can have (scoreboard.sh's names), as the tables name them.
-NAMES = {'engine': 'engine efficient', 'engperf': 'engine performance', 'pg': 'PostgreSQL',
+NAMES = {'engine': 'engine', 'pg': 'PostgreSQL',
          'pgdef': 'PostgreSQL default', 'pgrust': 'pgrust'}
 
 
 def table_for(score, order, en_t, present):
-    """One engine mode's table: its four ratios against PostgreSQL (tuned) and pgrust, its
+    """The engine's table: its four ratios against PostgreSQL (tuned) and pgrust, its
     throughput against PostgreSQL with stock settings, and every server's raw value."""
     third, pgdef = 'pgrust' in present, 'pgdef' in present
     rows, tally, failures = [], {'pg': [0, 0], 'pgrust': [0, 0]}, []
@@ -188,8 +185,9 @@ def table_for(score, order, en_t, present):
 
 def table(score, gate, order, mode, rounds, idle):
     servers = {t for (_, t) in score} | {t for g in gate.values() for t in g}
+    if 'engperf' in servers:
+        raise ValueError('Historical mode-comparison input: use the scoreboard renderer saved with that run')
     present = [t for t in NAMES if t in servers]
-    engines = [t for t in ('engine', 'engperf') if t in present]
     third = 'pgrust' in present
     commit = os.environ.get('SB_COMMIT')
     try:
@@ -205,20 +203,19 @@ def table(score, gate, order, mode, rounds, idle):
         'PostgreSQL is tuned (shared_buffers=2GB, a quarter of the containers\' memory); PostgreSQL '
         'default has its stock settings. `tools/bench/scoreboard.sh quick|full`.',
     ]
-    for en_t in engines:
-        rows, tally = table_for(score, order, en_t, present)
+    if 'engine' in present:
+        rows, tally = table_for(score, order, 'engine', present)
         ahead = f'ahead of PostgreSQL in **{tally["pg"][0]} of {tally["pg"][1]}** cells'
         if third:
             ahead += f' and of pgrust in **{tally["pgrust"][0]} of {tally["pgrust"][1]}**'
-        how = '--mode performance, caches sized from its memory' if en_t == 'engperf' else '--cache-mb 2048'
-        out += ['', f'**{NAMES[en_t]}** ({how}): {ahead}.', '', *rows]
+        out += ['', f'**engine** (memory-derived defaults unless explicitly overridden): {ahead}.', '', *rows]
     others = [t for t in present if t not in ('engine', 'pg')]
     out += [
         '',
         f'Footprint gate (fresh servers, one at a time; idle CPU measured over {idle:g} s and scaled '
-        'to 5 minutes; the baseline and status are efficient mode\'s):',
+        'to 5 minutes; memory is informational, the former 33 MB efficient-mode limit is historical):',
         '',
-        '| gate | engine efficient | PostgreSQL | lead | baseline | status |' + ''.join(f' {NAMES[t]} |' for t in others),
+        '| gate | engine | PostgreSQL | lead | baseline | status |' + ''.join(f' {NAMES[t]} |' for t in others),
         '|---|---|---|---|---|---|' + '---|' * len(others),
     ]
     failed = False

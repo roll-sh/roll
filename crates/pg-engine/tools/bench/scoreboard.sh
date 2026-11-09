@@ -30,11 +30,9 @@
 # in the table, default the checkout's HEAD). Everything it starts runs at
 # nice 19 (PostgreSQL with --cpu-shares 2, about the same weight) and on the host network.
 #
-# The servers (BENCH.md "Modes"): engine (efficient mode, --cache-mb 2048 as the scoreboard
-# always ran it), engperf (performance mode, sizing itself from its container's memory; SB_PERF=
-# empty leaves it out), pg (PostgreSQL tuned: shared_buffers=2GB, a quarter of the containers'
-# SERVER_MEM, 8g), pgdef (PostgreSQL's stock settings; SB_PG_DEFAULT= empty leaves it out),
-# pgrust. Every server container gets SERVER_MEM.
+# The servers: engine (memory-derived defaults; CACHE_MB / ENGINE_ARGS override), pg
+# (PostgreSQL tuned: shared_buffers=2GB), pgdef (stock; SB_PG_DEFAULT= leaves it out),
+# pgrust. Every server container gets SERVER_MEM (8g by default).
 set -uo pipefail
 if [ -z "${BENCH_SG:-}" ] && ! docker info >/dev/null 2>&1; then
   q=""; for a in "$0" "$@"; do q="$q '$(printf '%s' "$a" | sed "s/'/'\\\\''/g")'"; done
@@ -57,10 +55,8 @@ export PG_NETWORK=host PG_CPU_SHARES=2
 # pgrust-start, in a container as PostgreSQL's (same cpuset, CPU weight, slice, network).
 export PGRUST_PORT=${PGRUST_PORT:-55372} PGRUST_NAME=${PGRUST_NAME:-$PG_NAME-pgrust}
 export PGDEF_PORT=${PGDEF_PORT:-55373} PGDEF_NAME=${PGDEF_NAME:-$PG_NAME-def}
-export ENGPERF_PORT=${ENGPERF_PORT:-55374} ENGPERF_NAME=${ENGPERF_NAME:-$PG_NAME-engperf}
 export SERVER_MEM=${SERVER_MEM-8g}
 SERVERS="pg engine"
-[ -n "${SB_PERF-1}" ] && SERVERS="$SERVERS engperf"
 [ -n "${SB_PG_DEFAULT-1}" ] && SERVERS="$SERVERS pgdef"
 [ -n "${SB_PGRUST-1}" ] && SERVERS="$SERVERS pgrust"
 # The engine runs in a container of its own, as PostgreSQL does (run.sh's ENGINE_DOCKER): the
@@ -79,7 +75,7 @@ else
 fi
 ONLY=${SB_ONLY:-pgbench,oltp,analytic,tpch,bulk,ddl,connect}
 has() { case ",$ONLY," in *",$1,"*) return 0 ;; esac; return 1; }
-for p in "$PG_PORT" "$ENGINE_PORT" "$PGRUST_PORT" "$PGDEF_PORT" "$ENGPERF_PORT"; do
+for p in "$PG_PORT" "$ENGINE_PORT" "$PGRUST_PORT" "$PGDEF_PORT"; do
   if ss -ltn | grep -q ":$p "; then echo "port $p busy: pick PG_PORT / ENGINE_PORT" >&2; exit 1; fi
 done
 
@@ -88,9 +84,9 @@ declare -A CG
 cg() { echo "/sys/fs/cgroup/system.slice/docker-$(docker inspect -f '{{.Id}}' "$1").scope"; }
 cname() {
   case $1 in pg) echo "$PG_NAME" ;; pgrust) echo "$PGRUST_NAME" ;; pgdef) echo "$PGDEF_NAME" ;;
-    engperf) echo "$ENGPERF_NAME" ;; *) echo "$ENGINE_NAME" ;; esac
+    *) echo "$ENGINE_NAME" ;; esac
 }
-is_engine() { [ "$1" = engine ] || [ "$1" = engperf ]; }
+is_engine() { [ "$1" = engine ]; }
 epid() { cat "$BENCH_DATA/$1.pid"; }
 # (A container's probes are its cgroup's, whichever server it holds: CPU of every process in
 # it, bytes written, anon + shmem memory.)
@@ -178,7 +174,7 @@ for t in $SERVERS; do
   c0=$(cpu "$t"); sleep "$IDLE_SECS"; c1=$(cpu "$t")
   printf 'GATE\t%s\tidle_cpu_s_5min\t%s\n' "$t" "$(calc "($c1 - $c0) * 300 / $IDLE_SECS")" | tee -a "$OUT"
   case $t in pg) port=$PG_PORT ;; engine) port=$ENGINE_PORT ;; pgrust) port=$PGRUST_PORT ;;
-    pgdef) port=$PGDEF_PORT ;; engperf) port=$ENGPERF_PORT ;; esac
+    pgdef) port=$PGDEF_PORT ;; esac
   docker run --rm --network host --cpuset-cpus "$CLIENT_CPUS" -e PGPASSWORD=pw -v "$BENCH_DATA:$BENCH_DATA" "$IMG" \
     pgbench -h 127.0.0.1 -p "$port" -U postgres -n -c 100 -j 4 -t 1 -f "$BENCH_DATA/idle-session.sql" postgres >>"$LOG" 2>&1 &
   bp=$!

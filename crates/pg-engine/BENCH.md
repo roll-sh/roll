@@ -1,5 +1,28 @@
 # pg-engine benchmarks
 
+## Current standalone defaults (2026-11-09)
+
+`roll-engine` now always uses the former performance defaults. Shared caches use one
+quarter of the container's memory limit (or host memory), split 3:1 between blocks and
+plans, with a 64 MiB block minimum and 36 MiB–1 GiB plans. Databases and idle sessions
+stay warm, and connections poll for up to 50 µs while cores are free before sleeping.
+Idle-session trimming is disabled. Sync and SQL behavior are unchanged.
+
+Use `--cache-mb`, `--plan-cache-mb`, `--memory-budget-mb` and `--idle-close-secs` for
+explicit overrides. Individual cache flags override their part of the memory budget.
+There is no `--mode`; remove saved `roll.engine_mode` settings before restarting.
+`SET` and `ALTER SYSTEM SET roll.engine_mode` are rejected. `ALTER SYSTEM RESET
+roll.engine_mode` can remove a stale saved setting on an already running server.
+
+The efficient/performance comparisons below are historical, including the former
+33 MiB footprint acceptance limit. That limit does not apply to this default; a prior
+measurement of the former performance profile was about 36 MiB with 100 idle sessions.
+It is not a new measurement or a new acceptance limit. The current scoreboard runs
+one engine arm, with memory-derived sizing by default (`CACHE_MB` overrides it), and
+reports idle-session memory without the retired limit. Old raw results and preliminary
+quick read/write comparisons remain historical; they do not establish universal
+performance superiority over PostgreSQL.
+
 ## Scoreboard
 
 The goal is to beat PostgreSQL 18.6 everywhere: throughput, CPU per operation, peak memory and
@@ -112,20 +135,19 @@ clients on 8-11, machine load 12-45 from other agents' builds):
 - Quick mode's idle CPU resolves one 10 ms clock tick per 60 s window (0.05 s per 5 minutes);
   an engine that used none shows its lead as a lower bound. Full mode measures the 5 minutes.
 
-How it is measured (`tools/bench/scoreboard.sh`, `scoreboard.py`):
+Current measurement procedure (`tools/bench/scoreboard.sh`, `scoreboard.py`):
 
 - Both servers in containers on the same pinned cores (`SERVER_CPUS`, the clients on
   `CLIENT_CPUS`), at the same low CPU weight (`--cpu-shares 2`) in the same slice, on the host
   network (no docker-proxy); the engine's container is a pinned `debian:trixie-slim` with the
   dist binary bind-mounted (`run.sh`'s `ENGINE_DOCKER=1`; empty runs it on the host). PostgreSQL is the pinned image with
-  `tools/bench/run.sh pg-start`'s settings; the engine is `roll-engine --cache-mb 2048` built
+  `tools/bench/run.sh pg-start`'s settings; the engine uses memory-derived defaults, built
   with `--profile dist` (fat LTO, what users run: "Build profile: dist" below).
-- Since agent 180 ("Modes" below) a run has up to five servers: the engine in efficient mode
-  (`engine`, `--cache-mb 2048` as always) and in performance mode (`engperf`, `--mode
-  performance`, its caches sized from its container's memory), PostgreSQL tuned (`pg`, the
-  settings above: `shared_buffers=2GB` is a quarter of the 8 GB every server container gets,
-  `SERVER_MEM`) and with its stock settings (`pgdef`, `SB_PG_DEFAULT=` leaves it out), and
-  pgrust; a table per engine mode against the others. `SB_PERF=` leaves performance mode out.
+- A run has up to four servers: one engine (`engine`), PostgreSQL tuned (`pg`),
+  PostgreSQL default (`pgdef`) and pgrust. `SERVER_MEM` defaults to 8 GiB.
+  `CACHE_MB` overrides the engine's block cache. `SB_PG_DEFAULT=` leaves out PostgreSQL
+  default, and `SB_PGRUST=` leaves out pgrust. The earlier five-server mode comparison
+  and its `SB_PERF` selector are historical.
 - Every workload of `tools/bench` (pgbench select-only and TPC-B-like, the OLTP cases, the
   analytic set, TPC-H, bulk loads, DDL, connection churn) runs on PostgreSQL and on the engine
   in turn, in interleaved rounds (each round swaps which goes first); a cell is the median of
@@ -168,7 +190,7 @@ Pick cores no other benchmark pins at the time (`docker inspect` the running con
 cpusets), ports in your range, and a container name of your own. A run's raw lines are in
 `$SB_DATA/score-<mode>.tsv`, every client's output in `$SB_DATA/logs/`.
 
-## Modes (2026-11-08, agent 180)
+## Historical modes (2026-11-08, agent 180)
 
 `roll-engine --mode efficient|performance` (HANDOFF "Modes"): efficient, the default, is the
 engine as it was; performance takes memory and a little CPU for speed. Results, errors, plans,
