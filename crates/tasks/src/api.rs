@@ -494,15 +494,23 @@ async fn ack(State(t): S, Path(name): Path<String>, Json(b): Json<AckBody>) -> A
     if receipts.is_empty() {
         return Err(TaskError::Invalid("give a receipt".into()));
     }
+    // Every ack is written without waiting for its own commit; they're made durable together
+    // before the answer.
     let mut errors = Vec::new();
-    for r in &receipts {
-        if let Err(e) = t.ack(&name, r).await {
-            if receipts.len() == 1 {
-                return Err(e);
+    let single = crate::store::relaxed(async {
+        for r in &receipts {
+            if let Err(e) = t.ack(&name, r).await {
+                if receipts.len() == 1 {
+                    return Err(e);
+                }
+                errors.push(json!({ "receipt": r, "error": e.to_string() }));
             }
-            errors.push(json!({ "receipt": r, "error": e.to_string() }));
         }
-    }
+        Ok(())
+    })
+    .await;
+    t.store.sync().await.map_err(TaskError::Internal)?;
+    single?;
     ok(json!({ "acked": receipts.len() - errors.len(), "errors": errors }))
 }
 

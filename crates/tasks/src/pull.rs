@@ -5,6 +5,7 @@
 use crate::engine::{Result, TaskError, Tasks, invalid};
 use crate::flow::{self, Acquire};
 use crate::model::*;
+use crate::store;
 use base64::Engine;
 use serde::Serialize;
 use std::time::Duration;
@@ -47,13 +48,22 @@ impl Tasks {
             let mut out = Vec::new();
             if !q.paused && !self.queue_cached(queue).is_some_and(|q| q.paused) {
                 let due = self.store.msg_due(&lane, now_ms(), max * 2).await?;
-                for id in due.ids {
-                    if out.len() >= max {
-                        break;
+                // The leases are written without waiting for each, then made durable together
+                // before they're handed out: one commit per pull, not one per message.
+                store::relaxed(async {
+                    for id in due.ids {
+                        if out.len() >= max {
+                            break;
+                        }
+                        if let Some(p) = self.lease_pulled(&q, &id, visibility_ms).await? {
+                            out.push(p);
+                        }
                     }
-                    if let Some(p) = self.lease_pulled(&q, &id, visibility_ms).await? {
-                        out.push(p);
-                    }
+                    Ok::<_, TaskError>(())
+                })
+                .await?;
+                if !out.is_empty() {
+                    self.store.sync().await?;
                 }
             }
             if !out.is_empty() || now_ms() >= deadline {

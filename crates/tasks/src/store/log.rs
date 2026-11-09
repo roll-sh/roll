@@ -1301,6 +1301,24 @@ impl Store for LogStore {
         self.t.db.shards()
     }
 
+    async fn sync(&self) -> Result<()> {
+        // Strict, whatever the caller's mode: it's the wait the relaxed writes skipped.
+        self.log.written(None).await
+    }
+
+    async fn write_all(&self, writes: &[Write]) -> Result<bool> {
+        anyhow::ensure!(
+            !writes.iter().any(|w| matches!(w, Write::Doc { kind, .. } if kind == crate::engine::KIND_NODE)),
+            "node records are local to a node; they don't go in a group of writes"
+        );
+        // One SQLite transaction, so one commit of the log (a cut takes the database's lock).
+        let ok = self.t.db.write_all(writes).await?;
+        if ok {
+            self.written().await?;
+        }
+        Ok(ok)
+    }
+
     fn take_storage_writes(&self) -> u64 {
         self.t.take_storage_writes()
     }

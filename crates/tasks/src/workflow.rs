@@ -24,7 +24,7 @@ use crate::engine::{KIND_APP, NewMessage, QueueUpdate, Result, TaskError, Tasks,
 use crate::expr::{self, key_string};
 use crate::ids::new_id;
 use crate::model::*;
-use crate::store::{self, Expect, RunQuery};
+use crate::store::{self, Expect, RunQuery, Write};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashMap};
@@ -368,18 +368,9 @@ impl Tasks {
         }
         let now = now_ms();
         let id = new_id("evt");
-        if let Some(d) = &e.id {
-            let key = format!("evdedup:{d}");
-            if !self.store.kv_put(&key, &json!(id), Expect::Absent, Some(now + DAY)).await? {
-                let existing = self.store.kv_get(&key).await?.and_then(|v| v.value.as_str().map(String::from)).unwrap_or_default();
-                if let Some(ev) = self.store.event_get(&existing).await? {
-                    return Ok((ev, false));
-                }
-                return Ok((Event { id: existing, name: e.name, dedup_id: e.id, data: e.data, user: e.user, ts: now, runs: vec![], expires_at: None }, false));
-            }
-        }
+        let key = e.id.as_ref().map(|d| format!("evdedup:{d}"));
         let ev = Event {
-            id,
+            id: id.clone(),
             name: e.name,
             dedup_id: e.id,
             data: e.data,
@@ -387,8 +378,21 @@ impl Tasks {
             ts: e.ts.unwrap_or(now),
             runs: vec![],
             expires_at: Some(now + self.config.retention_ms),
+            undispatched: true,
         };
-        self.store.event_put(&ev).await?;
+        // The claim and the event land together: a claim never names an event that was lost.
+        let mut writes = vec![Write::Event(ev.clone())];
+        if let Some(k) = &key {
+            writes.insert(0, Write::claim(k.clone(), json!(id), Some(now + DAY)));
+        }
+        if !self.store.write_all(&writes).await? {
+            let k = key.ok_or_else(|| TaskError::Internal(anyhow::anyhow!("a new event id was taken")))?;
+            let existing = self.store.kv_get(&k).await?.and_then(|v| v.value.as_str().map(String::from)).unwrap_or_default();
+            if let Some(ev) = self.store.event_get(&existing).await? {
+                return Ok((ev, false));
+            }
+            return Ok((Event { id: existing, runs: vec![], expires_at: None, undispatched: false, ..ev }, false));
+        }
         self.count(|u| {
             u.events += 1;
             u.bytes_in += size as u64;
@@ -398,9 +402,12 @@ impl Tasks {
 
     async fn send_event(&self, e: EventIn) -> Result<String> {
         let (mut ev, fresh) = self.store_event(e).await?;
-        if !fresh {
+        // A retry of an event whose dispatch never finished (its node died) runs it now; one
+        // whose dispatch is under way here leaves it to that.
+        if !fresh && !(ev.undispatched && !self.is_dispatching(&ev.id)) {
             return Ok(ev.id);
         }
+        let _dispatching = Dispatching::start(self, &ev.id);
         let json = ev.json();
         self.resolve_waits(&ev, &json).await?;
         let matching = self.cache.read().unwrap().registry.matching(&ev.name);
@@ -426,11 +433,20 @@ impl Tasks {
                 Err(e) => warn!(function = fid, error = %e, "trigger failed"),
             }
         }
-        if !runs.is_empty() {
-            ev.runs = runs;
+        let recorded = !runs.is_empty();
+        ev.runs.extend(runs);
+        ev.undispatched = false;
+        if recorded {
             self.store.event_put(&ev).await?;
+        } else {
+            // Only the "dispatched" mark: losing it means a retry dispatches again.
+            store::relaxed(self.store.event_put(&ev)).await?;
         }
         Ok(ev.id)
+    }
+
+    fn is_dispatching(&self, event_id: &str) -> bool {
+        self.dispatching.lock().unwrap().contains(event_id)
     }
 
     pub async fn event(&self, id: &str) -> Result<Event> {
@@ -441,12 +457,22 @@ impl Tasks {
     pub async fn invoke_function(&self, function_id: &str, event: EventIn) -> Result<String> {
         let (app, def) = self.function_def(function_id).ok_or_else(|| TaskError::NotFound(format!("function {function_id}")))?;
         let (mut ev, fresh) = self.store_event(event).await?;
-        if !fresh && let Some(run) = ev.runs.first() {
-            return Ok(run.clone());
+        if !fresh {
+            if let Some(run) = ev.runs.first() {
+                return Ok(run.clone());
+            }
+            if self.is_dispatching(&ev.id) {
+                return Err(TaskError::Conflict(format!("event {} is starting its run; try again", ev.id)));
+            }
         }
-        let run = self.start_run(&app, &def, vec![ev.json()], StartOpts::default()).await?;
-        ev.runs = vec![run.id.clone()];
-        self.store.event_put(&ev).await?;
+        let _dispatching = Dispatching::start(self, &ev.id);
+        let json = ev.json();
+        // The run and the event naming it land together.
+        let run_id = new_id("run");
+        ev.runs = vec![run_id.clone()];
+        ev.undispatched = false;
+        let opts = StartOpts { run_id: Some(run_id), extra: vec![Write::Event(ev)], ..Default::default() };
+        let run = self.start_run(&app, &def, vec![json], opts).await?;
         Ok(run.id)
     }
 
@@ -467,23 +493,37 @@ impl Tasks {
                 return Ok(None);
             }
         }
+        let mut claims = Vec::new();
         if let Some(src) = &def.idempotency {
             let key = format!("idem:{fid}:{}", eval_key(src, json)?);
-            if !self.store.kv_put(&key, &json!(ev.id), Expect::Absent, Some(now_ms() + DAY)).await? {
+            if self.store.kv_get(&key).await?.is_some() {
                 return Ok(None);
             }
+            claims.push(Write::claim(key, json!(ev.id), Some(now_ms() + DAY)));
         }
         if let Some(d) = &def.debounce {
-            return self.debounce(&app, &def, d, json).await.map(Some);
+            return self.debounce(&app, &def, d, json, claims).await;
         }
         if let Some(b) = &def.batch {
-            return self.batch(&app, &def, b, ev, json).await;
+            return self.batch(&app, &def, b, ev, json, claims).await;
         }
-        let run = self.start_run(&app, &def, vec![json.clone()], StartOpts::default()).await?;
-        Ok(Some(run.id))
+        let run = self.start_run_with(&app, &def, vec![json.clone()], StartOpts { extra: claims, ..Default::default() }).await?;
+        Ok(run.map(|r| r.id))
     }
 
-    async fn debounce(&self, app: &App, def: &FunctionDef, d: &Debounce, json: &Value) -> Result<String> {
+    /// Whether any of `claims` (written as a group that failed) is held by someone else.
+    async fn claimed(&self, claims: &[Write]) -> Result<bool> {
+        for c in claims {
+            if let Write::Kv { key, .. } = c
+                && self.store.kv_get(key).await?.is_some()
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    async fn debounce(&self, app: &App, def: &FunctionDef, d: &Debounce, json: &Value, claims: Vec<Write>) -> Result<Option<String>> {
         let key = format!(
             "debounce:{}:{}",
             def.id,
@@ -507,7 +547,11 @@ impl Tasks {
                     let msg_id = v.value["msg_id"].as_str().unwrap_or_default().to_string();
                     let first_at = v.value["first_at"].as_i64().unwrap_or(now);
                     if self.redebounce(&run_id, &msg_id, json, now + d.period_ms, first_at + d.timeout_ms.unwrap_or(i64::MAX / 4)).await? {
-                        return Ok(run_id);
+                        // Losing these only lets a retry push the same run out again.
+                        if !claims.is_empty() {
+                            self.store.write_all(&claims).await?;
+                        }
+                        return Ok(Some(run_id));
                     }
                     self.store.kv_delete(&key, Expect::Version(v.version)).await?;
                 }
@@ -516,11 +560,15 @@ impl Tasks {
                         continue;
                     }
                     let v = self.store.kv_get(&key).await?.map(|v| v.version).unwrap_or(0);
-                    let run = self.start_run(app, def, vec![json.clone()], StartOpts { delay_ms: d.period_ms, ..Default::default() }).await?;
+                    let opts = StartOpts { delay_ms: d.period_ms, extra: claims.clone(), ..Default::default() };
+                    let Some(run) = self.start_run_with(app, def, vec![json.clone()], opts).await? else {
+                        self.store.kv_delete(&key, Expect::Version(v)).await?;
+                        return Ok(None);
+                    };
                     self.store
                         .kv_put(&key, &json!({ "run_id": run.id, "msg_id": run.invocation, "first_at": now }), Expect::Version(v), Some(now + ttl))
                         .await?;
-                    return Ok(run.id);
+                    return Ok(Some(run.id));
                 }
             }
         }
@@ -552,7 +600,7 @@ impl Tasks {
         Ok(false)
     }
 
-    async fn batch(&self, app: &App, def: &FunctionDef, b: &Batch, ev: &Event, json: &Value) -> Result<Option<String>> {
+    async fn batch(&self, app: &App, def: &FunctionDef, b: &Batch, ev: &Event, json: &Value, claims: Vec<Write>) -> Result<Option<String>> {
         let key = format!(
             "batch:{}:{}",
             def.id,
@@ -562,7 +610,8 @@ impl Tasks {
             }
         );
         if b.max_size == 1 {
-            return Ok(Some(self.start_run(app, def, vec![json.clone()], StartOpts::default()).await?.id));
+            let opts = StartOpts { extra: claims, ..Default::default() };
+            return Ok(self.start_run_with(app, def, vec![json.clone()], opts).await?.map(|r| r.id));
         }
         for _ in 0..50 {
             let now = now_ms();
@@ -570,12 +619,18 @@ impl Tasks {
                 None => {
                     let batch_id = crate::ids::ulid();
                     let doc = json!({ "id": batch_id, "events": [ev.id], "first_at": now });
-                    if self.store.kv_put(&key, &doc, Expect::Absent, Some(now + b.timeout_ms + DAY)).await? {
-                        self.enqueue(
-                            NewMessage::internal(Target::Flush { function_id: def.id.clone(), key: format!("{key}#{batch_id}") }, now + b.timeout_ms),
-                            b"",
-                        )
+                    // The batch and its flush land together: a batch never waits for a flush
+                    // that was lost.
+                    let flush = self
+                        .prepare(NewMessage::internal(Target::Flush { function_id: def.id.clone(), key: format!("{key}#{batch_id}") }, now + b.timeout_ms))
                         .await?;
+                    let mut writes = vec![Write::claim(key.clone(), doc, Some(now + b.timeout_ms + DAY)), Write::Msg { message: flush.clone(), body: vec![] }];
+                    writes.extend(claims.iter().cloned());
+                    if self.store.write_all(&writes).await? {
+                        self.nudge_lane(&flush.lane, flush.due_at);
+                        return Ok(None);
+                    }
+                    if self.claimed(&claims).await? {
                         return Ok(None);
                     }
                 }
@@ -584,15 +639,23 @@ impl Tasks {
                     let mut ids: Vec<String> = serde_json::from_value(doc["events"].clone()).unwrap_or_default();
                     ids.push(ev.id.clone());
                     if ids.len() >= b.max_size as usize {
-                        if self.store.kv_delete(&key, Expect::Version(v.version)).await? {
-                            let events = self.load_events(&ids).await?;
-                            return Ok(Some(self.start_run(app, def, events, StartOpts::default()).await?.id));
+                        // The batch is taken and its run started in one write.
+                        let events = self.load_events(&ids).await?;
+                        let mut extra = vec![Write::KvDelete { key: key.clone(), expect: Expect::Version(v.version) }];
+                        extra.extend(claims.iter().cloned());
+                        if let Some(run) = self.start_run_with(app, def, events, StartOpts { extra, ..Default::default() }).await? {
+                            return Ok(Some(run.id));
                         }
                     } else {
                         doc["events"] = json!(ids);
-                        if self.store.kv_put(&key, &doc, Expect::Version(v.version), Some(now + b.timeout_ms + DAY)).await? {
+                        let mut writes = vec![Write::Kv { key: key.clone(), value: doc, expect: Expect::Version(v.version), expires_at: Some(now + b.timeout_ms + DAY) }];
+                        writes.extend(claims.iter().cloned());
+                        if self.store.write_all(&writes).await? {
                             return Ok(None);
                         }
+                    }
+                    if self.claimed(&claims).await? {
+                        return Ok(None);
                     }
                 }
             }
@@ -613,6 +676,17 @@ impl Tasks {
     // --- runs ---
 
     async fn start_run(&self, app: &App, def: &FunctionDef, events: Vec<Value>, opts: StartOpts) -> Result<Run> {
+        let id = opts.run_id.clone();
+        match self.start_run_with(app, def, events, opts).await? {
+            Some(run) => Ok(run),
+            None => Err(TaskError::Conflict(format!("run {} couldn't start", id.unwrap_or_default()))),
+        }
+    }
+
+    /// Start a run: its invocation, the run, its cancel waits and timeout timers, and `extra`
+    /// (claims, the event naming it, a batch taken) become durable in one write. The run that
+    /// already has this id if there is one; `None` if one of `extra`'s conditions failed.
+    async fn start_run_with(&self, app: &App, def: &FunctionDef, events: Vec<Value>, opts: StartOpts) -> Result<Option<Run>> {
         let now = now_ms();
         let first = events.first().cloned().unwrap_or(Value::Null);
         let mut run = Run {
@@ -635,6 +709,7 @@ impl Tasks {
             invocations: 0,
             version: 0,
             expires_at: None,
+            followups: false,
         };
 
         if let Some(s) = &def.singleton {
@@ -656,8 +731,12 @@ impl Tasks {
                             run.error = Some(json!({ "name": "Skipped", "message": "a run is already in progress" }));
                             run.ended_at = Some(now);
                             run.expires_at = Some(now + self.config.retention_ms);
-                            self.store.run_put(&run, Expect::Absent).await?;
-                            return Ok(run);
+                            let mut writes = vec![Write::NewRun(run.clone())];
+                            writes.extend(opts.extra.iter().cloned());
+                            if !self.store.write_all(&writes).await? {
+                                return self.store.run_get(&run.id).await.map_err(Into::into);
+                            }
+                            return Ok(Some(run));
                         }
                         if alive {
                             let _ = self.cancel_run(&holder, "replaced by a newer run").await;
@@ -691,17 +770,11 @@ impl Tasks {
             due -= (v.as_f64().unwrap_or(0.0) as i64).clamp(-600, 600) * 1000;
         }
 
-        // The invocation exists before the run: a crash in between leaves an orphan message
-        // (dropped when it finds no run), never a run nobody will call.
-        let inv = self.new_invocation(&run, def, due, flows.clone()).await?;
+        let inv = self.prepare(self.invocation(&run, def, due, flows.clone())).await?;
         run.invocation = Some(inv.id.clone());
         run.keys.insert("flows".into(), serde_json::to_string(&flows).unwrap_or_default());
-        if !self.store.run_put(&run, Expect::Absent).await? {
-            let _ = self.cancel(&inv.id, "duplicate run").await;
-            return self.store.run_get(&run.id).await?.ok_or_else(|| TaskError::Conflict("run vanished".into()));
-        }
-        run.version = 1;
-        self.count(|u| u.runs += 1);
+        let mut writes = vec![Write::Msg { message: inv.clone(), body: vec![] }, Write::NewRun(run.clone())];
+        let mut wake = vec![inv];
 
         for (i, c) in def.cancel_on.iter().enumerate() {
             let key = c.match_.as_ref().and_then(|m| match_key(m, &first));
@@ -719,56 +792,65 @@ impl Tasks {
             if let Some(m) = &c.match_ {
                 self.add_wait_path(&c.event, m).await?;
             }
-            self.store.wait_put(&w).await?;
+            writes.push(Write::Wait(w));
         }
         if let Some(t) = &def.timeouts {
-            if let Some(ms) = t.start_ms {
-                self.timer(&run.id, "", TimerKind::StartTimeout, now + ms).await?;
-            }
-            if let Some(ms) = t.finish_ms {
-                self.timer(&run.id, "", TimerKind::FinishTimeout, now + ms).await?;
+            for (ms, kind) in [(t.start_ms, TimerKind::StartTimeout), (t.finish_ms, TimerKind::FinishTimeout)] {
+                if let Some(ms) = ms {
+                    let (claim, m) = self.timer_writes(&run.id, "", kind, now + ms).await?;
+                    writes.extend([claim, Write::Msg { message: m.clone(), body: vec![] }]);
+                    wake.push(m);
+                }
             }
         }
-        Ok(run)
+        writes.extend(opts.extra);
+        if !self.store.write_all(&writes).await? {
+            return self.store.run_get(&run.id).await.map_err(Into::into);
+        }
+        run.version = 1;
+        self.count(|u| u.runs += 1);
+        for m in &wake {
+            self.nudge_lane(&m.lane, m.due_at);
+        }
+        Ok(Some(run))
+    }
+
+    fn invocation(&self, run: &Run, def: &FunctionDef, due: Ms, flows: Vec<Flow>) -> NewMessage {
+        NewMessage {
+            queue: Some(fn_queue(&def.id)),
+            retries: def.retries.unwrap_or(3).min(self.config.max_retries),
+            backoff: def.backoff.clone().unwrap_or_else(|| self.config.backoff.clone()),
+            timeout_ms: self.config.run_timeout_ms,
+            flows,
+            run_id: Some(run.id.clone()),
+            ..NewMessage::internal(Target::Run { run_id: run.id.clone() }, due)
+        }
     }
 
     async fn new_invocation(&self, run: &Run, def: &FunctionDef, due: Ms, flows: Vec<Flow>) -> Result<Message> {
-        self.enqueue(
-            NewMessage {
-                queue: Some(fn_queue(&def.id)),
-                retries: def.retries.unwrap_or(3).min(self.config.max_retries),
-                backoff: def.backoff.clone().unwrap_or_else(|| self.config.backoff.clone()),
-                timeout_ms: self.config.run_timeout_ms,
-                flows,
-                run_id: Some(run.id.clone()),
-                ..NewMessage::internal(Target::Run { run_id: run.id.clone() }, due)
-            },
-            b"",
-        )
-        .await
+        self.enqueue(self.invocation(run, def, due, flows), b"").await
     }
 
-    /// One timer per run, step and kind. The message goes in before the key that says it exists,
-    /// so a worker that dies between the two leaves a timer (a second one, from the delivery
-    /// that redoes this, is harmless: every timer's handler is idempotent), never a key with no
-    /// timer behind it, which would leave the run waiting forever.
-    async fn timer(&self, run_id: &str, step_id: &str, kind: TimerKind, at: Ms) -> Result<()> {
+    /// A timer's claim and its message: written together, so a claimed timer always fires.
+    async fn timer_writes(&self, run_id: &str, step_id: &str, kind: TimerKind, at: Ms) -> Result<(Write, Message)> {
         let key = format!("timer:{run_id}:{step_id}:{kind:?}");
-        if self.store.kv_get(&key).await?.is_some() {
-            return Ok(());
-        }
         let m = self
-            .enqueue(
-                NewMessage {
-                    run_id: Some(run_id.into()),
-                    ..NewMessage::internal(Target::Timer { run_id: run_id.into(), step_id: step_id.into(), kind }, at)
-                },
-                b"",
-            )
+            .prepare(NewMessage {
+                run_id: Some(run_id.into()),
+                ..NewMessage::internal(Target::Timer { run_id: run_id.into(), step_id: step_id.into(), kind }, at)
+            })
             .await?;
-        if !self.store.kv_put(&key, &json!(at), Expect::Absent, Some(at + DAY)).await? {
-            // Another delivery of the same invocation set it meanwhile: one timer is enough.
-            let _ = self.cancel(&m.id, "a duplicate timer").await;
+        Ok((Write::claim(key, json!(at), Some(at + DAY)), m))
+    }
+
+    /// One timer per run, step and kind. Its key and its message are one write, so a worker
+    /// that dies setting it leaves both or neither: never a key with no timer behind it, which
+    /// would leave the run waiting forever (the delivery that redoes this sets it then).
+    async fn timer(&self, run_id: &str, step_id: &str, kind: TimerKind, at: Ms) -> Result<()> {
+        let (claim, m) = self.timer_writes(run_id, step_id, kind, at).await?;
+        // Taken: this timer is set already (its message with it).
+        if self.store.write_all(&[claim, Write::Msg { message: m.clone(), body: vec![] }]).await? {
+            self.nudge_lane(&m.lane, m.due_at);
         }
         Ok(())
     }
@@ -830,16 +912,16 @@ impl Tasks {
         let Some(op) = run.pending.iter().find(|p| p.step_id == step_id).cloned() else { return Ok(false) };
         // First resolver wins (event vs timeout).
         let claim = format!("resolved:{run_id}:{step_id}");
-        if !self.store.kv_put(&claim, &json!(true), Expect::Absent, Some(now_ms() + self.config.retention_ms)).await? {
+        let data = if error.is_some() { None } else { Some(data.unwrap_or(Value::Null)) };
+        let step = Step { run_id: run_id.into(), id: step_id.into(), name: None, op: op.op.clone(), data, error, at: now_ms(), attempts: 1 };
+        // The claim and the step land together: a resolved claim always has its step.
+        let writes = [Write::claim(claim, json!(true), Some(now_ms() + self.config.retention_ms)), Write::Step(step)];
+        if !self.store.write_all(&writes).await? {
             let memo = self.store.steps(run_id).await?;
             if !memo.iter().any(|s| s.id == step_id) {
                 return Ok(false);
             }
         } else {
-            let data = if error.is_some() { None } else { Some(data.unwrap_or(Value::Null)) };
-            self.store
-                .step_put(&Step { run_id: run_id.into(), id: step_id.into(), name: None, op: op.op.clone(), data, error, at: now_ms(), attempts: 1 })
-                .await?;
             self.count(|u| u.steps += 1);
         }
         if op.op == "wait_for_event"
@@ -932,6 +1014,7 @@ impl Tasks {
     pub async fn cancel_run(&self, id: &str, reason: &str) -> Result<Run> {
         let run = self.run(id).await?;
         if run.status.is_final() {
+            let run = self.follow_up(run).await?;
             return Err(TaskError::Conflict(format!("run {id} is already {}", run.status.as_str())));
         }
         let error = json!({ "name": "RunCanceled", "message": reason });
@@ -976,7 +1059,8 @@ impl Tasks {
         for _ in 0..20 {
             let mut run = self.run(id).await?;
             if run.status.is_final() {
-                return Ok(run);
+                // An end whose follow-ups didn't all happen (its node died) finishes now.
+                return self.follow_up(run).await;
             }
             let v = run.version;
             let now = now_ms();
@@ -988,34 +1072,52 @@ impl Tasks {
             let pending = std::mem::take(&mut run.pending);
             let invocation = run.invocation.take();
             run.dirty = false;
+            // What follows the end goes with it, so whoever sees the run next can finish it.
+            run.followups = true;
+            run.keys.insert(END_PENDING.into(), serde_json::to_string(&pending).unwrap_or_default());
+            if let Some(inv) = invocation {
+                run.keys.insert(END_INVOCATION.into(), inv);
+            }
             if self.store.run_put(&run, Expect::Version(v)).await? {
                 run.version = v + 1;
-                if status == RunStatus::Canceled {
-                    if let Some(inv) = &invocation
-                        && let Ok(Some(m)) = self.store.msg_get(inv).await
-                        && m.state == MsgState::Pending
-                    {
-                        let _ = self.cancel(inv, "run canceled").await;
-                    }
-                    for p in &pending {
-                        if let Some(child) = &p.child_run {
-                            let _ = Box::pin(self.cancel_run(child, "parent canceled")).await;
-                        }
-                    }
-                }
-                for p in pending.iter().filter(|p| p.op == "wait_for_event") {
-                    if let Some(event) = &p.target {
-                        let _ = self
-                            .store
-                            .wait_delete(&wait_ref(&format!("{id}:{}", p.step_id), event, p.key.clone(), &run.id))
-                            .await;
-                    }
-                }
                 ended = Some(run);
                 break;
             }
         }
         let run = ended.ok_or_else(|| TaskError::Conflict(format!("run {id} is changing")))?;
+        self.follow_up(run).await
+    }
+
+    /// What follows a run's end: a canceled run's invocation and children, its waits, its
+    /// singleton, its parent's step and its lifecycle event. Each part is idempotent, and the
+    /// run's `followups` mark is cleared only after all of them, so a crash anywhere in between
+    /// means doing them again (from `end_run`, the run's next invocation, a cancel, a dead
+    /// message), never skipping them.
+    pub(crate) async fn follow_up(&self, run: Run) -> Result<Run> {
+        if !run.followups {
+            return Ok(run);
+        }
+        let id = run.id.as_str();
+        let status = run.status;
+        let pending: Vec<PendingOp> = run.keys.get(END_PENDING).and_then(|p| serde_json::from_str(p).ok()).unwrap_or_default();
+        if status == RunStatus::Canceled {
+            if let Some(inv) = run.keys.get(END_INVOCATION)
+                && let Ok(Some(m)) = self.store.msg_get(inv).await
+                && m.state == MsgState::Pending
+            {
+                let _ = self.cancel(inv, "run canceled").await;
+            }
+            for p in &pending {
+                if let Some(child) = &p.child_run {
+                    let _ = Box::pin(self.cancel_run(child, "parent canceled")).await;
+                }
+            }
+        }
+        for p in pending.iter().filter(|p| p.op == "wait_for_event") {
+            if let Some(event) = &p.target {
+                let _ = self.store.wait_delete(&wait_ref(&format!("{id}:{}", p.step_id), event, p.key.clone(), id)).await;
+            }
+        }
         let def = self.function_def(&run.function_id).map(|(_, d)| d);
         if let Some(def) = &def {
             for (i, c) in def.cancel_on.iter().enumerate() {
@@ -1049,19 +1151,61 @@ impl Tasks {
                 "error": run.error,
                 "event": run.events.first(),
             });
-            if let Err(e) = Box::pin(self.send_events(vec![EventIn { name: name.into(), data, ..Default::default() }])).await {
+            // Its id makes a repeated follow-up send it once.
+            let event = EventIn { name: name.into(), data, id: Some(format!("{id}:{name}")), ..Default::default() };
+            if let Err(e) = Box::pin(self.send_events(vec![event])).await {
+                // The mark stays: whoever sees the run next tries again.
                 warn!(error = %e, "lifecycle event failed");
+                return Ok(run);
+            }
+        }
+        // All done: clear the mark. Losing this write only means doing the above again.
+        for _ in 0..10 {
+            let Some(mut cur) = self.store.run_get(id).await? else { break };
+            if !cur.followups {
+                return Ok(cur);
+            }
+            let v = cur.version;
+            cur.followups = false;
+            cur.keys.remove(END_PENDING);
+            cur.keys.remove(END_INVOCATION);
+            if store::relaxed(self.store.run_put(&cur, Expect::Version(v))).await? {
+                cur.version = v + 1;
+                return Ok(cur);
             }
         }
         Ok(run)
     }
 }
 
+/// `Run::keys` of an ended run whose follow-ups are due: its pending operations and its last
+/// invocation, as they were when it ended.
+const END_PENDING: &str = "end.pending";
+const END_INVOCATION: &str = "end.invocation";
+
 #[derive(Default)]
 struct StartOpts {
     run_id: Option<String>,
     parent: Option<(String, String)>,
     delay_ms: i64,
+    /// Written with the run, or the run doesn't start.
+    extra: Vec<Write>,
+}
+
+/// An event this engine is dispatching, until dropped.
+struct Dispatching<'a>(&'a Tasks, String);
+
+impl<'a> Dispatching<'a> {
+    fn start(t: &'a Tasks, event_id: &str) -> Self {
+        t.dispatching.lock().unwrap().insert(event_id.to_string());
+        Dispatching(t, event_id.to_string())
+    }
+}
+
+impl Drop for Dispatching<'_> {
+    fn drop(&mut self) {
+        self.0.dispatching.lock().unwrap().remove(&self.1);
+    }
 }
 
 fn wait_ref(id: &str, event: &str, key: Option<String>, run_id: &str) -> Wait {
@@ -1144,6 +1288,8 @@ pub(crate) async fn invoke(t: &Arc<Tasks>, cell: &Arc<Mutex<Message>>) -> anyhow
     let mut run = loop {
         let Some(mut run) = t.store.run_get(run_id).await? else { return Ok(Done::Skip("run not found".into())) };
         if run.status.is_final() {
+            // Its end may not have finished what follows it (a crash right after it).
+            let run = t.follow_up(run).await?;
             return Ok(Done::Skip(format!("run {}", run.status.as_str())));
         }
         if let Some(other) = &run.invocation
@@ -1389,7 +1535,7 @@ async fn apply_ops(t: &Arc<Tasks>, run: &mut Run, def: &FunctionDef, c: &Message
                         &app,
                         &child_def,
                         vec![event],
-                        StartOpts { run_id: Some(child_id.clone()), parent: Some((run.id.clone(), op.id.clone())), delay_ms: 0 },
+                        StartOpts { run_id: Some(child_id.clone()), parent: Some((run.id.clone(), op.id.clone())), ..Default::default() },
                     )
                     .await?;
                 }
@@ -1528,13 +1674,13 @@ pub(crate) async fn flush(t: &Arc<Tasks>, m: &Message) -> anyhow::Result<Done> {
     if v.value["id"].as_str() != Some(batch_id) {
         return Ok(Done::Skip("batch already ran".into()));
     }
-    if !t.store.kv_delete(kv_key, Expect::Version(v.version)).await? {
-        return Ok(Done::Skip("batch already ran".into()));
-    }
     let ids: Vec<String> = serde_json::from_value(v.value["events"].clone()).unwrap_or_default();
     let Some((app, def)) = t.function_def(function_id) else { return Ok(Done::Skip("function not registered".into())) };
     let events = t.load_events(&ids).await?;
-    let run = t.start_run(&app, &def, events, StartOpts::default()).await?;
+    let taken = Write::KvDelete { key: kv_key.to_string(), expect: Expect::Version(v.version) };
+    let Some(run) = t.start_run_with(&app, &def, events, StartOpts { extra: vec![taken], ..Default::default() }).await? else {
+        return Ok(Done::Skip("batch already ran".into()));
+    };
     Ok(Done::Ok(Outcome { at: now_ms(), body: Some(run.id), ..Default::default() }))
 }
 
@@ -1551,7 +1697,10 @@ pub(crate) async fn on_dead(t: &Arc<Tasks>, m: &Message) -> anyhow::Result<()> {
             })
             .unwrap_or_else(|| "failed".into());
         if let Some(run) = t.store.run_get(run_id).await?
-            && !run.status.is_final()
+            && run.status.is_final()
+        {
+            t.follow_up(run).await?;
+        } else if let Some(run) = t.store.run_get(run_id).await?
             && run.invocation.as_deref() == Some(m.id.as_str())
         {
             t.end_run(run_id, RunStatus::Failed, None, Some(json!({ "name": "Error", "message": message, "attempts": m.attempts })))

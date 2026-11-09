@@ -548,3 +548,42 @@ async fn publishers_cannot_spoof_system_headers() {
     assert_ne!(hit.header("webhook-signature").unwrap(), "v1,forged");
     assert_eq!(hit.header("x-custom").as_deref(), Some("kept"));
 }
+
+/// A dedup claim and what it guards are one write: a crash can't leave the claim without its
+/// message (or event), so a retry never answers "deduplicated" for something that was lost.
+/// Dies at each write of a publish and an event send in turn, restarts on what was written, and
+/// retries with the same ids.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_crash_mid_publish_never_leaves_a_claim_without_its_message() {
+    use common::crashy::Crashy;
+    let publish = || serde_json::from_value::<tasks::PublishRequest>(json!({ "url": "http://example.test/x", "delay": "1h", "dedup_id": "op-95" })).unwrap();
+    let event = || tasks::workflow::EventIn { name: "e".into(), id: Some("evt-95".into()), ..Default::default() };
+    // Every write a publish and an event send make, until a run gets through without dying.
+    for at in 0.. {
+        let dir = tempfile::tempdir().unwrap();
+        let store = make_store(dir.path()).await;
+        let crashy = Crashy::new(store.clone());
+        let t = tasks::Tasks::new(fast_config(), crashy.clone()).await.unwrap();
+        crashy.crash_at(at);
+        let first = t.publish(publish()).await;
+        if !crashy.crashed() {
+            let _ = t.send_events(vec![event()]).await;
+        }
+        if !crashy.crashed() {
+            assert!(at >= 2, "a publish and an event send write at least twice");
+            break;
+        }
+        drop(t);
+        // The restart: an engine on whatever was written before the crash.
+        let t = tasks::Tasks::new(fast_config(), store).await.unwrap();
+        let again = t.publish(publish()).await.unwrap();
+        assert_eq!(again.len(), 1);
+        if let Ok(first) = &first {
+            assert_eq!(first[0].message_id, again[0].message_id, "crash at write {at}");
+        }
+        let m = t.message(&again[0].message_id).await;
+        assert!(m.is_ok(), "crash at write {at}: answered {} (deduplicated: {}), which doesn't exist", again[0].message_id, again[0].deduplicated);
+        let ids = t.send_events(vec![event()]).await.unwrap();
+        assert!(t.event(&ids[0]).await.is_ok(), "crash at write {at}: event {} doesn't exist", ids[0]);
+    }
+}

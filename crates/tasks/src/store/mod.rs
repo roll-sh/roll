@@ -78,8 +78,42 @@ pub struct Due {
     pub next_at: Option<Ms>,
 }
 
+/// One write of an atomic group ([`Store::write_all`]).
+// Groups are a few writes that live for one call: boxing the big records buys nothing.
+#[allow(clippy::large_enum_variant)]
+#[derive(Clone, Debug)]
+pub enum Write {
+    /// As [`Store::kv_put`].
+    Kv { key: String, value: Value, expect: Expect, expires_at: Option<Ms> },
+    /// As [`Store::kv_delete`].
+    KvDelete { key: String, expect: Expect },
+    /// As [`Store::doc_put`] (not a node-local kind).
+    Doc { kind: String, id: String, value: Value, expect: Expect },
+    /// As [`Store::msg_insert`]; fails the group if the id exists.
+    Msg { message: Message, body: Vec<u8> },
+    /// As [`Store::run_put`] with [`Expect::Absent`].
+    NewRun(Run),
+    Step(Step),
+    Event(Event),
+    Wait(Wait),
+}
+
+impl Write {
+    /// A claim: `key` set to `value` only if it's absent (or expired).
+    pub fn claim(key: impl Into<String>, value: Value, expires_at: Option<Ms>) -> Write {
+        Write::Kv { key: key.into(), value, expect: Expect::Absent, expires_at }
+    }
+}
+
 #[async_trait]
 pub trait Store: Send + Sync + 'static {
+    /// Make `writes` durable together, or none of them: a crash never leaves some without the
+    /// others. A "seen" marker (a dedup claim, a timer claim, a resolved step) and the effect it
+    /// guards go through here, so a marker never outlives a missing effect. `Ok(false)` when a
+    /// condition failed (a `Kv` expectation, a message or run that already exists): nothing was
+    /// written.
+    async fn write_all(&self, writes: &[Write]) -> Result<bool>;
+
     fn describe(&self) -> String;
     /// Shared due-index shards for messages outside queues.
     fn shards(&self) -> u32;
@@ -133,6 +167,13 @@ pub trait Store: Send + Sync + 'static {
     // --- metering ---
     async fn usage_add(&self, day: i64, u: &Usage) -> Result<()>;
     async fn usage(&self, from_day: i64) -> Result<Vec<(i64, Usage)>>;
+
+    /// Wait until every write made so far is durable, the relaxed ones included (stores whose
+    /// writes are durable when they return do nothing). A request that made many relaxed
+    /// writes calls it once before answering, instead of waiting for each.
+    async fn sync(&self) -> Result<()> {
+        Ok(())
+    }
 
     /// Delete expired records (backends with native expiry do nothing).
     async fn sweep(&self, now: Ms) -> Result<u64>;
