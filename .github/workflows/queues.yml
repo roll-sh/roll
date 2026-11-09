@@ -31,7 +31,9 @@ jobs:
 
   e2e:
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 45
+    # The cluster e2e (~12 min) plus the release build for the client suites (~13 min) and the
+    # clients themselves.
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
