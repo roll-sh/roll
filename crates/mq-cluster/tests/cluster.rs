@@ -18,6 +18,7 @@ use mq_core::{Broker, BrokerConfig};
 use roll_cluster::{Backend, DynamoDb, DynamoDbConfig, Memory, MemoryStore};
 use std::collections::HashSet;
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::runtime::Runtime;
@@ -98,10 +99,20 @@ struct Node {
 
 impl Node {
     fn start(env: &Env, id: &str) -> Node {
+        Node::start_with(env, id, None)
+    }
+
+    /// With `front`, other nodes reach this one's internal API through a proxy on that runtime
+    /// that goes silent when the flag is set ([`cuttable`]).
+    fn start_with(env: &Env, id: &str, front: Option<(&Runtime, Arc<AtomicBool>)>) -> Node {
         let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
         let (api, stream_listener) = rt.block_on(async { (tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap(), tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap()) });
         let stream_addr = stream_listener.local_addr().unwrap();
-        let advertise = format!("http://{}", api.local_addr().unwrap());
+        let api_addr = api.local_addr().unwrap();
+        let advertise = match front {
+            Some((on, cut)) => format!("http://{}", on.block_on(cuttable(api_addr, cut))),
+            None => format!("http://{api_addr}"),
+        };
         let nodes = roll_cluster::Cluster::join(env.backend(), env.timings(roll_cluster::ClusterConfig::for_tests(id, advertise, SECRET))).unwrap();
         let (meta, logs) = (env.meta.clone(), env.logs());
         let config = ClusterConfig { listeners: [("stream".to_string(), stream_addr)].into(), follow: Duration::from_millis(30) };
@@ -150,6 +161,34 @@ impl Drop for Node {
     fn drop(&mut self) {
         self.kill();
     }
+}
+
+/// A TCP proxy to `to` that, once `cut` is set, passes nothing on in either direction and closes
+/// nothing: a machine that died without a word (no FIN, no RST), as the other nodes see it.
+async fn cuttable(to: std::net::SocketAddr, cut: Arc<AtomicBool>) -> std::net::SocketAddr {
+    async fn pump(mut r: tokio::net::tcp::OwnedReadHalf, mut w: tokio::net::tcp::OwnedWriteHalf, cut: Arc<AtomicBool>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut buf = vec![0u8; 64 << 10];
+        while let Ok(n) = r.read(&mut buf).await {
+            while cut.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            if n == 0 || w.write_all(&buf[..n]).await.is_err() {
+                return;
+            }
+        }
+    }
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let at = l.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((client, _)) = l.accept().await {
+            let Ok(server) = tokio::net::TcpStream::connect(to).await else { continue };
+            let ((cr, cw), (sr, sw)) = (client.into_split(), server.into_split());
+            tokio::spawn(pump(cr, sw, cut.clone()));
+            tokio::spawn(pump(sr, cw, cut.clone()));
+        }
+    });
+    at
 }
 
 async fn channel(url: &str) -> (Connection, Channel) {
@@ -416,6 +455,52 @@ fn a_drain_hands_every_queue_off_while_clients_carry_on() {
     });
 }
 
+/// An owner that vanishes without a word (its connections neither close nor answer, as when a
+/// machine dies) doesn't hold up its queue's publishers on other nodes past a lease: the RPC
+/// connection to it is dropped when it stops answering pings, so a publish in flight goes to the
+/// next owner and is confirmed there, and nothing confirmed before is lost.
+#[test]
+fn an_owner_that_vanishes_without_a_word_holds_nothing_up() {
+    let env = Env::memory();
+    let client = Runtime::new().unwrap();
+    let cuts = [Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false))];
+    let nodes = [Node::start_with(&env, "a", Some((&client, cuts[0].clone()))), Node::start_with(&env, "b", Some((&client, cuts[1].clone())))];
+    client.block_on(async {
+        let (_c, ch) = channel(&nodes[0].url).await;
+        declare(&ch, "silent").await;
+        known_on(&nodes[1], "silent").await;
+        let key = mq_cluster::queue_key("/", "silent", 0);
+        wait_until("the queue on its node", Duration::from_secs(10), async || {
+            let at = nodes[0].nodes.preferred(&key).map(|n| n.id);
+            nodes.iter().any(|n| Some(n.nodes.node_id()) == at.as_deref() && n.owns("silent"))
+        })
+        .await;
+        let owner = nodes.iter().position(|n| n.owns("silent")).unwrap();
+        let other = &nodes[1 - owner];
+        let (_c, ch) = channel(&other.url).await;
+        ch.confirm_select(ConfirmSelectOptions::default()).await.unwrap();
+        let mut confirmed = publish_confirmed(&ch, "silent", 0..50).await;
+        assert_eq!(confirmed.len(), 50);
+
+        // The owner goes silent: its membership stops (its lease lapses) and its connections
+        // carry nothing more, without closing.
+        cuts[owner].store(true, Ordering::SeqCst);
+        nodes[owner].nodes.fault_kill();
+        let t = Instant::now();
+        let props = BasicProperties::default().with_delivery_mode(2).with_message_id("50".into());
+        let c = ch.basic_publish("".into(), "silent".into(), BasicPublishOptions::default(), b"50", props).await.unwrap();
+        let c = tokio::time::timeout(Duration::from_secs(25), c).await.expect("the publish in flight is confirmed by the next owner").unwrap();
+        assert!(c.is_ack(), "{c:?}");
+        confirmed.push(50);
+        assert!(other.owns("silent"), "the other node took the queue over");
+        eprintln!("confirmed {:.1}s after the owner went silent", t.elapsed().as_secs_f64());
+        confirmed.extend(publish_confirmed(&ch, "silent", 51..100).await);
+        assert_eq!(confirmed.len(), 100);
+        let seen = consume_ids(&other.url, "silent", 100, Duration::from_secs(20)).await;
+        assert_eq!(seen, confirmed.into_iter().collect::<HashSet<u32>>(), "every confirmed message is there");
+    });
+}
+
 /// Correctness never rests on the lease: an owner whose membership died but whose process keeps
 /// running (cut off, frozen) is fenced out of the log by the next owner, so it can't confirm a
 /// message the next owner doesn't have.
@@ -453,10 +538,11 @@ fn a_deposed_owner_cannot_confirm() {
 
         // a still runs the queue it no longer owns: its publishes can't be confirmed.
         let from_a = publish_confirmed(&cha, "fenced", 2000..2010).await;
-        assert!(from_a.is_empty(), "a deposed owner confirmed {from_a:?}");
 
         let want: HashSet<u32> = (0..100).chain(from_b).collect();
-        let seen = consume_ids(&b.url, "fenced", want.len(), Duration::from_secs(20)).await;
+        let seen = consume_ids(&b.url, "fenced", want.len() + from_a.len(), Duration::from_secs(20)).await;
+        let kept: Vec<&u32> = from_a.iter().filter(|i| seen.contains(i)).collect();
+        assert!(from_a.is_empty(), "a deposed owner confirmed {from_a:?} (the new owner has {kept:?} of them)");
         assert_eq!(seen, want, "the new owner has exactly what was confirmed");
     });
 }

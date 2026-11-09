@@ -473,7 +473,19 @@ impl Cluster {
         let conn = Arc::new(ServerConn { tx, subs: Mutex::new(HashMap::new()), chunk_subs: Mutex::new(HashMap::new()), channels: Mutex::new(HashSet::new()) });
         self.conns.lock().push(Arc::downgrade(&conn));
         let mut r = BufReader::with_capacity(256 << 10, r);
-        while let Ok(Some(f)) = Frame::read(&mut r).await {
+        // Once the other node pings, a connection silent for longer than it pings is dead.
+        let mut pinged = false;
+        loop {
+            let f = tokio::select! {
+                f = Frame::read(&mut r) => match f {
+                    Ok(Some(f)) => f,
+                    _ => break,
+                },
+                _ = tokio::time::sleep(rpc::DEAD_AFTER), if pinged => {
+                    warn!("queues rpc: a node stopped pinging; dropping its connection");
+                    break;
+                }
+            };
             if f.kind != rpc::REQ {
                 continue;
             }
@@ -481,6 +493,11 @@ impl Cluster {
                 conn.reply(rpc::err_frame(f.id, &AmqpError::command_invalid("bad request")));
                 continue;
             };
+            if let Req::Ping = req {
+                pinged = true;
+                conn.reply(rpc::ok_frame(f.id, Value::Null, vec![]));
+                continue;
+            }
             self.handle(&conn, f.id, req, f.blobs).await;
         }
         // The other node is gone: drop its stream subscriptions, and requeue what its channels held.
@@ -510,6 +527,7 @@ impl Cluster {
                 }
                 return;
             }
+            Req::Ping => return,
             Req::Stats { qs } => {
                 let owned = self.owned.read();
                 let v: Vec<Value> = qs.iter().map(|k| owned.get(k).map(|o| json!(router::stats_of(&o.inner.shared))).unwrap_or(Value::Null)).collect();
@@ -766,7 +784,7 @@ impl Cluster {
                     }
                 });
             }
-            Req::Credit { .. } | Req::Stats { .. } | Req::StreamUnsubscribe { .. } => {}
+            Req::Credit { .. } | Req::Stats { .. } | Req::StreamUnsubscribe { .. } | Req::Ping => {}
         }
     }
 }

@@ -1731,14 +1731,17 @@ async fn amqp_open(w: &World, q: &QueuesState, confirms: bool) -> Result<Amqp, S
     Ok((conn, ch))
 }
 
-/// One publish, confirmed, on a shared connection (opened again if it dropped), as one attempt.
-async fn amqp_publish(w: &World, q: &QueuesState, conn: &tokio::sync::Mutex<Option<Amqp>>, id: &str) -> Result<(), String> {
+/// One publish, confirmed, on a shared connection (opened again if it dropped), as one attempt;
+/// its steps go in `trail` (for the report on a slow one).
+async fn amqp_publish(w: &World, q: &QueuesState, conn: &tokio::sync::Mutex<Option<Amqp>>, id: &str, trail: &Mutex<Vec<String>>) -> Result<(), String> {
     let mut g = conn.lock().await;
     if g.as_ref().is_some_and(|(c, ch)| !c.status().connected() || !ch.status().connected()) {
         *g = None;
     }
     if g.is_none() {
+        trail.lock().push(format!("+{:.2}s connecting", w.at(Instant::now())));
         *g = Some(amqp_open(w, q, true).await?);
+        trail.lock().push(format!("+{:.2}s connected", w.at(Instant::now())));
     }
     let ch = g.as_ref().unwrap().1.clone();
     let props = lapin::BasicProperties::default().with_delivery_mode(2).with_message_id(id.into());
@@ -1773,13 +1776,19 @@ async fn queues_publisher(w: Arc<World>, q: Arc<QueuesState>, k: usize) {
         let id = format!("p{k}-{n}");
         q.sent.lock().insert(id.clone());
         w.write(Product::Queues);
+        let (started, trail) = (Instant::now(), Mutex::new(Vec::new()));
         let res = retry(&w, Product::Queues, |_| async {
-            match amqp_publish(&w, &q, &conn, &id).await {
+            let r = amqp_publish(&w, &q, &conn, &id, &trail).await;
+            trail.lock().push(format!("+{:.2}s {}", w.at(Instant::now()), r.as_ref().err().map_or("confirmed", String::as_str)));
+            match r {
                 Ok(()) => Step::Done(()),
                 Err(k) => Step::Retry(k, None),
             }
         })
         .await;
+        if started.elapsed() > Duration::from_secs(5) {
+            w.note(Product::Queues, format!("publish {id} took {:.1}s from +{:.2}s: {:?}", started.elapsed().as_secs_f64(), w.at(started), trail.lock()));
+        }
         match res {
             Ok(()) => {
                 w.ack(Product::Queues);
