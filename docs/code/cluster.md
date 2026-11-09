@@ -225,7 +225,7 @@ Taking a repo over (`Ownership::Acquired`) first drops everything the node cache
 | GitHub | the import if it never finished, else the mirror and the reconcile (at once, then every 10 minutes); its notifications for GitHub (`gh_…` deliveries) go out from here | the mirror, import and reconcile stop; its notifications wait for the next owner |
 | code index | an index this node still has catches up; a repo whose reviewer is on builds one in the background; others build on first use (search answers 503 until it's built, as on a fresh repo) | removed from disk if the repo hasn't come back after two lease lengths (a node that fenced itself through a slow database usually gets it straight back); a node starting in a cluster removes every index it finds (it owns nothing yet), and a single node those of repos that no longer exist; deleting a repo removes its index on its owner at once |
 | checks (code-preview) | checks that were queued or running on open changes run again; the default branch's head is checked unless it's the last green one (which opens or closes `broken-main` items) | results of checks still running are dropped |
-| previews (code-preview) | previews stored as running are asleep (their containers were elsewhere); the next visit starts one here | the containers stop |
+| previews (code-preview) | previews stored as running are asleep (their containers were elsewhere), and a Fargate task of theirs still running is stopped; the next visit starts one here | the containers stop |
 
 `Lost` can come late (a node frozen past its deadline) or never (a killed process), so every
 piece of this also checks `Code::owns_repo` before its side effects, and long work runs under

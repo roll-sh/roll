@@ -249,9 +249,87 @@ when `ROLL_EDGE=1` (without it rolld is unchanged).
 
 ## Isolated work
 
-Code checks, previews and agent sandboxes run customer code. They run as their own Fargate tasks
-(ECS `RunTask`, a microVM each) with a minimal task role and no route into the fleet's network,
-never on a fleet node or through a Docker socket.
+Code checks, previews and agent sandboxes run customer code. On the fleet each run is its own
+Fargate task (ECS `RunTask`, a Firecracker microVM), with a task role that can do nothing and no
+way into the fleet's network: customer code never runs on a fleet node or through a Docker
+socket. One node and local development keep running checks and previews as Docker containers on
+the host (`ROLL_CODE_RUNNER=docker`, the default), exactly as before.
+
+- **One seam.** `code_preview::Isolation` (`crates/code-preview/src/isolation.rs`) prepares a
+  job's container with its tree, runs a check to its exit with its output, starts a preview and
+  says where it answers, and removes everything of a run by name. `Docker` (the `docker` CLI) and
+  `Fargate` (`fargate.rs`, aws-sdk-ecs) implement it; the callers keep the guarantees: a fork's
+  code waits for `approve-run`, a check's timeout covers its run and then everything it made is
+  removed (again a minute later, for a `RunTask` cut short), and the tree comes from
+  `Code::checkout`, only read while it's packed. Sandboxes keep their own seam
+  (`SandboxBackend`): `code_preview::sandbox::FargateSandboxes` is its Fargate backend
+  (`ROLL_SANDBOX_BACKEND=fargate`). With `ROLL_CODE_RUNNER=fargate` rolld refuses the docker
+  sandbox backend.
+- **A task** is three containers from a template task definition in the stack (`<stack>-check`,
+  `-preview`, `-sandbox`; arm64): `fetch` and `guard` run roll's small image (`roll-fetch`,
+  `crates/roll-fetch`, pushed as `fetch-<tag>`), `run` is the customer's image. The image is the
+  one thing `RunTask` can't override, so rolld registers a copy of the template per image (family
+  `<template>-<hash of template and image>`), once, and reuses it. CPU and memory are task
+  overrides rounded up to a Fargate size. Checks run on Fargate Spot when `ROLL_CODE_FARGATE_SPOT=1`
+  (one that's interrupted runs again on demand); previews and sandboxes on demand.
+- **The tree goes in as a bundle**: rolld packs the run's env and tree (`roll_fetch::pack`, a
+  gzipped tar, symlinks as symlinks, bounded by code-git's `Limits`: 100 MiB a file, 2 GiB in
+  all) to `s3://<bucket>/code/runs/<run>.tgz` and gives `fetch` a presigned GET that lasts 15
+  minutes. `fetch` downloads it and unpacks it into the task's own storage with
+  `Store::materialize`'s rules (`roll_fetch::unpack`): plain relative paths only, nothing that
+  exists is written again (a repeated name fails the run), nothing is written through a symlink,
+  no hard links or devices, sizes bounded by the bytes read. `run` starts only once `fetch`
+  succeeded, as `sh -c <run>` after sourcing the env. rolld deletes the object when the run ends
+  (a preview's once its tree is in); the bucket expires anything under `code/runs/` after a day,
+  noncurrent versions too.
+- **Nothing secret is in a `RunTask` request** (it shows in `DescribeTasks` and CloudTrail): the
+  env (data URLs with their passwords, a sandbox's machine token) is only in the bundle. The
+  presigned URL in the request opens the bundle until it's deleted or expires.
+- **Every task ends by itself.** A check's `guard` exits at its deadline (timeout + 11 minutes),
+  which stops the task; a preview's `guard` is its proxy and exits once no byte has gone either
+  way for the preview's idle time plus two minutes. So a node that dies mid-run leaves nothing
+  running for long, and nothing scans for leftovers at startup.
+- **Previews.** The repo's owner starts the task on the first visit, waits for it to run and for
+  `fetch` to finish, and proxies `chg-<id>.roll.site` to the task's private IP on the preview port
+  (`ROLL_CODE_FARGATE_PREVIEW_PORT`, 9970), where `guard` forwards to the app's port (`roll.toml`
+  `port`; 9970 itself is refused). The address lives only in the owner's memory, with the rest of
+  a running preview; nothing persists it, because a new owner never adopts a running task. A
+  preview stops when it's idle (the owner's reaper, or its own guard), when its change lands or
+  closes, and when its repo moves: the old owner stops it, the new one marks previews stored as
+  running asleep and stops any task of theirs still running, and the next visit starts one there
+  (docs/code/cluster.md, "Moving work"). Data URLs reach the repo's Postgres and Redis branches by
+  their public names on the edge.
+- **Sandboxes.** A running sandbox is one task named `roll-sbx-<id>` (`startedBy`), in group
+  `roll-sandbox`. Asleep or stopped means no task, so waking needs its env again: the backend
+  keeps it sealed with `ROLL_SECRET_KEY` at `code/sandboxes/<id>.sealed` until the sandbox is
+  deleted, and hands it over in a bundle on each start; `fetch` writes it to `/roll/env` for the
+  sandbox's user, who removes it once read.
+- **The network** (`deploy/cloud/aws/roll-cloud.yaml`): tasks run in subnets of their own
+  (`10.80.64.0/18`) whose network ACL refuses everything to and from the VPC except fleet nodes
+  reaching a preview on its port (and the replies to the nodes' ephemeral ports), and in
+  `IsolatedSecurityGroup`, which admits only nodes on the preview port. No node security group
+  admits it. There's no NAT, so tasks get a public IP (`ROLL_CODE_FARGATE_PUBLIC_IP=1`): their
+  only way out, to pull images and packages and reach roll's public endpoints like anyone else.
+- **Roles.** The task role has no policy. The execution role pulls images and writes logs
+  (`/<stack>/runs`, 7 days). The fleet's task role may `RunTask` only the runner families, in this
+  cluster, `StopTask`/`DescribeTasks`/`ListTasks` in this cluster, register and describe task
+  definitions, pass only the two runner roles to ECS, and read the runner logs (a check's summary
+  is the tail of its `run` log).
+- **Tests**: `code-preview/tests/fargate.rs` runs checks, a preview and a sandbox against a fake
+  ECS and CloudWatch Logs API and S3 (in process, or MinIO with `ROLL_E2E=1`, which checks the
+  presigned URLs' signatures), "running" each task the way Fargate would; the hostile bundles are
+  in `roll-fetch/tests/hostile.rs` (docs/code/test-coverage.md, "Checks and previews").
+- **Not done yet**:
+  - Not run against AWS.
+  - A sandbox's home lives in the task's storage, so a sleep loses it: provider logins and the
+    daemon's `agent.db` start over on each wake (the relay's mirror keeps the records). An EFS
+    access point per sandbox would keep it. Endpoints and API keys in the sandbox's env survive.
+  - Only public images (no registry credentials), and they need an arm64 variant. Docker Hub's
+    anonymous pull limits apply per task address.
+  - A check's output is read from CloudWatch Logs once it ends, not streamed.
+  - The `fetch` image comes from the stack's `ImageTag`, which changes on stack updates, not on
+    every deploy: the bundle format (`roll-bundle-1`) must stay readable by the previous
+    `roll-fetch`.
 
 ## GitHub resilience
 
@@ -305,6 +383,8 @@ never on a fleet node or through a Docker socket.
   role. Internal hops are signed with the cluster secret and stay on the VPC.
 - Security groups admit the NLB and the other nodes only; Cloudflare's proxied hostnames reach
   the origin with authenticated origin pulls.
+- Customer code (checks, previews, sandboxes) runs in Fargate tasks with no AWS permissions, in
+  subnets and a security group that can't reach the nodes ("Isolated work").
 
 ## Cost (us-east-1, testing size)
 
@@ -351,6 +431,15 @@ The contract between the stack, the image and rolld. Each setting is a flag with
 | `ROLL_LOG_FORMAT` | `json` | one JSON object per line, with access lines and metrics (see "Logs") |
 | `ROLL_QUEUES_USER`, `ROLL_QUEUES_PASSWORD` | `roll-admin`, generated in Secrets Manager | roll queues' admin login (guest/guest is refused behind the edge) |
 | `ROLL_CODE_PREVIEW_DOMAIN` | `roll.site` | previews answer on `chg-<id>.roll.site` |
+| `ROLL_CODE_RUNNER` | `fargate` | where checks and previews run: `docker` (this host, the default) or `fargate` ("Isolated work") |
+| `ROLL_CODE_RUNNER_CONCURRENCY` | `16` | checks running at once from one node |
+| `ROLL_CODE_FARGATE_CLUSTER`, `_SUBNETS`, `_SECURITY_GROUP` | the stack's cluster, isolated subnets (comma separated) and `IsolatedSecurityGroup` | where tasks run |
+| `ROLL_CODE_FARGATE_CHECK_TASK`, `_PREVIEW_TASK`, `_SANDBOX_TASK` | `<stack>-check`, `-preview`, `-sandbox` | the template task definitions |
+| `ROLL_CODE_FARGATE_PUBLIC_IP` | `1` | a public IP per task: their only way out without a NAT gateway |
+| `ROLL_CODE_FARGATE_SPOT` | `1` (`ChecksOnSpot`) | checks on Fargate Spot |
+| `ROLL_CODE_FARGATE_PREVIEW_PORT` | `9970` | where nodes reach a preview task |
+| `ROLL_CODE_FARGATE_BUCKET`, `_PREFIX` | `ROLL_S3_BUCKET`, `code/runs/` | where bundles go |
+| `ROLL_SANDBOX_BACKEND` | `fargate` with a `SandboxImage`, else `none` | agent sandboxes as Fargate tasks |
 
 Public ports (NLB listener → node port): 443 → 8443 (HTTPS: dashboard, API, git, S3, REST data
 planes, WebSockets), 5432, 6379, 9092, 9042, 5671, 8883, 61614 and 5551, each to the same port on
@@ -375,8 +464,9 @@ shorthands over the same set: `--no-storage`, `--no-queues` and `--no-nosql` tak
 - A product that's off binds none of its ports (the edge's too), starts no background work, and
   its API routes answer 404 with `{"error": "roll <product> is off on this node (ROLL_PRODUCTS)",
   "product": …}`. Its hostnames on the edge answer 404.
-- With Postgres off rolld never runs `docker` for computes. (roll code's checks and previews
-  still use Docker until they move to Fargate: without it they fail, and the node keeps serving.)
+- With Postgres off rolld never runs `docker` for computes. roll code's checks and previews
+  run as Fargate tasks on the fleet (`ROLL_CODE_RUNNER=fargate`, "Isolated work"); elsewhere
+  they use Docker on the host, and without it they fail while the node keeps serving.
 - `GET /v1/info` (no token) answers `{"version", "node", "products"}`; the dashboard hides the
   products a node doesn't run.
 - Every node of the fleet must run the same set: requests are forwarded to a resource's owner,
@@ -543,13 +633,14 @@ against it, then removes everything it created (all named `roll-cloud-e2e-*`).
 | queues on the cluster layer | built: lease `mq:<vhost>/<queue>`, metadata on the system database (schema `mq`), logs in S3 Standard with group commit (no keepers, no proxies), drain = roll-cluster's (docs/queues/deploy-aws.md) |
 | fleet end to end test | built (`pnpm test:fleet`, "Testing the fleet"): every product but postgres through a SIGKILL, a rolling restart and a scale-out, through HAProxy with PROXY v2; queues to be added to it |
 | postgres on the fleet and the system database | with the pg-engine branch |
-| isolated work on Fargate | next |
+| isolated work on Fargate | built ("Isolated work": checks, previews and sandboxes as Fargate tasks, `crates/roll-fetch`, the stack's isolated subnets and runner templates); not yet run against AWS |
 
 ### Open items
 
 - **Postgres on the fleet.** Today's Postgres product starts computes with the `docker` CLI, so
   the stack runs with it off (`ROLL_PRODUCTS`) until the in-process engine replaces them.
-- **Code checks and previews** still run in Docker; they move to Fargate ("Isolated work").
+- **Isolated work** hasn't run against AWS, and a Fargate sandbox's home doesn't survive a sleep
+  ("Isolated work", "Not done yet").
 - **Buckets on roll.site** are served by host (`<bucket>.roll.site/<key>`, the Worker's
   `ROLL_BUCKET_DOMAIN`) and by path on the zone (`roll.site/<bucket>/<key>`); set the deployment's
   CDN `base_url` to `https://roll.site` so purges reach both. Bucket names starting `chg-` are
