@@ -6362,6 +6362,7 @@ dependencies = [
  "pg-control",
  "pg-proxy",
  "pg-storage",
+ "rabbitmq-stream-client",
  "rcgen",
  "rdkafka",
  "redis-control",

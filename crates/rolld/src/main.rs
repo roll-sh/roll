@@ -373,7 +373,7 @@ async fn run() -> anyhow::Result<()> {
     };
     // roll queues on the node's cluster: each queue runs on its lease's holder.
     let queues = match on.on(Product::Queues) {
-        true => Some(queues::Queues::start(&home, args.queues.clone(), &args.public_host, cluster.clone(), args.code.cluster.system_database.as_deref().filter(|u| !u.is_empty()), &storage).await?),
+        true => Some(queues::Queues::start(&home, args.queues.clone(), &args.public_host, cluster.clone(), args.code.cluster.system_database.as_deref().filter(|u| !u.is_empty()), &storage, edge::Public::of(&args).as_ref()).await?),
         false => None,
     };
 

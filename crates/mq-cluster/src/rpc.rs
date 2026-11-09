@@ -120,6 +120,53 @@ pub enum Req {
     Touch { q: String },
     Consumers { q: String },
     Stats { qs: Vec<String> },
+    /// A stream-protocol publish. blobs: the entries (as stored), one per id in `ids`.
+    StreamPublish { q: String, writer: Option<String>, ids: Vec<u64> },
+    /// A stream-protocol subscription reading from `offset`, fed by credit (in chunks). blob 0:
+    /// its properties (field table); with `filtered`, blobs 1.. are the filter values.
+    StreamSubscribe { q: String, sub: u64, conn: u64, tag: String, offset: Offset, filtered: bool, match_unfiltered: bool, credit: u32, max_bytes: usize },
+    StreamUnsubscribe { q: String, sub: u64 },
+    StreamResolve { q: String, offset: Offset },
+    StreamWriterSequence { q: String, writer: String, seed: u64 },
+    StreamStats { q: String },
+}
+
+/// A stream offset specification on the wire (`StreamOffset`).
+#[derive(Serialize, Deserialize, Clone, Copy, Debug)]
+#[serde(rename_all = "snake_case")]
+pub enum Offset {
+    First,
+    Last,
+    Next,
+    At(u64),
+    /// Unix ms.
+    Time(u64),
+}
+
+impl From<&mq_core::queue::StreamOffset> for Offset {
+    fn from(o: &mq_core::queue::StreamOffset) -> Self {
+        use mq_core::queue::StreamOffset as S;
+        match *o {
+            S::First => Offset::First,
+            S::Last => Offset::Last,
+            S::Next => Offset::Next,
+            S::Offset(n) => Offset::At(n),
+            S::Timestamp(t) => Offset::Time(t),
+        }
+    }
+}
+
+impl From<Offset> for mq_core::queue::StreamOffset {
+    fn from(o: Offset) -> Self {
+        use mq_core::queue::StreamOffset as S;
+        match o {
+            Offset::First => S::First,
+            Offset::Last => S::Last,
+            Offset::Next => S::Next,
+            Offset::At(n) => S::Offset(n),
+            Offset::Time(t) => S::Timestamp(t),
+        }
+    }
 }
 
 /// Events the owner pushes to a subscribed consumer's node.
@@ -133,6 +180,8 @@ pub enum Push {
     TimedOut { sub: u64, timeout_ms: u64 },
     /// The queue moved to another node: subscribe there.
     Moved { sub: u64 },
+    /// A chunk for a stream-protocol subscription. blobs: its entries (as stored).
+    Chunk { sub: u64, first: u64, next: u64, committed: u64 },
 }
 
 /// An owner's answer.
@@ -231,7 +280,7 @@ impl Peer {
                     PUSH => {
                         let Ok(ev) = serde_json::from_value::<Push>(f.head) else { continue };
                         let sub = match &ev {
-                            Push::Deliver { sub, .. } | Push::Cancelled { sub } | Push::Activated { sub, .. } | Push::TimedOut { sub, .. } | Push::Moved { sub } => *sub,
+                            Push::Deliver { sub, .. } | Push::Cancelled { sub } | Push::Activated { sub, .. } | Push::TimedOut { sub, .. } | Push::Moved { sub } | Push::Chunk { sub, .. } => *sub,
                         };
                         let h = p.subs.lock().get(&sub).cloned();
                         if let Some(h) = h {

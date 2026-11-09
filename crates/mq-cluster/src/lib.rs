@@ -29,11 +29,12 @@ use bytes::{Bytes, BytesMut};
 use mq_core::cluster::{Placement, QueueStart};
 use mq_core::log::LogStore;
 use mq_core::meta::MetaStore;
+use mq_core::queue::stream::{ChunkSubscription, NativePublish};
 use mq_core::queue::{ConfirmTicket, ConsumerSpec, Outcome, PublishResult, QueueCmd, QueueRef};
 use mq_core::{AmqpError, Broker, FieldTable, Message};
 use parking_lot::{Mutex, RwLock};
 use roll_cluster::{Guard, Ownership, Route};
-use router::{Ctl, RemoteSink, Router, RouterRef};
+use router::{Ctl, RemoteChunkSink, RemoteSink, Router, RouterRef};
 use rpc::{Frame, Peer, Push, Req};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -329,6 +330,11 @@ impl Cluster {
                 c.subs.lock().remove(&sub);
                 c.push(Push::Moved { sub });
             }
+            let subs: Vec<u64> = c.chunk_subs.lock().iter().filter(|(_, s)| s.key == key).map(|(id, _)| *id).collect();
+            for sub in subs {
+                c.chunk_subs.lock().remove(&sub);
+                c.push(Push::Moved { sub });
+            }
         }
     }
 
@@ -464,7 +470,7 @@ impl Cluster {
                 buf.clear();
             }
         });
-        let conn = Arc::new(ServerConn { tx, subs: Mutex::new(HashMap::new()), channels: Mutex::new(HashSet::new()) });
+        let conn = Arc::new(ServerConn { tx, subs: Mutex::new(HashMap::new()), chunk_subs: Mutex::new(HashMap::new()), channels: Mutex::new(HashSet::new()) });
         self.conns.lock().push(Arc::downgrade(&conn));
         let mut r = BufReader::with_capacity(256 << 10, r);
         while let Ok(Some(f)) = Frame::read(&mut r).await {
@@ -477,7 +483,11 @@ impl Cluster {
             };
             self.handle(&conn, f.id, req, f.blobs).await;
         }
-        // The other node is gone: requeue what its channels held.
+        // The other node is gone: drop its stream subscriptions, and requeue what its channels held.
+        let chunk_subs: Vec<ChunkServerSub> = conn.chunk_subs.lock().drain().map(|(_, s)| s).collect();
+        for s in chunk_subs {
+            s.queue.stream_unsubscribe(s.reg).await;
+        }
         let chans: Vec<(String, u64)> = conn.channels.lock().drain().collect();
         for (key, ch) in chans {
             let o = self.owned.read().get(&key).cloned();
@@ -494,6 +504,9 @@ impl Cluster {
                 if let Some(s) = conn.subs.lock().get(sub) {
                     s.sink.credit.fetch_add(*n, Ordering::AcqRel);
                     s.queue.wake();
+                } else if let Some(s) = conn.chunk_subs.lock().get(sub) {
+                    s.sink.credit.fetch_add(*n, Ordering::AcqRel);
+                    s.queue.wake();
                 }
                 return;
             }
@@ -501,6 +514,13 @@ impl Cluster {
                 let owned = self.owned.read();
                 let v: Vec<Value> = qs.iter().map(|k| owned.get(k).map(|o| json!(router::stats_of(&o.inner.shared))).unwrap_or(Value::Null)).collect();
                 conn.reply(rpc::ok_frame(id, Value::Array(v), vec![]));
+                return;
+            }
+            Req::StreamUnsubscribe { sub, .. } => {
+                let s = conn.chunk_subs.lock().remove(sub);
+                if let Some(s) = s {
+                    s.queue.stream_unsubscribe(s.reg).await;
+                }
                 return;
             }
             Req::Publish { q, .. }
@@ -519,7 +539,12 @@ impl Cluster {
             | Req::ExtendLease { q, .. }
             | Req::Peek { q, .. }
             | Req::Touch { q }
-            | Req::Consumers { q } => q.clone(),
+            | Req::Consumers { q }
+            | Req::StreamPublish { q, .. }
+            | Req::StreamSubscribe { q, .. }
+            | Req::StreamResolve { q, .. }
+            | Req::StreamWriterSequence { q, .. }
+            | Req::StreamStats { q } => q.clone(),
         };
         let Some(owned) = self.owned.read().get(&key).cloned() else {
             // Not running here: the sender routes again, and this node starts the queue if it
@@ -681,7 +706,67 @@ impl Cluster {
                     reply.reply(rpc::ok_frame(id, serde_json::to_value(cs).unwrap_or(Value::Null), vec![]));
                 });
             }
-            Req::Credit { .. } | Req::Stats { .. } => {}
+            Req::StreamPublish { writer, ids, .. } => {
+                if ids.len() != blobs.len() {
+                    conn.reply(rpc::err_frame(id, &AmqpError::command_invalid("bad stream publish")));
+                    return;
+                }
+                let (ctx, crx) = oneshot::channel();
+                let confirm = ConfirmTicket::new(move |ok| {
+                    let _ = ctx.send(ok);
+                });
+                let entries = ids.into_iter().zip(blobs).collect();
+                if q.stream_publish(NativePublish { writer: writer.map(Arc::from), entries, confirm }).await.is_err() {
+                    conn.reply(rpc::moved_frame(id));
+                    return;
+                }
+                tokio::spawn(async move {
+                    let confirmed = crx.await.unwrap_or(false);
+                    reply.reply(rpc::ok_frame(id, json!({ "confirmed": confirmed }), vec![]));
+                });
+            }
+            Req::StreamSubscribe { sub, conn: cid, tag, offset, filtered, match_unfiltered, credit, max_bytes, .. } => {
+                let mut blobs = blobs.into_iter();
+                let properties = blobs.next().and_then(|mut b| FieldTable::decode(&mut b).ok()).unwrap_or_default();
+                let filters = filtered.then(|| blobs.collect());
+                let Some(broker) = self.broker() else { return };
+                let reg = broker.next_id();
+                let sink = Arc::new(RemoteChunkSink { sub, tx: conn.tx.clone(), credit: AtomicU32::new(credit), max_bytes, paused: owned.paused.clone() });
+                let cs = ChunkSubscription { id: reg, conn: cid, tag: Arc::from(tag.as_str()), offset: offset.into(), filters, match_unfiltered, properties, sink: sink.clone() };
+                match q.stream_subscribe(cs).await {
+                    Ok(next) => {
+                        conn.chunk_subs.lock().insert(sub, ChunkServerSub { key, queue: q.clone(), reg, sink });
+                        conn.reply(rpc::ok_frame(id, json!({ "next": next }), vec![]));
+                        q.wake();
+                    }
+                    Err(_) => conn.reply(rpc::moved_frame(id)),
+                }
+            }
+            Req::StreamResolve { offset, .. } => {
+                tokio::spawn(async move {
+                    match q.stream_resolve(offset.into()).await {
+                        Ok(n) => reply.reply(rpc::ok_frame(id, json!(n), vec![])),
+                        Err(_) => reply.reply(rpc::moved_frame(id)),
+                    }
+                });
+            }
+            Req::StreamWriterSequence { writer, seed, .. } => {
+                tokio::spawn(async move {
+                    match q.stream_writer_sequence(&writer, seed).await {
+                        Ok(n) => reply.reply(rpc::ok_frame(id, json!(n), vec![])),
+                        Err(_) => reply.reply(rpc::moved_frame(id)),
+                    }
+                });
+            }
+            Req::StreamStats { .. } => {
+                tokio::spawn(async move {
+                    match q.stream_stats().await {
+                        Ok(s) => reply.reply(rpc::ok_frame(id, json!({ "first": s.first, "next": s.next }), vec![])),
+                        Err(_) => reply.reply(rpc::moved_frame(id)),
+                    }
+                });
+            }
+            Req::Credit { .. } | Req::Stats { .. } | Req::StreamUnsubscribe { .. } => {}
         }
     }
 }
@@ -699,10 +784,20 @@ struct ServerSub {
     sink: Arc<RemoteSink>,
 }
 
+/// A stream-protocol subscription from another node, registered with the stream's actor.
+struct ChunkServerSub {
+    key: String,
+    queue: QueueRef,
+    /// Its id at the actor.
+    reg: u64,
+    sink: Arc<RemoteChunkSink>,
+}
+
 /// A connection from another node.
 struct ServerConn {
     tx: mpsc::Sender<Frame>,
     subs: Mutex<HashMap<u64, ServerSub>>,
+    chunk_subs: Mutex<HashMap<u64, ChunkServerSub>>,
     channels: Mutex<HashSet<(String, u64)>>,
 }
 

@@ -112,9 +112,15 @@ pub async fn start(broker: Arc<Broker>, mut config: Config) -> Handle {
 impl Handle {
     /// Serve one connection whose transport is already set up; `tls` is reported to the
     /// management API.
-    pub async fn serve_connection<S: AsyncRead + AsyncWrite + Send + Unpin + 'static>(&self, stream: S, peer: SocketAddr, local: SocketAddr, tls: bool) -> anyhow::Result<()> {
+    ///
+    /// `virtual_node` (behind roll cloud's edge, docs/cloud/README.md): the `host:port` the
+    /// client connected to. The connection then sees a single node there, as one virtual node:
+    /// `Open` and `Metadata` name it as every stream's leader, so the client never learns, or
+    /// needs to reach, an address inside the fleet; on a cluster, each stream's router carries
+    /// its publishes and reads to whichever node owns it, across moves.
+    pub async fn serve_connection<S: AsyncRead + AsyncWrite + Send + Unpin + 'static>(&self, stream: S, peer: SocketAddr, local: SocketAddr, tls: bool, virtual_node: Option<(String, u16)>) -> anyhow::Result<()> {
         let (rd, wr) = tokio::io::split(stream);
-        conn::run_split(self.0.clone(), Box::new(rd), Box::new(wr), peer, local, tls).await
+        conn::run_split(self.0.clone(), Box::new(rd), Box::new(wr), peer, local, tls, virtual_node).await
     }
 
     /// Accept connections on `listener` forever.

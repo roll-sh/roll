@@ -2,12 +2,17 @@
 //! the queue's actor, wherever it runs: in this process (the node holds the queue's lease) or on
 //! another node over RPC. When ownership moves (rebalance, drain, failover) the router retargets
 //! and re-registers its consumers, so client connections never notice.
+//!
+//! Stream queues take the stream protocol's commands too (publishes with deduplication, chunk
+//! subscriptions by offset): a subscription moves with the stream from the offset after the last
+//! chunk its client was handed, so it sees every entry once, in order, whichever node serves it.
 
-use crate::rpc::{Peer, Push, PushHandler, Reply, Req};
+use crate::rpc::{Offset, Peer, Push, PushHandler, Reply, Req};
 use crate::{Cluster, Decision, OwnedQueue, outcome_code};
 use bytes::{Bytes, BytesMut};
 use mq_core::cluster::QueueStart;
 use mq_core::queue::engine::QueueHost;
+use mq_core::queue::stream::{Chunk, ChunkSink, ChunkSubscription, Entry, StreamCmd, StreamStats};
 use mq_core::queue::*;
 use mq_core::{AmqpError, FieldTable, Message};
 use parking_lot::Mutex;
@@ -112,6 +117,7 @@ impl PushHandler for Reg {
             Push::Moved { .. } => {
                 let _ = self.ctl.send(Ctl::Resubscribe);
             }
+            Push::Chunk { .. } => {}
         }
     }
 
@@ -152,6 +158,130 @@ impl ConsumerSink for LocalSink {
     }
 }
 
+/// Chunks a stream subscription on another node may have in flight.
+const REMOTE_CHUNK_CREDIT: u32 = 8;
+
+/// One stream-protocol subscription registered through this router.
+struct ChunkReg {
+    /// The client's subscription id (unique in this broker): the actor here knows it by it.
+    id: ChannelId,
+    conn: ConnId,
+    tag: Arc<str>,
+    /// Where the client asked to start.
+    start: StreamOffset,
+    filters: Option<Vec<Bytes>>,
+    match_unfiltered: bool,
+    properties: FieldTable,
+    /// The client's sink.
+    sink: Arc<dyn ChunkSink>,
+    /// Where reading goes on from after a move: past the last chunk handed to `sink`.
+    next: Mutex<Option<u64>>,
+    /// Remote subscriptions: chunks waiting for the client's credit, and where to grant more.
+    buf: Mutex<VecDeque<Chunk>>,
+    sub: Mutex<Option<(u64, Weak<Peer>)>>,
+    ctl: mpsc::UnboundedSender<Ctl>,
+}
+
+impl ChunkReg {
+    fn new(s: ChunkSubscription, ctl: mpsc::UnboundedSender<Ctl>) -> Arc<ChunkReg> {
+        Arc::new(ChunkReg {
+            id: s.id,
+            conn: s.conn,
+            tag: s.tag,
+            start: s.offset,
+            filters: s.filters,
+            match_unfiltered: s.match_unfiltered,
+            properties: s.properties,
+            sink: s.sink,
+            next: Mutex::new(None),
+            buf: Mutex::default(),
+            sub: Mutex::default(),
+            ctl,
+        })
+    }
+
+    /// The offset to read from at a (new) owner.
+    fn offset(&self) -> StreamOffset {
+        self.next.lock().map_or_else(|| self.start.clone(), StreamOffset::Offset)
+    }
+
+    /// An owner accepted the subscription, reading from `next`.
+    fn started(&self, next: u64) {
+        self.next.lock().get_or_insert(next);
+    }
+
+    fn hand(&self, chunk: Chunk) {
+        *self.next.lock() = Some(chunk.next);
+        self.sink.deliver(chunk);
+    }
+
+    /// Hand buffered chunks to the client while it has credit; grant the owner as many.
+    fn drain(&self) {
+        let mut n = 0;
+        while self.sink.has_credit() {
+            let Some(c) = self.buf.lock().pop_front() else { break };
+            self.hand(c);
+            n += 1;
+        }
+        if n > 0
+            && let Some((sub, peer)) = self.sub.lock().clone()
+            && let Some(p) = peer.upgrade()
+        {
+            p.send(&Req::Credit { sub, n });
+        }
+    }
+}
+
+impl PushHandler for ChunkReg {
+    fn push(&self, ev: Push, blobs: Vec<Bytes>) {
+        match ev {
+            Push::Chunk { sub, first, next, committed } => {
+                // A chunk from a subscription this router has since replaced is read again there.
+                if self.sub.lock().as_ref().is_none_or(|(s, _)| *s != sub) {
+                    return;
+                }
+                let Ok(entries) = blobs.into_iter().map(Entry::decode).collect::<Result<Vec<_>, _>>() else { return };
+                self.buf.lock().push_back(Chunk { first, entries, committed, next });
+                self.drain();
+            }
+            Push::Cancelled { .. } => self.sink.cancelled(),
+            Push::Moved { .. } => {
+                let _ = self.ctl.send(Ctl::Resubscribe);
+            }
+            Push::Deliver { .. } | Push::Activated { .. } | Push::TimedOut { .. } => {}
+        }
+    }
+
+    fn disconnected(&self) {
+        let _ = self.ctl.send(Ctl::Resubscribe);
+    }
+}
+
+/// Sink for a stream subscription to a locally owned stream: records how far the client got, and
+/// stops delivering while the stream is being handed off.
+struct LocalChunkSink {
+    reg: Arc<ChunkReg>,
+    paused: Arc<AtomicBool>,
+}
+
+impl ChunkSink for LocalChunkSink {
+    fn has_credit(&self) -> bool {
+        !self.paused.load(Ordering::Acquire) && self.reg.sink.has_credit()
+    }
+    fn max_bytes(&self) -> usize {
+        self.reg.sink.max_bytes()
+    }
+    fn deliver(&self, chunk: Chunk) {
+        self.reg.hand(chunk);
+    }
+    fn cancelled(&self) {
+        // Paused means the stream is moving: the router subscribes again where it goes.
+        if !self.paused.load(Ordering::Acquire) {
+            self.reg.sink.cancelled();
+        }
+    }
+}
+
 /// Host for the local actor: marks the router deleted before the vhost forgets it.
 struct RouterHost {
     inner: Arc<dyn QueueHost>,
@@ -178,7 +308,10 @@ pub(crate) struct Router {
     target: Target,
     tenure: Option<Tenure>,
     regs: HashMap<(ChannelId, Arc<str>), Arc<Reg>>,
+    chunk_regs: HashMap<ChannelId, Arc<ChunkReg>>,
     ctl_tx: mpsc::UnboundedSender<Ctl>,
+    /// Stream queues: where stream-protocol commands come in (retries go back in here).
+    stream_tx: Option<mpsc::Sender<StreamCmd>>,
     rref: Arc<RouterRef>,
 }
 
@@ -200,7 +333,16 @@ impl Router {
         let (tx, rx) = mpsc::channel(4096);
         let (ctl_tx, ctl_rx) = mpsc::unbounded_channel();
         let shared = Arc::new(QueueShared::default());
-        let handle = Arc::new(QueueHandle::new(start.meta.clone(), start.kind, shared.clone(), tx));
+        let mut handle = QueueHandle::new(start.meta.clone(), start.kind, shared.clone(), tx);
+        let (stream_tx, srx) = match start.kind {
+            QueueType::Stream => {
+                let (stx, srx) = mpsc::channel(4096);
+                handle = handle.with_stream(stx.clone());
+                (Some(stx), Some(srx))
+            }
+            _ => (None, None),
+        };
+        let handle = Arc::new(handle);
         let rref = Arc::new(RouterRef { key: key.clone(), handle: Arc::downgrade(&handle), ctl: ctl_tx.clone(), remote: Mutex::new(None) });
         let host = start.host.clone();
         let mut r = Router {
@@ -213,7 +355,9 @@ impl Router {
             target: Target::None,
             tenure: None,
             regs: HashMap::new(),
+            chunk_regs: HashMap::new(),
             ctl_tx,
+            stream_tx,
             rref: rref.clone(),
         };
         // Registered before it routes: taking the lease announces it (`Acquired`), and the
@@ -226,7 +370,7 @@ impl Router {
             }
             return Err(e);
         }
-        tokio::spawn(r.run(rx, ctl_rx));
+        tokio::spawn(r.run(rx, ctl_rx, srx));
         Ok(handle)
     }
 
@@ -330,6 +474,87 @@ impl Router {
                 self.regs.remove(&(reg.spec.channel, reg.spec.tag.clone()));
             }
         }
+        // Stream subscriptions read on from where their clients got: chunks buffered but never
+        // handed over are read again at the new owner.
+        let chunk_regs: Vec<Arc<ChunkReg>> = self.chunk_regs.values().cloned().collect();
+        for reg in chunk_regs {
+            self.unsubscribe_remote(&reg);
+            if let Err(e) = self.register_chunks(&reg).await {
+                warn!(queue = %self.key, tag = %reg.tag, error = %e, "stream subscription lost on failover");
+                reg.sink.cancelled();
+                self.chunk_regs.remove(&reg.id);
+            }
+        }
+    }
+
+    /// Stop a stream subscription at the owner it's registered with on another node.
+    fn unsubscribe_remote(&self, reg: &ChunkReg) {
+        reg.buf.lock().clear();
+        if let Some((sub, peer)) = reg.sub.lock().take()
+            && let Some(p) = peer.upgrade()
+        {
+            p.unsubscribe(sub);
+            p.send(&Req::StreamUnsubscribe { q: self.key.clone(), sub });
+        }
+    }
+
+    /// Register a stream subscription with the current target, from where its client got to.
+    async fn register_chunks(&self, reg: &Arc<ChunkReg>) -> mq_core::Result<()> {
+        match &self.target {
+            Target::Local(o) => {
+                let sink = Arc::new(LocalChunkSink { reg: reg.clone(), paused: o.paused.clone() });
+                let cs = ChunkSubscription {
+                    id: reg.id,
+                    conn: reg.conn,
+                    tag: reg.tag.clone(),
+                    offset: reg.offset(),
+                    filters: reg.filters.clone(),
+                    match_unfiltered: reg.match_unfiltered,
+                    properties: reg.properties.clone(),
+                    sink,
+                };
+                reg.started(o.inner.stream_subscribe(cs).await?);
+                o.inner.wake();
+                Ok(())
+            }
+            Target::Remote(peer) => {
+                let Some(c) = self.cluster() else { return Err(AmqpError::internal("cluster stopped")) };
+                let sub = c.next_sub();
+                *reg.sub.lock() = Some((sub, Arc::downgrade(peer)));
+                peer.subscribe(sub, reg.clone());
+                let req = Req::StreamSubscribe {
+                    q: self.key.clone(),
+                    sub,
+                    conn: c.ns(reg.conn),
+                    tag: reg.tag.to_string(),
+                    offset: Offset::from(&reg.offset()),
+                    filtered: reg.filters.is_some(),
+                    match_unfiltered: reg.match_unfiltered,
+                    credit: REMOTE_CHUNK_CREDIT,
+                    max_bytes: reg.sink.max_bytes(),
+                };
+                let mut blobs = vec![table_bytes(&reg.properties)];
+                blobs.extend(reg.filters.iter().flatten().cloned());
+                match peer.call(&req, blobs).await {
+                    Reply::Ok(v, _) => {
+                        reg.started(v["next"].as_u64().unwrap_or(0));
+                        Ok(())
+                    }
+                    Reply::Err(e) => {
+                        peer.unsubscribe(sub);
+                        *reg.sub.lock() = None;
+                        Err(e)
+                    }
+                    Reply::Moved => {
+                        peer.unsubscribe(sub);
+                        *reg.sub.lock() = None;
+                        let _ = self.ctl_tx.send(Ctl::Resubscribe);
+                        Ok(())
+                    }
+                }
+            }
+            Target::None => Ok(()),
+        }
     }
 
     async fn register(&self, reg: &Arc<Reg>) -> mq_core::Result<()> {
@@ -375,8 +600,14 @@ impl Router {
         }
     }
 
-    async fn run(mut self, mut rx: mpsc::Receiver<QueueCmd>, mut ctl: mpsc::UnboundedReceiver<Ctl>) {
+    async fn run(mut self, mut rx: mpsc::Receiver<QueueCmd>, mut ctl: mpsc::UnboundedReceiver<Ctl>, mut srx: Option<mpsc::Receiver<StreamCmd>>) {
         loop {
+            let stream_cmd = async {
+                match srx.as_mut() {
+                    Some(r) => r.recv().await,
+                    None => std::future::pending().await,
+                }
+            };
             tokio::select! {
                 biased;
                 c = ctl.recv() => match c {
@@ -409,6 +640,7 @@ impl Router {
                     }
                     None => break,
                 },
+                Some(cmd) = stream_cmd => self.handle_stream(cmd).await,
             }
         }
         self.shutdown(false).await;
@@ -424,6 +656,10 @@ impl Router {
             reg.spec.sink.cancelled(&reg.spec.tag);
         }
         self.regs.clear();
+        for reg in std::mem::take(&mut self.chunk_regs).into_values() {
+            self.unsubscribe_remote(&reg);
+            reg.sink.cancelled();
+        }
         if let Some(c) = self.cluster() {
             let mine = c.routers.read().get(&self.key).is_some_and(|r| Arc::ptr_eq(r, &self.rref));
             if mine {
@@ -545,7 +781,10 @@ impl Router {
                 }
                 match &self.target {
                     Target::Local(o) => o.inner.wake(),
-                    _ => self.regs.values().for_each(|r| r.drain()),
+                    _ => {
+                        self.regs.values().for_each(|r| r.drain());
+                        self.chunk_regs.values().for_each(|r| r.drain());
+                    }
                 }
             }
             (_, QueueCmd::Consume { spec, reply }) => {
@@ -843,6 +1082,133 @@ impl Router {
     }
 }
 
+impl Router {
+    /// A stream-protocol command: to the actor here, or to the owner over RPC.
+    async fn handle_stream(&mut self, cmd: StreamCmd) {
+        if matches!(self.target, Target::None) {
+            let _ = self.resolve(false).await;
+        }
+        let q = self.key.clone();
+        match (self.target.clone(), cmd) {
+            (_, StreamCmd::Subscribe { sub, reply }) => {
+                let reg = ChunkReg::new(sub, self.ctl_tx.clone());
+                if self.register_chunks(&reg).await.is_ok() {
+                    let next = reg.next.lock().unwrap_or(0);
+                    self.chunk_regs.insert(reg.id, reg);
+                    let _ = reply.send(next);
+                }
+            }
+            (target, StreamCmd::Unsubscribe { id }) => {
+                if let Some(reg) = self.chunk_regs.remove(&id) {
+                    self.unsubscribe_remote(&reg);
+                }
+                if let Target::Local(o) = target {
+                    o.inner.stream_unsubscribe(id).await;
+                }
+            }
+            (Target::Local(o), StreamCmd::Publish(p)) => {
+                let _ = o.inner.stream_publish(p).await;
+            }
+            (Target::Local(o), cmd) => {
+                // Answered by the actor (it may flush first): keep the router free meanwhile.
+                tokio::spawn(async move {
+                    match cmd {
+                        StreamCmd::Resolve { offset, reply } => {
+                            if let Ok(n) = o.inner.stream_resolve(offset).await {
+                                let _ = reply.send(n);
+                            }
+                        }
+                        StreamCmd::WriterSequence { writer, seed, reply } => {
+                            if let Ok(n) = o.inner.stream_writer_sequence(&writer, seed).await {
+                                let _ = reply.send(n);
+                            }
+                        }
+                        StreamCmd::Stats { reply } => {
+                            if let Ok(s) = o.inner.stream_stats().await {
+                                let _ = reply.send(s);
+                            }
+                        }
+                        StreamCmd::Publish(_) | StreamCmd::Subscribe { .. } | StreamCmd::Unsubscribe { .. } => {}
+                    }
+                });
+            }
+            (Target::Remote(peer), StreamCmd::Publish(p)) => {
+                let ids: Vec<u64> = p.entries.iter().map(|(id, _)| *id).collect();
+                let blobs: Vec<Bytes> = p.entries.iter().map(|(_, e)| e.clone()).collect();
+                let req = Req::StreamPublish { q, writer: p.writer.as_deref().map(str::to_string), ids };
+                let fut = self.remote_stream(&peer, req, blobs, move |rep| match rep {
+                    Reply::Ok(v, _) => {
+                        p.confirm.settle(v["confirmed"].as_bool().unwrap_or(false));
+                        None
+                    }
+                    // Not taken there: publish again wherever it is now (deduplicated by
+                    // publishing id, like any retried publish).
+                    Reply::Moved => Some(StreamCmd::Publish(p)),
+                    Reply::Err(_) => None,
+                });
+                fut.await;
+            }
+            (Target::Remote(peer), StreamCmd::Resolve { offset, reply }) => {
+                let req = Req::StreamResolve { q, offset: Offset::from(&offset) };
+                let fut = self.remote_stream(&peer, req, vec![], move |rep| match rep {
+                    Reply::Ok(v, _) => {
+                        let _ = reply.send(v.as_u64().unwrap_or(0));
+                        None
+                    }
+                    Reply::Moved => Some(StreamCmd::Resolve { offset, reply }),
+                    Reply::Err(_) => None,
+                });
+                fut.await;
+            }
+            (Target::Remote(peer), StreamCmd::WriterSequence { writer, seed, reply }) => {
+                let req = Req::StreamWriterSequence { q, writer: writer.clone(), seed };
+                let fut = self.remote_stream(&peer, req, vec![], move |rep| match rep {
+                    Reply::Ok(v, _) => {
+                        let _ = reply.send(v.as_u64().unwrap_or(seed));
+                        None
+                    }
+                    Reply::Moved => Some(StreamCmd::WriterSequence { writer, seed, reply }),
+                    Reply::Err(_) => None,
+                });
+                fut.await;
+            }
+            (Target::Remote(peer), StreamCmd::Stats { reply }) => {
+                let fut = self.remote_stream(&peer, Req::StreamStats { q }, vec![], move |rep| match rep {
+                    Reply::Ok(v, _) => {
+                        let _ = reply.send(StreamStats { first: v["first"].as_u64().unwrap_or(0), next: v["next"].as_u64().unwrap_or(0) });
+                        None
+                    }
+                    Reply::Moved => Some(StreamCmd::Stats { reply }),
+                    Reply::Err(_) => None,
+                });
+                fut.await;
+            }
+            // No owner reachable: dropping the command answers it (a publish's ticket reports
+            // the failure, a reply channel closes).
+            (Target::None, _) => {}
+        }
+    }
+
+    /// [`Router::remote`] for stream commands: a retry goes back into the stream mailbox.
+    fn remote_stream(&self, peer: &Arc<Peer>, req: Req, blobs: Vec<Bytes>, done: impl FnOnce(Reply) -> Option<StreamCmd> + Send + 'static) -> impl std::future::Future<Output = ()> + Send + 'static {
+        let peer = peer.clone();
+        let stx = self.stream_tx.clone();
+        let ctl = self.ctl_tx.clone();
+        async move {
+            let rx = peer.start(&req, blobs).await;
+            tokio::spawn(async move {
+                if let Some(retry) = done(Peer::finish(rx).await)
+                    && let Some(stx) = stx
+                {
+                    let _ = ctl.send(Ctl::Resubscribe);
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                    let _ = stx.send(retry).await;
+                }
+            });
+        }
+    }
+}
+
 /// Answer a command that can't be served (no owner reachable).
 fn drop_cmd(cmd: QueueCmd, meta: &QueueMeta) {
     let gone = || AmqpError::internal(format!("queue '{}' in vhost '{}' is unavailable (owner unreachable)", meta.name, meta.vhost));
@@ -915,6 +1281,38 @@ pub(crate) fn apply_stats(s: &QueueShared, v: &[u64]) {
     s.dead_lettered.store(v[10], Ordering::Relaxed);
     if was_empty && v[0] > 0 {
         s.available.notify_waiters();
+    }
+}
+
+/// Sink the owner registers for a stream subscription on another node: sends whole chunks over
+/// RPC within the credit (in chunks) that node grants.
+pub(crate) struct RemoteChunkSink {
+    pub sub: u64,
+    pub tx: mpsc::Sender<crate::rpc::Frame>,
+    pub credit: AtomicU32,
+    pub max_bytes: usize,
+    pub paused: Arc<AtomicBool>,
+}
+
+impl ChunkSink for RemoteChunkSink {
+    fn has_credit(&self) -> bool {
+        !self.paused.load(Ordering::Acquire) && self.credit.load(Ordering::Acquire) > 0 && self.tx.capacity() > 64
+    }
+    fn max_bytes(&self) -> usize {
+        self.max_bytes
+    }
+    fn deliver(&self, c: Chunk) {
+        let _ = self.credit.try_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1));
+        let head = serde_json::to_value(Push::Chunk { sub: self.sub, first: c.first, next: c.next, committed: c.committed }).unwrap_or(Value::Null);
+        let blobs = c.entries.iter().map(Entry::stored).collect();
+        let _ = self.tx.try_send(crate::rpc::Frame { kind: crate::rpc::PUSH, id: 0, head, blobs });
+    }
+    fn cancelled(&self) {
+        // Paused: the stream is moving, and the subscriber is told `Moved` instead.
+        if !self.paused.load(Ordering::Acquire) {
+            let head = serde_json::to_value(Push::Cancelled { sub: self.sub }).unwrap_or(Value::Null);
+            let _ = self.tx.try_send(crate::rpc::Frame { kind: crate::rpc::PUSH, id: 0, head, blobs: vec![] });
+        }
     }
 }
 

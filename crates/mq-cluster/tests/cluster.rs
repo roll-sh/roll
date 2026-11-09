@@ -89,9 +89,10 @@ struct Node {
     url: String,
     /// RabbitMQ Stream protocol listener.
     stream_port: u16,
+    /// The stream protocol's server (the edge hands it connections).
+    stream: mq_stream::Handle,
     nodes: Arc<roll_cluster::Cluster>,
     cluster: Arc<Cluster>,
-    #[allow(dead_code)]
     broker: Arc<Broker>,
 }
 
@@ -105,7 +106,7 @@ impl Node {
         let (meta, logs) = (env.meta.clone(), env.logs());
         let config = ClusterConfig { listeners: [("stream".to_string(), stream_addr)].into(), follow: Duration::from_millis(30) };
         let n = nodes.clone();
-        let (url, cluster, broker) = rt.block_on(async move {
+        let (url, cluster, broker, stream) = rt.block_on(async move {
             let cluster = Cluster::join(n, config, meta.clone(), logs.clone()).await.unwrap();
             let bc = BrokerConfig { node_name: format!("rabbit@{id}"), ..Default::default() };
             let broker = Broker::start_with_placement(bc, meta, logs, Some(cluster.placement())).await.unwrap();
@@ -117,11 +118,13 @@ impl Node {
             tokio::spawn(async move {
                 let _ = mq_amqp::serve_listener(b, listener, mq_amqp::ServerConfig { listen: addr, amqp10: None }).await;
             });
-            let sc = mq_stream::Config { advertised_host: "127.0.0.1".into(), ..mq_stream::Config::new(stream_addr) };
-            tokio::spawn(mq_stream::serve_listener(broker.clone(), stream_listener, sc));
-            (format!("amqp://guest:guest@{addr}/%2f"), cluster, broker)
+            let sc = mq_stream::Config { advertised_host: "127.0.0.1".into(), advertised_port: stream_addr.port(), ..mq_stream::Config::new(stream_addr) };
+            let stream = mq_stream::start(broker.clone(), sc).await;
+            let s = stream.clone();
+            tokio::spawn(async move { s.serve_listener(stream_listener).await });
+            (format!("amqp://guest:guest@{addr}/%2f"), cluster, broker, stream)
         });
-        Node { rt: Some(rt), url, stream_port: stream_addr.port(), nodes, cluster, broker }
+        Node { rt: Some(rt), url, stream_port: stream_addr.port(), stream, nodes, cluster, broker }
     }
 
     /// Crash: membership stops without a word (its leases lapse), and every task and socket of
@@ -495,6 +498,93 @@ fn stream_clients_are_sent_to_the_owner() {
         }
         assert_eq!(got, (0..100).map(|i| format!("e{i}")).collect::<Vec<_>>());
         let _ = producer.close().await;
+    });
+}
+
+/// Behind the edge, every node answers stream clients as one virtual node at the address the
+/// client used (`Open` and `Metadata` name it), and the stream's router carries publishes and
+/// reads to wherever the stream runs. A producer (deduplicating) and a consumer that only ever
+/// reach a node that doesn't own the stream keep going while the stream moves (its owner drains),
+/// without reconnecting: every confirmed message is read once, in order.
+#[test]
+fn stream_clients_behind_the_edge_see_one_node_across_a_move() {
+    use rabbitmq_stream_client::Environment;
+    use rabbitmq_stream_client::types::{Message, OffsetSpecification};
+    let env = Env::memory();
+    let nodes = [Node::start(&env, "a"), Node::start(&env, "b"), Node::start(&env, "c")];
+    let client = Runtime::new().unwrap();
+    client.block_on(async {
+        let (_c, ch) = channel(&nodes[0].url).await;
+        let mut args = FieldTable::default();
+        args.insert("x-queue-type".into(), AMQPValue::LongString("stream".into()));
+        ch.queue_declare("events".into(), QueueDeclareOptions { durable: true, ..Default::default() }, args).await.unwrap();
+        for n in &nodes {
+            known_on(n, "events").await;
+        }
+        let key = mq_cluster::queue_key("/", "events", 0);
+        wait_until("the stream on its node", Duration::from_secs(10), async || {
+            let at = nodes[0].nodes.preferred(&key).map(|n| n.id);
+            nodes.iter().any(|n| Some(n.nodes.node_id()) == at.as_deref() && n.owns("events"))
+        })
+        .await;
+        let owner = nodes.iter().position(|n| n.owns("events")).unwrap();
+        let edge = (owner + 1) % 3;
+
+        // The edge's stream port on a node that doesn't own the stream: one virtual node, at the
+        // address the client connects to.
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = l.local_addr().unwrap().port();
+        let handle = nodes[edge].stream.clone();
+        nodes[edge].spawn(async move {
+            while let Ok((sock, peer)) = l.accept().await {
+                let (h, local) = (handle.clone(), sock.local_addr().unwrap());
+                tokio::spawn(async move { h.serve_connection(sock, peer, local, false, Some(("127.0.0.1".to_string(), port))).await });
+            }
+        });
+
+        let senv = Environment::builder().host("127.0.0.1").port(port).build().await.unwrap();
+        let mut producer = senv.producer().name("app").build("events").await.unwrap();
+        let mut consumer = senv.consumer().offset(OffsetSpecification::First).build("events").await.unwrap();
+        let got = Arc::new(parking_lot::Mutex::new(Vec::<String>::new()));
+        let reader = {
+            let got = got.clone();
+            tokio::spawn(async move {
+                while let Ok(Some(Ok(d))) = tokio::time::timeout(Duration::from_secs(20), consumer.next()).await {
+                    got.lock().push(String::from_utf8(d.message().data().unwrap().to_vec()).unwrap());
+                }
+            })
+        };
+        let mut send = async |i: u32| {
+            let c = tokio::time::timeout(Duration::from_secs(20), producer.send_with_confirm(Message::builder().body(format!("e{i}")).build())).await;
+            assert!(matches!(c, Ok(Ok(ref c)) if c.confirmed()), "e{i} not confirmed: {c:?}");
+        };
+        for i in 0..300 {
+            send(i).await;
+        }
+        // The owner drains while the clients carry on: the stream moves.
+        let on = nodes[owner].nodes.clone();
+        let drain = nodes[owner].spawn(async move { on.drain(Duration::from_secs(15)).await });
+        for i in 300..600 {
+            send(i).await;
+        }
+        drain.await.unwrap();
+        assert!(!nodes[owner].owns("events") && nodes.iter().any(|n| n.owns("events")), "the stream moved");
+        for i in 600..800 {
+            send(i).await;
+        }
+        let want: Vec<String> = (0..800).map(|i| format!("e{i}")).collect();
+        let t = Instant::now();
+        while got.lock().len() < want.len() && t.elapsed() < Duration::from_secs(20) {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert_eq!(*got.lock(), want, "read once each, in order");
+        // The clients never reached any node but the edge's.
+        for (i, n) in nodes.iter().enumerate() {
+            let streams = n.broker.connections().iter().filter(|c| c.protocol == "stream").count();
+            assert_eq!(streams > 0, i == edge, "stream connections on node {i}: {streams}");
+        }
+        let _ = producer.close().await;
+        reader.abort();
     });
 }
 

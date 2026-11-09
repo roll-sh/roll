@@ -6,7 +6,7 @@ use bytes::Bytes;
 use mq_core::error::{ACCESS_REFUSED as AMQP_ACCESS_REFUSED, PRECONDITION_FAILED as AMQP_PRECONDITION_FAILED};
 use mq_core::exchange::DestKind;
 use mq_core::message::{Message, Properties};
-use mq_core::queue::QueueRef;
+use mq_core::queue::{QueueRef, QueueType};
 use mq_core::value::{FieldTable, FieldValue};
 use mq_core::vhost::{DeclareQueue, VHost};
 
@@ -19,32 +19,31 @@ pub fn enforce_name(name: &str) -> Option<String> {
     (!n.is_empty() && !n.starts_with("amq.")).then_some(n)
 }
 
-/// Where a stream lives: on this node, or on another cluster node (its stream listener).
+/// Where a stream runs: on this node, or on another cluster node (its stream listener).
 pub enum Found {
-    Here(QueueRef),
+    Here,
     Elsewhere(Option<std::net::SocketAddr>),
 }
 
-/// A stream by name, wherever it runs.
+/// Where a stream runs (what `Metadata` names as its leader off the edge).
 pub fn find(vh: &VHost, name: &str) -> Result<Found, u16> {
     use mq_core::cluster::Located;
     match vh.locate_queue(name) {
-        Some(Located::Local(q)) if q.is_stream() && !q.is_deleted() => Ok(Found::Here(q)),
-        Some(Located::Remote { listeners, .. }) if vh.queue(name).is_some_and(|q| q.kind == mq_core::queue::QueueType::Stream) => {
-            Ok(Found::Elsewhere(listeners.get("stream").copied()))
-        }
+        Some(Located::Local(q)) if q.is_stream() && !q.is_deleted() => Ok(Found::Here),
+        Some(Located::Remote { listeners, .. }) if vh.queue(name).is_some_and(|q| q.kind == QueueType::Stream) => Ok(Found::Elsewhere(listeners.get("stream").copied())),
         // A clustered stream between owners (moving, failing over): ask again shortly.
-        Some(Located::Local(q)) if q.kind == mq_core::queue::QueueType::Stream && !q.is_deleted() => Err(STREAM_NOT_AVAILABLE),
+        Some(Located::Local(q)) if q.kind == QueueType::Stream && !q.is_deleted() => Err(STREAM_NOT_AVAILABLE),
         _ => Err(STREAM_DOES_NOT_EXIST),
     }
 }
 
-/// A stream served by this node (publishing and reading need the stream's own node; clients
-/// find it through `Metadata`).
+/// A stream to publish to and read from on this connection: its actor on a node alone; on a
+/// cluster its router, which reaches the stream wherever it runs and follows it when it moves.
 pub fn lookup(vh: &VHost, name: &str) -> Result<QueueRef, u16> {
-    match find(vh, name)? {
-        Found::Here(q) => Ok(q),
-        Found::Elsewhere(_) => Err(STREAM_NOT_AVAILABLE),
+    match vh.queue(name) {
+        Some(q) if q.is_stream() && !q.is_deleted() => Ok(q),
+        Some(q) if q.kind == QueueType::Stream && !q.is_deleted() => Err(STREAM_NOT_AVAILABLE),
+        _ => Err(STREAM_DOES_NOT_EXIST),
     }
 }
 

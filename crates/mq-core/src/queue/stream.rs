@@ -222,7 +222,8 @@ impl Entry {
         }
     }
 
-    fn stored(&self) -> Bytes {
+    /// The entry as stored ([`Entry::decode`] reads it back).
+    pub fn stored(&self) -> Bytes {
         match self {
             Entry::Msg(m) => encode(m),
             Entry::Native(n) => n.raw.clone(),
@@ -237,6 +238,8 @@ pub struct Chunk {
     pub entries: Vec<Entry>,
     /// Last durable offset (deliver v2's committed chunk id).
     pub committed: u64,
+    /// Where the subscription reads on from after this chunk (past what a filter skipped).
+    pub next: u64,
 }
 
 /// How the stream protocol receives chunks. Implementations must never block.
@@ -363,7 +366,7 @@ impl ChunkConsumer {
     }
 
     fn emit(&self, first: u64, entries: Vec<Entry>, committed: u64) {
-        self.sub.sink.deliver(Chunk { first, entries, committed });
+        self.sub.sink.deliver(Chunk { first, entries, committed, next: self.next });
     }
 }
 
@@ -711,9 +714,16 @@ impl Stream {
             }
             StreamCmd::WriterSequence { writer, seed, reply } => {
                 self.flush().await;
-                let last = self.writers.entry(writer).or_insert(0);
-                *last = (*last).max(seed);
-                let _ = reply.send(*last);
+                // A reference with nothing stored has no last id: its first publish may use 0.
+                let last = match self.writers.get_mut(&writer) {
+                    Some(last) => {
+                        *last = (*last).max(seed);
+                        *last
+                    }
+                    None if seed > 0 => *self.writers.entry(writer).or_insert(seed),
+                    None => 0,
+                };
+                let _ = reply.send(last);
             }
             StreamCmd::Stats { reply } => {
                 self.flush().await;
@@ -767,8 +777,10 @@ impl Stream {
         if let Some((cfirst, _)) = self.cache.front()
             && from >= *cfirst
         {
-            let skip = (from - cfirst) as usize;
-            return self.cache.iter().skip(skip).take(max).cloned().collect();
+            // By offset, not position: offsets skip the indexes a new owner's fence (and an
+            // object log's links) take, so the cache has gaps after every move.
+            let at = self.cache.partition_point(|(off, _)| *off < from);
+            return self.cache.range(at..).take(max).cloned().collect();
         }
         match self.log.read(from, max, 8 << 20).await {
             Ok(v) => v.into_iter().filter_map(|(o, b)| Entry::decode(b).ok().map(|e| (o, e))).collect(),

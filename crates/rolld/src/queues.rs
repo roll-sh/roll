@@ -135,8 +135,9 @@ pub struct Queues {
 impl Queues {
     /// Start the broker on `nodes` (the node's roll-cluster handle). `system_database`: the
     /// shared database's URL, where a cluster keeps metadata; `objects`: the node's object
-    /// storage, where a cluster keeps logs by default.
-    pub async fn start(home: &Path, args: QueuesArgs, public_host: &str, nodes: Arc<roll_cluster::Cluster>, system_database: Option<&str>, objects: &StorageConfig) -> anyhow::Result<Self> {
+    /// storage, where a cluster keeps logs by default; `public`: behind the edge, the names
+    /// connection details give.
+    pub async fn start(home: &Path, args: QueuesArgs, public_host: &str, nodes: Arc<roll_cluster::Cluster>, system_database: Option<&str>, objects: &StorageConfig, public: Option<&crate::edge::Public>) -> anyhow::Result<Self> {
         let dir = home.join("queues");
         let clustered = nodes.backend_name() != "memory";
         // RabbitMQ's rule: guest/guest only from this machine (behind the edge, nothing is).
@@ -182,15 +183,20 @@ impl Queues {
         }
         info!(storage = %logs.describe(), metadata = %meta.describe(), clustered, "queues broker started");
 
+        // Behind the edge, each vhost's hostname over TLS (docs/cloud/README.md, "Hostnames");
+        // else this node's own listeners.
         let url = |scheme: &str, addr: SocketAddr| Some(format!("{scheme}://{public_host}:{}", addr.port()));
-        let endpoints = Endpoints {
-            amqp: url("amqp", args.amqp),
-            mqtt: url("mqtt", args.mqtt),
-            stream: url("rabbitmq-stream", args.stream),
-            stomp: url("stomp", args.stomp),
-            http: url("http", args.http),
-            management: url("http", args.management),
-            ..Default::default()
+        let endpoints = match public {
+            Some(p) => p.queues(),
+            None => Endpoints {
+                amqp: url("amqp", args.amqp),
+                mqtt: url("mqtt", args.mqtt),
+                stream: url("rabbitmq-stream", args.stream),
+                stomp: url("stomp", args.stomp),
+                http: url("http", args.http),
+                management: url("http", args.management),
+                ..Default::default()
+            },
         };
         let control = QueuesControl::with_config(
             broker.clone(),
