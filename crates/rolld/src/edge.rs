@@ -152,12 +152,37 @@ pub struct Public {
     pub pg_port: u16,
     pub kafka_port: u16,
     pub nosql_port: u16,
+    /// Queues: AMQPS, MQTTS, STOMP over TLS, streams over TLS.
+    pub mq_ports: [u16; 4],
 }
 
 impl Public {
     pub fn of(args: &Args) -> Option<Public> {
         let e = &args.edge;
-        e.enabled.then(|| Public { hosts: e.hostnames(), pg_port: e.pg_listen.port(), kafka_port: e.kafka_listen.port(), nosql_port: e.nosql_listen.port() })
+        e.enabled.then(|| Public {
+            hosts: e.hostnames(),
+            pg_port: e.pg_listen.port(),
+            kafka_port: e.kafka_listen.port(),
+            nosql_port: e.nosql_listen.port(),
+            mq_ports: [e.amqps_listen.port(), e.mqtts_listen.port(), e.stomps_listen.port(), e.mq_stream_listen.port()],
+        })
+    }
+
+    /// queues: every vhost at `<vhost label>.mq.<region>.<domain>` (`mq_control::host_label`),
+    /// with AMQPS, MQTTS, STOMP over TLS and the stream protocol over TLS on the edge's ports and
+    /// the HTTP messaging API on 443. Nothing in the clear, and no management port: those are
+    /// this node's own.
+    pub fn queues(&self) -> mq_control::Endpoints {
+        let host = format!("{}.{}", mq_control::VHOST, self.hosts.product_domain("mq"));
+        let [amqps, mqtts, stomps, stream] = self.mq_ports;
+        mq_control::Endpoints {
+            amqps: Some(format!("amqps://{host}:{amqps}")),
+            mqtt: Some(format!("mqtts://{host}:{mqtts}")),
+            stomp: Some(format!("stomp+ssl://{host}:{stomps}")),
+            stream: Some(format!("rabbitmq-stream+tls://{host}:{stream}")),
+            http: Some(format!("https://{host}")),
+            ..Default::default()
+        }
     }
 
     /// nosql: `<id>.nosql.<region>.<domain>:9042` over TLS (the server name picks the database),
@@ -496,12 +521,17 @@ async fn queue_listeners(e: &EdgeArgs, q: &crate::queues::Queues, plain: &Arc<to
             }
         }
     })));
+    // Streams: one virtual node at the name and port the client used (a client without a server
+    // name is told the default vhost's), so `Metadata` never hands out a node's own address; the
+    // stream's router reaches it wherever it runs.
     let l = bind(e.mq_stream_listen).await?;
     let stream = q.stream.clone();
+    let unnamed = format!("{}.{}", mq_control::host_label("/"), e.hostnames().product_domain("mq"));
     out.push(io(listener::serve_tls(l, plain.clone(), opts, drain.clone(), move |tls, a| {
         let stream = stream.clone();
+        let advertised = (a.sni.clone().unwrap_or_else(|| unnamed.clone()), a.local.port());
         async move {
-            if let Err(err) = stream.serve_connection(tls, a.peer, a.local, true).await {
+            if let Err(err) = stream.serve_connection(tls, a.peer, a.local, true, Some(advertised)).await {
                 tracing::debug!(peer = %a.peer, error = %err, "edge: stream TLS connection ended");
             }
         }

@@ -56,8 +56,10 @@ x-node: &node
     ROLL_EDGE_REGION: us-east-1
     ROLL_EDGE_PROXY_PROTOCOL: "1"
     ROLL_EDGE_CERT_DIR: /certs
-    # The edge advertises its own Kafka port to clients, so it listens on the published one.
+    # The edge advertises its own Kafka port to clients, so it listens on the published one; and
+    # queues' connection details name the edge's AMQPS port, so that one is published as it is too.
     ROLL_EDGE_KAFKA: 0.0.0.0:${ROLL_E2E_KAFKA_PORT:-29092}
+    ROLL_EDGE_AMQPS: 0.0.0.0:${ROLL_E2E_AMQPS_PORT:-25671}
     # The cloud waits 15 s for the NLB (checks every 5 s, 2 failures); HAProxy here checks every
     # second, so 5 s covers it.
     ROLL_EDGE_DRAIN_DELAY: "5"
@@ -173,13 +175,14 @@ services:
     container_name: roll-cloud-e2e-lb
     environment:
       ROLL_E2E_KAFKA_PORT: ${ROLL_E2E_KAFKA_PORT:-29092}
+      ROLL_E2E_AMQPS_PORT: ${ROLL_E2E_AMQPS_PORT:-25671}
     volumes: ["./haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro"]
     ports:
       - 127.0.0.1:${ROLL_E2E_HTTPS_PORT:-28443}:8443
       - 127.0.0.1:${ROLL_E2E_REDIS_PORT:-26379}:6379
       - 127.0.0.1:${ROLL_E2E_KAFKA_PORT:-29092}:${ROLL_E2E_KAFKA_PORT:-29092}
       - 127.0.0.1:${ROLL_E2E_NOSQL_PORT:-29042}:9042
-      - 127.0.0.1:${ROLL_E2E_AMQPS_PORT:-25671}:5671
+      - 127.0.0.1:${ROLL_E2E_AMQPS_PORT:-25671}:${ROLL_E2E_AMQPS_PORT:-25671}
       - 127.0.0.1:${ROLL_E2E_LB_STATS_PORT:-28404}:8404
 
 networks:

@@ -7,6 +7,13 @@
 //! secret like every internal hop. The answer (101) names the node's client listeners.
 //!
 //! Frame: `u32 len | u8 kind | u64 id | u32 head_len | head (JSON) | u16 blobs | (u32 len | bytes)*`.
+//!
+//! A node that dies doesn't close its connections (a killed machine sends no FIN or RST), so a
+//! request in flight to it would wait for TCP to give up, minutes later. Both ends watch the
+//! connection instead: the connecting node pings every [`PING_EVERY`] and drops a connection that
+//! brought nothing back for [`DEAD_AFTER`] (its requests then read as `Moved` and go to the next
+//! owner, its subscriptions register again there); the other end drops a pinging peer that went
+//! as quiet, so the deliveries it held go back to their queues.
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use mq_core::AmqpError;
@@ -32,6 +39,11 @@ pub const REQ: u8 = 1;
 pub const RESP: u8 = 2;
 pub const PUSH: u8 = 3;
 const MAX_FRAME: usize = 256 << 20;
+/// How often a connecting node pings the other end.
+pub const PING_EVERY: Duration = Duration::from_secs(2);
+/// A connection silent this long is dead (less than a lease, so it's dropped before the next
+/// owner can take over).
+pub const DEAD_AFTER: Duration = Duration::from_secs(8);
 
 #[derive(Debug, Clone)]
 pub struct Frame {
@@ -120,6 +132,56 @@ pub enum Req {
     Touch { q: String },
     Consumers { q: String },
     Stats { qs: Vec<String> },
+    /// A stream-protocol publish. blobs: the entries (as stored), one per id in `ids`.
+    StreamPublish { q: String, writer: Option<String>, ids: Vec<u64> },
+    /// A stream-protocol subscription reading from `offset`, fed by credit (in chunks). blob 0:
+    /// its properties (field table); with `filtered`, blobs 1.. are the filter values.
+    StreamSubscribe { q: String, sub: u64, conn: u64, tag: String, offset: Offset, filtered: bool, match_unfiltered: bool, credit: u32, max_bytes: usize },
+    StreamUnsubscribe { q: String, sub: u64 },
+    StreamResolve { q: String, offset: Offset },
+    StreamWriterSequence { q: String, writer: String, seed: u64 },
+    StreamStats { q: String },
+    /// Liveness (answered with an empty `ok`; a node that doesn't know it answers an error, which
+    /// shows it's alive just as well).
+    Ping,
+}
+
+/// A stream offset specification on the wire (`StreamOffset`).
+#[derive(Serialize, Deserialize, Clone, Copy, Debug)]
+#[serde(rename_all = "snake_case")]
+pub enum Offset {
+    First,
+    Last,
+    Next,
+    At(u64),
+    /// Unix ms.
+    Time(u64),
+}
+
+impl From<&mq_core::queue::StreamOffset> for Offset {
+    fn from(o: &mq_core::queue::StreamOffset) -> Self {
+        use mq_core::queue::StreamOffset as S;
+        match *o {
+            S::First => Offset::First,
+            S::Last => Offset::Last,
+            S::Next => Offset::Next,
+            S::Offset(n) => Offset::At(n),
+            S::Timestamp(t) => Offset::Time(t),
+        }
+    }
+}
+
+impl From<Offset> for mq_core::queue::StreamOffset {
+    fn from(o: Offset) -> Self {
+        use mq_core::queue::StreamOffset as S;
+        match o {
+            Offset::First => S::First,
+            Offset::Last => S::Last,
+            Offset::Next => S::Next,
+            Offset::At(n) => S::Offset(n),
+            Offset::Time(t) => S::Timestamp(t),
+        }
+    }
 }
 
 /// Events the owner pushes to a subscribed consumer's node.
@@ -133,6 +195,8 @@ pub enum Push {
     TimedOut { sub: u64, timeout_ms: u64 },
     /// The queue moved to another node: subscribe there.
     Moved { sub: u64 },
+    /// A chunk for a stream-protocol subscription. blobs: its entries (as stored).
+    Chunk { sub: u64, first: u64, next: u64, committed: u64 },
 }
 
 /// An owner's answer.
@@ -184,6 +248,8 @@ pub struct Peer {
     pending: Mutex<HashMap<u64, oneshot::Sender<Frame>>>,
     subs: Mutex<HashMap<u64, Arc<dyn PushHandler>>>,
     closed: AtomicBool,
+    /// When a frame last came in (`mq_core::now_ms`).
+    last_rx: AtomicU64,
 }
 
 impl Peer {
@@ -200,6 +266,7 @@ impl Peer {
             pending: Mutex::new(HashMap::new()),
             subs: Mutex::new(HashMap::new()),
             closed: AtomicBool::new(false),
+            last_rx: AtomicU64::new(mq_core::now_ms()),
         });
         // Writer: coalesce whatever is queued into one write.
         tokio::spawn(async move {
@@ -219,9 +286,10 @@ impl Peer {
             }
         });
         let p = peer.clone();
-        tokio::spawn(async move {
+        let reader = tokio::spawn(async move {
             let mut r = BufReader::with_capacity(256 << 10, r);
             while let Ok(Some(f)) = Frame::read(&mut r).await {
+                p.last_rx.store(mq_core::now_ms(), Ordering::Relaxed);
                 match f.kind {
                     RESP => {
                         if let Some(tx) = p.pending.lock().remove(&f.id) {
@@ -231,7 +299,7 @@ impl Peer {
                     PUSH => {
                         let Ok(ev) = serde_json::from_value::<Push>(f.head) else { continue };
                         let sub = match &ev {
-                            Push::Deliver { sub, .. } | Push::Cancelled { sub } | Push::Activated { sub, .. } | Push::TimedOut { sub, .. } | Push::Moved { sub } => *sub,
+                            Push::Deliver { sub, .. } | Push::Cancelled { sub } | Push::Activated { sub, .. } | Push::TimedOut { sub, .. } | Push::Moved { sub } | Push::Chunk { sub, .. } => *sub,
                         };
                         let h = p.subs.lock().get(&sub).cloned();
                         if let Some(h) = h {
@@ -242,6 +310,25 @@ impl Peer {
                 }
             }
             p.close();
+        });
+        // Ping, and drop the connection when the other end stops answering.
+        let p = Arc::downgrade(&peer);
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(PING_EVERY).await;
+                let Some(p) = p.upgrade() else { return };
+                if p.is_closed() {
+                    return;
+                }
+                let quiet = mq_core::now_ms().saturating_sub(p.last_rx.load(Ordering::Relaxed));
+                if quiet > DEAD_AFTER.as_millis() as u64 {
+                    tracing::warn!(node = %p.node, quiet_ms = quiet, "queues rpc: no answer from the node; dropping the connection");
+                    reader.abort();
+                    p.close();
+                    return;
+                }
+                p.send(&Req::Ping);
+            }
         });
         Ok(peer)
     }

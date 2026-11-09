@@ -297,6 +297,21 @@ impl Args {
     }
 }
 
+/// Every socket is a file descriptor: client connections, each product's pools to S3, DynamoDB
+/// and Postgres, node-to-node hops. Containers start with a soft limit of 1024, which a fleet node
+/// ran out of while draining under the fleet test (`Too many open files`, then nothing could
+/// reach the next owner); the hard limit is the real ceiling, so take it, as Go's runtime does.
+fn raise_open_files_limit() {
+    let mut rl = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+    // SAFETY: getrlimit and setrlimit only read and write the struct passed.
+    unsafe {
+        if libc::getrlimit(libc::RLIMIT_NOFILE, &mut rl) == 0 && rl.rlim_cur < rl.rlim_max {
+            rl.rlim_cur = rl.rlim_max;
+            libc::setrlimit(libc::RLIMIT_NOFILE, &rl);
+        }
+    }
+}
+
 fn main() -> anyhow::Result<()> {
     // Return freed memory to the OS right away (mimalloc's default waits 1 s), and have each worker
     // collect its heap when it goes idle: otherwise memory freed after a burst stays with threads
@@ -304,6 +319,7 @@ fn main() -> anyhow::Result<()> {
     // → 24–31 MB (and ~90 MB → ~60 MB with 600 partitions).
     unsafe { libmimalloc_sys::mi_option_set(MI_OPTION_PURGE_DELAY, 0) };
     nosql_storage::memory::set_allocator_release(|| unsafe { libmimalloc_sys::mi_collect(true) });
+    raise_open_files_limit();
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .on_thread_park(|| unsafe { libmimalloc_sys::mi_collect(false) })
@@ -375,7 +391,7 @@ async fn run() -> anyhow::Result<()> {
     };
     // roll queues on the node's cluster: each queue runs on its lease's holder.
     let queues = match on.on(Product::Queues) {
-        true => Some(queues::Queues::start(&home, args.queues.clone(), &args.public_host, cluster.clone(), args.code.cluster.system_database.as_deref().filter(|u| !u.is_empty()), &storage).await?),
+        true => Some(queues::Queues::start(&home, args.queues.clone(), &args.public_host, cluster.clone(), args.code.cluster.system_database.as_deref().filter(|u| !u.is_empty()), &storage, edge::Public::of(&args).as_ref()).await?),
         false => None,
     };
 
@@ -497,7 +513,7 @@ async fn run() -> anyhow::Result<()> {
     tokio::select! {
         r = &mut api => r?,
         (r, ..) = futures::future::select_all(serving) => r?,
-        grace = stop(code.as_ref(), &cluster, &args) => {
+        grace = stop(code.as_ref(), queues.as_ref(), &cluster, &args) => {
             metrics.flush();
             // Queue clients go while the API finishes its requests: gradually, so they don't
             // all reconnect at once (a node alone closes them quickly, as it always did).
@@ -580,11 +596,12 @@ impl CodeNode {
 /// load balancer has let go and the public listeners stopped accepting (`edge::stopping`).
 /// Returns how long the API may then take to finish the requests it still has in flight: what's
 /// left of the drain timeout, between 5 and 10 s (an open event stream holds the API until then).
-async fn stop(code: Option<&CodeNode>, cluster: &roll_cluster::Cluster, args: &Args) -> std::time::Duration {
+async fn stop(code: Option<&CodeNode>, queues: Option<&queues::Queues>, cluster: &roll_cluster::Cluster, args: &Args) -> std::time::Duration {
     shutdown_signal().await;
     let started = std::time::Instant::now();
     let timeout = args.code.drain_timeout();
     let clustered = cluster.backend_name() != "memory";
+    let grace = move || timeout.saturating_sub(started.elapsed()).clamp(std::time::Duration::from_secs(5), std::time::Duration::from_secs(10));
     let products = async {
         if !clustered {
             return;
@@ -602,6 +619,13 @@ async fn stop(code: Option<&CodeNode>, cluster: &roll_cluster::Cluster, args: &A
                 info!("drained");
             }
         }
+        // Behind the edge, queue clients are the edge's connections served here: queues closes
+        // them gradually (they reconnect to other nodes) before the edge closes what's left.
+        if args.edge.enabled
+            && let Some(q) = queues
+        {
+            q.close_clients(grace()).await;
+        }
     };
     let edge = edge::stopping(products).await;
     if clustered && !edge {
@@ -609,7 +633,7 @@ async fn stop(code: Option<&CodeNode>, cluster: &roll_cluster::Cluster, args: &A
         // serving until the load balancer has stopped sending to it (docs/code/cluster.md).
         tokio::time::sleep(cluster::DEREGISTER.saturating_sub(started.elapsed())).await;
     }
-    timeout.saturating_sub(started.elapsed()).clamp(std::time::Duration::from_secs(5), std::time::Duration::from_secs(10))
+    grace()
 }
 
 /// Stop taking connections and let the requests in flight finish, for up to `grace`: requests

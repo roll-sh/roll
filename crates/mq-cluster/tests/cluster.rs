@@ -18,6 +18,7 @@ use mq_core::{Broker, BrokerConfig};
 use roll_cluster::{Backend, DynamoDb, DynamoDbConfig, Memory, MemoryStore};
 use std::collections::HashSet;
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::runtime::Runtime;
@@ -89,23 +90,34 @@ struct Node {
     url: String,
     /// RabbitMQ Stream protocol listener.
     stream_port: u16,
+    /// The stream protocol's server (the edge hands it connections).
+    stream: mq_stream::Handle,
     nodes: Arc<roll_cluster::Cluster>,
     cluster: Arc<Cluster>,
-    #[allow(dead_code)]
     broker: Arc<Broker>,
 }
 
 impl Node {
     fn start(env: &Env, id: &str) -> Node {
+        Node::start_with(env, id, None)
+    }
+
+    /// With `front`, other nodes reach this one's internal API through a proxy on that runtime
+    /// that goes silent when the flag is set ([`cuttable`]).
+    fn start_with(env: &Env, id: &str, front: Option<(&Runtime, Arc<AtomicBool>)>) -> Node {
         let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
         let (api, stream_listener) = rt.block_on(async { (tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap(), tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap()) });
         let stream_addr = stream_listener.local_addr().unwrap();
-        let advertise = format!("http://{}", api.local_addr().unwrap());
+        let api_addr = api.local_addr().unwrap();
+        let advertise = match front {
+            Some((on, cut)) => format!("http://{}", on.block_on(cuttable(api_addr, cut))),
+            None => format!("http://{api_addr}"),
+        };
         let nodes = roll_cluster::Cluster::join(env.backend(), env.timings(roll_cluster::ClusterConfig::for_tests(id, advertise, SECRET))).unwrap();
         let (meta, logs) = (env.meta.clone(), env.logs());
         let config = ClusterConfig { listeners: [("stream".to_string(), stream_addr)].into(), follow: Duration::from_millis(30) };
         let n = nodes.clone();
-        let (url, cluster, broker) = rt.block_on(async move {
+        let (url, cluster, broker, stream) = rt.block_on(async move {
             let cluster = Cluster::join(n, config, meta.clone(), logs.clone()).await.unwrap();
             let bc = BrokerConfig { node_name: format!("rabbit@{id}"), ..Default::default() };
             let broker = Broker::start_with_placement(bc, meta, logs, Some(cluster.placement())).await.unwrap();
@@ -117,11 +129,13 @@ impl Node {
             tokio::spawn(async move {
                 let _ = mq_amqp::serve_listener(b, listener, mq_amqp::ServerConfig { listen: addr, amqp10: None }).await;
             });
-            let sc = mq_stream::Config { advertised_host: "127.0.0.1".into(), ..mq_stream::Config::new(stream_addr) };
-            tokio::spawn(mq_stream::serve_listener(broker.clone(), stream_listener, sc));
-            (format!("amqp://guest:guest@{addr}/%2f"), cluster, broker)
+            let sc = mq_stream::Config { advertised_host: "127.0.0.1".into(), advertised_port: stream_addr.port(), ..mq_stream::Config::new(stream_addr) };
+            let stream = mq_stream::start(broker.clone(), sc).await;
+            let s = stream.clone();
+            tokio::spawn(async move { s.serve_listener(stream_listener).await });
+            (format!("amqp://guest:guest@{addr}/%2f"), cluster, broker, stream)
         });
-        Node { rt: Some(rt), url, stream_port: stream_addr.port(), nodes, cluster, broker }
+        Node { rt: Some(rt), url, stream_port: stream_addr.port(), stream, nodes, cluster, broker }
     }
 
     /// Crash: membership stops without a word (its leases lapse), and every task and socket of
@@ -147,6 +161,34 @@ impl Drop for Node {
     fn drop(&mut self) {
         self.kill();
     }
+}
+
+/// A TCP proxy to `to` that, once `cut` is set, passes nothing on in either direction and closes
+/// nothing: a machine that died without a word (no FIN, no RST), as the other nodes see it.
+async fn cuttable(to: std::net::SocketAddr, cut: Arc<AtomicBool>) -> std::net::SocketAddr {
+    async fn pump(mut r: tokio::net::tcp::OwnedReadHalf, mut w: tokio::net::tcp::OwnedWriteHalf, cut: Arc<AtomicBool>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut buf = vec![0u8; 64 << 10];
+        while let Ok(n) = r.read(&mut buf).await {
+            while cut.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            if n == 0 || w.write_all(&buf[..n]).await.is_err() {
+                return;
+            }
+        }
+    }
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let at = l.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((client, _)) = l.accept().await {
+            let Ok(server) = tokio::net::TcpStream::connect(to).await else { continue };
+            let ((cr, cw), (sr, sw)) = (client.into_split(), server.into_split());
+            tokio::spawn(pump(cr, sw, cut.clone()));
+            tokio::spawn(pump(sr, cw, cut.clone()));
+        }
+    });
+    at
 }
 
 async fn channel(url: &str) -> (Connection, Channel) {
@@ -413,6 +455,77 @@ fn a_drain_hands_every_queue_off_while_clients_carry_on() {
     });
 }
 
+/// An owner that vanishes without a word (its connections neither close nor answer, as when a
+/// machine dies) doesn't hold up its queue's publishers on other nodes past a lease: the RPC
+/// connection to it is dropped when it stops answering pings, so a publish in flight goes to the
+/// next owner and is confirmed there, and nothing confirmed before is lost.
+#[test]
+fn an_owner_that_vanishes_without_a_word_holds_nothing_up() {
+    let env = Env::memory();
+    let client = Runtime::new().unwrap();
+    let cuts = [Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false))];
+    let nodes = [Node::start_with(&env, "a", Some((&client, cuts[0].clone()))), Node::start_with(&env, "b", Some((&client, cuts[1].clone())))];
+    client.block_on(async {
+        let (_c, ch) = channel(&nodes[0].url).await;
+        declare(&ch, "silent").await;
+        known_on(&nodes[1], "silent").await;
+        let key = mq_cluster::queue_key("/", "silent", 0);
+        wait_until("the queue on its node", Duration::from_secs(10), async || {
+            let at = nodes[0].nodes.preferred(&key).map(|n| n.id);
+            nodes.iter().any(|n| Some(n.nodes.node_id()) == at.as_deref() && n.owns("silent"))
+        })
+        .await;
+        let owner = nodes.iter().position(|n| n.owns("silent")).unwrap();
+        let other = &nodes[1 - owner];
+        let (_c, ch) = channel(&other.url).await;
+        ch.confirm_select(ConfirmSelectOptions::default()).await.unwrap();
+        let mut confirmed = publish_confirmed(&ch, "silent", 0..50).await;
+        assert_eq!(confirmed.len(), 50);
+
+        // The owner goes silent: its membership stops (its lease lapses) and its connections
+        // carry nothing more, without closing.
+        cuts[owner].store(true, Ordering::SeqCst);
+        nodes[owner].nodes.fault_kill();
+        let t = Instant::now();
+        let props = BasicProperties::default().with_delivery_mode(2).with_message_id("50".into());
+        let c = ch.basic_publish("".into(), "silent".into(), BasicPublishOptions::default(), b"50", props).await.unwrap();
+        let c = tokio::time::timeout(Duration::from_secs(25), c).await.expect("the publish in flight is confirmed by the next owner").unwrap();
+        assert!(c.is_ack(), "{c:?}");
+        confirmed.push(50);
+        assert!(other.owns("silent"), "the other node took the queue over");
+        eprintln!("confirmed {:.1}s after the owner went silent", t.elapsed().as_secs_f64());
+        confirmed.extend(publish_confirmed(&ch, "silent", 51..100).await);
+        assert_eq!(confirmed.len(), 100);
+        let seen = consume_ids(&other.url, "silent", 100, Duration::from_secs(20)).await;
+        assert_eq!(seen, confirmed.into_iter().collect::<HashSet<u32>>(), "every confirmed message is there");
+    });
+}
+
+/// A node that drained (its queues handed off, the cluster left) keeps serving the clients still
+/// connected to it until it closes them: their publishes go to the queues' new owners.
+#[test]
+fn a_drained_node_serves_its_clients_until_it_closes_them() {
+    let env = Env::memory();
+    let (a, b) = (Node::start(&env, "a"), Node::start(&env, "b"));
+    let client = Runtime::new().unwrap();
+    client.block_on(async {
+        let (_ca, cha) = channel(&a.url).await;
+        declare(&cha, "after").await;
+        known_on(&b, "after").await;
+        cha.confirm_select(ConfirmSelectOptions::default()).await.unwrap();
+        assert_eq!(publish_confirmed(&cha, "after", 0..20).await.len(), 20);
+        let an = a.nodes.clone();
+        a.spawn(async move { an.drain(Duration::from_secs(15)).await }).await.unwrap();
+        assert_eq!(a.cluster.owned_count(), 0);
+        let t = Instant::now();
+        let after = publish_confirmed(&cha, "after", 20..40).await;
+        assert_eq!(after.len(), 20, "publishes through the drained node, {:.1}s", t.elapsed().as_secs_f64());
+        assert!(t.elapsed() < Duration::from_secs(3), "they waited {:.1}s", t.elapsed().as_secs_f64());
+        let seen = consume_ids(&b.url, "after", 40, Duration::from_secs(20)).await;
+        assert_eq!(seen, (0..40).collect::<HashSet<u32>>());
+    });
+}
+
 /// Correctness never rests on the lease: an owner whose membership died but whose process keeps
 /// running (cut off, frozen) is fenced out of the log by the next owner, so it can't confirm a
 /// message the next owner doesn't have.
@@ -450,10 +563,11 @@ fn a_deposed_owner_cannot_confirm() {
 
         // a still runs the queue it no longer owns: its publishes can't be confirmed.
         let from_a = publish_confirmed(&cha, "fenced", 2000..2010).await;
-        assert!(from_a.is_empty(), "a deposed owner confirmed {from_a:?}");
 
         let want: HashSet<u32> = (0..100).chain(from_b).collect();
-        let seen = consume_ids(&b.url, "fenced", want.len(), Duration::from_secs(20)).await;
+        let seen = consume_ids(&b.url, "fenced", want.len() + from_a.len(), Duration::from_secs(20)).await;
+        let kept: Vec<&u32> = from_a.iter().filter(|i| seen.contains(i)).collect();
+        assert!(from_a.is_empty(), "a deposed owner confirmed {from_a:?} (the new owner has {kept:?} of them)");
         assert_eq!(seen, want, "the new owner has exactly what was confirmed");
     });
 }
@@ -495,6 +609,93 @@ fn stream_clients_are_sent_to_the_owner() {
         }
         assert_eq!(got, (0..100).map(|i| format!("e{i}")).collect::<Vec<_>>());
         let _ = producer.close().await;
+    });
+}
+
+/// Behind the edge, every node answers stream clients as one virtual node at the address the
+/// client used (`Open` and `Metadata` name it), and the stream's router carries publishes and
+/// reads to wherever the stream runs. A producer (deduplicating) and a consumer that only ever
+/// reach a node that doesn't own the stream keep going while the stream moves (its owner drains),
+/// without reconnecting: every confirmed message is read once, in order.
+#[test]
+fn stream_clients_behind_the_edge_see_one_node_across_a_move() {
+    use rabbitmq_stream_client::Environment;
+    use rabbitmq_stream_client::types::{Message, OffsetSpecification};
+    let env = Env::memory();
+    let nodes = [Node::start(&env, "a"), Node::start(&env, "b"), Node::start(&env, "c")];
+    let client = Runtime::new().unwrap();
+    client.block_on(async {
+        let (_c, ch) = channel(&nodes[0].url).await;
+        let mut args = FieldTable::default();
+        args.insert("x-queue-type".into(), AMQPValue::LongString("stream".into()));
+        ch.queue_declare("events".into(), QueueDeclareOptions { durable: true, ..Default::default() }, args).await.unwrap();
+        for n in &nodes {
+            known_on(n, "events").await;
+        }
+        let key = mq_cluster::queue_key("/", "events", 0);
+        wait_until("the stream on its node", Duration::from_secs(10), async || {
+            let at = nodes[0].nodes.preferred(&key).map(|n| n.id);
+            nodes.iter().any(|n| Some(n.nodes.node_id()) == at.as_deref() && n.owns("events"))
+        })
+        .await;
+        let owner = nodes.iter().position(|n| n.owns("events")).unwrap();
+        let edge = (owner + 1) % 3;
+
+        // The edge's stream port on a node that doesn't own the stream: one virtual node, at the
+        // address the client connects to.
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = l.local_addr().unwrap().port();
+        let handle = nodes[edge].stream.clone();
+        nodes[edge].spawn(async move {
+            while let Ok((sock, peer)) = l.accept().await {
+                let (h, local) = (handle.clone(), sock.local_addr().unwrap());
+                tokio::spawn(async move { h.serve_connection(sock, peer, local, false, Some(("127.0.0.1".to_string(), port))).await });
+            }
+        });
+
+        let senv = Environment::builder().host("127.0.0.1").port(port).build().await.unwrap();
+        let mut producer = senv.producer().name("app").build("events").await.unwrap();
+        let mut consumer = senv.consumer().offset(OffsetSpecification::First).build("events").await.unwrap();
+        let got = Arc::new(parking_lot::Mutex::new(Vec::<String>::new()));
+        let reader = {
+            let got = got.clone();
+            tokio::spawn(async move {
+                while let Ok(Some(Ok(d))) = tokio::time::timeout(Duration::from_secs(20), consumer.next()).await {
+                    got.lock().push(String::from_utf8(d.message().data().unwrap().to_vec()).unwrap());
+                }
+            })
+        };
+        let mut send = async |i: u32| {
+            let c = tokio::time::timeout(Duration::from_secs(20), producer.send_with_confirm(Message::builder().body(format!("e{i}")).build())).await;
+            assert!(matches!(c, Ok(Ok(ref c)) if c.confirmed()), "e{i} not confirmed: {c:?}");
+        };
+        for i in 0..300 {
+            send(i).await;
+        }
+        // The owner drains while the clients carry on: the stream moves.
+        let on = nodes[owner].nodes.clone();
+        let drain = nodes[owner].spawn(async move { on.drain(Duration::from_secs(15)).await });
+        for i in 300..600 {
+            send(i).await;
+        }
+        drain.await.unwrap();
+        assert!(!nodes[owner].owns("events") && nodes.iter().any(|n| n.owns("events")), "the stream moved");
+        for i in 600..800 {
+            send(i).await;
+        }
+        let want: Vec<String> = (0..800).map(|i| format!("e{i}")).collect();
+        let t = Instant::now();
+        while got.lock().len() < want.len() && t.elapsed() < Duration::from_secs(20) {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert_eq!(*got.lock(), want, "read once each, in order");
+        // The clients never reached any node but the edge's.
+        for (i, n) in nodes.iter().enumerate() {
+            let streams = n.broker.connections().iter().filter(|c| c.protocol == "stream").count();
+            assert_eq!(streams > 0, i == edge, "stream connections on node {i}: {streams}");
+        }
+        let _ = producer.close().await;
+        reader.abort();
     });
 }
 

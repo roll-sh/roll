@@ -16,7 +16,8 @@ front proxies and no keeper instances.
  DynamoDB (roll-cluster)        the system database (mq)     S3 Standard: <data bucket>/queues/logs
 ```
 
-- **Clients** connect to `<id>.mq.<region>.roll.sh` on the TLS ports above; the node the NLB
+- **Clients** connect to `<vhost>.mq.<region>.roll.sh` on the TLS ports above (the vhost's
+  hostname, [README.md](README.md); the connection strings the API gives name it); the node the NLB
   picked serves them. Each durable queue runs on the holder of its lease (`mq:<vhost>/<queue>`);
   other nodes forward to it, so a connection never has to move when its queues do.
 - **Logs** are objects in the stack's data bucket under `queues/logs` (S3 Standard, three zones),

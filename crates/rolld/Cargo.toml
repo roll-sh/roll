@@ -75,6 +75,7 @@ aws-sdk-dynamodb.workspace = true
 bytes.workspace = true
 futures-util.workspace = true
 lapin.workspace = true
+rabbitmq-stream-client.workspace = true
 nosql-proto = { workspace = true, features = ["client"] }
 parking_lot.workspace = true
 rcgen.workspace = true
