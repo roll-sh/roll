@@ -596,3 +596,6 @@ against it, then removes everything it created (all named `roll-cloud-e2e-*`).
     5671).
   - The takeover and stop-order numbers above predate the hardening fixes: rerun the fleet test to
     measure them again.
+- **tasks debounce on DynamoDB**: `workflows.rs::debounce_keeps_the_last_event` gave an extra run
+  for a window's first event ([1, 4, 99] for [4, 99]) on the DynamoDB store in CI, with the events
+  in one request. Debounce must give one run per window per key; lane `cloud/tasks` is on it.
