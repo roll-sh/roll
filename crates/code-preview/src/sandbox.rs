@@ -6,7 +6,7 @@
 //!
 //! A stopped sandbox has no task, so starting one again needs its env (the machine token, the
 //! owner's provider keys) again: this backend keeps it sealed with `ROLL_SECRET_KEY` in S3
-//! (`<prefix>sandboxes/<id>.sealed`) until the sandbox is deleted. Each start hands it to the
+//! (`code/sandboxes/<id>.sealed`; bundles' `code/runs/` expires in a day) until the sandbox is deleted. Each start hands it to the
 //! task the way checks get theirs: in a bundle behind a presigned URL, never in the `RunTask`
 //! request. `fetch` writes it to `/roll/env` (owned by the sandbox's user, who removes it once
 //! it's read).
@@ -29,6 +29,8 @@ use tracing::warn;
 
 /// The group every sandbox task is started in.
 pub const GROUP: &str = "roll-sandbox";
+/// Where what a start needs is kept, apart from the bundles (which expire).
+pub const KEPT: &str = "code/sandboxes/";
 /// The sandbox image's user (`deploy/agent/Dockerfile`), who gets the env file.
 const SANDBOX_UID: u32 = 10001;
 
@@ -71,7 +73,7 @@ impl FargateSandboxes {
     }
 
     fn kept_key(&self, sandbox_id: &str) -> ObjPath {
-        ObjPath::from(format!("{}sandboxes/{sandbox_id}.sealed", self.fargate.cfg.prefix))
+        ObjPath::from(format!("{KEPT}{sandbox_id}.sealed"))
     }
 
     fn scope(sandbox_id: &str) -> String {

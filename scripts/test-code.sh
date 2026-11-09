@@ -12,7 +12,8 @@
 #
 # Opt in (AGENTS.md says when each must run):
 #   --docker  the stores again on Postgres 18 (ROLL_CODE_TEST_DATABASE), checks and previews in real
-#             Docker, roll code's in-process cluster again with its leases on DynamoDB Local, and a
+#             Docker, the Fargate runner's bundles on MinIO, roll code's in-process cluster again
+#             with its leases on DynamoDB Local, and a
 #             three-node cluster of real `rolld` containers through a kill, a rolling restart and a
 #             Postgres restart (crates/rolld/tests/code_cluster_e2e.rs).
 #   --stress  40,000 merges through the lander in release (prints merges/s; on Postgres too with
@@ -23,7 +24,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 source scripts/lib/gate.sh
 
-CODE_CRATES=(code-sql roll-cluster code-store code-git code-github code-index code-review code-chat code-control code-preview)
+CODE_CRATES=(code-sql roll-cluster code-store code-git code-github code-index code-review code-chat code-control code-preview roll-fetch)
 RUST_PATHS=("${CODE_CRATES[@]/#/crates/}" crates/agent-proto/src crates/roll-cli/src/code crates/roll-cli/src/code.rs crates/roll-cli/src/main.rs
             crates/roll-cli/tests/code.rs crates/roll-cli/tests/common crates/roll-cli/Cargo.toml
             docs/code/test-coverage.md Cargo.toml Cargo.lock scripts/test-code.sh scripts/lib/gate.sh)
@@ -119,10 +120,11 @@ if [[ $docker == 1 ]]; then
     # roll code's cluster with its leases on DynamoDB (data on Postgres).
     test_args() { [[ $1:$2 == code-control:cluster ]]; }
     ROLL_CODE_TEST_CLUSTER_BACKEND=dynamodb ROLL_CLUSTER_DYNAMODB_REQUIRED=1 ROLL_CODE_TEST_DATABASE=$pg_url RUST_CLIPPY=0 rust_tests code-ddb --test cluster
-    # Checks and previews in real containers, and the cluster as real rolld containers
-    # (deploy/code/Dockerfile): a kill, a rolling restart and a Postgres restart under load.
-    test_args() { [[ $1:$2 == code-preview:docker || $1:$2 == rolld:code_cluster_e2e ]] && ARGS=(--nocapture); }
-    ROLL_CODE_DOCKER_REQUIRED=1 ROLL_E2E=1 RUST_CLIPPY=0 rust_tests code-docker --test docker --test code_cluster_e2e
+    # Checks and previews in real containers, the Fargate runner's bundles on MinIO (presigned
+    # URLs checked by a real S3), and the cluster as real rolld containers (deploy/code/Dockerfile):
+    # a kill, a rolling restart and a Postgres restart under load.
+    test_args() { [[ $1:$2 == code-preview:docker || $1:$2 == code-preview:fargate || $1:$2 == rolld:code_cluster_e2e ]] && ARGS=(--nocapture); }
+    ROLL_CODE_DOCKER_REQUIRED=1 ROLL_E2E=1 RUST_CLIPPY=0 rust_tests code-docker --test docker --test fargate --test code_cluster_e2e
     echo "$docker_hash" > "$TARGET/.test-code-docker.hash"
   else
     echo "code: --docker: nothing it covers changed since its last green run; skipping it (--force to run anyway)"

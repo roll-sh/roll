@@ -624,8 +624,8 @@ async fn sandboxes_are_tasks_that_start_again_with_their_sealed_env() {
     assert_eq!(envs.len(), 2);
     assert!(envs.iter().all(|v| v == "export ROLL_AGENT_TOKEN='rlm_s3cr3t'\n"), "{envs:?}");
     // What's kept is sealed: the token isn't in the bucket in the clear.
-    let kept = e.store.keys("code/runs/sandboxes/").await;
-    assert_eq!(kept, ["code/runs/sandboxes/sbx_t1.sealed"]);
+    let kept = e.store.keys("code/sandboxes/").await;
+    assert_eq!(kept, ["code/sandboxes/sbx_t1.sealed"]);
     if let Some(o) = &e.store.objects {
         let sealed = o.lock().get(&format!("{BUCKET}/{}", kept[0])).cloned().unwrap();
         assert!(!String::from_utf8_lossy(&sealed).contains("rlm_s3cr3t"));
@@ -634,5 +634,5 @@ async fn sandboxes_are_tasks_that_start_again_with_their_sealed_env() {
     // Deleting stops it and drops what was kept; the bundles went once fetched.
     b.delete(&id).await.unwrap();
     assert_eq!(b.status(&id).await.unwrap(), BackendState::Stopped);
-    until("nothing left in the bucket", 10, async || e.store.keys("code/runs/").await.is_empty().then_some(())).await;
+    until("nothing left in the bucket", 10, async || e.store.keys("code/").await.is_empty().then_some(())).await;
 }

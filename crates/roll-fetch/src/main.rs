@@ -1,9 +1,10 @@
 //! `roll-fetch`: runs beside customer code in an isolated task (docs/cloud/README.md, "Isolated
 //! work"), from roll's own small image, with no AWS credentials of its own.
 //!
-//! - `fetch --url <get> [--delete <url>] --tree <dir> --env <file> [--chown <uid>]`: download the
-//!   run's bundle through its presigned URL, delete the object, and unpack it (`roll_fetch::unpack`).
-//!   The customer's container starts only once this exits 0.
+//! - `fetch --url <get> --tree <dir> --env <file> [--chown <uid>]`: download the run's bundle
+//!   through its presigned URL and unpack it (`roll_fetch::unpack`) into `tree` (made if missing,
+//!   and empty), the env to `env` (given to `uid` with its directory, when asked). The customer's
+//!   container starts only once this exits 0; rolld deletes the object.
 //! - `deadline <seconds>`: exit after that long. It's an essential container of a check's task,
 //!   so a check whose node went away still ends.
 //! - `proxy --listen <port> --to <port> --idle <seconds>`: the fixed port fleet nodes reach a
@@ -54,6 +55,7 @@ async fn fetch(args: &[String]) -> anyhow::Result<()> {
         .timeout(Duration::from_secs(600))
         .redirect(reqwest::redirect::Policy::none())
         .build()?;
+    std::fs::create_dir_all(&tree).with_context(|| format!("making {}", tree.display()))?;
     let staging = env.with_extension("bundle");
     let mut last = None;
     for attempt in 0..5u32 {
@@ -70,12 +72,6 @@ async fn fetch(args: &[String]) -> anyhow::Result<()> {
     }
     if let Some(e) = last {
         return Err(e.context("downloading the bundle"));
-    }
-    // The object holds the run's env: it goes as soon as it's here (rolld deletes it too).
-    if let Some(del) = f.get("delete")
-        && let Err(e) = client.delete(del).send().await.and_then(|r| r.error_for_status())
-    {
-        eprintln!("roll-fetch: deleting the bundle: {e}");
     }
     let file = std::fs::File::open(&staging)?;
     let n = roll_fetch::unpack(std::io::BufReader::new(file), &tree, &env, roll_fetch::Limits::default())?;

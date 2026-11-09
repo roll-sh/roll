@@ -18,6 +18,8 @@ Metadata:
         Parameters: [ResetsPerMinute, ErrorsPerMinute, LatencyP99Ms, ConnectionsPerNode]
       - Label: { default: GitHub }
         Parameters: [GitHubRepo, GitHubOidcProviderArn]
+      - Label: { default: Isolated work }
+        Parameters: [PreviewPort, ChecksOnSpot, SandboxImage]
 
 Parameters:
   ImageTag:
@@ -124,6 +126,25 @@ Parameters:
     Type: String
     Default: ""
     Description: The account's existing token.actions.githubusercontent.com OIDC provider, if it has one (an account holds one per URL). Empty creates it.
+  PreviewPort:
+    Type: Number
+    Default: 9970
+    MinValue: 1024
+    MaxValue: 65535
+    Description: >-
+      The port fleet nodes reach a preview task on (its guard, which forwards to the app's port);
+      the only port the isolated security group admits, and only from nodes.
+  ChecksOnSpot:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+    Description: Run roll.toml checks on Fargate Spot (one that's interrupted runs again on demand). Previews and sandboxes run on demand.
+  SandboxImage:
+    Type: String
+    Default: ""
+    Description: >-
+      The agent sandbox image (deploy/agent/Dockerfile, arm64) for sandboxes as Fargate tasks.
+      Empty: no sandboxes on the fleet.
   EcsAmiId:
     Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
     Default: /aws/service/ecs/optimized-ami/amazon-linux-2023/arm64/recommended/image_id
@@ -133,6 +154,8 @@ Conditions:
   HasType2: !Not [!Equals [!Ref InstanceType2, ""]]
   HasType3: !Not [!Equals [!Ref InstanceType3, ""]]
   UseEips: !Equals [!Ref UseElasticIps, "true"]
+  HasSandboxes: !Not [!Equals [!Ref SandboxImage, ""]]
+  ChecksSpot: !Equals [!Ref ChecksOnSpot, "true"]
   CreateOidc: !Equals [!Ref GitHubOidcProviderArn, ""]
 
 Resources:
@@ -193,6 +216,75 @@ Resources:
   Subnet3Routes:
     Type: AWS::EC2::SubnetRouteTableAssociation
     Properties: { SubnetId: !Ref Subnet3, RouteTableId: !Ref RouteTable }
+  # Isolated work (checks, previews, sandboxes: customer code) runs in subnets of its own, whose
+  # network ACL refuses everything to and from the fleet's subnets but nodes reaching a preview
+  # on PreviewPort (and the replies). Security groups say the same (IsolatedSecurityGroup); this
+  # is the second wall. docs/cloud/README.md, "Isolated work".
+  IsolatedSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      CidrBlock: 10.80.64.0/20
+      Tags: [{ Key: Name, Value: roll-cloud-isolated-1 }]
+  IsolatedSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      CidrBlock: 10.80.80.0/20
+      Tags: [{ Key: Name, Value: roll-cloud-isolated-2 }]
+  IsolatedSubnet3:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      AvailabilityZone: !Select [2, !GetAZs ""]
+      CidrBlock: 10.80.96.0/20
+      Tags: [{ Key: Name, Value: roll-cloud-isolated-3 }]
+  IsolatedSubnet1Routes:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: { SubnetId: !Ref IsolatedSubnet1, RouteTableId: !Ref RouteTable }
+  IsolatedSubnet2Routes:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: { SubnetId: !Ref IsolatedSubnet2, RouteTableId: !Ref RouteTable }
+  IsolatedSubnet3Routes:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: { SubnetId: !Ref IsolatedSubnet3, RouteTableId: !Ref RouteTable }
+  IsolatedAcl:
+    Type: AWS::EC2::NetworkAcl
+    Properties:
+      VpcId: !Ref Vpc
+      Tags: [{ Key: Name, Value: roll-cloud-isolated }]
+  # 10.80.0.0/18 holds the fleet's subnets; the rest of the VPC is refused too.
+  IsolatedAclInPreview:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties: { NetworkAclId: !Ref IsolatedAcl, RuleNumber: 100, Protocol: 6, RuleAction: allow, CidrBlock: 10.80.0.0/18, PortRange: { From: !Ref PreviewPort, To: !Ref PreviewPort } }
+  IsolatedAclInVpc:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties: { NetworkAclId: !Ref IsolatedAcl, RuleNumber: 110, Protocol: -1, RuleAction: deny, CidrBlock: 10.80.0.0/16 }
+  IsolatedAclInInternet:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties: { NetworkAclId: !Ref IsolatedAcl, RuleNumber: 200, Protocol: -1, RuleAction: allow, CidrBlock: 0.0.0.0/0 }
+  # Replies to nodes go to their ephemeral ports (32768-60999 on Amazon Linux), which no node
+  # listens on.
+  IsolatedAclOutReplies:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties: { NetworkAclId: !Ref IsolatedAcl, RuleNumber: 100, Egress: true, Protocol: 6, RuleAction: allow, CidrBlock: 10.80.0.0/18, PortRange: { From: 32768, To: 60999 } }
+  IsolatedAclOutVpc:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties: { NetworkAclId: !Ref IsolatedAcl, RuleNumber: 110, Egress: true, Protocol: -1, RuleAction: deny, CidrBlock: 10.80.0.0/16 }
+  IsolatedAclOutInternet:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties: { NetworkAclId: !Ref IsolatedAcl, RuleNumber: 200, Egress: true, Protocol: -1, RuleAction: allow, CidrBlock: 0.0.0.0/0 }
+  IsolatedSubnet1Acl:
+    Type: AWS::EC2::SubnetNetworkAclAssociation
+    Properties: { SubnetId: !Ref IsolatedSubnet1, NetworkAclId: !Ref IsolatedAcl }
+  IsolatedSubnet2Acl:
+    Type: AWS::EC2::SubnetNetworkAclAssociation
+    Properties: { SubnetId: !Ref IsolatedSubnet2, NetworkAclId: !Ref IsolatedAcl }
+  IsolatedSubnet3Acl:
+    Type: AWS::EC2::SubnetNetworkAclAssociation
+    Properties: { SubnetId: !Ref IsolatedSubnet3, NetworkAclId: !Ref IsolatedAcl }
   S3Endpoint:
     Type: AWS::EC2::VPCEndpoint
     Properties:
@@ -252,6 +344,19 @@ Resources:
       FromPort: 7070
       ToPort: 7070
       Description: signed internal hops between nodes
+  # Isolated tasks: out to the internet (images, packages, roll's public endpoints); in, only
+  # nodes on the preview port. Nothing admits this group (NodeSecurityGroup lists the NLB and
+  # nodes only), so customer code has no way to a node's internal API or ports.
+  IsolatedSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: roll cloud isolated work (customer code)
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - { IpProtocol: tcp, FromPort: !Ref PreviewPort, ToPort: !Ref PreviewPort, SourceSecurityGroupId: !Ref NodeSecurityGroup, Description: previews from fleet nodes }
+      SecurityGroupEgress:
+        - { IpProtocol: "-1", CidrIp: 0.0.0.0/0, Description: the internet (the VPC is refused by the subnets' network ACL) }
+      Tags: [{ Key: Name, Value: roll-cloud-isolated }]
 
   # ── data: one KMS key, one bucket, one table ──
   Key:
@@ -299,6 +404,13 @@ Resources:
           - Id: queue-logs-noncurrent-1-day
             Status: Enabled
             Prefix: queues/logs/
+            NoncurrentVersionExpiration: { NoncurrentDays: 1 }
+          # Isolated runs' bundles (a run's env and tree): deleted when the run ends; nothing
+          # of them is kept a day later, deleted or not.
+          - Id: code-runs-1-day
+            Status: Enabled
+            Prefix: code/runs/
+            ExpirationInDays: 1
             NoncurrentVersionExpiration: { NoncurrentDays: 1 }
       OwnershipControls:
         Rules: [{ ObjectOwnership: BucketOwnerEnforced }]
@@ -462,6 +574,8 @@ Resources:
         detail-type: [ECS Task State Change]
         detail:
           clusterArn: [!GetAtt Cluster.Arn]
+          # Not isolated work: a failing check is customer code failing.
+          group: [{ prefix: "service:" }]
           lastStatus: [STOPPED]
           $or:
             - stopCode: [EssentialContainerExited, TaskFailedToStart]
@@ -582,7 +696,8 @@ Resources:
     Type: AWS::ECS::ClusterCapacityProviderAssociations
     Properties:
       Cluster: !Ref Cluster
-      CapacityProviders: [!Ref CapacityProvider]
+      # Fargate and Fargate Spot for isolated work, which names its capacity on every RunTask.
+      CapacityProviders: [!Ref CapacityProvider, FARGATE, FARGATE_SPOT]
       DefaultCapacityProviderStrategy: [{ CapacityProvider: !Ref CapacityProvider, Weight: 1 }]
 
   # ── roles ──
@@ -652,14 +767,38 @@ Resources:
                   - dynamodb:Scan
                   - dynamodb:DescribeTable
                 Resource: !GetAtt ClusterTable.Arn
-              # Isolated work (checks, previews, sandboxes) as their own tasks in this cluster
-              # (docs/cloud/README.md, "Isolated work"). Their task roles get iam:PassRole here
-              # when they exist.
-              - Sid: IsolatedWork
+              # Isolated work (checks, previews, sandboxes) as their own Fargate tasks in this
+              # cluster (docs/cloud/README.md, "Isolated work"): only from the runner templates
+              # and the task definitions rolld derives from them (one per image), and only with
+              # the runner's roles.
+              - Sid: IsolatedRun
                 Effect: Allow
-                Action: [ecs:RunTask, ecs:StopTask, ecs:DescribeTasks]
+                Action: ecs:RunTask
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:task-definition/${AWS::StackName}-check*"
+                  - !Sub "arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:task-definition/${AWS::StackName}-preview*"
+                  - !Sub "arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:task-definition/${AWS::StackName}-sandbox*"
+                Condition: { ArnEquals: { ecs:cluster: !GetAtt Cluster.Arn } }
+              - Sid: IsolatedTasks
+                Effect: Allow
+                Action: [ecs:StopTask, ecs:DescribeTasks, ecs:ListTasks]
                 Resource: "*"
                 Condition: { ArnEquals: { ecs:cluster: !GetAtt Cluster.Arn } }
+              # RegisterTaskDefinition and DescribeTaskDefinition take no resource; what's
+              # registered can only be run through IsolatedRun, with the roles below.
+              - Sid: IsolatedDefinitions
+                Effect: Allow
+                Action: [ecs:RegisterTaskDefinition, ecs:DescribeTaskDefinition]
+                Resource: "*"
+              - Sid: IsolatedRoles
+                Effect: Allow
+                Action: iam:PassRole
+                Resource: [!GetAtt RunnerTaskRole.Arn, !GetAtt RunnerExecutionRole.Arn]
+                Condition: { StringEquals: { iam:PassedToService: ecs-tasks.amazonaws.com } }
+              - Sid: IsolatedLogs
+                Effect: Allow
+                Action: logs:GetLogEvents
+                Resource: !Sub "${RunnerLogs.Arn}:*"
               - Sid: Metrics
                 Effect: Allow
                 Action: cloudwatch:PutMetricData
@@ -669,6 +808,169 @@ Resources:
                 Effect: Allow
                 Action: [logs:CreateLogStream, logs:PutLogEvents]
                 Resource: !Sub "${NodeLogs.Arn}:*"
+
+  # ── isolated work: Fargate tasks for customer code (docs/cloud/README.md, "Isolated work") ──
+  # Pulls the images and writes the logs; never in the task's reach.
+  RunnerExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ecs-tasks.amazonaws.com }
+            Action: sts:AssumeRole
+            Condition: { StringEquals: { aws:SourceAccount: !Ref AWS::AccountId } }
+      ManagedPolicyArns: [!Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"]
+  # What customer code gets from AWS: nothing. (A task needs a role for ECS to run it; this one
+  # has no policy.) The bundle comes through a presigned URL the node signs.
+  RunnerTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: roll cloud isolated work. No permissions, on purpose.
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ecs-tasks.amazonaws.com }
+            Action: sts:AssumeRole
+            Condition: { StringEquals: { aws:SourceAccount: !Ref AWS::AccountId } }
+  RunnerLogs:
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /${AWS::StackName}/runs
+      RetentionInDays: 7
+  # Templates: rolld registers a copy per image (the image is the only thing RunTask can't
+  # override), named <family>-<hash>. `fetch` and `guard` run roll's small image (deploy.sh push
+  # builds `fetch-<tag>`); `run` is the customer's, `sh -c <run>` once `fetch` succeeded.
+  CheckTask:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub ${AWS::StackName}-check
+      RequiresCompatibilities: [FARGATE]
+      NetworkMode: awsvpc
+      RuntimePlatform: { CpuArchitecture: ARM64, OperatingSystemFamily: LINUX }
+      Cpu: "256"
+      Memory: "512"
+      ExecutionRoleArn: !GetAtt RunnerExecutionRole.Arn
+      TaskRoleArn: !GetAtt RunnerTaskRole.Arn
+      # The task's own storage (no host path on Fargate).
+      Volumes: [{ Name: workspace }, { Name: roll }]
+      ContainerDefinitions:
+        - Name: fetch
+          Image: !Sub "${Repository.RepositoryUri}:fetch-${ImageTag}"
+          Essential: false
+          Command: [roll-fetch]
+          ReadonlyRootFilesystem: true
+          LinuxParameters: { Capabilities: { Drop: [ALL] } }
+          MountPoints: [{ SourceVolume: workspace, ContainerPath: /workspace }, { SourceVolume: roll, ContainerPath: /roll }]
+          LogConfiguration:
+            LogDriver: awslogs
+            Options: { awslogs-group: !Ref RunnerLogs, awslogs-region: !Ref AWS::Region, awslogs-stream-prefix: check }
+        # The check's deadline: ends the task if the node that started it is gone.
+        - Name: guard
+          Image: !Sub "${Repository.RepositoryUri}:fetch-${ImageTag}"
+          Essential: true
+          Command: [roll-fetch, deadline, "4300"]
+          ReadonlyRootFilesystem: true
+          LinuxParameters: { Capabilities: { Drop: [ALL] } }
+          LogConfiguration:
+            LogDriver: awslogs
+            Options: { awslogs-group: !Ref RunnerLogs, awslogs-region: !Ref AWS::Region, awslogs-stream-prefix: check }
+        - Name: run
+          # Replaced by the check's image in each registered copy.
+          Image: public.ecr.aws/docker/library/busybox:stable
+          Essential: true
+          EntryPoint: [sh, -c]
+          WorkingDirectory: /workspace
+          DependsOn: [{ ContainerName: fetch, Condition: SUCCESS }]
+          MountPoints: [{ SourceVolume: workspace, ContainerPath: /workspace }, { SourceVolume: roll, ContainerPath: /roll, ReadOnly: true }]
+          LogConfiguration:
+            LogDriver: awslogs
+            Options: { awslogs-group: !Ref RunnerLogs, awslogs-region: !Ref AWS::Region, awslogs-stream-prefix: check }
+  PreviewTask:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub ${AWS::StackName}-preview
+      RequiresCompatibilities: [FARGATE]
+      NetworkMode: awsvpc
+      RuntimePlatform: { CpuArchitecture: ARM64, OperatingSystemFamily: LINUX }
+      Cpu: "256"
+      Memory: "512"
+      ExecutionRoleArn: !GetAtt RunnerExecutionRole.Arn
+      TaskRoleArn: !GetAtt RunnerTaskRole.Arn
+      Volumes: [{ Name: app }, { Name: roll }]
+      ContainerDefinitions:
+        - Name: fetch
+          Image: !Sub "${Repository.RepositoryUri}:fetch-${ImageTag}"
+          Essential: false
+          Command: [roll-fetch]
+          ReadonlyRootFilesystem: true
+          LinuxParameters: { Capabilities: { Drop: [ALL] } }
+          MountPoints: [{ SourceVolume: app, ContainerPath: /app }, { SourceVolume: roll, ContainerPath: /roll }]
+          LogConfiguration:
+            LogDriver: awslogs
+            Options: { awslogs-group: !Ref RunnerLogs, awslogs-region: !Ref AWS::Region, awslogs-stream-prefix: preview }
+        # The port nodes reach the preview on, forwarded to the app's; it ends the task once the
+        # preview has been idle (if its node is gone and can't).
+        - Name: guard
+          Image: !Sub "${Repository.RepositoryUri}:fetch-${ImageTag}"
+          Essential: true
+          Command: [roll-fetch, proxy]
+          ReadonlyRootFilesystem: true
+          LinuxParameters: { Capabilities: { Drop: [ALL] } }
+          PortMappings: [{ ContainerPort: !Ref PreviewPort, Protocol: tcp }]
+          LogConfiguration:
+            LogDriver: awslogs
+            Options: { awslogs-group: !Ref RunnerLogs, awslogs-region: !Ref AWS::Region, awslogs-stream-prefix: preview }
+        - Name: run
+          Image: public.ecr.aws/docker/library/busybox:stable
+          Essential: true
+          EntryPoint: [sh, -c]
+          WorkingDirectory: /app
+          DependsOn: [{ ContainerName: fetch, Condition: SUCCESS }]
+          MountPoints: [{ SourceVolume: app, ContainerPath: /app }, { SourceVolume: roll, ContainerPath: /roll, ReadOnly: true }]
+          LogConfiguration:
+            LogDriver: awslogs
+            Options: { awslogs-group: !Ref RunnerLogs, awslogs-region: !Ref AWS::Region, awslogs-stream-prefix: preview }
+  # An agent sandbox: `roll agent up` with its machine token, which `fetch` writes to /roll/env
+  # (owned by the sandbox's user, who removes it once read).
+  SandboxTask:
+    Condition: HasSandboxes
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub ${AWS::StackName}-sandbox
+      RequiresCompatibilities: [FARGATE]
+      NetworkMode: awsvpc
+      RuntimePlatform: { CpuArchitecture: ARM64, OperatingSystemFamily: LINUX }
+      Cpu: "2048"
+      Memory: "4096"
+      ExecutionRoleArn: !GetAtt RunnerExecutionRole.Arn
+      TaskRoleArn: !GetAtt RunnerTaskRole.Arn
+      Volumes: [{ Name: roll }]
+      ContainerDefinitions:
+        - Name: fetch
+          Image: !Sub "${Repository.RepositoryUri}:fetch-${ImageTag}"
+          Essential: false
+          Command: [roll-fetch]
+          MountPoints: [{ SourceVolume: roll, ContainerPath: /roll }]
+          LogConfiguration:
+            LogDriver: awslogs
+            Options: { awslogs-group: !Ref RunnerLogs, awslogs-region: !Ref AWS::Region, awslogs-stream-prefix: sandbox }
+        - Name: run
+          Image: !Ref SandboxImage
+          Essential: true
+          EntryPoint: [sh, -c]
+          Command: [". /roll/env && rm -f /roll/env && exec roll agent up"]
+          DependsOn: [{ ContainerName: fetch, Condition: SUCCESS }]
+          MountPoints: [{ SourceVolume: roll, ContainerPath: /roll }]
+          # `roll agent up` stops cleanly within 5 s, then the link drains (docs/code/agents.md).
+          StopTimeout: 30
+          LogConfiguration:
+            LogDriver: awslogs
+            Options: { awslogs-group: !Ref RunnerLogs, awslogs-region: !Ref AWS::Region, awslogs-stream-prefix: sandbox }
 
   # ── the node ──
   NodeTask:
@@ -734,6 +1036,21 @@ Resources:
             # JSON lines: the metric filters and the Embedded Metric Format metrics below read them.
             - { Name: ROLL_LOG_FORMAT, Value: json }
             - { Name: ROLL_CODE_PREVIEW_DOMAIN, Value: !Ref SiteDomain }
+            # Customer code as Fargate tasks, never on a node (docs/cloud/README.md, "Isolated work").
+            - { Name: ROLL_CODE_RUNNER, Value: fargate }
+            - { Name: ROLL_CODE_RUNNER_CONCURRENCY, Value: "16" }
+            - { Name: ROLL_CODE_FARGATE_CLUSTER, Value: !Ref Cluster }
+            - { Name: ROLL_CODE_FARGATE_SUBNETS, Value: !Join [",", [!Ref IsolatedSubnet1, !Ref IsolatedSubnet2, !Ref IsolatedSubnet3]] }
+            - { Name: ROLL_CODE_FARGATE_SECURITY_GROUP, Value: !Ref IsolatedSecurityGroup }
+            - { Name: ROLL_CODE_FARGATE_CHECK_TASK, Value: !Sub "${AWS::StackName}-check" }
+            - { Name: ROLL_CODE_FARGATE_PREVIEW_TASK, Value: !Sub "${AWS::StackName}-preview" }
+            - !If [HasSandboxes, { Name: ROLL_CODE_FARGATE_SANDBOX_TASK, Value: !Sub "${AWS::StackName}-sandbox" }, !Ref AWS::NoValue]
+            - { Name: ROLL_SANDBOX_BACKEND, Value: !If [HasSandboxes, fargate, none] }
+            # No NAT: a public IP is a task's only way to the internet (nothing reaches it: the
+            # security group admits nodes only).
+            - { Name: ROLL_CODE_FARGATE_PUBLIC_IP, Value: "1" }
+            - { Name: ROLL_CODE_FARGATE_SPOT, Value: !If [ChecksSpot, "1", "0"] }
+            - { Name: ROLL_CODE_FARGATE_PREVIEW_PORT, Value: !Ref PreviewPort }
             # Every product but Postgres, whose computes need Docker, until it runs in process.
             - { Name: ROLL_PRODUCTS, Value: "redis,streams,tasks,storage,nosql,queues,code" }
             - { Name: ROLL_QUEUES_USER, Value: roll-admin }
@@ -1495,3 +1812,6 @@ Outputs:
     Value: !Join [",", [!Ref CloudflareToken, !Ref SystemDatabase]]
   NodeLogGroup:
     Value: !Ref NodeLogs
+  RunnerLogGroup:
+    Description: Isolated work's logs (checks, previews, sandboxes).
+    Value: !Ref RunnerLogs
