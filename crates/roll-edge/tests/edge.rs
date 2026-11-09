@@ -280,7 +280,7 @@ async fn a_renewed_certificate_is_served_without_a_restart() {
     let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = l.local_addr().unwrap();
     let tls = roll_edge::tls::server_config(store.clone(), &[]);
-    tokio::spawn(roll_edge::listener::serve_tls(l, tls, ListenOptions::default(), |mut s, _| async move {
+    tokio::spawn(roll_edge::listener::serve_tls(l, tls, ListenOptions::default(), Drain::new(), |mut s, _| async move {
         let _ = s.write_all(b"hi").await;
     }));
     let first = served_cert(addr, "api.roll.test").await;

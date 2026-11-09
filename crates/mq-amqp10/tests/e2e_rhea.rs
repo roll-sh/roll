@@ -63,7 +63,7 @@ async fn rhea_roundtrip() {
         Command::new("docker")
             .args(["run", "--rm", "--add-host=host.docker.internal:host-gateway", "-e"])
             .arg(format!("PORT={}", addr.port()))
-            .args(["-e", &format!("SCRIPT={SCRIPT}"), "-w", "/app", "node:22-alpine", "sh", "-c"])
+            .args(["-e", &format!("SCRIPT={SCRIPT}"), "-w", "/app", "node:22-alpine@sha256:0e1754758c2df4cfa3e68d59e2e1b7374bb7fd9ea6328eaaacf15cc934af8202", "sh", "-c"])
             .arg("npm i --silent --no-audit --no-fund rhea >/dev/null && node -e \"$SCRIPT\"")
             .output()
             .expect("docker run")

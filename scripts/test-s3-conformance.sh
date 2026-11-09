@@ -39,7 +39,7 @@ SUITE=(s3tests/functional/test_s3.py s3tests/functional/test_headers.py s3tests/
 # workers' buckets: they run first, one at a time, on the fresh server.
 SERIAL=(s3tests/functional/test_s3.py::test_list_buckets_paginated)
 # The same LocalStack as scripts/test-storage-aws.sh.
-LOCALSTACK_IMAGE=localstack/localstack:4.9
+LOCALSTACK_IMAGE=localstack/localstack:4.9@sha256:59373b4a27dba3ec15c4db0b7455f0cb68c8a42300e2cbbe362b440f9a131697
 
 PATHS=(crates/s3-proto crates/s3-select crates/s3-image crates/s3-store crates/s3-server Cargo.toml Cargo.lock tests/s3-conformance scripts/test-s3-conformance.sh)
 

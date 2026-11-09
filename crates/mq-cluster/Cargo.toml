@@ -1,6 +1,6 @@
 [package]
 name = "mq-cluster"
-description = "roll queues clustering: stateless brokers sharing metadata (roll postgres) and replicated logs; queue ownership, internal RPC routing, failover, live rebalance and draining"
+description = "roll queues on many nodes: queue ownership on roll-cluster leases, metadata in the system database, internal RPC routing, failover, live rebalance and draining"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,10 +9,15 @@ publish.workspace = true
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
+axum.workspace = true
 bytes.workspace = true
 futures-util.workspace = true
+http-body-util.workspace = true
+hyper = { workspace = true, features = ["client", "server", "http1"] }
+hyper-util = { workspace = true, features = ["tokio"] }
 mq-core.workspace = true
 parking_lot.workspace = true
+roll-cluster.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
@@ -26,8 +31,11 @@ tracing.workspace = true
 rcgen.workspace = true
 futures.workspace = true
 lapin.workspace = true
+libc.workspace = true
 mq-amqp.workspace = true
+mq-storage.workspace = true
 mq-stream.workspace = true
+object_store.workspace = true
 rabbitmq-stream-client.workspace = true
 parking_lot.workspace = true
 tracing-subscriber.workspace = true

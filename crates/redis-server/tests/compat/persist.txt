@@ -28,7 +28,9 @@ CONFIG GET rdb-key-save-*
 CONFIG GET rdb-key-save-delay rdb-key-save-delay RDB-KEY-SAVE-DELAY
 SET b 1
 BGSAVE
-!info rdb_bgsave_in_progress,rdb_current_bgsave_time_sec,current_save_keys_total,rdb_saves,aof_rewrite_in_progress,aof_rewrite_scheduled INFO persistence
+# rdb_current_bgsave_time_sec counts seconds since BGSAVE started: 0 or 1 on either side,
+# depending on how busy the machine is, so only its name is compared here.
+!info rdb_bgsave_in_progress,current_save_keys_total,rdb_saves,aof_rewrite_in_progress,aof_rewrite_scheduled INFO persistence
 !info total_forks INFO stats
 BGSAVE
 BGSAVE SCHEDULE

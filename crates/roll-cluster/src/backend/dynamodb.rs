@@ -84,6 +84,8 @@ struct Seen {
     draining: bool,
     left: bool,
     rel: i64,
+    /// A sweep already looked for its leases since this `hb` went silent for a lease length.
+    swept_silent: bool,
 }
 
 struct State {
@@ -365,13 +367,13 @@ impl DynamoDb {
     fn observe(st: &mut State, id: &str, item: &Item, now: Duration) -> bool {
         let (hb, inc, rel) = (get_s(item, "hb"), get_s(item, "inc"), get_n(item, "rel"));
         let prev = st.seen.get(id);
-        let since = match prev {
-            Some(p) if p.hb == hb && p.inc == inc => p.since,
-            _ => now,
+        let (since, swept_silent) = match prev {
+            Some(p) if p.hb == hb && p.inc == inc => (p.since, p.swept_silent),
+            _ => (now, false),
         };
         let event = prev.is_none_or(|p| p.inc != inc || p.rel != rel);
         let zone = Some(get_s(item, "zone")).filter(|z| !z.is_empty());
-        st.seen.insert(id.to_string(), Seen { url: get_s(item, "url"), zone, inc, hb, since, draining: get_b(item, "draining"), left: get_b(item, "left"), rel });
+        st.seen.insert(id.to_string(), Seen { url: get_s(item, "url"), zone, inc, hb, since, draining: get_b(item, "draining"), left: get_b(item, "left"), rel, swept_silent });
         event
     }
 
@@ -643,11 +645,7 @@ impl Backend for DynamoDb {
         st.seen.retain(|id, _| ids.contains(id));
         let mut event = st.seen.len() != before;
         for item in &items {
-            let id = get_s(item, "sk");
-            let was_silent = st.seen.get(&id).is_some_and(|s| s.since + t.lease_ttl <= now);
-            event |= Self::observe(&mut st, &id, item, now);
-            // A node that just went silent for a lease's length: its leases may be taken now.
-            event |= !was_silent && st.seen.get(&id).is_some_and(|s| s.since + t.lease_ttl <= now);
+            event |= Self::observe(&mut st, &get_s(item, "sk"), item, now);
         }
         if event {
             st.scan_due = true;
@@ -782,18 +780,26 @@ impl Backend for DynamoDb {
         err.map_or(Ok(()), Err)
     }
 
-    /// Lease pages are read only when something may have freed a lease (a release, a node gone
-    /// or silent, the last look found some), and every `3 × lease_ttl` regardless.
+    /// Lease pages are read only when something may have freed a lease (a release, a node gone,
+    /// a holder silent for a lease length since the last look, the last look found some), and
+    /// every `3 × lease_ttl` regardless. Whether a holder went silent is decided here, from what
+    /// the last heartbeat saw, so a dead node's leases are looked for at the first sweep after
+    /// they become takeable (not at the next periodic scan).
     fn sweep(&self, page: usize) -> Result<(Vec<String>, bool)> {
         let t = self.me().timing;
         let from = {
             let mut st = self.state.lock();
             if st.cursor.is_none() {
                 let now = clock::now();
-                if !(st.scan_due || st.found || st.last_scan.is_none_or(|l| l + t.lease_ttl * 3 <= now)) {
+                let silent = |s: &Seen| s.since + t.lease_ttl <= now;
+                let newly_silent = st.seen.values().any(|s| !s.swept_silent && silent(s));
+                if !(st.scan_due || st.found || newly_silent || st.last_scan.is_none_or(|l| l + t.lease_ttl * 3 <= now)) {
                     return Ok((Vec::new(), false));
                 }
                 (st.scan_due, st.found) = (false, false);
+                for s in st.seen.values_mut().filter(|s| silent(s)) {
+                    s.swept_silent = true;
+                }
             }
             st.cursor.take()
         };

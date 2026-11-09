@@ -68,7 +68,8 @@ fn now_s() -> u64 {
 
 impl Signer {
     pub fn new(secret: &str) -> anyhow::Result<Self> {
-        anyhow::ensure!(secret.len() >= 20, "the cluster secret must be at least 20 characters");
+        // The cluster's own rule (`ClusterConfig::validate`): hops are signed with the same secret.
+        anyhow::ensure!(secret.len() >= 16, "the cluster secret must be at least 16 bytes");
         Ok(Self { key: hmac::Key::new(hmac::HMAC_SHA256, format!("roll-edge-splice:{secret}").as_bytes()) })
     }
 

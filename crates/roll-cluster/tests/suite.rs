@@ -133,6 +133,12 @@ fn a_dead_nodes_keys_move_to_their_preferred_live_node(kind: Kind) {
     let spans = spans.stop();
     let taken = spans.iter().filter(|s| s.0 != "a").map(|s| s.1).min().unwrap();
     assert!(taken >= frozen + a.config().lease_margin, "taken {:?} after the freeze", taken - frozen);
+    eprintln!("{kind:?}: taken over {:?} after the freeze (lease {:?})", taken - frozen, a.config().lease_ttl);
+    // Within a lease and one sweep (plus the heartbeat that first sees the silence, and a second
+    // for slow calls), not at some later periodic scan.
+    let cfg = a.config();
+    let bound = cfg.lease_ttl + cfg.heartbeat + cfg.sweep_every + Duration::from_secs(1);
+    assert!(taken - frozen <= bound, "taken {:?} after the freeze; a lease and a sweep is {bound:?}", taken - frozen);
     for k in &keys {
         let want = placement::rendezvous(k, ["b", "c"]).unwrap();
         assert_eq!(record(&b, k), Some((want.to_string(), 2)), "{k} went to its preferred live node");

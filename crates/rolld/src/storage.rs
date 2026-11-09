@@ -190,7 +190,8 @@ pub async fn start(args: &StorageOpts, home: &Path, storage: &StorageConfig, clu
     if let Some(c) = &args.s3_internal_cidrs {
         scfg.internal_cidrs = s3_server::parse_cidrs(c)?;
     }
-    let endpoint = format!("http://{}:{}", args.public_host, args.s3.port());
+    // The public endpoint (the edge's S3 host behind it), else this node's listener.
+    let endpoint = args.s3_public_endpoint.clone().unwrap_or_else(|| format!("http://{}:{}", args.public_host, args.s3.port()));
     let ccfg = s3_control::ControlConfig { endpoint, region: scfg.region.clone(), virtual_host_domain: args.s3_domain.clone(), website_domain: args.s3_website_domain.clone(), storage_class: class, pricing: Default::default() };
     let api_url = args.storage_api_public_url.clone().unwrap_or_else(|| format!("http://{}:{}{}", args.public_host, args.storage_api.port(), s3_api::PREFIX));
     let api_cfg = s3_api::Config { public_url: args.storage_api_public_url.clone(), spool_dir: scfg.spool_dir.clone(), ..Default::default() };

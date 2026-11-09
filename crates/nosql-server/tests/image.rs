@@ -593,13 +593,13 @@ cluster.shutdown()
 
     // Cassandra 5.0's cqlsh, validating the certificate.
     let o = docker::docker(&[
-        "run", "--rm", "--memory", "256m", "--add-host", &host, "-v", &tls_mount, "-e", "SSL_CERTFILE=/tls/tls.crt", "--entrypoint", "cqlsh", "cassandra:5.0.9",
+        "run", "--rm", "--memory", "256m", "--add-host", &host, "-v", &tls_mount, "-e", "SSL_CERTFILE=/tls/tls.crt", "--entrypoint", "cqlsh", common::CASSANDRA_IMAGE,
         "--ssl", "-u", "cassandra", "-p", "cassandra", "roll-tls", "-e", "SELECT v FROM tls.t WHERE k = 1",
     ]);
     let out = String::from_utf8_lossy(&o.stdout);
     assert!(o.status.success() && out.contains("secret"), "{out}{}", String::from_utf8_lossy(&o.stderr));
     // Without --ssl it can't connect.
-    let o = docker::docker(&["run", "--rm", "--memory", "256m", "--add-host", &host, "--entrypoint", "cqlsh", "cassandra:5.0.9", "-u", "cassandra", "-p", "cassandra", "--connect-timeout", "3", "roll-tls", "-e", "SELECT v FROM tls.t"]);
+    let o = docker::docker(&["run", "--rm", "--memory", "256m", "--add-host", &host, "--entrypoint", "cqlsh", common::CASSANDRA_IMAGE, "-u", "cassandra", "-p", "cassandra", "--connect-timeout", "3", "roll-tls", "-e", "SELECT v FROM tls.t"]);
     assert!(!o.status.success());
     // The image's cqlsh (Testcontainers runs it in the container).
     let o = c.exec(&["env", "SSL_CERTFILE=/tls/tls.crt", "cqlsh", "--ssl", "--server-name", "roll-tls", "-u", "cassandra", "-p", "cassandra", "-e", "SELECT v FROM tls.t WHERE k = 1"]);

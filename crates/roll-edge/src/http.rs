@@ -76,8 +76,9 @@ pub struct HttpsConfig {
 /// The ALPN the HTTPS listener offers.
 pub const ALPN: &[&[u8]] = &[b"http/1.1"];
 
-/// Serve HTTPS on `listener` forever. When the drain closes listeners, keep-alive connections
-/// are closed after their request in flight, so clients reconnect through another node.
+/// Serve HTTPS on `listener` until the drain stops accepting; then keep-alive connections are
+/// closed after their request in flight, so clients reconnect through another node. Requests in
+/// flight (a clone, a forwarded push) aren't cut by the edge: they finish, or end with the process.
 pub async fn serve(listener: TcpListener, tls: Arc<ServerConfig>, cfg: Arc<HttpsConfig>, routes: Arc<dyn Routes>, drain: Drain) -> std::io::Result<()> {
     let opts = cfg.listen;
     let pick = {
@@ -87,7 +88,7 @@ pub async fn serve(listener: TcpListener, tls: Arc<ServerConfig>, cfg: Arc<Https
             _ => tls.clone(),
         })
     };
-    listener::serve_tcp(listener, opts, move |sock, peer| {
+    listener::serve_tcp(listener, opts, drain.clone(), move |sock, peer| {
         let (cfg, routes, drain, pick) = (cfg.clone(), routes.clone(), drain.clone(), pick.clone());
         async move {
             let (stream, accepted) = match tokio::time::timeout(opts.handshake_timeout, listener::handshake_by_name(sock, peer, pick.as_ref())).await {
@@ -107,7 +108,7 @@ pub async fn serve(listener: TcpListener, tls: Arc<ServerConfig>, cfg: Arc<Https
             tokio::pin!(conn);
             let result = tokio::select! {
                 r = conn.as_mut() => r,
-                _ = drain.closing() => {
+                _ = drain.refusing() => {
                     conn.as_mut().graceful_shutdown();
                     conn.await
                 }

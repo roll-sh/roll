@@ -4,6 +4,7 @@
 //! clear are refused: everything on the edge is TLS. Cancel requests may still come in the clear
 //! (libpq before 17 sends them so); they carry only the key Postgres gave the session.
 
+use crate::drain::Drain;
 use crate::hosts::{Host, Hostnames};
 use crate::listener::{self, Accepted, ListenOptions};
 use crate::stream::Prefixed;
@@ -74,13 +75,14 @@ pub async fn negotiate(mut sock: TcpStream, peer: SocketAddr, tls: &TlsAcceptor)
 
 /// The Postgres listener: TLS either way in, then the proxy, with the endpoint the server name
 /// names (`<id>.pg.roll.sh`); clients without SNI name it in `options=endpoint=<id>`.
-pub async fn serve<R: pg_proxy::Router>(listener: TcpListener, tls: Arc<ServerConfig>, opts: ListenOptions, hosts: Hostnames, proxy: Arc<pg_proxy::Proxy<R>>) -> io::Result<()> {
+/// Follows `drain` as every edge listener does ([`listener::serve_tls`]).
+pub async fn serve<R: pg_proxy::Router>(listener: TcpListener, tls: Arc<ServerConfig>, opts: ListenOptions, drain: Drain, hosts: Hostnames, proxy: Arc<pg_proxy::Proxy<R>>) -> io::Result<()> {
     let acceptor = TlsAcceptor::from(tls);
     let hosts = Arc::new(hosts);
-    listener::serve_tcp(listener, opts, move |sock, peer| {
-        let (acceptor, hosts, proxy) = (acceptor.clone(), hosts.clone(), proxy.clone());
-        async move {
-            let result = match tokio::time::timeout(opts.handshake_timeout, negotiate(sock, peer, &acceptor)).await {
+    listener::serve_tcp(listener, opts, drain.clone(), move |sock, peer| {
+        let (acceptor, hosts, proxy, drain) = (acceptor.clone(), hosts.clone(), proxy.clone(), drain.clone());
+        let conn = async move {
+            match tokio::time::timeout(opts.handshake_timeout, negotiate(sock, peer, &acceptor)).await {
                 Ok(Ok(Some(Negotiated::Tls(stream, accepted)))) => {
                     let named = accepted.sni.as_deref().and_then(|s| match hosts.classify(s) {
                         Host::Pg(id) => Some(id),
@@ -92,8 +94,10 @@ pub async fn serve<R: pg_proxy::Router>(listener: TcpListener, tls: Arc<ServerCo
                 Ok(Ok(None)) => Ok(()),
                 Ok(Err(e)) => Err(e.into()),
                 Err(_) => Ok(()),
-            };
-            if let Err(e) = result {
+            }
+        };
+        async move {
+            if let Some(Err(e)) = drain.until_closing(conn).await {
                 debug!(%peer, error = %e, "edge: postgres connection ended with an error");
             }
         }

@@ -843,6 +843,9 @@ impl Tasks {
         Ok((Write::claim(key, json!(at), Some(at + DAY)), m))
     }
 
+    /// One timer per run, step and kind. Its key and its message are one write, so a worker
+    /// that dies setting it leaves both or neither: never a key with no timer behind it, which
+    /// would leave the run waiting forever (the delivery that redoes this sets it then).
     async fn timer(&self, run_id: &str, step_id: &str, kind: TimerKind, at: Ms) -> Result<()> {
         let (claim, m) = self.timer_writes(run_id, step_id, kind, at).await?;
         // Taken: this timer is set already (its message with it).

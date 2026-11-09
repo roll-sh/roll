@@ -25,8 +25,8 @@ REPEAT=${REPEAT:-3}
 SETTLE=${SETTLE:-10}
 BROKERS=${BROKERS:-roll rabbitmq}
 NET=roll-bench
-RABBIT_IMAGE=${RABBIT_IMAGE:-rabbitmq:4-management}
-PERFTEST_IMAGE=${PERFTEST_IMAGE:-pivotalrabbitmq/perf-test:latest}
+RABBIT_IMAGE=${RABBIT_IMAGE:-rabbitmq:4-management@sha256:af6f50d38098d8bd52fef7f3fa85015dd8b2bf6def58e995bf584ae9ba0f6407}
+PERFTEST_IMAGE=${PERFTEST_IMAGE:-pivotalrabbitmq/perf-test:2.25.0@sha256:b803911d60fdf6885fc6313f0d56a0c2c743bfdd27ac118f5e4b320c36c7b8c9}
 OUT=docs/benchmarks/queues.md
 RAW=target/bench-queues
 mkdir -p "$RAW" docs/benchmarks
@@ -51,7 +51,7 @@ SCENARIOS=(
 
 start_broker() {
   cleanup
-  docker run --rm alpine sync >/dev/null 2>&1 || true
+  docker run --rm alpine:3.24.4@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf sync >/dev/null 2>&1 || true
   sleep "$SETTLE"
   case $1 in
     roll) docker run -d --name bench-broker --network $NET --cpus "$CPUS" --memory "$MEM" \

@@ -66,9 +66,13 @@ number scheme, with one record per node instead of one per lock:
 - **Acquisitions** ride on the node's last confirmed renewal (contenders watch the same token) and
   aren't attempted once it's past its validity.
 - **Sweeps** read the lease items only when something may have freed one (a node released some:
-  its `rel` changed; a node went silent, vanished or came back as a new incarnation; the last look
-  found takeable leases) and every three lease lengths regardless, so idle clusters cost reads of
-  the node items only.
+  its `rel` changed; a node vanished or came back as a new incarnation; a node's token has stayed
+  unchanged for a lease length since the last look, decided at each sweep from what the
+  heartbeat's read saw; the last look found takeable leases) and every three lease lengths
+  regardless, so idle clusters cost reads of the node items only, and a dead node's leases are
+  taken within a lease length, one heartbeat and one sweep of its last renewal (2.8 s against a
+  3 s lease in roll-cluster's suite, where it was 7.8 s while silence was only noticed by the
+  periodic look).
 - Condition failures are outcomes, not errors. Throttling and network errors are retried by the
   SDK with backoff (2 s per call at most); a failure leaves the deadline where the last success
   put it, and a lease write whose outcome is unknown is read again at the next renewal (adopted

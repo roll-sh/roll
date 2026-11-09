@@ -46,6 +46,10 @@ pub async fn start(args: &Args, auth: &crate::auth::Auth, home: &std::path::Path
     c.local_disk_bytes = args.stream_disk_mb << 20;
     c.evict_on_unload = !args.stream_keep_local;
     c.storage = storage.clone();
+    // Behind the edge, connection details name the stream's public hostname.
+    if let Some(p) = crate::edge::Public::of(args) {
+        p.streams(&mut c);
+    }
     let broker = match cluster.backend_name() {
         "memory" => stream_broker::Broker::new(c).await?,
         _ => {

@@ -13,6 +13,11 @@ cd "$(dirname "$0")/.."
 PATHS=(crates/tasks crates/rolld crates/roll-cli Cargo.toml Cargo.lock
        scripts/test-tasks.sh .github/workflows/tasks.yml deploy/aws)
 STAMP=target/.test-tasks.hash
+# Images are pinned by digest (tag@multi-arch index digest): a rebuilt upstream tag can't change them.
+MINIO_IMAGE=cgr.dev/chainguard/minio:latest@sha256:a1ac4589a5f8136b616e667b48a0bea9719bb10bd45799ea946f24bbedfafde4
+MC_IMAGE=cgr.dev/chainguard/minio-client:latest@sha256:10388d580a724f356b94c9b2631b5a179039cabe8c76e9b37d86ed007d569b05
+DYNAMODB_IMAGE=amazon/dynamodb-local:3.3.2@sha256:6ada631ec7aa5fc83446855eb17233e3dad184fec47477e8140c6c569cfe0c86
+SEAWEEDFS_IMAGE=chrislusf/seaweedfs:4.50@sha256:c2658820e763294a9e9de7b36c81e59b879e3459148351aee4e31a126ca64860
 
 force=0 unit_only=0 e2e_only=0 args=()
 for a in "$@"; do
@@ -40,7 +45,7 @@ fi
 cluster_ddb=roll-cloud-tasks-ddb-$$
 trap 'docker rm -f "$cluster_ddb" >/dev/null 2>&1 || true' EXIT
 if [[ $unit_only == 0 && -z ${ROLL_CLUSTER_TEST_DYNAMODB:-} ]] && docker info >/dev/null 2>&1; then
-  docker run -d --rm --name "$cluster_ddb" -p 127.0.0.1::8000 amazon/dynamodb-local >/dev/null
+  docker run -d --rm --name "$cluster_ddb" -p 127.0.0.1::8000 "$DYNAMODB_IMAGE" >/dev/null
   port=$(docker port "$cluster_ddb" 8000/tcp | head -1 | sed 's/.*://')
   # Docker accepts connections before DynamoDB Local listens: wait for an HTTP answer.
   for _ in $(seq 120); do curl -s -o /dev/null "http://127.0.0.1:$port" && break; sleep 0.5; done
@@ -69,7 +74,7 @@ if [[ $unit_only == 0 ]]; then
 
   # The log store on S3.
   docker run -d --rm --name "$minio" -p 127.0.0.1::9000 -e MINIO_ROOT_USER=roll -e MINIO_ROOT_PASSWORD=roll-tasks-test \
-    cgr.dev/chainguard/minio server /data >/dev/null
+    "$MINIO_IMAGE" server /data >/dev/null
   minio_port=$(docker port "$minio" 9000/tcp | head -1 | sed 's/.*://')
   for _ in $(seq 60); do
     curl -sf -o /dev/null "http://127.0.0.1:$minio_port/minio/health/live" && break
@@ -78,7 +83,7 @@ if [[ $unit_only == 0 ]]; then
   for cmd in "mb l/roll-tasks-log" "version enable l/roll-tasks-log"; do
     # shellcheck disable=SC2086
     docker run --rm --network "container:$minio" -e MC_HOST_l=http://roll:roll-tasks-test@127.0.0.1:9000 \
-      cgr.dev/chainguard/minio-client $cmd >/dev/null
+      "$MC_IMAGE" $cmd >/dev/null
   done
   AWS_ACCESS_KEY_ID=roll AWS_SECRET_ACCESS_KEY=roll-tasks-test AWS_REGION=us-east-1 \
   AWS_ENDPOINT_URL="http://127.0.0.1:$minio_port" ROLL_TASKS_E2E_LOG=s3://roll-tasks-log/e2e \
@@ -90,8 +95,8 @@ if [[ $unit_only == 0 ]]; then
   docker rm -f "$minio" >/dev/null 2>&1 || true
 
   # DynamoDB.
-  docker run -d --rm --name "$ddb" -p 127.0.0.1::8000 amazon/dynamodb-local -jar DynamoDBLocal.jar -inMemory -sharedDb >/dev/null
-  docker run -d --rm --name "$s3" -p 127.0.0.1::8333 chrislusf/seaweedfs server -s3 >/dev/null
+  docker run -d --rm --name "$ddb" -p 127.0.0.1::8000 "$DYNAMODB_IMAGE" -jar DynamoDBLocal.jar -inMemory -sharedDb >/dev/null
+  docker run -d --rm --name "$s3" -p 127.0.0.1::8333 "$SEAWEEDFS_IMAGE" server -s3 >/dev/null
   ddb_port=$(docker port "$ddb" 8000/tcp | head -1 | sed 's/.*://')
   s3_port=$(docker port "$s3" 8333/tcp | head -1 | sed 's/.*://')
   for _ in $(seq 60); do

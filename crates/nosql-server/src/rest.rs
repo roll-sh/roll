@@ -516,7 +516,21 @@ async fn route(st: &RestState, lease: &Lease, method: &Method, p: &[&str], q: &P
             compact(&n, &t, flush).await?;
             done()
         }
-        ["column_family", "autocompaction" | "tombstone_gc", name] => {
+        // One table's background compaction: GET its state, POST enables, DELETE disables (what
+        // cqlpy's `no_autocompaction_context` uses for a table).
+        ["column_family", "autocompaction", name] => {
+            let t = n.table(name)?;
+            let s = db.store().get_table(t.table_id());
+            match s {
+                _ if get => ok(json!(s.is_none_or(|s| s.auto_compaction()))),
+                Some(s) => {
+                    s.set_auto_compaction(post);
+                    done()
+                }
+                None => done(),
+            }
+        }
+        ["column_family", "tombstone_gc", name] => {
             n.table(name)?;
             if get { ok(json!(true)) } else { done() }
         }

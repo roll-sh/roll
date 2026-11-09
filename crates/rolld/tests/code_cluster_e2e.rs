@@ -52,6 +52,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const IMAGE: &str = "roll-code:e2e";
+// The dependencies, pinned by digest (the multi-arch index).
+const POSTGRES_IMAGE: &str = "postgres:18-alpine@sha256:123b17998ccaf47e53b502e8c6a1e79afd8f579c6f3eec83c563da026f957395";
+const SEAWEEDFS_IMAGE: &str = "chrislusf/seaweedfs:4.50@sha256:c2658820e763294a9e9de7b36c81e59b879e3459148351aee4e31a126ca64860";
+const PYTHON_IMAGE: &str = "python:3.12-slim@sha256:5e2bdb1b0d542d5039cffb8181c65930093949194a65c365dfb1b0fe13a4fa5b";
 const TOKEN: &str = "e2e-admin-token-0123456789abcdef";
 const CLUSTER_SECRET: &str = "e2e cluster secret, more than 16 bytes";
 const SECRET_KEY: &str = "e2e-secret-key-0123456789abcdef0123456789";
@@ -831,12 +835,12 @@ async fn code_cluster_keeps_every_landing_through_kill_rolling_restart_and_postg
     let (pg, s3, hooks, net) = (env.name("pg"), env.name("s3"), env.name("hooks"), env.net());
     docker(&[
         "run", "-d", "--name", &pg, "--network", &net, "-e", "POSTGRES_USER=roll", "-e", "POSTGRES_PASSWORD=roll", "-e", "POSTGRES_DB=roll",
-        "postgres:18-alpine", "-c", "max_connections=300",
+        POSTGRES_IMAGE, "-c", "max_connections=300",
     ]);
     let s3_port = format!("127.0.0.1:{}:8333", env.s3_port);
-    docker(&["run", "-d", "--name", &s3, "--network", &net, "-p", &s3_port, "chrislusf/seaweedfs:latest", "server", "-s3"]);
+    docker(&["run", "-d", "--name", &s3, "--network", &net, "-p", &s3_port, SEAWEEDFS_IMAGE, "server", "-s3"]);
     let hooks_port = format!("127.0.0.1:{}:8080", env.hooks_port);
-    docker(&["run", "-d", "--name", &hooks, "--network", &net, "-p", &hooks_port, "python:3.12-slim", "python", "-u", "-c", RECEIVER, HOOK_SECRET]);
+    docker(&["run", "-d", "--name", &hooks, "--network", &net, "-p", &hooks_port, PYTHON_IMAGE, "python", "-u", "-c", RECEIVER, HOOK_SECRET]);
     let http = reqwest::Client::builder().no_proxy().connect_timeout(Duration::from_secs(3)).redirect(reqwest::redirect::Policy::none()).build().unwrap();
 
     let t = Instant::now();

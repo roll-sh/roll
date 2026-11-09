@@ -43,7 +43,7 @@ async fn rabbitmqadmin_v2() {
     let h = Harness::start_on("0.0.0.0").await;
     let port = h.addr.port().to_string();
     let admin = async |args: &[&str]| -> String {
-        let mut full = vec!["run", "--rm", "--add-host=host.docker.internal:host-gateway", "--entrypoint", "rabbitmqadmin", "rabbitmq:4-management"];
+        let mut full = vec!["run", "--rm", "--add-host=host.docker.internal:host-gateway", "--entrypoint", "rabbitmqadmin", "rabbitmq:4-management@sha256:af6f50d38098d8bd52fef7f3fa85015dd8b2bf6def58e995bf584ae9ba0f6407"];
         full.extend(["--host", "host.docker.internal", "--port", &port, "--username", "guest", "--password", "guest"]);
         full.extend(args);
         let o = docker(&full, None).await;
@@ -181,7 +181,7 @@ async fn terraform_rabbitmq_provider() {
     let plugins = format!("{}:/plugin-cache", cache.display());
     let tf = async |args: &[&str]| -> Out {
         let mut full = vec!["run", "--rm", "--add-host=host.docker.internal:host-gateway", "-v", &work, "-v", &plugins, "-w", "/work"];
-        full.extend(["-e", "TF_PLUGIN_CACHE_DIR=/plugin-cache", "-e", "TF_IN_AUTOMATION=1", "hashicorp/terraform:latest"]);
+        full.extend(["-e", "TF_PLUGIN_CACHE_DIR=/plugin-cache", "-e", "TF_IN_AUTOMATION=1", "hashicorp/terraform:1.17.1@sha256:a5d5a5a892c98f60fcbfa81eac2a40fc19e7b3fa7719bccae10ff6111d22524a"]);
         full.extend(args);
         docker(&full, None).await
     };
@@ -221,7 +221,7 @@ async fn promtool_check_metrics() {
     h.mgmt.sample();
     for path in ["/metrics", "/metrics/per-object", "/metrics/detailed?family=queue_coarse_metrics&family=queue_metrics&family=queue_delivery_metrics&family=connection_coarse_metrics&family=connection_metrics&family=channel_metrics&family=channel_exchange_metrics&family=connection_churn_metrics&family=node_coarse_metrics&family=exchange_names&family=exchange_bindings&family=vhost_status"] {
         let text = h.req_as(Method::GET, path, None, None).await.text;
-        let o = docker(&["run", "--rm", "-i", "--entrypoint", "promtool", "prom/prometheus:latest", "check", "metrics"], Some(&text)).await;
+        let o = docker(&["run", "--rm", "-i", "--entrypoint", "promtool", "prom/prometheus:v3.16.0@sha256:e04987641b57704f408e31f6373ba4138ecf27cb4a165d24aabb6c38fddd0f06", "check", "metrics"], Some(&text)).await;
         assert!(o.ok, "promtool rejected {path}:\nstdout: {}\nstderr: {}\n{text}", o.stdout, o.stderr);
     }
     drop(conn);

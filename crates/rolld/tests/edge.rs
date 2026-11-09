@@ -2,7 +2,7 @@
 //! API, tasks, code's git routes and the dashboard; redis-cli over TLS with the database named by
 //! SNI; and a stop that fails `/healthz` at once while the listeners keep serving.
 //!
-//! redis-cli runs in Docker (`redis:8-alpine`); without Docker that part is skipped.
+//! redis-cli runs in Docker (`REDIS_IMAGE`); without Docker that part is skipped.
 
 use serde_json::{Value, json};
 use std::process::{Child, Command};
@@ -15,6 +15,8 @@ use tokio_rustls::rustls::{self, ClientConfig, RootCertStore};
 
 /// The operator token: the edge listens for the internet, so rolld wants one.
 const TOKEN: &str = "edge-test-operator-token-0123456789";
+/// redis-cli's image, pinned by digest (the multi-arch index), so a rebuilt upstream tag can't change it.
+const REDIS_IMAGE: &str = "redis:8.10.3-alpine@sha256:71885d8cc6e42f2bc0aa2eb853bfc4be200b5108a46ac50e117ae1df0531fb80";
 
 fn free_port() -> u16 {
     static GIVEN: std::sync::Mutex<Vec<u16>> = std::sync::Mutex::new(Vec::new());
@@ -64,7 +66,7 @@ async fn edge_routes_by_host_and_sni_and_drains_on_sigterm() {
     let dashboard = format!("http://{}", l.local_addr().unwrap());
     tokio::spawn(async move { axum::serve(l, axum::Router::new().fallback(|| async { "dashboard" })).await });
 
-    let (api, https_port, edge_redis) = (free_port(), free_port(), free_port());
+    let (api, https_port, edge_redis, edge_kafka, edge_nosql) = (free_port(), free_port(), free_port(), free_port(), free_port());
     let local = |p: u16| format!("127.0.0.1:{p}");
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_rolld"));
     cmd.env_clear()
@@ -79,12 +81,26 @@ async fn edge_routes_by_host_and_sni_and_drains_on_sigterm() {
         .env("ROLL_EDGE_DRAIN_DELAY", "3")
         .env("ROLL_DASHBOARD_UPSTREAM", &dashboard)
         .env("ROLL_EDGE_HTTPS", local(https_port))
-        .env("ROLL_EDGE_REDIS", local(edge_redis));
-    for var in ["ROLL_EDGE_PG", "ROLL_EDGE_KAFKA", "ROLL_EDGE_NOSQL", "ROLL_EDGE_AMQPS", "ROLL_EDGE_MQTTS", "ROLL_EDGE_STOMPS", "ROLL_EDGE_MQ_STREAM"] {
+        .env("ROLL_EDGE_REDIS", local(edge_redis))
+        .env("ROLL_EDGE_KAFKA", local(edge_kafka))
+        .env("ROLL_EDGE_NOSQL", local(edge_nosql));
+    for var in ["ROLL_EDGE_PG", "ROLL_EDGE_AMQPS", "ROLL_EDGE_MQTTS", "ROLL_EDGE_STOMPS", "ROLL_EDGE_MQ_STREAM"] {
         cmd.env(var, local(free_port()));
     }
-    cmd.args(["--no-queues", "--no-nosql", "--home"]).arg(home.path()).args(["--api", &local(api)]);
-    for (flag, port) in [("--proxy", free_port()), ("--redis", free_port()), ("--redis-http", free_port()), ("--kafka", free_port()), ("--s3", free_port()), ("--storage-api", free_port())] {
+    cmd.args(["--no-queues", "--home"]).arg(home.path()).args(["--api", &local(api)]);
+    let ports = [
+        ("--proxy", free_port()),
+        ("--redis", free_port()),
+        ("--redis-http", free_port()),
+        ("--kafka", free_port()),
+        ("--s3", free_port()),
+        ("--storage-api", free_port()),
+        ("--nosql-cql", free_port()),
+        ("--nosql-cql-shard-aware", free_port()),
+        ("--nosql-rest", free_port()),
+        ("--nosql-alternator", free_port()),
+    ];
+    for (flag, port) in ports {
         cmd.args([flag, &local(port)]);
     }
     let mut rolld = Rolld(cmd.spawn().expect("rolld starts"));
@@ -110,6 +126,19 @@ async fn edge_routes_by_host_and_sni_and_drains_on_sigterm() {
     let (s, body) = https(https_port, &roots, "roll.test", "/acme/app.git/info/refs?service=git-upload-pack").await;
     assert!(s == 404 && body != "dashboard", "git paths go to code: {s} {body}");
 
+    // Connection details name the public hostnames, over TLS, never this node's listeners.
+    let post = |path: &str, body: Value| http.post(format!("{api}{path}")).bearer_auth(TOKEN).json(&body).send();
+    let db: Value = post("/v1/nosql/databases", json!({ "name": "app" })).await.unwrap().json().await.unwrap();
+    let id = db["id"].as_str().unwrap();
+    let host = format!("{id}.nosql.r1.roll.test");
+    assert_eq!((db["endpoints"]["cql"].as_str(), db["tls"].as_bool(), db["server_name"].as_str()), (Some(format!("{host}:{edge_nosql}").as_str()), Some(true), Some(host.as_str())), "{db}");
+    assert_eq!(db["endpoints"]["alternator"].as_str(), Some(format!("https://{host}").as_str()), "{db}");
+    assert!(db["endpoints"]["cql_shard_aware"].is_null() && db["endpoints"]["rest"].is_null(), "{db}");
+    let stream: Value = post("/v1/streams", json!({ "name": "events" })).await.unwrap().json().await.unwrap();
+    let sid = stream["id"].as_str().unwrap();
+    assert_eq!(stream["bootstrap"].as_str(), Some(format!("{sid}.kafka.r1.roll.test:{edge_kafka}").as_str()), "{stream}");
+    assert_eq!((stream["security_protocol"].as_str(), stream["http"].as_str()), (Some("SASL_SSL"), Some(format!("https://{sid}.kafka.r1.roll.test/v1/streams/{sid}").as_str())), "{stream}");
+
     // redis-cli over TLS: the server name picks the database.
     let docker = Command::new("docker").arg("info").output().is_ok_and(|o| o.status.success());
     if docker {
@@ -118,7 +147,7 @@ async fn edge_routes_by_host_and_sni_and_drains_on_sigterm() {
         let sni = format!("{id}.redis.r1.roll.test");
         let cli = |args: &[&str]| {
             let port = edge_redis.to_string();
-            let mut a = vec!["run", "--rm", "--network", "host", "redis:8-alpine", "redis-cli", "--tls", "--insecure", "--sni", &sni, "-h", "127.0.0.1", "-p", &port, "--no-auth-warning", "-a", password];
+            let mut a = vec!["run", "--rm", "--network", "host", REDIS_IMAGE, "redis-cli", "--tls", "--insecure", "--sni", &sni, "-h", "127.0.0.1", "-p", &port, "--no-auth-warning", "-a", password];
             a.extend_from_slice(args);
             let out = Command::new("docker").args(&a).output().unwrap();
             // Only redis-cli's answer: Docker writes its own progress to stderr.
@@ -126,7 +155,7 @@ async fn edge_routes_by_host_and_sni_and_drains_on_sigterm() {
             String::from_utf8_lossy(&out.stdout).trim().to_string()
         };
         // Pulled first, so the first command isn't timed against the download.
-        assert!(Command::new("docker").args(["pull", "-q", "redis:8-alpine"]).output().unwrap().status.success());
+        assert!(Command::new("docker").args(["pull", "-q", REDIS_IMAGE]).output().unwrap().status.success());
         assert_eq!(cli(&["SET", "k", "through the edge"]), "OK");
         assert_eq!(cli(&["GET", "k"]), "through the edge");
     } else {

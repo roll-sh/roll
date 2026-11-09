@@ -279,7 +279,7 @@ int main() {
 }
 CPP
 docker rm -f "$NAME" >/dev/null 2>&1 || true
-docker run -d --name "$NAME" -v "$W:/w" alpine:3.23 sleep infinity >/dev/null
+docker run -d --name "$NAME" -v "$W:/w" alpine:3.23@sha256:469c9ea410b9215eaee7976ba6c0639039b444be8e5d638f7abbada189971eb2 sleep infinity >/dev/null
 docker exec "$NAME" sh -c 'apk add --no-cache clang21 g++ musl-dev >/dev/null && cd /w &&
   clang++ -std=c++20 -O3 -fno-strict-aliasing -march=armv8-a+lse -mtune=neoverse-n1 -I boost_1_88_0 -o harness harness.cpp'
 echo "ROLL_GEO_HARNESS=\"docker exec -i $NAME /w/harness\""

@@ -19,6 +19,10 @@ PATHS=(crates/nosql-types crates/nosql-proto crates/nosql-cql crates/nosql-stora
        Cargo.toml Cargo.lock scripts/test-nosql.sh scripts/nosql-conformance.sh scripts/nosql-conformance deploy/nosql
        .github/workflows/nosql.yml)
 STAMP=target/.test-nosql.hash
+# Images are pinned by digest (tag@multi-arch index digest): a rebuilt upstream tag can't change them.
+# The references; the same as crates/nosql-server/tests/common/mod.rs and scripts/nosql-conformance.sh.
+SCYLLA_IMAGE=scylladb/scylla:2026.3.3@sha256:f96119dbbfa8bad4abe6161f11ac4f6d5a5c34fdc297fd23cf32626791ed2e59
+CASSANDRA_IMAGE=cassandra:5.0.9@sha256:7e2afd76d5afb991f64c5d9be7d1f8abf749e7ab0e9daaccfd6e865efcece7cc
 CARGO=${CARGO:-cargo}
 
 force=0 unit_only=0 e2e_only=0 conformance=0
@@ -70,7 +74,7 @@ if [[ $unit_only == 0 ]]; then
     echo "nosql: $c did not start" >&2; docker logs "$c" 2>&1 | tail -20 >&2; exit 1
   }
   if [[ -z ${ROLL_NOSQL_REF_SCYLLA:-} ]]; then
-    docker run -d --rm --name nosql-test-scylla -p 127.0.0.1::9042 -p 127.0.0.1::10000 -p 127.0.0.1::8000 scylladb/scylla:2026.3.3 \
+    docker run -d --rm --name nosql-test-scylla -p 127.0.0.1::9042 -p 127.0.0.1::10000 -p 127.0.0.1::8000 "$SCYLLA_IMAGE" \
       --smp 1 --memory 1G --overprovisioned 1 --developer-mode 1 --api-address 0.0.0.0 \
       --alternator-address 0.0.0.0 --alternator-port 8000 --alternator-write-isolation always_use_lwt >/dev/null
     started+=(nosql-test-scylla); wait_cql nosql-test-scylla
@@ -80,7 +84,7 @@ if [[ $unit_only == 0 ]]; then
   fi
   if [[ -z ${ROLL_NOSQL_REF_CASSANDRA:-} ]]; then
     docker run -d --rm --name nosql-test-cassandra --memory 2560m -p 127.0.0.1::9042 \
-      -e MAX_HEAP_SIZE=640M -e HEAP_NEWSIZE=128M cassandra:5.0.9 >/dev/null
+      -e MAX_HEAP_SIZE=640M -e HEAP_NEWSIZE=128M "$CASSANDRA_IMAGE" >/dev/null
     started+=(nosql-test-cassandra); wait_cql nosql-test-cassandra
     export ROLL_NOSQL_REF_CASSANDRA=$(docker port nosql-test-cassandra 9042 | head -1)
   fi

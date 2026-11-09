@@ -36,6 +36,10 @@ while (($#)); do
 done
 ((run_clients + run_perf + run_suites)) || run_clients=1
 
+# Images are pinned by digest (tag@multi-arch index digest): a rebuilt upstream tag can't change them.
+RABBIT_IMAGE=rabbitmq:4-management@sha256:af6f50d38098d8bd52fef7f3fa85015dd8b2bf6def58e995bf584ae9ba0f6407
+PERFTEST_IMAGE=pivotalrabbitmq/perf-test:2.25.0@sha256:b803911d60fdf6885fc6313f0d56a0c2c743bfdd27ac118f5e4b320c36c7b8c9
+
 if ! docker info >/dev/null 2>&1; then
   echo "queues-clients: Docker is not running" >&2
   exit 1
@@ -65,7 +69,7 @@ if ((rabbitmq)) && [[ -z $url ]]; then
     -p "$p_amqp:5672" -p "$mqtt_port:1883" -p "$stomp_port:61613" -p "$stream_port:5552" -p "$mgmt_port:15672" \
     -v "$ROOT/tests/queues/rabbitmq/20-roll.conf:/etc/rabbitmq/conf.d/20-roll.conf:ro" \
     -v "$OUT/30-stream.conf:/etc/rabbitmq/conf.d/30-stream.conf:ro" \
-    -v "$ROOT/tests/queues/rabbitmq/enabled_plugins:/etc/rabbitmq/enabled_plugins:ro" rabbitmq:4-management >/dev/null
+    -v "$ROOT/tests/queues/rabbitmq/enabled_plugins:/etc/rabbitmq/enabled_plugins:ro" "$RABBIT_IMAGE" >/dev/null
   ((keep)) || trap 'docker rm -f -v roll-qtest-rabbitmq >/dev/null 2>&1 || true' EXIT
   until docker logs roll-qtest-rabbitmq 2>&1 | grep -q 'Server startup complete'; do sleep 1; done
   port=$p_amqp
@@ -84,7 +88,7 @@ elif [[ -z $url ]]; then
     --api "127.0.0.1:$api_port" --public-host "$host" --queues-advertise-host "$host" \
     --queues-amqp "$any:$p_amqp" --queues-mqtt "$any:$mqtt_port" --queues-stomp "$any:$stomp_port" \
     --queues-stream "$any:$stream_port" --queues-management "$any:$mgmt_port" --queues-http "$any:$http_port" \
-    --queues-web-mqtt 127.0.0.1:0 --queues-web-stomp 127.0.0.1:0 --queues-rpc 127.0.0.1:0 >"$OUT/broker.log" 2>&1 &
+    --queues-web-mqtt 127.0.0.1:0 --queues-web-stomp 127.0.0.1:0 >"$OUT/broker.log" 2>&1 &
   BROKER_PID=$!
   ((keep)) || trap 'kill $BROKER_PID 2>/dev/null || true; wait $BROKER_PID 2>/dev/null || true; rm -rf "$home"' EXIT
   for _ in $(seq 200); do
@@ -170,7 +174,7 @@ if ((run_perf)); then
   perf() {
     local name=$1; shift
     echo "── perf-test $name: $*"
-    docker run --rm --add-host=host.docker.internal:host-gateway pivotalrabbitmq/perf-test:latest \
+    docker run --rm --add-host=host.docker.internal:host-gateway "$PERFTEST_IMAGE" \
       --uri "$url" "$@" >"$OUT/perf-$name.log" 2>&1 || failed=1
     local res
     res=$(grep -E 'rate avg|latency min' "$OUT/perf-$name.log" | sed 's/^id: [^,]*, /  /' || true)

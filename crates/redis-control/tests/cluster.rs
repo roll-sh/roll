@@ -4,10 +4,14 @@
 //! memory, or on DynamoDB Local (`ROLL_CLUSTER_TEST_DYNAMODB`; skipped without it unless
 //! `ROLL_CLUSTER_DYNAMODB_REQUIRED=1`). Cluster timings are `ClusterConfig::for_tests`.
 //!
+//! Each node's RESP front door is served as the edge serves its listeners (`roll_edge::listener`,
+//! following the node's `roll_edge::Drain`).
+//!
 //! Covered: connections, REST and control requests through any node reach the database's owner;
-//! a killed owner's database moves with every acknowledged write; a drain hands a busy database
-//! over with nothing lost and nothing but a reconnect for its clients; two nodes that both serve a
-//! database can't both make writes durable.
+//! a killed owner's database moves with every acknowledged write; a node's stop (the edge's order:
+//! stop accepting, the products' drain, then the edge closes what's left) hands a busy database
+//! over with nothing lost and nothing but one reconnect for its clients; two nodes that both serve
+//! a database can't both make writes durable.
 
 use bytes::Bytes;
 use redis_control::cluster::Front;
@@ -116,16 +120,30 @@ impl Env {
             .layer(axum::middleware::from_fn_with_state(cluster.clone(), roll_cluster::accept_forwarded))
             .merge(redis_control::cluster::internal_router(control.clone()))
             .merge(roll_edge::splice::router(roll_edge::splice::Signer::new(SECRET).unwrap(), handlers));
+        // The front door as the edge's listeners run it: accepting until the drain stops it, each
+        // connection until it ends or the edge closes what's left.
+        let drain = roll_edge::Drain::new();
+        let door = {
+            let drain = drain.clone();
+            roll_edge::listener::serve_tcp(resp, Default::default(), drain.clone(), move |sock, peer| {
+                let (front, drain) = (front.clone(), drain.clone());
+                let fd = std::os::fd::AsRawFd::as_raw_fd(&sock) as i64;
+                // Kept on its event loop, as the edge's TLS streams are.
+                async move {
+                    drain.until_closing(front.serve(redis_server::conn::Fixed(sock), peer, resp_addr, None, fd)).await;
+                }
+            })
+        };
         let tasks = vec![
             tokio::spawn(async move { axum::serve(internal, api.into_make_service_with_connect_info::<SocketAddr>()).await }).abort_handle(),
-            tokio::spawn(front.serve_listener(resp, Default::default())).abort_handle(),
+            tokio::spawn(door).abort_handle(),
             tokio::spawn({
                 let r = redis_control::cluster::rest_router(control.clone());
                 async move { axum::serve(rest, r.into_make_service_with_connect_info::<SocketAddr>()).await }
             })
             .abort_handle(),
         ];
-        TestNode { id: id.into(), control, cluster, url, resp: resp_addr, rest: rest_addr, tasks }
+        TestNode { id: id.into(), control, cluster, url, resp: resp_addr, rest: rest_addr, drain, tasks }
     }
 }
 
@@ -144,6 +162,8 @@ struct TestNode {
     url: String,
     resp: SocketAddr,
     rest: SocketAddr,
+    /// The front door's drain (the edge's).
+    drain: roll_edge::Drain,
     tasks: Vec<AbortHandle>,
 }
 
@@ -312,8 +332,44 @@ async fn a_drain_hands_a_busy_database_over_losing_nothing(kind: Kind) {
             })
         })
         .collect();
+    // On the owner itself: a client of the busy database (the product's to close), and one of a
+    // database another node serves (spliced on: no product here owns it).
+    let mut direct = client(owner.resp, &token).await;
+    let mut bystander = None;
+    for i in 0..20 {
+        let (other, other_token) = create(&nodes[0], &format!("elsewhere{i}"), "async");
+        let mut c = client(owner.resp, &other_token).await;
+        assert_eq!(c.cmd(["PING"]).await.unwrap(), Reply::Status("PONG".into()));
+        if !owner.loaded(&other) {
+            bystander = Some(c);
+            break;
+        }
+    }
+    let mut bystander = bystander.expect("a database another node serves");
     tokio::time::sleep(Duration::from_millis(500)).await;
-    owner.cluster.drain(Duration::from_secs(10)).await;
+    // The node stops as rolld stops it behind the edge.
+    let delay = Duration::from_millis(400);
+    let pong = || Reply::Status("PONG".into());
+    let accepting = async {
+        // While the load balancer lets go, the front door still takes new connections.
+        tokio::time::sleep(delay / 4).await;
+        assert!(owner.drain.is_draining());
+        assert_eq!(client(owner.resp, &token).await.cmd(["PING"]).await.unwrap(), pong());
+    };
+    let stopped = owner.drain.stop(delay, async {
+        // Then it takes none (they go to another node), and what's connected is still served
+        // until its product lets it go.
+        assert!(tokio::net::TcpStream::connect(owner.resp).await.is_err(), "the front door still accepts during the products' drain");
+        assert_eq!(direct.cmd(["PING"]).await.unwrap(), pong());
+        owner.cluster.drain(Duration::from_secs(10)).await;
+        // The product closed its own client as it handed the database over; the edge hasn't
+        // touched the one no product here owns.
+        assert!(direct.cmd(["PING"]).await.is_err(), "the handoff closes its database's connections");
+        assert_eq!(bystander.cmd(["PING"]).await.unwrap(), pong(), "closed before the products drained");
+    });
+    tokio::join!(accepting, stopped);
+    // The edge closes what's left at the end.
+    assert!(bystander.read().await.is_err(), "the edge closes the connections left");
     assert!(!owner.loaded(&id), "drained");
     let mut total_reconnects = 0;
     let mut c = reconnect(entry, &token).await;

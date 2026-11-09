@@ -20,8 +20,8 @@ use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-const PEBBLE: &str = "ghcr.io/letsencrypt/pebble:latest";
-const CHALLTESTSRV: &str = "ghcr.io/letsencrypt/pebble-challtestsrv:latest";
+const PEBBLE: &str = "ghcr.io/letsencrypt/pebble:2.10.1@sha256:ddf230642b1a584f519f32e347de1b05a6e4c1f6c35c1863b33effeab5f78199";
+const CHALLTESTSRV: &str = "ghcr.io/letsencrypt/pebble-challtestsrv:2.10.1@sha256:12ce21884def456bcf9786542113949e1f19dc7738d2c70e156c2d0c38a1405b";
 const NETWORK: &str = "roll-cloud-edge-acme";
 const DNS: &str = "roll-cloud-edge-challtestsrv";
 const CA: &str = "roll-cloud-edge-pebble";
@@ -173,7 +173,9 @@ async fn wildcards_are_issued_over_dns01_and_stored_sealed() {
     assert_eq!(stored.len(), 3, "two certificates and the ACME account: {stored:?}");
     for (key, _) in &stored {
         let raw = objects.get(key).await.unwrap().unwrap();
-        assert!(!raw.windows(11).any(|w| w == b"PRIVATE KEY") && !raw.windows(3).any(|w| w == b"\"d\""), "{key} is sealed");
+        // Plaintext key material, long enough not to turn up by chance in ciphertext (a JWK's
+        // private `"d":"` member, a PEM key's header).
+        assert!(!raw.windows(11).any(|w| w == b"PRIVATE KEY") && !raw.windows(5).any(|w| w == b"\"d\":\""), "{key} is sealed");
     }
     assert!(*fake.created.lock().unwrap() >= hosts.all_cert_names().len() - 1);
     assert!(fake.records.lock().unwrap().is_empty(), "challenge records removed");

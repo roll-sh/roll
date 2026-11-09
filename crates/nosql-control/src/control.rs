@@ -505,7 +505,12 @@ impl Control {
     /// The Alternator endpoint of a database: `https://<id>.<alternator domain>` when hosted
     /// (the `Host` names the database), else the node's address.
     pub fn alternator_endpoint(&self, id: &str) -> Option<String> {
-        let host = |h: &str, p: u16| if h.contains(':') { format!("[{h}]:{p}") } else { format!("{h}:{p}") };
+        let host = |h: &str, p: u16| match (h.contains(':'), p) {
+            // HTTPS on its own port (behind the edge) needs none.
+            (false, 443) => h.to_string(),
+            (true, _) => format!("[{h}]:{p}"),
+            (false, _) => format!("{h}:{p}"),
+        };
         match (&self.cfg.alternator_domain, self.cfg.alternator_https_port, self.cfg.alternator_port) {
             (Some(domain), Some(p), _) => Some(format!("https://{}", host(&format!("{id}.{domain}"), p))),
             (Some(domain), None, Some(p)) => Some(format!("http://{}", host(&format!("{id}.{domain}"), p))),

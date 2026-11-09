@@ -8,7 +8,9 @@
 //! - Certificates come from object storage (`system/certs/`, issued over ACME by whichever node
 //!   holds the `acme` singleton), or from `ROLL_EDGE_CERT_DIR` (dev mode: a self-signed one is
 //!   written there if it's empty).
-//! - `GET /healthz` joins the internal API; draining starts on SIGTERM.
+//! - `GET /healthz` joins the internal API; on SIGTERM the stop runs in `roll_edge::drain`'s order
+//!   around the products' drains (`stopping`).
+//! - The splice hop's owner side (`splice_routes`) is on every cluster node, edge or not.
 
 use crate::Args;
 use axum::http::{HeaderMap, Uri, header};
@@ -123,6 +125,8 @@ pub fn configure(args: &mut Args) {
     }
     let hosts = args.edge.hostnames();
     args.s3_domain.get_or_insert_with(|| hosts.s3_domain());
+    // The S3 endpoint storage shows (and gives Object Lambda functions).
+    args.s3_public_endpoint.get_or_insert_with(|| format!("https://{}", hosts.s3_domain()));
     args.nosql.nosql_alternator_domain.get_or_insert_with(|| hosts.product_domain("nosql"));
     if !env_set("ROLL_CODE_PREVIEW_DOMAIN") {
         args.code_preview_domain = hosts.site_domain.clone();
@@ -136,6 +140,52 @@ pub fn configure(args: &mut Args) {
         let moved = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 19092);
         info!(from = %args.kafka, to = %moved, "edge: rolld's own Kafka listener moves off the edge's port");
         args.kafka = moved;
+    }
+}
+
+/// The names clients use behind the edge (docs/cloud/README.md, "Hostnames"), for the
+/// connection details products hand out: `None` without the edge (they keep this node's
+/// addresses). TCP products keep their port (the edge listens on the public one); HTTPS is the
+/// NLB's 443.
+pub struct Public {
+    pub hosts: Hostnames,
+    pub pg_port: u16,
+    pub kafka_port: u16,
+    pub nosql_port: u16,
+}
+
+impl Public {
+    pub fn of(args: &Args) -> Option<Public> {
+        let e = &args.edge;
+        e.enabled.then(|| Public { hosts: e.hostnames(), pg_port: e.pg_listen.port(), kafka_port: e.kafka_listen.port(), nosql_port: e.nosql_listen.port() })
+    }
+
+    /// nosql: `<id>.nosql.<region>.<domain>:9042` over TLS (the server name picks the database),
+    /// Alternator on `https://<id>.nosql.<region>.<domain>`; the shard-aware and REST ports aren't
+    /// public.
+    pub fn nosql(&self, cfg: &mut nosql_control::NosqlConfig) {
+        let domain = self.hosts.product_domain("nosql");
+        cfg.domain = Some(domain.clone());
+        cfg.alternator_domain = Some(domain);
+        cfg.tls = true;
+        cfg.cql_port = self.nosql_port;
+        cfg.cql_shard_aware_port = None;
+        cfg.cql_shard_aware_port_ssl = None;
+        cfg.rest_port = None;
+        cfg.alternator_https_port = Some(443);
+    }
+
+    /// streams: `<stream id>.kafka.<region>.<domain>:9092` with `SASL_SSL`, HTTP on
+    /// `https://<stream id>.kafka.<region>.<domain>`.
+    pub fn streams(&self, cfg: &mut stream_broker::Config) {
+        cfg.public_domain = Some(self.hosts.product_domain("kafka"));
+        cfg.advertised_port = self.kafka_port;
+    }
+
+    /// Postgres: `<endpoint>.pg.<region>.<domain>:5432`, `sslmode=require`.
+    pub fn postgres(&self, cfg: &mut pg_control::Config) {
+        cfg.public_domain = Some(self.hosts.product_domain("pg"));
+        cfg.public_port = self.pg_port;
     }
 }
 
@@ -243,14 +293,14 @@ impl Edge {
         if let Some(pg) = &p.pg {
             let l = bind(e.pg_listen).await?;
             let tls = roll_edge::tls::server_config(store.clone(), &[roll_edge::pg::ALPN]);
-            served.push(io(roll_edge::pg::serve(l, tls, opts, hosts.clone(), pg.clone())));
+            served.push(io(roll_edge::pg::serve(l, tls, opts, drain.clone(), hosts.clone(), pg.clone())));
         }
         // Redis: the server name picks the database (in a cluster, spliced to its owner right
         // after the handshake).
         if let Some(r) = p.redis {
             let l = bind(e.redis_listen).await?;
             let front = r.front.clone();
-            served.push(io(listener::serve_tls(l, plain.clone(), opts, move |tls, a| {
+            served.push(io(listener::serve_tls(l, plain.clone(), opts, drain.clone(), move |tls, a| {
                 let fd = { use std::os::fd::AsRawFd; tls.get_ref().0.as_raw_fd() as i64 };
                 front.clone().serve(tls, a.peer, a.local, a.sni, fd)
             })));
@@ -259,7 +309,7 @@ impl Edge {
         if let Some(b) = &p.streams {
             let l = bind(e.kafka_listen).await?;
             let b = b.clone();
-            served.push(io(listener::serve_tls(l, plain.clone(), opts, move |tls, a| {
+            served.push(io(listener::serve_tls(l, plain.clone(), opts, drain.clone(), move |tls, a| {
                 let advertised = a.sni.clone().map(|s| (s, a.local.port()));
                 stream_broker::server::serve_connection(b.clone(), tls, a.peer, true, advertised)
             })));
@@ -268,14 +318,14 @@ impl Edge {
         if let Some(n) = p.nosql {
             let l = bind(e.nosql_listen).await?;
             let dir: Arc<dyn nosql_server::Directory> = n.control.node.clone();
-            served.push(io(listener::serve_tls(l, plain.clone(), opts, move |tls, a| {
+            served.push(io(listener::serve_tls(l, plain.clone(), opts, drain.clone(), move |tls, a| {
                 let details = nosql_server::net::tls_details(tls.get_ref().1);
                 let accepted = nosql_server::conn::Accepted { peer: a.peer, sni: a.sni, shard_aware: false, tls: details, certificate: None };
                 nosql_server::conn::serve(Box::new(tls), accepted, dir.clone())
             })));
         }
         if let Some(q) = p.queues {
-            served.extend(queue_listeners(e, q, &plain, opts).await?);
+            served.extend(queue_listeners(e, q, &plain, opts, &drain).await?);
         }
         info!(https = %e.https_listen, listeners = served.len(), domain = %hosts.domain, site = %hosts.site_domain, proxy_protocol = e.proxy_protocol, "edge listening");
 
@@ -289,37 +339,7 @@ impl Edge {
         });
         let _ = STOPPING.set((drain.clone(), Duration::from_secs(e.drain_delay_s)));
 
-        let mut internal = drain.router();
-        if let Some(secret) = ["ROLL_CLUSTER_SECRET", "ROLL_CODE_CLUSTER_SECRET"].iter().find_map(|k| std::env::var(k).ok().filter(|v| !v.is_empty())) {
-            let handlers = roll_edge::splice::Handlers::default();
-            // A connection another node read the startup packet of: the proxy, as if it came here.
-            if let Some(pg) = p.pg.clone() {
-                handlers.register(
-                    "pg",
-                    Arc::new(move |io, hop| {
-                        let pg = pg.clone();
-                        Box::pin(async move {
-                            if let Err(e) = pg.serve_connection(io, Some(hop.tenant)).await {
-                                tracing::debug!(error = %e, "edge: spliced postgres connection ended with an error");
-                            }
-                        })
-                    }),
-                );
-            }
-            // A Redis connection another node read the TLS handshake (or the first AUTH) of.
-            if let Some(r) = p.redis {
-                handlers.register(redis_control::cluster::PRODUCT, r.front.handler());
-            }
-            // A CQL connection whose database this node serves.
-            if let Some(n) = p.nosql {
-                handlers.register("cql", n.splice_handler());
-            }
-            // A Kafka connection another node authenticated, for a stream this node owns.
-            if let Some(b) = &p.streams {
-                handlers.register("kafka", crate::streams::splice_handler(b.clone()));
-            }
-            internal = internal.merge(roll_edge::splice::router(roll_edge::splice::Signer::new(&secret)?, handlers));
-        }
+        let internal = drain.router();
         let serve = Box::pin(async move { futures::future::select_all(served).await.0 });
         Ok(Some(Edge { drain, internal, serve }))
     }
@@ -331,22 +351,70 @@ impl Edge {
     }
 }
 
+/// The owner's side of the splice hop (`/internal/edge/splice`): a connection another node
+/// accepted and read the tenant of, handed to the product here. On every cluster node, with the
+/// edge or without (rolld's own Redis and CQL ports splice too), signed with the cluster secret;
+/// `None` on a node alone.
+pub fn splice_routes(cluster: &roll_cluster::Cluster, p: &Products<'_>) -> anyhow::Result<Option<axum::Router>> {
+    if cluster.backend_name() == "memory" {
+        return Ok(None);
+    }
+    let handlers = roll_edge::splice::Handlers::default();
+    // A connection another node read the startup packet of: the proxy, as if it came here.
+    if let Some(pg) = p.pg.clone() {
+        handlers.register(
+            "pg",
+            Arc::new(move |io, hop| {
+                let pg = pg.clone();
+                Box::pin(async move {
+                    if let Err(e) = pg.serve_connection(io, Some(hop.tenant)).await {
+                        tracing::debug!(error = %e, "edge: spliced postgres connection ended with an error");
+                    }
+                })
+            }),
+        );
+    }
+    // A Redis connection another node read the TLS handshake (or the first AUTH) of.
+    if let Some(r) = p.redis {
+        handlers.register(redis_control::cluster::PRODUCT, r.front.handler());
+    }
+    // A CQL connection whose database this node serves.
+    if let Some(n) = p.nosql {
+        handlers.register("cql", n.splice_handler());
+    }
+    // A Kafka connection another node authenticated, for a stream this node owns.
+    if let Some(b) = &p.streams {
+        handlers.register("kafka", crate::streams::splice_handler(b.clone()));
+    }
+    let signer = roll_edge::splice::Signer::new(&String::from_utf8_lossy(&cluster.config().secret))?;
+    Ok(Some(roll_edge::splice::router(signer, handlers)))
+}
+
 /// The edge's drain and how long it keeps serving once health checks fail.
 static STOPPING: std::sync::OnceLock<(Drain, Duration)> = std::sync::OnceLock::new();
 
-/// After the stop signal, before anything else stops: fail `/healthz` at once, keep the public
-/// listeners serving while the NLB takes this node out, then close their connections. Returns
-/// right away without the edge.
-pub async fn stopping() {
-    let Some((drain, delay)) = STOPPING.get() else { return };
-    drain.start();
-    info!(delay_s = delay.as_secs(), "edge: draining; health checks fail, listeners keep serving until the NLB lets go");
-    tokio::time::sleep(*delay).await;
-    drain.close();
-    info!("edge: listeners closing");
+/// Run `products` (the products' drains) as the stop with the edge orders it (`roll_edge::drain`):
+/// `/healthz` fails at once, the public listeners keep accepting while the NLB takes this node
+/// out, then stop accepting; `products` runs (each product closing its own connections as it hands
+/// its tenants off); then the edge closes the connections left. Without the edge, `products` just
+/// runs. Whether the edge was on.
+pub async fn stopping(products: impl std::future::Future<Output = ()>) -> bool {
+    let Some((drain, delay)) = STOPPING.get() else {
+        products.await;
+        return false;
+    };
+    info!(delay_s = delay.as_secs(), "edge: draining; health checks fail, listeners keep accepting until the NLB lets go");
+    drain
+        .stop(*delay, async {
+            info!("edge: listeners stop accepting; products hand their tenants off");
+            products.await
+        })
+        .await;
+    info!("edge: closing the connections left");
+    true
 }
 
-/// The internal API's extra routes (`/healthz`, the splice hop) on top of `api`.
+/// The internal API's extra routes (`/healthz`) on top of `api`.
 pub fn internal(api: axum::Router, edge: Option<&Edge>) -> axum::Router {
     match edge {
         Some(e) => api.merge(e.internal.clone()),
@@ -395,12 +463,12 @@ fn load_certificates(e: &EdgeArgs, hosts: &Hostnames, storage: &StorageConfig, s
     Ok(())
 }
 
-async fn queue_listeners(e: &EdgeArgs, q: &crate::queues::Queues, plain: &Arc<tokio_rustls::rustls::ServerConfig>, opts: ListenOptions) -> anyhow::Result<Vec<Served>> {
+async fn queue_listeners(e: &EdgeArgs, q: &crate::queues::Queues, plain: &Arc<tokio_rustls::rustls::ServerConfig>, opts: ListenOptions, drain: &Drain) -> anyhow::Result<Vec<Served>> {
     let mut out: Vec<Served> = vec![];
     let l = bind(e.amqps_listen).await?;
     let b = q.broker.clone();
     let amqp10 = mq_amqp10::handoff(mq_amqp10::Config { listen: e.amqps_listen, ..Default::default() });
-    out.push(io(listener::serve_tls(l, plain.clone(), opts, move |tls, a| {
+    out.push(io(listener::serve_tls(l, plain.clone(), opts, drain.clone(), move |tls, a| {
         let (b, amqp10) = (b.clone(), amqp10.clone());
         async move {
             if let Err(err) = mq_amqp::serve_connection(b, tls, a.peer, a.local, true, Some(amqp10)).await {
@@ -410,7 +478,7 @@ async fn queue_listeners(e: &EdgeArgs, q: &crate::queues::Queues, plain: &Arc<to
     })));
     let l = bind(e.mqtts_listen).await?;
     let (b, cfg) = (q.broker.clone(), Arc::new(mq_mqtt::Config { listen: e.mqtts_listen, ..Default::default() }));
-    out.push(io(listener::serve_tls(l, plain.clone(), opts, move |tls, a| {
+    out.push(io(listener::serve_tls(l, plain.clone(), opts, drain.clone(), move |tls, a| {
         let (b, cfg) = (b.clone(), cfg.clone());
         async move {
             if let Err(err) = mq_mqtt::serve_connection(b, tls, a.peer, a.local, true, cfg).await {
@@ -420,7 +488,7 @@ async fn queue_listeners(e: &EdgeArgs, q: &crate::queues::Queues, plain: &Arc<to
     })));
     let l = bind(e.stomps_listen).await?;
     let (b, cfg) = (q.broker.clone(), Arc::new(mq_stomp::Config { listen: e.stomps_listen, ..Default::default() }));
-    out.push(io(listener::serve_tls(l, plain.clone(), opts, move |tls, a| {
+    out.push(io(listener::serve_tls(l, plain.clone(), opts, drain.clone(), move |tls, a| {
         let (b, cfg) = (b.clone(), cfg.clone());
         async move {
             if let Err(err) = mq_stomp::serve_connection(b, tls, a.peer, a.local, true, cfg).await {
@@ -430,7 +498,7 @@ async fn queue_listeners(e: &EdgeArgs, q: &crate::queues::Queues, plain: &Arc<to
     })));
     let l = bind(e.mq_stream_listen).await?;
     let stream = q.stream.clone();
-    out.push(io(listener::serve_tls(l, plain.clone(), opts, move |tls, a| {
+    out.push(io(listener::serve_tls(l, plain.clone(), opts, drain.clone(), move |tls, a| {
         let stream = stream.clone();
         async move {
             if let Err(err) = stream.serve_connection(tls, a.peer, a.local, true).await {
@@ -508,5 +576,32 @@ impl Routes for HttpRoutes {
             // Public buckets and sites come through the CDN Worker, not straight here.
             Host::Pg(_) | Host::Site(_) | Host::Origin | Host::Unknown => Target::NotFound,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+    use tower::ServiceExt;
+
+    /// A cluster node takes spliced connections whether or not it runs the edge (rolld's own Redis
+    /// and CQL ports splice to owners too); a node alone has nothing to take them for.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn every_cluster_node_takes_spliced_connections() {
+        let args = crate::Args::parse_from(["rolld"]);
+        let auth = crate::auth::Auth::new(&args).unwrap();
+        let products = Products { api: axum::Router::new(), pg: None, redis: None, streams: None, tasks: None, storage: None, nosql: None, queues: None, auth: &auth };
+        let cfg = |id: &str| roll_cluster::ClusterConfig::for_tests(id, "http://127.0.0.1:9", b"splice test cluster secret".to_vec());
+        let alone = roll_cluster::Cluster::join(Box::new(roll_cluster::Memory::solo()), cfg("alone")).unwrap();
+        assert!(splice_routes(&alone, &products).unwrap().is_none());
+
+        let dir = tempfile::tempdir().unwrap();
+        let db = code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.path().join("cluster.db")), "splice").unwrap();
+        let member = tokio::task::block_in_place(|| roll_cluster::Cluster::join(Box::new(roll_cluster::Postgres::new(db)), cfg("member"))).unwrap();
+        let routes = splice_routes(&member, &products).unwrap().expect("mounted on a cluster node");
+        // Mounted (a plain GET isn't an upgrade); the hop's signature and handlers are roll-edge's.
+        let resp = routes.oneshot(axum::http::Request::get(roll_edge::splice::PATH).body(axum::body::Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::BAD_REQUEST);
     }
 }
