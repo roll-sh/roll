@@ -200,7 +200,8 @@ when `ROLL_EDGE=1` (without it rolld is unchanged).
   node out; they stop accepting (a late connection is refused and goes to another node) and
   keep-alive HTTP connections close after their request in flight; the products drain, each
   closing its own tenants' connections gradually as it hands them off (Redis over 2 s, CQL over
-  a second); only then does the edge close the TCP connections still open, the ones no product
+  a second, queues over the 5–10 s after their queues moved, since their connections don't need to
+  move); only then does the edge close the TCP connections still open, the ones no product
   here owns (spliced on to another node, or never past their first message). Tested with real
   clients by `redis-control/tests/cluster.rs::a_drain_hands_a_busy_database_over_losing_nothing`
   and `nosql-control/tests/cluster.rs::a_drain_hands_databases_over_with_nothing_lost`.
