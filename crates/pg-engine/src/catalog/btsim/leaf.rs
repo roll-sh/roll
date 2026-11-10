@@ -160,6 +160,49 @@ impl Leaf {
         }
     }
 
+    /// Item `i`'s key attributes' encodings (`KeyBytes::key_bytes`), without the rest of
+    /// `get`'s decoding: a binary search or a scan's walk compares only these.
+    pub fn key_bytes(&self, i: usize, nkey: usize) -> &[u8] {
+        if self.stride != 0 {
+            let b = &self.buf[i * self.stride as usize + 6..(i + 1) * self.stride as usize];
+            return KeyBytes::of(b).key_bytes(nkey);
+        }
+        let a = self.at[i] as usize;
+        let n = u16::from_le_bytes([self.buf[a + 1], self.buf[a + 2]]) as usize;
+        // (The encoding's header gives where its key attributes end: its length isn't needed.)
+        KeyBytes::of(&self.buf[a + HEAD + 6 * n..]).key_bytes(nkey)
+    }
+
+    /// Whether item `i` is LP_DEAD.
+    pub fn is_dead(&self, i: usize) -> bool {
+        self.stride == 0 && self.buf[self.at[i] as usize] & 1 != 0
+    }
+
+    /// Item `i`'s heap TIDs.
+    pub fn tids(&self, i: usize) -> Tids<'_> {
+        if self.stride != 0 {
+            let s = i * self.stride as usize;
+            return Tids(&self.buf[s..s + 6]);
+        }
+        let a = self.at[i] as usize;
+        let n = u16::from_le_bytes([self.buf[a + 1], self.buf[a + 2]]) as usize;
+        Tids(&self.buf[a + HEAD..a + HEAD + 6 * n])
+    }
+
+    /// The first item for which `f` of its key attributes' encodings and its index is false.
+    pub fn partition_point_keys(&self, nkey: usize, mut f: impl FnMut(&[u8], usize) -> bool) -> usize {
+        let (mut lo, mut hi) = (0, self.len());
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            if f(self.key_bytes(mid, nkey), mid) {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        lo
+    }
+
     pub fn last(&self) -> Option<ItemRef<'_>> {
         self.len().checked_sub(1).map(|i| self.get(i))
     }

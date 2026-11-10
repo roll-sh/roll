@@ -7,7 +7,7 @@ use super::heapsim::{BLCKSZ, ITEM_ID, PAGE_HEADER, Tid, get_varint as get, maxal
 use std::cmp::Ordering;
 
 mod leaf;
-use leaf::{ItemRef, Leaf};
+use leaf::Leaf;
 
 /// BTPageOpaqueData, MAXALIGNed.
 const SPECIAL: usize = 16;
@@ -421,8 +421,7 @@ fn child_for(inner: &[(Pivot, u32)], lo: &[u8], nkey: usize) -> usize {
 
 /// Whether a leaf item is past model key `lo` for a scan: some row key `lo` goes on with
 /// puts it there (a storage key is the entry's key attributes, then the row's key).
-fn above(it: ItemRef, lo: &[u8], nkey: usize) -> bool {
-    let k = it.key.key_bytes(nkey);
+fn above(k: &[u8], lo: &[u8]) -> bool {
     let m = k.len().min(lo.len());
     k[..m] >= lo[..m]
 }
@@ -431,8 +430,8 @@ fn above(it: ItemRef, lo: &[u8], nkey: usize) -> bool {
 /// attributes' encodings are self-delimiting, so no item past `lo` is followed by one
 /// that isn't.
 fn first_above(items: &Leaf, lo: &[u8], nkey: usize) -> usize {
-    let i = items.partition_point(|it| !above(it, lo, nkey));
-    debug_assert!(items.iter().skip(i).all(|it| above(it, lo, nkey)), "items out of order");
+    let i = items.partition_point_keys(nkey, |k, _| !above(k, lo));
+    debug_assert!((i..items.len()).all(|j| above(items.key_bytes(j, nkey), lo)), "items out of order");
     i
 }
 
@@ -927,10 +926,10 @@ impl Btree {
     /// (self-delimiting: they compare as the attributes do), then heap TID.
     fn insert_pos(items: &Leaf, key: &Key, tid: Tid, nkey: usize) -> usize {
         let k = key.key_bytes(nkey);
-        items.partition_point(|it| match it.key.key_bytes(nkey).cmp(k) {
+        items.partition_point_keys(nkey, |ik, i| match ik.cmp(k) {
             Ordering::Less => true,
             Ordering::Greater => false,
-            Ordering::Equal => it.tids.first() < tid,
+            Ordering::Equal => items.tids(i).first() < tid,
         })
     }
 
@@ -1598,7 +1597,7 @@ impl Btree {
             && let Some(at) = self.head.get(l)
             && let Some(p) = self.pages.get(at as usize).and_then(|p| p.as_ref())
             && p.leaf
-            && hi.is_none_or(|hi| !p.items.is_empty() && p.items.get(0).key.key_bytes(nkey) < hi)
+            && hi.is_none_or(|hi| !p.items.is_empty() && p.items.key_bytes(0, nkey) < hi)
         {
             blk = at;
         }
@@ -1624,7 +1623,7 @@ impl Btree {
                 lo = None;
             }
             let last = p.items.len().saturating_sub(1);
-            let whole = hi.is_none_or(|hi| p.items.last().is_none_or(|l| l.key.key_bytes(nkey) < hi));
+            let whole = hi.is_none_or(|hi| p.items.is_empty() || p.items.key_bytes(last, nkey) < hi);
             if p.items.live() == 0 {
                 // (Every entry LP_DEAD: the walk would only stop at the last, past `hi`.)
                 if from < p.items.len() && !whole {
@@ -1632,17 +1631,18 @@ impl Btree {
                 }
             } else {
                 for i in from..p.items.len() {
-                    let it = p.items.get(i);
+                    // (Decoded only as far as the walk needs: an entry's key only to stop at.)
+                    let dead = p.items.is_dead(i);
                     if !whole
-                        && (!it.dead || i == last)
-                        && hi.is_some_and(|hi| it.key.key_bytes(nkey) >= hi)
+                        && (!dead || i == last)
+                        && hi.is_some_and(|hi| p.items.key_bytes(i, nkey) >= hi)
                     {
                         return false;
                     }
-                    if it.dead {
+                    if dead {
                         continue;
                     }
-                    match each(blk, i, it.tids) {
+                    match each(blk, i, p.items.tids(i)) {
                         Pass::Go => {}
                         Pass::Mark => return true,
                     }
