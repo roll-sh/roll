@@ -3966,6 +3966,16 @@ impl StoredInsert {
 
 impl InsertNode {
     pub fn new(plan: super::planref::PlanRef<InsertPlan>, ctx: &ExecCtx) -> Result<Self> {
+        Self::start(plan, ctx, |p, ctx| super::nodes::open(&p.source, ctx))
+    }
+
+    /// `new`, its source made by `source` where `new` opens it (`Node::restart`'s, its
+    /// source restarted).
+    fn start(
+        plan: super::planref::PlanRef<InsertPlan>,
+        ctx: &ExecCtx,
+        source: impl FnOnce(&InsertPlan, &ExecCtx) -> Result<BoxNode>,
+    ) -> Result<Self> {
         // (ExecutorStart: es_output_cid, which the next command moves past.)
         ctx.txn.borrow_mut().output_cid();
         let rules = &plan.rules;
@@ -3983,7 +3993,7 @@ impl InsertNode {
         for &e in Self::events(&plan) {
             trigger::statement(&rules.triggers, &rules.table, true, e, &conflict_cols, ctx)?;
         }
-        let source = super::nodes::open(&plan.source, ctx)?;
+        let source = source(&plan, ctx)?;
         let last_table = plan.rules.table.oid;
         let copied = plan.copy.as_ref().filter(|_| !rules.view && rules.table.partkey.is_none());
         // A COPY whose rows and entries nothing reads before it ends (COPY's multi-insert
@@ -4640,6 +4650,28 @@ impl InsertNode {
 }
 
 impl Node for InsertNode {
+    /// (A plain INSERT run to its end, into a table of its own storage: opened, its plan
+    /// makes this node again, over its source.)
+    fn restartable(&self, ctx: &ExecCtx) -> bool {
+        self.done
+            && self.plan.copy.is_none()
+            && self.plan.rules.table.foreign.is_none()
+            && self.source.restartable(ctx)
+    }
+
+    fn park(&mut self) {
+        self.source.park();
+    }
+
+    fn restart(&mut self, ctx: &ExecCtx) -> Result<()> {
+        let mut source = std::mem::replace(&mut self.source, Box::new(super::Taken));
+        *self = Self::start(self.plan.clone(), ctx, |_, ctx| {
+            source.restart(ctx)?;
+            Ok(source)
+        })?;
+        Ok(())
+    }
+
     fn next(&mut self, ctx: &ExecCtx) -> Result<Option<Row>> {
         let _target = DmlTarget::push(
             self.plan.rules.table.clone(),
@@ -5001,6 +5033,15 @@ fn take_capture(after: &mut Vec<AfterRow>) -> Vec<AfterRow> {
 
 impl UpdateNode {
     pub fn new(plan: super::planref::PlanRef<UpdatePlan>, ctx: &ExecCtx) -> Result<Self> {
+        Self::start(plan, ctx, |p, ctx| super::nodes::open(&p.source, ctx))
+    }
+
+    /// `new`, its source made by `source` where `new` opens it (`Node::restart`'s).
+    fn start(
+        plan: super::planref::PlanRef<UpdatePlan>,
+        ctx: &ExecCtx,
+        source: impl FnOnce(&UpdatePlan, &ExecCtx) -> Result<BoxNode>,
+    ) -> Result<Self> {
         // (ExecInitModifyTable: a foreign member can't give its rows to the transition
         // tables.)
         if plan.inh && reads_transition(&plan.rules.triggers, tt::UPDATE) && plan.members.iter().any(|m| m.rules.table.foreign.is_some()) {
@@ -5035,7 +5076,7 @@ impl UpdateNode {
             ctx,
         )?;
         let trans = plan.inh && reads_transition(&plan.rules.triggers, tt::UPDATE);
-        let source = super::nodes::open(&plan.source, ctx)?;
+        let source = source(&plan, ctx)?;
         let seen = (!rows_once(&plan.source)).then(Default::default);
         Ok(UpdateNode {
             plan,
@@ -5289,6 +5330,30 @@ pub(super) fn key_of(v: &Value) -> Result<Vec<u8>> {
 }
 
 impl Node for UpdateNode {
+    /// (An UPDATE of one table of its own storage, run to its end: opened, its plan makes
+    /// this node again (`open_update`), over its source.)
+    fn restartable(&self, ctx: &ExecCtx) -> bool {
+        self.done
+            && !self.plan.inh
+            && self.plan.members.is_empty()
+            && self.plan.route.is_none()
+            && self.plan.rules.table.foreign.is_none()
+            && self.source.restartable(ctx)
+    }
+
+    fn park(&mut self) {
+        self.source.park();
+    }
+
+    fn restart(&mut self, ctx: &ExecCtx) -> Result<()> {
+        let mut source = std::mem::replace(&mut self.source, Box::new(super::Taken));
+        *self = Self::start(self.plan.clone(), ctx, |_, ctx| {
+            source.restart(ctx)?;
+            Ok(source)
+        })?;
+        Ok(())
+    }
+
     fn dml_table(&self) -> Option<Arc<Table>> {
         Some(self.plan.rules.table.clone())
     }

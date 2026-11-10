@@ -439,3 +439,62 @@ fn custom_plans_choose_the_scan_again() {
     run(&mut s, &data, Some(3), Some(102));
     run(&mut s, &data, Some(4), Some(103));
 }
+
+/// A prepared statement's executor tree, run to its end, restarts at its next execution
+/// (`exec::collect_kept`): each execution's rows, statement triggers, unique checks and
+/// errors as opening it again gives them, across transactions, rollbacks and DDL.
+#[test]
+fn prepared_statements_restart_their_trees() {
+    use std::sync::atomic::Ordering::Relaxed;
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = engine_session(open_store(dir.path()), "kept");
+    s.query("CREATE TABLE a (id int PRIMARY KEY, bal bigint NOT NULL)").unwrap();
+    s.query("INSERT INTO a SELECT g, 0 FROM generate_series(1, 10) g").unwrap();
+    s.query("CREATE TABLE ev (id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, account int NOT NULL, delta int NOT NULL)").unwrap();
+    s.query("CREATE INDEX ON ev (account)").unwrap();
+    s.query("CREATE TABLE fired (n int)").unwrap();
+    s.query("CREATE FUNCTION f() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN INSERT INTO fired VALUES (1); RETURN NULL; END $$").unwrap();
+    s.query("CREATE TRIGGER t BEFORE UPDATE ON a FOR EACH STATEMENT EXECUTE FUNCTION f()").unwrap();
+    let (upd, sel, ins) = (
+        "UPDATE a SET bal = bal + $2 WHERE id = $1",
+        "SELECT bal FROM a WHERE id = $1",
+        "INSERT INTO ev (account, delta) VALUES ($1, $2)",
+    );
+    let restarts = pg_engine::exec::TREE_RESTARTS.load(Relaxed);
+    let mut bal = [0i64; 11];
+    for i in 1..=40i64 {
+        let id = (i % 10 + 1).to_string();
+        s.query("BEGIN").unwrap();
+        assert_eq!(ext(&mut s, "u", upd, &[Some(&id), Some(&i.to_string())]).unwrap(), "UPDATE 1");
+        let rolled_back = i % 9 == 0;
+        if !rolled_back {
+            bal[i as usize % 10 + 1] += i;
+        }
+        let want = bal[i as usize % 10 + 1] + if rolled_back { i } else { 0 };
+        assert_eq!(ext(&mut s, "s", sel, &[Some(&id)]).unwrap(), format!("{:?}", Value::Int8(want)));
+        assert_eq!(ext(&mut s, "i", ins, &[Some(&id), Some(&i.to_string())]).unwrap(), "INSERT 0 1");
+        s.query(if rolled_back { "ROLLBACK" } else { "COMMIT" }).unwrap();
+    }
+    assert!(pg_engine::exec::TREE_RESTARTS.load(Relaxed) >= restarts + 80);
+    for (id, b) in bal.iter().enumerate().skip(1) {
+        assert_eq!(one(&mut s, &format!("SELECT bal FROM a WHERE id = {id}")), Some(Value::Int8(*b)));
+    }
+    // One statement trigger per execution; a rolled-back one's row went with it.
+    assert_eq!(one(&mut s, "SELECT count(*) FROM fired"), Some(Value::Int8(36)));
+    assert_eq!(one(&mut s, "SELECT count(*) FROM ev"), Some(Value::Int8(36)));
+    // An error mid-statement, then the next execution; a unique violation from a key the
+    // sequence will hand out.
+    let e = ext(&mut s, "u", upd, &[Some("1"), Some("9223372036854775807")]).unwrap_err();
+    assert!(e.contains("bigint out of range"), "{e}");
+    s.query("INSERT INTO ev (id, account, delta) OVERRIDING SYSTEM VALUE VALUES (41, 1, 0)").unwrap();
+    let e = ext(&mut s, "i", ins, &[Some("1"), Some("1")]).unwrap_err();
+    assert_eq!(e, "duplicate key value violates unique constraint \"ev_pkey\"");
+    assert_eq!(ext(&mut s, "i", ins, &[Some("1"), Some("1")]).unwrap(), "INSERT 0 1");
+    assert_eq!(ext(&mut s, "u", upd, &[Some("1"), Some("1")]).unwrap(), "UPDATE 1");
+    // DDL: the trigger gone, a column added.
+    s.query("DROP TRIGGER t ON a").unwrap();
+    s.query("ALTER TABLE a ADD COLUMN note text").unwrap();
+    assert_eq!(ext(&mut s, "u", upd, &[Some("2"), Some("5")]).unwrap(), "UPDATE 1");
+    assert_eq!(ext(&mut s, "s", sel, &[Some("2")]).unwrap(), format!("{:?}", Value::Int8(bal[2] + 5)));
+    assert_eq!(one(&mut s, "SELECT count(*) FROM fired"), Some(Value::Int8(37)));
+}

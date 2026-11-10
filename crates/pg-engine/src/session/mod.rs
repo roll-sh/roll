@@ -380,7 +380,23 @@ pub struct Session {
     fetch_limit: usize,
     /// The executor of the SELECT `run_query` stopped after `fetch_limit` rows.
     suspended: Option<cursor::Lazy>,
+    /// Executor trees prepared statements' plans ran to their ends, the latest last
+    /// (`KeptTree`).
+    kept: Vec<KeptTree>,
 }
+
+/// An executor tree a statement's plan ran to its end, for the plan's next execution to
+/// restart rather than open again (`exec::collect_kept`, `Node::restart`), while the
+/// plan, the catalog and the settings are the ones it was opened under.
+struct KeptTree {
+    plan: Arc<Plan>,
+    version: u64,
+    settings: u64,
+    node: crate::exec::BoxNode,
+}
+
+/// How many trees a session keeps (its prepared statements run most often).
+const KEPT_TREES: usize = 8;
 
 impl Session {
     /// Login checks (CONNECT, connection limits, VALID UNTIL) and the role's/database's default
@@ -500,6 +516,7 @@ impl Session {
             pgss_copy: None,
             fetch_limit: 0,
             suspended: None,
+            kept: Vec::new(),
         }
     }
 
@@ -2023,6 +2040,14 @@ impl Session {
         .unwrap_or_default()
     }
 
+    /// The tree kept for `plan` (`KeptTree`), taken out (None inside: none, or one opened
+    /// under another catalog or other settings, dropped).
+    fn kept_tree(&mut self, plan: &Arc<Plan>, version: u64, settings: u64) -> Option<crate::exec::BoxNode> {
+        let i = self.kept.iter().position(|k| Arc::ptr_eq(&k.plan, plan))?;
+        let k = self.kept.remove(i);
+        (k.version == version && k.settings == settings).then_some(k.node)
+    }
+
     /// Run query `p`; `stmt` is its tree or its template's (`StmtTree::shape`): only its
     /// kind is read from it, and `own` is its own.
     fn run_query(&mut self, p: &Prepared, stmt: &Node, params: &[Value]) -> Result<QueryResult> {
@@ -2089,6 +2114,14 @@ impl Session {
         // long enough.
         let ae = crate::ext::auto_explain::start(&self.state.settings.borrow(), false);
         let mut ae_plan = None;
+        // The tree an earlier execution of the plan ran to its end, under this catalog and
+        // these settings (not under auto_explain, which may instrument it, nor for a portal
+        // run a few rows at a time).
+        let keyed = (ae.is_none() && fetch == 0 && !matches!(*bq.plan, Plan::Context { .. })).then(|| {
+            (version(self), self.state.settings.borrow().generation())
+        });
+        let mut kept = keyed.map(|(v, g)| self.kept_tree(&bq.plan, v, g));
+        let mut ran = None;
         let r = self.with_ctx(params, |ctx| {
             bq.check_perms(ctx)?;
             let ae_instr = ae.as_ref().filter(|a| a.opts.analyze).map(|_| {
@@ -2128,8 +2161,13 @@ impl Session {
                 run_as_parallel_worker(ctx, &bq.plan, &mut put)?;
             } else if streams && fetch > 0 {
                 suspended = Some(run_suspendable(ctx, &bq.plan, params, fetch, &mut put)?);
+            } else if streams && let Some(k) = kept.take() {
+                ran = crate::exec::run_each_kept(&bq.plan, k, ctx, |r| put(r, ctx))?;
             } else if streams {
                 crate::exec::run_each(&bq.plan, ctx, |r| put(r, ctx))?;
+            } else if let Some(k) = kept.take() {
+                drop(put);
+                (made, ran) = crate::exec::collect_kept(&bq.plan, k, ctx)?;
             } else {
                 drop(put);
                 made = collect(&bq.plan, ctx, None)?;
@@ -2178,6 +2216,12 @@ impl Session {
             self.row_sink = sink;
         }
         self.sent = sent;
+        if let (Ok(_), Some(node), Some((version, settings))) = (&r, ran, keyed) {
+            self.kept.push(KeptTree { plan: bq.plan.clone(), version, settings, node });
+            if self.kept.len() > KEPT_TREES {
+                self.kept.remove(0);
+            }
+        }
         let processed = r?;
         let rows = made;
         // (debug_parallel_query's single-copy run counts 2, as pg_stat_statements' did before

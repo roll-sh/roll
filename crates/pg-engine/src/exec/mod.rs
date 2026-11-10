@@ -132,6 +132,25 @@ pub trait Node {
         Ok(false)
     }
 
+    /// Whether `restart` can make this node, which ran to its end, what opening its plan
+    /// node again would (ExecutorStart over a kept tree: `collect_kept`), this node and
+    /// every node below it. Asked before anything restarts: false changes nothing.
+    fn restartable(&self, _ctx: &ExecCtx) -> bool {
+        false
+    }
+
+    /// Let go of what an execution that ran to its end holds (its snapshot's iterators and
+    /// rows, what is queued until the node goes), as dropping the node would: kept now for a
+    /// next execution to `restart`, it holds only what its plan decides.
+    fn park(&mut self) {}
+
+    /// Start over as a new execution of the statement (`restartable` said it can): what
+    /// opening the plan node does, in its order (errors, counts, statement triggers), over
+    /// the node's state; per-execution state as a new node has it.
+    fn restart(&mut self, _ctx: &ExecCtx) -> Result<()> {
+        Err(crate::error::internal("restart of a node that can't"))
+    }
+
     /// Before its first row: a node that can may leave out the rows whose column `col` (an
     /// oid) is none of `keys`, which nothing above can match (an inner or semi hash join's
     /// outer side, its inner side built: a catalog scan then reads the matching rows through
@@ -247,6 +266,32 @@ pub trait Node {
 }
 
 pub type BoxNode = Box<dyn Node>;
+
+/// A source taken out of a node while it restarts (`Node::restart`), until it is put back
+/// (a unit struct: no allocation).
+pub(crate) struct Taken;
+
+impl Node for Taken {
+    fn next(&mut self, _ctx: &ExecCtx) -> Result<Option<Row>> {
+        Err(crate::error::internal("a node's source taken out"))
+    }
+}
+
+/// Executor trees restarted (`reopen`), for tests.
+#[doc(hidden)]
+pub static TREE_RESTARTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// `node`, restarted when it can be (`Node::restartable`), else `plan` opened anew.
+fn reopen(plan: &Arc<Plan>, node: Option<BoxNode>, ctx: &ExecCtx) -> Result<BoxNode> {
+    match node {
+        Some(mut n) if n.restartable(ctx) => {
+            n.restart(ctx)?;
+            TREE_RESTARTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(n)
+        }
+        _ => nodes::open(plan, ctx),
+    }
+}
 
 thread_local! {
     /// The notice lists of the statement contexts alive on this thread, outermost first.
@@ -1775,6 +1820,45 @@ pub fn collect(plan: &Arc<Plan>, ctx: &ExecCtx, limit: Option<usize>) -> Result<
     } else {
         ctx.temp_cleanup.run(run)
     }
+}
+
+/// `collect` (every row) of a prepared statement's plan over `kept`, the tree an earlier
+/// execution of the plan ran to its end, restarted rather than opened again when it can be
+/// (`Session::kept_tree`). Returns the tree too, run to its end and parked, for the next
+/// execution, when it can restart. (Not a SQL function's framed plan, which `collect` gives
+/// its context.)
+pub fn collect_kept(plan: &Arc<Plan>, kept: Option<BoxNode>, ctx: &ExecCtx) -> Result<(Vec<Row>, Option<BoxNode>)> {
+    debug_assert!(!matches!(plan.as_ref(), crate::sql::plan::Plan::Context { .. }));
+    ctx.temp_cleanup.run(|| ctx.statement(|| {
+        let mut node = reopen(plan, kept, ctx)?;
+        let mut out = Vec::new();
+        while let Some(r) = node.next(ctx)? {
+            out.push(r);
+        }
+        Ok((out, keep(node, ctx)))
+    }))
+}
+
+/// `run_each` over `kept` (`collect_kept`).
+pub fn run_each_kept(plan: &Arc<Plan>, kept: Option<BoxNode>, ctx: &ExecCtx, mut f: impl FnMut(Row) -> Result<()>) -> Result<Option<BoxNode>> {
+    ctx.temp_cleanup.run(|| ctx.statement(|| {
+        let mut node = reopen(plan, kept, ctx)?;
+        while let Some(r) = node.next(ctx)? {
+            f(r)?;
+        }
+        Ok(keep(node, ctx))
+    }))
+}
+
+/// A tree run to its end, parked for the next execution when it can restart; else dropped
+/// here, where `collect` drops it (what its nodes do as they go, a hash join's temporary
+/// space accounted, is the statement's).
+fn keep(mut node: BoxNode, ctx: &ExecCtx) -> Option<BoxNode> {
+    if !node.restartable(ctx) {
+        return None;
+    }
+    node.park();
+    Some(node)
 }
 
 /// `collect` of a plan whose rows' columns outside `need` nothing reads (they may be NULL),

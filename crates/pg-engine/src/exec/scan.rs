@@ -5086,6 +5086,158 @@ impl Node for ScanNode {
         true
     }
 
+    /// (A btree or hash index scan `rescan_index` starts over, of a table `open_scan` would
+    /// scan the same way again: of its own storage, not dropped while the statement waited,
+    /// not an EvalPlanQual test's.)
+    fn restartable(&self, ctx: &ExecCtx) -> bool {
+        let s: &ScanPlan = &self.plan;
+        s.table.foreign.is_none()
+            && s.current_of.is_none()
+            && s.sample.is_none()
+            && matches!(s.access, Access::Index { only: false, .. })
+            && s.index.as_ref().is_some_and(|(ix, b)| matches!(ix.method.as_str(), "btree" | "hash") && b.order.is_empty())
+            && self.keys.is_none()
+            && self.am.is_none()
+            && !ctx.instrumented()
+            && ctx.epq.borrow().is_none()
+            && !ctx.gone_rels.borrow().contains(&s.table.oid)
+    }
+
+    fn park(&mut self) {
+        // Everything else as `open_scan_as` makes it, and nothing held that dropping the node
+        // would let go of: what the plan alone decides is kept; what one execution read,
+        // decided or holds (its snapshot's iterators and rows, the LP_DEAD marks still
+        // queued, the heap model's watch, a temporary table's transaction) goes now. (Every
+        // field named: a new one is decided here.)
+        let ScanNode {
+            key: _,
+            need: _,
+            stat: _,
+            plan,
+            ranges,
+            cur_range,
+            iter,
+            rb,
+            rb_max,
+            held,
+            one,
+            run_blocks,
+            hstream,
+            hstream_tried,
+            any_order,
+            skip,
+            rev: _,
+            kills,
+            secondary: _,
+            emitted,
+            only: _,
+            sample: _,
+            keys: _,
+            ios: _,
+            ios_entries,
+            tid_order: _,
+            sorted,
+            streamed,
+            in_order,
+            prefilter,
+            toast,
+            filter_cols,
+            lazy,
+            kfilter,
+            implied,
+            point,
+            proj,
+            erb,
+            spare,
+            fscan,
+            fetch_calls,
+            dscan,
+            par,
+            par_tried,
+            run,
+            pending,
+            one_run: _,
+            blocks,
+            prune_next,
+            nblocks,
+            fetcher,
+            fetched,
+            batch,
+            ios_cols,
+            am: _,
+        } = self;
+        ranges.clear();
+        *cur_range = 0;
+        *iter = None;
+        rb.clear();
+        *rb_max = RB_MIN;
+        *held = false;
+        *one = None;
+        run_blocks.clear();
+        *hstream = None;
+        *hstream_tried = false;
+        *any_order = false;
+        *skip = None;
+        *kills = None;
+        *emitted = 0;
+        *ios_entries = None;
+        *sorted = None;
+        *streamed = false;
+        *in_order = None;
+        *prefilter = None;
+        *toast = None;
+        *filter_cols = None;
+        *lazy = None;
+        *kfilter = None;
+        *implied = false;
+        *point = false;
+        // (Asked again by the projection above as it starts over.)
+        *proj = None;
+        erb.clear();
+        *spare = None;
+        *fscan = None;
+        *fetch_calls = 0;
+        *dscan = None;
+        *par = None;
+        *par_tried = false;
+        run.clear();
+        *pending = None;
+        blocks.clear();
+        *prune_next = 0;
+        *nblocks = None;
+        *fetcher = None;
+        fetched.clear();
+        *batch = first_batch(plan);
+        *ios_cols = None;
+    }
+
+    fn restart(&mut self, ctx: &ExecCtx) -> Result<()> {
+        // `open_scan`'s check, then its ranges and binding (`rescan_index`'s).
+        let s: &ScanPlan = &self.plan;
+        if let Some(v) = ctx.catalog().views.get(&s.table.oid)
+            && !v.populated
+        {
+            return Err(Error::new(
+                code::OBJECT_NOT_IN_PREREQUISITE_STATE,
+                format!("materialized view \"{}\" has not been populated", v.name),
+            )
+            .hint("Use the REFRESH MATERIALIZED VIEW command."));
+        }
+        if !self.rescan_index(ctx)? {
+            return Err(crate::error::internal("an index scan that restarts without a rescan"));
+        }
+        self.batch = first_batch(&self.plan);
+        self.ios_cols = if self.secondary { index_only_columns(&self.plan, ctx) } else { None };
+        // (As `open_scan_as` decides them, at this execution's snapshot and isolation.)
+        self.implied = self.secondary && self.only.is_none() && filter_implied(&self.plan, ctx);
+        self.point = self.secondary
+            && self.only.is_none()
+            && self.ios_cols.is_none()
+            && !self.ios
+            && unique_point(&self.plan, ctx);
+        Ok(())
+    }
+
     fn next(&mut self, ctx: &ExecCtx) -> Result<Option<Row>> {
         if self.plan.limit.is_some_and(|l| self.emitted >= l) {
             return Ok(None);

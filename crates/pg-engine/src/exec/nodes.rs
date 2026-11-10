@@ -998,6 +998,15 @@ struct ValuesNode {
 }
 
 impl Node for ValuesNode {
+    fn restartable(&self, _ctx: &ExecCtx) -> bool {
+        true
+    }
+
+    fn restart(&mut self, _ctx: &ExecCtx) -> Result<()> {
+        self.i = 0;
+        Ok(())
+    }
+
     fn next(&mut self, ctx: &ExecCtx) -> Result<Option<Row>> {
         let Plan::Values { rows, .. } = &*self.plan else {
             unreachable!("a VALUES node of another plan")
@@ -2865,6 +2874,27 @@ impl Node for GateNode {
 
 
 impl Node for ProjectNode {
+    /// (Its expressions are its plan's, merged as `merge_moves` merges them again; what the
+    /// first row decided, and a node above asked for, start over.)
+    fn restartable(&self, ctx: &ExecCtx) -> bool {
+        self.input.restartable(ctx)
+    }
+
+    fn park(&mut self) {
+        self.input.park();
+    }
+
+    fn restart(&mut self, ctx: &ExecCtx) -> Result<()> {
+        let ProjectNode { input, exprs: _, computed, tried, topk, moves, piped, passed } = self;
+        *computed = None;
+        *passed = false;
+        *tried = false;
+        *topk = None;
+        *moves = None;
+        *piped = false;
+        input.restart(ctx)
+    }
+
     fn next(&mut self, ctx: &ExecCtx) -> Result<Option<Row>> {
         if !self.tried {
             self.compute_below(ctx)?;
