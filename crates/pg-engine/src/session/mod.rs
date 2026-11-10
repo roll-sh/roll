@@ -2083,109 +2083,144 @@ impl Session {
         self.pgss_planned(planning.elapsed());
         // Its relations are locked before it runs; a wait for a lock may end with another
         // transaction's DDL committed, which the statement then sees (Postgres analyzes it
-        // only once it holds them): it is bound again over the catalog it finds.
+        // only once it holds them): it is bound again over the catalog it finds. The first
+        // try locks them in the context the statement then runs in (`fused`: one statement
+        // begun, not two); one whose locking finds another catalog is bound again and runs
+        // the loop below.
         let version = |s: &Self| s.txn.as_ref().map_or(0, |t| t.borrow().catalog_version());
-        for _ in 0..8 {
-            let before = version(self);
-            self.with_ctx(params, |ctx| crate::sql::binder::perms::lock_named_relations(&bq.perms, ctx))?;
-            if version(self) == before {
-                break;
+        let needs_snapshot = !self.state.no_snapshot.get();
+        let given = params;
+        let mut fused = true;
+        let (r, streams, sink, suspended, made, sent, parallel, workers, ae, ae_plan, ran, keyed) = loop {
+            if !fused {
+                for _ in 0..8 {
+                    let before = version(self);
+                    self.with_ctx(given, |ctx| crate::sql::binder::perms::lock_named_relations(&bq.perms, ctx))?;
+                    if version(self) == before {
+                        break;
+                    }
+                    bq = self.planned(p, own(p)?, given)?.0;
+                    lit_vals.clear();
+                }
             }
-            bq = self.planned(p, own(p)?, params)?.0;
-            lit_vals.clear();
-        }
-        let lit_vals = lit_vals;
-        let params: &[Value] = if lit_vals.is_empty() { params } else { &lit_vals };
-        self.pgss_measure(false);
-        // A SELECT's rows go out as they're made (PORTAL_ONE_SELECT); a data-modifying
-        // query's when it has finished.
-        let streams = !bq.plan.writes() && matches!(inner(stmt), Some(NodeEnum::SelectStmt(_)));
-        // Its rows go to the sink as they're made (the client's DataRows), else into `made`.
-        let mut sink = if streams { self.row_sink.take() } else { None };
-        let mut suspended = None;
-        let mut made = Vec::new();
-        let mut sent = None;
-        let mut parallel = false;
-        // pg_stat_statements: the workers the plan's Gathers launch.
-        let count_workers = self.pgss_counts_workers();
-        let parallel_workers_alone = self.state.settings.borrow().workers_alone();
-        let mut workers = 0;
-        // auto_explain (explain_ExecutorStart / End): the plan, with what ran, when it took
-        // long enough.
-        let ae = crate::ext::auto_explain::start(&self.state.settings.borrow(), false);
-        let mut ae_plan = None;
-        // The tree an earlier execution of the plan ran to its end, under this catalog and
-        // these settings (not under auto_explain, which may instrument it, nor for a portal
-        // run a few rows at a time).
-        let keyed = (ae.is_none() && fetch == 0 && !matches!(*bq.plan, Plan::Context { .. })).then(|| {
-            (version(self), self.state.settings.borrow().generation())
-        });
-        let mut kept = keyed.map(|(v, g)| self.kept_tree(&bq.plan, v, g));
-        let mut ran = None;
-        let r = self.with_ctx(params, |ctx| {
-            bq.check_perms(ctx)?;
-            let ae_instr = ae.as_ref().filter(|a| a.opts.analyze).map(|_| {
-                let i = std::rc::Rc::new(crate::exec::Instr::default());
-                *ctx.instr.borrow_mut() = Some(i.clone());
-                i
+            let params: &[Value] = if lit_vals.is_empty() { given } else { &lit_vals };
+            self.pgss_measure(false);
+            // A SELECT's rows go out as they're made (PORTAL_ONE_SELECT); a data-modifying
+            // query's when it has finished.
+            let streams = !bq.plan.writes() && matches!(inner(stmt), Some(NodeEnum::SelectStmt(_)));
+            // Its rows go to the sink as they're made (the client's DataRows), else into `made`.
+            let mut sink = if streams { self.row_sink.take() } else { None };
+            let mut suspended = None;
+            let mut made = Vec::new();
+            let mut sent = None;
+            let mut parallel = false;
+            // pg_stat_statements: the workers the plan's Gathers launch.
+            let count_workers = self.pgss_counts_workers();
+            let parallel_workers_alone = self.state.settings.borrow().workers_alone();
+            let mut workers = 0;
+            // auto_explain (explain_ExecutorStart / End): the plan, with what ran, when it took
+            // long enough.
+            let ae = crate::ext::auto_explain::start(&self.state.settings.borrow(), false);
+            let mut ae_plan = None;
+            // The tree an earlier execution of the plan ran to its end, under this catalog and
+            // these settings (not under auto_explain, which may instrument it, nor for a portal
+            // run a few rows at a time).
+            let keyed = (ae.is_none() && fetch == 0 && !matches!(*bq.plan, Plan::Context { .. })).then(|| {
+                (version(self), self.state.settings.borrow().generation())
             });
-            let ae_start = std::time::Instant::now();
-            // The Gathers' workers (other backends see them while the statement runs); the
-            // part below each Gather that only the workers would run (its locks end with
-            // them).
-            let _launched = crate::exec::parallel_part::start(&bq.plan, &bq.perms.locks, ctx, count_workers, parallel_workers_alone, &mut workers, &bq.gathers);
-            // ExecutorRun begins (past ExecutorStart's permission checks): the RowDescription
-            // goes out, so an error from here on follows it.
-            let mut feed = sink.as_deref_mut().map(|k| sink::Feed::new(k, &bq.cols));
-            if let Some(f) = feed.as_mut() {
-                sent = Some(0);
-                f.sink.begin(&bq.cols)?;
-            }
-            let mut put = |r: Row, ctx: &ExecCtx| -> Result<()> {
-                match feed.as_mut() {
-                    Some(f) => {
-                        let r = f.row(ctx, r);
-                        sent = Some(f.sent);
-                        r
+            let mut kept = keyed.map(|(v, g)| self.kept_tree(&bq.plan, v, g));
+            let mut ran = None;
+            let r = self.with_ctx(params, |ctx| {
+                if fused {
+                    let before = ctx.txn.borrow().catalog_version();
+                    crate::sql::binder::perms::lock_named_relations(&bq.perms, ctx)?;
+                    if ctx.txn.borrow().catalog_version() != before {
+                        return Ok(None);
                     }
-                    None => {
-                        made.push(r);
-                        Ok(())
+                    // (What the context after the locks would begin again: READ COMMITTED's
+                    // snapshot, when a commit came while they were taken.)
+                    let mut t = ctx.txn.borrow_mut();
+                    if t.snapshot_behind() {
+                        t.begin_statement(needs_snapshot)?;
                     }
                 }
-            };
-            // (The less common ways are functions of their own: what this frame holds is
-            // on the stack while the plan runs.)
-            if streams && in_parallel_worker(ctx, &bq.plan) {
-                parallel = true;
-                run_as_parallel_worker(ctx, &bq.plan, &mut put)?;
-            } else if streams && fetch > 0 {
-                suspended = Some(run_suspendable(ctx, &bq.plan, params, fetch, &mut put)?);
-            } else if streams && let Some(k) = kept.take() {
-                ran = crate::exec::run_each_kept(&bq.plan, k, ctx, |r| put(r, ctx))?;
-            } else if streams {
-                crate::exec::run_each(&bq.plan, ctx, |r| put(r, ctx))?;
-            } else if let Some(k) = kept.take() {
-                drop(put);
-                (made, ran) = crate::exec::collect_kept(&bq.plan, k, ctx)?;
-            } else {
-                drop(put);
-                made = collect(&bq.plan, ctx, None)?;
-            }
-            if let Some(a) = &ae {
-                let secs = ae_start.elapsed().as_secs_f64();
-                if ae_instr.is_some() {
-                    *ctx.instr.borrow_mut() = None;
+                bq.check_perms(ctx)?;
+                let ae_instr = ae.as_ref().filter(|a| a.opts.analyze).map(|_| {
+                    let i = std::rc::Rc::new(crate::exec::Instr::default());
+                    *ctx.instr.borrow_mut() = Some(i.clone());
+                    i
+                });
+                let ae_start = std::time::Instant::now();
+                // The Gathers' workers (other backends see them while the statement runs); the
+                // part below each Gather that only the workers would run (its locks end with
+                // them).
+                let _launched = crate::exec::parallel_part::start(&bq.plan, &bq.perms.locks, ctx, count_workers, parallel_workers_alone, &mut workers, &bq.gathers);
+                // ExecutorRun begins (past ExecutorStart's permission checks): the RowDescription
+                // goes out, so an error from here on follows it.
+                let mut feed = sink.as_deref_mut().map(|k| sink::Feed::new(k, &bq.cols));
+                if let Some(f) = feed.as_mut() {
+                    sent = Some(0);
+                    f.sink.begin(&bq.cols)?;
                 }
-                let plan = ctx.explained.borrow_mut().take().unwrap_or((bq.plan.clone(), bq.hidden_rtes));
-                if let Some(text) = a.message(secs * 1000.0, "", "", &[]).map(|_| {
-                    crate::sql::explain::explain(&plan.0, plan.1, &a.opts, ctx, params, ae_instr.as_deref(), 0.0, secs)
-                }) {
-                    ae_plan = Some((secs * 1000.0, text));
+                let mut put = |r: Row, ctx: &ExecCtx| -> Result<()> {
+                    match feed.as_mut() {
+                        Some(f) => {
+                            let r = f.row(ctx, r);
+                            sent = Some(f.sent);
+                            r
+                        }
+                        None => {
+                            made.push(r);
+                            Ok(())
+                        }
+                    }
+                };
+                // (The less common ways are functions of their own: what this frame holds is
+                // on the stack while the plan runs.)
+                if streams && in_parallel_worker(ctx, &bq.plan) {
+                    parallel = true;
+                    run_as_parallel_worker(ctx, &bq.plan, &mut put)?;
+                } else if streams && fetch > 0 {
+                    suspended = Some(run_suspendable(ctx, &bq.plan, params, fetch, &mut put)?);
+                } else if streams && let Some(k) = kept.take() {
+                    ran = crate::exec::run_each_kept(&bq.plan, k, ctx, |r| put(r, ctx))?;
+                } else if streams {
+                    crate::exec::run_each(&bq.plan, ctx, |r| put(r, ctx))?;
+                } else if let Some(k) = kept.take() {
+                    drop(put);
+                    (made, ran) = crate::exec::collect_kept(&bq.plan, k, ctx)?;
+                } else {
+                    drop(put);
+                    made = collect(&bq.plan, ctx, None)?;
                 }
+                if let Some(a) = &ae {
+                    let secs = ae_start.elapsed().as_secs_f64();
+                    if ae_instr.is_some() {
+                        *ctx.instr.borrow_mut() = None;
+                    }
+                    let plan = ctx.explained.borrow_mut().take().unwrap_or((bq.plan.clone(), bq.hidden_rtes));
+                    if let Some(text) = a.message(secs * 1000.0, "", "", &[]).map(|_| {
+                        crate::sql::explain::explain(&plan.0, plan.1, &a.opts, ctx, params, ae_instr.as_deref(), 0.0, secs)
+                    }) {
+                        ae_plan = Some((secs * 1000.0, text));
+                    }
+                }
+                Ok(Some(ctx.processed.get()))
+            });
+            if let Ok(None) = r {
+                // (Nothing ran: bound again over the catalog the locks found, then locked as
+                // that binding needs, as the loop above does.)
+                if streams {
+                    self.row_sink = sink;
+                }
+                bq = self.planned(p, own(p)?, given)?.0;
+                lit_vals.clear();
+                fused = false;
+                continue;
             }
-            Ok(ctx.processed.get())
-        });
+            break (r.map(|n| n.unwrap_or(0)), streams, sink, suspended, made, sent, parallel, workers, ae, ae_plan, ran, keyed);
+        };
+        let params: &[Value] = if lit_vals.is_empty() { given } else { &lit_vals };
         if let (Some(a), Some((ms, plan))) = (&ae, ae_plan) {
             // (A prepared statement's source text: its PREPARE's, or its Parse message's.)
             let query = self

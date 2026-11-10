@@ -1285,6 +1285,12 @@ impl Txn {
         Ok(())
     }
 
+    /// READ COMMITTED: a commit became visible after the statement's snapshot was taken, so
+    /// `begin_statement` would take another.
+    pub fn snapshot_behind(&self) -> bool {
+        !self.isolation.txn_snapshot() && self.db.store.visible_ts() != self.snapshot_ts
+    }
+
     /// READ COMMITTED: a fresh snapshot for the rest of the statement, as the queries SPI
     /// runs for a utility command take (RI_PartitionRemove_Check after waiting for its
     /// lock on the referencing table sees what the transaction it waited for committed).
