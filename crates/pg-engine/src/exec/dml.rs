@@ -3753,6 +3753,18 @@ fn model_deferrable(plan: &InsertPlan, ctx: &ExecCtx) -> bool {
         && reads_only_others(&plan.source, t)
 }
 
+/// Whether an INSERT's source makes at most one row: a single-row VALUES list (or one
+/// without a FROM item).
+fn at_most_one_row(p: &crate::sql::plan::Plan) -> bool {
+    use crate::sql::plan::Plan as P;
+    match p {
+        P::One => true,
+        P::Values { rows, .. } => rows.len() <= 1,
+        P::Project { input, .. } => at_most_one_row(input),
+        _ => false,
+    }
+}
+
 /// Whether a plan (its sub-selects and CTEs too) is made only of plain reading nodes, none
 /// scanning table `t` or one it inherits from.
 fn reads_only_others(p: &crate::sql::plan::Plan, t: &crate::catalog::Table) -> bool {
@@ -3978,9 +3990,13 @@ impl InsertNode {
         if copied.is_some_and(|c| c.multi) {
             crate::repl::log::multi_insert(ctx);
         }
+        // (`model_deferrable` once, and only where its answer is used: a source of at most
+        // one row, such as a single-row VALUES, has nothing to register as deferred inserts.)
+        let mut deferrable = None;
+        let mut deferrable = || *deferrable.get_or_insert_with(|| plan.copy.is_none() && model_deferrable(&plan, ctx));
         let copy_load = match copied {
             Some(c) => Some(super::sizing::CopyLoad::start(&rules.table, c.multi, c.freeze, bulk, ctx)),
-            None if plan.copy.is_none() && model_deferrable(&plan, ctx) => {
+            None if !at_most_one_row(&plan.source) && deferrable() => {
                 Some(super::sizing::CopyLoad::deferred_inserts(&rules.table, ctx))
             }
             _ => None,
@@ -3991,19 +4007,13 @@ impl InsertNode {
         // So does an INSERT … SELECT that reads only other tables and models as it goes
         // (`deferred_inserts`: each row stored once, with its TID while the table is modelled).
         let select_bulk = plan.copy.is_none()
-            && copy_load.is_some()
             && rules.table.has_rowid()
             && rules.indexes.iter().all(|b| b.index.method == "btree" && !checks_rows(b))
+            && deferrable()
             && !ctx.txn.borrow().sink_open();
         let sink = (bulk || select_bulk).then_some(false);
         // (And an INSERT … SELECT whose source runs nothing volatile: `model_deferrable`.)
-        let plain = (copied.is_some_and(|c| c.multi)
-            || plan.copy.is_none()
-                && !rules.view
-                && plan.route.is_none()
-                && rules.table.partkey.is_none()
-                && model_deferrable(&plan, ctx))
-            && plan.on_conflict.is_none()
+        let plain = plan.on_conflict.is_none()
             && plan.returning.is_empty()
             && rules.triggers.is_empty()
             && rules.rls_checks.is_empty()
@@ -4011,7 +4021,13 @@ impl InsertNode {
             && rules.part_check.is_none()
             && rules.table.foreign.is_none()
             && rules.generated.iter().all(Option::is_none)
-            && rules.indexes.iter().all(|b| !checks_rows(b));
+            && rules.indexes.iter().all(|b| !checks_rows(b))
+            && (copied.is_some_and(|c| c.multi)
+                || plan.copy.is_none()
+                    && !rules.view
+                    && plan.route.is_none()
+                    && rules.table.partkey.is_none()
+                    && deferrable());
         // Such a COPY into a table this transaction emptied (TRUNCATE, then COPY, as pgbench
         // -i and COPY FREEZE do) measures its rows as they go in: VACUUM finds them as it
         // left them without reading them (`txn::unchanged`).
