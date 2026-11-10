@@ -229,12 +229,13 @@ pub struct ScanPlan {
     pub rtindex: RtIndex,
     /// The (startup, total) cost of the access path the planner chose for it
     /// (`sql::paths` `apply`), EXPLAIN's for the scan node; None when no path was costed.
+    /// Then the rows the path is expected to return (0: not costed).
     pub est: ScanEst,
 }
 
 /// `ScanPlan::est`. Not part of its Debug text.
 #[derive(Clone, Copy, Default)]
-pub struct ScanEst(pub Option<(f64, f64)>);
+pub struct ScanEst(pub Option<(f64, f64)>, pub f64);
 
 impl std::fmt::Debug for ScanEst {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

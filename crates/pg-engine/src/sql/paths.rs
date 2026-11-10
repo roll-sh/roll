@@ -4132,7 +4132,7 @@ fn to_bitmap(rel: &Rel, b: &BPath) -> BitmapQual {
 /// Record path `p` in the scan.
 fn apply(rel: &Rel, s: &mut ScanPlan, p: &Path) {
     s.params = crate::sql::plan::ScanParams(rel.params.clone());
-    s.est = crate::sql::plan::ScanEst(Some((p.startup, p.total)));
+    s.est = crate::sql::plan::ScanEst(Some((p.startup, p.total)), p.rows);
     match &p.kind {
         PathKind::Seq => {
             s.index = None;
@@ -6338,7 +6338,7 @@ impl Planner<'_, '_> {
             let total = rel.qual_startup
                 + self.g.seq_page_cost * rel.size.pages
                 + (seq_cpu_tuple_cost(&self.cat, &rel.table) + rel.qual_cost) * rel.size.tuples;
-            s.est = crate::sql::plan::ScanEst(Some((rel.qual_startup, total)));
+            s.est = crate::sql::plan::ScanEst(Some((rel.qual_startup, total)), rel.rows);
             return false;
         }
         let path = self.choose(rel, want, width);

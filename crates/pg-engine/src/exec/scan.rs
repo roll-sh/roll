@@ -945,7 +945,7 @@ fn open_scan_as(
         nblocks: None,
         fetcher: None,
         fetched: Default::default(),
-        batch: FETCH_BATCH_MIN,
+        batch: first_batch(s),
         ios_cols,
         am: None,
         one_run: collation_equal_run(s),
@@ -2474,9 +2474,36 @@ fn index_only_columns(s: &ScanPlan, ctx: &ExecCtx) -> Option<Vec<(usize, crate::
 }
 
 /// An index scan's heap fetches made together, from this many entries up to
-/// `FETCH_BATCH_MAX` as the scan goes on.
+/// `FETCH_BATCH_MAX` as the scan goes on (`next_batch`).
 const FETCH_BATCH_MIN: usize = 4;
 const FETCH_BATCH_MAX: usize = 128;
+
+/// The fetch batch after one of `batch` entries: twice as many, or at once the rest of the
+/// rows planning expects `plan` to return (up to its LIMIT), when that is more. A scan read
+/// past its small first batch usually reads on to its end, and each batch costs a seek of
+/// the table's rows on top of its rows.
+fn next_batch(batch: usize, plan: &ScanPlan) -> usize {
+    let rows = plan.limit.map_or(plan.est.1, |l| plan.est.1.min(l as f64));
+    let rest = if rows.is_finite() && rows > 0.0 { (rows.ceil() as usize + 1).saturating_sub(batch) } else { 0 };
+    (batch * 2).max(rest).min(FETCH_BATCH_MAX)
+}
+
+/// The first fetch batch of an index scan `s`: the rows planning expects it to return
+/// (`next_batch`) when its bounds are constants, else `FETCH_BATCH_MIN`. A scan whose bounds
+/// come from an outer row or a parameter (a nested loop's inner side, a correlated
+/// subquery's) is run again and again, and may be wanted for its first row alone each time.
+fn first_batch(s: &ScanPlan) -> usize {
+    let fixed = |e: &crate::sql::expr::Expr| matches!(e, crate::sql::expr::Expr::Const(..));
+    let constant = s.params.0.is_empty()
+        && s.index.as_ref().is_some_and(|(_, b)| {
+            b.skip.is_none()
+                && b.eq.iter().all(fixed)
+                && b.any.as_ref().is_none_or(fixed)
+                && b.lower.as_ref().is_none_or(|l| fixed(&l.0))
+                && b.upper.as_ref().is_none_or(|u| fixed(&u.0))
+        });
+    if constant { next_batch(0, s).max(FETCH_BATCH_MIN) } else { FETCH_BATCH_MIN }
+}
 
 /// A plain scan's rows read from storage together (`ScanNode::rb`), from this many up to
 /// `RB_MAX` as the scan goes on (a LIMIT may want one).
@@ -3168,7 +3195,7 @@ impl ScanNode {
             if ents.is_empty() {
                 return Ok(None);
             }
-            self.batch = (self.batch * 2).min(FETCH_BATCH_MAX);
+            self.batch = next_batch(self.batch, &self.plan);
             if self.ios_cols.is_some() {
                 // (The entry key stands in for the row: `index_row`.)
                 self.fetched.extend(ents.into_iter().map(|(k, d)| {
@@ -3208,7 +3235,7 @@ impl ScanNode {
                 if batch.is_empty() {
                     return Ok(None);
                 }
-                self.batch = (self.batch * 2).min(FETCH_BATCH_MAX);
+                self.batch = next_batch(self.batch, &self.plan);
                 let rows = fetch_rows(&batch, ctx)?;
                 am.pending.extend(checks.into_iter().zip(batch).zip(rows).map(|((c, k), r)| (c, k, r)));
             }
@@ -3231,7 +3258,7 @@ impl ScanNode {
                 if batch.is_empty() {
                     return Ok(None);
                 }
-                self.batch = (self.batch * 2).min(FETCH_BATCH_MAX);
+                self.batch = next_batch(self.batch, &self.plan);
                 let rows = self.fetch_stored(&batch, ctx)?;
                 self.fetched
                     .extend(batch.into_iter().zip(rows).map(|(k, r)| (Vec::new(), k, r)));
