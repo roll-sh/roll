@@ -355,6 +355,9 @@ pub struct Session {
     /// The query string of the statements being run (pg_cursors / pg_prepared_statements
     /// show it whole).
     source: String,
+    /// Transaction commands a simple query sent as text (BEGIN, COMMIT), parsed once
+    /// (`Session::parse`): their trees depend on nothing but the text.
+    txn_cmds: Vec<(Box<str>, Arc<Prepared>)>,
     /// transaction_read_only as each open savepoint started (a subtransaction's change
     /// ends with it: CommitSubTransaction / AbortSubTransaction restore XactReadOnly).
     ro_stack: Vec<bool>,
@@ -488,6 +491,7 @@ impl Session {
             pipelining: false,
             ro_stack: Vec::new(),
             source: String::new(),
+            txn_cmds: Vec::new(),
             row_sink: None,
             sent: None,
             pgss_tracked: None,
@@ -1106,6 +1110,13 @@ impl Session {
         // have run on: an embedder's Parse / Describe before any execute.)
         crate::catalog::set_session_temp_schema_of(self.state.proc.number());
         self.sync_lex();
+        if let Some((_, p)) = self.txn_cmds.iter().find(|(t, _)| **t == *sql) {
+            let p = p.clone();
+            self.take_lex_warnings();
+            self.source = sql.to_string();
+            crate::sql::scs::set_source(None);
+            return Ok(vec![p]);
+        }
         let parsed = crate::sql::parse::parse_live_lazy(sql);
         self.take_lex_warnings();
         let (text, stmts) = parsed?;
@@ -1139,13 +1150,26 @@ impl Session {
             crate::sql::literals::Stmts::Trees(t) => (t, None),
         };
         let mut lit = lit.filter(|_| stmts.len() == 1);
-        Ok(stmts
+        let out: Vec<Arc<Prepared>> = stmts
             .into_iter()
             .map(|mut s| {
                 let tree = s.stmt.take().map(|n| crate::sql::binder::ast::select_into_as_ctas(&n).unwrap_or(*n));
                 prepared(&s, tree.into(), lit.take())
             })
-            .collect())
+            .collect();
+        // (Text the scanner reads alike under every setting: letters, spaces and `;`.)
+        if let [p] = &out[..]
+            && matches!(&text, std::borrow::Cow::Borrowed(_))
+            && sql.len() <= 32
+            && sql.bytes().all(|b| b.is_ascii_alphabetic() || b == b' ' || b == b';')
+            && matches!(p.stmt.shape().and_then(|n| n.node.as_ref()), Some(NodeEnum::TransactionStmt(_)))
+        {
+            if self.txn_cmds.len() >= 8 {
+                self.txn_cmds.remove(0);
+            }
+            self.txn_cmds.push((sql.into(), p.clone()));
+        }
+        Ok(out)
     }
 
     /// Refresh the prepared statements pg_prepared_statements shows, when the set changed
