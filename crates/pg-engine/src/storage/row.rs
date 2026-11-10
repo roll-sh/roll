@@ -940,6 +940,28 @@ pub fn decode_row_need_spare(b: &[u8], need: &[bool], spare: usize) -> Result<Ve
     Ok(row)
 }
 
+/// The values of columns `cols` (ascending) of the encoded row `b`, in that order, pushed
+/// to `out`, the values between stepped over and none after the last walked; those past the
+/// row's own values aren't pushed. The row's count of values.
+pub fn decode_cols(b: &[u8], cols: &[u32], out: &mut Vec<Value>) -> Result<usize> {
+    let mut pos = 0;
+    let n = get_varint(b, &mut pos)? as usize;
+    let mut at = 0;
+    for &c in cols {
+        let c = c as usize;
+        if c >= n {
+            break;
+        }
+        while at < c {
+            skip_value(b, &mut pos)?;
+            at += 1;
+        }
+        out.push(decode_value(b, &mut pos)?);
+        at += 1;
+    }
+    Ok(n)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1007,6 +1029,10 @@ mod tests {
         for m in 0u32..(1 << row.len()) {
             let need: Vec<bool> = (0..row.len()).map(|i| m & (1 << i) != 0).collect();
             let part = decode_row_need(&enc, &need).unwrap();
+            let cols: Vec<u32> = (0..row.len() as u32).filter(|&i| need[i as usize]).collect();
+            let mut out = Vec::new();
+            assert_eq!(decode_cols(&enc, &cols, &mut out).unwrap(), row.len());
+            assert_eq!(out, cols.iter().map(|&i| row[i as usize].clone()).collect::<Vec<_>>());
             for (i, v) in part.iter().enumerate() {
                 if need[i] {
                     assert_eq!(*v, row[i]);

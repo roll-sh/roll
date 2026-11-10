@@ -224,6 +224,13 @@ pub trait Node {
         self.key_order()
     }
 
+    /// Before its first row: a node that can makes its rows only of its columns `cols`
+    /// (ascending), in that order, as a projection of them above would (true); what it reads
+    /// and checks is unchanged.
+    fn project_columns(&mut self, _cols: &[u32], _ctx: &ExecCtx) -> bool {
+        false
+    }
+
     /// A projection's expressions, before its first row: an aggregation above may read its
     /// rows through them (`pipeline_projected`).
     fn projection(&self) -> Option<&[Expr]> {

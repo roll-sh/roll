@@ -353,6 +353,7 @@ fn open_node(plan: &Arc<Plan>, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<B
                 topk: None,
                 moves: None,
                 piped: false,
+                passed: false,
             })
         }
         Plan::ProjectSet { input, exprs, srfs } => Box::new(ProjectSetNode {
@@ -2453,6 +2454,9 @@ struct ProjectNode {
     /// The input runs a pipeline for an aggregation above (`pipeline_projected`): its
     /// parts pass through, its rows are projected.
     piped: bool,
+    /// The input makes its rows of the columns moved, as projected (`Node::project_columns`):
+    /// they pass through.
+    passed: bool,
 }
 
 const NOT_MOVED: u32 = u32::MAX;
@@ -2672,7 +2676,7 @@ mod projection_tests {
             let mut p = ProjectNode {
                 input: Box::new(Items([Item::Part(part), Item::Row(row, 2)].into())),
                 exprs: vec![col(0), col(2)], moves: Some(vec![0, 2].into_boxed_slice()),
-                computed: None, tried: true, topk: None, piped: true,
+                computed: None, tried: true, topk: None, piped: true, passed: false,
             };
             match projected_item(&mut p, ctx).unwrap().unwrap() {
                 Item::Part(part) => {
@@ -2707,6 +2711,19 @@ impl ProjectNode {
     fn compute_below(&mut self, ctx: &ExecCtx) -> Result<()> {
         self.tried = true;
         self.moves = project_moves(&self.exprs);
+        // (Every expression a column of the input's, each read once, in their order: the
+        // input's rows made of just those.)
+        if self.topk.is_none()
+            && !ctx.instrumented()
+            && let Some(m) = &self.moves
+            && m.len() == self.exprs.len()
+            && m.iter().enumerate().all(|(i, &c)| c != NOT_MOVED && (i == 0 || m[i - 1] < c))
+            && self.input.project_columns(m, ctx)
+        {
+            self.moves = None;
+            self.passed = true;
+            return Ok(());
+        }
         // Large bounds build worker heaps without discarding rows. Their shallow slots
         // alone must fit work_mem before enabling numeric column computation.
         let numeric = self.topk.is_some_and(|t| super::parscan::topk_slots_fit(t.k, super::workmem::work_mem(ctx) as usize))
@@ -2833,6 +2850,9 @@ impl Node for ProjectNode {
         let Some(mut r) = self.input.next(ctx)? else {
             return Ok(None);
         };
+        if self.passed {
+            return Ok(Some(r));
+        }
         // A row with the values computed has them after its columns (none of them where a
         // kernel left one to `eval`: all evaluated here, as without the workers).
         if let Some((base, places)) = &self.computed

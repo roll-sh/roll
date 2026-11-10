@@ -343,6 +343,60 @@ skiplist insert under the commit mutex 5.7, its key compares about half, `releas
 locks 2.7; `with_search_path` 1.9; mimalloc 12 us over all (allocation's free-list pop, cache
 misses), libc's `memcmp` / `memcpy` about 18.
 
+## Range reads, round 3 (2026-11-10, agent 198)
+
+HANDOFF.md, "Range reads round 3", has what changed: an index scan whose filter is exactly
+the conditions its key range applies no longer checks it on each row, and a projection of
+plain columns has the index scan below decode just those columns into the row it returns.
+Agent 196's harness (copied to `~/.cache/a198/h`; dist builds in containers on CPUs 24-27,
+the client on 28-31, 100,000 accounts, 8 clients, 2 s warmup, 10 s measured, every row
+value-checked, user instructions from `perf stat -e instructions:u` over 9 s of each run, a
+pair run again when another tenant used more than 0.3 cores of the server's CPUs), the
+prepared 100-row range read, five alternating pairs per step. **base** is `aae3424d0`.
+
+| pair | base ops/s | new ops/s | base us CPU / op | new us CPU / op | base instr / op | new instr / op |
+|---|---:|---:|---:|---:|---:|---:|
+| 1 | 28,511 | 32,514 | 128.0 | 112.7 | 586k | 500k (-14.7%) |
+| 2 | 27,319 | 31,256 | 130.8 | 114.3 | 586k | 499k (-14.9%) |
+| 3 | 29,036 | 32,804 | 127.3 | 112.3 | 587k | 503k (-14.2%) |
+| 4 | 27,759 | 32,185 | 129.5 | 115.2 | 582k | 501k (-14.0%) |
+| 5 | 28,396 | 30,870 | 128.8 | 114.2 | 586k | 501k (-14.6%) |
+
+Medians: +13.3% ops/s, -11.4% server CPU per operation, -14.6% user instructions per
+operation; memory unchanged (50-55 MiB after load either side). Each step was gated on its
+own (five pairs each):
+
+- Not rechecking the implied filter, against base: -6.1% to -7.3% instructions per pair
+  (median -6.6%), +3.1% to +7.2% ops/s, -2.4% to -5.1% CPU per operation.
+- Decoding only the projected columns, against the first step: -8.2% to -9.3% instructions
+  (median -8.6%), +2.0% to +11.0% ops/s, -4.6% to -11.2% CPU per operation.
+- Dropped: the planning copies HANDOFF's round 13 lists (an early return in
+  `bitmap_or_paths`, `btcost`'s bound clauses moved, `match_quals` skipped for an index no
+  clause reads): -0.1% to -1.0% instructions per pair, -2.8% to +6.1% ops/s
+  (`~/.cache/a198/c3-planning-dropped.patch`).
+
+The point read (`point_select`, five pairs: +3.1% median ops/s, -3.7% CPU per operation,
+-2.3% to -4.3% instructions in every pair; one pair -9.2% ops/s with 0.27 cores of another
+tenant on the candidate's run) and the prepared single-row UPDATE (`update_indexed`, three
+pairs: +1.2% median ops/s, -0.3% CPU, -1.4% median instructions, the pairs -5.1% to +7.6%)
+don't regress.
+
+**The plan cache.** PostgreSQL 18.6 keeps choosing a custom plan for this statement: after
+12 and 30 executions with different values, by `PREPARE`/`EXECUTE` and by the benchmark's
+protocol (a named extended-protocol statement with an int4 parameter type),
+`pg_prepared_statements` shows `generic_plans = 0`. Its generic plan costs 25.30 (500 rows
+estimated) against a custom plan's 10.11 (91 rows) plus the planning overhead
+`choose_custom_plan` adds. The engine shows the same counts and the same generic plan; its
+custom plan estimates 100 rows (10.29), from its own ANALYZE sample (not compared further).
+Planning each Bind is PostgreSQL's behaviour here too, not a difference to remove.
+
+**The socket.** `strace -f` of each server for 3 s under the workload (from a container in
+its pid namespace): both send each query's response in one `sendto` of 2,727 bytes and read
+its 42 request bytes in one `recvfrom`. The engine makes 2.0 system calls per query;
+PostgreSQL 8.5 (3 `lseek`, an `mmap`/`munmap` pair, a second `recvfrom` and 0.7
+`epoll_pwait`). The time under `send` at ReadyForQuery is the kernel's loopback TCP work,
+which PostgreSQL pays the same.
+
 ## Planner, round 13 (2026-11-10, agent 196)
 
 HANDOFF.md, "Planner round 13", has what changed: a reused custom plan's scan is chosen again

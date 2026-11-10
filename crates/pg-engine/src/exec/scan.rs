@@ -605,6 +605,7 @@ pub fn open_scan(s: &ScanPlan, shared: Option<&Arc<crate::sql::plan::Plan>>, nee
             lazy: None,
             kfilter: None,
             implied: false,
+            proj: None,
             erb: Default::default(),
             spare: None,
             fscan: None,
@@ -700,6 +701,7 @@ pub fn open_scan(s: &ScanPlan, shared: Option<&Arc<crate::sql::plan::Plan>>, nee
             lazy: None,
             kfilter: None,
             implied: false,
+            proj: None,
             erb: Default::default(),
             spare: None,
             fscan: None,
@@ -785,6 +787,7 @@ pub fn open_scan(s: &ScanPlan, shared: Option<&Arc<crate::sql::plan::Plan>>, nee
             lazy: None,
             kfilter: None,
             implied: false,
+            proj: None,
             erb: Default::default(),
             spare: None,
             fscan: None,
@@ -938,6 +941,7 @@ fn open_scan_as(
         lazy: None,
         kfilter: None,
         implied,
+        proj: None,
         erb: Default::default(),
         spare: None,
         fscan: None,
@@ -1898,6 +1902,7 @@ fn dense_bitmap_scan(
         lazy: None,
         kfilter: None,
         implied: false,
+        proj: None,
         erb: Default::default(),
         spare: None,
         fscan: None,
@@ -2364,6 +2369,9 @@ struct ScanNode {
     /// The filter is exactly the index conditions the scan's key range applies
     /// (`filter_implied`): not checked again on the rows it returns.
     implied: bool,
+    /// The table columns its rows are made of, in order, for a projection above
+    /// (`Node::project_columns`; None: the table's row).
+    proj: Option<Box<[u32]>>,
     /// An index scan's entries read a batch at a time (`next_indexed`).
     erb: crate::storage::batch::RowBatch,
     /// The last range's store iterator once it ended, for the next range to read on with
@@ -3853,6 +3861,25 @@ impl ScanNode {
         k.passes(row?)
     }
 
+    /// `full_row` made of just the columns `cols` (`proj`): only those decoded, the ones
+    /// before stepped over, when the row has no values out of line and its table no values
+    /// tracked (`sizing::note_read` notes a whole row's), else taken out of the whole row.
+    fn projected_row(&self, key: &[u8], bytes: &[u8], cols: &[u32], ctx: &ExecCtx) -> Result<Row> {
+        let t = &self.plan.table;
+        if (self.toast.is_some() && crate::storage::toast::has_external(bytes)) || super::sizing::tracked(t.oid) {
+            return Ok(pick_columns(self.full_row(key, bytes, ctx)?, cols));
+        }
+        let (_, data) = split_header(bytes)?;
+        let mut row = Vec::with_capacity(cols.len());
+        let n = crate::storage::row::decode_cols(data, cols, &mut row)?;
+        // (Columns added after the row was written: their defaults.)
+        for &c in &cols[row.len()..] {
+            debug_assert!(c as usize >= n);
+            row.push(t.columns[c as usize].missing.clone().unwrap_or(Value::Null));
+        }
+        Ok(row)
+    }
+
     fn full_row(&self, key: &[u8], bytes: &[u8], ctx: &ExecCtx) -> Result<Row> {
         if self.toast.is_some() && crate::storage::toast::has_external(bytes) {
             return self.row_ext(key, bytes, self.need.as_deref(), None, ctx);
@@ -3945,6 +3972,15 @@ impl ScanNode {
         ROWS_FROM_INDEX_ENTRIES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ok(row)
     }
+}
+
+/// A table row's columns `cols` (ascending), in that order.
+fn pick_columns(mut row: Row, cols: &[u32]) -> Row {
+    for (i, &c) in cols.iter().enumerate() {
+        row.swap(i, c as usize);
+    }
+    row.truncate(cols.len());
+    row
 }
 
 /// `scan_row` decoding only the table columns `need` marks (the others NULL). The values
@@ -4963,6 +4999,32 @@ impl Node for ScanNode {
         self.rescan_index(ctx)
     }
 
+    /// (A serial or parallel index scan by its entries checking no filter on the rows it
+    /// makes, nor locking them: they are only read.)
+    fn project_columns(&mut self, cols: &[u32], ctx: &ExecCtx) -> bool {
+        let p = &self.plan;
+        if !self.secondary
+            || (p.filter.is_some() && !self.implied)
+            || self.emitted > 0
+            || self.par_tried
+            || p.mark.is_some()
+            || p.with_key
+            || p.sys
+            || self.ios_cols.is_some()
+            || self.ios
+            || self.am.is_some()
+            || self.keys.is_some()
+            || self.only.is_some()
+            || self.sample.is_some()
+            || ctx.instrumented()
+            || cols.last().is_none_or(|&c| c as usize >= p.table.columns.len())
+        {
+            return false;
+        }
+        self.proj = Some(cols.into());
+        true
+    }
+
     fn next(&mut self, ctx: &ExecCtx) -> Result<Option<Row>> {
         if self.plan.limit.is_some_and(|l| self.emitted >= l) {
             return Ok(None);
@@ -4976,7 +5038,10 @@ impl Node for ScanNode {
         if self.par.is_some() {
             return match self.next_par(ctx)? {
                 None => Ok(None),
-                Some(super::pipe::Item::Row(r, _)) => Ok(Some(r)),
+                Some(super::pipe::Item::Row(r, _)) => Ok(Some(match &self.proj {
+                    Some(cols) => pick_columns(r, cols),
+                    None => r,
+                })),
                 Some(super::pipe::Item::Part(_)) => Err(crate::error::internal("parts from a scan")),
             };
         }
@@ -5106,7 +5171,10 @@ impl ScanNode {
             }
             (None, Some(cols), _) => self.index_row(cols, key, bytes, ctx)?,
             (None, None, Some((probe, fm))) => self.row_ext(key, bytes, self.need.as_deref(), Some((probe, &fm)), ctx)?,
-            (None, None, None) => self.full_row(key, bytes, ctx)?,
+            (None, None, None) => match &self.proj {
+                Some(cols) => self.projected_row(key, bytes, cols, ctx)?,
+                None => self.full_row(key, bytes, ctx)?,
+            },
         };
         if (self.plan.index.is_some() || self.keys.is_some())
             && self.only.is_none()
@@ -5144,10 +5212,13 @@ impl ScanNode {
             ctx.sess.db.ssi.read_row(me, self.plan.table.oid, key)?;
         }
         // (A filter the key range applies exactly holds: checked again in debug builds.)
-        debug_assert!(
-            !self.implied || self.plan.filter.as_ref().is_none_or(|f| eval_bool(f, &row, ctx).unwrap_or(true)),
-            "a row outside its index range"
-        );
+        #[cfg(debug_assertions)]
+        if self.implied
+            && let Some(f) = &self.plan.filter
+        {
+            let whole = if self.proj.is_some() { self.full_row(key, bytes, ctx)? } else { row.clone() };
+            assert!(eval_bool(f, &whole, ctx).unwrap_or(true), "a row outside its index range");
+        }
         if !prefiltered
             && !self.implied
             && self.plan.filter.is_some()
@@ -5875,6 +5946,7 @@ fn keyed_scan(s: &ScanPlan, plan: ScanPlan, ix: &Index, keys: Keys, ctx: &ExecCt
         lazy: None,
         kfilter: None,
         implied: false,
+        proj: None,
         erb: Default::default(),
         spare: None,
         fscan: None,

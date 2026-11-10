@@ -9421,6 +9421,75 @@ privileges, rowsecurity; release build, the same private reference): 5460/5460 u
 newly differing. The measured dist binary is `aef3a18b2` with the change; the rebase onto
 `aae3424d0` (planner paths only) touched none of its code.
 
+## Range reads round 3 (agent 198)
+
+BENCH.md "Range reads, round 3" has the measurements: the prepared 100-row range read takes
+14.6% fewer user instructions per operation (every one of five pairs 14.0-14.9%), 11.4% less
+server CPU and 13.3% more operations per second; the point read takes 2.3-4.3% fewer. Two
+changes, both in the executor's index scan by entries (`ScanNode`, `secondary`):
+
+- **An implied filter isn't checked again** (`scan::filter_implied`, `ScanNode::implied`):
+  when every conjunct of the scan's filter is one of its index conditions that its key range
+  applies exactly, no row the range returns can fail it, so `emit` skips both the prefilter
+  and the filter (PostgreSQL's `create_indexscan_plan` drops such quals from the qpqual: its
+  EXPLAIN shows only the Index Cond, as the engine's does). Exact means: a btree index, not
+  ordered by a made class, no `= ANY` and no skip scan; the condition `=`, `<`, `<=`, `>`
+  or `>=` on a plain integer key column (int2, int4, int8; no operator class, collation or
+  padding) against a value of the column's own type, not lossy, and the bound the range was
+  built from is that very value (`same_as`), so of `id >= 5 AND id >= 10` only one is
+  exact and the filter stays. Only at the statement's snapshot (the entries are the rows'
+  values there: an UPDATE writes a changed key's entries with its row) and not under a row
+  mark (a newer version a lock finds is checked against the whole filter). Debug builds
+  still evaluate the filter on every such row and assert it holds.
+- **Only the projected columns are decoded** (`Node::project_columns`,
+  `ScanNode::proj`, `storage::row::decode_cols`): a `ProjectNode` whose expressions are
+  each a different input column, in ascending order, asks its input at the first row to
+  make its rows of just those columns; the index scan accepts when it checks no filter on
+  the rows (none, or an implied one), locks none and adds no key or system columns, and is
+  not an index-only scan, an access method's or under EXPLAIN ANALYZE. Its rows are then the
+  columns decoded straight from the stored row (the ones before stepped over, none after
+  the last walked; columns added after the row was written get their defaults), one
+  allocation of the result's width instead of the table's width and a projection. A row
+  with values out of line, a table with values tracked (`sizing::note_read` notes a whole
+  row's) and a parallel scan's rows are made whole and the columns taken out
+  (`pick_columns`). The projection then passes the rows through (`ProjectNode::passed`).
+
+Why it is exact: the rows returned and their values are the same; what is read, counted,
+locked and checked otherwise is unchanged. A differential script against PostgreSQL 18.6
+(`~/.cache/a198/edge.sql`: added columns with defaults, DESC and smallint indexes,
+contradictory and overlapping bounds, cross-type bounds, a key moved by an uncommitted
+UPDATE, FOR UPDATE, LATERAL rescans, a scrollable cursor, an out-of-line value,
+SERIALIZABLE, EXPLAIN ANALYZE) gives identical output.
+
+Verification on `aae3424d0` with both changes: release build; release lib tests (211
+passed), kept_plans (9), wire (69) and golden (all files); debug golden (all files, with the
+reuse cross-check and the implied-filter assertion) and kept_plans; the planner regress
+subset (select, join, subselect, aggregates, create_index, btree_index, partition_prune,
+portals, limit, prepare, plancache; debug build, a private PG 18.6 reference): 4184/4186
+units, no newly differing unit. Release Clippy with `-D warnings` fails as on `aae3424d0`,
+with the same lints in the same files (math.rs, json.rs, text.rs, explain.rs, nodes.rs'
+test module placement and others), none in this change.
+The same gates, all again, after rebasing onto `a96bce378` (agent 197's round 1 and the
+others before it): the same results. The measured dist binaries are of `aae3424d0`.
+
+The plan cache: PostgreSQL 18.6 also keeps custom plans for this statement
+(`generic_plans = 0` after 30 executions, by PREPARE and by a named extended-protocol
+statement with an int4 parameter), so planning each Bind stays. The socket: both servers
+send each response in one `sendto` of the same bytes; the engine makes 2 system calls per
+query to PostgreSQL's 8.5.
+
+Dropped (`~/.cache/a198/c3-planning-dropped.patch`, -0.6% median instructions, under the 2%
+gate): round 13's planning copies (an early return in `bitmap_or_paths` without an OR,
+`btcost` moving its bound clauses, `match_quals` skipped for an index of columns no clause
+reads). Not done: `lit_env` read twice per Bind (agent 197's `litplan.rs`).
+
+Next, from a profile of the base (LBR, 148k samples): `planned_as` 17.7% (`rechoose`
+10.3%: choosing the path 6.3%, the rows' selectivity 2.2%; placing the WHERE 3.2%); the
+index scan's entries copied out of their batch per entry (`next_indexed`: `to_vec` of key
+and value, then an unzip into the fetch queue; allocation under it 1.35%) and
+`fetch_dense` 7.7%; `Feed::row` 4.5% and the wire encode about 3%; the kernel send at
+ReadyForQuery 11% (equal on both sides).
+
 ## Storage engine, round 1 (agent 169)
 
 Agent 169 owns the store's internals (block format and cache, point lookups inside the store,
