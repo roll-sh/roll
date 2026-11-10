@@ -120,48 +120,67 @@ impl Built {
     /// and the chains model; `pos[i]`: row i's place in its chain; `merge`: equal rows in
     /// their order instead.
     pub fn new(rows: Vec<Row>, keys: Vec<(Vec<Value>, usize)>, table: super::pghash::JoinTable, merge: bool) -> Built {
-        let mut pos = vec![usize::MAX; rows.len()];
-        for (p, i) in table.scan().enumerate() {
-            pos[i] = p;
-        }
-        let order = |v: &mut Vec<u32>| {
-            if merge {
-                v.sort_unstable();
-            } else {
-                v.sort_by_key(|&i| pos[i as usize]);
-            }
-        };
+        // (Each key's group, the groups' sizes, then each group's rows put in its range of
+        // `cands` in chain order (a merge join's: row order); the map's values made the
+        // ranges at the end. No vector per key.)
         let single_int = !keys.is_empty() && keys.iter().all(|(k, _)| k.len() == 1 && matches!(k[0], Value::Int8(_)));
-        let mut cands = Vec::with_capacity(keys.len());
-        let map = if single_int || keys.is_empty() {
-            let mut m: super::fasthash::HashMap<i64, Vec<u32>> = Default::default();
+        let n = keys.len();
+        let mut group = vec![u32::MAX; rows.len()];
+        let mut sizes: Vec<u32> = Vec::new();
+        let mut add = |g: &mut Span, i: usize, sizes: &mut Vec<u32>| {
+            if g.1 == u32::MAX {
+                *g = (sizes.len() as u32, 0);
+                sizes.push(0);
+            }
+            sizes[g.0 as usize] += 1;
+            group[i] = g.0;
+        };
+        let mut map = if single_int || keys.is_empty() {
+            let mut m: super::fasthash::HashMap<i64, Span> = Default::default();
+            m.reserve(n);
             for (k, i) in keys {
                 if let Value::Int8(x) = k[0] {
-                    m.entry(x).or_default().push(i as u32);
+                    add(m.entry(x).or_insert((0, u32::MAX)), i, &mut sizes);
                 }
             }
-            let mut out: super::fasthash::HashMap<i64, Span> = Default::default();
-            out.reserve(m.len());
-            for (k, mut v) in m {
-                order(&mut v);
-                out.insert(k, (cands.len() as u32, v.len() as u32));
-                cands.extend(v);
-            }
-            KeyMap::Int(out)
+            KeyMap::Int(m)
         } else {
-            let mut m: super::fasthash::HashMap<Box<[Value]>, Vec<u32>> = Default::default();
+            let mut m: super::fasthash::HashMap<Box<[Value]>, Span> = Default::default();
+            m.reserve(n);
             for (k, i) in keys {
-                m.entry(k.into_boxed_slice()).or_default().push(i as u32);
+                add(m.entry(k.into_boxed_slice()).or_insert((0, u32::MAX)), i, &mut sizes);
             }
-            let mut out: super::fasthash::HashMap<Box<[Value]>, Span> = Default::default();
-            out.reserve(m.len());
-            for (k, mut v) in m {
-                order(&mut v);
-                out.insert(k, (cands.len() as u32, v.len() as u32));
-                cands.extend(v);
-            }
-            KeyMap::Vals(out)
+            KeyMap::Vals(m)
         };
+        let mut starts = Vec::with_capacity(sizes.len());
+        let mut at = 0u32;
+        for &s in &sizes {
+            starts.push(at);
+            at += s;
+        }
+        let mut cands = vec![0u32; at as usize];
+        let mut fill = starts.clone();
+        let mut place = |i: usize, group: &mut [u32]| {
+            let g = std::mem::replace(&mut group[i], u32::MAX);
+            if g != u32::MAX {
+                cands[fill[g as usize] as usize] = i as u32;
+                fill[g as usize] += 1;
+            }
+        };
+        if !merge {
+            for i in table.scan() {
+                place(i, &mut group);
+            }
+        }
+        // (A merge join's rows, and any row the chains don't have, in row order.)
+        for i in 0..rows.len() {
+            place(i, &mut group);
+        }
+        let span = |v: &mut Span| *v = (starts[v.0 as usize], sizes[v.0 as usize]);
+        match &mut map {
+            KeyMap::Int(m) => m.values_mut().for_each(span),
+            KeyMap::Vals(m) => m.values_mut().for_each(span),
+        }
         Built { rows, map, cands, table, cols: None }
     }
 

@@ -4711,7 +4711,9 @@ impl ScanNode {
             if self.nblocks.is_none() || !super::sizing::heap_unprunable(&p.table, ctx) {
                 return Ok(None);
             }
-            reordered = !super::sizing::heap_scan_splits(&p.table, p.sys, ctx);
+            // (Rows nothing reads in order come as stored: no page is pruned as the scan
+            // reaches it.)
+            reordered = !computed.any_order && !super::sizing::heap_scan_splits(&p.table, p.sys, ctx);
             // (Reordered only for the work above it: joins' probes and lookups, aggregation.)
             if reordered && stages.is_empty() && spec.is_none() {
                 return Ok(None);

@@ -2798,7 +2798,7 @@ impl ProjectNode {
             .collect();
         // (The sort's key among the computed values.)
         let topk = self.topk.and_then(|t| Some(super::TopK { col: (*places.get(t.col)?)?, ..t }));
-        if let Some(base) = self.input.compute_in_workers(super::Computed { extra: kernels, drop, raw, topk }, ctx)? {
+        if let Some(base) = self.input.compute_in_workers(super::Computed { extra: kernels, drop, raw, topk, any_order: false }, ctx)? {
             self.computed = Some((base, places));
         }
         Ok(())
@@ -5462,6 +5462,8 @@ struct Batching {
     otypes: Vec<crate::types::DataType>,
     oktypes: Vec<crate::types::DataType>,
     cat: Arc<crate::catalog::Catalog>,
+    /// The table's rows' keys, while it has one batch (`build_hashed`).
+    prekeys: Option<Vec<Vec<Value>>>,
 }
 
 /// A Merge Join of a Gather's part that PostgreSQL's plan has as a Parallel Hash Join
@@ -5873,12 +5875,8 @@ impl HashJoinNode {
         let useskew = skew_column(&self.lkeys).is_some_and(|c| crate::sql::explain::pwagg::origin(&self.left_plan, c).is_some());
         // (A Parallel Hash's table is shared by the participants: their combined hash_mem
         // when it holds the table whole.)
-        let shared = ctx
-            .parallel_hashes
-            .borrow()
-            .iter()
-            .find(|p| p.inner == Arc::as_ptr(&self.right_plan) as usize)
-            .and_then(|p| super::hashjoin::HashTable::new_shared(p, ctx));
+        let ph = ctx.parallel_hashes.borrow().iter().find(|p| p.inner == Arc::as_ptr(&self.right_plan) as usize).copied();
+        let shared = ph.as_ref().and_then(|p| super::hashjoin::HashTable::new_shared(p, ctx));
         let mut hj = shared.unwrap_or_else(|| super::hashjoin::HashTable::new(est.0, est.1, useskew, ctx));
         if useskew && hj.wants_skew() {
             hj.build_skew(&skew_mcvs(&self.left_plan, &self.lkeys, ctx));
@@ -5886,9 +5884,26 @@ impl HashJoinNode {
         let mut st = ctx.instr.borrow().is_some().then(|| InnerStats::new(&self.right_plan));
         let cat = ctx.catalog();
         let need = narrow.as_ref().map_or_else(|| tcols.clone(), |(_, n, _)| Some(n.clone()));
+        // (The keys of the rows in the table, in its rows' order while it has one batch: the
+        // batch's table is made of them, not of the keys evaluated again.)
+        let mut prekeys = Some(Vec::new());
         ctx.statement(|| {
             let mut node = open_need(&self.right_plan, need, ctx)?;
-            while let Some(r) = node.next(ctx)? {
+            // A Parallel Hash's inner rows: PostgreSQL's participants scan and insert them
+            // in no set order, so the scan's workers read them as stored, their keys computed
+            // there (after each row's columns).
+            let base = match (&ph, &*self.right_plan) {
+                (Some(_), Plan::Scan(_)) if st.is_none() => match self.rkeys.iter().map(super::kernel::compile).collect::<Option<Vec<_>>>() {
+                    Some(extra) => node.compute_in_workers(super::Computed { extra, any_order: true, ..Default::default() }, ctx)?,
+                    None => None,
+                },
+                _ => None,
+            };
+            while let Some(mut r) = node.next(ctx)? {
+                let computed = match base {
+                    Some(b) if r.len() > b => Some(r.split_off(b)),
+                    _ => None,
+                };
                 let r = match &narrow {
                     Some((n, ..)) => n.shrink(r),
                     None => r,
@@ -5896,16 +5911,27 @@ impl HashJoinNode {
                 if let Some(st) = &mut st {
                     st.add(&r, &self.rkeys, ctx)?;
                 }
-                let k = eval_all(&rkeys, &r, ctx)?;
+                let k = match computed {
+                    Some(k) => k,
+                    None => eval_all(&rkeys, &r, ctx)?,
+                };
                 if !keep_nulls && k.iter().any(Value::is_null) {
                     continue;
                 }
                 let h = super::pghash::combine(&k, &ktypes, Some(&cat));
                 let tlen = super::workmem::minimal_tuple_len_order(&r, &ttypes, &order, ctx);
                 hj.build_insert(r, h, tlen, ctx)?;
+                if hj.batched() {
+                    prekeys = None;
+                } else if let Some(p) = &mut prekeys {
+                    p.push(k);
+                }
             }
             Ok(())
         })?;
+        if hj.batched() {
+            prekeys = None;
+        }
         if let Some(st) = st {
             st.record(&self.right_plan, ctx);
         }
@@ -5928,6 +5954,7 @@ impl HashJoinNode {
             otypes: Vec::new(),
             oktypes: key_types(&self.lkeys),
             cat,
+            prekeys,
         }));
         self.load_batch(ctx)
     }
@@ -5937,10 +5964,21 @@ impl HashJoinNode {
         let b = self.batching.as_mut().unwrap();
         let (rows, table) = b.hj.take_batch();
         let mut by_key = Vec::with_capacity(rows.len());
-        for (i, r) in rows.iter().enumerate() {
-            let k = eval_all(&b.rkeys, r, ctx)?;
-            if !k.iter().any(Value::is_null) {
-                by_key.push((normed(k, &self.rnorm), i));
+        match b.prekeys.take().filter(|p| p.len() == rows.len()) {
+            Some(pre) => {
+                for (i, k) in pre.into_iter().enumerate() {
+                    if !k.iter().any(Value::is_null) {
+                        by_key.push((normed(k, &self.rnorm), i));
+                    }
+                }
+            }
+            None => {
+                for (i, r) in rows.iter().enumerate() {
+                    let k = eval_all(&b.rkeys, r, ctx)?;
+                    if !k.iter().any(Value::is_null) {
+                        by_key.push((normed(k, &self.rnorm), i));
+                    }
+                }
             }
         }
         let mut built = super::pipe::Built::new(rows, by_key, table, false);

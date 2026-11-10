@@ -67,6 +67,10 @@ pub struct Computed {
     pub raw: Vec<usize>,
     /// A bounded sort's wish over value `topk.col` (`Node::topk_below`).
     pub topk: Option<TopK>,
+    /// Nothing reads the rows' order (a Parallel Hash's inner side, whose participants
+    /// insert in no set order): a modelled heap's rows may come as stored, not put in heap
+    /// order first.
+    pub any_order: bool,
 }
 
 /// What a bounded sort wants of the rows below it (`Node::topk_below`): its bound, and its
