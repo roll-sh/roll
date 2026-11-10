@@ -2293,7 +2293,7 @@ impl Planner<'_, '_> {
                 selq.push(p.clone());
             }
         }
-        selq.extend(qexprs.iter().cloned());
+        selq.extend(qexprs);
         let mut num_sa_scans = num_sa_scans;
         if num_sa_scans < 1.0 {
             num_sa_scans = 1.0;
@@ -3393,16 +3393,18 @@ impl Planner<'_, '_> {
             let fwd_keys = index_pathkeys(rel, ii, false, want);
             let only = self.g.indexonlyscan && self.index_only(rel, ii);
             let mut made = Vec::new();
+            // (The clauses go to the last path made of them.)
+            let back_keys = index_pathkeys(rel, ii, true, want);
+            let back_cs = (!back_keys.is_empty()).then(|| cs.clone());
             // match_pathkeys_to_index: ordering operators for (a prefix of) the ORDER BY.
             let (ob_keys, orderbys) = order_by_ops(ii, want);
             if !orderbys.is_empty() {
-                made.push(self.index_path_ob(rel, ix, cs.clone(), ob_keys, orderbys, false, only));
+                made.push(self.index_path_ob(rel, ix, cs, ob_keys, orderbys, false, only));
             } else if !cs.is_empty() || !fwd_keys.is_empty() || pred_ok || only {
-                made.push(self.index_path(rel, ix, cs.clone(), fwd_keys, false, only));
+                made.push(self.index_path(rel, ix, cs, fwd_keys, false, only));
             }
-            let back_keys = index_pathkeys(rel, ii, true, want);
-            if !back_keys.is_empty() {
-                made.push(self.index_path(rel, ix, cs.clone(), back_keys, true, only));
+            if let Some(cs) = back_cs {
+                made.push(self.index_path(rel, ix, cs, back_keys, true, only));
             }
             let gettuple = ii.am.gettuple();
             for p in made {
@@ -6871,7 +6873,9 @@ impl ScanChoice {
     /// The caller checks what the choice doesn't: the catalog and role (the plan's
     /// environment), the relation sizes planning read (`literals::SizeRead`, as kept plans
     /// are checked), and that the new plan still takes no Gather (`planned_total` of it).
-    pub fn rechoose(&self, kept: &ScanPlan, placed: &ScanPlan, ctx: &ExecCtx) -> Option<Box<ScanPlan>> {
+    ///
+    /// `placed`'s own access path isn't read (`optimize::add_filter_unindexed` places it).
+    pub fn rechoose(&self, kept: &ScanPlan, placed: Box<ScanPlan>, ctx: &ExecCtx) -> Option<Box<ScanPlan>> {
         if !placed.phv_quals.is_empty() || placed.table.oid != self.rel.table.oid || FINAL_FRACTION.get().is_some() {
             return None;
         }
@@ -6880,13 +6884,16 @@ impl ScanChoice {
             return None;
         }
         let mut rel = self.rel.shallow();
-        rel.quals = scan_quals(placed);
-        rel.written = Arc::new(placed.written.clone());
+        rel.quals = scan_quals(&placed);
+        let ScanPlan { filter, written, .. } = *placed;
+        let written = Arc::new(written);
+        rel.written = written.clone();
         p.estimate_quals(&mut rel);
-        let mut s = Box::new(kept.clone());
-        s.filter = placed.filter.clone();
-        s.written = placed.written.clone();
-        if p.scan_path_applied(&rel, &mut s, &self.want, self.width) != self.sorted {
+        let mut s = Box::new(unchosen(kept, filter));
+        let sorted = p.scan_path_applied(&rel, &mut s, &self.want, self.width);
+        drop(rel);
+        s.written = Arc::try_unwrap(written).unwrap_or_else(|w| (*w).clone());
+        if sorted != self.sorted {
             return None;
         }
         let same = std::mem::discriminant(&s.access) == std::mem::discriminant(&kept.access)
@@ -6898,6 +6905,72 @@ impl ScanChoice {
             *ordered = *was;
         }
         Some(s)
+    }
+}
+
+/// `kept` with the restriction clauses `filter` and its access path to choose again
+/// (`ScanChoice::rechoose`): what `scan_path_applied` sets (the access, index and cost) and
+/// the clauses aren't copied from it. (`written` is set after.)
+fn unchosen(kept: &ScanPlan, filter: Option<Expr>) -> ScanPlan {
+    let ScanPlan {
+        table,
+        index: _,
+        filter: _,
+        with_key,
+        reverse,
+        mark,
+        lock_order,
+        limit,
+        sys,
+        alias,
+        current_of,
+        sample,
+        excl,
+        part,
+        part_excl,
+        access: _,
+        col_aliases,
+        written: _,
+        phv_quals,
+        phv_proj,
+        check_as,
+        rti,
+        useful,
+        params,
+        reltarget,
+        fdw,
+        rtindex,
+        est,
+    } = kept;
+    ScanPlan {
+        table: table.clone(),
+        index: None,
+        filter,
+        with_key: *with_key,
+        reverse: *reverse,
+        mark: *mark,
+        lock_order: *lock_order,
+        limit: *limit,
+        sys: *sys,
+        alias: alias.clone(),
+        current_of: current_of.clone(),
+        sample: sample.clone(),
+        excl: excl.clone(),
+        part: part.clone(),
+        part_excl: part_excl.clone(),
+        access: Access::Seq,
+        col_aliases: col_aliases.clone(),
+        written: Vec::new(),
+        phv_quals: phv_quals.clone(),
+        phv_proj: *phv_proj,
+        check_as: *check_as,
+        rti: *rti,
+        useful: useful.clone(),
+        params: params.clone(),
+        reltarget: reltarget.clone(),
+        fdw: fdw.clone(),
+        rtindex: *rtindex,
+        est: *est,
     }
 }
 
@@ -6931,7 +7004,7 @@ pub fn check_rechoose(plan: &Plan, choice: Option<Arc<ScanChoice>>, ctx: &ExecCt
         p = input;
     }
     let Plan::Scan(s) = p else { return };
-    let Some(again) = choice.rechoose(s, s, ctx) else {
+    let Some(again) = choice.rechoose(s, s.clone(), ctx) else {
         assert!(!settled(), "no scan chosen again for its own values: {s:?}");
         return;
     };

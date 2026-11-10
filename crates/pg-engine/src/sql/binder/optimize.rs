@@ -396,6 +396,16 @@ pub fn written_equalities_with(parts: &[Expr], outer: bool) -> Vec<Expr> {
 }
 
 pub fn add_filter(cat: &Catalog, plan: Plan, pred: Expr) -> Plan {
+    add_filter_as(cat, plan, pred, true)
+}
+
+/// `add_filter`, a scan given no index of the binder's choosing (`choose_index`, for a scan
+/// whose path planning chooses again): the rest is as `add_filter` places it.
+pub fn add_filter_unindexed(cat: &Catalog, plan: Plan, pred: Expr) -> Plan {
+    add_filter_as(cat, plan, pred, false)
+}
+
+fn add_filter_as(cat: &Catalog, plan: Plan, pred: Expr, index: bool) -> Plan {
     let mut parts = Vec::new();
     conjuncts(strip_free_domains(pred), &mut parts);
     if parts.is_empty() {
@@ -536,7 +546,9 @@ pub fn add_filter(cat: &Catalog, plan: Plan, pred: Expr) -> Plan {
                 crate::sql::plan::Access::Index { ordered: true, .. }
             ) {
                 s.access = crate::sql::plan::Access::Unplanned;
-                choose_index(cat, &mut s);
+                if index {
+                    choose_index(cat, &mut s);
+                }
             }
             Plan::Scan(s)
         }

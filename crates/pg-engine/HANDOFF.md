@@ -9314,6 +9314,53 @@ owns the full suite.
 No performance comparison was run for this batch. The lane's worktree and cache remain
 available to the coordinator.
 
+## Planner round 13 (agent 196)
+
+BENCH.md "Planner, round 13" has the measurements: the prepared 100-row range read takes
+3.6% fewer user instructions per operation (every one of five alternating pairs 3.4-4.2%),
+4.8% less server CPU and 3.6% more operations per second. What changed, all on the path
+where a custom plan is the kept one with its scan chosen again (`Analyzed::rechosen`):
+
+- `ScanChoice::rechoose` takes the placed scan by value. Its scan is the kept one without
+  what `scan_path_applied` sets in every branch (access, index, cost) and the clauses
+  (`unchosen`, an exhaustive destructuring: a new `ScanPlan` field must be placed there);
+  the placed filter and written clauses move in instead of being copied, the written list
+  shared with the relation while the path is chosen.
+- The WHERE is placed by `optimize::add_filter_unindexed`, `add_filter` without
+  `choose_index`: that only sets `ScanPlan::index`, which `rechoose` never reads (the
+  access path is chosen again from the kept relation). `values_in`, fresh planning, still
+  places it with the index pick.
+- `rechosen` keeps the cost `planned_total` found for the plan, and the Gathers
+  (`of_explain` of none) `Session::plan_cost` would set, in the plan's cells; `plan_cost`
+  of a plan whose cost is known no longer starts a statement for it (release builds; debug
+  builds still go through it and check the cost against EXPLAIN's).
+- In `Planner::paths`, an index's matched clauses go to the last path made of them (a
+  backward path's copy only when there is one), and `generic` moves the index quals into
+  its selectivity list.
+
+Why it is exact: nothing the choice computes changed, only copies: the same clauses,
+estimates and path costing run, and every field of the scan is the same value as before (the
+fields not copied are overwritten on every branch). Debug builds compare every rechosen
+plan and its cost with fresh planning (`values_custom`) and choose every lone scan again for
+its own values (`check_rechoose`).
+
+Verification on `aef3a18b2` with the change: release build; release lib tests (211 passed),
+kept_plans (9), wire (69) and golden (all files); debug golden (all files, with the
+reuse cross-check) and kept_plans; the planner regress subset (select, join, subselect,
+aggregates, create_index, partition_prune, portals, limit; debug build, a private PG 18.6
+reference): 3919/3921 units, no newly differing unit. Release Clippy with `-D warnings`
+fails as on `aef3a18b2`, with the same lints (math.rs, json.rs, text.rs and others), none in
+this change. The measured dist binary predates a debug-only type fix in `check_rechoose`.
+
+Not done, for the next round (the rest of `rechoose` is spread thin; expressions copied and
+freed are about a third of it): `bitmap_or_paths` copies the relation's clauses before
+looking for an OR (an early return when there is none is exact); `btcost` copies the bound
+clauses into its selectivity list; the bitmap path clones the index path's clauses even
+when it loses; an index none of whose key columns a clause reads still runs
+`match_quals`; `lit_env` is read twice per Bind (`param_custom`, `values_custom`), 0.5%;
+`Planner::endpoint`'s reverse scan expands a whole SST block (0.4%); Describe at Bind
+(`describe_here`, 1.1%) is per-Bind work outside planning.
+
 ## Storage engine, round 1 (agent 169)
 
 Agent 169 owns the store's internals (block format and cache, point lookups inside the store,

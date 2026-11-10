@@ -285,6 +285,42 @@ The current checked measurements compare release engine builds and PostgreSQL 18
 the wire. Older rounds below are historical records, with their original methods and
 limits. Their results have not been reverified on the current source.
 
+## Planner, round 13 (2026-11-10, agent 196)
+
+HANDOFF.md, "Planner round 13", has what changed: a reused custom plan's scan is chosen again
+without copying what the choice replaces, its WHERE is placed without the binder's index pick,
+and its cost is kept for the plan cache's average. Agent 193's harness
+(`~/.cache/a180/evaluations/20261110-range-perf-first-r1`, copied to `~/.cache/a196/h` with
+user instructions per operation from `perf stat -e instructions:u` over 9 s of each run and a
+check that no other tenant used more than 0.3 cores of the server's CPUs): both engines dist
+builds in containers on CPUs 24-27, the client on 28-31, 100,000 accounts, 8 clients, 2 s
+warmup, 10 s measured, every row value-checked. **base** is `aef3a18b2`; five alternating
+pairs of the prepared 100-row range read
+(`SELECT id, balance FROM accounts WHERE id BETWEEN $1 AND $1 + 99 ORDER BY id`):
+
+| pair | base ops/s | new ops/s | base us CPU / op | new us CPU / op | base instr / op | new instr / op |
+|---|---:|---:|---:|---:|---:|---:|
+| 1 | 28,602 | 30,111 | 128.6 | 121.7 | 607k | 585k (-3.6%) |
+| 2 | 28,747 | 28,746 | 127.9 | 124.4 | 607k | 583k (-4.0%) |
+| 3 | 28,935 | 29,780 | 127.7 | 121.5 | 609k | 587k (-3.5%) |
+| 4 | 29,077 | 30,580 | 126.9 | 121.3 | 607k | 582k (-4.2%) |
+| 5 | 27,740 | 28,898 | 128.6 | 123.4 | 606k | 586k (-3.4%) |
+
+Medians: +3.6% ops/s, -4.8% server CPU per operation, -3.6% user instructions per operation;
+memory unchanged (48-55 MiB after load either side). One run each of the point read
+(`point_select`: 95,586 -> 100,214 ops/s, 66.2k -> 66.0k instructions / op) and the prepared
+single-row UPDATE (`update_indexed`: three runs, -0.8% to +8.0% ops/s and -1.4% to +1.1%
+instructions / op, which background compaction moves by more than that) show no regression.
+
+**Where the range read's planning goes** (LBR call stacks of base, 144k samples): `planned_as`
+20.1% of server CPU, the custom plan made from the kept one 17.0%: `ScanChoice::rechoose`
+11.1% (choosing the path, `scan_path_applied`, 6.6%: every path costed 5.3%, of which the
+index path 1.7% and matching clauses to indexes 1.0%; the rows' selectivity 2.0%, of which
+reading the column's actual end through the index 0.6%; copying the kept scan 0.7%), placing
+the WHERE again 3.7% (the binder's own index pick 0.9%), costing the plan for the plan cache
+1.2%. Expressions copied, freed and allocated are about 5.5% of it. After: `planned_as` 18.0%,
+`rechoose` 10.4%, placing 3.2%, the plan cache's costing 0.1%.
+
 ## OLTP, round 7 (2026-11-08, agent 178)
 
 HANDOFF.md, "OLTP round 7", has what changed. Both servers in containers (`run.sh

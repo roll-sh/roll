@@ -95,7 +95,7 @@ fn with_base(p: &Plan, s: Box<ScanPlan>) -> Option<Plan> {
 }
 
 /// `p`, a scan under projections, with the scan `f` makes of its own.
-fn scan_swapped(p: &Plan, f: &dyn Fn(&ScanPlan) -> Option<Box<ScanPlan>>) -> Option<Plan> {
+fn scan_swapped(p: &Plan, f: impl FnOnce(&ScanPlan) -> Option<Box<ScanPlan>>) -> Option<Plan> {
     match p {
         Plan::Scan(s) => Some(Plan::Scan(f(s)?)),
         Plan::Project { input, exprs } => Some(Plan::Project { input: Arc::new(scan_swapped(input, f)?), exprs: exprs.clone() }),
@@ -180,14 +180,20 @@ impl Analyzed {
         Ok(site)
     }
 
-    /// The scan with the WHERE placed again, the values in.
-    fn placed(&self, site: &WhereSite, sub: &Subst<'_, '_>) -> Put<Box<ScanPlan>> {
+    /// The scan with the WHERE placed again, the values in. `index`: with the binder's own
+    /// index choice (`ScanPlan::index`), which only planning it reads.
+    fn placed(&self, site: &WhereSite, sub: &Subst<'_, '_>, index: bool) -> Put<Box<ScanPlan>> {
         let pred = sub.expr(&site.pred, true)?;
         let mut scan = site.scan.clone();
         if !site.alone {
             sub.plan(&mut scan)?;
         }
-        match super::optimize::add_filter(&self.cat, scan, pred) {
+        let placed = if index {
+            super::optimize::add_filter(&self.cat, scan, pred)
+        } else {
+            super::optimize::add_filter_unindexed(&self.cat, scan, pred)
+        };
+        match placed {
             Plan::Scan(placed) => Ok(placed),
             _ => Err(Bail::Rebind),
         }
@@ -204,26 +210,29 @@ impl Analyzed {
     /// planning the analysis with them gives when the same path wins. None: plan it.
     pub fn rechosen(&self, kept: &BoundQuery, choice: &ScanChoice, vals: &[Value], ctx: &ExecCtx) -> Option<BoundQuery> {
         let site = self.site_for(vals).ok().filter(|s| s.alone)?;
-        let placed = self.placed(site, &Subst { vals, ctx }).ok()?;
-        let plan = Arc::new(scan_swapped(&kept.plan, &|old| choice.rechoose(old, &placed, ctx))?);
-        // (Still costed by its scan's path alone, no Gather over it.)
-        crate::sql::paths::planned_total(&plan, ctx, true)?;
+        // (The scan's path is chosen again from the kept relation: the binder's index choice
+        // in the placed scan would go unread.)
+        let placed = self.placed(site, &Subst { vals, ctx }, false).ok()?;
+        let plan = Arc::new(scan_swapped(&kept.plan, |old| choice.rechoose(old, placed, ctx))?);
+        // (Still costed by its scan's path alone, no Gather over it: the cost and the Gathers
+        // the custom plan's costing (`Session::plan_cost`) would find for it.)
+        let total = crate::sql::paths::planned_total(&plan, ctx, true)?;
         Some(BoundQuery {
-            plan,
             cols: kept.cols.clone(),
             params: kept.params.clone(),
             perms: kept.perms.clone(),
             hidden_rtes: kept.hidden_rtes,
             param_domains: Vec::new(),
-            gathers: Default::default(),
-            cost: Default::default(),
+            gathers: (plan.clone(), crate::exec::parallel_part::of_explain(&plan, Vec::new()).into()).into(),
+            cost: (plan.clone(), total).into(),
+            plan,
         })
     }
 
     fn values_in(&self, vals: &[Value], ctx: &ExecCtx) -> Put<Analyzed> {
         let site = self.site_for(vals)?;
         let sub = Subst { vals, ctx };
-        let placed = self.placed(site, &sub)?;
+        let placed = self.placed(site, &sub, true)?;
         // (With no `$n` outside the WHERE, the nodes over the scan are the analysis's.)
         let plan = if site.alone {
             with_base(&self.plan, placed).ok_or(Bail::Never)?

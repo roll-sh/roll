@@ -1954,6 +1954,14 @@ impl Session {
 
     /// cached_plan_cost (`plan_cost_estimate`).
     fn plan_cost(&mut self, bq: &BoundQuery, params: &[Value], planning: bool) -> f64 {
+        // (A cost already found for the plan needs no statement of its own; debug builds
+        // check it against EXPLAIN's below.)
+        #[cfg(not(debug_assertions))]
+        if let Some((p, t)) = bq.cost.get()
+            && Arc::ptr_eq(p, &bq.plan)
+        {
+            return if planning { *t + planning_charge(&bq.plan, bq.hidden_rtes) } else { *t };
+        }
         self.with_ctx(params, |ctx| {
             // (One EXPLAIN tree gives the cost and the Gathers the plan runs with: a custom
             // plan, made for one execution, needs both.)
