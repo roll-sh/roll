@@ -1546,7 +1546,8 @@ fn statement_done_activity(act: &Act, s: &Session) {
     set_activity(act, |a| {
         let state = activity_state(s);
         if a.state != state {
-            a.state = state.into();
+            a.state.clear();
+            a.state.push_str(state);
             a.state_change = Some(now);
         }
         if idle {
@@ -1576,7 +1577,8 @@ fn start_activity(act: &Act, s: &Session, state: &str, sql: Option<&str>) {
     });
     set_activity(act, |a| {
         if a.state != state {
-            a.state = state.into();
+            a.state.clear();
+            a.state.push_str(state);
             a.state_change = Some(now);
         }
         // (Copied only when it changed: a prepared statement's Bind and Execute name the same.)
