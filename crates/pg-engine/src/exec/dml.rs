@@ -581,7 +581,7 @@ pub fn insert_routed_oc(
     let l = &routing.leaves[leaf];
     // ExecInitPartitionInfo opens the leaf a row goes to with RowExclusiveLock (an
     // ATTACH PARTITION changing a default partition holds it off).
-    let before = ctx.catalog().version;
+    let before = ctx.catalog_version();
     {
         let name = l.rules.table.name.clone();
         ctx.txn.borrow_mut().lock_relation(
@@ -591,7 +591,7 @@ pub fn insert_routed_oc(
             &|| name.clone(),
         )?;
     }
-    if ctx.catalog().version != before {
+    if ctx.catalog_version() != before {
         recheck_default_partitions(routing, &row, ctx)?;
     }
     // ExecInitPartitionInfo's CheckValidResultRel: ON CONFLICT DO UPDATE updates the leaf.

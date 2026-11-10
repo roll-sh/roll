@@ -926,7 +926,7 @@ impl<'a> ExecCtx<'a> {
             .names
             .as_ref()
             .and_then(|n| n.catalog_version())
-            .is_some_and(|v| v < self.txn.borrow().catalog().version)
+            .is_some_and(|v| v < self.txn.borrow().catalog_version())
     }
 
     /// A child context (as `child`, with this one's parameters and snapshot) whose names and
@@ -1074,6 +1074,14 @@ impl<'a> ExecCtx<'a> {
         self.catalog_snapshot
             .clone()
             .unwrap_or_else(|| self.txn.borrow().catalog())
+    }
+
+    /// `catalog().version`, without a reference to the catalog (`Txn::with_catalog`).
+    pub fn catalog_version(&self) -> u64 {
+        match &self.catalog_snapshot {
+            Some(c) => c.version,
+            None => self.txn.borrow().catalog_version(),
+        }
     }
 
     /// current_user's oid.

@@ -1672,16 +1672,14 @@ impl Session {
         cursor: bool,
     ) -> Result<Arc<BoundQuery>> {
         self.ensure_txn();
-        let version = self
+        let (version, role) = self
             .txn
             .as_ref()
-            .map(|t| t.borrow().catalog().version)
-            .unwrap_or(0);
+            .unwrap()
+            .borrow()
+            .with_catalog(|cat| (cat.version, self.state.current_role(cat)));
         let path = self.state.shared_search_path();
-        let who = {
-            let cat = self.txn.as_ref().unwrap().borrow().catalog();
-            (self.state.current_role(&cat), self.state.settings.borrow().hot().row_security)
-        };
+        let who = (role, self.state.settings.borrow().hot().row_security);
         if !cursor
             && let Some((v, sp, w, b)) = &*p.bound.lock()
             && *v == version
@@ -2037,7 +2035,7 @@ impl Session {
         // Its relations are locked before it runs; a wait for a lock may end with another
         // transaction's DDL committed, which the statement then sees (Postgres analyzes it
         // only once it holds them): it is bound again over the catalog it finds.
-        let version = |s: &Self| s.txn.as_ref().map_or(0, |t| t.borrow().catalog().version);
+        let version = |s: &Self| s.txn.as_ref().map_or(0, |t| t.borrow().catalog_version());
         for _ in 0..8 {
             let before = version(self);
             self.with_ctx(params, |ctx| crate::sql::binder::perms::lock_named_relations(&bq.perms, ctx))?;

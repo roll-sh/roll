@@ -548,13 +548,14 @@ fn lock_some(perms: &Perms, ctx: &ExecCtx, n: usize) -> Result<()> {
     let cat = ctx.catalog();
     for (i, (oid, mode)) in perms.locks[..n.min(perms.locks.len())].iter().enumerate() {
         let name = || rel_word(&cat, *oid).1;
-        let before = ctx.catalog().version;
+        let child = i >= perms.named_locks;
+        let before = if child { ctx.catalog_version() } else { 0 };
         ctx.txn
             .borrow_mut()
             .lock_relation(*oid, *mode, WaitPolicy::Block, &name)?;
         // An inheritance child the plan found, locked after a wait (find_all_inheritors):
         // looked at again as other transactions left it.
-        if i >= perms.named_locks && ctx.catalog().version != before {
+        if child && ctx.catalog_version() != before {
             recheck_child(&cat, *oid, perms, ctx)?;
         }
     }

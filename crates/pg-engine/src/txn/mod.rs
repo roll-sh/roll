@@ -1374,6 +1374,21 @@ impl Txn {
         }
     }
 
+    /// `f` of `catalog()`, without taking a reference to it (a count every session's
+    /// statements share) unless a detach-pending view has to be made.
+    pub fn with_catalog<R>(&self, f: impl FnOnce(&Arc<Catalog>) -> R) -> R {
+        match (&self.catalog, &self.read_catalog) {
+            (Some(c), _) => f(c),
+            (None, Some(c)) if !self.stmt_snapshot || !c.has_detach_pending() => f(c),
+            _ => f(&self.catalog()),
+        }
+    }
+
+    /// `catalog().version`.
+    pub fn catalog_version(&self) -> u64 {
+        self.with_catalog(|c| c.version)
+    }
+
     /// The catalog as a fresh snapshot sees it: what a REPEATABLE READ foreign key check
     /// against a partitioned table plans with (ri_PerformCheck's latest snapshot, under
     /// which a partition whose detach is pending is left out).
