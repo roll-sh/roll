@@ -62,6 +62,11 @@ pub struct Xids {
     /// `horizon` as of the state's last change (`publish`): readers (pruning, the size
     /// models' per-row upkeep) load it instead of taking the state's mutex.
     horizon_now: std::sync::atomic::AtomicU64,
+    /// How many times `xmin_now`'s inputs changed (a transaction id ended, or ran again at
+    /// recovery), counted under the state's mutex: Postgres's xactCompletionCount. A
+    /// snapshot whose count is still this one would get its xmin again
+    /// (GetSnapshotDataReuse).
+    completions: std::sync::atomic::AtomicU64,
 }
 
 /// A snapshot's xmin, registered (`Xids::register_snapshot`) until this is dropped.
@@ -69,11 +74,19 @@ pub struct SnapshotXmin {
     xids: std::sync::Arc<Xids>,
     xmin: u64,
     owner: Option<u64>,
+    /// `Xids::completions` when the xmin was found.
+    seen: u64,
 }
 
 impl SnapshotXmin {
     pub fn xmin(&self) -> u64 {
         self.xmin
+    }
+
+    /// A snapshot taken now would have another xmin: a transaction id ended since this one
+    /// was found.
+    pub fn stale(&self) -> bool {
+        self.xids.completions.load(std::sync::atomic::Ordering::Acquire) != self.seen
     }
 }
 
@@ -138,6 +151,7 @@ impl Xids {
                 NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             },
             horizon_now: std::sync::atomic::AtomicU64::new(next),
+            completions: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -210,6 +224,7 @@ impl Xids {
             }
         }
         s.latest_completed = s.latest_completed.max(xid);
+        self.completions.fetch_add(1, std::sync::atomic::Ordering::Release);
         self.publish(&s);
     }
 
@@ -225,6 +240,7 @@ impl Xids {
             }
         }
         s.subs.extend(subs.iter().copied());
+        self.completions.fetch_add(1, std::sync::atomic::Ordering::Release);
         self.publish(&s);
     }
 
@@ -284,7 +300,8 @@ impl Xids {
             s.owners.entry(o).or_default().push(xmin);
         }
         self.publish(&s);
-        SnapshotXmin { xids: self.clone(), xmin, owner }
+        let seen = self.completions.load(std::sync::atomic::Ordering::Relaxed);
+        SnapshotXmin { xids: self.clone(), xmin, owner, seen }
     }
 
     /// `register_snapshot_of(owner)` replacing `old` (the next statement's snapshot in place
@@ -300,8 +317,13 @@ impl Xids {
                 return new;
             }
         };
+        // (Nothing ended since it was found: the same xmin, without the state's mutex.)
+        if !o.stale() {
+            return o;
+        }
         let mut s = self.state.lock();
         let xmin = Self::xmin_now(&s);
+        o.seen = self.completions.load(std::sync::atomic::Ordering::Relaxed);
         if xmin != o.xmin {
             *s.snapshots.entry(xmin).or_default() += 1;
             if let Some(n) = s.snapshots.get_mut(&o.xmin) {

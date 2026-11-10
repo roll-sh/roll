@@ -85,6 +85,9 @@ pub trait Cluster: Send + Sync {
     }
     /// Backend `pid` waits for `event` (wait_event_type, wait_event) now, or no longer.
     fn set_wait(&self, _pid: i32, _event: Option<(&'static str, &'static str)>) {}
+    /// Backend `pid`'s statement registered a snapshot with xmin `xmin` in the middle of
+    /// its run (pg_stat_activity's backend_xmin, MyProc->xmin).
+    fn set_backend_xmin(&self, _pid: i32, _xmin: u64) {}
     /// Database `oid`'s cumulative statistics entry (pg_stat_database), if it has one.
     fn db_stats(&self, _oid: u32) -> Option<crate::exec::pgstat::DbEntry> {
         None

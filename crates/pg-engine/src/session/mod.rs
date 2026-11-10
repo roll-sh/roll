@@ -370,6 +370,8 @@ pub struct Session {
     /// pg_stat_statements: the top-level statement running, and the parallel workers its
     /// plan used.
     pgss_tracked: Option<pgss::Tracked>,
+    /// The next `run_query` runs a SQL EXECUTE's plan (`execute_stmt`).
+    sql_execute: bool,
     /// Time the tracked statement spent that pg_stat_statements doesn't count
     /// (`finish_txn_untimed`).
     pgss_untimed: std::time::Duration,
@@ -511,6 +513,7 @@ impl Session {
             row_sink: None,
             sent: None,
             pgss_tracked: None,
+            sql_execute: false,
             pgss_untimed: Default::default(),
             pgss_workers: 0,
             pgss_copy: None,
@@ -2089,6 +2092,14 @@ impl Session {
         // the loop below.
         let version = |s: &Self| s.txn.as_ref().map_or(0, |t| t.borrow().catalog_version());
         let needs_snapshot = !self.state.no_snapshot.get();
+        // SQL EXECUTE runs its plan under the snapshot taken before the plan's locks
+        // (ExecuteQuery's PortalStart with the active snapshot); a query's own Bind or
+        // simple query takes a new one once it holds them (PortalStart's
+        // GetTransactionSnapshot).
+        let keep_snapshot = std::mem::take(&mut self.sql_execute);
+        // pg_stat_statements' execution time starts once the locks are held (the executor's).
+        let timed = self.pgss_tracked.is_some();
+        let mut locked_at = None;
         let given = params;
         let mut fused = true;
         let (r, streams, sink, suspended, made, sent, parallel, workers, ae, ae_plan, ran, keyed) = loop {
@@ -2101,6 +2112,9 @@ impl Session {
                     }
                     bq = self.planned(p, own(p)?, given)?.0;
                     lit_vals.clear();
+                }
+                if timed {
+                    locked_at = Some(std::time::Instant::now());
                 }
             }
             let params: &[Value] = if lit_vals.is_empty() { given } else { &lit_vals };
@@ -2137,11 +2151,19 @@ impl Session {
                     if ctx.txn.borrow().catalog_version() != before {
                         return Ok(None);
                     }
+                    if timed {
+                        locked_at = Some(std::time::Instant::now());
+                    }
                     // (What the context after the locks would begin again: READ COMMITTED's
-                    // snapshot, when a commit came while they were taken.)
+                    // snapshot, when a transaction ended while they were taken. Its xmin is
+                    // the backend's from then on.)
                     let mut t = ctx.txn.borrow_mut();
-                    if t.snapshot_behind() {
+                    if !keep_snapshot && (t.snapshot_behind() || t.xmin_stale()) {
+                        let was = t.snapshot_xmin();
                         t.begin_statement(needs_snapshot)?;
+                        if let Some(x) = t.snapshot_xmin().filter(|x| Some(*x) != was) {
+                            ctx.sess.cluster.set_backend_xmin(ctx.sess.pid, x);
+                        }
                     }
                 }
                 bq.check_perms(ctx)?;
@@ -2220,6 +2242,9 @@ impl Session {
             }
             break (r.map(|n| n.unwrap_or(0)), streams, sink, suspended, made, sent, parallel, workers, ae, ae_plan, ran, keyed);
         };
+        if let (Some(at), Some(t)) = (locked_at, self.pgss_tracked.as_mut()) {
+            t.executing_since(at);
+        }
         let params: &[Value] = if lit_vals.is_empty() { given } else { &lit_vals };
         if let (Some(a), Some((ms, plan))) = (&ae, ae_plan) {
             // (A prepared statement's source text: its PREPARE's, or its Parse message's.)

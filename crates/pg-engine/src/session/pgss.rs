@@ -115,6 +115,14 @@ fn jumble_cached(s: &super::SessionState, p: &Prepared, n: &NodeEnum) -> (i64, j
     (id, j)
 }
 
+impl Tracked {
+    /// The statement's executor starts (its locks held): its execution time counts from
+    /// `at` (pgss_ExecutorRun / Finish, not parse analysis, planning or the lock waits).
+    pub(super) fn executing_since(&mut self, at: std::time::Instant) {
+        self.started = at;
+    }
+}
+
 impl Session {
     /// The query string statement `p` came in, when this session's source is it.
     fn pgss_source(&self, p: &Prepared) -> Arc<str> {

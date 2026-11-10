@@ -660,7 +660,10 @@ impl Session {
                 .routine("RevalidateCachedQuery"));
             }
         }
-        self.execute_with(&p, &values, 0).map_err(strip)
+        self.sql_execute = true;
+        let r = self.execute_with(&p, &values, 0).map_err(strip);
+        self.sql_execute = false;
+        r
     }
 
     /// EXECUTE's prepared statement and its argument values.

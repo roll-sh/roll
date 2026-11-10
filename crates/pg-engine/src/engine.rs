@@ -2588,6 +2588,10 @@ impl Cluster for Engine {
         self.set_activity(pid, |a| a.wait = event);
     }
 
+    fn set_backend_xmin(&self, pid: i32, xmin: u64) {
+        self.set_activity(pid, |a| a.backend_xmin = Some(xmin));
+    }
+
     fn db_stats(&self, oid: u32) -> Option<crate::exec::pgstat::DbEntry> {
         let open = self.open.lock();
         if let Some(k) = open.kept.get(&oid) {

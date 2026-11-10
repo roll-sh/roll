@@ -1291,6 +1291,12 @@ impl Txn {
         !self.isolation.txn_snapshot() && self.db.store.visible_ts() != self.snapshot_ts
     }
 
+    /// READ COMMITTED: a transaction id ended after the statement's snapshot xmin was found
+    /// (an abort too), so `begin_statement` would register another.
+    pub fn xmin_stale(&self) -> bool {
+        !self.isolation.txn_snapshot() && self.stmt_snapshot && self.xmin.as_ref().is_some_and(|x| x.stale())
+    }
+
     /// READ COMMITTED: a fresh snapshot for the rest of the statement, as the queries SPI
     /// runs for a utility command take (RI_PartitionRemove_Check after waiting for its
     /// lock on the referencing table sees what the transaction it waited for committed).
