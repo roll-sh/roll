@@ -5095,7 +5095,17 @@ impl Node for ScanNode {
             && s.current_of.is_none()
             && s.sample.is_none()
             && matches!(s.access, Access::Index { only: false, .. })
-            && s.index.as_ref().is_some_and(|(ix, b)| matches!(ix.method.as_str(), "btree" | "hash") && b.order.is_empty())
+            && s.index.as_ref().is_some_and(|(ix, b)| {
+                // (One key's entries, as a point read or write has them: a range's scan opened
+                // afresh measured cheaper than one restarted, BENCH.md "Point reads, round 1".)
+                matches!(ix.method.as_str(), "btree" | "hash")
+                    && b.order.is_empty()
+                    && b.eq.len() == ix.columns.len()
+                    && b.any.is_none()
+                    && b.skip.is_none()
+                    && b.lower.is_none()
+                    && b.upper.is_none()
+            })
             && self.keys.is_none()
             && self.am.is_none()
             && !ctx.instrumented()
