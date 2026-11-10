@@ -107,8 +107,8 @@ fn open_node(plan: &Arc<Plan>, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<B
     Ok(match &**plan {
         Plan::One => Box::new(VecNode::new(vec![Vec::new()])),
         Plan::Empty { .. } => Box::new(VecNode::new(Vec::new())),
-        Plan::Values { rows, .. } => Box::new(ValuesNode {
-            rows: rows.clone(),
+        Plan::Values { .. } => Box::new(ValuesNode {
+            plan: plan.clone(),
             i: 0,
         }),
         Plan::Scan(s) => super::scan::open_scan(s, Some(plan), need, ctx)?,
@@ -991,14 +991,18 @@ impl Node for RcNode {
     }
 }
 
+/// A VALUES list's rows, read through the statement's plan (not a copy of its expressions).
 struct ValuesNode {
-    rows: Vec<Vec<Expr>>,
+    plan: Arc<Plan>,
     i: usize,
 }
 
 impl Node for ValuesNode {
     fn next(&mut self, ctx: &ExecCtx) -> Result<Option<Row>> {
-        let Some(r) = self.rows.get(self.i) else {
+        let Plan::Values { rows, .. } = &*self.plan else {
+            unreachable!("a VALUES node of another plan")
+        };
+        let Some(r) = rows.get(self.i) else {
             return Ok(None);
         };
         self.i += 1;

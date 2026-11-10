@@ -3979,15 +3979,9 @@ impl InsertNode {
         {
             check_replica_identity(&rules.table, crate::catalog::pubsub::RiCmd::Update, ctx)?;
         }
-        for e in Self::events(&plan) {
-            trigger::statement(
-                &rules.triggers,
-                &rules.table,
-                true,
-                e,
-                &Self::conflict_cols(&plan),
-                ctx,
-            )?;
+        let conflict_cols = Self::conflict_cols(&plan);
+        for &e in Self::events(&plan) {
+            trigger::statement(&rules.triggers, &rules.table, true, e, &conflict_cols, ctx)?;
         }
         let source = super::nodes::open(&plan.source, ctx)?;
         let last_table = plan.rules.table.oid;
@@ -4076,15 +4070,15 @@ impl InsertNode {
     }
 
     /// Statement-level events: INSERT, plus UPDATE for ON CONFLICT DO UPDATE.
-    fn events(plan: &InsertPlan) -> Vec<u16> {
-        let mut ev = vec![tt::INSERT];
+    fn events(plan: &InsertPlan) -> &'static [u16] {
         if matches!(
             plan.on_conflict.as_ref().map(|o| &o.action),
             Some(ConflictAction::Update { .. })
         ) {
-            ev.push(tt::UPDATE);
+            &[tt::INSERT, tt::UPDATE]
+        } else {
+            &[tt::INSERT]
         }
-        ev
     }
 
     fn conflict_cols(plan: &InsertPlan) -> Vec<usize> {
@@ -4725,8 +4719,10 @@ impl Node for InsertNode {
                 check_statement_rechecks(ctx)?;
                 let rules = &self.plan.rules;
                 // AFTER STATEMENT: UPDATE (ON CONFLICT) before INSERT, as ExecEndPlan fires them.
-                let mut events = Self::events(&self.plan);
-                events.reverse();
+                let events: &[u16] = match Self::events(&self.plan) {
+                    [_, _] => &[tt::UPDATE, tt::INSERT],
+                    one => one,
+                };
                 if let Some(c) = &self.plan.copy {
                     if let Some(p) = ctx.sess.copy_progress.borrow_mut().as_mut() {
                         p.tuples_processed = if rules.view {
@@ -4750,7 +4746,7 @@ impl Node for InsertNode {
                         &rules.triggers,
                         &rules.table,
                         std::mem::take(&mut self.after),
-                        &events,
+                        events,
                         &Self::conflict_cols(&self.plan),
                         ctx,
                     )?;
