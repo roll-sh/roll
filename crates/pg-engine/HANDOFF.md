@@ -9439,6 +9439,74 @@ when it loses; an index none of whose key columns a clause reads still runs
 `Planner::endpoint`'s reverse scan expands a whole SST block (0.4%); Describe at Bind
 (`describe_here`, 1.1%) is per-Bind work outside planning.
 
+## Point reads, round 1 (agent 202)
+
+BENCH.md "Point reads, round 1" has the three-server table (roll, PostgreSQL 18.6, pgrust on
+the same cores), the per-read cost split and the gates. Prepared point selects at 8 clients:
+roll about 0.94x PostgreSQL and 0.57x pgrust before this round; pgrust's lead (1.75-1.9x
+ops/s at 8 and 32 clients, prepared, pgbench simple and prepared alike) is user CPU per read
+(13-15 µs against roll's 30-36). What changed, each its own commit:
+
+- `exec/scan.rs` `unique_point`: an index scan whose bounds are `=` on every key column of a
+  valid unique btree index (plain integer keys, no deferrable constraint), at an MVCC
+  snapshot, without row marks, `with_key`, system columns, LIMIT or predicate locks, has at
+  most one visible row. `ScanNode::point`: it reads its entries one at a time (`want` 1), ends
+  its ranges at the row it returns (the iterator kept as `spare` for a rescan), and tries no
+  workers (`start_parallel`). Debug builds read the range on and assert there is no second
+  visible row. Per-row statistics (`emit`) are unchanged: only entries after the visible row
+  aren't read (versions the snapshot doesn't see).
+- Agent 199's bundle, rebased onto agent 198's projection decode (`ScanNode::proj` and
+  `ProjectNode::passed` are decided again at a restart, `implied` and `point` recomputed at
+  the restart's snapshot): executor trees of prepared statements restarted (`KeptTree`,
+  `Node::restartable/park/restart`), the unique check's first entry without a merging scan,
+  VALUES / INSERT statement events without copies, the snapshot xmin renewed in one pass.
+  `ScanNode::restartable` now asks for one key's scan (equalities on every key column, no
+  bounds): a range's scan restarted cost 2-3% more cycles per read than one opened again.
+- `session/mod.rs` `run_query`: the first try locks the plan's named relations in the
+  execution context the statement then runs in (`fused`), not in a context of its own
+  followed by a second `begin_statement` and context. When locking finds another catalog
+  (`catalog_version` moved) nothing has run: the statement is bound again and goes through the
+  old loop. When a commit became visible while the locks were taken (`Txn::snapshot_behind`,
+  READ COMMITTED), `begin_statement` runs again inside the context, as the second context's
+  did, so the snapshot still follows the locks. What differs: the backend's registered xmin
+  isn't renewed when nothing committed meanwhile (an older or equal xmin, briefly), and
+  pg_stat_statements' execution time starts before the locks.
+
+**pgrust's point path** (read in `crates/gravity/exec/src/runner/point/`, AGPL: ideas only):
+a guarded statement path that skips its executor for a plain point SELECT after planning.
+`select::shape` accepts the planner's IndexScan over a unique btree with equality on every key
+column against a constant or (portal.rs) the portal's parameters, one plain relation in the
+range table, no quals, row marks, subplans, RLS or inheritance; anything else falls back.
+It then runs ExecutorStart's order by hand: permission checks, relations opened and locked as
+ExecInitIndexScan opens them, the scan keys bound, the probe, one DataRow, `SELECT n`. For the
+extended protocol's unnamed portal, Bind is PortalStart + ExecutorStart (the snapshot
+registered on the portal), Execute is IndexNext to max_rows, PortalDrop ends the scan;
+`pkeep.rs` keeps a portal's bound probe (scan, keys, slot, output columns) across the portals
+of one generic plan, `keep.rs` keeps a point write's pieces in a plan memo, and a run state
+(memory context, wire node) is kept per session. Taken here: the guard's shape (unique key,
+equality on every column, MVCC snapshot, no marks) as `unique_point`, ending the scan at the
+key's one row, and keeping the opened tree across executions (199's restart). Not taken: a
+separate executor and protocol path, which would have to repeat roll's statement machinery
+(snapshot, locks, privileges, pg_stat, pg_stat_statements, auto_explain, logging) exactly.
+
+**Next**, by the profile: the index entry's merging scan (~3.5 µs a read: `Scan::new` makes a
+cursor per source and positions each; a one-key probe that positions each source once, not
+twice as agent 195's did) and the row's point read (1.9 µs); the read-only commit (2.8 µs:
+`Txn` drop 0.9, pg_stat's per-transaction report 0.5); Bind's binding check and the
+format context's catalog names per statement (`Feed::row`, the search path read under the
+shared catalog lock three times a read); allocations (mimalloc 3.2 µs self). pgrust's user CPU
+per read is 13 µs; roll is at about 27 after this round.
+
+Verification (release, the tree before its rebase over `6bb700332`): build; Clippy with the
+base's warnings only (math.rs, json.rs, text.rs, nodes.rs' projection tests and others, none in
+a line changed here); lib tests (211); golden, golden_wire, golden_shuffled; kept_plans (10);
+wire (69); the isolation suite against a private
+PostgreSQL 18.6 (a202-pgref, port 54050): 118/122 specs, 1629/1648 permutations; the regress files select, prepare,
+plancache, portals, privileges, rowsecurity, btree_index, create_index, create_misc,
+create_table: 4552/4553 units. The same isolation specs and regress units differ with the base2
+binary against the same reference (its pg_stat_statements preload shows `Query Identifier`
+in EXPLAIN VERBOSE, and the engine had max_prepared_transactions 0).
+
 ## Short write transactions, round 1 (agent 197)
 
 BENCH.md "Short write transactions, round 1" has the measurements: `short_txn` at 8 clients

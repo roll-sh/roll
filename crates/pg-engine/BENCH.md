@@ -390,6 +390,139 @@ Heavily loaded (new: `c4`, the pushed source):
   statement. Another tenant's verification train ran pinned to CPUs 8-17 during the heavily
   loaded rounds and these runs.
 
+## Point reads, round 1 (2026-11-10, agent 202)
+
+HANDOFF.md "Point reads, round 1" has what changed. Every server in a container on CPUs 32-35
+(8 GiB, swap off, `--cpu-shares 2`, host network), the clients on 12-15 (`taskset`, nice 19):
+roll dist builds, PostgreSQL 18.6 (the pinned image; shared_buffers 2 GB, maintenance_work_mem
+256 MB, max_wal_size 8 GB, checkpoint_timeout 30 min, max_connections 300, fsync and
+synchronous_commit on) and pgrust (`malisper/pgrust:v0.4-beta-amd64`, the digest run.sh pins;
+the same settings plus its README's stack options and io_method=sync). 100,000 accounts
+(`bench oltp-load`) or pgbench scale 1; 2 s warmup, 10 s measured; server CPU from the
+container's cgroup; memory is the cgroup's peak. Point reads check every returned value.
+Scripts and raw results: `~/.cache/a202/bench`, `~/.cache/a202/runs`.
+
+**Three servers** (`sb1`: 3 rounds, each server started once a round in rotated order, medians;
+roll is `a96bce378`, this round's starting head; a run where another tenant used
+more than 0.3 cores of the server CPUs is left out, n/x):
+
+| workload | clients | server | n/x | ops/s | CPU µs/op (user+sys) | p50 / p99 ms | peak MiB | roll ÷PG | roll ÷pgrust |
+|---|---:|---|---|---:|---:|---:|---:|---:|---:|
+| prepared point select | 1 | roll | 3/0 | 17,246 | 54.9 (29.1+26.4) | 0.053 / 0.117 | 126 | 1.41x | 1.02x |
+| | | PostgreSQL | 3/0 | 12,197 | 54.6 (25.1+28.1) | 0.077 / 0.188 | 187 | | |
+| | | pgrust | 3/0 | 16,843 | 34.5 (19.0+16.1) | 0.050 / 0.119 | 350 | | |
+| prepared point select | 8 | roll | 3/0 | 80,460 | 44.2 (30.2+14.0) | 0.086 / 0.232 | 131 | 0.94x | 0.57x |
+| | | PostgreSQL | 3/0 | 85,223 | 42.7 (19.2+23.5) | 0.088 / 0.216 | 214 | | |
+| | | pgrust | 3/0 | 141,020 | 24.9 (12.9+12.0) | 0.050 / 0.122 | 386 | | |
+| prepared point select | 32 | roll | 3/0 | 83,970 | 47.6 (32.3+14.8) | 0.190 / 3.854 | 131 | 0.98x | 0.55x |
+| | | PostgreSQL | 3/0 | 85,706 | 45.7 (22.0+23.8) | 0.298 / 1.234 | 255 | | |
+| | | pgrust | 3/0 | 152,790 | 25.9 (13.2+12.6) | 0.153 / 0.701 | 472 | | |
+| pgbench -S simple | 8 | roll | 3/0 | 70,599 | 47.4 (33.6+14.2) | 0.097 / 0.274 | 131 | 1.33x | 0.60x |
+| | | PostgreSQL | 2/1 | 53,051 | 67.5 (40.8+26.7) | 0.140 / 0.373 | 252 | | |
+| | | pgrust | 3/0 | 116,867 | 26.0 (15.0+11.0) | 0.056 / 0.156 | 472 | | |
+| pgbench -S simple | 32 | roll | 3/0 | 78,343 | 50.6 (35.8+14.8) | 0.254 / 2.990 | 131 | 1.48x | 0.54x |
+| | | PostgreSQL | 3/0 | 52,810 | 72.9 (45.1+27.9) | 0.503 / 1.910 | 273 | | |
+| | | pgrust | 3/0 | 146,393 | 25.7 (14.6+11.1) | 0.176 / 0.564 | 472 | | |
+| pgbench -S prepared | 8 | roll | 3/0 | 71,511 | 48.3 (34.0+14.3) | 0.097 / 0.264 | 131 | 0.86x | 0.55x |
+| | | PostgreSQL | 3/0 | 82,798 | 40.6 (18.7+21.9) | 0.083 / 0.234 | 273 | | |
+| | | pgrust | 3/0 | 130,549 | 23.5 (12.9+10.7) | 0.051 / 0.146 | 472 | | |
+| pgbench -S prepared | 32 | roll | 2/1 | 84,087 | 46.0 (32.1+13.8) | 0.205 / 5.259 | 128 | 0.94x | 0.54x |
+| | | PostgreSQL | 3/0 | 89,099 | 43.8 (21.2+22.4) | 0.326 / 1.021 | 279 | | |
+| | | pgrust | 3/0 | 154,768 | 23.7 (12.9+10.9) | 0.161 / 0.541 | 483 | | |
+
+pgrust's lead is real at 8 and 32 clients on every read workload: 1.75-1.9x roll's ops/s at
+about half its server CPU per read. The gap is user CPU (roll 30-36 µs a read, pgrust 13-15,
+PostgreSQL 19-22); kernel CPU is close (roll 14-15, pgrust 11-12, PostgreSQL 22-28: roll and
+pgrust read and write once per Bind/Execute/Sync, about 1.3 context switches a read). At one
+client roll is level with pgrust and 1.4x PostgreSQL (its connection polls; 0.97 cores busy).
+Idle, a fresh server holds 8 MiB (roll), 80 (PostgreSQL), 206-215 (pgrust). The one-client
+cells see 0.5-0.8 cores of foreign CPU for every server (wakeup work outside the cgroups), so
+the 0.3 rule is not applied there. CPUs 14-15 of the clients are hyperthreads of the server's
+32-33: the same for all three servers.
+
+**Where a read goes** (prepared point select, 8 clients, roll at `16eccc605`: LBR call stacks
+of cycles:u, 104k samples; user 30.1 µs of 45.0 µs server CPU per read, the kernel's 14.9 the
+loopback reads and writes):
+
+| part | µs / read (user) |
+|---|---:|
+| network read and write, framing, ReadyForQuery | ~1.0 (+ 14.9 kernel) |
+| Bind: parameters, the portal, Describe's binding check | 2.0 (of which the implicit transaction's begin 0.9) |
+| plan choice and reuse (`planned_as`) | 0.4 |
+| executor open and close (nodes, `ExecCtx` made and dropped twice) | 4.3 |
+| index lookup and row fetch (`next_raw_ref`), and the parallel check | 7.3 + 0.9 |
+| row decode and checks (`emit`) | 1.4 |
+| wire encode (`Feed::row`: the row's text, a format context with names) | 0.7 |
+| statement begin twice, locks and privileges | 1.2 + 1.6 |
+| commit of the read-only transaction (Txn drop 0.9, pg_stat counts 0.5) | 2.8 |
+| pg_stat_activity per message | 0.7 |
+| allocation (mimalloc, self) | 3.2 across the above |
+
+Of the lookup, the index entry's merging scan is about 3.5 µs (sources made, each positioned)
+and the row's point read 1.9 (one L1 file: block search 0.25, block cache 0.2, seek in the block
+0.55). At 32 clients the same parts cost about the same per read (47.6 against 44.2 µs CPU):
+no lock or block-cache shard shows; the connection threads (one per client) take the 4 cores.
+
+**Kept changes** (alternating pairs of dist builds against **base2** = `16eccc605`, each run a
+fresh server and data directory; user instructions and cycles per read from `perf stat
+--per-thread` of the connections' threads over 7 s of each run):
+
+1. *An index scan of one unique key ends at its visible row* (`unique_point`), **cand1**.
+   Prepared point select, 8 clients:
+
+| pair | base2 ops/s | cand1 ops/s | Δ ops/s | base2 µs/op | cand1 µs/op | Δ CPU | Δ instr | Δ cycles |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 87,077 | 90,261 | +3.7% | 41.2 | 39.5 | -4.2% | -4.6% | -6.2% |
+| 2 | 85,698 | 89,779 | +4.8% | 41.7 | 39.6 | -5.0% | -3.9% | -6.7% |
+| 3 | 85,438 | 89,382 | +4.6% | 40.9 | 39.7 | -3.1% | -3.2% | -4.4% |
+| 4 | 87,800 | 91,362 | +4.1% | 40.9 | 39.3 | -4.0% | -2.9% | -4.9% |
+| 5 | 87,208 | 91,428 | +4.8% | 41.2 | 39.4 | -4.2% | -3.0% | -3.8% |
+
+   An earlier set of five counted the whole process's instructions: one pair's candidate run
+   had the base's count (62.7k, a flush or compaction thread in its window) and lost 3.3% ops/s;
+   the other four were -3.0% to -7.3%. The connections' threads are counted since.
+   No regression, three pairs each: one client +0.4% ops/s, -1.9% CPU, -4.9% instructions;
+   32 clients +4.1%, -3.4%, -4.7%; range reads +2.9%, -2.1%; short transactions +0.7%, -1.3%;
+   pgbench -S prepared at 32 clients +1.6%, -3.1%.
+
+2. *Agent 199's bundle* (executor trees restarted, the unique check's first entry, VALUES /
+   INSERT events without copies, the snapshot xmin in one pass) on top, **cand2**: point
+   select 8 clients against base2 -3.9% to -8.3% instructions in every pair (median -5.7%,
+   cycles -3.8%, ops/s +3.9%, CPU -3.0%, worst pair -1.6% ops/s); short transactions median
+   +1.9% ops/s, -1.6% CPU, -0.1% instructions (every pair within ±10% of noise, worst -1.5%).
+   Range reads regressed with it: -1.0% ops/s, +1.0% CPU, +2.0% cycles against base2.
+
+3. *A query locks its relations in the context it then runs in* (`fused`), **cand3** against
+   cand2: point select 8 clients -3.8% to -9.9% instructions in every pair (median -4.1%,
+   cycles -3.9%, ops/s +5.2%, CPU -3.3%, worst pair -3.6% ops/s); short transactions median
+   +0.3% ops/s, -0.7% CPU, worst -4.9%; range reads +2.1% ops/s, -2.0% CPU.
+   cand3 against base2, three pairs each: one client +4.5% ops/s, -4.2% CPU, -7.0%
+   instructions; 32 clients +6.7%, -6.3%, -9.5%; pgbench -S prepared at 32 clients +9.9%,
+   -9.2%, -12.2%; pgbench -S simple at 8 +6.6%, -7.8%, -10.5%; range reads -2.8%, +2.6% CPU
+   (cycles +3.2%, instructions -0.3%: item 2's restart of a range's scan).
+
+4. *Only an index scan of one key restarts its executor tree*, **cand5** (what landed):
+against base2, prepared point select at 8 clients:
+
+| pair | base2 ops/s | cand5 ops/s | Δ ops/s | base2 µs/op | cand5 µs/op | Δ CPU | Δ instr | Δ cycles |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 81,022 | 87,516 | +8.0% | 43.6 | 40.3 | -7.7% | -8.6% | -8.5% |
+| 2 | 82,954 | 88,584 | +6.8% | 42.4 | 39.7 | -6.5% | -11.6% | -10.2% |
+| 3 | 83,550 | 88,830 | +6.3% | 42.4 | 39.7 | -6.5% | -9.9% | -8.8% |
+| 4 | 81,618 | 87,610 | +7.3% | 43.5 | 39.9 | -8.4% | -11.6% | -11.4% |
+| 5 | 86,990 | 94,147 | +8.2% | 40.8 | 37.6 | -7.9% | -10.1% | -9.4% |
+
+   Medians +7.3% ops/s, -7.7% CPU, -10.1% instructions (62.4k to 55.9k a read), -9.4%
+   cycles. Short transactions (BEGIN, prepared UPDATE, SELECT, INSERT, COMMIT; 8 clients,
+   five pairs): user cycles -3.0% to -6.0% in every pair, median ops/s +4.3% (worst pair
+   +2.3%), CPU -4.4%, instructions -4.2% (-9.2% to +0.3%: this workload's instruction
+   counts move ±5% between runs of one build). Range reads (three pairs): +0.4% ops/s, -0.8%
+   CPU, every pair +0.3% or better. cand5 differs from cand3 only in which scans restart,
+   so cand3's one- and 32-client and pgbench rows above stand for it.
+
+Footprint (fresh server each, cgroup anon+shmem 25 s into 100 idle sessions; fresh data
+directory): base2 36.5 MB / 3.03 MB, cand3 36.3 MB / 3.03 MB, twice each: unchanged.
+
 ## Short write transactions, round 1 (2026-11-10, agent 197)
 
 HANDOFF.md, "Short write transactions, round 1", has what changed. `short_txn`: 100,000
