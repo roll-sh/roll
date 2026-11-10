@@ -195,6 +195,18 @@ impl HashTable {
     pub fn new(rows: f64, width: u32, useskew: bool, ctx: &ExecCtx) -> HashTable {
         let hash_bytes = super::pghash::hash_mem(ctx).floor();
         let (nb, nbatch, space, skew_mcvs) = crate::sql::joins::choose_hash_table_size(rows, width, hash_bytes, useskew);
+        Self::sized(nb, nbatch, space, skew_mcvs)
+    }
+
+    /// A Parallel Hash's table when the participants' combined hash_mem holds it whole
+    /// (ExecChooseHashTableSize's try_combined_hash_mem: one batch); None when it doesn't.
+    pub fn new_shared(ph: &crate::sql::explain::ParallelHash, ctx: &ExecCtx) -> Option<HashTable> {
+        let g = crate::sql::joins::JoinGucs::read(ctx);
+        let (nb, nbatch, space) = crate::sql::joins::parallel_hash_table_space(ph.rows_total, ph.width, &g, ph.workers);
+        (nbatch == 1).then(|| Self::sized(nb, 1, space, 0))
+    }
+
+    fn sized(nb: u32, nbatch: u32, space: f64, skew_mcvs: u32) -> HashTable {
         HashTable {
             nbuckets: nb,
             nbuckets_optimal: nb,

@@ -285,6 +285,111 @@ The current checked measurements compare release engine builds and PostgreSQL 18
 the wire. Older rounds below are historical records, with their original methods and
 limits. Their results have not been reverified on the current source.
 
+## Executor, round 12 (2026-11-10, agent 200)
+
+HANDOFF "Executor, round 12, batch 1" has what changed: a Parallel Hash Join's table is sized
+from the participants' combined hash_mem, as PostgreSQL's shared table is, and a merge join
+PostgreSQL's plan has as a Parallel Hash Join under its Gather runs as that hash join.
+**base** is origin's head `a96bce378`; **new** is this batch on top of it (`c4`). Both are dist
+builds (fat LTO, line tables) of the same checkout, copied aside with their manifests
+(`~/.cache/a200/bin`).
+
+How it was run: each server in its own container on CPUs 8-11 (`--memory 8g` both;
+PostgreSQL 18.6 with the bench settings, `shared_buffers=2GB`, host network; the engine with
+`--cache-mb 2048` through `run.sh ENGINE_DOCKER=1`), the client on 12-15 at nice 19, TPC-H SF1
+from `bench tpch-load --sf 1` on both. A round is a fresh engine, a warm-up pass, then 3
+measured passes per query (their median); rounds interleave PostgreSQL, new, base, then base,
+new, PostgreSQL; tables are the median of 3 rounds. Each pass waited for CPUs 8-15 to average
+below 35% busy; the machine ran at load 12-30 and wall times moved up to 2x between runs, so
+user instructions (`perf stat -e instructions:u` over each run of a fresh engine, the binaries
+alternating) are the gate's measure.
+
+### TPC-H SF1 baseline on origin's head (PostgreSQL, base, three rounds)
+
+| | q01 | q02 | q03 | q04 | q05 | q06 | q07 | q08 | q09 | q10 | q11 | q12 | q13 | q14 | q15 | q16 | q17 | q18 | q19 | q20 | q21 | q22 | sum |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| pg s | 1.73 | 0.21 | 0.37 | 0.16 | 0.29 | 0.37 | 0.36 | 0.18 | 1.22 | 0.59 | 0.09 | 0.51 | 0.65 | 0.16 | 0.31 | 0.23 | 0.79 | 2.35 | 0.07 | 0.10 | 0.51 | 0.11 | 11.34 |
+| base s | 0.93 | 0.80 | 0.54 | 0.28 | 0.46 | 0.52 | 0.58 | 0.36 | 1.29 | 0.66 | 0.22 | 0.77 | 1.00 | 0.43 | 0.41 | 0.42 | 0.74 | 1.68 | 0.12 | 0.37 | 0.68 | 0.34 | 13.60 |
+| pg CPU, s | 5.10 | 0.32 | 1.04 | 0.44 | 0.82 | 0.97 | 1.01 | 0.46 | 3.16 | 1.51 | 0.09 | 1.48 | 1.72 | 0.40 | 0.79 | 0.53 | 0.89 | 6.12 | 0.17 | 0.11 | 1.42 | 0.27 | 28.82 |
+| base CPU, s | 2.81 | 0.80 | 1.43 | 0.79 | 0.95 | 1.19 | 1.56 | 0.62 | 3.59 | 1.71 | 0.22 | 2.49 | 2.82 | 0.59 | 1.17 | 0.85 | 1.72 | 5.53 | 0.23 | 0.38 | 2.02 | 0.78 | 34.25 |
+
+- Engine/PostgreSQL: wall 1.20x (13.60 s against 11.34 s), CPU 1.19x, peak 1,862-1,883 MB.
+- q01, q17 and q18 are ahead of PostgreSQL; all 22 result hashes equal PostgreSQL's.
+- Largest gaps by wall time: q02, q13, q14, q20, q12; by CPU: q13, q12, q17, q07, q22.
+
+### Where the gaps went (LBR call stacks)
+
+- **q12**: the executor's Merge Join over a full `orders_pkey` index scan (1.5M heap fetches
+  in the workers, `Store::get_with`, `IndexChunk`) with the join itself on the executor's
+  thread (17% of the samples), where PostgreSQL runs a Parallel Hash Join over two Parallel
+  Seq Scans.
+- **q14**: 78% of the samples on the executor's thread: the part table's 200,000 rows in a
+  private hash table of hash_mem went to batch files, and every batch after the first was
+  probed there (`next_batch`, `BatchReader`, `RowReader`); PostgreSQL's Parallel Hash fits in
+  one batch of the participants' combined memory.
+- **q13**: the merge of the workers' parts on the executor's thread (23%; `AggNode::run`).
+- **q02, q20**: serial in both servers; index nested loops' point fetches (`Block::seek`,
+  `SstReader::block_with`, `find_block`) and, in q02, the hash join's batches.
+- **q04, q03, q07, q21, q09** (profiled too): almost all in the workers, 45-60% of their
+  samples in point lookups (`Store::get_versions_with`, `point::newest`, `point::file_get`).
+
+### User instructions a run (one round, all 22; fresh engines, alternating)
+
+| x10^9 | q01 | q02 | q03 | q04 | q05 | q06 | q07 | q08 | q09 | q10 | q11 | q12 | q13 | q14 | q15 | q16 | q17 | q18 | q19 | q20 | q21 | q22 | sum |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| base | 30.27 | 4.66 | 14.71 | 7.78 | 7.75 | 11.49 | 13.48 | 4.08 | 24.18 | 11.65 | 1.07 | 36.74 | 10.88 | 3.92 | 9.88 | 5.64 | 7.63 | 119.65 | 1.43 | 2.09 | 27.41 | 6.14 | 362.6 |
+| new | 30.27 | 4.67 | 14.95 | 7.77 | 7.78 | 11.49 | 13.47 | 4.12 | 24.32 | 11.65 | 1.07 | 10.93 | 10.91 | 3.30 | 9.88 | 5.65 | 7.63 | 120.45 | 1.44 | 2.09 | 27.53 | 6.16 | 337.5 |
+| change | +0.0% | +0.0% | +1.6% | -0.2% | +0.4% | +0.0% | -0.1% | +0.8% | +0.6% | -0.0% | +0.0% | -70.3% | +0.2% | -15.8% | +0.0% | +0.1% | -0.1% | +0.7% | +0.2% | +0.1% | +0.4% | +0.3% | -6.9% |
+
+Three more rounds of the affected queries: q12 -73.7 / -75.1 / -76.0%, q14 -14.7 / -14.9 /
+-14.1%; q05, q13 and q16 (Parallel Hash Joins that fit either way) +0.4 / -0.8 / +0.3%,
++0.2 / -0.2 / 0.0%, -0.9 / +0.3 / -0.2%. q03, q08 and q18 again: +0.5 / -0.8 / +0.6%,
++0.3 / -0.1 / +0.4%, +0.5 / -0.5 / +0.8% (instructions grow with the machine's load in every
+binary: worker waits are counted).
+
+### TPC-H SF1, base against new (three interleaved rounds each)
+
+Moderately loaded (new: `c3`, the same source with a debug print that an unset variable
+switched off):
+
+| | q01 | q02 | q03 | q04 | q05 | q06 | q07 | q08 | q09 | q10 | q11 | q12 | q13 | q14 | q15 | q16 | q17 | q18 | q19 | q20 | q21 | q22 | sum |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| pg s | 1.66 | 0.20 | 0.37 | 0.14 | 0.28 | 0.34 | 0.34 | 0.17 | 1.21 | 0.58 | 0.08 | 0.52 | 0.69 | 0.16 | 0.27 | 0.20 | 0.81 | 2.46 | 0.06 | 0.11 | 0.47 | 0.10 | 11.20 |
+| base s | 0.91 | 0.77 | 0.66 | 0.32 | 0.54 | 0.49 | 0.70 | 0.38 | 1.43 | 0.62 | 0.21 | 0.93 | 0.90 | 0.37 | 0.37 | 0.38 | 0.69 | 2.51 | 0.12 | 0.36 | 0.82 | 0.35 | 14.83 |
+| new s | 0.91 | 0.77 | 0.68 | 0.33 | 0.49 | 0.54 | 0.72 | 0.39 | 1.45 | 0.64 | 0.20 | 0.42 | 0.92 | 0.28 | 0.44 | 0.36 | 0.66 | 2.60 | 0.13 | 0.36 | 0.92 | 0.37 | 14.57 |
+| pg CPU, s | 4.91 | 0.31 | 1.02 | 0.41 | 0.80 | 0.94 | 0.99 | 0.48 | 3.13 | 1.48 | 0.08 | 1.43 | 1.72 | 0.40 | 0.75 | 0.52 | 0.88 | 6.29 | 0.16 | 0.11 | 1.35 | 0.28 | 28.44 |
+| base CPU, s | 2.71 | 0.77 | 1.77 | 0.94 | 1.09 | 1.13 | 1.89 | 0.70 | 4.05 | 1.63 | 0.21 | 3.05 | 2.56 | 0.58 | 1.13 | 0.77 | 1.60 | 8.13 | 0.23 | 0.37 | 2.35 | 0.84 | 38.50 |
+| new CPU, s | 2.69 | 0.76 | 1.82 | 0.92 | 1.04 | 1.20 | 1.94 | 0.74 | 4.12 | 1.68 | 0.22 | 1.28 | 2.53 | 0.47 | 1.19 | 0.77 | 1.70 | 8.28 | 0.24 | 0.37 | 2.69 | 0.84 | 37.49 |
+
+Heavily loaded (new: `c4`, the pushed source):
+
+| | q01 | q02 | q03 | q04 | q05 | q06 | q07 | q08 | q09 | q10 | q11 | q12 | q13 | q14 | q15 | q16 | q17 | q18 | q19 | q20 | q21 | q22 | sum |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| pg s | 1.81 | 0.22 | 0.39 | 0.15 | 0.30 | 0.39 | 0.38 | 0.21 | 1.33 | 0.61 | 0.09 | 0.50 | 0.72 | 0.17 | 0.31 | 0.24 | 0.86 | 2.33 | 0.06 | 0.10 | 0.58 | 0.13 | 11.91 |
+| base s | 0.97 | 0.84 | 1.03 | 0.42 | 0.68 | 0.52 | 1.04 | 0.55 | 2.04 | 0.68 | 0.22 | 1.75 | 1.08 | 0.42 | 0.43 | 0.41 | 0.83 | 5.43 | 0.15 | 0.41 | 1.25 | 0.47 | 21.63 |
+| new s | 1.06 | 0.87 | 0.96 | 0.52 | 0.65 | 0.54 | 1.01 | 0.47 | 1.89 | 0.75 | 0.20 | 0.46 | 0.94 | 0.33 | 0.44 | 0.41 | 0.79 | 4.99 | 0.14 | 0.38 | 1.18 | 0.45 | 19.46 |
+| pg CPU, s | 5.40 | 0.34 | 1.07 | 0.43 | 0.86 | 1.04 | 1.10 | 0.50 | 3.50 | 1.59 | 0.09 | 1.52 | 1.87 | 0.40 | 0.79 | 0.57 | 0.94 | 6.29 | 0.16 | 0.11 | 1.51 | 0.32 | 30.40 |
+| base CPU, s | 2.81 | 0.84 | 2.84 | 1.29 | 1.49 | 1.23 | 2.85 | 0.97 | 5.69 | 1.74 | 0.22 | 5.46 | 3.05 | 0.76 | 1.17 | 0.85 | 1.63 | 16.57 | 0.24 | 0.41 | 3.58 | 1.11 | 56.80 |
+| new CPU, s | 3.07 | 0.89 | 2.71 | 1.31 | 1.40 | 1.27 | 2.88 | 0.90 | 5.29 | 1.70 | 0.21 | 1.31 | 2.67 | 0.59 | 1.24 | 0.82 | 1.75 | 15.72 | 0.27 | 0.40 | 3.52 | 1.14 | 51.06 |
+
+- q12 0.93 -> 0.42 s (PostgreSQL 0.52), CPU 3.05 -> 1.28 s (PostgreSQL 1.43); q14 0.37 ->
+  0.28 s, CPU 0.58 -> 0.47 s. Totals 14.83 -> 14.57 s and 21.63 -> 19.46 s; CPU 38.5 -> 37.5 s
+  and 56.8 -> 51.1 s. Other queries' times moved either way with equal instructions.
+- Peak (VmHWM) 1,866-1,873 MB against base's 1,865-1,875 MB. All 22 result hashes equal
+  PostgreSQL's in every round of both builds.
+- pg_stat after one q12: base counts an `orders_pkey` index scan of 1,499,877 tuples and no
+  sequential scan of orders; new counts one sequential scan of orders and no index scan, as
+  PostgreSQL does (which counts one per participant).
+- Point read and short transaction smoke (a fresh 100,000-row fixture, 8 clients, 10 s,
+  user instructions over 9 s of each run, eight runs of base and seven of new, alternating):
+  point_select 65.6k against 66.0k instructions an operation (medians of the runs with a
+  whole window; base 65.0-68.4k, new 64.1-66.6k), 89k against 83k ops/s (base 85-94k, new
+  77-92k); short_txn 329k against 337k (base 285-343k, new 300-354k), 12.2k against 11.6k
+  ops/s (base 11.2-12.9k, new 11.2-13.1k). The runs' spread is wider than the medians'
+  difference both ways; nothing on those paths changed but two empty vectors set once per
+  statement. Another tenant's verification train ran pinned to CPUs 8-17 during the heavily
+  loaded rounds and these runs.
+
 ## Short write transactions, round 1 (2026-11-10, agent 197)
 
 HANDOFF.md, "Short write transactions, round 1", has what changed. `short_txn`: 100,000

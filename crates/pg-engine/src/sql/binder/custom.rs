@@ -223,7 +223,7 @@ impl Analyzed {
             perms: kept.perms.clone(),
             hidden_rtes: kept.hidden_rtes,
             param_domains: Vec::new(),
-            gathers: (plan.clone(), crate::exec::parallel_part::of_explain(&plan, Vec::new()).into()).into(),
+            gathers: (plan.clone(), crate::exec::parallel_part::of_explain(&plan, Vec::new(), ctx).into()).into(),
             cost: (plan.clone(), total).into(),
             plan,
         })

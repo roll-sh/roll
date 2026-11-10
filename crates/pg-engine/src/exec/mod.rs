@@ -396,6 +396,10 @@ pub struct ExecCtx<'a> {
     pub instr: RefCell<Option<Rc<Instr>>>,
     /// Gather parts' startup work and worker-only lock ownership for this execution.
     pub worker_parts: RefCell<Vec<parallel_part::Part>>,
+    /// The Parallel Hash Joins of the Gather parts (`parallel_part::prepare`).
+    pub parallel_hashes: RefCell<Vec<crate::sql::explain::ParallelHash>>,
+    /// The Gather parts' Merge Joins run as their Parallel Hash Joins (`parallel_part`).
+    pub merge_hashes: RefCell<Vec<usize>>,
     /// EXPLAIN ANALYZE of a utility statement (CREATE TABLE AS): the plan it ran, with its
     /// hidden range-table count.
     pub explained: RefCell<Option<(Arc<Plan>, usize)>>,
@@ -868,6 +872,8 @@ impl<'a> ExecCtx<'a> {
             enrs: RefCell::new(Vec::new()),
             instr: RefCell::new(None),
             worker_parts: RefCell::new(Vec::new()),
+            parallel_hashes: RefCell::new(Vec::new()),
+            merge_hashes: RefCell::new(Vec::new()),
             explained: RefCell::new(None),
             moved: RefCell::default(),
             defer_after: Cell::new(false),
@@ -999,6 +1005,8 @@ impl<'a> ExecCtx<'a> {
             enrs: RefCell::new(self.enrs.borrow().clone()),
             instr: RefCell::new(None),
             worker_parts: RefCell::new(Vec::new()),
+            parallel_hashes: RefCell::new(Vec::new()),
+            merge_hashes: RefCell::new(Vec::new()),
             explained: RefCell::new(None),
             moved: RefCell::default(),
             defer_after: Cell::new(false),

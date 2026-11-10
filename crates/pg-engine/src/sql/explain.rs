@@ -20485,13 +20485,40 @@ pub fn estimate(plan: &Arc<Plan>, ctx: &ExecCtx) -> PlanEstimate {
 /// (the top of the part its workers run; None: none of the executor's) and the workers it
 /// plans (pg_stat_statements' parallel_workers_to_launch; the engine runs them all, so they
 /// are the launched ones too).
-pub fn gathers(plan: &Arc<Plan>, ctx: &ExecCtx) -> Vec<(Option<usize>, usize)> {
+pub fn gathers(plan: &Arc<Plan>, ctx: &ExecCtx) -> Vec<GatherAt> {
     total_and_gathers(plan, ctx).1
+}
+
+/// A Gather or Gather Merge as EXPLAIN places it (`gathers`).
+#[derive(Debug)]
+pub struct GatherAt {
+    /// The plan node under it (the top of the part its workers run; None: none of the
+    /// executor's).
+    pub part: Option<usize>,
+    /// The workers it plans.
+    pub workers: usize,
+    /// The Parallel Hash Joins of its part.
+    pub parallel_hashes: Vec<ParallelHash>,
+}
+
+/// A Parallel Hash Join: its inner side's plan node (the Parallel Hash's) and what
+/// ExecHashTableCreate sizes its table from (the plan's rows_total, the partial rows times
+/// the parallel divisor; the width; the planned workers, whose hash_mem it may combine with
+/// the leader's).
+#[derive(Clone, Copy, Debug)]
+pub struct ParallelHash {
+    pub inner: usize,
+    /// Its outer side's plan node, and whether that side is a Parallel Seq Scan.
+    pub outer: Option<usize>,
+    pub outer_seq: bool,
+    pub rows_total: f64,
+    pub width: u32,
+    pub workers: usize,
 }
 
 /// `estimate`'s total and `gathers` from one tree (a custom plan needs its cost and its
 /// Gathers both).
-pub fn total_and_gathers(plan: &Arc<Plan>, ctx: &ExecCtx) -> (f64, Vec<(Option<usize>, usize)>) {
+pub fn total_and_gathers(plan: &Arc<Plan>, ctx: &ExecCtx) -> (f64, Vec<GatherAt>) {
     let o = estimate_options();
     let mut b = estimate_builder(plan, ctx, &o);
     // A Gather or Gather Merge costs at least parallel_setup_cost: a plan whose every node
@@ -20513,7 +20540,7 @@ pub fn total_and_gathers(plan: &Arc<Plan>, ctx: &ExecCtx) -> (f64, Vec<(Option<u
                 let mut full = estimate_builder(plan, ctx, &o);
                 let f = full.level(plan);
                 let mut found = Vec::new();
-                gather_nodes(&f, &mut found);
+                gather_nodes(&f, false, &mut found);
                 assert!(
                     (found.is_empty() && f.total_cost == n.total_cost)
                         || !crate::sql::literals::unchanged_since(ctx, &cat0, &reads),
@@ -20526,7 +20553,7 @@ pub fn total_and_gathers(plan: &Arc<Plan>, ctx: &ExecCtx) -> (f64, Vec<(Option<u
     }
     let n = b.level(plan);
     let mut out = Vec::new();
-    gather_nodes(&n, &mut out);
+    gather_nodes(&n, crate::sql::paths::parallel::ParCfg::read(ctx).leader, &mut out);
     (n.total_cost, out)
 }
 
@@ -20540,15 +20567,43 @@ fn max_node_cost(n: &ExNode) -> f64 {
         .fold(n.total_cost, f64::max)
 }
 
-fn gather_nodes(n: &ExNode, out: &mut Vec<(Option<usize>, usize)>) {
+fn gather_nodes(n: &ExNode, leader: bool, out: &mut Vec<GatherAt>) {
     fn first_key(n: &ExNode) -> Option<usize> {
         n.key.or_else(|| n.children.iter().find_map(first_key))
     }
+    // (The Parallel Hash Joins of a Gather's part, not past another Gather.)
+    fn parallel_hashes(n: &ExNode, leader: bool, out: &mut Vec<ParallelHash>) {
+        if matches!(n.node_type, "Gather" | "Gather Merge") {
+            return;
+        }
+        if n.parallel_aware
+            && n.node_type == "Hash Join"
+            && let Some(h) = n.children.get(1).filter(|h| h.parallel_aware)
+            && let Some(inner) = h.key
+        {
+            // (As EXPLAIN ANALYZE sizes the table.)
+            let workers = h.children.first().map_or(0, |c| c.workers);
+            let wf = workers as f64;
+            let lead = if leader { (1.0 - 0.3 * wf).max(0.0) } else { 0.0 };
+            let o = n.children.first();
+            out.push(ParallelHash {
+                inner,
+                outer: o.and_then(|o| o.key),
+                outer_seq: o.is_some_and(|o| o.node_type == "Seq Scan" && o.parallel_aware),
+                rows_total: h.rows * (wf + lead).max(1.0),
+                width: h.width,
+                workers,
+            });
+        }
+        n.children.iter().for_each(|c| parallel_hashes(c, leader, out));
+    }
     if matches!(n.node_type, "Gather" | "Gather Merge") {
         let workers = n.details.iter().map(|d| if let Detail::Workers(w) = d { *w } else { 0 }).sum();
-        out.push((n.children.first().and_then(first_key), workers));
+        let mut parallel = Vec::new();
+        n.children.iter().for_each(|c| parallel_hashes(c, leader, &mut parallel));
+        out.push(GatherAt { part: n.children.first().and_then(first_key), workers, parallel_hashes: parallel });
     }
-    n.children.iter().for_each(|c| gather_nodes(c, out));
+    n.children.iter().for_each(|c| gather_nodes(c, leader, out));
 }
 
 /// `estimate` of a sub-select's plan (a level of its own): every `Outer(d, ..)` in it is a

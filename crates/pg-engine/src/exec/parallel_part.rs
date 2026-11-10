@@ -187,6 +187,11 @@ pub struct Gather {
     pub workers: usize,
     pub rels: Arc<[u32]>,
     pub initplans: Arc<[Expr]>,
+    /// The part's Parallel Hash Joins (their tables sized as PostgreSQL's shared ones).
+    pub parallel_hashes: Arc<[crate::sql::explain::ParallelHash]>,
+    /// The part's Merge Joins EXPLAIN plans as Parallel Hash Joins, which nothing above
+    /// reads in their order (`merge_hashes`).
+    pub merge_hashes: Arc<[usize]>,
 }
 
 /// The statement's Gathers (none for a plan no Gather can be part of: `may_gather`'s
@@ -195,14 +200,14 @@ pub fn gathers(plan: &Arc<Plan>, rels: &[(u32, crate::txn::locks::LockMode)], ct
     if !crate::sql::paths::parallel::may_gather(plan, rels, ctx) {
         return Vec::new();
     }
-    of_explain(plan, crate::sql::explain::gathers(plan, ctx))
+    of_explain(plan, crate::sql::explain::gathers(plan, ctx), ctx)
 }
 
 /// The Gathers `explain::gathers` found in `plan`, with the relations each part opens.
-pub fn of_explain(plan: &Arc<Plan>, found: Vec<(Option<usize>, usize)>) -> Vec<Gather> {
+pub fn of_explain(plan: &Arc<Plan>, found: Vec<crate::sql::explain::GatherAt>, ctx: &ExecCtx) -> Vec<Gather> {
     found
         .into_iter()
-        .map(|(part, workers)| {
+        .map(|crate::sql::explain::GatherAt { part, workers, parallel_hashes }| {
             let mut rels = Vec::new();
             if let Some(p) = part.and_then(|k| find(plan, k)) {
                 part_rels(p, &mut rels);
@@ -211,9 +216,69 @@ pub fn of_explain(plan: &Arc<Plan>, found: Vec<(Option<usize>, usize)>) -> Vec<G
             if let Some(p) = part.and_then(|k| find(plan, k)) {
                 part_initplans(p, &mut initplans);
             }
-            Gather { part, workers, rels: rels.into(), initplans: initplans.into() }
+            let mut merge = Vec::new();
+            if !parallel_hashes.is_empty()
+                && let Some(p) = part.and_then(|k| find(plan, k))
+            {
+                merge_hashes(p, false, &parallel_hashes, ctx, &mut merge);
+            }
+            Gather {
+                part,
+                workers,
+                rels: rels.into(),
+                initplans: initplans.into(),
+                parallel_hashes: parallel_hashes.into(),
+                merge_hashes: merge.into(),
+            }
         })
         .collect()
+}
+
+/// A merge join's input without the Sort the merge put on it.
+pub fn unsorted(p: &Arc<Plan>) -> &Arc<Plan> {
+    match &**p {
+        Plan::Sort { input, .. } => input,
+        _ => p,
+    }
+}
+
+/// The inner Merge Joins of `p` (a Gather's part) that EXPLAIN plans as Parallel Hash Joins
+/// of the same sides (`ph`: the hash on the merge's unsorted inner input, the outer one
+/// outside) and whose order nothing above reads (`free`: below a Sort, or a sorted grouping
+/// whose results don't depend on its rows' order, through projections and filters): run by
+/// hashing, their rows come out in no order.
+fn merge_hashes(p: &Arc<Plan>, free: bool, ph: &[crate::sql::explain::ParallelHash], ctx: &ExecCtx, out: &mut Vec<usize>) {
+    match &**p {
+        Plan::Sort { input, .. } => merge_hashes(input, true, ph, ctx, out),
+        Plan::Agg { input, groups, sets: None, aggs } => {
+            // (count, exact sums and averages, min / max: the same whatever order the rows
+            // come in; groups put out sorted on their keys, distinct, a GroupAggregate's.)
+            let exact = aggs.iter().all(|a| {
+                a.user.is_none()
+                    && a.order_by.is_empty()
+                    && a.direct.is_empty()
+                    && matches!(a.def.sig.name, "count" | "sum" | "avg" | "min" | "max")
+                    && !a.arg_types.iter().any(|t| matches!(t, crate::types::DataType::Float4 | crate::types::DataType::Float8))
+            });
+            let free = free || (exact && (groups.is_empty() || super::pghash::agg_estimate(p, ctx).sorted.is_some()));
+            merge_hashes(input, free, ph, ctx, out)
+        }
+        Plan::Project { input, .. } | Plan::Filter { input, .. } => merge_hashes(input, free, ph, ctx, out),
+        Plan::Join { kind: crate::sql::plan::JoinKind::Inner, left, right, hash: Some(_), params, meta, .. }
+            if free
+                && params.is_empty()
+                && !meta.swapped
+                && meta.method == Some(crate::sql::plan::JoinMethod::Merge)
+                && ph.iter().any(|h| {
+                    h.inner == Arc::as_ptr(unsorted(right)) as usize && h.outer == Some(Arc::as_ptr(unsorted(left)) as usize)
+                }) =>
+        {
+            out.push(Arc::as_ptr(p) as usize);
+            merge_hashes(left, false, ph, ctx, out);
+            merge_hashes(right, false, ph, ctx, out);
+        }
+        _ => inputs(p).into_iter().for_each(|c| merge_hashes(c, false, ph, ctx, out)),
+    }
 }
 
 /// The plan's inputs (what `Plan::writes` looks through).
@@ -322,6 +387,8 @@ pub fn prepare(gathers: &[Gather], exclusive: &[usize], ctx: &ExecCtx) {
         let alone = exclusive.contains(&key);
         (alone || !g.initplans.is_empty()).then(|| Part { key, initplans: g.initplans.clone(), alone })
     }).collect();
+    *ctx.parallel_hashes.borrow_mut() = gathers.iter().filter(|g| g.workers > 0).flat_map(|g| g.parallel_hashes.iter().copied()).collect();
+    *ctx.merge_hashes.borrow_mut() = gathers.iter().filter(|g| g.workers > 0).flat_map(|g| g.merge_hashes.iter().copied()).collect();
 }
 
 /// The workers a statement's Gathers launch as other backends see them (pg_stat_activity's

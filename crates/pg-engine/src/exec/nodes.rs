@@ -541,7 +541,25 @@ fn open_node(plan: &Arc<Plan>, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<B
             nright,
             meta,
         } => {
-            if let Some((lk, rk)) = hash
+            if let Some((left, right, meta)) = merge_as_parallel_hash(plan, ctx)
+                && let Some((lk, rk)) = hash
+            {
+                // A Merge Join PostgreSQL runs as a Parallel Hash Join under its Gather: the
+                // inner side hashed unsorted, the outer side read in no order.
+                Box::new(HashJoinNode::new(
+                    *kind,
+                    open_need(&left, nd::join_left(need, *nleft, lk, cond.as_ref()), ctx)?,
+                    left,
+                    right,
+                    lk.clone(),
+                    rk.clone(),
+                    cond.clone(),
+                    *nleft,
+                    *nright,
+                    &meta,
+                    need,
+                ))
+            } else if let Some((lk, rk)) = hash
                 && params.is_empty()
                 && meta.swapped
                 && matches!(kind, JoinKind::Semi | JoinKind::Anti)
@@ -5412,6 +5430,57 @@ struct Batching {
     cat: Arc<crate::catalog::Catalog>,
 }
 
+/// A Merge Join of a Gather's part that PostgreSQL's plan has as a Parallel Hash Join
+/// (`ExecCtx::merge_hashes`): its inputs as that join reads them (the merge's Sorts left
+/// out; a full index scan of the outer table read as the Parallel Seq Scan it is there)
+/// and its meta as a hash join's, the table sized from the Parallel Hash's estimate. Not
+/// under EXPLAIN ANALYZE, whose counters are kept by the plan's own nodes.
+fn merge_as_parallel_hash(plan: &Arc<Plan>, ctx: &ExecCtx) -> Option<(Arc<Plan>, Arc<Plan>, crate::sql::plan::JoinMeta)> {
+    use crate::sql::plan::{Access, JoinMethod};
+    if ctx.instrumented() || !ctx.merge_hashes.borrow().contains(&(Arc::as_ptr(plan) as usize)) {
+        return None;
+    }
+    let Plan::Join { left, right, meta, .. } = &**plan else { return None };
+    let (left, right) = (super::parallel_part::unsorted(left), super::parallel_part::unsorted(right));
+    let ph = ctx.parallel_hashes.borrow().iter().find(|h| h.inner == Arc::as_ptr(right) as usize).copied()?;
+    let left = match &**left {
+        Plan::Scan(sp) if ph.outer_seq && !matches!(sp.access, Access::Seq) => {
+            let full = match (&sp.access, &sp.index) {
+                (Access::Index { only: false, quals, .. }, Some((_, b))) => {
+                    quals.is_empty() && b.eq.is_empty() && b.any.is_none() && b.lower.is_none() && b.upper.is_none() && b.skip.is_none()
+                }
+                _ => false,
+            };
+            if !full
+                || sp.with_key
+                || sp.mark.is_some()
+                || sp.limit.is_some()
+                || sp.sample.is_some()
+                || sp.current_of.is_some()
+                || sp.fdw.is_some()
+            {
+                return None;
+            }
+            Arc::new(Plan::Scan(Box::new(crate::sql::plan::ScanPlan {
+                index: None,
+                reverse: false,
+                access: Access::Seq,
+                ..(**sp).clone()
+            })))
+        }
+        Plan::Scan(_) => left.clone(),
+        _ if ph.outer_seq => return None,
+        _ => left.clone(),
+    };
+    let mut m = meta.clone();
+    m.method = Some(JoinMethod::Hash);
+    m.hash_inner = Some((ph.rows_total, ph.width));
+    m.hash_buckets = None;
+    m.merge_dirs = Vec::new();
+    m.scansel = None;
+    Some((left, right.clone(), *m))
+}
+
 /// What a join's output needs copied: `need` and the columns its condition reads.
 fn join_keep(need: Option<&[bool]>, cond: Option<&Expr>, width: usize) -> Option<Box<[bool]>> {
     let mut k: Vec<bool> = need?.to_vec();
@@ -5768,7 +5837,15 @@ impl HashJoinNode {
         let keep_nulls = matches!(self.kind, JoinKind::Right | JoinKind::Full);
         // (create_hashjoin_plan's skew column: one clause, over an outer column.)
         let useskew = skew_column(&self.lkeys).is_some_and(|c| crate::sql::explain::pwagg::origin(&self.left_plan, c).is_some());
-        let mut hj = super::hashjoin::HashTable::new(est.0, est.1, useskew, ctx);
+        // (A Parallel Hash's table is shared by the participants: their combined hash_mem
+        // when it holds the table whole.)
+        let shared = ctx
+            .parallel_hashes
+            .borrow()
+            .iter()
+            .find(|p| p.inner == Arc::as_ptr(&self.right_plan) as usize)
+            .and_then(|p| super::hashjoin::HashTable::new_shared(p, ctx));
+        let mut hj = shared.unwrap_or_else(|| super::hashjoin::HashTable::new(est.0, est.1, useskew, ctx));
         if useskew && hj.wants_skew() {
             hj.build_skew(&skew_mcvs(&self.left_plan, &self.lkeys, ctx));
         }

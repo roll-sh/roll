@@ -2009,7 +2009,7 @@ impl Session {
                         }
                         None => crate::sql::explain::total_and_gathers(&bq.plan, ctx),
                     };
-                    let gathers = crate::exec::parallel_part::of_explain(&bq.plan, found);
+                    let gathers = crate::exec::parallel_part::of_explain(&bq.plan, found, ctx);
                     let _ = bq.gathers.set((bq.plan.clone(), gathers.into()));
                     let _ = bq.cost.set((bq.plan.clone(), t));
                     t

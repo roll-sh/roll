@@ -3361,6 +3361,84 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
     - Item 2's batches past the scan (joined rows from batches, the probe hits aggregated from
       columns), item 4 (streaming merge joins) and item 5 (work_mem for hash tables and sorts)
       are not started.
+- **Executor, round 12, batch 1: Parallel Hash tables and merge joins PostgreSQL hashes in
+  parallel** (agent 200; BENCH.md "Executor, round 12"):
+  - **Baseline on origin's head `a96bce378`** (three interleaved rounds, quiet machine): TPC-H
+    SF1 13.60 s against PostgreSQL's 11.34 s (1.20x), CPU 34.3 s against 28.8 s, peak
+    1,862-1,883 MB. The largest gaps by wall time: q02 +0.59 s, q13 +0.35, q14 +0.27, q20
+    +0.27, q12 +0.26; by CPU: q13 +1.10 s, q12 +1.01, q17 +0.83, q07 +0.55, q22 +0.51.
+  - **Parallel Hash tables sized as PostgreSQL's shared ones** (`explain::GatherAt`,
+    `explain::ParallelHash`, `parallel_part::Gather::parallel_hashes`,
+    `ExecCtx::parallel_hashes`, `hashjoin::HashTable::new_shared`): EXPLAIN's Gathers now also
+    name the Parallel Hash Joins of their parts (the Parallel Hash's plan node, its rows_total
+    as EXPLAIN ANALYZE sizes it, its width and the planned workers). The executor's hash join
+    over that inner side sizes its table as ExecChooseHashTableSize does with
+    try_combined_hash_mem: the participants' combined hash_mem when the whole table fits it
+    (one batch), else the private table as before. q14's 200,000 part rows went to 2+ batches
+    in a private table of hash_mem (8 MB), and every batch after the first was probed on the
+    executor's thread from its files (`next_batch`, `RowReader`); PostgreSQL's Parallel Hash
+    holds them in one batch (24 MB). Now the probes all run in the workers: q14 -15% to -16%
+    user instructions in every round.
+  - **Merge joins PostgreSQL's plan has as Parallel Hash Joins** (`exec::nodes`
+    `merge_as_parallel_hash`, `parallel_part::merge_hashes`, `ExecCtx::merge_hashes`): the
+    executor runs the serial plan, and q12's serial join is a Merge Join over a full
+    `orders_pkey` index scan (1.5M heap fetches) and a sorted lineitem scan, while PostgreSQL's
+    (and EXPLAIN's) plan under its Gather Merge is a Parallel Hash Join over two Parallel Seq
+    Scans. An inner Merge Join of a Gather's part that EXPLAIN plans as a Parallel Hash Join of
+    the same sides (the hash on the merge's unsorted inner input, the outer side's plan node
+    the same) now runs as that hash join: the merge's Sorts left out, a full index scan of the
+    outer table (no index conditions, bounds, row marks, LIMIT, sample, cursor or foreign
+    pushdown; not index-only) read as the sequential scan PostgreSQL reads, the table sized
+    from the Parallel Hash's estimate, the probes in the workers. Only when nothing above
+    reads the join's order: the walk from the part's top passes a Sort, or a grouping whose
+    groups come out sorted on their keys (a GroupAggregate's, or no keys) and whose
+    aggregates don't depend on the rows' order (count, sum, avg, min, max, not of float4 /
+    float8, no ORDER BY, DISTINCT is fine, no user aggregates or grouping sets), through
+    projections and filters. Not under EXPLAIN ANALYZE (its counters are the plan's nodes').
+    q12 0.93 -> 0.42 s against PostgreSQL's 0.52 (CPU 3.05 -> 1.28 s against 1.43), -70% to
+    -76% user instructions in every round; pg_stat now counts orders' sequential scan, as
+    PostgreSQL does, instead of an `orders_pkey` index scan of 1.5M tuples (PostgreSQL still
+    counts a parallel seq scan once per participant, the engine once).
+  - Gate (BENCH.md has the tables): the 22 queries' user instructions a run (`perf stat
+    -e instructions:u`, fresh engines, alternating): q12 -70.3% and q14 -15.8%; three more
+    rounds of the affected ones q12 -73.7 / -75.1 / -76.0%, q14 -14.7 / -14.9 / -14.1%, q05,
+    q13 and q16 (Parallel Hash Joins that already fit) within 0.8%; every other query within
+    +-1.6% (q03, q08 and q18 rechecked over three rounds: +-0.8%). Sum of instructions
+    362.6 -> 337.5 x 10^9. Wall and CPU time over three interleaved rounds: 14.83 -> 14.57 s
+    and 38.5 -> 37.5 s on a moderately loaded machine, 21.63 -> 19.46 s and 56.8 -> 51.1 s on
+    a heavily loaded one (wall times moved by up to 2x between runs; the instructions are the
+    measure). Peak memory 1,866-1,873 MB against 1,865-1,875. All 22 result hashes equal
+    PostgreSQL's in every round. Point read and short transaction smoke runs (100,000 rows,
+    8 clients, 10 s, eight runs of base and seven of new, alternating): point_select 65.6k
+    against 66.0k user instructions an operation, short_txn 329k against 337k (medians; the
+    runs' spreads, 65.0-68.4k / 64.1-66.6k and 285-343k / 300-354k, overlap the difference);
+    ops/s moved with another tenant's verification train pinned to CPUs 8-17 (point 89k
+    against 83k, short 12.2k against 11.6k, each side's runs spanning 77-94k and 11.2-13.1k).
+    Nothing on those paths changed but two empty vectors set once per statement.
+  - Tests (release, rebased on `16eccc605`): build; lib 211 passed; parallel_scan 11 passed
+    (its merge join over a full pkey scan, `parallel_fetches_match_serial`, and the join
+    queries); golden, golden_wire, golden_shuffled passed; big_tables 19 passed on its rerun
+    (the first run's `deferred_entry_deletes` failed its `DELETE_RUNS` counter check, which a
+    process-global spill-size setting shared with the concurrently running tests can race;
+    alone and in a second full run it passes); all-target Clippy with no warning in the
+    changed code (19, all in code this batch didn't touch); regress subset create_index,
+    join, join_hash, aggregates, subselect, select_parallel, partition_aggregate,
+    partition_join, groupingsets, window, union, select_distinct, limit, with, bitmapops,
+    stats_ext, explain against a private PostgreSQL 18.6: 6,161/6,162 units, no unit newly
+    differing against the baseline.
+  - Left (next steps):
+    - The point lookups of the workers' joins and nested loops (`Store::get_versions_with` ->
+      `point::newest` -> `point::file_get`, `Block::seek`) are 45-60% of q07's, q21's, q03's
+      and q04's samples, all in the workers: the largest remaining analytics cost (point-read
+      owners).
+    - Hash builds still run on the executor's thread (q14's part, 27% of its samples; q16's
+      filtered part, 20%): a Parallel Hash's build by the participants. A batch's table is
+      made twice (`HashTable::build_insert` then `load_batch`'s keys again and
+      `pipe::Built::new`).
+    - q13's merge of parts on the executor's thread (189's note stands), q02's serial hash
+      join batches re-decoding spilled rows, q20 / q02's index nested loops.
+    - Merge joins that EXPLAIN plans otherwise in parallel (a Parallel Hash Join the other way
+      round, a partial merge join) keep their serial shape.
 - **Deep input** (round 19, agent 63; `src/stack.rs`, `tests/deep_input.rs`): the engine no
   longer overflows the stack of the thread that runs it, however deep the input nests. A
   host's 2 MB thread or a test harness thread is safe. Before, 400 `+` terms aborted the
