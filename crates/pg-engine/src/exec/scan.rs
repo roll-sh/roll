@@ -605,6 +605,7 @@ pub fn open_scan(s: &ScanPlan, shared: Option<&Arc<crate::sql::plan::Plan>>, nee
             lazy: None,
             kfilter: None,
             implied: false,
+            point: false,
             proj: None,
             erb: Default::default(),
             spare: None,
@@ -701,6 +702,7 @@ pub fn open_scan(s: &ScanPlan, shared: Option<&Arc<crate::sql::plan::Plan>>, nee
             lazy: None,
             kfilter: None,
             implied: false,
+            point: false,
             proj: None,
             erb: Default::default(),
             spare: None,
@@ -787,6 +789,7 @@ pub fn open_scan(s: &ScanPlan, shared: Option<&Arc<crate::sql::plan::Plan>>, nee
             lazy: None,
             kfilter: None,
             implied: false,
+            point: false,
             proj: None,
             erb: Default::default(),
             spare: None,
@@ -901,6 +904,7 @@ fn open_scan_as(
     let Bound { ranges, kills, ios_entries, skip, stat } = bind_scan(s, ranges, only.is_some(), rev, ctx)?;
     let ios = matches!(s.access, Access::Index { only: true, .. }) && ctx.instrumented();
     let implied = secondary && only.is_none() && filter_implied(s, ctx);
+    let point = secondary && only.is_none() && ios_cols.is_none() && !ios && unique_point(s, ctx);
     Ok(Box::new(ScanNode {
         stat,
         sample,
@@ -941,6 +945,7 @@ fn open_scan_as(
         lazy: None,
         kfilter: None,
         implied,
+        point,
         proj: None,
         erb: Default::default(),
         spare: None,
@@ -959,6 +964,57 @@ fn open_scan_as(
         am: None,
         one_run: collation_equal_run(s),
     }))
+}
+
+/// Whether index scan `s` reads one key of a unique index: `=` on every key column of a valid
+/// btree index that a non-deferrable constraint (or none) keeps unique, plain integer columns
+/// compared with values of their own types. At an MVCC snapshot such a key has at most one
+/// visible row: the rows of its other entries are versions the snapshot doesn't see. Not
+/// under a row mark or for an UPDATE's or DELETE's rows (their newer versions are followed),
+/// nor where serializable reads take predicate locks.
+fn unique_point(s: &ScanPlan, ctx: &ExecCtx) -> bool {
+    use crate::catalog::{ConstraintKind, IndexKey};
+    use crate::types::DataType as T;
+    let (Some((ix, b)), Access::Index { only: false, .. }) = (&s.index, &s.access) else {
+        return false;
+    };
+    if ix.method != "btree"
+        || !ix.unique
+        || !ix.valid
+        || ix.not_ready
+        || ix.predicate.is_some()
+        || b.eq.len() != ix.columns.len()
+        || b.any.is_some()
+        || b.skip.is_some()
+        || b.lower.is_some()
+        || b.upper.is_some()
+        || !b.order.is_empty()
+        || s.mark.is_some()
+        || s.with_key
+        || s.sys
+        || s.reverse
+        || s.limit.is_some()
+        || s.current_of.is_some()
+        || s.sample.is_some()
+        || ctx.snapshot().is_none()
+        || predicate_locked(&s.table, ctx)
+    {
+        return false;
+    }
+    let keys = ix.columns.iter().zip(&b.eq).enumerate().all(|(i, (c, v))| {
+        let IndexKey::Column(col) = c.key else { return false };
+        let Some(ty) = s.table.columns.get(col).map(|c| &c.ty) else { return false };
+        matches!(ty, T::Int2 | T::Int4 | T::Int8)
+            && v.ty() == *ty
+            && c.opclass == 0
+            && c.collation.is_none()
+            && b.coll(i).is_none()
+            && b.pad(i).is_none()
+    });
+    // (A deferrable constraint's index may hold several of a key until the check is due.)
+    keys && !s.table.constraints.iter().any(|c| {
+        c.deferrable && matches!(c.kind, ConstraintKind::PrimaryKey { index } | ConstraintKind::Unique { index } if index == ix.oid)
+    })
 }
 
 /// Whether every conjunct of scan `s`'s filter is one of its index conditions that its key
@@ -1902,6 +1958,7 @@ fn dense_bitmap_scan(
         lazy: None,
         kfilter: None,
         implied: false,
+        point: false,
         proj: None,
         erb: Default::default(),
         spare: None,
@@ -2388,6 +2445,10 @@ struct ScanNode {
     /// Such a scan read by worker threads (`parscan`), once decided (`par_tried`).
     par: Option<super::parscan::ParScan>,
     par_tried: bool,
+    /// The range is one key of a unique index (`unique_point`): at most one row of it is
+    /// visible, so the scan reads its entries one at a time, ends at that row and takes no
+    /// workers.
+    point: bool,
     /// An index scan's run of rows with equal keys, in heap order.
     run: std::collections::VecDeque<(Vec<u8>, bytes::Bytes)>,
     /// The index entry that ended the last run (it starts the next).
@@ -3236,7 +3297,7 @@ impl ScanNode {
                     return Ok(Some((k, dkey, row)));
                 }
             }
-            let want = if ctx.snapshot().is_some() { self.batch } else { 1 };
+            let want = if ctx.snapshot().is_some() && !self.point { self.batch } else { 1 };
             let mut ents: Vec<(Vec<u8>, Vec<u8>)> = Vec::with_capacity(want);
             while ents.len() < want {
                 if self.iter.is_none() && !self.open_range(ctx) {
@@ -5031,7 +5092,7 @@ impl Node for ScanNode {
         }
         if !self.par_tried {
             self.par_tried = true;
-            if self.sorted.is_none() && !self.streamed {
+            if self.sorted.is_none() && !self.streamed && !self.point {
                 self.par = self.start_parallel(None, Vec::new(), super::Computed::default(), ctx)?;
             }
         }
@@ -5066,6 +5127,17 @@ impl Node for ScanNode {
             let r = self.emit(key, bytes, ctx);
             self.rb = rb;
             if let Some(row) = r? {
+                // (Debug builds read on, and check that the key has no other visible row.)
+                debug_assert!(!self.point || self.emitted <= 1, "a second visible row of a unique key");
+                if self.point && !cfg!(debug_assertions) {
+                    // (The key's one visible row: the range is done, its entries after it
+                    // name versions the snapshot doesn't see.)
+                    self.cur_range = self.ranges.len();
+                    self.fetched.clear();
+                    if let Some(it) = self.iter.take() {
+                        self.spare = Some(it);
+                    }
+                }
                 return Ok(Some(row));
             }
         }
@@ -5946,6 +6018,7 @@ fn keyed_scan(s: &ScanPlan, plan: ScanPlan, ix: &Index, keys: Keys, ctx: &ExecCt
         lazy: None,
         kfilter: None,
         implied: false,
+        point: false,
         proj: None,
         erb: Default::default(),
         spare: None,
