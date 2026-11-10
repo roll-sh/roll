@@ -1375,11 +1375,20 @@ impl Txn {
     }
 
     /// `f` of `catalog()`, without taking a reference to it (a count every session's
-    /// statements share) unless a detach-pending view has to be made.
+    /// statements share) unless a detach-pending view has to be made. (`f` may run under
+    /// the database's catalog lock: it must not publish a catalog.)
     pub fn with_catalog<R>(&self, f: impl FnOnce(&Arc<Catalog>) -> R) -> R {
         match (&self.catalog, &self.read_catalog) {
             (Some(c), _) => f(c),
             (None, Some(c)) if !self.stmt_snapshot || !c.has_detach_pending() => f(c),
+            (None, None) => {
+                let c = self.db.catalog.read();
+                if !self.stmt_snapshot || !c.has_detach_pending() {
+                    return f(&c);
+                }
+                drop(c);
+                f(&self.catalog())
+            }
             _ => f(&self.catalog()),
         }
     }
