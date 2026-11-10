@@ -604,6 +604,7 @@ pub fn open_scan(s: &ScanPlan, shared: Option<&Arc<crate::sql::plan::Plan>>, nee
             filter_cols: None,
             lazy: None,
             kfilter: None,
+            implied: false,
             erb: Default::default(),
             spare: None,
             fscan: None,
@@ -698,6 +699,7 @@ pub fn open_scan(s: &ScanPlan, shared: Option<&Arc<crate::sql::plan::Plan>>, nee
             filter_cols: None,
             lazy: None,
             kfilter: None,
+            implied: false,
             erb: Default::default(),
             spare: None,
             fscan: None,
@@ -782,6 +784,7 @@ pub fn open_scan(s: &ScanPlan, shared: Option<&Arc<crate::sql::plan::Plan>>, nee
             filter_cols: None,
             lazy: None,
             kfilter: None,
+            implied: false,
             erb: Default::default(),
             spare: None,
             fscan: None,
@@ -894,6 +897,7 @@ fn open_scan_as(
         !clustered && only.is_none() && (s.index.is_none() || secondary || heap_read);
     let Bound { ranges, kills, ios_entries, skip, stat } = bind_scan(s, ranges, only.is_some(), rev, ctx)?;
     let ios = matches!(s.access, Access::Index { only: true, .. }) && ctx.instrumented();
+    let implied = secondary && only.is_none() && filter_implied(s, ctx);
     Ok(Box::new(ScanNode {
         stat,
         sample,
@@ -933,6 +937,7 @@ fn open_scan_as(
         filter_cols: None,
         lazy: None,
         kfilter: None,
+        implied,
         erb: Default::default(),
         spare: None,
         fscan: None,
@@ -950,6 +955,62 @@ fn open_scan_as(
         am: None,
         one_run: collation_equal_run(s),
     }))
+}
+
+/// Whether every conjunct of scan `s`'s filter is one of its index conditions that its key
+/// range applies exactly, so no row the range returns can fail it (create_indexscan_plan
+/// drops such quals from the qpqual): `=` or a range bound on a plain integer key column
+/// of a btree index, compared with a value of the column's own type, the bound built from
+/// that very value. Read at the statement's snapshot, the entries are the rows' values
+/// there; not under a row mark, whose newer versions are checked against the filter.
+fn filter_implied(s: &ScanPlan, ctx: &ExecCtx) -> bool {
+    use crate::catalog::IndexKey;
+    use crate::types::DataType as T;
+    let (Some(f), Some((ix, b)), Access::Index { quals, only: false, .. }) = (&s.filter, &s.index, &s.access) else {
+        return false;
+    };
+    if ix.method != "btree"
+        || s.mark.is_some()
+        || s.current_of.is_some()
+        || s.sample.is_some()
+        || ctx.snapshot().is_none()
+        || b.any.is_some()
+        || b.skip.is_some()
+        || !b.order.is_empty()
+    {
+        return false;
+    }
+    let exact = |q: &crate::sql::plan::IndexQual| {
+        let Expr::Call(def, args, _) = &q.expr else { return false };
+        let ([Expr::Col(col, ty), v], Some(c)) = (args.as_slice(), ix.columns.get(q.col)) else { return false };
+        if q.lossy
+            || !matches!(ty, T::Int2 | T::Int4 | T::Int8)
+            || v.ty() != *ty
+            || !matches!(c.key, IndexKey::Column(i) if i == *col)
+            || c.opclass != 0
+            || c.collation.is_some()
+            || b.coll(q.col).is_some()
+            || b.pad(q.col).is_some()
+        {
+            return false;
+        }
+        let bound = |x: &Option<(Expr, bool)>, incl: bool| {
+            q.col == b.eq.len() && x.as_ref().is_some_and(|(e, i)| *i == incl && e.same_as(v))
+        };
+        match def.name {
+            "=" => b.eq.get(q.col).is_some_and(|e| e.same_as(v)),
+            ">=" => bound(&b.lower, true),
+            ">" => bound(&b.lower, false),
+            "<=" => bound(&b.upper, true),
+            "<" => bound(&b.upper, false),
+            _ => false,
+        }
+    };
+    let conj: Vec<&Expr> = match f {
+        Expr::And(a) => a.iter().collect(),
+        e => vec![e],
+    };
+    conj.iter().all(|c| quals.iter().any(|q| q.orig.same_as(c) && exact(q)))
 }
 
 /// What a scan over its ranges starts with, at open and again at each rescan.
@@ -1836,6 +1897,7 @@ fn dense_bitmap_scan(
         filter_cols: None,
         lazy: None,
         kfilter: None,
+        implied: false,
         erb: Default::default(),
         spare: None,
         fscan: None,
@@ -2299,6 +2361,9 @@ struct ScanNode {
     /// The filter's kernel, run over a row made before `eval` (an index scan's rows: their
     /// conditions checked again), once compiled; None inside: it has none.
     kfilter: Option<Option<(super::kernel::K, Option<super::kernel::StoredCmps>)>>,
+    /// The filter is exactly the index conditions the scan's key range applies
+    /// (`filter_implied`): not checked again on the rows it returns.
+    implied: bool,
     /// An index scan's entries read a batch at a time (`next_indexed`).
     erb: crate::storage::batch::RowBatch,
     /// The last range's store iterator once it ended, for the next range to read on with
@@ -5000,6 +5065,7 @@ impl ScanNode {
         let mut probed: Option<(Row, Rc<[bool]>)> = None;
         if lazy.is_none()
             && self.ios_cols.is_none()
+            && !self.implied
             && let Some(fm) = self.prefilter_mask().or_else(|| self.external_prefilter(bytes))
             && !predicate_locked(&self.plan.table, ctx)
             && self.plan.filter.is_some()
@@ -5077,7 +5143,13 @@ impl ScanNode {
             let me = ctx.txn.borrow().id;
             ctx.sess.db.ssi.read_row(me, self.plan.table.oid, key)?;
         }
+        // (A filter the key range applies exactly holds: checked again in debug builds.)
+        debug_assert!(
+            !self.implied || self.plan.filter.as_ref().is_none_or(|f| eval_bool(f, &row, ctx).unwrap_or(true)),
+            "a row outside its index range"
+        );
         if !prefiltered
+            && !self.implied
             && self.plan.filter.is_some()
             && !match self.filter_kernel(bytes, Some(&row)) {
                 Some(pass) => pass,
@@ -5802,6 +5874,7 @@ fn keyed_scan(s: &ScanPlan, plan: ScanPlan, ix: &Index, keys: Keys, ctx: &ExecCt
         filter_cols: None,
         lazy: None,
         kfilter: None,
+        implied: false,
         erb: Default::default(),
         spare: None,
         fscan: None,
