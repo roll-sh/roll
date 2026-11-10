@@ -285,6 +285,64 @@ The current checked measurements compare release engine builds and PostgreSQL 18
 the wire. Older rounds below are historical records, with their original methods and
 limits. Their results have not been reverified on the current source.
 
+## Short write transactions, round 1 (2026-11-10, agent 197)
+
+HANDOFF.md, "Short write transactions, round 1", has what changed. `short_txn`: 100,000
+accounts; per transaction a simple `BEGIN`, the prepared `UPDATE accounts SET balance =
+balance + $2 WHERE id = $1`, `SELECT balance FROM accounts WHERE id = $1` and `INSERT INTO
+events (account, delta) VALUES ($1, $2)`, a simple `COMMIT`. Agent 195's harness
+(`~/.cache/a197/bench`): dist builds in a debian container on CPUs 16-19 (8 GiB, `--cpu-shares
+2`), the client on 20-23, a fresh data directory per run, 2 s warmup, 10 s measured, events
+and balances checked against the client's count afterwards, fsync and synchronous_commit on;
+user instructions per operation from `perf stat -e instructions:u` over 9 s, server CPU from
+the container's cgroup; a pair is run again when another tenant used more than 0.3 cores of
+16-19. **base** is `aef3a18b2`, **new** this round's nine commits (agent 195's pruning in
+place included). Five alternating pairs, 8 clients:
+
+| pair | base ops/s | new ops/s | base us CPU / op | new us CPU / op | base instr / op | new instr / op |
+|---|---:|---:|---:|---:|---:|---:|
+| 1 | 12,858 | 13,526 | 257.8 | 243.7 | 356k | 330k (-7.2%) |
+| 2 | 12,046 | 13,849 | 272.0 | 240.6 | 348k | 335k (-3.7%) |
+| 3 | 11,523 | 12,611 | 282.7 | 262.2 | 363k | 329k (-9.4%) |
+| 4 | 12,773 | 13,521 | 258.0 | 242.1 | 346k | 332k (-4.0%) |
+| 5 | 12,334 | 13,444 | 267.3 | 245.4 | 359k | 338k (-6.0%) |
+
+Medians: +9.6% ops/s (12,334 -> 13,521), -8.8% server CPU per operation (267.3 -> 243.7 us),
+-6.7% user instructions and -6.8% user cycles per operation; p50 0.565 -> 0.526 ms, p99
+2.33 -> 1.91 ms. One client, five pairs (another tenant used 0.34-1.31 cores of 16-19 in
+most of them even after four tries each): every pair better, median 2,456 -> 2,672 ops/s,
+369.9 -> 343.9 us CPU / op, 464k -> 428k instructions / op (-4.2% to -11.2%).
+
+The same run's instruction count varies by 2-3% (5% at 8 clients) between runs of one
+binary: how much the heap model prunes and background compaction move with timing. Each
+commit was also measured alone (three alternated one-client rounds, the instructions of
+the connection threads sampled every 100,003 and summed by symbol, so an item's own
+functions show its effect where the whole count can't):
+
+| commit | whole count / op | its functions / op |
+|---|---:|---:|
+| prune the heap model in place (agent 195) | -6.0% | `prune_with` and the line pointers |
+| single-row INSERT: no deferred-insert registration | -1.4% | -0.9k (`model_deferrable`, `CopyLoad`) |
+| catalog version without a catalog reference | (noise) | -1.2k (`Txn::catalog`) |
+| lock bookkeeping without regrowth | -1.6% | -1.8k (`Txn::lock`, rehash), +0.7k `accept_catalog` |
+| BEGIN / COMMIT text parsed once per session | -1.2% | -2.1k (the parser) |
+| btree model: decode only what a walk reads | (noise) | -0.5k (`Leaf`, `kill_walk`, `insert_pos`) |
+| merge sources, activity state, catalog before a statement | (noise) | -0.1k, -0.3k, -0.3k |
+
+Dropped: reading the published catalog in place for the session's search path (agent 195's
+search-path item): no fewer instructions (its functions -0.2k, the whole count +0.9%); kept
+as `~/.cache/a197/patches/`.
+
+**Where the user CPU still goes** (base, LBR call stacks, 109k user samples, 167.8 us user
+per transaction): `run_query` 114 us, of which the nodes' `next` 40 (UPDATE 40: its index
+scan 25, the heap model's prune on fetch 6.6, `mark_passed`'s kill walk 4.0, the model's
+update 4.6), INSERT 24 (the identity primary key's unique check 7.8, the heap and btree
+models 8.0, of which btree inserts 4.7), node open 11.1; COMMIT 18 (of which the memtable
+skiplist insert under the commit mutex 5.7, its key compares about half, `release_locks`
+3.0); Bind 6.4 (Describe at Bind 3.2); `begin_statement` 3.4; privilege checks and relation
+locks 2.7; `with_search_path` 1.9; mimalloc 12 us over all (allocation's free-list pop, cache
+misses), libc's `memcmp` / `memcpy` about 18.
+
 ## Planner, round 13 (2026-11-10, agent 196)
 
 HANDOFF.md, "Planner round 13", has what changed: a reused custom plan's scan is chosen again

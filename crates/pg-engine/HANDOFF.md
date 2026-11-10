@@ -9361,6 +9361,66 @@ when it loses; an index none of whose key columns a clause reads still runs
 `Planner::endpoint`'s reverse scan expands a whole SST block (0.4%); Describe at Bind
 (`describe_here`, 1.1%) is per-Bind work outside planning.
 
+## Short write transactions, round 1 (agent 197)
+
+BENCH.md "Short write transactions, round 1" has the measurements: `short_txn` at 8 clients
+takes 6.7% fewer user instructions per transaction (every one of five alternating pairs
+3.7-9.4%), 8.8% less server CPU and 9.6% more transactions per second; one client gains too.
+What changed, each its own commit:
+
+- Agent 195's heap-model pruning in place (`heapsim::Lps`): a page's line pointers are no
+  longer copied out and back to prune it.
+- `InsertNode::new`: `model_deferrable` runs once, and only where its answer is read; a
+  source of at most one row (`at_most_one_row`: `One`, a one-row `VALUES`, a `Project` of
+  either) registers no `CopyLoad::deferred_inserts`. That registration (defer `None`, mode
+  `single`) changes nothing a row does: the store's insert path finds the same mode without
+  it, and only a sink, which needs 10,000 rows, reads it. `select_bulk` reads the same
+  predicate as before (`deferrable()` in place of `copy_load.is_some()`).
+- `Txn::with_catalog` / `catalog_version` (and `ExecCtx::catalog_version`): the statement's
+  catalog read in place, without cloning the `Arc` every session shares (its count is a
+  contended cache line); the published one under its read lock before a statement has begun.
+  `bound_as`, `run_query`'s lock loop, `lock_some` (only for inheritance children, where its
+  answer is read), routing to a partition and `names_stale` use them. `f` must not take the
+  database's catalog lock again (parking_lot's fair read lock can deadlock on a recursive
+  read while a writer waits).
+- `Txn::lock`: room for 8 locks at the first one (no regrowth of the journal or rehashing of
+  the held set as a transaction takes its few), the key copied only once a lock is granted,
+  and `accept_catalog` replaces the statement's catalog only when another was published
+  (`Arc::ptr_eq`), as LockRelationOid's AcceptInvalidationMessages would find nothing new.
+- `Session::parse`: a simple query whose text is only letters, spaces and `;` (32 bytes at
+  most) and parses to one `TransactionStmt` is kept per session by its text (8 kept): the
+  next `BEGIN` / `COMMIT` reuses the `Prepared` (its tree depends on nothing but the text:
+  no literal, escape, comment, long identifier or encoding-dependent byte).
+- The btree model (`btsim::leaf`): `Leaf::key_bytes`, `is_dead` and `tids` read one part of
+  an item; `first_above`, `insert_pos` and `kill_walk` decode only what they compare (a dead
+  entry's key only when it is the page's last).
+- A scan's merge sources are allocated once; pg_stat_activity's state string is rewritten
+  in place (no allocation per state change).
+
+Dropped, as patches in `~/.cache/a197/patches/`: the session's search path reading the
+published catalog in place (no fewer instructions: its cost there is the shared lock and
+count, which one client doesn't see and eight didn't show either).
+
+Not done, for the next round (BENCH.md has the profile): reusing the opened executor tree
+across executions of a point statement (node open and drop about 15 us of 157); the memtable
+skiplist insert under the commit mutex (5.7 us, serialized): keys inline in the node
+(`SmallVec<[u8; 40]>`) is ready on local branch `keep-a197-memkey`, unmeasured; Describe at
+Bind (3.2 us); `begin_statement` (3.4); the identity primary key's unique check (7.8, of which
+`committed_conflict`'s scan 6.2); mimalloc's free-list pop (12 us over all: allocations per
+statement, `ExecCtx` alone makes four).
+
+Verification on `aae3424d0` with the change: release build; release Clippy with no warning in
+the files changed (its warnings are `aef3a18b2`'s: math.rs, json.rs, text.rs and others);
+release lib tests (211 passed), golden, golden_wire and golden_shuffled, kept_plans (9),
+wire (69), twophase (4), crash_random with seeds 1-30; the isolation suite against a private
+PostgreSQL 18.6 reference: 121/122 specs, 1647/1648 permutations (intra-grant-inplace's
+`DELETE FROM pg_class` permutation, the same hunk with the `aef3a18b2` binary); the regress
+files of the areas changed (test_setup, transactions, insert, insert_conflict, identity,
+sequence, btree_index, lock, update, delete, returning, prepared_xacts, portals, namespace,
+privileges, rowsecurity; release build, the same private reference): 5460/5460 units, none
+newly differing. The measured dist binary is `aef3a18b2` with the change; the rebase onto
+`aae3424d0` (planner paths only) touched none of its code.
+
 ## Storage engine, round 1 (agent 169)
 
 Agent 169 owns the store's internals (block format and cache, point lookups inside the store,
