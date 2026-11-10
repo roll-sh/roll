@@ -2929,7 +2929,6 @@ impl Txn {
         if self.locks_held.contains_key(&HeldKey(key, mode)) {
             return Ok(true);
         }
-        let k = (key.to_vec(), mode);
         let fast = self.fast().is_some_and(|s| self.db.locks.acquire_fast(s, key, self.id, mode));
         let got = fast
             || self.db.locks.acquire(
@@ -2942,6 +2941,12 @@ impl Txn {
             )?;
         if got {
             self.table_used |= !fast;
+            // (A transaction takes a few: room for them at once, not grown one by one.)
+            if self.lock_journal.capacity() == 0 {
+                self.lock_journal.reserve(8);
+                self.locks_held.reserve(8);
+            }
+            let k = (key.to_vec(), mode);
             self.lock_journal.push(k.clone());
             self.locks_held.insert(k, self.savepoints.len());
             // A new lock may have waited for DDL that then committed: the statement reads the
@@ -3247,8 +3252,15 @@ impl Txn {
     /// The running statement reads the database's catalog as it is now, after a lock or a
     /// wait (AcceptInvalidationMessages): `catalog`'s `read_catalog`.
     pub fn accept_catalog(&mut self) {
-        if self.catalog.is_none() && self.read_catalog.is_some() {
-            self.read_catalog = Some(self.db.catalog());
+        if self.catalog.is_none()
+            && let Some(rc) = &self.read_catalog
+        {
+            // (Unchanged, as it mostly is: no new reference to it.)
+            let now = self.db.catalog.read();
+            if !Arc::ptr_eq(rc, &now) {
+                let now = now.clone();
+                self.read_catalog = Some(now);
+            }
         }
     }
 
