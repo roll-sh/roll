@@ -2435,7 +2435,7 @@ fn sources(view: &View, start: &[u8], end: &[u8]) -> Vec<Cursor> {
     // (By user keys: a file's first key with its version appended can sort past an `end`
     // that its user key is a prefix of.)
     let overlaps = |s: &&Arc<SstReader>| s.overlaps(start, end);
-    let mut sources = Vec::new();
+    let mut sources = Vec::with_capacity(2 + view.imm.len() + view.l0.len());
     sources.push(Cursor::mem(view.mem.clone(), start, end));
     for f in &view.imm {
         match f {
