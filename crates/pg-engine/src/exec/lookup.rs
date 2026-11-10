@@ -49,6 +49,12 @@ pub struct LookupScratch {
     cache: std::collections::HashMap<Vec<u8>, std::rc::Rc<Vec<Row>>>,
     loops: u64,
     fetched: u64,
+    /// The worker's reader of the rows' keys, kept from lookup to lookup: the blocks the
+    /// last one read stay at hand for the next (an outer side in key order reads its inner
+    /// rows' blocks once).
+    reader: Option<crate::storage::point::PointReader>,
+    /// The index entries' row keys of a lookup, reused.
+    dkeys: Vec<Vec<u8>>,
 }
 
 /// One nested loop's inner index scans.
@@ -240,10 +246,16 @@ impl Lookup {
             let v = super::scan::padded(v, *pad);
             encode_index_value(&mut start, &v, *desc, *nulls_first, coll.as_ref());
         }
+        // (A semi or anti join's inner scan stops at its first match, as ExecNestLoop's
+        // does: the rows after it aren't fetched.)
+        let first = matches!(self.kind, JoinKind::Semi | JoinKind::Anti);
+        if first && !self.cache {
+            return self.first_row(l, &start, out, sc);
+        }
         let found = match sc.cache.get(&start) {
             Some(rows) => rows.clone(),
             None => {
-                let Some(rows) = self.fetch(&start) else { return false };
+                let Some(rows) = self.fetch(&start, sc) else { return false };
                 let rows = std::rc::Rc::new(rows);
                 if self.cache {
                     if sc.cache.len() >= CACHE_KEYS {
@@ -255,9 +267,6 @@ impl Lookup {
             }
         };
         sc.loops += 1;
-        // (A semi or anti join's inner scan stops at its first match, as ExecNestLoop's
-        // does: the rows after it aren't fetched.)
-        let first = matches!(self.kind, JoinKind::Semi | JoinKind::Anti);
         let mut read = 0u64;
         for r in found.iter() {
             read += 1;
@@ -287,37 +296,114 @@ impl Lookup {
         true
     }
 
+    /// The row keys of the index entries under key `start`, in index order, into
+    /// `sc.dkeys` (None: a read failed).
+    fn entries(&self, start: &[u8], sc: &mut LookupScratch) -> Option<()> {
+        let end = prefix_end(start);
+        sc.dkeys.clear();
+        for e in self.store.scan(start, &end, self.ts) {
+            sc.dkeys.push(e.ok()?.1.to_vec());
+        }
+        Some(())
+    }
+
+    /// Row `d` at the snapshot, through the worker's reader (None inside: not visible).
+    fn get(&self, d: &[u8], reader: &mut Option<crate::storage::point::PointReader>) -> Option<Option<bytes::Bytes>> {
+        let r = reader.get_or_insert_with(|| self.store.point_reader(self.ts, false));
+        match self.store.get_with(r, d, true).ok()? {
+            Some((_, Some(b))) => Some(Some(b)),
+            _ => Some(None),
+        }
+    }
+
     /// The rows of the index entries under key `start`, in index order (None: a read
     /// failed, or a row didn't decode).
-    fn fetch(&self, start: &[u8]) -> Option<Vec<Row>> {
-        let end = prefix_end(start);
-        let mut dkeys: Vec<Vec<u8>> = Vec::new();
-        for e in self.store.scan(start, &end, self.ts) {
-            dkeys.push(e.ok()?.1.to_vec());
-        }
-        if dkeys.is_empty() {
-            return Some(Vec::new());
-        }
-        // (Fetched in key order, together; the rows then taken in the entries' order.)
-        let mut sorted: Vec<&[u8]> = dkeys.iter().map(Vec::as_slice).collect();
-        sorted.sort_unstable();
-        sorted.dedup();
-        let got = self.store.get_versions(&sorted, self.ts).ok()?;
-        let found: std::collections::HashMap<&[u8], &bytes::Bytes> = sorted
-            .iter()
-            .zip(&got)
-            .filter_map(|(k, v)| match v {
-                Some((_, Some(b))) => Some((*k, b)),
-                _ => None,
-            })
-            .collect();
-        let mut rows = Vec::with_capacity(dkeys.len());
-        for d in &dkeys {
-            if let Some(bytes) = found.get(d.as_slice()) {
-                rows.push(self.decode.row(d, bytes).ok()?);
+    fn fetch(&self, start: &[u8], sc: &mut LookupScratch) -> Option<Vec<Row>> {
+        self.entries(start, sc)?;
+        let dkeys = std::mem::take(&mut sc.dkeys);
+        let out = (|| {
+            if dkeys.len() <= 1 {
+                return match dkeys.first() {
+                    None => Some(Vec::new()),
+                    Some(d) => Some(match self.get(d, &mut sc.reader)? {
+                        Some(b) => vec![self.decode.row(d, &b).ok()?],
+                        None => Vec::new(),
+                    }),
+                };
             }
+            // (Fetched in key order; the rows then taken in the entries' order.)
+            let mut sorted: Vec<&[u8]> = dkeys.iter().map(Vec::as_slice).collect();
+            sorted.sort_unstable();
+            sorted.dedup();
+            let mut found: Vec<(&[u8], bytes::Bytes)> = Vec::with_capacity(sorted.len());
+            for k in sorted {
+                if let Some(b) = self.get(k, &mut sc.reader)? {
+                    found.push((k, b));
+                }
+            }
+            let mut rows = Vec::with_capacity(dkeys.len());
+            for d in &dkeys {
+                if let Ok(i) = found.binary_search_by(|(k, _)| (*k).cmp(d.as_slice())) {
+                    rows.push(self.decode.row(d, &found[i].1).ok()?);
+                }
+            }
+            Some(rows)
+        })();
+        sc.dkeys = dkeys;
+        out
+    }
+
+    /// `rows` of a semi or anti join: the index entries' rows fetched one at a time in
+    /// index order up to the first that passes the filter and the join condition.
+    fn first_row(&self, l: &[Value], start: &[u8], out: &mut Vec<Row>, sc: &mut LookupScratch) -> bool {
+        if self.entries(start, sc).is_none() {
+            return false;
         }
-        Some(rows)
+        let dkeys = std::mem::take(&mut sc.dkeys);
+        let r = (|| {
+            let mut read = 0u64;
+            for (n, d) in dkeys.iter().enumerate() {
+                let Some(b) = self.get(d, &mut sc.reader)? else { continue };
+                let row = self.decode.row(d, &b).ok()?;
+                read += 1;
+                let view = Joined::Pair { l, r: super::pipe::Inner::plain(&row), keep: None };
+                let mut pass = true;
+                for k in [&self.filter, &self.cond].into_iter().flatten() {
+                    match k.passes(&view) {
+                        Some(true) => {}
+                        Some(false) => {
+                            pass = false;
+                            break;
+                        }
+                        None => {
+                            // (Left to the executor's thread: every visible row counted,
+                            // as a whole fetch counts them.)
+                            for d in &dkeys[n + 1..] {
+                                if let Some(Some(_)) = self.get(d, &mut sc.reader) {
+                                    read += 1;
+                                }
+                            }
+                            sc.fetched += read;
+                            return Some(false);
+                        }
+                    }
+                }
+                if pass {
+                    out.push(row);
+                    break;
+                }
+            }
+            sc.fetched += read;
+            Some(true)
+        })();
+        sc.dkeys = dkeys;
+        match r {
+            Some(done) => {
+                sc.loops += 1;
+                done
+            }
+            None => false,
+        }
     }
 
     /// A worker's counts, into the stage's (`flush` counts them).
