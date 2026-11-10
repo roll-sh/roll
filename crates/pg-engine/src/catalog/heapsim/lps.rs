@@ -100,6 +100,19 @@ impl Slot {
     }
 }
 
+/// A line pointer as `Lps::shapes` gives it.
+#[derive(Clone, Copy, Debug)]
+pub enum Shape {
+    Unused,
+    Dead,
+    Redirect,
+    /// A version whose xmin is committed for everyone (settled or frozen), not deleted or
+    /// updated: live.
+    Settled { heap_only: bool },
+    /// Any other version.
+    Version { heap_only: bool },
+}
+
 const UNUSED: Slot = Slot(T_EMPTY << TAG | 1);
 const DEAD: Slot = Slot(T_EMPTY << TAG);
 
@@ -185,6 +198,23 @@ impl Lps {
 
     pub fn iter(&self) -> impl Iterator<Item = Lp> + '_ {
         self.all_slots().map(|s| self.view(s))
+    }
+
+    /// What each line pointer is, without making its version (`Heap::prune_with`).
+    pub fn shapes(&self) -> impl Iterator<Item = Shape> + '_ {
+        self.all_slots().map(|s| match s.tag() {
+            T_SMALL => {
+                let heap_only = bits(s.0, HOT_AT, 1) != 0;
+                match bits(s.0, XMIN_AT, 2) {
+                    OWN_XMIN => Shape::Version { heap_only },
+                    _ => Shape::Settled { heap_only },
+                }
+            }
+            T_FULL => Shape::Version { heap_only: self.full[s.low() as usize].heap_only },
+            T_REDIRECT => Shape::Redirect,
+            _ if s.low() == 1 => Shape::Unused,
+            _ => Shape::Dead,
+        })
     }
 
     /// Whether line pointer `i` is in use (not LP_UNUSED; past the end: not).

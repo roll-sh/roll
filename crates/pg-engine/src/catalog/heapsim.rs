@@ -1834,41 +1834,21 @@ impl Heap {
 
     fn prune_with(&mut self, blk: u32, v: &Vis, unused_now: bool, sc: &mut PruneScratch) {
         self.settle(v);
-        let PruneScratch { lps, htsv, processed, new, roots, heaponly, chain, freed } = sc;
-        // (A copy of the line pointers: the page keeps most of them packed.)
-        lps.clear();
-        lps.extend(self.pages[blk as usize].lps.iter());
+        let PruneScratch { htsv, processed, changes, heaponly, chain, freed } = sc;
+        // (Read in place, a version made only where pruning looks at it: most of a page's
+        // are settled and live, and nothing changes of them.)
+        let lps = &self.pages[blk as usize].lps;
         let n = lps.len();
+        let lp = |off: usize| lps.get(off - 1).unwrap_or(Lp::Unused);
+        // (Each version's verdict once, when first needed.)
         htsv.clear();
         htsv.resize(n + 1, None);
+        let status = |htsv: &mut Vec<Option<Htsv>>, off: usize, t: &Tup| *htsv[off].get_or_insert_with(|| t.status(v));
         processed.clear();
         processed.resize(n + 1, false);
-        // New states: None = unchanged.
-        new.clear();
-        new.resize(n + 1, None);
-        roots.clear();
+        changes.clear();
         heaponly.clear();
         freed.clear();
-        for off in 1..=n {
-            match &lps[off - 1] {
-                Lp::Unused => processed[off] = true,
-                Lp::Dead => {
-                    processed[off] = true;
-                    if unused_now {
-                        new[off] = Some(Lp::Unused);
-                    }
-                }
-                Lp::Redirect(_) => roots.push(off),
-                Lp::Normal(t) => {
-                    htsv[off] = Some(t.status(v));
-                    if t.heap_only {
-                        heaponly.push(off);
-                    } else {
-                        roots.push(off);
-                    }
-                }
-            }
-        }
         let mut prune_xid = 0u64;
         let mut prunable = |x: u64| {
             if x != 0 && (prune_xid == 0 || x < prune_xid) {
@@ -1876,7 +1856,30 @@ impl Heap {
             }
         };
         let dead_or_unused = if unused_now { Lp::Unused } else { Lp::Dead };
-        for &root in roots.iter() {
+        // The chain from each root in turn; then the heap-only versions no chain took.
+        for (i, shape) in lps.shapes().enumerate() {
+            let root = i + 1;
+            let is_redirect = match shape {
+                lps::Shape::Unused => continue,
+                lps::Shape::Dead => {
+                    if unused_now {
+                        changes.push((root, Lp::Unused));
+                    }
+                    continue;
+                }
+                // (Settled versions are live, not updated: a chain of one, nothing changed.)
+                lps::Shape::Settled { heap_only: true } => continue,
+                lps::Shape::Settled { heap_only: false } => {
+                    processed[root] = true;
+                    continue;
+                }
+                lps::Shape::Version { heap_only: true } => {
+                    heaponly.push(root);
+                    continue;
+                }
+                lps::Shape::Version { heap_only: false } => false,
+                lps::Shape::Redirect => true,
+            };
             if processed[root] {
                 continue;
             }
@@ -1884,18 +1887,17 @@ impl Heap {
             let mut ndead = 0;
             let mut off = root;
             let mut prior_xmax = 0u64;
-            let is_redirect = matches!(lps[root - 1], Lp::Redirect(_));
             loop {
                 if off < 1 || off > n || processed[off] {
                     break;
                 }
-                match &lps[off - 1] {
+                match lp(off) {
                     Lp::Redirect(to) => {
                         if !chain.is_empty() {
                             break;
                         }
                         chain.push(off);
-                        off = *to as usize;
+                        off = to as usize;
                         continue;
                     }
                     Lp::Normal(t) => {
@@ -1903,9 +1905,9 @@ impl Heap {
                             break;
                         }
                         chain.push(off);
-                        match htsv[off] {
-                            Some(Htsv::Dead) => ndead = chain.len(),
-                            Some(Htsv::RecentlyDead) => {}
+                        match status(htsv, off, &t) {
+                            Htsv::Dead => ndead = chain.len(),
+                            Htsv::RecentlyDead => {}
                             _ => break,
                         }
                         if !t.hot_updated {
@@ -1921,12 +1923,12 @@ impl Heap {
                 processed[c] = true;
             }
             if is_redirect && chain.len() < 2 {
-                new[root] = Some(dead_or_unused);
+                changes.push((root, dead_or_unused));
                 continue;
             }
             let unchanged = |c: usize, prunable: &mut dyn FnMut(u64)| {
-                if let (Some(h), Lp::Normal(t)) = (htsv[c], &lps[c - 1])
-                    && matches!(h, Htsv::RecentlyDead | Htsv::DeleteInProgress)
+                if matches!(htsv[c], Some(Htsv::RecentlyDead | Htsv::DeleteInProgress))
+                    && let Lp::Normal(t) = lp(c)
                 {
                     prunable(t.xmax);
                 }
@@ -1936,14 +1938,14 @@ impl Heap {
                     unchanged(c, &mut prunable);
                 }
             } else if ndead == chain.len() {
-                new[root] = Some(dead_or_unused);
+                changes.push((root, dead_or_unused));
                 for &c in &chain[1..] {
-                    new[c] = Some(Lp::Unused);
+                    changes.push((c, Lp::Unused));
                 }
             } else {
-                new[root] = Some(Lp::Redirect(chain[ndead] as u16));
+                changes.push((root, Lp::Redirect(chain[ndead] as u16)));
                 for &c in &chain[1..ndead] {
-                    new[c] = Some(Lp::Unused);
+                    changes.push((c, Lp::Unused));
                 }
                 for &c in &chain[ndead..] {
                     unchanged(c, &mut prunable);
@@ -1955,32 +1957,30 @@ impl Heap {
                 continue;
             }
             processed[off] = true;
-            if htsv[off] == Some(Htsv::Dead) {
-                new[off] = Some(Lp::Unused);
-            } else if let (Some(h), Lp::Normal(t)) = (htsv[off], &lps[off - 1])
-                && matches!(h, Htsv::RecentlyDead | Htsv::DeleteInProgress)
-            {
-                prunable(t.xmax);
+            let Lp::Normal(t) = lp(off) else { continue };
+            match status(htsv, off, &t) {
+                Htsv::Dead => changes.push((off, Lp::Unused)),
+                Htsv::RecentlyDead | Htsv::DeleteInProgress => prunable(t.xmax),
+                _ => {}
             }
         }
-        let do_prune = new.iter().any(Option::is_some);
         let p = &mut self.pages[blk as usize];
         if p.prune_xid != prune_xid || p.full {
             p.prune_xid = prune_xid;
             p.full = false;
         }
-        if do_prune {
-            for off in 1..new.len() {
-                if let Some(st) = new[off].take() {
-                    if let Lp::Normal(t) = lps[off - 1] {
-                        p.used -= maxalign(t.len as usize);
-                        self.versions -= 1;
-                    }
-                    if matches!(st, Lp::Unused) {
-                        freed.push((blk, off as u16));
-                    }
-                    p.lps.set(off - 1, st);
+        if !changes.is_empty() {
+            // (In line pointer order.)
+            changes.sort_unstable_by_key(|c| c.0);
+            for &(off, st) in changes.iter() {
+                if let Some(Lp::Normal(t)) = p.lps.get(off - 1) {
+                    p.used -= maxalign(t.len as usize);
+                    self.versions -= 1;
                 }
+                if matches!(st, Lp::Unused) {
+                    freed.push((blk, off as u16));
+                }
+                p.lps.set(off - 1, st);
             }
             p.repair();
         }
@@ -2534,11 +2534,10 @@ pub fn restored_from<'k>(
 /// `Heap::prune_page`'s per-page vectors, kept by each thread between pages.
 #[derive(Default)]
 struct PruneScratch {
-    lps: Vec<Lp>,
     htsv: Vec<Option<Htsv>>,
     processed: Vec<bool>,
-    new: Vec<Option<Lp>>,
-    roots: Vec<usize>,
+    /// Line pointers' new states (offset, state), each at most once.
+    changes: Vec<(usize, Lp)>,
     heaponly: Vec<usize>,
     chain: Vec<usize>,
     freed: Vec<Tid>,
