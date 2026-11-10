@@ -992,30 +992,44 @@ pub(crate) fn committed_conflict(
         .map(|c| c.opclass == RECORD_IMAGE_OPS)
         .collect();
     let prefix = index_value_prefix(t, &bix.index, vals, &bix.colls);
-    let mut scan = ctx.txn.borrow().scan_latest(&prefix, &prefix_end(&prefix));
-    for e in scan.by_ref() {
-        let (_, dkey) = e?;
-        if own == Some(dkey.as_ref()) {
-            continue;
-        }
-        if image.contains(&true) {
-            let latest = ctx.txn.borrow().get_latest(&dkey)?;
-            if let Some((_, Some(bytes))) = latest
-                && let Some(other) = index_values(bix, &decode_table_row(t, &bytes)?, ctx)?
-                && !vals.iter().zip(&other).zip(&image).all(|((a, b), img)| {
-                    if *img {
-                        crate::sql::func::ops::record_image_equal(a, b)
-                    } else {
-                        true
-                    }
-                })
-            {
+    let end = prefix_end(&prefix);
+    let scanned = || -> Result<Option<Vec<u8>>> {
+        let mut scan = ctx.txn.borrow().scan_latest(&prefix, &end);
+        for e in scan.by_ref() {
+            let (_, dkey) = e?;
+            if own == Some(dkey.as_ref()) {
                 continue;
             }
+            if image.contains(&true) {
+                let latest = ctx.txn.borrow().get_latest(&dkey)?;
+                if let Some((_, Some(bytes))) = latest
+                    && let Some(other) = index_values(bix, &decode_table_row(t, &bytes)?, ctx)?
+                    && !vals.iter().zip(&other).zip(&image).all(|((a, b), img)| {
+                        if *img {
+                            crate::sql::func::ops::record_image_equal(a, b)
+                        } else {
+                            true
+                        }
+                    })
+                {
+                    continue;
+                }
+            }
+            return Ok(Some(dkey.to_vec()));
         }
-        return Ok(Some(dkey.to_vec()));
+        Ok(None)
+    };
+    // The first entry, read without a merging scan, when it answers: it isn't `own`'s, and
+    // no image comparison could pass over it.
+    if !image.contains(&true) {
+        let first = ctx.txn.borrow().first_latest(&prefix, &end)?;
+        match first {
+            Some(None) => return Ok(None),
+            Some(Some((_, dkey))) if own != Some(dkey.as_ref()) => return Ok(Some(dkey.to_vec())),
+            _ => {}
+        }
     }
-    Ok(None)
+    scanned()
 }
 
 /// An ON CONFLICT DO UPDATE starting its row over (never reaches a client).

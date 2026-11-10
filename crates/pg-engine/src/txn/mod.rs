@@ -2495,6 +2495,47 @@ impl Txn {
         self.scan_at(start, end, self.db.store.visible_ts())
     }
 
+    /// `scan_latest`'s first entry in [start, end) (key, value as stored), read without a
+    /// merging scan: the store's first visible key (`Store::first_with`) against our
+    /// buffered writes. None: not answered here (spilled writes or a range deletion of ours
+    /// in the range, our delete of the store's first key, or deleted keys to step over):
+    /// scan the range.
+    pub fn first_latest(&self, start: &[u8], end: &[u8]) -> Result<Option<Option<(Vec<u8>, Bytes)>>> {
+        if self.runs.is_some() || self.rdels.iter().any(|r| r.overlaps(start, end)) {
+            return Ok(None);
+        }
+        let store = &self.db.store;
+        let ts = store.visible_ts();
+        let mut r = store.point_reader(ts, true);
+        let below = match store.first_with(&mut r, start, end, false)? {
+            crate::storage::point::First::Row(k, v) => Some((k, v)),
+            crate::storage::point::First::None => None,
+            crate::storage::point::First::Unknown => return Ok(None),
+        };
+        let range = (Bound::Included(start), Bound::Excluded(end));
+        let mine = self.writes.range::<[u8], _>(range).find_map(|(k, e)| Some((k, e.v.clone()?)));
+        let first = match (mine, below) {
+            // (Our write of a key replaces the store's version.)
+            (Some((k, v)), Some((bk, _))) if k.as_slice() <= bk.as_slice() => Some((k.clone(), v)),
+            (_, Some((bk, bv))) => {
+                // (The store's first key under a delete of ours: its next one would count.)
+                if self.writes.get(bk.as_slice()).is_some_and(|e| e.v.is_none()) {
+                    return Ok(None);
+                }
+                Some((bk, bv))
+            }
+            (Some((k, v)), None) => Some((k.clone(), v)),
+            (None, None) => None,
+        };
+        // (Debug builds: the merging scan at the same snapshot finds the same.)
+        #[cfg(debug_assertions)]
+        {
+            let scanned = self.scan_at(start, end, ts).next().transpose()?;
+            assert_eq!(first, scanned, "first entry in {start:?}..{end:?}");
+        }
+        Ok(Some(first))
+    }
+
     /// Scan [start, end) merging our buffered writes over the data committed as of `ts`.
     pub fn scan_at(&self, start: &[u8], end: &[u8], ts: u64) -> TxnScan {
         self.scan_overlay(start, end, ts, None)
