@@ -1274,7 +1274,10 @@ impl Txn {
             }
             // The statement's snapshot holds back pruning while it runs (and, here, until
             // the next statement or the transaction's end).
-            self.xmin = needs_snapshot.then(|| self.db.xids().register_snapshot_of(Some(self.id)));
+            self.xmin = match needs_snapshot {
+                true => Some(self.db.xids().renew_snapshot(self.xmin.take(), Some(self.id))),
+                false => None,
+            };
             if needs_snapshot {
                 self.hold_own_xact_lock();
             }

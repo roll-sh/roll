@@ -287,6 +287,43 @@ impl Xids {
         SnapshotXmin { xids: self.clone(), xmin, owner }
     }
 
+    /// `register_snapshot_of(owner)` replacing `old` (the next statement's snapshot in place
+    /// of the last one's), in one pass under the state's lock: the registration moves to the
+    /// xmin a snapshot taken now has, or stays when that is its own.
+    pub fn renew_snapshot(self: &std::sync::Arc<Self>, old: Option<SnapshotXmin>, owner: Option<u64>) -> SnapshotXmin {
+        let mut o = match old {
+            Some(o) if std::sync::Arc::ptr_eq(&o.xids, self) && o.owner == owner => o,
+            old => {
+                // (The new one registered before the old one goes, as assigning it did.)
+                let new = self.register_snapshot_of(owner);
+                drop(old);
+                return new;
+            }
+        };
+        let mut s = self.state.lock();
+        let xmin = Self::xmin_now(&s);
+        if xmin != o.xmin {
+            *s.snapshots.entry(xmin).or_default() += 1;
+            if let Some(n) = s.snapshots.get_mut(&o.xmin) {
+                *n -= 1;
+                if *n == 0 {
+                    s.snapshots.remove(&o.xmin);
+                }
+            }
+            if let Some(ow) = owner {
+                let v = s.owners.entry(ow).or_default();
+                match v.iter_mut().find(|x| **x == o.xmin) {
+                    Some(x) => *x = xmin,
+                    None => v.push(xmin),
+                }
+            }
+            o.xmin = xmin;
+        }
+        self.publish(&s);
+        drop(s);
+        o
+    }
+
     /// The xmin a snapshot taken now would have.
     pub fn current_xmin(&self) -> u64 {
         Self::xmin_now(&self.state.lock())
