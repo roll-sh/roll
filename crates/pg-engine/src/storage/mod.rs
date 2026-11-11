@@ -300,6 +300,13 @@ pub struct Store {
     durable_wait: (Mutex<()>, parking_lot::Condvar),
     next_id: AtomicU64,
     snapshots: Mutex<BTreeMap<u64, usize>>,
+    /// The sessions' own pins (`pin_slot`).
+    slots: Mutex<Vec<Arc<PinSlot>>>,
+    /// The visible timestamp as `gc_horizon` last read it before reading the slots: a
+    /// slot's pin of a timestamp before it may have been missed (`pin_visible_in`).
+    gc_floor: AtomicU64,
+    /// The newest horizon `gc_horizon` found (`horizon_hint`).
+    horizon_seen: AtomicU64,
     bg: Mutex<()>,
     bg_running: AtomicBool,
     closed: AtomicBool,
@@ -323,18 +330,72 @@ pub struct Store {
 
 /// Keeps versions visible at `ts` from being compacted away.
 pub struct SnapshotPin {
-    store: Arc<Store>,
+    owner: PinOwner,
     pub ts: u64,
+}
+
+/// Where a pin is counted: the store's table every session shares, or a session's own
+/// slot (`Store::pin_slot`), which no other session writes.
+enum PinOwner {
+    Store(Arc<Store>),
+    Slot(Arc<PinSlot>),
 }
 
 impl Drop for SnapshotPin {
     fn drop(&mut self) {
-        let mut s = self.store.snapshots.lock();
-        if let Some(n) = s.get_mut(&self.ts) {
-            *n -= 1;
-            if *n == 0 {
-                s.remove(&self.ts);
+        match &self.owner {
+            PinOwner::Store(store) => {
+                let mut s = store.snapshots.lock();
+                if let Some(n) = s.get_mut(&self.ts) {
+                    *n -= 1;
+                    if *n == 0 {
+                        s.remove(&self.ts);
+                    }
+                }
             }
+            PinOwner::Slot(slot) => slot.remove(self.ts),
+        }
+    }
+}
+
+/// One session's snapshot pins (for the store's versions what PGPROC.xmin is for heap
+/// tuples): counted under a mutex of its own, the oldest published in `min` for
+/// `Store::gc_horizon`. Taking and dropping one writes only this session's cache lines,
+/// where the store's shared table (`snapshots`) took a mutex every session shares. (Made by
+/// its session's thread, among that thread's own allocations: no other session's slot shares
+/// its cache line, and no line of padding is needed.)
+pub struct PinSlot {
+    pins: Mutex<Vec<(u64, usize)>>,
+    /// The oldest pinned timestamp, u64::MAX for none.
+    min: AtomicU64,
+}
+
+impl PinSlot {
+    /// Count a pin of `ts`; true when it is the slot's oldest now (`min` moved back to it).
+    fn add(&self, ts: u64) -> bool {
+        let mut p = self.pins.lock();
+        match p.iter_mut().find(|e| e.0 == ts) {
+            Some(e) => e.1 += 1,
+            None => p.push((ts, 1)),
+        }
+        if ts < self.min.load(Ordering::Relaxed) {
+            self.min.store(ts, Ordering::SeqCst);
+            return true;
+        }
+        false
+    }
+
+    fn remove(&self, ts: u64) {
+        let mut p = self.pins.lock();
+        if let Some(i) = p.iter().position(|e| e.0 == ts) {
+            p[i].1 -= 1;
+            if p[i].1 == 0 {
+                p.swap_remove(i);
+            }
+        }
+        let min = p.iter().map(|e| e.0).min().unwrap_or(u64::MAX);
+        if min != self.min.load(Ordering::Relaxed) {
+            self.min.store(min, Ordering::Release);
         }
     }
 }
@@ -461,6 +522,9 @@ impl Store {
             durable_wait: (Mutex::new(()), parking_lot::Condvar::new()),
             next_id: AtomicU64::new(next_id),
             snapshots: Mutex::new(BTreeMap::new()),
+            slots: Mutex::new(Vec::new()),
+            gc_floor: AtomicU64::new(0),
+            horizon_seen: AtomicU64::new(last_ts),
             bg: Mutex::new(()),
             bg_running: AtomicBool::new(false),
             closed: AtomicBool::new(false),
@@ -552,8 +616,48 @@ impl Store {
     pub fn pin(self: &Arc<Self>, ts: u64) -> SnapshotPin {
         *self.snapshots.lock().entry(ts).or_insert(0) += 1;
         SnapshotPin {
-            store: self.clone(),
+            owner: PinOwner::Store(self.clone()),
             ts,
+        }
+    }
+
+    /// A slot for one session's pins (`pin_in`, `pin_visible_in`), which `gc_horizon`
+    /// reads for as long as a pin or its session holds it.
+    pub fn pin_slot(&self) -> Arc<PinSlot> {
+        let slot = Arc::new(PinSlot { pins: Mutex::new(Vec::new()), min: AtomicU64::new(u64::MAX) });
+        let mut slots = self.slots.lock();
+        // (Slots nothing else holds any more go.)
+        slots.retain(|s| Arc::strong_count(s) > 1);
+        slots.push(slot.clone());
+        drop(slots);
+        slot
+    }
+
+    /// `pin(ts)` counted in `slot`: `ts` is one another pin holds (no older than the
+    /// horizon).
+    pub fn pin_in(&self, slot: &Arc<PinSlot>, ts: u64) -> SnapshotPin {
+        slot.add(ts);
+        SnapshotPin {
+            owner: PinOwner::Slot(slot.clone()),
+            ts,
+        }
+    }
+
+    /// `pin_visible` counted in `slot`. A `gc_horizon` running meanwhile either reads the
+    /// slot's new oldest pin or has published a floor before it read the slots, which this
+    /// then reads: a timestamp below the floor is given up for a newer one. (Both sides'
+    /// store and load are sequentially consistent, so one of them sees the other's.)
+    pub fn pin_visible_in(&self, slot: &Arc<PinSlot>) -> SnapshotPin {
+        loop {
+            let ts = self.visible_ts();
+            // (When not the slot's oldest, an older pin of the slot holds it already.)
+            if !slot.add(ts) || self.gc_floor.load(Ordering::SeqCst) <= ts {
+                return SnapshotPin {
+                    owner: PinOwner::Slot(slot.clone()),
+                    ts,
+                };
+            }
+            slot.remove(ts);
         }
     }
 
@@ -570,18 +674,32 @@ impl Store {
         let ts = self.visible_ts();
         *s.entry(ts).or_insert(0) += 1;
         SnapshotPin {
-            store: self.clone(),
+            owner: PinOwner::Store(self.clone()),
             ts,
         }
     }
 
-    /// Oldest timestamp any reader may still need.
+    /// Oldest timestamp any reader may still need, the sessions' slots' pins counted. (It
+    /// never moves back: a pin is taken of a timestamp another pin holds, or of the visible
+    /// one, past `gc_floor` in a slot.)
     pub fn gc_horizon(&self) -> u64 {
         let s = self.snapshots.lock();
-        s.keys()
-            .next()
-            .copied()
-            .unwrap_or_else(|| self.visible_ts())
+        let visible = self.visible_ts();
+        // (Before the slots are read: `pin_visible_in`.)
+        self.gc_floor.fetch_max(visible, Ordering::SeqCst);
+        let mut h = s.keys().next().map_or(visible, |t| (*t).min(visible));
+        for slot in self.slots.lock().iter() {
+            h = h.min(slot.min.load(Ordering::SeqCst));
+        }
+        drop(s);
+        self.horizon_seen.fetch_max(h, Ordering::AcqRel);
+        h
+    }
+
+    /// A horizon `gc_horizon` found before, without reading the pins: no newer than the
+    /// one it would find now, which is what a scan pruning the memtables' versions needs.
+    fn horizon_hint(&self) -> u64 {
+        self.horizon_seen.load(Ordering::Acquire)
     }
 
     pub fn view(&self) -> Arc<View> {
@@ -761,7 +879,7 @@ impl Store {
         };
         // (Past every version of the last key: storage keys end in their version.)
         let end = [last.as_ref(), &[0xFF; 9]].concat();
-        let mut s = Scan::new(self.view(), first.as_ref().to_vec(), end, ts, self.gc_horizon());
+        let mut s = Scan::new(self.view(), first.as_ref().to_vec(), end, ts, self.horizon_hint());
         s.resolve = resolve;
         s.fetch_sorted(keys, batch)
     }
@@ -873,7 +991,7 @@ impl Store {
             Some(live) => live,
             None => start.to_vec(),
         };
-        let mut s = Scan::new(self.view(), start.clone(), end.to_vec(), ts, self.gc_horizon());
+        let mut s = Scan::new(self.view(), start.clone(), end.to_vec(), ts, self.horizon_hint());
         s.dead = Some((self.dead.clone(), start));
         s
     }
@@ -979,6 +1097,7 @@ impl Store {
             // (Woken once the fsync is over: a commit appended after `upto` syncs next.)
             drop(_g);
             self.wake_durable();
+            self.refresh_horizon_hint();
         }
         Ok(())
     }
@@ -988,6 +1107,13 @@ impl Store {
         self.durable.fetch_max(upto, Ordering::AcqRel);
         self.visible.fetch_max(upto, Ordering::AcqRel);
         self.wake_durable();
+        self.refresh_horizon_hint();
+    }
+
+    /// `horizon_hint` brought up to date, as commits made visible move it on: once per
+    /// group of commits fsynced together, not per scan.
+    fn refresh_horizon_hint(&self) {
+        self.gc_horizon();
     }
 
     /// Wake the commits sleeping in `wait_durable` (`durable` advanced, or the fsync ended).

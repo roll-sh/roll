@@ -375,6 +375,10 @@ pub struct Session {
     /// The lock manager's fast-path slot of this backend (`LockManager::fast_slot`), found
     /// once: it lasts as long as the session's state (`SessionState`'s drop ends it).
     fast_slot: Option<Option<Arc<crate::txn::locks::FastSlot>>>,
+    /// This backend's slots for its transactions' snapshot pins and xmins
+    /// (`Store::pin_slot`, `Xids::xmin_slot`), made once.
+    pin_slot: Option<Arc<crate::storage::PinSlot>>,
+    xmin_slot: Option<Arc<crate::txn::xids::XminSlot>>,
     /// Time the tracked statement spent that pg_stat_statements doesn't count
     /// (`finish_txn_untimed`).
     pgss_untimed: std::time::Duration,
@@ -518,6 +522,8 @@ impl Session {
             pgss_tracked: None,
             sql_execute: false,
             fast_slot: None,
+            pin_slot: None,
+            xmin_slot: None,
             pgss_untimed: Default::default(),
             pgss_workers: 0,
             pgss_copy: None,
@@ -716,7 +722,9 @@ impl Session {
         if !self.reads_clear_cancel {
             self.cancel.store(false, Ordering::Relaxed);
         }
-        let mut txn = self.state.db.begin(iso, ro, self.cancel.clone());
+        let pins = self.pin_slot.get_or_insert_with(|| self.state.db.store.pin_slot()).clone();
+        let xmins = self.xmin_slot.get_or_insert_with(|| self.state.db.xids().xmin_slot()).clone();
+        let mut txn = self.state.db.begin_in(iso, ro, self.cancel.clone(), Some(pins), Some(xmins));
         txn.lock_peer = Some(self.state.lock_owner);
         let (db, owner) = (&self.state.db, self.state.lock_owner);
         txn.use_fast_slot(self.fast_slot.get_or_insert_with(|| db.locks.fast_slot(owner)).clone());

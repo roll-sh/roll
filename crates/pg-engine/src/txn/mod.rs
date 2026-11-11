@@ -419,12 +419,30 @@ impl Database {
         read_only: bool,
         cancel: Arc<AtomicBool>,
     ) -> Txn {
+        self.begin_in(isolation, read_only, cancel, None, None)
+    }
+
+    /// `begin` for a session whose snapshot pins and xmins go in slots of its own
+    /// (`Store::pin_slot`, `Xids::xmin_slot`).
+    pub fn begin_in(
+        self: &Arc<Self>,
+        isolation: Isolation,
+        read_only: bool,
+        cancel: Arc<AtomicBool>,
+        pin_slot: Option<Arc<crate::storage::PinSlot>>,
+        xmin_slot: Option<Arc<xids::XminSlot>>,
+    ) -> Txn {
         let id = self.next_txn.fetch_add(1, Ordering::Relaxed);
-        let pin = self.store.pin_visible();
+        let pin = match &pin_slot {
+            Some(s) => self.store.pin_visible_in(s),
+            None => self.store.pin_visible(),
+        };
         let ts = pin.ts;
         Txn {
             id,
             xid: 0,
+            pin_slot,
+            xmin_slot,
             db: self.clone(),
             isolation,
             read_only,
@@ -884,6 +902,10 @@ pub struct Txn {
     pub id: u64,
     /// The Postgres transaction id, once it has one (0: none yet).
     xid: u64,
+    /// Its session's slot for snapshot pins (`Database::begin_in`), if it has one.
+    pin_slot: Option<Arc<crate::storage::PinSlot>>,
+    /// Its session's slot for snapshot xmins, if it has one.
+    xmin_slot: Option<Arc<xids::XminSlot>>,
     pub db: Arc<Database>,
     pub isolation: Isolation,
     pub read_only: bool,
@@ -1242,6 +1264,22 @@ impl Txn {
 }
 
 impl Txn {
+    /// The visible timestamp, pinned (in its session's slot when it has one).
+    fn pin_visible(&self) -> SnapshotPin {
+        match &self.pin_slot {
+            Some(s) => self.db.store.pin_visible_in(s),
+            None => self.db.store.pin_visible(),
+        }
+    }
+
+    /// Another pin of `ts`, which a pin of its own holds.
+    fn pin_at(&self, ts: u64) -> SnapshotPin {
+        match &self.pin_slot {
+            Some(s) => self.db.store.pin_in(s, ts),
+            None => self.db.store.pin(ts),
+        }
+    }
+
     pub fn snapshot_ts(&self) -> u64 {
         self.snapshot_ts
     }
@@ -1271,14 +1309,14 @@ impl Txn {
             }
         } else {
             if self.db.store.visible_ts() != self.snapshot_ts {
-                let pin = self.db.store.pin_visible();
+                let pin = self.pin_visible();
                 self.snapshot_ts = pin.ts;
                 self._pin = Some(pin);
             }
             // The statement's snapshot holds back pruning while it runs (and, here, until
             // the next statement or the transaction's end).
             self.xmin = match needs_snapshot {
-                true => Some(self.db.xids().renew_snapshot(self.xmin.take(), Some(self.id))),
+                true => Some(self.db.xids().renew_snapshot(self.xmin.take(), Some(self.id), self.xmin_slot.as_ref())),
                 false => None,
             };
             if needs_snapshot {
@@ -1305,7 +1343,7 @@ impl Txn {
     /// lock on the referencing table sees what the transaction it waited for committed).
     pub fn refresh_read_committed_snapshot(&mut self) {
         if !self.isolation.txn_snapshot() && self.db.store.visible_ts() != self.snapshot_ts {
-            let pin = self.db.store.pin_visible();
+            let pin = self.pin_visible();
             self.snapshot_ts = pin.ts;
             self._pin = Some(pin);
         }
@@ -1328,10 +1366,10 @@ impl Txn {
 
     /// (Pinned atomically with the timestamp it reads: `Store::pin_visible`.)
     fn take_snapshot(&mut self) {
-        self.xmin = Some(self.db.xids().register_snapshot_of(Some(self.id)));
+        self.xmin = Some(self.db.xids().register_snapshot_in(self.xmin_slot.as_ref(), Some(self.id)));
         self.hold_own_xact_lock();
         if self.db.store.visible_ts() != self.snapshot_ts && !self.wrote {
-            let pin = self.db.store.pin_visible();
+            let pin = self.pin_visible();
             self.snapshot_ts = pin.ts;
             self.start_ts = pin.ts;
             self._pin = Some(pin);
@@ -2705,7 +2743,7 @@ impl Txn {
         SnapState {
             txn: self.id,
             ts: self.snapshot_ts,
-            _pin: Some(self.db.store.pin(self.snapshot_ts)),
+            _pin: Some(self.pin_at(self.snapshot_ts)),
             mark: self.position(),
             seen: self.position(),
             base: self.journal_base,
@@ -3086,7 +3124,7 @@ impl Txn {
             }
         }
         if had {
-            self.xmin = Some(xids.register_snapshot_of(Some(self.id)));
+            self.xmin = Some(xids.register_snapshot_in(self.xmin_slot.as_ref(), Some(self.id)));
         }
         r
     }
@@ -4094,7 +4132,7 @@ impl Txn {
     /// logical slot's consistent point: CREATE_REPLICATION_SLOT ... (SNAPSHOT 'use')).
     pub fn use_snapshot(&mut self, ts: u64) {
         self._pin = Some(self.db.store.pin(ts));
-        self.xmin = Some(self.db.xids().register_snapshot_of(Some(self.id)));
+        self.xmin = Some(self.db.xids().register_snapshot_in(self.xmin_slot.as_ref(), Some(self.id)));
         self.snapshot_ts = ts;
         self.start_ts = ts;
         self.snapshot_fixed = true;
@@ -4127,7 +4165,7 @@ impl Txn {
             );
         }
         self._pin = Some(self.db.store.pin(ts));
-        self.xmin = Some(self.db.xids().register_snapshot_of(Some(self.id)));
+        self.xmin = Some(self.db.xids().register_snapshot_in(self.xmin_slot.as_ref(), Some(self.id)));
         self.snapshot_ts = ts;
         self.start_ts = ts;
         // (The transaction's snapshot is this one now: SSI tracks it from here.)
