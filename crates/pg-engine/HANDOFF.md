@@ -9737,6 +9737,48 @@ The manifest's form is unchanged and a clean close still rewrites linked L1 file
 builds read a cleanly closed store. Rebased for the push onto `c35d07a86` (agents 198-203's commits touch none of
 the changed functions).
 
+## big_tables flakes and the cursor fraction fix (agent 209)
+
+- **`deferred_entry_deletes` was test isolation, not an engine bug.** Every failure was the
+  check "the deletes went in as runs" (`txn::DELETE_RUNS`). No row, count or cursor check
+  failed. The test default for `txn_spill_bytes` was one process-wide value. Both this test and
+  `copy_through_the_sink` set it to 1 MB before `Engine::open` and reset it to 0 after.
+  Engine::open opens its databases' stores (`init_shared`). So when the other test's reset
+  came between this test's set and open, its stores got the usual 64 MB. A 64 MB store puts a
+  DELETE under 1 MB of keys into the buffer, not into a run. Debug build, whole binary:
+  8 threads, 3 of 40 runs failed; 2 threads, 1 thread and the test alone, 0 of 40 each. At 8
+  threads with `--skip copy_through_the_sink`, 0 of 40 failed. The higher rate seen after
+  agent 201's commits is a timing change. 2a0152a16's sort (`sort_by_key_after`) was read and
+  is correct. Fix: `storage::with_txn_spill_bytes(n, || open(..))` sets the value for the
+  opening thread only (`scoped`), and `Engine` keeps the value it was opened with
+  (`Engine::txn_spill_bytes`) for every store it opens later. `set_default_txn_spill_bytes`
+  is gone, and its callers in big_tables, txn_spill and crash_bulk now use the scoped form. Nothing
+  on a hot path changed: the value is read when a store is opened.
+- **`parallel_index_builds` was a second flake of the same kind**, seen in the same runs (5 of
+  40 at 8 threads, "left: 2..5, right: 0"). `parscan::index_builds` counted every thread's
+  parallel builds, so the serial step's "no parallel build" saw
+  `brin_gin_builds_measure_as_postgres`' builds (parallel since a2392dd09). It is now counted
+  on the building session's thread, as `txn::unchanged::skips` is.
+- With both fixes: big_tables in full passed 200 of 200 runs at 8 threads and 50 of 50 at 2.
+  txn_spill and crash_bulk pass.
+- **Cursor fraction fix (wip/a190's 43657216d): it had already landed** as 223fffc6c, the
+  same code (wip/a190 differs only in its HANDOFF text). PostgreSQL 18.6 (the pinned image,
+  `--locale=C`) re-recorded `a190_planner_r12` and `a118_cursor_plan` byte for byte as
+  committed. Those goldens and the other cursor goldens pass on head in-process, over the wire
+  and shuffled. Examples: the default fraction and 0 give GroupAggregate over an Index Scan,
+  which is non-scrollable, so `FETCH ABSOLUTE -1` errors and aborts the transaction. SCROLL
+  adds Materialize. Fraction 1 gives Sort over HashAggregate. Nothing was ported, so no
+  benchmark was run.
+- **wip/a191, not landed:** its last commit landed as 72007ce57 (kept block positions for
+  snapshot seeks, golden a191_scan_paths). The WIP commits before it were never measured
+  and are not on head: secondary-index scans by reference with dense fetches into a kept
+  batch (mostly superseded by agent 203's 953fb8278), point-entry probes for a unique
+  equality without a parallel probe, a two-source merge a pair at a time, hot-range rows copied
+  once per reader, run compression off the producer, and generic filters as kernels.
+  The two-source merge (16% of DELETE, agent 201's profile) and the unique-equality probe
+  are worth a measured round. ed986715f has since added a unique key's point probe, so
+  check that first.
+
 ## Short write transactions, round 1 (agent 197)
 
 BENCH.md "Short write transactions, round 1" has the measurements: `short_txn` at 8 clients
