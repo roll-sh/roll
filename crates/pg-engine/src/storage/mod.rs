@@ -475,6 +475,11 @@ impl Store {
             store.flush_all()?;
         }
         store.load_rdels()?;
+        // (L0 at its trigger as it was left, a crash's or a build's before closes compacted
+        // it: merged in the background now, not at the first memtable filled.)
+        if store.view().l0.len() >= store.opts.l0_compaction_trigger {
+            store.schedule_background();
+        }
         // Older WAL files are fully covered now.
         for seq in wal_seqs {
             if seq != replay_seq {
@@ -1927,7 +1932,15 @@ impl Store {
         // before them reading the files after a clean shutdown would see deleted rows again,
         // or misread a linked run's versions.
         let linked = |v: &View| v.l0.iter().chain(&v.l1).any(|s| s.meta.commit_ts.is_some()) || v.imm.iter().any(|f| matches!(f, Frozen::Sst(s) if s.meta.commit_ts.is_some()));
-        if !self.closed.load(Ordering::Acquire) && (!self.view().rdels.is_empty() || linked(&self.view())) {
+        // (And L0 at its compaction trigger: only a memtable filled up runs compaction, so a
+        // session of a few writes left its close's file to the next, and every restart added
+        // one that nothing merged: 413 after 400 restarts, each in every point read.)
+        let l0_full = |v: &View| v.l0.len() + v.imm.len() >= self.opts.l0_compaction_trigger;
+        let pending = {
+            let v = self.view();
+            !v.rdels.is_empty() || linked(&v) || l0_full(&v)
+        };
+        if !self.closed.load(Ordering::Acquire) && pending {
             self.rotate()?;
             self.flush_all()?;
             self.compact()?;
@@ -3555,6 +3568,25 @@ mod tests {
         s.flush_memtables().unwrap();
         s.compact().unwrap();
         check(&s, true);
+    }
+
+    /// A clean close leaves L0 below its trigger however many sessions of a few writes the
+    /// store had: a close compacts an L0 at its trigger, as an open does in the background.
+    #[test]
+    fn restarts_keep_l0_bounded() {
+        let dir = tempfile::tempdir().unwrap();
+        let o = || StoreOptions { sync: false, ..Default::default() };
+        let trigger = o().l0_compaction_trigger;
+        for i in 0..50 {
+            let s = Store::open(dir.path(), o()).unwrap();
+            put(&s, &format!("k{i:03}"), Some("v"));
+            assert_eq!(s.get(b"k000", s.visible_ts()).unwrap().as_deref(), Some(&b"v"[..]));
+            s.close().unwrap();
+            let v = s.view();
+            assert!(v.l0.len() <= trigger, "restart {i}: {} L0 files", v.l0.len());
+        }
+        let s = Store::open(dir.path(), o()).unwrap();
+        assert_eq!(scan_all(&s, s.visible_ts()).len(), 50);
     }
 
     /// Compaction rewrites only the L1 files an L0 file's keys overlap: one between two L0
