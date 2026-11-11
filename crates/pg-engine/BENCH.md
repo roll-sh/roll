@@ -456,6 +456,124 @@ each), one binary, the path switched by an environment variable (patch in
 -1.0%, q05 +1.1%, everything else within 1%. The storage's point lookups (`Block::seek`,
 `SstReader::find_block`, `block_with`) cost about the same either way.
 
+## Point reads, round 3 (2026-11-11, agent 210)
+
+HANDOFF.md "Point reads, round 3" has what changed. Agent 205's harness (`~/.cache/a210/bench`):
+dist builds in a container on CPUs 32-35 (8 GiB, swap off, `--cpu-shares 2`), clients on
+4-7; 100,000 accounts, 2 s warmup, 10 s measured; user instructions and cycles per operation
+from `perf stat --per-thread` of the connections' threads (a privileged helper, `a210-perf`);
+a pair is run again when another tenant used more than 0.3 cores of the server CPUs. From
+the afternoon on every run held `~/.cache/lane-32-35.lock` (agent 213 shares the server
+CPUs). **base2** is `10d70e555` (the head this round's commits are on), **base1** `5a67e195a`
+and **base0** `0dba28977` (round 2's head) the heads the candidates were measured on before.
+
+**Three servers, same day** (`sb3`: two rounds, each server started once a round; roll is
+this round's head, PostgreSQL 18.6 and pgrust `malisper/pgrust:v0.4-beta-amd64` as in rounds
+1 and 2; medians):
+
+| workload | clients | server | ops/s | CPU µs/op (user+sys) | p50 / p99 ms | peak MiB | roll ÷PG | roll ÷pgrust |
+|---|---:|---|---:|---:|---:|---:|---:|---:|
+| prepared point select | 1 | roll | 21,853 | 43.8 (20.4+23.5) | 0.042 / 0.086 | 128 | 1.54x | 1.39x |
+| | | PostgreSQL | 14,194 | 44.0 (19.4+24.6) | 0.056 / 0.167 | 188 | | |
+| | | pgrust | 15,734 | 36.2 (19.0+17.2) | 0.057 / 0.111 | 347 | | |
+| prepared point select | 8 | roll | 117,318 | 29.9 (18.2+11.8) | 0.060 / 0.166 | 130 | 1.25x | 0.76x |
+| | | PostgreSQL | 93,910 | 36.6 (16.7+20.0) | 0.081 / 0.214 | 216 | | |
+| | | pgrust | 153,796 | 22.7 (11.5+11.2) | 0.044 / 0.118 | 389 | | |
+| prepared point select | 32 | roll | 120,044 | 32.7 (20.1+12.6) | 0.228 / 0.710 | 130 | 1.30x | 0.74x |
+| | | PostgreSQL | 92,434 | 42.7 (20.5+22.2) | 0.331 / 0.998 | 256 | | |
+| | | pgrust | 161,530 | 24.3 (12.6+11.7) | 0.175 / 0.583 | 466 | | |
+| pgbench -S prepared | 32 | roll | 122,303 | 31.2 (19.6+11.6) | 0.217 / 0.726 | 130 | 1.30x | 0.71x |
+| | | PostgreSQL | 93,821 | 40.4 (19.2+21.2) | 0.298 / 0.895 | 270 | | |
+| | | pgrust | 171,851 | 21.6 (11.8+9.8) | 0.147 / 0.442 | 481 | | |
+| short transactions | 8 | roll | 14,096 | 229.9 (140.7+89.1) | 0.496 / 1.974 | 174 | 0.87x | 0.78x |
+| | | PostgreSQL | 16,163 | 196.5 (96.4+100.1) | 0.432 / 2.068 | 333 | | |
+| | | pgrust | 18,167 | 170.7 (95.6+75.1) | 0.377 / 1.913 | 536 | | |
+
+Prepared point selects at 8 clients: 1.25x PostgreSQL (round 2: 1.14x) and 0.76x pgrust
+(0.67x); user CPU 18.2 µs a read against pgrust's 11.5 (round 2: 22.5 against 12.5). Short
+transactions are agent 213's from here on; they stay behind both (user 141 µs against 96).
+
+**Where the time went at 8 clients** (base0, `perf record` of cycles:u and instructions:u,
+600k samples, then `perf c2c` of a run of the same server): 70k user cycles a read for 49k
+instructions, CPI 1.42 (1 client: 1.13). `perf c2c` sampled 4,009 loads that hit a line
+another core had modified (HITM, about 200 cycles each), on these lines:
+
+| line (HITM samples) | written by | read by |
+|---|---|---|
+| the catalog's `RwLock` word (426) | every `db.catalog()` (lock, unlock) | `bound_as`, `shared_search_path`, `finish_txn`, `accept_catalog`, `catalog_version`, `begin_statement` |
+| the id table's `RwLock` and its count (275, 131) | `db.xids()`, `SnapshotXmin` | `start_activity` (`current_xmin`, under the id table's mutex), `finish_xid`, `begin_statement`, `emit` |
+| `Database` around `next_txn` (239) | `Database::begin` | `begin_statement`, `get_many_snap_with`, `read_entries`, `Txn::lock` |
+| the store's pin table (166) | `pin_visible`, `pin`, `SnapshotPin::drop` | the same |
+| the id table's state mutex (164) | `register_snapshot_of`, `SnapshotXmin::drop` | the same |
+| the visibility watch's count (155, 153) | `Kills::new` and its drop (an `Arc` clone a rescan) | `Kills::passed`, `mark` (`VisWatch::holds`) |
+| statics around `WORKING` / `SPINNING` (154) | every message (`Waiting`) | `set_ps_idle` (`log::active`) |
+
+The functions touching them ran at CPI 3 to 12 (`pin_visible` 12.6, `Store::pin` 10.4,
+`SnapshotPin::drop` 9.7, `point_reader` 6.3, `begin_statement` 5.1).
+
+**Kept**: four commits, each removing cache lines every read shared, measured as one change
+(alone each is within this host's noise) and in steps on the older heads.
+
+The round's commits against base2 (landD, alternating pairs of dist builds):
+
+| cell | pairs | Δ ops/s | Δ CPU/op | Δ instr/op | Δ cycles/op | cycles by pair |
+|---|---:|---:|---:|---:|---:|---|
+| point select, 8 clients | 5 | +4.3% | -5.9% | +1.6% | -8.0% | -5.5% to -10.4% |
+| point select, 1 client | 3 | +6.0% | -4.0% | -1.8% | +1.1% | -17.0% to +1.3% |
+| point select, 32 clients | 3 | -0.1% | +0.2% | +2.8% | -3.3% | -5.1% to -2.2% |
+| range read (100 rows), 8 clients | 3 | -1.6% | +1.2% | +0.3% | +0.1% | -0.2% to +1.7% |
+| short transactions, 8 clients | 3 | -0.2% | -0.9% | +0.7% | -2.1% | -3.1% to -0.0% |
+
+Run again (3 pairs each): range reads -0.6% ops/s, +0.8% CPU (pairs -2.8% to +3.4%), so
+over six pairs -1.5% ops/s and +1.0% CPU, pairs on both sides of zero: within this host's
+noise, but not a gain; 32 clients +1.0% ops/s, -1.6% CPU, cycles -4.2%.
+
+Point select, 8 clients, every pair:
+
+| pair | base2 ops/s | landD ops/s | Δ ops/s | base2 µs/op | landD µs/op | Δ CPU | Δ instr | Δ cycles |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 113,937 | 120,672 | +5.9% | 31.0 | 29.1 | -6.3% | +1.6% | -6.7% |
+| 2 | 107,197 | 111,804 | +4.3% | 32.8 | 30.8 | -5.9% | +0.6% | -8.7% |
+| 3 | 111,752 | 113,679 | +1.7% | 31.3 | 30.7 | -1.9% | +3.1% | -5.5% |
+| 4 | 114,909 | 115,259 | +0.3% | 30.9 | 30.4 | -1.6% | -0.5% | -8.0% |
+| 5 | 112,967 | 120,914 | +7.0% | 31.2 | 29.1 | -6.8% | +2.7% | -10.4% |
+
+Before (landA, the same commits with the threads' copies kept until the thread read again,
+against base1): point select 8 clients +4.9% ops/s, -5.5% CPU, cycles -10.0% (every pair
+-7.3% to -12.6%); 1 client +0.9%, +0.1%; 32 clients +5.9%, -5.7%; range +1.0%, -1.4%; short
++2.6%, -2.2%. The copies are now emptied when the value is replaced (an idle connection held
+an old view's memtables and files), at the cost of a mutex of the thread's own per read of
+a copy. And on base0, step by step (point select, 8 clients, 5 pairs): the pins and xmins
+alone cycles -4.1% median (one pair disturbed); with the published catalog, id table and
+view -5.2% (every pair -2.1% to -6.4%, ops/s +2.5%); all four -6.6% (every pair -4.1% to
+-8.2%, ops/s +4.9%, CPU -4.8%); the four on base0's other cells: 1 client +0.7% ops/s, -0.6%
+CPU; 32 clients +5.8%, -4.9%; range +0.6%, -0.7%; short transactions +1.4%, -1.9% (cycles
+-6.0% every pair).
+
+Instructions per read stay level (the slots' fences, the copies' lookups and the counters'
+sums replace the atomics they remove); the gain is in cycles: the read stopped waiting for
+lines other cores held. As round 2 suspected, part of roll's gap to pgrust at 8 clients was
+sharing, not only path length.
+
+Footprint (fresh server each, cgroup anon+shmem 25 s into 100 idle sessions, two of each,
+alternating; fresh data directory 3.03 MB each): base2 36.4 / 36.5 MB, landD 36.8 / 36.7 MB
+(+0.3 MB, 0.9%: each connection's thread keeps three copies and its session two slots).
+
+**Dropped** (`~/.cache/a210/patches/dropped-update-point-path.*`): an UPDATE's or DELETE's
+scan of one unique key ending at its visible row (`unique_point_plan` without the `with_key`
+exclusion; `roll-point-update.spec`, kept, gives PostgreSQL 18.6's output with it). Short
+transactions, 8 clients, 5 pairs each: on base0 +4.9% ops/s, -4.7% CPU, cycles -5.2% (one
+pair +0.5%); on base1 +1.3%, -0.8%, cycles +2.1% (pairs -7.4% to +3.0%), and again +1.1%,
+-1.5%, cycles -2.1% with one pair -14.9% ops/s: unclear.
+
+**Where a read goes now** (LBR call stacks of cycles:u, 8 clients, the commits on base1 with
+the earlier copies, a run another tenant disturbed: 24.5 µs user a read there): allocation
+3.4 µs (`mi_malloc` 2.9 self: `Txn::lock`'s keys and sets 0.4, the message loop 0.3, a block
+entry read in `Block::seek` 0.3, `first_raw` 0.3, `fetch_entries` 0.2, `bind_scan` 0.14, the
+transaction's settings 0.13); the index probe 2.4 and the row's point read 1.9; the
+executor's restart 1.8 (`rescan_index` 1.55); Bind 2.0, its Describe 1.3; the transaction's
+end 2.2 (`Txn::commit` 1.0).
+
 ## Point reads, round 2 (2026-11-11, agent 205)
 
 HANDOFF.md "Point reads, round 2" has what changed. Agent 202's harness

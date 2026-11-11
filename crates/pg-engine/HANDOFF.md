@@ -9576,6 +9576,97 @@ when it loses; an index none of whose key columns a clause reads still runs
 `Planner::endpoint`'s reverse scan expands a whole SST block (0.4%); Describe at Bind
 (`describe_here`, 1.1%) is per-Bind work outside planning.
 
+## Point reads, round 3 (agent 210)
+
+BENCH.md "Point reads, round 3" has the measurements. At 8 clients a prepared point select
+cost 70k user cycles for 49k instructions (CPI 1.42; one client: 1.13), and `perf c2c` of the
+connections' threads put the difference on cache lines every session writes: locks taken
+only to read (the catalog's, the transaction id table's and the store view's
+`RwLock<Arc<_>>`, read-locked and reference-counted several times a read), the store's
+snapshot-pin table and the id table's snapshot registrations (a mutex each, twice a read),
+counters bumped for tests, a database field every statement wrote next to fields every
+statement reads, and reference counts of shared objects cloned per rescan. Each sharing was
+removed, not shortened. Four commits:
+
+- *A session's snapshot pins and xmins in slots of its own* (PostgreSQL's PGPROC.xmin):
+  `Store::pin_slot` / `PinSlot` and `Xids::xmin_slot` / `XminSlot`, one per backend
+  (`Session::pin_slot`, `xmin_slot`, passed to `Database::begin_in`). A pin or a
+  registration writes only its session's slot (a mutex of its own, the oldest value in an
+  atomic); `Store::gc_horizon` and `Xids::publish` read the slots. The races are closed as
+  GetSnapshotData's are: a pin reads `visible`, stores its slot's oldest and then reads
+  `gc_floor`, which `gc_horizon` stores before it reads the slots (all SeqCst; a timestamp
+  below the floor is given up for a newer one); a registration reads `run_now` (`xmin_now`,
+  stored by `publish` before it reads the slots) before and after storing, and registers the
+  new one when it moved. Letting go of an xmin older than `run_now` publishes the horizon
+  again (it may be what held it back), so VACUUM's horizon stays exact. `Xids::assign` no
+  longer publishes (a new id never moves `xmin_now`); `finish` stores `run_now` before it
+  counts the completion, so a registration that reads a new count reads that xmin;
+  `current_xmin` (pg_stat_activity's backend_xmin at a message) reads `run_now`. Scans pruning
+  the memtables' versions use `Store::horizon_hint`, the newest horizon `gc_horizon` found
+  (refreshed once per WAL fsync group), instead of taking the pin table's mutex per scan: a
+  lower horizon only prunes less. The slots are plain allocations of their session's thread,
+  so no other session's data shares their lines.
+- *The catalog, the transaction id table and the store's view read without their locks*:
+  `published::Published<T>` in place of `RwLock<Arc<T>>` (`Database::catalog`, `xids`,
+  `Store::view`). A generation moves on under the write lock; a connection's thread
+  (`keep_on_this_thread`, from `server::handle`) keeps the value it last read with its
+  generation, under a mutex only it and a replacement take, and borrows it (`with`) while
+  the generation is the same. A replacement empties every thread's copy (one at a time,
+  holding no other lock), so an idle connection holds no old catalog or view; other threads
+  read the lock as before. (A thread keeps at most 8: one of a database it no longer reads
+  goes first.)
+- *Counters, the database's last use and its transaction ids without a line every
+  statement writes*: the counters tests read (`TREE_RESTARTS`, `INDEX_RESCANS`,
+  `STORED_INSERTS`, ...) are `counter::Counter`s, a cache line per group of threads, summed on
+  read (agent 208 made `STORED_SIZES` debug-only meanwhile); `Database::touch` took a mutex at
+  every statement and transaction end to store an `Instant`: now microseconds in an atomic,
+  written at most once a millisecond (`idle_for`); `next_txn` sits on a cache line of its own
+  (`counter::Padded`), as do the server's `WORKING` / `SPINNING` counts (they shared one with
+  the log flags every statement reads); the lock manager's hold order (`next_seq`, a
+  process-wide counter every lock hold incremented) comes from the clock, a thread's own holds
+  in the order it took them.
+- *A rescan's dead-entry marker, a slot's xmins and an id-less transaction's end without
+  shared reference counts*: `sizing::Kills::again` starts the last run's marker over while
+  every heap page is still all-visible (it has nothing to mark; a new one cloned the
+  visibility watch, whose count shares a line with the atomic every scan's `holds` reads); a
+  slot's registrations reach the id table through the session's `XminSlot`, which holds the
+  `Arc<Xids>` (`XminShared` is what `publish` reads); `finish_xid` leaves the id table alone
+  for a transaction without ids.
+
+Dropped (`~/.cache/a210/patches/dropped-update-point-path.*`): an UPDATE's or DELETE's scan of
+one unique key ending at its visible row, `unique_point_plan` without its `with_key`
+exclusion. The statement locks the row the scan returns and rechecks a newer version itself
+(`Locked::Newer`, `plan.recheck`), so reading on finds nothing; `roll-point-update.spec`
+(concurrent update, failed recheck, abort, key change, delete, delete and re-insert of the
+key, a prepared statement) gives PostgreSQL 18.6's output with and without it, and is kept as
+a spec. Short transactions: +4.9% ops/s on round 2's head, then +1.3% and +1.1% with cycles
++2.1% / -2.1% on the rebased stack, pairs from -14.9% to +14.3%: unclear.
+
+**Next**, by the profile in BENCH.md, path length now: allocation (3.4 µs of a read: the lock
+bookkeeping's key vectors and sets in `Txn::lock`, a block entry's copy in `Block::seek`,
+the probe's and the fetch's buffers, `bind_scan`'s ranges; a session could keep the last
+transaction's collections, and a lock's key need not be copied twice), the executor restart's
+`rescan_index` (1.55), Bind with its Describe (2.0) and the transaction's end (2.2). pgrust's
+lead is now about 7 µs of user CPU a read at 8 clients. Not measured here: pgrust's own
+profile (its image's binary has no symbols; a source build would be needed). The UPDATE point
+path above wants a rerun on a quiet machine; agent 213 owns the write side of short
+transactions now.
+
+Verification, on the pushed commits (`e2a307243`, checked as `d37dda874` before a rebase over a docs commit; the measured landD is the same commits on `10d70e555`): release build; release Clippy
+19 warnings, none in a file changed here; release lib tests; kept_plans; crash_random seeds
+1-3; the isolation suite and the engine's own specs against a private PostgreSQL 18.6
+(a210-pgref, port 54210, max_prepared_transactions 10): 141/142 specs, 1823/1824
+permutations (intra-grant-inplace, as before), and `roll-point-update` matching. Before, on
+`8536166d9` (the same commits with the dropped UPDATE point path, before its rebase onto
+`10d70e555`): golden (golden_wire, golden_shuffled), wire, twophase, crash_random seeds 1-30,
+the isolation run (141/142 specs, 1823/1824 permutations) and the regress files test_setup,
+select, prepare, plancache, portals, privileges, rowsecurity, transactions, btree_index,
+insert, update against the same reference: 4530/4530 units. The verification train runs on the
+pushed head (its result follows in this section).
+
+Not this round's: roll's `VACUUM (VERBOSE)` sends none of PostgreSQL's INFO lines (agent 205's
+note, still open).
+
 ## Short write transactions, round 3 (agent 213)
 
 Nothing kept; BENCH.md "Short write transactions, round 3" has the same-day table (8 clients:
