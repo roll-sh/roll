@@ -2519,6 +2519,15 @@ fn bind_msg(c: &mut Conn, s: &mut Session, body: &[u8]) -> Result<()> {
     Ok(())
 }
 
+/// IsAbortedTransactionBlockState's refusal, raised by `routine`.
+fn aborted_txn(routine: &'static str) -> Error {
+    Error::new(
+        code::IN_FAILED_SQL_TRANSACTION,
+        "current transaction is aborted, commands ignored until end of transaction block",
+    )
+    .routine(routine)
+}
+
 fn describe_msg(c: &mut Conn, s: &mut Session, body: &[u8]) -> Result<()> {
     let mut b = Body::new(body);
     let kind = b.u8()?;
@@ -2526,9 +2535,13 @@ fn describe_msg(c: &mut Conn, s: &mut Session, body: &[u8]) -> Result<()> {
     match kind {
         b'S' => {
             let Some(p) = s.prepared.get(&name).cloned() else {
-                return Err(crate::session::missing_statement(&name));
+                return Err(crate::session::missing_statement(&name, "exec_describe_statement_message"));
             };
             let cols = s.describe(&p)?;
+            // (A statement returning rows isn't described in a failed transaction.)
+            if s.status() == TxnStatus::Failed && cols.is_some() {
+                return Err(aborted_txn("exec_describe_statement_message"));
+            }
             c.msg(b't', |o| {
                 let oids = p.param_type_oids();
                 o.put_i16(oids.len() as i16);
@@ -2546,8 +2559,11 @@ fn describe_msg(c: &mut Conn, s: &mut Session, body: &[u8]) -> Result<()> {
                 return Err(Error::new(
                     code::INVALID_CURSOR_NAME,
                     format!("portal \"{name}\" does not exist"),
-                ));
+                ).routine("exec_describe_portal_message"));
             };
+            if s.status() == TxnStatus::Failed && cols.is_some() {
+                return Err(aborted_txn("exec_describe_portal_message"));
+            }
             match cols {
                 Some(cols) => row_description(c, &cols, &f),
                 None => c.msg(b'n', |_| {}),

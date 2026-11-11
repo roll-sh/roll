@@ -225,7 +225,7 @@ impl Session {
             return Err(Error::new(
                 code::IN_FAILED_SQL_TRANSACTION,
                 "current transaction is aborted, commands ignored until end of transaction block",
-            ));
+            ).routine("HandleFunctionRequest"));
         }
         let cat = self.state.db.catalog();
         let f = lookup(&cat, oid)?;

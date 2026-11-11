@@ -10871,3 +10871,19 @@ Recorded against a private PostgreSQL 18.6 (`select version()`: 18.6, Debian 18.
   sibling links; the model places rows by the pages as they are now (a run of 16 rows came
   in another order in the probe `~/.cache/a214/cur1.sql` case D). Modelling it needs the
   leaf pages as of each page read.
+- **Wire-protocol error fields** (`error_location.rs`): the policy is PostgreSQL's routine,
+  file and line for messages in `KNOWN` (or named by `Error::routine`), else `pg-engine`, 0,
+  empty. A raw-protocol probe of 50 cases (`~/.cache/a214/probe/wireprobe.py`: Parse, Bind,
+  Describe, Execute, Close, message layout, fast path, COPY, startup) found 33 errors with
+  PostgreSQL's SQLSTATE and message but other F/L/R (agent 211's Bind result-format count
+  among them, and the failed-transaction error on Parse / Bind / Execute / fast path, which
+  named exec_simple_query). All carry PostgreSQL's now; a message more than one routine
+  raises is named at its site (missing unnamed statement, missing portal, failed
+  transaction). Describe of a row-returning statement or portal in a failed transaction now
+  fails as PostgreSQL's does (it was answered). Still differing in behaviour, not fields:
+  an unsupported result format code fails at Bind, PostgreSQL's at the first row Execute
+  sends; COPY's unexpected message isn't followed by the FATAL "protocol synchronization
+  was lost"; a duplicate named portal at Bind, a Sync with trailing bytes, a startup packet
+  without its terminator are accepted; Parse with an unknown type oid gives 42704 (PostgreSQL
+  XX000 cache lookup failed); the protocol-version message says 3.0 to 3.0 (PostgreSQL 18:
+  3.2).

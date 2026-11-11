@@ -160,13 +160,15 @@ fn is_result_change(e: &Error) -> bool {
     e.code == code::FEATURE_NOT_SUPPORTED && e.message == "cached plan must not change result type"
 }
 
-/// Bind and Describe distinguish the unnamed statement in their missing-statement errors.
-pub(crate) fn missing_statement(name: &str) -> Error {
-    let msg = match name {
-        "" => "unnamed prepared statement does not exist".to_string(),
-        n => format!("prepared statement \"{n}\" does not exist"),
+/// Bind and Describe distinguish the unnamed statement in their missing-statement errors
+/// (raised by `routine`, exec_bind_message or exec_describe_statement_message; a named one's
+/// by FetchPreparedStatement).
+pub(crate) fn missing_statement(name: &str, routine: &'static str) -> Error {
+    let (msg, routine) = match name {
+        "" => ("unnamed prepared statement does not exist".to_string(), routine),
+        n => (format!("prepared statement \"{n}\" does not exist"), "FetchPreparedStatement"),
     };
-    Error::new(code::INVALID_SQL_STATEMENT_NAME, msg)
+    Error::new(code::INVALID_SQL_STATEMENT_NAME, msg).routine(routine)
 }
 
 impl Prepared {
@@ -2424,7 +2426,7 @@ impl Session {
             return Err(Error::new(
                 code::IN_FAILED_SQL_TRANSACTION,
                 "current transaction is aborted, commands ignored until end of transaction block",
-            ));
+            ).routine("exec_parse_message"));
         }
         // A superuser's DML on a system catalog the engine derives: the query it runs types
         // its parameters; it returns no rows.
@@ -2749,13 +2751,13 @@ impl Session {
         result_formats: Vec<i16>,
     ) -> Result<()> {
         let Some(p) = self.prepared.get(stmt).cloned() else {
-            return Err(missing_statement(stmt));
+            return Err(missing_statement(stmt, "exec_bind_message"));
         };
         if self.status == TxnStatus::Failed && !ends_failed_txn(p.stmt.as_ref().and_then(inner)) {
             return Err(Error::new(
                 code::IN_FAILED_SQL_TRANSACTION,
                 "current transaction is aborted, commands ignored until end of transaction block",
-            ));
+            ).routine("exec_bind_message"));
         }
         if formats.len() > 1 && formats.len() != params.len() {
             return Err(Error::new(
@@ -2906,10 +2908,13 @@ impl Session {
             ));
         }
         if let Some(f) = result_formats.iter().find(|f| !matches!(f, 0 | 1)) {
+            // (PostgreSQL's comes from printtup_prepare_info, at the first row Execute
+            // sends.)
             return Err(Error::new(
                 code::INVALID_PARAMETER_VALUE,
                 format!("unsupported format code: {f}"),
-            ));
+            )
+            .routine("printtup_prepare_info"));
         }
         if portal.is_empty() {
             self.close_portal(portal)?;
@@ -2946,7 +2951,7 @@ impl Session {
             let e = Error::new(
                 code::INVALID_CURSOR_NAME,
                 format!("portal \"{portal}\" does not exist"),
-            );
+            ).routine("exec_execute_message");
             self.on_error();
             return Err(e);
         };
@@ -2962,7 +2967,7 @@ impl Session {
             return Err(Error::new(
                 code::IN_FAILED_SQL_TRANSACTION,
                 "current transaction is aborted, commands ignored until end of transaction block",
-            ));
+            ).routine("exec_execute_message"));
         }
         if let Some(lazy) = pt.lazy.take() {
             let r = self.execute_suspended(&mut pt, lazy, max_rows);
@@ -3121,7 +3126,7 @@ impl Session {
             return Err(Error::new(
                 code::IN_FAILED_SQL_TRANSACTION,
                 "current transaction is aborted, commands ignored until end of transaction block",
-            ));
+            ).routine("exec_execute_message"));
         }
         let mut rows = Vec::new();
         let mut sink = self.row_sink.take();
@@ -3161,7 +3166,7 @@ impl Session {
             return Err(Error::new(
                 code::IN_FAILED_SQL_TRANSACTION,
                 "current transaction is aborted, commands ignored until end of transaction block",
-            ));
+            ).routine("exec_execute_message"));
         }
         let count = if max_rows == 0 { i64::MAX } else { max_rows as i64 };
         let got = self.with_ctx(&[], |ctx| {
@@ -3171,7 +3176,7 @@ impl Session {
             return Err(Error::new(
                 code::INVALID_CURSOR_NAME,
                 format!("portal \"{name}\" does not exist"),
-            ));
+            ).routine("exec_execute_message"));
         };
         let more = max_rows > 0 && rows.len() == max_rows;
         let tag = format!("SELECT {}", rows.len());
