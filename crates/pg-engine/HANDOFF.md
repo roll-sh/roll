@@ -10822,3 +10822,35 @@ gate remain open. The old new-src footprint run predates custom-plan reuse. The
 reuse range test checks its first row, so complete ordered-result validation also
 remains open. No speedup or blanket performance acceptance is claimed. The full
 verification train remains an integrated-origin gate before candidate acceptance.
+
+## Behaviour gaps closed by agent 214 (2026-11-11)
+
+Recorded against a private PostgreSQL 18.6 (`select version()`: 18.6, Debian 18.6-1.pgdg13+2).
+
+- **VACUUM (VERBOSE), ANALYZE (VERBOSE), VACUUM (VERBOSE, ANALYZE)** (`session/ddl/vacreport.rs`):
+  heap_vacuum_rel's `vacuuming` / `aggressively vacuuming` and `finished vacuuming` report for
+  the table, then its TOAST table; lazy_truncate_heap's `truncated` line (with its
+  vacuum_error_callback CONTEXT); do_analyze_rel's `analyzing` (and `inheritance tree`),
+  acquire_sample_rows' and acquire_inherited_sample_rows' lines and `finished analyzing`.
+  VACUUM FULL / CLUSTER's copy_table_data lines now carry the removable and nonremovable
+  counts and the old heap's pages. Pages, tuples removed / remaining / recently dead, dead
+  line pointers, index scan needed / not needed / bypassed (INDEX_CLEANUP and the
+  vacuum_index_cleanup storage parameter now reach the heap model), frozen pages and
+  tuples, visibility-map bits set and each index's pages (btree: newly deleted, deleted,
+  reusable, from `Btree::vacuum_scan`) come from the heap and btree models
+  (`heapsim::VacuumResult`, `btsim::BtVacuumed`). Buffer, WAL and I/O numbers are 0 as in
+  autovacuum's log report; CPU and elapsed are the thread's. The golden harness masks, in
+  INFO messages only, the numbers on `removable cutoff`, `new relfrozenxid`, rate, buffer,
+  WAL, timing and `CPU:` lines and the oid in `pg_toast_N` (`tests/common` `mask_report`);
+  everything else is pinned. Two behaviour changes came with it, both as PostgreSQL: a
+  VACUUM that skipped an all-visible page that isn't all-frozen leaves relfrozenxid alone
+  (skippedallvis), and a VACUUM that truncated the heap takes a transaction id
+  (LogAccessExclusiveLock), so the btree pages it deleted are reusable at the next VACUUM.
+  The INFO messages carry PostgreSQL's routine, file and line (`error_location`, by
+  routine). Golden `a214_vacuum_verbose`.
+  Not modelled: GIN, GiST, SP-GiST, BRIN and hash index lines give the index's pages with 0
+  deleted / reusable (PostgreSQL's GIN pending-list cleanup can show deleted pages);
+  `new relminmxid`; eager scanning (always 0); opportunistic freezing beyond what the heap
+  model freezes. Still differs: the first VACUUM after VACUUM FULL or CLUSTER doesn't
+  advance relfrozenxid (no `new relfrozenxid` line): the rewritten rows keep the rewrite's
+  xmin in storage, which `advance_frozen_xid` reads, where PostgreSQL froze them.

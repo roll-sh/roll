@@ -42,6 +42,7 @@ impl Ddl<'_, '_> {
         let mut skip_locked = false;
         let (mut process_main, mut process_toast) = (true, true);
         let mut truncate: Option<bool> = None;
+        let mut index_cleanup: Option<bool> = None;
         let (mut ring_size, mut nworkers) = (None::<i64>, 0i64);
         for d in super::def_elems(&s.options) {
             let flag = || bool_option(d);
@@ -82,10 +83,11 @@ impl Ddl<'_, '_> {
                 (true, "truncate") => truncate = Some(flag()?),
                 (true, "skip_database_stats") => skip_db = flag()?,
                 (true, "index_cleanup") => {
-                    if def_arg_str(d).is_some_and(|v| v.eq_ignore_ascii_case("auto")) {
-                        continue;
-                    }
-                    flag()?;
+                    index_cleanup = if def_arg_str(d).is_some_and(|v| v.eq_ignore_ascii_case("auto")) {
+                        None
+                    } else {
+                        Some(flag()?)
+                    };
                 }
                 (true, "parallel") => match d.arg.as_deref().and_then(ival) {
                     Some(n) if (0..=1024).contains(&n) => nworkers = n,
@@ -121,6 +123,7 @@ impl Ddl<'_, '_> {
         }
         vacuum &= s.is_vacuumcmd;
         crate::exec::sizing::set_vacuum_truncate(truncate);
+        crate::exec::sizing::set_vacuum_index_cleanup(index_cleanup);
         crate::exec::sizing::set_vacuum_skip(freeze, skip_pages);
         if full && nworkers > 0 {
             return Err(Error::new(
@@ -327,7 +330,8 @@ impl Ddl<'_, '_> {
                 .map(|t| (t, Vec::new(), false))
                 .collect();
         }
-        let _ = verbose;
+        // (vacuum_get_cutoffs: FREEZE makes it aggressive, so does DISABLE_PAGE_SKIPPING.)
+        let aggressive = freeze || skip_pages;
         let mut analyzed = Vec::new();
         let own_xacts =
             vacuum || super::TOP_LEVEL.with(|t| t.get()) == Some(false);
@@ -491,7 +495,22 @@ impl Ddl<'_, '_> {
                         let _progress = super::idxprogress::command(&sess.index_progress, 0);
                         // PROCESS_MAIN false: only the TOAST table gets new files.
                         if process_main {
-                            self.measure_rewritten(&r, None)?;
+                            // (copy_table_data's report: what it left out and kept of the
+                            // old heap, and its pages.)
+                            let before = if verbose {
+                                self.send_rewrite_start(&r, None);
+                                let pages = match crate::exec::sizing::heap_blocks(&r, self.ctx)? {
+                                    Some(b) => b as i64,
+                                    None => self.cat.relstats.get(&r.oid).map_or(0, |s| s.pages.max(0) as i64),
+                                };
+                                Some((pages, crate::exec::sizing::dead_counts(&r, self.ctx)?, super::vacreport::Began::now()))
+                            } else {
+                                None
+                            };
+                            let kept = self.measure_rewritten(&r, None)?;
+                            if let Some((pages, dead, began)) = before {
+                                self.send_rewrite_end(&r, pages, dead, kept, &began);
+                            }
                             // (It rebuilds the indexes: their expressions are computed.)
                             self.evaluate_index_exprs(&r, None)?;
                             crate::exec::pgstat::io_rewrite(self.ctx, r.oid);
@@ -513,19 +532,66 @@ impl Ddl<'_, '_> {
                             progress.set(8, indexes as i64);
                             super::analyze::ProgressEnd(&progress)
                         });
+                        let report = (verbose && vacuum).then(|| {
+                            let schema = self.cat.schema_name(r.schema).to_string();
+                            if process_main {
+                                self.vacuuming_info(&schema, &r.name, aggressive);
+                            }
+                            (schema, super::vacreport::Began::now())
+                        });
+                        self.vacuumed = None;
                         if vacuum && process_main {
                             self.vacuum_am_indexes(&r)?;
                         }
                         if process_main || !vacuum {
                             live = Some(self.measure(&r, vacuum)?);
                         }
+                        // lazy_truncate_heap's AccessExclusiveLock is WAL-logged for hot
+                        // standbys (LogAccessExclusiveLock), which gives the VACUUM's
+                        // transaction an id: btree pages it deleted are recyclable once it
+                        // is past.
+                        let truncated = self.vacuumed.as_ref().is_some_and(|(oid, m, t)| {
+                            *oid == r.oid
+                                && (m.heap.pages < m.heap.rel_pages
+                                    || t.as_ref().is_some_and(|t| t.heap.pages < t.heap.rel_pages))
+                        });
                         if vacuum {
                             progress.set(0, 6);
                         }
                         if vacuum {
                             // vac_update_relstats: the table's pg_class row, in place.
                             self.ctx.txn.borrow_mut().inplace_lock_catalog_row(1259, r.oid)?;
+                            let first = crate::txn::xids::FIRST_NORMAL_XID;
+                            let frozen = |d: &Self, oid: u32| d.cat.frozen_xids.get(&oid).copied().unwrap_or(first);
+                            let frozen_before = (frozen(self, r.oid), frozen(self, r.toast));
+                            let cutoff = self.recent_xmin();
                             self.advance_frozen_xid(&r, freeze, process_main, process_toast)?;
+                            // (Given after the cutoffs it took at its start.)
+                            if truncated {
+                                self.ctx.txn.borrow_mut().xid();
+                            }
+                            if let Some((schema, began)) = report {
+                                let advanced = |d: &Self, oid: u32, old: u64| {
+                                    let new = frozen(d, oid);
+                                    (new > old).then_some((old, new))
+                                };
+                                let delay = progress.params[10].load(std::sync::atomic::Ordering::Relaxed);
+                                let (main, toast) = match self.vacuumed.take() {
+                                    Some((oid, m, t)) if oid == r.oid => (Some(m), t),
+                                    _ => (None, None),
+                                };
+                                if process_main {
+                                    let f = advanced(self, r.oid, frozen_before.0);
+                                    self.vacuumed_info(r.oid, &schema, &r.name, main.as_ref(), cutoff, f, delay, &began);
+                                }
+                                if process_toast && r.toast != 0 {
+                                    let name = r.toast_relname(false);
+                                    self.vacuuming_info("pg_toast", &name, aggressive);
+                                    let f = advanced(self, r.toast, frozen_before.1);
+                                    let began = super::vacreport::Began::now();
+                                    self.vacuumed_info(r.toast, "pg_toast", &name, toast.as_ref(), cutoff, f, 0, &began);
+                                }
+                            }
                             // pgstat_report_vacuum, of the table and of its TOAST table.
                             if let Some(live) = live {
                                 let pages = crate::exec::sizing::modelled_blocks(r.oid, self.ctx)
@@ -541,6 +607,10 @@ impl Ddl<'_, '_> {
                     }
                     if analyze {
                         let started = std::time::Instant::now();
+                        let began = verbose.then(|| {
+                            self.analyzing_info(&r, false);
+                            super::vacreport::Began::now()
+                        });
                         let read = self.analyze_columns(&r, &cols, false)?;
                         let live = match read {
                             Some(n) => n,
@@ -550,6 +620,11 @@ impl Ddl<'_, '_> {
                         // in the heap model (the whole table, as a full sample reads it).
                         let dead = crate::exec::sizing::heap_tuple_stats(r.oid, self.ctx)?
                             .map_or(0, |s| s.2 as i64);
+                        if let Some(began) = began {
+                            let targrows = self.targrows;
+                            self.sample_info(&r, targrows, Some(live as u64))?;
+                            self.analyzed_info(&r, &began);
+                        }
                         crate::exec::pgstat::report_analyze(
                             self.ctx,
                             r.oid,
@@ -565,12 +640,23 @@ impl Ddl<'_, '_> {
                     continue;
                 }
                 analyzed.push(r.oid);
-                // An inheritance parent without children any more: relhassubclass goes.
+                // An inheritance parent without children any more: relhassubclass goes
+                // (acquire_inherited_sample_rows finds none).
+                let had_children = self.cat.class_has_subclass.contains(&r.oid);
                 if self.cat.children(r.oid).is_empty() {
                     self.cat.class_has_subclass.remove(&r.oid);
                 }
                 // Statistics over the whole tree below a partitioned table or a parent.
-                if r.partkey.is_some() || !self.cat.children(r.oid).is_empty() {
+                let tree = r.partkey.is_some() || !self.cat.children(r.oid).is_empty();
+                if verbose && (tree && !self.cat.children(r.oid).is_empty() || had_children && r.partkey.is_none()) {
+                    self.analyzing_info(&r, true);
+                    let began = super::vacreport::Began::now();
+                    if tree {
+                        self.analyze_columns(&r, &cols, true)?;
+                    }
+                    self.inherited_sample_info(&r)?;
+                    self.analyzed_info(&r, &began);
+                } else if tree {
                     self.analyze_columns(&r, &cols, true)?;
                 }
                 if r.partkey.is_some() {
@@ -695,10 +781,16 @@ impl Ddl<'_, '_> {
         main: bool,
         toast: bool,
     ) -> Result<()> {
+        // (A VACUUM that skipped an all-visible page not all-frozen can't know that page's
+        // oldest xmin: it leaves relfrozenxid as it was, skippedallvis.)
+        let skipped = self.vacuumed.as_ref().filter(|v| v.0 == t.oid).map_or((false, false), |v| {
+            (v.1.heap.skipped_all_visible, v.2.as_ref().is_some_and(|r| r.heap.skipped_all_visible))
+        });
+        let main = main && !skipped.0;
         let oldest = self.recent_xmin();
         let first = crate::txn::xids::FIRST_NORMAL_XID;
         let old = self.cat.frozen_xids.get(&t.oid).copied().unwrap_or(first);
-        let toast = toast && t.toast != 0;
+        let toast = toast && t.toast != 0 && !skipped.1;
         let old_toast = self.cat.frozen_xids.get(&t.toast).copied().unwrap_or(first);
         let (mut new, mut new_toast) = (oldest, oldest);
         let measured = self.measured_xmin.take().filter(|m| m.0 == t.oid && m.1 == old);
@@ -871,7 +963,8 @@ impl Ddl<'_, '_> {
     fn measure_quiet(&mut self, t: &Table, vacuum: bool) -> Result<f64> {
         // (A lazy VACUUM doesn't compute index expressions; when modelling the indexes
         // would, and that fails, the heap isn't modelled.)
-        if vacuum && let Some(v) = crate::exec::sizing::vacuum(t, self.ctx).ok().flatten() {
+        if vacuum && let Some(mut v) = crate::exec::sizing::vacuum(t, self.ctx).ok().flatten() {
+            self.vacuumed = Some((t.oid, std::mem::take(&mut v.report), v.toast.take()));
             // The modelled heap, vacuumed: indexes it cleaned up are measured too.
             self.cat.had_triggers.remove(&t.oid);
             self.cat.relstats.insert(
@@ -1263,19 +1356,16 @@ impl Ddl<'_, '_> {
         let sess = self.ctx.sess;
         let _progress = super::idxprogress::command(&sess.index_progress, 0);
         self.mark_clustered(t, Some(ix.oid));
-        if verbose {
-            let name = format!(
-                "{}.{}",
-                crate::catalog::quote_ident(self.cat.schema_name(t.schema)),
-                crate::catalog::quote_ident(&t.name)
-            );
-            let mut e = Error::new(
-                code::SUCCESSFUL_COMPLETION,
-                format!("clustering \"{name}\" using sequential scan and sort"),
-            );
-            e.severity = crate::error::Severity::Info;
-            self.ctx.notice(e);
-        }
+        let before = if verbose {
+            self.send_rewrite_start(t, Some("using sequential scan and sort"));
+            let pages = match crate::exec::sizing::heap_blocks(t, self.ctx)? {
+                Some(b) => b as i64,
+                None => self.cat.relstats.get(&t.oid).map_or(0, |s| s.pages.max(0) as i64),
+            };
+            Some((pages, crate::exec::sizing::dead_counts(t, self.ctx)?, super::vacreport::Began::now()))
+        } else {
+            None
+        };
         let bixs = self.binder().bound_indexes(t)?;
         let bix = bixs
             .iter()
@@ -1319,17 +1409,8 @@ impl Ddl<'_, '_> {
         // Rows re-stored under new keys are in index order already.
         let order = t.storage_pkey().is_some().then_some(order.as_slice());
         let n = self.measure_rewritten(t, order)?;
-        if verbose {
-            let name = format!(
-                "{}.{}",
-                crate::catalog::quote_ident(self.cat.schema_name(t.schema)),
-                crate::catalog::quote_ident(&t.name)
-            );
-            let pages = self.cat.relstats.get(&t.oid).map_or(0, |s| s.pages);
-            let mut e = Error::new(code::SUCCESSFUL_COMPLETION, format!("\"{name}\": found 0 removable, {n} nonremovable row versions in {pages} pages"))
-                .detail("0 dead row versions cannot be removed yet.\nCPU: user: 0.00 s, system: 0.00 s, elapsed: 0.00 s.");
-            e.severity = crate::error::Severity::Info;
-            self.ctx.notice(e);
+        if let Some((pages, dead, began)) = before {
+            self.send_rewrite_end(t, pages, dead, n, &began);
         }
         Ok(())
     }

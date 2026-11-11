@@ -153,6 +153,8 @@ impl Ddl<'_, '_> {
         // has fewer (`sampled_blocks`). Taken as the rows are read: only the reservoir is
         // held.
         let want = 300 * max_target.max(1) as usize;
+        // (do_analyze_rel's targrows: 100 without a column to analyze.)
+        self.targrows = if max_target > 0 { want } else { 100 };
         let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
         let mut next = || {
             state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);

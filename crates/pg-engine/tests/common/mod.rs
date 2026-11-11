@@ -532,7 +532,69 @@ fn has_order_by(sql: &str) -> bool {
         .any(|w| w[0] == "order" && w[1] == "by")
 }
 
+/// The lines of VACUUM / ANALYZE / CLUSTER (VERBOSE)'s INFO reports whose numbers depend on
+/// the server's history and its buffer manager (transaction ids, rates, buffers, WAL, time):
+/// their numbers as `N`. A TOAST table's name carries its table's oid: `pg_toast_N`.
+const VOLATILE_REPORT_LINES: [&str; 10] = [
+    "removable cutoff:",
+    "new relfrozenxid:",
+    "new relminmxid:",
+    "delay time:",
+    "I/O timings:",
+    "avg read rate:",
+    "buffer usage:",
+    "WAL usage:",
+    "system usage:",
+    "CPU:",
+];
+
+fn mask_report(text: &str) -> String {
+    let text = text.split("pg_toast_").enumerate().fold(String::new(), |mut acc, (i, part)| {
+        if i == 0 {
+            return part.to_string();
+        }
+        acc.push_str("pg_toast_");
+        let digits = part.find(|c: char| !c.is_ascii_digit()).unwrap_or(part.len());
+        if digits > 0 {
+            acc.push('N');
+        }
+        acc.push_str(&part[digits..]);
+        acc
+    });
+    text.split('\n')
+        .map(|l| {
+            if !VOLATILE_REPORT_LINES.iter().any(|p| l.starts_with(p)) {
+                return l.to_string();
+            }
+            let mut out = String::new();
+            let mut chars = l.chars().peekable();
+            while let Some(c) = chars.next() {
+                if c.is_ascii_digit() {
+                    while chars.peek().is_some_and(|d| d.is_ascii_digit() || *d == '.') {
+                        chars.next();
+                    }
+                    out.push('N');
+                } else {
+                    out.push(c);
+                }
+            }
+            out
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn render_field(out: &mut String, kind: &str, f: &Field) {
+    if kind == "INFO" {
+        let mut f = f.clone();
+        f.message = mask_report(&f.message);
+        f.detail = f.detail.as_deref().map(mask_report);
+        return render_field_as_is(out, kind, &f);
+    }
+    render_field_as_is(out, kind, f)
+}
+
+fn render_field_as_is(out: &mut String, kind: &str, f: &Field) {
     let _ = write!(out, "{kind} {}: {}", f.code, f.message);
     if let Some(p) = f.position {
         let _ = write!(out, " (at {p})");

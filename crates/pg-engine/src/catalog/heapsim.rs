@@ -773,6 +773,23 @@ pub struct VacuumResult {
     /// it skip): `live` counts the read ones' tuples (vac_estimate_reltuples' input).
     pub rel_pages: u32,
     pub scanned: u32,
+    /// heap_vacuum_rel's report: the tuples whose storage pruning removed (ndeleted), the
+    /// pages with dead line pointers and those pointers (lpdead_item_pages / _items),
+    /// whether their index entries were removed (an index scan) or that was bypassed, the
+    /// pages and tuples it froze, the visibility map bits it set (newly all-visible, of
+    /// those also all-frozen, all-visible ones now all-frozen), and whether it skipped an
+    /// all-visible page that isn't all-frozen (relfrozenxid can't advance then).
+    pub tuples_deleted: u64,
+    pub lpdead_pages: u32,
+    pub lpdead_items: u64,
+    pub index_scans: u32,
+    pub bypassed: bool,
+    pub frozen_pages: u32,
+    pub tuples_frozen: u64,
+    pub vm_visible: u32,
+    pub vm_visible_frozen: u32,
+    pub vm_frozen: u32,
+    pub skipped_all_visible: bool,
 }
 
 /// The pages a VACUUM may skip by the visibility map (lazy_scan_heap's skipwithvm,
@@ -1125,6 +1142,24 @@ impl Heap {
             }
         }
         s
+    }
+
+    /// The tuples a rewrite (heapam_relation_copy_for_cluster) leaves behind and those it
+    /// must keep though dead: (HEAPTUPLE_DEAD, HEAPTUPLE_RECENTLY_DEAD).
+    pub fn dead_counts(&self, v: &Vis) -> (u64, u64) {
+        let mut n = (0, 0);
+        for p in &self.pages {
+            for l in p.lps.iter() {
+                if let Lp::Normal(t) = l {
+                    match t.status(v) {
+                        Htsv::Dead => n.0 += 1,
+                        Htsv::RecentlyDead => n.1 += 1,
+                        _ => {}
+                    }
+                }
+            }
+        }
+        n
     }
 
     /// A relcache invalidation: the cached insertion targets are forgotten.
@@ -1994,6 +2029,21 @@ impl Heap {
     /// indexes to clean, unless that is bypassed) free the dead line pointers, record
     /// free space, mark pages all-visible and truncate empty trailing pages.
     pub fn vacuum(&mut self, v: &Vis, nindexes: usize, truncate: bool, skip: Skip, freeze: bool) -> VacuumResult {
+        self.vacuum_with(v, nindexes, None, truncate, skip, freeze)
+    }
+
+    /// `vacuum` under INDEX_CLEANUP `cleanup`: None (auto) bypasses removing the dead line
+    /// pointers' index entries when few pages have them, false always (the pointers stay
+    /// dead), true never.
+    pub fn vacuum_with(
+        &mut self,
+        v: &Vis,
+        nindexes: usize,
+        cleanup: Option<bool>,
+        truncate: bool,
+        skip: Skip,
+        freeze: bool,
+    ) -> VacuumResult {
         self.settle(v);
         let rel_pages = self.pages.len() as u32;
         let mut res = VacuumResult { rel_pages, ..Default::default() };
@@ -2019,6 +2069,10 @@ impl Heap {
         if rel_pages > 0 {
             self.vm_pin(rel_pages - 1);
         }
+        res.skipped_all_visible = (0..rel_pages).any(|b| !scan[b as usize] && !self.page_all_frozen(b));
+        // (Each page's map bits before it is read: all-visible, all-frozen.)
+        let before: Vec<(bool, bool)> =
+            (0..rel_pages).map(|b| (self.page_all_visible(b), self.page_all_frozen(b))).collect();
         let mut nonempty = 0u32;
         let mut lpdead_pages = 0u32;
         let mut dead_by_page: Vec<(u32, Vec<u16>)> = Vec::new();
@@ -2028,6 +2082,7 @@ impl Heap {
             }
             res.scanned += 1;
             let p = &self.pages[b as usize];
+            let normal = p.lps.normal();
             if p.new {
                 if self.fsm.recorded(b) == 0 {
                     self.fsm.record(b, BLCKSZ - PAGE_HEADER);
@@ -2042,6 +2097,7 @@ impl Heap {
                 continue;
             }
             let (hastup, dead, live, all_visible) = self.prune(b, v, nindexes == 0);
+            res.tuples_deleted += normal.saturating_sub(self.pages[b as usize].lps.normal()) as u64;
             res.live += live as f64;
             // HEAPTUPLE_RECENTLY_DEAD: dead, but a transaction or snapshot may still see it.
             res.recently_dead += self.pages[b as usize]
@@ -2055,15 +2111,24 @@ impl Heap {
             self.pages[b as usize].set_all_visible(all_visible, &mut self.visible_pages);
             if !dead.is_empty() {
                 lpdead_pages += 1;
+                res.lpdead_items += dead.len() as u64;
                 dead_by_page.push((b, dead));
             } else {
                 let free = self.pages[b as usize].heap_free();
                 self.fsm.record(b, free);
             }
         }
+        res.lpdead_pages = lpdead_pages;
+        // (INDEX_CLEANUP off: do_index_vacuuming is false from the start.)
+        res.bypassed = cleanup == Some(false);
         if !dead_by_page.is_empty() {
             let threshold = (rel_pages as f64 * 0.02) as u32;
-            let bypass = lpdead_pages < threshold;
+            let bypass = match cleanup {
+                Some(c) => !c,
+                None => lpdead_pages < threshold,
+            };
+            res.bypassed |= bypass;
+            res.index_scans = u32::from(!bypass && nindexes > 0);
             for (b, dead) in dead_by_page {
                 if !bypass {
                     let p = &mut self.pages[b as usize];
@@ -2086,14 +2151,31 @@ impl Heap {
         if freeze {
             for (b, p) in self.pages.iter_mut().enumerate() {
                 if scan[b] {
+                    let mut frozen = 0u64;
                     for i in 0..p.lps.len() {
                         p.lps.update(i, |t| {
                             if v.removable(t.xmin) && v.state(t.xmin) == Xs::Committed {
                                 t.xmin = 2;
+                                frozen += 1;
                             }
                         });
                     }
+                    res.frozen_pages += u32::from(frozen > 0);
+                    res.tuples_frozen += frozen;
                 }
+            }
+        }
+        // The map bits it set (on pages truncated below too).
+        for (b, &(was_visible, was_frozen)) in before.iter().enumerate() {
+            if !scan[b] {
+                continue;
+            }
+            let (visible, frozen) = (self.page_all_visible(b as u32), self.page_all_frozen(b as u32));
+            if visible && !was_visible {
+                res.vm_visible += 1;
+                res.vm_visible_frozen += u32::from(frozen);
+            } else if visible && frozen && !was_frozen {
+                res.vm_frozen += 1;
             }
         }
         self.fsm.vacuum_range(0, rel_pages);

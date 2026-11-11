@@ -1,0 +1,674 @@
+> CREATE TABLE vv_t (a int PRIMARY KEY, b text) WITH (autovacuum_enabled = off, toast.autovacuum_enabled = off)
+-- CREATE TABLE
+
+> INSERT INTO vv_t SELECT g, repeat('x', 10) FROM generate_series(1, 1000) g
+-- INSERT 0 1000
+
+> DELETE FROM vv_t WHERE a < 100
+-- DELETE 99
+
+> VACUUM (VERBOSE) vv_t
+INFO 00000: vacuuming "golden_a214_vacuum_verbose.public.vv_t"
+INFO 00000: finished vacuuming "golden_a214_vacuum_verbose.public.vv_t": index scans: 1
+pages: 0 removed, 6 remain, 6 scanned (100.00% of total), 0 eagerly scanned
+tuples: 99 removed, 901 remain, 0 are dead but not yet removable
+removable cutoff: N, which was N XIDs old when operation ended
+new relfrozenxid: N, which is N XIDs ahead of previous value
+frozen: 0 pages from table (0.00% of total) had 0 tuples frozen
+visibility map: 6 pages set all-visible, 0 pages set all-frozen (0 were all-visible)
+index scan needed: 1 pages from table (16.67% of total) had 99 dead item identifiers removed
+index "vv_t_pkey": pages: 5 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+avg read rate: N MB/s, avg write rate: N MB/s
+buffer usage: N hits, N reads, N dirtied
+WAL usage: N records, N full page images, N bytes, N buffers full
+system usage: CPU: user: N s, system: N s, elapsed: N s
+INFO 00000: vacuuming "golden_a214_vacuum_verbose.pg_toast.pg_toast_N"
+INFO 00000: finished vacuuming "golden_a214_vacuum_verbose.pg_toast.pg_toast_N": index scans: 0
+pages: 0 removed, 0 remain, 0 scanned (100.00% of total), 0 eagerly scanned
+tuples: 0 removed, 0 remain, 0 are dead but not yet removable
+removable cutoff: N, which was N XIDs old when operation ended
+new relfrozenxid: N, which is N XIDs ahead of previous value
+frozen: 0 pages from table (100.00% of total) had 0 tuples frozen
+visibility map: 0 pages set all-visible, 0 pages set all-frozen (0 were all-visible)
+index scan not needed: 0 pages from table (100.00% of total) had 0 dead item identifiers removed
+avg read rate: N MB/s, avg write rate: N MB/s
+buffer usage: N hits, N reads, N dirtied
+WAL usage: N records, N full page images, N bytes, N buffers full
+system usage: CPU: user: N s, system: N s, elapsed: N s
+-- VACUUM
+
+> ANALYZE (VERBOSE) vv_t
+INFO 00000: analyzing "public.vv_t"
+INFO 00000: "vv_t": scanned 6 of 6 pages, containing 901 live rows and 0 dead rows; 901 rows in sample, 901 estimated total rows
+INFO 00000: finished analyzing table "golden_a214_vacuum_verbose.public.vv_t"
+avg read rate: N MB/s, avg write rate: N MB/s
+buffer usage: N hits, N reads, N dirtied
+WAL usage: N records, N full page images, N bytes, N buffers full
+system usage: CPU: user: N s, system: N s, elapsed: N s
+-- ANALYZE
+
+> VACUUM (VERBOSE, ANALYZE) vv_t
+INFO 00000: vacuuming "golden_a214_vacuum_verbose.public.vv_t"
+INFO 00000: finished vacuuming "golden_a214_vacuum_verbose.public.vv_t": index scans: 0
+pages: 0 removed, 6 remain, 6 scanned (100.00% of total), 0 eagerly scanned
+tuples: 0 removed, 901 remain, 0 are dead but not yet removable
+removable cutoff: N, which was N XIDs old when operation ended
+frozen: 0 pages from table (0.00% of total) had 0 tuples frozen
+visibility map: 0 pages set all-visible, 0 pages set all-frozen (0 were all-visible)
+index scan not needed: 0 pages from table (0.00% of total) had 0 dead item identifiers removed
+avg read rate: N MB/s, avg write rate: N MB/s
+buffer usage: N hits, N reads, N dirtied
+WAL usage: N records, N full page images, N bytes, N buffers full
+system usage: CPU: user: N s, system: N s, elapsed: N s
+INFO 00000: vacuuming "golden_a214_vacuum_verbose.pg_toast.pg_toast_N"
+INFO 00000: finished vacuuming "golden_a214_vacuum_verbose.pg_toast.pg_toast_N": index scans: 0
+pages: 0 removed, 0 remain, 0 scanned (100.00% of total), 0 eagerly scanned
+tuples: 0 removed, 0 remain, 0 are dead but not yet removable
+removable cutoff: N, which was N XIDs old when operation ended
+new relfrozenxid: N, which is N XIDs ahead of previous value
+frozen: 0 pages from table (100.00% of total) had 0 tuples frozen
+visibility map: 0 pages set all-visible, 0 pages set all-frozen (0 were all-visible)
+index scan not needed: 0 pages from table (100.00% of total) had 0 dead item identifiers removed
+avg read rate: N MB/s, avg write rate: N MB/s
+buffer usage: N hits, N reads, N dirtied
+WAL usage: N records, N full page images, N bytes, N buffers full
+system usage: CPU: user: N s, system: N s, elapsed: N s
+INFO 00000: analyzing "public.vv_t"
+INFO 00000: "vv_t": scanned 6 of 6 pages, containing 901 live rows and 0 dead rows; 901 rows in sample, 901 estimated total rows
+INFO 00000: finished analyzing table "golden_a214_vacuum_verbose.public.vv_t"
+avg read rate: N MB/s, avg write rate: N MB/s
+buffer usage: N hits, N reads, N dirtied
+WAL usage: N records, N full page images, N bytes, N buffers full
+system usage: CPU: user: N s, system: N s, elapsed: N s
+-- VACUUM
+
+> VACUUM (VERBOSE, FREEZE) vv_t
+INFO 00000: aggressively vacuuming "golden_a214_vacuum_verbose.public.vv_t"
+INFO 00000: finished vacuuming "golden_a214_vacuum_verbose.public.vv_t": index scans: 0
+pages: 0 removed, 6 remain, 6 scanned (100.00% of total), 0 eagerly scanned
+tuples: 0 removed, 901 remain, 0 are dead but not yet removable
+removable cutoff: N, which was N XIDs old when operation ended
+new relfrozenxid: N, which is N XIDs ahead of previous value
+frozen: 6 pages from table (100.00% of total) had 901 tuples frozen
+visibility map: 0 pages set all-visible, 6 pages set all-frozen (6 were all-visible)
+index scan not needed: 0 pages from table (0.00% of total) had 0 dead item identifiers removed
+avg read rate: N MB/s, avg write rate: N MB/s
+buffer usage: N hits, N reads, N dirtied
+WAL usage: N records, N full page images, N bytes, N buffers full
+system usage: CPU: user: N s, system: N s, elapsed: N s
+INFO 00000: aggressively vacuuming "golden_a214_vacuum_verbose.pg_toast.pg_toast_N"
+INFO 00000: finished vacuuming "golden_a214_vacuum_verbose.pg_toast.pg_toast_N": index scans: 0
+pages: 0 removed, 0 remain, 0 scanned (100.00% of total), 0 eagerly scanned
+tuples: 0 removed, 0 remain, 0 are dead but not yet removable
+removable cutoff: N, which was N XIDs old when operation ended
+new relfrozenxid: N, which is N XIDs ahead of previous value
+frozen: 0 pages from table (100.00% of total) had 0 tuples frozen
+visibility map: 0 pages set all-visible, 0 pages set all-frozen (0 were all-visible)
+index scan not needed: 0 pages from table (100.00% of total) had 0 dead item identifiers removed
+avg read rate: N MB/s, avg write rate: N MB/s
+buffer usage: N hits, N reads, N dirtied
+WAL usage: N records, N full page images, N bytes, N buffers full
+system usage: CPU: user: N s, system: N s, elapsed: N s
+-- VACUUM
+
+> VACUUM (VERBOSE, PROCESS_TOAST false) vv_t
+INFO 00000: vacuuming "golden_a214_vacuum_verbose.public.vv_t"
+INFO 00000: finished vacuuming "golden_a214_vacuum_verbose.public.vv_t": index scans: 0
+pages: 0 removed, 6 remain, 6 scanned (100.00% of total), 0 eagerly scanned
+tuples: 0 removed, 901 remain, 0 are dead but not yet removable
+removable cutoff: N, which was N XIDs old when operation ended
+frozen: 0 pages from table (0.00% of total) had 0 tuples frozen
+visibility map: 0 pages set all-visible, 0 pages set all-frozen (0 were all-visible)
+index scan not needed: 0 pages from table (0.00% of total) had 0 dead item identifiers removed
+avg read rate: N MB/s, avg write rate: N MB/s
+buffer usage: N hits, N reads, N dirtied
+WAL usage: N records, N full page images, N bytes, N buffers full
+system usage: CPU: user: N s, system: N s, elapsed: N s
+-- VACUUM
+
+> VACUUM (VERBOSE, PROCESS_MAIN false) vv_t
+INFO 00000: vacuuming "golden_a214_vacuum_verbose.pg_toast.pg_toast_N"
+INFO 00000: finished vacuuming "golden_a214_vacuum_verbose.pg_toast.pg_toast_N": index scans: 0
+pages: 0 removed, 0 remain, 0 scanned (100.00% of total), 0 eagerly scanned
+tuples: 0 removed, 0 remain, 0 are dead but not yet removable
+removable cutoff: N, which was N XIDs old when operation ended
+frozen: 0 pages from table (100.00% of total) had 0 tuples frozen
+visibility map: 0 pages set all-visible, 0 pages set all-frozen (0 were all-visible)
+index scan not needed: 0 pages from table (100.00% of total) had 0 dead item identifiers removed
+avg read rate: N MB/s, avg write rate: N MB/s
+buffer usage: N hits, N reads, N dirtied
+WAL usage: N records, N full page images, N bytes, N buffers full
+system usage: CPU: user: N s, system: N s, elapsed: N s
+-- VACUUM
+
+> CREATE TABLE vv_n (a int, b text) WITH (autovacuum_enabled = off, toast.autovacuum_enabled = off)
+-- CREATE TABLE
+
+> INSERT INTO vv_n SELECT g, 'x' FROM generate_series(1, 1000) g
+-- INSERT 0 1000
+
+> DELETE FROM vv_n WHERE a % 10 = 0
+-- DELETE 100
+
+> VACUUM (VERBOSE) vv_n
+INFO 00000: vacuuming "golden_a214_vacuum_verbose.public.vv_n"
+INFO 00000: finished vacuuming "golden_a214_vacuum_verbose.public.vv_n": index scans: 0
+pages: 0 removed, 5 remain, 5 scanned (100.00% of total), 0 eagerly scanned
+tuples: 100 removed, 900 remain, 0 are dead but not yet removable
+removable cutoff: N, which was N XIDs old when operation ended
+new relfrozenxid: N, which is N XIDs ahead of previous value
+frozen: 0 pages from table (0.00% of total) had 0 tuples frozen
+visibility map: 5 pages set all-visible, 0 pages set all-frozen (0 were all-visible)
+index scan not needed: 0 pages from table (0.00% of total) had 0 dead item identifiers removed
+avg read rate: N MB/s, avg write rate: N MB/s
+buffer usage: N hits, N reads, N dirtied
+WAL usage: N records, N full page images, N bytes, N buffers full
+system usage: CPU: user: N s, system: N s, elapsed: N s
+INFO 00000: vacuuming "golden_a214_vacuum_verbose.pg_toast.pg_toast_N"
+INFO 00000: finished vacuuming "golden_a214_vacuum_verbose.pg_toast.pg_toast_N": index scans: 0
+pages: 0 removed, 0 remain, 0 scanned (100.00% of total), 0 eagerly scanned
+tuples: 0 removed, 0 remain, 0 are dead but not yet removable
+removable cutoff: N, which was N XIDs old when operation ended
+new relfrozenxid: N, which is N XIDs ahead of previous value
+frozen: 0 pages from table (100.00% of total) had 0 tuples frozen
+visibility map: 0 pages set all-visible, 0 pages set all-frozen (0 were all-visible)
+index scan not needed: 0 pages from table (100.00% of total) had 0 dead item identifiers removed
+avg read rate: N MB/s, avg write rate: N MB/s
+buffer usage: N hits, N reads, N dirtied
+WAL usage: N records, N full page images, N bytes, N buffers full
+system usage: CPU: user: N s, system: N s, elapsed: N s
+-- VACUUM
+
+> VACUUM (VERBOSE, FULL) vv_n
+INFO 00000: vacuuming "public.vv_n"
+INFO 00000: "public.vv_n": found 0 removable, 900 nonremovable row versions in 5 pages
+DETAIL: 0 dead row versions cannot be removed yet.
+DETAIL: CPU: user: N s, system: N s, elapsed: N s.
+-- VACUUM
+
+> VACUUM (VERBOSE) vv_n
+INFO 00000: vacuuming "golden_a214_vacuum_verbose.public.vv_n"
+INFO 00000: finished vacuuming "golden_a214_vacuum_verbose.public.vv_n": index scans: 0
+pages: 0 removed, 4 remain, 4 scanned (100.00% of total), 0 eagerly scanned
+tuples: 0 removed, 900 remain, 0 are dead but not yet removable
+removable cutoff: N, which was N XIDs old when operation ended
+new relfrozenxid: N, which is N XIDs ahead of previous value
+frozen: 0 pages from table (0.00% of total) had 0 tuples frozen
+visibility map: 4 pages set all-visible, 4 pages set all-frozen (0 were all-visible)
+index scan not needed: 0 pages from table (0.00% of total) had 0 dead item identifiers removed
+avg read rate: N MB/s, avg write rate: N MB/s
+buffer usage: N hits, N reads, N dirtied
+WAL usage: N records, N full page images, N bytes, N buffers full
+system usage: CPU: user: N s, system: N s, elapsed: N s
+INFO 00000: vacuuming "golden_a214_vacuum_verbose.pg_toast.pg_toast_N"
+INFO 00000: finished vacuuming "golden_a214_vacuum_verbose.pg_toast.pg_toast_N": index scans: 0
+pages: 0 removed, 0 remain, 0 scanned (100.00% of total), 0 eagerly scanned
+tuples: 0 removed, 0 remain, 0 are dead but not yet removable
+removable cutoff: N, which was N XIDs old when operation ended
+new relfrozenxid: N, which is N XIDs ahead of previous value
+frozen: 0 pages from table (100.00% of total) had 0 tuples frozen
+visibility map: 0 pages set all-visible, 0 pages set all-frozen (0 were all-visible)
+index scan not needed: 0 pages from table (100.00% of total) had 0 dead item identifiers removed
+avg read rate: N MB/s, avg write rate: N MB/s
+buffer usage: N hits, N reads, N dirtied
+WAL usage: N records, N full page images, N bytes, N buffers full
+system usage: CPU: user: N s, system: N s, elapsed: N s
+-- VACUUM
+
+> CREATE TABLE vv_big (a int PRIMARY KEY, b text) WITH (autovacuum_enabled = off, toast.autovacuum_enabled = off)
+-- CREATE TABLE
+
+> INSERT INTO vv_big SELECT g, repeat('y', 50) FROM generate_series(1, 20000) g
+-- INSERT 0 20000
+
+> VACUUM vv_big
+-- VACUUM
+
+> DELETE FROM vv_big WHERE a = 5
+-- DELETE 1
+
+> VACUUM (VERBOSE) vv_big
+INFO 00000: vacuuming "golden_a214_vacuum_verbose.public.vv_big"
+INFO 00000: finished vacuuming "golden_a214_vacuum_verbose.public.vv_big": index scans: 0
+pages: 0 removed, 207 remain, 2 scanned (0.97% of total), 0 eagerly scanned
+tuples: 1 removed, 20000 remain, 0 are dead but not yet removable
+removable cutoff: N, which was N XIDs old when operation ended
+frozen: 0 pages from table (0.00% of total) had 0 tuples frozen
+visibility map: 0 pages set all-visible, 0 pages set all-frozen (0 were all-visible)
+index scan bypassed: 1 pages from table (0.48% of total) have 1 dead item identifiers
+avg read rate: N MB/s, avg write rate: N MB/s
+buffer usage: N hits, N reads, N dirtied
+WAL usage: N records, N full page images, N bytes, N buffers full
+system usage: CPU: user: N s, system: N s, elapsed: N s
+INFO 00000: vacuuming "golden_a214_vacuum_verbose.pg_toast.pg_toast_N"
+INFO 00000: finished vacuuming "golden_a214_vacuum_verbose.pg_toast.pg_toast_N": index scans: 0
+pages: 0 removed, 0 remain, 0 scanned (100.00% of total), 0 eagerly scanned
+tuples: 0 removed, 0 remain, 0 are dead but not yet removable
+removable cutoff: N, which was N XIDs old when operation ended
+new relfrozenxid: N, which is N XIDs ahead of previous value
+frozen: 0 pages from table (100.00% of total) had 0 tuples frozen
+visibility map: 0 pages set all-visible, 0 pages set all-frozen (0 were all-visible)
+index scan not needed: 0 pages from table (100.00% of total) had 0 dead item identifiers removed
+avg read rate: N MB/s, avg write rate: N MB/s
+buffer usage: N hits, N reads, N dirtied
+WAL usage: N records, N full page images, N bytes, N buffers full
+system usage: CPU: user: N s, system: N s, elapsed: N s
+-- VACUUM
+
+> DELETE FROM vv_big WHERE a > 10000
+-- DELETE 10000
+
+> VACUUM (VERBOSE) vv_big
+INFO 00000: vacuuming "golden_a214_vacuum_verbose.public.vv_big"
+INFO 00000: table "vv_big": truncated 207 to 104 pages
+CONTEXT: while truncating relation "public.vv_big" to 104 blocks
+INFO 00000: finished vacuuming "golden_a214_vacuum_verbose.public.vv_big": index scans: 1
+pages: 103 removed, 104 remain, 105 scanned (50.72% of total), 0 eagerly scanned
+tuples: 10000 removed, 9960 remain, 0 are dead but not yet removable
+removable cutoff: N, which was N XIDs old when operation ended
+frozen: 0 pages from table (0.00% of total) had 0 tuples frozen
+visibility map: 105 pages set all-visible, 103 pages set all-frozen (0 were all-visible)
+index scan needed: 105 pages from table (50.72% of total) had 10001 dead item identifiers removed
+index "vv_big_pkey": pages: 57 in total, 26 newly deleted, 26 currently deleted, 0 reusable
+avg read rate: N MB/s, avg write rate: N MB/s
+buffer usage: N hits, N reads, N dirtied
+WAL usage: N records, N full page images, N bytes, N buffers full
+system usage: CPU: user: N s, system: N s, elapsed: N s
+INFO 00000: vacuuming "golden_a214_vacuum_verbose.pg_toast.pg_toast_N"
+INFO 00000: finished vacuuming "golden_a214_vacuum_verbose.pg_toast.pg_toast_N": index scans: 0
+pages: 0 removed, 0 remain, 0 scanned (100.00% of total), 0 eagerly scanned
+tuples: 0 removed, 0 remain, 0 are dead but not yet removable
+removable cutoff: N, which was N XIDs old when operation ended
+new relfrozenxid: N, which is N XIDs ahead of previous value
+frozen: 0 pages from table (100.00% of total) had 0 tuples frozen
+visibility map: 0 pages set all-visible, 0 pages set all-frozen (0 were all-visible)
+index scan not needed: 0 pages from table (100.00% of total) had 0 dead item identifiers removed
+avg read rate: N MB/s, avg write rate: N MB/s
+buffer usage: N hits, N reads, N dirtied
+WAL usage: N records, N full page images, N bytes, N buffers full
+system usage: CPU: user: N s, system: N s, elapsed: N s
+-- VACUUM
+
+> VACUUM (VERBOSE, PROCESS_TOAST false) vv_big
+INFO 00000: vacuuming "golden_a214_vacuum_verbose.public.vv_big"
+INFO 00000: finished vacuuming "golden_a214_vacuum_verbose.public.vv_big": index scans: 0
+pages: 0 removed, 104 remain, 1 scanned (0.96% of total), 0 eagerly scanned
+tuples: 0 removed, 9960 remain, 0 are dead but not yet removable
+removable cutoff: N, which was N XIDs old when operation ended
+frozen: 0 pages from table (0.00% of total) had 0 tuples frozen
+visibility map: 0 pages set all-visible, 0 pages set all-frozen (0 were all-visible)
+index scan not needed: 0 pages from table (0.00% of total) had 0 dead item identifiers removed
+index "vv_big_pkey": pages: 57 in total, 0 newly deleted, 26 currently deleted, 26 reusable
+avg read rate: N MB/s, avg write rate: N MB/s
+buffer usage: N hits, N reads, N dirtied
+WAL usage: N records, N full page images, N bytes, N buffers full
+system usage: CPU: user: N s, system: N s, elapsed: N s
+-- VACUUM
+
+> DELETE FROM vv_big WHERE a < 50
+-- DELETE 48
+
+> VACUUM (VERBOSE, INDEX_CLEANUP off, PROCESS_TOAST false) vv_big
+INFO 00000: vacuuming "golden_a214_vacuum_verbose.public.vv_big"
+INFO 00000: finished vacuuming "golden_a214_vacuum_verbose.public.vv_big": index scans: 0
+pages: 0 removed, 104 remain, 2 scanned (1.92% of total), 0 eagerly scanned
+tuples: 48 removed, 9960 remain, 0 are dead but not yet removable
+removable cutoff: N, which was N XIDs old when operation ended
+frozen: 0 pages from table (0.00% of total) had 0 tuples frozen
+visibility map: 0 pages set all-visible, 0 pages set all-frozen (0 were all-visible)
+index scan bypassed: 1 pages from table (0.96% of total) have 48 dead item identifiers
+avg read rate: N MB/s, avg write rate: N MB/s
+buffer usage: N hits, N reads, N dirtied
+WAL usage: N records, N full page images, N bytes, N buffers full
+system usage: CPU: user: N s, system: N s, elapsed: N s
+-- VACUUM
+
+> VACUUM (VERBOSE, INDEX_CLEANUP on, PROCESS_TOAST false) vv_big
+INFO 00000: vacuuming "golden_a214_vacuum_verbose.public.vv_big"
+INFO 00000: finished vacuuming "golden_a214_vacuum_verbose.public.vv_big": index scans: 1
+pages: 0 removed, 104 remain, 2 scanned (1.92% of total), 0 eagerly scanned
+tuples: 0 removed, 9960 remain, 0 are dead but not yet removable
+removable cutoff: N, which was N XIDs old when operation ended
+frozen: 0 pages from table (0.00% of total) had 0 tuples frozen
+visibility map: 1 pages set all-visible, 0 pages set all-frozen (0 were all-visible)
+index scan needed: 1 pages from table (0.96% of total) had 48 dead item identifiers removed
+index "vv_big_pkey": pages: 57 in total, 0 newly deleted, 26 currently deleted, 26 reusable
+avg read rate: N MB/s, avg write rate: N MB/s
+buffer usage: N hits, N reads, N dirtied
+WAL usage: N records, N full page images, N bytes, N buffers full
+system usage: CPU: user: N s, system: N s, elapsed: N s
+-- VACUUM
+
+> CREATE TABLE vv_x (a int PRIMARY KEY) WITH (autovacuum_enabled = off)
+-- CREATE TABLE
+
+> INSERT INTO vv_x SELECT generate_series(1, 500)
+-- INSERT 0 500
+
+> DELETE FROM vv_x WHERE a > 100
+-- DELETE 400
+
+> VACUUM (VERBOSE, FULL) vv_x
+INFO 00000: vacuuming "public.vv_x"
+INFO 00000: "public.vv_x": found 400 removable, 100 nonremovable row versions in 3 pages
+DETAIL: 0 dead row versions cannot be removed yet.
+DETAIL: CPU: user: N s, system: N s, elapsed: N s.
+-- VACUUM
+
+> CLUSTER (VERBOSE) vv_x USING vv_x_pkey
+INFO 00000: clustering "public.vv_x" using sequential scan and sort
+INFO 00000: "public.vv_x": found 0 removable, 100 nonremovable row versions in 1 pages
+DETAIL: 0 dead row versions cannot be removed yet.
+DETAIL: CPU: user: N s, system: N s, elapsed: N s.
+-- CLUSTER
+
+> CREATE TABLE vv_p (a int) PARTITION BY RANGE (a)
+-- CREATE TABLE
+
+> CREATE TABLE vv_p1 PARTITION OF vv_p FOR VALUES FROM (0) TO (100) WITH (autovacuum_enabled = off)
+-- CREATE TABLE
+
+> CREATE TABLE vv_p2 PARTITION OF vv_p FOR VALUES FROM (100) TO (200) WITH (autovacuum_enabled = off)
+-- CREATE TABLE
+
+> INSERT INTO vv_p SELECT g FROM generate_series(0, 199) g
+-- INSERT 0 200
+
+> ANALYZE (VERBOSE) vv_p
+INFO 00000: analyzing "public.vv_p" inheritance tree
+INFO 00000: "vv_p1": scanned 1 of 1 pages, containing 100 live rows and 0 dead rows; 100 rows in sample, 100 estimated total rows
+INFO 00000: "vv_p2": scanned 1 of 1 pages, containing 100 live rows and 0 dead rows; 100 rows in sample, 100 estimated total rows
+INFO 00000: finished analyzing table "golden_a214_vacuum_verbose.public.vv_p"
+avg read rate: N MB/s, avg write rate: N MB/s
+buffer usage: N hits, N reads, N dirtied
+WAL usage: N records, N full page images, N bytes, N buffers full
+system usage: CPU: user: N s, system: N s, elapsed: N s
+INFO 00000: analyzing "public.vv_p1"
+INFO 00000: "vv_p1": scanned 1 of 1 pages, containing 100 live rows and 0 dead rows; 100 rows in sample, 100 estimated total rows
+INFO 00000: finished analyzing table "golden_a214_vacuum_verbose.public.vv_p1"
+avg read rate: N MB/s, avg write rate: N MB/s
+buffer usage: N hits, N reads, N dirtied
+WAL usage: N records, N full page images, N bytes, N buffers full
+system usage: CPU: user: N s, system: N s, elapsed: N s
+INFO 00000: analyzing "public.vv_p2"
+INFO 00000: "vv_p2": scanned 1 of 1 pages, containing 100 live rows and 0 dead rows; 100 rows in sample, 100 estimated total rows
+INFO 00000: finished analyzing table "golden_a214_vacuum_verbose.public.vv_p2"
+avg read rate: N MB/s, avg write rate: N MB/s
+buffer usage: N hits, N reads, N dirtied
+WAL usage: N records, N full page images, N bytes, N buffers full
+system usage: CPU: user: N s, system: N s, elapsed: N s
+-- ANALYZE
+
+> VACUUM (VERBOSE) vv_p
+INFO 00000: vacuuming "golden_a214_vacuum_verbose.public.vv_p1"
+INFO 00000: finished vacuuming "golden_a214_vacuum_verbose.public.vv_p1": index scans: 0
+pages: 0 removed, 1 remain, 1 scanned (100.00% of total), 0 eagerly scanned
+tuples: 0 removed, 100 remain, 0 are dead but not yet removable
+removable cutoff: N, which was N XIDs old when operation ended
+new relfrozenxid: N, which is N XIDs ahead of previous value
+frozen: 0 pages from table (0.00% of total) had 0 tuples frozen
+visibility map: 1 pages set all-visible, 0 pages set all-frozen (0 were all-visible)
+index scan not needed: 0 pages from table (0.00% of total) had 0 dead item identifiers removed
+avg read rate: N MB/s, avg write rate: N MB/s
+buffer usage: N hits, N reads, N dirtied
+WAL usage: N records, N full page images, N bytes, N buffers full
+system usage: CPU: user: N s, system: N s, elapsed: N s
+INFO 00000: vacuuming "golden_a214_vacuum_verbose.public.vv_p2"
+INFO 00000: finished vacuuming "golden_a214_vacuum_verbose.public.vv_p2": index scans: 0
+pages: 0 removed, 1 remain, 1 scanned (100.00% of total), 0 eagerly scanned
+tuples: 0 removed, 100 remain, 0 are dead but not yet removable
+removable cutoff: N, which was N XIDs old when operation ended
+new relfrozenxid: N, which is N XIDs ahead of previous value
+frozen: 0 pages from table (0.00% of total) had 0 tuples frozen
+visibility map: 1 pages set all-visible, 0 pages set all-frozen (0 were all-visible)
+index scan not needed: 0 pages from table (0.00% of total) had 0 dead item identifiers removed
+avg read rate: N MB/s, avg write rate: N MB/s
+buffer usage: N hits, N reads, N dirtied
+WAL usage: N records, N full page images, N bytes, N buffers full
+system usage: CPU: user: N s, system: N s, elapsed: N s
+-- VACUUM
+
+> CREATE TABLE vv_pe (a int) PARTITION BY LIST (a)
+-- CREATE TABLE
+
+> ANALYZE (VERBOSE) vv_pe
+-- ANALYZE
+
+> CREATE TABLE vv_inh (a int) WITH (autovacuum_enabled = off)
+-- CREATE TABLE
+
+> CREATE TABLE vv_inhc () INHERITS (vv_inh) WITH (autovacuum_enabled = off)
+-- CREATE TABLE
+
+> INSERT INTO vv_inhc VALUES (1)
+-- INSERT 0 1
+
+> ANALYZE (VERBOSE) vv_inh
+INFO 00000: analyzing "public.vv_inh"
+INFO 00000: "vv_inh": scanned 0 of 0 pages, containing 0 live rows and 0 dead rows; 0 rows in sample, 0 estimated total rows
+INFO 00000: finished analyzing table "golden_a214_vacuum_verbose.public.vv_inh"
+avg read rate: N MB/s, avg write rate: N MB/s
+buffer usage: N hits, N reads, N dirtied
+WAL usage: N records, N full page images, N bytes, N buffers full
+system usage: CPU: user: N s, system: N s, elapsed: N s
+INFO 00000: analyzing "public.vv_inh" inheritance tree
+INFO 00000: "vv_inhc": scanned 1 of 1 pages, containing 1 live rows and 0 dead rows; 1 rows in sample, 1 estimated total rows
+INFO 00000: finished analyzing table "golden_a214_vacuum_verbose.public.vv_inh"
+avg read rate: N MB/s, avg write rate: N MB/s
+buffer usage: N hits, N reads, N dirtied
+WAL usage: N records, N full page images, N bytes, N buffers full
+system usage: CPU: user: N s, system: N s, elapsed: N s
+INFO 00000: analyzing "public.vv_inhc"
+INFO 00000: "vv_inhc": scanned 1 of 1 pages, containing 1 live rows and 0 dead rows; 1 rows in sample, 1 estimated total rows
+INFO 00000: finished analyzing table "golden_a214_vacuum_verbose.public.vv_inhc"
+avg read rate: N MB/s, avg write rate: N MB/s
+buffer usage: N hits, N reads, N dirtied
+WAL usage: N records, N full page images, N bytes, N buffers full
+system usage: CPU: user: N s, system: N s, elapsed: N s
+-- ANALYZE
+
+> DROP TABLE vv_inhc
+-- DROP TABLE
+
+> ANALYZE (VERBOSE) vv_inh
+INFO 00000: analyzing "public.vv_inh"
+INFO 00000: "vv_inh": scanned 0 of 0 pages, containing 0 live rows and 0 dead rows; 0 rows in sample, 0 estimated total rows
+INFO 00000: finished analyzing table "golden_a214_vacuum_verbose.public.vv_inh"
+avg read rate: N MB/s, avg write rate: N MB/s
+buffer usage: N hits, N reads, N dirtied
+WAL usage: N records, N full page images, N bytes, N buffers full
+system usage: CPU: user: N s, system: N s, elapsed: N s
+INFO 00000: analyzing "public.vv_inh" inheritance tree
+INFO 00000: skipping analyze of "public.vv_inh" inheritance tree --- this inheritance tree contains no child tables
+INFO 00000: finished analyzing table "golden_a214_vacuum_verbose.public.vv_inh"
+avg read rate: N MB/s, avg write rate: N MB/s
+buffer usage: N hits, N reads, N dirtied
+WAL usage: N records, N full page images, N bytes, N buffers full
+system usage: CPU: user: N s, system: N s, elapsed: N s
+-- ANALYZE
+
+> ANALYZE (VERBOSE) vv_inh
+INFO 00000: analyzing "public.vv_inh"
+INFO 00000: "vv_inh": scanned 0 of 0 pages, containing 0 live rows and 0 dead rows; 0 rows in sample, 0 estimated total rows
+INFO 00000: finished analyzing table "golden_a214_vacuum_verbose.public.vv_inh"
+avg read rate: N MB/s, avg write rate: N MB/s
+buffer usage: N hits, N reads, N dirtied
+WAL usage: N records, N full page images, N bytes, N buffers full
+system usage: CPU: user: N s, system: N s, elapsed: N s
+-- ANALYZE
+
+> CREATE TABLE vv_e () WITH (autovacuum_enabled = off)
+-- CREATE TABLE
+
+> ANALYZE (VERBOSE) vv_e
+INFO 00000: analyzing "public.vv_e"
+INFO 00000: "vv_e": scanned 0 of 0 pages, containing 0 live rows and 0 dead rows; 0 rows in sample, 0 estimated total rows
+INFO 00000: finished analyzing table "golden_a214_vacuum_verbose.public.vv_e"
+avg read rate: N MB/s, avg write rate: N MB/s
+buffer usage: N hits, N reads, N dirtied
+WAL usage: N records, N full page images, N bytes, N buffers full
+system usage: CPU: user: N s, system: N s, elapsed: N s
+-- ANALYZE
+
+> ANALYZE (VERBOSE) vv_big (a)
+INFO 00000: analyzing "public.vv_big"
+INFO 00000: "vv_big": scanned 104 of 104 pages, containing 9951 live rows and 0 dead rows; 9951 rows in sample, 9951 estimated total rows
+INFO 00000: finished analyzing table "golden_a214_vacuum_verbose.public.vv_big"
+avg read rate: N MB/s, avg write rate: N MB/s
+buffer usage: N hits, N reads, N dirtied
+WAL usage: N records, N full page images, N bytes, N buffers full
+system usage: CPU: user: N s, system: N s, elapsed: N s
+-- ANALYZE
+
+> CREATE TABLE vv_g (a int, b int) WITH (autovacuum_enabled = off)
+-- CREATE TABLE
+
+> CREATE INDEX vv_g_brin ON vv_g USING brin (a)
+-- CREATE INDEX
+
+> CREATE INDEX vv_g_hash ON vv_g USING hash (b)
+-- CREATE INDEX
+
+> INSERT INTO vv_g SELECT g, g FROM generate_series(1, 100) g
+-- INSERT 0 100
+
+> DELETE FROM vv_g WHERE a < 10
+-- DELETE 9
+
+> VACUUM (VERBOSE) vv_g
+INFO 00000: vacuuming "golden_a214_vacuum_verbose.public.vv_g"
+INFO 00000: finished vacuuming "golden_a214_vacuum_verbose.public.vv_g": index scans: 1
+pages: 0 removed, 1 remain, 1 scanned (100.00% of total), 0 eagerly scanned
+tuples: 9 removed, 91 remain, 0 are dead but not yet removable
+removable cutoff: N, which was N XIDs old when operation ended
+new relfrozenxid: N, which is N XIDs ahead of previous value
+frozen: 0 pages from table (0.00% of total) had 0 tuples frozen
+visibility map: 1 pages set all-visible, 0 pages set all-frozen (0 were all-visible)
+index scan needed: 1 pages from table (100.00% of total) had 9 dead item identifiers removed
+index "vv_g_brin": pages: 3 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+index "vv_g_hash": pages: 10 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+avg read rate: N MB/s, avg write rate: N MB/s
+buffer usage: N hits, N reads, N dirtied
+WAL usage: N records, N full page images, N bytes, N buffers full
+system usage: CPU: user: N s, system: N s, elapsed: N s
+-- VACUUM
+
+> VACUUM (VERBOSE, INDEX_CLEANUP off) vv_g
+INFO 00000: vacuuming "golden_a214_vacuum_verbose.public.vv_g"
+INFO 00000: finished vacuuming "golden_a214_vacuum_verbose.public.vv_g": index scans: 0
+pages: 0 removed, 1 remain, 1 scanned (100.00% of total), 0 eagerly scanned
+tuples: 0 removed, 91 remain, 0 are dead but not yet removable
+removable cutoff: N, which was N XIDs old when operation ended
+frozen: 0 pages from table (0.00% of total) had 0 tuples frozen
+visibility map: 0 pages set all-visible, 0 pages set all-frozen (0 were all-visible)
+index scan bypassed: 0 pages from table (0.00% of total) have 0 dead item identifiers
+avg read rate: N MB/s, avg write rate: N MB/s
+buffer usage: N hits, N reads, N dirtied
+WAL usage: N records, N full page images, N bytes, N buffers full
+system usage: CPU: user: N s, system: N s, elapsed: N s
+-- VACUUM
+
+> VACUUM (VERBOSE, DISABLE_PAGE_SKIPPING) vv_g
+INFO 00000: aggressively vacuuming "golden_a214_vacuum_verbose.public.vv_g"
+INFO 00000: finished vacuuming "golden_a214_vacuum_verbose.public.vv_g": index scans: 0
+pages: 0 removed, 1 remain, 1 scanned (100.00% of total), 0 eagerly scanned
+tuples: 0 removed, 91 remain, 0 are dead but not yet removable
+removable cutoff: N, which was N XIDs old when operation ended
+frozen: 0 pages from table (0.00% of total) had 0 tuples frozen
+visibility map: 0 pages set all-visible, 0 pages set all-frozen (0 were all-visible)
+index scan not needed: 0 pages from table (0.00% of total) had 0 dead item identifiers removed
+index "vv_g_brin": pages: 3 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+avg read rate: N MB/s, avg write rate: N MB/s
+buffer usage: N hits, N reads, N dirtied
+WAL usage: N records, N full page images, N bytes, N buffers full
+system usage: CPU: user: N s, system: N s, elapsed: N s
+-- VACUUM
+
+> CREATE TABLE vv_gs (p point) WITH (autovacuum_enabled = off)
+-- CREATE TABLE
+
+> CREATE INDEX vv_gs_gist ON vv_gs USING gist (p)
+-- CREATE INDEX
+
+> INSERT INTO vv_gs SELECT point(g, g) FROM generate_series(1, 100) g
+-- INSERT 0 100
+
+> VACUUM (VERBOSE) vv_gs
+INFO 00000: vacuuming "golden_a214_vacuum_verbose.public.vv_gs"
+INFO 00000: finished vacuuming "golden_a214_vacuum_verbose.public.vv_gs": index scans: 0
+pages: 0 removed, 1 remain, 1 scanned (100.00% of total), 0 eagerly scanned
+tuples: 0 removed, 100 remain, 0 are dead but not yet removable
+removable cutoff: N, which was N XIDs old when operation ended
+new relfrozenxid: N, which is N XIDs ahead of previous value
+frozen: 0 pages from table (0.00% of total) had 0 tuples frozen
+visibility map: 1 pages set all-visible, 0 pages set all-frozen (0 were all-visible)
+index scan not needed: 0 pages from table (0.00% of total) had 0 dead item identifiers removed
+index "vv_gs_gist": pages: 1 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+avg read rate: N MB/s, avg write rate: N MB/s
+buffer usage: N hits, N reads, N dirtied
+WAL usage: N records, N full page images, N bytes, N buffers full
+system usage: CPU: user: N s, system: N s, elapsed: N s
+-- VACUUM
+
+> VACUUM (VERBOSE, ANALYZE, SKIP_LOCKED) vv_n, vv_gs
+INFO 00000: vacuuming "golden_a214_vacuum_verbose.public.vv_n"
+INFO 00000: finished vacuuming "golden_a214_vacuum_verbose.public.vv_n": index scans: 0
+pages: 0 removed, 4 remain, 4 scanned (100.00% of total), 0 eagerly scanned
+tuples: 0 removed, 900 remain, 0 are dead but not yet removable
+removable cutoff: N, which was N XIDs old when operation ended
+new relfrozenxid: N, which is N XIDs ahead of previous value
+frozen: 0 pages from table (0.00% of total) had 0 tuples frozen
+visibility map: 0 pages set all-visible, 0 pages set all-frozen (0 were all-visible)
+index scan not needed: 0 pages from table (0.00% of total) had 0 dead item identifiers removed
+avg read rate: N MB/s, avg write rate: N MB/s
+buffer usage: N hits, N reads, N dirtied
+WAL usage: N records, N full page images, N bytes, N buffers full
+system usage: CPU: user: N s, system: N s, elapsed: N s
+INFO 00000: vacuuming "golden_a214_vacuum_verbose.pg_toast.pg_toast_N"
+INFO 00000: finished vacuuming "golden_a214_vacuum_verbose.pg_toast.pg_toast_N": index scans: 0
+pages: 0 removed, 0 remain, 0 scanned (100.00% of total), 0 eagerly scanned
+tuples: 0 removed, 0 remain, 0 are dead but not yet removable
+removable cutoff: N, which was N XIDs old when operation ended
+new relfrozenxid: N, which is N XIDs ahead of previous value
+frozen: 0 pages from table (100.00% of total) had 0 tuples frozen
+visibility map: 0 pages set all-visible, 0 pages set all-frozen (0 were all-visible)
+index scan not needed: 0 pages from table (100.00% of total) had 0 dead item identifiers removed
+avg read rate: N MB/s, avg write rate: N MB/s
+buffer usage: N hits, N reads, N dirtied
+WAL usage: N records, N full page images, N bytes, N buffers full
+system usage: CPU: user: N s, system: N s, elapsed: N s
+INFO 00000: analyzing "public.vv_n"
+INFO 00000: "vv_n": scanned 4 of 4 pages, containing 900 live rows and 0 dead rows; 900 rows in sample, 900 estimated total rows
+INFO 00000: finished analyzing table "golden_a214_vacuum_verbose.public.vv_n"
+avg read rate: N MB/s, avg write rate: N MB/s
+buffer usage: N hits, N reads, N dirtied
+WAL usage: N records, N full page images, N bytes, N buffers full
+system usage: CPU: user: N s, system: N s, elapsed: N s
+INFO 00000: vacuuming "golden_a214_vacuum_verbose.public.vv_gs"
+INFO 00000: finished vacuuming "golden_a214_vacuum_verbose.public.vv_gs": index scans: 0
+pages: 0 removed, 1 remain, 1 scanned (100.00% of total), 0 eagerly scanned
+tuples: 0 removed, 100 remain, 0 are dead but not yet removable
+removable cutoff: N, which was N XIDs old when operation ended
+frozen: 0 pages from table (0.00% of total) had 0 tuples frozen
+visibility map: 0 pages set all-visible, 0 pages set all-frozen (0 were all-visible)
+index scan not needed: 0 pages from table (0.00% of total) had 0 dead item identifiers removed
+index "vv_gs_gist": pages: 1 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+avg read rate: N MB/s, avg write rate: N MB/s
+buffer usage: N hits, N reads, N dirtied
+WAL usage: N records, N full page images, N bytes, N buffers full
+system usage: CPU: user: N s, system: N s, elapsed: N s
+INFO 00000: analyzing "public.vv_gs"
+INFO 00000: "vv_gs": scanned 1 of 1 pages, containing 100 live rows and 0 dead rows; 100 rows in sample, 100 estimated total rows
+INFO 00000: finished analyzing table "golden_a214_vacuum_verbose.public.vv_gs"
+avg read rate: N MB/s, avg write rate: N MB/s
+buffer usage: N hits, N reads, N dirtied
+WAL usage: N records, N full page images, N bytes, N buffers full
+system usage: CPU: user: N s, system: N s, elapsed: N s
+-- VACUUM
+
+> ANALYZE (VERBOSE) does_not_exist
+ERROR 42P01: relation "does_not_exist" does not exist
+
+> VACUUM (VERBOSE false) vv_n
+-- VACUUM
+

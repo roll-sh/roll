@@ -8,6 +8,7 @@ use crate::error::Error;
 
 /// (SQLSTATE, message prefix, message suffix) → (routine, file, line), from PostgreSQL 18.6.
 const KNOWN: &[(&str, &str, &str, &str, &str, u32)] = &[
+    ("25P02", "current transaction is aborted", "", "exec_simple_query", "postgres.c", 1136),
     ("42804", "column \"", "\" but expression is of type record", "transformAssignedExpr", "parse_target.c", 588),
     ("42804", "column \"", "", "transformAssignedExpr", "parse_target.c", 588),
     ("42P01", "relation \"", "\" does not exist", "parserOpenTable", "parse_relation.c", 1498),
@@ -31,7 +32,6 @@ const KNOWN: &[(&str, &str, &str, &str, &str, u32)] = &[
     ("42P07", "relation \"", "\" already exists", "heap_create_with_catalog", "heap.c", 1194),
     ("42P05", "prepared statement \"", "\" already exists", "StorePreparedStatement", "prepare.c", 412),
     ("26000", "prepared statement \"", "\" does not exist", "FetchPreparedStatement", "prepare.c", 451),
-    ("25P02", "current transaction is aborted", "", "exec_simple_query", "postgres.c", 1136),
     ("42704", "unrecognized configuration parameter", "", "assignable_custom_variable_name", "guc.c", 1166),
     ("21000", "more than one row returned by a subquery", "", "ExecSetParamPlan", "nodeSubplan.c", 1164),
     ("34000", "cursor \"", "\" does not exist", "PerformPortalFetch", "portalcmds.c", 197),
@@ -46,12 +46,35 @@ const KNOWN: &[(&str, &str, &str, &str, &str, u32)] = &[
     ("40P01", "deadlock detected", "", "DeadLockReport", "deadlock.c", 1133),
     ("28P01", "password authentication failed for user", "", "auth_failed", "auth.c", 317),
     ("3D000", "database \"", "\" does not exist", "InitPostgres", "postinit.c", 1014),
+    // VACUUM (VERBOSE) and ANALYZE (VERBOSE)'s INFO messages (each names its routine).
+    ("00000", "aggressively vacuuming \"", "", "heap_vacuum_rel", "vacuumlazy.c", 814),
+    ("00000", "vacuuming \"", "", "heap_vacuum_rel", "vacuumlazy.c", 819),
+    ("00000", "finished vacuuming \"", "", "heap_vacuum_rel", "vacuumlazy.c", 1146),
+    ("00000", "table \"", "", "lazy_truncate_heap", "vacuumlazy.c", 3341),
+    ("00000", "analyzing \"", "\" inheritance tree", "do_analyze_rel", "analyze.c", 316),
+    ("00000", "analyzing \"", "", "do_analyze_rel", "analyze.c", 321),
+    ("00000", "finished analyzing table \"", "", "do_analyze_rel", "analyze.c", 842),
+    ("00000", "\"", "", "acquire_sample_rows", "analyze.c", 1345),
+    ("00000", "skipping analyze of \"", "contains no child tables", "acquire_inherited_sample_rows", "analyze.c", 1429),
+    ("00000", "skipping analyze of \"", "", "acquire_inherited_sample_rows", "analyze.c", 1527),
+    ("00000", "clustering \"", "", "copy_table_data", "cluster.c", 966),
+    ("00000", "vacuuming \"", "", "copy_table_data", "cluster.c", 971),
+    ("00000", "\"", "", "copy_table_data", "cluster.c", 998),
 ];
 
 /// (file, line, routine) for an error.
 pub fn location(e: &Error) -> (&'static str, String, &'static str) {
+    let m = e.message.as_str();
+    // (The suffix may be followed by a name: `... violates check constraint "c"`.)
+    let matches = |k: &&(&str, &str, &str, &str, &str, u32)| {
+        k.0 == e.code
+            && m.starts_with(k.1)
+            && (m.ends_with(k.2) || (k.2.starts_with(" violates") || k.2.starts_with("violates")) && m.contains(k.2))
+    };
     if let Some(r) = e.objects.as_ref().and_then(|o| o.routine) {
-        if let Some(k) = KNOWN.iter().find(|k| k.3 == r) {
+        // (The routine's message that this is, else its first.)
+        let mut of = KNOWN.iter().filter(|k| k.3 == r);
+        if let Some(k) = of.clone().find(matches).or_else(|| of.next()) {
             return (k.4, k.5.to_string(), r);
         }
         return match r {
@@ -60,16 +83,8 @@ pub fn location(e: &Error) -> (&'static str, String, &'static str) {
             _ => ("pg-engine", "0".into(), r),
         };
     }
-    let m = e.message.as_str();
-    match KNOWN
-        .iter()
-        // (The suffix may be followed by a name: `... violates check constraint "c"`.)
-        .find(|k| {
-            k.0 == e.code
-                && m.starts_with(k.1)
-                && (m.ends_with(k.2) || (k.2.starts_with(" violates") || k.2.starts_with("violates")) && m.contains(k.2))
-        })
-    {
+    // (The INFO messages only by their routine: their prefixes are too general.)
+    match KNOWN.iter().filter(|k| k.0 != "00000").find(matches) {
         Some(k) => (k.4, k.5.to_string(), k.3),
         None => ("pg-engine", "0".into(), ""),
     }

@@ -43,6 +43,7 @@ mod tblspc;
 mod stored;
 mod tsearch;
 mod vacuum;
+mod vacreport;
 mod parbuild;
 mod idxprogress;
 
@@ -264,6 +265,11 @@ pub(crate) struct Ddl<'c, 'a> {
     /// read the table again; with a TOAST table, the same of the rows with values stored out
     /// of line (its frozen xid, the xmin).
     pub measured_xmin: std::cell::Cell<Option<(u32, u64, u64, Option<(u64, u64)>)>>,
+    /// What the last lazy VACUUM's measure of a table found, for VACUUM VERBOSE's report:
+    /// (table, its report, its TOAST table's).
+    pub vacuumed: Option<(u32, crate::exec::sizing::VacuumReport, Option<crate::exec::sizing::VacuumReport>)>,
+    /// The rows the last ANALYZE's sample takes at most (acquire_sample_rows' targrows).
+    pub targrows: usize,
 }
 
 impl<'c, 'a> Ddl<'c, 'a> {
@@ -290,6 +296,8 @@ impl<'c, 'a> Ddl<'c, 'a> {
             attaching: false,
             lock_nowait: false,
             measured_xmin: Default::default(),
+            vacuumed: None,
+            targrows: 0,
         }
     }
 

@@ -4448,6 +4448,31 @@ pub struct Vacuumed {
     pub allvisible: i32,
     /// Indexes it cleaned up: (oid, pages, tuples).
     pub indexes: Vec<(u32, i32, f64)>,
+    /// What heap_vacuum_rel reports of the table, and of its TOAST table.
+    pub report: VacuumReport,
+    pub toast: Option<VacuumReport>,
+}
+
+/// heap_vacuum_rel's report of one heap (VACUUM VERBOSE's).
+#[derive(Default)]
+pub struct VacuumReport {
+    /// (Its `dead` taken out.)
+    pub heap: heapsim::VacuumResult,
+    /// new_rel_tuples: the live tuples' estimate and the dead ones it kept.
+    pub remain: f64,
+    /// The indexes it bulk-deleted from or cleaned up (those with an
+    /// IndexBulkDeleteResult), in oid order: (oid, pages, newly deleted, deleted, free).
+    pub indexes: Vec<(u32, u32, u32, u32, u32)>,
+}
+
+thread_local! {
+    /// The running VACUUM's INDEX_CLEANUP option (None: auto).
+    static VACUUM_INDEX_CLEANUP: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+/// VACUUM's INDEX_CLEANUP option, for the tables it vacuums next.
+pub fn set_vacuum_index_cleanup(v: Option<bool>) {
+    VACUUM_INDEX_CLEANUP.with(|c| c.set(v));
 }
 
 /// Lazy VACUUM of a table (and of its TOAST table).
@@ -4478,8 +4503,15 @@ pub fn vacuum(t: &Table, ctx: &ExecCtx) -> Result<Option<Vacuumed>> {
         })
     };
     let (skip, freeze) = VACUUM_SKIP.with(|c| c.get());
-    let res = heap.vacuum(&v, indexes.len(), truncate("vacuum_truncate"), skip, freeze);
-    let live = estimate_reltuples(ctx.catalog().relstats.get(&t.oid), res.rel_pages, res.scanned, res.live);
+    // INDEX_CLEANUP, else the vacuum_index_cleanup storage parameter (auto, or a bool).
+    let cleanup_opt = VACUUM_INDEX_CLEANUP.with(|c| c.get());
+    let cleanup = |name: &str| {
+        cleanup_opt.or_else(|| option(&t.options, name).and_then(|v| crate::types::text::parse_bool(&v).ok()))
+    };
+    let main_cleanup = cleanup("vacuum_index_cleanup");
+    let mut res = heap.vacuum_with(&v, indexes.len(), main_cleanup, truncate("vacuum_truncate"), skip, freeze);
+    let cat = ctx.catalog();
+    let live = estimate_reltuples(cat.relstats.get(&t.oid), res.rel_pages, res.scanned, res.live);
     vacuum_kept.insert(t.oid, res.recently_dead as i64);
     for bix in &indexes {
         if let Some(l) = gist_logs.get_mut(&bix.index.oid) {
@@ -4491,24 +4523,31 @@ pub fn vacuum(t: &Table, ctx: &ExecCtx) -> Result<Option<Vacuumed>> {
         tuples: live,
         allvisible: res.all_visible as i32,
         indexes: Vec::new(),
+        report: VacuumReport::default(),
+        toast: None,
     };
+    let line = |oid: u32, s: crate::catalog::btsim::BtVacuumed| (oid, s.pages, s.newly_deleted, s.deleted, s.free);
     // (A deleted btree page's safexid: ReadNextFullTransactionId when it went.)
     let next_xid = xids.next();
     let removable = |x: u64| v.removable(x);
-    if res.dead.is_empty() {
+    if main_cleanup == Some(false) {
+        // (INDEX_CLEANUP off: neither bulk delete nor cleanup.)
+    } else if res.dead.is_empty() {
         // btvacuumcleanup's scan, for an index with deleted pages waiting.
         for bix in &indexes {
             if let Some(bt) = btrees.get_mut(&bix.index.oid)
                 && bt.needs_cleanup()
             {
-                bt.vacuum_scan(None, &removable, next_xid);
+                let s = bt.vacuum_scan(None, &removable, next_xid);
+                out.report.indexes.push(line(bix.index.oid, s));
             }
         }
     } else {
         let dead: crate::exec::fasthash::HashSet<Tid> = res.dead.iter().copied().collect();
         for bix in &indexes {
             if let Some(bt) = btrees.get_mut(&bix.index.oid) {
-                bt.vacuum_scan(Some(&dead), &removable, next_xid);
+                let s = bt.vacuum_scan(Some(&dead), &removable, next_xid);
+                out.report.indexes.push(line(bix.index.oid, s));
                 // (btbulkdelete's count of what is left; clamped to the heap's surviving
                 // tuples when VACUUM read every page: btvacuumcleanup.)
                 let mut tuples = bt.tuples as f64;
@@ -4520,18 +4559,32 @@ pub fn vacuum(t: &Table, ctx: &ExecCtx) -> Result<Option<Vacuumed>> {
             }
         }
     }
+    let bulk_deleted = !res.dead.is_empty();
+    res.dead = Vec::new();
+    let remain = live.max(0.0) + res.recently_dead as f64;
+    out.report.heap = res;
+    out.report.remain = remain;
     if t.toast != 0
         && let Some(th) = heaps.get_mut(&t.toast)
     {
-        let r = th.vacuum(&v, 1, truncate("toast.vacuum_truncate"), skip, freeze);
-        if let Some(bt) = btrees.get_mut(&(t.toast + 1)) {
+        let toast_cleanup = cleanup("toast.vacuum_index_cleanup");
+        let mut r = th.vacuum_with(&v, 1, toast_cleanup, truncate("toast.vacuum_truncate"), skip, freeze);
+        let mut report = VacuumReport::default();
+        if let Some(bt) = btrees.get_mut(&(t.toast + 1))
+            && toast_cleanup != Some(false)
+        {
             if !r.dead.is_empty() {
                 let dead = r.dead.iter().copied().collect::<crate::exec::fasthash::HashSet<_>>();
-                bt.vacuum_scan(Some(&dead), &removable, next_xid);
+                report.indexes.push(line(t.toast + 1, bt.vacuum_scan(Some(&dead), &removable, next_xid)));
             } else if bt.needs_cleanup() {
-                bt.vacuum_scan(None, &removable, next_xid);
+                report.indexes.push(line(t.toast + 1, bt.vacuum_scan(None, &removable, next_xid)));
             }
         }
+        r.dead = Vec::new();
+        let toast_live = estimate_reltuples(cat.relstats.get(&t.toast), r.rel_pages, r.scanned, r.live);
+        report.remain = toast_live.max(0.0) + r.recently_dead as f64;
+        report.heap = r;
+        out.toast = Some(report);
     }
     drop(rf);
     // gistvacuumcleanup: the GiST indexes' pages (their models replay this VACUUM).
@@ -4541,6 +4594,25 @@ pub fn vacuum(t: &Table, ctx: &ExecCtx) -> Result<Option<Vacuumed>> {
             out.indexes.push((bix.index.oid, n as i32, live));
         }
     }
+    // The other access methods' reports: GiST, SP-GiST, GIN and BRIN clean up (and report)
+    // every time, hash only after a bulk delete; their deleted pages aren't modelled.
+    if main_cleanup != Some(false) {
+        for bix in &indexes {
+            let reports = match bix.index.method.as_str() {
+                "gist" | "spgist" | "gin" | "brin" => true,
+                "hash" => bulk_deleted && !out.report.heap.bypassed,
+                _ => false,
+            };
+            if reports {
+                let pages = match out.indexes.iter().find(|i| i.0 == bix.index.oid) {
+                    Some(i) => i.1.max(0) as u32,
+                    None => fork_blocks(bix.index.oid, Fork::Main, ctx)?.unwrap_or(0) as u32,
+                };
+                out.report.indexes.push((bix.index.oid, pages, 0, 0, 0));
+            }
+        }
+    }
+    out.report.indexes.sort_by_key(|i| i.0);
     Ok(Some(out))
 }
 
@@ -5575,6 +5647,16 @@ pub fn heap_tuple_stats(oid: u32, ctx: &ExecCtx) -> Result<Option<(u64, u64, u64
         None if rf.untracked.contains(&heap) => None,
         None => Some((0, 0, 0, 0, 0)),
     })
+}
+
+/// The dead and recently dead tuples of table `t`'s heap model (what a rewrite leaves out
+/// and must keep); None without a model.
+pub fn dead_counts(t: &Table, ctx: &ExecCtx) -> Result<Option<(u64, u64)>> {
+    fork_blocks(t.oid, Fork::Main, ctx)?;
+    let xids = ctx.sess.db.xids();
+    let v = heapsim::Vis::new(&xids);
+    let rf = ctx.sess.db.relfiles.of(t.oid).read();
+    Ok(rf.heaps.get(&t.oid).map(|h| h.dead_counts(&v)))
 }
 
 /// pgstatindex's counts of btree `ix` (the model's), its pages; None when not modelled.

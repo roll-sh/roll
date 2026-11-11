@@ -511,6 +511,17 @@ impl<'a> LeafView<'a> {
     }
 }
 
+/// What a btvacuumscan did (its IndexBulkDeleteResult): the heap TIDs it removed, the
+/// index's pages, those it deleted, those deleted now, those it recorded as free to reuse.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct BtVacuumed {
+    pub removed: usize,
+    pub pages: u32,
+    pub newly_deleted: u32,
+    pub deleted: u32,
+    pub free: u32,
+}
+
 /// What `Btree::page_stats` counts.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct BtPageStats {
@@ -1713,7 +1724,7 @@ impl Btree {
     /// VACUUM's bulk delete: entries pointing at removed heap tuples go (pages stay).
     /// `tuples` becomes the heap TIDs left, as btvacuumscan counts them.
     pub fn bulk_delete(&mut self, dead: &crate::exec::fasthash::HashSet<Tid>) -> usize {
-        self.vacuum_scan(Some(dead), &|_| false, 0)
+        self.vacuum_scan(Some(dead), &|_| false, 0).removed
     }
 
     /// btvacuumscan, from btbulkdelete (`dead`: the heap TIDs whose entries go, each page's
@@ -1721,14 +1732,13 @@ impl Btree {
     /// the leaves left empty are deleted (`delete_empty_pages`, their safexid `next_xid`),
     /// and deleted pages whose safexid is `removable` are recorded in the free space map,
     /// those deleted earlier as the scan meets them, those it deleted at its end in the
-    /// order it deleted them, until one isn't (_bt_pendingfsm_finalize). Returns the heap
-    /// TIDs removed.
+    /// order it deleted them, until one isn't (_bt_pendingfsm_finalize).
     pub fn vacuum_scan(
         &mut self,
         dead: Option<&crate::exec::fasthash::HashSet<Tid>>,
         removable: &dyn Fn(u64) -> bool,
         next_xid: u64,
-    ) -> usize {
+    ) -> BtVacuumed {
         // (Pages go: the hint names none of them.)
         self.head.forget();
         let mut free = 0u32;
@@ -1745,7 +1755,9 @@ impl Btree {
         };
         // (Those deleted now share their safexid: they go to the map together, or none.)
         let now = removable(next_xid);
-        for b in self.delete_empty_pages() {
+        let gone = self.delete_empty_pages();
+        let newly_deleted = gone.len() as u32;
+        for b in gone {
             self.safexids.insert(b, next_xid);
             if now {
                 self.fsm.get_or_insert_default().record_free_index_page(b);
@@ -1759,7 +1771,7 @@ impl Btree {
         }
         let deleted = self.pages.iter().skip(1).filter(|p| p.is_none()).count() as u32;
         self.pending_delpages = deleted - free.min(deleted);
-        removed
+        BtVacuumed { removed, pages: self.nblocks(), newly_deleted, deleted, free }
     }
 
     /// The entries pointing at removed heap tuples go (pages stay). `tuples` becomes the
