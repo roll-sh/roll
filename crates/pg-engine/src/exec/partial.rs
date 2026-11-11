@@ -220,6 +220,10 @@ pub struct Spec {
     pub seq: bool,
     /// Groups kept as words (`Layout`), when every key and state is fixed-width.
     pub words: Option<Arc<Layout>>,
+    /// Nothing the aggregation gives depends on which rows a part holds or the order parts
+    /// come in (exact aggregates, groups put out sorted on all their keys): a worker keeps
+    /// one part over all its chunks (`parscan`).
+    pub unordered: bool,
 }
 
 impl Spec {
@@ -229,10 +233,11 @@ impl Spec {
         trim: Vec<bool>,
         aggs: Vec<(Option<K>, bool, Partial)>,
         seq: bool,
+        unordered: bool,
         key_types: &[crate::types::DataType],
     ) -> Spec {
         let words = Layout::of(&trim, &aggs, key_types).map(Arc::new);
-        Spec { keys, trim, aggs, seq, words }
+        Spec { keys, trim, aggs, seq, words, unordered }
     }
 }
 
@@ -950,6 +955,14 @@ impl<'a> Partials<'a> {
     /// Rows aggregated in the part so far.
     pub fn rows(&self) -> usize {
         self.rows
+    }
+
+    /// The part's groups so far.
+    pub fn groups(&self) -> usize {
+        match &self.spec.words {
+            Some(l) => self.words.len() / l.stride,
+            None => self.groups.len(),
+        }
     }
 
     /// Row `r` of the column batch `b` (one that passed the filter, not odd) aggregated by

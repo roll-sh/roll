@@ -2806,7 +2806,7 @@ impl AggNode {
     /// through hash join probes in its workers, `pipe`): when the input is one that can and
     /// every key and aggregate can be: kernels for the keys and arguments, exact
     /// aggregates without DISTINCT, ORDER BY, FILTER or direct arguments.
-    fn partial_run(&self, input: &mut BoxNode, colls: &[Option<KeyNorm>], seq: bool, ctx: &ExecCtx) -> Result<bool> {
+    fn partial_run(&self, input: &mut BoxNode, colls: &[Option<KeyNorm>], seq: bool, streamed: bool, ctx: &ExecCtx) -> Result<bool> {
         use super::kernel::compile;
         if ctx.instrumented() || self.split(ctx) {
             return Ok(false);
@@ -2856,12 +2856,38 @@ impl AggNode {
             aggs.push((arg, a.def.skip_nulls, empty));
         }
         let key_types: Vec<_> = self.groups.iter().map(|g| g.ty()).collect();
-        let spec = Arc::new(super::partial::Spec::new(keys, trim, aggs, seq, &key_types));
+        // (A streamed grouping's groups come in its input's order: the parts' order.)
+        let unordered = !seq && !streamed && self.parts_unordered(&aggs, ctx);
+        let spec = Arc::new(super::partial::Spec::new(keys, trim, aggs, seq, unordered, &key_types));
         Ok(match proj {
             Some(_) => input.pipeline_projected(spec, ctx)?,
             None => input.pipeline(Vec::new(), Some(spec), ctx)?,
         }
         .is_some())
+    }
+
+    /// Whether the parts of a parallel scan's rows may hold any of its rows, coming in any
+    /// order (`Spec::unordered`): every aggregate exact whatever the rows' order (counts,
+    /// integer and numeric sums and averages: no float, no min / max, which keep one of
+    /// equal values), the groups' keys of types whose equal values are identical (no
+    /// numeric, float or bpchar: the group would show its first row's), and the groups put
+    /// out sorted on all their keys (a GroupAggregate's) or one group.
+    fn parts_unordered(&self, aggs: &[(Option<super::kernel::K>, bool, super::partial::Partial)], ctx: &ExecCtx) -> bool {
+        use super::partial::Partial as P;
+        use crate::types::DataType as T;
+        if !aggs.iter().all(|(_, _, p)| matches!(p, P::Count(_) | P::SumInt(_) | P::AvgInt(..) | P::SumNum(_))) {
+            return false;
+        }
+        if self.groups.is_empty() {
+            return true;
+        }
+        if !self.groups.iter().all(|g| matches!(g.ty(), T::Int2 | T::Int4 | T::Int8 | T::Date | T::Bool | T::Oid | T::Text | T::Varchar(_))) {
+            return false;
+        }
+        let Some(plan) = &self.plan else { return false };
+        let e = super::pghash::agg_estimate(plan, ctx);
+        let Some(sorted) = &e.sorted else { return false };
+        (0..self.groups.len()).all(|i| sorted.iter().any(|(k, ..)| *k == i))
     }
 
     /// A new group's aggregate states; direct arguments see the group's key.
@@ -2907,7 +2933,7 @@ impl AggNode {
             // (The groups of single integer keys by their numbers, as parts' groups find
             // them: a cache of `index`'s lookups, of the groups any integer key equal to the
             // number belongs to.)
-            let mut ints: super::fasthash::HashMap<i64, u32> = Default::default();
+            let mut ints = IntGroups::default();
             // (Parts' counts by group and aggregate, added here and merged into the groups'
             // states once, after the input: `Count`'s merge adds.)
             let mut counts: Vec<i64> = Vec::new();
@@ -3060,7 +3086,7 @@ impl AggNode {
             let parts = presorted_agg.is_none()
                 && trims_only
                 && !may_spill
-                && self.partial_run(&mut input, &colls, hash_order, ctx)?;
+                && self.partial_run(&mut input, &colls, hash_order, false, ctx)?;
             if parts {
                 spill = None;
             }
@@ -3126,8 +3152,8 @@ impl AggNode {
                                     (false, [v @ (Value::Int2(_) | Value::Int4(_) | Value::Int8(_))]) => v.as_i64(),
                                     _ => None,
                                 };
-                                let gi = match int.and_then(|x| ints.get(&x)) {
-                                    Some(&i) => i as usize,
+                                let gi = match int.and_then(|x| ints.get(x)) {
+                                    Some(i) => i as usize,
                                     // (The key compared is the key itself unless normalised.)
                                     None => {
                                         let gi = if nondet {
@@ -3606,7 +3632,7 @@ impl AggNode {
             _ => return Ok(None),
         }
         let mut input = self.input.take().unwrap();
-        let parts = self.partial_run(&mut input, &colls, false, ctx)?;
+        let parts = self.partial_run(&mut input, &colls, false, true, ctx)?;
         Ok(Some(Stream {
             input,
             parts,
@@ -4092,4 +4118,51 @@ pub(crate) fn group_key(key: &[Value], colls: &[Option<KeyNorm>]) -> Vec<Value> 
             None => v.clone(),
         })
         .collect()
+}
+
+/// The groups of single integer keys by their numbers (`AggNode::run`'s parts' lookups): a
+/// vector indexed by the number for small non-negative ones as dense as the groups (a
+/// table's ids), a map for the others.
+#[derive(Default)]
+struct IntGroups {
+    /// `u32::MAX`: none.
+    dense: Vec<u32>,
+    map: super::fasthash::HashMap<i64, u32>,
+    n: usize,
+}
+
+impl IntGroups {
+    #[inline]
+    fn get(&self, x: i64) -> Option<u32> {
+        if let Some(&g) = usize::try_from(x).ok().and_then(|i| self.dense.get(i))
+            && g != u32::MAX
+        {
+            return Some(g);
+        }
+        if self.map.is_empty() { None } else { self.map.get(&x).copied() }
+    }
+
+    fn insert(&mut self, x: i64, g: u32) {
+        self.n += 1;
+        // (At most 8 slots a group, past the first 64k.)
+        let room = (self.n * 8).max(1 << 16);
+        match usize::try_from(x) {
+            Ok(i) if i < room => {
+                if i >= self.dense.len() {
+                    let len = (i + 1).max(self.dense.len() * 2).min(room);
+                    self.dense.resize(len, u32::MAX);
+                }
+                self.dense[i] = g;
+            }
+            _ => {
+                self.map.insert(x, g);
+            }
+        }
+    }
+
+    fn clear(&mut self) {
+        self.dense.clear();
+        self.map.clear();
+        self.n = 0;
+    }
 }
