@@ -1935,6 +1935,9 @@ fn result_format(formats: &[i16], i: usize) -> i16 {
 /// A DataRow (printtup). A value its output function or the client's encoding can't take
 /// fails the row: nothing of it is left in `b`.
 fn put_data_row(b: &mut BytesMut, row: &[crate::types::Value], cols: &[OutCol], formats: &[i16], fmt: &FormatCtx) -> Result<()> {
+    if put_data_row_fixed(b, row, formats) {
+        return Ok(());
+    }
     let start = b.len();
     let r = put_msg(b, b'D', |b| {
         b.put_i16(row.len() as i16);
@@ -1971,6 +1974,57 @@ fn put_data_row(b: &mut BytesMut, row: &[crate::types::Value], cols: &[OutCol], 
         b.truncate(start);
     }
     r
+}
+
+/// `put_data_row` of a row whose values are each null or one of fixed width sent in binary
+/// (`binary::encode` writes those whatever the column's type), the message made on the stack
+/// and copied in at once. False: another row (nothing written).
+fn put_data_row_fixed(b: &mut BytesMut, row: &[crate::types::Value], formats: &[i16]) -> bool {
+    use crate::types::Value as V;
+    let mut m = [0u8; 256];
+    let mut at = 7;
+    for (i, v) in row.iter().enumerate() {
+        let mut put = |x: &[u8]| {
+            let end = at + 4 + x.len();
+            if end > m.len() {
+                return false;
+            }
+            m[at..at + 4].copy_from_slice(&(x.len() as i32).to_be_bytes());
+            m[at + 4..end].copy_from_slice(x);
+            at = end;
+            true
+        };
+        if !matches!(v, V::Null) && result_format(formats, i) != 1 {
+            return false;
+        }
+        let fits = match v {
+            V::Null => {
+                if at + 4 > m.len() {
+                    return false;
+                }
+                m[at..at + 4].copy_from_slice(&(-1i32).to_be_bytes());
+                at += 4;
+                true
+            }
+            V::Bool(x) => put(&[*x as u8]),
+            V::Int2(x) => put(&x.to_be_bytes()),
+            V::Int4(x) => put(&x.to_be_bytes()),
+            V::Int8(x) => put(&x.to_be_bytes()),
+            V::Oid(x) => put(&x.to_be_bytes()),
+            V::Xid8(x) => put(&x.to_be_bytes()),
+            V::Float4(x) => put(&x.to_be_bytes()),
+            V::Float8(x) => put(&x.to_be_bytes()),
+            _ => false,
+        };
+        if !fits {
+            return false;
+        }
+    }
+    m[0] = b'D';
+    m[1..5].copy_from_slice(&((at - 1) as i32).to_be_bytes());
+    m[5..7].copy_from_slice(&(row.len() as i16).to_be_bytes());
+    b.put_slice(&m[..at]);
+    true
 }
 
 /// The text output of the commonest values written straight into the message (what
