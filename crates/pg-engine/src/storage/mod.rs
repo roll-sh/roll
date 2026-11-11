@@ -808,6 +808,29 @@ impl Store {
         })
     }
 
+    /// `first_with` (values as stored) for a lookup a scan would otherwise make: the hot
+    /// ranges as `scan_raw` reads them, the probe counted toward keeping its range hot as a
+    /// scan is.
+    pub fn first_noted(&self, r: &mut point::PointReader, start: &[u8], end: &[u8]) -> Result<point::First> {
+        let first = |rows: Vec<(Bytes, Bytes)>| match rows.into_iter().next() {
+            Some((k, v)) => point::First::Row(k.to_vec(), v),
+            None => point::First::None,
+        };
+        if let Some(rows) = self.hot.scan(start, end, r.ts()) {
+            return Ok(first(rows));
+        }
+        if let Some(p) = hot::covering(start, end)
+            && !self.discard.claims(&p)
+            && self.hot.note_scan(p)
+            // (Kept from now on; a failure to read it leaves it to the probe.)
+            && self.keep_hot(p).is_ok()
+            && let Some(rows) = self.hot.scan(start, end, r.ts())
+        {
+            return Ok(first(rows));
+        }
+        r.first_raw(start, end)
+    }
+
     /// Ascending scan of user keys in [start, end) at snapshot `ts`, rows with their
     /// out-of-line values put back (`toast`).
     pub fn scan(&self, start: &[u8], end: &[u8], ts: u64) -> Scan {

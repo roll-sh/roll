@@ -2800,6 +2800,33 @@ impl Txn {
         TxnScan::new(own.into_iter().collect(), self.lower(start, end, st.ts, mark), src)
     }
 
+    /// `scan_snap`'s first entry of [start, end) as of the snapshot `s`, read by a point probe
+    /// of the store (`Store::first_with`: each source positioned at `start`, no merging
+    /// scan): Some(None) when there is none. None: scan instead (writes or range deletions
+    /// of ours may be in the range, spilled writes, or the probe gave up). Values as stored:
+    /// for ranges no table row is in (an index's entries).
+    pub fn first_snap(&self, start: &[u8], end: &[u8], s: &Snap) -> Result<Option<Option<(Vec<u8>, Bytes)>>> {
+        use crate::storage::point::First;
+        self.catch_up(s);
+        let st = s.st.borrow();
+        let range = (Bound::Included(start), Bound::Excluded(end));
+        if st.mark < self.journal_base
+            || self.runs.is_some()
+            || self.writes.range::<[u8], _>(range).next().is_some()
+            || st.prev.range::<[u8], _>(range).next().is_some()
+            || self.rdels.iter().any(|r| r.ts <= st.mark as u64 && r.overlaps(start, end))
+        {
+            return Ok(None);
+        }
+        let store = &self.db.store;
+        let mut r = store.point_reader(st.ts, false);
+        Ok(match store.first_noted(&mut r, start, end)? {
+            First::Row(k, v) => Some(Some((k, v))),
+            First::None => Some(None),
+            First::Unknown => None,
+        })
+    }
+
     /// `it` (a forward `scan_snap` at snapshot `s`) over [start, end) instead, its store
     /// sources keeping their places (`storage::Scan::reseek`): the next of ascending lookups
     /// reads on in the blocks the last one read. False: not such a scan (spilled writes, range

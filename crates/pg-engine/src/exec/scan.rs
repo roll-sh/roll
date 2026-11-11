@@ -609,6 +609,7 @@ pub fn open_scan(s: &ScanPlan, shared: Option<&Arc<crate::sql::plan::Plan>>, nee
             proj: None,
             erb: Default::default(),
             spare: None,
+            probe: Probe::Not,
             fscan: None,
             fetch_calls: 0,
             dscan: None,
@@ -709,6 +710,7 @@ pub fn open_scan(s: &ScanPlan, shared: Option<&Arc<crate::sql::plan::Plan>>, nee
             proj: None,
             erb: Default::default(),
             spare: None,
+            probe: Probe::Not,
             fscan: None,
             fetch_calls: 0,
             dscan: None,
@@ -799,6 +801,7 @@ pub fn open_scan(s: &ScanPlan, shared: Option<&Arc<crate::sql::plan::Plan>>, nee
             proj: None,
             erb: Default::default(),
             spare: None,
+            probe: Probe::Not,
             fscan: None,
             fetch_calls: 0,
             dscan: None,
@@ -958,6 +961,7 @@ fn open_scan_as(
         proj: None,
         erb: Default::default(),
         spare: None,
+        probe: Probe::Not,
         fscan: None,
         fetch_calls: 0,
         dscan: None,
@@ -1974,6 +1978,7 @@ fn dense_bitmap_scan(
         proj: None,
         erb: Default::default(),
         spare: None,
+        probe: Probe::Not,
         fscan: None,
         fetch_calls: 0,
         dscan: None,
@@ -2230,6 +2235,16 @@ fn collation_equal_run(s: &ScanPlan) -> bool {
     })
 }
 
+/// Where an execution of a point scan (`ScanNode::point`) is with its probe of the key's
+/// first entry (`ScanNode::probe_point`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Probe {
+    Not,
+    /// Its entry is in `erb`, its row not read yet.
+    Fetching,
+    Done,
+}
+
 /// A scan's storage iterator over one range: ascending, or descending for a backward scan.
 enum StoreIter {
     Fwd(Box<TxnScan>),
@@ -2449,6 +2464,8 @@ struct ScanNode {
     /// The last range's store iterator once it ended, for the next range to read on with
     /// (`Txn::reseek_snap`) instead of a new one.
     spare: Option<StoreIter>,
+    /// This execution's point probe (`probe_point`).
+    probe: Probe,
     /// The table's rows read for a few keys at a time (`fetch_kept`): one scan kept and
     /// sought from key to key, its sources staying in their blocks.
     fscan: Option<Box<TxnScan>>,
@@ -3061,6 +3078,7 @@ impl ScanNode {
         self.skip = bound.skip;
         self.stat = bound.stat;
         self.cur_range = 0;
+        self.probe = Probe::Not;
         // (The last range's iterator kept: the new one reads on with it, `seek`.)
         self.spare = self.iter.take().or(self.spare.take());
         self.rb.clear();
@@ -3356,6 +3374,9 @@ impl ScanNode {
         self.erb.clear();
         // (An entry's key is its columns' and the data key's, its value the data key.)
         self.erb.reserve(want, want * 32, want * 16);
+        if self.probe_point(ctx)? {
+            return Ok(!self.erb.is_empty());
+        }
         while self.erb.len() < want {
             if self.iter.is_none() && !self.open_range(ctx) {
                 break;
@@ -3404,6 +3425,15 @@ impl ScanNode {
             })
             .unzip();
         let rows = self.fetch_stored(&dks, ctx)?;
+        if self.probe == Probe::Fetching {
+            self.probe = Probe::Done;
+            if rows[0].is_none() {
+                // (The key's first entry names a version the snapshot doesn't see: its range
+                // is read as a scan, that entry again among the rest.)
+                self.cur_range = 0;
+                return Ok(());
+            }
+        }
         self.fetched
             .extend(iks.into_iter().zip(dks).zip(rows).map(|((k, d), r)| (k, d, r)));
         Ok(())
@@ -3584,6 +3614,44 @@ impl ScanNode {
             self.rb.clear();
             self.erow.clear();
             return Ok(false);
+        }
+        Ok(true)
+    }
+
+    /// A unique key's lookup (`point`) before its one range is opened: the range's first
+    /// entry read by a point probe (`Txn::first_snap`) into `erb`, and the range done. False:
+    /// read the range as a scan (another kind of scan, the probe can't tell, or its entry's
+    /// row wasn't visible: `fetch_entries`).
+    fn probe_point(&mut self, ctx: &ExecCtx) -> Result<bool> {
+        if !self.point
+            || self.probe != Probe::Not
+            || self.rev
+            || self.cur_range != 0
+            || self.iter.is_some()
+            || self.ranges.len() != 1
+            || self.skip.is_some()
+            || self.ios_cols.is_some()
+        {
+            return Ok(false);
+        }
+        let Some(snap) = ctx.snapshot() else {
+            return Ok(false);
+        };
+        let (start, end) = &self.ranges[0];
+        let Some(found) = ctx.txn.borrow().first_snap(start, end, &snap)? else {
+            return Ok(false);
+        };
+        // (Debug builds: what the range's scan finds first.)
+        #[cfg(debug_assertions)]
+        {
+            let mut it = ctx.txn.borrow().scan_snap(start, end, &snap);
+            let scanned = it.next().transpose()?;
+            assert_eq!(found.as_ref().map(|(k, v)| (k.as_slice(), &v[..])), scanned.as_ref().map(|(k, v)| (k.as_slice(), &v[..])), "a point probe's entry");
+        }
+        self.cur_range = 1;
+        self.probe = Probe::Fetching;
+        if let Some((k, v)) = found {
+            self.erb.push(&k, v);
         }
         Ok(true)
     }
@@ -5417,6 +5485,7 @@ impl Node for ScanNode {
             proj,
             erb,
             spare,
+            probe,
             fscan,
             fetch_calls,
             dscan,
@@ -5462,6 +5531,7 @@ impl Node for ScanNode {
         *kfilter = None;
         *implied = false;
         *point = false;
+        *probe = Probe::Not;
         // (Asked again by the projection above as it starts over.)
         *proj = None;
         erb.clear();
@@ -6450,6 +6520,7 @@ fn keyed_scan(s: &ScanPlan, plan: ScanPlan, ix: &Index, keys: Keys, ctx: &ExecCt
         proj: None,
         erb: Default::default(),
         spare: None,
+        probe: Probe::Not,
         fscan: None,
         fetch_calls: 0,
         dscan: None,
