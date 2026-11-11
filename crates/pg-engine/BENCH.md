@@ -416,6 +416,68 @@ directory): base 35.2 / 36.4 MB, c4 36.4 / 36.5 MB, data 3.03 MB each: unchanged
 (`dropped-probe2-*.patch`): against probe1, run twice, instructions -2.1% / -3.0% median but
 cycles -0.3% / -1.1% and CPU flat, -0.2% to -4.8% instructions by pair.
 
+## Range reads, round 5 (2026-11-11, agent 206)
+
+HANDOFF.md, "Range reads round 5", has what changed: a kept custom plan's scan chosen again
+for new values reuses how its clauses matched the indexes (`Skel`), the planner reads only
+the end of a column get_actual_variable_range asks for, and a custom plan not known to be the
+generic binding reads no environment first. Agent 203's harness, copied to `~/.cache/a206/h`
+(equal-length binary paths, dist builds in containers, the server on CPUs 24-27 and the
+client on 28-31, 100,000 accounts, 8 clients, 2 s warmup, 10 s measured, every row
+value-checked, a pair run again when another tenant used more than 0.3 cores of the server's
+CPUs; none was). One change: user instructions and cycles now count the connection threads
+only (`perf stat --per-thread`, the eight `roll-conn` threads summed), not the background
+threads. **base** is `c35d07a86`; the prepared 100-row range read, alternating pairs.
+
+The planning change against base, two sets of five pairs:
+
+| pair | base ops/s | new ops/s | base us CPU / op | new us CPU / op | base instr / op | new instr / op | cycles / op |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 33,864 | 34,057 | 105.2 | 101.6 | 439k | 435k (-0.9%) | -3.6% |
+| 2 | 33,834 | 34,171 | 103.9 | 101.6 | 441k | 432k (-1.9%) | -2.3% |
+| 3 | 34,174 | 35,219 | 102.0 | 98.2 | 438k | 432k (-1.3%) | -2.5% |
+| 4 | 34,111 | 35,195 | 101.8 | 98.5 | 441k | 432k (-2.1%) | -4.4% |
+| 5 | 34,363 | 35,060 | 101.6 | 98.9 | 441k | 432k (-2.0%) | -4.4% |
+| 6 | 32,817 | 33,200 | 106.2 | 103.5 | 441k | 433k (-1.8%) | -2.5% |
+| 7 | 32,826 | 33,642 | 106.3 | 103.2 | 442k | 433k (-2.0%) | -2.9% |
+| 8 | 32,323 | 33,226 | 106.6 | 104.3 | 442k | 431k (-2.5%) | -2.5% |
+| 9 | 32,417 | 33,596 | 106.5 | 103.0 | 441k | 429k (-2.9%) | -4.0% |
+| 10 | 32,422 | 33,762 | 105.5 | 103.1 | 442k | 430k (-2.7%) | -3.2% |
+
+Medians, first set: +2.8% ops/s, -3.0% CPU per operation, -1.9% instructions; second set
++3.6%, -2.9%, -2.5%. User cycles per operation -2.3% to -4.4% in every pair (the gate's 2%);
+instructions -0.9% to -2.9%. Memory after the runs 51-56 MiB on both.
+
+The point read (`point_select`, base against the change, five pairs): ops/s -2.0% to +0.4%
+(median +0.2%), CPU per operation median -0.5%, instructions -1.0% to +0.7% (median +0.2%).
+The prepared single-row UPDATE (`update_indexed`, five pairs): ops/s median +1.0% (one pair
+-11% beside a busy machine, 0.25 foreign cores), CPU per operation median -0.6%,
+instructions median -0.2%. Neither regresses beyond the runs' spread.
+
+Dropped (`~/.cache/a206/B-datarow-dropped.patch`): the fixed-width DataRow checked first and
+written straight into the send buffer (`put_u8` / `put_i32` per value) instead of a zeroed
+stack buffer copied in. Five pairs over the planning change: +0.57% median instructions
+(-0.3% to +0.7%), -2.1% ops/s: the buffer's checks per value cost more than the zeroing.
+
+PostgreSQL 18.6, the same session and CPUs (ops/s, us CPU / op, MiB after the run, p99 ms),
+alternating with the engine with the change: three single runs while the gates built on
+CPUs 16-23, PostgreSQL 34,095 / 101.9 / 103 / 0.553, 29,330 / 117.7 / 103 / 0.595, 31,999 /
+107.8 / 103 / 0.572 against the engine's 32,806 / 104.9 / 51 / 0.590, 29,485 / 117.3 / 55 /
+0.604, 34,454 / 101.2 / 55 / 0.540; then four pairs, PostgreSQL 33,353, 33,276, 33,751,
+32,627 against 33,559, 33,552, 33,642, 33,356 (+0.6%, +0.8%, -0.3%, +2.2%; CPU per operation
+-1.8% to +0.9%). The engine is level with PostgreSQL on this read (median +0.7% ops/s), on
+about half its memory, not clearly past it.
+
+The LBR profile of base this round started from (111k samples, shares of the server's user
+samples): planning (`planned_as`) 21.1% (choosing the scan again 12.4%: path generation 6.6%
+of it, `match_quals` 1.5%, `index_pathkeys` 0.45%, `index_only` 0.4%, the bitmap OR search's
+clause copy 0.3%, selectivity 2.6% with the live endpoint 0.86%; placing the WHERE 3.6%;
+`lit_env` twice 0.8%), the index scan (`ScanNode::next`) 37.6% with the row made from the
+stored bytes (`emit`) 10.2%, the kernel send at ReadyForQuery 12%, reading the next message
+5.5%, the transaction's end 2.7%, Bind 2.2%, Describe 1.4% (the transaction it starts, 0.9%).
+With the change: planning 19.4%, choosing the scan again 10.5% (path generation 4.4%), the
+endpoint 0.62% (only its last-bin reverse scan left).
+
 ## Range reads, round 4 (2026-11-11, agent 203)
 
 HANDOFF.md, "Range reads round 4", has what changed: a secondary index scan hands each row out

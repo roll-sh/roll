@@ -9917,6 +9917,87 @@ the column where get_actual_variable_range reads the one it needs. The row made 
 stored bytes (`emit` 9.5%: the decode 2.9%, its allocation 1.2%, the header's numbers 0.8%,
 `PlanRef`'s calls 0.6%). Describe at Bind starts the transaction (`ensure_txn`, 0.7%).
 
+## Range reads round 5 (agent 206)
+
+BENCH.md "Range reads, round 5" has the measurements: the prepared 100-row range read takes
+2.3-4.4% fewer user cycles per operation in every pair (instructions -0.9% to -2.9%, medians
+-1.9% and -2.5% over two sets), +2.8% / +3.6% median ops/s, -3% CPU per operation, and is
+level with PostgreSQL 18.6 in the same session (median +0.7% ops/s over four pairs) on half
+its memory. One planning change and one behaviour fix:
+
+- **A kept custom plan's scan chosen again reuses its clauses' matches** (`sql/paths.rs`,
+  `Skel`, `Planner::skel`, `Planner::index_match`, `ScanChoice::skel`). The first
+  `ScanChoice::rechoose` keeps, per index, what create_index_paths found before costing
+  (`index_match`: the clauses as `ClauseAt` recipes, the forward and backward pathkeys,
+  index-only), and whether an OR clause is there. A later rechoose whose clauses `fits` (each
+  the same as the kept one, or the same `=`/`<`/`<=`/`>`/`>=` call, by `Arc::ptr_eq` of its
+  function, with another non-NULL constant of the same type in an operand) gets the
+  matches from the recipes (`IxSkel::matched`) instead of `match_quals`, `index_pathkeys`,
+  `index_only`, `order_by_ops`, the TID checks and `bitmap_or_paths`' copy; the
+  selectivities, costs, `add_path` comparisons and `apply` run as before. `skel` is None
+  (never reused) when a match could read a constant's value: an index with a predicate, of an
+  operator family or with ordering operators, a TID qual, or an index clause that isn't its
+  clause as written or commuted (`ClauseAt::of` rebuilds each and compares: a bool key, an
+  OR turned into `= ANY`, LIKE prefixes, row comparisons, IS NULL all fall out). The
+  skeleton lives in the `ScanChoice` (a `OnceLock`, shared by sessions with the kept plan), so
+  catalog, statistics, settings and role changes drop it with the kept plan.
+- **Only the end asked for** (`exec/scan.rs` `column_end`, `Planner::endpoint`): the live
+  min/max probe reads one end of the index (`ends` is keyed by the end), as
+  get_actual_variable_range is called for the end the histogram probe reached.
+- `param_custom` checks `custom_is_generic` before reading the environment (`lit_env`), so a
+  statement whose custom plans aren't its generic binding (the range read) reads it once per
+  Bind, in `values_custom`. (`bound_custom` starts the transaction right after, as before.)
+- **FETCH after a btree scan ran off an end** (`session/cursor.rs`, `Cursor::restart_scan`):
+  PostgreSQL's btree scan invalidates its position when it runs off either end of its range
+  (_bt_readnextpage), so the next fetch the other way is a new `_bt_first` from that end, and
+  a backward page read returns each posting list's TIDs in ascending order (_bt_readpage). A
+  scroll cursor over a plain btree index scan (under projections and filters, no LIMIT,
+  immutable) turning back at its end now reads the rows of that scan run afresh in the other
+  direction (stored reversed, `turned`), and turning forward again at its start the forward
+  scan's; turning anywhere else steps back over the rows passed, as before. 203's
+  `FETCH LAST` difference (4967 against PostgreSQL's 4893) was this, not heap order after the
+  updates: it happens on a freshly loaded table too, whenever a run of equal keys spans two
+  posting lists. Golden `a206_cursor_turn` (recorded from PostgreSQL 18.6). Not modelled:
+  turning in mid-scan after a turn (PostgreSQL reverses the current page's items exactly and
+  reads other pages afresh).
+
+Why the reuse is exact: for clauses that `fits`, `match_clause` takes the same branch whatever
+the constant's value (`ops_ok`, `key_order_op`, `scan_const`, the operand's type family;
+`pattern_clause` and `network_clause` only look at their own operators), and the recipes
+rebuild the IClause `match_clause` makes, checked against it when the skeleton is made.
+Debug builds still plan every reused custom plan afresh and compare plan and cost
+(`values_custom`, `check_rechoose`). The edge scripts (`~/.cache/a206/edge`: 198's and 203's)
+give PostgreSQL's output on both servers; the raw DataRow script gives the same bytes as
+base.
+
+Verification on `d54dcbe10` with both changes: release build; release lib tests (212
+passed), kept_plans (10), wire (69) and golden (all files, golden_wire and golden_shuffled);
+debug golden (all files, with the reuse cross-check) and kept_plans; the planner regress
+subset (select, join, subselect, aggregates, create_index, btree_index, partition_prune,
+portals, limit, prepare, plancache; debug build, a private PG 18.6 reference): 4184/4186
+units, the same two differing units as round 4 (join 368, partition_prune 410), none newly
+differing. Release Clippy (all targets) warns in files this change doesn't touch only
+(math.rs, json.rs, text.rs, nodes.rs, expr.rs, fold.rs, optimize.rs, explain.rs,
+partitionwise.rs, a test and the bench client), so `-D warnings` fails as before; none in this
+change. Rebased onto `0dba28977` (agent 205's point reads, round 2): release build,
+kept_plans, wire and golden (all files) again, and the edge, cursor and DataRow scripts.
+
+Dropped (`~/.cache/a206/B-datarow-dropped.patch`): the fixed-width DataRow written straight into
+the send buffer after a check (+0.6% instructions). 203's note stands: the stack-buffer path
+zeroes 256 bytes and writes a row's leading values before it leaves a row with a text
+column (`point_select`'s); a check first would spare that on the point read only.
+
+Next, from the profile (BENCH.md): planning is still 19% of the range read. What is left per
+Bind is mostly value-dependent or copies: placing the WHERE (`Analyzed::placed` 3.6%:
+`Subst` 1.6%, `add_filter_as` 1.7%, whose refutation, constraint exclusion and
+`const_conflict` read the values), the selectivities (2.5%: `hist_ineq`, and the last-bin
+reverse scan of the endpoint, 0.37%, which costs about a third of a Bind each time it runs:
+the storage's reverse seek), `apply` (1.0%), the IClause and Expr copies (about 1.5% over
+`ClauseAt::made`, the bitmap candidate's IPath clone, `qual_exprs`, `SelMemo::put`,
+`scan_quals`). Describe at Bind starts the transaction (0.9%), which Execute would start
+anyway: `txn_settings`' map copy (0.4%) is the part to cut (agent 205's per-statement setup).
+`emit` 10.5% (self 3.3%, decode 3.1%, the row's allocation 1.4%).
+
 ## Storage engine, round 1 (agent 169)
 
 Agent 169 owns the store's internals (block format and cache, point lookups inside the store,
