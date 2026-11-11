@@ -12,6 +12,7 @@ use super::kernel::{Cols, K};
 use crate::types::Value;
 use crate::types::numeric::Numeric;
 use std::cmp::Ordering;
+use std::sync::Arc;
 
 /// An aggregate's partial state (an `Accum` that can be split: `Accum::partial`).
 #[derive(Clone, Debug)]
@@ -217,6 +218,215 @@ pub struct Spec {
     pub aggs: Vec<(Option<K>, bool, Partial)>,
     /// Whether the executor's thread reads `Part::seq` (the hash table's order model).
     pub seq: bool,
+    /// Groups kept as words (`Layout`), when every key and state is fixed-width.
+    pub words: Option<Arc<Layout>>,
+}
+
+impl Spec {
+    /// `key_types`: the keys' types, which decide whether the parts' groups are words.
+    pub fn new(
+        keys: Vec<K>,
+        trim: Vec<bool>,
+        aggs: Vec<(Option<K>, bool, Partial)>,
+        seq: bool,
+        key_types: &[crate::types::DataType],
+    ) -> Spec {
+        let words = Layout::of(&trim, &aggs, key_types).map(Arc::new);
+        Spec { keys, trim, aggs, seq, words }
+    }
+}
+
+/// A key a group's words hold: the type, whose values are the only ones taken (a row with
+/// another kind of value goes to the serial path), each one word, equal words equal values.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum WordKey {
+    Bool,
+    Int2,
+    Int4,
+    Int8,
+    Date,
+    Timestamp,
+    Timestamptz,
+}
+
+impl WordKey {
+    fn of(t: &crate::types::DataType) -> Option<WordKey> {
+        use crate::types::DataType as T;
+        Some(match t {
+            T::Bool => WordKey::Bool,
+            T::Int2 => WordKey::Int2,
+            T::Int4 => WordKey::Int4,
+            T::Int8 => WordKey::Int8,
+            T::Date => WordKey::Date,
+            T::Timestamp(_) => WordKey::Timestamp,
+            T::Timestamptz(_) => WordKey::Timestamptz,
+            _ => return None,
+        })
+    }
+
+    /// A value's word (None: NULL, or not this type's value).
+    #[inline]
+    fn word(self, v: &Value) -> Option<u64> {
+        Some(match (self, v) {
+            (WordKey::Bool, Value::Bool(b)) => *b as u64,
+            (WordKey::Int2, Value::Int2(x)) => *x as i64 as u64,
+            (WordKey::Int4, Value::Int4(x)) => *x as i64 as u64,
+            (WordKey::Int8, Value::Int8(x)) => *x as u64,
+            (WordKey::Date, Value::Date(x)) => *x as i64 as u64,
+            (WordKey::Timestamp, Value::Timestamp(x)) => *x as u64,
+            (WordKey::Timestamptz, Value::Timestamptz(x)) => *x as u64,
+            _ => return None,
+        })
+    }
+
+    fn value(self, w: u64) -> Value {
+        match self {
+            WordKey::Bool => Value::Bool(w != 0),
+            WordKey::Int2 => Value::Int2(w as i64 as i16),
+            WordKey::Int4 => Value::Int4(w as i64 as i32),
+            WordKey::Int8 => Value::Int8(w as i64),
+            WordKey::Date => Value::Date(w as i64 as i32),
+            WordKey::Timestamp => Value::Timestamp(w as i64),
+            WordKey::Timestamptz => Value::Timestamptz(w as i64),
+        }
+    }
+}
+
+/// A state a group's words hold: count `[n]`; integer sum `[has a value, sum]`; integer
+/// average `[sum low, sum high, n]`; exact numeric sum `[sum low, sum high, scale, n]` (the
+/// unscaled sum, at the largest scale seen; a value past an i128 goes to the serial path).
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum WordState {
+    Count,
+    SumInt,
+    AvgInt,
+    SumNum,
+}
+
+impl WordState {
+    fn width(self) -> usize {
+        match self {
+            WordState::Count => 1,
+            WordState::SumInt => 2,
+            WordState::AvgInt => 3,
+            WordState::SumNum => 4,
+        }
+    }
+}
+
+fn wide(lo: u64, hi: u64) -> i128 {
+    ((hi as u128) << 64 | lo as u128) as i128
+}
+
+/// A part's groups as words (`Groups::Words`): per group a word of which keys are NULL, a
+/// word per key, then each state's words; no allocation of its own.
+#[derive(Debug)]
+pub struct Layout {
+    keys: Vec<WordKey>,
+    states: Vec<WordState>,
+    /// Words a group.
+    stride: usize,
+}
+
+impl Layout {
+    fn of(trim: &[bool], aggs: &[(Option<K>, bool, Partial)], key_types: &[crate::types::DataType]) -> Option<Layout> {
+        if key_types.is_empty() || key_types.len() > 64 || trim.iter().any(|t| *t) {
+            return None;
+        }
+        let keys = key_types.iter().map(WordKey::of).collect::<Option<Vec<_>>>()?;
+        let states = aggs
+            .iter()
+            .map(|(_, _, p)| match p {
+                Partial::Count(0) => Some(WordState::Count),
+                Partial::SumInt(None) => Some(WordState::SumInt),
+                Partial::AvgInt(0, 0) => Some(WordState::AvgInt),
+                Partial::SumNum(SumNum { big: None, small: None, n: 0 }) => Some(WordState::SumNum),
+                _ => None,
+            })
+            .collect::<Option<Vec<_>>>()?;
+        let stride = 1 + keys.len() + states.iter().map(|s| s.width()).sum::<usize>();
+        Some(Layout { keys, states, stride })
+    }
+}
+
+/// A part's groups, numbered by first appearance.
+pub enum Groups {
+    /// Each one's key and states as values.
+    Values(Vec<(Vec<Value>, Vec<Partial>)>),
+    /// Fixed-width keys and states in place (`Layout`).
+    Words(Arc<Layout>, Vec<u64>),
+}
+
+impl Groups {
+    pub fn len(&self) -> usize {
+        match self {
+            Groups::Values(g) => g.len(),
+            Groups::Words(l, w) => w.len() / l.stride,
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// The groups in their order, as `GroupsIter::next` puts them.
+    pub fn into_iter(self) -> GroupsIter {
+        match self {
+            Groups::Values(g) => GroupsIter::Values(g.into_iter()),
+            Groups::Words(l, w) => GroupsIter::Words(l, w, 0),
+        }
+    }
+}
+
+/// `Groups::into_iter`.
+pub enum GroupsIter {
+    Values(std::vec::IntoIter<(Vec<Value>, Vec<Partial>)>),
+    Words(Arc<Layout>, Vec<u64>, usize),
+}
+
+impl GroupsIter {
+    /// The next group's key into `key` and states into `states` (both replaced), false
+    /// after the last.
+    pub fn next(&mut self, key: &mut Vec<Value>, states: &mut Vec<Partial>) -> bool {
+        match self {
+            GroupsIter::Values(it) => match it.next() {
+                Some((k, s)) => {
+                    *key = k;
+                    *states = s;
+                    true
+                }
+                None => false,
+            },
+            GroupsIter::Words(l, w, at) => {
+                let Some(g) = w.get(*at..*at + l.stride) else { return false };
+                *at += l.stride;
+                key.clear();
+                states.clear();
+                let nulls = g[0];
+                for (i, k) in l.keys.iter().enumerate() {
+                    key.push(if nulls >> i & 1 == 1 { Value::Null } else { k.value(g[1 + i]) });
+                }
+                let mut o = 1 + l.keys.len();
+                for s in &l.states {
+                    states.push(match s {
+                        WordState::Count => Partial::Count(g[o] as i64),
+                        WordState::SumInt => Partial::SumInt((g[o] != 0).then_some(g[o + 1] as i64)),
+                        WordState::AvgInt => Partial::AvgInt(wide(g[o], g[o + 1]), g[o + 2] as i64),
+                        WordState::SumNum => {
+                            let n = g[o + 3] as i64;
+                            Partial::SumNum(SumNum {
+                                big: None,
+                                small: (n > 0).then(|| (wide(g[o], g[o + 1]), g[o + 2] as u32)),
+                                n,
+                            })
+                        }
+                    });
+                    o += s.width();
+                }
+                true
+            }
+        }
+    }
 }
 
 /// A bpchar key's value as its groups compare it.
@@ -231,7 +441,7 @@ fn trimmed(v: Value) -> Value {
 /// appearance), each aggregated row's group in order, and the rows read (the filter's
 /// dropped ones too).
 pub struct Part {
-    pub groups: Vec<(Vec<Value>, Vec<Partial>)>,
+    pub groups: Groups,
     pub seq: Vec<u32>,
     pub read: u64,
     /// The rows aggregated.
@@ -251,7 +461,20 @@ pub enum Seg {
 pub struct Partials<'a> {
     spec: &'a Spec,
     index: hashbrown::HashMap<Box<[Value]>, u32, super::fasthash::FastState>,
-    part: Part,
+    /// The part's groups (`Groups::Values`), each aggregated row's group in order (when
+    /// `Spec::seq`), the rows read and those aggregated.
+    groups: Vec<(Vec<Value>, Vec<Partial>)>,
+    seq: Vec<u32>,
+    nread: u64,
+    rows: usize,
+    /// `Spec::words`: the groups' words (`Groups::Words`), found by their NULLs and keys'
+    /// words (`wtable`, of group numbers); a row's NULLs and key words, and its group's
+    /// states after it (`wst`, the state words).
+    words: Vec<u64>,
+    wtable: hashbrown::HashTable<u32>,
+    wkey: Vec<u64>,
+    wst: Vec<u64>,
+    hasher: super::fasthash::FastState,
     /// The keys and arguments a row computes (those that aren't columns or constants), and
     /// per argument its exact number when a numeric sum's was computed without a value
     /// (`K::num`).
@@ -350,7 +573,15 @@ impl<'a> Partials<'a> {
         Partials {
             spec,
             index: Default::default(),
-            part: Part { groups: Vec::new(), seq: Vec::new(), read: 0, rows: 0 },
+            groups: Vec::new(),
+            seq: Vec::new(),
+            nread: 0,
+            rows: 0,
+            words: Vec::new(),
+            wtable: hashbrown::HashTable::new(),
+            wkey: Vec::new(),
+            wst: Vec::new(),
+            hasher: Default::default(),
             key: Vec::with_capacity(spec.keys.len()),
             args: Vec::with_capacity(spec.aggs.len()),
             nums: Vec::with_capacity(spec.aggs.len()),
@@ -386,11 +617,11 @@ impl<'a> Partials<'a> {
             }
             self.vals.push(v);
         }
-        if self.part.groups.is_empty() {
+        if self.groups.is_empty() {
             let states = self.spec.aggs.iter().map(|(_, _, p)| p.clone()).collect();
-            self.part.groups.push((Vec::new(), states));
+            self.groups.push((Vec::new(), states));
         }
-        let states = &mut self.part.groups[0].1;
+        let states = &mut self.groups[0].1;
         // (Checked before anything changes, as `row` does.)
         for (st, v) in states.iter().zip(&self.vals) {
             let Some((x, sc)) = *v else { continue };
@@ -418,18 +649,21 @@ impl<'a> Partials<'a> {
                 _ => {}
             }
         }
-        self.part.rows += 1;
+        self.rows += 1;
         Some(())
     }
 
     /// Rows read (the scan's: what its statistics count), aggregated or not.
     pub fn read(&mut self, n: u64) {
-        self.part.read += n;
+        self.nread += n;
     }
 
     /// A row that passed the filter: aggregated (true), or left for the serial path
     /// (false; the caller ends the part first: `take`). Its columns are read in place.
     pub fn row<R: Cols + ?Sized>(&mut self, row: &R) -> bool {
+        if self.spec.words.is_some() {
+            return self.row_words(row);
+        }
         if self.fast && self.fast_row(row).is_some() {
             return true;
         }
@@ -481,7 +715,7 @@ impl<'a> Partials<'a> {
         let kr = KeyRef { keys: &self.spec.keys, trim: &self.spec.trim, row, computed: &self.key };
         // (No grouping: the one group, once it is made.)
         let g = match self.spec.keys.is_empty() {
-            true => (!self.part.groups.is_empty()).then_some(0),
+            true => (!self.groups.is_empty()).then_some(0),
             false => self.index.get(&kr).map(|g| *g as usize),
         };
         // (A state that can't take its value leaves the whole row to the serial path:
@@ -494,7 +728,7 @@ impl<'a> Partials<'a> {
                 None => arg(a, row, &self.args, &mut at),
             };
             let st = match g {
-                Some(g) => &self.part.groups[g].1[i],
+                Some(g) => &self.groups[g].1[i],
                 None => empty,
             };
             if !skipped(a, *skip, v) && !st.takes(v) {
@@ -518,8 +752,8 @@ impl<'a> Partials<'a> {
                 }
                 let key: Box<[Value]> = key.into_boxed_slice();
                 let states = self.spec.aggs.iter().map(|(_, _, p)| p.clone()).collect();
-                self.part.groups.push((own, states));
-                let g = self.part.groups.len() - 1;
+                self.groups.push((own, states));
+                let g = self.groups.len() - 1;
                 self.index.insert(key, g as u32);
                 g
             }
@@ -528,7 +762,7 @@ impl<'a> Partials<'a> {
         for (i, (a, skip, _)) in self.spec.aggs.iter().enumerate() {
             if let Some(c) = self.cols[i] {
                 if !skipped(a, *skip, stand_in(&c)) {
-                    match (&mut self.part.groups[g].1[i], c) {
+                    match (&mut self.groups[g].1[i], c) {
                         (Partial::SumNum(sn), Some((n, sc))) => sn.add_wide(n, sc),
                         (st, _) => st.add(stand_in(&c)),
                     }
@@ -539,22 +773,183 @@ impl<'a> Partials<'a> {
             let v = arg(a, row, &self.args, &mut at);
             if !skipped(a, *skip, v) {
                 let wide = if at > ci { self.nums[ci] } else { None };
-                match (&mut self.part.groups[g].1[i], wide) {
+                match (&mut self.groups[g].1[i], wide) {
                     (Partial::SumNum(sn), Some((n, sc))) => sn.add_wide(n, sc),
                     (st, _) => st.add(v),
                 }
             }
         }
         if self.spec.seq {
-            self.part.seq.push(g as u32);
+            self.seq.push(g as u32);
         }
-        self.part.rows += 1;
+        self.rows += 1;
+        true
+    }
+
+    /// `row` for a spec of words (`Layout`): its NULLs and key words into `wkey`, its
+    /// aggregates' numbers into `vals` (None: a NULL skipped), then `add_words`. False,
+    /// nothing changed: a value of another kind, or one a state doesn't take.
+    fn row_words<R: Cols + ?Sized>(&mut self, row: &R) -> bool {
+        let Some(l) = self.spec.words.clone() else { return false };
+        self.wkey.clear();
+        self.wkey.push(0);
+        for (i, (k, wk)) in self.spec.keys.iter().zip(&l.keys).enumerate() {
+            let tmp;
+            let v = match k {
+                K::Col(c) => match row.col(*c) {
+                    Some(v) => v,
+                    None => return false,
+                },
+                K::Const(v) => v,
+                _ => match k.run(row) {
+                    Some(v) => {
+                        tmp = v;
+                        &tmp
+                    }
+                    None => return false,
+                },
+            };
+            if v.is_null() {
+                self.wkey[0] |= 1 << i;
+                self.wkey.push(0);
+                continue;
+            }
+            let Some(w) = wk.word(v) else { return false };
+            self.wkey.push(w);
+        }
+        self.vals.clear();
+        for ((a, skip, _), st) in self.spec.aggs.iter().zip(&l.states) {
+            let n = match (a, st) {
+                // (count(*): a non-NULL stand-in.)
+                (None, _) => Some((1, 0)),
+                (Some(k), WordState::Count) => {
+                    let null = match k {
+                        K::Col(c) => match row.col(*c) {
+                            Some(v) => v.is_null(),
+                            None => return false,
+                        },
+                        K::Const(v) => v.is_null(),
+                        _ => match k.run(row) {
+                            Some(v) => v.is_null(),
+                            None => return false,
+                        },
+                    };
+                    (!null).then_some((1, 0))
+                }
+                (Some(k), _) => match k.num(row) {
+                    Some(n) => n,
+                    None => {
+                        let v = match k {
+                            K::Col(c) => match row.col(*c) {
+                                Some(v) => v.clone(),
+                                None => return false,
+                            },
+                            _ => match k.run(row) {
+                                Some(v) => v,
+                                None => return false,
+                            },
+                        };
+                        if v.is_null() {
+                            None
+                        } else {
+                            match super::kernel::small_num(&v) {
+                                Some(n) => Some(n),
+                                None => return false,
+                            }
+                        }
+                    }
+                },
+            };
+            // (A NULL an aggregate doesn't skip: the serial path adds it as only it can.)
+            if n.is_none() && !*skip {
+                return false;
+            }
+            self.vals.push(n);
+        }
+        self.add_words()
+    }
+
+    /// The row whose key words are in `wkey` and aggregates' numbers in `vals` added to its
+    /// group (made after the last when new), when every state takes its number; else
+    /// false, nothing changed.
+    fn add_words(&mut self) -> bool {
+        use std::hash::BuildHasher;
+        let Some(l) = self.spec.words.as_deref() else { return false };
+        let (stride, nk) = (l.stride, self.wkey.len());
+        let words = &self.words;
+        let h = self.hasher.hash_one(&self.wkey[..]);
+        let key = &self.wkey[..];
+        let g = self.wtable.find(h, |&g| words[g as usize * stride..][..nk] == *key).map(|g| *g as usize);
+        // (The group's states after the row, in `wst`: checked before anything changes.)
+        self.wst.clear();
+        match g {
+            Some(g) => self.wst.extend_from_slice(&words[g * stride + nk..(g + 1) * stride]),
+            None => self.wst.resize(stride - nk, 0),
+        }
+        let mut o = 0;
+        for (s, v) in l.states.iter().zip(&self.vals) {
+            let w = &mut self.wst[o..o + s.width()];
+            o += s.width();
+            let Some((x, sc)) = *v else { continue };
+            match s {
+                WordState::Count => w[0] += 1,
+                WordState::SumInt => {
+                    let Some(x) = i64::try_from(x).ok().filter(|_| sc == 0) else { return false };
+                    let Some(t) = (w[1] as i64).checked_add(x) else { return false };
+                    (w[0], w[1]) = (1, t as u64);
+                }
+                WordState::AvgInt => {
+                    if sc != 0 || i64::try_from(x).is_err() {
+                        return false;
+                    }
+                    let Some(t) = wide(w[0], w[1]).checked_add(x) else { return false };
+                    (w[0], w[1], w[2]) = (t as u64, (t >> 64) as u64, w[2] + 1);
+                }
+                WordState::SumNum => {
+                    // (SumNum::add_wide's sum, at the larger scale; past an i128: not taken.)
+                    let (t, ns) = if w[3] == 0 {
+                        (x, sc)
+                    } else {
+                        let (acc, s) = (wide(w[0], w[1]), w[2] as u32);
+                        let ns = s.max(sc);
+                        let r = (|| {
+                            let a = acc.checked_mul(10i128.checked_pow(ns - s)?)?;
+                            let b = x.checked_mul(10i128.checked_pow(ns - sc)?)?;
+                            a.checked_add(b)
+                        })();
+                        match r {
+                            Some(t) => (t, ns),
+                            None => return false,
+                        }
+                    };
+                    (w[0], w[1], w[2], w[3]) = (t as u64, (t >> 64) as u64, ns as u64, w[3] + 1);
+                }
+            }
+        }
+        let g = match g {
+            Some(g) => {
+                self.words[g * stride + nk..(g + 1) * stride].copy_from_slice(&self.wst);
+                g
+            }
+            None => {
+                let g = self.words.len() / stride;
+                self.words.extend_from_slice(&self.wkey);
+                self.words.extend_from_slice(&self.wst);
+                let (words, hasher) = (&self.words, &self.hasher);
+                self.wtable.insert_unique(h, g as u32, |&g| hasher.hash_one(&words[g as usize * stride..][..nk]));
+                g
+            }
+        };
+        if self.spec.seq {
+            self.seq.push(g as u32);
+        }
+        self.rows += 1;
         true
     }
 
     /// Rows aggregated in the part so far.
     pub fn rows(&self) -> usize {
-        self.part.rows
+        self.rows
     }
 
     /// Row `r` of the column batch `b` (one that passed the filter, not odd) aggregated by
@@ -585,8 +980,23 @@ impl<'a> Partials<'a> {
             }
             self.vals.push(v);
         }
+        if let Some(l) = &self.spec.words {
+            self.wkey.clear();
+            self.wkey.push(0);
+            for (i, ((c, ty), k)) in plan.keys.iter().zip(&plan.key_types).zip(&l.keys).enumerate() {
+                let Some(col) = &b.cols[*c] else { return false };
+                if col.nulls[r] {
+                    self.wkey[0] |= 1 << i;
+                    self.wkey.push(0);
+                    continue;
+                }
+                let Some(w) = col.value(b, r, ty).ok().and_then(|v| k.word(&v)) else { return false };
+                self.wkey.push(w);
+            }
+            return self.add_words();
+        }
         let g = match plan.keys.is_empty() {
-            true => (!self.part.groups.is_empty()).then_some(0),
+            true => (!self.groups.is_empty()).then_some(0),
             false => {
                 if !self.batch_key(plan, b, r) {
                     return false;
@@ -604,7 +1014,7 @@ impl<'a> Partials<'a> {
         for (i, v) in self.vals.iter().enumerate() {
             let Some((x, sc)) = *v else { continue };
             let st = match g {
-                Some(g) => &self.part.groups[g].1[i],
+                Some(g) => &self.groups[g].1[i],
                 None => &self.spec.aggs[i].2,
             };
             match st {
@@ -622,12 +1032,12 @@ impl<'a> Partials<'a> {
             Some(g) => g,
             None => {
                 let states = self.spec.aggs.iter().map(|(_, _, p)| p.clone()).collect();
-                let g = self.part.groups.len();
+                let g = self.groups.len();
                 if plan.keys.is_empty() {
-                    self.part.groups.push((Vec::new(), states));
+                    self.groups.push((Vec::new(), states));
                 } else {
                     let Some((key, own)) = self.batch_values(plan, b, r) else { return false };
-                    self.part.groups.push((own, states));
+                    self.groups.push((own, states));
                     self.index.insert(key.into_boxed_slice(), g as u32);
                 }
                 g
@@ -636,7 +1046,7 @@ impl<'a> Partials<'a> {
         if !plan.keys.is_empty() && !self.bidx.contains_key(&self.bkey[..]) {
             self.bidx.insert(self.bkey.as_slice().into(), g as u32);
         }
-        for (st, v) in self.part.groups[g].1.iter_mut().zip(&self.vals) {
+        for (st, v) in self.groups[g].1.iter_mut().zip(&self.vals) {
             let Some((x, sc)) = *v else { continue };
             match st {
                 Partial::Count(n) => *n += 1,
@@ -650,9 +1060,9 @@ impl<'a> Partials<'a> {
             }
         }
         if self.spec.seq {
-            self.part.seq.push(g as u32);
+            self.seq.push(g as u32);
         }
-        self.part.rows += 1;
+        self.rows += 1;
         true
     }
 
@@ -706,11 +1116,18 @@ impl<'a> Partials<'a> {
 
     /// The part so far (the next one starts empty).
     pub fn take(&mut self) -> Option<Part> {
-        if self.part.read == 0 && self.part.rows == 0 {
+        if self.nread == 0 && self.rows == 0 {
             return None;
         }
         self.index.clear();
         self.bidx.clear();
-        Some(std::mem::replace(&mut self.part, Part { groups: Vec::new(), seq: Vec::new(), read: 0, rows: 0 }))
+        self.wtable.clear();
+        let groups = match &self.spec.words {
+            Some(l) => Groups::Words(l.clone(), std::mem::take(&mut self.words)),
+            None => Groups::Values(std::mem::take(&mut self.groups)),
+        };
+        let part = Part { groups, seq: std::mem::take(&mut self.seq), read: self.nread, rows: self.rows };
+        (self.nread, self.rows) = (0, 0);
+        Some(part)
     }
 }

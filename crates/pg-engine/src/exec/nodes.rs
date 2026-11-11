@@ -2701,7 +2701,7 @@ mod projection_tests {
             let row = vec![Value::Int4(7), Value::text("discard"), Value::Null];
             let ptr = row.as_ptr();
             let part = super::super::partial::Part {
-                groups: vec![(vec![Value::Int4(9)], vec![super::super::partial::Partial::Count(3)])],
+                groups: super::super::partial::Groups::Values(vec![(vec![Value::Int4(9)], vec![super::super::partial::Partial::Count(3)])]),
                 seq: vec![0], read: 5, rows: 3,
             };
             let mut p = ProjectNode {
@@ -2712,8 +2712,9 @@ mod projection_tests {
             match projected_item(&mut p, ctx).unwrap().unwrap() {
                 Item::Part(part) => {
                     assert_eq!((part.read, part.rows, part.seq), (5, 3, vec![0]));
-                    assert_eq!(part.groups[0].0, vec![Value::Int4(9)]);
-                    assert!(matches!(part.groups[0].1.as_slice(), [super::super::partial::Partial::Count(3)]));
+                    let super::super::partial::Groups::Values(g) = &part.groups else { panic!("groups changed") };
+                    assert_eq!(g[0].0, vec![Value::Int4(9)]);
+                    assert!(matches!(g[0].1.as_slice(), [super::super::partial::Partial::Count(3)]));
                 }
                 _ => panic!("part was changed to a row"),
             }

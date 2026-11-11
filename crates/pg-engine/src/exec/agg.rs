@@ -2855,7 +2855,8 @@ impl AggNode {
             };
             aggs.push((arg, a.def.skip_nulls, empty));
         }
-        let spec = Arc::new(super::partial::Spec { keys, trim, aggs, seq });
+        let key_types: Vec<_> = self.groups.iter().map(|g| g.ty()).collect();
+        let spec = Arc::new(super::partial::Spec::new(keys, trim, aggs, seq, &key_types));
         Ok(match proj {
             Some(_) => input.pipeline_projected(spec, ctx)?,
             None => input.pipeline(Vec::new(), Some(spec), ctx)?,
@@ -3104,6 +3105,8 @@ impl AggNode {
             }
             // (The key is made in one vector, copied only for a new group.)
             let mut key: Vec<Value> = Vec::with_capacity(self.groups.len());
+            // (A part's group: its key and states, `GroupsIter::next`.)
+            let (mut part_key, mut part_states) = (Vec::new(), Vec::new());
             loop {
             loop {
                 let row = match parts {
@@ -3115,7 +3118,9 @@ impl AggNode {
                             // the part's rows come before the later ones), each one's
                             // states added as it is found; then each row's lookup.
                             let mut map = Vec::with_capacity(if hash_order { p.groups.len() } else { 0 });
-                            for (k, st) in p.groups {
+                            let mut it = p.groups.into_iter();
+                            while it.next(&mut part_key, &mut part_states) {
+                                let k = &part_key;
                                 // (A single integer key is looked up by its number first.)
                                 let int = match (nondet, &k[..]) {
                                     (false, [v @ (Value::Int2(_) | Value::Int4(_) | Value::Int8(_))]) => v.as_i64(),
@@ -3126,17 +3131,17 @@ impl AggNode {
                                     // (The key compared is the key itself unless normalised.)
                                     None => {
                                         let gi = if nondet {
-                                            let hk = group_key(&k, &colls);
+                                            let hk = group_key(k, &colls);
                                             let h = index.hash(&hk);
                                             match find_group!(h, &hk) {
                                                 Some(i) => i,
-                                                None => new_group!(h, k, hk),
+                                                None => new_group!(h, k.clone(), hk),
                                             }
                                         } else {
-                                            let h = index.hash(&k);
-                                            match find_group!(h, &k) {
+                                            let h = index.hash(k);
+                                            match find_group!(h, k) {
                                                 Some(i) => i,
-                                                None => new_group!(h, k, Vec::new()),
+                                                None => new_group!(h, k.clone(), Vec::new()),
                                             }
                                         };
                                         if let Some(x) = int {
@@ -3145,7 +3150,7 @@ impl AggNode {
                                         gi
                                     }
                                 };
-                                for (a, x) in st.into_iter().enumerate() {
+                                for (a, x) in part_states.drain(..).enumerate() {
                                     match x {
                                         super::partial::Partial::Count(n) => {
                                             if counts.len() < groups.len() * naggs {
@@ -3651,15 +3656,16 @@ impl AggNode {
                     Some(super::pipe::Item::Row(row, _)) => Some(row),
                     Some(super::pipe::Item::Part(p)) => {
                         // (Its groups in order; the first may go on with the open one.)
-                        for (k, st) in p.groups {
+                        let (mut it, mut k, mut st) = (p.groups.into_iter(), Vec::new(), Vec::new());
+                        while it.next(&mut k, &mut st) {
                             if s.open.as_ref().is_none_or(|(open, _)| *open != k) {
                                 let states = self.states(&k, ctx)?;
-                                if let Some(g) = s.open.replace((k, states)) {
+                                if let Some(g) = s.open.replace((std::mem::take(&mut k), states)) {
                                     s.ready.push_back(g);
                                 }
                             }
                             if let Some((_, states)) = s.open.as_mut() {
-                                for (a, x) in states.iter_mut().zip(st) {
+                                for (a, x) in states.iter_mut().zip(st.drain(..)) {
                                     a.acc.merge(x)?;
                                 }
                             }
