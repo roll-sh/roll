@@ -1659,9 +1659,25 @@ pub(crate) fn parse_copy_data(
     } = st;
     let plain = *plain;
     let ctx_line = |line: usize, raw: &str| format!("COPY {}, line {line}: \"{raw}\"", t.name);
+    // (Lines without escapes of a plain text COPY: `plain_values`.)
+    let direct = plain && !f.csv && f.default.is_none() && f.null.contains('\\') && c.ncols > 0 && c.target.len() == c.ncols;
     'records: for (lineno, (raw, rec)) in records.into_iter().enumerate() {
         let lineno = first + lineno;
         let line = lineno + 1;
+        let rec = match rec {
+            Rec::Fields(v) => v,
+            Rec::Plain(text) => {
+                if direct
+                    && !(lineno == 0 && f.header)
+                    && let Some(vals) = plain_values(text, c, fmt)
+                {
+                    rows.push(CopyRow::Values(vals));
+                    lines.push((line, raw));
+                    continue;
+                }
+                plain_fields(text, f)
+            }
+        };
         if lineno == 0 && f.header {
             if f.header_match {
                 if rec.len() != c.ncols {
@@ -1913,7 +1929,36 @@ impl InField<'_> {
     }
 }
 
-type Records<'a> = Vec<(String, Vec<InField<'a>>)>;
+type Records<'a> = Vec<(String, Rec<'a>)>;
+
+/// A record's fields: split, or (a text-format line without escapes) the line itself, its
+/// fields each its own text (`plain_fields`).
+enum Rec<'a> {
+    Fields(Vec<InField<'a>>),
+    Plain(&'a str),
+}
+
+/// A text-format line without escapes, as fields borrowing it.
+fn plain_fields<'a>(line: &'a str, f: &CopyFormat) -> Vec<InField<'a>> {
+    line.split(f.delimiter)
+        .map(|s| InField {
+            value: Cow::Borrowed(s),
+            raw: Some(Cow::Borrowed(s)),
+        })
+        .collect()
+}
+
+/// A plain text COPY's line without escapes, when it gives every column a value that
+/// parses: the values, as the record loop makes them (no field can be the NULL marker, which
+/// has a backslash, or a DEFAULT one, which this COPY hasn't). None: the loop's general path.
+fn plain_values(line: &str, c: &CopyIn, fmt: &crate::types::text::FormatCtx) -> Option<Vec<Value>> {
+    let mut vals = Vec::with_capacity(c.ncols);
+    let mut fields = line.split(c.format.delimiter);
+    for &col in &c.target {
+        vals.push(parse_value(fields.next()?, &c.table.columns[col].ty, fmt).ok()?);
+    }
+    fields.next().is_none().then_some(vals)
+}
 
 /// Columns a COPY reads or writes; generated columns can't be listed.
 /// CopyGetAttnums over a view's columns (DoCopy resolves them before BeginCopyTo refuses a
@@ -2095,14 +2140,9 @@ fn split_text<'a>(data: &'a str, f: &CopyFormat, table: &str, first: usize) -> R
         }
         // A line without escapes: each field is its own text, borrowed.
         let fields = if !line.as_bytes().contains(&b'\\') {
-            line.split(f.delimiter)
-                .map(|s| InField {
-                    value: Cow::Borrowed(s),
-                    raw: Some(Cow::Borrowed(s)),
-                })
-                .collect()
+            Rec::Plain(line)
         } else {
-            split_text_escaped(line, f, table, lineno)?
+            Rec::Fields(split_text_escaped(line, f, table, lineno)?)
         };
         out.push((line.to_string(), fields));
     }
@@ -2232,7 +2272,7 @@ fn split_csv(data: &str, f: &CopyFormat) -> (Records<'static>, Option<String>) {
             '\r' if chars.peek() == Some(&'\n') => {}
             '\n' | '\r' => {
                 finish_field(&mut cur, &mut quoted, &mut fields);
-                out.push((std::mem::take(&mut line), std::mem::take(&mut fields)));
+                out.push((std::mem::take(&mut line), Rec::Fields(std::mem::take(&mut fields))));
             }
             c => {
                 line.push(c);
@@ -2245,7 +2285,7 @@ fn split_csv(data: &str, f: &CopyFormat) -> (Records<'static>, Option<String>) {
     }
     if !cur.is_empty() || !fields.is_empty() || quoted {
         finish_field(&mut cur, &mut quoted, &mut fields);
-        out.push((line, fields));
+        out.push((line, Rec::Fields(fields)));
     }
     (out, None)
 }
