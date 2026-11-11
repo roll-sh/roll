@@ -5304,6 +5304,41 @@ impl Node for ScanNode {
         }
     }
 
+    /// A plain index scan's rows (`picks`) as `next` returns them, each offered as its stored
+    /// values (`pick`). Its parallel workers are tried first, as `next` tries them (None when
+    /// they run: `next` reads their rows).
+    fn each_picked(&mut self, f: &mut dyn FnMut(super::Stored<'_>) -> Result<bool>, ctx: &ExecCtx) -> Result<Option<()>> {
+        if !self.picks(ctx) {
+            return Ok(None);
+        }
+        if !self.par_tried {
+            self.par_tried = true;
+            if self.sorted.is_none() && !self.streamed {
+                self.par = self.start_parallel(None, Vec::new(), super::Computed::default(), ctx)?;
+            }
+        }
+        if self.par.is_some() {
+            return Ok(None);
+        }
+        // (A copy: `emit`, for a row `pick` can't offer as stored, reads the scan's own.)
+        let cols = self.proj.clone().expect("a projection");
+        loop {
+            ctx.check()?;
+            if !self.next_raw_ref(ctx)? {
+                return Ok(Some(()));
+            }
+            // (The row borrowed from the batch while it is offered, as `next` makes its rows.)
+            let (rb, one) = (std::mem::take(&mut self.rb), self.one.take());
+            let (key, bytes) = match &one {
+                Some((k, v)) => (&k[..], &v[..]),
+                None => rb.peek().expect("a row handed out"),
+            };
+            let r = self.pick(key, bytes, &cols, f, ctx);
+            self.rb = rb;
+            r?;
+        }
+    }
+
     fn key_order(&self) -> Option<Vec<(usize, bool, bool)>> {
         use crate::catalog::IndexKey;
         let p = &self.plan;
@@ -5654,20 +5689,87 @@ impl Node for ScanNode {
 impl ScanNode {
     /// What `next` returns for the stored row `bytes` under `key`: counted, read, checked
     /// against the filter and locked (None: skipped).
-    fn emit(&mut self, key: &[u8], bytes: &[u8], ctx: &ExecCtx) -> Result<Option<Row>> {
+    /// A row handed out, counted as its scan counts it.
+    fn count_row(&self, ctx: &ExecCtx) {
         match self.stat {
             StatTarget::Off => {}
             StatTarget::Seq(t) => super::pgstat::count_returned(ctx, t, 1),
             StatTarget::Index(ix) => super::pgstat::count_index_tuple(ctx, ix),
             StatTarget::Fetched(t) => super::pgstat::count_fetched(ctx, t, 1),
         }
+    }
+
+    /// The row under `key` (stored with the heap TID `tid`) fetched, for the heap's model:
+    /// an index scan's or a scan by keys'.
+    fn note_fetch(&mut self, key: &[u8], tid: Option<crate::catalog::heapsim::Tid>, ctx: &ExecCtx) {
         if (self.plan.index.is_some() || self.keys.is_some()) && self.only.is_none() {
             // None also clears the cached block when all-visible pages need no fetch.
             let t = self.plan.table.oid;
             if let Some(f) = self.fetcher.get_or_insert_with(|| super::sizing::Fetcher::new(t, ctx)) {
-                f.fetched_at(key, stored_tid(bytes));
+                f.fetched_at(key, tid);
             }
         }
+    }
+
+    /// `Node::each_picked` of a plain index scan: whether this scan's rows can go out as
+    /// their stored values (`Stored::Cols`), decided once per execution. Only where `emit`
+    /// would do nothing per row but count it, note its fetch and decode its columns `proj`:
+    /// no filter it doesn't imply, no lock, mark, system or key columns, LIMIT or
+    /// instrumentation, no predicate locks, an index scan of the table's rows by reference.
+    fn picks(&self, ctx: &ExecCtx) -> bool {
+        let p = &self.plan;
+        self.proj.is_some()
+            && self.emitted == 0
+            && self.par.is_none()
+            && self.secondary
+            && !self.ios
+            && self.ios_cols.is_none()
+            && !self.point
+            && self.am.is_none()
+            && self.keys.is_none()
+            && self.only.is_none()
+            && self.sample.is_none()
+            && !ctx.instrumented()
+            && p.limit.is_none()
+            && (p.filter.is_none() || self.implied)
+            && !p.with_key
+            && p.mark.is_none()
+            && !p.sys
+            && p.index.is_some()
+            && matches!(p.access, Access::Index { only: false, .. })
+            && !predicate_locked(&p.table, ctx)
+            && !p.table.columns.iter().any(|c| c.virtual_gen)
+    }
+
+    /// One row of `each_picked` (`key`, stored as `bytes`) offered to `f`: its stored values
+    /// with the columns `proj` (`Stored::Cols`), else decoded as `emit` makes it.
+    fn pick(&mut self, key: &[u8], bytes: &[u8], cols: &[u32], f: &mut dyn FnMut(super::Stored<'_>) -> Result<bool>, ctx: &ExecCtx) -> Result<()> {
+        if (self.toast.is_some() && crate::storage::toast::has_external(bytes)) || super::sizing::tracked(self.plan.table.oid) {
+            if let Some(row) = self.emit(key, bytes, ctx)? {
+                f(super::Stored::Row(row))?;
+            }
+            return Ok(());
+        }
+        self.count_row(ctx);
+        let (_, tid, data) = split_header_tid(bytes)?;
+        self.note_fetch(key, tid, ctx);
+        // (A filter the key range applies exactly holds: checked again in debug builds.)
+        #[cfg(debug_assertions)]
+        if let Some(flt) = &self.plan.filter {
+            let whole = self.full_row(key, bytes, ctx)?;
+            assert!(eval_bool(flt, &whole, ctx).unwrap_or(true), "a row outside its index range");
+        }
+        self.emitted += 1;
+        if !f(super::Stored::Cols(data, cols))? {
+            let row = self.projected_row(key, bytes, cols, ctx)?;
+            f(super::Stored::Row(row))?;
+        }
+        Ok(())
+    }
+
+    fn emit(&mut self, key: &[u8], bytes: &[u8], ctx: &ExecCtx) -> Result<Option<Row>> {
+        self.count_row(ctx);
+        self.note_fetch(key, stored_tid(bytes), ctx);
         if self.ios {
             let counted = match &mut self.ios_entries {
                 Some(e) => e.upto_row(&self.plan.table, key, ctx),

@@ -4348,6 +4348,7 @@ impl InsertNode {
                         return Ok(false);
                     }
                 }
+                super::Stored::Cols(..) => return Ok(false),
                 super::Stored::Row(r) => {
                     Self::plain_row(plan, plain_counts, r, ctx)?;
                 }

@@ -2211,7 +2211,23 @@ impl Session {
                 } else if streams && fetch > 0 {
                     suspended = Some(run_suspendable(ctx, &bq.plan, params, fetch, &mut put)?);
                 } else if streams && let Some(k) = kept.take() {
-                    ran = crate::exec::run_each_kept(&bq.plan, k, ctx, |r| put(r, ctx))?;
+                    // (Rows a plain index scan gives as stored go out from their stored
+                    // values where the sink can send them so: `RowSink::row_stored`.)
+                    ran = crate::exec::run_each_kept_picked(&bq.plan, k, ctx, |s| {
+                        let r = match (feed.as_mut(), s) {
+                            (Some(f), crate::exec::Stored::Cols(data, picked)) => f.row_stored(ctx, data, picked),
+                            (Some(f), crate::exec::Stored::Row(r)) => f.row(ctx, r).map(|()| true),
+                            (None, crate::exec::Stored::Row(r)) => {
+                                made.push(r);
+                                Ok(true)
+                            }
+                            (None, _) | (Some(_), crate::exec::Stored::Bytes(_)) => Ok(false),
+                        };
+                        if let Some(f) = feed.as_ref() {
+                            sent = Some(f.sent);
+                        }
+                        r
+                    })?;
                 } else if streams {
                     crate::exec::run_each(&bq.plan, ctx, |r| put(r, ctx))?;
                 } else if let Some(k) = kept.take() {

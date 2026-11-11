@@ -958,6 +958,7 @@ impl Session {
                                     Some(line) => line,
                                     None => return Ok(false),
                                 },
+                                crate::exec::Stored::Cols(..) => return Ok(false),
                                 crate::exec::Stored::Row(r) => lines.row(&r)?,
                             };
                             n += 1;

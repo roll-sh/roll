@@ -105,6 +105,9 @@ impl TopK {
 pub enum Stored<'a> {
     /// As stored (header and values, `storage::row`).
     Bytes(&'a [u8]),
+    /// A stored row's values (after its header, `storage::row`), the row being its columns
+    /// `cols` in this order (`Node::each_picked`).
+    Cols(&'a [u8], &'a [u32]),
     /// Decoded, as `next` makes it.
     Row(Row),
 }
@@ -126,6 +129,15 @@ pub trait Node {
     /// doesn't take (false) comes again decoded (`Stored::Row`). None: this node can't, and
     /// nothing was read.
     fn each_stored(&mut self, _f: &mut dyn FnMut(Stored<'_>) -> Result<bool>, _ctx: &ExecCtx) -> Result<Option<()>> {
+        Ok(None)
+    }
+
+    /// The rows `next` would return, in its order, handed to `f` as the stored values of the
+    /// columns they are (`Stored::Cols`) by a node that can (a plain index scan, and the
+    /// projections over one that keep its columns as they are: what a query's rows go to the
+    /// client from); a row `f` doesn't take (false) comes again decoded (`Stored::Row`), as
+    /// one the node can't offer that way does. None: this node can't, and nothing was read.
+    fn each_picked(&mut self, _f: &mut dyn FnMut(Stored<'_>) -> Result<bool>, _ctx: &ExecCtx) -> Result<Option<()>> {
         Ok(None)
     }
 
@@ -1849,6 +1861,23 @@ pub fn run_each_kept(plan: &Arc<Plan>, kept: Option<BoxNode>, ctx: &ExecCtx, mut
         let mut node = reopen(plan, kept, ctx)?;
         while let Some(r) = node.next(ctx)? {
             f(r)?;
+        }
+        Ok(keep(node, ctx))
+    }))
+}
+
+/// `run_each_kept`, the rows offered to `f` as their stored values first
+/// (`Node::each_picked`), else each as `next` makes it (`f`'s answer to a decoded row is
+/// ignored).
+pub fn run_each_kept_picked(plan: &Arc<Plan>, kept: Option<BoxNode>, ctx: &ExecCtx, mut f: impl FnMut(Stored<'_>) -> Result<bool>) -> Result<Option<BoxNode>> {
+    ctx.temp_cleanup.run(|| ctx.statement(|| {
+        let mut node = reopen(plan, kept, ctx)?;
+        // (The rows of a tree that can't, as `run_each_kept` hands them out: `f` called
+        // directly.)
+        if node.each_picked(&mut f, ctx)?.is_none() {
+            while let Some(r) = node.next(ctx)? {
+                f(Stored::Row(r))?;
+            }
         }
         Ok(keep(node, ctx))
     }))

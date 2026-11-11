@@ -25,6 +25,13 @@ pub trait RowSink {
     /// (an output function reads them when it is called). An error fails the statement.
     fn row(&mut self, row: Row, cols: &[OutCol], fmt: &FormatCtx) -> Result<()>;
 
+    /// One row as its stored values (`exec::Stored::Cols`: `data` a stored row's values, the
+    /// row its columns `picked`), sent as `row` would send it decoded. False: this sink
+    /// can't (nothing sent; the row comes again decoded).
+    fn row_stored(&mut self, _data: &[u8], _picked: &[u32]) -> Result<bool> {
+        Ok(false)
+    }
+
     /// Whether COPY TO STDOUT's data goes here as it is made (`copy_begin` / `copy_data` /
     /// `copy_end`); false: it is collected into `Outcome::CopyOut`.
     fn takes_copy(&self) -> bool {
@@ -84,6 +91,16 @@ impl<'a> Feed<'a> {
         }
         self.sent += 1;
         self.sink.row(row, self.cols, self.fmt.as_ref().unwrap())
+    }
+}
+
+impl Feed<'_> {
+    /// `row` of a row as its stored values (`RowSink::row_stored`; false: not sent).
+    pub fn row_stored(&mut self, ctx: &ExecCtx, data: &[u8], picked: &[u32]) -> Result<bool> {
+        ctx.check()?;
+        let sent = self.sink.row_stored(data, picked)?;
+        self.sent += usize::from(sent);
+        Ok(sent)
     }
 }
 

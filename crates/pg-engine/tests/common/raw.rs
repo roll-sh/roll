@@ -50,6 +50,36 @@ impl Raw {
         self.send(b'B', format!("{portal}\0{stmt}\0\0\0\0\0\0\0").as_bytes());
     }
 
+    /// Bind with text parameters `params` and the result formats `formats`.
+    pub fn bind_with(&mut self, portal: &str, stmt: &str, params: &[&str], formats: &[i16]) {
+        let mut b = format!("{portal}\0{stmt}\0").into_bytes();
+        b.extend_from_slice(&0i16.to_be_bytes());
+        b.extend_from_slice(&(params.len() as i16).to_be_bytes());
+        for v in params {
+            b.extend_from_slice(&(v.len() as i32).to_be_bytes());
+            b.extend_from_slice(v.as_bytes());
+        }
+        b.extend_from_slice(&(formats.len() as i16).to_be_bytes());
+        for f in formats {
+            b.extend_from_slice(&f.to_be_bytes());
+        }
+        self.send(b'B', &b);
+    }
+
+    /// Sync, and the messages up to ReadyForQuery as they came (type and body).
+    pub fn sync_messages(&mut self) -> Vec<(u8, Vec<u8>)> {
+        self.send(b'S', b"");
+        let mut out = Vec::new();
+        loop {
+            let (t, b) = self.message();
+            if t == b'Z' {
+                self.status = b[0];
+                return out;
+            }
+            out.push((t, b));
+        }
+    }
+
     pub fn describe(&mut self, kind: u8, name: &str) {
         let mut b = vec![kind];
         b.extend_from_slice(format!("{name}\0").as_bytes());

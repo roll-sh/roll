@@ -2948,6 +2948,18 @@ impl Node for ProjectNode {
         )
     }
 
+    /// (Only when the input makes the projection's rows itself, `passed`: decided as `next`
+    /// decides it first.)
+    fn each_picked(&mut self, f: &mut dyn FnMut(super::Stored<'_>) -> Result<bool>, ctx: &ExecCtx) -> Result<Option<()>> {
+        if !self.tried {
+            self.compute_below(ctx)?;
+        }
+        if !self.passed {
+            return Ok(None);
+        }
+        self.input.each_picked(f, ctx)
+    }
+
     fn projection(&self) -> Option<&[Expr]> {
         (!self.tried).then_some(&self.exprs[..])
     }

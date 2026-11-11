@@ -2027,6 +2027,71 @@ fn put_data_row_fixed(b: &mut BytesMut, row: &[crate::types::Value], formats: &[
     true
 }
 
+/// `put_data_row_fixed` of a row as its stored values (`data`, `storage::row`: the row is
+/// its columns `picked`, ascending), each null or of fixed width, made from the stored bytes
+/// without decoding them: the bytes `put_data_row_fixed` writes for the row decoded. False:
+/// another row (nothing written).
+fn put_data_row_stored(b: &mut BytesMut, data: &[u8], picked: &[u32], formats: &[i16]) -> Result<bool> {
+    use crate::storage::row::tag;
+    let mut m = [0u8; 256];
+    let mut at = 7;
+    let mut pos = 0;
+    let stored = crate::storage::sst::get_varint(data, &mut pos)? as usize;
+    let mut col = 0;
+    for (i, &c) in picked.iter().enumerate() {
+        let c = c as usize;
+        // (A column added after the row was stored, or one before the last: decoded.)
+        if c >= stored || c < col {
+            return Ok(false);
+        }
+        while col < c {
+            crate::storage::row::skip_value(data, &mut pos)?;
+            col += 1;
+        }
+        let t = *data.get(pos).ok_or_else(|| crate::error::internal("truncated row"))?;
+        let n = match t {
+            tag::NULL => {
+                if at + 4 > m.len() {
+                    return Ok(false);
+                }
+                m[at..at + 4].copy_from_slice(&(-1i32).to_be_bytes());
+                at += 4;
+                pos += 1;
+                col += 1;
+                continue;
+            }
+            _ if result_format(formats, i) != 1 => return Ok(false),
+            tag::FALSE | tag::TRUE => 0,
+            tag::INT2 => 2,
+            tag::INT4 | tag::FLOAT4 | tag::OID => 4,
+            tag::INT8 | tag::FLOAT8 => 8,
+            _ => return Ok(false),
+        };
+        let end = at + 4 + n.max(1);
+        if end > m.len() {
+            return Ok(false);
+        }
+        let v = data.get(pos + 1..pos + 1 + n).ok_or_else(|| crate::error::internal("truncated row"))?;
+        m[at..at + 4].copy_from_slice(&(n.max(1) as i32).to_be_bytes());
+        if n == 0 {
+            m[at + 4] = u8::from(t == tag::TRUE);
+        } else {
+            // (Stored little-endian, sent big-endian.)
+            for (d, s) in m[at + 4..end].iter_mut().zip(v.iter().rev()) {
+                *d = *s;
+            }
+        }
+        at = end;
+        pos += 1 + n;
+        col += 1;
+    }
+    m[0] = b'D';
+    m[1..5].copy_from_slice(&((at - 1) as i32).to_be_bytes());
+    m[5..7].copy_from_slice(&(picked.len() as i16).to_be_bytes());
+    b.put_slice(&m[..at]);
+    Ok(true)
+}
+
 /// The text output of the commonest values written straight into the message (what
 /// `format_value` would make, without a String per value): text, integers, booleans and
 /// plain oids for a UTF-8 client, numerics for any. False: not one of those.
@@ -2134,6 +2199,17 @@ impl crate::session::RowSink for WireSink {
         let r = self.put(|b| put_data_row(b, &row, cols, &formats, fmt));
         self.formats = formats;
         r
+    }
+
+    fn row_stored(&mut self, data: &[u8], picked: &[u32]) -> Result<bool> {
+        let formats = std::mem::take(&mut self.formats);
+        let mut sent = false;
+        let r = self.put(|b| {
+            sent = put_data_row_stored(b, data, picked, &formats)?;
+            Ok(())
+        });
+        self.formats = formats;
+        r.map(|()| sent)
     }
 
     fn takes_copy(&self) -> bool {

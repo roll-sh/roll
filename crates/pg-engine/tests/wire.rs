@@ -1885,6 +1885,47 @@ fn cursors_are_portals() {
     s.engine.shutdown();
 }
 
+/// A kept index scan's rows sent from their stored values (`RowSink::row_stored`) are the
+/// bytes the decoded rows make: each statement's DataRows and CommandComplete, executed again
+/// and again, in binary, text and mixed result formats, as those of the same statement under a
+/// LIMIT (whose rows are decoded first). Fixed-width values, NULLs, a column added since the
+/// rows were stored, text, a repeated column and columns out of their stored order.
+#[test]
+fn stored_rows_go_out_as_decoded_ones() {
+    let s = server(AuthMethod::Trust);
+    let mut c = raw::Raw::connect(&s.addr, "postgres");
+    c.query(
+        "CREATE TABLE sr (id int PRIMARY KEY, i2 int2, i8 int8, f4 real, f8 float8, b bool, o oid, t text, n int);
+         INSERT INTO sr SELECT g, g::int2, g * 1000003, g / 7.0, g / 3.0, g % 2 = 0, g + 7, 'v' || g,
+           CASE WHEN g % 5 = 0 THEN NULL ELSE -g END FROM generate_series(1, 300) g;
+         ANALYZE sr;
+         ALTER TABLE sr ADD COLUMN late int DEFAULT 77;
+         INSERT INTO sr VALUES (301, 1, 2, 3, 4, true, 5, 'new', NULL, 9)",
+    );
+    let lists = ["id, i2, i8, f4, f8, b, o, n", "n, id", "id, late", "id, t", "id, id", "i8"];
+    for (i, cols) in lists.iter().enumerate() {
+        let q = format!("SELECT {cols} FROM sr WHERE id BETWEEN $1 AND $1 + 12 ORDER BY id");
+        c.parse(&format!("s{i}"), &q);
+        c.parse(&format!("l{i}"), &format!("{q} LIMIT 1000"));
+        assert_eq!(c.sync(), Vec::<String>::new());
+        // (Two result formats for the two-column lists.)
+        let two = cols.matches(',').count() == 1;
+        for formats in [&[1][..], &[0], &[1, 0], &[0, 1]].into_iter().filter(|f| f.len() == 1 || two) {
+            for v in ["1", "5", "295", "1", "290"] {
+                let mut got = Vec::new();
+                for stmt in [format!("s{i}"), format!("l{i}")] {
+                    c.bind_with("", &stmt, &[v], formats);
+                    c.execute("", 0);
+                    got.push(c.sync_messages());
+                }
+                assert_eq!(got[0], got[1], "{q} ({v}, formats {formats:?})");
+                assert!(got[0].iter().any(|(t, _)| *t == b'D'), "{q} ({v}): rows");
+            }
+        }
+    }
+    s.engine.shutdown();
+}
+
 /// exec_parse_message: a parameter nothing gives a type (an "any" argument, IS NULL, a ROW()
 /// field) is refused; the select list and operators type theirs.
 #[test]
