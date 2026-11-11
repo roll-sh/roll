@@ -2,9 +2,10 @@
 //! in its own schema, `mq`. Writes are serialised through a single version row, so the change log
 //! is gap-free and every node can follow it in order.
 //!
-//! TLS follows the URL's `sslmode`: `disable` never, `prefer` (the default) when the server
-//! offers it, `require` always. Certificates are always verified, against the system roots plus
-//! the CA bundle given to [`PgMeta::connect_with`] (RDS needs its own bundle). A lost
+//! TLS follows the URL's `sslmode` as [`code_sql::pg_config`] reads it: `disable` never, `prefer`
+//! (the default) when the server offers it, `require`, `verify-ca` and `verify-full` always.
+//! Certificates are always verified, against the system roots plus the CA bundle given to
+//! [`PgMeta::connect_with`] (RDS needs its own bundle) and the URL's `sslrootcert`. A lost
 //! connection (a Postgres restart, a Multi-AZ failover) is re-established on the next call.
 
 use async_trait::async_trait;
@@ -13,12 +14,8 @@ use serde_json::Value;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::{Mutex, MutexGuard};
-use tokio_postgres::config::SslMode;
 use tokio_postgres::{Client, NoTls};
 use tokio_postgres_rustls::MakeRustlsConnect;
-use tokio_rustls::rustls;
-use tokio_rustls::rustls::pki_types::CertificateDer;
-use tokio_rustls::rustls::pki_types::pem::PemObject;
 use tracing::{info, warn};
 
 pub struct PgMeta {
@@ -56,11 +53,7 @@ impl PgMeta {
 
     /// [`PgMeta::connect`], also trusting the CA certificates in `ca` (PEM).
     pub async fn connect_with(url: &str, ca: Option<&Path>) -> anyhow::Result<Arc<Self>> {
-        let config: tokio_postgres::Config = url.parse()?;
-        let tls = match config.get_ssl_mode() {
-            SslMode::Disable => None,
-            _ => Some(MakeRustlsConnect::new(tls_config(ca)?)),
-        };
+        let (config, tls) = code_sql::pg_config(url, ca)?;
         let client = open(&config, tls.as_ref()).await?;
         // Nodes starting together would race their `IF NOT EXISTS` statements (Postgres fails the
         // loser on a catalog unique index): they take turns on a session advisory lock. Writers
@@ -159,21 +152,6 @@ async fn open(config: &tokio_postgres::Config, tls: Option<&MakeRustlsConnect>) 
     })
 }
 
-fn tls_config(ca: Option<&Path>) -> anyhow::Result<rustls::ClientConfig> {
-    use anyhow::Context;
-    let mut roots = rustls::RootCertStore::empty();
-    for c in rustls_native_certs::load_native_certs().certs {
-        let _ = roots.add(c);
-    }
-    if let Some(ca) = ca {
-        for c in CertificateDer::pem_file_iter(ca).with_context(|| format!("{}: reading CA certificates", ca.display()))? {
-            roots.add(c.with_context(|| format!("{}: bad CA certificate", ca.display()))?)?;
-        }
-    }
-    let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
-    Ok(rustls::ClientConfig::builder_with_provider(provider).with_safe_default_protocol_versions()?.with_root_certificates(roots).with_no_client_auth())
-}
-
 fn redact(url: &str) -> String {
     match (url.find("://"), url.rfind('@')) {
         (Some(s), Some(at)) if at > s => format!("{}://…@{}", &url[..s], &url[at + 1..]),
@@ -239,6 +217,7 @@ impl MetaStore for PgMeta {
 mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio_rustls::rustls;
 
     /// A fake server that records how the client starts: the SSLRequest, then (over TLS when
     /// it said yes) the startup message.
@@ -310,6 +289,12 @@ mod tests {
         let _ = PgMeta::connect_with(&url(port, "require"), Some(&ca)).await;
         let (asked, startup) = server.await.unwrap();
         assert!(asked && sent_user(&startup), "startup over TLS: {startup:?}");
+
+        // A managed Postgres URL (PlanetScale, Neon): verify-full, the CA named in the URL.
+        let (port, server) = fake_server(Some(acceptor.clone())).await;
+        let _ = PgMeta::connect_with(&format!("{}&sslrootcert={}", url(port, "verify-full"), ca.display()), None).await;
+        let (asked, startup) = server.await.unwrap();
+        assert!(asked && sent_user(&startup), "verify-full with sslrootcert: {startup:?}");
 
         // An untrusted server certificate is refused before anything is sent.
         let (port, server) = fake_server(Some(acceptor)).await;

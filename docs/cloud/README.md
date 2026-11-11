@@ -76,7 +76,9 @@ written once in SQLite's dialect), as roll code's did.
 - In the cloud it's a roll postgres database on the fleet: lease `system:pg`, always on, a hot
   standby on a second node, point-in-time recovery from S3.
 - `ROLL_SYSTEM_DATABASE` takes any Postgres URL, so the fleet also runs on an outside Postgres
-  (CI and local clusters use `postgres:18-alpine`).
+  (CI and local clusters use `postgres:18-alpine`). A managed Postgres's URL works as its console
+  gives it: `sslmode=verify-ca`/`verify-full` and `sslrootcert` (`system` or a file) are read as
+  libpq reads them (`code_sql::pg_config`); TLS always verifies the chain and the host name.
 - roll code keeps its data there (schemas `code_store` and `code_control`) unless
   `ROLL_CODE_DATABASE` names a Postgres of its own (docs/code/cluster.md, "Code's database").
 - Boot order: nodes join through DynamoDB → the `system:pg` owner starts the system database from

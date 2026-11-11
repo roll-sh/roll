@@ -17,6 +17,7 @@ hyper = { workspace = true, features = ["client", "server", "http1"] }
 hyper-util = { workspace = true, features = ["tokio"] }
 mq-core.workspace = true
 parking_lot.workspace = true
+code-sql.workspace = true
 roll-cluster.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -31,6 +31,7 @@ mod sqlite;
 pub mod translate;
 mod value;
 
+pub use pg::pg_config;
 pub use value::{FromValue, Params, ToValue, Value, ValueRef};
 
 use std::path::{Path, PathBuf};
