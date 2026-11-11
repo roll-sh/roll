@@ -60,12 +60,22 @@ You need the AWS CLI, Node 24, pnpm, Docker with buildx, and the GitHub CLI.
      -F use_default=false
    ```
 
+   The repository uses GitHub's immutable subjects, so the claim names it by id:
+   `repo:roll-sh@343565064/roll@1422227286:environment:production:ref:refs/heads/main` (the stack's
+   `GitHubRepo` default). `gh api repos/roll-sh/roll/actions/oidc/customization/sub` shows the
+   prefix (`sub_claim_prefix`).
+
 ### 3. Create the stack
 
 ```sh
+aws s3 mb s3://roll-cloud-templates-<account> --region us-east-1   # once: the template is over 51,200 bytes
 aws cloudformation deploy --region us-east-1 --stack-name roll-cloud \
-  --template-file deploy/cloud/aws/roll-cloud.yaml --capabilities CAPABILITY_NAMED_IAM
+  --template-file deploy/cloud/aws/roll-cloud.yaml --capabilities CAPABILITY_NAMED_IAM \
+  --s3-bucket roll-cloud-templates-<account> --s3-prefix roll-cloud
 ```
+
+Every later `aws cloudformation deploy` of the stack takes the same `--s3-bucket` and
+`--s3-prefix` (CloudFormation reads templates over 51,200 bytes from S3 only).
 
 - The first create runs no nodes (`ImageTag` is `none`: the image repository is still empty).
   It makes the instances, the NLB and everything else.
@@ -160,6 +170,7 @@ touches the other's records. The global names (`roll.sh`, `api.roll.sh`, `git.ro
    ```sh
    aws cloudformation deploy --region us-east-1 --stack-name roll-cloud \
      --template-file deploy/cloud/aws/roll-cloud.yaml --capabilities CAPABILITY_NAMED_IAM \
+     --s3-bucket roll-cloud-templates-<account> --s3-prefix roll-cloud \
      --parameter-overrides ImageTag=$(git rev-parse HEAD)
    ```
 
@@ -212,6 +223,7 @@ stack, pass the tag that is running, or CloudFormation deploys the tag it last k
 ```sh
 aws cloudformation deploy --region us-east-1 --stack-name roll-cloud \
   --template-file deploy/cloud/aws/roll-cloud.yaml --capabilities CAPABILITY_NAMED_IAM \
+  --s3-bucket roll-cloud-templates-<account> --s3-prefix roll-cloud \
   --parameter-overrides ImageTag=$(deploy/cloud/deploy.sh current) [Name=Value …]
 ```
 

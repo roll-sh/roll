@@ -130,8 +130,11 @@ Parameters:
     Description: Scale out above this many NLB flows per node.
   GitHubRepo:
     Type: String
-    Default: roll-sh/roll
-    Description: owner/repo whose main branch, in the production environment, may deploy.
+    # The repository uses GitHub's immutable OIDC subject (owner@id/repo@id): read it with
+    # `gh api repos/<owner>/<repo>/actions/oidc/customization/sub` (sub_claim_prefix). Plain
+    # owner/repo for a repository without it.
+    Default: roll-sh@343565064/roll@1422227286
+    Description: The repository as it appears in the OIDC subject claim (owner@id/repo@id with immutable subjects, else owner/repo); its main branch, in the production environment, may deploy.
   GitHubOidcProviderArn:
     Type: String
     Default: ""
@@ -365,7 +368,7 @@ Resources:
       SecurityGroupIngress:
         - { IpProtocol: tcp, FromPort: !Ref PreviewPort, ToPort: !Ref PreviewPort, SourceSecurityGroupId: !Ref NodeSecurityGroup, Description: previews from fleet nodes }
       SecurityGroupEgress:
-        - { IpProtocol: "-1", CidrIp: 0.0.0.0/0, Description: the internet (the VPC is refused by the subnets' network ACL) }
+        - { IpProtocol: "-1", CidrIp: 0.0.0.0/0, Description: the internet (the network ACL of the isolated subnets refuses the VPC) }
       Tags: [{ Key: Name, Value: roll-cloud-isolated }]
 
   # ── data: one KMS key, one bucket, one table ──
