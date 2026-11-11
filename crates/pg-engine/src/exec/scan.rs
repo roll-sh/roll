@@ -610,6 +610,7 @@ pub fn open_scan(s: &ScanPlan, shared: Option<&Arc<crate::sql::plan::Plan>>, nee
             erb: Default::default(),
             spare: None,
             probe: Probe::Not,
+            plan_decided: None,
             fscan: None,
             fetch_calls: 0,
             dscan: None,
@@ -711,6 +712,7 @@ pub fn open_scan(s: &ScanPlan, shared: Option<&Arc<crate::sql::plan::Plan>>, nee
             erb: Default::default(),
             spare: None,
             probe: Probe::Not,
+            plan_decided: None,
             fscan: None,
             fetch_calls: 0,
             dscan: None,
@@ -802,6 +804,7 @@ pub fn open_scan(s: &ScanPlan, shared: Option<&Arc<crate::sql::plan::Plan>>, nee
             erb: Default::default(),
             spare: None,
             probe: Probe::Not,
+            plan_decided: None,
             fscan: None,
             fetch_calls: 0,
             dscan: None,
@@ -962,6 +965,7 @@ fn open_scan_as(
         erb: Default::default(),
         spare: None,
         probe: Probe::Not,
+        plan_decided: None,
         fscan: None,
         fetch_calls: 0,
         dscan: None,
@@ -989,6 +993,11 @@ fn open_scan_as(
 /// under a row mark or for an UPDATE's or DELETE's rows (their newer versions are followed),
 /// nor where serializable reads take predicate locks.
 fn unique_point(s: &ScanPlan, ctx: &ExecCtx) -> bool {
+    ctx.snapshot().is_some() && !predicate_locked(&s.table, ctx) && unique_point_plan(s)
+}
+
+/// `unique_point`'s conditions on the plan alone.
+fn unique_point_plan(s: &ScanPlan) -> bool {
     use crate::catalog::{ConstraintKind, IndexKey};
     use crate::types::DataType as T;
     let (Some((ix, b)), Access::Index { only: false, .. }) = (&s.index, &s.access) else {
@@ -1012,8 +1021,6 @@ fn unique_point(s: &ScanPlan, ctx: &ExecCtx) -> bool {
         || s.limit.is_some()
         || s.current_of.is_some()
         || s.sample.is_some()
-        || ctx.snapshot().is_none()
-        || predicate_locked(&s.table, ctx)
     {
         return false;
     }
@@ -1040,6 +1047,11 @@ fn unique_point(s: &ScanPlan, ctx: &ExecCtx) -> bool {
 /// that very value. Read at the statement's snapshot, the entries are the rows' values
 /// there; not under a row mark, whose newer versions are checked against the filter.
 fn filter_implied(s: &ScanPlan, ctx: &ExecCtx) -> bool {
+    ctx.snapshot().is_some() && filter_implied_plan(s)
+}
+
+/// `filter_implied`'s conditions on the plan alone.
+fn filter_implied_plan(s: &ScanPlan) -> bool {
     use crate::catalog::IndexKey;
     use crate::types::DataType as T;
     let (Some(f), Some((ix, b)), Access::Index { quals, only: false, .. }) = (&s.filter, &s.index, &s.access) else {
@@ -1049,7 +1061,6 @@ fn filter_implied(s: &ScanPlan, ctx: &ExecCtx) -> bool {
         || s.mark.is_some()
         || s.current_of.is_some()
         || s.sample.is_some()
-        || ctx.snapshot().is_none()
         || b.any.is_some()
         || b.skip.is_some()
         || !b.order.is_empty()
@@ -1979,6 +1990,7 @@ fn dense_bitmap_scan(
         erb: Default::default(),
         spare: None,
         probe: Probe::Not,
+        plan_decided: None,
         fscan: None,
         fetch_calls: 0,
         dscan: None,
@@ -2466,6 +2478,9 @@ struct ScanNode {
     spare: Option<StoreIter>,
     /// This execution's point probe (`probe_point`).
     probe: Probe,
+    /// What the plan alone decides of `implied` and `point` (`filter_implied_plan`,
+    /// `unique_point_plan`), asked once for the node's restarts.
+    plan_decided: Option<(bool, bool)>,
     /// The table's rows read for a few keys at a time (`fetch_kept`): one scan kept and
     /// sought from key to key, its sources staying in their blocks.
     fscan: Option<Box<TxnScan>>,
@@ -5486,6 +5501,7 @@ impl Node for ScanNode {
             erb,
             spare,
             probe,
+            plan_decided: _,
             fscan,
             fetch_calls,
             dscan,
@@ -5572,13 +5588,18 @@ impl Node for ScanNode {
         }
         self.batch = first_batch(&self.plan);
         self.ios_cols = if self.secondary { index_only_columns(&self.plan, ctx) } else { None };
-        // (As `open_scan_as` decides them, at this execution's snapshot and isolation.)
-        self.implied = self.secondary && self.only.is_none() && filter_implied(&self.plan, ctx);
+        // (As `open_scan_as` decides them, at this execution's snapshot and isolation; what
+        // the plan alone decides, once.)
+        let (implied, point) = *self.plan_decided.get_or_insert_with(|| (filter_implied_plan(&self.plan), unique_point_plan(&self.plan)));
+        let snap = ctx.snapshot().is_some();
+        self.implied = self.secondary && self.only.is_none() && snap && implied;
         self.point = self.secondary
             && self.only.is_none()
             && self.ios_cols.is_none()
             && !self.ios
-            && unique_point(&self.plan, ctx);
+            && snap
+            && point
+            && !predicate_locked(&self.plan.table, ctx);
         Ok(())
     }
 
@@ -6521,6 +6542,7 @@ fn keyed_scan(s: &ScanPlan, plan: ScanPlan, ix: &Index, keys: Keys, ctx: &ExecCt
         erb: Default::default(),
         spare: None,
         probe: Probe::Not,
+        plan_decided: None,
         fscan: None,
         fetch_calls: 0,
         dscan: None,

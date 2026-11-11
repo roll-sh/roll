@@ -372,6 +372,9 @@ pub struct Session {
     pgss_tracked: Option<pgss::Tracked>,
     /// The next `run_query` runs a SQL EXECUTE's plan (`execute_stmt`).
     sql_execute: bool,
+    /// The lock manager's fast-path slot of this backend (`LockManager::fast_slot`), found
+    /// once: it lasts as long as the session's state (`SessionState`'s drop ends it).
+    fast_slot: Option<Option<Arc<crate::txn::locks::FastSlot>>>,
     /// Time the tracked statement spent that pg_stat_statements doesn't count
     /// (`finish_txn_untimed`).
     pgss_untimed: std::time::Duration,
@@ -514,6 +517,7 @@ impl Session {
             sent: None,
             pgss_tracked: None,
             sql_execute: false,
+            fast_slot: None,
             pgss_untimed: Default::default(),
             pgss_workers: 0,
             pgss_copy: None,
@@ -714,6 +718,8 @@ impl Session {
         }
         let mut txn = self.state.db.begin(iso, ro, self.cancel.clone());
         txn.lock_peer = Some(self.state.lock_owner);
+        let (db, owner) = (&self.state.db, self.state.lock_owner);
+        txn.use_fast_slot(self.fast_slot.get_or_insert_with(|| db.locks.fast_slot(owner)).clone());
         txn.vxid = self.state.proc.begin();
         txn.backend_proc = Some(self.state.proc.clone());
         self.state.proc.set_owner(txn.id);
@@ -4157,18 +4163,8 @@ fn run_suspendable(
 }
 
 fn in_parallel_worker(ctx: &crate::exec::ExecCtx, plan: &crate::sql::plan::Plan) -> bool {
-    {
-        let s = ctx.sess.settings.borrow();
-        let on = s
-            .get_raw("debug_parallel_query")
-            .is_some_and(|v| matches!(v.as_str(), "on" | "true" | "yes" | "1"));
-        let workers = s
-            .get_raw("max_parallel_workers")
-            .and_then(|v| v.parse::<i64>().ok())
-            .unwrap_or(8);
-        if !on || workers <= 0 {
-            return false;
-        }
+    if !ctx.sess.settings.borrow().forced_parallel() {
+        return false;
     }
     crate::sql::paths::parallel::ParCfg::read(ctx).max_workers > 0
         && !plan.writes()

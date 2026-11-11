@@ -139,6 +139,8 @@ pub struct Database {
     pub relfiles: crate::exec::sizing::Models,
     /// The cumulative statistics (`exec::pgstat`).
     pub pgstat: Mutex<crate::exec::pgstat::Shared>,
+    /// `pgstat`'s `pruned_at`, readable without its lock (written with it, under it).
+    pub pgstat_pruned_at: AtomicU64,
     /// System catalogs' rows generated for its sessions' statements, for the next ones that
     /// read them under the same catalog, roles, path and settings (`catalog::system::rows`).
     pub sys_rows: Mutex<crate::catalog::system::SysRowsCache>,
@@ -262,6 +264,7 @@ impl Database {
             twophase: RwLock::new(Arc::new(twophase::TwoPhase::local())),
             relfiles: Default::default(),
             pgstat: Mutex::new(Default::default()),
+            pgstat_pruned_at: AtomicU64::new(0),
             sys_rows: Mutex::new(Default::default()),
             detach_marks: Mutex::new(HashMap::new()),
             detach_views: Mutex::new(Vec::new()),
@@ -3183,6 +3186,12 @@ impl Txn {
     }
 
     /// The backend's fast-path slot (`locks::FastSlot`).
+    /// Its backend's fast-path slot, as `fast` would find it (`lock_peer`'s), found by the
+    /// session before.
+    pub fn use_fast_slot(&self, slot: Option<Arc<locks::FastSlot>>) {
+        let _ = self.fast_slot.set(slot);
+    }
+
     fn fast(&self) -> Option<&Arc<locks::FastSlot>> {
         self.fast_slot.get_or_init(|| self.db.locks.fast_slot(self.lock_proc())).as_ref()
     }

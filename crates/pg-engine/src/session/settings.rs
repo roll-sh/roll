@@ -522,6 +522,8 @@ struct Derived {
     /// parallel_leader_participation off: a Gather's part runs in the workers alone, whose
     /// locks end with them (`exec::parallel_part`).
     workers_alone: bool,
+    /// debug_parallel_query on, with max_parallel_workers above 0 (`forced_parallel`).
+    forced_parallel: bool,
     /// What every message or statement reads (`Settings::hot`).
     hot: Hot,
 }
@@ -1469,6 +1471,10 @@ impl Settings {
                 logs_inside: self.bool("log_lock_waits")
                     || self.get_str("auto_explain.log_nested_statements") == Some("on"),
                 workers_alone: !self.bool("parallel_leader_participation"),
+                forced_parallel: self
+                    .get_str("debug_parallel_query")
+                    .is_some_and(|v| matches!(v, "on" | "true" | "yes" | "1"))
+                    && self.get_str("max_parallel_workers").and_then(|v| v.parse::<i64>().ok()).unwrap_or(8) > 0,
                 hot: Hot {
                     idle_session_timeout: self.int("idle_session_timeout"),
                     idle_in_transaction_timeout: self.int("idle_in_transaction_session_timeout"),
@@ -1534,6 +1540,12 @@ impl Settings {
     /// Whether parallel workers alone run a Gather's part (`Derived::workers_alone`).
     pub fn workers_alone(&self) -> bool {
         self.derived().workers_alone
+    }
+
+    /// debug_parallel_query on (as a boolean's spellings) and max_parallel_workers above 0:
+    /// a streamed query may run as a parallel worker would (`session::in_parallel_worker`).
+    pub fn forced_parallel(&self) -> bool {
+        self.derived().forced_parallel
     }
 
     /// Whether `session_replication_role` is `replica`.

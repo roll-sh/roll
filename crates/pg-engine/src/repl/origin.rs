@@ -284,9 +284,9 @@ impl Origins {
 /// Before a session's transaction commits: its origin goes on its commit record, and the
 /// origin's progress into the same commit.
 pub fn before_commit(sess: &crate::session::state::SessionState, txn: &mut crate::txn::Txn) -> Option<(u16, u64)> {
+    txn.xid_if_assigned()?;
     let r = sess.db.repl()?;
     let so = r.origins.session(sess.pid)?;
-    txn.xid_if_assigned()?;
     if let Some(l) = txn.log.as_mut() {
         l.origin = so.id;
         l.origin_lsn = so.xact_lsn;

@@ -1654,27 +1654,29 @@ fn end_xact_counts(
             // (Its records are in the WAL now; the statistics count them when flushed.)
             fixed(&sess.db).lock().advance(wal * 59 + 34);
         }
-        let mut s = sess.db.pgstat.lock();
         // Dropped objects' entries go, once per catalog version, by a transaction that sees
         // the database's current catalog. (Every transaction's end visited every table's
         // entry under the lock all sessions share; and one over an older catalog removed
         // the entries of tables made since.) Since the version pruned last, only what the
         // catalog's maps changed is looked at: each DDL commit of `pg_restore -j` visited
-        // every table's entry.
-        let cur = sess.db.catalog();
-        if s.pruned_at != cat.version && cur.version == cat.version {
-            match s.pruned.take() {
-                Some(old) => prune_since(&mut s, &old, &cur),
-                None => {
-                    s.tables.retain(|rel, _| *rel < crate::catalog::FIRST_USER_OID || in_catalog(cat, *rel));
-                    s.funcs
-                        .retain(|f, _| *f < crate::catalog::FIRST_USER_OID || cat.functions.contains_key(f));
+        // every table's entry. (Pruned at this version already: not even the lock.)
+        if sess.db.pgstat_pruned_at.load(std::sync::atomic::Ordering::Acquire) != cat.version {
+            let mut s = sess.db.pgstat.lock();
+            let cur = sess.db.catalog();
+            if s.pruned_at != cat.version && cur.version == cat.version {
+                match s.pruned.take() {
+                    Some(old) => prune_since(&mut s, &old, &cur),
+                    None => {
+                        s.tables.retain(|rel, _| *rel < crate::catalog::FIRST_USER_OID || in_catalog(cat, *rel));
+                        s.funcs
+                            .retain(|f, _| *f < crate::catalog::FIRST_USER_OID || cat.functions.contains_key(f));
+                    }
                 }
+                s.pruned_at = cat.version;
+                s.pruned = Some(cur);
             }
-            s.pruned_at = cat.version;
-            s.pruned = Some(cur);
+            sess.db.pgstat_pruned_at.store(s.pruned_at, std::sync::atomic::Ordering::Release);
         }
-        drop(s);
         p.clear_snapshot();
         p.consistency_generation = sess.settings.borrow().stats_fetch_generation();
     }
