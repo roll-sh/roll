@@ -285,6 +285,86 @@ The current checked measurements compare release engine builds and PostgreSQL 18
 the wire. Older rounds below are historical records, with their original methods and
 limits. Their results have not been reverified on the current source.
 
+## Executor, round 13 (2026-11-11, agent 207)
+
+HANDOFF "Executor, round 13" has what changed: q21's plan made PostgreSQL's (three planner
+fixes), a parallel aggregation's parts of fixed-width keys and states kept as words, 204's
+order-free parts on top of them, and the workers' unique-key lookups read by a point probe.
+**base** is `db6830deb`; each change was measured against the one before it (`pl01` the
+planner fixes, `cp01` compact parts, `up01` order-free parts, `lk01` unique lookups). Dist
+builds (fat LTO, line tables) of the same checkout, equal-length paths (`~/.cache/a207/bin`);
+PostgreSQL 18.6 with the bench settings; each server in its own container on CPUs 8-11
+(`--memory 8g`, host network, the engine with `--cache-mb 2048`), the client on 12-15 at
+nice 19, TPC-H SF1 from `bench tpch-load --sf 1`, the data directory restored before every
+engine start. Other tenants used about one core of CPUs 8-15 throughout (the runs waited for
+them to average below 20-25% busy).
+
+### TPC-H SF1, PostgreSQL, base and lk01 (three interleaved rounds, medians)
+
+| | q01 | q02 | q03 | q04 | q05 | q06 | q07 | q08 | q09 | q10 | q11 | q12 | q13 | q14 | q15 | q16 | q17 | q18 | q19 | q20 | q21 | q22 | sum |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| pg s | 1.66 | 0.19 | 0.36 | 0.17 | 0.28 | 0.35 | 0.36 | 0.17 | 1.16 | 0.62 | 0.08 | 0.48 | 0.67 | 0.16 | 0.29 | 0.22 | 0.82 | 2.46 | 0.06 | 0.10 | 0.49 | 0.09 | 11.24 |
+| base s | 0.94 | 0.75 | 0.43 | 0.24 | 0.42 | 0.50 | 0.59 | 0.35 | 1.19 | 0.63 | 0.18 | 0.38 | 0.95 | 0.21 | 0.39 | 0.26 | 0.74 | 1.62 | 0.12 | 0.34 | 0.56 | 0.21 | 11.97 |
+| lk01 s | 0.93 | 0.73 | 0.43 | 0.22 | 0.45 | 0.55 | 0.58 | 0.33 | 1.07 | 0.65 | 0.18 | 0.38 | 0.93 | 0.20 | 0.38 | 0.26 | 0.75 | 1.66 | 0.11 | 0.37 | 0.58 | 0.22 | 11.94 |
+| pg CPU, s | 4.90 | 0.31 | 1.02 | 0.46 | 0.80 | 0.97 | 1.05 | 0.45 | 3.11 | 1.56 | 0.08 | 1.43 | 1.73 | 0.41 | 0.79 | 0.53 | 0.89 | 6.29 | 0.17 | 0.11 | 1.36 | 0.27 | 28.69 |
+| base CPU, s | 2.78 | 0.75 | 1.27 | 0.66 | 0.87 | 1.14 | 1.51 | 0.62 | 3.45 | 1.66 | 0.20 | 1.16 | 2.73 | 0.46 | 1.20 | 0.72 | 1.83 | 5.29 | 0.23 | 0.37 | 1.61 | 0.42 | 30.93 |
+| lk01 CPU, s | 2.74 | 0.74 | 1.28 | 0.64 | 0.93 | 1.18 | 1.46 | 0.60 | 3.10 | 1.66 | 0.19 | 1.18 | 2.15 | 0.44 | 0.98 | 0.70 | 1.81 | 5.42 | 0.23 | 0.37 | 1.62 | 0.43 | 29.85 |
+
+- Engine/PostgreSQL: wall 1.065x -> 1.062x (11.97 -> 11.94 s against 11.24), CPU 1.078x ->
+  1.040x (30.9 -> 29.9 s against 28.7). q13's CPU 2.73 -> 2.15 s (PostgreSQL 1.73), q15's
+  1.20 -> 0.98, q09's 3.45 -> 3.10 (wall 1.19 -> 1.07, now 0.09 s ahead of PostgreSQL). Wall
+  time moved less than CPU: q13's workers' parts merge on the executor's thread once the scan
+  is done, not during it, and q05 / q06 / q20 ran 0.02-0.05 s slower at their medians with
+  their user instructions unchanged (load moved by more between passes).
+- Peak memory (anon + shmem of each server's cgroup, sampled; the largest of a pass):
+  PostgreSQL 1,663-1,664 MB, base 1,834-1,838, lk01 1,829-1,833 (VmHWM 1,869-1,872 ->
+  1,862-1,866).
+- All 22 result hashes equal PostgreSQL's in every pass of both builds.
+- Point read and short transaction smoke (a fresh 100,000-row fixture, 8 clients, 10 s, user
+  instructions over 9 s, five alternating pairs, base against lk01): point_select 57.4k
+  against 57.7k instructions an operation (medians; base 57.4-57.9k, lk01 57.3-58.3k),
+  99.0k against 99.7k ops/s; short_txn 316.7k against 316.8k (base 316.0-322.9k, lk01
+  314.2-319.9k), 13.6k ops/s each.
+
+### User instructions a run (`perf stat -e instructions:u` over each run of a fresh engine)
+
+Per change, three rounds, the two binaries alternating; the change of each against the one
+before it:
+
+| % | q01 | q02 | q03 | q04 | q05 | q06 | q07 | q08 | q09 | q10 | q11 | q12 | q13 | q14 | q15 | q16 | q17 | q18 | q19 | q20 | q21 | q22 | sum |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| planner r1 | +0.0 | -0.0 | +0.8 | -0.7 | +0.6 | -0.0 | -0.0 | -0.8 | -2.0 | +0.0 | -0.0 | -0.0 | -0.7 | -1.3 | +0.1 | -0.6 | +0.0 | -0.4 | +0.0 | -0.0 | -0.4 | -0.0 | -0.28 |
+| planner r2 | -0.0 | -0.0 | -1.8 | +0.1 | +0.7 | -0.0 | -0.8 | +0.0 | +0.9 | -0.0 | -0.1 | -0.0 | -0.8 | +0.0 | +0.0 | +0.0 | +0.7 | -0.0 | +0.0 | +0.2 | +0.1 | +0.0 | -0.02 |
+| planner r3 | -0.0 | +0.0 | -1.6 | +0.1 | -0.7 | +0.0 | +1.4 | +0.6 | -2.1 | -0.0 | -0.1 | -0.0 | -0.0 | -0.1 | +0.0 | -0.0 | +0.4 | +0.0 | -0.0 | +0.1 | +0.2 | +0.5 | -0.14 |
+| compact r1 | -0.1 | -0.0 | -1.7 | -0.0 | -0.3 | -0.0 | +0.0 | -0.2 | -1.0 | +0.3 | +0.2 | +0.0 | -12.3 | -0.1 | -3.7 | -0.0 | -0.1 | -5.7 | +0.0 | -0.0 | +0.4 | -0.1 | -2.09 |
+| compact r2 | -0.1 | -0.0 | -0.2 | -0.6 | +2.6 | -0.0 | +0.1 | +0.0 | -3.0 | +0.2 | +0.2 | -0.0 | -12.4 | +0.0 | -3.7 | -0.0 | +1.1 | -5.8 | +0.0 | -0.0 | +0.0 | +0.4 | -2.11 |
+| compact r3 | -0.1 | -0.0 | -1.2 | -0.1 | +0.7 | -0.0 | -2.6 | +0.2 | +1.8 | +0.1 | +0.1 | -0.0 | -12.5 | -1.3 | -3.7 | -0.0 | -0.3 | -5.6 | +0.0 | +0.2 | -0.7 | -0.4 | -2.02 |
+| order-free r1 | +1.1 | +0.0 | -2.9 | -0.2 | -0.3 | +0.0 | -0.3 | -0.6 | -1.9 | +0.1 | -0.0 | +0.0 | -6.8 | +1.2 | -1.3 | -0.4 | +0.8 | +0.0 | +0.1 | +0.0 | +0.5 | -0.3 | -0.42 |
+| order-free r2 | +1.1 | +0.0 | -0.8 | -0.2 | -0.5 | +0.0 | -0.2 | +0.4 | -0.1 | -0.0 | +0.2 | -0.0 | -7.1 | +0.1 | -1.2 | +0.1 | +1.4 | +0.0 | +0.1 | +0.2 | -0.3 | +0.0 | -0.24 |
+| order-free r3 | +1.1 | +0.0 | +2.9 | +0.5 | -0.2 | +0.0 | +0.2 | +0.2 | -0.3 | +0.0 | -0.0 | -0.0 | -6.7 | +1.2 | -1.2 | +0.6 | +0.3 | +0.2 | +0.1 | -0.0 | -0.3 | +0.0 | -0.06 |
+| lookups r1 | -0.0 | -0.0 | +0.7 | +0.6 | -0.4 | +0.0 | -0.6 | -4.7 | -5.3 | -0.0 | -0.0 | +0.0 | -0.2 | -1.7 | +0.0 | +0.1 | +0.4 | +0.0 | -0.0 | -0.1 | -0.1 | -0.0 | -0.42 |
+| lookups r2 | +0.0 | -0.0 | -0.5 | -0.3 | -1.5 | +0.0 | +0.1 | -4.2 | -6.3 | -0.1 | +0.0 | +0.0 | -0.0 | +2.8 | -0.0 | -0.1 | -0.3 | -0.1 | -0.0 | +0.0 | -0.4 | +0.0 | -0.58 |
+| lookups r3 | -0.0 | -0.0 | -2.5 | +0.5 | -0.7 | -0.0 | -0.2 | -4.1 | -6.9 | -0.0 | +0.0 | +0.0 | +0.0 | -0.4 | -0.0 | -0.4 | -0.4 | +0.1 | -0.0 | +0.5 | -0.2 | +0.5 | -0.66 |
+
+- Sum of the 22 queries' user instructions, base 201.4 -> lk01 195.6 x 10^9 (-2.9%).
+- The queries over +2% once are within the spread every round of every binary shows for
+  them (q03 +-2.9, q05 +-2.6, q09 +-3.0, q14 +-2.8; q05, q09 and q03 again over three more
+  rounds of the compact change: +0.4 / -0.5 / -0.1, -0.5 / -0.7 / +0.8, -0.3 / -1.7 /
+  -1.8%). q01's +1.1% under the order-free change was the same in each round.
+- The planner fixes change only q21's plan (where the Gathers go and which join comes
+  first), so its instructions; its wall time 0.56 -> 0.58 s.
+- Peak memory per query (VmHWM reset before each, after a warm-up pass; twice each): q13
+  1,866 / 1,865 MB (pl01) -> 1,851 / 1,853 (cp01) -> 1,844 / 1,849 (up01); the other queries
+  within the runs' spread (q14 1,846-1,880 in every build).
+
+### Dropped: an index scan's heap fetches as point reads
+
+`get_sorted` (one merging scan sought from key to key) against `get_many_snap` (a point read
+each), one binary, the path switched by an environment variable (patch in
+`~/.cache/a207/patches/experiment-point-fetch.patch`), one round: q20 -1.8%, q03 -1.7%, q17
+-1.0%, q05 +1.1%, everything else within 1%. The storage's point lookups (`Block::seek`,
+`SstReader::find_block`, `block_with`) cost about the same either way.
+
 ## Point reads, round 2 (2026-11-11, agent 205)
 
 HANDOFF.md "Point reads, round 2" has what changed. Agent 202's harness

@@ -3361,6 +3361,77 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
     - Item 2's batches past the scan (joined rows from batches, the probe hits aggregated from
       columns), item 4 (streaming merge joins) and item 5 (work_mem for hash tables and sorts)
       are not started.
+- **Executor, round 13: q21's plan, compact aggregation parts, unique lookups** (agent 207;
+  BENCH.md "Executor, round 13"):
+  - **q21's plan is PostgreSQL's** (three planner fixes; golden `a207_semi_anti_classes`
+    recorded from PostgreSQL 18.6, on tables ANALYZE reads whole):
+    - `joinpath::index_takes_joins` (has_indexed_join_quals): a nested loop's inner index
+      scan is an indexed join only when its index conditions are every join clause moved into
+      it. A join clause it checks as a filter (q21's `l2.l_suppkey <> l1.l_suppkey`) makes a
+      semi or anti join cost the scan as a plain rescan (q21's semi join +1.03, not +0.52).
+    - `Search::semi_classes` / `semi_clause`: a group with semi joins and anti joins (no other
+      outer join) puts the semi joins' equalities in their equivalence classes, as
+      deconstruct_distribute does (a semi join adds no nonnullable relations); an anti join's
+      own clauses stay out. So the join to orders below q21's semi join gets the class's clause
+      with orders' member (`o_orderkey = l2.l_orderkey`) as a join filter, as PostgreSQL's
+      does, and the semi join goes first (a tie otherwise, the first path made kept).
+    - EXPLAIN (`explain.rs`, `lateral_gathered`): a serial nested loop over its outer side's
+      Gather path when that Gather won at the outer relation, even when the outer side's serial
+      plan has a Gather below it already (q21's anti join over a gathered hash join). Before,
+      the Gather went above the semi join and the join to orders.
+    - plancmp (tpch, orm, tpcds against PostgreSQL 18.6): q21 differed, now matches, parallel
+      and serial; nothing else changed (77 -> 78 / 89 shapes parallel, 81 -> 82 serial; the
+      rest differ as before, stats samples). Full regress 51,148 / 51,150, none newly
+      differing.
+    - Found, not fixed (pre-existing): an anti join's `l3.ok = o.ok` with `o.ok = 5` gets
+      `(ok = o.ok) AND (ok = 5)` in the engine, `ok = 5` alone in PostgreSQL
+      (reconsider_outer_join_clauses replaces the clause).
+  - **Compact partial-aggregation parts** (`partial::Layout`, `Groups::Words`): when every
+    group key is bool / int2 / int4 / int8 / date / timestamp(tz) (no bpchar) and every state
+    a count, integer sum or average, or exact numeric sum, a part's groups are words in one
+    vector (a NULL mask, a word per key, the states: q13's group is 3 words, 24 bytes, against
+    ~250 bytes with its key twice, two vectors and their allocations), found through a
+    `HashTable<u32>` of group numbers hashed on the words. A row whose value isn't the key's
+    type, or a sum past an i128, goes to the serial path as rows a part can't take did. The
+    executor's merge reads the groups through `GroupsIter` (a key copied only for a new group).
+  - **204's order-free parts**, on top (`Spec::unordered`, `ParScan::tail`): each worker keeps
+    one part over all its chunks (128k groups at most) for a grouping whose results can't
+    depend on the rows a part holds. With compact parts the workers' parts are small: peak
+    memory went down, not up.
+  - **The workers' unique-key lookups** (`Lookup::unique`): a nested loop's inner index scan of
+    a unique (or primary) index with every key column equated reads its entry by
+    `Store::first_with`, not a merging `Store::scan`; an entry whose row the snapshot doesn't
+    see falls back to the scan, as the serial probe does (agent 205's `probe_point`). Test
+    `parallel_unique_lookups_match_serial`: lookups after updates that moved rows to other
+    keys and back match the serial plan's (it passes without the fallback too: those updates
+    leave no visible entry of an invisible row). q08 and q09's orders / part lookups.
+  - Gate (BENCH.md has the tables, user instructions a run over three alternating rounds per
+    change, each against the previous one): planner fixes within +-2.1% everywhere (sum
+    -0.3 / -0.0 / -0.1%); compact parts q13 -12.3 / -12.4 / -12.5%, q18 -5.7 / -5.8 / -5.6%,
+    q15 -3.7% each (sum -2.1%); order-free parts q13 -6.8 / -7.1 / -6.7% (q15 -1.2%, q01 +1.1%
+    each round); unique lookups q08 -4.7 / -4.2 / -4.1%, q09 -5.3 / -6.3 / -6.9%. Sum of the 22
+    queries 201.4 -> 195.6 x 10^9. Peak memory not worse (q13 1,865 -> 1,847 MB).
+  - Dropped (`~/.cache/a207/patches/experiment-point-fetch.patch`): an index scan's heap
+    fetches as point reads (`get_many_snap`) instead of one merging scan sought from key to key
+    (`get_sorted`): q20 -1.8%, q17 -1.0%, everything else within 1% (one round). Either way the
+    time is the storage's point lookups (`Block::seek`, `SstReader::find_block`, `block_with`:
+    25-31% of q02, q07 and q20's samples).
+  - Left (next steps):
+    - q02: its hash join's 8 batches (as PostgreSQL's) decode every spilled row back into
+      values (`RowReader::read_tagged_row`, 11%; saves 4.5%), its inner index scans 24%
+      (`fetch_entries`, `get_sorted`: point reads of partsupp), 10% the correlated SubPlan.
+    - q20: 2,083 partsupp lookups and 8,332 SubPlan runs over the lineitem index, 58k heap
+      point reads: `get_sorted` 34% (`Scan::position`, `Merge::min`, `Cursor::fill`).
+    - q07 / q02 / q20 all wait on storage point reads (agents 205 / 201): a block cache lookup
+      takes a shard mutex, a hash and an `Arc` clone per block; `find_block` and `Block::seek`
+      binary searches. The workers' lookups of non-unique keys (q04, q21, q22's lineitem by
+      `l_orderkey`) still make a merging `Store::scan` per outer row.
+    - Peak memory (~1,780-1,880 MB against PostgreSQL's ~1,650-1,710): the block cache holds
+      every table's decoded blocks after a pass (RSS 1,073 MB after q01 alone, ~1,650 after
+      q03; the data directory is 654 MB on disk). PostgreSQL reads lineitem through a
+      256 kB ring (BAS_BULKREAD) and keeps it out of shared_buffers. Not caching a big scan's
+      blocks here would cost a zstd decompression of every lineitem block on every scan:
+      the storage owners' call (cache compressed blocks, or a smaller decoded form).
 - **Executor, round 12, batch 2: Parallel Hash builds and the workers' nested-loop lookups**
   (agent 204; BENCH.md "Executor, round 12, batch 2"):
   - **A Parallel Hash's inner rows read in the scan's workers** (`nodes::build_hashed`,
