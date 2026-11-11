@@ -427,6 +427,106 @@ next message per round trip, about 25 µs a transaction.)
    the `Arc` counts don't share its first fields' line; `next_txn`), on top of 2: built, not
    measured (the build queue held it past the round).
 
+## Executor, round 14 (2026-11-11, agent 212)
+
+HANDOFF "Executor, round 14" has what changed: a dense bitmap scan's entries counted a batch at
+a time with each distinct value checked once, the workers' non-unique index lookups sought on
+one scan, and decoded blocks kept in allocations of their own size. **base** is `a9ced4585`;
+each change was measured against the one before it (`c001` the dense count, `c003` the lookup
+scans, `c004` the block allocations; `c002`, dropped, against `c001`). Dist builds (fat LTO, line
+tables) of snapshots of one checkout, equal-length paths (`~/.cache/a212/bin`); PostgreSQL 18.6
+with the bench settings and pgrust (`malisper/pgrust`, 0.4-beta, its defaults) as `run.sh`
+starts them; each server in its own container on CPUs 8-11 (`--memory 8g`, host network, the
+engine with `--cache-mb 2048`), the client on 12-15 at nice 19, TPC-H SF1 from
+`bench tpch-load --sf 1`, the engine's data directory restored before every start. The host was
+busy throughout (load 15-70, other tenants on CPUs 8-15 at 25-45%): wall times moved by 5-15%
+between passes of one binary, so the gate is the user instructions; the wall table below is the
+quietest run (load 11-15).
+
+### TPC-H SF1, PostgreSQL, base and c004 (three interleaved rounds, medians) and pgrust (three rounds)
+
+| | q01 | q02 | q03 | q04 | q05 | q06 | q07 | q08 | q09 | q10 | q11 | q12 | q13 | q14 | q15 | q16 | q17 | q18 | q19 | q20 | q21 | q22 | sum |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| pg s | 1.72 | 0.20 | 0.37 | 0.15 | 0.28 | 0.35 | 0.37 | 0.18 | 1.21 | 0.59 | 0.08 | 0.47 | 0.69 | 0.17 | 0.30 | 0.21 | 0.82 | 2.35 | 0.06 | 0.10 | 0.51 | 0.09 | 11.27 |
+| base s | 0.97 | 0.80 | 0.46 | 0.23 | 0.40 | 0.56 | 0.56 | 0.33 | 1.13 | 0.62 | 0.19 | 0.43 | 0.95 | 0.21 | 0.40 | 0.26 | 0.75 | 1.67 | 0.12 | 0.37 | 0.59 | 0.22 | 12.23 |
+| c004 s | 0.95 | 0.75 | 0.38 | 0.19 | 0.41 | 0.39 | 0.54 | 0.33 | 1.15 | 0.63 | 0.19 | 0.45 | 0.96 | 0.21 | 0.35 | 0.26 | 0.72 | 1.69 | 0.13 | 0.38 | 0.51 | 0.22 | 11.80 |
+| pgrust s | 0.23 | 0.28 | 0.26 | 0.16 | 0.22 | 0.27 | 0.54 | 0.18 | 1.58 | 0.97 | 0.05 | 0.58 | 0.19 | 0.10 | 0.16 | 0.20 | 0.65 | 2.11 | 0.04 | 0.36 | 0.29 | 0.02 | 9.44 |
+| pg CPU, s | 5.11 | 0.33 | 1.04 | 0.43 | 0.83 | 0.97 | 1.03 | 0.51 | 3.17 | 1.50 | 0.08 | 1.40 | 1.82 | 0.44 | 0.82 | 0.52 | 0.88 | 6.26 | 0.18 | 0.11 | 1.38 | 0.27 | 29.08 |
+| base CPU, s | 2.88 | 0.79 | 1.28 | 0.66 | 0.89 | 1.24 | 1.49 | 0.60 | 3.26 | 1.70 | 0.20 | 1.27 | 2.24 | 0.44 | 1.03 | 0.71 | 1.84 | 5.44 | 0.23 | 0.38 | 1.69 | 0.44 | 30.70 |
+| c004 CPU, s | 2.82 | 0.73 | 1.12 | 0.61 | 0.87 | 1.09 | 1.38 | 0.60 | 3.31 | 1.74 | 0.19 | 1.33 | 2.29 | 0.45 | 1.04 | 0.74 | 1.79 | 5.53 | 0.23 | 0.38 | 1.51 | 0.40 | 30.15 |
+| pgrust CPU, s | 0.93 | 0.34 | 1.05 | 0.63 | 0.74 | 1.08 | 2.04 | 0.64 | 5.65 | 1.06 | 0.08 | 1.34 | 0.68 | 0.36 | 0.61 | 0.38 | 0.71 | 2.39 | 0.15 | 0.40 | 1.13 | 0.11 | 22.50 |
+
+- Engine/PostgreSQL: wall 1.085x -> 1.047x (12.23 -> 11.80 s against 11.27), CPU 1.056x ->
+  1.037x (30.70 -> 30.15 s against 29.08). q06 0.56 -> 0.39 s (PostgreSQL 0.35), q03 0.46 ->
+  0.38, q04 0.23 -> 0.19, q21 0.59 -> 0.51 (level with PostgreSQL), q15 0.40 -> 0.35, q17 0.75
+  -> 0.72. Still behind: q02 (+0.55 s), q13 (+0.27), q20 (+0.27), q07 (+0.17), q08 (+0.15),
+  q05 (+0.13), q22 (+0.13), q11 (+0.11).
+- Peak memory (anon + shmem of each server's cgroup, sampled; the largest of a pass):
+  PostgreSQL 1,645-1,646 MB, base 1,827-1,829, c004 1,677-1,690 (VmHWM 1,860-1,863 ->
+  1,710-1,723). PostgreSQL's own peak moved between runs (1,646-1,717 MB on this host today);
+  in the same run the engine is 31-44 MB above it, against 182 before.
+- pgrust (three rounds of its own, the same day, the same container limits): 9.44 s, 22.5 s
+  CPU, peak 554 MB; every result hash equal to PostgreSQL's. It is ahead of the engine on 15
+  of the 22 (q01 0.23 against 0.95, q13 0.19 against 0.96, q22 0.02 against 0.22, q02 0.28
+  against 0.75); the engine is ahead on q07, q09, q10, q12, q18 and level on q20. pgrust's
+  executor compiles its plans (Gravity: memoized generic plans, column lanes filled straight
+  from heap tuples, a whole-block row encoder); what that buys on q01 / q13 is the per-row
+  work of a compiled aggregation over tuples in place, not something one change here reaches.
+- All 22 result hashes equal PostgreSQL's in every pass of every build.
+- Point read and short transaction smoke (a fresh 100,000-row fixture, 8 clients, 10 s, user
+  instructions over 9 s, five alternating pairs, base against c004): point_select 53.5k against
+  53.5k instructions an operation (medians; base 53.48-53.62k, c004 53.19-53.74k), 109.1k
+  ops/s each; short_txn 325.7k against 316.3k (base 317.3-337.0k, c004 314.1-322.3k), 13.78k
+  against 13.79k ops/s.
+
+### User instructions a run (`perf stat -e instructions:u` over each run of a fresh engine)
+
+Per change, three rounds, the two binaries alternating; each change against the one before it:
+
+| % | q01 | q02 | q03 | q04 | q05 | q06 | q07 | q08 | q09 | q10 | q11 | q12 | q13 | q14 | q15 | q16 | q17 | q18 | q19 | q20 | q21 | q22 | sum |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| dense count r1 | -0.0 | -0.0 | +2.8 | -1.6 | -6.9 | -11.5 | +0.1 | -0.1 | +2.0 | -0.8 | -0.1 | -0.0 | +0.1 | -7.1 | -3.5 | +0.1 | -3.9 | -0.1 | +0.0 | +0.2 | +0.0 | -0.5 | -1.10 |
+| dense count r2 | +0.0 | -0.0 | -0.5 | -2.0 | -4.8 | -11.5 | +1.4 | -0.2 | -1.1 | -0.8 | -0.0 | -0.0 | -0.1 | -5.9 | -3.5 | +0.0 | -4.4 | +0.0 | -0.0 | -0.4 | +0.1 | +0.5 | -1.32 |
+| dense count r3 | +0.0 | -0.0 | +0.2 | -1.8 | -6.7 | -11.5 | +2.3 | -0.3 | +2.2 | -0.7 | +0.3 | -0.0 | +0.0 | -3.9 | -3.5 | -0.5 | -3.8 | -0.1 | -0.0 | -0.1 | -0.1 | -0.1 | -1.09 |
+| lookup scans r1 | -0.0 | +0.0 | -7.5 | -4.3 | -2.7 | -0.0 | -4.2 | +0.1 | -20.2 | -0.1 | +0.1 | +0.0 | +0.0 | +2.2 | +0.0 | +0.1 | -0.1 | +0.0 | +0.3 | -0.2 | -3.3 | -2.5 | -2.18 |
+| lookup scans r2 | -0.0 | +0.0 | -5.7 | -3.7 | -2.8 | -0.0 | -4.7 | -0.1 | -2.4 | -0.1 | -0.3 | +0.0 | +0.0 | -0.1 | -0.0 | -0.2 | -0.7 | -0.0 | +0.3 | -0.3 | -3.4 | -2.8 | -0.98 |
+| lookup scans r3 | +0.0 | -0.0 | -6.0 | -3.8 | -3.0 | +0.0 | -3.8 | +0.1 | -1.5 | -0.0 | -0.2 | -0.0 | -0.1 | -0.7 | -0.0 | -0.6 | +1.0 | -0.0 | +0.3 | +0.2 | -3.2 | -2.6 | -0.83 |
+| exact blocks r1 | -0.0 | +0.0 | -1.4 | -0.3 | -0.6 | +0.0 | -0.1 | -0.2 | -0.4 | -0.0 | -0.1 | -0.0 | +0.1 | +1.8 | -0.0 | -0.1 | +0.2 | +0.1 | -0.0 | +0.0 | -0.0 | -0.0 | -0.07 |
+| exact blocks r2 | -0.0 | +0.0 | +1.6 | +0.0 | -1.5 | -0.0 | -0.8 | +0.2 | -0.8 | +0.0 | -0.1 | -0.0 | -0.1 | +2.2 | +0.0 | -0.1 | +0.4 | -0.1 | -0.0 | -0.1 | +0.2 | -0.0 | -0.04 |
+| exact blocks r3 | -0.0 | -0.0 | +0.5 | -0.1 | +0.4 | -0.0 | +0.6 | -0.2 | -0.0 | -0.0 | -0.5 | -0.0 | +0.8 | -0.2 | -0.0 | +0.1 | -0.1 | +0.0 | -0.0 | -0.2 | +0.0 | +0.0 | +0.07 |
+
+- Sum of the 22 queries' user instructions, base 195.9 -> c004 191.8 x 10^9 (-2.1%).
+- Over +2% once: q03 (+2.8, dense count r1), q07 (+2.3, r3), q09 (+2.2, r3), q14 (+2.2 lookup
+  scans r1, +2.2 exact blocks r2). None of these queries runs the code a change touches (q03,
+  q07 and q09 have no bitmap scan; c004 changes no warm read), and each is within the spread
+  every binary shows for it (BENCH "Executor, round 13": q03 +-2.9, q09 +-3.0, q14 +-2.8).
+- Wall medians of each change's targets (the gate's rounds; host busy): dense count q06 0.541 ->
+  0.382, q05 0.430 -> 0.406, q15 0.388 -> 0.375, q17 0.756 -> 0.672, q14 0.195 -> 0.199. Lookup
+  scans (five more rounds of its targets alone, load 16-20): q03 0.484 -> 0.450, q07 0.584 ->
+  0.543, q21 0.604 -> 0.526, q04 0.214 -> 0.220 (its passes 0.187-0.316 against 0.212-0.235:
+  within this host's noise; CPU 0.65 -> 0.62 s), q05 0.417 -> 0.434, q22 0.223 -> 0.234.
+- Peak memory per query (VmHWM reset before each, after a warm-up pass): exact blocks q01
+  1,778 -> 1,632 MB, q10 1,865 -> 1,715, q13 1,840 -> 1,701, every query 135-150 MB lower; the
+  other changes within +-10 MB.
+
+### Where the memory went
+
+A sampled heap profile of base after one pass (`--features heapprof`): 1.54 GB live, of it 1.28
+GB decoded blocks (`Block::decode_with`), bloom filters 22 MB, the heap and btree models about
+30 MB. RSS was 1.83 GB: the rest was the allocator's. A decoded block was built in a buffer the
+size of the raw block and shrunk with `shrink_to_fit`; mimalloc's realloc keeps a block in place
+when it shrinks by less than half, so each cached block held its raw size. Copying it into an
+allocation of its own size (c004) took 145 MB off RSS and the cgroup peak.
+
+### Dropped: a per-thread front table before the block cache
+
+`c002`: each thread's 1,024-slot direct-mapped table of weak references to the blocks it found
+last, before the shared shards' mutex and hash (a hit: no mutex, no probe). Against c001, three
+rounds: user instructions +0.1 to +0.9% on every query, cycles -6 to +7% (noise), wall medians
+q02 0.770 -> 0.822, q20 0.418 -> 0.437, q07 0.586 -> 0.567. The workers' lookups land on too many
+different blocks for a small table to hit, and a miss pays for the table too. Patch:
+`~/.cache/a212/patches/dropped-c002-block-cache-front.patch`.
+
 ## Executor, round 13 (2026-11-11, agent 207)
 
 HANDOFF "Executor, round 13" has what changed: q21's plan made PostgreSQL's (three planner

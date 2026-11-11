@@ -3361,6 +3361,58 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
     - Item 2's batches past the scan (joined rows from batches, the probe hits aggregated from
       columns), item 4 (streaming merge joins) and item 5 (work_mem for hash tables and sorts)
       are not started.
+- **Executor, round 14: dense bitmap counts, lookup scans sought on, decoded blocks of their
+  own size** (agent 212; BENCH.md "Executor, round 14"). TPC-H SF1 12.23 -> 11.80 s against
+  PostgreSQL's 11.27 (1.085x -> 1.047x), CPU 30.70 -> 30.15 s against 29.08, peak memory 1,828
+  -> 1,677-1,690 MB against PostgreSQL's 1,645 in the same run (VmHWM 1,862 -> 1,710-1,723).
+  - **A dense bitmap scan's entries counted a batch at a time** (`scan::dense_bitmap_scan`):
+    the bitmap's index entries are read by `TxnScan::fill_batch` (keys only, rows as stored),
+    and an entry whose encoded key values are the last decoded one's takes that one's verdict,
+    so the quals' check runs once per distinct value (q06: once per l_shipdate day, not per
+    lineitem row). This count runs on the executor's thread before the workers start: it was
+    a third of q06's wall time. q06 -11.5% instructions, wall 0.56 -> 0.39 s; q05, q14, q15,
+    q17 -3.5 to -7%.
+  - **A worker's lookups of a key that isn't unique seek one scan on** (`lookup::entry_keys`,
+    `LookupScratch::entries`): the entries' scan of the last lookup is sought to the next key
+    (`Scan::reseek`) instead of a new merging scan per outer row, so its sources aren't made
+    again and a key landing in the block the last one read reads on in it. q03 -6 to -7.5%,
+    q07 -4%, q04 -4%, q21 -3.3% (wall 0.60 -> 0.53 s), q05 / q22 -2.7%.
+  - **Decoded blocks in allocations of their own size** (`Block::decode_with`): the compact
+    form was built in a buffer sized for the raw block and shrunk with `shrink_to_fit`, which
+    mimalloc's realloc leaves in place when it shrinks by less than half, so every cached block
+    held its raw size. Copied into an exact allocation: RSS -145 MB after a TPC-H pass, every
+    query's peak 135-150 MB lower, no instruction change on warm reads.
+  - Test `exec::lookup::tests::unique_probe_past_an_entry_without_its_row`: a unique key's
+    probe whose first entry names a row the snapshot doesn't see falls back to the scan and
+    finds the later entry (it fails without 207's fallback). Through SQL no such state was
+    found: an entry and its row are written and deleted in one commit, so a snapshot that sees
+    the entry sees the row (207's `parallel_unique_lookups_match_serial` passes either way for
+    that reason); the test builds the store state directly.
+  - Dropped: a per-thread front table before the block cache's shards (instructions +0.1 to
+    +0.9%, wall no better; `~/.cache/a212/patches/dropped-c002-block-cache-front.patch`).
+  - Measured, not changed:
+    - pgrust on the 22 queries (BENCH): 9.44 s, 22.5 s CPU, 554 MB; ahead of the engine on 15
+      of 22 (q01 0.23 s, q13 0.19, q22 0.02, q02 0.28), every hash PostgreSQL's.
+    - q02 spills as PostgreSQL does (`Batches: 8`, 4.6 MB at work_mem 4 MB, both): the batch
+      files' cost is roll's row format there, not its memory accounting.
+    - q13's executor-thread time per run: ~140 ms merging the workers' parts (each group's key
+      and states made as `Value`s, `AggNode::run`) after the scan, ~80 ms building the hash of
+      customer (an index-only scan read row by row, `HashJoinNode::build`) before it.
+    - q22: the customer heap model is disordered (42 rows out of key order, as PostgreSQL's
+      heap has them), so each parallel scan of it reads and sorts all 150,000 rows on the
+      executor's thread first (`start_parallel`, `heap_order`): ~60 ms twice a run of 0.22 s.
+    - mimalloc's `MIMALLOC_PURGE_DELAY=0` takes another ~25 MB off RSS (CPU not measured).
+    - The anti join gap 207 found (`(ok = o.ok) AND (ok = 5)` for PostgreSQL's `ok = 5` in an
+      anti join's parameterized inner scan) is not fixed: `oj_const_redundant` drops the
+      clause from the join's restriction list, but the parameterized paths take it from
+      `movable_into` / `param_paths`, which don't ask; a fix there changes path generation for
+      every outer join and needs plancmp and the planner regress, more than this round had.
+  - Next steps (largest first): q02 (0.75 s against 0.20; serial hash build of 158,720 nested
+    loop rows and its 8 batches), q13 (merge the parts into word groups without `Value`
+    keys, or partition them across the workers), q20 (58k random lineitem reads at ~1.8 µs
+    each, a merging scan made per SubPlan run), q22's disordered-heap reorder, memory under
+    PostgreSQL's (pack a block's restarts, values index and last key into its data; the
+    per-query peaks of q10 / q11 / q13).
 - **Executor, round 13: q21's plan, compact aggregation parts, unique lookups** (agent 207;
   BENCH.md "Executor, round 13"):
   - **q21's plan is PostgreSQL's** (three planner fixes; golden `a207_semi_anti_classes`
