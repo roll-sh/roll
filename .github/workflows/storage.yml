@@ -144,7 +144,7 @@ jobs:
           mkdir -p /tmp/seaweed
           echo '{"identities":[{"name":"roll","credentials":[{"accessKey":"roll","secretKey":"roll"}],"actions":["Admin","Read","Write","List","Tagging"]}]}' > /tmp/seaweed/s3.json
           docker run -d --name seaweed -p 8333:8333 -v /tmp/seaweed:/etc/seaweed "$SEAWEEDFS_IMAGE" server -s3 -s3.config=/etc/seaweed/s3.json
-          for i in $(seq 60); do curl -s -o /dev/null http://127.0.0.1:8333 && break; sleep 1; done
+          for _ in $(seq 60); do curl -s -o /dev/null http://127.0.0.1:8333 && break; sleep 1; done
           docker exec seaweed sh -c 'echo "s3.bucket.create -name roll-e2e" | weed shell'
       - name: Metadata log, blobs and the S3 API on S3
         run: |
