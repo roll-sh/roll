@@ -2507,6 +2507,11 @@ impl Cursor {
     }
 }
 
+/// How many of the ranked sources `rank` (heads ascending) have a head below `k`.
+fn rank_of(sources: &[Cursor], rank: &[usize], k: &[u8]) -> usize {
+    rank.iter().take_while(|&&j| sources[j].head().is_some_and(|(h, _)| h < k)).count()
+}
+
 struct Merge {
     sources: Vec<Cursor>,
     end: Vec<u8>,
@@ -2517,11 +2522,17 @@ struct Merge {
     cur: Option<usize>,
     bound: Vec<u8>,
     bounded: bool,
+    /// While `cur` is set: the sources with a head, by their heads ascending (`cur` first).
+    /// Only `cur` moves before the next `min`, so once it passes the bound it goes back in
+    /// its place among the others, whose heads are where they were, without filling and
+    /// comparing them all again (two sources taking turns, a table's rows and an UPDATE's
+    /// new versions of every other one, switch at every row).
+    rank: Vec<usize>,
 }
 
 impl Merge {
     fn new(sources: Vec<Cursor>, end: Vec<u8>) -> Merge {
-        Merge { sources, end, cur: None, bound: Vec::new(), bounded: false }
+        Merge { sources, end, cur: None, bound: Vec::new(), bounded: false, rank: Vec::new() }
     }
 
     /// The source holding the smallest raw entry left (None: none below the end). Identical
@@ -2529,49 +2540,47 @@ impl Merge {
     /// ties don't need breaking. Only the source chosen last may have moved since (`cur`).
     fn min(&mut self) -> Result<Option<usize>> {
         if let Some(i) = self.cur {
-            let c = &mut self.sources[i];
-            c.fill()?;
+            self.sources[i].fill()?;
             // (A source's entries stop at the end: `head`, the memtables' ranges.)
-            match c.head() {
+            match self.sources[i].head() {
                 Some((k, _)) if !self.bounded || k < self.bound.as_slice() => return Ok(Some(i)),
                 None if !self.bounded => return Ok(None),
                 _ => {}
             }
-        }
-        for c in &mut self.sources {
-            c.fill()?;
-        }
-        let mut best: Option<(usize, &[u8])> = None;
-        let mut second: Option<&[u8]> = None;
-        for (i, c) in self.sources.iter().enumerate() {
-            let Some((k, _)) = c.head() else {
-                continue;
-            };
-            match best {
-                Some((_, b)) if k >= b => {
-                    if second.is_none_or(|s| k < s) {
-                        second = Some(k);
-                    }
-                }
-                _ => {
-                    second = best.map(|(_, b)| b);
-                    best = Some((i, k));
+            // (Past the bound, the next source's head, or run out.)
+            debug_assert_eq!(self.rank.first(), Some(&i));
+            self.rank.remove(0);
+            if let Some((k, _)) = self.sources[i].head() {
+                let at = 1 + rank_of(&self.sources, &self.rank[1..], k);
+                self.rank.insert(at, i);
+            }
+        } else {
+            for c in &mut self.sources {
+                c.fill()?;
+            }
+            self.rank.clear();
+            for i in 0..self.sources.len() {
+                if let Some((k, _)) = self.sources[i].head() {
+                    let at = rank_of(&self.sources, &self.rank, k);
+                    self.rank.insert(at, i);
                 }
             }
         }
-        let Some((i, k)) = best else {
+        let Some(&i) = self.rank.first() else {
             self.cur = None;
             return Ok(None);
         };
+        let (k, _) = self.sources[i].head().expect("a ranked head");
         if !self.end.is_empty() && k >= self.end.as_slice() {
             self.cur = None;
             return Ok(None);
         }
         self.bound.clear();
-        if let Some(s) = second {
-            self.bound.extend_from_slice(s);
+        self.bounded = self.rank.len() > 1;
+        if self.bounded {
+            let (b, _) = self.sources[self.rank[1]].head().expect("a ranked head");
+            self.bound.extend_from_slice(b);
         }
-        self.bounded = second.is_some();
         self.cur = Some(i);
         Ok(Some(i))
     }
