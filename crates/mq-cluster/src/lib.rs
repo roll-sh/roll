@@ -338,7 +338,10 @@ impl Cluster {
         }
     }
 
-    /// Stop background work (after the node's leases were handed off, or it was killed).
+    /// Stop background work (after the node's leases were handed off, or it was killed). Call it
+    /// before `Broker::stop`: until then a router whose queue was handed off keeps waiting for the
+    /// next owner (riding out the move), which never comes when this is the last node, and the
+    /// broker's stop waits on that router.
     pub async fn leave(&self) {
         self.stopped.store(true, Ordering::Release);
         for t in self.tasks.lock().drain(..) {

@@ -286,10 +286,12 @@ impl Queues {
             self.close_clients(Duration::from_secs(2)).await;
         }
         self.shovels.stop();
-        self.broker.stop().await;
+        // Leave first: the last node's handed-off queues would wait for an owner (mq_cluster's
+        // `leave`), and the broker's stop on them.
         if let Some(c) = &self.cluster {
             c.leave().await;
         }
+        self.broker.stop().await;
         self.logs.close().await;
         self.control.flush();
     }

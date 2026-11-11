@@ -523,6 +523,15 @@ fn a_drained_node_serves_its_clients_until_it_closes_them() {
         assert!(t.elapsed() < Duration::from_secs(3), "they waited {:.1}s", t.elapsed().as_secs_f64());
         let seen = consume_ids(&b.url, "after", 40, Duration::from_secs(20)).await;
         assert_eq!(seen, (0..40).collect::<HashSet<u32>>());
+        // The last node stops as rolld does (drain, leave, then the broker): with no node left to
+        // take its queues, the broker still stops.
+        let (bn, bc, bb) = (b.nodes.clone(), b.cluster.clone(), b.broker.clone());
+        let stopped = b.spawn(async move {
+            bn.drain(Duration::from_secs(15)).await;
+            bc.leave().await;
+            tokio::time::timeout(Duration::from_secs(10), bb.stop()).await.is_ok()
+        });
+        assert!(stopped.await.unwrap(), "the last node's broker never stopped");
     });
 }
 
