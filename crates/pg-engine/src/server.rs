@@ -144,8 +144,16 @@ static WAIT_SPIN_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64
 /// working only once it runs). On 4 cores, two pollers at most cost 32 clients 15% of their
 /// throughput; working and polling threads up to all 4 cores cost 8 clients 8%, up to 2
 /// cost 8 clients' range reads 9%.
-static WORKING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-static SPINNING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// (On a cache line of their own: every connection writes them, and the flags and settings
+/// next to them in memory are read by every statement.)
+#[repr(align(128))]
+struct Counts {
+    working: std::sync::atomic::AtomicUsize,
+    spinning: std::sync::atomic::AtomicUsize,
+}
+static COUNTS: Counts = Counts { working: std::sync::atomic::AtomicUsize::new(0), spinning: std::sync::atomic::AtomicUsize::new(0) };
+static WORKING: &std::sync::atomic::AtomicUsize = &COUNTS.working;
+static SPINNING: &std::sync::atomic::AtomicUsize = &COUNTS.spinning;
 static QUARTER_CORES: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
 
 /// Poll for a client's next message up to this long before sleeping, while cores are free

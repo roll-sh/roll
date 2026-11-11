@@ -426,10 +426,19 @@ struct Hold {
     seq: u64,
 }
 
-/// A process-wide order of holds.
+/// A process-wide order of holds: when they were taken (a thread's own in the order it took
+/// them), without a counter every backend's locks write.
 fn next_seq() -> u64 {
-    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    SEQ.fetch_add(1, Ordering::Relaxed)
+    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    thread_local! {
+        static LAST: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    }
+    let ns = START.get_or_init(std::time::Instant::now).elapsed().as_nanos() as u64;
+    LAST.with(|l| {
+        let s = (ns << 6).max(l.get() + 1);
+        l.set(s);
+        s
+    })
 }
 
 impl Hold {

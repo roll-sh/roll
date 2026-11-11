@@ -2554,18 +2554,18 @@ struct ScanNode {
 
 /// Index scans rescanned in place (`ScanNode::rescan_index`), for tests.
 #[doc(hidden)]
-pub static INDEX_RESCANS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static INDEX_RESCANS: crate::counter::Counter = crate::counter::Counter::new();
 
 /// Rows index-only scans made from index entries alone (`ScanNode::index_row`), for tests.
 #[doc(hidden)]
-pub static ROWS_FROM_INDEX_ENTRIES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static ROWS_FROM_INDEX_ENTRIES: crate::counter::Counter = crate::counter::Counter::new();
 
 /// Heap-order scans streamed (`ScanNode::next_heap_ordered`), and the displaced rows they
 /// held, for tests.
 #[doc(hidden)]
-pub static HEAP_ORDER_STREAMED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static HEAP_ORDER_STREAMED: crate::counter::Counter = crate::counter::Counter::new();
 #[doc(hidden)]
-pub static HEAP_ORDER_HELD: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static HEAP_ORDER_HELD: crate::counter::Counter = crate::counter::Counter::new();
 
 /// The index columns (table column, type, direction) a bitmap's quals can be checked on
 /// from the index entries alone: a btree's plain columns of the types `index_only_columns`

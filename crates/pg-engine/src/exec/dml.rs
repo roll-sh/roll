@@ -3876,7 +3876,7 @@ pub struct InsertNode {
 
 /// Rows INSERT … SELECT copied as stored (`StoredInsert::insert`), for tests.
 #[doc(hidden)]
-pub static STORED_INSERTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static STORED_INSERTS: crate::counter::Counter = crate::counter::Counter::new();
 
 /// A plain INSERT … SELECT whose source hands out a table's rows as stored
 /// (`Node::each_stored`: its columns as they are, which are the target's, of the same types)

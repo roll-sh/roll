@@ -295,7 +295,7 @@ impl Node for Taken {
 
 /// Executor trees restarted (`reopen`), for tests.
 #[doc(hidden)]
-pub static TREE_RESTARTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static TREE_RESTARTS: crate::counter::Counter = crate::counter::Counter::new();
 
 /// `node`, restarted when it can be (`Node::restartable`), else `plan` opened anew.
 fn reopen(plan: &Arc<Plan>, node: Option<BoxNode>, ctx: &ExecCtx) -> Result<BoxNode> {

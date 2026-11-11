@@ -192,7 +192,7 @@ enum Against {
 }
 
 /// Scans that made a `StoredCmps` (tests: which filters run over stored bytes).
-pub static STORED_CMPS_SCANS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static STORED_CMPS_SCANS: crate::counter::Counter = crate::counter::Counter::new();
 
 impl StoredCmps {
     pub fn of(k: &K) -> Option<StoredCmps> {

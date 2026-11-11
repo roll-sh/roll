@@ -25,6 +25,7 @@ pub mod sysconf;
 pub mod log;
 pub mod lru;
 pub mod configuration;
+pub mod counter;
 pub mod server_programs;
 pub mod session;
 pub mod sort;

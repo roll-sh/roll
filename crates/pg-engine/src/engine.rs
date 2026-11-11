@@ -1218,7 +1218,7 @@ impl Engine {
                     // new hold needs this lock).
                     Arc::strong_count(db) == 1
                         && db.sessions.load(Ordering::Acquire) == 0
-                        && db.last_active.lock().elapsed() >= idle
+                        && db.idle_for() >= idle
                 })
                 .map(|(id, _)| *id)
                 .collect();

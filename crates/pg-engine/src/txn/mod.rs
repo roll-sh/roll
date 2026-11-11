@@ -112,7 +112,9 @@ pub struct Database {
     /// Big tables' measures, for VACUUM to skip those nothing changed since (`unchanged`).
     pub unchanged: unchanged::Unchanged,
     seqs: Mutex<HashMap<u32, SeqState>>,
-    next_txn: AtomicU64,
+    /// (On a cache line of its own: every transaction takes an id, and what the statements
+    /// read of the database sits next to it.)
+    next_txn: crate::counter::Padded<AtomicU64>,
     /// Open sessions; the engine closes a database once it reaches 0 and stays idle.
     pub sessions: AtomicUsize,
     /// Ended sessions still dropping their temporary objects; a new session's login waits
@@ -122,7 +124,8 @@ pub struct Database {
     /// in their proc array slot (whose pg_temp_N it is) drops before it starts, as
     /// InitTempTableNamespace removes them before the namespace is used again.
     pub temp_leftovers: std::sync::atomic::AtomicBool,
-    pub last_active: Mutex<Instant>,
+    /// When it was last used (`touch`), in `active_clock`'s microseconds.
+    last_active: AtomicU64,
     /// LISTEN / NOTIFY between this database's sessions.
     pub notify: crate::notify::Hub,
     /// Where lo_create(0) looks for a free large object oid next (Postgres's oid counter
@@ -252,11 +255,11 @@ impl Database {
             watch: Default::default(),
             unchanged: Default::default(),
             seqs: Mutex::new(HashMap::new()),
-            next_txn: AtomicU64::new(1),
+            next_txn: crate::counter::Padded(AtomicU64::new(1)),
             sessions: AtomicUsize::new(0),
             temp_cleanups: AtomicUsize::new(0),
             temp_leftovers: std::sync::atomic::AtomicBool::new(temp_leftovers),
-            last_active: Mutex::new(Instant::now()),
+            last_active: AtomicU64::new(active_clock()),
             notify: Default::default(),
             lo_oid: Mutex::new(0),
             last_local: AtomicU64::new(version),
@@ -419,8 +422,18 @@ impl Database {
         o
     }
 
+    /// Used now: what `idle_for` measures from. (Written only when a millisecond passed
+    /// since the last write, not at every statement of every session.)
     pub fn touch(&self) {
-        *self.last_active.lock() = Instant::now();
+        let now = active_clock();
+        if now.saturating_sub(self.last_active.load(Ordering::Relaxed)) >= 1000 {
+            self.last_active.store(now, Ordering::Relaxed);
+        }
+    }
+
+    /// How long since the database was last used (`touch`).
+    pub fn idle_for(&self) -> Duration {
+        Duration::from_micros(active_clock().saturating_sub(self.last_active.load(Ordering::Relaxed)))
     }
 
     pub fn begin(
@@ -4616,6 +4629,12 @@ impl Iterator for TxnScan {
             _ => Ok((k, v)),
         }))
     }
+}
+
+/// Microseconds since the process first asked (`Database::touch`).
+fn active_clock() -> u64 {
+    static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    START.get_or_init(Instant::now).elapsed().as_micros() as u64
 }
 
 #[cfg(test)]
