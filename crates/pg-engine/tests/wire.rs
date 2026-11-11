@@ -4140,3 +4140,52 @@ fn parallel_workers_seen_by_others() {
     });
     s.engine.shutdown();
 }
+
+/// The extended protocol's errors carry PostgreSQL 18.6's SQLSTATE, routine, file and line
+/// (recorded from it): each named by the routine that raises it where several do.
+#[test]
+fn protocol_error_locations() {
+    let s = server(AuthMethod::Trust);
+    let mut c = raw::Raw::connect(&s.addr, "postgres");
+    // The first ErrorResponse before ReadyForQuery: "C R F:L".
+    fn err(msgs: Vec<(u8, Vec<u8>)>) -> String {
+        let (_, b) = msgs.into_iter().find(|(t, _)| *t == b'E').expect("an error");
+        let f = |k: u8| {
+            b.split(|c| *c == 0)
+                .find(|p| p.first() == Some(&k))
+                .map(|p| String::from_utf8_lossy(&p[1..]).into_owned())
+                .unwrap_or_default()
+        };
+        format!("{} {} {}:{}", f(b'C'), f(b'R'), f(b'F'), f(b'L'))
+    }
+    c.parse("", "SELECT 1, 2");
+    c.bind_with("", "", &[], &[0, 0, 0]);
+    assert_eq!(err(c.sync_messages()), "08P01 PortalSetResultFormat pquery.c:640");
+    c.close(b'S', "");
+    c.sync();
+    c.bind("", "");
+    assert_eq!(err(c.sync_messages()), "26000 exec_bind_message postgres.c:1670");
+    c.describe(b'S', "");
+    assert_eq!(err(c.sync_messages()), "26000 exec_describe_statement_message postgres.c:2668");
+    c.describe(b'P', "nope");
+    assert_eq!(err(c.sync_messages()), "34000 exec_describe_portal_message postgres.c:2750");
+    c.execute("nope", 0);
+    assert_eq!(err(c.sync_messages()), "34000 exec_execute_message postgres.c:2136");
+    c.describe(b'X', "");
+    assert_eq!(err(c.sync_messages()), "08P01 PostgresMain postgres.c:4947");
+    c.query("PREPARE q AS SELECT 1");
+    c.query("BEGIN");
+    c.query("DECLARE k CURSOR FOR SELECT 1");
+    c.query("SELECT 1/0");
+    c.parse("", "SELECT 1");
+    assert_eq!(err(c.sync_messages()), "25P02 exec_parse_message postgres.c:1493");
+    c.bind("", "q");
+    assert_eq!(err(c.sync_messages()), "25P02 exec_bind_message postgres.c:1745");
+    c.describe(b'S', "q");
+    assert_eq!(err(c.sync_messages()), "25P02 exec_describe_statement_message postgres.c:2687");
+    c.describe(b'P', "k");
+    assert_eq!(err(c.sync_messages()), "25P02 exec_describe_portal_message postgres.c:2764");
+    c.execute("k", 0);
+    assert_eq!(err(c.sync_messages()), "25P02 exec_execute_message postgres.c:2250");
+    s.engine.shutdown();
+}
