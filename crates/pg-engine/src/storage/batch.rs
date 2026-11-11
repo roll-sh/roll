@@ -127,6 +127,18 @@ impl RowBatch {
         (self.pos < self.ents.len()).then(|| self.get(self.pos))
     }
 
+    /// Room for `rows` more rows of `key_bytes` of keys and `own_bytes` of copied values.
+    pub fn reserve(&mut self, rows: usize, key_bytes: usize, own_bytes: usize) {
+        self.ents.reserve(rows);
+        self.keys.reserve(key_bytes);
+        self.own.reserve(own_bytes);
+    }
+
+    /// The cursor on row `i`.
+    pub fn set_pos(&mut self, i: usize) {
+        self.pos = i;
+    }
+
     /// The cursor on past its row.
     pub fn advance(&mut self) {
         self.pos += 1;
