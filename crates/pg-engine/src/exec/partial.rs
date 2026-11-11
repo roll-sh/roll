@@ -374,8 +374,8 @@ impl Groups {
         self.len() == 0
     }
 
-    /// The groups in their order, as `GroupsIter::next` puts them.
-    pub fn into_iter(self) -> GroupsIter {
+    /// The groups in their order, as `GroupsIter::next` puts them out.
+    pub fn into_groups(self) -> GroupsIter {
         match self {
             Groups::Values(g) => GroupsIter::Values(g.into_iter()),
             Groups::Words(l, w) => GroupsIter::Words(l, w, 0),
@@ -383,7 +383,7 @@ impl Groups {
     }
 }
 
-/// `Groups::into_iter`.
+/// `Groups::into_groups`.
 pub enum GroupsIter {
     Values(std::vec::IntoIter<(Vec<Value>, Vec<Partial>)>),
     Words(Arc<Layout>, Vec<u64>, usize),

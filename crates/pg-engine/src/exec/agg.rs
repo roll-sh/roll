@@ -3144,7 +3144,7 @@ impl AggNode {
                             // the part's rows come before the later ones), each one's
                             // states added as it is found; then each row's lookup.
                             let mut map = Vec::with_capacity(if hash_order { p.groups.len() } else { 0 });
-                            let mut it = p.groups.into_iter();
+                            let mut it = p.groups.into_groups();
                             while it.next(&mut part_key, &mut part_states) {
                                 let k = &part_key;
                                 // (A single integer key is looked up by its number first.)
@@ -3682,7 +3682,7 @@ impl AggNode {
                     Some(super::pipe::Item::Row(row, _)) => Some(row),
                     Some(super::pipe::Item::Part(p)) => {
                         // (Its groups in order; the first may go on with the open one.)
-                        let (mut it, mut k, mut st) = (p.groups.into_iter(), Vec::new(), Vec::new());
+                        let (mut it, mut k, mut st) = (p.groups.into_groups(), Vec::new(), Vec::new());
                         while it.next(&mut k, &mut st) {
                             if s.open.as_ref().is_none_or(|(open, _)| *open != k) {
                                 let states = self.states(&k, ctx)?;
