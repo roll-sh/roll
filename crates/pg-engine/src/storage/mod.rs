@@ -1699,9 +1699,10 @@ impl Store {
         self.compact()
     }
 
-    /// Merge L0 into L1: every L0 file with the L1 files whose user keys overlap theirs
-    /// (the others stay as they are: a bulk load into a new table rewrites none of the
-    /// database's other files).
+    /// Merge L0 into L1: every L0 file with the L1 files whose user keys overlap one of theirs
+    /// (the others stay as they are, also between L0 files' ranges: a new index's entries and
+    /// a catalog change don't rewrite the table loaded between them, nor drop its cached
+    /// blocks; the outputs end before each such file, so L1's files still don't overlap).
     pub fn compact(&self) -> Result<()> {
         let _g = self.bg.lock();
         // A closed store's files may belong to a store opened after it (`close` waits for a
@@ -1732,7 +1733,14 @@ impl Store {
             .l1
             .partition_point(|s| user_key(&s.meta.first_key) <= hi)
             .max(first);
-        let inputs_l1: Vec<Arc<SstReader>> = view.l1[first..last].to_vec();
+        let meets_l0 = |s: &SstReader| {
+            let (a, b) = (user_key(&s.meta.first_key), user_key(&s.meta.last_key));
+            inputs_l0.iter().any(|l| b >= user_key(&l.meta.first_key) && a <= user_key(&l.meta.last_key))
+        };
+        let (inputs_l1, kept): (Vec<Arc<SstReader>>, Vec<Arc<SstReader>>) =
+            view.l1[first..last].iter().cloned().partition(|s| meets_l0(s));
+        // (The next L1 file left in place that the outputs reach: one ends before it.)
+        let mut next_kept = 0;
         let horizon = self.gc_horizon();
         let mut sources: Vec<Cursor> = inputs_l0
             .iter()
@@ -1781,10 +1789,17 @@ impl Store {
             }
             // Only split between user keys: a key's versions all in one L1 file, as point
             // reads look for them (`point::newest` reads the one file whose range has the key).
+            // (Past a file left in place: no key of an input is in its range, so `uk` is past
+            // all of it.)
+            let mut past_kept = false;
+            while first_version && next_kept < kept.len() && user_key(&kept[next_kept].meta.first_key) < uk {
+                past_kept = true;
+                next_kept += 1;
+            }
             if first_version
                 && writer
                     .as_ref()
-                    .is_some_and(|w| w.approx_size() >= self.opts.target_file_bytes)
+                    .is_some_and(|w| past_kept || w.approx_size() >= self.opts.target_file_bytes)
             {
                 let w = writer.take().unwrap();
                 outputs.push(w.finish()?);
@@ -1806,10 +1821,13 @@ impl Store {
                 w.abandon();
             }
         }
-        let readers = outputs
+        let mut readers = outputs
             .iter()
             .map(|m| SstReader::open(&self.dir, m.clone(), self.opts.cache.clone()).map(Arc::new))
             .collect::<Result<Vec<_>>>()?;
+        // (In key order with the files left in place between them.)
+        readers.extend(kept);
+        readers.sort_by(|a, b| a.meta.first_key.cmp(&b.meta.first_key));
         {
             let mut m = self.manifest.lock();
             let input_ids: std::collections::HashSet<u64> = inputs_l0
@@ -1818,11 +1836,11 @@ impl Store {
                 .map(|s| s.meta.id)
                 .collect();
             m.l0.retain(|s| !input_ids.contains(&s.id));
+            let mut l1: Vec<Arc<SstReader>> = view.l1[..first].to_vec();
+            l1.extend(readers);
+            l1.extend(view.l1[last..].iter().cloned());
             // (Only compaction changes L1, under `bg`: the view's is the manifest's.)
-            let mut l1_meta: Vec<SstMeta> = view.l1[..first].iter().map(|s| s.meta.clone()).collect();
-            l1_meta.extend(outputs.iter().cloned());
-            l1_meta.extend(view.l1[last..].iter().map(|s| s.meta.clone()));
-            m.l1 = l1_meta;
+            m.l1 = l1.iter().map(|s| s.meta.clone()).collect();
             m.next_id = self.next_id.load(Ordering::Relaxed);
             write_manifest(&self.dir, &m)?;
             let mut v = self.view.write();
@@ -1831,9 +1849,6 @@ impl Store {
                     .filter(|s| !input_ids.contains(&s.meta.id))
                     .cloned()
                     .collect();
-            let mut l1: Vec<Arc<SstReader>> = view.l1[..first].to_vec();
-            l1.extend(readers);
-            l1.extend(view.l1[last..].iter().cloned());
             *v = Arc::new(View {
                 mem: v.mem.clone(),
                 imm: v.imm.clone(),
@@ -3517,6 +3532,50 @@ mod tests {
         s.flush_memtables().unwrap();
         s.compact().unwrap();
         check(&s, true);
+    }
+
+    /// Compaction rewrites only the L1 files an L0 file's keys overlap: one between two L0
+    /// files' ranges stays, the outputs around it, and L1 stays in order without overlaps.
+    #[test]
+    fn compaction_leaves_l1_files_between_l0_ranges() {
+        let dir = tempfile::tempdir().unwrap();
+        let o = || StoreOptions { sync: false, background: false, ..Default::default() };
+        let mut s = Store::open(dir.path(), o()).unwrap();
+        let fill = |s: &Arc<Store>, p: &str, v: &str| {
+            for i in 0..200 {
+                put(s, &format!("{p}{i:04}"), Some(v));
+            }
+            s.flush_memtables().unwrap();
+        };
+        fill(&s, "m", "m1");
+        s.compact().unwrap();
+        let mid = s.view().l1[0].meta.id;
+        fill(&s, "a", "a1");
+        fill(&s, "x", "x1");
+        s.compact().unwrap();
+        let l1 = |s: &Arc<Store>| s.view().l1.iter().map(|f| (f.meta.id, user_key(&f.meta.first_key).to_vec(), user_key(&f.meta.last_key).to_vec())).collect::<Vec<_>>();
+        let files = l1(&s);
+        assert_eq!(files.len(), 3, "{files:?}");
+        assert_eq!(files[1].0, mid, "the file between stays");
+        assert!(files.windows(2).all(|w| w[0].2 < w[1].1), "{files:?}");
+        // (A version of one of its keys rewrites it.)
+        put(&s, "m0100", Some("m2"));
+        fill(&s, "b", "b1");
+        s.compact().unwrap();
+        let files = l1(&s);
+        assert!(files.iter().all(|f| f.0 != mid), "{files:?}");
+        assert!(files.windows(2).all(|w| w[0].2 < w[1].1), "{files:?}");
+        for _ in 0..2 {
+            let ts = s.visible_ts();
+            let rows = scan_all(&s, ts);
+            assert_eq!(rows.len(), 800);
+            for (p, v) in [("a", "a1"), ("b", "b1"), ("m", "m1"), ("x", "x1")] {
+                assert!(rows.iter().filter(|(k, _)| k.starts_with(p) && k != "m0100").all(|(_, x)| x == v), "{p}");
+            }
+            assert_eq!(s.get(b"m0100", ts).unwrap().as_deref(), Some(&b"m2"[..]));
+            drop(s);
+            s = Store::open(dir.path(), o()).unwrap();
+        }
     }
 
     #[test]
