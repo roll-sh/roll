@@ -10047,6 +10047,57 @@ the column where get_actual_variable_range reads the one it needs. The row made 
 stored bytes (`emit` 9.5%: the decode 2.9%, its allocation 1.2%, the header's numbers 0.8%,
 `PlanRef`'s calls 0.6%). Describe at Bind starts the transaction (`ensure_txn`, 0.7%).
 
+## Range reads round 6 (agent 211)
+
+BENCH.md "Range reads, round 6" has the measurements. One change: a kept plain index scan's
+rows go to the client from their stored values.
+
+- **`Node::each_picked`** (`exec/mod.rs`): a node hands its rows to `f` as the stored values of
+  the columns they are, `Stored::Cols(data, cols)` (a stored row's values after its header,
+  the row being its columns `cols`); a row `f` doesn't take comes again decoded
+  (`Stored::Row`), as does one the node can't offer that way. `run_each_kept_picked` runs a kept
+  tree that way (the streamed, kept branch of `run_query`), falling back to `next` when the root
+  can't. `ProjectNode` passes it through when its input makes the projection's rows itself
+  (`passed`, decided by `compute_below` first, as `next` decides it). `ScanNode::each_picked`
+  (`picks`, `pick`): only a plain index scan of a table's rows by reference whose `emit` would
+  do nothing per row but count it (`count_row`), note its fetch for the heap model (`note_fetch`)
+  and decode its columns `proj`: no filter the key range doesn't imply, no LIMIT, row mark,
+  system or key columns, TID quals, index-only scan, point lookup, instrumentation, predicate
+  locks or virtual generated columns; its parallel workers are tried first, as `next` tries
+  them. A row with values out of line, or of a table whose reads are tracked, goes `emit`'s way
+  whole.
+- **`RowSink::row_stored`** (`session/sink.rs`, `server.rs` `put_data_row_stored`): the wire
+  sink writes a binary DataRow from the stored bytes when every value is NULL, a bool, int2,
+  int4, int8, float4, float8 or oid in binary format, the columns ascending and stored (not added
+  since): the bytes `put_data_row_fixed` makes from the decoded row (little-endian stored,
+  big-endian sent; NULL -1). Anything else (text format, a text value, a column added after the
+  row was written, columns out of their stored order) returns false and the row is decoded.
+  `Feed::row_stored` counts it as `row` does; no `FormatCtx` is made for such rows.
+- COPY's and INSERT … SELECT's `each_stored` consumers refuse `Stored::Cols` (never offered to
+  them).
+- `run_each_kept_picked` is generic over its closure, as `run_each_kept` is: with a `dyn` one the
+  point read (which never takes the path) measured +1.05% instructions per operation; generic,
+  +0.07%.
+
+Checks: `tests/wire.rs` `stored_rows_go_out_as_decoded_ones` (every DataRow and
+CommandComplete of six prepared index scans, executed again and again in binary, text and mixed
+formats, equal to the same statement's under a LIMIT, which decodes its rows);
+`~/.cache/a211/edge/binscan.py` (raw DataRows of nine prepared scans in four format sets: the
+same bytes from base and the change, and the same as PostgreSQL 18.6's but for an error's
+file/line fields).
+
+Where it stands: about 8% fewer cycles per operation than PostgreSQL 18.6 in all (less kernel
+time), user cycles still about 5% above its, half its memory; the 10% goal isn't met. Next, from
+the profile with the change (BENCH.md): planning is the largest share (23%: choosing the scan
+again 12%, placing the WHERE 4%, both value-dependent as round 5 found); then the storage reads,
+two `fill_batch` passes per Bind (the index entries, then the rows' dense scan; 21% together, 5%
+positioning the merge over every source twice): sharing one positioned reader between the two
+passes, or reading entries and rows a batch at a time from readers kept across Binds of the
+kept tree, is the best lead I see (the entries' pass can't simply be skipped: a row in the
+data-key range needn't have an entry in the key range, after an UPDATE of its key or a HOT
+chain); then the kernel send at ReadyForQuery
+(14%) and reopening the kept tree (5%: `open_scan_as`, `ranges_from`, `bind_scan`).
+
 ## Range reads round 5 (agent 206)
 
 BENCH.md "Range reads, round 5" has the measurements: the prepared 100-row range read takes

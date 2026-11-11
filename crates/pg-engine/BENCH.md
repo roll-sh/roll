@@ -496,6 +496,87 @@ directory): base 35.2 / 36.4 MB, c4 36.4 / 36.5 MB, data 3.03 MB each: unchanged
 (`dropped-probe2-*.patch`): against probe1, run twice, instructions -2.1% / -3.0% median but
 cycles -0.3% / -1.1% and CPU flat, -0.2% to -4.8% instructions by pair.
 
+## Range reads, round 6 (2026-11-11, agent 211)
+
+HANDOFF.md, "Range reads round 6", has what changed: a kept plain index scan's rows go to the
+client from their stored values (`Node::each_picked`, `RowSink::row_stored`), a binary DataRow of
+null and fixed-width values written from the stored bytes without decoding the row. Agent 206's
+harness, copied to `~/.cache/a211/h` (dist builds in containers with PostgreSQL's limits, the
+server on CPUs 24-27 and the client on 28-31, 100,000 accounts, 2 s warmup, 10 s measured, every
+row value-checked; user instructions and cycles of the connection threads, `perf stat
+--per-thread`). New this round: each server container's own cycles (`perf stat -a -G` over its
+cgroup: every process and thread, background ones included) for the three-server table, a
+pgrust arm, and a client count.
+
+**PostgreSQL's plan on this statement.** On PostgreSQL 18.6 with the bench's table the prepared
+range read stays on custom plans (`pg_prepared_statements`: 0 generic, 8 custom after 8
+executions): the generic plan's estimate is 500 rows (cost 25.30) against about 10.4 for a
+custom plan plus its planning charge. Planning again at every Bind is what PostgreSQL does here
+too; a kept generic plan would be a behaviour difference.
+
+The change against base (`fce790984`), five alternating pairs, the prepared 100-row range read
+at 8 clients (other tenants' load on 24-27 at most 0.21 cores in every run):
+
+| pair | base ops/s | new ops/s | base us CPU / op | new us CPU / op | instr / op | cycles / op |
+|---|---:|---:|---:|---:|---:|---:|
+| 1 | 33,305 | 37,890 | 104.9 | 92.1 | -18.6% | -14.0% |
+| 2 | 33,036 | 36,712 | 104.9 | 94.0 | -17.9% | -12.7% |
+| 3 | 33,377 | 37,544 | 103.9 | 92.3 | -18.2% | -13.0% |
+| 4 | 33,570 | 36,521 | 104.5 | 93.7 | -18.1% | -12.2% |
+| 5 | 32,721 | 35,967 | 105.5 | 96.0 | -17.5% | -11.2% |
+
+Medians: ops/s 33,305 -> 36,712 (+10.2%), CPU per operation 104.9 -> 93.7 us (-10.7%), user
+instructions 430k -> 353k (-18.0%), p50 0.222 -> 0.198 ms; memory 54-56 MiB on both.
+
+Rebased onto `a9ced4585` (the runner made generic over its closure, below), against that base,
+under the machine's load as it is now (coordinator: the other tenants are the user's own
+sessions; a run waits at most 60 s for them, a pair isn't run again for load, one above a core
+is flagged). Instructions and cycles per operation are the gate; ops/s and CPU are noisy:
+
+| workload | pairs | instr / op (median; range) | cycles / op (range) | ops/s (median, noisy) | CPU / op (median, noisy) |
+|---|---:|---|---|---:|---:|
+| range read, 8 clients | 5 | -18.1%; -17.2% to -19.6% | -7.3% to -19.9% | +10.7% | -11.5% |
+| range read, 1 client | 5 | -18.2%; -14.9% to -20.6% | -10.0% to -28.7% | +1.5% | -7.3% |
+| point read, 8 clients | 5 | +0.07%; -2.4% to +2.3% | -8.3% to +0.8% | -1.0% | +0.5% |
+| UPDATE one row, 8 clients | 5 | -1.0%; -4.3% to +0.4% | -8.8% to +0.1% | +2.3% | -1.7% |
+
+(Flagged, more than a core of other load in a run: the 8-client range read's pair 3 (1.10 on
+its base run), the 1-client read's pairs 1, 2 and 5 (1.04-1.37).) The
+1-client read waits on the round trip, so its ops/s barely move while its CPU drops. The
+point read and the UPDATE don't take the new path (a unique-key point lookup and a DML); a first
+version, with the runner's per-row callback a `dyn` closure, measured +1.05% instructions on the
+point read (-0.9% to +2.0%), and the generic one brought it back.
+
+**Same day, the three servers** (one round each, the machine loaded, other tenants 0.06-0.49
+cores; cycles are the server container's, all its processes and threads):
+
+| server | ops/s | us CPU / op | user cycles / op | all cycles / op | MiB after |
+|---|---:|---:|---:|---:|---:|
+| PostgreSQL 18.6 | 30,180 | 117.8 | 306k | 429k | 103 |
+| pgrust | 28,627 | 126.6 | 395k | 477k | 184 |
+| roll, base `a9ced4585` | 27,434 | 130.0 | 382k | 461k | 54 |
+| roll, this change | 29,453 | 112.0 | 320k | 396k | 55 |
+
+Earlier the same day on a quieter machine (one run each): PostgreSQL 31,655 ops/s, 111.0 us
+CPU / op, 298k user and 417k all cycles / op, 103 MiB; pgrust 27,089, 131.0, 402k, 488k,
+162 MiB. pgrust is behind PostgreSQL on this read (about -10% ops/s, +20-30% user cycles) and
+wasn't profiled. Roll with the change takes about 8% fewer cycles per operation than PostgreSQL
+in all (less kernel time per operation), 5% less CPU, half the memory; its user cycles are still
+about 5% above PostgreSQL's, so the round's goal (10% fewer cycles) isn't met yet.
+
+DataRows: `~/.cache/a211/edge/binscan.py` (nine prepared scans of a table of fixed-width, text,
+NULL and added columns, four result-format sets, three executions each) gives the same bytes
+from both bases and both builds of the change; `tests/wire.rs`
+`stored_rows_go_out_as_decoded_ones` checks the same against the decoding path.
+
+The LBR profile with the change (connection threads; shares of the samples): planning
+(`planned_as`) 23.1% (choosing the scan again 12.3%, placing the WHERE 4.1%), the index
+entries' read 9.2% and the rows' dense scan 12.3% (`TxnScan::fill_batch` 12.1% of both,
+positioning, `Scan::position`, 5.2%), the DataRows from the stored bytes 3.6%, the kernel send at
+ReadyForQuery 13.6%, reading the next message 7.1%, reopening the kept tree 5.0%, the
+transaction's end 3.1%, Bind 2.9%, Describe 1.9%. Before it (base): row building (`emit`) 11.0%,
+the sink's row path 4.3%, the allocator 9.8% of leaf samples.
+
 ## Range reads, round 5 (2026-11-11, agent 206)
 
 HANDOFF.md, "Range reads round 5", has what changed: a kept custom plan's scan chosen again
