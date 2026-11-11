@@ -368,6 +368,81 @@ stored bytes 9.5%), planning (`planned_as`) 19.5% (choosing the scan again 11.1%
 WHERE 3.6%), the kernel send at ReadyForQuery 11.9%, the DataRows 4.2%, opening the executor
 3.5%, reading the next message 4.4%, the transaction's end 2.7%, Bind 2.1% (Describe 1.3%).
 
+## Executor, round 12, batch 2 (2026-11-11, agent 204)
+
+HANDOFF "Executor, round 12, batch 2" has what changed: a Parallel Hash's inner rows read and
+keyed in the scan's workers, and the workers' nested-loop lookups keeping their reader and
+stopping a semi or anti join's at its first row. **base** is origin's head `c92dd8116`;
+**new** is the two commits on top of it. Both are dist builds (fat LTO, line tables) of the
+same checkout (`~/.cache/a204/bin`); PostgreSQL 18.6 with the bench settings; each server in
+its own container on CPUs 8-11 (`--memory 8g`, host network; the engine with
+`--cache-mb 2048`), the client on 12-15 at nice 19, TPC-H SF1 from `bench tpch-load --sf 1`.
+
+**The data directory is restored before every engine start** (`~/.cache/a204/scripts/r.sh`).
+Each clean close of the engine leaves a small L0 file (150-180 bytes) that nothing compacts
+while nothing else is written; after ~400 starts and stops one directory had 413 of them, and
+point reads and scans consult every one: q18 went from 72 to 363 billion user instructions a
+run, q04 from 5.7 to 11.9, q01 (a full scan) stayed at 30.3. The per-change gates below that
+ran on such an aging directory say so.
+
+### User instructions a run (`perf stat -e instructions:u` over each run of a fresh engine)
+
+Three rounds, the binaries alternating, base `c92dd8116` against new, pristine data:
+
+| x10^9 | q01 | q02 | q03 | q04 | q05 | q06 | q07 | q08 | q09 | q10 | q11 | q12 | q13 | q14 | q15 | q16 | q17 | q18 | q19 | q20 | q21 | q22 | sum |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| change r1 | +0.0% | -2.9% | -11.4% | -16.9% | -5.9% | +0.0% | -11.3% | -5.5% | -7.0% | -1.0% | +0.1% | -0.5% | -0.8% | -20.1% | -0.0% | -13.5% | +0.0% | -0.1% | -1.2% | -0.0% | -17.1% | -35.7% | 211.0 -> 201.4 (-4.6%) |
+| change r2 | -0.0% | -2.9% | -12.4% | -15.6% | -4.9% | +0.0% | -9.7% | -5.2% | -10.0% | -1.0% | -0.0% | -0.5% | -0.8% | -18.1% | -0.0% | -13.1% | +0.1% | -0.1% | -1.2% | -0.0% | -17.2% | -36.0% | 211.2 -> 201.3 (-4.7%) |
+| change r3 | -0.0% | -2.9% | -12.3% | -16.8% | -5.6% | +0.0% | -10.2% | -5.7% | -9.8% | -1.0% | +0.0% | -0.5% | -0.8% | -17.3% | -0.0% | -13.1% | -0.0% | -0.2% | -1.2% | -0.5% | -17.3% | -35.9% | 211.0 -> 201.0 (-4.7%) |
+
+Per change (on the older base `6bb700332`; three rounds each, the binaries alternating, on the
+aging data directory):
+
+- Parallel Hash inner side in the workers: q14 -16.6 / -15.5 / -12.3%, q16 -13.0 / -10.6 /
+  -13.0%, q09 -3.8 / -2.9 / -1.9%, q02 -2.8% each; every other query within +1.4%. q14's
+  executor thread: 52% -> 29% of its samples (its build 40% -> 16%).
+- Lookups: q04 -38.8 / -42.2 / -44.6%, q21 -41.3 / -44.4 / -45.9%, q22 -69.0 / -72.3 /
+  -74.4%, q09 -7.0 / -7.5 / -6.9%, q07 -6.2 / -5.9 / -4.8%, q08 -4.3 / -5.1 / -4.9%, q03
+  -4.9 / -6.7 / -3.9%; every other query within +0.5%. (On pristine data the lookups cost
+  less to begin with: the combined table above has q04 -16%, q21 -17%, q22 -36%.)
+
+### TPC-H SF1, PostgreSQL, base and new (three interleaved rounds, medians)
+
+Load 11-17 while it ran (wall times move with it; the instructions above are the gate):
+
+| | q01 | q02 | q03 | q04 | q05 | q06 | q07 | q08 | q09 | q10 | q11 | q12 | q13 | q14 | q15 | q16 | q17 | q18 | q19 | q20 | q21 | q22 | sum |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| pg s | 1.71 | 0.19 | 0.36 | 0.15 | 0.27 | 0.35 | 0.34 | 0.17 | 1.19 | 0.62 | 0.08 | 0.48 | 0.68 | 0.16 | 0.29 | 0.20 | 0.80 | 2.47 | 0.06 | 0.10 | 0.48 | 0.10 | 11.23 |
+| base s | 0.92 | 0.72 | 0.54 | 0.27 | 0.40 | 0.48 | 0.58 | 0.32 | 1.24 | 0.64 | 0.17 | 0.37 | 0.91 | 0.28 | 0.40 | 0.37 | 0.73 | 1.59 | 0.12 | 0.34 | 0.68 | 0.31 | 12.37 |
+| new s | 0.94 | 0.73 | 0.42 | 0.23 | 0.42 | 0.50 | 0.57 | 0.34 | 1.18 | 0.63 | 0.19 | 0.38 | 0.94 | 0.20 | 0.43 | 0.26 | 0.73 | 1.61 | 0.12 | 0.35 | 0.51 | 0.21 | 11.90 |
+| pg CPU, s | 5.08 | 0.30 | 1.02 | 0.42 | 0.82 | 0.98 | 0.98 | 0.49 | 3.11 | 1.54 | 0.08 | 1.45 | 1.76 | 0.41 | 0.77 | 0.51 | 0.87 | 6.48 | 0.16 | 0.11 | 1.38 | 0.27 | 28.99 |
+| base CPU, s | 2.73 | 0.71 | 1.36 | 0.79 | 0.90 | 1.12 | 1.51 | 0.59 | 3.42 | 1.65 | 0.18 | 1.14 | 2.54 | 0.44 | 1.16 | 0.77 | 1.76 | 5.23 | 0.23 | 0.36 | 1.91 | 0.74 | 31.24 |
+| new CPU, s | 2.77 | 0.72 | 1.24 | 0.66 | 0.89 | 1.13 | 1.50 | 0.63 | 3.38 | 1.61 | 0.19 | 1.15 | 2.62 | 0.44 | 1.16 | 0.71 | 1.77 | 5.21 | 0.23 | 0.36 | 1.51 | 0.42 | 30.30 |
+
+- Engine/PostgreSQL: wall 1.10x -> 1.06x (12.37 -> 11.90 s against 11.23), CPU 1.08x ->
+  1.05x (31.2 -> 30.3 s against 29.0). q14 0.28 -> 0.20 s, q16 0.37 -> 0.26, q21 0.68 ->
+  0.51, q22 0.31 -> 0.21, q03 0.54 -> 0.42, q04 0.27 -> 0.23; q09, q12, q17 and q18 ahead
+  of PostgreSQL, q01 too.
+- Peak (VmHWM over a round) 1,869-1,876 MB against base's 1,869-1,878. Per query (the peak
+  reset before each, after a warm-up pass; the changes' builds on the older base, twice) q13
+  and q14 are the highest, 1,853-1,879 against base's 1,869-1,880. All 22 result hashes equal PostgreSQL's in every round of both builds.
+- Point read and short transaction smoke (a fresh 100,000-row fixture, 8 clients, 10 s, user
+  instructions over 9 s, five alternating pairs): point_select 57.1k against 57.2k
+  instructions an operation (medians; base 55.8-57.4k, new 56.0-57.6k), 104k against 101k
+  ops/s (base 87-108k, new 85-106k); short_txn 328k against 320k (base 214-335k, new
+  314-326k), 13.4k against 13.1k ops/s (base 12.8-14.1k, new 13.1-13.9k). Neither path
+  changed.
+
+### Dropped: order-free partial aggregation
+
+Each scan worker keeping one aggregated part over all its chunks, for groupings whose results
+can't depend on which rows a part holds (patches in
+`~/.cache/a204/patches/dropped-unordered-parts`): q13 -12.1 / -12.7 / -12.2% and q15 -4.6 /
+-4.5 / -4.5% user instructions (pristine data), but peak RSS in q13 1,861 -> 1,904 MB (the
+workers' parts, ~100k groups each at ~250 bytes a group) and q13's wall time up (the big
+parts merge after the scan instead of during it). `agg::IntGroups` alone (parts' integer
+keys found through a dense vector): q13 -0.7 / +0.0 / +0.4%.
+
 ## Executor, round 12 (2026-11-10, agent 200)
 
 HANDOFF "Executor, round 12, batch 1" has what changed: a Parallel Hash Join's table is sized

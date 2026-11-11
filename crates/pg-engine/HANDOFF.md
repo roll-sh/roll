@@ -3361,6 +3361,72 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
     - Item 2's batches past the scan (joined rows from batches, the probe hits aggregated from
       columns), item 4 (streaming merge joins) and item 5 (work_mem for hash tables and sorts)
       are not started.
+- **Executor, round 12, batch 2: Parallel Hash builds and the workers' nested-loop lookups**
+  (agent 204; BENCH.md "Executor, round 12, batch 2"):
+  - **A Parallel Hash's inner rows read in the scan's workers** (`nodes::build_hashed`,
+    `Computed::any_order`, `scan::start_parallel`): when EXPLAIN's Parallel Hash is over a
+    plain table scan, the scan's workers read its rows and compute the join keys
+    (`Computed::extra`, after each row's columns); a modelled heap whose rows aren't stored
+    in heap order is read as stored (PostgreSQL's participants insert into a Parallel Hash
+    in no set order). Before, q14's part (no filter: `start_parallel` found nothing for the
+    workers to do) and q16's filtered part (rows out of heap order: put in it on the
+    executor's thread) were read serially.
+  - **One set of keys a table** (`Batching::prekeys`): a table of one batch makes its probe
+    table of the keys it was built with, not evaluated again in `load_batch`.
+    `pipe::Built::new` counts each key's rows, then fills each key's range in chain order (no
+    vector per key, no sort by chain position).
+  - q14's executor thread went from 52% to 29% of its samples. What is left there: lineitem's
+    bitmap (10%; PostgreSQL's leader runs its Bitmap Index Scan too), the table's inserts and
+    `Built::new` (8%).
+  - **The workers' nested-loop lookups** (`exec::lookup`): one `PointReader` per worker and
+    stage, kept from outer row to outer row (its blocks stay at hand), and a semi or anti
+    join's lookup fetches its entries' rows one at a time up to the first that passes
+    (ExecNestLoop's inner scan stops there too): q04, q21, q22's EXISTS / NOT EXISTS.
+  - **Found: L0 files pile up across restarts.** Every clean close of the engine leaves a
+    small L0 file (150-180 bytes) and nothing compacts them while nothing else is written:
+    after ~400 restarts of one TPC-H data directory, 413 of them, which every point read and
+    scan consults (q18 72 -> 363 billion user instructions a run, q04 5.7 -> 11.9, q01's
+    full scan unchanged). The benchmarks restore a pristine copy of the data directory before
+    each start now (`~/.cache/a204/scripts/r.sh`), and the earlier rounds' gates (on the aging
+    directory, the binaries alternating) overstate the lookup change's share. For the
+    storage owners: compact those files, or don't write them.
+  - **Dropped: order-free partial aggregation** (patches in
+    `~/.cache/a204/patches/dropped-unordered-parts`): a grouping whose results can't depend
+    on which rows a part holds or the parts' order (count, integer / numeric sum and avg;
+    keys int, date, bool, oid, text, varchar; groups put out sorted on all their keys, not
+    streamed) had each worker keep one part over all its chunks (`ParScan::tail`). q13's
+    executor thread merged ~1.5M partial groups (a part per chunk, 64 chunks a worker) and
+    then ~300k: q13 -12% user instructions, q15 -4.5%. But the workers' parts held ~100k
+    groups each at the end, at ~250 bytes a group (the key twice: `Partials::index` and
+    `Part::groups`, plus `bidx`; a `Vec<Partial>` and a `Vec<Value>` each), and peak RSS went
+    from 1,861 to 1,904 MB in q13, past the gate; q13's wall time also rose (the merge of the
+    big parts can't overlap the scan). A compact part (keys in place, one index, flat states:
+    PostgreSQL's partial HashAggregate holds 50k groups in 2.5 MB) would make it pay.
+    `agg::IntGroups` alone (a dense vector for parts' integer keys) changed nothing.
+  - Gate: BENCH.md has the tables (TPC-H SF1 sum of user instructions 211.0 -> 201.3 x 10^9,
+    wall 12.37 -> 11.90 s against PostgreSQL's 11.23, CPU 31.2 -> 30.3 s against 29.0, peak
+    unchanged, every result hash PostgreSQL's; point read and short transaction smoke
+    unchanged).
+  - Tests (release, `c92dd8116` and the two commits): lib 211 passed; parallel_scan 11;
+    golden 3 (golden, golden_wire, golden_shuffled); big_tables 19; all-target Clippy 19
+    warnings, the baseline's, none in the changed code; regress subset create_index, join,
+    join_hash, aggregates, subselect, select_parallel, partition_aggregate, partition_join,
+    groupingsets, window, union, select_distinct, limit, with, bitmapops, stats_ext,
+    explain against a private PostgreSQL 18.6: 6,161/6,162 units, none newly differing.
+  - Left (next steps):
+    - q21's plan differs: PostgreSQL's Gather sits below the Semi Join on l2 and the
+      orders_pkey Nested Loop (the leader runs both) and joins l2 before orders; the engine's
+      Gather is above them and joins orders first. A planner cost difference (EXPLAIN
+      differs).
+    - The workers' lookups still make a merging `Store::scan` per outer row for the index
+      entries (`Scan::new`, `position`, `Merge::min`), and the row fetch's `Block::seek`,
+      `SstReader::block_with`, `find_block` are 25% of q07's samples: point-read internals
+      (agent 202) and scan merge (agent 201); a unique key's entry could come from
+      `Store::first_with`, as the serial point path's does.
+    - q13's merge on the executor's thread (compact parts, above); q02's batch files and
+      index nested loops (agent 203's range reads); q14's inserts and `Built::new`.
+    - Peak memory: the engine's peak RSS is ~1,860-1,880 MB against PostgreSQL's ~1,650-1,710
+      (cgroup), mostly the block cache; not changed here.
 - **Executor, round 12, batch 1: Parallel Hash tables and merge joins PostgreSQL hashes in
   parallel** (agent 200; BENCH.md "Executor, round 12"):
   - **Baseline on origin's head `a96bce378`** (three interleaved rounds, quiet machine): TPC-H
