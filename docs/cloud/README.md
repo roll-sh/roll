@@ -408,11 +408,11 @@ the host (`ROLL_CODE_RUNNER=docker`, the default), exactly as before.
 
 | piece | per month |
 | --- | --- |
-| 3 × t4g.medium fleet nodes, one per zone (Spot about a third of this) | ~$75 |
+| 3 × t4g.medium fleet nodes, one per zone, on-demand | ~$75 |
 | NLB | ~$18 |
 | public IPv4 addresses | ~$22 |
 | DynamoDB, S3, logs, alarms, secrets, ECR | ~$12–17 |
-| **total** | **~$125** (~$80 on Spot) |
+| **total** | **~$125** |
 
 Production is a parameter change: bigger instances with local NVMe, more nodes, and a separate
 NLB per protocol family if connection counts need it.
