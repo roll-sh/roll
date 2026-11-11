@@ -52,7 +52,9 @@ CRATES=(-p nosql-types -p nosql-proto -p nosql-cql -p nosql-storage -p nosql-eng
 $CARGO build "${CRATES[@]}" -p rolld -p roll-cli
 # CI runs the unit job separately; keep the default local command comprehensive.
 if [[ $e2e_only == 0 ]]; then
-  $CARGO clippy "${CRATES[@]}" -p rolld -p roll-cli --all-targets --all-features -- -D warnings
+  # --all-features on nosql's own crates only: rolld's `fleet-e2e` would build librdkafka.
+  $CARGO clippy "${CRATES[@]}" --all-targets --all-features -- -D warnings
+  $CARGO clippy -p rolld -p roll-cli --all-targets -- -D warnings
   # Everything that needs no reference server: env-gated reference tests skip themselves. With
   # ROLL_E2E_S3_BUCKET set, every suite on test_objects (and rolld's) runs against S3.
   $CARGO test "${CRATES[@]}" --all-features

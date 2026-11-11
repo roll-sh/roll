@@ -31,7 +31,9 @@ jobs:
         with:
           cache-on-failure: true
       # librdkafka is built from source for the client tests; it includes the curl headers on Linux.
-      - run: sudo apt-get update && sudo apt-get install -y cmake libcurl4-openssl-dev libsasl2-dev
+      # A mirror that won't answer (security.ubuntu.com, 2026-11-11) mustn't stop the install: the
+      # packages come from the main archive.
+      - run: (sudo apt-get update -o Acquire::Retries=3 || true) && sudo apt-get install -y -o Acquire::Retries=3 cmake libcurl4-openssl-dev libsasl2-dev
       - run: scripts/test-stream.sh --force --unit
 
   e2e:
@@ -48,7 +50,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
-      - run: sudo apt-get update && sudo apt-get install -y cmake libcurl4-openssl-dev libsasl2-dev
+      - run: (sudo apt-get update -o Acquire::Retries=3 || true) && sudo apt-get install -y -o Acquire::Retries=3 cmake libcurl4-openssl-dev libsasl2-dev
       - name: Pull the Kafka image
         run: docker pull -q "$ROLL_E2E_KAFKA_IMAGE"
       - name: Java clients and tools
